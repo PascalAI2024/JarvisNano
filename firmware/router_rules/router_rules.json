@@ -1,0 +1,159 @@
+[
+  {
+    "id": "boot_status_led",
+    "description": "Auto-start the on-board status LED breathing animation when the device finishes booting.",
+    "enabled": true,
+    "consume_on_match": false,
+    "ack": "status LED job queued",
+    "match": {
+      "event_type": "startup",
+      "event_key": "boot_completed"
+    },
+    "actions": [
+      {
+        "type": "call_cap",
+        "cap": "lua_run_async",
+        "input": {
+          "path": "builtin/status_led.lua",
+          "exclusive": "none",
+          "timeout_ms": 0
+        }
+      }
+    ]
+  },
+  {
+    "id": "im_new_session",
+    "description": "Start a fresh persistent chat session when the user sends /new.",
+    "enabled": true,
+    "consume_on_match": true,
+    "ack": "{{event.source_channel}} new session started",
+    "match": {
+      "event_type": "message",
+      "event_key": "text",
+      "content_type": "text",
+      "text": "/new"
+    },
+    "actions": [
+      {
+        "type": "call_cap",
+        "cap": "roll_chat_session",
+        "input": {}
+      },
+      {
+        "type": "send_message",
+        "input": {
+          "channel": "{{event.source_channel}}",
+          "chat_id": "{{event.chat_id}}",
+          "message": "Started a new session."
+        }
+      }
+    ]
+  },
+  {
+    "id": "im_any_message_working_reply",
+    "description": "Reply to any IM text message before other automation handling.",
+    "enabled": true,
+    "consume_on_match": false,
+    "ack": "{{event.source_channel}} working reply sent",
+    "match": {
+      "event_type": "message",
+      "event_key": "text",
+      "content_type": "text"
+    },
+    "actions": [
+      {
+        "type": "send_message",
+        "input": {
+          "channel": "{{event.source_channel}}",
+          "chat_id": "{{event.chat_id}}",
+          "message": "🦞 ESP-Claw is snapping on it..."
+        }
+      }
+    ]
+  },
+  {
+    "id": "im_attachment_saved_reply",
+    "description": "Reply when an IM attachment is saved.",
+    "enabled": true,
+    "ack": "{{event.channel}} attachment saved",
+    "match": {
+      "event_type": "attachment_saved"
+    },
+    "actions": [
+      {
+        "type": "send_message",
+        "input": {
+          "channel": "{{event.source_channel}}",
+          "chat_id": "{{event.chat_id}}",
+          "message": "File received from {{event.source_channel}}"
+        }
+      }
+    ]
+  },
+  {
+    "id": "im_any_message_agent",
+    "description": "Route IM text messages to the agent.",
+    "enabled": true,
+    "consume_on_match": true,
+    "ack": "{{event.source_channel}} routed to agent",
+    "match": {
+      "event_type": "message",
+      "event_key": "text",
+      "content_type": "text"
+    },
+    "actions": [
+      {
+        "type": "run_agent",
+        "input": {
+          "target_channel": "{{event.source_channel}}",
+          "session_policy": "chat"
+        }
+      }
+    ]
+  },
+  {
+    "id": "agent_stage_im_notify",
+    "description": "Deliver agent stage progress messages to the original IM chat.",
+    "enabled": true,
+    "consume_on_match": true,
+    "ack": "{{event.source_channel}} agent stage sent",
+    "match": {
+      "source_cap": "claw_core",
+      "event_type": "agent_stage",
+      "content_type": "text"
+    },
+    "actions": [
+      {
+        "type": "send_message",
+        "input": {
+          "event_type": "{{event.event_type}}",
+          "channel": "{{event.source_channel}}",
+          "chat_id": "{{event.chat_id}}",
+          "message": "{{event.text}}"
+        }
+      }
+    ]
+  },
+  {
+    "id": "agent_out_message_send_message",
+    "description": "Deliver agent output messages to the original IM chat.",
+    "enabled": true,
+    "consume_on_match": true,
+    "ack": "{{event.source_channel}} agent output sent",
+    "match": {
+      "source_cap": "claw_core",
+      "event_type": "out_message",
+      "content_type": "text"
+    },
+    "actions": [
+      {
+        "type": "send_message",
+        "input": {
+          "channel": "{{event.source_channel}}",
+          "chat_id": "{{event.chat_id}}",
+          "message": "{{event.text}}"
+        }
+      }
+    ]
+  }
+]

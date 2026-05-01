@@ -37,8 +37,8 @@ sequenceDiagram
 ### 1. Clone
 
 ```bash
-git clone git@github.com:PascalAI2024/JarvisRobot.git
-cd JarvisRobot
+git clone git@github.com:PascalAI2024/JarvisNano.git
+cd JarvisNano
 ```
 
 ### 2. Bootstrap

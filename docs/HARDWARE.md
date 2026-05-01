@@ -69,9 +69,49 @@ flowchart LR
 Nothing to wire. Plug USB-C into your Mac, hit `./scripts/flash.sh`,
 done. The on-board PDM mic and Wi-Fi are already on the chip.
 
-## Wiring — Phase 2 (add a speaker)
+## Wiring — Phase 2 (add the PAM8002A speaker module)
 
-Adafruit / generic **MAX98357A I²S 3 W amp** + 4 Ω 1–2 W speaker.
+The chosen Phase-2 amp is the **PAM8002A combo board** — analog mono 3 W amp with a built-in 28 mm 4 Ω speaker (the ubiquitous ~$3 AliExpress module).
+
+The XIAO ESP32-S3 has no DAC, so the firmware drives **I²S PDM-TX on a single GPIO** (D3 / GPIO4) and an external **RC low-pass filter** reconstructs the analog signal that the PAM8002A expects on its IN+ pin.
+
+```mermaid
+flowchart LR
+    subgraph X[XIAO ESP32-S3 Sense]
+        V5[5V]
+        GND[GND]
+        D3[D3 / GPIO4 — PDM-TX]
+    end
+
+    R[270 Ω resistor]
+    C[100 nF cap]
+
+    subgraph A[PAM8002A combo module]
+        VIN[VCC]
+        AGND[GND]
+        INP[IN+]
+        INN[IN-]
+        SPK[28 mm 4 Ω<br/>speaker dome<br/>on-board]
+    end
+
+    V5 --> VIN
+    GND --> AGND
+    D3 --> R --> INP
+    INP -.- C
+    C -.- GND
+    INN --> GND
+```
+
+**Notes:**
+- **Why this works:** PDM-TX out of GPIO4 is a high-frequency 1-bit pulse density signal (~1 MHz). The 270 Ω + 100 nF low-pass (cutoff ≈ 6 kHz, gentle 1st-order roll-off) smooths it back into a usable line-level analog signal. Higher-fidelity setups stack a second RC stage; for a 28 mm speaker on a desk, single-stage is plenty.
+- **Power the amp from `5V`** (the USB-C rail), not `3V3`. The 3.3 V regulator can't deliver 1 W audio peaks.
+- **Common ground is critical** — tie `AGND` to the XIAO `GND`.
+- **No I²S BCLK or WS lines** are used — that path is only needed for digital amps like the MAX98357A. PDM-TX is single-pin.
+- The board manager YAML at [`boards/seeed/xiao_esp32s3_sense/board_peripherals.yaml`](../boards/seeed/xiao_esp32s3_sense/board_peripherals.yaml) already declares `format: pdm-out` on `i2s_audio_out`, so once you wire the RC filter the firmware drives audio out on first boot.
+
+### Alternative: MAX98357A I²S amp
+
+If you already have a MAX98357A on hand, swap the YAML back to `format: std-out` with the original BCLK / WS / DOUT pin trio (D1 / D2 / D3) and skip the RC filter. The enclosure cavity fits both modules.
 
 ```mermaid
 flowchart LR

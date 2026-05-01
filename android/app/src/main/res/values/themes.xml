@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Bare-bones platform theme; the real Material 3 colors are applied
+         by JarvisNanoTheme() in Compose. This shim gives the system a dark,
+         edge-to-edge surface before Compose takes over. -->
+    <style name="Theme.JarvisNano" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@color/igd_background</item>
+        <item name="android:navigationBarColor">@color/igd_background</item>
+        <item name="android:windowBackground">@color/igd_background</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="m">false</item>
+    </style>
+</resources>

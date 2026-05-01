@@ -1,6 +1,6 @@
 # Visual identity
 
-Brand assets for JarvisRobot. Palette matches [Ingenious Digital](https://ingeniousdigital.com): matte charcoal (#0d1117 / #1a1a1a) + vivid orange neon (#FF5722).
+Brand assets for JarvisNano. Palette matches [Ingenious Digital](https://ingeniousdigital.com): matte charcoal (#0d1117 / #1a1a1a) + vivid orange neon (#FF5722).
 
 ## Canonical assets (use these)
 
@@ -8,7 +8,7 @@ Brand assets for JarvisRobot. Palette matches [Ingenious Digital](https://ingeni
 | --- | --- | --- |
 | [`logo.png`](logo.png) | Primary brand mark | Arc-reactor lens with neon J. Reads at favicon size when cropped tight. |
 | [`logo-secondary.png`](logo-secondary.png) | Secondary stamp | Hex-frame JR monogram. Use sparingly — page footers, hardware etch, document watermark. |
-| [`wordmark.png`](wordmark.png) | README banner / lockup | Two-line "JARVIS / ROBOT" with mark on the left, mirrors Ingenious Digital header structure. |
+| [`wordmark.png`](wordmark.png) | README banner / lockup | Two-line "JARVIS / NANO" with mark on the left, mirrors Ingenious Digital header structure. |
 | [`mascot.png`](mascot.png) | Lineup add / hero portrait | Full-body chibi on a glowing orange ring — drops into the IGD 5-mascot lineup as #6 (*The J.A.R.V.I.S. — Voice Companion*). |
 | [`mascot-bust.png`](mascot-bust.png) | Avatar / social card | Bust crop with neon J on chest plate. Ideal as GitHub social preview or Discord/Telegram avatar. |
 | [`hero.png`](hero.png) | README hero | Phase-3 product render — Monolith with round AMOLED on, orange waveform, glowing under-ring. |
