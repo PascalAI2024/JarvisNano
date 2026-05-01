@@ -1,5 +1,26 @@
 # Build & Flash
 
+There are **two install paths**:
+
+| Path | What you need | Best for |
+| --- | --- | --- |
+| **A. Browser flasher (no CLI)** | Chrome / Edge + a USB-C cable | End users. Click → install. No esptool, no Docker. |
+| **B. Local build + flash** | Docker, Python 3, Git | Developers iterating on firmware. |
+
+## Path A — Browser flasher
+
+1. Open [`dashboard/index.html`](../dashboard/index.html) — either from this repo's `python3 -m http.server` or from any deploy target.
+2. Click the **Flash** tab.
+3. Plug in the XIAO Sense holding the **BOOT** button. Click **Install**. Pick the `/dev/cu.usbmodem*` (macOS / Linux) or `COM*` (Windows) port.
+4. Wait ~30 s. The merged 7.6 MB firmware bundle (`dashboard/firmware/jarvis-xiao-esp32s3-sense.bin`) is written via WebSerial.
+5. The device reboots, broadcasts `esp-claw-XXXXXX`. Visit [`dashboard/onboard.html`](../dashboard/onboard.html) and walk through the 5-step wizard.
+
+Browser support note: Web Serial only works on Chromium browsers (Chrome, Edge, Brave, Arc, Opera). **Safari and Firefox don't support Web Serial** — use one of the Chromium browsers if the Install button is greyed out.
+
+---
+
+## Path B — Local build + flash
+
 The full pipeline runs in Docker, so you only need:
 - macOS / Linux / Windows + WSL
 - Docker Desktop
@@ -86,15 +107,17 @@ FATFS `storage` blob (which holds Lua skills + memory).
 
 After flashing, the XIAO reboots and broadcasts an open Wi-Fi AP named
 `esp-claw-XXXXXX` (the `XXXXXX` is the last 3 bytes of the MAC). Join it
-from your phone or laptop, browse to **http://192.168.4.1/**, and
+from your phone or laptop, browse to **http://192.168.4.1/** (or open
+[`dashboard/onboard.html`](../dashboard/onboard.html) — the 5-step wizard), and
 configure:
 
 - Your home Wi-Fi SSID + password
-- An LLM provider (OpenAI / Anthropic / Qwen / DeepSeek / custom endpoint) + API key + model
+- An LLM provider (OpenAI / Anthropic / **MiniMax-M2.7** / Qwen / Ollama / custom endpoint) + API key + model
 - Optionally a Telegram bot token, or just use the built-in **Web IM**
 
 The device reboots onto your LAN. Find it again at
-**http://esp-claw.local/** (mDNS) and start chatting.
+**http://esp-claw.local/** (mDNS) — the [Cockpit dashboard](../dashboard/index.html)
+takes over from there.
 
 ## Monitoring serial output
 

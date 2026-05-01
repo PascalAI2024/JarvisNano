@@ -18,48 +18,55 @@ Pin map, schematic, BOM, and wiring diagrams for each phase.
 
 ## Pin assignments (Phase 1 firmware)
 
+| Header | GPIO | Direction | Phase | Use |
+| --- | --- | --- | --- | --- |
+| D0 | 1  | output | 1 | RMT WS2812 placeholder (optional) |
+| D1 | 2  | reserved | — | free (was I²S BCLK in MAX98357 alt; unused under PAM8002A) |
+| D2 | 3  | reserved | — | free (was I²S WS in MAX98357 alt; unused under PAM8002A) |
+| **D3** | **4**  | output | **2** | **PDM-TX → 270 Ω + 100 nF → PAM8002A IN+** |
+| D4 | 5  | I²C | 1/3 | I²C SDA (touchscreen + sensors) |
+| D5 | 6  | I²C | 1/3 | I²C SCL |
+| D6 | 43 | UART | — | UART TX (free if not used) |
+| D7 | 44 | UART | — | UART RX (free if not used) |
+| D8 | 7  | output | 3 | free — Phase 3 LCD CS candidate |
+| D9 | 8  | output | 3 | free — Phase 3 LCD RST candidate |
+| D10 | 9 | output | 3 | free — Phase 3 LCD DC candidate |
+| (on-board) | **21** | output | 1 | **User LED — active LOW** (driven by `status_led.lua`) |
+| (on-board) | **41** | input | 1 | **PDM mic DATA** (full-duplex on I²S0 RX) |
+| (on-board) | **42** | output | 1 | **PDM mic CLK** |
+
 ```mermaid
 flowchart LR
     subgraph BOARD[XIAO ESP32-S3 Sense]
         direction TB
-        D0[D0 / GPIO1<br/>RMT WS2812 placeholder]
-        D1[D1 / GPIO2<br/>I²S BCLK]
-        D2[D2 / GPIO3<br/>I²S WS]
-        D3[D3 / GPIO4<br/>I²S DOUT]
-        D4[D4 / GPIO5<br/>I²C SDA]
-        D5[D5 / GPIO6<br/>I²C SCL]
-        D6[D6 / GPIO43 — UART TX]
-        D7[D7 / GPIO44 — UART RX]
-        D8[D8 / GPIO7 — free]
-        D9[D9 / GPIO8 — free]
-        D10[D10 / GPIO9 — free]
+        D0[D0 GPIO1<br/>WS2812 ext]
+        D3X[D3 GPIO4<br/>PDM-TX out]
+        D4[D4 GPIO5<br/>I²C SDA]
+        D5[D5 GPIO6<br/>I²C SCL]
         ONBOARD41[GPIO41<br/>PDM mic DATA]
         ONBOARD42[GPIO42<br/>PDM mic CLK]
-        LED21[GPIO21<br/>user LED]
+        LED21[GPIO21<br/>USER LED active-LOW]
     end
 
     subgraph PDM[On-board MEMS mic]
         MIC[MSM261D3526H1CPM]
     end
 
-    subgraph AMP[Phase 2 — MAX98357A]
-        BCLK[BCLK]
-        LRC[LRC / WS]
-        DIN[DIN]
-        SPKP[SPK+]
-        SPKN[SPK-]
+    subgraph AMP[Phase 2 — PAM8002A combo + 28 mm 4 Ω speaker]
+        R[270 Ω]
+        C[100 nF to GND]
+        INP[IN+]
     end
 
-    subgraph SCREEN[Phase 3 — touchscreen]
+    subgraph SCREEN[Phase 3 — Seeed Round Display 1.28&quot;]
         TSDA[I²C SDA]
         TSCL[I²C SCL]
     end
 
     MIC -- PDM CLK --> ONBOARD42
     MIC -- PDM DATA --> ONBOARD41
-    D1 --> BCLK
-    D2 --> LRC
-    D3 --> DIN
+    D3X --> R --> INP
+    R -.- C
     D4 --> TSDA
     D5 --> TSCL
 ```
@@ -184,24 +191,30 @@ This phase will need a new `spi_display` peripheral entry in
 | ----- | ---------------------------- | --------------- | ----------- |
 | 1     | Seeed XIAO ESP32-S3 Sense    | Seeed / Mouser  | $14         |
 | 1     | USB-C cable (data + power)   | anywhere        | $5          |
-| 2     | MAX98357A I²S amp            | Adafruit / AliEx | $5          |
-| 2     | 4 Ω 1 W speaker (~28 mm)     | AliExpress      | $2          |
-| 2     | Hookup wire / breadboard     | bin             | -           |
-| 3     | 2.8" SPI ILI9341 + XPT2046   | AliExpress      | $8          |
-| 3     | (optional) 3D-printed shell  | print           | filament    |
+| 2     | **PAM8002A combo amp + 28 mm speaker module** | AliExpress | $3 |
+| 2     | 270 Ω resistor + 100 nF cap (RC LPF) | bin / Mouser | $0.10 |
+| 2     | 503450 LiPo (850 mAh) — solders to BAT+ | AliExpress | $4 |
+| 2     | (alternative) MAX98357A I²S amp + 4 Ω speaker | Adafruit / AliEx | $5+$2 |
+| 3     | Seeed Round Display for XIAO (1.28" GC9A01 + XPT2046) | Seeed | $14 |
+| 3     | 3D-printed Monolith enclosure | hardware/enclosure/ | filament |
 
-Total Phase 1: **~$19**. Total Phase 2: **+$7**. Total Phase 3: **+$8**.
+Total Phase 1: **~$19**. Phase 2 (PAM8002A path): **+$7**. Phase 3 (touchscreen + enclosure): **+$14**.
 
 ## Power budget
 
 Order-of-magnitude figures, USB-C 5 V input:
 
-| State                     | Current  | Notes                          |
-| ------------------------- | -------- | ------------------------------ |
-| Wi-Fi idle                | ~80 mA   | both cores idling, mic off     |
-| Listening (PDM RX)        | ~110 mA  | mic + DMA active               |
-| Wi-Fi TX burst            | ~250 mA  | spike during chat upload       |
-| Speaker @ 1 W (Phase 2)   | +200 mA  | through MAX98357A              |
-| Touchscreen backlight     | +60 mA   | typical 2.8" panel             |
+| State                     | Current  | Notes                                |
+| ------------------------- | -------- | ------------------------------------ |
+| Wi-Fi idle                | ~80 mA   | both cores idling, mic off           |
+| Listening (PDM RX)        | ~110 mA  | mic + DMA active                     |
+| Status LED on full        | +6 mA    | brief during boot flash + LISTENING  |
+| Wi-Fi TX burst            | ~250 mA  | spike during chat upload             |
+| PAM8002A @ 1 W (Phase 2)  | +180 mA  | analog amp, RC-filtered PDM input    |
+| MAX98357A alt @ 1 W       | +200 mA  | digital I²S amp                      |
+| Touchscreen backlight     | +60 mA   | 1.28" round AMOLED (Phase 3)         |
+| LiPo charger (Phase 2)    | +200 mA  | only when charging via USB           |
 
-A standard 5 V / 1 A USB charger covers all phases comfortably.
+A standard 5 V / 1 A USB charger covers all phases comfortably. With the
+850 mAh LiPo and Wi-Fi + chat workload, expect **~5–7 h of run time**
+unplugged before the LED starts SOS-ing low battery.

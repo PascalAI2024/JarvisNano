@@ -15,6 +15,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-ff5722?style=flat-square" alt="license"></a>
   <img src="https://img.shields.io/badge/board-XIAO_ESP32--S3_Sense-ff5722?style=flat-square" alt="board">
   <img src="https://img.shields.io/badge/runtime-ESP--Claw-ff5722?style=flat-square" alt="runtime">
+  <img src="https://img.shields.io/badge/llm-MiniMax--M2.7-ff5722?style=flat-square" alt="llm">
 </p>
 
 ---
@@ -25,13 +26,15 @@ framework to the **Seeed Studio XIAO ESP32-S3 Sense** — the smallest
 Wi-Fi/BLE board with an on-board MEMS PDM microphone and an OV2640 camera.
 
 The bare board, plugged into USB-C, gives you:
-- 🎙️ on-device PDM mic capture
+- 🎙️ on-device PDM mic capture (full-duplex on I²S0)
 - 💬 LLM-driven chat (OpenAI / Anthropic / **MiniMax-M2.7** / Qwen / DeepSeek / custom)
 - 🧠 dynamic Lua skill loading (no reflash to teach new behaviors)
+- 🟧 visible heartbeat on the on-board user LED — boot flash + idle wink
 - 🔌 MCP server + client over LAN
 - 🛜 self-hosted Wi-Fi provisioning portal on first boot
+- 🎛️ browser admin / onboarding / WebSerial flasher (no esptool install)
 
-Add a `MAX98357A` I²S amp, a 503450 LiPo, and a 1.28" Seeed Round Display, and the same firmware grows into a battery-powered desktop concierge.
+Add a **PAM8002A** analog speaker, a 503450 LiPo, and a 1.28" Seeed Round Display, and the same firmware grows into a battery-powered desktop concierge.
 
 ---
 
@@ -54,35 +57,37 @@ flowchart LR
     end
 
     subgraph XIAO[XIAO ESP32-S3 Sense]
-        MIC[🎙️ PDM mic<br/>GPIO41/42]
-        I2S[🔊 I2S DAC out<br/>GPIO2/3/4]
+        MIC[🎙️ PDM mic RX<br/>GPIO41/42<br/>on I²S0]
+        I2S[🔊 PDM-TX speaker<br/>GPIO4 + RC LPF<br/>on I²S0]
+        LED[🟧 User LED<br/>GPIO21]
         CAM[📷 OV2640<br/>on-board]
-        I2C[🧩 I2C bus<br/>GPIO5/6]
+        I2C[🧩 I²C bus<br/>GPIO5/6]
         CORE[ESP-Claw runtime<br/>Lua + Agent loop]
         WIFI[Wi-Fi STA + AP]
     end
 
-    subgraph Cloud
+    subgraph Cloud[" Phase 1 — cloud LLM "]
         LLM[(LLM API<br/>MiniMax-M2.7 / GPT / Claude)]
         IM[(Telegram / Web IM)]
     end
 
-    subgraph Future[" Phase 2 / 3 "]
-        AMP[MAX98357A amp<br/>+ speaker + LiPo]
+    subgraph Future[" Phase 2 / 3 — local + visual "]
+        AMP[PAM8002A combo amp<br/>+ 28 mm speaker + LiPo]
         SCR[Seeed Round Display<br/>1.28" GC9A01]
-        SENS[I²C sensors / servos]
+        BLE[Phone over BLE<br/>Gemma 4 E4B local]
     end
 
     U -->|voice| MIC
     MIC --> CORE
+    CORE --> LED
     CORE -->|prompt + tools| LLM
     LLM -->|reply| CORE
-    CORE -->|TTS audio| I2S
+    CORE -->|TTS PDM| I2S
     I2S -.->|Phase 2| AMP --> U
     CORE <-->|chat| IM <--> U
     CORE -->|mDNS http| WIFI
     I2C -.->|Phase 3| SCR
-    I2C -.->|Phase 3| SENS
+    CORE <-.->|Phase 3| BLE
     CAM -.-> CORE
 ```
 
@@ -96,12 +101,14 @@ K10, and a few Espressif breadboards — but **not the XIAO ESP32-S3 Sense**,
 the cheapest accessible S3 board with a built-in microphone.
 
 This repo:
-1. Provides the board adaptation (`boards/seeed/xiao_esp32s3_sense/`)
-2. Patches an upstream [codegen bug](#upstream-bug-fix) we hit on the way
-3. Ships a Docker-only build/flash flow so you don't need to install ESP-IDF locally
-4. Documents the hardware story with [schematics](docs/HARDWARE.md), the
-   firmware story with [architecture diagrams](docs/ARCHITECTURE.md), and
-   four parametric [enclosure designs](hardware/enclosure/) ready to print
+1. Provides the **board adaptation** at [`boards/seeed/xiao_esp32s3_sense/`](boards/seeed/xiao_esp32s3_sense/) — board info, peripherals (full-duplex PDM on I²S0), devices, sdkconfig, setup C.
+2. Patches an [upstream codegen bug](#upstream-bug-fix) that broke ESP32-S3 builds.
+3. Ships a Docker-only build/flash flow so you don't need to install ESP-IDF locally.
+4. Adds a **status LED** Lua skill ([`firmware/lua/status_led.lua`](firmware/lua/status_led.lua)) that gives the device a visible heartbeat.
+5. Provides a **browser admin** ([`dashboard/`](dashboard/)) — three-tab cockpit + onboarding wizard + ESP Web Tools flasher.
+6. Provides an **open-source Android companion** ([`android/`](android/)) — Kotlin + Compose, mDNS discovery, BLE skeleton, Gemma 4 stub.
+7. Ships **four parametric 3D-printable enclosures** ([`hardware/enclosure/`](hardware/enclosure/)) with mermaid plans + dimensioned drawings.
+8. Documents the **public protocol** ([`docs/PROTOCOL.md`](docs/PROTOCOL.md)) so any client (web, Android, ZeroChat, third-party) can integrate cleanly.
 
 ---
 
@@ -123,8 +130,9 @@ cd JarvisNano
 ./scripts/flash.sh
 ```
 
-Then plug in, open the captive Wi-Fi `esp-claw-XXXXXX`, and visit
-`http://192.168.4.1/` to set Wi-Fi + LLM credentials.
+**Or no-CLI install:** open [`dashboard/index.html`](dashboard/index.html) in Chrome / Edge → **Flash** tab → click *Install* → ESP Web Tools programs the merged `.bin` over WebSerial. No esptool, no Docker for the user.
+
+Then plug in, open the captive Wi-Fi `esp-claw-XXXXXX`, visit `http://192.168.4.1/` (or [`dashboard/onboard.html`](dashboard/onboard.html)) to set Wi-Fi + LLM credentials.
 
 Detailed walk-through in [docs/BUILD.md](docs/BUILD.md).
 
@@ -136,47 +144,54 @@ Detailed walk-through in [docs/BUILD.md](docs/BUILD.md).
   <img src="images/dashboard/cockpit.png" alt="JarvisNano cockpit dashboard" width="900">
 </p>
 
-`dashboard/index.html` is a single-file vanilla-JS admin that talks straight to the device. Three tabs:
+[`dashboard/index.html`](dashboard/index.html) is a single-file vanilla-JS admin that talks straight to the device. Three tabs:
 
 | Tab | What it does |
 | --- | --- |
-| **Cockpit** | Live system telemetry, Wi-Fi + LLM state, mic/camera/battery/Bluetooth tiles, full chat with the agent (with `<think>` reasoning collapsed), capability + Lua module index, FATFS browser, live event stream. |
-| **Flash** | One-click [ESP Web Tools](https://esphome.github.io/esp-web-tools/) flasher — Chrome/Edge users can program a fresh XIAO Sense over USB-C from the browser, no esptool install. |
-| **Settings** | Editable form for every device config field (Wi-Fi, LLM provider, IM credentials). Saves the diff back via `/api/config`. |
+| **Cockpit** | Live system telemetry, Wi-Fi + LLM state, mic / camera / battery / Bluetooth tiles, full chat with the agent (with `<think>` reasoning collapsed), capability + Lua module index, FATFS browser, live event stream, restart + new-session controls. |
+| **Flash** | One-click [ESP Web Tools](https://esphome.github.io/esp-web-tools/) flasher — Chrome / Edge users program a fresh XIAO Sense over USB-C from the browser, no esptool install. Manifest at [`dashboard/firmware/manifest.json`](dashboard/firmware/manifest.json). |
+| **Settings** | Editable form for every device config field (Wi-Fi, LLM provider, IM credentials). Saves the diff back via `/api/config`. Eye-toggle for sensitive fields. |
 
-There's also [`dashboard/onboard.html`](dashboard/onboard.html) — a 5-step first-boot wizard (Welcome → Wi-Fi → LLM → Test round-trip → Done).
+Plus [`dashboard/onboard.html`](dashboard/onboard.html) — a 5-step first-boot wizard (Welcome → Wi-Fi → LLM preset → test round-trip → Done) with 6 LLM presets aligned to the firmware schema.
 
 <p align="center">
   <img src="images/dashboard/flash-tab.png" alt="Flash tab" width="430">
   <img src="images/dashboard/settings-tab.png" alt="Settings tab" width="430">
 </p>
 
-Open `dashboard/index.html` from any local server (`python3 -m http.server` in `dashboard/`) and point it at `esp-claw.local`. Add `?demo=1` to mask SSIDs/IPs for clean screenshots.
+Open `dashboard/index.html` from any local server (`python3 -m http.server` in `dashboard/`) and point it at `esp-claw.local`. Add `?demo=1` to mask SSIDs / IPs / API key for clean screenshots.
 
 ---
 
 ## Companion apps
 
-- **[`android/`](android/)** — open-source Kotlin + Jetpack Compose reference companion (in this repo). Cockpit / Chat / Settings / About screens, mDNS discovery, BLE GATT skeleton (Phase 2), Gemma 4 E4B local-LLM interface (Phase 3). See [`android/README.md`](android/README.md).
-- **ZeroChat** — Ingenious Digital's voice-first mobile companion (private). Integrates against the JarvisNano protocol — see [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the contract.
+| App | Repo | Purpose |
+| --- | --- | --- |
+| **`android/`** | this repo, `android/` | Open-source Kotlin + Jetpack Compose reference companion. Cockpit / Chat / Settings / About screens, mDNS discovery, BLE GATT skeleton (Phase 2), Gemma 4 E4B local-LLM interface (Phase 3). See [`android/README.md`](android/README.md). |
+| **ZeroChat** | private (`Ingenious-Digital-LLC/zerochat`) | Voice-first React Native 0.84 + Zustand 5 mobile companion. Integrates against the JarvisNano protocol via a `src/integrations/jarvisnano/` module — see [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the contract and [PR #1](https://github.com/Ingenious-Digital-LLC/zerochat/pull/1). |
+
+Both clients compute the same five Phase-2 BLE GATT UUIDs from a single `uuidv5` namespace, so there's no hardcoded magic anywhere.
 
 ---
 
 ## Verified boot log
 
 ```
-I (568) PERIPH_I2S: I2S[0] PDM-RX, clk: 42, din: 41
-I (568) PERIPH_I2S: I2S[1] STD,  TX, ws: 3, bclk: 2, dout: 4, din: -1
-I (568) BOARD_MANAGER: All peripherals initialized
-I (1948) claw_skill: Initialized registry with 34 skill(s)
+I (578) PERIPH_I2S: I2S[0] PDM-RX, clk: 42, din: 41
+I (578) PERIPH_I2S: I2S[0] initialize success: 0x3c1fcd90
+I (578) PERIPH_I2S: I2S[0] PDM-TX, clk: -1, dout: 4
+I (578) PERIPH_I2S: I2S[0] initialize success: 0x3c1fcbbc
+I (578) BOARD_MANAGER: All peripherals initialized
+I (1948) claw_skill: Initialized registry with 51 skill(s)
 I (1958) cap_mcp_srv: MCP server ready: http://esp-claw.local:18791/mcp_server
 I (14808) claw_core: Initialized
 I (14808) claw_core: Started worker task
 I (24948) claw_core: context_loaded request=1 provider=cap Tools context_kind=tools context_len=8015
 I (57968) claw_core: completion request=1 status=done
+[status_led] on-board LED on gpio 21 active_low=true
 ```
 
-LLM round-trip verified end-to-end on hardware (XIAO ESP32-S3R8 / 8 MB octal PSRAM / IDF v5.5.4) with MiniMax-M2.7 over a custom OpenAI-compatible endpoint.
+LLM round-trip verified end-to-end on hardware (XIAO ESP32-S3R8 / 8 MB octal PSRAM / IDF v5.5.4) with **MiniMax-M2.7** over a custom OpenAI-compatible endpoint. Status LED runs as a long-lived async Lua job that survives across chat turns.
 
 ---
 
@@ -186,11 +201,11 @@ LLM round-trip verified end-to-end on hardware (XIAO ESP32-S3R8 / 8 MB octal PSR
   <img src="images/exploded-view.png" alt="Exploded isometric of the Monolith enclosure showing component layout" width="800">
 </p>
 
-Four parametric OpenSCAD enclosure concepts ship in [`hardware/enclosure/`](hardware/enclosure/), each with a `PLAN.md` (mermaid front/top/cross-section views), a `technical-drawing.svg` (dimensioned multi-view engineering drawing), and a printable `enclosure.scad`.
+Four parametric OpenSCAD enclosure concepts ship in [`hardware/enclosure/`](hardware/enclosure/), each with a `PLAN.md` (mermaid front / top / cross-section views), a `technical-drawing.svg` (dimensioned multi-view engineering drawing), and a printable `enclosure.scad`.
 
-**Recommended:** the Monolith — 78 × 68 × 66 mm, matte charcoal PETG/ASA, 4× M2 brass-insert screws, lid off in under 60 s, ~4.5 h print on a 0.4 mm nozzle. See [`hardware/enclosure/COMPARISON.md`](hardware/enclosure/COMPARISON.md) for the full matrix and pick rationale.
+**Recommended:** the **Monolith** — 78 × 68 × 66 mm, matte charcoal PETG / ASA, 4× M2 brass-insert screws, lid off in under 60 s, ~4.5 h print on a 0.4 mm nozzle. See [`hardware/enclosure/COMPARISON.md`](hardware/enclosure/COMPARISON.md) for the full matrix and pick rationale, and [`hardware/enclosure/assembly-flow.md`](hardware/enclosure/assembly-flow.md) for the assembly sequence.
 
-The case is sized to fit the XIAO ESP32-S3 Sense, an audio amp + speaker module (PAM8002A combo or MAX98357A I²S — both fit), a 503040/503450 LiPo with foam shim, and a 39 mm round cutout from day one for the future [Seeed Round Display for XIAO](https://wiki.seeedstudio.com/get_start_round_display/).
+The case is sized to fit the XIAO ESP32-S3 Sense, an audio amp + speaker module (PAM8002A combo or MAX98357A I²S — both fit), a 503040 / 503450 LiPo with foam shim, and a 39 mm round cutout from day one for the future [Seeed Round Display for XIAO](https://wiki.seeedstudio.com/get_start_round_display/).
 
 ---
 
@@ -199,21 +214,31 @@ The case is sized to fit the XIAO ESP32-S3 Sense, an audio amp + speaker module 
 ```mermaid
 timeline
     title JarvisNano phases
-    Phase 1 (now) : Bare board chat + listen
-                  : PDM mic on-board
-                  : MiniMax-M2.7 LLM verified
-                  : Wi-Fi provisioning portal
-                  : Telegram + Web IM
-    Phase 2       : MAX98357A I²S amp + 28 mm speaker
-                  : 503450 LiPo + on-board charger
-                  : Real TTS playback
-                  : Wake-word
-    Phase 3       : Seeed 1.28" round AMOLED touchscreen
-                  : LVGL chat UI
-                  : Animated emote face via esp_emote_expression
-    Phase 4       : OV2640 vision tools (describe, OCR)
-                  : MCP server exposes desktop sensors
-                  : 3D-printed enclosure (4 designs ship now)
+    Phase 1 (shipped) : Bare board chat + listen
+                      : XIAO ESP32-S3 Sense board adaptation
+                      : Full-duplex PDM on I²S0 (mic + speaker)
+                      : MiniMax-M2.7 cloud LLM verified
+                      : Wi-Fi provisioning portal + Telegram + Web IM
+                      : Status LED heartbeat (GPIO21 Lua job)
+                      : Browser dashboard (Cockpit · Flash · Settings)
+                      : 5-step onboarding wizard
+                      : ESP Web Tools WebSerial flasher
+                      : Public PROTOCOL.md (HTTP + WS + MCP + BLE + LLM)
+                      : Android companion scaffold
+                      : ZeroChat integration PR
+                      : 4 parametric 3D-printable enclosures
+                      : Upstream esp_board_manager codegen PR
+    Phase 2           : PAM8002A analog amp + 28 mm speaker (RC LPF off PDM-TX GPIO4)
+                      : 503450 LiPo + on-board USB-C charger
+                      : Real TTS playback + wake-word
+                      : BLE GATT service (frozen UUIDs in PROTOCOL.md)
+                      : Battery + audio level + camera HTTP endpoints
+    Phase 3           : Seeed 1.28" round AMOLED touchscreen
+                      : LVGL chat UI + animated emote face
+                      : Phone-as-brain Privacy Mode — Gemma 4 E4B on-device via BLE
+    Phase 4           : OV2640 vision tools (describe scene · OCR · find object)
+                      : MCP server exposes desktop sensors
+                      : 3D-printed enclosure released for community remix
 ```
 
 Full detail in [docs/ROADMAP.md](docs/ROADMAP.md).
@@ -239,18 +264,22 @@ on the ESP32-P4. ESP32-S3, S2, C3 fail to compile.
 
 ```
 JarvisNano/
-├── boards/seeed/xiao_esp32s3_sense/   # 5-file board adaptation
-├── hardware/enclosure/                # 4 parametric enclosures + drawings
-├── docs/                              # architecture · hardware · build · roadmap · protocol
-├── images/                            # mascot · wordmark · renders · early concepts
+├── boards/seeed/xiao_esp32s3_sense/   # 5-file board adaptation (yaml + setup C)
+├── firmware/                          # Lua skills baked into the FATFS image
+│   ├── lua/status_led.lua             #   on-board LED heartbeat
+│   └── router_rules/                  #   event-router rules
+├── hardware/enclosure/                # 4 parametric OpenSCAD designs + drawings
+├── dashboard/                         # browser admin (Cockpit + Flash + Settings + Onboard)
+│   ├── index.html
+│   ├── onboard.html
+│   └── firmware/                      #   merged .bin + ESP Web Tools manifest
+├── android/                           # Kotlin + Compose companion app
+├── docs/                              # ARCHITECTURE · BUILD · HARDWARE · ROADMAP · PROTOCOL
+├── images/                            # mascot · wordmark · renders · dashboard shots · early concepts
 ├── patches/                           # upstream codegen fix
 ├── scripts/                           # bootstrap.sh · flash.sh
 └── README.md
 ```
-
-**Companion apps:**
-- `android/` — open-source Kotlin + Compose reference companion (in this repo).
-- **ZeroChat** — Ingenious Digital's voice-first companion (separate, private; integration via the [JarvisNano protocol](docs/PROTOCOL.md)).
 
 ---
 
@@ -261,7 +290,9 @@ JarvisNano/
 ## Credits
 
 - [Espressif ESP-Claw](https://github.com/espressif/esp-claw) — agent framework
+- [Espressif esp-gmf · esp_board_manager](https://github.com/espressif/esp-gmf) — board codegen
 - [Seeed Studio XIAO ESP32-S3 Sense](https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/) — hardware
+- [Google DeepMind Gemma 4](https://ai.google.dev/gemma/docs/core) — Phase-3 on-device LLM
 - [Ingenious Digital](https://ingeniousdigital.com) — brand & mascot family
 - ESP-Claw is inspired by the OpenClaw concept
 
