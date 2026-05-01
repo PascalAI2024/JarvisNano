@@ -1,0 +1,81 @@
+version: 1.0.0
+# Peripherals Configuration for Seeed XIAO ESP32-S3 Sense
+#
+# Pin map (chat + listen baseline; touchscreen reserved):
+#   D0/GPIO1  -> rmt_tx       (external WS2812, optional)
+#   D1/GPIO2  -> i2s BCLK     (MAX98357 amp, optional)
+#   D2/GPIO3  -> i2s WS/LRCLK (MAX98357 amp, optional)
+#   D3/GPIO4  -> i2s DOUT     (MAX98357 amp, optional)
+#   D4/GPIO5  -> I2C SDA      (touchscreen / sensors)
+#   D5/GPIO6  -> I2C SCL      (touchscreen / sensors)
+#   GPIO41    -> PDM mic data (on-board MSM261D3526H1CPM)
+#   GPIO42    -> PDM mic clk  (on-board)
+peripherals:
+
+  # Placeholder RMT for an optional external WS2812 (status LED).
+  # The on-board user LED on GPIO21 is a plain LED, not addressable.
+  - name: rmt_tx
+    type: rmt
+    role: tx
+    config:
+      gpio_num: 1
+      clk_src: RMT_CLK_SRC_DEFAULT
+      resolution_hz: 10000000
+      mem_block_symbols: 64
+      trans_queue_depth: 4
+      intr_priority: 1
+      flags:
+        invert_out: false
+        with_dma: true
+        io_loop_back: false
+        io_od_mode: false
+        allow_pd: false
+        init_level: false
+
+  # I2C master — reserved for the future touchscreen + any I2C peripherals.
+  - name: i2c_master
+    type: i2c
+    role: master
+    config:
+      port: 0
+      pins:
+        sda: 5
+        scl: 6
+
+  # PDM RX from on-board microphone.
+  # XIAO Sense routes the MEMS PDM mic to GPIO41 (data) and GPIO42 (clk).
+  - name: i2s_audio_in
+    type: i2s
+    format: "pdm-in"
+    role: master
+    config:
+      port: 0
+      sample_rate_hz: 16000
+      clk_src: "I2S_CLK_SRC_DEFAULT"
+      data_bit_width: 16
+      slot_mode: "I2S_SLOT_MODE_MONO"
+      pins:
+        clk: 42
+        din: 41
+
+  # I2S0 standard out — MAX98357A amplifier (optional, install later).
+  # Pins are reserved on free header pads so flashing today with no amp
+  # connected is harmless.
+  - name: i2s_audio_out
+    type: i2s
+    role: master
+    format: std-out
+    config:
+      port: 1
+      sample_rate_hz: 16000
+      mclk_multiple: 256
+      data_bit_width: 16
+      slot_bit_width: I2S_SLOT_BIT_WIDTH_AUTO
+      slot_mode: I2S_SLOT_MODE_MONO
+      slot_mask: I2S_STD_SLOT_LEFT
+      ws_width: 16
+      pins:
+        mclk: -1
+        bclk: 2
+        ws: 3
+        dout: 4

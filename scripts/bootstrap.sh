@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# bootstrap.sh — clone esp-claw, drop in our board, apply codegen patch, optionally build
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ESP_CLAW_DIR="$ROOT/esp-claw"
+ESP_CLAW_REPO="https://github.com/espressif/esp-claw.git"
+BOARD_NAME="xiao_esp32s3_sense"
+BOARD_VENDOR="seeed"
+IDF_IMAGE="espressif/idf:release-v5.5"
+
+log() { printf '\033[1;36m[bootstrap]\033[0m %s\n' "$*"; }
+
+clone_or_update_esp_claw() {
+    if [ -d "$ESP_CLAW_DIR/.git" ]; then
+        log "esp-claw already cloned at $ESP_CLAW_DIR"
+    else
+        log "cloning esp-claw → $ESP_CLAW_DIR"
+        git clone --depth 1 "$ESP_CLAW_REPO" "$ESP_CLAW_DIR"
+    fi
+}
+
+copy_board() {
+    local src="$ROOT/boards/$BOARD_VENDOR/$BOARD_NAME"
+    local dst="$ESP_CLAW_DIR/application/edge_agent/boards/$BOARD_VENDOR/$BOARD_NAME"
+    log "copying board $BOARD_VENDOR/$BOARD_NAME → upstream tree"
+    mkdir -p "$dst"
+    cp -f "$src"/* "$dst/"
+}
+
+apply_patch() {
+    local target="$ESP_CLAW_DIR/application/edge_agent/managed_components/espressif__esp_board_manager/peripherals/periph_i2s/periph_i2s.py"
+    if [ ! -f "$target" ]; then
+        log "esp_board_manager not pulled yet — running idf.py reconfigure inside Docker to populate managed_components"
+        docker run --rm -v "$ESP_CLAW_DIR":/project -w /project/application/edge_agent "$IDF_IMAGE" \
+            bash -lc 'pip install --quiet esp-bmgr-assist && idf.py set-target esp32s3 && idf.py reconfigure' \
+            > "$ROOT/.build_logs/reconfigure.log" 2>&1 || true
+    fi
+    if grep -q "chip_supports_pdm_rx_hp_filter" "$target" 2>/dev/null; then
+        log "codegen patch already applied"
+        return
+    fi
+    log "applying patches/0001-fix-pdm-rx-hp-filter-cap.patch"
+    python3 - <<PY
+import re, pathlib
+p = pathlib.Path(r"$target")
+s = p.read_text()
+old = (
+    "    # Add hardware version specific fields\n"
+    "    if hw_version == 2:  # SOC_I2S_HW_VERSION_2 (all other chips) - only these chips support HP filter\n"
+    "        slot_cfg['hp_en'] = bool(cfg.get('hp_en', True))\n"
+    "        # Validate HP filter cut-off frequency (23.3Hz ~ 185Hz)\n"
+    "        hp_freq = float(cfg.get('hp_cut_off_freq_hz', 35.5))\n"
+)
+new = (
+    "    # PDM RX HP filter fields are gated by SOC_I2S_SUPPORTS_PDM_RX_HP_FILTER,\n"
+    "    # which is only set on ESP32-P4 (and other future chips). HW_VERSION_2\n"
+    "    # alone is not enough — ESP32-S3 is HW_VERSION_2 but lacks the cap.\n"
+    "    chip_supports_pdm_rx_hp_filter = get_effective_chip_name() in ('esp32p4',)\n"
+    "    if hw_version == 2 and chip_supports_pdm_rx_hp_filter:\n"
+    "        slot_cfg['hp_en'] = bool(cfg.get('hp_en', True))\n"
+    "        hp_freq = float(cfg.get('hp_cut_off_freq_hz', 35.5))\n"
+)
+if old not in s:
+    raise SystemExit(f"could not locate target hunk in {p} — upstream may have changed")
+p.write_text(s.replace(old, new))
+print("patched", p)
+PY
+}
+
+build() {
+    mkdir -p "$ROOT/.build_logs"
+    log "building inside $IDF_IMAGE (output streams to .build_logs/build.log)"
+    docker run --rm -v "$ESP_CLAW_DIR":/project -w /project/application/edge_agent "$IDF_IMAGE" \
+        bash -lc 'set -e; pip install --quiet esp-bmgr-assist;
+                  idf.py set-target esp32s3;
+                  idf.py gen-bmgr-config -c ./boards -b xiao_esp32s3_sense;
+                  idf.py build' \
+        | tee "$ROOT/.build_logs/build.log"
+    log "✓ build complete → $ESP_CLAW_DIR/application/edge_agent/build/edge_agent.bin"
+}
+
+main() {
+    mkdir -p "$ROOT/.build_logs"
+    clone_or_update_esp_claw
+    copy_board
+    apply_patch
+
+    if [ "${1:-}" = "build" ]; then
+        build
+    else
+        log "ready. run \`./scripts/bootstrap.sh build\` to compile in Docker"
+    fi
+}
+
+main "$@"

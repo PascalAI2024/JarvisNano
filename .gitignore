@@ -1,0 +1,23 @@
+# Upstream esp-claw clone (bootstrapped by scripts/bootstrap.sh)
+esp-claw/
+
+# Build artifacts
+build/
+.build_logs/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old
+sdkconfig.ci
+
+# IDE / OS noise
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Secrets / local overrides
+.env
+*.local
+secrets.yaml
