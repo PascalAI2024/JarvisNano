@@ -1,0 +1,4 @@
+board: xiao_esp32s3_sense
+chip: esp32s3
+description: "Seeed Studio XIAO ESP32-S3 Sense (8MB flash, 8MB octal PSRAM, on-board OV2640 + PDM mic)"
+manufacturer: "Seeed Studio"

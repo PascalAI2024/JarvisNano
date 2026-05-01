@@ -1,0 +1,52 @@
+version: 1.0.0
+# Devices Configuration for Seeed XIAO ESP32-S3 Sense
+#
+# Phase 1 (current): chat + listen, bare board.
+#   - audio_adc → on-board PDM mic (real)
+#   - audio_dac → fake placeholder so framework dependencies resolve
+#                 even with no amp wired yet. Swap to a real codec
+#                 entry (e.g. dummy_dac on i2s_audio_out) once the
+#                 MAX98357 is installed.
+#   - led_strip → init_skip placeholder for an external WS2812
+#
+# Phase 2 (touchscreen + speaker):
+#   - add display_lcd: ili9341 (or st7789) over a new spi_display peripheral
+#   - flip audio_dac to chip: dummy and drive i2s_audio_out
+#   - optional: enable on-board OV2640 camera (DVP) for vision tools
+devices:
+
+  - name: led_strip
+    chip: ws2812
+    type: custom
+    version: default
+    init_skip: true
+    dependencies:
+      espressif/led_strip:
+        version: "^3.0"
+        public: true
+    config:
+      max_leds: 1
+    peripherals:
+      - name: rmt_tx
+
+  # Placeholder mic device. PDM driver writes raw 16-bit PCM into the
+  # esp-claw audio pipeline; no codec IC is involved.
+  - name: audio_adc
+    type: custom
+    version: default
+    init_skip: true
+    config:
+      sample_rate_hz: 16000
+    peripherals:
+      - name: i2s_audio_in
+
+  # Placeholder DAC so audio_codec dependencies resolve even when no
+  # amplifier is connected. Replace with a real codec (e.g. chip: dummy
+  # or chip: ns4168) once the MAX98357 is wired.
+  - name: fake_audio_dac
+    chip: none
+    type: audio_codec
+    version: default
+    init_skip: true
+    peripherals:
+      - name: i2s_audio_out
