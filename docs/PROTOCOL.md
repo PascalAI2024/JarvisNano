@@ -244,19 +244,27 @@ Phase 2 adds BLE so the device can be paired with a phone for **Privacy Mode** �
 
 ### 6.1 UUID derivation
 
-All UUIDs are derived from a single 128-bit namespace using **UUIDv5** (SHA-1, RFC 4122 §4.3). This makes the UUIDs reproducible by any client.
+All UUIDs are derived from a single 128-bit namespace using **UUIDv5** (SHA-1, RFC 4122 §4.3). This makes the UUIDs reproducible by any client and the values below are **canonical**.
 
 ```
 namespace = 6e617676-2d6a-7276-732d-6e616e6f0000   ; "navv-jrvs-nano"
 
-service     = uuidv5(namespace, "jarvisnano.service")     = TBD on first ship
-audio_in    = uuidv5(namespace, "jarvisnano.audio_in")    = TBD on first ship
-audio_out   = uuidv5(namespace, "jarvisnano.audio_out")   = TBD on first ship
-state       = uuidv5(namespace, "jarvisnano.state")       = TBD on first ship
-control     = uuidv5(namespace, "jarvisnano.control")     = TBD on first ship
+service     = uuidv5(namespace, "jarvisnano.service")     = 1ec185cd-4bc7-5797-a8b1-0f5b66c59757
+audio_in    = uuidv5(namespace, "jarvisnano.audio_in")    = ca04b99f-5e74-5a35-8f4f-d1313f19b29b
+audio_out   = uuidv5(namespace, "jarvisnano.audio_out")   = 872228b7-ccd8-55dd-b12b-5d0352903617
+state       = uuidv5(namespace, "jarvisnano.state")       = dab5c3d4-915d-5f25-acc9-9d511df742bf
+control     = uuidv5(namespace, "jarvisnano.control")     = 2e14c0f2-4b07-5802-a8f9-369752d7cf2a
 ```
 
-> **Note:** Until Phase 2 firmware lands, the concrete hex UUIDs are not frozen. When the firmware ships its first BLE build, the resolved UUIDs become canonical and this section will be updated. Clients SHOULD compute them on the fly using a UUIDv5 implementation rather than hard-coding.
+Reproducibility check (Python):
+
+```python
+import uuid
+ns = uuid.UUID("6e617676-2d6a-7276-732d-6e616e6f0000")
+assert str(uuid.uuid5(ns, "jarvisnano.service")) == "1ec185cd-4bc7-5797-a8b1-0f5b66c59757"
+```
+
+These UUIDs are the contract. The Phase-2 firmware will advertise the `service` UUID and expose the four characteristics under it.
 
 ### 6.2 Service shape
 
