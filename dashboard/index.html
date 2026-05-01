@@ -1,0 +1,1084 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JarvisNano — Admin</title>
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --bg-2: #141414;
+    --bg-3: #1d1d1d;
+    --fg: #e8e8e8;
+    --fg-dim: #888;
+    --line: #2a2a2a;
+    --orange: #ff5722;
+    --orange-soft: rgba(255, 87, 34, 0.18);
+    --orange-glow: rgba(255, 87, 34, 0.6);
+    --green: #3fcb6f;
+    --red: #ff3b3b;
+    --cyan: #00b3ff;
+    --amber: #ffb400;
+    --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: var(--bg); color: var(--fg); font-family: -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif; height: 100%; }
+  body { display: flex; flex-direction: column; }
+
+  /* ---------- Top bar ---------- */
+  .topbar {
+    display: flex; align-items: center; gap: 16px;
+    padding: 14px 22px; background: linear-gradient(180deg, #161616 0%, #0a0a0a 100%);
+    border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 10;
+  }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand-mark {
+    width: 28px; height: 28px; border-radius: 6px; background: var(--bg-3);
+    display: grid; place-items: center; color: var(--orange); font-weight: 800; font-family: var(--mono); font-size: 16px;
+    box-shadow: 0 0 0 1px var(--line), inset 0 0 12px rgba(255,87,34,.18);
+  }
+  .brand-name { font-weight: 700; letter-spacing: 0.04em; }
+  .brand-name .bold { color: var(--fg); }
+  .brand-name .accent { color: var(--orange); }
+  .brand-tag { color: var(--fg-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.2em; padding-left: 12px; border-left: 1px solid var(--line); margin-left: 4px; }
+  .conn { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+  .conn input {
+    background: var(--bg-3); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 7px 10px; font-family: var(--mono); font-size: 13px; width: 220px;
+  }
+  .conn input:focus { outline: none; border-color: var(--orange); box-shadow: 0 0 0 3px var(--orange-soft); }
+  .icon-btn {
+    background: var(--bg-3); color: var(--fg-dim); border: 1px solid var(--line);
+    border-radius: 6px; padding: 7px 9px; cursor: pointer; transition: all 0.15s;
+    display: inline-grid; place-items: center; line-height: 1;
+  }
+  .icon-btn:hover { color: var(--orange); border-color: var(--orange); }
+  .icon-btn.on { color: var(--orange); border-color: var(--orange); }
+  .icon-btn svg { width: 16px; height: 16px; display: block; }
+  .btn {
+    background: var(--bg-3); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 7px 12px; font-size: 13px; cursor: pointer; transition: all 0.15s;
+  }
+  .btn:hover { border-color: var(--orange); color: var(--orange); }
+  .btn.primary { background: var(--orange); color: #fff; border-color: var(--orange); font-weight: 600; }
+  .btn.primary:hover { filter: brightness(1.08); }
+  .btn.danger:hover { border-color: var(--red); color: var(--red); }
+  .status-orb {
+    width: 10px; height: 10px; border-radius: 50%; background: #444;
+    box-shadow: 0 0 0 0 rgba(0,0,0,0); transition: all 0.4s;
+  }
+  .status-orb.live { background: var(--green); box-shadow: 0 0 12px var(--green); }
+  .status-orb.warn { background: var(--amber); box-shadow: 0 0 12px var(--amber); }
+  .status-orb.dead { background: var(--red); box-shadow: 0 0 12px var(--red); }
+
+  /* ---------- Grid ---------- */
+  .grid {
+    display: grid; gap: 18px; padding: 22px;
+    grid-template-columns: repeat(12, 1fr);
+    flex: 1; min-height: 0;
+  }
+  .card {
+    background: var(--bg-2); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px 18px; position: relative; min-width: 0;
+  }
+  .card::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: linear-gradient(180deg, transparent 0%, var(--orange) 50%, transparent 100%);
+    opacity: 0.5;
+  }
+  .card h3 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.16em;
+    color: var(--fg-dim); margin-bottom: 12px; display: flex; align-items: center; gap: 8px;
+  }
+  .card h3 .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--orange); }
+  .span-3 { grid-column: span 3; }
+  .span-4 { grid-column: span 4; }
+  .span-5 { grid-column: span 5; }
+  .span-6 { grid-column: span 6; }
+  .span-7 { grid-column: span 7; }
+  .span-8 { grid-column: span 8; }
+  .span-9 { grid-column: span 9; }
+  .span-12 { grid-column: span 12; }
+  @media (max-width: 1100px) {
+    .span-3, .span-4, .span-5, .span-7, .span-8, .span-9 { grid-column: span 6; }
+    .span-6 { grid-column: span 12; }
+  }
+  @media (max-width: 700px) {
+    .grid > .card { grid-column: span 12; }
+  }
+
+  /* ---------- KV rows ---------- */
+  .kv { display: grid; grid-template-columns: minmax(120px, max-content) 1fr; gap: 6px 14px; font-family: var(--mono); font-size: 13px; }
+  .kv .k { color: var(--fg-dim); text-transform: uppercase; font-size: 11px; letter-spacing: 0.1em; }
+  .kv .v { color: var(--fg); word-break: break-all; }
+  .kv .v.accent { color: var(--orange); }
+  .kv .v.good { color: var(--green); }
+  .kv .v.warn { color: var(--amber); }
+  .kv .v.bad { color: var(--red); }
+
+  /* ---------- Pill ---------- */
+  .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.12em; margin-right: 4px; margin-bottom: 4px;
+    border: 1px solid var(--line); color: var(--fg-dim); background: var(--bg-3);
+  }
+  .pill.on { color: var(--orange); border-color: var(--orange); }
+  .pill.off { color: var(--fg-dim); }
+
+  /* ---------- Hero ---------- */
+  .hero {
+    grid-column: span 12;
+    display: flex; align-items: center; gap: 24px;
+    background:
+      radial-gradient(ellipse at 90% 50%, rgba(255,87,34,0.18) 0%, transparent 60%),
+      var(--bg-2);
+    border: 1px solid var(--line); border-radius: 12px; padding: 22px 28px;
+  }
+  .hero-mascot { width: 110px; height: 110px; border-radius: 50%; background: var(--bg-3);
+    display: grid; place-items: center; flex-shrink: 0; overflow: hidden;
+    box-shadow: 0 0 0 1px var(--line), 0 0 32px var(--orange-soft);
+  }
+  .hero-mascot img { width: 100%; height: 100%; object-fit: cover; }
+  .hero-text h1 { font-size: 22px; font-weight: 700; letter-spacing: 0.02em; }
+  .hero-text h1 .accent { color: var(--orange); }
+  .hero-text p { color: var(--fg-dim); margin-top: 4px; font-family: var(--mono); font-size: 13px; }
+  .hero-state { margin-left: auto; text-align: right; }
+  .hero-state .lbl { color: var(--fg-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.16em; }
+  .hero-state .val { color: var(--orange); font-size: 26px; font-weight: 700; font-family: var(--mono); }
+
+  /* ---------- Chat ---------- */
+  .chat-wrap { display: flex; flex-direction: column; min-height: 360px; max-height: 560px; }
+  .chat-log { flex: 1; overflow-y: auto; padding: 8px 4px; display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+  .chat-log::-webkit-scrollbar { width: 6px; }
+  .chat-log::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+  .msg { padding: 10px 14px; border-radius: 10px; max-width: 80%; word-wrap: break-word; line-height: 1.45; white-space: pre-wrap; }
+  .msg.user { align-self: flex-end; background: var(--orange); color: #fff; }
+  .msg.agent { align-self: flex-start; background: var(--bg-3); border: 1px solid var(--line); }
+  .msg.sys { align-self: center; font-family: var(--mono); font-size: 11px; color: var(--fg-dim); background: transparent; padding: 4px 8px; }
+  .chat-input { display: flex; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+  .chat-input textarea {
+    flex: 1; background: var(--bg-3); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 10px 12px; resize: none; font: inherit; min-height: 40px; max-height: 120px;
+  }
+  .chat-input textarea:focus { outline: none; border-color: var(--orange); }
+
+  /* ---------- Lists ---------- */
+  ul.bare { list-style: none; }
+  ul.bare li { padding: 5px 0; font-family: var(--mono); font-size: 13px; display: flex; gap: 8px; align-items: center; }
+  ul.bare li .name { color: var(--fg); }
+  ul.bare li .meta { color: var(--fg-dim); font-size: 11px; margin-left: auto; }
+
+  pre.code {
+    background: var(--bg-3); border: 1px solid var(--line); border-radius: 6px;
+    padding: 10px 12px; font-family: var(--mono); font-size: 12px; overflow-x: auto;
+    color: var(--fg-dim);
+  }
+  .events { font-family: var(--mono); font-size: 12px; color: var(--fg-dim); max-height: 220px; overflow-y: auto; padding: 4px; }
+  .events div { padding: 2px 0; border-bottom: 1px dashed var(--line); }
+  .events div .ts { color: var(--orange); margin-right: 8px; }
+
+  footer {
+    padding: 14px 22px; color: var(--fg-dim); font-size: 11px; text-align: center;
+    border-top: 1px solid var(--line); font-family: var(--mono);
+  }
+  footer a { color: var(--orange); text-decoration: none; }
+
+  /* Scoped scrollbar styling for cards */
+  .card *::-webkit-scrollbar { width: 6px; height: 6px; }
+  .card *::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+
+  /* ---------- Tabs (in topbar) ---------- */
+  .tabs { display: flex; gap: 2px; margin-left: 22px; }
+  .tab {
+    background: transparent; color: var(--fg-dim); border: 0; cursor: pointer;
+    padding: 8px 14px; font-size: 13px; font-weight: 500; letter-spacing: 0.04em;
+    border-bottom: 2px solid transparent; transition: all 0.15s; position: relative; top: 1px;
+  }
+  .tab:hover { color: var(--fg); }
+  .tab.active { color: var(--fg); border-bottom-color: var(--orange); }
+
+  /* ---------- Chat reasoning (think block) ---------- */
+  .think {
+    margin-top: 6px; padding: 8px 10px; border-left: 2px solid var(--line);
+    color: var(--fg-dim); font-size: 12px; font-style: italic; line-height: 1.4;
+    white-space: pre-wrap; background: rgba(255,255,255,0.02); border-radius: 0 4px 4px 0;
+  }
+  .think-toggle {
+    display: inline-block; margin-top: 6px; cursor: pointer; color: var(--fg-dim);
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
+    border: 1px solid var(--line); border-radius: 4px; padding: 2px 8px;
+    user-select: none; background: transparent;
+  }
+  .think-toggle:hover { color: var(--orange); border-color: var(--orange); }
+
+  /* ---------- Settings panel ---------- */
+  .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; padding: 22px; }
+  @media (max-width: 900px) { .settings-grid { grid-template-columns: 1fr; } }
+  .settings-grid .card { grid-column: span 1; }
+  .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+  .field label {
+    color: var(--fg-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em;
+  }
+  .field input, .field select, .field textarea {
+    background: var(--bg-3); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px 10px; font-family: var(--mono); font-size: 13px;
+  }
+  .field input:focus, .field select:focus, .field textarea:focus {
+    outline: none; border-color: var(--orange); box-shadow: 0 0 0 3px var(--orange-soft);
+  }
+  .field-row { position: relative; }
+  .field-row .toggle-eye {
+    position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+    background: transparent; border: 0; color: var(--fg-dim); cursor: pointer; padding: 4px;
+  }
+  .field-row .toggle-eye:hover { color: var(--orange); }
+  .field-row .toggle-eye svg { width: 14px; height: 14px; display: block; }
+  .field-row input { padding-right: 32px; width: 100%; }
+  .save-bar {
+    display: flex; gap: 8px; align-items: center; margin-top: 8px; padding-top: 12px;
+    border-top: 1px solid var(--line);
+  }
+  .save-bar .status { color: var(--fg-dim); font-family: var(--mono); font-size: 12px; }
+
+  /* ---------- Flash panel ---------- */
+  .flash-wrap { padding: 22px; max-width: 760px; margin: 0 auto; }
+  .flash-wrap .instructions {
+    background: var(--bg-2); border: 1px solid var(--line); border-radius: 10px;
+    padding: 18px 20px; margin-bottom: 18px;
+  }
+  .flash-wrap .instructions h3 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.16em;
+    color: var(--fg-dim); margin-bottom: 10px;
+  }
+  .flash-wrap ol { padding-left: 20px; line-height: 1.7; font-size: 14px; }
+  .flash-wrap ol li { margin-bottom: 4px; }
+  .flash-wrap code {
+    font-family: var(--mono); background: var(--bg-3); padding: 1px 5px;
+    border-radius: 3px; font-size: 12px; color: var(--orange);
+  }
+  .flash-wrap .warn-box {
+    background: rgba(255, 180, 0, 0.08); border: 1px solid var(--amber); border-radius: 8px;
+    padding: 10px 14px; margin-top: 14px; font-size: 13px; color: var(--amber);
+  }
+  .flash-wrap .install-box {
+    background: var(--bg-2); border: 1px solid var(--line); border-radius: 10px;
+    padding: 28px; text-align: center;
+  }
+  .flash-wrap .install-box esp-web-install-button { --esp-tools-button-color: var(--orange); }
+  .flash-wrap .install-box .fallback {
+    color: var(--fg-dim); font-size: 12px; margin-top: 14px; font-family: var(--mono);
+  }
+  .flash-wrap .install-box .fallback a { color: var(--orange); }
+
+  /* tab panels */
+  .tab-panel { display: none; flex-direction: column; flex: 1; min-height: 0; }
+  .tab-panel.active { display: flex; }
+
+  /* footer for events timestamp */
+  .events-foot {
+    margin-top: 6px; font-family: var(--mono); font-size: 11px; color: var(--fg-dim);
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand">
+    <div class="brand-mark">J</div>
+    <div class="brand-name"><span class="bold">JARVIS</span><span class="accent">NANO</span></div>
+    <div class="brand-tag">Admin</div>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="cockpit" role="tab">Cockpit</button>
+    <button class="tab" data-tab="flash" role="tab">Flash</button>
+    <button class="tab" data-tab="settings" role="tab">Settings</button>
+  </nav>
+  <div class="conn">
+    <span id="connOrb" class="status-orb"></span>
+    <input id="hostInput" type="text" placeholder="esp-claw.local or 192.168.x.x" autocomplete="off">
+    <button id="connectBtn" class="btn primary">Connect</button>
+    <button id="revealBtn" class="icon-btn" title="Show / hide sensitive values">
+      <svg id="iconEyeOff" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+      <svg id="iconEye" style="display:none;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+    </button>
+    <button id="btBtn" class="icon-btn" title="Pair via Bluetooth (Phase 2)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6.5,6.5 17.5,17.5 12,23 12,1 17.5,6.5 6.5,17.5"/></svg>
+    </button>
+  </div>
+</div>
+
+<div id="panel-cockpit" class="tab-panel active">
+<div class="grid">
+  <!-- Hero strip -->
+  <div class="hero">
+    <div class="hero-mascot">
+      <img src="mascot.png" alt="JARVIS mascot" onerror="this.style.display='none'">
+    </div>
+    <div class="hero-text">
+      <h1>The <span class="accent">J.A.R.V.I.S.</span> Voice Companion</h1>
+      <p id="heroSub">Awaiting connection…</p>
+    </div>
+    <div class="hero-state">
+      <div class="lbl">Status</div>
+      <div class="val" id="heroState">OFFLINE</div>
+    </div>
+  </div>
+
+  <!-- System -->
+  <div class="card span-4">
+    <h3><span class="dot"></span>System</h3>
+    <div class="kv">
+      <div class="k">Hostname</div><div class="v" id="sysHostname">—</div>
+      <div class="k">IP</div><div class="v accent" id="sysIp">—</div>
+      <div class="k">Mode</div><div class="v" id="sysMode">—</div>
+      <div class="k">AP SSID</div><div class="v" id="sysApSsid">—</div>
+      <div class="k">AP IP</div><div class="v" id="sysApIp">—</div>
+      <div class="k">Storage</div><div class="v" id="sysStorage">—</div>
+    </div>
+  </div>
+
+  <!-- Wi-Fi -->
+  <div class="card span-4">
+    <h3><span class="dot"></span>Wi-Fi</h3>
+    <div class="kv">
+      <div class="k">STA SSID</div><div class="v" id="wifiSsid">—</div>
+      <div class="k">STA Conn</div><div class="v" id="wifiConn">—</div>
+      <div class="k">AP Active</div><div class="v" id="wifiAp">—</div>
+    </div>
+    <div style="margin-top: 12px;">
+      <button class="btn" onclick="callRestart()">Restart device</button>
+      <button class="btn danger" onclick="rollSession()">New session</button>
+    </div>
+
+    <h3 style="margin-top: 18px;"><span class="dot"></span>Battery</h3>
+    <div class="kv">
+      <div class="k">Voltage</div><div class="v" id="batV">— mV</div>
+      <div class="k">Charge</div><div class="v accent" id="batPct">— %</div>
+      <div class="k">State</div><div class="v" id="batState">no battery wired</div>
+    </div>
+    <div style="height: 8px; background: var(--bg-3); border-radius: 4px; margin-top: 10px; overflow: hidden;">
+      <div id="batBar" style="height: 100%; width: 0%; background: linear-gradient(90deg, var(--orange), var(--amber)); transition: width 0.4s;"></div>
+    </div>
+
+    <h3 style="margin-top: 18px;"><span class="dot"></span>Bluetooth</h3>
+    <div class="kv">
+      <div class="k">Status</div><div class="v" id="btStatus">unpaired (Phase 2)</div>
+      <div class="k">Web BT</div><div class="v" id="btSupport">—</div>
+    </div>
+    <div style="margin-top: 10px;">
+      <button class="btn" id="btnPairInline" onclick="pairBluetooth()">Pair via BLE</button>
+    </div>
+  </div>
+
+  <!-- LLM -->
+  <div class="card span-4">
+    <h3><span class="dot"></span>LLM Provider</h3>
+    <div class="kv">
+      <div class="k">Backend</div><div class="v" id="llmBackend">—</div>
+      <div class="k">Profile</div><div class="v" id="llmProfile">—</div>
+      <div class="k">Model</div><div class="v accent" id="llmModel">—</div>
+      <div class="k">Base URL</div><div class="v" id="llmBase">—</div>
+      <div class="k">Auth</div><div class="v" id="llmAuth">—</div>
+      <div class="k">API key</div><div class="v" id="llmKey">—</div>
+      <div class="k">Timeout</div><div class="v" id="llmTimeout">—</div>
+      <div class="k">Max tokens</div><div class="v" id="llmTokens">—</div>
+    </div>
+  </div>
+
+  <!-- Chat -->
+  <div class="card span-7 chat-wrap">
+    <h3><span class="dot"></span>Chat with the agent</h3>
+    <div id="chatLog" class="chat-log">
+      <div class="msg sys">Connect to a device, then say hello.</div>
+    </div>
+    <div class="chat-input">
+      <textarea id="chatInput" rows="1" placeholder="Type a message — Enter to send, Shift+Enter for newline"></textarea>
+      <button class="btn primary" id="sendBtn">Send</button>
+    </div>
+  </div>
+
+  <!-- Mic + Camera (live sensor feeds) -->
+  <div class="card span-5">
+    <h3><span class="dot"></span>On-board mic <span style="color:var(--fg-dim); margin-left:auto; font-weight:400;" id="micState">awaiting endpoint</span></h3>
+    <div style="position: relative; height: 36px; background: var(--bg-3); border: 1px solid var(--line); border-radius: 6px; overflow: hidden;">
+      <div id="micBar" style="position: absolute; left: 0; top: 0; bottom: 0; width: 0%; background: linear-gradient(90deg, var(--orange), var(--amber)); transition: width 0.08s linear;"></div>
+      <div id="micPeakLine" style="position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--cyan); transition: left 0.4s ease-out;"></div>
+      <div style="position: absolute; inset: 0; display: grid; place-items: center; font-family: var(--mono); font-size: 11px; color: var(--fg-dim); pointer-events: none;" id="micLabel">PDM mic · GPIO41/42 · 16 kHz mono</div>
+    </div>
+    <div class="kv" style="margin-top: 10px;">
+      <div class="k">RMS</div><div class="v" id="micRms">— dB</div>
+      <div class="k">Peak</div><div class="v" id="micPeak">— dB</div>
+      <div class="k">Sample rate</div><div class="v">16000 Hz</div>
+    </div>
+
+    <h3 style="margin-top: 18px;"><span class="dot"></span>On-board camera <span style="color:var(--fg-dim); margin-left:auto; font-weight:400;" id="camState">awaiting endpoint</span></h3>
+    <div style="aspect-ratio: 4/3; background: var(--bg-3); border: 1px solid var(--line); border-radius: 6px; display: grid; place-items: center; overflow: hidden; position: relative;">
+      <img id="camFrame" style="width: 100%; height: 100%; object-fit: cover; display: none;">
+      <div id="camPlaceholder" style="text-align: center; color: var(--fg-dim); font-family: var(--mono); font-size: 12px; padding: 18px;">
+        OV2640 · 2 MP DVP<br>
+        <span style="opacity: 0.6;">camera capability not yet enabled in board_devices.yaml — Phase 2 firmware adds /api/camera/snapshot</span>
+      </div>
+    </div>
+    <div style="margin-top: 10px; display: flex; gap: 8px; align-items: center;">
+      <button class="btn" onclick="snapshotNow()">Capture frame</button>
+      <label style="display: inline-flex; align-items: center; gap: 6px; color: var(--fg-dim); font-size: 12px;">
+        <input type="checkbox" id="camAuto"> auto every 2 s
+      </label>
+    </div>
+  </div>
+
+  <!-- Capabilities -->
+  <div class="card span-5">
+    <h3><span class="dot"></span>Capabilities</h3>
+    <div id="capList"><span class="pill">Connecting…</span></div>
+    <h3 style="margin-top: 18px;"><span class="dot"></span>Lua modules</h3>
+    <div id="modList"><span class="pill">Connecting…</span></div>
+  </div>
+
+  <!-- Files -->
+  <div class="card span-4">
+    <h3><span class="dot"></span>Files (FATFS root)</h3>
+    <ul class="bare" id="fileList"><li class="meta">Connecting…</li></ul>
+  </div>
+
+  <!-- Live event log -->
+  <div class="card span-8">
+    <h3><span class="dot"></span>Live event stream <span style="color:var(--fg-dim); margin-left:auto; font-weight:400;" id="wsState">disconnected</span></h3>
+    <div class="events" id="evLog"><div class="ts">—</div> Awaiting WebSocket events…</div>
+    <div class="events-foot" id="evUpdated">no events yet</div>
+  </div>
+</div>
+</div>
+
+<!-- ===== FLASH TAB ===== -->
+<div id="panel-flash" class="tab-panel">
+  <div class="flash-wrap">
+    <div class="instructions">
+      <h3><span class="dot" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--orange);margin-right:8px;"></span>Install JarvisNano firmware</h3>
+      <p style="color:var(--fg-dim); margin-bottom:12px; font-size:13px;">Flashes the merged 7.6 MB firmware bundle (bootloader + partition table + OTA data + app + storage) directly to your Seeed XIAO ESP32-S3 Sense over WebSerial. No CLI, no esptool — just a USB-C cable.</p>
+      <ol>
+        <li>Hold the <code>BOOT</code> button on the XIAO.</li>
+        <li>Plug the device in via USB-C while still holding <code>BOOT</code>.</li>
+        <li>Release <code>BOOT</code>.</li>
+        <li>Click <strong>Connect</strong> below, pick the <code>/dev/cu.usbmodem*</code> port (or <code>COM*</code> on Windows), and let it install.</li>
+        <li>When done, the device will reboot and broadcast <code>esp-claw-XXXXXX</code> as a Wi-Fi AP. Connect, browse to <a href="onboard.html" style="color:var(--orange);">onboard.html</a>, and run through setup.</li>
+      </ol>
+      <div class="warn-box">
+        <strong>Browser support:</strong> Web Serial only works on Chromium browsers (Chrome, Edge, Brave, Arc, Opera). Safari and Firefox <em>do not</em> support Web Serial — switch browsers if the install button is greyed out.
+      </div>
+    </div>
+    <div class="install-box">
+      <esp-web-install-button manifest="firmware/manifest.json"></esp-web-install-button>
+      <div class="fallback">
+        Button unavailable? Download <a href="firmware/jarvis-xiao-esp32s3-sense.bin">jarvis-xiao-esp32s3-sense.bin</a> and flash with <code>esptool.py --chip esp32s3 write_flash 0 jarvis-xiao-esp32s3-sense.bin</code>.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== SETTINGS TAB ===== -->
+<div id="panel-settings" class="tab-panel">
+  <div class="settings-grid">
+    <div class="card">
+      <h3><span class="dot"></span>Wi-Fi (STA)</h3>
+      <div class="field"><label for="cfg_wifi_ssid">SSID</label>
+        <div class="field-row"><input type="text" id="cfg_wifi_ssid" autocomplete="off"></div>
+      </div>
+      <div class="field"><label for="cfg_wifi_password">Password</label>
+        <div class="field-row">
+          <input type="password" id="cfg_wifi_password" autocomplete="off">
+          <button type="button" class="toggle-eye" data-target="cfg_wifi_password" title="Show / hide password">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3><span class="dot"></span>IM (Telegram)</h3>
+      <div class="field"><label for="cfg_telegram_bot_token">Telegram bot token</label>
+        <div class="field-row">
+          <input type="password" id="cfg_telegram_bot_token" autocomplete="off">
+          <button type="button" class="toggle-eye" data-target="cfg_telegram_bot_token">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="field"><label for="cfg_telegram_allowed">Allowed chat IDs (comma-sep)</label>
+        <div class="field-row"><input type="text" id="cfg_telegram_allowed" autocomplete="off" placeholder="e.g. 12345,67890"></div>
+      </div>
+    </div>
+
+    <div class="card" style="grid-column: span 2;">
+      <h3><span class="dot"></span>LLM Provider</h3>
+      <div class="settings-grid" style="padding:0; grid-template-columns: 1fr 1fr;">
+        <div>
+          <div class="field"><label for="cfg_llm_backend_type">Backend type</label>
+            <select id="cfg_llm_backend_type">
+              <option value="openai">openai</option>
+              <option value="anthropic">anthropic</option>
+              <option value="custom_openai_compatible">custom_openai_compatible</option>
+              <option value="qwen">qwen</option>
+              <option value="ollama">ollama</option>
+            </select>
+          </div>
+          <div class="field"><label for="cfg_llm_profile">Profile</label>
+            <input type="text" id="cfg_llm_profile" autocomplete="off">
+          </div>
+          <div class="field"><label for="cfg_llm_base_url">Base URL</label>
+            <input type="text" id="cfg_llm_base_url" autocomplete="off" placeholder="https://api.openai.com/v1">
+          </div>
+          <div class="field"><label for="cfg_llm_auth_type">Auth type</label>
+            <select id="cfg_llm_auth_type">
+              <option value="bearer">bearer</option>
+              <option value="x-api-key">x-api-key</option>
+              <option value="none">none</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <div class="field"><label for="cfg_llm_model">Model</label>
+            <input type="text" id="cfg_llm_model" autocomplete="off" placeholder="gpt-4o-mini">
+          </div>
+          <div class="field"><label for="cfg_llm_api_key">API key</label>
+            <div class="field-row">
+              <input type="password" id="cfg_llm_api_key" autocomplete="off">
+              <button type="button" class="toggle-eye" data-target="cfg_llm_api_key">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="field"><label for="cfg_llm_timeout_ms">Timeout (ms)</label>
+            <input type="number" id="cfg_llm_timeout_ms" min="500" step="500">
+          </div>
+          <div class="field"><label for="cfg_llm_max_tokens">Max tokens</label>
+            <input type="number" id="cfg_llm_max_tokens" min="64" step="64">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="grid-column: span 2;">
+      <div class="save-bar">
+        <button class="btn primary" id="btnSettingsSave">Save changes</button>
+        <button class="btn" id="btnSettingsReload">Reload from device</button>
+        <button class="btn" onclick="callRestart()">Restart device</button>
+        <span class="status" id="settingsStatus">Connect to a device to load config.</span>
+      </div>
+      <p style="margin-top: 10px; color: var(--fg-dim); font-size: 12px; line-height: 1.5;">
+        Settings save instantly, but several keys (Wi-Fi creds, LLM backend) only take effect after a device restart.
+      </p>
+    </div>
+  </div>
+</div>
+
+<!-- ESP Web Tools (loaded once for the Flash tab) -->
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+
+<footer>
+  JarvisNano admin · open <a href="https://github.com/PascalAI2024/JarvisNano" target="_blank" rel="noopener">PascalAI2024/JarvisNano</a> for source · everything talks straight to the device, no cloud round-trip
+</footer>
+
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const fmtBool = (b, on="online", off="offline") => b ? on : off;
+
+const STATE = {
+  host: localStorage.getItem("jarvis_host") || "esp-claw.local",
+  pollTimer: null,
+  ws: null,
+  chatId: "cockpit-" + Math.random().toString(36).slice(2, 8),
+  demo: new URLSearchParams(location.search).get("demo") === "1",
+  // Sensitive values (SSID/IP/AP-SSID/key) hidden by default; click eye to reveal.
+  // ?demo=1 forces hidden and locks the toggle for clean marketing screenshots.
+  hide: localStorage.getItem("jarvis_hide") !== "0" || (new URLSearchParams(location.search).get("demo") === "1"),
+  raw: {},
+};
+
+function maybeMask(value, kind) {
+  if (!STATE.hide) return value;
+  if (kind === "ssid")     return "••••••••";
+  if (kind === "ip")       return "•••.•••.•••.•••";
+  if (kind === "apssid")   return "esp-claw-••••••";
+  if (kind === "key")      return "••••••••••••••";
+  return value;
+}
+
+function toggleHide() {
+  if (STATE.demo) return; // locked in demo mode
+  STATE.hide = !STATE.hide;
+  localStorage.setItem("jarvis_hide", STATE.hide ? "1" : "0");
+  $("iconEye").style.display = STATE.hide ? "none" : "block";
+  $("iconEyeOff").style.display = STATE.hide ? "block" : "none";
+  $("revealBtn").classList.toggle("on", !STATE.hide);
+  pollStatus();  // re-render with new mask state
+}
+
+$("hostInput").value = STATE.host;
+$("hostInput").addEventListener("keydown", (e) => { if (e.key === "Enter") connect(); });
+$("connectBtn").addEventListener("click", connect);
+$("sendBtn").addEventListener("click", sendChat);
+$("chatInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
+});
+$("revealBtn").addEventListener("click", toggleHide);
+$("btBtn").addEventListener("click", pairBluetooth);
+
+// Apply initial eye state
+$("iconEye").style.display = STATE.hide ? "none" : "block";
+$("iconEyeOff").style.display = STATE.hide ? "block" : "none";
+$("revealBtn").classList.toggle("on", !STATE.hide);
+
+function baseUrl() { return "http://" + STATE.host; }
+function wsUrl() { return "ws://" + STATE.host + "/ws/webim"; }
+
+async function get(path, timeoutMs = 5000) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), timeoutMs);
+  try {
+    const r = await fetch(baseUrl() + path, { signal: c.signal });
+    clearTimeout(t);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return await r.json();
+  } catch (e) {
+    clearTimeout(t);
+    throw e;
+  }
+}
+
+async function post(path, body, timeoutMs = 8000) {
+  // Use text/plain so the request stays a "simple" CORS request and the
+  // browser doesn't fire a preflight OPTIONS the device doesn't handle yet.
+  // The firmware doesn't check content-type — it parses the raw body as JSON.
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), timeoutMs);
+  try {
+    const r = await fetch(baseUrl() + path, {
+      method: "POST", headers: { "content-type": "text/plain;charset=UTF-8" },
+      body: JSON.stringify(body), signal: c.signal,
+    });
+    clearTimeout(t);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return await r.json();
+  } catch (e) { clearTimeout(t); throw e; }
+}
+
+function setOrb(state) {
+  const orb = $("connOrb");
+  orb.classList.remove("live", "warn", "dead");
+  if (state) orb.classList.add(state);
+  $("heroState").textContent = state === "live" ? "ONLINE" : state === "warn" ? "PARTIAL" : "OFFLINE";
+  $("heroSub").textContent = state === "live"
+    ? "Connected to " + STATE.host + " — chat ready, telemetry live."
+    : "Awaiting connection.";
+}
+
+async function pollStatus() {
+  try {
+    const [status, cfg] = await Promise.all([get("/api/status"), get("/api/config")]);
+    setOrb(status.wifi_connected ? "live" : "warn");
+    $("sysHostname").textContent = "esp-claw.local";
+    $("sysIp").textContent = maybeMask(status.ip || "—", "ip");
+    $("sysMode").textContent = status.wifi_mode || "—";
+    $("sysApSsid").textContent = maybeMask(status.ap_ssid || "—", "apssid");
+    $("sysApIp").textContent = status.ap_ip || "—";
+    $("sysStorage").textContent = status.storage_base_path || "—";
+
+    $("wifiSsid").textContent = maybeMask(cfg.wifi_ssid || "(unset)", "ssid");
+    const conn = status.wifi_connected;
+    $("wifiConn").textContent = conn ? "connected" : "disconnected";
+    $("wifiConn").className = "v " + (conn ? "good" : "bad");
+    $("wifiAp").textContent = status.ap_active ? "yes" : "no";
+    $("wifiAp").className = "v " + (status.ap_active ? "warn" : "");
+
+    $("llmBackend").textContent = cfg.llm_backend_type || "(unset)";
+    $("llmProfile").textContent = cfg.llm_profile || "(unset)";
+    $("llmModel").textContent = cfg.llm_model || "(unset)";
+    $("llmBase").textContent = cfg.llm_base_url || "(unset)";
+    $("llmAuth").textContent = cfg.llm_auth_type || "(unset)";
+    const k = cfg.llm_api_key || "";
+    const tail = k ? ("***" + k.slice(-6)) : "(empty)";
+    $("llmKey").textContent = STATE.hide ? maybeMask(tail, "key") : tail;
+    $("llmTimeout").textContent = (cfg.llm_timeout_ms || "—") + " ms";
+    $("llmTokens").textContent = cfg.llm_max_tokens || "—";
+  } catch (e) {
+    setOrb("dead");
+  }
+}
+
+async function loadCaps() {
+  try {
+    const c = await get("/api/capabilities");
+    $("capList").innerHTML = (c.items || []).map(it =>
+      `<span class="pill ${it.default_llm_visible ? "on" : "off"}">${it.display_name}</span>`
+    ).join("");
+  } catch (e) { $("capList").textContent = "—"; }
+  try {
+    const m = await get("/api/lua-modules");
+    $("modList").innerHTML = (m.items || []).map(it =>
+      `<span class="pill on">${it.display_name}</span>`
+    ).join("");
+  } catch (e) { $("modList").textContent = "—"; }
+  try {
+    const f = await get("/api/files");
+    $("fileList").innerHTML = (f.entries || []).map(en =>
+      `<li><span class="name">${en.is_dir ? "📁" : "📄"} ${en.name}</span><span class="meta">${en.is_dir ? "" : (en.size + " B")}</span></li>`
+    ).join("") || "<li class='meta'>(empty)</li>";
+  } catch (e) { $("fileList").textContent = "—"; }
+}
+
+async function pollBattery() {
+  // Battery is wired to ADC on a free GPIO via a 100k/100k divider (Phase 2).
+  // The firmware exposes /api/battery returning {mV, pct, state}. While the
+  // endpoint isn't there yet, this falls back to "no battery wired" gracefully.
+  try {
+    const b = await get("/api/battery", 2500);
+    $("batV").textContent = b.mV ? (b.mV + " mV") : "—";
+    $("batPct").textContent = (b.pct ?? "—") + " %";
+    $("batState").textContent = b.state || "—";
+    $("batBar").style.width = (b.pct ?? 0) + "%";
+  } catch (e) {
+    $("batV").textContent = "— mV";
+    $("batPct").textContent = "— %";
+    $("batState").textContent = "no battery wired";
+    $("batBar").style.width = "0%";
+  }
+
+  // Web Bluetooth capability check
+  $("btSupport").textContent = (navigator.bluetooth ? "supported" : "not supported in this browser");
+  $("btSupport").className = "v " + (navigator.bluetooth ? "good" : "warn");
+}
+
+async function pairBluetooth() {
+  if (!navigator.bluetooth) {
+    appendChat("sys", "Web Bluetooth not available in this browser. Use Chrome / Edge on macOS / Linux / Android.");
+    return;
+  }
+  try {
+    appendChat("sys", "Scanning for nearby JarvisNano devices…");
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: "esp-claw" }, { namePrefix: "JarvisNano" }],
+      optionalServices: ["generic_access", "0000ffe0-0000-1000-8000-00805f9b34fb"],
+    });
+    appendChat("sys", "Selected: " + device.name);
+    $("btStatus").textContent = "selected: " + device.name;
+    $("btStatus").className = "v good";
+    const server = await device.gatt.connect();
+    appendChat("sys", "Connected GATT. (Provisioning service is Phase 2 — coming soon.)");
+    $("btStatus").textContent = "GATT connected";
+  } catch (e) {
+    appendChat("sys", "BLE: " + e.message);
+    $("btStatus").textContent = "pair canceled";
+  }
+}
+
+async function pollMic() {
+  // Phase 2 firmware will expose /api/audio/level returning {rms_db, peak_db, ts}.
+  try {
+    const m = await get("/api/audio/level", 1500);
+    const rms = Math.max(-80, Math.min(0, m.rms_db ?? -80));
+    const pk  = Math.max(-80, Math.min(0, m.peak_db ?? -80));
+    const pct = ((rms + 80) / 80) * 100;
+    const peakPct = ((pk + 80) / 80) * 100;
+    $("micBar").style.width = pct + "%";
+    $("micPeakLine").style.left = peakPct + "%";
+    $("micRms").textContent = rms.toFixed(1) + " dB";
+    $("micPeak").textContent = pk.toFixed(1) + " dB";
+    $("micState").textContent = "live";
+    $("micState").style.color = "var(--green)";
+    $("micLabel").style.opacity = "0.3";
+  } catch {
+    $("micState").textContent = "awaiting endpoint";
+    $("micState").style.color = "var(--fg-dim)";
+  }
+}
+
+async function snapshotNow() {
+  // Phase 2 firmware will expose /api/camera/snapshot returning JPEG bytes.
+  try {
+    const url = baseUrl() + "/api/camera/snapshot?t=" + Date.now();
+    const r = await fetch(url, { method: "GET" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const blob = await r.blob();
+    const obj = URL.createObjectURL(blob);
+    const img = $("camFrame");
+    img.src = obj;
+    img.style.display = "block";
+    $("camPlaceholder").style.display = "none";
+    $("camState").textContent = "frame @ " + new Date().toLocaleTimeString();
+    $("camState").style.color = "var(--green)";
+  } catch (e) {
+    $("camState").textContent = "endpoint missing — Phase 2";
+    $("camState").style.color = "var(--fg-dim)";
+  }
+}
+
+let camAutoTimer = null;
+function ensureCamAuto() {
+  const on = $("camAuto").checked;
+  if (camAutoTimer) { clearInterval(camAutoTimer); camAutoTimer = null; }
+  if (on) camAutoTimer = setInterval(snapshotNow, 2000);
+}
+
+async function callRestart() {
+  if (!confirm("Restart the device?")) return;
+  try { await post("/api/restart", {}); appendChat("sys", "Restart requested. Device will be back in ~10 s."); }
+  catch (e) { appendChat("sys", "Restart failed: " + e.message); }
+}
+
+async function rollSession() {
+  appendChat("sys", "New session marker (chat cleared on device).");
+  $("chatLog").innerHTML = "<div class='msg sys'>New session.</div>";
+  try { await sendChatRaw("/new"); } catch (e) {}
+}
+
+function appendChat(kind, text, opts = {}) {
+  const log = $("chatLog");
+  const d = document.createElement("div");
+  d.className = "msg " + kind;
+  // For agent messages, split <think>...</think> chain-of-thought into a collapsed block.
+  if (kind === "agent" && typeof text === "string" && text.indexOf("<think>") !== -1) {
+    const parts = parseThink(text);
+    if (parts.think) {
+      const reasonId = "rz-" + Math.random().toString(36).slice(2, 8);
+      const visible = document.createElement("div");
+      visible.textContent = parts.body || "(reasoning only — no final answer)";
+      d.appendChild(visible);
+      const toggle = document.createElement("button");
+      toggle.className = "think-toggle";
+      toggle.textContent = "show reasoning";
+      toggle.addEventListener("click", () => {
+        const el = document.getElementById(reasonId);
+        const open = el.style.display !== "none";
+        el.style.display = open ? "none" : "block";
+        toggle.textContent = open ? "show reasoning" : "hide reasoning";
+      });
+      d.appendChild(toggle);
+      const reason = document.createElement("div");
+      reason.id = reasonId;
+      reason.className = "think";
+      reason.style.display = "none";
+      reason.textContent = parts.think;
+      d.appendChild(reason);
+    } else {
+      d.textContent = text;
+    }
+  } else {
+    d.textContent = text;
+  }
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+}
+
+function parseThink(text) {
+  // Returns {think, body}. Strips <think>...</think> tag pairs, accumulates inner text.
+  let think = "";
+  let body = text;
+  const re = /<think>([\s\S]*?)<\/think>/gi;
+  let m;
+  while ((m = re.exec(text)) !== null) think += (think ? "\n\n" : "") + m[1].trim();
+  body = text.replace(re, "").trim();
+  return { think: think.trim(), body };
+}
+
+function appendEvent(payload) {
+  const log = $("evLog");
+  const d = document.createElement("div");
+  const ts = new Date().toLocaleTimeString();
+  d.innerHTML = `<span class="ts">${ts}</span>` + (typeof payload === "string" ? payload : JSON.stringify(payload));
+  log.prepend(d);
+  while (log.children.length > 200) log.lastChild.remove();
+  STATE.lastEventTs = Date.now();
+  refreshEventStamp();
+}
+
+let STAMP_TIMER = null;
+function refreshEventStamp() {
+  const el = $("evUpdated");
+  if (!el) return;
+  if (!STATE.lastEventTs) { el.textContent = "no events yet"; return; }
+  const sec = Math.max(0, Math.floor((Date.now() - STATE.lastEventTs) / 1000));
+  el.textContent = sec < 1 ? "Updated just now" :
+                   sec < 60 ? `Updated ${sec} s ago` :
+                   sec < 3600 ? `Updated ${Math.floor(sec/60)} min ago` :
+                                `Updated ${Math.floor(sec/3600)} h ago`;
+}
+if (!STAMP_TIMER) STAMP_TIMER = setInterval(refreshEventStamp, 1000);
+
+async function sendChat() {
+  const input = $("chatInput");
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = "";
+  appendChat("user", text);
+  try { await sendChatRaw(text); }
+  catch (e) { appendChat("sys", "Send failed: " + e.message); }
+}
+
+async function sendChatRaw(text) {
+  return post("/api/webim/send", { chat_id: STATE.chatId, text });
+}
+
+function openWs() {
+  if (STATE.ws) try { STATE.ws.close(); } catch (e) {}
+  $("wsState").textContent = "connecting…";
+  try {
+    const ws = new WebSocket(wsUrl());
+    STATE.ws = ws;
+    ws.onopen = () => { $("wsState").textContent = "connected"; appendEvent("WebSocket connected: " + wsUrl()); };
+    ws.onclose = () => { $("wsState").textContent = "disconnected"; appendEvent("WebSocket closed"); };
+    ws.onerror = (e) => { $("wsState").textContent = "error"; appendEvent("WebSocket error"); };
+    ws.onmessage = (ev) => {
+      let data = ev.data;
+      try { data = JSON.parse(ev.data); } catch (_) {}
+      appendEvent(data);
+      // Best-effort agent reply detection: anything with a 'text' field gets surfaced in chat.
+      if (data && typeof data === "object" && data.text) {
+        const isUser = data.from === "user" || data.role === "user" || data.source === "web_user";
+        if (!isUser) appendChat("agent", String(data.text));
+      }
+    };
+  } catch (e) { $("wsState").textContent = "error"; }
+}
+
+function connect() {
+  STATE.host = $("hostInput").value.trim() || "esp-claw.local";
+  localStorage.setItem("jarvis_host", STATE.host);
+  if (STATE.pollTimer) clearInterval(STATE.pollTimer);
+  pollStatus(); loadCaps(); pollBattery(); pollMic(); openWs();
+  STATE.pollTimer = setInterval(pollStatus, 4000);
+  setInterval(loadCaps, 30000);
+  setInterval(pollBattery, 8000);
+  setInterval(pollMic, 200);
+  $("camAuto").addEventListener("change", ensureCamAuto);
+}
+
+// ---------- Tab switching ----------
+function activateTab(name) {
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === name));
+  document.querySelectorAll(".tab-panel").forEach(p => p.classList.toggle("active", p.id === "panel-" + name));
+  localStorage.setItem("jarvis_tab", name);
+  if (name === "settings") loadSettingsForm();
+}
+document.querySelectorAll(".tab").forEach(t => {
+  t.addEventListener("click", () => activateTab(t.dataset.tab));
+});
+const hashTab = (location.hash || "").replace("#", "");
+const savedTab = localStorage.getItem("jarvis_tab");
+const initialTab = ["cockpit", "flash", "settings"].includes(hashTab)
+  ? hashTab
+  : (["cockpit", "flash", "settings"].includes(savedTab) ? savedTab : null);
+if (initialTab) activateTab(initialTab);
+window.addEventListener("hashchange", () => {
+  const t = (location.hash || "").replace("#", "");
+  if (["cockpit", "flash", "settings"].includes(t)) activateTab(t);
+});
+
+// ---------- Per-field eye toggles (settings) ----------
+document.querySelectorAll(".toggle-eye").forEach(b => {
+  b.addEventListener("click", () => {
+    const el = document.getElementById(b.dataset.target);
+    if (!el) return;
+    el.type = el.type === "password" ? "text" : "password";
+  });
+});
+
+// ---------- Settings form load/save ----------
+const SETTINGS_FIELDS = [
+  ["wifi_ssid", "cfg_wifi_ssid"],
+  ["wifi_password", "cfg_wifi_password"],
+  ["tg_bot_token", "cfg_telegram_bot_token"],
+  ["tg_allowed_chat_ids", "cfg_telegram_allowed"],
+  ["llm_backend_type", "cfg_llm_backend_type"],
+  ["llm_profile", "cfg_llm_profile"],
+  ["llm_base_url", "cfg_llm_base_url"],
+  ["llm_auth_type", "cfg_llm_auth_type"],
+  ["llm_model", "cfg_llm_model"],
+  ["llm_api_key", "cfg_llm_api_key"],
+  ["llm_timeout_ms", "cfg_llm_timeout_ms"],
+  ["llm_max_tokens", "cfg_llm_max_tokens"],
+];
+
+let SETTINGS_INITIAL = {};
+
+async function loadSettingsForm() {
+  const status = $("settingsStatus");
+  status.textContent = "Loading config from " + STATE.host + "…";
+  status.style.color = "var(--fg-dim)";
+  try {
+    const cfg = await get("/api/config");
+    SETTINGS_INITIAL = {};
+    for (const [key, fieldId] of SETTINGS_FIELDS) {
+      const el = document.getElementById(fieldId);
+      if (!el) continue;
+      const v = cfg[key];
+      if (v === undefined || v === null) { el.value = ""; SETTINGS_INITIAL[key] = ""; continue; }
+      if (Array.isArray(v)) {
+        el.value = v.join(",");
+        SETTINGS_INITIAL[key] = el.value;
+      } else {
+        const s = String(v);
+        // For <select>, append unknown option so any device value round-trips correctly.
+        if (el.tagName === "SELECT" && ![...el.options].some(o => o.value === s)) {
+          const opt = document.createElement("option");
+          opt.value = s; opt.textContent = s;
+          el.appendChild(opt);
+        }
+        el.value = s;
+        SETTINGS_INITIAL[key] = el.value;
+      }
+    }
+    status.textContent = "Loaded. Edit fields then Save.";
+    status.style.color = "var(--green)";
+  } catch (e) {
+    status.textContent = "Failed: " + e.message;
+    status.style.color = "var(--red)";
+  }
+}
+
+async function saveSettingsForm() {
+  const status = $("settingsStatus");
+  const diff = {};
+  for (const [key, fieldId] of SETTINGS_FIELDS) {
+    const el = document.getElementById(fieldId);
+    if (!el) continue;
+    const cur = el.value;
+    if (cur !== (SETTINGS_INITIAL[key] ?? "")) {
+      // numeric coercion for known numeric fields
+      if (key === "llm_timeout_ms" || key === "llm_max_tokens") {
+        diff[key] = cur === "" ? 0 : Number(cur);
+      } else if (key === "tg_allowed_chat_ids") {
+        diff[key] = cur ? cur.split(",").map(s => s.trim()).filter(Boolean) : [];
+      } else {
+        diff[key] = cur;
+      }
+    }
+  }
+  if (Object.keys(diff).length === 0) {
+    status.textContent = "No changes to save.";
+    status.style.color = "var(--fg-dim)";
+    return;
+  }
+  status.textContent = "Saving " + Object.keys(diff).length + " field(s)…";
+  status.style.color = "var(--fg-dim)";
+  try {
+    await post("/api/config", diff);
+    status.textContent = "Saved. Hit Restart device for some keys to take effect.";
+    status.style.color = "var(--green)";
+    Object.assign(SETTINGS_INITIAL, Object.fromEntries(Object.entries(diff).map(([k, v]) =>
+      [k, Array.isArray(v) ? v.join(",") : String(v)])));
+  } catch (e) {
+    status.textContent = "Save failed: " + e.message;
+    status.style.color = "var(--red)";
+  }
+}
+
+$("btnSettingsSave").addEventListener("click", saveSettingsForm);
+$("btnSettingsReload").addEventListener("click", loadSettingsForm);
+
+connect();
+</script>
+</body>
+</html>

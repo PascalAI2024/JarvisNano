@@ -1,7 +1,7 @@
 # Roadmap
 
 <p align="center">
-  <img src="../images/hero-phase2.png" alt="Phase 2 illustration — JarvisRobot with audio amp + speaker" width="700">
+  <img src="../images/hero-phase2.png" alt="Phase 2 illustration — JarvisNano with audio amp + speaker" width="700">
 </p>
 
 ## Phase 1 — Bare board chat + listen ✅

@@ -1,0 +1,15 @@
+{
+  "name": "JarvisNano",
+  "version": "1.0.0",
+  "home_assistant_domain": "jarvisnano",
+  "funding_url": "https://github.com/PascalAI2024/JarvisNano",
+  "new_install_prompt_erase": false,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "jarvis-xiao-esp32s3-sense.bin", "offset": 0 }
+      ]
+    }
+  ]
+}

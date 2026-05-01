@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="images/wordmark.png" alt="JarvisRobot" width="640">
+  <img src="images/wordmark.png" alt="JarvisNano" width="640">
 </p>
 
 <p align="center">
-  <img src="images/hero.png" alt="JarvisRobot Phase 3 — desktop AI agent with round AMOLED" width="900">
+  <img src="images/hero.png" alt="JarvisNano Phase 3 — desktop AI agent with round AMOLED" width="900">
 </p>
 
 <p align="center">
@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/PascalAI2024/JarvisRobot/stargazers"><img src="https://img.shields.io/github/stars/PascalAI2024/JarvisRobot?style=flat-square&color=ff5722" alt="stars"></a>
+  <a href="https://github.com/PascalAI2024/JarvisNano/stargazers"><img src="https://img.shields.io/github/stars/PascalAI2024/JarvisNano?style=flat-square&color=ff5722" alt="stars"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-ff5722?style=flat-square" alt="license"></a>
   <img src="https://img.shields.io/badge/board-XIAO_ESP32--S3_Sense-ff5722?style=flat-square" alt="board">
   <img src="https://img.shields.io/badge/runtime-ESP--Claw-ff5722?style=flat-square" alt="runtime">
@@ -19,14 +19,14 @@
 
 ---
 
-JarvisRobot is a board adaptation + reference build that brings Espressif's
+JarvisNano is a board adaptation + reference build that brings Espressif's
 [ESP-Claw](https://github.com/espressif/esp-claw) "Chat Coding" agent
 framework to the **Seeed Studio XIAO ESP32-S3 Sense** — the smallest
 Wi-Fi/BLE board with an on-board MEMS PDM microphone and an OV2640 camera.
 
 The bare board, plugged into USB-C, gives you:
 - 🎙️ on-device PDM mic capture
-- 💬 LLM-driven chat (OpenAI / Anthropic / **MiniMax-M2** / Qwen / DeepSeek / custom)
+- 💬 LLM-driven chat (OpenAI / Anthropic / **MiniMax-M2.7** / Qwen / DeepSeek / custom)
 - 🧠 dynamic Lua skill loading (no reflash to teach new behaviors)
 - 🔌 MCP server + client over LAN
 - 🛜 self-hosted Wi-Fi provisioning portal on first boot
@@ -38,7 +38,7 @@ Add a `MAX98357A` I²S amp, a 503450 LiPo, and a 1.28" Seeed Round Display, and 
 ## Meet The J.A.R.V.I.S. — Voice Companion
 
 <p align="center">
-  <img src="images/mascot.png" alt="JarvisRobot mascot — chibi character in matte black armor with orange neon trim, holding a microphone" width="320">
+  <img src="images/mascot.png" alt="JarvisNano mascot — chibi character in matte black armor with orange neon trim, holding a microphone" width="320">
 </p>
 
 <p align="center"><em>The 6th member of the <a href="https://ingeniousdigital.com">Ingenious Digital</a> mascot lineup.</em></p>
@@ -63,7 +63,7 @@ flowchart LR
     end
 
     subgraph Cloud
-        LLM[(LLM API<br/>MiniMax-M2 / GPT / Claude)]
+        LLM[(LLM API<br/>MiniMax-M2.7 / GPT / Claude)]
         IM[(Telegram / Web IM)]
     end
 
@@ -110,8 +110,8 @@ This repo:
 You need: Docker, the XIAO Sense, a USB-C cable, and Python 3.
 
 ```bash
-git clone git@github.com:PascalAI2024/JarvisRobot.git
-cd JarvisRobot
+git clone git@github.com:PascalAI2024/JarvisNano.git
+cd JarvisNano
 
 # 1. Bootstrap: clones esp-claw, applies the codegen patch, copies our board files
 ./scripts/bootstrap.sh
@@ -130,6 +130,38 @@ Detailed walk-through in [docs/BUILD.md](docs/BUILD.md).
 
 ---
 
+## Cockpit — browser admin + onboarding + flashing
+
+<p align="center">
+  <img src="images/dashboard/cockpit.png" alt="JarvisNano cockpit dashboard" width="900">
+</p>
+
+`dashboard/index.html` is a single-file vanilla-JS admin that talks straight to the device. Three tabs:
+
+| Tab | What it does |
+| --- | --- |
+| **Cockpit** | Live system telemetry, Wi-Fi + LLM state, mic/camera/battery/Bluetooth tiles, full chat with the agent (with `<think>` reasoning collapsed), capability + Lua module index, FATFS browser, live event stream. |
+| **Flash** | One-click [ESP Web Tools](https://esphome.github.io/esp-web-tools/) flasher — Chrome/Edge users can program a fresh XIAO Sense over USB-C from the browser, no esptool install. |
+| **Settings** | Editable form for every device config field (Wi-Fi, LLM provider, IM credentials). Saves the diff back via `/api/config`. |
+
+There's also [`dashboard/onboard.html`](dashboard/onboard.html) — a 5-step first-boot wizard (Welcome → Wi-Fi → LLM → Test round-trip → Done).
+
+<p align="center">
+  <img src="images/dashboard/flash-tab.png" alt="Flash tab" width="430">
+  <img src="images/dashboard/settings-tab.png" alt="Settings tab" width="430">
+</p>
+
+Open `dashboard/index.html` from any local server (`python3 -m http.server` in `dashboard/`) and point it at `esp-claw.local`. Add `?demo=1` to mask SSIDs/IPs for clean screenshots.
+
+---
+
+## Companion apps
+
+- **[`android/`](android/)** — open-source Kotlin + Jetpack Compose reference companion (in this repo). Cockpit / Chat / Settings / About screens, mDNS discovery, BLE GATT skeleton (Phase 2), Gemma 4 E4B local-LLM interface (Phase 3). See [`android/README.md`](android/README.md).
+- **ZeroChat** — Ingenious Digital's voice-first mobile companion (private). Integrates against the JarvisNano protocol — see [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the contract.
+
+---
+
 ## Verified boot log
 
 ```
@@ -144,7 +176,7 @@ I (24948) claw_core: context_loaded request=1 provider=cap Tools context_kind=to
 I (57968) claw_core: completion request=1 status=done
 ```
 
-LLM round-trip verified end-to-end on hardware (XIAO ESP32-S3R8 / 8 MB octal PSRAM / IDF v5.5.4) with MiniMax-M2 over a custom OpenAI-compatible endpoint.
+LLM round-trip verified end-to-end on hardware (XIAO ESP32-S3R8 / 8 MB octal PSRAM / IDF v5.5.4) with MiniMax-M2.7 over a custom OpenAI-compatible endpoint.
 
 ---
 
@@ -166,10 +198,10 @@ The case is sized to fit the XIAO ESP32-S3 Sense, an audio amp + speaker module 
 
 ```mermaid
 timeline
-    title JarvisRobot phases
+    title JarvisNano phases
     Phase 1 (now) : Bare board chat + listen
                   : PDM mic on-board
-                  : MiniMax-M2 LLM verified
+                  : MiniMax-M2.7 LLM verified
                   : Wi-Fi provisioning portal
                   : Telegram + Web IM
     Phase 2       : MAX98357A I²S amp + 28 mm speaker
@@ -206,15 +238,19 @@ on the ESP32-P4. ESP32-S3, S2, C3 fail to compile.
 ## Layout
 
 ```
-JarvisRobot/
+JarvisNano/
 ├── boards/seeed/xiao_esp32s3_sense/   # 5-file board adaptation
 ├── hardware/enclosure/                # 4 parametric enclosures + drawings
-├── docs/                              # architecture · hardware · build · roadmap
+├── docs/                              # architecture · hardware · build · roadmap · protocol
 ├── images/                            # mascot · wordmark · renders · early concepts
 ├── patches/                           # upstream codegen fix
 ├── scripts/                           # bootstrap.sh · flash.sh
 └── README.md
 ```
+
+**Companion apps:**
+- `android/` — open-source Kotlin + Compose reference companion (in this repo).
+- **ZeroChat** — Ingenious Digital's voice-first companion (separate, private; integration via the [JarvisNano protocol](docs/PROTOCOL.md)).
 
 ---
 
@@ -230,5 +266,5 @@ JarvisRobot/
 - ESP-Claw is inspired by the OpenClaw concept
 
 <p align="center">
-  <img src="images/logo.png" alt="JarvisRobot mark" width="120">
+  <img src="images/logo.png" alt="JarvisNano mark" width="120">
 </p>

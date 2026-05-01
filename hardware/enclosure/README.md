@@ -1,6 +1,6 @@
 # J.A.R.V.I.S. Enclosure — Hardware Design
 
-This directory contains four distinct enclosure concepts for the JarvisRobot desktop AI agent. All four are designed around the same internal component set and share the same Phase 1/Phase 3 upgrade strategy.
+This directory contains four distinct enclosure concepts for the JarvisNano desktop AI agent. All four are designed around the same internal component set and share the same Phase 1/Phase 3 upgrade strategy.
 
 ## Component Assumptions
 

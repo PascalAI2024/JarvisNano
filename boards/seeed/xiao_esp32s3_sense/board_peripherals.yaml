@@ -1,15 +1,13 @@
 version: 1.0.0
 # Peripherals Configuration for Seeed XIAO ESP32-S3 Sense
 #
-# Pin map (chat + listen baseline; touchscreen reserved):
-#   D0/GPIO1  -> rmt_tx       (external WS2812, optional)
-#   D1/GPIO2  -> i2s BCLK     (MAX98357 amp, optional)
-#   D2/GPIO3  -> i2s WS/LRCLK (MAX98357 amp, optional)
-#   D3/GPIO4  -> i2s DOUT     (MAX98357 amp, optional)
-#   D4/GPIO5  -> I2C SDA      (touchscreen / sensors)
-#   D5/GPIO6  -> I2C SCL      (touchscreen / sensors)
-#   GPIO41    -> PDM mic data (on-board MSM261D3526H1CPM)
-#   GPIO42    -> PDM mic clk  (on-board)
+# Pin map (chat + listen + analog speaker via PAM8002A; touchscreen reserved):
+#   D0/GPIO1  -> rmt_tx        (external WS2812, optional)
+#   D3/GPIO4  -> i2s PDM dout  (PAM8002A audio amp, RC-filtered to analog)
+#   D4/GPIO5  -> I2C SDA       (touchscreen / sensors)
+#   D5/GPIO6  -> I2C SCL       (touchscreen / sensors)
+#   GPIO41    -> PDM mic data  (on-board MSM261D3526H1CPM)
+#   GPIO42    -> PDM mic clk   (on-board)
 peripherals:
 
   # Placeholder RMT for an optional external WS2812 (status LED).
@@ -58,24 +56,52 @@ peripherals:
         clk: 42
         din: 41
 
-  # I2S0 standard out — MAX98357A amplifier (optional, install later).
-  # Pins are reserved on free header pads so flashing today with no amp
-  # connected is harmless.
+  # I2S0 PDM TX out -> PAM8002A analog combo amp + 28 mm 4 Ohm speaker.
+  # ESP32-S3 only supports PDM on I2S0 (NOT I2S1), so this peripheral
+  # shares the controller with the on-board mic above (full-duplex PDM).
+  # The mic uses the RX channel on pins 41/42; the speaker uses the TX
+  # channel on pin 4. They never conflict because they target different
+  # channel handles.
+  #
+  # Drive PDM TX on a single GPIO and reconstruct analog with an external
+  # low-pass filter:
+  #
+  #     GPIO4 ---[ 270 ohm ]---+--- PAM8002A IN+
+  #                            |
+  #                          100 nF
+  #                            |
+  #                           GND
+  #
+  # PAM8002A VCC tied to USB 5V rail (or LiPo via the XIAO's BAT pad once
+  # battery is installed). With no amp connected the GPIO toggles harmlessly.
   - name: i2s_audio_out
     type: i2s
     role: master
-    format: std-out
+    format: pdm-out
     config:
-      port: 1
+      port: 0
       sample_rate_hz: 16000
+      clk_src: I2S_CLK_SRC_DEFAULT
       mclk_multiple: 256
+      up_sample_fp: 960
+      up_sample_fs: 441
+      bclk_div: 8
       data_bit_width: 16
       slot_bit_width: I2S_SLOT_BIT_WIDTH_AUTO
       slot_mode: I2S_SLOT_MODE_MONO
-      slot_mask: I2S_STD_SLOT_LEFT
-      ws_width: 16
+      slot_mask: I2S_PDM_SLOT_LEFT
+      data_fmt: "I2S_PDM_DATA_FMT_PCM"
+      sd_prescale: 0
+      sd_scale: I2S_PDM_SIG_SCALING_MUL_4
+      hp_scale: I2S_PDM_SIG_SCALING_MUL_4
+      lp_scale: I2S_PDM_SIG_SCALING_MUL_4
+      sinc_scale: I2S_PDM_SIG_SCALING_MUL_4
+      line_mode: I2S_PDM_TX_ONE_LINE_CODEC
+      hp_en: false
+      hp_cut_off_freq_hz: 35.5
+      sd_dither: 0
+      sd_dither2: 1
       pins:
-        mclk: -1
-        bclk: 2
-        ws: 3
         dout: 4
+      invert_flags:
+        clk_inv: false

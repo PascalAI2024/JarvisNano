@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Ingenious Digital / JarvisNano palette (mirrors the dashboard CSS vars). -->
+    <color name="igd_background">#0A0A0A</color>
+    <color name="igd_surface">#141414</color>
+    <color name="igd_surface_elevated">#1D1D1D</color>
+    <color name="igd_orange">#FF5722</color>
+    <color name="igd_amber">#FFB400</color>
+    <color name="igd_green">#3FCB6F</color>
+    <color name="igd_red">#FF3B3B</color>
+    <color name="igd_cyan">#00B3FF</color>
+    <color name="igd_foreground">#E8E8E8</color>
+    <color name="igd_foreground_dim">#888888</color>
+</resources>

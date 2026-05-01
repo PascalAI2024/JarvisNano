@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The "J" monogram in IGD orange. Sits centered within the 108dp launcher
+     foreground, leaving the standard 18dp safe-zone padding around the edge. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:fillColor="#FF5722"
+        android:pathData="M62,30
+                          L62,68
+                          C62,76 56,82 47,82
+                          C40,82 34,78 32,72
+                          L40,68
+                          C41,71 43,73 46,73
+                          C50,73 53,71 53,67
+                          L53,30
+                          Z" />
+</vector>
