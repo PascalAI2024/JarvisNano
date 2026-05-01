@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600">
+  <rect width="800" height="600" fill="white"/>
+  <rect x="0" y="0" width="800" height="600" fill="none" stroke="#000" stroke-width="0.8"/>
+  <line x1="0" y1="560" x2="800" y2="560" stroke="#000" stroke-width="0.8"/>
+  <text x="10" y="575" font-family="system-ui, sans-serif" font-size="11" font-weight="bold">J.A.R.V.I.S. Enclosure — Concept 4: Radio</text>
+  <text x="10" y="590" font-family="system-ui, sans-serif" font-size="9">All dimensions in mm. Walls 2 mm. Landscape orientation. Wood-fill PLA body. Rear-panel lid. 4x M2 brass inserts in rear wall.</text>
+  <text x="600" y="575" font-family="system-ui, sans-serif" font-size="9">Rev A</text>
+  <text x="600" y="590" font-family="system-ui, sans-serif" font-size="9">Scale: approx 3.8:1</text>
+
+  <!-- FRONT VIEW: 78 x 55 mm (plus knob 10 mm above) => 78*3.8=296.4, 65*3.8=247 -->
+  <text x="50" y="20" font-family="system-ui, sans-serif" font-size="10" font-weight="bold">FRONT VIEW</text>
+  <!-- Main body rect -->
+  <rect x="55" y="60" width="296.4" height="209" fill="none" stroke="#000" stroke-width="0.8"/>
+  <!-- Knob on top-right -->
+  <rect x="270" y="22" width="53.2" height="38" fill="none" stroke="#000" stroke-width="0.6"/>
+  <circle cx="296.6" cy="41" r="26.6" fill="none" stroke="#000" stroke-width="0.6"/>
+  <circle cx="296.6" cy="41" r="7.6" fill="none" stroke="#555" stroke-width="0.4" stroke-dasharray="2,1"/>
+  <text x="274" y="17" font-family="system-ui, sans-serif" font-size="7">status knob dia14 h10</text>
+  <!-- Vertical connector from knob to body -->
+  <line x1="270" y1="60" x2="270" y2="22" stroke="#000" stroke-width="0.4" stroke-dasharray="2,1"/>
+  <line x1="323.4" y1="60" x2="323.4" y2="22" stroke="#000" stroke-width="0.4" stroke-dasharray="2,1"/>
+
+  <!-- Display cutout (left side): 39 mm dia => 148.2 px -->
+  <!-- center X = 55 + 39/2*3.8 = 55+74.1 = 129.1 (+WALL 7.6 + 4*3.8) -->
+  <circle cx="151" cy="164.5" r="74.1" fill="none" stroke="#000" stroke-width="0.6" stroke-dasharray="4,2"/>
+  <circle cx="151" cy="164.5" r="1.5" fill="#000"/>
+  <text x="155" y="167" font-family="system-ui, sans-serif" font-size="7">dia 39</text>
+
+  <!-- Vertical grille slots: right portion -->
+  <!-- 10 slots, 1.5 mm wide, 22 mm tall, 3.5 pitch => slots from x=240 rightward -->
+  <!-- slot w = 5.7 px, h = 83.6 px, pitch = 13.3 px -->
+  <text x="240" y="90" font-family="system-ui, sans-serif" font-size="7">grille (10x vertical slots)</text>
+  <rect x="242" y="100" width="5.7" height="83.6" fill="#ddd" stroke="#000" stroke-width="0.3"/>
+  <rect x="255.3" y="100" width="5.7" height="83.6" fill="#ddd" stroke="#000" stroke-width="0.3"/>
+  <rect x="268.6" y="100" width="5.7" height="83.6" fill="#ddd" stroke="#000" stroke-width="0.3"/>
+  <rect x="281.9" y="100" width="5.7" height="83.6" fill="#ddd" stroke="#000" stroke-width="0.3"/>
+  <rect x="295.2" y="100" width="5.7" height="83.6" fill="#ddd" stroke="#000" stroke-width="0.3"/>
+  <rect x="308.5" y="100" width="5.7" height="83.6" fill="#ddd" stroke="#000" stroke-width="0.3"/>
+  <rect x="321.8" y="100" width="5.7" height="83.6" fill="#ddd" stroke="#000" stroke-width="0.3"/>
+  <rect x="335.1" y="100" width="5.7" height="83.6" fill="#ddd" stroke="#000" stroke-width="0.3"/>
+
+  <!-- USB-C bottom-left below display -->
+  <rect x="62" y="246" width="36.1" height="17.1" fill="#ddd" stroke="#000" stroke-width="0.5"/>
+  <text x="64" y="243" font-family="system-ui, sans-serif" font-size="7">USB-C</text>
+
+  <!-- Mic port -->
+  <circle cx="108" cy="254" r="3.4" fill="none" stroke="#000" stroke-width="0.5"/>
+  <text x="113" y="257" font-family="system-ui, sans-serif" font-size="6">mic</text>
+
+  <!-- Dimension width 78 -->
+  <line x1="55" y1="285" x2="351.4" y2="285" stroke="#000" stroke-width="0.3"/>
+  <line x1="55" y1="280" x2="55" y2="290" stroke="#000" stroke-width="0.3"/>
+  <line x1="351.4" y1="280" x2="351.4" y2="290" stroke="#000" stroke-width="0.3"/>
+  <text x="203" y="297" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle">78</text>
+
+  <!-- Dimension height 55 -->
+  <line x1="365" y1="60" x2="365" y2="269" stroke="#000" stroke-width="0.3"/>
+  <line x1="360" y1="60" x2="370" y2="60" stroke="#000" stroke-width="0.3"/>
+  <line x1="360" y1="269" x2="370" y2="269" stroke="#000" stroke-width="0.3"/>
+  <text x="380" y="168" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle">55</text>
+
+  <!-- TOP VIEW: 78 x 60 mm => 296.4 x 228 -->
+  <text x="420" y="20" font-family="system-ui, sans-serif" font-size="10" font-weight="bold">TOP VIEW</text>
+  <rect x="420" y="35" width="296.4" height="228" fill="none" stroke="#000" stroke-width="0.8"/>
+
+  <!-- Knob footprint on top -->
+  <circle cx="680" cy="75" r="26.6" fill="none" stroke="#000" stroke-width="0.6"/>
+  <circle cx="680" cy="75" r="7.6" fill="none" stroke="#555" stroke-width="0.4" stroke-dasharray="2,1"/>
+  <text x="653" y="30" font-family="system-ui, sans-serif" font-size="7">knob dia14</text>
+
+  <!-- Battery left -->
+  <rect x="427" y="121.6" width="197.6" height="133" fill="none" stroke="#000" stroke-width="0.5" stroke-dasharray="3,2"/>
+  <text x="470" y="190" font-family="system-ui, sans-serif" font-size="7">BATTERY 52x35</text>
+
+  <!-- XIAO front-left -->
+  <rect x="427" y="46" width="79.8" height="66.5" fill="none" stroke="#000" stroke-width="0.5"/>
+  <text x="435" y="80" font-family="system-ui, sans-serif" font-size="7">XIAO 21x17.5</text>
+
+  <!-- AMP+SPK right mid -->
+  <rect x="516.4" y="46" width="190" height="114" fill="none" stroke="#888" stroke-width="0.4" stroke-dasharray="3,2"/>
+  <text x="540" y="105" font-family="system-ui, sans-serif" font-size="7">AMP+SPK 50x30</text>
+
+  <!-- Dim width -->
+  <line x1="420" y1="275" x2="716.4" y2="275" stroke="#000" stroke-width="0.3"/>
+  <line x1="420" y1="270" x2="420" y2="280" stroke="#000" stroke-width="0.3"/>
+  <line x1="716.4" y1="270" x2="716.4" y2="280" stroke="#000" stroke-width="0.3"/>
+  <text x="568" y="287" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle">78</text>
+
+  <!-- Dim depth 60 -->
+  <line x1="728" y1="35" x2="728" y2="263" stroke="#000" stroke-width="0.3"/>
+  <line x1="723" y1="35" x2="733" y2="35" stroke="#000" stroke-width="0.3"/>
+  <line x1="723" y1="263" x2="733" y2="263" stroke="#000" stroke-width="0.3"/>
+  <text x="745" y="152" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle">60</text>
+
+  <!-- SIDE VIEW: 60 x 55 mm => 228 x 209 -->
+  <text x="50" y="325" font-family="system-ui, sans-serif" font-size="10" font-weight="bold">SIDE VIEW (right)</text>
+  <rect x="55" y="340" width="228" height="209" fill="none" stroke="#000" stroke-width="0.8"/>
+
+  <!-- Layer zones -->
+  <rect x="62" y="517" width="214" height="25.7" fill="#f0f0f0" stroke="#000" stroke-width="0.4"/>
+  <text x="120" y="533" font-family="system-ui, sans-serif" font-size="7">BAT 6</text>
+  <rect x="62" y="449" width="214" height="68.4" fill="#e8e8e8" stroke="#000" stroke-width="0.4"/>
+  <text x="120" y="485" font-family="system-ui, sans-serif" font-size="7">AMP+SPKR 18</text>
+  <text x="120" y="400" font-family="system-ui, sans-serif" font-size="7">XIAO 3.5</text>
+
+  <!-- Rear panel indicator -->
+  <rect x="270" y="340" width="13" height="209" fill="#ccc" stroke="#000" stroke-width="0.4"/>
+  <text x="285" y="447" font-family="system-ui, sans-serif" font-size="7">rear lid</text>
+
+  <!-- Dim depth 60 -->
+  <line x1="55" y1="560" x2="283" y2="560" stroke="#000" stroke-width="0.3"/>
+  <line x1="55" y1="555" x2="55" y2="565" stroke="#000" stroke-width="0.3"/>
+  <line x1="283" y1="555" x2="283" y2="565" stroke="#000" stroke-width="0.3"/>
+  <text x="169" y="572" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle">60</text>
+
+  <!-- Dim height 55 -->
+  <line x1="298" y1="340" x2="298" y2="549" stroke="#000" stroke-width="0.3"/>
+  <line x1="293" y1="340" x2="303" y2="340" stroke="#000" stroke-width="0.3"/>
+  <line x1="293" y1="549" x2="303" y2="549" stroke="#000" stroke-width="0.3"/>
+  <text x="313" y="447" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle">55</text>
+
+  <!-- ISOMETRIC -->
+  <text x="420" y="325" font-family="system-ui, sans-serif" font-size="10" font-weight="bold">ISOMETRIC (schematic)</text>
+  <!-- Landscape box — wider than tall -->
+  <polygon points="420,530 620,530 620,430 420,430" fill="none" stroke="#000" stroke-width="0.8"/>
+  <polygon points="420,430 620,430 660,395 460,395" fill="none" stroke="#000" stroke-width="0.8"/>
+  <polygon points="620,530 660,495 660,395 620,430" fill="none" stroke="#000" stroke-width="0.8"/>
+  <!-- Knob on top right -->
+  <ellipse cx="648" cy="390" rx="22" ry="10" fill="none" stroke="#000" stroke-width="0.6"/>
+  <line x1="626" y1="390" x2="628" y2="412" stroke="#000" stroke-width="0.4"/>
+  <line x1="670" y1="390" x2="672" y2="412" stroke="#000" stroke-width="0.4"/>
+  <!-- Display circle on front -->
+  <ellipse cx="487" cy="485" rx="50" ry="50" fill="none" stroke="#000" stroke-width="0.4" stroke-dasharray="3,2"/>
+  <!-- Grille slots on front right -->
+  <line x1="572" y1="445" x2="572" y2="520" stroke="#ccc" stroke-width="4"/>
+  <line x1="581" y1="445" x2="581" y2="520" stroke="#ccc" stroke-width="4"/>
+  <line x1="590" y1="445" x2="590" y2="520" stroke="#ccc" stroke-width="4"/>
+  <line x1="599" y1="445" x2="599" y2="520" stroke="#ccc" stroke-width="4"/>
+  <line x1="608" y1="445" x2="608" y2="520" stroke="#ccc" stroke-width="4"/>
+  <text x="422" y="546" font-family="system-ui, sans-serif" font-size="8">78 x 60 x 55 mm (+10 knob)</text>
+  <text x="422" y="557" font-family="system-ui, sans-serif" font-size="8">4x M2 rear panel | walnut-look + brass face</text>
+</svg>

@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600">
+  <rect width="800" height="600" fill="white"/>
+  <rect x="0" y="0" width="800" height="600" fill="none" stroke="#000" stroke-width="0.8"/>
+  <line x1="0" y1="560" x2="800" y2="560" stroke="#000" stroke-width="0.8"/>
+  <text x="10" y="575" font-family="system-ui, sans-serif" font-size="11" font-weight="bold">J.A.R.V.I.S. Enclosure — Concept 2: Open Cube</text>
+  <text x="10" y="590" font-family="system-ui, sans-serif" font-size="9">All dimensions in mm. Walls 2 mm. FDM: 0.4 mm nozzle, 0.2 mm layer. Material: aluminum-look PLA. Clear PETG lid optional.</text>
+  <text x="600" y="575" font-family="system-ui, sans-serif" font-size="9">Rev A</text>
+  <text x="600" y="590" font-family="system-ui, sans-serif" font-size="9">Scale: approx 3.8:1</text>
+
+  <!-- FRONT VIEW: 76 x 65 mm, scale 3.8 => 288.8 x 247 px -->
+  <text x="50" y="25" font-family="system-ui, sans-serif" font-size="10" font-weight="bold">FRONT VIEW</text>
+  <rect x="55" y="40" width="289" height="247" fill="none" stroke="#000" stroke-width="0.8"/>
+
+  <!-- Hex grille region: left side, approx 30 mm wide -->
+  <!-- 30mm * 3.8 = 114 px wide, 50 mm tall => 190 px, positioned left -->
+  <rect x="62" y="80" width="114" height="190" fill="none" stroke="#555" stroke-width="0.4" stroke-dasharray="2,1"/>
+  <text x="70" y="76" font-family="system-ui, sans-serif" font-size="7">hex grille zone</text>
+  <!-- Draw some hex shapes to suggest grille -->
+  <text x="90" y="180" font-family="system-ui, sans-serif" font-size="22" fill="#ccc" letter-spacing="2">&#x2B22;&#x2B22;&#x2B22;</text>
+  <text x="90" y="200" font-family="system-ui, sans-serif" font-size="22" fill="#ccc" letter-spacing="2">&#x2B22;&#x2B22;&#x2B22;</text>
+  <text x="90" y="220" font-family="system-ui, sans-serif" font-size="22" fill="#ccc" letter-spacing="2">&#x2B22;&#x2B22;&#x2B22;</text>
+
+  <!-- Display cutout: 39 mm dia => 148.2 px, centered right portion -->
+  <!-- center X = 55 + 289 * 0.7 = 55+202 = 257, center Y = 40+247*0.55 = 40+136 = 176 -->
+  <circle cx="257" cy="176" r="74.1" fill="none" stroke="#000" stroke-width="0.6" stroke-dasharray="4,2"/>
+  <circle cx="257" cy="176" r="1.5" fill="#000"/>
+  <text x="261" y="179" font-family="system-ui, sans-serif" font-size="7">dia 39</text>
+
+  <!-- LED bar: 30 mm => 114 px wide, 2 mm tall => 7.6 px -->
+  <rect x="200" y="70" width="114" height="7.6" fill="#ddd" stroke="#000" stroke-width="0.4"/>
+  <text x="205" y="67" font-family="system-ui, sans-serif" font-size="7">LED 30x2</text>
+
+  <!-- M2 hex cap-heads at corners (visible on lid) -->
+  <polygon points="62,47 72,40 82,47 82,54 72,61 62,54" fill="#888" stroke="#000" stroke-width="0.4"/>
+  <polygon points="272,47 282,40 292,47 292,54 282,61 272,54" fill="#888" stroke="#000" stroke-width="0.4"/>
+  <text x="88" y="52" font-family="system-ui, sans-serif" font-size="7">M2 hex cap</text>
+
+  <!-- USB-C bottom -->
+  <rect x="65" y="265" width="36.1" height="17.1" fill="#ddd" stroke="#000" stroke-width="0.5"/>
+  <text x="67" y="262" font-family="system-ui, sans-serif" font-size="7">USB-C</text>
+
+  <!-- Dimensions -->
+  <line x1="55" y1="300" x2="344" y2="300" stroke="#000" stroke-width="0.3"/>
+  <line x1="55" y1="295" x2="55" y2="305" stroke="#000" stroke-width="0.3"/>
+  <line x1="344" y1="295" x2="344" y2="305" stroke="#000" stroke-width="0.3"/>
+  <text x="190" y="312" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle">76</text>
+
+  <line x1="356" y1="40" x2="356" y2="287" stroke="#000" stroke-width="0.3"/>
+  <line x1="351" y1="40" x2="361" y2="40" stroke="#000" stroke-width="0.3"/>
+  <line x1="351" y1="287" x2="361" y2="287" stroke="#000" stroke-width="0.3"/>
+  <text x="370" y="167" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle">65</text>
+
+  <!-- TOP VIEW: 76 x 66 mm depth => 289 x 251 -->
+  <text x="420" y="25" font-family="system-ui, sans-serif" font-size="10" font-weight="bold">TOP VIEW (lid = clear panel)</text>
+  <rect x="420" y="40" width="289" height="251" fill="none" stroke="#000" stroke-width="0.8"/>
+  <!-- Window cutout in lid -->
+  <rect x="443" y="63" width="242" height="205" fill="#e8f4ff" stroke="#000" stroke-width="0.4" stroke-dasharray="3,1"/>
+  <text x="520" y="150" font-family="system-ui, sans-serif" font-size="8" fill="#0055aa">clear window</text>
+
+  <!-- PCB tray outline -->
+  <rect x="430" y="48" width="269" height="98.8" fill="none" stroke="#555" stroke-width="0.5"/>
+  <text x="490" y="100" font-family="system-ui, sans-serif" font-size="7">PCB TRAY (slides out)</text>
+
+  <!-- XIAO footprint on tray -->
+  <rect x="520" y="55" width="79.8" height="66.5" fill="none" stroke="#000" stroke-width="0.5"/>
+  <text x="530" y="90" font-family="system-ui, sans-serif" font-size="7">XIAO</text>
+
+  <!-- Battery -->
+  <rect x="433" y="178" width="197.6" height="113" fill="none" stroke="#000" stroke-width="0.5" stroke-dasharray="3,2"/>
+  <text x="475" y="237" font-family="system-ui, sans-serif" font-size="7">BATTERY 52x35</text>
+
+  <!-- AMP module -->
+  <rect x="430" y="48" width="190" height="114" fill="none" stroke="#888" stroke-width="0.4" stroke-dasharray="2,2"/>
+  <text x="435" y="110" font-family="system-ui, sans-serif" font-size="7">AMP+SPK 50x30</text>
+
+  <!-- Rail lines -->
+  <line x1="420" y1="40" x2="420" y2="291" stroke="#000" stroke-width="1.5"/>
+  <line x1="709" y1="40" x2="709" y2="291" stroke="#000" stroke-width="1.5"/>
+  <text x="715" y="100" font-family="system-ui, sans-serif" font-size="7">rail</text>
+  <text x="415" y="100" font-family="system-ui, sans-serif" font-size="7" text-anchor="end">rail</text>
+
+  <!-- Dim depth 66 -->
+  <line x1="720" y1="40" x2="720" y2="291" stroke="#000" stroke-width="0.3"/>
+  <line x1="715" y1="40" x2="725" y2="40" stroke="#000" stroke-width="0.3"/>
+  <line x1="715" y1="291" x2="725" y2="291" stroke="#000" stroke-width="0.3"/>
+  <text x="735" y="170" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle">66</text>
+
+  <!-- SIDE VIEW -->
+  <text x="50" y="340" font-family="system-ui, sans-serif" font-size="10" font-weight="bold">SIDE VIEW</text>
+  <rect x="55" y="355" width="251" height="247" fill="none" stroke="#000" stroke-width="0.8"/>
+  <!-- Layer zones -->
+  <rect x="62" y="570" width="237" height="22.8" fill="#f0f0f0" stroke="#000" stroke-width="0.4"/>
+  <text x="130" y="584" font-family="system-ui, sans-serif" font-size="7">BAT 6</text>
+  <rect x="62" y="501.6" width="237" height="68.4" fill="#e8e8e8" stroke="#000" stroke-width="0.4"/>
+  <text x="130" y="537" font-family="system-ui, sans-serif" font-size="7">SPKR 18</text>
+  <rect x="62" y="355" width="237" height="11.4" fill="#cccccc" stroke="#000" stroke-width="0.4"/>
+  <text x="130" y="364" font-family="system-ui, sans-serif" font-size="7">TRAY+LID 3</text>
+  <text x="130" y="450" font-family="system-ui, sans-serif" font-size="7">XIAO + tray</text>
+
+  <!-- Dim width 66 -->
+  <line x1="55" y1="610" x2="306" y2="610" stroke="#000" stroke-width="0.3"/>
+  <line x1="55" y1="605" x2="55" y2="615" stroke="#000" stroke-width="0.3"/>
+  <line x1="306" y1="605" x2="306" y2="615" stroke="#000" stroke-width="0.3"/>
+  <text x="180" y="622" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle">66</text>
+  <!-- Dim height 65 -->
+  <line x1="320" y1="355" x2="320" y2="602" stroke="#000" stroke-width="0.3"/>
+  <line x1="315" y1="355" x2="325" y2="355" stroke="#000" stroke-width="0.3"/>
+  <line x1="315" y1="602" x2="325" y2="602" stroke="#000" stroke-width="0.3"/>
+  <text x="334" y="482" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle">65</text>
+
+  <!-- ISOMETRIC -->
+  <text x="420" y="340" font-family="system-ui, sans-serif" font-size="10" font-weight="bold">ISOMETRIC (schematic)</text>
+  <polygon points="430,540 585,540 585,425 430,425" fill="none" stroke="#000" stroke-width="0.8"/>
+  <polygon points="430,425 585,425 630,385 475,385" fill="none" stroke="#000" stroke-width="0.8"/>
+  <polygon points="585,540 630,500 630,385 585,425" fill="none" stroke="#000" stroke-width="0.8"/>
+  <!-- Hex dots on front -->
+  <text x="445" y="500" font-family="system-ui, sans-serif" font-size="16" fill="#aaa">&#x2B22;&#x2B22;</text>
+  <!-- M2 corners -->
+  <circle cx="437" cy="432" r="4" fill="#888" stroke="#000" stroke-width="0.4"/>
+  <circle cx="578" cy="432" r="4" fill="#888" stroke="#000" stroke-width="0.4"/>
+  <circle cx="437" cy="533" r="4" fill="#888" stroke="#000" stroke-width="0.4"/>
+  <circle cx="578" cy="533" r="4" fill="#888" stroke="#000" stroke-width="0.4"/>
+  <!-- Display circle -->
+  <ellipse cx="540" cy="490" rx="52" ry="52" fill="none" stroke="#000" stroke-width="0.4" stroke-dasharray="3,2"/>
+  <text x="432" y="556" font-family="system-ui, sans-serif" font-size="8">76 x 66 x 65 mm</text>
+  <text x="432" y="567" font-family="system-ui, sans-serif" font-size="8">4x M2 cap-head visible | clear lid</text>
+</svg>
