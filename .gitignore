@@ -17,7 +17,12 @@ sdkconfig.ci
 *.swp
 *.swo
 
-# Secrets / local overrides
+# Secrets / local overrides — NEVER commit
 .env
+.env.*
 *.local
+.local/
 secrets.yaml
+*.key
+*.token
+credentials*
