@@ -18,7 +18,13 @@ Brand assets for JarvisNano. Palette matches [Ingenious Digital](https://ingenio
 
 ## Subdirs
 
-- [`igd-rebrand/`](igd-rebrand/) — full source set of the brand-aligned generation pass (mascot variants, all 3 logo concepts, all 3 product hero variants). Keep as masters; the canonical `logo.png` / `wordmark.png` etc. above are copies.
+- [`dashboard/`](dashboard/) — live dashboard screenshots in demo mode (sensitive values masked):
+    - `cockpit.png` — README hero (Cockpit tab with all telemetry tiles populated).
+    - `cockpit-tab.png` — same as cockpit.png; canonical alias.
+    - `flash-tab.png` — ESP Web Tools install panel.
+    - `settings-tab.png` — full editable config form.
+    - `onboard-step1.png` — first-boot wizard welcome step.
+- [`igd-rebrand/`](igd-rebrand/) — full source set of the brand-aligned generation pass (mascot variants, 3 logo concepts, 3 product hero variants, full mascot lineup). Keep as masters; the canonical `logo.png` / `wordmark.png` etc. above are copies.
 - [`enclosure/`](enclosure/) — 8 enclosure concept renders (4 exploded views + 1 cross-section + 3 Phase-3 hero shots) covering Monolith / Cube / Egg / Radio.
 - [`early-concepts/`](early-concepts/) — first-pass non-IGD-aligned renders. Kept for provenance only; don't use in marketing.
 
