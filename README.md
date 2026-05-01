@@ -152,7 +152,7 @@ but those fields are gated by `SOC_I2S_SUPPORTS_PDM_RX_HP_FILTER` — which
 is only set on the ESP32-P4. ESP32-S3, S2, C3, etc. fail to compile.
 
 Patch: [`patches/0001-fix-pdm-rx-hp-filter-cap.patch`](patches/0001-fix-pdm-rx-hp-filter-cap.patch).
-Upstream issue: filed at `espressif/esp-gmf` (link in repo description).
+Upstream issue: [espressif/esp-gmf#44](https://github.com/espressif/esp-gmf/issues/44).
 
 `scripts/bootstrap.sh` applies the patch automatically until upstream merges.
 
