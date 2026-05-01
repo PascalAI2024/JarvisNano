@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600">
+  <rect width="800" height="600" fill="white"/>
+  <!-- Title block -->
+  <rect x="0" y="0" width="800" height="600" fill="none" stroke="#000" stroke-width="0.8"/>
+  <line x1="0" y1="560" x2="800" y2="560" stroke="#000" stroke-width="0.8"/>
+  <text x="10" y="575" font-family="system-ui, sans-serif" font-size="11" font-weight="bold">J.A.R.V.I.S. Enclosure — Concept 1: Monolith</text>
+  <text x="10" y="590" font-family="system-ui, sans-serif" font-size="9">All dimensions in mm. Walls 2 mm. FDM: 0.4 mm nozzle, 0.2 mm layer. Material: PETG or ASA matte charcoal.</text>
+  <text x="600" y="575" font-family="system-ui, sans-serif" font-size="9">Rev A</text>
+  <text x="600" y="590" font-family="system-ui, sans-serif" font-size="9">Scale: approx 4:1 (screen)</text>
+
+  <!-- ===================== FRONT VIEW ===================== -->
+  <text x="50" y="25" font-family="system-ui, sans-serif" font-size="10" font-weight="bold">FRONT VIEW</text>
+  <!-- Outer rectangle 78 x 66 mm, scaled 3.5x => 273 x 231 px -->
+  <!-- Origin at (60, 40) -->
+  <rect x="60" y="40" width="273" height="231" fill="none" stroke="#000" stroke-width="0.8"/>
+  <!-- Corner radius visual note -->
+  <text x="63" y="53" font-family="system-ui, sans-serif" font-size="7" fill="#666">R3</text>
+
+  <!-- LED slit: 40 mm wide x 2.5 mm tall, 10 mm from top => y=75 (40+10*3.5=75), h=8.75 px -->
+  <!-- slit center x = 60+273/2=196.5, slit w=140, slit h=8.75 -->
+  <rect x="126.5" y="75" width="140" height="8.75" fill="#ddd" stroke="#000" stroke-width="0.5"/>
+  <text x="130" y="71" font-family="system-ui, sans-serif" font-size="7">LED slit 40 x 2.5</text>
+
+  <!-- Round display cutout: dia 39 mm, center at Z=25 mm from base => y = 40+231-(25*3.5) = 40+231-87.5 = 183.5 -->
+  <circle cx="196.5" cy="183.5" r="68.25" fill="none" stroke="#000" stroke-width="0.5" stroke-dasharray="4,2"/>
+  <circle cx="196.5" cy="183.5" r="1.5" fill="#000"/>
+  <text x="200" y="186" font-family="system-ui, sans-serif" font-size="7">dia 39</text>
+
+  <!-- USB-C slot: 9.5 x 4.5 mm, near top of front face, XIAO position (top-ish) -->
+  <!-- Z = OH-12 = 54 mm from base => y = 40+231-(54*3.5) = 40+231-189=82 -->
+  <rect x="120" y="82" width="33.25" height="15.75" fill="#ddd" stroke="#000" stroke-width="0.5"/>
+  <text x="122" y="79" font-family="system-ui, sans-serif" font-size="7">USB-C 9.5x4.5</text>
+
+  <!-- Mic port: 1.8 mm dia, 3 mm right of USB-C edge, same Z -->
+  <circle cx="163" cy="89" r="3.15" fill="none" stroke="#000" stroke-width="0.5"/>
+  <text x="166" y="88" font-family="system-ui, sans-serif" font-size="6">mic o1.8</text>
+
+  <!-- Dimension lines — width 78 mm -->
+  <line x1="60" y1="285" x2="333" y2="285" stroke="#000" stroke-width="0.3"/>
+  <line x1="60" y1="280" x2="60" y2="290" stroke="#000" stroke-width="0.3"/>
+  <line x1="333" y1="280" x2="333" y2="290" stroke="#000" stroke-width="0.3"/>
+  <text x="170" y="297" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle">78</text>
+
+  <!-- Dimension lines — height 66 mm -->
+  <line x1="345" y1="40" x2="345" y2="271" stroke="#000" stroke-width="0.3"/>
+  <line x1="340" y1="40" x2="350" y2="40" stroke="#000" stroke-width="0.3"/>
+  <line x1="340" y1="271" x2="350" y2="271" stroke="#000" stroke-width="0.3"/>
+  <text x="358" y="160" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle">66</text>
+
+  <!-- ===================== TOP VIEW ===================== -->
+  <text x="420" y="25" font-family="system-ui, sans-serif" font-size="10" font-weight="bold">TOP VIEW</text>
+  <!-- 78 x 68 mm depth, scaled 3.5x => 273 x 238 -->
+  <rect x="420" y="40" width="273" height="238" fill="none" stroke="#000" stroke-width="0.8"/>
+
+  <!-- Battery outline: 52x35 => 182x122.5 px, centered X, bottom -->
+  <rect x="465" y="155" width="182" height="122.5" fill="none" stroke="#000" stroke-width="0.5" stroke-dasharray="4,2"/>
+  <text x="530" y="220" font-family="system-ui, sans-serif" font-size="7">BATTERY 52x35</text>
+
+  <!-- Speaker module: 50x30 => 175x105 -->
+  <rect x="466" y="45" width="175" height="105" fill="none" stroke="#000" stroke-width="0.5" stroke-dasharray="3,2"/>
+  <text x="490" y="100" font-family="system-ui, sans-serif" font-size="7">AMP+SPK 50x30</text>
+
+  <!-- XIAO: 21x17.5 => 73.5x61.25 px, centered X, top-biased front -->
+  <rect x="520" y="52" width="73.5" height="61.25" fill="none" stroke="#000" stroke-width="0.5"/>
+  <text x="530" y="85" font-family="system-ui, sans-serif" font-size="7">XIAO 21x17.5</text>
+
+  <!-- Dim: depth 68 -->
+  <line x1="705" y1="40" x2="705" y2="278" stroke="#000" stroke-width="0.3"/>
+  <line x1="700" y1="40" x2="710" y2="40" stroke="#000" stroke-width="0.3"/>
+  <line x1="700" y1="278" x2="710" y2="278" stroke="#000" stroke-width="0.3"/>
+  <text x="718" y="163" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle">68</text>
+
+  <!-- ===================== SIDE VIEW (right) ===================== -->
+  <text x="50" y="340" font-family="system-ui, sans-serif" font-size="10" font-weight="bold">SIDE VIEW (right)</text>
+  <!-- 68 x 66 mm => 238 x 231 px -->
+  <rect x="60" y="355" width="238" height="231" fill="none" stroke="#000" stroke-width="0.8"/>
+
+  <!-- Battery layer: 6 mm => 21 px -->
+  <rect x="67" y="559" width="224" height="21" fill="#f0f0f0" stroke="#000" stroke-width="0.5"/>
+  <text x="120" y="573" font-family="system-ui, sans-serif" font-size="7">BAT 6H</text>
+
+  <!-- Speaker layer: 18 mm => 63 px -->
+  <rect x="67" y="496" width="224" height="63" fill="#e8e8e8" stroke="#000" stroke-width="0.5"/>
+  <text x="130" y="530" font-family="system-ui, sans-serif" font-size="7">SPKR 18H</text>
+
+  <!-- XIAO shelf: 3.5 mm => 12.25 px -->
+  <rect x="67" y="402" width="224" height="12.25" fill="#d8d8d8" stroke="#000" stroke-width="0.5"/>
+  <text x="130" y="411" font-family="system-ui, sans-serif" font-size="7">XIAO 3.5H</text>
+
+  <!-- Lid: 2.5 mm => 8.75 px -->
+  <rect x="60" y="355" width="238" height="8.75" fill="#ccc" stroke="#000" stroke-width="0.5"/>
+  <text x="130" y="364" font-family="system-ui, sans-serif" font-size="7">LID 2.5</text>
+
+  <!-- Dim: depth 68 -->
+  <line x1="60" y1="598" x2="298" y2="598" stroke="#000" stroke-width="0.3"/>
+  <line x1="60" y1="593" x2="60" y2="603" stroke="#000" stroke-width="0.3"/>
+  <line x1="298" y1="593" x2="298" y2="603" stroke="#000" stroke-width="0.3"/>
+  <text x="179" y="610" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle">68</text>
+
+  <!-- Dim: height 66 -->
+  <line x1="310" y1="355" x2="310" y2="586" stroke="#000" stroke-width="0.3"/>
+  <line x1="305" y1="355" x2="315" y2="355" stroke="#000" stroke-width="0.3"/>
+  <line x1="305" y1="586" x2="315" y2="586" stroke="#000" stroke-width="0.3"/>
+  <text x="323" y="475" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle">66</text>
+
+  <!-- ===================== ISOMETRIC SKETCH ===================== -->
+  <text x="420" y="340" font-family="system-ui, sans-serif" font-size="10" font-weight="bold">ISOMETRIC (schematic)</text>
+  <!-- Simple isometric box: front face, top face, right side -->
+  <!-- Base point (530, 540) -->
+  <polygon points="530,540 685,540 685,415 530,415" fill="none" stroke="#000" stroke-width="0.8"/>
+  <!-- Top face (parallelogram) -->
+  <polygon points="530,415 685,415 730,370 575,370" fill="none" stroke="#000" stroke-width="0.8"/>
+  <!-- Right side face -->
+  <polygon points="685,540 730,495 730,370 685,415" fill="none" stroke="#000" stroke-width="0.8"/>
+  <!-- LED slit on front -->
+  <rect x="553" y="418" width="100" height="6" fill="#ddd" stroke="#000" stroke-width="0.4"/>
+  <!-- Display circle on front (ellipse for iso) -->
+  <ellipse cx="607" cy="490" rx="50" ry="50" fill="none" stroke="#000" stroke-width="0.4" stroke-dasharray="3,2"/>
+  <!-- USB-C slot -->
+  <rect x="540" y="424" width="25" height="12" fill="#ddd" stroke="#000" stroke-width="0.4"/>
+  <text x="532" y="556" font-family="system-ui, sans-serif" font-size="8">78 x 68 x 66 mm</text>
+  <text x="532" y="567" font-family="system-ui, sans-serif" font-size="8">4x M2 brass insert + cap-head</text>
+</svg>
