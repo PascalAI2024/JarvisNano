@@ -24,6 +24,10 @@ CONFIG_CODEC_DUMMY_SUPPORT=y
 CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT=y
 CONFIG_ESP_VIDEO_ENABLE_DVP_VIDEO_DEVICE=y
 CONFIG_CAMERA_OV2640=y
+# Hardware JPEG @ 640x480, 25 fps. Without an enabled DVP output format
+# the OV2640 driver registers no V4L2 capture mode, so /api/camera/snapshot
+# returns 500 even when the sensor probes successfully.
+CONFIG_CAMERA_OV2640_DVP_JPEG_640X480_25FPS=y
 
 # USB: native USB-C (CDC) for monitor/log over the same cable that powers it.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
