@@ -20,30 +20,28 @@ CONFIG_SPIRAM_SPEED_40M=y
 CONFIG_ESP_BOARD_PERIPH_I2S_SUPPORT=y
 CONFIG_CODEC_DUMMY_SUPPORT=y
 
-# Camera: on-board OV3660 over DVP 8-bit + SCCB on a dedicated I2C bus.
-# IMPORTANT: 2026 production XIAO ESP32-S3 Sense units (Amazon ASIN
-# B0C69FFVHH and likely others) ship with the OV3660 sensor at SCCB
-# address 0x3C, NOT the OV2640 at 0x30 documented in the Seeed wiki.
-# Identified by chip ID 0x3660 read from register 0x300A/0x300B.
-# Pulls in espressif/esp_video and espressif/esp_cam_sensor on first
-# build via lua_module_camera's idf_component.yml.
-CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT=y
-CONFIG_ESP_VIDEO_ENABLE_DVP_VIDEO_DEVICE=y
-CONFIG_CAMERA_OV3660=y
-# Bring-up format: RGB565-BE 640x480 @ 10 fps. We chose RGB565 over the
-# 1280x720 JPEG mode for first-light because RGB565 has the simplest
-# DVP timing requirements — it isolates "is the camera + clocking
-# stable?" from "does the JPEG encoder pipeline work?". The
-# lua_module_camera_service software-encodes RGB565 → JPEG for the
-# /api/camera/snapshot endpoint, so the HTTP path still produces JPEG.
-# Once stable, swap to CONFIG_CAMERA_OV3660_DVP_JPEG_1280X720_12FPS for
-# hardware JPEG and lower CPU.
-CONFIG_CAMERA_OV3660_DVP_RGB565_BE_640X480_10FPS=y
-
-# Disable PSRAM-DMA mode for the camera framebuffer. Default (=y) hangs
-# OV3660's higher-bandwidth pipeline on this board (FB-OVF / LCD_CAM
-# DMA stall). Khangura 2026-02.
-CONFIG_CAMERA_PSRAM_DMA_MODE=n
+# Camera: TEMPORARILY DISABLED.
+# 2026 production XIAO ESP32-S3 Sense units ship with the OV3660 (3MP)
+# sensor at SCCB address 0x3C — NOT the OV2640 (2MP) at 0x30 shown in
+# older Seeed wiki diagrams. Identified by chip ID 0x3660 read from
+# register 0x300A/0x300B.
+#
+# Enabling CONFIG_CAMERA_OV3660 triggers an esp_cam_sensor driver bug
+# where the OV3660's hardware-JPEG output stream is missing the SOI
+# (Start-Of-Image, 0xFFD8) marker — the V4L2 ringbuffer logs hundreds
+# of `E:NO-SOI` per second and the dequeue loop starves the HTTP
+# server, making /api/status hang. Tracking issue:
+#   https://github.com/espressif/esp-video-components/issues/52
+# Khangura's Feb-2026 working write-up uses the legacy esp32-camera
+# driver, not esp_cam_sensor — different code path entirely.
+#
+# To re-enable once the upstream NO-SOI bug is fixed (or after
+# switching to a working driver): flip the next three lines back to y
+# and pick a format from the OV3660 menu. The mDNS / HTTP / Wi-Fi
+# stack is otherwise unaffected by this gate.
+# CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT=n
+# CONFIG_ESP_VIDEO_ENABLE_DVP_VIDEO_DEVICE=n
+# CONFIG_CAMERA_OV3660=n
 
 # USB: native USB-C (CDC) for monitor/log over the same cable that powers it.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
