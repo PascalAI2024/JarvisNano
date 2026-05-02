@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.Icon
@@ -26,6 +27,7 @@ import androidx.navigation.compose.rememberNavController
 import com.ingeniousdigital.jarvisnano.R
 import com.ingeniousdigital.jarvisnano.data.DeviceRepository
 import com.ingeniousdigital.jarvisnano.ui.screens.AboutScreen
+import com.ingeniousdigital.jarvisnano.ui.screens.CameraScreen
 import com.ingeniousdigital.jarvisnano.ui.screens.ChatScreen
 import com.ingeniousdigital.jarvisnano.ui.screens.CockpitScreen
 import com.ingeniousdigital.jarvisnano.ui.screens.SettingsScreen
@@ -33,6 +35,7 @@ import com.ingeniousdigital.jarvisnano.ui.screens.SettingsScreen
 private enum class Destination(val route: String, val labelRes: Int, val icon: ImageVector) {
     Cockpit("cockpit", R.string.nav_cockpit, Icons.Filled.Speed),
     Chat("chat", R.string.nav_chat, Icons.Filled.Chat),
+    Camera("camera", R.string.nav_camera, Icons.Filled.PhotoCamera),
     Settings("settings", R.string.nav_settings, Icons.Filled.Settings),
     About("about", R.string.nav_about, Icons.Filled.Info),
 }
@@ -79,6 +82,7 @@ fun JarvisNanoNavHost(
         ) {
             composable(Destination.Cockpit.route) { CockpitScreen(repository) }
             composable(Destination.Chat.route) { ChatScreen(repository, sessionId) }
+            composable(Destination.Camera.route) { CameraScreen(repository) }
             composable(Destination.Settings.route) { SettingsScreen(repository) }
             composable(Destination.About.route) { AboutScreen() }
         }

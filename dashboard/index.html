@@ -411,12 +411,12 @@
       <div class="k">Sample rate</div><div class="v">16000 Hz</div>
     </div>
 
-    <h3 style="margin-top: 18px;"><span class="dot"></span>On-board camera <span style="color:var(--fg-dim); margin-left:auto; font-weight:400;" id="camState">awaiting endpoint</span></h3>
+    <h3 style="margin-top: 18px;"><span class="dot"></span>On-board camera <span style="color:var(--fg-dim); margin-left:auto; font-weight:400;" id="camState">tap Capture frame</span></h3>
     <div style="aspect-ratio: 4/3; background: var(--bg-3); border: 1px solid var(--line); border-radius: 6px; display: grid; place-items: center; overflow: hidden; position: relative;">
       <img id="camFrame" style="width: 100%; height: 100%; object-fit: cover; display: none;">
       <div id="camPlaceholder" style="text-align: center; color: var(--fg-dim); font-family: var(--mono); font-size: 12px; padding: 18px;">
-        OV2640 · 2 MP DVP<br>
-        <span style="opacity: 0.6;">camera capability not yet enabled in board_devices.yaml — Phase 2 firmware adds /api/camera/snapshot</span>
+        OV2640 · 2 MP DVP · 640×480 JPEG<br>
+        <span style="opacity: 0.6;">tap Capture frame to fetch GET /api/camera/snapshot</span>
       </div>
     </div>
     <div style="margin-top: 10px; display: flex; gap: 8px; align-items: center;">
@@ -796,7 +796,6 @@ async function pollMic() {
 }
 
 async function snapshotNow() {
-  // Phase 2 firmware will expose /api/camera/snapshot returning JPEG bytes.
   try {
     const url = baseUrl() + "/api/camera/snapshot?t=" + Date.now();
     const r = await fetch(url, { method: "GET" });
@@ -810,8 +809,8 @@ async function snapshotNow() {
     $("camState").textContent = "frame @ " + new Date().toLocaleTimeString();
     $("camState").style.color = "var(--green)";
   } catch (e) {
-    $("camState").textContent = "endpoint missing — Phase 2";
-    $("camState").style.color = "var(--fg-dim)";
+    $("camState").textContent = "snapshot failed: " + (e.message || e);
+    $("camState").style.color = "var(--red)";
   }
 }
 
