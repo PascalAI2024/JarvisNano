@@ -17,6 +17,14 @@ sdkconfig.ci
 *.swp
 *.swo
 
+# Local agent / tooling state — Claude Code, Cursor, etc.
+# (may contain absolute paths and personal config)
+.claude/
+.cursor/
+
+# Local diagnostic scratch (firmware logs, support emails, etc.)
+.private/
+
 # Secrets / local overrides — NEVER commit
 .env
 .env.*
