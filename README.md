@@ -52,28 +52,26 @@ Add a **PAM8002A** analog speaker, a 503450 LiPo, and a 1.28" Seeed Round Displa
 
 ```mermaid
 flowchart LR
-    subgraph User
-        U[🧑 You]
-    end
+    U[You]
 
     subgraph XIAO[XIAO ESP32-S3 Sense]
-        MIC[🎙️ PDM mic RX<br/>GPIO41/42<br/>on I²S0]
-        I2S[🔊 PDM-TX speaker<br/>GPIO4 + RC LPF<br/>on I²S0]
-        LED[🟧 User LED<br/>GPIO21]
-        CAM[📷 OV2640<br/>on-board]
-        I2C[🧩 I²C bus<br/>GPIO5/6]
+        MIC[PDM mic RX<br/>GPIO41/42 on I2S0]
+        I2S[PDM-TX speaker<br/>GPIO4 + RC LPF on I2S0]
+        LED[User LED GPIO21]
+        CAM[OV2640 on-board]
+        I2C[I2C bus GPIO5/6]
         CORE[ESP-Claw runtime<br/>Lua + Agent loop]
         WIFI[Wi-Fi STA + AP]
     end
 
-    subgraph Cloud[" Phase 1 — cloud LLM "]
-        LLM[(LLM API<br/>MiniMax-M2.7 / GPT / Claude)]
-        IM[(Telegram / Web IM)]
+    subgraph Cloud[Phase 1 cloud LLM]
+        LLM[LLM API<br/>MiniMax-M2.7 / GPT / Claude]
+        IM[Telegram / Web IM]
     end
 
-    subgraph Future[" Phase 2 / 3 — local + visual "]
-        AMP[PAM8002A combo amp<br/>+ 28 mm speaker + LiPo]
-        SCR[Seeed Round Display<br/>1.28" GC9A01]
+    subgraph Future[Phase 2 / 3 local + visual]
+        AMP[PAM8002A combo amp<br/>+ speaker + LiPo]
+        SCR[Seeed Round Display<br/>1.28in GC9A01]
         BLE[Phone over BLE<br/>Gemma 4 E4B local]
     end
 
@@ -83,8 +81,10 @@ flowchart LR
     CORE -->|prompt + tools| LLM
     LLM -->|reply| CORE
     CORE -->|TTS PDM| I2S
-    I2S -.->|Phase 2| AMP --> U
-    CORE <-->|chat| IM <--> U
+    I2S -.->|Phase 2| AMP
+    AMP --> U
+    CORE <-->|chat| IM
+    IM <--> U
     CORE -->|mDNS http| WIFI
     I2C -.->|Phase 3| SCR
     CORE <-.->|Phase 3| BLE
@@ -214,31 +214,30 @@ The case is sized to fit the XIAO ESP32-S3 Sense, an audio amp + speaker module 
 ```mermaid
 timeline
     title JarvisNano phases
-    Phase 1 (shipped) : Bare board chat + listen
-                      : XIAO ESP32-S3 Sense board adaptation
-                      : Full-duplex PDM on I²S0 (mic + speaker)
-                      : MiniMax-M2.7 cloud LLM verified
-                      : Wi-Fi provisioning portal + Telegram + Web IM
-                      : Status LED heartbeat (GPIO21 Lua job)
-                      : Browser dashboard (Cockpit · Flash · Settings)
-                      : 5-step onboarding wizard
-                      : ESP Web Tools WebSerial flasher
-                      : Public PROTOCOL.md (HTTP + WS + MCP + BLE + LLM)
-                      : Android companion scaffold
-                      : ZeroChat integration PR
-                      : 4 parametric 3D-printable enclosures
-                      : Upstream esp_board_manager codegen PR
-    Phase 2           : PAM8002A analog amp + 28 mm speaker (RC LPF off PDM-TX GPIO4)
-                      : 503450 LiPo + on-board USB-C charger
-                      : Real TTS playback + wake-word
-                      : BLE GATT service (frozen UUIDs in PROTOCOL.md)
-                      : Battery + audio level + camera HTTP endpoints
-    Phase 3           : Seeed 1.28" round AMOLED touchscreen
-                      : LVGL chat UI + animated emote face
-                      : Phone-as-brain Privacy Mode — Gemma 4 E4B on-device via BLE
-    Phase 4           : OV2640 vision tools (describe scene · OCR · find object)
-                      : MCP server exposes desktop sensors
-                      : 3D-printed enclosure released for community remix
+    Phase 1 shipped : Board adaptation
+                    : Full-duplex PDM on I2S0 (mic + speaker)
+                    : MiniMax-M2.7 cloud LLM verified
+                    : Wi-Fi provisioning + Telegram + Web IM
+                    : Status LED heartbeat (GPIO21)
+                    : Browser dashboard (Cockpit / Flash / Settings)
+                    : 5-step onboarding wizard
+                    : ESP Web Tools WebSerial flasher
+                    : Public PROTOCOL.md
+                    : Android companion scaffold
+                    : ZeroChat integration PR
+                    : 4 parametric 3D-printable enclosures
+                    : Upstream esp_board_manager codegen PR
+    Phase 2         : PAM8002A analog amp + 28 mm speaker
+                    : 503450 LiPo + on-board USB-C charger
+                    : Real TTS + wake-word
+                    : BLE GATT service (UUIDs in PROTOCOL.md)
+                    : Battery + audio + camera HTTP endpoints
+    Phase 3         : Seeed 1.28in round AMOLED touchscreen
+                    : LVGL chat UI + animated emote face
+                    : Privacy Mode (phone runs Gemma 4 E4B over BLE)
+    Phase 4         : OV2640 vision tools (describe / OCR)
+                    : MCP server exposes desktop sensors
+                    : Community remix release
 ```
 
 Full detail in [docs/ROADMAP.md](docs/ROADMAP.md).

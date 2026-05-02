@@ -41,8 +41,8 @@ flowchart LR
         direction TB
         D0[D0 GPIO1<br/>WS2812 ext]
         D3X[D3 GPIO4<br/>PDM-TX out]
-        D4[D4 GPIO5<br/>I²C SDA]
-        D5[D5 GPIO6<br/>I²C SCL]
+        D4[D4 GPIO5<br/>I2C SDA]
+        D5[D5 GPIO6<br/>I2C SCL]
         ONBOARD41[GPIO41<br/>PDM mic DATA]
         ONBOARD42[GPIO42<br/>PDM mic CLK]
         LED21[GPIO21<br/>USER LED active-LOW]
@@ -52,21 +52,22 @@ flowchart LR
         MIC[MSM261D3526H1CPM]
     end
 
-    subgraph AMP[Phase 2 — PAM8002A combo + 28 mm 4 Ω speaker]
-        R[270 Ω]
+    subgraph AMP[Phase 2 PAM8002A combo + speaker]
+        R[270 ohm]
         C[100 nF to GND]
         INP[IN+]
     end
 
-    subgraph SCREEN[Phase 3 — Seeed Round Display 1.28&quot;]
-        TSDA[I²C SDA]
-        TSCL[I²C SCL]
+    subgraph SCREEN[Phase 3 Seeed Round Display 1.28in]
+        TSDA[I2C SDA]
+        TSCL[I2C SCL]
     end
 
-    MIC -- PDM CLK --> ONBOARD42
-    MIC -- PDM DATA --> ONBOARD41
-    D3X --> R --> INP
-    R -.- C
+    MIC -->|PDM CLK| ONBOARD42
+    MIC -->|PDM DATA| ONBOARD41
+    D3X --> R
+    R --> INP
+    R --- C
     D4 --> TSDA
     D5 --> TSCL
 ```
@@ -87,10 +88,10 @@ flowchart LR
     subgraph X[XIAO ESP32-S3 Sense]
         V5[5V]
         GND[GND]
-        D3[D3 / GPIO4 — PDM-TX]
+        D3[D3 GPIO4 PDM-TX]
     end
 
-    R[270 Ω resistor]
+    R[270 ohm resistor]
     C[100 nF cap]
 
     subgraph A[PAM8002A combo module]
@@ -98,14 +99,15 @@ flowchart LR
         AGND[GND]
         INP[IN+]
         INN[IN-]
-        SPK[28 mm 4 Ω<br/>speaker dome<br/>on-board]
+        SPK[28 mm speaker dome on-board]
     end
 
     V5 --> VIN
     GND --> AGND
-    D3 --> R --> INP
-    INP -.- C
-    C -.- GND
+    D3 --> R
+    R --> INP
+    INP --- C
+    C --- GND
     INN --> GND
 ```
 
@@ -125,9 +127,9 @@ flowchart LR
     subgraph X[XIAO ESP32-S3 Sense]
         V5[5V]
         GND[GND]
-        D1[D1 / GPIO2 — BCLK]
-        D2[D2 / GPIO3 — WS / LRC]
-        D3[D3 / GPIO4 — DIN]
+        D1[D1 GPIO2 BCLK]
+        D2[D2 GPIO3 WS LRC]
+        D3[D3 GPIO4 DIN]
     end
 
     subgraph A[MAX98357A]
@@ -138,11 +140,11 @@ flowchart LR
         DIN[DIN]
         SPK1[SPK+]
         SPK2[SPK-]
-        GAIN[GAIN — leave floating = 9 dB]
-        SD[SD — leave floating = on]
+        GAIN[GAIN floating = 9 dB]
+        SD[SD floating = on]
     end
 
-    SPKR[(4 Ω 1 W speaker)]
+    SPKR[4 ohm 1W speaker]
 
     V5 --> VIN
     GND --> AGND
