@@ -113,6 +113,8 @@ class DeviceRepository(
 
     suspend fun restart() = client.restart(requireHost())
 
+    suspend fun loadSnapshot(): ByteArray = client.fetchSnapshot(requireHost())
+
     fun openChatSocket(): Flow<WebimEvent> =
         client.openWebimSocket(requireHost())
 

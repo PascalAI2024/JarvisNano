@@ -118,6 +118,20 @@ class DeviceClient(
         awaitClose { socket.close(1000, "client closed") }
     }
 
+    /**
+     * Fetch a single JPEG frame from /api/camera/snapshot.
+     * Throws on non-2xx or empty body. Returned bytes are raw JPEG.
+     */
+    fun fetchSnapshot(host: String): ByteArray {
+        val req = get(host, "/api/camera/snapshot")
+        http.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) error("HTTP ${resp.code} from camera snapshot")
+            val bytes = resp.body?.bytes() ?: error("empty body from camera snapshot")
+            if (bytes.isEmpty()) error("zero-length JPEG from camera snapshot")
+            return bytes
+        }
+    }
+
     // ---- helpers --------------------------------------------------------
 
     private fun get(host: String, path: String) = Request.Builder().url(url(host, path)).get().build()
