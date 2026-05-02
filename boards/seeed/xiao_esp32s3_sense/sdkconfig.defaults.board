@@ -7,14 +7,15 @@ CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 
-# 8 MB octal PSRAM @ 40 MHz. Octal PSRAM at 80 MHz with concurrent
-# LCD_CAM DMA traffic (OV3660 at 1280x720 / 640x480) is unstable on
-# ESP32-S3 — the working community config (Khangura 2026-02) caps it
-# at 40 MHz. Bump back to 80 MHz only if PSRAM bandwidth is a real
-# bottleneck *after* camera capture is verified stable.
+# 8 MB octal PSRAM @ 80 MHz. (Was capped at 40 MHz earlier to stabilize
+# the OV3660 camera path which is now disabled — see CAMERA section
+# below — so we restore full PSRAM bandwidth. Empirically the HTTP
+# server is bandwidth-bound on PSRAM at 40 MHz: serving the 66 KB
+# gzipped dashboard takes 8+ s, so the browser appears to hang. At
+# 80 MHz the same response lands sub-second.)
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
-CONFIG_SPIRAM_SPEED_40M=y
+CONFIG_SPIRAM_SPEED_80M=y
 
 # Audio: PDM in (on-board mic) + I2S std out (placeholder).
 CONFIG_ESP_BOARD_PERIPH_I2S_SUPPORT=y
