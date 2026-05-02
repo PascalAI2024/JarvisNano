@@ -7,43 +7,43 @@ utterance flows through it.
 
 ```mermaid
 flowchart TB
-    subgraph HW[Hardware — XIAO ESP32-S3 Sense]
+    subgraph HW[Hardware XIAO ESP32-S3 Sense]
         MIC[PDM mic<br/>MSM261D3526H1CPM<br/>GPIO41/42]
         OV[OV2640 camera<br/>on-board DVP]
         SPK[PAM8002A amp<br/>+ 28 mm speaker<br/>via GPIO4 + RC LPF]
         LED[On-board user LED<br/>GPIO21 active-low]
-        FLASH[(8 MB QIO flash<br/>@ 80 MHz)]
-        PSRAM[(8 MB octal PSRAM<br/>@ 80 MHz)]
-        USB[USB-Serial-JTAG<br/>USB-C]
-        ANT[Wi-Fi 2.4 GHz<br/>+ BLE 5.0]
+        FLASH[8 MB QIO flash 80 MHz]
+        PSRAM[8 MB octal PSRAM 80 MHz]
+        USB[USB-Serial-JTAG USB-C]
+        ANT[Wi-Fi 2.4 GHz + BLE 5.0]
     end
 
     subgraph IDF[ESP-IDF v5.5]
-        I2S0[i2s_pdm driver<br/>full-duplex on I²S0]
+        I2S0[i2s_pdm driver<br/>full-duplex on I2S0]
         WIFI[wifi_manager<br/>STA + AP fallback]
-        FATFS[FATFS<br/>on storage partition]
-        NETIF[lwip + mDNS<br/>esp-claw.local]
+        FATFS[FATFS on storage partition]
+        NETIF[lwip + mDNS esp-claw.local]
         HTTP[esp_http_server<br/>port 80 + WS /ws/webim]
     end
 
     subgraph BMGR[esp_board_manager codegen]
-        PERIPH[periph cfg<br/>i2c · i2s_audio_in/out · rmt]
-        DEV[device cfg<br/>audio_adc · audio_dac · led_strip]
+        PERIPH[periph cfg<br/>i2c, i2s_audio_in/out, rmt]
+        DEV[device cfg<br/>audio_adc, audio_dac, led_strip]
     end
 
     subgraph CLAW[ESP-Claw runtime]
-        CORE[claw_core<br/>agent loop]
+        CORE[claw_core agent loop]
         ROUTER[claw_event_router<br/>JSON rules at /fatfs/router_rules]
-        SCHED[cap_scheduler<br/>cron-style triggers]
-        MEM[claw_memory<br/>structured RAG]
-        SKILLS[claw_skill<br/>51 skills loaded]
+        SCHED[cap_scheduler cron triggers]
+        MEM[claw_memory structured RAG]
+        SKILLS[claw_skill 51 skills loaded]
         LUARTI[Lua runtime<br/>chat-coding + status_led.lua]
     end
 
     subgraph CAPS[18 capability groups]
-        IM[IM gateways<br/>Telegram · QQ · Feishu · WeChat · Web]
+        IM[IM gateways<br/>Telegram, QQ, Feishu, WeChat, Web]
         MCPC[MCP client]
-        MCPS[MCP server :18791]
+        MCPS[MCP server 18791]
         FILES[files cap]
         TIME[time cap]
         WEB[web search cap]
@@ -51,56 +51,59 @@ flowchart TB
     end
 
     subgraph EXT[External]
-        LLM[(LLM HTTPS API<br/>MiniMax-M2.7 default)]
-        IMSRV[(IM platforms)]
-        MCPNET[(other MCP peers on LAN)]
-        DASH[browser dashboard<br/>+ Android app + ZeroChat]
+        LLM[LLM HTTPS API<br/>MiniMax-M2.7 default]
+        IMSRV[IM platforms]
+        MCPNET[other MCP peers on LAN]
+        DASH[browser dashboard<br/>+ Android + ZeroChat]
     end
 
     MIC --> I2S0
-    I2S0 -- RX channel --> CORE
-    CORE -- TX channel --> I2S0
+    I2S0 --> CORE
+    CORE --> I2S0
     I2S0 --> SPK
     USB --> CORE
-    ANT --> WIFI --> NETIF
+    ANT --> WIFI
+    WIFI --> NETIF
     NETIF --> HTTP
-    FLASH --> FATFS --> CORE
+    FLASH --> FATFS
+    FATFS --> CORE
     PSRAM --> CORE
     BMGR --> CLAW
-    CORE -. drives .-> LED
+    CORE --> LED
     CORE <--> SKILLS
     CORE <--> ROUTER
     CORE <--> SCHED
     CORE <--> MEM
     SKILLS <--> LUARTI
-    LUARTI -. status_led.lua .-> LED
+    LUARTI --> LED
     CORE <--> CAPS
     CAPS <--> EXT
     HTTP <--> DASH
-    NETIF <-.-> EXT
+    NETIF <--> EXT
 ```
 
-## I²S0 full-duplex layout
+## I2S0 full-duplex layout
 
-ESP32-S3 only supports PDM on **I²S0**, so we run mic + speaker as two
+ESP32-S3 only supports PDM on **I2S0**, so we run mic + speaker as two
 separate channels on the same controller:
 
 ```mermaid
 flowchart LR
-    subgraph S3[ESP32-S3 I²S0 controller]
-        RX[RX channel<br/>PDM-RX mode]
-        TX[TX channel<br/>PDM-TX mode<br/>one-line]
+    subgraph S3[ESP32-S3 I2S0 controller]
+        RX[RX channel PDM-RX mode]
+        TX[TX channel PDM-TX one-line]
     end
 
     M[MEMS mic<br/>MSM261D3526H1CPM]
-    R[270 Ω]
+    R[270 ohm]
     C[100 nF to GND]
     A[PAM8002A IN+]
 
-    M -- CLK GPIO42 --> RX
-    M -- DATA GPIO41 --> RX
-    TX -- DOUT GPIO4 --> R --> A
-    R -.- C
+    M -->|CLK GPIO42| RX
+    M -->|DATA GPIO41| RX
+    TX -->|DOUT GPIO4| R
+    R --> A
+    R --- C
 ```
 
 Verified by the boot log:
@@ -123,30 +126,30 @@ sequenceDiagram
     participant LED as Status LED
     participant CR as claw_core
     participant LU as Lua skill
-    participant LLM as LLM API (MiniMax-M2.7)
+    participant LLM as LLM API
     participant TTS as TTS skill
-    participant DAC as PDM-TX → PAM8002A (Phase 2)
+    participant DAC as PDM-TX speaker
     participant DASH as Dashboard / Android / ZeroChat
 
     U->>M: voice
-    M->>CR: 16 kHz mono PCM (I²S0 RX)
-    CR->>LED: state = LISTENING
+    M->>CR: 16 kHz mono PCM on I2S0 RX
+    CR->>LED: state LISTENING
     CR->>CR: VAD + endpointing
     CR->>LLM: STT request (audio bytes)
     LLM-->>CR: transcript
-    CR->>LED: state = THINKING
+    CR->>LED: state THINKING
     CR->>CR: claw_event_router rule match
     CR->>LU: dispatch matched skill
     LU->>LLM: chat completion (tools + memory)
     LLM-->>LU: tool calls + reply
     LU->>CR: execute tool calls
-    CR->>DASH: WebSocket frame (chat bubble)
+    CR->>DASH: WebSocket frame
     DASH-->>U: shown in any connected client
-    CR->>LED: state = SPEAKING
+    CR->>LED: state SPEAKING
     CR->>TTS: synthesize reply
-    TTS-->>DAC: PCM frames (Phase 2)
-    DAC-->>U: speaker audio (Phase 2)
-    CR->>LED: state = IDLE
+    TTS-->>DAC: PCM frames
+    DAC-->>U: speaker audio Phase 2
+    CR->>LED: state IDLE
 ```
 
 ## Status LED state machine
@@ -197,14 +200,14 @@ flowchart TD
     B --> C[octal_psram + flash detect]
     C --> D[heap init + PSRAM pool]
     D --> E[main_task]
-    E --> F[BOARD_MANAGER<br/>I²C · I²S0 PDM-RX + PDM-TX · RMT]
+    E --> F[BOARD_MANAGER<br/>I2C, I2S0 PDM-RX + PDM-TX, RMT]
     F --> G[FATFS mount + skills sync]
-    G --> H[wifi_manager<br/>STA → AP fallback]
+    G --> H[wifi_manager<br/>STA then AP fallback]
     H --> I[claw_event_router<br/>load /fatfs/router_rules/router_rules.json]
     I --> J[cap_scheduler]
-    J --> K[http_server :80<br/>+ WS /ws/webim<br/>+ MCP server :18791]
+    J --> K[http_server port 80<br/>+ WS /ws/webim<br/>+ MCP server 18791]
     K --> L[CLI REPL on USB-Serial-JTAG]
-    L --> M[idle / awaiting LLM creds<br/>OR claw_core ready]
+    L --> M[idle awaiting LLM creds<br/>OR claw_core ready]
 ```
 
 ## File layout (firmware side)
