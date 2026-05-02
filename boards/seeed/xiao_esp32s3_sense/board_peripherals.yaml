@@ -40,6 +40,19 @@ peripherals:
         sda: 5
         scl: 6
 
+  # SCCB I2C bus dedicated to the on-board OV2640 camera. Distinct
+  # peripheral name + I2C port from the user bus above so neither one
+  # disturbs the other. XIAO routes camera SCCB to GPIO40 (SDA) and
+  # GPIO39 (SCL) on a separate pad group.
+  - name: i2c_master_cam
+    type: i2c
+    role: master
+    config:
+      port: 1
+      pins:
+        sda: 40
+        scl: 39
+
   # PDM RX from on-board microphone.
   # XIAO Sense routes the MEMS PDM mic to GPIO41 (data) and GPIO42 (clk).
   - name: i2s_audio_in

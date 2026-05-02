@@ -50,3 +50,44 @@ devices:
     init_skip: true
     peripherals:
       - name: i2s_audio_out
+
+  # On-board OV2640 camera over DVP 8-bit. SCCB rides on a dedicated
+  # I2C bus (i2c_master_cam, port 1) on GPIO40/39 — NOT on the user
+  # I2C (port 0, GPIO5/6) so the touchscreen/sensors stay isolated.
+  # XIAO ESP32-S3 Sense pinout (camera DVP):
+  #   VSYNC=38  HREF=47  PCLK=13  XCLK=10  PWDN=-1  RESET=-1
+  #   D7=48  D6=11  D5=12  D4=14  D3=16  D2=18  D1=17  D0=15
+  - name: camera
+    type: camera
+    sub_type: dvp
+    version: default
+    config:
+      dvp_config:
+        reset_io: -1
+        pwdn_io: -1
+        vsync_io: 38
+        de_io: 47
+        pclk_io: 13
+        xclk_io: 10
+        xclk_freq: 16000000
+        data_width: CAM_CTLR_DATA_WIDTH_8
+        data_io:
+          data_io_0: 15
+          data_io_1: 17
+          data_io_2: 18
+          data_io_3: 16
+          data_io_4: 14
+          data_io_5: 12
+          data_io_6: 11
+          data_io_7: 48
+          data_io_8: -1
+          data_io_9: -1
+          data_io_10: -1
+          data_io_11: -1
+          data_io_12: -1
+          data_io_13: -1
+          data_io_14: -1
+          data_io_15: -1
+    peripherals:
+      - name: i2c_master_cam
+        frequency: 100000

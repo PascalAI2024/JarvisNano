@@ -16,6 +16,15 @@ CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_ESP_BOARD_PERIPH_I2S_SUPPORT=y
 CONFIG_CODEC_DUMMY_SUPPORT=y
 
+# Camera: on-board OV2640 over DVP 8-bit + SCCB on a dedicated I2C bus.
+# Pulls in espressif/esp_video and espressif/esp_cam_sensor on first
+# build via lua_module_camera's idf_component.yml. lua_module_camera
+# is auto-included whenever ESP_BOARD_DEV_CAMERA_SUPPORT is set, so
+# the V4L2 service the HTTP layer reuses is also wired in.
+CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT=y
+CONFIG_ESP_VIDEO_ENABLE_DVP_VIDEO_DEVICE=y
+CONFIG_CAMERA_OV2640=y
+
 # USB: native USB-C (CDC) for monitor/log over the same cable that powers it.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
