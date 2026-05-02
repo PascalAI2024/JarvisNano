@@ -80,11 +80,49 @@ build() {
     log "✓ build complete → $ESP_CLAW_DIR/application/edge_agent/build/edge_agent.bin"
 }
 
+apply_wifi_ps_patch() {
+    local target="$ESP_CLAW_DIR/components/common/wifi_manager/wifi_manager.c"
+    if [ ! -f "$target" ]; then
+        log "wifi_manager.c not found at $target — skipping wifi PS patch"
+        return
+    fi
+    if grep -q "Disable Wi-Fi modem-sleep AFTER association" "$target" 2>/dev/null; then
+        log "wifi PS patch already applied"
+        return
+    fi
+    log "applying patches/0002-wifi-disable-modem-sleep.patch"
+    python3 - <<PY
+import pathlib
+p = pathlib.Path(r"$target")
+s = p.read_text()
+old = (
+    "        s_mode = s_ap_active ? WIFI_MODE_APSTA_OK : s_mode;\n"
+    "        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);\n"
+)
+new = (
+    "        s_mode = s_ap_active ? WIFI_MODE_APSTA_OK : s_mode;\n"
+    "        // Disable Wi-Fi modem-sleep AFTER association — must run here\n"
+    "        // (not at esp_wifi_start) because the new association resets\n"
+    "        // PS to default MIN_MODEM, which delays outbound TCP packets\n"
+    "        // by hundreds of ms and makes /api/camera/snapshot (~50 KB\n"
+    "        // JPEG) un-deliverable to a browser client. Trades ~30 mA\n"
+    "        // idle current for reliable HTTP throughput.\n"
+    "        (void)esp_wifi_set_ps(WIFI_PS_NONE);\n"
+    "        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);\n"
+)
+if old not in s:
+    raise SystemExit(f"could not locate target hunk in {p} — upstream may have changed")
+p.write_text(s.replace(old, new))
+print("patched", p)
+PY
+}
+
 main() {
     mkdir -p "$ROOT/.build_logs"
     clone_or_update_esp_claw
     copy_board
     apply_patch
+    apply_wifi_ps_patch
 
     if [ "${1:-}" = "build" ]; then
         build

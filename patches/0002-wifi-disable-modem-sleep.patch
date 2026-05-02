@@ -1,0 +1,41 @@
+From: Pascal Ledesma <pascal@ingeniousdigital.com>
+Date: 2026-05-02
+Subject: [PATCH] wifi_manager: disable modem-sleep after STA association
+
+With Wi-Fi modem-sleep enabled (the IDF default WIFI_PS_MIN_MODEM),
+outbound TCP packets get delayed by 100-300 ms while the modem
+naps between beacons. For tiny responses (/api/status ~ 200 B) the
+delay is invisible, but for the camera snapshot endpoint a 50 KB
+JPEG is fragmented into many segments and curl times out before
+all of them arrive — http=200 with 0 bytes received in 60s, on a
+loop. Browsers see the same hang.
+
+The fix is one line: call esp_wifi_set_ps(WIFI_PS_NONE) after the
+STA association completes. We pay ~30 mA more idle current in
+exchange for reliable HTTP throughput across all response sizes.
+
+Note: setting PS at esp_wifi_start time does not stick — the
+fresh association resets PS back to the default. Has to run from
+the IP_EVENT_STA_GOT_IP handler.
+
+Patch target:
+  components/common/wifi_manager/wifi_manager.c
+
+---
+diff --git a/components/common/wifi_manager/wifi_manager.c b/components/common/wifi_manager/wifi_manager.c
+--- a/components/common/wifi_manager/wifi_manager.c
++++ b/components/common/wifi_manager/wifi_manager.c
+@@ -261,6 +261,13 @@ static void wifi_event_handler(void *arg,
+         s_retry_count = 0;
+         s_connected = true;
+         s_mode = s_ap_active ? WIFI_MODE_APSTA_OK : s_mode;
++        // Disable Wi-Fi modem-sleep AFTER association — must run here
++        // (not at esp_wifi_start) because the new association resets
++        // PS to default MIN_MODEM, which delays outbound TCP packets
++        // by hundreds of ms and makes /api/camera/snapshot (~50 KB
++        // JPEG) un-deliverable to a browser client. Trades ~30 mA
++        // idle current for reliable HTTP throughput.
++        (void)esp_wifi_set_ps(WIFI_PS_NONE);
+         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+         notify_state_changed(true);
+     }
