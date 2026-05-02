@@ -51,12 +51,24 @@ devices:
     peripherals:
       - name: i2s_audio_out
 
-  # On-board OV2640 camera over DVP 8-bit. SCCB rides on a dedicated
-  # I2C bus (i2c_master_cam, port 1) on GPIO40/39 — NOT on the user
-  # I2C (port 0, GPIO5/6) so the touchscreen/sensors stay isolated.
+  # On-board camera over DVP 8-bit. SCCB rides on a dedicated I2C bus
+  # (i2c_master_cam, port 1) on GPIO40/39 — NOT on the user I2C
+  # (port 0, GPIO5/6) so the touchscreen/sensors stay isolated.
   # XIAO ESP32-S3 Sense pinout (camera DVP):
   #   VSYNC=38  HREF=47  PCLK=13  XCLK=10  PWDN=-1  RESET=-1
   #   D7=48  D6=11  D5=12  D4=14  D3=16  D2=18  D1=17  D0=15
+  #
+  # Sensor: 2026 production XIAO Sense units ship with the OV3660 (3MP)
+  # at SCCB 0x3C, NOT the OV2640 (2MP) at 0x30 shown in older Seeed
+  # wiki diagrams. We enable CONFIG_CAMERA_OV3660 in
+  # sdkconfig.defaults.board accordingly.
+  # XCLK = 20 MHz. The OV3660 esp_cam_sensor reg tables are all named
+  # `20Minput_*` and the header sets OV3660_XCLK_DEFAULT to 20 MHz —
+  # any other input frequency miscalibrates the sensor's PLL and the
+  # LCD_CAM DMA engine watchdog-resets the chip within seconds (boot
+  # loop, USB CDC dies, esptool can't reconnect). Source:
+  # github.com/espressif/esp-video-components ov3660.c hardcoded reg
+  # tables + Khangura's 2026-02 working write-up on this exact board.
   - name: camera
     type: camera
     sub_type: dvp
@@ -69,7 +81,7 @@ devices:
         de_io: 47
         pclk_io: 13
         xclk_io: 10
-        xclk_freq: 16000000
+        xclk_freq: 20000000
         data_width: CAM_CTLR_DATA_WIDTH_8
         data_io:
           data_io_0: 15

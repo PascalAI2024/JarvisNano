@@ -7,27 +7,43 @@ CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 
-# 8 MB octal PSRAM @ 80 MHz.
+# 8 MB octal PSRAM @ 40 MHz. Octal PSRAM at 80 MHz with concurrent
+# LCD_CAM DMA traffic (OV3660 at 1280x720 / 640x480) is unstable on
+# ESP32-S3 — the working community config (Khangura 2026-02) caps it
+# at 40 MHz. Bump back to 80 MHz only if PSRAM bandwidth is a real
+# bottleneck *after* camera capture is verified stable.
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
-CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_SPEED_40M=y
 
 # Audio: PDM in (on-board mic) + I2S std out (placeholder).
 CONFIG_ESP_BOARD_PERIPH_I2S_SUPPORT=y
 CONFIG_CODEC_DUMMY_SUPPORT=y
 
-# Camera: on-board OV2640 over DVP 8-bit + SCCB on a dedicated I2C bus.
+# Camera: on-board OV3660 over DVP 8-bit + SCCB on a dedicated I2C bus.
+# IMPORTANT: 2026 production XIAO ESP32-S3 Sense units (Amazon ASIN
+# B0C69FFVHH and likely others) ship with the OV3660 sensor at SCCB
+# address 0x3C, NOT the OV2640 at 0x30 documented in the Seeed wiki.
+# Identified by chip ID 0x3660 read from register 0x300A/0x300B.
 # Pulls in espressif/esp_video and espressif/esp_cam_sensor on first
-# build via lua_module_camera's idf_component.yml. lua_module_camera
-# is auto-included whenever ESP_BOARD_DEV_CAMERA_SUPPORT is set, so
-# the V4L2 service the HTTP layer reuses is also wired in.
+# build via lua_module_camera's idf_component.yml.
 CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT=y
 CONFIG_ESP_VIDEO_ENABLE_DVP_VIDEO_DEVICE=y
-CONFIG_CAMERA_OV2640=y
-# Hardware JPEG @ 640x480, 25 fps. Without an enabled DVP output format
-# the OV2640 driver registers no V4L2 capture mode, so /api/camera/snapshot
-# returns 500 even when the sensor probes successfully.
-CONFIG_CAMERA_OV2640_DVP_JPEG_640X480_25FPS=y
+CONFIG_CAMERA_OV3660=y
+# Bring-up format: RGB565-BE 640x480 @ 10 fps. We chose RGB565 over the
+# 1280x720 JPEG mode for first-light because RGB565 has the simplest
+# DVP timing requirements — it isolates "is the camera + clocking
+# stable?" from "does the JPEG encoder pipeline work?". The
+# lua_module_camera_service software-encodes RGB565 → JPEG for the
+# /api/camera/snapshot endpoint, so the HTTP path still produces JPEG.
+# Once stable, swap to CONFIG_CAMERA_OV3660_DVP_JPEG_1280X720_12FPS for
+# hardware JPEG and lower CPU.
+CONFIG_CAMERA_OV3660_DVP_RGB565_BE_640X480_10FPS=y
+
+# Disable PSRAM-DMA mode for the camera framebuffer. Default (=y) hangs
+# OV3660's higher-bandwidth pipeline on this board (FB-OVF / LCD_CAM
+# DMA stall). Khangura 2026-02.
+CONFIG_CAMERA_PSRAM_DMA_MODE=n
 
 # USB: native USB-C (CDC) for monitor/log over the same cable that powers it.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
