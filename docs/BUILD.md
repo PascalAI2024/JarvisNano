@@ -173,6 +173,23 @@ pip install --user esp-idf-monitor
 python -m esp_idf_monitor -p /dev/cu.usbmodem*
 ```
 
+## HTTP reachability matrix
+
+When the board boots but the dashboard cannot reach it, test the cheapest
+endpoint first across AP, STA IP, and mDNS:
+
+```bash
+./scripts/http-matrix.sh
+```
+
+By default it probes `192.168.4.1`, `192.168.50.80`, and `esp-claw.local`
+against `/api/health`, `/api/status`, `/api/battery`, `/api/audio/level`, and
+`/api/wifi/scan`. Override the host list when the board has a different STA IP:
+
+```bash
+./scripts/http-matrix.sh 192.168.1.42 esp-claw.local
+```
+
 ## Troubleshooting
 
 | Symptom                                          | Fix                                                                                  |

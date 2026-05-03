@@ -43,6 +43,7 @@ test gap, or follow-up appears.
 - `[x]` Firmware bootstrap applies `OPTIONS /api/*` CORS preflight support.
 - `[x]` Firmware bootstrap applies `/api/battery` not-wired JSON stub.
 - `[x]` Firmware bootstrap applies `/api/wifi/scan` for onboarding AP discovery.
+- `[x]` Firmware bootstrap applies `/api/health` as a cheap AP/STA/mDNS reachability probe.
 - `[x]` Firmware bootstrap gates the HTTP camera route when the Lua camera module is not built.
 - `[x]` Firmware bootstrap copies JarvisNano Lua scripts and router rules into the FATFS image before each build.
 - `[x]` Firmware bootstrap disables the heap-heavy serial CLI on the XIAO build; USB serial logs still work.
@@ -78,10 +79,12 @@ test gap, or follow-up appears.
 - `[x]` Boot: services reach Wi-Fi/FATFS/router/scheduler/Lua/MCP/Web IM, publish startup, and return from `app_main()`.
 - `[x]` Physical LED: native GPIO21 task starts after `app_claw_start()` and logs `Native status LED on gpio 21 active_low=1`; heartbeat is non-fatal if allocation fails.
 - `[x]` Dashboard: `http://127.0.0.1:8000/index.html` opens in the Codex in-app browser.
-- `[~]` HTTP reachability: isolate why Mac curls to `192.168.50.80` time out despite ARP resolution; after the 2026-05-03 flash, `/api/status`, `/api/battery`, and `/api/camera/snapshot` still timed out from macOS.
+- `[~]` HTTP reachability: isolate why Mac curls to `192.168.50.80` time out despite ARP resolution; after the 2026-05-03 health-route flash, `/api/health`, `/api/status`, `/api/battery`, `/api/audio/level`, and `/api/wifi/scan` still timed out from macOS, while `esp-claw.local` resolution also timed out.
 - `[ ]` Test HTTP from the device AP path at `192.168.4.1` to separate STA LAN issues from server issues.
 - `[ ]` Test HTTP from another client on the same Wi-Fi network to rule out macOS routing/firewall behavior.
 - `[~]` Capture serial logs during each failed curl and add the observed HTTPD/socket errors to this file; the post-flash boot log proves HTTPD starts, but macOS curl still timed out before a useful request log appeared.
+- `[x]` Add a repeatable `scripts/http-matrix.sh` probe for AP, STA IP, and `esp-claw.local` covering `/api/health`, `/api/status`, battery, audio level, and Wi-Fi scan.
+- `[~]` Probe `/api/health` first on AP, STA IP, and `esp-claw.local`; STA IP and mDNS failed from macOS after the 2026-05-03 flash, AP path and second-client path are still pending.
 - `[ ]` Verify final response bodies for `/api/status`, `/api/config`, `/api/battery`, `/api/audio/level`, and `/api/wifi/scan`.
 - `[ ]` Verify normal API responses include `Access-Control-Allow-Origin: *`, not only `OPTIONS /api/*`.
 - `[~]` Confirm dashboard polling does not starve or wedge the HTTP server when camera auto-refresh is enabled; post-flash serial logs showed repeated `/api/camera/snapshot` 405/500 responses from an active browser session, while a fresh dashboard reload disables auto-refresh after gated/pending camera failures.
@@ -128,8 +131,8 @@ test gap, or follow-up appears.
 - `[ ]` Add unit tests for `DeviceClient`, config patch typing, discovery/repository state, and status polling recovery.
 - `[ ]` Add instrumented smoke tests for permissions and navigation.
 - `[x]` Add Android acceptance checklist: sync, build, install, grant BLE permissions, scan, connect, missing-service diagnostic, HTTP status/config, chat, camera failure message.
-- `[ ]` Harden mDNS discovery so it verifies the resolved host with `GET /api/status`, instead of trusting the first `_http._tcp.local.` `esp-claw*` result.
-- `[ ]` Fix repository polling recovery: with responses `200 -> timeout -> 200`, the app should surface failure and then return to connected without an app restart.
+- `[x]` Harden mDNS discovery so it verifies the resolved host with `GET /api/status`, instead of trusting the first `_http._tcp.local.` `esp-claw*` result.
+- `[x]` Fix repository polling recovery: with responses `200 -> timeout -> 200`, the app surfaces failure and then returns to connected on the next successful poll without an app restart.
 - `[ ]` Preserve config JSON types when editing settings; boolean/number/string values must round-trip without type drift and unchanged fields should be omitted.
 - `[ ]` Implement GATT characteristic discovery state in UI after firmware service lands.
 - `[ ]` Implement a serialized GATT operation queue for MTU request, service validation, characteristic validation, reads, writes, and descriptor writes.
@@ -189,7 +192,7 @@ test gap, or follow-up appears.
 ## Wave 9: Protocol, Security, And Client Contract
 
 - `[x]` Canonical BLE UUIDs are frozen in `docs/PROTOCOL.md`.
-- `[x]` HTTP endpoint matrix includes Phase-2 `/api/audio/level`, `/api/battery`, `/api/wifi/scan`, camera snapshot, and preflight.
+- `[x]` HTTP endpoint matrix includes Phase-2 `/api/health`, `/api/audio/level`, `/api/battery`, `/api/wifi/scan`, camera snapshot, and preflight.
 - `[ ]` Add explicit HTTP error schema for unavailable hardware, timeouts, and gated features.
 - `[ ]` Add BLE packet framing details: sequence number, chunk duration, content type, backpressure, and error recovery.
 - `[ ]` Add lifecycle diagrams for Wi-Fi mode and BLE Privacy Mode.
@@ -217,7 +220,7 @@ test gap, or follow-up appears.
 - Firmware builds from a clean checkout with `./scripts/bootstrap.sh build`.
 - Firmware flashes with a documented command and boots without OOM/reboot loops.
 - Dashboard opens at `http://127.0.0.1:8000/index.html` without console syntax errors.
-- HTTP `/api/status`, `/api/config`, `/api/battery`, `/api/audio/level`, `/api/wifi/scan`, and browser preflight behavior are verified on the same client network path the dashboard will use.
+- HTTP `/api/health`, `/api/status`, `/api/config`, `/api/battery`, `/api/audio/level`, `/api/wifi/scan`, and browser preflight behavior are verified on the same client network path the dashboard will use.
 - Android build command is documented and verified.
 - Phone can discover the robot over BLE and either connect to the Phase-2 service or show a clear missing-service diagnostic.
 - Firmware BLE GATT exposes the canonical service and four characteristics.

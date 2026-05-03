@@ -537,6 +537,84 @@ print("patched", status)
 PY
 }
 
+apply_http_health_patch() {
+    local status="$ESP_CLAW_DIR/application/edge_agent/components/http_server/http_server_status_api.c"
+    if [ ! -f "$status" ]; then
+        log "http status route source not found — skipping health patch"
+        return
+    fi
+    if grep -q "/api/health" "$status" 2>/dev/null; then
+        log "HTTP health route patch already applied"
+        return
+    fi
+    log "applying patches/0008-http-health-route.patch"
+    python3 - <<PY
+import pathlib
+
+status = pathlib.Path(r"$status")
+s = status.read_text()
+
+include_anchor = '#include "http_server_priv.h"\n'
+if '#include "esp_heap_caps.h"' not in s:
+    if include_anchor not in s:
+        raise SystemExit(f"could not locate health include insertion point in {status}")
+    s = s.replace(
+        include_anchor,
+        include_anchor + '\n#include "esp_heap_caps.h"\n#include "esp_timer.h"\n',
+        1,
+    )
+
+helper_anchor = "static esp_err_t status_handler(httpd_req_t *req)\n{\n"
+health_handler = (
+    "static esp_err_t health_handler(httpd_req_t *req)\n"
+    "{\n"
+    "    static uint32_t s_health_requests;\n"
+    "    http_server_ctx_t *ctx = http_server_ctx();\n"
+    "    http_server_wifi_status_t status = {0};\n"
+    "    bool wifi_status_ok = false;\n"
+    "    if (ctx->services.get_wifi_status) {\n"
+    "        wifi_status_ok = (ctx->services.get_wifi_status(&status) == ESP_OK);\n"
+    "    }\n"
+    "\n"
+    "    cJSON *root = cJSON_CreateObject();\n"
+    "    if (!root) {\n"
+    "        httpd_resp_send_500(req);\n"
+    "        return ESP_ERR_NO_MEM;\n"
+    "    }\n"
+    "\n"
+    "    cJSON_AddBoolToObject(root, \"ok\", true);\n"
+    "    cJSON_AddNumberToObject(root, \"uptime_ms\", (double)(esp_timer_get_time() / 1000));\n"
+    "    cJSON_AddNumberToObject(root, \"free_heap\", heap_caps_get_free_size(MALLOC_CAP_8BIT));\n"
+    "    cJSON_AddNumberToObject(root, \"min_free_heap\", heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));\n"
+    "    cJSON_AddNumberToObject(root, \"requests\", ++s_health_requests);\n"
+    "    cJSON_AddBoolToObject(root, \"wifi_status_ok\", wifi_status_ok);\n"
+    "    http_server_json_add_string(root, \"wifi_mode\", status.wifi_mode);\n"
+    "    http_server_json_add_string(root, \"ip\", status.ip);\n"
+    "    http_server_json_add_string(root, \"ap_ip\", status.ap_ip);\n"
+    "    return http_server_send_json_response(req, root);\n"
+    "}\n"
+    "\n"
+)
+if "health_handler" not in s:
+    if helper_anchor not in s:
+        raise SystemExit(f"could not locate health handler insertion point in {status}")
+    s = s.replace(helper_anchor, health_handler + helper_anchor, 1)
+
+route_anchor = '        { .uri = "/api/status", .method = HTTP_GET, .handler = status_handler },\n'
+if '"/api/health"' not in s:
+    if route_anchor not in s:
+        raise SystemExit(f"could not locate health route table point in {status}")
+    s = s.replace(
+        route_anchor,
+        '        { .uri = "/api/health", .method = HTTP_GET, .handler = health_handler },\n' + route_anchor,
+        1,
+    )
+
+status.write_text(s)
+print("patched", status)
+PY
+}
+
 apply_native_status_led_patch() {
     local main_c="$ESP_CLAW_DIR/application/edge_agent/main/main.c"
     if [ ! -f "$main_c" ]; then
@@ -675,6 +753,7 @@ main() {
     apply_http_phase2_patch
     apply_http_camera_gate_patch
     apply_http_wifi_scan_patch
+    apply_http_health_patch
     apply_native_status_led_patch
 
     if [ "${1:-}" = "build" ]; then

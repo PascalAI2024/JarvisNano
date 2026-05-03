@@ -61,11 +61,13 @@ class DeviceRepository(
         _connection.value = ConnectionState.Searching
         scope.launch {
             runCatching {
-                discovery.findEspClaw().also { resolved ->
+                val resolved = discovery.findEspClaw()
+                client.getStatus(resolved)
+                resolved.also { verified ->
                     hostLock.withLock {
                         if (_manualOverride.value == null) {
-                            host = resolved
-                            _connection.value = ConnectionState.Connected(resolved)
+                            host = verified
+                            _connection.value = ConnectionState.Connected(verified)
                         }
                     }
                 }
@@ -88,6 +90,7 @@ class DeviceRepository(
                 runCatching { client.getStatus(h) }
                     .onSuccess {
                         _status.value = it
+                        _connection.value = ConnectionState.Connected(h)
                         emit(it)
                     }
                     .onFailure { _connection.value = ConnectionState.Failed(it.message ?: "status failed") }

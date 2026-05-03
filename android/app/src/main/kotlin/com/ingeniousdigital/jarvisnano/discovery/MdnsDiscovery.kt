@@ -16,8 +16,9 @@ import kotlin.coroutines.resume
  *
  * The firmware advertises itself as `esp-claw.local` under `_http._tcp.local.`.
  * We scan that service type and return the first host whose name starts with
- * `esp-claw` (case-insensitive). Multicast lock is grabbed for the duration so
- * the radio actually delivers the packets to userspace.
+ * `esp-claw` (case-insensitive). DeviceRepository probes /api/status before it
+ * accepts the resolved host. Multicast lock is grabbed for the duration so the
+ * radio actually delivers the packets to userspace.
  */
 class MdnsDiscovery(private val context: Context) {
 
