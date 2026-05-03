@@ -17,6 +17,17 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import java.util.concurrent.TimeUnit
 
+private val defaultDeviceJson: Json = Json {
+    ignoreUnknownKeys = true
+    encodeDefaults = true
+}
+
+private fun defaultDeviceClient(): OkHttpClient = OkHttpClient.Builder()
+    .connectTimeout(15, TimeUnit.SECONDS)
+    .readTimeout(15, TimeUnit.SECONDS)
+    .writeTimeout(15, TimeUnit.SECONDS)
+    .build()
+
 /**
  * OkHttp + WebSocket facade for the firmware's HTTP API.
  *
@@ -25,8 +36,8 @@ import java.util.concurrent.TimeUnit
  * the same client can target different devices on the LAN without rebuilding.
  */
 class DeviceClient(
-    val http: OkHttpClient = defaultClient(),
-    private val json: Json = defaultJson,
+    val http: OkHttpClient = defaultDeviceClient(),
+    private val json: Json = defaultDeviceJson,
 ) {
 
     /** GET /api/status — short-poll telemetry. */
@@ -70,7 +81,7 @@ class DeviceClient(
      * POST /api/webim/send.
      *
      * Sends as `text/plain;charset=UTF-8` for compatibility with older firmware.
-     * Current bootstrap builds also support OPTIONS /api/* for JSON clients.
+     * Current bootstrap builds also support API wildcard OPTIONS for JSON clients.
      */
     suspend fun sendWebim(host: String, chatId: String, text: String): Unit = withContext(Dispatchers.IO) {
         val stringSerializer = String.serializer()
@@ -158,16 +169,5 @@ class DeviceClient(
     companion object {
         private val JSON = "application/json; charset=utf-8".toMediaType()
         private val TEXT_PLAIN = "text/plain; charset=utf-8".toMediaType()
-
-        private val defaultJson: Json = Json {
-            ignoreUnknownKeys = true
-            encodeDefaults = true
-        }
-
-        private fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
-            .writeTimeout(15, TimeUnit.SECONDS)
-            .build()
     }
 }

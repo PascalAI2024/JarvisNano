@@ -231,6 +231,7 @@ class BleClient(private val context: Context) {
             }
         }
 
+        @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
             if (g != gatt) {
                 g.close()
@@ -313,6 +314,7 @@ class BleClient(private val context: Context) {
         _state.value = State.Failed(reason)
     }
 
+    @SuppressLint("MissingPermission")
     private fun closeGatt(g: BluetoothGatt) {
         if (g == gatt) gatt = null
         runCatching { g.close() }

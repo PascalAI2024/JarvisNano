@@ -9,6 +9,7 @@ navigationCompose = "2.8.5"
 okhttp = "4.12.0"
 serialization = "1.7.3"
 jmdns = "3.5.12"
+junit = "4.13.2"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -27,6 +28,7 @@ androidx-navigation-compose = { group = "androidx.navigation", name = "navigatio
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "serialization" }
 jmdns = { group = "org.jmdns", name = "jmdns", version.ref = "jmdns" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

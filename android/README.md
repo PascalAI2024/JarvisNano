@@ -76,16 +76,18 @@ On macOS with Homebrew, the shortest clean setup is:
 
 ```bash
 brew install gradle
+brew install openjdk@17
 brew install --cask android-commandlinetools
 
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
 export ANDROID_HOME=/opt/homebrew/share/android-commandlinetools
 export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
 
-sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+sdkmanager "platform-tools" "platforms;android-35" "build-tools;34.0.0"
 ```
 
 If you use Android Studio instead, install Android SDK Platform 35 and Android
-SDK Build-Tools 35 from **Settings -> Languages & Frameworks -> Android SDK**,
+SDK Build-Tools 34.0.0 from **Settings -> Languages & Frameworks -> Android SDK**,
 then either export `ANDROID_HOME` or create an untracked `local.properties`
 file containing `sdk.dir=/path/to/android/sdk`.
 

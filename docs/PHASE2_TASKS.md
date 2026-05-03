@@ -31,6 +31,7 @@ test gap, or follow-up appears.
 | Firmware audit | runtime, patches, boot, HTTP, BLE, audio, battery, camera | complete | added reachability, pinning, flash/storage, audio, battery, camera, patch-debt tasks |
 | Dashboard audit | admin, onboarding, browser BLE guard, polling, visual QA | complete | added browser guard, AP-to-STA onboarding, device tile, demo/QA tasks |
 | Android audit | build, BLE client, HTTP client, screens, permissions | complete | added build tests, repository recovery, GATT queue, permissions, local LLM, docs tasks |
+| Research finish pass | upstream ESP-IDF, Android, camera, CI efficiency | complete | added `docs/FINISH_PLAN.md`, CI, dashboard syntax check, patch check, and secret scan |
 
 ## Wave 0: Stabilized Baseline
 
@@ -50,11 +51,12 @@ test gap, or follow-up appears.
 
 ## Wave 1: Build, Patch, And Release Hygiene
 
-- `[~]` Restore Android CLI build verification by adding trusted Gradle wrapper files or documenting an installed Gradle path that works on a clean machine; Homebrew Gradle 9.5.0 is installed and runs, but Android SDK API 35 is not installed/configured yet.
-- `[~]` Verify Android with `:app:assembleDebug`, `:app:lintDebug`, and a physical phone install; Gradle now starts but fails before compile with missing Android SDK location (`ANDROID_HOME`/`local.properties`).
+- `[x]` Restore Android CLI build verification by documenting the system Gradle path and installing Android command-line tools, SDK Platform 35, Build-Tools 34.0.0, and JDK 17 for local validation.
+- `[x]` Verify Android CLI with `:app:assembleDebug`, `:app:testDebugUnitTest`, `:app:compileDebugAndroidTestKotlin`, and `:app:lintDebug` using `JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home` and `ANDROID_HOME=/opt/homebrew/share/android-commandlinetools`.
+- `[ ]` Verify Android install and BLE permission flow on a physical phone.
 - `[x]` Replace every prose-only patch artifact with a real patch or explicitly mark it as bootstrap-generated documentation.
 - `[x]` Add a matching patch artifact for the native status LED mutation currently embedded in `scripts/bootstrap.sh`.
-- `[ ]` Add a local check that each patch artifact applies cleanly against the pinned `esp-claw` commit, or that the bootstrap mutation is intentionally generated.
+- `[x]` Add a local check that each patch artifact applies cleanly against the pinned `esp-claw` commit, or that the bootstrap mutation is intentionally generated; `scripts/check-patches.sh` now separates direct patch application from bootstrap-managed mutations.
 - `[x]` Harden bootstrap patch failure behavior so missing managed components or upstream drift fails clearly before build.
 - `[x]` Remove or replace any silent `reconfigure || true` path that can mask patch non-application.
 - `[x]` Add a `scripts/flash.sh` or document the exact `esptool write_flash` command used after `./scripts/bootstrap.sh build`.
@@ -62,6 +64,8 @@ test gap, or follow-up appears.
 - `[x]` Pin the `esp-claw` checkout to a fixed commit or tag; `scripts/bootstrap.sh` currently clones the default branch with `--depth 1`.
 - `[x]` Record the resolved `esp-claw` commit in build output and release notes.
 - `[ ]` Confirm a clean checkout can run `./scripts/bootstrap.sh`, `./scripts/bootstrap.sh build`, and the flash flow without relying on generated local files.
+- `[x]` Add GitHub Actions CI for repository checks, dashboard JavaScript syntax, patch artifact checks, secret-pattern scanning, and Android CLI build/test tasks.
+- `[x]` Add local open-source safety checks for obvious API tokens/private keys before publishing.
 - `[~]` Verify the normal app flash path preserves Wi-Fi/LLM config while an explicit storage flash wipes and reprovisions cleanly.
 - `[ ]` Decide whether generated `esp-claw/` edits should remain ignored-only or be reproducible solely from `scripts/bootstrap.sh` and `patches/`.
 - `[x]` Add a short release checklist for firmware artifact generation, dashboard manifest update, Android APK build, and docs sync.
@@ -96,7 +100,7 @@ test gap, or follow-up appears.
 - `[x]` Verify camera unavailable/gated state renders as blocked/pending, not as a broken image loop.
 - `[ ]` Add a Chrome/Edge BLE smoke test note for service discovery once firmware GATT advertising exists.
 - `[ ]` Add visual QA screenshots for desktop and mobile widths after the current UI changes.
-- `[x]` Run dashboard JavaScript syntax checks for `dashboard/index.html` and `dashboard/onboard.html`.
+- `[x]` Run dashboard JavaScript syntax checks for `dashboard/index.html` and `dashboard/onboard.html`; `scripts/check-dashboard-js.mjs` now makes this repeatable locally and in CI.
 - `[x]` Run in-app browser console QA and record any errors after a fresh reload; dashboard and onboarding reload without console errors in the Codex in-app browser, and the BLE button shows the Chrome/Edge guard without leaving the page.
 - `[ ]` Confirm demo mode still masks SSIDs, IPs, and API keys after status/config polling changes.
 - `[ ]` Capture repeatable screenshots for `index.html`, `index.html?demo=1`, `index.html?alive=1`, onboarding steps 1-5, Flash tab, and Settings tab.
@@ -119,8 +123,8 @@ test gap, or follow-up appears.
 
 - `[x]` BLE UUID constants match the protocol.
 - `[x]` BLE scan/connect flow is bounded and reports service-present or missing-service diagnostics.
-- `[~]` Restore reproducible Android build on CLI and in Android Studio; Gradle is installed, but Android SDK command-line tools/platforms are pending.
-- `[~]` Add Android test harness dependencies/source sets; dependency-free `src/test` and `src/androidTest` scaffolds now exist, but real test dependencies/assertions are still open.
+- `[x]` Restore reproducible Android build on CLI; command-line tools, SDK Platform 35, Build-Tools 34.0.0, and JDK 17 are installed locally, and CI mirrors the commands.
+- `[x]` Add Android JVM test harness dependency and a real `src/test` assertion so `:app:testDebugUnitTest` cannot pass as an empty source set.
 - `[ ]` Add unit tests for `DeviceClient`, config patch typing, discovery/repository state, and status polling recovery.
 - `[ ]` Add instrumented smoke tests for permissions and navigation.
 - `[x]` Add Android acceptance checklist: sync, build, install, grant BLE permissions, scan, connect, missing-service diagnostic, HTTP status/config, chat, camera failure message.
