@@ -47,7 +47,11 @@
 
 Shipped so far: PDM-TX firmware output path, `/api/audio/level`, `/api/wifi/scan`, dashboard readiness for Phase 2/3 tiles, physical GPIO21 boot/alive LED effect verified on the USB-connected board, canonical BLE UUIDs, and a `/api/battery` not-wired stub in the bootstrap patch. Remaining work is LAN HTTP response verification from the client network path, the GATT service, ADC-backed battery readings, camera capture, TTS, and wake-word path.
 
-The detailed execution board is [`PHASE2_TASKS.md`](PHASE2_TASKS.md). It is organized into agent waves covering build/release hygiene, LAN API reliability, dashboard onboarding, BLE firmware, Android, voice/TTS, battery, camera, protocol/security, and Phase-3 display/privacy-mode work.
+The shortest current finish path is [`FINISH_PLAN.md`](FINISH_PLAN.md). The
+detailed execution board is [`PHASE2_TASKS.md`](PHASE2_TASKS.md). It is
+organized into agent waves covering build/release hygiene, LAN API reliability,
+dashboard onboarding, BLE firmware, Android, voice/TTS, battery, camera,
+protocol/security, and Phase-3 display/privacy-mode work.
 
 - [ ] Wire **PAM8002A combo module** (50 × 30 × 18 mm, built-in 28 mm 4 Ω dome) per [`docs/HARDWARE.md`](HARDWARE.md): GPIO4 → 270 Ω → 100 nF → PAM8002A IN+, common ground, VCC = USB 5 V rail
 - [ ] Confirm clean audio off the RC-filtered PDM-TX

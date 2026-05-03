@@ -1,13 +1,21 @@
 package com.ingeniousdigital.jarvisnano
 
+import org.junit.Assert.assertEquals
+import org.junit.Test
+
 /**
- * Compile-only placeholder for local JVM tests.
+ * Minimal local JVM test to prove the source set and runner are wired.
  *
- * Keep this dependency-free until the project adds a committed test framework
- * decision. This source set proves that `src/test` is wired and gives future
- * unit tests a stable package to extend.
+ * Future unit tests can grow from this package without changing the CLI
+ * command used by docs and CI.
  */
-internal object UnitTestScaffold {
-    const val sourceSet = "test"
-    const val expectedCommand = ":app:testDebugUnitTest"
+class UnitTestScaffold {
+    private val sourceSet = "test"
+    private val expectedCommand = ":app:testDebugUnitTest"
+
+    @Test
+    fun sourceSetIsWired() {
+        assertEquals("test", sourceSet)
+        assertEquals(":app:testDebugUnitTest", expectedCommand)
+    }
 }

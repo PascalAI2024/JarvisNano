@@ -137,6 +137,10 @@ Then plug in, open the captive Wi-Fi `esp-claw-XXXXXX`, visit `http://192.168.4.
 
 Detailed walk-through in [docs/BUILD.md](docs/BUILD.md).
 
+The current Phase-2 finish order is tracked in
+[docs/FINISH_PLAN.md](docs/FINISH_PLAN.md), with the full wave task board in
+[docs/PHASE2_TASKS.md](docs/PHASE2_TASKS.md).
+
 ---
 
 ## Cockpit — browser admin + onboarding + flashing

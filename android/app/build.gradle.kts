@@ -82,4 +82,6 @@ dependencies {
 
     // mDNS — esp-claw.local discovery
     implementation(libs.jmdns)
+
+    testImplementation(libs.junit)
 }
