@@ -1,0 +1,69 @@
+From: Pascal Ledesma <pascal@ingeniousdigital.com>
+Date: 2026-05-03
+Subject: [PATCH] http_server: add cheap API health route
+
+LAN debugging currently has to hit `/api/status`, which can grow as status
+payloads and service checks expand. Add a tiny `/api/health` route for AP, STA,
+and mDNS reachability tests. It avoids config, FATFS browsing, camera, LLM, and
+WebSocket work, but still reports uptime, heap, Wi-Fi mode/IP, and request
+count so client-side timeouts can be correlated with serial logs.
+
+Patch target:
+  application/edge_agent/components/http_server/http_server_status_api.c
+
+---
+diff --git a/application/edge_agent/components/http_server/http_server_status_api.c b/application/edge_agent/components/http_server/http_server_status_api.c
+--- a/application/edge_agent/components/http_server/http_server_status_api.c
++++ b/application/edge_agent/components/http_server/http_server_status_api.c
+@@ -4,6 +4,9 @@
+  */
+ #include "http_server_priv.h"
+ 
++#include "esp_heap_caps.h"
++#include "esp_timer.h"
++
+ #include "wifi_manager.h"
+ 
+ #define HTTP_WIFI_SCAN_LIMIT 20
+@@ -23,6 +26,39 @@ static const char *wifi_auth_mode_to_string(wifi_auth_mode_t authmode)
+     }
+ }
+ 
++static esp_err_t health_handler(httpd_req_t *req)
++{
++    static uint32_t s_health_requests;
++    http_server_ctx_t *ctx = http_server_ctx();
++    http_server_wifi_status_t status = {0};
++    bool wifi_status_ok = false;
++    if (ctx->services.get_wifi_status) {
++        wifi_status_ok = (ctx->services.get_wifi_status(&status) == ESP_OK);
++    }
++
++    cJSON *root = cJSON_CreateObject();
++    if (!root) {
++        httpd_resp_send_500(req);
++        return ESP_ERR_NO_MEM;
++    }
++
++    cJSON_AddBoolToObject(root, "ok", true);
++    cJSON_AddNumberToObject(root, "uptime_ms", (double)(esp_timer_get_time() / 1000));
++    cJSON_AddNumberToObject(root, "free_heap", heap_caps_get_free_size(MALLOC_CAP_8BIT));
++    cJSON_AddNumberToObject(root, "min_free_heap", heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
++    cJSON_AddNumberToObject(root, "requests", ++s_health_requests);
++    cJSON_AddBoolToObject(root, "wifi_status_ok", wifi_status_ok);
++    http_server_json_add_string(root, "wifi_mode", status.wifi_mode);
++    http_server_json_add_string(root, "ip", status.ip);
++    http_server_json_add_string(root, "ap_ip", status.ap_ip);
++    return http_server_send_json_response(req, root);
++}
++
+ static esp_err_t status_handler(httpd_req_t *req)
+ {
+     http_server_ctx_t *ctx = http_server_ctx();
+@@ -109,6 +145,7 @@ esp_err_t http_server_register_status_routes(httpd_handle_t server)
+ {
+     const httpd_uri_t handlers[] = {
++        { .uri = "/api/health", .method = HTTP_GET, .handler = health_handler },
+         { .uri = "/api/status", .method = HTTP_GET, .handler = status_handler },
+         { .uri = "/api/wifi/scan", .method = HTTP_GET, .handler = wifi_scan_handler },
+         { .uri = "/api/battery", .method = HTTP_GET, .handler = battery_handler },

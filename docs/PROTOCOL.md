@@ -1,6 +1,6 @@
 # JarvisNano Protocol
 
-> **Status:** Draft v1 — Phase 1 (HTTP + WebSocket + MCP) is shipped firmware. Phase 2 is partially shipped: PDM-TX audio output, `/api/audio/level`, `/api/battery` not-wired stub, `/api/wifi/scan`, API preflight patch, dashboard readiness, physical GPIO21 alive heartbeat, and the canonical BLE UUIDs are in place; the BLE GATT service, ADC-backed battery readings, camera capture, TTS, and wake-word path are still planned. Phase 3 (on-device LLM) remains forward-looking.
+> **Status:** Draft v1 — Phase 1 (HTTP + WebSocket + MCP) is shipped firmware. Phase 2 is partially shipped: PDM-TX audio output, `/api/audio/level`, `/api/health`, `/api/battery` not-wired stub, `/api/wifi/scan`, API preflight patch, dashboard readiness, physical GPIO21 alive heartbeat, and the canonical BLE UUIDs are in place; the BLE GATT service, ADC-backed battery readings, camera capture, TTS, and wake-word path are still planned. Phase 3 (on-device LLM) remains forward-looking.
 
 This document is the stable contract that any client — the open-source Kotlin/Compose companion in [`/android`](../android), web dashboards, React Native apps, desktop tools, or third-party tooling — integrates against. It describes how to discover a JarvisNano device, talk to it, listen to it, and (as later phases land) hand it off to a phone for on-device inference.
 
@@ -95,6 +95,7 @@ Native (non-browser) clients MAY use `application/json`. Browser clients SHOULD 
 | Method | Path                  | Body              | Returns                    | Notes                                  |
 | ------ | --------------------- | ----------------- | -------------------------- | -------------------------------------- |
 | OPTIONS| `/api/*`              | —                 | 204                        | CORS preflight for API clients.        |
+| GET    | `/api/health`         | —                 | `HealthBody`               | Cheapest AP/STA/mDNS reachability probe. |
 | GET    | `/api/status`         | —                 | `StatusBody`               | Cheap; safe to poll every 5s.          |
 | GET    | `/api/config`         | —                 | `ConfigBody`               | LLM provider, Wi-Fi SSID, agent name.  |
 | POST   | `/api/config`         | `Partial<Config>` | `{ok: true}`               | Triggers a save; reboot for some keys. |
@@ -112,6 +113,18 @@ Native (non-browser) clients MAY use `application/json`. Browser clients SHOULD 
 ### 3.3 Schemas
 
 ```ts
+interface HealthBody {
+  ok: boolean;
+  uptime_ms: number;
+  free_heap: number;
+  min_free_heap: number;
+  requests: number;
+  wifi_status_ok: boolean;
+  wifi_mode?: string;
+  ip?: string;
+  ap_ip?: string;
+}
+
 interface StatusBody {
   wifi_connected: boolean;
   ip?: string;

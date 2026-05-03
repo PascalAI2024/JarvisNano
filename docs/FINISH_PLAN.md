@@ -45,7 +45,9 @@ piece is Android SDK installation, not code shape.
 
 Progress on 2026-05-03: local command-line tools are installed, Android CLI
 build/test/lint commands pass under JDK 17, and GitHub Actions now mirrors the
-same checks.
+same checks. A firmware `/api/health` bootstrap patch is now in place for cheap
+LAN reachability tests, and Android mDNS discovery now verifies the resolved
+host with `/api/status` before marking it connected.
 
 ## 2. Fix LAN HTTP Reachability Before Feature Work
 
@@ -60,8 +62,9 @@ Run this exact matrix:
 - mDNS path: `http://esp-claw.local/api/status`.
 - Serial capture during every request.
 
-Add a tiny `/api/health` route if needed. It should avoid config/FATFS/LLM work
-and return immediately with uptime, heap, Wi-Fi mode, and request count.
+Use the tiny `/api/health` route for the first probe. It avoids
+config/FATFS/LLM work and returns immediately with uptime, heap, Wi-Fi mode,
+and request count.
 
 Efficiency rule: keep dashboard camera auto-refresh off by default until the
 network path is stable. ESP-IDF HTTP server supports persistent connections and
@@ -179,7 +182,7 @@ Those are real features, but they are not blockers for a credible public Phase
 
 1. Install Android SDK API 35 and get Android CLI build green.
 2. Add CI for static checks and Android build.
-3. Add `/api/health` and run the AP/STA/mDNS HTTP matrix.
+3. Run the `/api/health` AP/STA/mDNS HTTP matrix.
 4. Implement BLE `state/control` only.
 5. Wire speaker and prove raw PDM-TX tone.
 6. Add ADC battery reading.
