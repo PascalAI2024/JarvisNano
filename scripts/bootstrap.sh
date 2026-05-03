@@ -117,12 +117,80 @@ print("patched", p)
 PY
 }
 
+apply_jpeg_soi_patch() {
+    local target="$ESP_CLAW_DIR/application/edge_agent/managed_components/espressif__esp_cam_sensor/src/driver_dvp/esp_cam_ctlr_dvp_cam.c"
+    if [ ! -f "$target" ]; then
+        log "esp_cam_sensor not pulled yet — skipping JPEG SOI patch (will apply on next build)"
+        return
+    fi
+    if grep -q "OV3660 (and likely other newer sensors) sometimes prepend" "$target" 2>/dev/null; then
+        log "JPEG SOI patch already applied"
+        return
+    fi
+    log "applying patches/0003-dvp-cam-scan-for-jpeg-soi.patch"
+    python3 - <<PY
+import pathlib
+p = pathlib.Path(r"$target")
+s = p.read_text()
+old = (
+    "static uint32_t dvp_calculate_jpeg_size(const uint8_t *buffer, uint32_t size)\n"
+    "{\n"
+    "    if (size < 16) {\n"
+    "        DVP_CAM_ERROR(\"JPEG size\");\n"
+    "        return 0;\n"
+    "    }\n"
+    "\n"
+    "    /* Check JPEG header TAG: ff:d8 */\n"
+    "\n"
+    "    if (buffer[0] != 0xff || buffer[1] != 0xd8) {\n"
+    "        DVP_CAM_ERROR(\"NO-SOI\");\n"
+    "        return 0;\n"
+    "    }\n"
+)
+new = (
+    "static uint32_t dvp_calculate_jpeg_size(uint8_t *buffer, uint32_t size)\n"
+    "{\n"
+    "    if (size < 16) {\n"
+    "        DVP_CAM_ERROR(\"JPEG size\");\n"
+    "        return 0;\n"
+    "    }\n"
+    "\n"
+    "    /* OV3660 (and likely other newer sensors) sometimes prepend sync /\n"
+    "     * padding bytes before the JPEG SOI (0xFF 0xD8). Scan up to the\n"
+    "     * first 64 bytes for the marker and shift the buffer to start at\n"
+    "     * it. Without this, every frame is rejected NO-SOI on the XIAO\n"
+    "     * ESP32-S3 Sense + OV3660 batch shipped in 2026. */\n"
+    "\n"
+    "    uint32_t prefix = 0;\n"
+    "    if (buffer[0] != 0xff || buffer[1] != 0xd8) {\n"
+    "        const uint32_t max_scan = (size > 64) ? 64 : (size - 1);\n"
+    "        for (prefix = 1; prefix < max_scan; prefix++) {\n"
+    "            if (buffer[prefix] == 0xff && buffer[prefix + 1] == 0xd8) {\n"
+    "                memmove(buffer, buffer + prefix, size - prefix);\n"
+    "                size -= prefix;\n"
+    "                break;\n"
+    "            }\n"
+    "        }\n"
+    "        if (buffer[0] != 0xff || buffer[1] != 0xd8) {\n"
+    "            DVP_CAM_ERROR(\"NO-SOI\");\n"
+    "            return 0;\n"
+    "        }\n"
+    "    }\n"
+)
+if old not in s:
+    raise SystemExit(f"could not locate target hunk in {p} — upstream may have changed")
+p.write_text(s.replace(old, new))
+print("patched", p)
+PY
+}
+
 main() {
     mkdir -p "$ROOT/.build_logs"
     clone_or_update_esp_claw
     copy_board
     apply_patch
     apply_wifi_ps_patch
+    apply_jpeg_soi_patch
 
     if [ "${1:-}" = "build" ]; then
         build

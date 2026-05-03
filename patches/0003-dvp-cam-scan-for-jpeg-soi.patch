@@ -1,0 +1,67 @@
+From: Pascal Ledesma <pascal@ingeniousdigital.com>
+Date: 2026-05-02
+Subject: [PATCH] esp_cam_sensor: scan for JPEG SOI in DVP receive buffer
+
+The DVP camera driver's JPEG path validates that the first two bytes
+of the receive buffer are the JPEG Start-Of-Image marker (0xFF 0xD8)
+and rejects the frame outright if not. Several sensors — confirmed
+on OV3660 in the 2026 XIAO ESP32-S3 Sense batch — prepend a few
+sync / padding bytes before the actual JPEG, so the strict check
+fires every frame and the V4L2 layer logs "E:NO-SOI" hundreds of
+times per second, starving the HTTP server task.
+
+Fix: scan the first 64 bytes for the SOI marker and memmove the
+buffer to start there. Cheap (<32 ns/frame), preserves the rest of
+the validation logic, and recovers correct JPEG framing without
+needing sensor-specific knowledge in the DVP layer.
+
+Patch target:
+  managed_components/espressif__esp_cam_sensor/src/driver_dvp/esp_cam_ctlr_dvp_cam.c
+
+Note: this patch is necessary but not sufficient for OV3660 capture
+to work end-to-end on this board — a separate `ov3660_set_format`
+SCCB-mid-sequence failure still breaks capture. Camera stays off
+in board defaults until that's resolved.
+
+---
+diff --git a/src/driver_dvp/esp_cam_ctlr_dvp_cam.c b/src/driver_dvp/esp_cam_ctlr_dvp_cam.c
+--- a/src/driver_dvp/esp_cam_ctlr_dvp_cam.c
++++ b/src/driver_dvp/esp_cam_ctlr_dvp_cam.c
+@@ -273,18 +273,32 @@
+  *
+  * @return JPEG frame actual size if success or 0 if failed
+  */
+-static uint32_t dvp_calculate_jpeg_size(const uint8_t *buffer, uint32_t size)
++static uint32_t dvp_calculate_jpeg_size(uint8_t *buffer, uint32_t size)
+ {
+     if (size < 16) {
+         DVP_CAM_ERROR("JPEG size");
+         return 0;
+     }
+
+-    /* Check JPEG header TAG: ff:d8 */
++    /* OV3660 (and likely other newer sensors) sometimes prepend sync /
++     * padding bytes before the JPEG SOI (0xFF 0xD8). Scan up to the
++     * first 64 bytes for the marker and shift the buffer to start at
++     * it. Without this, every frame is rejected NO-SOI on the XIAO
++     * ESP32-S3 Sense + OV3660 batch shipped in 2026. */
+
++    uint32_t prefix = 0;
+     if (buffer[0] != 0xff || buffer[1] != 0xd8) {
+-        DVP_CAM_ERROR("NO-SOI");
+-        return 0;
++        const uint32_t max_scan = (size > 64) ? 64 : (size - 1);
++        for (prefix = 1; prefix < max_scan; prefix++) {
++            if (buffer[prefix] == 0xff && buffer[prefix + 1] == 0xd8) {
++                memmove(buffer, buffer + prefix, size - prefix);
++                size -= prefix;
++                break;
++            }
++        }
++        if (buffer[0] != 0xff || buffer[1] != 0xd8) {
++            DVP_CAM_ERROR("NO-SOI");
++            return 0;
++        }
+     }
+
+     for (uint32_t off = size - 2; off > 0; off--) {
