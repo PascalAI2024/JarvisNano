@@ -12,7 +12,7 @@ Pin map, schematic, BOM, and wiring diagrams for each phase.
 | Wi-Fi      | 2.4 GHz, BLE 5.0                     |
 | USB        | Native USB-C (USB-Serial-JTAG)       |
 | Mic        | MSM261D3526H1CPM PDM (on-board)      |
-| Camera     | OV2640 2 MP (on-board, ribbon)       |
+| Camera     | **OV3660 3 MP** on 2026 batches; OV2640 2 MP on older units. SCCB at 0x3C (OV3660) or 0x30 (OV2640). See [CAMERA.md](CAMERA.md) for the silent-swap story + driver state. |
 | Footprint  | 21 × 17.5 mm                         |
 | Power      | 5 V via USB-C, 3.3 V LDO regulated   |
 

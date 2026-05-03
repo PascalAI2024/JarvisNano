@@ -23,7 +23,8 @@
 JarvisNano is a board adaptation + reference build that brings Espressif's
 [ESP-Claw](https://github.com/espressif/esp-claw) "Chat Coding" agent
 framework to the **Seeed Studio XIAO ESP32-S3 Sense** — the smallest
-Wi-Fi/BLE board with an on-board MEMS PDM microphone and an OV2640 camera.
+Wi-Fi/BLE board with an on-board MEMS PDM microphone and an on-board camera
+(OV3660 on 2026 batches; OV2640 on older units — see [CAMERA.md](docs/CAMERA.md)).
 
 The bare board, plugged into USB-C, gives you:
 - 🎙️ on-device PDM mic capture (full-duplex on I²S0)
@@ -58,7 +59,7 @@ flowchart LR
         MIC[PDM mic RX<br/>GPIO41/42 on I2S0]
         I2S[PDM-TX speaker<br/>GPIO4 + RC LPF on I2S0]
         LED[User LED GPIO21]
-        CAM[OV2640 on-board]
+        CAM[OV3660 / OV2640 on-board]
         I2C[I2C bus GPIO5/6]
         CORE[ESP-Claw runtime<br/>Lua + Agent loop]
         WIFI[Wi-Fi STA + AP]
@@ -235,7 +236,7 @@ timeline
     Phase 3         : Seeed 1.28in round AMOLED touchscreen
                     : LVGL chat UI + animated emote face
                     : Privacy Mode (phone runs Gemma 4 E4B over BLE)
-    Phase 4         : OV2640 vision tools (describe / OCR)
+    Phase 4         : OV3660 / OV2640 vision tools (describe / OCR)
                     : MCP server exposes desktop sensors
                     : Community remix release
 ```
