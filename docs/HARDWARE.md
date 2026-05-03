@@ -31,7 +31,7 @@ Pin map, schematic, BOM, and wiring diagrams for each phase.
 | D8 | 7  | output | 3 | free — Phase 3 LCD CS candidate |
 | D9 | 8  | output | 3 | free — Phase 3 LCD RST candidate |
 | D10 | 9 | output | 3 | free — Phase 3 LCD DC candidate |
-| (on-board) | **21** | output | 1 | **User LED — active LOW** (driven by `status_led.lua`) |
+| (on-board) | **21** | output | 1 | **User LED — active LOW** (native boot/alive heartbeat) |
 | (on-board) | **41** | input | 1 | **PDM mic DATA** (full-duplex on I²S0 RX) |
 | (on-board) | **42** | output | 1 | **PDM mic CLK** |
 

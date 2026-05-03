@@ -63,13 +63,19 @@
   .btn.primary { background: var(--orange); color: #fff; border-color: var(--orange); font-weight: 600; }
   .btn.primary:hover { filter: brightness(1.08); }
   .btn.danger:hover { border-color: var(--red); color: var(--red); }
-  .status-orb {
-    width: 10px; height: 10px; border-radius: 50%; background: #444;
-    box-shadow: 0 0 0 0 rgba(0,0,0,0); transition: all 0.4s;
-  }
-  .status-orb.live { background: var(--green); box-shadow: 0 0 12px var(--green); }
-  .status-orb.warn { background: var(--amber); box-shadow: 0 0 12px var(--amber); }
-  .status-orb.dead { background: var(--red); box-shadow: 0 0 12px var(--red); }
+	  .status-orb {
+	    width: 10px; height: 10px; border-radius: 50%; background: #444;
+	    box-shadow: 0 0 0 0 rgba(0,0,0,0); transition: all 0.4s;
+	    position: relative;
+	  }
+	  .status-orb.live { background: var(--green); box-shadow: 0 0 12px var(--green); }
+	  .status-orb.warn { background: var(--amber); box-shadow: 0 0 12px var(--amber); }
+	  .status-orb.dead { background: var(--red); box-shadow: 0 0 12px var(--red); }
+	  .status-orb.live::after {
+	    content: ""; position: absolute; inset: -8px; border-radius: 50%;
+	    border: 1px solid rgba(63, 203, 111, 0.58);
+	    animation: orbPing 1.7s ease-out infinite;
+	  }
 
   /* ---------- Grid ---------- */
   .grid {
@@ -126,25 +132,96 @@
   .pill.off { color: var(--fg-dim); }
 
   /* ---------- Hero ---------- */
-  .hero {
-    grid-column: span 12;
-    display: flex; align-items: center; gap: 24px;
-    background:
-      radial-gradient(ellipse at 90% 50%, rgba(255,87,34,0.18) 0%, transparent 60%),
-      var(--bg-2);
-    border: 1px solid var(--line); border-radius: 12px; padding: 22px 28px;
-  }
-  .hero-mascot { width: 110px; height: 110px; border-radius: 50%; background: var(--bg-3);
-    display: grid; place-items: center; flex-shrink: 0; overflow: hidden;
-    box-shadow: 0 0 0 1px var(--line), 0 0 32px var(--orange-soft);
-  }
-  .hero-mascot img { width: 100%; height: 100%; object-fit: cover; }
+	  .hero {
+	    grid-column: span 12;
+	    display: flex; align-items: center; gap: 24px;
+	    background:
+	      radial-gradient(ellipse at 90% 50%, rgba(255,87,34,0.18) 0%, transparent 60%),
+	      var(--bg-2);
+	    border: 1px solid var(--line); border-radius: 12px; padding: 22px 28px;
+	    position: relative; overflow: hidden; isolation: isolate;
+	  }
+	  .hero > * { position: relative; z-index: 1; }
+	  .hero.alive {
+	    border-color: rgba(63,203,111,0.48);
+	    box-shadow: inset 0 0 0 1px rgba(63,203,111,0.1), 0 0 36px rgba(63,203,111,0.11);
+	  }
+	  .hero.alive::before {
+	    content: ""; position: absolute; inset: 0; z-index: 0; pointer-events: none;
+	    background: linear-gradient(110deg, transparent 0%, rgba(63,203,111,0.0) 36%, rgba(63,203,111,0.16) 50%, rgba(0,179,255,0.1) 54%, transparent 68%);
+	    transform: translateX(-100%);
+	    animation: aliveSweep 2.8s linear infinite;
+	  }
+	  .hero.alive::after {
+	    content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1px;
+	    background: linear-gradient(90deg, transparent, rgba(63,203,111,0.9), rgba(0,179,255,0.65), transparent);
+	    animation: liveRail 1.6s ease-in-out infinite;
+	  }
+	  .hero-mascot { width: 110px; height: 110px; border-radius: 50%; background: var(--bg-3);
+	    display: grid; place-items: center; flex-shrink: 0; overflow: hidden;
+	    box-shadow: 0 0 0 1px var(--line), 0 0 32px var(--orange-soft);
+	  }
+	  .hero.alive .hero-mascot {
+	    animation: aliveBreath 2.4s ease-in-out infinite;
+	    box-shadow: 0 0 0 1px rgba(63,203,111,0.55), 0 0 24px rgba(63,203,111,0.28), 0 0 46px rgba(0,179,255,0.1);
+	  }
+	  .hero-mascot img { width: 100%; height: 100%; object-fit: cover; }
   .hero-text h1 { font-size: 22px; font-weight: 700; letter-spacing: 0.02em; }
   .hero-text h1 .accent { color: var(--orange); }
   .hero-text p { color: var(--fg-dim); margin-top: 4px; font-family: var(--mono); font-size: 13px; }
   .hero-state { margin-left: auto; text-align: right; }
-  .hero-state .lbl { color: var(--fg-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.16em; }
-  .hero-state .val { color: var(--orange); font-size: 26px; font-weight: 700; font-family: var(--mono); }
+	  .hero-state .lbl { color: var(--fg-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.16em; }
+	  .hero-state .val { color: var(--orange); font-size: 26px; font-weight: 700; font-family: var(--mono); }
+	  .hero.alive .hero-state .val { color: var(--green); text-shadow: 0 0 18px rgba(63,203,111,0.55); }
+	  .life-signal {
+	    height: 22px; margin-top: 7px; display: flex; gap: 4px; justify-content: flex-end; align-items: flex-end;
+	    opacity: 0.35;
+	  }
+	  .life-signal span {
+	    width: 4px; height: 6px; border-radius: 999px; background: var(--fg-dim);
+	    transition: background 0.25s, height 0.25s, opacity 0.25s;
+	  }
+	  .hero.alive .life-signal { opacity: 1; }
+	  .hero.alive .life-signal span {
+	    background: linear-gradient(180deg, var(--cyan), var(--green));
+	    animation: signalBars 1.05s ease-in-out infinite;
+	  }
+	  .hero.alive .life-signal span:nth-child(2) { animation-delay: 0.1s; }
+	  .hero.alive .life-signal span:nth-child(3) { animation-delay: 0.2s; }
+	  .hero.alive .life-signal span:nth-child(4) { animation-delay: 0.3s; }
+	  .hero.alive .life-signal span:nth-child(5) { animation-delay: 0.4s; }
+	  .hero.warn {
+	    border-color: rgba(255,180,0,0.42);
+	    box-shadow: inset 0 0 0 1px rgba(255,180,0,0.08);
+	  }
+	  .hero.warn .hero-state .val { color: var(--amber); }
+	  @keyframes orbPing {
+	    0% { transform: scale(0.55); opacity: 0.9; }
+	    80%, 100% { transform: scale(1.8); opacity: 0; }
+	  }
+	  @keyframes aliveSweep {
+	    0% { transform: translateX(-120%); }
+	    100% { transform: translateX(120%); }
+	  }
+	  @keyframes liveRail {
+	    0%, 100% { opacity: 0.3; transform: scaleX(0.72); }
+	    50% { opacity: 1; transform: scaleX(1); }
+	  }
+	  @keyframes aliveBreath {
+	    0%, 100% { transform: scale(1); }
+	    50% { transform: scale(1.035); }
+	  }
+	  @keyframes signalBars {
+	    0%, 100% { height: 6px; opacity: 0.55; }
+	    45% { height: 20px; opacity: 1; }
+	  }
+	  @media (prefers-reduced-motion: reduce) {
+	    .status-orb.live::after,
+	    .hero.alive::before,
+	    .hero.alive::after,
+	    .hero.alive .hero-mascot,
+	    .hero.alive .life-signal span { animation: none; }
+	  }
 
   /* ---------- Chat ---------- */
   .chat-wrap { display: flex; flex-direction: column; min-height: 360px; max-height: 560px; }
@@ -310,7 +387,7 @@
 <div id="panel-cockpit" class="tab-panel active">
 <div class="grid">
   <!-- Hero strip -->
-  <div class="hero">
+	  <div class="hero" id="hero">
     <div class="hero-mascot">
       <img src="mascot.png" alt="JARVIS mascot" onerror="this.style.display='none'">
     </div>
@@ -318,11 +395,12 @@
       <h1>The <span class="accent">J.A.R.V.I.S.</span> Voice Companion</h1>
       <p id="heroSub">Awaiting connection…</p>
     </div>
-    <div class="hero-state">
-      <div class="lbl">Status</div>
-      <div class="val" id="heroState">OFFLINE</div>
-    </div>
-  </div>
+	    <div class="hero-state">
+	      <div class="lbl">Status</div>
+	      <div class="val" id="heroState">OFFLINE</div>
+	      <div class="life-signal" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+	    </div>
+	  </div>
 
   <!-- System -->
   <div class="card span-4">
@@ -415,7 +493,7 @@
     <div style="aspect-ratio: 4/3; background: var(--bg-3); border: 1px solid var(--line); border-radius: 6px; display: grid; place-items: center; overflow: hidden; position: relative;">
       <img id="camFrame" style="width: 100%; height: 100%; object-fit: cover; display: none;">
       <div id="camPlaceholder" style="text-align: center; color: var(--fg-dim); font-family: var(--mono); font-size: 12px; padding: 18px;">
-        OV2640 · 2 MP DVP · 640×480 JPEG<br>
+        OV3660 / OV2640 · DVP JPEG<br>
         <span style="opacity: 0.6;">tap Capture frame to fetch GET /api/camera/snapshot</span>
       </div>
     </div>
@@ -584,17 +662,31 @@
 
 const $ = (id) => document.getElementById(id);
 const fmtBool = (b, on="online", off="offline") => b ? on : off;
+const BLE_SERVICE_UUID = "1ec185cd-4bc7-5797-a8b1-0f5b66c59757";
+const QUERY = new URLSearchParams(location.search);
+const escapeHtml = (value) => String(value).replace(/[&<>"']/g, c => ({
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;",
+}[c]));
 
 const STATE = {
   host: localStorage.getItem("jarvis_host") || "esp-claw.local",
   pollTimer: null,
+  capsTimer: null,
+  batteryTimer: null,
+  micTimer: null,
   ws: null,
   chatId: "cockpit-" + Math.random().toString(36).slice(2, 8),
-  demo: new URLSearchParams(location.search).get("demo") === "1",
+  demo: QUERY.get("demo") === "1",
+  alivePreview: QUERY.get("alive") === "1",
   // Sensitive values (SSID/IP/AP-SSID/key) hidden by default; click eye to reveal.
   // ?demo=1 forces hidden and locks the toggle for clean marketing screenshots.
-  hide: localStorage.getItem("jarvis_hide") !== "0" || (new URLSearchParams(location.search).get("demo") === "1"),
+  hide: localStorage.getItem("jarvis_hide") !== "0" || (QUERY.get("demo") === "1"),
   raw: {},
+  micLastOkTs: 0,
 };
 
 function maybeMask(value, kind) {
@@ -626,6 +718,11 @@ $("chatInput").addEventListener("keydown", (e) => {
 $("revealBtn").addEventListener("click", toggleHide);
 $("btBtn").addEventListener("click", pairBluetooth);
 
+function isEmbeddedBrowser() {
+  const ua = navigator.userAgent || "";
+  return /\b(Electron|Codex)\b/i.test(ua);
+}
+
 // Apply initial eye state
 $("iconEye").style.display = STATE.hide ? "none" : "block";
 $("iconEyeOff").style.display = STATE.hide ? "block" : "none";
@@ -649,9 +746,8 @@ async function get(path, timeoutMs = 5000) {
 }
 
 async function post(path, body, timeoutMs = 8000) {
-  // Use text/plain so the request stays a "simple" CORS request and the
-  // browser doesn't fire a preflight OPTIONS the device doesn't handle yet.
-  // The firmware doesn't check content-type — it parses the raw body as JSON.
+  // Keep text/plain for compatibility with older firmware. Current bootstrap
+  // builds also register OPTIONS /api/* for JSON clients.
   const c = new AbortController();
   const t = setTimeout(() => c.abort(), timeoutMs);
   try {
@@ -667,8 +763,12 @@ async function post(path, body, timeoutMs = 8000) {
 
 function setOrb(state) {
   const orb = $("connOrb");
+  const hero = $("hero");
   orb.classList.remove("live", "warn", "dead");
   if (state) orb.classList.add(state);
+  hero.classList.remove("alive", "warn");
+  if (state === "live") hero.classList.add("alive");
+  if (state === "warn") hero.classList.add("warn");
   $("heroState").textContent = state === "live" ? "ONLINE" : state === "warn" ? "PARTIAL" : "OFFLINE";
   $("heroSub").textContent = state === "live"
     ? "Connected to " + STATE.host + " — chat ready, telemetry live."
@@ -677,7 +777,7 @@ function setOrb(state) {
 
 async function pollStatus() {
   try {
-    const [status, cfg] = await Promise.all([get("/api/status"), get("/api/config")]);
+    const status = await get("/api/status");
     setOrb(status.wifi_connected ? "live" : "warn");
     $("sysHostname").textContent = "esp-claw.local";
     $("sysIp").textContent = maybeMask(status.ip || "—", "ip");
@@ -686,13 +786,19 @@ async function pollStatus() {
     $("sysApIp").textContent = status.ap_ip || "—";
     $("sysStorage").textContent = status.storage_base_path || "—";
 
-    $("wifiSsid").textContent = maybeMask(cfg.wifi_ssid || "(unset)", "ssid");
     const conn = status.wifi_connected;
     $("wifiConn").textContent = conn ? "connected" : "disconnected";
     $("wifiConn").className = "v " + (conn ? "good" : "bad");
     $("wifiAp").textContent = status.ap_active ? "yes" : "no";
     $("wifiAp").className = "v " + (status.ap_active ? "warn" : "");
+  } catch (e) {
+    setOrb("dead");
+    return;
+  }
 
+  try {
+    const cfg = await get("/api/config");
+    $("wifiSsid").textContent = maybeMask(cfg.wifi_ssid || "(unset)", "ssid");
     $("llmBackend").textContent = cfg.llm_backend_type || "(unset)";
     $("llmProfile").textContent = cfg.llm_profile || "(unset)";
     $("llmModel").textContent = cfg.llm_model || "(unset)";
@@ -704,7 +810,14 @@ async function pollStatus() {
     $("llmTimeout").textContent = (cfg.llm_timeout_ms || "—") + " ms";
     $("llmTokens").textContent = cfg.llm_max_tokens || "—";
   } catch (e) {
-    setOrb("dead");
+    $("llmBackend").textContent = "(config unavailable)";
+    $("llmProfile").textContent = "—";
+    $("llmModel").textContent = "—";
+    $("llmBase").textContent = "—";
+    $("llmAuth").textContent = "—";
+    $("llmKey").textContent = "—";
+    $("llmTimeout").textContent = "—";
+    $("llmTokens").textContent = "—";
   }
 }
 
@@ -712,46 +825,70 @@ async function loadCaps() {
   try {
     const c = await get("/api/capabilities");
     $("capList").innerHTML = (c.items || []).map(it =>
-      `<span class="pill ${it.default_llm_visible ? "on" : "off"}">${it.display_name}</span>`
+      `<span class="pill ${it.default_llm_visible ? "on" : "off"}">${escapeHtml(it.display_name)}</span>`
     ).join("");
   } catch (e) { $("capList").textContent = "—"; }
   try {
     const m = await get("/api/lua-modules");
     $("modList").innerHTML = (m.items || []).map(it =>
-      `<span class="pill on">${it.display_name}</span>`
+      `<span class="pill on">${escapeHtml(it.display_name)}</span>`
     ).join("");
   } catch (e) { $("modList").textContent = "—"; }
   try {
     const f = await get("/api/files");
     $("fileList").innerHTML = (f.entries || []).map(en =>
-      `<li><span class="name">${en.is_dir ? "📁" : "📄"} ${en.name}</span><span class="meta">${en.is_dir ? "" : (en.size + " B")}</span></li>`
+      `<li><span class="name">${en.is_dir ? "📁" : "📄"} ${escapeHtml(en.name)}</span><span class="meta">${en.is_dir ? "" : (escapeHtml(en.size) + " B")}</span></li>`
     ).join("") || "<li class='meta'>(empty)</li>";
   } catch (e) { $("fileList").textContent = "—"; }
 }
 
 async function pollBattery() {
   // Battery is wired to ADC on a free GPIO via a 100k/100k divider (Phase 2).
-  // The firmware exposes /api/battery returning {mV, pct, state}. While the
-  // endpoint isn't there yet, this falls back to "no battery wired" gracefully.
+  // Current firmware patch exposes a not_wired stub until ADC sensing lands.
   try {
     const b = await get("/api/battery", 2500);
-    $("batV").textContent = b.mV ? (b.mV + " mV") : "—";
-    $("batPct").textContent = (b.pct ?? "—") + " %";
-    $("batState").textContent = b.state || "—";
-    $("batBar").style.width = (b.pct ?? 0) + "%";
+    const isNotWired = b && (b.wired === false || b.state === "not_wired");
+    if (isNotWired) {
+      $("batV").textContent = "not wired";
+      $("batPct").textContent = "n/a";
+      $("batPct").className = "v warn";
+      $("batState").textContent = "not_wired stub";
+      $("batState").className = "v warn";
+      $("batBar").style.width = "0%";
+    } else {
+      const pct = Number.isFinite(Number(b.pct)) ? Math.max(0, Math.min(100, Number(b.pct))) : 0;
+      $("batV").textContent = b.mV ? (b.mV + " mV") : "—";
+      $("batPct").textContent = (b.pct ?? "—") + " %";
+      $("batPct").className = "v accent";
+      $("batState").textContent = b.state || "—";
+      $("batState").className = "v";
+      $("batBar").style.width = pct + "%";
+    }
   } catch (e) {
     $("batV").textContent = "— mV";
     $("batPct").textContent = "— %";
-    $("batState").textContent = "no battery wired";
+    $("batPct").className = "v bad";
+    $("batState").textContent = "battery endpoint unavailable";
+    $("batState").className = "v bad";
     $("batBar").style.width = "0%";
   }
 
-  // Web Bluetooth capability check
-  $("btSupport").textContent = (navigator.bluetooth ? "supported" : "not supported in this browser");
-  $("btSupport").className = "v " + (navigator.bluetooth ? "good" : "warn");
+  // Web Bluetooth capability check. Embedded app browsers can advertise
+  // navigator.bluetooth but crash when the native chooser opens.
+  const btBlocked = isEmbeddedBrowser();
+  $("btSupport").textContent = btBlocked
+    ? "use Chrome / Edge"
+    : (navigator.bluetooth ? "supported" : "not supported in this browser");
+  $("btSupport").className = "v " + (navigator.bluetooth && !btBlocked ? "good" : "warn");
 }
 
 async function pairBluetooth() {
+  if (isEmbeddedBrowser()) {
+    appendChat("sys", "BLE pairing needs Chrome / Edge. The Codex in-app browser can crash when opening the native Bluetooth chooser.");
+    $("btStatus").textContent = "open in Chrome / Edge";
+    $("btStatus").className = "v warn";
+    return;
+  }
   if (!navigator.bluetooth) {
     appendChat("sys", "Web Bluetooth not available in this browser. Use Chrome / Edge on macOS / Linux / Android.");
     return;
@@ -760,7 +897,7 @@ async function pairBluetooth() {
     appendChat("sys", "Scanning for nearby JarvisNano devices…");
     const device = await navigator.bluetooth.requestDevice({
       filters: [{ namePrefix: "esp-claw" }, { namePrefix: "JarvisNano" }],
-      optionalServices: ["generic_access", "0000ffe0-0000-1000-8000-00805f9b34fb"],
+      optionalServices: ["generic_access", BLE_SERVICE_UUID],
     });
     appendChat("sys", "Selected: " + device.name);
     $("btStatus").textContent = "selected: " + device.name;
@@ -775,7 +912,7 @@ async function pairBluetooth() {
 }
 
 async function pollMic() {
-  // Phase 2 firmware will expose /api/audio/level returning {rms_db, peak_db, ts}.
+  // Phase 2 firmware exposes /api/audio/level returning {rms_db, peak_db, ts}.
   try {
     const m = await get("/api/audio/level", 1500);
     const rms = Math.max(-80, Math.min(0, m.rms_db ?? -80));
@@ -789,28 +926,72 @@ async function pollMic() {
     $("micState").textContent = "live";
     $("micState").style.color = "var(--green)";
     $("micLabel").style.opacity = "0.3";
+    STATE.micLastOkTs = Date.now();
   } catch {
-    $("micState").textContent = "awaiting endpoint";
-    $("micState").style.color = "var(--fg-dim)";
+    if (!STATE.micLastOkTs || Date.now() - STATE.micLastOkTs > 5000) {
+      $("micState").textContent = "awaiting endpoint";
+      $("micState").style.color = "var(--fg-dim)";
+    }
   }
 }
 
 async function snapshotNow() {
   try {
     const url = baseUrl() + "/api/camera/snapshot?t=" + Date.now();
-    const r = await fetch(url, { method: "GET" });
-    if (!r.ok) throw new Error("HTTP " + r.status);
+    const r = await fetch(url, { method: "GET", headers: { accept: "image/jpeg,image/*" } });
+    if (!r.ok) {
+      await handleCameraUnavailable(r);
+      return;
+    }
+    const type = (r.headers.get("content-type") || "").toLowerCase();
+    if (type && !type.includes("image")) {
+      showCameraBlocked("camera pending", "snapshot endpoint returned " + type);
+      return;
+    }
     const blob = await r.blob();
+    if (!blob.size) {
+      showCameraBlocked("camera pending", "snapshot endpoint returned an empty frame");
+      return;
+    }
     const obj = URL.createObjectURL(blob);
     const img = $("camFrame");
+    if (img.dataset.objectUrl) URL.revokeObjectURL(img.dataset.objectUrl);
+    img.dataset.objectUrl = obj;
     img.src = obj;
     img.style.display = "block";
     $("camPlaceholder").style.display = "none";
     $("camState").textContent = "frame @ " + new Date().toLocaleTimeString();
     $("camState").style.color = "var(--green)";
   } catch (e) {
-    $("camState").textContent = "snapshot failed: " + (e.message || e);
-    $("camState").style.color = "var(--red)";
+    showCameraBlocked("camera pending", e.message || String(e));
+  }
+}
+
+async function handleCameraUnavailable(response) {
+  let body = "";
+  try { body = await response.text(); } catch (e) {}
+  const gated = [404, 405, 501, 503].includes(response.status);
+  const title = gated ? "camera blocked" : "camera pending";
+  const detail = body ? "HTTP " + response.status + ": " + body.slice(0, 120) : "HTTP " + response.status;
+  showCameraBlocked(title, detail);
+}
+
+function showCameraBlocked(title, detail) {
+  const img = $("camFrame");
+  img.removeAttribute("src");
+  if (img.dataset.objectUrl) {
+    URL.revokeObjectURL(img.dataset.objectUrl);
+    delete img.dataset.objectUrl;
+  }
+  img.style.display = "none";
+  $("camPlaceholder").style.display = "block";
+  $("camPlaceholder").innerHTML =
+    `${escapeHtml(title)}<br><span style="opacity: 0.6;">${escapeHtml(detail)}</span>`;
+  $("camState").textContent = title;
+  $("camState").style.color = title === "camera blocked" ? "var(--amber)" : "var(--fg-dim)";
+  if ($("camAuto").checked) {
+    $("camAuto").checked = false;
+    ensureCamAuto();
   }
 }
 
@@ -820,6 +1001,7 @@ function ensureCamAuto() {
   if (camAutoTimer) { clearInterval(camAutoTimer); camAutoTimer = null; }
   if (on) camAutoTimer = setInterval(snapshotNow, 2000);
 }
+$("camAuto").addEventListener("change", ensureCamAuto);
 
 async function callRestart() {
   if (!confirm("Restart the device?")) return;
@@ -886,7 +1068,11 @@ function appendEvent(payload) {
   const log = $("evLog");
   const d = document.createElement("div");
   const ts = new Date().toLocaleTimeString();
-  d.innerHTML = `<span class="ts">${ts}</span>` + (typeof payload === "string" ? payload : JSON.stringify(payload));
+  const stamp = document.createElement("span");
+  stamp.className = "ts";
+  stamp.textContent = ts;
+  d.appendChild(stamp);
+  d.appendChild(document.createTextNode(typeof payload === "string" ? payload : JSON.stringify(payload)));
   log.prepend(d);
   while (log.children.length > 200) log.lastChild.remove();
   STATE.lastEventTs = Date.now();
@@ -946,12 +1132,14 @@ function connect() {
   STATE.host = $("hostInput").value.trim() || "esp-claw.local";
   localStorage.setItem("jarvis_host", STATE.host);
   if (STATE.pollTimer) clearInterval(STATE.pollTimer);
+  if (STATE.capsTimer) clearInterval(STATE.capsTimer);
+  if (STATE.batteryTimer) clearInterval(STATE.batteryTimer);
+  if (STATE.micTimer) clearInterval(STATE.micTimer);
   pollStatus(); loadCaps(); pollBattery(); pollMic(); openWs();
   STATE.pollTimer = setInterval(pollStatus, 4000);
-  setInterval(loadCaps, 30000);
-  setInterval(pollBattery, 8000);
-  setInterval(pollMic, 200);
-  $("camAuto").addEventListener("change", ensureCamAuto);
+  STATE.capsTimer = setInterval(loadCaps, 30000);
+  STATE.batteryTimer = setInterval(pollBattery, 8000);
+  STATE.micTimer = setInterval(pollMic, 500);
 }
 
 // ---------- Tab switching ----------
@@ -1045,10 +1233,7 @@ async function saveSettingsForm() {
     if (!el) continue;
     const cur = el.value;
     if (cur !== (SETTINGS_INITIAL[key] ?? "")) {
-      // numeric coercion for known numeric fields
-      if (key === "llm_timeout_ms" || key === "llm_max_tokens") {
-        diff[key] = cur === "" ? 0 : Number(cur);
-      } else if (key === "tg_allowed_chat_ids") {
+      if (key === "tg_allowed_chat_ids") {
         diff[key] = cur ? cur.split(",").map(s => s.trim()).filter(Boolean) : [];
       } else {
         diff[key] = cur;
@@ -1077,7 +1262,12 @@ async function saveSettingsForm() {
 $("btnSettingsSave").addEventListener("click", saveSettingsForm);
 $("btnSettingsReload").addEventListener("click", loadSettingsForm);
 
-connect();
+if (STATE.alivePreview) {
+  setOrb("live");
+  $("heroSub").textContent = "Alive preview — dashboard heartbeat visible.";
+} else {
+  connect();
+}
 </script>
 </body>
 </html>

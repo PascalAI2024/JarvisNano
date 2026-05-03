@@ -4,6 +4,7 @@ esp-claw/
 # Build artifacts
 build/
 .build_logs/
+.gradle/
 managed_components/
 dependencies.lock
 sdkconfig

@@ -63,11 +63,14 @@ class DeviceRepository(
             runCatching {
                 discovery.findEspClaw().also { resolved ->
                     hostLock.withLock {
-                        host = resolved
-                        _connection.value = ConnectionState.Connected(resolved)
+                        if (_manualOverride.value == null) {
+                            host = resolved
+                            _connection.value = ConnectionState.Connected(resolved)
+                        }
                     }
                 }
             }.onFailure { t ->
+                if (_manualOverride.value != null) return@onFailure
                 _connection.value = ConnectionState.Failed(t.message ?: "discovery failed")
             }
         }

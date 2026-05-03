@@ -105,7 +105,7 @@ This repo:
 1. Provides the **board adaptation** at [`boards/seeed/xiao_esp32s3_sense/`](boards/seeed/xiao_esp32s3_sense/) — board info, peripherals (full-duplex PDM on I²S0), devices, sdkconfig, setup C.
 2. Patches an [upstream codegen bug](#upstream-bug-fix) that broke ESP32-S3 builds.
 3. Ships a Docker-only build/flash flow so you don't need to install ESP-IDF locally.
-4. Adds a **status LED** Lua skill ([`firmware/lua/status_led.lua`](firmware/lua/status_led.lua)) that gives the device a visible heartbeat.
+4. Adds a native **status LED** heartbeat on GPIO21 that gives the physical board a boot flourish and alive pulse without consuming Lua heap.
 5. Provides a **browser admin** ([`dashboard/`](dashboard/)) — three-tab cockpit + onboarding wizard + ESP Web Tools flasher.
 6. Provides an **open-source Android companion** ([`android/`](android/)) — Kotlin + Compose, mDNS discovery, BLE skeleton, Gemma 4 stub.
 7. Ships **four parametric 3D-printable enclosures** ([`hardware/enclosure/`](hardware/enclosure/)) with mermaid plans + dimensioned drawings.
@@ -121,7 +121,7 @@ You need: Docker, the XIAO Sense, a USB-C cable, and Python 3.
 git clone git@github.com:PascalAI2024/JarvisNano.git
 cd JarvisNano
 
-# 1. Bootstrap: clones esp-claw, applies the codegen patch, copies our board files
+# 1. Bootstrap: clones esp-claw, applies patches, copies board + FATFS assets
 ./scripts/bootstrap.sh
 
 # 2. Build the firmware in Docker (~10 min the first time)
@@ -169,30 +169,34 @@ Open `dashboard/index.html` from any local server (`python3 -m http.server` in `
 | App | Repo | Purpose |
 | --- | --- | --- |
 | **`android/`** | this repo, `android/` | Open-source Kotlin + Jetpack Compose reference companion. Cockpit / Chat / Settings / About screens, mDNS discovery, BLE GATT skeleton (Phase 2), Gemma 4 E4B local-LLM interface (Phase 3). See [`android/README.md`](android/README.md). |
-| **ZeroChat** | private (`Ingenious-Digital-LLC/zerochat`) | Voice-first React Native 0.84 + Zustand 5 mobile companion. Integrates against the JarvisNano protocol via a `src/integrations/jarvisnano/` module — see [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the contract and [PR #1](https://github.com/Ingenious-Digital-LLC/zerochat/pull/1). |
+| **Protocol clients** | any repo | The public HTTP/WebSocket/MCP/BLE contract is documented in [`docs/PROTOCOL.md`](docs/PROTOCOL.md) so web, Android, React Native, desktop, and third-party clients can integrate without copying firmware internals. |
 
-Both clients compute the same five Phase-2 BLE GATT UUIDs from a single `uuidv5` namespace, so there's no hardcoded magic anywhere.
+Both clients compute the same five canonical Phase-2 BLE GATT UUIDs from a single `uuidv5` namespace. The UUID contract is shipped; the firmware GATT service is still planned.
 
 ---
 
-## Verified boot log
+## Current hardware status
+
+The USB-connected XIAO enumerates on macOS as `/dev/cu.usbmodem*` and has been flashed with the 8 MB ESP-Claw image. On boot it brings up FATFS, Wi-Fi STA/AP fallback, router rules, scheduler, Lua runtime, Web IM, and the MCP server. The current XIAO build intentionally disables the App Claw interactive serial REPL because ESP-IDF console command registration can exhaust internal heap after all Phase-2 services are started. USB serial logging remains enabled for boot diagnostics.
+
+The physical GPIO21 LED heartbeat is now native firmware in `edge_agent/main.c`, patched by `scripts/bootstrap.sh` during bootstrap. It starts after the core services are alive so the event router and scheduler get first claim on heap, and LED allocation is non-fatal. The older Lua `status_led.lua` prototype remains in FATFS for future state-pattern work, but the `boot_status_led` router rule is disabled on XIAO builds so Lua heap is not spent at boot.
+
+## Reference boot log
 
 ```
-I (578) PERIPH_I2S: I2S[0] PDM-RX, clk: 42, din: 41
-I (578) PERIPH_I2S: I2S[0] initialize success: 0x3c1fcd90
-I (578) PERIPH_I2S: I2S[0] PDM-TX, clk: -1, dout: 4
-I (578) PERIPH_I2S: I2S[0] initialize success: 0x3c1fcbbc
-I (578) BOARD_MANAGER: All peripherals initialized
-I (1948) claw_skill: Initialized registry with 51 skill(s)
-I (1958) cap_mcp_srv: MCP server ready: http://esp-claw.local:18791/mcp_server
-I (14808) claw_core: Initialized
-I (14808) claw_core: Started worker task
-I (24948) claw_core: context_loaded request=1 provider=cap Tools context_kind=tools context_len=8015
-I (57968) claw_core: completion request=1 status=done
-[status_led] on-board LED on gpio 21 active_low=true
+I (...) BOARD_MANAGER: All peripherals initialized
+I (...) app: FATFS mounted total=1482752 used=389120
+I (...) app: Wi-Fi STA ready: 192.168.50.80
+I (...) claw_event_router: Loaded 7 router rules
+I (...) cap_lua_rt: Lua runtime ready: scripts=/fatfs/scripts registered_modules=17
+I (...) cap_mcp_srv: MCP server ready: http://esp-claw.local:18791/mcp_server
+I (...) claw_event_router: event router task started
+I (...) app_claw: Publishing startup trigger event: startup/boot_completed
+I (...) app: Native status LED on gpio 21 active_low=1
+I (...) main_task: Returned from app_main()
 ```
 
-LLM round-trip verified end-to-end on hardware (XIAO ESP32-S3R8 / 8 MB octal PSRAM / IDF v5.5.4) with **MiniMax-M2.7** over a custom OpenAI-compatible endpoint. Status LED runs as a long-lived async Lua job that survives across chat turns.
+LLM round-trip was previously verified end-to-end on hardware (XIAO ESP32-S3R8 / 8 MB octal PSRAM / IDF v5.5.4) with **MiniMax-M2.7** over a custom OpenAI-compatible endpoint. The current flashed build is stable through service startup and the physical on-board LED alive effect. Remaining Phase-2 validation focus is LAN HTTP reachability from the dashboard/client network path, Android BLE diagnostics, TTS, battery ADC, and camera capture.
 
 ---
 
@@ -228,11 +232,13 @@ timeline
                     : ZeroChat integration PR
                     : 4 parametric 3D-printable enclosures
                     : Upstream esp_board_manager codegen PR
-    Phase 2         : PAM8002A analog amp + 28 mm speaker
+    Phase 2 partial : PDM-TX path + audio level endpoint
+                    : Canonical BLE UUIDs
+                    : PAM8002A analog amp + 28 mm speaker
                     : 503450 LiPo + on-board USB-C charger
                     : Real TTS + wake-word
                     : BLE GATT service (UUIDs in PROTOCOL.md)
-                    : Battery + audio + camera HTTP endpoints
+                    : Battery + camera HTTP endpoints
     Phase 3         : Seeed 1.28in round AMOLED touchscreen
                     : LVGL chat UI + animated emote face
                     : Privacy Mode (phone runs Gemma 4 E4B over BLE)
@@ -266,7 +272,7 @@ on the ESP32-P4. ESP32-S3, S2, C3 fail to compile.
 JarvisNano/
 ├── boards/seeed/xiao_esp32s3_sense/   # 5-file board adaptation (yaml + setup C)
 ├── firmware/                          # Lua skills baked into the FATFS image
-│   ├── lua/status_led.lua             #   on-board LED heartbeat
+│   ├── lua/status_led.lua             #   prototype state patterns; not auto-run on XIAO
 │   └── router_rules/                  #   event-router rules
 ├── hardware/enclosure/                # 4 parametric OpenSCAD designs + drawings
 ├── dashboard/                         # browser admin (Cockpit + Flash + Settings + Onboard)
@@ -274,10 +280,13 @@ JarvisNano/
 │   ├── onboard.html
 │   └── firmware/                      #   merged .bin + ESP Web Tools manifest
 ├── android/                           # Kotlin + Compose companion app
-├── docs/                              # ARCHITECTURE · BUILD · HARDWARE · ROADMAP · PROTOCOL
+├── docs/                              # ARCHITECTURE · BUILD · HARDWARE · ROADMAP · PROTOCOL · RELEASE_CHECKLIST
 ├── images/                            # mascot · wordmark · renders · dashboard shots · early concepts
-├── patches/                           # upstream codegen fix
-├── scripts/                           # bootstrap.sh · flash.sh
+├── patches/                           # upstream fixes + generated ESP-Claw patch artifacts
+├── scripts/                           # bootstrap.sh · flash.sh · smoke-build.sh
+├── CONTRIBUTING.md                    # contribution workflow and verification matrix
+├── SECURITY.md                        # vulnerability reporting and secret-handling policy
+├── CHANGELOG.md                       # release notes
 └── README.md
 ```
 

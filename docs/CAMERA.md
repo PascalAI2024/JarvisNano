@@ -1,6 +1,6 @@
 # Camera — current state + tomorrow plan
 
-Last updated: **2026-05-02** (end of day).
+Last updated: **2026-05-03**.
 
 ## TL;DR
 
@@ -65,7 +65,7 @@ Khangura's Feb-2026 write-up ([medium link](https://medium.com/@manjotkhangura/g
    - `fb_count = 2`
    - `jpeg_quality = 12`
    - 30 ms `vTaskDelay` after returning each frame buffer (avoids JPEG encoder timeout)
-4. **Re-flash with `STORAGE=1` ONCE** (the partition layout might shift slightly with a new component) — this wipes saved Wi-Fi creds. Re-provision via the dashboard's onboarding wizard at `192.168.4.1`, OR (faster) by POSTing `/api/config` from the AP and restarting. Saved Wi-Fi creds for the dev network: see `~/.claude/projects/-Users-pascalledesma-dev-JarvisRobot/memory/project_local_wifi.md`.
+4. **Re-flash with `STORAGE=1` ONCE** (the partition layout might shift slightly with a new component) — this wipes saved Wi-Fi credentials and LLM config. Re-provision via the dashboard's onboarding wizard at `192.168.4.1`, or by POSTing `/api/config` from the AP and restarting.
 5. **Test**:
    - `curl -m 10 -o /tmp/snap.jpg http://192.168.50.80/api/camera/snapshot` → should produce a valid 1280×720 JPEG (`file /tmp/snap.jpg` confirms)
    - Dashboard camera card → "Capture frame" → image renders

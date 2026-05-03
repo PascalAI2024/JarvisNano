@@ -41,7 +41,7 @@ class DeviceClient(
         DeviceConfig(raw = json.decodeFromString(JsonObject.serializer(), body))
     }
 
-    /** POST /api/config — full config replace. */
+    /** POST /api/config — partial config patch; absent keys stay untouched on-device. */
     suspend fun putConfig(host: String, config: DeviceConfig): Unit = withContext(Dispatchers.IO) {
         val payload = json.encodeToString(JsonObject.serializer(), config.raw)
         val req = Request.Builder()
@@ -69,8 +69,8 @@ class DeviceClient(
     /**
      * POST /api/webim/send.
      *
-     * Sends as `text/plain;charset=UTF-8` to skirt the firmware's CORS preflight gap —
-     * the body is still parsed as JSON server-side. The dashboard does the same.
+     * Sends as `text/plain;charset=UTF-8` for compatibility with older firmware.
+     * Current bootstrap builds also support OPTIONS /api/* for JSON clients.
      */
     suspend fun sendWebim(host: String, chatId: String, text: String): Unit = withContext(Dispatchers.IO) {
         val stringSerializer = String.serializer()

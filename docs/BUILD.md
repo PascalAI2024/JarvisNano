@@ -27,6 +27,10 @@ The full pipeline runs in Docker, so you only need:
 - Python 3 + `pip` (for `esptool` on the host — flashing happens outside Docker because Docker Desktop on macOS doesn't pass USB through)
 - Git
 
+Android companion builds are separate from the firmware flow. See
+[`android/README.md`](../android/README.md) for JDK, Gradle, and Android SDK
+requirements.
+
 The XIAO doesn't need to be plugged in for the build, only for the flash step.
 
 ```mermaid
@@ -40,7 +44,8 @@ sequenceDiagram
     U->>B: ./scripts/bootstrap.sh
     B->>B: clone esp-claw at pinned tag
     B->>B: cp boards/seeed/xiao_esp32s3_sense/ → esp-claw/.../boards/seeed/
-    B->>B: apply patches/0001-fix-pdm-rx-hp-filter-cap.patch
+    B->>B: cp firmware/lua + firmware/router_rules → FATFS image
+    B->>B: apply bootstrap patches + XIAO sdkconfig overrides
     U->>B: ./scripts/bootstrap.sh build
     B->>D: docker run espressif/idf:release-v5.5
     D->>D: idf.py set-target esp32s3
@@ -69,10 +74,15 @@ cd JarvisNano
 ```
 
 This:
-1. Clones `espressif/esp-claw` into `esp-claw/` (gitignored).
+1. Clones `espressif/esp-claw` into `esp-claw/` (gitignored) at the pinned `ESP_CLAW_REF` in `scripts/bootstrap.sh`.
 2. Copies `boards/seeed/xiao_esp32s3_sense/` into the upstream tree.
-3. Applies `patches/0001-fix-pdm-rx-hp-filter-cap.patch` to
+3. Copies `firmware/lua/*.lua` and `firmware/router_rules/router_rules.json` into the upstream FATFS image so prototype scripts and router rules are baked into flash.
+4. Applies `patches/0001-fix-pdm-rx-hp-filter-cap.patch` to
    `managed_components/espressif__esp_board_manager/peripherals/periph_i2s/periph_i2s.py`.
+5. Applies the local Phase-2 HTTP/camera/Wi-Fi patches used by the dashboard and onboarding flow.
+6. Patches a native GPIO21 status LED task into `edge_agent/main.c` so the physical board shows boot/alive state after core services are online, without starting a long-running Lua job.
+7. During `build`, forces the 8 MB flash profile and disables the App Claw interactive serial REPL for the XIAO build. USB serial logs stay enabled; only the heap-heavy command shell is skipped.
+8. Fails clearly if the pinned upstream tree drifts in a way that prevents required managed components or patches from applying.
 
 ### 3. Build inside Docker
 
@@ -100,8 +110,27 @@ ls /dev/cu.usbmodem*    # confirm enumeration
 If nothing shows up, hold the **BOOT** button while plugging in to force download mode.
 
 The script wraps `esptool.py write_flash` with the addresses esp-claw's
-build emits — bootloader, partition table, OTA data, the app, and the
-FATFS `storage` blob (which holds Lua skills + memory).
+build emits. By default it flashes bootloader, partition table, OTA data, and
+the app while preserving the FATFS `storage` partition so Wi-Fi and LLM
+configuration survive firmware iteration. Pass `STORAGE=1 ./scripts/flash.sh`
+for first install, partition-layout changes, or a deliberate provisioning wipe.
+
+After a build, run the post-build smoke check:
+
+```bash
+./scripts/smoke-build.sh
+```
+
+It records the pinned esp-claw commit, app/storage image sizes, and expected
+firmware/FATFS strings in `.build_logs/smoke-build.txt`.
+
+For manual flashing during firmware iteration:
+
+```bash
+cd esp-claw/application/edge_agent/build
+python3 -m esptool --chip esp32s3 -p /dev/cu.usbmodem1101 -b 460800 \
+  --before default_reset --after hard_reset write_flash @flash_args
+```
 
 ### 5. Talk to it
 
@@ -152,5 +181,6 @@ python -m esp_idf_monitor -p /dev/cu.usbmodem*
 | Build dies on `i2s_pdm_rx_slot_config_t … hp_en` | Codegen patch wasn't applied. Re-run `./scripts/bootstrap.sh`.                       |
 | Flash fails: `serial.serialutil.SerialException` | Hold **BOOT** while plugging in, then release after the second beep / port appears.  |
 | Boot loop / brownout                             | USB cable is power-only or the host port can't supply 500 mA. Try a different cable. |
+| Boot log reaches `Starting console REPL`, then `Out of memory!` | Rebuild with current `scripts/bootstrap.sh`; it disables the App Claw interactive CLI for the XIAO while preserving USB logs. |
 | AP never appears                                 | Wait 30 s — Wi-Fi calibration runs on first boot and adds latency.                   |
 | `esp-claw.local` doesn't resolve                 | Some routers block mDNS. Use the IP address printed on serial instead.               |

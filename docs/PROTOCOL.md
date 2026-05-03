@@ -1,8 +1,8 @@
 # JarvisNano Protocol
 
-> **Status:** Draft v1 — Phase 1 (HTTP + WebSocket + MCP) is shipped firmware. Phase 2 (BLE GATT) and Phase 3 (on-device LLM) are forward-looking and intentionally specified here so clients can plan the integration.
+> **Status:** Draft v1 — Phase 1 (HTTP + WebSocket + MCP) is shipped firmware. Phase 2 is partially shipped: PDM-TX audio output, `/api/audio/level`, `/api/battery` not-wired stub, `/api/wifi/scan`, API preflight patch, dashboard readiness, physical GPIO21 alive heartbeat, and the canonical BLE UUIDs are in place; the BLE GATT service, ADC-backed battery readings, camera capture, TTS, and wake-word path are still planned. Phase 3 (on-device LLM) remains forward-looking.
 
-This document is the stable contract that any client — the open-source Kotlin/Compose companion in [`/android`](../android/), the [ZeroChat](https://github.com/Ingenious-Digital-LLC/zerochat) React Native app, third-party tooling — integrates against. It describes how to discover a JarvisNano device, talk to it, listen to it, and (in upcoming phases) hand it off to a phone for on-device inference.
+This document is the stable contract that any client — the open-source Kotlin/Compose companion in [`/android`](../android), web dashboards, React Native apps, desktop tools, or third-party tooling — integrates against. It describes how to discover a JarvisNano device, talk to it, listen to it, and (as later phases land) hand it off to a phone for on-device inference.
 
 The firmware running this protocol is [ESP-Claw](https://github.com/espressif/esp-claw) on a Seeed XIAO ESP32-S3 Sense. See [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) for the on-device runtime story.
 
@@ -74,11 +74,11 @@ sequenceDiagram
 
 All endpoints are served on port `80`. The base URL is `http://esp-claw.local`.
 
-### 3.1 CORS workaround (read this first)
+### 3.1 CORS
 
-The firmware does not implement a CORS preflight handler — it has no `OPTIONS` route. A browser-style preflight (`OPTIONS` + `Access-Control-Request-Method`) returns `404 Not Found`, which the browser surfaces as a CORS failure.
+Current bootstrap builds apply [`patches/0004-http-phase2-preflight-battery.patch`](../patches/0004-http-phase2-preflight-battery.patch), which adds `OPTIONS /api/*` and returns CORS preflight headers.
 
-**Workaround:** for any non-`GET`, send `Content-Type: text/plain;charset=UTF-8` with a JSON-encoded string body. This is a "simple request" under the CORS spec and skips preflight entirely. The firmware ignores the `Content-Type` and parses the raw body as JSON regardless.
+Older firmware without that patch needs this workaround: for any non-`GET`, send `Content-Type: text/plain;charset=UTF-8` with a JSON-encoded string body. This is a "simple request" under the CORS spec and skips preflight entirely. The firmware ignores the `Content-Type` and parses the raw body as JSON regardless.
 
 ```http
 POST /api/webim/send HTTP/1.1
@@ -88,54 +88,76 @@ Content-Type: text/plain;charset=UTF-8
 {"chat_id":"web-1","text":"hello"}
 ```
 
-Native (non-browser) clients MAY use `application/json` — the workaround is only required for browsers and embedded WebViews.
-
-This is a Phase-3 fixme. Tracking issue: TODO add link.
+Native (non-browser) clients MAY use `application/json`. Browser clients SHOULD keep using the simple-request form until older firmware without the preflight patch is no longer supported. Current JSON responses should include `Access-Control-Allow-Origin: *`; if a new endpoint is added, verify both the `OPTIONS` response and the final response.
 
 ### 3.2 Endpoint matrix
 
 | Method | Path                  | Body              | Returns                    | Notes                                  |
 | ------ | --------------------- | ----------------- | -------------------------- | -------------------------------------- |
+| OPTIONS| `/api/*`              | —                 | 204                        | CORS preflight for API clients.        |
 | GET    | `/api/status`         | —                 | `StatusBody`               | Cheap; safe to poll every 5s.          |
 | GET    | `/api/config`         | —                 | `ConfigBody`               | LLM provider, Wi-Fi SSID, agent name.  |
 | POST   | `/api/config`         | `Partial<Config>` | `{ok: true}`               | Triggers a save; reboot for some keys. |
-| GET    | `/api/capabilities`   | —                 | `CapabilitiesBody`         | Static — built-in tool registry.       |
+| GET    | `/api/capabilities`   | —                 | `CapabilityListBody`       | Static tool/capability registry.       |
 | GET    | `/api/lua-modules`    | —                 | `LuaModuleListBody`        | Dynamic Lua skill index.               |
 | GET    | `/api/files?path=`    | —                 | `FileListBody`             | FATFS browser. `path` is `/`-rooted.   |
 | GET    | `/api/webim/status`   | —                 | `{ok: bool, bound: bool}`  | `bound=false` ⇒ WS will reject sends.  |
 | POST   | `/api/webim/send`     | `WebImSendBody`   | `{ok: true}`               | See §3.4.                              |
+| GET    | `/api/audio/level`    | —                 | `AudioLevelBody`           | Phase 2 mic level telemetry.           |
+| GET    | `/api/battery`        | —                 | `BatteryBody`              | Stubbed as not wired until ADC lands.  |
+| GET    | `/api/camera/snapshot`| —                 | JPEG bytes                 | Gated/blocked until camera driver lands. |
+| GET    | `/api/wifi/scan`      | —                 | `WifiScanBody`             | Shipped by bootstrap patch; used by onboarding wizard. |
 | POST   | `/api/restart`        | `{}`              | `{ok: true}` then closes   | Soft reset.                            |
 
 ### 3.3 Schemas
 
 ```ts
 interface StatusBody {
-  firmware: "esp-claw";
-  version: string;            // e.g. "1.4.2"
-  uptime_ms: number;
-  free_heap: number;          // bytes
-  psram_free: number;         // bytes; 0 if no PSRAM
-  wifi: { ssid: string; rssi: number; ip: string };
-  llm: { provider: string; model: string; ready: boolean };
-  agent_state: "idle" | "listening" | "thinking" | "speaking" | "error";
+  wifi_connected: boolean;
+  ip?: string;
+  ap_ssid?: string;
+  ap_active?: boolean;
+  wifi_mode?: string;
+  storage_base_path?: string;
 }
 
 interface ConfigBody {
   agent_name: string;
-  llm_provider: "openai" | "anthropic" | "minimax" | "deepseek" | "qwen" | "custom";
+  llm_backend_type: string;
+  llm_profile: string;
   llm_model: string;
-  llm_endpoint?: string;      // for custom
+  llm_base_url?: string;
+  llm_auth_type?: "bearer" | "api_key" | "none" | string;
+  llm_timeout_ms?: number;
+  llm_max_tokens?: number;
   wifi_ssid: string;          // never returns the password
-  tts_voice: string;
-  tts_speed: number;          // 0.5–2.0
+  [key: string]: unknown;
 }
 
-interface CapabilitiesBody {
-  capabilities: { id: string; name: string; description: string; group: string }[];
+interface CapabilityListBody {
+  items: { group_id: string; display_name: string; default_llm_visible?: boolean }[];
 }
 
 interface LuaModuleListBody {
-  modules: { name: string; size: number; mtime: number }[];
+  items: { module_id: string; display_name: string }[];
+}
+
+interface AudioLevelBody {
+  rms_db: number;
+  peak_db: number;
+  ts: number;
+}
+
+interface BatteryBody {
+  wired: boolean;
+  mV: number;
+  pct: number;
+  state: "not_wired" | "discharging" | "charging" | "full" | string;
+  source?: "stub" | "adc" | string;
+}
+
+interface WifiScanBody {
+  aps: { ssid: string; rssi: number; channel?: number; auth?: string }[];
 }
 
 interface WebImSendBody {
@@ -264,7 +286,7 @@ ns = uuid.UUID("6e617676-2d6a-7276-732d-6e616e6f0000")
 assert str(uuid.uuid5(ns, "jarvisnano.service")) == "1ec185cd-4bc7-5797-a8b1-0f5b66c59757"
 ```
 
-These UUIDs are the contract. The Phase-2 firmware will advertise the `service` UUID and expose the four characteristics under it.
+These UUIDs are the contract. The Phase-2 GATT service is not shipped yet; when implemented, firmware will advertise the `service` UUID and expose the four characteristics under it.
 
 ### 6.2 Service shape
 
@@ -288,7 +310,7 @@ classDiagram
 | `state`     | `notify`                | UTF-8 JSON line: `{"state": "IDLE\|LISTENING\|THINKING\|SPEAKING\|ERROR", "ts_ms": 12345, "detail": "...?"}` — one line per state change. |
 | `control`   | `write`                 | UTF-8 JSON command. See §6.4.                                      |
 
-MTU: clients SHOULD request 247 (BLE 4.2 LE Data Length Extension). The firmware will negotiate down on older centrals.
+MTU: clients SHOULD request 247 (BLE 4.2 LE Data Length Extension). The firmware implementation should negotiate down on older centrals.
 
 ### 6.4 Control commands
 
@@ -383,7 +405,7 @@ async function send(host: string, chatId: string, text: string) {
   const res = await fetch(`http://${host}/api/webim/send`, {
     method: "POST",
     headers: {
-      // CORS workaround — see §3.1
+      // Legacy browser compatibility — see §3.1
       "Content-Type": "text/plain;charset=UTF-8",
       "X-JarvisNano-Protocol": "1",
     },

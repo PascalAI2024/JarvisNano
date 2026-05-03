@@ -27,6 +27,7 @@ class MainActivity : ComponentActivity() {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     JarvisNanoNavHost(
                         repository = app.deviceRepository,
+                        bleClient = app.bleClient,
                         sessionId = sessionId,
                     )
                 }

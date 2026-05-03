@@ -15,16 +15,18 @@ Apache-2.0.
 | Phase | Status      | Surface                                                      |
 | ----- | ----------- | ------------------------------------------------------------ |
 | 1     | Implemented | Wi-Fi (HTTP + WebSocket) chat, telemetry, configuration       |
-| 2     | Scaffolded  | BLE GATT bridge for direct mic/speaker/control                |
+| 2     | In progress | BLE scan/connect UI + canonical GATT UUID readiness           |
 | 3     | Marked TODO | On-device Gemma 4 E4B (multimodal) for offline private mode   |
 
 ### Phase 1 features (working)
 
 - **Cockpit** — live telemetry orb, system / Wi-Fi / LLM / capability tiles,
-  restart and new-session controls. Polls `/api/status` every 4 s.
+  BLE scan/connect readiness, restart and new-session controls. Polls
+  `/api/status` every 4 s.
 - **Chat** — `/ws/webim` WebSocket subscription with user / agent / system
-  bubbles. Sends through `/api/webim/send` (uses `text/plain` body to skirt the
-  firmware's CORS preflight gap, which is also what the web dashboard does).
+  bubbles. Sends through `/api/webim/send` with a `text/plain` body for
+  compatibility with older firmware; current bootstrap builds also register
+  `OPTIONS /api/*` for JSON clients.
 - **Settings** — pulls `/api/config`, groups fields by Wi-Fi / LLM / IM /
   Misc, masks anything ending in `_password` / `_secret` / `_token` /
   `_api_key` with a show-hide toggle, then POSTs the full blob back. Save +
@@ -59,21 +61,72 @@ Apache-2.0.
 
 ## Build from the CLI
 
-The Gradle wrapper jar is intentionally **not** committed. Generate it once:
+This repo intentionally does **not** commit `gradlew`, `gradlew.bat`, or
+`gradle/wrapper/gradle-wrapper.jar`. The checked-in wrapper properties pin the
+expected Gradle distribution, but contributors should use a system Gradle first
+and keep any locally generated wrapper files untracked.
+
+Required local tools:
+
+- JDK 17
+- Android SDK with API 35 installed
+- System Gradle compatible with the pinned wrapper distribution
+
+On macOS with Homebrew, the shortest clean setup is:
+
+```bash
+brew install gradle
+brew install --cask android-commandlinetools
+
+export ANDROID_HOME=/opt/homebrew/share/android-commandlinetools
+export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+
+sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+```
+
+If you use Android Studio instead, install Android SDK Platform 35 and Android
+SDK Build-Tools 35 from **Settings -> Languages & Frameworks -> Android SDK**,
+then either export `ANDROID_HOME` or create an untracked `local.properties`
+file containing `sdk.dir=/path/to/android/sdk`.
+
+Preferred CLI path:
+
+```bash
+cd android
+gradle :app:assembleDebug
+```
+
+If your machine does not already have Gradle, install it with your package
+manager or SDKMAN. If you generate wrapper files locally for convenience, do not
+commit the generated scripts or `gradle-wrapper.jar`:
 
 ```bash
 cd android
 gradle wrapper --gradle-version 8.10.2
-```
-
-(That requires a system Gradle. After that, all subsequent builds use the
-wrapper.) Then:
-
-```bash
 ./gradlew :app:assembleDebug
 ```
 
 Output APK: `app/build/outputs/apk/debug/app-debug.apk`.
+
+### Test scaffold
+
+The project has dependency-free placeholder sources under `src/test` and
+`src/androidTest` so the source sets compile once Gradle is available. They are
+intentionally not full assertions yet; they reserve the package and commands for
+future unit, integration, and device tests without forcing a test framework
+choice in this slice.
+
+```bash
+cd android
+gradle :app:testDebugUnitTest
+gradle :app:compileDebugAndroidTestKotlin
+```
+
+Run device tests only when a phone or emulator is connected:
+
+```bash
+gradle :app:connectedDebugAndroidTest
+```
 
 ---
 
@@ -81,7 +134,7 @@ Output APK: `app/build/outputs/apk/debug/app-debug.apk`.
 
 ```bash
 # Pair your phone via USB with developer mode + USB debug enabled.
-./gradlew :app:installDebug
+gradle :app:installDebug
 adb shell am start -n com.ingeniousdigital.jarvisnano.debug/com.ingeniousdigital.jarvisnano.MainActivity
 ```
 
@@ -96,6 +149,49 @@ Device address** and paste the device's IP manually.
   physical device.
 - The emulator can hit the device over Wi-Fi if both are on a network the
   host machine can route to.
+
+---
+
+## Acceptance checklist
+
+Use this checklist for Android build and smoke-test signoff.
+
+### Build and tests
+
+- [ ] From `android/`, `gradle :app:assembleDebug` completes.
+- [ ] From `android/`, `gradle :app:testDebugUnitTest` completes.
+- [ ] From `android/`, `gradle :app:compileDebugAndroidTestKotlin` completes.
+- [ ] No `gradlew`, `gradlew.bat`, or `gradle/wrapper/gradle-wrapper.jar` files
+      are committed.
+
+### Install and launch
+
+- [ ] `adb devices` lists the target phone as `device`.
+- [ ] `gradle :app:installDebug` installs the debug APK.
+- [ ] `adb shell am start -n com.ingeniousdigital.jarvisnano.debug/com.ingeniousdigital.jarvisnano.MainActivity`
+      opens the companion app.
+- [ ] App remains responsive after rotating the phone and backgrounding /
+      foregrounding once.
+
+### HTTP and WebSocket
+
+- [ ] Phone and JarvisNano are on the same Wi-Fi network.
+- [ ] Cockpit discovers `esp-claw.local` or connects after setting a manual IP.
+- [ ] Cockpit telemetry updates from `/api/status` for at least three polling
+      intervals.
+- [ ] Chat sends a message through `/api/webim/send` and receives WebSocket
+      updates from `/ws/webim`.
+- [ ] Settings loads `/api/config`, preserves masked secret fields, saves a
+      non-secret change, and the device accepts restart from the app.
+
+### BLE
+
+- [ ] Test on a physical Android phone; standard emulators cannot validate BLE.
+- [ ] Android permission prompts are shown and accepted when scanning.
+- [ ] BLE scan shows the JarvisNano advertisement.
+- [ ] Connect succeeds and the displayed service / characteristic UUIDs match
+      the BLE README.
+- [ ] Disconnect and reconnect work without force-closing the app.
 
 ---
 

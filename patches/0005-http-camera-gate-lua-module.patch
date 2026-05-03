@@ -1,0 +1,69 @@
+From: Pascal Ledesma <pascal@ingeniousdigital.com>
+Date: 2026-05-03
+Subject: [PATCH] http_server: gate camera route on camera service module
+
+The HTTP camera route calls camera_open(), camera_capture_jpeg(), and
+camera_free_buffer() from lua_module_camera_service.c. Board camera
+support alone is not enough to guarantee those symbols are linked:
+lua_module_camera is also optional behind APP_CLAW_CAP_LUA and
+APP_CLAW_LUA_MODULE_CAMERA.
+
+Gate the CMake dependency, private include path, and route implementation
+on the same three conditions used by the optional component dependency.
+When the camera service is unavailable, keep the route registration as a
+no-op so the rest of the firmware links and the dashboard can report
+camera as pending instead of breaking the build.
+
+Patch targets:
+  application/edge_agent/components/http_server/CMakeLists.txt
+  application/edge_agent/components/http_server/http_server_camera_api.c
+
+---
+diff --git a/application/edge_agent/components/http_server/CMakeLists.txt b/application/edge_agent/components/http_server/CMakeLists.txt
+--- a/application/edge_agent/components/http_server/CMakeLists.txt
++++ b/application/edge_agent/components/http_server/CMakeLists.txt
+@@ -13,7 +13,7 @@ endif()
+
+ set(http_server_extra_requires "")
+-if(CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT)
++if(CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT AND CONFIG_APP_CLAW_CAP_LUA AND CONFIG_APP_CLAW_LUA_MODULE_CAMERA)
+     list(APPEND http_server_extra_requires lua_module_camera)
+ endif()
+@@ -57,7 +57,7 @@ target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-missing-field-initializers)
+ # Camera service header lives next to its .c in lua_module_camera/src/
+ # (not exported as a public include). Reach into it directly so the
+ # camera HTTP handler can call camera_open / camera_capture_jpeg.
+-if(CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT)
++if(CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT AND CONFIG_APP_CLAW_CAP_LUA AND CONFIG_APP_CLAW_LUA_MODULE_CAMERA)
+     target_include_directories(${COMPONENT_LIB} PRIVATE
+         "${CMAKE_CURRENT_LIST_DIR}/../../../../components/lua_modules/lua_module_camera/src")
+ endif()
+diff --git a/application/edge_agent/components/http_server/http_server_camera_api.c b/application/edge_agent/components/http_server/http_server_camera_api.c
+--- a/application/edge_agent/components/http_server/http_server_camera_api.c
++++ b/application/edge_agent/components/http_server/http_server_camera_api.c
+@@ -19,7 +19,7 @@
+  */
+ #include "http_server_priv.h"
+
+-#if CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT
++#if CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT && CONFIG_APP_CLAW_CAP_LUA && CONFIG_APP_CLAW_LUA_MODULE_CAMERA
+
+ #include <stdint.h>
+ #include <stdlib.h>
+@@ -118,4 +118,15 @@ esp_err_t http_server_register_camera_routes(httpd_handle_t server)
+     return httpd_register_uri_handler(server, &handler);
+ }
+
+-#endif /* CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT */
++#else  /* camera service unavailable */
++
++#include "esp_log.h"
++
++esp_err_t http_server_register_camera_routes(httpd_handle_t server)
++{
++    (void)server;
++    /* No camera service in this build; skip route registration. */
++    return ESP_OK;
++}
++
++#endif /* camera service gate */

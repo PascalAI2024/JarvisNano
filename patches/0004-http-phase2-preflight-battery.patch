@@ -1,0 +1,84 @@
+From: Pascal Ledesma <pascal@ingeniousdigital.com>
+Date: 2026-05-03
+Subject: [PATCH] http_server: add API preflight + battery not-wired stub
+
+Phase 2 clients should be able to send normal JSON requests without
+using the dashboard's text/plain workaround. Register a wildcard
+`OPTIONS /api/*` handler that returns CORS preflight headers.
+
+The dashboard also polls `/api/battery`. Until the LiPo sense divider
+is wired, expose an explicit `not_wired` JSON response instead of a
+404. This keeps the UI honest without touching ADC or board-manager
+hardware APIs.
+
+Patch targets:
+  application/edge_agent/components/http_server/http_server_core.c
+  application/edge_agent/components/http_server/http_server_status_api.c
+
+---
+diff --git a/application/edge_agent/components/http_server/http_server_core.c b/application/edge_agent/components/http_server/http_server_core.c
+--- a/application/edge_agent/components/http_server/http_server_core.c
++++ b/application/edge_agent/components/http_server/http_server_core.c
+@@ -15,6 +15,18 @@ static const char *TAG = "http_server";
+
+ static http_server_ctx_t s_ctx;
+
++static esp_err_t api_options_handler(httpd_req_t *req)
++{
++    /* Phase 2 browser preflight for JSON API clients. */
++    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
++    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
++    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type, X-JarvisNano-Protocol");
++    httpd_resp_set_hdr(req, "Access-Control-Max-Age", "86400");
++    httpd_resp_set_status(req, "204 No Content");
++    return httpd_resp_send(req, NULL, 0);
++}
++
+ http_server_ctx_t *http_server_ctx(void)
+ {
+     return &s_ctx;
+@@ -67,6 +79,11 @@ esp_err_t http_server_start(void)
+     config.uri_match_fn = httpd_uri_match_wildcard;
+
+     ESP_RETURN_ON_ERROR(httpd_start(&s_ctx.server, &config), TAG, "Failed to start HTTP server");
++    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_ctx.server, &(httpd_uri_t) {
++                            .uri = "/api/*",
++                            .method = HTTP_OPTIONS,
++                            .handler = api_options_handler,
++                        }), TAG, "Failed to register API OPTIONS route");
+     ESP_RETURN_ON_ERROR(http_server_register_assets_routes(s_ctx.server), TAG, "Failed to register assets routes");
+     ESP_RETURN_ON_ERROR(http_server_register_capabilities_routes(s_ctx.server), TAG, "Failed to register capability routes");
+     ESP_RETURN_ON_ERROR(http_server_register_lua_modules_routes(s_ctx.server), TAG, "Failed to register Lua module routes");
+diff --git a/application/edge_agent/components/http_server/http_server_status_api.c b/application/edge_agent/components/http_server/http_server_status_api.c
+--- a/application/edge_agent/components/http_server/http_server_status_api.c
++++ b/application/edge_agent/components/http_server/http_server_status_api.c
+@@ -30,6 +30,22 @@ static esp_err_t status_handler(httpd_req_t *req)
+     return http_server_send_json_response(req, root);
+ }
+
++static esp_err_t battery_handler(httpd_req_t *req)
++{
++    cJSON *root = cJSON_CreateObject();
++    if (!root) {
++        httpd_resp_send_500(req);
++        return ESP_ERR_NO_MEM;
++    }
++
++    cJSON_AddBoolToObject(root, "wired", false);
++    cJSON_AddNumberToObject(root, "mV", 0);
++    cJSON_AddNumberToObject(root, "pct", 0);
++    http_server_json_add_string(root, "state", "not_wired");
++    http_server_json_add_string(root, "source", "stub");
++    return http_server_send_json_response(req, root);
++}
++
+ static esp_err_t restart_handler(httpd_req_t *req)
+ {
+     http_server_ctx_t *ctx = http_server_ctx();
+@@ -52,6 +68,7 @@ esp_err_t http_server_register_status_routes(httpd_handle_t server)
+ {
+     const httpd_uri_t handlers[] = {
+         { .uri = "/api/status", .method = HTTP_GET, .handler = status_handler },
++        { .uri = "/api/battery", .method = HTTP_GET, .handler = battery_handler },
+         { .uri = "/api/restart", .method = HTTP_POST, .handler = restart_handler },
+     };

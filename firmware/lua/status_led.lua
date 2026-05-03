@@ -3,12 +3,12 @@
 
   Drives the on-board user LED of the Seeed XIAO ESP32-S3 Sense
   (GPIO21, active-LOW) with binary on/off patterns. We use direct gpio
-  control instead of PWM so the LED blink patterns are crisp and
-  reliable.
+  control with short duty-cycle frames, so the single LED gets a
+  soft "alive" pulse without requiring PWM hardware.
 
   State patterns:
-    BOOT       three quick bright flashes
-    IDLE       slow heartbeat — short wink every 2 s ("I'm alive")
+    BOOT       quick wake flash + soft settle pulse
+    IDLE       soft double heartbeat every ~2 s ("I'm alive")
     LISTENING  medium blink, ~3 Hz
     THINKING   fast strobe, ~6 Hz
     SPEAKING   double-tap heartbeat
@@ -43,6 +43,10 @@ local LED_OFF = ACTIVE_LOW and 1 or 0
 
 local STATE = "BOOT"
 
+local BOOT_SETTLE_PULSE = {2, 4, 7, 11, 15, 18, 15, 11, 7, 4, 2}
+local IDLE_MAIN_PULSE   = {2, 4, 7, 11, 15, 18, 15, 11, 7, 4, 2}
+local IDLE_ECHO_PULSE   = {2, 5, 9, 12, 9, 5, 2}
+
 local function led(level) gpio.set_level(PIN, level) end
 local function on()       led(LED_ON)  end
 local function off()      led(LED_OFF) end
@@ -54,21 +58,44 @@ local function blink(times, on_ms, off_ms)
     end
 end
 
+local function glow_frame(on_ms, frame_ms)
+    if on_ms > 0 then
+        on()
+        delay.delay_ms(on_ms)
+    end
+    if frame_ms > on_ms then
+        off()
+        delay.delay_ms(frame_ms - on_ms)
+    end
+end
+
+local function soft_pulse(levels, frame_ms)
+    for i = 1, #levels do
+        glow_frame(levels[i], frame_ms)
+    end
+    off()
+end
+
 -- ---------------------------------------------------------------
 -- State runners (each runs one full cycle; main loop repeats)
 -- ---------------------------------------------------------------
 
--- 3 quick bright flashes, then darkness.
+-- Wake flash, then a soft settle pulse so power-on is visible at a glance.
 local function run_boot()
-    blink(3, 100, 130)
-    delay.delay_ms(200)
+    blink(2, 70, 80)
+    soft_pulse(BOOT_SETTLE_PULSE, 18)
+    delay.delay_ms(120)
+    blink(1, 220, 180)
     STATE = "IDLE"
 end
 
--- Heartbeat: short wink, long pause. 1 cycle ~ 2 s. "Alive, awaiting input."
+-- Soft double heartbeat. On a single active-low LED this reads as
+-- "powered, booted, and waiting" without looking like an error blink.
 local function run_idle()
-    on();  delay.delay_ms(120)
-    off(); delay.delay_ms(1880)
+    soft_pulse(IDLE_MAIN_PULSE, 18)
+    delay.delay_ms(120)
+    soft_pulse(IDLE_ECHO_PULSE, 16)
+    delay.delay_ms(1500)
 end
 
 -- Medium blink ~3 Hz. Mic is capturing.

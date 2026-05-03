@@ -9,7 +9,7 @@ utterance flows through it.
 flowchart TB
     subgraph HW[Hardware XIAO ESP32-S3 Sense]
         MIC[PDM mic<br/>MSM261D3526H1CPM<br/>GPIO41/42]
-        OV[OV2640 camera<br/>on-board DVP]
+        OV[OV3660 / OV2640 camera<br/>on-board DVP]
         SPK[PAM8002A amp<br/>+ 28 mm speaker<br/>via GPIO4 + RC LPF]
         LED[On-board user LED<br/>GPIO21 active-low]
         FLASH[8 MB QIO flash 80 MHz]
@@ -37,7 +37,7 @@ flowchart TB
         SCHED[cap_scheduler cron triggers]
         MEM[claw_memory structured RAG]
         SKILLS[claw_skill 51 skills loaded]
-        LUARTI[Lua runtime<br/>chat-coding + status_led.lua]
+        LUARTI[Lua runtime<br/>chat-coding + prototype status_led.lua]
     end
 
     subgraph CAPS[18 capability groups]
@@ -154,14 +154,19 @@ sequenceDiagram
 
 ## Status LED state machine
 
-The on-board GPIO21 user LED (active-LOW) is driven by an async Lua job
-that runs forever once started. State controlled by the agent loop;
-fallback patterns work even with no device events.
+The on-board GPIO21 user LED (active-LOW) is driven by a native firmware
+task started after `app_claw_start()` brings the event router, scheduler, Lua,
+MCP, and Web IM online. This avoids spending Lua heap during boot and gives
+the core services first claim on task memory. LED startup is intentionally
+non-fatal: if the heartbeat task cannot allocate, the firmware keeps running
+and logs a warning. The Lua `status_led.lua` file remains as a prototype for
+future listening/thinking/speaking/error state patterns, but it is not
+auto-started by router rules on the XIAO build.
 
 ```mermaid
 stateDiagram-v2
     [*] --> BOOT
-    BOOT --> IDLE: 3 quick flashes
+    BOOT --> IDLE: boot flourish + settle pulse
     IDLE --> LISTENING: mic VAD opens
     LISTENING --> THINKING: utterance complete → LLM dispatched
     THINKING --> SPEAKING: TTS playback starts
@@ -169,7 +174,7 @@ stateDiagram-v2
     LISTENING --> IDLE: timeout / cancel
     THINKING --> ERROR: LLM failure
     ERROR --> IDLE: SOS triple-blink + pause
-    IDLE --> IDLE: heartbeat wink every 2 s
+    IDLE --> IDLE: soft double heartbeat every ~2 s
 ```
 
 ## Why structured memory matters
@@ -206,9 +211,15 @@ flowchart TD
     H --> I[claw_event_router<br/>load /fatfs/router_rules/router_rules.json]
     I --> J[cap_scheduler]
     J --> K[http_server port 80<br/>+ WS /ws/webim<br/>+ MCP server 18791]
-    K --> L[CLI REPL on USB-Serial-JTAG]
-    L --> M[idle awaiting LLM creds<br/>OR claw_core ready]
+    K --> L[publish startup/boot_completed]
+    L --> M[native GPIO21 status LED task]
+    M --> N[idle awaiting LLM creds<br/>OR claw_core ready]
 ```
+
+USB serial remains enabled for logs. The App Claw interactive serial REPL is
+disabled in the XIAO bootstrap build because its command registration can
+exhaust internal heap after Wi-Fi, Lua, router, scheduler, Web IM, MCP, and
+camera startup.
 
 ## File layout (firmware side)
 
@@ -217,7 +228,7 @@ The `application/edge_agent/` ESP-IDF project is laid out as follows
 
 ```
 edge_agent/
-├── main/                              # app entry, Wi-Fi mgr, CLI
+├── main/                              # app entry, Wi-Fi mgr, HTTP + app startup
 ├── components/                        # capability impls (im, mcp, scheduler, memory…)
 ├── boards/                            # the YAML+C board adaptations
 │   ├── espressif/                     #   upstream-provided
@@ -226,8 +237,8 @@ edge_agent/
 ├── managed_components/                # idf-component-manager pulls
 │   └── espressif__esp_board_manager/  #   ← codegen patched here
 ├── fatfs_image/                       # FATFS contents baked into flash
-│   ├── scripts/builtin/status_led.lua #   ← OURS
-│   ├── router_rules/router_rules.json #   includes our boot_status_led rule
+│   ├── scripts/builtin/status_led.lua #   ← prototype; legacy rule disabled on XIAO
+│   ├── router_rules/router_rules.json #   event-router rules
 │   └── skills/                        #   capability docs for the LLM
 └── partitions_8MB.csv                 # 8 MB layout used on the XIAO
 ```
@@ -243,5 +254,5 @@ the `X-JarvisNano-Protocol: 1` header.
 | HTTP REST | port 80 | dashboard · Android · ZeroChat |
 | WebSocket `/ws/webim` | port 80 | dashboard · Android · ZeroChat |
 | MCP JSON-RPC | port 18791 `/mcp_server` | other MCP peers |
-| BLE GATT (Phase 2) | UUIDs in PROTOCOL.md | Android · ZeroChat |
+| BLE GATT (Phase 2) | canonical UUIDs in PROTOCOL.md; service planned | Android · ZeroChat |
 | On-device LLM hand-off (Phase 3) | BLE audio + control | Android (Gemma 4 E4B local) |
