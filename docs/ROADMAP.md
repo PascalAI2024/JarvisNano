@@ -52,8 +52,8 @@
 - [ ] Wire **503450 LiPo** to BAT+ pad — XIAO Sense has on-board USB-C charger; battery cavity in the Monolith is sized
 - [ ] Implement firmware HTTP endpoints the dashboard already calls:
   - [ ] `GET /api/battery` → `{mV, pct, state}`
-  - [ ] `GET /api/audio/level` → `{rms_db, peak_db, ts}`
-  - [ ] `GET /api/camera/snapshot` → JPEG bytes (enables OV2640 in `board_devices.yaml`)
+  - [x] `GET /api/audio/level` → `{rms_db, peak_db, ts}` — shipped 2026-05-01
+  - [ ] `GET /api/camera/snapshot` → JPEG bytes — endpoint exists, wired into dashboard + Android Camera tab. **Blocked**: 2026 batches ship OV3660 (not the documented OV2640) and the upstream `esp_cam_sensor` driver has two cascading bugs. NO-SOI bug fixed locally ([patch 0003](../patches/0003-dvp-cam-scan-for-jpeg-soi.patch)); a SCCB-mid-format-set failure still blocks capture. Switching to the legacy `espressif/esp32-camera` driver is the planned next move — see [CAMERA.md](CAMERA.md).
   - [ ] `GET /api/wifi/scan` → list of nearby APs (used by onboarding wizard step 2)
   - [ ] `OPTIONS *` → 204 with CORS headers (drops the `text/plain` workaround)
 - [ ] Implement **BLE GATT service** matching the canonical UUIDs in [`PROTOCOL.md`](PROTOCOL.md) — characteristics: `audio_in` (notify, PCM16 mono 16 kHz), `audio_out` (write), `state` (notify, JSON), `control` (write, JSON cmds)
