@@ -25,6 +25,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.ingeniousdigital.jarvisnano.R
+import com.ingeniousdigital.jarvisnano.ble.BleClient
 import com.ingeniousdigital.jarvisnano.data.DeviceRepository
 import com.ingeniousdigital.jarvisnano.ui.screens.AboutScreen
 import com.ingeniousdigital.jarvisnano.ui.screens.CameraScreen
@@ -43,6 +44,7 @@ private enum class Destination(val route: String, val labelRes: Int, val icon: I
 @Composable
 fun JarvisNanoNavHost(
     repository: DeviceRepository,
+    bleClient: BleClient,
     sessionId: String,
 ) {
     val nav = rememberNavController()
@@ -80,7 +82,7 @@ fun JarvisNanoNavHost(
             startDestination = Destination.Cockpit.route,
             modifier = Modifier.padding(padding),
         ) {
-            composable(Destination.Cockpit.route) { CockpitScreen(repository) }
+            composable(Destination.Cockpit.route) { CockpitScreen(repository, bleClient) }
             composable(Destination.Chat.route) { ChatScreen(repository, sessionId) }
             composable(Destination.Camera.route) { CameraScreen(repository) }
             composable(Destination.Settings.route) { SettingsScreen(repository) }

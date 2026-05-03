@@ -1,5 +1,10 @@
 package com.ingeniousdigital.jarvisnano.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,7 +32,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import com.ingeniousdigital.jarvisnano.ble.BleConstants
+import com.ingeniousdigital.jarvisnano.ble.BleClient
 import com.ingeniousdigital.jarvisnano.data.Capability
 import com.ingeniousdigital.jarvisnano.data.ConnectionState
 import com.ingeniousdigital.jarvisnano.data.DeviceRepository
@@ -39,8 +48,9 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 @Composable
-fun CockpitScreen(repository: DeviceRepository) {
+fun CockpitScreen(repository: DeviceRepository, bleClient: BleClient) {
     val connection by repository.connection.collectAsState()
+    val bleState by bleClient.state.collectAsState()
     val status by repository.status.collectAsState()
     var capabilities by remember { mutableStateOf<List<Capability>>(emptyList()) }
     val scope = rememberCoroutineScope()
@@ -67,6 +77,7 @@ fun CockpitScreen(repository: DeviceRepository) {
         item { ConnectionHeader(connection) }
         item { SystemTile(status) }
         item { WifiTile(status) }
+        item { BleTile(bleClient, bleState) }
         item { LlmTile(connection) }
         item { CapabilitiesTile(capabilities) }
         item {
@@ -90,6 +101,113 @@ fun CockpitScreen(repository: DeviceRepository) {
         }
     }
 }
+
+@Composable
+private fun BleTile(bleClient: BleClient, state: BleClient.State) {
+    val context = LocalContext.current
+    var permissionMessage by remember { mutableStateOf<String?>(null) }
+    val permissions = remember { bleRuntimePermissions() }
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { result ->
+        val granted = permissions.all { permission ->
+            result[permission] == true ||
+                ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+        }
+        if (granted) {
+            permissionMessage = null
+            bleClient.startScan()
+        } else {
+            permissionMessage = "Bluetooth permission denied."
+        }
+    }
+
+    fun startScanWithPermissions() {
+        val missing = permissions.filter {
+            ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) {
+            permissionMessage = null
+            bleClient.startScan()
+        } else {
+            launcher.launch(missing.toTypedArray())
+        }
+    }
+
+    Tile(title = "Bluetooth", accent = IgdPalette.Cyan) {
+        when (state) {
+            BleClient.State.Idle -> {
+                TileRow("State", "idle")
+                TileRow("Service", "waiting for scan")
+            }
+            BleClient.State.Scanning -> {
+                TileRow("State", "scanning")
+                TileRow("Name prefix", BleConstants.NAME_PREFIXES.joinToString(" / "))
+            }
+            is BleClient.State.Found -> {
+                TileRow("State", "found")
+                TileRow("Device", state.name)
+                TileRow("Address", state.address, monospaceValue = true)
+            }
+            BleClient.State.Connecting -> {
+                TileRow("State", "connecting")
+                TileRow("Service", "discovering")
+            }
+            is BleClient.State.Connected -> {
+                TileRow("State", "connected")
+                TileRow("Device", state.name)
+                TileRow(
+                    "Jarvis GATT",
+                    when (state.jarvisServicePresent) {
+                        true -> "present"
+                        false -> "missing"
+                        null -> "discovering"
+                    },
+                    monospaceValue = state.jarvisServicePresent != true,
+                )
+            }
+            is BleClient.State.Failed -> {
+                TileRow("State", "failed")
+                TileRow("Reason", state.reason)
+            }
+        }
+
+        permissionMessage?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = { startScanWithPermissions() },
+                enabled = state !is BleClient.State.Scanning && state !is BleClient.State.Connecting,
+            ) { Text("Scan") }
+
+            if (state is BleClient.State.Found) {
+                OutlinedButton(onClick = { bleClient.connect(state.device) }) { Text("Connect") }
+            }
+
+            if (state is BleClient.State.Connected) {
+                OutlinedButton(onClick = { bleClient.disconnect() }) { Text("Disconnect") }
+            }
+        }
+    }
+}
+
+private fun bleRuntimePermissions(): List<String> =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        listOf(
+            Manifest.permission.BLUETOOTH_SCAN,
+            Manifest.permission.BLUETOOTH_CONNECT,
+        )
+    } else {
+        listOf(Manifest.permission.ACCESS_FINE_LOCATION)
+    }
 
 @Composable
 private fun ConnectionHeader(state: ConnectionState) {

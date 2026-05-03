@@ -1,0 +1,118 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: JarvisNano <jarvisnano@local>
+Date: Sun, 3 May 2026 00:00:00 -0400
+Subject: [PATCH] edge_agent: add native GPIO21 status LED heartbeat
+
+The XIAO ESP32-S3 Sense user LED is active-low on GPIO21. A previous
+router-rule approach started a long-running Lua LED script at boot, but that
+spent too much Lua heap after Wi-Fi, scheduler, MCP, Web IM, and capability
+startup.
+
+This patch documents the native firmware mutation applied by
+`scripts/bootstrap.sh`: configure GPIO21, start a small heartbeat task after
+`app_claw_start()`, and keep LED startup non-fatal so the robot stays online
+if the heartbeat task cannot allocate.
+---
+ application/edge_agent/main/main.c | 92 +++++++++++++++++++++++++++++
+ 1 file changed, 92 insertions(+)
+
+diff --git a/application/edge_agent/main/main.c b/application/edge_agent/main/main.c
+--- a/application/edge_agent/main/main.c
++++ b/application/edge_agent/main/main.c
+@@
+ #include "esp_system.h"
++#include "driver/gpio.h"
+@@
+ #define APP_FATFS_PARTITION_LABEL "storage"
+ #define APP_ENABLE_MEM_LOG        (0)
++#define APP_STATUS_LED_GPIO       GPIO_NUM_21
++#define APP_STATUS_LED_ACTIVE_LOW (1)
+@@
+ static wl_handle_t s_wl_handle = WL_INVALID_HANDLE;
++
++static void app_status_led_set(bool on)
++{
++    gpio_set_level(APP_STATUS_LED_GPIO,
++                   (APP_STATUS_LED_ACTIVE_LOW ? !on : on) ? 1 : 0);
++}
++
++static void app_status_led_blink(int times, int on_ms, int off_ms)
++{
++    for (int i = 0; i < times; i++) {
++        app_status_led_set(true);
++        vTaskDelay(pdMS_TO_TICKS(on_ms));
++        app_status_led_set(false);
++        vTaskDelay(pdMS_TO_TICKS(off_ms));
++    }
++}
++
++static void app_status_led_pulse(const uint8_t *levels, size_t count, int frame_ms)
++{
++    for (size_t i = 0; i < count; i++) {
++        int on_ms = levels[i];
++        if (on_ms > 0) {
++            app_status_led_set(true);
++            vTaskDelay(pdMS_TO_TICKS(on_ms));
++        }
++        if (frame_ms > on_ms) {
++            app_status_led_set(false);
++            vTaskDelay(pdMS_TO_TICKS(frame_ms - on_ms));
++        }
++    }
++    app_status_led_set(false);
++}
++
++static void app_status_led_task(void *arg)
++{
++    static const uint8_t boot_pulse[] = {2, 4, 7, 11, 15, 18, 15, 11, 7, 4, 2};
++    static const uint8_t idle_main[] = {2, 4, 7, 11, 15, 18, 15, 11, 7, 4, 2};
++    static const uint8_t idle_echo[] = {2, 5, 9, 12, 9, 5, 2};
++    (void)arg;
++
++    app_status_led_blink(2, 70, 80);
++    app_status_led_pulse(boot_pulse, sizeof(boot_pulse), 18);
++    vTaskDelay(pdMS_TO_TICKS(120));
++    app_status_led_blink(1, 220, 180);
++
++    while (true) {
++        app_status_led_pulse(idle_main, sizeof(idle_main), 18);
++        vTaskDelay(pdMS_TO_TICKS(120));
++        app_status_led_pulse(idle_echo, sizeof(idle_echo), 16);
++        vTaskDelay(pdMS_TO_TICKS(1500));
++    }
++}
++
++static esp_err_t app_status_led_start(void)
++{
++    gpio_config_t io_conf = {
++        .pin_bit_mask = 1ULL << APP_STATUS_LED_GPIO,
++        .mode = GPIO_MODE_OUTPUT,
++        .pull_up_en = GPIO_PULLUP_DISABLE,
++        .pull_down_en = GPIO_PULLDOWN_DISABLE,
++        .intr_type = GPIO_INTR_DISABLE,
++    };
++    esp_err_t err = gpio_config(&io_conf);
++    if (err != ESP_OK) {
++        return err;
++    }
++    app_status_led_set(false);
++
++    ESP_LOGI(TAG, "Native status LED on gpio %d active_low=%d",
++             APP_STATUS_LED_GPIO,
++             APP_STATUS_LED_ACTIVE_LOW);
++
++    BaseType_t ok = xTaskCreate(app_status_led_task, "status_led", 1536, NULL, 1, NULL);
++    return ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
++}
+@@
+     ESP_ERROR_CHECK(app_claw_init_storage_paths(s_claw_paths));
+     ESP_ERROR_CHECK(app_claw_start(s_claw_config, s_claw_paths));
++    esp_err_t status_led_err = app_status_led_start();
++    if (status_led_err != ESP_OK) {
++        ESP_LOGW(TAG, "Status LED heartbeat disabled: %s", esp_err_to_name(status_led_err));
++    }
+ #if CONFIG_APP_CLAW_CAP_IM_LOCAL
+     ESP_ERROR_CHECK(http_server_webim_bind_im());
+ #endif
+--
+2.39.5

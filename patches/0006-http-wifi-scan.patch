@@ -1,0 +1,104 @@
+From: Pascal Ledesma <pascal@ingeniousdigital.com>
+Date: 2026-05-03
+Subject: [PATCH] http_server: add Wi-Fi scan API route
+
+Expose `GET /api/wifi/scan` for Phase 2 clients. The route uses the
+existing wifi_manager_scan_aps API and returns a compact JSON shape:
+
+  { "aps": [{ "ssid": "...", "rssi": -55, "channel": 6, "auth": "wpa2_psk" }] }
+
+Patch targets:
+  application/edge_agent/components/http_server/CMakeLists.txt
+  application/edge_agent/components/http_server/http_server_status_api.c
+
+---
+diff --git a/application/edge_agent/components/http_server/CMakeLists.txt b/application/edge_agent/components/http_server/CMakeLists.txt
+--- a/application/edge_agent/components/http_server/CMakeLists.txt
++++ b/application/edge_agent/components/http_server/CMakeLists.txt
+@@ -42,6 +42,7 @@ idf_component_register(
+         driver
+         heap
+         json
++        wifi_manager
+         ${http_server_extra_requires}
+ )
+diff --git a/application/edge_agent/components/http_server/http_server_status_api.c b/application/edge_agent/components/http_server/http_server_status_api.c
+--- a/application/edge_agent/components/http_server/http_server_status_api.c
++++ b/application/edge_agent/components/http_server/http_server_status_api.c
+@@ -5,6 +5,28 @@
+  */
+ #include "http_server_priv.h"
+
++#include "wifi_manager.h"
++
++#define HTTP_WIFI_SCAN_LIMIT 20
++
++static const char *wifi_auth_mode_to_string(wifi_auth_mode_t authmode)
++{
++    switch (authmode) {
++    case WIFI_AUTH_OPEN:            return "open";
++    case WIFI_AUTH_WEP:             return "wep";
++    case WIFI_AUTH_WPA_PSK:         return "wpa_psk";
++    case WIFI_AUTH_WPA2_PSK:        return "wpa2_psk";
++    case WIFI_AUTH_WPA_WPA2_PSK:    return "wpa_wpa2_psk";
++    case WIFI_AUTH_WPA2_ENTERPRISE: return "wpa2_enterprise";
++    case WIFI_AUTH_WPA3_PSK:        return "wpa3_psk";
++    case WIFI_AUTH_WPA2_WPA3_PSK:   return "wpa2_wpa3_psk";
++    case WIFI_AUTH_WAPI_PSK:        return "wapi_psk";
++    default:                        return "unknown";
++    }
++}
++
+ static esp_err_t status_handler(httpd_req_t *req)
+ {
+     http_server_ctx_t *ctx = http_server_ctx();
+@@ -30,6 +52,42 @@ static esp_err_t status_handler(httpd_req_t *req)
+     return http_server_send_json_response(req, root);
+ }
+
++static esp_err_t wifi_scan_handler(httpd_req_t *req)
++{
++    wifi_manager_scan_record_t records[HTTP_WIFI_SCAN_LIMIT] = {0};
++    uint16_t count = 0;
++    esp_err_t err = wifi_manager_scan_aps(records, HTTP_WIFI_SCAN_LIMIT, &count);
++    if (err != ESP_OK) {
++        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to scan Wi-Fi APs");
++    }
++
++    cJSON *root = cJSON_CreateObject();
++    cJSON *aps = root ? cJSON_CreateArray() : NULL;
++    if (!root || !aps) {
++        cJSON_Delete(root);
++        httpd_resp_send_500(req);
++        return ESP_ERR_NO_MEM;
++    }
++    cJSON_AddItemToObject(root, "aps", aps);
++
++    for (uint16_t i = 0; i < count; i++) {
++        cJSON *ap = cJSON_CreateObject();
++        if (!ap || !cJSON_AddItemToArray(aps, ap)) {
++            cJSON_Delete(ap);
++            cJSON_Delete(root);
++            httpd_resp_send_500(req);
++            return ESP_ERR_NO_MEM;
++        }
++        http_server_json_add_string(ap, "ssid", records[i].ssid);
++        cJSON_AddNumberToObject(ap, "rssi", records[i].rssi);
++        cJSON_AddNumberToObject(ap, "channel", records[i].primary);
++        http_server_json_add_string(ap, "auth", wifi_auth_mode_to_string(records[i].authmode));
++    }
++
++    return http_server_send_json_response(req, root);
++}
++
+ static esp_err_t battery_handler(httpd_req_t *req)
+ {
+     cJSON *root = cJSON_CreateObject();
+@@ -68,6 +126,7 @@ esp_err_t http_server_register_status_routes(httpd_handle_t server)
+ {
+     const httpd_uri_t handlers[] = {
+         { .uri = "/api/status", .method = HTTP_GET, .handler = status_handler },
++        { .uri = "/api/wifi/scan", .method = HTTP_GET, .handler = wifi_scan_handler },
+         { .uri = "/api/battery", .method = HTTP_GET, .handler = battery_handler },
+         { .uri = "/api/restart", .method = HTTP_POST, .handler = restart_handler },
+     };

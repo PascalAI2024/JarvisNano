@@ -1,8 +1,8 @@
 [
   {
     "id": "boot_status_led",
-    "description": "Auto-start the on-board status LED breathing animation when the device finishes booting.",
-    "enabled": true,
+    "description": "Legacy Lua status LED starter. Disabled on XIAO builds because the native firmware task owns GPIO21 with lower heap cost.",
+    "enabled": false,
     "consume_on_match": false,
     "ack": "status LED job queued",
     "match": {
@@ -12,10 +12,12 @@
     "actions": [
       {
         "type": "call_cap",
-        "cap": "lua_run_async",
+        "cap": "lua_run_script_async",
         "input": {
           "path": "builtin/status_led.lua",
-          "exclusive": "none",
+          "name": "status_led",
+          "exclusive": "status_led",
+          "replace": true,
           "timeout_ms": 0
         }
       }

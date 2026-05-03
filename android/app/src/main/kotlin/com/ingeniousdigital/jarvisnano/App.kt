@@ -1,6 +1,7 @@
 package com.ingeniousdigital.jarvisnano
 
 import android.app.Application
+import com.ingeniousdigital.jarvisnano.ble.BleClient
 import com.ingeniousdigital.jarvisnano.data.DeviceClient
 import com.ingeniousdigital.jarvisnano.data.DeviceRepository
 import com.ingeniousdigital.jarvisnano.discovery.MdnsDiscovery
@@ -15,6 +16,7 @@ import com.ingeniousdigital.jarvisnano.discovery.MdnsDiscovery
 class App : Application() {
 
     val deviceClient: DeviceClient by lazy { DeviceClient() }
+    val bleClient: BleClient by lazy { BleClient(this) }
     val mdnsDiscovery: MdnsDiscovery by lazy { MdnsDiscovery(this) }
     val deviceRepository: DeviceRepository by lazy {
         DeviceRepository(client = deviceClient, discovery = mdnsDiscovery)

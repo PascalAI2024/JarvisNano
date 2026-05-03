@@ -11,7 +11,7 @@
 - [x] On-board MEMS PDM mic captured at 16 kHz mono PCM (I²S0 RX channel)
 - [x] PDM-TX speaker output on a single GPIO (I²S0 TX channel) for the **PAM8002A** analog amp via 270 Ω + 100 nF RC low-pass
 - [x] I²C bus reserved for Phase 3 touchscreen (GPIO5 / GPIO6)
-- [x] **Status LED skill** — `firmware/lua/status_led.lua` drives the on-board GPIO21 user LED with binary heartbeat patterns (boot flash, idle wink every 2 s, listening, thinking, speaking, SOS)
+- [x] **Status LED heartbeat** — native firmware task drives the on-board GPIO21 user LED after core services are alive, with a boot flourish and soft heartbeat; `firmware/lua/status_led.lua` remains as the future state-pattern prototype
 - [x] CORS `Access-Control-Allow-Origin: *` baked into HTTP responses
 - [x] **MiniMax-M2.7** verified end-to-end via OpenAI-compatible custom endpoint
 - [x] Wi-Fi provisioning AP fallback (`esp-claw-XXXXXX`)
@@ -31,7 +31,7 @@
 
 ### Companion apps
 - [x] **`android/`** — Kotlin + Jetpack Compose reference companion (Cockpit / Chat / Settings / About). 39 files, mDNS discovery, BLE GATT skeleton, Gemma 4 E4B local-LLM interface stub.
-- [x] **ZeroChat × JarvisNano integration PR** — purely additive React Native module + screen + nav toggle in `Ingenious-Digital-LLC/zerochat`. Settings-gated, doesn't disturb existing flows.
+- [x] Public protocol contract supports external companions without coupling them to firmware internals.
 
 ### Hardware
 - [x] Four parametric OpenSCAD enclosures (`Monolith` / `Cube` / `Egg` / `Radio`) in [`hardware/enclosure/`](../hardware/enclosure/)
@@ -41,9 +41,13 @@
 
 ### Public protocol contract
 - [x] [`docs/PROTOCOL.md`](PROTOCOL.md) — HTTP REST + WebSocket + MCP + Phase-2 BLE GATT + Phase-3 on-device Gemma 4 handoff
-- [x] BLE service + 4 characteristic UUIDs frozen as `uuidv5`-derived canonicals from a single namespace UUID — clients can't drift
+- [x] BLE service UUID + 4 characteristic UUIDs frozen as `uuidv5`-derived canonicals from a single namespace UUID — clients can't drift
 
-## Phase 2 — Voice replies + battery + BLE bridge
+## Phase 2 — Voice replies + battery + BLE bridge (in progress)
+
+Shipped so far: PDM-TX firmware output path, `/api/audio/level`, `/api/wifi/scan`, dashboard readiness for Phase 2/3 tiles, physical GPIO21 boot/alive LED effect verified on the USB-connected board, canonical BLE UUIDs, and a `/api/battery` not-wired stub in the bootstrap patch. Remaining work is LAN HTTP response verification from the client network path, the GATT service, ADC-backed battery readings, camera capture, TTS, and wake-word path.
+
+The detailed execution board is [`PHASE2_TASKS.md`](PHASE2_TASKS.md). It is organized into agent waves covering build/release hygiene, LAN API reliability, dashboard onboarding, BLE firmware, Android, voice/TTS, battery, camera, protocol/security, and Phase-3 display/privacy-mode work.
 
 - [ ] Wire **PAM8002A combo module** (50 × 30 × 18 mm, built-in 28 mm 4 Ω dome) per [`docs/HARDWARE.md`](HARDWARE.md): GPIO4 → 270 Ω → 100 nF → PAM8002A IN+, common ground, VCC = USB 5 V rail
 - [ ] Confirm clean audio off the RC-filtered PDM-TX
@@ -51,12 +55,12 @@
 - [ ] Add **wake-word** path (esp-sr porcupine or on-device VAD)
 - [ ] Wire **503450 LiPo** to BAT+ pad — XIAO Sense has on-board USB-C charger; battery cavity in the Monolith is sized
 - [ ] Implement firmware HTTP endpoints the dashboard already calls:
-  - [ ] `GET /api/battery` → `{mV, pct, state}`
+  - [x] `GET /api/battery` → `{mV, pct, state}` not-wired stub via [`patches/0004`](../patches/0004-http-phase2-preflight-battery.patch); ADC-backed readings still pending
   - [x] `GET /api/audio/level` → `{rms_db, peak_db, ts}` — shipped 2026-05-01
   - [ ] `GET /api/camera/snapshot` → JPEG bytes — endpoint exists, wired into dashboard + Android Camera tab. **Blocked**: 2026 batches ship OV3660 (not the documented OV2640) and the upstream `esp_cam_sensor` driver has two cascading bugs. NO-SOI bug fixed locally ([patch 0003](../patches/0003-dvp-cam-scan-for-jpeg-soi.patch)); a SCCB-mid-format-set failure still blocks capture. Switching to the legacy `espressif/esp32-camera` driver is the planned next move — see [CAMERA.md](CAMERA.md).
-  - [ ] `GET /api/wifi/scan` → list of nearby APs (used by onboarding wizard step 2)
-  - [ ] `OPTIONS *` → 204 with CORS headers (drops the `text/plain` workaround)
-- [ ] Implement **BLE GATT service** matching the canonical UUIDs in [`PROTOCOL.md`](PROTOCOL.md) — characteristics: `audio_in` (notify, PCM16 mono 16 kHz), `audio_out` (write), `state` (notify, JSON), `control` (write, JSON cmds)
+  - [x] `GET /api/wifi/scan` → list of nearby APs (used by onboarding wizard step 2) via [`patches/0006`](../patches/0006-http-wifi-scan.patch)
+  - [x] `OPTIONS /api/*` → 204 with CORS headers via [`patches/0004`](../patches/0004-http-phase2-preflight-battery.patch)
+- [ ] Implement **BLE GATT service** matching the shipped canonical UUIDs in [`PROTOCOL.md`](PROTOCOL.md) — characteristics: `audio_in` (notify, PCM16 mono 16 kHz), `audio_out` (write), `state` (notify, JSON), `control` (write, JSON cmds)
 - [ ] Latency target: end of utterance → first audio frame back ≤ 800 ms in cloud mode
 
 ## Phase 3 — Touchscreen + Privacy Mode
@@ -70,7 +74,7 @@
 
 ## Phase 4 — Vision + identity + community
 
-- [ ] Enable on-board OV2640 DVP camera in `board_devices.yaml`
+- [ ] Enable the on-board OV3660 / OV2640 DVP camera path in `board_devices.yaml`
 - [ ] Add `camera` device entry + DVP peripheral
 - [ ] Expose vision tools (describe scene, OCR, find object) as MCP tools
 - [ ] Release the 3D-printable enclosure as a community remix-friendly drop

@@ -138,6 +138,12 @@
   .status-line.ok { color: var(--green); border-color: rgba(63,203,111,0.5); }
   .status-line.err { color: var(--red); border-color: rgba(255,59,59,0.5); }
   .status-line.work { color: var(--amber); border-color: rgba(255,180,0,0.4); }
+  .handoff-actions {
+    display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px;
+  }
+  .handoff-actions .btn {
+    padding: 7px 10px; font-size: 12px;
+  }
 
   .conn-host {
     display: flex; gap: 8px; align-items: center; margin-bottom: 18px;
@@ -249,6 +255,15 @@
       </div>
 
       <div class="status-line" id="wifiStatus">Saves to device, then waits up to 30 s for STA to come up.</div>
+      <div class="status-line work" id="wifiHandoff" hidden>
+        <div id="wifiHandoffText">Switch host after Wi-Fi save.</div>
+        <div class="handoff-actions">
+          <button class="btn" id="handoffContinueAp" type="button">Continue on AP</button>
+          <button class="btn" id="handoffStaIp" type="button">Use STA IP</button>
+          <button class="btn" id="handoffMdns" type="button">Use esp-claw.local</button>
+          <button class="btn" id="handoffRetry" type="button">Retry current host</button>
+        </div>
+      </div>
 
       <div class="actions">
         <button class="btn" data-go="0">← Back</button>
@@ -371,6 +386,7 @@ const STATE = {
   step: parseInt(localStorage.getItem("jarvis_onboard_step") || "0", 10),
   ws: null,
   testGotReply: false,
+  handoffStaHost: "",
 };
 
 const PRESETS = [
@@ -398,7 +414,7 @@ async function get(path, timeoutMs = 5000) {
 }
 
 async function post(path, body, timeoutMs = 8000) {
-  // text/plain to dodge CORS preflight (firmware doesn't handle OPTIONS).
+  // text/plain keeps browser setup compatible with older firmware builds.
   const c = new AbortController();
   const t = setTimeout(() => c.abort(), timeoutMs);
   try {
@@ -449,10 +465,12 @@ document.querySelectorAll(".toggle-eye").forEach(b => {
 
 // ---------- Host ----------
 $("hostInput").value = STATE.host;
-$("hostSave").addEventListener("click", () => {
-  STATE.host = $("hostInput").value.trim() || "192.168.4.1";
+function setHost(host) {
+  STATE.host = (host || "").trim() || "192.168.4.1";
+  $("hostInput").value = STATE.host;
   localStorage.setItem("jarvis_host", STATE.host);
-});
+}
+$("hostSave").addEventListener("click", () => setHost($("hostInput").value));
 $("hostInput").addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("hostSave").click();
 });
@@ -505,6 +523,7 @@ $("wifiNext").addEventListener("click", async () => {
   const ssid = $("wifi_ssid").value.trim();
   const password = $("wifi_password").value;
   const status = $("wifiStatus");
+  $("wifiHandoff").hidden = true;
   if (!ssid) { status.textContent = "Need an SSID first."; status.className = "status-line err"; return; }
   status.textContent = "Saving Wi-Fi credentials to device…";
   status.className = "status-line work";
@@ -520,25 +539,80 @@ $("wifiNext").addEventListener("click", async () => {
   status.textContent = "Saved. Polling /api/status for STA connection (up to 30 s)…";
   // Poll every 2 s for up to 15 attempts. Once wifi_connected, advance.
   let connected = false;
+  let lastStatus = null;
   for (let i = 0; i < 15; i++) {
     await sleep(2000);
     try {
       const st = await get("/api/status", 3000);
+      if (st) lastStatus = st;
       if (st && st.wifi_connected) { connected = true; break; }
     } catch (e) { /* device may be reconfiguring its radio */ }
   }
   if (connected) {
-    status.textContent = "STA connected. Moving on.";
-    status.className = "status-line ok";
-    await sleep(700);
-    gotoStep(2);
+    const staHost = staHostFromStatus(lastStatus);
+    const currentHost = String(STATE.host).replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+    const currentPostSaveHost = currentHost === staHost || currentHost === "esp-claw.local";
+    if (lastStatus && (lastStatus.ap_active || currentPostSaveHost)) {
+      status.textContent = lastStatus.ap_active
+        ? "STA connected and the setup AP is still reachable. Continuing on current host."
+        : "STA connected and the current host is reachable. Continuing.";
+      status.className = "status-line ok";
+      await sleep(700);
+      gotoStep(2);
+      return;
+    }
+    showWifiHandoff(lastStatus, staHost
+      ? "STA connected. Join your normal Wi-Fi, then switch this wizard to the STA host before continuing."
+      : "STA connected, but the device did not report a usable STA IP. Join your normal Wi-Fi and try esp-claw.local.");
   } else {
-    status.textContent = "Couldn't confirm STA in 30 s. Settings saved — moving on. (Restart later if needed.)";
-    status.className = "status-line";
-    await sleep(900);
-    gotoStep(2);
+    showWifiHandoff(lastStatus, "Settings saved, but this browser could not confirm STA before the AP path changed.");
   }
 });
+
+function staHostFromStatus(status) {
+  const host = status && (status.st_ip || status.sta_ip || status.ip);
+  if (!host || host === "0.0.0.0") return "";
+  return String(host).replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+}
+
+function showWifiHandoff(status, message) {
+  const staHost = staHostFromStatus(status);
+  STATE.handoffStaHost = staHost;
+  const apActive = Boolean(status && status.ap_active);
+  $("wifiStatus").textContent = "Wi-Fi credentials saved. Confirm the post-save host before continuing.";
+  $("wifiStatus").className = "status-line work";
+  $("wifiHandoffText").textContent = message + " Current host: " + STATE.host + ".";
+  $("handoffContinueAp").hidden = !apActive;
+  $("handoffStaIp").textContent = staHost ? ("Use " + staHost) : "Use STA IP";
+  $("handoffStaIp").disabled = !staHost;
+  $("wifiHandoff").hidden = false;
+}
+
+async function verifyHandoffHost(host) {
+  if (host) setHost(host);
+  const status = $("wifiStatus");
+  status.textContent = "Checking " + STATE.host + "…";
+  status.className = "status-line work";
+  try {
+    const st = await get("/api/status", 5000);
+    if (st && st.wifi_connected === false && !st.ap_active) {
+      throw new Error("device reachable but Wi-Fi is not connected");
+    }
+    $("wifiHandoff").hidden = true;
+    status.textContent = "Device reachable on " + STATE.host + ". Moving on.";
+    status.className = "status-line ok";
+    await sleep(600);
+    gotoStep(2);
+  } catch (e) {
+    status.textContent = "Host check failed for " + STATE.host + ": " + e.message + ". Join the same Wi-Fi as the device, or try esp-claw.local / STA IP.";
+    status.className = "status-line err";
+  }
+}
+
+$("handoffContinueAp").addEventListener("click", () => gotoStep(2));
+$("handoffStaIp").addEventListener("click", () => verifyHandoffHost(STATE.handoffStaHost));
+$("handoffMdns").addEventListener("click", () => verifyHandoffHost("esp-claw.local"));
+$("handoffRetry").addEventListener("click", () => verifyHandoffHost(""));
 
 // ---------- Step 2: LLM presets ----------
 function renderPresets() {
