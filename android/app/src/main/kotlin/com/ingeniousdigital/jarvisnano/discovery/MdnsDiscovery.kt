@@ -10,6 +10,7 @@ import javax.jmdns.JmDNS
 import javax.jmdns.ServiceEvent
 import javax.jmdns.ServiceListener
 import kotlin.coroutines.resume
+import java.net.InetAddress
 
 /**
  * Resolves the JarvisNano device on the LAN via mDNS.
@@ -36,7 +37,7 @@ class MdnsDiscovery(private val context: Context) {
 
         try {
             withTimeout(timeoutMs) {
-                val dns = JmDNS.create()
+                val dns = localWifiAddress(wifi)?.let { JmDNS.create(it) } ?: JmDNS.create()
                 try {
                     suspendCancellableCoroutine { cont ->
                         val listener = object : ServiceListener {
@@ -50,6 +51,8 @@ class MdnsDiscovery(private val context: Context) {
                             override fun serviceResolved(event: ServiceEvent) {
                                 if (!event.name.startsWith(NAME_PREFIX, ignoreCase = true)) return
                                 val info = event.info ?: return
+                                val proto = info.getPropertyString("proto")
+                                if (proto != null && proto != "1") return
                                 val host = info.inet4Addresses.firstOrNull()?.hostAddress
                                     ?: info.hostAddresses.firstOrNull()
                                     ?: return
@@ -66,6 +69,19 @@ class MdnsDiscovery(private val context: Context) {
         } finally {
             runCatching { lock.release() }
         }
+    }
+
+    private fun localWifiAddress(wifi: WifiManager): InetAddress? {
+        val address = wifi.connectionInfo?.ipAddress ?: return null
+        if (address == 0) return null
+        return InetAddress.getByAddress(
+            byteArrayOf(
+                (address and 0xff).toByte(),
+                (address shr 8 and 0xff).toByte(),
+                (address shr 16 and 0xff).toByte(),
+                (address shr 24 and 0xff).toByte(),
+            ),
+        )
     }
 
     companion object {

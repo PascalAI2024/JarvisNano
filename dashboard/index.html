@@ -593,9 +593,8 @@
         <div>
           <div class="field"><label for="cfg_llm_backend_type">Backend type</label>
             <select id="cfg_llm_backend_type">
-              <option value="openai">openai</option>
+              <option value="openai_compatible">openai_compatible</option>
               <option value="anthropic">anthropic</option>
-              <option value="custom_openai_compatible">custom_openai_compatible</option>
               <option value="qwen">qwen</option>
               <option value="ollama">ollama</option>
             </select>
@@ -689,6 +688,17 @@ const STATE = {
   micLastOkTs: 0,
 };
 
+function normalizeHost(value, fallback = "esp-claw.local") {
+  const raw = String(value || "").trim();
+  if (!raw) return fallback;
+  try {
+    const parsed = new URL(raw.includes("://") ? raw : "http://" + raw);
+    return parsed.host || fallback;
+  } catch (_) {
+    return raw.replace(/^https?:\/\//i, "").split(/[/?#]/, 1)[0].replace(/\/+$/, "") || fallback;
+  }
+}
+
 function maybeMask(value, kind) {
   if (!STATE.hide) return value;
   if (kind === "ssid")     return "••••••••";
@@ -708,6 +718,7 @@ function toggleHide() {
   pollStatus();  // re-render with new mask state
 }
 
+STATE.host = normalizeHost(STATE.host);
 $("hostInput").value = STATE.host;
 $("hostInput").addEventListener("keydown", (e) => { if (e.key === "Enter") connect(); });
 $("connectBtn").addEventListener("click", connect);
@@ -728,8 +739,8 @@ $("iconEye").style.display = STATE.hide ? "none" : "block";
 $("iconEyeOff").style.display = STATE.hide ? "block" : "none";
 $("revealBtn").classList.toggle("on", !STATE.hide);
 
-function baseUrl() { return "http://" + STATE.host; }
-function wsUrl() { return "ws://" + STATE.host + "/ws/webim"; }
+function baseUrl() { return "http://" + normalizeHost(STATE.host); }
+function wsUrl() { return "ws://" + normalizeHost(STATE.host) + "/ws/webim"; }
 
 async function get(path, timeoutMs = 5000) {
   const c = new AbortController();
@@ -1129,7 +1140,8 @@ function openWs() {
 }
 
 function connect() {
-  STATE.host = $("hostInput").value.trim() || "esp-claw.local";
+  STATE.host = normalizeHost($("hostInput").value);
+  $("hostInput").value = STATE.host;
   localStorage.setItem("jarvis_host", STATE.host);
   if (STATE.pollTimer) clearInterval(STATE.pollTimer);
   if (STATE.capsTimer) clearInterval(STATE.capsTimer);

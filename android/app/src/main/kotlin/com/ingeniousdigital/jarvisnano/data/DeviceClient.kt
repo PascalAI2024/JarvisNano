@@ -57,6 +57,7 @@ class DeviceClient(
         val payload = json.encodeToString(JsonObject.serializer(), config.raw)
         val req = Request.Builder()
             .url(url(host, "/api/config"))
+            .deviceHeaders()
             .post(payload.toRequestBody(JSON))
             .build()
         http.newCall(req).execute().use { it.requireOk() }
@@ -91,6 +92,7 @@ class DeviceClient(
             "}"
         val req = Request.Builder()
             .url(url(host, "/api/webim/send"))
+            .deviceHeaders()
             .post(payload.toRequestBody(TEXT_PLAIN))
             .build()
         http.newCall(req).execute().use { it.requireOk() }
@@ -100,6 +102,7 @@ class DeviceClient(
     suspend fun restart(host: String): Unit = withContext(Dispatchers.IO) {
         val req = Request.Builder()
             .url(url(host, "/api/restart"))
+            .deviceHeaders()
             .post("".toRequestBody(JSON))
             .build()
         runCatching { http.newCall(req).execute().close() }
@@ -110,7 +113,10 @@ class DeviceClient(
      * The flow is cold; the socket opens on collect and closes on cancel.
      */
     fun openWebimSocket(host: String): Flow<WebimEvent> = callbackFlow {
-        val req = Request.Builder().url(wsUrl(host, "/ws/webim")).build()
+        val req = Request.Builder()
+            .url(wsUrl(host, "/ws/webim"))
+            .deviceHeaders()
+            .build()
         val listener = object : WebSocketListener() {
             override fun onMessage(webSocket: WebSocket, text: String) {
                 runCatching { json.decodeFromString(WebimEvent.serializer(), text) }
@@ -145,17 +151,33 @@ class DeviceClient(
 
     // ---- helpers --------------------------------------------------------
 
-    private fun get(host: String, path: String) = Request.Builder().url(url(host, path)).get().build()
+    private fun get(host: String, path: String) = Request.Builder()
+        .url(url(host, path))
+        .deviceHeaders()
+        .get()
+        .build()
 
     private fun url(host: String, path: String): String {
-        val cleanHost = host.removePrefix("http://").removePrefix("https://").trimEnd('/')
+        val cleanHost = cleanHost(host)
         return "http://$cleanHost$path"
     }
 
     private fun wsUrl(host: String, path: String): String {
-        val cleanHost = host.removePrefix("http://").removePrefix("https://").trimEnd('/')
+        val cleanHost = cleanHost(host)
         return "ws://$cleanHost$path"
     }
+
+    private fun cleanHost(host: String): String =
+        host.trim()
+            .removePrefix("http://")
+            .removePrefix("https://")
+            .substringBefore('/')
+            .substringBefore('?')
+            .substringBefore('#')
+            .trimEnd('/')
+
+    private fun Request.Builder.deviceHeaders(): Request.Builder =
+        header("X-JarvisNano-Protocol", "1")
 
     private fun Response.requireBody(): String {
         if (!isSuccessful) error("HTTP $code from $request")
