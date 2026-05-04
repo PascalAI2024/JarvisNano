@@ -56,16 +56,19 @@ AP SSID `esp-claw-11F0C5`. The Android Gradle wrapper is restored so the pinned
 Gradle version is reproducible; local Android compilation still requires an
 Android SDK path via `ANDROID_HOME` or `android/local.properties`.
 
-## 2. Fix LAN HTTP Reachability Before Feature Work
+## 2. Keep LAN HTTP Reachability Stable Before Feature Work
 
-The board boots cleanly, but macOS curls to `192.168.50.80` still time out.
-Until that is explained, camera/BLE/TTS debugging will waste time.
+The board now boots onto STA-only LAN mode after Wi-Fi association and responds
+from the Mac at `192.168.50.80`.
 
-Current 2026-05-04 evidence: ARP resolves `192.168.50.80` to the board MAC
-`90:70:69:11:f0:c4`, but ICMP and TCP port 80 time out from the Mac. Serial
-capture during curl attempts showed no matching request logs, while earlier boot
-logs showed stale dashboard camera requests reaching firmware. Treat this as a
-network-path problem until AP-path and second-client tests prove otherwise.
+Current 2026-05-04 evidence: the flashed XIAO logs STA IP `192.168.50.80`, then
+switches Wi-Fi from AP+STA to STA-only with `ap_active=false`. Direct probes
+returned `200 OK` for `/api/health` and `/api/status`; `/api/health` reported
+`wifi_mode:"sta_ok"` and `ip:"192.168.50.80"`. The expanded matrix passed the
+cheap health/status/config/Web IM/battery/audio endpoints, but open browser
+dashboard tabs can still create enough simultaneous sockets to crowd later
+diagnostic calls. Keep the HTTP server LRU-purge/socket tuning and dashboard
+background polling conservative while BLE/camera work proceeds.
 
 Run this exact matrix:
 
@@ -82,9 +85,10 @@ config/FATFS/LLM work and returns immediately with uptime, heap, Wi-Fi mode,
 and request count.
 
 Efficiency rule: keep dashboard camera auto-refresh off by default until the
-network path is stable. ESP-IDF HTTP server supports persistent connections and
+camera service is real. ESP-IDF HTTP server supports persistent connections and
 per-session state; use that when adding long-lived or repeated transfers, but
-keep health/status handlers tiny.
+keep health/status handlers tiny and make unavailable hardware return explicit
+JSON quickly.
 
 ## 3. BLE: Ship `state/control` Before Audio
 

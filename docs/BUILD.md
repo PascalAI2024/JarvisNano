@@ -148,6 +148,12 @@ The device reboots onto your LAN. Find it again at
 **http://esp-claw.local/** (mDNS) — the [Cockpit dashboard](../dashboard/index.html)
 takes over from there.
 
+Developer note: current firmware keeps the provisioning AP active only while
+joining Wi-Fi. Once STA receives an IP it switches to STA-only mode to avoid
+AP+STA single-radio reachability problems on some routers. Serial should show
+`STA connected; provisioning AP stopped for LAN reachability`, and
+`/api/status` should report `ap_active:false`.
+
 ## Monitoring serial output
 
 `esp-idf-monitor` is feature-rich but laggy on macOS over USB-Serial-JTAG.
@@ -202,6 +208,12 @@ Override the host list when the board has a different STA IP:
 ```bash
 ./scripts/http-matrix.sh 192.168.1.42 esp-claw.local
 ```
+
+If the first few endpoints pass but later probes time out, check for open
+dashboard/browser tabs holding many connections to port 80. The firmware enables
+HTTP LRU socket purge, shorter socket timeouts, and `Connection: close` on JSON
+responses, but stale browser tabs can still make a small MCU look worse than it
+is during matrix runs.
 
 ## Troubleshooting
 

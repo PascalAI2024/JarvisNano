@@ -11,8 +11,16 @@ is wired, expose an explicit `not_wired` JSON response instead of a
 404. This keeps the UI honest without touching ADC or board-manager
 hardware APIs.
 
+Dashboard diagnostics can open several concurrent browser sockets.
+Enable LRU socket purge, raise the open socket/backlog limits, and
+shorten socket wait timeouts so stale browser connections do not
+starve curl or Android probes. JSON and embedded-file responses also
+send `Connection: close` so dashboard polling does not hold persistent
+sockets open on the MCU.
+
 Patch targets:
   application/edge_agent/components/http_server/http_server_core.c
+  application/edge_agent/components/http_server/http_server_json.c
   application/edge_agent/components/http_server/http_server_status_api.c
 
 ---
@@ -37,18 +45,48 @@ diff --git a/application/edge_agent/components/http_server/http_server_core.c b/
  http_server_ctx_t *http_server_ctx(void)
  {
      return &s_ctx;
-@@ -67,6 +79,11 @@ esp_err_t http_server_start(void)
+@@ -73,6 +85,11 @@ esp_err_t http_server_start(void)
+     config.server_port = 80;
+     config.ctrl_port = HTTP_SERVER_CTRL_PORT;
+     config.max_uri_handlers = 32;
++    config.max_open_sockets = 13;
++    config.backlog_conn = 8;
++    config.lru_purge_enable = true;
++    config.recv_wait_timeout = 5;
++    config.send_wait_timeout = 5;
+     config.stack_size = 8192;
      config.uri_match_fn = httpd_uri_match_wildcard;
 
-     ESP_RETURN_ON_ERROR(httpd_start(&s_ctx.server, &config), TAG, "Failed to start HTTP server");
+@@ -79,6 +96,11 @@ esp_err_t http_server_start(void)
+     ESP_RETURN_ON_ERROR(http_server_register_webim_routes(s_ctx.server), TAG, "Failed to register Web IM routes");
+     ESP_RETURN_ON_ERROR(http_server_register_audio_level_routes(s_ctx.server), TAG, "Failed to register audio level routes");
+     ESP_RETURN_ON_ERROR(http_server_register_camera_routes(s_ctx.server), TAG, "Failed to register camera routes");
 +    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_ctx.server, &(httpd_uri_t) {
 +                            .uri = "/api/*",
 +                            .method = HTTP_OPTIONS,
 +                            .handler = api_options_handler,
 +                        }), TAG, "Failed to register API OPTIONS route");
-     ESP_RETURN_ON_ERROR(http_server_register_assets_routes(s_ctx.server), TAG, "Failed to register assets routes");
-     ESP_RETURN_ON_ERROR(http_server_register_capabilities_routes(s_ctx.server), TAG, "Failed to register capability routes");
-     ESP_RETURN_ON_ERROR(http_server_register_lua_modules_routes(s_ctx.server), TAG, "Failed to register Lua module routes");
+     ESP_RETURN_ON_ERROR(httpd_register_err_handler(s_ctx.server, HTTPD_404_NOT_FOUND, http_server_captive_404_handler),
+                         TAG, "Failed to register captive 404 handler");
+diff --git a/application/edge_agent/components/http_server/http_server_json.c b/application/edge_agent/components/http_server/http_server_json.c
+--- a/application/edge_agent/components/http_server/http_server_json.c
++++ b/application/edge_agent/components/http_server/http_server_json.c
+@@ -20,6 +20,7 @@ esp_err_t http_server_send_embedded_file(httpd_req_t *req,
+     httpd_resp_set_hdr(req, "Cache-Control", "no-store, max-age=0");
+     httpd_resp_set_hdr(req, "Pragma", "no-cache");
+     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
++    httpd_resp_set_hdr(req, "Connection", "close");
+     return httpd_resp_send(req, (const char *)start, content_len);
+ }
+
+@@ -43,6 +44,7 @@ esp_err_t http_server_send_json_response(httpd_req_t *req, cJSON *root)
+     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+     httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+     httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
++    httpd_resp_set_hdr(req, "Connection", "close");
+     esp_err_t err = httpd_resp_sendstr(req, payload);
+     free(payload);
+     return err;
 diff --git a/application/edge_agent/components/http_server/http_server_status_api.c b/application/edge_agent/components/http_server/http_server_status_api.c
 --- a/application/edge_agent/components/http_server/http_server_status_api.c
 +++ b/application/edge_agent/components/http_server/http_server_status_api.c
