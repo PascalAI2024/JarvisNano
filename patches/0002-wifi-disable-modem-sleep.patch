@@ -1,6 +1,6 @@
 From: Pascal Ledesma <pascal@ingeniousdigital.com>
 Date: 2026-05-02
-Subject: [PATCH] wifi_manager: disable modem-sleep after STA association
+Subject: [PATCH] wifi_manager: stabilize STA LAN reachability
 
 With Wi-Fi modem-sleep enabled (the IDF default WIFI_PS_MIN_MODEM),
 outbound TCP packets get delayed by 100-300 ms while the modem
@@ -18,6 +18,12 @@ Note: setting PS at esp_wifi_start time does not stick — the
 fresh association resets PS back to the default. Has to run from
 the IP_EVENT_STA_GOT_IP handler.
 
+The same handler also drops the provisioning SoftAP once STA has
+an IP. Running AP+STA on the ESP32-S3 single radio can leave the
+board visible in ARP while LAN traffic to the STA side times out,
+especially on WPA3 networks. If STA later fails, the existing
+retry/fallback path brings the provisioning AP back.
+
 Patch target:
   components/common/wifi_manager/wifi_manager.c
 
@@ -25,7 +31,7 @@ Patch target:
 diff --git a/components/common/wifi_manager/wifi_manager.c b/components/common/wifi_manager/wifi_manager.c
 --- a/components/common/wifi_manager/wifi_manager.c
 +++ b/components/common/wifi_manager/wifi_manager.c
-@@ -261,6 +261,13 @@ static void wifi_event_handler(void *arg,
+@@ -261,6 +261,23 @@ static void wifi_event_handler(void *arg,
          s_retry_count = 0;
          s_connected = true;
          s_mode = s_ap_active ? WIFI_MODE_APSTA_OK : s_mode;
@@ -36,6 +42,15 @@ diff --git a/components/common/wifi_manager/wifi_manager.c b/components/common/w
 +        // JPEG) un-deliverable to a browser client. Trades ~30 mA
 +        // idle current for reliable HTTP throughput.
 +        (void)esp_wifi_set_ps(WIFI_PS_NONE);
++        if (s_ap_active) {
++            esp_err_t mode_err = esp_wifi_set_mode(WIFI_MODE_STA);
++            if (mode_err == ESP_OK) {
++                ESP_LOGI(TAG, "STA connected; provisioning AP stopped for LAN reachability");
++            } else {
++                ESP_LOGW(TAG, "Failed to stop provisioning AP after STA connect: %s",
++                         esp_err_to_name(mode_err));
++            }
++        }
          xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
          notify_state_changed(true);
      }

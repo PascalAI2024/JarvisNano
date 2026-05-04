@@ -128,7 +128,7 @@ apply_wifi_ps_patch() {
         log "wifi_manager.c not found at $target — skipping wifi PS patch"
         return
     fi
-    if grep -q "Disable Wi-Fi modem-sleep AFTER association" "$target" 2>/dev/null; then
+    if grep -q "provisioning AP stopped for LAN reachability" "$target" 2>/dev/null; then
         log "wifi PS patch already applied"
         return
     fi
@@ -137,6 +137,25 @@ apply_wifi_ps_patch() {
 import pathlib
 p = pathlib.Path(r"$target")
 s = p.read_text()
+marker = "        (void)esp_wifi_set_ps(WIFI_PS_NONE);\n"
+if "Disable Wi-Fi modem-sleep AFTER association" in s and "provisioning AP stopped for LAN reachability" not in s:
+    new = (
+        marker +
+        "        if (s_ap_active) {\n"
+        "            esp_err_t mode_err = esp_wifi_set_mode(WIFI_MODE_STA);\n"
+        "            if (mode_err == ESP_OK) {\n"
+        "                ESP_LOGI(TAG, \"STA connected; provisioning AP stopped for LAN reachability\");\n"
+        "            } else {\n"
+        "                ESP_LOGW(TAG, \"Failed to stop provisioning AP after STA connect: %s\",\n"
+        "                         esp_err_to_name(mode_err));\n"
+        "            }\n"
+        "        }\n"
+    )
+    if marker not in s:
+        raise SystemExit(f"could not locate existing wifi PS marker in {p}")
+    p.write_text(s.replace(marker, new, 1))
+    print("patched", p)
+    raise SystemExit(0)
 old = (
     "        s_mode = s_ap_active ? WIFI_MODE_APSTA_OK : s_mode;\n"
     "        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);\n"
@@ -150,6 +169,15 @@ new = (
     "        // JPEG) un-deliverable to a browser client. Trades ~30 mA\n"
     "        // idle current for reliable HTTP throughput.\n"
     "        (void)esp_wifi_set_ps(WIFI_PS_NONE);\n"
+    "        if (s_ap_active) {\n"
+    "            esp_err_t mode_err = esp_wifi_set_mode(WIFI_MODE_STA);\n"
+    "            if (mode_err == ESP_OK) {\n"
+    "                ESP_LOGI(TAG, \"STA connected; provisioning AP stopped for LAN reachability\");\n"
+    "            } else {\n"
+    "                ESP_LOGW(TAG, \"Failed to stop provisioning AP after STA connect: %s\",\n"
+    "                         esp_err_to_name(mode_err));\n"
+    "            }\n"
+    "        }\n"
     "        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);\n"
 )
 if old not in s:
@@ -229,12 +257,49 @@ PY
 apply_http_phase2_patch() {
     local core="$ESP_CLAW_DIR/application/edge_agent/components/http_server/http_server_core.c"
     local status="$ESP_CLAW_DIR/application/edge_agent/components/http_server/http_server_status_api.c"
-    if [ ! -f "$core" ] || [ ! -f "$status" ]; then
+    local json="$ESP_CLAW_DIR/application/edge_agent/components/http_server/http_server_json.c"
+    if [ ! -f "$core" ] || [ ! -f "$status" ] || [ ! -f "$json" ]; then
         log "http_server sources not found — skipping Phase 2 HTTP patch"
         return
     fi
+    if grep -q "Failed to register API OPTIONS route" "$core" 2>/dev/null; then
+        python3 - <<PY
+import pathlib
+
+core = pathlib.Path(r"$core")
+s = core.read_text()
+block = (
+    "    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_ctx.server, &(httpd_uri_t) {\\n"
+    "                            .uri = \"/api/*\",\\n"
+    "                            .method = HTTP_OPTIONS,\\n"
+    "                            .handler = api_options_handler,\\n"
+    "                        }), TAG, \"Failed to register API OPTIONS route\");\\n"
+)
+old = (
+    "    ESP_RETURN_ON_ERROR(httpd_start(&s_ctx.server, &config), TAG, \"Failed to start HTTP server\");\\n"
+    + block
+    + "    ESP_RETURN_ON_ERROR(http_server_register_assets_routes(s_ctx.server), TAG, \"Failed to register assets routes\");\\n"
+)
+new = (
+    "    ESP_RETURN_ON_ERROR(httpd_start(&s_ctx.server, &config), TAG, \"Failed to start HTTP server\");\\n"
+    "    ESP_RETURN_ON_ERROR(http_server_register_assets_routes(s_ctx.server), TAG, \"Failed to register assets routes\");\\n"
+)
+if old in s:
+    s = s.replace(old, new, 1)
+    anchor = (
+        "    ESP_RETURN_ON_ERROR(http_server_register_camera_routes(s_ctx.server), TAG, \"Failed to register camera routes\");\\n"
+        "    ESP_RETURN_ON_ERROR(httpd_register_err_handler(s_ctx.server, HTTPD_404_NOT_FOUND, http_server_captive_404_handler),\\n"
+    )
+    if anchor not in s:
+        raise SystemExit(f"could not locate API OPTIONS route reorder point in {core}")
+    s = s.replace(anchor, "    ESP_RETURN_ON_ERROR(http_server_register_camera_routes(s_ctx.server), TAG, \"Failed to register camera routes\");\\n" + block + "    ESP_RETURN_ON_ERROR(httpd_register_err_handler(s_ctx.server, HTTPD_404_NOT_FOUND, http_server_captive_404_handler),\\n", 1)
+    core.write_text(s)
+PY
+    fi
     if grep -q "Failed to register API OPTIONS route" "$core" 2>/dev/null &&
        ! grep -q "allow JSON clients to POST /api/\\*" "$core" 2>/dev/null &&
+       grep -q "lru_purge_enable" "$core" 2>/dev/null &&
+       grep -q 'Connection", "close"' "$json" 2>/dev/null &&
        grep -q '"not_wired"' "$status" 2>/dev/null; then
         log "Phase 2 HTTP patch already applied"
         return
@@ -245,6 +310,7 @@ import pathlib
 
 core = pathlib.Path(r"$core")
 status = pathlib.Path(r"$status")
+json = pathlib.Path(r"$json")
 
 s = core.read_text()
 s = s.replace(
@@ -279,23 +345,61 @@ if "Phase 2 browser preflight" not in s:
     s = s.replace(old, new, 1)
 
 old = (
-    "    ESP_RETURN_ON_ERROR(httpd_start(&s_ctx.server, &config), TAG, \"Failed to start HTTP server\");\n"
-    "    ESP_RETURN_ON_ERROR(http_server_register_assets_routes(s_ctx.server), TAG, \"Failed to register assets routes\");\n"
+    "    config.max_uri_handlers = 32;\n"
+    "    config.stack_size = 8192;\n"
 )
 new = (
-    "    ESP_RETURN_ON_ERROR(httpd_start(&s_ctx.server, &config), TAG, \"Failed to start HTTP server\");\n"
+    "    config.max_uri_handlers = 32;\n"
+    "    config.max_open_sockets = 13;\n"
+    "    config.backlog_conn = 8;\n"
+    "    config.lru_purge_enable = true;\n"
+    "    config.recv_wait_timeout = 5;\n"
+    "    config.send_wait_timeout = 5;\n"
+    "    config.stack_size = 8192;\n"
+)
+if "lru_purge_enable" not in s:
+    if old not in s:
+        raise SystemExit(f"could not locate HTTP server config tuning point in {core}")
+    s = s.replace(old, new, 1)
+
+old = (
+    "    ESP_RETURN_ON_ERROR(http_server_register_camera_routes(s_ctx.server), TAG, \"Failed to register camera routes\");\n"
+    "    ESP_RETURN_ON_ERROR(httpd_register_err_handler(s_ctx.server, HTTPD_404_NOT_FOUND, http_server_captive_404_handler),\n"
+)
+new = (
+    "    ESP_RETURN_ON_ERROR(http_server_register_camera_routes(s_ctx.server), TAG, \"Failed to register camera routes\");\n"
     "    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_ctx.server, &(httpd_uri_t) {\n"
     "                            .uri = \"/api/*\",\n"
     "                            .method = HTTP_OPTIONS,\n"
     "                            .handler = api_options_handler,\n"
     "                        }), TAG, \"Failed to register API OPTIONS route\");\n"
-    "    ESP_RETURN_ON_ERROR(http_server_register_assets_routes(s_ctx.server), TAG, \"Failed to register assets routes\");\n"
+    "    ESP_RETURN_ON_ERROR(httpd_register_err_handler(s_ctx.server, HTTPD_404_NOT_FOUND, http_server_captive_404_handler),\n"
 )
 if "Failed to register API OPTIONS route" not in s:
     if old not in s:
         raise SystemExit(f"could not locate core route registration point in {core}")
     s = s.replace(old, new, 1)
 core.write_text(s)
+
+s = json.read_text()
+if 'httpd_resp_set_hdr(req, "Connection", "close");' not in s:
+    s = s.replace(
+        '    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");\n'
+        '    return httpd_resp_send(req, (const char *)start, content_len);\n',
+        '    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");\n'
+        '    httpd_resp_set_hdr(req, "Connection", "close");\n'
+        '    return httpd_resp_send(req, (const char *)start, content_len);\n',
+        1,
+    )
+    s = s.replace(
+        '    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");\n'
+        '    esp_err_t err = httpd_resp_sendstr(req, payload);\n',
+        '    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");\n'
+        '    httpd_resp_set_hdr(req, "Connection", "close");\n'
+        '    esp_err_t err = httpd_resp_sendstr(req, payload);\n',
+        1,
+    )
+    json.write_text(s)
 
 s = status.read_text()
 old = (
@@ -354,7 +458,8 @@ apply_http_camera_gate_patch() {
         return
     fi
     if grep -q "CONFIG_APP_CLAW_LUA_MODULE_CAMERA" "$cmake" 2>/dev/null &&
-       grep -q "CONFIG_APP_CLAW_CAP_LUA && CONFIG_APP_CLAW_LUA_MODULE_CAMERA" "$camera_api" 2>/dev/null; then
+       grep -q "CONFIG_APP_CLAW_CAP_LUA && CONFIG_APP_CLAW_LUA_MODULE_CAMERA" "$camera_api" 2>/dev/null &&
+       grep -q "camera_unavailable_get_handler" "$camera_api" 2>/dev/null; then
         log "camera route dependency gate patch already applied"
         return
     fi
@@ -402,6 +507,71 @@ s = s.replace(
 s = s.replace(
     "#endif /* CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT */\n",
     "#endif /* camera service gate */\n",
+    1,
+)
+s = s.replace(
+    "#include \"esp_log.h\"\n\n"
+    "esp_err_t http_server_register_camera_routes(httpd_handle_t server)\n"
+    "{\n"
+    "    (void)server;\n"
+    "    /* No camera service in this build; skip route registration. */\n"
+    "    return ESP_OK;\n"
+    "}\n",
+    "static esp_err_t camera_unavailable_get_handler(httpd_req_t *req)\n"
+    "{\n"
+    "    cJSON *root = cJSON_CreateObject();\n"
+    "    if (!root) {\n"
+    "        httpd_resp_send_500(req);\n"
+    "        return ESP_ERR_NO_MEM;\n"
+    "    }\n"
+    "    cJSON_AddBoolToObject(root, \"available\", false);\n"
+    "    http_server_json_add_string(root, \"state\", \"not_available\");\n"
+    "    http_server_json_add_string(root, \"reason\", \"camera service is not enabled in this build\");\n"
+    "    httpd_resp_set_status(req, \"503 Service Unavailable\");\n"
+    "    return http_server_send_json_response(req, root);\n"
+    "}\n"
+    "\n"
+    "esp_err_t http_server_register_camera_routes(httpd_handle_t server)\n"
+    "{\n"
+    "    const httpd_uri_t handler = {\n"
+    "        .uri     = \"/api/camera/snapshot\",\n"
+    "        .method  = HTTP_GET,\n"
+    "        .handler = camera_unavailable_get_handler,\n"
+    "    };\n"
+    "    return httpd_register_uri_handler(server, &handler);\n"
+    "}\n",
+    1,
+)
+s = s.replace(
+    "esp_err_t http_server_register_camera_routes(httpd_handle_t server)\n"
+    "{\n"
+    "    (void)server;\n"
+    "    /* No camera on this board — silently skip route registration. */\n"
+    "    return ESP_OK;\n"
+    "}\n",
+    "static esp_err_t camera_unavailable_get_handler(httpd_req_t *req)\n"
+    "{\n"
+    "    cJSON *root = cJSON_CreateObject();\n"
+    "    if (!root) {\n"
+    "        httpd_resp_send_500(req);\n"
+    "        return ESP_ERR_NO_MEM;\n"
+    "    }\n"
+    "    cJSON_AddBoolToObject(root, \"available\", false);\n"
+    "    http_server_json_add_string(root, \"state\", \"not_available\");\n"
+    "    http_server_json_add_string(root, \"reason\", \"camera service is not enabled in this build\");\n"
+    "    httpd_resp_set_status(req, \"503 Service Unavailable\");\n"
+    "    return http_server_send_json_response(req, root);\n"
+    "}\n"
+    "\n"
+    "esp_err_t http_server_register_camera_routes(httpd_handle_t server)\n"
+    "{\n"
+    "    const httpd_uri_t handler = {\n"
+    "        .uri     = \"/api/camera/snapshot\",\n"
+    "        .method  = HTTP_GET,\n"
+    "        .handler = camera_unavailable_get_handler,\n"
+    "    };\n"
+    "    return httpd_register_uri_handler(server, &handler);\n"
+    "}\n",
     1,
 )
 camera_api.write_text(s)

@@ -50,20 +50,35 @@ diff --git a/application/edge_agent/components/http_server/http_server_camera_ap
 
  #include <stdint.h>
  #include <stdlib.h>
-@@ -118,4 +118,15 @@ esp_err_t http_server_register_camera_routes(httpd_handle_t server)
+@@ -118,4 +118,33 @@ esp_err_t http_server_register_camera_routes(httpd_handle_t server)
      return httpd_register_uri_handler(server, &handler);
  }
 
 -#endif /* CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT */
 +#else  /* camera service unavailable */
 +
-+#include "esp_log.h"
++static esp_err_t camera_unavailable_get_handler(httpd_req_t *req)
++{
++    cJSON *root = cJSON_CreateObject();
++    if (!root) {
++        httpd_resp_send_500(req);
++        return ESP_ERR_NO_MEM;
++    }
++    cJSON_AddBoolToObject(root, "available", false);
++    http_server_json_add_string(root, "state", "not_available");
++    http_server_json_add_string(root, "reason", "camera service is not enabled in this build");
++    httpd_resp_set_status(req, "503 Service Unavailable");
++    return http_server_send_json_response(req, root);
++}
 +
 +esp_err_t http_server_register_camera_routes(httpd_handle_t server)
 +{
-+    (void)server;
-+    /* No camera service in this build; skip route registration. */
-+    return ESP_OK;
++    const httpd_uri_t handler = {
++        .uri     = "/api/camera/snapshot",
++        .method  = HTTP_GET,
++        .handler = camera_unavailable_get_handler,
++    };
++    return httpd_register_uri_handler(server, &handler);
 +}
 +
 +#endif /* camera service gate */
