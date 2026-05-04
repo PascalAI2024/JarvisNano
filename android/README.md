@@ -61,21 +61,18 @@ Apache-2.0.
 
 ## Build from the CLI
 
-This repo intentionally does **not** commit `gradlew`, `gradlew.bat`, or
-`gradle/wrapper/gradle-wrapper.jar`. The checked-in wrapper properties pin the
-expected Gradle distribution, but contributors should use a system Gradle first
-and keep any locally generated wrapper files untracked.
+This repo commits the Gradle wrapper so CLI builds use the same pinned Gradle
+distribution everywhere. Prefer `./gradlew` for project commands.
 
 Required local tools:
 
 - JDK 17
 - Android SDK with API 35 installed
-- System Gradle compatible with the pinned wrapper distribution
+- Android SDK command-line tools or Android Studio SDK Manager
 
 On macOS with Homebrew, the shortest clean setup is:
 
 ```bash
-brew install gradle
 brew install openjdk@17
 brew install --cask android-commandlinetools
 
@@ -95,16 +92,6 @@ Preferred CLI path:
 
 ```bash
 cd android
-gradle :app:assembleDebug
-```
-
-If your machine does not already have Gradle, install it with your package
-manager or SDKMAN. If you generate wrapper files locally for convenience, do not
-commit the generated scripts or `gradle-wrapper.jar`:
-
-```bash
-cd android
-gradle wrapper --gradle-version 8.10.2
 ./gradlew :app:assembleDebug
 ```
 
@@ -120,14 +107,14 @@ choice in this slice.
 
 ```bash
 cd android
-gradle :app:testDebugUnitTest
-gradle :app:compileDebugAndroidTestKotlin
+./gradlew :app:testDebugUnitTest
+./gradlew :app:compileDebugAndroidTestKotlin
 ```
 
 Run device tests only when a phone or emulator is connected:
 
 ```bash
-gradle :app:connectedDebugAndroidTest
+./gradlew :app:connectedDebugAndroidTest
 ```
 
 ---
@@ -136,7 +123,7 @@ gradle :app:connectedDebugAndroidTest
 
 ```bash
 # Pair your phone via USB with developer mode + USB debug enabled.
-gradle :app:installDebug
+./gradlew :app:installDebug
 adb shell am start -n com.ingeniousdigital.jarvisnano.debug/com.ingeniousdigital.jarvisnano.MainActivity
 ```
 
@@ -160,16 +147,16 @@ Use this checklist for Android build and smoke-test signoff.
 
 ### Build and tests
 
-- [ ] From `android/`, `gradle :app:assembleDebug` completes.
-- [ ] From `android/`, `gradle :app:testDebugUnitTest` completes.
-- [ ] From `android/`, `gradle :app:compileDebugAndroidTestKotlin` completes.
-- [ ] No `gradlew`, `gradlew.bat`, or `gradle/wrapper/gradle-wrapper.jar` files
-      are committed.
+- [ ] From `android/`, `./gradlew :app:assembleDebug` completes.
+- [ ] From `android/`, `./gradlew :app:testDebugUnitTest` completes.
+- [ ] From `android/`, `./gradlew :app:compileDebugAndroidTestKotlin` completes.
+- [ ] `gradlew`, `gradlew.bat`, and `gradle/wrapper/gradle-wrapper.jar` are
+      present so the pinned Gradle distribution is reproducible.
 
 ### Install and launch
 
 - [ ] `adb devices` lists the target phone as `device`.
-- [ ] `gradle :app:installDebug` installs the debug APK.
+- [ ] `./gradlew :app:installDebug` installs the debug APK.
 - [ ] `adb shell am start -n com.ingeniousdigital.jarvisnano.debug/com.ingeniousdigital.jarvisnano.MainActivity`
       opens the companion app.
 - [ ] App remains responsive after rotating the phone and backgrounding /

@@ -44,11 +44,32 @@ class DeviceRepository(
 
     /** Currently resolved host (hostname, IP, or null). */
     @Volatile private var host: String? = null
+    @Volatile private var statusFailures: Int = 0
 
     fun setManualHost(value: String?) {
-        _manualOverride.value = value?.takeIf { it.isNotBlank() }
-        host = _manualOverride.value
-        _connection.value = host?.let { ConnectionState.Connected(it) } ?: ConnectionState.Disconnected
+        val manualHost = value?.let(::cleanHost)?.takeIf { it.isNotBlank() }
+        _manualOverride.value = manualHost
+        host = manualHost
+        statusFailures = 0
+        if (manualHost == null) {
+            _connection.value = ConnectionState.Disconnected
+            _status.value = null
+            return
+        }
+
+        _connection.value = ConnectionState.Searching
+        scope.launch {
+            runCatching { client.getStatus(manualHost) }
+                .onSuccess {
+                    _status.value = it
+                    _connection.value = ConnectionState.Connected(manualHost)
+                }
+                .onFailure { t ->
+                    if (_manualOverride.value == manualHost) {
+                        _connection.value = ConnectionState.Failed(t.message ?: "manual host probe failed")
+                    }
+                }
+        }
     }
 
     /**
@@ -67,6 +88,7 @@ class DeviceRepository(
                     hostLock.withLock {
                         if (_manualOverride.value == null) {
                             host = verified
+                            statusFailures = 0
                             _connection.value = ConnectionState.Connected(verified)
                         }
                     }
@@ -89,11 +111,21 @@ class DeviceRepository(
             if (h != null) {
                 runCatching { client.getStatus(h) }
                     .onSuccess {
+                        statusFailures = 0
                         _status.value = it
                         _connection.value = ConnectionState.Connected(h)
                         emit(it)
                     }
-                    .onFailure { _connection.value = ConnectionState.Failed(it.message ?: "status failed") }
+                    .onFailure {
+                        statusFailures += 1
+                        _connection.value = ConnectionState.Failed(it.message ?: "status failed")
+                        if (_manualOverride.value == null && statusFailures >= MAX_STATUS_FAILURES) {
+                            host = null
+                            _status.value = null
+                            statusFailures = 0
+                            startDiscovery()
+                        }
+                    }
             }
             delay(POLL_INTERVAL_MS)
         }
@@ -127,7 +159,17 @@ class DeviceRepository(
     private fun requireHost(): String =
         host ?: error("device host not set — discovery hasn't completed and no manual override configured")
 
+    private fun cleanHost(value: String): String =
+        value.trim()
+            .removePrefix("http://")
+            .removePrefix("https://")
+            .substringBefore('/')
+            .substringBefore('?')
+            .substringBefore('#')
+            .trimEnd('/')
+
     companion object {
         const val POLL_INTERVAL_MS: Long = 4_000L
+        private const val MAX_STATUS_FAILURES: Int = 3
     }
 }

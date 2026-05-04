@@ -182,9 +182,22 @@ endpoint first across AP, STA IP, and mDNS:
 ./scripts/http-matrix.sh
 ```
 
-By default it probes `192.168.4.1`, `192.168.50.80`, and `esp-claw.local`
-against `/api/health`, `/api/status`, `/api/battery`, `/api/audio/level`, and
-`/api/wifi/scan`. Override the host list when the board has a different STA IP:
+By default it probes `192.168.4.1`, `192.168.50.80`, and `esp-claw.local`.
+The matrix covers the cheap health/status path plus the endpoints used by
+onboarding, settings, chat, telemetry, and camera diagnostics:
+
+- `/api/health`
+- `/api/status`
+- `/api/config`
+- `/api/webim/status`
+- `/api/battery`
+- `/api/audio/level`
+- `/api/wifi/scan`
+- `/api/camera/snapshot`
+- `OPTIONS /api/status`
+- WebSocket upgrade for `/ws/webim`
+
+Override the host list when the board has a different STA IP:
 
 ```bash
 ./scripts/http-matrix.sh 192.168.1.42 esp-claw.local

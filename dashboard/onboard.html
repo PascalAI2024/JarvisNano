@@ -389,6 +389,17 @@ const STATE = {
   handoffStaHost: "",
 };
 
+function normalizeHost(value, fallback = "192.168.4.1") {
+  const raw = String(value || "").trim();
+  if (!raw) return fallback;
+  try {
+    const parsed = new URL(raw.includes("://") ? raw : "http://" + raw);
+    return parsed.host || fallback;
+  } catch (_) {
+    return raw.replace(/^https?:\/\//i, "").split(/[/?#]/, 1)[0].replace(/\/+$/, "") || fallback;
+  }
+}
+
 const PRESETS = [
   { id: "openai",    name: "OpenAI",    backend: "openai_compatible",         profile: "openai",        base: "https://api.openai.com/v1",      auth: "bearer", model: "gpt-4o-mini" },
   { id: "anthropic", name: "Anthropic", backend: "anthropic",                profile: "anthropic",     base: "https://api.anthropic.com/v1",   auth: "x-api-key", model: "claude-3-5-haiku-latest" },
@@ -399,8 +410,8 @@ const PRESETS = [
 ];
 
 // ---------- HTTP helpers ----------
-function baseUrl() { return "http://" + STATE.host; }
-function wsUrl() { return "ws://" + STATE.host + "/ws/webim"; }
+function baseUrl() { return "http://" + normalizeHost(STATE.host); }
+function wsUrl() { return "ws://" + normalizeHost(STATE.host) + "/ws/webim"; }
 
 async function get(path, timeoutMs = 5000) {
   const c = new AbortController();
@@ -464,9 +475,10 @@ document.querySelectorAll(".toggle-eye").forEach(b => {
 });
 
 // ---------- Host ----------
+STATE.host = normalizeHost(STATE.host);
 $("hostInput").value = STATE.host;
 function setHost(host) {
-  STATE.host = (host || "").trim() || "192.168.4.1";
+  STATE.host = normalizeHost(host);
   $("hostInput").value = STATE.host;
   localStorage.setItem("jarvis_host", STATE.host);
 }

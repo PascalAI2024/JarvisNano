@@ -1,6 +1,6 @@
 # Finish Plan
 
-Last updated: **2026-05-03**.
+Last updated: **2026-05-04**.
 
 This is the shortest practical path from the current stable booting board to a
 finished Phase-2 public release. It is based on the current task board plus
@@ -49,10 +49,23 @@ same checks. A firmware `/api/health` bootstrap patch is now in place for cheap
 LAN reachability tests, and Android mDNS discovery now verifies the resolved
 host with `/api/status` before marking it connected.
 
+Progress on 2026-05-04: the connected XIAO flashed successfully on
+`/dev/cu.usbmodem1101` and booted through STA/AP Wi-Fi, Lua, router, MCP, Web
+IM, and native GPIO21 heartbeat. The board reported STA IP `192.168.50.80` and
+AP SSID `esp-claw-11F0C5`. The Android Gradle wrapper is restored so the pinned
+Gradle version is reproducible; local Android compilation still requires an
+Android SDK path via `ANDROID_HOME` or `android/local.properties`.
+
 ## 2. Fix LAN HTTP Reachability Before Feature Work
 
 The board boots cleanly, but macOS curls to `192.168.50.80` still time out.
 Until that is explained, camera/BLE/TTS debugging will waste time.
+
+Current 2026-05-04 evidence: ARP resolves `192.168.50.80` to the board MAC
+`90:70:69:11:f0:c4`, but ICMP and TCP port 80 time out from the Mac. Serial
+capture during curl attempts showed no matching request logs, while earlier boot
+logs showed stale dashboard camera requests reaching firmware. Treat this as a
+network-path problem until AP-path and second-client tests prove otherwise.
 
 Run this exact matrix:
 
@@ -61,6 +74,8 @@ Run this exact matrix:
 - STA path from phone/another laptop: same endpoint.
 - mDNS path: `http://esp-claw.local/api/status`.
 - Serial capture during every request.
+- ARP table before/after each test, to distinguish routing failure from firmware
+  HTTP handler failure.
 
 Use the tiny `/api/health` route for the first probe. It avoids
 config/FATFS/LLM work and returns immediately with uptime, heap, Wi-Fi mode,
