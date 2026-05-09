@@ -2,13 +2,15 @@
 
 Status: interface only. No real binding yet.
 
+This is the **canonical** Phase-3 runtime description for JarvisNano. The protocol doc (`docs/PROTOCOL.md` §7) and the device-side hand-off docs reference these values directly.
+
 ## Target stack
 
-- Engine: [llama.cpp](https://github.com/ggerganov/llama.cpp) Android NDK build.
+- Engine: [llama.cpp](https://github.com/ggerganov/llama.cpp) built as an **Android NDK** library and bound through JNI from the Kotlin/Compose companion in `/android`. **Not** `llama.rn` — this app is native Android, not React Native.
 - Model: `unsloth/gemma-4-E4B-it-GGUF` quantized at `Q4_K_M`.
 - Disk: ~3 GB.
 - RAM peak: ~3.5 GB at runtime.
-- Native multimodal: text **and** audio-in via the model's audio encoder.
+- Native multimodal: text **and** audio-in via the model's audio encoder. PCM frames arriving on BLE `audio_in` (16 kHz mono S16LE, 20 ms / 320 samples per frame) feed straight into the model graph — no separate STT round-trip.
 
 ## Why Gemma 4 E4B / Q4_K_M?
 

@@ -30,7 +30,7 @@ X-JarvisNano-Protocol: 1
 
 The firmware ignores the header today, but future breaking changes will gate behavior on it. Servers that observe a higher version than they implement MUST respond with their highest supported version in `X-JarvisNano-Protocol-Server`.
 
-Semantic version of this document: **1.0.0-draft**.
+Semantic version of this document: **1.1.0-draft**.
 
 ---
 
@@ -201,9 +201,78 @@ The reply arrives asynchronously over the `/ws/webim` WebSocket (§4).
 | Code  | Meaning                                                    |
 | ----- | ---------------------------------------------------------- |
 | `200` | OK.                                                        |
+| `204` | OK, no content (CORS preflight).                           |
 | `400` | Malformed JSON or missing required field (e.g. `chat_id`). |
 | `404` | Unknown endpoint.                                          |
+| `405` | Method not allowed (most commonly: feature gated; see §3.6). |
 | `500` | IM gateway not bound, OOM, FATFS write failure.            |
+| `503` | Hardware unavailable / not wired (see §3.6).               |
+| `504` | Upstream LLM/TTS provider timed out.                       |
+
+### 3.6 Error and feature-gate schema
+
+Endpoints that depend on optional hardware (camera, battery ADC, speaker, BLE) or external providers (LLM, TTS) MUST distinguish three states so clients can render a calm UI instead of a generic failure:
+
+1. **Feature unconfigured** — the build does not include the hardware/driver. Returns `405 Method Not Allowed` with the gated body below. Examples: `/api/camera/snapshot` on a build where the Lua camera module is not present.
+2. **Feature wired but offline** — driver is present but the device is in an explicit "not wired" state. Returns `200 OK` with a typed body where the `state` / `wired` field carries the reason. Example: `/api/battery` returns `{wired:false, state:"not_wired", source:"stub"}` on builds without the ADC divider.
+3. **Feature transient failure** — driver is present and was previously working but is currently failing (sensor error, provider timeout). Returns `503` (hardware) or `504` (upstream) with the error body below.
+
+```ts
+interface ErrorBody {
+  ok: false;
+  error: ErrorCode;       // machine-readable
+  message: string;        // short human-readable summary, never PII
+  feature?: string;       // "camera" | "battery" | "speaker" | "ble" | "llm" | "tts"
+  retry_after_ms?: number; // optional hint for transient failures
+  detail?: Record<string, unknown>; // optional, schema-stable per error code
+}
+
+type ErrorCode =
+  | "feature_gated"        // 405 — build does not include this feature
+  | "feature_unavailable"  // 503 — hardware/driver present but not currently usable
+  | "feature_not_wired"    // 503 — explicit not-wired state for batteries/speakers
+  | "upstream_timeout"     // 504 — LLM/TTS provider timed out
+  | "upstream_error"       // 502 — LLM/TTS provider returned an error
+  | "bad_request"          // 400 — payload malformed
+  | "rate_limited"         // 429 — local request quota exceeded
+  | "internal_error";      // 500 — uncategorized firmware failure
+```
+
+Example — camera not built:
+
+```http
+HTTP/1.1 405 Method Not Allowed
+Content-Type: application/json
+Access-Control-Allow-Origin: *
+
+{"ok":false,"error":"feature_gated","message":"camera module not built","feature":"camera"}
+```
+
+Example — battery ADC not wired:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"wired":false,"mV":0,"pct":0,"state":"not_wired","source":"stub"}
+```
+
+Example — LLM provider timed out:
+
+```http
+HTTP/1.1 504 Gateway Timeout
+Content-Type: application/json
+
+{"ok":false,"error":"upstream_timeout","message":"llm provider did not respond within 20000ms","feature":"llm","retry_after_ms":2000}
+```
+
+Clients SHOULD:
+
+- Render `feature_gated` and `feature_not_wired` states as informational ("camera not enabled on this build", "battery not wired") — not as errors.
+- Render `feature_unavailable`, `upstream_timeout`, and `upstream_error` as transient failures with a retry, honoring `retry_after_ms` if present.
+- Treat any non-`ok:true`, non-feature-gate response as an error path.
+
+Endpoints that return JPEG/binary bodies (`/api/camera/snapshot`) follow the same rules, except the body is the binary on success and the `ErrorBody` JSON on failure (`Content-Type` distinguishes them).
 
 ---
 
@@ -318,12 +387,12 @@ classDiagram
 
 | Char        | Properties              | Payload                                                            |
 | ----------- | ----------------------- | ------------------------------------------------------------------ |
-| `audio_in`  | `notify`                | PCM16, mono, 16 kHz, little-endian. Up to 240 samples per packet (480 B), one packet per 15 ms. The phone subscribes; the device pushes mic frames live. |
-| `audio_out` | `write` + `write_no_rsp`| PCM16, mono, 16 kHz, little-endian. The phone writes synthesized speech (TTS output or a pre-recorded clip) for the device to play through the I²S amp. |
+| `audio_in`  | `notify`                | PCM16, mono, 16 kHz, little-endian. **20 ms frames = 320 samples = 640 audio bytes** + 4-byte header (see §6.5). Device pushes mic frames live. |
+| `audio_out` | `write` + `write_no_rsp`| PCM16, mono, 16 kHz, little-endian. Same 20 ms framing as `audio_in`. Phone writes synthesized speech for the device to play through the I²S amp. |
 | `state`     | `notify`                | UTF-8 JSON line: `{"state": "IDLE\|LISTENING\|THINKING\|SPEAKING\|ERROR", "ts_ms": 12345, "detail": "...?"}` — one line per state change. |
 | `control`   | `write`                 | UTF-8 JSON command. See §6.4.                                      |
 
-MTU: clients SHOULD request 247 (BLE 4.2 LE Data Length Extension). The firmware implementation should negotiate down on older centrals.
+MTU: clients SHOULD request 247 (BLE 4.2 LE Data Length Extension). The firmware implementation MUST negotiate down on older centrals — see §6.5 for the fragmentation rules when the negotiated MTU is below the frame payload.
 
 ### 6.4 Control commands
 
@@ -338,7 +407,45 @@ MTU: clients SHOULD request 247 (BLE 4.2 LE Data Length Extension). The firmware
 
 Unknown commands are silently dropped (logged on the device).
 
-### 6.5 Pairing
+### 6.5 Audio framing
+
+Both `audio_in` and `audio_out` carry the same fixed-size frame. One canonical frame size keeps phone and device buffers symmetric and matches a sensible jitter budget for VAD / endpointing.
+
+```
++------+------+------+------+----------------+
+| seq  | seq  | flag | rsv  | PCM16 LE × 320 |
+| (lo) | (hi) | (u8) | (u8) | = 640 bytes    |
++------+------+------+------+----------------+
+   0      1      2      3        4 .. 643
+```
+
+| Field | Bytes | Meaning |
+| ----- | ----- | ------- |
+| `seq` | 2 (LE u16) | Per-direction frame sequence, wraps at 0xFFFF. Resets to 0 on (re)connect. |
+| `flag` | 1 | Bit 0 = `END` (last frame of an utterance), bit 1 = `KEYFRAME` (silence boundary, safe resync point), bits 2–7 reserved (set to 0). |
+| `rsv` | 1 | Reserved, MUST be 0. |
+| `pcm` | 640 | 320 × PCM16 LE samples at 16 kHz mono = 20 ms of audio. |
+
+**Total payload: 644 bytes per frame.**
+
+Fragmentation when MTU < 644:
+
+- The phone MUST request MTU 247 on connect; the firmware MUST honor it where the central allows.
+- If the negotiated MTU is below `payload + 3`, the writer MUST split a single frame across consecutive ATT writes / notifications using the same `seq`. The reader reassembles by `seq`. The trailing fragment of a frame has the same `seq` as the leading fragment; the next `seq` value indicates the start of a new frame.
+- Common worst case (MTU 23, ATT payload 20): 644 bytes → 33 fragments. This works but is slow; treat it as a fallback, not a target.
+
+Backpressure:
+
+- `audio_out` (phone→device): the phone MUST keep no more than 8 frames (160 ms) in flight at once. Use `write_no_rsp` for steady state and `write` (with response) once per second as a flow checkpoint; if the response stalls beyond 500 ms, pause writes until it resolves.
+- `audio_in` (device→phone): if the phone cannot keep up with notifications, it MUST send `{"cmd":"audio_in_pause"}` on `control`; the device drops to a heartbeat (one keyframe per second) until `{"cmd":"audio_in_resume"}` arrives.
+- Either side MAY drop frames to recover. A receiver that observes a `seq` gap MUST keep playback going (insert silence or repeat the last frame) and SHOULD wait for the next `KEYFRAME` to resync rather than re-buffering.
+
+End of utterance:
+
+- The producer sets `flag.END = 1` on the final frame of an utterance and resets internal jitter buffers.
+- The consumer flushes its decode/playback buffers when it sees `END`, so the next frame can start playback immediately without a stale-sample carry-over.
+
+### 6.6 Pairing
 
 Just-Works pairing for Phase 2 — encrypted but unauthenticated. Phase 3 introduces passkey display via the Round Display.
 
@@ -367,9 +474,9 @@ sequenceDiagram
     Phone->>Dev: notify(state, "IDLE")
 ```
 
-Reference model: **Gemma 4 E4B INT4 GGUF** (`google/gemma-4-e4b-it-q4_0.gguf`, ~3.0 GB). The phone-side runtime is `llama.cpp` via the React Native binding `llama.rn`. Models are downloaded on first activation and stored in app-private storage; there is no model push from device to phone.
+Reference model: **Gemma 4 E4B GGUF** (`unsloth/gemma-4-E4B-it-GGUF`, quantization `Q4_K_M`, ~3.0 GB on disk, ~3.5 GB RAM peak). The phone-side runtime is **`llama.cpp` built as an Android NDK library** (the Kotlin/Compose companion in `/android` calls in via JNI; there is no React Native dependency). Models are downloaded on first activation and stored in app-private storage; there is no model push from device to phone.
 
-The protocol does not specify the LLM — any GGUF model the phone can load is acceptable. Gemma 4 E4B is the reference because it fits in 4 GB phones and is multilingual.
+The protocol does not specify the LLM — any GGUF model the phone can load is acceptable. Gemma 4 E4B at `Q4_K_M` is the reference because it fits in 4 GB phones, is multilingual, and exposes a native audio encoder so PCM frames from the device's `audio_in` characteristic can be fed straight to the model graph without a separate STT round-trip.
 
 ---
 
@@ -436,4 +543,5 @@ function listen(host: string, onFrame: (f: WebImFrame) => void) {
 
 ## Appendix B — change log
 
+- **1.1.0-draft** (2026-05) — Added §3.6 error/feature-gate schema and 405/503/504/502/429 codes. Added §6.5 BLE audio framing (canonical 20 ms / 320-sample / 644-byte frames with 4-byte header, fragmentation rules, backpressure). Renumbered Pairing to §6.6. Reconciled §7 to Gemma 4 E4B `Q4_K_M` over `llama.cpp` Android NDK (was: `q4_0` over `llama.rn`).
 - **1.0.0-draft** (2026-05) — Initial draft. Phase 1 endpoints frozen; Phase 2 BLE shape defined; Phase 3 on-device LLM described.
