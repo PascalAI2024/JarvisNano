@@ -13,6 +13,12 @@ All notable user-facing changes should be recorded here.
 - Added `scripts/check-patches.sh` to verify that each patch artifact applies
   cleanly to the pinned ESP-Claw commit, or is an explicit bootstrap-managed
   mutation.
+- Hardened `scripts/check-secrets.sh`: tightened the source-tree regexes to
+  reduce documentation false-positives, added Google API key / JWT /
+  Telegram bot token / Anthropic / OpenAI project-key patterns, and added a
+  second pass that runs `strings` over `dashboard/firmware/*.bin` so a
+  baked-in credential in the published WebSerial blob can no longer slip
+  through the scan.
 - Added native GPIO21 status LED heartbeat as `patches/0007-native-status-led.patch`,
   starting after `app_claw_start()` so the event router and scheduler get first
   claim on heap; LED allocation failure is non-fatal.
