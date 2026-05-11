@@ -38,10 +38,6 @@ import com.ingeniousdigital.jarvisnano.data.DeviceConfig
 import com.ingeniousdigital.jarvisnano.data.DeviceRepository
 import com.ingeniousdigital.jarvisnano.ui.components.Tile
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.contentOrNull
 
 @Composable
 fun SettingsScreen(repository: DeviceRepository) {
@@ -61,7 +57,7 @@ fun SettingsScreen(repository: DeviceRepository) {
                 .onSuccess { config ->
                     loaded = config
                     edits.clear()
-                    config.raw.forEach { (k, v) -> edits[k] = displayValue(v) }
+                    config.raw.forEach { (k, v) -> edits[k] = DeviceConfig.displayValue(v) }
                 }
                 .onFailure { status = "Could not load config: ${it.message}" }
         }
@@ -133,14 +129,14 @@ fun SettingsScreen(repository: DeviceRepository) {
                 Button(
                     onClick = {
                         scope.launch {
-                            val patch = buildConfigPatch(config, edits)
+                            val patch = DeviceConfig.buildConfigPatch(config, edits)
                             if (patch.raw.isEmpty()) {
                                 status = "No changes to save."
                                 return@launch
                             }
                             runCatching { repository.saveConfig(patch) }
                                 .onSuccess {
-                                    loaded = mergeConfig(config, patch)
+                                    loaded = DeviceConfig.mergeConfig(config, patch)
                                     status = "Saved."
                                 }
                                 .onFailure { status = "Save failed: ${it.message}" }
@@ -150,7 +146,7 @@ fun SettingsScreen(repository: DeviceRepository) {
                 OutlinedButton(
                     onClick = {
                         scope.launch {
-                            val patch = buildConfigPatch(config, edits)
+                            val patch = DeviceConfig.buildConfigPatch(config, edits)
                             if (patch.raw.isEmpty()) {
                                 status = "No changes to save."
                                 return@launch
@@ -159,7 +155,7 @@ fun SettingsScreen(repository: DeviceRepository) {
                                 repository.saveConfig(patch)
                                 repository.restart()
                             }.onSuccess {
-                                loaded = mergeConfig(config, patch)
+                                loaded = DeviceConfig.mergeConfig(config, patch)
                                 status = "Saved + restart requested."
                             }
                                 .onFailure { status = "Save failed: ${it.message}" }
@@ -208,24 +204,3 @@ private fun ConfigField(
     )
 }
 
-private fun buildConfigPatch(
-    base: DeviceConfig,
-    edits: Map<String, String>,
-): DeviceConfig {
-    val patch = mutableMapOf<String, JsonElement>()
-    edits.forEach { (key, value) ->
-        val original = base.raw[key]
-        if (original != null && value == displayValue(original)) return@forEach
-        patch[key] = JsonPrimitive(value)
-    }
-    return DeviceConfig(raw = JsonObject(patch))
-}
-
-private fun displayValue(value: JsonElement): String =
-    (value as? JsonPrimitive)?.contentOrNull ?: value.toString()
-
-private fun mergeConfig(base: DeviceConfig, patch: DeviceConfig): DeviceConfig {
-    val merged = base.raw.toMutableMap()
-    merged.putAll(patch.raw)
-    return DeviceConfig(raw = JsonObject(merged))
-}
