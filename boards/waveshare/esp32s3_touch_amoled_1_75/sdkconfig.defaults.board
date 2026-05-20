@@ -22,6 +22,15 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 # Display backed by LCD subsystem.
 CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT=y
 
+# Board-manager peripheral support flags (required by esp-bmgr-assist >= 0.8 — earlier
+# versions inferred these from board_peripherals.yaml; newer versions need them explicit).
+CONFIG_ESP_BOARD_PERIPH_I2C_SUPPORT=y
+CONFIG_ESP_BOARD_PERIPH_SPI_SUPPORT=y
+CONFIG_ESP_BOARD_PERIPH_GPIO_SUPPORT=y
+
+# Audio: I2S0 duplex driving ES8311 codec (out) + ES7210 ADC (in) with on-chip AEC.
+CONFIG_ESP_BOARD_PERIPH_I2S_SUPPORT=y
+
 # Touch screen (CST9217 has known broken READ_ID register; skip the probe).
 # Matches the pattern esp_vocat uses for CST816S.
 

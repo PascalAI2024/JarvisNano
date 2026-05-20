@@ -10,6 +10,43 @@ peripherals:
         sda: 15
         scl: 14
 
+  # I2S0 duplex — ES8311 DAC (out) and ES7210 ADC (in) share the same I2S clock domain.
+  # Pins from Waveshare BSP: MCLK=42, BCLK=9, WS=45, DOUT=8, DSIN=10.
+  - name: i2s_audio_out
+    type: i2s
+    role: master
+    format: std-out
+    config: &i2s0_config
+      port: 0
+      sample_rate_hz: 16000
+      mclk_multiple: 256
+      data_bit_width: 32
+      slot_bit_width: I2S_SLOT_BIT_WIDTH_AUTO
+      slot_mode: I2S_SLOT_MODE_STEREO
+      slot_mask: I2S_STD_SLOT_BOTH
+      ws_width: 32
+      pins:
+        mclk: 42
+        bclk: 9
+        ws: 45
+        dout: 8
+        din: 10
+
+  - name: i2s_audio_in
+    type: i2s
+    role: master
+    format: std-in
+    config: *i2s0_config
+
+  # ES8311 power-amp enable (drives the on-board class-D into the MX1.25 SPK connector).
+  - name: gpio_pa_control
+    type: gpio
+    role: io
+    config:
+      pin: 46
+      mode: GPIO_MODE_OUTPUT
+      pull_up: true
+
   # LCD QSPI bus — SPI2_HOST, four data lines for the CO5300 AMOLED.
   - name: spi_display
     type: spi

@@ -23,11 +23,52 @@ devices:
     chip: axp2101
     type: custom
     version: default
+    init_skip: true                # factory AXP2101 defaults already power display/audio rails on this board
     config:
       frequency: 400000
       i2c_addr: 0x34
     peripherals:
       - name: i2c_master
+
+  # ES8311 — speaker DAC + (unused here) onboard mic ADC. Mic ADC handled by ES7210 for AEC.
+  - name: audio_dac
+    chip: es8311
+    type: audio_codec
+    version: default
+    config:
+      adc_enabled: false
+      dac_enabled: true
+      dac_max_channel: 1
+      dac_channel_mask: "1"
+      dac_init_gain: 0
+      mclk_enabled: true
+    peripherals:
+      - name: gpio_pa_control
+        gain: 6
+        active_level: 1
+      - name: i2s_audio_out
+      - name: i2c_master
+        address: 0x30
+        frequency: 400000
+
+  # ES7210 — 4-channel ADC with on-chip AEC (acoustic echo cancellation).
+  # Board has 2 MEMS mics (MIC1+MIC2) + speaker reference loopback (AEC).
+  # Channel mask "0111" = 3 channels: Mic0, Mic1, plus reference channel.
+  - name: audio_adc
+    chip: es7210
+    type: audio_codec
+    version: default
+    config:
+      adc_enabled: true
+      adc_max_channel: 4
+      adc_channel_mask: "0111"
+      adc_channel_labels: ['NA', 'REF', 'MIC1', 'MIC2']
+      adc_init_gain: 0
+    peripherals:
+      - name: i2s_audio_in
+      - name: i2c_master
+        address: 0x80
+        frequency: 400000
 
   # CO5300 AMOLED, 466x466, QSPI on SPI2_HOST
   - name: display_lcd
