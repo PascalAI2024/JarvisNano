@@ -10,12 +10,25 @@
 #include <string.h>
 #include "esp_log.h"
 #include "esp_check.h"
+#include "esp_lcd_panel_ops.h"
 #include "esp_lcd_co5300.h"
 #include "esp_lcd_touch_cst9217.h"
+#include "esp_io_expander_tca9554.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
 static const char *TAG = "WS_AMOLED_1_75_SETUP";
+
+esp_err_t io_expander_factory_entry_t(i2c_master_bus_handle_t i2c_handle,
+                                      const uint16_t dev_addr,
+                                      esp_io_expander_handle_t *handle_ret)
+{
+    esp_err_t ret = esp_io_expander_new_i2c_tca9554(i2c_handle, dev_addr, handle_ret);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_io_expander_new_i2c_tca9554 failed: %s", esp_err_to_name(ret));
+    }
+    return ret;
+}
 
 /* CO5300 init sequence — vendor magic numbers from Waveshare's official BSP
  * (waveshareteam/Waveshare-ESP32-components/bsp/esp32_s3_touch_amoled_1_75).
