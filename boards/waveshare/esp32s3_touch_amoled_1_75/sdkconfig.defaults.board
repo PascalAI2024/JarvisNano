@@ -1,0 +1,29 @@
+# Waveshare ESP32-S3-Touch-AMOLED-1.75
+# ESP32-S3R8: 16 MB flash, 8 MB octal PSRAM
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# 16 MB QIO flash @ 80 MHz
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# 8 MB octal PSRAM @ 80 MHz
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# USB: native USB-Serial/JTAG console for monitor/log over the same cable used to flash.
+# Without this the board enumerates as JTAG-only and there is no /dev/cu.usbmodem* after flash —
+# you would have to hold BOOT + replug for every reflash. Confirmed: factory firmware ships
+# without this enabled, which is why the new unit only enumerates in download mode.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# Display backed by LCD subsystem.
+CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT=y
+
+# Touch screen (CST9217 has known broken READ_ID register; skip the probe).
+# Matches the pattern esp_vocat uses for CST816S.
+
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

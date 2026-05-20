@@ -1,0 +1,25 @@
+peripherals:
+  # I2C master — shared bus for TCA9554, AXP2101, ES8311, ES7210, CST9217, QMI8658, PCF85063.
+  # GPIO15/14 verified against schematic (ESP32_SDA / ESP32_SCL nets).
+  - name: i2c_master
+    type: i2c
+    role: master
+    config:
+      port: 0
+      pins:
+        sda: 15
+        scl: 14
+
+  # LCD QSPI bus — SPI2_HOST, four data lines for the CO5300 AMOLED.
+  - name: spi_display
+    type: spi
+    role: master
+    config:
+      spi_bus_config:
+        spi_port: SPI2_HOST
+        data0_io_num: 4
+        data1_io_num: 5
+        data2_io_num: 6
+        data3_io_num: 7
+        sclk_io_num: 38
+        max_transfer_sz: 21744  # width * height * 2 / 10 ≈ 466*466*2/10

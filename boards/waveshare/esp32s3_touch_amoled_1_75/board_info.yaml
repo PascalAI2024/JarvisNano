@@ -1,0 +1,4 @@
+board: esp32s3_touch_amoled_1_75
+chip: esp32s3
+description: "Waveshare ESP32-S3-Touch-AMOLED-1.75 (16 MB flash, 8 MB octal PSRAM, 1.75in 466x466 AMOLED CO5300 QSPI + CST9217 touch, AXP2101 PMIC, TCA9554 IO expander, ES8311+ES7210 audio chain with AEC, dual MEMS mic, QMI8658 IMU, PCF85063 RTC, optional LC76G GNSS)"
+manufacturer: "Waveshare"
