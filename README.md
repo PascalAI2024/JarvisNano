@@ -14,6 +14,7 @@
   <a href="https://github.com/PascalAI2024/JarvisNano/stargazers"><img src="https://img.shields.io/github/stars/PascalAI2024/JarvisNano?style=flat-square&color=ff5722" alt="stars"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-ff5722?style=flat-square" alt="license"></a>
   <img src="https://img.shields.io/badge/board-XIAO_ESP32--S3_Sense-ff5722?style=flat-square" alt="board">
+  <img src="https://img.shields.io/badge/board-Waveshare_AMOLED--1.75-ff5722?style=flat-square" alt="board">
   <img src="https://img.shields.io/badge/runtime-ESP--Claw-ff5722?style=flat-square" alt="runtime">
   <img src="https://img.shields.io/badge/llm-MiniMax--M2.7-ff5722?style=flat-square" alt="llm">
 </p>
@@ -22,9 +23,15 @@
 
 JarvisNano is a board adaptation + reference build that brings Espressif's
 [ESP-Claw](https://github.com/espressif/esp-claw) "Chat Coding" agent
-framework to the **Seeed Studio XIAO ESP32-S3 Sense** — the smallest
-Wi-Fi/BLE board with an on-board MEMS PDM microphone and an on-board camera
-(OV3660 on 2026 batches; OV2640 on older units — see [CAMERA.md](docs/CAMERA.md)).
+framework to small, accessible ESP32-S3 hardware. Two boards are currently
+supported in-tree:
+
+| Board | Vendor | Strengths | Adaptation at |
+|---|---|---|---|
+| **XIAO ESP32-S3 Sense** | Seeed Studio | Smallest S3 with on-board PDM mic + camera (OV3660 / OV2640) | [`boards/seeed/xiao_esp32s3_sense/`](boards/seeed/xiao_esp32s3_sense/) |
+| **ESP32-S3-Touch-AMOLED-1.75** | Waveshare | 1.75" round AMOLED, capacitive touch, dual MEMS mic + ES7210 AEC, 16 MB flash | [`boards/waveshare/esp32s3_touch_amoled_1_75/`](boards/waveshare/esp32s3_touch_amoled_1_75/) |
+
+They share one firmware tree, one dashboard, one Android companion. Pick the board whose **strengths match your use case** — the XIAO if you want voice + vision, the AMOLED if you want a screen + AEC mic array. End-to-end agent loop has been verified on both.
 
 The bare board, plugged into USB-C, gives you:
 - 🎙️ on-device PDM mic capture (full-duplex on I²S0)

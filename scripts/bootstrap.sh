@@ -8,7 +8,11 @@ ESP_CLAW_REPO="https://github.com/espressif/esp-claw.git"
 ESP_CLAW_REF="${ESP_CLAW_REF:-6a211756a6ebf8d725173e294f582a6cf30c9592}"
 BOARD_NAME="xiao_esp32s3_sense"
 BOARD_VENDOR="seeed"
-IDF_IMAGE="espressif/idf:release-v5.5"
+# Pinned to a specific point release. `release-v5.5` is a rolling tag and
+# Espressif rebases the upstream IDF source on each push (e.g. fixes get
+# back-ported), which silently breaks tools/esp-idf.patch and `gen-bmgr-config`
+# CLI surface across pip releases. See CHANGELOG entry for the 2026-05 incident.
+IDF_IMAGE="espressif/idf:v5.5.4"
 
 log() { printf '\033[1;36m[bootstrap]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[bootstrap]\033[0m %s\n' "$*" >&2; exit 1; }
@@ -60,7 +64,7 @@ apply_patch() {
     if [ ! -f "$target" ]; then
         log "esp_board_manager not pulled yet — running idf.py reconfigure inside Docker to populate managed_components"
         docker run --rm -v "$ESP_CLAW_DIR":/project -w /project/application/edge_agent "$IDF_IMAGE" \
-            bash -lc 'pip install --quiet esp-bmgr-assist && idf.py set-target esp32s3 && idf.py reconfigure' \
+            bash -lc 'pip install --quiet "esp-bmgr-assist==0.5.0" && idf.py set-target esp32s3 && idf.py reconfigure' \
             > "$ROOT/.build_logs/reconfigure.log" 2>&1 ||
             die "idf.py reconfigure failed; see $ROOT/.build_logs/reconfigure.log"
         [ -f "$target" ] || die "esp_board_manager component still missing after reconfigure: $target"
@@ -101,7 +105,7 @@ build() {
     mkdir -p "$ROOT/.build_logs"
     log "building inside $IDF_IMAGE (output streams to .build_logs/build.log)"
     docker run --rm -v "$ESP_CLAW_DIR":/project -w /project/application/edge_agent "$IDF_IMAGE" \
-        bash -lc 'set -e; pip install --quiet esp-bmgr-assist;
+        bash -lc 'set -e; pip install --quiet "esp-bmgr-assist==0.5.0";
                   idf.py set-target esp32s3;
                   idf.py gen-bmgr-config -c ./boards -b xiao_esp32s3_sense;
                   python3 - <<'"'"'PY'"'"'

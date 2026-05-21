@@ -70,6 +70,25 @@ devices:
         address: 0x80
         frequency: 400000
 
+  # 32 GB microSD via SDMMC (1-bit). Pin map from Waveshare BSP:
+  # D0=GPIO3, CMD=GPIO1, CLK=GPIO2. format_if_mount_failed lets the
+  # firmware reformat a card that's blank or has a non-FAT filesystem,
+  # rather than panic-aborting board init.
+  - name: fs_sdcard
+    type: fs_fat
+    sub_type: sdmmc
+    version: default
+    config:
+      vfs_config:
+        format_if_mount_failed: true
+      sub_config:
+        bus_width: 1
+        slot_flags: "SDMMC_SLOT_FLAG_INTERNAL_PULLUP"
+        pins:
+          clk: 2
+          cmd: 1
+          d0: 3
+
   # CO5300 AMOLED, 466x466, QSPI on SPI2_HOST
   - name: display_lcd
     chip: co5300
