@@ -20,13 +20,15 @@ Runtime behavior is intentionally bounded:
 | Characteristic       | UUID                                     | Direction     | Payload                                                |
 | -------------------- | ---------------------------------------- | ------------- | ------------------------------------------------------ |
 | `service`            | `1ec185cd-4bc7-5797-a8b1-0f5b66c59757`   | service       | JarvisNano GATT service                                |
-| `audio_in`           | `ca04b99f-5e74-5a35-8f4f-d1313f19b29b`   | device→phone  | PCM 16 kHz mono S16LE, 20 ms frames                    |
-| `audio_out`          | `872228b7-ccd8-55dd-b12b-5d0352903617`   | phone→device  | PCM 16 kHz mono S16LE, 20 ms frames (TTS playback)     |
+| `audio_in`           | `ca04b99f-5e74-5a35-8f4f-d1313f19b29b`   | device→phone  | PCM 16 kHz mono S16LE, 20 ms frames (320 samples, 644 B incl. header) |
+| `audio_out`          | `872228b7-ccd8-55dd-b12b-5d0352903617`   | phone→device  | PCM 16 kHz mono S16LE, 20 ms frames (320 samples, 644 B incl. header) |
 | `state`              | `dab5c3d4-915d-5f25-acc9-9d511df742bf`   | device→phone  | JSON `{mode, battery_pct, error?}`                     |
 | `control`            | `2e14c0f2-4b07-5802-a8f9-369752d7cf2a`   | phone→device  | JSON commands (`start_listen`, `stop`, `restart`, …)   |
 
 These values are derived in [`docs/PROTOCOL.md`](../../../../../../../../../docs/PROTOCOL.md)
-and must match the firmware exactly.
+and must match the firmware exactly. Audio framing (header layout, fragmentation,
+backpressure rules) is defined in §6.5 of that document — keep this README's
+20 ms / 320-sample number aligned with the canonical frame there.
 
 ## What "done" looks like for Phase 2
 
