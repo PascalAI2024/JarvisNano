@@ -916,6 +916,140 @@ print("patched", p)
 PY
 }
 
+apply_emote_status_detail_patch() {
+    # patches/0009 — emote idle screen shows the active LLM model
+    # ("Ready * <model>") instead of a generic Wi-Fi message. Touches 3 files.
+    local emote_c="$ESP_CLAW_DIR/components/common/emote/emote.c"
+    local emote_h="$ESP_CLAW_DIR/components/common/emote/include/emote.h"
+    local app_c="$ESP_CLAW_DIR/components/common/app_claw/app_claw.c"
+    if [ ! -f "$emote_c" ] || [ ! -f "$emote_h" ] || [ ! -f "$app_c" ]; then
+        log "emote/app_claw sources not found — skipping emote status-detail patch"
+        return
+    fi
+    if grep -q "emote_set_status_detail" "$emote_c" 2>/dev/null; then
+        log "emote status-detail patch already applied"
+        return
+    fi
+    log "applying patches/0009-emote-status-detail.patch"
+    python3 - <<PY
+import pathlib
+
+emote_c = pathlib.Path(r"$emote_c")
+emote_h = pathlib.Path(r"$emote_h")
+app_c   = pathlib.Path(r"$app_c")
+
+# --- emote.c: split emote_set_network_status into render + two setters ---
+s = emote_c.read_text()
+old = (
+    "esp_err_t emote_set_network_status(bool sta_connected, const char *ap_ssid)\n"
+    "{\n"
+    "    ESP_RETURN_ON_FALSE(s_emote_handle != NULL, ESP_ERR_INVALID_STATE, TAG, \"emote handle is NULL\");\n"
+    "\n"
+    "    const bool ap_present = (ap_ssid != NULL && ap_ssid[0] != '\\0');\n"
+    "    const char *idle = sta_connected ? \"swim\" : \"offline\";\n"
+    "\n"
+    "    char msg[96];\n"
+    "    if (sta_connected && ap_present) {\n"
+    "        snprintf(msg, sizeof(msg), \"Online * AP: %s\", ap_ssid);\n"
+    "    } else if (sta_connected) {\n"
+    "        snprintf(msg, sizeof(msg), \"Wi-Fi connected\");\n"
+    "    } else if (ap_present) {\n"
+    "        snprintf(msg, sizeof(msg), \"Setup WiFi: %s\", ap_ssid);\n"
+    "    } else {\n"
+    "        snprintf(msg, sizeof(msg), \"Wi-Fi offline\");\n"
+    "    }\n"
+    "\n"
+    "    return emote_apply(idle, msg);\n"
+    "}\n"
+)
+new = (
+    "static bool s_sta_connected;\n"
+    "static char s_ap_ssid[48];\n"
+    "static char s_status_detail[48];   /* e.g. the active LLM model name */\n"
+    "\n"
+    "static esp_err_t emote_render_status(void)\n"
+    "{\n"
+    "    ESP_RETURN_ON_FALSE(s_emote_handle != NULL, ESP_ERR_INVALID_STATE, TAG, \"emote handle is NULL\");\n"
+    "\n"
+    "    const bool ap_present = (s_ap_ssid[0] != '\\0');\n"
+    "    const bool has_detail = (s_status_detail[0] != '\\0');\n"
+    "    const char *idle = s_sta_connected ? \"swim\" : \"offline\";\n"
+    "\n"
+    "    char msg[96];\n"
+    "    if (s_sta_connected && has_detail) {\n"
+    "        snprintf(msg, sizeof(msg), \"Ready * %s\", s_status_detail);\n"
+    "    } else if (s_sta_connected && ap_present) {\n"
+    "        snprintf(msg, sizeof(msg), \"Online * AP: %s\", s_ap_ssid);\n"
+    "    } else if (s_sta_connected) {\n"
+    "        snprintf(msg, sizeof(msg), \"Wi-Fi connected\");\n"
+    "    } else if (ap_present) {\n"
+    "        snprintf(msg, sizeof(msg), \"Setup WiFi: %s\", s_ap_ssid);\n"
+    "    } else {\n"
+    "        snprintf(msg, sizeof(msg), \"Wi-Fi offline\");\n"
+    "    }\n"
+    "\n"
+    "    return emote_apply(idle, msg);\n"
+    "}\n"
+    "\n"
+    "esp_err_t emote_set_network_status(bool sta_connected, const char *ap_ssid)\n"
+    "{\n"
+    "    s_sta_connected = sta_connected;\n"
+    "    if (ap_ssid != NULL && ap_ssid[0] != '\\0') {\n"
+    "        snprintf(s_ap_ssid, sizeof(s_ap_ssid), \"%s\", ap_ssid);\n"
+    "    } else {\n"
+    "        s_ap_ssid[0] = '\\0';\n"
+    "    }\n"
+    "    return emote_render_status();\n"
+    "}\n"
+    "\n"
+    "esp_err_t emote_set_status_detail(const char *detail)\n"
+    "{\n"
+    "    if (detail != NULL && detail[0] != '\\0') {\n"
+    "        snprintf(s_status_detail, sizeof(s_status_detail), \"%s\", detail);\n"
+    "    } else {\n"
+    "        s_status_detail[0] = '\\0';\n"
+    "    }\n"
+    "    if (s_emote_handle != NULL) {\n"
+    "        return emote_render_status();\n"
+    "    }\n"
+    "    return ESP_OK;\n"
+    "}\n"
+)
+if old not in s:
+    raise SystemExit("could not locate emote_set_network_status in emote.c — upstream may have changed")
+emote_c.write_text(s.replace(old, new))
+
+# --- emote.h: declare the new setter ---
+h = emote_h.read_text()
+h_old = "esp_err_t emote_set_network_status(bool sta_connected, const char *ap_ssid);\n"
+h_new = (
+    "esp_err_t emote_set_network_status(bool sta_connected, const char *ap_ssid);\n"
+    "esp_err_t emote_set_status_detail(const char *detail);\n"
+)
+if h_old not in h:
+    raise SystemExit("could not locate emote_set_network_status decl in emote.h")
+emote_h.write_text(h.replace(h_old, h_new, 1))
+
+# --- app_claw.c: call the setter after the LLM provider starts ---
+a = app_c.read_text()
+a_old = (
+    "                 config->llm_model);\n"
+    "        ESP_RETURN_ON_ERROR(claw_core_init(&core_config), TAG, \"Failed to init claw_core\");\n"
+)
+a_new = (
+    "                 config->llm_model);\n"
+    "#if defined(CONFIG_APP_CLAW_ENABLE_EMOTE)\n"
+    "        emote_set_status_detail(config->llm_model);\n"
+    "#endif\n"
+    "        ESP_RETURN_ON_ERROR(claw_core_init(&core_config), TAG, \"Failed to init claw_core\");\n"
+)
+if a_old not in a:
+    raise SystemExit("could not locate claw_core_init anchor in app_claw.c")
+app_c.write_text(a.replace(a_old, a_new, 1))
+print("patched emote.c, emote.h, app_claw.c")
+PY
+}
+
 main() {
     mkdir -p "$ROOT/.build_logs"
     clone_or_update_esp_claw
@@ -929,6 +1063,7 @@ main() {
     apply_http_wifi_scan_patch
     apply_http_health_patch
     apply_native_status_led_patch
+    apply_emote_status_detail_patch
 
     if [ "${1:-}" = "build" ]; then
         build

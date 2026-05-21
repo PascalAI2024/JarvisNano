@@ -1,0 +1,120 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: JarvisNano <jarvisnano@local>
+Date: Wed, 21 May 2026 00:00:00 -0400
+Subject: [PATCH] emote: show active LLM model on idle screen ("Ready * <model>")
+
+Phase 6a for the AMOLED-1.75 board. The emote engine previously only
+reflected network status (swim/offline + a Wi-Fi message). This patch
+caches the network state and adds emote_set_status_detail(), which
+app_claw calls with the active model name right after the LLM provider
+starts. The idle screen then reads "Ready * MiniMax-M2.7" instead of a
+generic "Wi-Fi connected", giving the board a visible sign of life
+beyond the static idle animation.
+
+This patch documents the native firmware mutation applied by
+scripts/bootstrap.sh (apply_emote_status_detail_patch).
+---
+diff --git a/components/common/app_claw/app_claw.c b/components/common/app_claw/app_claw.c
+index 32764e8..f87dab9 100644
+--- a/components/common/app_claw/app_claw.c
++++ b/components/common/app_claw/app_claw.c
+@@ -303,6 +303,10 @@ esp_err_t app_claw_start(const app_claw_config_t *config,
+                  config->llm_profile,
+                  config->llm_backend_type[0] ? config->llm_backend_type : "(default)",
+                  config->llm_model);
++#if defined(CONFIG_APP_CLAW_ENABLE_EMOTE)
++        /* Surface the active model on the idle screen: "Ready * <model>". */
++        emote_set_status_detail(config->llm_model);
++#endif
+         ESP_RETURN_ON_ERROR(claw_core_init(&core_config), TAG, "Failed to init claw_core");
+         ESP_RETURN_ON_ERROR(claw_core_add_context_provider(&claw_memory_profile_provider),
+                             TAG, "Failed to add editable profile memory provider");
+diff --git a/components/common/emote/emote.c b/components/common/emote/emote.c
+index 311f0b6..694fe35 100644
+--- a/components/common/emote/emote.c
++++ b/components/common/emote/emote.c
+@@ -171,20 +171,29 @@ static esp_err_t emote_apply(const char *idle, const char *msg)
+     return ESP_OK;
+ }
+ 
+-esp_err_t emote_set_network_status(bool sta_connected, const char *ap_ssid)
++/* Cached status state so emote_set_status_detail() can re-render the message
++ * without the caller re-supplying the network state, and vice versa. */
++static bool s_sta_connected;
++static char s_ap_ssid[48];
++static char s_status_detail[48];   /* e.g. the active LLM model name */
++
++static esp_err_t emote_render_status(void)
+ {
+     ESP_RETURN_ON_FALSE(s_emote_handle != NULL, ESP_ERR_INVALID_STATE, TAG, "emote handle is NULL");
+ 
+-    const bool ap_present = (ap_ssid != NULL && ap_ssid[0] != '\0');
+-    const char *idle = sta_connected ? "swim" : "offline";
++    const bool ap_present = (s_ap_ssid[0] != '\0');
++    const bool has_detail = (s_status_detail[0] != '\0');
++    const char *idle = s_sta_connected ? "swim" : "offline";
+ 
+     char msg[96];
+-    if (sta_connected && ap_present) {
+-        snprintf(msg, sizeof(msg), "Online * AP: %s", ap_ssid);
+-    } else if (sta_connected) {
++    if (s_sta_connected && has_detail) {
++        snprintf(msg, sizeof(msg), "Ready * %s", s_status_detail);
++    } else if (s_sta_connected && ap_present) {
++        snprintf(msg, sizeof(msg), "Online * AP: %s", s_ap_ssid);
++    } else if (s_sta_connected) {
+         snprintf(msg, sizeof(msg), "Wi-Fi connected");
+     } else if (ap_present) {
+-        snprintf(msg, sizeof(msg), "Setup WiFi: %s", ap_ssid);
++        snprintf(msg, sizeof(msg), "Setup WiFi: %s", s_ap_ssid);
+     } else {
+         snprintf(msg, sizeof(msg), "Wi-Fi offline");
+     }
+@@ -192,6 +201,32 @@ esp_err_t emote_set_network_status(bool sta_connected, const char *ap_ssid)
+     return emote_apply(idle, msg);
+ }
+ 
++esp_err_t emote_set_network_status(bool sta_connected, const char *ap_ssid)
++{
++    s_sta_connected = sta_connected;
++    if (ap_ssid != NULL && ap_ssid[0] != '\0') {
++        snprintf(s_ap_ssid, sizeof(s_ap_ssid), "%s", ap_ssid);
++    } else {
++        s_ap_ssid[0] = '\0';
++    }
++    return emote_render_status();
++}
++
++esp_err_t emote_set_status_detail(const char *detail)
++{
++    if (detail != NULL && detail[0] != '\0') {
++        snprintf(s_status_detail, sizeof(s_status_detail), "%s", detail);
++    } else {
++        s_status_detail[0] = '\0';
++    }
++    /* If the emote engine is up, reflect the new detail now; otherwise the
++     * next emote_set_network_status() will pick it up. */
++    if (s_emote_handle != NULL) {
++        return emote_render_status();
++    }
++    return ESP_OK;
++}
++
+ static void emote_cleanup(void)
+ {
+     if (s_emote_handle) {
+diff --git a/components/common/emote/include/emote.h b/components/common/emote/include/emote.h
+index 9678560..8cd657c 100644
+--- a/components/common/emote/include/emote.h
++++ b/components/common/emote/include/emote.h
+@@ -16,6 +16,10 @@ extern "C" {
+ esp_err_t emote_start(void);
+ esp_err_t emote_set_network_status(bool sta_connected, const char *ap_ssid);
+ 
++/* Set a short status detail (e.g. the active LLM model name) shown on the
++ * idle screen as "Ready * <detail>" when the station is connected. */
++esp_err_t emote_set_status_detail(const char *detail);
++
+ #ifdef __cplusplus
+ }
+ #endif

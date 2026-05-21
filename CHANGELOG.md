@@ -6,6 +6,13 @@ All notable user-facing changes should be recorded here.
 
 ### Firmware
 
+- **Emote idle screen shows the active LLM model** (`patches/0009`). The emote
+  engine previously only reflected network status; it now caches that state and
+  exposes `emote_set_status_detail()`, which `app_claw` calls with the model
+  name as the LLM provider starts. The AMOLED idle screen reads
+  "Ready * MiniMax-M2.7" instead of a generic "Wi-Fi connected" — a visible
+  sign of life beyond the static idle animation. Re-applied on fresh clones by
+  `scripts/bootstrap.sh::apply_emote_status_detail_patch`.
 - **Second supported board: Waveshare ESP32-S3-Touch-AMOLED-1.75.** Adds a
   full board adaptation at `boards/waveshare/esp32s3_touch_amoled_1_75/` —
   1.75" CO5300 QSPI AMOLED (466×466), CST9217 capacitive touch, ES8311 DAC,
