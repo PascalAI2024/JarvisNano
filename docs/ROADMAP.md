@@ -4,6 +4,11 @@
   <img src="../images/hero-phase2.png" alt="Phase 2 illustration — JarvisNano with audio amp + speaker" width="700">
 </p>
 
+> **Two board tracks.** The phases below are the original **XIAO ESP32-S3 Sense**
+> roadmap. The **Waveshare ESP32-S3-Touch-AMOLED-1.75** is a second supported
+> target with its own phase status — see [AMOLED-1.75 board track](#amoled-175-board-track)
+> at the bottom.
+
 ## Phase 1 — Bare board chat + listen ✅ (shipped)
 
 ### Firmware
@@ -98,3 +103,25 @@ protocol/security, and Phase-3 display/privacy-mode work.
 - Multi-language wake words?
 - A "guest mode" that disables long-term memory for shared spaces?
 - Whether the open-source Android app should bundle a llama.cpp build (~30 MB) or download on first use.
+
+---
+
+## AMOLED-1.75 board track
+
+Status for the **Waveshare ESP32-S3-Touch-AMOLED-1.75** target. Full board
+reference: [`boards/waveshare/esp32s3_touch_amoled_1_75/README.md`](../boards/waveshare/esp32s3_touch_amoled_1_75/README.md).
+
+- [x] **Phase 1** — board adaptation: CO5300 QSPI display, CST9217 touch, I²C bus, TCA9554 IO expander, AXP2101 PMIC, USB-CDC console, 16 MB flash + 8 MB PSRAM sdkconfig
+- [x] **Phase 2** — audio chain: ES8311 DAC, ES7210 4-ch ADC with on-chip AEC, GPIO46 power-amp enable, I²S0 duplex
+- [x] **Phase 4** — Wi-Fi onboarding via USB-CDC `app_claw` CLI (`wifi --set --ssid … --password … --apply`), no captive portal needed
+- [x] **Phase 5** — end-to-end agent chat verified on hardware (MiniMax M2.7 via Anthropic-compatible endpoint, ~5.5 s round-trip)
+- [ ] **Phase 3** — microSD mount (SDMMC 1-bit, pins D0=3/CMD=1/CLK=2). YAML committed; blocked on the `esp-bmgr-assist<0.8` pin landing in the build flow
+- [ ] **Phase 6** — display reactive to agent state: router rules → emote transitions (idle / listening / thinking / speaking). **This is what makes the board feel alive** — right now the screen shows only the static idle emote (the stock "swim" lobster) regardless of what the agent is doing
+- [ ] **466×466 emote pack** — replace the stock 284×240 swim/offline pack with a JarvisNano mascot face rendered for the round AMOLED
+- [ ] **Voice loop** — mic VAD → STT → LLM → TTS → speaker, the full hands-free conversation path (multi-day, shared with the XIAO Phase-2 TTS work)
+
+### Enclosure
+
+- [x] Concept-5 mascot bust — parametric OpenSCAD, AMOLED is the chibi's face: [`hardware/enclosure/amoled-1_75/`](../hardware/enclosure/amoled-1_75/)
+- [ ] Concept-6 disc-on-stand alternative
+- [ ] Print + fit-test against a real board

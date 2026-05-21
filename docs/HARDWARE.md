@@ -2,6 +2,28 @@
 
 Pin map, schematic, BOM, and wiring diagrams for each phase.
 
+JarvisNano supports two boards. This file documents the **XIAO ESP32-S3 Sense**
+(the original target) in full. The **Waveshare ESP32-S3-Touch-AMOLED-1.75** has
+its own complete hardware reference at
+[`boards/waveshare/esp32s3_touch_amoled_1_75/README.md`](../boards/waveshare/esp32s3_touch_amoled_1_75/README.md);
+a summary table is below.
+
+## Board comparison
+
+| Spec | XIAO ESP32-S3 Sense | Waveshare AMOLED-1.75 |
+| --- | --- | --- |
+| MCU | ESP32-S3R8 240 MHz | ESP32-S3R8 240 MHz |
+| Flash | 8 MB | **16 MB** |
+| PSRAM | 8 MB octal | 8 MB octal |
+| Display | none (Phase-3 add-on) | **1.75" AMOLED 466×466, CO5300 QSPI** |
+| Touch | none | **CST9217 capacitive** |
+| Mic | 1× PDM (on-board) | **2× MEMS via ES7210, hardware AEC** |
+| Speaker path | PDM-TX → PAM8002A | **ES8311 codec → MX1.25 → external 28 mm** |
+| Camera | OV3660 / OV2640 | none |
+| GNSS | no | LC76G on -B SKUs |
+| USB | native USB-Serial-JTAG | native USB-Serial-JTAG |
+| App CLI | disabled (heap) | enabled |
+
 ## XIAO ESP32-S3 Sense at a glance
 
 | Spec       | Value                                |
