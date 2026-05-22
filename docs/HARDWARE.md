@@ -6,7 +6,8 @@ JarvisNano supports two boards. This file documents the **XIAO ESP32-S3 Sense**
 (the original target) in full. The **Waveshare ESP32-S3-Touch-AMOLED-1.75** has
 its own complete hardware reference at
 [`boards/waveshare/esp32s3_touch_amoled_1_75/README.md`](../boards/waveshare/esp32s3_touch_amoled_1_75/README.md);
-a summary table is below.
+a summary table is below. The latest live hardware-debug handoff is in
+[`NEXT_SESSION.md`](NEXT_SESSION.md).
 
 ## Board comparison
 

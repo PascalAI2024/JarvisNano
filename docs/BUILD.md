@@ -21,6 +21,10 @@ Browser support note: Web Serial only works on Chromium browsers (Chrome, Edge, 
 
 ## Path B — Local build + flash
 
+For the current connected Waveshare AMOLED board, read
+[`NEXT_SESSION.md`](NEXT_SESSION.md) first. USB is the primary debug/control
+path; AP access is only a runtime confirmation after USB proves the app booted.
+
 The full pipeline runs in Docker, so you only need:
 - macOS / Linux / Windows + WSL
 - Docker Desktop
@@ -31,7 +35,9 @@ Android companion builds are separate from the firmware flow. See
 [`android/README.md`](../android/README.md) for JDK, Gradle, and Android SDK
 requirements.
 
-The XIAO doesn't need to be plugged in for the build, only for the flash step.
+The board does not need to be plugged in for the build, only for the flash step.
+By default the scripts target the Seeed XIAO Sense. Set `BOARD_VENDOR` and
+`BOARD_NAME` for the Waveshare AMOLED board.
 
 ```mermaid
 sequenceDiagram
@@ -39,23 +45,23 @@ sequenceDiagram
     participant B as scripts/bootstrap.sh
     participant D as Docker (espressif/idf)
     participant H as Host (Mac)
-    participant X as XIAO Sense
+    participant X as ESP32-S3 board
 
     U->>B: ./scripts/bootstrap.sh
     B->>B: clone esp-claw at pinned tag
-    B->>B: cp boards/seeed/xiao_esp32s3_sense/ → esp-claw/.../boards/seeed/
+    B->>B: cp selected boards/<vendor>/<name>/ → esp-claw/.../boards/
     B->>B: cp firmware/lua + firmware/router_rules → FATFS image
-    B->>B: apply bootstrap patches + XIAO sdkconfig overrides
+    B->>B: apply bootstrap patches + board sdkconfig overrides
     U->>B: ./scripts/bootstrap.sh build
-    B->>D: docker run espressif/idf:release-v5.5
+    B->>D: docker run espressif/idf:v5.5.4
     D->>D: idf.py set-target esp32s3
-    D->>D: idf.py gen-bmgr-config -b xiao_esp32s3_sense
+    D->>D: idf.py gen-bmgr-config -b selected board
     D->>D: idf.py build (10 min first time)
-    D-->>B: build/edge_agent.bin (~2.1 MB)
+    D-->>B: build/edge_agent.bin + flasher_args.json
     U->>X: plug in USB-C
     U->>H: ./scripts/flash.sh
-    H->>X: esptool write_flash @flash_args
-    X->>X: boot, init mic, start AP esp-claw-XXXXXX
+    H->>X: esptool write_flash from flasher_args.json
+    X->>X: boot, print IP/AP state on serial
 ```
 
 ## Step-by-step
@@ -75,13 +81,13 @@ cd JarvisNano
 
 This:
 1. Clones `espressif/esp-claw` into `esp-claw/` (gitignored) at the pinned `ESP_CLAW_REF` in `scripts/bootstrap.sh`.
-2. Copies `boards/seeed/xiao_esp32s3_sense/` into the upstream tree.
+2. Copies the selected board directory into the upstream tree.
 3. Copies `firmware/lua/*.lua` and `firmware/router_rules/router_rules.json` into the upstream FATFS image so prototype scripts and router rules are baked into flash.
 4. Applies `patches/0001-fix-pdm-rx-hp-filter-cap.patch` to
    `managed_components/espressif__esp_board_manager/peripherals/periph_i2s/periph_i2s.py`.
 5. Applies the local Phase-2 HTTP/camera/Wi-Fi patches used by the dashboard and onboarding flow.
 6. Patches a native GPIO21 status LED task into `edge_agent/main.c` so the physical board shows boot/alive state after core services are online, without starting a long-running Lua job.
-7. During `build`, forces the 8 MB flash profile and disables the App Claw interactive serial REPL for the XIAO build. USB serial logs stay enabled; only the heap-heavy command shell is skipped.
+7. During `build`, applies board-specific sdkconfig fixes: XIAO uses the 8 MB flash profile and disables the heap-heavy App Claw interactive serial REPL; Waveshare AMOLED uses the 16 MB flash profile and keeps the USB-CDC CLI enabled.
 8. Fails clearly if the pinned upstream tree drifts in a way that prevents required managed components or patches from applying.
 
 ### 3. Build inside Docker
@@ -90,7 +96,15 @@ This:
 ./scripts/bootstrap.sh build
 ```
 
-First build pulls the `espressif/idf:release-v5.5` image (~13 GB) and
+For the Waveshare ESP32-S3-Touch-AMOLED-1.75:
+
+```bash
+BOARD_VENDOR=waveshare \
+BOARD_NAME=esp32s3_touch_amoled_1_75 \
+./scripts/bootstrap.sh build
+```
+
+First build pulls the `espressif/idf:v5.5.4` image (~13 GB) and
 takes 8–15 minutes. Subsequent builds reuse `application/edge_agent/build/`
 and finish in 30–60 seconds for incremental edits.
 
@@ -109,11 +123,16 @@ ls /dev/cu.usbmodem*    # confirm enumeration
 
 If nothing shows up, hold the **BOOT** button while plugging in to force download mode.
 
-The script wraps `esptool.py write_flash` with the addresses esp-claw's
-build emits. By default it flashes bootloader, partition table, OTA data, and
-the app while preserving the FATFS `storage` partition so Wi-Fi and LLM
-configuration survive firmware iteration. Pass `STORAGE=1 ./scripts/flash.sh`
-for first install, partition-layout changes, or a deliberate provisioning wipe.
+The script reads `esp-claw/application/edge_agent/build/flasher_args.json`, so
+it uses the selected board's real flash size and partition offsets. By default
+it flashes every generated artifact except the FATFS `storage` partition, so
+Wi-Fi and LLM configuration survive firmware iteration. It uses
+`--after watchdog-reset` by default because ESP32-S3 USB-Serial/JTAG boards can
+fall back into ROM download mode after a host RTS hard reset. Pass
+`STORAGE=1 ./scripts/flash.sh` for first install, partition-layout changes, or
+a deliberate provisioning wipe. Pass `ERASE_NVS=1 ./scripts/flash.sh` to wipe
+only the NVS config partition before flashing when a bad saved config prevents
+boot.
 
 After a build, run the post-build smoke check:
 
@@ -129,7 +148,15 @@ For manual flashing during firmware iteration:
 ```bash
 cd esp-claw/application/edge_agent/build
 python3 -m esptool --chip esp32s3 -p /dev/cu.usbmodem1101 -b 460800 \
-  --before default_reset --after hard_reset write_flash @flash_args
+  --before default-reset --after watchdog-reset write_flash $(python3 - <<'PY'
+import json
+args = json.load(open("flasher_args.json"))
+for k, v in args["flash_settings"].items():
+    print(f"--{k} {v}", end=" ")
+for offset, path in sorted(args["flash_files"].items(), key=lambda item: int(item[0], 16)):
+    print(offset, path, end=" ")
+PY
+)
 ```
 
 ### 5. Talk to it
@@ -157,7 +184,16 @@ AP+STA single-radio reachability problems on some routers. Serial should show
 ## Monitoring serial output
 
 `esp-idf-monitor` is feature-rich but laggy on macOS over USB-Serial-JTAG.
-Faster alternatives:
+Use the repo monitor first on ESP32-S3 USB-Serial/JTAG boards. It opens the
+device without toggling DTR/RTS, so it does not accidentally reset the board or
+strap it back into ROM download mode:
+
+```bash
+./scripts/usb-monitor.py --port /dev/cu.usbmodem1101
+./scripts/usb-monitor.py --seconds 5 --send status
+```
+
+Other faster alternatives:
 
 ```bash
 # screen — built-in, snappy. Ctrl-A K to exit.
@@ -188,7 +224,7 @@ endpoint first across AP, STA IP, and mDNS:
 ./scripts/http-matrix.sh
 ```
 
-By default it probes `192.168.4.1`, `192.0.2.80`, and `esp-claw.local`.
+By default it probes `192.168.4.1` (softAP), the device's STA IP, and `esp-claw.local`.
 The matrix covers the cheap health/status path plus the endpoints used by
 onboarding, settings, chat, telemetry, and camera diagnostics:
 

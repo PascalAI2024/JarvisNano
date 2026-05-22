@@ -144,6 +144,10 @@ Then plug in, open the captive Wi-Fi `esp-claw-XXXXXX`, visit `http://192.168.4.
 
 Detailed walk-through in [docs/BUILD.md](docs/BUILD.md).
 
+Current hardware-session handoff lives in
+[docs/NEXT_SESSION.md](docs/NEXT_SESSION.md). Read it first before debugging
+the connected Waveshare AMOLED board; the USB reset path has a specific trap.
+
 The current Phase-2 finish order is tracked in
 [docs/FINISH_PLAN.md](docs/FINISH_PLAN.md), with the full wave task board in
 [docs/PHASE2_TASKS.md](docs/PHASE2_TASKS.md).
@@ -197,7 +201,7 @@ The physical GPIO21 LED heartbeat is now native firmware in `edge_agent/main.c`,
 ```
 I (...) BOARD_MANAGER: All peripherals initialized
 I (...) app: FATFS mounted total=1482752 used=389120
-I (...) app: Wi-Fi STA ready: 192.0.2.80
+I (...) app: Wi-Fi STA ready: 192.168.x.x
 I (...) claw_event_router: Loaded 7 router rules
 I (...) cap_lua_rt: Lua runtime ready: scripts=/fatfs/scripts registered_modules=17
 I (...) cap_mcp_srv: MCP server ready: http://esp-claw.local:18791/mcp_server
