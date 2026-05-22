@@ -67,7 +67,7 @@ ORANGE = "#F5870B"
 # Image-to-image is done via Kie.ai Flux Kontext (the imagine skill's Gemini key
 # is CONSUMER_SUSPENDED). Flux needs the reference as a public URL, so we pin the
 # locked base to its immutable raw.githubusercontent SHA (commit ca20416).
-KIE_API_KEY = os.environ.get("KIE_API_KEY")
+KIE_API_KEY = os.environ.get("KIE_API_KEY")  # set via env; NEVER hardcode (open-source repo)
 KIE_MODEL = os.environ.get("KIE_MODEL", "flux-kontext-pro")  # or flux-kontext-max
 LOCKED_BASE_URL = os.environ.get(
     "LOCKED_BASE_URL",
