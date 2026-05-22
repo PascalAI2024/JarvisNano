@@ -149,6 +149,18 @@ static esp_err_t rwave_load_clip(const char *name, rwave_clip_t *clip)
         clip->loaded = false;
         return err == ESP_OK ? ESP_ERR_NOT_FOUND : err;
     }
+    /* Defensive: a malformed/mispacked asset-table entry can hand back a
+     * non-mapped pointer (observed: an offset-like 0x001f9xxx value) with a
+     * plausible size, and dereferencing it faults (LoadProhibited -> boot loop).
+     * Every valid mmap'd-flash / SRAM / PSRAM data pointer on ESP32-S3 lives in
+     * the cache window 0x3C000000..0x3FFFFFFF, so reject anything outside it and
+     * fall back to the baked eye instead of crashing. */
+    if ((uintptr_t)data < 0x3C000000UL || (uintptr_t)data >= 0x40000000UL) {
+        ESP_LOGW(TAG, "asset '%s' resolved to non-mapped ptr %p — skipping (eye fallback)",
+                 name, (const void *)data);
+        clip->loaded = false;
+        return ESP_ERR_INVALID_RESPONSE;
+    }
     uint32_t total = rwave_eaf_frame_count(data, size);
     if (total < 2) {
         ESP_LOGW(TAG, "asset '%s' has too few frames (%u)", name, (unsigned)total);
