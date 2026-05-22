@@ -1,0 +1,42 @@
+/*
+ * SPDX-FileCopyrightText: 2026
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Gemini Live voice capability — toggle-on/off voice conversation via
+ * Gemini Live API (BidiGenerateContent WebSocket).
+ */
+#pragma once
+
+#include <stdbool.h>
+#include <stdint.h>
+#include "esp_err.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+esp_err_t cap_gemini_live_set_api_key(const char *api_key);
+esp_err_t cap_gemini_live_set_mcp_key(const char *mcp_key);
+esp_err_t cap_gemini_live_set_mcp_url(const char *mcp_url);
+esp_err_t cap_gemini_live_register_group(void);
+esp_err_t cap_gemini_live_start(void);
+esp_err_t cap_gemini_live_stop(void);
+esp_err_t cap_gemini_live_send_text(const char *text);
+esp_err_t cap_gemini_live_test(void);
+/* Toggle session on/off — call from emote tap callback (Phase 5) */
+void      cap_gemini_live_toggle(void);
+
+/* ---- Audio level hooks for the reactive waveform (display layer) ----------
+ * Normalised 0.0..1.0. mic = ES7210 capture level (drives the LISTENING
+ * waveform), output = decoded Gemini playback level (drives the SPEAKING
+ * waveform). Both read 0 when their stream is idle. Lock-free (plain atomics) —
+ * safe to poll from the display task. The display amplitude-source adapter
+ * (patch 0032) scales these to its 0..1000 range. The synthetic setter drives
+ * the waveform with no live session (own audio-path testing). */
+float     cap_gemini_live_get_mic_level(void);
+float     cap_gemini_live_get_output_level(void);
+void      cap_gemini_live_set_synthetic_levels(float mic, float out);
+
+#ifdef __cplusplus
+}
+#endif

@@ -1,0 +1,21 @@
+idf_component_register(
+    SRCS
+        "src/cap_gemini_live.c"
+        "src/cmd_cap_gemini_live.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        claw_cap
+        claw_core
+        json
+        console
+        mbedtls
+        emote
+        freertos
+        espressif__esp_websocket_client
+        esp_http_client
+        esp-tls
+        espressif__esp_codec_dev
+        espressif__esp_board_manager
+        esp_lcd_touch
+)
