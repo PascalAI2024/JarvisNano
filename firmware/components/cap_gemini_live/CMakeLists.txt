@@ -18,4 +18,5 @@ idf_component_register(
         espressif__esp_codec_dev
         espressif__esp_board_manager
         esp_lcd_touch
+        jarvis_brain
 )

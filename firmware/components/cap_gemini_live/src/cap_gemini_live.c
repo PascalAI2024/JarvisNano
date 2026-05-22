@@ -39,6 +39,7 @@
 #include "esp_codec_dev.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
+#include "jarvis_brain.h"
 #include "esp_lcd_touch.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -138,6 +139,15 @@ typedef struct {
     esp_codec_dev_handle_t       dac;
     esp_codec_dev_handle_t       adc;
     esp_lcd_touch_handle_t       touch;
+    /* I2S codec open-state tracking. esp_codec_dev_open/close are NOT idempotent:
+     * a redundant close drives i2s_channel_disable on an already-disabled channel
+     * ("channel has not been enabled yet") and wedges the audio path under rapid
+     * start/stop. Track open state + the rate so open is rate-aware and close is
+     * a no-op when already closed. */
+    bool                         dac_open;
+    uint32_t                     dac_rate;
+    bool                         adc_open;
+    uint32_t                     adc_rate;
 } gl_ctx_t;
 
 static gl_ctx_t s_gl;
@@ -262,6 +272,15 @@ static int gl_open_dac(uint32_t sample_rate)
     if (!s_gl.dac) {
         return 0;
     }
+    /* Already open at this rate → no-op. Open at a different rate (TX 16k vs RX
+     * 24k) → close first so the codec re-inits cleanly. */
+    if (s_gl.dac_open) {
+        if (s_gl.dac_rate == sample_rate) {
+            return ESP_CODEC_DEV_OK;
+        }
+        esp_codec_dev_close(s_gl.dac);
+        s_gl.dac_open = false;
+    }
     esp_codec_dev_sample_info_t fs = {
         .sample_rate     = sample_rate,
         .channel         = GL_CHANNELS,
@@ -270,6 +289,8 @@ static int gl_open_dac(uint32_t sample_rate)
     int r = esp_codec_dev_open(s_gl.dac, &fs);
     if (r == ESP_CODEC_DEV_OK) {
         esp_codec_dev_set_out_vol(s_gl.dac, 100);
+        s_gl.dac_open = true;
+        s_gl.dac_rate = sample_rate;
     }
     return r;
 }
@@ -279,6 +300,13 @@ static int gl_open_adc(uint32_t sample_rate)
     if (!s_gl.adc) {
         return 0;
     }
+    if (s_gl.adc_open) {
+        if (s_gl.adc_rate == sample_rate) {
+            return ESP_CODEC_DEV_OK;
+        }
+        esp_codec_dev_close(s_gl.adc);
+        s_gl.adc_open = false;
+    }
     esp_codec_dev_sample_info_t fs = {
         .sample_rate     = sample_rate,
         .channel         = GL_CHANNELS,
@@ -287,21 +315,25 @@ static int gl_open_adc(uint32_t sample_rate)
     int r = esp_codec_dev_open(s_gl.adc, &fs);
     if (r == ESP_CODEC_DEV_OK) {
         esp_codec_dev_set_in_gain(s_gl.adc, 30.0f);
+        s_gl.adc_open = true;
+        s_gl.adc_rate = sample_rate;
     }
     return r;
 }
 
 static void gl_close_dac(void)
 {
-    if (s_gl.dac) {
+    if (s_gl.dac && s_gl.dac_open) {
         esp_codec_dev_close(s_gl.dac);
+        s_gl.dac_open = false;
     }
 }
 
 static void gl_close_adc(void)
 {
-    if (s_gl.adc) {
+    if (s_gl.adc && s_gl.adc_open) {
         esp_codec_dev_close(s_gl.adc);
+        s_gl.adc_open = false;
     }
 }
 
@@ -351,10 +383,17 @@ static bool gl_send_setup(void)
     cJSON *tc = cJSON_AddObjectToObject(gc, "thinkingConfig");
     cJSON_AddStringToObject(tc, "thinkingLevel", "minimal");
 
+    /* System instruction = JARVIS's persistent on-device self (identity +
+     * recent memory from /sdcard/brain). Fail-soft: jarvis_brain_load_context
+     * always returns a usable, NUL-terminated persona — the built-in default if
+     * the SD store is unavailable — so this never breaks the WSS setup. */
+    char persona[2048];
+    jarvis_brain_load_context(persona, sizeof persona);
+
     cJSON *si   = cJSON_AddObjectToObject(setup, "systemInstruction");
     cJSON *parts = cJSON_AddArrayToObject(si, "parts");
     cJSON *part = cJSON_CreateObject();
-    cJSON_AddStringToObject(part, "text", GEMINI_PERSONA);
+    cJSON_AddStringToObject(part, "text", persona);
     cJSON_AddItemToArray(parts, part);
 
     char *json = cJSON_PrintUnformatted(root);
@@ -482,16 +521,19 @@ static void gl_audio_tx_task(void *arg)
     (void)arg;
     static uint8_t pcm[GL_TX_PCM_BYTES];
 
-    /* Open I2S for half-duplex listen: TX co-enabled (shared clock), RX on ADC */
-    gl_open_dac(GL_TX_SAMPLE_RATE);
-    gl_open_adc(GL_TX_SAMPLE_RATE);
-
+    /* Codec lifetime is owned by the session task. This worker only reads from
+     * the already-open ADC so teardown cannot double-close codec/I2S handles
+     * from two tasks. */
     ESP_LOGI(TAG, "Audio TX: started (16kHz capture)");
 
     while (!(xEventGroupGetBits(s_gl.ev) & GL_BIT_TX_STOP)) {
         if (s_gl.state != GL_STATE_LISTENING) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
+        }
+
+        if (xEventGroupGetBits(s_gl.ev) & GL_BIT_TX_STOP) {
+            break;
         }
 
         int r = esp_codec_dev_read(s_gl.adc, pcm, GL_TX_PCM_BYTES);
@@ -510,8 +552,6 @@ static void gl_audio_tx_task(void *arg)
     /* Mic is quiet once capture stops. */
     atomic_store(&s_mic_rms, 0);
 
-    gl_close_adc();
-    gl_close_dac();
     ESP_LOGI(TAG, "Audio TX: stopped");
     xEventGroupSetBits(s_gl.ev, GL_BIT_TX_DONE);
     claw_task_delete(NULL);
@@ -524,7 +564,14 @@ static void gl_stop_tx_task(void)
     }
     xEventGroupClearBits(s_gl.ev, GL_BIT_TX_DONE);
     xEventGroupSetBits(s_gl.ev, GL_BIT_TX_STOP);
-    xEventGroupWaitBits(s_gl.ev, GL_BIT_TX_DONE, pdFALSE, pdTRUE, pdMS_TO_TICKS(3000));
+    EventBits_t bits = xEventGroupWaitBits(s_gl.ev, GL_BIT_TX_DONE,
+                                           pdFALSE, pdTRUE, pdMS_TO_TICKS(3000));
+    if (!(bits & GL_BIT_TX_DONE)) {
+        ESP_LOGE(TAG, "Audio TX: stop timed out; deleting wedged task");
+        vTaskDelete(s_gl.tx_task);
+        xEventGroupSetBits(s_gl.ev, GL_BIT_TX_DONE);
+        atomic_store(&s_mic_rms, 0);
+    }
     s_gl.tx_task = NULL;
 }
 
@@ -770,6 +817,8 @@ static void gl_dispatch_frame(const char *json)
             if (s_gl.state == GL_STATE_SPEAKING || s_gl.state == GL_STATE_THINKING) {
                 gl_close_dac();
                 gl_set_state(GL_STATE_LISTENING, "Listening");
+                gl_open_dac(GL_TX_SAMPLE_RATE);
+                gl_open_adc(GL_TX_SAMPLE_RATE);
                 gl_start_tx_task();
             }
         }
@@ -794,6 +843,7 @@ static void gl_dispatch_frame(const char *json)
                         if (s_gl.state == GL_STATE_LISTENING || s_gl.state == GL_STATE_READY) {
                             /* First audio chunk: stop TX, switch to 24kHz */
                             gl_stop_tx_task();
+                            gl_close_adc();
                             gl_set_state(GL_STATE_SPEAKING, "Speaking");
                             gl_open_dac(GL_RX_SAMPLE_RATE);
                         }
@@ -809,6 +859,8 @@ static void gl_dispatch_frame(const char *json)
             /* Finish playback, switch back to LISTENING */
             gl_close_dac();
             gl_set_state(GL_STATE_LISTENING, "Listening");
+            gl_open_dac(GL_TX_SAMPLE_RATE);
+            gl_open_adc(GL_TX_SAMPLE_RATE);
             gl_start_tx_task();
         }
         cJSON_Delete(root);
@@ -949,7 +1001,9 @@ static void gl_session_task(void *arg)
         ESP_LOGI(TAG, "Gemini Live session ready");
         gl_set_state(GL_STATE_LISTENING, "Listening");
 
-        /* Phase 4: start audio TX task */
+        /* Phase 4: session task owns codec lifetime; TX task only captures. */
+        gl_open_dac(GL_TX_SAMPLE_RATE);
+        gl_open_adc(GL_TX_SAMPLE_RATE);
         gl_start_tx_task();
 
         /* Main receive loop */
@@ -968,16 +1022,18 @@ static void gl_session_task(void *arg)
             }
         }
 
-        /* Stop audio TX */
-        if (s_gl.state == GL_STATE_LISTENING) {
-            gl_stop_tx_task();
-            gl_close_dac();
-        } else if (s_gl.state == GL_STATE_SPEAKING) {
-            gl_close_dac();
-            gl_stop_tx_task();
-        }
-
 session_cleanup:
+        /* Stop audio TX and close codecs from this task only. The TX worker
+         * never closes codec handles, avoiding cross-task I2S mutex deadlocks. */
+        ESP_LOGI(TAG, "Teardown: stopping tx task");
+        gl_stop_tx_task();
+        ESP_LOGI(TAG, "Teardown: tx task stopped");
+        ESP_LOGI(TAG, "Teardown: closing adc");
+        gl_close_adc();
+        ESP_LOGI(TAG, "Teardown: closing dac");
+        gl_close_dac();
+
+        ESP_LOGI(TAG, "Teardown: closing websocket");
         ESP_LOGI(TAG, "Session cleanup");
         gl_drain_rx_queue();
         gl_set_state(GL_STATE_IDLE, "");
@@ -1196,6 +1252,14 @@ void cap_gemini_live_toggle(void)
         return;
     }
     last_toggle_us = now_us;
+
+    /* Don't tear down a session that's mid-handshake — ignore the tap and let it
+     * reach READY (or time out). Prevents half-connected sessions and audio-path
+     * churn when the user taps impatiently during connect. */
+    if (s_gl.session_active && s_gl.state == GL_STATE_CONNECTING) {
+        ESP_LOGW(TAG, "Tap ignored (session still connecting)");
+        return;
+    }
 
     if (!s_gl.session_task) {
         cap_gemini_live_start();
