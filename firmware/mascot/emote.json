@@ -1,0 +1,7 @@
+[
+    { "emote": "neutral",  "src": "neutral.eaf",  "loop": true, "fps": 8 },
+    { "emote": "listen",   "src": "listen.eaf",   "loop": true, "fps": 8 },
+    { "emote": "thinking", "src": "thinking.eaf", "loop": true, "fps": 8 },
+    { "emote": "happy",    "src": "happy.eaf",    "loop": true, "fps": 8 },
+    { "emote": "offline",  "src": "offline.eaf",  "loop": true, "fps": 8 }
+]
