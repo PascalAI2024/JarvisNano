@@ -94,6 +94,22 @@ copy_jarvis_logger() {
     cp -f "$src"/src/*.c "$dst/src/"
 }
 
+copy_jarvis_brain() {
+    # JARVIS's persistent on-device self (identity + memory on SD). Same idiom as
+    # copy_jarvis_logger: vendored under firmware/components/jarvis_brain, mirrored
+    # into the generated tree's local project components dir so it survives a clean
+    # re-clone. main.c calls jarvis_brain_init("/sdcard"); cap_gemini_live's
+    # gl_send_setup uses jarvis_brain_load_context() for the system instruction.
+    local src="$ROOT/firmware/components/jarvis_brain"
+    local dst="$ESP_CLAW_DIR/application/edge_agent/components/jarvis_brain"
+    [ -d "$src" ] || die "missing vendored jarvis_brain source at $src"
+    log "copying jarvis_brain component → upstream tree"
+    mkdir -p "$dst/src" "$dst/include"
+    cp -f "$src/CMakeLists.txt" "$dst/CMakeLists.txt"
+    cp -f "$src"/include/*.h "$dst/include/"
+    cp -f "$src"/src/*.c "$dst/src/"
+}
+
 apply_patch() {
     local target="$ESP_CLAW_DIR/application/edge_agent/managed_components/espressif__esp_board_manager/peripherals/periph_i2s/periph_i2s.py"
     if [ ! -f "$target" ]; then
@@ -1781,6 +1797,7 @@ main() {
     copy_firmware_assets
     copy_cap_gemini_live
     copy_jarvis_logger
+    copy_jarvis_brain
     apply_patch
     apply_wifi_ps_patch
     apply_jpeg_soi_patch
