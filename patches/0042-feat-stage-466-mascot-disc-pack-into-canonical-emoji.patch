@@ -1,0 +1,61 @@
+From 98330e79e04e21776c0d852155c2d04958578d44 Mon Sep 17 00:00:00 2001
+From: PascalAI2024 <pascal@ingeniousdigital.com>
+Date: Thu, 21 May 2026 17:27:50 -0400
+Subject: [PATCH 42/43] feat: stage 466 mascot disc pack into canonical
+ emoji_hud_466 collection
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+display-eng confirmed from source: emote_set_anim_emoji resolves by NAME (the
+emote.json "emote" key, hash-looked-up), filename is decoupled; and the 466 build
+reads ONE collection per resolution. So:
+- emoji_hud_466/{neutral,listen,thinking,happy,offline}.eaf with literal name=src
+  filenames (no legacy confused/Happy names).
+- 466_466/config.json -> emoji_collection "emoji_hud_466"; 466_466/emote.json maps
+  the 5 disc emotes 1:1 name=src, fps 8 (gentle disc per Phase 2B).
+gen_mascot_eaf.py now mirrors each packed .eaf into the collection dir.
+
+Inert until the firmware CMake switch 284_240 -> 466_466 + the layout disc/annulus
+split land (display-eng/firmware-owned). Active pack stays 284 until then; these
+files sit build-ready. layout.json (eye=disc + new hud_anim=annulus) is the
+Phase 3 firmware task, NOT included here. Annulus .eaf is Codex's, added to the
+same emote.json later.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com> | Model: claude-opus-4 | Mode: ultrathink | 🤖 J.A.R.V.I.S.
+---
+ firmware/mascot/gen_mascot_eaf.py | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/firmware/mascot/gen_mascot_eaf.py b/firmware/mascot/gen_mascot_eaf.py
+index 04b30ac..c85d17d 100644
+--- a/firmware/mascot/gen_mascot_eaf.py
++++ b/firmware/mascot/gen_mascot_eaf.py
+@@ -49,7 +49,13 @@ LOCKED_BASE = REPO / "images" / "mascot-amoled-concept-locked.png"
+ OUT_DIR = Path(__file__).resolve().parent
+ RAW_DIR = OUT_DIR / "raw"          # generated PNGs (pre-processing)
+ DISC_DIR = OUT_DIR / "disc"        # processed 360x360 RGBA PNGs (preview)
+-EAF_DIR = OUT_DIR / "eaf"          # packed .eaf disc collection
++EAF_DIR = OUT_DIR / "eaf"          # packed .eaf working copies (this dir)
++# Canonical build collection (display-eng: ONE collection per resolution, by
++# NAME not filename). The 466 build reads assets_local/466_466/{config,emote}.json
++# and packs the .eaf named there from this dir. Live once CMake flips 284_240 ->
++# 466_466; until then the active pack stays 284 and these files sit ready.
++COLLECTION_DIR = (REPO / "esp-claw" / "components" / "common" / "emote"
++                  / "assets_local" / "emoji_hud_466")
+ 
+ CANVAS = 360                       # .eaf disc canvas (Phase 2B)
+ ART_DIA = 352                      # visible art circle (4px transparent margin)
+@@ -279,6 +285,9 @@ def pack_state(state: str, generate: bool) -> Path:
+     eaf = EAF_DIR / f"{state}.eaf"
+     emit_eaf([rows], pal, eaf)             # single representative frame per state
+     n = assert_roundtrip(eaf)
++    # Mirror into the canonical build collection (filename == emote name).
++    COLLECTION_DIR.mkdir(parents=True, exist_ok=True)
++    (COLLECTION_DIR / f"{state}.eaf").write_bytes(eaf.read_bytes())
+     print(f"  [{state}] -> {eaf}  ({eaf.stat().st_size} B, {n} frames, round-trip OK)")
+     return eaf
+ 
+-- 
+2.50.1 (Apple Git-155)
+

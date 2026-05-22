@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: JarvisNano <jarvisnano@local>
+Date: Wed, 21 May 2026 22:00:00 -0400
+Subject: [PATCH] emote: reactive "Siri-style" waveform face + `face` CLI demo
+
+New headline display visual (DISPLAY_UX_PLAN § Phase 5). A runtime-drawn
+waveform replaces the static emote eye while active — pure motion, no face:
+  IDLE      calm breathing centre line
+  LISTENING amplitude bars reacting to mic RMS
+  THINKING  traveling scan pulse (no audio)
+  SPEAKING  amplitude bars reacting to output RMS
+Palette: hot core #FFE25E / accent #F5870B on true black, eased for fluidity.
+
+The emote_gfx widget set has NO vector primitives (only label/anim/img/qrcode),
+so each frame is rasterised into a PSRAM RGB565A8 strip (466x120, double-
+buffered, ~328 KB) and pushed to a gfx image object via gfx_img_set_src(), which
+invalidates → the engine repaints at its fps. A 20 fps FreeRTOS task eases
+displayed amplitude toward target. Verified against the live decoder: C-array
+magic 0x19, header.w/h/cf read from the dsc, RGB565A8 alpha plane at w*h*2.
+
+CRITICAL — cameraless verification: the board has no camera, so a `face` CLI
+command drives each state with a SYNTHETIC amplitude so the user can watch each
+state on the AMOLED without a Gemini session:
+  face off | idle | think
+  face listen [pct]  | face speak [pct]   (pct 0-100; omitted = sinusoidal sweep)
+
+Audio source is pluggable: emote_face_set_amplitude_source(cb) registers voice-
+eng's live mic/out RMS getters; emote_face_set_synthetic_amplitude(milli) feeds
+the CLI demo. Patch 0032 (later) wires the live getters — this patch is
+self-contained on synthetic amplitude so the visual validates immediately.
+
+Files (applied by scripts/bootstrap.sh apply_reactive_waveform_face_patch):
+  + components/common/emote/waveform.c            (new — the renderer + task)
+  ~ components/common/emote/include/emote.h        (face API + enum)
+  ~ components/common/emote/emote.c                (call emote_face_init in start)
+  ~ components/common/emote/CMakeLists.txt         (add waveform.c to SRCS)
+  ~ components/common/app_claw/app_claw_cli.c      (the `face` command, emote-gated)
+
+The mascot/HUD composite (§ Phase 2B) is demoted to the optional fallback — see
+the plan. mascot-eng's 5 disc .eaf remain valid as the "face off" aesthetic.
+---
+ (full file bodies are installed by the bootstrap apply step — esp-claw/ is a
+  gitignored generated tree, so this patch is a documentation record of the
+  mutation, same idiom as patches 0009/0012/0030.)

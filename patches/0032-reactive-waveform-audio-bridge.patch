@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: JarvisNano <jarvisnano@local>
+Date: Wed, 21 May 2026 23:00:00 -0400
+Subject: [PATCH] emote: wire reactive waveform face to live Gemini audio levels
+
+Patch 0031 built the reactive waveform on a pluggable amplitude source, self-
+contained on synthetic amplitude. This wires the LIVE source: cap_gemini_live's
+audio level getters → the waveform's LISTENING/SPEAKING bars.
+
+The glue lives in the app_claw layer (the only place that knows both APIs), so
+cap_gemini_live stays display-agnostic and the emote component stays voice-
+agnostic. New app_claw_face_bridge.{c,h}:
+  - gl_face_amp(state): LISTENING → cap_gemini_live_get_mic_level(),
+    SPEAKING → cap_gemini_live_get_output_level() (both float 0.0..1.0),
+    scaled per-stream to 0..1000 for emote_face_amp_cb_t.
+  - app_claw_face_bridge_register(): emote_face_set_amplitude_source(gl_face_amp).
+Registered from app_claw_ui_start() right after emote_start().
+
+NORMALIZATION (tune after hardware test): ES7210 in-gain=30 → typical speech mic
+RMS ~2000-6000 raw → ~0.06..0.18 after the getter's /32768, so mic is scaled
+×6.0. Gemini TTS output reads much hotter, scaled ×1.6. The render task's lerp
+provides fast-attack/slow-decay smoothing. If speech reads flat/dead or clips on
+the panel, adjust FACE_MIC_GAIN / FACE_OUT_GAIN (or ask voice-eng to bump the
+ADC in-gain) and reship.
+
+Double-gated: CONFIG_APP_CLAW_ENABLE_EMOTE (bridge compiled) AND
+CONFIG_APP_CLAW_CAP_GEMINI_LIVE (live path); the latter off → a no-op stub, so
+the waveform still runs on synthetic amplitude via the `face` CLI (patch 0031).
+The two synthetic paths stay independent: the `face` CLI drives the display
+directly; cap_gemini_live_set_synthetic_levels() is voice-eng's audio-path test.
+
+Files (applied by scripts/bootstrap.sh apply_reactive_waveform_audio_bridge_patch;
+bridge .c/.h vendored under firmware/emote/, copied in like 0031's waveform.c):
+  + components/common/app_claw/app_claw_face_bridge.c   (new)
+  + components/common/app_claw/app_claw_face_bridge.h   (new)
+  ~ components/common/app_claw/app_claw.c               (include + register call)
+  ~ components/common/app_claw/CMakeLists.txt           (add .c, emote-gated)
+
+ABI note: depends on cap_gemini_live's FLOAT getters (get_mic_level /
+get_output_level, 0.0..1.0) — the version actually staged. (An earlier uint16
+*_rms variant was discussed but not shipped.)

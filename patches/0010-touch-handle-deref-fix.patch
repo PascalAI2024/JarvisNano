@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: JarvisNano <jarvisnano@local>
+Date: Wed, 21 May 2026 00:00:00 -0400
+Subject: [PATCH] touch: fix double-indirection that spammed "must be initialized"
+
+Runtime bug on the AMOLED-1.75 board: the CST9217 poll consumer logged
+  E TP: esp_lcd_touch_read_data(57): Touch controller must be initialized
+  E TP: esp_lcd_touch_get_coordinates(71): Touch controller must be initialized
+at the poll rate, forever.
+
+Root cause — one extra level of pointer indirection when fetching the
+touch handle. esp_board_manager_get_device_handle(name, &out) returns the
+device's INNER handle (the dev_lcd_touch_i2c_handles_t* the device init
+stored via *device_handle = handle->device_handle in
+esp_board_device.c::esp_board_device_get_handle), NOT the
+esp_board_device_handle_t wrapper.
+
+main.c::touch_monitor_task declared touch_h as esp_board_device_handle_t*
+and then read touch_h->device_handle. That field sits at offset 16 (5th
+member of the wrapper) but the returned object is an 8-byte, 2-pointer
+dev_lcd_touch_i2c_handles_t {touch_handle, io_handle}. Reading offset 16
+walks past the struct and yields a heap-garbage, non-NULL pointer. Cast
+to esp_lcd_touch_handle_t and dereferenced, `touch` became non-NULL but
+its read_data/get_xy vtable was NULL — exactly the "must be initialized"
+guard in esp_lcd_touch.c:57 / :71.
+
+The factory (boards/.../setup_device.c::lcd_touch_factory_entry_t) and the
+codegen device registration are correct; only the consumer's cast was
+wrong. The fix mirrors the already-correct Lua reference cast in
+lua_module_board_manager.c::lua_bm_get_lcd_touch_handle (which is why the
+flappybird/paint Lua demos polled touch fine): treat the returned pointer
+as the inner dev_lcd_touch_i2c_handles_t* and read its first member,
+touch_handle. dev_lcd_touch_i2c.h is reachable via the existing
+esp_board_manager_includes.h include, so no new include is needed.
+
+This patch documents the native firmware mutation applied by
+scripts/bootstrap.sh (apply_touch_handle_deref_patch). It targets the
+upstream esp-claw main.c, which ships touch_monitor_task. The identical
+defect in the local-only cap_gemini_live.c::gl_acquire_codec_handles
+(dac/adc/touch) is fixed in that file's own reproduction patch, owned by
+the Gemini Live work, not here.
+---
+diff --git a/application/edge_agent/main/main.c b/application/edge_agent/main/main.c
+index 1111111..2222222 100644
+--- a/application/edge_agent/main/main.c
++++ b/application/edge_agent/main/main.c
+@@ -424,13 +424,21 @@ static void touch_monitor_task(void *arg)
+     uint8_t  point_num = 0;
+     bool     was_touching = false;
+
+-    /* Wait until board manager has the touch handle ready */
++    /* Wait until board manager has the touch handle ready.
++     * esp_board_manager_get_device_handle() returns the device's INNER handle
++     * (the dev_lcd_touch_i2c_handles_t* the device init stored), not the
++     * esp_board_device_handle_t wrapper. Its first member is the real
++     * esp_lcd_touch_handle_t. Reading ->device_handle off it (as if it were the
++     * wrapper) walks past the 2-pointer struct and yields a garbage non-NULL
++     * handle whose read_data/get_xy vtable is NULL — that is what spammed
++     * "Touch controller must be initialized" at the poll rate. Mirror the
++     * working lua_module_board_manager.c::get_lcd_touch_handle cast. */
+     while (touch == NULL) {
+-        esp_board_device_handle_t *touch_h = NULL;
++        void *dev_h = NULL;
+         if (esp_board_manager_get_device_handle(ESP_BOARD_DEVICE_NAME_LCD_TOUCH,
+-                                                (void **)&touch_h) == ESP_OK && touch_h) {
+-            touch = *(esp_lcd_touch_handle_t *)touch_h->device_handle;
++                                                &dev_h) == ESP_OK && dev_h) {
++            touch = ((dev_lcd_touch_i2c_handles_t *)dev_h)->touch_handle;
+         }
+         if (touch == NULL) {
+             vTaskDelay(pdMS_TO_TICKS(500));
+         }
+     }

@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: JarvisNano <jarvisnano@local>
+Date: Thu, 22 May 2026 09:00:00 -0400
+Subject: [PATCH] waveform: byte-swap colours to panel bus order (fix white render)
+
+HARDWARE FEEDBACK (build 0030+0031): the reactive waveform rendered WHITE
+instead of arc-reactor orange.
+
+ROOT CAUSE: the CO5300 QSPI AMOLED runs with the emote engine's colour-swap
+flag ON (emote.c emote_should_swap_color → true for non-dsi/rgb panels). The gfx
+software blend has a fast path for fully-opaque pixels that copies the source
+pixel to the framebuffer WITHOUT swapping (gfx_blend.c:190,
+`last_res_color = src_buf[x]`). The working emote anim faces land correct
+because the EAF decoder bakes the swap into the palette at decode time
+(gfx_eaf_dec.c eaf_palette_get_color: swap=true → __builtin_bswap16). Our
+runtime RGB565A8 buffer wrote UNswapped pixels, so on the swap-expecting panel
+the bytes were misread → wrong colour.
+
+FIX: one line — pre-swap the RGB565 colour constants to panel bus order in the
+RGB565() macro, matching the anim path's convention. All COL_* constants inherit
+it. Partial-alpha glow still works: gfx_blend_color_mix swaps src+dest into
+native order, mixes, swaps the result back, which is consistent for a bus-order
+dest buffer.
+
+  -#define RGB565(r,g,b) ((uint16_t)(((r&0xF8)<<8)|((g&0xFC)<<3)|(b>>3)))
+  +#define RGB565(r,g,b) ((uint16_t)__builtin_bswap16((uint16_t)(((r&0xF8)<<8)|((g&0xFC)<<3)|(b>>3))))
+
+Verified the bswap: #FFE25E→bus 0x0BFF, #F5870B→bus 0x21F4, #6A3A05→bus 0xC069
+(none are 0xFFFF white).
+
+No new bootstrap apply step: the fix lives in the vendored
+firmware/emote/waveform.c, and apply_reactive_waveform_face_patch now ALWAYS
+re-copies that file (moved the cp above the idempotency guard) so source-of-truth
+edits propagate on incremental trees too. Clean rebuilds already re-copy it.
+
+SECOND FIX (same patch) — SPIRAL render: the user also saw a diagonal spiral,
+the textbook signature of a row-stride/descriptor mismatch. Compared our
+gfx_image_dsc_t to the working reference (test_apps assets/icon_rgbd565A8.c):
+the reference sets ONLY cf/magic/w/h/data_size/data as ONE designated-initializer
+literal, leaving stride+flags zero. Ours set header.stride=w*2 via field-by-field
+assignment on the live packed-bitfield struct. The decoder ignores header.stride
+(src_stride = header.w, gfx_img.c:117), but the field-by-field RMW on a packed
+bitfield header (vs the reference's single packed write) is the suspected spiral
+cause. Fix: build the dsc as one designated-initializer literal matching the
+reference, stride/flags zero. data_size = w*h*2 + w*h = 167760 (same formula the
+reference uses: 65*65*2 + 65*65 = 12675).
+
+Both fixes ship together — one flash, distinct diagnostic outcomes:
+  - orange + correct shape → both mattered, done.
+  - orange + still spiral → colour was it, dsc theory wrong → 0034 pivots to
+    object geometry / emote_create_obj_by_type image init.
+  - still white + spiral → deeper cause (cross-core PSRAM cache coherency, or the
+    create-by-type image object not wired like layout.json-defined objects).
+
+The "not full screen / thin band" feedback is a SEPARATE shape redesign
+(horizontal 466x120 strip → concentric rings + radial arcs at 466x466 for the
+round panel) — deferred to patch 0034 after the user confirms orange + no spiral.
+---
+diff --git a/components/common/emote/waveform.c b/components/common/emote/waveform.c
+--- a/components/common/emote/waveform.c
++++ b/components/common/emote/waveform.c
+@@ define RGB565 @@
+-#define RGB565(r, g, b)   ((uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)))
++#define RGB565(r, g, b)   ((uint16_t)__builtin_bswap16((uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3))))
+@@ face_init_dsc @@
+-    s_face.dsc[i].header.magic  = 0x19;
+-    s_face.dsc[i].header.cf     = GFX_COLOR_FORMAT_RGB565A8;
+-    s_face.dsc[i].header.w      = FACE_W;
+-    s_face.dsc[i].header.h      = FACE_H;
+-    s_face.dsc[i].header.stride = FACE_W * 2;
+-    s_face.dsc[i].data_size     = FRAME_BYTES;
+-    s_face.dsc[i].data          = s_face.buf[i];
++    s_face.dsc[i] = (gfx_image_dsc_t){
++        .header = { .cf = GFX_COLOR_FORMAT_RGB565A8, .magic = 0x19, .w = FACE_W, .h = FACE_H },
++        .data_size = FRAME_BYTES, .data = s_face.buf[i],
++    };

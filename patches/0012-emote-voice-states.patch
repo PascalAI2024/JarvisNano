@@ -1,0 +1,121 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: JarvisNano <jarvisnano@local>
+Date: Wed, 21 May 2026 03:00:00 -0400
+Subject: [PATCH] emote: voice-state faces (Connecting/Listening/Thinking/
+ Speaking/Idle) + voice-emote art
+
+Phase 1 of the AMOLED-1.75 display/UX plan (docs/DISPLAY_UX_PLAN.md). Gives
+the round display a live face for every Gemini Live voice state. Builds on
+patch 0009 (status_detail) and runs after it.
+
+This patch documents four native-tree mutations applied by
+scripts/bootstrap.sh (apply_emote_voice_states_patch), each idempotent so a
+clean re-clone (whose upstream may carry only the swim/offline pack) and a
+local re-clone (which may already carry the voice entries) both converge:
+
+  1. emote.c   — append voice helpers emote_set_connecting/listening/thinking/
+                 speaking/voice_idle(), and switch the idle eye from "swim" to
+                 "neutral" (the JarvisNano face).
+  2. emote.h   — declare the five voice helpers.
+  3. emote.json (assets_local/284_240) — map listen/thinking/happy/neutral/...
+                 emotes to their eaf art so the faces resolve at pack time.
+  4. assets_local/emoji_large/ — copy the voice/expression eaf art
+                 (listen, confused, Happy, neutral, winking, shocked, Sad,
+                 angry) from the upstream managed esp_emote_assets/emoji_large
+                 collection, so the faces actually render instead of being
+                 marked "lack":true by build.py.
+
+Without this, a clean rebuild loses the voice helpers entirely and
+cap_gemini_live.c fails to link (undefined reference to emote_set_listening),
+and even if it linked the voice faces would be blank for want of art.
+
+The voice helpers are *called* from cap_gemini_live.c's gl_set_state()
+(owned by voice-eng / patch path copy_cap_gemini_live); this patch only
+provides the symbols + art.
+---
+diff --git a/components/common/emote/emote.c b/components/common/emote/emote.c
+--- a/components/common/emote/emote.c
++++ b/components/common/emote/emote.c
+@@ -183,7 +183,7 @@ static esp_err_t emote_render_status(void)
+
+     const bool ap_present = (s_ap_ssid[0] != '\0');
+     const bool has_detail = (s_status_detail[0] != '\0');
+-    const char *idle = s_sta_connected ? "swim" : "offline";
++    const char *idle = s_sta_connected ? "neutral" : "offline";
+
+     char msg[96];
+     if (s_sta_connected && has_detail) {
+@@ -228,3 +228,40 @@ esp_err_t emote_set_status_detail(const char *detail)
+     }
+     return ESP_OK;
+ }
++
++/* ---- Voice state helpers -------------------------------------------------- */
++/* Each maps a GL_STATE_* to an eye animation (name indexes emote.json) plus a
++ * short status label. emote_apply() sets the anim + EMOTE_MGR_EVT_SYS message
++ * and refreshes if we own the display arbiter. */
++
++esp_err_t emote_set_connecting(void)
++{
++    return emote_apply("thinking", "Connecting...");
++}
++
++esp_err_t emote_set_listening(void)
++{
++    return emote_apply("listen", "Listening...");
++}
++
++esp_err_t emote_set_thinking(void)
++{
++    return emote_apply("thinking", "Thinking...");
++}
++
++esp_err_t emote_set_speaking(void)
++{
++    return emote_apply("happy", "Speaking...");
++}
++
++esp_err_t emote_set_voice_idle(void)
++{
++    return emote_render_status();
++}
+diff --git a/components/common/emote/include/emote.h b/components/common/emote/include/emote.h
+--- a/components/common/emote/include/emote.h
++++ b/components/common/emote/include/emote.h
+@@ -19,6 +19,13 @@ esp_err_t emote_set_network_status(bool sta_connected, const char *ap_ssid);
+  * idle screen as "Ready * <detail>" when the station is connected. */
+ esp_err_t emote_set_status_detail(const char *detail);
+
++/* Voice state helpers — called by cap_gemini_live when session state changes.
++ * One per GL_STATE_* so every transition repaints the face. */
++esp_err_t emote_set_connecting(void);
++esp_err_t emote_set_listening(void);
++esp_err_t emote_set_thinking(void);
++esp_err_t emote_set_speaking(void);
++esp_err_t emote_set_voice_idle(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/components/common/emote/assets_local/284_240/emote.json b/components/common/emote/assets_local/284_240/emote.json
+--- a/components/common/emote/assets_local/284_240/emote.json
++++ b/components/common/emote/assets_local/284_240/emote.json
+@@ -1,4 +1,12 @@
+ [
+     {"emote": "swim",        "src": "swim.eaf",     "loop": true,  "fps": 20},
+-    {"emote": "offline",     "src": "offline.eaf",  "loop": true,  "fps": 20}
++    {"emote": "offline",     "src": "offline.eaf",  "loop": true,  "fps": 20},
++    {"emote": "listen",      "src": "listen.eaf",   "loop": true,  "fps": 20},
++    {"emote": "thinking",    "src": "confused.eaf", "loop": true,  "fps": 20},
++    {"emote": "happy",       "src": "Happy.eaf",    "loop": true,  "fps": 20},
++    {"emote": "neutral",     "src": "neutral.eaf",  "loop": false, "fps": 20},
++    {"emote": "winking",     "src": "winking.eaf",  "loop": false, "fps": 20},
++    {"emote": "surprised",   "src": "shocked.eaf",  "loop": false, "fps": 20},
++    {"emote": "sad",         "src": "Sad.eaf",      "loop": true,  "fps": 20},
++    {"emote": "angry",       "src": "angry.eaf",    "loop": true,  "fps": 20}
+ ]
+diff --git a/components/common/emote/assets_local/emoji_large b/components/common/emote/assets_local/emoji_large
+--- copied from managed_components/espressif2022__esp_emote_assets/emoji_large/
++++ assets_local/emoji_large/
+ (binary) listen.eaf confused.eaf Happy.eaf neutral.eaf winking.eaf
+ (binary) shocked.eaf Sad.eaf angry.eaf

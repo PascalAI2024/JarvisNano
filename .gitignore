@@ -4,6 +4,7 @@ esp-claw/
 # Build artifacts
 build/
 .build_logs/
+.build_tools/
 .gradle/
 managed_components/
 dependencies.lock
@@ -35,3 +36,7 @@ secrets.yaml
 *.key
 *.token
 credentials*
+
+# mascot-eng local image-gen venv
+.venv-mascot/
+firmware/mascot/__pycache__/

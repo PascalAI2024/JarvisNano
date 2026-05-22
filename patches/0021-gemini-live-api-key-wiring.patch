@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: JarvisNano <jarvisnano@local>
+Date: Thu, 21 May 2026 00:00:00 -0400
+Subject: [PATCH] gemini-live: provision API key from NVS in main.c
+
+The Gemini Live touch-to-talk path starts on boot (touch_monitor_task →
+cap_gemini_live_toggle), but main.c never handed the capability an API
+key, so every BidiGenerateContent WebSocket session opened with no auth
+and the session task aborted with "No Gemini API key". The key already
+lives in NVS via app_config (struct field `gemini_api_key`, NVS key
+"gemini_key") — nothing was reading it into the capability.
+
+Fix: one call inside the existing `#if CONFIG_APP_CLAW_CAP_GEMINI_LIVE`
+block in app_main(), immediately before the touch monitor starts:
+
+    cap_gemini_live_set_api_key(s_config->gemini_api_key);
+
+Field access is used directly because app_config exposes NO getter for
+this field (the only getter is app_config_get_timezone); `s_config` is
+already dereferenced the same way elsewhere (e.g. s_config->wifi_ssid).
+
+Applied to the generated tree by scripts/bootstrap.sh
+(apply_gemini_live_api_key_patch), registered in main() right after
+apply_gemini_live_main_require_patch. Idempotent: guarded on
+grep "cap_gemini_live_set_api_key", anchored on the unique
+xTaskCreate(touch_monitor_task, ...) line.
+
+PROVISIONING (how a key gets into NVS):
+  - POST /api/config with the JSON field `gemini_api_key` (NVS key
+    "gemini_key"), OR a direct NVS write.
+  - The dashboard frontend does NOT yet expose a gemini_api_key input
+    (only llm_api_key), and there is no `gemini-live` CLI set-key
+    subcommand. Adding a frontend field or CLI subcommand is a follow-up
+    so a key can be set without a raw NVS write.
+
+NOTE: documentation record of a generated-tree mutation, not a unified
+diff against tracked files (same idiom as patches/0009, 0010, 0020). The
+mechanism is the python hunk in apply_gemini_live_api_key_patch().

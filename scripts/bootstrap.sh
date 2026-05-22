@@ -6,8 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ESP_CLAW_DIR="$ROOT/esp-claw"
 ESP_CLAW_REPO="https://github.com/espressif/esp-claw.git"
 ESP_CLAW_REF="${ESP_CLAW_REF:-6a211756a6ebf8d725173e294f582a6cf30c9592}"
-BOARD_NAME="xiao_esp32s3_sense"
-BOARD_VENDOR="seeed"
+BOARD_NAME="${BOARD_NAME:-xiao_esp32s3_sense}"
+BOARD_VENDOR="${BOARD_VENDOR:-seeed}"
 # Pinned to a specific point release. `release-v5.5` is a rolling tag and
 # Espressif rebases the upstream IDF source on each push (e.g. fixes get
 # back-ported), which silently breaks tools/esp-idf.patch and `gen-bmgr-config`
@@ -43,6 +43,7 @@ clone_or_update_esp_claw() {
 copy_board() {
     local src="$ROOT/boards/$BOARD_VENDOR/$BOARD_NAME"
     local dst="$ESP_CLAW_DIR/application/edge_agent/boards/$BOARD_VENDOR/$BOARD_NAME"
+    [ -d "$src" ] || die "unknown board $BOARD_VENDOR/$BOARD_NAME (missing $src)"
     log "copying board $BOARD_VENDOR/$BOARD_NAME → upstream tree"
     mkdir -p "$dst"
     cp -f "$src"/* "$dst/"
@@ -57,6 +58,40 @@ copy_firmware_assets() {
     mkdir -p "$fatfs/scripts/builtin" "$fatfs/router_rules"
     cp -f "$lua_src"/*.lua "$fatfs/scripts/builtin/"
     cp -f "$rules_src"/router_rules.json "$fatfs/router_rules/router_rules.json"
+}
+
+copy_cap_gemini_live() {
+    # The Gemini Live voice capability is a JarvisNano-authored component that does
+    # not exist upstream in esp-claw. esp-claw/ is a gitignored pinned clone, so the
+    # canonical source lives (git-tracked) under firmware/components/cap_gemini_live
+    # and is copied into the generated tree on every bootstrap — same idiom as
+    # copy_board. Without this, the component vanishes on a clean re-clone.
+    local src="$ROOT/firmware/components/cap_gemini_live"
+    local dst="$ESP_CLAW_DIR/components/claw_capabilities/cap_gemini_live"
+    [ -d "$src" ] || die "missing vendored cap_gemini_live source at $src"
+    log "copying cap_gemini_live component → upstream tree"
+    mkdir -p "$dst/src" "$dst/include"
+    cp -f "$src/CMakeLists.txt" "$dst/CMakeLists.txt"
+    cp -f "$src/idf_component.yml" "$dst/idf_component.yml"
+    cp -f "$src"/include/*.h "$dst/include/"
+    cp -f "$src"/src/*.c "$dst/src/"
+}
+
+copy_jarvis_logger() {
+    # Persistent ESP_LOG tee to rotating files on the SD card. Same idiom as
+    # copy_cap_gemini_live: canonical source is git-tracked under
+    # firmware/components/jarvis_logger and copied into the generated tree's
+    # local project components dir (always on the IDF component search path) so
+    # it survives a clean re-clone. main.c calls jarvis_logger_init("/sdcard")
+    # after SD mount; http_server calls jarvis_logger_register_http() for /api/logs.
+    local src="$ROOT/firmware/components/jarvis_logger"
+    local dst="$ESP_CLAW_DIR/application/edge_agent/components/jarvis_logger"
+    [ -d "$src" ] || die "missing vendored jarvis_logger source at $src"
+    log "copying jarvis_logger component → upstream tree"
+    mkdir -p "$dst/src" "$dst/include"
+    cp -f "$src/CMakeLists.txt" "$dst/CMakeLists.txt"
+    cp -f "$src"/include/*.h "$dst/include/"
+    cp -f "$src"/src/*.c "$dst/src/"
 }
 
 apply_patch() {
@@ -103,22 +138,33 @@ PY
 
 build() {
     mkdir -p "$ROOT/.build_logs"
-    log "building inside $IDF_IMAGE (output streams to .build_logs/build.log)"
-    docker run --rm -v "$ESP_CLAW_DIR":/project -w /project/application/edge_agent "$IDF_IMAGE" \
-        bash -lc 'set -e; pip install --quiet "esp-bmgr-assist==0.5.0";
+    log "building $BOARD_VENDOR/$BOARD_NAME inside $IDF_IMAGE (output streams to .build_logs/build.log)"
+    docker run --rm \
+        -e BOARD_NAME="$BOARD_NAME" \
+        -v "$ESP_CLAW_DIR":/project \
+        -w /project/application/edge_agent \
+        "$IDF_IMAGE" \
+        bash -lc 'set -e; pip install --quiet "idf-component-manager==2.4.10" "esp-bmgr-assist==0.5.0";
                   idf.py set-target esp32s3;
-                  idf.py gen-bmgr-config -c ./boards -b xiao_esp32s3_sense;
+                  idf.py gen-bmgr-config -c ./boards -b "$BOARD_NAME";
                   python3 - <<'"'"'PY'"'"'
+import os
 from pathlib import Path
 p = Path("sdkconfig")
 s = p.read_text()
-s = s.replace("CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y", "# CONFIG_ESPTOOLPY_FLASHSIZE_2MB is not set")
-s = s.replace("# CONFIG_ESPTOOLPY_FLASHSIZE_8MB is not set", "CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y")
-s = s.replace("CONFIG_ESPTOOLPY_FLASHSIZE=\"2MB\"", "CONFIG_ESPTOOLPY_FLASHSIZE=\"8MB\"")
-# The XIAO ESP32-S3 Sense has enough flash for the app image, but not enough
-# free internal heap to register the full serial REPL after Wi-Fi, MCP, Lua,
-# router, scheduler, and camera startup. Keep USB logs, skip the interactive CLI.
-s = s.replace("CONFIG_APP_CLAW_ENABLE_CLI=y", "# CONFIG_APP_CLAW_ENABLE_CLI is not set")
+board = os.environ["BOARD_NAME"]
+if board == "xiao_esp32s3_sense":
+    s = s.replace("CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y", "# CONFIG_ESPTOOLPY_FLASHSIZE_2MB is not set")
+    s = s.replace("# CONFIG_ESPTOOLPY_FLASHSIZE_8MB is not set", "CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y")
+    s = s.replace("CONFIG_ESPTOOLPY_FLASHSIZE=\"2MB\"", "CONFIG_ESPTOOLPY_FLASHSIZE=\"8MB\"")
+    # The XIAO ESP32-S3 Sense has enough flash for the app image, but not enough
+    # free internal heap to register the full serial REPL after Wi-Fi, MCP, Lua,
+    # router, scheduler, and camera startup. Keep USB logs, skip the interactive CLI.
+    s = s.replace("CONFIG_APP_CLAW_ENABLE_CLI=y", "# CONFIG_APP_CLAW_ENABLE_CLI is not set")
+elif board == "esp32s3_touch_amoled_1_75":
+    s = s.replace("CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y", "# CONFIG_ESPTOOLPY_FLASHSIZE_2MB is not set")
+    s = s.replace("# CONFIG_ESPTOOLPY_FLASHSIZE_16MB is not set", "CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y")
+    s = s.replace("CONFIG_ESPTOOLPY_FLASHSIZE=\"2MB\"", "CONFIG_ESPTOOLPY_FLASHSIZE=\"16MB\"")
 p.write_text(s)
 PY
                   idf.py build' \
@@ -581,6 +627,86 @@ s = s.replace(
 camera_api.write_text(s)
 print("patched", cmake)
 print("patched", camera_api)
+PY
+}
+
+apply_gemini_live_main_require_patch() {
+    local target="$ESP_CLAW_DIR/application/edge_agent/main/CMakeLists.txt"
+    if [ ! -f "$target" ]; then
+        log "main CMakeLists not found — skipping Gemini Live main dependency patch"
+        return
+    fi
+    if grep -q "JarvisNano: main.c includes cap_gemini_live.h" "$target" 2>/dev/null; then
+        log "Gemini Live main dependency patch already applied"
+        return
+    fi
+    log "applying Gemini Live main dependency patch"
+    python3 - <<PY
+import pathlib
+p = pathlib.Path(r"$target")
+s = p.read_text()
+old = (
+    "    esp_lcd_touch\n"
+    "    espressif__esp_board_manager\n"
+    ")\n"
+)
+new = (
+    "    esp_lcd_touch\n"
+    "    espressif__esp_board_manager\n"
+    "    # JarvisNano: main.c includes cap_gemini_live.h behind the Kconfig\n"
+    "    # macro, but this local ESP-Claw checkout can expose the macro before\n"
+    "    # CMake appends the conditional requirement. Keep the include path\n"
+    "    # available so the Waveshare touch-to-talk build is reproducible.\n"
+    "    cap_gemini_live\n"
+    ")\n"
+)
+if old not in s:
+    raise SystemExit(f"could not locate main_requires block in {p}")
+p.write_text(s.replace(old, new, 1))
+print("patched", p)
+PY
+}
+
+apply_gemini_live_api_key_patch() {
+    # patches/0020 — wire the Gemini Live API key from NVS into the capability.
+    # main.c starts the touch-to-talk monitor but never provisions the key, so the
+    # BidiGenerateContent WSS handshake has no auth. Insert one call before the
+    # touch monitor starts. The "gemini_api_key" struct field (NVS key "gemini_key")
+    # is accessed directly — app_config has no getter for it (only get_timezone).
+    local main_c="$ESP_CLAW_DIR/application/edge_agent/main/main.c"
+    if [ ! -f "$main_c" ]; then
+        log "main.c not found — skipping Gemini Live API key patch"
+        return
+    fi
+    if grep -q "cap_gemini_live_set_api_key" "$main_c" 2>/dev/null; then
+        log "Gemini Live API key patch already applied"
+        return
+    fi
+    log "applying patches/0020-gemini-live-api-key-wiring.patch"
+    python3 - <<PY
+import pathlib
+p = pathlib.Path(r"$main_c")
+s = p.read_text()
+old = (
+    '#if CONFIG_APP_CLAW_CAP_GEMINI_LIVE\n'
+    '    /* Start touch monitor — polls every 80ms, calls cap_gemini_live_toggle() on tap */\n'
+    '    xTaskCreate(touch_monitor_task, "touch_mon", 4096, NULL, 3, NULL);\n'
+    '#endif\n'
+)
+new = (
+    '#if CONFIG_APP_CLAW_CAP_GEMINI_LIVE\n'
+    '    /* Provision the Gemini Live API key from NVS (app_config field "gemini_key").\n'
+    '     * Without this the BidiGenerateContent session has no auth and the WSS handshake\n'
+    '     * is rejected. The field is empty until set via POST /api/config. */\n'
+    '    cap_gemini_live_set_api_key(s_config->gemini_api_key);\n'
+    '    /* Start touch monitor — polls every 80ms, calls cap_gemini_live_toggle() on tap */\n'
+    '    xTaskCreate(touch_monitor_task, "touch_mon", 4096, NULL, 3, NULL);\n'
+    '#endif\n'
+)
+if old not in s:
+    raise SystemExit("could not locate gemini-live touch monitor block in main.c — upstream may have changed")
+p.write_text(s.replace(old, new, 1))
+print("patched", p)
 PY
 }
 
@@ -1050,20 +1176,621 @@ print("patched emote.c, emote.h, app_claw.c")
 PY
 }
 
+apply_touch_handle_deref_patch() {
+    # patches/0010 — fix the CST9217 "must be initialized" spam in the upstream
+    # main.c touch monitor. esp_board_manager_get_device_handle() returns the
+    # INNER device handle (dev_lcd_touch_i2c_handles_t*), not the
+    # esp_board_device_handle_t wrapper, so reading ->device_handle off it walks
+    # past the struct into garbage and yields a non-NULL touch handle with a NULL
+    # read_data/get_xy vtable. Cast the returned pointer directly and read its
+    # first member, touch_handle — same as lua_module_board_manager.c.
+    local main_c="$ESP_CLAW_DIR/application/edge_agent/main/main.c"
+    if [ ! -f "$main_c" ]; then
+        log "main.c not found — skipping touch handle deref patch"
+        return
+    fi
+    if grep -q "touch = ((dev_lcd_touch_i2c_handles_t \*)dev_h)->touch_handle;" "$main_c" 2>/dev/null; then
+        log "touch handle deref patch already applied"
+        return
+    fi
+    log "applying patches/0010-touch-handle-deref-fix.patch"
+    python3 - <<PY
+import pathlib
+p = pathlib.Path(r"$main_c")
+s = p.read_text()
+old = (
+    "    /* Wait until board manager has the touch handle ready */\n"
+    "    while (touch == NULL) {\n"
+    "        esp_board_device_handle_t *touch_h = NULL;\n"
+    "        if (esp_board_manager_get_device_handle(ESP_BOARD_DEVICE_NAME_LCD_TOUCH,\n"
+    "                                                (void **)&touch_h) == ESP_OK && touch_h) {\n"
+    "            touch = *(esp_lcd_touch_handle_t *)touch_h->device_handle;\n"
+    "        }\n"
+    "        if (touch == NULL) {\n"
+    "            vTaskDelay(pdMS_TO_TICKS(500));\n"
+    "        }\n"
+    "    }\n"
+)
+new = (
+    "    /* Wait until board manager has the touch handle ready.\n"
+    "     * esp_board_manager_get_device_handle() returns the device's INNER handle\n"
+    "     * (the dev_lcd_touch_i2c_handles_t* the device init stored), not the\n"
+    "     * esp_board_device_handle_t wrapper. Its first member is the real\n"
+    "     * esp_lcd_touch_handle_t. Reading ->device_handle off it (as if it were the\n"
+    "     * wrapper) walks past the 2-pointer struct and yields a garbage non-NULL\n"
+    "     * handle whose read_data/get_xy vtable is NULL — that is what spammed\n"
+    "     * \"Touch controller must be initialized\" at the poll rate. Mirror the\n"
+    "     * working lua_module_board_manager.c::get_lcd_touch_handle cast. */\n"
+    "    while (touch == NULL) {\n"
+    "        void *dev_h = NULL;\n"
+    "        if (esp_board_manager_get_device_handle(ESP_BOARD_DEVICE_NAME_LCD_TOUCH,\n"
+    "                                                &dev_h) == ESP_OK && dev_h) {\n"
+    "            touch = ((dev_lcd_touch_i2c_handles_t *)dev_h)->touch_handle;\n"
+    "        }\n"
+    "        if (touch == NULL) {\n"
+    "            vTaskDelay(pdMS_TO_TICKS(500));\n"
+    "        }\n"
+    "    }\n"
+)
+if old not in s:
+    raise SystemExit("could not locate touch_monitor_task handle block in main.c — upstream may have changed")
+p.write_text(s.replace(old, new, 1))
+print("patched", p)
+PY
+}
+
+apply_emote_voice_states_patch() {
+    # patches/0012 — voice-state faces (Connecting/Listening/Thinking/Speaking/
+    # Idle) + the eaf art they need. Runs AFTER apply_emote_status_detail_patch
+    # (it appends to the emote_set_status_detail block that patch 0009 produces).
+    # Idempotent and self-healing: converges whether the cloned tree carries the
+    # original swim/offline pack or already carries the voice entries.
+    local emote_c="$ESP_CLAW_DIR/components/common/emote/emote.c"
+    local emote_h="$ESP_CLAW_DIR/components/common/emote/include/emote.h"
+    local emote_json="$ESP_CLAW_DIR/components/common/emote/assets_local/284_240/emote.json"
+    local coll_dst="$ESP_CLAW_DIR/components/common/emote/assets_local/emoji_large"
+    local coll_src="$ESP_CLAW_DIR/application/edge_agent/managed_components/espressif2022__esp_emote_assets/emoji_large"
+    if [ ! -f "$emote_c" ] || [ ! -f "$emote_h" ]; then
+        log "emote sources not found — skipping emote voice-states patch"
+        return
+    fi
+
+    # 1+2. Voice helpers in emote.c / emote.h (and swim->neutral idle face).
+    if grep -q "emote_set_listening" "$emote_c" 2>/dev/null; then
+        log "emote voice-states code already applied"
+    else
+        log "applying patches/0012-emote-voice-states.patch (code)"
+        python3 - <<PY
+import pathlib
+emote_c = pathlib.Path(r"$emote_c")
+emote_h = pathlib.Path(r"$emote_h")
+
+# emote.c: idle face swim -> neutral (the JarvisNano face)
+s = emote_c.read_text()
+swim = '    const char *idle = s_sta_connected ? "swim" : "offline";\n'
+neut = '    const char *idle = s_sta_connected ? "neutral" : "offline";\n'
+if swim in s:
+    s = s.replace(swim, neut, 1)
+
+# emote.c: append voice helpers just before emote_cleanup().
+anchor = "static void emote_cleanup(void)"
+helpers = (
+    "/* ---- Voice state helpers -------------------------------------------------- */\n"
+    "/* Each maps a GL_STATE_* to an eye animation (name indexes emote.json) plus a\n"
+    " * short status label. emote_apply() sets the anim + EMOTE_MGR_EVT_SYS message\n"
+    " * and refreshes if we own the display arbiter. */\n"
+    "\n"
+    "esp_err_t emote_set_connecting(void)\n"
+    "{\n"
+    '    return emote_apply("thinking", "Connecting...");\n'
+    "}\n"
+    "\n"
+    "esp_err_t emote_set_listening(void)\n"
+    "{\n"
+    '    return emote_apply("listen", "Listening...");\n'
+    "}\n"
+    "\n"
+    "esp_err_t emote_set_thinking(void)\n"
+    "{\n"
+    '    return emote_apply("thinking", "Thinking...");\n'
+    "}\n"
+    "\n"
+    "esp_err_t emote_set_speaking(void)\n"
+    "{\n"
+    '    return emote_apply("happy", "Speaking...");\n'
+    "}\n"
+    "\n"
+    "esp_err_t emote_set_voice_idle(void)\n"
+    "{\n"
+    "    return emote_render_status();\n"
+    "}\n"
+    "\n"
+)
+if anchor not in s:
+    raise SystemExit("could not locate emote_cleanup anchor in emote.c")
+s = s.replace(anchor, helpers + anchor, 1)
+emote_c.write_text(s)
+
+# emote.h: declare the five helpers after emote_set_status_detail decl.
+h = emote_h.read_text()
+if "emote_set_listening" not in h:
+    h_old = "esp_err_t emote_set_status_detail(const char *detail);\n"
+    h_new = (
+        "esp_err_t emote_set_status_detail(const char *detail);\n"
+        "\n"
+        "/* Voice state helpers — called by cap_gemini_live when session state changes.\n"
+        " * One per GL_STATE_* so every transition repaints the face. */\n"
+        "esp_err_t emote_set_connecting(void);\n"
+        "esp_err_t emote_set_listening(void);\n"
+        "esp_err_t emote_set_thinking(void);\n"
+        "esp_err_t emote_set_speaking(void);\n"
+        "esp_err_t emote_set_voice_idle(void);\n"
+    )
+    if h_old not in h:
+        raise SystemExit("could not locate emote_set_status_detail decl in emote.h")
+    emote_h.write_text(h.replace(h_old, h_new, 1))
+print("patched emote.c + emote.h voice helpers")
+PY
+    fi
+
+    # 3. emote.json — ensure the voice emotes are mapped to their eaf art.
+    if [ -f "$emote_json" ] && ! grep -q '"listen"' "$emote_json" 2>/dev/null; then
+        log "applying patches/0012 (emote.json voice entries)"
+        cat > "$emote_json" <<'JSON'
+[
+    {"emote": "swim",        "src": "swim.eaf",     "loop": true,  "fps": 20},
+    {"emote": "offline",     "src": "offline.eaf",  "loop": true,  "fps": 20},
+    {"emote": "listen",      "src": "listen.eaf",   "loop": true,  "fps": 20},
+    {"emote": "thinking",    "src": "confused.eaf", "loop": true,  "fps": 20},
+    {"emote": "happy",       "src": "Happy.eaf",    "loop": true,  "fps": 20},
+    {"emote": "neutral",     "src": "neutral.eaf",  "loop": false, "fps": 20},
+    {"emote": "winking",     "src": "winking.eaf",  "loop": false, "fps": 20},
+    {"emote": "surprised",   "src": "shocked.eaf",  "loop": false, "fps": 20},
+    {"emote": "sad",         "src": "Sad.eaf",      "loop": true,  "fps": 20},
+    {"emote": "angry",       "src": "angry.eaf",    "loop": true,  "fps": 20},
+    {"emote": "rwave_idle",   "src": "rwave_idle.eaf",   "loop": true, "fps": 20},
+    {"emote": "rwave_listen", "src": "rwave_listen.eaf", "loop": true, "fps": 24},
+    {"emote": "rwave_think",  "src": "rwave_think.eaf",  "loop": true, "fps": 24},
+    {"emote": "rwave_speak",  "src": "rwave_speak.eaf",  "loop": true, "fps": 24}
+]
+JSON
+    fi
+    # patch 0034: the four reactive-face EAFs are manifest-driven (build.py only
+    # packs files listed in emote.json). The guard above only rewrites emote.json
+    # when "listen" is absent, so on an already-patched tree force-add the rwave
+    # entries if missing (idempotent).
+    if [ -f "$emote_json" ] && ! grep -q "rwave_listen" "$emote_json" 2>/dev/null; then
+        log "applying patches/0034 (emote.json rwave reactive-face entries)"
+        python3 - "$emote_json" <<'PYR'
+import sys, json, pathlib
+p = pathlib.Path(sys.argv[1]); data = json.loads(p.read_text())
+have = {e.get("emote") for e in data}
+for name, fps in (("rwave_idle", 20), ("rwave_listen", 24), ("rwave_think", 24), ("rwave_speak", 24)):
+    if name not in have:
+        data.append({"emote": name, "src": f"{name}.eaf", "loop": True, "fps": fps})
+p.write_text(json.dumps(data, indent=4) + "\n")
+print("emote.json: rwave entries ensured")
+PYR
+    fi
+    # Copy the vendored reactive-face EAFs into the emoji collection so build.py
+    # packs them into the emote partition (source-of-truth: firmware/mascot/reactive/).
+    local rwave_src="$ROOT/firmware/mascot/reactive"
+    if [ -d "$rwave_src" ] && [ -d "$coll_dst" ]; then
+        for f in rwave_idle.eaf rwave_listen.eaf rwave_think.eaf rwave_speak.eaf; do
+            [ -f "$rwave_src/$f" ] && cp -f "$rwave_src/$f" "$coll_dst/$f"
+        done
+        log "copied reactive-face EAFs into emoji_large"
+    else
+        log "reactive-face EAFs not found at $rwave_src — face will fall back to eye"
+    fi
+
+    # 4. eaf art — copy the voice/expression frames into the local collection so
+    # the faces render (build.py marks missing eaf "lack":true otherwise).
+    if [ -d "$coll_src" ] && [ -d "$coll_dst" ]; then
+        if [ ! -f "$coll_dst/listen.eaf" ]; then
+            log "applying patches/0012 (copy voice eaf art into emoji_large)"
+            for f in listen.eaf confused.eaf Happy.eaf neutral.eaf winking.eaf shocked.eaf Sad.eaf angry.eaf; do
+                [ -f "$coll_src/$f" ] && cp -f "$coll_src/$f" "$coll_dst/$f"
+            done
+        else
+            log "emote voice eaf art already present"
+        fi
+    else
+        log "emoji_large source/dest missing — voice faces may render blank until art is added"
+    fi
+}
+
+apply_emote_partition_resize_patch() {
+    # patches/0030 — grow emote 3M->6M (storage 4M->5M), reclaim unused ota_1.
+    # The 8 voice-face .eaf files push emote_assets.bin past the old 3M emote
+    # partition (ESP_ERR_INVALID_SIZE → blank face); the 466 mascot pack needs
+    # more still. Rewrites partitions_16MB.csv with explicit offsets. Idempotent
+    # (guard: the 6M emote already present).
+    local csv="$ESP_CLAW_DIR/application/edge_agent/partitions_16MB.csv"
+    if [ ! -f "$csv" ]; then
+        log "partitions_16MB.csv not found — skipping emote partition resize patch"
+        return
+    fi
+    if grep -q "0x600000" "$csv" 2>/dev/null; then
+        log "emote partition resize patch already applied"
+        return
+    fi
+    log "applying patches/0030-emote-partition-6mb.patch"
+    python3 - <<PY
+import pathlib
+csv = pathlib.Path(r"$csv")
+new = (
+    "# Name,    Type, SubType, Offset,   Size\n"
+    "# JarvisNano AMOLED-1.75: emote grown 3M->6M for native 466x466 art, storage\n"
+    "# 4M->5M. ota_1 (4M, never flashed -- OTA-B was reserved-but-empty) reclaimed.\n"
+    "# Explicit offsets so the resized layout is unambiguous. Ends at 0xf20000 (same\n"
+    "# top as before); 896K free at top for future skill assets.\n"
+    "nvs,       data, nvs,     0x9000,   0x6000\n"
+    "otadata,   data, ota,     0xF000,   0x2000\n"
+    "phy_init,  data, phy,     0x11000,  0x1000\n"
+    "ota_0,     app,  ota_0,   0x20000,  0x400000\n"
+    "emote,     data, spiffs,  0x420000, 0x600000\n"
+    "storage,   data, fat,     0xA20000, 0x500000\n"
+)
+# Sanity: the file we are replacing must be the known 16MB layout (has the
+# auto-offset ota_1 line) so we don't clobber an unexpected upstream change.
+s = csv.read_text()
+if "ota_1" not in s and "0x300000" not in s and "   3M" not in s:
+    raise SystemExit("partitions_16MB.csv is not the expected pre-resize layout — aborting")
+csv.write_text(new)
+print("rewrote partitions_16MB.csv: emote 0x420000+6M, storage 0xA20000+5M")
+PY
+}
+
+apply_reactive_waveform_face_patch() {
+    # patches/0031 — reactive "Siri-style" waveform face + `face` CLI demo.
+    # Runs AFTER apply_emote_voice_states_patch (anchors on the voice-state decls
+    # it adds to emote.h). waveform.c is vendored under firmware/emote/ (same
+    # idiom as copy_cap_gemini_live) and copied into the emote component; the 4
+    # existing files get idempotent guarded edits.
+    local emote_dir="$ESP_CLAW_DIR/components/common/emote"
+    local emote_h="$emote_dir/include/emote.h"
+    local emote_c="$emote_dir/emote.c"
+    local cmake="$emote_dir/CMakeLists.txt"
+    local cli="$ESP_CLAW_DIR/components/common/app_claw/app_claw_cli.c"
+    # patch 0034: the reactive face is now BAKED-EAF (reactive_face.c) — the old
+    # runtime-buffer waveform.c spiraled on the CO5300 panel. Source-of-truth is
+    # firmware/emote/reactive_face.c; it loads firmware/mascot/reactive/*.eaf
+    # (mounted into the emote partition by apply_emote_voice_states_patch).
+    local wf_src="$ROOT/firmware/emote/reactive_face.c"
+    if [ ! -d "$emote_dir" ] || [ ! -f "$emote_h" ]; then
+        log "emote component not found — skipping reactive face patch"
+        return
+    fi
+    [ -f "$wf_src" ] || die "missing vendored reactive_face.c at $wf_src"
+    # Always re-copy the vendored renderer so source-of-truth edits propagate even
+    # on an incremental tree where the code-guard below would short-circuit. Drop
+    # the stale runtime waveform.c if a previous bootstrap left it behind.
+    cp -f "$wf_src" "$emote_dir/reactive_face.c"
+    rm -f "$emote_dir/waveform.c" "$emote_dir/reactive_face.h"
+    # CMakeLists: converge SRCS to reactive_face.c (handles old waveform.c trees).
+    python3 - "$cmake" <<'PYCM'
+import sys, pathlib
+cmake = pathlib.Path(sys.argv[1])
+m = cmake.read_text()
+if '"reactive_face.c"' not in m:
+    if '"waveform.c"' in m:
+        m = m.replace('"waveform.c"', '"reactive_face.c"', 1)
+    else:
+        m = m.replace('        "emote.c"\n', '        "emote.c"\n        "reactive_face.c"\n', 1)
+    cmake.write_text(m)
+    print("CMakeLists SRCS -> reactive_face.c")
+PYCM
+    if grep -q "emote_face_set_state" "$emote_h" 2>/dev/null; then
+        # emote.h API already present from a prior run; ensure the voice helpers
+        # still drive the reactive face (idempotent re-apply of the 0034 wiring).
+        apply_reactive_face_voice_wiring "$emote_c"
+        log "reactive face patch already applied (reactive_face.c + CMake refreshed)"
+        return
+    fi
+    log "applying patches/0031+0034-reactive-face.patch"
+
+    python3 - <<PY
+import pathlib
+emote_h = pathlib.Path(r"$emote_h")
+emote_c = pathlib.Path(r"$emote_c")
+cmake   = pathlib.Path(r"$cmake")
+cli     = pathlib.Path(r"$cli")
+
+# --- emote.h: stdint include + face API after the voice-state decls ---
+h = emote_h.read_text()
+if "#include <stdint.h>" not in h:
+    h = h.replace("#include <stdbool.h>\n", "#include <stdbool.h>\n#include <stdint.h>\n", 1)
+anchor = "esp_err_t emote_set_voice_idle(void);\n"
+face_api = (
+    "\n"
+    "/* ---- Reactive waveform face (the primary \"Siri-style\" visual) ------------- */\n"
+    "typedef enum {\n"
+    "    EMOTE_FACE_OFF = 0,\n"
+    "    EMOTE_FACE_IDLE,\n"
+    "    EMOTE_FACE_LISTENING,\n"
+    "    EMOTE_FACE_THINKING,\n"
+    "    EMOTE_FACE_SPEAKING,\n"
+    "} emote_face_state_t;\n"
+    "\n"
+    "esp_err_t emote_face_set_state(emote_face_state_t state);\n"
+    "void emote_face_set_synthetic_amplitude(int amp_milli);\n"
+    "typedef uint16_t (*emote_face_amp_cb_t)(emote_face_state_t state);\n"
+    "void emote_face_set_amplitude_source(emote_face_amp_cb_t cb);\n"
+)
+if anchor not in h:
+    raise SystemExit("emote.h voice-idle anchor missing — apply 0012 first")
+if "emote_face_set_state" not in h:
+    h = h.replace(anchor, anchor + face_api, 1)
+emote_h.write_text(h)
+
+# --- emote.c: forward-decl + call emote_face_init after assets load ---
+c = emote_c.read_text()
+decl_anchor = '#define EMOTE_ASSETS_PARTITION "emote"\n'
+decl = (
+    '#define EMOTE_ASSETS_PARTITION "emote"\n'
+    "\n"
+    "/* Reactive waveform face — defined in reactive_face.c (same component). */\n"
+    "esp_err_t emote_face_init(emote_handle_t emote);\n"
+)
+if "emote_face_init" not in c:
+    if decl_anchor not in c:
+        raise SystemExit("emote.c partition-define anchor missing")
+    c = c.replace(decl_anchor, decl, 1)
+    call_anchor = "    return emote_set_network_status(false, NULL);"
+    call = (
+        "    esp_err_t face_err = emote_face_init(s_emote_handle);\n"
+        "    if (face_err != ESP_OK) {\n"
+        '        ESP_LOGW(TAG, "waveform face init failed: %s (idle face still works)", esp_err_to_name(face_err));\n'
+        "    }\n"
+        "\n"
+        "    return emote_set_network_status(false, NULL);"
+    )
+    if call_anchor not in c:
+        raise SystemExit("emote.c network-status return anchor missing")
+    c = c.replace(call_anchor, call, 1)
+    emote_c.write_text(c)
+
+# --- CMakeLists SRCS handled in shell (reactive_face.c) before this heredoc. ---
+
+# --- app_claw_cli.c: emote.h include + cmd_face + registration (emote-gated) ---
+cl = cli.read_text()
+if "cmd_face" not in cl:
+    inc_anchor = '#include "esp_log.h"\n'
+    inc = (
+        '#include "esp_log.h"\n'
+        "\n"
+        "#if CONFIG_APP_CLAW_ENABLE_EMOTE\n"
+        '#include "emote.h"\n'
+        "#endif\n"
+    )
+    cl = cl.replace(inc_anchor, inc, 1)
+
+    fn_anchor = "static char *join_prompt_args(int argc, char **argv)\n"
+    fn = (
+        "#if CONFIG_APP_CLAW_ENABLE_EMOTE\n"
+        "static int cmd_face(int argc, char **argv)\n"
+        "{\n"
+        "    if (argc < 2) {\n"
+        '        printf("Usage: face <off|idle|listen|think|speak> [amplitude_pct 0-100]\\n");\n'
+        "        return 1;\n"
+        "    }\n"
+        "    const char *s = argv[1];\n"
+        "    emote_face_state_t st;\n"
+        "    bool reactive = false;\n"
+        '    if (strcmp(s, "off") == 0) { st = EMOTE_FACE_OFF; }\n'
+        '    else if (strcmp(s, "idle") == 0) { st = EMOTE_FACE_IDLE; }\n'
+        '    else if (strcmp(s, "listen") == 0) { st = EMOTE_FACE_LISTENING; reactive = true; }\n'
+        '    else if (strcmp(s, "think") == 0) { st = EMOTE_FACE_THINKING; }\n'
+        '    else if (strcmp(s, "speak") == 0) { st = EMOTE_FACE_SPEAKING; reactive = true; }\n'
+        "    else {\n"
+        '        printf("Unknown state \'%s\'. Use off|idle|listen|think|speak.\\n", s);\n'
+        "        return 1;\n"
+        "    }\n"
+        "    if (reactive) {\n"
+        "        if (argc >= 3) {\n"
+        "            int pct = atoi(argv[2]);\n"
+        "            if (pct < 0) pct = 0;\n"
+        "            if (pct > 100) pct = 100;\n"
+        "            emote_face_set_synthetic_amplitude(pct * 10);\n"
+        '            printf("face %s @ %d%% (fixed synthetic amplitude)\\n", s, pct);\n'
+        "        } else {\n"
+        "            emote_face_set_synthetic_amplitude(-1);\n"
+        '            printf("face %s (live audio if available, else synthetic sweep)\\n", s);\n'
+        "        }\n"
+        "    } else {\n"
+        '        printf("face %s\\n", s);\n'
+        "    }\n"
+        "    emote_face_set_state(st);\n"
+        "    return 0;\n"
+        "}\n"
+        "#endif /* CONFIG_APP_CLAW_ENABLE_EMOTE */\n"
+        "\n"
+        "static char *join_prompt_args(int argc, char **argv)\n"
+    )
+    if fn_anchor not in cl:
+        raise SystemExit("app_claw_cli.c join_prompt_args anchor missing")
+    cl = cl.replace(fn_anchor, fn, 1)
+
+    reg_anchor = '    printf("Type \'help\', \'auto rules\','
+    reg = (
+        "#if CONFIG_APP_CLAW_ENABLE_EMOTE\n"
+        "    {\n"
+        "        esp_console_cmd_t face_cmd = {\n"
+        '            .command = "face",\n'
+        '            .help = "Reactive waveform face demo: face <off|idle|listen|think|speak> [amplitude_pct]",\n'
+        "            .func = cmd_face,\n"
+        "        };\n"
+        "        ESP_ERROR_CHECK(esp_console_cmd_register(&face_cmd));\n"
+        "    }\n"
+        "#endif\n"
+        "\n"
+        '    printf("Type \'help\', \'auto rules\','
+    )
+    if reg_anchor not in cl:
+        raise SystemExit("app_claw_cli.c registration anchor missing")
+    cl = cl.replace(reg_anchor, reg, 1)
+    cli.write_text(cl)
+
+print("applied reactive face: reactive_face.c + emote.h/.c + CMake + cli")
+PY
+    # Rewire the voice helpers (added by apply_emote_voice_states_patch) so the
+    # reactive face is the PRIMARY visual during a voice session.
+    apply_reactive_face_voice_wiring "$emote_c"
+}
+
+apply_reactive_face_voice_wiring() {
+    # Idempotent: make emote_set_connecting/_listening/_thinking/_speaking/_voice_idle
+    # drive emote_face_set_state() AFTER emote_apply() (apply re-shows the eye;
+    # the face call then hides it — order matters). Safe to call repeatedly.
+    local emote_c="$1"
+    [ -f "$emote_c" ] || return 0
+    grep -q "emote_set_listening" "$emote_c" 2>/dev/null || return 0   # voice helpers not yet added
+    grep -q "emote_face_set_state(EMOTE_FACE_LISTENING)" "$emote_c" 2>/dev/null && return 0  # already wired
+    python3 - "$emote_c" <<'PYW'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1]); c = p.read_text()
+repl = {
+    'esp_err_t emote_set_connecting(void)\n{\n    return emote_apply("thinking", "Connecting...");\n}':
+        'esp_err_t emote_set_connecting(void)\n{\n    esp_err_t err = emote_apply("thinking", "Connecting...");\n    emote_face_set_state(EMOTE_FACE_THINKING);\n    return err;\n}',
+    'esp_err_t emote_set_listening(void)\n{\n    return emote_apply("listen", "Listening...");\n}':
+        'esp_err_t emote_set_listening(void)\n{\n    esp_err_t err = emote_apply("listen", "Listening...");\n    emote_face_set_state(EMOTE_FACE_LISTENING);\n    return err;\n}',
+    'esp_err_t emote_set_thinking(void)\n{\n    return emote_apply("thinking", "Thinking...");\n}':
+        'esp_err_t emote_set_thinking(void)\n{\n    esp_err_t err = emote_apply("thinking", "Thinking...");\n    emote_face_set_state(EMOTE_FACE_THINKING);\n    return err;\n}',
+    'esp_err_t emote_set_speaking(void)\n{\n    return emote_apply("happy", "Speaking...");\n}':
+        'esp_err_t emote_set_speaking(void)\n{\n    esp_err_t err = emote_apply("happy", "Speaking...");\n    emote_face_set_state(EMOTE_FACE_SPEAKING);\n    return err;\n}',
+    'esp_err_t emote_set_voice_idle(void)\n{\n    return emote_render_status();\n}':
+        'esp_err_t emote_set_voice_idle(void)\n{\n    emote_face_set_state(EMOTE_FACE_OFF);\n    return emote_render_status();\n}',
+}
+n = 0
+for old, new in repl.items():
+    if old in c:
+        c = c.replace(old, new, 1); n += 1
+p.write_text(c)
+print(f"reactive face voice wiring: {n}/5 helpers rewired")
+PYW
+}
+
+apply_reactive_waveform_audio_bridge_patch() {
+    # patches/0032 — wire the reactive waveform face to cap_gemini_live's live
+    # audio levels. Runs AFTER apply_reactive_waveform_face_patch (needs the
+    # emote_face_* API) and copy_cap_gemini_live (needs the level getters).
+    # Bridge .c/.h vendored under firmware/emote/ (same idiom as 0031).
+    local app_dir="$ESP_CLAW_DIR/components/common/app_claw"
+    local app_c="$app_dir/app_claw.c"
+    local cmake="$app_dir/CMakeLists.txt"
+    local br_c="$ROOT/firmware/emote/app_claw_face_bridge.c"
+    local br_h="$ROOT/firmware/emote/app_claw_face_bridge.h"
+    if [ ! -f "$app_c" ]; then
+        log "app_claw.c not found — skipping reactive waveform audio bridge patch"
+        return
+    fi
+    if grep -q "app_claw_face_bridge" "$app_c" 2>/dev/null; then
+        log "reactive waveform audio bridge patch already applied"
+        return
+    fi
+    [ -f "$br_c" ] && [ -f "$br_h" ] || die "missing vendored bridge files at $br_c / $br_h"
+    log "applying patches/0032-reactive-waveform-audio-bridge.patch"
+
+    cp -f "$br_c" "$app_dir/app_claw_face_bridge.c"
+    cp -f "$br_h" "$app_dir/app_claw_face_bridge.h"
+
+    python3 - <<PY
+import pathlib
+app_c = pathlib.Path(r"$app_c")
+cmake = pathlib.Path(r"$cmake")
+
+# app_claw.c: include the bridge header next to emote.h, and register after emote_start
+a = app_c.read_text()
+inc_anchor = (
+    "#if CONFIG_APP_CLAW_ENABLE_EMOTE\n"
+    '#include "emote.h"\n'
+    "#endif\n"
+)
+inc_new = (
+    "#if CONFIG_APP_CLAW_ENABLE_EMOTE\n"
+    '#include "emote.h"\n'
+    '#include "app_claw_face_bridge.h"\n'
+    "#endif\n"
+)
+if "app_claw_face_bridge.h" not in a:
+    if inc_anchor not in a:
+        raise SystemExit("app_claw.c emote include block anchor missing")
+    a = a.replace(inc_anchor, inc_new, 1)
+
+start_anchor = (
+    "#if defined(CONFIG_APP_CLAW_ENABLE_EMOTE)\n"
+    "    return emote_start();\n"
+    "#else\n"
+    "    return ESP_OK;\n"
+    "#endif\n"
+)
+start_new = (
+    "#if defined(CONFIG_APP_CLAW_ENABLE_EMOTE)\n"
+    "    esp_err_t err = emote_start();\n"
+    "    if (err == ESP_OK) {\n"
+    "        app_claw_face_bridge_register();\n"
+    "    }\n"
+    "    return err;\n"
+    "#else\n"
+    "    return ESP_OK;\n"
+    "#endif\n"
+)
+if "app_claw_face_bridge_register" not in a:
+    if start_anchor not in a:
+        raise SystemExit("app_claw.c emote_start return anchor missing")
+    a = a.replace(start_anchor, start_new, 1)
+app_c.write_text(a)
+
+# CMakeLists: add the bridge .c to SRCS, emote-gated
+m = cmake.read_text()
+if "app_claw_face_bridge.c" not in m:
+    anchor = (
+        'set(app_claw_srcs\n'
+        '    "app_claw.c"\n'
+        '    "app_capabilities.c"\n'
+        '    "app_lua_modules.c"\n'
+        ")\n"
+    )
+    add = (
+        anchor
+        + "\n"
+        + "if(CONFIG_APP_CLAW_ENABLE_EMOTE)\n"
+        + '    list(APPEND app_claw_srcs "app_claw_face_bridge.c")\n'
+        + "endif()\n"
+    )
+    if anchor not in m:
+        raise SystemExit("app_claw CMakeLists app_claw_srcs anchor missing")
+    m = m.replace(anchor, add, 1)
+    cmake.write_text(m)
+
+print("applied reactive waveform audio bridge: face_bridge.c/.h + app_claw.c + CMake")
+PY
+}
+
 main() {
     mkdir -p "$ROOT/.build_logs"
     clone_or_update_esp_claw
     copy_board
     copy_firmware_assets
+    copy_cap_gemini_live
+    copy_jarvis_logger
     apply_patch
     apply_wifi_ps_patch
     apply_jpeg_soi_patch
     apply_http_phase2_patch
     apply_http_camera_gate_patch
+    apply_gemini_live_main_require_patch
+    apply_gemini_live_api_key_patch
     apply_http_wifi_scan_patch
     apply_http_health_patch
     apply_native_status_led_patch
     apply_emote_status_detail_patch
+    apply_touch_handle_deref_patch
+    apply_emote_voice_states_patch
+    apply_emote_partition_resize_patch
+    apply_reactive_waveform_face_patch
+    apply_reactive_waveform_audio_bridge_patch
 
     if [ "${1:-}" = "build" ]; then
         build

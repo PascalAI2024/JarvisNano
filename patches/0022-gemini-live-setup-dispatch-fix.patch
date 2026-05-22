@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: JarvisNano <jarvisnano@local>
+Date: Thu, 21 May 2026 00:00:00 -0400
+Subject: [PATCH] gemini-live: fix setupComplete timeout (dispatch bug) + raw-frame logging
+
+HARDWARE SYMPTOM: WSS+TLS connects, setup frame sent, then "setupComplete
+timeout" exactly ~10s later, every tap. No audio, no response.
+
+ROOT CAUSE (not the wire format): a task-notification / event-group
+mismatch in gl_session_task's setup-wait phase. The flow was:
+  - gl_ws_event_handler reassembles a server frame into s_gl.rx_buf and
+    calls xTaskNotifyGive(s_gl.session_task).
+  - gl_session_task waited with xEventGroupWaitBits(GL_BIT_SETUP_OK).
+  - GL_BIT_SETUP_OK is only set inside gl_dispatch_frame().
+  - But gl_dispatch_frame is only called from the MAIN receive loop, which
+    starts AFTER the setup-wait succeeds. During the setup-wait, nothing
+    drains rx_buf, so setupComplete arrives, sits undispatched, the bit is
+    never set, and the wait times out at 10s.
+xTaskNotifyGive does NOT satisfy xEventGroupWaitBits, so the notify was
+inert during this window. cap_gemini_live_test() already worked around
+this by polling rx_buf itself; the production session task did not.
+
+VERIFIED CORRECT (against ai.google.dev, current 2026-05): endpoint
+v1beta (v1alpha is only for ephemeral tokens), model
+models/gemini-3.1-flash-live-preview, setup frame {"setup":{model,
+generationConfig.responseModalities:["AUDIO"], systemInstruction}} per
+the /api/live reference (the get-started page's {"config":...} wrapper is
+the genai SDK shape, not the raw wire format). thinkingLevel:"minimal" is
+not in the unsupported-fields list. So the payload was never the problem.
+
+FIX (cap_gemini_live.c, vendored at firmware/components/cap_gemini_live,
+copied into the tree by scripts/bootstrap.sh:copy_cap_gemini_live — same
+mechanism as patch 0020, no separate apply step needed):
+  1. gl_session_task setup-wait: replace the pure xEventGroupWaitBits with
+     a deadline-bounded poll loop that ulTaskNotifyTake()s and dispatches
+     rx_buf via gl_dispatch_frame() — mirrors the proven test path.
+  2. gl_ws_event_handler: ESP_LOGI the first 200 bytes of every complete
+     server frame ("WS RX (N B): ...") — decisive diagnostic; the next test
+     shows exactly what Gemini returns.
+  3. gl_dispatch_frame: ESP_LOGW on any unhandled top-level frame instead
+     of silently dropping it (an error/goAway frame on bad setup would
+     otherwise vanish and look like a plain timeout).
+
+NEXT TEST READS: if setupComplete now arrives, the session proceeds to
+LISTENING. If it still fails, the "WS RX" log will show the actual server
+reply (error frame, wrong field, or key-scope rejection) — converting the
+remaining guesswork to fact. Key scope to confirm if an auth/permission
+error frame appears: Generative Language API enabled + Live model access.
+
+NOTE: documentation record of a vendored-source change, not a unified diff
+against tracked files (same idiom as patches/0009, 0020, 0021).

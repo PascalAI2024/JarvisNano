@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: JarvisNano <jarvisnano@local>
+Date: Thu, 22 May 2026 11:00:00 -0400
+Subject: [PATCH] waveform: round-display redesign — concentric rings fill 466x466
+
+HARDWARE FEEDBACK: the waveform read as a thin horizontal sliver on the round
+panel — wrong primitive. Redesign to fill the circular 466x466 display with
+concentric rings + a rotating arc, centred on the panel.
+
+CHANGES (all in waveform.c, same dsc/buffer/task plumbing as 0031+0033):
+- Geometry: FACE_H 120 -> 466 (square buffer covering the round panel). Buffer
+  466*466*2 colour + 466*466 alpha = 651,468 B/frame; x2 double-buffer = ~1.24 MB
+  PSRAM. Verified headroom: board is 8 MB octal PSRAM (CONFIG_SPIRAM_MODE_OCT),
+  app ~2.5 MB, emote buffers small — 1.24 MB fits comfortably. malloc keeps the
+  internal-RAM fallback.
+- Renderers replaced (bars/line/scan -> rings):
+    IDLE      one calm breathing ring (r~150-164), radius+brightness pulse.
+    LISTENING/SPEAKING  5 concentric rings (r=70..220); inner always on, outer
+                        light up + thicken with amplitude (+ shimmer) — the
+                        recognisable round voice visualiser.
+    THINKING  a bright ~63deg arc sweeps around a dim full ring (r=165).
+  New draw_ring_arc(buf, r, half_thickness, colour, alpha, arc_from, arc_to)
+  strokes a (partial) ring by walking angle so it stays smooth at large radii.
+- px(), clear_frame, the dsc, the 20 fps eased task, and the amplitude source
+  (synthetic + the 0032 audio bridge) are UNCHANGED.
+
+SPIRAL CAN'T RECUR — verified the descriptor matches the buffer EXACTLY:
+- gfx_image_dsc_t built as ONE designated-initializer literal (from 0033),
+  header.w=FACE_W=466, header.h=FACE_H=466, stride/flags = 0 (reference style).
+- gfx_img_set_src sets obj->geometry.w/h = header.w/h, and the blend derives
+  src_stride = header.w = 466 (gfx_img.c:117) = the buffer's real row pitch
+  (px() indexes y*FACE_W+x, FACE_W=466). No pitch mismatch ⇒ no row shear.
+- data_size = w*h*2 + w*h = 651468 (same formula the reference uses).
+- The 0033 colour byte-swap (__builtin_bswap16 RGB565 macro) is retained.
+
+Carried by apply_reactive_waveform_face_patch, which (since 0033) ALWAYS
+re-copies the vendored firmware/emote/waveform.c — so this redesign installs on
+both clean and incremental trees with no new bootstrap step.
+
+Bundle order for the combined build: 0030 (6MB partition) + 0031 (waveform) +
+0033 (colour+dsc) + 0034 (round) + 0032 (audio bridge) + voice-eng's Gemini fix.
+Syntax-checked the ring renderers under -Wall (no warnings). Did NOT flash/build.
+---
+diff --git a/components/common/emote/waveform.c b/components/common/emote/waveform.c
+--- a/components/common/emote/waveform.c
++++ b/components/common/emote/waveform.c
+@@ geometry @@
+-#define FACE_H            120
+-#define FACE_BARS         48
++#define FACE_H            466
++#define FACE_RINGS        5
++#define FACE_R_MAX        220
++#define FACE_R_MIN        70
+@@ renderers @@
+- draw_bar / render_idle(line) / render_bars(vertical bars) / render_thinking(gaussian sweep)
++ draw_ring_arc / render_idle(breathing ring) / render_bars(concentric amplitude rings) / render_thinking(rotating rim arc)

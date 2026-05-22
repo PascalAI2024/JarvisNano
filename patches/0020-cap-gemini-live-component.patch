@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: JarvisNano <jarvisnano@local>
+Date: Thu, 21 May 2026 00:00:00 -0400
+Subject: [PATCH] cap_gemini_live: vendor the Gemini Live voice component
+
+The Gemini Live voice capability (toggle-on/off conversation via the
+BidiGenerateContent WebSocket) is a JarvisNano-authored component that
+does NOT exist upstream in espressif/esp-claw. Because esp-claw/ is a
+gitignored, pinned clone, any source created directly inside it is lost
+on a clean re-clone (and `clone_or_update_esp_claw` will refuse to move
+off the pinned ref while uncommitted local files are present).
+
+This patch makes the component reproducible. The canonical source is
+git-tracked at:
+
+    firmware/components/cap_gemini_live/
+      CMakeLists.txt
+      idf_component.yml
+      include/cap_gemini_live.h
+      include/cmd_cap_gemini_live.h
+      src/cap_gemini_live.c
+      src/cmd_cap_gemini_live.c
+
+scripts/bootstrap.sh copies it into the generated tree at
+  esp-claw/components/claw_capabilities/cap_gemini_live/
+via the new copy_cap_gemini_live() step (same idiom as copy_board /
+copy_firmware_assets), registered in main() before the apply_* chain.
+
+The component is wired into the build behind CONFIG_APP_CLAW_CAP_GEMINI_LIVE:
+  - apply_gemini_live_main_require_patch() adds `cap_gemini_live` to
+    main/CMakeLists.txt main_requires.
+  - main.c includes cap_gemini_live.h and runs touch_monitor_task, which
+    calls cap_gemini_live_toggle() on each finger-down (tap-to-talk).
+
+Protocol audit notes captured in this revision (verified 2026-05-21 against
+ai.google.dev, docs updated 2026-05-13):
+  - Model id: models/gemini-3.1-flash-live-preview (was the superseded
+    2.5-era models/gemini-2.5-flash-native-audio-preview-12-2025).
+  - Thinking config: generationConfig.thinkingConfig.thinkingLevel:"minimal"
+    (3.1 replaced the 2.5-era thinkingBudget integer; setting both is a 400).
+  - realtimeInput.audio.{mimeType,data} is the current send field (NOT the
+    older mediaChunks); serverContent.modelTurn.parts[].inlineData carries
+    24 kHz PCM16 audio out; turnComplete / interrupted drive state.
+
+NOTE: this is a documentation record of a generated-tree mutation, not a
+unified diff against tracked files. The mechanism is the cp in
+scripts/bootstrap.sh:copy_cap_gemini_live(), mirroring patches/0009's
+documentation-of-a-bootstrap-mutation convention.

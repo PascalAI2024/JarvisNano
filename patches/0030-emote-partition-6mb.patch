@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: JarvisNano <jarvisnano@local>
+Date: Wed, 21 May 2026 21:00:00 -0400
+Subject: [PATCH] partitions: grow emote 3M->6M (storage 4M->5M), reclaim unused
+ ota_1
+
+Hardware validation found emote_assets.bin = 3,395,435 B overflows the 3 MB
+emote partition by ~244 KB once the 8 voice-face .eaf files are packed:
+  E Expression_load: emote_mount_assets: ESP_ERR_INVALID_SIZE
+→ the emote face renders BLANK (esptool flashes it anyway; it only checks total
+flash, not logical partition fit). The native 466x466 mascot pack will need far
+more, so this grows emote generously now.
+
+The 16 MB layout had ota_1 (4 MB) allocated but NEVER flashed — OTA-B was
+"reserved-but-empty" (see flasher_args.json: no ota_1; README memory map). We
+reclaim that region: drop ota_1, move emote DOWN into 0x420000 and grow it to
+6 MB, shift storage to 0xA20000 and grow it 4M->5M. Total still ends at
+0xf20000 (unchanged top), 896 KB free for future skill assets. App stays in the
+unchanged 4 MB ota_0 slot (app is ~2.5 MB).
+
+OLD                                 NEW
+ ota_0   0x020000 4M  app            ota_0   0x020000 4M  app   (unchanged)
+ ota_1   0x420000 4M  (unused)       emote   0x420000 6M  ← grown, moved down
+ emote   0x820000 3M                 storage 0xA20000 5M  ← grown, moved down
+ storage 0xb20000 4M
+
+Partitions are mounted by LABEL ("emote", "storage") in C, and flash.sh flashes
+from build/flasher_args.json (regenerated from this CSV) — no hardcoded offsets
+to chase in firmware. Only docs carried the old offsets (README + DISPLAY_UX_PLAN),
+updated separately.
+
+Reflash needs STORAGE=1 (storage moved + grew → FATFS must be re-laid-out). That
+wipes the FATFS image; bootstrap's copy_firmware_assets repopulates Lua +
+router_rules from the repo on next build, and Wi-Fi creds get re-provisioned.
+
+This patch documents the native-tree mutation applied by scripts/bootstrap.sh
+(apply_emote_partition_resize_patch), idempotent (guard: 0x600000 already in CSV).
+---
+diff --git a/application/edge_agent/partitions_16MB.csv b/application/edge_agent/partitions_16MB.csv
+--- a/application/edge_agent/partitions_16MB.csv
++++ b/application/edge_agent/partitions_16MB.csv
+@@ -1,8 +1,11 @@
+ # Name,    Type, SubType, Offset,   Size
++# JarvisNano AMOLED-1.75: emote grown 3M->6M for native 466x466 art, storage
++# 4M->5M. ota_1 (4M, never flashed — OTA-B was reserved-but-empty) reclaimed.
++# Explicit offsets so the resized layout is unambiguous. Ends at 0xf20000 (same
++# top as before); 896K free at top for future skill assets.
+ nvs,       data, nvs,     0x9000,   0x6000
+ otadata,   data, ota,     0xF000,   0x2000
+ phy_init,  data, phy,     0x11000,  0x1000
+-ota_0,     app,  ota_0,         ,   4M
+-ota_1,     app,  ota_1,         ,   4M
+-emote,     data, spiffs,        ,   3M
+-storage,   data, fat,           ,   4M
++ota_0,     app,  ota_0,   0x20000,  0x400000
++emote,     data, spiffs,  0x420000, 0x600000
++storage,   data, fat,     0xA20000, 0x500000
