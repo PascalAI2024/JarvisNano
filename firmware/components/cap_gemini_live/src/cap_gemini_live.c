@@ -507,6 +507,11 @@ static void gl_play_audio_b64(const char *b64_str)
     atomic_store(&s_out_rms,
                  gl_compute_rms((const int16_t *)pcm, pcm_len / sizeof(int16_t)));
 
+    if (s_gl.stop_requested || !s_gl.session_active) {
+        free(pcm);
+        return;
+    }
+
     if (esp_codec_dev_write(s_gl.dac, pcm, (int)pcm_len) != ESP_CODEC_DEV_OK) {
         ESP_LOGW(TAG, "DAC write failed");
     }
@@ -841,8 +846,12 @@ static void gl_dispatch_frame(const char *json)
                     cJSON *data = cJSON_GetObjectItemCaseSensitive(id, "data");
                     if (cJSON_IsString(data)) {
                         if (s_gl.state == GL_STATE_LISTENING || s_gl.state == GL_STATE_READY) {
-                            /* First audio chunk: stop TX, switch to 24kHz */
+                            /* First audio chunk: stop TX, switch to 24kHz.
+                             * gl_stop_tx_task() must return before any codec
+                             * close/open here, or the session task can deadlock
+                             * against a blocking ADC read holding I2S locks. */
                             gl_stop_tx_task();
+                            ESP_LOGI(TAG, "Speaking: paused capture");
                             gl_close_adc();
                             gl_set_state(GL_STATE_SPEAKING, "Speaking");
                             gl_open_dac(GL_RX_SAMPLE_RATE);
@@ -862,6 +871,7 @@ static void gl_dispatch_frame(const char *json)
             gl_open_dac(GL_TX_SAMPLE_RATE);
             gl_open_adc(GL_TX_SAMPLE_RATE);
             gl_start_tx_task();
+            ESP_LOGI(TAG, "Listening: resumed capture");
         }
         cJSON_Delete(root);
         return;
