@@ -75,4 +75,17 @@ Each concept directory contains an `enclosure.scad` file renderable with:
 openscad -o enclosure.stl enclosure.scad
 ```
 
-To export individual parts, comment/uncomment the render calls at the bottom of each file. The files use standard OpenSCAD built-ins (cube, cylinder, sphere, hull, minkowski, difference, intersection, translate, rotate, for) — no external libraries required.
+For printer-ready part exports, use the repo script:
+
+```
+./scripts/export-stl.sh all
+```
+
+It writes individual STL files to `hardware/enclosure/dist/`, including the
+AMOLED-1.75 mascot bust parts and the XIAO Monolith parts. Use
+`./scripts/export-stl.sh amoled` for only the Waveshare AMOLED enclosure or
+`./scripts/export-stl.sh monolith` for only the primary XIAO enclosure.
+
+The files use standard OpenSCAD built-ins (cube, cylinder, sphere, hull,
+minkowski, difference, intersection, translate, rotate, for) — no external
+OpenSCAD libraries required.

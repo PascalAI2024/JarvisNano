@@ -4,6 +4,9 @@ Second JarvisNano host (alongside the Seeed XIAO ESP32-S3 Sense). Round 466×466
 
 > 🟠 The XIAO has a camera. This board has a screen. They are complementary, not competitive.
 
+Live debug handoff for the connected board is tracked in
+[`../../../docs/NEXT_SESSION.md`](../../../docs/NEXT_SESSION.md).
+
 ## Hardware
 
 | Subsystem | Chip | Bus | JarvisNano use |
@@ -42,20 +45,25 @@ BOARD_NAME=esp32s3_touch_amoled_1_75 \
 ./scripts/bootstrap.sh build
 ```
 
-(Note: `bootstrap.sh` currently hardcodes the XIAO board. Edit lines 9-10 and 106 to point at this board until the script is parametrized.)
-
 ## Flash
 
 ```bash
-esptool --chip esp32s3 -p /dev/cu.usbmodem1101 -b 460800 \
-  --before default_reset --after hard_reset \
-  write-flash --flash-mode dio --flash-size 16MB --flash-freq 80m \
-  0x0      esp-claw/application/edge_agent/build/bootloader/bootloader.bin \
-  0x8000   esp-claw/application/edge_agent/build/partition_table/partition-table.bin \
-  0xf000   esp-claw/application/edge_agent/build/ota_data_initial.bin \
-  0x20000  esp-claw/application/edge_agent/build/edge_agent.bin \
-  0x820000 esp-claw/application/edge_agent/build/emote_assets.bin \
-  0xb20000 esp-claw/application/edge_agent/build/storage.bin
+./scripts/flash.sh
+```
+
+`flash.sh` reads the generated `flasher_args.json`, so the 16 MB flash size,
+`emote_assets.bin`, and storage offset come from the build instead of a copied
+manual command. By default it preserves FATFS storage. Use
+`STORAGE=1 ./scripts/flash.sh` for a first install or deliberate provisioning
+wipe.
+
+The native USB-Serial/JTAG reset path is fussy on this board. A host RTS hard
+reset can leave GPIO0 sampled low and boot ROM download mode
+(`boot:0x23 (DOWNLOAD(USB/UART0))`). Use the repo default watchdog post-flash
+reset, then monitor USB without DTR/RTS toggles:
+
+```bash
+./scripts/usb-monitor.py --port /dev/cu.usbmodem1101
 ```
 
 ## Onboarding
@@ -88,7 +96,7 @@ POST to `/api/config` on the dashboard:
 }
 ```
 
-> ⚠️ `llm_profile` is the **protocol enum**, not the vendor name. Setting it to `"minimax"` will boot-loop on `app_claw_start` abort. Recovery is `esptool erase-region 0x9000 0x6000` to wipe NVS.
+> ⚠️ `llm_profile` is the **protocol enum**, not the vendor name. Setting it to `"minimax"` will boot-loop on `app_claw_start` abort. Recovery is `ERASE_NVS=1 ./scripts/flash.sh` to wipe NVS before reflashing.
 
 After POST, restart the device. `ask_once Hello` should round-trip in ~5 seconds.
 
@@ -119,20 +127,25 @@ See [`../../hardware/enclosure/amoled-1_75/`](../../../hardware/enclosure/amoled
 
 ## Memory map
 
-The build emits 6 partitions in the flash layout:
+The build emits 5 partitions in the flash layout:
 
 ```
 0x000000  bootloader.bin              second-stage bootloader
 0x008000  partition-table.bin         partition table
 0x00f000  ota_data_initial.bin        OTA selector
-0x020000  edge_agent.bin              ~2.51 MB application (43% headroom in 4 MB slot)
-0x820000  emote_assets.bin            ~2.48 MB packed emote frames (currently the
-                                      284×240 swim + offline pack — needs 466×466
-                                      JarvisNano-mascot pack)
-0xb20000  storage.bin                 4 MB FATFS — Lua scripts, router rules, memory
+0x020000  edge_agent.bin              ~2.51 MB application (37% headroom in 4 MB slot)
+0x420000  emote_assets.bin            6 MB emote partition — packed emote frames
+                                      (284×240 voice-face pack today; sized for the
+                                      466×466 JarvisNano mascot + HUD pack)
+0xa20000  storage.bin                 5 MB FATFS — Lua scripts, router rules, memory
 ```
 
-8 MB is unused — reserved for OTA slot B (which is currently empty) and future skill assets.
+OTA slot B (the old 4 MB `ota_1`) was reserved-but-never-flashed; it was reclaimed
+to grow `emote` 3 MB → 6 MB and `storage` 4 MB → 5 MB (the 8 voice-face .eaf files
+overflowed the old 3 MB emote partition). The layout still ends at `0xf20000`, with
+~896 KB free at the top for future skill assets. Partition table:
+`application/edge_agent/partitions_16MB.csv`. Resizing the `emote`/`storage`
+partitions requires reflashing with FATFS (`STORAGE=1`).
 
 ## References
 
