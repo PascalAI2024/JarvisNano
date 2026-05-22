@@ -1468,7 +1468,9 @@ apply_reactive_waveform_face_patch() {
     # the stale runtime waveform.c if a previous bootstrap left it behind.
     cp -f "$wf_src" "$emote_dir/reactive_face.c"
     rm -f "$emote_dir/waveform.c" "$emote_dir/reactive_face.h"
-    # CMakeLists: converge SRCS to reactive_face.c (handles old waveform.c trees).
+    # CMakeLists: converge SRCS to reactive_face.c (handles old waveform.c trees)
+    # and add the esp_partition REQUIRES (reactive_face.c esp_partition_read's the
+    # EAF clips out of flash when assets are NOT memory-mapped — XIP-from-PSRAM).
     python3 - "$cmake" <<'PYCM'
 import sys, pathlib
 cmake = pathlib.Path(sys.argv[1])
@@ -1478,8 +1480,12 @@ if '"reactive_face.c"' not in m:
         m = m.replace('"waveform.c"', '"reactive_face.c"', 1)
     else:
         m = m.replace('        "emote.c"\n', '        "emote.c"\n        "reactive_face.c"\n', 1)
-    cmake.write_text(m)
     print("CMakeLists SRCS -> reactive_face.c")
+if 'esp_partition' not in m:
+    m = m.replace('        espressif2022__esp_emote_gfx\n',
+                  '        espressif2022__esp_emote_gfx\n        esp_partition\n', 1)
+    print("CMakeLists REQUIRES += esp_partition")
+cmake.write_text(m)
 PYCM
     if grep -q "emote_face_set_state" "$emote_h" 2>/dev/null; then
         # emote.h API already present from a prior run; ensure the voice helpers

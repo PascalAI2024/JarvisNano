@@ -48,6 +48,9 @@
 
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
+#include "esp_partition.h"
+#include "soc/soc.h"        /* SOC_DROM_LOW / SOC_DROM_HIGH — the mmap cache window */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -59,6 +62,10 @@ static const char *TAG = "app_rwave";
 
 /* Custom gfx object name (must not collide with predefined emote elem names). */
 #define RWAVE_OBJ_NAME    "rwave"
+
+/* The flash partition the emote assets are mounted from (mirrors emote.c:22).
+ * Used to esp_partition_read clips when assets are NOT memory-mapped (XIP build). */
+#define EMOTE_ASSETS_PARTITION  "emote"
 
 /* Baked-asset file names — HARD CONTRACT with gen_reactive_face.py's STATE_ORDER
  * and with the `emote` partition manifest the orchestrator must populate. */
@@ -87,7 +94,13 @@ static const char *TAG = "app_rwave";
  * emote_op.c:283), so these blobs must stay valid while shown. They are mmap'd
  * read-only out of the asset partition; we just cache the pointer + frame count. */
 typedef struct {
-    const uint8_t *data;
+    const uint8_t *data;     /* EAF blob usable for gfx_anim_set_src + frame_count.
+                              * In mmap mode this aliases the flash cache window; in
+                              * XIP/non-mmap mode it points at `buf` (a heap copy). */
+    uint8_t       *buf;      /* heap copy when assets are NOT memory-mapped (XIP);
+                              * NULL when `data` aliases the mmap window. Freed in
+                              * deinit. The gfx anim decoder keeps a pointer into the
+                              * src for the object's lifetime, so this must persist. */
     size_t         size;
     uint32_t       frames;   /* total frames INCLUDING the trailing _C sentinel */
     uint32_t       last;     /* max `end` for set_segment: the loop draws [0..end-1],
@@ -138,42 +151,123 @@ static uint32_t rwave_eaf_frame_count(const uint8_t *d, size_t n)
     return total > 0 ? (uint32_t)total : 0;
 }
 
-static esp_err_t rwave_load_clip(const char *name, rwave_clip_t *clip)
+/* ESP32-S3 flash/PSRAM mmap cache window. A pointer in this range is a real,
+ * dereferenceable mapped address; anything below it (handed back by
+ * mmap_assets_get_mem when assets are NOT memory-mapped) is a raw PARTITION BYTE
+ * OFFSET that must be read with esp_partition_read, not dereferenced. */
+#ifndef SOC_DROM_LOW
+#define SOC_DROM_LOW   0x3C000000UL
+#endif
+#ifndef SOC_DROM_HIGH
+#define SOC_DROM_HIGH  0x40000000UL
+#endif
+
+static inline bool rwave_ptr_is_mapped(const void *p)
 {
+    return (uintptr_t)p >= SOC_DROM_LOW && (uintptr_t)p < SOC_DROM_HIGH;
+}
+
+/* ROOT CAUSE (boot loop): this build sets CONFIG_SPIRAM_XIP_FROM_PSRAM, so emote
+ * mounts the `emote` partition with mmap_enable=false (emote.c:252). In that mode
+ * mmap_assets_get_mem (and thus emote_get_asset_data_by_name) returns a raw
+ * PARTITION OFFSET — NOT a mapped pointer (observed 0x001f97be). The eye works
+ * because emote_set_anim_emoji copies the blob out of flash via emote_acquire_data
+ * (-> esp_partition_read) before use; that helper is private to the expression
+ * component, so we replicate it here with the public esp_partition API.
+ *
+ * Acquire a dereferenceable EAF buffer for `name`: if the asset pointer is in the
+ * mmap window, alias it (zero copy); otherwise treat it as a `emote`-partition
+ * offset and esp_partition_read `size` bytes into a heap buffer. Returns the
+ * usable buffer in *out (and, when copied, the owning allocation in *owned). */
+static esp_err_t rwave_acquire(const char *name, const uint8_t **out,
+                               uint8_t **owned, size_t *out_size)
+{
+    *out = NULL;
+    *owned = NULL;
+    *out_size = 0;
+
     const uint8_t *data = NULL;
     size_t size = 0;
     esp_err_t err = emote_get_asset_data_by_name(s_rw.emote, name, &data, &size);
     if (err != ESP_OK || !data || size < 16) {
-        ESP_LOGW(TAG, "asset '%s' not found (%s) — state will be skipped",
-                 name, esp_err_to_name(err));
-        clip->loaded = false;
+        ESP_LOGW(TAG, "asset '%s' not found (%s)", name, esp_err_to_name(err));
         return err == ESP_OK ? ESP_ERR_NOT_FOUND : err;
     }
-    /* Defensive: a malformed/mispacked asset-table entry can hand back a
-     * non-mapped pointer (observed: an offset-like 0x001f9xxx value) with a
-     * plausible size, and dereferencing it faults (LoadProhibited -> boot loop).
-     * Every valid mmap'd-flash / SRAM / PSRAM data pointer on ESP32-S3 lives in
-     * the cache window 0x3C000000..0x3FFFFFFF, so reject anything outside it and
-     * fall back to the baked eye instead of crashing. */
-    if ((uintptr_t)data < 0x3C000000UL || (uintptr_t)data >= 0x40000000UL) {
-        ESP_LOGW(TAG, "asset '%s' resolved to non-mapped ptr %p — skipping (eye fallback)",
-                 name, (const void *)data);
-        clip->loaded = false;
-        return ESP_ERR_INVALID_RESPONSE;
+
+    if (rwave_ptr_is_mapped(data)) {
+        *out = data;                 /* memory-mapped: use in place, no copy */
+        *out_size = size;
+        return ESP_OK;
     }
+
+    /* Non-mapped: `data` is a byte offset into the `emote` partition (it already
+     * points past the 2-byte asset wrapper magic; `size` is the table asset_size,
+     * which INCLUDES those 2 magic bytes — reading `size` bytes from the post-magic
+     * offset reads 2 bytes of trailing slack, exactly as the eye path does, and the
+     * EAF self-describes its own length so the slack is harmless). */
+    const esp_partition_t *part =
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY,
+                                 EMOTE_ASSETS_PARTITION);
+    if (!part) {
+        ESP_LOGW(TAG, "'%s' is a partition offset but '%s' partition not found",
+                 name, EMOTE_ASSETS_PARTITION);
+        return ESP_ERR_NOT_FOUND;
+    }
+    size_t off = (size_t)data;
+    if (off + size > part->size) {
+        ESP_LOGW(TAG, "asset '%s' offset+size (%zu) exceeds partition (%u)",
+                 name, off + size, (unsigned)part->size);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    uint8_t *buf = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        buf = heap_caps_malloc(size, MALLOC_CAP_8BIT);   /* internal RAM fallback */
+    }
+    if (!buf) {
+        ESP_LOGW(TAG, "no mem (%u B) to copy asset '%s'", (unsigned)size, name);
+        return ESP_ERR_NO_MEM;
+    }
+    err = esp_partition_read(part, off, buf, size);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_partition_read('%s' @0x%zx) failed: %s",
+                 name, off, esp_err_to_name(err));
+        free(buf);
+        return err;
+    }
+    *out = buf;
+    *owned = buf;
+    *out_size = size;
+    return ESP_OK;
+}
+
+static esp_err_t rwave_load_clip(const char *name, rwave_clip_t *clip)
+{
+    const uint8_t *data = NULL;
+    uint8_t *owned = NULL;
+    size_t size = 0;
+    esp_err_t err = rwave_acquire(name, &data, &owned, &size);
+    if (err != ESP_OK) {
+        clip->loaded = false;
+        return err;
+    }
+    /* Defense-in-depth: after acquire, `data` is guaranteed dereferenceable (it is
+     * either the mmap window or a heap copy). Validate the EAF header before use. */
     uint32_t total = rwave_eaf_frame_count(data, size);
     if (total < 2) {
-        ESP_LOGW(TAG, "asset '%s' has too few frames (%u)", name, (unsigned)total);
+        ESP_LOGW(TAG, "asset '%s' has too few/invalid frames (%u)", name, (unsigned)total);
+        free(owned);
         clip->loaded = false;
         return ESP_ERR_INVALID_SIZE;
     }
     clip->data = data;
+    clip->buf = owned;               /* NULL when mmap-aliased; freed in deinit */
     clip->size = size;
     clip->frames = total;
     clip->last = total - 1;          /* max set_segment end (exclusive draw window) */
     clip->loaded = true;
-    ESP_LOGI(TAG, "loaded '%s' (%u B, %u real frames)", name,
-             (unsigned)size, (unsigned)(total - 1));   /* real frames = total - 1 (_C) */
+    ESP_LOGI(TAG, "loaded '%s' (%u B, %u real frames, %s)", name,
+             (unsigned)size, (unsigned)(total - 1),
+             owned ? "flash-copied" : "mmap");   /* real frames = total - 1 (_C) */
     return ESP_OK;
 }
 
