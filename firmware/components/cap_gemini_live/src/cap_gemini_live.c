@@ -21,6 +21,7 @@
 #include "cap_gemini_live.h"
 #include "cmd_cap_gemini_live.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -34,7 +35,9 @@
 #include "claw_cap.h"
 #include "claw_task.h"
 #include "emote.h"
+#include "driver/i2s_common.h"
 #include "esp_board_manager_includes.h"
+#include "esp_board_periph.h"
 #include "esp_check.h"
 #include "esp_codec_dev.h"
 #include "esp_crt_bundle.h"
@@ -52,6 +55,11 @@
 #include "mbedtls/base64.h"
 
 static const char *TAG = "cap_gemini_live";
+
+/* forward declarations */
+static cJSON *gl_get_object_compat(cJSON *obj, const char *camel, const char *snake);
+static bool   gl_enter_speaking(uint32_t sample_rate);
+static void   gl_resume_listening(const char *reason);
 
 /* ---- Configuration -------------------------------------------------------- */
 
@@ -100,6 +108,13 @@ static const char *TAG = "cap_gemini_live";
  * connect and wedge the session on "connecting". */
 #define GL_TOGGLE_COOLDOWN_MS    2000
 #define GL_WS_TIMEOUT_MS         5000
+#define GL_SPEAK_WATCHDOG_MS     4500
+#define GL_LISTEN_RECOVERY_MS    2000
+#define GL_CODEC_HANDLE_RETRY_MS 250
+#define GL_CODEC_HANDLE_RETRIES  6
+#define GL_I2S_READ_TIMEOUT_MS   200
+#define GL_AUDIO_DAC_PERIPH      "i2s_audio_out"
+#define GL_AUDIO_ADC_PERIPH      "i2s_audio_in"
 
 /* ---- State ---------------------------------------------------------------- */
 
@@ -118,6 +133,7 @@ typedef enum {
 #define GL_BIT_TX_STOP      (1 << 2)
 #define GL_BIT_TX_DONE      (1 << 3)
 #define GL_BIT_SETUP_OK     (1 << 4)
+#define GL_BIT_SESSION_DONE (1 << 5)
 
 typedef struct {
     char                         api_key[320];
@@ -131,6 +147,22 @@ typedef struct {
     char                        *rx_buf;            /* GL_RX_BUF_SIZE reassembly scratch, PSRAM */
     QueueHandle_t                rx_queue;           /* completed frames (char*, PSRAM) → session task */
     volatile uint32_t            rx_drops;           /* frames dropped when queue full */
+    volatile uint32_t            rx_frames;          /* parsed server frames */
+    uint32_t                     text_part_hits;
+    uint32_t                     audio_part_hits;
+    uint32_t                     turn_complete_hits;
+    uint32_t                     generation_complete_hits;
+    uint32_t                     interrupted_hits;
+    uint32_t                     tool_call_hits;
+    uint32_t                     unhandled_hits;
+    uint32_t                     resume_count;
+    uint32_t                     watchdog_resume_count;
+    int64_t                      last_frame_us;
+    int64_t                      last_audio_us;
+    int64_t                      last_resume_us;
+    bool                         waiting_terminal;
+    char                         last_resume_reason[32];
+    char                         last_audio_error[96];
     EventGroupHandle_t           ev;
     TaskHandle_t                 session_task;
     TaskHandle_t                 touch_task;
@@ -138,6 +170,12 @@ typedef struct {
     SemaphoreHandle_t            ws_mutex;          /* serialises WS sends */
     esp_codec_dev_handle_t       dac;
     esp_codec_dev_handle_t       adc;
+    i2s_chan_handle_t           adc_chan;
+    i2s_chan_handle_t           dac_chan;
+    bool                         adc_raw;
+    bool                         dac_raw;
+    bool                         dac_codec_failed;
+    bool                         adc_codec_failed;
     esp_lcd_touch_handle_t       touch;
     /* I2S codec open-state tracking. esp_codec_dev_open/close are NOT idempotent:
      * a redundant close drives i2s_channel_disable on an already-disabled channel
@@ -146,11 +184,79 @@ typedef struct {
      * a no-op when already closed. */
     bool                         dac_open;
     uint32_t                     dac_rate;
+    uint32_t                     dac_raw_rate_hz;
     bool                         adc_open;
     uint32_t                     adc_rate;
+    uint32_t                     adc_raw_rate_hz;
+    uint32_t                     last_audio_mime_rate;
+    uint32_t                     rate_mismatch_chunks;
 } gl_ctx_t;
 
 static gl_ctx_t s_gl;
+
+static const char *gl_state_name(gl_state_t st)
+{
+    switch (st) {
+    case GL_STATE_IDLE:
+        return "IDLE";
+    case GL_STATE_CONNECTING:
+        return "CONNECTING";
+    case GL_STATE_READY:
+        return "READY";
+    case GL_STATE_LISTENING:
+        return "LISTENING";
+    case GL_STATE_THINKING:
+        return "THINKING";
+    case GL_STATE_SPEAKING:
+        return "SPEAKING";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+static void gl_mark_resume_reason(const char *reason)
+{
+    if (!reason) {
+        return;
+    }
+    strlcpy(s_gl.last_resume_reason, reason, sizeof(s_gl.last_resume_reason));
+    s_gl.last_resume_us = esp_timer_get_time();
+}
+
+static void gl_set_audio_error(const char *reason)
+{
+    if (!reason) {
+        return;
+    }
+    strlcpy(s_gl.last_audio_error, reason, sizeof(s_gl.last_audio_error));
+}
+
+static void gl_clear_audio_error(void)
+{
+    s_gl.last_audio_error[0] = '\0';
+}
+
+static void gl_reset_diag_counters(void)
+{
+    s_gl.rx_frames             = 0;
+    s_gl.text_part_hits        = 0;
+    s_gl.audio_part_hits       = 0;
+    s_gl.turn_complete_hits    = 0;
+    s_gl.generation_complete_hits = 0;
+    s_gl.interrupted_hits      = 0;
+    s_gl.tool_call_hits        = 0;
+    s_gl.unhandled_hits        = 0;
+    s_gl.resume_count          = 0;
+    s_gl.watchdog_resume_count = 0;
+    s_gl.last_frame_us         = 0;
+    s_gl.last_audio_us         = 0;
+    s_gl.last_resume_us        = 0;
+    s_gl.waiting_terminal      = false;
+    s_gl.last_resume_reason[0] = '\0';
+    s_gl.last_audio_mime_rate  = 0;
+    s_gl.last_audio_error[0]   = '\0';
+    s_gl.rate_mismatch_chunks  = 0;
+}
 
 /* ---- Audio level (RMS) for the reactive waveform -------------------------- *
  * Updated lock-free from the audio TX task (mic) and the playback path (out),
@@ -181,8 +287,13 @@ static uint16_t gl_compute_rms(const int16_t *samples, size_t n)
 
 static void gl_set_state(gl_state_t st, const char *detail)
 {
+    if (s_gl.state == GL_STATE_SPEAKING && st == GL_STATE_LISTENING) {
+        s_gl.waiting_terminal = false;
+    }
+    if (st == GL_STATE_LISTENING) {
+        s_gl.last_audio_us = 0;
+    }
     s_gl.state = st;
-    emote_set_status_detail(detail ? detail : "");
 
     /* Settle the playback waveform whenever we are not speaking; the mic level
      * is zeroed by the TX task itself when capture stops. */
@@ -213,6 +324,8 @@ static void gl_set_state(gl_state_t st, const char *detail)
     default:
         break;
     }
+
+    emote_set_status_detail(detail ? detail : "");
 }
 
 static bool gl_ws_send_text(const char *json)
@@ -233,9 +346,129 @@ static bool gl_b64_encode(const uint8_t *in, size_t in_len, char *out_b64, size_
     return mbedtls_base64_encode((unsigned char *)out_b64, out_size, out_len, in, in_len) == 0;
 }
 
+static esp_lcd_touch_handle_t gl_resolve_touch_handle(void *touch_h)
+{
+    /* Board-manager returns dev_lcd_touch_i2c_handles_t* (or dev_lcd_touch_handles_t*).
+     * Both structs have esp_lcd_touch_handle_t as their first member, so dereference
+     * once to get the actual driver handle rather than the wrapper struct pointer. */
+    return *(esp_lcd_touch_handle_t *)touch_h;
+}
+
+static uint32_t gl_parse_audio_rate_mime(const char *mime_type)
+{
+    if (!mime_type) {
+        return 0;
+    }
+
+    const char *p = strstr(mime_type, "rate=");
+    if (!p) {
+        return 0;
+    }
+    p += 5;
+
+    uint32_t rate = 0;
+    bool has_digit = false;
+    while (*p && isdigit((unsigned char)*p)) {
+        has_digit = true;
+        rate = rate * 10 + (uint32_t)(*p - '0');
+        p++;
+    }
+
+    return has_digit ? rate : 0;
+}
+
+static uint32_t gl_i2s_cfg_sample_rate(const periph_i2s_config_t *cfg, i2s_dir_t dir)
+{
+    if (!cfg) {
+        return 0;
+    }
+
+    switch (cfg->mode) {
+    case I2S_COMM_MODE_STD:
+        if (cfg->i2s_cfg.std.clk_cfg.sample_rate_hz > 0) {
+            return cfg->i2s_cfg.std.clk_cfg.sample_rate_hz;
+        }
+        break;
+    case I2S_COMM_MODE_PDM:
+        if (dir == I2S_DIR_RX && cfg->i2s_cfg.pdm_rx.clk_cfg.sample_rate_hz > 0) {
+            return cfg->i2s_cfg.pdm_rx.clk_cfg.sample_rate_hz;
+        }
+        if (dir == I2S_DIR_TX && cfg->i2s_cfg.pdm_tx.clk_cfg.sample_rate_hz > 0) {
+            return cfg->i2s_cfg.pdm_tx.clk_cfg.sample_rate_hz;
+        }
+        break;
+    case I2S_COMM_MODE_TDM:
+        if (cfg->i2s_cfg.tdm.clk_cfg.sample_rate_hz > 0) {
+            return cfg->i2s_cfg.tdm.clk_cfg.sample_rate_hz;
+        }
+        break;
+    default:
+        break;
+    }
+
+    if (dir == I2S_DIR_RX) {
+        if (cfg->i2s_cfg.pdm_rx.clk_cfg.sample_rate_hz > 0) {
+            return cfg->i2s_cfg.pdm_rx.clk_cfg.sample_rate_hz;
+        }
+        if (cfg->i2s_cfg.std.clk_cfg.sample_rate_hz > 0) {
+            return cfg->i2s_cfg.std.clk_cfg.sample_rate_hz;
+        }
+    } else {
+        if (cfg->i2s_cfg.pdm_tx.clk_cfg.sample_rate_hz > 0) {
+            return cfg->i2s_cfg.pdm_tx.clk_cfg.sample_rate_hz;
+        }
+        if (cfg->i2s_cfg.std.clk_cfg.sample_rate_hz > 0) {
+            return cfg->i2s_cfg.std.clk_cfg.sample_rate_hz;
+        }
+        if (cfg->i2s_cfg.tdm.clk_cfg.sample_rate_hz > 0) {
+            return cfg->i2s_cfg.tdm.clk_cfg.sample_rate_hz;
+        }
+    }
+    return 0;
+}
+
+static uint32_t gl_resolve_playback_rate(uint32_t model_rate)
+{
+    uint32_t source = model_rate ? model_rate : GL_RX_SAMPLE_RATE;
+    if (s_gl.dac_raw && s_gl.dac_raw_rate_hz) {
+        return s_gl.dac_raw_rate_hz;
+    }
+    return source;
+}
+
+static uint32_t gl_clamp_rate(uint32_t rate)
+{
+    if (rate == 0) {
+        return GL_RX_SAMPLE_RATE;
+    }
+    return rate;
+}
+
 /* ---- Board device handles ------------------------------------------------- */
 
-static void gl_acquire_codec_handles(void)
+static void gl_reset_audio_path_state(void)
+{
+    s_gl.dac = NULL;
+    s_gl.adc = NULL;
+    s_gl.dac_chan = NULL;
+    s_gl.adc_chan = NULL;
+    s_gl.dac_raw = false;
+    s_gl.adc_raw = false;
+    s_gl.dac_raw_rate_hz = 0;
+    s_gl.adc_raw_rate_hz = 0;
+    s_gl.dac_rate = 0;
+    s_gl.adc_rate = 0;
+}
+
+static esp_codec_dev_handle_t gl_extract_codec_handle(void *dev_h)
+{
+    if (!dev_h) {
+        return NULL;
+    }
+    return ((dev_audio_codec_handles_t *)dev_h)->codec_dev;
+}
+
+static bool gl_acquire_codec_handles(void)
 {
     /* esp_board_manager_get_device_handle() writes the device's INNER handle
      * struct pointer directly into the out-ptr (e.g. dev_audio_codec_handles_t*),
@@ -247,82 +480,210 @@ static void gl_acquire_codec_handles(void)
     void *dac_h = NULL;
     void *adc_h = NULL;
     void *touch_h = NULL;
+    void *raw_dac_h = NULL;
+    void *raw_adc_h = NULL;
+    void *raw_adc_cfg_h = NULL;
+    void *raw_dac_cfg_h = NULL;
 
-    if (esp_board_manager_get_device_handle(ESP_BOARD_DEVICE_NAME_AUDIO_DAC,
-                                            &dac_h) == ESP_OK && dac_h) {
-        s_gl.dac = ((dev_audio_codec_handles_t *)dac_h)->codec_dev;
+    gl_reset_audio_path_state();
+
+    if (esp_board_manager_get_device_handle(ESP_BOARD_DEVICE_NAME_AUDIO_DAC, &dac_h) == ESP_OK &&
+        dac_h) {
+        s_gl.dac = gl_extract_codec_handle(dac_h);
     }
-    if (esp_board_manager_get_device_handle(ESP_BOARD_DEVICE_NAME_AUDIO_ADC,
-                                            &adc_h) == ESP_OK && adc_h) {
-        s_gl.adc = ((dev_audio_codec_handles_t *)adc_h)->codec_dev;
+    if (!s_gl.dac && esp_board_manager_get_device_handle("fake_audio_dac", &dac_h) == ESP_OK &&
+        dac_h) {
+        s_gl.dac = gl_extract_codec_handle(dac_h);
     }
-    if (esp_board_manager_get_device_handle(ESP_BOARD_DEVICE_NAME_LCD_TOUCH,
-                                            &touch_h) == ESP_OK && touch_h) {
-        s_gl.touch = ((dev_lcd_touch_i2c_handles_t *)touch_h)->touch_handle;
+    if (esp_board_manager_get_device_handle(ESP_BOARD_DEVICE_NAME_AUDIO_ADC, &adc_h) == ESP_OK &&
+        adc_h) {
+        s_gl.adc = gl_extract_codec_handle(adc_h);
+    }
+    if (esp_board_periph_get_handle(GL_AUDIO_ADC_PERIPH, &raw_adc_h) == ESP_OK &&
+        raw_adc_h) {
+        s_gl.adc_raw = true;
+        s_gl.adc_chan = (i2s_chan_handle_t)raw_adc_h;
+    }
+    if (esp_board_periph_get_config(GL_AUDIO_ADC_PERIPH, (void **)&raw_adc_cfg_h) == ESP_OK &&
+        raw_adc_cfg_h) {
+        s_gl.adc_raw_rate_hz = gl_i2s_cfg_sample_rate((const periph_i2s_config_t *)raw_adc_cfg_h,
+                                                     I2S_DIR_RX);
+    }
+    if (esp_board_periph_get_handle(GL_AUDIO_DAC_PERIPH, &raw_dac_h) == ESP_OK &&
+        raw_dac_h) {
+        s_gl.dac_raw = true;
+        s_gl.dac_chan = (i2s_chan_handle_t)raw_dac_h;
+    }
+    if (esp_board_periph_get_config(GL_AUDIO_DAC_PERIPH, (void **)&raw_dac_cfg_h) == ESP_OK &&
+        raw_dac_cfg_h) {
+        s_gl.dac_raw_rate_hz = gl_i2s_cfg_sample_rate((const periph_i2s_config_t *)raw_dac_cfg_h,
+                                                     I2S_DIR_TX);
     }
 
-    ESP_LOGI(TAG, "Codec handles: dac=%p adc=%p touch=%p",
-             s_gl.dac, s_gl.adc, s_gl.touch);
+    if (esp_board_manager_get_device_handle(ESP_BOARD_DEVICE_NAME_LCD_TOUCH, &touch_h) == ESP_OK &&
+        touch_h) {
+        s_gl.touch = gl_resolve_touch_handle(touch_h);
+    }
+
+    if (!s_gl.dac && !s_gl.adc && !s_gl.dac_raw && !s_gl.adc_raw) {
+        gl_set_audio_error("no audio device handles");
+    }
+
+    ESP_LOGI(TAG, "Audio paths: dac=%p raw_dac=%p adc=%p raw_adc=%p touch=%p",
+             (void *)s_gl.dac, (void *)s_gl.dac_chan, (void *)s_gl.adc,
+             (void *)s_gl.adc_chan, (void *)s_gl.touch);
+    return s_gl.dac || s_gl.adc || s_gl.dac_raw || s_gl.adc_raw;
+}
+
+static bool gl_ensure_codec_handles(const char *tag, bool require_dac, bool require_adc)
+{
+    bool need_dac = require_dac &&
+                    !(s_gl.dac_raw || (s_gl.dac && !s_gl.dac_codec_failed));
+    bool need_adc = require_adc &&
+                    !(s_gl.adc_raw || (s_gl.adc && !s_gl.adc_codec_failed));
+
+    for (int i = 0; i < GL_CODEC_HANDLE_RETRIES; ++i) {
+        if (gl_acquire_codec_handles() &&
+            !need_dac && !need_adc) {
+            return true;
+        }
+        if (!need_dac || s_gl.dac_raw || (s_gl.dac && !s_gl.dac_codec_failed)) {
+            need_dac = false;
+        }
+        if (!need_adc || s_gl.adc_raw || (s_gl.adc && !s_gl.adc_codec_failed)) {
+            need_adc = false;
+        }
+        if (!need_dac && !need_adc) {
+            if (i > 0) {
+                ESP_LOGI(TAG, "%s: audio handles ready after %d attempts",
+                         tag ? tag : "codec", i + 1);
+            }
+            gl_clear_audio_error();
+            return true;
+        }
+
+        if (i + 1 < GL_CODEC_HANDLE_RETRIES) {
+            ESP_LOGW(TAG, "%s: audio handles unavailable (dac=%p raw_dac=%d adc=%p raw_adc=%d), retrying (%d/%d)",
+                     tag ? tag : "codec", (void *)s_gl.dac, (int)s_gl.dac_raw,
+                     (void *)s_gl.adc, (int)s_gl.adc_raw,
+                     i + 1, GL_CODEC_HANDLE_RETRIES);
+            vTaskDelay(pdMS_TO_TICKS(GL_CODEC_HANDLE_RETRY_MS));
+        }
+    }
+
+    if (need_dac && need_adc) {
+        gl_set_audio_error("audio path incomplete (missing both input and output)");
+    } else if (need_dac) {
+        gl_set_audio_error("missing output path (audio_dac/fake_audio_dac or i2s_audio_out)");
+    } else if (need_adc) {
+        gl_set_audio_error("missing input path (audio_adc or i2s_audio_in)");
+    }
+    return false;
 }
 
 /* ---- I2S open/close helpers ----------------------------------------------- */
 
 static int gl_open_dac(uint32_t sample_rate)
 {
-    if (!s_gl.dac) {
-        return 0;
+    if (!gl_ensure_codec_handles("open_dac", true, false)) {
+        ESP_LOGE(TAG, "DAC handle unavailable");
+        gl_set_audio_error("output path missing while opening DAC");
+        return ESP_ERR_INVALID_STATE;
     }
-    /* Already open at this rate → no-op. Open at a different rate (TX 16k vs RX
-     * 24k) → close first so the codec re-inits cleanly. */
-    if (s_gl.dac_open) {
-        if (s_gl.dac_rate == sample_rate) {
-            return ESP_CODEC_DEV_OK;
+
+    if (s_gl.dac && !s_gl.dac_codec_failed) {
+        /* Already open at this rate → no-op. Open at a different rate (TX 16k vs RX
+         * 24k) → close first so the codec re-inits cleanly. */
+        if (s_gl.dac_open) {
+            if (s_gl.dac_rate == sample_rate) {
+                return ESP_CODEC_DEV_OK;
+            }
+            esp_codec_dev_close(s_gl.dac);
+            s_gl.dac_open = false;
         }
-        esp_codec_dev_close(s_gl.dac);
-        s_gl.dac_open = false;
+        esp_codec_dev_sample_info_t fs = {
+            .sample_rate     = sample_rate,
+            .channel         = GL_CHANNELS,
+            .bits_per_sample = GL_BITS,
+        };
+        int r = esp_codec_dev_open(s_gl.dac, &fs);
+        if (r == ESP_CODEC_DEV_OK) {
+            s_gl.dac_codec_failed = false;
+            esp_codec_dev_set_out_mute(s_gl.dac, false);
+            esp_codec_dev_set_out_vol(s_gl.dac, 100);
+            s_gl.dac_open = true;
+            s_gl.dac_rate = sample_rate;
+            return r;
+        }
+        s_gl.dac_codec_failed = true;
+        ESP_LOGW(TAG, "DAC open failed rate=%u err=%d (%s), trying raw I2S if available",
+                 (unsigned)sample_rate, r, esp_err_to_name(r));
     }
-    esp_codec_dev_sample_info_t fs = {
-        .sample_rate     = sample_rate,
-        .channel         = GL_CHANNELS,
-        .bits_per_sample = GL_BITS,
-    };
-    int r = esp_codec_dev_open(s_gl.dac, &fs);
-    if (r == ESP_CODEC_DEV_OK) {
-        esp_codec_dev_set_out_vol(s_gl.dac, 100);
+
+    if (s_gl.dac_raw) {
         s_gl.dac_open = true;
         s_gl.dac_rate = sample_rate;
+        return ESP_CODEC_DEV_OK;
     }
-    return r;
+
+    if (s_gl.dac) {
+        gl_set_audio_error("DAC open failed (codec handle)");
+    }
+    return ESP_ERR_INVALID_STATE;
 }
 
 static int gl_open_adc(uint32_t sample_rate)
 {
-    if (!s_gl.adc) {
-        return 0;
+    if (!gl_ensure_codec_handles("open_adc", false, true)) {
+        ESP_LOGE(TAG, "ADC handle unavailable");
+        gl_set_audio_error("input path missing while opening ADC");
+        return ESP_ERR_INVALID_STATE;
     }
-    if (s_gl.adc_open) {
-        if (s_gl.adc_rate == sample_rate) {
-            return ESP_CODEC_DEV_OK;
+
+    if (s_gl.adc && !s_gl.adc_codec_failed) {
+        if (s_gl.adc_open) {
+            if (s_gl.adc_rate == sample_rate) {
+                return ESP_CODEC_DEV_OK;
+            }
+            esp_codec_dev_close(s_gl.adc);
+            s_gl.adc_open = false;
         }
-        esp_codec_dev_close(s_gl.adc);
-        s_gl.adc_open = false;
+        esp_codec_dev_sample_info_t fs = {
+            .sample_rate     = sample_rate,
+            .channel         = GL_CHANNELS,
+            .bits_per_sample = GL_BITS,
+        };
+        int r = esp_codec_dev_open(s_gl.adc, &fs);
+        if (r == ESP_CODEC_DEV_OK) {
+            s_gl.adc_codec_failed = false;
+            esp_codec_dev_set_in_gain(s_gl.adc, 30.0f);
+            s_gl.adc_open = true;
+            s_gl.adc_rate = sample_rate;
+            return r;
+        }
+        s_gl.adc_codec_failed = true;
+        ESP_LOGW(TAG, "ADC open failed rate=%u err=%d (%s), trying raw I2S if available",
+                 (unsigned)sample_rate, r, esp_err_to_name(r));
     }
-    esp_codec_dev_sample_info_t fs = {
-        .sample_rate     = sample_rate,
-        .channel         = GL_CHANNELS,
-        .bits_per_sample = GL_BITS,
-    };
-    int r = esp_codec_dev_open(s_gl.adc, &fs);
-    if (r == ESP_CODEC_DEV_OK) {
-        esp_codec_dev_set_in_gain(s_gl.adc, 30.0f);
+
+    if (s_gl.adc_raw) {
         s_gl.adc_open = true;
         s_gl.adc_rate = sample_rate;
+        return ESP_CODEC_DEV_OK;
     }
-    return r;
+
+    if (s_gl.adc) {
+        gl_set_audio_error("ADC open failed (codec handle)");
+    }
+    return ESP_ERR_INVALID_STATE;
 }
 
 static void gl_close_dac(void)
 {
+    if (s_gl.dac_raw) {
+        s_gl.dac_open = false;
+        return;
+    }
     if (s_gl.dac && s_gl.dac_open) {
         esp_codec_dev_close(s_gl.dac);
         s_gl.dac_open = false;
@@ -331,6 +692,10 @@ static void gl_close_dac(void)
 
 static void gl_close_adc(void)
 {
+    if (s_gl.adc_raw) {
+        s_gl.adc_open = false;
+        return;
+    }
     if (s_gl.adc && s_gl.adc_open) {
         esp_codec_dev_close(s_gl.adc);
         s_gl.adc_open = false;
@@ -451,11 +816,102 @@ static bool gl_send_audio_frame(const uint8_t *pcm, size_t len)
     return gl_ws_send_text(frame_json);
 }
 
+/* Convert PCM16 sample-rate using nearest-neighbour.
+ * It's intentionally simple: it avoids extra memory copies and keeps latency low,
+ * which is the important part for "raw" I2S playback in this stack. */
+static int16_t *gl_resample_pcm16_nearest(const int16_t *in, size_t nsamp_in,
+                                          uint32_t sample_rate_in, uint32_t sample_rate_out,
+                                          size_t *nsamp_out)
+{
+    if (!in || nsamp_in == 0 || sample_rate_in == 0 || sample_rate_out == 0 ||
+        sample_rate_in == sample_rate_out) {
+        return NULL;
+    }
+
+    size_t out_samples = (size_t)(((uint64_t)nsamp_in * (uint64_t)sample_rate_out +
+                                  (uint64_t)sample_rate_in - 1) / (uint64_t)sample_rate_in);
+    if (out_samples == 0) {
+        return NULL;
+    }
+
+    int16_t *out = heap_caps_malloc(out_samples * sizeof(int16_t),
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!out) {
+        return NULL;
+    }
+
+    uint64_t step = ((uint64_t)sample_rate_in << 16) / (uint64_t)sample_rate_out;
+    uint64_t pos = 0;
+    for (size_t i = 0; i < out_samples; ++i) {
+        size_t idx = (size_t)(pos >> 16);
+        if (idx >= nsamp_in) {
+            idx = nsamp_in - 1;
+        }
+        out[i] = in[idx];
+        pos += step;
+    }
+
+    if (nsamp_out) {
+        *nsamp_out = out_samples;
+    }
+    return out;
+}
+
+static bool gl_extract_audio_data_chunk(cJSON *audio, const char **out_data, uint32_t *out_rate)
+{
+    if (!audio || !out_data) {
+        return false;
+    }
+    cJSON *data = cJSON_GetObjectItemCaseSensitive(audio, "data");
+    cJSON *mime = cJSON_GetObjectItemCaseSensitive(audio, "mimeType");
+    if (!cJSON_IsString(data)) {
+        cJSON *inline_obj = gl_get_object_compat(audio, "inlineData", "inline_data");
+        if (!inline_obj) {
+            return false;
+        }
+        data = cJSON_GetObjectItemCaseSensitive(inline_obj, "data");
+        mime = cJSON_GetObjectItemCaseSensitive(inline_obj, "mimeType");
+    }
+
+    if (!cJSON_IsString(data)) {
+        return false;
+    }
+
+    *out_data = data->valuestring;
+    if (out_rate) {
+        if (cJSON_IsString(mime)) {
+            *out_rate = gl_parse_audio_rate_mime(mime->valuestring);
+        } else {
+            *out_rate = 0;
+        }
+    }
+    return true;
+}
+
 /* ---- Audio playback ------------------------------------------------------- */
 
-/* Decode base64 PCM, play via ES8311 @ 24kHz (SPEAKING state). */
-static void gl_play_audio_b64(const char *b64_str)
+/* Decode base64 PCM and play back to speaker (codec or raw I2S path). */
+static void gl_play_audio_b64(const char *b64_str, uint32_t sample_rate)
 {
+    if ((!s_gl.dac && !s_gl.dac_raw) || !s_gl.dac_open) {
+        gl_set_audio_error("playback: DAC unavailable");
+        ESP_LOGW(TAG, "Speaking: no DAC handle/opened, dropping audio chunk");
+        return;
+    }
+
+    uint32_t model_rate = gl_clamp_rate(sample_rate);
+    uint32_t playback_rate = gl_resolve_playback_rate(model_rate);
+    s_gl.last_audio_mime_rate = model_rate;
+    if (s_gl.dac_raw && playback_rate == 0) {
+        playback_rate = model_rate;
+    }
+
+    if (model_rate != playback_rate && s_gl.dac_raw) {
+        s_gl.rate_mismatch_chunks++;
+        ESP_LOGI(TAG, "audio rate mismatch: model=%u playback=%u; resampling",
+                 model_rate, playback_rate);
+    }
+
     size_t b64_len = strlen(b64_str);
     size_t pcm_max = (b64_len / 4) * 3 + 4;
     uint8_t *pcm = heap_caps_malloc(pcm_max, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -463,11 +919,20 @@ static void gl_play_audio_b64(const char *b64_str)
         ESP_LOGE(TAG, "OOM for PCM decode buf");
         return;
     }
+    if (gl_open_dac(playback_rate) != ESP_CODEC_DEV_OK) {
+        free(pcm);
+        return;
+    }
 
     size_t pcm_len = 0;
     if (mbedtls_base64_decode(pcm, pcm_max, &pcm_len,
                               (const unsigned char *)b64_str, b64_len) != 0) {
         ESP_LOGE(TAG, "base64 decode failed");
+        free(pcm);
+        return;
+    }
+    if (pcm_len == 0 || (pcm_len & 0x1)) {
+        ESP_LOGW(TAG, "PCM decode invalid len=%u", (unsigned)pcm_len);
         free(pcm);
         return;
     }
@@ -503,19 +968,50 @@ static void gl_play_audio_b64(const char *b64_str)
                  (int)peak_in, (int)rms_in, GL_OUT_GAIN, (unsigned)nsamp);
     }
 
+    int16_t  *out_pcm = s16;
+    size_t    out_samples = nsamp;
+    size_t    out_bytes = pcm_len;
+    int16_t  *resampled = NULL;
+
+    if (s_gl.dac_raw && model_rate != playback_rate) {
+        resampled = gl_resample_pcm16_nearest((const int16_t *)s16, nsamp,
+                                             model_rate, playback_rate, &out_samples);
+        if (resampled) {
+            out_pcm = resampled;
+            out_bytes = out_samples * sizeof(int16_t);
+            atomic_store(&s_out_rms, gl_compute_rms(out_pcm, out_samples));
+        }
+    }
+
     /* Publish playback level for the SPEAKING waveform (before the blocking write). */
-    atomic_store(&s_out_rms,
-                 gl_compute_rms((const int16_t *)pcm, pcm_len / sizeof(int16_t)));
+    if (!resampled) {
+        atomic_store(&s_out_rms, gl_compute_rms((const int16_t *)pcm, nsamp));
+    }
 
     if (s_gl.stop_requested || !s_gl.session_active) {
+        if (resampled) {
+            free(resampled);
+        }
         free(pcm);
         return;
     }
 
-    if (esp_codec_dev_write(s_gl.dac, pcm, (int)pcm_len) != ESP_CODEC_DEV_OK) {
+    if (s_gl.dac_raw) {
+        size_t bytes_written = 0;
+        esp_err_t err = i2s_channel_write(s_gl.dac_chan, out_pcm, out_bytes, &bytes_written,
+                                          pdMS_TO_TICKS(GL_TX_CHUNK_MS));
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "DAC write failed: i2s err=%d", (int)err);
+        } else if (bytes_written != out_bytes) {
+            ESP_LOGW(TAG, "DAC write short: %u != %u", (unsigned)bytes_written, (unsigned)out_bytes);
+        }
+    } else if (esp_codec_dev_write(s_gl.dac, out_pcm, (int)out_bytes) != ESP_CODEC_DEV_OK) {
         ESP_LOGW(TAG, "DAC write failed");
     }
 
+    if (resampled) {
+        free(resampled);
+    }
     free(pcm);
 }
 
@@ -530,6 +1026,15 @@ static void gl_audio_tx_task(void *arg)
      * the already-open ADC so teardown cannot double-close codec/I2S handles
      * from two tasks. */
     ESP_LOGI(TAG, "Audio TX: started (16kHz capture)");
+    if (!s_gl.adc && !s_gl.adc_raw) {
+        gl_set_audio_error("TX: missing ADC path");
+        ESP_LOGE(TAG, "Audio TX: missing ADC handle");
+        xEventGroupSetBits(s_gl.ev, GL_BIT_TX_DONE);
+        if (s_gl.tx_task == xTaskGetCurrentTaskHandle()) {
+            s_gl.tx_task = NULL;
+        }
+        claw_task_delete(NULL);
+    }
 
     while (!(xEventGroupGetBits(s_gl.ev) & GL_BIT_TX_STOP)) {
         if (s_gl.state != GL_STATE_LISTENING) {
@@ -541,7 +1046,19 @@ static void gl_audio_tx_task(void *arg)
             break;
         }
 
-        int r = esp_codec_dev_read(s_gl.adc, pcm, GL_TX_PCM_BYTES);
+        int r = 0;
+        if (s_gl.adc_raw) {
+            size_t bytes_read = 0;
+            esp_err_t read_err = i2s_channel_read(s_gl.adc_chan, pcm, GL_TX_PCM_BYTES,
+                                                  &bytes_read, pdMS_TO_TICKS(GL_I2S_READ_TIMEOUT_MS));
+            if (read_err != ESP_OK || bytes_read != GL_TX_PCM_BYTES) {
+                vTaskDelay(pdMS_TO_TICKS(GL_TX_CHUNK_MS));
+                continue;
+            }
+            r = ESP_CODEC_DEV_OK;
+        } else {
+            r = esp_codec_dev_read(s_gl.adc, pcm, GL_TX_PCM_BYTES);
+        }
         if (r != ESP_CODEC_DEV_OK) {
             vTaskDelay(pdMS_TO_TICKS(GL_TX_CHUNK_MS));
             continue;
@@ -559,6 +1076,9 @@ static void gl_audio_tx_task(void *arg)
 
     ESP_LOGI(TAG, "Audio TX: stopped");
     xEventGroupSetBits(s_gl.ev, GL_BIT_TX_DONE);
+    if (s_gl.tx_task == xTaskGetCurrentTaskHandle()) {
+        s_gl.tx_task = NULL;
+    }
     claw_task_delete(NULL);
 }
 
@@ -582,6 +1102,10 @@ static void gl_stop_tx_task(void)
 
 static void gl_start_tx_task(void)
 {
+    if (s_gl.tx_task) {
+        ESP_LOGW(TAG, "Audio TX: start ignored; task already running");
+        return;
+    }
     xEventGroupClearBits(s_gl.ev, GL_BIT_TX_STOP | GL_BIT_TX_DONE);
     static const claw_task_config_t tx_cfg = {
         .name         = "gl_audio_tx",
@@ -590,7 +1114,121 @@ static void gl_start_tx_task(void)
         .core_id      = tskNO_AFFINITY,
         .stack_policy = CLAW_TASK_STACK_PREFER_PSRAM,
     };
-    claw_task_create(&tx_cfg, gl_audio_tx_task, NULL, &s_gl.tx_task);
+    if (claw_task_create(&tx_cfg, gl_audio_tx_task, NULL, &s_gl.tx_task) != pdPASS) {
+        s_gl.tx_task = NULL;
+        ESP_LOGE(TAG, "Audio TX: failed to create task");
+    }
+}
+
+static void gl_ensure_listening_capture(void)
+{
+    static int64_t last_recover_us;
+    if (s_gl.state != GL_STATE_LISTENING && s_gl.state != GL_STATE_READY) {
+        return;
+    }
+    if (s_gl.tx_task) {
+        return;
+    }
+
+    int64_t now_us = esp_timer_get_time();
+    if ((uint64_t)(now_us - last_recover_us) < GL_LISTEN_RECOVERY_MS * 1000LL) {
+        return;
+    }
+
+    int r = gl_open_adc(GL_TX_SAMPLE_RATE);
+    if (r != ESP_CODEC_DEV_OK) {
+        gl_set_audio_error("capture retry: ADC open failed");
+        ESP_LOGW(TAG, "Listening recovery: ADC open failed (err=%d)", r);
+        last_recover_us = now_us;
+        return;
+    }
+    ESP_LOGW(TAG, "Listening recovery: restarting capture task");
+    last_recover_us = now_us;
+    gl_start_tx_task();
+}
+
+static cJSON *gl_get_object_compat(cJSON *obj, const char *camel, const char *snake)
+{
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, camel);
+    return item ? item : cJSON_GetObjectItemCaseSensitive(obj, snake);
+}
+
+static bool gl_play_model_audio_from_json(cJSON *audio_obj, uint32_t default_rate)
+{
+    const char *b64 = NULL;
+    uint32_t sample_rate = default_rate;
+    if (!gl_extract_audio_data_chunk(audio_obj, &b64, &sample_rate)) {
+        return false;
+    }
+
+    if (!b64) {
+        return false;
+    }
+
+    if (s_gl.state == GL_STATE_LISTENING || s_gl.state == GL_STATE_READY) {
+        if (!gl_enter_speaking(sample_rate)) {
+            gl_resume_listening("output-open-failed");
+            return false;
+        }
+    }
+    s_gl.audio_part_hits++;
+    s_gl.last_audio_us = esp_timer_get_time();
+    s_gl.last_audio_mime_rate = sample_rate;
+    s_gl.waiting_terminal = true;
+    gl_play_audio_b64(b64, sample_rate);
+    return true;
+}
+
+static bool gl_enter_speaking(uint32_t sample_rate)
+{
+    if (s_gl.state == GL_STATE_SPEAKING) {
+        return true;
+    }
+
+    /* First audio chunk: stop TX before any codec rate swap. The session task is
+     * the only codec owner; the TX task must be fully parked before ADC/DAC close
+     * or the shared I2S clock can be changed under a blocking read. */
+    gl_stop_tx_task();
+    ESP_LOGI(TAG, "Speaking: paused capture");
+    s_gl.waiting_terminal = true;
+    gl_close_adc();
+    gl_set_state(GL_STATE_SPEAKING, "Speaking");
+
+    uint32_t playback_rate = gl_resolve_playback_rate(sample_rate);
+    int r = gl_open_dac(playback_rate);
+    if (r != ESP_CODEC_DEV_OK) {
+        gl_set_audio_error("speaking: failed to open DAC");
+        ESP_LOGE(TAG, "Speaking: failed to open DAC @%u Hz (err=%d)",
+                 (unsigned)playback_rate, r);
+        gl_close_dac();
+        return false;
+    }
+    return true;
+}
+
+static void gl_resume_listening(const char *reason)
+{
+    if (s_gl.state == GL_STATE_LISTENING && s_gl.tx_task) {
+        gl_mark_resume_reason(reason ? reason : "already listening");
+        s_gl.resume_count++;
+        return;
+    }
+
+    gl_mark_resume_reason(reason ? reason : "turn complete");
+    s_gl.resume_count++;
+
+    gl_close_dac();
+    gl_set_state(GL_STATE_LISTENING, "Listening");
+
+    int adc_r = gl_open_adc(GL_TX_SAMPLE_RATE);
+    if (adc_r != ESP_CODEC_DEV_OK) {
+        ESP_LOGE(TAG, "Listening: ADC reopen failed after %s (adc=%d)",
+                 reason ? reason : "turn", adc_r);
+        return;
+    }
+
+    gl_start_tx_task();
+    ESP_LOGI(TAG, "Listening: resumed capture (%s)", reason ? reason : "turn complete");
 }
 
 /* ---- WS event handler ---------------------------------------------------- */
@@ -792,6 +1430,33 @@ static bool gl_handle_tool_call(cJSON *root)
     return true;
 }
 
+static void gl_maybe_resume_speaking_watchdog(void)
+{
+    if (!s_gl.waiting_terminal) {
+        return;
+    }
+    if (!(s_gl.state == GL_STATE_SPEAKING || s_gl.state == GL_STATE_THINKING)) {
+        s_gl.waiting_terminal = false;
+        return;
+    }
+    if (!s_gl.last_audio_us) {
+        return;
+    }
+    if (s_gl.rx_queue && uxQueueMessagesWaiting(s_gl.rx_queue) > 0) {
+        return;
+    }
+
+    int64_t now = esp_timer_get_time();
+    if ((uint64_t)(now - s_gl.last_audio_us) < GL_SPEAK_WATCHDOG_MS * 1000ULL) {
+        return;
+    }
+
+    s_gl.watchdog_resume_count++;
+    ESP_LOGW(TAG, "watchdog: no terminal signal for %lu ms while %s", (unsigned long)GL_SPEAK_WATCHDOG_MS,
+             gl_state_name(s_gl.state));
+    gl_resume_listening("speaking watchdog");
+}
+
 /* ---- Frame dispatch ------------------------------------------------------- */
 
 static void gl_dispatch_frame(const char *json)
@@ -802,11 +1467,14 @@ static void gl_dispatch_frame(const char *json)
         return;
     }
 
+    s_gl.rx_frames++;
+    s_gl.last_frame_us = esp_timer_get_time();
+
     /* setupComplete */
     cJSON *sc = cJSON_GetObjectItemCaseSensitive(root, "setupComplete");
     if (sc) {
         ESP_LOGI(TAG, "setupComplete received");
-        s_gl.state = GL_STATE_READY;
+        gl_set_state(GL_STATE_READY, "Setup complete");
         xEventGroupSetBits(s_gl.ev, GL_BIT_SETUP_OK);
         cJSON_Delete(root);
         return;
@@ -819,44 +1487,40 @@ static void gl_dispatch_frame(const char *json)
         cJSON *intr = cJSON_GetObjectItemCaseSensitive(svc, "interrupted");
         if (cJSON_IsTrue(intr)) {
             ESP_LOGI(TAG, "Model interrupted");
-            if (s_gl.state == GL_STATE_SPEAKING || s_gl.state == GL_STATE_THINKING) {
-                gl_close_dac();
-                gl_set_state(GL_STATE_LISTENING, "Listening");
-                gl_open_dac(GL_TX_SAMPLE_RATE);
-                gl_open_adc(GL_TX_SAMPLE_RATE);
-                gl_start_tx_task();
-            }
+            s_gl.interrupted_hits++;
+            gl_resume_listening("interrupted");
         }
 
         /* modelTurn parts */
         cJSON *turn = cJSON_GetObjectItemCaseSensitive(svc, "modelTurn");
         if (turn) {
             cJSON *parts = cJSON_GetObjectItemCaseSensitive(turn, "parts");
-            cJSON *part;
-            cJSON_ArrayForEach(part, parts) {
-                /* Text part — print to console (Phase 2) */
-                cJSON *text = cJSON_GetObjectItemCaseSensitive(part, "text");
-                if (cJSON_IsString(text)) {
-                    printf("[Gemini] %s\n", text->valuestring);
-                }
+            if (cJSON_IsArray(parts)) {
+                cJSON *part;
+                cJSON_ArrayForEach(part, parts) {
+                    /* Text part — print to console (Phase 2) */
+                    cJSON *text = cJSON_GetObjectItemCaseSensitive(part, "text");
+                    if (cJSON_IsString(text)) {
+                        s_gl.text_part_hits++;
+                        printf("[Gemini] %s\n", text->valuestring);
+                    }
 
-                /* Audio part (Phase 3) */
-                cJSON *id = cJSON_GetObjectItemCaseSensitive(part, "inlineData");
-                if (id) {
-                    cJSON *data = cJSON_GetObjectItemCaseSensitive(id, "data");
-                    if (cJSON_IsString(data)) {
-                        if (s_gl.state == GL_STATE_LISTENING || s_gl.state == GL_STATE_READY) {
-                            /* First audio chunk: stop TX, switch to 24kHz.
-                             * gl_stop_tx_task() must return before any codec
-                             * close/open here, or the session task can deadlock
-                             * against a blocking ADC read holding I2S locks. */
-                            gl_stop_tx_task();
-                            ESP_LOGI(TAG, "Speaking: paused capture");
-                            gl_close_adc();
-                            gl_set_state(GL_STATE_SPEAKING, "Speaking");
-                            gl_open_dac(GL_RX_SAMPLE_RATE);
+                    /* Audio part (Phase 3) */
+                    cJSON *id = gl_get_object_compat(part, "inlineData", "inline_data");
+                    if (gl_play_model_audio_from_json(id, GL_RX_SAMPLE_RATE)) {
+                        /* audio played (inlineData / inline_data) */
+                    }
+
+                    cJSON *chunks = cJSON_GetObjectItemCaseSensitive(part, "mediaChunks");
+                    if (cJSON_IsArray(chunks)) {
+                        cJSON *chunk_item;
+                        cJSON_ArrayForEach(chunk_item, chunks) {
+                            if (gl_play_model_audio_from_json(chunk_item, GL_RX_SAMPLE_RATE)) {
+                                /* audio played (mediaChunks array item) */
+                            }
                         }
-                        gl_play_audio_b64(data->valuestring);
+                    } else if (gl_play_model_audio_from_json(chunks, GL_RX_SAMPLE_RATE)) {
+                        /* audio played (mediaChunks object) */
                     }
                 }
             }
@@ -864,14 +1528,36 @@ static void gl_dispatch_frame(const char *json)
 
         /* turnComplete */
         cJSON *tc = cJSON_GetObjectItemCaseSensitive(svc, "turnComplete");
-        if (cJSON_IsTrue(tc) && s_gl.state == GL_STATE_SPEAKING) {
-            /* Finish playback, switch back to LISTENING */
-            gl_close_dac();
-            gl_set_state(GL_STATE_LISTENING, "Listening");
-            gl_open_dac(GL_TX_SAMPLE_RATE);
-            gl_open_adc(GL_TX_SAMPLE_RATE);
-            gl_start_tx_task();
-            ESP_LOGI(TAG, "Listening: resumed capture");
+        const bool tc_true = cJSON_IsTrue(tc);
+        if (tc_true) {
+            s_gl.turn_complete_hits++;
+        }
+
+        /* generationComplete */
+        cJSON *gc = cJSON_GetObjectItemCaseSensitive(svc, "generationComplete");
+        const bool gc_true = cJSON_IsTrue(gc);
+        if (gc_true) {
+            s_gl.generation_complete_hits++;
+        }
+        if (tc_true || gc_true) {
+            gl_resume_listening(tc_true ? "turn complete" : "generation complete");
+        }
+        cJSON_Delete(root);
+        return;
+    }
+
+    /* sessionResumptionUpdate — protocol heartbeat for resumable sessions. Harmless,
+     * but log occasionally so we can confirm the frame shape without warning spam. */
+    cJSON *sru = cJSON_GetObjectItemCaseSensitive(root, "sessionResumptionUpdate");
+    if (sru) {
+        static uint32_t sru_hits;
+        cJSON *new_handle = cJSON_GetObjectItemCaseSensitive(sru, "newHandle");
+        cJSON *resumable  = cJSON_GetObjectItemCaseSensitive(sru, "resumable");
+        sru_hits++;
+        if ((sru_hits % 32) == 1) {
+            ESP_LOGI(TAG, "sessionResumptionUpdate: handle=%s resumable=%s",
+                     cJSON_IsString(new_handle) ? new_handle->valuestring : "n/a",
+                     cJSON_IsTrue(resumable) ? "true" : "false");
         }
         cJSON_Delete(root);
         return;
@@ -879,14 +1565,31 @@ static void gl_dispatch_frame(const char *json)
 
     /* Function calling — run the tool via JarvisMCP and reply with toolResponse. */
     if (gl_handle_tool_call(root)) {
+        s_gl.tool_call_hits++;
+        cJSON_Delete(root);
+        return;
+    }
+
+    cJSON *ga = cJSON_GetObjectItemCaseSensitive(root, "goAway");
+    cJSON *err = cJSON_GetObjectItemCaseSensitive(root, "error");
+    if (ga || err) {
+        cJSON *code = ga ? cJSON_GetObjectItemCaseSensitive(ga, "code")
+                         : cJSON_GetObjectItemCaseSensitive(err, "code");
+        cJSON *msg = ga ? cJSON_GetObjectItemCaseSensitive(ga, "message")
+                        : cJSON_GetObjectItemCaseSensitive(err, "message");
+        ESP_LOGW(TAG, "%s: code=%s msg=%s",
+                 ga ? "goAway" : "error",
+                 cJSON_IsString(code) ? code->valuestring : "n/a",
+                 cJSON_IsString(msg) ? msg->valuestring : "n/a");
+        gl_resume_listening("server signal");
         cJSON_Delete(root);
         return;
     }
 
     /* Unhandled top-level frame — surface it instead of silently dropping.
-     * On a bad setup Gemini may send an error/goAway frame; without this it
-     * would vanish and look like a plain timeout. */
+     * Upstream protocol drift happens. Visible logs win over silent ignorance. */
     ESP_LOGW(TAG, "Unhandled server frame: %.200s", json);
+    s_gl.unhandled_hits++;
     cJSON_Delete(root);
 }
 
@@ -1012,24 +1715,29 @@ static void gl_session_task(void *arg)
         gl_set_state(GL_STATE_LISTENING, "Listening");
 
         /* Phase 4: session task owns codec lifetime; TX task only captures. */
-        gl_open_dac(GL_TX_SAMPLE_RATE);
-        gl_open_adc(GL_TX_SAMPLE_RATE);
+        if (gl_open_adc(GL_TX_SAMPLE_RATE) != ESP_CODEC_DEV_OK) {
+            gl_set_audio_error("session: initial ADC open failed");
+            ESP_LOGE(TAG, "Listening: ADC open failed, ending session");
+            goto session_cleanup;
+        }
         gl_start_tx_task();
 
         /* Main receive loop */
         while (s_gl.ws_connected && !s_gl.stop_requested && s_gl.session_active) {
             /* Drain ALL queued frames before re-checking loop conditions, so a
              * burst of audio chunks plays back-to-back without gaps. */
-            while (gl_process_rx_queue(pdMS_TO_TICKS(200))) {
-                if (s_gl.stop_requested || !s_gl.session_active) {
-                    break;
-                }
-            }
-            /* Check if WS dropped */
-            if (!s_gl.ws_connected) {
-                ESP_LOGW(TAG, "WS dropped, cleaning up session");
+        while (gl_process_rx_queue(pdMS_TO_TICKS(200))) {
+            if (s_gl.stop_requested || !s_gl.session_active) {
                 break;
             }
+        }
+        gl_maybe_resume_speaking_watchdog();
+        gl_ensure_listening_capture();
+        /* Check if WS dropped */
+        if (!s_gl.ws_connected) {
+            ESP_LOGW(TAG, "WS dropped, cleaning up session");
+            break;
+        }
         }
 
 session_cleanup:
@@ -1058,6 +1766,12 @@ session_cleanup:
     }
 
     ESP_LOGI(TAG, "Session task exiting");
+    if (s_gl.session_task == xTaskGetCurrentTaskHandle()) {
+        s_gl.session_task = NULL;
+    }
+    if (s_gl.ev) {
+        xEventGroupSetBits(s_gl.ev, GL_BIT_SESSION_DONE);
+    }
     claw_task_delete(NULL);
 }
 
@@ -1108,6 +1822,10 @@ static void gl_touch_task(void *arg)
 static esp_err_t gl_gateway_start(void)
 {
     if (s_gl.session_task) {
+        if (s_gl.stop_requested) {
+            ESP_LOGW(TAG, "Gemini Live gateway stop still in progress");
+            return ESP_ERR_INVALID_STATE;
+        }
         return ESP_OK;
     }
     if (!s_gl.rx_buf) {
@@ -1124,6 +1842,9 @@ static esp_err_t gl_gateway_start(void)
         }
     }
     s_gl.stop_requested = false;
+    gl_reset_diag_counters();
+    s_gl.dac_codec_failed = false;
+    s_gl.adc_codec_failed = false;
 
     if (!s_gl.ev) {
         s_gl.ev = xEventGroupCreate();
@@ -1139,7 +1860,8 @@ static esp_err_t gl_gateway_start(void)
     }
 
     /* Clear stop/done bits left over from any previous gateway run */
-    xEventGroupClearBits(s_gl.ev, GL_BIT_STOP | GL_BIT_TX_STOP | GL_BIT_TX_DONE);
+    xEventGroupClearBits(s_gl.ev,
+                         GL_BIT_STOP | GL_BIT_TX_STOP | GL_BIT_TX_DONE | GL_BIT_SESSION_DONE);
 
     gl_acquire_codec_handles();
 
@@ -1154,9 +1876,10 @@ static esp_err_t gl_gateway_start(void)
         return ESP_ERR_NO_MEM;
     }
 
-    /* Touch toggle (Phase 5) is driven by cap_gemini_live_toggle(), called from
-     * the emote tap callback — not by a separate polling task that would race
-     * the emote system on the shared I2C bus. */
+    /* Touch toggle is driven by touch_monitor_task in main.c (app_claw layer),
+     * which calls cap_gemini_live_toggle() on rising-edge tap. Do not start a
+     * second touch-polling task here — two tasks on the same I2C bus race the
+     * controller and cause phantom double-taps + I2S codec churn. */
 
     ESP_LOGI(TAG, "Gemini Live gateway started");
     return ESP_OK;
@@ -1166,11 +1889,26 @@ static esp_err_t gl_gateway_stop(void)
 {
     s_gl.stop_requested = true;
     s_gl.session_active = false;
+
+    if (!s_gl.ev) {
+        return ESP_OK;
+    }
+
+    TaskHandle_t session_task = s_gl.session_task;
+    xEventGroupClearBits(s_gl.ev, GL_BIT_SESSION_ON);
     xEventGroupSetBits(s_gl.ev, GL_BIT_STOP | GL_BIT_TX_STOP);
-    /* Tasks delete themselves when stop_requested is set */
-    s_gl.session_task = NULL;
-    s_gl.touch_task   = NULL;
-    s_gl.tx_task      = NULL;
+
+    /* Do not clear task handles here. The session task owns codec cleanup and
+     * must still see tx_task so it can wait for GL_BIT_TX_DONE before closing
+     * ADC/DAC. Clearing handles early was the race. Rather theatrical. */
+    if (session_task && session_task != xTaskGetCurrentTaskHandle()) {
+        EventBits_t bits = xEventGroupWaitBits(s_gl.ev, GL_BIT_SESSION_DONE,
+                                               pdFALSE, pdTRUE, pdMS_TO_TICKS(30000));
+        if (!(bits & GL_BIT_SESSION_DONE)) {
+            ESP_LOGE(TAG, "Gateway stop timed out waiting for session task");
+            return ESP_ERR_TIMEOUT;
+        }
+    }
     return ESP_OK;
 }
 
@@ -1218,6 +1956,133 @@ float cap_gemini_live_get_output_level(void)
     return (float)atomic_load(&s_out_rms) / 32768.0f;
 }
 
+void cap_gemini_live_print_diagnostics(void)
+{
+    EventBits_t bits = s_gl.ev ? xEventGroupGetBits(s_gl.ev) : 0;
+    UBaseType_t rx_depth = s_gl.rx_queue ? uxQueueMessagesWaiting(s_gl.rx_queue) : 0;
+    int64_t now_us = esp_timer_get_time();
+    int64_t frame_age = s_gl.last_frame_us ? (now_us - s_gl.last_frame_us) / 1000 : -1;
+    int64_t audio_age = s_gl.last_audio_us ? (now_us - s_gl.last_audio_us) / 1000 : -1;
+    int64_t resume_age = s_gl.last_resume_us ? (now_us - s_gl.last_resume_us) / 1000 : -1;
+
+    printf("Gemini Live diagnostics:\n");
+    printf("  state=%s listening=%d connected=%d session_active=%d stop_requested=%d\n",
+           gl_state_name(s_gl.state),
+           (int)(s_gl.state == GL_STATE_LISTENING || s_gl.state == GL_STATE_READY),
+           (int)s_gl.ws_connected,
+           (int)s_gl.session_active,
+           (int)s_gl.stop_requested);
+    printf("  capture: tx_task=%d dac_open=%d adc_open=%d dac=%p raw_dac=%p adc=%p raw_adc=%p\n",
+           (int)(s_gl.tx_task != NULL),
+           (int)s_gl.dac_open,
+           (int)s_gl.adc_open,
+           (void *)s_gl.dac,
+           (void *)s_gl.dac_chan,
+           (void *)s_gl.adc,
+           (void *)s_gl.adc_chan);
+    printf("  raw cfg rates: dac=%u adc=%u\n",
+           (unsigned)s_gl.dac_raw_rate_hz,
+           (unsigned)s_gl.adc_raw_rate_hz);
+    printf("  active dac rate=%u last_audio_mime_rate=%u rate_mismatch_chunks=%u\n",
+           (unsigned)s_gl.dac_rate,
+           (unsigned)s_gl.last_audio_mime_rate,
+           (unsigned)s_gl.rate_mismatch_chunks);
+    printf("  audio path state: dac_codec_failed=%d adc_codec_failed=%d\n",
+           (int)s_gl.dac_codec_failed,
+           (int)s_gl.adc_codec_failed);
+    printf("  audio path: errors=%s\n", s_gl.last_audio_error[0] ? s_gl.last_audio_error : "-");
+    printf("  bits=0x%08x queue_depth=%u drops=%u frames=%u text_parts=%u audio_parts=%u\n",
+           (unsigned)bits, (unsigned)rx_depth,
+           (unsigned)s_gl.rx_drops, (unsigned)s_gl.rx_frames,
+           (unsigned)s_gl.text_part_hits, (unsigned)s_gl.audio_part_hits);
+    printf("  turn_complete=%u generation_complete=%u interrupted=%u tool_calls=%u unhandled=%u\n",
+           (unsigned)s_gl.turn_complete_hits,
+           (unsigned)s_gl.generation_complete_hits,
+           (unsigned)s_gl.interrupted_hits,
+           (unsigned)s_gl.tool_call_hits,
+           (unsigned)s_gl.unhandled_hits);
+    printf("  resumes=%u watchdog_resumes=%u last_resume=%s (%lld ms ago) waiting_terminal=%d\n",
+           (unsigned)s_gl.resume_count,
+           (unsigned)s_gl.watchdog_resume_count,
+           s_gl.last_resume_reason[0] ? s_gl.last_resume_reason : "-",
+           (long long)resume_age,
+           (int)s_gl.waiting_terminal);
+    printf("  frame_age_ms=%lld audio_age_ms=%lld\n",
+           (long long)frame_age, (long long)audio_age);
+}
+
+esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size)
+{
+    if (!out || out_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    EventBits_t bits = s_gl.ev ? xEventGroupGetBits(s_gl.ev) : 0;
+    UBaseType_t rx_depth = s_gl.rx_queue ? uxQueueMessagesWaiting(s_gl.rx_queue) : 0;
+    int64_t now_us = esp_timer_get_time();
+    int64_t frame_age = s_gl.last_frame_us ? (now_us - s_gl.last_frame_us) / 1000 : -1;
+    int64_t audio_age = s_gl.last_audio_us ? (now_us - s_gl.last_audio_us) / 1000 : -1;
+    int64_t resume_age = s_gl.last_resume_us ? (now_us - s_gl.last_resume_us) / 1000 : -1;
+
+    cJSON *root = cJSON_CreateObject();
+    if (!root) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    cJSON_AddStringToObject(root, "state", gl_state_name(s_gl.state));
+    cJSON_AddBoolToObject(root, "listening", s_gl.state == GL_STATE_LISTENING || s_gl.state == GL_STATE_READY);
+    cJSON_AddBoolToObject(root, "connected", s_gl.ws_connected);
+    cJSON_AddBoolToObject(root, "session_active", s_gl.session_active);
+    cJSON_AddBoolToObject(root, "stop_requested", s_gl.stop_requested);
+    cJSON_AddBoolToObject(root, "tx_task", s_gl.tx_task != NULL);
+    cJSON_AddBoolToObject(root, "dac_open", s_gl.dac_open);
+    cJSON_AddBoolToObject(root, "adc_open", s_gl.adc_open);
+    cJSON_AddBoolToObject(root, "dac_raw", s_gl.dac_raw);
+    cJSON_AddBoolToObject(root, "adc_raw", s_gl.adc_raw);
+    cJSON_AddNumberToObject(root, "dac_rate", (double)s_gl.dac_rate);
+    cJSON_AddNumberToObject(root, "dac_raw_rate_hz", (double)s_gl.dac_raw_rate_hz);
+    cJSON_AddNumberToObject(root, "adc_raw_rate_hz", (double)s_gl.adc_raw_rate_hz);
+    cJSON_AddNumberToObject(root, "last_audio_mime_rate", (double)s_gl.last_audio_mime_rate);
+    cJSON_AddNumberToObject(root, "rate_mismatch_chunks", (double)s_gl.rate_mismatch_chunks);
+    cJSON_AddBoolToObject(root, "dac_codec_failed", s_gl.dac_codec_failed);
+    cJSON_AddBoolToObject(root, "adc_codec_failed", s_gl.adc_codec_failed);
+    cJSON_AddStringToObject(root, "audio_error", s_gl.last_audio_error[0] ? s_gl.last_audio_error : "-");
+    cJSON_AddNumberToObject(root, "bits", (double)bits);
+    cJSON_AddNumberToObject(root, "queue_depth", (double)rx_depth);
+    cJSON_AddNumberToObject(root, "drops", (double)s_gl.rx_drops);
+    cJSON_AddNumberToObject(root, "frames", (double)s_gl.rx_frames);
+    cJSON_AddNumberToObject(root, "text_parts", (double)s_gl.text_part_hits);
+    cJSON_AddNumberToObject(root, "audio_parts", (double)s_gl.audio_part_hits);
+    cJSON_AddNumberToObject(root, "turn_complete", (double)s_gl.turn_complete_hits);
+    cJSON_AddNumberToObject(root, "generation_complete", (double)s_gl.generation_complete_hits);
+    cJSON_AddNumberToObject(root, "interrupted", (double)s_gl.interrupted_hits);
+    cJSON_AddNumberToObject(root, "tool_calls", (double)s_gl.tool_call_hits);
+    cJSON_AddNumberToObject(root, "unhandled", (double)s_gl.unhandled_hits);
+    cJSON_AddNumberToObject(root, "resumes", (double)s_gl.resume_count);
+    cJSON_AddNumberToObject(root, "watchdog_resumes", (double)s_gl.watchdog_resume_count);
+    cJSON_AddNumberToObject(root, "frame_age_ms", (double)frame_age);
+    cJSON_AddNumberToObject(root, "audio_age_ms", (double)audio_age);
+    cJSON_AddNumberToObject(root, "last_resume_ms", (double)resume_age);
+    cJSON_AddStringToObject(root, "last_resume_reason",
+                            s_gl.last_resume_reason[0] ? s_gl.last_resume_reason : "-");
+    cJSON_AddNumberToObject(root, "mic_level", (double)cap_gemini_live_get_mic_level());
+    cJSON_AddNumberToObject(root, "output_level", (double)cap_gemini_live_get_output_level());
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!json) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (strlen(json) + 1 > out_size) {
+        free(json);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    strlcpy(out, json, out_size);
+    free(json);
+    return ESP_OK;
+}
+
 /* Optional: drive the levels with no live session (own audio-path testing). */
 void cap_gemini_live_set_synthetic_levels(float mic, float out)
 {
@@ -1250,6 +2115,11 @@ esp_err_t cap_gemini_live_send_text(const char *text)
         return ESP_ERR_INVALID_STATE;
     }
     return gl_send_text_turn(text) ? ESP_OK : ESP_FAIL;
+}
+
+bool cap_gemini_live_is_active(void)
+{
+    return s_gl.session_active && s_gl.state != GL_STATE_IDLE;
 }
 
 void cap_gemini_live_toggle(void)

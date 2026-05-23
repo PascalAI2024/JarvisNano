@@ -9,20 +9,26 @@
 
 ---
 
-## INTEGRATION STATUS — final decisions (measured, 2026-05-21)
+## INTEGRATION STATUS — final decisions (measured, updated 2026-05-23)
 
-**Asset config chosen:** `canvas=280`, `frames=32` per state, **RLE-encoded** EAF.
-- The mostly-black reactive frames compress hugely under RLE. **Measured packed sizes:**
-  `rwave_idle.eaf` 58.1KB, `rwave_listen.eaf` 83.5KB, `rwave_think.eaf` 58.7KB,
-  `rwave_speak.eaf` 83.5KB — **0.27 MB total for all four states.**
+**Asset config chosen:** `canvas=466`, `frames=24` per state, **RLE-encoded** EAF.
+- The current premium reactive face uses the full round AMOLED canvas: HUD ring identity,
+  amber non-white visor core, cyan listening energy, amber speaking energy, idle breathing
+  motion, and thinking orbit/scanner motion. **Measured packed sizes:**
+  `rwave_idle.eaf` 141.8KB, `rwave_listen.eaf` 229.5KB, `rwave_think.eaf` 161.9KB,
+  `rwave_speak.eaf` 228.6KB — **0.73 MB total for all four states.**
+- **Local generator validation:** `python3 firmware/mascot/gen_reactive_face.py check`
+  verifies non-blank frames, no white-ish fallback/eye pixels, and visible ramp energy for
+  listen/speak. `python3 firmware/mascot/gen_reactive_face.py all` round-trips every EAF.
 - **End-to-end verified:** ran the real asset packer (`build.py` → `spiffs_assets_gen.py`) against
   the live bundle. Produced `assets.bin` = **3.51 MB** (eye 3.3MB + reactive 0.27MB + manifest/index),
   vs the **6.00 MB** `emote` partition → **2.49 MB margin. FITS. No pruning needed**
   (`swim.eaf`/`offline.eaf` kept). All four `rwave_*.eaf` confirmed embedded in the packed bin and
-  resolvable by name.
+  resolvable by name. This packer measurement predates the full-panel premium assets; rerun it before
+  flashing if partition margin is tight.
 - **RLE correctness verified:** decoded every block back to exactly `width×rows` pixels; confirmed the
-  amplitude ramp survived (listen frame 0 = 81 lit px → frame 31 = 2386 lit px) and visually checked
-  the 32-frame preview (flat dotted line → full symmetric equalizer).
+  amplitude ramp survived (`check` confirms listen/speak gain visible energy) and visually checked
+  the 24-frame preview sheets.
 
 **Decode-buffer / PSRAM (was §8-Q2): RESOLVED, no concern.** `gfx_anim_prepare_frame`
 (`src/widget/gfx_anim.c:254`) allocates the decode buffer **per block**, sized `width × block_height`
@@ -234,17 +240,14 @@ mechanism — `emote_get_asset_data_by_name`, `src/emote_load.c:185`). Centered,
 
 | File              | Canvas | Frames | Loop fps | Reactive? | Visual |
 |-------------------|--------|--------|----------|-----------|--------|
-| `rwave_idle.eaf`  | 360x360| 24     | 20       | no        | calm breathing horizontal bar/dot, gentle amplitude + glow pulse |
-| `rwave_listen.eaf`| 360x360| 24     | 24       | YES (mic) | symmetric waveform/blob; frame 0 = flat line, frame 23 = full reach |
-| `rwave_think.eaf` | 360x360| 24     | 24       | no        | a bright dot/arc sweeping left↔right (scanning pulse) over a dim track |
-| `rwave_speak.eaf` | 360x360| 24     | 24       | YES (out) | same ramp geometry as listen, warmer/hotter palette bias |
+| `rwave_idle.eaf`  | 466x466| 24     | 20       | no        | breathing Jarvis HUD shell with amber visor; no white-eye fallback |
+| `rwave_listen.eaf`| 466x466| 24     | 24       | YES (mic) | cyan listening ramp: visor opens, bars/glow gain energy with mic level |
+| `rwave_think.eaf` | 466x466| 24     | 24       | no        | narrowed visor, orbit particles, scanner arcs |
+| `rwave_speak.eaf` | 466x466| 24     | 24       | YES (out) | amber speaking ramp: warmer bars/glow gain energy with output level |
 
-**Canvas = 360x360, NOT 466x466 (deliberate, per advisor #3).** A 466x466 RGB565A8 frame decodes
-to 466*466*3 ≈ 636 KB; 24 frames per state across 4 states would balloon the partition and decode
-time. A 360x360 centered strip reads as the Siri waveform on the round panel and is ~60% the
-pixels (360*360*3 ≈ 388 KB decoded/frame). The waveform geometry lives in the central band; the
-disc margin is transparent. (If the orchestrator finds the decode buffer is shared and full-panel
-is free, the canvas can be bumped — the generator takes `--canvas`.)
+**Canvas = 466x466.** The earlier 360x360 compromise was removed after confirming the engine decodes
+block-by-block, not full-frame. RLE keeps the full-panel assets small enough for local iteration while
+giving the display a deliberate state identity instead of a small center-strip equalizer.
 
 > The "amplitude ramp" frames (listen/speak) are baked so that frame `i` draws the waveform at
 > reach `i/(K-1)`. The reactive code plays `[0..end]` where `end` tracks the live level, so the

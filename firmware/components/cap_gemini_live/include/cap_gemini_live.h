@@ -9,6 +9,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -23,6 +24,7 @@ esp_err_t cap_gemini_live_start(void);
 esp_err_t cap_gemini_live_stop(void);
 esp_err_t cap_gemini_live_send_text(const char *text);
 esp_err_t cap_gemini_live_test(void);
+bool      cap_gemini_live_is_active(void);
 /* Toggle session on/off — call from emote tap callback (Phase 5) */
 void      cap_gemini_live_toggle(void);
 
@@ -36,6 +38,8 @@ void      cap_gemini_live_toggle(void);
 float     cap_gemini_live_get_mic_level(void);
 float     cap_gemini_live_get_output_level(void);
 void      cap_gemini_live_set_synthetic_levels(float mic, float out);
+void      cap_gemini_live_print_diagnostics(void);
+esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size);
 
 #ifdef __cplusplus
 }
