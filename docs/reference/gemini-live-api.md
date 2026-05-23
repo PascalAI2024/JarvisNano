@@ -1,6 +1,6 @@
 # Gemini Live API
 
-**What it is** — Google's low-latency bidirectional audio API, exposed as `BidiGenerateContent` over a WebSocket (WSS). The current model is `gemini-3.1-flash-live-preview`. It accepts 16 kHz PCM audio in and returns 24 kHz PCM audio out. Native audio mode — no STT/TTS pipeline needed.
+**What it is** — Google's low-latency bidirectional audio API, exposed as `BidiGenerateContent` over a WebSocket (WSS). The current model is `gemini-2.5-flash-native-audio-latest`. It accepts 16 kHz PCM audio in and returns 24 kHz PCM audio out. Native audio mode — no STT/TTS pipeline needed.
 
 **How we use it here** — `firmware/components/cap_gemini_live/cap_gemini_live.c` implements the full five-phase Gemini Live client: WSS+TLS handshake, setup frame, `setupComplete` wait, half-duplex I2S audio loop, and function-calling dispatch via the JarvisMCP bridge. Touch toggles the session on/off.
 
@@ -8,13 +8,15 @@
 
 ## Findings & gotchas
 
-**[2026-05-21] Use `thinkingLevel`, NOT `thinkingBudget`**
+**[2026-05-23] Model rollback: `gemini-3.1-flash-live-preview` does not exist — use `gemini-2.5-flash-native-audio-latest`**
 
-Gemini 3.1 Flash Live uses `thinkingLevel` (values: `"minimal"`, `"low"`, `"medium"`, `"high"`). The previous `gemini-2.5` API used `thinkingBudget` (an integer). Setting both in the same `thinkingConfig` is a 400 error.
+`gemini-3.1-flash-live-preview` returns 404 from the API (the model name was pre-release and never shipped). `gemini-2.0-flash-live-001` was shut down 2025-12-09. Confirmed live models as of 2026-05-23: `models/gemini-2.5-flash-native-audio-latest`, `models/gemini-2.5-flash-native-audio-preview-09-2025`.
 
-`"minimal"` is the default and gives lowest latency — appropriate for voice interaction.
+**[2026-05-23] `thinkingLevel` accepted by `gemini-2.5-flash-native-audio-latest`**
 
-Source: `cap_gemini_live.c:349-352` (comment and cJSON call confirming `thinkingLevel "minimal"`); [Gemini 3.1 Flash Live migration guide](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-live-preview).
+`thinkingLevel: "minimal"` was sent in the setup frame and the server returned `setupComplete` — confirming the field is accepted (or gracefully ignored). We keep `thinkingLevel: "minimal"` in the setup JSON for lowest latency. If a future model rejects it, switch to `thinkingBudget: 0` (integer, the 2.5-era parameter).
+
+Source: serial log 2026-05-23 confirming `setupComplete` with `thinkingLevel: "minimal"` in setup.
 
 **[2026-05-21] `setupComplete` handshake is mandatory — do not send audio before it**
 

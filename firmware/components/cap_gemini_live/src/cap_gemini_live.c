@@ -63,10 +63,10 @@ static void   gl_resume_listening(const char *reason);
 
 /* ---- Configuration -------------------------------------------------------- */
 
-/* Verified 2026-05-21 against ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-live-preview
- * (docs updated 2026-05-13). The 2.5-era native-audio preview is superseded by 3.1 Flash Live;
- * the migration guide also moves thinkingBudget -> thinkingLevel (see gl_send_setup). */
-#define GEMINI_LIVE_MODEL        "models/gemini-3.1-flash-live-preview"
+/* gemini-3.1-flash-live-preview never existed in production API (404 from server).
+ * gemini-2.0-flash-live-001 was shut down 2025-12-09.
+ * Current live model confirmed via API models list 2026-05-23. */
+#define GEMINI_LIVE_MODEL        "models/gemini-2.5-flash-native-audio-latest"
 #define GEMINI_WS_HOST           "generativelanguage.googleapis.com"
 #define GEMINI_WS_PATH           "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 /* JarvisMCP gateway — one authenticated POST runs JS (jarvis.* SDK) and returns
@@ -743,8 +743,8 @@ static bool gl_send_setup(void)
     cJSON *gc = cJSON_AddObjectToObject(setup, "generationConfig");
     cJSON *rm = cJSON_AddArrayToObject(gc, "responseModalities");
     cJSON_AddItemToArray(rm, cJSON_CreateString("AUDIO"));
-    /* Gemini 3.1 Flash Live uses thinkingLevel (minimal|low|medium|high), NOT the
-     * 2.5-era thinkingBudget integer. Setting both is a 400. "minimal" = lowest latency. */
+    /* thinkingLevel accepted by both gemini-2.5-flash-native-audio-latest and 3.x models.
+     * "minimal" = lowest latency, appropriate for voice. Confirmed: setupComplete received. */
     cJSON *tc = cJSON_AddObjectToObject(gc, "thinkingConfig");
     cJSON_AddStringToObject(tc, "thinkingLevel", "minimal");
 
