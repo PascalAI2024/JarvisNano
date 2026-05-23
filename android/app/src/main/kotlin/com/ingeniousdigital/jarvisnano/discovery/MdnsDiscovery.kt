@@ -21,14 +21,14 @@ import java.net.InetAddress
  * accepts the resolved host. Multicast lock is grabbed for the duration so the
  * radio actually delivers the packets to userspace.
  */
-class MdnsDiscovery(private val context: Context) {
+class MdnsDiscovery(private val context: Context) : Discovery {
 
     /**
      * Returns the resolved host (IP literal or hostname) suitable for HTTP calls.
      * Throws on timeout. Callers should wrap with runCatching {} if they want a
      * recoverable failure path.
      */
-    suspend fun findEspClaw(timeoutMs: Long = 8_000L): String = withContext(Dispatchers.IO) {
+    override suspend fun findEspClaw(timeoutMs: Long): String = withContext(Dispatchers.IO) {
         val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         val lock = wifi.createMulticastLock(LOCK_TAG).apply {
             setReferenceCounted(false)

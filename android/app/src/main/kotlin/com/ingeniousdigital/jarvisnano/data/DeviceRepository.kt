@@ -1,6 +1,6 @@
 package com.ingeniousdigital.jarvisnano.data
 
-import com.ingeniousdigital.jarvisnano.discovery.MdnsDiscovery
+import com.ingeniousdigital.jarvisnano.discovery.Discovery
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -26,10 +26,9 @@ import kotlinx.coroutines.sync.withLock
  */
 class DeviceRepository(
     private val client: DeviceClient,
-    private val discovery: MdnsDiscovery,
+    private val discovery: Discovery,
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) {
-
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val hostLock = Mutex()
 
     private val _connection = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
