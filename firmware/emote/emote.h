@@ -1,0 +1,99 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Espressif Systems (Shanghai) CO LTD
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#pragma once
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "esp_err.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+esp_err_t emote_start(void);
+esp_err_t emote_set_network_status(bool sta_connected, const char *ap_ssid);
+
+/* Set a short status detail (e.g. the active LLM model name) shown on the
+ * idle screen as "Ready * <detail>" when the station is connected. */
+esp_err_t emote_set_status_detail(const char *detail);
+
+/* Voice state helpers — called by cap_gemini_live when session state changes.
+ * One per GL_STATE_* so every transition repaints the face. */
+esp_err_t emote_set_connecting(void);
+esp_err_t emote_set_listening(void);
+esp_err_t emote_set_thinking(void);
+esp_err_t emote_set_speaking(void);
+esp_err_t emote_set_voice_idle(void);
+
+/* ---- Reactive waveform face (the primary baked-EAF voice visual) ----------- *
+ * A full-panel gfx_anim object replaces the static emote eye while active.
+ * The firmware never draws pixels at runtime; it switches among pre-baked
+ * rwave_*.eaf clips and maps mic/output RMS to stable animation segments.
+ * Idle is warm amber, listening cyan, thinking violet, and speaking amber. */
+typedef enum {
+    EMOTE_FACE_OFF = 0,   /* hide the waveform, restore the emote eye/idle */
+    EMOTE_FACE_IDLE,      /* calm breathing centre line */
+    EMOTE_FACE_LISTENING, /* bars react to mic amplitude */
+    EMOTE_FACE_THINKING,  /* traveling scan pulse (no audio) */
+    EMOTE_FACE_SPEAKING,  /* bars react to output amplitude */
+} emote_face_state_t;
+
+/* Switch the waveform face state. Idempotent; safe before emote_start (the
+ * state is applied once the engine is up). */
+esp_err_t emote_face_set_state(emote_face_state_t state);
+
+/* Feed a synthetic amplitude (0..1000) for LISTENING/SPEAKING when no live
+ * audio RMS is driving the face — used by the `face` CLI demo so the visual can
+ * be validated on the panel without a Gemini session. <0 restores the live
+ * audio source (the registered amplitude callback). */
+void emote_face_set_synthetic_amplitude(int amp_milli);
+
+/* Register the live audio-amplitude source (voice-eng's mic/out RMS getters).
+ * cb(state) returns 0..1000 for the given active state; NULL = synthetic only. */
+typedef uint16_t (*emote_face_amp_cb_t)(emote_face_state_t state);
+void emote_face_set_amplitude_source(emote_face_amp_cb_t cb);
+
+typedef struct {
+    int state;
+    int applied_state;
+    int synth_amp;
+    float displayed_amp;
+    int last_start;
+    int last_end;
+    uint32_t driver_ticks;
+    uint32_t segment_sets;
+    uint32_t keepalive_kicks;
+    uint32_t state_changes;
+    bool running;
+    bool object_ready;
+    bool display_owned;
+    bool current_clip_loaded;
+} emote_face_debug_t;
+
+esp_err_t emote_face_get_debug(emote_face_debug_t *out);
+
+/* Debug-only display snapshot mirror. The emote flush path records the exact
+ * RGB565 pixels last sent to the panel so HTTP diagnostics can export a screen
+ * capture without relying on panel readback. */
+typedef struct {
+    uint16_t width;
+    uint16_t height;
+    size_t bytes;
+    uint64_t frame_id;
+    uint64_t last_flush_ms;
+    bool valid;
+} emote_display_snapshot_info_t;
+
+esp_err_t emote_display_snapshot_get_info(emote_display_snapshot_info_t *out);
+esp_err_t emote_display_snapshot_copy_rgb565(void *dst,
+                                             size_t dst_size,
+                                             emote_display_snapshot_info_t *out);
+
+#ifdef __cplusplus
+}
+#endif

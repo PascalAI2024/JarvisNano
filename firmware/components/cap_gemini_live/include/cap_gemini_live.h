@@ -23,6 +23,7 @@ esp_err_t cap_gemini_live_register_group(void);
 esp_err_t cap_gemini_live_start(void);
 esp_err_t cap_gemini_live_stop(void);
 esp_err_t cap_gemini_live_send_text(const char *text);
+esp_err_t cap_gemini_live_end_input(void);
 esp_err_t cap_gemini_live_test(void);
 bool      cap_gemini_live_is_active(void);
 /* Toggle session on/off — call from emote tap callback (Phase 5) */

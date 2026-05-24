@@ -59,4 +59,4 @@ peripherals:
         data2_io_num: 6
         data3_io_num: 7
         sclk_io_num: 38
-        max_transfer_sz: 21744  # width * height * 2 / 10 ≈ 466*466*2/10
+        max_transfer_sz: 12000  # 466px * 12 rows * 2 bytes, plus DMA headroom

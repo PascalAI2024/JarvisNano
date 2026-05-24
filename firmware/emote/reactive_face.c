@@ -22,9 +22,11 @@
  * listen/think/speak). High-quality overrides may live on SD at
  * /sdcard/emote/rwave_*.eaf and are copied into PSRAM on first load. If SD is
  * absent or invalid, the small boot-safe partition assets remain the fallback.
- * The reactive states map the live 0..1000 amplitude to the looping segment END
- * frame, so a louder voice plays deeper into a pre-baked "amplitude ramp" and
- * the waveform visibly grows.
+ * The reactive states map the live 0..1000 amplitude to a quantized loop END
+ * inside a pre-baked "amplitude ramp". The loop always starts at frame 0; moving
+ * the start into the ramp makes a narrow bucket of near-identical frames look
+ * frozen on the panel. Quantizing only the end preserves motion without resetting
+ * the animation every driver tick.
  *
  * CRITICAL — single-frame pinning does NOT work on this engine. The anim timer
  * (gfx_anim.c:824) only DRAWS a frame in the `current_frame < end_frame` branch;
@@ -85,15 +87,17 @@ static const char *TAG = "app_rwave";
  * THIS custom anim object — those are only read by emote_set_anim_emoji (the eye
  * flow, emote_op.c:287). This object sets its own fps here. The manifest fps
  * values mirror these for documentation, but THESE constants are authoritative.
- * Reactive states run a touch faster for livelier shimmer. */
-#define RWAVE_FPS_IDLE      20
-#define RWAVE_FPS_REACTIVE  24
-#define RWAVE_FPS_THINK     24
+ * Reactive states run at the engine target rate; the baked clips are deliberately
+ * calm, so this reads as fluid motion rather than sparkle-noise. */
+#define RWAVE_FPS_IDLE      24
+#define RWAVE_FPS_REACTIVE  30
+#define RWAVE_FPS_THINK     30
 
 /* Amplitude driver task cadence (Hz) and lerp for fluid attack/decay. */
-#define RWAVE_DRIVER_HZ     20
+#define RWAVE_DRIVER_HZ     30
 #define RWAVE_DRIVER_MS     (1000 / RWAVE_DRIVER_HZ)
-#define RWAVE_LERP          0.30f   /* eased displayed level toward target */
+#define RWAVE_LERP          0.18f   /* eased displayed level toward target — softer for fluid AMOLED feel */
+#define RWAVE_AMP_BUCKETS   8U      /* coarse end buckets reduce segment resets when RMS jitters */
 
 /* One baked EAF held resident in memory for its object's lifetime. The decoder
  * keeps the pointer (it does NOT copy — cf. eye's emote_acquire_data,
@@ -129,8 +133,15 @@ typedef struct {
     emote_face_amp_cb_t amp_cb;
 
     float               disp_amp;     /* eased displayed amplitude 0..1 */
+    int                 last_start;   /* last segment start issued (avoid churn) */
     int                 last_end;     /* last segment end issued (avoid churn) */
     const rwave_clip_t *cur_clip;     /* clip whose src is currently set */
+    emote_face_state_t  applied_state; /* last state for which visibility was applied
+                                        * (only written by rwave_task, no volatile needed) */
+    uint32_t            driver_ticks;
+    uint32_t            segment_sets;
+    uint32_t            keepalive_kicks;
+    uint32_t            state_changes;
 } rwave_ctx_t;
 
 static rwave_ctx_t s_rw;
@@ -393,7 +404,7 @@ static float rwave_target_amp(emote_face_state_t st)
 
 /* Point the object's src at `clip` (only when it changes) then program the loop.
  * Must be called under emote_lock. */
-static void rwave_apply_segment(const rwave_clip_t *clip, uint32_t end, uint32_t fps)
+static void rwave_apply_segment(const rwave_clip_t *clip, uint32_t start, uint32_t end, uint32_t fps)
 {
     if (!clip || !clip->loaded || !s_rw.obj) {
         return;
@@ -407,16 +418,27 @@ static void rwave_apply_segment(const rwave_clip_t *clip, uint32_t end, uint32_t
         ESP_LOGI(TAG, "rwave_apply_segment: new clip set (%u frames, %zu B)",
                  (unsigned)clip->frames, clip->size);
         s_rw.cur_clip = clip;
+        s_rw.last_start = -1;            /* force a fresh set_segment */
         s_rw.last_end = -1;              /* force a fresh set_segment */
     }
-    if (end < 1)            end = 1;             /* end>=1 so the loop draws (plan §2) */
+    if (start >= clip->last) start = clip->last - 1;
+    if (end <= start)       end = start + 1;     /* end>start so the loop draws */
     if (end > clip->last)   end = clip->last;
-    if ((int)end == s_rw.last_end) {
+    if ((int)start == s_rw.last_start && (int)end == s_rw.last_end) {
+        /* The gfx engine can silently stop a custom anim after a long HTTP/SD
+         * diagnostic read. A cheap keepalive keeps the object invalidated and
+         * restarts it if is_playing was dropped. */
+        gfx_anim_start(s_rw.obj);
+        gfx_obj_set_visible(s_rw.obj, true);
+        s_rw.keepalive_kicks++;
         return;                          /* no change → don't thrash the engine */
     }
+    s_rw.last_start = (int)start;
     s_rw.last_end = (int)end;
-    gfx_anim_set_segment(s_rw.obj, 0, end, fps, /*repeat=*/true);
+    gfx_anim_set_segment(s_rw.obj, start, end, fps, /*repeat=*/true);
     gfx_anim_start(s_rw.obj);
+    gfx_obj_set_visible(s_rw.obj, true);
+    s_rw.segment_sets++;
 }
 
 /* ---- driver task ---------------------------------------------------------- */
@@ -425,7 +447,25 @@ static void rwave_task(void *arg)
 {
     (void)arg;
     while (s_rw.run) {
+        s_rw.driver_ticks++;
         emote_face_state_t st = s_rw.state;
+
+        /* Apply visibility changes whenever state transitions. Called WITHOUT the
+         * emote lock — emote_set_obj_visible/emote_set_anim_visible acquire their
+         * own internal lock; wrapping them in emote_lock() causes a recursive
+         * deadlock. The rwave_task is the only writer of applied_state. */
+        if (st != s_rw.applied_state && s_rw.obj) {
+            bool show = (st != EMOTE_FACE_OFF);
+            emote_set_obj_visible(s_rw.emote, RWAVE_OBJ_NAME, show);
+            emote_set_anim_visible(s_rw.emote, !show);
+            if (st == EMOTE_FACE_IDLE || st == EMOTE_FACE_THINKING) {
+                s_rw.disp_amp = 0.0f;
+            }
+            s_rw.applied_state = st;
+            s_rw.state_changes++;
+            ESP_LOGI(TAG, "rwave state applied=%d", (int)st);
+        }
+
         const rwave_clip_t *clip = rwave_clip_for(st);
 
         if (st == EMOTE_FACE_OFF || !s_rw.obj || !clip || !clip->loaded) {
@@ -448,14 +488,22 @@ static void rwave_task(void *arg)
                            ? rwave_target_amp(st) : 0.0f;
         s_rw.disp_amp += (target - s_rw.disp_amp) * RWAVE_LERP;
 
-        uint32_t end, fps;
+        uint32_t start = 0, end, fps;
         if (st == EMOTE_FACE_LISTENING || st == EMOTE_FACE_SPEAKING) {
-            /* amplitude → segment end: louder plays deeper into the ramp. amp 0
-             * → end 1 (flat line still loops/draws); amp 1.0 → end clip->last
-             * (the baked peak frame at index clip->last-1 is displayed). */
+            /* Quantize amplitude into loop ends. Calling gfx_anim_set_segment()
+             * resets current_frame, so changing the end every 30 Hz tick makes
+             * the animation snap back to frame 0. Keeping start at 0 is
+             * important: listen/speak are monotonic ramps, and a tiny bucket
+             * window around a steady level can be visually indistinguishable
+             * from a frozen frame. */
             float a = s_rw.disp_amp;
             if (a < 0.0f) a = 0.0f; else if (a > 1.0f) a = 1.0f;
-            end = 1 + (uint32_t)(a * (float)(clip->last - 1) + 0.5f);
+            uint32_t bucket = (uint32_t)(a * (float)RWAVE_AMP_BUCKETS + 0.5f);
+            if (bucket > RWAVE_AMP_BUCKETS) {
+                bucket = RWAVE_AMP_BUCKETS;
+            }
+            start = 0;
+            end = 1 + (bucket * (clip->last - 1)) / RWAVE_AMP_BUCKETS;
             fps = RWAVE_FPS_REACTIVE;
         } else if (st == EMOTE_FACE_THINKING) {
             end = clip->last;            /* full self-contained sweep loop */
@@ -467,7 +515,7 @@ static void rwave_task(void *arg)
 
         if (display_arbiter_is_owner(DISPLAY_ARBITER_OWNER_EMOTE)) {
             emote_lock(s_rw.emote);
-            rwave_apply_segment(clip, end, fps);
+            rwave_apply_segment(clip, start, end, fps);
             emote_unlock(s_rw.emote);
         } else {
             static bool logged_no_owner = false;
@@ -528,22 +576,13 @@ esp_err_t emote_face_init(emote_handle_t emote)
 
 esp_err_t emote_face_set_state(emote_face_state_t state)
 {
+    /* Pure state write — intentionally no emote engine calls here.
+     * emote_set_obj_visible / emote_set_anim_visible acquire the emote lock,
+     * which the render task holds mid-flush. Calling them from arbitrary tasks
+     * (e.g. the Gemini session task) causes a permanent deadlock when the render
+     * task is busy. The rwave_task detects applied_state != state on its next tick
+     * and applies visibility within its own emote_lock region. */
     s_rw.state = state;
-    if (!s_rw.obj) {
-        return ESP_OK;   /* applied once initialised */
-    }
-
-    bool show = (state != EMOTE_FACE_OFF);
-    /* Show the waveform for any active state; hide it (restore the emote eye) on
-     * OFF. Mirrors waveform.c's visibility contract. */
-    emote_set_obj_visible(s_rw.emote, RWAVE_OBJ_NAME, show);
-    emote_set_anim_visible(s_rw.emote, !show);   /* hide the eye while active */
-
-    if (state == EMOTE_FACE_IDLE || state == EMOTE_FACE_THINKING) {
-        s_rw.disp_amp = 0.0f;
-    }
-    /* The driver task picks up the new state on its next tick and programs the
-     * matching clip + segment; nothing else to do here. */
     return ESP_OK;
 }
 
@@ -555,4 +594,27 @@ void emote_face_set_synthetic_amplitude(int amp_milli)
 void emote_face_set_amplitude_source(emote_face_amp_cb_t cb)
 {
     s_rw.amp_cb = cb;
+}
+
+esp_err_t emote_face_get_debug(emote_face_debug_t *out)
+{
+    ESP_RETURN_ON_FALSE(out != NULL, ESP_ERR_INVALID_ARG, TAG, "face debug is NULL");
+    memset(out, 0, sizeof(*out));
+    emote_face_state_t st = s_rw.state;
+    const rwave_clip_t *clip = rwave_clip_for(st);
+    out->state = (int)st;
+    out->applied_state = (int)s_rw.applied_state;
+    out->synth_amp = s_rw.synth_amp;
+    out->displayed_amp = s_rw.disp_amp;
+    out->last_start = s_rw.last_start;
+    out->last_end = s_rw.last_end;
+    out->driver_ticks = s_rw.driver_ticks;
+    out->segment_sets = s_rw.segment_sets;
+    out->keepalive_kicks = s_rw.keepalive_kicks;
+    out->state_changes = s_rw.state_changes;
+    out->running = s_rw.run;
+    out->object_ready = s_rw.obj != NULL;
+    out->display_owned = display_arbiter_is_owner(DISPLAY_ARBITER_OWNER_EMOTE);
+    out->current_clip_loaded = clip && clip->loaded;
+    return ESP_OK;
 }

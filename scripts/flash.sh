@@ -43,7 +43,7 @@ cd "$BUILD_DIR"
 
 if [ "${ERASE_NVS:-0}" = "1" ]; then
     log "ERASE_NVS=1 → erasing NVS config partition at 0x9000..0xefff"
-    "${ESPTOOL_PY[@]}" --chip esp32s3 -p "$DEFAULT_PORT" -b 460800 \
+    "${ESPTOOL_PY[@]}" --chip esp32s3 -p "$DEFAULT_PORT" -b 115200 \
         --before "$BEFORE_RESET" --after no-reset erase-region 0x9000 0x6000
 fi
 
@@ -80,13 +80,13 @@ PY
 )
 
 log "flashing from build metadata in flasher_args.json"
-"${ESPTOOL_PY[@]}" --chip esp32s3 -p "$DEFAULT_PORT" -b 460800 \
+"${ESPTOOL_PY[@]}" --chip esp32s3 -p "$DEFAULT_PORT" -b 115200 \
     --before "$BEFORE_RESET" --after "$WRITE_AFTER_RESET" write-flash \
     "${flash_argv[@]}"
 
 if [ "$AFTER_RESET" = "watchdog-reset" ]; then
     log "starting app with watchdog reset"
-    if ! "${ESPTOOL_PY[@]}" --chip esp32s3 -p "$DEFAULT_PORT" -b 460800 \
+    if ! "${ESPTOOL_PY[@]}" --chip esp32s3 -p "$DEFAULT_PORT" -b 115200 \
         --before no-reset --after watchdog-reset flash-id >/dev/null; then
         log "watchdog reset command returned nonzero after USB re-enumeration; flash was already verified"
     fi

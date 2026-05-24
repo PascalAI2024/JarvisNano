@@ -105,6 +105,8 @@ devices:
         cs_gpio_num: 12
         dc_gpio_num: -1                  # not used by CO5300 QSPI (command bits in transfer header)
         spi_mode: 0
+        pclk_hz: 20000000                # conservative panel clock; avoids physical QSPI streaking
+        trans_queue_depth: 2
         lcd_cmd_bits: 32
         flags:
           quad_mode: true                # 4 data lines

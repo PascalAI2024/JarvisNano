@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bake the reactive "Pulsing Orb" face into per-state EAF animations.
+"""Bake the reactive premium face into per-state EAF animations.
 
 This produces FOUR looping EAF files — one per face state — for the
 `esp_emote_gfx` `gfx_anim` widget. NO runtime pixel drawing happens on the device;
@@ -9,15 +9,15 @@ runtime code (firmware/emote/reactive_face.c) only selects which baked frames to
 loop, using the live audio amplitude. See docs/REACTIVE_FACE_PLAN.md.
 
 States (names are a HARD CONTRACT with reactive_face.c's RWAVE_ASSET_* strings):
-  rwave_idle    calm breathing orb — single soft glow pulsing at centre (full-loop)
-  rwave_listen  concentric orb stacks, cyan palette; frame 0 = centre orb,
-                frame K-1 = 4 orbs fully lit (mic amplitude → reach)
-  rwave_think   orbiting particle with fading trail circling a dim anchor (full-loop)
-  rwave_speak   same orb-stack geometry as listen, hot amber palette (output RMS)
+  rwave_idle    low amber standby: slow halo, dim core, stable visor
+  rwave_listen  cyan/teal receive state: smooth lower waveform, no sparkle noise
+  rwave_think   violet scanner state: slow sweep, restrained orbit accents
+  rwave_speak   warm amber transmit state: same geometry as listen, hotter core
 
 The listen/speak files are baked as a MONOTONIC amplitude ramp so the runtime can
-play [0..end] where `end` tracks loudness — louder voice = more orbs visible.
-The idle/think files are baked as a self-contained motion loop.
+select small loop windows around the current loudness bucket. Louder voice = a
+deeper, brighter section of the ramp without resetting playback every tick. The
+idle/think files are baked as self-contained motion loops.
 
 Encoder: emit_eaf()/assert_roundtrip() are imported VERBATIM from gen_mascot_eaf.py
 (byte-verified against gfx_eaf_dec.c). Palette is stored UNswapped BGRA; the engine
@@ -125,15 +125,19 @@ OUT_DIR = Path(__file__).resolve().parent / "reactive"
 EAF_DIR = OUT_DIR                          # the .eaf deliverables
 PREVIEW_DIR = OUT_DIR / "preview"          # optional per-frame PNGs
 
-# Brand-exact accents on pure black.
+# Brand/state accents on pure black. AMOLED likes restraint. How terribly modern.
 HOT_CORE = (0xFF, 0xE2, 0x5E)              # #FFE25E hot yellow core
 ACCENT = (0xF5, 0x87, 0x0B)               # #F5870B amber
 DIM = (0x6A, 0x3A, 0x05)                   # dim amber (idle rest / think track)
 WARM = (0xFF, 0xB8, 0x2C)                  # warm intermediate
 CYAN_GLOW = (0x4A, 0xF0, 0xE0)             # cyan accent for listening
+TEAL_DEEP = (0x12, 0x8A, 0x83)             # listening shadow
+THINK = (0x78, 0x86, 0xFF)                 # blue-violet scanner, not pink
+THINK_DIM = (0x18, 0x20, 0x58)
 
 DEFAULT_CANVAS = 466                       # FULL panel — use every pixel of the AMOLED
-DEFAULT_FRAMES = 24                        # smoother motion for the larger canvas
+DEFAULT_FRAMES = 28                        # calmer motion without bloating the asset pack
+PALETTE_COLORS = 96                        # stylized gradients, sane RLE output
 
 # State -> (renderer key). Names are the HARD CONTRACT with reactive_face.c.
 STATE_ORDER = ["rwave_idle", "rwave_listen", "rwave_think", "rwave_speak"]
@@ -193,133 +197,139 @@ def _arc(arr, cx, cy, r, a0, a1, rgb, alpha, width=3, steps=96):
 
 
 def _visor(arr, cx, cy, openness, rgb, alpha):
-    """Draw a warm, non-white visor/sprite core. Looks like a face without using
-    the default emote eyes."""
+    """Draw a calm non-white visor core."""
     img = Image.fromarray(arr, "RGBA")
     draw = ImageDraw.Draw(img, "RGBA")
-    w = int(154 + 18 * openness)
-    h = int(24 + 42 * openness)
+    w = int(138 + 20 * openness)
+    h = int(18 + 32 * openness)
     y = int(cy - 36)
     x0 = int(cx - w / 2)
     x1 = int(cx + w / 2)
     y0 = int(y - h / 2)
     y1 = int(y + h / 2)
-    draw.rounded_rectangle((x0, y0, x1, y1), radius=max(10, h // 2),
-                           outline=(rgb[0], rgb[1], rgb[2], alpha), width=4)
-    draw.line((x0 + 22, y, x1 - 22, y), fill=(HOT_CORE[0], HOT_CORE[1], HOT_CORE[2], min(255, alpha + 45)), width=3)
-    # Tiny asymmetric glints, amber not white.
-    draw.ellipse((x0 + 30, y - 5, x0 + 42, y + 5), fill=(HOT_CORE[0], HOT_CORE[1], HOT_CORE[2], 210))
-    draw.ellipse((x1 - 42, y - 5, x1 - 30, y + 5), fill=(HOT_CORE[0], HOT_CORE[1], HOT_CORE[2], 170))
+    draw.rounded_rectangle((x0, y0, x1, y1), radius=max(8, h // 2),
+                           outline=(rgb[0], rgb[1], rgb[2], alpha), width=3)
+    draw.line((x0 + 24, y, x1 - 24, y),
+              fill=(HOT_CORE[0], HOT_CORE[1], HOT_CORE[2], min(235, alpha + 35)),
+              width=2)
     arr[:] = np.array(img)
 
 
-def _voice_bars(arr, cx, cy, reach, rgb, alpha, phase, bars=17):
+def _voice_bars(arr, cx, cy, reach, rgb, alpha, bars=9):
+    energy = reach * reach * (3.0 - 2.0 * reach)
+    if energy < 0.035:
+        return
     img = Image.fromarray(arr, "RGBA")
     draw = ImageDraw.Draw(img, "RGBA")
-    span = 250
+    span = 214
     step = span / (bars - 1)
     for k in range(bars):
         n = k / (bars - 1)
         env = math.sin(n * math.pi)
-        shimmer = 0.75 + 0.25 * math.sin(phase + k * 0.73)
-        h = 10 + reach * env * shimmer * 130
+        h = 3 + energy * env * 122
         x = cx - span / 2 + k * step
-        draw.rounded_rectangle((x - 4, cy - h / 2, x + 4, cy + h / 2),
-                               radius=4,
-                               fill=(rgb[0], rgb[1], rgb[2], int(alpha * (0.45 + 0.55 * env))))
+        w = 5 + 2 * env
+        draw.rounded_rectangle((x - w / 2, cy - h / 2, x + w / 2, cy + h / 2),
+                               radius=5,
+                               fill=(rgb[0], rgb[1], rgb[2],
+                                     int(alpha * energy * (0.30 + 0.70 * env))))
     arr[:] = np.array(img)
 
 
-def _hud_shell(arr, cx, cy, phase, mood=0.0):
-    """Round AMOLED-friendly HUD: segmented arcs, particles, and dark core."""
-    # Glow bed
-    _soft_orb(arr, cx, cy, 32 + 8 * math.sin(phase), ACCENT, 70, feather=90)
+def _premium_shell(arr, cx, cy, phase, primary, secondary, mood=0.0):
+    """Round AMOLED-friendly face shell: one halo and restrained instrument marks."""
+    pulse = 0.5 + 0.5 * math.sin(phase)
+    _soft_orb(arr, cx, cy + 12, 34 + 14 * mood + 3 * pulse, primary,
+              int(20 + 32 * mood), feather=56)
 
-    for idx, r in enumerate((102, 146, 190)):
-        spin = phase * (0.22 + idx * 0.07) + idx
-        segs = 5 + idx
-        for s in range(segs):
-            base = spin + s * (2 * math.pi / segs)
-            length = 0.30 + mood * 0.22
-            color = HOT_CORE if idx == 0 else (WARM if idx == 1 else ACCENT)
-            _arc(arr, cx, cy, r, base, base + length, color, 105 - idx * 18, width=max(2, 5 - idx))
+    outer = 178 + 2 * pulse
+    inner = 118 + 2 * math.sin(phase + 1.2)
+    spin = phase * 0.07
+    for s in range(3):
+        base = spin + s * math.tau / 3
+        _arc(arr, cx, cy, outer, base + 0.10, base + 0.52,
+             secondary, int(42 + 34 * mood), width=3, steps=42)
+    for s in range(2):
+        base = -spin * 0.7 + s * math.pi + 0.38
+        _arc(arr, cx, cy, inner, base, base + 0.26,
+             primary, int(72 + 38 * mood), width=4, steps=34)
 
-    # Small orbit particles.
-    for p in range(8):
-        a = phase * (0.55 if p % 2 else -0.42) + p * math.tau / 8
-        r = 120 + (p % 3) * 26
-        _soft_orb(arr, cx + r * math.cos(a), cy + r * math.sin(a), 4.5,
-                  HOT_CORE if p % 3 == 0 else ACCENT, 135, feather=7)
+    for a in (-math.pi * 0.72, -math.pi * 0.30, math.pi * 0.30, math.pi * 0.72):
+        r0 = 150
+        r1 = 158
+        _stroke_poly(arr,
+                     [(cx + r0 * math.cos(a), cy + r0 * math.sin(a)),
+                      (cx + r1 * math.cos(a), cy + r1 * math.sin(a))],
+                     primary, int(38 + 42 * mood), width=2)
 
 
-def _round_mask(arr, canvas):
-    """Clip everything outside the inscribed circle to transparent."""
-    yy, xx = np.mgrid[0:canvas, 0:canvas]
-    c = (canvas - 1) / 2.0
-    r = (canvas / 2.0) - 2.0  # 2px margin for clean edge
-    outside = (xx - c) ** 2 + (yy - c) ** 2 > r ** 2
-    arr[:, :, 3][outside] = 0
-    return arr
+def _finish_frame(arr, canvas):
+    """Composite the drawn glow onto opaque black so every baked frame clears."""
+    out = np.zeros((canvas, canvas, 4), dtype=np.uint8)
+    alpha = arr[:, :, 3:4].astype(np.uint16)
+    rgb = (arr[:, :, :3].astype(np.uint16) * alpha) // 255
+    rgb[rgb < 7] = 0
+    rgb = np.minimum(((rgb + 3) // 6) * 6, 255)
+    out[:, :, :3] = rgb.astype(np.uint8)
+    out[:, :, 3] = 255
+    return out
 
 
 # ---- per-state frame renderers --------------------------------------------
 def render_idle_frame(canvas, i, n):
-    """Jarvis idle sprite: breathing HUD shell + visor. No default white eyes."""
+    """Idle sprite: slow amber breathing with a stable center."""
     arr = _blank(canvas)
     cx = cy = (canvas - 1) / 2.0
     phase = 2 * math.pi * (i / n)
     breath = 0.5 + 0.5 * math.sin(phase)
-    _hud_shell(arr, cx, cy, phase, mood=0.15 + 0.18 * breath)
-    _visor(arr, cx, cy, 0.16 + 0.08 * breath, ACCENT, 165 + int(55 * breath))
-    _arc(arr, cx, cy + 48, 42, math.radians(22), math.radians(158), HOT_CORE, 135, width=3, steps=48)
-    return _round_mask(arr, canvas)
+    _premium_shell(arr, cx, cy, phase, ACCENT, DIM, mood=0.10 + 0.16 * breath)
+    _soft_orb(arr, cx, cy + 22, 26 + 5 * breath, ACCENT, 44 + int(26 * breath), feather=42)
+    _visor(arr, cx, cy, 0.10 + 0.06 * breath, ACCENT, 140 + int(42 * breath))
+    return _finish_frame(arr, canvas)
 
 
 def render_ramp_frame(canvas, i, n, hot_bias):
-    """Amplitude sprite. It uses HUD rings + visor + segmented bars, not a blob."""
+    """Amplitude sprite: clean state colour, stable geometry, smooth energy gain."""
     arr = _blank(canvas)
     reach = i / max(1, (n - 1))                    # 0..1
     cx = cy = (canvas - 1) / 2.0
-    phase = reach * math.tau * 1.25
 
-    rgb = (_lerp_col(CYAN_GLOW, HOT_CORE, 0.18) if hot_bias < 0.5
-           else _lerp_col(ACCENT, HOT_CORE, 0.72))
-    accent = CYAN_GLOW if hot_bias < 0.5 else ACCENT
+    if hot_bias < 0.5:
+        rgb = _lerp_col(CYAN_GLOW, HOT_CORE, 0.10)
+        accent = CYAN_GLOW
+        shell = TEAL_DEEP
+    else:
+        rgb = _lerp_col(WARM, HOT_CORE, 0.45)
+        accent = ACCENT
+        shell = DIM
 
-    _hud_shell(arr, cx, cy, phase, mood=reach)
-    _soft_orb(arr, cx, cy + 8, 35 + reach * 92, accent, int(35 + reach * 115), feather=52)
-    _visor(arr, cx, cy, 0.25 + reach * 0.58, rgb, int(155 + reach * 85))
-    _voice_bars(arr, cx, cy + 78, reach, rgb, int(105 + reach * 130), phase)
-    # Energy teeth at the bottom, giving the sprite more character on loud frames.
-    for k in range(9):
-        a = math.radians(212 + k * 14)
-        r0 = 156
-        r1 = 172 + reach * 26 * (0.6 + 0.4 * math.sin(phase + k))
-        _stroke_poly(arr,
-                     [(cx + r0 * math.cos(a), cy + r0 * math.sin(a)),
-                      (cx + r1 * math.cos(a), cy + r1 * math.sin(a))],
-                     rgb, int(70 + reach * 105), width=2)
-    return _round_mask(arr, canvas)
+    phase = reach * math.tau
+    _premium_shell(arr, cx, cy, phase, accent, shell, mood=0.18 + 0.58 * reach)
+    _soft_orb(arr, cx, cy + 28, 30 + reach * 42, accent,
+              int(24 + reach * 76), feather=42)
+    _visor(arr, cx, cy, 0.18 + reach * 0.42, rgb, int(150 + reach * 70))
+    _voice_bars(arr, cx, cy + 82, reach, rgb, int(95 + reach * 120))
+    return _finish_frame(arr, canvas)
 
 
 def render_think_frame(canvas, i, n):
-    """Thinking sprite: scanner ring, orbit particles, narrowed visor."""
+    """Thinking sprite: slow violet scanner, no glitter storm."""
     arr = _blank(canvas)
     cx = cy = (canvas - 1) / 2.0
     phase = i / n * math.tau
-    _hud_shell(arr, cx, cy, phase, mood=0.35)
-    _visor(arr, cx, cy, 0.08, ACCENT, 170)
+    _premium_shell(arr, cx, cy, phase, THINK, THINK_DIM, mood=0.34)
+    _visor(arr, cx, cy, 0.06, THINK, 168)
 
-    sweep = phase * 1.35
-    _arc(arr, cx, cy, 174, sweep, sweep + math.radians(72), HOT_CORE, 210, width=6, steps=72)
-    _arc(arr, cx, cy, 132, -sweep * 0.8, -sweep * 0.8 + math.radians(42), WARM, 145, width=4, steps=48)
-    for trail in range(6):
-        a = sweep - trail * 0.26
-        r = 174
-        _soft_orb(arr, cx + r * math.cos(a), cy + r * math.sin(a), 5.5,
-                  HOT_CORE if trail == 0 else WARM, int(210 / (trail + 1)), feather=10)
+    sweep = phase * 0.85
+    _arc(arr, cx, cy, 174, sweep, sweep + math.radians(54), THINK, 198, width=5, steps=58)
+    _arc(arr, cx, cy, 132, -sweep * 0.72, -sweep * 0.72 + math.radians(34),
+         ACCENT, 110, width=3, steps=38)
+    a = sweep
+    r = 174
+    _soft_orb(arr, cx + r * math.cos(a), cy + r * math.sin(a), 4.0,
+              THINK, 145, feather=8)
 
-    return _round_mask(arr, canvas)
+    return _finish_frame(arr, canvas)
 
 
 RENDERERS = {
@@ -338,29 +348,31 @@ RENDERERS = {
 def build_palette(frames_rgba):
     """Build one shared <=256-colour BGRA palette (index 0 transparent) from all
     frames of a state, plus a fast (r,g,b)->index lookup."""
-    # Collect semi-opaque+ colours across every frame, quantize together.
-    # Threshold lowered from 128 to 40: the Pulsing Orb design uses soft
-    # Gaussian glow with alpha often in 20-120 range at low reach, so a
-    # 128 threshold would discard ALL pixels from early ramp frames.
+    # Index 1 is opaque black. Index 0 remains transparent for format hygiene,
+    # but the baked frames deliberately paint black so old pixels get cleared.
     stack = []
     for arr in frames_rgba:
-        opaque = arr[:, :, 3] >= 40
-        stack.append(arr[:, :, :3][opaque])
+        lit = (arr[:, :, 3] >= 40) & (arr[:, :, :3].max(axis=2) > 7)
+        stack.append(arr[:, :, :3][lit])
     allpx = np.concatenate(stack, axis=0) if stack else np.zeros((1, 3), np.uint8)
     pal_src = Image.fromarray(allpx.reshape(-1, 1, 3).astype(np.uint8), "RGB")
-    pal_img = pal_src.quantize(colors=255, method=Image.MEDIANCUT, dither=Image.NONE)
+    pal_img = pal_src.quantize(colors=PALETTE_COLORS - 1, method=Image.MEDIANCUT, dither=Image.NONE)
     pal_rgb = pal_img.getpalette() or []
-    ncol = min(255, len(pal_rgb) // 3)               # PIL may return < 255 colours
-    palette_bgra = [(0, 0, 0, 0)]
-    pal_list = []
+    ncol = min(PALETTE_COLORS - 1, len(pal_rgb) // 3)
+    palette_bgra = [(0, 0, 0, 0), (0, 0, 0, 255)]
+    pal_list = [(0, 0, 0)]
     for k in range(ncol):
         r, g, b = pal_rgb[k * 3], pal_rgb[k * 3 + 1], pal_rgb[k * 3 + 2]
+        if r <= 5 and g <= 5 and b <= 5:
+            continue
         palette_bgra.append((b, g, r, 255))
         pal_list.append((r, g, b))
+        if len(palette_bgra) >= 256:
+            break
     # pad palette to 256 entries (emit_eaf writes 256 BGRA slots regardless)
     while len(palette_bgra) < 256:
         palette_bgra.append((0, 0, 0, 0))
-    pal_arr = np.array(pal_list, dtype=np.int16)     # 255x3, palette index k -> k+1
+    pal_arr = np.array(pal_list, dtype=np.int16)     # palette index k -> k+1
     return palette_bgra, pal_arr
 
 
@@ -368,14 +380,29 @@ def quantize_frame(arr, pal_arr, alpha_cutoff=40):
     """Map an RGBA frame to 8-bit palette indices using the shared palette.
     Transparent pixels -> 0; else nearest palette colour -> 1..255."""
     h, w = arr.shape[:2]
-    rgb = arr[:, :, :3].astype(np.int16).reshape(-1, 3)
-    # nearest-colour in RGB (small palette, brute force is fine for host tooling)
-    d = ((rgb[:, None, :] - pal_arr[None, :, :]) ** 2).sum(axis=2)   # (HW,255)
-    idx = d.argmin(axis=1).astype(np.uint8) + 1                      # 1..255
-    idx = idx.reshape(h, w)
+    rgb = arr[:, :, :3].astype(np.int32).reshape(-1, 3)
+    pal = pal_arr.astype(np.int32)
+    idx_flat = np.empty(rgb.shape[0], dtype=np.uint8)
+    # Chunked nearest-colour in RGB. int32 is intentional: int16 squared wraps
+    # and turns black into bright palette colours. Ask me how I know.
+    chunk = 32768
+    for off in range(0, rgb.shape[0], chunk):
+        cur = rgb[off:off + chunk]
+        d = ((cur[:, None, :] - pal[None, :, :]) ** 2).sum(axis=2)
+        idx_flat[off:off + chunk] = d.argmin(axis=1).astype(np.uint8) + 1
+    idx = idx_flat.reshape(h, w)
     transparent = arr[:, :, 3] < alpha_cutoff
     idx[transparent] = 0
     return [bytes(idx[y].tolist()) for y in range(h)]
+
+
+def _rows_to_preview_image(rows, palette_bgra):
+    """Render quantized EAF rows back to RGBA so previews show baked colours."""
+    h = len(rows)
+    w = len(rows[0])
+    idx = np.frombuffer(b"".join(rows), dtype=np.uint8).reshape(h, w)
+    lut = np.array([(r, g, b, a) for b, g, r, a in palette_bgra], dtype=np.uint8)
+    return Image.fromarray(lut[idx], "RGBA")
 
 
 # ----------------------------------------------------------------------------
@@ -400,29 +427,40 @@ def check_state(state, canvas, n_frames):
     """Host-side sanity check for the baked design before it reaches hardware."""
     rnd = RENDERERS[state]
     frames = [rnd(canvas, i, n_frames) for i in range(n_frames)]
-    alpha = [int((fr[:, :, 3] >= 40).sum()) for fr in frames]
+    lit = [int((fr[:, :, :3].max(axis=2) >= 16).sum()) for fr in frames]
+    energy = [int(fr[:, :, :3].max(axis=2).sum()) for fr in frames]
+    transparent = max(int((fr[:, :, 3] < 255).sum()) for fr in frames)
     brightest = max(int(fr[:, :, :3].max()) for fr in frames)
     whiteish = max(int(((fr[:, :, 0] > 245) & (fr[:, :, 1] > 245) & (fr[:, :, 2] > 245)
                         & (fr[:, :, 3] >= 40)).sum()) for fr in frames)
-    if min(alpha) == 0:
+    pinkish = max(int(((fr[:, :, 0] > 145) & (fr[:, :, 1] < 115) & (fr[:, :, 2] > 145)
+                       & (fr[:, :, 3] >= 40)).sum()) for fr in frames)
+    if min(lit) == 0:
         raise SystemExit(f"{state}: blank frame detected")
+    if transparent:
+        raise SystemExit(f"{state}: {transparent} transparent pixels detected")
     if whiteish:
         raise SystemExit(f"{state}: {whiteish} white-ish pixels detected")
-    if state in ("rwave_listen", "rwave_speak") and alpha[-1] <= alpha[0]:
+    if pinkish:
+        raise SystemExit(f"{state}: {pinkish} pink/magenta pixels detected")
+    if state in ("rwave_listen", "rwave_speak") and energy[-1] <= energy[0]:
         raise SystemExit(f"{state}: ramp does not gain visible energy")
-    print(f"  [{state}] check OK: alpha pixels {min(alpha)}..{max(alpha)}, "
-          f"brightest channel={brightest}, white-ish pixels=0")
+    print(f"  [{state}] check OK: lit pixels {min(lit)}..{max(lit)}, "
+          f"brightest channel={brightest}, transparent=0, pink-ish=0, white-ish=0")
 
 
 def write_preview(state, canvas, n_frames):
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
     rnd = RENDERERS[state]
     pad = 8
-    tiles = [Image.fromarray(rnd(canvas, i, n_frames), "RGBA") for i in range(n_frames)]
+    frames_rgba = [rnd(canvas, i, n_frames) for i in range(n_frames)]
+    palette_bgra, pal_arr = build_palette(frames_rgba)
+    frames_rows = [quantize_frame(arr, pal_arr) for arr in frames_rgba]
+    tiles = [_rows_to_preview_image(rows, palette_bgra) for rows in frames_rows]
     cols = min(n_frames, 8)
     rows = (n_frames + cols - 1) // cols
     sheet = Image.new("RGBA", (cols * canvas + pad * (cols + 1),
-                               rows * canvas + pad * (rows + 1)), (8, 8, 10, 255))
+                               rows * canvas + pad * (rows + 1)), (0, 0, 0, 255))
     for k, im in enumerate(tiles):
         r, c = divmod(k, cols)
         sheet.alpha_composite(im, (pad + c * (canvas + pad), pad + r * (canvas + pad)))

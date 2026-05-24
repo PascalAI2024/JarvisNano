@@ -26,6 +26,64 @@ After sending the `setup` frame, the client must wait for a `setupComplete` serv
 
 Source: `cap_gemini_live.c:580, 927-944` (setup-poll drain loop and event wait).
 
+**[2026-05-24] Push-to-talk must use manual activity detection**
+
+The board's UI is push-to-talk: tap to start listening, speak, tap/release to
+commit the turn. In this mode the setup frame disables automatic activity
+detection:
+
+```json
+{
+  "setup": {
+    "realtimeInputConfig": {
+      "automaticActivityDetection": { "disabled": true }
+    }
+  }
+}
+```
+
+The client then sends:
+
+```json
+{"realtimeInput":{"activityStart":{}}}
+```
+
+before streaming audio frames, and:
+
+```json
+{"realtimeInput":{"activityEnd":{}}}
+```
+
+when the user ends input.
+
+Do not use `audioStreamEnd` as the push-to-talk commit signal. On the live
+Waveshare board it left the session in `THINKING` with `frames=1` after
+`setupComplete`, no `serverContent`, and `audio_parts=0`. Switching to explicit
+`activityStart` / `activityEnd` produced model audio and clean turn completion.
+
+Source: [Live API reference](https://ai.google.dev/api/live) and [Live API
+capabilities guide](https://ai.google.dev/gemini-api/docs/live-api/capabilities);
+`firmware/components/cap_gemini_live/src/cap_gemini_live.c`.
+
+**[2026-05-24] Prefer codec capture over raw I2S on Waveshare**
+
+The Waveshare board exposes both codec device handles and raw I2S peripheral
+handles. The raw handle existing is not proof it should be used for Gemini
+capture. The voice path should prefer `esp_codec_dev_read()` from the ES7210
+codec and use raw I2S only as fallback.
+
+Live verification after the fix showed codec capture only:
+
+```text
+tx_codec_reads > 0
+tx_raw_reads=0
+tx_send_failures=0
+tx_read_failures=0
+```
+
+This matters because the previous raw-first capture path made the UI look alive
+while Gemini received no useful committed audio turn.
+
 **[2026-05-21] Tool call frame structure**
 
 Incoming tool call:

@@ -23,6 +23,7 @@ sdkconfig.ci
 # (may contain absolute paths and personal config)
 .claude/
 .cursor/
+.antigravitycli/
 
 # Local diagnostic scratch (firmware logs, support emails, etc.)
 .private/

@@ -1,6 +1,6 @@
 # Next Session Handoff
 
-Last updated: **2026-05-21**.
+Last updated: **2026-05-24**.
 
 This is the fast path back into the current hardware state. Use USB first. AP
 checks are only runtime confirmation after USB proves the firmware booted.
@@ -72,6 +72,20 @@ generated `esp-claw/` checkout. That directory is ignored, so treat the shell as
 local diagnostic state unless it is later promoted into tracked bootstrap
 patches.
 
+For Wi-Fi runtime diagnostics, use the live-device harness:
+
+```bash
+export JARVIS_DEVICE_HOST=<device-host-or-ip>
+scripts/live-device.py status --host $JARVIS_DEVICE_HOST
+scripts/live-device.py screen --host $JARVIS_DEVICE_HOST --save-sd
+scripts/live-device.py gemini-cycle --host $JARVIS_DEVICE_HOST --text "Say one short sentence." --report
+scripts/live-device.py logs --host $JARVIS_DEVICE_HOST --grep touch,rwave,gemini,audio,ws
+```
+
+See [`docs/LIVE_DEVICE_DEBUG.md`](./LIVE_DEVICE_DEBUG.md). It classifies the
+current bad signatures instead of making the next agent rediscover them with
+curl and optimism.
+
 ## Do Not Repeat
 
 - Do not start with AP access when the board is freshly flashed or confused.
@@ -80,22 +94,44 @@ patches.
 - Do not assume `hard-reset` means app boot on this board. It can be a very
   efficient way to boot exactly the wrong thing.
 
-## Next Real Bug
+## Current Firmware State (2026-05-24)
 
-The firmware boots and app services come up, but USB logs spam:
-
-```text
-E (...) TP: esp_lcd_touch_read_data(57): Touch controller must be initialized
-E (...) TP: esp_lcd_touch_get_coordinates(71): Touch controller must be initialized
-```
-
-Next session should investigate the Waveshare touch init path:
-
-1. Confirm whether `CST9217` is declared and initialized by board manager.
-2. Check whether touch polling starts even when touch init fails.
-3. Either fix the touch device init or gate the polling loop on a valid touch
-   handle.
-4. Keep USB monitoring as the primary proof while iterating.
+- **Boot**: current flashed build boots with STA Wi-Fi and HTTP healthy. Use
+  `JARVIS_DEVICE_HOST` locally; do not commit LAN IPs.
+- **Route-slot incident**: adding display diagnostics initially boot-looped with
+  `httpd_register_uri_handler: no slots left`; fixed by raising HTTP
+  `max_uri_handlers` to 40.
+- **Display diagnostics**:
+  - `GET /api/display/snapshot.json` gives lightweight animation heartbeat data.
+  - `GET /api/display/snapshot.ppm?save=1` streams a PPM and saves a copy under
+    `/sdcard/diagnostics/`.
+  - `GET/POST /api/display/face` reads and forces reactive face state.
+- **Animation/display transfer fix**: the emote flush path now waits for CO5300
+  SPI transfer completion before notifying GFX. Render strips use internal DMA
+  buffers, avoid `.buff_spiram`, and run 12-row chunks with QSPI at 20 MHz and
+  queue depth 2. This keeps transfers under the board's `max_transfer_sz` and
+  removed the physical horizontal green lines that did not appear in framebuffer
+  screenshots. Verified: `driver_ticks` and `frame_id` continue increasing after
+  25+ seconds and after a full screenshot capture.
+- **Screenshot color fix**: capture conversion byte-swaps panel-order RGB565 and
+  maps the old transparent/pink key to black. Verified local PNG:
+  `.build_logs/live-device/20260524-004411-screen.png`.
+- **Gemini Live text path**: verified start/text/stop over Wi-Fi. Text requests
+  produce `audio_parts > 0`, `turn_complete=1`, `generation_complete=1`, and
+  resume to `LISTENING`.
+- **Gemini Live voice path**: push-to-talk uses manual activity boundaries:
+  `activityStart`, codec-captured PCM frames, then `activityEnd`. Do not revert
+  this to `audioStreamEnd`; that left the board in `THINKING` with no
+  `serverContent`.
+- **Mic**: voice capture now prefers the ES7210 codec path. Verified counters:
+  `tx_codec_reads > 0`, `tx_raw_reads=0`, `tx_send_failures=0`,
+  `tx_read_failures=0`.
+- **Speaker**: verified indirectly through Gemini voice response:
+  `audio_parts > 0`, `turn_complete=1`, `generation_complete=1`, `drops=0`.
+  Acoustic proof still requires hearing it or adding a tone/loopback route.
+- **Touch route**: short tap routes to Gemini Live. First tap starts listening;
+  the next tap ends the input stream. Long press remains available for local
+  hardware demo behavior.
 
 ## Useful Commands
 

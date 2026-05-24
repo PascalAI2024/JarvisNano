@@ -77,6 +77,35 @@ Source: `esp_emote_gfx/scripts/` (local managed component copy).
 
 ---
 
+## Animation Performance: Known Issues & Fixes (2026-05-23)
+
+> Full analysis: **[docs/ANIMATION_OPTIMIZATION.md](../ANIMATION_OPTIMIZATION.md)**
+
+### 🔴 Root causes of choppy/noisy animation (in priority order)
+
+**1. Compiler is in DEBUG mode (`-O0`) — single biggest issue**
+- Config: `CONFIG_COMPILER_OPTIMIZATION_DEBUG=y` in `sdkconfig`
+- Impact: 3–5× slower pixel math, EAF decode, and lerp calculations
+- Fix: `idf.py menuconfig` → Compiler options → Optimization Level → **Performance (-O2)**
+
+**2. GFX engine FPS capped at 10** (not 20/24 as intended)
+- Source: `esp-claw/components/common/emote/emote.c` line 155: `.fps = 10`
+- The `gfx_render_loop_task` (gfx_core.c:185–210) only renders 10× per second regardless
+  of what `gfx_anim_set_segment(…, fps, …)` requests
+- Fix: change to `.fps = 30` in `emote_get_default_config()`
+
+**3. Partial render buffer too small (1.6% of screen = 29 flush strips per frame)**
+- Source: `emote.c` line 158: `.buf_pixels = (size_t)s_lcd_width * 16` = 7,456 pixels
+- At 30 FPS this would require 870 SPI transactions/second
+- Fix: change to `.buf_pixels = (size_t)s_lcd_width * (s_lcd_height / 4)` ≈ quarter-screen strips
+
+### ✅ What IS correctly configured
+- Double buffering ON: `.double_buffer = true`
+- DMA enabled: `.buff_dma = true`
+- CPU at 240 MHz, PSRAM Octal at 80 MHz
+- GDMA handlers in IRAM (`CONFIG_GDMA_CTRL_FUNC_IN_IRAM=y`)
+- PSRAM is DMA-capable (`CONFIG_SOC_PSRAM_DMA_CAPABLE=y`)
+
 ## Open questions
 
 - Can `gfx_motion` / `gfx_motion_scene` transform params be updated each frame from an audio RMS value? If yes, this is the cleaner reactive path than per-state AAF segment selection.
@@ -90,3 +119,4 @@ Source: `esp_emote_gfx/scripts/` (local managed component copy).
 - [asset-pipeline.md](./asset-pipeline.md) — AAF packer, EAF encoder, `emote_assets.bin` build.
 - [waveshare-amoled-175.md](./waveshare-amoled-175.md) — CO5300 panel specs (466×466, QSPI).
 - [audio-es8311-es7210.md](./audio-es8311-es7210.md) — Audio RMS source for amplitude-reactive face.
+- [ANIMATION_OPTIMIZATION.md](../ANIMATION_OPTIMIZATION.md) — Full performance audit: bandwidth budget, all fixes with line numbers, change sequence.

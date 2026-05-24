@@ -110,6 +110,117 @@ copy_jarvis_brain() {
     cp -f "$src"/src/*.c "$dst/src/"
 }
 
+copy_emote_runtime() {
+    # The emote runtime is patched enough now (reactive face, display mirror,
+    # CO5300 flush sync, small internal-DMA render strips) that keeping it as scattered
+    # string patches is a fine way to rediscover old bugs. Keep the verified
+    # source in firmware/emote and mirror it into the generated ESP-Claw tree.
+    local src="$ROOT/firmware/emote"
+    local dst="$ESP_CLAW_DIR/components/common/emote"
+    [ -f "$src/emote.c" ] || die "missing vendored emote.c at $src/emote.c"
+    [ -f "$src/emote.h" ] || die "missing vendored emote.h at $src/emote.h"
+    [ -f "$src/CMakeLists.txt" ] || die "missing vendored emote CMakeLists at $src/CMakeLists.txt"
+    [ -d "$dst/include" ] || die "emote component not found at $dst"
+    log "copying patched emote runtime → upstream tree"
+    cp -f "$src/emote.c" "$dst/emote.c"
+    cp -f "$src/emote.h" "$dst/include/emote.h"
+    cp -f "$src/CMakeLists.txt" "$dst/CMakeLists.txt"
+}
+
+copy_http_display_diagnostics() {
+    # Runtime display/screenshot diagnostics for the live-device harness. The
+    # endpoint source is vendored because esp-claw/ is a gitignored generated
+    # checkout and clean bootstrap must reproduce the flashed build.
+    local src="$ROOT/firmware/http_server/http_server_display_api.c"
+    local touch_src="$ROOT/firmware/http_server/http_server_touch_api.c"
+    local audio_src="$ROOT/firmware/http_server/http_server_audio_level_api.c"
+    local dst_dir="$ESP_CLAW_DIR/application/edge_agent/components/http_server"
+    local cmake="$dst_dir/CMakeLists.txt"
+    local priv="$dst_dir/http_server_priv.h"
+    local core="$dst_dir/http_server_core.c"
+    local public_h="$dst_dir/include/http_server.h"
+    [ -f "$src" ] || die "missing vendored display HTTP API at $src"
+    [ -f "$touch_src" ] || die "missing vendored touch HTTP API at $touch_src"
+    [ -f "$audio_src" ] || die "missing vendored audio-level HTTP API at $audio_src"
+    [ -d "$dst_dir" ] || die "http_server component not found at $dst_dir"
+    log "copying display/touch/audio diagnostics HTTP API → upstream tree"
+    cp -f "$src" "$dst_dir/http_server_display_api.c"
+    cp -f "$touch_src" "$dst_dir/http_server_touch_api.c"
+    cp -f "$audio_src" "$dst_dir/http_server_audio_level_api.c"
+    python3 - "$cmake" "$priv" "$core" "$public_h" <<'PY'
+import pathlib
+import sys
+
+cmake = pathlib.Path(sys.argv[1])
+priv = pathlib.Path(sys.argv[2])
+core = pathlib.Path(sys.argv[3])
+public_h = pathlib.Path(sys.argv[4])
+
+s = cmake.read_text()
+if '"http_server_display_api.c"' not in s:
+    anchor = '        "http_server_camera_api.c"\n'
+    if anchor not in s:
+        raise SystemExit("http_server CMake source anchor missing")
+    s = s.replace(anchor, anchor + '        "http_server_display_api.c"\n', 1)
+if '"http_server_touch_api.c"' not in s:
+    anchor = '        "http_server_display_api.c"\n'
+    if anchor not in s:
+        raise SystemExit("http_server CMake touch source anchor missing")
+    s = s.replace(anchor, anchor + '        "http_server_touch_api.c"\n', 1)
+for dep in ("heap", "emote"):
+    if f"        {dep}\n" not in s:
+        anchor = "        esp_timer\n"
+        if anchor not in s:
+            raise SystemExit("http_server CMake REQUIRES anchor missing")
+        s = s.replace(anchor, anchor + f"        {dep}\n", 1)
+cmake.write_text(s)
+
+h = priv.read_text()
+decl = "esp_err_t http_server_register_display_routes(httpd_handle_t server);\n"
+if decl not in h:
+    anchor = "esp_err_t http_server_register_camera_routes(httpd_handle_t server);\n"
+    if anchor not in h:
+        raise SystemExit("http_server_priv display decl anchor missing")
+    h = h.replace(anchor, anchor + decl, 1)
+touch_decl = "esp_err_t http_server_register_touch_routes(httpd_handle_t server);\n"
+if touch_decl not in h:
+    anchor = "esp_err_t http_server_register_display_routes(httpd_handle_t server);\n"
+    if anchor not in h:
+        raise SystemExit("http_server_priv touch decl anchor missing")
+    h = h.replace(anchor, anchor + touch_decl, 1)
+priv.write_text(h)
+
+c = core.read_text()
+c = c.replace("    config.max_uri_handlers = 32;\n", "    config.max_uri_handlers = 44;\n")
+c = c.replace("    config.max_uri_handlers = 40;\n", "    config.max_uri_handlers = 44;\n")
+if "http_server_register_display_routes" not in c:
+    anchor = '    ESP_RETURN_ON_ERROR(http_server_register_camera_routes(s_ctx.server), TAG, "Failed to register camera routes");\n'
+    if anchor not in c:
+        raise SystemExit("http_server_core display route anchor missing")
+    c = c.replace(anchor, anchor + '    ESP_RETURN_ON_ERROR(http_server_register_display_routes(s_ctx.server), TAG, "Failed to register display routes");\n', 1)
+if "http_server_register_touch_routes" not in c:
+    anchor = '    ESP_RETURN_ON_ERROR(http_server_register_display_routes(s_ctx.server), TAG, "Failed to register display routes");\n'
+    if anchor not in c:
+        raise SystemExit("http_server_core touch route anchor missing")
+    c = c.replace(anchor, anchor + '    ESP_RETURN_ON_ERROR(http_server_register_touch_routes(s_ctx.server), TAG, "Failed to register touch routes");\n', 1)
+core.write_text(c)
+
+hp = public_h.read_text()
+svc_fields = (
+    "    esp_err_t (*touch_get_diagnostics)(char *out, size_t out_size);\n"
+    "    esp_err_t (*touch_run_scene)(const char *scene_name);\n"
+)
+if "touch_get_diagnostics" not in hp:
+    anchor = "    bool (*gemini_live_is_active)(void);\n"
+    if anchor not in hp:
+        raise SystemExit("http_server services touch anchor missing")
+    hp = hp.replace(anchor, anchor + svc_fields, 1)
+public_h.write_text(hp)
+
+print("display/touch diagnostics HTTP API wired")
+PY
+}
+
 apply_patch() {
     local target="$ESP_CLAW_DIR/application/edge_agent/managed_components/espressif__esp_board_manager/peripherals/periph_i2s/periph_i2s.py"
     if [ ! -f "$target" ]; then
@@ -172,6 +283,25 @@ board = os.environ["BOARD_NAME"]
 cfg = Path("sdkconfig")
 bm = Path("components/gen_bmgr_codes/board_manager.defaults")
 
+def force_perf_build(text: str) -> str:
+    # Keep the device build out of -O0. The AMOLED renderer and audio path are
+    # too timing-sensitive for debug optimization; the symptoms look like bad UX,
+    # because technically they are.
+    replacements = {
+        "CONFIG_COMPILER_OPTIMIZATION_DEBUG=y": "# CONFIG_COMPILER_OPTIMIZATION_DEBUG is not set",
+        "# CONFIG_COMPILER_OPTIMIZATION_PERF is not set": "CONFIG_COMPILER_OPTIMIZATION_PERF=y",
+        "CONFIG_COMPILER_OPTIMIZATION_LEVEL_DEBUG=y": "# CONFIG_COMPILER_OPTIMIZATION_LEVEL_DEBUG is not set",
+        "CONFIG_COMPILER_OPTIMIZATION_DEFAULT=y": "# CONFIG_COMPILER_OPTIMIZATION_DEFAULT is not set",
+        "# CONFIG_COMPILER_OPTIMIZATION_LEVEL_RELEASE is not set": "CONFIG_COMPILER_OPTIMIZATION_LEVEL_RELEASE=y",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    if "CONFIG_COMPILER_OPTIMIZATION_PERF=y" not in text:
+        text += "\nCONFIG_COMPILER_OPTIMIZATION_PERF=y\n"
+    if "CONFIG_COMPILER_OPTIMIZATION_LEVEL_RELEASE=y" not in text:
+        text += "CONFIG_COMPILER_OPTIMIZATION_LEVEL_RELEASE=y\n"
+    return text
+
 if cfg.exists():
     s = cfg.read_text()
 else:
@@ -199,6 +329,7 @@ elif board == "esp32s3_touch_amoled_1_75":
     s = s.replace("# CONFIG_ESPTOOLPY_FLASHSIZE_16MB is not set", "CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y")
     s = s.replace("CONFIG_ESPTOOLPY_FLASHSIZE=\"2MB\"", "CONFIG_ESPTOOLPY_FLASHSIZE=\"16MB\"")
 
+s = force_perf_build(s)
 cfg.write_text(s)
 PY
                   idf.py build' \
@@ -712,6 +843,34 @@ print("patched", cmake)
 PY
 }
 
+apply_gemini_http_action_response_patch() {
+    local api="$ESP_CLAW_DIR/application/edge_agent/components/http_server/http_server_gemini_api.c"
+    if [ ! -f "$api" ]; then
+        log "Gemini HTTP API source not found — skipping action response patch"
+        return
+    fi
+    if grep -q "action_copy" "$api" 2>/dev/null; then
+        log "Gemini HTTP action response patch already applied"
+        return
+    fi
+    log "applying Gemini HTTP action response lifetime patch"
+    python3 - <<PY
+import pathlib
+p = pathlib.Path(r"$api")
+s = p.read_text()
+old = '    esp_err_t err = ESP_OK;\\n    const char *status = "ok";\\n\\n'
+new = '    esp_err_t err = ESP_OK;\\n    const char *status = "ok";\\n    char action_copy[24];\\n    strlcpy(action_copy, action, sizeof(action_copy));\\n\\n'
+if old not in s:
+    raise SystemExit("could not locate Gemini HTTP action locals")
+s = s.replace(old, new, 1)
+s = s.replace('    cJSON_AddStringToObject(resp, "action", action);\\n',
+              '    cJSON_AddStringToObject(resp, "action", action_copy);\\n',
+              1)
+p.write_text(s)
+print("patched", p)
+PY
+}
+
 apply_gemini_live_main_require_patch() {
     local target="$ESP_CLAW_DIR/application/edge_agent/main/CMakeLists.txt"
     if [ ! -f "$target" ]; then
@@ -788,6 +947,131 @@ new = (
 )
 if old not in s:
     raise SystemExit("could not locate gemini-live touch monitor block in main.c — upstream may have changed")
+p.write_text(s.replace(old, new, 1))
+print("patched", p)
+PY
+}
+
+apply_gemini_live_network_ready_patch() {
+    local main_c="$ESP_CLAW_DIR/application/edge_agent/main/main.c"
+    if [ ! -f "$main_c" ]; then
+        log "main.c not found — skipping Gemini Live network-ready patch"
+        return
+    fi
+    if grep -q "main_gemini_live_start" "$main_c" 2>/dev/null; then
+        log "Gemini Live network-ready patch already applied"
+        return
+    fi
+    log "applying Gemini Live network-ready guard"
+    python3 - <<PY
+import pathlib
+p = pathlib.Path(r"$main_c")
+s = p.read_text()
+
+old = '''#if CONFIG_APP_CLAW_CAP_GEMINI_LIVE
+static bool gemini_live_configured(void)
+{
+    return s_gemini_api_key_configured;
+}
+#endif
+'''
+new = '''#if CONFIG_APP_CLAW_CAP_GEMINI_LIVE
+static bool gemini_live_network_ready(void)
+{
+    if (!s_wifi_manager_ready) {
+        return false;
+    }
+
+    wifi_manager_status_t status = {0};
+    wifi_manager_get_status(&status);
+    return status.sta_connected && status.sta_ip[0] != '\\0';
+}
+
+static bool gemini_live_time_ready(void)
+{
+    return time(NULL) > 1700000000;
+}
+
+static bool gemini_live_configured(void)
+{
+    return s_gemini_api_key_configured && gemini_live_network_ready() && gemini_live_time_ready();
+}
+
+static esp_err_t main_gemini_live_start(void)
+{
+    if (!s_gemini_api_key_configured) {
+        ESP_LOGW(TAG, "Gemini Live start rejected: API key not configured");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!gemini_live_network_ready()) {
+        ESP_LOGW(TAG, "Gemini Live start rejected: Wi-Fi STA not ready");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!gemini_live_time_ready()) {
+        ESP_LOGW(TAG, "Gemini Live start rejected: system time not synced");
+        return ESP_ERR_INVALID_STATE;
+    }
+    return cap_gemini_live_start();
+}
+#endif
+'''
+if old not in s:
+    raise SystemExit("could not locate gemini_live_configured block in main.c")
+s = s.replace(old, new, 1)
+s = s.replace(".gemini_live_start = cap_gemini_live_start,", ".gemini_live_start = main_gemini_live_start,", 1)
+p.write_text(s)
+print("patched", p)
+PY
+}
+
+apply_gemini_live_nonblocking_stop_patch() {
+    local cap_c="$ESP_CLAW_DIR/components/claw_capabilities/cap_gemini_live/src/cap_gemini_live.c"
+    if [ ! -f "$cap_c" ]; then
+        log "cap_gemini_live.c not found — skipping nonblocking stop patch"
+        return
+    fi
+    if grep -q "Gateway stop requested" "$cap_c" 2>/dev/null; then
+        log "Gemini Live nonblocking stop patch already applied"
+        return
+    fi
+    log "applying Gemini Live nonblocking stop patch"
+    python3 - <<PY
+import pathlib
+p = pathlib.Path(r"$cap_c")
+s = p.read_text()
+old = '''    /* Do not clear task handles here. The session task owns codec cleanup and
+     * must still see tx_task so it can wait for GL_BIT_TX_DONE before closing
+     * ADC/DAC. Clearing handles early was the race. Rather theatrical. */
+    if (session_task && session_task != xTaskGetCurrentTaskHandle()) {
+        EventBits_t bits = xEventGroupWaitBits(s_gl.ev, GL_BIT_SESSION_DONE,
+                                               pdFALSE, pdTRUE, pdMS_TO_TICKS(8000));
+        if (!(bits & GL_BIT_SESSION_DONE)) {
+            ESP_LOGE(TAG, "Gateway stop timed out — force cleanup");
+            vTaskDelete(session_task);
+            s_gl.session_task = NULL;
+            if (s_gl.ws_client) {
+                esp_websocket_client_destroy(s_gl.ws_client);
+                s_gl.ws_client = NULL;
+            }
+            s_gl.ws_connected  = false;
+            s_gl.stop_requested = false;
+            gl_set_state(GL_STATE_IDLE, "stop-timeout");
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+    return ESP_OK;
+'''
+new = '''    /* Stop may be called by HTTP. Do not wait here: the session task owns codec
+     * and WebSocket teardown, and blocking the HTTP server makes the device look
+     * dead while cleanup runs. */
+    if (session_task == xTaskGetCurrentTaskHandle()) {
+        return ESP_OK;
+    }
+    ESP_LOGI(TAG, "Gateway stop requested");
+    return ESP_OK;
+'''
+if old not in s:
+    raise SystemExit("could not locate blocking Gemini Live stop block")
 p.write_text(s.replace(old, new, 1))
 print("patched", p)
 PY
@@ -1337,8 +1621,137 @@ apply_touch_local_hardware_demo_patch() {
     # real CST9217 touch panel, CO5300 display, and cap_gemini_live synthetic RMS
     # path, so hardware can be validated without spending API calls.
     local main_c="$ESP_CLAW_DIR/application/edge_agent/main/main.c"
-    if [ -f "$ESP_CLAW_DIR/application/edge_agent/main/touch_demo.c" ]; then
-        log "touch local hardware demo patch superseded by touch_demo.c"
+    local touch_demo_c="$ESP_CLAW_DIR/application/edge_agent/main/touch_demo.c"
+    local touch_demo_h="$ESP_CLAW_DIR/application/edge_agent/main/touch_demo.h"
+    local touch_demo_src="$ROOT/firmware/main/touch_demo.c"
+    local touch_demo_hdr="$ROOT/firmware/main/touch_demo.h"
+    if [ -f "$touch_demo_c" ]; then
+        if [ -f "$touch_demo_src" ] && [ -f "$touch_demo_hdr" ]; then
+            log "copying patched touch_demo runtime → upstream tree"
+            cp -f "$touch_demo_src" "$touch_demo_c"
+            cp -f "$touch_demo_hdr" "$touch_demo_h"
+            python3 - "$main_c" <<'PY'
+import pathlib
+import sys
+
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+if ".touch_get_diagnostics = touch_demo_get_diagnostics_json," not in s:
+    anchor = "            .gemini_live_is_active = cap_gemini_live_is_active,\n"
+    if anchor not in s:
+        raise SystemExit("main.c touch diagnostics service anchor missing")
+    s = s.replace(
+        anchor,
+        anchor
+        + "            .touch_get_diagnostics = touch_demo_get_diagnostics_json,\n"
+        + "            .touch_run_scene = touch_demo_run_scene,\n",
+        1,
+    )
+p.write_text(s)
+print("touch diagnostics service wired")
+PY
+            return
+        fi
+        log "patching touch_demo.c local tap scenes"
+        python3 - "$touch_demo_c" <<'PY'
+import pathlib
+import sys
+
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+
+helper = r'''static local_scene_t local_scene_from_touch(uint16_t tx)
+{
+    if (tx < 155) {
+        return LOCAL_SCENE_LISTEN;
+    }
+    if (tx > 310) {
+        return LOCAL_SCENE_SPEAK;
+    }
+    return LOCAL_SCENE_THINK;
+}
+
+static const char *local_scene_name(local_scene_t scene)
+{
+    switch (scene) {
+    case LOCAL_SCENE_LISTEN: return "listen";
+    case LOCAL_SCENE_THINK: return "think";
+    case LOCAL_SCENE_SPEAK: return "speak";
+    case LOCAL_SCENE_SHOWCASE:
+    default: return "showcase";
+    }
+}
+
+'''
+
+if "local_scene_from_touch" not in s:
+    anchor = "\nstatic void touch_monitor_task(void *arg)\n"
+    if anchor not in s:
+        raise SystemExit("touch_demo.c touch_monitor_task anchor missing")
+    s = s.replace(anchor, "\n" + helper + anchor, 1)
+
+s = s.replace("     *   short tap  - Gemini Live toggle\n"
+              "     *   long press - local hardware showcase\n",
+              "     *   centre tap - Gemini Live toggle when ready, else local scanner\n"
+              "     *   left tap   - local listening field\n"
+              "     *   right tap  - local speaking pulse\n"
+              "     *   long press - local hardware showcase\n")
+s = s.replace("    const int PRESS_CONFIRM = 2;       /* ~160ms stable touch to count as a press */\n",
+              "    const int PRESS_CONFIRM = 1;       /* one poll is enough for a deliberate tap */\n")
+s = s.replace("    const int RELEASE_CONFIRM = 4;     /* ~320ms stable release to re-arm */\n",
+              "    const int RELEASE_CONFIRM = 2;     /* ~160ms stable release to re-arm */\n")
+
+if "uint16_t last_x = 233;" not in s:
+    marker = "    bool long_fired = false;\n    (void)was_touching;\n"
+    if marker not in s:
+        raise SystemExit("touch_demo.c debounce variable anchor missing")
+    s = s.replace(marker, "    bool long_fired = false;\n    uint16_t last_x = 233;\n    (void)was_touching;\n", 1)
+
+if "last_x = x[0];" not in s:
+    marker = "        if (touching) {\n            touch_run++;\n"
+    if marker not in s:
+        raise SystemExit("touch_demo.c touching branch anchor missing")
+    s = s.replace(marker, "        if (touching) {\n            last_x = x[0];\n            touch_run++;\n", 1)
+
+old = '''            if (just_released && armed && press_seen && !long_fired) {
+                if (cap_gemini_live_is_active()) {
+                    ESP_LOGI(TAG, "Tap: toggling Gemini Live off");
+                    cap_gemini_live_toggle();
+                } else if (gemini_live_configured()) {
+                    ESP_LOGI(TAG, "Tap: toggling Gemini Live on");
+                    cap_gemini_live_toggle();
+                } else {
+                    ESP_LOGW(TAG, "Tap ignored: Gemini Live not ready");
+                }
+                armed = false;
+            }
+'''
+new = '''            if (just_released && armed && press_seen && !long_fired) {
+                local_scene_t scene = local_scene_from_touch(last_x);
+                if (cap_gemini_live_is_active()) {
+                    ESP_LOGI(TAG, "Tap: toggling Gemini Live off (x=%u)",
+                             (unsigned)last_x);
+                    cap_gemini_live_toggle();
+                } else if (gemini_live_configured() && scene == LOCAL_SCENE_THINK) {
+                    ESP_LOGI(TAG, "Tap: toggling Gemini Live on (x=%u)",
+                             (unsigned)last_x);
+                    cap_gemini_live_toggle();
+                } else {
+                    ESP_LOGI(TAG, "Tap: local scene %s (x=%u)",
+                             local_scene_name(scene), (unsigned)last_x);
+                    local_hardware_demo_start(scene);
+                }
+                armed = false;
+            }
+'''
+if old in s:
+    s = s.replace(old, new, 1)
+elif "Tap: local scene" not in s:
+    raise SystemExit("touch_demo.c tap action block missing")
+
+p.write_text(s)
+print("patched", p)
+PY
         return
     fi
     if [ ! -f "$main_c" ]; then
@@ -1806,6 +2219,30 @@ print("rewrote partitions_16MB.csv: emote 0x420000+6M, storage 0xA20000+5M")
 PY
 }
 
+apply_emote_performance_patch() {
+    local emote_c="$ESP_CLAW_DIR/components/common/emote/emote.c"
+    [ -f "$emote_c" ] || return 0
+    python3 - "$emote_c" <<'PY'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+replacements = {
+    ".double_buffer = false,": ".double_buffer = true,",
+    ".fps = 10,": ".fps = 30,",
+    ".buf_pixels = (size_t)s_lcd_width * 16,": ".buf_pixels = (size_t)s_lcd_width * EMOTE_FLUSH_STRIP_ROWS,",
+    ".buf_pixels = (size_t)s_lcd_width * (s_lcd_height / 4),": ".buf_pixels = (size_t)s_lcd_width * EMOTE_FLUSH_STRIP_ROWS,",
+    ".buf_pixels = (size_t)s_lcd_width * 48,": ".buf_pixels = (size_t)s_lcd_width * EMOTE_FLUSH_STRIP_ROWS,",
+}
+for old, new in replacements.items():
+    s = s.replace(old, new)
+if "            .buff_dma = true,\n" in s and "            .buff_spiram = true,\n" not in s:
+    pass
+s = s.replace("            .buff_spiram = true,\n", "")
+p.write_text(s)
+print("emote performance patch applied")
+PY
+}
+
 apply_reactive_waveform_face_patch() {
     # patches/0031 — reactive "Siri-style" waveform face + `face` CLI demo.
     # Runs AFTER apply_emote_voice_states_patch (anchors on the voice-state decls
@@ -2010,9 +2447,9 @@ PY
 }
 
 apply_reactive_face_voice_wiring() {
-    # Idempotent: make emote_set_connecting/_listening/_thinking/_speaking/_voice_idle
-    # drive emote_face_set_state() AFTER emote_apply() (apply re-shows the eye;
-    # the face call then hides it — order matters). Safe to call repeatedly.
+    # Idempotent: make voice-state helpers non-blocking. The Gemini session task
+    # must not call emote_apply(); that can wait on the render lock while the
+    # display is flushing and wedge voice startup in CONNECTING.
     local emote_c="$1"
     [ -f "$emote_c" ] || return 0
     grep -q "emote_set_listening" "$emote_c" 2>/dev/null || return 0   # voice helpers not yet added
@@ -2021,13 +2458,21 @@ import sys, pathlib
 p = pathlib.Path(sys.argv[1]); c = p.read_text()
 repl = {
     'esp_err_t emote_set_connecting(void)\n{\n    return emote_apply("thinking", "Connecting...");\n}':
-        'esp_err_t emote_set_connecting(void)\n{\n    s_voice_visual_active = true;\n    esp_err_t err = emote_apply("thinking", "Connecting...");\n    emote_face_set_state(EMOTE_FACE_THINKING);\n    return err;\n}',
+        'esp_err_t emote_set_connecting(void)\n{\n    s_voice_visual_active = true;\n    emote_face_set_state(EMOTE_FACE_THINKING);\n    return ESP_OK;\n}',
     'esp_err_t emote_set_listening(void)\n{\n    return emote_apply("listen", "Listening...");\n}':
-        'esp_err_t emote_set_listening(void)\n{\n    s_voice_visual_active = true;\n    esp_err_t err = emote_apply("listen", "Listening...");\n    emote_face_set_state(EMOTE_FACE_LISTENING);\n    return err;\n}',
+        'esp_err_t emote_set_listening(void)\n{\n    s_voice_visual_active = true;\n    emote_face_set_state(EMOTE_FACE_LISTENING);\n    return ESP_OK;\n}',
     'esp_err_t emote_set_thinking(void)\n{\n    return emote_apply("thinking", "Thinking...");\n}':
-        'esp_err_t emote_set_thinking(void)\n{\n    s_voice_visual_active = true;\n    esp_err_t err = emote_apply("thinking", "Thinking...");\n    emote_face_set_state(EMOTE_FACE_THINKING);\n    return err;\n}',
+        'esp_err_t emote_set_thinking(void)\n{\n    s_voice_visual_active = true;\n    emote_face_set_state(EMOTE_FACE_THINKING);\n    return ESP_OK;\n}',
     'esp_err_t emote_set_speaking(void)\n{\n    return emote_apply("happy", "Speaking...");\n}':
-        'esp_err_t emote_set_speaking(void)\n{\n    s_voice_visual_active = true;\n    esp_err_t err = emote_apply("happy", "Speaking...");\n    emote_face_set_state(EMOTE_FACE_SPEAKING);\n    return err;\n}',
+        'esp_err_t emote_set_speaking(void)\n{\n    s_voice_visual_active = true;\n    emote_face_set_state(EMOTE_FACE_SPEAKING);\n    return ESP_OK;\n}',
+    'esp_err_t emote_set_connecting(void)\n{\n    s_voice_visual_active = true;\n    esp_err_t err = emote_apply("thinking", "Connecting...");\n    emote_face_set_state(EMOTE_FACE_THINKING);\n    return err;\n}':
+        'esp_err_t emote_set_connecting(void)\n{\n    s_voice_visual_active = true;\n    emote_face_set_state(EMOTE_FACE_THINKING);\n    return ESP_OK;\n}',
+    'esp_err_t emote_set_listening(void)\n{\n    s_voice_visual_active = true;\n    esp_err_t err = emote_apply("listen", "Listening...");\n    emote_face_set_state(EMOTE_FACE_LISTENING);\n    return err;\n}':
+        'esp_err_t emote_set_listening(void)\n{\n    s_voice_visual_active = true;\n    emote_face_set_state(EMOTE_FACE_LISTENING);\n    return ESP_OK;\n}',
+    'esp_err_t emote_set_thinking(void)\n{\n    s_voice_visual_active = true;\n    esp_err_t err = emote_apply("thinking", "Thinking...");\n    emote_face_set_state(EMOTE_FACE_THINKING);\n    return err;\n}':
+        'esp_err_t emote_set_thinking(void)\n{\n    s_voice_visual_active = true;\n    emote_face_set_state(EMOTE_FACE_THINKING);\n    return ESP_OK;\n}',
+    'esp_err_t emote_set_speaking(void)\n{\n    s_voice_visual_active = true;\n    esp_err_t err = emote_apply("happy", "Speaking...");\n    emote_face_set_state(EMOTE_FACE_SPEAKING);\n    return err;\n}':
+        'esp_err_t emote_set_speaking(void)\n{\n    s_voice_visual_active = true;\n    emote_face_set_state(EMOTE_FACE_SPEAKING);\n    return ESP_OK;\n}',
     'esp_err_t emote_set_voice_idle(void)\n{\n    return emote_render_status();\n}':
         'esp_err_t emote_set_voice_idle(void)\n{\n    s_voice_visual_active = false;\n    return emote_render_status();\n}',
     'esp_err_t emote_set_voice_idle(void)\n{\n    emote_face_set_state(EMOTE_FACE_OFF);   /* restore the eye + status idle screen */\n    return emote_render_status();\n}':
@@ -2157,10 +2602,14 @@ main() {
     apply_http_phase2_patch
     apply_http_camera_gate_patch
     apply_gemini_http_diagnostics_patch
+    apply_gemini_http_action_response_patch
     apply_gemini_live_main_require_patch
     apply_gemini_live_api_key_patch
+    apply_gemini_live_network_ready_patch
+    apply_gemini_live_nonblocking_stop_patch
     apply_http_wifi_scan_patch
     apply_http_health_patch
+    copy_http_display_diagnostics
     apply_native_status_led_patch
     apply_emote_status_detail_patch
     apply_touch_handle_deref_patch
@@ -2168,6 +2617,8 @@ main() {
     apply_emote_voice_states_patch
     apply_emote_partition_resize_patch
     apply_reactive_waveform_face_patch
+    copy_emote_runtime
+    apply_emote_performance_patch
     apply_reactive_waveform_audio_bridge_patch
 
     if [ "${1:-}" = "build" ]; then
