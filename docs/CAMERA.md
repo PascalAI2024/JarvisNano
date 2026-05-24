@@ -67,7 +67,7 @@ Khangura's Feb-2026 write-up ([medium link](https://medium.com/@manjotkhangura/g
    - 30 ms `vTaskDelay` after returning each frame buffer (avoids JPEG encoder timeout)
 4. **Re-flash with `STORAGE=1` ONCE** (the partition layout might shift slightly with a new component) — this wipes saved Wi-Fi credentials and LLM config. Re-provision via the dashboard's onboarding wizard at `192.168.4.1`, or by POSTing `/api/config` from the AP and restarting.
 5. **Test**:
-   - `curl -m 10 -o /tmp/snap.jpg http://192.0.2.80/api/camera/snapshot` → should produce a valid 1280×720 JPEG (`file /tmp/snap.jpg` confirms)
+   - `curl -m 10 -o /tmp/snap.jpg http://192.0.2.80/api/camera/snapshot` (replace with the board STA IP) -> should produce a valid 1280x720 JPEG (`file /tmp/snap.jpg` confirms)
    - Dashboard camera card → "Capture frame" → image renders
    - Auto-2s checkbox → continuous live feed updates
 6. **Once camera works end-to-end**, toggle the `# CONFIG_…=n` comments in `sdkconfig.defaults.board` back on, and rip out the gated-off `esp_cam_sensor`-based `lua_module_camera_service.c` if it's no longer needed.

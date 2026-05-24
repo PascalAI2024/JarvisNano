@@ -18,8 +18,7 @@ if [ "$#" -gt 0 ]; then
 else
     HOSTS=(
         "192.168.4.1"
-        "192.0.2.80"
-        "esp-claw.local"
+        "${JARVIS_DEVICE_HOST:-esp-claw.local}"
     )
 fi
 

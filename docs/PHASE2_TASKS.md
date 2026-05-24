@@ -14,7 +14,7 @@ test gap, or follow-up appears.
 - Fixed boot blockers: App Claw serial REPL is disabled for the XIAO build to
   avoid internal heap exhaustion; the legacy Lua LED auto-start rule is disabled
   because the long-running Lua LED job exhausted Lua heap.
-- Current open hardware blocker: Mac LAN curls to `192.0.2.80` still time
+- Current open hardware blocker: Mac LAN curls to the board STA IP still time
   out despite ARP resolution, including after the 2026-05-03 fresh flash, so
   final HTTP response/header verification is not complete.
 
@@ -79,7 +79,7 @@ test gap, or follow-up appears.
 - `[x]` Boot: services reach Wi-Fi/FATFS/router/scheduler/Lua/MCP/Web IM, publish startup, and return from `app_main()`.
 - `[x]` Physical LED: native GPIO21 task starts after `app_claw_start()` and logs `Native status LED on gpio 21 active_low=1`; heartbeat is non-fatal if allocation fails.
 - `[x]` Dashboard: `http://127.0.0.1:8000/index.html` opens in the Codex in-app browser.
-- `[~]` HTTP reachability: isolate why Mac curls to `192.0.2.80` time out despite ARP resolution; after the 2026-05-03 health-route flash, `/api/health`, `/api/status`, `/api/battery`, `/api/audio/level`, and `/api/wifi/scan` still timed out from macOS, while `esp-claw.local` resolution also timed out.
+- `[~]` HTTP reachability: isolate why Mac curls to the board STA IP time out despite ARP resolution; after the 2026-05-03 health-route flash, `/api/health`, `/api/status`, `/api/battery`, `/api/audio/level`, and `/api/wifi/scan` still timed out from macOS, while `esp-claw.local` resolution also timed out.
 - `[ ]` Test HTTP from the device AP path at `192.168.4.1` to separate STA LAN issues from server issues.
 - `[ ]` Test HTTP from another client on the same Wi-Fi network to rule out macOS routing/firewall behavior.
 - `[~]` Capture serial logs during each failed curl and add the observed HTTPD/socket errors to this file; the post-flash boot log proves HTTPD starts, but macOS curl still timed out before a useful request log appeared.

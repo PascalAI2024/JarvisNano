@@ -51,7 +51,7 @@ host with `/api/status` before marking it connected.
 
 Progress on 2026-05-04: the connected XIAO flashed successfully on
 `/dev/cu.usbmodem1101` and booted through STA/AP Wi-Fi, Lua, router, MCP, Web
-IM, and native GPIO21 heartbeat. The board reported STA IP `192.0.2.80` and
+IM, and native GPIO21 heartbeat. The board reported a STA IP and
 AP SSID `esp-claw-XXXXXX`. The Android Gradle wrapper is restored so the pinned
 Gradle version is reproducible; local Android compilation still requires an
 Android SDK path via `ANDROID_HOME` or `android/local.properties`.
@@ -59,12 +59,12 @@ Android SDK path via `ANDROID_HOME` or `android/local.properties`.
 ## 2. Keep LAN HTTP Reachability Stable Before Feature Work
 
 The board now boots onto STA-only LAN mode after Wi-Fi association and responds
-from the Mac at `192.0.2.80`.
+from the Mac at its assigned STA IP.
 
-Current 2026-05-04 evidence: the flashed XIAO logs STA IP `192.0.2.80`, then
+Current 2026-05-04 evidence: the flashed XIAO logs its STA IP, then
 switches Wi-Fi from AP+STA to STA-only with `ap_active=false`. Direct probes
 returned `200 OK` for `/api/health` and `/api/status`; `/api/health` reported
-`wifi_mode:"sta_ok"` and `ip:"192.0.2.80"`. The expanded matrix passed the
+`wifi_mode:"sta_ok"` and the assigned IP. The expanded matrix passed the
 cheap health/status/config/Web IM/battery/audio endpoints, but open browser
 dashboard tabs can still create enough simultaneous sockets to crowd later
 diagnostic calls. Keep the HTTP server LRU-purge/socket tuning and dashboard
@@ -73,7 +73,7 @@ background polling conservative while BLE/camera work proceeds.
 Run this exact matrix:
 
 - AP path: join `esp-claw-XXXXXX`, test `http://192.168.4.1/api/status`.
-- STA path from macOS: test `http://192.0.2.80/api/status`.
+- STA path from macOS: test `http://<STA_IP>/api/status`.
 - STA path from phone/another laptop: same endpoint.
 - mDNS path: `http://esp-claw.local/api/status`.
 - Serial capture during every request.

@@ -242,7 +242,7 @@ onboarding, settings, chat, telemetry, and camera diagnostics:
 Override the host list when the board has a different STA IP:
 
 ```bash
-./scripts/http-matrix.sh 192.0.2.42 esp-claw.local
+./scripts/http-matrix.sh "$JARVIS_DEVICE_HOST" esp-claw.local
 ```
 
 If the first few endpoints pass but later probes time out, check for open
