@@ -113,6 +113,11 @@ static void   gl_resume_listening(const char *reason);
 #define GL_LISTEN_RECOVERY_MS    2000
 #define GL_CODEC_HANDLE_RETRY_MS 250
 #define GL_CODEC_HANDLE_RETRIES  6
+
+/* Hands-free turn-taking. With server VAD on, the device only sends mic frames;
+ * the server detects silence and ends the user turn — no client-side
+ * activityEnd, no tap to end. Tap during a session stops the whole session. */
+#define GL_USE_SERVER_VAD        1
 #define GL_I2S_READ_TIMEOUT_MS   200
 #define GL_AUDIO_WRITE_MARGIN_MS 250
 #define GL_AUDIO_DAC_PERIPH      "i2s_audio_out"
@@ -448,6 +453,13 @@ static uint32_t gl_i2s_cfg_sample_rate(const periph_i2s_config_t *cfg, i2s_dir_t
 static uint32_t gl_resolve_playback_rate(uint32_t model_rate)
 {
     uint32_t source = model_rate ? model_rate : GL_RX_SAMPLE_RATE;
+    /* Codec path (esp_codec_dev) reconfigures its own I2S clock on open, so
+     * play at the model's native rate (typically 24 kHz) — no resample needed.
+     * Only the raw i2s_channel path is locked to the peripheral's compile-time
+     * clock; fall back to that rate when the codec path is unavailable. */
+    if (s_gl.dac && !s_gl.dac_codec_failed) {
+        return source;
+    }
     if (s_gl.dac_raw && s_gl.dac_raw_rate_hz) {
         return s_gl.dac_raw_rate_hz;
     }
@@ -659,7 +671,10 @@ static int gl_open_dac(uint32_t sample_rate)
 
     if (s_gl.dac_raw) {
         s_gl.dac_open = true;
-        s_gl.dac_rate = sample_rate;
+        /* Raw I2S clock is fixed at peripheral-config time — record the actual
+         * hardware rate, not the requested one, so callers can detect mismatch
+         * and resample. */
+        s_gl.dac_rate = s_gl.dac_raw_rate_hz ? s_gl.dac_raw_rate_hz : sample_rate;
         return ESP_CODEC_DEV_OK;
     }
 
@@ -779,11 +794,23 @@ static bool gl_send_setup(void)
     cJSON *tc = cJSON_AddObjectToObject(gc, "thinkingConfig");
     cJSON_AddStringToObject(tc, "thinkingLevel", "minimal");
 
-    /* Push-to-talk has explicit boundaries. Disable server-side VAD so quiet
-     * speech or room noise cannot leave the turn stuck after button release. */
+    /* Hands-free conversation via server-side VAD. The server detects speech
+     * start/end on the streamed mic frames and ends the user's turn after
+     * `silenceDurationMs` of quiet — no manual activityEnd from the client.
+     * END_SENSITIVITY_LOW + 700 ms silence is tolerant of mid-sentence pauses
+     * without feeling sluggish; START_SENSITIVITY_HIGH catches speech onset
+     * quickly. See [[project_session_handoff]] design direction. */
     cJSON *ric = cJSON_AddObjectToObject(setup, "realtimeInputConfig");
     cJSON *aad = cJSON_AddObjectToObject(ric, "automaticActivityDetection");
-    cJSON_AddBoolToObject(aad, "disabled", true);
+    if (GL_USE_SERVER_VAD) {
+        cJSON_AddBoolToObject(aad, "disabled", false);
+        cJSON_AddStringToObject(aad, "startOfSpeechSensitivity", "START_SENSITIVITY_HIGH");
+        cJSON_AddStringToObject(aad, "endOfSpeechSensitivity",   "END_SENSITIVITY_LOW");
+        cJSON_AddNumberToObject(aad, "prefixPaddingMs", 100);
+        cJSON_AddNumberToObject(aad, "silenceDurationMs", 700);
+    } else {
+        cJSON_AddBoolToObject(aad, "disabled", true);
+    }
 
     /* System instruction = JARVIS's persistent on-device self (identity +
      * recent memory from /sdcard/brain). Fail-soft: jarvis_brain_load_context
@@ -828,11 +855,20 @@ static bool gl_send_text_turn(const char *text)
 
 static bool gl_send_activity_start(void)
 {
+    /* With server VAD enabled, the server detects activity on the streamed
+     * audio itself; client-side activityStart is rejected/ignored. Return true
+     * so the caller's bookkeeping still treats the "activity" as open. */
+    if (GL_USE_SERVER_VAD) {
+        return true;
+    }
     return gl_ws_send_text("{\"realtimeInput\":{\"activityStart\":{}}}");
 }
 
 static bool gl_send_activity_end(void)
 {
+    if (GL_USE_SERVER_VAD) {
+        return true;
+    }
     return gl_ws_send_text("{\"realtimeInput\":{\"activityEnd\":{}}}");
 }
 
@@ -979,16 +1015,10 @@ static void gl_play_audio_b64(const char *b64_str, uint32_t sample_rate)
     }
 
     uint32_t model_rate = gl_clamp_rate(sample_rate);
-    uint32_t playback_rate = gl_resolve_playback_rate(model_rate);
+    uint32_t requested_rate = gl_resolve_playback_rate(model_rate);
     s_gl.last_audio_mime_rate = model_rate;
-    if (s_gl.dac_raw && playback_rate == 0) {
-        playback_rate = model_rate;
-    }
-
-    if (model_rate != playback_rate && s_gl.dac_raw) {
-        s_gl.rate_mismatch_chunks++;
-        ESP_LOGD(TAG, "audio rate mismatch: model=%u playback=%u; resampling",
-                 model_rate, playback_rate);
+    if (requested_rate == 0) {
+        requested_rate = model_rate;
     }
 
     size_t b64_len = strlen(b64_str);
@@ -998,9 +1028,16 @@ static void gl_play_audio_b64(const char *b64_str, uint32_t sample_rate)
         ESP_LOGE(TAG, "OOM for PCM decode buf");
         return;
     }
-    if (gl_open_dac(playback_rate) != ESP_CODEC_DEV_OK) {
+    if (gl_open_dac(requested_rate) != ESP_CODEC_DEV_OK) {
         free(pcm);
         return;
+    }
+    /* Use the rate the DAC actually opened at (codec adapts; raw is fixed). */
+    uint32_t playback_rate = s_gl.dac_rate ? s_gl.dac_rate : requested_rate;
+    if (model_rate != playback_rate) {
+        s_gl.rate_mismatch_chunks++;
+        ESP_LOGD(TAG, "audio rate mismatch: model=%u playback=%u; resampling",
+                 model_rate, playback_rate);
     }
 
     size_t pcm_len = 0;
@@ -2310,6 +2347,13 @@ esp_err_t cap_gemini_live_end_input(void)
         (s_gl.state != GL_STATE_READY && s_gl.state != GL_STATE_LISTENING)) {
         return ESP_ERR_INVALID_STATE;
     }
+    /* Server VAD owns turn end; manual end_input would race the server and
+     * leave the model wedged in THINKING with no serverContent. Treat as
+     * idempotent OK so external callers (HTTP /api/gemini/live action=end_input)
+     * stay backward-compatible. */
+    if (GL_USE_SERVER_VAD) {
+        return ESP_OK;
+    }
     if (s_gl.state == GL_STATE_LISTENING) {
         gl_stop_tx_task();
         gl_close_adc();
@@ -2350,7 +2394,8 @@ void cap_gemini_live_toggle(void)
         return;
     }
     if (s_gl.session_active) {
-        if (s_gl.state == GL_STATE_READY || s_gl.state == GL_STATE_LISTENING) {
+        if (!GL_USE_SERVER_VAD &&
+            (s_gl.state == GL_STATE_READY || s_gl.state == GL_STATE_LISTENING)) {
             ESP_LOGI(TAG, "Tap: ending input stream");
             cap_gemini_live_end_input();
             return;
