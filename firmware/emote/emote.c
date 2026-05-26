@@ -606,6 +606,10 @@ esp_err_t emote_set_speaking(void)
 esp_err_t emote_set_voice_idle(void)
 {
     s_voice_visual_active = false;
-    emote_face_set_state(EMOTE_FACE_OFF);
+    /* Stay on the waveform IDLE breathing face after a session ends — the
+     * device is a voice assistant, the reactive face IS its identity. The eye
+     * + Wi-Fi status overlay still renders behind whenever the face is OFF
+     * (no asset, or set via /api/display/face) for diagnostic use. */
+    emote_face_set_state(EMOTE_FACE_IDLE);
     return ESP_OK;
 }

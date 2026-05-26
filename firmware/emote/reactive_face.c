@@ -566,7 +566,10 @@ esp_err_t emote_face_init(emote_handle_t emote)
     emote_set_obj_visible(emote, RWAVE_OBJ_NAME, false);
 
     s_rw.run = true;
-    s_rw.state = EMOTE_FACE_OFF;
+    /* Boot directly into the IDLE breathing face so the device shows the
+     * waveform identity from the moment the display arbiter hands EMOTE
+     * ownership — no blank panel waiting for a tap. */
+    s_rw.state = EMOTE_FACE_IDLE;
     BaseType_t started = xTaskCreate(rwave_task, "rwave", 4096, NULL, 3, &s_rw.task);
     ESP_RETURN_ON_FALSE(started == pdPASS, ESP_FAIL, TAG, "failed to start rwave task");
 
