@@ -421,20 +421,28 @@ static void touch_monitor_task(void *arg)
             release_run++;
             if (just_released && armed && press_seen && !long_fired) {
                 local_scene_t scene = local_scene_from_touch(last_x);
+                /* Any tap toggles Gemini when configured — no x-zone routing.
+                 * The legacy local-demo dispatch was the cause of "stuck on
+                 * green / no response": tapping outside a narrow centre band
+                 * played the SPEAK clip with no Gemini audio attached, which
+                 * looked identical to a wedged voice session. Long-press still
+                 * routes to the local showcase when Gemini is idle (above). */
                 if (cap_gemini_live_is_active()) {
-                    ESP_LOGI(TAG, "Tap: ending Gemini Live input (x=%u)",
+                    /* toggle() sends activityEnd while LISTENING (commit turn),
+                     * or stops the session when speaking/thinking. */
+                    ESP_LOGI(TAG, "Tap: commit/stop Gemini Live (x=%u)",
                              (unsigned)last_x);
                     cap_gemini_live_toggle();
-                    touch_diag_set_action("tap_gemini_end", scene);
-                } else if (gemini_live_configured() && scene == LOCAL_SCENE_THINK) {
-                    ESP_LOGI(TAG, "Tap: toggling Gemini Live on (x=%u)",
+                    touch_diag_set_action("tap_gemini_commit", scene);
+                } else if (gemini_live_configured()) {
+                    ESP_LOGI(TAG, "Tap: starting Gemini Live (x=%u)",
                              (unsigned)last_x);
                     cap_gemini_live_toggle();
                     touch_diag_set_action("tap_gemini_on", scene);
                 } else {
-                    ESP_LOGI(TAG, "Tap: local scene %s (x=%u)",
-                             local_scene_name(scene), (unsigned)last_x);
-                    local_hardware_demo_start(scene);
+                    ESP_LOGW(TAG, "Tap ignored: Gemini not configured (x=%u)",
+                             (unsigned)last_x);
+                    touch_diag_set_action("tap_unconfigured", scene);
                 }
                 if (s_diag_mx && xSemaphoreTake(s_diag_mx, pdMS_TO_TICKS(20)) == pdTRUE) {
                     s_diag.taps++;

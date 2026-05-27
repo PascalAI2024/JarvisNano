@@ -114,10 +114,12 @@ static void   gl_resume_listening(const char *reason);
 #define GL_CODEC_HANDLE_RETRY_MS 250
 #define GL_CODEC_HANDLE_RETRIES  6
 
-/* Hands-free turn-taking. With server VAD on, the device only sends mic frames;
- * the server detects silence and ends the user turn — no client-side
- * activityEnd, no tap to end. Tap during a session stops the whole session. */
-#define GL_USE_SERVER_VAD        1
+/* Push-to-talk on device: send activityStart before mic frames and activityEnd
+ * when the user taps to commit. Server VAD was enabled experimentally but on
+ * Waveshare hardware the server never returns serverContent (only setupComplete)
+ * while tx_frames climb — mic looks alive, zero reply. Manual boundaries match
+ * docs/reference/gemini-live-api.md and the verified text/audio path. */
+#define GL_USE_SERVER_VAD        0
 #define GL_I2S_READ_TIMEOUT_MS   200
 #define GL_AUDIO_WRITE_MARGIN_MS 250
 #define GL_AUDIO_DAC_PERIPH      "i2s_audio_out"
@@ -812,6 +814,12 @@ static bool gl_send_setup(void)
         cJSON_AddBoolToObject(aad, "disabled", true);
     }
 
+    /* Ask the server for an input transcript stream so we can flip the face to
+     * THINKING the instant VAD decides the user's turn ended — closes the
+     * "silent gap" between speech-end and audio-reply that made the device
+     * look frozen and tempted the user to tap-to-abort mid-response. */
+    cJSON_AddItemToObject(setup, "inputAudioTranscription", cJSON_CreateObject());
+
     /* System instruction = JARVIS's persistent on-device self (identity +
      * recent memory from /sdcard/brain). Fail-soft: jarvis_brain_load_context
      * always returns a usable, NUL-terminated persona — the built-in default if
@@ -880,7 +888,7 @@ static bool gl_begin_audio_activity(const char *reason)
     bool ok = gl_send_activity_start();
     if (ok) {
         s_gl.activity_open = true;
-        ESP_LOGI(TAG, "Audio activity start requested (%s)", reason ? reason : "listen");
+        ESP_LOGI(TAG, "Audio activity start sent (%s)", reason ? reason : "listen");
     } else {
         s_gl.tx_send_failures++;
         ESP_LOGW(TAG, "Audio activity start send failed (%s)", reason ? reason : "listen");
@@ -894,7 +902,7 @@ static bool gl_end_audio_activity(const char *reason)
     if (s_gl.activity_open) {
         ok = gl_send_activity_end();
         if (ok) {
-            ESP_LOGI(TAG, "Audio activity end requested (%s)", reason ? reason : "end_input");
+            ESP_LOGI(TAG, "Audio activity end sent (%s)", reason ? reason : "end_input");
         } else {
             s_gl.tx_send_failures++;
             ESP_LOGW(TAG, "Audio activity end send failed (%s)", reason ? reason : "end_input");
@@ -1113,8 +1121,12 @@ static void gl_play_audio_b64(const char *b64_str, uint32_t sample_rate)
     }
 
     if (s_gl.dac && !s_gl.dac_codec_failed) {
-        if (esp_codec_dev_write(s_gl.dac, out_pcm, (int)out_bytes) != ESP_CODEC_DEV_OK) {
-            ESP_LOGW(TAG, "DAC write failed: codec bytes=%u rate=%u",
+        int wr = esp_codec_dev_write(s_gl.dac, out_pcm, (int)out_bytes);
+        if (wr != ESP_CODEC_DEV_OK) {
+            ESP_LOGW(TAG, "DAC write failed: codec rc=%d bytes=%u rate=%u",
+                     wr, (unsigned)out_bytes, (unsigned)playback_rate);
+        } else if (s_gl.audio_part_hits == 1) {
+            ESP_LOGI(TAG, "Speaking: first DAC write OK (codec, bytes=%u rate=%u)",
                      (unsigned)out_bytes, (unsigned)playback_rate);
         }
     } else if (s_gl.dac_raw) {
@@ -1128,6 +1140,9 @@ static void gl_play_audio_b64(const char *b64_str, uint32_t sample_rate)
         } else if (bytes_written != out_bytes) {
             ESP_LOGW(TAG, "DAC write short: %u != %u timeout_ms=%u",
                      (unsigned)bytes_written, (unsigned)out_bytes, (unsigned)timeout_ms);
+        } else if (s_gl.audio_part_hits == 1) {
+            ESP_LOGI(TAG, "Speaking: first DAC write OK (raw i2s, bytes=%u rate=%u)",
+                     (unsigned)out_bytes, (unsigned)playback_rate);
         }
     }
 
@@ -1191,6 +1206,29 @@ static void gl_audio_tx_task(void *arg)
             s_gl.tx_read_failures++;
             vTaskDelay(pdMS_TO_TICKS(GL_TX_CHUNK_MS));
             continue;
+        }
+
+        /* Digital mic-gain stage. ES7210 analog gain is already maxed (30 dB);
+         * still, normal-conversation RMS off this board sits ~50-300 raw, which
+         * is below the server VAD threshold for reliable speech detection. A
+         * 6x lift with 4:1 soft-knee above 24000 keeps loud speech from
+         * clipping while making quiet speech audible to the server. Both the
+         * visual mic_rms and the sent PCM see the gained signal. */
+        {
+            int16_t *s = (int16_t *)pcm;
+            const size_t n = GL_TX_PCM_BYTES / sizeof(int16_t);
+            const int32_t knee = 24000;
+            const int32_t gain = 6;
+            for (size_t i = 0; i < n; ++i) {
+                int32_t v = (int32_t)s[i] * gain;
+                int32_t a = v < 0 ? -v : v;
+                if (a > knee) {
+                    a = knee + ((a - knee) >> 2);
+                    if (a > 32767) a = 32767;
+                    v = (v < 0) ? -a : a;
+                }
+                s[i] = (int16_t)v;
+            }
         }
 
         /* Publish mic level for the LISTENING waveform. */
@@ -1323,6 +1361,17 @@ static bool gl_enter_speaking(uint32_t sample_rate)
 {
     if (s_gl.state == GL_STATE_SPEAKING) {
         return true;
+    }
+
+    /* Teardown race guard: if a stop was already requested, do not start a new
+     * playback path. Otherwise an audio chunk landing during shutdown opens the
+     * DAC just to have it slammed shut by the teardown — produces a flash of
+     * green on screen + no audible output. Drop the chunk; the session is
+     * ending anyway. */
+    if (s_gl.stop_requested || !s_gl.session_active) {
+        ESP_LOGW(TAG, "enter_speaking: skipped (stop_requested=%d active=%d)",
+                 (int)s_gl.stop_requested, (int)s_gl.session_active);
+        return false;
     }
 
     /* First audio chunk: stop TX before any codec rate swap. The session task is
@@ -1650,6 +1699,21 @@ static void gl_dispatch_frame(const char *json)
             ESP_LOGI(TAG, "Model interrupted");
             s_gl.interrupted_hits++;
             gl_resume_listening("interrupted");
+        }
+
+        /* inputTranscription.finished=true → VAD just decided the user's turn
+         * ended. Audio reply is ~1-3 s away. Flip the face to THINKING so the
+         * panel doesn't read as frozen during that gap. Keep gl state as
+         * LISTENING so capture continues (VAD may also flip back to user mid-
+         * gap if it changes its mind). gl_enter_speaking will overwrite the
+         * face when audio arrives. */
+        cJSON *itr = cJSON_GetObjectItemCaseSensitive(svc, "inputTranscription");
+        if (itr) {
+            cJSON *fin = cJSON_GetObjectItemCaseSensitive(itr, "finished");
+            if (cJSON_IsTrue(fin) && s_gl.state == GL_STATE_LISTENING) {
+                ESP_LOGI(TAG, "inputTranscription finished — face=THINKING (await audio)");
+                emote_set_thinking();
+            }
         }
 
         /* modelTurn parts */
