@@ -388,10 +388,14 @@ static const rwave_clip_t *rwave_clip_for(emote_face_state_t st)
 static float rwave_target_amp(emote_face_state_t st)
 {
     int milli;
+    /* Snapshot the callback pointer once. emote_face_set_amplitude_source()
+     * may swap or clear amp_cb from another task, so a check-then-call on the
+     * live field could dereference a pointer cleared between the two reads. */
+    emote_face_amp_cb_t cb = s_rw.amp_cb;
     if (s_rw.synth_amp >= 0) {
         milli = s_rw.synth_amp;          /* CLI synthetic 0..1000 */
-    } else if (s_rw.amp_cb) {
-        milli = s_rw.amp_cb(st);         /* live mic/out RMS, 0..1000 */
+    } else if (cb) {
+        milli = cb(st);                  /* live mic/out RMS, 0..1000 */
     } else {
         milli = 0;                       /* no source → flat (full loop still moves) */
     }

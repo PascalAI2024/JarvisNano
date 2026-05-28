@@ -11,6 +11,13 @@ for patch in patches/*.patch; do
   [ -e "$patch" ] || continue
 
   if ! grep -q '^diff --git ' "$patch"; then
+    # Some patches intentionally carry no diff payload: they document a
+    # bootstrap-managed copy/mutation whose canonical source is git-tracked
+    # elsewhere in the tree. Treat those as informational, not a failure.
+    if grep -qiE 'bootstrap|generated|managed_components|Patch target[s]?:' "$patch"; then
+      echo "$patch: bootstrap-managed (no diff payload), source git-tracked elsewhere"
+      continue
+    fi
     echo "$patch: missing git diff payload" >&2
     missing=1
     continue

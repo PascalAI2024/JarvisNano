@@ -1,6 +1,6 @@
 # Build Toolchain
 
-**What it is** — The build environment for JarvisRobot firmware: ESP-IDF `v5.5.1` in the `espressif/idf:v5.5.1` Docker image, patched with `tools/esp-idf.patch`, with two version pins that must be applied before every build.
+**What it is** — The build environment for JarvisRobot firmware: ESP-IDF `v5.5.4` in the `espressif/idf:v5.5.4` Docker image (pinned as `IDF_IMAGE` in `scripts/bootstrap.sh`), patched with `tools/esp-idf.patch`, with two version pins that must be applied before every build.
 
 **How we use it here** — `scripts/bootstrap.sh` orchestrates the build: it clones or validates `esp-claw`, applies patches, installs Python deps, and calls `idf.py build` inside the container. The flash path invokes `esptool.py` via the same container.
 
@@ -10,16 +10,16 @@
 
 **[2026-05-21] Pin `idf-component-manager==2.4.10` before every build**
 
-`espressif/idf:v5.5.1` ships with `idf-component-manager==2.3.0`, which introduced a strict "Already defined root local requirement" check. This codebase intentionally declares some local components in both parent and child `idf_component.yml` files. `2.3.0` rejects this and aborts the build.
+`espressif/idf:v5.5.4` ships with `idf-component-manager==2.3.0`, which introduced a strict "Already defined root local requirement" check. This codebase intentionally declares some local components in both parent and child `idf_component.yml` files. `2.3.0` rejects this and aborts the build.
 
 Fix: always prepend the pip upgrade before `idf.py build`:
 ```bash
 docker run --rm -v "$(pwd):/project" -e IDF_TARGET=esp32s3 \
-  -w /project/esp-claw/application/edge_agent espressif/idf:v5.5.1 \
+  -w /project/esp-claw/application/edge_agent espressif/idf:v5.5.4 \
   bash -c "pip install -q 'idf-component-manager==2.4.10' && idf.py build"
 ```
 
-`2.4.10` comes from the `release-v5.5` image; use the versioned `v5.5.1` image (not the rolling `release-v5.5` tag) because `tools/esp-idf.patch` applies cleanly only to the exact IDF in `v5.5.1`.
+`2.4.10` comes from the `release-v5.5` image; use the versioned `v5.5.4` image (not the rolling `release-v5.5` tag) because `tools/esp-idf.patch` applies cleanly only to the exact IDF in `v5.5.4`.
 
 Source: `scripts/bootstrap.sh` (build step); memory file `feedback_build_idf_component_manager.md`.
 
@@ -96,7 +96,7 @@ Flash command for this board: `idf.py flash --flash-mode dio` (DIO mode required
 | Source | Notes |
 |--------|-------|
 | `scripts/bootstrap.sh` | Authoritative build orchestrator. Check lines ~62 and ~104 for pip pins. |
-| `tools/esp-idf.patch` | The patch that must apply cleanly to `espressif/idf:v5.5.1`. |
+| `tools/esp-idf.patch` | The patch that must apply cleanly to `espressif/idf:v5.5.4`. |
 | `esp-claw/application/edge_agent/components/app_config/` | NVS field registration — three-file pattern. See [jarvismcp-bridge.md](./jarvismcp-bridge.md). |
 
 ---

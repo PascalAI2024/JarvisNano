@@ -26,7 +26,11 @@
  * normal talking fills a useful range. Gemini TTS output reads much hotter, so
  * it needs a gentler scale. Per-stream gain + clamp; tune after hardware test.
  * (The render task's lerp provides the fast-attack/slow-decay smoothing.) */
-#define FACE_MIC_GAIN  6.0f   /* 0.17 speech → ~1.0 */
+/* The TX path now applies 6x digital gain to outgoing PCM (cap_gemini_live.c)
+ * so the server VAD reliably triggers. mic_level publishes the gained value,
+ * so the bridge multiplier dropped from 12 → 3 to keep total effective face
+ * response near the previous 12x without pegging at bucket=8 on every sample. */
+#define FACE_MIC_GAIN  3.0f
 #define FACE_OUT_GAIN  1.6f   /* TTS already hot → modest lift */
 
 static uint16_t gl_face_amp(emote_face_state_t state)

@@ -1,4 +1,4 @@
-name: Leak Check
+name: CI
 
 on:
   push:
@@ -19,3 +19,26 @@ jobs:
           fetch-depth: 1
       - name: Secret and identifier scan
         run: ./scripts/check-secrets.sh
+
+  patch-check:
+    name: Patch syntax validity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      - name: Validate patches apply cleanly (syntax mode)
+        run: ./scripts/check-patches.sh
+
+  dashboard-js:
+    name: Dashboard inline JS syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Lint inline <script> blocks in dashboard HTML
+        run: node scripts/check-dashboard-js.mjs dashboard/*.html
