@@ -120,6 +120,23 @@ static void   gl_resume_listening(const char *reason);
  * while tx_frames climb — mic looks alive, zero reply. Manual boundaries match
  * docs/reference/gemini-live-api.md and the verified text/audio path. */
 #define GL_USE_SERVER_VAD        0
+
+/* On-device VAD (hands-free turn commit). Server VAD does not return
+ * serverContent on this Waveshare board (see above), so instead of disabling
+ * hands-free we detect end-of-speech locally: the TX task watches the mic RMS
+ * it already computes for the face, and once the user has spoken and then
+ * stayed quiet for GL_VAD_HANG_MS it asks the session task to commit the turn
+ * (the same end_input the tap / HTTP path uses). Thresholds calibrated live on
+ * the ES7210 capture (post-6x-gain RMS): silence floor ~150-400, speech
+ * 1000-4900. Hysteresis between SILENCE_RMS and SPEECH_RMS prevents flicker. */
+#define GL_USE_LOCAL_VAD         1
+#define GL_VAD_SPEECH_RMS        1200  /* RMS at/above this = speech. Above the   */
+                                       /* measured idle ceiling (~939 raw over    */
+                                       /* 60s silent) so ambient never registers. */
+#define GL_VAD_SILENCE_RMS       500   /* RMS below this = silence (hysteresis)  */
+#define GL_VAD_HANG_MS           700   /* trailing silence that ends the turn    */
+#define GL_VAD_MIN_SPEECH_MS     300   /* sustained speech required before commit */
+
 #define GL_I2S_READ_TIMEOUT_MS   200
 #define GL_AUDIO_WRITE_MARGIN_MS 250
 #define GL_AUDIO_DAC_PERIPH      "i2s_audio_out"
@@ -206,6 +223,7 @@ typedef struct {
     uint32_t                     tx_raw_reads;
     int64_t                      last_input_end_us;
     bool                         activity_open;
+    volatile bool                vad_commit_request; /* TX task → session task: end-of-speech, commit turn */
 } gl_ctx_t;
 
 static gl_ctx_t s_gl;
@@ -1159,6 +1177,13 @@ static void gl_audio_tx_task(void *arg)
     (void)arg;
     static uint8_t pcm[GL_TX_PCM_BYTES];
 
+#if GL_USE_LOCAL_VAD
+    /* Local VAD accumulators — TX-task-private, reset every capture cycle. */
+    uint32_t vad_speech_ms  = 0;
+    uint32_t vad_silence_ms = 0;
+    bool     vad_speech_seen = false;
+#endif
+
     /* Codec lifetime is owned by the session task. This worker only reads from
      * the already-open ADC so teardown cannot double-close codec/I2S handles
      * from two tasks. */
@@ -1232,8 +1257,43 @@ static void gl_audio_tx_task(void *arg)
         }
 
         /* Publish mic level for the LISTENING waveform. */
-        atomic_store(&s_mic_rms,
-                     gl_compute_rms((const int16_t *)pcm, GL_TX_PCM_BYTES / sizeof(int16_t)));
+        uint16_t mic_rms = gl_compute_rms((const int16_t *)pcm,
+                                          GL_TX_PCM_BYTES / sizeof(int16_t));
+        atomic_store(&s_mic_rms, mic_rms);
+
+#if GL_USE_LOCAL_VAD
+        /* Hands-free turn commit. Detect speech, then GL_VAD_HANG_MS of trailing
+         * silence. Runs here for precise per-frame (20 ms) timing but only
+         * *requests* the commit — the session task performs end_input(), since
+         * this task cannot stop itself (gl_stop_tx_task waits on GL_BIT_TX_DONE).
+         * The dead zone between SILENCE_RMS and SPEECH_RMS holds the current
+         * state, so mid-sentence dips don't end the turn early. */
+        if (s_gl.state == GL_STATE_LISTENING && !s_gl.vad_commit_request) {
+            if (mic_rms >= GL_VAD_SPEECH_RMS) {
+                vad_speech_ms += GL_TX_CHUNK_MS;
+                vad_silence_ms = 0;
+                if (vad_speech_ms >= GL_VAD_MIN_SPEECH_MS) {
+                    vad_speech_seen = true;
+                }
+            } else if (mic_rms < GL_VAD_SILENCE_RMS) {
+                if (vad_speech_seen) {
+                    vad_silence_ms += GL_TX_CHUNK_MS;
+                    if (vad_silence_ms >= GL_VAD_HANG_MS) {
+                        ESP_LOGI(TAG, "Local VAD: end of speech (%ums speech, %ums silence) -> commit turn",
+                                 (unsigned)vad_speech_ms, (unsigned)vad_silence_ms);
+                        s_gl.vad_commit_request = true;
+                    }
+                } else if (vad_speech_ms > 0) {
+                    /* Genuine silence before any utterance latched: decay the
+                     * accumulator so only *sustained* speech reaches MIN_SPEECH.
+                     * Without this, scattered noise spikes accumulate monotonically
+                     * and fire a phantom empty turn during a quiet room. */
+                    vad_speech_ms -= GL_TX_CHUNK_MS;
+                }
+            }
+            /* dead zone (SILENCE_RMS..SPEECH_RMS): hold state, no add/decay. */
+        }
+#endif
 
         if (gl_send_audio_frame(pcm, GL_TX_PCM_BYTES)) {
             s_gl.tx_frames_sent++;
@@ -1277,6 +1337,7 @@ static void gl_start_tx_task(void)
         ESP_LOGW(TAG, "Audio TX: start ignored; task already running");
         return;
     }
+    s_gl.vad_commit_request = false;   /* fresh turn — clear any stale commit */
     xEventGroupClearBits(s_gl.ev, GL_BIT_TX_STOP | GL_BIT_TX_DONE);
     static const claw_task_config_t tx_cfg = {
         .name         = "gl_audio_tx",
@@ -2002,6 +2063,17 @@ static void gl_session_task(void *arg)
         }
         gl_maybe_resume_speaking_watchdog();
         gl_ensure_listening_capture();
+#if GL_USE_LOCAL_VAD
+        /* Local VAD asked us to end the user's turn. Done here (session task)
+         * because end_input() stops the TX task — which can't stop itself. */
+        if (s_gl.vad_commit_request) {
+            s_gl.vad_commit_request = false;
+            if (s_gl.state == GL_STATE_LISTENING) {
+                ESP_LOGI(TAG, "Local VAD: committing turn");
+                cap_gemini_live_end_input();
+            }
+        }
+#endif
         /* Check if WS dropped */
         if (!s_gl.ws_connected) {
             ESP_LOGW(TAG, "WS dropped, cleaning up session");
@@ -2257,6 +2329,12 @@ void cap_gemini_live_print_diagnostics(void)
     printf("  raw cfg rates: dac=%u adc=%u\n",
            (unsigned)s_gl.dac_raw_rate_hz,
            (unsigned)s_gl.adc_raw_rate_hz);
+    printf("  tx: frames_sent=%u send_failures=%u read_failures=%u codec_reads=%u raw_reads=%u\n",
+           (unsigned)s_gl.tx_frames_sent,
+           (unsigned)s_gl.tx_send_failures,
+           (unsigned)s_gl.tx_read_failures,
+           (unsigned)s_gl.tx_codec_reads,
+           (unsigned)s_gl.tx_raw_reads);
     printf("  active dac rate=%u last_audio_mime_rate=%u rate_mismatch_chunks=%u\n",
            (unsigned)s_gl.dac_rate,
            (unsigned)s_gl.last_audio_mime_rate,
