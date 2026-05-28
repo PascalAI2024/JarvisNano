@@ -770,6 +770,25 @@ static void gl_close_adc(void)
 
 /* ---- JSON send helpers ---------------------------------------------------- */
 
+/* Declare one Gemini function-call tool taking a single required string arg.
+ * Keeps gl_send_setup readable as the JarvisMCP skill set grows. */
+static void gl_add_str_fn(cJSON *fdecls, const char *name, const char *desc,
+                          const char *arg, const char *arg_desc)
+{
+    cJSON *fn = cJSON_CreateObject();
+    cJSON_AddStringToObject(fn, "name", name);
+    cJSON_AddStringToObject(fn, "description", desc);
+    cJSON *params = cJSON_AddObjectToObject(fn, "parameters");
+    cJSON_AddStringToObject(params, "type", "object");
+    cJSON *props = cJSON_AddObjectToObject(params, "properties");
+    cJSON *p = cJSON_AddObjectToObject(props, arg);
+    cJSON_AddStringToObject(p, "type", "string");
+    cJSON_AddStringToObject(p, "description", arg_desc);
+    cJSON *reqd = cJSON_AddArrayToObject(params, "required");
+    cJSON_AddItemToArray(reqd, cJSON_CreateString(arg));
+    cJSON_AddItemToArray(fdecls, fn);
+}
+
 static bool gl_send_setup(void)
 {
     cJSON *root  = cJSON_CreateObject();
@@ -804,6 +823,28 @@ static bool gl_send_setup(void)
     cJSON *reqd = cJSON_AddArrayToObject(params, "required");
     cJSON_AddItemToArray(reqd, cJSON_CreateString("symbol"));
     cJSON_AddItemToArray(fdecls, fn);
+
+    /* JarvisMCP-backed skills. Each maps to a jarvis.* SDK call in
+     * gl_handle_tool_call → /act gateway. Company brain (memory) + knowledge. */
+    gl_add_str_fn(fdecls, "recall_memory",
+                  "Search Jarvis's own long-term memory and knowledge base for facts, notes, decisions, and context from past sessions. Use for 'what do you know about...', 'do you remember...', or anything personal or project-specific.",
+                  "query", "What to look up, in natural language.");
+    gl_add_str_fn(fdecls, "remember",
+                  "Save a fact or note to Jarvis's long-term memory so it persists across sessions. Use when the user asks you to remember something.",
+                  "note", "The fact to store, as a clear standalone sentence.");
+    gl_add_str_fn(fdecls, "wikipedia",
+                  "Look up a concise factual summary of a topic, person, place, or thing.",
+                  "topic", "The subject to summarise.");
+    gl_add_str_fn(fdecls, "country_info",
+                  "Get facts about a country: capital, population, currencies, region.",
+                  "country", "Country name, e.g. Japan.");
+    gl_add_str_fn(fdecls, "current_time",
+                  "Get the current date and time for a timezone.",
+                  "timezone", "IANA timezone like America/New_York, Europe/London, or UTC.");
+    gl_add_str_fn(fdecls, "ask_jarvis",
+                  "Escape hatch for capabilities the other tools don't cover: run a JavaScript expression against the JarvisMCP SDK and return its result. Available: jarvis.crypto(coin), jarvis.weather(lat,lon), jarvis.exchange(base,targets), jarvis.wiki(q), jarvis.memory.search({query,area:'all'}), jarvis.dns(domain), jarvis.country(name), jarvis.time(tz). The value MUST be one statement starting with 'return await', e.g. return await jarvis.crypto('bitcoin').",
+                  "code", "A JavaScript expression starting with 'return await jarvis.'.");
+
     cJSON_AddItemToArray(tools, fd_tool);
 
     cJSON *gc = cJSON_AddObjectToObject(setup, "generationConfig");
@@ -844,6 +885,15 @@ static bool gl_send_setup(void)
      * the SD store is unavailable — so this never breaks the WSS setup. */
     char persona[2048];
     jarvis_brain_load_context(persona, sizeof persona);
+    /* Tell the model, in-voice, what it can actually do — so it offers its tools
+     * naturally instead of claiming it has no skills. */
+    size_t plen = strlen(persona);
+    snprintf(persona + plen, sizeof(persona) - plen,
+             "\n\nYou are not limited to conversation — you have tools and should use them rather than guess. "
+             "recall_memory / remember access your own long-term memory; wikipedia, country_info, and current_time "
+             "answer factual lookups; crypto_price gives live coin prices; ask_jarvis runs anything else via the "
+             "JarvisMCP SDK; and you have live web search for general facts and news. When the user asks what you "
+             "can do, mention these capabilities concretely.");
 
     cJSON *si   = cJSON_AddObjectToObject(setup, "systemInstruction");
     cJSON *parts = cJSON_AddArrayToObject(si, "parts");
@@ -1558,6 +1608,33 @@ static void gl_ws_event_handler(void *arg, esp_event_base_t base,
 
 /* ---- JarvisMCP tool bridge ------------------------------------------------ */
 
+/* Read a string arg from a functionCall's args object ("" if absent). */
+static const char *gl_arg(cJSON *args, const char *key)
+{
+    const char *v = args ? cJSON_GetStringValue(cJSON_GetObjectItem(args, key)) : NULL;
+    return v ? v : "";
+}
+
+/* Escape src for embedding inside a JS single-quoted string literal (no
+ * surrounding quotes written). Backslash and apostrophe are escaped; control
+ * chars dropped; output truncated to fit dst. Defends the generated /act JS
+ * against model-supplied free text containing quotes. */
+static void gl_js_str_escape(char *dst, size_t dst_sz, const char *src)
+{
+    size_t j = 0;
+    for (size_t i = 0; src && src[i] && j + 2 < dst_sz; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c < 0x20) {
+            continue;
+        }
+        if (c == '\\' || c == '\'') {
+            dst[j++] = '\\';
+        }
+        dst[j++] = (char)c;
+    }
+    dst[j] = '\0';
+}
+
 /* POST {"code":<js>} to the JarvisMCP /act gateway with the bearer token; copy
  * the response body into `out`. Returns the HTTP status (200 ok) or -1 on a
  * transport error. Blocking — only called from a toolCall (model is paused). */
@@ -1639,7 +1716,7 @@ static bool gl_handle_tool_call(cJSON *root)
         cJSON *response = cJSON_AddObjectToObject(fr, "response");
 
         /* Build the JS for this function. Args are sanitised into the template. */
-        char code[192] = {0};
+        char code[512] = {0};
         if (name && strcmp(name, "crypto_price") == 0) {
             const char *symbol = args ? cJSON_GetStringValue(cJSON_GetObjectItem(args, "symbol")) : NULL;
             char sym[40];
@@ -1653,6 +1730,35 @@ static bool gl_handle_tool_call(cJSON *root)
             }
             sym[j] = '\0';
             snprintf(code, sizeof(code), "return await jarvis.crypto('%s')", sym[0] ? sym : "bitcoin");
+        } else if (name && strcmp(name, "recall_memory") == 0) {
+            char q[256];
+            gl_js_str_escape(q, sizeof(q), gl_arg(args, "query"));
+            snprintf(code, sizeof(code),
+                     "return await jarvis.memory.search({query:'%s', area:'all'})", q);
+        } else if (name && strcmp(name, "remember") == 0) {
+            char q[300];
+            gl_js_str_escape(q, sizeof(q), gl_arg(args, "note"));
+            snprintf(code, sizeof(code), "return await jarvis.memory.capture('%s')", q);
+        } else if (name && strcmp(name, "wikipedia") == 0) {
+            char q[200];
+            gl_js_str_escape(q, sizeof(q), gl_arg(args, "topic"));
+            snprintf(code, sizeof(code), "return await jarvis.wiki('%s')", q);
+        } else if (name && strcmp(name, "country_info") == 0) {
+            char q[120];
+            gl_js_str_escape(q, sizeof(q), gl_arg(args, "country"));
+            snprintf(code, sizeof(code), "return await jarvis.country('%s')", q);
+        } else if (name && strcmp(name, "current_time") == 0) {
+            char tz[80];
+            gl_js_str_escape(tz, sizeof(tz), gl_arg(args, "timezone"));
+            if (tz[0]) {
+                snprintf(code, sizeof(code), "return await jarvis.time('%s')", tz);
+            } else {
+                snprintf(code, sizeof(code), "return await jarvis.time()");
+            }
+        } else if (name && strcmp(name, "ask_jarvis") == 0) {
+            /* Escape hatch: the model supplies the JS itself; the /act gateway
+             * sandboxes execution. Pass through verbatim (truncated to buffer). */
+            snprintf(code, sizeof(code), "%s", gl_arg(args, "code"));
         }
 
         if (code[0]) {
