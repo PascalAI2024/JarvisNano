@@ -54,11 +54,35 @@ The board's MAC address, local IP, Wi-Fi SSID, and dashboard URL are development
 
 ---
 
+## Interrupt & wake routing (from schematic, 2026-06-11)
+
+Read off `docs/reference/vendor/waveshare/ESP32-S3-Touch-AMOLED-1.75-schematic.pdf`
+(net names verbatim). **This reshapes the sleep/wake design** — only the IMU INT2 line
+is a real, wake-capable GPIO; the AXP IRQ and IMU INT1 are behind the TCA9554 IO expander.
+
+| Net | Routed to | Wake-capable? | Use |
+|-----|-----------|---------------|-----|
+| **`QMI_INT2`** | **`GPIO21`** (direct ESP32-S3, RTC-capable) | **Yes** — GPIO ISR + EXT0/EXT1 deep-sleep wake | Primary IMU interrupt / wake-on-motion line |
+| `QMI_INT1` | `EXIO6` (TCA9554 pin 6) | No — behind I²C expander | Secondary IMU INT; only readable by polling the expander |
+| `AXP_IRQ` | `EXIO5` (TCA9554 pin 5) | **No** — behind I²C expander | PMIC IRQ (power-button/low-batt) is NOT a direct deep-sleep wake source |
+| `PWRON` | AXP2101 PWRON pin (not an ESP GPIO) | n/a | Physical power button handled internally by the AXP2101 (long-press off/on) |
+
+Consequences for the upgrade plan (`docs/UPGRADE_RESEARCH.md` §2.2 / §2.4 / §7):
+- **IMU wake-on-motion is viable** — route the QMI8658 motion engine to **INT2 → GPIO21**,
+  and use GPIO21 as the EXT0/EXT1 deep-sleep wake source.
+- **The AXP power-button cannot directly wake the ESP from deep sleep** (its IRQ is on
+  `EXIO5`, behind the TCA9554, which is unpowered/unclocked in deep sleep). Power-button
+  wake would rely on the AXP2101's own PWRON sequencing (it can re-enable rails / reset the
+  SoC), not an ESP wake source. Plan deep-sleep wake around **motion (GPIO21) + RTC timer**.
+- QMI8658 I²C address strap not legible in the text layer — confirm at runtime via WHO_AM_I
+  (reg `0x00` → `0x05`); the driver should probe both `0x6B` (default) and `0x6A`.
+
 ## Primary sources
 
 | Source | Notes |
 |--------|-------|
 | `boards/waveshare/esp32s3_touch_amoled_1_75/board_devices.yaml` | All device declarations, pin assignments, I2C addresses. Ground truth. |
+| `docs/reference/vendor/waveshare/ESP32-S3-Touch-AMOLED-1.75-schematic.pdf` | Full board schematic — interrupt/wake net routing (QMI_INT1/2, AXP_IRQ, PWRON), rail mapping. |
 | `boards/waveshare/esp32s3_touch_amoled_1_75/board_info.yaml` | Board-level metadata. |
 | `boards/waveshare/esp32s3_touch_amoled_1_75/setup_device.c` | Factory entry functions, CO5300 init commands, CST9217 interrupt setup. |
 | [Waveshare BSP (official)](https://github.com/waveshareteam/Waveshare-ESP32-components/tree/master/bsp/esp32_s3_touch_amoled_1_75/) | Official BSP; diff against our `board_devices.yaml` when debugging pin issues. |
@@ -70,7 +94,8 @@ The board's MAC address, local IP, Wi-Fi SSID, and dashboard URL are development
 ## Open questions
 
 - What is the actual PA rail voltage on the NS4150-class amplifier? (Xiaozhi references 5.0 V; our board's PA supply may differ. Affects ES8311 `hw_gain.pa_voltage`.)
-- Is the QMI8658 IMU connected and accessible? It is listed in the board description but not yet declared in `board_devices.yaml`.
+- QMI8658 IMU connectivity: **resolved** — present, INT2→GPIO21, INT1→EXIO6 (see Interrupt & wake routing above). Still not declared in `board_devices.yaml`; address strap to confirm at runtime via WHO_AM_I.
+- AXP2101 rail→peripheral mapping (which DCDC/LDO feeds the AMOLED panel vs. the ES8311/ES7210 codecs) — needed before cutting rails for sleep (§2.3). Read from the schematic's power tree.
 
 ---
 
