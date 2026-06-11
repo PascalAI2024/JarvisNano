@@ -6,6 +6,17 @@ All notable user-facing changes should be recorded here.
 
 ### Firmware
 
+- **Conversation reliability + face fluidity round 2.** Four field-diagnosed
+  fixes: (1) local VAD speech threshold 1200→1000 (sat inside the measured
+  speech band, so quiet speech never committed a turn — "it never replies"),
+  min-speech 300→240 ms; (2) VAD accumulators reset at commit time — a race
+  re-fired a second `end_input` 20 ms after the first on every turn; (3) taps
+  during THINKING are ignored for 10 s — users tapping at a slow reply were
+  killing their own pending answer (after 10 s a tap still stops the session);
+  (4) face segment updates are fast-attack/slow-decay (600 ms hold) — every
+  segment reprogram resets the animation to frame 0, so per-bucket updates
+  during ramping speech strobed; and the listen ramp has a baked baseline
+  floor so LISTENING is visibly distinct from IDLE in a quiet room.
 - **Voice clarity + cutoff fixes (Gemini Live audio path).** Root-caused the
   intermittent "deep, garbled, cut-off" playback: the ES8311 DAC and ES7210
   ADC share one I2S port in STD duplex, so opening playback at the model's

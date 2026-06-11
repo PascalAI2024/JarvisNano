@@ -305,6 +305,16 @@ def render_ramp_frame(canvas, i, n, hot_bias):
     reach = i / max(1, n - 1)
     ease = _smooth(np.float32(reach)).item()
     hot = hot_bias >= 0.5
+    # LISTEN baseline floor: frame 0 must read as "I'm receiving" on the panel
+    # — users couldn't tell listening from idle in a quiet room (mic amp ~0 →
+    # loop window stuck in frames 0..7, whose eased energy is near zero).
+    # Floor only the SPOKES and INNER RING: thin strokes are cheap in RLE
+    # (a whole-ramp lift cost +76 KB and most of the partition headroom) and
+    # they are the elements idle doesn't have, so even frame 0 is unmistakable.
+    spoke_floor = 0.0 if hot else 0.28
+    ring_floor = 0.60 + 0.30 * ease
+    if not hot:
+        ring_floor = max(ring_floor, 0.85)
     E, (dx, dy, dist, theta) = _reactor(
         canvas,
         rot_bezel=(2.0 * math.pi / 60.0) * reach,
@@ -312,8 +322,8 @@ def render_ramp_frame(canvas, i, n, hot_bias):
         coil_rot=(2.0 * math.pi / 10.0) * 0.25 * reach,
         core_r=42.0 + 26.0 * ease,
         core_gain=0.40 + 0.55 * ease,
-        ring_gain=0.60 + 0.30 * ease,
-        spoke_reach=ease,
+        ring_gain=ring_floor,
+        spoke_reach=max(ease, spoke_floor),
         spoke_rot=(2.0 * math.pi / 24.0) * 1.5 * reach)
     if hot:
         # Transmit shock ring expanding past the coil with output level.

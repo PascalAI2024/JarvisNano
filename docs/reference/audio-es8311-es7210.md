@@ -64,6 +64,25 @@ Reference: EchoEar (xiaozhi `boards/esp-vocat/config.h`) runs BOTH directions
 at 24 kHz for the same shared-clock reason. Our input must stay 16 kHz for the
 Gemini API, so we hold the bus at 16 kHz and resample the downlink instead.
 
+**[2026-06-10] Local VAD tuning: speech 1000 / silence 500 / min-speech 240 ms — and reset accumulators on commit**
+
+Field calibration (post-6x-gain RMS): idle ceiling ~939, speech band 1000–4900.
+The original `GL_VAD_SPEECH_RMS 1200` sat *inside* the speech band, so quiet or
+distant speech never latched a turn — the user experience was "it never
+replies" with no error anywhere. 1000 hugs the ambient ceiling. Don't go below
+~950 without re-measuring the room floor. `GL_VAD_MIN_SPEECH_MS` 300→240:
+short utterances ("yes") sat right at the boundary.
+
+Separate bug, same UX: after `vad_commit_request = true` the TX task kept its
+`speech_seen`/`silence_ms` accumulators, and the session task clears the
+request flag while the state is still LISTENING — the very next 20 ms frame
+re-fired a second commit (two "end of speech" logs 20 ms apart → double
+`end_input` per turn). Accumulators now reset at request time.
+
+Also: taps during THINKING are ignored for 10 s (`cap_gemini_live_toggle`).
+Live trace showed a 16 s grounding delay → user tapped three times → killed
+their own pending reply. After 10 s the tap stops the session as before.
+
 **[2026-06-10] BLE GATT service disabled — Wi-Fi/BT coexistence starves streaming audio**
 
 `main.c` started a NimBLE GATT companion service (`ble_gatt_init()`) at boot.

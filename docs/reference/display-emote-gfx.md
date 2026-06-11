@@ -135,6 +135,19 @@ Source: `esp_emote_gfx/scripts/` (local managed component copy).
   (`RWAVE_FPS_IDLE` 24, `RWAVE_FPS_REACTIVE`/`RWAVE_FPS_THINK` 30) — the fps fields in
   `emote.json` are documentation-only for the rwave object.
 
+### [2026-06-10] Fluidity round 3: segment churn + listen visibility
+
+- **Every `gfx_anim_set_segment()` resets `current_frame` to 0.** With the loop window
+  re-programmed each amplitude-bucket step, ramping speech restarted the animation every
+  ~160 ms — a pulse train, not motion. `reactive_face.c` now does fast-attack/slow-decay:
+  the window widens immediately on louder input, but holds `RWAVE_DECAY_HOLD_MS` (600 ms)
+  before shrinking, so the loop plays through speech dips instead of restarting.
+- **Listen vs idle was indistinguishable in a quiet room** (mic amp ~0 → both show a dim
+  breathing core). The listen ramp in `gen_reactive_face.py` now has a baked baseline floor
+  (`reach = 0.12 + 0.88·t`): frame 0 shows lit intake spokes + inner ring. Floor size cost is
+  real — 0.18 cost +76 KB of RLE and left 25 KB partition headroom; 0.12 leaves ~54 KB.
+  Anything visual added to ramp frames multiplies across all 22 of them.
+
 ## Open questions
 
 - Can `gfx_motion` / `gfx_motion_scene` transform params be updated each frame from an audio RMS value? If yes, this is the cleaner reactive path than per-state AAF segment selection.

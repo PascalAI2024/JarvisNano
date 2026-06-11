@@ -54,6 +54,7 @@
 
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_timer.h"   /* decay-hold timing for fast-attack/slow-decay segments */
 #include "esp_heap_caps.h"
 #include "esp_partition.h"
 #include "soc/soc.h"        /* SOC_DROM_LOW / SOC_DROM_HIGH — the mmap cache window */
@@ -104,6 +105,9 @@ static const char *TAG = "app_rwave";
 #define RWAVE_MIN_END_DIV   3U      /* quiet-voice floor: never loop fewer than last/3 frames.
                                      * Without this, low amplitude maps to end=2..4 → a ~130 ms
                                      * micro-loop that strobes on the panel instead of animating. */
+#define RWAVE_DECAY_HOLD_MS 600     /* hold a wider loop window this long before shrinking —
+                                     * each set_segment resets to frame 0, so eager shrinking
+                                     * during speech dips restarted the loop into a pulse train. */
 
 /* One baked EAF held resident in memory for its object's lifetime. The decoder
  * keeps the pointer (it does NOT copy — cf. eye's emote_acquire_data,
@@ -525,6 +529,26 @@ static void rwave_task(void *arg)
             }
             if (end < min_end) {
                 end = min_end;
+            }
+            /* Fast attack, slow decay. Every gfx_anim_set_segment() resets
+             * current_frame to 0, so re-programming the window each bucket
+             * step made speech look like a pulse train (restart every ~160 ms
+             * as the level ramped). Louder = widen IMMEDIATELY (responsive
+             * onset); quieter = hold the wider window for RWAVE_DECAY_HOLD_MS
+             * before shrinking, so the loop keeps playing through dips instead
+             * of restarting. */
+            {
+                static int64_t decay_gate_us = 0;
+                int64_t now_us = esp_timer_get_time();
+                if (s_rw.last_end > 0 && (int)end < s_rw.last_end) {
+                    if (now_us - decay_gate_us < (int64_t)RWAVE_DECAY_HOLD_MS * 1000) {
+                        end = (uint32_t)s_rw.last_end;   /* hold — no reset */
+                    } else {
+                        decay_gate_us = now_us;          /* allow one shrink step */
+                    }
+                } else if ((int)end > s_rw.last_end) {
+                    decay_gate_us = now_us;              /* growth re-arms the hold */
+                }
             }
             fps = RWAVE_FPS_REACTIVE;
         } else if (st == EMOTE_FACE_THINKING) {

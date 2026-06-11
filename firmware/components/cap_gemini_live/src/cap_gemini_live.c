@@ -130,12 +130,16 @@ static void   gl_resume_listening(const char *reason);
  * the ES7210 capture (post-6x-gain RMS): silence floor ~150-400, speech
  * 1000-4900. Hysteresis between SILENCE_RMS and SPEECH_RMS prevents flicker. */
 #define GL_USE_LOCAL_VAD         1
-#define GL_VAD_SPEECH_RMS        1200  /* RMS at/above this = speech. Above the   */
-                                       /* measured idle ceiling (~939 raw over    */
-                                       /* 60s silent) so ambient never registers. */
+#define GL_VAD_SPEECH_RMS        1000  /* RMS at/above this = speech. Sits just   */
+                                       /* above the measured idle ceiling (~939   */
+                                       /* raw over 60s silent) at the bottom of   */
+                                       /* the measured speech band (1000-4900) —  */
+                                       /* 1200 missed quiet/distant speech, which */
+                                       /* read as "it never replies".             */
 #define GL_VAD_SILENCE_RMS       500   /* RMS below this = silence (hysteresis)  */
 #define GL_VAD_HANG_MS           700   /* trailing silence that ends the turn    */
-#define GL_VAD_MIN_SPEECH_MS     300   /* sustained speech required before commit */
+#define GL_VAD_MIN_SPEECH_MS     240   /* sustained speech required before commit */
+                                       /* (300 swallowed short replies: "yes")   */
 
 #define GL_I2S_READ_TIMEOUT_MS   200
 #define GL_AUDIO_WRITE_MARGIN_MS 250
@@ -224,6 +228,7 @@ typedef struct {
     int64_t                      last_input_end_us;
     bool                         activity_open;
     volatile bool                vad_commit_request; /* TX task → session task: end-of-speech, commit turn */
+    int64_t                      thinking_since_us;  /* when THINKING was entered; gates the tap-to-stop grace */
 } gl_ctx_t;
 
 static gl_ctx_t s_gl;
@@ -353,6 +358,7 @@ static void gl_set_state(gl_state_t st, const char *detail)
         emote_set_listening();
         break;
     case GL_STATE_THINKING:
+        s_gl.thinking_since_us = esp_timer_get_time();
         emote_set_thinking();
         break;
     case GL_STATE_SPEAKING:
@@ -1353,6 +1359,15 @@ static void gl_audio_tx_task(void *arg)
                         ESP_LOGI(TAG, "Local VAD: end of speech (%ums speech, %ums silence) -> commit turn",
                                  (unsigned)vad_speech_ms, (unsigned)vad_silence_ms);
                         s_gl.vad_commit_request = true;
+                        /* Reset NOW, not on the next LISTENING entry: the session
+                         * task clears vad_commit_request while the state is still
+                         * LISTENING, and with stale speech_seen + silence_ms the
+                         * very next 20 ms frame re-fired a second commit (seen
+                         * live: two "end of speech" logs 20 ms apart → double
+                         * end_input on one turn). */
+                        vad_speech_ms = 0;
+                        vad_silence_ms = 0;
+                        vad_speech_seen = false;
                     }
                 } else if (vad_speech_ms > 0) {
                     /* Genuine silence before any utterance latched: decay the
@@ -2667,6 +2682,19 @@ void cap_gemini_live_toggle(void)
             (s_gl.state == GL_STATE_READY || s_gl.state == GL_STATE_LISTENING)) {
             ESP_LOGI(TAG, "Tap: ending input stream");
             cap_gemini_live_end_input();
+            return;
+        }
+        /* THINKING = a reply is being generated. Tearing the session down here
+         * is the worst outcome — the user (who is usually tapping because the
+         * reply feels slow) kills their own answer and reads it as "it never
+         * replied" (seen live: 16 s grounding delay → three taps → dead turn).
+         * Ignore taps for the first 10 s of THINKING; after that the user has
+         * waited long enough that "get me out" is the honest intent. SPEAKING
+         * taps still stop immediately (shut it up). */
+        if (s_gl.state == GL_STATE_THINKING &&
+            (now_us - s_gl.thinking_since_us) < 10 * 1000 * 1000LL) {
+            ESP_LOGI(TAG, "Tap ignored: reply pending (THINKING %lld ms) — taps stop it after 10 s",
+                     (long long)((now_us - s_gl.thinking_since_us) / 1000));
             return;
         }
         ESP_LOGI(TAG, "Tap: stopping session");
