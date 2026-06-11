@@ -126,6 +126,22 @@ copy_jarvis_pmic() {
     cp -f "$src"/src/*.c "$dst/src/"
 }
 
+copy_jarvis_imu() {
+    # QMI8658 accelerometer telemetry (read-only). Same vendoring idiom as
+    # copy_jarvis_pmic: canonical source under firmware/components/jarvis_imu,
+    # mirrored into the generated tree's local project components dir so it
+    # survives a clean re-clone. The http_server imu handler (patched by
+    # apply_imu_read_patch) calls jarvis_imu_read().
+    local src="$ROOT/firmware/components/jarvis_imu"
+    local dst="$ESP_CLAW_DIR/application/edge_agent/components/jarvis_imu"
+    [ -d "$src" ] || die "missing vendored jarvis_imu source at $src"
+    log "copying jarvis_imu component → upstream tree"
+    mkdir -p "$dst/src" "$dst/include"
+    cp -f "$src/CMakeLists.txt" "$dst/CMakeLists.txt"
+    cp -f "$src"/include/*.h "$dst/include/"
+    cp -f "$src"/src/*.c "$dst/src/"
+}
+
 copy_emote_runtime() {
     # The emote runtime is patched enough now (reactive face, display mirror,
     # CO5300 flush sync, small internal-DMA render strips) that keeping it as scattered
@@ -795,6 +811,104 @@ if "jarvis_pmic" not in c:
     c = c.replace(anchor, anchor + "        jarvis_pmic\n", 1)
     cmake.write_text(c)
     print("patched", cmake)
+PY
+}
+
+# Add a read-only /api/imu endpoint backed by the jarvis_imu component (QMI8658
+# accelerometer). Runs AFTER apply_battery_real_read_patch (shares the status API
+# file + REQUIRES idiom) and copy_jarvis_imu. The IMU is read on demand only — no
+# always-on poller is added (the I2C bus is shared). See firmware/components/jarvis_imu.
+apply_imu_read_patch() {
+    local status="$ESP_CLAW_DIR/application/edge_agent/components/http_server/http_server_status_api.c"
+    local cmake="$ESP_CLAW_DIR/application/edge_agent/components/http_server/CMakeLists.txt"
+    if [ ! -f "$status" ] || [ ! -f "$cmake" ]; then
+        log "http status route sources not found — skipping IMU read patch"
+        return
+    fi
+    if grep -q "jarvis_imu_read" "$status" 2>/dev/null; then
+        log "QMI8658 IMU read patch already applied"
+        return
+    fi
+    log "applying QMI8658 IMU read (jarvis_imu → /api/imu)"
+    python3 - <<PY
+import pathlib
+status = pathlib.Path(r"$status")
+cmake = pathlib.Path(r"$cmake")
+
+s = status.read_text()
+
+# 1. Pull in the jarvis_imu header (after jarvis_pmic.h if present, else priv).
+if '#include "jarvis_imu.h"' not in s:
+    for anchor in ('#include "jarvis_pmic.h"\n', '#include "http_server_priv.h"\n'):
+        if anchor in s:
+            s = s.replace(anchor, anchor + '#include "jarvis_imu.h"\n', 1)
+            break
+    else:
+        raise SystemExit("could not locate status API include anchor in %s" % status)
+
+# 2. Insert imu_handler just before restart_handler.
+end_marker = "static esp_err_t restart_handler(httpd_req_t *req)\n"
+idx = s.find(end_marker)
+if idx == -1:
+    raise SystemExit("could not locate restart_handler in %s" % status)
+
+handler = '''static esp_err_t imu_handler(httpd_req_t *req)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (!root) {
+        httpd_resp_send_500(req);
+        return ESP_ERR_NO_MEM;
+    }
+
+    jarvis_imu_t imu;
+    if (jarvis_imu_read(&imu) != ESP_OK || !imu.present) {
+        cJSON_AddBoolToObject(root, "present", false);
+        http_server_json_add_string(root, "source", "qmi8658");
+        return http_server_send_json_response(req, root);
+    }
+
+    cJSON_AddBoolToObject(root, "present", true);
+    cJSON_AddNumberToObject(root, "addr", imu.i2c_addr);
+    cJSON_AddNumberToObject(root, "ax", imu.ax);
+    cJSON_AddNumberToObject(root, "ay", imu.ay);
+    cJSON_AddNumberToObject(root, "az", imu.az);
+    cJSON_AddNumberToObject(root, "gx", imu.gx);
+    cJSON_AddNumberToObject(root, "gy", imu.gy);
+    cJSON_AddNumberToObject(root, "gz", imu.gz);
+    cJSON_AddNumberToObject(root, "pitch", imu.pitch_deg);
+    cJSON_AddNumberToObject(root, "roll", imu.roll_deg);
+    http_server_json_add_string(root, "orientation", imu.orientation);
+    http_server_json_add_string(root, "source", "qmi8658");
+    return http_server_send_json_response(req, root);
+}
+
+'''
+if "imu_handler" not in s:
+    s = s[:idx] + handler + s[idx:]
+
+# 3. Register the /api/imu route after /api/battery.
+route_anchor = '        { .uri = "/api/battery", .method = HTTP_GET, .handler = battery_handler },\n'
+if '"/api/imu"' not in s:
+    if route_anchor not in s:
+        raise SystemExit("could not locate /api/battery route in %s" % status)
+    s = s.replace(route_anchor,
+                  route_anchor + '        { .uri = "/api/imu", .method = HTTP_GET, .handler = imu_handler },\n',
+                  1)
+status.write_text(s)
+
+# 4. Add jarvis_imu to the http_server component REQUIRES (after jarvis_pmic).
+c = cmake.read_text()
+if "jarvis_imu" not in c:
+    for anchor in ("        jarvis_pmic\n", "        json\n"):
+        if anchor in c:
+            c = c.replace(anchor, anchor + "        jarvis_imu\n", 1)
+            break
+    else:
+        raise SystemExit("could not locate http_server REQUIRES anchor in %s" % cmake)
+    cmake.write_text(c)
+
+print("patched", status)
+print("patched", cmake)
 PY
 }
 
@@ -2736,6 +2850,7 @@ main() {
     copy_jarvis_logger
     copy_jarvis_brain
     copy_jarvis_pmic
+    copy_jarvis_imu
     apply_patch
     apply_wifi_ps_patch
     apply_jpeg_soi_patch
@@ -2751,6 +2866,7 @@ main() {
     apply_http_health_patch
     copy_http_display_diagnostics
     apply_battery_real_read_patch
+    apply_imu_read_patch
     apply_native_status_led_patch
     apply_emote_status_detail_patch
     apply_touch_handle_deref_patch
