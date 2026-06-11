@@ -55,3 +55,19 @@ diff --git a/application/edge_agent/partitions_16MB.csv b/application/edge_agent
 +ota_0,     app,  ota_0,   0x20000,  0x400000
 +emote,     data, spiffs,  0x420000, 0x600000
 +storage,   data, fat,     0xA20000, 0x500000
+
+--- UPDATE 2026-06-10: second resize (applied by the same bootstrap.sh function) ---
+
+emote grown again 6M -> 6.875M (0x6E0000) for higher-frame-count 466x466
+reactive-face packs (rwave idle/listen/think/speak now 30/22/32/22 frames,
+~3.71 MB, alongside ~3.40 MB of eye assets). The former 896K free top gap is
+folded into emote; storage moves up to 0xB00000 (still 5 MB) and now ends
+exactly at 0x1000000.
+
+ OLD (this patch)                     NEW (2026-06-10)
+  emote   0x420000 6M                  emote   0x420000 0x6E0000 (6.875M)
+  storage 0xA20000 5M                  storage 0xB00000 5M (ends 0x1000000)
+
+Same rules as before: partitions are mounted by LABEL, offsets flow from
+flasher_args.json. Moving storage requires reflashing with STORAGE=1; Wi-Fi +
+LLM config live in NVS (0x9000) and survive.

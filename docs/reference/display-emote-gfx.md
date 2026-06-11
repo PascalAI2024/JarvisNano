@@ -106,6 +106,35 @@ Source: `esp_emote_gfx/scripts/` (local managed component copy).
 - GDMA handlers in IRAM (`CONFIG_GDMA_CTRL_FUNC_IN_IRAM=y`)
 - PSRAM is DMA-capable (`CONFIG_SOC_PSRAM_DMA_CAPABLE=y`)
 
+### [2026-06-10] Status update: fixes 1–2 applied; fix 3 had regressed, now resolved via PSRAM buffers
+
+- Fix 1 ✅ — `CONFIG_COMPILER_OPTIMIZATION_PERF=y` (-O2) is live in `application/edge_agent/sdkconfig:684`.
+- Fix 2 ✅ — `.fps = 30` in `emote_get_default_config()` (`esp-claw/components/common/emote/emote.c`).
+- Fix 3 ❌→✅ — the strip buffer had shrunk further (16 → 48 → **12 rows**) instead of growing. Cause: buffers were allocated with `MALLOC_CAP_DMA` only → **internal SRAM**, which was being fought over by SD-card DMA (see esp-claw commits `d6429e3`, `12af66b`). Only ~5.4% of a frame per strip ⇒ ~39 SPI flushes/frame ⇒ visible tearing/banding at 30 fps.
+  - Resolution: set `.buff_spiram = true` alongside `.buff_dma = true` (`gfx_disp.c` allows the combo when `SOC_PSRAM_DMA_CAPABLE`, true on ESP32-S3) and raise `EMOTE_FLUSH_STRIP_ROWS` to `s_lcd_height / 4` (116 rows ⇒ 4 flushes/frame). Buffers (2 × ~108 KB) move to PSRAM, freeing ~22 KB internal SRAM for SD DMA.
+  - This mirrors Waveshare's own `05_LVGL_WITH_RAM` ESP-IDF demo for this exact board: dual buffering + DMA from PSRAM is how they reach their advertised 200–300 fps LVGL benchmark (wiki: ESP32-S3-Touch-AMOLED-1.75, demo table).
+  - Source: `managed_components/espressif2022__esp_emote_gfx/src/core/gfx_disp.c:57–67` (cap flag logic), `esp_emote_expression/include/expression_emote/emote_init.h` (`buff_spiram` flag).
+
+### [2026-06-10] Smoothness round 2: emote partition 6 MB → 6.875 MB, reactive frame counts raised
+
+- With the render pipeline fixed (30 fps engine, -O2, PSRAM quarter-strips), the remaining
+  smoothness lever is baked frame count. Raised `STATE_FRAMES` in
+  `firmware/mascot/gen_reactive_face.py`: idle 24→**30**, listen 16→**22**, think 24→**32**,
+  speak 16→**22** (rwave total 3.71 MB; loops stay seamless because renderers parameterize on
+  `t = i/n`). The runtime needs no change — `reactive_face.c` reads the real frame count from
+  each EAF header and the 8 amplitude buckets scale to it.
+- Budget: grew the `emote` partition `0x600000` → `0x6E0000` (6.875 MB) by folding in the 896 KB
+  free top gap; `storage` moved `0xA20000` → `0xB00000` (5 MB, ends exactly at `0x1000000`).
+- ⚠️ The partition CSV's source of truth is `scripts/bootstrap.sh` (`apply_emote_partition_patch`,
+  ~line 2186) — it REWRITES `partitions_16MB.csv` on every build, guarded by a grep for the
+  current emote size. Editing the CSV alone gets silently reverted at the next build; change the
+  bootstrap heredoc (and its guard grep) instead.
+- Moving `storage` requires reflashing with `STORAGE=1` (FAT re-laid-out). Wi-Fi + LLM config
+  live in NVS (`0x9000`) and survive; runtime `storage_base_path` is the SD card anyway.
+- Per-state playback rates are authoritative in `firmware/emote/reactive_face.c`
+  (`RWAVE_FPS_IDLE` 24, `RWAVE_FPS_REACTIVE`/`RWAVE_FPS_THINK` 30) — the fps fields in
+  `emote.json` are documentation-only for the rwave object.
+
 ## Open questions
 
 - Can `gfx_motion` / `gfx_motion_scene` transform params be updated each frame from an audio RMS value? If yes, this is the cleaner reactive path than per-state AAF segment selection.

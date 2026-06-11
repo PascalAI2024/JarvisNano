@@ -40,11 +40,41 @@ Fix: PSRAM-backed frame queue, depth 128. At that depth, drops go to zero under 
 
 Source: memory file `project_waveform_solo_state.md`.
 
-**[2026-05-21] 16 kHz capture in / 24 kHz playback out — no resample needed for Gemini Live**
+**[2026-05-21] ~~16 kHz capture in / 24 kHz playback out — no resample needed~~ DISPROVEN 2026-06-10: the shared I2S duplex clock cannot hold 16 kHz RX + 24 kHz TX**
 
-Gemini Live expects 16 kHz PCM in and returns 24 kHz PCM out. Our codec chain matches exactly: ES7210 captures at 16 kHz, ES8311 plays back at 24 kHz. No software resampling is needed if I2S rates are set correctly.
+Original claim: ES7210 captures at 16 kHz, ES8311 plays at 24 kHz, no software
+resampling needed. **Wrong on this board.** Both codecs sit on ONE I2S port in
+STD duplex (same BCLK/WS), so TX and RX share a clock. `gl_open_dac(24000)`
+succeeds, but the next record-path (re)init reconfigures the pair and slams TX
+back to 16 kHz — device log: `I2S_IF: STD: TX, sample_rate_hz: 16000`
+immediately after `enter_speaking: gl_open_dac(24000) = 0`. Result: 24 kHz PCM
+played on a 16 kHz clock — 1.5× slow, pitched down, write backpressure →
+intermittent cutoffs. Symptom waxes/wanes with open ORDER, which made it look
+random.
 
-Reference: EchoEar (xiaozhi `boards/esp-vocat/config.h`) also uses `AUDIO_INPUT_SAMPLE_RATE 24000` / `AUDIO_OUTPUT_SAMPLE_RATE 24000` — note that EchoEar uses 24 kHz input because it does not feed Gemini Live. Our input must stay at 16 kHz for the Gemini API.
+Fix (2026-06-10, `cap_gemini_live.c`): `gl_resolve_playback_rate()` returns
+`GL_TX_SAMPLE_RATE` (16 kHz) whenever a capture path exists, and the playback
+path resamples model 24 kHz → 16 kHz with `gl_resample_pcm16_linear()`
+(linear interpolation; the old nearest-neighbour decimation caused metallic
+aliasing). The I2S clock then never moves during a session. Also fixed: the
+playback entry no longer drops chunks that arrive before `enter_speaking`
+opens the DAC (start-of-utterance clipping) — it opens on demand.
+
+Reference: EchoEar (xiaozhi `boards/esp-vocat/config.h`) runs BOTH directions
+at 24 kHz for the same shared-clock reason. Our input must stay 16 kHz for the
+Gemini API, so we hold the bus at 16 kHz and resample the downlink instead.
+
+**[2026-06-10] BLE GATT service disabled — Wi-Fi/BT coexistence starves streaming audio**
+
+`main.c` started a NimBLE GATT companion service (`ble_gatt_init()`) at boot.
+With the BT controller active, ESP32-S3 software coexistence time-slices the
+single 2.4 GHz radio between BT and Wi-Fi — the boot log showed repeated
+`wifi: Coexist: Wi-Fi connect fail, apply reconnect coex policy` and
+`Coexist!!! Wi-Fi station would only keep waked when available`. For a
+WSS-streaming voice device this manifests as intermittent audio stalls.
+Nothing pairs over BLE today, so the init call is replaced with a log line
+(grep `BLE GATT service disabled` in `main.c`). Restore the call if a BLE
+companion app ever ships — and revisit coexistence tuning then.
 
 **[2026-05-21] ES7210 AEC: channel mask `0111` — Mic0 is labeled NA**
 

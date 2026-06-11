@@ -96,8 +96,14 @@ static const char *TAG = "app_rwave";
 /* Amplitude driver task cadence (Hz) and lerp for fluid attack/decay. */
 #define RWAVE_DRIVER_HZ     30
 #define RWAVE_DRIVER_MS     (1000 / RWAVE_DRIVER_HZ)
-#define RWAVE_LERP          0.18f   /* eased displayed level toward target — softer for fluid AMOLED feel */
+#define RWAVE_LERP          0.35f   /* eased displayed level toward target. The driver task only
+                                     * achieves ~6 Hz effective cadence (emote_lock contention with
+                                     * the 30 fps render loop), so 0.18 measured as visibly laggy
+                                     * voice tracking; 0.35 at ~6 Hz ≈ the intended 0.18 at 30 Hz. */
 #define RWAVE_AMP_BUCKETS   8U      /* coarse end buckets reduce segment resets when RMS jitters */
+#define RWAVE_MIN_END_DIV   3U      /* quiet-voice floor: never loop fewer than last/3 frames.
+                                     * Without this, low amplitude maps to end=2..4 → a ~130 ms
+                                     * micro-loop that strobes on the panel instead of animating. */
 
 /* One baked EAF held resident in memory for its object's lifetime. The decoder
  * keeps the pointer (it does NOT copy — cf. eye's emote_acquire_data,
@@ -508,6 +514,18 @@ static void rwave_task(void *arg)
             }
             start = 0;
             end = 1 + (bucket * (clip->last - 1)) / RWAVE_AMP_BUCKETS;
+            /* Quiet-voice floor: a near-silent level would otherwise loop only
+             * frames [0..2-4] — at 30 fps that 100-150 ms micro-loop reads as
+             * strobing, not motion. The ramp's early frames carry subtle
+             * baked motion, so a window of at least last/RWAVE_MIN_END_DIV
+             * always animates while still reading as "quiet". */
+            uint32_t min_end = clip->last / RWAVE_MIN_END_DIV;
+            if (min_end < 2) {
+                min_end = 2;
+            }
+            if (end < min_end) {
+                end = min_end;
+            }
             fps = RWAVE_FPS_REACTIVE;
         } else if (st == EMOTE_FACE_THINKING) {
             end = clip->last;            /* full self-contained sweep loop */

@@ -134,18 +134,20 @@ The build emits 5 partitions in the flash layout:
 0x008000  partition-table.bin         partition table
 0x00f000  ota_data_initial.bin        OTA selector
 0x020000  edge_agent.bin              ~2.51 MB application (37% headroom in 4 MB slot)
-0x420000  emote_assets.bin            6 MB emote partition — packed emote frames
-                                      (284×240 voice-face pack today; sized for the
-                                      466×466 JarvisNano mascot + HUD pack)
-0xa20000  storage.bin                 5 MB FATFS — Lua scripts, router rules, memory
+0x420000  emote_assets.bin            6.875 MB emote partition — packed emote frames
+                                      (466×466 reactive-face rwave packs + the
+                                      284×240 eye/voice-face pack)
+0xb00000  storage.bin                 5 MB FATFS — Lua scripts, router rules, memory
 ```
 
 OTA slot B (the old 4 MB `ota_1`) was reserved-but-never-flashed; it was reclaimed
 to grow `emote` 3 MB → 6 MB and `storage` 4 MB → 5 MB (the 8 voice-face .eaf files
-overflowed the old 3 MB emote partition). The layout still ends at `0xf20000`, with
-~896 KB free at the top for future skill assets. Partition table:
-`application/edge_agent/partitions_16MB.csv`. Resizing the `emote`/`storage`
-partitions requires reflashing with FATFS (`STORAGE=1`).
+overflowed the old 3 MB emote partition). `emote` was later grown again
+6 MB → 6.875 MB (0x6E0000) for higher-frame-count reactive-face packs, folding in
+the former 896 KB top gap; `storage` moved up to 0xB00000 and now ends exactly at
+`0x1000000`. Partition table: `application/edge_agent/partitions_16MB.csv`.
+Resizing or moving the `emote`/`storage` partitions requires reflashing with FATFS
+(`STORAGE=1`); Wi-Fi/LLM config live in NVS and survive.
 
 ## References
 

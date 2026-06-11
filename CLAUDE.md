@@ -15,6 +15,16 @@ ESP_CLAW_REF=$(cd esp-claw && git rev-parse HEAD) \
 
 Flash: `idf.py flash --flash-mode dio` (DIO mode required for the CO5300 QSPI display).
 
+**⚠️ Edit canonical sources, never the esp-claw copies.** `bootstrap.sh` overwrites
+parts of the `esp-claw/` tree on EVERY build: `firmware/components/cap_gemini_live/`
+→ `esp-claw/components/claw_capabilities/cap_gemini_live/`, `firmware/emote/` →
+the emote runtime, `boards/` → board YAMLs, and it rewrites
+`application/edge_agent/partitions_16MB.csv` from a heredoc inside
+`apply_emote_partition_resize_patch`. Edits made directly to those esp-claw copies
+are silently reverted at the next build. Files that exist ONLY in esp-claw (e.g.
+`application/edge_agent/main/main.c`) are modified via idempotent `apply_*_patch`
+functions in `bootstrap.sh` — add a patch function there, not a bare edit.
+
 Two version pins are required inside the build container before `idf.py build`:
 - `pip install 'idf-component-manager==2.4.10'`
 - `pip install 'esp-bmgr-assist==0.5.0'`

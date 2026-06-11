@@ -6,6 +6,33 @@ All notable user-facing changes should be recorded here.
 
 ### Firmware
 
+- **Voice clarity + cutoff fixes (Gemini Live audio path).** Root-caused the
+  intermittent "deep, garbled, cut-off" playback: the ES8311 DAC and ES7210
+  ADC share one I2S port in STD duplex, so opening playback at the model's
+  native 24 kHz only lasted until the next record-path re-init slammed the
+  shared clock back to 16 kHz. Playback is now locked to the 16 kHz capture
+  rate for the whole session and the 24 kHz downlink is resampled with linear
+  interpolation (the old nearest-neighbour decimation caused metallic
+  aliasing). Also: audio chunks arriving before the DAC opened are no longer
+  dropped (start-of-utterance clipping) — the DAC opens on demand.
+  See `docs/reference/audio-es8311-es7210.md`.
+- **BLE GATT service disabled** (`bootstrap.sh::apply_ble_disable_patch`).
+  NimBLE kept the BT controller active and Wi-Fi/BT coexistence time-sliced
+  the radio — measured as repeated "apply reconnect coex policy" Wi-Fi
+  failures and audio stalls. With BLE off: `coexist: 0`, STA association in
+  ~6 s (was ~17.5 s with retries), and the internal-heap floor rose
+  76 KB → 244 KB. Restore `ble_gatt_init()` if a BLE companion app ships.
+- **Arc-reactor reactive face, smoother + bigger.** The four 466×466 rwave
+  EAF packs were redesigned (energy-field renderer, Stark cyan LUTs) and
+  re-baked with 25–37% more frames (idle 24→30, listen 16→22, think 24→32,
+  speak 16→22). The `emote` partition grew 6 MB → 6.875 MB (`0x6E0000`) by
+  folding in the former 896 KB top gap; `storage` moved to `0xB00000` (still
+  5 MB, ends exactly at 16 MB). Repartition flashes need `STORAGE=1`; Wi-Fi/
+  LLM config live in NVS and survive.
+- **Quiet-voice strobe fix (`firmware/emote/reactive_face.c`).** Low
+  amplitude used to map to a 2–4 frame loop window (~130 ms micro-loop that
+  strobed on the panel); listen/speak now enforce a floor of ⅓ of the ramp,
+  and the amplitude easing was retuned for the driver task's real cadence.
 - **Emote idle screen shows the active LLM model** (`patches/0009`). The emote
   engine previously only reflected network status; it now caches that state and
   exposes `emote_set_status_detail()`, which `app_claw` calls with the model

@@ -2188,34 +2188,40 @@ apply_emote_partition_resize_patch() {
         log "partitions_16MB.csv not found — skipping emote partition resize patch"
         return
     fi
-    if grep -q "0x600000" "$csv" 2>/dev/null; then
+    if grep -q "0x6E0000" "$csv" 2>/dev/null; then
         log "emote partition resize patch already applied"
         return
     fi
-    log "applying patches/0030-emote-partition-6mb.patch"
+    log "applying patches/0030-emote-partition-resize (emote 6.875M, storage moved up)"
     python3 - <<PY
 import pathlib
 csv = pathlib.Path(r"$csv")
 new = (
     "# Name,    Type, SubType, Offset,   Size\n"
-    "# JarvisNano AMOLED-1.75: emote grown 3M->6M for native 466x466 art, storage\n"
-    "# 4M->5M. ota_1 (4M, never flashed -- OTA-B was reserved-but-empty) reclaimed.\n"
-    "# Explicit offsets so the resized layout is unambiguous. Ends at 0xf20000 (same\n"
-    "# top as before); 896K free at top for future skill assets.\n"
+    "# JarvisNano AMOLED-1.75: emote grown 3M->6M->6.875M for native 466x466 art\n"
+    "# (reactive face frame bump for smoother loops), storage 4M->5M. ota_1 (4M,\n"
+    "# never flashed -- OTA-B was reserved-but-empty) reclaimed. Explicit offsets so\n"
+    "# the resized layout is unambiguous. storage now ends exactly at 0x1000000 --\n"
+    "# the former 896K top gap is folded into emote. Moving storage wipes the FAT\n"
+    "# partition (runtime storage_base_path is the SD card; Wi-Fi/LLM config live\n"
+    "# in NVS and survive) -- flash with STORAGE=1 after changing this table.\n"
     "nvs,       data, nvs,     0x9000,   0x6000\n"
     "otadata,   data, ota,     0xF000,   0x2000\n"
     "phy_init,  data, phy,     0x11000,  0x1000\n"
     "ota_0,     app,  ota_0,   0x20000,  0x400000\n"
-    "emote,     data, spiffs,  0x420000, 0x600000\n"
-    "storage,   data, fat,     0xA20000, 0x500000\n"
+    "emote,     data, spiffs,  0x420000, 0x6E0000\n"
+    "storage,   data, fat,     0xB00000, 0x500000\n"
 )
-# Sanity: the file we are replacing must be the known 16MB layout (has the
-# auto-offset ota_1 line) so we don't clobber an unexpected upstream change.
+# Sanity: only replace layouts we know — the upstream pre-resize table (has the
+# auto-offset ota_1 line / 3M emote) or our previous 6M-emote resize. Anything
+# else means an unexpected upstream change: abort rather than clobber.
 s = csv.read_text()
-if "ota_1" not in s and "0x300000" not in s and "   3M" not in s:
-    raise SystemExit("partitions_16MB.csv is not the expected pre-resize layout — aborting")
+known_pre = "ota_1" in s or "0x300000" in s or "   3M" in s
+known_6m = "0x600000" in s and "0xA20000" in s
+if not (known_pre or known_6m):
+    raise SystemExit("partitions_16MB.csv is not a known layout — aborting")
 csv.write_text(new)
-print("rewrote partitions_16MB.csv: emote 0x420000+6M, storage 0xA20000+5M")
+print("rewrote partitions_16MB.csv: emote 0x420000+0x6E0000, storage 0xB00000+5M")
 PY
 }
 
@@ -2620,12 +2626,55 @@ main() {
     copy_emote_runtime
     apply_emote_performance_patch
     apply_reactive_waveform_audio_bridge_patch
+    apply_ble_disable_patch
 
     if [ "${1:-}" = "build" ]; then
         build
     else
         log "ready. run \`./scripts/bootstrap.sh build\` to compile in Docker"
     fi
+}
+
+# BLE GATT companion service off: NimBLE keeps the BT controller active and
+# Wi-Fi/BT software coexistence time-slices the single 2.4 GHz radio — measured
+# as "apply reconnect coex policy" Wi-Fi failures and intermittent Gemini Live
+# audio stalls. Voice path is Wi-Fi only; re-enable if a BLE companion ships.
+# See docs/reference/audio-es8311-es7210.md (2026-06-10 finding).
+apply_ble_disable_patch() {
+    local main_c="$ESP_CLAW_DIR/application/edge_agent/main/main.c"
+    if [ ! -f "$main_c" ]; then
+        log "main.c not found — skipping BLE disable patch"
+        return
+    fi
+    if grep -q "BLE GATT service disabled" "$main_c" 2>/dev/null; then
+        log "BLE disable patch already applied"
+        return
+    fi
+    log "applying BLE-disable patch (skip ble_gatt_init; avoid Wi-Fi coex audio stalls)"
+    python3 - <<PY
+import pathlib
+p = pathlib.Path(r"$main_c")
+s = p.read_text()
+old = (
+    '    if (ble_gatt_init() != ESP_OK) {\n'
+    '        ESP_LOGE(TAG, "Failed to initialize BLE GATT service");\n'
+    '    }\n'
+)
+new = (
+    '    /* BLE GATT companion service intentionally NOT started. NimBLE keeps the\n'
+    '     * BT controller active, and Wi-Fi/BT software coexistence time-slices the\n'
+    '     * single 2.4 GHz radio — measured as repeated "apply reconnect coex\n'
+    '     * policy" Wi-Fi failures and intermittent Gemini Live audio cutoffs. The\n'
+    '     * JarvisNano voice path is Wi-Fi only; nothing pairs over BLE today.\n'
+    '     * Re-enable by restoring the ble_gatt_init() call if a companion app\n'
+    '     * ships. (Skipping init also keeps the controller SRAM unallocated.) */\n'
+    '    ESP_LOGI(TAG, "BLE GATT service disabled (voice path is Wi-Fi only; avoids coex audio stalls)");\n'
+)
+if old not in s:
+    raise SystemExit("could not locate ble_gatt_init block in main.c — upstream may have changed")
+p.write_text(s.replace(old, new, 1))
+print("patched", p)
+PY
 }
 
 main "$@"

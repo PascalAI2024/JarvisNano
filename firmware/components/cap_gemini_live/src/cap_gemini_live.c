@@ -473,10 +473,19 @@ static uint32_t gl_i2s_cfg_sample_rate(const periph_i2s_config_t *cfg, i2s_dir_t
 static uint32_t gl_resolve_playback_rate(uint32_t model_rate)
 {
     uint32_t source = model_rate ? model_rate : GL_RX_SAMPLE_RATE;
-    /* Codec path (esp_codec_dev) reconfigures its own I2S clock on open, so
-     * play at the model's native rate (typically 24 kHz) — no resample needed.
-     * Only the raw i2s_channel path is locked to the peripheral's compile-time
-     * clock; fall back to that rate when the codec path is unavailable. */
+    /* The ES8311 DAC and ES7210 ADC share one I2S port in STD duplex on this
+     * board, so TX and RX cannot hold different clocks: opening the DAC at the
+     * model's native 24 kHz works until the next record-path (re)init slams
+     * the shared clock back to 16 kHz (I2S_IF logs: "STD: TX, sample_rate_hz:
+     * 16000" right after enter_speaking opened 24000). 24 kHz data on a
+     * 16 kHz clock plays 1.5x slow and backs up into write timeouts — the
+     * intermittent "deep, garbled, cut-off" audio. Lock playback to the
+     * capture rate and resample the model audio instead; the clock then never
+     * moves for the whole session. */
+    if (s_gl.adc || s_gl.adc_raw) {
+        return GL_TX_SAMPLE_RATE;
+    }
+    /* Playback-only sessions (no capture path) can use the codec natively. */
     if (s_gl.dac && !s_gl.dac_codec_failed) {
         return source;
     }
@@ -1007,12 +1016,14 @@ static bool gl_send_audio_frame(const uint8_t *pcm, size_t len)
     return gl_ws_send_text(frame_json);
 }
 
-/* Convert PCM16 sample-rate using nearest-neighbour.
- * It's intentionally simple: it avoids extra memory copies and keeps latency low,
- * which is the important part for "raw" I2S playback in this stack. */
-static int16_t *gl_resample_pcm16_nearest(const int16_t *in, size_t nsamp_in,
-                                          uint32_t sample_rate_in, uint32_t sample_rate_out,
-                                          size_t *nsamp_out)
+/* Convert PCM16 sample-rate using linear interpolation (fixed-point 16.16).
+ * Nearest-neighbour was audibly harsh for the 24 kHz -> 16 kHz speech path
+ * (ratio 1.5 drops every third sample cold → metallic aliasing); linear
+ * interpolation costs one multiply per sample and removes most of it. Still
+ * single-pass, single output allocation, low latency. */
+static int16_t *gl_resample_pcm16_linear(const int16_t *in, size_t nsamp_in,
+                                         uint32_t sample_rate_in, uint32_t sample_rate_out,
+                                         size_t *nsamp_out)
 {
     if (!in || nsamp_in == 0 || sample_rate_in == 0 || sample_rate_out == 0 ||
         sample_rate_in == sample_rate_out) {
@@ -1035,10 +1046,14 @@ static int16_t *gl_resample_pcm16_nearest(const int16_t *in, size_t nsamp_in,
     uint64_t pos = 0;
     for (size_t i = 0; i < out_samples; ++i) {
         size_t idx = (size_t)(pos >> 16);
-        if (idx >= nsamp_in) {
-            idx = nsamp_in - 1;
+        uint32_t frac = (uint32_t)(pos & 0xFFFF);   /* 16-bit fractional position */
+        if (idx >= nsamp_in - 1) {
+            out[i] = in[nsamp_in - 1];
+        } else {
+            int32_t a = in[idx];
+            int32_t b = in[idx + 1];
+            out[i] = (int16_t)(a + (((b - a) * (int32_t)frac) >> 16));
         }
-        out[i] = in[idx];
         pos += step;
     }
 
@@ -1084,9 +1099,12 @@ static bool gl_extract_audio_data_chunk(cJSON *audio, const char **out_data, uin
 /* Decode base64 PCM and play back to speaker (codec or raw I2S path). */
 static void gl_play_audio_b64(const char *b64_str, uint32_t sample_rate)
 {
-    if ((!s_gl.dac && !s_gl.dac_raw) || !s_gl.dac_open) {
+    /* Require a handle, but NOT an already-open DAC: the first audio chunks of
+     * a turn race enter_speaking's gl_open_dac(), and dropping them clipped the
+     * start of every utterance. gl_open_dac() below opens on demand. */
+    if (!s_gl.dac && !s_gl.dac_raw) {
         gl_set_audio_error("playback: DAC unavailable");
-        ESP_LOGW(TAG, "Speaking: no DAC handle/opened, dropping audio chunk");
+        ESP_LOGW(TAG, "Speaking: no DAC handle, dropping audio chunk");
         return;
     }
 
@@ -1165,8 +1183,11 @@ static void gl_play_audio_b64(const char *b64_str, uint32_t sample_rate)
     size_t    out_bytes = pcm_len;
     int16_t  *resampled = NULL;
 
-    if (s_gl.dac_raw && model_rate != playback_rate) {
-        resampled = gl_resample_pcm16_nearest((const int16_t *)s16, nsamp,
+    /* Resample whenever the model rate differs from the rate the DAC actually
+     * runs at — codec path included. (Previously only the raw path resampled,
+     * so codec playback at a mismatched rate played at the wrong speed.) */
+    if (model_rate != playback_rate) {
+        resampled = gl_resample_pcm16_linear((const int16_t *)s16, nsamp,
                                              model_rate, playback_rate, &out_samples);
         if (resampled) {
             out_pcm = resampled;

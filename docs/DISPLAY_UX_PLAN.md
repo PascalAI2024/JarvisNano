@@ -538,6 +538,13 @@ repopulates Lua + router_rules from the repo, Wi-Fi gets re-provisioned. After t
 lands, the 6 MB partition holds today's voice pack with room and the future 466
 pack.
 
+> **Update 2026-06-10:** `emote` grown again 6 MB → **6.875 MB** (`0x6E0000`) by
+> folding in the former 896 KB top gap; `storage` moved up to `0xB00000` (still
+> 5 MB, now ends exactly at `0x1000000`). Motivation: higher frame counts for the
+> 466×466 reactive-face packs (idle 24→30, listen 16→22, think 24→32, speak
+> 16→22 frames ≈ 3.71 MB rwave + ~3.40 MB eye assets). Same reflash rule:
+> `STORAGE=1`; Wi-Fi/LLM config live in NVS and survive.
+
 ---
 
 ## Phase 3 — Layout, colors, info, theming
