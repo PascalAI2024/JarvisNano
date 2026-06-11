@@ -110,6 +110,22 @@ copy_jarvis_brain() {
     cp -f "$src"/src/*.c "$dst/src/"
 }
 
+copy_jarvis_pmic() {
+    # AXP2101 battery telemetry (read-only). Same vendoring idiom as
+    # copy_jarvis_brain: canonical source under firmware/components/jarvis_pmic,
+    # mirrored into the generated tree's local project components dir so it
+    # survives a clean re-clone. The http_server battery handler (patched by
+    # apply_battery_real_read_patch) calls jarvis_pmic_read_battery().
+    local src="$ROOT/firmware/components/jarvis_pmic"
+    local dst="$ESP_CLAW_DIR/application/edge_agent/components/jarvis_pmic"
+    [ -d "$src" ] || die "missing vendored jarvis_pmic source at $src"
+    log "copying jarvis_pmic component → upstream tree"
+    mkdir -p "$dst/src" "$dst/include"
+    cp -f "$src/CMakeLists.txt" "$dst/CMakeLists.txt"
+    cp -f "$src"/include/*.h "$dst/include/"
+    cp -f "$src"/src/*.c "$dst/src/"
+}
+
 copy_emote_runtime() {
     # The emote runtime is patched enough now (reactive face, display mirror,
     # CO5300 flush sync, small internal-DMA render strips) that keeping it as scattered
@@ -328,6 +344,17 @@ elif board == "esp32s3_touch_amoled_1_75":
     s = s.replace("CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y", "# CONFIG_ESPTOOLPY_FLASHSIZE_2MB is not set")
     s = s.replace("# CONFIG_ESPTOOLPY_FLASHSIZE_16MB is not set", "CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y")
     s = s.replace("CONFIG_ESPTOOLPY_FLASHSIZE=\"2MB\"", "CONFIG_ESPTOOLPY_FLASHSIZE=\"16MB\"")
+
+# LVGL is pulled in as a managed dependency, but its bundled examples/demos are
+# never compiled into the app and fail a clean (fullclean) build with
+# "sdkconfig.h: No such file or directory". Turn them off — strictly a build-time
+# saving, no app code references LV_USE_*_EXAMPLE.
+s = s.replace("CONFIG_LV_BUILD_EXAMPLES=y", "# CONFIG_LV_BUILD_EXAMPLES is not set")
+s = s.replace("CONFIG_LV_BUILD_DEMOS=y", "# CONFIG_LV_BUILD_DEMOS is not set")
+if "CONFIG_LV_BUILD_EXAMPLES=y" not in s and "# CONFIG_LV_BUILD_EXAMPLES is not set" not in s:
+    s += "\n# CONFIG_LV_BUILD_EXAMPLES is not set\n"
+if "CONFIG_LV_BUILD_DEMOS=y" not in s and "# CONFIG_LV_BUILD_DEMOS is not set" not in s:
+    s += "# CONFIG_LV_BUILD_DEMOS is not set\n"
 
 s = force_perf_build(s)
 cfg.write_text(s)
@@ -662,6 +689,112 @@ if "/api/battery" not in s:
 status.write_text(s)
 print("patched", core)
 print("patched", status)
+PY
+}
+
+# Point /api/battery at a real AXP2101 fuel-gauge read via the jarvis_pmic
+# component. Runs AFTER apply_http_phase2_patch (which creates the battery_handler)
+# and AFTER copy_http_display_diagnostics (so the http_server REQUIRES list is
+# settled). Fully idempotent and self-cleaning: it strips ANY in-tree axp2101_*
+# helper functions (including non-durable hand-edits committed straight into the
+# esp-claw snapshot) and rewrites battery_handler to call jarvis_pmic. The PMIC
+# stays init_skip:true — jarvis_pmic only reads, never re-sequences rails.
+apply_battery_real_read_patch() {
+    local status="$ESP_CLAW_DIR/application/edge_agent/components/http_server/http_server_status_api.c"
+    local cmake="$ESP_CLAW_DIR/application/edge_agent/components/http_server/CMakeLists.txt"
+    if [ ! -f "$status" ] || [ ! -f "$cmake" ]; then
+        log "http_server sources not found — skipping AXP2101 battery patch"
+        return
+    fi
+    log "asserting AXP2101 real battery read (jarvis_pmic → /api/battery)"
+    python3 - <<PY
+import pathlib
+import re
+
+status = pathlib.Path(r"$status")
+cmake = pathlib.Path(r"$cmake")
+
+s = status.read_text()
+orig = s
+
+# 1. Pull in the jarvis_pmic header (idempotent).
+inc_anchor = '#include "http_server_priv.h"\n'
+if '#include "jarvis_pmic.h"' not in s:
+    if inc_anchor not in s:
+        raise SystemExit("could not locate http_server_priv.h include in status_api.c")
+    s = s.replace(inc_anchor, inc_anchor + '#include "jarvis_pmic.h"\n', 1)
+
+# 2. Strip EVERY in-tree axp2101_* helper function (and an optional doc comment
+#    directly above it). Older snapshots hand-edited a raw reader straight into
+#    this upstream file; the canonical read now lives in the jarvis_pmic
+#    component, so these become dead code. No-op when none are present.
+helper_re = re.compile(
+    r"(?:/\*.*?\*/\n)?"
+    r"static [^\n]*\baxp2101_\w+\([^)]*\)\n\{\n.*?\n\}\n\n?",
+    re.DOTALL,
+)
+s = helper_re.sub("", s)
+
+# 3. Rewrite battery_handler (whatever its current body) to call jarvis_pmic.
+#    The function ends at the first column-0 '}' — inner braces are indented.
+real = (
+    "static esp_err_t battery_handler(httpd_req_t *req)\n"
+    "{\n"
+    "    cJSON *root = cJSON_CreateObject();\n"
+    "    if (!root) {\n"
+    "        httpd_resp_send_500(req);\n"
+    "        return ESP_ERR_NO_MEM;\n"
+    "    }\n"
+    "\n"
+    "    jarvis_battery_t bat;\n"
+    "    if (jarvis_pmic_read_battery(&bat) != ESP_OK) {\n"
+    "        /* PMIC not reachable on the shared I2C bus yet — stay honest. */\n"
+    "        cJSON_AddBoolToObject(root, \"wired\", false);\n"
+    "        cJSON_AddNumberToObject(root, \"mV\", 0);\n"
+    "        cJSON_AddNumberToObject(root, \"pct\", 0);\n"
+    "        http_server_json_add_string(root, \"state\", \"not_wired\");\n"
+    "        http_server_json_add_string(root, \"source\", \"axp2101\");\n"
+    "        return http_server_send_json_response(req, root);\n"
+    "    }\n"
+    "\n"
+    "    const char *state = bat.charging        ? \"charging\"\n"
+    "                      : !bat.present          ? \"no_battery\"\n"
+    "                      : (bat.percent != 0xFF && bat.percent <= 15) ? \"low\"\n"
+    "                      :                         \"discharging\";\n"
+    "\n"
+    "    cJSON_AddBoolToObject(root, \"wired\", bat.present);\n"
+    "    cJSON_AddNumberToObject(root, \"mV\", bat.millivolts);\n"
+    "    cJSON_AddNumberToObject(root, \"pct\", bat.percent == 0xFF ? 0 : bat.percent);\n"
+    "    cJSON_AddBoolToObject(root, \"charging\", bat.charging);\n"
+    "    cJSON_AddBoolToObject(root, \"usb\", bat.usb_present);\n"
+    "    http_server_json_add_string(root, \"state\", state);\n"
+    "    http_server_json_add_string(root, \"source\", \"axp2101\");\n"
+    "    return http_server_send_json_response(req, root);\n"
+    "}\n"
+)
+handler_re = re.compile(
+    r"static esp_err_t battery_handler\(httpd_req_t \*req\)\n\{\n.*?\n\}\n",
+    re.DOTALL,
+)
+if not handler_re.search(s):
+    raise SystemExit("could not locate battery_handler — apply_http_phase2_patch must run first")
+s = handler_re.sub(lambda _m: real, s, count=1)
+
+if s != orig:
+    status.write_text(s)
+    print("patched", status)
+else:
+    print("battery handler already current")
+
+# 4. Add jarvis_pmic to the http_server component REQUIRES (idempotent).
+c = cmake.read_text()
+if "jarvis_pmic" not in c:
+    anchor = "        json\n"
+    if anchor not in c:
+        raise SystemExit("could not locate http_server REQUIRES json anchor")
+    c = c.replace(anchor, anchor + "        jarvis_pmic\n", 1)
+    cmake.write_text(c)
+    print("patched", cmake)
 PY
 }
 
@@ -2602,6 +2735,7 @@ main() {
     copy_cap_gemini_live
     copy_jarvis_logger
     copy_jarvis_brain
+    copy_jarvis_pmic
     apply_patch
     apply_wifi_ps_patch
     apply_jpeg_soi_patch
@@ -2616,6 +2750,7 @@ main() {
     apply_http_wifi_scan_patch
     apply_http_health_patch
     copy_http_display_diagnostics
+    apply_battery_real_read_patch
     apply_native_status_led_patch
     apply_emote_status_detail_patch
     apply_touch_handle_deref_patch
