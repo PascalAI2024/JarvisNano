@@ -359,7 +359,7 @@ if "CONFIG_LV_BUILD_DEMOS=y" not in s and "# CONFIG_LV_BUILD_DEMOS is not set" n
 s = force_perf_build(s)
 cfg.write_text(s)
 PY
-                  idf.py build' \
+                  { idf.py build || { echo "[bootstrap] first idf.py build failed — retrying once incrementally (sdkconfig.h generation can lose a race with the first compile after set-target fullclean)"; idf.py build; }; }' \
         | tee "$ROOT/.build_logs/build.log"
     log "✓ build complete → $ESP_CLAW_DIR/application/edge_agent/build/edge_agent.bin"
 }
