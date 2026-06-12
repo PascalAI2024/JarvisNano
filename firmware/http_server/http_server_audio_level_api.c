@@ -17,6 +17,29 @@
  * available — but periph_i2s_init() already enables the PDM-RX channel
  * before any device init runs, so we can call i2s_channel_read() on the
  * raw handle without disturbing any other consumer.
+ *
+ * Gemini session gate (STABILITY_PLAN.md P1.6 / F14): the Gemini Live
+ * session owns the same RX channel while a session is active, so this
+ * sampler must never read concurrently. The task polls
+ * gemini_live_is_active() (a) at the top of each cycle, and (b)
+ * immediately before EVERY i2s_channel_read — the 100 ms window is
+ * filled in ~20 ms chunks so an activating session is observed within
+ * one chunk. After the session is last seen active, reads stay off for
+ * a further AUDIO_LEVEL_SESSION_SETTLE_MS.
+ *
+ * Why no practical overlap window remains:
+ *  - Session start: is_active() flips true when the session task enters
+ *    CONNECTING — its first I2S access (gl_open_adc / mic capture) only
+ *    happens after the TLS WebSocket connect + setupComplete, hundreds
+ *    of ms later. The sampler re-checks before every ≤20 ms chunk, so it
+ *    has long backed off by then. Residual theoretical window: a single
+ *    chunk read already in flight when the flag flips (≤ ~20 ms of
+ *    samples, and only if the flag flips in the µs between check and
+ *    read entry — still far before the session touches the channel).
+ *  - Session stop: session_cleanup closes the codec BEFORE clearing
+ *    session_active/state (cap_gemini_live.c session_cleanup ordering),
+ *    and the settle delay additionally covers teardown tails and rapid
+ *    stop→start cycles.
  */
 #include "http_server_priv.h"
 
@@ -45,6 +68,14 @@ static const char *TAG = "http_audio_level";
 #define AUDIO_LEVEL_TASK_PRIO        3
 /* Read timeout per chunk; if the I2S subsystem is starved we just retry. */
 #define AUDIO_LEVEL_READ_TIMEOUT_MS  500
+/* The window is filled in short chunks so gemini_live_is_active() can be
+ * re-checked immediately before every i2s_channel_read (P1.6). */
+#define AUDIO_LEVEL_CHUNK_MS         20
+#define AUDIO_LEVEL_CHUNK_SAMPLES    ((AUDIO_LEVEL_SAMPLE_RATE_HZ * AUDIO_LEVEL_CHUNK_MS) / 1000)
+/* After a Gemini session was last observed active, stay off the RX channel
+ * for this long before any read may resume (covers codec teardown tails and
+ * rapid stop→start session cycles). */
+#define AUDIO_LEVEL_SESSION_SETTLE_MS 750
 
 typedef struct {
     float       rms_db;
@@ -84,6 +115,13 @@ static float audio_level_db_from_amp(float amplitude_unit)
     return db;
 }
 
+static bool audio_level_session_active(void)
+{
+    http_server_ctx_t *ctx = http_server_ctx();
+    return ctx && ctx->services.gemini_live_is_active &&
+           ctx->services.gemini_live_is_active();
+}
+
 static void audio_level_task(void *arg)
 {
     (void)arg;
@@ -101,13 +139,36 @@ static void audio_level_task(void *arg)
              AUDIO_LEVEL_WINDOW_MS, AUDIO_LEVEL_WINDOW_SAMPLES, AUDIO_LEVEL_SAMPLE_RATE_HZ);
 
     uint32_t read_warns = 0;
+    int64_t  last_active_us = 0;   /* last time a Gemini session was observed active */
+    bool     was_active = false;
     while (1) {
-        http_server_ctx_t *ctx = http_server_ctx();
-        if (ctx && ctx->services.gemini_live_is_active &&
-            ctx->services.gemini_live_is_active()) {
+        /* P1.6 gate: never touch the shared I2S RX channel while a Gemini
+         * Live session owns the mic. */
+        if (audio_level_session_active()) {
+            last_active_us = esp_timer_get_time();
+            if (!was_active) {
+                ESP_LOGI(TAG, "gemini session active — audio level sampling paused");
+                was_active = true;
+            }
             audio_level_store_invalid();
             vTaskDelay(pdMS_TO_TICKS(250));
             continue;
+        }
+
+        /* Settle window: after the session flag flips, hold off further so a
+         * codec teardown tail or an immediate session restart can never
+         * overlap a read. */
+        if (last_active_us != 0 &&
+            (esp_timer_get_time() - last_active_us) <
+                (int64_t)AUDIO_LEVEL_SESSION_SETTLE_MS * 1000) {
+            audio_level_store_invalid();
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+        if (was_active) {
+            ESP_LOGI(TAG, "gemini session idle for %d ms — audio level sampling resumed",
+                     AUDIO_LEVEL_SESSION_SETTLE_MS);
+            was_active = false;
         }
 
         i2s_chan_info_t chan_info = {0};
@@ -121,22 +182,50 @@ static void audio_level_task(void *arg)
             continue;
         }
 
-        size_t bytes_read = 0;
-        esp_err_t err = i2s_channel_read(s_rx_chan, buf,
-                                         AUDIO_LEVEL_WINDOW_SAMPLES * sizeof(int16_t),
-                                         &bytes_read,
-                                         pdMS_TO_TICKS(AUDIO_LEVEL_READ_TIMEOUT_MS));
-        if (err != ESP_OK || bytes_read == 0) {
+        /* Fill the window in ≤AUDIO_LEVEL_CHUNK_MS chunks, re-checking the
+         * session flag immediately before EVERY read so an activating
+         * session is observed within one chunk. */
+        const size_t want_bytes = AUDIO_LEVEL_WINDOW_SAMPLES * sizeof(int16_t);
+        size_t    have_bytes  = 0;
+        bool      session_hit = false;
+        esp_err_t err         = ESP_OK;
+        while (have_bytes < want_bytes) {
+            if (audio_level_session_active()) {
+                last_active_us = esp_timer_get_time();
+                session_hit = true;
+                break;
+            }
+            size_t chunk = AUDIO_LEVEL_CHUNK_SAMPLES * sizeof(int16_t);
+            if (chunk > want_bytes - have_bytes) {
+                chunk = want_bytes - have_bytes;
+            }
+            size_t bytes_read = 0;
+            err = i2s_channel_read(s_rx_chan,
+                                   (uint8_t *)buf + have_bytes,
+                                   chunk, &bytes_read,
+                                   pdMS_TO_TICKS(AUDIO_LEVEL_READ_TIMEOUT_MS));
+            if (err != ESP_OK || bytes_read == 0) {
+                break;
+            }
+            have_bytes += bytes_read;
+        }
+
+        if (session_hit) {
+            audio_level_store_invalid();
+            vTaskDelay(pdMS_TO_TICKS(250));
+            continue;
+        }
+        if (err != ESP_OK || have_bytes == 0) {
             audio_level_store_invalid();
             if (err != ESP_ERR_INVALID_STATE && ((read_warns++ % 20) == 0)) {
-                ESP_LOGD(TAG, "i2s_channel_read err=%d bytes=%u", err, (unsigned)bytes_read);
+                ESP_LOGD(TAG, "i2s_channel_read err=%d bytes=%u", err, (unsigned)have_bytes);
             }
             vTaskDelay(pdMS_TO_TICKS(err == ESP_ERR_INVALID_STATE ? 250 : 50));
             continue;
         }
         read_warns = 0;
 
-        size_t n = bytes_read / sizeof(int16_t);
+        size_t n = have_bytes / sizeof(int16_t);
         uint64_t sumsq = 0;
         int32_t  peak  = 0;
         for (size_t i = 0; i < n; i++) {
