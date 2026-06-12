@@ -16,7 +16,10 @@
  * audio (24 kHz) is resampled to the session clock before playback.
  *
  * Audio pipeline (stability sprint P2.1–P2.3), one direction per arrow:
- *   WS task        → rx_queue (raw frames, byte-accounted/byte-capped)
+ *   WS task        → rx_queue (raw frames, byte-accounted/byte-capped; at the
+ *                    cap the WS task WAITS instead of dropping — the unread
+ *                    socket becomes TCP backpressure on the server, so a long
+ *                    reply throttles to realtime instead of losing audio)
  *   gl_session     → cJSON parse + base64 + gain/limiter + resample → PCM ring
  *   gl_pcm_feeder  → blocking esp_codec_dev_write from the PCM ring — nothing else
  *   gl_audio_tx    → 20 ms mic reads + RMS + local VAD → tx_frame_queue (drop-oldest)
@@ -114,6 +117,18 @@ static void   gl_dac_mute(bool mute);
                                                 * covers parse latency, not playback time. */
 #define GL_RX_QUEUE_BYTE_CAP     (512 * 1024)  /* byte cap across queued raw frames (P2.2/F9): bounds the PSRAM the
                                                 * raw queue can pin even if the session task stalls */
+/* At the byte cap the WS task waits (10 ms steps) for the session task to free
+ * queue space instead of dropping the frame. Holding the handler parks the WS
+ * client task with the socket unread, which closes the TCP window — the server
+ * throttles to our realtime drain rate and a long reply arrives without loss
+ * (hardware gate 2026-06-12: a ~30 s story burst overflowed ring+queue and
+ * dropped 36/785 frames under drop-newest). The deadline is a safety valve for
+ * a genuinely wedged consumer: under backpressure a pop frees space every
+ * ~50-150 ms (ring drains at the session clock), and even a max-size 96 KB
+ * frame clears in ~1.4 s, so 5 s of zero progress means wedged — fall back to
+ * dropping (pre-fix behaviour). Stop/teardown bails out within 10 ms via
+ * stop_requested/session_active, so a tap-stop is never delayed. */
+#define GL_RX_BACKPRESSURE_MAX_MS 5000
 /* Decoded-PCM ring between the session task (producer: parse/decode/gain/
  * resample) and the playback feeder (consumer: blocking DAC writes). 1 MB at
  * the 16 kHz session clock (32 kB/s) buffers ~32 s of model speech — a whole
@@ -2331,19 +2346,34 @@ static void gl_ws_event_handler(void *arg, esp_event_base_t base,
             }
             /* Copy the completed frame to a right-sized PSRAM block and queue it,
              * so a slow (blocking-playback) consumer cannot lose frames to rx_buf
-             * being overwritten by the next arrival. Drop (don't block the WS
-             * task) if the queue is full — an audio gap is recoverable, a stalled
-             * WS task is not. */
+             * being overwritten by the next arrival. At the byte cap, WAIT for
+             * the consumer instead of dropping (see GL_RX_BACKPRESSURE_MAX_MS):
+             * the parked WS task is TCP backpressure on the server, so a long
+             * reply throttles to realtime instead of losing audio. Drop only on
+             * a wedged consumer (deadline) or during stop/teardown. */
             if (s_gl.rx_queue) {
                 size_t flen = (size_t)ev->payload_len + 1;
-                /* Byte-cap the raw queue (P2.2/F9): the session task drains
-                 * at decode speed now, so real depth here means trouble —
-                 * bound the PSRAM the queue can pin instead of letting a
-                 * burst eat the budget. */
+                /* Byte-cap the raw queue (P2.2/F9): bound the PSRAM the queue
+                 * can pin instead of letting a burst eat the budget. */
+                uint32_t waited_ms = 0;
+                /* Wait while EITHER limit binds: the byte cap, or queue depth
+                 * (small frames can fill all GL_RX_QUEUE_DEPTH slots below the
+                 * byte cap — without this the depth path would still drop). */
+                while ((atomic_load(&s_rx_queue_bytes) + flen > GL_RX_QUEUE_BYTE_CAP ||
+                        uxQueueSpacesAvailable(s_gl.rx_queue) == 0) &&
+                       s_gl.session_active && !s_gl.stop_requested &&
+                       waited_ms < GL_RX_BACKPRESSURE_MAX_MS) {
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                    waited_ms += 10;
+                }
                 if (atomic_load(&s_rx_queue_bytes) + flen > GL_RX_QUEUE_BYTE_CAP) {
-                    if ((s_gl.rx_drops++ % 8) == 0) {
-                        ESP_LOGW(TAG, "rx queue byte cap hit, dropped frame (total %u)",
-                                 (unsigned)s_gl.rx_drops);
+                    /* Stopping: the frame is moot (teardown drains the queue) —
+                     * discard silently. Otherwise the consumer made zero
+                     * progress for the whole deadline: count the drop. */
+                    if (s_gl.session_active && !s_gl.stop_requested &&
+                        (s_gl.rx_drops++ % 8) == 0) {
+                        ESP_LOGW(TAG, "rx queue byte cap held %u ms, dropped frame (total %u)",
+                                 (unsigned)waited_ms, (unsigned)s_gl.rx_drops);
                     }
                 } else {
                     char *frame = heap_caps_malloc(flen, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -2357,6 +2387,14 @@ static void gl_ws_event_handler(void *arg, esp_event_base_t base,
                             }
                         } else {
                             atomic_fetch_add(&s_rx_queue_bytes, (uint32_t)flen);
+                        }
+                    } else {
+                        /* PSRAM allocation failure loses the frame too — count
+                         * it so the drops diag stays an honest audio-loss
+                         * proxy (was a silent loss before). */
+                        if ((s_gl.rx_drops++ % 8) == 0) {
+                            ESP_LOGW(TAG, "rx frame alloc failed (%u B), dropped frame (total %u)",
+                                     (unsigned)flen, (unsigned)s_gl.rx_drops);
                         }
                     }
                 }
