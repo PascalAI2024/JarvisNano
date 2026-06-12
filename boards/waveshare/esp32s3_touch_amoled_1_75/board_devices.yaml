@@ -51,9 +51,12 @@ devices:
         address: 0x30
         frequency: 400000
 
-  # ES7210 — 4-channel ADC with on-chip AEC (acoustic echo cancellation).
-  # Board has 2 MEMS mics (MIC1+MIC2) + speaker reference loopback (AEC).
-  # Channel mask "0111" = 3 channels: Mic0, Mic1, plus reference channel.
+  # ES7210 — 4-channel ADC. It only DIGITIZES the AEC echo reference; echo
+  # cancellation itself is software (esp-sr) — the chip has no on-chip AEC.
+  # Schematic (docs/reference/aec-barge-in.md): MIC1+MIC2 = MEMS mics,
+  # MIC3 = speaker echo-reference loopback (ES8311 OUTP/OUTN via ~-23.5 dB
+  # pad), MIC4 = unconnected. Channel mask "0111" = MIC1|MIC2|MIC3.
+  # Labels below are TDM lane order, zero-based: lane 2 carries the reference.
   - name: audio_adc
     chip: es7210
     type: audio_codec
@@ -62,7 +65,7 @@ devices:
       adc_enabled: true
       adc_max_channel: 4
       adc_channel_mask: "0111"
-      adc_channel_labels: ['NA', 'REF', 'MIC1', 'MIC2']
+      adc_channel_labels: ['MIC1', 'MIC2', 'REF', 'NC']
       adc_init_gain: 0
     peripherals:
       - name: i2s_audio_in

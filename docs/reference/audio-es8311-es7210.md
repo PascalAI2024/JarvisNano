@@ -1,6 +1,6 @@
 # Audio: ES8311 (DAC) + ES7210 (ADC)
 
-**What it is** — The audio codec chain on the Waveshare AMOLED-1.75 board. The ES8311 is a mono speaker DAC; the ES7210 is a 4-channel ADC with on-chip hardware acoustic echo cancellation (AEC). Both are driven via I2C control + I2S data, managed through `esp_board_manager` and `esp_codec_dev`.
+**What it is** — The audio codec chain on the Waveshare AMOLED-1.75 board. The ES8311 is a mono speaker DAC; the ES7210 is a 4-channel ADC that digitizes the two MEMS mics plus a hardware echo-reference loopback (it has **no on-chip AEC** — echo cancellation is software, esp-sr; see [aec-barge-in.md](./aec-barge-in.md)). Both are driven via I2C control + I2S data, managed through `esp_board_manager` and `esp_codec_dev`.
 
 **How we use it here** — 16 kHz mono PCM from the ES7210 is sent to Gemini Live as the microphone stream. 24 kHz mono PCM returned from Gemini Live is played back through the ES8311. The `cap_gemini_live` component acquires both codec handles via `esp_board_manager_get_device_handle`, opens them, and runs a half-duplex I2S loop.
 
@@ -95,11 +95,28 @@ Nothing pairs over BLE today, so the init call is replaced with a log line
 (grep `BLE GATT service disabled` in `main.c`). Restore the call if a BLE
 companion app ever ships — and revisit coexistence tuning then.
 
-**[2026-05-21] ES7210 AEC: channel mask `0111` — Mic0 is labeled NA**
+**[2026-05-21] ~~ES7210 AEC: channel mask `0111` — Mic0 is labeled NA~~ CORRECTED 2026-06-12: ref is MIC3 (TDM lane 2); MIC1/MIC2 are the mics; the chip has no on-chip AEC**
 
-`board_devices.yaml` sets `adc_channel_mask: "0111"` with labels `['NA', 'REF', 'MIC1', 'MIC2']`. Channel 0 (labeled NA) is excluded; channels 1–3 are enabled. Channel 1 is the AEC reference loopback from the speaker output. Channels 2 and 3 are the two MEMS microphones.
+The original claim ("Channel 0 excluded; channel 1 is the AEC reference; channels 2–3
+are the mics") was wrong on every channel assignment. Schematic-verified facts
+([aec-barge-in.md](./aec-barge-in.md), vendor PDF p.1, 2026-06-12):
 
-Source: `boards/waveshare/esp32s3_touch_amoled_1_75/board_devices.yaml:62-65`.
+- `adc_channel_mask: "0111"` = binary 0x7 = `ES7210_SEL_MIC1|MIC2|MIC3` — the three
+  **lowest** channels are enabled, not the highest.
+- **MIC1 + MIC2 (TDM lanes 0/1) = the two MEMS microphones. MIC3 (lane 2) = the speaker
+  echo-reference loopback** (ES8311 OUTP/OUTN via ~−23.5 dB pad → ES7210 pins 31/32).
+  MIC4 (lane 3) is unconnected.
+- The ES7210 only **digitizes** the reference; echo cancellation is esp-sr software.
+  There is no on-chip AEC.
+
+`board_devices.yaml` labels were fixed accordingly: `['MIC1', 'MIC2', 'REF', 'NC']`
+(index = zero-based TDM lane). Labels are informational only — codegen'd into a string
+field, never parsed at runtime — so this was a label-only change. An AEC implementation
+demuxing lane 1 as the reference would feed a microphone as the ref and converge on
+nothing; **demux `ref = lane 2`**.
+
+Source: `boards/waveshare/esp32s3_touch_amoled_1_75/board_devices.yaml:54-68`;
+`docs/reference/aec-barge-in.md` §1 (schematic citations).
 
 **[2026-05-21] Board-manager handle cast: use `dev_audio_codec_handles_t*` directly**
 
@@ -133,6 +150,7 @@ Source: `cap_gemini_live.c:147-161`.
 
 ## See also
 
+- [aec-barge-in.md](./aec-barge-in.md) — AEC + barge-in design; schematic-verified ES7210 channel map (mics = lanes 0/1, echo ref = lane 2).
 - [board-manager.md](./board-manager.md) — how to acquire codec handles without the double-deref crash.
 - [gemini-live-api.md](./gemini-live-api.md) — 16 kHz / 24 kHz I/O contract with the Gemini API.
 - [waveshare-amoled-175.md](./waveshare-amoled-175.md) — physical hardware context (PA chip, rail voltages).

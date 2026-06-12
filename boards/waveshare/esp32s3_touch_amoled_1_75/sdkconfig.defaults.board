@@ -28,7 +28,8 @@ CONFIG_ESP_BOARD_PERIPH_I2C_SUPPORT=y
 CONFIG_ESP_BOARD_PERIPH_SPI_SUPPORT=y
 CONFIG_ESP_BOARD_PERIPH_GPIO_SUPPORT=y
 
-# Audio: I2S0 duplex driving ES8311 codec (out) + ES7210 ADC (in) with on-chip AEC.
+# Audio: I2S0 duplex driving ES8311 codec (out) + ES7210 ADC (in). The ES7210
+# digitizes a hardware echo-reference on MIC3; AEC itself is software (esp-sr).
 CONFIG_ESP_BOARD_PERIPH_I2S_SUPPORT=y
 
 # Touch screen (CST9217 has known broken READ_ID register; skip the probe).

@@ -1,3 +1,7 @@
 dependencies:
   espressif/esp_websocket_client: "^1.4.0"
   espressif/esp_codec_dev: "~1.5"
+  # AEC for barge-in (docs/reference/aec-barge-in.md D6): direct esp_aec.h API,
+  # no models/partition/task. Min acceptable 2.4.5 (FD modes since 2.4.3; S3 +
+  # IDF v5.5.x fixes in 2.4.5); resolves under idf-component-manager==2.4.10.
+  espressif/esp-sr: "^2.4.6"

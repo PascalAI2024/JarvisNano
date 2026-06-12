@@ -15,7 +15,7 @@ Live debug handoff for the connected board is tracked in
 | Display | **CO5300** | QSPI on SPI2_HOST | 1.75" AMOLED 466×466, emote engine canvas |
 | Touch | **CST9217** | I²C | Capacitive multi-touch, agent confirmation surface |
 | Audio DAC | **ES8311** | I²S + I²C | Speaker output via MX1.25 SPK connector |
-| Audio ADC | **ES7210** | I²S + I²C | 2 MEMS mics + on-chip AEC reference loopback |
+| Audio ADC | **ES7210** | I²S + I²C | 2 MEMS mics (MIC1/MIC2) + hardware echo-reference loopback on MIC3 (TDM lane 2); AEC itself is software (esp-sr) |
 | PMIC | AXP2101 | I²C | Factory defaults sufficient — no power_manager.c required |
 | IO expander | TCA9554 | I²C | 8-bit expansion (currently unused by JarvisNano logic) |
 | RTC | PCF85063 | I²C | Battery-backed clock |

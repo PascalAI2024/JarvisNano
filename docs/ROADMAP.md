@@ -112,7 +112,7 @@ Status for the **Waveshare ESP32-S3-Touch-AMOLED-1.75** target. Full board
 reference: [`boards/waveshare/esp32s3_touch_amoled_1_75/README.md`](../boards/waveshare/esp32s3_touch_amoled_1_75/README.md).
 
 - [x] **Phase 1** — board adaptation: CO5300 QSPI display, CST9217 touch, I²C bus, TCA9554 IO expander, AXP2101 PMIC, USB-CDC console, 16 MB flash + 8 MB PSRAM sdkconfig
-- [x] **Phase 2** — audio chain: ES8311 DAC, ES7210 4-ch ADC with on-chip AEC, GPIO46 power-amp enable, I²S0 duplex
+- [x] **Phase 2** — audio chain: ES8311 DAC, ES7210 4-ch ADC (mics + hardware echo-reference lane; AEC is software via esp-sr), GPIO46 power-amp enable, I²S0 duplex
 - [x] **Phase 4** — Wi-Fi onboarding via USB-CDC `app_claw` CLI (`wifi --set --ssid … --password … --apply`), no captive portal needed
 - [x] **Phase 5** — end-to-end agent chat verified on hardware (MiniMax M2.7 via Anthropic-compatible endpoint, ~5.5 s round-trip)
 - [ ] **Phase 3** — microSD mount (SDMMC 1-bit, pins D0=3/CMD=1/CLK=2). YAML committed; blocked on the `esp-bmgr-assist<0.8` pin landing in the build flow
