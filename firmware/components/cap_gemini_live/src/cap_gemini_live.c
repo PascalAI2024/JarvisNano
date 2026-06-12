@@ -13,6 +13,15 @@
  *   LISTEN: I2S @ 16kHz, TX+RX both open (TX silent, shared clock drives RX)
  *   SPEAK:  close ADC+DAC, reopen DAC @ 24kHz, play, then reopen for LISTEN
  *
+ * Lifecycle ownership (stability sprint P1.1–P1.4): gl_session_task is the
+ * SINGLE owner of codec open/close, TX-task start/stop, WS-client
+ * create/destroy and the gl_set_state transitions tied to them. Public entry
+ * points reachable from httpd / touch / CLI contexts only post requests:
+ * send_text/end_input go through s_gl.cmd_queue (consumed by the session
+ * loop in every wait state), start/stop set flags + event bits under
+ * s_gl_lifecycle_mutex. No other task may call gl_open_* or gl_close_*,
+ * gl_start_tx_task or gl_stop_tx_task, or create/destroy the WS client.
+ *
  * NOTE: Gemini Live field names — the plan says realtimeInput.audio.data.
  * If the server rejects that format, switch GEMINI_AUDIO_KEY to "mediaChunks"
  * and wrap the chunk in an array: [{"mimeType":...,"data":...}].
@@ -103,12 +112,24 @@ static void   gl_resume_listening(const char *reason);
 #define GL_TX_SAMPLES_PER_CHUNK  (GL_TX_SAMPLE_RATE * GL_TX_CHUNK_MS / 1000)  /* 320 */
 #define GL_TX_PCM_BYTES          (GL_TX_SAMPLES_PER_CHUNK * GL_CHANNELS * (GL_BITS / 8)) /* 640 */
 #define GL_TX_B64_BYTES          (((GL_TX_PCM_BYTES + 2) / 3) * 4 + 1)
-#define GL_TOUCH_POLL_MS         100
 /* Ignore taps within this window of the last accepted one. A session start runs
  * a multi-second WSS+TLS handshake; rapid taps otherwise toggle start/stop mid-
  * connect and wedge the session on "connecting". */
 #define GL_TOGGLE_COOLDOWN_MS    2000
 #define GL_WS_TIMEOUT_MS         5000
+/* Mic frames fail fast: a frame is worth 20 ms of audio, so blocking the TX
+ * loop 5 s on Wi-Fi backpressure only skews VAD and stretches the TX stop
+ * window. Losing a frame is recoverable; a parked capture loop is not. */
+#define GL_WS_MIC_TIMEOUT_MS     500
+/* TX stop wait must exceed the worst-case blocked iteration of the TX loop
+ * (codec read ~200 ms + one mic send timeout) AND the old full control-send
+ * timeout, so the timeout firing means "genuinely wedged", never "just slow".
+ * The old 3 s wait raced the 5 s WS send timeout and the loser got
+ * force-deleted (F1). */
+#define GL_TX_STOP_WAIT_MS       8000
+/* Upper bound for joining the async WS cleanup task before a new client may
+ * be created (stop can block up to network_timeout_ms = 10 s). */
+#define GL_WS_CLEANUP_JOIN_MS    15000
 #define GL_SPEAK_WATCHDOG_MS     4500
 #define GL_LISTEN_RECOVERY_MS    2000
 #define GL_CODEC_HANDLE_RETRY_MS 250
@@ -164,6 +185,28 @@ typedef enum {
 #define GL_BIT_TX_DONE      (1 << 3)
 #define GL_BIT_SETUP_OK     (1 << 4)
 #define GL_BIT_SESSION_DONE (1 << 5)
+#define GL_BIT_WS_CLEANED   (1 << 6)   /* async WS stop/destroy finished; a new
+                                        * client may be created (F6 join) */
+
+/* ---- Session command queue -------------------------------------------------
+ * Single-owner lifecycle: every state-mutating request from a non-session
+ * context (httpd send_text/end_input, touch tap-commit, TX-task local-VAD
+ * commit) is posted here and consumed by gl_session_task, which alone runs
+ * the codec/TX/WS lifecycle. This generalises the old vad_commit_request
+ * flag (same pattern, one mechanism). start/stop are not queued: they were
+ * already flag/event posts (stop_requested + GL_BIT_*), now serialised by
+ * s_gl_lifecycle_mutex. */
+typedef enum {
+    GL_CMD_END_INPUT = 1,   /* commit the user's audio turn (tap / HTTP / VAD) */
+    GL_CMD_SEND_TEXT,       /* send a text turn (HTTP / CLI) */
+} gl_cmd_type_t;
+
+typedef struct {
+    gl_cmd_type_t type;
+    char         *text;     /* heap copy for GL_CMD_SEND_TEXT; consumer frees */
+} gl_cmd_t;
+
+#define GL_CMD_QUEUE_DEPTH  8
 
 typedef struct {
     char                         api_key[320];
@@ -176,6 +219,7 @@ typedef struct {
     volatile bool                ws_connected;
     char                        *rx_buf;            /* GL_RX_BUF_SIZE reassembly scratch, PSRAM */
     QueueHandle_t                rx_queue;           /* completed frames (char*, PSRAM) → session task */
+    QueueHandle_t                cmd_queue;          /* gl_cmd_t requests → session task (single owner) */
     volatile uint32_t            rx_drops;           /* frames dropped when queue full */
     volatile uint32_t            rx_frames;          /* parsed server frames */
     uint32_t                     text_part_hits;
@@ -195,7 +239,6 @@ typedef struct {
     char                         last_audio_error[96];
     EventGroupHandle_t           ev;
     TaskHandle_t                 session_task;
-    TaskHandle_t                 touch_task;
     TaskHandle_t                 tx_task;
     SemaphoreHandle_t            ws_mutex;          /* serialises WS sends */
     esp_codec_dev_handle_t       dac;
@@ -227,11 +270,34 @@ typedef struct {
     uint32_t                     tx_raw_reads;
     int64_t                      last_input_end_us;
     bool                         activity_open;
-    volatile bool                vad_commit_request; /* TX task → session task: end-of-speech, commit turn */
     int64_t                      thinking_since_us;  /* when THINKING was entered; gates the tap-to-stop grace */
 } gl_ctx_t;
 
 static gl_ctx_t s_gl;
+
+/* Serialises gl_gateway_start / gl_gateway_stop / session activation so the
+ * check-then-create on s_gl.session_task is atomic — exactly one gl_session
+ * task can ever exist (F5 / P1.4). Statically backed; materialised on the
+ * single-threaded boot path (gl_cap_init) before any concurrent caller. */
+static SemaphoreHandle_t s_gl_lifecycle_mutex;
+static StaticSemaphore_t s_gl_lifecycle_mutex_buf;
+
+static void gl_lifecycle_lock(void)
+{
+    if (!s_gl_lifecycle_mutex) {
+        s_gl_lifecycle_mutex = xSemaphoreCreateMutexStatic(&s_gl_lifecycle_mutex_buf);
+    }
+    xSemaphoreTake(s_gl_lifecycle_mutex, portMAX_DELAY);
+}
+
+static void gl_lifecycle_unlock(void)
+{
+    xSemaphoreGive(s_gl_lifecycle_mutex);
+}
+
+/* Post a request to the session task (defined with the other cmd-queue
+ * helpers below; forward-declared here for the TX task's VAD commit). */
+static esp_err_t gl_post_cmd(gl_cmd_type_t type, char *text);
 
 static const char *gl_state_name(gl_state_t st)
 {
@@ -377,16 +443,30 @@ static void gl_set_state(gl_state_t st, const char *detail)
     emote_set_status_detail(detail ? detail : "");
 }
 
-static bool gl_ws_send_text(const char *json)
+static bool gl_ws_send_text_to(const char *json, uint32_t timeout_ms)
 {
-    if (!s_gl.ws_client || !s_gl.ws_connected) {
+    if (!s_gl.ws_mutex) {
         return false;
     }
     int len = (int)strlen(json);
+    bool ok = false;
     xSemaphoreTake(s_gl.ws_mutex, portMAX_DELAY);
-    int sent = esp_websocket_client_send_text(s_gl.ws_client, json, len, pdMS_TO_TICKS(GL_WS_TIMEOUT_MS));
+    /* Snapshot the client handle INSIDE the mutex: session_cleanup NULLs
+     * s_gl.ws_client under this same mutex, so destruction waits for any
+     * in-flight send and later senders see NULL instead of a freed client
+     * (F2 use-after-free). */
+    esp_websocket_client_handle_t client = s_gl.ws_client;
+    if (client && s_gl.ws_connected) {
+        int sent = esp_websocket_client_send_text(client, json, len, pdMS_TO_TICKS(timeout_ms));
+        ok = (sent == len);
+    }
     xSemaphoreGive(s_gl.ws_mutex);
-    return sent == len;
+    return ok;
+}
+
+static bool gl_ws_send_text(const char *json)
+{
+    return gl_ws_send_text_to(json, GL_WS_TIMEOUT_MS);
 }
 
 /* Base64-encode pcm bytes into out_b64 (caller provides GL_TX_B64_BYTES+ buf) */
@@ -1019,7 +1099,9 @@ static bool gl_send_audio_frame(const uint8_t *pcm, size_t len)
         return false;
     }
 
-    return gl_ws_send_text(frame_json);
+    /* Mic frames use the short timeout (see GL_WS_MIC_TIMEOUT_MS) so Wi-Fi
+     * backpressure cannot park the TX loop beyond the stop wait (P1.2). */
+    return gl_ws_send_text_to(frame_json, GL_WS_MIC_TIMEOUT_MS);
 }
 
 /* Convert PCM16 sample-rate using linear interpolation (fixed-point 16.16).
@@ -1341,11 +1423,14 @@ static void gl_audio_tx_task(void *arg)
 #if GL_USE_LOCAL_VAD
         /* Hands-free turn commit. Detect speech, then GL_VAD_HANG_MS of trailing
          * silence. Runs here for precise per-frame (20 ms) timing but only
-         * *requests* the commit — the session task performs end_input(), since
-         * this task cannot stop itself (gl_stop_tx_task waits on GL_BIT_TX_DONE).
+         * *requests* the commit — the session task performs the end_input
+         * lifecycle, since this task cannot stop itself (gl_stop_tx_task waits
+         * on GL_BIT_TX_DONE). The request rides the same cmd_queue the HTTP
+         * and tap paths use; a duplicate commit is harmless because the
+         * consumer re-checks state (THINKING after the first one → no-op).
          * The dead zone between SILENCE_RMS and SPEECH_RMS holds the current
          * state, so mid-sentence dips don't end the turn early. */
-        if (s_gl.state == GL_STATE_LISTENING && !s_gl.vad_commit_request) {
+        if (s_gl.state == GL_STATE_LISTENING) {
             if (mic_rms >= GL_VAD_SPEECH_RMS) {
                 vad_speech_ms += GL_TX_CHUNK_MS;
                 vad_silence_ms = 0;
@@ -1358,16 +1443,18 @@ static void gl_audio_tx_task(void *arg)
                     if (vad_silence_ms >= GL_VAD_HANG_MS) {
                         ESP_LOGI(TAG, "Local VAD: end of speech (%ums speech, %ums silence) -> commit turn",
                                  (unsigned)vad_speech_ms, (unsigned)vad_silence_ms);
-                        s_gl.vad_commit_request = true;
-                        /* Reset NOW, not on the next LISTENING entry: the session
-                         * task clears vad_commit_request while the state is still
-                         * LISTENING, and with stale speech_seen + silence_ms the
-                         * very next 20 ms frame re-fired a second commit (seen
-                         * live: two "end of speech" logs 20 ms apart → double
-                         * end_input on one turn). */
-                        vad_speech_ms = 0;
-                        vad_silence_ms = 0;
-                        vad_speech_seen = false;
+                        if (gl_post_cmd(GL_CMD_END_INPUT, NULL) == ESP_OK) {
+                            /* Reset NOW, not on the next LISTENING entry: with
+                             * stale speech_seen + silence_ms the very next 20 ms
+                             * frame re-fired a second commit (seen live: two
+                             * "end of speech" logs 20 ms apart → double
+                             * end_input on one turn). */
+                            vad_speech_ms = 0;
+                            vad_silence_ms = 0;
+                            vad_speech_seen = false;
+                        }
+                        /* post failed (queue full): keep the accumulators so
+                         * the next silent frame retries the commit. */
                     }
                 } else if (vad_speech_ms > 0) {
                     /* Genuine silence before any utterance latched: decay the
@@ -1380,6 +1467,13 @@ static void gl_audio_tx_task(void *arg)
             /* dead zone (SILENCE_RMS..SPEECH_RMS): hold state, no add/decay. */
         }
 #endif
+
+        /* tx-abort: a stop was requested while we were reading. Park before
+         * touching the WS so gl_stop_tx_task's wait is bounded by one mic
+         * send timeout at most, never a full blocked send (F1 / P1.2). */
+        if (xEventGroupGetBits(s_gl.ev) & GL_BIT_TX_STOP) {
+            break;
+        }
 
         if (gl_send_audio_frame(pcm, GL_TX_PCM_BYTES)) {
             s_gl.tx_frames_sent++;
@@ -1399,22 +1493,41 @@ static void gl_audio_tx_task(void *arg)
     claw_task_delete(NULL);
 }
 
-static void gl_stop_tx_task(void)
+/* Park the TX task and wait for it to exit. SESSION TASK ONLY.
+ *
+ * The old timeout path force-deleted the task with plain vTaskDelete — on a
+ * WithCaps PSRAM stack that leaks the 8 KB stack + TCB per event, could kill
+ * a task holding ws_mutex mid-send (permanent voice wedge), and could even
+ * resolve to vTaskDelete(NULL), deleting the *caller* (F1). The force-delete
+ * is gone entirely: the TX loop re-checks GL_BIT_TX_STOP between mic read
+ * and WS send, and mic sends time out after GL_WS_MIC_TIMEOUT_MS, so its
+ * worst-case park latency is bounded far below GL_TX_STOP_WAIT_MS. On the
+ * (should-never-fire) timeout we leave the task alive: it clears
+ * s_gl.tx_task itself on exit, and gl_start_tx_task refuses to start a
+ * duplicate while the handle is set, so the invariant of at most one TX task
+ * holds without killing anything.
+ *
+ * GL_BIT_TX_DONE is NOT cleared here: gl_start_tx_task clears it before
+ * creating each task generation, so the bit being set always means "the
+ * current task generation finished" — no clear-then-wait race with a task
+ * that already exited. Returns true when the task is known to be gone. */
+static bool gl_stop_tx_task(void)
 {
     if (!s_gl.tx_task) {
-        return;
+        return true;
     }
-    xEventGroupClearBits(s_gl.ev, GL_BIT_TX_DONE);
     xEventGroupSetBits(s_gl.ev, GL_BIT_TX_STOP);
     EventBits_t bits = xEventGroupWaitBits(s_gl.ev, GL_BIT_TX_DONE,
-                                           pdFALSE, pdTRUE, pdMS_TO_TICKS(3000));
+                                           pdFALSE, pdTRUE, pdMS_TO_TICKS(GL_TX_STOP_WAIT_MS));
     if (!(bits & GL_BIT_TX_DONE)) {
-        ESP_LOGE(TAG, "Audio TX: stop timed out; deleting wedged task");
-        vTaskDelete(s_gl.tx_task);
-        xEventGroupSetBits(s_gl.ev, GL_BIT_TX_DONE);
-        atomic_store(&s_mic_rms, 0);
+        if (!s_gl.tx_task) {
+            return true;    /* exited between the head check and the wait */
+        }
+        ESP_LOGE(TAG, "Audio TX: stop timed out; leaving task parked (no force-delete)");
+        return false;
     }
     s_gl.tx_task = NULL;
+    return true;
 }
 
 static void gl_start_tx_task(void)
@@ -1423,7 +1536,6 @@ static void gl_start_tx_task(void)
         ESP_LOGW(TAG, "Audio TX: start ignored; task already running");
         return;
     }
-    s_gl.vad_commit_request = false;   /* fresh turn — clear any stale commit */
     xEventGroupClearBits(s_gl.ev, GL_BIT_TX_STOP | GL_BIT_TX_DONE);
     static const claw_task_config_t tx_cfg = {
         .name         = "gl_audio_tx",
@@ -1464,6 +1576,112 @@ static void gl_ensure_listening_capture(void)
     last_recover_us = now_us;
     gl_begin_audio_activity("capture recovery");
     gl_start_tx_task();
+}
+
+/* ---- Session command queue (request side + consumer) ---------------------- */
+
+static esp_err_t gl_post_cmd(gl_cmd_type_t type, char *text)
+{
+    if (!s_gl.cmd_queue) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    gl_cmd_t cmd = {
+        .type = type,
+        .text = text,
+    };
+    if (xQueueSend(s_gl.cmd_queue, &cmd, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "cmd queue full, dropping request %d", (int)type);
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+/* Commit the user's audio turn. SESSION TASK ONLY — stops the TX task and
+ * closes the ADC, which only the lifecycle owner may do (F3/F4). State is
+ * re-checked here because the request was queued from another context and
+ * the session may have moved on (duplicate commits become no-ops). */
+static void gl_do_end_input(void)
+{
+    if (!s_gl.session_active ||
+        (s_gl.state != GL_STATE_READY && s_gl.state != GL_STATE_LISTENING)) {
+        return;
+    }
+    if (s_gl.state == GL_STATE_LISTENING) {
+        if (gl_stop_tx_task()) {
+            gl_close_adc();
+        } else {
+            ESP_LOGE(TAG, "end_input: TX task still parked; skipping ADC close");
+        }
+        atomic_store(&s_mic_rms, 0);
+        gl_set_state(GL_STATE_THINKING, "Thinking");
+    }
+    s_gl.last_input_end_us = esp_timer_get_time();
+    s_gl.waiting_terminal = true;
+    gl_end_audio_activity("end_input");
+}
+
+/* Send a text turn. SESSION TASK ONLY (same lifecycle rules as above). */
+static void gl_do_send_text(const char *text)
+{
+    if (!text || !s_gl.session_active ||
+        (s_gl.state != GL_STATE_READY && s_gl.state != GL_STATE_LISTENING &&
+         s_gl.state != GL_STATE_SPEAKING)) {
+        return;
+    }
+    if (s_gl.state == GL_STATE_LISTENING) {
+        if (gl_stop_tx_task()) {
+            gl_close_adc();
+        } else {
+            ESP_LOGE(TAG, "send_text: TX task still parked; skipping ADC close");
+        }
+        gl_end_audio_activity("text turn");
+        atomic_store(&s_mic_rms, 0);
+        gl_set_state(GL_STATE_THINKING, "Thinking");
+    }
+    if (!gl_send_text_turn(text)) {
+        ESP_LOGW(TAG, "send_text: WS send failed");
+    }
+}
+
+/* Drain and execute pending requests. SESSION TASK ONLY. Called from every
+ * wait state of the session loop so tap / HTTP / VAD requests act promptly
+ * even while an audio burst is being drained. */
+static void gl_process_cmd_queue(void)
+{
+    gl_cmd_t cmd;
+    if (!s_gl.cmd_queue) {
+        return;
+    }
+    while (xQueueReceive(s_gl.cmd_queue, &cmd, 0) == pdTRUE) {
+        switch (cmd.type) {
+        case GL_CMD_END_INPUT:
+            gl_do_end_input();
+            break;
+        case GL_CMD_SEND_TEXT:
+            gl_do_send_text(cmd.text);
+            break;
+        default:
+            ESP_LOGW(TAG, "unknown cmd %d", (int)cmd.type);
+            break;
+        }
+        if (cmd.text) {
+            free(cmd.text);
+        }
+    }
+}
+
+/* Discard pending requests without executing them (session start/teardown). */
+static void gl_drain_cmd_queue(void)
+{
+    gl_cmd_t cmd;
+    if (!s_gl.cmd_queue) {
+        return;
+    }
+    while (xQueueReceive(s_gl.cmd_queue, &cmd, 0) == pdTRUE) {
+        if (cmd.text) {
+            free(cmd.text);
+        }
+    }
 }
 
 static cJSON *gl_get_object_compat(cJSON *obj, const char *camel, const char *snake)
@@ -1524,7 +1742,13 @@ static bool gl_enter_speaking(uint32_t sample_rate)
     /* First audio chunk: stop TX before any codec rate swap. The session task is
      * the only codec owner; the TX task must be fully parked before ADC/DAC close
      * or the shared I2S clock can be changed under a blocking read. */
-    gl_stop_tx_task();
+    if (!gl_stop_tx_task()) {
+        /* Never close the ADC under a live reader (F3). Drop this chunk; the
+         * TX task exits on its own (bounded timeouts) and the next chunk or
+         * gl_ensure_listening_capture recovers. */
+        ESP_LOGE(TAG, "enter_speaking: TX task still parked; dropping chunk");
+        return false;
+    }
     ESP_LOGI(TAG, "Speaking: paused capture");
     s_gl.waiting_terminal = true;
     gl_close_adc();
@@ -2077,6 +2301,12 @@ static void gl_ws_cleanup_task(void *arg)
         esp_websocket_client_destroy(client);
         ESP_LOGI(TAG, "WS cleanup: stop/destroy done");
     }
+    /* Signal the session task that the old client is fully gone — it must not
+     * create a new client (sharing rx_buf + the event handler) before this
+     * (F6 two-clients window). */
+    if (s_gl.ev) {
+        xEventGroupSetBits(s_gl.ev, GL_BIT_WS_CLEANED);
+    }
     vTaskDelete(NULL);
 }
 
@@ -2092,8 +2322,14 @@ static void gl_session_task(void *arg)
             break;
         }
         if (!(bits & GL_BIT_SESSION_ON) || !s_gl.session_active) {
+            /* No session: requests posted in the race window around teardown
+             * are stale — discard them so they cannot fire into a future
+             * session. */
+            gl_drain_cmd_queue();
             continue;
         }
+        /* Fresh session: drop any requests left over from before activation. */
+        gl_drain_cmd_queue();
         if (!s_gl.api_key[0]) {
             ESP_LOGE(TAG, "No Gemini API key — set via dashboard (gemini_key)");
             xEventGroupClearBits(s_gl.ev, GL_BIT_SESSION_ON);
@@ -2105,6 +2341,19 @@ static void gl_session_task(void *arg)
 
         char ws_path[512];
         snprintf(ws_path, sizeof(ws_path), "%s?key=%s", GEMINI_WS_PATH, s_gl.api_key);
+
+        /* Join any in-flight async WS cleanup before creating a new client —
+         * two clients alive at once would both feed the shared rx_buf via the
+         * event handler (F6). The bit is set at init, cleared when a cleanup
+         * task is spawned, re-set when it finishes. */
+        EventBits_t cleaned = xEventGroupWaitBits(s_gl.ev, GL_BIT_WS_CLEANED,
+                                                  pdFALSE, pdTRUE,
+                                                  pdMS_TO_TICKS(GL_WS_CLEANUP_JOIN_MS));
+        if (!(cleaned & GL_BIT_WS_CLEANED)) {
+            ESP_LOGE(TAG, "WS cleanup still pending after %d ms; refusing new session",
+                     (int)GL_WS_CLEANUP_JOIN_MS);
+            goto session_cleanup;
+        }
 
         ESP_LOGI(TAG, "Connecting to Gemini Live...");
         gl_set_state(GL_STATE_CONNECTING, "Connecting");
@@ -2148,6 +2397,9 @@ static void gl_session_task(void *arg)
                 ESP_LOGE(TAG, "WS connect timeout");
                 goto session_cleanup;
             }
+            /* Consume requests even while connecting (handlers state-check,
+             * so anything invalid for CONNECTING is discarded promptly). */
+            gl_process_cmd_queue();
             vTaskDelay(pdMS_TO_TICKS(100));
         }
         if (s_gl.stop_requested || !s_gl.session_active) {
@@ -2175,6 +2427,7 @@ static void gl_session_task(void *arg)
             }
             /* Drain queued frames until setupComplete lands (sets GL_BIT_SETUP_OK). */
             gl_process_rx_queue(pdMS_TO_TICKS(100));
+            gl_process_cmd_queue();
         }
         if (!(xEventGroupGetBits(s_gl.ev) & GL_BIT_SETUP_OK)) {
             ESP_LOGE(TAG, "setupComplete timeout (see WS RX logs for server reply)");
@@ -2197,25 +2450,18 @@ static void gl_session_task(void *arg)
         /* Main receive loop */
         while (s_gl.ws_connected && !s_gl.stop_requested && s_gl.session_active) {
             /* Drain ALL queued frames before re-checking loop conditions, so a
-             * burst of audio chunks plays back-to-back without gaps. */
+             * burst of audio chunks plays back-to-back without gaps. Requests
+             * (tap-commit, HTTP send_text/end_input, local-VAD commit) are
+             * consumed between frames so they act promptly even mid-burst. */
         while (gl_process_rx_queue(pdMS_TO_TICKS(200))) {
+            gl_process_cmd_queue();
             if (s_gl.stop_requested || !s_gl.session_active) {
                 break;
             }
         }
+        gl_process_cmd_queue();
         gl_maybe_resume_speaking_watchdog();
         gl_ensure_listening_capture();
-#if GL_USE_LOCAL_VAD
-        /* Local VAD asked us to end the user's turn. Done here (session task)
-         * because end_input() stops the TX task — which can't stop itself. */
-        if (s_gl.vad_commit_request) {
-            s_gl.vad_commit_request = false;
-            if (s_gl.state == GL_STATE_LISTENING) {
-                ESP_LOGI(TAG, "Local VAD: committing turn");
-                cap_gemini_live_end_input();
-            }
-        }
-#endif
         /* Check if WS dropped */
         if (!s_gl.ws_connected) {
             ESP_LOGW(TAG, "WS dropped, cleaning up session");
@@ -2227,19 +2473,43 @@ session_cleanup:
         /* Stop audio TX and close codecs from this task only. The TX worker
          * never closes codec handles, avoiding cross-task I2S mutex deadlocks. */
         ESP_LOGI(TAG, "Teardown: stopping tx task");
-        gl_stop_tx_task();
-        ESP_LOGI(TAG, "Teardown: tx task stopped");
-        ESP_LOGI(TAG, "Teardown: closing adc");
-        gl_close_adc();
+        {
+            bool tx_stopped = gl_stop_tx_task();
+            for (int retry = 0; !tx_stopped && retry < 2; ++retry) {
+                ESP_LOGE(TAG, "Teardown: TX task still parked; retrying stop wait (%d/2)",
+                         retry + 1);
+                tx_stopped = gl_stop_tx_task();
+            }
+            ESP_LOGI(TAG, "Teardown: tx task %s", tx_stopped ? "stopped" : "STILL RUNNING");
+            if (tx_stopped) {
+                ESP_LOGI(TAG, "Teardown: closing adc");
+                gl_close_adc();
+            } else {
+                /* Never close the ADC under a live reader — that is the
+                 * close-during-read crash this rework retires (F3). The task
+                 * will exit on its own (bounded send timeouts) and the next
+                 * session recovers via gl_ensure_listening_capture. */
+                ESP_LOGE(TAG, "Teardown: skipping ADC close (TX task alive)");
+            }
+        }
         ESP_LOGI(TAG, "Teardown: closing dac");
         gl_close_dac();
 
         ESP_LOGI(TAG, "Teardown: closing websocket");
         ESP_LOGI(TAG, "Session cleanup");
         gl_drain_rx_queue();
-        esp_websocket_client_handle_t ws_client = s_gl.ws_client;
+        gl_drain_cmd_queue();
+        /* Detach the client under ws_mutex: an in-flight sender holds the
+         * mutex through its send, so by the time we own the mutex no sender
+         * can still be using the old handle, and any later sender snapshots
+         * NULL (F2). Destruction itself happens off-mutex in the cleanup
+         * task — the handle is already unreachable. */
+        esp_websocket_client_handle_t ws_client = NULL;
+        xSemaphoreTake(s_gl.ws_mutex, portMAX_DELAY);
+        ws_client = s_gl.ws_client;
         s_gl.ws_client = NULL;
         s_gl.ws_connected = false;
+        xSemaphoreGive(s_gl.ws_mutex);
         s_gl.session_active = false;
         s_gl.activity_open = false;
         s_gl.state = GL_STATE_IDLE;
@@ -2247,9 +2517,11 @@ session_cleanup:
         emote_set_voice_idle();
         xEventGroupClearBits(s_gl.ev, GL_BIT_SESSION_ON);
         if (ws_client) {
+            xEventGroupClearBits(s_gl.ev, GL_BIT_WS_CLEANED);
             if (xTaskCreate(gl_ws_cleanup_task, "gl_ws_cleanup", 4096, ws_client, 3, NULL) != pdPASS) {
                 ESP_LOGW(TAG, "WS cleanup task create failed; destroying inline");
                 esp_websocket_client_destroy(ws_client);
+                xEventGroupSetBits(s_gl.ev, GL_BIT_WS_CLEANED);
             }
         }
     }
@@ -2267,70 +2539,48 @@ session_cleanup:
     claw_task_delete(NULL);
 }
 
-/* ---- Touch task (Phase 5) ------------------------------------------------- */
-
-static void gl_touch_task(void *arg)
-{
-    (void)arg;
-    uint16_t x[1] = {0};
-    uint16_t y[1] = {0};
-    uint16_t strength[1] = {0};
-    uint8_t point_num = 0;
-    bool was_touching = false;
-
-    while (!s_gl.stop_requested) {
-        if (!s_gl.touch) {
-            vTaskDelay(pdMS_TO_TICKS(500));
-            /* Retry acquiring touch handle once per second */
-            gl_acquire_codec_handles();
-            continue;
-        }
-
-        esp_lcd_touch_read_data(s_gl.touch);
-        bool touching = (esp_lcd_touch_get_coordinates(s_gl.touch, x, y, strength,
-                                                       &point_num, 1) && point_num > 0);
-
-        if (touching && !was_touching) {
-            /* Tap detected — toggle session */
-            if (s_gl.session_active) {
-                ESP_LOGI(TAG, "Tap: stopping session");
-                s_gl.session_active = false;
-                xEventGroupClearBits(s_gl.ev, GL_BIT_SESSION_ON);
-            } else {
-                ESP_LOGI(TAG, "Tap: starting session");
-                s_gl.session_active = true;
-                xEventGroupSetBits(s_gl.ev, GL_BIT_SESSION_ON);
-            }
-        }
-        was_touching = touching;
-        vTaskDelay(pdMS_TO_TICKS(GL_TOUCH_POLL_MS));
-    }
-
-    claw_task_delete(NULL);
-}
+/* Touch input is handled by touch_monitor_task (main app layer), which calls
+ * cap_gemini_live_toggle() — a request-poster. The old in-component
+ * gl_touch_task (Phase 5) was dead code that mutated session state outside
+ * the session task; removed in the P1 lifecycle rework. */
 
 /* ---- Lifecycle ------------------------------------------------------------ */
 
+/* Start/stop are guarded by s_gl_lifecycle_mutex so the check-then-create on
+ * s_gl.session_task is atomic: a concurrent tap + HTTP action=start can never
+ * spawn two gl_session tasks sharing one s_gl (F5 / P1.4). */
 static esp_err_t gl_gateway_start(void)
 {
+    esp_err_t err = ESP_OK;
+
+    gl_lifecycle_lock();
     if (s_gl.session_task) {
         if (s_gl.stop_requested) {
             ESP_LOGW(TAG, "Gemini Live gateway stop still in progress");
-            return ESP_ERR_INVALID_STATE;
+            err = ESP_ERR_INVALID_STATE;
         }
-        return ESP_OK;
+        goto out;
     }
     if (!s_gl.rx_buf) {
         s_gl.rx_buf = heap_caps_malloc(GL_RX_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!s_gl.rx_buf) {
-            return ESP_ERR_NO_MEM;
+            err = ESP_ERR_NO_MEM;
+            goto out;
         }
     }
     s_gl.rx_buf[0] = '\0';
     if (!s_gl.rx_queue) {
         s_gl.rx_queue = xQueueCreate(GL_RX_QUEUE_DEPTH, sizeof(char *));
         if (!s_gl.rx_queue) {
-            return ESP_ERR_NO_MEM;
+            err = ESP_ERR_NO_MEM;
+            goto out;
+        }
+    }
+    if (!s_gl.cmd_queue) {
+        s_gl.cmd_queue = xQueueCreate(GL_CMD_QUEUE_DEPTH, sizeof(gl_cmd_t));
+        if (!s_gl.cmd_queue) {
+            err = ESP_ERR_NO_MEM;
+            goto out;
         }
     }
     s_gl.stop_requested = false;
@@ -2341,17 +2591,23 @@ static esp_err_t gl_gateway_start(void)
     if (!s_gl.ev) {
         s_gl.ev = xEventGroupCreate();
         if (!s_gl.ev) {
-            return ESP_ERR_NO_MEM;
+            err = ESP_ERR_NO_MEM;
+            goto out;
         }
+        /* Fresh event group: no WS cleanup can be in flight. */
+        xEventGroupSetBits(s_gl.ev, GL_BIT_WS_CLEANED);
     }
     if (!s_gl.ws_mutex) {
         s_gl.ws_mutex = xSemaphoreCreateMutex();
         if (!s_gl.ws_mutex) {
-            return ESP_ERR_NO_MEM;
+            err = ESP_ERR_NO_MEM;
+            goto out;
         }
     }
 
-    /* Clear stop/done bits left over from any previous gateway run */
+    /* Clear stop/done bits left over from any previous gateway run.
+     * GL_BIT_WS_CLEANED is deliberately NOT touched: it tracks the async WS
+     * cleanup task, which can outlive a gateway run. */
     xEventGroupClearBits(s_gl.ev,
                          GL_BIT_STOP | GL_BIT_TX_STOP | GL_BIT_TX_DONE | GL_BIT_SESSION_DONE);
 
@@ -2365,7 +2621,9 @@ static esp_err_t gl_gateway_start(void)
         .stack_policy = CLAW_TASK_STACK_PREFER_PSRAM,
     };
     if (claw_task_create(&sess_cfg, gl_session_task, NULL, &s_gl.session_task) != pdPASS) {
-        return ESP_ERR_NO_MEM;
+        s_gl.session_task = NULL;
+        err = ESP_ERR_NO_MEM;
+        goto out;
     }
 
     /* Touch toggle is driven by touch_monitor_task in main.c (app_claw layer),
@@ -2374,25 +2632,31 @@ static esp_err_t gl_gateway_start(void)
      * controller and cause phantom double-taps + I2S codec churn. */
 
     ESP_LOGI(TAG, "Gemini Live gateway started");
-    return ESP_OK;
+
+out:
+    gl_lifecycle_unlock();
+    return err;
 }
 
 static esp_err_t gl_gateway_stop(void)
 {
+    /* Request-poster only: flags + event bits. The session task performs the
+     * actual codec/TX/WS teardown. Never block here — stop may be called from
+     * the HTTP server or the touch monitor. */
+    gl_lifecycle_lock();
     s_gl.stop_requested = true;
     s_gl.session_active = false;
 
     if (!s_gl.ev) {
+        gl_lifecycle_unlock();
         return ESP_OK;
     }
 
     TaskHandle_t session_task = s_gl.session_task;
     xEventGroupClearBits(s_gl.ev, GL_BIT_SESSION_ON);
     xEventGroupSetBits(s_gl.ev, GL_BIT_STOP | GL_BIT_TX_STOP);
+    gl_lifecycle_unlock();
 
-    /* Stop may be called by HTTP. Do not wait here: the session task owns codec
-     * and WebSocket teardown, and blocking the HTTP server makes the device look
-     * dead while cleanup runs. */
     if (session_task == xTaskGetCurrentTaskHandle()) {
         return ESP_OK;
     }
@@ -2598,9 +2862,12 @@ esp_err_t cap_gemini_live_start(void)
     if (err != ESP_OK) {
         return err;
     }
-    /* Activate the first session immediately */
+    /* Activate the first session immediately. Under the lifecycle mutex so a
+     * racing stop cannot interleave between activation flag and event bit. */
+    gl_lifecycle_lock();
     s_gl.session_active = true;
     xEventGroupSetBits(s_gl.ev, GL_BIT_SESSION_ON);
+    gl_lifecycle_unlock();
     return ESP_OK;
 }
 
@@ -2609,22 +2876,34 @@ esp_err_t cap_gemini_live_stop(void)
     return gl_gateway_stop();
 }
 
+/* Request-poster (httpd / CLI context): the session task performs the actual
+ * TX stop + codec close + WS send (F3 — codec lifecycle was previously run
+ * directly on the httpd task here). ESP_OK means "queued", not "sent". */
 esp_err_t cap_gemini_live_send_text(const char *text)
 {
     if (!text || !s_gl.session_active ||
         (s_gl.state != GL_STATE_READY && s_gl.state != GL_STATE_LISTENING && s_gl.state != GL_STATE_SPEAKING)) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (s_gl.state == GL_STATE_LISTENING) {
-        gl_stop_tx_task();
-        gl_close_adc();
-        gl_end_audio_activity("text turn");
-        atomic_store(&s_mic_rms, 0);
-        gl_set_state(GL_STATE_THINKING, "Thinking");
+    size_t len = strlen(text) + 1;
+    char *copy = heap_caps_malloc(len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!copy) {
+        copy = malloc(len);
     }
-    return gl_send_text_turn(text) ? ESP_OK : ESP_FAIL;
+    if (!copy) {
+        return ESP_ERR_NO_MEM;
+    }
+    memcpy(copy, text, len);
+    esp_err_t err = gl_post_cmd(GL_CMD_SEND_TEXT, copy);
+    if (err != ESP_OK) {
+        free(copy);
+    }
+    return err;
 }
 
+/* Request-poster (httpd / touch context): see gl_do_end_input for the actual
+ * lifecycle work (F3/F4 — this used to run codec teardown + a TLS WS send on
+ * the 4 KB touch_mon stack). */
 esp_err_t cap_gemini_live_end_input(void)
 {
     if (!s_gl.session_active ||
@@ -2638,15 +2917,7 @@ esp_err_t cap_gemini_live_end_input(void)
     if (GL_USE_SERVER_VAD) {
         return ESP_OK;
     }
-    if (s_gl.state == GL_STATE_LISTENING) {
-        gl_stop_tx_task();
-        gl_close_adc();
-        atomic_store(&s_mic_rms, 0);
-        gl_set_state(GL_STATE_THINKING, "Thinking");
-    }
-    s_gl.last_input_end_us = esp_timer_get_time();
-    s_gl.waiting_terminal = true;
-    return gl_end_audio_activity("end_input") ? ESP_OK : ESP_FAIL;
+    return gl_post_cmd(GL_CMD_END_INPUT, NULL);
 }
 
 bool cap_gemini_live_is_active(void)
@@ -2680,6 +2951,7 @@ void cap_gemini_live_toggle(void)
     if (s_gl.session_active) {
         if (!GL_USE_SERVER_VAD &&
             (s_gl.state == GL_STATE_READY || s_gl.state == GL_STATE_LISTENING)) {
+            /* Posts GL_CMD_END_INPUT; the session task commits the turn. */
             ESP_LOGI(TAG, "Tap: ending input stream");
             cap_gemini_live_end_input();
             return;
@@ -2700,9 +2972,10 @@ void cap_gemini_live_toggle(void)
         ESP_LOGI(TAG, "Tap: stopping session");
         cap_gemini_live_stop();
     } else {
+        /* Gateway up, session off — reactivate through the same locked path
+         * as a cold start (atomic with a racing stop). */
         ESP_LOGI(TAG, "Tap: starting session");
-        s_gl.session_active = true;
-        xEventGroupSetBits(s_gl.ev, GL_BIT_SESSION_ON);
+        cap_gemini_live_start();
     }
 }
 
@@ -2711,6 +2984,14 @@ esp_err_t cap_gemini_live_test(void)
 {
     if (!s_gl.api_key[0]) {
         ESP_LOGE(TAG, "No API key — set via dashboard (gemini_key NVS field)");
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* The test shares s_gl.ws_client / rx_buf / the WS event handler with the
+     * session path. Running it while the gateway is up would put a second WS
+     * client on the same state from the CLI task — exactly the cross-task
+     * lifecycle access P1 retires. Refuse instead. */
+    if (s_gl.session_task) {
+        ESP_LOGE(TAG, "gemini-live test refused: gateway is running (stop it first)");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -2825,10 +3106,23 @@ test_cleanup:
 
 static esp_err_t gl_cap_init(void)
 {
+    /* Boot path is single-threaded — materialise the lifecycle mutex before
+     * any httpd/touch caller can race gateway start/stop. */
+    if (!s_gl_lifecycle_mutex) {
+        s_gl_lifecycle_mutex = xSemaphoreCreateMutexStatic(&s_gl_lifecycle_mutex_buf);
+    }
     s_gl.ev       = xEventGroupCreate();
     s_gl.ws_mutex = xSemaphoreCreateMutex();
     if (!s_gl.ev || !s_gl.ws_mutex) {
         return ESP_ERR_NO_MEM;
+    }
+    /* No WS cleanup can be in flight at init. */
+    xEventGroupSetBits(s_gl.ev, GL_BIT_WS_CLEANED);
+    if (!s_gl.cmd_queue) {
+        s_gl.cmd_queue = xQueueCreate(GL_CMD_QUEUE_DEPTH, sizeof(gl_cmd_t));
+        if (!s_gl.cmd_queue) {
+            return ESP_ERR_NO_MEM;
+        }
     }
     cmd_cap_gemini_live_register();
     return ESP_OK;

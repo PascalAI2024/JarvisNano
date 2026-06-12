@@ -473,7 +473,11 @@ esp_err_t touch_demo_start(touch_demo_gemini_configured_cb_t gemini_configured)
             return ESP_ERR_NO_MEM;
         }
     }
-    return xTaskCreate(touch_monitor_task, "touch_mon", 4096, NULL, 3, NULL) == pdPASS
+    /* 8192: tap handling posts requests to the Gemini session task instead of
+     * running codec teardown + TLS WS sends here (STABILITY_PLAN F4), but the
+     * bigger stack stays as belt-and-suspenders — cap_gemini_live_start() can
+     * still allocate queues/tasks from this context. */
+    return xTaskCreate(touch_monitor_task, "touch_mon", 8192, NULL, 3, NULL) == pdPASS
                ? ESP_OK
                : ESP_ERR_NO_MEM;
 }
