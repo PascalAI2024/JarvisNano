@@ -334,6 +334,66 @@ def force_perf_build(text: str) -> str:
         text += "CONFIG_COMPILER_OPTIMIZATION_LEVEL_RELEASE=y\n"
     return text
 
+def force_stability_config(text: str) -> str:
+    # docs/STABILITY_PLAN.md stability sprint:
+    #   P0.2 coredump-to-flash (ELF + CRC32, dedicated dump stack; pairs with the
+    #        64K coredump partition added in apply_emote_partition_resize_patch)
+    #   P0.3 task-WDT wedges become evidenced panics; panic output gets 3 s on
+    #        the wire before reboot instead of 0 s
+    #   P2.5 Wi-Fi RX buffering un-strangled (F12) + hardware AES for WSS traffic
+    # Mechanism: strip EVERY assignment of the managed symbols first — including
+    # the deprecated alias spellings kconfgen keeps at the bottom of sdkconfig,
+    # because a later alias line ("# CONFIG_TASK_WDT_PANIC is not set") would
+    # override an earlier "CONFIG_ESP_TASK_WDT_PANIC=y" on reload — then append
+    # the desired values at EOF so they are always the last assignment seen.
+    managed = (
+        "CONFIG_ESP_COREDUMP_ENABLE_TO_NONE",
+        "CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH",
+        "CONFIG_ESP_COREDUMP_ENABLE_TO_UART",
+        "CONFIG_ESP_COREDUMP_DATA_FORMAT_BIN",
+        "CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF",
+        "CONFIG_ESP_COREDUMP_CHECKSUM_SHA256",
+        "CONFIG_ESP_COREDUMP_CHECKSUM_CRC32",
+        "CONFIG_ESP_COREDUMP_STACK_SIZE",
+        "CONFIG_ESP32_ENABLE_COREDUMP_TO_NONE",
+        "CONFIG_ESP32_ENABLE_COREDUMP_TO_FLASH",
+        "CONFIG_ESP32_ENABLE_COREDUMP_TO_UART",
+        "CONFIG_ESP_TASK_WDT_PANIC",
+        "CONFIG_TASK_WDT_PANIC",
+        "CONFIG_ESP_SYSTEM_PANIC_REBOOT_DELAY_SECONDS",
+        "CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM",
+        "CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM",
+        "CONFIG_ESP_WIFI_RX_BA_WIN",
+        "CONFIG_ESP32_WIFI_STATIC_RX_BUFFER_NUM",
+        "CONFIG_ESP32_WIFI_DYNAMIC_RX_BUFFER_NUM",
+        "CONFIG_ESP32_WIFI_RX_BA_WIN",
+        "CONFIG_MBEDTLS_HARDWARE_AES",
+    )
+    marker = "# stability sprint overrides (docs/STABILITY_PLAN.md P0.2/P0.3/P2.5)"
+    def is_managed(line: str) -> bool:
+        stripped = line.strip()
+        if stripped == marker:
+            return True
+        for sym in managed:
+            if stripped.startswith(sym + "=") or stripped == "# " + sym + " is not set":
+                return True
+        return False
+    lines = [ln for ln in text.splitlines() if not is_managed(ln)]
+    lines += [
+        marker,
+        "CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y",
+        "CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y",
+        "CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y",
+        "CONFIG_ESP_COREDUMP_STACK_SIZE=1792",
+        "CONFIG_ESP_TASK_WDT_PANIC=y",
+        "CONFIG_ESP_SYSTEM_PANIC_REBOOT_DELAY_SECONDS=3",
+        "CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=8",
+        "CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16",
+        "CONFIG_ESP_WIFI_RX_BA_WIN=6",
+        "CONFIG_MBEDTLS_HARDWARE_AES=y",
+    ]
+    return "\n".join(lines) + "\n"
+
 if cfg.exists():
     s = cfg.read_text()
 else:
@@ -373,6 +433,7 @@ if "CONFIG_LV_BUILD_DEMOS=y" not in s and "# CONFIG_LV_BUILD_DEMOS is not set" n
     s += "# CONFIG_LV_BUILD_DEMOS is not set\n"
 
 s = force_perf_build(s)
+s = force_stability_config(s)
 cfg.write_text(s)
 PY
                   { idf.py build || { echo "[bootstrap] first idf.py build failed — retrying once incrementally (sdkconfig.h generation can lose a race with the first compile after set-target fullclean)"; idf.py build; }; }' \
@@ -2431,47 +2492,55 @@ apply_emote_partition_resize_patch() {
     # patches/0030 — grow emote 3M->6M (storage 4M->5M), reclaim unused ota_1.
     # The 8 voice-face .eaf files push emote_assets.bin past the old 3M emote
     # partition (ESP_ERR_INVALID_SIZE → blank face); the 466 mascot pack needs
-    # more still. Rewrites partitions_16MB.csv with explicit offsets. Idempotent
-    # (guard: the 6M emote already present).
+    # more still. STABILITY_PLAN P0.2 revision: carve a 64K coredump partition
+    # out of the storage tail (storage 5M->4.9375M; no other partition moves) so
+    # panic backtraces survive reboot. Rewrites partitions_16MB.csv with explicit
+    # offsets. Idempotent (guard: the coredump partition already present).
     local csv="$ESP_CLAW_DIR/application/edge_agent/partitions_16MB.csv"
     if [ ! -f "$csv" ]; then
         log "partitions_16MB.csv not found — skipping emote partition resize patch"
         return
     fi
-    if grep -q "0x6E0000" "$csv" 2>/dev/null; then
+    if grep -q "coredump" "$csv" 2>/dev/null; then
         log "emote partition resize patch already applied"
         return
     fi
-    log "applying patches/0030-emote-partition-resize (emote 6.875M, storage moved up)"
+    log "applying patches/0030-emote-partition-resize (emote 6.875M, storage 4.9375M, 64K coredump tail)"
     python3 - <<PY
 import pathlib
 csv = pathlib.Path(r"$csv")
 new = (
-    "# Name,    Type, SubType, Offset,   Size\n"
+    "# Name,    Type, SubType,  Offset,   Size\n"
     "# JarvisNano AMOLED-1.75: emote grown 3M->6M->6.875M for native 466x466 art\n"
-    "# (reactive face frame bump for smoother loops), storage 4M->5M. ota_1 (4M,\n"
-    "# never flashed -- OTA-B was reserved-but-empty) reclaimed. Explicit offsets so\n"
-    "# the resized layout is unambiguous. storage now ends exactly at 0x1000000 --\n"
-    "# the former 896K top gap is folded into emote. Moving storage wipes the FAT\n"
-    "# partition (runtime storage_base_path is the SD card; Wi-Fi/LLM config live\n"
-    "# in NVS and survive) -- flash with STORAGE=1 after changing this table.\n"
-    "nvs,       data, nvs,     0x9000,   0x6000\n"
-    "otadata,   data, ota,     0xF000,   0x2000\n"
-    "phy_init,  data, phy,     0x11000,  0x1000\n"
-    "ota_0,     app,  ota_0,   0x20000,  0x400000\n"
-    "emote,     data, spiffs,  0x420000, 0x6E0000\n"
-    "storage,   data, fat,     0xB00000, 0x500000\n"
+    "# (reactive face frame bump for smoother loops), storage 4M->5M->4.9375M.\n"
+    "# ota_1 (4M, never flashed -- OTA-B was reserved-but-empty) reclaimed; the\n"
+    "# former 896K top gap is folded into emote. STABILITY_PLAN P0.2: 64K coredump\n"
+    "# partition carved from the storage tail (no other partition moved) so panic\n"
+    "# backtraces persist across reboot (CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH).\n"
+    "# Explicit offsets so the layout is unambiguous; the table ends flush at\n"
+    "# 0x1000000 (16 MiB). Resizing storage wipes the FAT partition (runtime\n"
+    "# storage_base_path is the SD card; Wi-Fi/LLM config live in NVS and\n"
+    "# survive) -- flash with STORAGE=1 after changing this table.\n"
+    "nvs,       data, nvs,      0x9000,   0x6000\n"
+    "otadata,   data, ota,      0xF000,   0x2000\n"
+    "phy_init,  data, phy,      0x11000,  0x1000\n"
+    "ota_0,     app,  ota_0,    0x20000,  0x400000\n"
+    "emote,     data, spiffs,   0x420000, 0x6E0000\n"
+    "storage,   data, fat,      0xB00000, 0x4F0000\n"
+    "coredump,  data, coredump, 0xFF0000, 0x10000\n"
 )
 # Sanity: only replace layouts we know — the upstream pre-resize table (has the
-# auto-offset ota_1 line / 3M emote) or our previous 6M-emote resize. Anything
+# auto-offset ota_1 line / 3M emote), our previous 6M-emote resize, or the
+# 6.875M-emote/5M-storage layout that predates the coredump carve-out. Anything
 # else means an unexpected upstream change: abort rather than clobber.
 s = csv.read_text()
 known_pre = "ota_1" in s or "0x300000" in s or "   3M" in s
 known_6m = "0x600000" in s and "0xA20000" in s
-if not (known_pre or known_6m):
+known_6875 = "0x6E0000" in s and "0x500000" in s
+if not (known_pre or known_6m or known_6875):
     raise SystemExit("partitions_16MB.csv is not a known layout — aborting")
 csv.write_text(new)
-print("rewrote partitions_16MB.csv: emote 0x420000+0x6E0000, storage 0xB00000+5M")
+print("rewrote partitions_16MB.csv: emote 0x420000+0x6E0000, storage 0xB00000+0x4F0000, coredump 0xFF0000+0x10000")
 PY
 }
 
@@ -2844,6 +2913,173 @@ print("applied reactive waveform audio bridge: face_bridge.c/.h + app_claw.c + C
 PY
 }
 
+# STABILITY_PLAN P0.1 — every boot must explain the previous death. Injects a
+# one-line "boot_diag" log into app_main: decoded esp_reset_reason(), raw
+# per-core ROM reset reasons, and esp_core_dump_image_check() state. Emitted
+# right after the SD-storage block (i.e. AFTER jarvis_logger_init) so the line
+# lands in the persistent SD log — the 12 undiagnosed reboots in the SD log
+# were unreadable without this. Also adds espcoredump to main_requires for the
+# esp_core_dump.h include path. Idempotent (guards: "boot_diag" in main.c,
+# "espcoredump" in CMakeLists). Must run AFTER apply_gemini_live_main_require_patch
+# (that patch anchors on the unmodified main_requires block).
+apply_boot_diag_patch() {
+    local main_c="$ESP_CLAW_DIR/application/edge_agent/main/main.c"
+    local cmake="$ESP_CLAW_DIR/application/edge_agent/main/CMakeLists.txt"
+    if [ ! -f "$main_c" ]; then
+        log "main.c not found — skipping boot_diag patch"
+        return
+    fi
+    if ! grep -q "boot_diag" "$main_c" 2>/dev/null; then
+        log "applying boot_diag patch (P0.1: reset reason + coredump state at boot)"
+        python3 - "$main_c" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+
+inc_old = '#include "esp_system.h"\n'
+inc_new = (
+    '#include "esp_system.h"\n'
+    '#include "esp_rom_sys.h"\n'
+    '#include "sdkconfig.h"\n'
+    '#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH\n'
+    '#include "esp_core_dump.h"\n'
+    '#endif\n'
+)
+if s.count(inc_old) != 1:
+    raise SystemExit("boot_diag: esp_system.h include anchor not unique in main.c")
+s = s.replace(inc_old, inc_new, 1)
+
+helper_anchor = 'void app_main(void)\n{\n'
+helper = (
+    '/* boot_diag (STABILITY_PLAN P0.1): every boot must explain the previous\n'
+    ' * death. Called from app_main AFTER jarvis_logger_init so the line lands in\n'
+    ' * the SD persistent log, where the unexplained reboot clusters live. */\n'
+    'static const char *boot_diag_reset_reason_name(esp_reset_reason_t reason)\n'
+    '{\n'
+    '    switch (reason) {\n'
+    '    case ESP_RST_POWERON:    return "POWERON";\n'
+    '    case ESP_RST_EXT:        return "EXT_PIN";\n'
+    '    case ESP_RST_SW:         return "SW_RESTART";\n'
+    '    case ESP_RST_PANIC:      return "PANIC";\n'
+    '    case ESP_RST_INT_WDT:    return "INT_WDT";\n'
+    '    case ESP_RST_TASK_WDT:   return "TASK_WDT";\n'
+    '    case ESP_RST_WDT:        return "OTHER_WDT";\n'
+    '    case ESP_RST_DEEPSLEEP:  return "DEEPSLEEP_WAKE";\n'
+    '    case ESP_RST_BROWNOUT:   return "BROWNOUT";\n'
+    '    case ESP_RST_SDIO:       return "SDIO";\n'
+    '    case ESP_RST_USB:        return "USB";\n'
+    '    case ESP_RST_JTAG:       return "JTAG";\n'
+    '    case ESP_RST_EFUSE:      return "EFUSE_ERR";\n'
+    '    case ESP_RST_PWR_GLITCH: return "PWR_GLITCH";\n'
+    '    case ESP_RST_CPU_LOCKUP: return "CPU_LOCKUP";\n'
+    '    case ESP_RST_UNKNOWN:\n'
+    '    default:                 return "UNKNOWN";\n'
+    '    }\n'
+    '}\n'
+    '\n'
+    'static void boot_diag_log(void)\n'
+    '{\n'
+    '    esp_reset_reason_t reason = esp_reset_reason();\n'
+    '#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH\n'
+    '    esp_err_t cd_err = esp_core_dump_image_check();\n'
+    '    const char *coredump_state = (cd_err == ESP_OK) ? "PRESENT" : esp_err_to_name(cd_err);\n'
+    '#else\n'
+    '    const char *coredump_state = "DISABLED_IN_BUILD";\n'
+    '#endif\n'
+    '    ESP_LOGI("boot_diag", "reset_reason=%s(%d) rom_reset_cpu0=%d rom_reset_cpu1=%d coredump=%s",\n'
+    '             boot_diag_reset_reason_name(reason), (int)reason,\n'
+    '             (int)esp_rom_get_reset_reason(0), (int)esp_rom_get_reset_reason(1),\n'
+    '             coredump_state);\n'
+    '}\n'
+    '\n'
+    'void app_main(void)\n{\n'
+)
+if s.count(helper_anchor) != 1:
+    raise SystemExit("boot_diag: app_main anchor not unique in main.c")
+s = s.replace(helper_anchor, helper, 1)
+
+call_old = (
+    '        ESP_LOGW(TAG, "Storage: internal flash (/fatfs, SD card unavailable)");\n'
+    '    }\n'
+)
+call_new = (
+    '        ESP_LOGW(TAG, "Storage: internal flash (/fatfs, SD card unavailable)");\n'
+    '    }\n'
+    '    /* boot_diag (P0.1): after jarvis_logger_init so it reaches the SD log. */\n'
+    '    boot_diag_log();\n'
+)
+if s.count(call_old) != 1:
+    raise SystemExit("boot_diag: storage-block call-site anchor not unique in main.c")
+s = s.replace(call_old, call_new, 1)
+
+p.write_text(s)
+print("patched", p)
+PY
+    else
+        log "boot_diag patch already applied"
+    fi
+
+    if [ -f "$cmake" ] && ! grep -q "espcoredump" "$cmake" 2>/dev/null; then
+        log "adding espcoredump to main_requires (boot_diag needs esp_core_dump.h)"
+        python3 - "$cmake" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+old = "    espressif__esp_board_manager\n"
+new = (
+    "    espressif__esp_board_manager\n"
+    "    # JarvisNano boot_diag (STABILITY_PLAN P0.1): esp_core_dump_image_check\n"
+    "    # at startup needs the espcoredump include path.\n"
+    "    espcoredump\n"
+)
+if s.count(old) != 1:
+    raise SystemExit("boot_diag: esp_board_manager anchor not unique in main/CMakeLists.txt")
+p.write_text(s.replace(old, new, 1))
+print("patched", p)
+PY
+    else
+        log "espcoredump main_requires already present (or CMakeLists missing)"
+    fi
+}
+
+# STABILITY_PLAN P1.5 (F7) — a bad/corrupt emote partition must degrade to
+# voice-only operation with an E-log, not a silent bootloop. The stock
+# ESP_ERROR_CHECK(app_claw_ui_start()) panics and (with 0 s reboot delay and no
+# coredump, pre-P0.2) erased all evidence. Idempotency guard keys on the
+# replacement CONTENT, not symbol presence.
+apply_ui_start_soft_fail_patch() {
+    local main_c="$ESP_CLAW_DIR/application/edge_agent/main/main.c"
+    if [ ! -f "$main_c" ]; then
+        log "main.c not found — skipping ui_start soft-fail patch"
+        return
+    fi
+    if grep -qF "continuing without display (voice-only mode)" "$main_c" 2>/dev/null; then
+        log "ui_start soft-fail patch already applied"
+        return
+    fi
+    log "applying ui_start soft-fail patch (P1.5: emote mount failure degrades to voice-only)"
+    python3 - "$main_c" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+old = "    ESP_ERROR_CHECK(app_claw_ui_start());\n"
+new = (
+    "    /* STABILITY_PLAN P1.5 (F7): a bad emote partition/asset mount must degrade\n"
+    "     * to voice-only operation with evidence, not a silent bootloop. The stock\n"
+    "     * ESP_ERROR_CHECK here panicked and insta-rebooted on any UI start failure. */\n"
+    "    esp_err_t ui_start_err = app_claw_ui_start();\n"
+    "    if (ui_start_err != ESP_OK) {\n"
+    "        ESP_LOGE(TAG, \"app_claw_ui_start failed: %s -- continuing without display (voice-only mode)\",\n"
+    "                 esp_err_to_name(ui_start_err));\n"
+    "    }\n"
+)
+if s.count(old) != 1:
+    raise SystemExit("ui_start soft-fail: ESP_ERROR_CHECK(app_claw_ui_start()) anchor not unique in main.c")
+p.write_text(s.replace(old, new, 1))
+print("patched", p)
+PY
+}
+
 main() {
     mkdir -p "$ROOT/.build_logs"
     clone_or_update_esp_claw
@@ -2881,6 +3117,8 @@ main() {
     apply_emote_performance_patch
     apply_reactive_waveform_audio_bridge_patch
     apply_ble_disable_patch
+    apply_boot_diag_patch
+    apply_ui_start_soft_fail_patch
 
     if [ "${1:-}" = "build" ]; then
         build
