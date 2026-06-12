@@ -25,7 +25,17 @@ die() { printf '\033[1;31m[flash]\033[0m %s\n' "$*" >&2; exit 1; }
 [ -n "$DEFAULT_PORT" ] || die "no /dev/cu.usbmodem* found — plug in the ESP32-S3 board (hold BOOT if needed) or set PORT=..."
 log "port=$DEFAULT_PORT"
 
-if python3 -c "import esptool" 2>/dev/null; then
+# This script uses the esptool v5 CLI (dash-style options like
+# --before default-reset / watchdog-reset). An esptool v4.x that happens to
+# be importable from the system python3 only accepts underscore-style options
+# and would die on argv parsing — so only accept system esptool if it is v5+.
+if python3 - 2>/dev/null <<'PY'
+import sys
+import esptool
+major = int(getattr(esptool, "__version__", "0").split(".")[0] or 0)
+sys.exit(0 if major >= 5 else 1)
+PY
+then
     ESPTOOL_PY=(python3 -m esptool)
 else
     if [ ! -x "$ESPTOOL_VENV/bin/python" ]; then
