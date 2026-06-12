@@ -9,9 +9,20 @@
  *   Phase 4: Send audio (ES7210 ADC 16kHz → realtimeInput)
  *   Phase 5: Touch toggle + emote status overlay
  *
- * Half-duplex I2S constraint (SOC_I2S_HW_VERSION_1, shared clock):
- *   LISTEN: I2S @ 16kHz, TX+RX both open (TX silent, shared clock drives RX)
- *   SPEAK:  close ADC+DAC, reopen DAC @ 24kHz, play, then reopen for LISTEN
+ * Shared-clock I2S design (SOC_I2S_HW_VERSION_1): ADC + DAC are opened ONCE
+ * per session, both on the shared 16 kHz clock (intentional — commit 66413b1).
+ * Turn transitions only pause/resume capture (state-gated) and mute/unmute
+ * the DAC; the codec is never closed/reopened per turn (P2.4/F11). Model
+ * audio (24 kHz) is resampled to the session clock before playback.
+ *
+ * Audio pipeline (stability sprint P2.1–P2.3), one direction per arrow:
+ *   WS task        → rx_queue (raw frames, byte-accounted/byte-capped)
+ *   gl_session     → cJSON parse + base64 + gain/limiter + resample → PCM ring
+ *   gl_pcm_feeder  → blocking esp_codec_dev_write from the PCM ring — nothing else
+ *   gl_audio_tx    → 20 ms mic reads + RMS + local VAD → tx_frame_queue (drop-oldest)
+ *   gl_tx_sender   → drains tx_frame_queue → WS sends (Wi-Fi backpressure can
+ *                    never stall the capture cadence)
+ *   gl_tool_worker → toolCall frames (30 s HTTPS gl_act_call) off the session task
  *
  * Lifecycle ownership (stability sprint P1.1–P1.4): gl_session_task is the
  * SINGLE owner of codec open/close, TX-task start/stop, WS-client
@@ -70,6 +81,11 @@ static const char *TAG = "cap_gemini_live";
 static cJSON *gl_get_object_compat(cJSON *obj, const char *camel, const char *snake);
 static bool   gl_enter_speaking(uint32_t sample_rate);
 static void   gl_resume_listening(const char *reason);
+static void   gl_interrupt_playback(const char *reason);
+static bool   gl_playback_pending(void);
+static void   gl_drain_rx_queue(void);
+static void   gl_process_cmd_queue(void);
+static void   gl_dac_mute(bool mute);
 
 /* ---- Configuration -------------------------------------------------------- */
 
@@ -93,9 +109,24 @@ static void   gl_resume_listening(const char *reason);
 #define GEMINI_AUDIO_KEY         "audio"
 
 #define GL_RX_BUF_SIZE           (96 * 1024)   /* WS reassembly buffer (PSRAM) — audio turns can be ~60KB */
-#define GL_RX_QUEUE_DEPTH        256           /* completed-frame queue depth: Gemini bursts a full reply faster than
-                                                * real-time playback, so this must buffer the whole burst (~30s audio,
-                                                * ~2MB PSRAM peak). At 16 it overflowed and dropped ~12s of a reply. */
+#define GL_RX_QUEUE_DEPTH        256           /* completed-frame queue depth. Since P2.1 the session task drains this
+                                                * at decode speed (DAC writes moved to the feeder), so depth here only
+                                                * covers parse latency, not playback time. */
+#define GL_RX_QUEUE_BYTE_CAP     (512 * 1024)  /* byte cap across queued raw frames (P2.2/F9): bounds the PSRAM the
+                                                * raw queue can pin even if the session task stalls */
+/* Decoded-PCM ring between the session task (producer: parse/decode/gain/
+ * resample) and the playback feeder (consumer: blocking DAC writes). 1 MB at
+ * the 16 kHz session clock (32 kB/s) buffers ~32 s of model speech — a whole
+ * burst reply. Allocation degrades by halving down to the floor instead of
+ * failing the session (P2.2/F9). */
+#define GL_PCM_RING_BYTES        (1024 * 1024)
+#define GL_PCM_RING_MIN_BYTES    (128 * 1024)
+#define GL_FEEDER_CHUNK_BYTES    2560          /* 80 ms @ 16 kHz mono s16 per DAC write — small enough that an
+                                                * interrupt flush takes effect within one chunk (P3.1 < 200 ms) */
+#define GL_FEEDER_STOP_WAIT_MS   5000          /* worst case: one in-flight DAC write (~330 ms) */
+/* Capture→sender frame queue: 16 × 20 ms ≈ 320 ms of mic audio (P2.3/F10). */
+#define GL_TX_FRAME_QUEUE_DEPTH  16
+#define GL_TOOL_QUEUE_DEPTH      4
 #define GL_TX_CHUNK_MS           20             /* mic capture interval */
 #define GL_TX_SAMPLE_RATE        16000
 #define GL_RX_SAMPLE_RATE        24000
@@ -187,6 +218,9 @@ typedef enum {
 #define GL_BIT_SESSION_DONE (1 << 5)
 #define GL_BIT_WS_CLEANED   (1 << 6)   /* async WS stop/destroy finished; a new
                                         * client may be created (F6 join) */
+#define GL_BIT_TXS_DONE     (1 << 7)   /* TX sender task exited (P2.3) */
+#define GL_BIT_FEEDER_STOP  (1 << 8)   /* park the playback feeder (P2.1) */
+#define GL_BIT_FEEDER_DONE  (1 << 9)   /* playback feeder exited */
 
 /* ---- Session command queue -------------------------------------------------
  * Single-owner lifecycle: every state-mutating request from a non-session
@@ -199,6 +233,9 @@ typedef enum {
 typedef enum {
     GL_CMD_END_INPUT = 1,   /* commit the user's audio turn (tap / HTTP / VAD) */
     GL_CMD_SEND_TEXT,       /* send a text turn (HTTP / CLI) */
+    GL_CMD_INTERRUPT,       /* tap during SPEAKING — flush playback, back to
+                             * LISTENING (P3.1); shares the path the server
+                             * `interrupted` frame uses (P3.2) */
 } gl_cmd_type_t;
 
 typedef struct {
@@ -207,6 +244,15 @@ typedef struct {
 } gl_cmd_t;
 
 #define GL_CMD_QUEUE_DEPTH  8
+
+/* JarvisMCP tool execution rides a dedicated worker task: gl_act_call blocks
+ * up to 30 s on HTTPS, which must never stall the session task's rx drain
+ * (P2.1/F8). Jobs are tagged with the session generation so a result from a
+ * dead session is dropped instead of being sent into the next one. */
+typedef struct {
+    uint32_t  gen;          /* s_gl.session_gen at queue time */
+    cJSON    *tool_call;    /* detached "toolCall" object; worker deletes */
+} gl_tool_job_t;
 
 typedef struct {
     char                         api_key[320];
@@ -239,7 +285,27 @@ typedef struct {
     char                         last_audio_error[96];
     EventGroupHandle_t           ev;
     TaskHandle_t                 session_task;
-    TaskHandle_t                 tx_task;
+    TaskHandle_t                 tx_task;            /* mic capture (20 ms cadence) */
+    TaskHandle_t                 tx_sender_task;     /* drains tx_frame_queue → WS (P2.3) */
+    TaskHandle_t                 feeder_task;        /* PCM ring → DAC (P2.1) */
+    TaskHandle_t                 tool_task;          /* JarvisMCP tool worker (P2.1) */
+    QueueHandle_t                tx_frame_queue;     /* 20 ms mic frames, by value */
+    QueueHandle_t                tool_queue;         /* gl_tool_job_t → tool worker */
+    SemaphoreHandle_t            ring_mutex;         /* guards pcm_ring indices */
+    uint8_t                     *pcm_ring;           /* decoded PCM at the DAC rate (PSRAM) */
+    size_t                       pcm_ring_cap;
+    size_t                       pcm_ring_head;      /* write index (session task) */
+    size_t                       pcm_ring_tail;      /* read index (feeder task) */
+    volatile size_t              pcm_ring_bytes;     /* occupancy; volatile for lock-free peeks */
+    volatile uint32_t            pcm_ring_epoch;     /* bumped on flush — aborts in-flight producer */
+    uint32_t                     pcm_ring_drop_bytes;/* producer bytes dropped (flush/stop mid-write) */
+    volatile bool                feeder_writing;     /* feeder mid-DAC-write */
+    volatile bool                pending_resume;     /* terminal frame seen, ring still draining */
+    char                         pending_resume_reason[32];
+    int64_t                      speak_enter_us;     /* enter_speaking timestamp (latency log) */
+    volatile bool                first_audio_pending;/* set per turn until the first DAC feed */
+    uint32_t                     last_first_audio_ms;/* last measured first-audio latency */
+    volatile uint32_t            session_gen;        /* bumped per session; stale tool jobs dropped */
     SemaphoreHandle_t            ws_mutex;          /* serialises WS sends */
     esp_codec_dev_handle_t       dac;
     esp_codec_dev_handle_t       adc;
@@ -368,6 +434,22 @@ static void gl_reset_diag_counters(void)
     s_gl.tx_raw_reads          = 0;
     s_gl.last_input_end_us     = 0;
     s_gl.activity_open         = false;
+    s_gl.pcm_ring_drop_bytes   = 0;
+}
+
+/* P0.4 (logging half): one heap line at session start/stop so leaks and PSRAM
+ * fragmentation are trendable from the SD log across sessions. */
+static void gl_log_heap_snapshot(const char *when)
+{
+    ESP_LOGI(TAG,
+             "heap[%s]: int free=%u largest=%u min=%u | psram free=%u largest=%u min=%u",
+             when,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM));
 }
 
 /* ---- Audio level (RMS) for the reactive waveform -------------------------- *
@@ -376,6 +458,11 @@ static void gl_reset_diag_counters(void)
  * (0..32767); getters normalise to 0..1 float. Plain atomics, no locks. */
 static _Atomic uint16_t s_mic_rms;   /* ES7210 capture level (LISTENING) */
 static _Atomic uint16_t s_out_rms;   /* decoded playback level (SPEAKING) */
+
+/* Raw rx-queue byte accounting (P2.2): WS task adds, session task subtracts. */
+static _Atomic uint32_t s_rx_queue_bytes;
+/* Tool jobs queued-but-not-finished (session task posts, worker completes). */
+static _Atomic uint32_t s_tool_inflight;
 
 /* RMS of a block of mono int16 PCM, clamped to uint16. */
 static uint16_t gl_compute_rms(const int16_t *samples, size_t n)
@@ -863,6 +950,178 @@ static void gl_close_adc(void)
     s_gl.adc_rate = 0;
 }
 
+/* Session-long codec (P2.4/F11): the DAC stays open on the shared session
+ * clock; turn transitions toggle mute instead of close/reopen. Muting while
+ * listening also prevents I2S TX underrun artifacts from reaching the
+ * speaker between turns. Raw-I2S fallback has no mute — acceptable, the
+ * codec path is the real hardware path on this board. */
+static void gl_dac_mute(bool mute)
+{
+    if (s_gl.dac && s_gl.dac_open && !s_gl.dac_codec_failed) {
+        esp_codec_dev_set_out_mute(s_gl.dac, mute);
+    }
+}
+
+/* ---- Decoded-PCM ring (session task → playback feeder, P2.1/P2.2) --------- */
+
+/* Drop all buffered playback. Bumping the epoch aborts any producer blocked
+ * in gl_pcm_ring_write. SESSION TASK ONLY. */
+static void gl_pcm_ring_flush(void)
+{
+    if (!s_gl.ring_mutex || !s_gl.pcm_ring) {
+        return;
+    }
+    xSemaphoreTake(s_gl.ring_mutex, portMAX_DELAY);
+    s_gl.pcm_ring_head  = 0;
+    s_gl.pcm_ring_tail  = 0;
+    s_gl.pcm_ring_bytes = 0;
+    s_gl.pcm_ring_epoch++;
+    xSemaphoreGive(s_gl.ring_mutex);
+}
+
+/* Allocate the ring for a session. Degrades by halving instead of failing
+ * (P2.2/F9) — a smaller ring just means earlier producer backpressure, never
+ * a crash. SESSION TASK ONLY. */
+static void gl_pcm_ring_alloc(void)
+{
+    if (s_gl.pcm_ring) {
+        /* Survivor from a feeder that refused to park last session: reuse. */
+        gl_pcm_ring_flush();
+        return;
+    }
+    size_t want = GL_PCM_RING_BYTES;
+    while (want >= GL_PCM_RING_MIN_BYTES) {
+        s_gl.pcm_ring = heap_caps_malloc(want, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_gl.pcm_ring) {
+            break;
+        }
+        ESP_LOGE(TAG, "PCM ring: %u B alloc failed (largest PSRAM block %u), halving",
+                 (unsigned)want,
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+        want /= 2;
+    }
+    if (!s_gl.pcm_ring) {
+        ESP_LOGE(TAG, "PCM ring: no allocation >= %u B — degraded synchronous playback",
+                 (unsigned)GL_PCM_RING_MIN_BYTES);
+        s_gl.pcm_ring_cap = 0;
+        return;
+    }
+    s_gl.pcm_ring_cap   = want;
+    s_gl.pcm_ring_head  = 0;
+    s_gl.pcm_ring_tail  = 0;
+    s_gl.pcm_ring_bytes = 0;
+    ESP_LOGI(TAG, "PCM ring: %u B (~%u s at the session clock)",
+             (unsigned)want,
+             (unsigned)(want / (GL_TX_SAMPLE_RATE * GL_CHANNELS * (GL_BITS / 8))));
+}
+
+/* SESSION TASK ONLY, and only after the feeder is known parked. */
+static void gl_pcm_ring_free(void)
+{
+    if (!s_gl.pcm_ring) {
+        return;
+    }
+    if (s_gl.feeder_task) {
+        /* Never free under a live reader; the next session reuses (flushes) it. */
+        ESP_LOGE(TAG, "PCM ring: feeder still alive, keeping ring allocated");
+        return;
+    }
+    heap_caps_free(s_gl.pcm_ring);
+    s_gl.pcm_ring       = NULL;
+    s_gl.pcm_ring_cap   = 0;
+    s_gl.pcm_ring_bytes = 0;
+}
+
+/* Copy len bytes into the ring. SESSION TASK ONLY. When the ring is full
+ * (> ~32 s buffered — rare) this blocks in 10 ms steps, but keeps consuming
+ * the cmd queue so a tap interrupt stays responsive mid-burst; a flush
+ * (epoch bump), stop request or session end aborts the write. Returns false
+ * if any bytes were dropped. */
+static bool gl_pcm_ring_write(const uint8_t *data, size_t len)
+{
+    if (!s_gl.pcm_ring || !s_gl.ring_mutex) {
+        return false;
+    }
+    uint32_t epoch0 = s_gl.pcm_ring_epoch;
+    size_t   off = 0;
+    while (off < len) {
+        xSemaphoreTake(s_gl.ring_mutex, portMAX_DELAY);
+        size_t space = s_gl.pcm_ring_cap - s_gl.pcm_ring_bytes;
+        size_t n = len - off;
+        if (n > space) {
+            n = space;
+        }
+        if (n) {
+            size_t first = s_gl.pcm_ring_cap - s_gl.pcm_ring_head;
+            if (first > n) {
+                first = n;
+            }
+            memcpy(s_gl.pcm_ring + s_gl.pcm_ring_head, data + off, first);
+            if (n > first) {
+                memcpy(s_gl.pcm_ring, data + off + first, n - first);
+            }
+            s_gl.pcm_ring_head = (s_gl.pcm_ring_head + n) % s_gl.pcm_ring_cap;
+            s_gl.pcm_ring_bytes += n;
+        }
+        xSemaphoreGive(s_gl.ring_mutex);
+        off += n;
+        if (off == len) {
+            return true;
+        }
+        /* Ring full: pump requests while waiting so GL_CMD_INTERRUPT can
+         * flush us free (P3.1 latency target). */
+        gl_process_cmd_queue();
+        if (s_gl.stop_requested || !s_gl.session_active ||
+            s_gl.pcm_ring_epoch != epoch0) {
+            s_gl.pcm_ring_drop_bytes += (uint32_t)(len - off);
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    return true;
+}
+
+/* Pop up to max bytes. FEEDER TASK ONLY. Returns 0 after ~wait_ms idle. */
+static size_t gl_pcm_ring_read(uint8_t *out, size_t max, uint32_t wait_ms)
+{
+    if (!s_gl.pcm_ring || !s_gl.ring_mutex) {
+        vTaskDelay(pdMS_TO_TICKS(wait_ms));
+        return 0;
+    }
+    uint32_t waited = 0;
+    for (;;) {
+        xSemaphoreTake(s_gl.ring_mutex, portMAX_DELAY);
+        size_t n = s_gl.pcm_ring_bytes;
+        if (n > max) {
+            n = max;
+        }
+        if (n) {
+            size_t first = s_gl.pcm_ring_cap - s_gl.pcm_ring_tail;
+            if (first > n) {
+                first = n;
+            }
+            memcpy(out, s_gl.pcm_ring + s_gl.pcm_ring_tail, first);
+            if (n > first) {
+                memcpy(out + first, s_gl.pcm_ring, n - first);
+            }
+            s_gl.pcm_ring_tail = (s_gl.pcm_ring_tail + n) % s_gl.pcm_ring_cap;
+            s_gl.pcm_ring_bytes -= n;
+        }
+        xSemaphoreGive(s_gl.ring_mutex);
+        if (n || waited >= wait_ms) {
+            return n;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+        waited += 10;
+    }
+}
+
+/* True while decoded audio is still buffered or mid-write to the DAC. */
+static bool gl_playback_pending(void)
+{
+    return (s_gl.pcm_ring && s_gl.pcm_ring_bytes > 0) || s_gl.feeder_writing;
+}
+
 /* ---- JSON send helpers ---------------------------------------------------- */
 
 /* Declare one Gemini function-call tool taking a single required string arg.
@@ -920,7 +1179,8 @@ static bool gl_send_setup(void)
     cJSON_AddItemToArray(fdecls, fn);
 
     /* JarvisMCP-backed skills. Each maps to a jarvis.* SDK call in
-     * gl_handle_tool_call → /act gateway. Company brain (memory) + knowledge. */
+     * gl_run_tool_call (tool worker task) → /act gateway. Company brain
+     * (memory) + knowledge. */
     gl_add_str_fn(fdecls, "recall_memory",
                   "Search Jarvis's own long-term memory and knowledge base for facts, notes, decisions, and context from past sessions. Use for 'what do you know about...', 'do you remember...', or anything personal or project-specific.",
                   "query", "What to look up, in natural language.");
@@ -1280,13 +1540,7 @@ static void gl_play_audio_b64(const char *b64_str, uint32_t sample_rate)
         if (resampled) {
             out_pcm = resampled;
             out_bytes = out_samples * sizeof(int16_t);
-            atomic_store(&s_out_rms, gl_compute_rms(out_pcm, out_samples));
         }
-    }
-
-    /* Publish playback level for the SPEAKING waveform (before the blocking write). */
-    if (!resampled) {
-        atomic_store(&s_out_rms, gl_compute_rms((const int16_t *)pcm, nsamp));
     }
 
     if (s_gl.stop_requested || !s_gl.session_active) {
@@ -1297,29 +1551,43 @@ static void gl_play_audio_b64(const char *b64_str, uint32_t sample_rate)
         return;
     }
 
-    if (s_gl.dac && !s_gl.dac_codec_failed) {
-        int wr = esp_codec_dev_write(s_gl.dac, out_pcm, (int)out_bytes);
-        if (wr != ESP_CODEC_DEV_OK) {
-            ESP_LOGW(TAG, "DAC write failed: codec rc=%d bytes=%u rate=%u",
-                     wr, (unsigned)out_bytes, (unsigned)playback_rate);
-        } else if (s_gl.audio_part_hits == 1) {
-            ESP_LOGI(TAG, "Speaking: first DAC write OK (codec, bytes=%u rate=%u)",
-                     (unsigned)out_bytes, (unsigned)playback_rate);
+    if (s_gl.pcm_ring && s_gl.feeder_task) {
+        /* P2.1 (F8): hand the conditioned PCM to the feeder via the ring —
+         * the session task never blocks on the DAC, so the rx_queue drains
+         * at decode speed. The feeder publishes s_out_rms as chunks actually
+         * play, keeping the face in sync with the speaker. */
+        if (!gl_pcm_ring_write((const uint8_t *)out_pcm, out_bytes)) {
+            ESP_LOGD(TAG, "PCM ring write aborted (flush/stop)");
         }
-    } else if (s_gl.dac_raw) {
-        size_t bytes_written = 0;
-        uint32_t timeout_ms = gl_audio_write_timeout_ms(out_bytes, playback_rate);
-        esp_err_t err = i2s_channel_write(s_gl.dac_chan, out_pcm, out_bytes, &bytes_written,
-                                          pdMS_TO_TICKS(timeout_ms));
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "DAC write failed: i2s err=%d bytes=%u timeout_ms=%u rate=%u",
-                     (int)err, (unsigned)out_bytes, (unsigned)timeout_ms, (unsigned)playback_rate);
-        } else if (bytes_written != out_bytes) {
-            ESP_LOGW(TAG, "DAC write short: %u != %u timeout_ms=%u",
-                     (unsigned)bytes_written, (unsigned)out_bytes, (unsigned)timeout_ms);
-        } else if (s_gl.audio_part_hits == 1) {
-            ESP_LOGI(TAG, "Speaking: first DAC write OK (raw i2s, bytes=%u rate=%u)",
-                     (unsigned)out_bytes, (unsigned)playback_rate);
+    } else {
+        /* Degraded path (ring allocation or feeder create failed): the old
+         * synchronous write. Audio still works; it just blocks this task. */
+        atomic_store(&s_out_rms, gl_compute_rms(out_pcm, out_samples));
+        if (s_gl.first_audio_pending) {
+            s_gl.first_audio_pending = false;
+            uint32_t ms = (uint32_t)((esp_timer_get_time() - s_gl.speak_enter_us) / 1000);
+            s_gl.last_first_audio_ms = ms;
+            ESP_LOGI(TAG, "first-audio latency: %u ms (enter_speaking -> DAC, sync path)",
+                     (unsigned)ms);
+        }
+        if (s_gl.dac && !s_gl.dac_codec_failed) {
+            int wr = esp_codec_dev_write(s_gl.dac, out_pcm, (int)out_bytes);
+            if (wr != ESP_CODEC_DEV_OK) {
+                ESP_LOGW(TAG, "DAC write failed: codec rc=%d bytes=%u rate=%u",
+                         wr, (unsigned)out_bytes, (unsigned)playback_rate);
+            }
+        } else if (s_gl.dac_raw) {
+            size_t bytes_written = 0;
+            uint32_t timeout_ms = gl_audio_write_timeout_ms(out_bytes, playback_rate);
+            esp_err_t err = i2s_channel_write(s_gl.dac_chan, out_pcm, out_bytes, &bytes_written,
+                                              pdMS_TO_TICKS(timeout_ms));
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "DAC write failed: i2s err=%d bytes=%u timeout_ms=%u rate=%u",
+                         (int)err, (unsigned)out_bytes, (unsigned)timeout_ms, (unsigned)playback_rate);
+            } else if (bytes_written != out_bytes) {
+                ESP_LOGW(TAG, "DAC write short: %u != %u timeout_ms=%u",
+                         (unsigned)bytes_written, (unsigned)out_bytes, (unsigned)timeout_ms);
+            }
         }
     }
 
@@ -1327,6 +1595,106 @@ static void gl_play_audio_b64(const char *b64_str, uint32_t sample_rate)
         free(resampled);
     }
     free(pcm);
+}
+
+/* ---- Playback feeder task (P2.1/F8) ---------------------------------------
+ * The ONLY job of this task: pop PCM from the ring and run the blocking
+ * esp_codec_dev_write. No JSON, no base64, no network, no lifecycle. */
+
+static void gl_playback_feeder_task(void *arg)
+{
+    (void)arg;
+    static uint8_t chunk[GL_FEEDER_CHUNK_BYTES];
+
+    ESP_LOGI(TAG, "Feeder: started (ring %u B)", (unsigned)s_gl.pcm_ring_cap);
+    while (!(xEventGroupGetBits(s_gl.ev) & GL_BIT_FEEDER_STOP)) {
+        size_t got = gl_pcm_ring_read(chunk, sizeof(chunk), 50);
+        if (!got) {
+            continue;
+        }
+
+        if (s_gl.first_audio_pending) {
+            s_gl.first_audio_pending = false;
+            uint32_t ms = (uint32_t)((esp_timer_get_time() - s_gl.speak_enter_us) / 1000);
+            s_gl.last_first_audio_ms = ms;
+            ESP_LOGI(TAG, "first-audio latency: %u ms (enter_speaking -> DAC feed)",
+                     (unsigned)ms);
+        }
+
+        /* Playback level for the SPEAKING waveform — what is actually playing. */
+        atomic_store(&s_out_rms, gl_compute_rms((const int16_t *)chunk,
+                                                got / sizeof(int16_t)));
+
+        s_gl.feeder_writing = true;
+        if (s_gl.dac && s_gl.dac_open && !s_gl.dac_codec_failed) {
+            int wr = esp_codec_dev_write(s_gl.dac, chunk, (int)got);
+            if (wr != ESP_CODEC_DEV_OK) {
+                ESP_LOGW(TAG, "Feeder: DAC write failed rc=%d bytes=%u", wr, (unsigned)got);
+            }
+        } else if (s_gl.dac_raw && s_gl.dac_chan) {
+            size_t written = 0;
+            uint32_t timeout_ms = gl_audio_write_timeout_ms(got, s_gl.dac_rate);
+            esp_err_t err = i2s_channel_write(s_gl.dac_chan, chunk, got, &written,
+                                              pdMS_TO_TICKS(timeout_ms));
+            if (err != ESP_OK || written != got) {
+                ESP_LOGW(TAG, "Feeder: raw write %s (%u/%u B)",
+                         esp_err_to_name(err), (unsigned)written, (unsigned)got);
+            }
+        }
+        s_gl.feeder_writing = false;
+    }
+
+    s_gl.feeder_writing = false;
+    atomic_store(&s_out_rms, 0);
+    ESP_LOGI(TAG, "Feeder: stopped");
+    xEventGroupSetBits(s_gl.ev, GL_BIT_FEEDER_DONE);
+    if (s_gl.feeder_task == xTaskGetCurrentTaskHandle()) {
+        s_gl.feeder_task = NULL;
+    }
+    claw_task_delete(NULL);
+}
+
+/* SESSION TASK ONLY. */
+static void gl_start_feeder_task(void)
+{
+    if (s_gl.feeder_task) {
+        return;     /* a stuck survivor is still serving the (reused) ring */
+    }
+    if (!s_gl.pcm_ring) {
+        return;     /* degraded sync mode — gl_play_audio_b64 writes directly */
+    }
+    xEventGroupClearBits(s_gl.ev, GL_BIT_FEEDER_STOP | GL_BIT_FEEDER_DONE);
+    static const claw_task_config_t feeder_cfg = {
+        .name         = "gl_pcm_feeder",
+        .stack_size   = 6144,
+        .priority     = 5,
+        .core_id      = tskNO_AFFINITY,
+        .stack_policy = CLAW_TASK_STACK_PREFER_PSRAM,
+    };
+    if (claw_task_create(&feeder_cfg, gl_playback_feeder_task, NULL, &s_gl.feeder_task) != pdPASS) {
+        s_gl.feeder_task = NULL;
+        ESP_LOGE(TAG, "Feeder: task create failed — degraded synchronous playback");
+    }
+}
+
+/* SESSION TASK ONLY. Same no-force-delete doctrine as gl_stop_tx_task. */
+static bool gl_stop_feeder_task(void)
+{
+    if (!s_gl.feeder_task) {
+        return true;
+    }
+    xEventGroupSetBits(s_gl.ev, GL_BIT_FEEDER_STOP);
+    EventBits_t bits = xEventGroupWaitBits(s_gl.ev, GL_BIT_FEEDER_DONE, pdFALSE, pdTRUE,
+                                           pdMS_TO_TICKS(GL_FEEDER_STOP_WAIT_MS));
+    if (!(bits & GL_BIT_FEEDER_DONE)) {
+        if (!s_gl.feeder_task) {
+            return true;
+        }
+        ESP_LOGE(TAG, "Feeder: stop timed out; leaving task parked (no force-delete)");
+        return false;
+    }
+    s_gl.feeder_task = NULL;
+    return true;
 }
 
 /* ---- Audio TX task (Phase 4) --------------------------------------------- */
@@ -1342,6 +1710,11 @@ static void gl_audio_tx_task(void *arg)
     uint32_t vad_silence_ms = 0;
     bool     vad_speech_seen = false;
 #endif
+    /* The ADC stays open across turns (P2.4), so the I2S RX DMA accumulates
+     * stale audio — including speaker echo — while capture is paused. Dump
+     * ~200 ms of frames on every pause→listen transition so neither the VAD
+     * nor the server sees it. */
+    int flush_frames = 10;
 
     /* Codec lifetime is owned by the session task. This worker only reads from
      * the already-open ADC so teardown cannot double-close codec/I2S handles
@@ -1359,6 +1732,15 @@ static void gl_audio_tx_task(void *arg)
 
     while (!(xEventGroupGetBits(s_gl.ev) & GL_BIT_TX_STOP)) {
         if (s_gl.state != GL_STATE_LISTENING) {
+#if GL_USE_LOCAL_VAD
+            /* The task survives turn transitions now (P2.4): clear VAD state
+             * across pauses so a stale "speech seen" cannot insta-commit the
+             * next listening segment. */
+            vad_speech_ms   = 0;
+            vad_silence_ms  = 0;
+            vad_speech_seen = false;
+#endif
+            flush_frames = 10;
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
@@ -1389,6 +1771,12 @@ static void gl_audio_tx_task(void *arg)
         if (r != ESP_CODEC_DEV_OK) {
             s_gl.tx_read_failures++;
             vTaskDelay(pdMS_TO_TICKS(GL_TX_CHUNK_MS));
+            continue;
+        }
+
+        if (flush_frames > 0) {
+            /* Stale DMA backlog from the paused window — discard. */
+            flush_frames--;
             continue;
         }
 
@@ -1468,17 +1856,26 @@ static void gl_audio_tx_task(void *arg)
         }
 #endif
 
-        /* tx-abort: a stop was requested while we were reading. Park before
-         * touching the WS so gl_stop_tx_task's wait is bounded by one mic
-         * send timeout at most, never a full blocked send (F1 / P1.2). */
+        /* tx-abort: a stop was requested while we were reading (F1 / P1.2). */
         if (xEventGroupGetBits(s_gl.ev) & GL_BIT_TX_STOP) {
             break;
         }
 
-        if (gl_send_audio_frame(pcm, GL_TX_PCM_BYTES)) {
-            s_gl.tx_frames_sent++;
-        } else {
-            s_gl.tx_send_failures++;
+        /* Decoupled send (P2.3/F10): hand the frame to the sender task via a
+         * bounded queue. Wi-Fi backpressure fills the queue and we drop the
+         * OLDEST frame, keeping capture cadence + VAD timing intact. Drops
+         * land in tx_send_failures (they are failures to deliver). */
+        if (s_gl.state != GL_STATE_LISTENING || !s_gl.tx_frame_queue) {
+            continue;   /* turn ended while we were reading — frame is stale */
+        }
+        if (xQueueSend(s_gl.tx_frame_queue, pcm, 0) != pdTRUE) {
+            static uint8_t drop_scratch[GL_TX_PCM_BYTES];
+            if (xQueueReceive(s_gl.tx_frame_queue, drop_scratch, 0) == pdTRUE) {
+                s_gl.tx_send_failures++;
+            }
+            if (xQueueSend(s_gl.tx_frame_queue, pcm, 0) != pdTRUE) {
+                s_gl.tx_send_failures++;
+            }
         }
     }
 
@@ -1489,6 +1886,44 @@ static void gl_audio_tx_task(void *arg)
     xEventGroupSetBits(s_gl.ev, GL_BIT_TX_DONE);
     if (s_gl.tx_task == xTaskGetCurrentTaskHandle()) {
         s_gl.tx_task = NULL;
+    }
+    claw_task_delete(NULL);
+}
+
+/* Drains the capture queue into the WS (P2.3/F10). ALL mic WS sends happen
+ * here, off the 20 ms capture cadence; the worst-case block per frame is the
+ * 500 ms mic send timeout, which only delays delivery, never capture. */
+static void gl_audio_tx_sender_task(void *arg)
+{
+    (void)arg;
+    static uint8_t frame[GL_TX_PCM_BYTES];
+
+    ESP_LOGI(TAG, "TX sender: started");
+    while (!(xEventGroupGetBits(s_gl.ev) & GL_BIT_TX_STOP)) {
+        if (!s_gl.tx_frame_queue ||
+            xQueueReceive(s_gl.tx_frame_queue, frame, pdMS_TO_TICKS(100)) != pdTRUE) {
+            continue;
+        }
+        if (xEventGroupGetBits(s_gl.ev) & GL_BIT_TX_STOP) {
+            break;
+        }
+        /* Frames queued before a turn ended are stale once the activity
+         * closed — audio outside an activity window confuses the manual-VAD
+         * protocol. Drop silently (they are trailing silence). */
+        if (!s_gl.activity_open || s_gl.state != GL_STATE_LISTENING) {
+            continue;
+        }
+        if (gl_send_audio_frame(frame, GL_TX_PCM_BYTES)) {
+            s_gl.tx_frames_sent++;
+        } else {
+            s_gl.tx_send_failures++;
+        }
+    }
+
+    ESP_LOGI(TAG, "TX sender: stopped");
+    xEventGroupSetBits(s_gl.ev, GL_BIT_TXS_DONE);
+    if (s_gl.tx_sender_task == xTaskGetCurrentTaskHandle()) {
+        s_gl.tx_sender_task = NULL;
     }
     claw_task_delete(NULL);
 }
@@ -1513,30 +1948,36 @@ static void gl_audio_tx_task(void *arg)
  * that already exited. Returns true when the task is known to be gone. */
 static bool gl_stop_tx_task(void)
 {
-    if (!s_gl.tx_task) {
+    if (!s_gl.tx_task && !s_gl.tx_sender_task) {
         return true;
     }
     xEventGroupSetBits(s_gl.ev, GL_BIT_TX_STOP);
-    EventBits_t bits = xEventGroupWaitBits(s_gl.ev, GL_BIT_TX_DONE,
+    const EventBits_t both = GL_BIT_TX_DONE | GL_BIT_TXS_DONE;
+    EventBits_t bits = xEventGroupWaitBits(s_gl.ev, both,
                                            pdFALSE, pdTRUE, pdMS_TO_TICKS(GL_TX_STOP_WAIT_MS));
-    if (!(bits & GL_BIT_TX_DONE)) {
-        if (!s_gl.tx_task) {
+    if ((bits & both) != both) {
+        if (!s_gl.tx_task && !s_gl.tx_sender_task) {
             return true;    /* exited between the head check and the wait */
         }
-        ESP_LOGE(TAG, "Audio TX: stop timed out; leaving task parked (no force-delete)");
+        ESP_LOGE(TAG, "Audio TX: stop timed out (capture=%d sender=%d); leaving parked (no force-delete)",
+                 (int)(s_gl.tx_task != NULL), (int)(s_gl.tx_sender_task != NULL));
         return false;
     }
     s_gl.tx_task = NULL;
+    s_gl.tx_sender_task = NULL;
     return true;
 }
 
+/* Starts the capture + sender pair. Since P2.4 this runs once per session
+ * (turn transitions only pause via state), so an "already running" call is
+ * the per-turn norm, not an anomaly. */
 static void gl_start_tx_task(void)
 {
-    if (s_gl.tx_task) {
-        ESP_LOGW(TAG, "Audio TX: start ignored; task already running");
+    if (s_gl.tx_task || s_gl.tx_sender_task) {
+        ESP_LOGD(TAG, "Audio TX: start ignored; task(s) already running");
         return;
     }
-    xEventGroupClearBits(s_gl.ev, GL_BIT_TX_STOP | GL_BIT_TX_DONE);
+    xEventGroupClearBits(s_gl.ev, GL_BIT_TX_STOP | GL_BIT_TX_DONE | GL_BIT_TXS_DONE);
     static const claw_task_config_t tx_cfg = {
         .name         = "gl_audio_tx",
         .stack_size   = 8192,
@@ -1544,9 +1985,25 @@ static void gl_start_tx_task(void)
         .core_id      = tskNO_AFFINITY,
         .stack_policy = CLAW_TASK_STACK_PREFER_PSRAM,
     };
+    static const claw_task_config_t txs_cfg = {
+        .name         = "gl_tx_sender",
+        .stack_size   = 8192,
+        .priority     = 5,
+        .core_id      = tskNO_AFFINITY,
+        .stack_policy = CLAW_TASK_STACK_PREFER_PSRAM,
+    };
     if (claw_task_create(&tx_cfg, gl_audio_tx_task, NULL, &s_gl.tx_task) != pdPASS) {
         s_gl.tx_task = NULL;
-        ESP_LOGE(TAG, "Audio TX: failed to create task");
+        /* Both DONE bits so a later stop wait can never hang on a task that
+         * was never created this generation. */
+        xEventGroupSetBits(s_gl.ev, GL_BIT_TX_DONE | GL_BIT_TXS_DONE);
+        ESP_LOGE(TAG, "Audio TX: failed to create capture task");
+        return;
+    }
+    if (claw_task_create(&txs_cfg, gl_audio_tx_sender_task, NULL, &s_gl.tx_sender_task) != pdPASS) {
+        s_gl.tx_sender_task = NULL;
+        xEventGroupSetBits(s_gl.ev, GL_BIT_TXS_DONE);
+        ESP_LOGE(TAG, "Audio TX: failed to create sender task (frames will drop)");
     }
 }
 
@@ -1596,10 +2053,14 @@ static esp_err_t gl_post_cmd(gl_cmd_type_t type, char *text)
     return ESP_OK;
 }
 
-/* Commit the user's audio turn. SESSION TASK ONLY — stops the TX task and
- * closes the ADC, which only the lifecycle owner may do (F3/F4). State is
- * re-checked here because the request was queued from another context and
- * the session may have moved on (duplicate commits become no-ops). */
+/* Commit the user's audio turn. SESSION TASK ONLY. State is re-checked here
+ * because the request was queued from another context and the session may
+ * have moved on (duplicate commits become no-ops).
+ *
+ * P2.4 (F11): capture is PAUSED, not torn down — the capture task self-parks
+ * the moment state leaves LISTENING and the codec stays open on the session
+ * clock. Trailing queued frames are dropped so nothing rides after
+ * activityEnd. */
 static void gl_do_end_input(void)
 {
     if (!s_gl.session_active ||
@@ -1607,20 +2068,18 @@ static void gl_do_end_input(void)
         return;
     }
     if (s_gl.state == GL_STATE_LISTENING) {
-        if (gl_stop_tx_task()) {
-            gl_close_adc();
-        } else {
-            ESP_LOGE(TAG, "end_input: TX task still parked; skipping ADC close");
+        gl_set_state(GL_STATE_THINKING, "Thinking");
+        if (s_gl.tx_frame_queue) {
+            xQueueReset(s_gl.tx_frame_queue);
         }
         atomic_store(&s_mic_rms, 0);
-        gl_set_state(GL_STATE_THINKING, "Thinking");
     }
     s_gl.last_input_end_us = esp_timer_get_time();
     s_gl.waiting_terminal = true;
     gl_end_audio_activity("end_input");
 }
 
-/* Send a text turn. SESSION TASK ONLY (same lifecycle rules as above). */
+/* Send a text turn. SESSION TASK ONLY (same pause rules as above). */
 static void gl_do_send_text(const char *text)
 {
     if (!text || !s_gl.session_active ||
@@ -1629,14 +2088,12 @@ static void gl_do_send_text(const char *text)
         return;
     }
     if (s_gl.state == GL_STATE_LISTENING) {
-        if (gl_stop_tx_task()) {
-            gl_close_adc();
-        } else {
-            ESP_LOGE(TAG, "send_text: TX task still parked; skipping ADC close");
+        gl_set_state(GL_STATE_THINKING, "Thinking");
+        if (s_gl.tx_frame_queue) {
+            xQueueReset(s_gl.tx_frame_queue);
         }
         gl_end_audio_activity("text turn");
         atomic_store(&s_mic_rms, 0);
-        gl_set_state(GL_STATE_THINKING, "Thinking");
     }
     if (!gl_send_text_turn(text)) {
         ESP_LOGW(TAG, "send_text: WS send failed");
@@ -1659,6 +2116,13 @@ static void gl_process_cmd_queue(void)
             break;
         case GL_CMD_SEND_TEXT:
             gl_do_send_text(cmd.text);
+            break;
+        case GL_CMD_INTERRUPT:
+            /* Tap during SPEAKING (P3.1). State re-checked: if the turn
+             * already ended there is nothing left to interrupt. */
+            if (s_gl.state == GL_STATE_SPEAKING || gl_playback_pending()) {
+                gl_interrupt_playback("tap interrupt");
+            }
             break;
         default:
             ESP_LOGW(TAG, "unknown cmd %d", (int)cmd.type);
@@ -1739,40 +2203,37 @@ static bool gl_enter_speaking(uint32_t sample_rate)
         return false;
     }
 
-    /* First audio chunk: stop TX before any codec rate swap. The session task is
-     * the only codec owner; the TX task must be fully parked before ADC/DAC close
-     * or the shared I2S clock can be changed under a blocking read. */
-    if (!gl_stop_tx_task()) {
-        /* Never close the ADC under a live reader (F3). Drop this chunk; the
-         * TX task exits on its own (bounded timeouts) and the next chunk or
-         * gl_ensure_listening_capture recovers. */
-        ESP_LOGE(TAG, "enter_speaking: TX task still parked; dropping chunk");
-        return false;
+    /* P2.4 (F11): capture is NOT torn down — the capture task self-pauses the
+     * instant state leaves LISTENING, and the codec stays open on the shared
+     * session clock, so the first sample needs no reopen. Drop any
+     * queued-but-unsent mic frames so they cannot trail into the model's
+     * turn. */
+    if (s_gl.tx_frame_queue) {
+        xQueueReset(s_gl.tx_frame_queue);
     }
-    ESP_LOGI(TAG, "Speaking: paused capture");
     s_gl.waiting_terminal = true;
-    gl_close_adc();
+    s_gl.speak_enter_us = esp_timer_get_time();
+    s_gl.first_audio_pending = true;
     gl_set_state(GL_STATE_SPEAKING, "Speaking");
 
     uint32_t playback_rate = gl_resolve_playback_rate(sample_rate);
-    ESP_LOGI(TAG, "enter_speaking: model_rate=%u resolved=%u dac=%p dac_codec_failed=%d dac_raw=%p",
-             (unsigned)sample_rate, (unsigned)playback_rate,
-             s_gl.dac, (int)s_gl.dac_codec_failed, s_gl.dac_raw);
-    int r = gl_open_dac(playback_rate);
-    ESP_LOGI(TAG, "enter_speaking: gl_open_dac(%u) = %d dac_open=%d",
-             (unsigned)playback_rate, r, (int)s_gl.dac_open);
+    int r = gl_open_dac(playback_rate);   /* no-op: opened for the session */
     if (r != ESP_CODEC_DEV_OK) {
         gl_set_audio_error("speaking: failed to open DAC");
         ESP_LOGE(TAG, "Speaking: failed to open DAC @%u Hz (err=%d)",
                  (unsigned)playback_rate, r);
-        gl_close_dac();
+        s_gl.first_audio_pending = false;
         return false;
     }
+    gl_dac_mute(false);
+    ESP_LOGI(TAG, "Speaking: DAC live (model_rate=%u playback_rate=%u)",
+             (unsigned)sample_rate, (unsigned)playback_rate);
     return true;
 }
 
 static void gl_resume_listening(const char *reason)
 {
+    s_gl.pending_resume = false;
     if (s_gl.state == GL_STATE_LISTENING && s_gl.tx_task) {
         gl_mark_resume_reason(reason ? reason : "already listening");
         s_gl.resume_count++;
@@ -1782,19 +2243,46 @@ static void gl_resume_listening(const char *reason)
     gl_mark_resume_reason(reason ? reason : "turn complete");
     s_gl.resume_count++;
 
-    gl_close_dac();
+    /* P2.4 (F11): mute instead of close — the codec keeps running on the
+     * session clock. This is what erases the per-turn i2s_channel_disable
+     * error pairs and the reopen latency. */
+    gl_dac_mute(true);
+    s_gl.first_audio_pending = false;
     gl_set_state(GL_STATE_LISTENING, "Listening");
 
-    int adc_r = gl_open_adc(GL_TX_SAMPLE_RATE);
-    if (adc_r != ESP_CODEC_DEV_OK) {
-        ESP_LOGE(TAG, "Listening: ADC reopen failed after %s (adc=%d)",
-                 reason ? reason : "turn", adc_r);
-        return;
+    if (!s_gl.adc_open) {
+        int adc_r = gl_open_adc(GL_TX_SAMPLE_RATE);
+        if (adc_r != ESP_CODEC_DEV_OK) {
+            ESP_LOGE(TAG, "Listening: ADC reopen failed after %s (adc=%d)",
+                     reason ? reason : "turn", adc_r);
+            return;
+        }
     }
 
     gl_begin_audio_activity(reason ? reason : "resume");
     gl_start_tx_task();
     ESP_LOGI(TAG, "Listening: resumed capture (%s)", reason ? reason : "turn complete");
+}
+
+/* Cut playback NOW and go back to listening. Tap-during-SPEAKING (P3.1) and
+ * the server `interrupted` frame (P3.2) share this path. SESSION TASK ONLY.
+ * Flushes the PCM ring (epoch bump aborts an in-flight producer), drops the
+ * buffered (undecoded) reply frames, mutes the DAC, and resumes listening —
+ * which sends activityStart via gl_begin_audio_activity. */
+static void gl_interrupt_playback(const char *reason)
+{
+    bool playing = (s_gl.state == GL_STATE_SPEAKING) || gl_playback_pending();
+    s_gl.pending_resume = false;
+    if (playing) {
+        ESP_LOGI(TAG, "Interrupt (%s): flushing ring=%u B, rx_queue=%u frames",
+                 reason ? reason : "?", (unsigned)s_gl.pcm_ring_bytes,
+                 (unsigned)(s_gl.rx_queue ? uxQueueMessagesWaiting(s_gl.rx_queue) : 0));
+        gl_pcm_ring_flush();
+        gl_drain_rx_queue();
+        gl_dac_mute(true);
+    }
+    s_gl.waiting_terminal = false;
+    gl_resume_listening(reason ? reason : "interrupt");
 }
 
 /* ---- WS event handler ---------------------------------------------------- */
@@ -1845,14 +2333,27 @@ static void gl_ws_event_handler(void *arg, esp_event_base_t base,
              * WS task is not. */
             if (s_gl.rx_queue) {
                 size_t flen = (size_t)ev->payload_len + 1;
-                char *frame = heap_caps_malloc(flen, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-                if (frame) {
-                    memcpy(frame, s_gl.rx_buf, flen);
-                    if (xQueueSend(s_gl.rx_queue, &frame, 0) != pdTRUE) {
-                        heap_caps_free(frame);
-                        if ((s_gl.rx_drops++ % 8) == 0) {
-                            ESP_LOGW(TAG, "rx queue full, dropped frame (total %u)",
-                                     (unsigned)s_gl.rx_drops);
+                /* Byte-cap the raw queue (P2.2/F9): the session task drains
+                 * at decode speed now, so real depth here means trouble —
+                 * bound the PSRAM the queue can pin instead of letting a
+                 * burst eat the budget. */
+                if (atomic_load(&s_rx_queue_bytes) + flen > GL_RX_QUEUE_BYTE_CAP) {
+                    if ((s_gl.rx_drops++ % 8) == 0) {
+                        ESP_LOGW(TAG, "rx queue byte cap hit, dropped frame (total %u)",
+                                 (unsigned)s_gl.rx_drops);
+                    }
+                } else {
+                    char *frame = heap_caps_malloc(flen, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                    if (frame) {
+                        memcpy(frame, s_gl.rx_buf, flen);
+                        if (xQueueSend(s_gl.rx_queue, &frame, 0) != pdTRUE) {
+                            heap_caps_free(frame);
+                            if ((s_gl.rx_drops++ % 8) == 0) {
+                                ESP_LOGW(TAG, "rx queue full, dropped frame (total %u)",
+                                         (unsigned)s_gl.rx_drops);
+                            }
+                        } else {
+                            atomic_fetch_add(&s_rx_queue_bytes, (uint32_t)flen);
                         }
                     }
                 }
@@ -1897,7 +2398,8 @@ static void gl_js_str_escape(char *dst, size_t dst_sz, const char *src)
 
 /* POST {"code":<js>} to the JarvisMCP /act gateway with the bearer token; copy
  * the response body into `out`. Returns the HTTP status (200 ok) or -1 on a
- * transport error. Blocking — only called from a toolCall (model is paused). */
+ * transport error. Blocking up to 30 s — TOOL WORKER TASK ONLY (P2.1/F8),
+ * never the session task. */
 static int gl_act_call(const char *code, char *out, size_t out_sz)
 {
     if (!s_gl.mcp_key[0] || !s_gl.mcp_url[0]) {
@@ -1949,14 +2451,12 @@ static int gl_act_call(const char *code, char *out, size_t out_sz)
     return status;
 }
 
-/* Handle a Gemini toolCall frame: run each declared function via JarvisMCP and
- * send a toolResponse back. Returns true if the frame was a toolCall. */
-static bool gl_handle_tool_call(cJSON *root)
+/* Execute a toolCall's functions via JarvisMCP and send the toolResponse.
+ * TOOL WORKER TASK ONLY — gl_act_call blocks up to 30 s per function, which
+ * must never gap audio (P2.1/F8). The WS send is race-safe: gl_ws_send_text
+ * snapshots the client handle under ws_mutex (P1.3). */
+static void gl_run_tool_call(cJSON *toolCall)
 {
-    cJSON *toolCall = cJSON_GetObjectItemCaseSensitive(root, "toolCall");
-    if (!toolCall) {
-        return false;
-    }
     cJSON *fcs = cJSON_GetObjectItemCaseSensitive(toolCall, "functionCalls");
     cJSON *resp_root = cJSON_CreateObject();
     cJSON *tr  = cJSON_AddObjectToObject(resp_root, "toolResponse");
@@ -2052,11 +2552,81 @@ static bool gl_handle_tool_call(cJSON *root)
         gl_ws_send_text(out);
         free(out);
     }
-    return true;
+}
+
+/* Persistent tool worker (P2.1/F8). Created once at gateway start, never
+ * deleted — a parked task costs one PSRAM stack and removes every teardown
+ * race. Stale jobs (from a session that ended while the HTTPS call ran) are
+ * dropped by the generation check. */
+static void gl_tool_worker_task(void *arg)
+{
+    (void)arg;
+    gl_tool_job_t job;
+    for (;;) {
+        if (xQueueReceive(s_gl.tool_queue, &job, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        if (job.gen == s_gl.session_gen && s_gl.session_active) {
+            gl_run_tool_call(job.tool_call);
+        } else {
+            ESP_LOGW(TAG, "tool job dropped (stale session gen %u != %u)",
+                     (unsigned)job.gen, (unsigned)s_gl.session_gen);
+        }
+        cJSON_Delete(job.tool_call);
+        atomic_fetch_sub(&s_tool_inflight, 1);
+    }
+}
+
+/* SESSION TASK ONLY. Takes ownership of tool_call (deleted on failure too). */
+static void gl_queue_tool_call(cJSON *tool_call)
+{
+    if (!s_gl.tool_queue || !s_gl.tool_task) {
+        ESP_LOGE(TAG, "toolCall dropped: no tool worker");
+        cJSON_Delete(tool_call);
+        return;
+    }
+    gl_tool_job_t job = {
+        .gen       = s_gl.session_gen,
+        .tool_call = tool_call,
+    };
+    atomic_fetch_add(&s_tool_inflight, 1);
+    if (xQueueSend(s_gl.tool_queue, &job, 0) != pdTRUE) {
+        atomic_fetch_sub(&s_tool_inflight, 1);
+        ESP_LOGW(TAG, "tool queue full, dropping toolCall");
+        cJSON_Delete(tool_call);
+    }
 }
 
 static void gl_maybe_resume_speaking_watchdog(void)
 {
+    /* Playback in progress = not stalled. The burst is decoded long before it
+     * finishes playing (P2.1), so last_audio_us (a decode-time stamp) goes
+     * stale while the ring drains. Refresh it while audio demonstrably moves. */
+    if (s_gl.state == GL_STATE_SPEAKING && gl_playback_pending()) {
+        s_gl.last_audio_us = esp_timer_get_time();
+    }
+
+    /* A JarvisMCP tool call may legitimately take ~30 s and the model cannot
+     * answer before the toolResponse. Hold the watchdog while a job is in
+     * flight and restart the no-reply window when the last one completes
+     * (64-bit stamps stay session-task-only — the worker never writes them). */
+    static uint32_t s_prev_tool_inflight;
+    uint32_t tool_inflight = atomic_load(&s_tool_inflight);
+    if (tool_inflight > 0) {
+        s_prev_tool_inflight = tool_inflight;
+        return;
+    }
+    if (s_prev_tool_inflight > 0) {
+        s_prev_tool_inflight = 0;
+        int64_t now = esp_timer_get_time();
+        if (s_gl.last_input_end_us) {
+            s_gl.last_input_end_us = now;
+        }
+        if (s_gl.last_audio_us) {
+            s_gl.last_audio_us = now;
+        }
+    }
+
     if (s_gl.state == GL_STATE_THINKING && !s_gl.last_audio_us && s_gl.last_input_end_us) {
         int64_t now = esp_timer_get_time();
         if ((uint64_t)(now - s_gl.last_input_end_us) >= GL_SPEAK_WATCHDOG_MS * 1000ULL) {
@@ -2107,6 +2677,12 @@ static void gl_dispatch_frame(const char *json)
     s_gl.rx_frames++;
     s_gl.last_frame_us = esp_timer_get_time();
 
+    /* If an interrupt flushes playback while THIS frame is being processed
+     * (tap mid-burst via the cmd queue, or this very frame's `interrupted`
+     * flag), the epoch moves and the remaining audio parts of the frame are
+     * skipped instead of restarting the cancelled reply. */
+    uint32_t play_epoch = s_gl.pcm_ring_epoch;
+
     /* setupComplete */
     cJSON *sc = cJSON_GetObjectItemCaseSensitive(root, "setupComplete");
     if (sc) {
@@ -2123,9 +2699,12 @@ static void gl_dispatch_frame(const char *json)
         /* interrupted */
         cJSON *intr = cJSON_GetObjectItemCaseSensitive(svc, "interrupted");
         if (cJSON_IsTrue(intr)) {
+            /* P3.2: flush queued audio instead of draining the backlog — the
+             * server already decided the reply is dead. Counter increments on
+             * every receipt. */
             ESP_LOGI(TAG, "Model interrupted");
             s_gl.interrupted_hits++;
-            gl_resume_listening("interrupted");
+            gl_interrupt_playback("interrupted");
         }
 
         /* inputTranscription.finished=true → VAD just decided the user's turn
@@ -2171,20 +2750,25 @@ static void gl_dispatch_frame(const char *json)
                         }
                         ESP_LOGD(TAG, "part keys=[%s] id=%s", part_keys, id ? "found" : "null");
                     }
-                    if (gl_play_model_audio_from_json(id, GL_RX_SAMPLE_RATE)) {
-                        /* audio played (inlineData / inline_data) */
+                    if (s_gl.pcm_ring_epoch == play_epoch &&
+                        gl_play_model_audio_from_json(id, GL_RX_SAMPLE_RATE)) {
+                        /* audio queued (inlineData / inline_data) */
                     }
 
                     cJSON *chunks = cJSON_GetObjectItemCaseSensitive(part, "mediaChunks");
                     if (cJSON_IsArray(chunks)) {
                         cJSON *chunk_item;
                         cJSON_ArrayForEach(chunk_item, chunks) {
+                            if (s_gl.pcm_ring_epoch != play_epoch) {
+                                break;   /* interrupted mid-frame */
+                            }
                             if (gl_play_model_audio_from_json(chunk_item, GL_RX_SAMPLE_RATE)) {
-                                /* audio played (mediaChunks array item) */
+                                /* audio queued (mediaChunks array item) */
                             }
                         }
-                    } else if (gl_play_model_audio_from_json(chunks, GL_RX_SAMPLE_RATE)) {
-                        /* audio played (mediaChunks object) */
+                    } else if (s_gl.pcm_ring_epoch == play_epoch &&
+                               gl_play_model_audio_from_json(chunks, GL_RX_SAMPLE_RATE)) {
+                        /* audio queued (mediaChunks object) */
                     }
                 }
             }
@@ -2204,7 +2788,20 @@ static void gl_dispatch_frame(const char *json)
             s_gl.generation_complete_hits++;
         }
         if (tc_true || gc_true) {
-            gl_resume_listening(tc_true ? "turn complete" : "generation complete");
+            const char *why = tc_true ? "turn complete" : "generation complete";
+            if (s_gl.state == GL_STATE_SPEAKING && gl_playback_pending()) {
+                /* The reply is still draining out of the PCM ring (the model
+                 * bursts faster than realtime, P2.1). Defer the resume until
+                 * the feeder runs dry — cutting over now would clip the
+                 * reply. The session loop completes it. */
+                strlcpy(s_gl.pending_resume_reason, why,
+                        sizeof(s_gl.pending_resume_reason));
+                s_gl.pending_resume = true;
+                ESP_LOGI(TAG, "%s: deferred behind playback (%u B buffered)",
+                         why, (unsigned)s_gl.pcm_ring_bytes);
+            } else {
+                gl_resume_listening(why);
+            }
         }
         cJSON_Delete(root);
         return;
@@ -2227,9 +2824,13 @@ static void gl_dispatch_frame(const char *json)
         return;
     }
 
-    /* Function calling — run the tool via JarvisMCP and reply with toolResponse. */
-    if (gl_handle_tool_call(root)) {
+    /* Function calling — hand the toolCall to the worker task (P2.1/F8): the
+     * 30 s HTTPS POST must never run on this task, where it would gap audio
+     * and stall the rx drain. The worker sends the toolResponse itself. */
+    cJSON *tool_call = cJSON_DetachItemFromObjectCaseSensitive(root, "toolCall");
+    if (tool_call) {
         s_gl.tool_call_hits++;
+        gl_queue_tool_call(tool_call);   /* takes ownership */
         cJSON_Delete(root);
         return;
     }
@@ -2269,6 +2870,7 @@ static bool gl_process_rx_queue(TickType_t wait)
     if (!frame) {
         return false;
     }
+    atomic_fetch_sub(&s_rx_queue_bytes, (uint32_t)(strlen(frame) + 1));
     UBaseType_t depth = uxQueueMessagesWaiting(s_gl.rx_queue);
     if (depth > 3) {
         ESP_LOGD(TAG, "rx queue depth=%u", (unsigned)depth);
@@ -2278,7 +2880,7 @@ static bool gl_process_rx_queue(TickType_t wait)
     return true;
 }
 
-/* Drop and free any frames left in the queue (session teardown). */
+/* Drop and free any frames left in the queue (teardown / interrupt flush). */
 static void gl_drain_rx_queue(void)
 {
     char *frame = NULL;
@@ -2286,7 +2888,10 @@ static void gl_drain_rx_queue(void)
         return;
     }
     while (xQueueReceive(s_gl.rx_queue, &frame, 0) == pdTRUE) {
-        heap_caps_free(frame);
+        if (frame) {
+            atomic_fetch_sub(&s_rx_queue_bytes, (uint32_t)(strlen(frame) + 1));
+            heap_caps_free(frame);
+        }
     }
 }
 
@@ -2330,6 +2935,10 @@ static void gl_session_task(void *arg)
         }
         /* Fresh session: drop any requests left over from before activation. */
         gl_drain_cmd_queue();
+        s_gl.session_gen++;            /* invalidates tool jobs from prior sessions */
+        s_gl.pending_resume = false;
+        s_gl.first_audio_pending = false;
+        gl_log_heap_snapshot("session start");   /* P0.4 logging half */
         if (!s_gl.api_key[0]) {
             ESP_LOGE(TAG, "No Gemini API key — set via dashboard (gemini_key)");
             xEventGroupClearBits(s_gl.ev, GL_BIT_SESSION_ON);
@@ -2436,14 +3045,28 @@ static void gl_session_task(void *arg)
 
         /* Phase 1 verified: WSS + setup handshake works. */
         ESP_LOGI(TAG, "Gemini Live session ready");
-        gl_set_state(GL_STATE_LISTENING, "Listening");
 
-        /* Phase 4: session task owns codec lifetime; TX task only captures. */
+        /* P2.4 (F11): open BOTH converters once for the whole session on the
+         * shared 16 kHz I2S clock (intentional design — commit 66413b1).
+         * Turn transitions only pause/resume capture and mute/unmute the
+         * DAC; no esp_codec_dev_close/open per turn. */
         if (gl_open_adc(GL_TX_SAMPLE_RATE) != ESP_CODEC_DEV_OK) {
             gl_set_audio_error("session: initial ADC open failed");
             ESP_LOGE(TAG, "Listening: ADC open failed, ending session");
             goto session_cleanup;
         }
+        if (gl_open_dac(gl_resolve_playback_rate(GL_RX_SAMPLE_RATE)) == ESP_CODEC_DEV_OK) {
+            gl_dac_mute(true);    /* silent until the first model turn */
+        } else {
+            ESP_LOGW(TAG, "Session: DAC pre-open failed; will retry at first audio");
+        }
+
+        /* P2.2 (F9): decoded-PCM ring + feeder. Allocation degrades by
+         * halving and playback falls back to synchronous — never a crash. */
+        gl_pcm_ring_alloc();
+        gl_start_feeder_task();
+
+        gl_set_state(GL_STATE_LISTENING, "Listening");
         gl_begin_audio_activity("initial listen");
         gl_start_tx_task();
 
@@ -2460,6 +3083,11 @@ static void gl_session_task(void *arg)
             }
         }
         gl_process_cmd_queue();
+        /* Deferred turn-end (P2.1): a terminal frame arrived while the ring
+         * was still draining; complete the resume once the feeder runs dry. */
+        if (s_gl.pending_resume && !gl_playback_pending()) {
+            gl_resume_listening(s_gl.pending_resume_reason);
+        }
         gl_maybe_resume_speaking_watchdog();
         gl_ensure_listening_capture();
         /* Check if WS dropped */
@@ -2492,8 +3120,19 @@ session_cleanup:
                 ESP_LOGE(TAG, "Teardown: skipping ADC close (TX task alive)");
             }
         }
-        ESP_LOGI(TAG, "Teardown: closing dac");
-        gl_close_dac();
+        /* Flush first so the feeder isn't left draining seconds of backlog,
+         * then park it BEFORE touching the DAC or the ring memory. If it
+         * refuses to park, leave both alone (never close/free under a live
+         * writer) — the next session reuses the surviving ring. */
+        gl_pcm_ring_flush();
+        ESP_LOGI(TAG, "Teardown: stopping feeder");
+        if (gl_stop_feeder_task()) {
+            ESP_LOGI(TAG, "Teardown: closing dac");
+            gl_close_dac();
+            gl_pcm_ring_free();
+        } else {
+            ESP_LOGE(TAG, "Teardown: skipping DAC close + ring free (feeder alive)");
+        }
 
         ESP_LOGI(TAG, "Teardown: closing websocket");
         ESP_LOGI(TAG, "Session cleanup");
@@ -2512,6 +3151,8 @@ session_cleanup:
         xSemaphoreGive(s_gl.ws_mutex);
         s_gl.session_active = false;
         s_gl.activity_open = false;
+        s_gl.pending_resume = false;
+        s_gl.first_audio_pending = false;
         s_gl.state = GL_STATE_IDLE;
         atomic_store(&s_out_rms, 0);
         emote_set_voice_idle();
@@ -2524,6 +3165,7 @@ session_cleanup:
                 xEventGroupSetBits(s_gl.ev, GL_BIT_WS_CLEANED);
             }
         }
+        gl_log_heap_snapshot("session stop");   /* P0.4 logging half */
     }
 
     ESP_LOGI(TAG, "Session task exiting");
@@ -2583,6 +3225,28 @@ static esp_err_t gl_gateway_start(void)
             goto out;
         }
     }
+    if (!s_gl.tx_frame_queue) {
+        /* By-value 20 ms mic frames (P2.3): 16 × 640 B, one-time allocation. */
+        s_gl.tx_frame_queue = xQueueCreate(GL_TX_FRAME_QUEUE_DEPTH, GL_TX_PCM_BYTES);
+        if (!s_gl.tx_frame_queue) {
+            err = ESP_ERR_NO_MEM;
+            goto out;
+        }
+    }
+    if (!s_gl.tool_queue) {
+        s_gl.tool_queue = xQueueCreate(GL_TOOL_QUEUE_DEPTH, sizeof(gl_tool_job_t));
+        if (!s_gl.tool_queue) {
+            err = ESP_ERR_NO_MEM;
+            goto out;
+        }
+    }
+    if (!s_gl.ring_mutex) {
+        s_gl.ring_mutex = xSemaphoreCreateMutex();
+        if (!s_gl.ring_mutex) {
+            err = ESP_ERR_NO_MEM;
+            goto out;
+        }
+    }
     s_gl.stop_requested = false;
     gl_reset_diag_counters();
     s_gl.dac_codec_failed = false;
@@ -2607,11 +3271,29 @@ static esp_err_t gl_gateway_start(void)
 
     /* Clear stop/done bits left over from any previous gateway run.
      * GL_BIT_WS_CLEANED is deliberately NOT touched: it tracks the async WS
-     * cleanup task, which can outlive a gateway run. */
+     * cleanup task, which can outlive a gateway run. Feeder bits are managed
+     * by gl_start_feeder_task per session. */
     xEventGroupClearBits(s_gl.ev,
-                         GL_BIT_STOP | GL_BIT_TX_STOP | GL_BIT_TX_DONE | GL_BIT_SESSION_DONE);
+                         GL_BIT_STOP | GL_BIT_TX_STOP | GL_BIT_TX_DONE |
+                         GL_BIT_TXS_DONE | GL_BIT_SESSION_DONE);
 
     gl_acquire_codec_handles();
+
+    /* Persistent tool worker (P2.1/F8): outlives sessions, never deleted —
+     * no teardown races. Stale jobs die on the generation check. */
+    if (!s_gl.tool_task) {
+        static const claw_task_config_t tool_cfg = {
+            .name         = "gl_tool_worker",
+            .stack_size   = 12288,          /* TLS HTTPS client runs here */
+            .priority     = 4,
+            .core_id      = tskNO_AFFINITY,
+            .stack_policy = CLAW_TASK_STACK_PREFER_PSRAM,
+        };
+        if (claw_task_create(&tool_cfg, gl_tool_worker_task, NULL, &s_gl.tool_task) != pdPASS) {
+            s_gl.tool_task = NULL;
+            ESP_LOGE(TAG, "tool worker create failed; toolCalls will be dropped");
+        }
+    }
 
     static const claw_task_config_t sess_cfg = {
         .name         = "gl_session",
@@ -2759,6 +3441,20 @@ void cap_gemini_live_print_diagnostics(void)
            (unsigned)s_gl.interrupted_hits,
            (unsigned)s_gl.tool_call_hits,
            (unsigned)s_gl.unhandled_hits);
+    printf("  pipeline: ring=%u/%u B ring_drop=%u rx_q_bytes=%u tx_q_depth=%u tool_inflight=%u first_audio_ms=%u\n",
+           (unsigned)s_gl.pcm_ring_bytes,
+           (unsigned)s_gl.pcm_ring_cap,
+           (unsigned)s_gl.pcm_ring_drop_bytes,
+           (unsigned)atomic_load(&s_rx_queue_bytes),
+           (unsigned)(s_gl.tx_frame_queue ? uxQueueMessagesWaiting(s_gl.tx_frame_queue) : 0),
+           (unsigned)atomic_load(&s_tool_inflight),
+           (unsigned)s_gl.last_first_audio_ms);
+    printf("  tasks: tx=%d sender=%d feeder=%d tool=%d pending_resume=%d\n",
+           (int)(s_gl.tx_task != NULL),
+           (int)(s_gl.tx_sender_task != NULL),
+           (int)(s_gl.feeder_task != NULL),
+           (int)(s_gl.tool_task != NULL),
+           (int)s_gl.pending_resume);
     printf("  resumes=%u watchdog_resumes=%u last_resume=%s (%lld ms ago) waiting_terminal=%d\n",
            (unsigned)s_gl.resume_count,
            (unsigned)s_gl.watchdog_resume_count,
@@ -2822,6 +3518,17 @@ esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size)
     cJSON_AddNumberToObject(root, "interrupted", (double)s_gl.interrupted_hits);
     cJSON_AddNumberToObject(root, "tool_calls", (double)s_gl.tool_call_hits);
     cJSON_AddNumberToObject(root, "unhandled", (double)s_gl.unhandled_hits);
+    cJSON_AddNumberToObject(root, "pcm_ring_bytes", (double)s_gl.pcm_ring_bytes);
+    cJSON_AddNumberToObject(root, "pcm_ring_cap", (double)s_gl.pcm_ring_cap);
+    cJSON_AddNumberToObject(root, "pcm_ring_drop_bytes", (double)s_gl.pcm_ring_drop_bytes);
+    cJSON_AddNumberToObject(root, "rx_queue_bytes", (double)atomic_load(&s_rx_queue_bytes));
+    cJSON_AddNumberToObject(root, "tx_queue_depth",
+                            (double)(s_gl.tx_frame_queue ? uxQueueMessagesWaiting(s_gl.tx_frame_queue) : 0));
+    cJSON_AddNumberToObject(root, "tool_inflight", (double)atomic_load(&s_tool_inflight));
+    cJSON_AddNumberToObject(root, "first_audio_ms", (double)s_gl.last_first_audio_ms);
+    cJSON_AddBoolToObject(root, "feeder_task", s_gl.feeder_task != NULL);
+    cJSON_AddBoolToObject(root, "tx_sender_task", s_gl.tx_sender_task != NULL);
+    cJSON_AddBoolToObject(root, "pending_resume", s_gl.pending_resume);
     cJSON_AddNumberToObject(root, "resumes", (double)s_gl.resume_count);
     cJSON_AddNumberToObject(root, "watchdog_resumes", (double)s_gl.watchdog_resume_count);
     cJSON_AddNumberToObject(root, "frame_age_ms", (double)frame_age);
@@ -2949,6 +3656,16 @@ void cap_gemini_live_toggle(void)
         return;
     }
     if (s_gl.session_active) {
+        /* Tap during SPEAKING = barge-in (P3.1): the session task flushes the
+         * PCM ring + rx queue, sends activityStart, and returns to LISTENING.
+         * The session stays up — her voice stops, her ears open. */
+        if (s_gl.state == GL_STATE_SPEAKING) {
+            ESP_LOGI(TAG, "Tap: interrupting playback");
+            if (gl_post_cmd(GL_CMD_INTERRUPT, NULL) != ESP_OK) {
+                ESP_LOGW(TAG, "Tap: interrupt request dropped (cmd queue full)");
+            }
+            return;
+        }
         if (!GL_USE_SERVER_VAD &&
             (s_gl.state == GL_STATE_READY || s_gl.state == GL_STATE_LISTENING)) {
             /* Posts GL_CMD_END_INPUT; the session task commits the turn. */
@@ -2961,8 +3678,7 @@ void cap_gemini_live_toggle(void)
          * reply feels slow) kills their own answer and reads it as "it never
          * replied" (seen live: 16 s grounding delay → three taps → dead turn).
          * Ignore taps for the first 10 s of THINKING; after that the user has
-         * waited long enough that "get me out" is the honest intent. SPEAKING
-         * taps still stop immediately (shut it up). */
+         * waited long enough that "get me out" is the honest intent. */
         if (s_gl.state == GL_STATE_THINKING &&
             (now_us - s_gl.thinking_since_us) < 10 * 1000 * 1000LL) {
             ESP_LOGI(TAG, "Tap ignored: reply pending (THINKING %lld ms) — taps stop it after 10 s",
