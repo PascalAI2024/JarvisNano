@@ -22,7 +22,8 @@
  *                    reply throttles to realtime instead of losing audio)
  *   gl_session     → cJSON parse + base64 + gain/limiter + resample → PCM ring
  *   gl_pcm_feeder  → blocking esp_codec_dev_write from the PCM ring — nothing else
- *   gl_audio_tx    → 20 ms mic reads + RMS + local VAD → tx_frame_queue (drop-oldest)
+ *   gl_audio_tx    → 20 ms 4-ch TDM reads (mics + ES7210 echo-ref lane, D2)
+ *                    → software demux + RMS + local VAD → tx_frame_queue (drop-oldest)
  *   gl_tx_sender   → drains tx_frame_queue → WS sends (Wi-Fi backpressure can
  *                    never stall the capture cadence)
  *   gl_tool_worker → toolCall frames (30 s HTTPS gl_act_call) off the session task
@@ -147,6 +148,33 @@ static void   gl_dac_mute(bool mute);
 #define GL_RX_SAMPLE_RATE        24000
 #define GL_CHANNELS              1
 #define GL_BITS                  16
+/* ---- 4-channel TDM capture (AEC Phase 2, design D2) ------------------------
+ * The ES7210 runs TDM with the MEMS mics on lanes 0/1 and the hardware echo
+ * reference (ES8311 line-out through the schematic's AEC pad into MIC3) on
+ * lane 2; lane 3 (MIC4) is unconnected. Open the record dev with channel=4 /
+ * channel_mask=0 and demux lanes in software. NEVER use channel_mask to
+ * hardware-pick lanes: the esp_codec_dev STD branch clamps the mask to the 2
+ * physical slots (slot_mask & I2S_STD_SLOT_BOTH) and silently drops the ref.
+ * Each I2S frame then carries 4×16-bit samples packed as 2×32-bit STD slots:
+ * [MIC1][MIC2][REF][NC] expected — verified empirically via lane_rms. */
+#define GL_CAPTURE_CHANNELS      4
+/* MEASURED buffer-lane order (Phase 2 tone test, hardware, 2026-06-12):
+ *   lane 0 = ES7210 MIC3 echo reference (silent when the DAC is muted; rises to
+ *            rms~390 / peak~1650 raw, no clipping, while the speaker plays —
+ *            it tracks playback, so the HW loopback is LIVE),
+ *   lane 1 = live MEMS mic (uplink),
+ *   lane 2 = MIC4 / unconnected (dead, peak 2 even with the speaker blasting),
+ *   lane 3 = live MEMS mic.
+ * i.e. [REF][MIC][NC][MIC] — scrambled vs the design's nominal
+ * [MIC1][MIC2][REF][NC], but fully identified. Demux follows the MEASURED order.
+ *
+ * IMPORTANT: the per-channel GAIN mask is a CHIP-mic index (es7210 maps mask
+ * bit N → MIC(N+1) gain register), a DIFFERENT numbering space from these
+ * buffer-lane indices. Chip MIC3 (the reference) is gain-mask bit 2 regardless
+ * of which buffer lane it lands on — see GL_REF_CHIP_MASK_BIT. */
+#define GL_MIC_LANE              1   /* buffer lane: live MEMS mic (uplink)        */
+#define GL_REF_LANE              0   /* buffer lane: MIC3 echo reference (Phase 3) */
+#define GL_REF_CHIP_MASK_BIT     2   /* es7210 chip MIC3 → REG45 (gain-mask space) */
 /* Make-up gain + soft-knee limiter for model audio. Measured PCM is speech with
  * a high crest factor: peaks ~80% full-scale but RMS only ~15%, so it sounds
  * quiet. A flat gain big enough to raise the average hard-clips the peaks into
@@ -157,6 +185,7 @@ static void   gl_dac_mute(bool mute);
 #define GL_LIMIT_KNEE            24000
 #define GL_TX_SAMPLES_PER_CHUNK  (GL_TX_SAMPLE_RATE * GL_TX_CHUNK_MS / 1000)  /* 320 */
 #define GL_TX_PCM_BYTES          (GL_TX_SAMPLES_PER_CHUNK * GL_CHANNELS * (GL_BITS / 8)) /* 640 */
+#define GL_TX_RAW_BYTES          (GL_TX_SAMPLES_PER_CHUNK * GL_CAPTURE_CHANNELS * (GL_BITS / 8)) /* 2560 */
 #define GL_TX_B64_BYTES          (((GL_TX_PCM_BYTES + 2) / 3) * 4 + 1)
 /* Ignore taps within this window of the last accepted one. A session start runs
  * a multi-second WSS+TLS handshake; rapid taps otherwise toggle start/stop mid-
@@ -207,6 +236,16 @@ static void   gl_dac_mute(bool mute);
 #define GL_VAD_HANG_MS           700   /* trailing silence that ends the turn    */
 #define GL_VAD_MIN_SPEECH_MS     240   /* sustained speech required before commit */
                                        /* (300 swallowed short replies: "yes")   */
+
+/* TEMPORARY (AEC Phase 2 go/no-go gate): per-lane capture diagnostic for the
+ * 4-channel bring-up. While enabled, the capture task (a) logs one I-level
+ * `lane_rms` line per second with the raw (pre-digital-gain) RMS + peak of
+ * all four demuxed lanes, and (b) keeps READING the ADC during SPEAKING —
+ * without sending anything — so the echo-reference lane can be observed
+ * while the speaker is live (the tone test). The diagnostics JSON gains
+ * lane_rms/lane_peak arrays. Flip to 0 (or remove outright) once the lane
+ * order and ref level are confirmed and AEC lands (Phase 3). */
+#define GL_LANE_DIAG             1
 
 #define GL_I2S_READ_TIMEOUT_MS   200
 #define GL_AUDIO_WRITE_MARGIN_MS 250
@@ -473,6 +512,13 @@ static void gl_log_heap_snapshot(const char *when)
  * (0..32767); getters normalise to 0..1 float. Plain atomics, no locks. */
 static _Atomic uint16_t s_mic_rms;   /* ES7210 capture level (LISTENING) */
 static _Atomic uint16_t s_out_rms;   /* decoded playback level (SPEAKING) */
+
+#if GL_LANE_DIAG
+/* TEMPORARY (Phase 2): last 1 s window of raw per-lane RMS/peak, published by
+ * the capture task, surfaced in the diagnostics JSON (lane_rms/lane_peak). */
+static _Atomic uint16_t s_lane_rms[GL_CAPTURE_CHANNELS];
+static _Atomic uint16_t s_lane_peak[GL_CAPTURE_CHANNELS];
+#endif
 
 /* Raw rx-queue byte accounting (P2.2): WS task adds, session task subtracts. */
 static _Atomic uint32_t s_rx_queue_bytes;
@@ -919,13 +965,28 @@ static int gl_open_adc(uint32_t sample_rate)
         }
         esp_codec_dev_sample_info_t fs = {
             .sample_rate     = sample_rate,
-            .channel         = GL_CHANNELS,
+            .channel         = GL_CAPTURE_CHANNELS, /* all 4 TDM lanes; SW demux (D2) */
             .bits_per_sample = GL_BITS,
+            .channel_mask    = 0,                   /* never lane-pick — see GL_CAPTURE_CHANNELS */
         };
         int r = esp_codec_dev_open(s_gl.adc, &fs);
+        ESP_LOGI(TAG, "esp_codec_dev_open(adc, %u Hz, %d ch) = %d (%s)",
+                 (unsigned)sample_rate, GL_CAPTURE_CHANNELS, r, esp_err_to_name(r));
         if (r == ESP_CODEC_DEV_OK) {
             s_gl.adc_codec_failed = false;
-            esp_codec_dev_set_in_gain(s_gl.adc, 30.0f);
+            /* Per-channel PGA (D2 gain fix). es7210_open just re-applied
+             * +30 dB to ALL enabled channels — including the echo-reference
+             * lane, which already arrives only ≈ −23.5 dB below line-out
+             * through the AEC pad; +30 dB nets ≈ +6.5 dB ABOVE line-out and
+             * clips at volume. Keep 30 dB on the MEMS mics (chip MIC1/MIC2 =
+             * mask bits 0/1; uplink level unchanged vs the old all-channel
+             * set_in_gain), drop the ref (chip MIC3 → REG45 = mask bit 2) to
+             * 0 dB. These masks are CHIP-mic indices, not buffer lanes. */
+            esp_codec_dev_set_in_channel_gain(s_gl.adc,
+                ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) |
+                ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1), 30.0f);
+            esp_codec_dev_set_in_channel_gain(s_gl.adc,
+                ESP_CODEC_DEV_MAKE_CHANNEL_MASK(GL_REF_CHIP_MASK_BIT), 0.0f);
             s_gl.adc_open = true;
             s_gl.adc_rate = sample_rate;
             return r;
@@ -1720,8 +1781,19 @@ static bool gl_stop_feeder_task(void)
 static void gl_audio_tx_task(void *arg)
 {
     (void)arg;
+    /* Raw 4-lane TDM frames straight off the codec (D2): 320 frames × 4 lanes
+     * × 16-bit per 20 ms read, demuxed into the mono mic chunk below. The raw
+     * I2S fallback path (no codec handle at all) still reads mono into pcm —
+     * the board YAML config governs that path, not the 4-ch codec open. */
+    static int16_t raw4[GL_TX_SAMPLES_PER_CHUNK * GL_CAPTURE_CHANNELS];
     static uint8_t pcm[GL_TX_PCM_BYTES];
 
+#if GL_LANE_DIAG
+    /* TEMPORARY per-lane accumulators — one log line per second (50 frames). */
+    uint64_t lane_sumsq[GL_CAPTURE_CHANNELS] = {0};
+    int32_t  lane_pk[GL_CAPTURE_CHANNELS]    = {0};
+    uint32_t lane_diag_frames = 0;
+#endif
 #if GL_USE_LOCAL_VAD
     /* Local VAD accumulators — TX-task-private, reset every capture cycle. */
     uint32_t vad_speech_ms  = 0;
@@ -1749,7 +1821,18 @@ static void gl_audio_tx_task(void *arg)
     }
 
     while (!(xEventGroupGetBits(s_gl.ev) & GL_BIT_TX_STOP)) {
-        if (s_gl.state != GL_STATE_LISTENING) {
+        const bool listening = (s_gl.state == GL_STATE_LISTENING);
+#if GL_LANE_DIAG
+        /* TEMPORARY (Phase 2 tone test): keep READING — never sending —
+         * during SPEAKING so the echo-reference lane is observable while the
+         * speaker is live. RX-only codec reads are duplex-safe against the
+         * feeder's TX writes (independent I2S channels on the shared clock). */
+        const bool diag_read = !listening && s_gl.state == GL_STATE_SPEAKING &&
+                               s_gl.adc && s_gl.adc_open && !s_gl.adc_codec_failed;
+#else
+        const bool diag_read = false;
+#endif
+        if (!listening) {
 #if GL_USE_LOCAL_VAD
             /* The task survives turn transitions now (P2.4): clear VAD state
              * across pauses so a stale "speech seen" cannot insta-commit the
@@ -1758,9 +1841,13 @@ static void gl_audio_tx_task(void *arg)
             vad_silence_ms  = 0;
             vad_speech_seen = false;
 #endif
+            /* Stays pinned while paused (or diag-reading): the first 10
+             * LISTENING frames after any non-listening window are dropped. */
             flush_frames = 10;
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
+            if (!diag_read) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
         }
 
         if (xEventGroupGetBits(s_gl.ev) & GL_BIT_TX_STOP) {
@@ -1768,10 +1855,14 @@ static void gl_audio_tx_task(void *arg)
         }
 
         int r = ESP_FAIL;
+        bool four_lane = false;
         if (s_gl.adc && s_gl.adc_open && !s_gl.adc_codec_failed) {
-            r = esp_codec_dev_read(s_gl.adc, pcm, GL_TX_PCM_BYTES);
+            /* 4-lane TDM read (D2): measured buffer order is [REF][MIC][NC][MIC]
+             * (see GL_MIC_LANE / GL_REF_LANE), confirmed by the lane_rms diag. */
+            r = esp_codec_dev_read(s_gl.adc, raw4, GL_TX_RAW_BYTES);
             if (r == ESP_CODEC_DEV_OK) {
                 s_gl.tx_codec_reads++;
+                four_lane = true;
             }
         }
         if (r != ESP_CODEC_DEV_OK && s_gl.adc_raw) {
@@ -1789,6 +1880,53 @@ static void gl_audio_tx_task(void *arg)
         if (r != ESP_CODEC_DEV_OK) {
             s_gl.tx_read_failures++;
             vTaskDelay(pdMS_TO_TICKS(GL_TX_CHUNK_MS));
+            continue;
+        }
+
+        if (four_lane) {
+            /* Demux the uplink mic out of the interleaved TDM frame using the
+             * MEASURED buffer-lane order (GL_MIC_LANE = a live MEMS mic). The
+             * reference lane (GL_REF_LANE) and the others feed only the
+             * lane_rms diagnostic here; the AEC consumes the ref in Phase 3. */
+            int16_t *mono = (int16_t *)pcm;
+            for (size_t i = 0; i < GL_TX_SAMPLES_PER_CHUNK; ++i) {
+                mono[i] = raw4[i * GL_CAPTURE_CHANNELS + GL_MIC_LANE];
+            }
+#if GL_LANE_DIAG
+            for (size_t i = 0; i < GL_TX_SAMPLES_PER_CHUNK * GL_CAPTURE_CHANNELS; ) {
+                for (int l = 0; l < GL_CAPTURE_CHANNELS; ++l, ++i) {
+                    int32_t s = raw4[i];
+                    lane_sumsq[l] += (uint64_t)((int64_t)s * (int64_t)s);
+                    int32_t a = s < 0 ? -s : s;
+                    if (a > lane_pk[l]) {
+                        lane_pk[l] = a;
+                    }
+                }
+            }
+            if (++lane_diag_frames >= 1000 / GL_TX_CHUNK_MS) {  /* once per second */
+                const uint32_t n = lane_diag_frames * GL_TX_SAMPLES_PER_CHUNK;
+                uint16_t rms[GL_CAPTURE_CHANNELS];
+                uint16_t pk[GL_CAPTURE_CHANNELS];
+                for (int l = 0; l < GL_CAPTURE_CHANNELS; ++l) {
+                    double v = sqrt((double)lane_sumsq[l] / (double)n);
+                    rms[l] = (v > 32767.0) ? 32767 : (uint16_t)v;
+                    pk[l]  = (lane_pk[l] > 32767) ? 32767 : (uint16_t)lane_pk[l];
+                    atomic_store(&s_lane_rms[l], rms[l]);
+                    atomic_store(&s_lane_peak[l], pk[l]);
+                }
+                ESP_LOGI(TAG, "lane_rms: state=%s rms=[%u %u %u %u] peak=[%u %u %u %u] (expected [MIC1][MIC2][REF][NC])",
+                         gl_state_name(s_gl.state),
+                         rms[0], rms[1], rms[2], rms[3],
+                         pk[0], pk[1], pk[2], pk[3]);
+                memset(lane_sumsq, 0, sizeof(lane_sumsq));
+                memset(lane_pk, 0, sizeof(lane_pk));
+                lane_diag_frames = 0;
+            }
+#endif
+        }
+
+        if (!listening) {
+            /* Diag-only read during SPEAKING — never gain/VAD/send. */
             continue;
         }
 
@@ -3589,6 +3727,17 @@ esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size)
                             s_gl.last_resume_reason[0] ? s_gl.last_resume_reason : "-");
     cJSON_AddNumberToObject(root, "mic_level", (double)cap_gemini_live_get_mic_level());
     cJSON_AddNumberToObject(root, "output_level", (double)cap_gemini_live_get_output_level());
+#if GL_LANE_DIAG
+    /* TEMPORARY (Phase 2): raw per-lane capture levels, last 1 s window. */
+    {
+        cJSON *lr = cJSON_AddArrayToObject(root, "lane_rms");
+        cJSON *lp = cJSON_AddArrayToObject(root, "lane_peak");
+        for (int l = 0; l < GL_CAPTURE_CHANNELS; ++l) {
+            cJSON_AddItemToArray(lr, cJSON_CreateNumber((double)atomic_load(&s_lane_rms[l])));
+            cJSON_AddItemToArray(lp, cJSON_CreateNumber((double)atomic_load(&s_lane_peak[l])));
+        }
+    }
+#endif
 
     char *json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
