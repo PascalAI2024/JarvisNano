@@ -981,11 +981,14 @@ static void gl_pcm_ring_flush(void)
 
 /* Allocate the ring for a session. Degrades by halving instead of failing
  * (P2.2/F9) — a smaller ring just means earlier producer backpressure, never
- * a crash. SESSION TASK ONLY. */
+ * a crash. A full-size ring is deliberately retained across sessions (see
+ * session_cleanup): emote clip churn fragments PSRAM, and a released 1 MB
+ * block can never be re-allocated later. SESSION TASK ONLY. */
 static void gl_pcm_ring_alloc(void)
 {
     if (s_gl.pcm_ring) {
-        /* Survivor from a feeder that refused to park last session: reuse. */
+        /* Retained from the previous session (or a feeder that refused to
+         * park): reuse in place. */
         gl_pcm_ring_flush();
         return;
     }
@@ -3129,7 +3132,17 @@ session_cleanup:
         if (gl_stop_feeder_task()) {
             ESP_LOGI(TAG, "Teardown: closing dac");
             gl_close_dac();
-            gl_pcm_ring_free();
+            /* P2.2 (F9): retain a full-size ring across sessions. Emote rwave
+             * clip swaps (~0.7-0.9 MB each) fragment PSRAM while a session
+             * runs; once a freed 1 MB ring's hole is carved up, the largest
+             * free block drops to ~430 KB and every later session degrades to
+             * a 256 KB (~8 s) ring — long replies then overflow the ring and
+             * the raw-queue byte cap (observed: 53 drops in one story turn).
+             * Only release a degraded ring so the next session start can
+             * retry the full-size allocation. */
+            if (s_gl.pcm_ring && s_gl.pcm_ring_cap < GL_PCM_RING_BYTES) {
+                gl_pcm_ring_free();
+            }
         } else {
             ESP_LOGE(TAG, "Teardown: skipping DAC close + ring free (feeder alive)");
         }

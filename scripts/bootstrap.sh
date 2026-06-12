@@ -314,6 +314,125 @@ print("patched", p)
 PY
 }
 
+# STABILITY_PLAN P2.4 follow-up (2026-06-12): esp_codec_dev_open() funnels
+# through _i2s_data_set_fmt(), which calls i2s_channel_disable()
+# unconditionally — on a channel that is already disabled (every session start
+# after the first close) the IDF driver logs
+# "i2s_channel_disable(...): the channel has not been enabled yet" at E level,
+# two per session start (RX via set_fmt, TX via the full-duplex set_fs pair).
+# Teach the component's single enable/disable chokepoint to track the last
+# driver-confirmed state per channel handle and skip already-satisfied calls.
+# Safe because every runtime enable/disable of these channels goes through
+# _i2s_drv_enable (board bring-up enables them once BEFORE the first codec
+# open, while the cache still reads UNKNOWN, so that first disable is real),
+# and calls are serialized by the per-port codec mutex.
+apply_codec_i2s_idempotent_toggle_patch() {
+    local target="$ESP_CLAW_DIR/application/edge_agent/managed_components/espressif__esp_codec_dev/platform/audio_codec_data_i2s.c"
+    if [ ! -f "$target" ]; then
+        # apply_patch (which runs first) reconfigures to populate managed_components.
+        die "esp_codec_dev managed component missing: $target"
+    fi
+    if grep -q "jn_i2s_en_slot" "$target" 2>/dev/null; then
+        log "codec i2s idempotent-toggle patch already applied"
+        return
+    fi
+    log "applying codec i2s idempotent-toggle patch (silence redundant i2s_channel_disable at session start)"
+    python3 - "$target" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+old = (
+    "static int _i2s_drv_enable(i2s_data_t *i2s_data, bool playback, bool enable)\n"
+    "{\n"
+    "#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)\n"
+    "    i2s_chan_handle_t channel = (i2s_chan_handle_t) (\n"
+    "        playback ? i2s_data->out_handle : i2s_data->in_handle);\n"
+    "    if (channel == NULL) {\n"
+    "        return ESP_CODEC_DEV_NOT_FOUND;\n"
+    "    }\n"
+    "    int ret;\n"
+    "    if (enable) {\n"
+    "        ret = i2s_channel_enable(channel);\n"
+    "    } else {\n"
+    "        ret = i2s_channel_disable(channel);\n"
+    "    }\n"
+    "    return ret == ESP_OK ? ESP_CODEC_DEV_OK : ESP_CODEC_DEV_DRV_ERR;\n"
+    "#endif\n"
+    "    return ESP_CODEC_DEV_OK;\n"
+    "}\n"
+)
+new = (
+    "/* JarvisNano: per-handle enable-state cache. _i2s_data_set_fmt() disables\n"
+    " * channels unconditionally; on an already-disabled channel the IDF driver\n"
+    " * logs an E-level \"the channel has not been enabled yet\" on every session\n"
+    " * start. Track the last driver-confirmed state per handle and skip calls\n"
+    " * whose requested state is already current. All enable/disable calls in\n"
+    " * this component go through _i2s_drv_enable, nothing else toggles these\n"
+    " * channels at runtime, and calls are serialized by the per-port mutex. */\n"
+    "#define JN_I2S_EN_SLOTS 8\n"
+    "typedef enum { JN_EN_UNKNOWN = 0, JN_EN_ENABLED, JN_EN_DISABLED } jn_i2s_en_state_t;\n"
+    "static struct { void *chan; jn_i2s_en_state_t st; } s_jn_i2s_en[JN_I2S_EN_SLOTS];\n"
+    "\n"
+    "static jn_i2s_en_state_t *jn_i2s_en_slot(void *chan)\n"
+    "{\n"
+    "    for (int i = 0; i < JN_I2S_EN_SLOTS; i++) {\n"
+    "        if (s_jn_i2s_en[i].chan == chan) {\n"
+    "            return &s_jn_i2s_en[i].st;\n"
+    "        }\n"
+    "    }\n"
+    "    for (int i = 0; i < JN_I2S_EN_SLOTS; i++) {\n"
+    "        if (s_jn_i2s_en[i].chan == NULL) {\n"
+    "            s_jn_i2s_en[i].chan = chan;\n"
+    "            return &s_jn_i2s_en[i].st;\n"
+    "        }\n"
+    "    }\n"
+    "    return NULL;\n"
+    "}\n"
+    "\n"
+    "static int _i2s_drv_enable(i2s_data_t *i2s_data, bool playback, bool enable)\n"
+    "{\n"
+    "#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)\n"
+    "    i2s_chan_handle_t channel = (i2s_chan_handle_t) (\n"
+    "        playback ? i2s_data->out_handle : i2s_data->in_handle);\n"
+    "    if (channel == NULL) {\n"
+    "        return ESP_CODEC_DEV_NOT_FOUND;\n"
+    "    }\n"
+    "    jn_i2s_en_state_t *st = jn_i2s_en_slot(channel);\n"
+    "    jn_i2s_en_state_t want = enable ? JN_EN_ENABLED : JN_EN_DISABLED;\n"
+    "    if (st && *st == want) {\n"
+    "        return ESP_CODEC_DEV_OK;\n"
+    "    }\n"
+    "    int ret;\n"
+    "    if (enable) {\n"
+    "        ret = i2s_channel_enable(channel);\n"
+    "    } else {\n"
+    "        ret = i2s_channel_disable(channel);\n"
+    "    }\n"
+    "    if (ret == ESP_OK) {\n"
+    "        if (st) {\n"
+    "            *st = want;\n"
+    "        }\n"
+    "        return ESP_CODEC_DEV_OK;\n"
+    "    }\n"
+    "    if (!enable && ret == ESP_ERR_INVALID_STATE) {\n"
+    "        /* \"not been enabled yet\" — already in the requested state. */\n"
+    "        if (st) {\n"
+    "            *st = JN_EN_DISABLED;\n"
+    "        }\n"
+    "        return ESP_CODEC_DEV_OK;\n"
+    "    }\n"
+    "    return ESP_CODEC_DEV_DRV_ERR;\n"
+    "#endif\n"
+    "    return ESP_CODEC_DEV_OK;\n"
+    "}\n"
+)
+if old not in s:
+    raise SystemExit(f"could not locate _i2s_drv_enable in {p} — esp_codec_dev version may have changed")
+p.write_text(s.replace(old, new, 1))
+print("patched", p)
+PY
+}
+
 build() {
     mkdir -p "$ROOT/.build_logs"
     log "building $BOARD_VENDOR/$BOARD_NAME inside $IDF_IMAGE (output streams to .build_logs/build.log)"
@@ -1211,6 +1330,67 @@ s = s.replace(old, new, 1)
 s = s.replace('    cJSON_AddStringToObject(resp, "action", action);\\n',
               '    cJSON_AddStringToObject(resp, "action", action_copy);\\n',
               1)
+p.write_text(s)
+print("patched", p)
+PY
+}
+
+# Hardware-verification finding (2026-06-12): the /api/gemini/live GET diag
+# JSON outgrew the 1 KB stack buffer once the P2.x lifecycle counters landed
+# (~1.4 KB serialized), so cap_gemini_live_get_diagnostics returned
+# ESP_ERR_INVALID_SIZE and every GET 500'd — and the error path printed the
+# httpd_err_code_t ENUM with %d (HTTPD_500_INTERNAL_SERVER_ERROR == 0,
+# HTTPD_400_BAD_REQUEST == 3), emitting a malformed "HTTP/1.1 0" status line
+# that blinded the diagnostic harness for ~190 s. Double the buffer (the httpd
+# task stack is 8 KB) and emit real integer status codes with a defensive
+# clamp in gemini_send_error_json.
+apply_gemini_diag_buffer_status_patch() {
+    local api="$ESP_CLAW_DIR/application/edge_agent/components/http_server/http_server_gemini_api.c"
+    if [ ! -f "$api" ]; then
+        log "Gemini HTTP API source not found — skipping diag buffer/status patch"
+        return
+    fi
+    if grep -q "GEMINI_DIAG_JSON_SIZE 2048" "$api" 2>/dev/null; then
+        log "Gemini diag buffer/status patch already applied"
+        return
+    fi
+    log "applying Gemini diag buffer + error status patch"
+    python3 - "$api" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+
+old = "#define GEMINI_DIAG_JSON_SIZE 1024\n"
+new = ("/* Diag JSON is ~1.4 KB after the P2.x lifecycle counters; 1 KB overflowed\n"
+       " * (ESP_ERR_INVALID_SIZE -> 500 on every GET). httpd stack is 8 KB. */\n"
+       "#define GEMINI_DIAG_JSON_SIZE 2048\n")
+if old not in s:
+    raise SystemExit("gemini diag size anchor missing")
+s = s.replace(old, new, 1)
+
+# Call sites: pass real integers, not httpd_err_code_t enum members. Every
+# occurrence of these two tokens in this file is a gemini_send_error_json arg.
+# (Run BEFORE inserting the clamp comment below, which names the enum.)
+s = s.replace("HTTPD_500_INTERNAL_SERVER_ERROR", "500")
+s = s.replace("HTTPD_400_BAD_REQUEST", "400")
+
+old = ("static void gemini_send_error_json(httpd_req_t *req, int status, const char *message)\n"
+       "{\n"
+       "    cJSON *root = cJSON_CreateObject();\n")
+new = ("static void gemini_send_error_json(httpd_req_t *req, int status, const char *message)\n"
+       "{\n"
+       "    /* httpd_err_code_t enum values are NOT HTTP status numbers\n"
+       "     * (HTTPD_500_INTERNAL_SERVER_ERROR == 0) — printing one with %d made\n"
+       "     * the status line a literal \"HTTP/1.1 0\". Clamp anything that is\n"
+       "     * not a plausible wire status. */\n"
+       "    if (status < 100 || status > 599) {\n"
+       "        status = 500;\n"
+       "    }\n"
+       "    cJSON *root = cJSON_CreateObject();\n")
+if old not in s:
+    raise SystemExit("gemini_send_error_json anchor missing")
+s = s.replace(old, new, 1)
+
 p.write_text(s)
 print("patched", p)
 PY
@@ -3164,12 +3344,14 @@ main() {
     copy_jarvis_pmic
     copy_jarvis_imu
     apply_patch
+    apply_codec_i2s_idempotent_toggle_patch
     apply_wifi_ps_patch
     apply_jpeg_soi_patch
     apply_http_phase2_patch
     apply_http_camera_gate_patch
     apply_gemini_http_diagnostics_patch
     apply_gemini_http_action_response_patch
+    apply_gemini_diag_buffer_status_patch
     apply_gemini_live_main_require_patch
     apply_gemini_live_api_key_patch
     apply_gemini_live_network_ready_patch
