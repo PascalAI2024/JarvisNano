@@ -49,8 +49,10 @@ typedef struct {
  * @brief Read QMI8658 accelerometer telemetry on demand.
  *
  * Lazily acquires the shared I2C bus, probes the QMI8658 at 0x6B then 0x6A,
- * configures the accelerometer (±8 g, 125 Hz) on first success, and reads the
- * three axes. Thread-safe via the ESP-IDF i2c_master per-bus serialization.
+ * configures the accelerometer (±8 g, 125 Hz) on first success, and reads all
+ * three axes in a single 6-byte burst (CTRL1.ADDR_AI auto-increment — no torn
+ * 16-bit values). Thread-safe: lazy init is serialized by a static mutex and
+ * I2C transactions by the ESP-IDF i2c_master per-bus lock.
  *
  * @param[out] out  filled on ESP_OK.
  * @return ESP_OK on success; an esp_err_t if the bus/device is unavailable.

@@ -10,6 +10,7 @@
 #include "esp_board_manager.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #define AXP2101_I2C_ADDR          0x34
 #define AXP2101_REG_STATUS1       0x00
@@ -32,20 +33,45 @@ static const char *TAG = "jarvis_pmic";
 static i2c_master_dev_handle_t s_dev;   /* AXP2101 device handle on the shared bus */
 static bool s_ready;
 
+/* Guards lazy init (device add + ADC/detection enable + s_dev/s_ready
+ * publication). Created from a C constructor, which ESP-IDF runs
+ * single-threaded during startup — before app_main() and before any task that
+ * could call jarvis_pmic_read_battery() exists — so there is no
+ * mutex-creation race to bootstrap around. Statically allocated: no heap. */
+static SemaphoreHandle_t s_init_lock;
+static StaticSemaphore_t s_init_lock_buf;
+
+__attribute__((constructor))
+static void pmic_init_lock_ctor(void)
+{
+    s_init_lock = xSemaphoreCreateMutexStatic(&s_init_lock_buf);
+}
+
+/* Burst read of `len` consecutive registers in ONE I2C transaction. The
+ * AXP2101 auto-increments its register pointer on multi-byte reads (same
+ * idiom as M5Unified AXP2101_Class::readRegister14 and Tactility Axp2101).
+ * NOTE: the new i2c_master API takes its timeout in MILLISECONDS
+ * (xfer_timeout_ms), not ticks — wrapping it in pdMS_TO_TICKS() would
+ * silently shrink 100 ms to 10 at CONFIG_FREERTOS_HZ=100. */
+static esp_err_t pmic_read_regs(uint8_t reg, uint8_t *buf, size_t len)
+{
+    return i2c_master_transmit_receive(s_dev, &reg, 1, buf, len,
+                                       AXP2101_I2C_TIMEOUT_MS);
+}
+
 static esp_err_t pmic_read_reg(uint8_t reg, uint8_t *val)
 {
-    return i2c_master_transmit_receive(s_dev, &reg, 1, val, 1,
-                                       pdMS_TO_TICKS(AXP2101_I2C_TIMEOUT_MS));
+    return pmic_read_regs(reg, val, 1);
 }
 
 static esp_err_t pmic_write_reg(uint8_t reg, uint8_t val)
 {
     uint8_t buf[2] = { reg, val };
     return i2c_master_transmit(s_dev, buf, sizeof(buf),
-                               pdMS_TO_TICKS(AXP2101_I2C_TIMEOUT_MS));
+                               AXP2101_I2C_TIMEOUT_MS);
 }
 
-static esp_err_t pmic_lazy_init(void)
+static esp_err_t pmic_lazy_init_locked(void)
 {
     if (s_ready) {
         return ESP_OK;
@@ -92,6 +118,18 @@ static esp_err_t pmic_lazy_init(void)
     return ESP_OK;
 }
 
+static esp_err_t pmic_lazy_init(void)
+{
+    if (s_init_lock == NULL) {
+        /* Constructor did not run — should be impossible; stay safe, not racy. */
+        return ESP_ERR_INVALID_STATE;
+    }
+    xSemaphoreTake(s_init_lock, portMAX_DELAY);
+    esp_err_t err = pmic_lazy_init_locked();
+    xSemaphoreGive(s_init_lock);
+    return err;
+}
+
 esp_err_t jarvis_pmic_read_battery(jarvis_battery_t *out)
 {
     if (out == NULL) {
@@ -122,10 +160,13 @@ esp_err_t jarvis_pmic_read_battery(jarvis_battery_t *out)
         if (pmic_read_reg(AXP2101_REG_BAT_PERCENT, &pct) == ESP_OK && pct <= 100) {
             out->percent = pct;
         }
-        uint8_t vh = 0, vl = 0;
-        if (pmic_read_reg(AXP2101_REG_VBAT_H, &vh) == ESP_OK &&
-            pmic_read_reg(AXP2101_REG_VBAT_L, &vl) == ESP_OK) {
-            out->millivolts = (uint16_t)(((vh & 0x1Fu) << 8) | vl);
+        /* VBAT H/L (0x34/0x35) in ONE 2-byte transaction — two separate reads
+         * can pair the high byte of one ADC sample with the low byte of the
+         * next (torn reading). The AXP2101 register pointer auto-increments
+         * within a multi-byte read, keeping the H5/L8 pair coherent. */
+        uint8_t v[2] = { 0, 0 };
+        if (pmic_read_regs(AXP2101_REG_VBAT_H, v, sizeof(v)) == ESP_OK) {
+            out->millivolts = (uint16_t)(((v[0] & 0x1Fu) << 8) | v[1]);
         }
     }
 

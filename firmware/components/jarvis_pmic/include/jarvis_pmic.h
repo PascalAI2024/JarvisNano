@@ -42,8 +42,10 @@ typedef struct {
  * @brief Read AXP2101 battery telemetry on demand.
  *
  * Lazily acquires the shared I2C bus and AXP2101 device handle on first call.
- * Thread-safe: the ESP-IDF i2c_master driver serializes transactions per bus,
- * so this coexists with the touch / codec traffic on the same bus.
+ * Thread-safe: lazy init is serialized by a static mutex, and the ESP-IDF
+ * i2c_master driver serializes transactions per bus, so this coexists with
+ * the touch / codec traffic on the same bus. The VBAT high/low pair is read
+ * in one 2-byte transaction (register auto-increment) to avoid torn values.
  *
  * @param[out] out  filled with the latest reading on ESP_OK.
  * @return ESP_OK on success; an esp_err_t if the bus/device is unavailable.
