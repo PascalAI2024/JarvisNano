@@ -22,8 +22,9 @@
  *                    reply throttles to realtime instead of losing audio)
  *   gl_session     → cJSON parse + base64 + gain/limiter + resample → PCM ring
  *   gl_pcm_feeder  → blocking esp_codec_dev_write from the PCM ring — nothing else
- *   gl_audio_tx    → 20 ms 4-ch TDM reads (mics + ES7210 echo-ref lane, D2)
- *                    → software demux + RMS + local VAD → tx_frame_queue (drop-oldest)
+ *   gl_audio_tx    → 32 ms 4-ch TDM reads (mics + ES7210 echo-ref lane, D2)
+ *                    → demux → AEC(mic, ref) (esp-sr, D3/D4) → 6x gain + knee
+ *                    → RMS + local VAD → tx_frame_queue (drop-oldest)
  *   gl_tx_sender   → drains tx_frame_queue → WS sends (Wi-Fi backpressure can
  *                    never stall the capture cadence)
  *   gl_tool_worker → toolCall frames (30 s HTTPS gl_act_call) off the session task
@@ -62,6 +63,7 @@
 #include "driver/i2s_common.h"
 #include "esp_board_manager_includes.h"
 #include "esp_board_periph.h"
+#include "esp_aec.h"          /* esp-sr direct AEC API (aec-barge-in.md D3) */
 #include "esp_check.h"
 #include "esp_codec_dev.h"
 #include "esp_crt_bundle.h"
@@ -140,10 +142,14 @@ static void   gl_dac_mute(bool mute);
 #define GL_FEEDER_CHUNK_BYTES    2560          /* 80 ms @ 16 kHz mono s16 per DAC write — small enough that an
                                                 * interrupt flush takes effect within one chunk (P3.1 < 200 ms) */
 #define GL_FEEDER_STOP_WAIT_MS   5000          /* worst case: one in-flight DAC write (~330 ms) */
-/* Capture→sender frame queue: 16 × 20 ms ≈ 320 ms of mic audio (P2.3/F10). */
+/* Capture→sender frame queue: 16 × 32 ms ≈ 512 ms of mic audio (P2.3/F10). */
 #define GL_TX_FRAME_QUEUE_DEPTH  16
 #define GL_TOOL_QUEUE_DEPTH      4
-#define GL_TX_CHUNK_MS           20             /* mic capture interval */
+/* Mic capture interval. 32 ms = 512 samples @16 kHz = exactly one esp-sr AEC
+ * chunk (aec_get_chunksize, FD/SR modes), so one TDM read feeds one
+ * synchronous aec_process call with no rebuffering (D4). Was 20 ms pre-AEC;
+ * the VAD constants below are expressed in frames of this size. */
+#define GL_TX_CHUNK_MS           32
 #define GL_TX_SAMPLE_RATE        16000
 #define GL_RX_SAMPLE_RATE        24000
 #define GL_CHANNELS              1
@@ -183,16 +189,20 @@ static void   gl_dac_mute(bool mute);
  * syllables are limited smoothly, not squared off. */
 #define GL_OUT_GAIN              4
 #define GL_LIMIT_KNEE            24000
-#define GL_TX_SAMPLES_PER_CHUNK  (GL_TX_SAMPLE_RATE * GL_TX_CHUNK_MS / 1000)  /* 320 */
-#define GL_TX_PCM_BYTES          (GL_TX_SAMPLES_PER_CHUNK * GL_CHANNELS * (GL_BITS / 8)) /* 640 */
-#define GL_TX_RAW_BYTES          (GL_TX_SAMPLES_PER_CHUNK * GL_CAPTURE_CHANNELS * (GL_BITS / 8)) /* 2560 */
+#define GL_TX_SAMPLES_PER_CHUNK  (GL_TX_SAMPLE_RATE * GL_TX_CHUNK_MS / 1000)  /* 512 */
+#define GL_TX_PCM_BYTES          (GL_TX_SAMPLES_PER_CHUNK * GL_CHANNELS * (GL_BITS / 8)) /* 1024 */
+#define GL_TX_RAW_BYTES          (GL_TX_SAMPLES_PER_CHUNK * GL_CAPTURE_CHANNELS * (GL_BITS / 8)) /* 4096 */
 #define GL_TX_B64_BYTES          (((GL_TX_PCM_BYTES + 2) / 3) * 4 + 1)
+/* Frames dumped on every pause→listen transition: the ADC stays open across
+ * turns (P2.4) and the RX DMA accumulates stale audio — including speaker
+ * echo — while capture is paused. 7 × 32 ms ≈ 224 ms (was 10 × 20 ms). */
+#define GL_CAPTURE_FLUSH_FRAMES  7
 /* Ignore taps within this window of the last accepted one. A session start runs
  * a multi-second WSS+TLS handshake; rapid taps otherwise toggle start/stop mid-
  * connect and wedge the session on "connecting". */
 #define GL_TOGGLE_COOLDOWN_MS    2000
 #define GL_WS_TIMEOUT_MS         5000
-/* Mic frames fail fast: a frame is worth 20 ms of audio, so blocking the TX
+/* Mic frames fail fast: a frame is worth 32 ms of audio, so blocking the TX
  * loop 5 s on Wi-Fi backpressure only skews VAD and stretches the TX stop
  * window. Losing a frame is recoverable; a parked capture loop is not. */
 #define GL_WS_MIC_TIMEOUT_MS     500
@@ -221,10 +231,13 @@ static void   gl_dac_mute(bool mute);
  * serverContent on this Waveshare board (see above), so instead of disabling
  * hands-free we detect end-of-speech locally: the TX task watches the mic RMS
  * it already computes for the face, and once the user has spoken and then
- * stayed quiet for GL_VAD_HANG_MS it asks the session task to commit the turn
- * (the same end_input the tap / HTTP path uses). Thresholds calibrated live on
- * the ES7210 capture (post-6x-gain RMS): silence floor ~150-400, speech
- * 1000-4900. Hysteresis between SILENCE_RMS and SPEECH_RMS prevents flicker. */
+ * stayed quiet for GL_VAD_HANG_FRAMES it asks the session task to commit the
+ * turn (the same end_input the tap / HTTP path uses). Thresholds calibrated
+ * live on the ES7210 capture (post-6x-gain RMS): silence floor ~150-400,
+ * speech 1000-4900. The VAD now sees the AEC-cleaned signal (P3.3), but with
+ * a muted DAC during LISTENING the ref lane is silent and the AEC is ~pass-
+ * through, so the calibration holds. Hysteresis between SILENCE_RMS and
+ * SPEECH_RMS prevents flicker. */
 #define GL_USE_LOCAL_VAD         1
 #define GL_VAD_SPEECH_RMS        1000  /* RMS at/above this = speech. Sits just   */
                                        /* above the measured idle ceiling (~939   */
@@ -233,18 +246,40 @@ static void   gl_dac_mute(bool mute);
                                        /* 1200 missed quiet/distant speech, which */
                                        /* read as "it never replies".             */
 #define GL_VAD_SILENCE_RMS       500   /* RMS below this = silence (hysteresis)  */
-#define GL_VAD_HANG_MS           700   /* trailing silence that ends the turn    */
-#define GL_VAD_MIN_SPEECH_MS     240   /* sustained speech required before commit */
-                                       /* (300 swallowed short replies: "yes")   */
+/* VAD accumulators count 32 ms capture frames since the AEC rechunk (D4).
+ * HANG: 22 frames = 704 ms ≈ the field-tuned 700 ms hang. (The design table's
+ * "16 frames = 512 ms" was derived from a stale 500 ms baseline; keeping the
+ * tuned value is what actually preserves turn-commit timing — the Phase-3
+ * acceptance bar. Drop toward 16 only with a fresh 10-turn field test.)
+ * MIN_SPEECH: 8 frames = 256 ms of sustained speech before a commit can arm
+ * (was 240 ms; 300 swallowed short replies like "yes"). */
+#define GL_VAD_HANG_FRAMES       22
+#define GL_VAD_MIN_SPEECH_FRAMES 8
 
-/* TEMPORARY (AEC Phase 2 go/no-go gate): per-lane capture diagnostic for the
- * 4-channel bring-up. While enabled, the capture task (a) logs one I-level
- * `lane_rms` line per second with the raw (pre-digital-gain) RMS + peak of
- * all four demuxed lanes, and (b) keeps READING the ADC during SPEAKING —
- * without sending anything — so the echo-reference lane can be observed
- * while the speaker is live (the tone test). The diagnostics JSON gains
- * lane_rms/lane_peak arrays. Flip to 0 (or remove outright) once the lane
- * order and ref level are confirmed and AEC lands (Phase 3). */
+/* ---- Acoustic echo cancellation (P3.3, design D3/D4) -----------------------
+ * esp-sr direct esp_aec.h API: no AFE framework, no model files/partition, no
+ * internal task — aec_process runs synchronously in the capture task, one
+ * 512-sample/32 ms chunk per TDM read. mic = the demuxed MEMS lane
+ * (GL_MIC_LANE); ref = the ES7210 MIC3 hardware loopback (GL_REF_LANE,
+ * verified live 2026-06-12: ref rises only while the DAC plays, raw peak
+ * ~1655 ≈ -26 dBFS at 0 dB PGA — under-driven, zero clipping risk; +3/+6 dB
+ * headroom available for calibration). FD_LOW_COST + aggressive NLP per D3.
+ * R3 CPU gate: if the measured p95 cost exceeds GL_AEC_COST_GATE_US, switch
+ * GL_AEC_MODE to AEC_MODE_SR_HIGH_PERF (linear-only, lighter). Engine create
+ * failure degrades to un-cancelled capture — never a crash. */
+#define GL_USE_AEC               1
+#define GL_AEC_MODE              AEC_MODE_FD_LOW_COST
+#define GL_AEC_FILTER_LENGTH     4              /* esp_aec.h recommended value */
+#define GL_AEC_COST_GATE_US      10000          /* <10 ms per 32 ms frame (R3) */
+#define GL_AEC_STAT_FRAMES       (10000 / GL_TX_CHUNK_MS)  /* ~10 s stats window */
+#define GL_AEC_ATTEN_MIN_FRAMES  31             /* ≥~1 s of playback in the window */
+
+/* Per-lane capture diagnostic (Phase 2 bring-up tool, retained through the
+ * AEC verification phases): the capture task logs one I-level `lane_rms` line
+ * per second with the raw (pre-AEC, pre-digital-gain) RMS + peak of all four
+ * demuxed lanes, and the diagnostics JSON carries lane_rms/lane_peak arrays —
+ * the cross-check for the aec_atten estimate while the speaker is live.
+ * Remove in the Phase-4 cleanup once hands-free barge-in is field-verified. */
 #define GL_LANE_DIAG             1
 
 #define GL_I2S_READ_TIMEOUT_MS   200
@@ -339,11 +374,11 @@ typedef struct {
     char                         last_audio_error[96];
     EventGroupHandle_t           ev;
     TaskHandle_t                 session_task;
-    TaskHandle_t                 tx_task;            /* mic capture (20 ms cadence) */
+    TaskHandle_t                 tx_task;            /* mic capture (32 ms cadence) */
     TaskHandle_t                 tx_sender_task;     /* drains tx_frame_queue → WS (P2.3) */
     TaskHandle_t                 feeder_task;        /* PCM ring → DAC (P2.1) */
     TaskHandle_t                 tool_task;          /* JarvisMCP tool worker (P2.1) */
-    QueueHandle_t                tx_frame_queue;     /* 20 ms mic frames, by value */
+    QueueHandle_t                tx_frame_queue;     /* 32 ms mic frames, by value */
     QueueHandle_t                tool_queue;         /* gl_tool_job_t → tool worker */
     SemaphoreHandle_t            ring_mutex;         /* guards pcm_ring indices */
     uint8_t                     *pcm_ring;           /* decoded PCM at the DAC rate (PSRAM) */
@@ -514,10 +549,22 @@ static _Atomic uint16_t s_mic_rms;   /* ES7210 capture level (LISTENING) */
 static _Atomic uint16_t s_out_rms;   /* decoded playback level (SPEAKING) */
 
 #if GL_LANE_DIAG
-/* TEMPORARY (Phase 2): last 1 s window of raw per-lane RMS/peak, published by
- * the capture task, surfaced in the diagnostics JSON (lane_rms/lane_peak). */
+/* Last 1 s window of raw per-lane RMS/peak, published by the capture task,
+ * surfaced in the diagnostics JSON (lane_rms/lane_peak). */
 static _Atomic uint16_t s_lane_rms[GL_CAPTURE_CHANNELS];
 static _Atomic uint16_t s_lane_peak[GL_CAPTURE_CHANNELS];
+#endif
+
+#if GL_USE_AEC
+/* AEC telemetry (P3.3): published by the capture task, read by diagnostics.
+ * cost = per-frame aec_process duration percentiles over the last ~10 s
+ * window (tag `aec_cost`); atten = echo attenuation during playback, raw-mic
+ * RMS vs clean-mic RMS in tenths of dB (tag `aec_atten`). */
+static _Atomic bool     s_aec_enabled;
+static _Atomic uint32_t s_aec_frames;        /* aec_process calls this session */
+static _Atomic uint32_t s_aec_cost_p50_us;
+static _Atomic uint32_t s_aec_cost_p95_us;
+static _Atomic int32_t  s_aec_atten_db10;
 #endif
 
 /* Raw rx-queue byte accounting (P2.2): WS task adds, session task subtracts. */
@@ -1778,11 +1825,33 @@ static bool gl_stop_feeder_task(void)
 
 /* ---- Audio TX task (Phase 4) --------------------------------------------- */
 
+#if GL_USE_AEC
+static int gl_u16_cmp(const void *a, const void *b)
+{
+    return (int)*(const uint16_t *)a - (int)*(const uint16_t *)b;
+}
+
+/* One 16-byte-aligned mono frame buffer for aec_process (esp_aec.h warns the
+ * mic/ref/out buffers must be 16-byte aligned, non-interleaved int16).
+ * Internal RAM preferred for speed (3 KB total across the three buffers),
+ * PSRAM acceptable; NULL means the caller degrades to no-AEC. */
+static int16_t *gl_aec_buf_alloc(void)
+{
+    int16_t *p = heap_caps_aligned_alloc(16, GL_TX_PCM_BYTES,
+                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!p) {
+        p = heap_caps_aligned_alloc(16, GL_TX_PCM_BYTES,
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    return p;
+}
+#endif
+
 static void gl_audio_tx_task(void *arg)
 {
     (void)arg;
-    /* Raw 4-lane TDM frames straight off the codec (D2): 320 frames × 4 lanes
-     * × 16-bit per 20 ms read, demuxed into the mono mic chunk below. The raw
+    /* Raw 4-lane TDM frames straight off the codec (D2): 512 frames × 4 lanes
+     * × 16-bit per 32 ms read, demuxed into the mono mic chunk below. The raw
      * I2S fallback path (no codec handle at all) still reads mono into pcm —
      * the board YAML config governs that path, not the 4-ch codec open. */
     static int16_t raw4[GL_TX_SAMPLES_PER_CHUNK * GL_CAPTURE_CHANNELS];
@@ -1795,16 +1864,28 @@ static void gl_audio_tx_task(void *arg)
     uint32_t lane_diag_frames = 0;
 #endif
 #if GL_USE_LOCAL_VAD
-    /* Local VAD accumulators — TX-task-private, reset every capture cycle. */
-    uint32_t vad_speech_ms  = 0;
-    uint32_t vad_silence_ms = 0;
-    bool     vad_speech_seen = false;
+    /* Local VAD accumulators (32 ms frames) — TX-task-private, reset every
+     * capture cycle. */
+    uint32_t vad_speech_frames  = 0;
+    uint32_t vad_silence_frames = 0;
+    bool     vad_speech_seen    = false;
+#endif
+#if GL_USE_AEC
+    /* P3.3 instrumentation: per-frame aec_process cost window (p50/p95 logged
+     * once per ~10 s, tag aec_cost) and the playback-window echo-attenuation
+     * accumulators (raw vs clean mic RMS, tag aec_atten). The window array is
+     * consumed (sorted in place) at every rollover. */
+    static uint16_t aec_cost_win[GL_AEC_STAT_FRAMES];
+    uint32_t aec_win_n         = 0;
+    uint64_t atten_raw_sumsq   = 0;
+    uint64_t atten_clean_sumsq = 0;
+    uint32_t atten_frames      = 0;
 #endif
     /* The ADC stays open across turns (P2.4), so the I2S RX DMA accumulates
      * stale audio — including speaker echo — while capture is paused. Dump
-     * ~200 ms of frames on every pause→listen transition so neither the VAD
+     * ~220 ms of frames on every pause→listen transition so neither the VAD
      * nor the server sees it. */
-    int flush_frames = 10;
+    int flush_frames = GL_CAPTURE_FLUSH_FRAMES;
 
     /* Codec lifetime is owned by the session task. This worker only reads from
      * the already-open ADC so teardown cannot double-close codec/I2S handles
@@ -1820,31 +1901,111 @@ static void gl_audio_tx_task(void *arg)
         claw_task_delete(NULL);
     }
 
+#if GL_USE_AEC
+    /* AEC engine (D3): created per capture-task generation (= per session
+     * under P2.4) so the echo filter converges once and stays converged
+     * across turn boundaries. Working state prefers internal RAM (~31 KB per
+     * the esp-sr FD_LOW_COST budget), falls back to PSRAM, then degrades to
+     * un-cancelled capture — never crashes (task rule + R3). */
+    aec_handle_t *aec       = NULL;
+    int16_t      *aec_mic   = NULL;
+    int16_t      *aec_ref   = NULL;
+    int16_t      *aec_clean = NULL;
+    {
+        size_t int_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        size_t spi_before = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        aec_config_t aec_cfg = {
+            .mic_num       = 1,
+            .ref_num       = 1,
+            .out_num       = 1,
+            .filter_length = GL_AEC_FILTER_LENGTH,
+            .sample_rate   = GL_TX_SAMPLE_RATE,    /* aec_create: must be 16000 */
+            .caps          = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT,
+            .mode          = GL_AEC_MODE,
+            .nlp_level     = AEC_NLP_LEVEL_AGGR,
+        };
+        aec = aec_create_from_config(&aec_cfg);
+        if (!aec) {
+            ESP_LOGW(TAG, "AEC: internal-RAM create failed, retrying in PSRAM");
+            aec_cfg.caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+            aec = aec_create_from_config(&aec_cfg);
+        }
+        if (aec) {
+            int chunk = aec_get_chunksize(aec);
+            if (chunk != GL_TX_SAMPLES_PER_CHUNK) {
+                /* The whole 32 ms pipeline assumes one TDM read = one AEC
+                 * chunk; a different chunk size would need rebuffering. */
+                ESP_LOGE(TAG, "AEC: chunksize %d != %d, disabling",
+                         chunk, (int)GL_TX_SAMPLES_PER_CHUNK);
+                aec_destroy(aec);
+                aec = NULL;
+            }
+        }
+        if (aec) {
+            aec_mic   = gl_aec_buf_alloc();
+            aec_ref   = gl_aec_buf_alloc();
+            aec_clean = gl_aec_buf_alloc();
+            if (!aec_mic || !aec_ref || !aec_clean) {
+                ESP_LOGE(TAG, "AEC: frame buffer alloc failed, disabling");
+                heap_caps_free(aec_mic);
+                heap_caps_free(aec_ref);
+                heap_caps_free(aec_clean);
+                aec_mic = aec_ref = aec_clean = NULL;
+                aec_destroy(aec);
+                aec = NULL;
+            }
+        }
+        if (aec) {
+            atomic_store(&s_aec_frames, 0);
+            atomic_store(&s_aec_cost_p50_us, 0);
+            atomic_store(&s_aec_cost_p95_us, 0);
+            atomic_store(&s_aec_atten_db10, 0);
+            atomic_store(&s_aec_enabled, true);
+            /* Heap delta at create (P0.4 doctrine) — verifies the §3 budget. */
+            ESP_LOGI(TAG, "AEC: created (%s, filter=%d, chunk=%d) heap delta int=-%d B psram=-%d B",
+                     aec_get_mode_string(GL_AEC_MODE), GL_AEC_FILTER_LENGTH,
+                     (int)GL_TX_SAMPLES_PER_CHUNK,
+                     (int)(int_before - heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                     (int)(spi_before - heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+        } else {
+            /* Degrade, never crash: capture continues un-cancelled (pre-P3.3
+             * behaviour); barge-in stays tap-only. */
+            ESP_LOGE(TAG, "AEC: unavailable — capture continues without echo cancellation");
+        }
+    }
+#endif
+
     while (!(xEventGroupGetBits(s_gl.ev) & GL_BIT_TX_STOP)) {
         const bool listening = (s_gl.state == GL_STATE_LISTENING);
-#if GL_LANE_DIAG
-        /* TEMPORARY (Phase 2 tone test): keep READING — never sending —
-         * during SPEAKING so the echo-reference lane is observable while the
-         * speaker is live. RX-only codec reads are duplex-safe against the
-         * feeder's TX writes (independent I2S channels on the shared clock). */
-        const bool diag_read = !listening && s_gl.state == GL_STATE_SPEAKING &&
-                               s_gl.adc && s_gl.adc_open && !s_gl.adc_codec_failed;
+        /* Keep READING — never sending — during SPEAKING: the AEC converges
+         * on the live echo path while the speaker plays (so the filter is
+         * already adapted when hands-free barge-in arrives in Phase 4) and
+         * the aec_atten estimate sees real playback; with GL_LANE_DIAG the
+         * per-lane meters stay live too. Capture stays paused protocol-wise —
+         * no gain, no VAD, no frames sent (P3.3 scope). RX-only codec reads
+         * are duplex-safe against the feeder's TX writes (independent I2S
+         * channels on the shared clock). */
+        bool speaking_read = !listening && s_gl.state == GL_STATE_SPEAKING &&
+                             s_gl.adc && s_gl.adc_open && !s_gl.adc_codec_failed;
+#if GL_USE_AEC
+        speaking_read = speaking_read && (aec != NULL || GL_LANE_DIAG);
 #else
-        const bool diag_read = false;
+        speaking_read = speaking_read && GL_LANE_DIAG;
 #endif
         if (!listening) {
 #if GL_USE_LOCAL_VAD
             /* The task survives turn transitions now (P2.4): clear VAD state
              * across pauses so a stale "speech seen" cannot insta-commit the
              * next listening segment. */
-            vad_speech_ms   = 0;
-            vad_silence_ms  = 0;
-            vad_speech_seen = false;
+            vad_speech_frames  = 0;
+            vad_silence_frames = 0;
+            vad_speech_seen    = false;
 #endif
-            /* Stays pinned while paused (or diag-reading): the first 10
-             * LISTENING frames after any non-listening window are dropped. */
-            flush_frames = 10;
-            if (!diag_read) {
+            /* Stays pinned while paused (or speaking-reading): the first
+             * GL_CAPTURE_FLUSH_FRAMES LISTENING frames after any
+             * non-listening window are dropped. */
+            flush_frames = GL_CAPTURE_FLUSH_FRAMES;
+            if (!speaking_read) {
                 vTaskDelay(pdMS_TO_TICKS(10));
                 continue;
             }
@@ -1883,14 +2044,94 @@ static void gl_audio_tx_task(void *arg)
             continue;
         }
 
+        /* Mono uplink frame for this iteration: AEC-cleaned when the engine
+         * is live, raw demuxed mic otherwise (and on the raw-I2S fallback
+         * path, where the mono read above filled pcm directly). */
+        int16_t *frame = (int16_t *)pcm;
         if (four_lane) {
-            /* Demux the uplink mic out of the interleaved TDM frame using the
-             * MEASURED buffer-lane order (GL_MIC_LANE = a live MEMS mic). The
-             * reference lane (GL_REF_LANE) and the others feed only the
-             * lane_rms diagnostic here; the AEC consumes the ref in Phase 3. */
-            int16_t *mono = (int16_t *)pcm;
-            for (size_t i = 0; i < GL_TX_SAMPLES_PER_CHUNK; ++i) {
-                mono[i] = raw4[i * GL_CAPTURE_CHANNELS + GL_MIC_LANE];
+            /* Demux mic + hardware echo-ref out of the interleaved TDM frame
+             * using the MEASURED buffer-lane order ([REF][MIC][NC][MIC] — see
+             * GL_MIC_LANE / GL_REF_LANE). */
+#if GL_USE_AEC
+            if (aec) {
+                uint64_t raw_sumsq = 0;   /* pre-AEC mic energy, for aec_atten */
+                for (size_t i = 0; i < GL_TX_SAMPLES_PER_CHUNK; ++i) {
+                    int16_t m = raw4[i * GL_CAPTURE_CHANNELS + GL_MIC_LANE];
+                    aec_mic[i] = m;
+                    aec_ref[i] = raw4[i * GL_CAPTURE_CHANNELS + GL_REF_LANE];
+                    raw_sumsq += (uint64_t)((int32_t)m * (int32_t)m);
+                }
+                /* D4: synchronous cancellation, one 512-sample chunk per
+                 * read. The 6x digital gain + soft-knee run AFTER this, on
+                 * the clean mic only — never on the ref, never pre-AEC. */
+                int64_t aec_t0 = esp_timer_get_time();
+                aec_process(aec, aec_mic, aec_ref, aec_clean);
+                uint32_t cost_us = (uint32_t)(esp_timer_get_time() - aec_t0);
+                frame = aec_clean;
+                atomic_fetch_add(&s_aec_frames, 1);
+                if (aec_win_n < GL_AEC_STAT_FRAMES) {
+                    aec_cost_win[aec_win_n++] =
+                        (cost_us > 0xFFFF) ? 0xFFFF : (uint16_t)cost_us;
+                }
+                if (!listening) {
+                    /* SPEAKING read — echo present: feed the attenuation
+                     * estimate (raw-mic vs clean-mic RMS, P3.3 gate). */
+                    uint64_t clean_sumsq = 0;
+                    for (size_t i = 0; i < GL_TX_SAMPLES_PER_CHUNK; ++i) {
+                        int32_t c = aec_clean[i];
+                        clean_sumsq += (uint64_t)(c * c);
+                    }
+                    atten_raw_sumsq   += raw_sumsq;
+                    atten_clean_sumsq += clean_sumsq;
+                    atten_frames++;
+                }
+                if (aec_win_n >= GL_AEC_STAT_FRAMES) {
+                    /* ~10 s of processed frames: publish cost percentiles. */
+                    qsort(aec_cost_win, aec_win_n, sizeof(aec_cost_win[0]),
+                          gl_u16_cmp);
+                    uint16_t p50 = aec_cost_win[aec_win_n / 2];
+                    uint16_t p95 = aec_cost_win[(aec_win_n * 95) / 100];
+                    atomic_store(&s_aec_cost_p50_us, p50);
+                    atomic_store(&s_aec_cost_p95_us, p95);
+                    ESP_LOGI(TAG, "aec_cost: p50=%u us p95=%u us per %d ms frame (%u frames)",
+                             (unsigned)p50, (unsigned)p95, GL_TX_CHUNK_MS,
+                             (unsigned)aec_win_n);
+                    if (p95 > GL_AEC_COST_GATE_US) {
+                        /* R3 CPU gate: if this fires sustained, flip
+                         * GL_AEC_MODE to AEC_MODE_SR_HIGH_PERF (linear-only,
+                         * lighter) and re-measure. */
+                        ESP_LOGW(TAG, "aec_cost: p95 %u us exceeds the %u us gate (R3) — consider AEC_MODE_SR_HIGH_PERF",
+                                 (unsigned)p95, (unsigned)GL_AEC_COST_GATE_US);
+                    }
+                    if (atten_frames >= GL_AEC_ATTEN_MIN_FRAMES) {
+                        double nsamp = (double)atten_frames *
+                                       (double)GL_TX_SAMPLES_PER_CHUNK;
+                        double raw_rms   = sqrt((double)atten_raw_sumsq / nsamp);
+                        double clean_rms = sqrt((double)atten_clean_sumsq / nsamp);
+                        double atten_db  = (raw_rms > 1.0 && clean_rms > 1.0)
+                                           ? 20.0 * log10(raw_rms / clean_rms)
+                                           : 0.0;
+                        int32_t db10 = (int32_t)(atten_db * 10.0);
+                        atomic_store(&s_aec_atten_db10, db10);
+                        ESP_LOGI(TAG, "aec_atten: raw_rms=%d clean_rms=%d atten=%d.%u dB (%u playback frames)",
+                                 (int)raw_rms, (int)clean_rms,
+                                 (int)(db10 / 10),
+                                 (unsigned)((db10 < 0 ? -db10 : db10) % 10),
+                                 (unsigned)atten_frames);
+                    }
+                    aec_win_n         = 0;
+                    atten_raw_sumsq   = 0;
+                    atten_clean_sumsq = 0;
+                    atten_frames      = 0;
+                }
+            } else
+#endif
+            {
+                /* Degraded path (AEC unavailable): raw mic lane straight
+                 * through, pre-P3.3 behaviour. */
+                for (size_t i = 0; i < GL_TX_SAMPLES_PER_CHUNK; ++i) {
+                    frame[i] = raw4[i * GL_CAPTURE_CHANNELS + GL_MIC_LANE];
+                }
             }
 #if GL_LANE_DIAG
             for (size_t i = 0; i < GL_TX_SAMPLES_PER_CHUNK * GL_CAPTURE_CHANNELS; ) {
@@ -1926,7 +2167,8 @@ static void gl_audio_tx_task(void *arg)
         }
 
         if (!listening) {
-            /* Diag-only read during SPEAKING — never gain/VAD/send. */
+            /* Convergence/diag read during SPEAKING — never gain/VAD/send.
+             * Mic-during-playback (hands-free barge-in) flips on in Phase 4. */
             continue;
         }
 
@@ -1936,14 +2178,17 @@ static void gl_audio_tx_task(void *arg)
             continue;
         }
 
-        /* Digital mic-gain stage. ES7210 analog gain is already maxed (30 dB);
-         * still, normal-conversation RMS off this board sits ~50-300 raw, which
-         * is below the server VAD threshold for reliable speech detection. A
-         * 6x lift with 4:1 soft-knee above 24000 keeps loud speech from
-         * clipping while making quiet speech audible to the server. Both the
-         * visual mic_rms and the sent PCM see the gained signal. */
+        /* Digital mic-gain stage — runs on the AEC-cleaned mic only, after
+         * cancellation (D4: the gain + knee are nonlinear and would break AEC
+         * linearity if applied pre-AEC or to the ref). ES7210 analog gain is
+         * already maxed (30 dB); still, normal-conversation RMS off this board
+         * sits ~50-300 raw, below the server VAD threshold for reliable
+         * speech detection. A 6x lift with 4:1 soft-knee above 24000 keeps
+         * loud speech from clipping while making quiet speech audible to the
+         * server. Both the visual mic_rms and the sent PCM see the gained
+         * signal. */
         {
-            int16_t *s = (int16_t *)pcm;
+            int16_t *s = frame;
             const size_t n = GL_TX_PCM_BYTES / sizeof(int16_t);
             const int32_t knee = 24000;
             const int32_t gain = 6;
@@ -1960,52 +2205,56 @@ static void gl_audio_tx_task(void *arg)
         }
 
         /* Publish mic level for the LISTENING waveform. */
-        uint16_t mic_rms = gl_compute_rms((const int16_t *)pcm,
+        uint16_t mic_rms = gl_compute_rms(frame,
                                           GL_TX_PCM_BYTES / sizeof(int16_t));
         atomic_store(&s_mic_rms, mic_rms);
 
 #if GL_USE_LOCAL_VAD
-        /* Hands-free turn commit. Detect speech, then GL_VAD_HANG_MS of trailing
-         * silence. Runs here for precise per-frame (20 ms) timing but only
-         * *requests* the commit — the session task performs the end_input
-         * lifecycle, since this task cannot stop itself (gl_stop_tx_task waits
-         * on GL_BIT_TX_DONE). The request rides the same cmd_queue the HTTP
-         * and tap paths use; a duplicate commit is harmless because the
-         * consumer re-checks state (THINKING after the first one → no-op).
-         * The dead zone between SILENCE_RMS and SPEECH_RMS holds the current
-         * state, so mid-sentence dips don't end the turn early. */
+        /* Hands-free turn commit. Detect speech, then GL_VAD_HANG_FRAMES of
+         * trailing silence. Counted in 32 ms capture frames (D4 rechunk) so
+         * the thresholds track the cadence by construction. Runs here for
+         * precise per-frame timing but only *requests* the commit — the
+         * session task performs the end_input lifecycle, since this task
+         * cannot stop itself (gl_stop_tx_task waits on GL_BIT_TX_DONE). The
+         * request rides the same cmd_queue the HTTP and tap paths use; a
+         * duplicate commit is harmless because the consumer re-checks state
+         * (THINKING after the first one → no-op). The dead zone between
+         * SILENCE_RMS and SPEECH_RMS holds the current state, so mid-sentence
+         * dips don't end the turn early. */
         if (s_gl.state == GL_STATE_LISTENING) {
             if (mic_rms >= GL_VAD_SPEECH_RMS) {
-                vad_speech_ms += GL_TX_CHUNK_MS;
-                vad_silence_ms = 0;
-                if (vad_speech_ms >= GL_VAD_MIN_SPEECH_MS) {
+                vad_speech_frames++;
+                vad_silence_frames = 0;
+                if (vad_speech_frames >= GL_VAD_MIN_SPEECH_FRAMES) {
                     vad_speech_seen = true;
                 }
             } else if (mic_rms < GL_VAD_SILENCE_RMS) {
                 if (vad_speech_seen) {
-                    vad_silence_ms += GL_TX_CHUNK_MS;
-                    if (vad_silence_ms >= GL_VAD_HANG_MS) {
+                    vad_silence_frames++;
+                    if (vad_silence_frames >= GL_VAD_HANG_FRAMES) {
                         ESP_LOGI(TAG, "Local VAD: end of speech (%ums speech, %ums silence) -> commit turn",
-                                 (unsigned)vad_speech_ms, (unsigned)vad_silence_ms);
+                                 (unsigned)(vad_speech_frames * GL_TX_CHUNK_MS),
+                                 (unsigned)(vad_silence_frames * GL_TX_CHUNK_MS));
                         if (gl_post_cmd(GL_CMD_END_INPUT, NULL) == ESP_OK) {
                             /* Reset NOW, not on the next LISTENING entry: with
-                             * stale speech_seen + silence_ms the very next 20 ms
-                             * frame re-fired a second commit (seen live: two
-                             * "end of speech" logs 20 ms apart → double
-                             * end_input on one turn). */
-                            vad_speech_ms = 0;
-                            vad_silence_ms = 0;
-                            vad_speech_seen = false;
+                             * stale speech_seen + silence_frames the very next
+                             * capture frame re-fired a second commit (seen
+                             * live: two "end of speech" logs one frame apart →
+                             * double end_input on one turn). */
+                            vad_speech_frames  = 0;
+                            vad_silence_frames = 0;
+                            vad_speech_seen    = false;
                         }
                         /* post failed (queue full): keep the accumulators so
                          * the next silent frame retries the commit. */
                     }
-                } else if (vad_speech_ms > 0) {
+                } else if (vad_speech_frames > 0) {
                     /* Genuine silence before any utterance latched: decay the
-                     * accumulator so only *sustained* speech reaches MIN_SPEECH.
-                     * Without this, scattered noise spikes accumulate monotonically
-                     * and fire a phantom empty turn during a quiet room. */
-                    vad_speech_ms -= GL_TX_CHUNK_MS;
+                     * accumulator so only *sustained* speech reaches
+                     * MIN_SPEECH_FRAMES. Without this, scattered noise spikes
+                     * accumulate monotonically and fire a phantom empty turn
+                     * during a quiet room. */
+                    vad_speech_frames--;
                 }
             }
             /* dead zone (SILENCE_RMS..SPEECH_RMS): hold state, no add/decay. */
@@ -2024,12 +2273,12 @@ static void gl_audio_tx_task(void *arg)
         if (s_gl.state != GL_STATE_LISTENING || !s_gl.tx_frame_queue) {
             continue;   /* turn ended while we were reading — frame is stale */
         }
-        if (xQueueSend(s_gl.tx_frame_queue, pcm, 0) != pdTRUE) {
+        if (xQueueSend(s_gl.tx_frame_queue, frame, 0) != pdTRUE) {
             static uint8_t drop_scratch[GL_TX_PCM_BYTES];
             if (xQueueReceive(s_gl.tx_frame_queue, drop_scratch, 0) == pdTRUE) {
                 s_gl.tx_send_failures++;
             }
-            if (xQueueSend(s_gl.tx_frame_queue, pcm, 0) != pdTRUE) {
+            if (xQueueSend(s_gl.tx_frame_queue, frame, 0) != pdTRUE) {
                 s_gl.tx_send_failures++;
             }
         }
@@ -2037,6 +2286,25 @@ static void gl_audio_tx_task(void *arg)
 
     /* Mic is quiet once capture stops. */
     atomic_store(&s_mic_rms, 0);
+
+#if GL_USE_AEC
+    if (aec) {
+        size_t int_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        size_t spi_before = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        atomic_store(&s_aec_enabled, false);
+        aec_destroy(aec);
+        aec = NULL;
+        heap_caps_free(aec_mic);
+        heap_caps_free(aec_ref);
+        heap_caps_free(aec_clean);
+        aec_mic = aec_ref = aec_clean = NULL;
+        /* Heap delta at destroy (P0.4 doctrine): should mirror the create
+         * delta — a shrinking return value across sessions = an AEC leak. */
+        ESP_LOGI(TAG, "AEC: destroyed, heap delta int=+%d B psram=+%d B",
+                 (int)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) - int_before),
+                 (int)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) - spi_before));
+    }
+#endif
 
     ESP_LOGI(TAG, "Audio TX: stopped");
     xEventGroupSetBits(s_gl.ev, GL_BIT_TX_DONE);
@@ -2047,7 +2315,7 @@ static void gl_audio_tx_task(void *arg)
 }
 
 /* Drains the capture queue into the WS (P2.3/F10). ALL mic WS sends happen
- * here, off the 20 ms capture cadence; the worst-case block per frame is the
+ * here, off the 32 ms capture cadence; the worst-case block per frame is the
  * 500 ms mic send timeout, which only delays delivery, never capture. */
 static void gl_audio_tx_sender_task(void *arg)
 {
@@ -2136,9 +2404,9 @@ static void gl_start_tx_task(void)
     xEventGroupClearBits(s_gl.ev, GL_BIT_TX_STOP | GL_BIT_TX_DONE | GL_BIT_TXS_DONE);
     static const claw_task_config_t tx_cfg = {
         .name         = "gl_audio_tx",
-        .stack_size   = 8192,
+        .stack_size   = 12288,        /* +4 KB for the synchronous aec_process (D4) */
         .priority     = 6,
-        .core_id      = tskNO_AFFINITY,
+        .core_id      = 1,            /* away from the Wi-Fi/lwIP core (D4) */
         .stack_policy = CLAW_TASK_STACK_PREFER_PSRAM,
     };
     static const claw_task_config_t txs_cfg = {
@@ -3415,7 +3683,7 @@ static esp_err_t gl_gateway_start(void)
         }
     }
     if (!s_gl.tx_frame_queue) {
-        /* By-value 20 ms mic frames (P2.3): 16 × 640 B, one-time allocation. */
+        /* By-value 32 ms mic frames (P2.3): 16 × 1024 B, one-time allocation. */
         s_gl.tx_frame_queue = xQueueCreate(GL_TX_FRAME_QUEUE_DEPTH, GL_TX_PCM_BYTES);
         if (!s_gl.tx_frame_queue) {
             err = ESP_ERR_NO_MEM;
@@ -3638,6 +3906,14 @@ void cap_gemini_live_print_diagnostics(void)
            (unsigned)(s_gl.tx_frame_queue ? uxQueueMessagesWaiting(s_gl.tx_frame_queue) : 0),
            (unsigned)atomic_load(&s_tool_inflight),
            (unsigned)s_gl.last_first_audio_ms);
+#if GL_USE_AEC
+    printf("  aec: enabled=%d frames=%u cost_p50_us=%u cost_p95_us=%u atten_db10=%d\n",
+           (int)atomic_load(&s_aec_enabled),
+           (unsigned)atomic_load(&s_aec_frames),
+           (unsigned)atomic_load(&s_aec_cost_p50_us),
+           (unsigned)atomic_load(&s_aec_cost_p95_us),
+           (int)atomic_load(&s_aec_atten_db10));
+#endif
     printf("  tasks: tx=%d sender=%d feeder=%d tool=%d pending_resume=%d\n",
            (int)(s_gl.tx_task != NULL),
            (int)(s_gl.tx_sender_task != NULL),
@@ -3727,8 +4003,18 @@ esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size)
                             s_gl.last_resume_reason[0] ? s_gl.last_resume_reason : "-");
     cJSON_AddNumberToObject(root, "mic_level", (double)cap_gemini_live_get_mic_level());
     cJSON_AddNumberToObject(root, "output_level", (double)cap_gemini_live_get_output_level());
+#if GL_USE_AEC
+    /* P3.3 instrumentation: AEC health — engine state, per-frame cost
+     * percentiles (last ~10 s window, us) and the playback echo-attenuation
+     * estimate (raw-mic vs clean-mic RMS, dB; >0 means echo removed). */
+    cJSON_AddBoolToObject(root, "aec_enabled", atomic_load(&s_aec_enabled));
+    cJSON_AddNumberToObject(root, "aec_frames", (double)atomic_load(&s_aec_frames));
+    cJSON_AddNumberToObject(root, "aec_cost_p50_us", (double)atomic_load(&s_aec_cost_p50_us));
+    cJSON_AddNumberToObject(root, "aec_cost_p95_us", (double)atomic_load(&s_aec_cost_p95_us));
+    cJSON_AddNumberToObject(root, "aec_atten_db", (double)atomic_load(&s_aec_atten_db10) / 10.0);
+#endif
 #if GL_LANE_DIAG
-    /* TEMPORARY (Phase 2): raw per-lane capture levels, last 1 s window. */
+    /* Raw per-lane capture levels, last 1 s window (aec_atten cross-check). */
     {
         cJSON *lr = cJSON_AddArrayToObject(root, "lane_rms");
         cJSON *lp = cJSON_AddArrayToObject(root, "lane_peak");

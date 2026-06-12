@@ -16,6 +16,7 @@ idf_component_register(
         esp_http_client
         esp-tls
         espressif__esp_codec_dev
+        espressif__esp-sr
         espressif__esp_board_manager
         esp_lcd_touch
         jarvis_brain
