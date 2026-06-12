@@ -39,6 +39,10 @@ typedef struct {
     float    pitch_deg;     /* tilt fore/aft, atan2(ax, sqrt(ay^2+az^2))         */
     float    roll_deg;      /* tilt left/right, atan2(ay, az)                    */
     const char *orientation;/* coarse face: "face_up"/"face_down"/"tilted"/...   */
+    float    motion_mg;     /* motion energy: std-dev of |accel| over a short    */
+                            /* on-demand burst, in milli-g (≈0 at rest)          */
+    bool     moving;        /* motion_mg above the "handled/picked-up" threshold */
+    bool     shake;         /* motion_mg above the "shaken" threshold            */
 } jarvis_imu_t;
 
 /**

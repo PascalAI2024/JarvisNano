@@ -877,6 +877,9 @@ handler = '''static esp_err_t imu_handler(httpd_req_t *req)
     cJSON_AddNumberToObject(root, "gz", imu.gz);
     cJSON_AddNumberToObject(root, "pitch", imu.pitch_deg);
     cJSON_AddNumberToObject(root, "roll", imu.roll_deg);
+    cJSON_AddNumberToObject(root, "motion_mg", imu.motion_mg);
+    cJSON_AddBoolToObject(root, "moving", imu.moving);
+    cJSON_AddBoolToObject(root, "shake", imu.shake);
     http_server_json_add_string(root, "orientation", imu.orientation);
     http_server_json_add_string(root, "source", "qmi8658");
     return http_server_send_json_response(req, root);

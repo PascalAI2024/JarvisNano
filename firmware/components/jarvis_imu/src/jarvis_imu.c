@@ -169,5 +169,33 @@ esp_err_t jarvis_imu_read(jarvis_imu_t *out)
     out->roll_deg  = atan2f(out->gy, out->gz) * RAD_TO_DEG;
     out->orientation = orientation_from_g(out->gx, out->gy, out->gz);
 
+    /* Motion energy: std-dev of the accel-vector magnitude over a short on-demand
+     * burst (~40 ms). At rest this sits near 0; handling pushes it up, a shake
+     * spikes it. This is a deliberate burst inside the call, NOT a background
+     * poller — the shared I2C bus stays quiet between requests. */
+    const int N = 8;
+    float mag[8];
+    float sum = 0.0f;
+    for (int i = 0; i < N; i++) {
+        int16_t bx = imu_read_axis(QMI8658_REG_AX_L);
+        int16_t by = imu_read_axis(QMI8658_REG_AX_L + 2);
+        int16_t bz = imu_read_axis(QMI8658_REG_AX_L + 4);
+        float fx = (float)bx / QMI8658_ACC_LSB_PER_G;
+        float fy = (float)by / QMI8658_ACC_LSB_PER_G;
+        float fz = (float)bz / QMI8658_ACC_LSB_PER_G;
+        mag[i] = sqrtf(fx * fx + fy * fy + fz * fz);
+        sum += mag[i];
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    float mean = sum / N;
+    float var = 0.0f;
+    for (int i = 0; i < N; i++) {
+        float d = mag[i] - mean;
+        var += d * d;
+    }
+    out->motion_mg = sqrtf(var / N) * 1000.0f;   /* g -> milli-g */
+    out->moving = out->motion_mg > 50.0f;        /* handled / picked up */
+    out->shake  = out->motion_mg > 350.0f;       /* deliberate shake    */
+
     return ESP_OK;
 }
