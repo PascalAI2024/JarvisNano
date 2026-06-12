@@ -79,7 +79,13 @@ esp_err_t emote_face_get_debug(emote_face_debug_t *out);
 
 /* Debug-only display snapshot mirror. The emote flush path records the exact
  * RGB565 pixels last sent to the panel so HTTP diagnostics can export a screen
- * capture without relying on panel readback. */
+ * capture without relying on panel readback.
+ *
+ * The mirror is consumer-gated (STABILITY_PLAN P2.6): per-strip copies only run
+ * while a consumer has been seen within the last ~10 s. Both getters below mark
+ * the consumer as active (re-arming the mirror), so the first request after an
+ * idle period may return one stale frame — the next flush refreshes it. With no
+ * consumer the flush path is a single flag check: no mutex take, no memcpy. */
 typedef struct {
     uint16_t width;
     uint16_t height;
@@ -93,6 +99,12 @@ esp_err_t emote_display_snapshot_get_info(emote_display_snapshot_info_t *out);
 esp_err_t emote_display_snapshot_copy_rgb565(void *dst,
                                              size_t dst_size,
                                              emote_display_snapshot_info_t *out);
+
+/* Mark a snapshot consumer as active, (re-)arming the mirror for ~10 s. Called
+ * internally by both getters above; exposed for any consumer path that wants to
+ * pre-arm the mirror without reading it (e.g. an HTTP layer outside this
+ * component). Safe from any task; never blocks. */
+void emote_display_snapshot_notify_consumer(void);
 
 #ifdef __cplusplus
 }

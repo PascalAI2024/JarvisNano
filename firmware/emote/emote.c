@@ -41,6 +41,10 @@ static uint64_t s_snapshot_frame_id;
 static uint64_t s_snapshot_last_flush_ms;
 static bool s_snapshot_valid;
 static bool s_snapshot_alloc_logged;
+/* Last time a snapshot consumer was seen (ms tick, 0 = never). Written by the
+ * httpd task, read lock-free by the render task per strip — a 32-bit aligned
+ * store/load is atomic on Xtensa, and unsigned-subtract compare is wrap-safe. */
+static volatile uint32_t s_snapshot_consumer_ms;
 static SemaphoreHandle_t s_flush_done;
 static bool s_flush_sync_registered;
 static uint32_t s_flush_timeouts;
@@ -48,6 +52,9 @@ static uint32_t s_flush_timeouts;
 #define EMOTE_FLUSH_WAIT_MS        80
 #define EMOTE_FLUSH_TIMEOUT_LIMIT  3
 #define EMOTE_FLUSH_STRIP_ROWS     12
+/* P2.6: how long after the last /api/display/snapshot* read the mirror keeps
+ * recording flushes before idling off. */
+#define EMOTE_SNAPSHOT_CONSUMER_IDLE_MS 10000
 
 static IRAM_ATTR bool emote_panel_io_done_cb(esp_lcd_panel_io_handle_t panel_io,
                                              esp_lcd_panel_io_event_data_t *edata,
@@ -211,9 +218,37 @@ static esp_err_t emote_snapshot_ensure_buffer(void)
     return ESP_OK;
 }
 
+void emote_display_snapshot_notify_consumer(void)
+{
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    if (now == 0) {
+        now = 1; /* 0 is reserved for "never seen a consumer" */
+    }
+    s_snapshot_consumer_ms = now;
+}
+
+static bool emote_snapshot_consumer_active(void)
+{
+    uint32_t last = s_snapshot_consumer_ms;
+    if (last == 0) {
+        return false;
+    }
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    return (uint32_t)(now - last) <= EMOTE_SNAPSHOT_CONSUMER_IDLE_MS;
+}
+
 static void emote_snapshot_record_flush(int x_start, int y_start, int x_end, int y_end,
                                         const void *data)
 {
+    /* P2.6: the mirror only records while someone is watching. With no
+     * snapshot read in the last EMOTE_SNAPSHOT_CONSUMER_IDLE_MS this is a
+     * lock-free u32 compare and early return — zero per-strip mutex takes,
+     * zero memcpy (~13 MB/s of PSRAM write traffic reclaimed), and the
+     * 434 KB mirror buffer is not even allocated until a consumer shows up. */
+    if (!emote_snapshot_consumer_active()) {
+        return;
+    }
+
     if (!data || emote_snapshot_ensure_buffer() != ESP_OK || !s_snapshot_mx) {
         return;
     }
@@ -281,6 +316,11 @@ esp_err_t emote_display_snapshot_get_info(emote_display_snapshot_info_t *out)
     ESP_RETURN_ON_FALSE(out != NULL, ESP_ERR_INVALID_ARG, TAG, "snapshot info is NULL");
     memset(out, 0, sizeof(*out));
 
+    /* Every read re-arms the mirror. The first request after an idle gap
+     * serves whatever is in the buffer (one possibly stale frame — accepted
+     * per P2.6); the next flush refreshes it. */
+    emote_display_snapshot_notify_consumer();
+
     if (emote_snapshot_ensure_buffer() != ESP_OK || !s_snapshot_mx) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -296,7 +336,11 @@ esp_err_t emote_display_snapshot_get_info(emote_display_snapshot_info_t *out)
     out->valid = s_snapshot_valid;
     xSemaphoreGive(s_snapshot_mx);
 
-    return out->valid ? ESP_OK : ESP_ERR_INVALID_STATE;
+    /* Once the buffer exists the snapshot is served as-is even before the
+     * first armed flush lands (valid=false -> zeroed/blank frame): "respond
+     * with whatever is available" (P2.6). The flush we just re-armed
+     * refreshes it within one engine frame. */
+    return ESP_OK;
 }
 
 esp_err_t emote_display_snapshot_copy_rgb565(void *dst,
@@ -388,7 +432,8 @@ static emote_config_t emote_get_default_config(void)
         .gfx_emote = {
             .h_res = s_lcd_width,
             .v_res = s_lcd_height,
-            .fps = 30,
+            /* 24 fps: panel ceiling is ~23 fps (466*466*2 B/frame over 4-line QSPI @ 20 MHz pclk ≈ 10 MB/s) — 30 just rendered frames the panel can't take (P2.7) */
+            .fps = 24,
         },
         .buffers = {
             .buf_pixels = (size_t)s_lcd_width * EMOTE_FLUSH_STRIP_ROWS,

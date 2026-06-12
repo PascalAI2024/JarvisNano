@@ -166,6 +166,7 @@ copy_http_display_diagnostics() {
     local src="$ROOT/firmware/http_server/http_server_display_api.c"
     local touch_src="$ROOT/firmware/http_server/http_server_touch_api.c"
     local audio_src="$ROOT/firmware/http_server/http_server_audio_level_api.c"
+    local debug_src="$ROOT/firmware/http_server/http_server_debug_api.c"
     local dst_dir="$ESP_CLAW_DIR/application/edge_agent/components/http_server"
     local cmake="$dst_dir/CMakeLists.txt"
     local priv="$dst_dir/http_server_priv.h"
@@ -174,11 +175,13 @@ copy_http_display_diagnostics() {
     [ -f "$src" ] || die "missing vendored display HTTP API at $src"
     [ -f "$touch_src" ] || die "missing vendored touch HTTP API at $touch_src"
     [ -f "$audio_src" ] || die "missing vendored audio-level HTTP API at $audio_src"
+    [ -f "$debug_src" ] || die "missing vendored debug HTTP API at $debug_src"
     [ -d "$dst_dir" ] || die "http_server component not found at $dst_dir"
     log "copying display/touch/audio diagnostics HTTP API → upstream tree"
     cp -f "$src" "$dst_dir/http_server_display_api.c"
     cp -f "$touch_src" "$dst_dir/http_server_touch_api.c"
     cp -f "$audio_src" "$dst_dir/http_server_audio_level_api.c"
+    cp -f "$debug_src" "$dst_dir/http_server_debug_api.c"
     python3 - "$cmake" "$priv" "$core" "$public_h" <<'PY'
 import pathlib
 import sys
@@ -199,6 +202,11 @@ if '"http_server_touch_api.c"' not in s:
     if anchor not in s:
         raise SystemExit("http_server CMake touch source anchor missing")
     s = s.replace(anchor, anchor + '        "http_server_touch_api.c"\n', 1)
+if '"http_server_debug_api.c"' not in s:
+    anchor = '        "http_server_touch_api.c"\n'
+    if anchor not in s:
+        raise SystemExit("http_server CMake debug source anchor missing")
+    s = s.replace(anchor, anchor + '        "http_server_debug_api.c"\n', 1)
 for dep in ("heap", "emote"):
     if f"        {dep}\n" not in s:
         anchor = "        esp_timer\n"
@@ -220,6 +228,12 @@ if touch_decl not in h:
     if anchor not in h:
         raise SystemExit("http_server_priv touch decl anchor missing")
     h = h.replace(anchor, anchor + touch_decl, 1)
+debug_decl = "esp_err_t http_server_register_debug_routes(httpd_handle_t server);\n"
+if debug_decl not in h:
+    anchor = "esp_err_t http_server_register_touch_routes(httpd_handle_t server);\n"
+    if anchor not in h:
+        raise SystemExit("http_server_priv debug decl anchor missing")
+    h = h.replace(anchor, anchor + debug_decl, 1)
 priv.write_text(h)
 
 c = core.read_text()
@@ -235,6 +249,11 @@ if "http_server_register_touch_routes" not in c:
     if anchor not in c:
         raise SystemExit("http_server_core touch route anchor missing")
     c = c.replace(anchor, anchor + '    ESP_RETURN_ON_ERROR(http_server_register_touch_routes(s_ctx.server), TAG, "Failed to register touch routes");\n', 1)
+if "http_server_register_debug_routes" not in c:
+    anchor = '    ESP_RETURN_ON_ERROR(http_server_register_touch_routes(s_ctx.server), TAG, "Failed to register touch routes");\n'
+    if anchor not in c:
+        raise SystemExit("http_server_core debug route anchor missing")
+    c = c.replace(anchor, anchor + '    ESP_RETURN_ON_ERROR(http_server_register_debug_routes(s_ctx.server), TAG, "Failed to register debug routes");\n', 1)
 core.write_text(c)
 
 hp = public_h.read_text()
@@ -886,13 +905,19 @@ apply_imu_read_patch() {
         log "http status route sources not found — skipping IMU read patch"
         return
     fi
-    if grep -q "jarvis_imu_read" "$status" 2>/dev/null; then
+    # Content-keyed guard: the version marker is emitted into the generated
+    # handler, so a stale handler body on an incremental tree self-upgrades
+    # instead of being skipped on symbol presence (STABILITY_PLAN.md backlog).
+    # Process discipline: bump the marker version (v1→v2…) any time the
+    # handler body in the heredoc below changes.
+    if grep -q "jarvis-imu-handler v1" "$status" 2>/dev/null; then
         log "QMI8658 IMU read patch already applied"
         return
     fi
     log "applying QMI8658 IMU read (jarvis_imu → /api/imu)"
     python3 - <<PY
 import pathlib
+import re
 status = pathlib.Path(r"$status")
 cmake = pathlib.Path(r"$cmake")
 
@@ -907,13 +932,23 @@ if '#include "jarvis_imu.h"' not in s:
     else:
         raise SystemExit("could not locate status API include anchor in %s" % status)
 
-# 2. Insert imu_handler just before restart_handler.
+# 2. Insert imu_handler just before restart_handler. Strip any stale handler
+#    first (any marker version, or a pre-marker body) so incremental trees
+#    self-upgrade to the current heredoc — the same self-cleaning idiom
+#    apply_battery_real_read_patch uses for battery_handler.
+handler_re = re.compile(
+    r"(?:/\* jarvis-imu-handler v\d+[^\n]*\*/\n)?static esp_err_t imu_handler\(httpd_req_t \*req\)\n\{\n.*?\n\}\n\n",
+    re.DOTALL,
+)
+s = handler_re.sub("", s)
+
 end_marker = "static esp_err_t restart_handler(httpd_req_t *req)\n"
 idx = s.find(end_marker)
 if idx == -1:
     raise SystemExit("could not locate restart_handler in %s" % status)
 
-handler = '''static esp_err_t imu_handler(httpd_req_t *req)
+handler = '''/* jarvis-imu-handler v1 — bump version when this body changes */
+static esp_err_t imu_handler(httpd_req_t *req)
 {
     cJSON *root = cJSON_CreateObject();
     if (!root) {
@@ -947,8 +982,7 @@ handler = '''static esp_err_t imu_handler(httpd_req_t *req)
 }
 
 '''
-if "imu_handler" not in s:
-    s = s[:idx] + handler + s[idx:]
+s = s[:idx] + handler + s[idx:]
 
 # 3. Register the /api/imu route after /api/battery.
 route_anchor = '        { .uri = "/api/battery", .method = HTTP_GET, .handler = battery_handler },\n'
@@ -1588,6 +1622,41 @@ if '"/api/health"' not in s:
         1,
     )
 
+status.write_text(s)
+print("patched", status)
+PY
+}
+
+# Follow-on to apply_http_health_patch (STABILITY_PLAN P0.4): add internal/SPIRAM
+# heap detail to /api/health. Kept as a SEPARATE patch because the health patch's
+# outer guard (grep -q "/api/health") skips already-patched trees — a follow-on
+# patch is the only path that converges fresh clones and existing trees alike.
+# esp_heap_caps.h is already included by apply_http_health_patch.
+apply_http_health_heap_fields_patch() {
+    local status="$ESP_CLAW_DIR/application/edge_agent/components/http_server/http_server_status_api.c"
+    if [ ! -f "$status" ]; then
+        log "http status route source not found — skipping health heap fields patch"
+        return
+    fi
+    if grep -q "internal_largest_free_block" "$status" 2>/dev/null; then
+        log "HTTP health heap fields patch already applied"
+        return
+    fi
+    log "applying health heap fields patch (STABILITY_PLAN P0.4)"
+    python3 - <<PY
+import pathlib
+status = pathlib.Path(r"$status")
+s = status.read_text()
+anchor = '    cJSON_AddNumberToObject(root, "min_free_heap", heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));\n'
+if anchor not in s:
+    raise SystemExit(f"could not locate health heap fields insertion point in {status}")
+fields = (
+    '    cJSON_AddNumberToObject(root, "internal_free", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));\n'
+    '    cJSON_AddNumberToObject(root, "internal_largest_free_block", heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));\n'
+    '    cJSON_AddNumberToObject(root, "spiram_free", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));\n'
+    '    cJSON_AddNumberToObject(root, "spiram_largest_free_block", heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));\n'
+)
+s = s.replace(anchor, anchor + fields, 1)
 status.write_text(s)
 print("patched", status)
 PY
@@ -2553,7 +2622,11 @@ p = pathlib.Path(sys.argv[1])
 s = p.read_text()
 replacements = {
     ".double_buffer = false,": ".double_buffer = true,",
-    ".fps = 10,": ".fps = 30,",
+    # P2.7: 24 fps matches the QSPI panel ceiling (~23 fps). copy_emote_runtime
+    # already ships canonical emote.c at 24; these mappings are defensive so a
+    # build path that skipped the copy still converges on 24 instead of 30.
+    ".fps = 10,": ".fps = 24,",
+    ".fps = 30,": ".fps = 24,",
     ".buf_pixels = (size_t)s_lcd_width * 16,": ".buf_pixels = (size_t)s_lcd_width * EMOTE_FLUSH_STRIP_ROWS,",
     ".buf_pixels = (size_t)s_lcd_width * (s_lcd_height / 4),": ".buf_pixels = (size_t)s_lcd_width * EMOTE_FLUSH_STRIP_ROWS,",
     ".buf_pixels = (size_t)s_lcd_width * 48,": ".buf_pixels = (size_t)s_lcd_width * EMOTE_FLUSH_STRIP_ROWS,",
@@ -3103,6 +3176,7 @@ main() {
     apply_gemini_live_nonblocking_stop_patch
     apply_http_wifi_scan_patch
     apply_http_health_patch
+    apply_http_health_heap_fields_patch
     copy_http_display_diagnostics
     apply_battery_real_read_patch
     apply_imu_read_patch
