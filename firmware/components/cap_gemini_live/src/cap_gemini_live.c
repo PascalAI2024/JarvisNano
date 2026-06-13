@@ -140,7 +140,7 @@ static void   gl_dac_mute(bool mute);
  * the 16 kHz session clock (32 kB/s) buffers ~32 s of model speech — a whole
  * burst reply. Allocation degrades by halving down to the floor instead of
  * failing the session (P2.2/F9). */
-#define GL_PCM_RING_BYTES        (1024 * 1024)
+#define GL_PCM_RING_BYTES        (512 * 1024)   /* ~16 s @16k; halved 2026-06-12 to free PSRAM for the AEC engine (was 1 MB; decode-buf OOM under AEC) */
 #define GL_PCM_RING_MIN_BYTES    (128 * 1024)
 #define GL_FEEDER_CHUNK_BYTES    2560          /* 80 ms @ 16 kHz mono s16 per DAC write — small enough that an
                                                 * interrupt flush takes effect within one chunk (P3.1 < 200 ms) */
@@ -184,6 +184,14 @@ static void   gl_dac_mute(bool mute);
 #define GL_MIC_LANE              1   /* buffer lane: live MEMS mic (uplink)        */
 #define GL_REF_LANE              0   /* buffer lane: MIC3 echo reference (Phase 3) */
 #define GL_REF_CHIP_MASK_BIT     2   /* es7210 chip MIC3 → REG45 (gain-mask space) */
+/* AEC gain staging (calibration 2026-06-12). The +30 dB MEMS-mic PGA railed the
+ * echo at full scale (peak 32767, uncancellable nonlinearity) while the ref sat
+ * ~35 dB lower at 0 dB. A linear AEC needs an UNCLIPPED mic and a ref at a level
+ * comparable to the echo-in-mic. Measured SPEAKING echo-in-mic rms ~10000 @30 dB
+ * vs ref rms ~175 @0 dB: cut the mics 12 dB (echo peak ~8200, unclipped) and
+ * raise the ref 24 dB (~2800, ≈ post-cut echo ~2500). Tune from aec_atten_db. */
+#define GL_MIC_PGA_DB            6    /* MEMS mics (chip MIC1/MIC2, mask 0|1) — unclips echo; measured ~18 dB AEC suppression at this pairing (2026-06-13) */
+#define GL_REF_PGA_DB            12   /* echo reference (chip MIC3, mask bit 2) — matched to the post-cut echo level */
 /* Make-up gain + soft-knee limiter for model audio. Measured PCM is speech with
  * a high crest factor: peaks ~80% full-scale but RMS only ~15%, so it sounds
  * quiet. A flat gain big enough to raise the average hard-clips the peaks into
@@ -251,7 +259,7 @@ static void   gl_dac_mute(bool mute);
  * fixed it; the flag never ran with the gained signal (git log -S, see
  * aec-barge-in.md "Findings"). Re-enabled for P3.4 with the AEC (P3.3)
  * removing the echo confound for the during-playback stream. */
-#define GL_USE_SERVER_VAD        1
+#define GL_USE_SERVER_VAD        0  /* manual mode + LOCAL barge detector (chosen 2026-06-13). Server VAD needs a continuous uplink the server stops draining post-turn -> socket backs up -> transport_poll_write(0) deaths. Local barge on the AEC-cleaned mic is faster (~200 ms) and never floods. */
 
 /* On-device VAD (hands-free turn commit). Server VAD does not return
  * serverContent on this Waveshare board (see above), so instead of disabling
@@ -301,7 +309,7 @@ static void   gl_dac_mute(bool mute);
  * the 250 ms target; measured per event as `barge_latency` in the log.
  * Requires a live AEC engine: with the AEC degraded the detector stays OFF
  * (raw echo would self-trigger) and barge-in remains tap-only. */
-#define GL_BARGE_RMS             2500
+#define GL_BARGE_RMS             9000   /* measured no-self-interrupt floor at out_vol=100 (2026-06-13): residual-echo peaks sit at 6000-9000 post-AEC+6x, 9000 gives 0 self-barge over many replies while a real interruption (voice stacked on the residual) clears it. Runtime-tunable: /api/debug/gain?barge=N (lower for more sensitivity, accepting rare self-barge). */
 #define GL_BARGE_LATCH_FRAMES    3
 /* Auto-VAD stream contract: an uplink pause longer than this must be flushed
  * with realtimeInput.audioStreamEnd or the server keeps stale cached audio
@@ -323,8 +331,8 @@ static void   gl_dac_mute(bool mute);
 #define GL_AEC_MODE              AEC_MODE_FD_LOW_COST
 #define GL_AEC_FILTER_LENGTH     4              /* esp_aec.h recommended value */
 #define GL_AEC_COST_GATE_US      10000          /* <10 ms per 32 ms frame (R3) */
-#define GL_AEC_STAT_FRAMES       (10000 / GL_TX_CHUNK_MS)  /* ~10 s stats window */
-#define GL_AEC_ATTEN_MIN_FRAMES  31             /* ≥~1 s of playback in the window */
+#define GL_AEC_STAT_FRAMES       60             /* ~2 s stats window (AEC now runs SPEAKING-only, so this is ~2 s of speech) — short enough to publish aec_atten/aec_cost on brief replies */
+#define GL_AEC_ATTEN_MIN_FRAMES  15             /* ≥~0.5 s of playback in the window */
 
 /* Per-lane capture diagnostic (Phase 2 bring-up tool, retained through the
  * AEC verification phases): the capture task logs one I-level `lane_rms` line
@@ -617,6 +625,12 @@ static _Atomic uint16_t s_out_rms;   /* decoded playback level (SPEAKING) */
  * during SPEAKING. Atomic so the CLI (gemini-live --barge-rms) can calibrate
  * it live mid-session without a reflash. 0 disables the detector. */
 static _Atomic uint16_t s_barge_rms = GL_BARGE_RMS;
+/* Runtime-tunable AEC gain staging (calibration 2026-06-12). Sweep live via
+ * GET /api/debug/gain?mic=&ref=&vol= — no reflash needed. Defaults track the
+ * #defines; mic/ref are ES7210 PGA dB, out_vol is the ES8311 0-100 scale. */
+static _Atomic int      s_mic_pga_db = GL_MIC_PGA_DB;
+static _Atomic int      s_ref_pga_db = GL_REF_PGA_DB;
+static _Atomic int      s_out_vol    = 100;
 
 #if GL_LANE_DIAG
 /* Last 1 s window of raw per-lane RMS/peak, published by the capture task,
@@ -1039,7 +1053,7 @@ static int gl_open_dac(uint32_t sample_rate)
         if (r == ESP_CODEC_DEV_OK) {
             s_gl.dac_codec_failed = false;
             esp_codec_dev_set_out_mute(s_gl.dac, false);
-            esp_codec_dev_set_out_vol(s_gl.dac, 100);
+            esp_codec_dev_set_out_vol(s_gl.dac, atomic_load(&s_out_vol));
             s_gl.dac_open = true;
             s_gl.dac_rate = sample_rate;
             return r;
@@ -1062,6 +1076,22 @@ static int gl_open_dac(uint32_t sample_rate)
         gl_set_audio_error("DAC open failed (codec handle)");
     }
     return ESP_ERR_INVALID_STATE;
+}
+
+/* Apply the runtime-tunable per-channel input PGA to the open ADC: MEMS mics
+ * (chip MIC1/MIC2 = mask bits 0|1) and the echo reference (chip MIC3 =
+ * GL_REF_CHIP_MASK_BIT). Safe from any task — set_in_channel_gain is an I2C
+ * control write, off the I2S read path. Driven by s_mic_pga_db / s_ref_pga_db. */
+static void gl_apply_in_gains(void)
+{
+    if (!s_gl.adc || s_gl.adc_codec_failed) {
+        return;
+    }
+    esp_codec_dev_set_in_channel_gain(s_gl.adc,
+        ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) |
+        ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1), (float)atomic_load(&s_mic_pga_db));
+    esp_codec_dev_set_in_channel_gain(s_gl.adc,
+        ESP_CODEC_DEV_MAKE_CHANNEL_MASK(GL_REF_CHIP_MASK_BIT), (float)atomic_load(&s_ref_pga_db));
 }
 
 static int gl_open_adc(uint32_t sample_rate)
@@ -1099,11 +1129,7 @@ static int gl_open_adc(uint32_t sample_rate)
              * mask bits 0/1; uplink level unchanged vs the old all-channel
              * set_in_gain), drop the ref (chip MIC3 → REG45 = mask bit 2) to
              * 0 dB. These masks are CHIP-mic indices, not buffer lanes. */
-            esp_codec_dev_set_in_channel_gain(s_gl.adc,
-                ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) |
-                ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1), 30.0f);
-            esp_codec_dev_set_in_channel_gain(s_gl.adc,
-                ESP_CODEC_DEV_MAKE_CHANNEL_MASK(GL_REF_CHIP_MASK_BIT), 0.0f);
+            gl_apply_in_gains();
             s_gl.adc_open = true;
             s_gl.adc_rate = sample_rate;
             return r;
@@ -2200,7 +2226,12 @@ static void gl_audio_tx_task(void *arg)
              * using the MEASURED buffer-lane order ([REF][MIC][NC][MIC] — see
              * GL_MIC_LANE / GL_REF_LANE). */
 #if GL_USE_AEC
-            if (aec) {
+            /* Run the canceller only while the model is SPEAKING — that is the
+             * only time there is echo to cancel. During LISTENING it would burn
+             * ~37% of core 1 on silence and starve the Wi-Fi/sender path
+             * (2026-06-12: contributor to transport_poll_write(0) deaths). The
+             * else branch passes the raw demuxed mic for local VAD. */
+            if (aec && speaking) {
                 uint64_t raw_sumsq = 0;   /* pre-AEC mic energy, for aec_atten */
                 for (size_t i = 0; i < GL_TX_SAMPLES_PER_CHUNK; ++i) {
                     int16_t m = raw4[i * GL_CAPTURE_CHANNELS + GL_MIC_LANE];
@@ -2476,7 +2507,16 @@ static void gl_audio_tx_task(void *arg)
                       s_gl.state == GL_STATE_THINKING ||
                       (s_gl.state == GL_STATE_SPEAKING && aec_live));
         } else {
-            uplink = (s_gl.state == GL_STATE_LISTENING);
+            /* manual mode: stream ACTIVE speech only, never idle silence.
+             * A silent LISTENING uplink has no server-side consumer once the
+             * turn ends, so the TCP send buffer backs up until the socket write
+             * returns 0 (transport_poll_write(0)) and the WS tears the session
+             * down — observed ~7.5 s into every post-turn listen (2026-06-12).
+             * The local VAD above still sees every frame (commit timing intact);
+             * vad_speech_seen gives the mid-utterance hangover and the energy
+             * test catches onset before the VAD latches. */
+            uplink = (s_gl.state == GL_STATE_LISTENING) &&
+                     (vad_speech_seen || mic_rms >= GL_VAD_SILENCE_RMS);
         }
         if (!uplink || !s_gl.tx_frame_queue) {
             continue;
@@ -2635,7 +2675,11 @@ static void gl_start_tx_task(void)
         .name         = "gl_tx_sender",
         .stack_size   = 8192,
         .priority     = 5,
-        .core_id      = tskNO_AFFINITY,
+        .core_id      = 0,            /* pin to the Wi-Fi/lwIP core (2026-06-12):
+                                       * tskNO_AFFINITY let it land on core 1 where
+                                       * the prio-6 capture+AEC task preempted it,
+                                       * stalling the socket drain -> transport_poll_write(0)
+                                       * every session. */
         .stack_policy = CLAW_TASK_STACK_PREFER_PSRAM,
     };
     if (claw_task_create(&tx_cfg, gl_audio_tx_task, NULL, &s_gl.tx_task) != pdPASS) {
@@ -4264,6 +4308,9 @@ esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size)
     cJSON_AddBoolToObject(root, "server_vad", GL_USE_SERVER_VAD != 0);
     cJSON_AddNumberToObject(root, "barge_hits", (double)s_gl.barge_hits);
     cJSON_AddNumberToObject(root, "barge_rms_threshold", (double)atomic_load(&s_barge_rms));
+    cJSON_AddNumberToObject(root, "mic_pga_db", (double)atomic_load(&s_mic_pga_db));
+    cJSON_AddNumberToObject(root, "ref_pga_db", (double)atomic_load(&s_ref_pga_db));
+    cJSON_AddNumberToObject(root, "out_vol", (double)atomic_load(&s_out_vol));
     cJSON_AddNumberToObject(root, "audio_stream_ends", (double)s_gl.audio_stream_end_hits);
     cJSON_AddNumberToObject(root, "tool_cancellations", (double)s_gl.tool_cancel_hits);
     cJSON_AddNumberToObject(root, "tool_calls", (double)s_gl.tool_call_hits);
@@ -4334,6 +4381,26 @@ void cap_gemini_live_set_barge_rms(uint16_t rms)
     atomic_store(&s_barge_rms, rms);
     ESP_LOGI(TAG, "barge RMS threshold set to %u%s", (unsigned)rms,
              rms == 0 ? " (barge detector disabled)" : "");
+}
+
+/* Runtime AEC gain staging for hardware calibration (2026-06-12). Any arg < 0
+ * is left unchanged. Stores the value and, if a session is live, applies it
+ * immediately (I2C control writes, off the I2S read/write path). Exposed via
+ * GET /api/debug/gain?mic=&ref=&vol= so the echo-vs-reference levels can be
+ * swept without reflashing — read back the result from aec_atten_db/lane_rms. */
+void cap_gemini_live_set_in_gains(int mic_db, int ref_db, int out_vol)
+{
+    if (mic_db >= 0)  atomic_store(&s_mic_pga_db, mic_db);
+    if (ref_db >= 0)  atomic_store(&s_ref_pga_db, ref_db);
+    if (out_vol >= 0) atomic_store(&s_out_vol, out_vol);
+    if (s_gl.adc && !s_gl.adc_codec_failed && s_gl.adc_open) {
+        gl_apply_in_gains();
+    }
+    if (out_vol >= 0 && s_gl.dac && !s_gl.dac_codec_failed && s_gl.dac_open) {
+        esp_codec_dev_set_out_vol(s_gl.dac, atomic_load(&s_out_vol));
+    }
+    ESP_LOGI(TAG, "in-gains set: mic=%d dB ref=%d dB out_vol=%d",
+             atomic_load(&s_mic_pga_db), atomic_load(&s_ref_pga_db), atomic_load(&s_out_vol));
 }
 
 /* Optional: drive the levels with no live session (own audio-path testing). */

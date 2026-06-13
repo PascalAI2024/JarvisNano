@@ -24,6 +24,16 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+/* Forward decl instead of #include "cap_gemini_live.h": the http_server
+ * component's compile path only carries cap_gemini_live's include dir when the
+ * gemini HTTP API needs it, and that API reaches the capability through an
+ * app_claw service struct rather than this header — so http_server has no
+ * direct include dependency. The symbol is provided by the cap_gemini_live
+ * component already in the link graph (via app_claw). Keep this prototype in
+ * sync with cap_gemini_live.h. */
+void cap_gemini_live_set_in_gains(int mic_db, int ref_db, int out_vol);
+void cap_gemini_live_set_barge_rms(unsigned short rms);
+
 static const char *TAG = "http_debug";
 
 #define DEBUG_CRASH_BODY_MAX 256
@@ -90,12 +100,56 @@ static esp_err_t debug_crash_handler(httpd_req_t *req)
     return ESP_OK; /* unreachable */
 }
 
+/* GET /api/debug/gain?mic=<dB>&ref=<dB>&vol=<0-100>
+ * Runtime AEC gain-staging sweep (2026-06-12 hardware calibration). Any omitted
+ * param is left unchanged. Lets the echo-vs-reference levels be tuned live —
+ * read the result back from /api/gemini/live (aec_atten_db, mic_pga_db, ...)
+ * and the lane_rms log lines — without a 10-minute reflash per step. */
+static esp_err_t debug_gain_handler(httpd_req_t *req)
+{
+    char buf[16];
+    int mic = -1, ref = -1, vol = -1;
+    if (http_server_query_get(req, "mic", buf, sizeof(buf)) == ESP_OK) mic = atoi(buf);
+    if (http_server_query_get(req, "ref", buf, sizeof(buf)) == ESP_OK) ref = atoi(buf);
+    if (http_server_query_get(req, "vol", buf, sizeof(buf)) == ESP_OK) vol = atoi(buf);
+
+    cap_gemini_live_set_in_gains(mic, ref, vol);
+
+    int barge = -1;
+    if (http_server_query_get(req, "barge", buf, sizeof(buf)) == ESP_OK) {
+        barge = atoi(buf);
+        if (barge >= 0 && barge <= 65535) {
+            cap_gemini_live_set_barge_rms((unsigned short)barge);
+        }
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    if (root) {
+        cJSON_AddBoolToObject(root, "ok", true);
+        cJSON_AddNumberToObject(root, "mic", mic);
+        cJSON_AddNumberToObject(root, "ref", ref);
+        cJSON_AddNumberToObject(root, "vol", vol);
+        cJSON_AddNumberToObject(root, "barge", barge);
+        http_server_send_json_response(req, root);
+    }
+    return ESP_OK;
+}
+
 esp_err_t http_server_register_debug_routes(httpd_handle_t server)
 {
-    const httpd_uri_t handler = {
+    const httpd_uri_t crash = {
         .uri     = "/api/debug/crash",
         .method  = HTTP_POST,
         .handler = debug_crash_handler,
     };
-    return httpd_register_uri_handler(server, &handler);
+    esp_err_t err = httpd_register_uri_handler(server, &crash);
+    if (err != ESP_OK) {
+        return err;
+    }
+    const httpd_uri_t gain = {
+        .uri     = "/api/debug/gain",
+        .method  = HTTP_GET,
+        .handler = debug_gain_handler,
+    };
+    return httpd_register_uri_handler(server, &gain);
 }

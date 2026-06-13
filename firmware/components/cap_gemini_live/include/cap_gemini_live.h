@@ -45,6 +45,10 @@ void      cap_gemini_live_set_synthetic_levels(float mic, float out);
  * detector (tap interrupt still works). Default GL_BARGE_RMS (2500). Safe to
  * call from any task, mid-session. */
 void      cap_gemini_live_set_barge_rms(uint16_t rms);
+
+/* Runtime AEC gain staging for hardware calibration. Any arg < 0 is left
+ * unchanged. mic_db/ref_db = ES7210 per-channel PGA; out_vol = ES8311 0-100. */
+void      cap_gemini_live_set_in_gains(int mic_db, int ref_db, int out_vol);
 void      cap_gemini_live_print_diagnostics(void);
 esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size);
 
