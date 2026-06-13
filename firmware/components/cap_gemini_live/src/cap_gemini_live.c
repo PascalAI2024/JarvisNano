@@ -90,6 +90,7 @@ static const char *TAG = "cap_gemini_live";
 static cJSON *gl_get_object_compat(cJSON *obj, const char *camel, const char *snake);
 static bool   gl_enter_speaking(uint32_t sample_rate);
 static void   gl_resume_listening(const char *reason);
+static void   gl_apply_in_gains(void);   /* state-aware mic/ref PGA (defined below) */
 static void   gl_interrupt_playback(const char *reason);
 static bool   gl_playback_pending(void);
 static void   gl_drain_rx_queue(void);
@@ -190,7 +191,8 @@ static void   gl_dac_mute(bool mute);
  * comparable to the echo-in-mic. Measured SPEAKING echo-in-mic rms ~10000 @30 dB
  * vs ref rms ~175 @0 dB: cut the mics 12 dB (echo peak ~8200, unclipped) and
  * raise the ref 24 dB (~2800, ≈ post-cut echo ~2500). Tune from aec_atten_db. */
-#define GL_MIC_PGA_DB            6    /* MEMS mics (chip MIC1/MIC2, mask 0|1) — unclips echo; measured ~18 dB AEC suppression at this pairing (2026-06-13) */
+#define GL_MIC_PGA_DB            24   /* LISTENING mic gain (chip MIC1/MIC2) — loud enough to hear the USER (2026-06-13: confirmed responses at 24 dB; 6 dB was too quiet for the local VAD). Runtime-tunable listen default. */
+#define GL_MIC_PGA_SPEAK_DB      6    /* SPEAKING mic gain — drops to unclip the echo so the AEC stays linear (~18 dB suppression). Applied automatically on the SPEAKING transition (gl_set_state). */
 #define GL_REF_PGA_DB            12   /* echo reference (chip MIC3, mask bit 2) — matched to the post-cut echo level */
 /* Make-up gain + soft-knee limiter for model audio. Measured PCM is speech with
  * a high crest factor: peaks ~80% full-scale but RMS only ~15%, so it sounds
@@ -229,10 +231,25 @@ static void   gl_dac_mute(bool mute);
 /* Upper bound for joining the async WS cleanup task before a new client may
  * be created (stop can block up to network_timeout_ms = 10 s). */
 #define GL_WS_CLEANUP_JOIN_MS    15000
-#define GL_SPEAK_WATCHDOG_MS     4500
+/* In-session WS resume (root-cause #1 cure). ESP-IDF esp_websocket_client treats
+ * a transport write that returns 0 (a benign TCP would-block / poll-write
+ * timeout; errno=0) as fatal: it aborts the connection and fires
+ * WEBSOCKET_EVENT_DISCONNECTED. Before this, the session loop saw ws_connected
+ * go false and tore the WHOLE session down to IDLE (mute until a fresh session)
+ * — observed 11x "WS dropped, cleaning up session". Instead, on a drop we now
+ * stop()+start() the SAME client handle (reuses the registered event handler +
+ * shared rx_buf — no two-clients window, no destroy/re-init), re-send setup, and
+ * re-arm the activity, keeping the PCM ring + converters + feeder + TX task open.
+ * Only if every attempt fails do we fall through to session_cleanup. */
+#define GL_WS_RESUME_ATTEMPTS    3
+#define GL_WS_RESUME_CONNECT_MS  8000
+#define GL_WS_RESUME_SETUP_MS    8000
+#define GL_WS_RESUME_BACKOFF_MS  300
+#define GL_SPEAK_WATCHDOG_MS     20000  /* was 4500 — too short for native-audio first-token latency. Firing this resumes listening (sends activityStart), which the server reads as a USER interrupt and CANCELS the reply (observed mute, 2026-06-13). 20 s only catches genuine drops; it disarms the instant the first audio arrives. */
 #define GL_LISTEN_RECOVERY_MS    2000
 #define GL_CODEC_HANDLE_RETRY_MS 250
 #define GL_CODEC_HANDLE_RETRIES  6
+#define GL_PCM_DECODE_RETRY_MS   8     /* yield once on PCM-decode OOM. PSRAM is healthy (~720 KB free, 2026-06-13); the OOM is a momentary low-water dip on the first 24k chunk of a turn (AEC/feeder/rwave-clip churn), not a fragmentation ceiling. One short yield lets the transient allocation land. */
 
 /* Turn-taking mode (P3.4, aec-barge-in.md D5).
  *
@@ -311,6 +328,18 @@ static void   gl_dac_mute(bool mute);
  * (raw echo would self-trigger) and barge-in remains tap-only. */
 #define GL_BARGE_RMS             9000   /* measured no-self-interrupt floor at out_vol=100 (2026-06-13): residual-echo peaks sit at 6000-9000 post-AEC+6x, 9000 gives 0 self-barge over many replies while a real interruption (voice stacked on the residual) clears it. Runtime-tunable: /api/debug/gain?barge=N (lower for more sensitivity, accepting rare self-barge). */
 #define GL_BARGE_LATCH_FRAMES    3
+/* Post-SPEAKING-entry guard: do NOT arm the local barge detector for this long
+ * after gl_enter_speaking. The 24 dB LISTENING mic gain drops to
+ * GL_MIC_PGA_SPEAK_DB via an async codec control write that does not land
+ * instantly, and the AEC must re-converge on the fresh echo path at turn start
+ * — during that settling the first SPEAKING frames can carry a loud,
+ * not-yet-cancelled echo transient that would latch a phantom barge and flush
+ * the model's own reply (self-interrupt stutter, R4). 300 ms ≈ 9 capture
+ * frames: past the gain transient + initial AEC adaptation, far below
+ * native-audio first-token latency, so a genuine early user barge is still
+ * caught once the window elapses (real barges are sustained speech, not one
+ * transient). Anchored on s_gl.speak_enter_us (set in gl_enter_speaking). */
+#define GL_BARGE_GUARD_MS        300
 /* Auto-VAD stream contract: an uplink pause longer than this must be flushed
  * with realtimeInput.audioStreamEnd or the server keeps stale cached audio
  * that bleeds into the next utterance (aec-barge-in.md §4). */
@@ -492,6 +521,7 @@ typedef struct {
     uint32_t                     tx_read_failures;
     uint32_t                     tx_codec_reads;
     uint32_t                     tx_raw_reads;
+    uint32_t                     ws_resume_count;   /* in-session WS resumes survived (root-cause #1) */
     int64_t                      last_input_end_us;
     bool                         activity_open;
     int64_t                      thinking_since_us;  /* when THINKING was entered; gates the tap-to-stop grace */
@@ -591,6 +621,7 @@ static void gl_reset_diag_counters(void)
     s_gl.rate_mismatch_chunks  = 0;
     s_gl.tx_frames_sent        = 0;
     s_gl.tx_send_failures      = 0;
+    s_gl.ws_resume_count       = 0;
     s_gl.tx_read_failures      = 0;
     s_gl.tx_codec_reads        = 0;
     s_gl.tx_raw_reads          = 0;
@@ -685,6 +716,12 @@ static void gl_set_state(gl_state_t st, const char *detail)
         s_gl.last_audio_us = 0;
     }
     s_gl.state = st;
+
+    /* Re-apply state-aware mic gain on the SPEAKING/LISTENING edges: loud for
+     * hearing the user, quiet (GL_MIC_PGA_SPEAK_DB) for unclipping her echo. */
+    if (st == GL_STATE_SPEAKING || st == GL_STATE_LISTENING) {
+        gl_apply_in_gains();
+    }
 
     /* Settle the playback waveform whenever we are not speaking; the mic level
      * is zeroed by the TX task itself when capture stops. */
@@ -1087,9 +1124,15 @@ static void gl_apply_in_gains(void)
     if (!s_gl.adc || s_gl.adc_codec_failed) {
         return;
     }
+    /* State-aware mic gain (2026-06-13): drop to GL_MIC_PGA_SPEAK_DB while the
+     * model speaks so the echo stays unclipped for the AEC; otherwise use the
+     * louder, runtime-tunable listen gain so the user's voice is actually heard.
+     * Re-applied from gl_set_state on every SPEAKING/LISTENING transition. */
+    int mic_db = (s_gl.state == GL_STATE_SPEAKING)
+                 ? GL_MIC_PGA_SPEAK_DB : atomic_load(&s_mic_pga_db);
     esp_codec_dev_set_in_channel_gain(s_gl.adc,
         ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) |
-        ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1), (float)atomic_load(&s_mic_pga_db));
+        ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1), (float)mic_db);
     esp_codec_dev_set_in_channel_gain(s_gl.adc,
         ESP_CODEC_DEV_MAKE_CHANNEL_MASK(GL_REF_CHIP_MASK_BIT), (float)atomic_load(&s_ref_pga_db));
 }
@@ -1712,8 +1755,15 @@ static void gl_play_audio_b64(const char *b64_str, uint32_t sample_rate)
     size_t pcm_max = (b64_len / 4) * 3 + 4;
     uint8_t *pcm = heap_caps_malloc(pcm_max, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!pcm) {
-        ESP_LOGE(TAG, "OOM for PCM decode buf");
-        return;
+        /* Transient low-water dip (not a fragmentation ceiling): yield once so the
+         * AEC/feeder/rwave-clip churn frees a block, then retry. Dropping the chunk
+         * clips the start of an utterance, so only give up if the retry also fails. */
+        vTaskDelay(pdMS_TO_TICKS(GL_PCM_DECODE_RETRY_MS));
+        pcm = heap_caps_malloc(pcm_max, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!pcm) {
+            ESP_LOGE(TAG, "OOM for PCM decode buf (%u B, retry failed)", (unsigned)pcm_max);
+            return;
+        }
     }
     if (gl_open_dac(requested_rate) != ESP_CODEC_DEV_OK) {
         free(pcm);
@@ -2399,7 +2449,15 @@ static void gl_audio_tx_task(void *arg)
          * would self-trigger (R4), so barge-in stays tap-only there. */
         if (speaking) {
             uint16_t barge_thr = atomic_load(&s_barge_rms);
-            if (!aec_live || barge_thr == 0 || barge_posted) {
+            /* Guard window after SPEAKING entry: the mic-gain drop (24->6 dB)
+             * is an async codec write and the AEC is still re-converging, so
+             * the opening frames can carry an uncancelled echo transient. Hold
+             * the detector OFF until GL_BARGE_GUARD_MS past speak_enter_us so
+             * that transient can't latch a phantom self-barge (R4). */
+            const bool barge_guarded =
+                (esp_timer_get_time() - s_gl.speak_enter_us) <
+                (int64_t)GL_BARGE_GUARD_MS * 1000;
+            if (!aec_live || barge_thr == 0 || barge_posted || barge_guarded) {
                 barge_frames = 0;
             } else if (mic_rms >= barge_thr) {
                 if (barge_frames == 0) {
