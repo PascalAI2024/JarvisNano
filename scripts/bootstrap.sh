@@ -3304,7 +3304,7 @@ apply_ui_layer_register_patch() {
         log "app_claw sources not found — skipping ui_layer register patch"
         return
     fi
-    if grep -q "ui_layer_init" "$app_c" 2>/dev/null; then
+    if grep -q "interactive UI disabled" "$app_c" 2>/dev/null; then
         log "ui_layer register patch already applied"
         return
     fi
@@ -3360,7 +3360,7 @@ call_new = (
     "    }\n"
     "    return err;\n"
 )
-if "ui_layer_init" not in a:
+if "interactive UI disabled" not in a:
     if call_anchor not in a:
         raise SystemExit("app_claw.c app_claw_ui_start face_bridge call anchor missing")
     a = a.replace(call_anchor, call_new, 1)
