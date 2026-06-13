@@ -29,6 +29,7 @@ static struct {
     struct arg_lit *diag;
     struct arg_int *diag_loop;
     struct arg_int *diag_interval;
+    struct arg_int *barge_rms;
     struct arg_str *text;
     struct arg_end *end;
 } gl_args;
@@ -122,6 +123,18 @@ static int cmd_gemini_live(int argc, char **argv)
         return 0;
     }
 
+    if (gl_args.barge_rms->count) {
+        int v = gl_args.barge_rms->ival[0];
+        if (v < 0 || v > 32767) {
+            printf("barge-rms must be 0..32767 (0 disables the barge detector)\n");
+            return 1;
+        }
+        cap_gemini_live_set_barge_rms((uint16_t)v);
+        printf("barge RMS threshold set to %d%s\n", v,
+               v == 0 ? " (barge detector disabled)" : "");
+        return 0;
+    }
+
     if (gl_args.text->count) {
         esp_err_t r = cap_gemini_live_send_text(gl_args.text->sval[0]);
         if (r != ESP_OK) {
@@ -131,8 +144,9 @@ static int cmd_gemini_live(int argc, char **argv)
         return 0;
     }
 
-    printf("Usage: gemini-live --test | --start | --stop | --diag | --diag-loop <count> [--diag-interval <ms>] | --text <text>\n");
+    printf("Usage: gemini-live --test | --start | --stop | --diag | --diag-loop <count> [--diag-interval <ms>] | --barge-rms <rms> | --text <text>\n");
     printf("       --diag-loop 0 means run until interrupted\n");
+    printf("       --barge-rms tunes the hands-free barge-in threshold live (0 disables)\n");
     return 1;
 }
 
@@ -144,8 +158,9 @@ void cmd_cap_gemini_live_register(void)
     gl_args.diag  = arg_lit0(NULL, "diag",  "Print live diagnostics counters/state");
     gl_args.diag_loop = arg_int0(NULL, "diag-loop", "<count>", "Print diagnostics repeatedly (count=0 => infinite)");
     gl_args.diag_interval = arg_int0(NULL, "diag-interval", "<ms>", "Delay between --diag-loop prints (default 1000ms)");
+    gl_args.barge_rms = arg_int0(NULL, "barge-rms", "<rms>", "Set barge-in RMS threshold live (0 disables; default 2500)");
     gl_args.text  = arg_str0(NULL, "text",  "<text>", "Send a text prompt");
-    gl_args.end   = arg_end(7);
+    gl_args.end   = arg_end(8);
 
     const esp_console_cmd_t cmd = {
         .command  = "gemini-live",

@@ -39,6 +39,12 @@ void      cap_gemini_live_toggle(void);
 float     cap_gemini_live_get_mic_level(void);
 float     cap_gemini_live_get_output_level(void);
 void      cap_gemini_live_set_synthetic_levels(float mic, float out);
+
+/* Hands-free barge-in calibration (P3.4): RMS threshold for the local barge
+ * detector on the AEC-cleaned, post-gain mic during SPEAKING. 0 disables the
+ * detector (tap interrupt still works). Default GL_BARGE_RMS (2500). Safe to
+ * call from any task, mid-session. */
+void      cap_gemini_live_set_barge_rms(uint16_t rms);
 void      cap_gemini_live_print_diagnostics(void);
 esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size);
 

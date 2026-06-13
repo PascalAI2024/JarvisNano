@@ -24,7 +24,10 @@
  *   gl_pcm_feeder  → blocking esp_codec_dev_write from the PCM ring — nothing else
  *   gl_audio_tx    → 32 ms 4-ch TDM reads (mics + ES7210 echo-ref lane, D2)
  *                    → demux → AEC(mic, ref) (esp-sr, D3/D4) → 6x gain + knee
- *                    → RMS + local VAD → tx_frame_queue (drop-oldest)
+ *                    → RMS → per-state policy (P3.4/D5): LISTENING uplink +
+ *                    turn-commit VAD; SPEAKING stays OPEN-MIC for the local
+ *                    barge detector (and, under server VAD, continuous
+ *                    uplink) → tx_frame_queue (drop-oldest)
  *   gl_tx_sender   → drains tx_frame_queue → WS sends (Wi-Fi backpressure can
  *                    never stall the capture cadence)
  *   gl_tool_worker → toolCall frames (30 s HTTPS gl_act_call) off the session task
@@ -193,9 +196,12 @@ static void   gl_dac_mute(bool mute);
 #define GL_TX_PCM_BYTES          (GL_TX_SAMPLES_PER_CHUNK * GL_CHANNELS * (GL_BITS / 8)) /* 1024 */
 #define GL_TX_RAW_BYTES          (GL_TX_SAMPLES_PER_CHUNK * GL_CAPTURE_CHANNELS * (GL_BITS / 8)) /* 4096 */
 #define GL_TX_B64_BYTES          (((GL_TX_PCM_BYTES + 2) / 3) * 4 + 1)
-/* Frames dumped on every pause→listen transition: the ADC stays open across
- * turns (P2.4) and the RX DMA accumulates stale audio — including speaker
- * echo — while capture is paused. 7 × 32 ms ≈ 224 ms (was 10 × 20 ms). */
+/* Frames dumped when reads resume after a GENUINE capture pause (no reads at
+ * all): the ADC stays open across turns (P2.4) and the RX DMA accumulates
+ * stale audio — including speaker echo — while nobody reads. 7 × 32 ms ≈
+ * 224 ms (was 10 × 20 ms). Since P3.4 the mic stays open through
+ * LISTENING↔SPEAKING transitions, so those never arm this dump — only real
+ * pauses (manual-mode THINKING, AEC-degraded SPEAKING, IDLE/CONNECTING). */
 #define GL_CAPTURE_FLUSH_FRAMES  7
 /* Ignore taps within this window of the last accepted one. A session start runs
  * a multi-second WSS+TLS handshake; rapid taps otherwise toggle start/stop mid-
@@ -220,12 +226,32 @@ static void   gl_dac_mute(bool mute);
 #define GL_CODEC_HANDLE_RETRY_MS 250
 #define GL_CODEC_HANDLE_RETRIES  6
 
-/* Push-to-talk on device: send activityStart before mic frames and activityEnd
- * when the user taps to commit. Server VAD was enabled experimentally but on
- * Waveshare hardware the server never returns serverContent (only setupComplete)
- * while tx_frames climb — mic looks alive, zero reply. Manual boundaries match
- * docs/reference/gemini-live-api.md and the verified text/audio path. */
-#define GL_USE_SERVER_VAD        0
+/* Turn-taking mode (P3.4, aec-barge-in.md D5).
+ *
+ * 1 = server VAD (auto mode, PRIMARY): the AEC-cleaned mic streams to the
+ *     server continuously — including during SPEAKING — and Gemini's
+ *     automaticActivityDetection owns turn boundaries, barge-in semantics and
+ *     history truncation (activityHandling: START_OF_ACTIVITY_INTERRUPTS).
+ *     Client activityStart/End are forbidden in this mode (no-op'd below);
+ *     any uplink pause >1 s must send realtimeInput.audioStreamEnd (capture
+ *     task). The local turn-commit VAD is bypassed at runtime; the local
+ *     barge detector still owns the fast playback kill (see GL_BARGE_RMS) —
+ *     the server `interrupted` frame is confirmation, not the trigger.
+ *
+ * 0 = manual mode (FALLBACK — keep fully compiled, do not delete): client
+ *     sends activityStart before mic frames and activityEnd to commit a turn
+ *     (local VAD / tap / HTTP). Mic frames are sent only while LISTENING;
+ *     a barge trigger re-opens the activity via the interrupt→resume path.
+ *
+ * History: server VAD was enabled 2026-05-25 (ae0ed99) and disabled
+ * 2026-05-26 (4639cbb) — "server never returns serverContent... mic looks
+ * alive, zero reply". Root cause was mic LEVEL, not protocol: raw
+ * conversation RMS was 50-300 (≈ −50 dBFS — silence to a server VAD), and
+ * the SAME commit that disabled the flag added the 6x digital gain that
+ * fixed it; the flag never ran with the gained signal (git log -S, see
+ * aec-barge-in.md "Findings"). Re-enabled for P3.4 with the AEC (P3.3)
+ * removing the echo confound for the during-playback stream. */
+#define GL_USE_SERVER_VAD        1
 
 /* On-device VAD (hands-free turn commit). Server VAD does not return
  * serverContent on this Waveshare board (see above), so instead of disabling
@@ -255,6 +281,32 @@ static void   gl_dac_mute(bool mute);
  * (was 240 ms; 300 swallowed short replies like "yes"). */
 #define GL_VAD_HANG_FRAMES       22
 #define GL_VAD_MIN_SPEECH_FRAMES 8
+
+/* ---- Hands-free barge-in (P3.4, design D5) ---------------------------------
+ * RMS speech detector on the AEC-CLEANED, post-6x-gain mic during SPEAKING
+ * only. GL_BARGE_RMS is deliberately separate from (and above)
+ * GL_VAD_SPEECH_RMS: during playback the floor is post-AEC residual echo, not
+ * room noise — the AEC suppresses ~20-30 dB but not everything, and the 6x
+ * digital gain amplifies the residue. Conservative default: the measured
+ * normal-speech band post-gain is 1000-4900 while worst-case post-gain
+ * residual-echo estimates sit near ~2000, so 2500 favours ZERO
+ * self-interruptions over catching whispered barges (the Phase-4 acceptance
+ * bar is zero self-interruptions over 10 turns at vol 100, R4). Calibrate on
+ * hardware WITHOUT reflashing:
+ *     gemini-live --barge-rms <n>      (0 disables; cap_gemini_live_set_barge_rms)
+ * and read the live floor from aec_atten / mic_level in /api/gemini/live.
+ * The latch = GL_BARGE_LATCH_FRAMES consecutive frames (3 × 32 ms = 96 ms of
+ * sustained speech) — long enough to skip pops and taps, short enough that
+ * perceived stop (latch + cmd-queue hop + ring flush + DAC mute) lands under
+ * the 250 ms target; measured per event as `barge_latency` in the log.
+ * Requires a live AEC engine: with the AEC degraded the detector stays OFF
+ * (raw echo would self-trigger) and barge-in remains tap-only. */
+#define GL_BARGE_RMS             2500
+#define GL_BARGE_LATCH_FRAMES    3
+/* Auto-VAD stream contract: an uplink pause longer than this must be flushed
+ * with realtimeInput.audioStreamEnd or the server keeps stale cached audio
+ * that bleeds into the next utterance (aec-barge-in.md §4). */
+#define GL_STREAM_END_PAUSE_MS   1000
 
 /* ---- Acoustic echo cancellation (P3.3, design D3/D4) -----------------------
  * esp-sr direct esp_aec.h API: no AFE framework, no model files/partition, no
@@ -362,6 +414,15 @@ typedef struct {
     uint32_t                     turn_complete_hits;
     uint32_t                     generation_complete_hits;
     uint32_t                     interrupted_hits;
+    uint32_t                     barge_hits;          /* local barge detector fires (P3.4) */
+    uint32_t                     audio_stream_end_hits; /* audioStreamEnd sent (auto VAD) */
+    uint32_t                     tool_cancel_hits;    /* toolCallCancellation frames */
+    volatile int64_t             barge_onset_us;      /* speech-onset stamp → barge_latency log.
+                                                       * Written by the capture task immediately
+                                                       * before posting GL_CMD_INTERRUPT; consumed
+                                                       * (and zeroed) by the session task inside
+                                                       * gl_interrupt_playback — ordered by the
+                                                       * cmd queue, so no torn read in practice. */
     uint32_t                     tool_call_hits;
     uint32_t                     unhandled_hits;
     uint32_t                     resume_count;
@@ -504,6 +565,10 @@ static void gl_reset_diag_counters(void)
     s_gl.turn_complete_hits    = 0;
     s_gl.generation_complete_hits = 0;
     s_gl.interrupted_hits      = 0;
+    s_gl.barge_hits            = 0;
+    s_gl.audio_stream_end_hits = 0;
+    s_gl.tool_cancel_hits      = 0;
+    s_gl.barge_onset_us        = 0;
     s_gl.tool_call_hits        = 0;
     s_gl.unhandled_hits        = 0;
     s_gl.resume_count          = 0;
@@ -547,6 +612,11 @@ static void gl_log_heap_snapshot(const char *when)
  * (0..32767); getters normalise to 0..1 float. Plain atomics, no locks. */
 static _Atomic uint16_t s_mic_rms;   /* ES7210 capture level (LISTENING) */
 static _Atomic uint16_t s_out_rms;   /* decoded playback level (SPEAKING) */
+
+/* Barge-detector threshold (P3.4): RMS on the AEC-cleaned post-gain mic
+ * during SPEAKING. Atomic so the CLI (gemini-live --barge-rms) can calibrate
+ * it live mid-session without a reflash. 0 disables the detector. */
+static _Atomic uint16_t s_barge_rms = GL_BARGE_RMS;
 
 #if GL_LANE_DIAG
 /* Last 1 s window of raw per-lane RMS/peak, published by the capture task,
@@ -1336,20 +1406,28 @@ static bool gl_send_setup(void)
     cJSON *tc = cJSON_AddObjectToObject(gc, "thinkingConfig");
     cJSON_AddStringToObject(tc, "thinkingLevel", "minimal");
 
-    /* Hands-free conversation via server-side VAD. The server detects speech
-     * start/end on the streamed mic frames and ends the user's turn after
-     * `silenceDurationMs` of quiet — no manual activityEnd from the client.
-     * END_SENSITIVITY_LOW + 700 ms silence is tolerant of mid-sentence pauses
-     * without feeling sluggish; START_SENSITIVITY_HIGH catches speech onset
-     * quickly. See [[project_session_handoff]] design direction. */
+    /* Hands-free conversation via server-side VAD (P3.4, aec-barge-in.md §4).
+     * The server detects speech start/end on the continuously streamed,
+     * AEC-cleaned mic and ends the user's turn after `silenceDurationMs` of
+     * quiet — no client activity signals. START_SENSITIVITY_HIGH catches
+     * speech onset fast; END_SENSITIVITY_LOW + 700 ms silence tolerates
+     * mid-sentence pauses (matches the field-tuned local-VAD hang).
+     * prefixPaddingMs 200 is the anti-false-positive guard against post-AEC
+     * residual echo — raise toward 300 if self-interruptions appear; its
+     * latency cost is non-critical because the LOCAL barge detector owns the
+     * perceived playback stop (hybrid, D5). activityHandling
+     * START_OF_ACTIVITY_INTERRUPTS makes detected speech alone cancel
+     * generation server-side — the documented barge-in path; the resulting
+     * `interrupted` frame is our confirmation signal (P3.2 flush path). */
     cJSON *ric = cJSON_AddObjectToObject(setup, "realtimeInputConfig");
     cJSON *aad = cJSON_AddObjectToObject(ric, "automaticActivityDetection");
     if (GL_USE_SERVER_VAD) {
         cJSON_AddBoolToObject(aad, "disabled", false);
         cJSON_AddStringToObject(aad, "startOfSpeechSensitivity", "START_SENSITIVITY_HIGH");
         cJSON_AddStringToObject(aad, "endOfSpeechSensitivity",   "END_SENSITIVITY_LOW");
-        cJSON_AddNumberToObject(aad, "prefixPaddingMs", 100);
+        cJSON_AddNumberToObject(aad, "prefixPaddingMs", 200);
         cJSON_AddNumberToObject(aad, "silenceDurationMs", 700);
+        cJSON_AddStringToObject(ric, "activityHandling", "START_OF_ACTIVITY_INTERRUPTS");
     } else {
         cJSON_AddBoolToObject(aad, "disabled", true);
     }
@@ -1427,6 +1505,21 @@ static bool gl_send_activity_end(void)
         return true;
     }
     return gl_ws_send_text("{\"realtimeInput\":{\"activityEnd\":{}}}");
+}
+
+/* Auto-VAD stream-contract obligation (P3.4, aec-barge-in.md §4): any uplink
+ * pause >GL_STREAM_END_PAUSE_MS must flush the server's cached audio with
+ * audioStreamEnd, or a stale tail bleeds into the next utterance. Called from
+ * the CAPTURE task while the uplink is idle — uses the short mic timeout so
+ * Wi-Fi backpressure can never park the capture loop. No-op in manual mode
+ * (activityEnd already closes the stream there). */
+static bool gl_send_audio_stream_end(void)
+{
+    if (!GL_USE_SERVER_VAD) {
+        return true;
+    }
+    return gl_ws_send_text_to("{\"realtimeInput\":{\"audioStreamEnd\":true}}",
+                              GL_WS_MIC_TIMEOUT_MS);
 }
 
 static bool gl_begin_audio_activity(const char *reason)
@@ -1870,6 +1963,17 @@ static void gl_audio_tx_task(void *arg)
     uint32_t vad_silence_frames = 0;
     bool     vad_speech_seen    = false;
 #endif
+    /* Barge detector state (P3.4/D5): consecutive above-threshold frames on
+     * the AEC-cleaned post-gain mic during SPEAKING. barge_posted makes the
+     * detector one-shot per SPEAKING turn (re-armed when state leaves
+     * SPEAKING) so a slow cmd-queue drain cannot stack duplicate interrupts. */
+    uint32_t barge_frames   = 0;
+    bool     barge_posted   = false;
+    int64_t  barge_onset_us = 0;
+    /* Auto-VAD uplink bookkeeping (P3.4): when the last frame was queued for
+     * send, and the once-per-pause audioStreamEnd latch. */
+    int64_t  last_uplink_us  = 0;
+    bool     stream_end_sent = false;
 #if GL_USE_AEC
     /* P3.3 instrumentation: per-frame aec_process cost window (p50/p95 logged
      * once per ~10 s, tag aec_cost) and the playback-window echo-attenuation
@@ -1976,39 +2080,74 @@ static void gl_audio_tx_task(void *arg)
 #endif
 
     while (!(xEventGroupGetBits(s_gl.ev) & GL_BIT_TX_STOP)) {
-        const bool listening = (s_gl.state == GL_STATE_LISTENING);
-        /* Keep READING — never sending — during SPEAKING: the AEC converges
-         * on the live echo path while the speaker plays (so the filter is
-         * already adapted when hands-free barge-in arrives in Phase 4) and
-         * the aec_atten estimate sees real playback; with GL_LANE_DIAG the
-         * per-lane meters stay live too. Capture stays paused protocol-wise —
-         * no gain, no VAD, no frames sent (P3.3 scope). RX-only codec reads
-         * are duplex-safe against the feeder's TX writes (independent I2S
-         * channels on the shared clock). */
-        bool speaking_read = !listening && s_gl.state == GL_STATE_SPEAKING &&
-                             s_gl.adc && s_gl.adc_open && !s_gl.adc_codec_failed;
+        const gl_state_t st  = s_gl.state;
+        const bool listening = (st == GL_STATE_LISTENING);
+        const bool speaking  = (st == GL_STATE_SPEAKING);
+
+        /* Auto-VAD stream contract (P3.4): if the uplink has gone quiet for
+         * >1 s — capture paused, or reading without sending — flush the
+         * server's cached audio ONCE per pause. Checked every iteration; all
+         * loop paths cycle in <= ~42 ms (10 ms paused delay / 32 ms read). */
+        if (GL_USE_SERVER_VAD && !stream_end_sent && last_uplink_us &&
+            s_gl.session_active && s_gl.ws_connected &&
+            (esp_timer_get_time() - last_uplink_us) >
+                (int64_t)GL_STREAM_END_PAUSE_MS * 1000) {
+            if (gl_send_audio_stream_end()) {
+                s_gl.audio_stream_end_hits++;
+                ESP_LOGI(TAG, "audioStreamEnd sent (uplink paused > %d ms)",
+                         (int)GL_STREAM_END_PAUSE_MS);
+            }
+            stream_end_sent = true;   /* once per pause, even on send failure */
+        }
+
+        /* P3.4: the mic stays OPEN during SPEAKING — capture → AEC → clean
+         * frames keep flowing while the feeder plays, so the AEC stays
+         * converged AND the clean signal feeds the barge detector (plus, in
+         * server-VAD mode, the continuous uplink). What changes per state is
+         * the POLICY applied to the clean frame below, not the read itself.
+         * The SPEAKING read needs the 4-lane codec path (the echo reference);
+         * the raw-I2S mono fallback has no ref, so it captures only while
+         * LISTENING (and THINKING under auto VAD, where the DAC is muted and
+         * there is no echo to cancel). RX-only codec reads are duplex-safe
+         * against the feeder's TX writes (independent I2S channels on the
+         * shared clock). */
+        const bool codec_capture = s_gl.adc && s_gl.adc_open && !s_gl.adc_codec_failed;
+        bool speaking_read = speaking && codec_capture;
 #if GL_USE_AEC
         speaking_read = speaking_read && (aec != NULL || GL_LANE_DIAG);
 #else
         speaking_read = speaking_read && GL_LANE_DIAG;
 #endif
+        /* Auto VAD streams continuously across turn boundaries: THINKING
+         * (text turn sent, reply pending) keeps capturing so server VAD hears
+         * the user change their mind. Manual mode keeps the protocol pause
+         * there (frames after activityEnd are stale). */
+        const bool thinking_read = GL_USE_SERVER_VAD && st == GL_STATE_THINKING &&
+                                   (codec_capture || s_gl.adc_raw);
         if (!listening) {
 #if GL_USE_LOCAL_VAD
-            /* The task survives turn transitions now (P2.4): clear VAD state
-             * across pauses so a stale "speech seen" cannot insta-commit the
-             * next listening segment. */
+            /* Turn-commit VAD state is meaningless outside LISTENING: clear
+             * it so a stale "speech seen" cannot insta-commit the next
+             * listening segment. */
             vad_speech_frames  = 0;
             vad_silence_frames = 0;
             vad_speech_seen    = false;
 #endif
-            /* Stays pinned while paused (or speaking-reading): the first
-             * GL_CAPTURE_FLUSH_FRAMES LISTENING frames after any
-             * non-listening window are dropped. */
-            flush_frames = GL_CAPTURE_FLUSH_FRAMES;
-            if (!speaking_read) {
+            if (!speaking_read && !thinking_read) {
+                /* Genuinely paused — no reads happen, so the I2S RX DMA
+                 * accumulates stale audio: arm the flush dump for whenever
+                 * reads resume. Continuous LISTENING↔SPEAKING transitions
+                 * never pass through here, so a barge resume keeps the live
+                 * audio instead of dumping the user's first 224 ms. */
+                flush_frames = GL_CAPTURE_FLUSH_FRAMES;
                 vTaskDelay(pdMS_TO_TICKS(10));
                 continue;
             }
+        }
+        if (!speaking) {
+            /* Barge detection is SPEAKING-only; re-arm across turns. */
+            barge_frames = 0;
+            barge_posted = false;
         }
 
         if (xEventGroupGetBits(s_gl.ev) & GL_BIT_TX_STOP) {
@@ -2044,6 +2183,14 @@ static void gl_audio_tx_task(void *arg)
             continue;
         }
 
+        if (flush_frames > 0) {
+            /* Stale RX-DMA backlog from a genuinely paused window — dump it
+             * BEFORE it can reach the AEC (stale mic against the current ref
+             * would briefly perturb the converged filter) or the uplink. */
+            flush_frames--;
+            continue;
+        }
+
         /* Mono uplink frame for this iteration: AEC-cleaned when the engine
          * is live, raw demuxed mic otherwise (and on the raw-I2S fallback
          * path, where the mono read above filled pcm directly). */
@@ -2073,9 +2220,11 @@ static void gl_audio_tx_task(void *arg)
                     aec_cost_win[aec_win_n++] =
                         (cost_us > 0xFFFF) ? 0xFFFF : (uint16_t)cost_us;
                 }
-                if (!listening) {
+                if (speaking) {
                     /* SPEAKING read — echo present: feed the attenuation
-                     * estimate (raw-mic vs clean-mic RMS, P3.3 gate). */
+                     * estimate (raw-mic vs clean-mic RMS, P3.3 gate).
+                     * THINKING reads (auto VAD) are excluded: the DAC is
+                     * muted there, so they would dilute the estimate. */
                     uint64_t clean_sumsq = 0;
                     for (size_t i = 0; i < GL_TX_SAMPLES_PER_CHUNK; ++i) {
                         int32_t c = aec_clean[i];
@@ -2166,17 +2315,12 @@ static void gl_audio_tx_task(void *arg)
 #endif
         }
 
-        if (!listening) {
-            /* Convergence/diag read during SPEAKING — never gain/VAD/send.
-             * Mic-during-playback (hands-free barge-in) flips on in Phase 4. */
-            continue;
-        }
-
-        if (flush_frames > 0) {
-            /* Stale DMA backlog from the paused window — discard. */
-            flush_frames--;
-            continue;
-        }
+        /* AEC engine liveness for this frame — gates the barge detector and
+         * the during-SPEAKING uplink (raw echo must never reach either). */
+        bool aec_live = false;
+#if GL_USE_AEC
+        aec_live = (aec != NULL) && four_lane;
+#endif
 
         /* Digital mic-gain stage — runs on the AEC-cleaned mic only, after
          * cancellation (D4: the gain + knee are nonlinear and would break AEC
@@ -2186,7 +2330,9 @@ static void gl_audio_tx_task(void *arg)
          * speech detection. A 6x lift with 4:1 soft-knee above 24000 keeps
          * loud speech from clipping while making quiet speech audible to the
          * server. Both the visual mic_rms and the sent PCM see the gained
-         * signal. */
+         * signal. Applied in EVERY captured state (P3.4) so the barge
+         * detector and the auto-VAD uplink see the same calibrated level the
+         * LISTENING thresholds were tuned on. */
         {
             int16_t *s = frame;
             const size_t n = GL_TX_PCM_BYTES / sizeof(int16_t);
@@ -2204,24 +2350,68 @@ static void gl_audio_tx_task(void *arg)
             }
         }
 
-        /* Publish mic level for the LISTENING waveform. */
+        /* Publish mic level for the LISTENING waveform (and the barge floor
+         * during SPEAKING — the display uses out_rms there, so no conflict). */
         uint16_t mic_rms = gl_compute_rms(frame,
                                           GL_TX_PCM_BYTES / sizeof(int16_t));
         atomic_store(&s_mic_rms, mic_rms);
 
+        /* Local barge detector (P3.4/D5): RMS VAD on the AEC-cleaned,
+         * post-gain mic during SPEAKING only. GL_BARGE_LATCH_FRAMES (96 ms)
+         * of sustained speech post the existing INTERRUPT command — the
+         * session task flushes the PCM ring, mutes the DAC and resumes
+         * LISTENING (manual mode: + activityStart via the resume path). In
+         * auto mode we do NOT wait for the server: it hears the same speech
+         * on the continuous uplink, cancels generation, truncates history
+         * and sends `interrupted` as confirmation. One-shot per SPEAKING
+         * turn (barge_posted); AEC-degraded capture never barges — raw echo
+         * would self-trigger (R4), so barge-in stays tap-only there. */
+        if (speaking) {
+            uint16_t barge_thr = atomic_load(&s_barge_rms);
+            if (!aec_live || barge_thr == 0 || barge_posted) {
+                barge_frames = 0;
+            } else if (mic_rms >= barge_thr) {
+                if (barge_frames == 0) {
+                    /* Speech onset ≈ start of this 32 ms frame. */
+                    barge_onset_us = esp_timer_get_time() -
+                                     (int64_t)GL_TX_CHUNK_MS * 1000;
+                }
+                barge_frames++;
+                if (barge_frames >= GL_BARGE_LATCH_FRAMES) {
+                    s_gl.barge_onset_us = barge_onset_us;
+                    if (gl_post_cmd(GL_CMD_INTERRUPT, NULL) == ESP_OK) {
+                        s_gl.barge_hits++;
+                        barge_posted = true;
+                        ESP_LOGI(TAG, "Barge-in: speech over playback (rms=%u >= %u, %u frames) -> interrupt",
+                                 (unsigned)mic_rms, (unsigned)barge_thr,
+                                 (unsigned)barge_frames);
+                    }
+                    /* post failed (queue full): latch resets, retries in
+                     * another GL_BARGE_LATCH_FRAMES of sustained speech. */
+                    barge_frames = 0;
+                }
+            } else {
+                barge_frames = 0;
+            }
+        }
+
 #if GL_USE_LOCAL_VAD
-        /* Hands-free turn commit. Detect speech, then GL_VAD_HANG_FRAMES of
-         * trailing silence. Counted in 32 ms capture frames (D4 rechunk) so
-         * the thresholds track the cadence by construction. Runs here for
-         * precise per-frame timing but only *requests* the commit — the
-         * session task performs the end_input lifecycle, since this task
-         * cannot stop itself (gl_stop_tx_task waits on GL_BIT_TX_DONE). The
-         * request rides the same cmd_queue the HTTP and tap paths use; a
-         * duplicate commit is harmless because the consumer re-checks state
-         * (THINKING after the first one → no-op). The dead zone between
-         * SILENCE_RMS and SPEECH_RMS holds the current state, so mid-sentence
-         * dips don't end the turn early. */
-        if (s_gl.state == GL_STATE_LISTENING) {
+        /* Hands-free turn commit — MANUAL MODE ONLY (P3.4/D5): under server
+         * VAD the server owns end-of-turn on the continuous stream; a local
+         * END_INPUT would race it and pause the uplink mid-protocol. Kept
+         * fully compiled as the GL_USE_SERVER_VAD=0 fallback.
+         * Detect speech, then GL_VAD_HANG_FRAMES of trailing silence. Counted
+         * in 32 ms capture frames (D4 rechunk) so the thresholds track the
+         * cadence by construction. Runs here for precise per-frame timing but
+         * only *requests* the commit — the session task performs the
+         * end_input lifecycle, since this task cannot stop itself
+         * (gl_stop_tx_task waits on GL_BIT_TX_DONE). The request rides the
+         * same cmd_queue the HTTP and tap paths use; a duplicate commit is
+         * harmless because the consumer re-checks state (THINKING after the
+         * first one → no-op). The dead zone between SILENCE_RMS and
+         * SPEECH_RMS holds the current state, so mid-sentence dips don't end
+         * the turn early. */
+        if (!GL_USE_SERVER_VAD && s_gl.state == GL_STATE_LISTENING) {
             if (mic_rms >= GL_VAD_SPEECH_RMS) {
                 vad_speech_frames++;
                 vad_silence_frames = 0;
@@ -2266,13 +2456,35 @@ static void gl_audio_tx_task(void *arg)
             break;
         }
 
+        /* Uplink policy (P3.4/D5) — state re-read so a turn that ended while
+         * we were reading stales the frame:
+         *  - auto VAD: stream the clean frame CONTINUOUSLY — LISTENING,
+         *    THINKING and SPEAKING alike. The server needs the audio during
+         *    playback to detect barge-in and truncate history at the right
+         *    point. SPEAKING uplink additionally requires a live AEC (raw
+         *    echo would self-interrupt, R4) — without it the frame is held
+         *    back and the >1 s stream-end latch above keeps the protocol
+         *    honest.
+         *  - manual mode: LISTENING only. During SPEAKING the clean frames
+         *    feed the barge detector but are NOT sent; a barge trigger
+         *    re-opens the activity (activityStart) via interrupt→resume and
+         *    frames then flow as normal LISTENING uplink. */
+        bool uplink;
+        if (GL_USE_SERVER_VAD) {
+            uplink = s_gl.session_active &&
+                     (s_gl.state == GL_STATE_LISTENING ||
+                      s_gl.state == GL_STATE_THINKING ||
+                      (s_gl.state == GL_STATE_SPEAKING && aec_live));
+        } else {
+            uplink = (s_gl.state == GL_STATE_LISTENING);
+        }
+        if (!uplink || !s_gl.tx_frame_queue) {
+            continue;
+        }
         /* Decoupled send (P2.3/F10): hand the frame to the sender task via a
          * bounded queue. Wi-Fi backpressure fills the queue and we drop the
          * OLDEST frame, keeping capture cadence + VAD timing intact. Drops
          * land in tx_send_failures (they are failures to deliver). */
-        if (s_gl.state != GL_STATE_LISTENING || !s_gl.tx_frame_queue) {
-            continue;   /* turn ended while we were reading — frame is stale */
-        }
         if (xQueueSend(s_gl.tx_frame_queue, frame, 0) != pdTRUE) {
             static uint8_t drop_scratch[GL_TX_PCM_BYTES];
             if (xQueueReceive(s_gl.tx_frame_queue, drop_scratch, 0) == pdTRUE) {
@@ -2280,8 +2492,11 @@ static void gl_audio_tx_task(void *arg)
             }
             if (xQueueSend(s_gl.tx_frame_queue, frame, 0) != pdTRUE) {
                 s_gl.tx_send_failures++;
+                continue;   /* nothing entered the queue this iteration */
             }
         }
+        last_uplink_us  = esp_timer_get_time();
+        stream_end_sent = false;
     }
 
     /* Mic is quiet once capture stops. */
@@ -2331,10 +2546,17 @@ static void gl_audio_tx_sender_task(void *arg)
         if (xEventGroupGetBits(s_gl.ev) & GL_BIT_TX_STOP) {
             break;
         }
-        /* Frames queued before a turn ended are stale once the activity
-         * closed — audio outside an activity window confuses the manual-VAD
-         * protocol. Drop silently (they are trailing silence). */
-        if (!s_gl.activity_open || s_gl.state != GL_STATE_LISTENING) {
+        /* Manual mode: frames queued before a turn ended are stale once the
+         * activity closed — audio outside an activity window confuses the
+         * manual-VAD protocol. Drop silently (they are trailing silence).
+         * Auto VAD (P3.4): there is no activity window — the stream is
+         * continuous by design, including during SPEAKING (that is how the
+         * server detects barge-in); only a dead session stales a frame. */
+        if (GL_USE_SERVER_VAD) {
+            if (!s_gl.session_active || !s_gl.ws_connected) {
+                continue;
+            }
+        } else if (!s_gl.activity_open || s_gl.state != GL_STATE_LISTENING) {
             continue;
         }
         if (gl_send_audio_frame(frame, GL_TX_PCM_BYTES)) {
@@ -2542,10 +2764,16 @@ static void gl_process_cmd_queue(void)
             gl_do_send_text(cmd.text);
             break;
         case GL_CMD_INTERRUPT:
-            /* Tap during SPEAKING (P3.1). State re-checked: if the turn
-             * already ended there is nothing left to interrupt. */
+            /* Tap (P3.1) or local barge detector (P3.4) during SPEAKING —
+             * a pending barge onset stamp tells the two apart. State
+             * re-checked: if the turn already ended there is nothing left to
+             * interrupt; drop the stamp so a later tap cannot log a bogus
+             * barge_latency. */
             if (s_gl.state == GL_STATE_SPEAKING || gl_playback_pending()) {
-                gl_interrupt_playback("tap interrupt");
+                gl_interrupt_playback(s_gl.barge_onset_us ? "barge-in"
+                                                          : "tap interrupt");
+            } else {
+                s_gl.barge_onset_us = 0;
             }
             break;
         default:
@@ -2704,6 +2932,18 @@ static void gl_interrupt_playback(const char *reason)
         gl_pcm_ring_flush();
         gl_drain_rx_queue();
         gl_dac_mute(true);
+    }
+    /* barge_latency (P3.4 gate): the capture task stamped speech onset when
+     * the barge latch armed; playback is audibly dead as of the mute above
+     * (any in-flight ≤80 ms feeder chunk drains into a muted DAC). Perceived
+     * stop = onset → here. Target < 250 ms. Tap/server interrupts carry no
+     * onset stamp and skip the log. */
+    int64_t barge_onset = s_gl.barge_onset_us;
+    if (barge_onset) {
+        s_gl.barge_onset_us = 0;
+        ESP_LOGI(TAG, "barge_latency: %u ms (speech onset -> playback flushed, reason=%s)",
+                 (unsigned)((esp_timer_get_time() - barge_onset) / 1000),
+                 reason ? reason : "?");
     }
     s_gl.waiting_terminal = false;
     gl_resume_listening(reason ? reason : "interrupt");
@@ -3163,7 +3403,19 @@ static void gl_dispatch_frame(const char *json)
         cJSON *itr = cJSON_GetObjectItemCaseSensitive(svc, "inputTranscription");
         if (itr) {
             cJSON *fin = cJSON_GetObjectItemCaseSensitive(itr, "finished");
-            if (cJSON_IsTrue(fin) && s_gl.state == GL_STATE_LISTENING) {
+            bool   flip = cJSON_IsTrue(fin) && s_gl.state == GL_STATE_LISTENING;
+            /* AUTO-VAD gate (P3.4 — design open question): the transcription
+             * stream is UNORDERED relative to other server messages, and with
+             * the continuous uplink a late `finished` for the PREVIOUS turn
+             * can land while that turn's reply is still draining (state
+             * LISTENING via deferred resume) or right after a barge flush.
+             * Require "no reply in flight" so a stale marker cannot flash
+             * THINKING over live playback. Field re-validation of the flip
+             * itself is owed in the Phase-5 hardware pass. */
+            if (GL_USE_SERVER_VAD) {
+                flip = flip && !s_gl.waiting_terminal && !gl_playback_pending();
+            }
+            if (flip) {
                 ESP_LOGI(TAG, "inputTranscription finished — face=THINKING (await audio)");
                 emote_set_thinking();
             }
@@ -3278,6 +3530,24 @@ static void gl_dispatch_frame(const char *json)
     if (tool_call) {
         s_gl.tool_call_hits++;
         gl_queue_tool_call(tool_call);   /* takes ownership */
+        cJSON_Delete(root);
+        return;
+    }
+
+    /* toolCallCancellation (P3.4): a barge-in cancelled generation while tool
+     * calls were pending — the server has already discarded them and names
+     * the ids. An in-flight HTTPS call cannot be aborted mid-request; the
+     * worker's session-generation check plus the server having moved on make
+     * a late toolResponse harmless (ignored upstream). Count + log so the
+     * Phase-5 field test can see cancellations actually happen. */
+    cJSON *tcc = gl_get_object_compat(root, "toolCallCancellation",
+                                      "tool_call_cancellation");
+    if (tcc) {
+        s_gl.tool_cancel_hits++;
+        cJSON *ids = cJSON_GetObjectItemCaseSensitive(tcc, "ids");
+        ESP_LOGI(TAG, "toolCallCancellation: %d id(s) cancelled by server (total %u)",
+                 cJSON_IsArray(ids) ? cJSON_GetArraySize(ids) : 0,
+                 (unsigned)s_gl.tool_cancel_hits);
         cJSON_Delete(root);
         return;
     }
@@ -3898,6 +4168,12 @@ void cap_gemini_live_print_diagnostics(void)
            (unsigned)s_gl.interrupted_hits,
            (unsigned)s_gl.tool_call_hits,
            (unsigned)s_gl.unhandled_hits);
+    printf("  barge: server_vad=%d hits=%u rms_thr=%u stream_ends=%u tool_cancels=%u\n",
+           (int)GL_USE_SERVER_VAD,
+           (unsigned)s_gl.barge_hits,
+           (unsigned)atomic_load(&s_barge_rms),
+           (unsigned)s_gl.audio_stream_end_hits,
+           (unsigned)s_gl.tool_cancel_hits);
     printf("  pipeline: ring=%u/%u B ring_drop=%u rx_q_bytes=%u tx_q_depth=%u tool_inflight=%u first_audio_ms=%u\n",
            (unsigned)s_gl.pcm_ring_bytes,
            (unsigned)s_gl.pcm_ring_cap,
@@ -3981,6 +4257,15 @@ esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size)
     cJSON_AddNumberToObject(root, "turn_complete", (double)s_gl.turn_complete_hits);
     cJSON_AddNumberToObject(root, "generation_complete", (double)s_gl.generation_complete_hits);
     cJSON_AddNumberToObject(root, "interrupted", (double)s_gl.interrupted_hits);
+    /* P3.4 barge-in telemetry: server_vad = turn-taking mode; barge_hits =
+     * local detector fires; barge_rms_threshold = live calibration value;
+     * audio_stream_ends = auto-VAD pause flushes; tool_cancellations =
+     * server-side cancellations after a barge. */
+    cJSON_AddBoolToObject(root, "server_vad", GL_USE_SERVER_VAD != 0);
+    cJSON_AddNumberToObject(root, "barge_hits", (double)s_gl.barge_hits);
+    cJSON_AddNumberToObject(root, "barge_rms_threshold", (double)atomic_load(&s_barge_rms));
+    cJSON_AddNumberToObject(root, "audio_stream_ends", (double)s_gl.audio_stream_end_hits);
+    cJSON_AddNumberToObject(root, "tool_cancellations", (double)s_gl.tool_cancel_hits);
     cJSON_AddNumberToObject(root, "tool_calls", (double)s_gl.tool_call_hits);
     cJSON_AddNumberToObject(root, "unhandled", (double)s_gl.unhandled_hits);
     cJSON_AddNumberToObject(root, "pcm_ring_bytes", (double)s_gl.pcm_ring_bytes);
@@ -4038,6 +4323,17 @@ esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size)
     strlcpy(out, json, out_size);
     free(json);
     return ESP_OK;
+}
+
+/* Runtime calibration for the local barge detector (P3.4): RMS threshold on
+ * the AEC-cleaned post-gain mic during SPEAKING. 0 disables the detector
+ * (tap interrupt still works). Lock-free; takes effect on the next captured
+ * frame. Exposed via `gemini-live --barge-rms <n>` for on-device tuning. */
+void cap_gemini_live_set_barge_rms(uint16_t rms)
+{
+    atomic_store(&s_barge_rms, rms);
+    ESP_LOGI(TAG, "barge RMS threshold set to %u%s", (unsigned)rms,
+             rms == 0 ? " (barge detector disabled)" : "");
 }
 
 /* Optional: drive the levels with no live session (own audio-path testing). */
