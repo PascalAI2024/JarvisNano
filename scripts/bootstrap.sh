@@ -159,6 +159,29 @@ copy_emote_runtime() {
     cp -f "$src/CMakeLists.txt" "$dst/CMakeLists.txt"
 }
 
+copy_ui_layer_runtime() {
+    # ui_layer is a NEW canonical in-tree component (no upstream counterpart) that
+    # becomes a SECOND display-arbiter owner driving the existing display_hal. It
+    # is mirrored into esp-claw/components/common/ui_layer EXACTLY the way
+    # copy_emote_runtime mirrors firmware/emote — that path is auto-discovered by
+    # IDF (it scans components/common/*), so no EXTRA_COMPONENT_DIRS is needed.
+    # Edit the canonical firmware/ui_layer/*, never the generated copy below.
+    #
+    # The component dir does NOT pre-exist upstream (unlike emote), so we create it
+    # here. The header (ui_layer.h) is colocated with ui_layer.c and exported via
+    # the CMakeLists INCLUDE_DIRS ".", so there is no separate include/ tree.
+    local src="$ROOT/firmware/ui_layer"
+    local dst="$ESP_CLAW_DIR/components/common/ui_layer"
+    [ -f "$src/ui_layer.c" ] || die "missing vendored ui_layer.c at $src/ui_layer.c"
+    [ -f "$src/ui_layer.h" ] || die "missing vendored ui_layer.h at $src/ui_layer.h"
+    [ -f "$src/CMakeLists.txt" ] || die "missing vendored ui_layer CMakeLists at $src/CMakeLists.txt"
+    log "copying ui_layer runtime → upstream tree"
+    mkdir -p "$dst"
+    cp -f "$src/ui_layer.c" "$dst/ui_layer.c"
+    cp -f "$src/ui_layer.h" "$dst/ui_layer.h"
+    cp -f "$src/CMakeLists.txt" "$dst/CMakeLists.txt"
+}
+
 copy_http_display_diagnostics() {
     # Runtime display/screenshot diagnostics for the live-device harness. The
     # endpoint source is vendored because esp-claw/ is a gitignored generated
@@ -167,6 +190,7 @@ copy_http_display_diagnostics() {
     local touch_src="$ROOT/firmware/http_server/http_server_touch_api.c"
     local audio_src="$ROOT/firmware/http_server/http_server_audio_level_api.c"
     local debug_src="$ROOT/firmware/http_server/http_server_debug_api.c"
+    local ui_src="$ROOT/firmware/http_server/http_server_ui_api.c"
     local dst_dir="$ESP_CLAW_DIR/application/edge_agent/components/http_server"
     local cmake="$dst_dir/CMakeLists.txt"
     local priv="$dst_dir/http_server_priv.h"
@@ -176,12 +200,14 @@ copy_http_display_diagnostics() {
     [ -f "$touch_src" ] || die "missing vendored touch HTTP API at $touch_src"
     [ -f "$audio_src" ] || die "missing vendored audio-level HTTP API at $audio_src"
     [ -f "$debug_src" ] || die "missing vendored debug HTTP API at $debug_src"
+    [ -f "$ui_src" ] || die "missing vendored ui HTTP API at $ui_src"
     [ -d "$dst_dir" ] || die "http_server component not found at $dst_dir"
-    log "copying display/touch/audio diagnostics HTTP API → upstream tree"
+    log "copying display/touch/audio/ui diagnostics HTTP API → upstream tree"
     cp -f "$src" "$dst_dir/http_server_display_api.c"
     cp -f "$touch_src" "$dst_dir/http_server_touch_api.c"
     cp -f "$audio_src" "$dst_dir/http_server_audio_level_api.c"
     cp -f "$debug_src" "$dst_dir/http_server_debug_api.c"
+    cp -f "$ui_src" "$dst_dir/http_server_ui_api.c"
     python3 - "$cmake" "$priv" "$core" "$public_h" <<'PY'
 import pathlib
 import sys
@@ -207,7 +233,12 @@ if '"http_server_debug_api.c"' not in s:
     if anchor not in s:
         raise SystemExit("http_server CMake debug source anchor missing")
     s = s.replace(anchor, anchor + '        "http_server_debug_api.c"\n', 1)
-for dep in ("heap", "emote"):
+if '"http_server_ui_api.c"' not in s:
+    anchor = '        "http_server_debug_api.c"\n'
+    if anchor not in s:
+        raise SystemExit("http_server CMake ui source anchor missing")
+    s = s.replace(anchor, anchor + '        "http_server_ui_api.c"\n', 1)
+for dep in ("heap", "emote", "ui_layer"):
     if f"        {dep}\n" not in s:
         anchor = "        esp_timer\n"
         if anchor not in s:
@@ -234,6 +265,12 @@ if debug_decl not in h:
     if anchor not in h:
         raise SystemExit("http_server_priv debug decl anchor missing")
     h = h.replace(anchor, anchor + debug_decl, 1)
+ui_decl = "esp_err_t http_server_register_ui_routes(httpd_handle_t server);\n"
+if ui_decl not in h:
+    anchor = "esp_err_t http_server_register_debug_routes(httpd_handle_t server);\n"
+    if anchor not in h:
+        raise SystemExit("http_server_priv ui decl anchor missing")
+    h = h.replace(anchor, anchor + ui_decl, 1)
 priv.write_text(h)
 
 c = core.read_text()
@@ -254,6 +291,11 @@ if "http_server_register_debug_routes" not in c:
     if anchor not in c:
         raise SystemExit("http_server_core debug route anchor missing")
     c = c.replace(anchor, anchor + '    ESP_RETURN_ON_ERROR(http_server_register_debug_routes(s_ctx.server), TAG, "Failed to register debug routes");\n', 1)
+if "http_server_register_ui_routes" not in c:
+    anchor = '    ESP_RETURN_ON_ERROR(http_server_register_debug_routes(s_ctx.server), TAG, "Failed to register debug routes");\n'
+    if anchor not in c:
+        raise SystemExit("http_server_core ui route anchor missing")
+    c = c.replace(anchor, anchor + '    ESP_RETURN_ON_ERROR(http_server_register_ui_routes(s_ctx.server), TAG, "Failed to register ui routes");\n', 1)
 core.write_text(c)
 
 hp = public_h.read_text()
@@ -3246,6 +3288,134 @@ print("applied reactive waveform audio bridge: face_bridge.c/.h + app_claw.c + C
 PY
 }
 
+# Register the ui_layer component so IDF links it and app_claw can call
+# ui_layer_init(). ui_layer is the interactive (tappable) second display-arbiter
+# owner. Runs AFTER copy_ui_layer_runtime (component must exist) and AFTER
+# apply_reactive_waveform_audio_bridge_patch (anchors on the app_claw_ui_start
+# body that patch produces). Gated on CONFIG_APP_CLAW_ENABLE_EMOTE: ui_layer
+# shares the display path the emote face owns, and reuses the emote owner-changed
+# callback to repaint the face on dismiss, so it is only meaningful when the
+# display/emote stack is built. Idempotent (guards on "ui_layer_init" presence).
+apply_ui_layer_register_patch() {
+    local app_dir="$ESP_CLAW_DIR/components/common/app_claw"
+    local app_c="$app_dir/app_claw.c"
+    local cmake="$app_dir/CMakeLists.txt"
+    if [ ! -f "$app_c" ] || [ ! -f "$cmake" ]; then
+        log "app_claw sources not found — skipping ui_layer register patch"
+        return
+    fi
+    if grep -q "ui_layer_init" "$app_c" 2>/dev/null; then
+        log "ui_layer register patch already applied"
+        return
+    fi
+    log "applying ui_layer register patch (REQUIRES ui_layer + ui_layer_init in app_claw_ui_start)"
+    python3 - <<PY
+import pathlib
+app_c = pathlib.Path(r"$app_c")
+cmake = pathlib.Path(r"$cmake")
+
+# --- app_claw.c: include ui_layer.h next to emote.h, and call ui_layer_init()
+#     right after app_claw_face_bridge_register() in app_claw_ui_start(). ---
+a = app_c.read_text()
+
+inc_anchor = (
+    "#if CONFIG_APP_CLAW_ENABLE_EMOTE\n"
+    '#include "emote.h"\n'
+    '#include "app_claw_face_bridge.h"\n'
+)
+inc_new = (
+    "#if CONFIG_APP_CLAW_ENABLE_EMOTE\n"
+    '#include "emote.h"\n'
+    '#include "app_claw_face_bridge.h"\n'
+    '#include "ui_layer.h"\n'
+)
+if "ui_layer.h" not in a:
+    if inc_anchor not in a:
+        raise SystemExit("app_claw.c emote/face_bridge include anchor missing — run audio-bridge patch first")
+    a = a.replace(inc_anchor, inc_new, 1)
+
+# Call ui_layer_init() after the face bridge registration. Best-effort: a failed
+# init (no display handle on a voice-only board) must NOT abort emote start, so
+# the return value is logged-and-dropped, mirroring the face-bridge contract.
+call_anchor = (
+    "        app_claw_face_bridge_register();\n"
+    "    }\n"
+    "    return err;\n"
+)
+call_new = (
+    "        app_claw_face_bridge_register();\n"
+    "        /* Bring up the interactive UI layer (second display-arbiter owner,\n"
+    "         * draws via display_hal). Best-effort: a NULL display handle on a\n"
+    "         * voice-only board returns non-OK and must not abort emote start. */\n"
+    "        esp_err_t ui_err = ui_layer_init();\n"
+    "        if (ui_err != ESP_OK) {\n"
+    '            ESP_LOGW(TAG, "ui_layer_init failed (%s); interactive UI disabled", esp_err_to_name(ui_err));\n'
+    "        }\n"
+    "    }\n"
+    "    return err;\n"
+)
+if "ui_layer_init" not in a:
+    if call_anchor not in a:
+        raise SystemExit("app_claw.c app_claw_ui_start face_bridge call anchor missing")
+    a = a.replace(call_anchor, call_new, 1)
+app_c.write_text(a)
+
+# --- CMakeLists: REQUIRES ui_layer, gated alongside emote. ---
+m = cmake.read_text()
+req_anchor = (
+    "if(CONFIG_APP_CLAW_ENABLE_EMOTE)\n"
+    "    list(APPEND app_claw_requires emote)\n"
+    "endif()\n"
+)
+req_new = (
+    "if(CONFIG_APP_CLAW_ENABLE_EMOTE)\n"
+    "    list(APPEND app_claw_requires emote)\n"
+    "    list(APPEND app_claw_requires ui_layer)\n"
+    "endif()\n"
+)
+if "ui_layer" not in m:
+    if req_anchor not in m:
+        raise SystemExit("app_claw CMakeLists emote REQUIRES anchor missing")
+    m = m.replace(req_anchor, req_new, 1)
+    cmake.write_text(m)
+
+print("registered ui_layer: app_claw.c include + ui_layer_init() + CMake REQUIRES")
+PY
+}
+
+# Declare ui_layer as a local path dependency in main/idf_component.yml.
+# Components under esp-claw/components/common are NOT auto-discovered — they are
+# resolved by the component manager via path-deps in this manifest (see the
+# emote/app_claw/wifi_manager entries). Without this, REQUIRES ui_layer fails
+# with "Failed to resolve component 'ui_layer'". Idempotent; independent of the
+# app_claw register patch so it applies even if that one early-returns.
+apply_ui_layer_manifest_dep_patch() {
+    local yml="$ESP_CLAW_DIR/application/edge_agent/main/idf_component.yml"
+    if [ ! -f "$yml" ]; then
+        log "main idf_component.yml not found — skipping ui_layer manifest dep"
+        return
+    fi
+    if grep -qE "^  ui_layer:" "$yml" 2>/dev/null; then
+        log "ui_layer manifest dep already present"
+        return
+    fi
+    log "adding ui_layer path dependency to main/idf_component.yml"
+    python3 - "$yml" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+anchor = "  emote:\n    path: ../../../components/common/emote\n"
+if "ui_layer:" in s:
+    raise SystemExit(0)
+if anchor not in s:
+    raise SystemExit("emote path-dep anchor not found in idf_component.yml")
+add = anchor + "\n  ui_layer:\n    path: ../../../components/common/ui_layer\n"
+s = s.replace(anchor, add, 1)
+p.write_text(s)
+print("added ui_layer path dependency to idf_component.yml")
+PY
+}
+
 # STABILITY_PLAN P0.1 — every boot must explain the previous death. Injects a
 # one-line "boot_diag" log into app_main: decoded esp_reset_reason(), raw
 # per-core ROM reset reasons, and esp_core_dump_image_check() state. Emitted
@@ -3575,8 +3745,11 @@ main() {
     apply_emote_partition_resize_patch
     apply_reactive_waveform_face_patch
     copy_emote_runtime
+    copy_ui_layer_runtime
     apply_emote_performance_patch
     apply_reactive_waveform_audio_bridge_patch
+    apply_ui_layer_register_patch
+    apply_ui_layer_manifest_dep_patch
     apply_ble_disable_patch
     apply_boot_diag_patch
     apply_ui_start_soft_fail_patch

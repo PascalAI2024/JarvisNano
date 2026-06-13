@@ -97,6 +97,17 @@ static void   gl_drain_rx_queue(void);
 static void   gl_process_cmd_queue(void);
 static void   gl_dac_mute(bool mute);
 
+/* ui_layer forward decls — cap_gemini_live does not REQUIRE ui_layer (avoids a
+ * component dep cycle: ui_layer draws the display, cap drives voice), but
+ * ui_layer is in the link graph via app_claw, so these symbols resolve at link
+ * time. Same forward-decl idiom http_server uses to reach cap_gemini_live. Used
+ * by the ask_user tool: show a tappable choice arc, then return the tapped
+ * label as the functionResponse. Keep in sync with firmware/ui_layer/ui_layer.h. */
+esp_err_t ui_layer_show_choice(const char *question, const char *const *opts, int n);
+esp_err_t ui_layer_get_result(int *out_index, bool *out_done);
+esp_err_t ui_layer_dismiss(void);
+bool      ui_layer_is_active(void);
+
 /* ---- Configuration -------------------------------------------------------- */
 
 /* gemini-3.1-flash-live-preview never existed in production API (404 from server).
@@ -1470,6 +1481,35 @@ static bool gl_send_setup(void)
     gl_add_str_fn(fdecls, "ask_jarvis",
                   "Escape hatch for capabilities the other tools don't cover: run a JavaScript expression against the JarvisMCP SDK and return its result. Available: jarvis.crypto(coin), jarvis.weather(lat,lon), jarvis.exchange(base,targets), jarvis.wiki(q), jarvis.memory.search({query,area:'all'}), jarvis.dns(domain), jarvis.country(name), jarvis.time(tz). The value MUST be one statement starting with 'return await', e.g. return await jarvis.crypto('bitcoin').",
                   "code", "A JavaScript expression starting with 'return await jarvis.'.");
+
+    /* ask_user — show tappable choice arcs on the round display and wait for the
+     * user to TAP an answer (the VISION's "asks you questions you tap to
+     * answer"). Two args: a short `question` (string) and `options` (array of 2..6
+     * short strings). The tool worker shows the arc via ui_layer_show_choice,
+     * waits (bounded) for the tap, and returns the chosen label as the
+     * functionResponse — zero new transport. Declared inline because it takes an
+     * array arg that gl_add_str_fn (single-string) can't express. */
+    {
+        cJSON *au = cJSON_CreateObject();
+        cJSON_AddStringToObject(au, "name", "ask_user");
+        cJSON_AddStringToObject(au, "description",
+            "Ask the user a question they answer by TAPPING one of a few options on the device's round touchscreen. Use this when you need a decision or a choice from a small fixed set (2 to 6 options) and want a reliable tapped answer instead of relying on speech. Returns the label the user tapped.");
+        cJSON *aup = cJSON_AddObjectToObject(au, "parameters");
+        cJSON_AddStringToObject(aup, "type", "object");
+        cJSON *aprops = cJSON_AddObjectToObject(aup, "properties");
+        cJSON *qp = cJSON_AddObjectToObject(aprops, "question");
+        cJSON_AddStringToObject(qp, "type", "string");
+        cJSON_AddStringToObject(qp, "description", "The short question shown at the top of the screen.");
+        cJSON *op = cJSON_AddObjectToObject(aprops, "options");
+        cJSON_AddStringToObject(op, "type", "array");
+        cJSON_AddStringToObject(op, "description", "2 to 6 short answer labels the user can tap.");
+        cJSON *items = cJSON_AddObjectToObject(op, "items");
+        cJSON_AddStringToObject(items, "type", "string");
+        cJSON *aureq = cJSON_AddArrayToObject(aup, "required");
+        cJSON_AddItemToArray(aureq, cJSON_CreateString("question"));
+        cJSON_AddItemToArray(aureq, cJSON_CreateString("options"));
+        cJSON_AddItemToArray(fdecls, au);
+    }
 
     cJSON_AddItemToArray(tools, fd_tool);
 
@@ -3258,6 +3298,89 @@ static int gl_act_call(const char *code, char *out, size_t out_sz)
     return status;
 }
 
+/* ask_user — show a tappable choice arc on the round display and wait (bounded)
+ * for the user to tap an answer. TOOL WORKER TASK ONLY (runs off the session
+ * task, so the blocking poll never gaps audio — same contract as gl_act_call).
+ *
+ * Writes the chosen label into `response` (key "answer") on success, or an error
+ * on bad args / timeout. Returns true if a selection completed. The poll budget
+ * (GL_ASK_USER_TIMEOUT_MS) is held by the tool-inflight watchdog hold in
+ * gl_maybe_resume_speaking_watchdog, so the 20 s no-reply watchdog will not fire
+ * while we wait. ui_layer copies the strings internally. */
+#define GL_ASK_USER_TIMEOUT_MS  30000
+#define GL_ASK_USER_POLL_MS     100
+static bool gl_ask_user(cJSON *args, cJSON *response)
+{
+    cJSON *qj = args ? cJSON_GetObjectItem(args, "question") : NULL;
+    cJSON *oj = args ? cJSON_GetObjectItem(args, "options") : NULL;
+    const char *question = (qj && cJSON_IsString(qj)) ? qj->valuestring : "";
+
+    if (!oj || !cJSON_IsArray(oj)) {
+        cJSON_AddStringToObject(response, "error", "options must be an array of 2..6 strings");
+        return false;
+    }
+    int total = cJSON_GetArraySize(oj);
+    if (total < 2) {
+        cJSON_AddStringToObject(response, "error", "need at least 2 options");
+        return false;
+    }
+    int n = total > 6 ? 6 : total; /* UI_LAYER_MAX_OPTIONS */
+
+    /* Stable storage for the option labels passed to ui_layer (it copies, but the
+     * const char* array must stay valid for the duration of the call). */
+    char store[6][48] = {{0}};
+    const char *opts[6] = {0};
+    for (int i = 0; i < n; ++i) {
+        cJSON *it = cJSON_GetArrayItem(oj, i);
+        const char *s = (it && cJSON_IsString(it)) ? it->valuestring : "";
+        strlcpy(store[i], s, sizeof(store[i]));
+        opts[i] = store[i];
+    }
+
+    esp_err_t err = ui_layer_show_choice(question, opts, n);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "ask_user: show_choice failed: %s", esp_err_to_name(err));
+        cJSON_AddStringToObject(response, "error", "could not show choices on screen");
+        return false;
+    }
+    ESP_LOGI(TAG, "ask_user: \"%s\" (%d options), waiting for tap", question, n);
+
+    int waited = 0;
+    int index = -1;
+    bool done = false;
+    while (waited < GL_ASK_USER_TIMEOUT_MS) {
+        /* Bail out if the session ended under us — don't keep a dead UI up. */
+        if (!s_gl.session_active) {
+            ESP_LOGW(TAG, "ask_user: session ended while waiting; dismissing");
+            ui_layer_dismiss();
+            cJSON_AddStringToObject(response, "error", "session ended before answer");
+            return false;
+        }
+        ui_layer_get_result(&index, &done);
+        if (done) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(GL_ASK_USER_POLL_MS));
+        waited += GL_ASK_USER_POLL_MS;
+    }
+
+    if (!done) {
+        ESP_LOGW(TAG, "ask_user: timed out after %d ms; dismissing", waited);
+        ui_layer_dismiss(); /* on_tap self-dismisses; this covers the timeout path */
+        cJSON_AddStringToObject(response, "error", "user did not tap an answer in time");
+        return false;
+    }
+
+    if (index < 0 || index >= n) {
+        cJSON_AddStringToObject(response, "error", "invalid selection");
+        return false;
+    }
+    ESP_LOGI(TAG, "ask_user: user tapped option %d (\"%s\")", index, store[index]);
+    cJSON_AddStringToObject(response, "answer", store[index]);
+    cJSON_AddNumberToObject(response, "index", index);
+    return true;
+}
+
 /* Execute a toolCall's functions via JarvisMCP and send the toolResponse.
  * TOOL WORKER TASK ONLY — gl_act_call blocks up to 30 s per function, which
  * must never gap audio (P2.1/F8). The WS send is race-safe: gl_ws_send_text
@@ -3281,6 +3404,15 @@ static void gl_run_tool_call(cJSON *toolCall)
         }
         cJSON_AddStringToObject(fr, "name", name ? name : "");
         cJSON *response = cJSON_AddObjectToObject(fr, "response");
+
+        /* ask_user is handled locally (show choice arc + wait for tap) — it does
+         * NOT route through the /act JS gateway like the other tools, so it short
+         * -circuits the code-building + gl_act_call path below via `handled`. */
+        if (name && strcmp(name, "ask_user") == 0) {
+            gl_ask_user(args, response);
+            cJSON_AddItemToArray(frs, fr);
+            continue;
+        }
 
         /* Build the JS for this function. Args are sanitised into the template. */
         char code[512] = {0};

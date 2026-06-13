@@ -27,9 +27,23 @@
 
 static const char *TAG = "touch_mon";
 
+/* ui_layer forward decls — the main component does not carry ui_layer's include
+ * dir on its compile path (it is not in main's REQUIRES), but ui_layer is in the
+ * link graph via app_claw's REQUIRES, so the symbols resolve at link time. Same
+ * forward-decl trick http_server_debug_api.c uses to reach cap_gemini_live.
+ * Keep in sync with firmware/ui_layer/ui_layer.h. */
+bool ui_layer_is_active(void);
+int  ui_layer_on_tap(int x, int y);
+
 /* Polls the CST9217 touch panel every 80ms and calls cap_gemini_live_toggle()
  * on each rising edge (finger-down event). The I2C bus is shared with audio
- * codecs and GPIO expander, so >=50ms poll interval is required. */
+ * codecs and GPIO expander, so >=50ms poll interval is required.
+ *
+ * INTERACTIVE-UI DISPATCH: when a ui_layer scene owns the panel
+ * (ui_layer_is_active()), a confirmed tap is routed to ui_layer_on_tap(x,y) for
+ * hit-testing and MUST NOT start/stop a Gemini session — otherwise tapping a
+ * choice arc would also toggle voice behind the UI. The debounce + shared-I2C
+ * poll cadence is unchanged; only the action taken on a resolved tap differs. */
 
 typedef enum {
     LOCAL_SCENE_SHOWCASE = 0,
@@ -387,6 +401,7 @@ static void touch_monitor_task(void *arg)
     bool press_seen = false;
     bool long_fired = false;
     uint16_t last_x = 233;
+    uint16_t last_y = 233; /* captured for the ui_layer hit-test (needs x AND y) */
     (void)was_touching;
 
     while (1) {
@@ -448,13 +463,19 @@ static void touch_monitor_task(void *arg)
         }
         if (touching) {
             last_x = x[0];
+            last_y = y[0];
             touch_run++;
             release_run = 0;
             if (touch_run >= PRESS_CONFIRM) {
                 press_seen = true;
             }
             if (armed && !long_fired && touch_run == LONG_CONFIRM) {
-                if (cap_gemini_live_is_active()) {
+                if (ui_layer_is_active()) {
+                    /* A UI scene owns the panel — swallow the long-press so it
+                     * neither stops Gemini nor launches the local showcase. The
+                     * tap-up path below routes the coordinates to the hit-test. */
+                    ESP_LOGI(TAG, "Long press swallowed: ui_layer scene active");
+                } else if (cap_gemini_live_is_active()) {
                     ESP_LOGI(TAG, "Long press: stopping Gemini Live");
                     cap_gemini_live_stop();
                 } else {
@@ -476,13 +497,25 @@ static void touch_monitor_task(void *arg)
             release_run++;
             if (just_released && armed && press_seen && !long_fired) {
                 local_scene_t scene = local_scene_from_touch(last_x);
+                /* INTERACTIVE UI takes priority: when a ui_layer scene owns the
+                 * panel, route the tap to its hit-test and DO NOT touch the
+                 * Gemini session. Selectable scenes resolve the option (and
+                 * self-dismiss); static scenes (data/image) swallow the tap so
+                 * it can't toggle voice behind the UI. Falls through to the
+                 * shared post-tap re-arm at the bottom of the block. */
+                if (ui_layer_is_active()) {
+                    int picked = ui_layer_on_tap((int)last_x, (int)last_y);
+                    ESP_LOGI(TAG, "Tap -> ui_layer (x=%u y=%u) picked=%d",
+                             (unsigned)last_x, (unsigned)last_y, picked);
+                    touch_diag_set_action(picked >= 0 ? "tap_ui_pick" : "tap_ui_miss",
+                                          scene);
+                } else if (cap_gemini_live_is_active()) {
                 /* Any tap toggles Gemini when configured — no x-zone routing.
                  * The legacy local-demo dispatch was the cause of "stuck on
                  * green / no response": tapping outside a narrow centre band
                  * played the SPEAK clip with no Gemini audio attached, which
                  * looked identical to a wedged voice session. Long-press still
                  * routes to the local showcase when Gemini is idle (above). */
-                if (cap_gemini_live_is_active()) {
                     /* toggle() sends activityEnd while LISTENING (commit turn),
                      * or stops the session when speaking/thinking. */
                     ESP_LOGI(TAG, "Tap: commit/stop Gemini Live (x=%u)",

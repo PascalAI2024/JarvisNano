@@ -52,3 +52,14 @@ CONFIG_COMPILER_OPTIMIZATION_LEVEL_RELEASE=y
 # so the extra per-socket TCP memory is free here.
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
 CONFIG_LWIP_TCP_WND_DEFAULT=16384
+
+# Lua display module — provides the display_hal 2D drawing API (fill_arc,
+# draw_text, draw_jpeg, ...) that firmware/ui_layer renders the interactive,
+# tappable UI with (choice arcs, data panels, images, radial menu). display_hal
+# lives inside lua_module_display, which only builds when the Lua capability +
+# this module are enabled. The shipping firmware had CAP_LUA on (the persisted
+# sdkconfig carried it); declaring it here makes the interactive-UI build
+# reproducible across a clean/fullclean regeneration instead of silently
+# dropping display_hal and failing to resolve ui_layer's REQUIRES.
+CONFIG_APP_CLAW_CAP_LUA=y
+CONFIG_APP_CLAW_LUA_MODULE_DISPLAY=y
