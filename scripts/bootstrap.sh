@@ -3451,6 +3451,45 @@ CONFIG_LWIP_TCP_WND_DEFAULT=16384
 EOF
 }
 
+# Declare cap_lua + lua_module_display as UNCONDITIONAL path-deps in
+# main/idf_component.yml. Seeding sdkconfig is not enough: the component manager
+# evaluates app_claw's `if: $CONFIG{APP_CLAW_CAP_LUA}` rules on the clean build's
+# FIRST pass, before any sdkconfig is read, so it never pulls lua_module_display
+# (which owns display_hal) — and ui_layer's hard REQUIRES on it fails. An
+# unconditional path-dep is always resolved (same fix that made ui_layer itself
+# resolve). CAP_LUA is default-y and the shipped firmware already ships the Lua
+# engine, so this changes nothing at runtime — it only fixes clean-build
+# resolution. cap_lua brings georgik/lua via its own manifest. Idempotent.
+apply_ui_layer_lua_dep_patch() {
+    local yml="$ESP_CLAW_DIR/application/edge_agent/main/idf_component.yml"
+    if [ ! -f "$yml" ]; then
+        log "main idf_component.yml not found — skipping ui_layer lua deps"
+        return
+    fi
+    if grep -qE "^  lua_module_display:" "$yml" 2>/dev/null; then
+        log "ui_layer lua deps already present"
+        return
+    fi
+    log "adding cap_lua + lua_module_display unconditional path-deps to main/idf_component.yml"
+    python3 - "$yml" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+anchor = "  ui_layer:\n    path: ../../../components/common/ui_layer\n"
+if "lua_module_display:" in s:
+    raise SystemExit(0)
+if anchor not in s:
+    raise SystemExit("ui_layer path-dep anchor not found in idf_component.yml")
+add = anchor + (
+    "\n  cap_lua:\n    path: ../../../components/claw_capabilities/cap_lua\n"
+    "\n  lua_module_display:\n    path: ../../../components/lua_modules/lua_module_display\n"
+)
+s = s.replace(anchor, add, 1)
+p.write_text(s)
+print("added cap_lua + lua_module_display unconditional path-deps")
+PY
+}
+
 # STABILITY_PLAN P0.1 — every boot must explain the previous death. Injects a
 # one-line "boot_diag" log into app_main: decoded esp_reset_reason(), raw
 # per-core ROM reset reasons, and esp_core_dump_image_check() state. Emitted
@@ -3786,6 +3825,7 @@ main() {
     apply_ui_layer_register_patch
     apply_ui_layer_manifest_dep_patch
     apply_ui_sdkconfig_seed_patch
+    apply_ui_layer_lua_dep_patch
     apply_ble_disable_patch
     apply_boot_diag_patch
     apply_ui_start_soft_fail_patch
