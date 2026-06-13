@@ -3327,9 +3327,15 @@ inc_new = (
     "#if CONFIG_APP_CLAW_ENABLE_EMOTE\n"
     '#include "emote.h"\n'
     '#include "app_claw_face_bridge.h"\n'
-    '#include "ui_layer.h"\n'
+    "/* ui_layer: forward declaration instead of #include \"ui_layer.h\". The\n"
+    " * header lives in the ui_layer component, and app_claw's REQUIRES list is\n"
+    " * expanded before the CONFIG_* CMake vars are loaded, so the gated\n"
+    " * list(APPEND app_claw_requires ui_layer) may not register at expansion\n"
+    " * time -> the #include would fail 'not in requirements'. The symbol still\n"
+    " * links because ui_layer is in the component graph (main path-dep). */\n"
+    "esp_err_t ui_layer_init(void);\n"
 )
-if "ui_layer.h" not in a:
+if "ui_layer_init(void);" not in a:
     if inc_anchor not in a:
         raise SystemExit("app_claw.c emote/face_bridge include anchor missing — run audio-bridge patch first")
     a = a.replace(inc_anchor, inc_new, 1)
