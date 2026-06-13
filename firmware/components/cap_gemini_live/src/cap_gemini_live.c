@@ -220,8 +220,14 @@ static void   gl_dac_mute(bool mute);
 #define GL_WS_TIMEOUT_MS         5000
 /* Mic frames fail fast: a frame is worth 32 ms of audio, so blocking the TX
  * loop 5 s on Wi-Fi backpressure only skews VAD and stretches the TX stop
- * window. Losing a frame is recoverable; a parked capture loop is not. */
-#define GL_WS_MIC_TIMEOUT_MS     500
+ * window. Losing a frame is recoverable; a parked capture loop is not.
+ * Root-cause #1, Part B: 500 ms was short enough that a brief RTT spike made
+ * the underlying send return 0 (would-block) instead of waiting the stall out —
+ * and esp_websocket_client turns that write-0 into a fatal abort. 1500 ms rides
+ * out a typical spike (one frame's worth of extra latency, recoverable) while
+ * still leaving margin under GL_TX_STOP_WAIT_MS (8 s) so the "genuinely wedged"
+ * semantics of the TX stop wait hold. */
+#define GL_WS_MIC_TIMEOUT_MS     1500
 /* TX stop wait must exceed the worst-case blocked iteration of the TX loop
  * (codec read ~200 ms + one mic send timeout) AND the old full control-send
  * timeout, so the timeout firing means "genuinely wedged", never "just slow".
@@ -1499,6 +1505,18 @@ static bool gl_send_setup(void)
         cJSON_AddStringToObject(ric, "activityHandling", "START_OF_ACTIVITY_INTERRUPTS");
     } else {
         cJSON_AddBoolToObject(aad, "disabled", true);
+        /* Manual mode: the LOCAL barge detector owns barge-in — it flushes
+         * playback + mutes the DAC locally (gl_interrupt_playback) and re-opens
+         * the activity on real speech. The server must therefore NOT treat a
+         * client activityStart as a barge-in: the default
+         * START_OF_ACTIVITY_INTERRUPTS made any resume-path activityStart (the
+         * input watchdog, or a stale resume) cancel the model's pending reply
+         * before it produced audio (observed mute, 2026-06-13 — a no-audio turn
+         * stuck in LISTENING with audio_parts=0). NO_INTERRUPTION lets the
+         * model finish its turn regardless of client activity signals; barge-in
+         * still works because the local detector kills playback without needing
+         * the server to cancel. */
+        cJSON_AddStringToObject(ric, "activityHandling", "NO_INTERRUPTION");
     }
 
     /* Ask the server for an input transcript stream so we can flip the face to
@@ -3734,6 +3752,89 @@ static void gl_ws_cleanup_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/* In-session WS resume after a transport write-0 abort (root-cause #1).
+ *
+ * A benign TCP would-block makes esp_websocket_client abort the connection and
+ * fire WEBSOCKET_EVENT_DISCONNECTED; the handler clears ws_connected. Rather
+ * than tear the whole session down to IDLE, restart the SAME client handle and
+ * re-do the setup handshake while the audio path (PCM ring, converters, feeder,
+ * TX task) stays open. Returns true if the socket is live and setupComplete was
+ * re-received; false to fall through to session_cleanup.
+ *
+ * Safety: we reuse s_gl.ws_client (never destroy/re-init it here), so the
+ * registered event handler + shared rx_buf are unchanged — there is no
+ * two-clients window (F6) and no need to join the async cleanup task. While the
+ * resume runs ws_connected is false, so gl_ws_send_text_to (which snapshots the
+ * handle under ws_mutex and gates on ws_connected) emits nothing into the
+ * restarting socket. */
+static bool gl_try_ws_resume(void)
+{
+    esp_websocket_client_handle_t client = s_gl.ws_client;
+    if (!client || s_gl.stop_requested || !s_gl.session_active) {
+        return false;
+    }
+
+    /* stop() the aborted client, then start() the same handle. stop() can block
+     * up to network_timeout_ms; that is acceptable here — we are already torn
+     * out of realtime by the drop. */
+    esp_websocket_client_stop(client);
+    if (s_gl.stop_requested || !s_gl.session_active) {
+        return false;
+    }
+    s_gl.ws_connected = false;
+    xEventGroupClearBits(s_gl.ev, GL_BIT_SETUP_OK);
+
+    esp_err_t err = esp_websocket_client_start(client);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WS resume: start failed (%s)", esp_err_to_name(err));
+        return false;
+    }
+
+    /* Wait for the new TCP+WS handshake (CONNECTED sets ws_connected). */
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(GL_WS_RESUME_CONNECT_MS);
+    while (!s_gl.ws_connected && !s_gl.stop_requested && s_gl.session_active) {
+        if (xTaskGetTickCount() > deadline) {
+            ESP_LOGW(TAG, "WS resume: reconnect timeout");
+            return false;
+        }
+        gl_process_cmd_queue();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    if (!s_gl.ws_connected || s_gl.stop_requested || !s_gl.session_active) {
+        return false;
+    }
+
+    /* Re-send setup and re-wait setupComplete (same poll+dispatch as the initial
+     * handshake — the main rx loop is not running during resume). */
+    if (!gl_send_setup()) {
+        ESP_LOGW(TAG, "WS resume: setup send failed");
+        return false;
+    }
+    deadline = xTaskGetTickCount() + pdMS_TO_TICKS(GL_WS_RESUME_SETUP_MS);
+    while (!(xEventGroupGetBits(s_gl.ev) & GL_BIT_SETUP_OK) &&
+           !s_gl.stop_requested && s_gl.session_active && s_gl.ws_connected) {
+        if (xTaskGetTickCount() > deadline) {
+            break;
+        }
+        gl_process_rx_queue(pdMS_TO_TICKS(100));
+        gl_process_cmd_queue();
+    }
+    if (!(xEventGroupGetBits(s_gl.ev) & GL_BIT_SETUP_OK)) {
+        ESP_LOGW(TAG, "WS resume: setupComplete timeout");
+        return false;
+    }
+
+    /* Re-arm the input activity so the mic uplink + turn-taking resume cleanly
+     * (server-VAD mode no-ops the activity signal but still needs capture live).
+     * The audio path was never torn down, so nothing else to re-open. */
+    s_gl.activity_open = false;
+    gl_begin_audio_activity("ws resume");
+    s_gl.ws_resume_count++;
+    ESP_LOGI(TAG, "WS resume OK (#%u) — session preserved",
+             (unsigned)s_gl.ws_resume_count);
+    return true;
+}
+
 static void gl_session_task(void *arg)
 {
     (void)arg;
@@ -3797,6 +3898,17 @@ static void gl_session_task(void *arg)
             .network_timeout_ms     = 10000,
             .reconnect_timeout_ms   = 5000,
             .disable_auto_reconnect = true,
+            /* Root-cause #1, Part B: client-side keepalive PING. A genuinely
+             * dead socket (Wi-Fi gone, server hung) is then closed by a clean
+             * PONG-timeout DISCONNECTED — which our in-session resume catches —
+             * instead of waiting for the next writer to hit a write-0 abort
+             * during silence. Auto-reconnect stays DISABLED: the explicit
+             * gl_try_ws_resume path owns reconnection so the shared event
+             * handler + rx_buf invariants (F6 two-clients window) are never
+             * violated by the client reconnecting on its own. */
+            .ping_interval_sec      = 20,
+            .pingpong_timeout_sec   = 20,
+            .keep_alive_enable      = true,
             .crt_bundle_attach      = esp_crt_bundle_attach,
         };
         ESP_LOGI(TAG, "WS init host=%s path=%s", GEMINI_WS_HOST, GEMINI_WS_PATH);
@@ -3909,10 +4021,29 @@ static void gl_session_task(void *arg)
         }
         gl_maybe_resume_speaking_watchdog();
         gl_ensure_listening_capture();
-        /* Check if WS dropped */
+        /* WS dropped: a transport write-0 abort (root-cause #1) — most often a
+         * benign TCP would-block, not a dead socket. Try to resume the SAME
+         * client in place (re-handshake, audio path untouched) before tearing
+         * the session down to IDLE. Only after every attempt fails do we break
+         * to session_cleanup. */
         if (!s_gl.ws_connected) {
-            ESP_LOGW(TAG, "WS dropped, cleaning up session");
-            break;
+            bool resumed = false;
+            for (int attempt = 1;
+                 attempt <= GL_WS_RESUME_ATTEMPTS &&
+                 !s_gl.stop_requested && s_gl.session_active;
+                 ++attempt) {
+                ESP_LOGW(TAG, "WS dropped; in-session resume attempt %d/%d",
+                         attempt, GL_WS_RESUME_ATTEMPTS);
+                if (gl_try_ws_resume()) {
+                    resumed = true;
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(GL_WS_RESUME_BACKOFF_MS));
+            }
+            if (!resumed) {
+                ESP_LOGW(TAG, "WS dropped, cleaning up session");
+                break;
+            }
         }
         }
 
@@ -4344,6 +4475,7 @@ esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size)
     cJSON_AddNumberToObject(root, "rate_mismatch_chunks", (double)s_gl.rate_mismatch_chunks);
     cJSON_AddNumberToObject(root, "tx_frames_sent", (double)s_gl.tx_frames_sent);
     cJSON_AddNumberToObject(root, "tx_send_failures", (double)s_gl.tx_send_failures);
+    cJSON_AddNumberToObject(root, "ws_resume_count", (double)s_gl.ws_resume_count);
     cJSON_AddNumberToObject(root, "tx_read_failures", (double)s_gl.tx_read_failures);
     cJSON_AddNumberToObject(root, "tx_codec_reads", (double)s_gl.tx_codec_reads);
     cJSON_AddNumberToObject(root, "tx_raw_reads", (double)s_gl.tx_raw_reads);
@@ -4364,6 +4496,16 @@ esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size)
      * audio_stream_ends = auto-VAD pause flushes; tool_cancellations =
      * server-side cancellations after a barge. */
     cJSON_AddBoolToObject(root, "server_vad", GL_USE_SERVER_VAD != 0);
+    /* Self-interrupt cure (2026-06-13): how long the THINKING watchdog waits
+     * before resuming, and whether the server honors client activityStart as a
+     * barge-in. In manual mode activity_handling is NO_INTERRUPTION so a
+     * resume-path activityStart can never cancel the model's pending reply;
+     * speak_watchdog_ms is the no-audio timeout (20000) that only catches a
+     * genuinely dead turn. Both confirm the running binary carries the fix. */
+    cJSON_AddNumberToObject(root, "speak_watchdog_ms", (double)GL_SPEAK_WATCHDOG_MS);
+    cJSON_AddStringToObject(root, "activity_handling",
+                            GL_USE_SERVER_VAD ? "START_OF_ACTIVITY_INTERRUPTS"
+                                              : "NO_INTERRUPTION");
     cJSON_AddNumberToObject(root, "barge_hits", (double)s_gl.barge_hits);
     cJSON_AddNumberToObject(root, "barge_rms_threshold", (double)atomic_load(&s_barge_rms));
     cJSON_AddNumberToObject(root, "mic_pga_db", (double)atomic_load(&s_mic_pga_db));

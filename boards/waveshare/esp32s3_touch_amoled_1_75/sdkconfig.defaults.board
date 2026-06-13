@@ -42,3 +42,13 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # face look broken even when the rendering code is correct.
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 CONFIG_COMPILER_OPTIMIZATION_LEVEL_RELEASE=y
+
+# lwIP TCP TX buffer + window (root-cause #1, Part B). The default send buffer is
+# 5760 B (4xMSS). A Wi-Fi RTT spike fills it, the WS poll-write times out and
+# returns 0, and esp_websocket_client treats that benign would-block as fatal —
+# aborting the socket and (before the in-session resume) dropping the whole voice
+# session to IDLE. Tripling the buffer + window to 16 KB lets a brief stall be
+# absorbed instead of stalling the writer to a write-0. PSRAM is plentiful (8 MB),
+# so the extra per-socket TCP memory is free here.
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
+CONFIG_LWIP_TCP_WND_DEFAULT=16384
