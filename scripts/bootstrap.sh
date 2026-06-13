@@ -2107,6 +2107,86 @@ print("patched emote.c, emote.h, app_claw.c")
 PY
 }
 
+# Root-cause boot race (2026-06-13): dev_lcd_touch_i2c_init() runs a single
+# i2c_master_probe(addr, 200ms) BEFORE the CST9217 is ever reset. The chip's
+# reset pulse (RST low 10ms / high 50ms) lives in cst9217_reset() and is only
+# reached LATER, inside esp_lcd_touch_new_i2c_cst9217() via the factory entry.
+# A cold/soft-boot chip that has not yet ACKed fails that first probe → dev_addr
+# stays 0x00 → panel IO is built for addr 0 → read_config fails → the device
+# handle stays NULL and main.c's touch monitor loops "Waiting for LCD touch
+# handle" forever (board_manager error 0x801fe). Census of the live SD log: 2 of
+# the last 6 boots died this way. Fix: drive rst_gpio_num as OUTPUT and pulse it
+# (low 10ms / high 60ms) immediately before the probe loop so the chip is awake
+# the first time it is addressed. This also overrides any floating state left by
+# cst9217_del()'s gpio_reset_pin(rst) on the previous boot's error path. The
+# driver's own later reset is a harmless idempotent second pulse.
+# This file is an esp_board_manager managed_component that bootstrap.sh
+# overwrites every build, so the fix lives here as an idempotent patch.
+apply_touch_reset_before_probe_patch() {
+    local target="$ESP_CLAW_DIR/application/edge_agent/managed_components/espressif__esp_board_manager/devices/dev_lcd_touch_i2c/dev_lcd_touch_i2c.c"
+    if [ ! -f "$target" ]; then
+        log "dev_lcd_touch_i2c.c not found — skipping touch reset-before-probe patch"
+        return
+    fi
+    if grep -q "reset CST9217 before the very first I2C probe" "$target" 2>/dev/null; then
+        log "touch reset-before-probe patch already applied"
+        return
+    fi
+    log "applying touch reset-before-probe patch (cure CST9217 boot race)"
+    python3 - <<PY
+import pathlib
+p = pathlib.Path(r"$target")
+s = p.read_text()
+
+# 1) Pull in the headers the reset block needs (gpio + FreeRTOS delay). The file
+#    only includes driver/i2c_master.h by default.
+inc_old = '#include "driver/i2c_master.h"\n'
+inc_new = (
+    '#include "driver/i2c_master.h"\n'
+    '#include "driver/gpio.h"\n'
+    '#include "freertos/FreeRTOS.h"\n'
+    '#include "freertos/task.h"\n'
+)
+if inc_old not in s:
+    raise SystemExit("could not locate i2c_master.h include in dev_lcd_touch_i2c.c — upstream may have changed")
+if '#include "driver/gpio.h"\n' not in s:
+    s = s.replace(inc_old, inc_new, 1)
+
+# 2) Inject the reset pulse immediately before the probe loop, after dev_addr is
+#    seeded to 0x00.
+anchor = "    io_i2c_config.dev_addr = 0x00;\n"
+block = (
+    "    io_i2c_config.dev_addr = 0x00;\n"
+    "    /* reset CST9217 before the very first I2C probe: the driver's own\n"
+    "     * reset runs only after the probe, so a cold/soft-boot chip that has\n"
+    "     * not yet ACKed fails the probe and the handle stays NULL. Pulse RST\n"
+    "     * (low 10ms / high 60ms) here so the chip is awake when first addressed.\n"
+    "     * Also overrides any floating state left by gpio_reset_pin() on a prior\n"
+    "     * boot's error path. The driver's later reset is a harmless second pulse. */\n"
+    "    if (touch_cfg->touch_config.rst_gpio_num != GPIO_NUM_NC) {\n"
+    "        gpio_config_t rst_cfg = {\n"
+    "            .pin_bit_mask = BIT64(touch_cfg->touch_config.rst_gpio_num),\n"
+    "            .mode = GPIO_MODE_OUTPUT,\n"
+    "        };\n"
+    "        if (gpio_config(&rst_cfg) == ESP_OK) {\n"
+    "            gpio_set_level(touch_cfg->touch_config.rst_gpio_num, 0);\n"
+    "            vTaskDelay(pdMS_TO_TICKS(10));\n"
+    "            gpio_set_level(touch_cfg->touch_config.rst_gpio_num, 1);\n"
+    "            vTaskDelay(pdMS_TO_TICKS(60));\n"
+    "        } else {\n"
+    "            ESP_LOGW(TAG, \"touch RST gpio_config failed; probing without pre-reset\");\n"
+    "        }\n"
+    "    }\n"
+)
+if anchor not in s:
+    raise SystemExit("could not locate dev_addr=0x00 anchor in dev_lcd_touch_i2c.c — upstream may have changed")
+s = s.replace(anchor, block, 1)
+
+p.write_text(s)
+print("patched", p)
+PY
+}
+
 apply_touch_handle_deref_patch() {
     # patches/0010 — fix the CST9217 "must be initialized" spam in the upstream
     # main.c touch monitor. esp_board_manager_get_device_handle() returns the
@@ -3333,6 +3413,130 @@ print("patched", p)
 PY
 }
 
+# ROADMAP #5 (boot-i2c) — harden the shared boot-time check. Three small
+# defensive boot-diagnostic fixes, all on edge_agent main.c (which exists only in
+# esp-claw, so it is patched idempotently here rather than bare-edited):
+#
+#   (a) esp_board_manager_init() returns ESP_OK even when the CST9217 touch probe
+#       failed (esp_board_device_init_all unconditionally returns ESP_OK). After
+#       board init, run a short bounded retry: up to 3 times, if the lcd_touch
+#       handle is missing, re-run its real init path + a 100 ms settle. This gives
+#       a flaky I2C probe a couple of clean attempts BEFORE the app starts —
+#       complementary to the touch task's slower runtime self-heal.
+#   (b) The decisive "Failed to init device: lcd_touch" line is UART-only because
+#       jarvis_logger_init() runs AFTER board init, so it never reaches the SD log.
+#       Stash a touch_ok flag and emit "touch=ok/failed" inside boot_diag_log(),
+#       which runs after the logger is up — every boot's touch state now lands on SD.
+#   (c) boot_diag_log() reports a PRESENT coredump every boot because the image is
+#       never erased; the stale flag masks whether THIS boot crashed. After
+#       reporting, erase the coredump image so coredump=PRESENT means a fresh crash.
+#
+# Idempotent (guard: "boot_touch_breadcrumb" sentinel in main.c). Must run AFTER
+# apply_boot_diag_patch (anchors on the boot_diag_log body + ESP_LOGI it emits) and
+# AFTER apply_ui_start_soft_fail_patch (anchors on the board_manager boot stage,
+# which is stable across both). Uses esp_board_manager APIs (already included via
+# esp_board_manager_includes.h) and esp_core_dump_image_erase (guarded by the same
+# CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH the boot_diag patch already keys on).
+apply_boot_touch_breadcrumb_patch() {
+    local main_c="$ESP_CLAW_DIR/application/edge_agent/main/main.c"
+    if [ ! -f "$main_c" ]; then
+        log "main.c not found — skipping boot_touch_breadcrumb patch"
+        return
+    fi
+    if grep -q "boot_touch_breadcrumb" "$main_c" 2>/dev/null; then
+        log "boot_touch_breadcrumb patch already applied"
+        return
+    fi
+    log "applying boot_touch_breadcrumb patch (ROADMAP #5: touch retry + SD breadcrumb + stale coredump erase)"
+    python3 - "$main_c" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+
+# (b/setup) file-scope flag for the boot-time touch state, read by boot_diag_log().
+flag_old = "static bool s_gemini_api_key_configured;\n"
+flag_new = (
+    "static bool s_gemini_api_key_configured;\n"
+    "/* boot_touch_breadcrumb (ROADMAP #5): boot-time CST9217 touch probe result,\n"
+    " * set in app_main after the bounded retry and read by boot_diag_log() so the\n"
+    " * touch=ok/failed breadcrumb reaches the SD log. */\n"
+    "static bool s_boot_touch_ok;\n"
+)
+if s.count(flag_old) != 1:
+    raise SystemExit("boot_touch_breadcrumb: s_gemini_api_key_configured anchor not unique in main.c")
+s = s.replace(flag_old, flag_new, 1)
+
+# (a) bounded touch retry right after board_manager init. esp_board_manager_init
+# returns ESP_OK even when the touch probe failed, so re-run the real init path a
+# couple of times before the app/UI starts. Record the final state for the breadcrumb.
+retry_old = (
+    "    ESP_ERROR_CHECK(esp_board_manager_init());\n"
+    "    usb_diag_write(\"boot stage=board_manager\\r\\n\");\n"
+)
+retry_new = (
+    "    ESP_ERROR_CHECK(esp_board_manager_init());\n"
+    "    usb_diag_write(\"boot stage=board_manager\\r\\n\");\n"
+    "    /* boot_touch_breadcrumb (ROADMAP #5a): esp_board_manager_init() returns\n"
+    "     * ESP_OK even when the CST9217 probe failed (esp_board_device_init_all\n"
+    "     * unconditionally returns ESP_OK). Give a flaky I2C probe a couple of clean\n"
+    "     * retries here, before the UI/touch task starts. */\n"
+    "    {\n"
+    "        void *touch_h = NULL;\n"
+    "        for (int i = 0; i < 3; i++) {\n"
+    "            if (esp_board_manager_get_device_handle(ESP_BOARD_DEVICE_NAME_LCD_TOUCH,\n"
+    "                                                    &touch_h) == ESP_OK && touch_h) {\n"
+    "                break;\n"
+    "            }\n"
+    "            esp_err_t tret = esp_board_manager_init_device_by_name(ESP_BOARD_DEVICE_NAME_LCD_TOUCH);\n"
+    "            ESP_LOGW(TAG, \"boot touch retry %d/3: %s\", i + 1, esp_err_to_name(tret));\n"
+    "            vTaskDelay(pdMS_TO_TICKS(100));\n"
+    "        }\n"
+    "        touch_h = NULL;\n"
+    "        s_boot_touch_ok = (esp_board_manager_get_device_handle(ESP_BOARD_DEVICE_NAME_LCD_TOUCH,\n"
+    "                                                               &touch_h) == ESP_OK && touch_h);\n"
+    "    }\n"
+)
+if s.count(retry_old) != 1:
+    raise SystemExit("boot_touch_breadcrumb: board_manager boot-stage anchor not unique in main.c")
+s = s.replace(retry_old, retry_new, 1)
+
+# (c) erase the coredump image after reporting it, so coredump=PRESENT next boot
+# only reflects a fresh crash. Inserted inside the same CONFIG_ESP_COREDUMP guard
+# the boot_diag patch emitted, after the ESP_LOGI line so the report still sees it.
+log_old = (
+    "    ESP_LOGI(\"boot_diag\", \"reset_reason=%s(%d) rom_reset_cpu0=%d rom_reset_cpu1=%d coredump=%s\",\n"
+    "             boot_diag_reset_reason_name(reason), (int)reason,\n"
+    "             (int)esp_rom_get_reset_reason(0), (int)esp_rom_get_reset_reason(1),\n"
+    "             coredump_state);\n"
+    "}\n"
+)
+log_new = (
+    "    ESP_LOGI(\"boot_diag\", \"reset_reason=%s(%d) rom_reset_cpu0=%d rom_reset_cpu1=%d coredump=%s touch=%s\",\n"
+    "             boot_diag_reset_reason_name(reason), (int)reason,\n"
+    "             (int)esp_rom_get_reset_reason(0), (int)esp_rom_get_reset_reason(1),\n"
+    "             coredump_state, s_boot_touch_ok ? \"ok\" : \"failed\");\n"
+    "    /* boot_touch_breadcrumb (ROADMAP #5c): erase the coredump image after\n"
+    "     * reporting it, so a PRESENT flag on the next boot means a NEW crash and\n"
+    "     * clean POWERON boots read coredump=NONE instead of a stale PRESENT. */\n"
+    "#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH\n"
+    "    if (cd_err == ESP_OK) {\n"
+    "        esp_err_t erase_err = esp_core_dump_image_erase();\n"
+    "        if (erase_err != ESP_OK) {\n"
+    "            ESP_LOGW(\"boot_diag\", \"coredump erase failed: %s\", esp_err_to_name(erase_err));\n"
+    "        }\n"
+    "    }\n"
+    "#endif\n"
+    "}\n"
+)
+if s.count(log_old) != 1:
+    raise SystemExit("boot_touch_breadcrumb: boot_diag ESP_LOGI anchor not unique in main.c (apply_boot_diag_patch must run first)")
+s = s.replace(log_old, log_new, 1)
+
+p.write_text(s)
+print("patched", p)
+PY
+}
+
 main() {
     mkdir -p "$ROOT/.build_logs"
     clone_or_update_esp_claw
@@ -3364,6 +3568,7 @@ main() {
     apply_imu_read_patch
     apply_native_status_led_patch
     apply_emote_status_detail_patch
+    apply_touch_reset_before_probe_patch
     apply_touch_handle_deref_patch
     apply_touch_local_hardware_demo_patch
     apply_emote_voice_states_patch
@@ -3375,6 +3580,7 @@ main() {
     apply_ble_disable_patch
     apply_boot_diag_patch
     apply_ui_start_soft_fail_patch
+    apply_boot_touch_breadcrumb_patch
 
     if [ "${1:-}" = "build" ]; then
         build

@@ -16,6 +16,7 @@
 #include "cap_gemini_live.h"
 #include "emote.h"
 #include "esp_err.h"
+#include "esp_board_manager.h"
 #include "esp_board_manager_includes.h"
 #include "esp_lcd_touch.h"
 #include "esp_log.h"
@@ -278,8 +279,25 @@ static void touch_monitor_task(void *arg)
 
     /* Wait until board manager has the touch handle ready.
      * Board-manager returns dev_lcd_touch_i2c_handles_t* (or dev_lcd_touch_handles_t*);
-     * both structs have esp_lcd_touch_handle_t as their first member — dereference once. */
+     * both structs have esp_lcd_touch_handle_t as their first member — dereference once.
+     *
+     * Self-heal: the CST9217 probe intermittently fails at board bring-up (I2C
+     * timing / power / bus-contention race), leaving device_handle==NULL with the
+     * ref_count decremented (esp_board_device.c:137-141). The original loop only
+     * READ the handle, so a failed boot spun on NULL forever and touch never came
+     * up without a power cycle. Now, every ~3s of NULL we re-run the real init
+     * path via esp_board_manager_init_device_by_name(), which re-enters
+     * esp_board_device.c:128-142 and re-runs the full probe+reset+config. Cap the
+     * re-init attempts so the task can't busy-spin indefinitely on dead hardware;
+     * after the cap we fall through to IRQ/voice-only behaviour. */
+    const int TOUCH_REINIT_MAX = 20;
+    /* ~3s of NULL (6 ticks at the 500ms cadence) before we surface the fault
+     * on-screen. The re-init above keeps running — this only tells the user WHY
+     * taps do nothing instead of leaving the calm idle face up. Fired once. */
+    const int TOUCH_ALERT_AFTER_TICKS = 6;
     int wait_ticks = 0;
+    int reinit_attempts = 0;
+    bool alert_raised = false;
     while (touch == NULL) {
         void *dev_h = NULL;
         if (esp_board_manager_get_device_handle(ESP_BOARD_DEVICE_NAME_LCD_TOUCH,
@@ -287,13 +305,50 @@ static void touch_monitor_task(void *arg)
             touch = *(esp_lcd_touch_handle_t *)dev_h;
         }
         if (touch == NULL) {
-            if ((wait_ticks++ % 4) == 0) {
+            if ((wait_ticks % 4) == 0) {
                 ESP_LOGW(TAG, "Waiting for LCD touch handle");
+            }
+            /* Every ~3s (6 ticks at the 500ms cadence) re-run device init to
+             * recover from a failed boot-time probe. */
+            if ((wait_ticks % 6) == 0 && reinit_attempts < TOUCH_REINIT_MAX) {
+                esp_err_t r = esp_board_manager_init_device_by_name(
+                    ESP_BOARD_DEVICE_NAME_LCD_TOUCH);
+                ESP_LOGW(TAG, "Re-init lcd_touch: %s", esp_err_to_name(r));
+                reinit_attempts++;
+                /* Pick up the freshly-initialised handle immediately. */
+                if (r == ESP_OK &&
+                    esp_board_manager_get_device_handle(ESP_BOARD_DEVICE_NAME_LCD_TOUCH,
+                                                        &dev_h) == ESP_OK && dev_h) {
+                    touch = *(esp_lcd_touch_handle_t *)dev_h;
+                }
+            } else if (reinit_attempts >= TOUCH_REINIT_MAX) {
+                ESP_LOGE(TAG, "lcd_touch re-init exhausted (%d attempts); "
+                              "touch disabled, voice/IRQ only", reinit_attempts);
+                if (s_diag_mx && xSemaphoreTake(s_diag_mx, pdMS_TO_TICKS(20)) == pdTRUE) {
+                    strlcpy(s_diag.last_action, "touch_init_failed",
+                            sizeof(s_diag.last_action));
+                    s_diag.last_action_ms = touch_demo_now_ms();
+                    xSemaphoreGive(s_diag_mx);
+                }
+                vTaskDelete(NULL);
+            }
+        }
+        if (touch == NULL) {
+            wait_ticks++;
+            if (!alert_raised && wait_ticks >= TOUCH_ALERT_AFTER_TICKS) {
+                ESP_LOGW(TAG, "Touch still NULL after ~3s; raising on-screen "
+                              "alert (re-init continues)");
+                emote_set_alert(EMOTE_ALERT_TOUCH, "Touch offline - reboot");
+                alert_raised = true;
             }
             vTaskDelay(pdMS_TO_TICKS(500));
         }
     }
 
+    /* Acquired (possibly via a late re-init) — drop the alert and resume. */
+    if (alert_raised) {
+        emote_clear_alert();
+    }
     ESP_LOGI(TAG, "Touch handle acquired, polling started");
     SemaphoreHandle_t irq_sem = (SemaphoreHandle_t)touch->config.user_data;
     if (irq_sem) {

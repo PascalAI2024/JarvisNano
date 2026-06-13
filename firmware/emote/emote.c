@@ -475,10 +475,20 @@ static bool s_sta_connected;
 static char s_ap_ssid[48];
 static char s_status_detail[48];   /* e.g. the active LLM model name */
 static bool s_voice_visual_active;
+/* When set, a persistent alert overlay (emote_set_alert) owns the screen.
+ * emote_render_status() and emote_set_status_detail() early-return so a late
+ * status/detail write can't clobber the alert mid-session. Cleared only by
+ * emote_clear_alert(). */
+static bool s_alert_active;
 
 static esp_err_t emote_render_status(void)
 {
     ESP_RETURN_ON_FALSE(s_emote_handle != NULL, ESP_ERR_INVALID_STATE, TAG, "emote handle is NULL");
+
+    /* A latched alert owns the screen — don't let a status repaint clobber it. */
+    if (s_alert_active) {
+        return ESP_OK;
+    }
 
     const bool ap_present = (s_ap_ssid[0] != '\0');
     const bool has_detail = (s_status_detail[0] != '\0');
@@ -520,11 +530,58 @@ esp_err_t emote_set_status_detail(const char *detail)
     } else {
         s_status_detail[0] = '\0';
     }
-    if (s_voice_visual_active) {
+    if (s_voice_visual_active || s_alert_active) {
         return ESP_OK;
     }
     /* If the emote engine is up, reflect the new detail now; otherwise the
      * next emote_set_network_status() will pick it up. */
+    if (s_emote_handle != NULL) {
+        return emote_render_status();
+    }
+    return ESP_OK;
+}
+
+esp_err_t emote_set_alert(emote_alert_t kind, const char *line)
+{
+    (void)kind; /* "offline" is the only baked trouble face; reserved for future kinds */
+
+    /* Latch FIRST so any concurrent status/detail repaint early-returns. */
+    s_alert_active = true;
+
+    /* If the engine isn't up yet, the flag is enough — the alert renders once
+     * emote_start() brings the display online and a refresh runs. */
+    if (s_emote_handle == NULL) {
+        return ESP_OK;
+    }
+
+    const char *msg = (line && line[0] != '\0') ? line : "Hardware fault";
+    /* Dark-visor "something's wrong" look + short strip line. Same pure state
+     * writes as emote_apply(); we refresh only when emote owns the display
+     * (the safe pattern emote_apply uses) so this never deadlocks the render
+     * task from a caller context. */
+    esp_err_t err = emote_set_anim_emoji(s_emote_handle, "offline");
+    esp_err_t msg_err = emote_set_event_msg(s_emote_handle, EMOTE_MGR_EVT_SYS, msg);
+    if (err == ESP_OK) {
+        err = msg_err;
+    }
+    emote_face_set_state(EMOTE_FACE_OFF);
+    if (display_arbiter_is_owner(DISPLAY_ARBITER_OWNER_EMOTE)) {
+        esp_err_t r = emote_notify_all_refresh(s_emote_handle);
+        if (err == ESP_OK) {
+            err = r;
+        }
+    }
+    return err;
+}
+
+esp_err_t emote_clear_alert(void)
+{
+    if (!s_alert_active) {
+        return ESP_OK;
+    }
+    s_alert_active = false;
+    /* Restore the normal idle/status screen (neutral face when online,
+     * offline-with-Wi-Fi-message when not). */
     if (s_emote_handle != NULL) {
         return emote_render_status();
     }

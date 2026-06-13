@@ -22,6 +22,23 @@ esp_err_t emote_set_network_status(bool sta_connected, const char *ap_ssid);
  * idle screen as "Ready * <detail>" when the station is connected. */
 esp_err_t emote_set_status_detail(const char *detail);
 
+/* ---- Persistent alert overlay --------------------------------------------- *
+ * A "something is wrong" screen the user can't miss: the dark-visor offline
+ * face plus a short (<=24 char) strip line, latched so a later status write
+ * can't quietly clobber it. Use it for boot-time hardware faults (e.g. touch
+ * controller failed to init) that would otherwise look like the calm idle face.
+ *
+ * Pure state writes, safe to call from any caller task (same contract as
+ * emote_set_network_status — it refreshes only when emote owns the display).
+ * Idempotent. emote_clear_alert() restores the normal idle/status screen. */
+typedef enum {
+    EMOTE_ALERT_GENERIC = 0,
+    EMOTE_ALERT_TOUCH,    /* touch controller failed to initialise */
+} emote_alert_t;
+
+esp_err_t emote_set_alert(emote_alert_t kind, const char *line);
+esp_err_t emote_clear_alert(void);
+
 /* Voice state helpers — called by cap_gemini_live when session state changes.
  * One per GL_STATE_* so every transition repaints the face. */
 esp_err_t emote_set_connecting(void);
