@@ -43,6 +43,7 @@ static const char *TAG = "ui_layer";
 #define UI_ARC_OUTER    168      /* annular wedge outer radius (task spec) */
 #define UI_ARC_EDGE_R   135      /* bright "tappable" inner edge ring radius */
 #define UI_ARC_LABEL_R  150      /* label centre radius (mid of the wedge band) */
+#define UI_TAP_DEADZONE_R 50     /* taps within this radius = centre/hint, ignored; outside = matched by angle (touch reads ~15% compressed, so don't require the exact rim radius) */
 #define UI_ARC_TOPGAP   1.20f    /* radians reserved at 12 o'clock for question */
 #define UI_ARC_GAP      0.08f    /* radians between adjacent wedges */
 #define UI_TAU          6.28318530717958647692f
@@ -816,7 +817,14 @@ int ui_layer_on_tap(int x, int y)
     int chosen = -1;
 
     if (scene == UI_SCENE_CHOICE_ARCS) {
-        if (dist <= (float)UI_ARC_INNER) {
+        /* Select by DIRECTION (angle), not exact rim radius. Measured CST9217
+         * taps on the arc band (rendered at radius UI_ARC_INNER..OUTER) report
+         * ~15% compressed toward centre — e.g. a rim tap lands at dist ~110-130,
+         * just inside the 132 px inner radius — so a strict `dist > UI_ARC_INNER`
+         * rejected every real tap (2026-06-13). Exclude only the centre dot +
+         * "tap to answer" hint (UI_TAP_DEADZONE_R), then match by angle. This is
+         * also a more forgiving UX: tap anywhere toward an option. */
+        if (dist <= (float)UI_TAP_DEADZONE_R) {
             return -1; /* centre tap, not on a wedge */
         }
         const float ang = ui_norm_angle(atan2f(dy, dx));
