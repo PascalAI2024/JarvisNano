@@ -3416,6 +3416,41 @@ print("added ui_layer path dependency to idf_component.yml")
 PY
 }
 
+# Seed CAP_LUA + LUA_MODULE_DISPLAY (and the lwIP TX override) into the REAL
+# sdkconfig.defaults that IDF reads. lua_module_display (which owns display_hal,
+# the ui_layer renderer) is pulled by a path-dep gated on
+# `if: $CONFIG{APP_CLAW_CAP_LUA}`. On a CLEAN build the component manager
+# evaluates that rule before any sdkconfig exists -> false -> the component is
+# never pulled -> ui_layer's hard REQUIRES lua_module_display fails to resolve.
+# CAP_LUA is `default y`, but that default isn't visible at first-pass
+# resolution; seeding it in sdkconfig.defaults makes it true before the manager
+# runs. NOTE: sdkconfig.defaults.board is NOT in this build's SDKCONFIG_DEFAULTS,
+# so the lwIP voice-WS override placed there never took effect — fold it in here
+# too. Idempotent (guards on the LUA_MODULE_DISPLAY line).
+apply_ui_sdkconfig_seed_patch() {
+    local defaults="$ESP_CLAW_DIR/application/edge_agent/sdkconfig.defaults"
+    if [ ! -f "$defaults" ]; then
+        log "sdkconfig.defaults not found — skipping ui sdkconfig seed"
+        return
+    fi
+    if grep -q "CONFIG_APP_CLAW_LUA_MODULE_DISPLAY=y" "$defaults" 2>/dev/null; then
+        log "ui sdkconfig seed already present"
+        return
+    fi
+    log "seeding CAP_LUA + LUA_MODULE_DISPLAY + lwIP TX into sdkconfig.defaults"
+    cat >> "$defaults" <<'EOF'
+
+# JarvisNano interactive UI + voice WS resilience — seeded here (not the unused
+# sdkconfig.defaults.board) so the component manager sees them on a clean build.
+# CAP_LUA/LUA_MODULE_DISPLAY pull lua_module_display -> display_hal (ui_layer
+# renderer). The lwIP TX buffer enlarges the WS send window.
+CONFIG_APP_CLAW_CAP_LUA=y
+CONFIG_APP_CLAW_LUA_MODULE_DISPLAY=y
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
+CONFIG_LWIP_TCP_WND_DEFAULT=16384
+EOF
+}
+
 # STABILITY_PLAN P0.1 — every boot must explain the previous death. Injects a
 # one-line "boot_diag" log into app_main: decoded esp_reset_reason(), raw
 # per-core ROM reset reasons, and esp_core_dump_image_check() state. Emitted
@@ -3750,6 +3785,7 @@ main() {
     apply_reactive_waveform_audio_bridge_patch
     apply_ui_layer_register_patch
     apply_ui_layer_manifest_dep_patch
+    apply_ui_sdkconfig_seed_patch
     apply_ble_disable_patch
     apply_boot_diag_patch
     apply_ui_start_soft_fail_patch
