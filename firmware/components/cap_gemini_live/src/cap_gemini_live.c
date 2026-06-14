@@ -3956,11 +3956,30 @@ static bool gl_try_ws_resume(void)
         return false;
     }
 
-    /* Re-arm the input activity so the mic uplink + turn-taking resume cleanly
-     * (server-VAD mode no-ops the activity signal but still needs capture live).
-     * The audio path was never torn down, so nothing else to re-open. */
+    /* The resumed socket is a fresh server session (new setupComplete) with no
+     * memory of the pre-drop turn, so the input activity must be re-sent. Force
+     * a clean LISTENING turn first: a drop mid-SPEAKING would otherwise leave
+     * state == GL_STATE_SPEAKING, and the TX gate (mic frames uplink only when
+     * state == GL_STATE_LISTENING) would drop every frame until the ~20 s
+     * speaking watchdog rescued it — the "ws_resume_count++ but audio_parts==0
+     * next turn" failure mode. The audio path itself (PCM ring, feeder, TX task)
+     * was never torn down. */
+    s_gl.waiting_terminal = false;
+    s_gl.pending_resume   = false;
+    if (s_gl.state != GL_STATE_LISTENING) {
+        gl_dac_mute(true);
+        s_gl.first_audio_pending = false;
+        gl_set_state(GL_STATE_LISTENING, "Listening");
+    }
+    if (!s_gl.adc_open) {
+        gl_open_adc(GL_TX_SAMPLE_RATE);
+    }
+    /* Reset activity_open so gl_begin_audio_activity re-sends activityStart on
+     * the new socket (it no-ops when activity_open is already true — needed for
+     * the drop-while-LISTENING case where the old activity was open). */
     s_gl.activity_open = false;
     gl_begin_audio_activity("ws resume");
+    gl_start_tx_task();   /* idempotent: no-ops if the TX task survived the drop */
     s_gl.ws_resume_count++;
     ESP_LOGI(TAG, "WS resume OK (#%u) — session preserved",
              (unsigned)s_gl.ws_resume_count);

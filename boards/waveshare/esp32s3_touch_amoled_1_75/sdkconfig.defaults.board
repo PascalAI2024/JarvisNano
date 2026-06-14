@@ -50,6 +50,11 @@ CONFIG_COMPILER_OPTIMIZATION_LEVEL_RELEASE=y
 # session to IDLE. Tripling the buffer + window to 16 KB lets a brief stall be
 # absorbed instead of stalling the writer to a write-0. PSRAM is plentiful (8 MB),
 # so the extra per-socket TCP memory is free here.
+#
+# NOTE (INERT COPY): this sdkconfig.defaults.board file is NOT consumed by the
+# build. The override that actually reaches the generated sdkconfig is the
+# bootstrap.sh apply_ui_sdkconfig_seed heredoc — tune the value THERE, not here.
+# These two lines are kept as rationale near the board definition only.
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
 CONFIG_LWIP_TCP_WND_DEFAULT=16384
 

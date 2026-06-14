@@ -136,8 +136,8 @@ pattern already exists in this file (`vad_commit_request`) — extend it, don't 
 |---|---|---|---|
 | P3.1 | Immediate stopgap: tap-to-interrupt — tap during SPEAKING flushes the RX queue + DAC, sends `activityStart`, returns to LISTENING | Tap mid-reply stops her voice < 200 ms and she listens | done |
 | P3.2 | Honor server `interrupted` frames: on receipt, flush queued audio instead of draining the backlog | `interrupted` counter increments and playback halts promptly when it fires | done |
-| P3.3 | AEC bring-up: esp-sr AFE with ES7210 loopback reference channel; mic stays open during playback (prerequisite shared with the VISION wake-word milestone) | Loopback-referenced capture during playback; echo suppressed in `/api/audio/level` samples | todo |
-| P3.4 | Barge-in: with AEC live, stream mic during SPEAKING and re-test Gemini server VAD (previously documented broken — retest may have been confounded by echo, which AEC removes) | Speaking over her interrupts within ~500 ms hands-free | todo |
+| P3.3 | AEC bring-up: esp-sr AFE with ES7210 loopback reference channel; mic stays open during playback (prerequisite shared with the VISION wake-word milestone) | Loopback-referenced capture during playback; echo suppressed in `/api/audio/level` samples | **built** (`5f1005d`; direct `esp_aec.h`, not AFE — see [aec-barge-in.md](reference/aec-barge-in.md)) · HW-verify pending |
+| P3.4 | Barge-in: with AEC live, stream mic during SPEAKING and re-test Gemini server VAD (previously documented broken — retest may have been confounded by echo, which AEC removes) | Speaking over her interrupts within ~500 ms hands-free | **built** (`feb198e`/`6264014`/`cf277e7`) · HW-verify pending |
 
 ### P4 — Resume the vision build order
 
@@ -250,3 +250,75 @@ plan was written. Statuses above reflect the verified state.
 - **Backlog still open**: `local_hardware_demo_start` duplicate-task race
   (`touch_demo.c:192`); rwave segment-widening EAF loop-reset pulse
   (`reactive_face.c:549`).
+
+---
+
+## Execution log (2026-06-13)
+
+P3.3/P3.4 (AEC + hands-free barge-in), the voice-mute remediation, the CST9217
+touch-init cure, and the interactive `ui_layer` all landed today. Detailed
+design + evidence live in the new reference pages:
+[aec-barge-in.md](reference/aec-barge-in.md),
+[voice-remediation-2026-06-13.md](reference/voice-remediation-2026-06-13.md),
+[reliability-and-ui-2026-06-13.md](reference/reliability-and-ui-2026-06-13.md).
+
+### Commits landed (chronological)
+
+| Commit | Scope |
+|---|---|
+| `5f1005d` | P3.3 — ES7210-referenced echo cancellation in the capture path (direct `esp_aec.h`, 4-ch TDM read, MIC3 ref demux, post-AEC gain staging) |
+| `feb198e` | P3.4 — hands-free barge-in: open-mic AEC capture during SPEAKING, local barge detector, Gemini server-VAD path |
+| `6264014` | AEC barge-in hardening — gain staging, PCM-OOM + WS-death cures, runtime tuning endpoint |
+| `cf277e7` | State-aware mic gain (24 dB listen / 6 dB speak) + 20 s reply watchdog (she hears the user; no self-cancel) |
+| `d9031ac` | Voice-mute remediation — in-session WS resume (survive transient `transport_poll_write(0)`), lwIP TX 16384, `activityHandling=NO_INTERRUPTION`, barge guard, PCM-decode retry |
+| `079eb94` | CST9217 touch reliability — reset-before-probe (bootstrap) + self-heal re-init loop + visible emote alert overlay |
+| `186adda` + 5× `fix:` | Interactive `firmware/ui_layer/` (WIP) — tappable choice arcs / data / image / radial menu + `ask_user` tool, as a second display-arbiter owner on `display_hal`; build-wiring fixes (sdkconfig seeds, CMake path-deps, register patch, forward-decl, hit-test by angle) |
+
+### Build gate (this session)
+
+`b0c27ee` (HEAD) builds clean in `espressif/idf:v5.5.4` → valid 2.5 MB
+`edge_agent.bin`; `smoke-build.sh` passes. The ui_layer wiring links.
+
+### Adversarial audit + the one must-fix
+
+A 27-agent multi-lens audit (ui_layer / WS-resume / AEC / touch / regression),
+every finding refuted-by-default before counting: **21 raw → 7 kept (1 high,
+5 low, 1 none); zero P0/P1/deadlock/PSRAM regressions.** The one high-severity
+defect — and its fix — landed this session:
+
+- **WS-resume left state stuck (the `resume_count++ / audio_parts==0` mute).**
+  `gl_try_ws_resume` re-armed activity but never forced `state` back to
+  `GL_STATE_LISTENING`, so a WS drop *mid-SPEAKING* left the TX gate dropping
+  every mic frame until the ~20 s speaking watchdog. Fixed: force a clean
+  LISTENING turn (mute DAC, `gl_set_state(LISTENING)`, reopen ADC if needed)
+  before re-arming activity + `gl_start_tx_task()`, preserving the
+  drop-while-LISTENING re-arm. `cap_gemini_live.c:gl_try_ws_resume`.
+
+Folded-in hardening (audit lows): `volatile` on the cross-task `s_alert_active`
+/ `s_voice_visual_active` flags; the missing `s_voice_visual_active` guard added
+to `emote_render_status` (so `emote_clear_alert` can't repaint the idle face
+over a live waveform); inert-copy note on the dead lwIP override in
+`sdkconfig.defaults.board` (the live override is the bootstrap seed, verified in
+the generated `sdkconfig`).
+
+### Deferred (low, optional)
+
+- `#3` barge-disarm diagnostic counter — emit a counter when the barge detector
+  disarms on a non-`four_lane` SPEAKING read, so degraded-capture barge loss is
+  visible in `/api/gemini/live` (observability only; tap-to-barge fallback still
+  works).
+- `#2` drop the inert `.reconnect_timeout_ms = 5000` in `ws_cfg` (already has an
+  adjacent explanatory comment; cosmetic).
+
+### Owed: hardware verification (device was offline this session)
+
+The board is connected over USB but was not on Wi-Fi, so none of today's landing
+is hardware-verified. After flashing the WS-resume fix, run the on-device
+checklist in [reliability-and-ui-2026-06-13.md](reference/reliability-and-ui-2026-06-13.md) §5
+plus: **(1)** WS-resume mid-SPEAKING (force a transport abort during a long
+reply; next turn must get audio within ~1 s, not after ~20 s) — confirm via
+`/api/gemini/live` that `ws_resume_count` incremented AND `audio_parts > 0`;
+**(2)** 6 voice cycles (3 long + 3 short), zero `WS dropped, cleaning up
+session`; **(3)** barge-in regression (hands-free + tap fallback); **(4)** 10×
+power-cycle touch self-heal loop; **(5)** `snapshot.ppm` ui_layer ↔ emote
+handoff during an active session.

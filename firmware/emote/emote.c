@@ -474,19 +474,22 @@ static esp_err_t emote_apply(const char *idle, const char *msg)
 static bool s_sta_connected;
 static char s_ap_ssid[48];
 static char s_status_detail[48];   /* e.g. the active LLM model name */
-static bool s_voice_visual_active;
+static volatile bool s_voice_visual_active;
 /* When set, a persistent alert overlay (emote_set_alert) owns the screen.
  * emote_render_status() and emote_set_status_detail() early-return so a late
  * status/detail write can't clobber the alert mid-session. Cleared only by
  * emote_clear_alert(). */
-static bool s_alert_active;
+static volatile bool s_alert_active;
 
 static esp_err_t emote_render_status(void)
 {
     ESP_RETURN_ON_FALSE(s_emote_handle != NULL, ESP_ERR_INVALID_STATE, TAG, "emote handle is NULL");
 
-    /* A latched alert owns the screen — don't let a status repaint clobber it. */
-    if (s_alert_active) {
+    /* A latched alert — or an active voice session's reactive face — owns the
+     * screen; don't let a status repaint clobber it. Mirrors the dual guard in
+     * emote_set_status_detail() so emote_clear_alert()/network-status writes
+     * can't repaint the idle face over a live waveform. */
+    if (s_alert_active || s_voice_visual_active) {
         return ESP_OK;
     }
 
