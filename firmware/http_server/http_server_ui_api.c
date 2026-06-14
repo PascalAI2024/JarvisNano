@@ -313,7 +313,7 @@ static esp_err_t ui_snapshot_handler(httpd_req_t *req)
     esp_err_t err = display_hal_copy_visible(fb, max_px, &w, &h);
     if (err != ESP_OK || w <= 0 || h <= 0) {
         heap_caps_free(fb);
-        return httpd_resp_send_err(req, HTTPD_503_SERVICE_UNAVAILABLE,
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                                    "no UI framebuffer (is a ui_layer scene active?)");
     }
     httpd_resp_set_type(req, "image/x-portable-pixmap");
