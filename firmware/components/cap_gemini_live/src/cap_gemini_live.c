@@ -685,6 +685,7 @@ static _Atomic uint16_t s_barge_rms = GL_BARGE_RMS;
  * GET /api/debug/gain?mic=&ref=&vol= — no reflash needed. Defaults track the
  * #defines; mic/ref are ES7210 PGA dB, out_vol is the ES8311 0-100 scale. */
 static _Atomic int      s_mic_pga_db = GL_MIC_PGA_DB;
+static _Atomic int      s_mic_pga_speak_db = GL_MIC_PGA_SPEAK_DB;  /* during-SPEAKING mic gain; raise to make a barge audible over the residual echo. Runtime: /api/debug/gain?speak=N */
 static _Atomic int      s_ref_pga_db = GL_REF_PGA_DB;
 static _Atomic int      s_out_vol    = 100;
 /* Manual-mode barge-in: server-side activityHandling. 1 = START_OF_ACTIVITY_INTERRUPTS
@@ -1160,7 +1161,7 @@ static void gl_apply_in_gains(void)
      * louder, runtime-tunable listen gain so the user's voice is actually heard.
      * Re-applied from gl_set_state on every SPEAKING/LISTENING transition. */
     int mic_db = (s_gl.state == GL_STATE_SPEAKING)
-                 ? GL_MIC_PGA_SPEAK_DB : atomic_load(&s_mic_pga_db);
+                 ? atomic_load(&s_mic_pga_speak_db) : atomic_load(&s_mic_pga_db);
     esp_codec_dev_set_in_channel_gain(s_gl.adc,
         ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) |
         ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1), (float)mic_db);
@@ -4716,6 +4717,7 @@ esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size)
     cJSON_AddNumberToObject(root, "barge_hits", (double)s_gl.barge_hits);
     cJSON_AddNumberToObject(root, "barge_rms_threshold", (double)atomic_load(&s_barge_rms));
     cJSON_AddNumberToObject(root, "mic_pga_db", (double)atomic_load(&s_mic_pga_db));
+    cJSON_AddNumberToObject(root, "speak_pga_db", (double)atomic_load(&s_mic_pga_speak_db));
     cJSON_AddNumberToObject(root, "ref_pga_db", (double)atomic_load(&s_ref_pga_db));
     cJSON_AddNumberToObject(root, "out_vol", (double)atomic_load(&s_out_vol));
     cJSON_AddNumberToObject(root, "audio_stream_ends", (double)s_gl.audio_stream_end_hits);
@@ -4819,6 +4821,22 @@ void cap_gemini_live_set_in_gains(int mic_db, int ref_db, int out_vol)
     }
     ESP_LOGI(TAG, "in-gains set: mic=%d dB ref=%d dB out_vol=%d",
              atomic_load(&s_mic_pga_db), atomic_load(&s_ref_pga_db), atomic_load(&s_out_vol));
+}
+
+/* During-SPEAKING mic gain (barge calibration). Raising it lifts a real barge
+ * above the post-AEC residual echo so the local detector can catch it; too high
+ * re-clips the echo into the AEC. Applies immediately (re-runs gl_apply_in_gains)
+ * so it can be swept mid-reply via /api/debug/gain?speak=N. <0 = unchanged. */
+void cap_gemini_live_set_speak_gain(int db)
+{
+    if (db < 0) {
+        return;
+    }
+    atomic_store(&s_mic_pga_speak_db, db);
+    if (s_gl.adc && !s_gl.adc_codec_failed && s_gl.adc_open) {
+        gl_apply_in_gains();   /* takes effect now if currently SPEAKING */
+    }
+    ESP_LOGI(TAG, "speak mic gain set to %d dB (barge calibration)", db);
 }
 
 /* Optional: drive the levels with no live session (own audio-path testing). */

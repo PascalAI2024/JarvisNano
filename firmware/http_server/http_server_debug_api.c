@@ -37,6 +37,7 @@ esp_err_t cap_gemini_live_start(void);
 esp_err_t cap_gemini_live_send_text(const char *text);
 bool      cap_gemini_live_is_active(void);
 void      cap_gemini_live_set_activity_interrupts(int enable);
+void      cap_gemini_live_set_speak_gain(int db);
 
 static const char *TAG = "http_debug";
 
@@ -134,6 +135,12 @@ static esp_err_t debug_gain_handler(httpd_req_t *req)
         cap_gemini_live_set_activity_interrupts(interrupt);
     }
 
+    int speak = -1;
+    if (http_server_query_get(req, "speak", buf, sizeof(buf)) == ESP_OK) {
+        speak = atoi(buf);
+        cap_gemini_live_set_speak_gain(speak);   /* during-SPEAKING mic gain, live */
+    }
+
     cJSON *root = cJSON_CreateObject();
     if (root) {
         cJSON_AddBoolToObject(root, "ok", true);
@@ -142,6 +149,7 @@ static esp_err_t debug_gain_handler(httpd_req_t *req)
         cJSON_AddNumberToObject(root, "vol", vol);
         cJSON_AddNumberToObject(root, "barge", barge);
         cJSON_AddNumberToObject(root, "interrupt", interrupt);
+        cJSON_AddNumberToObject(root, "speak", speak);
         http_server_send_json_response(req, root);
     }
     return ESP_OK;

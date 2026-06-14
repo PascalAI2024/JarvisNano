@@ -54,6 +54,10 @@ void      cap_gemini_live_set_activity_interrupts(int enable);
 /* Runtime AEC gain staging for hardware calibration. Any arg < 0 is left
  * unchanged. mic_db/ref_db = ES7210 per-channel PGA; out_vol = ES8311 0-100. */
 void      cap_gemini_live_set_in_gains(int mic_db, int ref_db, int out_vol);
+
+/* During-SPEAKING mic gain (barge-in calibration). Higher = a barge stands out
+ * over the residual echo; too high re-clips the echo into the AEC. <0 = leave. */
+void      cap_gemini_live_set_speak_gain(int db);
 void      cap_gemini_live_print_diagnostics(void);
 esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size);
 
