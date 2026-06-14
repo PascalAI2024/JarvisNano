@@ -203,7 +203,7 @@ bool      ui_layer_is_active(void);
  * vs ref rms ~175 @0 dB: cut the mics 12 dB (echo peak ~8200, unclipped) and
  * raise the ref 24 dB (~2800, ≈ post-cut echo ~2500). Tune from aec_atten_db. */
 #define GL_MIC_PGA_DB            24   /* LISTENING mic gain (chip MIC1/MIC2) — loud enough to hear the USER (2026-06-13: confirmed responses at 24 dB; 6 dB was too quiet for the local VAD). Runtime-tunable listen default. */
-#define GL_MIC_PGA_SPEAK_DB      6    /* SPEAKING mic gain — drops to unclip the echo so the AEC stays linear (~18 dB suppression). Applied automatically on the SPEAKING transition (gl_set_state). */
+#define GL_MIC_PGA_SPEAK_DB      9    /* SPEAKING mic gain — drops to unclip the echo so the AEC stays linear (~18 dB suppression). Applied automatically on the SPEAKING transition (gl_set_state). */
 #define GL_REF_PGA_DB            12   /* echo reference (chip MIC3, mask bit 2) — matched to the post-cut echo level */
 /* Make-up gain + soft-knee limiter for model audio. Measured PCM is speech with
  * a high crest factor: peaks ~80% full-scale but RMS only ~15%, so it sounds
@@ -351,8 +351,8 @@ bool      ui_layer_is_active(void);
  * the 250 ms target; measured per event as `barge_latency` in the log.
  * Requires a live AEC engine: with the AEC degraded the detector stays OFF
  * (raw echo would self-trigger) and barge-in remains tap-only. */
-#define GL_BARGE_RMS             9000   /* measured no-self-interrupt floor at out_vol=100 (2026-06-13): residual-echo peaks sit at 6000-9000 post-AEC+6x, 9000 gives 0 self-barge over many replies while a real interruption (voice stacked on the residual) clears it. Runtime-tunable: /api/debug/gain?barge=N (lower for more sensitivity, accepting rare self-barge). */
-#define GL_BARGE_LATCH_FRAMES    3
+#define GL_BARGE_RMS             180    /* 2026-06-14 recalibration from real barge logs: the stronger AEC drops the post-6x residual floor to ~24-162 (worst case ~162 at the 5dB-atten dip); real barges measured 207-754 (12/12 fired, server-confirmed "Model interrupted"). 180 sits just above the worst-case floor and below the quietest real barge; the 4-frame (128ms) latch rejects transient residual spikes. (Was 9000 — calibrated for the OLD weak AEC, ~30x too high, which is why barge "didn't stop".) Runtime-tunable: /api/debug/gain?barge=N. */
+#define GL_BARGE_LATCH_FRAMES    4
 /* Post-SPEAKING-entry guard: do NOT arm the local barge detector for this long
  * after gl_enter_speaking. The 24 dB LISTENING mic gain drops to
  * GL_MIC_PGA_SPEAK_DB via an async codec control write that does not land
@@ -364,7 +364,7 @@ bool      ui_layer_is_active(void);
  * native-audio first-token latency, so a genuine early user barge is still
  * caught once the window elapses (real barges are sustained speech, not one
  * transient). Anchored on s_gl.speak_enter_us (set in gl_enter_speaking). */
-#define GL_BARGE_GUARD_MS        300
+#define GL_BARGE_GUARD_MS        200
 /* Auto-VAD stream contract: an uplink pause longer than this must be flushed
  * with realtimeInput.audioStreamEnd or the server keeps stale cached audio
  * that bleeds into the next utterance (aec-barge-in.md §4). */
