@@ -3509,11 +3509,11 @@ apply_display_hal_capture_patch() {
         log "display_hal sources not found — skipping capture patch"
         return
     fi
-    if grep -q "display_hal_copy_visible" "$c" 2>/dev/null; then
+    if grep -q "display_hal_visible_ptr" "$c" 2>/dev/null; then
         log "display_hal capture patch already applied"
         return
     fi
-    log "applying display_hal capture patch (display_hal_copy_visible)"
+    log "applying display_hal capture patch (visible_ptr + copy_visible)"
     python3 - "$c" "$h" <<'PY'
 import pathlib, sys
 c = pathlib.Path(sys.argv[1]); h = pathlib.Path(sys.argv[2])
@@ -3551,20 +3551,40 @@ func = (
     "    return ESP_OK;\n"
     "}\n"
 )
+ptr_func = (
+    "\n/* JarvisNano: borrow the visible framebuffer pointer for the UI snapshot\n"
+    " * endpoint so it can stream-convert without a full-frame copy buffer (which\n"
+    " * cannot allocate once display_hal has fragmented PSRAM). Static scene =\n"
+    " * pointer stable for the stream. */\n"
+    "const uint16_t *display_hal_visible_ptr(int *out_w, int *out_h)\n"
+    "{\n"
+    "    if (display_hal_lock() != ESP_OK) {\n"
+    "        return NULL;\n"
+    "    }\n"
+    "    uint16_t *fb = display_hal_get_visible_framebuffer_locked();\n"
+    "    if (out_w) { *out_w = s_state.width; }\n"
+    "    if (out_h) { *out_h = s_state.height; }\n"
+    "    display_hal_unlock();\n"
+    "    return fb;\n"
+    "}\n"
+)
+if cs.count(anchor) != 1:
+    raise SystemExit("display_hal present() anchor not unique (%d)" % cs.count(anchor))
 if "display_hal_copy_visible" not in cs:
-    if cs.count(anchor) != 1:
-        raise SystemExit("display_hal present() anchor not unique (%d)" % cs.count(anchor))
     cs = cs.replace(anchor, anchor + func, 1)
-    c.write_text(cs)
+if "display_hal_visible_ptr" not in cs:
+    cs = cs.replace(anchor, anchor + ptr_func, 1)
+c.write_text(cs)
 hs = h.read_text()
 decl_anchor = "esp_err_t display_hal_present(void);\n"
-decl_new = decl_anchor + "esp_err_t display_hal_copy_visible(uint16_t *dst, size_t max_px, int *out_w, int *out_h);\n"
+if decl_anchor not in hs:
+    raise SystemExit("display_hal.h present decl anchor missing")
 if "display_hal_copy_visible" not in hs:
-    if decl_anchor not in hs:
-        raise SystemExit("display_hal.h present decl anchor missing")
-    hs = hs.replace(decl_anchor, decl_new, 1)
-    h.write_text(hs)
-print("added display_hal_copy_visible")
+    hs = hs.replace(decl_anchor, decl_anchor + "esp_err_t display_hal_copy_visible(uint16_t *dst, size_t max_px, int *out_w, int *out_h);\n", 1)
+if "display_hal_visible_ptr" not in hs:
+    hs = hs.replace(decl_anchor, decl_anchor + "const uint16_t *display_hal_visible_ptr(int *out_w, int *out_h);\n", 1)
+h.write_text(hs)
+print("added display_hal visible_ptr + copy_visible")
 PY
 }
 

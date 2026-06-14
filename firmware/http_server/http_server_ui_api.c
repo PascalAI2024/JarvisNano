@@ -38,8 +38,9 @@
 #define HTTP_UI_MAX_ROWS    5
 
 /* display_hal capture (provided by lua_module_display; see the bootstrap
- * apply_display_hal_capture_patch). Copies the visible framebuffer (RGB565). */
-esp_err_t display_hal_copy_visible(uint16_t *dst, size_t max_px, int *out_w, int *out_h);
+ * apply_display_hal_capture_patch). visible_ptr returns the live framebuffer
+ * pointer (RGB565) so the snapshot streams without a full-frame copy buffer. */
+const uint16_t *display_hal_visible_ptr(int *out_w, int *out_h);
 
 esp_err_t ui_layer_show_choice(const char *question, const char *const *opts, int n);
 esp_err_t ui_layer_show_data(const char *title, const char *const *labels,
@@ -303,37 +304,33 @@ static esp_err_t ui_dismiss_handler(httpd_req_t *req)
  * tool: lets the screen render be captured even when ui_layer holds the panel. */
 static esp_err_t ui_snapshot_handler(httpd_req_t *req)
 {
-    const size_t max_px = 480 * 480;
-    uint16_t *fb = heap_caps_malloc(max_px * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!fb) {
-        httpd_resp_send_500(req);
-        return ESP_ERR_NO_MEM;
-    }
     int w = 0, h = 0;
-    esp_err_t err = display_hal_copy_visible(fb, max_px, &w, &h);
-    if (err != ESP_OK || w <= 0 || h <= 0) {
-        heap_caps_free(fb);
+    const uint16_t *fb = display_hal_visible_ptr(&w, &h);
+    if (!fb || w <= 0 || h <= 0) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                                    "no UI framebuffer (is a ui_layer scene active?)");
+    }
+    /* Stream-convert RGB565 -> RGB888 a row at a time: a ~1.4 KB row buffer
+     * instead of a full-frame copy, which cannot allocate once display_hal has
+     * fragmented PSRAM. */
+    uint8_t *row = malloc((size_t)w * 3);
+    if (!row) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "row alloc failed");
     }
     httpd_resp_set_type(req, "image/x-portable-pixmap");
     char hdr[32];
     int hlen = snprintf(hdr, sizeof(hdr), "P6\n%d %d\n255\n", w, h);
     httpd_resp_send_chunk(req, hdr, hlen);
-    uint8_t *row = malloc((size_t)w * 3);
-    if (row) {
-        for (int y = 0; y < h; ++y) {
-            for (int x = 0; x < w; ++x) {
-                uint16_t px = fb[(size_t)y * w + x];
-                row[x * 3 + 0] = (uint8_t)(((px >> 11) & 0x1F) << 3);
-                row[x * 3 + 1] = (uint8_t)(((px >> 5) & 0x3F) << 2);
-                row[x * 3 + 2] = (uint8_t)((px & 0x1F) << 3);
-            }
-            httpd_resp_send_chunk(req, (const char *)row, (size_t)w * 3);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            uint16_t px = fb[(size_t)y * w + x];
+            row[x * 3 + 0] = (uint8_t)(((px >> 11) & 0x1F) << 3);
+            row[x * 3 + 1] = (uint8_t)(((px >> 5) & 0x3F) << 2);
+            row[x * 3 + 2] = (uint8_t)((px & 0x1F) << 3);
         }
-        free(row);
+        httpd_resp_send_chunk(req, (const char *)row, (size_t)w * 3);
     }
-    heap_caps_free(fb);
+    free(row);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
 }
