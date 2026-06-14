@@ -485,6 +485,7 @@ build() {
         -w /project/application/edge_agent \
         "$IDF_IMAGE" \
         bash -lc 'set -e; pip install --quiet "idf-component-manager==2.4.10" "esp-bmgr-assist==0.5.0";
+                  rm -rf build;
                   idf.py set-target esp32s3;
                   idf.py gen-bmgr-config -c ./boards -b "$BOARD_NAME";
                   python3 - <<'"'"'PY'"'"'
