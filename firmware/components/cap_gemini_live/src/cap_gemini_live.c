@@ -301,7 +301,7 @@ bool      ui_layer_is_active(void);
  * fixed it; the flag never ran with the gained signal (git log -S, see
  * aec-barge-in.md "Findings"). Re-enabled for P3.4 with the AEC (P3.3)
  * removing the echo confound for the during-playback stream. */
-#define GL_USE_SERVER_VAD        0  /* manual mode + LOCAL barge detector (chosen 2026-06-13). Server VAD needs a continuous uplink the server stops draining post-turn -> socket backs up -> transport_poll_write(0) deaths. Local barge on the AEC-cleaned mic is faster (~200 ms) and never floods. */
+#define GL_USE_SERVER_VAD        1  /* 2026-06-14: NATIVE server-VAD barge-in (the official Gemini Live path + how the examples do it). The server runs model-aware VAD on the continuous uplink and interrupts itself when the user speaks over the model — a crude local RMS threshold can't separate the user's voice from residual echo (that was "fires in logs but doesn't feel real" + the self-barge choppiness). The two reasons this was 0 are now fixed: (a) mic-too-quiet -> 6x gain + speak-PGA; (b) continuous-uplink WS death -> audioStreamEnd latch + drop-oldest TX queue + lwIP TX tuning (d9031ac, AFTER this was last disabled). The local detector stays as a demoted fast-mute hint (GL_BARGE_RMS high). */
 
 /* On-device VAD (hands-free turn commit). Server VAD does not return
  * serverContent on this Waveshare board (see above), so instead of disabling
@@ -351,7 +351,7 @@ bool      ui_layer_is_active(void);
  * the 250 ms target; measured per event as `barge_latency` in the log.
  * Requires a live AEC engine: with the AEC degraded the detector stays OFF
  * (raw echo would self-trigger) and barge-in remains tap-only. */
-#define GL_BARGE_RMS             180    /* 2026-06-14 recalibration from real barge logs: the stronger AEC drops the post-6x residual floor to ~24-162 (worst case ~162 at the 5dB-atten dip); real barges measured 207-754 (12/12 fired, server-confirmed "Model interrupted"). 180 sits just above the worst-case floor and below the quietest real barge; the 4-frame (128ms) latch rejects transient residual spikes. (Was 9000 — calibrated for the OLD weak AEC, ~30x too high, which is why barge "didn't stop".) Runtime-tunable: /api/debug/gain?barge=N. */
+#define GL_BARGE_RMS             9000   /* With server-VAD ON (GL_USE_SERVER_VAD=1) the SERVER owns barge (model-aware, won't self-trip on its own echo). The local RMS detector is demoted to a rare loud-only fast-mute HINT, so its threshold is deliberately HIGH (9000) to never self-barge on residual echo — a low threshold (180) caused the choppy self-interruption. Runtime-tunable: /api/debug/gain?barge=N (0 disables the local hint entirely; the server still barges). */
 #define GL_BARGE_LATCH_FRAMES    4
 /* Post-SPEAKING-entry guard: do NOT arm the local barge detector for this long
  * after gl_enter_speaking. The 24 dB LISTENING mic gain drops to
@@ -2212,7 +2212,13 @@ static void gl_audio_tx_task(void *arg)
             .sample_rate   = GL_TX_SAMPLE_RATE,    /* aec_create: must be 16000 */
             .caps          = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT,
             .mode          = GL_AEC_MODE,
-            .nlp_level     = AEC_NLP_LEVEL_AGGR,
+            /* NORMAL, not AGGR: aggressive NLP gates anything correlated with the
+             * echo reference, which during double-talk ducks the USER's overlapping
+             * speech too — so the server VAD never hears the barge ("server VAD
+             * doesn't work"). NORMAL still cancels echo linearly but preserves the
+             * user's voice at an intelligible level for the server. (Per 2026-06-14
+             * barge research; the speak-time mic-PGA drop keeps the AEC linear.) */
+            .nlp_level     = AEC_NLP_LEVEL_NORMAL,
         };
         aec = aec_create_from_config(&aec_cfg);
         if (!aec) {
