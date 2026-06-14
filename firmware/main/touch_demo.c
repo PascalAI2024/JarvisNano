@@ -23,6 +23,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -148,7 +149,7 @@ static void touch_exit_sleep(void)
  * on the UI task, but keeping them static avoids any lifetime ambiguity). */
 static void touch_show_status_panel(void)
 {
-    static char v_batt[24], v_wifi[28], v_ip[20], v_up[24], v_mem[28];
+    static char v_batt[32], v_wifi[48], v_ip[24], v_up[32], v_mem[40];
     const char *labels[5] = { "Battery", "Wi-Fi", "IP", "Uptime", "Free RAM" };
     const char *values[5] = { v_batt, v_wifi, v_ip, v_up, v_mem };
 
@@ -170,12 +171,23 @@ static void touch_show_status_panel(void)
     memset(&st, 0, sizeof(st));
     wifi_manager_get_status(&st);
     if (st.sta_connected) {
-        snprintf(v_wifi, sizeof(v_wifi), "%s %ddBm",
-                 st.sta_ssid ? st.sta_ssid : "?", (int)st.rssi);
+        /* SSID + signal come from esp_wifi (the status struct only carries the
+         * IP/mode); esp_wifi is already on the link+include path via
+         * wifi_manager. Fall back to "online" if the AP record isn't ready. */
+        wifi_ap_record_t ap;
+        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+            snprintf(v_wifi, sizeof(v_wifi), "%.24s %ddBm", (const char *)ap.ssid,
+                     (int)ap.rssi);
+        } else {
+            strlcpy(v_wifi, "online", sizeof(v_wifi));
+        }
         strlcpy(v_ip, st.sta_ip ? st.sta_ip : "n/a", sizeof(v_ip));
+    } else if (st.ap_active) {
+        snprintf(v_wifi, sizeof(v_wifi), "AP %.24s", st.ap_ssid ? st.ap_ssid : "");
+        strlcpy(v_ip, st.ap_ip ? st.ap_ip : "n/a", sizeof(v_ip));
     } else {
         strlcpy(v_wifi, "offline", sizeof(v_wifi));
-        strlcpy(v_ip, st.ap_ip ? st.ap_ip : "n/a", sizeof(v_ip));
+        strlcpy(v_ip, "n/a", sizeof(v_ip));
     }
 
     uint64_t up_s = esp_timer_get_time() / 1000000ULL;
