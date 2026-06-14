@@ -2021,7 +2021,13 @@ static void gl_start_feeder_task(void)
         .name         = "gl_pcm_feeder",
         .stack_size   = 6144,
         .priority     = 5,
-        .core_id      = tskNO_AFFINITY,
+        /* Pin to core 0 (Wi-Fi/sender core), AWAY from gl_audio_tx which runs the
+         * ~18 ms AEC at priority 6 on core 1. With NO_AFFINITY the feeder could
+         * land on core 1 and be starved by the AEC mid-frame -> the DAC DMA
+         * underruns -> the playback "hiccup". Core 0's Wi-Fi bursts are short and
+         * the sender is the same priority (5), so they timeshare without
+         * starving the ~80 ms feeder cadence. */
+        .core_id      = 0,
         .stack_policy = CLAW_TASK_STACK_PREFER_PSRAM,
     };
     if (claw_task_create(&feeder_cfg, gl_playback_feeder_task, NULL, &s_gl.feeder_task) != pdPASS) {

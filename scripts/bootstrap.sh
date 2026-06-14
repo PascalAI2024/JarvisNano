@@ -3898,6 +3898,48 @@ print("removed ble_gatt.c from SRCS")
 PY
 }
 
+# SD cold-boot mount can intermittently fail (SDMMC enumeration timing) → the
+# fs_sdcard board-manager device never mounts → /api/logs 503 + no persistent SD
+# logs. Self-heal: if sdcard_probe() fails, re-init the fs_sdcard device and
+# re-probe a few times before falling back to flash — the SAME proven pattern as
+# the touch controller (esp_board_manager_init_device_by_name). main.c already
+# includes esp_board_manager_includes.h + freertos/task.h. Idempotent.
+apply_sdcard_mount_retry_patch() {
+    local main_c="$ESP_CLAW_DIR/application/edge_agent/main/main.c"
+    if [ ! -f "$main_c" ]; then
+        log "main.c not found — skipping SD mount-retry patch"
+        return
+    fi
+    if grep -q "re-init fs_sdcard" "$main_c" 2>/dev/null; then
+        log "SD mount-retry patch already applied"
+        return
+    fi
+    log "applying SD cold-boot mount-retry self-heal patch"
+    python3 - "$main_c" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]); s = p.read_text()
+old = "    if (sdcard_probe()) {\n"
+new = (
+    "    /* JarvisNano: SD cold-boot mounts can intermittently fail (SDMMC\n"
+    "     * enumeration timing) -> /api/logs 503 + no persistent logs. Re-init the\n"
+    "     * fs_sdcard board-manager device and re-probe before falling back to\n"
+    "     * flash (same self-heal pattern as the touch controller). */\n"
+    "    bool sd_ok = sdcard_probe();\n"
+    "    for (int sd_try = 0; !sd_ok && sd_try < 3; ++sd_try) {\n"
+    "        ESP_LOGW(TAG, \"SD not mounted; re-init fs_sdcard (retry %d/3)\", sd_try + 1);\n"
+    "        esp_board_manager_init_device_by_name(\"fs_sdcard\");\n"
+    "        vTaskDelay(pdMS_TO_TICKS(400));\n"
+    "        sd_ok = sdcard_probe();\n"
+    "    }\n"
+    "    if (sd_ok) {\n"
+)
+if s.count(old) != 1:
+    raise SystemExit("sdcard_probe() call-site anchor not unique in main.c")
+p.write_text(s.replace(old, new, 1))
+print("patched SD mount-retry into main.c")
+PY
+}
+
 # STABILITY_PLAN P1.5 (F7) — a bad/corrupt emote partition must degrade to
 # voice-only operation with an E-log, not a silent bootloop. The stock
 # ESP_ERROR_CHECK(app_claw_ui_start()) panics and (with 0 s reboot delay and no
@@ -4112,6 +4154,7 @@ main() {
     apply_boot_diag_patch
     apply_status_panel_main_require_patch
     apply_bt_remove_gatt_src_patch
+    apply_sdcard_mount_retry_patch
     apply_ui_start_soft_fail_patch
     apply_boot_touch_breadcrumb_patch
 
