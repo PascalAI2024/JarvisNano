@@ -80,6 +80,7 @@ static const char *TAG = "ui_layer";
 #define UI_FONT_TITLE   40
 #define UI_FONT_LABEL   32
 #define UI_FONT_SMALL   28
+#define UI_FONT_ROW     24   /* data-panel rows: dense enough for label+value on one line */
 
 /* -------------------------------------------------------------------------
  * Command queue model — public API posts these; the UI task executes them.
@@ -401,22 +402,26 @@ static void ui_render_data(const ui_cmd_t *c)
     }
 
     /* a central round card holding the rows */
-    const int card_w = 300, card_h = 200;
+    const int card_w = 330, card_h = 210;
     const int card_x = UI_CX - card_w / 2;
-    const int card_y = UI_CY - card_h / 2 + 10;
+    const int card_y = UI_CY - card_h / 2 + 8;
     display_hal_fill_round_rect(card_x, card_y, card_w, card_h, 22, UI_COL_CARD);
     display_hal_draw_round_rect(card_x, card_y, card_w, card_h, 22, UI_COL_CARD_EDG);
 
+    /* Each row spans the FULL card width: label left-aligned, value right-aligned
+     * in the same band. The two-column (half/half) split clipped long values
+     * (a 13-char IP can't fit half a card) and collided with the label once the
+     * font grew. Transparent text means the two ends never stamp boxes over each
+     * other; only genuinely over-long labels+values could meet in the middle. */
     const int row_h = (n > 0) ? (card_h - 24) / n : card_h;
     for (int i = 0; i < n; ++i) {
         const int ry = card_y + 12 + i * row_h;
-        /* label left, value right, within the card */
-        display_hal_draw_text_aligned(card_x + 18, ry, card_w / 2 - 18, row_h,
-                                      c->opts[i], UI_FONT_LABEL, UI_COL_DIM, false, 0,
+        display_hal_draw_text_aligned(card_x + 18, ry, card_w - 36, row_h,
+                                      c->opts[i], UI_FONT_ROW, UI_COL_DIM, false, 0,
                                       DISPLAY_HAL_TEXT_ALIGN_LEFT,
                                       DISPLAY_HAL_TEXT_VALIGN_MIDDLE);
-        display_hal_draw_text_aligned(card_x + card_w / 2, ry, card_w / 2 - 18, row_h,
-                                      c->vals[i], UI_FONT_LABEL, UI_COL_TEXT, false, 0,
+        display_hal_draw_text_aligned(card_x + 18, ry, card_w - 36, row_h,
+                                      c->vals[i], UI_FONT_ROW, UI_COL_TEXT, false, 0,
                                       DISPLAY_HAL_TEXT_ALIGN_RIGHT,
                                       DISPLAY_HAL_TEXT_VALIGN_MIDDLE);
     }

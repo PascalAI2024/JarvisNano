@@ -33,6 +33,9 @@
  * sync with cap_gemini_live.h. */
 void cap_gemini_live_set_in_gains(int mic_db, int ref_db, int out_vol);
 void cap_gemini_live_set_barge_rms(unsigned short rms);
+esp_err_t cap_gemini_live_start(void);
+esp_err_t cap_gemini_live_send_text(const char *text);
+bool      cap_gemini_live_is_active(void);
 
 static const char *TAG = "http_debug";
 
@@ -135,6 +138,44 @@ static esp_err_t debug_gain_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* GET /api/debug/say?text=...
+ * Drive a full Gemini turn from a text prompt so the AUDIO REPLY path can be
+ * reproduced and instrumented without a person speaking: starts the session if
+ * idle, waits up to ~8 s for it to come up, then sends the text (the model
+ * replies with audio). Poll /api/gemini/live to watch the reply unfold
+ * (audio_parts, first_audio_ms, ws_resume_count, drops, pcm_ring_drop_bytes).
+ * Diagnostic + handy remote "make her say something" trigger. */
+static esp_err_t debug_say_handler(httpd_req_t *req)
+{
+    char text[200] = {0};
+    if (http_server_query_get(req, "text", text, sizeof(text)) != ESP_OK || text[0] == '\0') {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "text/plain; charset=utf-8");
+        return httpd_resp_sendstr(req, "missing ?text=\n");
+    }
+
+    bool started = false;
+    if (!cap_gemini_live_is_active()) {
+        cap_gemini_live_start();
+        started = true;
+        for (int i = 0; i < 80 && !cap_gemini_live_is_active(); ++i) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
+    esp_err_t err = cap_gemini_live_send_text(text);
+
+    cJSON *root = cJSON_CreateObject();
+    if (root) {
+        cJSON_AddBoolToObject(root, "ok", err == ESP_OK);
+        cJSON_AddStringToObject(root, "result", esp_err_to_name(err));
+        cJSON_AddBoolToObject(root, "started_session", started);
+        cJSON_AddBoolToObject(root, "active", cap_gemini_live_is_active());
+        cJSON_AddStringToObject(root, "sent", text);
+        http_server_send_json_response(req, root);
+    }
+    return ESP_OK;
+}
+
 esp_err_t http_server_register_debug_routes(httpd_handle_t server)
 {
     const httpd_uri_t crash = {
@@ -151,5 +192,14 @@ esp_err_t http_server_register_debug_routes(httpd_handle_t server)
         .method  = HTTP_GET,
         .handler = debug_gain_handler,
     };
-    return httpd_register_uri_handler(server, &gain);
+    err = httpd_register_uri_handler(server, &gain);
+    if (err != ESP_OK) {
+        return err;
+    }
+    const httpd_uri_t say = {
+        .uri     = "/api/debug/say",
+        .method  = HTTP_GET,
+        .handler = debug_say_handler,
+    };
+    return httpd_register_uri_handler(server, &say);
 }
