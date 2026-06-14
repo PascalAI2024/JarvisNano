@@ -315,13 +315,13 @@ bool      ui_layer_is_active(void);
  * through, so the calibration holds. Hysteresis between SILENCE_RMS and
  * SPEECH_RMS prevents flicker. */
 #define GL_USE_LOCAL_VAD         1
-#define GL_VAD_SPEECH_RMS        1000  /* RMS at/above this = speech. Sits just   */
+#define GL_VAD_SPEECH_RMS        120   /* 2026-06-14: was 1000 — calibrated for a louder/closer voice. Measured: ambient ~63 RMS, this user's normal voice 130-256. 1000 meant hands-free turns NEVER committed (no reply unless tapping). 120 sits between ambient and voice so normal speech commits a turn. Runtime-tunable: /api/debug/gain?vadspeech=N */
                                        /* above the measured idle ceiling (~939   */
                                        /* raw over 60s silent) at the bottom of   */
                                        /* the measured speech band (1000-4900) —  */
                                        /* 1200 missed quiet/distant speech, which */
                                        /* read as "it never replies".             */
-#define GL_VAD_SILENCE_RMS       500   /* RMS below this = silence (hysteresis)  */
+#define GL_VAD_SILENCE_RMS       80    /* 2026-06-14: was 500. RMS below this = silence (hysteresis). 80 sits just above ambient (~63) so the trailing-silence hangover completes and the turn commits. Runtime-tunable: /api/debug/gain?vadsilence=N */
 /* VAD accumulators count 32 ms capture frames since the AEC rechunk (D4).
  * HANG: 22 frames = 704 ms ≈ the field-tuned 700 ms hang. (The design table's
  * "16 frames = 512 ms" was derived from a stale 500 ms baseline; keeping the
@@ -351,7 +351,7 @@ bool      ui_layer_is_active(void);
  * the 250 ms target; measured per event as `barge_latency` in the log.
  * Requires a live AEC engine: with the AEC degraded the detector stays OFF
  * (raw echo would self-trigger) and barge-in remains tap-only. */
-#define GL_BARGE_RMS             9000   /* With server-VAD ON (GL_USE_SERVER_VAD=1) the SERVER owns barge (model-aware, won't self-trip on its own echo). The local RMS detector is demoted to a rare loud-only fast-mute HINT, so its threshold is deliberately HIGH (9000) to never self-barge on residual echo — a low threshold (180) caused the choppy self-interruption. Runtime-tunable: /api/debug/gain?barge=N (0 disables the local hint entirely; the server still barges). */
+#define GL_BARGE_RMS             220    /* Manual-mode local barge (the path the logs proved works: fired 12x at 200-300 -> server "Model interrupted"). 220 sits above the steady post-AEC residual (~162) and below firm barges (207-754). Lower self-barges when the AEC atten dips; higher misses quiet barges. Runtime-tunable: /api/debug/gain?barge=N (0 = off). */
 #define GL_BARGE_LATCH_FRAMES    4
 /* Post-SPEAKING-entry guard: do NOT arm the local barge detector for this long
  * after gl_enter_speaking. The 24 dB LISTENING mic gain drops to
@@ -696,6 +696,11 @@ static _Atomic int      s_out_vol    = 100;
  * the next session — restart voice to take effect). The 20 s speak-watchdog
  * makes the old spurious-cancel (4.5 s watchdog) a non-issue now. */
 static _Atomic int      s_activity_interrupts = 1;
+/* Local-VAD turn-commit thresholds (manual mode), runtime-tunable so hands-free
+ * turn detection can be matched to the user's actual mic level live (their voice
+ * was 130-256 RMS vs the old 1000 default). /api/debug/gain?vadspeech=N&vadsilence=N */
+static _Atomic int      s_vad_speech_rms  = GL_VAD_SPEECH_RMS;
+static _Atomic int      s_vad_silence_rms = GL_VAD_SILENCE_RMS;
 
 #if GL_LANE_DIAG
 /* Last 1 s window of raw per-lane RMS/peak, published by the capture task,
@@ -2615,13 +2620,13 @@ static void gl_audio_tx_task(void *arg)
          * SPEECH_RMS holds the current state, so mid-sentence dips don't end
          * the turn early. */
         if (!GL_USE_SERVER_VAD && s_gl.state == GL_STATE_LISTENING) {
-            if (mic_rms >= GL_VAD_SPEECH_RMS) {
+            if (mic_rms >= (uint16_t)atomic_load(&s_vad_speech_rms)) {
                 vad_speech_frames++;
                 vad_silence_frames = 0;
                 if (vad_speech_frames >= GL_VAD_MIN_SPEECH_FRAMES) {
                     vad_speech_seen = true;
                 }
-            } else if (mic_rms < GL_VAD_SILENCE_RMS) {
+            } else if (mic_rms < (uint16_t)atomic_load(&s_vad_silence_rms)) {
                 if (vad_speech_seen) {
                     vad_silence_frames++;
                     if (vad_silence_frames >= GL_VAD_HANG_FRAMES) {
@@ -2688,7 +2693,7 @@ static void gl_audio_tx_task(void *arg)
              * vad_speech_seen gives the mid-utterance hangover and the energy
              * test catches onset before the VAD latches. */
             uplink = (s_gl.state == GL_STATE_LISTENING) &&
-                     (vad_speech_seen || mic_rms >= GL_VAD_SILENCE_RMS);
+                     (vad_speech_seen || mic_rms >= (uint16_t)atomic_load(&s_vad_silence_rms));
         }
         if (!uplink || !s_gl.tx_frame_queue) {
             continue;
@@ -4716,6 +4721,8 @@ esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size)
                                 : "NO_INTERRUPTION");
     cJSON_AddNumberToObject(root, "barge_hits", (double)s_gl.barge_hits);
     cJSON_AddNumberToObject(root, "barge_rms_threshold", (double)atomic_load(&s_barge_rms));
+    cJSON_AddNumberToObject(root, "vad_speech_rms", (double)atomic_load(&s_vad_speech_rms));
+    cJSON_AddNumberToObject(root, "vad_silence_rms", (double)atomic_load(&s_vad_silence_rms));
     cJSON_AddNumberToObject(root, "mic_pga_db", (double)atomic_load(&s_mic_pga_db));
     cJSON_AddNumberToObject(root, "speak_pga_db", (double)atomic_load(&s_mic_pga_speak_db));
     cJSON_AddNumberToObject(root, "ref_pga_db", (double)atomic_load(&s_ref_pga_db));
@@ -4837,6 +4844,18 @@ void cap_gemini_live_set_speak_gain(int db)
         gl_apply_in_gains();   /* takes effect now if currently SPEAKING */
     }
     ESP_LOGI(TAG, "speak mic gain set to %d dB (barge calibration)", db);
+}
+
+/* Runtime local-VAD turn-commit thresholds (manual mode). Lets hands-free turn
+ * detection be matched to the user's mic level live: speech = RMS to start a
+ * turn, silence = RMS (below) to end it. <0 = leave unchanged. Lock-free; the
+ * capture task picks them up on the next frame. */
+void cap_gemini_live_set_vad(int speech_rms, int silence_rms)
+{
+    if (speech_rms >= 0)  atomic_store(&s_vad_speech_rms, speech_rms);
+    if (silence_rms >= 0) atomic_store(&s_vad_silence_rms, silence_rms);
+    ESP_LOGI(TAG, "VAD thresholds set: speech=%d silence=%d",
+             atomic_load(&s_vad_speech_rms), atomic_load(&s_vad_silence_rms));
 }
 
 /* Optional: drive the levels with no live session (own audio-path testing). */

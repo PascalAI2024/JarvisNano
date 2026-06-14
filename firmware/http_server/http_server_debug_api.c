@@ -38,6 +38,7 @@ esp_err_t cap_gemini_live_send_text(const char *text);
 bool      cap_gemini_live_is_active(void);
 void      cap_gemini_live_set_activity_interrupts(int enable);
 void      cap_gemini_live_set_speak_gain(int db);
+void      cap_gemini_live_set_vad(int speech_rms, int silence_rms);
 
 static const char *TAG = "http_debug";
 
@@ -139,6 +140,13 @@ static esp_err_t debug_gain_handler(httpd_req_t *req)
     if (http_server_query_get(req, "speak", buf, sizeof(buf)) == ESP_OK) {
         speak = atoi(buf);
         cap_gemini_live_set_speak_gain(speak);   /* during-SPEAKING mic gain, live */
+    }
+
+    int vadspeech = -1, vadsilence = -1;
+    if (http_server_query_get(req, "vadspeech", buf, sizeof(buf)) == ESP_OK) vadspeech = atoi(buf);
+    if (http_server_query_get(req, "vadsilence", buf, sizeof(buf)) == ESP_OK) vadsilence = atoi(buf);
+    if (vadspeech >= 0 || vadsilence >= 0) {
+        cap_gemini_live_set_vad(vadspeech, vadsilence);   /* hands-free turn-commit thresholds, live */
     }
 
     cJSON *root = cJSON_CreateObject();

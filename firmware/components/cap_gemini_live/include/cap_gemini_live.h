@@ -58,6 +58,10 @@ void      cap_gemini_live_set_in_gains(int mic_db, int ref_db, int out_vol);
 /* During-SPEAKING mic gain (barge-in calibration). Higher = a barge stands out
  * over the residual echo; too high re-clips the echo into the AEC. <0 = leave. */
 void      cap_gemini_live_set_speak_gain(int db);
+
+/* Runtime local-VAD turn-commit thresholds (manual mode): speech = RMS to start
+ * a turn (hands-free), silence = RMS below which the turn ends. <0 = leave. */
+void      cap_gemini_live_set_vad(int speech_rms, int silence_rms);
 void      cap_gemini_live_print_diagnostics(void);
 esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size);
 
