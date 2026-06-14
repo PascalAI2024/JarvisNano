@@ -168,14 +168,26 @@ static void emote_on_owner_changed(display_arbiter_owner_t owner, void *user_ctx
      * overwritten!"). If we don't re-attach ours every time we regain the
      * display, emote_flush_sync_wait() blocks on a semaphore that never fires:
      * the render loop keeps ticking and the framebuffer keeps updating, but the
-     * panel freezes on the last frame. Force a clean re-register on every
-     * handback. */
-    s_flush_sync_registered = false;
-    if (s_flush_done) {
-        while (xSemaphoreTake(s_flush_done, 0) == pdTRUE) {
+     * panel freezes on the last frame.
+     *
+     * Re-point the HW callback back at us DIRECTLY rather than via
+     * emote_register_flush_sync() — its guard would no-op (s_flush_sync_registered
+     * is still true; emote_draw() early-returns while LUA owns the display so no
+     * timeouts accrued to flip it). Crucially we do NOT touch s_flush_sync_registered
+     * or drain s_flush_done here: the render task may be concurrently inside
+     * emote_flush_sync_wait() at the same priority, and mutating that shared state
+     * would race it (a lost wakeup → spurious 80 ms stall). Writing the io
+     * callback pointer is a single aligned store the flush ISR reads — safe. The
+     * next flush signals normally. */
+    if (s_io_handle && s_flush_sync_registered) {
+        const esp_lcd_panel_io_callbacks_t callbacks = {
+            .on_color_trans_done = emote_panel_io_done_cb,
+        };
+        esp_err_t cb_err = esp_lcd_panel_io_register_event_callbacks(s_io_handle, &callbacks, NULL);
+        if (cb_err != ESP_OK) {
+            ESP_LOGW(TAG, "re-attach flush callback after handback failed: %s", esp_err_to_name(cb_err));
         }
     }
-    emote_register_flush_sync();
 
     esp_err_t err = emote_notify_all_refresh(s_emote_handle);
     if (err != ESP_OK) {

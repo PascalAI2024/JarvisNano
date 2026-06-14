@@ -3617,6 +3617,88 @@ print("added display_hal visible_ptr + copy_visible")
 PY
 }
 
+# True transparent text. display_hal_draw_text() renders glyphs into a tight
+# text_w x text_h scratch buffer, then blits it OPAQUELY. With has_bg=false it
+# pre-fills that buffer with black (0x0000), so every label/hint stamps an opaque
+# black rectangle over whatever it sits on (wedges, images) — the "black box
+# behind the text" artifact. This patch seeds the scratch buffer from the live
+# draw framebuffer pixels under the text when has_bg=false, so esp_painter only
+# overwrites glyph pixels and the background shows through. Idempotent (guards on
+# the JarvisNano marker). display_hal.c exists only in esp-claw, so this is a
+# bootstrap patch, not a bare edit.
+apply_display_hal_text_transparency_patch() {
+    local c="$ESP_CLAW_DIR/components/lua_modules/lua_module_display/src/display_hal.c"
+    if [ ! -f "$c" ]; then
+        log "display_hal.c not found — skipping text transparency patch"
+        return
+    fi
+    if grep -q "JarvisNano: true transparent text" "$c" 2>/dev/null; then
+        log "display_hal text transparency patch already applied"
+        return
+    fi
+    log "applying display_hal text transparency patch"
+    python3 - "$c" <<'PY'
+import pathlib, sys
+c = pathlib.Path(sys.argv[1])
+cs = c.read_text()
+anchor = (
+    "    fill_color = has_bg ? bg_color565 : 0x0000;\n"
+    "    for (size_t i = 0; i < aligned_buffer_bytes / sizeof(uint16_t); ++i) {\n"
+    "        buffer[i] = fill_color;\n"
+    "    }\n"
+)
+repl = (
+    "    fill_color = has_bg ? bg_color565 : 0x0000;\n"
+    "    /* JarvisNano: true transparent text. has_bg=true keeps the flat\n"
+    "     * bg_color; has_bg=false seeds the glyph buffer with the framebuffer\n"
+    "     * pixels under the text so esp_painter only overwrites glyph pixels —\n"
+    "     * no opaque black box stamped over wedges/images. If a flush is in flight\n"
+    "     * to this same draw framebuffer we wait; if that wait TIMES OUT the DMA may\n"
+    "     * still own the buffer, so we fall back to the flat fill rather than read\n"
+    "     * mid-transfer (matches the bail-on-timeout safety elsewhere in the HAL —\n"
+    "     * degrades to an opaque box for one frame, never torn pixels). Also falls\n"
+    "     * back when not compositing into an active frame. */\n"
+    "    bool ui_composite = (!has_bg && s_state.frame_active &&\n"
+    "                         s_state.width > 0 && s_state.height > 0);\n"
+    "    uint16_t *bg_fb = ui_composite ? display_hal_get_draw_framebuffer_locked() : NULL;\n"
+    "    if (!bg_fb) {\n"
+    "        ui_composite = false;\n"
+    "    }\n"
+    "    if (ui_composite && s_state.flush_in_flight &&\n"
+    "        s_state.pending_framebuffer_index == (int8_t)s_state.draw_framebuffer_index) {\n"
+    "        if (display_hal_wait_flush_done_locked(pdMS_TO_TICKS(DISPLAY_HAL_FLUSH_TIMEOUT_MS)) != ESP_OK) {\n"
+    "            ui_composite = false;\n"
+    "        }\n"
+    "    }\n"
+    "    if (ui_composite) {\n"
+    "        for (uint16_t row = 0; row < text_h; ++row) {\n"
+    "            uint16_t *dstrow = buffer + (size_t)row * text_w;\n"
+    "            int fy = y + (int)row;\n"
+    "            if (fy < 0 || fy >= s_state.height) {\n"
+    "                for (uint16_t col = 0; col < text_w; ++col) { dstrow[col] = 0x0000; }\n"
+    "                continue;\n"
+    "            }\n"
+    "            const uint16_t *fbrow = bg_fb + (size_t)fy * s_state.width;\n"
+    "            for (uint16_t col = 0; col < text_w; ++col) {\n"
+    "                int fx = x + (int)col;\n"
+    "                dstrow[col] = (fx >= 0 && fx < s_state.width) ? fbrow[fx] : 0x0000;\n"
+    "            }\n"
+    "        }\n"
+    "    } else {\n"
+    "        for (size_t i = 0; i < aligned_buffer_bytes / sizeof(uint16_t); ++i) {\n"
+    "            buffer[i] = fill_color;\n"
+    "        }\n"
+    "    }\n"
+)
+n = cs.count(anchor)
+if n != 1:
+    raise SystemExit("text fill anchor not unique (%d) — display_hal.c changed" % n)
+cs = cs.replace(anchor, repl, 1)
+c.write_text(cs)
+print("display_hal text transparency applied")
+PY
+}
+
 # STABILITY_PLAN P0.1 — every boot must explain the previous death. Injects a
 # one-line "boot_diag" log into app_main: decoded esp_reset_reason(), raw
 # per-core ROM reset reasons, and esp_core_dump_image_check() state. Emitted
@@ -3955,6 +4037,7 @@ main() {
     apply_ui_fonts_seed_patch
     apply_ui_layer_lua_dep_patch
     apply_display_hal_capture_patch
+    apply_display_hal_text_transparency_patch
     apply_ble_disable_patch
     apply_boot_diag_patch
     apply_ui_start_soft_fail_patch
