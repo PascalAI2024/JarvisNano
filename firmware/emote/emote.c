@@ -161,6 +161,22 @@ static void emote_on_owner_changed(display_arbiter_owner_t owner, void *user_ctx
         return;
     }
 
+    /* The Lua/UI owner (display_hal) registers its own on_color_trans_done on
+     * the shared panel_io while it holds the display, then nulls it on destroy
+     * — either way it clobbers emote's flush-sync callback (the serial log
+     * shows "Callback on_color_trans_done was already set and now it was
+     * overwritten!"). If we don't re-attach ours every time we regain the
+     * display, emote_flush_sync_wait() blocks on a semaphore that never fires:
+     * the render loop keeps ticking and the framebuffer keeps updating, but the
+     * panel freezes on the last frame. Force a clean re-register on every
+     * handback. */
+    s_flush_sync_registered = false;
+    if (s_flush_done) {
+        while (xSemaphoreTake(s_flush_done, 0) == pdTRUE) {
+        }
+    }
+    emote_register_flush_sync();
+
     esp_err_t err = emote_notify_all_refresh(s_emote_handle);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "refresh after owner switch failed: %s", esp_err_to_name(err));

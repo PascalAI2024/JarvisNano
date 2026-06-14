@@ -3459,6 +3459,35 @@ CONFIG_LWIP_TCP_WND_DEFAULT=16384
 EOF
 }
 
+# Enable larger esp_painter bitmap fonts for the interactive UI. Stock only
+# enables font_24 (default y); on a 466x466 panel 24px reads small and blocky —
+# the "looks low quality" feedback. Enable a ladder up to 48 so ui_layer can use
+# 40px titles / 32px labels. Each font is a small const glyph table in flash and
+# the app partition has ~38% headroom, so this is free. Separate from the LUA
+# seed (which guards on its own marker and would skip on an already-seeded tree),
+# guarded on the font marker so it applies on the persisted tree too. Idempotent.
+apply_ui_fonts_seed_patch() {
+    local defaults="$ESP_CLAW_DIR/application/edge_agent/sdkconfig.defaults"
+    if [ ! -f "$defaults" ]; then
+        log "sdkconfig.defaults not found — skipping ui fonts seed"
+        return
+    fi
+    if grep -q "CONFIG_ESP_PAINTER_BASIC_FONT_48=y" "$defaults" 2>/dev/null; then
+        log "ui fonts seed already present"
+        return
+    fi
+    log "seeding larger esp_painter fonts (28/32/40/48) into sdkconfig.defaults"
+    cat >> "$defaults" <<'EOF'
+
+# Larger esp_painter bitmap fonts for the interactive UI (ui_layer 40px titles /
+# 32px labels). Stock enables only font_24, which reads small/blocky on 466x466.
+CONFIG_ESP_PAINTER_BASIC_FONT_28=y
+CONFIG_ESP_PAINTER_BASIC_FONT_32=y
+CONFIG_ESP_PAINTER_BASIC_FONT_40=y
+CONFIG_ESP_PAINTER_BASIC_FONT_48=y
+EOF
+}
+
 # Declare cap_lua + lua_module_display as UNCONDITIONAL path-deps in
 # main/idf_component.yml. Seeding sdkconfig is not enough: the component manager
 # evaluates app_claw's `if: $CONFIG{APP_CLAW_CAP_LUA}` rules on the clean build's
@@ -3923,6 +3952,7 @@ main() {
     apply_ui_layer_register_patch
     apply_ui_layer_manifest_dep_patch
     apply_ui_sdkconfig_seed_patch
+    apply_ui_fonts_seed_patch
     apply_ui_layer_lua_dep_patch
     apply_display_hal_capture_patch
     apply_ble_disable_patch

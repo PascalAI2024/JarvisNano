@@ -39,10 +39,10 @@ static const char *TAG = "ui_layer";
 #define UI_CY           233
 #define UI_SAFE_R       233      /* clip radius for the round bezel (r<=233) */
 
-#define UI_ARC_INNER    132      /* annular wedge inner radius (task spec) */
-#define UI_ARC_OUTER    168      /* annular wedge outer radius (task spec) */
-#define UI_ARC_EDGE_R   135      /* bright "tappable" inner edge ring radius */
-#define UI_ARC_LABEL_R  150      /* label centre radius (mid of the wedge band) */
+#define UI_ARC_INNER    118      /* annular wedge inner radius (thicker = bolder, more button-like) */
+#define UI_ARC_OUTER    188      /* annular wedge outer radius (still well inside r<=233 bezel) */
+#define UI_ARC_EDGE_R   122      /* bright "tappable" inner edge ring radius */
+#define UI_ARC_LABEL_R  153      /* label centre radius (mid of the 118..188 wedge band) */
 #define UI_TAP_DEADZONE_R 50     /* taps within this radius = centre/hint, ignored; outside = matched by angle (touch reads ~15% compressed, so don't require the exact rim radius) */
 #define UI_ARC_TOPGAP   1.20f    /* radians reserved at 12 o'clock for question */
 #define UI_ARC_GAP      0.08f    /* radians between adjacent wedges */
@@ -62,22 +62,24 @@ static const char *TAG = "ui_layer";
 /* Colours (RGB565). The HAL handles the CO5300 byte swap internally. */
 #define C565(r, g, b)   ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
 #define UI_COL_BG       C565(0x00, 0x00, 0x00)   /* true-black AMOLED ground */
-#define UI_COL_TRACK    C565(0x0E, 0x11, 0x1A)   /* dim wedge track */
-#define UI_COL_WEDGE    C565(0x23, 0x2C, 0x3D)   /* idle wedge fill */
-#define UI_COL_ACCENT   C565(0xFF, 0x57, 0x22)   /* J.A.R.V.I.S. amber */
-#define UI_COL_ACCENT_D C565(0x16, 0x0A, 0x05)   /* dark text on amber */
+#define UI_COL_TRACK    C565(0x16, 0x20, 0x30)   /* wedge track halo (visible rim) */
+#define UI_COL_WEDGE    C565(0x2B, 0x4F, 0x7E)   /* idle wedge fill — brighter HUD blue */
+#define UI_COL_EDGE     C565(0x6E, 0xB9, 0xFF)   /* cyan inner edge = "tappable" cue */
+#define UI_COL_ACCENT   C565(0xFF, 0x6A, 0x1F)   /* J.A.R.V.I.S. amber (selected) */
+#define UI_COL_ACCENT_D C565(0x1A, 0x0C, 0x03)   /* dark text on amber */
 #define UI_COL_WHITE    C565(0xFF, 0xFF, 0xFF)
 #define UI_COL_TEXT     C565(0xEA, 0xEE, 0xF4)
 #define UI_COL_DIM      C565(0x9A, 0xA3, 0xB2)
 #define UI_COL_CARD     C565(0x14, 0x17, 0x1F)
 #define UI_COL_CARD_EDG C565(0x27, 0x2C, 0x38)
 
-/* Fonts: 24 is the always-available default (font 0 also maps to 24 in the HAL).
- * 16 is requested for denser strings; the HAL falls back gracefully if a size is
- * not compiled in, so these are safe even on a minimal font set. */
-#define UI_FONT_TITLE   24
-#define UI_FONT_LABEL   16
-#define UI_FONT_SMALL   16
+/* Fonts: the build seeds esp_painter basic fonts 24/28/32/40/48 (see
+ * apply_ui_fonts_seed_patch in bootstrap.sh). The HAL falls back to 24 for any
+ * size not compiled in, so these stay safe even on a minimal font set. Sizes
+ * chosen for the 466x466 panel: 40px questions, 32px wedge labels, 28px hints. */
+#define UI_FONT_TITLE   40
+#define UI_FONT_LABEL   32
+#define UI_FONT_SMALL   28
 
 /* -------------------------------------------------------------------------
  * Command queue model — public API posts these; the UI task executes them.
@@ -320,7 +322,7 @@ static void ui_render_choice(const ui_cmd_t *c, int highlight)
 
     /* Question at 12 o'clock. */
     if (c->question[0]) {
-        display_hal_draw_text_aligned(0, 40, s_lcd_width, 44, c->question, UI_FONT_TITLE,
+        display_hal_draw_text_aligned(0, 30, s_lcd_width, 52, c->question, UI_FONT_TITLE,
                                       UI_COL_WHITE, false, 0,
                                       DISPLAY_HAL_TEXT_ALIGN_CENTER,
                                       DISPLAY_HAL_TEXT_VALIGN_MIDDLE);
@@ -341,28 +343,31 @@ static void ui_render_choice(const ui_cmd_t *c, int highlight)
         const float d0 = a0 * UI_RAD2DEG;
         const float d1 = a1 * UI_RAD2DEG;
 
-        /* track (full band) + fill (slightly inset) */
-        display_hal_fill_arc(UI_CX, UI_CY, UI_ARC_INNER - 4, UI_ARC_OUTER + 4, d0, d1, UI_COL_TRACK);
+        /* track halo (full band) + fill (slightly inset) */
+        display_hal_fill_arc(UI_CX, UI_CY, UI_ARC_INNER - 5, UI_ARC_OUTER + 5, d0, d1, UI_COL_TRACK);
         display_hal_fill_arc(UI_CX, UI_CY, UI_ARC_INNER, UI_ARC_OUTER, d0, d1,
                              hot ? UI_COL_ACCENT : UI_COL_WEDGE);
-        /* bright inner edge = "this is tappable" */
+        /* bright inner edge = "this is tappable" (2px for a crisper rim) */
         display_hal_draw_arc(UI_CX, UI_CY, UI_ARC_EDGE_R, d0, d1,
-                             hot ? UI_COL_WHITE : UI_COL_ACCENT);
+                             hot ? UI_COL_WHITE : UI_COL_EDGE);
+        display_hal_draw_arc(UI_CX, UI_CY, UI_ARC_EDGE_R + 1, d0, d1,
+                             hot ? UI_COL_WHITE : UI_COL_EDGE);
 
         /* centred label at the wedge mid-angle */
         const float mid = (a0 + a1) * 0.5f;
         const int lx = UI_CX + (int)lroundf(cosf(mid) * (float)UI_ARC_LABEL_R);
         const int ly = UI_CY + (int)lroundf(sinf(mid) * (float)UI_ARC_LABEL_R);
-        /* a label box centred on (lx,ly): 96x28 */
-        display_hal_draw_text_aligned(lx - 48, ly - 14, 96, 28, c->opts[i], UI_FONT_LABEL,
+        /* a label box centred on (lx,ly), wide enough for a 32px word */
+        display_hal_draw_text_aligned(lx - 90, ly - 22, 180, 44, c->opts[i], UI_FONT_LABEL,
                                       hot ? UI_COL_ACCENT_D : UI_COL_WHITE, false, 0,
                                       DISPLAY_HAL_TEXT_ALIGN_CENTER,
                                       DISPLAY_HAL_TEXT_VALIGN_MIDDLE);
     }
 
     /* centre hint + reactor dot */
-    display_hal_fill_circle(UI_CX, UI_CY, 8, UI_COL_ACCENT);
-    display_hal_draw_text_aligned(0, UI_CY + 18, s_lcd_width, 24, "tap to answer", UI_FONT_SMALL,
+    display_hal_fill_circle(UI_CX, UI_CY, 11, UI_COL_EDGE);
+    display_hal_fill_circle(UI_CX, UI_CY, 6, UI_COL_WHITE);
+    display_hal_draw_text_aligned(0, UI_CY + 26, s_lcd_width, 32, "tap to answer", UI_FONT_SMALL,
                                   UI_COL_DIM, false, 0,
                                   DISPLAY_HAL_TEXT_ALIGN_CENTER,
                                   DISPLAY_HAL_TEXT_VALIGN_MIDDLE);
@@ -389,7 +394,7 @@ static void ui_render_data(const ui_cmd_t *c)
 
     /* title at the top */
     if (c->question[0]) {
-        display_hal_draw_text_aligned(0, 56, s_lcd_width, 36, c->question, UI_FONT_TITLE,
+        display_hal_draw_text_aligned(0, 40, s_lcd_width, 52, c->question, UI_FONT_TITLE,
                                       UI_COL_WHITE, false, 0,
                                       DISPLAY_HAL_TEXT_ALIGN_CENTER,
                                       DISPLAY_HAL_TEXT_VALIGN_MIDDLE);
