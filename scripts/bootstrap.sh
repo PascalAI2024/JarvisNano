@@ -603,6 +603,14 @@ elif board == "esp32s3_touch_amoled_1_75":
     s = s.replace("CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y", "# CONFIG_ESPTOOLPY_FLASHSIZE_2MB is not set")
     s = s.replace("# CONFIG_ESPTOOLPY_FLASHSIZE_16MB is not set", "CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y")
     s = s.replace("CONFIG_ESPTOOLPY_FLASHSIZE=\"2MB\"", "CONFIG_ESPTOOLPY_FLASHSIZE=\"16MB\"")
+    # JarvisNano: fully disable Bluetooth ("remove ble for now" — 2026-06-13).
+    # The device is Wi-Fi-only; BLE GATT was already dormant (init skipped). Fully
+    # turning the controller off frees internal SRAM and removes any Wi-Fi/BT
+    # 2.4 GHz coexistence overhead. NimBLE + controller disable automatically via
+    # Kconfig deps once BT_ENABLED is off. Re-enable later by reverting this line,
+    # restoring "ble_gatt.c" to main SRCS (apply_bt_remove_gatt_src_patch), and the
+    # ble_gatt_init() call in main.c.
+    s = s.replace("CONFIG_BT_ENABLED=y", "# CONFIG_BT_ENABLED is not set")
 
 # LVGL is pulled in as a managed dependency, but its bundled examples/demos are
 # never compiled into the app and fail a clean (fullclean) build with
@@ -3863,6 +3871,33 @@ print("patched", p)
 PY
 }
 
+# Drop ble_gatt.c from main SRCS when Bluetooth is disabled. With
+# CONFIG_BT_ENABLED off (see the amoled sdkconfig block), ble_gatt.c's NimBLE
+# includes won't resolve, so it must leave the build. The file stays in the tree
+# (and main.c keeps the harmless ble_gatt.h include + the disabled-init comment)
+# so BLE is re-enableable later by reverting this + the sdkconfig line. Idempotent.
+apply_bt_remove_gatt_src_patch() {
+    local cmake="$ESP_CLAW_DIR/application/edge_agent/main/CMakeLists.txt"
+    if [ ! -f "$cmake" ]; then
+        log "main/CMakeLists.txt not found — skipping ble_gatt SRCS removal"
+        return
+    fi
+    if ! grep -q '"ble_gatt.c"' "$cmake" 2>/dev/null; then
+        log "ble_gatt.c already removed from main SRCS (BT disabled)"
+        return
+    fi
+    log "removing ble_gatt.c from main SRCS (BT disabled for now)"
+    python3 - "$cmake" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]); s = p.read_text()
+old = '        "ble_gatt.c"\n'
+if s.count(old) != 1:
+    raise SystemExit("ble_gatt.c SRCS anchor not unique in main/CMakeLists.txt")
+p.write_text(s.replace(old, "", 1))
+print("removed ble_gatt.c from SRCS")
+PY
+}
+
 # STABILITY_PLAN P1.5 (F7) — a bad/corrupt emote partition must degrade to
 # voice-only operation with an E-log, not a silent bootloop. The stock
 # ESP_ERROR_CHECK(app_claw_ui_start()) panics and (with 0 s reboot delay and no
@@ -4076,6 +4111,7 @@ main() {
     apply_ble_disable_patch
     apply_boot_diag_patch
     apply_status_panel_main_require_patch
+    apply_bt_remove_gatt_src_patch
     apply_ui_start_soft_fail_patch
     apply_boot_touch_breadcrumb_patch
 
