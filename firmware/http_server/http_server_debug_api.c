@@ -39,6 +39,8 @@ bool      cap_gemini_live_is_active(void);
 void      cap_gemini_live_set_activity_interrupts(int enable);
 void      cap_gemini_live_set_speak_gain(int db);
 void      cap_gemini_live_set_vad(int speech_rms, int silence_rms);
+void      cap_gemini_live_set_barge_guard_ms(int ms);
+void      cap_gemini_live_set_barge_ratio_pct(int pct);
 
 static const char *TAG = "http_debug";
 
@@ -149,6 +151,18 @@ static esp_err_t debug_gain_handler(httpd_req_t *req)
         cap_gemini_live_set_vad(vadspeech, vadsilence);   /* hands-free turn-commit thresholds, live */
     }
 
+    int guard = -1;
+    if (http_server_query_get(req, "guard", buf, sizeof(buf)) == ESP_OK) {
+        guard = atoi(buf);
+        cap_gemini_live_set_barge_guard_ms(guard);   /* barge self-barge guard window (ms), live */
+    }
+
+    int ratio = -1;
+    if (http_server_query_get(req, "ratio", buf, sizeof(buf)) == ESP_OK) {
+        ratio = atoi(buf);
+        cap_gemini_live_set_barge_ratio_pct(ratio);  /* adaptive barge floor: pct of playback, live */
+    }
+
     cJSON *root = cJSON_CreateObject();
     if (root) {
         cJSON_AddBoolToObject(root, "ok", true);
@@ -158,6 +172,8 @@ static esp_err_t debug_gain_handler(httpd_req_t *req)
         cJSON_AddNumberToObject(root, "barge", barge);
         cJSON_AddNumberToObject(root, "interrupt", interrupt);
         cJSON_AddNumberToObject(root, "speak", speak);
+        cJSON_AddNumberToObject(root, "guard", guard);
+        cJSON_AddNumberToObject(root, "ratio", ratio);
         http_server_send_json_response(req, root);
     }
     return ESP_OK;

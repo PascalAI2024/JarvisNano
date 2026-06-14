@@ -435,6 +435,114 @@ turn), P3.1 (interrupt/flush primitive), P3.2 (interrupted flushes queued audio)
 
 ---
 
+## 8. As-built barge-in (2026-06-13/14) — the working tuning
+
+> Sections 1–7 are the **design**. This section is **what actually shipped** after
+> on-hardware tuning. Where they differ, this section wins. All values here are
+> baked defaults in `cap_gemini_live.c` **and** live-tunable via `/api/debug/gain`
+> (no reflash) — read them back from `/api/gemini/live`.
+
+### What changed vs the design
+
+- **Manual mode, not server VAD (`GL_USE_SERVER_VAD=0`).** Server VAD was retested
+  with the gained signal (as section 4 predicted it should be) and still failed on
+  this user's hardware: normal-volume voice reads ~230 RMS at the mic — below
+  Google's server-VAD speech floor — so the server heard silence and never replied
+  (40 s of speech → 0 turns). The local RMS detector + manual `activityStart` is the
+  shipped path. Server VAD remains compiled behind the flag for a future SNR effort.
+- **Hands-free turn-commit thresholds (local VAD, LISTENING):** `GL_VAD_SPEECH_RMS
+  150`, `GL_VAD_SILENCE_RMS 130`. The original 1000/500 never committed a turn for
+  this user (no hands-free reply). The **silence** threshold was the actual bug — at
+  80 it sat *below* this user's inter-word/pause level (~93–117), so a real
+  end-of-turn pause never read as silence and the turn never ended. 130 sits above
+  the pause level. Validated live (user spoke normally → THINKING → SPEAKING, no tap).
+
+### The barge stop is fast because the capture task mutes directly (the "fast-kill")
+
+The original "huge delay" on barge was **not** the detector — it fired fine
+(`barge_hits` climbing). It was that `GL_CMD_INTERRUPT` queued behind PCM decode on
+the busy session task, so the flush/mute lagged the detection by a variable
+135–262 ms (the variance tracked ring fill — full ring = busy session task = slower
+service). Fix (`s_playback_kill`):
+
+- The **capture task** sets `s_playback_kill` and calls `gl_dac_mute(true)` **the
+  instant the latch arms** — `esp_codec_dev_set_out_mute` is an I2C write to the
+  ES8311 `DAC_REG31` mute bit, *in front of the DMA*, so the analog output goes
+  silent in ~1 ms regardless of the ~90 ms still in the I2S DMA. Verified safe:
+  `esp_codec_dev` shares **no lock** between `_write` (I2S data) and
+  `_set_out_mute` (I2C control), so this never blocks behind the feeder's blocking
+  write (adversarial-review + esp-codec source, 2026-06-14).
+- The **feeder** honours `s_playback_kill` and stops feeding the DMA.
+- The **session task** still does the full `gl_pcm_ring_flush` + `gl_drain_rx_queue`
+  on the cmd; the flag is cleared on **every** exit path (interrupt-service,
+  `gl_enter_speaking`, `gl_try_ws_resume`, `gl_reset_audio_path_state`) so it can
+  never stick true and muzzle a later reply.
+- Latch `GL_BARGE_LATCH_FRAMES = 2` (64 ms). Measured perceived stop: **~79 ms**,
+  down from 135–262 ms and now *consistent* (no longer session-load-dependent).
+
+### Self-barge: the guard + the adaptive gate (the hard part)
+
+The echo is **usually tiny** (post-AEC `clean_rms` ~3–22) but throws **brief
+transients up to ~382 RMS** during loud playback that the AEC can't cancel in real
+time. With a fixed threshold these overlap the user's own talk-over level — no single
+number separates "user" from "her echo." Two mechanisms fix it:
+
+1. **Guard window `GL_BARGE_GUARD_MS = 500`** (was 200). The cold AEC needs
+   ~300–500 ms to converge below the barge threshold; at 200 ms the convergence-window
+   residual self-barged her own reply ~280 ms in. 500 ms covers it; genuine talk-over
+   after she's a few words in still fires at ~79 ms.
+2. **Adaptive (proportional) gate** — the effective threshold is
+   `max(GL_BARGE_RMS floor, GL_BARGE_RATIO_PCT% × peak-held playback level)`:
+   - Echo residual is **proportional to playback level**; the user's voice is
+     **independent** of it. So the floor rises only as loud as her own playback
+     demands (rejecting echo) and drops to the absolute floor in her pauses (a soft
+     barge fires).
+   - **Peak-hold over `GL_BARGE_PLAY_WIN = 4` frames (128 ms)** is essential: the
+     echo at the mic *lags* the playback by the DAC/DMA + acoustic delay (~60–100 ms),
+     so the instantaneous `s_out_rms` collapses while the echo tail is still loud
+     (observed `mic=736` echo while `play` had already dropped to 141). A
+     sliding-window max holds the floor up exactly long enough to cover the tail,
+     then releases cleanly. (An exponential decay over-held — 25 % of a ~13000 peak
+     stays high ~400 ms and blocks pause-barges.)
+
+### The real reason barge "only worked if you shouted": SPEAKING mic gain
+
+`GL_MIC_PGA_SPEAK_DB` was **9 dB** (dropped from the 24 dB LISTENING gain to keep the
+echo from clipping the AEC). But that same −15 dB knocked the **user's** talk-over down
+to ~30–50 RMS — below any safe floor — so a normal barge was undetectable and the user
+had to shout (their shout measured 428). Raised to **18 dB**: the user's barge returns
+to ~65–130 while the AEC stays healthy (measured atten 8–24 dB, no clipping at this
+echo level). The louder echo is handled by the adaptive gate (which tracks playback),
+**not** by starving the mic. Lesson: never fix an echo problem by throwing away the
+mic gain that also carries the barge.
+
+### Runtime tuning endpoints (no reflash)
+
+`GET /api/debug/gain?…` — all live, read back from `/api/gemini/live`:
+
+| Param | Sets | Diag field | Baked default |
+|---|---|---|---|
+| `mic=` / `ref=` / `vol=` | ES7210 mic PGA / ref PGA / ES8311 out vol | `mic_pga_db`/`ref_pga_db`/`out_vol` | 24 / 12 / 100 |
+| `speak=` | SPEAKING mic PGA (barge sensitivity vs echo) | `speak_pga_db` | **18** |
+| `barge=` | adaptive-gate absolute floor (0 = detector off) | `barge_rms_threshold` | **80** |
+| `ratio=` | adaptive-gate % of peak playback (0 = floor only) | `barge_ratio_pct` | **10** |
+| `guard=` | post-SPEAKING guard window (ms) | `barge_guard_ms` | **500** |
+| `vadspeech=` / `vadsilence=` | hands-free turn-commit thresholds | `vad_speech_rms`/`vad_silence_rms` | **150 / 130** |
+| `interrupt=` | `START_OF_ACTIVITY_INTERRUPTS` vs `NO_INTERRUPTION` (next session) | `activity_handling` | interrupts on |
+
+Barge log line (every fire) prints the full decision:
+`Barge-in: mic=<M> >= eff_thr=<E> (floor=<F> prop=<P> peak=<K> play=<V>) <n> frames`.
+
+### Known hard limit (not a bug)
+
+Barging during her **loudest** moments still requires a raised voice — the user's
+voice must physically exceed the echo residual, and the adaptive floor is high there
+by design. Pause-barges and normal-volume talk-over during normal-level speech work at
+~79 ms. Closing the loud-playback gap needs better AEC (longer filter / ref alignment /
+lower playback volume), a separate effort.
+
+---
+
 ## Findings & gotchas
 
 > Hard-won facts from the 2026-06-12 three-track research pass (schematic, esp-sr,
@@ -483,6 +591,29 @@ The firmware already no-ops activity signals under `GL_USE_SERVER_VAD=1`
 **[2026-06-12] Today's `interrupted` handler does not flush — the backlog plays anyway**
 `gl_resume_listening("interrupted")` (`cap_gemini_live.c:2123`) reopens listening but
 queued playback re-enters SPEAKING. P3.2's flush is a hard prerequisite for any barge-in.
+
+**[2026-06-14] The SPEAKING mic-gain drop (9 dB) starved the barge, not just the echo**
+Dropping mic PGA to 9 dB during SPEAKING (to protect AEC linearity) also knocked the
+*user's* talk-over to ~30–50 RMS — undetectable, so barge "only worked if you shouted."
+Raised to 18 dB; the louder echo is rejected by the adaptive gate, not by starving the
+mic. Never fix an echo problem with the gain that also carries the barge. See §8.
+
+**[2026-06-14] Barge stop must be muted from the CAPTURE task, not via the cmd queue**
+`GL_CMD_INTERRUPT` queues behind PCM decode on the busy session task → 135–262 ms
+variable lag. `esp_codec_dev_set_out_mute` from the capture task at latch is ~1 ms (I2C,
+in front of the DMA) and shares no lock with the feeder's `_write`. Perceived stop
+dropped to ~79 ms, consistent. Clear the kill flag on every exit path. See §8.
+
+**[2026-06-14] The echo lags playback ~60–100 ms — a proportional gate must peak-hold**
+A barge floor proportional to the *instantaneous* playback level self-barges on the echo
+tail (seen: `mic=736` echo while `play` already dropped to 141), because the echo at the
+mic is from audio played ~one DMA-depth ago. Hold the playback max over ~4 frames
+(128 ms) so the floor covers the tail, then releases into her pauses. See §8.
+
+**[2026-06-14] Server VAD still can't hear this user even with gain — voice ~230 RMS**
+Retested as §4 recommended: normal-volume voice (~230 RMS at the mic) is below Google's
+server-VAD floor, so the server hears silence and never replies. Manual mode (local RMS
+detector + `activityStart`) shipped. Server VAD stays behind `GL_USE_SERVER_VAD=0`.
 
 ---
 

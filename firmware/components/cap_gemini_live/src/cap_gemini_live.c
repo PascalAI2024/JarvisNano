@@ -203,7 +203,7 @@ bool      ui_layer_is_active(void);
  * vs ref rms ~175 @0 dB: cut the mics 12 dB (echo peak ~8200, unclipped) and
  * raise the ref 24 dB (~2800, ≈ post-cut echo ~2500). Tune from aec_atten_db. */
 #define GL_MIC_PGA_DB            24   /* LISTENING mic gain (chip MIC1/MIC2) — loud enough to hear the USER (2026-06-13: confirmed responses at 24 dB; 6 dB was too quiet for the local VAD). Runtime-tunable listen default. */
-#define GL_MIC_PGA_SPEAK_DB      9    /* SPEAKING mic gain — drops to unclip the echo so the AEC stays linear (~18 dB suppression). Applied automatically on the SPEAKING transition (gl_set_state). */
+#define GL_MIC_PGA_SPEAK_DB      18   /* SPEAKING mic gain. 2026-06-14: was 9 — that dropped the user's talk-over to ~30-50 RMS (below any safe barge floor), so barge "only worked if you shouted". 18 dB lifts the barge back to ~65-130 while the AEC stays healthy (measured atten 8-24 dB, no clipping at this echo level). The louder echo is rejected by the peak-held proportional gate, not by starving the mic. Runtime: /api/debug/gain?speak=N. */
 #define GL_REF_PGA_DB            12   /* echo reference (chip MIC3, mask bit 2) — matched to the post-cut echo level */
 /* Make-up gain + soft-knee limiter for model audio. Measured PCM is speech with
  * a high crest factor: peaks ~80% full-scale but RMS only ~15%, so it sounds
@@ -315,13 +315,13 @@ bool      ui_layer_is_active(void);
  * through, so the calibration holds. Hysteresis between SILENCE_RMS and
  * SPEECH_RMS prevents flicker. */
 #define GL_USE_LOCAL_VAD         1
-#define GL_VAD_SPEECH_RMS        120   /* 2026-06-14: was 1000 — calibrated for a louder/closer voice. Measured: ambient ~63 RMS, this user's normal voice 130-256. 1000 meant hands-free turns NEVER committed (no reply unless tapping). 120 sits between ambient and voice so normal speech commits a turn. Runtime-tunable: /api/debug/gain?vadspeech=N */
+#define GL_VAD_SPEECH_RMS        150   /* 2026-06-14: was 120, then validated at 150 in a live hands-free test (user spoke normally -> THINKING -> SPEAKING with no tap). Measured: ambient ~63 RMS, this user's normal voice 130-256, inter-word dips ~93-117. 150 starts a turn on real speech without latching on room noise. Runtime-tunable: /api/debug/gain?vadspeech=N */
                                        /* above the measured idle ceiling (~939   */
                                        /* raw over 60s silent) at the bottom of   */
                                        /* the measured speech band (1000-4900) —  */
                                        /* 1200 missed quiet/distant speech, which */
                                        /* read as "it never replies".             */
-#define GL_VAD_SILENCE_RMS       80    /* 2026-06-14: was 500. RMS below this = silence (hysteresis). 80 sits just above ambient (~63) so the trailing-silence hangover completes and the turn commits. Runtime-tunable: /api/debug/gain?vadsilence=N */
+#define GL_VAD_SILENCE_RMS       130   /* 2026-06-14: was 80, then validated at 130 in the same live test. RMS below this = silence (end-of-turn hysteresis). 80 sat below this user's inter-word/pause level (~93-117) so a real end-of-turn pause never read as silence and the turn never committed (no hands-free reply). 130 sits above the pause level so trailing silence completes and the turn commits. Runtime-tunable: /api/debug/gain?vadsilence=N */
 /* VAD accumulators count 32 ms capture frames since the AEC rechunk (D4).
  * HANG: 22 frames = 704 ms ≈ the field-tuned 700 ms hang. (The design table's
  * "16 frames = 512 ms" was derived from a stale 500 ms baseline; keeping the
@@ -345,14 +345,17 @@ bool      ui_layer_is_active(void);
  * hardware WITHOUT reflashing:
  *     gemini-live --barge-rms <n>      (0 disables; cap_gemini_live_set_barge_rms)
  * and read the live floor from aec_atten / mic_level in /api/gemini/live.
- * The latch = GL_BARGE_LATCH_FRAMES consecutive frames (3 × 32 ms = 96 ms of
+ * The latch = GL_BARGE_LATCH_FRAMES consecutive frames (2 × 32 ms = 64 ms of
  * sustained speech) — long enough to skip pops and taps, short enough that
- * perceived stop (latch + cmd-queue hop + ring flush + DAC mute) lands under
- * the 250 ms target; measured per event as `barge_latency` in the log.
+ * perceived stop is fluid. Since 2026-06-14 the capture task mutes the codec
+ * the instant the latch arms (fast-kill, s_playback_kill) rather than waiting
+ * for the session task's cmd-queue hop + ring flush — so the perceived stop is
+ * ~latch + I2C mute, no longer the 135-262 ms variance that tracked ring fill.
+ * Still measured per event as `barge_latency` in the log.
  * Requires a live AEC engine: with the AEC degraded the detector stays OFF
  * (raw echo would self-trigger) and barge-in remains tap-only. */
-#define GL_BARGE_RMS             220    /* Manual-mode local barge (the path the logs proved works: fired 12x at 200-300 -> server "Model interrupted"). 220 sits above the steady post-AEC residual (~162) and below firm barges (207-754). Lower self-barges when the AEC atten dips; higher misses quiet barges. Runtime-tunable: /api/debug/gain?barge=N (0 = off). */
-#define GL_BARGE_LATCH_FRAMES    4
+#define GL_BARGE_RMS             80     /* Absolute floor of the adaptive barge gate (the other term is GL_BARGE_RATIO_PCT × peak playback). 2026-06-14: at the 18 dB SPEAKING gain the user's normal talk-over reads ~65-130 RMS and a SPEAKING-pause ambient ~22, so 80 catches a normal barge in her pauses while staying clear of ambient; the peak-held proportional term handles loud playback. Runtime-tunable: /api/debug/gain?barge=N (0 = off). */
+#define GL_BARGE_LATCH_FRAMES    2    /* 2026-06-14: was 4 (128 ms). 2 frames (64 ms) of sustained 220+ RMS over playback is a real barge — the guard window + threshold already reject echo transients. Halves the fixed detection floor for a fluid talk-over stop. */
 /* Post-SPEAKING-entry guard: do NOT arm the local barge detector for this long
  * after gl_enter_speaking. The 24 dB LISTENING mic gain drops to
  * GL_MIC_PGA_SPEAK_DB via an async codec control write that does not land
@@ -364,7 +367,7 @@ bool      ui_layer_is_active(void);
  * native-audio first-token latency, so a genuine early user barge is still
  * caught once the window elapses (real barges are sustained speech, not one
  * transient). Anchored on s_gl.speak_enter_us (set in gl_enter_speaking). */
-#define GL_BARGE_GUARD_MS        200
+#define GL_BARGE_GUARD_MS        500    /* 2026-06-14: was 200. The cold AEC needs ~300-500 ms to converge below the barge threshold; at 200 ms the residual echo (~230 RMS) self-barged her own reply 280 ms in (logged). 500 ms covers convergence — genuine talk-over after she's a few words in still fires at ~79 ms. Runtime-tunable: /api/debug/gain?guard=N. */
 /* Auto-VAD stream contract: an uplink pause longer than this must be flushed
  * with realtimeInput.audioStreamEnd or the server keeps stale cached audio
  * that bleeds into the next utterance (aec-barge-in.md §4). */
@@ -681,6 +684,32 @@ static _Atomic uint16_t s_out_rms;   /* decoded playback level (SPEAKING) */
  * during SPEAKING. Atomic so the CLI (gemini-live --barge-rms) can calibrate
  * it live mid-session without a reflash. 0 disables the detector. */
 static _Atomic uint16_t s_barge_rms = GL_BARGE_RMS;
+/* Fast-barge playback kill (2026-06-14): the capture task sets this the instant
+ * the barge latch arms, BEFORE the session task services GL_CMD_INTERRUPT (which
+ * queues behind PCM decode — the 135-262 ms / "huge delay" variance in the
+ * barge_latency logs). The feeder honours it within one chunk: mutes the codec
+ * (instant ES8311 register silence) and stops feeding the DMA. The session task
+ * clears it on flush/resume. Perceived stop drops to ~latch + one feeder chunk,
+ * independent of session-task load. */
+static _Atomic bool     s_playback_kill = false;
+/* Barge guard window (ms after SPEAKING entry where the detector stays OFF while
+ * the AEC re-converges). Runtime-tunable via /api/debug/gain?guard=N so the
+ * convergence window can be swept live without a 10-min reflash — the cold-AEC
+ * residual self-barges if this is too short (observed: rms=230 echo at 280 ms
+ * tripped a phantom barge with the old 200 ms guard). */
+static _Atomic int      s_barge_guard_ms = GL_BARGE_GUARD_MS;
+/* Adaptive barge gate (2026-06-14): the echo residual is PROPORTIONAL to the
+ * current playback level (s_out_rms), but the user's voice is independent of it.
+ * An absolute threshold can't separate them — measured: this user's normal
+ * talk-over (~<450 RMS) overlaps the echo spikes (~382). So the effective barge
+ * threshold is max(absolute floor, ratio%% × playback level): low during her
+ * pauses (a soft barge fires), rising only as loud as her own playback demands
+ * (rejecting her echo). Both terms runtime-tunable: barge=<floor>, ratio=<pct>.
+ * Echo measured at ~3%% of playback (382 at out_rms 12615); default 6%% = 2x
+ * margin. 0 disables the proportional term (pure absolute floor). */
+#define GL_BARGE_RATIO_PCT       10
+#define GL_BARGE_PLAY_WIN        4    /* frames (×32 ms = 128 ms) the adaptive floor holds the playback max, to cover the DAC/DMA + acoustic echo delay before releasing into her pauses. */
+static _Atomic int      s_barge_ratio_pct = GL_BARGE_RATIO_PCT;
 /* Runtime-tunable AEC gain staging (calibration 2026-06-12). Sweep live via
  * GET /api/debug/gain?mic=&ref=&vol= — no reflash needed. Defaults track the
  * #defines; mic/ref are ES7210 PGA dB, out_vol is the ES8311 0-100 scale. */
@@ -960,6 +989,7 @@ static uint32_t gl_clamp_rate(uint32_t rate)
 
 static void gl_reset_audio_path_state(void)
 {
+    atomic_store(&s_playback_kill, false);   /* never carry a barge kill into a new session */
     s_gl.dac = NULL;
     s_gl.adc = NULL;
     s_gl.dac_chan = NULL;
@@ -2011,6 +2041,14 @@ static void gl_playback_feeder_task(void *arg)
 
     ESP_LOGI(TAG, "Feeder: started (ring %u B)", (unsigned)s_gl.pcm_ring_cap);
     while (!(xEventGroupGetBits(s_gl.ev) & GL_BIT_FEEDER_STOP)) {
+        if (atomic_load(&s_playback_kill)) {
+            /* Barge fast-kill: the capture task already muted the codec. Stop
+             * feeding the DMA so no buffered audio survives into the next turn;
+             * gl_enter_speaking clears the flag + un-mutes for the new reply. */
+            atomic_store(&s_out_rms, 0);
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
         size_t got = gl_pcm_ring_read(chunk, sizeof(chunk), 50);
         if (!got) {
             continue;
@@ -2161,6 +2199,16 @@ static void gl_audio_tx_task(void *arg)
     uint32_t barge_frames   = 0;
     bool     barge_posted   = false;
     int64_t  barge_onset_us = 0;
+    /* Sliding-window max of the playback level for the adaptive barge floor. The
+     * echo at the mic lags the playback by the DAC/DMA + acoustic delay
+     * (~60-100 ms), so the instantaneous s_out_rms collapses while the echo tail
+     * is still loud (seen: mic=736 echo while play had already dropped to 141).
+     * Holding the max over the last GL_BARGE_PLAY_WIN frames (~128 ms) keeps the
+     * floor up exactly long enough to cover the tail, then drops cleanly into her
+     * pauses where a soft barge can fire (an exponential decay over-held: 25% of
+     * a ~13000 peak stays high for ~400 ms and blocks pause-barges). */
+    uint16_t play_hist[GL_BARGE_PLAY_WIN] = {0};
+    unsigned play_idx       = 0;
     /* Auto-VAD uplink bookkeeping (P3.4): when the last frame was queued for
      * send, and the once-per-pause audioStreamEnd latch. */
     int64_t  last_uplink_us  = 0;
@@ -2557,7 +2605,7 @@ static void gl_audio_tx_task(void *arg)
         atomic_store(&s_mic_rms, mic_rms);
 
         /* Local barge detector (P3.4/D5): RMS VAD on the AEC-cleaned,
-         * post-gain mic during SPEAKING only. GL_BARGE_LATCH_FRAMES (96 ms)
+         * post-gain mic during SPEAKING only. GL_BARGE_LATCH_FRAMES (64 ms)
          * of sustained speech post the existing INTERRUPT command — the
          * session task flushes the PCM ring, mutes the DAC and resumes
          * LISTENING (manual mode: + activityStart via the resume path). In
@@ -2571,14 +2619,31 @@ static void gl_audio_tx_task(void *arg)
             /* Guard window after SPEAKING entry: the mic-gain drop (24->6 dB)
              * is an async codec write and the AEC is still re-converging, so
              * the opening frames can carry an uncancelled echo transient. Hold
-             * the detector OFF until GL_BARGE_GUARD_MS past speak_enter_us so
+             * the detector OFF until s_barge_guard_ms past speak_enter_us so
              * that transient can't latch a phantom self-barge (R4). */
             const bool barge_guarded =
                 (esp_timer_get_time() - s_gl.speak_enter_us) <
-                (int64_t)GL_BARGE_GUARD_MS * 1000;
+                (int64_t)atomic_load(&s_barge_guard_ms) * 1000;
+            /* Adaptive floor: raise the threshold in proportion to what she is
+             * currently playing, so her own echo residual (which scales with
+             * playback) can't trip it, while a voice independent of the playback
+             * still stands out. Falls back to the absolute floor in her pauses
+             * (out_rms ~0) so a soft barge there still fires. */
+            uint16_t play_now = atomic_load(&s_out_rms);
+            play_hist[play_idx] = play_now;
+            play_idx = (play_idx + 1u) % GL_BARGE_PLAY_WIN;
+            uint16_t play_peak = 0;
+            for (unsigned k = 0; k < GL_BARGE_PLAY_WIN; ++k) {
+                if (play_hist[k] > play_peak) play_peak = play_hist[k];
+            }
+            int ratio = atomic_load(&s_barge_ratio_pct);
+            uint16_t prop_floor = ratio > 0
+                ? (uint16_t)(((uint32_t)play_peak * (uint32_t)ratio) / 100u)
+                : 0;
+            uint16_t eff_thr = barge_thr > prop_floor ? barge_thr : prop_floor;
             if (!aec_live || barge_thr == 0 || barge_posted || barge_guarded) {
                 barge_frames = 0;
-            } else if (mic_rms >= barge_thr) {
+            } else if (mic_rms >= eff_thr) {
                 if (barge_frames == 0) {
                     /* Speech onset ≈ start of this 32 ms frame. */
                     barge_onset_us = esp_timer_get_time() -
@@ -2590,8 +2655,18 @@ static void gl_audio_tx_task(void *arg)
                     if (gl_post_cmd(GL_CMD_INTERRUPT, NULL) == ESP_OK) {
                         s_gl.barge_hits++;
                         barge_posted = true;
-                        ESP_LOGI(TAG, "Barge-in: speech over playback (rms=%u >= %u, %u frames) -> interrupt",
-                                 (unsigned)mic_rms, (unsigned)barge_thr,
+                        /* Fast kill: don't wait for the session task to service
+                         * the cmd (it queues behind PCM decode). Silence the
+                         * codec NOW and tell the feeder to stop feeding the DMA
+                         * — the perceived stop lands within one feeder chunk
+                         * instead of 135-262 ms later. The session task still
+                         * does the ring flush + resume when it gets the cmd. */
+                        atomic_store(&s_playback_kill, true);
+                        gl_dac_mute(true);
+                        ESP_LOGI(TAG, "Barge-in: mic=%u >= eff_thr=%u (floor=%u prop=%u peak=%u play=%u) %u frames -> interrupt",
+                                 (unsigned)mic_rms, (unsigned)eff_thr,
+                                 (unsigned)barge_thr, (unsigned)prop_floor,
+                                 (unsigned)play_peak, (unsigned)play_now,
                                  (unsigned)barge_frames);
                     }
                     /* post failed (queue full): latch resets, retries in
@@ -3087,6 +3162,7 @@ static bool gl_enter_speaking(uint32_t sample_rate)
     s_gl.waiting_terminal = true;
     s_gl.speak_enter_us = esp_timer_get_time();
     s_gl.first_audio_pending = true;
+    atomic_store(&s_playback_kill, false);   /* new reply: release any prior barge fast-kill */
     gl_set_state(GL_STATE_SPEAKING, "Speaking");
 
     uint32_t playback_rate = gl_resolve_playback_rate(sample_rate);
@@ -3154,6 +3230,13 @@ static void gl_interrupt_playback(const char *reason)
         gl_drain_rx_queue();
         gl_dac_mute(true);
     }
+    /* The fast-kill flag only needs to hold the feeder off across the
+     * latch→flush window (the variable session-task-busy gap). The ring is now
+     * flushed and the DAC muted, so release it — playback stays silent (muted)
+     * through LISTENING; gl_enter_speaking un-mutes for the next reply. Clearing
+     * here (not only in gl_enter_speaking) stops the flag sticking true across a
+     * barge that has no following speaking turn (teardown / WS-resume). */
+    atomic_store(&s_playback_kill, false);
     /* barge_latency (P3.4 gate): the capture task stamped speech onset when
      * the barge latch armed; playback is audibly dead as of the mute above
      * (any in-flight ≤80 ms feeder chunk drains into a muted DAC). Perceived
@@ -4027,6 +4110,7 @@ static bool gl_try_ws_resume(void)
      * was never torn down. */
     s_gl.waiting_terminal = false;
     s_gl.pending_resume   = false;
+    atomic_store(&s_playback_kill, false);   /* a drop mid-barge must not carry the fast-kill into the resumed session */
     if (s_gl.state != GL_STATE_LISTENING) {
         gl_dac_mute(true);
         s_gl.first_audio_pending = false;
@@ -4721,6 +4805,8 @@ esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size)
                                 : "NO_INTERRUPTION");
     cJSON_AddNumberToObject(root, "barge_hits", (double)s_gl.barge_hits);
     cJSON_AddNumberToObject(root, "barge_rms_threshold", (double)atomic_load(&s_barge_rms));
+    cJSON_AddNumberToObject(root, "barge_guard_ms", (double)atomic_load(&s_barge_guard_ms));
+    cJSON_AddNumberToObject(root, "barge_ratio_pct", (double)atomic_load(&s_barge_ratio_pct));
     cJSON_AddNumberToObject(root, "vad_speech_rms", (double)atomic_load(&s_vad_speech_rms));
     cJSON_AddNumberToObject(root, "vad_silence_rms", (double)atomic_load(&s_vad_silence_rms));
     cJSON_AddNumberToObject(root, "mic_pga_db", (double)atomic_load(&s_mic_pga_db));
@@ -4856,6 +4942,20 @@ void cap_gemini_live_set_vad(int speech_rms, int silence_rms)
     if (silence_rms >= 0) atomic_store(&s_vad_silence_rms, silence_rms);
     ESP_LOGI(TAG, "VAD thresholds set: speech=%d silence=%d",
              atomic_load(&s_vad_speech_rms), atomic_load(&s_vad_silence_rms));
+}
+
+void cap_gemini_live_set_barge_guard_ms(int ms)
+{
+    if (ms < 0) return;
+    atomic_store(&s_barge_guard_ms, ms);
+    ESP_LOGI(TAG, "Barge guard window set: %d ms", ms);
+}
+
+void cap_gemini_live_set_barge_ratio_pct(int pct)
+{
+    if (pct < 0) return;
+    atomic_store(&s_barge_ratio_pct, pct);
+    ESP_LOGI(TAG, "Barge adaptive ratio set: %d%% of playback", pct);
 }
 
 /* Optional: drive the levels with no live session (own audio-path testing). */

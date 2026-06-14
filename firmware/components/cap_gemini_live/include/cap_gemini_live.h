@@ -62,6 +62,16 @@ void      cap_gemini_live_set_speak_gain(int db);
 /* Runtime local-VAD turn-commit thresholds (manual mode): speech = RMS to start
  * a turn (hands-free), silence = RMS below which the turn ends. <0 = leave. */
 void      cap_gemini_live_set_vad(int speech_rms, int silence_rms);
+
+/* Barge guard window: ms after SPEAKING entry during which the local barge
+ * detector stays OFF while the AEC re-converges (too short → self-barge on the
+ * uncancelled echo residual). <0 = leave. */
+void      cap_gemini_live_set_barge_guard_ms(int ms);
+
+/* Adaptive barge gate: effective threshold = max(absolute floor, pct% of the
+ * live playback level). Rejects the playback-proportional echo while letting an
+ * independent voice through. 0 = disable the proportional term. <0 = leave. */
+void      cap_gemini_live_set_barge_ratio_pct(int pct);
 void      cap_gemini_live_print_diagnostics(void);
 esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size);
 
