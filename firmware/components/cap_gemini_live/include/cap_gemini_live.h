@@ -46,6 +46,11 @@ void      cap_gemini_live_set_synthetic_levels(float mic, float out);
  * call from any task, mid-session. */
 void      cap_gemini_live_set_barge_rms(uint16_t rms);
 
+/* Runtime toggle for server-side barge-in (manual mode): 1 =
+ * START_OF_ACTIVITY_INTERRUPTS (barge stops her reply), 0 = NO_INTERRUPTION.
+ * Takes effect on the next session/WS (re)connect. */
+void      cap_gemini_live_set_activity_interrupts(int enable);
+
 /* Runtime AEC gain staging for hardware calibration. Any arg < 0 is left
  * unchanged. mic_db/ref_db = ES7210 per-channel PGA; out_vol = ES8311 0-100. */
 void      cap_gemini_live_set_in_gains(int mic_db, int ref_db, int out_vol);

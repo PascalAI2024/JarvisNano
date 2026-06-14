@@ -216,6 +216,14 @@ bool      ui_layer_is_active(void);
 #define GL_TX_SAMPLES_PER_CHUNK  (GL_TX_SAMPLE_RATE * GL_TX_CHUNK_MS / 1000)  /* 512 */
 #define GL_TX_PCM_BYTES          (GL_TX_SAMPLES_PER_CHUNK * GL_CHANNELS * (GL_BITS / 8)) /* 1024 */
 #define GL_TX_RAW_BYTES          (GL_TX_SAMPLES_PER_CHUNK * GL_CAPTURE_CHANNELS * (GL_BITS / 8)) /* 4096 */
+/* Native 24 kHz output: the ES8311 DAC + ES7210 ADC share one duplex I2S clock,
+ * so to play the model's 24 kHz audio crisply (not downsampled to 16 kHz) the
+ * WHOLE codec runs at 24 kHz. The mic is then captured at 24 kHz and downsampled
+ * 24->16 to a byte-identical 16 kHz frame right after the read, so the AEC / VAD
+ * / barge / uplink pipeline (all 512-sample 16 kHz) is unchanged. */
+#define GL_CAP_SAMPLE_RATE       GL_RX_SAMPLE_RATE   /* 24000 — codec/capture clock = model output rate */
+#define GL_CAP_SAMPLES_PER_CHUNK (GL_CAP_SAMPLE_RATE * GL_TX_CHUNK_MS / 1000)  /* 768 */
+#define GL_CAP_RAW_BYTES         (GL_CAP_SAMPLES_PER_CHUNK * GL_CAPTURE_CHANNELS * (GL_BITS / 8)) /* 6144 */
 #define GL_TX_B64_BYTES          (((GL_TX_PCM_BYTES + 2) / 3) * 4 + 1)
 /* Frames dumped when reads resume after a GENUINE capture pause (no reads at
  * all): the ADC stays open across turns (P2.4) and the RX DMA accumulates
@@ -679,6 +687,14 @@ static _Atomic uint16_t s_barge_rms = GL_BARGE_RMS;
 static _Atomic int      s_mic_pga_db = GL_MIC_PGA_DB;
 static _Atomic int      s_ref_pga_db = GL_REF_PGA_DB;
 static _Atomic int      s_out_vol    = 100;
+/* Manual-mode barge-in: server-side activityHandling. 1 = START_OF_ACTIVITY_INTERRUPTS
+ * (a client activityStart on real barge cancels the model's reply — required for
+ * talk-over-her barge to actually work). 0 = NO_INTERRUPTION (server ignores
+ * client activity; replies never cancelled, but barge can't stop her). Default 1
+ * so barge works; runtime-toggle via /api/debug/gain?interrupt=0/1 (applies on
+ * the next session — restart voice to take effect). The 20 s speak-watchdog
+ * makes the old spurious-cancel (4.5 s watchdog) a non-issue now. */
+static _Atomic int      s_activity_interrupts = 1;
 
 #if GL_LANE_DIAG
 /* Last 1 s window of raw per-lane RMS/peak, published by the capture task,
@@ -892,17 +908,15 @@ static uint32_t gl_i2s_cfg_sample_rate(const periph_i2s_config_t *cfg, i2s_dir_t
 static uint32_t gl_resolve_playback_rate(uint32_t model_rate)
 {
     uint32_t source = model_rate ? model_rate : GL_RX_SAMPLE_RATE;
-    /* The ES8311 DAC and ES7210 ADC share one I2S port in STD duplex on this
-     * board, so TX and RX cannot hold different clocks: opening the DAC at the
-     * model's native 24 kHz works until the next record-path (re)init slams
-     * the shared clock back to 16 kHz (I2S_IF logs: "STD: TX, sample_rate_hz:
-     * 16000" right after enter_speaking opened 24000). 24 kHz data on a
-     * 16 kHz clock plays 1.5x slow and backs up into write timeouts — the
-     * intermittent "deep, garbled, cut-off" audio. Lock playback to the
-     * capture rate and resample the model audio instead; the clock then never
-     * moves for the whole session. */
+    /* The ES8311 DAC and ES7210 ADC share one I2S STD-duplex clock, so TX and RX
+     * MUST hold the same rate. We now run the whole codec at 24 kHz (GL_CAP_SAMPLE_RATE
+     * == the model output rate) and downsample the MIC 24->16 right after the
+     * read (gl_downsample_capture_24to16). That lets the model's 24 kHz audio play
+     * NATIVELY (no downsample, crisp) while the AEC/VAD/uplink pipeline still sees
+     * 16 kHz. Because capture is also 24 kHz, the shared clock never has to move
+     * mid-session — the old 16 kHz-lock + output-resample is gone. */
     if (s_gl.adc || s_gl.adc_raw) {
-        return GL_TX_SAMPLE_RATE;
+        return GL_CAP_SAMPLE_RATE;
     }
     /* Playback-only sessions (no capture path) can use the codec natively. */
     if (s_gl.dac && !s_gl.dac_codec_failed) {
@@ -1552,11 +1566,17 @@ static bool gl_send_setup(void)
          * START_OF_ACTIVITY_INTERRUPTS made any resume-path activityStart (the
          * input watchdog, or a stale resume) cancel the model's pending reply
          * before it produced audio (observed mute, 2026-06-13 — a no-audio turn
-         * stuck in LISTENING with audio_parts=0). NO_INTERRUPTION lets the
-         * model finish its turn regardless of client activity signals; barge-in
-         * still works because the local detector kills playback without needing
-         * the server to cancel. */
-        cJSON_AddStringToObject(ric, "activityHandling", "NO_INTERRUPTION");
+         * stuck in LISTENING with audio_parts=0). That spurious source was the
+         * 4.5 s watchdog; it is now 20 s and disarms on first audio, so the only
+         * activityStart that lands during a reply is a REAL barge. Default back
+         * to START_OF_ACTIVITY_INTERRUPTS so barge-in actually stops her (the
+         * local detector kills LOCAL audio, but only this makes the SERVER stop
+         * generating). Runtime-tunable: /api/debug/gain?interrupt=0 reverts to
+         * NO_INTERRUPTION if reply-cancellation regressions reappear. */
+        cJSON_AddStringToObject(ric, "activityHandling",
+                                atomic_load(&s_activity_interrupts)
+                                    ? "START_OF_ACTIVITY_INTERRUPTS"
+                                    : "NO_INTERRUPTION");
     }
 
     /* Ask the server for an input transcript stream so we can flip the face to
@@ -1755,6 +1775,30 @@ static int16_t *gl_resample_pcm16_linear(const int16_t *in, size_t nsamp_in,
         *nsamp_out = out_samples;
     }
     return out;
+}
+
+/* Downsample one 4-lane interleaved s16 capture frame from the 24 kHz codec
+ * clock to the 16 kHz the AEC/VAD/uplink pipeline expects (3:2 ratio,
+ * GL_CAP_SAMPLES_PER_CHUNK -> GL_TX_SAMPLES_PER_CHUNK). Linear interp per lane,
+ * fixed in/out buffers (no malloc — runs every 32 ms capture frame). Lane order
+ * is preserved so the downstream demux is byte-identical to the old 16 kHz read.
+ * Native 24 kHz playback is the whole point; the mic just rides the same clock. */
+static void gl_downsample_capture_24to16(const int16_t *in4, int16_t *out4)
+{
+    for (size_t j = 0; j < GL_TX_SAMPLES_PER_CHUNK; ++j) {
+        uint32_t pos = j * 3u;            /* in-frame position = j * 1.5 = (j*3)/2 */
+        size_t   lo  = pos >> 1;          /* floor(j * 1.5) */
+        size_t   hi  = lo + 1u;
+        if (hi >= GL_CAP_SAMPLES_PER_CHUNK) {
+            hi = GL_CAP_SAMPLES_PER_CHUNK - 1u;
+        }
+        int32_t frac = (int32_t)(pos & 1u) << 14;   /* 0 or 0.5 in Q15 (0 / 16384) */
+        for (int l = 0; l < GL_CAPTURE_CHANNELS; ++l) {
+            int32_t a = in4[lo * GL_CAPTURE_CHANNELS + l];
+            int32_t b = in4[hi * GL_CAPTURE_CHANNELS + l];
+            out4[j * GL_CAPTURE_CHANNELS + l] = (int16_t)(a + (((b - a) * frac) >> 15));
+        }
+    }
 }
 
 static bool gl_extract_audio_data_chunk(cJSON *audio, const char **out_data, uint32_t *out_rate)
@@ -2087,7 +2131,8 @@ static void gl_audio_tx_task(void *arg)
      * × 16-bit per 32 ms read, demuxed into the mono mic chunk below. The raw
      * I2S fallback path (no codec handle at all) still reads mono into pcm —
      * the board YAML config governs that path, not the 4-ch codec open. */
-    static int16_t raw4[GL_TX_SAMPLES_PER_CHUNK * GL_CAPTURE_CHANNELS];
+    static int16_t raw4[GL_TX_SAMPLES_PER_CHUNK * GL_CAPTURE_CHANNELS];      /* 16 kHz frame (downsampled) — feeds the unchanged demux */
+    static int16_t raw4_cap[GL_CAP_SAMPLES_PER_CHUNK * GL_CAPTURE_CHANNELS]; /* 24 kHz codec read, downsampled into raw4 */
     static uint8_t pcm[GL_TX_PCM_BYTES];
 
 #if GL_LANE_DIAG
@@ -2134,7 +2179,7 @@ static void gl_audio_tx_task(void *arg)
     /* Codec lifetime is owned by the session task. This worker only reads from
      * the already-open ADC so teardown cannot double-close codec/I2S handles
      * from two tasks. */
-    ESP_LOGI(TAG, "Audio TX: started (16kHz capture)");
+    ESP_LOGI(TAG, "Audio TX: started (24kHz capture -> 16kHz pipeline; native 24kHz playback)");
     if (!s_gl.adc && !s_gl.adc_raw) {
         gl_set_audio_error("TX: missing ADC path");
         ESP_LOGE(TAG, "Audio TX: missing ADC handle");
@@ -2299,8 +2344,12 @@ static void gl_audio_tx_task(void *arg)
         if (s_gl.adc && s_gl.adc_open && !s_gl.adc_codec_failed) {
             /* 4-lane TDM read (D2): measured buffer order is [REF][MIC][NC][MIC]
              * (see GL_MIC_LANE / GL_REF_LANE), confirmed by the lane_rms diag. */
-            r = esp_codec_dev_read(s_gl.adc, raw4, GL_TX_RAW_BYTES);
+            r = esp_codec_dev_read(s_gl.adc, raw4_cap, GL_CAP_RAW_BYTES);
             if (r == ESP_CODEC_DEV_OK) {
+                /* Codec now runs at 24 kHz (for native 24 kHz playback). Downsample
+                 * the 4-lane frame 24->16 so the demux + AEC + VAD + uplink below
+                 * are byte-identical to the old native-16 kHz read. */
+                gl_downsample_capture_24to16(raw4_cap, raw4);
                 s_gl.tx_codec_reads++;
                 four_lane = true;
             }
@@ -2834,7 +2883,7 @@ static void gl_ensure_listening_capture(void)
         return;
     }
 
-    int r = gl_open_adc(GL_TX_SAMPLE_RATE);
+    int r = gl_open_adc(GL_CAP_SAMPLE_RATE);
     if (r != ESP_CODEC_DEV_OK) {
         gl_set_audio_error("capture retry: ADC open failed");
         ESP_LOGW(TAG, "Listening recovery: ADC open failed (err=%d)", r);
@@ -3069,7 +3118,7 @@ static void gl_resume_listening(const char *reason)
     gl_set_state(GL_STATE_LISTENING, "Listening");
 
     if (!s_gl.adc_open) {
-        int adc_r = gl_open_adc(GL_TX_SAMPLE_RATE);
+        int adc_r = gl_open_adc(GL_CAP_SAMPLE_RATE);
         if (adc_r != ESP_CODEC_DEV_OK) {
             ESP_LOGE(TAG, "Listening: ADC reopen failed after %s (adc=%d)",
                      reason ? reason : "turn", adc_r);
@@ -3978,7 +4027,7 @@ static bool gl_try_ws_resume(void)
         gl_set_state(GL_STATE_LISTENING, "Listening");
     }
     if (!s_gl.adc_open) {
-        gl_open_adc(GL_TX_SAMPLE_RATE);
+        gl_open_adc(GL_CAP_SAMPLE_RATE);
     }
     /* Reset activity_open so gl_begin_audio_activity re-sends activityStart on
      * the new socket (it no-ops when activity_open is already true — needed for
@@ -4138,7 +4187,7 @@ static void gl_session_task(void *arg)
          * shared 16 kHz I2S clock (intentional design — commit 66413b1).
          * Turn transitions only pause/resume capture and mute/unmute the
          * DAC; no esp_codec_dev_close/open per turn. */
-        if (gl_open_adc(GL_TX_SAMPLE_RATE) != ESP_CODEC_DEV_OK) {
+        if (gl_open_adc(GL_CAP_SAMPLE_RATE) != ESP_CODEC_DEV_OK) {
             gl_set_audio_error("session: initial ADC open failed");
             ESP_LOGE(TAG, "Listening: ADC open failed, ending session");
             goto session_cleanup;
@@ -4661,8 +4710,9 @@ esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size)
      * genuinely dead turn. Both confirm the running binary carries the fix. */
     cJSON_AddNumberToObject(root, "speak_watchdog_ms", (double)GL_SPEAK_WATCHDOG_MS);
     cJSON_AddStringToObject(root, "activity_handling",
-                            GL_USE_SERVER_VAD ? "START_OF_ACTIVITY_INTERRUPTS"
-                                              : "NO_INTERRUPTION");
+                            (GL_USE_SERVER_VAD || atomic_load(&s_activity_interrupts))
+                                ? "START_OF_ACTIVITY_INTERRUPTS"
+                                : "NO_INTERRUPTION");
     cJSON_AddNumberToObject(root, "barge_hits", (double)s_gl.barge_hits);
     cJSON_AddNumberToObject(root, "barge_rms_threshold", (double)atomic_load(&s_barge_rms));
     cJSON_AddNumberToObject(root, "mic_pga_db", (double)atomic_load(&s_mic_pga_db));
@@ -4738,6 +4788,17 @@ void cap_gemini_live_set_barge_rms(uint16_t rms)
     atomic_store(&s_barge_rms, rms);
     ESP_LOGI(TAG, "barge RMS threshold set to %u%s", (unsigned)rms,
              rms == 0 ? " (barge detector disabled)" : "");
+}
+
+/* Runtime toggle for server-side barge-in (manual mode). 1 =
+ * START_OF_ACTIVITY_INTERRUPTS (barge stops her), 0 = NO_INTERRUPTION (replies
+ * never cancelled, no barge). Read at session setup, so this takes effect on the
+ * NEXT session — restart voice (or it applies on the next WS (re)connect). */
+void cap_gemini_live_set_activity_interrupts(int enable)
+{
+    atomic_store(&s_activity_interrupts, enable ? 1 : 0);
+    ESP_LOGI(TAG, "activityHandling -> %s (applies next session)",
+             enable ? "START_OF_ACTIVITY_INTERRUPTS" : "NO_INTERRUPTION");
 }
 
 /* Runtime AEC gain staging for hardware calibration (2026-06-12). Any arg < 0

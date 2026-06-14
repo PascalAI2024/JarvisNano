@@ -36,6 +36,7 @@ void cap_gemini_live_set_barge_rms(unsigned short rms);
 esp_err_t cap_gemini_live_start(void);
 esp_err_t cap_gemini_live_send_text(const char *text);
 bool      cap_gemini_live_is_active(void);
+void      cap_gemini_live_set_activity_interrupts(int enable);
 
 static const char *TAG = "http_debug";
 
@@ -126,6 +127,13 @@ static esp_err_t debug_gain_handler(httpd_req_t *req)
         }
     }
 
+    int interrupt = -1;
+    if (http_server_query_get(req, "interrupt", buf, sizeof(buf)) == ESP_OK) {
+        interrupt = atoi(buf);
+        /* applies on the next session — restart voice to take effect */
+        cap_gemini_live_set_activity_interrupts(interrupt);
+    }
+
     cJSON *root = cJSON_CreateObject();
     if (root) {
         cJSON_AddBoolToObject(root, "ok", true);
@@ -133,6 +141,7 @@ static esp_err_t debug_gain_handler(httpd_req_t *req)
         cJSON_AddNumberToObject(root, "ref", ref);
         cJSON_AddNumberToObject(root, "vol", vol);
         cJSON_AddNumberToObject(root, "barge", barge);
+        cJSON_AddNumberToObject(root, "interrupt", interrupt);
         http_server_send_json_response(req, root);
     }
     return ESP_OK;
