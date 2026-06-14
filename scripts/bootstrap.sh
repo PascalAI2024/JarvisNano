@@ -3828,6 +3828,40 @@ PY
     fi
 }
 
+# Add jarvis_pmic to main_requires so touch_demo.c's swipe-down status panel can
+# call jarvis_pmic_read_battery() (the battery row). wifi_manager is already a
+# main dep (Wi-Fi rows), and heap/uptime are core — only the PMIC needs adding.
+# Idempotent (guards on jarvis_pmic in the CMakeLists). Anchors on the closing
+# of set(main_requires ...).
+apply_status_panel_main_require_patch() {
+    local cmake="$ESP_CLAW_DIR/application/edge_agent/main/CMakeLists.txt"
+    if [ ! -f "$cmake" ]; then
+        log "main/CMakeLists.txt not found — skipping status-panel require"
+        return
+    fi
+    if grep -q "jarvis_pmic" "$cmake" 2>/dev/null; then
+        log "jarvis_pmic main_requires already present"
+        return
+    fi
+    log "adding jarvis_pmic to main_requires (swipe-down status panel battery row)"
+    python3 - "$cmake" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+old = "    cap_gemini_live\n    bt\n)\n"
+new = (
+    "    cap_gemini_live\n"
+    "    # JarvisNano status panel: swipe-down battery row reads jarvis_pmic.\n"
+    "    jarvis_pmic\n"
+    "    bt\n)\n"
+)
+if s.count(old) != 1:
+    raise SystemExit("status-panel: 'cap_gemini_live/bt/)' anchor not unique in main/CMakeLists.txt")
+p.write_text(s.replace(old, new, 1))
+print("patched", p)
+PY
+}
+
 # STABILITY_PLAN P1.5 (F7) — a bad/corrupt emote partition must degrade to
 # voice-only operation with an E-log, not a silent bootloop. The stock
 # ESP_ERROR_CHECK(app_claw_ui_start()) panics and (with 0 s reboot delay and no
@@ -4040,6 +4074,7 @@ main() {
     apply_display_hal_text_transparency_patch
     apply_ble_disable_patch
     apply_boot_diag_patch
+    apply_status_panel_main_require_patch
     apply_ui_start_soft_fail_patch
     apply_boot_touch_breadcrumb_patch
 

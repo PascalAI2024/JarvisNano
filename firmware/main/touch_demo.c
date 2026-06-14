@@ -18,12 +18,18 @@
 #include "esp_err.h"
 #include "esp_board_manager.h"
 #include "esp_board_manager_includes.h"
+#include "esp_heap_caps.h"
 #include "esp_lcd_touch.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+/* Status-panel data sources. wifi_manager is already in main's REQUIRES;
+ * jarvis_pmic is added by apply_status_panel_main_require_patch in bootstrap. */
+#include "jarvis_pmic.h"
+#include "wifi_manager.h"
 
 static const char *TAG = "touch_mon";
 
@@ -34,6 +40,9 @@ static const char *TAG = "touch_mon";
  * Keep in sync with firmware/ui_layer/ui_layer.h. */
 bool ui_layer_is_active(void);
 int  ui_layer_on_tap(int x, int y);
+esp_err_t ui_layer_show_data(const char *title, const char *const *labels,
+                             const char *const *values, int n);
+esp_err_t ui_layer_dismiss(void);
 
 /* Polls the CST9217 touch panel every 80ms and calls cap_gemini_live_toggle()
  * on each rising edge (finger-down event). The I2C bus is shared with audio
@@ -55,6 +64,11 @@ typedef enum {
 static TaskHandle_t s_local_demo_task;
 static volatile local_scene_t s_local_demo_scene = LOCAL_SCENE_SHOWCASE;
 static touch_demo_gemini_configured_cb_t s_gemini_configured;
+
+/* Swipe-up sleep: voice stopped + latched "tap to wake" overlay. Tap clears it
+ * and wakes. Tracks whether the user explicitly put the device to sleep so a
+ * tap on the dim face wakes instead of starting a fresh session by accident. */
+static bool s_asleep = false;
 
 typedef struct {
     bool started;
@@ -94,6 +108,92 @@ static touch_demo_diag_t s_diag = {
 static bool gemini_live_configured(void)
 {
     return s_gemini_configured && s_gemini_configured();
+}
+
+/* ---- Gesture targets (the swipe grammar) --------------------------------- *
+ * tap = talk/pick · swipe up = sleep · swipe down = status · swipe side =
+ * dismiss a scene · long-press = stop/showcase. The swipe classification lives
+ * in the touch loop; these are the actions it dispatches to. */
+
+/* Swipe up: put the assistant to sleep. Stop the voice session and latch the
+ * dim "tap to wake" overlay so it is unmistakable that it is NOT listening
+ * (the user's #1 confusion). emote_set_alert is latched, so the idle-status
+ * write from stop() can't quietly un-dim it. */
+static void touch_enter_sleep(void)
+{
+    if (cap_gemini_live_is_active()) {
+        cap_gemini_live_stop();
+    }
+    emote_set_alert(EMOTE_ALERT_GENERIC, "tap to wake");
+    s_asleep = true;
+    ESP_LOGI(TAG, "Swipe up: sleep (voice off; tap to wake)");
+}
+
+/* Tap while asleep: clear the latched overlay so the live face can paint, then
+ * start listening. Clearing MUST precede start() or the latch hides the face. */
+static void touch_exit_sleep(void)
+{
+    emote_clear_alert();
+    s_asleep = false;
+    if (gemini_live_configured() && !cap_gemini_live_is_active()) {
+        cap_gemini_live_start();
+    }
+    ESP_LOGI(TAG, "Tap: wake from sleep");
+}
+
+/* Swipe down: show a live status panel. All sources are read-only and safe from
+ * the touch task; ui_layer_show_data posts to the UI task. wifi_manager is a
+ * main dep; jarvis_pmic is added to REQUIRES by bootstrap; heap/uptime are core.
+ * The value strings are static so they outlive this call (ui_layer copies them
+ * on the UI task, but keeping them static avoids any lifetime ambiguity). */
+static void touch_show_status_panel(void)
+{
+    static char v_batt[24], v_wifi[28], v_ip[20], v_up[24], v_mem[28];
+    const char *labels[5] = { "Battery", "Wi-Fi", "IP", "Uptime", "Free RAM" };
+    const char *values[5] = { v_batt, v_wifi, v_ip, v_up, v_mem };
+
+    jarvis_battery_t bat;
+    if (jarvis_pmic_read_battery(&bat) == ESP_OK) {
+        if (bat.present && bat.percent != 0xFF) {
+            snprintf(v_batt, sizeof(v_batt), "%u%%%s", (unsigned)bat.percent,
+                     bat.charging ? " chg" : (bat.usb_present ? " usb" : ""));
+        } else if (bat.usb_present) {
+            strlcpy(v_batt, "USB power", sizeof(v_batt));
+        } else {
+            strlcpy(v_batt, "n/a", sizeof(v_batt));
+        }
+    } else {
+        strlcpy(v_batt, "n/a", sizeof(v_batt));
+    }
+
+    wifi_manager_status_t st;
+    memset(&st, 0, sizeof(st));
+    wifi_manager_get_status(&st);
+    if (st.sta_connected) {
+        snprintf(v_wifi, sizeof(v_wifi), "%s %ddBm",
+                 st.sta_ssid ? st.sta_ssid : "?", (int)st.rssi);
+        strlcpy(v_ip, st.sta_ip ? st.sta_ip : "n/a", sizeof(v_ip));
+    } else {
+        strlcpy(v_wifi, "offline", sizeof(v_wifi));
+        strlcpy(v_ip, st.ap_ip ? st.ap_ip : "n/a", sizeof(v_ip));
+    }
+
+    uint64_t up_s = esp_timer_get_time() / 1000000ULL;
+    unsigned uh = (unsigned)(up_s / 3600);
+    unsigned um = (unsigned)((up_s % 3600) / 60);
+    unsigned us = (unsigned)(up_s % 60);
+    if (uh) {
+        snprintf(v_up, sizeof(v_up), "%uh %um", uh, um);
+    } else {
+        snprintf(v_up, sizeof(v_up), "%um %us", um, us);
+    }
+
+    unsigned heap_k = (unsigned)(esp_get_free_heap_size() / 1024);
+    unsigned ps_k = (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024);
+    snprintf(v_mem, sizeof(v_mem), "%uK + %uK PS", heap_k, ps_k);
+
+    ui_layer_show_data("Status", labels, values, 5);
+    ESP_LOGI(TAG, "Swipe down: status panel");
 }
 
 static const char *local_scene_name(local_scene_t scene);
@@ -402,6 +502,8 @@ static void touch_monitor_task(void *arg)
     bool long_fired = false;
     uint16_t last_x = 233;
     uint16_t last_y = 233; /* captured for the ui_layer hit-test (needs x AND y) */
+    uint16_t press_x0 = 233;
+    uint16_t press_y0 = 233; /* touch-down origin, for swipe vs tap classification */
     (void)was_touching;
 
     while (1) {
@@ -462,6 +564,11 @@ static void touch_monitor_task(void *arg)
             xSemaphoreGive(s_diag_mx);
         }
         if (touching) {
+            if (touch_run == 0) {
+                /* first poll of this press = the touch-down origin for swipes */
+                press_x0 = x[0];
+                press_y0 = y[0];
+            }
             last_x = x[0];
             last_y = y[0];
             touch_run++;
@@ -497,18 +604,48 @@ static void touch_monitor_task(void *arg)
             release_run++;
             if (just_released && armed && press_seen && !long_fired) {
                 local_scene_t scene = local_scene_from_touch(last_x);
-                /* INTERACTIVE UI takes priority: when a ui_layer scene owns the
-                 * panel, route the tap to its hit-test and DO NOT touch the
-                 * Gemini session. Selectable scenes resolve the option (and
-                 * self-dismiss); static scenes (data/image) swallow the tap so
-                 * it can't toggle voice behind the UI. Falls through to the
-                 * shared post-tap re-arm at the bottom of the block. */
-                if (ui_layer_is_active()) {
+                /* Classify the released gesture: a tap (little travel) vs a swipe
+                 * (>= SWIPE_MIN px from the touch-down origin). Touch reads ~15%
+                 * compressed, so 60 raw px is a clear, deliberate swipe well
+                 * above tap jitter. Direction is the dominant axis (y origin is
+                 * top-left, so dy<0 = up). */
+                const int SWIPE_MIN = 60;
+                int dx = (int)last_x - (int)press_x0;
+                int dy = (int)last_y - (int)press_y0;
+                int adx = dx < 0 ? -dx : dx;
+                int ady = dy < 0 ? -dy : dy;
+
+                if (adx >= SWIPE_MIN || ady >= SWIPE_MIN) {
+                    /* SWIPE. While a UI scene owns the panel, any swipe just
+                     * dismisses it. On the face: up = sleep, down = status,
+                     * sideways = reserved. */
+                    if (ui_layer_is_active()) {
+                        ui_layer_dismiss();
+                        ESP_LOGI(TAG, "Swipe -> dismiss UI scene");
+                        touch_diag_set_action("swipe_dismiss", scene);
+                    } else if (ady > adx && dy < 0) {
+                        touch_enter_sleep();
+                        touch_diag_set_action("swipe_up_sleep", scene);
+                    } else if (ady > adx && dy > 0) {
+                        touch_show_status_panel();
+                        touch_diag_set_action("swipe_down_status", scene);
+                    } else {
+                        ESP_LOGI(TAG, "Swipe %s on face — reserved",
+                                 dx < 0 ? "left" : "right");
+                        touch_diag_set_action("swipe_side_noop", scene);
+                    }
+                } else if (ui_layer_is_active()) {
+                    /* TAP on an active scene: route to its hit-test, never touch
+                     * the Gemini session behind it. */
                     int picked = ui_layer_on_tap((int)last_x, (int)last_y);
                     ESP_LOGI(TAG, "Tap -> ui_layer (x=%u y=%u) picked=%d",
                              (unsigned)last_x, (unsigned)last_y, picked);
                     touch_diag_set_action(picked >= 0 ? "tap_ui_pick" : "tap_ui_miss",
                                           scene);
+                } else if (s_asleep) {
+                    /* TAP while asleep: wake + start listening. */
+                    touch_exit_sleep();
+                    touch_diag_set_action("tap_wake", scene);
                 } else if (cap_gemini_live_is_active()) {
                 /* Any tap toggles Gemini when configured — no x-zone routing.
                  * The legacy local-demo dispatch was the cause of "stuck on
