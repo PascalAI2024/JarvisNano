@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+  <meta charset="utf-8" />
+        <!-- Global site tag (gtag.js) - Google Analytics -->
+        <script async src="https://www.googletagmanager.com/gtag/js?id=G-LCZ2R2P0F4"></script>
+        <script>
+            window.dataLayer = window.dataLayer || [];
+            function gtag(){dataLayer.push(arguments);}
+            gtag('js', new Date());
+
+            gtag('config', 'G-LCZ2R2P0F4');
+        </script><meta name="generator" content="Docutils 0.17.1: http://docutils.sourceforge.net/" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Audio Front-end Framework - ESP32-S3 -  &mdash; ESP-SR latest documentation</title>
+      <link rel="stylesheet" href="../_static/pygments.css" type="text/css" />
+      <link rel="stylesheet" href="../_static/css/theme.css" type="text/css" />
+      <link rel="stylesheet" href="../_static/copybutton.css" type="text/css" />
+      <link rel="stylesheet" href="../_static/theme_overrides.css" type="text/css" />
+  <!--[if lt IE 9]>
+    <script src="../_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+        <script data-url_root="../" id="documentation_options" src="../_static/documentation_options.js"></script>
+        <script src="../_static/jquery.js"></script>
+        <script src="../_static/underscore.js"></script>
+        <script src="../_static/doctools.js"></script>
+        <script src="../_static/clipboard.min.js"></script>
+        <script src="../_static/copybutton.js"></script>
+        <script src="https://wavedrom.com/skins/default.js"></script>
+        <script src="https://wavedrom.com/wavedrom.min.js"></script>
+    <script src="../_static/js/theme.js"></script>
+
+    
+        
+
+    <script type="text/javascript">
+        DOCUMENTATION_OPTIONS.PAGENAME = 'audio_front_end/README';
+        DOCUMENTATION_OPTIONS.PROJECT_SLUG = 'esp-sr';
+        DOCUMENTATION_OPTIONS.LATEST_BRANCH_NAME = 'master';
+        DOCUMENTATION_OPTIONS.VERSIONS_URL = '.././_static/docs_version.js';
+        DOCUMENTATION_OPTIONS.LANGUAGES = ["en", "zh_CN"];
+        DOCUMENTATION_OPTIONS.IDF_TARGET = 'esp32s3';
+        DOCUMENTATION_OPTIONS.HAS_IDF_TARGETS = ["esp32", "esp32s3", "esp32p4"]
+        DOCUMENTATION_OPTIONS.RELEASE = 'latest';
+    </script>
+
+    <script type="text/javascript" src=".././_static/docs_version.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Espressif Microphone Design Guidelines" href="Espressif_Microphone_Design_Guidelines.html" />
+    <link rel="prev" title="AFE Audio Front-end" href="index.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+            <a href="../index.html" class="icon icon-home"> ESP-SR
+            <img src="../_static/espressif-logo.svg" class="logo" alt="Logo"/>
+          </a>
+
+          
+            <div class="selectors">
+              <select id="target-select" style="width: 150px;" hidden>
+                <option value="" disabled selected>Choose target...</option>
+              </select>
+            </div>
+          
+
+          <div class="selectors">
+            <select id="version-select" style="width: 150px;" hidden>
+              <option value="" disabled selected>Choose version...</option>
+            </select>
+          </div>
+
+          
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/readme.html">Getting Started</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="index.html">Audio Front-end (AFE)</a><ul class="current">
+<li class="toctree-l2 current"><a class="current reference internal" href="#">AFE Introduction</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#overview">Overview</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#usage-scenarios">Usage Scenarios</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#speech-recognition">Speech Recognition</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#voice-communication">Voice Communication</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#input-format-definition">Input Format Definition</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#afe-api-usage">AFE API Usage</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#step-1-initialize-afe-configuration">Step 1: Initialize AFE Configuration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#step-2-create-afe-instance">Step 2: Create AFE Instance</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#step-3-feed-audio-data">Step 3: Feed Audio Data</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#step-4-fetch-processed-audio">Step 4: Fetch Processed Audio</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#afe-basic-example">AFE Basic Example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#resource-occupancy">Resource Occupancy</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="Espressif_Microphone_Design_Guidelines.html">Espressif Microphone Design Guidelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="migration_guide.html">Migration from V1.* to V2.*</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../wake_word_engine/index.html">Wake Word WakeNet</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../vadnet/README.html">VAD Model vadnet</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../acoustic_echo_cancellation/README.html">Acoustic Echo Cancellation (AEC)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../speech_command_recognition/README.html">Speech Command Word MultiNet</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../speech_synthesis/readme.html">Speech Synthesis (Only Supports Chinese Language)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../flash_model/README.html">Model Selection and Loading</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../benchmark/README.html">Benchmark</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../test_report/README.html">Test Methods</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../glossary/glossary.html">Glossary</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">ESP-SR</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home"></a> &raquo;</li>
+          <li><a href="index.html">AFE Audio Front-end</a> &raquo;</li>
+      <li>Audio Front-end Framework</li>
+      <li class="wy-breadcrumbs-aside">
+              <a href="https://github.com/espressif/esp-sr/blob/7ff63a7/docs/en/audio_front_end/README.rst" class="fa fa-github"> Edit on GitHub</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="audio-front-end-framework">
+<h1>Audio Front-end Framework<a class="headerlink" href="#audio-front-end-framework" title="Permalink to this headline"></a></h1>
+<p><a class="reference external" href="../../../../zh_CN/latest/esp32s3/audio_front_end/README.html">[中文]</a></p>
+<section id="overview">
+<h2>Overview<a class="headerlink" href="#overview" title="Permalink to this headline"></a></h2>
+<p>This guide provides an overview of how to use the Audio Front End (AFE) framework and explains the definition of the input format.
+The AFE framework is designed to process audio data for applications such as speech recognition and voice communication.
+It includes various algorithms like Acoustic Echo Cancellation (AEC), Noise Suppression (NS), Voice Activity Detection (VAD), and Wake Word Detection (WakeNet).</p>
+<table class="colwidths-given docutils align-default">
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 75%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Name</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>AEC (Acoustic Echo Cancellation)</p></td>
+<td><p>Supports maximum two-mic processing, which can effectively remove the echo in the mic input signal, and help with further speech recognition.</p></td>
+</tr>
+<tr class="row-odd"><td><p>NS (Noise Suppression)</p></td>
+<td><p>Supports single-channel processing and can suppress the non-human noise in single-channel audio, especially for stationary noise.</p></td>
+</tr>
+<tr class="row-even"><td><p>BSS (Blind Source Separation)</p></td>
+<td><p>Supports dual-channel processing, which can well separate the target sound source from the rest of the interference sound, so as to extract the useful audio signal and ensure the quality of the subsequent speech.</p></td>
+</tr>
+<tr class="row-odd"><td><p>MISO (Multi Input Single Output)</p></td>
+<td><p>Supports dual channel input and single channel output. It is used to select a channel of audio output with high signal-to-noise ratio when there is no WakeNet enable in the dual mic scene.</p></td>
+</tr>
+<tr class="row-even"><td><p>VAD (Voice Activity Detection)</p></td>
+<td><p>Supports real-time output of the voice activity state of the current frame.</p></td>
+</tr>
+<tr class="row-odd"><td><p>AGC (Automatic Gain Control)</p></td>
+<td><p>Dynamically adjusts the amplitude of the output audio, and amplifies the output amplitude when a weak signal is input; When the input signal reaches a certain strength, the output amplitude will be compressed.</p></td>
+</tr>
+<tr class="row-even"><td><p>WakeNet</p></td>
+<td><p>A wake word engine built upon neural network, and is specially designed for low-power embedded MCUs.</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="usage-scenarios">
+<h2>Usage Scenarios<a class="headerlink" href="#usage-scenarios" title="Permalink to this headline"></a></h2>
+<p>This section introduces two typical usage scenarios of Espressif AFE framework.</p>
+<section id="speech-recognition">
+<h3>Speech Recognition<a class="headerlink" href="#speech-recognition" title="Permalink to this headline"></a></h3>
+<figure class="align-default">
+<img alt="overview" src="../_images/AFE_SR_overview.png" />
+</figure>
+</section>
+<section id="voice-communication">
+<h3>Voice Communication<a class="headerlink" href="#voice-communication" title="Permalink to this headline"></a></h3>
+<figure class="align-default">
+<img alt="overview" src="../_images/AFE_VOIP_overview.png" />
+</figure>
+</section>
+</section>
+<section id="input-format-definition">
+<h2>Input Format Definition<a class="headerlink" href="#input-format-definition" title="Permalink to this headline"></a></h2>
+<p>The <code class="docutils literal notranslate"><span class="pre">input_format</span></code> parameter specifies the arrangement of audio channels in the input data. Each character in the string represents a channel type:</p>
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 34%" />
+<col style="width: 66%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Character</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">M</span></code></p></td>
+<td><p>Microphone channel</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">R</span></code></p></td>
+<td><p>Playback reference
+channel</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">N</span></code></p></td>
+<td><p>Unused or unknown
+channel</p></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Example:</strong>
+<code class="docutils literal notranslate"><span class="pre">&quot;MMNR&quot;</span></code> Indicates four channels inorder : microphone channel, microphone channel, unused channel, and playback reference channel.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The input data must be arranged in <strong>channel-interleaved format</strong>.</p>
+</div>
+</section>
+<section id="afe-api-usage">
+<h2>AFE API Usage<a class="headerlink" href="#afe-api-usage" title="Permalink to this headline"></a></h2>
+<p>Based on the <code class="docutils literal notranslate"><span class="pre">menuconfig</span></code> -&gt; <code class="docutils literal notranslate"><span class="pre">ESP</span> <span class="pre">Speech</span> <span class="pre">Recognition</span></code>, select the required AFE (Analog Front End) models, such as the WakeNet model, VAD (Voice Activity Detection) model, NS (Noise Suppression) model, etc., and then call the AFE framework in the code using the following steps.</p>
+<p>For reference, you can check the code in <a class="reference external" href="https://github.com/espressif/esp-sr/blob/7ff63a7/test_apps/esp-sr/main/test_afe.cpp">test_apps/esp-sr/main/test_afe.cpp</a> or <a class="reference external" href="https://github.com/espressif/esp-skainet/tree/master/examples">esp-skainet/examples</a>.</p>
+<section id="step-1-initialize-afe-configuration">
+<h3>Step 1: Initialize AFE Configuration<a class="headerlink" href="#step-1-initialize-afe-configuration" title="Permalink to this headline"></a></h3>
+<p>Get the default configuration using <code class="docutils literal notranslate"><span class="pre">afe_config_init()</span></code> and customize parameters as needed:</p>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="n">srmodel_list_t</span><span class="w"> </span><span class="o">*</span><span class="n">models</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">esp_srmodel_init</span><span class="p">(</span><span class="s">&quot;model&quot;</span><span class="p">);</span>
+<span class="n">afe_config_t</span><span class="w"> </span><span class="o">*</span><span class="n">afe_config</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">afe_config_init</span><span class="p">(</span><span class="s">&quot;MMNR&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">models</span><span class="p">,</span><span class="w"> </span><span class="n">AFE_TYPE_SR</span><span class="p">,</span><span class="w"> </span><span class="n">AFE_MODE_HIGH_PERF</span><span class="p">);</span>
+</pre></div>
+</div>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">input_format</span></code>: Define the channel arrangement (e.g., <code class="docutils literal notranslate"><span class="pre">MMNR</span></code>).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">models</span></code>: List of models (e.g., for NS, VAD, or WakeNet).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">afe_type</span></code>: Type of AFE (e.g., <code class="docutils literal notranslate"><span class="pre">AFE_TYPE_SR</span></code> for speech recognition).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">afe_mode</span></code>: Performance mode (e.g., <code class="docutils literal notranslate"><span class="pre">AFE_MODE_HIGH_PERF</span></code>).</p></li>
+</ul>
+</section>
+<section id="step-2-create-afe-instance">
+<h3>Step 2: Create AFE Instance<a class="headerlink" href="#step-2-create-afe-instance" title="Permalink to this headline"></a></h3>
+<p>Create an AFE instance using the configuration:</p>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// get handle</span>
+<span class="n">esp_afe_sr_iface_t</span><span class="w"> </span><span class="o">*</span><span class="n">afe_handle</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">esp_afe_handle_from_config</span><span class="p">(</span><span class="n">afe_config</span><span class="p">);</span>
+<span class="c1">// create instance</span>
+<span class="n">esp_afe_sr_data_t</span><span class="w"> </span><span class="o">*</span><span class="n">afe_data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">afe_handle</span><span class="o">-&gt;</span><span class="n">create_from_config</span><span class="p">(</span><span class="n">afe_config</span><span class="p">);</span>
+</pre></div>
+</div>
+</section>
+<section id="step-3-feed-audio-data">
+<h3>Step 3: Feed Audio Data<a class="headerlink" href="#step-3-feed-audio-data" title="Permalink to this headline"></a></h3>
+<p>Input audio data to the AFE for processing. The input data must match the <code class="docutils literal notranslate"><span class="pre">input_format</span></code>:</p>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="n">feed_chunksize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">afe_handle</span><span class="o">-&gt;</span><span class="n">get_feed_chunksize</span><span class="p">(</span><span class="n">afe_data</span><span class="p">);</span>
+<span class="kt">int</span><span class="w"> </span><span class="n">feed_nch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">afe_handle</span><span class="o">-&gt;</span><span class="n">get_feed_channel_num</span><span class="p">(</span><span class="n">afe_data</span><span class="p">);</span>
+<span class="kt">int16_t</span><span class="w"> </span><span class="o">*</span><span class="n">feed_buff</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">int16_t</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="n">malloc</span><span class="p">(</span><span class="n">feed_chunksize</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">feed_nch</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="kt">int16_t</span><span class="p">));</span>
+<span class="n">afe_handle</span><span class="o">-&gt;</span><span class="n">feed</span><span class="p">(</span><span class="n">afe_data</span><span class="p">,</span><span class="w"> </span><span class="n">feed_buff</span><span class="p">);</span>
+</pre></div>
+</div>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">feed_chunksize</span></code>: Number of samples to feed per frame.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">feed_nch</span></code>: Number of channel of input data.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">feed_buff</span></code>: Channel-interleaved audio data (16-bit signed, 16 kHz).</p></li>
+</ul>
+</section>
+<section id="step-4-fetch-processed-audio">
+<h3>Step 4: Fetch Processed Audio<a class="headerlink" href="#step-4-fetch-processed-audio" title="Permalink to this headline"></a></h3>
+<p>Retrieve the processed single-channel audio data and detection states:</p>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="n">afe_fetch_result_t</span><span class="w"> </span><span class="o">*</span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">afe_handle</span><span class="o">-&gt;</span><span class="n">fetch</span><span class="p">(</span><span class="n">afe_data</span><span class="p">);</span>
+<span class="kt">int16_t</span><span class="w"> </span><span class="o">*</span><span class="n">processed_audio</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">result</span><span class="o">-&gt;</span><span class="n">data</span><span class="p">;</span>
+<span class="n">vad_state_t</span><span class="w"> </span><span class="n">vad_state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">result</span><span class="o">-&gt;</span><span class="n">vad_state</span><span class="p">;</span>
+<span class="n">wakenet_state_t</span><span class="w"> </span><span class="n">wakeup_state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">result</span><span class="o">-&gt;</span><span class="n">wakeup_state</span><span class="p">;</span>
+
+<span class="c1">// if vad cache is exists, please attach the cache to the front of processed_audio to avoid data loss</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">result</span><span class="o">-&gt;</span><span class="n">vad_cache_size</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int16_t</span><span class="w"> </span><span class="o">*</span><span class="n">vad_cache</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">result</span><span class="o">-&gt;</span><span class="n">vad_cache</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// get the processed audio with specified delay, default delay is 2000 ms</span>
+<span class="n">afe_fetch_result_t</span><span class="w"> </span><span class="o">*</span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">afe_handle</span><span class="o">-&gt;</span><span class="n">fetch_with_delay</span><span class="p">(</span><span class="n">afe_data</span><span class="p">,</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">portTICK_PERIOD_MS</span><span class="p">);</span>
+</pre></div>
+</div>
+</section>
+</section>
+<section id="afe-basic-example">
+<h2>AFE Basic Example<a class="headerlink" href="#afe-basic-example" title="Permalink to this headline"></a></h2>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="w"> </span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;esp_afe_sr_iface.h&quot;</span>
+<span class="w"> </span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;esp_afe_config.h&quot;</span>
+
+<span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">esp_afe_sr_iface_t</span><span class="w"> </span><span class="o">*</span><span class="n">afe_handle</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">feed_task</span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">arg</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">esp_afe_sr_data_t</span><span class="w"> </span><span class="o">*</span><span class="n">afe_data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">arg</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">audio_chunksize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">afe_handle</span><span class="o">-&gt;</span><span class="n">get_feed_chunksize</span><span class="p">(</span><span class="n">afe_data</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">feed_channel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">afe_handle</span><span class="o">-&gt;</span><span class="n">get_feed_channel_num</span><span class="p">(</span><span class="n">afe_data</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">int16_t</span><span class="w"> </span><span class="o">*</span><span class="n">buff</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">malloc</span><span class="p">(</span><span class="n">audio_chunksize</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="kt">int16_t</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">feed_channel</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">read_data_from_i2s_or_file</span><span class="p">(</span><span class="n">buff</span><span class="p">,</span><span class="w"> </span><span class="p">...);</span><span class="w"> </span><span class="c1">// read audio data from I2S or file</span>
+<span class="w">        </span><span class="n">afe_handle</span><span class="o">-&gt;</span><span class="n">feed</span><span class="p">(</span><span class="n">afe_data</span><span class="p">,</span><span class="w"> </span><span class="n">buff</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">buff</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">free</span><span class="p">(</span><span class="n">buff</span><span class="p">);</span>
+<span class="w">        </span><span class="n">buff</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">vTaskDelete</span><span class="p">(</span><span class="nb">NULL</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">fetch_task</span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">arg</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">esp_afe_sr_data_t</span><span class="w"> </span><span class="o">*</span><span class="n">afe_data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">arg</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">fetch_chunksize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">afe_handle</span><span class="o">-&gt;</span><span class="n">get_fetch_chunksize</span><span class="p">(</span><span class="n">afe_data</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">int16_t</span><span class="w"> </span><span class="o">*</span><span class="n">buff</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">malloc</span><span class="p">(</span><span class="n">fetch_chunksize</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="kt">int16_t</span><span class="p">));</span>
+
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">afe_fetch_result_t</span><span class="o">*</span><span class="w"> </span><span class="n">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">afe_handle</span><span class="o">-&gt;</span><span class="n">fetch</span><span class="p">(</span><span class="n">afe_data</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">res</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">res</span><span class="o">-&gt;</span><span class="n">ret_value</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">ESP_FAIL</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;fetch error!</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+<span class="w">            </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="p">...</span><span class="w"> </span><span class="c1">// process the results, e.g., res-&gt;data for AFE output, res-&gt;data_size for output data size, etc.</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">buff</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">free</span><span class="p">(</span><span class="n">buff</span><span class="p">);</span>
+<span class="w">        </span><span class="n">buff</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">afe_data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">afe_handle</span><span class="o">-&gt;</span><span class="n">destroy</span><span class="p">(</span><span class="n">afe_data</span><span class="p">);</span>
+<span class="w">        </span><span class="n">afe_data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">vTaskDelete</span><span class="p">(</span><span class="nb">NULL</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">create_afe_task</span><span class="p">()</span>
+<span class="p">{</span>
+
+<span class="w"> </span><span class="c1">// 1. Initialize default configuration</span>
+<span class="w"> </span><span class="n">afe_config_t</span><span class="w"> </span><span class="o">*</span><span class="n">afe_config</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">afe_config_init</span><span class="p">(</span><span class="s">&quot;MNR&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">models</span><span class="p">,</span><span class="w"> </span><span class="n">AFE_TYPE_SR</span><span class="p">,</span><span class="w"> </span><span class="n">AFE_MODE_HIGH_PERF</span><span class="p">);</span>
+
+<span class="w"> </span><span class="c1">// 2. Create an AFE instance</span>
+<span class="w"> </span><span class="n">afe_handle</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">esp_afe_handle_from_config</span><span class="p">(</span><span class="n">afe_config</span><span class="p">);</span>
+<span class="w"> </span><span class="n">esp_afe_sr_data_t</span><span class="w"> </span><span class="o">*</span><span class="n">afe_data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">afe_handle</span><span class="o">-&gt;</span><span class="n">create_from_config</span><span class="p">(</span><span class="n">afe_config</span><span class="p">);</span>
+<span class="w"> </span><span class="n">afe_config_free</span><span class="p">(</span><span class="n">afe_config</span><span class="p">);</span>
+
+<span class="w"> </span><span class="c1">// 3. Get feed frame length and allocate buffers</span>
+<span class="w">  </span><span class="n">xTaskCreatePinnedToCore</span><span class="p">(</span><span class="o">&amp;</span><span class="n">feed_task</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;feed&quot;</span><span class="p">,</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">afe_data</span><span class="p">,</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="w">  </span><span class="n">xTaskCreatePinnedToCore</span><span class="p">(</span><span class="o">&amp;</span><span class="n">fetch_task</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;detect&quot;</span><span class="p">,</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">afe_data</span><span class="p">,</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="resource-occupancy">
+<h2>Resource Occupancy<a class="headerlink" href="#resource-occupancy" title="Permalink to this headline"></a></h2>
+<p>For the resource occupancy for AFE, see <a class="reference internal" href="../benchmark/README.html"><span class="doc">Resource Occupancy</span></a>.</p>
+</section>
+</section>
+
+    <script type="text/javascript">
+        function init() {
+            WaveDrom.ProcessAll();
+        }
+        window.onload = init;
+    </script>
+
+           </div>
+             <div class="articleComments">
+<p style="text-align:center"><a href="https://www.espressif.com/en/company/documents/documentation_feedback?docId=6473&sections=Audio Front-end Framework (audio_front_end/README)&version=latest (master)">Provide feedback about this document</a></p>
+
+             </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="index.html" class="btn btn-neutral float-left" title="AFE Audio Front-end" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="Espressif_Microphone_Design_Guidelines.html" class="btn btn-neutral float-right" title="Espressif Microphone Design Guidelines" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2016 - 2022, Espressif Systems (Shanghai) Co., Ltd.</p>
+  </div>
+
+  <ul class="footer">
+        <li>
+	    
+            
+            Built with <a href="http://sphinx-doc.org/">Sphinx</a> using a <a href="https://github.com/espressif/sphinx_idf_theme">theme</a>  based on <a href="https://github.com/readthedocs/sphinx_rtd_theme">Read the Docs Sphinx Theme</a>.
+         </li>
+    <li class="footer-aside">
+        <a href="../esp-sr-en-master-esp32s3.pdf" class="fa fa-file-pdf-o"> Download PDF</a>
+    </li>
+
+  </ul> 
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
