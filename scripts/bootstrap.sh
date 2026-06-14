@@ -3496,6 +3496,76 @@ print("added cap_lua + lua_module_display unconditional path-deps")
 PY
 }
 
+# Add display_hal_copy_visible() to lua_module_display so the UI snapshot endpoint
+# (/api/ui/snapshot.ppm) can capture the ui_layer render. The emote snapshot
+# mirror can't see it (the face yields the panel to ui_layer). esp-claw component
+# -> idempotent patch, not a bare edit. Inserts after display_hal_present().
+apply_display_hal_capture_patch() {
+    local c="$ESP_CLAW_DIR/components/lua_modules/lua_module_display/src/display_hal.c"
+    local h="$ESP_CLAW_DIR/components/lua_modules/lua_module_display/include/display_hal.h"
+    if [ ! -f "$c" ] || [ ! -f "$h" ]; then
+        log "display_hal sources not found — skipping capture patch"
+        return
+    fi
+    if grep -q "display_hal_copy_visible" "$c" 2>/dev/null; then
+        log "display_hal capture patch already applied"
+        return
+    fi
+    log "applying display_hal capture patch (display_hal_copy_visible)"
+    python3 - "$c" "$h" <<'PY'
+import pathlib, sys
+c = pathlib.Path(sys.argv[1]); h = pathlib.Path(sys.argv[2])
+cs = c.read_text()
+anchor = (
+    "    if (ret == ESP_OK) {\n"
+    "        ret = display_hal_present_locked();\n"
+    "    }\n"
+    "    display_hal_unlock();\n"
+    "    return ret;\n"
+    "}\n"
+)
+func = (
+    "\n/* JarvisNano: copy the visible framebuffer (RGB565) for /api/ui/snapshot.ppm. */\n"
+    "esp_err_t display_hal_copy_visible(uint16_t *dst, size_t max_px, int *out_w, int *out_h)\n"
+    "{\n"
+    "    if (!dst) {\n"
+    "        return ESP_ERR_INVALID_ARG;\n"
+    "    }\n"
+    "    esp_err_t ret = display_hal_lock();\n"
+    "    if (ret != ESP_OK) {\n"
+    "        return ret;\n"
+    "    }\n"
+    "    uint16_t *fb = display_hal_get_visible_framebuffer_locked();\n"
+    "    int w = s_state.width;\n"
+    "    int h = s_state.height;\n"
+    "    if (!fb || w <= 0 || h <= 0 || (size_t)w * (size_t)h > max_px) {\n"
+    "        display_hal_unlock();\n"
+    "        return ESP_ERR_INVALID_STATE;\n"
+    "    }\n"
+    "    memcpy(dst, fb, (size_t)w * (size_t)h * sizeof(uint16_t));\n"
+    "    if (out_w) { *out_w = w; }\n"
+    "    if (out_h) { *out_h = h; }\n"
+    "    display_hal_unlock();\n"
+    "    return ESP_OK;\n"
+    "}\n"
+)
+if "display_hal_copy_visible" not in cs:
+    if cs.count(anchor) != 1:
+        raise SystemExit("display_hal present() anchor not unique (%d)" % cs.count(anchor))
+    cs = cs.replace(anchor, anchor + func, 1)
+    c.write_text(cs)
+hs = h.read_text()
+decl_anchor = "esp_err_t display_hal_present(void);\n"
+decl_new = decl_anchor + "esp_err_t display_hal_copy_visible(uint16_t *dst, size_t max_px, int *out_w, int *out_h);\n"
+if "display_hal_copy_visible" not in hs:
+    if decl_anchor not in hs:
+        raise SystemExit("display_hal.h present decl anchor missing")
+    hs = hs.replace(decl_anchor, decl_new, 1)
+    h.write_text(hs)
+print("added display_hal_copy_visible")
+PY
+}
+
 # STABILITY_PLAN P0.1 — every boot must explain the previous death. Injects a
 # one-line "boot_diag" log into app_main: decoded esp_reset_reason(), raw
 # per-core ROM reset reasons, and esp_core_dump_image_check() state. Emitted
@@ -3832,6 +3902,7 @@ main() {
     apply_ui_layer_manifest_dep_patch
     apply_ui_sdkconfig_seed_patch
     apply_ui_layer_lua_dep_patch
+    apply_display_hal_capture_patch
     apply_ble_disable_patch
     apply_boot_diag_patch
     apply_ui_start_soft_fail_patch

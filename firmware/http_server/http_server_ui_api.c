@@ -30,11 +30,16 @@
 #include <string.h>
 
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 /* ---- ui_layer forward decls (kept in sync with ui_layer.h) ---------------- */
 #define HTTP_UI_MAX_OPTIONS 6
 #define HTTP_UI_MAX_ROWS    5
+
+/* display_hal capture (provided by lua_module_display; see the bootstrap
+ * apply_display_hal_capture_patch). Copies the visible framebuffer (RGB565). */
+esp_err_t display_hal_copy_visible(uint16_t *dst, size_t max_px, int *out_w, int *out_h);
 
 esp_err_t ui_layer_show_choice(const char *question, const char *const *opts, int n);
 esp_err_t ui_layer_show_data(const char *title, const char *const *labels,
@@ -292,6 +297,47 @@ static esp_err_t ui_dismiss_handler(httpd_req_t *req)
     return ui_send_ok(req);
 }
 
+/* GET /api/ui/snapshot.ppm -> the UI layer's visible framebuffer as a binary
+ * PPM (P6). The emote-mirror /api/display/snapshot.ppm cannot see this layer
+ * because the face yields the panel while a UI scene owns it. Troubleshooting
+ * tool: lets the screen render be captured even when ui_layer holds the panel. */
+static esp_err_t ui_snapshot_handler(httpd_req_t *req)
+{
+    const size_t max_px = 480 * 480;
+    uint16_t *fb = heap_caps_malloc(max_px * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!fb) {
+        httpd_resp_send_500(req);
+        return ESP_ERR_NO_MEM;
+    }
+    int w = 0, h = 0;
+    esp_err_t err = display_hal_copy_visible(fb, max_px, &w, &h);
+    if (err != ESP_OK || w <= 0 || h <= 0) {
+        heap_caps_free(fb);
+        return httpd_resp_send_err(req, HTTPD_503_SERVICE_UNAVAILABLE,
+                                   "no UI framebuffer (is a ui_layer scene active?)");
+    }
+    httpd_resp_set_type(req, "image/x-portable-pixmap");
+    char hdr[32];
+    int hlen = snprintf(hdr, sizeof(hdr), "P6\n%d %d\n255\n", w, h);
+    httpd_resp_send_chunk(req, hdr, hlen);
+    uint8_t *row = malloc((size_t)w * 3);
+    if (row) {
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                uint16_t px = fb[(size_t)y * w + x];
+                row[x * 3 + 0] = (uint8_t)(((px >> 11) & 0x1F) << 3);
+                row[x * 3 + 1] = (uint8_t)(((px >> 5) & 0x3F) << 2);
+                row[x * 3 + 2] = (uint8_t)((px & 0x1F) << 3);
+            }
+            httpd_resp_send_chunk(req, (const char *)row, (size_t)w * 3);
+        }
+        free(row);
+    }
+    heap_caps_free(fb);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
 esp_err_t http_server_register_ui_routes(httpd_handle_t server)
 {
     const httpd_uri_t handlers[] = {
@@ -301,6 +347,7 @@ esp_err_t http_server_register_ui_routes(httpd_handle_t server)
         { .uri = "/api/ui/menu",    .method = HTTP_POST, .handler = ui_menu_handler },
         { .uri = "/api/ui/result",  .method = HTTP_GET,  .handler = ui_result_handler },
         { .uri = "/api/ui/dismiss", .method = HTTP_POST, .handler = ui_dismiss_handler },
+        { .uri = "/api/ui/snapshot.ppm", .method = HTTP_GET, .handler = ui_snapshot_handler },
     };
     for (size_t i = 0; i < sizeof(handlers) / sizeof(handlers[0]); i++) {
         esp_err_t err = httpd_register_uri_handler(server, &handlers[i]);
