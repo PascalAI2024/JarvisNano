@@ -301,7 +301,7 @@ bool      ui_layer_is_active(void);
  * fixed it; the flag never ran with the gained signal (git log -S, see
  * aec-barge-in.md "Findings"). Re-enabled for P3.4 with the AEC (P3.3)
  * removing the echo confound for the during-playback stream. */
-#define GL_USE_SERVER_VAD        1  /* 2026-06-14: NATIVE server-VAD barge-in (the official Gemini Live path + how the examples do it). The server runs model-aware VAD on the continuous uplink and interrupts itself when the user speaks over the model — a crude local RMS threshold can't separate the user's voice from residual echo (that was "fires in logs but doesn't feel real" + the self-barge choppiness). The two reasons this was 0 are now fixed: (a) mic-too-quiet -> 6x gain + speak-PGA; (b) continuous-uplink WS death -> audioStreamEnd latch + drop-oldest TX queue + lwIP TX tuning (d9031ac, AFTER this was last disabled). The local detector stays as a demoted fast-mute hint (GL_BARGE_RMS high). */
+#define GL_USE_SERVER_VAD        0  /* 2026-06-14: REVERTED to manual mode after testing server VAD on hardware. Server VAD (the "official" barge path) hit the same wall the dev found twice: the user's normal-volume voice reads ~230 RMS at the mic — below Google's server-VAD speech floor — so the server heard silence and NEVER replied (40s of user speech -> 0 turns, the documented "server never returns serverContent"). Manual mode replies reliably. Real talk-over barge needs the mic-to-server SNR raised (acoustic/gain work, a dedicated effort), not a flag flip. Local RMS barge stays available (GL_BARGE_RMS, default high = off-ish) but self-barges if set low (the choppiness). Tap-to-interrupt is the reliable manual barge. */
 
 /* On-device VAD (hands-free turn commit). Server VAD does not return
  * serverContent on this Waveshare board (see above), so instead of disabling
@@ -2212,13 +2212,7 @@ static void gl_audio_tx_task(void *arg)
             .sample_rate   = GL_TX_SAMPLE_RATE,    /* aec_create: must be 16000 */
             .caps          = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT,
             .mode          = GL_AEC_MODE,
-            /* NORMAL, not AGGR: aggressive NLP gates anything correlated with the
-             * echo reference, which during double-talk ducks the USER's overlapping
-             * speech too — so the server VAD never hears the barge ("server VAD
-             * doesn't work"). NORMAL still cancels echo linearly but preserves the
-             * user's voice at an intelligible level for the server. (Per 2026-06-14
-             * barge research; the speak-time mic-PGA drop keeps the AEC linear.) */
-            .nlp_level     = AEC_NLP_LEVEL_NORMAL,
+            .nlp_level     = AEC_NLP_LEVEL_AGGR,   /* manual mode: strongest echo suppression (local barge off, so no double-talk-ducking concern) */
         };
         aec = aec_create_from_config(&aec_cfg);
         if (!aec) {
