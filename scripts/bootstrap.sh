@@ -274,8 +274,9 @@ if ui_decl not in h:
 priv.write_text(h)
 
 c = core.read_text()
-c = c.replace("    config.max_uri_handlers = 32;\n", "    config.max_uri_handlers = 44;\n")
-c = c.replace("    config.max_uri_handlers = 40;\n", "    config.max_uri_handlers = 44;\n")
+c = c.replace("    config.max_uri_handlers = 32;\n", "    config.max_uri_handlers = 56;\n")
+c = c.replace("    config.max_uri_handlers = 40;\n", "    config.max_uri_handlers = 56;\n")
+c = c.replace("    config.max_uri_handlers = 44;\n", "    config.max_uri_handlers = 56;\n")
 if "http_server_register_display_routes" not in c:
     anchor = '    ESP_RETURN_ON_ERROR(http_server_register_camera_routes(s_ctx.server), TAG, "Failed to register camera routes");\n'
     if anchor not in c:
