@@ -64,6 +64,26 @@ Reference: EchoEar (xiaozhi `boards/esp-vocat/config.h`) runs BOTH directions
 at 24 kHz for the same shared-clock reason. Our input must stay 16 kHz for the
 Gemini API, so we hold the bus at 16 kHz and resample the downlink instead.
 
+**[2026-06-14] Native 24 kHz output (current): common 24 kHz clock + capture downsample**
+
+Supersedes the 16 kHz lock + downlink resample. Run the *entire* duplex I2S/codec
+at 24 kHz (board_peripherals.yaml + gl_open_* at GL_CAP_SAMPLE_RATE). Model
+24 kHz PCM plays natively to the ES8311 (crisp, no resample in the main path).
+Mic capture reads 768 samples, immediately downsampled 24→16 (linear per-lane
+`gl_downsample_capture_24to16`) so AEC (esp-sr requires 16 k), VAD, barge, and
+Gemini uplink frames remain byte-identical 512-sample 16 kHz.
+
+`gl_resolve_playback_rate` forces 24 kHz whenever the capture path is live (shared
+clock invariant). Playback resample path is kept only as a fallback for raw or
+mismatch cases.
+
+Board yaml + audio level sampler updated to 24 kHz for consistency. Feeder chunk
+made duration-aware. See `cap_gemini_live.c:220 (defines), 1816 (downsample),
+2037 (feeder), 2399 (capture path), 3168 (enter speaking)` and the native 24 kHz
+commit.
+
+This is the production path that made "connected" 24 kHz voice work on hardware.
+
 **[2026-06-10] Local VAD tuning: speech 1000 / silence 500 / min-speech 240 ms — and reset accumulators on commit**
 
 Field calibration (post-6x-gain RMS): idle ceiling ~939, speech band 1000–4900.

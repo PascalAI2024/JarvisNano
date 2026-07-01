@@ -149,15 +149,13 @@ bool      ui_layer_is_active(void);
  * stop_requested/session_active, so a tap-stop is never delayed. */
 #define GL_RX_BACKPRESSURE_MAX_MS 5000
 /* Decoded-PCM ring between the session task (producer: parse/decode/gain/
- * resample) and the playback feeder (consumer: blocking DAC writes). 1 MB at
- * the 16 kHz session clock (32 kB/s) buffers ~32 s of model speech — a whole
- * burst reply. Allocation degrades by halving down to the floor instead of
- * failing the session (P2.2/F9). */
-#define GL_PCM_RING_BYTES        (512 * 1024)   /* ~16 s @16k; halved 2026-06-12 to free PSRAM for the AEC engine (was 1 MB; decode-buf OOM under AEC) */
+ * resample) and the playback feeder (consumer: blocking DAC writes).
+ * Native 24 kHz playback: 512 kB ~10.6 s of model audio. */
+#define GL_PCM_RING_BYTES        (512 * 1024)   /* ~10.6 s @24 kHz playback (halved 2026-06-12 for AEC PSRAM headroom) */
 #define GL_PCM_RING_MIN_BYTES    (128 * 1024)
-#define GL_FEEDER_CHUNK_BYTES    2560          /* 80 ms @ 16 kHz mono s16 per DAC write — small enough that an
-                                                * interrupt flush takes effect within one chunk (P3.1 < 200 ms) */
-#define GL_FEEDER_STOP_WAIT_MS   5000          /* worst case: one in-flight DAC write (~330 ms) */
+#define GL_FEEDER_CHUNK_MS       80
+#define GL_FEEDER_CHUNK_BYTES    (24000 * GL_FEEDER_CHUNK_MS / 1000 * GL_CHANNELS * (GL_BITS / 8))  /* 3840 B max = ~80 ms @24 kHz (rate-aware computation inside feeder keeps consistent duration) */
+#define GL_FEEDER_STOP_WAIT_MS   5000          /* worst case: one in-flight DAC write (~80 ms chunk + margin) */
 /* Capture→sender frame queue: 16 × 32 ms ≈ 512 ms of mic audio (P2.3/F10). */
 #define GL_TX_FRAME_QUEUE_DEPTH  16
 #define GL_TOOL_QUEUE_DEPTH      4
@@ -166,8 +164,8 @@ bool      ui_layer_is_active(void);
  * synchronous aec_process call with no rebuffering (D4). Was 20 ms pre-AEC;
  * the VAD constants below are expressed in frames of this size. */
 #define GL_TX_CHUNK_MS           32
-#define GL_TX_SAMPLE_RATE        16000
-#define GL_RX_SAMPLE_RATE        24000
+#define GL_TX_SAMPLE_RATE        16000   /* Gemini uplink + AEC + VAD pipeline (capture is downsampled to this) */
+#define GL_RX_SAMPLE_RATE        24000   /* model output + native codec clock (shared I2S duplex) */
 #define GL_CHANNELS              1
 #define GL_BITS                  16
 /* ---- 4-channel TDM capture (AEC Phase 2, design D2) ------------------------
@@ -218,10 +216,10 @@ bool      ui_layer_is_active(void);
 #define GL_TX_PCM_BYTES          (GL_TX_SAMPLES_PER_CHUNK * GL_CHANNELS * (GL_BITS / 8)) /* 1024 */
 #define GL_TX_RAW_BYTES          (GL_TX_SAMPLES_PER_CHUNK * GL_CAPTURE_CHANNELS * (GL_BITS / 8)) /* 4096 */
 /* Native 24 kHz output: the ES8311 DAC + ES7210 ADC share one duplex I2S clock,
- * so to play the model's 24 kHz audio crisply (not downsampled to 16 kHz) the
- * WHOLE codec runs at 24 kHz. The mic is then captured at 24 kHz and downsampled
- * 24->16 to a byte-identical 16 kHz frame right after the read, so the AEC / VAD
- * / barge / uplink pipeline (all 512-sample 16 kHz) is unchanged. */
+ * so to play the model's 24 kHz audio crisply (not downsampled) the WHOLE codec
+ * runs at 24 kHz (GL_RX / GL_CAP). Capture read at 24 kHz then linearly
+ * downsampled 3:2 per-lane (gl_downsample_capture_24to16) to feed the 16 kHz
+ * AEC/VAD/uplink pipeline unchanged. */
 #define GL_CAP_SAMPLE_RATE       GL_RX_SAMPLE_RATE   /* 24000 — codec/capture clock = model output rate */
 #define GL_CAP_SAMPLES_PER_CHUNK (GL_CAP_SAMPLE_RATE * GL_TX_CHUNK_MS / 1000)  /* 768 */
 #define GL_CAP_RAW_BYTES         (GL_CAP_SAMPLES_PER_CHUNK * GL_CAPTURE_CHANNELS * (GL_BITS / 8)) /* 6144 */
@@ -1347,9 +1345,11 @@ static void gl_pcm_ring_alloc(void)
     s_gl.pcm_ring_head  = 0;
     s_gl.pcm_ring_tail  = 0;
     s_gl.pcm_ring_bytes = 0;
-    ESP_LOGI(TAG, "PCM ring: %u B (~%u s at the session clock)",
+    uint32_t ring_rate = GL_RX_SAMPLE_RATE;  /* playback audio rate (native 24 kHz) */
+    ESP_LOGI(TAG, "PCM ring: %u B (~%u s @ %u Hz)",
              (unsigned)want,
-             (unsigned)(want / (GL_TX_SAMPLE_RATE * GL_CHANNELS * (GL_BITS / 8))));
+             (unsigned)(want / (ring_rate * GL_CHANNELS * (GL_BITS / 8))),
+             (unsigned)ring_rate);
 }
 
 /* SESSION TASK ONLY, and only after the feeder is known parked. */
@@ -2054,7 +2054,12 @@ static void gl_playback_feeder_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
-        size_t got = gl_pcm_ring_read(chunk, sizeof(chunk), 50);
+        /* Rate-aware chunk for consistent ~GL_FEEDER_CHUNK_MS duration across 16/24 kHz clocks.
+         * Uses actual dac_rate (set by gl_open_dac / resolve) so interrupt flush latency target holds. */
+        uint32_t pr = (s_gl.dac_rate ? s_gl.dac_rate : GL_RX_SAMPLE_RATE);
+        size_t chunk_bytes = (size_t)pr * GL_FEEDER_CHUNK_MS / 1000 * GL_CHANNELS * (GL_BITS / 8);
+        if (chunk_bytes > sizeof(chunk)) chunk_bytes = sizeof(chunk);
+        size_t got = gl_pcm_ring_read(chunk, chunk_bytes, 50);
         if (!got) {
             continue;
         }
