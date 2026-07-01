@@ -8,6 +8,8 @@
 #include "sdkconfig.h"
 
 #include <stdio.h>
+#include <time.h>
+#include <sys/time.h>
 
 #if CONFIG_APP_CLAW_CAP_GEMINI_LIVE
 #include <stdint.h>
@@ -30,6 +32,7 @@
 /* Status-panel data sources. wifi_manager is already in main's REQUIRES;
  * jarvis_pmic is added by apply_status_panel_main_require_patch in bootstrap. */
 #include "jarvis_pmic.h"
+#include "jarvis_imu.h"
 #include "wifi_manager.h"
 
 static const char *TAG = "touch_mon";
@@ -44,6 +47,8 @@ int  ui_layer_on_tap(int x, int y);
 esp_err_t ui_layer_show_data(const char *title, const char *const *labels,
                              const char *const *values, int n);
 esp_err_t ui_layer_dismiss(void);
+esp_err_t ui_layer_show_cockpit(void);  /* the Orbital Cockpit HUD viz */
+esp_err_t ui_layer_show_menu(const char *const *items, int n);
 
 /* Polls the CST9217 touch panel every 80ms and calls cap_gemini_live_toggle()
  * on each rising edge (finger-down event). The I2C bus is shared with audio
@@ -70,6 +75,25 @@ static touch_demo_gemini_configured_cb_t s_gemini_configured;
  * and wakes. Tracks whether the user explicitly put the device to sleep so a
  * tap on the dim face wakes instead of starting a fresh session by accident. */
 static bool s_asleep = false;
+
+/* Track when we opened a demo radial menu so a later tap pick can drive
+ * quick actions (status, stop, etc.) without needing labels from ui_layer. */
+static bool s_demo_radial_active = false;
+
+/* ---- Hardware Power Moods (IMU + PMIC) ---------------------------------- *
+ * Central tiny state. face_down + stable >3s → DREAM (stop voice, alert overlay).
+ * Lift (moving or face_up change) → AWAKE (clear, bloom via idle+amp).
+ * Shake → dismiss ui_layer or stop voice. Battery low/charge tunes visuals
+ * in face amp. Polled lightly via esp_timer (on-demand I2C, no always bus). */
+static volatile power_mood_t s_power_mood = POWER_MOOD_AWAKE;
+static esp_timer_handle_t s_power_timer = NULL;
+
+/* Bloom ramp counter for wake-from-dream lively amp (synthetic drives rwave
+ * briefly on lift so idle breathing feels "picked up", then hands to IMU boost). */
+static volatile int s_bloom_ticks = 0;
+static uint64_t s_face_down_since_us = 0;
+static bool s_last_shake = false;
+static char s_last_orient[16] = "unknown";
 
 typedef struct {
     bool started;
@@ -149,9 +173,9 @@ static void touch_exit_sleep(void)
  * on the UI task, but keeping them static avoids any lifetime ambiguity). */
 static void touch_show_status_panel(void)
 {
-    static char v_batt[32], v_wifi[48], v_ip[24], v_up[32], v_mem[40];
-    const char *labels[5] = { "Battery", "Wi-Fi", "IP", "Uptime", "Free RAM" };
-    const char *values[5] = { v_batt, v_wifi, v_ip, v_up, v_mem };
+    static char v_batt[32], v_wifi[48], v_ip[24], v_up[32], v_clk[24];
+    const char *labels[5] = { "Battery", "Wi-Fi", "IP", "Uptime", "Clock" };
+    const char *values[5] = { v_batt, v_wifi, v_ip, v_up, v_clk };
 
     jarvis_battery_t bat;
     if (jarvis_pmic_read_battery(&bat) == ESP_OK) {
@@ -202,10 +226,107 @@ static void touch_show_status_panel(void)
 
     unsigned heap_k = (unsigned)(esp_get_free_heap_size() / 1024);
     unsigned ps_k = (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024);
-    snprintf(v_mem, sizeof(v_mem), "%uK + %uK PS", heap_k, ps_k);
+    (void)heap_k; (void)ps_k; /* kept for json diags; clock replaces RAM row in panel */
+
+    /* Basic clock for ambient watch / status panel. Prefers seeded wall time
+     * (HH:MM) else monotonic uptime as fallback. Pairs with battery rim. */
+    time_t tnow = 0;
+    struct tm tminfo;
+    if (time(&tnow) != (time_t)-1 && localtime_r(&tnow, &tminfo)) {
+        snprintf(v_clk, sizeof(v_clk), "%02d:%02d", tminfo.tm_hour, tminfo.tm_min);
+    } else {
+        uint64_t ups = esp_timer_get_time() / 1000000ULL;
+        snprintf(v_clk, sizeof(v_clk), "%02u:%02u", (unsigned)((ups / 3600) % 24), (unsigned)((ups / 60) % 60));
+    }
 
     ui_layer_show_data("Status", labels, values, 5);
+    s_demo_radial_active = false;
     ESP_LOGI(TAG, "Swipe down: status panel");
+}
+
+/* Power mood poll: on-demand IMU (burst ~40 ms) + PMIC at low rate. Central
+ * transitions drive sleep/wake/dismiss exactly as swipe paths. */
+static void power_mood_poll(void *arg)
+{
+    (void)arg;
+    jarvis_imu_t imu = {0};
+    if (jarvis_imu_read(&imu) != ESP_OK || !imu.present) {
+        return;
+    }
+    jarvis_battery_t bat = {0};
+    (void)jarvis_pmic_read_battery(&bat); /* best-effort; influences amp elsewhere */
+
+    /* Wire battery + refresh ambient watch (clock rim + % label) on every poll.
+     * Guards inside the emote helpers make this a no-op during voice or DREAM alert. */
+    if (bat.present && bat.percent != 0xFF) {
+        emote_set_battery_info(bat.percent, bat.charging || bat.usb_present);
+    }
+    emote_refresh_ambient_watch();
+
+    /* Wake bloom decay: quick high amp on lift, ramp down synthetic so IMU "breathing"
+     * boost (team work in bridge) takes over for lively idle. Dim hint on dream path. */
+    if (s_bloom_ticks > 0) {
+        s_bloom_ticks--;
+        if (s_bloom_ticks > 0) {
+            emote_face_set_synthetic_amplitude(s_bloom_ticks >= 3 ? 620 : 340);
+        } else {
+            emote_face_set_synthetic_amplitude(-1);
+        }
+    }
+
+    bool is_face_down = (imu.orientation && strcmp(imu.orientation, "face_down") == 0);
+    bool is_face_up   = (imu.orientation && strstr(imu.orientation, "face_up") != NULL);
+    uint64_t now = (uint64_t)esp_timer_get_time();
+
+    if (is_face_down) {
+        if (s_face_down_since_us == 0) {
+            s_face_down_since_us = now;
+            strlcpy(s_last_orient, imu.orientation ? imu.orientation : "face_down", sizeof(s_last_orient));
+        }
+        uint64_t stable_us = now - s_face_down_since_us;
+        if (stable_us > 3000000ULL && s_power_mood != POWER_MOOD_DREAM) {
+            s_power_mood = POWER_MOOD_DREAM;
+            if (cap_gemini_live_is_active()) {
+                cap_gemini_live_stop();
+            }
+            emote_face_set_synthetic_amplitude(25); /* dim before alert hides face */
+            emote_set_alert(EMOTE_ALERT_GENERIC, "dream");
+            s_asleep = true;
+            ESP_LOGI(TAG, "Power mood → DREAM (face_down stable >3s)");
+        }
+    } else {
+        s_face_down_since_us = 0;
+        bool lift = imu.moving || is_face_up;
+        if (s_power_mood == POWER_MOOD_DREAM && lift) {
+            s_power_mood = POWER_MOOD_AWAKE;
+            emote_clear_alert();
+            s_asleep = false;
+            emote_set_voice_idle(); /* idle face + motion amp = bloom to life */
+            /* Quick amp ramp bloom on wake (polish for lively idle when lifted).
+             * Synthetic forces high energy briefly; poll will decay it to IMU-driven
+             * subtle breathing boost (already in bridge gl_face_amp). */
+            emote_face_set_synthetic_amplitude(620);
+            s_bloom_ticks = 5;  /* ~2 s decay at 400 ms poll */
+            ESP_LOGI(TAG, "Power mood → AWAKE (lift moving=%d orient=%s)", (int)imu.moving,
+                     imu.orientation ? imu.orientation : "?");
+        }
+    }
+
+    /* Shake: one-shot on rising edge → dismiss scene or barge (stop voice) */
+    if (imu.shake && !s_last_shake) {
+        if (ui_layer_is_active()) {
+            ui_layer_dismiss();
+            s_demo_radial_active = false;
+            ESP_LOGI(TAG, "Power shake → dismiss ui_layer");
+        } else if (cap_gemini_live_is_active()) {
+            cap_gemini_live_stop();
+            ESP_LOGI(TAG, "Power shake → stop Gemini");
+        }
+    }
+    s_last_shake = imu.shake;
+    if (imu.orientation) {
+        strlcpy(s_last_orient, imu.orientation, sizeof(s_last_orient));
+    }
 }
 
 static const char *local_scene_name(local_scene_t scene);
@@ -598,8 +719,8 @@ static void touch_monitor_task(void *arg)
                     ESP_LOGI(TAG, "Long press: stopping Gemini Live");
                     cap_gemini_live_stop();
                 } else {
-                    ESP_LOGI(TAG, "Long press: local hardware showcase");
-                    local_hardware_demo_start(LOCAL_SCENE_SHOWCASE);
+                    ESP_LOGI(TAG, "Long press: Orbital Cockpit HUD (live IMU + sensors on round bezel)");
+                    ui_layer_show_cockpit();  /* the great creative data viz + animation layer */
                 }
                 if (s_diag_mx && xSemaphoreTake(s_diag_mx, pdMS_TO_TICKS(20)) == pdTRUE) {
                     s_diag.long_presses++;
@@ -633,6 +754,7 @@ static void touch_monitor_task(void *arg)
                      * sideways = reserved. */
                     if (ui_layer_is_active()) {
                         ui_layer_dismiss();
+                        s_demo_radial_active = false;
                         ESP_LOGI(TAG, "Swipe -> dismiss UI scene");
                         touch_diag_set_action("swipe_dismiss", scene);
                     } else if (ady > adx && dy < 0) {
@@ -642,9 +764,15 @@ static void touch_monitor_task(void *arg)
                         touch_show_status_panel();
                         touch_diag_set_action("swipe_down_status", scene);
                     } else {
-                        ESP_LOGI(TAG, "Swipe %s on face — reserved",
-                                 dx < 0 ? "left" : "right");
-                        touch_diag_set_action("swipe_side_noop", scene);
+                        /* Wave 3: side swipe on face triggers radial menu for
+                         * quick actions (status, stop voice, etc.). Taps on the
+                         * dial resolve via ui_layer and we act on the index. */
+                        static const char *items[4] = {"Status", "Stop", "Info", "Dismiss"};
+                        if (ui_layer_show_menu(items, 4) == ESP_OK) {
+                            s_demo_radial_active = true;
+                        }
+                        ESP_LOGI(TAG, "Swipe side -> radial quick menu");
+                        touch_diag_set_action("swipe_side_menu", scene);
                     }
                 } else if (ui_layer_is_active()) {
                     /* TAP on an active scene: route to its hit-test, never touch
@@ -652,6 +780,21 @@ static void touch_monitor_task(void *arg)
                     int picked = ui_layer_on_tap((int)last_x, (int)last_y);
                     ESP_LOGI(TAG, "Tap -> ui_layer (x=%u y=%u) picked=%d",
                              (unsigned)last_x, (unsigned)last_y, picked);
+                    if (picked >= 0 && s_demo_radial_active) {
+                        /* Act on radial picks (demo quick actions). Choice arcs
+                         * from Gemini are handled in cap_gemini_live poll path. */
+                        s_demo_radial_active = false;
+                        if (picked == 0) {
+                            touch_show_status_panel();
+                        } else if (picked == 1 && cap_gemini_live_is_active()) {
+                            cap_gemini_live_stop();
+                            ESP_LOGI(TAG, "Radial: stop Gemini");
+                        } else if (picked == 3) {
+                            ui_layer_dismiss();
+                        }
+                    } else if (s_demo_radial_active) {
+                        s_demo_radial_active = false;
+                    }
                     touch_diag_set_action(picked >= 0 ? "tap_ui_pick" : "tap_ui_miss",
                                           scene);
                 } else if (s_asleep) {
@@ -710,13 +853,33 @@ esp_err_t touch_demo_start(touch_demo_gemini_configured_cb_t gemini_configured)
             return ESP_ERR_NO_MEM;
         }
     }
+
+    /* Seed a base wall time so emote's built-in clock_label (and any C time())
+     * shows an advancing HH:MM for the ambient watch-face element. Real NTP
+     * not required; this makes the rim clock live from boot. */
+    struct timeval tv = { .tv_sec = 1735689600, .tv_usec = 0 }; /* 2025-01-01 base */
+    settimeofday(&tv, NULL);
+    ESP_LOGI(TAG, "seeded demo wall clock for emote clock_label / ambient watch");
     /* 8192: tap handling posts requests to the Gemini session task instead of
      * running codec teardown + TLS WS sends here (STABILITY_PLAN F4), but the
      * bigger stack stays as belt-and-suspenders — cap_gemini_live_start() can
      * still allocate queues/tasks from this context. */
-    return xTaskCreate(touch_monitor_task, "touch_mon", 8192, NULL, 3, NULL) == pdPASS
+    esp_err_t t_err = xTaskCreate(touch_monitor_task, "touch_mon", 8192, NULL, 3, NULL) == pdPASS
                ? ESP_OK
                : ESP_ERR_NO_MEM;
+
+    /* Start light periodic power-mood poll for IMU-driven DREAM/AWAKE.
+     * 400 ms is responsive for 3 s stable yet gentle on shared I2C. Mood timer
+     * independent of touch task so hardware sleep/wake works hands-free. */
+    const esp_timer_create_args_t mood_args = {
+        .callback = power_mood_poll,
+        .name     = "power_mood",
+    };
+    if (esp_timer_create(&mood_args, &s_power_timer) == ESP_OK && s_power_timer) {
+        esp_timer_start_periodic(s_power_timer, 400000);
+        ESP_LOGI(TAG, "power mood timer started (400ms)");
+    }
+    return t_err;
 }
 
 esp_err_t touch_demo_get_diagnostics_json(char *out, size_t out_size)
@@ -736,6 +899,7 @@ esp_err_t touch_demo_get_diagnostics_json(char *out, size_t out_size)
                      "{\"ok\":true,\"started\":%s,\"touch_ready\":%s,"
                      "\"touching\":%s,\"local_demo_running\":%s,"
                      "\"gemini_configured\":%s,\"gemini_active\":%s,"
+                     "\"power_mood\":\"%s\","
                      "\"polls\":%lu,\"touch_edges\":%lu,\"taps\":%lu,"
                      "\"long_presses\":%lu,\"local_scene_starts\":%lu,"
                      "\"irq_events\":%lu,\"idle_skips\":%lu,"
@@ -752,6 +916,7 @@ esp_err_t touch_demo_get_diagnostics_json(char *out, size_t out_size)
                      snap.local_demo_running ? "true" : "false",
                      gemini_live_configured() ? "true" : "false",
                      cap_gemini_live_is_active() ? "true" : "false",
+                     touch_demo_get_power_mood_name(),
                      (unsigned long)snap.polls,
                      (unsigned long)snap.touch_edges,
                      (unsigned long)snap.taps,
@@ -788,6 +953,16 @@ esp_err_t touch_demo_run_scene(const char *scene_name)
     ESP_LOGI(TAG, "HTTP touch diagnostic scene=%s", local_scene_name(scene));
     return ESP_OK;
 }
+
+power_mood_t touch_demo_get_power_mood(void)
+{
+    return s_power_mood;
+}
+
+const char *touch_demo_get_power_mood_name(void)
+{
+    return (s_power_mood == POWER_MOOD_DREAM) ? "DREAM" : "AWAKE";
+}
 #else
 esp_err_t touch_demo_start(touch_demo_gemini_configured_cb_t gemini_configured)
 {
@@ -809,4 +984,7 @@ esp_err_t touch_demo_run_scene(const char *scene_name)
     (void)scene_name;
     return ESP_ERR_NOT_SUPPORTED;
 }
+
+power_mood_t touch_demo_get_power_mood(void) { return POWER_MOOD_AWAKE; }
+const char *touch_demo_get_power_mood_name(void) { return "AWAKE"; }
 #endif
