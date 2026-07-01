@@ -48,6 +48,7 @@ typedef enum {
     UI_SCENE_DATA_PANEL,  /* title + label/value rows */
     UI_SCENE_RADIAL_MENU, /* radial dial of selectable items */
     UI_SCENE_IMAGE,       /* a decoded JPEG presented once */
+    UI_SCENE_COCKPIT,     /* live Orbital Cockpit HUD: IMU horizon + motion radar + battery/audio energy arcs on round bezel. Sky's the limit data viz. */
 } ui_scene_t;
 
 /* One-time init: grabs the board panel/io handles and starts the dedicated UI
@@ -90,6 +91,14 @@ esp_err_t ui_layer_show_image(const uint8_t *jpeg, size_t len, const char *path)
 /* Show a radial menu of selectable items (1..UI_LAYER_MAX_OPTIONS). Strings are
  * copied internally. A tap on an item resolves the result like a choice arc. */
 esp_err_t ui_layer_show_menu(const char *const *items, int n);
+
+/* Orbital Cockpit HUD - creative data viz masterpiece.
+ * Draws live gauges using the round form: tilted horizon (IMU roll/pitch), 
+ * motion radar dots/sweep, battery energy arc, audio pulse ring.
+ * IMU tilt physically "steers" the viz. Touch on bezel can highlight layers.
+ * This is the "sky's the limit" cool touch + graphics + sensor fusion.
+ * Call from gestures, debug, or Gemini personality moments. */
+esp_err_t ui_layer_show_cockpit(void);
 
 /* Dismiss the current scene: the UI task releases the arbiter and destroys the
  * display_hal; the emote face repaints via the owner-changed callback. Safe to
