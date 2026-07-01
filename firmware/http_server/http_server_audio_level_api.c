@@ -60,7 +60,7 @@
 static const char *TAG = "http_audio_level";
 
 #define AUDIO_LEVEL_PERIPH_NAME      "i2s_audio_in"
-#define AUDIO_LEVEL_SAMPLE_RATE_HZ   16000
+#define AUDIO_LEVEL_SAMPLE_RATE_HZ   24000  /* match board i2s + native 24 kHz codec clock */
 #define AUDIO_LEVEL_WINDOW_MS        100
 #define AUDIO_LEVEL_WINDOW_SAMPLES   ((AUDIO_LEVEL_SAMPLE_RATE_HZ * AUDIO_LEVEL_WINDOW_MS) / 1000)
 #define AUDIO_LEVEL_DBFS_FLOOR       (-80.0f)
