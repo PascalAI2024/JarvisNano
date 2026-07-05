@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "src/jarvis_board.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        esp_lcd
+        esp_driver_spi
+    PRIV_REQUIRES
+        freertos
+        espressif__esp_lcd_co5300
+)

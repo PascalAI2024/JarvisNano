@@ -47,16 +47,6 @@ peripherals:
       mode: GPIO_MODE_OUTPUT
       pull_up: true
 
-  # LCD QSPI bus — SPI2_HOST, four data lines for the CO5300 AMOLED.
-  - name: spi_display
-    type: spi
-    role: master
-    config:
-      spi_bus_config:
-        spi_port: SPI2_HOST
-        data0_io_num: 4
-        data1_io_num: 5
-        data2_io_num: 6
-        data3_io_num: 7
-        sclk_io_num: 38
-        max_transfer_sz: 12000  # 466px * 12 rows * 2 bytes, plus DMA headroom
+  # CO5300 QSPI display is intentionally not registered here. esp_board_manager
+  # initializes all listed peripherals before devices, which pre-claims SPI2 and
+  # races the Waveshare BSP display primitive. jarvis_board owns this bus.

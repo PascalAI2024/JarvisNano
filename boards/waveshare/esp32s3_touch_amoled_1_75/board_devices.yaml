@@ -92,37 +92,6 @@ devices:
           cmd: 1
           d0: 3
 
-  # CO5300 AMOLED, 466x466, QSPI on SPI2_HOST
-  - name: display_lcd
-    chip: co5300
-    type: display_lcd
-    sub_type: spi
-    version: default
-    dependencies:
-      espressif/esp_lcd_co5300: "*"
-    config:
-      x_max: 466
-      y_max: 466
-      need_reset: true
-      io_spi_config:
-        cs_gpio_num: 12
-        dc_gpio_num: -1                  # not used by CO5300 QSPI (command bits in transfer header)
-        spi_mode: 0
-        pclk_hz: 20000000                # conservative panel clock; avoids physical QSPI streaking
-        trans_queue_depth: 2
-        lcd_cmd_bits: 32
-        flags:
-          quad_mode: true                # 4 data lines
-
-      lcd_panel_config:
-        reset_gpio_num: 39
-        rgb_ele_order: LCD_RGB_ELEMENT_ORDER_RGB
-        bits_per_pixel: 16
-        # CO5300 init commands provided by setup_device.c::lcd_panel_factory_entry_t
-        vendor_config: NULL
-    peripherals:
-      - name: spi_display
-
   # CST9217 capacitive touch on shared I2C bus
   - name: lcd_touch
     chip: cst9217

@@ -196,19 +196,23 @@ static esp_err_t debug_say_handler(httpd_req_t *req)
     }
 
     bool started = false;
+    esp_err_t start_err = ESP_OK;
     if (!cap_gemini_live_is_active()) {
-        cap_gemini_live_start();
+        start_err = cap_gemini_live_start();
         started = true;
-        for (int i = 0; i < 80 && !cap_gemini_live_is_active(); ++i) {
-            vTaskDelay(pdMS_TO_TICKS(100));
+        if (start_err == ESP_OK) {
+            for (int i = 0; i < 80 && !cap_gemini_live_is_active(); ++i) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
         }
     }
-    esp_err_t err = cap_gemini_live_send_text(text);
+    esp_err_t err = (start_err == ESP_OK) ? cap_gemini_live_send_text(text) : start_err;
 
     cJSON *root = cJSON_CreateObject();
     if (root) {
         cJSON_AddBoolToObject(root, "ok", err == ESP_OK);
         cJSON_AddStringToObject(root, "result", esp_err_to_name(err));
+        cJSON_AddStringToObject(root, "start_result", esp_err_to_name(start_err));
         cJSON_AddBoolToObject(root, "started_session", started);
         cJSON_AddBoolToObject(root, "active", cap_gemini_live_is_active());
         cJSON_AddStringToObject(root, "sent", text);

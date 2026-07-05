@@ -5,13 +5,13 @@ idf_component_register(
     INCLUDE_DIRS
         "include"
     REQUIRES
-        espressif__esp_board_manager
         espressif2022__esp_emote_expression
         espressif2022__esp_emote_gfx
         esp_timer
         esp_partition
         freertos
         heap
+        jarvis_board
 )
 
 if(CONFIG_APP_CLAW_ENABLE_EMOTE)

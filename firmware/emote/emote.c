@@ -14,12 +14,12 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "esp_board_manager_includes.h"
 #include "expression_emote.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "gfx.h"
 #include "display_arbiter.h"
+#include "jarvis_board.h"
 
 static const char *TAG = "app_emote";
 
@@ -47,9 +47,11 @@ static bool s_snapshot_alloc_logged;
 static volatile uint32_t s_snapshot_consumer_ms;
 static SemaphoreHandle_t s_flush_done;
 static bool s_flush_sync_registered;
+static volatile bool s_flush_handoff_grace;
 static uint32_t s_flush_timeouts;
 
 #define EMOTE_FLUSH_WAIT_MS        80
+#define EMOTE_FLUSH_HANDOFF_WAIT_MS 200
 #define EMOTE_FLUSH_TIMEOUT_LIMIT  3
 #define EMOTE_FLUSH_STRIP_ROWS     12
 /* P2.6: how long after the last /api/display/snapshot* read the mirror keeps
@@ -88,7 +90,10 @@ static void emote_flush_sync_wait(void)
         return;
     }
 
-    if (xSemaphoreTake(s_flush_done, pdMS_TO_TICKS(EMOTE_FLUSH_WAIT_MS)) == pdTRUE) {
+    bool handoff_grace = s_flush_handoff_grace;
+    s_flush_handoff_grace = false;
+    uint32_t wait_ms = handoff_grace ? EMOTE_FLUSH_HANDOFF_WAIT_MS : EMOTE_FLUSH_WAIT_MS;
+    if (xSemaphoreTake(s_flush_done, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
         s_flush_timeouts = 0;
         return;
     }
@@ -129,30 +134,6 @@ static void emote_register_flush_sync(void)
     ESP_LOGI(TAG, "display flush sync callback registered");
 }
 
-static bool emote_should_swap_color(
-#if CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT
-    const dev_display_lcd_config_t *lcd_cfg
-#else
-    const void *lcd_cfg
-#endif
-)
-{
-#ifdef CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT
-    if (lcd_cfg == NULL || lcd_cfg->sub_type == NULL) {
-        return true;
-    }
-
-    if (strcmp(lcd_cfg->sub_type, "dsi") == 0 || strcmp(lcd_cfg->sub_type, "mipi_dsi") == 0 || strcmp(lcd_cfg->sub_type, "rgb") == 0) {
-        return false;
-    }
-
-    return true;
-#else
-    (void)lcd_cfg;
-    return true;
-#endif
-}
-
 static void emote_on_owner_changed(display_arbiter_owner_t owner, void *user_ctx)
 {
     (void)user_ctx;
@@ -186,6 +167,8 @@ static void emote_on_owner_changed(display_arbiter_owner_t owner, void *user_ctx
         esp_err_t cb_err = esp_lcd_panel_io_register_event_callbacks(s_io_handle, &callbacks, NULL);
         if (cb_err != ESP_OK) {
             ESP_LOGW(TAG, "re-attach flush callback after handback failed: %s", esp_err_to_name(cb_err));
+        } else {
+            s_flush_handoff_grace = true;
         }
     }
 
@@ -411,45 +394,26 @@ static void emote_update_callback(gfx_disp_event_t event, const void *obj,
 
 static esp_err_t emote_load_board_display(void)
 {
-#if !CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT
-    return ESP_ERR_NOT_SUPPORTED;
-#else
-    void *lcd_handle = NULL;
-    void *lcd_config = NULL;
-    esp_err_t err = esp_board_manager_get_device_handle(ESP_BOARD_DEVICE_NAME_DISPLAY_LCD, &lcd_handle);
-    if (err != ESP_OK) {
-        return err;
-    }
+    jarvis_board_display_t display = {0};
+    ESP_RETURN_ON_ERROR(jarvis_board_display_get(&display), TAG, "jarvis board display init failed");
+    ESP_RETURN_ON_FALSE(display.panel && display.io, ESP_ERR_INVALID_STATE, TAG,
+                        "jarvis board display handles are NULL");
 
-    err = esp_board_manager_get_device_config(ESP_BOARD_DEVICE_NAME_DISPLAY_LCD, &lcd_config);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    dev_display_lcd_handles_t *lcd_handles = (dev_display_lcd_handles_t *)lcd_handle;
-    dev_display_lcd_config_t *lcd_cfg = (dev_display_lcd_config_t *)lcd_config;
-
-    ESP_RETURN_ON_FALSE(lcd_handles && lcd_cfg && lcd_handles->panel_handle,
-                        ESP_ERR_INVALID_STATE, TAG, "display_lcd handle/config is NULL");
-
-    s_panel_handle = lcd_handles->panel_handle;
-    s_io_handle = lcd_handles->io_handle;
-    s_lcd_width = lcd_cfg->lcd_width;
-    s_lcd_height = lcd_cfg->lcd_height;
+    s_panel_handle = display.panel;
+    s_io_handle = display.io;
+    s_lcd_width = display.width;
+    s_lcd_height = display.height;
     emote_register_flush_sync();
     return ESP_OK;
-#endif
 }
 
 static emote_config_t emote_get_default_config(void)
 {
-    void *lcd_config = NULL;
     bool swap = true;
-#if CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT
-    if (esp_board_manager_get_device_config(ESP_BOARD_DEVICE_NAME_DISPLAY_LCD, &lcd_config) == ESP_OK) {
-        swap = emote_should_swap_color((const dev_display_lcd_config_t *)lcd_config);
+    jarvis_board_display_t display = {0};
+    if (jarvis_board_display_get(&display) == ESP_OK) {
+        swap = display.swap_color_bytes;
     }
-#endif
 
     emote_config_t config = {
         .flags = {

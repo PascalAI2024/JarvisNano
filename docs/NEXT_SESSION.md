@@ -102,9 +102,15 @@ curl and optimism.
   `httpd_register_uri_handler: no slots left`; fixed by raising HTTP
   `max_uri_handlers` to 40.
 - **Display diagnostics**:
-  - `GET /api/display/snapshot.json` gives lightweight animation heartbeat data.
+  - `GET /api/display/snapshot.json` gives lightweight owner/mirror metadata.
+    It is explicit about `capture_source`, `display_owner`, `panel_readback:false`,
+    and `mirror_fresh`.
   - `GET /api/display/snapshot.ppm?save=1` streams a PPM and saves a copy under
-    `/sdcard/diagnostics/`.
+    `/sdcard/diagnostics/` when the emote mirror is active.
+  - These routes are software mirrors of the active display owner, not CO5300
+    panel readback. If the old reactor face owns the panel, the snapshot should
+    show the old reactor face. `valid` means a mirror buffer is available;
+    `mirror_fresh:false` means the emote renderer has not marked a fresh flush yet.
   - `GET/POST /api/display/face` reads and forces reactive face state.
 - **Animation/display transfer fix**: the emote flush path now waits for CO5300
   SPI transfer completion before notifying GFX. Render strips use internal DMA

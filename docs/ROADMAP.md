@@ -115,8 +115,14 @@ reference: [`boards/waveshare/esp32s3_touch_amoled_1_75/README.md`](../boards/wa
 - [x] **Phase 2** — audio chain: ES8311 DAC, ES7210 4-ch ADC (mics + hardware echo-reference lane; AEC is software via esp-sr), GPIO46 power-amp enable, I²S0 duplex
 - [x] **Phase 4** — Wi-Fi onboarding via USB-CDC `app_claw` CLI (`wifi --set --ssid … --password … --apply`), no captive portal needed
 - [x] **Phase 5** — end-to-end agent chat verified on hardware (MiniMax M2.7 via Anthropic-compatible endpoint, ~5.5 s round-trip)
+- [x] **Waveshare v1 recovery** — direct `jarvis_board` + CO5300 primitive builds and flashes in preserve mode; hardware boot watch is stable; `/api/display/snapshot.json`, `/api/display/snapshot.ppm`, active-scene `/api/ui/snapshot.ppm`, `/api/touch`, `/api/tools/status`, and canonical face states (`idle` / `listen` / `think` / `speak` / `error` / `sleep`) are live on hardware
+- [x] **Touch diagnostics service** — CST9217 service starts independently of demo Kconfig drift and reports `{ok, enabled, x_max, y_max, last_event}` from `/api/touch`
+- [x] **JarvisMCP config groundwork** — `llm_api_key` (Gemini key), `jarvis_mcp_url`, `jarvis_mcp_key`, and `pairing_token` are NVS-backed config fields; config readback masks sensitive values, and `/api/tools/status` reports configured/unconfigured state without exposing the URL or key
 - [ ] **Phase 3** — microSD mount (SDMMC 1-bit, pins D0=3/CMD=1/CLK=2). YAML committed; blocked on the `esp-bmgr-assist<0.8` pin landing in the build flow
-- [ ] **Phase 6** — display reactive to agent state: router rules → emote transitions (idle / listening / thinking / speaking). **This is what makes the board feel alive** — right now the screen shows only the static idle emote (the stock "swim" lobster) regardless of what the agent is doing
+- [ ] **Voice-loop binding** — bind Gemini Live session state to the recovered face states within 250 ms, prove ES7210 mic frames, ES8311 speaker playback, and tap-to-interrupt on hardware
+- [ ] **Touch behavior QA** — physical short tap toggles Gemini start/end; long press opens the cockpit/menu; swipe/dismiss returns to emote without wedging voice state
+- [ ] **Pairing-token enforcement** — protect config writes, restart/control, Gemini control, touch injection, JarvisMCP config, and destructive file actions with `X-JarvisNano-Token`
+- [ ] **Dashboard v1** — make Waveshare the first-class browser setup target: face preview, touch status, Gemini state, memory/tool status, masked secrets, and desktop/mobile visual QA
 - [ ] **466×466 emote pack** — replace the stock 284×240 swim/offline pack with a JarvisNano mascot face rendered for the round AMOLED
 - [ ] **Voice loop** — mic VAD → STT → LLM → TTS → speaker, the full hands-free conversation path (multi-day, shared with the XIAO Phase-2 TTS work)
 
