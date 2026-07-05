@@ -2,7 +2,7 @@
 #
 # A second display-arbiter owner. It draws via lua_module_display's display_hal
 # (no LVGL, no baked emote-gfx) and grabs the board panel/io handles through the
-# board manager, exactly like firmware/emote.
+# jarvis_board, exactly like firmware/emote.
 #
 # Wiring: bootstrap.sh mirrors firmware/ui_layer/ -> esp-claw/components/common/
 # ui_layer (see copy_ui_layer_runtime, parallel to copy_emote_runtime). Edit
@@ -13,8 +13,8 @@ idf_component_register(
     INCLUDE_DIRS
         "."
     REQUIRES
-        # board handle grab (esp_board_manager_get_device_handle + display_lcd cfg)
-        espressif__esp_board_manager
+        # board handle grab (Waveshare BSP display primitive)
+        jarvis_board
         # display_hal_* drawing primitives (lua_module_display owns display_hal.c)
         lua_module_display
         # second-owner handoff (acquire/release/is_owner + owner-changed cb)

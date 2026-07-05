@@ -15,7 +15,7 @@
 
 #include "app_claw_face_bridge.h"
 
-#if CONFIG_APP_CLAW_ENABLE_EMOTE && CONFIG_APP_CLAW_CAP_GEMINI_LIVE
+#if CONFIG_APP_CLAW_ENABLE_EMOTE
 
 #include <stdint.h>
 #include "emote.h"
@@ -56,7 +56,7 @@ void app_claw_face_bridge_register(void)
     emote_face_set_amplitude_source(gl_face_amp);
 }
 
-#else  /* emote or gemini-live disabled — no-op so callers need no guards */
+#else  /* emote disabled — no-op so callers need no guards */
 
 void app_claw_face_bridge_register(void) {}
 

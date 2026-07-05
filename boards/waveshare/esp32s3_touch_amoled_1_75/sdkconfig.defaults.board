@@ -68,3 +68,18 @@ CONFIG_LWIP_TCP_WND_DEFAULT=16384
 # dropping display_hal and failing to resolve ui_layer's REQUIRES.
 CONFIG_APP_CLAW_CAP_LUA=y
 CONFIG_APP_CLAW_LUA_MODULE_DISPLAY=y
+CONFIG_APP_CLAW_ENABLE_EMOTE=y
+
+# Scheduler, external IM demo bridges, and firmware MCP are optional for
+# JarvisNano and were boot-time failure points on this 8 MB PSRAM / constrained
+# internal-SRAM target. MCP is still available from the Mac/Codex side; the
+# device firmware must first keep the display, diagnostics, and Gemini path
+# stable. The build-enforced copy is in scripts/bootstrap.sh because this board
+# defaults file is currently inert.
+# CONFIG_APP_CLAW_CAP_SCHEDULER is not set
+# CONFIG_APP_CLAW_CAP_IM_QQ is not set
+# CONFIG_APP_CLAW_CAP_IM_FEISHU is not set
+# CONFIG_APP_CLAW_CAP_IM_TG is not set
+# CONFIG_APP_CLAW_CAP_IM_WECHAT is not set
+# CONFIG_APP_CLAW_CAP_MCP_CLIENT is not set
+# CONFIG_APP_CLAW_CAP_MCP_SERVER is not set

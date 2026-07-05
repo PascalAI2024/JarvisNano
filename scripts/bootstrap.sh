@@ -142,6 +142,174 @@ copy_jarvis_imu() {
     cp -f "$src"/src/*.c "$dst/src/"
 }
 
+copy_jarvis_board() {
+    # Waveshare board primitives that are deliberately not driven through
+    # esp_board_manager. The CO5300 display is initialised through the vendor BSP
+    # and then handed to the existing emote/display_hal owners.
+    local src="$ROOT/firmware/components/jarvis_board"
+    local dst="$ESP_CLAW_DIR/application/edge_agent/components/jarvis_board"
+    [ -d "$src" ] || die "missing vendored jarvis_board source at $src"
+    log "copying jarvis_board component → upstream tree"
+    mkdir -p "$dst/src" "$dst/include"
+    cp -f "$src/CMakeLists.txt" "$dst/CMakeLists.txt"
+    cp -f "$src/idf_component.yml" "$dst/idf_component.yml"
+    cp -f "$src"/include/*.h "$dst/include/"
+    cp -f "$src"/src/*.c "$dst/src/"
+}
+
+apply_app_claw_direct_display_kconfig_patch() {
+    # JarvisNano owns the CO5300 panel through jarvis_board instead of the
+    # board-manager display device. app_claw's stock emote Kconfig depends on
+    # CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT, which is intentionally off in
+    # this architecture to avoid board-manager pre-claiming SPI2. Keep emote/UI
+    # buildable by removing that obsolete dependency.
+    #
+    # app_claw also includes emote.h from app_claw.c when the generated
+    # sdkconfig enables emote. ESP-IDF's component requirement pass can evaluate
+    # app_claw's CMake before those CONFIG_* appends become reliable, so keep
+    # the display runtime dependencies in the base app_claw requirement set.
+    local kconfig="$ESP_CLAW_DIR/components/common/app_claw/Kconfig"
+    local cmake="$ESP_CLAW_DIR/components/common/app_claw/CMakeLists.txt"
+    [ -f "$kconfig" ] || die "missing app_claw Kconfig at $kconfig"
+    [ -f "$cmake" ] || die "missing app_claw CMakeLists at $cmake"
+    if ! grep -q "depends on ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT" "$kconfig" 2>/dev/null; then
+        log "app_claw direct-display Kconfig patch already applied"
+    else
+        log "patching app_claw Kconfig for direct-display emote"
+        python3 - "$kconfig" <<'PY'
+from pathlib import Path
+import sys
+
+p = Path(sys.argv[1])
+s = p.read_text()
+old = (
+    '    config APP_CLAW_ENABLE_EMOTE\n'
+    '        bool "Enable App Claw emote"\n'
+    '        depends on ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT\n'
+    '        default y\n'
+)
+new = (
+    '    config APP_CLAW_ENABLE_EMOTE\n'
+    '        bool "Enable App Claw emote"\n'
+    '        default y\n'
+)
+if old not in s:
+    raise SystemExit("APP_CLAW_ENABLE_EMOTE Kconfig anchor missing")
+p.write_text(s.replace(old, new, 1))
+PY
+    fi
+
+    python3 - "$cmake" <<'PY'
+from pathlib import Path
+import sys
+
+p = Path(sys.argv[1])
+s = p.read_text()
+old = (
+    'set(app_claw_requires\n'
+    '    claw_cap\n'
+    '    claw_core\n'
+    '    claw_event_router\n'
+    '    claw_memory\n'
+    '    claw_skill\n'
+    '    freertos\n'
+)
+new = (
+    'set(app_claw_requires\n'
+    '    claw_cap\n'
+    '    claw_core\n'
+    '    claw_event_router\n'
+    '    claw_memory\n'
+    '    claw_skill\n'
+    '    freertos\n'
+    '    emote\n'
+    '    ui_layer\n'
+)
+if "    emote\n" in s and "    ui_layer\n" in s:
+    print("app_claw base display dependencies already present")
+elif old in s:
+    p.write_text(s.replace(old, new, 1))
+    print("app_claw base dependencies += emote, ui_layer")
+else:
+    raise SystemExit("app_claw_requires base anchor missing")
+PY
+}
+
+apply_lua_storage_listdir_truncation_patch() {
+    # ESP-IDF v5.5.4's newer GCC treats lua_module_storage listdir path
+    # formatting as a possible -Wformat-truncation overflow. Replace the
+    # generated snprintf path join with explicit checked sizing + memcpy.
+    local target="$ESP_CLAW_DIR/components/lua_modules/lua_module_storage/src/lua_module_storage.c"
+    [ -f "$target" ] || die "missing lua_module_storage source at $target"
+    python3 - "$target" <<'PY'
+from pathlib import Path
+import sys
+
+p = Path(sys.argv[1])
+s = p.read_text()
+old = '''        size_t path_len = strlen(path);
+        size_t name_len = strlen(entry->d_name);
+        size_t full_len = path_len + 1 + name_len + 1;
+        char *full_path = NULL;
+        struct stat st;
+
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        full_path = malloc(full_len);
+        if (!full_path) {
+            closedir(dir);
+            return luaL_error(L, "failed to allocate listdir path buffer");
+        }
+
+        if (path_len > 0 && path[path_len - 1] == '/') {
+            snprintf(full_path, full_len, "%s%s", path, entry->d_name);
+        } else {
+            snprintf(full_path, full_len, "%s/%s", path, entry->d_name);
+        }
+'''
+new = '''        size_t path_len = strlen(path);
+        size_t name_len = strlen(entry->d_name);
+        bool add_sep = !(path_len > 0 && path[path_len - 1] == '/');
+        size_t sep_len = add_sep ? 1 : 0;
+        size_t full_len = 0;
+        char *full_path = NULL;
+        char *cursor = NULL;
+        struct stat st;
+
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        if (name_len > ((size_t)-1) - path_len - sep_len - 1) {
+            closedir(dir);
+            return luaL_error(L, "listdir path is too long");
+        }
+        full_len = path_len + sep_len + name_len + 1;
+        full_path = malloc(full_len);
+        if (!full_path) {
+            closedir(dir);
+            return luaL_error(L, "failed to allocate listdir path buffer");
+        }
+
+        cursor = full_path;
+        memcpy(cursor, path, path_len);
+        cursor += path_len;
+        if (add_sep) {
+            *cursor++ = '/';
+        }
+        memcpy(cursor, entry->d_name, name_len);
+        cursor[name_len] = '\\0';
+'''
+if old not in s:
+    if "listdir path is too long" in s:
+        raise SystemExit(0)
+    raise SystemExit("lua_module_storage listdir anchor not found")
+p.write_text(s.replace(old, new))
+PY
+}
+
 copy_emote_runtime() {
     # The emote runtime is patched enough now (reactive face, display mirror,
     # CO5300 flush sync, small internal-DMA render strips) that keeping it as scattered
@@ -491,6 +659,7 @@ build() {
                   idf.py gen-bmgr-config -c ./boards -b "$BOARD_NAME";
                   python3 - <<'"'"'PY'"'"'
 import os
+import re
 from pathlib import Path
 
 board = os.environ["BOARD_NAME"]
@@ -611,6 +780,38 @@ elif board == "esp32s3_touch_amoled_1_75":
     # restoring "ble_gatt.c" to main SRCS (apply_bt_remove_gatt_src_patch), and the
     # ble_gatt_init() call in main.c.
     s = s.replace("CONFIG_BT_ENABLED=y", "# CONFIG_BT_ENABLED is not set")
+    # Keep the round AMOLED build on the assistant-critical path. The board
+    # defaults file is not in SDKCONFIG_DEFAULTS, so force the S3R8 PSRAM here
+    # as well as the optional-capability cuts. The local MCP server starts a
+    # second HTTPD instance and currently collides with the diagnostic HTTP
+    # server; keep firmware MCP out until display + Gemini are stable.
+    enabled_boot_symbols = (
+        "CONFIG_SPIRAM",
+        "CONFIG_SPIRAM_MODE_OCT",
+        "CONFIG_SPIRAM_SPEED_80M",
+        "CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP",
+        "CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY",
+        "CONFIG_SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY",
+        "CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM",
+        "CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC",
+        "CONFIG_APP_CLAW_ENABLE_EMOTE",
+    )
+    disabled_boot_symbols = (
+        "CONFIG_APP_CLAW_CAP_SCHEDULER",
+        "CONFIG_APP_CLAW_CAP_IM_QQ",
+        "CONFIG_APP_CLAW_CAP_IM_FEISHU",
+        "CONFIG_APP_CLAW_CAP_IM_TG",
+        "CONFIG_APP_CLAW_CAP_IM_WECHAT",
+        "CONFIG_APP_CLAW_CAP_MCP_CLIENT",
+        "CONFIG_APP_CLAW_CAP_MCP_SERVER",
+    )
+    for sym in enabled_boot_symbols + disabled_boot_symbols:
+        s = re.sub(rf"(?m)^({re.escape(sym)}=.*|# {re.escape(sym)} is not set)\n?", "", s)
+    s = s.rstrip() + "\n# JarvisNano boot memory profile: assistant path only\n"
+    for sym in enabled_boot_symbols:
+        s += f"{sym}=y\n"
+    for sym in disabled_boot_symbols:
+        s += f"# {sym} is not set\n"
 
 # LVGL is pulled in as a managed dependency, but its bundled examples/demos are
 # never compiled into the app and fail a clean (fullclean) build with
@@ -1318,43 +1519,29 @@ apply_gemini_http_diagnostics_patch() {
         log "http_server/CMakeLists not found — skipping Gemini diagnostics dependency patch"
         return
     fi
-    if grep -q "CONFIG_APP_CLAW_CAP_GEMINI_LIVE" "$cmake" &&
-       grep -q "cap_gemini_live" "$cmake"; then
+    if grep -q "cap_gemini_live" "$cmake" 2>/dev/null &&
+       ! grep -q "list(APPEND http_server_extra_requires cap_gemini_live)" "$cmake" 2>/dev/null; then
         log "Gemini diagnostics dependency patch already applied"
         return
     fi
-    log "applying patches/0007-gemini-http-dependency.patch"
+    log "normalizing Gemini diagnostics http_server dependency"
     python3 - <<PY
 import pathlib
 
 cmake = pathlib.Path(r"$cmake")
 s = cmake.read_text()
-if 'CONFIG_APP_CLAW_CAP_GEMINI_LIVE' not in s:
-    if 'if(CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT AND CONFIG_APP_CLAW_CAP_LUA && CONFIG_APP_CLAW_LUA_MODULE_CAMERA)' in s:
-        s = s.replace(
-            'if(CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT AND CONFIG_APP_CLAW_CAP_LUA && CONFIG_APP_CLAW_LUA_MODULE_CAMERA)\n'
-            '    list(APPEND http_server_extra_requires lua_module_camera)\n'
-            'endif()\n',
-            'if(CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT AND CONFIG_APP_CLAW_CAP_LUA && CONFIG_APP_CLAW_LUA_MODULE_CAMERA)\n'
-            '    list(APPEND http_server_extra_requires lua_module_camera)\n'
-            'endif()\n'
-            'if(CONFIG_APP_CLAW_CAP_GEMINI_LIVE)\n'
-            '    list(APPEND http_server_extra_requires cap_gemini_live)\n'
-            'endif()\n',
-            1,
-        )
-    elif 'REQUIRES' in s:
-        s = s.replace(
-            '    esp_timer\n',
-            '    esp_timer\n'
-            '    \n'
-            '    if(CONFIG_APP_CLAW_CAP_GEMINI_LIVE)\n'
-            '        list(APPEND http_server_extra_requires cap_gemini_live)\n'
-            '    endif()\n',
-            1,
-        )
-if 'if(CONFIG_APP_CLAW_CAP_GEMINI_LIVE)' not in s:
-    raise SystemExit(f"could not locate GEMINI dependency insertion point in {cmake}")
+bad = (
+    '    \n'
+    '    if(CONFIG_APP_CLAW_CAP_GEMINI_LIVE)\n'
+    '        list(APPEND http_server_extra_requires cap_gemini_live)\n'
+    '    endif()\n'
+)
+s = s.replace(bad, '')
+if '        cap_gemini_live\n' not in s:
+    anchor = '        esp_timer\n'
+    if anchor not in s:
+        raise SystemExit(f"could not locate GEMINI dependency insertion point in {cmake}")
+    s = s.replace(anchor, anchor + '        cap_gemini_live\n', 1)
 cmake.write_text(s)
 print("patched", cmake)
 PY
@@ -1537,7 +1724,28 @@ apply_gemini_live_network_ready_patch() {
         return
     fi
     if grep -q "main_gemini_live_start" "$main_c" 2>/dev/null; then
-        log "Gemini Live network-ready patch already applied"
+        if grep -q "s_wifi_manager_ready" "$main_c" 2>/dev/null; then
+            log "repairing stale Gemini Live network-ready guard"
+            python3 - <<PY
+import pathlib
+p = pathlib.Path(r"$main_c")
+s = p.read_text()
+bad_guard = '''    if (!s_wifi_manager_ready) {
+        return false;
+    }
+
+'''
+if bad_guard not in s:
+    raise SystemExit("stale Gemini Live guard marker not found")
+s = s.replace(bad_guard, "", 1)
+if "s_wifi_manager_ready" in s:
+    raise SystemExit("stale Gemini Live guard still present after repair")
+p.write_text(s)
+print("patched", p)
+PY
+        else
+            log "Gemini Live network-ready patch already applied"
+        fi
         return
     fi
     log "applying Gemini Live network-ready guard"
@@ -1556,10 +1764,6 @@ static bool gemini_live_configured(void)
 new = '''#if CONFIG_APP_CLAW_CAP_GEMINI_LIVE
 static bool gemini_live_network_ready(void)
 {
-    if (!s_wifi_manager_ready) {
-        return false;
-    }
-
     wifi_manager_status_t status = {0};
     wifi_manager_get_status(&status);
     return status.sta_connected && status.sta_ip[0] != '\\0';
@@ -3468,6 +3672,57 @@ CONFIG_LWIP_TCP_WND_DEFAULT=16384
 EOF
 }
 
+apply_waveshare_boot_memory_sdkconfig_seed_patch() {
+    if [ "$BOARD_NAME" != "esp32s3_touch_amoled_1_75" ]; then
+        return
+    fi
+    local defaults="$ESP_CLAW_DIR/application/edge_agent/sdkconfig.defaults"
+    if [ ! -f "$defaults" ]; then
+        log "sdkconfig.defaults not found — skipping boot memory sdkconfig seed"
+        return
+    fi
+    python3 - "$defaults" <<'PY'
+from pathlib import Path
+import sys
+
+p = Path(sys.argv[1])
+marker = "# JarvisNano boot memory profile: assistant path only"
+enabled = (
+    "CONFIG_SPIRAM",
+    "CONFIG_SPIRAM_MODE_OCT",
+    "CONFIG_SPIRAM_SPEED_80M",
+    "CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP",
+    "CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY",
+    "CONFIG_SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY",
+    "CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM",
+    "CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC",
+    "CONFIG_APP_CLAW_ENABLE_EMOTE",
+)
+disabled = (
+    "CONFIG_APP_CLAW_CAP_SCHEDULER",
+    "CONFIG_APP_CLAW_CAP_IM_QQ",
+    "CONFIG_APP_CLAW_CAP_IM_FEISHU",
+    "CONFIG_APP_CLAW_CAP_IM_TG",
+    "CONFIG_APP_CLAW_CAP_IM_WECHAT",
+    "CONFIG_APP_CLAW_CAP_MCP_CLIENT",
+    "CONFIG_APP_CLAW_CAP_MCP_SERVER",
+)
+lines = []
+for line in p.read_text().splitlines():
+    stripped = line.strip()
+    if stripped == marker:
+        continue
+    if any(stripped == f"# {sym} is not set" or stripped.startswith(sym + "=") for sym in enabled + disabled):
+        continue
+    lines.append(line)
+lines += ["", marker]
+lines += [f"{sym}=y" for sym in enabled]
+lines += [f"# {sym} is not set" for sym in disabled]
+p.write_text("\n".join(lines).rstrip() + "\n")
+PY
+    log "boot memory sdkconfig seed enforced for Waveshare"
+}
+
 # Enable larger esp_painter bitmap fonts for the interactive UI. Stock only
 # enables font_24 (default y); on a 466x466 panel 24px reads small and blocky —
 # the "looks low quality" feedback. Enable a ladder up to 48 so ui_layer can use
@@ -3623,6 +3878,152 @@ if "display_hal_visible_ptr" not in hs:
     hs = hs.replace(decl_anchor, decl_anchor + "const uint16_t *display_hal_visible_ptr(int *out_w, int *out_h);\n", 1)
 h.write_text(hs)
 print("added display_hal visible_ptr + copy_visible")
+PY
+}
+
+# The stock IO-panel path allocates a full-screen swap buffer before it even
+# allocates the scene framebuffer. On 466x466 that is another 434 KB contiguous
+# PSRAM demand during boot. Chunk the byte-swapped panel submissions instead.
+apply_display_hal_chunked_swap_patch() {
+    local c="$ESP_CLAW_DIR/components/lua_modules/lua_module_display/src/display_hal.c"
+    if [ ! -f "$c" ]; then
+        log "display_hal.c not found — skipping chunked swap patch"
+        return
+    fi
+    if grep -q "DISPLAY_HAL_SWAP_CHUNK_ROWS" "$c" 2>/dev/null; then
+        log "display_hal chunked swap patch already applied"
+        return
+    fi
+    log "applying display_hal chunked swap patch"
+    python3 - "$c" <<'PY'
+from pathlib import Path
+import sys
+
+p = Path(sys.argv[1])
+s = p.read_text()
+
+s = s.replace(
+    "#define DISPLAY_HAL_JPEG_WORKBUF_SIZE     3100\n",
+    "#define DISPLAY_HAL_JPEG_WORKBUF_SIZE     3100\n"
+    "#define DISPLAY_HAL_SWAP_CHUNK_ROWS       24\n",
+    1,
+)
+
+old_create = (
+    "    if (display_hal_panel_requires_swap()) {\n"
+    "        s_state.submit_swap_buffer = heap_caps_aligned_alloc(16, (size_t)lcd_width * (size_t)lcd_height * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);\n"
+    "        ESP_GOTO_ON_FALSE(s_state.submit_swap_buffer != NULL, ESP_ERR_NO_MEM, fail, TAG, \"alloc submit swap buffer failed\");\n"
+    "        s_state.submit_swap_buffer_pixels = (size_t)lcd_width * (size_t)lcd_height;\n"
+    "    }\n"
+)
+new_create = (
+    "    if (display_hal_panel_requires_swap()) {\n"
+    "        size_t full_pixels = (size_t)lcd_width * (size_t)lcd_height;\n"
+    "        size_t chunk_pixels = (size_t)lcd_width * DISPLAY_HAL_SWAP_CHUNK_ROWS;\n"
+    "        if (chunk_pixels == 0 || chunk_pixels > full_pixels) {\n"
+    "            chunk_pixels = full_pixels;\n"
+    "        }\n"
+    "        s_state.submit_swap_buffer = heap_caps_aligned_alloc(16,\n"
+    "                                                              chunk_pixels * sizeof(uint16_t),\n"
+    "                                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);\n"
+    "        ESP_GOTO_ON_FALSE(s_state.submit_swap_buffer != NULL, ESP_ERR_NO_MEM, fail, TAG,\n"
+    "                          \"alloc chunked submit swap buffer failed (%u px)\",\n"
+    "                          (unsigned)chunk_pixels);\n"
+    "        s_state.submit_swap_buffer_pixels = chunk_pixels;\n"
+    "    }\n"
+)
+if old_create not in s:
+    raise SystemExit("display_hal swap allocation anchor missing")
+s = s.replace(old_create, new_create, 1)
+
+old_submit = (
+    "    if (display_hal_panel_requires_swap()) {\n"
+    "        pixel_count = (size_t)(x_end - x_start) * (size_t)(y_end - y_start);\n"
+    "        ESP_RETURN_ON_FALSE(s_state.submit_swap_buffer != NULL, ESP_ERR_INVALID_STATE, TAG,\n"
+    "                            \"submit swap buffer missing\");\n"
+    "        swap_buffer = s_state.submit_swap_buffer;\n"
+    "        display_hal_bswap16_into(swap_buffer, pixels, pixel_count);\n"
+    "        submit_pixels = swap_buffer;\n"
+    "    }\n"
+    "\n"
+    "    ret = esp_lcd_panel_draw_bitmap(s_state.panel, x_start, y_start, x_end, y_end, submit_pixels);\n"
+    "    if (ret != ESP_OK) {\n"
+    "        return ret;\n"
+    "    }\n"
+    "\n"
+    "    s_state.flush_in_flight = true;\n"
+    "    s_state.pending_framebuffer_index = (int8_t)pending_framebuffer_index;\n"
+    "\n"
+    "    if (wait_for_done) {\n"
+    "        ret = display_hal_wait_flush_done_locked(pdMS_TO_TICKS(DISPLAY_HAL_FLUSH_TIMEOUT_MS));\n"
+    "    }\n"
+    "    return ret;\n"
+)
+new_submit = (
+    "    if (display_hal_panel_requires_swap()) {\n"
+    "        int width = x_end - x_start;\n"
+    "        int height = y_end - y_start;\n"
+    "        int row = 0;\n"
+    "        ESP_RETURN_ON_FALSE(width > 0 && height > 0, ESP_ERR_INVALID_ARG, TAG,\n"
+    "                            \"invalid submit rect\");\n"
+    "        ESP_RETURN_ON_FALSE(s_state.submit_swap_buffer != NULL, ESP_ERR_INVALID_STATE, TAG,\n"
+    "                            \"submit swap buffer missing\");\n"
+    "        swap_buffer = s_state.submit_swap_buffer;\n"
+    "        size_t rows_per_chunk = s_state.submit_swap_buffer_pixels / (size_t)width;\n"
+    "        ESP_RETURN_ON_FALSE(rows_per_chunk > 0, ESP_ERR_NO_MEM, TAG,\n"
+    "                            \"submit swap buffer too small for row\");\n"
+    "        while (row < height) {\n"
+    "            int rows = height - row;\n"
+    "            bool last = false;\n"
+    "            if ((size_t)rows > rows_per_chunk) {\n"
+    "                rows = (int)rows_per_chunk;\n"
+    "            }\n"
+    "            last = (row + rows) >= height;\n"
+    "            pixel_count = (size_t)width * (size_t)rows;\n"
+    "            display_hal_bswap16_into(swap_buffer,\n"
+    "                                     pixels + (size_t)row * (size_t)width,\n"
+    "                                     pixel_count);\n"
+    "            ret = esp_lcd_panel_draw_bitmap(s_state.panel,\n"
+    "                                            x_start,\n"
+    "                                            y_start + row,\n"
+    "                                            x_end,\n"
+    "                                            y_start + row + rows,\n"
+    "                                            swap_buffer);\n"
+    "            if (ret != ESP_OK) {\n"
+    "                return ret;\n"
+    "            }\n"
+    "            s_state.flush_in_flight = true;\n"
+    "            s_state.pending_framebuffer_index = last ? (int8_t)pending_framebuffer_index : -1;\n"
+    "            if (!last || wait_for_done) {\n"
+    "                ret = display_hal_wait_flush_done_locked(pdMS_TO_TICKS(DISPLAY_HAL_FLUSH_TIMEOUT_MS));\n"
+    "                if (ret != ESP_OK) {\n"
+    "                    return ret;\n"
+    "                }\n"
+    "            }\n"
+    "            row += rows;\n"
+    "        }\n"
+    "        return ESP_OK;\n"
+    "    }\n"
+    "\n"
+    "    ret = esp_lcd_panel_draw_bitmap(s_state.panel, x_start, y_start, x_end, y_end, submit_pixels);\n"
+    "    if (ret != ESP_OK) {\n"
+    "        return ret;\n"
+    "    }\n"
+    "\n"
+    "    s_state.flush_in_flight = true;\n"
+    "    s_state.pending_framebuffer_index = (int8_t)pending_framebuffer_index;\n"
+    "\n"
+    "    if (wait_for_done) {\n"
+    "        ret = display_hal_wait_flush_done_locked(pdMS_TO_TICKS(DISPLAY_HAL_FLUSH_TIMEOUT_MS));\n"
+    "    }\n"
+    "    return ret;\n"
+)
+if old_submit not in s:
+    raise SystemExit("display_hal submit anchor missing")
+s = s.replace(old_submit, new_submit, 1)
+
+p.write_text(s)
+print("display_hal chunked swap applied")
 PY
 }
 
@@ -3804,8 +4205,16 @@ call_new = (
     '    boot_diag_log();\n'
 )
 if s.count(call_old) != 1:
-    raise SystemExit("boot_diag: storage-block call-site anchor not unique in main.c")
-s = s.replace(call_old, call_new, 1)
+    call_fallback = '    ESP_ERROR_CHECK(init_fatfs());\n'
+    if s.count(call_fallback) != 1:
+        raise SystemExit("boot_diag: storage-block call-site anchor not unique in main.c")
+    s = s.replace(call_fallback,
+                  call_fallback +
+                  '    /* boot_diag (P0.1): after initial storage mount. */\n'
+                  '    boot_diag_log();\n',
+                  1)
+else:
+    s = s.replace(call_old, call_new, 1)
 
 p.write_text(s)
 print("patched", p)
@@ -3934,6 +4343,8 @@ new = (
     "    if (sd_ok) {\n"
 )
 if s.count(old) != 1:
+    if "sdcard_probe" not in s:
+        raise SystemExit(0)
     raise SystemExit("sdcard_probe() call-site anchor not unique in main.c")
 p.write_text(s.replace(old, new, 1))
 print("patched SD mount-retry into main.c")
@@ -3973,6 +4384,113 @@ new = (
 )
 if s.count(old) != 1:
     raise SystemExit("ui_start soft-fail: ESP_ERROR_CHECK(app_claw_ui_start()) anchor not unique in main.c")
+p.write_text(s.replace(old, new, 1))
+print("patched", p)
+PY
+}
+
+# JarvisNano boot cockpit: after the display stack starts, render a short HUD
+# frame through ui_layer and then let ui_layer auto-release the panel back to the
+# emote face. This must explicitly call ui_layer_init() because app_claw's
+# best-effort registration path may not have run before this boot proof frame is
+# posted.
+apply_boot_cockpit_patch() {
+    local main_c="$ESP_CLAW_DIR/application/edge_agent/main/main.c"
+    if [ ! -f "$main_c" ]; then
+        log "main.c not found — skipping boot cockpit patch"
+        return
+    fi
+    log "applying/repairing boot cockpit patch"
+    python3 - "$main_c" <<'PY'
+import pathlib, sys
+
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+
+decl = "esp_err_t ui_layer_show_cockpit(void);\n"
+decl_new = "esp_err_t ui_layer_init(void);\nesp_err_t ui_layer_show_cockpit(void);\n"
+if "esp_err_t ui_layer_init(void);" not in s:
+    if decl in s:
+        s = s.replace(decl, decl_new, 1)
+    else:
+        anchor = "static const char *app_fatfs_base_path = \"/fatfs\";\n"
+        if anchor not in s:
+            raise SystemExit("boot cockpit: declaration anchor missing")
+        s = s.replace(anchor, anchor + "\n" + decl_new, 1)
+
+old_plain = (
+    "    /* JarvisNano boot cockpit: prove the display is alive before touch/Gemini readiness. */\n"
+    "    if (ui_start_err == ESP_OK) {\n"
+    "        esp_err_t cockpit_err = ui_layer_show_cockpit();\n"
+    "        if (cockpit_err != ESP_OK) {\n"
+    "            ESP_LOGW(TAG, \"boot cockpit unavailable: %s\", esp_err_to_name(cockpit_err));\n"
+    "        }\n"
+    "    }\n"
+)
+new = (
+    "    /* JarvisNano boot cockpit: prove the display is alive before touch/Gemini readiness. */\n"
+    "    if (ui_start_err == ESP_OK) {\n"
+    "        esp_err_t ui_layer_err = ui_layer_init();\n"
+    "        if (ui_layer_err != ESP_OK) {\n"
+    "            ESP_LOGW(TAG, \"boot cockpit ui init unavailable: %s\", esp_err_to_name(ui_layer_err));\n"
+    "        } else {\n"
+    "            esp_err_t cockpit_err = ui_layer_show_cockpit();\n"
+    "            if (cockpit_err != ESP_OK) {\n"
+    "                ESP_LOGW(TAG, \"boot cockpit unavailable: %s\", esp_err_to_name(cockpit_err));\n"
+    "            }\n"
+    "        }\n"
+    "    }\n"
+)
+if old_plain in s:
+    s = s.replace(old_plain, new, 1)
+elif "boot cockpit ui init unavailable" in s:
+    pass
+else:
+    anchor = (
+        "    if (ui_start_err != ESP_OK) {\n"
+        "        ESP_LOGE(TAG, \"app_claw_ui_start failed: %s -- continuing without display (voice-only mode)\",\n"
+        "                 esp_err_to_name(ui_start_err));\n"
+        "    }\n"
+    )
+    if anchor not in s:
+        raise SystemExit("boot cockpit: ui_start soft-fail anchor missing")
+    s = s.replace(anchor, anchor + new, 1)
+
+p.write_text(s)
+print("patched", p)
+PY
+}
+
+apply_touch_demo_soft_fail_patch() {
+    # touch_demo is diagnostic glue, not a boot-critical subsystem. On the
+    # Waveshare direct-display build it can legitimately return
+    # ESP_ERR_NOT_SUPPORTED when the Gemini/touch toggle mode is unavailable.
+    # Do not reboot a working display stack over that.
+    local main_c="$ESP_CLAW_DIR/application/edge_agent/main/main.c"
+    if [ ! -f "$main_c" ]; then
+        log "main.c not found — skipping touch demo soft-fail patch"
+        return
+    fi
+    if grep -q "touch demo disabled:" "$main_c" 2>/dev/null; then
+        log "touch demo soft-fail patch already applied"
+        return
+    fi
+    log "applying touch demo soft-fail patch"
+    python3 - "$main_c" <<'PY'
+from pathlib import Path
+import sys
+
+p = Path(sys.argv[1])
+s = p.read_text()
+old = "    ESP_ERROR_CHECK(touch_demo_start(gemini_live_configured));\n"
+new = (
+    "    esp_err_t touch_demo_err = touch_demo_start(gemini_live_configured);\n"
+    "    if (touch_demo_err != ESP_OK) {\n"
+    '        ESP_LOGW(TAG, "touch demo disabled: %s", esp_err_to_name(touch_demo_err));\n'
+    "    }\n"
+)
+if old not in s:
+    raise SystemExit("touch_demo_start fatal anchor missing")
 p.write_text(s.replace(old, new, 1))
 print("patched", p)
 PY
@@ -4062,8 +4580,34 @@ retry_new = (
     "    }\n"
 )
 if s.count(retry_old) != 1:
-    raise SystemExit("boot_touch_breadcrumb: board_manager boot-stage anchor not unique in main.c")
-s = s.replace(retry_old, retry_new, 1)
+    retry_fallback = "    ESP_ERROR_CHECK(esp_board_manager_init());\n"
+    retry_new_fallback = (
+        "    ESP_ERROR_CHECK(esp_board_manager_init());\n"
+        "    /* boot_touch_breadcrumb (ROADMAP #5a): esp_board_manager_init() returns\n"
+        "     * ESP_OK even when the CST9217 probe failed (esp_board_device_init_all\n"
+        "     * unconditionally returns ESP_OK). Give a flaky I2C probe a couple of clean\n"
+        "     * retries here, before the UI/touch task starts. */\n"
+        "    {\n"
+        "        void *touch_h = NULL;\n"
+        "        for (int i = 0; i < 3; i++) {\n"
+        "            if (esp_board_manager_get_device_handle(ESP_BOARD_DEVICE_NAME_LCD_TOUCH,\n"
+        "                                                    &touch_h) == ESP_OK && touch_h) {\n"
+        "                break;\n"
+        "            }\n"
+        "            esp_err_t tret = esp_board_manager_init_device_by_name(ESP_BOARD_DEVICE_NAME_LCD_TOUCH);\n"
+        "            ESP_LOGW(TAG, \"boot touch retry %d/3: %s\", i + 1, esp_err_to_name(tret));\n"
+        "            vTaskDelay(pdMS_TO_TICKS(100));\n"
+        "        }\n"
+        "        touch_h = NULL;\n"
+        "        s_boot_touch_ok = (esp_board_manager_get_device_handle(ESP_BOARD_DEVICE_NAME_LCD_TOUCH,\n"
+        "                                                               &touch_h) == ESP_OK && touch_h);\n"
+        "    }\n"
+    )
+    if s.count(retry_fallback) != 1:
+        raise SystemExit("boot_touch_breadcrumb: board_manager boot-stage anchor not unique in main.c")
+    s = s.replace(retry_fallback, retry_new_fallback, 1)
+else:
+    s = s.replace(retry_old, retry_new, 1)
 
 # (c) erase the coredump image after reporting it, so coredump=PRESENT next boot
 # only reflects a fresh crash. Inserted inside the same CONFIG_ESP_COREDUMP guard
@@ -4112,7 +4656,10 @@ main() {
     copy_jarvis_brain
     copy_jarvis_pmic
     copy_jarvis_imu
+    copy_jarvis_board
+    apply_lua_storage_listdir_truncation_patch
     apply_patch
+    apply_app_claw_direct_display_kconfig_patch
     apply_codec_i2s_idempotent_toggle_patch
     apply_wifi_ps_patch
     apply_jpeg_soi_patch
@@ -4146,8 +4693,10 @@ main() {
     apply_ui_layer_register_patch
     apply_ui_layer_manifest_dep_patch
     apply_ui_sdkconfig_seed_patch
+    apply_waveshare_boot_memory_sdkconfig_seed_patch
     apply_ui_fonts_seed_patch
     apply_ui_layer_lua_dep_patch
+    apply_display_hal_chunked_swap_patch
     apply_display_hal_capture_patch
     apply_display_hal_text_transparency_patch
     apply_ble_disable_patch
@@ -4156,6 +4705,8 @@ main() {
     apply_bt_remove_gatt_src_patch
     apply_sdcard_mount_retry_patch
     apply_ui_start_soft_fail_patch
+    apply_boot_cockpit_patch
+    apply_touch_demo_soft_fail_patch
     apply_boot_touch_breadcrumb_patch
 
     if [ "${1:-}" = "build" ]; then
@@ -4201,6 +4752,8 @@ new = (
     '    ESP_LOGI(TAG, "BLE GATT service disabled (voice path is Wi-Fi only; avoids coex audio stalls)");\n'
 )
 if old not in s:
+    if "ble_gatt_init" not in s:
+        raise SystemExit(0)
     raise SystemExit("could not locate ble_gatt_init block in main.c — upstream may have changed")
 p.write_text(s.replace(old, new, 1))
 print("patched", p)

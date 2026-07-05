@@ -20,10 +20,9 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
-#include "esp_board_manager_includes.h"
-
 #include "display_arbiter.h"
 #include "display_hal.h"
+#include "jarvis_board.h"
 
 static const char *TAG = "ui_layer";
 
@@ -87,6 +86,7 @@ static const char *TAG = "ui_layer";
  * ---------------------------------------------------------------------- */
 typedef enum {
     UI_CMD_SHOW_CHOICE = 0,
+    UI_CMD_SHOW_COCKPIT,
     UI_CMD_SHOW_DATA,
     UI_CMD_SHOW_IMAGE,
     UI_CMD_SHOW_MENU,
@@ -182,53 +182,20 @@ static void ui_safe_strcpy(char *dst, const char *src, size_t cap)
     strlcpy(dst, src, cap);
 }
 
-/* -------------------------------------------------------------------------
- * Board handle grab — mirrors firmware/emote/emote.c:391-410. Also derives the
- * panel interface from the board sub_type so display_hal_create gets it right.
- * ---------------------------------------------------------------------- */
-static display_hal_panel_if_t ui_panel_if_from_subtype(const char *sub_type)
-{
-#if CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUB_DSI_SUPPORT
-    if (sub_type && (strcmp(sub_type, "dsi") == 0 || strcmp(sub_type, "mipi_dsi") == 0)) {
-        return DISPLAY_HAL_PANEL_IF_MIPI_DSI;
-    }
-#endif
-    if (sub_type && (strcmp(sub_type, "rgb") == 0 || strcmp(sub_type, "rgb_3wire_spi") == 0)) {
-        return DISPLAY_HAL_PANEL_IF_RGB;
-    }
-    /* spi / qspi / parlio all flush via esp_lcd_panel_io */
-    return DISPLAY_HAL_PANEL_IF_IO;
-}
-
 static esp_err_t ui_grab_board_display(void)
 {
-#if !CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT
-    return ESP_ERR_NOT_SUPPORTED;
-#else
-    void *lcd_handle = NULL;
-    void *lcd_config = NULL;
-    esp_err_t err = esp_board_manager_get_device_handle(ESP_BOARD_DEVICE_NAME_DISPLAY_LCD, &lcd_handle);
-    if (err != ESP_OK) {
-        return err;
-    }
-    err = esp_board_manager_get_device_config(ESP_BOARD_DEVICE_NAME_DISPLAY_LCD, &lcd_config);
-    if (err != ESP_OK) {
-        return err;
-    }
+    jarvis_board_display_t display = {0};
+    ESP_RETURN_ON_ERROR(jarvis_board_display_get(&display), TAG,
+                        "jarvis board display init failed");
+    ESP_RETURN_ON_FALSE(display.panel && display.io, ESP_ERR_INVALID_STATE, TAG,
+                        "jarvis board display handles are NULL");
 
-    dev_display_lcd_handles_t *handles = (dev_display_lcd_handles_t *)lcd_handle;
-    dev_display_lcd_config_t  *cfg     = (dev_display_lcd_config_t *)lcd_config;
-
-    ESP_RETURN_ON_FALSE(handles && cfg && handles->panel_handle, ESP_ERR_INVALID_STATE, TAG,
-                        "display_lcd handle/config is NULL");
-
-    s_panel_handle = handles->panel_handle;
-    s_io_handle    = handles->io_handle;
-    s_lcd_width    = cfg->lcd_width  ? cfg->lcd_width  : UI_W;
-    s_lcd_height   = cfg->lcd_height ? cfg->lcd_height : UI_H;
-    s_panel_if     = ui_panel_if_from_subtype(cfg->sub_type);
+    s_panel_handle = display.panel;
+    s_io_handle    = display.io;
+    s_lcd_width    = display.width  ? display.width  : UI_W;
+    s_lcd_height   = display.height ? display.height : UI_H;
+    s_panel_if     = DISPLAY_HAL_PANEL_IF_IO;
     return ESP_OK;
-#endif
 }
 
 /* -------------------------------------------------------------------------
@@ -385,6 +352,46 @@ static void ui_render_choice(const ui_cmd_t *c, int highlight)
         s_scene = UI_SCENE_CHOICE_ARCS;
         xSemaphoreGive(s_result_mx);
     }
+}
+
+static void ui_render_cockpit(void)
+{
+    display_hal_begin_frame(true, UI_COL_BG);
+    ui_clip_round();
+
+    /* First-frame cockpit: a compact HUD that proves panel init, byte order,
+     * arcs, text, and full-frame present without depending on LVGL. */
+    display_hal_draw_circle(UI_CX, UI_CY, 208, UI_COL_CARD_EDG);
+    display_hal_draw_circle(UI_CX, UI_CY, 209, UI_COL_CARD_EDG);
+    display_hal_draw_circle(UI_CX, UI_CY, 155, UI_COL_TRACK);
+    display_hal_fill_arc(UI_CX, UI_CY, 176, 184, -42.0f, 38.0f, UI_COL_EDGE);
+    display_hal_fill_arc(UI_CX, UI_CY, 176, 184, 120.0f, 196.0f, UI_COL_ACCENT);
+    display_hal_fill_arc(UI_CX, UI_CY, 176, 184, 244.0f, 324.0f, UI_COL_WEDGE);
+
+    display_hal_fill_circle(UI_CX, UI_CY, 54, C565(0x05, 0x09, 0x0E));
+    display_hal_draw_circle(UI_CX, UI_CY, 56, UI_COL_EDGE);
+    display_hal_draw_circle(UI_CX, UI_CY, 62, UI_COL_CARD_EDG);
+    display_hal_fill_circle(UI_CX, UI_CY, 18, UI_COL_EDGE);
+    display_hal_fill_circle(UI_CX, UI_CY, 9, UI_COL_WHITE);
+
+    display_hal_draw_text_aligned(0, 94, s_lcd_width, 44, "JARVIS", UI_FONT_TITLE,
+                                  UI_COL_WHITE, false, 0,
+                                  DISPLAY_HAL_TEXT_ALIGN_CENTER,
+                                  DISPLAY_HAL_TEXT_VALIGN_MIDDLE);
+    display_hal_draw_text_aligned(0, UI_CY + 82, s_lcd_width, 32, "DISPLAY ONLINE",
+                                  UI_FONT_SMALL, UI_COL_DIM, false, 0,
+                                  DISPLAY_HAL_TEXT_ALIGN_CENTER,
+                                  DISPLAY_HAL_TEXT_VALIGN_MIDDLE);
+
+    display_hal_clear_clip_rect();
+    display_hal_present();
+
+    if (s_result_mx && xSemaphoreTake(s_result_mx, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_opt_count = 0;
+        s_scene = UI_SCENE_COCKPIT;
+        xSemaphoreGive(s_result_mx);
+    }
+    ESP_LOGI(TAG, "cockpit frame presented");
 }
 
 static void ui_render_data(const ui_cmd_t *c)
@@ -611,6 +618,21 @@ static void ui_task(void *arg)
                 ui_render_choice(&cmd, -1);
             }
             break;
+        case UI_CMD_SHOW_COCKPIT:
+            if (ui_hal_up() == ESP_OK) {
+                memset(&s_last_cmd, 0, sizeof(s_last_cmd));
+                ui_render_cockpit();
+                vTaskDelay(pdMS_TO_TICKS(1600));
+                if (s_result_mx && xSemaphoreTake(s_result_mx, pdMS_TO_TICKS(50)) == pdTRUE) {
+                    if (s_scene == UI_SCENE_COCKPIT) {
+                        s_scene = UI_SCENE_NONE;
+                        s_opt_count = 0;
+                    }
+                    xSemaphoreGive(s_result_mx);
+                }
+                ui_hal_down();
+            }
+            break;
         case UI_CMD_SHOW_DATA:
             if (ui_hal_up() == ESP_OK) {
                 s_last_cmd = cmd;
@@ -722,6 +744,15 @@ esp_err_t ui_layer_show_choice(const char *question, const char *const *opts, in
     for (int i = 0; i < n; ++i) {
         ui_safe_strcpy(cmd.opts[i], opts[i], sizeof(cmd.opts[i]));
     }
+    return ui_post(&cmd);
+}
+
+esp_err_t ui_layer_show_cockpit(void)
+{
+    ui_result_reset();
+
+    ui_cmd_t cmd = {0};
+    cmd.kind = UI_CMD_SHOW_COCKPIT;
     return ui_post(&cmd);
 }
 

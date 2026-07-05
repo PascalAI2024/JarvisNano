@@ -42,6 +42,7 @@ extern "C" {
 
 typedef enum {
     UI_SCENE_NONE = 0,    /* no UI scene; emote face owns the panel */
+    UI_SCENE_COCKPIT,     /* short boot/status frame; auto-dismisses */
     UI_SCENE_CHOICE_ARCS, /* tappable annular choice wedges */
     UI_SCENE_DATA_PANEL,  /* title + label/value rows */
     UI_SCENE_RADIAL_MENU, /* radial dial of selectable items */
@@ -62,6 +63,11 @@ esp_err_t ui_layer_init(void);
  * (2..UI_LAYER_MAX_OPTIONS). Strings are copied internally. Clears any pending
  * result so a fresh tap can resolve it. */
 esp_err_t ui_layer_show_choice(const char *question, const char *const *opts, int n);
+
+/* Show a short boot cockpit/status frame, then automatically release the panel
+ * back to the animated face. Used at boot to prove the display path is alive
+ * without leaving a static UI scene that captures taps forever. */
+esp_err_t ui_layer_show_cockpit(void);
 
 /* Show a data panel: a title plus up to UI_LAYER_MAX_ROWS label/value rows.
  * `labels` and `values` are parallel arrays of length `n`. Either array entry
