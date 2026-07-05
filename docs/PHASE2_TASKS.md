@@ -7,7 +7,7 @@ test gap, or follow-up appears.
 
 ## Current Hardware Baseline
 
-- Board: Seeed XIAO ESP32-S3 Sense on USB as `/dev/cu.usbmodem1101`.
+- Board: Seeed XIAO ESP32-S3 Sense on USB as the detected `/dev/cu.usbmodem*` port.
 - Latest flashed build: boots Wi-Fi, FATFS, router rules, scheduler, Lua, MCP,
   Web IM, publishes `startup/boot_completed`, returns from `app_main()`, and
   starts the native GPIO21 heartbeat.
@@ -75,12 +75,12 @@ test gap, or follow-up appears.
 ## Wave 2: Hardware Acceptance And LAN API Reliability
 
 - `[x]` Build: `./scripts/bootstrap.sh build` completes in Docker for the 8 MB XIAO profile.
-- `[x]` Flash: USB device enumerates as `/dev/cu.usbmodem1101`; `esptool write_flash` completes and hard-resets the board.
+- `[x]` Flash: USB device enumerates as `/dev/cu.usbmodem*`; `esptool write_flash` completes and hard-resets the board.
 - `[x]` Boot: services reach Wi-Fi/FATFS/router/scheduler/Lua/MCP/Web IM, publish startup, and return from `app_main()`.
 - `[x]` Physical LED: native GPIO21 task starts after `app_claw_start()` and logs `Native status LED on gpio 21 active_low=1`; heartbeat is non-fatal if allocation fails.
 - `[x]` Dashboard: `http://127.0.0.1:8000/index.html` opens in the Codex in-app browser.
 - `[~]` HTTP reachability: isolate why Mac curls to the board STA IP time out despite ARP resolution; after the 2026-05-03 health-route flash, `/api/health`, `/api/status`, `/api/battery`, `/api/audio/level`, and `/api/wifi/scan` still timed out from macOS, while `esp-claw.local` resolution also timed out.
-- `[ ]` Test HTTP from the device AP path at `192.168.4.1` to separate STA LAN issues from server issues.
+- `[ ]` Test HTTP from the device AP path to separate STA LAN issues from server issues.
 - `[ ]` Test HTTP from another client on the same Wi-Fi network to rule out macOS routing/firewall behavior.
 - `[~]` Capture serial logs during each failed curl and add the observed HTTPD/socket errors to this file; the post-flash boot log proves HTTPD starts, but macOS curl still timed out before a useful request log appeared.
 - `[x]` Add a repeatable `scripts/http-matrix.sh` probe for AP, STA IP, and `esp-claw.local` covering `/api/health`, `/api/status`, battery, audio level, and Wi-Fi scan.

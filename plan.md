@@ -48,7 +48,7 @@ tackle them.
 
 ### LAN HTTP reachability matrix (PHASE2_TASKS.md Wave 2)
 
-- Run `scripts/http-matrix.sh` for AP path (`192.168.4.1`), STA IP, and
+- Run `scripts/http-matrix.sh` for AP path, STA host, and
   `esp-claw.local` against `/api/health`, `/api/status`, `/api/config`,
   `/api/battery`, `/api/audio/level`, `/api/wifi/scan`.
 - Confirm normal API responses (not just `OPTIONS /api/*`) include
@@ -243,7 +243,7 @@ the maintainer can review what was kept vs flagged.
   intentional QA helpers from the rebrand commit. Leaving in place; if
   they are pure scratch and should not ship in the public repo, delete
   them in a follow-up. They contain no secrets — only the documented
-  AP IP `192.168.4.1`.
+  softAP host shown on serial.
 - The ESP-Claw firmware embeds default API endpoints for several Chinese
   LLM/IM providers (Tavily, DashScope, Feishu, QQ Bot Gateway). These
   are upstream defaults, not project-specific config, so they should

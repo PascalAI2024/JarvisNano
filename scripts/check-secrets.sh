@@ -23,11 +23,12 @@ patterns=(
 )
 
 identifier_patterns=(
-  # Private LAN/device identifiers. The ESP softAP default 192.168.4.1 is
-  # allowed because it is product behavior, not a unique deployment value.
-  '\b(10(\.[0-9]{1,3}){3}|172\.(1[6-9]|2[0-9]|3[0-1])(\.[0-9]{1,3}){2}|192\.168\.(?!4\.1\b)([0-9]{1,3}\.)[0-9]{1,3})\b'
+  # Private LAN/device identifiers.
+  '\b(10(\.[0-9]{1,3}){3}|172\.(1[6-9]|2[0-9]|3[0-1])(\.[0-9]{1,3}){2}|192\.168\.([0-9]{1,3}\.)[0-9]{1,3})\b'
   '\b([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}\b'
   'esp-claw-[0-9A-Fa-f]{6}'
+  '/Users/[^[:space:]`"'\''<>]+'
+  '/var/folders/[^[:space:]`"'\''<>]+'
 )
 
 status=0
@@ -51,6 +52,7 @@ done
 # concrete board IP, MAC, or AP suffix makes field logs and support docs messy.
 for pattern in "${identifier_patterns[@]}"; do
   if git grep -nI -P -e "$pattern" -- \
+      ':!scripts/check-secrets.sh' \
       ':!dashboard/firmware/*.bin' \
       ':!images/**' \
       ':!**/*.png' \

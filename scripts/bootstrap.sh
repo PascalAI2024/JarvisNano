@@ -199,6 +199,38 @@ p.write_text(s.replace(old, new, 1))
 PY
     fi
 
+    python3 - "$kconfig" <<'PY'
+from pathlib import Path
+import sys
+
+p = Path(sys.argv[1])
+s = p.read_text()
+if "config APP_CLAW_CAP_GEMINI_LIVE" in s:
+    print("app_claw Kconfig already has Gemini Live capability")
+else:
+    anchor = (
+        '        config APP_CLAW_CAP_LUA\n'
+        '            bool "Enable Lua capability"\n'
+        '            default y\n'
+        '            help\n'
+        "                Enable the Lua capability and keep app_claw's direct dependency\n"
+        '                on cap_lua.\n'
+    )
+    insert = anchor + (
+        '\n'
+        '        config APP_CLAW_CAP_GEMINI_LIVE\n'
+        '            bool "Enable Gemini Live capability"\n'
+        '            default n\n'
+        '            help\n'
+        '                Enable the JarvisNano Gemini Live voice capability and\n'
+        "                keep app_claw's direct dependency on cap_gemini_live.\n"
+    )
+    if anchor not in s:
+        raise SystemExit("APP_CLAW_CAP_LUA Kconfig anchor missing")
+    p.write_text(s.replace(anchor, insert, 1))
+    print("app_claw Kconfig += Gemini Live capability")
+PY
+
     python3 - "$cmake" <<'PY'
 from pathlib import Path
 import sys
@@ -224,14 +256,42 @@ new = (
     '    freertos\n'
     '    emote\n'
     '    ui_layer\n'
+    '    cap_gemini_live\n'
 )
-if "    emote\n" in s and "    ui_layer\n" in s:
+if "    emote\n" in s and "    ui_layer\n" in s and "    cap_gemini_live\n" in s:
     print("app_claw base display dependencies already present")
+elif "    emote\n" in s and "    ui_layer\n" in s:
+    s = s.replace("    ui_layer\n", "    ui_layer\n    cap_gemini_live\n", 1)
+    p.write_text(s)
+    print("app_claw base dependencies += cap_gemini_live")
 elif old in s:
     p.write_text(s.replace(old, new, 1))
-    print("app_claw base dependencies += emote, ui_layer")
+    print("app_claw base dependencies += emote, ui_layer, cap_gemini_live")
 else:
     raise SystemExit("app_claw_requires base anchor missing")
+PY
+
+    python3 - "$ESP_CLAW_DIR/components/common/app_claw/idf_component.yml" <<'PY'
+from pathlib import Path
+import sys
+
+p = Path(sys.argv[1])
+if not p.exists():
+    raise SystemExit(0)
+s = p.read_text()
+if "  cap_gemini_live:\n" not in s:
+    anchor = "dependencies:\n"
+    dep = (
+        "  cap_gemini_live:\n"
+        "    path: ../../claw_capabilities/cap_gemini_live\n\n"
+    )
+    if anchor not in s:
+        raise SystemExit("app_claw idf_component.yml dependencies anchor missing")
+    s = s.replace(anchor, anchor + dep, 1)
+    p.write_text(s)
+    print("app_claw manifest dependency += cap_gemini_live")
+else:
+    print("app_claw manifest dependency already has cap_gemini_live")
 PY
 }
 
@@ -394,7 +454,7 @@ public_h = pathlib.Path(sys.argv[4])
 
 s = cmake.read_text()
 if '"http_server_display_api.c"' not in s:
-    anchor = '        "http_server_camera_api.c"\n'
+    anchor = '        "http_server_utils.c"\n'
     if anchor not in s:
         raise SystemExit("http_server CMake source anchor missing")
     s = s.replace(anchor, anchor + '        "http_server_display_api.c"\n', 1)
@@ -430,16 +490,16 @@ if '"http_server_gemini_api.c"' not in s:
     s = s.replace(anchor, anchor + '        "http_server_gemini_api.c"\n', 1)
 for dep in ("heap", "emote", "ui_layer"):
     if f"        {dep}\n" not in s:
-        anchor = "        esp_timer\n"
+        anchor = "        json\n"
         if anchor not in s:
             raise SystemExit("http_server CMake REQUIRES anchor missing")
-        s = s.replace(anchor, anchor + f"        {dep}\n", 1)
+        s = s.replace(anchor, f"        {dep}\n" + anchor, 1)
 cmake.write_text(s)
 
 h = priv.read_text()
 decl = "esp_err_t http_server_register_display_routes(httpd_handle_t server);\n"
 if decl not in h:
-    anchor = "esp_err_t http_server_register_camera_routes(httpd_handle_t server);\n"
+    anchor = "esp_err_t http_server_register_webim_routes(httpd_handle_t server);\n"
     if anchor not in h:
         raise SystemExit("http_server_priv display decl anchor missing")
     h = h.replace(anchor, anchor + decl, 1)
@@ -487,7 +547,7 @@ c = c.replace("    config.max_uri_handlers = 40;\n", "    config.max_uri_handler
 c = c.replace("    config.max_uri_handlers = 44;\n", "    config.max_uri_handlers = 64;\n")
 c = c.replace("    config.max_uri_handlers = 56;\n", "    config.max_uri_handlers = 64;\n")
 if "http_server_register_display_routes" not in c:
-    anchor = '    ESP_RETURN_ON_ERROR(http_server_register_camera_routes(s_ctx.server), TAG, "Failed to register camera routes");\n'
+    anchor = '    ESP_RETURN_ON_ERROR(http_server_register_webim_routes(s_ctx.server), TAG, "Failed to register Web IM routes");\n'
     if anchor not in c:
         raise SystemExit("http_server_core display route anchor missing")
     c = c.replace(anchor, anchor + '    ESP_RETURN_ON_ERROR(http_server_register_display_routes(s_ctx.server), TAG, "Failed to register display routes");\n', 1)
@@ -525,14 +585,18 @@ core.write_text(c)
 
 hp = public_h.read_text()
 svc_fields = (
+    "    bool (*gemini_live_is_active)(void);\n"
     "    esp_err_t (*touch_get_diagnostics)(char *out, size_t out_size);\n"
     "    esp_err_t (*touch_run_scene)(const char *scene_name);\n"
 )
-if "touch_get_diagnostics" not in hp:
-    anchor = "    bool (*gemini_live_is_active)(void);\n"
+if "gemini_live_is_active" not in hp:
+    anchor = "    esp_err_t (*restart_device)(void);\n"
     if anchor not in hp:
         raise SystemExit("http_server services touch anchor missing")
     hp = hp.replace(anchor, anchor + svc_fields, 1)
+elif "touch_get_diagnostics" not in hp:
+    anchor = "    bool (*gemini_live_is_active)(void);\n"
+    hp = hp.replace(anchor, anchor + "    esp_err_t (*touch_get_diagnostics)(char *out, size_t out_size);\n    esp_err_t (*touch_run_scene)(const char *scene_name);\n", 1)
 public_h.write_text(hp)
 
 print("display/touch/tools diagnostics HTTP API wired")
@@ -596,8 +660,13 @@ PY
 apply_codec_i2s_idempotent_toggle_patch() {
     local target="$ESP_CLAW_DIR/application/edge_agent/managed_components/espressif__esp_codec_dev/platform/audio_codec_data_i2s.c"
     if [ ! -f "$target" ]; then
-        # apply_patch (which runs first) reconfigures to populate managed_components.
-        die "esp_codec_dev managed component missing: $target"
+        # On a clean checkout the first dependency-resolution pass can run
+        # before board-manager has generated the audio_codec defaults, so this
+        # conditional component is not materialized yet. The patch is a runtime
+        # log-noise cleanup, not a compile prerequisite; skip it until a later
+        # bootstrap pass sees the component.
+        log "esp_codec_dev managed component missing — skipping idempotent-toggle patch for this pass"
+        return
     fi
     if grep -q "jn_i2s_en_slot" "$target" 2>/dev/null; then
         log "codec i2s idempotent-toggle patch already applied"
@@ -606,6 +675,7 @@ apply_codec_i2s_idempotent_toggle_patch() {
     log "applying codec i2s idempotent-toggle patch (silence redundant i2s_channel_disable at session start)"
     python3 - "$target" <<'PY'
 import pathlib, sys
+import re
 p = pathlib.Path(sys.argv[1])
 s = p.read_text()
 old = (
@@ -709,6 +779,27 @@ build() {
         -w /project/application/edge_agent \
         "$IDF_IMAGE" \
         bash -lc 'set -e; pip install --quiet "idf-component-manager==2.4.10" "esp-bmgr-assist==0.5.0";
+                  python3 - <<'"'"'PY'"'"'
+import pathlib
+import re
+
+p = pathlib.Path("main/idf_component.yml")
+s = p.read_text()
+anchor = "  ui_layer:\n    path: ../../../components/common/ui_layer\n"
+if anchor not in s:
+    raise SystemExit("ui_layer path-dep anchor not found in main/idf_component.yml")
+
+def force_path_dep(text: str, name: str, path: str) -> str:
+    block = f"  {name}:\n    path: {path}\n"
+    pattern = rf"  {re.escape(name)}:\n(?:(?:    .*)?\n)*?(?=\n  [A-Za-z0-9_/-]+:|\Z)"
+    if re.search(pattern, text):
+        return re.sub(pattern, block, text, count=1)
+    return text.replace(anchor, anchor + "\n" + block, 1)
+
+s = force_path_dep(s, "cap_lua", "../../../components/claw_capabilities/cap_lua")
+s = force_path_dep(s, "lua_module_display", "../../../components/lua_modules/lua_module_display")
+p.write_text(s)
+PY
                   rm -rf build;
                   idf.py set-target esp32s3;
                   idf.py gen-bmgr-config -c ./boards -b "$BOARD_NAME";
@@ -827,6 +918,29 @@ elif board == "esp32s3_touch_amoled_1_75":
     s = s.replace("CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y", "# CONFIG_ESPTOOLPY_FLASHSIZE_2MB is not set")
     s = s.replace("# CONFIG_ESPTOOLPY_FLASHSIZE_16MB is not set", "CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y")
     s = s.replace("CONFIG_ESPTOOLPY_FLASHSIZE=\"2MB\"", "CONFIG_ESPTOOLPY_FLASHSIZE=\"16MB\"")
+    # The board manager defaults still select the upstream 8 MB partition table.
+    # JarvisNano Waveshare target is 16 MB and needs the resized emote/storage
+    # layout plus a coredump partition; force the active table here so a clean
+    # bootstrap does not quietly build against partitions_8MB.csv.
+    partition_symbols = (
+        "CONFIG_PARTITION_TABLE_SINGLE_APP",
+        "CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE",
+        "CONFIG_PARTITION_TABLE_TWO_OTA",
+        "CONFIG_PARTITION_TABLE_TWO_OTA_LARGE",
+        "CONFIG_PARTITION_TABLE_CUSTOM",
+        "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME",
+        "CONFIG_PARTITION_TABLE_FILENAME",
+    )
+    for sym in partition_symbols:
+        s = re.sub(rf"(?m)^({re.escape(sym)}=.*|# {re.escape(sym)} is not set)\n?", "", s)
+    s = s.rstrip() + "\n# JarvisNano Waveshare 16 MB partition table\n"
+    s += "# CONFIG_PARTITION_TABLE_SINGLE_APP is not set\n"
+    s += "# CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE is not set\n"
+    s += "# CONFIG_PARTITION_TABLE_TWO_OTA is not set\n"
+    s += "# CONFIG_PARTITION_TABLE_TWO_OTA_LARGE is not set\n"
+    s += "CONFIG_PARTITION_TABLE_CUSTOM=y\n"
+    s += "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions_16MB.csv\"\n"
+    s += "CONFIG_PARTITION_TABLE_FILENAME=\"partitions_16MB.csv\"\n"
     # JarvisNano: fully disable Bluetooth ("remove ble for now" — 2026-06-13).
     # The device is Wi-Fi-only; BLE GATT was already dormant (init skipped). Fully
     # turning the controller off frees internal SRAM and removes any Wi-Fi/BT
@@ -850,6 +964,7 @@ elif board == "esp32s3_touch_amoled_1_75":
         "CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM",
         "CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC",
         "CONFIG_APP_CLAW_ENABLE_EMOTE",
+        "CONFIG_APP_CLAW_CAP_GEMINI_LIVE",
     )
     disabled_boot_symbols = (
         "CONFIG_APP_CLAW_CAP_SCHEDULER",
@@ -1053,12 +1168,11 @@ new = (
 if old in s:
     s = s.replace(old, new, 1)
     anchor = (
-        "    ESP_RETURN_ON_ERROR(http_server_register_camera_routes(s_ctx.server), TAG, \"Failed to register camera routes\");\\n"
         "    ESP_RETURN_ON_ERROR(httpd_register_err_handler(s_ctx.server, HTTPD_404_NOT_FOUND, http_server_captive_404_handler),\\n"
     )
     if anchor not in s:
         raise SystemExit(f"could not locate API OPTIONS route reorder point in {core}")
-    s = s.replace(anchor, "    ESP_RETURN_ON_ERROR(http_server_register_camera_routes(s_ctx.server), TAG, \"Failed to register camera routes\");\\n" + block + "    ESP_RETURN_ON_ERROR(httpd_register_err_handler(s_ctx.server, HTTPD_404_NOT_FOUND, http_server_captive_404_handler),\\n", 1)
+    s = s.replace(anchor, block + anchor, 1)
     core.write_text(s)
 PY
     fi
@@ -1097,7 +1211,7 @@ new = (
     "    /* Phase 2 browser preflight for JSON API clients. */\n"
     "    httpd_resp_set_hdr(req, \"Access-Control-Allow-Origin\", \"*\");\n"
     "    httpd_resp_set_hdr(req, \"Access-Control-Allow-Methods\", \"GET, POST, DELETE, OPTIONS\");\n"
-    "    httpd_resp_set_hdr(req, \"Access-Control-Allow-Headers\", \"Content-Type, X-JarvisNano-Protocol\");\n"
+    "    httpd_resp_set_hdr(req, \"Access-Control-Allow-Headers\", \"Content-Type, X-JarvisNano-Protocol, X-JarvisNano-Token\");\n"
     "    httpd_resp_set_hdr(req, \"Access-Control-Max-Age\", \"86400\");\n"
     "    httpd_resp_set_status(req, \"204 No Content\");\n"
     "    return httpd_resp_send(req, NULL, 0);\n"
@@ -1129,11 +1243,9 @@ if "lru_purge_enable" not in s:
     s = s.replace(old, new, 1)
 
 old = (
-    "    ESP_RETURN_ON_ERROR(http_server_register_camera_routes(s_ctx.server), TAG, \"Failed to register camera routes\");\n"
     "    ESP_RETURN_ON_ERROR(httpd_register_err_handler(s_ctx.server, HTTPD_404_NOT_FOUND, http_server_captive_404_handler),\n"
 )
 new = (
-    "    ESP_RETURN_ON_ERROR(http_server_register_camera_routes(s_ctx.server), TAG, \"Failed to register camera routes\");\n"
     "    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_ctx.server, &(httpd_uri_t) {\n"
     "                            .uri = \"/api/*\",\n"
     "                            .method = HTTP_OPTIONS,\n"
@@ -1593,10 +1705,10 @@ bad = (
 )
 s = s.replace(bad, '')
 if '        cap_gemini_live\n' not in s:
-    anchor = '        esp_timer\n'
+    anchor = '        json\n'
     if anchor not in s:
         raise SystemExit(f"could not locate GEMINI dependency insertion point in {cmake}")
-    s = s.replace(anchor, anchor + '        cap_gemini_live\n', 1)
+    s = s.replace(anchor, '        cap_gemini_live\n' + anchor, 1)
 cmake.write_text(s)
 print("patched", cmake)
 PY
@@ -1693,27 +1805,25 @@ PY
 
 apply_gemini_live_main_require_patch() {
     local target="$ESP_CLAW_DIR/application/edge_agent/main/CMakeLists.txt"
+    local yml="$ESP_CLAW_DIR/application/edge_agent/main/idf_component.yml"
     if [ ! -f "$target" ]; then
         log "main CMakeLists not found — skipping Gemini Live main dependency patch"
         return
     fi
     if grep -q "JarvisNano: main.c includes cap_gemini_live.h" "$target" 2>/dev/null; then
-        log "Gemini Live main dependency patch already applied"
-        return
-    fi
-    log "applying Gemini Live main dependency patch"
-    python3 - <<PY
+        log "Gemini Live main CMake dependency already applied"
+    else
+        log "applying Gemini Live main dependency patch"
+        python3 - <<PY
 import pathlib
 p = pathlib.Path(r"$target")
 s = p.read_text()
 old = (
-    "    esp_lcd_touch\n"
-    "    espressif__esp_board_manager\n"
+    "    cmd_wifi\n"
     ")\n"
 )
 new = (
-    "    esp_lcd_touch\n"
-    "    espressif__esp_board_manager\n"
+    "    cmd_wifi\n"
     "    # JarvisNano: main.c includes cap_gemini_live.h behind the Kconfig\n"
     "    # macro, but this local ESP-Claw checkout can expose the macro before\n"
     "    # CMake appends the conditional requirement. Keep the include path\n"
@@ -1726,20 +1836,38 @@ if old not in s:
 p.write_text(s.replace(old, new, 1))
 print("patched", p)
 PY
+    fi
+    if [ -f "$yml" ] && ! grep -qE "^  cap_gemini_live:" "$yml" 2>/dev/null; then
+        log "adding cap_gemini_live path dependency to main/idf_component.yml"
+        python3 - "$yml" <<'PY'
+import pathlib
+import sys
+
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+anchor = "  cap_lua:\n    path: ../../../components/claw_capabilities/cap_lua\n"
+if anchor not in s:
+    anchor = "  captive_dns:\n    path: ../../../components/common/captive_dns\n"
+if anchor not in s:
+    raise SystemExit("cap_gemini_live path-dep anchor not found in main/idf_component.yml")
+s = s.replace(anchor, anchor + "\n  cap_gemini_live:\n    path: ../../../components/claw_capabilities/cap_gemini_live\n", 1)
+p.write_text(s)
+print("added cap_gemini_live path dependency")
+PY
+    fi
 }
 
 apply_gemini_live_api_key_patch() {
     # patches/0020 — wire the Gemini Live API key from NVS into the capability.
-    # main.c starts the touch-to-talk monitor but never provisions the key, so the
-    # BidiGenerateContent WSS handshake has no auth. Insert one call before the
-    # touch monitor starts. The "gemini_api_key" struct field (NVS key "gemini_key")
-    # is accessed directly — app_config has no getter for it (only get_timezone).
+    # Do it after app_config_load(), not at a touch-monitor anchor; upstream has
+    # changed that startup shape several times, while config load is stable.
     local main_c="$ESP_CLAW_DIR/application/edge_agent/main/main.c"
     if [ ! -f "$main_c" ]; then
         log "main.c not found — skipping Gemini Live API key patch"
         return
     fi
-    if grep -q "cap_gemini_live_set_api_key" "$main_c" 2>/dev/null; then
+    if grep -q "cap_gemini_live_set_api_key" "$main_c" 2>/dev/null &&
+       grep -q ".gemini_live_is_active = cap_gemini_live_is_active" "$main_c" 2>/dev/null; then
         log "Gemini Live API key patch already applied"
         return
     fi
@@ -1748,26 +1876,43 @@ apply_gemini_live_api_key_patch() {
 import pathlib
 p = pathlib.Path(r"$main_c")
 s = p.read_text()
-old = (
-    '#if CONFIG_APP_CLAW_CAP_GEMINI_LIVE\n'
-    '    /* Start touch monitor — polls every 80ms, calls cap_gemini_live_toggle() on tap */\n'
-    '    xTaskCreate(touch_monitor_task, "touch_mon", 4096, NULL, 3, NULL);\n'
-    '#endif\n'
-)
+if '#include "cap_gemini_live.h"' not in s:
+    anchor = '#include "app_config.h"\n'
+    if anchor not in s:
+        raise SystemExit("main.c app_config include anchor missing")
+    s = s.replace(anchor, anchor + '#include "cap_gemini_live.h"\n', 1)
+
+if "static bool s_gemini_api_key_configured;" not in s:
+    anchor = "static wl_handle_t s_wl_handle = WL_INVALID_HANDLE;\n"
+    if anchor not in s:
+        raise SystemExit("main.c runtime-state anchor missing")
+    s = s.replace(anchor, anchor + "\nstatic bool s_gemini_api_key_configured;\n\nstatic bool gemini_live_configured(void)\n{\n#if CONFIG_APP_CLAW_CAP_GEMINI_LIVE\n    return s_gemini_api_key_configured;\n#else\n    return false;\n#endif\n}\n", 1)
+
+old = "    ESP_ERROR_CHECK(app_config_load(s_config));\n"
 new = (
-    '#if CONFIG_APP_CLAW_CAP_GEMINI_LIVE\n'
-    '    /* Provision the Gemini Live API key from NVS (app_config field "gemini_key").\n'
-    '     * Without this the BidiGenerateContent session has no auth and the WSS handshake\n'
-    '     * is rejected. The field is empty until set via POST /api/config. */\n'
-    "    s_gemini_api_key_configured = (s_config->gemini_api_key[0] != '\\0');\\n"
-    '    cap_gemini_live_set_api_key(s_config->gemini_api_key);\n'
-    '    /* Start touch monitor — polls every 80ms, calls cap_gemini_live_toggle() on tap */\n'
-    '    xTaskCreate(touch_monitor_task, "touch_mon", 4096, NULL, 3, NULL);\n'
-    '#endif\n'
+    "    ESP_ERROR_CHECK(app_config_load(s_config));\n"
+    "#if CONFIG_APP_CLAW_CAP_GEMINI_LIVE\n"
+    "    /* Gemini Live uses the current app_config llm_api_key field. */\n"
+    "    s_gemini_api_key_configured = (s_config->llm_api_key[0] != '\\\\0');\n"
+    "    cap_gemini_live_set_api_key(s_config->llm_api_key);\n"
+    "#endif\n"
 )
-if old not in s:
-    raise SystemExit("could not locate gemini-live touch monitor block in main.c — upstream may have changed")
-p.write_text(s.replace(old, new, 1))
+if "cap_gemini_live_set_api_key(s_config->llm_api_key);" not in s:
+    if old not in s:
+        raise SystemExit("main.c app_config_load anchor missing")
+    s = s.replace(old, new, 1)
+if ".gemini_live_is_active = cap_gemini_live_is_active," not in s:
+    anchor = "            .restart_device = main_restart_device,\n"
+    add = (
+        anchor +
+        "#if CONFIG_APP_CLAW_CAP_GEMINI_LIVE\n"
+        "            .gemini_live_is_active = cap_gemini_live_is_active,\n"
+        "#endif\n"
+    )
+    if anchor not in s:
+        raise SystemExit("main.c http_server services anchor missing")
+    s = s.replace(anchor, add, 1)
+p.write_text(s)
 print("patched", p)
 PY
 }
@@ -1937,22 +2082,16 @@ if new_post not in api:
 config_api.write_text(api)
 
 m = main_c.read_text()
-old = (
-    "    /* Gemini Live uses the current app_config llm_api_key field. */\n"
-    "    s_gemini_api_key_configured = (s_config->llm_api_key[0] != '\\0');\n"
-    "    cap_gemini_live_set_api_key(s_config->llm_api_key);\n"
-)
-new = (
-    "    /* Gemini Live uses the current app_config llm_api_key field. */\n"
-    "    s_gemini_api_key_configured = (s_config->llm_api_key[0] != '\\0');\n"
-    "    cap_gemini_live_set_api_key(s_config->llm_api_key);\n"
-    "    cap_gemini_live_set_mcp_key(s_config->jarvis_mcp_key);\n"
-    "    cap_gemini_live_set_mcp_url(s_config->jarvis_mcp_url);\n"
-)
 if "cap_gemini_live_set_mcp_key(s_config->jarvis_mcp_key);" not in m:
-    if old not in m:
+    anchor = "    cap_gemini_live_set_api_key(s_config->llm_api_key);\n"
+    add = (
+        anchor +
+        "    cap_gemini_live_set_mcp_key(s_config->jarvis_mcp_key);\n"
+        "    cap_gemini_live_set_mcp_url(s_config->jarvis_mcp_url);\n"
+    )
+    if anchor not in m:
         raise SystemExit("main.c Gemini Live app_config anchor missing")
-    m = m.replace(old, new, 1)
+    m = m.replace(anchor, add, 1)
 main_c.write_text(m)
 
 print("public v1 config patch applied")
@@ -1996,19 +2135,20 @@ import pathlib
 p = pathlib.Path(r"$main_c")
 s = p.read_text()
 
-old = '''#if CONFIG_APP_CLAW_CAP_GEMINI_LIVE
-static bool gemini_live_configured(void)
+old = '''static bool gemini_live_configured(void)
 {
+#if CONFIG_APP_CLAW_CAP_GEMINI_LIVE
     return s_gemini_api_key_configured;
-}
+#else
+    return false;
 #endif
+}
 '''
-new = '''#if CONFIG_APP_CLAW_CAP_GEMINI_LIVE
-static bool gemini_live_network_ready(void)
+new = '''static bool gemini_live_network_ready(void)
 {
     wifi_manager_status_t status = {0};
     wifi_manager_get_status(&status);
-    return status.sta_connected && status.sta_ip[0] != '\\0';
+    return status.sta_connected && status.sta_ip[0] != '\\\\0';
 }
 
 static bool gemini_live_time_ready(void)
@@ -2018,9 +2158,14 @@ static bool gemini_live_time_ready(void)
 
 static bool gemini_live_configured(void)
 {
+#if CONFIG_APP_CLAW_CAP_GEMINI_LIVE
     return s_gemini_api_key_configured && gemini_live_network_ready() && gemini_live_time_ready();
+#else
+    return false;
+#endif
 }
 
+#if CONFIG_APP_CLAW_CAP_GEMINI_LIVE
 static esp_err_t main_gemini_live_start(void)
 {
     if (!s_gemini_api_key_configured) {
@@ -2497,7 +2642,7 @@ old = (
     "{\n"
     "    ESP_RETURN_ON_FALSE(s_emote_handle != NULL, ESP_ERR_INVALID_STATE, TAG, \"emote handle is NULL\");\n"
     "\n"
-    "    const bool ap_present = (ap_ssid != NULL && ap_ssid[0] != '\\0');\n"
+    "    const bool ap_present = (ap_ssid != NULL && ap_ssid[0] != '\\\\0');\n"
     "    const char *idle = sta_connected ? \"swim\" : \"offline\";\n"
     "\n"
     "    char msg[96];\n"
@@ -2524,8 +2669,8 @@ new = (
     "{\n"
     "    ESP_RETURN_ON_FALSE(s_emote_handle != NULL, ESP_ERR_INVALID_STATE, TAG, \"emote handle is NULL\");\n"
     "\n"
-    "    const bool ap_present = (s_ap_ssid[0] != '\\0');\n"
-    "    const bool has_detail = (s_status_detail[0] != '\\0');\n"
+    "    const bool ap_present = (s_ap_ssid[0] != '\\\\0');\n"
+    "    const bool has_detail = (s_status_detail[0] != '\\\\0');\n"
     "    const char *idle = s_sta_connected ? \"swim\" : \"offline\";\n"
     "\n"
     "    char msg[96];\n"
@@ -2547,20 +2692,20 @@ new = (
     "esp_err_t emote_set_network_status(bool sta_connected, const char *ap_ssid)\n"
     "{\n"
     "    s_sta_connected = sta_connected;\n"
-    "    if (ap_ssid != NULL && ap_ssid[0] != '\\0') {\n"
+    "    if (ap_ssid != NULL && ap_ssid[0] != '\\\\0') {\n"
     "        snprintf(s_ap_ssid, sizeof(s_ap_ssid), \"%s\", ap_ssid);\n"
     "    } else {\n"
-    "        s_ap_ssid[0] = '\\0';\n"
+    "        s_ap_ssid[0] = '\\\\0';\n"
     "    }\n"
     "    return emote_render_status();\n"
     "}\n"
     "\n"
     "esp_err_t emote_set_status_detail(const char *detail)\n"
     "{\n"
-    "    if (detail != NULL && detail[0] != '\\0') {\n"
+    "    if (detail != NULL && detail[0] != '\\\\0') {\n"
     "        snprintf(s_status_detail, sizeof(s_status_detail), \"%s\", detail);\n"
     "    } else {\n"
-    "        s_status_detail[0] = '\\0';\n"
+    "        s_status_detail[0] = '\\\\0';\n"
     "    }\n"
     "    if (s_voice_visual_active) {\n"
     "        return ESP_OK;\n"
@@ -2747,7 +2892,8 @@ new = (
     "    }\n"
 )
 if old not in s:
-    raise SystemExit("could not locate touch_monitor_task handle block in main.c — upstream may have changed")
+    print("touch_monitor_task handle block absent; touch_demo service path will own touch")
+    raise SystemExit(0)
 p.write_text(s.replace(old, new, 1))
 print("patched", p)
 PY
@@ -2764,6 +2910,62 @@ apply_touch_local_hardware_demo_patch() {
     local touch_demo_h="$ESP_CLAW_DIR/application/edge_agent/main/touch_demo.h"
     local touch_demo_src="$ROOT/firmware/main/touch_demo.c"
     local touch_demo_hdr="$ROOT/firmware/main/touch_demo.h"
+    local main_cmake="$ESP_CLAW_DIR/application/edge_agent/main/CMakeLists.txt"
+    if [ -f "$touch_demo_src" ] && [ -f "$touch_demo_hdr" ]; then
+        log "copying patched touch_demo runtime → upstream tree"
+        cp -f "$touch_demo_src" "$touch_demo_c"
+        cp -f "$touch_demo_hdr" "$touch_demo_h"
+        python3 - "$main_c" "$main_cmake" <<'PY'
+import pathlib
+import sys
+
+main_c = pathlib.Path(sys.argv[1])
+cmake = pathlib.Path(sys.argv[2])
+
+c = cmake.read_text()
+if '"touch_demo.c"' not in c:
+    anchor = '        "main.c"\n'
+    if anchor not in c:
+        raise SystemExit("main CMake touch_demo source anchor missing")
+    c = c.replace(anchor, anchor + '        "touch_demo.c"\n', 1)
+cmake.write_text(c)
+
+s = main_c.read_text()
+if '#include "touch_demo.h"' not in s:
+    anchor = '#include "cap_gemini_live.h"\n'
+    if anchor not in s:
+        raise SystemExit("main.c touch_demo include anchor missing")
+    s = s.replace(anchor, anchor + '#include "touch_demo.h"\n', 1)
+
+if ".touch_get_diagnostics = touch_demo_get_diagnostics_json," not in s:
+    anchor = "            .gemini_live_is_active = cap_gemini_live_is_active,\n"
+    if anchor not in s:
+        raise SystemExit("main.c touch diagnostics service anchor missing")
+    s = s.replace(
+        anchor,
+        anchor
+        + "            .touch_get_diagnostics = touch_demo_get_diagnostics_json,\n"
+        + "            .touch_run_scene = touch_demo_run_scene,\n",
+        1,
+    )
+
+if "touch_demo_start(gemini_live_configured)" not in s:
+    anchor = "    esp_err_t status_led_err = app_status_led_start();\n"
+    add = (
+        "    esp_err_t touch_demo_err = touch_demo_start(gemini_live_configured);\n"
+        "    if (touch_demo_err != ESP_OK) {\n"
+        "        ESP_LOGW(TAG, \"Touch service disabled: %s\", esp_err_to_name(touch_demo_err));\n"
+        "    }\n"
+    )
+    if anchor not in s:
+        raise SystemExit("main.c touch_demo_start anchor missing")
+    s = s.replace(anchor, add + anchor, 1)
+
+main_c.write_text(s)
+print("touch diagnostics service wired")
+PY
+        return
+    fi
     if [ -f "$touch_demo_c" ]; then
         if [ -f "$touch_demo_src" ] && [ -f "$touch_demo_hdr" ]; then
             log "copying patched touch_demo runtime → upstream tree"
@@ -3536,7 +3738,7 @@ if "cmd_face" not in cl:
         "static int cmd_face(int argc, char **argv)\n"
         "{\n"
         "    if (argc < 2) {\n"
-        '        printf("Usage: face <off|idle|listen|think|speak> [amplitude_pct 0-100]\\n");\n'
+        '        printf("Usage: face <off|idle|listen|think|speak> [amplitude_pct 0-100]\\\\n");\n'
         "        return 1;\n"
         "    }\n"
         "    const char *s = argv[1];\n"
@@ -3548,7 +3750,7 @@ if "cmd_face" not in cl:
         '    else if (strcmp(s, "think") == 0) { st = EMOTE_FACE_THINKING; }\n'
         '    else if (strcmp(s, "speak") == 0) { st = EMOTE_FACE_SPEAKING; reactive = true; }\n'
         "    else {\n"
-        '        printf("Unknown state \'%s\'. Use off|idle|listen|think|speak.\\n", s);\n'
+        '        printf("Unknown state \'%s\'. Use off|idle|listen|think|speak.\\\\n", s);\n'
         "        return 1;\n"
         "    }\n"
         "    if (reactive) {\n"
@@ -3557,13 +3759,13 @@ if "cmd_face" not in cl:
         "            if (pct < 0) pct = 0;\n"
         "            if (pct > 100) pct = 100;\n"
         "            emote_face_set_synthetic_amplitude(pct * 10);\n"
-        '            printf("face %s @ %d%% (fixed synthetic amplitude)\\n", s, pct);\n'
+        '            printf("face %s @ %d%% (fixed synthetic amplitude)\\\\n", s, pct);\n'
         "        } else {\n"
         "            emote_face_set_synthetic_amplitude(-1);\n"
-        '            printf("face %s (live audio if available, else synthetic sweep)\\n", s);\n'
+        '            printf("face %s (live audio if available, else synthetic sweep)\\\\n", s);\n'
         "        }\n"
         "    } else {\n"
-        '        printf("face %s\\n", s);\n'
+        '        printf("face %s\\\\n", s);\n'
         "    }\n"
         "    emote_face_set_state(st);\n"
         "    return 0;\n"
@@ -3662,10 +3864,6 @@ apply_reactive_waveform_audio_bridge_patch() {
         log "app_claw.c not found — skipping reactive waveform audio bridge patch"
         return
     fi
-    if grep -q "app_claw_face_bridge" "$app_c" 2>/dev/null; then
-        log "reactive waveform audio bridge patch already applied"
-        return
-    fi
     [ -f "$br_c" ] && [ -f "$br_h" ] || die "missing vendored bridge files at $br_c / $br_h"
     log "applying patches/0032-reactive-waveform-audio-bridge.patch"
 
@@ -3719,7 +3917,8 @@ if "app_claw_face_bridge_register" not in a:
     a = a.replace(start_anchor, start_new, 1)
 app_c.write_text(a)
 
-# CMakeLists: add the bridge .c to SRCS, emote-gated
+# CMakeLists: add the bridge .c to SRCS and declare the cap_gemini_live include
+# dependency. The bridge file includes cap_gemini_live.h directly.
 m = cmake.read_text()
 if "app_claw_face_bridge.c" not in m:
     anchor = (
@@ -3739,7 +3938,22 @@ if "app_claw_face_bridge.c" not in m:
     if anchor not in m:
         raise SystemExit("app_claw CMakeLists app_claw_srcs anchor missing")
     m = m.replace(anchor, add, 1)
-    cmake.write_text(m)
+if "list(APPEND app_claw_requires cap_gemini_live)" not in m:
+    req_anchor = (
+        "if(CONFIG_APP_CLAW_ENABLE_EMOTE)\n"
+        "    list(APPEND app_claw_requires emote)\n"
+        "endif()\n"
+    )
+    req_new = (
+        "if(CONFIG_APP_CLAW_ENABLE_EMOTE)\n"
+        "    list(APPEND app_claw_requires emote)\n"
+        "    list(APPEND app_claw_requires cap_gemini_live)\n"
+        "endif()\n"
+    )
+    if req_anchor not in m:
+        raise SystemExit("app_claw CMakeLists emote requirement anchor missing")
+    m = m.replace(req_anchor, req_new, 1)
+cmake.write_text(m)
 
 print("applied reactive waveform audio bridge: face_bridge.c/.h + app_claw.c + CMake")
 PY
@@ -3864,7 +4078,7 @@ apply_ui_layer_manifest_dep_patch() {
     fi
     log "adding ui_layer path dependency to main/idf_component.yml"
     python3 - "$yml" <<'PY'
-import pathlib, sys
+import pathlib, re, sys
 p = pathlib.Path(sys.argv[1])
 s = p.read_text()
 anchor = "  emote:\n    path: ../../../components/common/emote\n"
@@ -4009,27 +4223,26 @@ apply_ui_layer_lua_dep_patch() {
         log "main idf_component.yml not found — skipping ui_layer lua deps"
         return
     fi
-    if grep -qE "^  lua_module_display:" "$yml" 2>/dev/null; then
-        log "ui_layer lua deps already present"
-        return
-    fi
-    log "adding cap_lua + lua_module_display unconditional path-deps to main/idf_component.yml"
+    log "normalizing cap_lua + lua_module_display unconditional path-deps in main/idf_component.yml"
     python3 - "$yml" <<'PY'
-import pathlib, sys
+import pathlib, re, sys
 p = pathlib.Path(sys.argv[1])
 s = p.read_text()
 anchor = "  ui_layer:\n    path: ../../../components/common/ui_layer\n"
-if "lua_module_display:" in s:
-    raise SystemExit(0)
 if anchor not in s:
     raise SystemExit("ui_layer path-dep anchor not found in idf_component.yml")
-add = anchor + (
-    "\n  cap_lua:\n    path: ../../../components/claw_capabilities/cap_lua\n"
-    "\n  lua_module_display:\n    path: ../../../components/lua_modules/lua_module_display\n"
-)
-s = s.replace(anchor, add, 1)
+
+def force_path_dep(text: str, name: str, path: str) -> str:
+    block = f"  {name}:\n    path: {path}\n"
+    pattern = rf"  {re.escape(name)}:\n(?:(?:    .*)?\n)*?(?=\n  [A-Za-z0-9_/-]+:|\Z)"
+    if re.search(pattern, text):
+        return re.sub(pattern, block, text, count=1)
+    return text.replace(anchor, anchor + "\n" + block, 1)
+
+s = force_path_dep(s, "cap_lua", "../../../components/claw_capabilities/cap_lua")
+s = force_path_dep(s, "lua_module_display", "../../../components/lua_modules/lua_module_display")
 p.write_text(s)
-print("added cap_lua + lua_module_display unconditional path-deps")
+print("normalized cap_lua + lua_module_display unconditional path-deps")
 PY
 }
 
@@ -4471,15 +4684,15 @@ PY
 import pathlib, sys
 p = pathlib.Path(sys.argv[1])
 s = p.read_text()
-old = "    espressif__esp_board_manager\n"
+old = "    cmd_wifi\n"
 new = (
-    "    espressif__esp_board_manager\n"
+    "    cmd_wifi\n"
     "    # JarvisNano boot_diag (STABILITY_PLAN P0.1): esp_core_dump_image_check\n"
     "    # at startup needs the espcoredump include path.\n"
     "    espcoredump\n"
 )
 if s.count(old) != 1:
-    raise SystemExit("boot_diag: esp_board_manager anchor not unique in main/CMakeLists.txt")
+    raise SystemExit("boot_diag: cmd_wifi anchor not unique in main/CMakeLists.txt")
 p.write_text(s.replace(old, new, 1))
 print("patched", p)
 PY
@@ -4508,15 +4721,14 @@ apply_status_panel_main_require_patch() {
 import pathlib, sys
 p = pathlib.Path(sys.argv[1])
 s = p.read_text()
-old = "    cap_gemini_live\n    bt\n)\n"
+old = "    cap_gemini_live\n"
 new = (
     "    cap_gemini_live\n"
     "    # JarvisNano status panel: swipe-down battery row reads jarvis_pmic.\n"
     "    jarvis_pmic\n"
-    "    bt\n)\n"
 )
 if s.count(old) != 1:
-    raise SystemExit("status-panel: 'cap_gemini_live/bt/)' anchor not unique in main/CMakeLists.txt")
+    raise SystemExit("status-panel: cap_gemini_live anchor not unique in main/CMakeLists.txt")
 p.write_text(s.replace(old, new, 1))
 print("patched", p)
 PY
@@ -4729,7 +4941,8 @@ apply_touch_demo_soft_fail_patch() {
         log "main.c not found — skipping touch demo soft-fail patch"
         return
     fi
-    if grep -q "touch demo disabled:" "$main_c" 2>/dev/null; then
+    if grep -q "touch demo disabled:" "$main_c" 2>/dev/null ||
+       grep -q "Touch service disabled:" "$main_c" 2>/dev/null; then
         log "touch demo soft-fail patch already applied"
         return
     fi
@@ -4748,7 +4961,8 @@ new = (
     "    }\n"
 )
 if old not in s:
-    raise SystemExit("touch_demo_start fatal anchor missing")
+    print("touch_demo_start already soft-fails or is absent")
+    raise SystemExit(0)
 p.write_text(s.replace(old, new, 1))
 print("patched", p)
 PY

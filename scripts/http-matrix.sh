@@ -16,10 +16,11 @@ ENDPOINTS=(
 if [ "$#" -gt 0 ]; then
     HOSTS=("$@")
 else
-    HOSTS=(
-        "192.168.4.1"
-        "${JARVIS_DEVICE_HOST:-esp-claw.local}"
-    )
+    HOSTS=()
+    if [ -n "${JARVIS_SOFTAP_HOST:-}" ]; then
+        HOSTS+=("$JARVIS_SOFTAP_HOST")
+    fi
+    HOSTS+=("${JARVIS_DEVICE_HOST:-esp-claw.local}")
 fi
 
 printf 'HTTP matrix timeout=%ss\n' "$TIMEOUT"

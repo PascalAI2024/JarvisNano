@@ -50,7 +50,7 @@ LAN reachability tests, and Android mDNS discovery now verifies the resolved
 host with `/api/status` before marking it connected.
 
 Progress on 2026-05-04: the connected XIAO flashed successfully on
-`/dev/cu.usbmodem1101` and booted through STA/AP Wi-Fi, Lua, router, MCP, Web
+the detected `/dev/cu.usbmodem*` port and booted through STA/AP Wi-Fi, Lua, router, MCP, Web
 IM, and native GPIO21 heartbeat. The board reported a STA IP and
 AP SSID `esp-claw-XXXXXX`. The Android Gradle wrapper is restored so the pinned
 Gradle version is reproducible; local Android compilation still requires an
@@ -72,7 +72,7 @@ background polling conservative while BLE/camera work proceeds.
 
 Run this exact matrix:
 
-- AP path: join `esp-claw-XXXXXX`, test `http://192.168.4.1/api/status`.
+- AP path: join `esp-claw-XXXXXX`, test the status route through the softAP host shown on serial.
 - STA path from macOS: test `http://<STA_IP>/api/status`.
 - STA path from phone/another laptop: same endpoint.
 - mDNS path: `http://esp-claw.local/api/status`.

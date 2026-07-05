@@ -368,7 +368,7 @@ gl_interrupt_playback():
 ## 5. Build-system deltas (D6)
 
 1. **Component pin** — add to the **canonical**
-   `/Users/pascalledesma/dev/jarvisnano/firmware/components/cap_gemini_live/idf_component.yml`
+   `firmware/components/cap_gemini_live/idf_component.yml`
    (currently only `esp_websocket_client ^1.4.0` + `esp_codec_dev ~1.5` — verified):
 
    ```yaml

@@ -46,3 +46,4 @@ The most expensive lessons learned, with page links:
 - **`thinkingBudget` is deprecated** — use `thinkingLevel` → [gemini-live-api.md](./gemini-live-api.md)
 - **Choppy Gemini audio** — single `rx_buf` overwritten; fix: PSRAM frame queue depth 128 → [audio-es8311-es7210.md](./audio-es8311-es7210.md)
 - **Flat gain hard-clips speech** — use soft-knee limiter → [audio-es8311-es7210.md](./audio-es8311-es7210.md)
+- **Display snapshots are software mirrors, not panel readback** — check owner/freshness before trusting screenshots → [bsp-primitive-reboot.md](./bsp-primitive-reboot.md)

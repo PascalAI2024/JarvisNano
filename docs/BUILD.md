@@ -1,264 +1,195 @@
-# Build & Flash
+# Build And Flash
 
-There are **two install paths**:
+The primary v1 target is the **Waveshare ESP32-S3-Touch-AMOLED-1.75**. The
+Seeed XIAO path remains available, but do not use the old XIAO defaults when
+debugging the round AMOLED device.
 
-| Path | What you need | Best for |
-| --- | --- | --- |
-| **A. Browser flasher (no CLI)** | Chrome / Edge + a USB-C cable | End users. Click → install. No esptool, no Docker. |
-| **B. Local build + flash** | Docker, Python 3, Git | Developers iterating on firmware. |
+## Install Paths
 
-## Path A — Browser flasher
+| Path | Target | Best for |
+|---|---|---|
+| Local build + `scripts/flash.sh` | Waveshare primary | Firmware development and release validation |
+| Browser flasher | XIAO-era bundle unless updated | End-user no-CLI installs after a matching firmware bundle is published |
 
-1. Open [`dashboard/index.html`](../dashboard/index.html) — either from this repo's `python3 -m http.server` or from any deploy target.
-2. Click the **Flash** tab.
-3. Plug in the XIAO Sense holding the **BOOT** button. Click **Install**. Pick the `/dev/cu.usbmodem*` (macOS / Linux) or `COM*` (Windows) port.
-4. Wait ~30 s. The merged 7.6 MB firmware bundle (`dashboard/firmware/jarvis-xiao-esp32s3-sense.bin`) is written via WebSerial.
-5. The device reboots, broadcasts `esp-claw-XXXXXX`. Visit [`dashboard/onboard.html`](../dashboard/onboard.html) and walk through the 5-step wizard.
+## Requirements
 
-Browser support note: Web Serial only works on Chromium browsers (Chrome, Edge, Brave, Arc, Opera). **Safari and Firefox don't support Web Serial** — use one of the Chromium browsers if the Install button is greyed out.
+- Docker Desktop or a Linux Docker host.
+- Python 3 on the host for flashing and diagnostics.
+- Git.
+- USB-C data cable.
+- Waveshare ESP32-S3-Touch-AMOLED-1.75 board.
 
----
+Flashing runs on the host because Docker Desktop on macOS does not pass the
+native ESP32-S3 USB-Serial-JTAG device through cleanly.
 
-## Path B — Local build + flash
-
-For the current connected Waveshare AMOLED board, read
-[`NEXT_SESSION.md`](NEXT_SESSION.md) first. USB is the primary debug/control
-path; AP access is only a runtime confirmation after USB proves the app booted.
-
-The full pipeline runs in Docker, so you only need:
-- macOS / Linux / Windows + WSL
-- Docker Desktop
-- Python 3 + `pip` (for `esptool` on the host — flashing happens outside Docker because Docker Desktop on macOS doesn't pass USB through)
-- Git
-
-Android companion builds are separate from the firmware flow. See
-[`android/README.md`](../android/README.md) for JDK, Gradle, and Android SDK
-requirements.
-
-The board does not need to be plugged in for the build, only for the flash step.
-By default the scripts target the Seeed XIAO Sense. Set `BOARD_VENDOR` and
-`BOARD_NAME` for the Waveshare AMOLED board.
-
-```mermaid
-sequenceDiagram
-    participant U as You
-    participant B as scripts/bootstrap.sh
-    participant D as Docker (espressif/idf)
-    participant H as Host (Mac)
-    participant X as ESP32-S3 board
-
-    U->>B: ./scripts/bootstrap.sh
-    B->>B: clone esp-claw at pinned tag
-    B->>B: cp selected boards/<vendor>/<name>/ → esp-claw/.../boards/
-    B->>B: cp firmware/lua + firmware/router_rules → FATFS image
-    B->>B: apply bootstrap patches + board sdkconfig overrides
-    U->>B: ./scripts/bootstrap.sh build
-    B->>D: docker run espressif/idf:v5.5.4
-    D->>D: idf.py set-target esp32s3
-    D->>D: idf.py gen-bmgr-config -b selected board
-    D->>D: idf.py build (10 min first time)
-    D-->>B: build/edge_agent.bin + flasher_args.json
-    U->>X: plug in USB-C
-    U->>H: ./scripts/flash.sh
-    H->>X: esptool write_flash from flasher_args.json
-    X->>X: boot, print IP/AP state on serial
-```
-
-## Step-by-step
-
-### 1. Clone
+## Build Waveshare Firmware
 
 ```bash
 git clone git@github.com:PascalAI2024/JarvisNano.git
 cd JarvisNano
-```
 
-### 2. Bootstrap
-
-```bash
-./scripts/bootstrap.sh
-```
-
-This:
-1. Clones `espressif/esp-claw` into `esp-claw/` (gitignored) at the pinned `ESP_CLAW_REF` in `scripts/bootstrap.sh`.
-2. Copies the selected board directory into the upstream tree.
-3. Copies `firmware/lua/*.lua` and `firmware/router_rules/router_rules.json` into the upstream FATFS image so prototype scripts and router rules are baked into flash.
-4. Applies `patches/0001-fix-pdm-rx-hp-filter-cap.patch` to
-   `managed_components/espressif__esp_board_manager/peripherals/periph_i2s/periph_i2s.py`.
-5. Applies the local Phase-2 HTTP/camera/Wi-Fi patches used by the dashboard and onboarding flow.
-6. Patches a native GPIO21 status LED task into `edge_agent/main.c` so the physical board shows boot/alive state after core services are online, without starting a long-running Lua job.
-7. During `build`, applies board-specific sdkconfig fixes: XIAO uses the 8 MB flash profile and disables the heap-heavy App Claw interactive serial REPL; Waveshare AMOLED uses the 16 MB flash profile and keeps the USB-CDC CLI enabled.
-8. Fails clearly if the pinned upstream tree drifts in a way that prevents required managed components or patches from applying.
-
-### 3. Build inside Docker
-
-```bash
-./scripts/bootstrap.sh build
-```
-
-For the Waveshare ESP32-S3-Touch-AMOLED-1.75:
-
-```bash
 BOARD_VENDOR=waveshare \
 BOARD_NAME=esp32s3_touch_amoled_1_75 \
 ./scripts/bootstrap.sh build
 ```
 
-First build pulls the `espressif/idf:v5.5.4` image (~13 GB) and
-takes 8–15 minutes. Subsequent builds reuse `application/edge_agent/build/`
-and finish in 30–60 seconds for incremental edits.
+The first build pulls the ESP-IDF Docker image and can take several minutes.
+Incremental builds are much faster.
 
-If you want a clean rebuild:
-```bash
-rm -rf esp-claw/application/edge_agent/build esp-claw/application/edge_agent/components/gen_bmgr_codes
-./scripts/bootstrap.sh build
+`bootstrap.sh` performs the important source sync:
+
+```mermaid
+sequenceDiagram
+    participant U as Developer
+    participant B as scripts/bootstrap.sh
+    participant C as Canonical repo sources
+    participant E as ignored esp-claw checkout
+    participant I as ESP-IDF build
+
+    U->>B: BOARD_VENDOR=waveshare BOARD_NAME=esp32s3_touch_amoled_1_75 build
+    B->>C: read boards/, firmware/, patches
+    B->>E: clone/update esp-claw
+    B->>E: copy board adaptation
+    B->>E: copy cap_gemini_live, emote, ui, board primitives
+    B->>E: apply idempotent app/bootstrap patches
+    B->>I: idf.py set-target esp32s3
+    B->>I: idf.py gen-bmgr-config
+    B->>I: idf.py build
 ```
 
-### 4. Flash from host
+Important: edit canonical files in this repo, not generated copies under
+`esp-claw/`. Bootstrap overwrites selected generated files on every build.
+
+## Flash Waveshare Firmware
 
 ```bash
-ls /dev/cu.usbmodem*    # confirm enumeration
 ./scripts/flash.sh
 ```
 
-If nothing shows up, hold the **BOOT** button while plugging in to force download mode.
+`flash.sh` reads the generated `flasher_args.json`, including the board flash
+settings and partition offsets. It preserves storage by default so Wi-Fi,
+Gemini, JarvisMCP, and pairing-token config survive normal iteration.
 
-The script reads `esp-claw/application/edge_agent/build/flasher_args.json`, so
-it uses the selected board's real flash size and partition offsets. By default
-it flashes every generated artifact except the FATFS `storage` partition, so
-Wi-Fi and LLM configuration survive firmware iteration. It uses
-`--after watchdog-reset` by default because ESP32-S3 USB-Serial/JTAG boards can
-fall back into ROM download mode after a host RTS hard reset. Pass
-`STORAGE=1 ./scripts/flash.sh` for first install, partition-layout changes, or
-a deliberate provisioning wipe. Pass `ERASE_NVS=1 ./scripts/flash.sh` to wipe
-only the NVS config partition before flashing when a bad saved config prevents
-boot.
+Use these modes deliberately:
 
-After a build, run the post-build smoke check:
+```bash
+# First install, partition change, or deliberate provisioning wipe.
+STORAGE=1 ./scripts/flash.sh
+
+# Bad saved config recovery.
+ERASE_NVS=1 ./scripts/flash.sh
+
+# Full blank-device release test.
+ERASE_NVS=1 STORAGE=1 ./scripts/flash.sh
+```
+
+The Waveshare CO5300/QSPI display path requires DIO flash mode. Use the repo
+scripts rather than a copied manual `esptool` command unless you are diagnosing
+the flasher itself.
+
+## USB Diagnostics First
+
+The Waveshare board uses native ESP32-S3 USB-Serial-JTAG. Host reset-line
+behavior can leave it in ROM download mode after a hard reset, where flashing
+works but the app does not boot. The repo scripts avoid the common reset trap.
+
+Use the monitor that does not toggle modem-control lines:
+
+```bash
+./scripts/usb-monitor.py --seconds 5 --send status
+```
+
+If you need to specify a port:
+
+```bash
+PORT=/dev/cu.usbmodem* ./scripts/flash.sh
+./scripts/usb-monitor.py --port /dev/cu.usbmodem*
+```
+
+Expected good status includes boot stages through Wi-Fi/HTTP/app startup and a
+stable uptime counter. If the serial log shows ROM download mode, unplug/replug
+or flash again with the repo script.
+
+## Configure Runtime Secrets
+
+Do not put keys or local URLs in source. Configure them on the device through
+NVS-backed `/api/config`.
+
+Fields used by Waveshare v1:
+
+| Field | Purpose |
+|---|---|
+| `llm_api_key` / `gemini_api_key` | Gemini Live key, depending on the active config path |
+| `jarvis_mcp_url` | JarvisMCP `/act` endpoint |
+| `jarvis_mcp_key` | JarvisMCP bearer token |
+| `pairing_token` | Token for protected write/control routes |
+
+Config readback must mask sensitive values. `/api/tools/status` reports whether
+Gemini and JarvisMCP are configured without exposing the actual values.
+
+## Live Device Checks
+
+After the device is on Wi-Fi:
+
+```bash
+export JARVIS_DEVICE_HOST=<device-host>
+scripts/live-device.py status --host "$JARVIS_DEVICE_HOST"
+scripts/live-device.py report --host "$JARVIS_DEVICE_HOST"
+scripts/live-device.py screen --host "$JARVIS_DEVICE_HOST" --save-sd
+scripts/live-device.py gemini-cycle --host "$JARVIS_DEVICE_HOST" --text "Say one short sentence." --report
+```
+
+The display snapshot routes are software mirrors:
+
+- `/api/display/snapshot.json` gives owner and mirror metadata.
+- `/api/display/snapshot.ppm` captures the active display owner, normally emote.
+- `/api/ui/snapshot.ppm` captures the UI framebuffer.
+
+Use [LIVE_DEVICE_DEBUG.md](LIVE_DEVICE_DEBUG.md) for the full acceptance matrix.
+
+## Smoke Check
+
+After a build:
 
 ```bash
 ./scripts/smoke-build.sh
 ```
 
-It records the pinned esp-claw commit, app/storage image sizes, and expected
-firmware/FATFS strings in `.build_logs/smoke-build.txt`.
-
-For manual flashing during firmware iteration:
+Before pushing:
 
 ```bash
-cd esp-claw/application/edge_agent/build
-python3 -m esptool --chip esp32s3 -p /dev/cu.usbmodem1101 -b 460800 \
-  --before default-reset --after watchdog-reset write_flash $(python3 - <<'PY'
-import json
-args = json.load(open("flasher_args.json"))
-for k, v in args["flash_settings"].items():
-    print(f"--{k} {v}", end=" ")
-for offset, path in sorted(args["flash_files"].items(), key=lambda item: int(item[0], 16)):
-    print(offset, path, end=" ")
-PY
-)
+git diff --check
+./scripts/check-secrets.sh
 ```
 
-### 5. Talk to it
+## Browser Flasher Status
 
-After flashing, the XIAO reboots and broadcasts an open Wi-Fi AP named
-`esp-claw-XXXXXX` (the `XXXXXX` is the last 3 bytes of the MAC). Join it
-from your phone or laptop, browse to **http://192.168.4.1/** (or open
-[`dashboard/onboard.html`](../dashboard/onboard.html) — the 5-step wizard), and
-configure:
+The dashboard WebSerial flasher is useful, but the current public browser bundle
+must be treated as board-specific. Do not assume it programs Waveshare unless
+`dashboard/firmware/manifest.json` and the published binary were intentionally
+updated from a Waveshare build.
 
-- Your home Wi-Fi SSID + password
-- An LLM provider (OpenAI / Anthropic / **MiniMax-M2.7** / Qwen / Ollama / custom endpoint) + API key + model
-- Optionally a Telegram bot token, or just use the built-in **Web IM**
+For Waveshare development and release candidates, use local build + host flash.
 
-The device reboots onto your LAN. Find it again at
-**http://esp-claw.local/** (mDNS) — the [Cockpit dashboard](../dashboard/index.html)
-takes over from there.
+## HTTP Reachability Matrix
 
-Developer note: current firmware keeps the provisioning AP active only while
-joining Wi-Fi. Once STA receives an IP it switches to STA-only mode to avoid
-AP+STA single-radio reachability problems on some routers. Serial should show
-`STA connected; provisioning AP stopped for LAN reachability`, and
-`/api/status` should report `ap_active:false`.
-
-## Monitoring serial output
-
-`esp-idf-monitor` is feature-rich but laggy on macOS over USB-Serial-JTAG.
-Use the repo monitor first on ESP32-S3 USB-Serial/JTAG boards. It opens the
-device without toggling DTR/RTS, so it does not accidentally reset the board or
-strap it back into ROM download mode:
-
-```bash
-./scripts/usb-monitor.py --port /dev/cu.usbmodem1101
-./scripts/usb-monitor.py --seconds 5 --send status
-```
-
-Other faster alternatives:
-
-```bash
-# screen — built-in, snappy. Ctrl-A K to exit.
-screen /dev/cu.usbmodem* 115200
-
-# picocom — also snappy, easier exit (Ctrl-A Ctrl-X)
-brew install picocom
-picocom -b 115200 /dev/cu.usbmodem*
-
-# minicom — familiar UX
-brew install minicom
-minicom -D /dev/cu.usbmodem* -b 115200
-```
-
-For decoded panic backtraces / GDB stub interception, `esp-idf-monitor`
-is still worth keeping for emergencies:
-```bash
-pip install --user esp-idf-monitor
-python -m esp_idf_monitor -p /dev/cu.usbmodem*
-```
-
-## HTTP reachability matrix
-
-When the board boots but the dashboard cannot reach it, test the cheapest
-endpoint first across AP, STA IP, and mDNS:
-
-```bash
-./scripts/http-matrix.sh
-```
-
-By default it probes `192.168.4.1` (softAP), the device's STA IP, and `esp-claw.local`.
-The matrix covers the cheap health/status path plus the endpoints used by
-onboarding, settings, chat, telemetry, and camera diagnostics:
-
-- `/api/health`
-- `/api/status`
-- `/api/config`
-- `/api/webim/status`
-- `/api/battery`
-- `/api/audio/level`
-- `/api/wifi/scan`
-- `/api/camera/snapshot`
-- `OPTIONS /api/status`
-- WebSocket upgrade for `/ws/webim`
-
-Override the host list when the board has a different STA IP:
+When the board boots but the dashboard cannot reach it:
 
 ```bash
 ./scripts/http-matrix.sh "$JARVIS_DEVICE_HOST" esp-claw.local
 ```
 
-If the first few endpoints pass but later probes time out, check for open
-dashboard/browser tabs holding many connections to port 80. The firmware enables
-HTTP LRU socket purge, shorter socket timeouts, and `Connection: close` on JSON
-responses, but stale browser tabs can still make a small MCU look worse than it
-is during matrix runs.
+The matrix covers health/status, config, web IM, battery/audio/touch/display
+diagnostics, and browser preflight behavior. If early endpoints pass but later
+ones hang, check for stale browser tabs holding many MCU HTTP sockets.
 
 ## Troubleshooting
 
-| Symptom                                          | Fix                                                                                  |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------ |
-| `idf.py: command not found` from your host shell | You're trying to run IDF outside Docker. Use `./scripts/bootstrap.sh build`.         |
-| Build dies on `i2s_pdm_rx_slot_config_t … hp_en` | Codegen patch wasn't applied. Re-run `./scripts/bootstrap.sh`.                       |
-| Flash fails: `serial.serialutil.SerialException` | Hold **BOOT** while plugging in, then release after the second beep / port appears.  |
-| Boot loop / brownout                             | USB cable is power-only or the host port can't supply 500 mA. Try a different cable. |
-| Boot log reaches `Starting console REPL`, then `Out of memory!` | Rebuild with current `scripts/bootstrap.sh`; it disables the App Claw interactive CLI for the XIAO while preserving USB logs. |
-| AP never appears                                 | Wait 30 s — Wi-Fi calibration runs on first boot and adds latency.                   |
-| `esp-claw.local` doesn't resolve                 | Some routers block mDNS. Use the IP address printed on serial instead.               |
+| Symptom | Fix |
+|---|---|
+| `idf.py: command not found` from host shell | Use `./scripts/bootstrap.sh build`; IDF runs in Docker. |
+| Display stuck on white dot or old face | Check `/api/display/snapshot.json` owner and freshness, then capture both display and UI snapshots. |
+| Snapshot differs from what your eyes see | Snapshot is a software mirror, not panel readback; investigate display owner transfer and flush path. |
+| App does not boot after successful flash | Check for ROM download mode; use repo flash/monitor scripts and avoid reset-line toggles. |
+| Bad config causes boot loop | Reflash with `ERASE_NVS=1` to wipe saved config. |
+| Voice path conflicts with audio level sampler | Stop the sampler; Gemini owns the mic during active sessions. |

@@ -1,133 +1,114 @@
 # Roadmap
 
-<p align="center">
-  <img src="../images/hero-phase2.png" alt="Phase 2 illustration — JarvisNano with audio amp + speaker" width="700">
-</p>
+JarvisNano is Waveshare-first for v1. The XIAO/camera/Android/BLE tracks remain
+important, but they no longer block the USB desktop assistant release.
 
-> **Two board tracks.** The phases below are the original **XIAO ESP32-S3 Sense**
-> roadmap. The **Waveshare ESP32-S3-Touch-AMOLED-1.75** is a second supported
-> target with its own phase status — see [AMOLED-1.75 board track](#amoled-175-board-track)
-> at the bottom.
+## v1 Target
 
-## Phase 1 — Bare board chat + listen ✅ (shipped)
+- Board: Waveshare ESP32-S3-Touch-AMOLED-1.75.
+- Form factor: USB-powered desktop assistant.
+- UX: voice + expressive round face + touch cockpit.
+- Client: device firmware + browser dashboard first.
+- Security: pairing token for writes/control; secrets only in NVS.
+- Tools: JarvisMCP bridge through Gemini Live tool calls.
+- Memory: on-device `claw_memory` without storing secrets.
 
-### Firmware
-- [x] Custom board adaptation `boards/seeed/xiao_esp32s3_sense/`
-- [x] On-board MEMS PDM mic captured at 16 kHz mono PCM (I²S0 RX channel)
-- [x] PDM-TX speaker output on a single GPIO (I²S0 TX channel) for the **PAM8002A** analog amp via 270 Ω + 100 nF RC low-pass
-- [x] I²C bus reserved for Phase 3 touchscreen (GPIO5 / GPIO6)
-- [x] **Status LED heartbeat** — native firmware task drives the on-board GPIO21 user LED after core services are alive, with a boot flourish and soft heartbeat; `firmware/lua/status_led.lua` remains as the future state-pattern prototype
-- [x] CORS `Access-Control-Allow-Origin: *` baked into HTTP responses
-- [x] **MiniMax-M2.7** verified end-to-end via OpenAI-compatible custom endpoint
-- [x] Wi-Fi provisioning AP fallback (`esp-claw-XXXXXX`)
-- [x] Telegram + Web IM gateways
-- [x] mDNS at `esp-claw.local`
-- [x] MCP server live on `:18791`
-- [x] Patched upstream `esp_board_manager` codegen bug — PR open at [espressif/esp-gmf#45](https://github.com/espressif/esp-gmf/pull/45)
+## Phase 0 - Stabilize And Merge `gpt`
 
-### Browser admin
-- [x] Single-file vanilla-JS [`dashboard/index.html`](../dashboard/index.html) — three tabs (Cockpit · Flash · Settings)
-- [x] Live telemetry tiles + chat with `<think>` parsing + capability index + FATFS browser + live event stream
-- [x] **ESP Web Tools** flasher — WebSerial install of merged 7.6 MB firmware bundle, no esptool install
-- [x] Settings tab edits any `/api/config` field with diff-only saves + eye-toggle for sensitive values
-- [x] Onboarding wizard at [`dashboard/onboard.html`](../dashboard/onboard.html) — 5 steps with 6 LLM presets aligned to firmware schema
-- [x] Demo mode (`?demo=1`) that masks SSIDs / IPs / API key for portfolio screenshots
-- [x] Battery / Bluetooth / mic-level / camera-snapshot tiles ready for Phase 2/3 endpoints
+- [x] Merge the `gpt` display/runtime recovery work onto `main`.
+- [x] Keep the direct `jarvis_board` CO5300 primitive for v1.
+- [x] Keep full Waveshare BSP/LVGL migration out of the critical path.
+- [x] Preserve existing NVS/storage by default during flash.
+- [x] Document the display snapshot contract and software-mirror limitation.
+- [ ] Re-run clean build, flash, 5-minute boot watch, display snapshot, and
+      secret scan before tagging a release candidate.
 
-### Companion apps
-- [x] **`android/`** — Kotlin + Jetpack Compose reference companion (Cockpit / Chat / Settings / About). 39 files, mDNS discovery, BLE GATT skeleton, Gemma 4 E4B local-LLM interface stub.
-- [x] Public protocol contract supports external companions without coupling them to firmware internals.
+## Phase 1 - Touch And Display Runtime
 
-### Hardware
-- [x] Four parametric OpenSCAD enclosures (`Monolith` / `Cube` / `Egg` / `Radio`) in [`hardware/enclosure/`](../hardware/enclosure/)
-- [x] Each ships `enclosure.scad` + mermaid `PLAN.md` + dimensioned `technical-drawing.svg`
-- [x] Top-level `COMPARISON.md` picks the Monolith (78 × 68 × 66 mm, 4× M2 brass-insert, ~4.5 h FDM print)
-- [x] `assembly-flow.md` documents the build sequence + Phase-3 swap
+- [x] Expose `/api/touch` diagnostics.
+- [x] Preserve `/api/display/face`, `/api/display/snapshot.*`, and `/api/ui/*`.
+- [ ] Replace demo-dependent touch behavior with a dedicated CST9217 touch
+      service.
+- [ ] Short tap starts listening when idle and ends input while listening.
+- [ ] Long press opens a cockpit/menu scene.
+- [ ] Swipe/down or explicit control sleeps/dismisses UI.
+- [ ] Emote resumes after UI dismissal.
+- [ ] Add diagnostic-only touch injection behind the pairing token.
 
-### Public protocol contract
-- [x] [`docs/PROTOCOL.md`](PROTOCOL.md) — HTTP REST + WebSocket + MCP + Phase-2 BLE GATT + Phase-3 on-device Gemma 4 handoff
-- [x] BLE service UUID + 4 characteristic UUIDs frozen as `uuidv5`-derived canonicals from a single namespace UUID — clients can't drift
+## Phase 2 - Voice And Face v1
 
-## Phase 2 — Voice replies + battery + BLE bridge (in progress)
+- [ ] Make Gemini Live the primary interaction loop:
+      idle -> listening -> thinking -> speaking -> listening/idle.
+- [ ] Bind face states to real session state, not timers.
+- [ ] Prove ES7210 mic frames on Waveshare during a physical voice session.
+- [ ] Prove ES8311 speaker playback by audible output or loopback/tone route.
+- [ ] Add tap or voice-activity interrupt during speaking.
+- [ ] Ensure `/api/audio/level` pauses cleanly while Gemini owns the mic.
+- [ ] Keep display flush timeouts from wedging the face.
 
-Shipped so far: PDM-TX firmware output path, `/api/audio/level`, `/api/wifi/scan`, dashboard readiness for Phase 2/3 tiles, physical GPIO21 boot/alive LED effect verified on the USB-connected board, canonical BLE UUIDs, and a `/api/battery` not-wired stub in the bootstrap patch. Remaining work is LAN HTTP response verification from the client network path, the GATT service, ADC-backed battery readings, camera capture, TTS, and wake-word path.
+## Phase 3 - Memory And JarvisMCP Tools
 
-The shortest current finish path is [`FINISH_PLAN.md`](FINISH_PLAN.md). The
-detailed execution board is [`PHASE2_TASKS.md`](PHASE2_TASKS.md). It is
-organized into agent waves covering build/release hygiene, LAN API reliability,
-dashboard onboarding, BLE firmware, Android, voice/TTS, battery, camera,
-protocol/security, and Phase-3 display/privacy-mode work.
+- [x] Add NVS-backed `jarvis_mcp_url`, `jarvis_mcp_key`, and pairing-token
+      config fields.
+- [x] Add `/api/tools/status` without exposing secrets.
+- [ ] Configure Gemini and JarvisMCP only through NVS-backed setup.
+- [ ] Return model-visible tool errors for unconfigured, timeout, and
+      unreachable JarvisMCP states.
+- [ ] Confirm successful Gemini tool call reaches JarvisMCP and returns a
+      concise result.
+- [ ] Keep `claw_memory` enabled while preventing secret extraction.
 
-- [ ] Wire **PAM8002A combo module** (50 × 30 × 18 mm, built-in 28 mm 4 Ω dome) per [`docs/HARDWARE.md`](HARDWARE.md): GPIO4 → 270 Ω → 100 nF → PAM8002A IN+, common ground, VCC = USB 5 V rail
-- [ ] Confirm clean audio off the RC-filtered PDM-TX
-- [ ] Add **TTS** in firmware — call MiniMax-M2.7 / Bailian / OpenAI / ElevenLabs from Lua, stream PCM to I²S0 TX
-- [ ] Add **wake-word** path (esp-sr porcupine or on-device VAD)
-- [ ] Wire **503450 LiPo** to BAT+ pad — XIAO Sense has on-board USB-C charger; battery cavity in the Monolith is sized
-- [ ] Implement firmware HTTP endpoints the dashboard already calls:
-  - [x] `GET /api/battery` → `{mV, pct, state}` not-wired stub via [`patches/0004`](../patches/0004-http-phase2-preflight-battery.patch); ADC-backed readings still pending
-  - [x] `GET /api/audio/level` → `{rms_db, peak_db, ts}` — shipped 2026-05-01
-  - [ ] `GET /api/camera/snapshot` → JPEG bytes — endpoint exists, wired into dashboard + Android Camera tab. **Blocked**: 2026 batches ship OV3660 (not the documented OV2640) and the upstream `esp_cam_sensor` driver has two cascading bugs. NO-SOI bug fixed locally ([patch 0003](../patches/0003-dvp-cam-scan-for-jpeg-soi.patch)); a SCCB-mid-format-set failure still blocks capture. Switching to the legacy `espressif/esp32-camera` driver is the planned next move — see [CAMERA.md](CAMERA.md).
-  - [x] `GET /api/wifi/scan` → list of nearby APs (used by onboarding wizard step 2) via [`patches/0006`](../patches/0006-http-wifi-scan.patch)
-  - [x] `OPTIONS /api/*` → 204 with CORS headers via [`patches/0004`](../patches/0004-http-phase2-preflight-battery.patch)
-- [ ] Implement **BLE GATT service** matching the shipped canonical UUIDs in [`PROTOCOL.md`](PROTOCOL.md) — characteristics: `audio_in` (notify, PCM16 mono 16 kHz), `audio_out` (write), `state` (notify, JSON), `control` (write, JSON cmds)
-- [ ] Latency target: end of utterance → first audio frame back ≤ 800 ms in cloud mode
+## Phase 4 - Secure Browser Setup
 
-## Phase 3 — Touchscreen + Privacy Mode
+- [ ] Require `X-JarvisNano-Token` for writes/control in public builds.
+- [ ] Generate or set the token on device storage, never source.
+- [ ] Protect config writes, restart/control, Gemini control, touch injection,
+      JarvisMCP config, and destructive file actions.
+- [ ] Make the dashboard Waveshare-first:
+      face preview, touch status, Gemini state, memory/tool status, masked
+      config, and setup verification.
+- [ ] Hide or mark camera/battery/Android/BLE as unavailable for USB desktop v1.
+- [ ] Run desktop and mobile-width visual QA.
 
-- [ ] Add 1.28" Seeed Round Display for XIAO (GC9A01 + XPT2046, 39 mm OD)
-- [ ] New `spi_display` peripheral entry + `display_lcd` device entry
-- [ ] Crib LVGL bringup pattern from `boards/m5stack/m5stack_cores3/`
-- [ ] Build a chat-bubble UI matching the dashboard
-- [ ] Animated emote face via `espressif2022/esp_emote_expression` (already pulled in build)
-- [ ] **Privacy Mode** — phone runs **Gemma 4 E4B** ([model card](https://ai.google.dev/gemma/docs/core)) on-device via llama.cpp Android port + `unsloth/gemma-4-E4B-it-GGUF Q4_K_M` (~3 GB INT4). Native multimodal — audio in, no separate Whisper STT. Hand-off contract documented in [`PROTOCOL.md`](PROTOCOL.md).
+## Phase 5 - Release Candidate
 
-## Phase 4 — Vision + identity + community
+- [ ] Clean checkout build.
+- [ ] Preserve-config flash test.
+- [ ] Wiped-storage flash test.
+- [ ] 5-minute serial boot watch.
+- [ ] HTTP matrix.
+- [ ] Display screenshots for emote and UI.
+- [ ] Physical touch tests.
+- [ ] Gemini text and voice tests.
+- [ ] JarvisMCP success, timeout, and unconfigured tests.
+- [ ] Dashboard setup test from blank device.
+- [ ] Public secret/identifier scan.
+- [ ] Docs review for Waveshare build, first boot, pairing token,
+      Gemini/JarvisMCP config, and troubleshooting.
 
-- [ ] Enable the on-board OV3660 / OV2640 DVP camera path in `board_devices.yaml`
-- [ ] Add `camera` device entry + DVP peripheral
-- [ ] Expose vision tools (describe scene, OCR, find object) as MCP tools
-- [ ] Release the 3D-printable enclosure as a community remix-friendly drop
-- [ ] Optional: 1414 chip on the same enclosure for sub-GHz mesh / LoRa relay
+## Post-v1
 
-## Phase 5 — Personality + integrations
+### Phase 6 - Better UI / Optional BSP-LVGL Migration
 
-- [ ] Custom Lua skills for Mac control via MCP (open / type / clipboard / window)
-- [ ] FlowTrack / personal CRM hooks
-- [ ] Daily briefing on first interaction of the morning
-- [ ] Calendar + email summarization through MCP
-- [ ] Multi-device mesh — esp-claw nodes already discover each other via MCP; build a routing layer
+- Keep direct CO5300 path unless LVGL gives a clear measurable win.
+- If migrating, start with a standalone BSP probe branch.
+- Port cockpit scenes only after emote, voice, display, and touch acceptance
+  remain green.
 
-## Open questions
+### Phase 7 - Android And BLE Privacy Mode
 
-- BLE audio (LE Audio / A2DP source) for cordless speaker pairing? S3 supports BLE but not classic A2DP — would need an external module.
-- Multi-language wake words?
-- A "guest mode" that disables long-term memory for shared spaces?
-- Whether the open-source Android app should bundle a llama.cpp build (~30 MB) or download on first use.
+- Implement BLE state/control first, then audio.
+- Make Android first-class after firmware service stability.
+- Privacy mode with phone-side local model is post-v1.
 
----
+### Phase 8 - Battery, Enclosure, Hardware Polish
 
-## AMOLED-1.75 board track
+- Add battery/PMIC reporting after USB desktop v1 ships.
+- Fit-test enclosure, thermals, current draw, charging, and speaker loudness.
+- Add low-battery UI only after readings are real.
 
-Status for the **Waveshare ESP32-S3-Touch-AMOLED-1.75** target. Full board
-reference: [`boards/waveshare/esp32s3_touch_amoled_1_75/README.md`](../boards/waveshare/esp32s3_touch_amoled_1_75/README.md).
+### Phase 9 - Camera And XIAO Parity
 
-- [x] **Phase 1** — board adaptation: CO5300 QSPI display, CST9217 touch, I²C bus, TCA9554 IO expander, AXP2101 PMIC, USB-CDC console, 16 MB flash + 8 MB PSRAM sdkconfig
-- [x] **Phase 2** — audio chain: ES8311 DAC, ES7210 4-ch ADC (mics + hardware echo-reference lane; AEC is software via esp-sr), GPIO46 power-amp enable, I²S0 duplex
-- [x] **Phase 4** — Wi-Fi onboarding via USB-CDC `app_claw` CLI (`wifi --set --ssid … --password … --apply`), no captive portal needed
-- [x] **Phase 5** — end-to-end agent chat verified on hardware (MiniMax M2.7 via Anthropic-compatible endpoint, ~5.5 s round-trip)
-- [x] **Waveshare v1 recovery** — direct `jarvis_board` + CO5300 primitive builds and flashes in preserve mode; hardware boot watch is stable; `/api/display/snapshot.json`, `/api/display/snapshot.ppm`, active-scene `/api/ui/snapshot.ppm`, `/api/touch`, `/api/tools/status`, and canonical face states (`idle` / `listen` / `think` / `speak` / `error` / `sleep`) are live on hardware
-- [x] **Touch diagnostics service** — CST9217 service starts independently of demo Kconfig drift and reports `{ok, enabled, x_max, y_max, last_event}` from `/api/touch`
-- [x] **JarvisMCP config groundwork** — `llm_api_key` (Gemini key), `jarvis_mcp_url`, `jarvis_mcp_key`, and `pairing_token` are NVS-backed config fields; config readback masks sensitive values, and `/api/tools/status` reports configured/unconfigured state without exposing the URL or key
-- [ ] **Phase 3** — microSD mount (SDMMC 1-bit, pins D0=3/CMD=1/CLK=2). YAML committed; blocked on the `esp-bmgr-assist<0.8` pin landing in the build flow
-- [ ] **Voice-loop binding** — bind Gemini Live session state to the recovered face states within 250 ms, prove ES7210 mic frames, ES8311 speaker playback, and tap-to-interrupt on hardware
-- [ ] **Touch behavior QA** — physical short tap toggles Gemini start/end; long press opens the cockpit/menu; swipe/dismiss returns to emote without wedging voice state
-- [ ] **Pairing-token enforcement** — protect config writes, restart/control, Gemini control, touch injection, JarvisMCP config, and destructive file actions with `X-JarvisNano-Token`
-- [ ] **Dashboard v1** — make Waveshare the first-class browser setup target: face preview, touch status, Gemini state, memory/tool status, masked secrets, and desktop/mobile visual QA
-- [ ] **466×466 emote pack** — replace the stock 284×240 swim/offline pack with a JarvisNano mascot face rendered for the round AMOLED
-- [ ] **Voice loop** — mic VAD → STT → LLM → TTS → speaker, the full hands-free conversation path (multi-day, shared with the XIAO Phase-2 TTS work)
-
-### Enclosure
-
-- [x] Concept-5 mascot bust — parametric OpenSCAD, AMOLED is the chibi's face: [`hardware/enclosure/amoled-1_75/`](../hardware/enclosure/amoled-1_75/)
-- [ ] Concept-6 disc-on-stand alternative
-- [ ] Print + fit-test against a real board
+- Keep camera deferred for Waveshare v1.
+- Resume XIAO camera work separately with the `esp32-camera` path.
+- Do not let XIAO parity block the Waveshare desktop release.

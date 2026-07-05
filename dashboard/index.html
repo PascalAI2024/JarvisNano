@@ -423,7 +423,7 @@
   </nav>
   <div class="conn">
     <span id="connOrb" class="status-orb"></span>
-    <input id="hostInput" type="text" placeholder="esp-claw.local or 192.168.x.x" autocomplete="off">
+    <input id="hostInput" type="text" placeholder="esp-claw.local or device host" autocomplete="off">
     <button id="connectBtn" class="btn primary">Connect</button>
     <button id="revealBtn" class="icon-btn" title="Show / hide sensitive values">
       <svg id="iconEyeOff" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
@@ -912,13 +912,13 @@ function mockPayload(path) {
   const now = Date.now();
   const fault = intensity / 100;
   if (scenario === "wifi_flap" && path === "/api/status" && Math.floor(now / 2500) % 2 === 0) {
-    return { wifi_connected: false, wifi_mode: "AP+STA", ap_active: true, ap_ssid: "esp-claw-DIAG", ap_ip: "192.168.4.1", storage_base_path: "/fatfs" };
+    return { wifi_connected: false, wifi_mode: "AP+STA", ap_active: true, ap_ssid: "esp-claw-DIAG", ap_ip: "softap-host", storage_base_path: "/fatfs" };
   }
   if (scenario === "llm_timeout" && path === "/api/webim/status") throw new Error("HTTP 504 simulated upstream timeout");
   if (scenario === "mic_stuck" && path === "/api/audio/level") return { rms_db: -80, peak_db: -80, ts: now };
   if (path === "/api/health") {
     const heap = scenario === "heap_pressure" ? Math.round(72000 * (1 - fault * 0.7)) : 246000;
-    return { ok: heap > 42000, uptime_ms: 731200 + Math.floor(now % 90000), free_heap: heap, min_free_heap: Math.round(heap * 0.72), requests: 120 + Math.floor(now / 1000) % 900, wifi_status_ok: scenario !== "wifi_flap", wifi_mode: "AP+STA", ip: "192.0.2.80", ap_ip: "192.168.4.1" };
+    return { ok: heap > 42000, uptime_ms: 731200 + Math.floor(now % 90000), free_heap: heap, min_free_heap: Math.round(heap * 0.72), requests: 120 + Math.floor(now / 1000) % 900, wifi_status_ok: scenario !== "wifi_flap", wifi_mode: "AP+STA", ip: "192.0.2.80", ap_ip: "softap-host" };
   }
   if (path === "/api/status") return { wifi_connected: true, ip: "192.0.2.80", ap_ssid: "esp-claw-DIAG", ap_active: true, wifi_mode: "AP+STA", storage_base_path: "/fatfs" };
   if (path === "/api/config") return { agent_name: "JarvisNano", llm_backend_type: "gemini_live", llm_profile: "voice", llm_model: "gemini-3.1-flash-live-preview", llm_timeout_ms: 12000, llm_max_tokens: 1024, wifi_ssid: "LabNet" };

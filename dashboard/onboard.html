@@ -206,7 +206,7 @@
     <!-- Host bar (always visible) -->
     <div class="conn-host">
       <span class="lbl">Device</span>
-      <input id="hostInput" type="text" placeholder="esp-claw.local or 192.168.4.1">
+      <input id="hostInput" type="text" placeholder="esp-claw.local or device host">
       <button class="btn" id="hostSave" style="padding: 6px 12px; font-size: 12px;">Set</button>
     </div>
 
@@ -382,14 +382,14 @@
 const $ = (id) => document.getElementById(id);
 
 const STATE = {
-  host: localStorage.getItem("jarvis_host") || "192.168.4.1",
+  host: localStorage.getItem("jarvis_host") || "esp-claw.local",
   step: parseInt(localStorage.getItem("jarvis_onboard_step") || "0", 10),
   ws: null,
   testGotReply: false,
   handoffStaHost: "",
 };
 
-function normalizeHost(value, fallback = "192.168.4.1") {
+function normalizeHost(value, fallback = "esp-claw.local") {
   const raw = String(value || "").trim();
   if (!raw) return fallback;
   try {

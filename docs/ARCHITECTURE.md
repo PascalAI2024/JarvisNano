@@ -1,258 +1,260 @@
 # Architecture
 
-How the firmware is organized once it boots, and how a single user
-utterance flows through it.
+JarvisNano is now organized around the Waveshare ESP32-S3-Touch-AMOLED-1.75
+desktop assistant path. The older XIAO/camera track remains supported, but it
+does not define the v1 release architecture.
 
-## Subsystem map
+## Release Architecture
 
 ```mermaid
 flowchart TB
-    subgraph HW[Hardware XIAO ESP32-S3 Sense]
-        MIC[PDM mic<br/>MSM261D3526H1CPM<br/>GPIO41/42]
-        OV[OV3660 / OV2640 camera<br/>on-board DVP]
-        SPK[PAM8002A amp<br/>+ 28 mm speaker<br/>via GPIO4 + RC LPF]
-        LED[On-board user LED<br/>GPIO21 active-low]
-        FLASH[8 MB QIO flash 80 MHz]
-        PSRAM[8 MB octal PSRAM 80 MHz]
-        USB[USB-Serial-JTAG USB-C]
-        ANT[Wi-Fi 2.4 GHz + BLE 5.0]
+    subgraph HW[Waveshare ESP32-S3-Touch-AMOLED-1.75]
+        S3[ESP32-S3R8<br/>16 MB flash / 8 MB PSRAM]
+        AMOLED[CO5300 AMOLED<br/>466x466 QSPI]
+        TOUCH[CST9217 touch<br/>I2C]
+        ADC[ES7210 audio ADC<br/>dual MEMS microphones]
+        DAC[ES8311 audio DAC<br/>speaker output]
+        PMIC[AXP2101 PMIC]
+        USB[USB-Serial-JTAG]
+        WIFI[Wi-Fi]
     end
 
-    subgraph IDF[ESP-IDF v5.5]
-        I2S0[i2s_pdm driver<br/>full-duplex on I2S0]
-        WIFI[wifi_manager<br/>STA + AP fallback]
-        FATFS[FATFS on storage partition]
-        NETIF[lwip + mDNS esp-claw.local]
-        HTTP[esp_http_server<br/>port 80 + WS /ws/webim]
+    subgraph BSP[Jarvis board primitives]
+        Board[jarvis_board<br/>display, touch, codec, PMIC helpers]
+        DisplayHAL[display HAL<br/>chunked CO5300 flush]
+        TouchSvc[touch service<br/>diagnostic events]
+        AudioSvc[audio codec path]
     end
 
-    subgraph BMGR[esp_board_manager codegen]
-        PERIPH[periph cfg<br/>i2c, i2s_audio_in/out, rmt]
-        DEV[device cfg<br/>audio_adc, audio_dac, led_strip]
+    subgraph Runtime[ESP-Claw application runtime]
+        Gemini[cap_gemini_live]
+        Face[reactive face / esp_emote_gfx]
+        UILayer[ui_layer cockpit]
+        Arbiter[display arbiter]
+        HTTP[HTTP diagnostics]
+        Config[NVS app_config]
+        Memory[claw_memory]
+        Tools[JarvisMCP bridge]
     end
 
-    subgraph CLAW[ESP-Claw runtime]
-        CORE[claw_core agent loop]
-        ROUTER[claw_event_router<br/>JSON rules at /fatfs/router_rules]
-        SCHED[cap_scheduler cron triggers]
-        MEM[claw_memory structured RAG]
-        SKILLS[claw_skill 51 skills loaded]
-        LUARTI[Lua runtime<br/>chat-coding + prototype status_led.lua]
+    subgraph External[External clients and services]
+        GeminiAPI[Gemini Live API]
+        MCP[JarvisMCP /act]
+        Browser[Browser dashboard]
+        Human[User]
     end
 
-    subgraph CAPS[18 capability groups]
-        IM[IM gateways<br/>Telegram, QQ, Feishu, WeChat, Web]
-        MCPC[MCP client]
-        MCPS[MCP server 18791]
-        FILES[files cap]
-        TIME[time cap]
-        WEB[web search cap]
-        SYS[system cap]
-    end
-
-    subgraph EXT[External]
-        LLM[LLM HTTPS API<br/>MiniMax-M2.7 default]
-        IMSRV[IM platforms]
-        MCPNET[other MCP peers on LAN]
-        DASH[browser dashboard<br/>+ Android + ZeroChat]
-    end
-
-    MIC --> I2S0
-    I2S0 --> CORE
-    CORE --> I2S0
-    I2S0 --> SPK
-    USB --> CORE
-    ANT --> WIFI
-    WIFI --> NETIF
-    NETIF --> HTTP
-    FLASH --> FATFS
-    FATFS --> CORE
-    PSRAM --> CORE
-    BMGR --> CLAW
-    CORE --> LED
-    CORE <--> SKILLS
-    CORE <--> ROUTER
-    CORE <--> SCHED
-    CORE <--> MEM
-    SKILLS <--> LUARTI
-    LUARTI --> LED
-    CORE <--> CAPS
-    CAPS <--> EXT
-    HTTP <--> DASH
-    NETIF <--> EXT
+    S3 --> Board
+    AMOLED --> DisplayHAL
+    TOUCH --> TouchSvc
+    ADC --> AudioSvc
+    DAC --> AudioSvc
+    PMIC --> Board
+    USB --> Runtime
+    WIFI --> HTTP
+    Board --> DisplayHAL
+    Board --> TouchSvc
+    Board --> AudioSvc
+    TouchSvc --> Gemini
+    AudioSvc --> Gemini
+    Gemini <--> GeminiAPI
+    Gemini --> AudioSvc
+    Gemini --> Face
+    Gemini <--> Memory
+    Gemini <--> Tools
+    Tools <--> MCP
+    Config --> Gemini
+    Config --> Tools
+    Face --> Arbiter
+    UILayer --> Arbiter
+    Arbiter --> DisplayHAL
+    HTTP <--> Browser
+    HTTP --> Face
+    HTTP --> UILayer
+    HTTP --> TouchSvc
+    Human --> TOUCH
+    Human --> ADC
+    DAC --> Human
+    AMOLED --> Human
 ```
 
-## I2S0 full-duplex layout
+## Display Ownership
 
-ESP32-S3 only supports PDM on **I2S0**, so we run mic + speaker as two
-separate channels on the same controller:
+The round display has two runtime producers:
+
+- `esp_emote_gfx` / reactive face for idle, listening, thinking, speaking,
+  error, and sleep states.
+- `ui_layer` for cockpit/menu scenes and diagnostics.
+
+They must not both push frames blindly. The display arbiter owns that handoff.
 
 ```mermaid
-flowchart LR
-    subgraph S3[ESP32-S3 I2S0 controller]
-        RX[RX channel PDM-RX mode]
-        TX[TX channel PDM-TX one-line]
-    end
-
-    M[MEMS mic<br/>MSM261D3526H1CPM]
-    R[270 ohm]
-    C[100 nF to GND]
-    A[PAM8002A IN+]
-
-    M -->|CLK GPIO42| RX
-    M -->|DATA GPIO41| RX
-    TX -->|DOUT GPIO4| R
-    R --> A
-    R --- C
+stateDiagram-v2
+    [*] --> EmoteOwner
+    EmoteOwner --> UiOwner: long press / local cockpit
+    UiOwner --> EmoteOwner: dismiss / timeout / sleep
+    EmoteOwner --> EmoteOwner: face state update
+    UiOwner --> UiOwner: scene redraw
+    EmoteOwner --> Error: flush timeout / mirror unavailable
+    UiOwner --> Error: framebuffer unavailable
+    Error --> EmoteOwner: recovered owner
 ```
 
-Verified by the boot log:
+Snapshot routes report software mirrors, not physical panel readback:
 
-```
-PERIPH_I2S: I2S[0] PDM-RX, clk: 42, din: 41
-PERIPH_I2S: I2S[0] PDM-TX, clk: -1, dout: 4
-PERIPH_I2S: I2S[0] initialize success: 0x3c1fcd90
-PERIPH_I2S: I2S[0] initialize success: 0x3c1fcbbc
-```
+| Route | Source | Use |
+|---|---|---|
+| `/api/display/snapshot.json` | owner/mirror metadata | Fast health check |
+| `/api/display/snapshot.ppm` | active display owner, usually emote mirror | Face/runtime screenshot |
+| `/api/ui/snapshot.ppm` | `ui_layer` visible framebuffer | Cockpit/menu screenshot |
 
-## Single-utterance lifecycle
+`panel_readback:false` is intentional. If the panel and snapshot disagree, the
+bug is in owner transfer, stale mirror freshness, or a physical flush path. Do
+not treat the software mirror as panel truth.
 
-What happens when you speak to the robot:
+## Voice Turn
+
+Gemini Live is the primary interaction loop for Waveshare v1. Manual touch
+start/end is the first stable path; hands-free VAD follows after that path is
+boring.
 
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant M as PDM mic
-    participant LED as Status LED
-    participant CR as claw_core
-    participant LU as Lua skill
-    participant LLM as LLM API
-    participant TTS as TTS skill
-    participant DAC as PDM-TX speaker
-    participant DASH as Dashboard / Android / ZeroChat
+    participant T as Touch service
+    participant A as ES7210 mic
+    participant GL as cap_gemini_live
+    participant F as Face state
+    participant G as Gemini Live API
+    participant S as ES8311 speaker
+    participant M as JarvisMCP bridge
 
-    U->>M: voice
-    M->>CR: 16 kHz mono PCM on I2S0 RX
-    CR->>LED: state LISTENING
-    CR->>CR: VAD + endpointing
-    CR->>LLM: STT request (audio bytes)
-    LLM-->>CR: transcript
-    CR->>LED: state THINKING
-    CR->>CR: claw_event_router rule match
-    CR->>LU: dispatch matched skill
-    LU->>LLM: chat completion (tools + memory)
-    LLM-->>LU: tool calls + reply
-    LU->>CR: execute tool calls
-    CR->>DASH: WebSocket frame
-    DASH-->>U: shown in any connected client
-    CR->>LED: state SPEAKING
-    CR->>TTS: synthesize reply
-    TTS-->>DAC: PCM frames
-    DAC-->>U: speaker audio Phase 2
-    CR->>LED: state IDLE
+    U->>T: short tap
+    T->>GL: start listening
+    GL->>F: listen
+    U->>A: speech
+    A->>GL: 16 kHz PCM frames
+    U->>T: short tap
+    T->>GL: end input
+    GL->>F: think
+    GL->>G: activityEnd + buffered audio
+    G-->>GL: transcript / toolCall / audio
+    opt tool call
+        GL->>M: dispatch tool
+        M-->>GL: concise result or model-visible error
+        GL->>G: toolResponse
+    end
+    GL->>F: speak
+    GL->>S: 24 kHz PCM playback
+    S-->>U: audio
+    GL->>F: listen or idle
 ```
 
-## Status LED state machine
+Known face states are intentionally small:
 
-The on-board GPIO21 user LED (active-LOW) is driven by a native firmware
-task started after `app_claw_start()` brings the event router, scheduler, Lua,
-MCP, and Web IM online. This avoids spending Lua heap during boot and gives
-the core services first claim on task memory. LED startup is intentionally
-non-fatal: if the heartbeat task cannot allocate, the firmware keeps running
-and logs a warning. The Lua `status_led.lua` file remains as a prototype for
-future listening/thinking/speaking/error state patterns, but it is not
-auto-started by router rules on the XIAO build.
+| Public value | Meaning |
+|---|---|
+| `idle` | Ready, not currently listening |
+| `listen` | Capturing user input |
+| `think` | Waiting for Gemini or a tool result |
+| `speak` | Playing model audio |
+| `error` | Recoverable fault |
+| `sleep` | Dismissed or inactive |
 
-```mermaid
-stateDiagram-v2
-    [*] --> BOOT
-    BOOT --> IDLE: boot flourish + settle pulse
-    IDLE --> LISTENING: mic VAD opens
-    LISTENING --> THINKING: utterance complete → LLM dispatched
-    THINKING --> SPEAKING: TTS playback starts
-    SPEAKING --> IDLE: TTS done
-    LISTENING --> IDLE: timeout / cancel
-    THINKING --> ERROR: LLM failure
-    ERROR --> IDLE: SOS triple-blink + pause
-    IDLE --> IDLE: soft double heartbeat every ~2 s
-```
+## Config And Secrets
 
-## Why structured memory matters
-
-ESP-Claw's `claw_memory` keeps facts on-device (FATFS). The system prompt
-is small; relevant memories are retrieved per-turn. Privacy stays local;
-only the prompt + relevant slice ever hits the LLM.
+Runtime secrets are NVS values. They are not source files, sample configs, or
+generated firmware defaults.
 
 ```mermaid
 flowchart LR
-    subgraph OnDevice[XIAO Sense FATFS]
-        RAW[raw notes]
-        IDX[FTS index]
-        CTX[per-turn slice]
-    end
-    USR[user msg] --> SCAN[similarity scan] --> CTX
-    RAW --> IDX --> SCAN
-    CTX --> PROMPT[final prompt] --> LLM[(LLM)]
-    LLM --> REPLY[reply]
-    REPLY -.->|extract facts| RAW
+    Browser[Dashboard or setup script]
+    Token[X-JarvisNano-Token]
+    ConfigAPI[/api/config]
+    NVS[(NVS app namespace)]
+    GeminiKey[Gemini key<br/>masked on readback]
+    MCPURL[JarvisMCP URL<br/>masked/read protected]
+    MCPKey[JarvisMCP key<br/>masked on readback]
+    Pairing[Pairing token<br/>never displayed raw]
+    Tools[/api/tools/status]
+
+    Browser --> Token
+    Token --> ConfigAPI
+    Browser --> ConfigAPI
+    ConfigAPI --> NVS
+    NVS --> GeminiKey
+    NVS --> MCPURL
+    NVS --> MCPKey
+    NVS --> Pairing
+    NVS --> Tools
+    Tools --> Browser
 ```
 
-## Boot order
+For public builds, reads can remain open on a trusted LAN. Writes and control
+routes need pairing-token protection. Protected routes include config writes,
+restart/control, Gemini control, touch injection, JarvisMCP config, and
+destructive file actions.
+
+## Memory And Tools
+
+`claw_memory` remains on-device for local assistant memory. It must not extract
+or store secrets. JarvisMCP is the v1 tool execution path:
 
 ```mermaid
-flowchart TD
-    A[ROM bootloader] --> B[2nd-stage bootloader]
-    B --> C[octal_psram + flash detect]
-    C --> D[heap init + PSRAM pool]
-    D --> E[main_task]
-    E --> F[BOARD_MANAGER<br/>I2C, I2S0 PDM-RX + PDM-TX, RMT]
-    F --> G[FATFS mount + skills sync]
-    G --> H[wifi_manager<br/>STA then AP fallback]
-    H --> I[claw_event_router<br/>load /fatfs/router_rules/router_rules.json]
-    I --> J[cap_scheduler]
-    J --> K[http_server port 80<br/>+ WS /ws/webim<br/>+ MCP server 18791]
-    K --> L[publish startup/boot_completed]
-    L --> M[native GPIO21 status LED task]
-    M --> N[idle awaiting LLM creds<br/>OR claw_core ready]
+flowchart TB
+    User[User request]
+    Gemini[Gemini Live session]
+    Memory[claw_memory<br/>local facts]
+    ToolCall[Gemini function call]
+    Bridge[JarvisMCP bridge]
+    MCP[JarvisMCP /act]
+    Result[Concise tool result]
+    Failure[Model-visible tool error]
+
+    User --> Gemini
+    Memory --> Gemini
+    Gemini --> ToolCall
+    ToolCall --> Bridge
+    Bridge -->|configured and reachable| MCP
+    MCP --> Result
+    Bridge -->|unconfigured / timeout| Failure
+    Result --> Gemini
+    Failure --> Gemini
 ```
 
-USB serial remains enabled for logs. The App Claw interactive serial REPL is
-disabled in the XIAO bootstrap build because its command registration can
-exhaust internal heap after Wi-Fi, Lua, router, scheduler, Web IM, MCP, and
-camera startup.
+Unconfigured or unreachable JarvisMCP must not crash or wedge the live session.
+It returns a short failure result to the model.
 
-## File layout (firmware side)
+## Build Boundary
 
-The `application/edge_agent/` ESP-IDF project is laid out as follows
-(after `bootstrap.sh` runs):
+Canonical sources live in this repo under `firmware/`, `boards/`, and
+`scripts/bootstrap.sh`. The ignored `esp-claw/` checkout is generated on every
+bootstrap/build.
 
-```
-edge_agent/
-├── main/                              # app entry, Wi-Fi mgr, HTTP + app startup
-├── components/                        # capability impls (im, mcp, scheduler, memory…)
-├── boards/                            # the YAML+C board adaptations
-│   ├── espressif/                     #   upstream-provided
-│   ├── m5stack/                       #   upstream-provided
-│   └── seeed/xiao_esp32s3_sense/      #   ← OURS
-├── managed_components/                # idf-component-manager pulls
-│   └── espressif__esp_board_manager/  #   ← codegen patched here
-├── fatfs_image/                       # FATFS contents baked into flash
-│   ├── scripts/builtin/status_led.lua #   ← prototype; legacy rule disabled on XIAO
-│   ├── router_rules/router_rules.json #   event-router rules
-│   └── skills/                        #   capability docs for the LLM
-└── partitions_8MB.csv                 # 8 MB layout used on the XIAO
+```mermaid
+flowchart LR
+    Canonical[Tracked JarvisNano sources]
+    Bootstrap[scripts/bootstrap.sh]
+    EspClaw[ignored esp-claw checkout]
+    Build[idf.py build]
+    Flash[scripts/flash.sh]
+    Device[Waveshare board]
+
+    Canonical --> Bootstrap
+    Bootstrap --> EspClaw
+    EspClaw --> Build
+    Build --> Flash
+    Flash --> Device
 ```
 
-## Public protocol surface
+Edits made only under `esp-claw/` are disposable. If a generated file must be
+changed, add an idempotent patch function to `scripts/bootstrap.sh` or patch the
+canonical source that gets copied into the generated tree.
 
-Everything a client (browser dashboard, Android app, ZeroChat, third-party)
-talks to is documented in [`docs/PROTOCOL.md`](PROTOCOL.md). Versioned via
-the `X-JarvisNano-Protocol: 1` header.
+## Post-v1 Tracks
 
-| Surface | Where | Used by |
-| --- | --- | --- |
-| HTTP REST | port 80 | dashboard · Android · ZeroChat |
-| WebSocket `/ws/webim` | port 80 | dashboard · Android · ZeroChat |
-| MCP JSON-RPC | port 18791 `/mcp_server` | other MCP peers |
-| BLE GATT (Phase 2) | canonical UUIDs in PROTOCOL.md; service planned | Android · ZeroChat |
-| On-device LLM hand-off (Phase 3) | BLE audio + control | Android (Gemma 4 E4B local) |
+- BSP/LVGL migration only after direct CO5300 display, touch, voice, and
+  diagnostics stay green.
+- Android/BLE after firmware service stability.
+- Battery/enclosure polish after USB desktop v1 ships.
+- Camera/XIAO parity after Waveshare voice/display release candidate.
