@@ -263,10 +263,13 @@ static esp_err_t display_face_control_handler(httpd_req_t *req)
         state_text = state_item->valuestring;
     }
 
+    bool state_error = state_text && (strcmp(state_text, "error") == 0);
+    bool state_sleep = state_text && (strcmp(state_text, "sleep") == 0 || strcmp(state_text, "sleeping") == 0);
     emote_face_state_t state = EMOTE_FACE_IDLE;
-    if (!display_parse_face_state(state_text, &state)) {
+    if (!state_error && !state_sleep && !display_parse_face_state(state_text, &state)) {
         cJSON_Delete(root);
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "state must be off, idle, listen, think, or speak");
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "state must be off, idle, listen, think, speak, error, or sleep");
     }
 
     int amp = -1;
@@ -285,13 +288,35 @@ static esp_err_t display_face_control_handler(httpd_req_t *req)
     cJSON_Delete(root);
 
     emote_face_set_synthetic_amplitude(amp);
-    esp_err_t err = emote_face_set_state(state);
+    esp_err_t err = ESP_OK;
+    const char *response_state = NULL;
+    if (state_error) {
+        response_state = "error";
+        esp_err_t alert_err = emote_set_alert(EMOTE_ALERT_GENERIC, "error");
+        if (alert_err != ESP_OK) {
+            ESP_LOGW(TAG, "display face error alert unavailable: %s", esp_err_to_name(alert_err));
+        }
+        err = emote_face_set_state(EMOTE_FACE_THINKING);
+    } else if (state_sleep) {
+        response_state = "sleep";
+        esp_err_t alert_err = emote_set_alert(EMOTE_ALERT_GENERIC, "tap to wake");
+        if (alert_err != ESP_OK) {
+            ESP_LOGW(TAG, "display face sleep alert unavailable: %s", esp_err_to_name(alert_err));
+        }
+        err = emote_face_set_state(EMOTE_FACE_OFF);
+    } else {
+        response_state = display_face_state_name(state);
+        if (state != EMOTE_FACE_OFF) {
+            (void)emote_clear_alert();
+        }
+        err = emote_face_set_state(state);
+    }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "display face control failed: %s", esp_err_to_name(err));
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "display face control failed");
     }
 
-    ESP_LOGI(TAG, "display face control state=%s amp=%d", display_face_state_name(state), amp);
+    ESP_LOGI(TAG, "display face control state=%s amp=%d", response_state, amp);
 
     cJSON *resp = cJSON_CreateObject();
     if (!resp) {
@@ -299,7 +324,7 @@ static esp_err_t display_face_control_handler(httpd_req_t *req)
         return ESP_ERR_NO_MEM;
     }
     cJSON_AddBoolToObject(resp, "ok", true);
-    http_server_json_add_string(resp, "state", display_face_state_name(state));
+    http_server_json_add_string(resp, "state", response_state);
     cJSON_AddNumberToObject(resp, "amp", amp);
     return http_server_send_json_response(req, resp);
 #endif

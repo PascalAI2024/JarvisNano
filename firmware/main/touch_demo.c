@@ -9,7 +9,6 @@
 
 #include <stdio.h>
 
-#if CONFIG_APP_CLAW_CAP_GEMINI_LIVE
 #include <stdint.h>
 #include <string.h>
 
@@ -734,6 +733,7 @@ esp_err_t touch_demo_get_diagnostics_json(char *out, size_t out_size)
 
     int n = snprintf(out, out_size,
                      "{\"ok\":true,\"started\":%s,\"touch_ready\":%s,"
+                     "\"enabled\":%s,\"x_max\":466,\"y_max\":466,"
                      "\"touching\":%s,\"local_demo_running\":%s,"
                      "\"gemini_configured\":%s,\"gemini_active\":%s,"
                      "\"polls\":%lu,\"touch_edges\":%lu,\"taps\":%lu,"
@@ -745,8 +745,11 @@ esp_err_t touch_demo_get_diagnostics_json(char *out, size_t out_size)
                      "\"last_x\":%u,\"last_y\":%u,\"last_strength\":%u,"
                      "\"last_point_num\":%u,\"last_touch_ms\":%llu,"
                      "\"last_action_ms\":%llu,\"last_action\":\"%s\","
-                     "\"last_scene\":\"%s\"}",
+                     "\"last_scene\":\"%s\",\"last_event\":{"
+                     "\"x\":%u,\"y\":%u,\"strength\":%u,\"touching\":%s,"
+                     "\"action\":\"%s\",\"scene\":\"%s\"}}",
                      snap.started ? "true" : "false",
+                     snap.touch_ready ? "true" : "false",
                      snap.touch_ready ? "true" : "false",
                      snap.touching ? "true" : "false",
                      snap.local_demo_running ? "true" : "false",
@@ -771,6 +774,12 @@ esp_err_t touch_demo_get_diagnostics_json(char *out, size_t out_size)
                      (unsigned long long)snap.last_touch_ms,
                      (unsigned long long)snap.last_action_ms,
                      snap.last_action,
+                     snap.last_scene,
+                     (unsigned)snap.last_x,
+                     (unsigned)snap.last_y,
+                     (unsigned)snap.last_strength,
+                     snap.touching ? "true" : "false",
+                     snap.last_action,
                      snap.last_scene);
     if (n < 0 || (size_t)n >= out_size) {
         return ESP_ERR_NO_MEM;
@@ -788,25 +797,3 @@ esp_err_t touch_demo_run_scene(const char *scene_name)
     ESP_LOGI(TAG, "HTTP touch diagnostic scene=%s", local_scene_name(scene));
     return ESP_OK;
 }
-#else
-esp_err_t touch_demo_start(touch_demo_gemini_configured_cb_t gemini_configured)
-{
-    (void)gemini_configured;
-    return ESP_ERR_NOT_SUPPORTED;
-}
-
-esp_err_t touch_demo_get_diagnostics_json(char *out, size_t out_size)
-{
-    if (!out || out_size == 0) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    int n = snprintf(out, out_size, "{\"ok\":false,\"error\":\"touch not enabled\"}");
-    return (n < 0 || (size_t)n >= out_size) ? ESP_ERR_NO_MEM : ESP_OK;
-}
-
-esp_err_t touch_demo_run_scene(const char *scene_name)
-{
-    (void)scene_name;
-    return ESP_ERR_NOT_SUPPORTED;
-}
-#endif

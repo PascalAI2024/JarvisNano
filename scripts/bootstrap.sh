@@ -359,6 +359,7 @@ copy_http_display_diagnostics() {
     local audio_src="$ROOT/firmware/http_server/http_server_audio_level_api.c"
     local debug_src="$ROOT/firmware/http_server/http_server_debug_api.c"
     local ui_src="$ROOT/firmware/http_server/http_server_ui_api.c"
+    local tools_src="$ROOT/firmware/http_server/http_server_tools_api.c"
     local dst_dir="$ESP_CLAW_DIR/application/edge_agent/components/http_server"
     local cmake="$dst_dir/CMakeLists.txt"
     local priv="$dst_dir/http_server_priv.h"
@@ -369,15 +370,18 @@ copy_http_display_diagnostics() {
     [ -f "$audio_src" ] || die "missing vendored audio-level HTTP API at $audio_src"
     [ -f "$debug_src" ] || die "missing vendored debug HTTP API at $debug_src"
     [ -f "$ui_src" ] || die "missing vendored ui HTTP API at $ui_src"
+    [ -f "$tools_src" ] || die "missing vendored tools HTTP API at $tools_src"
     [ -d "$dst_dir" ] || die "http_server component not found at $dst_dir"
-    log "copying display/touch/audio/ui diagnostics HTTP API → upstream tree"
+    log "copying display/touch/audio/ui/tools diagnostics HTTP API → upstream tree"
     cp -f "$src" "$dst_dir/http_server_display_api.c"
     cp -f "$touch_src" "$dst_dir/http_server_touch_api.c"
     cp -f "$audio_src" "$dst_dir/http_server_audio_level_api.c"
     cp -f "$debug_src" "$dst_dir/http_server_debug_api.c"
     cp -f "$ui_src" "$dst_dir/http_server_ui_api.c"
+    cp -f "$tools_src" "$dst_dir/http_server_tools_api.c"
     python3 - "$cmake" "$priv" "$core" "$public_h" <<'PY'
 import pathlib
+import re
 import sys
 
 cmake = pathlib.Path(sys.argv[1])
@@ -396,8 +400,13 @@ if '"http_server_touch_api.c"' not in s:
     if anchor not in s:
         raise SystemExit("http_server CMake touch source anchor missing")
     s = s.replace(anchor, anchor + '        "http_server_touch_api.c"\n', 1)
-if '"http_server_debug_api.c"' not in s:
+if '"http_server_audio_level_api.c"' not in s:
     anchor = '        "http_server_touch_api.c"\n'
+    if anchor not in s:
+        raise SystemExit("http_server CMake audio-level source anchor missing")
+    s = s.replace(anchor, anchor + '        "http_server_audio_level_api.c"\n', 1)
+if '"http_server_debug_api.c"' not in s:
+    anchor = '        "http_server_audio_level_api.c"\n'
     if anchor not in s:
         raise SystemExit("http_server CMake debug source anchor missing")
     s = s.replace(anchor, anchor + '        "http_server_debug_api.c"\n', 1)
@@ -406,6 +415,11 @@ if '"http_server_ui_api.c"' not in s:
     if anchor not in s:
         raise SystemExit("http_server CMake ui source anchor missing")
     s = s.replace(anchor, anchor + '        "http_server_ui_api.c"\n', 1)
+if '"http_server_tools_api.c"' not in s:
+    anchor = '        "http_server_ui_api.c"\n'
+    if anchor not in s:
+        raise SystemExit("http_server CMake tools source anchor missing")
+    s = s.replace(anchor, anchor + '        "http_server_tools_api.c"\n', 1)
 for dep in ("heap", "emote", "ui_layer"):
     if f"        {dep}\n" not in s:
         anchor = "        esp_timer\n"
@@ -427,9 +441,15 @@ if touch_decl not in h:
     if anchor not in h:
         raise SystemExit("http_server_priv touch decl anchor missing")
     h = h.replace(anchor, anchor + touch_decl, 1)
+audio_decl = "esp_err_t http_server_register_audio_level_routes(httpd_handle_t server);\n"
+if audio_decl not in h:
+    anchor = "esp_err_t http_server_register_touch_routes(httpd_handle_t server);\n"
+    if anchor not in h:
+        raise SystemExit("http_server_priv audio-level decl anchor missing")
+    h = h.replace(anchor, anchor + audio_decl, 1)
 debug_decl = "esp_err_t http_server_register_debug_routes(httpd_handle_t server);\n"
 if debug_decl not in h:
-    anchor = "esp_err_t http_server_register_touch_routes(httpd_handle_t server);\n"
+    anchor = "esp_err_t http_server_register_audio_level_routes(httpd_handle_t server);\n"
     if anchor not in h:
         raise SystemExit("http_server_priv debug decl anchor missing")
     h = h.replace(anchor, anchor + debug_decl, 1)
@@ -439,6 +459,12 @@ if ui_decl not in h:
     if anchor not in h:
         raise SystemExit("http_server_priv ui decl anchor missing")
     h = h.replace(anchor, anchor + ui_decl, 1)
+tools_decl = "esp_err_t http_server_register_tools_routes(httpd_handle_t server);\n"
+if tools_decl not in h:
+    anchor = "esp_err_t http_server_register_ui_routes(httpd_handle_t server);\n"
+    if anchor not in h:
+        raise SystemExit("http_server_priv tools decl anchor missing")
+    h = h.replace(anchor, anchor + tools_decl, 1)
 priv.write_text(h)
 
 c = core.read_text()
@@ -456,8 +482,13 @@ if "http_server_register_touch_routes" not in c:
     if anchor not in c:
         raise SystemExit("http_server_core touch route anchor missing")
     c = c.replace(anchor, anchor + '    ESP_RETURN_ON_ERROR(http_server_register_touch_routes(s_ctx.server), TAG, "Failed to register touch routes");\n', 1)
-if "http_server_register_debug_routes" not in c:
+if "http_server_register_audio_level_routes" not in c:
     anchor = '    ESP_RETURN_ON_ERROR(http_server_register_touch_routes(s_ctx.server), TAG, "Failed to register touch routes");\n'
+    if anchor not in c:
+        raise SystemExit("http_server_core audio-level route anchor missing")
+    c = c.replace(anchor, anchor + '    ESP_RETURN_ON_ERROR(http_server_register_audio_level_routes(s_ctx.server), TAG, "Failed to register audio level routes");\n', 1)
+if "http_server_register_debug_routes" not in c:
+    anchor = '    ESP_RETURN_ON_ERROR(http_server_register_audio_level_routes(s_ctx.server), TAG, "Failed to register audio level routes");\n'
     if anchor not in c:
         raise SystemExit("http_server_core debug route anchor missing")
     c = c.replace(anchor, anchor + '    ESP_RETURN_ON_ERROR(http_server_register_debug_routes(s_ctx.server), TAG, "Failed to register debug routes");\n', 1)
@@ -466,6 +497,11 @@ if "http_server_register_ui_routes" not in c:
     if anchor not in c:
         raise SystemExit("http_server_core ui route anchor missing")
     c = c.replace(anchor, anchor + '    ESP_RETURN_ON_ERROR(http_server_register_ui_routes(s_ctx.server), TAG, "Failed to register ui routes");\n', 1)
+if "http_server_register_tools_routes" not in c:
+    anchor = '    ESP_RETURN_ON_ERROR(http_server_register_ui_routes(s_ctx.server), TAG, "Failed to register ui routes");\n'
+    if anchor not in c:
+        raise SystemExit("http_server_core tools route anchor missing")
+    c = c.replace(anchor, anchor + '    ESP_RETURN_ON_ERROR(http_server_register_tools_routes(s_ctx.server), TAG, "Failed to register tools routes");\n', 1)
 core.write_text(c)
 
 hp = public_h.read_text()
@@ -480,7 +516,7 @@ if "touch_get_diagnostics" not in hp:
     hp = hp.replace(anchor, anchor + svc_fields, 1)
 public_h.write_text(hp)
 
-print("display/touch diagnostics HTTP API wired")
+print("display/touch/tools diagnostics HTTP API wired")
 PY
 }
 
@@ -1714,6 +1750,193 @@ if old not in s:
     raise SystemExit("could not locate gemini-live touch monitor block in main.c — upstream may have changed")
 p.write_text(s.replace(old, new, 1))
 print("patched", p)
+PY
+}
+
+apply_public_v1_config_patch() {
+    # Phase 3/4 groundwork: keep Gemini/JarvisMCP secrets in NVS-backed
+    # app_config, mask sensitive reads, and pass JarvisMCP settings into the
+    # Gemini Live capability. This patches generated ESP-Claw sources; canonical
+    # bootstrap keeps the edits reproducible from a clean checkout.
+    local app_h="$ESP_CLAW_DIR/application/edge_agent/components/app_config/include/app_config.h"
+    local app_c="$ESP_CLAW_DIR/application/edge_agent/components/app_config/app_config.c"
+    local config_api="$ESP_CLAW_DIR/application/edge_agent/components/http_server/http_server_config_api.c"
+    local main_c="$ESP_CLAW_DIR/application/edge_agent/main/main.c"
+    [ -f "$app_h" ] || die "app_config.h not found at $app_h"
+    [ -f "$app_c" ] || die "app_config.c not found at $app_c"
+    [ -f "$config_api" ] || die "http_server_config_api.c not found at $config_api"
+    [ -f "$main_c" ] || die "main.c not found at $main_c"
+    log "applying public v1 NVS/config masking patch"
+python3 - "$app_h" "$app_c" "$config_api" "$main_c" <<'PY'
+import pathlib
+import re
+import sys
+
+app_h = pathlib.Path(sys.argv[1])
+app_c = pathlib.Path(sys.argv[2])
+config_api = pathlib.Path(sys.argv[3])
+main_c = pathlib.Path(sys.argv[4])
+
+h = app_h.read_text()
+if "char jarvis_mcp_key[APP_CONFIG_STR_LEN];" not in h:
+    anchor = "    char search_tavily_key[APP_CONFIG_STR_LEN];\n"
+    add = (
+        anchor +
+        "    char jarvis_mcp_key[APP_CONFIG_STR_LEN];\n"
+        "    char jarvis_mcp_url[APP_CONFIG_STR_LEN];\n"
+        "    char pairing_token[64];\n"
+    )
+    if anchor not in h:
+        raise SystemExit("app_config.h JarvisMCP field anchor missing")
+    h = h.replace(anchor, add, 1)
+app_h.write_text(h)
+
+c = app_c.read_text()
+if "#define APP_DEFAULT_JARVIS_MCP_KEY" not in c:
+    anchor = '#define APP_DEFAULT_SEARCH_TAVILY_KEY     ""\n'
+    add = (
+        anchor +
+        '#define APP_DEFAULT_JARVIS_MCP_KEY       ""\n'
+        '#define APP_DEFAULT_JARVIS_MCP_URL       ""\n'
+        '#define APP_DEFAULT_PAIRING_TOKEN        ""\n'
+    )
+    if anchor not in c:
+        raise SystemExit("app_config.c JarvisMCP default anchor missing")
+    c = c.replace(anchor, add, 1)
+if 'APP_CONFIG_FIELD(jarvis_mcp_key, "jarvis_mcp_key"' not in c:
+    anchor = '    APP_CONFIG_FIELD(search_tavily_key, "tavily_key", APP_DEFAULT_SEARCH_TAVILY_KEY),\n'
+    add = (
+        anchor +
+        '    APP_CONFIG_FIELD(jarvis_mcp_key, "jarvis_mcp_key", APP_DEFAULT_JARVIS_MCP_KEY),\n'
+        '    APP_CONFIG_FIELD(jarvis_mcp_url, "jarvis_mcp_url", APP_DEFAULT_JARVIS_MCP_URL),\n'
+        '    APP_CONFIG_FIELD(pairing_token, "pairing_token", APP_DEFAULT_PAIRING_TOKEN),\n'
+    )
+    if anchor not in c:
+        raise SystemExit("app_config.c JarvisMCP field anchor missing")
+    c = c.replace(anchor, add, 1)
+app_c.write_text(c)
+
+api = config_api.read_text()
+if 'CONFIG_FIELD("jarvis",       jarvis_mcp_key)' not in api:
+    anchor = '    CONFIG_FIELD("search",       search_tavily_key),\n'
+    add = (
+        anchor +
+        '\n'
+        '    CONFIG_FIELD("jarvis",       jarvis_mcp_key),\n'
+        '    CONFIG_FIELD("jarvis",       jarvis_mcp_url),\n'
+        '    CONFIG_FIELD("security",     pairing_token),\n'
+    )
+    if anchor not in api:
+        raise SystemExit("http_server_config_api.c JarvisMCP CONFIG_FIELD anchor missing")
+    api = api.replace(anchor, add, 1)
+
+helper_anchor = "static const char *TAG = \"http_config_api\";\n"
+helpers = r'''
+static bool config_field_is_sensitive(const char *name)
+{
+    if (!name) {
+        return false;
+    }
+    size_t len = strlen(name);
+    return strcmp(name, "wifi_password") == 0 ||
+           strcmp(name, "llm_api_key") == 0 ||
+           strcmp(name, "jarvis_mcp_key") == 0 ||
+           strcmp(name, "jarvis_mcp_url") == 0 ||
+           strcmp(name, "pairing_token") == 0 ||
+           strcmp(name, "tg_bot_token") == 0 ||
+           strstr(name, "secret") != NULL ||
+           strstr(name, "api_key") != NULL ||
+           (len >= 6 && strcmp(name + len - 6, "_token") == 0) ||
+           (len >= 4 && strcmp(name + len - 4, "_key") == 0);
+}
+
+static bool config_value_is_mask(const char *value)
+{
+    return value && strcmp(value, "********") == 0;
+}
+'''
+helper_pattern = re.compile(
+    r'\nstatic bool config_field_is_sensitive\(const char \*name\)\n'
+    r'\{.*?\n\}\n\n'
+    r'static bool config_value_is_mask\(const char \*value\)\n'
+    r'\{.*?\n\}\n',
+    re.S,
+)
+api, helper_count = helper_pattern.subn("\n" + helpers.strip("\n") + "\n", api, count=1)
+if helper_count == 0:
+    if helper_anchor not in api:
+        raise SystemExit("http_server_config_api.c TAG anchor missing")
+    api = api.replace(helper_anchor, helper_anchor + helpers, 1)
+
+old_emit = "        http_server_json_add_string(root, field->name, field_value(config, field));\n"
+new_emit = (
+    "        const char *value = field_value(config, field);\n"
+    "        if (config_field_is_sensitive(field->name) && value && value[0]) {\n"
+    "            http_server_json_add_string(root, field->name, \"********\");\n"
+    "        } else {\n"
+    "            http_server_json_add_string(root, field->name, value);\n"
+    "        }\n"
+)
+if new_emit not in api:
+    if old_emit not in api:
+        raise SystemExit("http_server_config_api.c emit_config value anchor missing")
+    api = api.replace(old_emit, new_emit, 1)
+
+old_meta = (
+    '                    cJSON_AddStringToObject(entry, "name", field->name);\n'
+    '                    cJSON_AddStringToObject(entry, "group", field->group);\n'
+    '                    cJSON_AddItemToArray(fields, entry);\n'
+)
+new_meta = (
+    '                    cJSON_AddStringToObject(entry, "name", field->name);\n'
+    '                    cJSON_AddStringToObject(entry, "group", field->group);\n'
+    '                    cJSON_AddBoolToObject(entry, "sensitive", config_field_is_sensitive(field->name));\n'
+    '                    cJSON_AddItemToArray(fields, entry);\n'
+)
+if new_meta not in api:
+    if old_meta not in api:
+        raise SystemExit("http_server_config_api.c meta field anchor missing")
+    api = api.replace(old_meta, new_meta, 1)
+
+old_post = (
+    '        if (!cJSON_IsString(item)) {\n'
+    '            continue;\n'
+    '        }\n'
+)
+new_post = (
+    '        if (!cJSON_IsString(item)) {\n'
+    '            continue;\n'
+    '        }\n'
+    '        if (config_field_is_sensitive(field->name) && config_value_is_mask(item->valuestring)) {\n'
+    '            continue;\n'
+    '        }\n'
+)
+if new_post not in api:
+    if old_post not in api:
+        raise SystemExit("http_server_config_api.c post string anchor missing")
+    api = api.replace(old_post, new_post, 1)
+config_api.write_text(api)
+
+m = main_c.read_text()
+old = (
+    "    /* Gemini Live uses the current app_config llm_api_key field. */\n"
+    "    s_gemini_api_key_configured = (s_config->llm_api_key[0] != '\\0');\n"
+    "    cap_gemini_live_set_api_key(s_config->llm_api_key);\n"
+)
+new = (
+    "    /* Gemini Live uses the current app_config llm_api_key field. */\n"
+    "    s_gemini_api_key_configured = (s_config->llm_api_key[0] != '\\0');\n"
+    "    cap_gemini_live_set_api_key(s_config->llm_api_key);\n"
+    "    cap_gemini_live_set_mcp_key(s_config->jarvis_mcp_key);\n"
+    "    cap_gemini_live_set_mcp_url(s_config->jarvis_mcp_url);\n"
+)
+if "cap_gemini_live_set_mcp_key(s_config->jarvis_mcp_key);" not in m:
+    if old not in m:
+        raise SystemExit("main.c Gemini Live app_config anchor missing")
+    m = m.replace(old, new, 1)
+main_c.write_text(m)
+
+print("public v1 config patch applied")
 PY
 }
 
@@ -4670,6 +4893,7 @@ main() {
     apply_gemini_diag_buffer_status_patch
     apply_gemini_live_main_require_patch
     apply_gemini_live_api_key_patch
+    apply_public_v1_config_patch
     apply_gemini_live_network_ready_patch
     apply_gemini_live_nonblocking_stop_patch
     apply_http_wifi_scan_patch
