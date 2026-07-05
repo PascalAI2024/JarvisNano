@@ -54,6 +54,8 @@ static const char *TAG = "ui_layer";
 #define UI_MENU_DOT_R   14
 #define UI_MENU_HIT_R   30       /* tap within this of a dot selects it */
 
+#define UI_COCKPIT_HOLD_MS 5000  /* long enough for physical QA, then release back to emote */
+
 /* Largest JPEG accepted by ui_layer_show_image(path); larger files are rejected
  * (an error placeholder is shown) so a bad/huge path can't exhaust PSRAM. */
 #define UI_IMG_MAX_BYTES (512 * 1024)
@@ -87,6 +89,7 @@ static const char *TAG = "ui_layer";
 typedef enum {
     UI_CMD_SHOW_CHOICE = 0,
     UI_CMD_SHOW_COCKPIT,
+    UI_CMD_SHOW_IDLE_HUD,
     UI_CMD_SHOW_DATA,
     UI_CMD_SHOW_IMAGE,
     UI_CMD_SHOW_MENU,
@@ -378,7 +381,11 @@ static void ui_render_cockpit(void)
                                   UI_COL_WHITE, false, 0,
                                   DISPLAY_HAL_TEXT_ALIGN_CENTER,
                                   DISPLAY_HAL_TEXT_VALIGN_MIDDLE);
-    display_hal_draw_text_aligned(0, UI_CY + 82, s_lcd_width, 32, "DISPLAY ONLINE",
+    display_hal_draw_text_aligned(0, UI_CY + 70, s_lcd_width, 32, "MEMORY ONLINE",
+                                  UI_FONT_SMALL, UI_COL_EDGE, false, 0,
+                                  DISPLAY_HAL_TEXT_ALIGN_CENTER,
+                                  DISPLAY_HAL_TEXT_VALIGN_MIDDLE);
+    display_hal_draw_text_aligned(0, UI_CY + 102, s_lcd_width, 32, "TAP TO TALK",
                                   UI_FONT_SMALL, UI_COL_DIM, false, 0,
                                   DISPLAY_HAL_TEXT_ALIGN_CENTER,
                                   DISPLAY_HAL_TEXT_VALIGN_MIDDLE);
@@ -392,6 +399,17 @@ static void ui_render_cockpit(void)
         xSemaphoreGive(s_result_mx);
     }
     ESP_LOGI(TAG, "cockpit frame presented");
+}
+
+static void ui_render_idle_hud(void)
+{
+    ui_render_cockpit();
+    if (s_result_mx && xSemaphoreTake(s_result_mx, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_opt_count = 0;
+        s_scene = UI_SCENE_IDLE_HUD;
+        xSemaphoreGive(s_result_mx);
+    }
+    ESP_LOGI(TAG, "idle HUD presented");
 }
 
 static void ui_render_data(const ui_cmd_t *c)
@@ -620,17 +638,32 @@ static void ui_task(void *arg)
             break;
         case UI_CMD_SHOW_COCKPIT:
             if (ui_hal_up() == ESP_OK) {
-                memset(&s_last_cmd, 0, sizeof(s_last_cmd));
-                ui_render_cockpit();
-                vTaskDelay(pdMS_TO_TICKS(1600));
+                bool return_to_idle_hud = false;
                 if (s_result_mx && xSemaphoreTake(s_result_mx, pdMS_TO_TICKS(50)) == pdTRUE) {
-                    if (s_scene == UI_SCENE_COCKPIT) {
-                        s_scene = UI_SCENE_NONE;
-                        s_opt_count = 0;
-                    }
+                    return_to_idle_hud = (s_scene == UI_SCENE_IDLE_HUD);
                     xSemaphoreGive(s_result_mx);
                 }
-                ui_hal_down();
+                memset(&s_last_cmd, 0, sizeof(s_last_cmd));
+                ui_render_cockpit();
+                vTaskDelay(pdMS_TO_TICKS(UI_COCKPIT_HOLD_MS));
+                if (return_to_idle_hud) {
+                    ui_render_idle_hud();
+                } else {
+                    if (s_result_mx && xSemaphoreTake(s_result_mx, pdMS_TO_TICKS(50)) == pdTRUE) {
+                        if (s_scene == UI_SCENE_COCKPIT) {
+                            s_scene = UI_SCENE_NONE;
+                            s_opt_count = 0;
+                        }
+                        xSemaphoreGive(s_result_mx);
+                    }
+                    ui_hal_down();
+                }
+            }
+            break;
+        case UI_CMD_SHOW_IDLE_HUD:
+            if (ui_hal_up() == ESP_OK) {
+                memset(&s_last_cmd, 0, sizeof(s_last_cmd));
+                ui_render_idle_hud();
             }
             break;
         case UI_CMD_SHOW_DATA:
@@ -690,6 +723,16 @@ static esp_err_t ui_post(const ui_cmd_t *cmd)
         return ESP_ERR_INVALID_STATE;
     }
     return (xQueueSend(s_cmd_q, cmd, pdMS_TO_TICKS(100)) == pdTRUE) ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+static void ui_drain_pending_commands(void)
+{
+    if (!s_cmd_q) {
+        return;
+    }
+    ui_cmd_t stale;
+    while (xQueueReceive(s_cmd_q, &stale, 0) == pdTRUE) {
+    }
 }
 
 /* -------------------------------------------------------------------------
@@ -753,6 +796,19 @@ esp_err_t ui_layer_show_cockpit(void)
 
     ui_cmd_t cmd = {0};
     cmd.kind = UI_CMD_SHOW_COCKPIT;
+    return ui_post(&cmd);
+}
+
+esp_err_t ui_layer_show_idle_hud(void)
+{
+    ui_result_reset();
+    /* Returning to idle is authoritative. Drop stale dismiss/highlight commands
+     * queued during voice transitions so the HUD cannot be torn down after it is
+     * presented. */
+    ui_drain_pending_commands();
+
+    ui_cmd_t cmd = {0};
+    cmd.kind = UI_CMD_SHOW_IDLE_HUD;
     return ui_post(&cmd);
 }
 
@@ -822,6 +878,15 @@ esp_err_t ui_layer_show_menu(const char *const *items, int n)
 
 esp_err_t ui_layer_dismiss(void)
 {
+    bool has_scene = false;
+    if (s_result_mx && xSemaphoreTake(s_result_mx, pdMS_TO_TICKS(20)) == pdTRUE) {
+        has_scene = (s_scene != UI_SCENE_NONE);
+        xSemaphoreGive(s_result_mx);
+    }
+    if (!has_scene && !s_hal_up) {
+        return ESP_OK;
+    }
+
     ui_cmd_t cmd = {0};
     cmd.kind = UI_CMD_DISMISS;
     return ui_post(&cmd);
@@ -963,8 +1028,12 @@ esp_err_t ui_layer_get_result(int *out_index, bool *out_done)
 
 bool ui_layer_is_active(void)
 {
-    /* Any non-NONE scene means the UI owns the panel; the touch dispatcher must
-     * route taps here (selectable scenes act on them, static scenes swallow them
-     * so they don't toggle a Gemini session behind the UI). */
+    /* Any non-NONE scene except the idle HUD captures taps. The idle HUD is the
+     * visible rest face, but short taps must still pass through to Gemini. */
+    return s_scene != UI_SCENE_NONE && s_scene != UI_SCENE_IDLE_HUD;
+}
+
+bool ui_layer_has_scene(void)
+{
     return s_scene != UI_SCENE_NONE;
 }

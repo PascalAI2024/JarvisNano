@@ -103,7 +103,8 @@ static esp_err_t touch_post_handler(httpd_req_t *req)
     } else if (cJSON_IsString(action_item)) {
         const char *action = action_item->valuestring;
         if (strcmp(action, "listen") == 0 || strcmp(action, "think") == 0 ||
-            strcmp(action, "speak") == 0 || strcmp(action, "showcase") == 0) {
+            strcmp(action, "speak") == 0 || strcmp(action, "showcase") == 0 ||
+            strcmp(action, "cockpit") == 0) {
             scene = action;
         }
     }

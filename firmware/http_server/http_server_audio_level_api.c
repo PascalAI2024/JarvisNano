@@ -6,17 +6,14 @@
  * GET /api/audio/level
  *   { "rms_db": <float>, "peak_db": <float>, "ts": <uint64 ms> }
  *
- * Reads PCM samples directly from the on-board PDM-RX I2S channel
- * (the "i2s_audio_in" peripheral published by the board manager) in a
- * background task, computes RMS + peak over a ~100 ms window, and stores
- * the latest values in a mutex-guarded struct that the HTTP handler
- * snapshots on demand.
+ * Reads PCM samples from the board microphone path in a background task,
+ * computes RMS + peak over a ~100 ms window, and stores the latest values in a
+ * mutex-guarded struct that the HTTP handler snapshots on demand.
  *
- * On the Seeed XIAO ESP32-S3 Sense the audio_adc device is
- * `init_skip: true` (no codec IC), so esp_codec_dev_read() is not
- * available — but periph_i2s_init() already enables the PDM-RX channel
- * before any device init runs, so we can call i2s_channel_read() on the
- * raw handle without disturbing any other consumer.
+ * Waveshare uses an ES7210 codec (`audio_adc`) and must be sampled through
+ * esp_codec_dev_read(); directly reading the raw I2S channel after codec use
+ * can sit invalid forever. On raw-PDM boards such as XIAO, `audio_adc` may be
+ * absent, so the sampler falls back to the "i2s_audio_in" peripheral.
  *
  * Gemini session gate (STABILITY_PLAN.md P1.6 / F14): the Gemini Live
  * session owns the same RX channel while a session is active, so this
@@ -49,7 +46,10 @@
 #include <string.h>
 
 #include "driver/i2s_common.h"
+#include "esp_board_manager.h"
+#include "esp_board_manager_includes.h"
 #include "esp_board_periph.h"
+#include "esp_codec_dev.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -60,9 +60,16 @@
 static const char *TAG = "http_audio_level";
 
 #define AUDIO_LEVEL_PERIPH_NAME      "i2s_audio_in"
+#define AUDIO_LEVEL_ADC_DEVICE_NAME  ESP_BOARD_DEVICE_NAME_AUDIO_ADC
 #define AUDIO_LEVEL_SAMPLE_RATE_HZ   16000
+#define AUDIO_LEVEL_CODEC_RATE_HZ    24000
+#define AUDIO_LEVEL_CODEC_CHANNELS   4
+/* ES7210 measured order on Waveshare is [REF][MIC][NC][MIC]. Match Gemini's
+ * primary mic lane so /api/audio/level reflects the real voice input. */
+#define AUDIO_LEVEL_CODEC_MIC_LANE   1
 #define AUDIO_LEVEL_WINDOW_MS        100
 #define AUDIO_LEVEL_WINDOW_SAMPLES   ((AUDIO_LEVEL_SAMPLE_RATE_HZ * AUDIO_LEVEL_WINDOW_MS) / 1000)
+#define AUDIO_LEVEL_CODEC_WINDOW_FRAMES ((AUDIO_LEVEL_CODEC_RATE_HZ * AUDIO_LEVEL_WINDOW_MS) / 1000)
 #define AUDIO_LEVEL_DBFS_FLOOR       (-80.0f)
 #define AUDIO_LEVEL_TASK_STACK       4096
 #define AUDIO_LEVEL_TASK_PRIO        3
@@ -72,6 +79,7 @@ static const char *TAG = "http_audio_level";
  * re-checked immediately before every i2s_channel_read (P1.6). */
 #define AUDIO_LEVEL_CHUNK_MS         20
 #define AUDIO_LEVEL_CHUNK_SAMPLES    ((AUDIO_LEVEL_SAMPLE_RATE_HZ * AUDIO_LEVEL_CHUNK_MS) / 1000)
+#define AUDIO_LEVEL_CODEC_CHUNK_FRAMES ((AUDIO_LEVEL_CODEC_RATE_HZ * AUDIO_LEVEL_CHUNK_MS) / 1000)
 /* After a Gemini session was last observed active, stay off the RX channel
  * for this long before any read may resume (covers codec teardown tails and
  * rapid stop→start session cycles). */
@@ -88,6 +96,17 @@ static SemaphoreHandle_t        s_lvl_mx;
 static audio_level_snapshot_t   s_lvl;
 static TaskHandle_t             s_lvl_task;
 static i2s_chan_handle_t        s_rx_chan;
+static esp_codec_dev_handle_t   s_adc_dev;
+static bool                     s_adc_open;
+static bool                     s_adc_codec_failed;
+
+static esp_codec_dev_handle_t audio_level_extract_codec_handle(void *dev_h)
+{
+    if (!dev_h) {
+        return NULL;
+    }
+    return ((dev_audio_codec_handles_t *)dev_h)->codec_dev;
+}
 
 static void audio_level_store_invalid(void)
 {
@@ -122,21 +141,80 @@ static bool audio_level_session_active(void)
            ctx->services.gemini_live_is_active();
 }
 
+static void audio_level_close_codec(void)
+{
+    if (s_adc_dev && s_adc_open && !s_adc_codec_failed) {
+        esp_codec_dev_close(s_adc_dev);
+    }
+    s_adc_open = false;
+}
+
+static esp_err_t audio_level_open_codec(void)
+{
+    if (!s_adc_dev || s_adc_codec_failed) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_adc_open) {
+        return ESP_OK;
+    }
+
+    esp_codec_dev_sample_info_t fs = {
+        .sample_rate = AUDIO_LEVEL_CODEC_RATE_HZ,
+        .channel = AUDIO_LEVEL_CODEC_CHANNELS,
+        .bits_per_sample = 16,
+        .channel_mask = 0,
+    };
+    int r = esp_codec_dev_open(s_adc_dev, &fs);
+    if (r != ESP_CODEC_DEV_OK) {
+        s_adc_codec_failed = true;
+        ESP_LOGW(TAG, "esp_codec_dev_open(adc) failed err=%d (%s), falling back to raw I2S",
+                 r, esp_err_to_name(r));
+        return ESP_FAIL;
+    }
+    /* Keep the diagnostic level comparable to Gemini's idle/listen mic path. */
+    esp_codec_dev_set_in_channel_gain(s_adc_dev,
+        ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) |
+        ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1), 30.0f);
+    esp_codec_dev_set_in_channel_gain(s_adc_dev,
+        ESP_CODEC_DEV_MAKE_CHANNEL_MASK(2), 0.0f);
+    s_adc_open = true;
+    ESP_LOGI(TAG, "audio level bound to codec ADC (%u Hz, %u ch)",
+             (unsigned)AUDIO_LEVEL_CODEC_RATE_HZ,
+             (unsigned)AUDIO_LEVEL_CODEC_CHANNELS);
+    return ESP_OK;
+}
+
+static void audio_level_accumulate(const int16_t *samples, size_t n,
+                                   uint64_t *sumsq, int32_t *peak)
+{
+    for (size_t i = 0; i < n; i++) {
+        int32_t s = samples[i];
+        int32_t a = s < 0 ? -s : s;
+        if (a > *peak) {
+            *peak = a;
+        }
+        *sumsq += (uint64_t)((int64_t)s * (int64_t)s);
+    }
+}
+
 static void audio_level_task(void *arg)
 {
     (void)arg;
 
-    int16_t *buf = (int16_t *)heap_caps_malloc(AUDIO_LEVEL_WINDOW_SAMPLES * sizeof(int16_t),
-                                                MALLOC_CAP_DEFAULT);
+    const size_t raw_samples = AUDIO_LEVEL_WINDOW_SAMPLES;
+    const size_t codec_samples = AUDIO_LEVEL_CODEC_WINDOW_FRAMES * AUDIO_LEVEL_CODEC_CHANNELS;
+    const size_t buf_samples = codec_samples > raw_samples ? codec_samples : raw_samples;
+    int16_t *buf = (int16_t *)heap_caps_malloc(buf_samples * sizeof(int16_t),
+                                               MALLOC_CAP_DEFAULT);
     if (!buf) {
-        ESP_LOGE(TAG, "alloc %d-sample buffer failed", AUDIO_LEVEL_WINDOW_SAMPLES);
+        ESP_LOGE(TAG, "alloc %u-sample buffer failed", (unsigned)buf_samples);
         s_lvl_task = NULL;
         vTaskDelete(NULL);
         return;
     }
 
     ESP_LOGI(TAG, "audio level task running (window=%d ms / %d samples @ %d Hz)",
-             AUDIO_LEVEL_WINDOW_MS, AUDIO_LEVEL_WINDOW_SAMPLES, AUDIO_LEVEL_SAMPLE_RATE_HZ);
+         AUDIO_LEVEL_WINDOW_MS, AUDIO_LEVEL_WINDOW_SAMPLES, AUDIO_LEVEL_SAMPLE_RATE_HZ);
 
     uint32_t read_warns = 0;
     int64_t  last_active_us = 0;   /* last time a Gemini session was observed active */
@@ -145,6 +223,7 @@ static void audio_level_task(void *arg)
         /* P1.6 gate: never touch the shared I2S RX channel while a Gemini
          * Live session owns the mic. */
         if (audio_level_session_active()) {
+            audio_level_close_codec();
             last_active_us = esp_timer_get_time();
             if (!was_active) {
                 ESP_LOGI(TAG, "gemini session active — audio level sampling paused");
@@ -169,6 +248,74 @@ static void audio_level_task(void *arg)
             ESP_LOGI(TAG, "gemini session idle for %d ms — audio level sampling resumed",
                      AUDIO_LEVEL_SESSION_SETTLE_MS);
             was_active = false;
+        }
+
+        if (s_adc_dev && !s_adc_codec_failed && audio_level_open_codec() == ESP_OK) {
+            uint32_t frames = 0;
+            uint64_t sumsq = 0;
+            int32_t peak = 0;
+            bool session_hit = false;
+            esp_err_t err = ESP_OK;
+
+            while (frames < AUDIO_LEVEL_CODEC_WINDOW_FRAMES) {
+                if (audio_level_session_active()) {
+                    audio_level_close_codec();
+                    last_active_us = esp_timer_get_time();
+                    session_hit = true;
+                    break;
+                }
+
+                uint32_t chunk_frames = AUDIO_LEVEL_CODEC_CHUNK_FRAMES;
+                if (chunk_frames > AUDIO_LEVEL_CODEC_WINDOW_FRAMES - frames) {
+                    chunk_frames = AUDIO_LEVEL_CODEC_WINDOW_FRAMES - frames;
+                }
+                int bytes = (int)(chunk_frames * AUDIO_LEVEL_CODEC_CHANNELS * sizeof(int16_t));
+                int r = esp_codec_dev_read(s_adc_dev, buf, bytes);
+                if (r != ESP_CODEC_DEV_OK) {
+                    err = ESP_FAIL;
+                    if ((read_warns++ % 20) == 0) {
+                        ESP_LOGD(TAG, "esp_codec_dev_read err=%d (%s)", r, esp_err_to_name(r));
+                    }
+                    break;
+                }
+                for (uint32_t i = 0; i < chunk_frames; ++i) {
+                    int16_t s = buf[i * AUDIO_LEVEL_CODEC_CHANNELS + AUDIO_LEVEL_CODEC_MIC_LANE];
+                    audio_level_accumulate(&s, 1, &sumsq, &peak);
+                }
+                frames += chunk_frames;
+            }
+
+            if (session_hit) {
+                audio_level_store_invalid();
+                vTaskDelay(pdMS_TO_TICKS(250));
+                continue;
+            }
+            if (err != ESP_OK || frames == 0) {
+                audio_level_store_invalid();
+                vTaskDelay(pdMS_TO_TICKS(50));
+                continue;
+            }
+            read_warns = 0;
+
+            float rms_amp  = sqrtf((float)sumsq / (float)frames) / 32768.0f;
+            float peak_amp = (float)peak / 32768.0f;
+            float rms_db   = audio_level_db_from_amp(rms_amp);
+            float peak_db  = audio_level_db_from_amp(peak_amp);
+
+            if (s_lvl_mx && xSemaphoreTake(s_lvl_mx, portMAX_DELAY) == pdTRUE) {
+                s_lvl.rms_db  = rms_db;
+                s_lvl.peak_db = peak_db;
+                s_lvl.ts_ms   = (uint64_t)(esp_timer_get_time() / 1000);
+                s_lvl.valid   = true;
+                xSemaphoreGive(s_lvl_mx);
+            }
+            continue;
+        }
+
+        if (!s_rx_chan) {
+            audio_level_store_invalid();
+            vTaskDelay(pdMS_TO_TICKS(250));
+            continue;
         }
 
         i2s_chan_info_t chan_info = {0};
@@ -228,14 +375,7 @@ static void audio_level_task(void *arg)
         size_t n = have_bytes / sizeof(int16_t);
         uint64_t sumsq = 0;
         int32_t  peak  = 0;
-        for (size_t i = 0; i < n; i++) {
-            int32_t s = buf[i];
-            int32_t a = s < 0 ? -s : s;
-            if (a > peak) {
-                peak = a;
-            }
-            sumsq += (uint64_t)((int64_t)s * (int64_t)s);
-        }
+        audio_level_accumulate(buf, n, &sumsq, &peak);
 
         float rms_amp  = sqrtf((float)sumsq / (float)n) / 32768.0f;
         float peak_amp = (float)peak / 32768.0f;
@@ -266,17 +406,31 @@ static esp_err_t audio_level_ensure_started(void)
         }
     }
 
+    if (!s_adc_dev) {
+        void *adc_h = NULL;
+        if (esp_board_manager_get_device_handle(AUDIO_LEVEL_ADC_DEVICE_NAME, &adc_h) == ESP_OK &&
+            adc_h) {
+            s_adc_dev = audio_level_extract_codec_handle(adc_h);
+        }
+        if (s_adc_dev) {
+            ESP_LOGI(TAG, "bound to codec ADC handle %p via '%s'",
+                     (void *)s_adc_dev, AUDIO_LEVEL_ADC_DEVICE_NAME);
+        }
+    }
+
     if (!s_rx_chan) {
         void *h = NULL;
         esp_err_t err = esp_board_periph_get_handle(AUDIO_LEVEL_PERIPH_NAME, &h);
-        if (err != ESP_OK || h == NULL) {
+        if ((err != ESP_OK || h == NULL) && !s_adc_dev) {
             ESP_LOGE(TAG, "no '%s' peripheral handle (err=%d) — audio level disabled",
                      AUDIO_LEVEL_PERIPH_NAME, err);
             return err == ESP_OK ? ESP_ERR_NOT_FOUND : err;
         }
-        s_rx_chan = (i2s_chan_handle_t)h;
-        ESP_LOGI(TAG, "bound to PDM-RX chan handle %p via '%s'",
-                 (void *)s_rx_chan, AUDIO_LEVEL_PERIPH_NAME);
+        if (h) {
+            s_rx_chan = (i2s_chan_handle_t)h;
+            ESP_LOGI(TAG, "bound to raw RX chan handle %p via '%s'",
+                     (void *)s_rx_chan, AUDIO_LEVEL_PERIPH_NAME);
+        }
     }
 
     BaseType_t ok = xTaskCreate(audio_level_task, "audio_lvl", AUDIO_LEVEL_TASK_STACK,
@@ -317,6 +471,7 @@ static esp_err_t audio_level_get_handler(httpd_req_t *req)
     cJSON_AddNumberToObject(root, "peak_db", snap.peak_db);
     cJSON_AddNumberToObject(root, "ts",      (double)snap.ts_ms);
     cJSON_AddBoolToObject  (root, "valid",   snap.valid);
+    cJSON_AddStringToObject(root, "source",  (s_adc_dev && !s_adc_codec_failed) ? "codec" : "raw_i2s");
     return http_server_send_json_response(req, root);
 }
 

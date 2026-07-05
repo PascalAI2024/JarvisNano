@@ -344,7 +344,16 @@ def command_screen(args: argparse.Namespace) -> int:
     with open(ppm_path, "wb") as fh:
         fh.write(data)
 
-    print_check("OK", "device screen captured", ppm_path)
+    capture_source = headers.get("X-Jarvis-Display-Source", "unknown")
+    display_owner = headers.get("X-Jarvis-Display-Owner", "unknown")
+    panel_readback = headers.get("X-Jarvis-Panel-Readback", "false")
+    mirror_fresh = headers.get("X-Jarvis-Display-Fresh", "unknown")
+    print_check("OK", "display software mirror captured", ppm_path)
+    print_check(
+        "OK",
+        "display capture source",
+        f"source={capture_source} owner={display_owner} panel_readback={panel_readback} mirror_fresh={mirror_fresh}",
+    )
     if headers.get("X-Jarvis-Saved-Path"):
         print_check("OK", "device SD copy", headers["X-Jarvis-Saved-Path"])
     if headers.get("X-Jarvis-Display-Frame"):

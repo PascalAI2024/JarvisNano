@@ -13,6 +13,7 @@
  *                        (also accepts parallel "labels":[],"values":[])
  *   POST /api/ui/image   {"path":"/sdcard/x.jpg"}  (b64 inline jpeg optional, see below)
  *   POST /api/ui/menu    {"items":["A","B",...]}    -> ui_layer_show_menu
+ *   POST /api/ui/cockpit -> ui_layer_show_cockpit
  *   GET  /api/ui/result  -> {"done":bool,"index":int}
  *   POST /api/ui/dismiss -> ui_layer_dismiss
  *
@@ -47,6 +48,7 @@ esp_err_t ui_layer_show_data(const char *title, const char *const *labels,
                              const char *const *values, int n);
 esp_err_t ui_layer_show_image(const uint8_t *jpeg, size_t len, const char *path);
 esp_err_t ui_layer_show_menu(const char *const *items, int n);
+esp_err_t ui_layer_show_cockpit(void);
 esp_err_t ui_layer_dismiss(void);
 esp_err_t ui_layer_get_result(int *out_index, bool *out_done);
 bool ui_layer_is_active(void);
@@ -268,6 +270,18 @@ static esp_err_t ui_menu_handler(httpd_req_t *req)
     return ui_send_ok(req);
 }
 
+/* POST /api/ui/cockpit -> short Jarvis cockpit/status frame */
+static esp_err_t ui_cockpit_handler(httpd_req_t *req)
+{
+    (void)req;
+    esp_err_t err = ui_layer_show_cockpit();
+    if (err != ESP_OK) {
+        return ui_send_err(req, err, "ui_layer_show_cockpit failed");
+    }
+    ESP_LOGI(TAG, "show_cockpit");
+    return ui_send_ok(req);
+}
+
 /* GET /api/ui/result -> {"ok":true,"done":bool,"index":int,"active":bool} */
 static esp_err_t ui_result_handler(httpd_req_t *req)
 {
@@ -342,6 +356,7 @@ esp_err_t http_server_register_ui_routes(httpd_handle_t server)
         { .uri = "/api/ui/data",    .method = HTTP_POST, .handler = ui_data_handler },
         { .uri = "/api/ui/image",   .method = HTTP_POST, .handler = ui_image_handler },
         { .uri = "/api/ui/menu",    .method = HTTP_POST, .handler = ui_menu_handler },
+        { .uri = "/api/ui/cockpit", .method = HTTP_POST, .handler = ui_cockpit_handler },
         { .uri = "/api/ui/result",  .method = HTTP_GET,  .handler = ui_result_handler },
         { .uri = "/api/ui/dismiss", .method = HTTP_POST, .handler = ui_dismiss_handler },
         { .uri = "/api/ui/snapshot.ppm", .method = HTTP_GET, .handler = ui_snapshot_handler },

@@ -104,6 +104,7 @@ static void   gl_dac_mute(bool mute);
  * by the ask_user tool: show a tappable choice arc, then return the tapped
  * label as the functionResponse. Keep in sync with firmware/ui_layer/ui_layer.h. */
 esp_err_t ui_layer_show_choice(const char *question, const char *const *opts, int n);
+esp_err_t ui_layer_show_idle_hud(void);
 esp_err_t ui_layer_get_result(int *out_index, bool *out_done);
 esp_err_t ui_layer_dismiss(void);
 bool      ui_layer_is_active(void);
@@ -299,8 +300,7 @@ bool      ui_layer_is_active(void);
  * conversation RMS was 50-300 (≈ −50 dBFS — silence to a server VAD), and
  * the SAME commit that disabled the flag added the 6x digital gain that
  * fixed it; the flag never ran with the gained signal (git log -S, see
- * aec-barge-in.md "Findings"). Re-enabled for P3.4 with the AEC (P3.3)
- * removing the echo confound for the during-playback stream. */
+ * aec-barge-in.md "Findings"). */
 #define GL_USE_SERVER_VAD        0  /* 2026-06-14: REVERTED to manual mode after testing server VAD on hardware. Server VAD (the "official" barge path) hit the same wall the dev found twice: the user's normal-volume voice reads ~230 RMS at the mic — below Google's server-VAD speech floor — so the server heard silence and NEVER replied (40s of user speech -> 0 turns, the documented "server never returns serverContent"). Manual mode replies reliably. Real talk-over barge needs the mic-to-server SNR raised (acoustic/gain work, a dedicated effort), not a flag flip. Local RMS barge stays available (GL_BARGE_RMS, default high = off-ish) but self-barges if set low (the choppiness). Tap-to-interrupt is the reliable manual barge. */
 
 /* On-device VAD (hands-free turn commit). Server VAD does not return
@@ -338,11 +338,9 @@ bool      ui_layer_is_active(void);
  * GL_VAD_SPEECH_RMS: during playback the floor is post-AEC residual echo, not
  * room noise — the AEC suppresses ~20-30 dB but not everything, and the 6x
  * digital gain amplifies the residue. Conservative default: the measured
- * normal-speech band post-gain is 1000-4900 while worst-case post-gain
- * residual-echo estimates sit near ~2000, so 2500 favours ZERO
- * self-interruptions over catching whispered barges (the Phase-4 acceptance
- * bar is zero self-interruptions over 10 turns at vol 100, R4). Calibrate on
- * hardware WITHOUT reflashing:
+ * local detector has already self-interrupted live text replies on Waveshare,
+ * so public v1 ships with the detector disabled and tap-to-interrupt as the
+ * safe path. Calibrate on hardware WITHOUT reflashing:
  *     gemini-live --barge-rms <n>      (0 disables; cap_gemini_live_set_barge_rms)
  * and read the live floor from aec_atten / mic_level in /api/gemini/live.
  * The latch = GL_BARGE_LATCH_FRAMES consecutive frames (2 × 32 ms = 64 ms of
@@ -354,7 +352,7 @@ bool      ui_layer_is_active(void);
  * Still measured per event as `barge_latency` in the log.
  * Requires a live AEC engine: with the AEC degraded the detector stays OFF
  * (raw echo would self-trigger) and barge-in remains tap-only. */
-#define GL_BARGE_RMS             80     /* Absolute floor of the adaptive barge gate (the other term is GL_BARGE_RATIO_PCT × peak playback). 2026-06-14: at the 18 dB SPEAKING gain the user's normal talk-over reads ~65-130 RMS and a SPEAKING-pause ambient ~22, so 80 catches a normal barge in her pauses while staying clear of ambient; the peak-held proportional term handles loud playback. Runtime-tunable: /api/debug/gain?barge=N (0 = off). */
+#define GL_BARGE_RMS             0      /* Disabled for public v1. The previous 80 default self-interrupted model replies on Waveshare; tap interrupt remains reliable. Runtime-tunable: /api/debug/gain?barge=N. */
 #define GL_BARGE_LATCH_FRAMES    2    /* 2026-06-14: was 4 (128 ms). 2 frames (64 ms) of sustained 220+ RMS over playback is a real barge — the guard window + threshold already reject echo transients. Halves the fixed detection floor for a fluid talk-over stop. */
 /* Post-SPEAKING-entry guard: do NOT arm the local barge detector for this long
  * after gl_enter_speaking. The 24 dB LISTENING mic gain drops to
@@ -718,13 +716,10 @@ static _Atomic int      s_mic_pga_speak_db = GL_MIC_PGA_SPEAK_DB;  /* during-SPE
 static _Atomic int      s_ref_pga_db = GL_REF_PGA_DB;
 static _Atomic int      s_out_vol    = 100;
 /* Manual-mode barge-in: server-side activityHandling. 1 = START_OF_ACTIVITY_INTERRUPTS
- * (a client activityStart on real barge cancels the model's reply — required for
- * talk-over-her barge to actually work). 0 = NO_INTERRUPTION (server ignores
- * client activity; replies never cancelled, but barge can't stop her). Default 1
- * so barge works; runtime-toggle via /api/debug/gain?interrupt=0/1 (applies on
- * the next session — restart voice to take effect). The 20 s speak-watchdog
- * makes the old spurious-cancel (4.5 s watchdog) a non-issue now. */
-static _Atomic int      s_activity_interrupts = 1;
+ * (a client activityStart can cancel the model's reply); 0 = NO_INTERRUPTION.
+ * Public v1 defaults to 0 because the Waveshare-safe path is tap interrupt plus
+ * stable replies. Re-enable only with a calibrated barge detector. */
+static _Atomic int      s_activity_interrupts = 0;
 /* Local-VAD turn-commit thresholds (manual mode), runtime-tunable so hands-free
  * turn detection can be matched to the user's actual mic level live (their voice
  * was 130-256 RMS vs the old 1000 default). /api/debug/gain?vadspeech=N&vadsilence=N */
@@ -802,22 +797,32 @@ static void gl_set_state(gl_state_t st, const char *detail)
      * Face setters are declared in emote.h (display teammate's voice states). */
     switch (st) {
     case GL_STATE_CONNECTING:
+        ui_layer_dismiss();
         emote_set_connecting();
         break;
     case GL_STATE_LISTENING:
+        ui_layer_dismiss();
         emote_set_listening();
         break;
     case GL_STATE_THINKING:
         s_gl.thinking_since_us = esp_timer_get_time();
+        ui_layer_dismiss();
         emote_set_thinking();
         break;
     case GL_STATE_SPEAKING:
+        ui_layer_dismiss();
         ESP_LOGI(TAG, "gl_set_state: emote_set_speaking enter");
         emote_set_speaking();
         ESP_LOGI(TAG, "gl_set_state: emote_set_speaking done");
         break;
     case GL_STATE_IDLE:
         emote_set_voice_idle();
+        {
+            esp_err_t hud_err = ui_layer_show_idle_hud();
+            if (hud_err != ESP_OK) {
+                ESP_LOGW(TAG, "idle HUD unavailable after voice idle: %s", esp_err_to_name(hud_err));
+            }
+        }
         break;
     case GL_STATE_READY:
     default:

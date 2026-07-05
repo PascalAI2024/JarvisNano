@@ -1,9 +1,11 @@
 /*
  * GET /api/display/snapshot.ppm
  *
- * Streams the latest emote-rendered panel mirror as a binary PPM image. This
- * captures the pixels the firmware last flushed to the display; it does not
- * depend on panel readback support. Add ?save=1 to also write the capture to
+ * Streams the active display owner's software mirror as a binary PPM image.
+ * This is NOT CO5300 panel readback; the QSPI display path has no reliable
+ * readback primitive in v1. The response identifies whether it came from the
+ * UI framebuffer or the emote mirror so diagnostics do not confuse "framebuffer
+ * exists" with "panel read back." Add ?save=1 to also write emote captures to
  * /sdcard/diagnostics/display-<frame>.ppm.
  */
 #include "http_server_priv.h"
@@ -19,9 +21,34 @@
 
 #if CONFIG_APP_CLAW_ENABLE_EMOTE
 #include "emote.h"
+
+/* ui_layer/display_hal live capture. http_server links these through bootstrap's
+ * component graph; keep forward decls here to avoid a hard include-path
+ * dependency from this component. */
+bool ui_layer_has_scene(void);
+const uint16_t *display_hal_visible_ptr(int *out_w, int *out_h);
+typedef enum {
+    DISPLAY_ARBITER_OWNER_NONE = 0,
+    DISPLAY_ARBITER_OWNER_LUA,
+    DISPLAY_ARBITER_OWNER_EMOTE,
+} display_arbiter_owner_t;
+display_arbiter_owner_t display_arbiter_get_owner(void);
 #endif
 
 static const char *TAG = "http_display";
+
+#if CONFIG_APP_CLAW_ENABLE_EMOTE
+static const char *display_owner_name(void)
+{
+    switch (display_arbiter_get_owner()) {
+    case DISPLAY_ARBITER_OWNER_LUA: return "ui";
+    case DISPLAY_ARBITER_OWNER_EMOTE: return "emote";
+    case DISPLAY_ARBITER_OWNER_NONE:
+    default:
+        return "none";
+    }
+}
+#endif
 
 static bool display_query_save_requested(httpd_req_t *req)
 {
@@ -52,6 +79,16 @@ static void rgb565_to_rgb888(uint16_t px, uint8_t *out)
     out[2] = (uint8_t)((b << 3) | (b >> 2));
 }
 
+static void rgb565_native_to_rgb888(uint16_t px, uint8_t *out)
+{
+    uint8_t r = (uint8_t)((px >> 11) & 0x1F);
+    uint8_t g = (uint8_t)((px >> 5) & 0x3F);
+    uint8_t b = (uint8_t)(px & 0x1F);
+    out[0] = (uint8_t)((r << 3) | (r >> 2));
+    out[1] = (uint8_t)((g << 2) | (g >> 4));
+    out[2] = (uint8_t)((b << 3) | (b >> 2));
+}
+
 static esp_err_t display_send_unavailable(httpd_req_t *req, const char *reason)
 {
     cJSON *root = cJSON_CreateObject();
@@ -71,6 +108,59 @@ static esp_err_t display_snapshot_get_handler(httpd_req_t *req)
 #if !CONFIG_APP_CLAW_ENABLE_EMOTE
     return display_send_unavailable(req, "emote is not enabled in this build");
 #else
+    if (ui_layer_has_scene()) {
+        int w = 0;
+        int h = 0;
+        const uint16_t *fb = display_hal_visible_ptr(&w, &h);
+        if (!fb || w <= 0 || h <= 0) {
+            ESP_LOGW(TAG, "display snapshot UI scene active but framebuffer is unavailable");
+            return display_send_unavailable(req, "UI framebuffer is not ready");
+        }
+
+        uint8_t *row = (uint8_t *)heap_caps_malloc((size_t)w * 3, MALLOC_CAP_DEFAULT);
+        if (!row) {
+            httpd_resp_send_500(req);
+            return ESP_ERR_NO_MEM;
+        }
+
+        char header[96];
+        int header_len = snprintf(header, sizeof(header), "P6\n%d %d\n255\n", w, h);
+
+        httpd_resp_set_type(req, "image/x-portable-pixmap");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store, max-age=0");
+        httpd_resp_set_hdr(req, "Pragma", "no-cache");
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+        httpd_resp_set_hdr(req, "X-Jarvis-Display-Source", "ui_framebuffer");
+        httpd_resp_set_hdr(req, "X-Jarvis-Display-Owner", display_owner_name());
+        httpd_resp_set_hdr(req, "X-Jarvis-Panel-Readback", "false");
+        httpd_resp_set_hdr(req, "X-Jarvis-Display-Fresh", "true");
+
+        char width_value[16];
+        char height_value[16];
+        snprintf(width_value, sizeof(width_value), "%d", w);
+        snprintf(height_value, sizeof(height_value), "%d", h);
+        httpd_resp_set_hdr(req, "X-Jarvis-Display-Width", width_value);
+        httpd_resp_set_hdr(req, "X-Jarvis-Display-Height", height_value);
+
+        ESP_LOGI(TAG, "display snapshot stream source=ui_framebuffer owner=%s readback=false %dx%d",
+                 display_owner_name(), w, h);
+        esp_err_t err = httpd_resp_send_chunk(req, header, (ssize_t)header_len);
+        for (int y = 0; y < h && err == ESP_OK; y++) {
+            const uint16_t *src = fb + ((size_t)y * (size_t)w);
+            for (int x = 0; x < w; x++) {
+                rgb565_native_to_rgb888(src[x], row + ((size_t)x * 3));
+            }
+            err = httpd_resp_send_chunk(req, (const char *)row, (ssize_t)((size_t)w * 3));
+        }
+        heap_caps_free(row);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "UI display snapshot stream failed: %s", esp_err_to_name(err));
+            httpd_resp_send_chunk(req, NULL, 0);
+            return err;
+        }
+        return httpd_resp_send_chunk(req, NULL, 0);
+    }
+
     emote_display_snapshot_info_t info = {0};
     esp_err_t err = emote_display_snapshot_get_info(&info);
     if (err != ESP_OK) {
@@ -125,6 +215,10 @@ static esp_err_t display_snapshot_get_handler(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Cache-Control", "no-store, max-age=0");
     httpd_resp_set_hdr(req, "Pragma", "no-cache");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "X-Jarvis-Display-Source", "emote_mirror");
+    httpd_resp_set_hdr(req, "X-Jarvis-Display-Owner", display_owner_name());
+    httpd_resp_set_hdr(req, "X-Jarvis-Panel-Readback", "false");
+    httpd_resp_set_hdr(req, "X-Jarvis-Display-Fresh", info.valid ? "true" : "false");
 
     char width_value[16];
     char height_value[16];
@@ -139,7 +233,8 @@ static esp_err_t display_snapshot_get_handler(httpd_req_t *req)
         httpd_resp_set_hdr(req, "X-Jarvis-Saved-Path", save_path);
     }
 
-    ESP_LOGI(TAG, "display snapshot stream frame=%llu %ux%u save=%s",
+    ESP_LOGI(TAG, "display snapshot stream source=emote_mirror owner=%s readback=false frame=%llu %ux%u save=%s",
+             display_owner_name(),
              (unsigned long long)info.frame_id,
              (unsigned)info.width,
              (unsigned)info.height,
@@ -189,6 +284,37 @@ static esp_err_t display_snapshot_info_handler(httpd_req_t *req)
 #if !CONFIG_APP_CLAW_ENABLE_EMOTE
     return display_send_unavailable(req, "emote is not enabled in this build");
 #else
+    if (ui_layer_has_scene()) {
+        int w = 0;
+        int h = 0;
+        const uint16_t *fb = display_hal_visible_ptr(&w, &h);
+        if (!fb || w <= 0 || h <= 0) {
+            ESP_LOGW(TAG, "display snapshot info UI scene active but framebuffer is unavailable");
+            return display_send_unavailable(req, "UI framebuffer is not ready");
+        }
+        cJSON *root = cJSON_CreateObject();
+        if (!root) {
+            httpd_resp_send_500(req);
+            return ESP_ERR_NO_MEM;
+        }
+        cJSON_AddBoolToObject(root, "available", true);
+        http_server_json_add_string(root, "source", "ui_framebuffer");
+        http_server_json_add_string(root, "capture_source", "ui_framebuffer");
+        http_server_json_add_string(root, "display_owner", display_owner_name());
+        cJSON_AddBoolToObject(root, "panel_readback", false);
+        http_server_json_add_string(root, "note",
+                                    "software framebuffer mirror; CO5300 panel readback is not available");
+        cJSON_AddNumberToObject(root, "width", w);
+        cJSON_AddNumberToObject(root, "height", h);
+        cJSON_AddNumberToObject(root, "bytes", (size_t)w * (size_t)h * sizeof(uint16_t));
+        cJSON_AddNumberToObject(root, "frame_id", 0);
+        cJSON_AddNumberToObject(root, "last_flush_ms", 0);
+        cJSON_AddBoolToObject(root, "valid", true);
+        cJSON_AddBoolToObject(root, "buffer_valid", true);
+        cJSON_AddBoolToObject(root, "mirror_fresh", true);
+        return http_server_send_json_response(req, root);
+    }
+
     emote_display_snapshot_info_t info = {0};
     esp_err_t err = emote_display_snapshot_get_info(&info);
     if (err != ESP_OK) {
@@ -202,12 +328,20 @@ static esp_err_t display_snapshot_info_handler(httpd_req_t *req)
         return ESP_ERR_NO_MEM;
     }
     cJSON_AddBoolToObject(root, "available", true);
+    http_server_json_add_string(root, "source", "emote_mirror");
+    http_server_json_add_string(root, "capture_source", "emote_mirror");
+    http_server_json_add_string(root, "display_owner", display_owner_name());
+    cJSON_AddBoolToObject(root, "panel_readback", false);
+    http_server_json_add_string(root, "note",
+                                "software framebuffer mirror; CO5300 panel readback is not available");
     cJSON_AddNumberToObject(root, "width", info.width);
     cJSON_AddNumberToObject(root, "height", info.height);
     cJSON_AddNumberToObject(root, "bytes", info.bytes);
     cJSON_AddNumberToObject(root, "frame_id", info.frame_id);
     cJSON_AddNumberToObject(root, "last_flush_ms", info.last_flush_ms);
-    cJSON_AddBoolToObject(root, "valid", info.valid);
+    cJSON_AddBoolToObject(root, "valid", true);
+    cJSON_AddBoolToObject(root, "buffer_valid", true);
+    cJSON_AddBoolToObject(root, "mirror_fresh", info.valid);
     return http_server_send_json_response(req, root);
 #endif
 }

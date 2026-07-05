@@ -162,9 +162,12 @@ Expected:
 
 ## Current Limitations
 
-- The screen capture is a firmware mirror of the emote flush path, not panel
-  readback. It is valid for reactive-face debugging, but it will not capture
-  arbitrary Lua display drawing unless that drawing uses the same mirror path.
+- The screen capture is a firmware software mirror, not CO5300 panel readback.
+  `/api/display/snapshot.json` reports `capture_source`, `display_owner`, and
+  `panel_readback:false`; `/api/display/snapshot.ppm` follows the active owner
+  (`emote_mirror` or `ui_framebuffer`) and returns a `mirror_fresh` hint. If the
+  old reactor face owns the panel, the capture should show that face. `valid`
+  means a mirror buffer exists; freshness is tracked separately.
 - The tooling cannot physically tap the capacitive glass. A person must tap
   while `logs` or `watch` is running, or a future diagnostic route must inject a
   touch event.

@@ -47,9 +47,11 @@ static bool s_snapshot_alloc_logged;
 static volatile uint32_t s_snapshot_consumer_ms;
 static SemaphoreHandle_t s_flush_done;
 static bool s_flush_sync_registered;
+static volatile bool s_flush_handoff_grace;
 static uint32_t s_flush_timeouts;
 
 #define EMOTE_FLUSH_WAIT_MS        80
+#define EMOTE_FLUSH_HANDOFF_WAIT_MS 200
 #define EMOTE_FLUSH_TIMEOUT_LIMIT  3
 #define EMOTE_FLUSH_STRIP_ROWS     12
 /* P2.6: how long after the last /api/display/snapshot* read the mirror keeps
@@ -88,7 +90,10 @@ static void emote_flush_sync_wait(void)
         return;
     }
 
-    if (xSemaphoreTake(s_flush_done, pdMS_TO_TICKS(EMOTE_FLUSH_WAIT_MS)) == pdTRUE) {
+    bool handoff_grace = s_flush_handoff_grace;
+    s_flush_handoff_grace = false;
+    uint32_t wait_ms = handoff_grace ? EMOTE_FLUSH_HANDOFF_WAIT_MS : EMOTE_FLUSH_WAIT_MS;
+    if (xSemaphoreTake(s_flush_done, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
         s_flush_timeouts = 0;
         return;
     }
@@ -162,6 +167,8 @@ static void emote_on_owner_changed(display_arbiter_owner_t owner, void *user_ctx
         esp_err_t cb_err = esp_lcd_panel_io_register_event_callbacks(s_io_handle, &callbacks, NULL);
         if (cb_err != ESP_OK) {
             ESP_LOGW(TAG, "re-attach flush callback after handback failed: %s", esp_err_to_name(cb_err));
+        } else {
+            s_flush_handoff_grace = true;
         }
     }
 

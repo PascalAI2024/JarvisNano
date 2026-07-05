@@ -39,9 +39,11 @@ static const char *TAG = "touch_mon";
  * forward-decl trick http_server_debug_api.c uses to reach cap_gemini_live.
  * Keep in sync with firmware/ui_layer/ui_layer.h. */
 bool ui_layer_is_active(void);
+bool ui_layer_has_scene(void);
 int  ui_layer_on_tap(int x, int y);
 esp_err_t ui_layer_show_data(const char *title, const char *const *labels,
                              const char *const *values, int n);
+esp_err_t ui_layer_show_cockpit(void);
 esp_err_t ui_layer_dismiss(void);
 
 /* Polls the CST9217 touch panel every 80ms and calls cap_gemini_live_toggle()
@@ -112,7 +114,7 @@ static bool gemini_live_configured(void)
 
 /* ---- Gesture targets (the swipe grammar) --------------------------------- *
  * tap = talk/pick · swipe up = sleep · swipe down = status · swipe side =
- * dismiss a scene · long-press = stop/showcase. The swipe classification lives
+ * dismiss a scene · long-press = stop/cockpit. The swipe classification lives
  * in the touch loop; these are the actions it dispatches to. */
 
 /* Swipe up: put the assistant to sleep. Stop the voice session and latch the
@@ -501,7 +503,7 @@ static void touch_monitor_task(void *arg)
      *   centre tap - Gemini Live toggle when ready, else local scanner
      *   left tap   - local listening field
      *   right tap  - local speaking pulse
-     *   long press - local hardware showcase
+     *   long press - cockpit/menu frame
      */
     const int PRESS_CONFIRM = 1;       /* one poll is enough for a deliberate tap */
     const int RELEASE_CONFIRM = 2;     /* ~160ms stable release to re-arm */
@@ -597,13 +599,13 @@ static void touch_monitor_task(void *arg)
                     ESP_LOGI(TAG, "Long press: stopping Gemini Live");
                     cap_gemini_live_stop();
                 } else {
-                    ESP_LOGI(TAG, "Long press: local hardware showcase");
-                    local_hardware_demo_start(LOCAL_SCENE_SHOWCASE);
+                    ESP_LOGI(TAG, "Long press: cockpit");
+                    ui_layer_show_cockpit();
                 }
                 if (s_diag_mx && xSemaphoreTake(s_diag_mx, pdMS_TO_TICKS(20)) == pdTRUE) {
                     s_diag.long_presses++;
-                    strlcpy(s_diag.last_action, "long_press", sizeof(s_diag.last_action));
-                    strlcpy(s_diag.last_scene, local_scene_name(LOCAL_SCENE_SHOWCASE), sizeof(s_diag.last_scene));
+                    strlcpy(s_diag.last_action, "long_cockpit", sizeof(s_diag.last_action));
+                    strlcpy(s_diag.last_scene, "cockpit", sizeof(s_diag.last_scene));
                     s_diag.last_action_ms = touch_demo_now_ms();
                     xSemaphoreGive(s_diag_mx);
                 }
@@ -630,7 +632,7 @@ static void touch_monitor_task(void *arg)
                     /* SWIPE. While a UI scene owns the panel, any swipe just
                      * dismisses it. On the face: up = sleep, down = status,
                      * sideways = reserved. */
-                    if (ui_layer_is_active()) {
+                    if (ui_layer_has_scene()) {
                         ui_layer_dismiss();
                         ESP_LOGI(TAG, "Swipe -> dismiss UI scene");
                         touch_diag_set_action("swipe_dismiss", scene);
@@ -789,6 +791,22 @@ esp_err_t touch_demo_get_diagnostics_json(char *out, size_t out_size)
 
 esp_err_t touch_demo_run_scene(const char *scene_name)
 {
+    if (scene_name && strcmp(scene_name, "cockpit") == 0) {
+        esp_err_t err = ui_layer_show_cockpit();
+        if (err != ESP_OK) {
+            return err;
+        }
+        if (s_diag_mx && xSemaphoreTake(s_diag_mx, pdMS_TO_TICKS(20)) == pdTRUE) {
+            s_diag.local_scene_starts++;
+            strlcpy(s_diag.last_action, "http_cockpit", sizeof(s_diag.last_action));
+            strlcpy(s_diag.last_scene, "cockpit", sizeof(s_diag.last_scene));
+            s_diag.last_action_ms = touch_demo_now_ms();
+            xSemaphoreGive(s_diag_mx);
+        }
+        ESP_LOGI(TAG, "HTTP touch diagnostic scene=cockpit");
+        return ESP_OK;
+    }
+
     local_scene_t scene = LOCAL_SCENE_SHOWCASE;
     if (!local_scene_from_name(scene_name ? scene_name : "showcase", &scene)) {
         return ESP_ERR_INVALID_ARG;

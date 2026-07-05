@@ -360,6 +360,7 @@ copy_http_display_diagnostics() {
     local debug_src="$ROOT/firmware/http_server/http_server_debug_api.c"
     local ui_src="$ROOT/firmware/http_server/http_server_ui_api.c"
     local tools_src="$ROOT/firmware/http_server/http_server_tools_api.c"
+    local gemini_src="$ROOT/firmware/http_server/http_server_gemini_api.c"
     local dst_dir="$ESP_CLAW_DIR/application/edge_agent/components/http_server"
     local cmake="$dst_dir/CMakeLists.txt"
     local priv="$dst_dir/http_server_priv.h"
@@ -371,14 +372,16 @@ copy_http_display_diagnostics() {
     [ -f "$debug_src" ] || die "missing vendored debug HTTP API at $debug_src"
     [ -f "$ui_src" ] || die "missing vendored ui HTTP API at $ui_src"
     [ -f "$tools_src" ] || die "missing vendored tools HTTP API at $tools_src"
+    [ -f "$gemini_src" ] || die "missing vendored gemini HTTP API at $gemini_src"
     [ -d "$dst_dir" ] || die "http_server component not found at $dst_dir"
-    log "copying display/touch/audio/ui/tools diagnostics HTTP API → upstream tree"
+    log "copying display/touch/audio/ui/tools/gemini diagnostics HTTP API → upstream tree"
     cp -f "$src" "$dst_dir/http_server_display_api.c"
     cp -f "$touch_src" "$dst_dir/http_server_touch_api.c"
     cp -f "$audio_src" "$dst_dir/http_server_audio_level_api.c"
     cp -f "$debug_src" "$dst_dir/http_server_debug_api.c"
     cp -f "$ui_src" "$dst_dir/http_server_ui_api.c"
     cp -f "$tools_src" "$dst_dir/http_server_tools_api.c"
+    cp -f "$gemini_src" "$dst_dir/http_server_gemini_api.c"
     python3 - "$cmake" "$priv" "$core" "$public_h" <<'PY'
 import pathlib
 import re
@@ -420,6 +423,11 @@ if '"http_server_tools_api.c"' not in s:
     if anchor not in s:
         raise SystemExit("http_server CMake tools source anchor missing")
     s = s.replace(anchor, anchor + '        "http_server_tools_api.c"\n', 1)
+if '"http_server_gemini_api.c"' not in s:
+    anchor = '        "http_server_tools_api.c"\n'
+    if anchor not in s:
+        raise SystemExit("http_server CMake gemini source anchor missing")
+    s = s.replace(anchor, anchor + '        "http_server_gemini_api.c"\n', 1)
 for dep in ("heap", "emote", "ui_layer"):
     if f"        {dep}\n" not in s:
         anchor = "        esp_timer\n"
@@ -465,6 +473,12 @@ if tools_decl not in h:
     if anchor not in h:
         raise SystemExit("http_server_priv tools decl anchor missing")
     h = h.replace(anchor, anchor + tools_decl, 1)
+gemini_decl = "esp_err_t http_server_register_gemini_routes(httpd_handle_t server);\n"
+if gemini_decl not in h:
+    anchor = "esp_err_t http_server_register_tools_routes(httpd_handle_t server);\n"
+    if anchor not in h:
+        raise SystemExit("http_server_priv gemini decl anchor missing")
+    h = h.replace(anchor, anchor + gemini_decl, 1)
 priv.write_text(h)
 
 c = core.read_text()
@@ -502,6 +516,11 @@ if "http_server_register_tools_routes" not in c:
     if anchor not in c:
         raise SystemExit("http_server_core tools route anchor missing")
     c = c.replace(anchor, anchor + '    ESP_RETURN_ON_ERROR(http_server_register_tools_routes(s_ctx.server), TAG, "Failed to register tools routes");\n', 1)
+if "http_server_register_gemini_routes" not in c:
+    anchor = '    ESP_RETURN_ON_ERROR(http_server_register_tools_routes(s_ctx.server), TAG, "Failed to register tools routes");\n'
+    if anchor not in c:
+        raise SystemExit("http_server_core gemini route anchor missing")
+    c = c.replace(anchor, anchor + '    ESP_RETURN_ON_ERROR(http_server_register_gemini_routes(s_ctx.server), TAG, "Failed to register gemini routes");\n', 1)
 core.write_text(c)
 
 hp = public_h.read_text()
@@ -1626,7 +1645,7 @@ apply_gemini_diag_buffer_status_patch() {
         log "Gemini HTTP API source not found — skipping diag buffer/status patch"
         return
     fi
-    if grep -q "GEMINI_DIAG_JSON_SIZE 2048" "$api" 2>/dev/null; then
+    if grep -Eq "GEMINI_DIAG_JSON_SIZE (2048|4096)" "$api" 2>/dev/null; then
         log "Gemini diag buffer/status patch already applied"
         return
     fi
@@ -4612,9 +4631,9 @@ print("patched", p)
 PY
 }
 
-# JarvisNano boot cockpit: after the display stack starts, render a short HUD
-# frame through ui_layer and then let ui_layer auto-release the panel back to the
-# emote face. This must explicitly call ui_layer_init() because app_claw's
+# JarvisNano idle HUD: after the display stack starts, render the persistent HUD
+# through ui_layer so the physical idle display matches the cockpit identity.
+# This must explicitly call ui_layer_init() because app_claw's
 # best-effort registration path may not have run before this boot proof frame is
 # posted.
 apply_boot_cockpit_patch() {
@@ -4631,7 +4650,7 @@ p = pathlib.Path(sys.argv[1])
 s = p.read_text()
 
 decl = "esp_err_t ui_layer_show_cockpit(void);\n"
-decl_new = "esp_err_t ui_layer_init(void);\nesp_err_t ui_layer_show_cockpit(void);\n"
+decl_new = "esp_err_t ui_layer_init(void);\nesp_err_t ui_layer_show_cockpit(void);\nesp_err_t ui_layer_show_idle_hud(void);\n"
 if "esp_err_t ui_layer_init(void);" not in s:
     if decl in s:
         s = s.replace(decl, decl_new, 1)
@@ -4640,6 +4659,14 @@ if "esp_err_t ui_layer_init(void);" not in s:
         if anchor not in s:
             raise SystemExit("boot cockpit: declaration anchor missing")
         s = s.replace(anchor, anchor + "\n" + decl_new, 1)
+elif "esp_err_t ui_layer_show_idle_hud(void);" not in s:
+    if decl in s:
+        s = s.replace(decl, decl + "esp_err_t ui_layer_show_idle_hud(void);\n", 1)
+    else:
+        anchor = "esp_err_t ui_layer_init(void);\n"
+        if anchor not in s:
+            raise SystemExit("idle HUD: declaration anchor missing")
+        s = s.replace(anchor, anchor + "esp_err_t ui_layer_show_idle_hud(void);\n", 1)
 
 old_plain = (
     "    /* JarvisNano boot cockpit: prove the display is alive before touch/Gemini readiness. */\n"
@@ -4651,23 +4678,31 @@ old_plain = (
     "    }\n"
 )
 new = (
-    "    /* JarvisNano boot cockpit: prove the display is alive before touch/Gemini readiness. */\n"
+    "    /* JarvisNano idle HUD: make the cockpit the visible rest face. */\n"
     "    if (ui_start_err == ESP_OK) {\n"
     "        esp_err_t ui_layer_err = ui_layer_init();\n"
     "        if (ui_layer_err != ESP_OK) {\n"
-    "            ESP_LOGW(TAG, \"boot cockpit ui init unavailable: %s\", esp_err_to_name(ui_layer_err));\n"
+    "            ESP_LOGW(TAG, \"idle HUD ui init unavailable: %s\", esp_err_to_name(ui_layer_err));\n"
     "        } else {\n"
-    "            esp_err_t cockpit_err = ui_layer_show_cockpit();\n"
-    "            if (cockpit_err != ESP_OK) {\n"
-    "                ESP_LOGW(TAG, \"boot cockpit unavailable: %s\", esp_err_to_name(cockpit_err));\n"
+    "            esp_err_t hud_err = ui_layer_show_idle_hud();\n"
+    "            if (hud_err != ESP_OK) {\n"
+    "                ESP_LOGW(TAG, \"idle HUD unavailable: %s\", esp_err_to_name(hud_err));\n"
     "            }\n"
     "        }\n"
     "    }\n"
 )
 if old_plain in s:
     s = s.replace(old_plain, new, 1)
-elif "boot cockpit ui init unavailable" in s:
+elif "idle HUD ui init unavailable" in s:
     pass
+elif "boot cockpit ui init unavailable" in s:
+    s = s.replace("/* JarvisNano boot cockpit: prove the display is alive before touch/Gemini readiness. */",
+                  "/* JarvisNano idle HUD: make the cockpit the visible rest face. */")
+    s = s.replace("boot cockpit ui init unavailable", "idle HUD ui init unavailable")
+    s = s.replace("esp_err_t cockpit_err = ui_layer_show_cockpit();", "esp_err_t hud_err = ui_layer_show_idle_hud();")
+    s = s.replace("if (cockpit_err != ESP_OK)", "if (hud_err != ESP_OK)")
+    s = s.replace("boot cockpit unavailable: %s\", esp_err_to_name(cockpit_err)",
+                  "idle HUD unavailable: %s\", esp_err_to_name(hud_err)")
 else:
     anchor = (
         "    if (ui_start_err != ESP_OK) {\n"
