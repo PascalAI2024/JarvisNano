@@ -473,6 +473,22 @@ static volatile bool s_voice_visual_active;
  * emote_clear_alert(). */
 static volatile bool s_alert_active;
 
+/* Ambient watch hooks are intentionally inert for now. The previous version
+ * pushed EVT_BAT/EVT_IDLE while the gfx render task was decoding EAF frames,
+ * and the board reproduced LoadProhibited panics in esp_emote_gfx. Keep the
+ * API so touch_demo can compile; re-enable only through a serialized emote path. */
+esp_err_t emote_set_battery_info(uint8_t pct, bool charging)
+{
+    (void)pct;
+    (void)charging;
+    return ESP_OK;
+}
+
+esp_err_t emote_refresh_ambient_watch(void)
+{
+    return ESP_OK;
+}
+
 static esp_err_t emote_render_status(void)
 {
     ESP_RETURN_ON_FALSE(s_emote_handle != NULL, ESP_ERR_INVALID_STATE, TAG, "emote handle is NULL");

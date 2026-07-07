@@ -313,13 +313,15 @@ bool      ui_layer_is_active(void);
  * through, so the calibration holds. Hysteresis between SILENCE_RMS and
  * SPEECH_RMS prevents flicker. */
 #define GL_USE_LOCAL_VAD         1
-#define GL_VAD_SPEECH_RMS        150   /* 2026-06-14: was 120, then validated at 150 in a live hands-free test (user spoke normally -> THINKING -> SPEAKING with no tap). Measured: ambient ~63 RMS, this user's normal voice 130-256, inter-word dips ~93-117. 150 starts a turn on real speech without latching on room noise. Runtime-tunable: /api/debug/gain?vadspeech=N */
+#define GL_VAD_SPEECH_RMS        85   /* 2026-06-14: was 120, then validated at 150 in a live hands-free test (user spoke normally -> THINKING -> SPEAKING with no tap). Measured: ambient ~63 RMS, this user's normal voice 130-256, inter-word dips ~93-117. 150 starts a turn on real speech without latching on room noise. Runtime-tunable: /api/debug/gain?vadspeech=N */
+                                       /* 2026-07-07 recal: this device's mic now reads ~130 RMS during normal speech, so 150 sat just above it and turns never started (device stuck LISTENING, "not responding"); 85/40 matches the measured level. Still runtime-tunable via /api/debug/gain. */
                                        /* above the measured idle ceiling (~939   */
                                        /* raw over 60s silent) at the bottom of   */
                                        /* the measured speech band (1000-4900) —  */
                                        /* 1200 missed quiet/distant speech, which */
                                        /* read as "it never replies".             */
-#define GL_VAD_SILENCE_RMS       130   /* 2026-06-14: was 80, then validated at 130 in the same live test. RMS below this = silence (end-of-turn hysteresis). 80 sat below this user's inter-word/pause level (~93-117) so a real end-of-turn pause never read as silence and the turn never committed (no hands-free reply). 130 sits above the pause level so trailing silence completes and the turn commits. Runtime-tunable: /api/debug/gain?vadsilence=N */
+#define GL_VAD_SILENCE_RMS       40   /* 2026-06-14: was 80, then validated at 130 in the same live test. RMS below this = silence (end-of-turn hysteresis). 80 sat below this user's inter-word/pause level (~93-117) so a real end-of-turn pause never read as silence and the turn never committed (no hands-free reply). 130 sits above the pause level so trailing silence completes and the turn commits. Runtime-tunable: /api/debug/gain?vadsilence=N */
+                                       /* 2026-07-07 recal: this device's mic now reads ~130 RMS during normal speech, so 150 sat just above it and turns never started (device stuck LISTENING, "not responding"); 85/40 matches the measured level. Still runtime-tunable via /api/debug/gain. */
 /* VAD accumulators count 32 ms capture frames since the AEC rechunk (D4).
  * HANG: 22 frames = 704 ms ≈ the field-tuned 700 ms hang. (The design table's
  * "16 frames = 512 ms" was derived from a stale 500 ms baseline; keeping the

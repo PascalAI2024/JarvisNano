@@ -22,6 +22,11 @@ esp_err_t emote_set_network_status(bool sta_connected, const char *ap_ssid);
  * idle screen as "Ready * <detail>" when the station is connected. */
 esp_err_t emote_set_status_detail(const char *detail);
 
+/* Ambient watch hooks. Currently no-op after the 2026-07-03 render-loop crash;
+ * re-enable only through a serialized emote/render path. */
+esp_err_t emote_set_battery_info(uint8_t pct, bool charging);
+esp_err_t emote_refresh_ambient_watch(void);
+
 /* ---- Persistent alert overlay --------------------------------------------- *
  * A "something is wrong" screen the user can't miss: the dark-visor offline
  * face plus a short (<=24 char) strip line, latched so a later status write

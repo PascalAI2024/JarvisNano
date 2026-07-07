@@ -46,9 +46,8 @@ bool ui_layer_has_scene(void);
 int  ui_layer_on_tap(int x, int y);
 esp_err_t ui_layer_show_data(const char *title, const char *const *labels,
                              const char *const *values, int n);
-esp_err_t ui_layer_show_cockpit(void);
-esp_err_t ui_layer_dismiss(void);
 esp_err_t ui_layer_show_cockpit(void);  /* the Orbital Cockpit HUD viz */
+esp_err_t ui_layer_dismiss(void);
 esp_err_t ui_layer_show_menu(const char *const *items, int n);
 
 /* Polls the CST9217 touch panel every 80ms and calls cap_gemini_live_toggle()

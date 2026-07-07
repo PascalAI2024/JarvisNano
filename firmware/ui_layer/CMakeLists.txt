@@ -23,4 +23,16 @@ idf_component_register(
         esp_lcd
         esp_timer
         freertos
+        # Orbital Cockpit HUD (grok-hud): jarvis_imu_read() for live IMU
+        # horizon/motion-radar tilt data. Added with the HUD rebase but the
+        # REQUIRES entry was missing, so the #include "jarvis_imu.h" in
+        # ui_layer.c failed to resolve on a clean build.
+        jarvis_imu
+        # Orbital Cockpit HUD: jarvis_pmic_read_battery() for the battery
+        # energy arc. Same missing-REQUIRES gap as jarvis_imu above.
+        jarvis_pmic
+        # Orbital Cockpit HUD: #include "cap_gemini_live.h" is present for a
+        # planned audio-level pulse ring (not yet called), but the header
+        # still needs to resolve on the include path for the file to compile.
+        cap_gemini_live
 )

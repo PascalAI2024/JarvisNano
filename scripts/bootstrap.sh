@@ -363,7 +363,11 @@ new = '''        size_t path_len = strlen(path);
         cursor[name_len] = '\\0';
 '''
 if old not in s:
-    if "listdir path is too long" in s:
+    if ("listdir path is too long" in s or "path too long for listdir" in s
+            or "LISTDIR_PATH_MAX" in s):
+        # Already guarded — either by this patch or by esp-claw's own upstream
+        # listdir-truncation fix (the pinned ref now ships a 384-byte stack
+        # buffer variant). Nothing to do; keep the patch idempotent.
         raise SystemExit(0)
     raise SystemExit("lua_module_storage listdir anchor not found")
 p.write_text(s.replace(old, new))
@@ -2117,9 +2121,14 @@ bad_guard = '''    if (!s_wifi_manager_ready) {
 
 '''
 if bad_guard not in s:
-    raise SystemExit("stale Gemini Live guard marker not found")
+    # Already repaired — the stale early-return is gone. s_wifi_manager_ready
+    # is a legitimate flag used elsewhere in this file (usb diag prints, boot
+    # flow, other subsystems), so its bare presence is not a signal that the
+    # guard is still there. Check the specific block instead of the symbol.
+    print("Gemini Live network-ready guard already repaired")
+    raise SystemExit(0)
 s = s.replace(bad_guard, "", 1)
-if "s_wifi_manager_ready" in s:
+if bad_guard in s:
     raise SystemExit("stale Gemini Live guard still present after repair")
 p.write_text(s)
 print("patched", p)
@@ -3872,6 +3881,7 @@ apply_reactive_waveform_audio_bridge_patch() {
 
     python3 - <<PY
 import pathlib
+import re
 app_c = pathlib.Path(r"$app_c")
 cmake = pathlib.Path(r"$cmake")
 
@@ -3938,7 +3948,20 @@ if "app_claw_face_bridge.c" not in m:
     if anchor not in m:
         raise SystemExit("app_claw CMakeLists app_claw_srcs anchor missing")
     m = m.replace(anchor, add, 1)
-if "list(APPEND app_claw_requires cap_gemini_live)" not in m:
+# cap_gemini_live may already be required via a broader, unconditional
+# mechanism (e.g. JarvisNano's own "list(APPEND app_claw_requires
+# cap_gemini_live jarvis_imu jarvis_pmic)" or the base "set(app_claw_requires
+# ...)" block) rather than this patch's narrow EMOTE-gated literal line. Check
+# any app_claw_requires-mutating statement for the cap_gemini_live token
+# instead of requiring the exact single-purpose line this patch would add.
+requires_stmt_re = re.compile(
+    r'(?:list\(APPEND\s+app_claw_requires\b[^)]*\)|set\(app_claw_requires\b[^)]*\))',
+    re.S,
+)
+already_required = any(
+    "cap_gemini_live" in stmt.group(0) for stmt in requires_stmt_re.finditer(m)
+)
+if not already_required:
     req_anchor = (
         "if(CONFIG_APP_CLAW_ENABLE_EMOTE)\n"
         "    list(APPEND app_claw_requires emote)\n"
@@ -4090,6 +4113,56 @@ add = anchor + "\n  ui_layer:\n    path: ../../../components/common/ui_layer\n"
 s = s.replace(anchor, add, 1)
 p.write_text(s)
 print("added ui_layer path dependency to idf_component.yml")
+PY
+}
+
+# cap_im_wechat's CMakeLists.txt unconditionally REQUIRES cap_im_attachment
+# (no Kconfig gate — component-manager resolution happens before Kconfig is
+# even evaluated, so disabling CONFIG_APP_CLAW_CAP_IM_WECHAT does not help).
+# cap_im_attachment physically exists under claw_capabilities/ AND the
+# pristine main/idf_component.yml already declares it as a path-dep — but
+# gated behind `rules: - if: $CONFIG{APP_CLAW_CAP_IM_WECHAT} == True`. Rule
+# evaluation happens before any sdkconfig exists on a clean build, so the
+# rule reads false, the component manager never registers cap_im_attachment,
+# and CMake's requirement-graph expansion dies with "Failed to resolve
+# component 'cap_im_attachment' ... unknown name." Fix: strip the rules gate
+# so the dep is unconditional (cap_im_wechat's own CMakeLists REQUIRES is
+# already unconditional, so gating the manifest entry buys nothing but
+# breakage). Idempotent — detects and replaces a still-gated entry, not just
+# "any mention of the string", so it self-heals against a pristine reset.
+apply_cap_im_attachment_manifest_dep_patch() {
+    local yml="$ESP_CLAW_DIR/application/edge_agent/main/idf_component.yml"
+    if [ ! -f "$yml" ]; then
+        log "main idf_component.yml not found — skipping cap_im_attachment manifest dep"
+        return
+    fi
+    log "checking cap_im_attachment path dependency in main/idf_component.yml"
+    python3 - "$yml" <<'PY'
+import pathlib, re, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+
+gated = re.search(
+    r"(  cap_im_attachment:\n    path: [^\n]+\n)(    rules:\n(?:      .*\n)*)",
+    s,
+)
+if gated:
+    s = s.replace(gated.group(1) + gated.group(2), gated.group(1))
+    p.write_text(s)
+    print("stripped rules gate from cap_im_attachment manifest dep")
+    raise SystemExit(0)
+
+if re.search(r"^  cap_im_attachment:\n    path: [^\n]+\n(?!    rules:)", s, re.M):
+    print("cap_im_attachment manifest dep already present and ungated")
+    raise SystemExit(0)
+
+anchor = "  cap_im_wechat:\n    path: ../../../components/claw_capabilities/cap_im_wechat\n"
+if anchor not in s:
+    raise SystemExit("cap_im_wechat path-dep anchor not found in idf_component.yml")
+add = anchor + "\n  cap_im_attachment:\n    path: ../../../components/claw_capabilities/cap_im_attachment\n"
+s = s.replace(anchor, add, 1)
+p.write_text(s)
+print("added cap_im_attachment path dependency to idf_component.yml")
 PY
 }
 
@@ -4714,10 +4787,9 @@ apply_status_panel_main_require_patch() {
     fi
     if grep -q "jarvis_pmic" "$cmake" 2>/dev/null; then
         log "jarvis_pmic main_requires already present"
-        return
-    fi
-    log "adding jarvis_pmic to main_requires (swipe-down status panel battery row)"
-    python3 - "$cmake" <<'PY'
+    else
+        log "adding jarvis_pmic to main_requires (swipe-down status panel battery row)"
+        python3 - "$cmake" <<'PY'
 import pathlib, sys
 p = pathlib.Path(sys.argv[1])
 s = p.read_text()
@@ -4730,6 +4802,30 @@ new = (
 if s.count(old) != 1:
     raise SystemExit("status-panel: cap_gemini_live anchor not unique in main/CMakeLists.txt")
 p.write_text(s.replace(old, new, 1))
+print("patched", p)
+PY
+    fi
+
+    # touch_demo.c (compiled as part of the main component) calls
+    # jarvis_imu_read() for the status-panel IMU row (grok-hud rebase: same
+    # class of missing-REQUIRES gap as jarvis_pmic above, just never caught
+    # because no clean build had run since it landed). Handled as an
+    # independent guard so this applies even on a tree that already has
+    # jarvis_pmic from a prior bootstrap run.
+    if grep -q "^    jarvis_imu$" "$cmake" 2>/dev/null; then
+        log "jarvis_imu main_requires already present"
+        return
+    fi
+    log "adding jarvis_imu to main_requires (status panel IMU row, touch_demo.c)"
+    python3 - "$cmake" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+anchor = "    # JarvisNano status panel: swipe-down battery row reads jarvis_pmic.\n    jarvis_pmic\n"
+if anchor not in s:
+    raise SystemExit("status-panel: jarvis_pmic anchor not found in main/CMakeLists.txt")
+new = anchor + "    # JarvisNano status panel IMU row (touch_demo.c): jarvis_imu_read().\n    jarvis_imu\n"
+p.write_text(s.replace(anchor, new, 1))
 print("patched", p)
 PY
 }
@@ -4867,8 +4963,15 @@ if "esp_err_t ui_layer_init(void);" not in s:
     if decl in s:
         s = s.replace(decl, decl_new, 1)
     else:
-        anchor = "static const char *app_fatfs_base_path = \"/fatfs\";\n"
-        if anchor not in s:
+        # The literal "/fatfs" init form and the macro-ized
+        # APP_FATFS_FLASH_PATH form (current esp-claw pin) are both valid
+        # anchors — same declaration point, different literal spelling.
+        anchor_candidates = [
+            "static const char *app_fatfs_base_path = \"/fatfs\";\n",
+            "static const char *app_fatfs_base_path = APP_FATFS_FLASH_PATH;\n",
+        ]
+        anchor = next((a for a in anchor_candidates if a in s), None)
+        if anchor is None:
             raise SystemExit("boot cockpit: declaration anchor missing")
         s = s.replace(anchor, anchor + "\n" + decl_new, 1)
 elif "esp_err_t ui_layer_show_idle_hud(void);" not in s:
@@ -5165,6 +5268,7 @@ main() {
     apply_reactive_waveform_audio_bridge_patch
     apply_ui_layer_register_patch
     apply_ui_layer_manifest_dep_patch
+    apply_cap_im_attachment_manifest_dep_patch
     apply_ui_sdkconfig_seed_patch
     apply_waveshare_boot_memory_sdkconfig_seed_patch
     apply_ui_fonts_seed_patch

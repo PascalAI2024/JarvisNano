@@ -72,6 +72,12 @@ static const char *TAG = "ui_layer";
 #define UI_COL_EDGE     C565(0x6E, 0xB9, 0xFF)   /* cyan inner edge = "tappable" cue */
 #define UI_COL_ACCENT   C565(0xFF, 0x6A, 0x1F)   /* J.A.R.V.I.S. amber (selected) */
 #define UI_COL_ACCENT_D C565(0x1A, 0x0C, 0x03)   /* dark text on amber */
+/* Orbital Cockpit HUD palette additions (grok-hud): referenced by
+ * ui_render_cockpit but never defined in the original commit — first-pass
+ * values, tune to taste. ACCENT2 = secondary "energy" cyan (charging arc,
+ * IMU horizon line, orb rim); WARN = alert red (low battery, motion shake). */
+#define UI_COL_ACCENT2  C565(0x3D, 0xE8, 0xFF)
+#define UI_COL_WARN     C565(0xFF, 0x3B, 0x30)
 #define UI_COL_WHITE    C565(0xFF, 0xFF, 0xFF)
 #define UI_COL_TEXT     C565(0xEA, 0xEE, 0xF4)
 #define UI_COL_DIM      C565(0x9A, 0xA3, 0xB2)
@@ -92,12 +98,11 @@ static const char *TAG = "ui_layer";
  * ---------------------------------------------------------------------- */
 typedef enum {
     UI_CMD_SHOW_CHOICE = 0,
-    UI_CMD_SHOW_COCKPIT,
+    UI_CMD_SHOW_COCKPIT, /* live Orbital Cockpit HUD viz */
     UI_CMD_SHOW_IDLE_HUD,
     UI_CMD_SHOW_DATA,
     UI_CMD_SHOW_IMAGE,
     UI_CMD_SHOW_MENU,
-    UI_CMD_SHOW_COCKPIT, /* live Orbital Cockpit HUD viz */
     UI_CMD_HIGHLIGHT, /* re-render with one option highlighted (tap feedback) */
     UI_CMD_DISMISS,
 } ui_cmd_kind_t;
@@ -362,49 +367,10 @@ static void ui_render_choice(const ui_cmd_t *c, int highlight)
     }
 }
 
-static void ui_render_cockpit(void)
-{
-    display_hal_begin_frame(true, UI_COL_BG);
-    ui_clip_round();
-
-    /* First-frame cockpit: a compact HUD that proves panel init, byte order,
-     * arcs, text, and full-frame present without depending on LVGL. */
-    display_hal_draw_circle(UI_CX, UI_CY, 208, UI_COL_CARD_EDG);
-    display_hal_draw_circle(UI_CX, UI_CY, 209, UI_COL_CARD_EDG);
-    display_hal_draw_circle(UI_CX, UI_CY, 155, UI_COL_TRACK);
-    display_hal_fill_arc(UI_CX, UI_CY, 176, 184, -42.0f, 38.0f, UI_COL_EDGE);
-    display_hal_fill_arc(UI_CX, UI_CY, 176, 184, 120.0f, 196.0f, UI_COL_ACCENT);
-    display_hal_fill_arc(UI_CX, UI_CY, 176, 184, 244.0f, 324.0f, UI_COL_WEDGE);
-
-    display_hal_fill_circle(UI_CX, UI_CY, 54, C565(0x05, 0x09, 0x0E));
-    display_hal_draw_circle(UI_CX, UI_CY, 56, UI_COL_EDGE);
-    display_hal_draw_circle(UI_CX, UI_CY, 62, UI_COL_CARD_EDG);
-    display_hal_fill_circle(UI_CX, UI_CY, 18, UI_COL_EDGE);
-    display_hal_fill_circle(UI_CX, UI_CY, 9, UI_COL_WHITE);
-
-    display_hal_draw_text_aligned(0, 94, s_lcd_width, 44, "JARVIS", UI_FONT_TITLE,
-                                  UI_COL_WHITE, false, 0,
-                                  DISPLAY_HAL_TEXT_ALIGN_CENTER,
-                                  DISPLAY_HAL_TEXT_VALIGN_MIDDLE);
-    display_hal_draw_text_aligned(0, UI_CY + 70, s_lcd_width, 32, "MEMORY ONLINE",
-                                  UI_FONT_SMALL, UI_COL_EDGE, false, 0,
-                                  DISPLAY_HAL_TEXT_ALIGN_CENTER,
-                                  DISPLAY_HAL_TEXT_VALIGN_MIDDLE);
-    display_hal_draw_text_aligned(0, UI_CY + 102, s_lcd_width, 32, "TAP TO TALK",
-                                  UI_FONT_SMALL, UI_COL_DIM, false, 0,
-                                  DISPLAY_HAL_TEXT_ALIGN_CENTER,
-                                  DISPLAY_HAL_TEXT_VALIGN_MIDDLE);
-
-    display_hal_clear_clip_rect();
-    display_hal_present();
-
-    if (s_result_mx && xSemaphoreTake(s_result_mx, pdMS_TO_TICKS(50)) == pdTRUE) {
-        s_opt_count = 0;
-        s_scene = UI_SCENE_COCKPIT;
-        xSemaphoreGive(s_result_mx);
-    }
-    ESP_LOGI(TAG, "cockpit frame presented");
-}
+/* Forward decl: ui_render_cockpit is defined later in this file (Orbital
+ * Cockpit HUD section) but ui_render_idle_hud, defined here, uses it as its
+ * base frame. */
+static void ui_render_cockpit(void);
 
 static void ui_render_idle_hud(void)
 {
@@ -782,12 +748,6 @@ static void ui_task(void *arg)
                 ui_render_menu(&cmd, 0);
             }
             break;
-        case UI_CMD_SHOW_COCKPIT:
-            if (ui_hal_up() == ESP_OK) {
-                s_last_cmd = cmd;
-                ui_render_cockpit();
-            }
-            break;
         case UI_CMD_HIGHLIGHT:
             /* re-render the live scene with one option lit; uses the cached cmd */
             if (s_hal_up) {
@@ -989,14 +949,6 @@ esp_err_t ui_layer_dismiss(void)
 
     ui_cmd_t cmd = {0};
     cmd.kind = UI_CMD_DISMISS;
-    return ui_post(&cmd);
-}
-
-esp_err_t ui_layer_show_cockpit(void)
-{
-    ui_result_reset();
-    ui_cmd_t cmd = {0};
-    cmd.kind = UI_CMD_SHOW_COCKPIT;
     return ui_post(&cmd);
 }
 

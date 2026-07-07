@@ -42,7 +42,6 @@ extern "C" {
 
 typedef enum {
     UI_SCENE_NONE = 0,    /* no UI scene; emote face owns the panel */
-    UI_SCENE_COCKPIT,     /* short boot/status frame; auto-dismisses */
     UI_SCENE_IDLE_HUD,    /* persistent idle HUD; taps pass through to Gemini */
     UI_SCENE_CHOICE_ARCS, /* tappable annular choice wedges */
     UI_SCENE_DATA_PANEL,  /* title + label/value rows */
@@ -65,11 +64,6 @@ esp_err_t ui_layer_init(void);
  * (2..UI_LAYER_MAX_OPTIONS). Strings are copied internally. Clears any pending
  * result so a fresh tap can resolve it. */
 esp_err_t ui_layer_show_choice(const char *question, const char *const *opts, int n);
-
-/* Show the cockpit/status frame briefly, then automatically release the panel
- * back to the animated face. Used to prove the UI layer and display handoff
- * without leaving a static scene that captures taps forever. */
-esp_err_t ui_layer_show_cockpit(void);
 
 /* Show the persistent idle HUD. It owns the panel like any UI scene, but
  * ui_layer_is_active() returns false for this scene so the touch dispatcher can
