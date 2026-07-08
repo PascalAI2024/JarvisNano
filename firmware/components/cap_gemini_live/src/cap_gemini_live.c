@@ -493,6 +493,8 @@ typedef struct {
     int64_t                      last_frame_us;
     int64_t                      last_audio_us;
     int64_t                      last_resume_us;
+    int64_t                      last_server_rx_us;  /* last server frame (any kind) — staleness clock for idle-death auto-reconnect */
+    uint32_t                     stale_reconnects;   /* count of stale-session auto-reconnects performed */
     bool                         waiting_terminal;
     char                         last_resume_reason[32];
     char                         last_audio_error[96];
@@ -3299,6 +3301,10 @@ static void gl_ws_event_handler(void *arg, esp_event_base_t base,
         }
         if (ev->payload_offset + ev->data_len >= (size_t)ev->payload_len) {
             s_gl.rx_buf[ev->payload_len] = '\0';
+            /* Any complete server frame — including sessionResumptionUpdate
+             * heartbeats — refreshes the staleness clock. Its absence is the
+             * signal a silently-dead idle session leaves behind. */
+            s_gl.last_server_rx_us = esp_timer_get_time();
             if (strstr(s_gl.rx_buf, "\"setupComplete\"") ||
                 strstr(s_gl.rx_buf, "\"error\"") ||
                 strstr(s_gl.rx_buf, "\"goAway\"")) {
@@ -4138,9 +4144,46 @@ static bool gl_try_ws_resume(void)
     gl_begin_audio_activity("ws resume");
     gl_start_tx_task();   /* idempotent: no-ops if the TX task survived the drop */
     s_gl.ws_resume_count++;
+    s_gl.last_server_rx_us = esp_timer_get_time();   /* fresh socket — reset the staleness clock */
     ESP_LOGI(TAG, "WS resume OK (#%u) — session preserved",
              (unsigned)s_gl.ws_resume_count);
     return true;
+}
+
+/* Stale-session auto-reconnect (2026-07-07). A Gemini Live session can die
+ * silently on idle (server session limit / dropped network) while the WS still
+ * reports connected — no WEBSOCKET_EVENT_DISCONNECTED fires, so the in-session
+ * resume loop never triggers and the device sits in LISTENING against a dead
+ * socket: the user talks and gets no reply until an eventual reconnect
+ * ("responds after minutes"). Detect it REACTIVELY: only when we are LISTENING,
+ * the socket claims connected, no server frame has arrived for GL_SESSION_STALE_MS,
+ * AND the user is speaking right now (mic energy over the VAD speech floor). A
+ * live session answers speech immediately — refreshing last_server_rx_us — so on
+ * a healthy session this never fires; a silence that outlasts the threshold while
+ * the user is actively talking is a dead session. Gating on live user-speech means
+ * a quiet idle never churns reconnects (quota-safe) and a healthy mid-conversation
+ * session is never touched. SESSION TASK ONLY (calls gl_try_ws_resume). */
+#define GL_SESSION_STALE_MS 45000
+static void gl_maybe_reconnect_stale_session(void)
+{
+    if (s_gl.state != GL_STATE_LISTENING || !s_gl.ws_connected ||
+        s_gl.stop_requested || !s_gl.session_active) {
+        return;
+    }
+    int64_t idle_ms = (esp_timer_get_time() - s_gl.last_server_rx_us) / 1000;
+    if (idle_ms < GL_SESSION_STALE_MS) {
+        return;
+    }
+    uint16_t mic = atomic_load(&s_mic_rms);
+    if (mic < (uint16_t)atomic_load(&s_vad_speech_rms)) {
+        return;   /* user not speaking — leave an idle session alone (quota) */
+    }
+    ESP_LOGW(TAG, "stale session: no server frame for %lld ms + user speech (rms=%u) -> reconnecting",
+             (long long)idle_ms, (unsigned)mic);
+    if (gl_try_ws_resume()) {
+        s_gl.last_server_rx_us = esp_timer_get_time();
+        s_gl.stale_reconnects++;
+    }
 }
 
 static void gl_session_task(void *arg)
@@ -4166,6 +4209,7 @@ static void gl_session_task(void *arg)
         s_gl.session_gen++;            /* invalidates tool jobs from prior sessions */
         s_gl.pending_resume = false;
         s_gl.first_audio_pending = false;
+        s_gl.last_server_rx_us = esp_timer_get_time();   /* start staleness clock fresh */
         gl_log_heap_snapshot("session start");   /* P0.4 logging half */
         if (!s_gl.api_key[0]) {
             ESP_LOGE(TAG, "No Gemini API key — set via dashboard (gemini_key)");
@@ -4329,6 +4373,7 @@ static void gl_session_task(void *arg)
         }
         gl_maybe_resume_speaking_watchdog();
         gl_ensure_listening_capture();
+        gl_maybe_reconnect_stale_session();   /* idle-death (stale session) recovery */
         /* WS dropped: a transport write-0 abort (root-cause #1) — most often a
          * benign TCP would-block, not a dead socket. Try to resume the SAME
          * client in place (re-handshake, audio path untouched) before tearing
@@ -4843,6 +4888,10 @@ esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size)
     cJSON_AddNumberToObject(root, "resumes", (double)s_gl.resume_count);
     cJSON_AddNumberToObject(root, "watchdog_resumes", (double)s_gl.watchdog_resume_count);
     cJSON_AddNumberToObject(root, "frame_age_ms", (double)frame_age);
+    cJSON_AddNumberToObject(root, "session_idle_ms",
+                            (double)((esp_timer_get_time() - s_gl.last_server_rx_us) / 1000));
+    cJSON_AddNumberToObject(root, "stale_reconnects", (double)s_gl.stale_reconnects);
+    cJSON_AddNumberToObject(root, "session_stale_ms", (double)GL_SESSION_STALE_MS);
     cJSON_AddNumberToObject(root, "audio_age_ms", (double)audio_age);
     cJSON_AddNumberToObject(root, "last_resume_ms", (double)resume_age);
     cJSON_AddStringToObject(root, "last_resume_reason",
