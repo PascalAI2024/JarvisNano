@@ -275,6 +275,22 @@ bool      ui_layer_is_active(void);
 #define GL_CODEC_HANDLE_RETRIES  6
 #define GL_PCM_DECODE_RETRY_MS   8     /* yield once on PCM-decode OOM. PSRAM is healthy (~720 KB free, 2026-06-13); the OOM is a momentary low-water dip on the first 24k chunk of a turn (AEC/feeder/rwave-clip churn), not a fragmentation ceiling. One short yield lets the transient allocation land. */
 
+/* Auto-restart-after-death tunables (2026-07-07). Every involuntary session
+ * death lands at session_cleanup -> IDLE and parks the task at
+ * xEventGroupWaitBits(GL_BIT_SESSION_ON) — a bit only a manual tap/say sets, so
+ * voice stays dead until the user types. These bound a self-healing re-arm: a
+ * capped exponential backoff, a bigger cool-off after a server `error`, a budget
+ * that parks after too many quick deaths (quota-safe), and a healthy-uptime
+ * threshold that refreshes the budget. GL_TX_FAIL_RESUME governs the companion
+ * dead-uplink watchdog (sustained mic-send failures on a still-"connected"
+ * socket). */
+#define GL_AUTO_RESTART_BASE_MS      1000    /* first backoff before re-arming */
+#define GL_AUTO_RESTART_CAP_MS       16000   /* exponential-backoff ceiling */
+#define GL_AUTO_RESTART_MAX          6       /* consecutive auto-restarts before parking */
+#define GL_AUTO_RESTART_HEALTHY_MS   15000   /* a session up this long earns a fresh budget */
+#define GL_AUTO_RESTART_ERROR_MS     45000   /* longer cool-off after a server `error` frame (quota) */
+#define GL_TX_FAIL_RESUME            25      /* consecutive mic-uplink send failures -> dead-uplink resume */
+
 /* Turn-taking mode (P3.4, aec-barge-in.md D5).
  *
  * 1 = server VAD (auto mode, PRIMARY): the AEC-cleaned mic streams to the
@@ -495,6 +511,16 @@ typedef struct {
     int64_t                      last_resume_us;
     int64_t                      last_server_rx_us;  /* last server frame (any kind) — staleness clock for idle-death auto-reconnect */
     uint32_t                     stale_reconnects;   /* count of stale-session auto-reconnects performed */
+    /* Auto-restart-after-death state (2026-07-07). See gl_maybe_auto_restart_session. */
+    uint32_t                     auto_restarts;          /* successful auto-restart re-arms (cumulative) */
+    uint32_t                     auto_restart_streak;    /* consecutive auto-restarts since last healthy/manual */
+    bool                         auto_restart_parked;    /* budget exhausted — waiting for a manual tap */
+    int64_t                      last_auto_restart_us;   /* when the last auto-restart re-armed */
+    int64_t                      session_ready_us;       /* when "session ready" was logged — health timer */
+    uint32_t                     tx_consecutive_failures;/* mic-uplink send failures in a row (dead-uplink watchdog) */
+    bool                         goaway_seen;            /* server goAway this session */
+    bool                         server_error_seen;      /* server error frame this session */
+    char                         last_death_reason[24];  /* last involuntary-death cause (diag) */
     bool                         waiting_terminal;
     char                         last_resume_reason[32];
     char                         last_audio_error[96];
@@ -656,6 +682,15 @@ static void gl_reset_diag_counters(void)
     s_gl.last_input_end_us     = 0;
     s_gl.activity_open         = false;
     s_gl.pcm_ring_drop_bytes   = 0;
+    s_gl.auto_restarts             = 0;
+    s_gl.auto_restart_streak       = 0;
+    s_gl.auto_restart_parked       = false;
+    s_gl.last_auto_restart_us      = 0;
+    s_gl.session_ready_us          = 0;
+    s_gl.tx_consecutive_failures   = 0;
+    s_gl.goaway_seen               = false;
+    s_gl.server_error_seen         = false;
+    s_gl.last_death_reason[0]      = '\0';
 }
 
 /* P0.4 (logging half): one heap line at session start/stop so leaks and PSRAM
@@ -2867,8 +2902,10 @@ static void gl_audio_tx_sender_task(void *arg)
         }
         if (gl_send_audio_frame(frame, GL_TX_PCM_BYTES)) {
             s_gl.tx_frames_sent++;
+            s_gl.tx_consecutive_failures = 0;   /* healthy uplink — reset the dead-uplink watchdog */
         } else {
             s_gl.tx_send_failures++;
+            s_gl.tx_consecutive_failures++;     /* dead-uplink watchdog (gl_maybe_reconnect_dead_uplink) */
         }
     }
 
@@ -3977,6 +4014,12 @@ static void gl_dispatch_frame(const char *json)
                  ga ? "goAway" : "error",
                  cJSON_IsString(code) ? code->valuestring : "n/a",
                  cJSON_IsString(msg) ? msg->valuestring : "n/a");
+        if (ga) {
+            s_gl.goaway_seen = true;        /* auto-restart cause tracking */
+        }
+        if (err) {
+            s_gl.server_error_seen = true;  /* triggers the longer error cool-off */
+        }
         gl_resume_listening("server signal");
         cJSON_Delete(root);
         return;
@@ -4186,6 +4229,117 @@ static void gl_maybe_reconnect_stale_session(void)
     }
 }
 
+/* Dead-uplink split-brain recovery (2026-07-07). Companion to the stale-session
+ * watchdog above: here the socket still claims connected and the server may even
+ * be sending, but our mic uplink is silently failing every send
+ * (gl_send_audio_frame returns false) — a half-open TCP write path. The user
+ * talks and the model never hears it. When tx_consecutive_failures crosses
+ * GL_TX_FAIL_RESUME while LISTENING on a live session, re-handshake the SAME
+ * client in place (gl_try_ws_resume) to rebuild the write path. Deliberately
+ * narrow: it never widens the stale watchdog's connected==true gate and only
+ * fires on a sustained failure run, not a transient send timeout. SESSION TASK
+ * ONLY (calls gl_try_ws_resume). */
+static void gl_maybe_reconnect_dead_uplink(void)
+{
+    if (s_gl.state == GL_STATE_LISTENING && s_gl.ws_connected &&
+        !s_gl.stop_requested && s_gl.session_active &&
+        s_gl.tx_consecutive_failures >= GL_TX_FAIL_RESUME) {
+        ESP_LOGW(TAG, "dead uplink: %u consecutive tx failures -> reconnecting",
+                 (unsigned)s_gl.tx_consecutive_failures);
+        if (gl_try_ws_resume()) {
+            s_gl.stale_reconnects++;
+        }
+        s_gl.tx_consecutive_failures = 0;
+    }
+}
+
+/* Auto-restart after an involuntary session death (2026-07-07). Every death
+ * path lands at session_cleanup -> IDLE and the task parks at
+ * xEventGroupWaitBits(GL_BIT_SESSION_ON), a bit only a manual tap/say sets — so
+ * voice goes dead until the user types ("can't talk unless I type"). On a
+ * DELIBERATE stop, gl_gateway_stop sets stop_requested=true and the outer loop
+ * exits; on a death, stop_requested stays false and the task loops back, parked.
+ * That flag cleanly distinguishes the two and survives session_cleanup
+ * unchanged. Here, at the tail of session_cleanup, we re-arm GL_BIT_SESSION_ON
+ * ourselves under a capped exponential backoff so the SAME parked task loops
+ * back into a fresh session with no user action. A healthy session (up >=
+ * GL_AUTO_RESTART_HEALTHY_MS) refreshes the budget; a run of quick deaths
+ * exhausts GL_AUTO_RESTART_MAX and parks for a manual tap (quota-safe). The
+ * re-arm matches cap_gemini_live_start's discipline exactly (lifecycle mutex +
+ * the same session_active/GL_BIT_SESSION_ON order) so a concurrent
+ * gl_gateway_stop can never be lost to a TOCTOU. SESSION TASK ONLY — runs after
+ * teardown, single-threaded (no concurrent session-task writer). */
+static void gl_maybe_auto_restart_session(void)
+{
+    if (s_gl.stop_requested) {
+        s_gl.auto_restart_streak = 0;   /* deliberate stop — not a death */
+        return;
+    }
+    /* A session that stayed up long enough was healthy: reset the streak so a
+     * later death starts its backoff from scratch. */
+    if (s_gl.session_ready_us &&
+        (esp_timer_get_time() - s_gl.session_ready_us) >= (int64_t)GL_AUTO_RESTART_HEALTHY_MS * 1000) {
+        s_gl.auto_restart_streak = 0;
+    }
+    if (s_gl.auto_restart_streak >= GL_AUTO_RESTART_MAX) {
+        s_gl.auto_restart_parked = true;
+        ESP_LOGW(TAG, "auto-restart budget exhausted (%u) — parking; tap to resume",
+                 (unsigned)s_gl.auto_restart_streak);
+        return;
+    }
+
+    uint32_t backoff_ms;
+    if (s_gl.server_error_seen) {
+        backoff_ms = GL_AUTO_RESTART_ERROR_MS;
+    } else {
+        backoff_ms = (uint32_t)GL_AUTO_RESTART_BASE_MS << s_gl.auto_restart_streak;
+        if (backoff_ms > GL_AUTO_RESTART_CAP_MS) {
+            backoff_ms = GL_AUTO_RESTART_CAP_MS;
+        }
+    }
+    ESP_LOGW(TAG, "session died (streak %u/%u, reason=%s) — auto-restarting in %u ms",
+             (unsigned)s_gl.auto_restart_streak, (unsigned)GL_AUTO_RESTART_MAX,
+             s_gl.last_death_reason[0] ? s_gl.last_death_reason : "-",
+             (unsigned)backoff_ms);
+
+    /* Sleep the backoff in <=100 ms slices so a stop or a manual re-arm during
+     * the wait is honoured promptly (never a blind vTaskDelay of the whole
+     * backoff). */
+    int64_t sleep_deadline_us = esp_timer_get_time() + (int64_t)backoff_ms * 1000;
+    while (esp_timer_get_time() < sleep_deadline_us) {
+        EventBits_t bits = xEventGroupWaitBits(s_gl.ev, GL_BIT_STOP | GL_BIT_SESSION_ON,
+                                               pdFALSE, pdFALSE, pdMS_TO_TICKS(100));
+        if (bits & GL_BIT_STOP) {
+            return;   /* user stopped during backoff */
+        }
+        if (bits & GL_BIT_SESSION_ON) {
+            return;   /* a tap/say already re-armed the session */
+        }
+    }
+
+    /* Re-arm under the lifecycle mutex, matching cap_gemini_live_start /
+     * gl_gateway_stop exactly, so a concurrent stop can't interleave between the
+     * activation flag and the event bit. Re-check the guards inside the lock;
+     * skip if a tap already re-armed GL_BIT_SESSION_ON in the wait->lock window
+     * (that tap owns the fresh budget, not us). */
+    gl_lifecycle_lock();
+    if (!s_gl.stop_requested && s_gl.session_task &&
+        !(xEventGroupGetBits(s_gl.ev) & GL_BIT_SESSION_ON)) {
+        s_gl.auto_restart_streak++;
+        s_gl.auto_restarts++;
+        s_gl.last_auto_restart_us = esp_timer_get_time();
+        snprintf(s_gl.last_death_reason, sizeof(s_gl.last_death_reason), "%s",
+                 s_gl.server_error_seen ? "server_error"
+                 : s_gl.goaway_seen ? "goaway" : "drop");
+        s_gl.session_active = true;
+        xEventGroupSetBits(s_gl.ev, GL_BIT_SESSION_ON);
+        ESP_LOGW(TAG, "auto-restart #%u armed (streak %u/%u)",
+                 (unsigned)s_gl.auto_restarts, (unsigned)s_gl.auto_restart_streak,
+                 (unsigned)GL_AUTO_RESTART_MAX);
+    }
+    gl_lifecycle_unlock();
+}
+
 static void gl_session_task(void *arg)
 {
     (void)arg;
@@ -4210,6 +4364,10 @@ static void gl_session_task(void *arg)
         s_gl.pending_resume = false;
         s_gl.first_audio_pending = false;
         s_gl.last_server_rx_us = esp_timer_get_time();   /* start staleness clock fresh */
+        s_gl.tx_consecutive_failures = 0;   /* fresh uplink — reset dead-uplink watchdog */
+        s_gl.goaway_seen = false;           /* per-session death-signal flags */
+        s_gl.server_error_seen = false;
+        s_gl.session_ready_us = 0;          /* health timer starts once "session ready" logs */
         gl_log_heap_snapshot("session start");   /* P0.4 logging half */
         if (!s_gl.api_key[0]) {
             ESP_LOGE(TAG, "No Gemini API key — set via dashboard (gemini_key)");
@@ -4328,6 +4486,7 @@ static void gl_session_task(void *arg)
 
         /* Phase 1 verified: WSS + setup handshake works. */
         ESP_LOGI(TAG, "Gemini Live session ready");
+        s_gl.session_ready_us = esp_timer_get_time();   /* health timer for auto-restart budget */
 
         /* P2.4 (F11): open BOTH converters once for the whole session on the
          * shared 16 kHz I2S clock (intentional design — commit 66413b1).
@@ -4374,6 +4533,7 @@ static void gl_session_task(void *arg)
         gl_maybe_resume_speaking_watchdog();
         gl_ensure_listening_capture();
         gl_maybe_reconnect_stale_session();   /* idle-death (stale session) recovery */
+        gl_maybe_reconnect_dead_uplink();     /* dead-uplink (split-brain) recovery */
         /* WS dropped: a transport write-0 abort (root-cause #1) — most often a
          * benign TCP would-block, not a dead socket. Try to resume the SAME
          * client in place (re-handshake, audio path untouched) before tearing
@@ -4479,6 +4639,7 @@ session_cleanup:
             }
         }
         gl_log_heap_snapshot("session stop");   /* P0.4 logging half */
+        gl_maybe_auto_restart_session();   /* re-arm the parked task after an involuntary death */
     }
 
     ESP_LOGI(TAG, "Session task exiting");
@@ -4892,6 +5053,14 @@ esp_err_t cap_gemini_live_get_diagnostics_json(char *out, size_t out_size)
                             (double)((esp_timer_get_time() - s_gl.last_server_rx_us) / 1000));
     cJSON_AddNumberToObject(root, "stale_reconnects", (double)s_gl.stale_reconnects);
     cJSON_AddNumberToObject(root, "session_stale_ms", (double)GL_SESSION_STALE_MS);
+    cJSON_AddNumberToObject(root, "auto_restarts", (double)s_gl.auto_restarts);
+    cJSON_AddNumberToObject(root, "auto_restart_streak", (double)s_gl.auto_restart_streak);
+    cJSON_AddBoolToObject(root, "auto_restart_parked", s_gl.auto_restart_parked);
+    cJSON_AddNumberToObject(root, "tx_consecutive_failures", (double)s_gl.tx_consecutive_failures);
+    cJSON_AddBoolToObject(root, "goaway_seen", s_gl.goaway_seen);
+    cJSON_AddBoolToObject(root, "server_error_seen", s_gl.server_error_seen);
+    cJSON_AddStringToObject(root, "last_death_reason",
+                            s_gl.last_death_reason[0] ? s_gl.last_death_reason : "-");
     cJSON_AddNumberToObject(root, "audio_age_ms", (double)audio_age);
     cJSON_AddNumberToObject(root, "last_resume_ms", (double)resume_age);
     cJSON_AddStringToObject(root, "last_resume_reason",
@@ -5038,6 +5207,8 @@ esp_err_t cap_gemini_live_start(void)
      * racing stop cannot interleave between activation flag and event bit. */
     gl_lifecycle_lock();
     s_gl.session_active = true;
+    s_gl.auto_restart_streak = 0;    /* a manual tap/say grants a fresh restart budget */
+    s_gl.auto_restart_parked = false;
     xEventGroupSetBits(s_gl.ev, GL_BIT_SESSION_ON);
     gl_lifecycle_unlock();
     return ESP_OK;
