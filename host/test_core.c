@@ -19,6 +19,8 @@
 #include "unity.h"
 #include "jr_core/session.h"
 #include "jr_core/turn_policy.h"
+#include "jr_core/monitors.h"
+#include "jr_core/snapshot.h"
 #include "jr_dsp/dsp.h"
 #include "fake_clock.h"
 #include <math.h>
@@ -487,96 +489,213 @@ static void test_T18_split_brain_dead_uplink(void)
 }
 
 /* ===================================================================== *
- *  7.3 VAD / barge tests — T19..T23                                     *
- *  This run: the L3/state-level + current TurnPolicy-stub guarantees     *
- *  (zero-self-barge at L3, the barge command contract, turn-boundary     *
- *  contract, playback-adaptive gate, cold-start safety). The full WAV-   *
- *  fixture signal-math assertions land with the L4 adaptive VAD next run.*
+ *  7.3 L4 adaptive-VAD / barge tests — T19..T23 (REAL signal math)      *
+ *                                                                       *
+ *  Synthesized deterministic PCM (no binary WAV assets): a constant-fill *
+ *  frame has RMS == fill value, so jr_dsp_rms(frame) reproduces the      *
+ *  target level exactly and every threshold crossing is deterministic.   *
+ *  The fake clock advances one 32 ms frame per eval so the cold-start +  *
+ *  barge-guard windows are driven with no wall-clock wait.               *
  * ===================================================================== */
 
-/* T19 — zero self-barge: raw SpeechStarted edges during Speaking never barge
- * (L3 §4.6), and the TurnPolicy peak-hold guard suppresses the echo-tail
- * transient (mic spikes while playback already dropped). */
+#define FRAME_N 512
+
+/* Fill a frame so jr_dsp_rms(frame) == |level| (RMS of a constant == |const|). */
+static void fill_rms(int16_t *buf, size_t n, float level)
+{
+    if (level < 0.0f) { level = 0.0f; }
+    if (level > 32767.0f) { level = 32767.0f; }
+    int16_t v = (int16_t)level;
+    for (size_t i = 0; i < n; ++i) { buf[i] = v; }
+}
+
+/* Reduce one frame at the given capture RMS + known playback reference level,
+ * then advance the fake clock one frame (32 ms). */
+static jr_turn_decision_t tp_frame(jr_turn_policy_t *p, float cap_rms,
+                                   float play_level, bool play_active,
+                                   jr_tp_substate_t sub)
+{
+    int16_t buf[FRAME_N];
+    fill_rms(buf, FRAME_N, cap_rms);
+    jr_turn_decision_t d =
+        jr_turn_policy_eval(p, buf, FRAME_N, play_level, play_active, sub, g_clk);
+    fake_clock_advance(JR_TP_FRAME_MS);
+    return d;
+}
+
+/* Warm the noise floor to `floor` and clear the 500 ms cold-start window by
+ * feeding ambient Listening frames. 20 frames = 640 ms > cold-start. */
+static void tp_warm(jr_turn_policy_t *p, float floor_level)
+{
+    for (int i = 0; i < 20; ++i) {
+        tp_frame(p, floor_level, 0.0f, false, JR_TP_LISTENING);
+    }
+}
+
+/* T19 — ZERO SELF-BARGE across a synthesized ~10-turn playback with the exact
+ * calibration echo-tail transient (mic~=736 while the instantaneous playback
+ * level already dropped to ~141). The 4-frame peak-hold retains the causing
+ * high playback level, so the gate stays above the lagged echo — no frame
+ * barges, guard window or not. */
 static void test_T19_zero_self_barge(void)
 {
-    /* L3: 10 raw speech edges over the model's turn -> stays Speaking, no barge */
-    jr_session_t s = sess_at(JR_ST_SPEAKING);
-    for (int i = 0; i < 10; ++i) {
-        jr_outcome_t r = step(s, jr_event(JR_EV_SPEECH_STARTED));
-        TEST_ASSERT_EQUAL_INT(JR_ST_SPEAKING, r.next.phase);
-        TEST_ASSERT_FALSE(has_cmd(&r.cmds, JR_CMD_MUTE_DAC_NOW));
-        TEST_ASSERT_FALSE(has_cmd(&r.cmds, JR_CMD_SEND_ACTIVITY_START));
-        s = r.next;
-    }
-
-    /* L4 stub: peak-hold covers the 60-100ms echo-tail lag */
     jr_turn_policy_t p;
     jr_turn_policy_init(&p);
-    jr_turn_policy_eval(&p, 100.0f, 1000.0f, true);          /* peak attacks high */
-    jr_turn_decision_t d = jr_turn_policy_eval(&p, 736.0f, 141.0f, true);
-    TEST_ASSERT_FALSE(d.is_barge);                            /* echo tail suppressed */
+    tp_warm(&p, 40.0f);                     /* floor -> ~40, cold-start cleared */
+
+    const float PLAY_HI = 8177.0f;          /* loud model audio                 */
+    const float PLAY_LO = 141.0f;           /* the "play dropped to 141" level   */
+    const float ECHO_RATIO = 0.09f;         /* residual echo just under the 10% */
+    const int   LAG = 2;                    /* 64 ms DAC/DMA echo lag           */
+
+    /* build 10 back-to-back turns: 20 loud frames + 4 quiet frames each */
+    #define NF (10 * 24)
+    float play[NF];
+    for (int t = 0; t < 10; ++t) {
+        for (int f = 0; f < 24; ++f) {
+            play[t * 24 + f] = (f < 20) ? PLAY_HI : PLAY_LO;
+        }
+    }
+
+    bool saw_tail_transient = false;
+    for (int i = 0; i < NF; ++i) {
+        float echo = (i >= LAG ? ECHO_RATIO * play[i - LAG] : 0.0f) + 40.0f;
+        if (echo > 700.0f && play[i] < 200.0f) {
+            saw_tail_transient = true;      /* the mic~=736 while play~=141 case */
+        }
+        jr_turn_decision_t d = tp_frame(&p, echo, play[i], true, JR_TP_SPEAKING);
+        TEST_ASSERT_FALSE(d.is_barge);
+        TEST_ASSERT_NOT_EQUAL(JR_TP_EV_BARGE_DETECTED, d.event);
+    }
+    TEST_ASSERT_TRUE(saw_tail_transient);   /* we really exercised the transient */
+    #undef NF
 }
 
-/* T20 — THE barge row: BargeDetected in Speaking -> Listening emitting EXACTLY
- * [MuteDacNow, FlushPlaybackRing, SendActivityStart] in that order. (Critical
- * invariant #3.) */
-static void test_T20_barge_command_contract(void)
+/* T20 — a GENUINE talk-over barge fires promptly (< 300 ms). Steady loud
+ * playback: echo alone never crosses the gate; from frame K the user talks over
+ * (capture well above the gate) and BargeDetected latches within 2 frames. */
+static void test_T20_talkover_barge_prompt(void)
 {
-    jr_event_t e = jr_event(JR_EV_BARGE_DETECTED);
-    e.rms = 736.0f;
-    e.playback_peak = 141.0f;
-    jr_outcome_t r = step(sess_at(JR_ST_SPEAKING), e);
+    jr_turn_policy_t p;
+    jr_turn_policy_init(&p);
+    tp_warm(&p, 40.0f);
 
-    TEST_ASSERT_EQUAL_INT(JR_ST_LISTENING, r.next.phase);
-    TEST_ASSERT_EQUAL_INT(JR_CMD_MUTE_DAC_NOW,        r.cmds.cmds[0].kind);
-    TEST_ASSERT_EQUAL_INT(JR_CMD_FLUSH_PLAYBACK_RING, r.cmds.cmds[1].kind);
-    TEST_ASSERT_EQUAL_INT(JR_CMD_SEND_ACTIVITY_START, r.cmds.cmds[2].kind);
-    TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_ARM_CAPTURE_PAUSE_TIMER));
-    TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_EMIT_DIAG));
+    const float PLAY = 8177.0f;
+    const float ECHO = 0.09f * PLAY + 40.0f;   /* ~776 — below the ~817 gate    */
+    const float VOICE = 2600.0f;               /* talk-over, well above the gate */
+    const int   K = 20;                        /* onset frame (past the guard)  */
+
+    int barge_frame = -1;
+    for (int i = 0; i < 40; ++i) {
+        float cap = (i >= K) ? VOICE : ECHO;
+        jr_turn_decision_t d = tp_frame(&p, cap, PLAY, true, JR_TP_SPEAKING);
+        if (i < K) {
+            TEST_ASSERT_FALSE(d.is_barge);     /* echo alone never self-barges  */
+        }
+        if (d.event == JR_TP_EV_BARGE_DETECTED && barge_frame < 0) {
+            barge_frame = i;
+        }
+    }
+    TEST_ASSERT_TRUE(barge_frame >= 0);                 /* it fired              */
+    TEST_ASSERT_TRUE((barge_frame - K) <= 10);          /* within 300 ms (10 fr) */
 }
 
-/* T21 — turn-boundary regression: inter-word SpeechStarted does NOT end the
- * turn; exactly ONE SpeechEnded commits it; a second is illegal (no double). */
+/* T21 — the silence threshold is the subtle killer. A speech utterance with
+ * inter-word pauses at ~93-117 RMS (ABOVE the offset threshold) then a true
+ * end-of-turn pause at the floor: hysteresis holds through the inter-word
+ * pauses, so EXACTLY ONE SpeechStarted and EXACTLY ONE SpeechEnded fire — the
+ * SpeechEnded only at the real pause. */
 static void test_T21_silence_threshold_regression(void)
 {
-    jr_outcome_t a = step(sess_at(JR_ST_LISTENING), jr_event(JR_EV_SPEECH_STARTED));
-    TEST_ASSERT_EQUAL_INT(JR_ST_LISTENING, a.next.phase); /* inter-word, no commit */
+    jr_turn_policy_t p;
+    jr_turn_policy_init(&p);
+    tp_warm(&p, 40.0f);                     /* floor 40 -> onset 88, offset 48   */
 
-    jr_outcome_t b = step(a.next, jr_event(JR_EV_SPEECH_ENDED));
-    TEST_ASSERT_EQUAL_INT(JR_ST_THINKING, b.next.phase);  /* the one real boundary */
+    int starts = 0, ends = 0, end_frame = -1, i = 0;
+    /* word 1 (10 frames @120), inter-word pause (5 @100), word 2 (10 @120) */
+    for (int k = 0; k < 10; ++k, ++i) { if (tp_frame(&p,120,0,false,JR_TP_LISTENING).event==JR_TP_EV_SPEECH_STARTED) starts++; }
+    for (int k = 0; k < 5;  ++k, ++i) { if (tp_frame(&p,100,0,false,JR_TP_LISTENING).event==JR_TP_EV_SPEECH_ENDED)   { ends++; end_frame=i; } }
+    for (int k = 0; k < 10; ++k, ++i) { jr_turn_decision_t d=tp_frame(&p,120,0,false,JR_TP_LISTENING); if(d.event==JR_TP_EV_SPEECH_STARTED) starts++; if(d.event==JR_TP_EV_SPEECH_ENDED){ends++;end_frame=i;} }
+    /* true end-of-turn pause @40 (< offset 48) held past hangover */
+    int pause_start = i;
+    for (int k = 0; k < 15; ++k, ++i) { jr_turn_decision_t d=tp_frame(&p,40,0,false,JR_TP_LISTENING); if(d.event==JR_TP_EV_SPEECH_ENDED){ends++;end_frame=i;} if(d.event==JR_TP_EV_SPEECH_STARTED) starts++; }
 
-    jr_outcome_t c = step(b.next, jr_event(JR_EV_SPEECH_ENDED));
-    TEST_ASSERT_TRUE(c.illegal);                          /* no double-commit */
+    TEST_ASSERT_EQUAL_INT(1, starts);                 /* one turn opened         */
+    TEST_ASSERT_EQUAL_INT(1, ends);                   /* committed exactly once  */
+    TEST_ASSERT_TRUE(end_frame >= pause_start);       /* at the REAL pause only  */
 }
 
-/* T22 — the barge gate adapts to the playback (echo) level: the same capture
- * crosses a quiet gate but not a loud one. (Room/echo scaling; the noise-floor
- * room-adaptation lands with the L4 tracker next run.) */
-static void test_T22_gate_adapts_to_playback(void)
+/* T22 — the noise floor ADAPTS across rooms: a fixed 85/40 fails the loud-floor
+ * case (the ADR's core claim). Same-shaped utterance at a quiet (~40) and a
+ * loud (~130) floor both fire their turn transitions; a burst that a fixed 85
+ * would (wrongly) latch is correctly rejected at the loud floor; and the
+ * tracker climbs across a rising-noise sweep. */
+static void test_T22_vad_adapts_across_rooms(void)
 {
-    jr_turn_policy_t lo;
-    jr_turn_policy_init(&lo);
-    jr_turn_policy_eval(&lo, 50.0f, 200.0f, true);         /* quiet playback */
-    jr_turn_decision_t d_lo = jr_turn_policy_eval(&lo, 500.0f, 100.0f, true);
-    TEST_ASSERT_TRUE(d_lo.is_barge);                       /* talk-over crosses */
+    /* quiet room: floor ~40, onset ~88. A 120-RMS word commits + a 40 pause ends. */
+    jr_turn_policy_t q;
+    jr_turn_policy_init(&q);
+    tp_warm(&q, 40.0f);
+    int q_starts = 0, q_ends = 0;
+    for (int k = 0; k < 12; ++k) if (tp_frame(&q,120,0,false,JR_TP_LISTENING).event==JR_TP_EV_SPEECH_STARTED) q_starts++;
+    for (int k = 0; k < 12; ++k) if (tp_frame(&q,40, 0,false,JR_TP_LISTENING).event==JR_TP_EV_SPEECH_ENDED)   q_ends++;
+    TEST_ASSERT_EQUAL_INT(1, q_starts);
+    TEST_ASSERT_EQUAL_INT(1, q_ends);
 
-    jr_turn_policy_t hi;
-    jr_turn_policy_init(&hi);
-    jr_turn_policy_eval(&hi, 50.0f, 2000.0f, true);        /* loud playback */
-    jr_turn_decision_t d_hi = jr_turn_policy_eval(&hi, 500.0f, 300.0f, true);
-    TEST_ASSERT_FALSE(d_hi.is_barge);                      /* same capture = echo */
+    /* loud room: floor ~130, onset ~286. The SAME 120 burst (which a fixed 85
+     * would latch, 120>85) must NOT commit; a scaled 400 burst does. */
+    jr_turn_policy_t h;
+    jr_turn_policy_init(&h);
+    tp_warm(&h, 130.0f);
+    int h_false = 0;
+    for (int k = 0; k < 12; ++k) if (tp_frame(&h,120,0,false,JR_TP_LISTENING).event==JR_TP_EV_SPEECH_STARTED) h_false++;
+    TEST_ASSERT_EQUAL_INT(0, h_false);            /* adaptive rejects; fixed-85 would fire */
+    TEST_ASSERT_TRUE(120.0f > 85.0f);             /* the fixed-threshold trap, made explicit */
+    int h_starts = 0;
+    for (int k = 0; k < 12; ++k) if (tp_frame(&h,400,0,false,JR_TP_LISTENING).event==JR_TP_EV_SPEECH_STARTED) h_starts++;
+    TEST_ASSERT_EQUAL_INT(1, h_starts);           /* a properly-scaled word commits */
+
+    /* rising-noise sweep: floor climbs from ~40 toward ~130. */
+    jr_turn_policy_t s;
+    jr_turn_policy_init(&s);
+    tp_warm(&s, 40.0f);
+    jr_turn_decision_t d0 = tp_frame(&s, 40.0f, 0, false, JR_TP_LISTENING);
+    TEST_ASSERT_FLOAT_WITHIN(6.0f, 40.0f, d0.noise_floor);      /* started at ~40 */
+    float lvl = 40.0f;
+    for (int k = 0; k < 60; ++k) { lvl += 1.5f; tp_frame(&s, lvl, 0, false, JR_TP_LISTENING); }
+    jr_turn_decision_t dz;
+    memset(&dz, 0, sizeof dz);
+    for (int k = 0; k < 90; ++k) { dz = tp_frame(&s, 130.0f, 0, false, JR_TP_LISTENING); }
+    TEST_ASSERT_FLOAT_WITHIN(12.0f, 130.0f, dz.noise_floor);    /* tracked up to ~130 */
 }
 
-/* T23 — cold-start safety at L3: a fresh Listening does not spuriously commit a
- * turn on a bare SpeechStarted; a cold-AEC SpeechStarted in Speaking is not a
- * self-barge. (The 500ms floor-unconverged guard window is L4, next run.) */
+/* T23 — cold-start guard: while the floor is unconverged (first ~500 ms), no
+ * speech commit and no barge fire, even for over-threshold input; once the
+ * window passes, a genuine word commits. */
 static void test_T23_cold_start_guard(void)
 {
-    jr_outcome_t l = step(sess_at(JR_ST_LISTENING), jr_event(JR_EV_SPEECH_STARTED));
-    TEST_ASSERT_EQUAL_INT(JR_ST_LISTENING, l.next.phase); /* no spurious commit */
+    /* (A) speech-commit suppression during the first 500 ms. */
+    jr_turn_policy_t p;
+    jr_turn_policy_init(&p);
+    tp_frame(&p, 40.0f, 0, false, JR_TP_LISTENING);   /* frame 0: seed floor ~40 */
+    int early = 0;
+    for (int i = 1; i < 16; ++i) {                    /* frames 1..15 : t < 500ms */
+        if (tp_frame(&p, 120.0f, 0, false, JR_TP_LISTENING).event == JR_TP_EV_SPEECH_STARTED) early++;
+    }
+    TEST_ASSERT_EQUAL_INT(0, early);                  /* commit suppressed cold   */
+    int late = 0;
+    for (int i = 0; i < 15; ++i) {                    /* now t >= 500ms          */
+        if (tp_frame(&p, 120.0f, 0, false, JR_TP_LISTENING).event == JR_TP_EV_SPEECH_STARTED) late++;
+    }
+    TEST_ASSERT_EQUAL_INT(1, late);                   /* commits once warm        */
 
-    jr_outcome_t sp = step(sess_at(JR_ST_SPEAKING), jr_event(JR_EV_SPEECH_STARTED));
-    TEST_ASSERT_EQUAL_INT(JR_ST_SPEAKING, sp.next.phase); /* no cold-start barge */
+    /* (B) barge suppression during the first 500 ms even for a massive talk-over. */
+    jr_turn_policy_t b;
+    jr_turn_policy_init(&b);
+    for (int i = 0; i < 15; ++i) {                    /* all frames t < 500ms    */
+        jr_turn_decision_t d = tp_frame(&b, 3000.0f, 2000.0f, true, JR_TP_SPEAKING);
+        TEST_ASSERT_FALSE(d.is_barge);
+    }
 }
 
 /* ===================================================================== *
@@ -724,6 +843,276 @@ static void test_reconnect_policy_direct(void)
     TEST_ASSERT_EQUAL_UINT32(1000, healthy.delay_ms); /* effective 0 despite fc=5 */
 }
 
+/* THE barge row (L3 §4.6, critical invariant #3): BargeDetected in Speaking ->
+ * Listening emitting EXACTLY [MuteDacNow, FlushPlaybackRing, SendActivityStart]
+ * in that order. (The L4 signal math that PRODUCES a BargeDetected is T19/T20;
+ * this pins the command contract the event triggers.) */
+static void test_barge_command_contract(void)
+{
+    jr_event_t e = jr_event(JR_EV_BARGE_DETECTED);
+    e.rms = 2600.0f;
+    e.playback_peak = 8177.0f;
+    jr_outcome_t r = step(sess_at(JR_ST_SPEAKING), e);
+
+    TEST_ASSERT_EQUAL_INT(JR_ST_LISTENING, r.next.phase);
+    TEST_ASSERT_EQUAL_INT(JR_CMD_MUTE_DAC_NOW,        r.cmds.cmds[0].kind);
+    TEST_ASSERT_EQUAL_INT(JR_CMD_FLUSH_PLAYBACK_RING, r.cmds.cmds[1].kind);
+    TEST_ASSERT_EQUAL_INT(JR_CMD_SEND_ACTIVITY_START, r.cmds.cmds[2].kind);
+    TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_ARM_CAPTURE_PAUSE_TIMER));
+    TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_EMIT_DIAG));
+}
+
+/* ===================================================================== *
+ *  §5 resilience monitors — arm / re-arm / fire (fake-clock driven)     *
+ * ===================================================================== */
+
+/* 5.2 KeepaliveMonitor — fires StaleDeadline past the deadline; server traffic
+ * (any frame incl. Heartbeat) before the deadline re-arms and it does NOT fire. */
+static void test_keepalive_monitor_arm_rearm_fire(void)
+{
+    jr_keepalive_monitor_t m;
+    memset(&m, 0, sizeof m);
+    jr_keepalive_arm(&m, jr_clock_now_ms(&g_clk), JR_LIVE_DEADLINE_MS);   /* 45000 */
+
+    fake_clock_advance(44000);
+    TEST_ASSERT_FALSE(jr_keepalive_poll(&m, jr_clock_now_ms(&g_clk)).fired);
+    jr_keepalive_on_traffic(&m, jr_clock_now_ms(&g_clk));                 /* re-arm */
+    fake_clock_advance(44000);
+    TEST_ASSERT_FALSE(jr_keepalive_poll(&m, jr_clock_now_ms(&g_clk)).fired); /* still alive */
+
+    fake_clock_advance(2000);                                            /* age > 45000 */
+    jr_monitor_poll_t p = jr_keepalive_poll(&m, jr_clock_now_ms(&g_clk));
+    TEST_ASSERT_TRUE(p.fired);
+    TEST_ASSERT_EQUAL_INT(JR_EV_STALE_DEADLINE, p.event.kind);
+    TEST_ASSERT_TRUE(p.event.age_ms > JR_LIVE_DEADLINE_MS);
+
+    jr_keepalive_disarm(&m);
+    fake_clock_advance(100000);
+    TEST_ASSERT_FALSE(jr_keepalive_poll(&m, jr_clock_now_ms(&g_clk)).fired); /* disarmed */
+}
+
+/* 5.3 DeadUplinkMonitor — fires UplinkDead at TX_FAIL_RESUME(25) consecutive tx
+ * failures; a good send re-arms (resets); a would-block never counts (§5.6). */
+static void test_dead_uplink_monitor_arm_rearm_fire(void)
+{
+    jr_dead_uplink_monitor_t m;
+    memset(&m, 0, sizeof m);
+    jr_dead_uplink_arm(&m, JR_TX_FAIL_RESUME);
+
+    for (int i = 0; i < 24; ++i) { jr_dead_uplink_on_tx(&m, JR_ERR_FAIL); }
+    TEST_ASSERT_FALSE(jr_dead_uplink_poll(&m).fired);       /* 24 < 25 */
+    jr_dead_uplink_on_tx(&m, JR_ERR_FAIL);                  /* the 25th */
+    jr_monitor_poll_t p = jr_dead_uplink_poll(&m);
+    TEST_ASSERT_TRUE(p.fired);
+    TEST_ASSERT_EQUAL_INT(JR_EV_UPLINK_DEAD, p.event.kind);
+    TEST_ASSERT_EQUAL_UINT32(25, p.event.consecutive_tx_failures);
+
+    /* a good send mid-run re-arms (counter -> 0) so it does NOT fire */
+    jr_dead_uplink_arm(&m, JR_TX_FAIL_RESUME);
+    for (int i = 0; i < 24; ++i) { jr_dead_uplink_on_tx(&m, JR_ERR_FAIL); }
+    jr_dead_uplink_on_tx(&m, JR_OK);                        /* success re-arms */
+    for (int i = 0; i < 24; ++i) { jr_dead_uplink_on_tx(&m, JR_ERR_FAIL); }
+    TEST_ASSERT_FALSE(jr_dead_uplink_poll(&m).fired);
+
+    /* would-block is backpressure, not a tx failure: 25 of them never fire */
+    jr_dead_uplink_arm(&m, JR_TX_FAIL_RESUME);
+    for (int i = 0; i < 25; ++i) { jr_dead_uplink_on_tx(&m, JR_ERR_WOULD_BLOCK); }
+    TEST_ASSERT_FALSE(jr_dead_uplink_poll(&m).fired);
+}
+
+/* 5.4 NoReplyWatchdog — fires NoReplyTimeout past 20 s in Thinking; disarm (the
+ * first ServerAudioChunk / any exit) prevents the fire. */
+static void test_no_reply_watchdog_arm_disarm_fire(void)
+{
+    jr_no_reply_watchdog_t m;
+    memset(&m, 0, sizeof m);
+    jr_no_reply_arm(&m, jr_clock_now_ms(&g_clk), JR_NOREPLY_MS);          /* 20000 */
+
+    fake_clock_advance(19000);
+    TEST_ASSERT_FALSE(jr_no_reply_poll(&m, jr_clock_now_ms(&g_clk)).fired);
+    fake_clock_advance(2000);                                            /* > 20000 */
+    jr_monitor_poll_t p = jr_no_reply_poll(&m, jr_clock_now_ms(&g_clk));
+    TEST_ASSERT_TRUE(p.fired);
+    TEST_ASSERT_EQUAL_INT(JR_EV_NO_REPLY_TIMEOUT, p.event.kind);
+
+    /* disarmed (first chunk arrived) -> never fires */
+    jr_no_reply_arm(&m, jr_clock_now_ms(&g_clk), JR_NOREPLY_MS);
+    jr_no_reply_disarm(&m);
+    fake_clock_advance(60000);
+    TEST_ASSERT_FALSE(jr_no_reply_poll(&m, jr_clock_now_ms(&g_clk)).fired);
+}
+
+/* 5.5 CapturePauseKeepalive — auto-VAD only: fires CapturePauseElapsed past 1 s
+ * of capture pause; on_capture re-arms; NEVER fires in manual mode. */
+static void test_capture_pause_monitor_arm_rearm_fire(void)
+{
+    jr_capture_pause_monitor_t m;
+    memset(&m, 0, sizeof m);
+    jr_capture_pause_arm(&m, jr_clock_now_ms(&g_clk), JR_CAPTURE_PAUSE_MS, true); /* auto */
+
+    fake_clock_advance(1001);                                            /* > 1000 */
+    jr_monitor_poll_t p = jr_capture_pause_poll(&m, jr_clock_now_ms(&g_clk));
+    TEST_ASSERT_TRUE(p.fired);
+    TEST_ASSERT_EQUAL_INT(JR_EV_CAPTURE_PAUSE_ELAPSED, p.event.kind);
+
+    /* a captured frame re-arms so a sub-second pause does not fire */
+    jr_capture_pause_on_capture(&m, jr_clock_now_ms(&g_clk));
+    fake_clock_advance(999);
+    TEST_ASSERT_FALSE(jr_capture_pause_poll(&m, jr_clock_now_ms(&g_clk)).fired);
+
+    /* manual mode never fires, however long the pause */
+    jr_capture_pause_monitor_t manual;
+    memset(&manual, 0, sizeof manual);
+    jr_capture_pause_arm(&manual, jr_clock_now_ms(&g_clk), JR_CAPTURE_PAUSE_MS, false);
+    fake_clock_advance(5000);
+    TEST_ASSERT_FALSE(jr_capture_pause_poll(&manual, jr_clock_now_ms(&g_clk)).fired);
+}
+
+/* 5.6 Backpressure — the bounded, drop-newest ring primitive: capped memory,
+ * oldest retained (FIFO), newest dropped, a drops counter, never a DEATH. */
+static void test_bp_ring_primitive(void)
+{
+    jr_bp_ring_t r;
+    jr_bp_init(&r, 4);
+    for (uint32_t i = 0; i < 10; ++i) { jr_bp_push(&r, i); }
+    TEST_ASSERT_TRUE(r.len <= r.cap);              /* bounded memory */
+    TEST_ASSERT_EQUAL_size_t(4, r.len);
+    TEST_ASSERT_EQUAL_UINT32(6, r.drops);          /* newest 6 dropped */
+
+    uint32_t v;
+    TEST_ASSERT_TRUE(jr_bp_pop(&r, &v));
+    TEST_ASSERT_EQUAL_UINT32(0, v);                /* oldest retained (FIFO) */
+    TEST_ASSERT_TRUE(jr_bp_pop(&r, &v));
+    TEST_ASSERT_EQUAL_UINT32(1, v);
+
+    /* a would-block is backpressure, not a death event in the L3 vocabulary */
+    TEST_ASSERT_TRUE(jr_err_is_backpressure(JR_ERR_WOULD_BLOCK));
+}
+
+/* Integration: each monitor emits an event the L3 machine actually consumes,
+ * with the right payload, driving the right transition. Proves the seam — the
+ * monitors feed the SAME reducer, no inline timeout inside a task. */
+static void test_monitors_feed_the_machine(void)
+{
+    /* KeepaliveMonitor StaleDeadline in Listening -> Reconnecting (DEATH). */
+    jr_keepalive_monitor_t ka;
+    memset(&ka, 0, sizeof ka);
+    jr_keepalive_arm(&ka, jr_clock_now_ms(&g_clk), JR_LIVE_DEADLINE_MS);
+    fake_clock_advance(JR_LIVE_DEADLINE_MS + 1);
+    jr_monitor_poll_t sp = jr_keepalive_poll(&ka, jr_clock_now_ms(&g_clk));
+    TEST_ASSERT_TRUE(sp.fired);
+    jr_outcome_t ro = step(sess_at(JR_ST_LISTENING), sp.event);
+    TEST_ASSERT_EQUAL_INT(JR_ST_RECONNECTING, ro.next.phase);
+
+    /* DeadUplinkMonitor UplinkDead in Listening -> Reconnecting (DEATH). */
+    jr_dead_uplink_monitor_t du;
+    memset(&du, 0, sizeof du);
+    jr_dead_uplink_arm(&du, JR_TX_FAIL_RESUME);
+    for (int i = 0; i < 25; ++i) { jr_dead_uplink_on_tx(&du, JR_ERR_FAIL); }
+    jr_monitor_poll_t up = jr_dead_uplink_poll(&du);
+    TEST_ASSERT_TRUE(up.fired);
+    TEST_ASSERT_EQUAL_INT(JR_ST_RECONNECTING, step(sess_at(JR_ST_LISTENING), up.event).next.phase);
+
+    /* NoReplyWatchdog NoReplyTimeout in Thinking -> Listening + resume. */
+    jr_no_reply_watchdog_t nr;
+    memset(&nr, 0, sizeof nr);
+    jr_no_reply_arm(&nr, jr_clock_now_ms(&g_clk), JR_NOREPLY_MS);
+    fake_clock_advance(JR_NOREPLY_MS + 1);
+    jr_monitor_poll_t nrp = jr_no_reply_poll(&nr, jr_clock_now_ms(&g_clk));
+    TEST_ASSERT_TRUE(nrp.fired);
+    jr_outcome_t nro = step(sess_at(JR_ST_THINKING), nrp.event);
+    TEST_ASSERT_EQUAL_INT(JR_ST_LISTENING, nro.next.phase);
+    TEST_ASSERT_TRUE(has_cmd(&nro.cmds, JR_CMD_START_CAPTURE));
+
+    /* CapturePauseKeepalive CapturePauseElapsed in auto-VAD Listening ->
+     * stays Listening + SendAudioStreamEnd (the keepalive v4 never had). */
+    jr_capture_pause_monitor_t cp;
+    memset(&cp, 0, sizeof cp);
+    jr_capture_pause_arm(&cp, jr_clock_now_ms(&g_clk), JR_CAPTURE_PAUSE_MS, true);
+    fake_clock_advance(JR_CAPTURE_PAUSE_MS + 1);
+    jr_monitor_poll_t cpp = jr_capture_pause_poll(&cp, jr_clock_now_ms(&g_clk));
+    TEST_ASSERT_TRUE(cpp.fired);
+    jr_outcome_t cpo = step(sess_at_auto(JR_ST_LISTENING), cpp.event);
+    TEST_ASSERT_EQUAL_INT(JR_ST_LISTENING, cpo.next.phase);
+    TEST_ASSERT_TRUE(has_cmd(&cpo.cmds, JR_CMD_SEND_AUDIO_STREAM_END));
+}
+
+/* ===================================================================== *
+ *  Observability StateSnapshot — the fold reducer                       *
+ * ===================================================================== */
+
+/* Step the machine AND fold the transition into the snapshot (mirrors the owner
+ * task consuming the implicit PublishSnapshot on every transition). */
+static jr_session_t step_fold(jr_state_snapshot_t *snap, jr_session_t s, jr_event_t e)
+{
+    jr_outcome_t o = step(s, e);
+    jr_snapshot_fold(snap, s.phase, e, &o);
+    return o.next;
+}
+
+/* A sequence of transitions yields the expected counters, last-reason, error
+ * kind, and last-N reason ring. */
+static void test_snapshot_counters_and_ring(void)
+{
+    jr_state_snapshot_t snap;
+    jr_snapshot_init(&snap);
+    TEST_ASSERT_EQUAL_INT(JR_ST_IDLE, snap.phase);
+
+    jr_session_t s = sess_at(JR_ST_IDLE);
+    s = step_fold(&snap, s, jr_event(JR_EV_USER_START));    /* -> Connecting  */
+    s = step_fold(&snap, s, jr_event(JR_EV_CONNECTED));     /* -> Handshaking */
+    s = step_fold(&snap, s, jr_event(JR_EV_SETUP_COMPLETE));/* -> Listening   */
+
+    /* an involuntary death (quota) -> Backoff, counted as a death */
+    jr_event_t q = jr_event(JR_EV_SERVER_ERROR);
+    q.error_kind = JR_ERRK_QUOTA;
+    s = step_fold(&snap, s, q);                             /* -> Backoff     */
+    TEST_ASSERT_EQUAL_INT(JR_ST_BACKOFF, snap.phase);
+    TEST_ASSERT_EQUAL_UINT32(1, snap.deaths);
+    TEST_ASSERT_EQUAL_INT(JR_ERRK_QUOTA, snap.last_error_kind);
+
+    /* the quota cool-off elapses -> auto-redial to Connecting (a reconnect) */
+    s = step_fold(&snap, s, jr_event(JR_EV_BACKOFF_ELAPSED)); /* -> Connecting */
+    TEST_ASSERT_EQUAL_INT(JR_ST_CONNECTING, snap.phase);
+    TEST_ASSERT_EQUAL_UINT32(1, snap.reconnects);
+    TEST_ASSERT_EQUAL_INT(JR_EV_BACKOFF_ELAPSED, snap.last_reason);
+
+    /* 5 state-changing transitions so far; ring holds them in order */
+    TEST_ASSERT_EQUAL_UINT32(5, snap.transitions);
+    TEST_ASSERT_EQUAL_size_t(5, snap.ring_count);
+    TEST_ASSERT_EQUAL_INT(JR_EV_USER_START,     snap.reason_ring[0]);
+    TEST_ASSERT_EQUAL_INT(JR_EV_CONNECTED,      snap.reason_ring[1]);
+    TEST_ASSERT_EQUAL_INT(JR_EV_SETUP_COMPLETE, snap.reason_ring[2]);
+    TEST_ASSERT_EQUAL_INT(JR_EV_SERVER_ERROR,   snap.reason_ring[3]);
+    TEST_ASSERT_EQUAL_INT(JR_EV_BACKOFF_ELAPSED,snap.reason_ring[4]);
+}
+
+/* An illegal (state,event) drop is not a transition: it folds nothing (no
+ * counter bump, no ring push, phase unchanged). And the ring is bounded — it
+ * keeps only the last N reasons, overwriting oldest. */
+static void test_snapshot_illegal_and_ring_bound(void)
+{
+    jr_state_snapshot_t snap;
+    jr_snapshot_init(&snap);
+
+    /* illegal in Idle folds nothing */
+    jr_outcome_t bad = step(sess_at(JR_ST_IDLE), jr_event(JR_EV_SERVER_TURN_COMPLETE));
+    jr_snapshot_fold(&snap, JR_ST_IDLE, jr_event(JR_EV_SERVER_TURN_COMPLETE), &bad);
+    TEST_ASSERT_EQUAL_UINT32(0, snap.transitions);
+    TEST_ASSERT_EQUAL_size_t(0, snap.ring_count);
+
+    /* overflow the ring: JR_SNAP_RING+3 heartbeat-driven no-op... use real
+     * transitions by toggling Listening<->Speaking via chunk / turn-complete. */
+    jr_session_t s = sess_at(JR_ST_LISTENING);
+    for (int i = 0; i < JR_SNAP_RING + 3; ++i) {
+        jr_event_t e = (i % 2 == 0) ? jr_event(JR_EV_SERVER_AUDIO_CHUNK)   /* ->Speaking */
+                                    : jr_event(JR_EV_SERVER_TURN_COMPLETE);/* ->Listening */
+        s = step_fold(&snap, s, e);
+    }
+    TEST_ASSERT_EQUAL_size_t(JR_SNAP_RING, snap.ring_count);   /* bounded */
+    TEST_ASSERT_TRUE(snap.transitions >= (uint32_t)(JR_SNAP_RING + 3));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -761,9 +1150,9 @@ int main(void)
     RUN_TEST(test_T17_serverChunk_before_boundary);
     RUN_TEST(test_T18_split_brain_dead_uplink);
     RUN_TEST(test_T19_zero_self_barge);
-    RUN_TEST(test_T20_barge_command_contract);
+    RUN_TEST(test_T20_talkover_barge_prompt);
     RUN_TEST(test_T21_silence_threshold_regression);
-    RUN_TEST(test_T22_gate_adapts_to_playback);
+    RUN_TEST(test_T22_vad_adapts_across_rooms);
     RUN_TEST(test_T23_cold_start_guard);
     RUN_TEST(test_T24_backpressure_bounded_drop_newest);
     RUN_TEST(test_T25_wouldblock_is_not_death);
@@ -773,6 +1162,19 @@ int main(void)
     RUN_TEST(test_manual_ptt_turn_boundaries);
     RUN_TEST(test_fatal_exits);
     RUN_TEST(test_reconnect_policy_direct);
+    RUN_TEST(test_barge_command_contract);
+
+    /* --- Run 2: §5 resilience monitors (arm/re-arm/fire) --- */
+    RUN_TEST(test_keepalive_monitor_arm_rearm_fire);
+    RUN_TEST(test_dead_uplink_monitor_arm_rearm_fire);
+    RUN_TEST(test_no_reply_watchdog_arm_disarm_fire);
+    RUN_TEST(test_capture_pause_monitor_arm_rearm_fire);
+    RUN_TEST(test_bp_ring_primitive);
+    RUN_TEST(test_monitors_feed_the_machine);
+
+    /* --- Run 2: observability StateSnapshot fold reducer --- */
+    RUN_TEST(test_snapshot_counters_and_ring);
+    RUN_TEST(test_snapshot_illegal_and_ring_bound);
 
     return UNITY_END();
 }

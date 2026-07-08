@@ -24,6 +24,8 @@ set(REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(CORE_SRCS
     ${REPO_ROOT}/components/jr_core/src/session.c
     ${REPO_ROOT}/components/jr_core/src/turn_policy.c
+    ${REPO_ROOT}/components/jr_core/src/monitors.c
+    ${REPO_ROOT}/components/jr_core/src/snapshot.c
     ${REPO_ROOT}/components/jr_dsp/src/dsp.c
 )
 

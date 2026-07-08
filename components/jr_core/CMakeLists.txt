@@ -9,6 +9,8 @@ idf_component_register(
     SRCS
         "src/session.c"
         "src/turn_policy.c"
+        "src/monitors.c"
+        "src/snapshot.c"
     INCLUDE_DIRS "include"
     REQUIRES jr_ports jr_dsp
 )
