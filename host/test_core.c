@@ -26,6 +26,10 @@
 #include <math.h>
 #include <string.h>
 
+/* Run-3 L2 transport suite, defined in host/test_transport.c; registered inside
+ * this file's UNITY_BEGIN/END so the whole suite is one jr_host_tests binary. */
+extern void transport_tests_run(void);
+
 /* ---- shared fixtures ---- */
 static jr_clock_t g_clk;
 
@@ -1175,6 +1179,9 @@ int main(void)
     /* --- Run 2: observability StateSnapshot fold reducer --- */
     RUN_TEST(test_snapshot_counters_and_ring);
     RUN_TEST(test_snapshot_illegal_and_ring_bound);
+
+    /* --- Run 3: L2 Gemini transport (builders/framer/parser + fake ws) --- */
+    transport_tests_run();
 
     return UNITY_END();
 }
