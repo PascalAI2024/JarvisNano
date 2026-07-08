@@ -35,7 +35,10 @@ typedef struct {
     jr_clock_t   clock;    /* injected: esp_timer on device, fake on host   */
     jr_display_t display;  /* injected: L5 presenter port                    */
     jr_input_t   input;    /* injected: L0 CST9217 event port                */
-    jr_state_t   state;    /* owned by the core; L6 seeds it to Idle         */
+    jr_session_t session;  /* owned by the core; L6 seeds it to Idle. The    */
+                           /* full SessionState (phase + fail_count +        */
+                           /* resumption_token + session_gen + vad_mode) the */
+                           /* owner replaces each jr_transition() step.      */
 } jr_app_t;
 
 static jr_app_t s_app;
@@ -74,9 +77,13 @@ void app_main(void)
     s_app.display = jr_hal_display();
     s_app.input   = jr_hal_input();
 
-    /* 4. Seed the core lifecycle. Phase 0 boots to Idle and stays there. */
-    s_app.state = JR_ST_IDLE;
-    ESP_LOGI(TAG, "core state = %s", jr_state_name(s_app.state));
+    /* 4. Seed the core lifecycle. Manual/PTT is the shipping VAD mode
+     *    (activityStart/activityEnd boundaries; audioStreamEnd is never emitted
+     *    in manual mode — see docs/reference/gemini-live-api-v5.md). Phase 0
+     *    boots to Idle and stays there; Phase 1's owner task will feed events
+     *    into jr_transition() and execute the returned command list. */
+    s_app.session = jr_session_init(JR_VAD_MANUAL_LOCAL_RMS);
+    ESP_LOGI(TAG, "core state = %s", jr_state_name(s_app.session.phase));
 
     /* 5. Present the idle face — the Phase-0 acceptance target (blank/idle
      *    face on real hardware). On device this drives the CO5300; in this
