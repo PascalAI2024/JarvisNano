@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Managed (registry) dependencies for JarvisRobot v5. Versions pinned to the v4
+# dependencies.lock (proven-good on this board) so Phase 0 does not chase a
+# floating registry. These are pulled by `idf.py reconfigure`; the local
+# components/ tree (jr_*) is auto-discovered and NOT listed here.
+dependencies:
+  idf: ">=5.5.0"
+
+  # --- L0 board bring-up ---------------------------------------------------
+  # esp_board_manager owns the TCA9554 -> AXP2101 -> ES8311 -> ES7210 ->
+  # CST9217 -> SDMMC device tree from boards/. `idf.py gen-bmgr-config` turns
+  # the board YAML into the generated gen_bmgr_codes component.
+  espressif/esp_board_manager: "==0.5.15"
+
+  # CO5300 466x466 QSPI AMOLED panel driver (hardware.md #4/#5).
+  espressif/esp_lcd_co5300: "==2.1.0"
+
+  # CST9217 interrupt-driven capacitive touch (hardware.md #9).
+  esp_lcd_touch: "==1.2.1"
+  waveshare/esp_lcd_touch_cst9217: "==2.0.0"
+
+  # TCA9554 IO expander (init order head, hardware.md peripheral map).
+  espressif/esp_io_expander_tca9554: "==2.0.3"
+
+  # --- L1 audio ------------------------------------------------------------
+  # esp-sr provides the software AEC (AEC_MODE_FD_LOW_COST) — the ES7210 has no
+  # on-chip AEC, it only digitizes a hardware echo reference (hardware.md #3).
+  espressif/esp-sr: "==2.4.6"
+  # Codec device abstraction over ES8311/ES7210 on the shared I2S0 duplex clock.
+  espressif/esp_codec_dev: "==1.5.11"
+
+  # --- L2 transport --------------------------------------------------------
+  # WS client behind the L2 framer (would-block-as-backpressure). Pinned to the
+  # version the v4 write-block behavior was characterised against.
+  espressif/esp_websocket_client: "==1.7.0"
+
+  # --- L5 display ----------------------------------------------------------
+  # emote_gfx baked-AAF face runtime. NO canvas / no runtime framebuffer
+  # (hardware.md #5) — reactivity is flash-baked AAF/EAF segments.
+  espressif2022/esp_emote_gfx: "==3.0.2"

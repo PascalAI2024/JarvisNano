@@ -1,0 +1,36 @@
+# JarvisRobot v5 — toolchain + component pins (single source of truth).
+#
+# These pins are the reproducible-build contract for Phase 0. They are the
+# reason v4 builds succeeded on this board; v5 inherits them exactly.
+
+# --- ESP-IDF ---------------------------------------------------------------
+esp-idf                      == v5.5.4        # docker: espressif/idf:v5.5.4
+
+# --- Python build tools (install INSIDE the build container BEFORE idf.py) --
+# The board-manager codegen (`idf.py gen-bmgr-config`) is provided by
+# esp-bmgr-assist and requires this exact component-manager version.
+idf-component-manager        == 2.4.10
+esp-bmgr-assist             == 0.5.0
+
+# --- Managed (registry) components — see main/idf_component.yml -------------
+# Pinned to the v4 dependencies.lock (proven-good on the Waveshare AMOLED-1.75).
+espressif/esp_board_manager        == 0.5.15
+espressif/esp_lcd_co5300           == 2.1.0
+esp_lcd_touch                      == 1.2.1
+waveshare/esp_lcd_touch_cst9217    == 2.0.0
+espressif/esp_io_expander_tca9554  == 2.0.3
+espressif/esp-sr                   == 2.4.6
+espressif/esp_codec_dev            == 1.5.11
+espressif/esp_websocket_client     == 1.7.0
+espressif2022/esp_emote_gfx        == 3.0.2
+
+# --- Build recipe (device) -------------------------------------------------
+#   1. docker run --rm -it -v <repo>:/project -w /project espressif/idf:v5.5.4
+#   2. pip install 'idf-component-manager==2.4.10' 'esp-bmgr-assist==0.5.0'
+#   3. idf.py set-target esp32s3
+#   4. idf.py gen-bmgr-config -c ./boards -b esp32s3_touch_amoled_1_75
+#   5. idf.py build
+#   6. (on host) scripts/flash-v5.sh          # DIO flash mode
+
+# --- Build recipe (host tests — NO ESP-IDF) --------------------------------
+#   cd host && cmake -B build && cmake --build build && ./build/jr_host_tests

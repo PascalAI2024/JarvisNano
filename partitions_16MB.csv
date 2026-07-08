@@ -1,0 +1,20 @@
+# JarvisRobot v5 — 16 MB flash partition table (hand-written; NO heredoc/codegen).
+#
+# hardware.md non-negotiable #8: flash is partitioned to the byte, table ends
+# FLUSH at 0x1000000 (16 MiB). v5 drops the never-flashed OTA-B slot AND otadata
+# for a SINGLE `factory` app slot (the Phase-0 OTA decision: single-slot now;
+# revisit dual-OTA vs emote/storage trade in Phase 4). Named offsets match
+# hardware.md exactly: app @0x20000, emote @0x420000, storage @0xB00000,
+# coredump @0xFF0000.
+#
+# Sizes: factory 4 MiB, emote_assets 6.875 MiB (SPIFFS baked AAF/EAF art),
+# storage 4.9375 MiB (FAT; runtime store is the SD card, this is a fallback),
+# coredump 64 KiB (persists panic backtraces, CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH).
+#
+# Name,        Type, SubType,  Offset,   Size
+nvs,           data, nvs,      0x9000,   0x6000
+phy_init,      data, phy,      0xF000,   0x1000
+factory,       app,  factory,  0x20000,  0x400000
+emote_assets,  data, spiffs,   0x420000, 0x6E0000
+storage,       data, fat,      0xB00000, 0x4F0000
+coredump,      data, coredump, 0xFF0000, 0x10000

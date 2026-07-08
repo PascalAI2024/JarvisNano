@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# JarvisRobot v5 — project sdkconfig defaults (plain IDF; the ONE source of
+# truth, unlike v4 where the board's sdkconfig.defaults.board was inert and the
+# real values lived in a bootstrap.sh heredoc). Every line traces to a
+# hardware.md non-negotiable.
+
+# --- Target: ESP32-S3, dual-core LX7 @ 240 MHz ---
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# --- Flash: 16 MB @ 80 MHz, DIO mode. CO5300 QSPI display forces DIO; default
+#     QIO has caused boot failures (hardware.md #4). Also baked into the flash
+#     script as belt-and-suspenders. ---
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# --- PSRAM: 8 MB OCTAL @ 80 MHz, DMA-capable. Internal SRAM is the scarce
+#     resource, not PSRAM — large buffers/queues go here (hardware.md #7). ---
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# --- Partition table: hand-written 16 MB CSV, NO heredoc/codegen (hardware.md
+#     #8). Table ends flush at 0x1000000. ---
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_16MB.csv"
+
+# --- Compiler: -O2 perf. The AMOLED/emote path is timing-sensitive; -O0 makes
+#     correct rendering look broken (hardware.md #6). ---
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# --- Console: native USB-Serial/JTAG over the flash cable. Single-owner — no
+#     component may install the USB-serial driver before the console
+#     (hardware.md #11). Without this the board enumerates JTAG-only. ---
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# --- lwIP TCP: triple the send buffer + window to 16 KB (default 5760 B). A
+#     Wi-Fi RTT spike must be absorbed, not surfaced as a would-block that the
+#     L2 framer would otherwise have to treat as backpressure. PSRAM is
+#     plentiful so the per-socket memory is free. ---
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
+CONFIG_LWIP_TCP_WND_DEFAULT=16384
+
+# --- BT/BLE OFF. BT/Wi-Fi coex time-slices the single 2.4 GHz radio and
+#     starves WSS streaming audio; a boot-stability + audio invariant
+#     (hardware.md #11). ---
+CONFIG_BT_ENABLED=n
+
+# --- Coredump to flash. Persists panic backtraces across reboot into the
+#     coredump partition — a debugging asset worth keeping (harvest list). ---
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+
+# --- NOTE: the CONFIG_ESP_BOARD_PERIPH_* / CONFIG_ESP_BOARD_DEV_DISPLAY_LCD
+#     symbols (I2C/SPI/GPIO/I2S/display support) are OWNED by esp_board_manager
+#     (>=0.5.15) and are generated into components/gen_bmgr_codes/
+#     board_manager.defaults from boards/.../sdkconfig.defaults.board by
+#     `idf.py gen-bmgr-config`. Declaring them here is REJECTED as a managed-
+#     symbol collision — so they intentionally do NOT appear in this file. ---
+
+# --- Log levels: INFO default, DEBUG available for bring-up. ---
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y

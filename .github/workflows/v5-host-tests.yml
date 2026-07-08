@@ -1,0 +1,30 @@
+name: v5 host tests
+
+# Phase 0 deliverable (roadmap.md): the pure core (jr_core + jr_dsp) is
+# host-testable with NO ESP-IDF — CI runs the Unity suite on every commit. A
+# core file reaching for a driver/network/model header breaks this job before
+# any 15-20 min device build is attempted.
+
+on:
+  push:
+    branches: [v5, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-unity:
+    name: jr_core + jr_dsp Unity suite (no ESP-IDF)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      - name: Configure + build host tests
+        run: cmake -S host -B host/build
+      - name: Build
+        run: cmake --build host/build
+      - name: Run Unity suite
+        run: ./host/build/jr_host_tests
