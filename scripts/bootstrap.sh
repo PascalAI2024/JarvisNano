@@ -1007,6 +1007,56 @@ PY
     log "✓ build complete → $ESP_CLAW_DIR/application/edge_agent/build/edge_agent.bin"
 }
 
+# esp_websocket_client aborts the ENTIRE connection when esp_transport_ws_send_raw
+# returns 0 -- a transient TCP would-block / poll-write timeout (errno 0): the socket
+# is alive, the send buffer is just momentarily full. That single upstream behavior is
+# the ROOT CAUSE of JarvisNano's "voice breaks completely mid-reply" sessions: one Wi-Fi
+# backpressure spike tears the WS down and the session dies to IDLE (needs a re-tap).
+# Losing one frame (32 ms of audio, or a resend-able control frame) is recoverable;
+# tearing the connection is not. This patch makes a would-block AT FRAME START (widx==0
+# -- nothing transmitted, so the WS byte stream is not corrupted) return without aborting:
+# the caller drops that one frame and the connection survives. A real error (wlen<0) or a
+# mid-frame stall (widx>0, unrecoverable partial) still aborts, unchanged. Managed
+# component (git-ignored, re-downloaded on clean builds) -> re-applied each build like the
+# other managed-component patches; single-lock path only (SEPARATE_TX_LOCK is unset here).
+apply_esp_websocket_client_writeblock_patch() {
+    local target="$ESP_CLAW_DIR/application/edge_agent/managed_components/espressif__esp_websocket_client/esp_websocket_client.c"
+    if [ ! -f "$target" ]; then
+        log "esp_websocket_client managed component not pulled yet — skipping would-block patch for this pass"
+        return
+    fi
+    if grep -q "JarvisNano: transient TCP would-block" "$target" 2>/dev/null; then
+        log "esp_websocket_client would-block tolerance patch already applied"
+        return
+    fi
+    log "applying esp_websocket_client would-block tolerance patch (a transient send would-block no longer tears the WS session down)"
+    python3 - "$target" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+anchor = "        if (wlen < 0 || (wlen == 0 && need_write != 0)) {\n"
+if anchor not in s:
+    raise SystemExit("esp_websocket_client send-error anchor not found (upstream changed?)")
+insert = (
+    "        /* JarvisNano: transient TCP would-block at frame start (wlen==0 with\n"
+    "         * nothing of this frame written yet) is NOT fatal -- the socket is alive,\n"
+    "         * the send buffer is momentarily full. Aborting the whole WebSocket over\n"
+    "         * one droppable frame is the root cause of the voice dying mid-reply.\n"
+    "         * Return without transmitting: nothing was written, so the WS byte stream\n"
+    "         * stays intact and the caller drops this frame. A real error (wlen<0) or a\n"
+    "         * mid-frame stall (widx>0) still aborts the connection below. */\n"
+    "        if (wlen == 0 && widx == 0 && need_write != 0) {\n"
+    "            ret = 0;\n"
+    "            esp_websocket_free_buf(client, true);\n"
+    "            goto unlock_and_return;\n"
+    "        }\n"
+)
+s = s.replace(anchor, insert + anchor, 1)
+p.write_text(s)
+print("patched", p)
+PY
+}
+
 apply_wifi_ps_patch() {
     local target="$ESP_CLAW_DIR/components/common/wifi_manager/wifi_manager.c"
     if [ ! -f "$target" ]; then
@@ -5236,6 +5286,7 @@ main() {
     apply_patch
     apply_app_claw_direct_display_kconfig_patch
     apply_codec_i2s_idempotent_toggle_patch
+    apply_esp_websocket_client_writeblock_patch
     apply_wifi_ps_patch
     apply_jpeg_soi_patch
     apply_http_phase2_patch
