@@ -1,10 +1,19 @@
-# jr_audio — L1 Audio Pipeline adapter (Phase 0: empty-but-registered skeleton).
-# Phase 1 fills this in: TDM demux (mic lane0 / ref lane2), esp-sr AEC
-# (FD_LOW_COST, filter_length=4), the mandatory 24->16 downsample, gain/knee,
-# and the PCM ring feeder — the task bodies wrapping jr_dsp's pure math and the
-# esp_codec_dev calls, exposed as AudioSource/AudioSink ports.
+# jr_audio — L1 Audio Pipeline adapter (device implementation).
+#
+# Capture: esp_codec_dev 4-lane TDM read -> 24->16 downsample -> demux -> esp-sr
+# AEC (FD_LOW_COST) -> gain/knee, exposed as jr_audio_source_t. Playback: a
+# drop-newest PSRAM ring drained by a feeder task to the ES8311, exposed as
+# jr_audio_sink_t with the synchronous fast-kill mute_now. Codec handles come
+# from esp_board_manager (double-cast dev_audio_codec_handles_t->codec_dev).
 idf_component_register(
     SRCS "src/jr_audio.c"
     INCLUDE_DIRS "include"
-    REQUIRES jr_ports jr_dsp jr_hal
+    REQUIRES
+        jr_ports
+        jr_dsp
+        jr_hal
+        esp_board_manager
+        espressif__esp_codec_dev
+        espressif__esp-sr
+        esp_timer
 )

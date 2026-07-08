@@ -1,30 +1,37 @@
 /*
  * SPDX-License-Identifier: Apache-2.0
  *
- * jr_transport/gemini_device_ws.h — DEVICE-PHASE STUB (out of scope for Run 3).
+ * jr_transport/gemini_device_ws.h — the DEVICE impl of the lower ws_transport
+ * seam: a thin adapter over esp_websocket_client that plugs UNDER the
+ * host-tested Gemini framer/parser (gemini_live.c). It buries v4's worst bug —
+ * a transient would-block that aborted the whole socket — behind the port by
+ * classifying esp_websocket_client's poll_write==0 as JR_WS_TX_WOULD_BLOCK
+ * (backpressure), never a teardown. Inbound frames arrive via the
+ * WEBSOCKET_EVENT_DATA handler and are reassembled into a recv ring that
+ * recv_frame() pops.
  *
- * The device implementation of the lower ws_transport seam: a thin adapter over
- * esp_websocket_client that plugs UNDER the host-tested Gemini framer/parser
- * (gemini_live.c). It is intentionally NOT compiled by the host suite and NOT
- * yet wired into the device build — the framer/parser above it are already
- * proven by host/test_transport.c against a fake ws_transport. Completing this
- * adapter (chiefly the WEBSOCKET_EVENT_DATA -> recv ring) is a Phase-1 DEVICE
- * acceptance step; do NOT treat it as done. See gemini_live.h for the seam.
+ * Module-singleton (one WSS session per device): jr_gemini_ws_init(url) builds
+ * the client + recv ring; jr_gemini_ws() returns the jr_ws_transport_t view to
+ * inject under jr_gemini_client_init(). The URL carries the API key as a query
+ * param at runtime — NEVER hardcode it in-repo.
  */
 #ifndef JR_TRANSPORT_GEMINI_DEVICE_WS_H
 #define JR_TRANSPORT_GEMINI_DEVICE_WS_H
 
+#include "esp_err.h"
 #include "jr_ports/ws_transport.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Opaque device state (holds the esp_websocket_client handle + recv ring). */
-typedef struct jr_gemini_device_ws jr_gemini_device_ws_t;
+/* Allocate the recv ring and remember the default endpoint URL (the full wss
+ * URL including ?key=). Idempotent. connect() may also receive a URL from the
+ * framer's cfg.url; a non-empty one there wins, else this default is used. */
+esp_err_t jr_gemini_ws_init(const char *url);
 
-/* Build a ws_transport backed by esp_websocket_client. DEVICE-PHASE STUB. */
-jr_ws_transport_t jr_gemini_device_ws_make(jr_gemini_device_ws_t *dev);
+/* The byte-level transport view to inject under the host-tested Gemini client. */
+jr_ws_transport_t jr_gemini_ws(void);
 
 #ifdef __cplusplus
 }

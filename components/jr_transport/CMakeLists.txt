@@ -19,8 +19,8 @@ idf_component_register(
     SRCS
         "src/jr_transport.c"
         "src/gemini_live.c"
-        # "src/gemini_device_ws.c"   # device-phase (see note above)
+        "src/gemini_device_ws.c"   # device WS byte transport (recv ring landed)
     INCLUDE_DIRS "include"
     REQUIRES jr_ports jr_core json
-    PRIV_REQUIRES esp_websocket_client
+    PRIV_REQUIRES esp_websocket_client esp-tls esp_timer
 )
