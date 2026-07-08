@@ -11,6 +11,7 @@ idf_component_register(
         "src/turn_policy.c"
         "src/monitors.c"
         "src/snapshot.c"
+        "src/orchestrator.c"
     INCLUDE_DIRS "include"
     REQUIRES jr_ports jr_dsp
 )

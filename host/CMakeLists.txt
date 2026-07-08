@@ -26,6 +26,7 @@ set(CORE_SRCS
     ${REPO_ROOT}/components/jr_core/src/turn_policy.c
     ${REPO_ROOT}/components/jr_core/src/monitors.c
     ${REPO_ROOT}/components/jr_core/src/snapshot.c
+    ${REPO_ROOT}/components/jr_core/src/orchestrator.c
     ${REPO_ROOT}/components/jr_dsp/src/dsp.c
 )
 
@@ -42,6 +43,7 @@ set(TRANSPORT_SRCS
 add_executable(jr_host_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_core.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_transport.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_soak.c
     ${CMAKE_CURRENT_SOURCE_DIR}/fakes/fake_clock.c
     ${CMAKE_CURRENT_SOURCE_DIR}/fakes/fake_ws_transport.c
     ${CMAKE_CURRENT_SOURCE_DIR}/unity/unity.c

@@ -30,6 +30,10 @@
  * this file's UNITY_BEGIN/END so the whole suite is one jr_host_tests binary. */
 extern void transport_tests_run(void);
 
+/* Capstone: the integrated orchestrator-pump + adversarial self-heal soak,
+ * defined in host/test_soak.c; registered inside this file's UNITY_BEGIN/END. */
+extern void soak_tests_run(void);
+
 /* ---- shared fixtures ---- */
 static jr_clock_t g_clk;
 
@@ -1182,6 +1186,9 @@ int main(void)
 
     /* --- Run 3: L2 Gemini transport (builders/framer/parser + fake ws) --- */
     transport_tests_run();
+
+    /* --- Capstone: orchestrator pump + integrated adversarial self-heal soak --- */
+    soak_tests_run();
 
     return UNITY_END();
 }
