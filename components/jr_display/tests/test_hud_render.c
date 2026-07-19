@@ -857,6 +857,217 @@ static void test_choice_render_and_hit_agree(void)
     free(fb); free(mask);
 }
 
+/* ---- ask text helpers (the STATE-05/06 text layer's geometry) --------- */
+
+static void test_wrap2_short_fits_one_line(void)
+{
+    char l1[25], l2[25];
+    memset(l1, 'X', sizeof l1);
+    memset(l2, 'X', sizeof l2);
+    hud_wrap2("hello", 24, l1, l2);
+    CHECK(strcmp(l1, "hello") == 0, "l1='%s'", l1);
+    CHECK(l2[0] == '\0', "l2 should be empty, got '%s'", l2);
+}
+
+static void test_wrap2_splits_at_space(void)
+{
+    char l1[25], l2[25];
+    /* 29 chars; the break must land on the last space at or before col 24,
+     * and the break space must be consumed, not carried onto either line. */
+    hud_wrap2("have you considered rebooting", 24, l1, l2);
+    CHECK(strcmp(l1, "have you considered") == 0, "l1='%s'", l1);
+    CHECK(strcmp(l2, "rebooting") == 0, "l2='%s'", l2);
+}
+
+static void test_wrap2_hard_splits_long_word(void)
+{
+    char l1[25], l2[25];
+    /* 48 chars, no spaces: nothing to break on, so 24/24 hard split. */
+    const char *s = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuv";
+    hud_wrap2(s, 24, l1, l2);
+    CHECK(strlen(l1) == 24 && strncmp(l1, s, 24) == 0, "l1='%s'", l1);
+    CHECK(strlen(l2) == 24 && strcmp(l2, s + 24) == 0, "l2='%s'", l2);
+}
+
+static void test_wrap2_truncates_overflow(void)
+{
+    char l1[25], l2[25];
+    /* 71 chars — more than 2*24, so line 2 must hard-truncate at 24 and
+     * still terminate. The break still lands on a word boundary. */
+    const char *s =
+        "would you like the long answer or the short answer to this question sir";
+    hud_wrap2(s, 24, l1, l2);
+    CHECK(strcmp(l1, "would you like the long") == 0, "l1='%s'", l1);
+    CHECK(strlen(l2) == 24, "overflow should fill line 2 to 24, got %zu",
+          strlen(l2));
+    CHECK(strncmp(l2, "answer or the short answ", 24) == 0, "l2='%s'", l2);
+}
+
+static void test_wrap2_preserves_48_char_sentence(void)
+{
+    char l1[25], l2[25];
+    /* exactly 2*24 chars with a space at col 24: nothing may be lost — the
+     * two lines rejoined across the consumed break space must equal the
+     * original text. */
+    const char *s = "this question is exactly forty eight chars long!";
+    hud_wrap2(s, 24, l1, l2);
+    char joined[64];
+    snprintf(joined, sizeof joined, "%s %s", l1, l2);
+    CHECK(strcmp(joined, s) == 0, "lost characters: '%s' + '%s'", l1, l2);
+    CHECK(strlen(l1) <= 24 && strlen(l2) <= 24, "line overflow");
+}
+
+static void test_wrap2_terminates_and_empty(void)
+{
+    char l1[25], l2[25];
+    memset(l1, 'X', sizeof l1);
+    memset(l2, 'X', sizeof l2);
+    hud_wrap2("", 24, l1, l2);
+    CHECK(l1[0] == '\0', "empty text: l1 not terminated empty");
+    CHECK(l2[0] == '\0', "empty text: l2 not terminated empty");
+
+    /* termination must hold even when both lines fill completely */
+    memset(l1, 'X', sizeof l1);
+    memset(l2, 'X', sizeof l2);
+    hud_wrap2("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz", 24,
+              l1, l2);
+    CHECK(l1[24] == '\0', "l1 not NUL-terminated at max_cols");
+    CHECK(l2[24] == '\0', "l2 not NUL-terminated at max_cols");
+}
+
+/* Every label anchor from the real 3-choice layout must land fully on-screen
+ * (every box corner inside the framebuffer) with the box CENTRE within
+ * r=215+24 of the true centre — the clamped-box equivalent of "no text past
+ * the glass", since the drawn text hugs the anchor. The bottom arc's label
+ * must actually sit in the 6 o'clock region, not just somewhere legal. */
+static void test_label_anchor_on_screen(void)
+{
+    hud_choice_t c[HUD_CHOICE_MAX];
+    t_fill_choices(c, HUD_CHOICE_MAX);
+
+    const int r = 205, w = 60, h = 7;
+    int bottom_y = -1;
+    for (int i = 0; i < HUD_CHOICE_MAX; i++) {
+        int x = -1, y = -1;
+        hud_choice_label_anchor(&c[i], r, w, h, &x, &y);
+        CHECK(x >= 0 && y >= 0 && x + w <= HUD_W && y + h <= HUD_H,
+              "arc %d anchor box off-screen: x=%d y=%d", i, x, y);
+        /* box centre in doubled coords about the true centre (232.5, 232.5) */
+        const long cx2 = 2L * x + w - (HUD_W - 1);
+        const long cy2 = 2L * y + h - (HUD_H - 1);
+        CHECK(cx2 * cx2 + cy2 * cy2 <= (2L * (215 + 24)) * (2L * (215 + 24)),
+              "arc %d label centre strays past r239", i);
+        if (y > bottom_y) {
+            bottom_y = y;
+        }
+    }
+    CHECK(bottom_y > 300, "no label in the 6 o'clock region (max y=%d)",
+          bottom_y);
+}
+
+/* The square clamp is not the glass. Near-horizontal arcs — BOTH n=2 arcs and
+ * the n=3 side arcs — put the r=205 anchor centre ~200 px out, where a
+ * square-clamped box's corners ran under the arc annulus (r>=223) from ~8
+ * label chars and off the r=232.5 glass edge from ~10. Options may legally be
+ * 19 chars, so prove the radial clamp at exactly that width: every corner of
+ * every box inside HUD_LABEL_R_SAFE (verifier bound 2*R+1 in doubled coords)
+ * and strictly inside the r=223 arc band — the farthest point of an
+ * axis-aligned box from the centre is a corner, so corner checks cover the
+ * whole box. The clamp must slide boxes along the chord, not teleport them:
+ * the n=2 labels must stay on their own sides of the screen. */
+static void test_label_anchor_radial_clamp_19_chars(void)
+{
+    const int w = 6 * 19, h = 7;
+    for (int n = 2; n <= HUD_CHOICE_MAX; n++) {
+        hud_choice_t c[HUD_CHOICE_MAX];
+        memset(c, 0, sizeof c);
+        hud_choice_layout(n, c);
+        for (int i = 0; i < n; i++) {
+            int x = -1, y = -1;
+            hud_choice_label_anchor(&c[i], 205, w, h, &x, &y);
+            CHECK(x >= 0 && y >= 0 && x + w <= HUD_W && y + h <= HUD_H,
+                  "n=%d arc %d box off-screen: x=%d y=%d", n, i, x, y);
+            const int cxs[2] = { x, x + w - 1 };
+            const int cys[2] = { y, y + h - 1 };
+            for (int a = 0; a < 2; a++) {
+                for (int b = 0; b < 2; b++) {
+                    const long dx = 2L * cxs[a] - (HUD_W - 1);
+                    const long dy = 2L * cys[b] - (HUD_H - 1);
+                    const long r2 = dx * dx + dy * dy;
+                    CHECK(r2 <= (2L * HUD_LABEL_R_SAFE + 1) *
+                                (2L * HUD_LABEL_R_SAFE + 1),
+                          "n=%d arc %d corner (%d,%d) past r%d",
+                          n, i, cxs[a], cys[b], HUD_LABEL_R_SAFE);
+                    CHECK(r2 < (2L * 223) * (2L * 223),
+                          "n=%d arc %d corner (%d,%d) touches the arc band",
+                          n, i, cxs[a], cys[b]);
+                }
+            }
+            if (n == 2) {
+                /* arc 0 is the right-side arc, arc 1 the left-side one */
+                const int cx = x + w / 2;
+                CHECK(i == 0 ? cx > 233 : cx < 233,
+                      "n=2 arc %d label crossed to the wrong side (cx=%d)",
+                      i, cx);
+            }
+        }
+    }
+}
+
+/* Lifted verbatim from jr_display.c native_darken() — the reference the fold
+ * must match. Do not "simplify" it: the point is comparing hud_dim565 against
+ * the real per-channel transform, not against a re-model of it. */
+static uint16_t ref_native_darken(uint16_t pixel)
+{
+    uint16_t r = (pixel >> 11) & 0x1fU;
+    uint16_t g = (pixel >> 5) & 0x3fU;
+    uint16_t b = pixel & 0x1fU;
+    return (uint16_t)(((r >> 2) << 11) | ((g >> 2) << 5) | (b >> 2));
+}
+
+/* hud_dim565 folds jr_display.c's per-pixel dim chain — panel_native (bswap
+ * if swapped), native_darken, panel_order_color (bswap back) — into one
+ * masked shift. The green channel spans both bytes in the swapped layout, so
+ * nothing short of EXHAUSTIVE equality is proof: all 65536 values, both byte
+ * orders. */
+static void test_dim565_matches_darken_chain(void)
+{
+    size_t bad_plain = 0, bad_swap = 0;
+    unsigned first_plain = 0, first_swap = 0;
+    for (uint32_t v = 0; v <= 0xFFFFu; v++) {
+        const uint16_t p = (uint16_t)v;
+        if (hud_dim565(p, false) != ref_native_darken(p)) {
+            if (!bad_plain) first_plain = (unsigned)v;
+            bad_plain++;
+        }
+        /* swapped path: memory -> native -> darken -> memory */
+        const uint16_t nat = (uint16_t)((p >> 8) | (p << 8));
+        const uint16_t dark = ref_native_darken(nat);
+        const uint16_t want = (uint16_t)((dark >> 8) | (dark << 8));
+        if (hud_dim565(p, true) != want) {
+            if (!bad_swap) first_swap = (unsigned)v;
+            bad_swap++;
+        }
+    }
+    CHECK(bad_plain == 0, "%zu plain-path mismatches (first 0x%04x)",
+          bad_plain, first_plain);
+    CHECK(bad_swap == 0, "%zu swapped-path mismatches (first 0x%04x)",
+          bad_swap, first_swap);
+}
+
+/* A wrapping span [240..20] crosses 3 o'clock; its midpoint is a=2, just past
+ * 3 o'clock — NOT the complementary a=130 over by 9 o'clock. A naive
+ * (a0+a1)/2 lands on the wrong side of the screen; the anchor must not. */
+static void test_label_anchor_wrap_span(void)
+{
+    const hud_choice_t wrap = { "wrap", 240, 20 };
+    int x = -1, y = -1;
+    hud_choice_label_anchor(&wrap, 205, 24, 7, &x, &y);
+    CHECK(x > 350, "wrap-span label on the complementary side: x=%d", x);
+    CHECK(y + 3 > 200 && y + 3 < 266,
+          "wrap-span label strayed vertically: y=%d", y);
+}
+
 int main(void)
 {
     test_strip_invariance();
@@ -878,6 +1089,16 @@ int main(void)
     test_choice_hit();
     test_choice_hit_rejects_face_and_bezel();
     test_choice_render_and_hit_agree();
+    test_wrap2_short_fits_one_line();
+    test_wrap2_splits_at_space();
+    test_wrap2_hard_splits_long_word();
+    test_wrap2_truncates_overflow();
+    test_wrap2_preserves_48_char_sentence();
+    test_wrap2_terminates_and_empty();
+    test_label_anchor_on_screen();
+    test_label_anchor_wrap_span();
+    test_label_anchor_radial_clamp_19_chars();
+    test_dim565_matches_darken_chain();
 
     if (g_failures) {
         printf("hud_render tests FAILED (%d)\n", g_failures);

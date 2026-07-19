@@ -727,6 +727,13 @@ bool jr_gemini_event_to_ask(const jr_gemini_event_t *ev, jr_gemini_ask_t *out)
     if (!ev->tool_name || strcmp(ev->tool_name, JR_GEMINI_ASK_USER_TOOL) != 0) {
         return false;
     }
+    /* No text id means no answer can ever be addressed: the hash alone cannot
+     * rebuild the functionResponse Gemini expects. Accepting such an ask would
+     * wedge the Asking state for the full 120 s and then still fail to answer.
+     * Reject it here so the caller's malformed-ask path handles it instead. */
+    if (!ev->call_id_text || ev->call_id_text[0] == '\0') {
+        return false;
+    }
 
     const char *q = jr_gemini_tool_arg_string(ev, JR_GEMINI_ASK_USER_ARG_QUESTION);
     if (!q || q[0] == '\0') { return false; }

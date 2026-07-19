@@ -183,6 +183,56 @@ typedef struct {
  * n is clamped to 1..HUD_CHOICE_MAX. */
 void hud_choice_layout(int n, hud_choice_t *out);
 
+/* ---- ask text geometry --------------------------------------------------
+ * The question and the per-arc labels are TEXT, drawn by jr_display.c's font
+ * machinery — this file owns no font. These helpers keep the wrapping and the
+ * placement integer-only and host-testable, so the text layer's geometry is
+ * pinned by the same suite that pins the arcs. Both are called once per
+ * present, never per strip or per frame. */
+
+/* Word-wrap `text` into at most two lines of at most max_cols chars each; the
+ * caller's buffers hold max_cols+1 bytes and are always NUL-terminated. Breaks
+ * at spaces where possible (break spaces are consumed); a word longer than
+ * max_cols hard-splits; no character is lost while the text fits in
+ * 2*max_cols, beyond which line 2 hard-truncates. Integer-only, no
+ * allocation. */
+void hud_wrap2(const char *text, int max_cols, char l1[], char l2[]);
+
+/* Every corner of a label box stays inside this radius. 219 = the arcs' inner
+ * edge (223) minus margin: on a ROUND panel the square clamp is not enough —
+ * a near-horizontal arc puts the box ~200 px out, where corners run under the
+ * arc annulus and off the r=232.5 glass long before they leave the square.
+ * Text may overlap the (dimmed) battery rim during a modal ask; it may never
+ * touch the arcs' band or the glass edge. */
+#define HUD_LABEL_R_SAFE 219
+
+/* Top-left corner of a w-by-h px text box centred on the arc's angular
+ * midpoint at radius r. Wrap-aware: an a0 > a1 span crosses 3 o'clock and the
+ * midpoint stays inside the span, never on the complementary side. The box is
+ * clamped fully inside the 466x466 screen AND radially inside
+ * HUD_LABEL_R_SAFE, corner-measured about the half-unit centre (232.5): rows
+ * are pulled toward the centre row until the worst row's chord is at least w
+ * wide, then x is pulled into that chord. Integer-only. */
+void hud_choice_label_anchor(const hud_choice_t *c, int r, int w, int h,
+                             int *out_x, int *out_y);
+
+/* Fold of jr_display.c's panel_native -> native_darken -> panel_order_color
+ * chain into one masked shift per pixel — the STATE-07 backdrop dim runs over
+ * every pixel of every strip while an ask is up, and two per-pixel byte swaps
+ * cost real frame rate. Derivation: darken keeps the top 3/4/3 bits of each
+ * 5/6/5 channel in place, which is (v >> 2) & 0x39E7 on the native layout; on
+ * the byte-swapped layout the same bit permutation splits into the two green
+ * bits that cross the byte boundary ((s & 3) << 14) plus the in-byte
+ * remainder ((s >> 2) & 0x2739 — bswap(0x39E7) minus those two bits). Proven
+ * exhaustively over all 65536 values, both byte orders, in the host suite. */
+static inline uint16_t hud_dim565(uint16_t v, bool swap_bytes)
+{
+    if (!swap_bytes) {
+        return (uint16_t)((v >> 2) & 0x39E7u);
+    }
+    return (uint16_t)(((v & 0x0003u) << 14) | ((v >> 2) & 0x2739u));
+}
+
 /* Draw the choice arcs over an already-rendered strip. `selected` renders
  * bright (tap confirmation), the rest dim; pass -1 for none. Slots with a NULL
  * label are skipped. Same strip contract as hud_overlay_frame: dst holds rows

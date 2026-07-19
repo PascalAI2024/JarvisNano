@@ -131,6 +131,9 @@ static const jr_gemini_fn_decl_t s_device_tool_fns[] = {
         .arg_name = NULL,
         .arg_desc = NULL,
     },
+    /* ask_user never reaches the HTTPS tool worker: rich_cb intercepts it and
+     * it becomes the Asking substate (choice arcs on glass, STATE-05/06). */
+    JR_GEMINI_ASK_USER_DECL,
 };
 
 #define DEVICE_TOOL_DECL_COUNT \
@@ -192,6 +195,34 @@ static size_t s_local_tool_head;
 static size_t s_local_tool_count;
 static jr_tool_result_t *s_tool_poll_result;
 static pending_tool_consent_t s_tool_consent;
+
+/* The OWNED ask_user snapshot (STATE-05/06). The Gemini parse tree dies the
+ * moment rich_cb returns, but the Asking window holds the question and options
+ * for up to JR_ASK_TIMEOUT_MS (120 s) — so rich_cb copies into this struct and
+ * everything downstream (PresentChoices labels, the CHOICE_PICKED echo text,
+ * the functionResponse call id) points into it. All writers and readers run on
+ * the app task (rich_cb via voice_poll, voice_exec, the input loop): single
+ * writer, no locking. `s_ask_prev` is the one-deep history a re-ask needs — the
+ * session answers the OLD call id first, but only AFTER rich_cb has already
+ * overwritten the live snapshot with the new ask. */
+static jr_gemini_ask_t s_ask;
+static jr_gemini_ask_t s_ask_prev;
+
+/* Synthetic tap lane for /api/input/tap: ((x+1)<<16)|(y+1), 0 == none. It is
+ * drained ahead of the HAL queue by input_next() and flows through the REAL
+ * tap handler, so the ask/consent/shade tap paths can be exercised end-to-end
+ * over HTTP; only the CST9217 itself is bypassed (which /api/touch covers). */
+static _Atomic uint32_t s_sim_touch;
+
+/* Debug-choices request lane: 0 == none, else requested arc count + 1 (so a
+ * dismiss, n == 0, encodes as 1). The httpd handler only posts here; the app
+ * task drains it — jr_display's choice statics keep exactly ONE writer. */
+static _Atomic uint32_t s_debug_choices_req;
+
+/* App-task only: taps are swallowed until this deadline right after an arc was
+ * tapped, so the trailing contact of a double-tap cannot reach the mute
+ * toggle the instant the arcs synchronously dismiss. */
+static uint32_t s_ask_tap_grace_ms;
 
 typedef struct {
     jr_event_t ev;
@@ -955,6 +986,68 @@ static void rich_cb(void *u, const jr_gemini_event_t *ge)
         }
         break;
     case JR_GEV_TOOL_CALL:
+        if (ge->tool_name != NULL &&
+            strcmp(ge->tool_name, JR_GEMINI_ASK_USER_TOOL) == 0) {
+            /* Snapshot NOW — the parse tree dies when this callback returns,
+             * and the arcs hold these strings for up to 120 s. Validate into
+             * a LOCAL first: a malformed ask arriving mid-ask must not
+             * destroy the live snapshot the open question still renders and
+             * answers from. */
+            jr_gemini_ask_t tmp;
+            if (jr_gemini_event_to_ask(ge, &tmp)) {
+                if (s_ask.call_id_hash != 0U &&
+                    s_ask.call_id_hash != ge->call_id) {
+                    /* One frame can batch several ask_user calls; each
+                     * rotation can push a still-unanswered ask off the far
+                     * end of the two-deep history before the session's
+                     * answer-the-old-one command ever executes. Answer it
+                     * HERE, at eviction, so no call id is ever stranded —
+                     * the later SendChoiceResult miss is then a no-op. */
+                    if (s_ask_prev.call_id[0] != '\0' && !s_ask_prev.answered) {
+                        ESP_LOGW(TAG, "ask_user: evicting unanswered ask; "
+                                 "sending empty answer");
+                        char *evf = jr_gemini_build_ask_user_response(
+                            s_ask_prev.call_id, NULL);
+                        if (evf != NULL) {
+                            (void)jr_gemini_send_frame(&a->client, evf,
+                                                       strlen(evf));
+                            free(evf);
+                        }
+                    }
+                    s_ask_prev = s_ask;
+                }
+                s_ask = tmp;
+                if (s_ask.truncated) {
+                    ESP_LOGW(TAG, "ask_user: fields clipped to UI caps");
+                }
+                ESP_LOGI(TAG, "ask_user: \"%s\" (%u options)",
+                         s_ask.question, (unsigned)s_ask.count);
+                e = jr_event(JR_EV_ASK_OPENED);
+                e.call_id = ge->call_id;
+                /* Deliberately NO call_id_text: inq_push would repoint it at
+                 * a recycled inbox slot, and the session BORROWS that pointer
+                 * for the whole ask. voice_exec resolves hash -> s_ask. */
+                break;
+            }
+            /* Unusable ask (no question, no options, or no text id). Answer
+             * immediately with an empty string so the server does not hold
+             * the turn open waiting for a functionResponse that can never
+             * come. An id-less call cannot even be answered — log and drop. */
+            if (ge->call_id_text != NULL && ge->call_id_text[0] != '\0') {
+                ESP_LOGW(TAG, "ask_user: malformed call; sending empty answer");
+                char *frame =
+                    jr_gemini_build_ask_user_response(ge->call_id_text, NULL);
+                if (frame != NULL) {
+                    (void)jr_gemini_send_frame(&a->client, frame,
+                                               strlen(frame));
+                    free(frame);
+                }
+            } else {
+                ESP_LOGW(TAG, "ask_user: id-less call; nothing to answer");
+            }
+            e = jr_event(JR_EV_HEARTBEAT);
+            break;
+        }
         e = jr_event(JR_EV_SERVER_TOOL_CALL);
         e.call_id = ge->call_id;
         e.call_id_text = ge->call_id_text;
@@ -1050,6 +1143,24 @@ static bool voice_poll(void *ctx, jr_event_t *out)
     io->head = (io->head + 1) % INBOX_CAP;
     io->count--;
     return true;
+}
+
+/* Resolve the core's uint32 ask handle back to the owned snapshot. The
+ * ASK_OPENED event deliberately carries no call_id_text (the inbox would
+ * repoint a borrowed string at a recycled slot), so the text id, question and
+ * options live only here. Checks the live snapshot first, then the one-deep
+ * re-ask history. */
+static jr_gemini_ask_t *ask_by_hash(uint32_t call_id)
+{
+    if (call_id != 0U && s_ask.call_id_hash == call_id &&
+        s_ask.call_id[0] != '\0') {
+        return &s_ask;
+    }
+    if (call_id != 0U && s_ask_prev.call_id_hash == call_id &&
+        s_ask_prev.call_id[0] != '\0') {
+        return &s_ask_prev;
+    }
+    return NULL;
 }
 
 /* exec: run one externally-visible command against the real ports. */
@@ -1226,6 +1337,61 @@ static void voice_exec(void *ctx, const jr_command_t *cmd)
             jr_audio_sink_write(&a->spk, cmd->pcm, cmd->pcm_len);
         }
         break;
+    case JR_CMD_PRESENT_CHOICES: {
+        const jr_gemini_ask_t *ask = ask_by_hash(cmd->call_id);
+        if (ask == NULL || ask->count == 0U) {
+            ESP_LOGW(TAG, "present-choices: no owned ask for id=%08x",
+                     (unsigned)cmd->call_id);
+            break;
+        }
+        const char *labels[JR_GEMINI_ASK_USER_MAX_CHOICES];
+        for (uint8_t i = 0; i < ask->count; ++i) {
+            labels[i] = ask->options[i];
+        }
+        /* Question + labels are borrowed from the owned snapshot, which lives
+         * until a NEW ask overwrites it — always after this one is resolved. */
+        jr_display_present_choices(ask->question, labels, (int)ask->count);
+        break;
+    }
+    case JR_CMD_DISMISS_CHOICES:
+        jr_display_dismiss_choices();   /* idempotent by contract */
+        break;
+    case JR_CMD_SEND_CHOICE_RESULT: {
+        jr_gemini_ask_t *ask = ask_by_hash(cmd->call_id);
+        if (ask == NULL) {
+            /* Not an error by itself: the flush-on-evict path in rich_cb may
+             * already have answered an ask this command arrives late for. */
+            ESP_LOGW(TAG, "choice-result: no owned ask for id=%08x "
+                     "(already answered at eviction?)",
+                     (unsigned)cmd->call_id);
+            break;
+        }
+        if (ask->answered) {
+            break;   /* exactly one functionResponse per call id */
+        }
+        const char *answer = (cmd->choice_index == JR_CHOICE_NONE)
+            ? NULL : cmd->choice_text;
+        char *frame = jr_gemini_build_ask_user_response(ask->call_id, answer);
+        if (frame == NULL) {
+            atomic_fetch_add(&s_tool_diag.response_send_failed, 1U);
+            break;
+        }
+        uint32_t drops_before = a->client.live.tx_drops;
+        jr_err_t sent = jr_gemini_send_frame(&a->client, frame, strlen(frame));
+        bool accepted = sent == JR_OK ||
+            (sent == JR_ERR_WOULD_BLOCK &&
+             a->client.live.tx_drops == drops_before);
+        free(frame);
+        if (accepted) {
+            ask->answered = true;
+            atomic_fetch_add(&s_tool_diag.responses_sent, 1U);
+            ESP_LOGI(TAG, "ask answered: \"%s\"", answer ? answer : "");
+        } else {
+            atomic_fetch_add(&s_tool_diag.response_send_failed, 1U);
+            ESP_LOGW(TAG, "choice result was not accepted by Gemini transport");
+        }
+        break;
+    }
     default:
         /* EmitDiag / PublishSnapshot / timers: timers are handled inside the
          * orchestrator; the remaining observability commands are no-ops here. */
@@ -1330,6 +1496,17 @@ static esp_err_t diag_get_handler(httpd_req_t *req)
         (unsigned)uxTaskGetStackHighWaterMark(s_voice_task) : 0;
     bool tools_ready = atomic_load(&s_tool_diag.worker_ready);
     bool tools_configured = tools_ready && jr_tools_is_configured();
+    /* Transcript tail, defanged for direct embedding: quotes, backslashes and
+     * control bytes become spaces. Lossy on purpose — this is a diag peek, not
+     * a transcript API. */
+    char said_safe[128];   /* httpd stack is the tight one; clip, don't grow */
+    for (size_t i = 0; i < sizeof said_safe; ++i) {
+        char ch = s_last_said[i];
+        said_safe[i] = (ch != '\0' && (ch == '"' || ch == '\\' ||
+                        (unsigned char)ch < 0x20)) ? ' ' : ch;
+        if (ch == '\0') break;
+    }
+    said_safe[sizeof said_safe - 1] = '\0';
     char buf[2304];
     int n = snprintf(buf, sizeof buf,
         "{\"phase\":\"%s\",\"transitions\":%u,\"deaths\":%u,\"reconnects\":%u,"
@@ -1350,6 +1527,7 @@ static esp_err_t diag_get_handler(httpd_req_t *req)
         "\"audio_samples\":%u,\"audio_dropped_samples\":%u,"
         "\"text_parts\":%u,\"turn_complete\":%u,"
         "\"generation_complete\":%u,\"server_errors\":%u,"
+        "\"last_said\":\"%.120s\","
         "\"tools\":{\"execution\":\"on_device\",\"worker_ready\":%s,"
         "\"configured\":%s,\"declared\":%u,\"last_tool\":\"%s\","
         "\"last_status\":\"%s\","
@@ -1403,6 +1581,7 @@ static esp_err_t diag_get_handler(httpd_req_t *req)
         (unsigned)s_app.rx_turn_complete,
         (unsigned)s_app.rx_generation_complete,
         (unsigned)s_app.rx_errors,
+        said_safe,
         tools_ready ? "true" : "false",
         tools_configured ? "true" : "false",
         (unsigned)DEVICE_TOOL_DECL_COUNT,
@@ -1909,20 +2088,54 @@ static esp_err_t tasks_diag_handler(httpd_req_t *req)
  * contract in jr_display.h without any lifetime games. */
 static esp_err_t choices_debug_handler(httpd_req_t *req)
 {
-    static const char *const kLabels[HUD_CHOICE_MAX] = { "Yes", "Later", "Ignore" };
     int n = 3;
     if (!query_int(req, "n", &n) || n < 0 || n > HUD_CHOICE_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "n must be 0..3");
         return ESP_OK;
     }
-    if (n == 0) {
-        jr_display_dismiss_choices();
-    } else {
-        jr_display_present_choices(kLabels, n);
-    }
+    /* MARSHALLED, not applied here: the choice statics are single-writer (the
+     * app task), and the httpd task writing them raced the flush. The app
+     * task drains this next loop; poll /api/display/choices/hit (or a
+     * snapshot) for the applied state. A queued-but-undrained request is
+     * simply replaced — last writer wins, matching the old semantics. */
+    atomic_store(&s_debug_choices_req, (uint32_t)n + 1U);
     char body[96];
-    int len = snprintf(body, sizeof body, "{\"choices\":%d,\"active\":%s}",
+    int len = snprintf(body, sizeof body, "{\"queued\":%d,\"active\":%s}",
                        n, jr_display_choices_active() ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, len);
+    return ESP_OK;
+}
+
+/* POST /api/input/tap?x=..&y=.. — inject one synthetic tap through the real
+ * input handler (see input_next). This is the finger-free end of the ask loop:
+ * present arcs, sim-tap one, and the full CHOICE_PICKED -> functionResponse
+ * path runs exactly as it would under glass. */
+static esp_err_t tap_sim_handler(httpd_req_t *req)
+{
+    if (!control_intent_required(req)) {
+        return ESP_OK;
+    }
+    int x = -1, y = -1;
+    if (!query_int(req, "x", &x) || !query_int(req, "y", &y) ||
+        x < 0 || x >= 466 || y < 0 || y >= 466) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "need x and y in 0..465");
+        return ESP_OK;
+    }
+    /* CAS-from-zero: a second tap posted before the app task drains the first
+     * must be REFUSED, not silently swallowed after being acknowledged. */
+    uint32_t expected = 0U;
+    const uint32_t packed = (((uint32_t)x + 1U) << 16) | ((uint32_t)y + 1U);
+    bool queued = atomic_compare_exchange_strong(&s_sim_touch, &expected,
+                                                 packed);
+    if (!queued) {
+        httpd_resp_set_status(req, "409 Conflict");
+    }
+    char body[64];
+    int len = snprintf(body, sizeof body,
+                       "{\"queued\":%s,\"x\":%d,\"y\":%d}",
+                       queued ? "true" : "false", x, y);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, body, len);
     return ESP_OK;
@@ -3855,7 +4068,7 @@ static void start_diag_http(void)
      * build, and diag handlers keep growing. Raised from 6144. Some of the
      * reclaim from the render/touch stacks is deliberately spent here. */
     cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 30;
+    cfg.max_uri_handlers = 31;
     cfg.max_resp_headers = 16;
     cfg.lru_purge_enable = false;
     if (httpd_start(&server, &cfg) != ESP_OK) {
@@ -3888,6 +4101,8 @@ static void start_diag_http(void)
           .handler = choices_debug_handler },
         { .uri = "/api/display/choices/hit", .method = HTTP_GET,
           .handler = choices_hit_handler },
+        { .uri = "/api/input/tap", .method = HTTP_POST,
+          .handler = tap_sim_handler },
         { .uri = "/api/diag/panel-touch", .method = HTTP_POST,
           .handler = panel_touch_control_handler },
         { .uri = "/api/ui/shade", .method = HTTP_POST,
@@ -3948,6 +4163,22 @@ static void handle_say(const char *text)
     s_pending_text_set = true;
     s_pending_text_inflight = false;
     s_pending_text_retry_ms = 0;
+}
+
+/* Drain order: synthetic diag taps first, then the HAL touch queue. Both come
+ * out through the same jr_input_event_t so the loop below cannot tell them
+ * apart — a simulated tap exercises exactly the code a finger does. */
+static bool input_next(jr_input_t *in, jr_input_event_t *iev)
+{
+    uint32_t sim = atomic_exchange(&s_sim_touch, 0U);
+    if (sim != 0U) {
+        memset(iev, 0, sizeof *iev);
+        iev->kind = JR_INPUT_TAP;
+        iev->x = (uint16_t)((sim >> 16) - 1U);
+        iev->y = (uint16_t)((sim & 0xFFFFU) - 1U);
+        return true;
+    }
+    return jr_input_poll(in, iev);
 }
 
 static void voice_task(void *arg)
@@ -4203,9 +4434,30 @@ static void voice_task(void *arg)
             }
         }
 
+        /* 2a) debug-choices drain — the ONE writer of jr_display's choice
+         * statics is this task. A live ask always wins over debug arcs. */
+        {
+            uint32_t dbg = atomic_exchange(&s_debug_choices_req, 0U);
+            if (dbg != 0U) {
+                static const char *const kDbgLabels[HUD_CHOICE_MAX] = {
+                    "Yes", "Later", "Ignore"
+                };
+                int dn = (int)dbg - 1;
+                if (jr_orch_phase(&s_app.orch) == JR_ST_ASKING) {
+                    ESP_LOGW(TAG, "debug choices refused: a live ask owns "
+                             "the glass");
+                } else if (dn == 0) {
+                    jr_display_dismiss_choices();
+                } else {
+                    jr_display_present_choices("Run diagnostics now?",
+                                               kDbgLabels, dn);
+                }
+            }
+        }
+
         /* 2) manual/PTT input (HAL touch; stub until the CST9217 path lands) */
         jr_input_event_t iev;
-        while (jr_input_poll(&s_app.input, &iev)) {
+        while (input_next(&s_app.input, &iev)) {
             atomic_fetch_add(&s_touch_events, 1U);
             atomic_store(&s_touch_last_kind, (uint32_t)iev.kind);
             atomic_store(&s_touch_last_x, iev.x);
@@ -4292,6 +4544,38 @@ static void voice_task(void *arg)
             }
             if (iev.kind == JR_INPUT_TAP &&
                 brain_surface_handle_tap(iev.x, iev.y, (uint32_t)now)) {
+                continue;
+            }
+            /* An open ask owns every tap: an arc hit answers it, a miss is
+             * swallowed — a stray poke at the face must not fall through to
+             * the mute toggle mid-question. Timeout, voice answer and server
+             * cancel are the session's own exits from Asking. */
+            if (iev.kind == JR_INPUT_TAP && jr_display_choices_active()) {
+                int choice = jr_display_choice_hit(iev.x, iev.y);
+                if (choice >= 0 && choice < (int)s_ask.count) {
+                    jr_display_set_choice_selected(choice);
+                    jr_event_t pick = jr_event(JR_EV_CHOICE_PICKED);
+                    pick.call_id = s_ask.call_id_hash;
+                    pick.choice_index = (uint8_t)choice;
+                    pick.choice_text = s_ask.options[choice];
+                    jr_orch_inject(&s_app.orch, pick, now);
+                    s_ask_tap_grace_ms = (uint32_t)now + 600U;
+                    ESP_LOGI(TAG, "ask: tapped arc %d = \"%s\"",
+                             choice, s_ask.options[choice]);
+                } else {
+                    ESP_LOGI(TAG, "ask: tap (%u,%u) missed the arcs",
+                             (unsigned)iev.x, (unsigned)iev.y);
+                }
+                continue;
+            }
+            /* The inject above dismisses the arcs SYNCHRONOUSLY, so the second
+             * contact of an eager double-tap arrives one event later with no
+             * arcs up — and would fall through to the mute toggle, killing the
+             * session right after the human answered. Swallow trailing taps
+             * for a short grace window instead. */
+            if (iev.kind == JR_INPUT_TAP && s_ask_tap_grace_ms != 0U &&
+                (int32_t)((uint32_t)now - s_ask_tap_grace_ms) < 0) {
+                ESP_LOGI(TAG, "ask: trailing tap swallowed (answer grace)");
                 continue;
             }
             jr_state_t p = jr_orch_phase(&s_app.orch);
@@ -4624,19 +4908,21 @@ void app_main(void)
      * making the audio owner depend on PSRAM/cache availability. */
     ESP_LOGI(TAG, "reserving voice task before hardware bring-up");
     BaseType_t task_ok = xTaskCreatePinnedToCore(
-        voice_task, "jr_voice", 20480, NULL, 7, &s_voice_task, 1);
-    /* DELIBERATELY NOT REDUCED — and this is a worked example of why stack
-     * right-sizing needs adversarial exercise, not one happy-path run.
+        voice_task, "jr_voice", 24576, NULL, 7, &s_voice_task, 1);
+    /* THE DEEPEST-STACK TASK IN THE BUILD — sized by incident, not by guess.
      *
      * A first pass measured peak use at 15,236 B and cut this to 17,408. Three
      * disarm/rearm reconnect cycles then drove min-ever-free down to 1,412 B
-     * (peak 15,996 B) — the reconnect path is deeper than a steady voice turn,
-     * and 8% headroom on the task that owns TLS, JSON parsing and tool dispatch
-     * is not a trade worth 3 KB. Restored to 20480 (~4.5 KB margin).
+     * (peak 15,996 B) — the reconnect path is deeper than a steady voice turn —
+     * so it went back to 20480. Then the ask_user path (toolCall parse ->
+     * snapshot -> session outcome -> PresentChoices exec, 2026-07-19) blew
+     * straight through 20480 the first time it ever ran: instant stack-overflow
+     * panic, seconds after the model called the tool. Every new event/command
+     * lane deepens this task's worst case, so it gets 24576 and a rule: drive
+     * the NEW deepest path, read /api/diag/tasks, and only then judge margins.
      *
      * The other stacks in this build WERE reduced, because their call graphs are
-     * simple and bounded (render, touch, present, websocket). This one is not.
-     * Re-measure via /api/diag/tasks after any transport or tool change. */
+     * simple and bounded (render, touch, present, websocket). This one is not. */
     if (task_ok != pdPASS) {
         s_voice_task = NULL;
         ESP_LOGE(TAG,

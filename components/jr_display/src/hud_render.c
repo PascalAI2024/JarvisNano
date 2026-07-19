@@ -1012,6 +1012,150 @@ void hud_choice_layout(int n, hud_choice_t *out)
     }
 }
 
+void hud_wrap2(const char *text, int max_cols, char l1[], char l2[])
+{
+    if (l1 != NULL) {
+        l1[0] = '\0';
+    }
+    if (l2 != NULL) {
+        l2[0] = '\0';
+    }
+    if (text == NULL || max_cols <= 0 || l1 == NULL || l2 == NULL) {
+        return;
+    }
+
+    int len = 0;
+    while (text[len] != '\0') {
+        len++;
+    }
+    if (len <= max_cols) {
+        for (int i = 0; i < len; ++i) {
+            l1[i] = text[i];
+        }
+        l1[len] = '\0';
+        return;
+    }
+
+    /* Last space at or before column max_cols. The space break is taken when
+     * the remainder fits on line 2, or when the text overflows both lines
+     * anyway (truncation is then inevitable and a word-boundary break reads
+     * better). Otherwise a hard split at max_cols keeps every character of a
+     * text that fits in 2*max_cols — the text is the question being answered,
+     * so losing characters to aesthetics is not an option. */
+    int brk = 0;
+    for (int i = max_cols; i >= 1; --i) {
+        if (text[i] == ' ') {
+            brk = i;
+            break;
+        }
+    }
+    int l1_len;
+    int rest;
+    if (brk > 0 && (len - (brk + 1) <= max_cols || len > 2 * max_cols)) {
+        l1_len = brk;
+        rest = brk + 1;
+    } else {
+        l1_len = max_cols;
+        rest = max_cols;
+    }
+    while (l1_len > 0 && text[l1_len - 1] == ' ') {
+        l1_len--;                       /* spaces at the break are consumed */
+    }
+    for (int i = 0; i < l1_len; ++i) {
+        l1[i] = text[i];
+    }
+    l1[l1_len] = '\0';
+
+    while (text[rest] == ' ') {
+        rest++;
+    }
+    int n2 = 0;
+    while (n2 < max_cols && text[rest + n2] != '\0') {
+        l2[n2] = text[rest + n2];       /* hard-truncates past 2*max_cols */
+        n2++;
+    }
+    l2[n2] = '\0';
+}
+
+void hud_choice_label_anchor(const hud_choice_t *c, int r, int w, int h,
+                             int *out_x, int *out_y)
+{
+    if (out_x == NULL || out_y == NULL) {
+        return;
+    }
+    *out_x = 0;
+    *out_y = 0;
+    if (c == NULL) {
+        return;
+    }
+    luts_build();
+
+    /* Angular midpoint, wrap-aware: (a1 - a0) & 255 is the swept width even
+     * when the span crosses 3 o'clock (a0 > a1), so the midpoint always lands
+     * inside the span, never on the complementary side. */
+    const int mid = (c->a0 + (((c->a1 - c->a0) & 255) / 2)) & 255;
+    int x = OV_CENTER + ((lcos(mid) * r) >> 15) - w / 2;
+    int y = OV_CENTER + ((lsin(mid) * r) >> 15) - h / 2;
+
+    /* Square clamp. High clamp first, so a box wider than the panel still
+     * ends pinned at 0, never negative. */
+    if (x > HUD_W - w) {
+        x = HUD_W - w;
+    }
+    if (y > HUD_H - h) {
+        y = HUD_H - h;
+    }
+    if (x < 0) {
+        x = 0;
+    }
+    if (y < 0) {
+        y = 0;
+    }
+
+    /* RADIAL clamp — the square is not the glass. A near-horizontal arc (both
+     * n=2 arcs, the n=3 side arcs) puts the box centre ~200 px out, where the
+     * corners of a square-clamped box ran under the arc annulus (r>=223) from
+     * ~8 label chars and off the r=232.5 glass edge from ~10; labels may be
+     * 19. Pull the whole box inside HUD_LABEL_R_SAFE, corner-measured: rows
+     * first, so the worst row's chord is at least w wide, then x into that
+     * row's chord. Offsets are measured from the half-unit centre (232.5)
+     * conservatively — a row/column at integer offset d from 232 is at most
+     * d+1 half-units out — and the chord is the symmetric column interval
+     * [233-t, 232+t], so t*t + dy*dy <= R*R puts every corner strictly inside
+     * R. A box wider than the glass (w > 2R-1) keeps the square clamp only. */
+    const int R = HUD_LABEL_R_SAFE;
+    int t_need = (w + 1) / 2;
+    if (t_need < 1) {
+        t_need = 1;
+    }
+    if (t_need <= R) {
+        const int dy_cap = (int)isqrt32((uint32_t)(R * R - t_need * t_need));
+        if (y > OV_CENTER + dy_cap - h) {
+            y = OV_CENTER + dy_cap - h;
+        }
+        if (y < OV_CENTER + 1 - dy_cap) {
+            y = OV_CENTER + 1 - dy_cap;
+        }
+        int dy = y + h - 1 - OV_CENTER;          /* bottom-row offset */
+        if (OV_CENTER - y > dy) {
+            dy = OV_CENTER - y;                  /* top-row offset */
+        }
+        dy += 1;                                 /* half-unit cover */
+        const int rr = R * R - dy * dy;
+        if (rr > 0) {
+            const int t_max = (int)isqrt32((uint32_t)rr);
+            if (x + w - 1 > OV_CENTER + t_max) {
+                x = OV_CENTER + t_max - (w - 1);
+            }
+            if (x < OV_CENTER + 1 - t_max) {
+                x = OV_CENTER + 1 - t_max;
+            }
+        }
+    }
+    *out_x = x;
+    *out_y = y;
+}
+
 void hud_overlay_choices(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                          const hud_choice_t *choices, int n, int selected)
 {

@@ -912,7 +912,25 @@ jr_outcome_t jr_transition(jr_session_t s, jr_event_t e, jr_clock_t clk)
             push(&o.cmds, mk_arm_ka(JR_ASK_DEADLINE_MS)); /* NOT the 45 s one   */
             break;
 
-        case JR_EV_SERVER_TOOL_CALL:         /* an unrelated tool, mid-ask      */
+        case JR_EV_SERVER_TOOL_CALL:
+            /* A cancellation of the ASK'S OWN call id is the server revoking
+             * the question: tear the ask down like the timeout row, but send
+             * NO SendChoiceResult — a functionResponse for a withdrawn id is
+             * a protocol error. The floor goes back to the user. */
+            if (e.is_cancellation && s.ask_call_id != 0 &&
+                e.call_id == s.ask_call_id) {
+                o = noop(s);
+                close_manual_activity(&s, &o.cmds);
+                leave_asking(&s, &o.cmds);
+                push(&o.cmds, mk(JR_CMD_START_CAPTURE));
+                push(&o.cmds, mk_arm_cap(JR_CAPTURE_PAUSE_MS));
+                push(&o.cmds, mk_diag("ask_cancelled_by_server", ev,
+                                      JR_ERRK_UNKNOWN));
+                s.phase = JR_ST_LISTENING;
+                o.next = s;
+                break;
+            }
+            /* Otherwise: an unrelated tool, mid-ask. */
             o = noop(s);
             if (e.is_cancellation) {
                 push(&o.cmds, mk_cancel_tool(&e));

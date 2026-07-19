@@ -436,6 +436,17 @@ static void test_ask_snapshot_rejects_and_flags_truncation(void)
     TEST_ASSERT_FALSE(jr_gemini_event_to_ask(&p.events[0], &ask));
     jr_gemini_parse_free(&p);
 
+    /* ask_user with no id is unanswerable — no text id means no
+     * functionResponse can ever be addressed, so accepting it would wedge
+     * Asking for the full 120 s and still fail. Rejected. */
+    TEST_ASSERT_TRUE(jr_gemini_parse(
+        "{\"toolCall\":{\"functionCalls\":[{\"name\":\"ask_user\","
+        "\"args\":{\"question\":\"Well?\",\"options\":[\"a\",\"b\"]}}]}}", &p));
+    memset(&ask, 0xAB, sizeof(ask));
+    TEST_ASSERT_FALSE(jr_gemini_event_to_ask(&p.events[0], &ask));
+    TEST_ASSERT_EQUAL_UINT8(0, ask.count);          /* zeroed, not garbage */
+    jr_gemini_parse_free(&p);
+
     /* a NULL event is inert, not a crash */
     TEST_ASSERT_FALSE(jr_gemini_event_to_ask(NULL, &ask));
     TEST_ASSERT_FALSE(jr_gemini_event_to_ask(NULL, NULL));

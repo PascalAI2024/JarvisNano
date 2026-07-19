@@ -173,6 +173,12 @@ typedef struct {
     uint32_t call_id_hash;   /* == ev->call_id; the core's uint32 handle     */
     uint8_t  count;          /* options actually copied (0..MAX_CHOICES)     */
     bool     truncated;      /* some field or the option list was clipped    */
+    bool     answered;       /* OWNED BY THE CALLER, never set here: marks
+                              * that a functionResponse for call_id has been
+                              * accepted by the transport. An eviction path
+                              * that finds this false must answer (empty) on
+                              * the spot — every ask_user call MUST receive
+                              * exactly one response or the model blocks.    */
 } jr_gemini_ask_t;
 
 /* (the snapshot function is declared below, next to the event type) */

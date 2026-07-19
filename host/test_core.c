@@ -1264,6 +1264,54 @@ static void test_choice_picked_sends_result_and_leaves(void)
     TEST_ASSERT_NULL(r.next.ask_call_id_text);
 }
 
+/* The server revoking the ask's own call id (toolCallCancellation) must tear
+ * the ask down — arcs off, timer dead, floor back to the user — and must NOT
+ * answer: a functionResponse for a withdrawn id is a protocol error. Before
+ * this row existed the cancellation was routed to the tool worker as an
+ * unrelated cancel, the arcs stayed up swallowing taps for the rest of the
+ * 120 s window, and the timeout then answered the withdrawn id anyway. */
+static void test_asking_cancel_of_own_ask_dismisses_without_result(void)
+{
+    jr_event_t cancel = jr_event(JR_EV_SERVER_TOOL_CALL);
+    cancel.is_cancellation = true;
+    cancel.call_id = 7;                       /* == asking_session()'s ask */
+
+    jr_outcome_t r = step(asking_session(), cancel);
+
+    TEST_ASSERT_EQUAL_INT(JR_ST_LISTENING, r.next.phase);
+    TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_DISMISS_CHOICES));
+    TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_DISARM_ASK_TIMER));
+    TEST_ASSERT_FALSE(has_cmd(&r.cmds, JR_CMD_SEND_CHOICE_RESULT));
+    TEST_ASSERT_FALSE(has_cmd(&r.cmds, JR_CMD_CANCEL_TOOL_CALL));
+    TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_START_CAPTURE));
+
+    /* the pending ask is forgotten */
+    TEST_ASSERT_EQUAL_UINT32(0, r.next.ask_call_id);
+    TEST_ASSERT_NULL(r.next.ask_call_id_text);
+
+    /* keepalive returns to the normal Live deadline */
+    const jr_command_t *k = find_cmd(&r.cmds, JR_CMD_ARM_KEEPALIVE);
+    TEST_ASSERT_NOT_NULL(k);
+    TEST_ASSERT_EQUAL_UINT32(JR_LIVE_DEADLINE_MS, k->deadline_ms);
+}
+
+/* A cancellation for a DIFFERENT call id mid-ask is an unrelated tool cancel:
+ * it goes to the worker and the ask stays untouched on the glass. */
+static void test_asking_cancel_of_other_tool_passes_through(void)
+{
+    jr_event_t cancel = jr_event(JR_EV_SERVER_TOOL_CALL);
+    cancel.is_cancellation = true;
+    cancel.call_id = 99;                      /* not the ask */
+
+    jr_outcome_t r = step(asking_session(), cancel);
+
+    TEST_ASSERT_EQUAL_INT(JR_ST_ASKING, r.next.phase);
+    TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_CANCEL_TOOL_CALL));
+    TEST_ASSERT_FALSE(has_cmd(&r.cmds, JR_CMD_DISMISS_CHOICES));
+    TEST_ASSERT_FALSE(has_cmd(&r.cmds, JR_CMD_SEND_CHOICE_RESULT));
+    TEST_ASSERT_EQUAL_UINT32(7, r.next.ask_call_id);
+}
+
 /* THE IMPORTANT ONE — a human who deliberates for 21 s keeps their session.
  *
  * JR_NOREPLY_MS is 20000. If Asking reused the no-reply watchdog, the arcs
@@ -1785,6 +1833,8 @@ int main(void)
     /* --- §4.11 Live.Asking: tap-to-answer choice arcs (STATE-05/06) --- */
     RUN_TEST(test_ask_opened_enters_asking);
     RUN_TEST(test_choice_picked_sends_result_and_leaves);
+    RUN_TEST(test_asking_cancel_of_own_ask_dismisses_without_result);
+    RUN_TEST(test_asking_cancel_of_other_tool_passes_through);
     RUN_TEST(test_asking_survives_21_second_deliberation);
     RUN_TEST(test_asking_user_stop_drains);
     RUN_TEST(test_asking_death_does_not_strand);

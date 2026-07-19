@@ -725,7 +725,30 @@ static hud_choice_t     s_choices[HUD_CHOICE_MAX];
 static volatile int     s_choice_n;
 static volatile int     s_choice_selected = -1;
 
-void jr_display_present_choices(const char *const *labels, int n)
+/* Ask text furniture (STATE-05/06/07). Everything below is computed ONCE in
+ * jr_display_present_choices and only READ by the flush path, under the same
+ * publish discipline as s_choices: every field is written BEFORE the
+ * s_choice_n release-store, so a present/flush race is bounded to one frame of
+ * stale text — never half-updated text.
+ *
+ * The display OWNS every byte it renders: the question is wrapped into
+ * s_choice_q_line and the labels are copied into s_choice_label_buf (and
+ * s_choices[i].label points at those copies). The caller's ask snapshot is
+ * only read during the present call itself — a re-ask that memsets and
+ * rewrites that snapshot while the render task is still flushing strips of
+ * the OLD presentation can therefore not blank or tear the labels on glass.
+ * s_choice_label_buf[i][24] is only ever written as NUL, so the buffers are
+ * NUL-terminated inside 25 bytes at EVERY interleaving of a racing rewrite. */
+static char             s_choice_q_line[2][25];    /* hud_wrap2(question, 24) */
+static int              s_choice_q_x[2];           /* per-line text origin    */
+static int              s_choice_q_y[2];
+static char             s_choice_label_buf[HUD_CHOICE_MAX][25];
+static int              s_choice_label_x[HUD_CHOICE_MAX];
+static int              s_choice_label_y[HUD_CHOICE_MAX];
+static int              s_choice_label_len[HUD_CHOICE_MAX];
+
+void jr_display_present_choices(const char *question,
+                                const char *const *labels, int n)
 {
     if (labels == NULL || n <= 0) {
         jr_display_dismiss_choices();
@@ -740,10 +763,55 @@ void jr_display_present_choices(const char *const *labels, int n)
         tmp[i].label = labels[i];          /* borrowed; see header contract */
     }
     hud_choice_layout(n, tmp);             /* fills a0/a1, leaves label alone */
+
+    /* Label BYTES are copied and OWNED here (24-char cap): the caller's ask
+     * snapshot may be memset and rewritten by the voice task on a re-ask
+     * while the render task is still flushing strips of the OLD presentation,
+     * so nothing rendered may dereference caller storage. From here on the
+     * hud_choice_t labels point at the copies — hud_overlay_choices' NULL
+     * occupancy semantics are preserved (unused slots stay NULL).
+     * Anchors go at r=205, just inside the arcs; the anchor clamp keeps every
+     * box fully on-glass. */
+    for (int i = 0; i < HUD_CHOICE_MAX; ++i) {
+        s_choice_label_buf[i][0] = '\0';
+        s_choice_label_len[i] = 0;
+        s_choice_label_x[i] = 0;
+        s_choice_label_y[i] = 0;
+        if (i >= n || tmp[i].label == NULL) {
+            tmp[i].label = NULL;
+            continue;
+        }
+        const int len = (int)strnlen(tmp[i].label, 24U);
+        memcpy(s_choice_label_buf[i], tmp[i].label, (size_t)len);
+        s_choice_label_buf[i][len] = '\0';
+        tmp[i].label = s_choice_label_buf[i];  /* render from the copy */
+        s_choice_label_len[i] = len;
+        hud_choice_label_anchor(&tmp[i], 205, 6 * len, 7,
+                                &s_choice_label_x[i], &s_choice_label_y[i]);
+    }
     memcpy(s_choices, tmp, sizeof tmp);
+
+    /* Question furniture: wrapped ONCE into owned lines — the borrowed
+     * pointer is not retained at all. Lines render at scale 2 (12 px/char,
+     * 14 px tall): one line centres at y=184, two stack at 170/198.
+     * (466 - 12*len) is even, so the centred origin is exact and the line
+     * ends at HUD_W - x0. */
+    s_choice_q_line[0][0] = '\0';
+    s_choice_q_line[1][0] = '\0';
+    if (question != NULL) {
+        hud_wrap2(question, 24, s_choice_q_line[0], s_choice_q_line[1]);
+    }
+    const int q1 = (int)strnlen(s_choice_q_line[0], 24U);
+    const int q2 = (int)strnlen(s_choice_q_line[1], 24U);
+    s_choice_q_x[0] = (HUD_W - 12 * q1) / 2;
+    s_choice_q_x[1] = (HUD_W - 12 * q2) / 2;
+    s_choice_q_y[0] = (q2 > 0) ? 170 : 184;
+    s_choice_q_y[1] = 198;
+
     s_choice_selected = -1;
     __atomic_store_n(&s_choice_n, n, __ATOMIC_RELEASE);
-    ESP_LOGI(TAG, "choices: presenting %d arcs", n);
+    ESP_LOGI(TAG, "choices: presenting %d arcs%s", n,
+             question != NULL ? " + question" : "");
 }
 
 void jr_display_dismiss_choices(void)
@@ -753,6 +821,11 @@ void jr_display_dismiss_choices(void)
     }
     __atomic_store_n(&s_choice_n, 0, __ATOMIC_RELEASE);
     s_choice_selected = -1;
+    s_choice_q_line[0][0] = '\0';
+    s_choice_q_line[1][0] = '\0';
+    for (int i = 0; i < HUD_CHOICE_MAX; ++i) {
+        s_choice_label_buf[i][0] = '\0';   /* owned copies end with the ask */
+    }
     ESP_LOGI(TAG, "choices: dismissed");
 }
 
@@ -810,6 +883,86 @@ static uint8_t hud_face_of(jr_face_t f)
     }
 }
 
+/* STATE-07: the modal ask presentation, run per flushed strip only while a
+ * question is on screen (a modal state measured in seconds, so a few fps of
+ * cost is acceptable). The whole strip dims — the same transform
+ * apply_surface_overlay uses for its backdrop — then the question text and the
+ * per-arc labels draw over the dimmed face; hud_overlay_choices follows in the
+ * caller so the arcs stay bright ON TOP. Reads only the s_choice_* statics
+ * published by jr_display_present_choices — nothing is derived here. Runs on
+ * the render task; full-width strips guaranteed by the caller. */
+static void apply_ask_overlay(jr_display_ctx_t *ctx, int y1, int y2,
+                              uint16_t *pixels, int cn)
+{
+    const int sel = s_choice_selected;
+    /* Hoisted per call: the byte order never changes mid-strip, and white is
+     * bswap-invariant. hud_dim565 folds the panel_native -> native_darken ->
+     * panel_order_color chain into one masked shift (proven equal for all
+     * 65536 values in the host suite) — two per-pixel byte swaps over 217k
+     * px/frame cost measurable frame rate. */
+    const bool swap = ctx->board.swap_color_bytes;
+    const uint16_t px_white = 0xffffu;
+    const uint16_t px_cyan = panel_order_color(ctx, 0x07ff);
+    for (int y = y1; y < y2; ++y) {
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        /* unswitched on the hoisted flag so the inline folds to one path */
+        if (swap) {
+            for (int x = 0; x < HUD_W; ++x) {
+                row[x] = hud_dim565(row[x], true);
+            }
+        } else {
+            for (int x = 0; x < HUD_W; ++x) {
+                row[x] = hud_dim565(row[x], false);
+            }
+        }
+
+        /* Question: up to two scale-2 lines, centred, white. The centred
+         * origin is exact (see present), so the line ends at HUD_W - x0 and
+         * no length is re-derived per strip. */
+        for (int l = 0; l < 2; ++l) {
+            const char *text = s_choice_q_line[l];
+            const int ty = s_choice_q_y[l];
+            if (text[0] == '\0' || y < ty || y >= ty + 14) {
+                continue;
+            }
+            const int tx = s_choice_q_x[l];
+            for (int x = tx; x < HUD_W - tx; ++x) {
+                if (surface_text_pixel(text, 24U, x, y, tx, ty, 2)) {
+                    row[x] = px_white;
+                }
+            }
+        }
+
+        /* Labels: scale 1 at the cached anchors (r=205, inside the arcs).
+         * The selected answer in white, the rest cyan — mirroring the arcs. */
+        for (int i = 0; i < cn; ++i) {
+            const char *lab = s_choices[i].label;
+            const int cap = s_choice_label_len[i];
+            const int ly = s_choice_label_y[i];
+            if (lab == NULL || cap <= 0 || y < ly || y >= ly + 7) {
+                continue;
+            }
+            /* Belt and braces under the one-frame-stale discipline: lab
+             * points at the display-owned copy (always NUL-terminated inside
+             * its 25 bytes), and clamping the sweep to the LIVE string means
+             * a stale longer cached len can never walk a shorter replacement
+             * past its NUL — any future regression is torn text for a frame,
+             * never an out-of-bounds read. */
+            const int len = (int)strnlen(lab, (size_t)cap);
+            if (len <= 0) {
+                continue;
+            }
+            const int lx = s_choice_label_x[i];
+            const uint16_t color = (i == sel) ? px_white : px_cyan;
+            for (int x = lx; x < lx + 6 * len; ++x) {
+                if (surface_text_pixel(lab, (size_t)len, x, y, lx, ly, 1)) {
+                    row[x] = color;
+                }
+            }
+        }
+    }
+}
+
 static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                               int x2, int y2, uint16_t *pixels)
 {
@@ -836,10 +989,13 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                       (uint32_t)(esp_timer_get_time() / 1000),
                       ctx->board.swap_color_bytes, &env);
 
-    /* Choice arcs draw LAST: they are the interactive layer and must sit above
-     * the face and the HUD accents. Same strip contract, same buffer. */
+    /* Modal ask (STATE-05/06/07): dim everything drawn so far, lay the
+     * question + labels over the dimmed face, then the arcs LAST — they are
+     * the interactive layer and must sit bright above the face, the HUD
+     * accents, and the text. Same strip contract, same buffer. */
     const int cn = __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE);
     if (cn > 0) {
+        apply_ask_overlay(ctx, y1, y2, pixels, cn);
         hud_overlay_choices(pixels, y1, nrows, ctx->board.swap_color_bytes,
                             s_choices, cn, s_choice_selected);
     }

@@ -166,17 +166,22 @@ void jr_display_set_hud_env(uint8_t batt_pct, bool charging,
  * flip it and read actual_fps from /api/display. Enabled by default. */
 void jr_display_set_hud_enabled(bool enabled);
 
-/* STATE-05: present / dismiss the tap-to-answer choice arcs.
+/* STATE-05/06: present / dismiss the tap-to-answer choice arcs.
  *
- * labels[] are BORROWED and must outlive the presentation — the caller owns
- * storage that survives the whole Asking window (up to JR_ASK_TIMEOUT_MS,
- * 120 s). jr_gemini_ask_t is designed for exactly that.
+ * `question` and labels[] only have to stay alive ACROSS THIS CALL: the
+ * display copies everything it renders (labels capped at 24 chars, question
+ * wrapped to 2x24) into its own storage before publishing. A caller may
+ * therefore rewrite or drop its ask snapshot the moment this returns — a
+ * re-ask that memsets the previous ask's storage while frames of the old
+ * presentation are still flushing can no longer blank or tear the glass.
+ * question may be NULL: the arcs and labels then render without a prompt.
  * n == 0 (or labels == NULL) dismisses. Idempotent: dismissing when nothing is
  * shown is a no-op, which is what JR_CMD_DISMISS_CHOICES requires.
  *
  * jr_display_choice_hit() maps a raw panel tap to a choice index, or -1. It
  * gates on the arc band, so taps on the face or the bezel ticks do NOT answer. */
-void jr_display_present_choices(const char *const *labels, int n);
+void jr_display_present_choices(const char *question,
+                                const char *const *labels, int n);
 void jr_display_dismiss_choices(void);
 bool jr_display_choices_active(void);
 int  jr_display_choice_hit(int x, int y);
