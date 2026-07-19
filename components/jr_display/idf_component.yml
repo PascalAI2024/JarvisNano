@@ -1,0 +1,6 @@
+# jr_display managed dependencies. Pins match main/idf_component.yml exactly
+# so the component manager resolves a single copy of each.
+dependencies:
+  idf: ">=5.5.0"
+  espressif/esp_lcd_co5300: "==2.1.0"
+  espressif2022/esp_emote_gfx: "==3.0.2"
