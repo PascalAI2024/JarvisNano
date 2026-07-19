@@ -165,6 +165,22 @@ void jr_display_set_hud_env(uint8_t batt_pct, bool charging,
  * true frame-rate cost can be A/B measured on the panel instead of estimated —
  * flip it and read actual_fps from /api/display. Enabled by default. */
 void jr_display_set_hud_enabled(bool enabled);
+
+/* STATE-05: present / dismiss the tap-to-answer choice arcs.
+ *
+ * labels[] are BORROWED and must outlive the presentation — the caller owns
+ * storage that survives the whole Asking window (up to JR_ASK_TIMEOUT_MS,
+ * 120 s). jr_gemini_ask_t is designed for exactly that.
+ * n == 0 (or labels == NULL) dismisses. Idempotent: dismissing when nothing is
+ * shown is a no-op, which is what JR_CMD_DISMISS_CHOICES requires.
+ *
+ * jr_display_choice_hit() maps a raw panel tap to a choice index, or -1. It
+ * gates on the arc band, so taps on the face or the bezel ticks do NOT answer. */
+void jr_display_present_choices(const char *const *labels, int n);
+void jr_display_dismiss_choices(void);
+bool jr_display_choices_active(void);
+int  jr_display_choice_hit(int x, int y);
+void jr_display_set_choice_selected(int index);
 bool jr_display_hud_enabled(void);
 
 #ifdef __cplusplus

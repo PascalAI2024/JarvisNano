@@ -68,6 +68,19 @@ static void orch_exec_cmds(jr_orch_t *app, const jr_cmd_list_t *L, uint64_t now)
         case JR_CMD_DISARM_CAPTURE_PAUSE_TIMER:
             jr_capture_pause_disarm(&app->capture_pause);
             break;
+        /* The ask timer is OWNED here, exactly like the backoff timer. It must
+         * NEVER reach the I/O port: the device's exec() has no case for it and
+         * would silently swallow it, leaving Asking with no bounding deadline at
+         * all. This case IS the implementation of JR_EV_ASK_TIMEOUT. */
+        case JR_CMD_ARM_ASK_TIMER:
+            app->ask_timer.armed = true;
+            app->ask_timer.armed_ts = now;
+            app->ask_timer.timeout_ms = c->timeout_ms;
+            break;
+        case JR_CMD_DISARM_ASK_TIMER:
+            app->ask_timer.armed = false;
+            break;
+
         case JR_CMD_SCHEDULE_BACKOFF:
             app->backoff.armed = true;
             app->backoff.fire_at = now + c->delay_ms;
@@ -141,6 +154,27 @@ static void orch_process(jr_orch_t *app, jr_event_t e, uint64_t now)
 static bool orch_poll_monitors(jr_orch_t *app, uint64_t now)
 {
     jr_monitor_poll_t p;
+
+    /* The ask timer is polled FIRST, ahead of the keepalive. By construction
+     * JR_ASK_DEADLINE_MS > JR_ASK_TIMEOUT_MS, so the ask timer expires 5 s
+     * earlier and the ordering is normally moot; it matters when the pump was
+     * starved and both are past due at the same `now`. In that race the GRACEFUL
+     * exit must win — AskTimeout answers the tool call, dismisses the arcs and
+     * hands the floor back to the user, whereas StaleDeadline routes to DEATH
+     * and tears the session down. Never trade a recoverable timeout for a
+     * reconnect. */
+    if (app->ask_timer.armed &&
+        (now - app->ask_timer.armed_ts) > app->ask_timer.timeout_ms) {
+        /* Disarm BEFORE feeding, exactly like the backoff timer below. The
+         * reducer's own DisarmAskTimer is then a harmless idempotent repeat.
+         * This is not belt-and-braces: if the timer were ever armed outside
+         * Asking the reducer would illegal_drop the event and emit no disarm at
+         * all, and a self-re-firing monitor turns jr_orch_step's fixpoint into a
+         * 512-iteration spin on every single tick, forever. */
+        app->ask_timer.armed = false;
+        orch_process(app, jr_event(JR_EV_ASK_TIMEOUT), now);
+        return true;
+    }
 
     p = jr_keepalive_poll(&app->keepalive, now);
     if (p.fired) { orch_process(app, p.event, now); return true; }
@@ -256,6 +290,7 @@ bool jr_orch_is_zombie(const jr_orch_t *app)
         return false;                       /* a legitimate rest, not a zombie */
     }
     /* a non-rest state must carry an armed forward-progress deadline */
-    bool armed = app->keepalive.armed || app->no_reply.armed || app->backoff.armed;
+    bool armed = app->keepalive.armed || app->no_reply.armed ||
+                 app->backoff.armed  || app->ask_timer.armed;
     return !armed;
 }

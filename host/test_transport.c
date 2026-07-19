@@ -116,7 +116,8 @@ static void test_setup_auto_vad_config(void)
 static void test_setup_tools_coexist(void)
 {
     jr_gemini_fn_decl_t fns[] = {
-        { "crypto_price", "price of a coin", "symbol", "coin symbol" },
+        { .name = "crypto_price", .description = "price of a coin",
+          .arg_name = "symbol", .arg_desc = "coin symbol" },
     };
     jr_gemini_config_t cfg = manual_cfg();
     cfg.google_search = true;
@@ -134,6 +135,407 @@ static void test_setup_tools_coexist(void)
     }
     TEST_ASSERT_TRUE(saw_gs);
     TEST_ASSERT_TRUE(saw_fd);
+    cJSON_Delete(root);
+    free(j);
+}
+
+/* ---- ask_user: a tool whose argument is a string ARRAY ------------------- *
+ * The blocker this proves fixed: jr_gemini_fn_decl_t used to carry exactly ONE
+ * string argument, and the builder hardcoded "string" + a one-element "required"
+ * array (gemini_live.c:195-201 before this change). A tool taking options[] was
+ * simply not expressible.                                                     */
+
+/* GOLDEN OUTPUT. Asserted whole, not field-by-field: this is the exact byte
+ * string that goes on the wire, and "items" is the field whose absence makes
+ * Gemini reject an array property outright. */
+static void test_setup_ask_user_array_schema_golden(void)
+{
+    jr_gemini_fn_decl_t fns[] = { JR_GEMINI_ASK_USER_DECL };
+    jr_gemini_config_t cfg = manual_cfg();
+    cfg.fns = fns;
+    cfg.fn_count = 1;
+    char *j = jr_gemini_build_setup(&cfg);
+    TEST_ASSERT_NOT_NULL(j);
+
+    static const char kGolden[] =
+        "{\"setup\":{\"model\":\"models/gemini-3.1-flash-live-preview\","
+        "\"generationConfig\":{\"responseModalities\":[\"AUDIO\"],"
+        "\"thinkingConfig\":{\"thinkingLevel\":\"low\"}},"
+        "\"realtimeInputConfig\":{\"automaticActivityDetection\":{\"disabled\":true},"
+        "\"activityHandling\":\"NO_INTERRUPTION\"},"
+        "\"tools\":[{\"functionDeclarations\":[{\"name\":\"ask_user\","
+        "\"description\":\"Ask Pascal a short multiple-choice question and wait "
+        "for the tap. Use at most three options; keep each option under 16 "
+        "characters.\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"question\":{\"type\":\"string\","
+        "\"description\":\"The question to show, at most 40 characters.\"},"
+        "\"options\":{\"type\":\"array\","
+        "\"description\":\"Two or three short answer choices, each under 16 "
+        "characters.\",\"items\":{\"type\":\"string\"}}},"
+        "\"required\":[\"question\",\"options\"]}}]}]}}";
+    TEST_ASSERT_EQUAL_STRING(kGolden, j);
+
+    /* Same claim structurally, so a future golden edit cannot quietly drop the
+     * one field that makes an array property legal. */
+    cJSON *root = cJSON_Parse(j);
+    TEST_ASSERT_NOT_NULL(root);
+    cJSON *fdecls = cJSON_GetObjectItem(
+        cJSON_GetArrayItem(cJSON_GetObjectItem(cJSON_GetObjectItem(root, "setup"),
+                                               "tools"), 0),
+        "functionDeclarations");
+    cJSON *params = cJSON_GetObjectItem(cJSON_GetArrayItem(fdecls, 0), "parameters");
+    cJSON *opts = cJSON_GetObjectItem(cJSON_GetObjectItem(params, "properties"),
+                                      "options");
+    TEST_ASSERT_EQUAL_STRING("array", cJSON_GetObjectItem(opts, "type")->valuestring);
+    cJSON *items = cJSON_GetObjectItem(opts, "items");       /* THE assertion */
+    TEST_ASSERT_NOT_NULL(items);
+    TEST_ASSERT_TRUE(cJSON_IsObject(items));
+    TEST_ASSERT_EQUAL_STRING("string", cJSON_GetObjectItem(items, "type")->valuestring);
+    /* both properties required, question first */
+    cJSON *reqd = cJSON_GetObjectItem(params, "required");
+    TEST_ASSERT_TRUE(cJSON_IsArray(reqd));
+    TEST_ASSERT_EQUAL_INT(2, cJSON_GetArraySize(reqd));
+    TEST_ASSERT_EQUAL_STRING("question", cJSON_GetArrayItem(reqd, 0)->valuestring);
+    TEST_ASSERT_EQUAL_STRING("options", cJSON_GetArrayItem(reqd, 1)->valuestring);
+    cJSON_Delete(root);
+    free(j);
+}
+
+/* BACKWARD COMPAT, the load-bearing half. The struct grew; every tool declared
+ * in main.c still uses the legacy single-string form, and its emitted schema
+ * must be byte-for-byte what it was BEFORE the struct grew. This golden string
+ * was captured from the pre-change emitter and pasted verbatim.
+ *
+ * The initializer below is deliberately POSITIONAL and four-wide — the exact
+ * pre-change source form — so this also proves old call sites still compile. */
+static void test_setup_legacy_single_string_decl_byte_identical(void)
+{
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#endif
+    jr_gemini_fn_decl_t fns[] = {
+        { "crypto_price", "price of a coin", "symbol", "coin symbol" },
+    };
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+    jr_gemini_config_t cfg = manual_cfg();
+    cfg.fns = fns;
+    cfg.fn_count = 1;
+    char *j = jr_gemini_build_setup(&cfg);
+    TEST_ASSERT_NOT_NULL(j);
+
+    static const char kPreChangeGolden[] =
+        "{\"setup\":{\"model\":\"models/gemini-3.1-flash-live-preview\","
+        "\"generationConfig\":{\"responseModalities\":[\"AUDIO\"],"
+        "\"thinkingConfig\":{\"thinkingLevel\":\"low\"}},"
+        "\"realtimeInputConfig\":{\"automaticActivityDetection\":{\"disabled\":true},"
+        "\"activityHandling\":\"NO_INTERRUPTION\"},"
+        "\"tools\":[{\"functionDeclarations\":[{\"name\":\"crypto_price\","
+        "\"description\":\"price of a coin\",\"parameters\":{\"type\":\"object\","
+        "\"properties\":{\"symbol\":{\"type\":\"string\","
+        "\"description\":\"coin symbol\"}},\"required\":[\"symbol\"]}}]}]}}";
+    TEST_ASSERT_EQUAL_STRING(kPreChangeGolden, j);
+    /* no array machinery leaked into a plain string tool */
+    TEST_ASSERT_NULL(strstr(j, "items"));
+    TEST_ASSERT_NULL(strstr(j, "array"));
+    free(j);
+}
+
+/* PARSER: a toolCall carrying an options ARRAY must surface the question and
+ * every option to the caller without the caller re-parsing tool_args. */
+static void test_parse_toolCall_ask_user_options(void)
+{
+    jr_gemini_parse_t p;
+    TEST_ASSERT_TRUE(jr_gemini_parse(
+        "{\"toolCall\":{\"functionCalls\":[{\"name\":\"ask_user\","
+        "\"id\":\"call_ask_7\",\"args\":{\"question\":\"Which mood?\","
+        "\"options\":[\"Awake\",\"Ambient\",\"Whisper\"]}}]}}", &p));
+
+    TEST_ASSERT_EQUAL_size_t(1, p.count);
+    const jr_gemini_event_t *ev = &p.events[0];
+    TEST_ASSERT_EQUAL_INT(JR_GEV_TOOL_CALL, ev->kind);
+    TEST_ASSERT_EQUAL_STRING(JR_GEMINI_ASK_USER_TOOL, ev->tool_name);
+    TEST_ASSERT_EQUAL_STRING("call_ask_7", ev->call_id_text);   /* echoed in the response */
+    TEST_ASSERT_NOT_EQUAL(0, ev->call_id);
+
+    /* the question */
+    const char *q = jr_gemini_tool_arg_string(ev, JR_GEMINI_ASK_USER_ARG_QUESTION);
+    TEST_ASSERT_NOT_NULL(q);
+    TEST_ASSERT_EQUAL_STRING("Which mood?", q);
+
+    /* ALL the options, in order */
+    const char *opts[JR_GEMINI_ASK_USER_MAX_CHOICES];
+    size_t n = jr_gemini_tool_arg_string_array(ev, JR_GEMINI_ASK_USER_ARG_OPTIONS,
+                                               opts, JR_GEMINI_ASK_USER_MAX_CHOICES);
+    TEST_ASSERT_EQUAL_size_t(3, n);
+    TEST_ASSERT_EQUAL_STRING("Awake",   opts[0]);
+    TEST_ASSERT_EQUAL_STRING("Ambient", opts[1]);
+    TEST_ASSERT_EQUAL_STRING("Whisper", opts[2]);
+
+    /* absent / wrong-typed keys are NULL-or-0, never a crash */
+    TEST_ASSERT_NULL(jr_gemini_tool_arg_string(ev, "nope"));
+    TEST_ASSERT_NULL(jr_gemini_tool_arg_string(ev, JR_GEMINI_ASK_USER_ARG_OPTIONS));
+    TEST_ASSERT_EQUAL_size_t(0, jr_gemini_tool_arg_string_array(
+        ev, JR_GEMINI_ASK_USER_ARG_QUESTION, opts, 3));
+    /* the raw printed args still work for every existing consumer */
+    TEST_ASSERT_NOT_NULL(strstr(ev->tool_args, "Ambient"));
+    jr_gemini_parse_free(&p);
+
+    /* Over-long and dirty lists: bounded to `max`, non-strings skipped, and a
+     * legacy no-array tool reports 0 rather than reading garbage. */
+    TEST_ASSERT_TRUE(jr_gemini_parse(
+        "{\"toolCall\":{\"functionCalls\":[{\"name\":\"ask_user\",\"id\":\"c8\","
+        "\"args\":{\"options\":[\"a\",7,\"b\",null,\"c\",\"d\"]}}]}}", &p));
+    const char *few[2];
+    TEST_ASSERT_EQUAL_size_t(2, jr_gemini_tool_arg_string_array(
+        &p.events[0], JR_GEMINI_ASK_USER_ARG_OPTIONS, few, 2));   /* capped */
+    TEST_ASSERT_EQUAL_STRING("a", few[0]);
+    TEST_ASSERT_EQUAL_STRING("b", few[1]);                        /* 7 skipped */
+    jr_gemini_parse_free(&p);
+
+    TEST_ASSERT_TRUE(jr_gemini_parse(
+        "{\"toolCall\":{\"functionCalls\":[{\"name\":\"weather\",\"id\":\"c9\","
+        "\"args\":{\"location\":\"Fort Lauderdale\"}}]}}", &p));
+    TEST_ASSERT_EQUAL_size_t(0, jr_gemini_tool_arg_string_array(
+        &p.events[0], JR_GEMINI_ASK_USER_ARG_OPTIONS, opts, 3));
+    TEST_ASSERT_EQUAL_STRING("Fort Lauderdale",
+                             jr_gemini_tool_arg_string(&p.events[0], "location"));
+    jr_gemini_parse_free(&p);
+}
+
+/* REGRESSION (major, cross-layer UAF): the Asking state holds the question and
+ * options for up to 120 s, but the parse tree dies the moment the rich callback
+ * returns. Every accessor pointer ALIASES that tree. jr_gemini_event_to_ask()
+ * must produce storage that owes the tree nothing.
+ *
+ * The test would have caught a consumer holding the borrow two ways:
+ *   1. structurally — every string must live INSIDE the caller's struct;
+ *   2. dynamically  — the snapshot is re-read after jr_gemini_parse_free() and
+ *      after the source JSON buffer is poisoned and freed. A borrowed pointer
+ *      reads freed heap here (a hard fault under ASAN, garbage without it). */
+static const jr_gemini_ask_t *g_ask_seen;   /* what a callback stashed */
+static jr_gemini_ask_t g_ask_slot;
+static bool g_ask_ok;
+
+static void ask_snapshot_cb(void *user, const jr_gemini_event_t *ev)
+{
+    (void)user;
+    if (ev->kind != JR_GEV_TOOL_CALL) { return; }
+    g_ask_ok   = jr_gemini_event_to_ask(ev, &g_ask_slot);
+    g_ask_seen = &g_ask_slot;
+}
+
+static bool inside(const void *p, const void *base, size_t n)
+{
+    const char *c = (const char *)p, *b = (const char *)base;
+    return c >= b && c < b + n;
+}
+
+static void test_ask_snapshot_outlives_the_parse_tree(void)
+{
+    /* heap-allocated source so the poison-after-free is real memory the
+     * borrowed pointers would still be aiming at */
+    const char *src =
+        "{\"toolCall\":{\"functionCalls\":[{\"name\":\"ask_user\","
+        "\"id\":\"call_ask_7\",\"args\":{\"question\":\"Which mood?\","
+        "\"options\":[\"Awake\",\"Ambient\",\"Whisper\"]}}]}}";
+    char *json = (char *)malloc(strlen(src) + 1);
+    TEST_ASSERT_NOT_NULL(json);
+    memcpy(json, src, strlen(src) + 1);
+
+    jr_gemini_parse_t p;
+    TEST_ASSERT_TRUE(jr_gemini_parse(json, &p));
+    jr_gemini_ask_t ask;
+    TEST_ASSERT_TRUE(jr_gemini_event_to_ask(&p.events[0], &ask));
+
+    /* (1) structural: nothing points out of the caller's own struct */
+    TEST_ASSERT_TRUE(inside(ask.question, &ask, sizeof(ask)));
+    TEST_ASSERT_TRUE(inside(ask.options[0], &ask, sizeof(ask)));
+    TEST_ASSERT_TRUE(inside(ask.call_id, &ask, sizeof(ask)));
+
+    /* (2) dynamic: burn the tree and the source bytes, then read again */
+    jr_gemini_parse_free(&p);
+    memset(json, 'X', strlen(src));
+    free(json);
+
+    TEST_ASSERT_EQUAL_STRING("Which mood?", ask.question);
+    TEST_ASSERT_EQUAL_STRING("call_ask_7", ask.call_id);
+    TEST_ASSERT_EQUAL_UINT8(3, ask.count);
+    TEST_ASSERT_EQUAL_STRING("Awake",   ask.options[0]);
+    TEST_ASSERT_EQUAL_STRING("Ambient", ask.options[1]);
+    TEST_ASSERT_EQUAL_STRING("Whisper", ask.options[2]);
+    TEST_ASSERT_FALSE(ask.truncated);
+    /* the id round-trips into the functionResponse the core will send later */
+    char *j = jr_gemini_build_ask_user_response(ask.call_id, ask.options[1]);
+    TEST_ASSERT_NOT_NULL(strstr(j, "call_ask_7"));
+    TEST_ASSERT_NOT_NULL(strstr(j, "Ambient"));
+    free(j);
+}
+
+/* Same guarantee through the REAL pump path: the pump frees the tree right
+ * after the callback returns, so a snapshot taken inside the callback is the
+ * only thing a 120 s Asking state may keep. */
+static void test_ask_snapshot_survives_pump_rx_free(void)
+{
+    fake_ws_t f; fake_ws_init(&f); f.state = JR_WS_OPEN;
+    fake_ws_push_inbox(&f,
+        "{\"toolCall\":{\"functionCalls\":[{\"name\":\"ask_user\",\"id\":\"c42\","
+        "\"args\":{\"question\":\"Lights?\",\"options\":[\"On\",\"Off\"]}}]}}");
+    jr_gemini_config_t cfg = manual_cfg();
+    jr_gemini_client_t c;
+    jr_gemini_client_init(&c, fake_ws_make(&f), fake_clock_make(), &cfg);
+    jr_gemini_client_set_event_cb(&c, ask_snapshot_cb, NULL);
+
+    memset(&g_ask_slot, 0, sizeof(g_ask_slot));
+    g_ask_seen = NULL; g_ask_ok = false;
+    TEST_ASSERT_TRUE(jr_gemini_pump_rx(&c));
+
+    /* tree is gone by now; the stashed snapshot must still read clean */
+    TEST_ASSERT_TRUE(g_ask_ok);
+    TEST_ASSERT_NOT_NULL(g_ask_seen);
+    TEST_ASSERT_EQUAL_STRING("Lights?", g_ask_seen->question);
+    TEST_ASSERT_EQUAL_STRING("c42",     g_ask_seen->call_id);
+    TEST_ASSERT_EQUAL_UINT8(2, g_ask_seen->count);
+    TEST_ASSERT_EQUAL_STRING("On",  g_ask_seen->options[0]);
+    TEST_ASSERT_EQUAL_STRING("Off", g_ask_seen->options[1]);
+    TEST_ASSERT_EQUAL_STRING("",    g_ask_seen->options[2]);   /* unused arc is empty */
+
+    jr_gemini_client_deinit(&c);
+}
+
+/* Rejection + truncation: a snapshot never half-fills, and clipping is LOUD. */
+static void test_ask_snapshot_rejects_and_flags_truncation(void)
+{
+    jr_gemini_parse_t p;
+    jr_gemini_ask_t ask;
+
+    /* a different tool is not an ask */
+    TEST_ASSERT_TRUE(jr_gemini_parse(
+        "{\"toolCall\":{\"functionCalls\":[{\"name\":\"weather\",\"id\":\"c9\","
+        "\"args\":{\"location\":\"Fort Lauderdale\"}}]}}", &p));
+    memset(&ask, 0xAB, sizeof(ask));
+    TEST_ASSERT_FALSE(jr_gemini_event_to_ask(&p.events[0], &ask));
+    TEST_ASSERT_EQUAL_UINT8(0, ask.count);          /* zeroed, not garbage */
+    TEST_ASSERT_EQUAL_STRING("", ask.question);
+    jr_gemini_parse_free(&p);
+
+    /* ask_user with no options is unanswerable -> rejected */
+    TEST_ASSERT_TRUE(jr_gemini_parse(
+        "{\"toolCall\":{\"functionCalls\":[{\"name\":\"ask_user\",\"id\":\"c1\","
+        "\"args\":{\"question\":\"Well?\"}}]}}", &p));
+    TEST_ASSERT_FALSE(jr_gemini_event_to_ask(&p.events[0], &ask));
+    jr_gemini_parse_free(&p);
+
+    /* ask_user with no question is undrawable -> rejected */
+    TEST_ASSERT_TRUE(jr_gemini_parse(
+        "{\"toolCall\":{\"functionCalls\":[{\"name\":\"ask_user\",\"id\":\"c2\","
+        "\"args\":{\"options\":[\"a\",\"b\"]}}]}}", &p));
+    TEST_ASSERT_FALSE(jr_gemini_event_to_ask(&p.events[0], &ask));
+    jr_gemini_parse_free(&p);
+
+    /* a NULL event is inert, not a crash */
+    TEST_ASSERT_FALSE(jr_gemini_event_to_ask(NULL, &ask));
+    TEST_ASSERT_FALSE(jr_gemini_event_to_ask(NULL, NULL));
+
+    /* four options: the fourth arc cannot be drawn -> kept 3 AND flagged */
+    TEST_ASSERT_TRUE(jr_gemini_parse(
+        "{\"toolCall\":{\"functionCalls\":[{\"name\":\"ask_user\",\"id\":\"c3\","
+        "\"args\":{\"question\":\"Pick\",\"options\":[\"a\",\"b\",\"c\",\"d\"]}}]}}", &p));
+    TEST_ASSERT_TRUE(jr_gemini_event_to_ask(&p.events[0], &ask));
+    TEST_ASSERT_EQUAL_UINT8(JR_GEMINI_ASK_USER_MAX_CHOICES, ask.count);
+    TEST_ASSERT_TRUE(ask.truncated);
+    jr_gemini_parse_free(&p);
+
+    /* an over-long question is clipped, NUL-terminated, and flagged */
+    TEST_ASSERT_TRUE(jr_gemini_parse(
+        "{\"toolCall\":{\"functionCalls\":[{\"name\":\"ask_user\",\"id\":\"c4\","
+        "\"args\":{\"question\":\"" /* 60 chars, cap is 48 */
+        "012345678901234567890123456789012345678901234567890123456789\","
+        "\"options\":[\"yes\"]}}]}}", &p));
+    TEST_ASSERT_TRUE(jr_gemini_event_to_ask(&p.events[0], &ask));
+    TEST_ASSERT_TRUE(ask.truncated);
+    TEST_ASSERT_EQUAL_size_t(JR_GEMINI_ASK_QUESTION_CAP - 1u, strlen(ask.question));
+    TEST_ASSERT_EQUAL_UINT8(1, ask.count);
+    jr_gemini_parse_free(&p);
+}
+
+/* REGRESSION (minor): an over-long declaration must never ship a schema that
+ * silently lost a property. build_setup refuses the whole message instead. */
+static void test_setup_refuses_overlong_declaration(void)
+{
+    jr_gemini_fn_decl_t bad;
+    memset(&bad, 0, sizeof(bad));
+    bad.name = "too_many";
+    bad.description = "d";
+    bad.params[0].name = "a";
+    bad.params[1].name = "b";
+    bad.param_count = JR_GEMINI_MAX_FN_PARAMS + 1u;   /* the lie */
+
+    jr_gemini_config_t cfg = manual_cfg();
+    cfg.fns = &bad; cfg.fn_count = 1;
+    TEST_ASSERT_NULL(jr_gemini_build_setup(&cfg));    /* loud, not truncated */
+
+    /* an honest declaration at exactly the cap still builds */
+    bad.param_count = JR_GEMINI_PARAM_COUNT(JR_GEMINI_MAX_FN_PARAMS);
+    for (size_t i = 0; i < JR_GEMINI_MAX_FN_PARAMS; i++) { bad.params[i].name = "p"; }
+    char *j = jr_gemini_build_setup(&cfg);
+    TEST_ASSERT_NOT_NULL(j);
+    free(j);
+}
+
+/* The answer goes home: a chosen option becomes a well-formed functionResponse
+ * on the SAME toolResponse path every other tool uses. */
+static void test_build_ask_user_response_for_chosen_option(void)
+{
+    char *j = jr_gemini_build_ask_user_response("call_ask_7", "Ambient");
+    TEST_ASSERT_NOT_NULL(j);
+    cJSON *root = cJSON_Parse(j);
+    TEST_ASSERT_NOT_NULL(root);                    /* well-formed JSON */
+    cJSON *fr = cJSON_GetArrayItem(
+        cJSON_GetObjectItem(cJSON_GetObjectItem(root, "toolResponse"),
+                            "functionResponses"), 0);
+    TEST_ASSERT_EQUAL_STRING("call_ask_7", cJSON_GetObjectItem(fr, "id")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("ask_user", cJSON_GetObjectItem(fr, "name")->valuestring);
+    cJSON *resp = cJSON_GetObjectItem(fr, "response");
+    TEST_ASSERT_TRUE(cJSON_IsObject(resp));        /* an OBJECT, not a bare string */
+    TEST_ASSERT_EQUAL_STRING("Ambient", cJSON_GetObjectItem(resp, "answer")->valuestring);
+    TEST_ASSERT_NULL(cJSON_GetObjectItem(resp, "error"));
+    cJSON_Delete(root);
+    free(j);
+
+    /* Identical shape to a hand-built tool response — one emitter, one shape. */
+    char *manual = jr_gemini_build_tool_response("call_ask_7", "ask_user",
+                                                 "{\"answer\":\"Ambient\"}");
+    TEST_ASSERT_EQUAL_STRING(manual, j = jr_gemini_build_ask_user_response(
+                                 "call_ask_7", "Ambient"));
+    free(manual);
+    free(j);
+
+    /* An option containing a quote is ESCAPED, not spliced — the frame survives
+     * and the answer round-trips exactly. */
+    j = jr_gemini_build_ask_user_response("c1", "Say \"yes\"\\now");
+    TEST_ASSERT_NOT_NULL(j);
+    root = cJSON_Parse(j);
+    TEST_ASSERT_NOT_NULL(root);
+    fr = cJSON_GetArrayItem(cJSON_GetObjectItem(
+        cJSON_GetObjectItem(root, "toolResponse"), "functionResponses"), 0);
+    TEST_ASSERT_EQUAL_STRING("Say \"yes\"\\now",
+        cJSON_GetObjectItem(cJSON_GetObjectItem(fr, "response"), "answer")->valuestring);
+    cJSON_Delete(root);
+    free(j);
+
+    /* No answer (dismissed arc) is still valid JSON, never NULL-deref. */
+    j = jr_gemini_build_ask_user_response("c2", NULL);
+    TEST_ASSERT_NOT_NULL(j);
+    root = cJSON_Parse(j);
+    TEST_ASSERT_NOT_NULL(root);
+    fr = cJSON_GetArrayItem(cJSON_GetObjectItem(
+        cJSON_GetObjectItem(root, "toolResponse"), "functionResponses"), 0);
+    TEST_ASSERT_EQUAL_STRING("",
+        cJSON_GetObjectItem(cJSON_GetObjectItem(fr, "response"), "answer")->valuestring);
     cJSON_Delete(root);
     free(j);
 }
@@ -627,9 +1029,17 @@ void transport_tests_run(void)
     RUN_TEST(test_setup_manual_ptt_config);
     RUN_TEST(test_setup_auto_vad_config);
     RUN_TEST(test_setup_tools_coexist);
+    RUN_TEST(test_setup_ask_user_array_schema_golden);
+    RUN_TEST(test_setup_legacy_single_string_decl_byte_identical);
     RUN_TEST(test_build_control_frames);
     RUN_TEST(test_build_audio_chunk_roundtrip);
     RUN_TEST(test_build_tool_response_preserves_original_id);
+    RUN_TEST(test_build_ask_user_response_for_chosen_option);
+    RUN_TEST(test_setup_refuses_overlong_declaration);
+    /* ask snapshot — the 120 s lifetime contract */
+    RUN_TEST(test_ask_snapshot_outlives_the_parse_tree);
+    RUN_TEST(test_ask_snapshot_survives_pump_rx_free);
+    RUN_TEST(test_ask_snapshot_rejects_and_flags_truncation);
     /* framer */
     RUN_TEST(test_framer_wouldblock_never_aborts);
     RUN_TEST(test_framer_drop_newest_oldest_retained);
@@ -648,6 +1058,7 @@ void transport_tests_run(void)
     RUN_TEST(test_parse_goAway_duration);
     RUN_TEST(test_parse_sessionResumption_resumable_gate);
     RUN_TEST(test_parse_toolCall_and_cancellation);
+    RUN_TEST(test_parse_toolCall_ask_user_options);
     RUN_TEST(test_parse_error_quota_detection);
     RUN_TEST(test_parse_unknown_and_invalid);
     /* pump + liveness */

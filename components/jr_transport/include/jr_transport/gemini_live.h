@@ -56,15 +56,126 @@ extern "C" {
  *  BUILDERS                                                                 *
  * ======================================================================== */
 
-/* A single declared function tool (name + description + one string arg). The
- * harvested setup declares several of these alongside googleSearch; the builder
- * proves the two tool types coexist. */
+/* Declared-parameter types. STRING is 0 so a zero-initialized parameter slot is
+ * a plain string — the legacy default. STRING_ARRAY is the one that forced this
+ * struct to grow: an `options[]` argument (tap-to-answer choice arcs) cannot be
+ * expressed by the single-string form below. */
+typedef enum {
+    JR_GEMINI_PT_STRING = 0,
+    JR_GEMINI_PT_STRING_ARRAY,   /* emits "type":"array" + "items":{"type":"string"} */
+    JR_GEMINI_PT_INTEGER,
+    JR_GEMINI_PT_BOOLEAN,
+} jr_gemini_param_type_t;
+
+/* Fixed cap per declaration. Declarations live in .rodata (flash) on device, so
+ * this costs no internal RAM — but keep it small anyway: the whole point of a
+ * fixed array is that nothing in the declaration path ever mallocs. */
+#ifndef JR_GEMINI_MAX_FN_PARAMS
+#define JR_GEMINI_MAX_FN_PARAMS 4
+#endif
+
+/* NO SILENT TRUNCATION. An over-long declaration used to clamp param_count to
+ * JR_GEMINI_MAX_FN_PARAMS and ship a schema missing a property — invisible
+ * until Gemini mis-calls the tool at runtime. Two guards now:
+ *   1. compile time — declare param_count through this macro and a 5-property
+ *      table fails to build;
+ *   2. run time     — jr_gemini_build_setup() REFUSES the whole setup (returns
+ *      NULL) rather than emitting a lying schema. There is no ESP-IDF logger in
+ *      this layer, so "loud" means "fails hard at the seam the caller checks".
+ */
+#define JR_GEMINI_PARAM_COUNT(n)                                               \
+    ((size_t)(n) +                                                             \
+     0u * sizeof(char[((n) <= JR_GEMINI_MAX_FN_PARAMS) ? 1 : -1]))
+
+typedef struct {
+    const char            *name;        /* NULL => slot skipped                 */
+    jr_gemini_param_type_t type;        /* default (0) == STRING                */
+    const char            *description; /* NULL => ""                           */
+    bool                   required;    /* listed in the schema "required" array*/
+} jr_gemini_fn_param_t;
+
+/* A single declared function tool.
+ *
+ * TWO WAYS to declare arguments, and they are additive:
+ *   (a) LEGACY single string — set arg_name/arg_desc. Emitted exactly as before
+ *       (one "string" property + a one-element "required" array). Untouched so
+ *       every existing tool in main.c keeps its byte-identical schema.
+ *   (b) TYPED params[] — up to JR_GEMINI_MAX_FN_PARAMS properties of mixed type,
+ *       including STRING_ARRAY. Zero-initialized (param_count == 0) means "none",
+ *       so a legacy positional or designated initializer still compiles and
+ *       still emits the legacy shape.
+ * A declaration may use either, or both (legacy property is emitted first). */
 typedef struct {
     const char *name;
     const char *description;
-    const char *arg_name;   /* NULL => a no-arg declaration */
+    const char *arg_name;   /* NULL => no legacy single-string arg */
     const char *arg_desc;
+    jr_gemini_fn_param_t params[JR_GEMINI_MAX_FN_PARAMS];
+    size_t               param_count;
 } jr_gemini_fn_decl_t;
+
+/* ---- ask_user: the tap-to-answer choice-arc tool (STATE-05/STATE-06) ------ *
+ * The model asks a short question and offers a few short options; the device
+ * draws them as arcs, the user taps one, and the answer returns as a
+ * functionResponse built by jr_gemini_build_ask_user_response().              */
+#define JR_GEMINI_ASK_USER_TOOL        "ask_user"
+#define JR_GEMINI_ASK_USER_ARG_QUESTION "question"
+#define JR_GEMINI_ASK_USER_ARG_OPTIONS  "options"
+/* The UI can only draw three arcs in the free r215-239 band. */
+#define JR_GEMINI_ASK_USER_MAX_CHOICES 3
+
+/* Drop-in initializer so the owner can splice ask_user into its `static const`
+ * declaration table without a runtime constructor. */
+#define JR_GEMINI_ASK_USER_DECL {                                              \
+    .name = JR_GEMINI_ASK_USER_TOOL,                                           \
+    .description =                                                             \
+        "Ask Pascal a short multiple-choice question and wait for the tap. "    \
+        "Use at most three options; keep each option under 16 characters.",     \
+    .params = {                                                                \
+        { .name = JR_GEMINI_ASK_USER_ARG_QUESTION,                             \
+          .type = JR_GEMINI_PT_STRING,                                         \
+          .description = "The question to show, at most 40 characters.",        \
+          .required = true },                                                  \
+        { .name = JR_GEMINI_ASK_USER_ARG_OPTIONS,                              \
+          .type = JR_GEMINI_PT_STRING_ARRAY,                                   \
+          .description =                                                       \
+              "Two or three short answer choices, each under 16 characters.",   \
+          .required = true },                                                  \
+    },                                                                         \
+    .param_count = JR_GEMINI_PARAM_COUNT(2),                                   \
+}
+
+/* ---- the OWNED ask snapshot (the 120 s lifetime problem) ----------------- *
+ * The parse tree dies the instant jr_gemini_pump_rx() returns from the rich
+ * callback, but the Asking state holds the question and the options for up to
+ * JR_ASK_TIMEOUT_MS (120 s) while a human decides. Every pointer handed out by
+ * jr_gemini_tool_arg_string() / _string_array() and every `const char *` on the
+ * event ALIASES that tree, so storing one and reading it later is a
+ * use-after-free.
+ *
+ * jr_gemini_event_to_ask() removes the hazard instead of documenting it: it
+ * copies into caller-provided fixed storage. No malloc (internal RAM is
+ * scarce), ~140 B, lives inside the caller's existing struct. A consumer that
+ * holds a jr_gemini_ask_t is safe for the whole 120 s and beyond; a consumer
+ * that holds a borrowed pointer is, and always was, wrong.
+ *
+ * Caps are the UI's real limits (the declaration asks the model for <=40-char
+ * questions and <16-char options), so truncation is a bad model response, not
+ * a normal path — hence the explicit `truncated` flag rather than silence. */
+#define JR_GEMINI_ASK_CALL_ID_CAP   64
+#define JR_GEMINI_ASK_QUESTION_CAP  48
+#define JR_GEMINI_ASK_OPTION_CAP    20
+
+typedef struct {
+    char     call_id[JR_GEMINI_ASK_CALL_ID_CAP];   /* always NUL-terminated */
+    char     question[JR_GEMINI_ASK_QUESTION_CAP];
+    char     options[JR_GEMINI_ASK_USER_MAX_CHOICES][JR_GEMINI_ASK_OPTION_CAP];
+    uint32_t call_id_hash;   /* == ev->call_id; the core's uint32 handle     */
+    uint8_t  count;          /* options actually copied (0..MAX_CHOICES)     */
+    bool     truncated;      /* some field or the option list was clipped    */
+} jr_gemini_ask_t;
+
+/* (the snapshot function is declared below, next to the event type) */
 
 typedef struct {
     const char *url;                /* wss endpoint (contains the API key at
@@ -108,6 +219,14 @@ char *jr_gemini_build_audio_stream_end(void); /* auto-VAD ONLY — never in manu
 char *jr_gemini_build_text_turn(const char *text); /* clientContent user turn, turnComplete */
 char *jr_gemini_build_tool_response(const char *call_id, const char *name,
                                     const char *response_json);
+
+/* The answered-question functionResponse. Thin wrapper over
+ * jr_gemini_build_tool_response() with name == "ask_user" and a
+ * {"answer":"<chosen>"} payload, so an answered choice arc goes back over the
+ * SAME toolResponse path every other tool already uses. `answer` is JSON-escaped
+ * (a quote or backslash in an option cannot corrupt the frame); NULL => "".
+ * Returns malloc'd JSON the caller frees, or NULL on OOM. */
+char *jr_gemini_build_ask_user_response(const char *call_id, const char *answer);
 
 /* Encode a PCM16 mono frame as a realtimeInput audio blob. `samples` is the
  * count of int16 samples; `rate` is the mimeType rate (JR_GEMINI_TX_RATE).
@@ -159,7 +278,12 @@ typedef struct {
     uint32_t    call_id;
     const char *call_id_text;  /* original Gemini id; required in toolResponse */
     const char *tool_name;
-    const char *tool_args;
+    const char *tool_args;     /* printed JSON of args; owned, freed in _free  */
+    /* The retained `args` cJSON node (opaque). Valid until jr_gemini_parse_free().
+     * Feeds jr_gemini_tool_arg_string() / _string_array() so a caller can read a
+     * typed argument — notably ask_user's options[] — WITHOUT re-parsing
+     * tool_args. NULL when the call carried no args. */
+    const void *tool_args_node;
 
     /* GO_AWAY */
     uint32_t go_away_seconds;
@@ -191,6 +315,35 @@ typedef struct {
  * tree + any decoded audio. Uses cJSON — never a hand-rolled untrusted parser. */
 bool jr_gemini_parse(const char *json, jr_gemini_parse_t *out);
 void jr_gemini_parse_free(jr_gemini_parse_t *out);
+
+/* ---- typed argument readers for a JR_GEV_TOOL_CALL event ------------------ *
+ * Both read straight out of the retained parse tree: NO allocation, NO copy.
+ * The returned pointers alias that tree and die at jr_gemini_parse_free() —
+ * which jr_gemini_pump_rx() calls the moment the rich callback returns.
+ *
+ * ⚠ THESE ARE STRICTLY IN-CALLBACK READS. Storing one and reading it later is a
+ * use-after-free. For ask_user — whose question and options must survive a
+ * 120 s human decision — do NOT use these: call jr_gemini_event_to_ask() and
+ * keep the owned snapshot instead.                                            */
+
+/* args[key] as a string, or NULL if absent / not a string. */
+const char *jr_gemini_tool_arg_string(const jr_gemini_event_t *ev, const char *key);
+
+/* args[key] as an array of strings. Writes at most `max` element pointers into
+ * `out` and returns how many were written. Non-string elements are skipped.
+ * Returns 0 (and touches nothing) if absent, not an array, or on a bad arg. */
+size_t jr_gemini_tool_arg_string_array(const jr_gemini_event_t *ev, const char *key,
+                                       const char **out, size_t max);
+
+/* Snapshot an ask_user JR_GEV_TOOL_CALL event into caller-owned fixed storage
+ * (see jr_gemini_ask_t above). Returns true only for a usable ask: an ask_user
+ * tool call carrying a non-empty question and at least one non-empty option.
+ * `out` is fully zeroed first, so a false return leaves a clean inert struct
+ * (count == 0, empty strings) rather than partial garbage. Copies everything —
+ * NOTHING in `out` aliases the parse tree, so it is valid after
+ * jr_gemini_parse_free() and for the entire 120 s Asking window.
+ * Allocation-free, no float. */
+bool jr_gemini_event_to_ask(const jr_gemini_event_t *ev, jr_gemini_ask_t *out);
 
 /* ======================================================================== *
  *  CLIENT — the RealtimeVoiceClient impl over a ws_transport (framer + pump)*

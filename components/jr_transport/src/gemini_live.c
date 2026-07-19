@@ -192,12 +192,61 @@ char *jr_gemini_build_setup(const jr_gemini_config_t *cfg)
             cJSON *params = cJSON_AddObjectToObject(fn, "parameters");
             cJSON_AddStringToObject(params, "type", "object");
             cJSON *props = cJSON_AddObjectToObject(params, "properties");
+            /* "required" is created LAZILY and always AFTER "properties", which
+             * is what keeps a legacy single-string declaration byte-identical to
+             * the pre-typed-params emitter (a host test asserts that exactly). */
+            cJSON *reqd = NULL;
+
+            /* (a) legacy single-string arg — emitted first, unchanged. */
             if (d->arg_name) {
                 cJSON *p = cJSON_AddObjectToObject(props, d->arg_name);
                 cJSON_AddStringToObject(p, "type", "string");
                 cJSON_AddStringToObject(p, "description", d->arg_desc ? d->arg_desc : "");
-                cJSON *reqd = cJSON_AddArrayToObject(params, "required");
+                reqd = cJSON_AddArrayToObject(params, "required");
                 cJSON_AddItemToArray(reqd, cJSON_CreateString(d->arg_name));
+            }
+
+            /* (b) typed params[] — mixed types incl. STRING_ARRAY. A tool with
+             * param_count == 0 (every legacy declaration) skips this entirely. */
+            const size_t np = d->param_count;
+            if (np > JR_GEMINI_MAX_FN_PARAMS) {
+                /* NO SILENT TRUNCATION. Clamping here shipped a schema missing
+                 * its last property, invisible until Gemini mis-called the
+                 * tool. JR_GEMINI_PARAM_COUNT() catches this at compile time;
+                 * a table that dodged the macro fails loudly HERE instead —
+                 * there is no logger in this ESP-IDF-free layer, so the only
+                 * loud channel is the NULL the caller already checks. */
+                cJSON_Delete(fn);
+                cJSON_Delete(fdtool);
+                cJSON_Delete(root);
+                return NULL;
+            }
+            for (size_t k = 0; k < np; k++) {
+                const jr_gemini_fn_param_t *pp = &d->params[k];
+                if (!pp->name) { continue; }
+                cJSON *p = cJSON_AddObjectToObject(props, pp->name);
+                if (!p) { continue; }
+                const char *tname;
+                switch (pp->type) {
+                case JR_GEMINI_PT_STRING_ARRAY: tname = "array";   break;
+                case JR_GEMINI_PT_INTEGER:      tname = "integer"; break;
+                case JR_GEMINI_PT_BOOLEAN:      tname = "boolean"; break;
+                case JR_GEMINI_PT_STRING:
+                default:                        tname = "string";  break;
+                }
+                cJSON_AddStringToObject(p, "type", tname);
+                cJSON_AddStringToObject(p, "description",
+                                        pp->description ? pp->description : "");
+                if (pp->type == JR_GEMINI_PT_STRING_ARRAY) {
+                    /* An array property is INVALID to Gemini without "items";
+                     * the whole reason ask_user could not be declared before. */
+                    cJSON *items = cJSON_AddObjectToObject(p, "items");
+                    cJSON_AddStringToObject(items, "type", "string");
+                }
+                if (pp->required) {
+                    if (!reqd) { reqd = cJSON_AddArrayToObject(params, "required"); }
+                    cJSON_AddItemToArray(reqd, cJSON_CreateString(pp->name));
+                }
             }
             cJSON_AddItemToArray(fdecls, fn);
         }
@@ -291,6 +340,28 @@ char *jr_gemini_build_tool_response(const char *call_id, const char *name,
     char *json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     return json;
+}
+
+char *jr_gemini_build_ask_user_response(const char *call_id, const char *answer)
+{
+    /* Build the payload through cJSON so a quote/backslash/newline inside a
+     * chosen option is escaped rather than splicing raw text into a frame. */
+    cJSON *resp = cJSON_CreateObject();
+    if (!resp) { return NULL; }
+    if (!cJSON_AddStringToObject(resp, "answer", answer ? answer : "")) {
+        cJSON_Delete(resp);
+        return NULL;
+    }
+    char *payload = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    if (!payload) { return NULL; }
+
+    /* Delegate so an answered question travels the IDENTICAL toolResponse path
+     * as every other tool — one emitter, one shape. */
+    char *frame = jr_gemini_build_tool_response(call_id, JR_GEMINI_ASK_USER_TOOL,
+                                                payload);
+    free(payload);
+    return frame;
 }
 
 char *jr_gemini_build_audio_chunk(const jr_pcm_t *pcm, size_t samples, uint32_t rate)
@@ -523,7 +594,13 @@ bool jr_gemini_parse(const char *json, jr_gemini_parse_t *out)
             const char *idstr = cJSON_IsString(id) ? id->valuestring : NULL;
             e->call_id_text = idstr;
             e->call_id = fnv1a(idstr ? idstr : (e->tool_name ? e->tool_name : ""));
-            if (args) { e->tool_args = cJSON_PrintUnformatted(args); } /* owned; freed in _free */
+            if (args) {
+                e->tool_args = cJSON_PrintUnformatted(args); /* owned; freed in _free */
+                /* Retain the live node too, so a caller reads a typed argument
+                 * (ask_user's options[]) without re-parsing. Borrowed from
+                 * out->_root — dies with jr_gemini_parse_free(). */
+                e->tool_args_node = args;
+            }
         }
         if (out->count == 0) { push_ev(out, JR_GEV_UNKNOWN); }
         return true;
@@ -588,12 +665,100 @@ void jr_gemini_parse_free(jr_gemini_parse_t *out)
             free((void *)e->tool_args);   /* cJSON_PrintUnformatted result */
             e->tool_args = NULL;
         }
+        /* Borrowed from _root (never owned) — just drop the dangling alias. */
+        e->tool_args_node = NULL;
     }
     if (out->_root) {
         cJSON_Delete((cJSON *)out->_root);
         out->_root = NULL;
     }
     out->count = 0;
+}
+
+/* ---- typed argument readers over the retained args node ------------------ */
+const char *jr_gemini_tool_arg_string(const jr_gemini_event_t *ev, const char *key)
+{
+    if (!ev || !key || !ev->tool_args_node) { return NULL; }
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(
+        (const cJSON *)ev->tool_args_node, key);
+    return cJSON_IsString(v) ? v->valuestring : NULL;
+}
+
+size_t jr_gemini_tool_arg_string_array(const jr_gemini_event_t *ev, const char *key,
+                                       const char **out, size_t max)
+{
+    if (!ev || !key || !out || max == 0 || !ev->tool_args_node) { return 0; }
+    const cJSON *arr = cJSON_GetObjectItemCaseSensitive(
+        (const cJSON *)ev->tool_args_node, key);
+    if (!cJSON_IsArray(arr)) { return 0; }
+    size_t n = 0;
+    const cJSON *it = NULL;
+    cJSON_ArrayForEach(it, arr) {
+        if (n >= max) { break; }
+        /* Skip a non-string element rather than aborting: a malformed option in
+         * an otherwise usable list must not cost the user the whole question. */
+        if (cJSON_IsString(it) && it->valuestring) {
+            out[n++] = it->valuestring;
+        }
+    }
+    return n;
+}
+
+/* ---- the OWNED ask snapshot (kills the 120 s use-after-free) ------------- *
+ * Bounded copy into caller storage. No malloc, no float, no aliasing: after
+ * this returns, `out` is independent of the parse tree and survives
+ * jr_gemini_parse_free() — which the pump calls the instant the rich callback
+ * returns, 120 seconds before the human finishes deciding. */
+static bool copy_bounded(char *dst, size_t cap, const char *src)
+{
+    /* returns true if the whole source fitted */
+    size_t i = 0;
+    if (!src) { dst[0] = '\0'; return true; }
+    while (src[i] != '\0' && i + 1u < cap) { dst[i] = src[i]; i++; }
+    dst[i] = '\0';
+    return src[i] == '\0';
+}
+
+bool jr_gemini_event_to_ask(const jr_gemini_event_t *ev, jr_gemini_ask_t *out)
+{
+    if (!out) { return false; }
+    memset(out, 0, sizeof(*out));   /* inert on every failure path */
+    if (!ev || ev->kind != JR_GEV_TOOL_CALL) { return false; }
+    if (!ev->tool_name || strcmp(ev->tool_name, JR_GEMINI_ASK_USER_TOOL) != 0) {
+        return false;
+    }
+
+    const char *q = jr_gemini_tool_arg_string(ev, JR_GEMINI_ASK_USER_ARG_QUESTION);
+    if (!q || q[0] == '\0') { return false; }
+
+    /* Read ONE past the arc budget purely to detect an over-long list — a
+     * dropped option is a real loss of user choice and must be reported, not
+     * absorbed. */
+    const char *opts[JR_GEMINI_ASK_USER_MAX_CHOICES + 1u];
+    size_t n = jr_gemini_tool_arg_string_array(
+        ev, JR_GEMINI_ASK_USER_ARG_OPTIONS, opts,
+        JR_GEMINI_ASK_USER_MAX_CHOICES + 1u);
+
+    bool whole = true;
+    if (n > JR_GEMINI_ASK_USER_MAX_CHOICES) {
+        n = JR_GEMINI_ASK_USER_MAX_CHOICES;
+        whole = false;
+    }
+    size_t kept = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (!opts[i] || opts[i][0] == '\0') { continue; }   /* an empty arc is not a choice */
+        whole &= copy_bounded(out->options[kept], JR_GEMINI_ASK_OPTION_CAP, opts[i]);
+        kept++;
+    }
+    if (kept == 0) { memset(out, 0, sizeof(*out)); return false; }
+
+    whole &= copy_bounded(out->question, JR_GEMINI_ASK_QUESTION_CAP, q);
+    whole &= copy_bounded(out->call_id, JR_GEMINI_ASK_CALL_ID_CAP, ev->call_id_text);
+    out->call_id_hash = ev->call_id;
+    out->count        = (uint8_t)kept;
+    /* The model was told at most three options; a longer list lost arcs. */
+    out->truncated    = !whole;
+    return true;
 }
 
 /* ======================================================================== *

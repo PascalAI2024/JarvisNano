@@ -29,9 +29,9 @@
 #endif
 
 /* Enforce the contract counts at compile time (spec §8). */
-_Static_assert(JR_ST__COUNT == 10, "8 states, Live x3 substates -> 10 configs");
-_Static_assert(JR_EV__COUNT == 22, "22 typed events");
-_Static_assert(JR_CMD__COUNT == 27, "27 typed commands");
+_Static_assert(JR_ST__COUNT == 11, "8 states, Live x4 substates -> 11 configs");
+_Static_assert(JR_EV__COUNT == 25, "25 typed events");
+_Static_assert(JR_CMD__COUNT == 32, "32 typed commands");
 
 /* ---------------------- command builders (readable rows) ----------------- */
 
@@ -120,6 +120,51 @@ static jr_command_t mk_cancel_tool(const jr_event_t *e)
     c.call_id_text = e->call_id_text;
     return c;
 }
+static jr_command_t mk_arm_ask(uint32_t timeout_ms)
+{
+    jr_command_t c = mk(JR_CMD_ARM_ASK_TIMER);
+    c.timeout_ms = timeout_ms;
+    return c;
+}
+/* PresentChoices carries the ask_user tool call verbatim; L6 parses the
+ * question + labels out of tool_args and renders the arcs. */
+static jr_command_t mk_present_choices(const jr_event_t *e)
+{
+    jr_command_t c = mk(JR_CMD_PRESENT_CHOICES);
+    c.call_id = e->call_id;
+    c.call_id_text = e->call_id_text;
+    c.tool_name = e->tool_name;
+    c.tool_args = e->tool_args;
+    return c;
+}
+/* Re-present uses the ask payload remembered in SessionState (a stray tap
+ * carries none of its own). It MUST carry tool_name/tool_args as well as the
+ * ids: L6 re-parses the question and the labels out of tool_args on every
+ * PresentChoices, so a payload with only ids renders empty arcs (or dereferences
+ * NULL in the parser). These are the same BORROWED pointers enter_asking
+ * captured — see the lifetime contract in session.h. */
+static jr_command_t mk_represent_choices(const jr_session_t *s)
+{
+    jr_command_t c = mk(JR_CMD_PRESENT_CHOICES);
+    c.call_id = s->ask_call_id;
+    c.call_id_text = s->ask_call_id_text;
+    c.tool_name = s->ask_tool_name;
+    c.tool_args = s->ask_tool_args;
+    return c;
+}
+/* The functionResponse. index == JR_CHOICE_NONE / text == NULL is the
+ * "no answer" form every abandon path MUST send, so the model is never left
+ * waiting on a tool call that will never be answered. */
+static jr_command_t mk_choice_result(const jr_session_t *s, uint8_t index,
+                                     const char *text)
+{
+    jr_command_t c = mk(JR_CMD_SEND_CHOICE_RESULT);
+    c.call_id = s->ask_call_id;
+    c.call_id_text = s->ask_call_id_text;
+    c.choice_index = index;
+    c.choice_text = text;
+    return c;
+}
 static jr_command_t mk_diag(const char *reason, jr_event_kind_t et, jr_error_kind_t ek)
 {
     jr_command_t c = mk(JR_CMD_EMIT_DIAG);
@@ -186,9 +231,27 @@ static jr_outcome_t death(jr_session_t s, jr_error_kind_t ek,
     push(L, mk(JR_CMD_DISARM_KEEPALIVE));
     push(L, mk(JR_CMD_DISARM_NO_REPLY_WATCHDOG));
     push(L, mk(JR_CMD_DISARM_CAPTURE_PAUSE_TIMER));
+    /* Only when dying OUT of Asking — keeps the ordinary death fan-out at 10
+     * commands (JR_MAX_CMDS is 12) while still guaranteeing the ask timer can
+     * never fire into a reconnected session and address a dead tool call. */
+    if (s.phase == JR_ST_ASKING) {
+        push(L, mk(JR_CMD_DISARM_ASK_TIMER));
+        /* ...and take the arcs OFF the glass. Without this the last arc-related
+         * instruction L6 ever received is a PresentChoices, so the device shows
+         * three tappable choices belonging to a dead session while the machine
+         * sits in Reconnecting. A tap on them can answer nothing. */
+        push(L, mk(JR_CMD_DISMISS_CHOICES));
+    }
     push(L, mk_diag("death", trigger, ek));  /* load-bearing: carries error_kind*/
 
     s.fail_count = (uint16_t)(s.fail_count + 1);
+    s.ask_call_id = 0;                       /* the ask dies with the session   */
+    s.ask_call_id_text = NULL;
+    s.ask_tool_name = NULL;
+    s.ask_tool_args = NULL;
+    /* No SendActivityEnd here: the socket is being closed involuntarily, so
+     * there is nothing to send it on. The window closes with the session. */
+    s.manual_activity_open = false;
 
     if (p.should_park) {
         if (p.delay_ms > 0) {
@@ -215,7 +278,15 @@ static bool is_death_source(jr_state_t st)
 {
     return st == JR_ST_CONNECTING || st == JR_ST_HANDSHAKING ||
            st == JR_ST_LISTENING || st == JR_ST_THINKING ||
-           st == JR_ST_SPEAKING;
+           st == JR_ST_SPEAKING ||
+           /* Asking is a Live substate on a live socket: if the transport dies
+            * under it the machine MUST route to DEATH like any other Live
+            * substate. Omitting it would strand the machine in Asking with
+            * arcs on screen and no session behind them. The spurious-kill risk
+            * (no server frame arrives while a human deliberates) is handled by
+            * the longer JR_ASK_DEADLINE_MS keepalive, not by exempting the
+            * state from DEATH. */
+           st == JR_ST_ASKING;
 }
 
 /* ---------------------- small transition constructors -------------------- */
@@ -287,8 +358,87 @@ static jr_outcome_t to_idle_reset(jr_session_t s, bool cancel_backoff,
     s.phase = JR_ST_IDLE;
     s.fail_count = 0;                        /* reset fail_count                */
     s.resumption_token = 0;                  /* clear resumption_token          */
+    s.ask_call_id = 0;                       /* no ask survives a park          */
+    s.ask_call_id_text = NULL;
+    s.ask_tool_name = NULL;
+    s.ask_tool_args = NULL;
+    s.manual_activity_open = false;
     o.next = s;
     return o;
+}
+
+/* ---------------------- Asking (§4.11 STATE-05/06) ----------------------- */
+
+/* Enter Live.Asking from any Live substate. THE contract, in order:
+ *   1. the arcs go up (PresentChoices);
+ *   2. the no-reply watchdog is DISARMED — it is machine-scale (20 s) and this
+ *      state waits on a human;
+ *   3. the human-scale ask timer is armed instead;
+ *   4. the capture-pause timer is disarmed so we do not spray audioStreamEnd
+ *      once a second for the whole deliberation;
+ *   5. the keepalive is stretched past the ask timer so StaleDeadline cannot
+ *      pre-empt it and route to DEATH.
+ * Capture is deliberately left RUNNING: the user may answer out loud, and the
+ * mic must stay hot for barge-in. */
+static jr_outcome_t enter_asking(jr_session_t s, const jr_event_t *e)
+{
+    jr_outcome_t o;
+    memset(&o, 0, sizeof o);
+    jr_cmd_list_t *L = &o.cmds;
+
+    /* RE-ASK: the model asked a second question while the first ask was still
+     * open. Adopting the new call without answering the old one strands the
+     * model on a functionCall that will never be answered — it blocks on it
+     * forever and the session goes silent. Answer the OUTGOING call first
+     * (JR_CHOICE_NONE == "no answer"), then adopt the new one. Guarded on a
+     * live ask so a first entry from Listening/Thinking/Speaking emits nothing
+     * extra. */
+    if (s.phase == JR_ST_ASKING && s.ask_call_id != 0) {
+        push(L, mk_choice_result(&s, JR_CHOICE_NONE, NULL));
+    }
+
+    s.ask_call_id = e->call_id;
+    s.ask_call_id_text = e->call_id_text;    /* BORROWED — see session.h        */
+    s.ask_tool_name = e->tool_name;          /* BORROWED — for the re-present   */
+    s.ask_tool_args = e->tool_args;          /* BORROWED — for the re-present   */
+    s.phase = JR_ST_ASKING;
+
+    push(L, mk_present_choices(e));
+    push(L, mk(JR_CMD_DISARM_NO_REPLY_WATCHDOG));
+    push(L, mk(JR_CMD_DISARM_CAPTURE_PAUSE_TIMER));
+    push(L, mk_arm_ask(JR_ASK_TIMEOUT_MS));
+    push(L, mk_arm_ka(JR_ASK_DEADLINE_MS));
+
+    o.next = s;
+    return o;
+}
+
+/* Every voluntary exit from Asking: take the arcs off the glass, kill the ask
+ * timer, put the keepalive back on the normal Live deadline, and forget the
+ * pending call. DismissChoices is EXPLICIT and unconditional — L6 must never
+ * have to infer teardown from a phase field. */
+static void leave_asking(jr_session_t *s, jr_cmd_list_t *L)
+{
+    push(L, mk(JR_CMD_DISMISS_CHOICES));
+    push(L, mk(JR_CMD_DISARM_ASK_TIMER));
+    push(L, mk_arm_ka(JR_LIVE_DEADLINE_MS));
+    s->ask_call_id = 0;
+    s->ask_call_id_text = NULL;
+    s->ask_tool_name = NULL;
+    s->ask_tool_args = NULL;
+}
+
+/* Close a manual-VAD activity window IF one is open. Manual (PTT) mode opens
+ * the window on SpeechStarted and the model waits for its activityEnd; leaving
+ * Asking without closing it leaves the model listening to a turn that never
+ * ends. The `manual_activity_open` gate means a tap-and-leave that never saw
+ * SpeechStarted emits nothing — a bare activityEnd is itself a protocol error. */
+static void close_manual_activity(jr_session_t *s, jr_cmd_list_t *L)
+{
+    if (s->vad_mode == JR_VAD_MANUAL_LOCAL_RMS && s->manual_activity_open) {
+        push(L, mk(JR_CMD_SEND_ACTIVITY_END));
+        s->manual_activity_open = false;
+    }
 }
 
 /* Append the implicit PublishSnapshot to any state-changing / command-emitting
@@ -416,11 +566,13 @@ jr_outcome_t jr_transition(jr_session_t s, jr_event_t e, jr_clock_t clk)
             o = noop(s);
             if (manual) {
                 push(&o.cmds, mk(JR_CMD_SEND_ACTIVITY_START));
+                o.next.manual_activity_open = true;   /* window opens here      */
             }
             push(&o.cmds, mk(JR_CMD_DISARM_CAPTURE_PAUSE_TIMER));
             break;
         case JR_EV_SPEECH_ENDED:
             s.phase = JR_ST_THINKING;
+            s.manual_activity_open = false;           /* ...and closes here     */
             o = noop(s);
             push(&o.cmds, manual ? mk(JR_CMD_SEND_ACTIVITY_END)
                                  : mk(JR_CMD_SEND_AUDIO_STREAM_END));
@@ -455,6 +607,9 @@ jr_outcome_t jr_transition(jr_session_t s, jr_event_t e, jr_clock_t clk)
                 push(&o.cmds, mk_arm_noreply(JR_NOREPLY_MS));
             }
             break;
+        case JR_EV_ASK_OPENED:               /* ask_user tool call -> arcs      */
+            o = enter_asking(s, &e);
+            break;
         case JR_EV_SERVER_INTERRUPTED:       /* benign; nothing playing         */
             o = noop(s);
             push(&o.cmds, mk(JR_CMD_FLUSH_PLAYBACK_RING));
@@ -475,6 +630,7 @@ jr_outcome_t jr_transition(jr_session_t s, jr_event_t e, jr_clock_t clk)
             break;
         case JR_EV_USER_STOP:
             s.phase = JR_ST_DRAINING;
+            s.manual_activity_open = false;
             o = noop(s);
             push(&o.cmds, mk(JR_CMD_SEND_ACTIVITY_END));
             push(&o.cmds, mk_close(true));
@@ -542,12 +698,18 @@ jr_outcome_t jr_transition(jr_session_t s, jr_event_t e, jr_clock_t clk)
             push(&o.cmds, mk(JR_CMD_START_CAPTURE));
             push(&o.cmds, mk_arm_cap(JR_CAPTURE_PAUSE_MS));
             break;
+        case JR_EV_ASK_OPENED:               /* the usual emitter: the ask_user
+                                              * tool call was dispatched from
+                                              * Thinking and L6 recognised it   */
+            o = enter_asking(s, &e);
+            break;
         case JR_EV_SPEECH_STARTED:           /* user re-engaged                 */
             s.phase = JR_ST_LISTENING;
             o = noop(s);
             push(&o.cmds, mk(JR_CMD_DISARM_NO_REPLY_WATCHDOG));
             if (manual) {
                 push(&o.cmds, mk(JR_CMD_SEND_ACTIVITY_START));
+                o.next.manual_activity_open = true;
             }
             break;
         case JR_EV_HEARTBEAT:
@@ -591,6 +753,7 @@ jr_outcome_t jr_transition(jr_session_t s, jr_event_t e, jr_clock_t clk)
             push(&o.cmds, mk(JR_CMD_MUTE_DAC_NOW));
             push(&o.cmds, mk(JR_CMD_FLUSH_PLAYBACK_RING));
             push(&o.cmds, mk(JR_CMD_SEND_ACTIVITY_START));
+            o.next.manual_activity_open = manual; /* the barge opens the window */
             push(&o.cmds, mk_arm_cap(JR_CAPTURE_PAUSE_MS));
             push(&o.cmds, mk_diag("barge", ev, JR_ERRK_UNKNOWN));
             break;
@@ -625,6 +788,11 @@ jr_outcome_t jr_transition(jr_session_t s, jr_event_t e, jr_clock_t clk)
             o = noop(s);
             push(&o.cmds, mk_arm_ka(JR_LIVE_DEADLINE_MS));
             break;
+        case JR_EV_ASK_OPENED:               /* arcs go up while the model is
+                                              * still speaking the question —
+                                              * audio keeps flowing, no mute    */
+            o = enter_asking(s, &e);
+            break;
         case JR_EV_SPEECH_STARTED:           /* NOT a barge (zero-self-barge)   */
         case JR_EV_SPEECH_ENDED:             /* user pause during model speech  */
             o = noop(s);
@@ -643,6 +811,156 @@ jr_outcome_t jr_transition(jr_session_t s, jr_event_t e, jr_clock_t clk)
             o = noop(s);
             break;
         default:                             /* NoReply illegal (disarmed)      */
+            o = illegal_drop(s, ev);
+            break;
+        }
+        break;
+
+    /* -------------------- §4.11 Live.Asking (STATE-05/06) ---------------- *
+     * Waiting on a HUMAN, not on the server. Two rules dominate every row:
+     *   - the no-reply watchdog stays DISARMED for the whole state (it is
+     *     20 s; deliberation is not a fault) and is only re-armed on an exit
+     *     that leaves the model owing us a reply;
+     *   - every exit sends a SendChoiceResult, even the abandon paths, so the
+     *     model is never left blocked on an unanswered tool call.
+     * Death events never reach here — the shared §4.0 pre-check owns them. */
+    case JR_ST_ASKING:
+        switch (ev) {
+        case JR_EV_CHOICE_PICKED:            /* THE row: a finger landed        */
+            o = noop(s);
+            push(&o.cmds, mk_choice_result(&s, e.choice_index, e.choice_text));
+            /* The human may have started talking while deciding and then tapped
+             * instead. That activity window is still open — close it or the
+             * model waits on a turn that never ends. */
+            close_manual_activity(&s, &o.cmds);
+            leave_asking(&s, &o.cmds);
+            push(&o.cmds, mk_arm_noreply(JR_NOREPLY_MS)); /* model owes a reply */
+            s.phase = JR_ST_THINKING;
+            o.next = s;
+            break;
+
+        case JR_EV_ASK_TIMEOUT:              /* nobody answered in 120 s        */
+            o = noop(s);
+            push(&o.cmds, mk_choice_result(&s, JR_CHOICE_NONE, NULL));
+            close_manual_activity(&s, &o.cmds);
+            leave_asking(&s, &o.cmds);
+            /* Back to Listening, NOT Thinking: we hand the floor back to the
+             * user. No no-reply watchdog here — it is illegal in Listening. */
+            push(&o.cmds, mk(JR_CMD_START_CAPTURE));
+            push(&o.cmds, mk_arm_cap(JR_CAPTURE_PAUSE_MS));
+            push(&o.cmds, mk_diag("ask_timeout", ev, JR_ERRK_UNKNOWN));
+            s.phase = JR_ST_LISTENING;
+            o.next = s;
+            break;
+
+        case JR_EV_NO_REPLY_TIMEOUT:
+            /* A late fire from a watchdog we disarmed on entry. It must be
+             * INERT: this is exactly the 21-second-deliberation teardown the
+             * plan calls out. Never route to DEATH, never change phase. */
+            o = noop(s);
+            push(&o.cmds, mk(JR_CMD_DISARM_NO_REPLY_WATCHDOG));  /* belt+braces */
+            push(&o.cmds, mk_diag("noreply_ignored_in_asking", ev, JR_ERRK_UNKNOWN));
+            break;
+
+        case JR_EV_SPEECH_ENDED:
+            /* The human answered OUT LOUD instead of tapping. Abandon the arcs,
+             * close the tool call so the model is not stranded, and commit the
+             * spoken turn exactly like Listening + SpeechEnded does. */
+            o = noop(s);
+            push(&o.cmds, mk_choice_result(&s, JR_CHOICE_NONE, NULL));
+            /* Unconditional, exactly like Listening's SpeechEnded row: this IS
+             * the turn boundary, and in auto-VAD it is the audioStreamEnd that
+             * commits the turn. */
+            push(&o.cmds, manual ? mk(JR_CMD_SEND_ACTIVITY_END)
+                                 : mk(JR_CMD_SEND_AUDIO_STREAM_END));
+            s.manual_activity_open = false;
+            leave_asking(&s, &o.cmds);
+            push(&o.cmds, mk_arm_noreply(JR_NOREPLY_MS));
+            s.phase = JR_ST_THINKING;
+            o.next = s;
+            break;
+
+        case JR_EV_SPEECH_STARTED:           /* mic is hot by design            */
+            o = noop(s);
+            if (manual) {
+                push(&o.cmds, mk(JR_CMD_SEND_ACTIVITY_START));
+                o.next.manual_activity_open = true;  /* MUST be closed on exit  */
+            }
+            break;
+
+        case JR_EV_SERVER_AUDIO_CHUNK:       /* model speaks the question aloud
+                                              * while the arcs are up           */
+            o = noop(s);
+            push(&o.cmds, mk(JR_CMD_UNMUTE_DAC));
+            push(&o.cmds, mk_feed(e.pcm, e.pcm_len));
+            push(&o.cmds, mk_arm_ka(JR_ASK_DEADLINE_MS));
+            break;
+
+        case JR_EV_SERVER_TURN_COMPLETE:     /* question finished; still waiting*/
+            o = noop(s);
+            push(&o.cmds, mk_arm_ka(JR_ASK_DEADLINE_MS));
+            break;
+
+        case JR_EV_SERVER_INTERRUPTED:
+            o = noop(s);
+            push(&o.cmds, mk(JR_CMD_FLUSH_PLAYBACK_RING));
+            push(&o.cmds, mk(JR_CMD_MUTE_DAC_NOW));
+            break;
+
+        case JR_EV_HEARTBEAT:
+            o = noop(s);
+            push(&o.cmds, mk_arm_ka(JR_ASK_DEADLINE_MS)); /* NOT the 45 s one   */
+            break;
+
+        case JR_EV_SERVER_TOOL_CALL:         /* an unrelated tool, mid-ask      */
+            o = noop(s);
+            if (e.is_cancellation) {
+                push(&o.cmds, mk_cancel_tool(&e));
+            } else {
+                push(&o.cmds, mk_dispatch(&e, s.session_gen));
+            }
+            break;
+
+        case JR_EV_TOOL_RESULT_READY:
+            o = noop(s);
+            if (!jr_session_gen_is_stale(s.session_gen, e.session_gen)) {
+                push(&o.cmds, mk_tool_response(&e));
+            }
+            break;
+
+        case JR_EV_ASK_OPENED:               /* the model re-asked — re-arm the
+                                              * whole ask around the NEW call   */
+            o = enter_asking(s, &e);
+            break;
+
+        case JR_EV_TAP:                      /* a tap that missed every arc     */
+        case JR_EV_USER_START:
+            o = noop(s);
+            push(&o.cmds, mk_represent_choices(&s));  /* redraw; idempotent     */
+            break;
+
+        case JR_EV_USER_STOP:                /* drains exactly like Listening   */
+            o = noop(s);
+            push(&o.cmds, mk_choice_result(&s, JR_CHOICE_NONE, NULL));
+            close_manual_activity(&s, &o.cmds);  /* the leak Listening never had */
+            push(&o.cmds, mk(JR_CMD_DISMISS_CHOICES));
+            push(&o.cmds, mk(JR_CMD_DISARM_ASK_TIMER));
+            push(&o.cmds, mk_close(true));
+            push(&o.cmds, mk(JR_CMD_PAUSE_CAPTURE));
+            push(&o.cmds, mk_arm_ka(JR_DRAIN_DEADLINE_MS));
+            s.ask_call_id = 0;
+            s.ask_call_id_text = NULL;
+            s.ask_tool_name = NULL;
+            s.ask_tool_args = NULL;
+            s.phase = JR_ST_DRAINING;
+            o.next = s;
+            break;
+
+        case JR_EV_CAPTURE_PAUSE_ELAPSED:    /* late fire; disarmed on entry    */
+            o = noop(s);                     /* inert — do NOT re-arm           */
+            break;
+
+        default:
             o = illegal_drop(s, ev);
             break;
         }
@@ -753,7 +1071,11 @@ bool jr_state_is_live(jr_state_t state)
 {
     return state == JR_ST_LISTENING ||
            state == JR_ST_THINKING ||
-           state == JR_ST_SPEAKING;
+           state == JR_ST_SPEAKING ||
+           /* Asking is a Live substate: socket up, mic hot, DAC available.
+            * jr_orch_is_talking_capable() and jr_orch_is_zombie() both depend
+            * on this — Asking arms the keepalive, so it is never a zombie. */
+           state == JR_ST_ASKING;
 }
 
 const char *jr_state_name(jr_state_t state)
@@ -765,6 +1087,7 @@ const char *jr_state_name(jr_state_t state)
     case JR_ST_LISTENING:    return "Listening";
     case JR_ST_THINKING:     return "Thinking";
     case JR_ST_SPEAKING:     return "Speaking";
+    case JR_ST_ASKING:       return "Asking";
     case JR_ST_DRAINING:     return "Draining";
     case JR_ST_RECONNECTING: return "Reconnecting";
     case JR_ST_BACKOFF:      return "Backoff";
@@ -798,6 +1121,9 @@ const char *jr_event_name(jr_event_kind_t event)
     case JR_EV_USER_START:           return "UserStart";
     case JR_EV_USER_STOP:            return "UserStop";
     case JR_EV_TAP:                  return "Tap";
+    case JR_EV_ASK_OPENED:           return "AskOpened";
+    case JR_EV_CHOICE_PICKED:        return "ChoicePicked";
+    case JR_EV_ASK_TIMEOUT:          return "AskTimeout";
     default:                         return "?";
     }
 }
@@ -832,6 +1158,11 @@ const char *jr_cmd_name(jr_cmd_kind_t cmd)
     case JR_CMD_CANCEL_TOOL_CALL:         return "CancelToolCall";
     case JR_CMD_PUBLISH_SNAPSHOT:         return "PublishSnapshot";
     case JR_CMD_EMIT_DIAG:                return "EmitDiag";
+    case JR_CMD_PRESENT_CHOICES:          return "PresentChoices";
+    case JR_CMD_DISMISS_CHOICES:          return "DismissChoices";
+    case JR_CMD_SEND_CHOICE_RESULT:       return "SendChoiceResult";
+    case JR_CMD_ARM_ASK_TIMER:            return "ArmAskTimer";
+    case JR_CMD_DISARM_ASK_TIMER:         return "DisarmAskTimer";
     default:                              return "?";
     }
 }

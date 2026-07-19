@@ -21,6 +21,7 @@
 #include "jr_core/turn_policy.h"
 #include "jr_core/monitors.h"
 #include "jr_core/snapshot.h"
+#include "jr_core/orchestrator.h"
 #include "jr_dsp/dsp.h"
 #include "fake_clock.h"
 #include <math.h>
@@ -1172,6 +1173,563 @@ static void test_snapshot_illegal_and_ring_bound(void)
     TEST_ASSERT_TRUE(snap.transitions >= (uint32_t)(JR_SNAP_RING + 3));
 }
 
+/* ===================================================================== *
+ *  §4.11 Live.Asking — tap-to-answer choice arcs (STATE-05/06)          *
+ * ===================================================================== */
+
+/* Build the ask_user tool call that opens the arcs. */
+static jr_event_t ask_opened_event(void)
+{
+    jr_event_t e = jr_event(JR_EV_ASK_OPENED);
+    e.call_id = 7;
+    e.call_id_text = "call-7";
+    e.tool_name = "ask_user";
+    e.tool_args = "{\"question\":\"Which one?\",\"choices\":[\"A\",\"B\",\"C\"]}";
+    return e;
+}
+static jr_session_t asking_session(void)
+{
+    return step(sess_at(JR_ST_LISTENING), ask_opened_event()).next;
+}
+
+/* Listening + AskOpened -> Asking, arcs presented, and the whole timer
+ * choreography in one shot. */
+static void test_ask_opened_enters_asking(void)
+{
+    jr_outcome_t r = step(sess_at(JR_ST_LISTENING), ask_opened_event());
+
+    TEST_ASSERT_EQUAL_INT(JR_ST_ASKING, r.next.phase);
+    TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_PRESENT_CHOICES));
+
+    /* the arcs must carry the tool call through to L6 verbatim */
+    const jr_command_t *p = find_cmd(&r.cmds, JR_CMD_PRESENT_CHOICES);
+    TEST_ASSERT_EQUAL_STRING("call-7", p->call_id_text);
+    TEST_ASSERT_EQUAL_STRING("ask_user", p->tool_name);
+    TEST_ASSERT_NOT_NULL(p->tool_args);
+
+    /* the no-reply watchdog is DISARMED on entry and is NOT re-armed */
+    TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_DISARM_NO_REPLY_WATCHDOG));
+    TEST_ASSERT_FALSE(has_cmd(&r.cmds, JR_CMD_ARM_NO_REPLY_WATCHDOG));
+
+    /* a separate, human-scale timer is armed instead */
+    const jr_command_t *t = find_cmd(&r.cmds, JR_CMD_ARM_ASK_TIMER);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_EQUAL_UINT32(JR_ASK_TIMEOUT_MS, t->timeout_ms);
+
+    /* and the keepalive is stretched past it, or StaleDeadline kills the ask */
+    const jr_command_t *k = find_cmd(&r.cmds, JR_CMD_ARM_KEEPALIVE);
+    TEST_ASSERT_NOT_NULL(k);
+    TEST_ASSERT_EQUAL_UINT32(JR_ASK_DEADLINE_MS, k->deadline_ms);
+    TEST_ASSERT_TRUE(k->deadline_ms > t->timeout_ms);
+
+    /* the pending call is remembered for the abandon paths */
+    TEST_ASSERT_EQUAL_UINT32(7, r.next.ask_call_id);
+    TEST_ASSERT_EQUAL_STRING("call-7", r.next.ask_call_id_text);
+
+    /* Thinking and Speaking can open an ask too (the realistic emitters). */
+    TEST_ASSERT_EQUAL_INT(JR_ST_ASKING,
+        step(sess_at(JR_ST_THINKING), ask_opened_event()).next.phase);
+    TEST_ASSERT_EQUAL_INT(JR_ST_ASKING,
+        step(sess_at(JR_ST_SPEAKING), ask_opened_event()).next.phase);
+}
+
+/* A tapped arc answers the model and leaves Asking. */
+static void test_choice_picked_sends_result_and_leaves(void)
+{
+    jr_event_t pick = jr_event(JR_EV_CHOICE_PICKED);
+    pick.choice_index = 1;
+    pick.choice_text = "B";
+
+    jr_outcome_t r = step(asking_session(), pick);
+
+    TEST_ASSERT_NOT_EQUAL(JR_ST_ASKING, r.next.phase);
+    TEST_ASSERT_EQUAL_INT(JR_ST_THINKING, r.next.phase);
+
+    const jr_command_t *c = find_cmd(&r.cmds, JR_CMD_SEND_CHOICE_RESULT);
+    TEST_ASSERT_NOT_NULL(c);
+    TEST_ASSERT_EQUAL_UINT8(1, c->choice_index);
+    TEST_ASSERT_EQUAL_STRING("B", c->choice_text);
+    TEST_ASSERT_EQUAL_STRING("call-7", c->call_id_text); /* correlates the call */
+
+    /* the ask timer dies, the normal Live keepalive + watchdog come back */
+    TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_DISARM_ASK_TIMER));
+    const jr_command_t *k = find_cmd(&r.cmds, JR_CMD_ARM_KEEPALIVE);
+    TEST_ASSERT_EQUAL_UINT32(JR_LIVE_DEADLINE_MS, k->deadline_ms);
+    const jr_command_t *w = find_cmd(&r.cmds, JR_CMD_ARM_NO_REPLY_WATCHDOG);
+    TEST_ASSERT_NOT_NULL(w);
+    TEST_ASSERT_EQUAL_UINT32(JR_NOREPLY_MS, w->timeout_ms);
+
+    /* the pending ask is forgotten */
+    TEST_ASSERT_EQUAL_UINT32(0, r.next.ask_call_id);
+    TEST_ASSERT_NULL(r.next.ask_call_id_text);
+}
+
+/* THE IMPORTANT ONE — a human who deliberates for 21 s keeps their session.
+ *
+ * JR_NOREPLY_MS is 20000. If Asking reused the no-reply watchdog, the arcs
+ * would be torn off the screen and the session torn down one second into the
+ * 21st. Two independent guarantees are asserted:
+ *   1. the watchdog is never armed while Asking, and JR_ASK_TIMEOUT_MS is far
+ *      past 21 s, so nothing CAN fire at t=21 s;
+ *   2. even a stray NoReplyTimeout delivered anyway (a late fire from before
+ *      entry) is inert — no phase change, no teardown, no DEATH.
+ * And the ask timeout DOES eventually abandon, gracefully. */
+static void test_asking_survives_21_second_deliberation(void)
+{
+    jr_session_t s = asking_session();
+
+    /* (1) nothing armed in Asking can fire inside 21 s. */
+    TEST_ASSERT_TRUE(JR_ASK_TIMEOUT_MS > 21000u);
+    TEST_ASSERT_TRUE(JR_ASK_DEADLINE_MS > 21000u);
+
+    /* the human stares at the arcs for 21 seconds */
+    fake_clock_advance(21000);
+
+    /* (2) a stray no-reply fire is INERT — the session survives it. */
+    jr_outcome_t stray = step(s, jr_event(JR_EV_NO_REPLY_TIMEOUT));
+    TEST_ASSERT_EQUAL_INT(JR_ST_ASKING, stray.next.phase);      /* still asking */
+    TEST_ASSERT_NOT_EQUAL(JR_ST_RECONNECTING, stray.next.phase);
+    TEST_ASSERT_NOT_EQUAL(JR_ST_IDLE, stray.next.phase);
+    TEST_ASSERT_FALSE(has_cmd(&stray.cmds, JR_CMD_CLOSE_TRANSPORT)); /* no teardown */
+    TEST_ASSERT_FALSE(has_cmd(&stray.cmds, JR_CMD_SCHEDULE_BACKOFF));
+    TEST_ASSERT_EQUAL_UINT16(0, stray.next.fail_count);         /* not a death  */
+    s = stray.next;
+
+    /* the arcs are still live: a late tap at t=21s still answers the model */
+    jr_event_t pick = jr_event(JR_EV_CHOICE_PICKED);
+    pick.choice_index = 2;
+    pick.choice_text = "C";
+    jr_outcome_t late = step(s, pick);
+    TEST_ASSERT_EQUAL_INT(JR_ST_THINKING, late.next.phase);
+    TEST_ASSERT_TRUE(has_cmd(&late.cmds, JR_CMD_SEND_CHOICE_RESULT));
+
+    /* ...but the ask timer eventually DOES abandon, gracefully: back to
+     * Listening, mic re-opened, and a "no answer" result so the model is not
+     * left blocked on a tool call nobody will ever answer. */
+    jr_outcome_t giveup = step(s, jr_event(JR_EV_ASK_TIMEOUT));
+    TEST_ASSERT_EQUAL_INT(JR_ST_LISTENING, giveup.next.phase);
+    const jr_command_t *c = find_cmd(&giveup.cmds, JR_CMD_SEND_CHOICE_RESULT);
+    TEST_ASSERT_NOT_NULL(c);
+    TEST_ASSERT_EQUAL_UINT8(JR_CHOICE_NONE, c->choice_index);
+    TEST_ASSERT_NULL(c->choice_text);
+    TEST_ASSERT_TRUE(has_cmd(&giveup.cmds, JR_CMD_DISARM_ASK_TIMER));
+    TEST_ASSERT_TRUE(has_cmd(&giveup.cmds, JR_CMD_START_CAPTURE));
+    /* abandoning is NOT a death and NOT a park */
+    TEST_ASSERT_FALSE(has_cmd(&giveup.cmds, JR_CMD_SCHEDULE_BACKOFF));
+    TEST_ASSERT_EQUAL_UINT16(0, giveup.next.fail_count);
+    /* Listening treats NoReplyTimeout as illegal, so it must NOT be re-armed
+     * on this exit. */
+    TEST_ASSERT_FALSE(has_cmd(&giveup.cmds, JR_CMD_ARM_NO_REPLY_WATCHDOG));
+}
+
+/* UserStop during Asking drains cleanly, like every other Live substate — and
+ * still closes the tool call on the way out. */
+static void test_asking_user_stop_drains(void)
+{
+    jr_outcome_t r = step(asking_session(), jr_event(JR_EV_USER_STOP));
+
+    TEST_ASSERT_EQUAL_INT(JR_ST_DRAINING, r.next.phase);
+    TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_CLOSE_TRANSPORT));
+    TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_PAUSE_CAPTURE));
+    TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_DISARM_ASK_TIMER));
+    TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_SEND_CHOICE_RESULT));
+    const jr_command_t *k = find_cmd(&r.cmds, JR_CMD_ARM_KEEPALIVE);
+    TEST_ASSERT_EQUAL_UINT32(JR_DRAIN_DEADLINE_MS, k->deadline_ms);
+
+    /* and the drain reaches Idle exactly like the other paths */
+    TEST_ASSERT_EQUAL_INT(JR_ST_IDLE,
+        step(r.next, jr_event(JR_EV_TRANSPORT_CLOSED)).next.phase);
+}
+
+/* Session death under the arcs must never strand the machine in Asking: every
+ * death event routes through the shared §4.0 handler like any Live substate. */
+static void test_asking_death_does_not_strand(void)
+{
+    const jr_event_kind_t deaths[] = {
+        JR_EV_TRANSPORT_CLOSED, JR_EV_SERVER_ERROR, JR_EV_STALE_DEADLINE,
+        JR_EV_UPLINK_DEAD,      JR_EV_SERVER_GO_AWAY,
+    };
+    for (size_t i = 0; i < sizeof deaths / sizeof deaths[0]; ++i) {
+        jr_event_t e = jr_event(deaths[i]);
+        /* NB: a zeroed error_kind is JR_ERRK_QUOTA (== 0), which PARKS. Ask for
+         * the ordinary transient death here; the quota park is asserted below. */
+        e.error_kind = JR_ERRK_TRANSIENT;
+        jr_outcome_t r = step(asking_session(), e);
+        TEST_ASSERT_NOT_EQUAL(JR_ST_ASKING, r.next.phase);
+        TEST_ASSERT_EQUAL_INT(JR_ST_RECONNECTING, r.next.phase);
+        TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_CLOSE_TRANSPORT));
+        TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_SCHEDULE_BACKOFF));
+        /* the ask timer must die with the session, or it fires into the next one */
+        TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_DISARM_ASK_TIMER));
+        TEST_ASSERT_EQUAL_UINT32(0, r.next.ask_call_id);
+        TEST_ASSERT_NULL(r.next.ask_call_id_text);
+        /* the death fan-out still fits the bounded command list */
+        TEST_ASSERT_TRUE(r.cmds.count <= JR_MAX_CMDS);
+    }
+
+    /* A quota error under the arcs parks instead, but still leaves Asking. */
+    jr_event_t quota = jr_event(JR_EV_SERVER_ERROR);
+    quota.error_kind = JR_ERRK_QUOTA;
+    jr_outcome_t q = step(asking_session(), quota);
+    TEST_ASSERT_EQUAL_INT(JR_ST_BACKOFF, q.next.phase);
+}
+
+/* Asking is a Live substate and can never be mistaken for a zombie: it always
+ * leaves an armed keepalive behind, and a stray tap just redraws the arcs. */
+static void test_asking_is_live_and_taps_represent(void)
+{
+    TEST_ASSERT_TRUE(jr_state_is_live(JR_ST_ASKING));
+    TEST_ASSERT_EQUAL_STRING("Asking", jr_state_name(JR_ST_ASKING));
+    TEST_ASSERT_EQUAL_STRING("AskOpened", jr_event_name(JR_EV_ASK_OPENED));
+    TEST_ASSERT_EQUAL_STRING("PresentChoices", jr_cmd_name(JR_CMD_PRESENT_CHOICES));
+
+    /* a tap that hit no arc re-presents rather than falling through */
+    jr_outcome_t tap = step(asking_session(), jr_event(JR_EV_TAP));
+    TEST_ASSERT_EQUAL_INT(JR_ST_ASKING, tap.next.phase);
+    TEST_ASSERT_TRUE(has_cmd(&tap.cmds, JR_CMD_PRESENT_CHOICES));
+    TEST_ASSERT_FALSE(tap.illegal);
+
+    /* the model may speak the question while the arcs are up — audio flows and
+     * the state holds */
+    jr_outcome_t chunk = step(asking_session(), jr_event(JR_EV_SERVER_AUDIO_CHUNK));
+    TEST_ASSERT_EQUAL_INT(JR_ST_ASKING, chunk.next.phase);
+    TEST_ASSERT_TRUE(has_cmd(&chunk.cmds, JR_CMD_FEED_PLAYBACK));
+
+    /* every heartbeat keeps the stretched deadline, never the 45 s one */
+    jr_outcome_t hb = step(asking_session(), jr_event(JR_EV_HEARTBEAT));
+    const jr_command_t *k = find_cmd(&hb.cmds, JR_CMD_ARM_KEEPALIVE);
+    TEST_ASSERT_EQUAL_UINT32(JR_ASK_DEADLINE_MS, k->deadline_ms);
+
+    /* answering out loud instead of tapping still closes the tool call */
+    jr_outcome_t spoke = step(asking_session(), jr_event(JR_EV_SPEECH_ENDED));
+    TEST_ASSERT_EQUAL_INT(JR_ST_THINKING, spoke.next.phase);
+    TEST_ASSERT_TRUE(has_cmd(&spoke.cmds, JR_CMD_SEND_CHOICE_RESULT));
+    TEST_ASSERT_TRUE(has_cmd(&spoke.cmds, JR_CMD_SEND_ACTIVITY_END)); /* manual VAD */
+}
+
+/* ===================================================================== *
+ *  ARC REVIEW REGRESSIONS — one test per defect the adversarial review   *
+ *  found in the tap-to-answer choice-arc work. Each is written so that   *
+ *  it FAILS against the pre-fix code.                                    *
+ * ===================================================================== */
+
+/* has_cmd() on an outcome returned by value (C forbids taking its address). */
+static int out_has(jr_outcome_t o, jr_cmd_kind_t c)
+{
+    return has_cmd(&o.cmds, c);
+}
+
+/* --- BLOCKER 1: the ask timer had no implementation ------------------- *
+ *
+ * ArmAskTimer/DisarmAskTimer fell through orch_exec_cmds' default and were
+ * forwarded to the I/O port, where the device's exec() swallowed them. Nothing
+ * produced JR_EV_ASK_TIMEOUT, so Asking was terminal in practice. The claimed
+ * fallback ("the JR_ASK_DEADLINE_MS keepalive fires StaleDeadline") only holds
+ * on a SILENT wire — a server that pings re-arms the keepalive forever.
+ *
+ * This test runs the real pump against a PINGING server and asserts the machine
+ * leaves Asking anyway. Pre-fix it sits in Asking until the harness gives up. */
+
+/* A minimal orchestrator I/O port: no inbound events, commands recorded. */
+typedef struct {
+    uint32_t cmd_count[JR_CMD__COUNT];
+    uint32_t total;
+} arc_io_log_t;
+
+static void arc_io_exec(void *ctx, const jr_command_t *cmd)
+{
+    arc_io_log_t *log = (arc_io_log_t *)ctx;
+    if (cmd->kind >= 0 && cmd->kind < JR_CMD__COUNT) {
+        log->cmd_count[cmd->kind]++;
+    }
+    log->total++;
+}
+static bool arc_io_poll_none(void *ctx, jr_event_t *out)
+{
+    (void)ctx; (void)out;
+    return false;   /* the pump drives everything through jr_orch_inject here */
+}
+
+static uint64_t arc_now(void)
+{
+    jr_clock_t c = fake_clock_make();
+    return jr_clock_now_ms(&c);
+}
+
+/* Drive a fresh orchestrator all the way to Live.Asking. */
+static void arc_orch_to_asking(jr_orch_t *app, arc_io_log_t *log)
+{
+    memset(log, 0, sizeof *log);
+    jr_orch_io_t io = { .ctx = log,
+                        .poll_inbound = arc_io_poll_none,
+                        .exec = arc_io_exec };
+    jr_orch_init(app, fake_clock_make(), io, JR_VAD_MANUAL_LOCAL_RMS);
+
+    jr_orch_inject(app, jr_event(JR_EV_USER_START),     arc_now());
+    jr_orch_inject(app, jr_event(JR_EV_CONNECTED),      arc_now());
+    jr_orch_inject(app, jr_event(JR_EV_SETUP_COMPLETE), arc_now());
+    TEST_ASSERT_EQUAL_INT(JR_ST_LISTENING, jr_orch_phase(app));
+
+    jr_orch_inject(app, ask_opened_event(), arc_now());
+    TEST_ASSERT_EQUAL_INT(JR_ST_ASKING, jr_orch_phase(app));
+}
+
+static void test_arc_ask_timer_bounds_asking_against_a_pinging_server(void)
+{
+    jr_orch_t app;
+    arc_io_log_t log;
+    arc_orch_to_asking(&app, &log);
+
+    /* The command is OWNED: it must have armed the pump's timer and must NOT
+     * have leaked out to the I/O port (where main.c's exec swallows it). */
+    TEST_ASSERT_TRUE(app.ask_timer.armed);
+    TEST_ASSERT_EQUAL_UINT32(JR_ASK_TIMEOUT_MS, app.ask_timer.timeout_ms);
+    TEST_ASSERT_EQUAL_UINT32(0, log.cmd_count[JR_CMD_ARM_ASK_TIMER]);
+
+    /* Now the adversarial part: a server that pings every 10 s. Each ping is a
+     * JR_EV_HEARTBEAT, which re-arms the keepalive at JR_ASK_DEADLINE_MS — so
+     * the keepalive NEVER expires and can never rescue us. Walk past the ask
+     * timeout in 10 s ticks. */
+    const uint64_t ping_ms = 10000;
+    uint64_t elapsed = 0;
+    while (elapsed < JR_ASK_TIMEOUT_MS + ping_ms &&
+           jr_orch_phase(&app) == JR_ST_ASKING) {
+        fake_clock_advance(ping_ms);
+        elapsed += ping_ms;
+        jr_orch_inject(&app, jr_event(JR_EV_HEARTBEAT), arc_now()); /* the ping */
+        jr_orch_step(&app, arc_now());
+    }
+
+    /* THE assertion: the ask timer fired and the machine left Asking. */
+    TEST_ASSERT_EQUAL_INT(JR_ST_LISTENING, jr_orch_phase(&app));
+    TEST_ASSERT_FALSE(app.ask_timer.armed);
+
+    /* It left GRACEFULLY, not through DEATH: the keepalive never expired. */
+    TEST_ASSERT_EQUAL_UINT32(0, log.cmd_count[JR_CMD_SCHEDULE_BACKOFF]);
+    TEST_ASSERT_EQUAL_UINT16(0, app.session.fail_count);
+
+    /* ...and it did the right things on the way out. */
+    TEST_ASSERT_TRUE(log.cmd_count[JR_CMD_SEND_CHOICE_RESULT] >= 1);
+    TEST_ASSERT_TRUE(log.cmd_count[JR_CMD_DISMISS_CHOICES] >= 1);
+    TEST_ASSERT_TRUE(log.cmd_count[JR_CMD_START_CAPTURE] >= 1);
+
+    /* It must have taken roughly the ask timeout, not the keepalive deadline. */
+    TEST_ASSERT_TRUE(elapsed >= JR_ASK_TIMEOUT_MS);
+    TEST_ASSERT_TRUE(elapsed <= JR_ASK_TIMEOUT_MS + ping_ms);
+}
+
+/* And the timer must not fire early, nor be left armed after any exit — a timer
+ * that survives into the next session addresses a dead tool call. */
+static void test_arc_ask_timer_disarms_on_exit_and_never_fires_early(void)
+{
+    jr_orch_t app;
+    arc_io_log_t log;
+    arc_orch_to_asking(&app, &log);
+
+    /* one millisecond short of the deadline: still Asking */
+    fake_clock_advance(JR_ASK_TIMEOUT_MS);
+    jr_orch_step(&app, arc_now());
+    TEST_ASSERT_EQUAL_INT(JR_ST_ASKING, jr_orch_phase(&app));  /* strict > */
+
+    /* a tap answers it; the timer must be disarmed by the transition */
+    jr_event_t pick = jr_event(JR_EV_CHOICE_PICKED);
+    pick.choice_index = 0;
+    pick.choice_text = "A";
+    jr_orch_inject(&app, pick, arc_now());
+    TEST_ASSERT_EQUAL_INT(JR_ST_THINKING, jr_orch_phase(&app));
+    TEST_ASSERT_FALSE(app.ask_timer.armed);
+
+    /* ...so walking far past the old deadline produces no stray AskTimeout */
+    fake_clock_advance(JR_ASK_TIMEOUT_MS * 4);
+    jr_orch_step(&app, arc_now());
+    TEST_ASSERT_NOT_EQUAL(JR_ST_ASKING, jr_orch_phase(&app));
+
+    /* the same for the DEATH path: the ask must not outlive the session */
+    arc_orch_to_asking(&app, &log);
+    jr_event_t die = jr_event(JR_EV_TRANSPORT_CLOSED);
+    jr_orch_inject(&app, die, arc_now());
+    TEST_ASSERT_EQUAL_INT(JR_ST_RECONNECTING, jr_orch_phase(&app));
+    TEST_ASSERT_FALSE(app.ask_timer.armed);
+    TEST_ASSERT_TRUE(log.cmd_count[JR_CMD_DISMISS_CHOICES] >= 1);
+}
+
+/* Asking must never look healthy to the zombie detector purely because the
+ * keepalive is armed — and with the timer implemented it never sits there. */
+static void test_arc_asking_is_bounded_not_a_zombie(void)
+{
+    jr_orch_t app;
+    arc_io_log_t log;
+    arc_orch_to_asking(&app, &log);
+
+    TEST_ASSERT_FALSE(jr_orch_is_zombie(&app));
+    TEST_ASSERT_TRUE(app.ask_timer.armed);   /* the deadline that bounds it */
+}
+
+/* --- BLOCKER 2: the manual-VAD activity window leaked on exit ---------- *
+ *
+ * SpeechStarted in Asking opens an activity window (manual/PTT mode). Pre-fix,
+ * CHOICE_PICKED / ASK_TIMEOUT / USER_STOP all left Asking without ever sending
+ * the matching activityEnd, so the model sat waiting on a turn that never
+ * ended. Each exit is checked both ways: closed when open, silent when not. */
+static void test_arc_manual_activity_closed_on_every_asking_exit(void)
+{
+    /* the user starts talking while deciding, then taps an arc instead */
+    jr_session_t talking =
+        step(asking_session(), jr_event(JR_EV_SPEECH_STARTED)).next;
+    TEST_ASSERT_TRUE(talking.manual_activity_open);
+
+    jr_event_t pick = jr_event(JR_EV_CHOICE_PICKED);
+    pick.choice_index = 0;
+    pick.choice_text = "A";
+    jr_outcome_t picked = step(talking, pick);
+    TEST_ASSERT_TRUE(has_cmd(&picked.cmds, JR_CMD_SEND_ACTIVITY_END));
+    TEST_ASSERT_FALSE(picked.next.manual_activity_open);
+
+    /* ...or gives up and lets it time out */
+    jr_outcome_t timedout = step(talking, jr_event(JR_EV_ASK_TIMEOUT));
+    TEST_ASSERT_TRUE(has_cmd(&timedout.cmds, JR_CMD_SEND_ACTIVITY_END));
+    TEST_ASSERT_FALSE(timedout.next.manual_activity_open);
+
+    /* ...or stops the session outright */
+    jr_outcome_t stopped = step(talking, jr_event(JR_EV_USER_STOP));
+    TEST_ASSERT_TRUE(has_cmd(&stopped.cmds, JR_CMD_SEND_ACTIVITY_END));
+    TEST_ASSERT_FALSE(stopped.next.manual_activity_open);
+
+    /* The mirror image: no SpeechStarted means NO window is open, and a bare
+     * activityEnd with no matching activityStart is itself a protocol error. */
+    jr_session_t silent = asking_session();
+    TEST_ASSERT_FALSE(silent.manual_activity_open);
+    TEST_ASSERT_FALSE(out_has(step(silent, pick), JR_CMD_SEND_ACTIVITY_END));
+    TEST_ASSERT_FALSE(out_has(step(silent, jr_event(JR_EV_ASK_TIMEOUT)),
+                              JR_CMD_SEND_ACTIVITY_END));
+    TEST_ASSERT_FALSE(out_has(step(silent, jr_event(JR_EV_USER_STOP)),
+                              JR_CMD_SEND_ACTIVITY_END));
+
+    /* And auto-VAD never sends activity frames at all. */
+    jr_session_t auto_ask = step(sess_at_auto(JR_ST_LISTENING),
+                                 ask_opened_event()).next;
+    auto_ask = step(auto_ask, jr_event(JR_EV_SPEECH_STARTED)).next;
+    TEST_ASSERT_FALSE(auto_ask.manual_activity_open);
+    TEST_ASSERT_FALSE(out_has(step(auto_ask, pick), JR_CMD_SEND_ACTIVITY_END));
+}
+
+/* --- MAJOR: re-ask abandoned the previous call unanswered -------------- *
+ *
+ * AskOpened while already Asking overwrote ask_call_id without answering the
+ * outgoing call, so the model stayed blocked on the first ask_user functionCall
+ * forever. The old call must be answered BEFORE the new one is adopted. */
+static void test_arc_reask_answers_the_outgoing_call(void)
+{
+    jr_session_t s = asking_session();          /* call-7 is open */
+    TEST_ASSERT_EQUAL_UINT32(7, s.ask_call_id);
+
+    jr_event_t second = jr_event(JR_EV_ASK_OPENED);
+    second.call_id = 9;
+    second.call_id_text = "call-9";
+    second.tool_name = "ask_user";
+    second.tool_args = "{\"question\":\"Actually?\",\"choices\":[\"X\",\"Y\"]}";
+
+    jr_outcome_t r = step(s, second);
+
+    /* the OUTGOING call is answered "no answer" so the model unblocks */
+    const jr_command_t *c = find_cmd(&r.cmds, JR_CMD_SEND_CHOICE_RESULT);
+    TEST_ASSERT_NOT_NULL(c);
+    TEST_ASSERT_EQUAL_UINT32(7, c->call_id);
+    TEST_ASSERT_EQUAL_STRING("call-7", c->call_id_text);
+    TEST_ASSERT_EQUAL_UINT8(JR_CHOICE_NONE, c->choice_index);
+    TEST_ASSERT_NULL(c->choice_text);
+
+    /* ...and only then is the NEW one adopted and presented */
+    TEST_ASSERT_EQUAL_INT(JR_ST_ASKING, r.next.phase);
+    TEST_ASSERT_EQUAL_UINT32(9, r.next.ask_call_id);
+    TEST_ASSERT_EQUAL_STRING("call-9", r.next.ask_call_id_text);
+    const jr_command_t *p = find_cmd(&r.cmds, JR_CMD_PRESENT_CHOICES);
+    TEST_ASSERT_NOT_NULL(p);
+    TEST_ASSERT_EQUAL_STRING("call-9", p->call_id_text);
+
+    /* the answer must precede the new arcs in the ordered list */
+    size_t i_result = (size_t)(c - r.cmds.cmds);
+    size_t i_present = (size_t)(p - r.cmds.cmds);
+    TEST_ASSERT_TRUE(i_result < i_present);
+
+    /* A FIRST entry (not a re-ask) must not emit a spurious choice result. */
+    TEST_ASSERT_FALSE(out_has(step(sess_at(JR_ST_THINKING), ask_opened_event()),
+                              JR_CMD_SEND_CHOICE_RESULT));
+    TEST_ASSERT_TRUE(r.cmds.count <= JR_MAX_CMDS);
+}
+
+/* --- MAJOR: re-present handed L6 a payload with no question or labels -- *
+ *
+ * mk_represent_choices() set only the ids, and mk() zeroes the command, so
+ * tool_name/tool_args came out NULL. A tap that missed every arc therefore
+ * re-presented nothing to render (or NULL-dereffed in the L6 parser). */
+static void test_arc_represent_carries_the_full_payload(void)
+{
+    jr_outcome_t tap = step(asking_session(), jr_event(JR_EV_TAP));
+    const jr_command_t *p = find_cmd(&tap.cmds, JR_CMD_PRESENT_CHOICES);
+    TEST_ASSERT_NOT_NULL(p);
+
+    /* the ids alone are not enough — the question and the labels must ride */
+    TEST_ASSERT_EQUAL_STRING("call-7", p->call_id_text);
+    TEST_ASSERT_NOT_NULL(p->tool_name);
+    TEST_ASSERT_EQUAL_STRING("ask_user", p->tool_name);
+    TEST_ASSERT_NOT_NULL(p->tool_args);
+
+    /* byte-for-byte the payload the original PresentChoices carried */
+    jr_outcome_t entry = step(sess_at(JR_ST_LISTENING), ask_opened_event());
+    const jr_command_t *first = find_cmd(&entry.cmds, JR_CMD_PRESENT_CHOICES);
+    TEST_ASSERT_EQUAL_STRING(first->tool_args, p->tool_args);
+
+    /* UserStart re-presents identically */
+    jr_outcome_t us = step(asking_session(), jr_event(JR_EV_USER_START));
+    TEST_ASSERT_NOT_NULL(find_cmd(&us.cmds, JR_CMD_PRESENT_CHOICES)->tool_args);
+}
+
+/* --- MINOR: nothing tore the arcs down -------------------------------- *
+ *
+ * PresentChoices had no counterpart, so on every exit the last arc-related
+ * instruction L6 ever saw was "draw three arcs". Teardown is now explicit on
+ * ALL FIVE exits, death included. */
+static void test_arc_every_exit_dismisses_the_arcs(void)
+{
+    jr_event_t pick = jr_event(JR_EV_CHOICE_PICKED);
+    pick.choice_index = 1;
+    pick.choice_text = "B";
+
+    TEST_ASSERT_TRUE(out_has(step(asking_session(), pick), JR_CMD_DISMISS_CHOICES));
+    TEST_ASSERT_TRUE(out_has(step(asking_session(), jr_event(JR_EV_ASK_TIMEOUT)),
+                             JR_CMD_DISMISS_CHOICES));
+    TEST_ASSERT_TRUE(out_has(step(asking_session(), jr_event(JR_EV_SPEECH_ENDED)),
+                             JR_CMD_DISMISS_CHOICES));
+    TEST_ASSERT_TRUE(out_has(step(asking_session(), jr_event(JR_EV_USER_STOP)),
+                             JR_CMD_DISMISS_CHOICES));
+
+    /* death() too — otherwise dead arcs sit on the glass through Reconnecting */
+    const jr_event_kind_t deaths[] = {
+        JR_EV_TRANSPORT_CLOSED, JR_EV_SERVER_ERROR, JR_EV_STALE_DEADLINE,
+        JR_EV_UPLINK_DEAD,      JR_EV_SERVER_GO_AWAY,
+    };
+    for (size_t i = 0; i < sizeof deaths / sizeof deaths[0]; ++i) {
+        jr_event_t e = jr_event(deaths[i]);
+        e.error_kind = JR_ERRK_TRANSIENT;
+        jr_outcome_t r = step(asking_session(), e);
+        TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_DISMISS_CHOICES));
+        /* the fan-out is the worst case in the whole machine — it must FIT.
+         * push() drops silently past the cap, so a full list means the
+         * PublishSnapshot (or worse) was thrown away. */
+        TEST_ASSERT_TRUE(r.cmds.count < JR_MAX_CMDS);
+        TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_PUBLISH_SNAPSHOT));
+    }
+
+    /* a death NOT out of Asking must not emit a spurious dismiss */
+    jr_event_t e = jr_event(JR_EV_TRANSPORT_CLOSED);
+    e.error_kind = JR_ERRK_TRANSIENT;
+    TEST_ASSERT_FALSE(out_has(step(sess_at(JR_ST_SPEAKING), e),
+                              JR_CMD_DISMISS_CHOICES));
+
+    TEST_ASSERT_EQUAL_STRING("DismissChoices", jr_cmd_name(JR_CMD_DISMISS_CHOICES));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1223,6 +1781,23 @@ int main(void)
     RUN_TEST(test_fatal_exits);
     RUN_TEST(test_reconnect_policy_direct);
     RUN_TEST(test_barge_command_contract);
+
+    /* --- §4.11 Live.Asking: tap-to-answer choice arcs (STATE-05/06) --- */
+    RUN_TEST(test_ask_opened_enters_asking);
+    RUN_TEST(test_choice_picked_sends_result_and_leaves);
+    RUN_TEST(test_asking_survives_21_second_deliberation);
+    RUN_TEST(test_asking_user_stop_drains);
+    RUN_TEST(test_asking_death_does_not_strand);
+    RUN_TEST(test_asking_is_live_and_taps_represent);
+
+    /* --- adversarial-review regressions for the choice-arc work --- */
+    RUN_TEST(test_arc_ask_timer_bounds_asking_against_a_pinging_server);
+    RUN_TEST(test_arc_ask_timer_disarms_on_exit_and_never_fires_early);
+    RUN_TEST(test_arc_asking_is_bounded_not_a_zombie);
+    RUN_TEST(test_arc_manual_activity_closed_on_every_asking_exit);
+    RUN_TEST(test_arc_reask_answers_the_outgoing_call);
+    RUN_TEST(test_arc_represent_carries_the_full_payload);
+    RUN_TEST(test_arc_every_exit_dismisses_the_arcs);
 
     /* --- Run 2: §5 resilience monitors (arm/re-arm/fire) --- */
     RUN_TEST(test_keepalive_monitor_arm_rearm_fire);

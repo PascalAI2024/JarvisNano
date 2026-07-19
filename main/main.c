@@ -40,6 +40,7 @@
 
 #include "jr_ports/ports.h"
 #include "jr_display/jr_display.h"
+#include "jr_display/hud_render.h"
 #include "jr_core/session.h"
 #include "jr_core/orchestrator.h"
 #include "jr_core/snapshot.h"
@@ -1244,6 +1245,12 @@ static jr_face_t phase_to_face(jr_state_t p)
     case JR_ST_HANDSHAKING:
     case JR_ST_RECONNECTING: return JR_FACE_THINKING;
     case JR_ST_SPEAKING:  return JR_FACE_SPEAKING;
+    /* Asking keeps the LISTENING face: the device is waiting on the human, and
+     * the choice arcs are drawn over it. Falling through to `default` here sent
+     * the face to IDLE at the exact moment the arcs went up — the switch has a
+     * default, so adding the enumerator produced no compiler warning and the
+     * behaviour changed silently. */
+    case JR_ST_ASKING:    return JR_FACE_LISTENING;
     case JR_ST_BACKOFF:
     case JR_ST_FATAL:     return JR_FACE_ERROR;
     default:              return JR_FACE_IDLE;
@@ -1895,6 +1902,49 @@ static esp_err_t tasks_diag_handler(httpd_req_t *req)
 /* /api/sensors — live IMU + battery telemetry. Both reads are non-blocking
  * snapshot copies (their sampler tasks own the shared I2C bus), so this handler
  * never parks the httpd task on a transaction. Phase 1 acceptance gate. */
+/* POST /api/display/choices?n=3 — present test arcs, or n=0 to dismiss.
+ *
+ * Exists so the choice-arc RENDERING can be proven on glass independently of a
+ * live Gemini ask_user call. The labels are static, so they satisfy the borrow
+ * contract in jr_display.h without any lifetime games. */
+static esp_err_t choices_debug_handler(httpd_req_t *req)
+{
+    static const char *const kLabels[HUD_CHOICE_MAX] = { "Yes", "Later", "Ignore" };
+    int n = 3;
+    if (!query_int(req, "n", &n) || n < 0 || n > HUD_CHOICE_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "n must be 0..3");
+        return ESP_OK;
+    }
+    if (n == 0) {
+        jr_display_dismiss_choices();
+    } else {
+        jr_display_present_choices(kLabels, n);
+    }
+    char body[96];
+    int len = snprintf(body, sizeof body, "{\"choices\":%d,\"active\":%s}",
+                       n, jr_display_choices_active() ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, len);
+    return ESP_OK;
+}
+
+/* GET /api/display/choices/hit?x=..&y=.. — resolve a panel point to an arc.
+ * Lets the hit geometry be checked against the rendered pixels without a finger. */
+static esp_err_t choices_hit_handler(httpd_req_t *req)
+{
+    int x = -1, y = -1;
+    if (!query_int(req, "x", &x) || !query_int(req, "y", &y)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "need x and y");
+        return ESP_OK;
+    }
+    const int idx = jr_display_choice_hit(x, y);
+    char body[96];
+    int len = snprintf(body, sizeof body, "{\"x\":%d,\"y\":%d,\"index\":%d}", x, y, idx);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, len);
+    return ESP_OK;
+}
+
 /* POST /api/display/hud?on=0|1 — A/B the HUD's frame-rate cost on real glass. */
 static esp_err_t hud_toggle_handler(httpd_req_t *req)
 {
@@ -3834,6 +3884,10 @@ static void start_diag_http(void)
           .handler = tasks_diag_handler },
         { .uri = "/api/display/hud", .method = HTTP_POST,
           .handler = hud_toggle_handler },
+        { .uri = "/api/display/choices", .method = HTTP_POST,
+          .handler = choices_debug_handler },
+        { .uri = "/api/display/choices/hit", .method = HTTP_GET,
+          .handler = choices_hit_handler },
         { .uri = "/api/diag/panel-touch", .method = HTTP_POST,
           .handler = panel_touch_control_handler },
         { .uri = "/api/ui/shade", .method = HTTP_POST,
@@ -4331,6 +4385,14 @@ static void voice_task(void *arg)
         jr_state_t capture_phase = jr_orch_phase(&s_app.orch);
         bool phase_allows_capture = capture_phase == JR_ST_LISTENING ||
                                     capture_phase == JR_ST_SPEAKING ||
+                                    /* Asking listens too: enter_asking's contract
+                                     * is that a human may ANSWER OUT LOUD instead
+                                     * of tapping, and session.c handles
+                                     * SPEECH_STARTED in Asking for exactly that.
+                                     * Omitting it here paced the mic off for the
+                                     * whole Asking window and silently broke that
+                                     * contract. */
+                                    capture_phase == JR_ST_ASKING ||
                                     (capture_phase == JR_ST_THINKING &&
                                      s_app.cfg.vad_mode == JR_VAD_SERVER);
         uint32_t audio_diag_until = atomic_load(&s_audio_diag_until_ms);

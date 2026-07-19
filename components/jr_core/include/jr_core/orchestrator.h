@@ -85,6 +85,27 @@ typedef struct {
     uint64_t fire_at;   /* monotonic ms at which BackoffElapsed is emitted */
 } jr_orch_backoff_t;
 
+/* The ASK TIMER — the human-scale deadline behind Live.Asking, realized here
+ * for the same reason the backoff timer is: ArmAskTimer/DisarmAskTimer are
+ * INTERNAL commands the orchestrator OWNS, never external effects. If they were
+ * forwarded to the I/O port instead, nothing in the system would ever produce
+ * JR_EV_ASK_TIMEOUT and Asking would be a terminal state in practice: the arcs
+ * stay up, the no-reply watchdog is disarmed by design, and the keepalive is
+ * re-armed by every server frame — including WS pings — so JR_ASK_DEADLINE_MS
+ * never expires against a pinging server. jr_orch_is_zombie() would also report
+ * healthy, because the keepalive IS armed. This timer is the only thing that
+ * bounds the state.
+ *
+ * Modelled exactly on jr_no_reply_watchdog_t (armed_ts + timeout, fires when the
+ * age strictly exceeds the timeout) so the two behave identically under the
+ * pump. It lives here rather than in monitors.c because it is armed by a command
+ * rather than by traffic — the same shape as jr_orch_backoff_t. */
+typedef struct {
+    bool     armed;
+    uint64_t armed_ts;    /* monotonic ms at which ArmAskTimer was executed   */
+    uint32_t timeout_ms;  /* JR_ASK_TIMEOUT_MS in practice                    */
+} jr_orch_ask_timer_t;
+
 /* ======================================================================== *
  *  The orchestrator — the single-owned composition                        *
  * ======================================================================== *
@@ -104,6 +125,7 @@ typedef struct jr_orch {
     jr_no_reply_watchdog_t     no_reply;      /* Thinking > 20 s                */
     jr_capture_pause_monitor_t capture_pause; /* auto-VAD keepalive             */
     jr_orch_backoff_t          backoff;       /* ScheduleBackoff -> BackoffElapsed */
+    jr_orch_ask_timer_t        ask_timer;     /* ArmAskTimer -> AskTimeout      */
 
     jr_state_snapshot_t        snap;          /* observability fold             */
 
@@ -157,7 +179,11 @@ bool jr_orch_is_resting(const jr_orch_t *app);
  * the system could sit "Live but silent" forever. The self-heal proof asserts it
  * is ALWAYS false — every non-rest state has a deadline that WILL fire and move
  * it. (dead-uplink is a counter, not a deadline, so it does not count as
- * forward-progress here.) */
+ * forward-progress here.)
+ *
+ * The ask timer counts as forward progress: Asking arms the keepalive too, but
+ * the keepalive is re-armed by every inbound frame, so on a chatty/pinging
+ * server the ask timer is the deadline that actually bounds the state. */
 bool jr_orch_is_zombie(const jr_orch_t *app);
 
 #ifdef __cplusplus

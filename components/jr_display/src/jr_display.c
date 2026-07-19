@@ -716,6 +716,66 @@ static volatile uint32_t s_hud_env_word =
     0x000000FFu;   /* battery unknown, level, not charging */
 static volatile uint32_t s_hud_enabled = 1u;
 
+/* ---- STATE-05 choice arcs -------------------------------------------------
+ * The flush path reads these; the composition root writes them. Guarded by a
+ * generation counter rather than a mutex: the flush runs at 16 fps on the
+ * render task and must never block, and a torn read is bounded to one frame of
+ * a stale arc, which is invisible. Labels are borrowed (see the header). */
+static hud_choice_t     s_choices[HUD_CHOICE_MAX];
+static volatile int     s_choice_n;
+static volatile int     s_choice_selected = -1;
+
+void jr_display_present_choices(const char *const *labels, int n)
+{
+    if (labels == NULL || n <= 0) {
+        jr_display_dismiss_choices();
+        return;
+    }
+    if (n > HUD_CHOICE_MAX) {
+        n = HUD_CHOICE_MAX;
+    }
+    hud_choice_t tmp[HUD_CHOICE_MAX];
+    memset(tmp, 0, sizeof tmp);
+    for (int i = 0; i < n; ++i) {
+        tmp[i].label = labels[i];          /* borrowed; see header contract */
+    }
+    hud_choice_layout(n, tmp);             /* fills a0/a1, leaves label alone */
+    memcpy(s_choices, tmp, sizeof tmp);
+    s_choice_selected = -1;
+    __atomic_store_n(&s_choice_n, n, __ATOMIC_RELEASE);
+    ESP_LOGI(TAG, "choices: presenting %d arcs", n);
+}
+
+void jr_display_dismiss_choices(void)
+{
+    if (__atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE) == 0) {
+        return;                            /* idempotent */
+    }
+    __atomic_store_n(&s_choice_n, 0, __ATOMIC_RELEASE);
+    s_choice_selected = -1;
+    ESP_LOGI(TAG, "choices: dismissed");
+}
+
+bool jr_display_choices_active(void)
+{
+    return __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE) > 0;
+}
+
+void jr_display_set_choice_selected(int index)
+{
+    s_choice_selected = index;
+}
+
+int jr_display_choice_hit(int x, int y)
+{
+    const int n = __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE);
+    if (n <= 0) {
+        return -1;
+    }
+    int idx = -1;
+    return hud_choice_hit(s_choices, n, x, y, &idx) ? idx : -1;
+}
+
 void jr_display_set_hud_enabled(bool enabled)
 {
     __atomic_store_n(&s_hud_enabled, enabled ? 1u : 0u, __ATOMIC_RELAXED);
@@ -775,6 +835,14 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
     hud_overlay_frame(pixels, y1, nrows,
                       (uint32_t)(esp_timer_get_time() / 1000),
                       ctx->board.swap_color_bytes, &env);
+
+    /* Choice arcs draw LAST: they are the interactive layer and must sit above
+     * the face and the HUD accents. Same strip contract, same buffer. */
+    const int cn = __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE);
+    if (cn > 0) {
+        hud_overlay_choices(pixels, y1, nrows, ctx->board.swap_color_bytes,
+                            s_choices, cn, s_choice_selected);
+    }
 }
 
 static void apply_shell_overlay(jr_display_ctx_t *ctx, int x1, int y1,

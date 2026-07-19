@@ -28,6 +28,7 @@ intentional fixtures, not leaks.
 
 | File | What it proves |
 |---|---|
+| `20260719-choice-arcs.png` | **STATE-05/06 choice arcs on glass — the centerpiece.** Three arcs hugging the bezel at r223-231 with the 12 o'clock gap reserved for the question, drawn entirely in the baked art's free band. Hit geometry verified against the rendered pixels: a sweep at r=227 returns 9 samples each for arcs 0/1/2 and 9 for the gap; a centre tap and a tap on the face both correctly refuse to answer. |
 | `20260719-hud-speaking.png` | The 48-bar reactive waveform live on the panel at amplitude 246 — spoke length is driven by real playback audio, not a loop. Measured cost: 1.7 fps (18.0 -> 16.3), down from a 4 fps hit before per-strip culling was added. |
 | `20260719-hud-idle.png` | Idle breathing ring — the calm state. |
 | `20260719-thinking-spinner.png` | **STATE-03 on glass — the first element of the JarvisNano OS design to render on the physical panel.** A real panel-submission-mirror frame captured mid-THINKING: the baked reactor face underneath, the procedural dim cyan track ring at r=150, and the orbiting comet with its white-hot head. Verified numerically, not just visually — 0 cyan pixels on the r=150 ring when not thinking, 274 while thinking, clustered at 141-142 deg (a localized comet, not a ring artifact). |

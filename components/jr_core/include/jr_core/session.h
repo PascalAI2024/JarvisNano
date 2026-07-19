@@ -50,7 +50,14 @@ typedef enum {
     JR_ST_RECONNECTING,  /* automatic recovery after involuntary death       */
     JR_ST_BACKOFF,       /* throttled/parked (storm or quota cool-off)       */
     JR_ST_FATAL,         /* unrecoverable / non-retryable                    */
-    JR_ST__COUNT,        /* == 10 configurations                             */
+    /* Live.Asking — a 4th Live substate (STATE-05/06 tap-to-answer choice
+     * arcs). The model emitted an ask_user tool call; three arcs are on the
+     * bezel and the machine is waiting on a HUMAN, not on the server. It is
+     * APPENDED (not inserted after Speaking) so every pre-existing enumerator
+     * keeps its numeric value — diag ring entries and any logged phase ints
+     * stay comparable across the change. */
+    JR_ST_ASKING,
+    JR_ST__COUNT,        /* == 11 configurations                             */
 } jr_state_t;
 
 /* The L4 VAD strategy injected into L3 — a FIELD, not a state (spec §0). */
@@ -104,7 +111,11 @@ typedef enum {
     JR_EV_USER_START,          /* explicit arm (tap, /api/debug/say, boot)   */
     JR_EV_USER_STOP,           /* explicit stop — the ONLY route to Idle     */
     JR_EV_TAP,                 /* raw touch (arms / accelerates / no-op)     */
-    JR_EV__COUNT,              /* == 22                                      */
+    /* --- 2.5 tap-to-answer choice arcs (STATE-05/06) — 3 --- */
+    JR_EV_ASK_OPENED,          /* model emitted an ask_user tool call        */
+    JR_EV_CHOICE_PICKED,       /* human tapped an arc {choice_index,text}    */
+    JR_EV_ASK_TIMEOUT,         /* AskTimer fired — NOT the no-reply watchdog */
+    JR_EV__COUNT,              /* == 25                                      */
 } jr_event_kind_t;
 
 /* The Event value struct. Only the fields relevant to `kind` are meaningful;
@@ -147,6 +158,12 @@ typedef struct {
     /* monitors: UplinkDead / StaleDeadline / NoReplyTimeout / CapturePause */
     uint32_t        consecutive_tx_failures;
     uint32_t        age_ms;
+
+    /* ChoicePicked: which arc the human tapped. `choice_text` is the label to
+     * echo back to the model; both are ignored for JR_EV_ASK_OPENED (which
+     * reuses call_id / call_id_text / tool_name / tool_args). */
+    uint8_t         choice_index;
+    const char     *choice_text;
 } jr_event_t;
 
 /* ======================================================================== *
@@ -185,7 +202,30 @@ typedef enum {
     /* --- 3.5 observability (2) --- */
     JR_CMD_PUBLISH_SNAPSHOT,        /* PublishSnapshot{ phase, counters }    */
     JR_CMD_EMIT_DIAG,               /* EmitDiag{ event_type, reason, kind? } */
-    JR_CMD__COUNT,                  /* == 27                                 */
+    /* --- 3.6 tap-to-answer choice arcs (STATE-05/06) (5) --- */
+    JR_CMD_PRESENT_CHOICES,         /* PresentChoices{ call_id_text, tool_name,
+                                     * tool_args } — L6 renders the arcs      */
+    JR_CMD_DISMISS_CHOICES,         /* DismissChoices — the EXPLICIT teardown
+                                     * counterpart of PresentChoices. L6 must
+                                     * never have to infer "the arcs are gone"
+                                     * from a PublishSnapshot phase: EVERY exit
+                                     * from Asking (pick / timeout / spoken
+                                     * answer / UserStop / DEATH) emits exactly
+                                     * one of these. Idempotent — a DismissChoices
+                                     * with no arcs on screen is a no-op.      */
+    JR_CMD_SEND_CHOICE_RESULT,      /* SendChoiceResult{ call_id_text,
+                                     * choice_index, choice_text } — the
+                                     * functionResponse. choice_index ==
+                                     * JR_CHOICE_NONE means "no answer".      */
+    JR_CMD_ARM_ASK_TIMER,           /* ArmAskTimer{ timeout_ms } — a SEPARATE,
+                                     * human-scale timer. It is NOT the
+                                     * no-reply watchdog (see JR_ASK_TIMEOUT_MS).
+                                     * OWNED BY THE ORCHESTRATOR: this command
+                                     * never reaches the I/O port — the pump
+                                     * realizes it as jr_orch_ask_timer_t and
+                                     * emits JR_EV_ASK_TIMEOUT when it expires. */
+    JR_CMD_DISARM_ASK_TIMER,
+    JR_CMD__COUNT,                  /* == 32                                 */
 } jr_cmd_kind_t;
 
 /* The Command value struct. Only the fields relevant to `kind` are meaningful. */
@@ -216,13 +256,21 @@ typedef struct {
     jr_event_kind_t event_type;       /* EmitDiag                            */
     const char     *reason;           /* EmitDiag                            */
     jr_error_kind_t error_kind;       /* EmitDiag                            */
+
+    uint8_t         choice_index;     /* SendChoiceResult (JR_CHOICE_NONE ok)*/
+    const char     *choice_text;      /* SendChoiceResult (NULL == no answer)*/
 } jr_command_t;
 
-/* Worst-case command fan-out is the DEATH handler:
+/* Worst-case command fan-out is the DEATH handler OUT OF Asking:
  * MuteDacNow, FlushPlaybackRing, PauseCapture, CloseTransport, DisarmKeepalive,
- * DisarmNoReplyWatchdog, DisarmCapturePauseTimer, EmitDiag, ScheduleBackoff,
- * + the implicit PublishSnapshot = 10. 12 leaves headroom. */
-#define JR_MAX_CMDS 12
+ * DisarmNoReplyWatchdog, DisarmCapturePauseTimer, DisarmAskTimer,
+ * DismissChoices, EmitDiag, ScheduleBackoff + the implicit PublishSnapshot = 12.
+ * push() SILENTLY DROPS past the cap, so a fan-out that exactly equals it is a
+ * loaded gun — 14 keeps two slots of headroom. (The ordinary non-Asking death is
+ * 10.) Second-worst is Asking+AskTimeout: SendChoiceResult, SendActivityEnd,
+ * DismissChoices, DisarmAskTimer, ArmKeepalive, StartCapture,
+ * ArmCapturePauseTimer, EmitDiag + PublishSnapshot = 9. */
+#define JR_MAX_CMDS 14
 
 typedef struct {
     jr_command_t cmds[JR_MAX_CMDS];
@@ -239,6 +287,31 @@ typedef struct {
     uint32_t      resumption_token;/* last server-issued resume handle (0=none)*/
     uint32_t      session_gen;     /* ++ on entry to Connecting; stamps jobs  */
     jr_vad_mode_t vad_mode;        /* the injected L4 strategy (field)        */
+
+    /* The in-flight ask_user tool call, captured on entry to Asking so the
+     * abandon paths (timeout / voice answer) can still address the
+     * functionResponse. LIFETIME CONTRACT: `ask_call_id_text` is BORROWED from
+     * the JR_EV_ASK_OPENED event — L6 must keep that string alive (static or
+     * PSRAM-owned slot) until the ask closes. The pure core never copies or
+     * frees it. All four are cleared on every exit from Asking.
+     *
+     * `ask_tool_name` / `ask_tool_args` are the SAME borrowed-lifetime contract
+     * and exist so the re-present path (a tap that missed every arc) can hand L6
+     * a payload that actually carries the question and the labels. Without them
+     * a re-present is a PresentChoices with NULL tool_args — nothing to render,
+     * and a NULL-deref waiting in the L6 parser. */
+    uint32_t      ask_call_id;
+    const char   *ask_call_id_text;
+    const char   *ask_tool_name;
+    const char   *ask_tool_args;
+
+    /* Manual-VAD (PTT) bookkeeping: true between a SendActivityStart and its
+     * SendActivityEnd. The Asking exits consult it so the activity window is
+     * closed exactly when it was opened — never leaked (the model waits forever
+     * on an activity that never ends) and never double-closed (a stray
+     * activityEnd with no matching activityStart is a protocol error).
+     * Meaningless in JR_VAD_SERVER mode, where no activity frames are sent. */
+    bool          manual_activity_open;
 } jr_session_t;
 
 /* Outcome of a transition: the full next SessionState + the ordered command
@@ -265,6 +338,30 @@ typedef struct {
 #define JR_CONNECT_DEADLINE_MS   10000u  /* Phase 1 tune */
 #define JR_HANDSHAKE_DEADLINE_MS 10000u  /* Phase 1 tune */
 #define JR_DRAIN_DEADLINE_MS     2000u   /* Phase 1 tune (~2000) */
+
+/* --- Asking (STATE-05/06) ------------------------------------------------ *
+ * JR_NOREPLY_MS is a MACHINE-scale timeout: 20 s of server silence means the
+ * model is wedged. Asking waits on a HUMAN reading three arcs and deciding, so
+ * reusing the no-reply watchdog would tear the session down on anyone who
+ * deliberates for 21 s. Asking therefore DISARMS the no-reply watchdog on
+ * entry, arms this separate human-scale timer instead, and re-arms the
+ * watchdog only on the way out.
+ *
+ * JR_ASK_DEADLINE_MS is the KEEPALIVE deadline while Asking. The normal Live
+ * keepalive is 45 s, and no server frame arrives while we wait on a finger —
+ * leaving it at JR_LIVE_DEADLINE_MS would fire StaleDeadline at 45 s and kill
+ * the session through DEATH, defeating the whole point of the longer ask
+ * timer. It must strictly EXCEED JR_ASK_TIMEOUT_MS so the ask timer always
+ * wins the race. */
+#define JR_ASK_TIMEOUT_MS        120000u /* human-scale; NOT JR_NOREPLY_MS   */
+#define JR_ASK_DEADLINE_MS       (JR_ASK_TIMEOUT_MS + 5000u)
+_Static_assert(JR_ASK_TIMEOUT_MS > JR_NOREPLY_MS,
+               "the ask timeout must outlive the machine-scale no-reply watchdog");
+_Static_assert(JR_ASK_DEADLINE_MS > JR_ASK_TIMEOUT_MS,
+               "the Asking keepalive must outlive the ask timer, or DEATH wins");
+
+/* choice_index sentinel: the ask was abandoned, no arc was chosen. */
+#define JR_CHOICE_NONE           0xFFu
 
 /* ======================================================================== *
  *  The pure transition function + collaborators                            *

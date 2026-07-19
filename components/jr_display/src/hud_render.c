@@ -556,10 +556,36 @@ static void overlay_palette(bool swap)
  *
  * Everything else is occupied: core r0-94, inner ring r125-134, outer ring and
  * segments r155-179, bezel ticks r200-214. Put nothing there.
- * Re-measure if the baked art is ever changed. */
+ * Re-measure if the baked art is ever changed.
+ *
+ * TWO CORRECTIONS to that measurement, both learned the hard way:
+ *
+ * 1. THE FREE BAND IS r215-239 BUT THE GLASS ENDS AT r232.5. The frame is 466
+ *    px wide about a half-unit centre (232.5, 232.5), so nothing beyond
+ *    r=232.5 is displayable — it is silently clipped by the rectangular
+ *    framebuffer, not drawn at the bezel. The USABLE outer band is therefore
+ *    r215..232, not r215..239. An earlier choice-arc pass put 16% of its
+ *    pixels off-panel this way and lost a whole shading zone to the clip.
+ *
+ * 2. THE OUTER BAND HAS TWO TENANTS, SO IT IS SPLIT. The battery rim and the
+ *    tap-to-answer choice arcs are both live at the same time (hud_overlay_frame
+ *    draws the battery unconditionally, every frame, including while a question
+ *    is on screen), and they used to overlap: whichever drew second won, and a
+ *    gauge sweeping clockwise through 81% of the arcs made both unreadable.
+ *    The band is split rather than time-multiplexed, so no caller has to know
+ *    about the conflict and no state can get it wrong:
+ *
+ *        r215-220   battery rim + the ERROR ring  (inner half)
+ *        r221-222   dead gap
+ *        r223-231   choice arcs                   (outer half)
+ *
+ *    Note the primitives here use the INTEGER centre 232, so a pixel drawn at
+ *    nominal radius r reaches true radius r+0.5 on the -x/-y side. Every bound
+ *    above already carries that half pixel. */
 #define OV_R_COMET   142   /* centre of the free r135-149 band */
 #define OV_R_BREATH  190   /* centre of the free r185-194 band */
-#define OV_R_BATT    227   /* centre of the free r215-239 band */
+#define OV_R_BATT    218   /* inner half of the outer band; see the split above */
+#define OV_R_FACE    232   /* last displayable radius (glass edge is 232.5)     */
 
 /* One revolution every ~2639 ms == the prototype's `angle = now/420` rad
  * (2*pi*420 ms per turn), expressed in the Q8 turn units the LUT uses. */
@@ -712,7 +738,13 @@ void hud_tilt_offset(float roll_deg, float pitch_deg, int8_t *ox, int8_t *oy)
 /* Battery rim: a thin arc at the outer bezel sweeping clockwise from 12
  * o'clock, proportional to charge. Red under 20%, gold while charging, cyan
  * otherwise. Skipped entirely when no cell is present (batt_pct == 0xFF), so a
- * USB-powered puck shows no misleading gauge. */
+ * USB-powered puck shows no misleading gauge.
+ *
+ * It rides the INNER half of the outer free band (OV_R_BATT, see the split in
+ * the RADII note) precisely so it can coexist with the choice arcs, which own
+ * the outer half. Do not move it outward without moving them too — this
+ * collision was invisible on the bench only because no cell was attached
+ * (batt_pct 0xFF) and the gauge never drew. */
 static void ov_battery(const strip_t *s, int cx, int cy, const hud_env_t *env)
 {
     if (env->batt_pct > 100) {
@@ -778,4 +810,314 @@ void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
     default:
         break;
     }
+}
+
+/* ============================ choice arcs =============================== */
+/* STATE-05/06: tappable answer arcs hugging the bezel.
+ *
+ * They sit at r223..231 — the OUTER half of the free r215-239 band, which is
+ * really r215-232 because the glass ends at r232.5 (see the RADII note above
+ * for both the band measurement and the split that keeps the battery rim off
+ * these arcs). Thick filled bands, not outlines: at this radius a hairline is
+ * invisible and, more to the point, untappable.
+ *
+ * Three pieces of integer geometry, in the order the cost matters:
+ *
+ *   1. CULL. Each arc's bounding box is derived from its angular span (span
+ *      endpoints at both radii, plus whichever cardinal directions the span
+ *      contains) and clipped against the strip BEFORE any row work. Drawing
+ *      the whole band and letting the clip discard it costs frames.
+ *   2. ANNULUS. Each surviving row is solved with two integer sqrts, exactly
+ *      as ov_ring_row does, so per-row cost is the band thickness (20 px) and
+ *      never the row width (466 px).
+ *   3. ANGLE. Membership in [a0,a1] is a pair of CROSS PRODUCTS against the
+ *      span's two boundary rays — cross(dir(a), p) = cos(a)*dy - sin(a)*dx —
+ *      so the render path never computes a per-pixel angle and never needs an
+ *      atan. Spans wider than a half turn invert the test (see `wide`).
+ */
+
+#define OV_CENTER        232   /* the half-unit face centre all overlays use */
+#define OV_R_CHOICE_IN   223   /* inner edge; battery rim ends at 220        */
+#define OV_R_CHOICE_MID  226   /* inner -> full brightness step              */
+#define OV_R_CHOICE_HI   229   /* full -> outer brightness step              */
+#define OV_R_CHOICE_OUT  231   /* outer edge; glass ends at 232.5            */
+
+#define OV_CHOICE_GAP_Q8 48    /* ~1.18 rad reserved at 12 o'clock for text  */
+#define OV_CHOICE_SEP_Q8 6     /* dead angle between neighbouring arcs       */
+
+/* TAP TOLERANCE. The hit test answers a BAND, never an unbounded annulus.
+ *
+ * The first version gated only on a minimum radius and then tested the angle,
+ * so every pixel from r111 out to the corner of the framebuffer answered a
+ * question: 102,115 px answered versus 20,954 px painted, and a tap anywhere on
+ * the baked face's outer ring (r155-179) or its bezel ticks (r200-214) sent a
+ * WRONG ANSWER to Gemini. The band is the target; the slop is what makes it
+ * forgiving, and it is asymmetric on purpose:
+ *
+ *   INWARD is tight. Everything below r215 is baked face art. A user poking a
+ *      ring or a tick is looking at the face, not answering — 8 px of grace
+ *      reaches r215 and stops exactly where the free band starts.
+ *   OUTWARD is generous. A tap aimed at a bezel-hugging arc habitually lands
+ *      short of the finger's visual centre, the last 0.5 px of glass is under
+ *      the bezel, and there is nothing out there to hit by mistake, so the
+ *      slop runs well past the panel edge. */
+#define OV_CHOICE_HIT_SLOP_IN   8
+#define OV_CHOICE_HIT_SLOP_OUT  24
+
+/* Inclusive angular membership with wraparound. All arguments must already be
+ * normalised to 0..255. */
+static inline bool span_has(int a, int a0, int a1)
+{
+    return (a0 <= a1) ? (a >= a0 && a <= a1) : (a >= a0 || a <= a1);
+}
+
+/* Bounding box of the sector-annulus, in offsets from the centre. Padded by a
+ * pixel to absorb the LUT's rounding; the exact angular rejection is the cross
+ * product test, this only has to be conservative. */
+static void span_bbox(int a0, int a1, int r_in, int r_out,
+                      int *xmin, int *xmax, int *ymin, int *ymax)
+{
+    int xl = 0, xh = 0, yl = 0, yh = 0;
+    const int as[2] = { a0, a1 };
+    for (int e = 0; e < 2; ++e) {
+        for (int rr = 0; rr < 2; ++rr) {
+            const int r = rr ? r_out : r_in;
+            const int x = (lcos(as[e]) * r) >> 15;
+            const int y = (lsin(as[e]) * r) >> 15;
+            if (e == 0 && rr == 0) {
+                xl = xh = x;
+                yl = yh = y;
+                continue;
+            }
+            if (x < xl) xl = x;
+            if (x > xh) xh = x;
+            if (y < yl) yl = y;
+            if (y > yh) yh = y;
+        }
+    }
+    /* a cardinal direction inside the span pushes that side out to r_out */
+    if (span_has(0, a0, a1))   xh =  r_out;
+    if (span_has(128, a0, a1)) xl = -r_out;
+    if (span_has(64, a0, a1))  yh =  r_out;
+    if (span_has(192, a0, a1)) yl = -r_out;
+    *xmin = xl - 1;
+    *xmax = xh + 1;
+    *ymin = yl - 1;
+    *ymax = yh + 1;
+}
+
+/* One arc: a filled [a0,a1] wedge of the r217..236 annulus, shaded in three
+ * radial zones so the band reads as a lit tube rather than a flat slab. */
+static void choice_arc(uint16_t *dst, int y0, int nrows, int a0, int a1,
+                       const uint16_t *ramp, int level)
+{
+    if (level <= 0) {
+        return;
+    }
+    int xmin, xmax, ymin, ymax;
+    span_bbox(a0, a1, OV_R_CHOICE_IN, OV_R_CHOICE_OUT, &xmin, &xmax, &ymin, &ymax);
+
+    int ys = OV_CENTER + ymin;
+    int ye = OV_CENTER + ymax;
+    if (ys < y0)             ys = y0;
+    if (ye > y0 + nrows - 1) ye = y0 + nrows - 1;
+    if (ys < 0)              ys = 0;
+    if (ye > HUD_H - 1)      ye = HUD_H - 1;
+    if (ys > ye) {
+        return;                         /* arc misses this strip entirely */
+    }
+    int xlo = OV_CENTER + xmin;
+    int xhi = OV_CENTER + xmax;
+    if (xlo < 0)         xlo = 0;
+    if (xhi > HUD_W - 1) xhi = HUD_W - 1;
+    if (xlo > xhi) {
+        return;
+    }
+
+    /* boundary rays; `wide` flips the wedge test for spans over a half turn */
+    const int  c0 = lcos(a0), s0 = lsin(a0);
+    const int  c1 = lcos(a1), s1 = lsin(a1);
+    const bool wide = ((a1 - a0) & 255) > 128;
+
+    const uint16_t px_in  = shade(ramp, (level * 3) >> 2);
+    const uint16_t px_mid = shade(ramp, level);
+    const uint16_t px_out = shade(ramp, (level * 5) >> 3);
+
+    const int ro2 = OV_R_CHOICE_OUT * OV_R_CHOICE_OUT;
+    const int ri2 = OV_R_CHOICE_IN  * OV_R_CHOICE_IN;
+    const int rm2 = OV_R_CHOICE_MID * OV_R_CHOICE_MID;
+    const int rh2 = OV_R_CHOICE_HI  * OV_R_CHOICE_HI;
+
+    for (int y = ys; y <= ye; ++y) {
+        const int dy  = y - OV_CENTER;
+        const int dy2 = dy * dy;
+        if (dy2 >= ro2) {
+            continue;
+        }
+        /* |dx| runs t = t_in .. t_out across the band; the two zone
+         * boundaries are two more sqrts, so the pixel loop stays a lookup. */
+        const int t_out = (int)isqrt32((uint32_t)(ro2 - dy2));
+        const int t_in  = (dy2 < ri2) ? (int)isqrt32((uint32_t)(ri2 - dy2)) : 0;
+        const int t_mid = (dy2 < rm2) ? (int)isqrt32((uint32_t)(rm2 - dy2)) : 0;
+        const int t_hi  = (dy2 < rh2) ? (int)isqrt32((uint32_t)(rh2 - dy2)) : 0;
+
+        uint16_t *row = dst + (size_t)(y - y0) * HUD_W;
+        for (int t = t_in; t <= t_out; ++t) {
+            const uint16_t px = (t < t_mid) ? px_in
+                              : (t < t_hi)  ? px_mid : px_out;
+            /* right arm, then the mirrored left arm (t == 0 only once) */
+            for (int side = 0; side < 2; ++side) {
+                const int dx = side ? -t : t;
+                if (side && t == 0) {
+                    continue;
+                }
+                const int x = OV_CENTER + dx;
+                if (x < xlo || x > xhi) {
+                    continue;
+                }
+                const int32_t k0 = (int32_t)c0 * dy - (int32_t)s0 * dx;
+                const int32_t k1 = (int32_t)c1 * dy - (int32_t)s1 * dx;
+                const bool in = wide ? (k0 >= 0 || k1 <= 0)
+                                     : (k0 >= 0 && k1 <= 0);
+                if (in) {
+                    row[x] = px;
+                }
+            }
+        }
+    }
+}
+
+void hud_choice_layout(int n, hud_choice_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    if (n < 1) {
+        n = 1;
+    }
+    if (n > HUD_CHOICE_MAX) {
+        n = HUD_CHOICE_MAX;
+    }
+    /* Sweep starts just past the 12 o'clock gap and runs clockwise all the way
+     * back to its other edge; each arc gets an equal slice with a dead angle
+     * between neighbours so they read as separate targets. */
+    const int start = (192 + OV_CHOICE_GAP_Q8 / 2) & 255;
+    const int avail = 256 - OV_CHOICE_GAP_Q8;
+    const int each  = (avail - (n - 1) * OV_CHOICE_SEP_Q8) / n;
+
+    for (int i = 0; i < n; ++i) {
+        const int a0 = (start + i * (each + OV_CHOICE_SEP_Q8)) & 255;
+        out[i].a0 = a0;
+        out[i].a1 = (a0 + each) & 255;
+    }
+}
+
+void hud_overlay_choices(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                         const hud_choice_t *choices, int n, int selected)
+{
+    if (dst == NULL || choices == NULL || nrows <= 0 || n <= 0) {
+        return;
+    }
+    if (n > HUD_CHOICE_MAX) {
+        n = HUD_CHOICE_MAX;
+    }
+    overlay_palette(swap_bytes);
+
+    /* Labels are NOT drawn here: this file owns no font, and the question and
+     * its answers are text furniture drawn by the text layer. The pointer is
+     * the slot's occupancy flag. */
+    for (int i = 0; i < n; ++i) {
+        if (choices[i].label == NULL) {
+            continue;
+        }
+        const bool sel = (i == selected);
+        choice_arc(dst, y0, nrows, choices[i].a0 & 255, choices[i].a1 & 255,
+                   sel ? s_ov_tick : s_ov_cyan, sel ? 255 : 96);
+    }
+}
+
+/* Integer atan2: (dx,dy) -> Q8 turn units 0..255, in the LUT's convention.
+ * Touch arrives as cartesian pixels but spans are angular, and there is no
+ * float in this file, so:
+ *
+ *   1. Four sign tests pin the QUADRANT, putting the answer in a known
+ *      64-unit window [base, base+64).
+ *   2. Inside a window narrower than a half turn the predicate
+ *          P(m) = "the point lies at or clockwise of direction m"
+ *               = cos(m)*dy - sin(m)*dx >= 0
+ *      is monotone — true up to the answer, false after it — so six halving
+ *      steps find the largest m for which it holds, which is the angle
+ *      floored to the LUT's 1.4-degree step.
+ *
+ * The cross product is exact in int32 (32767 * 233 is ~2^23), so the only
+ * error is that flooring: no atan, no approximation series, no table beyond
+ * the sine LUT that is already here. */
+static int ov_angle_q8(int dx, int dy)
+{
+    int base;
+    if (dx > 0 && dy >= 0) {
+        base = 0;                       /* [0,64):    3 o'clock -> 6 o'clock */
+    } else if (dx <= 0 && dy > 0) {
+        base = 64;                      /* [64,128):  6 -> 9                */
+    } else if (dx < 0) {
+        base = 128;                     /* [128,192): 9 -> 12               */
+    } else {
+        base = 192;                     /* [192,256): 12 -> 3               */
+    }
+    int lo = base;
+    for (int step = 32; step >= 1; step >>= 1) {
+        const int m = lo + step;
+        if (m >= base + 64) {
+            continue;
+        }
+        if ((int32_t)lcos(m & 255) * dy - (int32_t)lsin(m & 255) * dx >= 0) {
+            lo = m;
+        }
+    }
+    return lo & 255;
+}
+
+bool hud_choice_hit(const hud_choice_t *choices, int n, int x, int y,
+                    int *out_index)
+{
+    if (out_index) {
+        *out_index = -1;
+    }
+    if (choices == NULL || n <= 0) {
+        return false;
+    }
+    if (n > HUD_CHOICE_MAX) {
+        n = HUD_CHOICE_MAX;
+    }
+    luts_build();
+
+    const int dx = x - OV_CENTER;
+    const int dy = y - OV_CENTER;
+
+    /* BAND FIRST, angle second. The arcs are a band, so the tap target is a
+     * band: reject anything that is not radially near the drawn annulus before
+     * the bearing is even computed. Gating on a minimum radius alone would
+     * hand the entire rest of the screen — the baked face's rings, its bezel
+     * ticks, the framebuffer corners — to whichever arc happened to share its
+     * bearing. See the slop note at OV_CHOICE_HIT_SLOP_IN. */
+    const int r_lo = OV_R_CHOICE_IN  - OV_CHOICE_HIT_SLOP_IN;
+    const int r_hi = OV_R_CHOICE_OUT + OV_CHOICE_HIT_SLOP_OUT;
+    const int r2 = dx * dx + dy * dy;
+    if (r2 < r_lo * r_lo || r2 > r_hi * r_hi) {
+        return false;
+    }
+
+    const int a = ov_angle_q8(dx, dy);
+    for (int i = 0; i < n; ++i) {
+        if (choices[i].label == NULL) {
+            continue;
+        }
+        if (span_has(a, choices[i].a0 & 255, choices[i].a1 & 255)) {
+            if (out_index) {
+                *out_index = i;
+            }
+            return true;
+        }
+    }
+    return false;
 }

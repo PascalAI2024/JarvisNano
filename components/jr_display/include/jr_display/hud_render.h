@@ -148,6 +148,61 @@ typedef struct {
 void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
                        bool swap_bytes, const hud_env_t *env);
 
+/* ---- STATE-05/06: tap-to-answer choice arcs -----------------------------
+ * The agent asks a question, three arcs hug the screen bezel, the user taps
+ * one and the answer goes back as a functionResponse.
+ *
+ * ANGLES are Q8 turn units (0..255) in the LUT's own convention, which is the
+ * screen convention (y grows down):
+ *
+ *      a = 0    ->  3 o'clock        a = 128  ->  9 o'clock
+ *      a = 64   ->  6 o'clock        a = 192  -> 12 o'clock
+ *
+ * A span [a0, a1] sweeps in the direction of INCREASING a (clockwise on
+ * glass) and may wrap through 0, i.e. a0 > a1 is legal and means the span
+ * crosses 3 o'clock.
+ *
+ * RADII: the arcs live at r223..231. The baked face leaves r215-239 empty, but
+ * the glass ends at r232.5 (466 px about a half-unit centre), so the usable
+ * band is r215-232 and it is SPLIT — battery rim r215-220, arcs r223-231 — so
+ * the gauge and the arcs can both be live without overdrawing each other. See
+ * the radii note in hud_render.c for the measurement and the split. Nothing
+ * else may go there, and these must not stray out of it.
+ */
+#define HUD_CHOICE_MAX 3
+
+typedef struct {
+    const char *label;   /* short, may be NULL for an unused slot */
+    int         a0, a1;  /* arc span, Q8 turn units 0..255, may wrap */
+} hud_choice_t;
+
+/* Fill out[0..n-1] with n evenly spaced, non-overlapping spans that fill the
+ * circle MINUS a ~1.2 rad gap centred on 12 o'clock, which is reserved for the
+ * question text. Only a0/a1 are written — `label` is left alone, so a caller
+ * may declare the labels first and lay the angles out afterwards.
+ * n is clamped to 1..HUD_CHOICE_MAX. */
+void hud_choice_layout(int n, hud_choice_t *out);
+
+/* Draw the choice arcs over an already-rendered strip. `selected` renders
+ * bright (tap confirmation), the rest dim; pass -1 for none. Slots with a NULL
+ * label are skipped. Same strip contract as hud_overlay_frame: dst holds rows
+ * [y0, y0+nrows) and only those rows are touched. Integer-only, stateless, no
+ * allocation — safe to call from the panel flush path. */
+void hud_overlay_choices(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                         const hud_choice_t *choices, int n, int selected);
+
+/* Hit-test a touch at panel pixel (x, y) against the arcs. Returns true and
+ * writes the index to *out_index on a hit; returns false and writes -1
+ * otherwise. Slots with a NULL label never hit.
+ *
+ * The target is the ARC BAND, not a bearing: a tap must land at r215..255 —
+ * the drawn r223..231 plus 8 px of inward and 24 px of outward grace — as well
+ * as inside an arc's angular span. Everything inside r215 is baked face art,
+ * so poking the face's rings or its bezel ticks can never answer a question by
+ * accident. */
+bool hud_choice_hit(const hud_choice_t *choices, int n, int x, int y,
+                    int *out_index);
+
 /* Map IMU tilt to a HUD parallax offset, clamped to +/-HUD_TILT_MAX px.
  *
  * This is the one place the device beats the browser mockup: a simulated HUD
