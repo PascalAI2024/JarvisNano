@@ -240,6 +240,13 @@ static _Atomic uint32_t s_sim_flip;
  * it so every session's instruction carries the current local time. */
 static void compose_system_instruction(void);
 
+/* Attract-reel state (POLISH-06). The httpd handler only posts the request;
+ * everything else is app-task single-writer. */
+static _Atomic bool s_demo_req;
+static uint32_t s_demo_start_ms;   /* app task only; 0 = off */
+static int      s_demo_step = -1;
+static int      s_demo_last_ripple = -1;
+
 typedef struct {
     jr_event_t ev;
     char call_id_text[TOOL_ID_CAP];
@@ -2207,6 +2214,19 @@ static esp_err_t tap_sim_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* POST /api/demo — run the 27 s attract reel (POLISH-06). Starts only from a
+ * quiet Listening/Idle; a live ask aborts it and any tap ends it. */
+static esp_err_t demo_handler(httpd_req_t *req)
+{
+    if (!control_intent_required(req)) {
+        return ESP_OK;
+    }
+    atomic_store(&s_demo_req, true);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"queued\":true,\"reel_s\":27}");
+    return ESP_OK;
+}
+
 /* GET /api/display/choices/hit?x=..&y=.. — resolve a panel point to an arc.
  * Lets the hit geometry be checked against the rendered pixels without a finger. */
 static esp_err_t choices_hit_handler(httpd_req_t *req)
@@ -4134,7 +4154,7 @@ static void start_diag_http(void)
      * build, and diag handlers keep growing. Raised from 6144. Some of the
      * reclaim from the render/touch stacks is deliberately spent here. */
     cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 31;
+    cfg.max_uri_handlers = 32;
     cfg.max_resp_headers = 16;
     cfg.lru_purge_enable = false;
     if (httpd_start(&server, &cfg) != ESP_OK) {
@@ -4169,6 +4189,8 @@ static void start_diag_http(void)
           .handler = choices_hit_handler },
         { .uri = "/api/input/tap", .method = HTTP_POST,
           .handler = tap_sim_handler },
+        { .uri = "/api/demo", .method = HTTP_POST,
+          .handler = demo_handler },
         { .uri = "/api/diag/panel-touch", .method = HTTP_POST,
           .handler = panel_touch_control_handler },
         { .uri = "/api/ui/shade", .method = HTTP_POST,
@@ -4229,6 +4251,102 @@ static void handle_say(const char *text)
     s_pending_text_set = true;
     s_pending_text_inflight = false;
     s_pending_text_retry_ms = 0;
+}
+
+/* ---- POLISH-06: the attract reel — 27 s of everything, on demand --------- *
+ * A scripted showcase of the shipped features, driven entirely from the app
+ * task (every display call below is app-task single-writer by contract).
+ * Reality always wins: a live ask aborts the reel, and any tap ends it.
+ * (State lives with the other request lanes near the top of the file.) */
+static void demo_stop(void)
+{
+    if (s_demo_start_ms == 0U) {
+        return;
+    }
+    s_demo_start_ms = 0U;
+    s_demo_step = -1;
+    jr_display_dismiss_choices();
+    jr_display_clock_set(false, 0, 0);
+    caption_reset();
+    ESP_LOGI(TAG, "demo: reel ended");
+}
+
+static void demo_tick(uint64_t now, jr_face_t *f, uint8_t *amp)
+{
+    static const char *const kDemoLabels[HUD_CHOICE_MAX] = {
+        "Yes", "Later", "Ignore"
+    };
+    if (atomic_exchange(&s_demo_req, false)) {
+        jr_state_t p = jr_orch_phase(&s_app.orch);
+        if (s_demo_start_ms == 0U &&
+            (p == JR_ST_LISTENING || p == JR_ST_IDLE)) {
+            s_demo_start_ms = (uint32_t)now;
+            s_demo_step = -1;
+            ESP_LOGI(TAG, "demo: reel started");
+        }
+    }
+    if (s_demo_start_ms == 0U) {
+        return;
+    }
+    if (jr_orch_phase(&s_app.orch) == JR_ST_ASKING) {
+        demo_stop();   /* a real question owns the glass */
+        return;
+    }
+    uint32_t el = (uint32_t)now - s_demo_start_ms;
+    int step = el < 6000U ? 0 : el < 14000U ? 1 : el < 19000U ? 2
+             : el < 24000U ? 3 : el < 27000U ? 4 : 5;
+    if (step != s_demo_step) {
+        s_demo_step = step;
+        switch (step) {
+        case 0:
+            jr_display_caption_set("JARVISNANO V5");
+            break;
+        case 1:
+            s_demo_last_ripple = -1;
+            jr_display_present_choices("Tap arcs answer Gemini",
+                                       kDemoLabels, 3);
+            break;
+        case 2:
+            jr_display_dismiss_choices();
+            jr_display_caption_set("LIVE CAPTIONS AS I SPEAK");
+            break;
+        case 3: {
+            time_t tt = time(NULL);
+            struct tm tmv;
+            localtime_r(&tt, &tmv);
+            jr_display_clock_set(true, tmv.tm_hour, tmv.tm_min);
+            jr_display_caption_set("AMBIENT WATCH WHEN MUTED");
+            break;
+        }
+        case 4:
+            jr_display_clock_set(false, 0, 0);
+            jr_display_caption_set("SELF-HEALING CONNECTION");
+            break;
+        default:
+            demo_stop();
+            return;
+        }
+    }
+    if (step == 1) {
+        int sel = (int)((el - 6000U) / 2600U);
+        if (sel > 2) {
+            sel = 2;
+        }
+        jr_display_set_choice_selected(sel);
+        if (sel != s_demo_last_ripple) {
+            s_demo_last_ripple = sel;
+            static const int rx[3] = {460, 233, 7};
+            static const int ry[3] = {233, 459, 233};
+            jr_display_ripple(rx[sel], ry[sel]);
+        }
+    }
+    *f = step == 0 ? JR_FACE_THINKING
+       : step == 2 ? JR_FACE_SPEAKING
+       : step == 4 ? JR_FACE_ERROR
+       : JR_FACE_LISTENING;
+    if (step == 2) {
+        *amp = (uint8_t)(128 + (int)(120.0f * sinf((float)el * 0.012f)));
+    }
 }
 
 /* Drain order: synthetic diag taps first, then the HAL touch queue. Both come
@@ -4407,7 +4525,8 @@ static void voice_task(void *arg)
                         }
                     }
                 }
-                if (!clock_on) {
+                if (!clock_on && s_demo_start_ms == 0U) {
+                    /* the demo reel borrows the clock; don't fight it */
                     jr_display_clock_set(false, 0, 0);
                     s_clock_last_min = -1;
                 }
@@ -4739,6 +4858,10 @@ static void voice_task(void *arg)
                 }
                 continue;
             }
+            if (s_demo_start_ms != 0U && iev.kind == JR_INPUT_TAP) {
+                demo_stop();   /* the reel yields to the first real finger */
+                continue;
+            }
             if (iev.kind == JR_INPUT_TAP &&
                 brain_surface_handle_tap(iev.x, iev.y, (uint32_t)now)) {
                 continue;
@@ -5033,6 +5156,7 @@ capture_complete:
                 amp = rms_to_amp(s_app.mic_level, 8.0f);
             }
         }
+        demo_tick(now, &f, &amp);   /* the reel overrides face+amp while active */
         if (f != s_app.last_face || amp != s_app.last_amp) {
             s_app.last_face = f;
             s_app.last_amp = amp;
