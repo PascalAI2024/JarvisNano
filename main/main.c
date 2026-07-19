@@ -230,6 +230,10 @@ static uint32_t s_ask_tap_grace_ms;
  * filter, not a bypass. */
 static _Atomic uint32_t s_sim_shake;
 
+/* Synthetic flip lane (GEST-02): number of 10 Hz polls that should read as
+ * face_down. The endpoint posts enough to satisfy the sustain filter. */
+static _Atomic uint32_t s_sim_flip;
+
 typedef struct {
     jr_event_t ev;
     char call_id_text[TOOL_ID_CAP];
@@ -2162,6 +2166,13 @@ static esp_err_t tap_sim_handler(httpd_req_t *req)
         atomic_store(&s_sim_shake, 2U);   /* two 10 Hz polls = a real shake */
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"queued\":true,\"gesture\":\"shake\"}");
+        return ESP_OK;
+    }
+    int flip = 0;
+    if (query_int(req, "flip", &flip) && flip == 1) {
+        atomic_store(&s_sim_flip, 30U);   /* ~3 s face-down, then auto face-up */
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"queued\":true,\"gesture\":\"flip\"}");
         return ESP_OK;
     }
     int x = -1, y = -1;
@@ -4319,6 +4330,43 @@ static void voice_task(void *arg)
                                    now);
                     ESP_LOGI(TAG, "gesture: shake cancelled %s",
                              jr_state_name(sp));
+                }
+            }
+
+            /* GEST-02 flip-to-mute: screen-down is a hard privacy mute — the
+             * one gesture that reads unambiguously with the display hidden.
+             * Six sustained polls (~600 ms) so handling the puck cannot
+             * trigger it. Face-up UNDOES the mute only when the flip caused
+             * it: a tap-mute or shade-mute stays muted through any amount of
+             * turning the device over in your hands. */
+            static uint8_t s_flip_polls, s_unflip_polls;
+            static bool    s_flip_muted;
+            uint32_t sim_flip = atomic_load(&s_sim_flip);
+            if (sim_flip > 0U) {
+                atomic_store(&s_sim_flip, sim_flip - 1U);
+            }
+            const bool face_down = sim_flip > 0U ||
+                (have_imu && imu.orientation != NULL &&
+                 strcmp(imu.orientation, "face_down") == 0 &&
+                 imu.age_ms < 500U);
+            if (face_down) {
+                s_unflip_polls = 0;
+                if (!s_flip_muted && ++s_flip_polls >= 6) {
+                    s_flip_polls = 0;
+                    if (!atomic_load(&s_voice_privacy_paused)) {
+                        s_flip_muted = true;   /* WE muted; face-up may undo */
+                        atomic_store(&s_voice_control_request,
+                                     VOICE_CONTROL_DISARM);
+                        ESP_LOGI(TAG, "gesture: face-down -> privacy mute");
+                    }
+                }
+            } else {
+                s_flip_polls = 0;
+                if (s_flip_muted && ++s_unflip_polls >= 6) {
+                    s_unflip_polls = 0;
+                    s_flip_muted = false;
+                    atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+                    ESP_LOGI(TAG, "gesture: face-up -> listening again");
                 }
             }
         }
