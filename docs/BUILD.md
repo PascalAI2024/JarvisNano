@@ -1,195 +1,158 @@
-# Build And Flash
+# Build, flash, and verify v5
 
-The primary v1 target is the **Waveshare ESP32-S3-Touch-AMOLED-1.75**. The
-Seeed XIAO path remains available, but do not use the old XIAO defaults when
-debugging the round AMOLED device.
-
-## Install Paths
-
-| Path | Target | Best for |
-|---|---|---|
-| Local build + `scripts/flash.sh` | Waveshare primary | Firmware development and release validation |
-| Browser flasher | XIAO-era bundle unless updated | End-user no-CLI installs after a matching firmware bundle is published |
+The active target is the Waveshare ESP32-S3 Touch AMOLED 1.75. The old
+ESP-Claw bootstrap build remains in the repository for history; it is not the
+source of the v5 firmware flashed to the round panel.
 
 ## Requirements
 
-- Docker Desktop or a Linux Docker host.
-- Python 3 on the host for flashing and diagnostics.
-- Git.
-- USB-C data cable.
-- Waveshare ESP32-S3-Touch-AMOLED-1.75 board.
+- Docker Desktop or a Linux Docker host
+- Python 3
+- USB-C data cable
+- the Waveshare board
 
-Flashing runs on the host because Docker Desktop on macOS does not pass the
-native ESP32-S3 USB-Serial-JTAG device through cleanly.
+The firmware build is pinned to ESP-IDF 5.5.4 in Docker. Flashing runs on the
+host because macOS Docker cannot reliably pass through native
+ESP32-S3 USB-Serial-JTAG.
 
-## Build Waveshare Firmware
-
-```bash
-git clone git@github.com:PascalAI2024/JarvisNano.git
-cd JarvisNano
-
-BOARD_VENDOR=waveshare \
-BOARD_NAME=esp32s3_touch_amoled_1_75 \
-./scripts/bootstrap.sh build
-```
-
-The first build pulls the ESP-IDF Docker image and can take several minutes.
-Incremental builds are much faster.
-
-`bootstrap.sh` performs the important source sync:
-
-```mermaid
-sequenceDiagram
-    participant U as Developer
-    participant B as scripts/bootstrap.sh
-    participant C as Canonical repo sources
-    participant E as ignored esp-claw checkout
-    participant I as ESP-IDF build
-
-    U->>B: BOARD_VENDOR=waveshare BOARD_NAME=esp32s3_touch_amoled_1_75 build
-    B->>C: read boards/, firmware/, patches
-    B->>E: clone/update esp-claw
-    B->>E: copy board adaptation
-    B->>E: copy cap_gemini_live, emote, ui, board primitives
-    B->>E: apply idempotent app/bootstrap patches
-    B->>I: idf.py set-target esp32s3
-    B->>I: idf.py gen-bmgr-config
-    B->>I: idf.py build
-```
-
-Important: edit canonical files in this repo, not generated copies under
-`esp-claw/`. Bootstrap overwrites selected generated files on every build.
-
-## Flash Waveshare Firmware
+## Build
 
 ```bash
-./scripts/flash.sh
+./scripts/build-v5.sh
 ```
 
-`flash.sh` reads the generated `flasher_args.json`, including the board flash
-settings and partition offsets. It preserves storage by default so Wi-Fi,
-Gemini, JarvisMCP, and pairing-token config survive normal iteration.
+The script:
 
-Use these modes deliberately:
+1. runs the pinned `espressif/idf:v5.5.4` image;
+2. generates the Waveshare board-manager configuration;
+3. synchronises the v5 sdkconfig contract;
+4. builds the plain ESP-IDF composition rooted at `main/main.c`;
+5. verifies managed patches and sdkconfig did not drift.
+
+Expected application output:
+
+```text
+build/jarvisrobot_v5.bin
+```
+
+Edit the canonical sources in `main/`, `components/`, `boards/`, and
+`firmware/components/`. Do not patch generated build output.
+
+## Flash
 
 ```bash
-# First install, partition change, or deliberate provisioning wipe.
-STORAGE=1 ./scripts/flash.sh
-
-# Bad saved config recovery.
-ERASE_NVS=1 ./scripts/flash.sh
-
-# Full blank-device release test.
-ERASE_NVS=1 STORAGE=1 ./scripts/flash.sh
+./scripts/flash-v5.sh
 ```
 
-The Waveshare CO5300/QSPI display path requires DIO flash mode. Use the repo
-scripts rather than a copied manual `esptool` command unless you are diagnosing
-the flasher itself.
-
-## USB Diagnostics First
-
-The Waveshare board uses native ESP32-S3 USB-Serial-JTAG. Host reset-line
-behavior can leave it in ROM download mode after a hard reset, where flashing
-works but the app does not boot. The repo scripts avoid the common reset trap.
-
-Use the monitor that does not toggle modem-control lines:
+Useful forms:
 
 ```bash
-./scripts/usb-monitor.py --seconds 5 --send status
+# Reuse an existing build and preserve NVS.
+NO_BUILD=1 ./scripts/flash-v5.sh
+
+# Select a specific native USB port.
+PORT=/dev/cu.usbmodemXXXX NO_BUILD=1 ./scripts/flash-v5.sh
+
+# Deliberately erase only NVS before flashing.
+ERASE_NVS=1 ./scripts/flash-v5.sh
 ```
 
-If you need to specify a port:
+The script refuses non-DIO images, uses the generated flash manifest, verifies
+the write, and performs a watchdog reset. Normal flashing preserves NVS,
+including Wi-Fi, Gemini, JarvisMCP, and pairing state. Do not set `ERASE_NVS=1`
+during ordinary iteration.
+
+## Serial diagnostics
+
+The monitor avoids DTR/RTS toggles that can strand the S3 in ROM download
+mode:
 
 ```bash
-PORT=/dev/cu.usbmodem* ./scripts/flash.sh
-./scripts/usb-monitor.py --port /dev/cu.usbmodem*
+python3 scripts/usb-monitor.py --seconds 10
 ```
 
-Expected good status includes boot stages through Wi-Fi/HTTP/app startup and a
-stable uptime counter. If the serial log shows ROM download mode, unplug/replug
-or flash again with the repo script.
+Or specify the port:
 
-## Configure Runtime Secrets
+```bash
+python3 scripts/usb-monitor.py --port /dev/cu.usbmodemXXXX --seconds 10
+```
 
-Do not put keys or local URLs in source. Configure them on the device through
-NVS-backed `/api/config`.
+A good boot includes display readiness, Wi-Fi connection, Gemini endpoint
+configuration, on-device tool worker readiness, HTTP startup, and a stable
+Listening phase. Logs may report whether a secret is configured; they must
+never print its value.
 
-Fields used by Waveshare v1:
+## Runtime secrets
+
+The `app` NVS namespace contains:
 
 | Field | Purpose |
-|---|---|
-| `llm_api_key` / `gemini_api_key` | Gemini Live key, depending on the active config path |
-| `jarvis_mcp_url` | JarvisMCP `/act` endpoint |
-| `jarvis_mcp_key` | JarvisMCP bearer token |
-| `pairing_token` | Token for protected write/control routes |
+| --- | --- |
+| `wifi_ssid` / `wifi_password` | Wi-Fi station credentials |
+| `llm_api_key` | Gemini Live key |
+| `jarvis_mcp_url` | Prefer JarvisMCP `/device/v1/invoke`; legacy `/act` is compatibility-only |
+| `jarvis_mcp_key` | Dedicated, revocable JarvisNano device credential |
+| pairing-token hash | Authenticates Agent Link writes, Brain Link in/out, and tools configuration |
 
-Config readback must mask sensitive values. `/api/tools/status` reports whether
-Gemini and JarvisMCP are configured without exposing the actual values.
+`GET /api/cockpit` and `GET /api/gemini/live` expose only configured/readiness
+booleans and counters. They never return secret or endpoint values.
 
-## Live Device Checks
+The preferred JarvisMCP URL must be HTTPS. Never provision a general
+`MCP_API_KEYS` desktop credential onto the device.
 
-After the device is on Wi-Fi:
+## Live verification
+
+v5 does not currently advertise mDNS. Supply the real IP explicitly:
 
 ```bash
-export JARVIS_DEVICE_HOST=<device-host>
-scripts/live-device.py status --host "$JARVIS_DEVICE_HOST"
-scripts/live-device.py report --host "$JARVIS_DEVICE_HOST"
-scripts/live-device.py screen --host "$JARVIS_DEVICE_HOST" --save-sd
-scripts/live-device.py gemini-cycle --host "$JARVIS_DEVICE_HOST" --text "Say one short sentence." --report
+export JARVIS_DEVICE_HOST='<device-ip>'
+python3 scripts/live-device.py status
+python3 scripts/live-device.py report
+python3 scripts/live-device.py screen
+# For secured control tests: long-press the panel for 1.2 seconds, then pair
+# once. The token goes to macOS Keychain and is loaded automatically below.
+python3 scripts/jarvis-desk.py --host "$JARVIS_DEVICE_HOST" pair
+python3 scripts/live-device.py gemini-cycle \
+  --text 'Use the current_time tool and tell me the result.' \
+  --report
 ```
 
-The display snapshot routes are software mirrors:
+Read-only diagnostics work without pairing. Secured write/control commands
+send the host-bound Keychain token and never place it in argv or output.
 
-- `/api/display/snapshot.json` gives owner and mirror metadata.
-- `/api/display/snapshot.ppm` captures the active display owner, normally emote.
-- `/api/ui/snapshot.ppm` captures the UI framebuffer.
+The strongest automated checks are:
 
-Use [LIVE_DEVICE_DEBUG.md](LIVE_DEVICE_DEBUG.md) for the full acceptance matrix.
+- `/api/cockpit`: Wi-Fi connected, Gemini WebSocket open, voice Listening,
+  on-device tools ready/configured, display ready, nonzero FPS, zero flush
+  errors;
+- `/api/gemini/live`: bounded queues, voice-task heartbeat, tool call/result
+  counters;
+- `/api/display/snapshot.*`: software proof of pixels submitted to the panel;
+- `/api/audio/taps` and `/api/audio/tap.wav`: electrical/software-path proof;
+- `/api/diag/panel-touch`: control-path and human touch challenge.
 
-## Smoke Check
+A framebuffer mirror does not prove the physical AMOLED lit. A WAV buffer does
+not prove the speaker was audible. Record those as external human/camera
+observations instead of allowing a pleasant HTTP 200 to develop delusions of
+grandeur.
 
-After a build:
+## Local gates
 
 ```bash
-./scripts/smoke-build.sh
-```
+cmake -S components/jr_tools/host -B /tmp/jarvisnano-jr-tools
+cmake --build /tmp/jarvisnano-jr-tools --parallel
+ctest --test-dir /tmp/jarvisnano-jr-tools --output-on-failure
 
-Before pushing:
-
-```bash
+python3 -m unittest scripts/test_jarvis_desk.py
+node scripts/check-dashboard-js.mjs main/diagnostics.html
 git diff --check
 ./scripts/check-secrets.sh
 ```
 
-## Browser Flasher Status
-
-The dashboard WebSerial flasher is useful, but the current public browser bundle
-must be treated as board-specific. Do not assume it programs Waveshare unless
-`dashboard/firmware/manifest.json` and the published binary were intentionally
-updated from a Waveshare build.
-
-For Waveshare development and release candidates, use local build + host flash.
-
-## HTTP Reachability Matrix
-
-When the board boots but the dashboard cannot reach it:
+For Android compatibility checks:
 
 ```bash
-./scripts/http-matrix.sh "$JARVIS_DEVICE_HOST" esp-claw.local
+cd android
+./gradlew :app:testDebugUnitTest :app:assembleDebug \
+  :app:compileDebugAndroidTestKotlin
 ```
-
-The matrix covers health/status, config, web IM, battery/audio/touch/display
-diagnostics, and browser preflight behavior. If early endpoints pass but later
-ones hang, check for stale browser tabs holding many MCU HTTP sockets.
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---|---|
-| `idf.py: command not found` from host shell | Use `./scripts/bootstrap.sh build`; IDF runs in Docker. |
-| Display stuck on white dot or old face | Check `/api/display/snapshot.json` owner and freshness, then capture both display and UI snapshots. |
-| Snapshot differs from what your eyes see | Snapshot is a software mirror, not panel readback; investigate display owner transfer and flush path. |
-| App does not boot after successful flash | Check for ROM download mode; use repo flash/monitor scripts and avoid reset-line toggles. |
-| Bad config causes boot loop | Reflash with `ERASE_NVS=1` to wipe saved config. |
-| Voice path conflicts with audio level sampler | Stop the sampler; Gemini owns the mic during active sessions. |

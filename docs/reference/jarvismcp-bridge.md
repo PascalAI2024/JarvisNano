@@ -1,102 +1,80 @@
-# JarvisMCP Bridge
+# JarvisMCP device bridge
 
-**What it is** — The function-calling gateway between Gemini Live on-device and the JarvisMCP backend. When Gemini calls a declared function, the device dispatches it to a hosted `/act` endpoint over HTTPS with Bearer auth, receives a result, and sends a `toolResponse` back to the model.
+The v5 bridge is an asynchronous ESP32 component in
+`components/jr_tools`. Gemini declares a small function catalogue; the model
+chooses a tool and supplies bounded JSON arguments; the worker performs HTTPS
+on the physical device and returns a Gemini `toolResponse`.
 
-**How we use it here** — `cap_gemini_live.c` declares function tools in the Gemini setup frame. When a `toolCall` frame arrives, `gl_run_tool_via_mcp()` POSTs `{"code": "..."}` to the configured endpoint, parses `{"ok": true, "result": "..."}`, and builds the `toolResponse`. The endpoint URL and Bearer key are stored in NVS only — never in source.
+No Android or desktop companion participates in this loop.
 
----
+## Security boundary
 
-## Security rule
+- Store `jarvis_mcp_url` and `jarvis_mcp_key` only in the `app` NVS namespace.
+- Use a dedicated, revocable JarvisNano credential.
+- Prefer JarvisMCP `POST /device/v1/invoke`. It accepts typed tool names and
+  arguments, never client-supplied JavaScript.
+- The firmware still supports an already-provisioned `/act` endpoint for
+  compatibility. Its locally-owned templates prevent model code injection,
+  but a stolen legacy bearer retains the gateway authority assigned to that
+  key. Move production devices to the typed route.
+- Diagnostics expose only configured/ready/status counters. They never return
+  endpoint or credential values.
+- HTTPS is mandatory for JarvisMCP calls.
 
-**No secrets in source or reference pages.** The `/act` endpoint URL and Bearer key must NEVER appear in source code, config files committed to this repo, or any reference page. They live in NVS, set via `POST /api/config` with fields `jarvis_mcp_url` and `jarvis_mcp_key` (group `jarvis`). If you see a URL or token in source, it is a security incident.
+## Runtime flow
 
----
+1. Gemini sends `toolCall` with its original string call ID.
+2. The voice owner deep-copies the call into the bounded `jr_tools` queue.
+3. One worker builds either a typed device request or a fixed legacy template.
+   A typed `remember` also receives a stable top-level `request_id` derived for
+   that Gemini call.
+4. The worker POSTs over HTTPS with `Authorization: Bearer <device key>`.
+5. A bounded `{ok,result}` response is copied to the result queue.
+6. The voice owner rejects stale session generations and sends a Gemini
+   `toolResponse` using the original call ID and tool name.
 
-## Findings & gotchas
+Tool HTTPS never runs on the voice task. Queue depth, response size, timeout,
+cancellation, and session generations are bounded.
 
-**[2026-05-21] A new config field must be registered in THREE places**
+## Catalogue
 
-The NVS config system requires registration in exactly three files. Missing the third causes POST to return `applied: N` silently — the value appears accepted but is never saved to NVS, so readback is always empty.
+Read tools:
 
-The three required registrations:
+- `current_time`
+- `weather`
+- `crypto_price`
+- `recall_memory`
+- `wikipedia`
+- `country_info`
 
-1. **`app_config.h`** — add the field to the `app_config_t` struct:
-   ```c
-   // esp-claw/application/edge_agent/components/app_config/include/app_config.h:48-49
-   char jarvis_mcp_key[APP_CONFIG_STR_LEN];
-   char jarvis_mcp_url[APP_CONFIG_STR_LEN];
-   ```
+`remember` is mutating and is dispatched only after an ALLOW tap on the
+physical consent card. Its note is limited to 47 panel-renderable characters.
+The firmware rejects invalid or unrenderable notes before consent and displays
+the exact accepted note on the DENY/ALLOW card. `physical_confirmed` is an
+internal job field, not a Gemini argument; the typed request sends it as
+confirmation together with the stable top-level `request_id` required for the
+write.
 
-2. **`app_config.c` — `s_fields[]` table** — add an `APP_CONFIG_FIELD` macro entry (the NVS save/load table):
-   ```c
-   // app_config.c:77-78
-   APP_CONFIG_FIELD(jarvis_mcp_key, "jarvis_mcp_key", APP_DEFAULT_JARVIS_MCP_KEY),
-   APP_CONFIG_FIELD(jarvis_mcp_url, "jarvis_mcp_url", APP_DEFAULT_JARVIS_MCP_URL),
-   ```
+The local consent card owns the panel and control-intent lane until ALLOW,
+DENY, cancellation, or the 15-second timeout resolves it. Other control-intent
+routes return `423 Locked`, and Brain inbox attempts return `409 Conflict`, so
+remote surfaces cannot replace or dismiss the physical write prompt.
 
-3. **`http_server_config_api.c` — `CONFIG_FIELDS[]` catalogue** — add a `CONFIG_FIELD` macro entry (the HTTP API exposure table):
-   ```c
-   // http_server_config_api.c:66-67
-   CONFIG_FIELD("jarvis", jarvis_mcp_key),
-   CONFIG_FIELD("jarvis", jarvis_mcp_url),
-   ```
+## Configuration truth
 
-If you miss `s_fields[]` (step 2), the HTTP POST accepts the field name but `settings_store_set_string` is never called — NVS is unchanged. If you miss `CONFIG_FIELDS[]` (step 3), the field is not exposed via the HTTP API at all.
+The NVS field names are each within ESP-IDF's 15-character key limit:
 
-Source: `app_config.h:48-49`, `app_config.c:77-78`, `http_server_config_api.c:66-67` (all verified).
+- `jarvis_mcp_url`
+- `jarvis_mcp_key`
 
-**[2026-05-21] NVS key names must be 15 characters or fewer**
+An empty field is a supported unconfigured state. The device still boots and
+returns a structured `not_configured` result to Gemini. Do not interpret a
+successful firmware build as proof that production gateway credentials have
+been provisioned.
 
-ESP-IDF's NVS key name limit is `NVS_KEY_NAME_MAX_SIZE` = 15 characters (null-terminated). Keys `"jarvis_mcp_key"` and `"jarvis_mcp_url"` are each 14 characters — within the limit. If you add a new field with a longer key, `nvs_set_str` will return `ESP_ERR_NVS_KEY_TOO_LONG` and the write will silently fail in some IDF versions.
-
-Source: `cap_scheduler_store.c:93` (`char key[NVS_KEY_NAME_MAX_SIZE]` usage pattern); ESP-IDF NVS docs.
-
-**[2026-05-21] Gateway pattern: `executeInSandbox` call and response**
-
-The dispatch flow:
-1. Gemini sends `toolCall` with `{"toolCall": {"functionCalls": [{"id": "...", "name": "...", "args": {...}}]}}`.
-2. Device POSTs `{"code": "<generated code string>"}` to the `/act` endpoint with `Authorization: Bearer <key>`.
-3. Gateway runs `executeInSandbox({code, mode: "execute"})`.
-4. Gateway returns `{"ok": true, "result": "..."}` (or `{"ok": false, ...}`).
-5. Device builds `toolResponse` with the result and sends it back to Gemini.
-
-Source: `cap_gemini_live.c:614-676` (gateway call and toolResponse assembly).
-
-**[2026-05-21] `gl_run_tool_via_mcp` is blocking — model is paused during execution**
-
-The gateway HTTP call in `gl_run_tool_via_mcp` is blocking. While it is in flight, the Gemini session is paused (the model waits for the tool response). This is acceptable for short tool calls but will cause perceived latency for slow network operations.
-
-Source: `cap_gemini_live.c:614` (comment: "Blocking — only called from a toolCall (model is paused)").
-
-**[2026-05-21] Gateway fields are logged at startup as unconfigured if NVS is empty**
-
-If `jarvis_mcp_url` is empty in NVS, `gl_run_tool_via_mcp` logs a warning and returns a failure response without attempting the HTTP call. The session continues; the tool call returns an error result to the model.
-
-Source: `cap_gemini_live.c:618` (warning log: "JarvisMCP not configured (set jarvis_mcp_url + jarvis_mcp_key via /api/config)").
-
----
-
-## Primary sources
-
-| Source | Notes |
-|--------|-------|
-| `firmware/components/cap_gemini_live/src/cap_gemini_live.c:614-676` | Gateway call, toolCall handler, toolResponse assembly. |
-| `esp-claw/application/edge_agent/components/app_config/include/app_config.h:48-49` | `jarvis_mcp_key` and `jarvis_mcp_url` field declarations. |
-| `esp-claw/application/edge_agent/components/app_config/app_config.c:77-78` | `s_fields[]` NVS save/load table entries. |
-| `esp-claw/application/edge_agent/components/http_server/http_server_config_api.c:66-67` | `CONFIG_FIELDS[]` HTTP API catalogue entries. |
-
----
-
-## Open questions
-
-- Should `gl_run_tool_via_mcp` be made async (enqueue the HTTP call, respond to Gemini when it completes) to reduce session latency?
-- Is there a timeout configured for the gateway HTTP call? What happens if the gateway is unreachable?
-- Should the gateway URL and key be cached in RAM at session start to avoid repeated NVS reads during a live call?
-
----
-
-## See also
-
-- [gemini-live-api.md](./gemini-live-api.md) — tool call frame structure (`toolCall` / `toolResponse`).
-- [llm-config.md](./llm-config.md) — NVS config system; the same three-file pattern applies to all new fields.
-- [build-toolchain.md](./build-toolchain.md) — NVS namespace, `settings_store` component.
+After a physical pairing claim, configuration is managed through
+`GET/POST /api/tools/config`. Both methods require the pairing token and
+`X-JarvisNano-Control: 1`. GET exposes only configured and route-kind booleans.
+POST accepts exactly `{url,key}`; the URL must be HTTPS and end in
+`/device/v1/invoke` or `/act`. Two empty strings clear both values. The worker
+reloads the NVS values without returning or logging them.
