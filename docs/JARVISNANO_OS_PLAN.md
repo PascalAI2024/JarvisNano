@@ -44,19 +44,61 @@ which PSRAM cannot serve. Voice regressed end to end.
 **The handshake threshold sits between 7,680 B and 10,752 B of largest
 contiguous block.** Total free is not the predictor; contiguity is.
 
-Consequences for the plan:
-- Phase 1 ships the samplers **on-demand** (started from `/api/sensors`), not at
-  boot. Phase 1's acceptance is met without spending the budget.
-- **Phase 2 gains a prerequisite task, ahead of the arc surface:** raise the
-  internal-RAM headroom. Cheapest lever first — `jr_voice` is created with a
-  **20,480 B** stack (`main.c`, `xTaskCreatePinnedToCore(... 20480 ...)`);
-  measure `uxTaskGetStackHighWaterMark()` and reclaim the slack. Other levers:
-  `CONFIG_MBEDTLS_HARDWARE_AES=n` (software AES frees DMA internal, costs CPU),
-  trimming WiFi static buffers, or PSRAM task stacks via `xTaskCreateWithCaps`
-  (only for tasks that never run with the flash cache disabled).
-- Until that lands, **nothing may depend on an always-on sampler** — which
-  includes GEST-01..06, the tilt UI, and PWR-06's battery arc. Phase 3 is
-  gated on it.
+### RESOLVED 2026-07-19 — the budget is now healthier *with* always-on sensors
+### than it used to be *without* them
+
+| Configuration | free internal | largest block | voice |
+|---|---|---|---|
+| Original baseline, samplers OFF | 22,771 B | 13,824 B | ✅ |
+| Original, samplers ON (on demand) | 15,635 B | 10,752 B | ✅ marginal |
+| Original, samplers ON at boot | 13,803 B | 7,680 B | ❌ broken |
+| **Optimized, samplers ON at boot** | **26,783 B** | **13,824 B** | ✅ **0/3 reconnect failures, deaths=0** |
+
+Four changes got there, in order of value:
+
+1. **PSRAM task stacks for both samplers** (`xTaskCreateWithCaps` with
+   `MALLOC_CAP_SPIRAM`, guarded, with an internal fallback). This is the one
+   that mattered: it removes the samplers' 7,136 B internal cost outright.
+   The pattern was already proven in-tree by `jr_tools`. Tasks created this way
+   MUST be torn down with `vTaskDeleteWithCaps` or the stack leaks — both
+   components track which path they took. Safe here because neither task ever
+   touches flash, so neither runs with the cache disabled.
+2. **Recovering the WiFi/LWIP tuning into `sdkconfig.defaults`** — see below.
+3. **Right-sizing four stacks from measured high-water marks** via the new
+   `/api/diag/tasks`: `gfx_render` 12288→5120 (peak use 1,784 B), `jr_touch`
+   8192→5120, `jr_present` 6144→5120, `websocket_task` 8192→6144. Total 13,312 B
+   reclaimed, every one left with >2.6 KB margin.
+4. **Raising `httpd` 6144→8192.** Its measured slack was 1,224 B — the thinnest
+   in the build. Some of the reclaim is deliberately spent buying safety back.
+
+**`jr_voice` was deliberately NOT reduced, and that is the instructive part.**
+A first pass measured its peak at 15,236 B and cut 20480→17408. Three
+disarm/rearm reconnect cycles then drove min-ever-free to **1,412 B** — the
+reconnect path is deeper than any steady voice turn. 8% headroom on the task
+owning TLS, JSON and tool dispatch is not worth 3 KB, so it was restored to
+20480 (~4.5 KB margin, measured 5,148 B after the same churn).
+
+**The lesson, which applies to every future stack change here: right-size from
+adversarial exercise, never from one happy-path run.** Reconnect churn, tool
+calls and error paths are where stacks actually peak. `/api/diag/tasks` reports
+min-ever-free per task; read it *after* abusing the device, not before.
+
+### The tuning was living in a gitignored file
+
+`CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10`, `CONFIG_ESP_WIFI_RX_BA_WIN=6` and
+`CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=4` had been tuned by hand directly in
+`sdkconfig`, which is **gitignored**. A single `idf.py set-target` reverted them
+to Kconfig defaults, cost ~16 KB of internal RAM (22,771 → 6,467 free; 13,824 →
+2,432 largest) and broke voice — with no diff to show for it. They now live in
+tracked `sdkconfig.defaults` and survive a full reconfigure. Anything tuned for
+memory belongs there, never in `sdkconfig` alone.
+
+Consequence for the plan: **Phase 3 is no longer gated.** Always-on sensors are
+viable, so GEST-01..06, the tilt UI and PWR-06's battery arc can proceed.
+Remaining caution: after a voice turn the largest block settles at ~8,704 B,
+which is above the ~7,680 B failure point but not by much — the handshake itself
+occurs from the higher steady state, and 3/3 reconnects passed. Re-check
+`/api/diag/tasks` before adding anything else that holds internal memory.
 
 ## SECURITY — Google API key is logged in plaintext (found 2026-07-18)
 

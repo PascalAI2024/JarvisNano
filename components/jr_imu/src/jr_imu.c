@@ -15,7 +15,9 @@
 #include "esp_board_manager.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"   /* xTaskCreateWithCaps / vTaskDeleteWithCaps */
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
@@ -68,6 +70,9 @@ static uint8_t s_addr;
 static bool    s_ready;
 static TaskHandle_t s_task;
 static volatile bool s_run;
+/* True when the task stack came from PSRAM via xTaskCreateWithCaps — such a
+ * task MUST be torn down with vTaskDeleteWithCaps or its stack leaks. */
+static bool s_ext_stack;
 
 /* Published snapshot + its guard. The sampler holds the mutex only long enough
  * to memcpy the struct, so jr_imu_read() never meaningfully blocks. */
@@ -269,8 +274,14 @@ static void imu_task(void *arg)
         vTaskDelayUntil(&last_wake, IMU_SAMPLE_GAP_TICKS);
     }
 
+    const bool ext = s_ext_stack;
     s_task = NULL;
-    vTaskDelete(NULL);
+    s_ext_stack = false;
+    if (ext) {
+        vTaskDeleteWithCaps(NULL);   /* frees the PSRAM stack too */
+    } else {
+        vTaskDelete(NULL);
+    }
 }
 
 esp_err_t jr_imu_start(void)
@@ -283,8 +294,29 @@ esp_err_t jr_imu_start(void)
         return err;
     }
     s_run = true;
-    if (xTaskCreate(imu_task, "jr_imu", IMU_TASK_STACK, NULL, IMU_TASK_PRIO,
-                    &s_task) != pdPASS) {
+    /* Put the sampler stack in PSRAM. Internal RAM is the scarcest resource on
+     * this board — the Gemini TLS handshake fails once the largest contiguous
+     * INTERNAL block drops under ~8 KB — and this task never touches flash, so
+     * it is never running with the cache disabled. Same guarded pattern as
+     * jr_tools, which has shipped a PSRAM stack here for a while. Falls back to
+     * an internal stack if EXT_MEM task creation is unavailable or fails. */
+    BaseType_t ok = pdFAIL;
+#if defined(CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM) && \
+    CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM && defined(CONFIG_SPIRAM) && \
+    CONFIG_SPIRAM
+    ok = xTaskCreateWithCaps(imu_task, "jr_imu", IMU_TASK_STACK, NULL,
+                             IMU_TASK_PRIO, &s_task,
+                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_ext_stack = (ok == pdPASS);
+    if (ok != pdPASS) {
+        s_task = NULL;
+    }
+#endif
+    if (ok != pdPASS) {
+        ok = xTaskCreate(imu_task, "jr_imu", IMU_TASK_STACK, NULL,
+                         IMU_TASK_PRIO, &s_task);
+    }
+    if (ok != pdPASS) {
         s_run = false;
         ESP_LOGE(TAG, "sampler task creation failed");
         return ESP_ERR_NO_MEM;

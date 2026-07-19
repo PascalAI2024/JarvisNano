@@ -13,7 +13,9 @@
 #include "esp_board_manager.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"   /* xTaskCreateWithCaps / vTaskDeleteWithCaps */
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
@@ -43,6 +45,9 @@ static i2c_master_dev_handle_t s_dev;
 static bool s_ready;
 static TaskHandle_t s_task;
 static volatile bool s_run;
+/* True when the task stack came from PSRAM via xTaskCreateWithCaps — such a
+ * task MUST be torn down with vTaskDeleteWithCaps or its stack leaks. */
+static bool s_ext_stack;
 
 static jr_power_t s_snap;
 static int64_t    s_snap_us;
@@ -176,8 +181,14 @@ static void power_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(POWER_SAMPLE_PERIOD_MS));
     }
 
+    const bool ext = s_ext_stack;
     s_task = NULL;
-    vTaskDelete(NULL);
+    s_ext_stack = false;
+    if (ext) {
+        vTaskDeleteWithCaps(NULL);   /* frees the PSRAM stack too */
+    } else {
+        vTaskDelete(NULL);
+    }
 }
 
 esp_err_t jr_power_start(void)
@@ -190,8 +201,26 @@ esp_err_t jr_power_start(void)
         return err;
     }
     s_run = true;
-    if (xTaskCreate(power_task, "jr_power", POWER_TASK_STACK, NULL,
-                    POWER_TASK_PRIO, &s_task) != pdPASS) {
+    /* PSRAM stack — internal RAM is the scarcest resource on this board and this
+     * task never touches flash. Same guarded pattern as jr_tools/jr_imu, with an
+     * internal-stack fallback. */
+    BaseType_t ok = pdFAIL;
+#if defined(CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM) && \
+    CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM && defined(CONFIG_SPIRAM) && \
+    CONFIG_SPIRAM
+    ok = xTaskCreateWithCaps(power_task, "jr_power", POWER_TASK_STACK, NULL,
+                             POWER_TASK_PRIO, &s_task,
+                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_ext_stack = (ok == pdPASS);
+    if (ok != pdPASS) {
+        s_task = NULL;
+    }
+#endif
+    if (ok != pdPASS) {
+        ok = xTaskCreate(power_task, "jr_power", POWER_TASK_STACK, NULL,
+                         POWER_TASK_PRIO, &s_task);
+    }
+    if (ok != pdPASS) {
         s_run = false;
         ESP_LOGE(TAG, "sampler task creation failed");
         return ESP_ERR_NO_MEM;

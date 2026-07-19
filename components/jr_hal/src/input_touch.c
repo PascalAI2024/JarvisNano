@@ -27,7 +27,8 @@
 #include "freertos/task.h"
 
 #define TOUCH_EVENT_QUEUE_LEN       8
-#define TOUCH_TASK_STACK_BYTES      8192
+/* Measured peak 2,132 B; 5120 leaves 2,988 B margin. Was 8192. */
+#define TOUCH_TASK_STACK_BYTES      5120
 #define TOUCH_TASK_PRIORITY         3
 #define TOUCH_ACTIVE_POLL_MS        40
 #define TOUCH_FALLBACK_POLL_MS      80

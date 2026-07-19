@@ -201,7 +201,11 @@ static jr_err_t dev_connect(void *ctx, const char *url)
     cfg.uri                    = use;   /* full wss URL incl. ?key= (overrides host/path) */
     cfg.transport              = WEBSOCKET_TRANSPORT_OVER_SSL;
     cfg.buffer_size            = 4096;
-    cfg.task_stack             = 8192;
+    /* Measured peak 3,596 B over full voice turns; 6144 leaves 2,548 B margin.
+     * Was 8192. Internal RAM is the binding resource — see the budget table in
+     * docs/JARVISNANO_OS_PLAN.md. Re-measure /api/diag/tasks after any change to
+     * frame sizes or buffer_size above. */
+    cfg.task_stack             = 6144;
     cfg.task_prio              = 5;
     cfg.network_timeout_ms     = 10000;
     cfg.reconnect_timeout_ms   = 5000;

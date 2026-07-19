@@ -33,10 +33,16 @@ static const char *TAG = "jr_display";
 
 #define JR_DISPLAY_MOUNT_POINT       "/emote"
 #define JR_DISPLAY_PARTITION         "emote_assets"
-#define JR_DISPLAY_TASK_STACK        6144
+/* Measured peak 2,496 B; 5120 leaves 2,624 B margin. Was 6144. */
+#define JR_DISPLAY_TASK_STACK        5120
 #define JR_DISPLAY_TASK_PRIORITY     3
 #define JR_DISPLAY_TASK_CORE         0
-#define JR_DISPLAY_RENDER_STACK      12288
+/* Right-sized 2026-07-19 from measured high-water: peak use 1,784 B under a
+ * full exercise (voice turns + transitions + snapshot), leaving 3,336 B margin
+ * — 187% headroom. Was 12288. Internal RAM is the binding resource on this
+ * board; see docs/JARVISNANO_OS_PLAN.md "Internal RAM budget". Re-measure via
+ * /api/diag/tasks after any render change before trusting this number. */
+#define JR_DISPLAY_RENDER_STACK      5120
 #define JR_DISPLAY_RENDER_PRIORITY   4
 #define JR_DISPLAY_RENDER_CORE       0
 /* 24, not 30: the measured CO5300 QSPI ceiling is ~23 fps full-frame — v4

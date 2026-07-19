@@ -86,3 +86,36 @@ CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
 #     ~45 KB TLS handshake alongside voice+display+http: observed live as
 #     mbedtls_ssl_setup -0x7F00 (ALLOC_FAILED) on every Gemini WSS connect. ---
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# --- WiFi/LWIP internal-RAM tuning. THESE MUST LIVE HERE, NOT ONLY IN sdkconfig.
+#
+#     Recovered 2026-07-19 after `idf.py set-target` (RECONFIGURE=1) silently
+#     reverted them to Kconfig defaults and cost ~16 KB of internal RAM, taking
+#     free internal from 22,771 B to 6,467 B and the largest contiguous block
+#     from 13,824 B to 2,432 B. The Gemini TLS handshake needs DMA-capable
+#     INTERNAL memory (esp-aes), so that is the difference between a working
+#     voice path and 'esp-aes: Failed to allocate memory'.
+#
+#     They had been tuned by hand directly in `sdkconfig`, which is GITIGNORED
+#     (.gitignore) — so the tuning was invisible to git, unreviewable, and one
+#     reconfigure away from silent loss. Declaring them here makes the build
+#     reproducible from a clean checkout. Do not remove them without measuring
+#     largest_internal_block via /api/diag/tasks first.
+#
+#     Static RX buffers dominate: each is ~1600 B of internal RAM, so 16 -> 10
+#     alone is ~9.6 KB. RX_BA_WIN must stay <= STATIC_RX_BUFFER_NUM. ---
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP_WIFI_RX_BA_WIN=6
+CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=4
+
+# --- Task introspection for the internal-RAM budget work (Phase 2).
+#     Largest contiguous INTERNAL block is the binding constraint on this board:
+#     the Gemini TLS handshake fails ('esp-aes: Failed to allocate memory') once
+#     it drops under ~8 KB, because the AES accelerator needs DMA-capable
+#     internal memory that PSRAM cannot serve. Trace facility + stats let
+#     /api/diag/tasks report per-task stack high-water marks so stacks are
+#     right-sized from MEASUREMENT rather than guesswork.
+#     Cost is a few hundred bytes of internal RAM; it pays for itself many times
+#     over. See docs/JARVISNANO_OS_PLAN.md "Internal RAM budget". ---
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS=y

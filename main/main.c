@@ -1834,6 +1834,64 @@ static int shade_control_from_point(uint16_t x, uint16_t y)
     return -1;
 }
 
+/* /api/diag/tasks — per-task stack high-water marks, for right-sizing stacks.
+ *
+ * "High-water" is FreeRTOS's minimum-ever-free figure in BYTES on ESP-IDF: the
+ * closest that task has come to overflowing since it started. Slack = stack
+ * size minus peak usage, and slack in INTERNAL RAM is exactly what the TLS
+ * handshake is starving for (see docs/JARVISNANO_OS_PLAN.md "Internal RAM
+ * budget"). Sorted by headroom so the biggest reclaim candidates come first.
+ *
+ * Read this AFTER exercising the device (a full voice turn, a display
+ * transition) — a task that has not yet hit its worst case reports misleadingly
+ * generous headroom, and shrinking a stack on that basis is how you get a
+ * stack-overflow panic three weeks later. */
+static esp_err_t tasks_diag_handler(httpd_req_t *req)
+{
+    const UBaseType_t count = uxTaskGetNumberOfTasks();
+    TaskStatus_t *snap = calloc(count, sizeof *snap);
+    if (snap == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_OK;
+    }
+    const UBaseType_t got = uxTaskGetSystemState(snap, count, NULL);
+
+    char *body = malloc(4096);
+    if (body == NULL) {
+        free(snap);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_OK;
+    }
+    int off = snprintf(body, 4096,
+        "{\"free_internal\":%u,\"largest_internal_block\":%u,\"tasks\":[",
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+
+    for (UBaseType_t i = 0; i < got && off > 0 && off < 4000; ++i) {
+        off += snprintf(body + off, (size_t)(4096 - off),
+            "%s{\"name\":\"%s\",\"prio\":%u,\"stack_free\":%u}",
+            i ? "," : "",
+            snap[i].pcTaskName ? snap[i].pcTaskName : "?",
+            (unsigned)snap[i].uxCurrentPriority,
+            (unsigned)snap[i].usStackHighWaterMark);
+    }
+    if (off > 0 && off < 4090) {
+        off += snprintf(body + off, (size_t)(4096 - off), "]}");
+    }
+    free(snap);
+
+    if (off <= 0 || off >= 4090) {
+        free(body);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "task encoding overflow");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, body, off);
+    free(body);
+    return ESP_OK;
+}
+
 /* /api/sensors — live IMU + battery telemetry. Both reads are non-blocking
  * snapshot copies (their sampler tasks own the shared I2C bus), so this handler
  * never parks the httpd task on a transaction. Phase 1 acceptance gate. */
@@ -3727,7 +3785,10 @@ static void start_diag_http(void)
     httpd_handle_t server = NULL;
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = 80;
-    cfg.stack_size = 6144;
+    /* Measured slack was only 1,224 B under load — the thinnest margin in the
+     * build, and diag handlers keep growing. Raised from 6144. Some of the
+     * reclaim from the render/touch stacks is deliberately spent here. */
+    cfg.stack_size = 8192;
     cfg.max_uri_handlers = 30;
     cfg.max_resp_headers = 16;
     cfg.lru_purge_enable = false;
@@ -3753,6 +3814,8 @@ static void start_diag_http(void)
           .handler = touch_status_handler },
         { .uri = "/api/sensors", .method = HTTP_GET,
           .handler = sensors_handler },
+        { .uri = "/api/diag/tasks", .method = HTTP_GET,
+          .handler = tasks_diag_handler },
         { .uri = "/api/diag/panel-touch", .method = HTTP_POST,
           .handler = panel_touch_control_handler },
         { .uri = "/api/ui/shade", .method = HTTP_POST,
@@ -4448,6 +4511,18 @@ void app_main(void)
     ESP_LOGI(TAG, "reserving voice task before hardware bring-up");
     BaseType_t task_ok = xTaskCreatePinnedToCore(
         voice_task, "jr_voice", 20480, NULL, 7, &s_voice_task, 1);
+    /* DELIBERATELY NOT REDUCED — and this is a worked example of why stack
+     * right-sizing needs adversarial exercise, not one happy-path run.
+     *
+     * A first pass measured peak use at 15,236 B and cut this to 17,408. Three
+     * disarm/rearm reconnect cycles then drove min-ever-free down to 1,412 B
+     * (peak 15,996 B) — the reconnect path is deeper than a steady voice turn,
+     * and 8% headroom on the task that owns TLS, JSON parsing and tool dispatch
+     * is not a trade worth 3 KB. Restored to 20480 (~4.5 KB margin).
+     *
+     * The other stacks in this build WERE reduced, because their call graphs are
+     * simple and bounded (render, touch, present, websocket). This one is not.
+     * Re-measure via /api/diag/tasks after any transport or tool change. */
     if (task_ok != pdPASS) {
         s_voice_task = NULL;
         ESP_LOGE(TAG,
@@ -4462,17 +4537,27 @@ void app_main(void)
         ESP_LOGE(TAG, "jr_hal_init failed: %s — continuing headless", esp_err_to_name(hal_err));
     }
 
-    /* Sensor samplers are NOT started here — deliberately. Measured 2026-07-18:
-     * starting both at boot costs ~7 KB of internal RAM (two task stacks + TCBs),
-     * which drops free internal to ~13.8 KB and makes the Gemini TLS handshake
-     * fail with `esp-aes: Failed to allocate memory` — the AES accelerator needs
-     * DMA-capable INTERNAL memory, which PSRAM cannot serve. Voice regressed
-     * end-to-end. See docs/JARVISNANO_OS_PLAN.md "Internal RAM budget".
+    /* Sensor samplers, always-on from boot. This was NOT safe on 2026-07-18 —
+     * two internal-RAM task stacks cost ~7 KB, dropped the largest contiguous
+     * internal block to 7,680 B, and the Gemini TLS handshake died with
+     * `esp-aes: Failed to allocate memory` (the AES accelerator needs
+     * DMA-capable INTERNAL memory that PSRAM cannot serve).
      *
-     * They are started on demand instead (idempotently, from /api/sensors).
-     * Phase 2 must fix the internal-RAM budget properly before anything that
-     * renders continuously — the HUD, gestures, the battery arc — can depend on
-     * an always-on sampler. That is now a tracked prerequisite, not a surprise. */
+     * It is safe now because both samplers allocate their stacks from PSRAM via
+     * xTaskCreateWithCaps, so they cost internal RAM only for their TCBs. That,
+     * plus right-sizing every oversized stack from measured high-water marks,
+     * turned the budget from "one feature away from breaking voice" into real
+     * headroom. Numbers in docs/JARVISNANO_OS_PLAN.md "Internal RAM budget".
+     *
+     * Neither is fatal: a missing IMU or PMIC just reports available=false. */
+    esp_err_t imu_err = jr_imu_start();
+    if (imu_err != ESP_OK) {
+        ESP_LOGW(TAG, "imu sampler unavailable: %s", esp_err_to_name(imu_err));
+    }
+    esp_err_t pwr_err = jr_power_start();
+    if (pwr_err != ESP_OK) {
+        ESP_LOGW(TAG, "battery sampler unavailable: %s", esp_err_to_name(pwr_err));
+    }
 
     /* pull the concrete ports. The real presenter is preferred; its panel +
      * SPIFFS + gfx bring-up runs async in its own task, so this never stalls
