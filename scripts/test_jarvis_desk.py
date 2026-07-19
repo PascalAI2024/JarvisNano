@@ -39,7 +39,7 @@ class FakeKeychain:
 
 class FakeClient:
     def __init__(self) -> None:
-        self.base_url = "http://192.168.50.98"
+        self.base_url = "http://192.0.2.10"
         self.gets: list[tuple[str, str | None]] = []
         self.posts: list[tuple[str, dict[str, Any], str | None]] = []
         self.next_inbox_seq = 7
@@ -108,7 +108,7 @@ class DeskCliTests(unittest.TestCase):
         return desk.build_parser({}).parse_args(list(argv))
 
     def test_normalize_base_url_and_reject_credentials(self) -> None:
-        self.assertEqual(desk.normalize_base_url("192.168.50.98"), "http://192.168.50.98")
+        self.assertEqual(desk.normalize_base_url("192.0.2.10"), "http://192.0.2.10")
         self.assertEqual(desk.normalize_base_url("https://device.test:8443/"), "https://device.test:8443")
         with self.assertRaises(desk.DeskError):
             desk.normalize_base_url("http://user:password@device.test")
@@ -120,8 +120,8 @@ class DeskCliTests(unittest.TestCase):
         token = desk.resolve_token(
             keychain,
             "account",
-            {"JARVIS_DESK_TOKEN": "from-env"},
-            "http://192.168.50.98",
+            {"JARVIS_DESK_TOKEN": "from-env", "JARVIS_DEVICE_HOST": "192.0.2.10"},
+            "http://192.0.2.10",
         )
         self.assertEqual(token, "from-keychain")
 
@@ -130,8 +130,8 @@ class DeskCliTests(unittest.TestCase):
         token = desk.resolve_token(
             keychain,
             "account",
-            {"JARVIS_DESK_TOKEN": "from-env"},
-            "http://192.168.50.98",
+            {"JARVIS_DESK_TOKEN": "from-env", "JARVIS_DEVICE_HOST": "192.0.2.10"},
+            "http://192.0.2.10",
         )
         self.assertEqual(token, "from-env")
 

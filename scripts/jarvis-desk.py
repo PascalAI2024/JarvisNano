@@ -20,7 +20,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence, TextIO
 
 
-DEFAULT_DEVICE_HOST = "192.168.50.98"
+# Device-specific identifiers (IPs, MACs, SSIDs) must never be committed to this repo.
+# Override with JARVIS_DEVICE_HOST=<ip-or-host> in the environment, or --host.
+DEFAULT_DEVICE_HOST = "esp-claw.local"
 DEFAULT_TIMEOUT_SECONDS = 5.0
 DEFAULT_WATCH_INTERVAL_SECONDS = 0.75
 KEYCHAIN_SERVICE = "com.ingeniousdigital.jarvisnano.desk"

@@ -1,0 +1,258 @@
+# v5 boot log — jarvisrobot_v5 (build 2026-07-11 22:10), captured 2026-07-18
+# Board: Waveshare ESP32-S3-Touch-AMOLED-1.75 | port /dev/cu.usbmodem1101 @115200
+# Reset: USB-Serial-JTAG RTS pulse (normal boot). Network identifiers redacted.
+# Result: BOOTS CLEAN. Display 466x466@24fps, assets mounted, faces rendering,
+#   WiFi associated, audio adc+dac+aec up, Gemini Live handshake -> Listening, VAD firing.
+#
+nknown data     01 82 00420000 006e0000
+I (28) boot:  4 storage          Unknown data     01 81 00b00000 004f0000
+I (28) boot:  5 coredump         Unknown data     01 03 00ff0000 00010000
+I (29) boot: End of partition table
+I (29) esp_image: segment 0: paddr=00020020 vaddr=3c110020 size=58e74h (364148) map
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x15 (USB_UART_CHIP_RESET),boot:0x2b (SPI_FAST_FLASH_BOOT)
+Saved PC:0x40056f6f
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2820,len:0x152c
+load:0x403c8700,len:0xce4
+load:0x403cb700,len:0x2efc
+entry 0x403c8920
+I (24) boot: ESP-IDF v5.5.4 2nd stage bootloader
+I (24) boot: compile time Jul  9 2026 21:48:21
+I (25) boot: Multicore bootloader
+I (25) boot: chip revision: v0.2
+I (25) boot: efuse block revision: v1.4
+I (25) boot.esp32s3: Boot SPI Speed : 80MHz
+I (25) boot.esp32s3: SPI Mode       : DIO
+I (26) boot.esp32s3: SPI Flash Size : 16MB
+I (26) boot: Enabling RNG early entropy source...
+I (26) boot: Partition Table:
+I (26) boot: ## Label            Usage          Type ST Offset   Length
+I (26) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+I (27) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+I (27) boot:  2 factory          factory app      00 00 00020000 00400000
+I (28) boot:  3 emote_assets     Unknown data     01 82 00420000 006e0000
+I (28) boot:  4 storage          Unknown data     01 81 00b00000 004f0000
+I (28) boot:  5 coredump         Unknown data     01 03 00ff0000 00010000
+I (29) boot: End of partition table
+I (29) esp_image: segment 0: paddr=00020020 vaddr=3c110020 size=58e74h (364148) map
+I (94) esp_image: segment 1: paddr=00078e9c vaddr=3fc9fa00 size=0717ch ( 29052) load
+I (100) esp_image: segment 2: paddr=00080020 vaddr=42000020 size=10fd34h (1113396) map
+I (297) esp_image: segment 3: paddr=0018fd5c vaddr=3fca6b7c size=0016ch (   364) load
+I (297) esp_image: segment 4: paddr=0018fed0 vaddr=40374000 size=1b988h (113032) load
+I (322) esp_image: segment 5: paddr=001ab860 vaddr=50000000 size=00020h (    32) load
+I (333) boot: Loaded app from partition at offset 0x20000
+I (334) boot: Disabling RNG early entropy source...
+I (335) octal_psram: vendor id    : 0x0d (AP)
+I (335) octal_psram: dev id       : 0x02 (generation 3)
+I (335) octal_psram: density      : 0x03 (64 Mbit)
+I (335) octal_psram: good-die     : 0x01 (Pass)
+I (336) octal_psram: Latency      : 0x01 (Fixed)
+I (336) octal_psram: VCC          : 0x01 (3V)
+I (336) octal_psram: SRF          : 0x01 (Fast Refresh)
+I (336) octal_psram: BurstType    : 0x01 (Hybrid Wrap)
+I (336) octal_psram: BurstLen     : 0x01 (32 Byte)
+I (337) octal_psram: Readlatency  : 0x02 (10 cycles@Fixed)
+I (337) octal_psram: DriveStrength: 0x00 (1/1)
+I (337) MSPI Timing: Enter psram timing tuning
+I (338) esp_psram: Found 8MB PSRAM device
+I (338) esp_psram: Speed: 80MHz
+I (338) cpu_start: Multicore app
+I (752) esp_psram: SPI SRAM memory test OK
+I (760) cpu_start: Pro cpu start user code
+I (760) cpu_start: cpu freq: 240000000 Hz
+I (761) app_init: Application information:
+I (761) app_init: Project name:     jarvisrobot_v5
+I (761) app_init: App version:      voice-known-good-26-25-g5ec631b
+I (761) app_init: Compile time:     Jul 10 2026 00:38:22
+I (761) app_init: ELF file SHA256:  ede26f05d...
+I (761) app_init: ESP-IDF:          v5.5.4
+I (762) efuse_init: Min chip rev:     v0.0
+I (762) efuse_init: Max chip rev:     v0.99 
+I (762) efuse_init: Chip rev:         v0.2
+I (762) heap_init: Initializing. RAM available for dynamic allocation:
+I (762) heap_init: At 3FCB6BB0 len 00032B60 (202 KiB): RAM
+I (762) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM
+I (763) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM
+I (763) heap_init: At 600FE000 len 00001FE8 (7 KiB): RTCRAM
+I (763) esp_psram: Adding pool of 8192K of PSRAM memory to heap allocator
+I (764) spi_flash: detected chip: generic
+I (764) spi_flash: flash io: dio
+I (765) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+I (765) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+I (765) esp_core_dump_flash: Init core dump to flash
+I (766) esp_core_dump_flash: Found partition 'coredump' @ ff0000 65536 bytes
+D (787) esp_core_dump_crc: Total length of hashed data: 22752
+I (787) esp_core_dump_flash: Core dump data checksum is correct
+I (787) esp_core_dump_flash: Found core dump 22756 bytes in flash @ 0xff0000
+I (788) main_task: Started on CPU0
+I (798) esp_psram: Reserving pool of 64K of internal memory for DMA/internal allocations
+I (798) main_task: Calling app_main()
+I (798) jarvis_v5: =====================================================
+I (798) jarvis_v5:  JarvisRobot v5  |  hexagonal core  |  voice boot     
+I (798) jarvis_v5: =====================================================
+I (828) jarvis_v5: reserving voice task before hardware bring-up
+I (828) jr_hal: board init: esp_board_manager_init()
+I (828) PERIPH_I2C: I2C master bus initialized successfully
+I (828) PERIPH_I2S: I2S[0] STD,  TX, ws: 45, bclk: 9, dout: 8, din: 10
+I (828) PERIPH_I2S: I2S[0] initialize success: 0x3c1922a8
+I (828) PERIPH_I2S: I2S[0] STD, RX, ws: 45, bclk: 9, dout: 8, din: 10
+I (828) PERIPH_I2S: I2S[0] initialize success: 0x3c192464
+I (828) PERIPH_GPIO: Initialize success, pin: 46, set the default level: 0
+I (828) BOARD_MANAGER: All peripherals initialized
+I (828) BOARD_PERIPH: Reuse periph: i2c_master, ref_count=2
+I (838) DEV_IO_EXPANDER: IO Expander found at address 0x40
+I (838) DEV_IO_EXPANDER: Set IO expander pin 0 as output, level: 0
+I (838) DEV_IO_EXPANDER: Set IO expander pin 1 as output, level: 0
+I (838) DEV_IO_EXPANDER: Set IO expander pin 2 as output, level: 0
+I (838) DEV_IO_EXPANDER: Set IO expander pin 3 as output, level: 0
+I (838) DEV_IO_EXPANDER: Set IO expander pin 4 as output, level: 0
+I (838) DEV_IO_EXPANDER: Set IO expander pin 5 as output, level: 0
+I (838) DEV_IO_EXPANDER: Set IO expander pin 6 as output, level: 0
+I (838) DEV_IO_EXPANDER: Set IO expander pin 7 as output, level: 0
+I (838) BOARD_PERIPH: Reuse periph: i2s_audio_out, ref_count=2
+I (838) DEV_AUDIO_CODEC: DAC is ENABLED
+I (838) BOARD_PERIPH: Reuse periph: gpio_pa_control, ref_count=2
+I (838) BOARD_PERIPH: Reuse periph: i2c_master, ref_count=3
+I (848) ES8311: Work in Slave mode
+I (848) DEV_AUDIO_CODEC: Successfully initialized codec: audio_dac
+I (848) DEV_AUDIO_CODEC: Create esp_codec_dev success, dev:0x3fceedd0, chip:es8311
+I (848) BOARD_PERIPH: Reuse periph: i2s_audio_in, ref_count=2
+I (848) DEV_AUDIO_CODEC: ADC over I2S is enabled
+I (848) BOARD_PERIPH: Reuse periph: i2c_master, ref_count=4
+I (848) ES7210: Work in Slave mode
+I (858) ES7210: Enable ES7210_INPUT_MIC1
+I (858) ES7210: Enable ES7210_INPUT_MIC2
+I (868) ES7210: Enable ES7210_INPUT_MIC3
+I (868) ES7210: Enable TDM mode
+I (868) DEV_AUDIO_CODEC: Successfully initialized codec: audio_adc
+I (868) DEV_AUDIO_CODEC: Create esp_codec_dev success, dev:0x3fcd3a90, chip:es7210
+I (868) DEV_FS_FAT_SUB_SDMMC: slot_config: cd=-1, wp=-1, clk=2, cmd=1, d0=3, d1=-1, d2=-1, d3=-1, d4=-1, d5=-1, d6=-1, d7=-1, width=1, flags=0x1
+Name: SH32G
+Type: SDHC
+Speed: 40.00 MHz (limit: 40.00 MHz)
+Size: 30436MB
+CSD: ver=2, sector_size=512, capacity=62333952 read_bl_len=9
+SSR: bus_width=1
+I (928) DEV_FS_FAT: Filesystem mounted, base path: /sdcard
+I (928) BOARD_PERIPH: Reuse periph: i2c_master, ref_count=5
+I (998) CST9217: Checkcode: 0x204ECACA
+I (998) CST9217: Resolution X: 466, Y: 466
+I (998) CST9217: Chip Type: 0x9217, ProjectID: 0x5734
+I (998) DEV_LCD_TOUCH_SUB_I2C: Successfully initialized LCD touch: lcd_touch, addr: 0xb4, touch:0x3c19995c, io:0x3fcd4074
+I (998) DEV_LCD_TOUCH: Successfully initialized LCD touch: lcd_touch, chip: cst9217, sub_type: i2c
+I (998) BOARD_MANAGER: Board manager initialized
+I (998) jr_hal: board init OK
+I (998) jarvis_board: Initialize SPI bus for CO5300 QSPI display
+I (998) co5300: version: 2.1.0
+I (998) co5300_spi: LCD panel create success, version: 2.1.0
+I (998) jarvis_v5: display: presenter injected (CO5300 async bring-up)
+I (998) BOARD_DEVICE: Device handle lcd_touch found, Handle: 0x3fcd4030 TO: 0x3fcd4030
+I (998) jr_hal_touch: touch ready; IRQ-driven input enabled
+I (998) pp: pp rom version: e7ae62f
+I (998) net80211: net80211 rom version: e7ae62f
+I (1008) wifi:wifi driver task: 3fcdbe0c, prio:23, stack:6656, core=0
+I (1018) wifi:wifi firmware version: 0947e8b
+I (1018) wifi:wifi certification version: v7.0
+I (1018) wifi:config NVS flash: enabled
+I (1018) wifi:config nano formatting: disabled
+I (1018) wifi:Init data frame dynamic rx buffer num: 32
+I (1018) wifi:Init static rx mgmt buffer num: 5
+I (1018) wifi:Init management short buffer num: 32
+I (1018) wifi:Init static tx buffer num: 16
+I (1018) wifi:Init tx cache buffer num: 32
+I (1018) wifi:Init static tx FG buffer num: 2
+I (1018) wifi:Init static rx buffer size: 1600
+I (1018) wifi:Init static rx buffer num: 10
+I (1018) wifi:Init dynamic rx buffer num: 32
+I (1018) wifi_init: rx ba win: 6
+I (1018) wifi_init: accept mbox: 6
+I (1018) wifi_init: tcpip mbox: 32
+I (1018) wifi_init: udp mbox: 6
+I (1018) wifi_init: tcp mbox: 6
+I (1018) wifi_init: tcp tx win: 16384
+I (1018) wifi_init: tcp rx win: 16384
+I (1018) wifi_init: tcp mss: 1440
+I (1018) wifi_init: WiFi/LWIP prefer SPIRAM
+I (1018) wifi_init: WiFi IRAM OP enabled
+I (1018) wifi_init: WiFi RX IRAM OP enabled
+I (1018) jr_net: wifi initialized (bounded STA + protected APSTA fallback)
+I (1018) phy_init: phy_version 711,97bcf0a2,Aug 25 2025,19:04:10
+I (1058) wifi:mode : sta (<redacted-mac>)
+I (1058) wifi:enable tsf
+I (1058) jr_net: station join started (SSID len=2)
+W (1158) co5300_spi: The 3Ah command has been used and will be overwritten by external initialization sequence
+I (2358) co5300_spi: set brightness to 100% (hardware value: 255)
+I (2358) jarvis_board: CO5300 QSPI display ready: 466x466 panel=0x3fcd6cc8 io=0x3fcd6694
+I (2638) jr_display: assets mounted: 3929405/6619121 bytes
+I (2638) gfx_timer: Timer manager initialized with FPS: 24 (period: 41 ms)
+I (2638) jr_display: presenter ready: 466x466, 24 fps, 12-row internal DMA strips
+I (2638) jr_display: panel test pattern=0
+I (3298) jr_display: face=0 asset=723266 bytes frames=30 bucket=0
+I (3468) wifi:new:<5,0>, old:<1,0>, ap:<255,255>, sta:<5,0>, prof:1, snd_ch_cfg:0x0
+I (3468) wifi:state: init -> auth (0xb0)
+I (7698) wifi:state: auth -> init (0x200)
+I (7708) wifi:new:<5,0>, old:<5,0>, ap:<255,255>, sta:<5,0>, prof:1, snd_ch_cfg:0x0
+W (7708) jr_net: sta disconnected (reason=2); retry 1/8
+W (10118) jr_net: sta disconnected (reason=205); retry 2/8
+I (12538) wifi:new:<5,0>, old:<5,0>, ap:<255,255>, sta:<5,0>, prof:1, snd_ch_cfg:0x0
+I (12538) wifi:state: init -> auth (0xb0)
+I (12988) wifi:state: auth -> assoc (0x0)
+I (12998) wifi:state: assoc -> run (0x10)
+I (13018) wifi:connected with OP, aid = 22, channel 5, BW20, bssid = <redacted-mac>
+I (13018) wifi:security: WPA3-SAE HUNT_AND_PECK, phy: bgn, rssi: -53, cipher(pairwise:0x3, group:0x3), pmf:1
+I (13018) wifi:pm start, type: 1
+
+I (13018) wifi:dp: 1, bi: 102400, li: 3, scale listen interval from 307200 us to 307200 us
+I (13018) wifi:set rx beacon pti, rx_bcn_pti: 0, bcn_timeout: 25000, mt_pti: 0, mt_time: 10000
+I (13028) wifi:<ba-add>idx:0 (ifx:0, <redacted-mac>), tid:6, ssn:1, winSize:64
+I (13048) wifi:AP's beacon interval = 102400 us, DTIM period = 1
+I (14028) esp_netif_handlers: sta ip: <redacted-ip>, mask: 255.255.255.0, gw: <redacted-ip>
+I (14028) wifi:Set ps type: 0, coexist: 0
+
+I (14028) jr_net: got ip: <redacted-ip>
+I (14028) BOARD_DEVICE: Device handle audio_dac found, Handle: 0x3fceec24 TO: 0x3fceec24
+I (14028) BOARD_DEVICE: Device handle audio_adc found, Handle: 0x3fcb9584 TO: 0x3fcb9584
+I (14028) jr_audio: codec handles: dac=0x3fceedd0 adc=0x3fcd3a90
+I (14038) jr_audio: audio diagnostics: four rolling 2 s taps ready
+I (14038) I2S_IF: Paired data: 0x3fceec50, current mode: record, paired in_enable: 0, paired out_enable: 0
+I (14048) I2S_IF: STD: RX, data_bit: 32, slot_bit: 32, ws_width: 32, slot_mode: STEREO, slot_mask: 0x3
+I (14048) I2S_IF: STD: RX, sample_rate_hz: 24000, mclk_multiple: 256, clk_src: 6
+I (14048) I2S_IF: STD: TX, data_bit: 32, slot_bit: 32, ws_width: 32, slot_mode: STEREO, slot_mask: 0x3
+I (14048) I2S_IF: STD: TX, sample_rate_hz: 24000, mclk_multiple: 256, clk_src: 6
+I (14048) ES7210: Bits 16
+I (14058) ES7210: Enable ES7210_INPUT_MIC1
+I (14068) ES7210: Enable ES7210_INPUT_MIC2
+I (14068) ES7210: Enable ES7210_INPUT_MIC3
+I (14078) ES7210: Enable TDM mode
+I (14088) ES7210: Unmuted
+I (14088) Adev_Codec: Open codec device OK
+I (14088) I2S_IF: STD: TX, data_bit: 16, slot_bit: 32, ws_width: 32, slot_mode: MONO, slot_mask: 0x1
+I (14088) I2S_IF: STD: TX, sample_rate_hz: 24000, mclk_multiple: 256, clk_src: 6
+I (14088) I2S_IF: Current mode playback has extended slot bits from 32 to 64
+I (14118) Adev_Codec: Open codec device OK
+I (14198) jr_audio: audio init: adc=ok dac=ok aec=on
+I (14198) jarvis_v5: gemini endpoint configured (key len=39)
+I (14208) jarvis_v5: diag http up: voice control, audio taps, display mirror/test
+I (14208) jr_tools: initialized (configured=1)
+I (14218) jarvis_v5: on-device tools ready (configured=1 declared=7)
+I (14218) jarvis_v5: boot complete — always-ready voice requested
+I (14218) main_task: Returned from app_main()
+I (14228) jarvis_v5: exec: CONNECT -> ws.connect(wss://generativelanguage.googleapis.com/...)
+I (14228) websocket_client: Started
+I (14228) jarvis_v5: phase: Idle -> Connecting
+I (14238) wifi:<ba-add>idx:1 (ifx:0, <redacted-mac>), tid:0, ssn:1, winSize:64
+I (14408) esp-x509-crt-bundle: Certificate validated
+I (14858) jr_ws: ws connected
+I (14868) jarvis_v5: exec: SEND_SETUP
+I (14928) jarvis_v5: phase: Connecting -> Handshaking
+I (15228) jarvis_v5: rx: server event kind=0
+I (15228) jarvis_v5: phase: Handshaking -> Listening
+I (15228) jarvis_v5: voice: always-ready listening window
+I (15768) jarvis_v5: vad: speech start rms=633.3 floor=40.0
+I (16098) jr_display: face=2 asset=1007052 bytes frames=32 bucket=0
+I (17398) jr_display: face=1 asset=936984 bytes frames=22 bucket=5
+E (23538) transport_ws: Error transport_poll_write(0)
+E (23618) transport_ws: Error transport_poll_write(0)
