@@ -9,6 +9,7 @@ set(JARVIS_BOARD_ROOT
 idf_component_register(
     SRCS
         "src/jr_display.c"
+        "src/hud_render.c"
         "${JARVIS_BOARD_ROOT}/src/jarvis_board.c"
     INCLUDE_DIRS
         "include"

@@ -175,20 +175,6 @@ static void test_rms_square_wave(void)
     for (int i = 0; i < 100; ++i) { buf[i] = (i % 2) ? 32767 : -32767; }
     TEST_ASSERT_FLOAT_WITHIN(1.0f, 32767.0f, jr_dsp_rms(buf, 100));
 }
-static void test_resample_length(void)
-{
-    int16_t in[768], out[600];
-    for (int i = 0; i < 768; ++i) { in[i] = (int16_t)i; }
-    size_t n = jr_dsp_resample_linear(in, 768, 24000, out, 600, 16000);
-    TEST_ASSERT_EQUAL_size_t(512, n);
-}
-static void test_vad_stub(void)
-{
-    jr_vad_t v;
-    jr_vad_init(&v);
-    TEST_ASSERT_TRUE(jr_vad_update(&v, 500.0f));
-    TEST_ASSERT_FALSE(jr_vad_update(&v, 0.0f));
-}
 static void test_fake_clock(void)
 {
     fake_clock_reset();
@@ -1199,8 +1185,6 @@ int main(void)
     RUN_TEST(test_state_predicates);
     RUN_TEST(test_rms_known_buffer);
     RUN_TEST(test_rms_square_wave);
-    RUN_TEST(test_resample_length);
-    RUN_TEST(test_vad_stub);
     RUN_TEST(test_fake_clock);
 
     /* --- T01..T25 acceptance matrix --- */

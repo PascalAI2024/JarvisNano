@@ -28,4 +28,5 @@ intentional fixtures, not leaks.
 
 | File | What it proves |
 |---|---|
+| `20260718-v5-boot-after-phase0.log` | The Phase 0 cleanup did not regress the device: identical boot path after removing the `jr_transport.c` placeholder, the `jr_vad_*` stub and `jr_dsp_resample_linear`, and after adding `hud_render.c` to the `jr_display` SRCS. |
 | `20260718-v5-boot.log` | v5 boots clean on the Waveshare 1.75" AMOLED: PSRAM 8 MB, SD mounted, CST9217 touch IRQ-driven, CO5300 466×466 @ 24 fps with 12-row internal DMA strips, emote assets mounted (3,929,405 / 6,619,121 bytes), faces 0/1/2 rendering, Wi-Fi associated, ES7210 MIC1+MIC2+MIC3 enabled, audio adc+dac+aec up, Gemini Live TLS + handshake → Listening, VAD firing. Two open issues visible: `sta disconnected (reason=2/205)` retries before association, and `transport_ws: Error transport_poll_write(0)` at ~23 s. |

@@ -9,15 +9,16 @@
 # every server frame (incl. heartbeat) is a liveness tick; reconnect is an L3
 # transition, not a flag here.
 #
-# src/gemini_device_ws.c is the DEVICE-PHASE stub: the esp_websocket_client impl
-# of the lower ws_transport seam that plugs UNDER the (already host-tested)
-# framer. It is intentionally NOT built yet — its recv (WEBSOCKET_EVENT_DATA ->
-# ring) wiring is a Phase-1 DEVICE acceptance step. Add "src/gemini_device_ws.c"
-# to SRCS (it is the only file that needs PRIV_REQUIRES esp_websocket_client)
-# once that lands; do NOT enable it before it is device-verified.
+# src/gemini_device_ws.c is the esp_websocket_client impl of the lower
+# ws_transport seam, plugging UNDER the (host-tested) framer in gemini_live.c.
+# It IS built and device-verified: see docs/evidence/20260718-v5-boot.log, which
+# shows TLS validation -> ws connected -> SEND_SETUP -> Handshaking -> Listening.
+#
+# The former src/jr_transport.c was a Phase-0 placeholder holding one empty
+# function; nothing included its header. Removed 2026-07-18 — the real
+# jr_realtime_voice_client_t impl is gemini_live.c + gemini_device_ws.c.
 idf_component_register(
     SRCS
-        "src/jr_transport.c"
         "src/gemini_live.c"
         "src/gemini_device_ws.c"   # device WS byte transport (recv ring landed)
     INCLUDE_DIRS "include"

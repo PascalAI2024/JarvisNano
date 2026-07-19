@@ -7,13 +7,7 @@
 
 ## Decisions taken (2026-07-18)
 
-- **Phase 0 commit — DONE.** The 10-day-old working tree (43 modified files,
-  +9,960/−1,381, plus untracked `jr_http` / `jr_memory` / `jr_tools` /
-  `hud_render.{c,h}` / `input_touch.c`) is committed in 8 logical commits and
-  pushed to `origin/v5`. The remaining Phase 0 items — wiring `hud_render.c`
-  into SRCS + a host target, the `emote_assets`/`emote` partition-label
-  mismatch, the three dead-code false signals, and the serial boot log —
-  are still open.
+- **Phase 0 — COMPLETE.** All items closed; see "Phase 0 results" below.
 - **D1 — RESOLVED: kill LVGL, extend the overlay compositor.** Interactive UI
   (choice arcs, radial menu, cards) is built on `apply_*_overlay` +
   `hud_render.c`, not LVGL. Rationale: LVGL links zero objects today
@@ -27,6 +21,37 @@
   (retire the 5 baked `.eaf` clips? revisit end of Phase 3), **D5** (companion
   app in the choice loop?), **D6** (dual-OTA before the partition table
   calcifies). **D2** is answered by the Phase 0 commit above: land v5.
+
+## Phase 0 results (2026-07-18)
+
+Executed in full. Three of the seven planned items turned out to rest on **wrong
+premises** — recorded here so they are not "fixed" later by someone reading the
+original Phase 0 list.
+
+| Item | Outcome |
+|---|---|
+| Commit the working tree | Done — 9 commits pushed to `origin/v5`; `git status` clean. |
+| **v5 boot log** | **Done, and it is the headline result: v5 boots CLEAN.** `docs/evidence/20260718-v5-boot.log`. PSRAM 8 MB, SD mounted, CST9217 touch IRQ-driven, CO5300 466×466 @ 24 fps on 12-row internal DMA strips, emote assets mounted (3,929,405 / 6,619,121 B), faces 0/1/2 rendering, Wi-Fi up, ES7210 MIC1+MIC2+MIC3, audio adc+dac+aec, Gemini Live TLS → handshake → Listening, VAD firing. **D2 (land v5) is now evidence-backed, not a bet.** |
+| Wire `hud_render.c` into SRCS | Done — `components/jr_display/CMakeLists.txt`. Compiles clean in the device build (object emitted); currently linker-GC'd since nothing calls it yet, so image size is unchanged. It will link when Phase 2.4 wires it. |
+| Host target for `hud_render.c` | Done — but **not** in `host/CMakeLists.txt` as originally planned. That harness enforces "NO path to jr_hal, jr_audio, or jr_display" as an architectural invariant; adding it there would break it. Instead: standalone `components/jr_display/tests/`, matching `jr_memory/tests` and `jr_tools/host`. 7 tests, clean under `-Wall -Wextra -Werror`. The load-bearing one is **strip invariance** — whole-frame render must equal the concatenation of 12-row strips, including the ragged 10-row tail (466 = 38·12 + 10). That is the seam-on-glass bug class. |
+| ~~Partition-label mismatch~~ | **FALSE FINDING — do not "fix" this.** There is no mismatch. `sdkconfig.defaults:28` selects `partitions_16MB.csv`; its line 18 declares label `emote_assets`; `jr_display.c:35` mounts `"emote_assets"`. `/emote` (`jr_display.c:34`) is the *mount point*, a different thing — the original audit conflated the two. The booted table and a successful mount confirm it. `bootstrap.sh` writes a table for the legacy esp-claw tree, which the v5 build never uses. |
+| Delete dead-code false signals | Done, after verifying each had zero production callers. Removed: `jr_transport.c` + its header (nothing included it; the real `jr_realtime_voice_client_t` is `gemini_live.c` + `gemini_device_ws.c`); the `jr_vad_*` stub (superseded — the real adaptive VAD with floor tracking runs in `main.c`, visible in the boot log as `vad: speech start rms=633.3 floor=40.0`); `jr_dsp_resample_linear` (superseded by `downsample_24to16_4lane()` at `jr_audio.c:323`, which must preserve the 4-lane TDM interleave — a generic resampler cannot). Host tests 90 → **88**: exactly the two that asserted stub behaviour. `jr_dsp_rms` was KEPT — it has real production callers. |
+| ~~`hal.c` "Phase 3 unstarted" comment~~ | Comment corrected, **code kept**. The `jr_hal` display stub is not dead: it is the live headless fallback when the real presenter fails to start (`main.c:4409-4414`). Only the comment was stale. |
+
+**Also fixed, found in passing:** `scripts/jarvis-desk.py` hardcoded the device
+LAN IP as `DEFAULT_DEVICE_HOST`, which `CLAUDE.md` bans. Now defaults to mDNS,
+overridable via the `JARVIS_DEVICE_HOST` env var `resolve_token` already
+honoured; tests use RFC 5737 TEST-NET-1.
+
+**Structural finding — why evidence never survived:** `.build_logs/` is
+gitignored (`.gitignore:8`). Every device artifact ever captured there was
+invisible to git and CI. That is the mechanical reason this project reached
+2026-07-18 with no in-repo proof the image booted, *while it booted fine*.
+Evidence now goes in `docs/evidence/` (tracked). See its README.
+
+**Two open issues visible in the boot log**, neither blocking:
+`sta disconnected (reason=2/205)` retries before association, and
+`transport_ws: Error transport_poll_write(0)` at ~23 s.
 
 ---
 

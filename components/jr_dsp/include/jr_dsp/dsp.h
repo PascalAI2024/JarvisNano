@@ -24,33 +24,15 @@ extern "C" {
  * buffer. Range 0..32768. The primitive every VAD/barge feature derives from. */
 float jr_dsp_rms(const int16_t *samples, size_t n);
 
-/* ---- Adaptive VAD (L4 TurnPolicy substrate) -----------------------------
- * NOT fixed RMS constants (decisions/2026-07-07-adaptive-vad): a tracked
- * noise floor + SNR/hysteresis. Phase 0 ships the state struct + a stub
- * decision so L4 can consume it; Phase 1 replaces the body with the real
- * exponential-moving noise-floor tracker. */
-typedef struct {
-    float noise_floor;   /* EMA-tracked ambient RMS */
-    float snr_ratio;     /* speech threshold = noise_floor * snr_ratio */
-    float attack;        /* EMA weight when rising (fast) */
-    float release;       /* EMA weight when falling (slow) */
-    bool  in_speech;     /* hysteresis latch */
-} jr_vad_t;
-
-/* Initialise with sane defaults (floor unknown, ratio ~3.0). */
-void jr_vad_init(jr_vad_t *v);
-
-/* Feed one frame's RMS; updates the noise floor and returns the current
- * speech decision. Phase-0 stub: floor stays 0, decision is rms > 0. */
-bool jr_vad_update(jr_vad_t *v, float rms);
-
-/* ---- Linear resampler (L1 rate-conversion substrate) --------------------
- * The mandatory 24<->16 rate conversion (hardware.md non-negotiable #2) as a
- * pure, host-testable function. Phase 0 = signature + nearest-sample stub;
- * Phase 1 = true linear interpolation harvested from gl_resample_pcm16_linear.
- * Returns the number of output samples written (<= out_cap). */
-size_t jr_dsp_resample_linear(const int16_t *in, size_t in_n, uint32_t in_rate,
-                              int16_t *out, size_t out_cap, uint32_t out_rate);
+/* NOTE: the Phase-0 jr_vad_* stub and jr_dsp_resample_linear stub were removed
+ * on 2026-07-18. Both were superseded and had ZERO production callers — their
+ * only callers were host tests asserting stub behaviour, which is a false
+ * signal, not coverage. The real implementations live where the data does:
+ *   - VAD: adaptive floor tracking in main.c (see /api/diag/vadlog); the L4
+ *     strategy is selected via jr_vad_mode_t in jr_core/session.h.
+ *   - 24k->16k rate conversion: downsample_24to16_4lane() in jr_audio.c, which
+ *     must preserve the 4-lane TDM interleave — a generic resampler cannot.
+ * Re-add a pure primitive here only when something pure actually needs it. */
 
 #ifdef __cplusplus
 }

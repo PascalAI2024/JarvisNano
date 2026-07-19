@@ -46,8 +46,12 @@ jr_clock_t jr_hal_clock(void)
 }
 
 /* ============================ Display port ============================= */
-/* Phase 0 stub: log the presentation intent. Phase 3 harvests the CO5300 QSPI
- * blit + emote_gfx baked-AAF presenter behind these same callbacks. */
+/* The headless FALLBACK presenter — it logs the presentation intent instead of
+ * drawing. This is live code, not a leftover: the real CO5300 QSPI + emote_gfx
+ * presenter now lives in components/jr_display (jr_display_start), and the
+ * composition root prefers it, dropping back to this stub only when that
+ * bring-up fails (main.c:4409-4414). Keeping the board bootable and diagnosable
+ * without a working panel is the point. */
 
 static const char *face_name(jr_face_t f)
 {
