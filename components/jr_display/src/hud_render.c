@@ -538,6 +538,29 @@ static void overlay_palette(bool swap)
     s_ov_ready = true;
 }
 
+/* ---- RADII: the overlay lives in the baked art's NEGATIVE SPACE ----------
+ *
+ * The baked rwave_*.eaf faces are not blank backdrops — each is already a
+ * complete arc-reactor HUD with its own core, spokes, rings and bezel ticks.
+ * Drawing a second ring or a second set of spokes on top produces two HUDs
+ * beating against each other, which is exactly what the first version did.
+ *
+ * Measured on hardware (6 frames averaged across animation phases, baked art
+ * only, via the /api/display/hud toggle) the art leaves precisely three bands
+ * free — mean AND peak luminance both zero:
+ *
+ *     r135-149   (15 px)   -> the thinking comet
+ *     r185-194   (10 px)   -> breathing ring / listen countdown
+ *     r215-239   (25 px)   -> battery rim, and the choice arcs later
+ *                             (which the prototype wanted hugging the bezel)
+ *
+ * Everything else is occupied: core r0-94, inner ring r125-134, outer ring and
+ * segments r155-179, bezel ticks r200-214. Put nothing there.
+ * Re-measure if the baked art is ever changed. */
+#define OV_R_COMET   142   /* centre of the free r135-149 band */
+#define OV_R_BREATH  190   /* centre of the free r185-194 band */
+#define OV_R_BATT    227   /* centre of the free r215-239 band */
+
 /* One revolution every ~2639 ms == the prototype's `angle = now/420` rad
  * (2*pi*420 ms per turn), expressed in the Q8 turn units the LUT uses. */
 #define OV_SPIN_PERIOD_MS  2639
@@ -561,7 +584,7 @@ void hud_overlay_thinking(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
             continue;
         }
         band_row(dst + (size_t)(y - s.y0) * HUD_W, y,
-                 R_RING - 1, R_RING + 1, s_ov_cyan, 40);
+                 OV_R_COMET - 1, OV_R_COMET + 1, s_ov_cyan, 40);
     }
 
     const int head = (int)(((uint64_t)now_ms * 256u) / OV_SPIN_PERIOD_MS) & 255;
@@ -574,14 +597,14 @@ void hud_overlay_thinking(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
         const uint16_t cool = shade(s_ov_cyan, (lv * 2) / 5);
         const int a = (head - d) & 255;
         /* 3-wide closes the ~3.7 px angular gap between adjacent Q8 steps. */
-        polar_dot(&s, a, R_RING, hot, 3);
-        polar_dot(&s, a, R_RING + 3, cool, 2);
+        polar_dot(&s, a, OV_R_COMET, hot, 3);
+        polar_dot(&s, a, OV_R_COMET + 3, cool, 2);
     }
 
     /* White-hot head. */
     const uint16_t blaze = shade(s_ov_tick, 255);
-    polar_dot(&s, head, R_RING, blaze, 4);
-    polar_dot(&s, (head + 1) & 255, R_RING, blaze, 3);
+    polar_dot(&s, head, OV_R_COMET, blaze, 4);
+    polar_dot(&s, (head + 1) & 255, OV_R_COMET, blaze, 3);
 }
 
 /* ---- offset-aware primitives -------------------------------------------
@@ -615,30 +638,9 @@ static inline void ov_polar(const strip_t *s, int cx, int cy, int a, int r,
     ov_dot(s, cx + ((lcos(a) * r) >> 15), y, px, n);
 }
 
-/* Radial spoke from r0 to r1 at angle a — the waveform bar primitive.
- *
- * CRITICAL: this is called once per DMA strip, 39 times per frame. Drawing the
- * whole spoke every time and letting ov_dot clip discards ~97% of the work and
- * measurably costs frame rate (24 -> 14 fps when this culling was absent).
- * y(r) is monotonic in r for a fixed angle, so the endpoints bound the span:
- * reject the spoke outright unless that span meets the strip. */
-static void ov_spoke(const strip_t *s, int cx, int cy, int a, int r0, int r1,
-                     uint16_t px, bool wide)
-{
-    if (r1 < r0) {
-        return;
-    }
-    const int sa = lsin(a);
-    int ya = cy + ((sa * r0) >> 15);
-    int yb = cy + ((sa * r1) >> 15);
-    if (ya > yb) { const int tmp = ya; ya = yb; yb = tmp; }
-    if (yb + 2 < s->y0 || ya >= s->y1) {
-        return;                                  /* cannot touch this strip */
-    }
-    for (int r = r0; r <= r1; ++r) {
-        ov_polar(s, cx, cy, a, r, px, wide ? 2 : 1);
-    }
-}
+/* NOTE: ov_spoke (radial bar primitive) lived here and was removed with the
+ * waveform — the baked art already draws spokes, so nothing needed it. Recover
+ * it from git history if a radial element is ever wanted in free space. */
 
 /* One row of an annulus about (cx,cy), filled analytically: solve the two x
  * spans rather than testing every pixel, so cost is the band width and not the
@@ -689,8 +691,6 @@ void hud_tilt_offset(float roll_deg, float pitch_deg, int8_t *ox, int8_t *oy)
  * o'clock, proportional to charge. Red under 20%, gold while charging, cyan
  * otherwise. Skipped entirely when no cell is present (batt_pct == 0xFF), so a
  * USB-powered puck shows no misleading gauge. */
-#define OV_R_BATT 212
-
 static void ov_battery(const strip_t *s, int cx, int cy, const hud_env_t *env)
 {
     if (env->batt_pct > 100) {
@@ -705,28 +705,18 @@ static void ov_battery(const strip_t *s, int cx, int cy, const hud_env_t *env)
     }
 }
 
-/* Reactive waveform: HUD_BARS spokes around the ring, length driven by
- * amplitude, shaped so the crown is tallest and the skirt shortest, with a
- * slow travelling ripple so it never looks like a static equaliser. */
-static void ov_waveform(const strip_t *s, int cx, int cy, uint32_t now_ms,
-                        const hud_env_t *env, const uint16_t *ramp, int base_lv)
-{
-    const int amp = env->amp;
-    for (int i = 0; i < HUD_BARS; ++i) {
-        const int a = (i * 256) / HUD_BARS;
-        /* envelope: full at the crown, tapering to the skirt */
-        const int env_q8 = 128 + ((lsin((i * 128) / HUD_BARS) * 127) >> 15);
-        /* travelling ripple keeps it alive even at constant amplitude */
-        const int rip = 180 + ((lsin((int)((now_ms >> 4) + i * 5) & 255) * 75) >> 15);
-        int len = 4 + (((amp * env_q8) >> 8) * rip) / 255 * 56 / 255;
-        if (len > 58) {
-            len = 58;
-        }
-        const int lv = base_lv + ((amp * (255 - base_lv)) >> 8);
-        ov_spoke(s, cx, cy, a, R_BAR_BASE, R_BAR_BASE + len,
-                 shade(ramp, lv), len > 24);
-    }
-}
+/* NOTE: there is deliberately NO waveform here.
+ *
+ * The first version drew 48 amplitude-driven spokes at r=70-128 — directly on
+ * top of the baked face's own radial spokes. The baked clips are named
+ * rwave_* for "reactive wave": they ALREADY are the amplitude-reactive
+ * waveform (the display diag exposes applied_bucket tracking audio level).
+ * Adding a second set was pure duplication and read as two competing HUDs.
+ *
+ * FACE-01 is therefore satisfied by the baked art, not by this layer. If the
+ * baked clips are ever retired (decision D4), hud_render_rows() already
+ * contains a full procedural face — use that, rather than reinstating an
+ * overlay waveform on top of a face that has one. */
 
 void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
                        bool swap_bytes, const hud_env_t *env)
@@ -744,21 +734,21 @@ void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
 
     switch ((hud_face_t)env->face) {
     case HUD_FACE_IDLE: {
-        /* Breathing ring — a slow sine on brightness. Present, not busy. */
+        /* Breathing ring in the free r185-194 band — a slow sine on
+         * brightness. Present, not busy, and clear of the baked rings. */
         const int lv = 26 + ((lsin((int)(now_ms / 24) & 255) * 22) >> 15) + 22;
         for (int y = s.y0; y < s.y1; ++y) {
             if (y >= 0 && y < HUD_H) {
                 ov_ring_row(dst + (size_t)(y - s.y0) * HUD_W, y, cx, cy,
-                            R_RING - 1, R_RING + 1, s_ov_cyan, lv);
+                            OV_R_BREATH - 1, OV_R_BREATH + 1, s_ov_cyan, lv);
             }
         }
         break;
     }
     case HUD_FACE_LISTEN:
-        ov_waveform(&s, cx, cy, now_ms, env, s_ov_cyan, 60);
-        break;
     case HUD_FACE_SPEAK:
-        ov_waveform(&s, cx, cy, now_ms, env, s_ov_tick, 90);
+        /* Nothing: the baked reactive-wave face already carries these states.
+         * The listen-window countdown rim (STATE-02) belongs at OV_R_BREATH. */
         break;
     case HUD_FACE_THINK:
         hud_overlay_thinking(dst, y0, nrows, now_ms, swap_bytes);
@@ -767,7 +757,7 @@ void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
         for (int y = s.y0; y < s.y1; ++y) {
             if (y >= 0 && y < HUD_H) {
                 ov_ring_row(dst + (size_t)(y - s.y0) * HUD_W, y, cx, cy,
-                            R_TICK_IN, R_TICK_IN + 3, s_ov_red, 150);
+                            OV_R_BATT - 2, OV_R_BATT + 2, s_ov_red, 150);
             }
         }
         break;

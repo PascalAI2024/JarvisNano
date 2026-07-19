@@ -22,6 +22,49 @@
   app in the choice loop?), **D6** (dual-OTA before the partition table
   calcifies). **D2** is answered by the Phase 0 commit above: land v5.
 
+## DESIGN RULE: the overlay lives in the baked art's negative space
+
+Found 2026-07-19 by user observation ("2 layers of design playing at the same
+time... overlapping?") — and they were right.
+
+The baked `rwave_*.eaf` faces are **not blank backdrops**. Each is already a
+complete arc-reactor HUD: core, radial spokes, inner ring, outer ring, segment
+blocks, bezel ticks. The first overlay drew its own ring at r=150 and its own 48
+radial spokes at r=70-128, directly on top of the art's ring and spokes. Two
+HUDs in the same visual language, slightly different geometry, beating against
+each other.
+
+Worse, it was **duplicating work already done**: the clips are named `rwave_*`
+for *reactive wave* and the display diag exposes `applied_bucket` tracking audio
+level. The baked faces ARE the amplitude-reactive waveform. FACE-01 was already
+satisfied; the overlay added nothing but visual noise.
+
+**The measured negative space** (6 frames averaged across animation phases,
+baked art only, via the `/api/display/hud?on=0` toggle — mean AND peak
+luminance both zero):
+
+| Band | Width | Reserved for |
+|---|---|---|
+| **r135-149** | 15 px | thinking comet |
+| **r185-194** | 10 px | breathing ring, listen countdown (STATE-02) |
+| **r215-239** | 25 px | battery rim, and the choice arcs — which the prototype wanted "hugging the bezel" anyway |
+
+Occupied, do not draw here: core r0-94, inner ring r125-134, outer ring and
+segments r155-179, bezel ticks r200-214. The old battery radius (212) sat right
+on the bezel ticks.
+
+**The rule: before adding any visual element, measure where the art already
+draws and put the new thing in a free band.** Toggle the HUD off, capture
+several frames, profile luminance by radius. If no free band fits the element,
+that is a signal the element duplicates something the art already provides —
+as the waveform did. Re-measure if the baked art is ever changed.
+
+Corollary for decision D4: going fully procedural remains viable —
+`hud_render_rows()` renders all five faces and was previewed on the host — but
+it is a **downgrade in richness** today. The procedural idle is a thin ring and
+a faint core; the baked idle has depth, glow and segments. Retire the clips only
+if the flash/PSRAM is needed, not for looks.
+
 ## Internal RAM budget — the real constraint on Phases 2–5 (measured 2026-07-18)
 
 The audit named PSRAM and flash as the hard ceilings. They are real, but the
