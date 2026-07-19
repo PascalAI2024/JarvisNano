@@ -6,7 +6,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The firmware regularly grows its `/api/status` and `/ws/webim` schemas. The
+ * The firmware regularly grows its `/api/cockpit` and `/ws/webim` schemas. The
  * Android side opts in to `ignoreUnknownKeys` so a new firmware field never
  * crashes the app — these tests pin that contract.
  */
@@ -15,29 +15,35 @@ class SerializationTest {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     @Test
-    fun deviceStatus_acceptsUnknownKeys() {
+    fun deviceCockpit_acceptsUnknownKeysAndParsesNestedTruth() {
         val payload = """
             {
-              "wifi_connected": true,
-              "ip": "192.0.2.80",
-              "ap_active": false,
-              "wifi_mode": "sta_ok",
+              "uptime_ms": 42000,
+              "network": {"connected":true,"ip":"192.0.2.80","rssi":-48},
+              "voice": {"phase":"Speaking","ws_connected":true,"capturing":false},
+              "display": {"init":"ready","actual_fps":18,"flush_errors":0},
+              "agent": {"active":false,"revision_hwm":2,"next_revision":3},
               "future_field_added_in_firmware_v2": "shouldnt break old clients"
             }
         """.trimIndent()
 
-        val parsed = json.decodeFromString(DeviceStatus.serializer(), payload)
-        assertTrue(parsed.wifiConnected)
-        assertEquals("192.0.2.80", parsed.ip)
-        assertEquals("sta_ok", parsed.wifiMode)
+        val parsed = json.decodeFromString(DeviceCockpit.serializer(), payload)
+        assertTrue(parsed.network.connected)
+        assertEquals("192.0.2.80", parsed.network.ip)
+        assertEquals("Speaking", parsed.voice.phase)
+        assertTrue(parsed.voice.wsConnected)
+        assertEquals(18, parsed.display.actualFps)
+        assertEquals(3L, parsed.agent.nextRevision)
     }
 
     @Test
-    fun deviceStatus_defaultsAreUsedForMissingFields() {
-        val parsed = json.decodeFromString(DeviceStatus.serializer(), "{}")
-        assertEquals(false, parsed.wifiConnected)
-        assertEquals(null, parsed.ip)
-        assertEquals(false, parsed.apActive)
+    fun deviceCockpit_defaultsAreUsedForMissingFields() {
+        val parsed = json.decodeFromString(DeviceCockpit.serializer(), "{}")
+        assertEquals(false, parsed.network.connected)
+        assertEquals("", parsed.network.ip)
+        assertEquals("Unknown", parsed.voice.phase)
+        assertEquals(false, parsed.agent.active)
+        assertEquals(CockpitSource.CURRENT, parsed.source)
     }
 
     @Test

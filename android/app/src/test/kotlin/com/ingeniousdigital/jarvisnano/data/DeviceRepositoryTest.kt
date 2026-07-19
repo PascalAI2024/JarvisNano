@@ -16,7 +16,6 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -69,6 +68,23 @@ class DeviceRepositoryTest {
 
     private fun host(): String = "${server.hostName}:${server.port}"
 
+    private fun cockpitBody(
+        ip: String = "192.0.2.80",
+        phase: String = "Listening",
+        agentActive: Boolean = false,
+    ): String = """
+        {
+          "uptime_ms":12000,
+          "network":{"connected":true,"ip":"$ip","rssi":-54},
+          "voice":{"phase":"$phase","voice_armed":true,"always_ready":true,
+            "privacy_paused":false,"capturing":true,"ws_connected":true},
+          "display":{"init":"ready","actual_fps":19,"flush_completions":200,"flush_errors":0},
+          "touch":{"events":1,"last":{"kind":"tap","x":233,"y":233},
+            "shade_open":false,"panel_touch_challenge":{}},
+          "agent":{"active":$agentActive,"revision_hwm":0,"next_revision":1}
+        }
+    """.trimIndent()
+
     private suspend fun TestScope.awaitBackgroundCompletion(condition: () -> Boolean) {
         val start = System.currentTimeMillis()
         while (System.currentTimeMillis() - start < 3000L) {
@@ -83,12 +99,28 @@ class DeviceRepositoryTest {
     }
 
     @Test
+    fun repositoryKeepsPrivateRouteSelectedWhenTransportIsUnavailable() {
+        repository.selectBrainRoute(BrainRoute.PRIVATE_ANDROID)
+        repository.updatePrivateAndroidReadiness(
+            bleConnected = false,
+            servicePresent = null,
+            localBrainReady = false,
+        )
+
+        assertEquals(BrainRoute.PRIVATE_ANDROID, repository.brainRoute.value.selected)
+        assertEquals(
+            BrainRouteReadiness.UNAVAILABLE,
+            repository.brainRoute.value.selectedStatus.readiness,
+        )
+    }
+
+    @Test
     fun testSuccessfulDiscovery() = testScope.runTest {
         server.enqueue(
             MockResponse()
                 .setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
-                .setBody("""{"wifi_connected":true,"ip":"192.0.2.80","ap_active":false,"wifi_mode":"sta_ok"}""")
+                .setBody(cockpitBody())
         )
 
         assertEquals(ConnectionState.Disconnected, repository.connection.value)
@@ -101,8 +133,10 @@ class DeviceRepositoryTest {
         val connectedState = repository.connection.value as ConnectionState.Connected
         assertEquals(host(), connectedState.host)
 
-        // status is expected to be null right after discovery, as it is only updated via polling or manual host setting
-        assertNull(repository.status.value)
+        // The verification probe is the first real cockpit snapshot; do not
+        // throw it away and leave the UI blank until the next poll.
+        assertEquals("Listening", repository.cockpit.value?.voice?.phase)
+        assertEquals("192.0.2.80", repository.cockpit.value?.network?.ip)
     }
 
     @Test
@@ -111,7 +145,7 @@ class DeviceRepositoryTest {
             MockResponse()
                 .setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
-                .setBody("""{"wifi_connected":true,"ip":"192.0.2.80","ap_active":false,"wifi_mode":"sta_ok"}""")
+                .setBody(cockpitBody())
         )
         repository.startDiscovery()
         awaitBackgroundCompletion { server.requestCount == 1 && repository.connection.value is ConnectionState.Connected }
@@ -121,7 +155,7 @@ class DeviceRepositoryTest {
             MockResponse()
                 .setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
-                .setBody("""{"wifi_connected":true,"ip":"192.0.2.80","ap_active":false,"wifi_mode":"sta_ok"}""")
+                .setBody(cockpitBody(phase = "Speaking"))
         )
         server.enqueue(
             MockResponse()
@@ -129,15 +163,16 @@ class DeviceRepositoryTest {
                 .setBody("Internal Server Error")
         )
 
-        val collectedStatuses = mutableListOf<DeviceStatus>()
+        val collectedCockpits = mutableListOf<DeviceCockpit>()
         val job = launch {
-            repository.observeStatus().take(2).collect {
-                collectedStatuses.add(it)
+            repository.observeCockpit().take(2).collect {
+                collectedCockpits.add(it)
             }
         }
 
         awaitBackgroundCompletion { server.requestCount == 2 }
-        assertEquals(1, collectedStatuses.size)
+        assertEquals(1, collectedCockpits.size)
+        assertEquals("Speaking", collectedCockpits.single().voice.phase)
         assertTrue(repository.connection.value is ConnectionState.Connected)
 
         testScheduler.advanceTimeBy(DeviceRepository.POLL_INTERVAL_MS)
@@ -155,7 +190,7 @@ class DeviceRepositoryTest {
             MockResponse()
                 .setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
-                .setBody("""{"wifi_connected":true,"ip":"192.0.2.80","ap_active":false,"wifi_mode":"sta_ok"}""")
+                .setBody(cockpitBody())
         )
         repository.startDiscovery()
         awaitBackgroundCompletion { server.requestCount == 1 && repository.connection.value is ConnectionState.Connected }
@@ -185,12 +220,12 @@ class DeviceRepositoryTest {
             MockResponse()
                 .setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
-                .setBody("""{"wifi_connected":true,"ip":"192.0.2.80","ap_active":false,"wifi_mode":"sta_ok"}""")
+                .setBody(cockpitBody())
         )
 
-        // Start observing status
+        // Start observing cockpit telemetry
         val job = launch {
-            repository.observeStatus().collect {}
+            repository.observeCockpit().collect {}
         }
 
         // Poll 1 (Immediate)

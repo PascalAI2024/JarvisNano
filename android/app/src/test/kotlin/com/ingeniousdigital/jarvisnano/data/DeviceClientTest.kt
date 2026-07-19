@@ -11,15 +11,14 @@ import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import java.util.concurrent.TimeUnit
 
 /**
- * Wire-level tests for [DeviceClient]. They lock down request shape so the
- * older firmware compatibility rules in docs/PROTOCOL.md §3.1 cannot regress
- * silently — in particular, /api/webim/send MUST be sent as text/plain so the
- * browser CORS simple-request path works on un-patched firmware.
+ * Wire-level tests for [DeviceClient]. Current telemetry is /api/cockpit; the
+ * retired /api/status endpoint is only consulted after an explicit 404.
  */
 class DeviceClientTest {
 
@@ -45,27 +44,83 @@ class DeviceClientTest {
     private fun host(): String = "${server.hostName}:${server.port}"
 
     @Test
-    fun getStatus_parsesPayload_andSendsProtocolHeader() = runBlocking {
+    fun getCockpit_parsesCurrentPayload_andSendsProtocolHeader() = runBlocking {
         server.enqueue(
             MockResponse()
                 .setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
                 .setBody(
                     """
-                    {"wifi_connected":true,"ip":"192.0.2.80","ap_active":false,"wifi_mode":"sta_ok"}
+                    {
+                      "uptime_ms":91234,
+                      "network":{"connected":true,"ip":"192.0.2.80","rssi":-51},
+                      "voice":{"phase":"Listening","voice_armed":true,"always_ready":true,
+                        "privacy_paused":false,"capturing":true,"ws_connected":true,
+                        "mic_rms":321.5,"vad_starts":8},
+                      "display":{"init":"ready","actual_fps":19,"flush_completions":1820,
+                        "flush_errors":0,"requested_face":1,"applied_face":1},
+                      "touch":{"events":4,"last":{"kind":"tap","x":233,"y":240},
+                        "shade_open":false,"panel_touch_challenge":{"verified":true}},
+                      "agent":{"active":true,"revision_hwm":4,"next_revision":5,
+                        "task_id":"android","revision":4,"state":"working","progress":60,
+                        "title":"Android compatibility","summary":"Reading cockpit",
+                        "ttl_ms":10000,"evidence":[{"label":"API","state":"pass"}]}
+                    }
                     """.trimIndent(),
                 ),
         )
 
-        val status = client.getStatus(host())
-        assertTrue(status.wifiConnected)
-        assertEquals("192.0.2.80", status.ip)
-        assertEquals("sta_ok", status.wifiMode)
+        val cockpit = client.getCockpit(host())
+        assertEquals(CockpitSource.CURRENT, cockpit.source)
+        assertTrue(cockpit.network.connected)
+        assertEquals("192.0.2.80", cockpit.network.ip)
+        assertEquals(-51, cockpit.network.rssi)
+        assertEquals("Listening", cockpit.voice.phase)
+        assertTrue(cockpit.voice.wsConnected)
+        assertEquals(19, cockpit.display.actualFps)
+        assertEquals("Android compatibility", cockpit.agent.title)
+        assertEquals("pass", cockpit.agent.evidence.single().state)
 
         val recorded = server.takeRequest()
         assertEquals("GET", recorded.method)
-        assertEquals("/api/status", recorded.path)
+        assertEquals("/api/cockpit", recorded.path)
         assertEquals("1", recorded.getHeader("X-JarvisNano-Protocol"))
+    }
+
+    @Test
+    fun getCockpit_fallsBackToLegacyStatus_onlyAfter404() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(404).setBody("not found"))
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody(
+                    """{"wifi_connected":true,"ip":"192.0.2.81","ap_active":false,"wifi_mode":"sta_ok"}""",
+                ),
+        )
+
+        val cockpit = client.getCockpit(host())
+
+        assertEquals(CockpitSource.LEGACY_STATUS, cockpit.source)
+        assertTrue(cockpit.network.connected)
+        assertEquals("192.0.2.81", cockpit.network.ip)
+        assertEquals("/api/cockpit", server.takeRequest().path)
+        assertEquals("/api/status", server.takeRequest().path)
+    }
+
+    @Test
+    fun getCockpit_doesNotMaskCurrentEndpointFailureWithLegacyData() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(503).setBody("degraded"))
+
+        try {
+            client.getCockpit(host())
+            fail("expected current cockpit failure to propagate")
+        } catch (expected: IllegalStateException) {
+            assertTrue(expected.message.orEmpty().contains("503"))
+        }
+
+        assertEquals(1, server.requestCount)
+        assertEquals("/api/cockpit", server.takeRequest().path)
     }
 
     @Test

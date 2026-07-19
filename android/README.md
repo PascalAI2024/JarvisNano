@@ -1,8 +1,10 @@
 # JarvisNano — Android companion
 
-The open-source Android companion for the **JarvisNano** XIAO ESP32-S3 Sense
-device. Built by [Ingenious Digital](https://ingeniousdigital.com), licensed
-Apache-2.0.
+The optional Android companion scaffold for the **JarvisNano** Waveshare
+ESP32-S3 Touch AMOLED 1.75 device. The active product is standalone: Gemini and
+the JarvisMCP client loop run from the ESP32 without this app; the gateway and
+sandbox remain remote. Android is being retained as the future private
+local-model brain.
 
 > JarvisNano is the polished public companion. The personal "Zero Chat" build the
 > author runs day-to-day stays separate, but speaks the same API surface so the
@@ -12,28 +14,23 @@ Apache-2.0.
 
 ## What it does
 
-| Phase | Status      | Surface                                                      |
-| ----- | ----------- | ------------------------------------------------------------ |
-| 1     | Implemented | Wi-Fi (HTTP + WebSocket) chat, telemetry, configuration       |
-| 2     | In progress | BLE scan/connect UI + canonical GATT UUID readiness           |
-| 3     | Marked TODO | On-device Gemma 4 E4B (multimodal) for offline private mode   |
+| Phase | Status | Surface |
+| ----- | ------ | ------- |
+| 1 | Implemented | Wi-Fi cockpit against the v5 `/api/cockpit` contract |
+| 2 | Scaffold only | BLE scan/connect types and canonical UUIDs; firmware GATT/audio is not enabled |
+| 3 | Interface only | Private Android STT/LLM/TTS route; no local model is wired yet |
 
-### Phase 1 features (working)
+### Current verified slice
 
-- **Cockpit** — live telemetry orb, system / Wi-Fi / LLM / capability tiles,
-  BLE scan/connect readiness, restart and new-session controls. Polls
-  `/api/status` every 4 s.
-- **Chat** — `/ws/webim` WebSocket subscription with user / agent / system
-  bubbles. Sends through `/api/webim/send` with a `text/plain` body for
-  compatibility with older firmware; current bootstrap builds also register
-  `OPTIONS /api/*` for JSON clients.
-- **Settings** — pulls `/api/config`, groups fields by Wi-Fi / LLM / IM /
-  Misc, masks anything ending in `_password` / `_secret` / `_token` /
-  `_api_key` with a show-hide toggle, then POSTs the full blob back. Save +
-  Restart in one tap.
-- **About** — mascot, version, links to the GitHub repo and Ingenious Digital.
-- **mDNS** discovery for `esp-claw.local` on `_http._tcp.local.`. Manual host
-  override available in Settings if your network blocks multicast.
+- **Cockpit** — typed v5 network, voice, display, touch, Brain Link, and
+  on-device routing state from `/api/cockpit`.
+- **Manual host connection** — required today because the v5 firmware does not
+  yet bundle the ESP-IDF mDNS component.
+- **Brain-route truth** — Cloud Gemini is current; Private Android and Codex
+  Desk are shown as optional routes rather than silently implied as active.
+
+The old ESP-Claw `/api/status`, `/api/config`, `/api/webim/send`, and
+`/ws/webim` claims are not part of the v5 firmware contract.
 
 ---
 
@@ -44,7 +41,7 @@ Apache-2.0.
 - Jetpack **Compose** with **Material 3**
 - **OkHttp 4.12** — HTTP and WebSocket
 - **kotlinx.serialization-json** — typed payloads
-- **jmdns** — `esp-claw.local` discovery
+- **jmdns** — retained discovery scaffold; v5 currently requires manual IP
 - Manual DI through `App.kt` (no Koin / Hilt — deliberately small)
 
 ---
@@ -97,13 +94,11 @@ cd android
 
 Output APK: `app/build/outputs/apk/debug/app-debug.apk`.
 
-### Test scaffold
+### Tests
 
-The project has dependency-free placeholder sources under `src/test` and
-`src/androidTest` so the source sets compile once Gradle is available. They are
-intentionally not full assertions yet; they reserve the package and commands for
-future unit, integration, and device tests without forcing a test framework
-choice in this slice.
+The JVM suite contains substantive serialization, API-compatibility,
+repository, and brain-routing assertions. Android instrumentation sources also
+compile as part of the normal verification command.
 
 ```bash
 cd android
@@ -127,10 +122,8 @@ Run device tests only when a phone or emulator is connected:
 adb shell am start -n com.ingeniousdigital.jarvisnano.debug/com.ingeniousdigital.jarvisnano.MainActivity
 ```
 
-The phone must be on the **same Wi-Fi network** as the JarvisNano device for
-Phase 1 connectivity. mDNS discovery times out after 8 s — if your network
-blocks multicast (most enterprise / hotel networks do), open **Settings →
-Device address** and paste the device's IP manually.
+The phone must be on the **same trusted Wi-Fi network** as the JarvisNano for
+the current cockpit. Enter the device IP manually; mDNS is not active in v5.
 
 ### Emulator caveats
 
@@ -162,31 +155,25 @@ Use this checklist for Android build and smoke-test signoff.
 - [ ] App remains responsive after rotating the phone and backgrounding /
       foregrounding once.
 
-### HTTP and WebSocket
+### HTTP cockpit
 
 - [ ] Phone and JarvisNano are on the same Wi-Fi network.
-- [ ] Cockpit discovers `esp-claw.local` or connects after setting a manual IP.
-- [ ] Cockpit telemetry updates from `/api/status` for at least three polling
+- [ ] Cockpit connects after setting a manual device IP.
+- [ ] Cockpit telemetry updates from `/api/cockpit` for at least three polling
       intervals.
-- [ ] Chat sends a message through `/api/webim/send` and receives WebSocket
-      updates from `/ws/webim`.
-- [ ] Settings loads `/api/config`, preserves masked secret fields, saves a
-      non-secret change, and the device accepts restart from the app.
 
 ### BLE
 
 - [ ] Test on a physical Android phone; standard emulators cannot validate BLE.
 - [ ] Android permission prompts are shown and accepted when scanning.
-- [ ] BLE scan shows the JarvisNano advertisement.
-- [ ] Connect succeeds and the displayed service / characteristic UUIDs match
-      the BLE README.
-- [ ] Disconnect and reconnect work without force-closing the app.
+- [ ] Treat scan/connect as scaffold validation only until the firmware GATT
+      service and audio characteristics are enabled.
 
 ---
 
 ## Roadmap
 
-- **Phase 1 (now):** Wi-Fi cockpit + chat + settings.
+- **Phase 1 (now):** Optional Wi-Fi cockpit for the standalone device.
 - **Phase 2:** BLE GATT bridge — see [`app/src/main/kotlin/com/ingeniousdigital/jarvisnano/ble/README.md`](./app/src/main/kotlin/com/ingeniousdigital/jarvisnano/ble/README.md).
 - **Phase 3:** On-device Gemma 4 E4B multimodal inference — see [`app/src/main/kotlin/com/ingeniousdigital/jarvisnano/llm/README.md`](./app/src/main/kotlin/com/ingeniousdigital/jarvisnano/llm/README.md).
 

@@ -40,10 +40,24 @@ class DeviceClient(
     private val json: Json = defaultDeviceJson,
 ) {
 
-    /** GET /api/status — short-poll telemetry. */
-    suspend fun getStatus(host: String): DeviceStatus = withContext(Dispatchers.IO) {
-        val body = http.newCall(get(host, "/api/status")).execute().use { it.requireBody() }
-        json.decodeFromString(DeviceStatus.serializer(), body)
+    /**
+     * GET /api/cockpit — the current, consolidated device telemetry contract.
+     *
+     * A 404 means we found an older firmware generation, so and only so do we
+     * probe the retired /api/status endpoint and normalize its narrow payload.
+     * Server failures are not hidden behind legacy data; a 503 must remain a
+     * 503 so the cockpit can report the device as degraded honestly.
+    */
+    suspend fun getCockpit(host: String): DeviceCockpit = withContext(Dispatchers.IO) {
+        val currentBody = http.newCall(get(host, "/api/cockpit")).execute().use { response ->
+            if (response.code == 404) {
+                null
+            } else {
+                response.requireBody()
+            }
+        }
+        if (currentBody == null) getLegacyCockpit(host)
+        else json.decodeFromString(DeviceCockpit.serializer(), currentBody)
     }
 
     /** GET /api/config — full config blob. */
@@ -156,6 +170,11 @@ class DeviceClient(
         .deviceHeaders()
         .get()
         .build()
+
+    private fun getLegacyCockpit(host: String): DeviceCockpit {
+        val body = http.newCall(get(host, "/api/status")).execute().use { it.requireBody() }
+        return json.decodeFromString(LegacyDeviceStatus.serializer(), body).toCockpit()
+    }
 
     private fun url(host: String, path: String): String {
         val cleanHost = cleanHost(host)

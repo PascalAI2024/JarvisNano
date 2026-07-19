@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -37,8 +38,13 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.ingeniousdigital.jarvisnano.ble.BleConstants
 import com.ingeniousdigital.jarvisnano.ble.BleClient
-import com.ingeniousdigital.jarvisnano.data.Capability
+import com.ingeniousdigital.jarvisnano.data.BrainRoute
+import com.ingeniousdigital.jarvisnano.data.BrainRouteReadiness
+import com.ingeniousdigital.jarvisnano.data.BrainRouteState
+import com.ingeniousdigital.jarvisnano.data.CockpitAgent
+import com.ingeniousdigital.jarvisnano.data.CockpitSource
 import com.ingeniousdigital.jarvisnano.data.ConnectionState
+import com.ingeniousdigital.jarvisnano.data.DeviceCockpit
 import com.ingeniousdigital.jarvisnano.data.DeviceRepository
 import com.ingeniousdigital.jarvisnano.ui.components.StatusOrb
 import com.ingeniousdigital.jarvisnano.ui.components.Tile
@@ -51,21 +57,26 @@ import kotlinx.coroutines.launch
 fun CockpitScreen(repository: DeviceRepository, bleClient: BleClient) {
     val connection by repository.connection.collectAsState()
     val bleState by bleClient.state.collectAsState()
-    val status by repository.status.collectAsState()
-    var capabilities by remember { mutableStateOf<List<Capability>>(emptyList()) }
+    val cockpit by repository.cockpit.collectAsState()
+    val brainRoute by repository.brainRoute.collectAsState()
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
         repository.startDiscovery()
+        // Keep the poller alive through transient Failed states so its
+        // three-failure rediscovery policy can actually run.
+        repository.observeCockpit().collectLatest { /* StateFlow owns the snapshot. */ }
     }
 
-    LaunchedEffect(connection) {
-        if (connection is ConnectionState.Connected) {
-            runCatching { repository.loadCapabilities() }
-                .onSuccess { capabilities = it.items }
-            // Begin polling — runs until the composition leaves.
-            repository.observeStatus().collectLatest { /* status flow updates StateFlow */ }
-        }
+    // The BLE skeleton can prove the transport and canonical service today.
+    // LocalLlm is still interface-only, so private readiness remains honest.
+    LaunchedEffect(bleState) {
+        val connected = bleState as? BleClient.State.Connected
+        repository.updatePrivateAndroidReadiness(
+            bleConnected = connected != null,
+            servicePresent = connected?.jarvisServicePresent,
+            localBrainReady = false,
+        )
     }
 
     LazyColumn(
@@ -75,11 +86,19 @@ fun CockpitScreen(repository: DeviceRepository, bleClient: BleClient) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item { ConnectionHeader(connection) }
-        item { SystemTile(status) }
-        item { WifiTile(status) }
+        item {
+            BrainRouteTile(
+                state = brainRoute,
+                onSelect = repository::selectBrainRoute,
+            )
+        }
+        item { VoiceTile(cockpit) }
+        item { NetworkTile(cockpit) }
+        item { DisplayTile(cockpit) }
+        item { AgentTile(cockpit?.agent) }
+        item { TouchTile(cockpit) }
         item { BleTile(bleClient, bleState) }
-        item { LlmTile(connection) }
-        item { CapabilitiesTile(capabilities) }
+        item { SystemTile(cockpit) }
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -94,12 +113,208 @@ fun CockpitScreen(repository: DeviceRepository, bleClient: BleClient) {
                     modifier = Modifier.weight(1f),
                 ) { Text("Restart device") }
                 OutlinedButton(
-                    onClick = { /* New session is just a chat-side concern; placeholder. */ },
+                    onClick = { /* Session ownership is route-specific; no fake reset. */ },
                     modifier = Modifier.weight(1f),
+                    enabled = false,
                 ) { Text("New session") }
             }
         }
     }
+}
+
+@Composable
+private fun BrainRouteTile(
+    state: BrainRouteState,
+    onSelect: (BrainRoute) -> Unit,
+) {
+    val selectedStatus = state.selectedStatus
+    val accent = when (selectedStatus.readiness) {
+        BrainRouteReadiness.READY -> IgdPalette.Green
+        BrainRouteReadiness.WAITING -> IgdPalette.Amber
+        BrainRouteReadiness.UNAVAILABLE -> IgdPalette.Red
+    }
+    Tile(title = "Brain route", accent = accent) {
+        TileRow("Selected", state.selected.label)
+        TileRow("Readiness", selectedStatus.readiness.name.lowercase())
+        Text(
+            selectedStatus.detail,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(10.dp))
+        BrainRoute.entries.forEach { route ->
+            val routeStatus = state.statusFor(route)
+            val label = "${route.label} · ${routeStatus.readiness.name.lowercase()}"
+            if (state.selected == route) {
+                Button(
+                    onClick = { onSelect(route) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(label) }
+            } else {
+                OutlinedButton(
+                    onClick = { onSelect(route) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(label) }
+            }
+            Text(
+                routeStatus.detail,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 4.dp, bottom = 8.dp),
+            )
+        }
+        Text(
+            "An unavailable private route stays selected. Cloud fallback requires your tap.",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun VoiceTile(cockpit: DeviceCockpit?) {
+    val voice = cockpit?.voice
+    val accent = when {
+        voice?.privacyPaused == true -> IgdPalette.Amber
+        voice?.wsConnected == true -> IgdPalette.Cyan
+        else -> IgdPalette.Red
+    }
+    Tile(title = "Voice", accent = accent) {
+        TileRow("Phase", voice?.phase ?: "—")
+        TileRow("Microphone", when {
+            voice == null -> "—"
+            voice.privacyPaused -> "privacy paused"
+            voice.capturing -> "capturing"
+            else -> "idle"
+        })
+        TileRow("Gemini socket", when (voice?.wsConnected) {
+            true -> "open"
+            false -> "closed"
+            null -> "—"
+        })
+        TileRow("Voice armed", if (voice?.voiceArmed == true) "yes" else "no")
+        TileRow("Always ready", if (voice?.alwaysReady == true) "yes" else "no")
+        TileRow("Mic RMS", voice?.let { "%.1f".format(it.micRms) } ?: "—", monospaceValue = true)
+        TileRow("VAD starts", voice?.vadStarts?.toString() ?: "—", monospaceValue = true)
+    }
+}
+
+@Composable
+private fun NetworkTile(cockpit: DeviceCockpit?) {
+    val network = cockpit?.network
+    Tile(
+        title = "Network",
+        accent = if (network?.connected == true) IgdPalette.Green else IgdPalette.Red,
+    ) {
+        TileRow("Connected", when (network?.connected) {
+            true -> "yes"
+            false -> "no"
+            null -> "—"
+        })
+        TileRow("IP", network?.ip?.takeIf(String::isNotBlank) ?: "—", monospaceValue = true)
+        TileRow(
+            "RSSI",
+            network?.takeIf { it.connected }?.let { "${it.rssi} dBm" } ?: "—",
+            monospaceValue = true,
+        )
+    }
+}
+
+@Composable
+private fun DisplayTile(cockpit: DeviceCockpit?) {
+    val display = cockpit?.display
+    val accent = when {
+        display?.flushErrors?.let { it > 0 } == true -> IgdPalette.Red
+        display?.init == "ready" -> IgdPalette.Green
+        else -> IgdPalette.Amber
+    }
+    Tile(title = "Round display", accent = accent) {
+        TileRow("Presenter", display?.init ?: "—")
+        TileRow("Frame rate", display?.let { "${it.actualFps} fps" } ?: "—", monospaceValue = true)
+        TileRow("Flushes", display?.flushCompletions?.toString() ?: "—", monospaceValue = true)
+        TileRow("Errors", display?.flushErrors?.toString() ?: "—", monospaceValue = true)
+        TileRow(
+            "Face",
+            display?.let { "${it.requestedFace} → ${it.appliedFace}" } ?: "—",
+            monospaceValue = true,
+        )
+    }
+}
+
+@Composable
+private fun AgentTile(agent: CockpitAgent?) {
+    Tile(
+        title = "Codex Agent Link",
+        accent = if (agent?.active == true) IgdPalette.Violet else IgdPalette.ForegroundDim,
+    ) {
+        if (agent?.active != true) {
+            TileRow("State", "waiting")
+            TileRow("Next revision", agent?.nextRevision?.toString() ?: "—", monospaceValue = true)
+            Text(
+                "No bounded Codex task is currently linked.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            TileRow("State", agent.state ?: "working")
+            TileRow("Progress", "${agent.progress ?: 0}%")
+            TileRow("Task", agent.title ?: agent.taskId ?: "active")
+            agent.summary?.takeIf(String::isNotBlank)?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 6.dp),
+                )
+            }
+            agent.evidence.forEach { evidence ->
+                TileRow(evidence.label, evidence.state)
+            }
+        }
+    }
+}
+
+@Composable
+private fun TouchTile(cockpit: DeviceCockpit?) {
+    val touch = cockpit?.touch
+    val challenge = touch?.panelTouchChallenge
+    Tile(title = "Touch + shade", accent = IgdPalette.Cyan) {
+        TileRow("Events", touch?.events?.toString() ?: "—", monospaceValue = true)
+        TileRow(
+            "Last",
+            touch?.last?.let { "${it.kind} · ${it.x},${it.y}" } ?: "—",
+            monospaceValue = true,
+        )
+        TileRow("Shade", if (touch?.shadeOpen == true) "open" else "closed")
+        TileRow("Physical proof", when {
+            challenge == null -> "—"
+            challenge.verified -> "verified"
+            challenge.active -> "round ${challenge.correctRounds + 1}"
+            challenge.pending -> "queued"
+            else -> "not run"
+        })
+    }
+}
+
+@Composable
+private fun SystemTile(cockpit: DeviceCockpit?) {
+    Tile(title = "System truth", accent = IgdPalette.Cyan) {
+        TileRow("Uptime", cockpit?.let { formatUptime(it.uptimeMs) } ?: "—", monospaceValue = true)
+        TileRow("Telemetry", when (cockpit?.source) {
+            CockpitSource.CURRENT -> "/api/cockpit"
+            CockpitSource.LEGACY_STATUS -> "legacy fallback"
+            null -> "—"
+        }, monospaceValue = true)
+        TileRow("Audio diagnostic", if (cockpit?.voice?.audioDiagRunning == true) "running" else "idle")
+    }
+}
+
+private fun formatUptime(uptimeMs: Long): String {
+    val totalSeconds = uptimeMs.coerceAtLeast(0) / 1_000
+    val hours = totalSeconds / 3_600
+    val minutes = (totalSeconds % 3_600) / 60
+    val seconds = totalSeconds % 60
+    return "%02d:%02d:%02d".format(hours, minutes, seconds)
 }
 
 @Composable
@@ -213,14 +428,14 @@ private fun bleRuntimePermissions(): List<String> =
 private fun ConnectionHeader(state: ConnectionState) {
     val (color, label, host) = when (state) {
         is ConnectionState.Connected -> Triple(IgdPalette.Green, "Online", state.host)
-        is ConnectionState.Searching -> Triple(IgdPalette.Amber, "Searching", "esp-claw.local")
+        is ConnectionState.Searching -> Triple(IgdPalette.Amber, "Searching", "JarvisNano on LAN")
         is ConnectionState.Failed -> Triple(IgdPalette.Red, "Offline", state.reason)
         ConnectionState.Disconnected -> Triple(IgdPalette.ForegroundDim, "Idle", "—")
     }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
-        shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(20.dp),
     ) {
         Row(
             modifier = Modifier.padding(20.dp),
@@ -243,62 +458,6 @@ private fun ConnectionHeader(state: ConnectionState) {
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-            }
-        }
-    }
-}
-
-@Composable
-private fun SystemTile(status: com.ingeniousdigital.jarvisnano.data.DeviceStatus?) {
-    Tile(title = "System", accent = IgdPalette.Cyan) {
-        TileRow("Wi-Fi mode", status?.wifiMode ?: "—")
-        TileRow("Storage", status?.storageBasePath ?: "—", monospaceValue = true)
-        TileRow("Access point", if (status?.apActive == true) "active" else "off")
-    }
-}
-
-@Composable
-private fun WifiTile(status: com.ingeniousdigital.jarvisnano.data.DeviceStatus?) {
-    Tile(
-        title = "Wi-Fi",
-        accent = if (status?.wifiConnected == true) IgdPalette.Green else IgdPalette.Red,
-    ) {
-        TileRow("Connected", if (status?.wifiConnected == true) "yes" else "no")
-        TileRow("IP", status?.ip ?: "—", monospaceValue = true)
-        TileRow("AP SSID", status?.apSsid ?: "—")
-    }
-}
-
-@Composable
-private fun LlmTile(state: ConnectionState) {
-    Tile(title = "LLM", accent = IgdPalette.Orange) {
-        when (state) {
-            is ConnectionState.Connected -> {
-                TileRow("Channel", "WebSocket /ws/webim", monospaceValue = true)
-                TileRow("Provider", "as configured on device")
-            }
-            else -> {
-                TileRow("Channel", "—")
-                TileRow("Provider", "—")
-            }
-        }
-    }
-}
-
-@Composable
-private fun CapabilitiesTile(items: List<Capability>) {
-    Tile(title = "Capabilities", accent = IgdPalette.Amber) {
-        if (items.isEmpty()) {
-            Text(
-                "No capabilities reported.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        } else {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                items.forEach { cap ->
-                    TileRow(cap.displayName, cap.groupId, monospaceValue = true)
-                }
             }
         }
     }

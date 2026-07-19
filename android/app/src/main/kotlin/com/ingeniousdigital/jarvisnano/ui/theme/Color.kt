@@ -14,6 +14,7 @@ object IgdPalette {
     val Green = Color(0xFF3FCB6F)         // success / online
     val Red = Color(0xFFFF3B3B)           // error / offline
     val Cyan = Color(0xFF00B3FF)          // info / streaming
+    val Violet = Color(0xFFB45CFF)        // Codex / Agent Link
 
     val Foreground = Color(0xFFE8E8E8)
     val ForegroundDim = Color(0xFF888888)
