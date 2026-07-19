@@ -186,13 +186,18 @@ leaks it — the Phase 1 boot logs in the scratchpad did, which is why they are
 NOT in `docs/evidence/`.
 
 Actions:
-1. **Rotate the key** — it has been written to device logs.
-2. Firmware fix: send the key as an `x-goog-api-key` header on the WS upgrade
-   instead of a query parameter, so the logged URI carries no secret. Verify the
-   Live endpoint accepts the header form before relying on it.
-3. Until then, treat any serial/SD capture from this device as secret-bearing
-   and redact before sharing. `scripts/check-secrets.sh` does not currently
-   catch `AIza…` in `.build_logs/` — add that pattern.
+1. **Rotate the key** — it has been written to device logs. STILL OPEN (owner:
+   Pascal); old SD-card log lines from before the fix below may retain it.
+2. ~~Firmware fix~~ **FIXED 2026-07-19 (commit a88a1941):** the key now rides
+   an `x-goog-api-key` header on the WS upgrade and the URL is bare, so the
+   logged URI carries no secret. Empirically verified on hardware: the Live
+   endpoint accepted the header (setup completed, 2/2 reconnects, spoken
+   reply). A two-strike runtime fallback to the `?key=` URL protects voice if
+   the endpoint ever stops honoring header auth (fallback trades privacy for
+   availability and logs loudly when it fires).
+3. Serial/SD captures from BEFORE the fix remain secret-bearing — redact
+   before sharing. `scripts/check-secrets.sh` does not currently catch
+   `AIza…` in `.build_logs/` — add that pattern.
 
 ## Phase 0 results (2026-07-18)
 
