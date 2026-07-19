@@ -1,53 +1,95 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
-#
-# flash-v5.sh — flash JarvisRobot v5 to the Waveshare AMOLED-1.75.
-#
-# DIO flash mode is MANDATORY: the CO5300 QSPI panel and the flash controller
-# interact, and the default QIO mode has caused boot failures with this firmware
-# (hardware.md non-negotiable #4). DIO is enforced in TWO places so it cannot be
-# flashed wrong:
-#   1. sdkconfig.defaults   -> CONFIG_ESPTOOLPY_FLASHMODE_DIO=y (build header)
-#   2. this script          -> preflight asserts the build's flash_args says dio
-#
-# Port is auto-detected as the first /dev/cu.usbmodem* (override with PORT=...).
-#
-# Usage:
-#   scripts/flash-v5.sh                 # build (if needed) + flash + monitor
-#   PORT=/dev/cu.usbmodem1101 scripts/flash-v5.sh
-#   BAUD=921600 scripts/flash-v5.sh
+# Build and safely flash JarvisRobot v5 to the Waveshare AMOLED-1.75.
 set -euo pipefail
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD_DIR="${PROJECT_DIR}/build"
-BAUD="${BAUD:-460800}"
-
-# --- port auto-detect ------------------------------------------------------
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BUILD_DIR="$ROOT/build"
 PORT="${PORT:-$(ls /dev/cu.usbmodem* 2>/dev/null | head -n1 || true)}"
-if [ -z "${PORT}" ]; then
-  echo "flash-v5: no /dev/cu.usbmodem* found. Plug in the board (or hold BOOT" >&2
-  echo "          and replug for download mode), or set PORT=... explicitly." >&2
-  exit 1
+BAUD="${BAUD:-460800}"
+ESPTOOL_VENV="$ROOT/.build_tools/esptool"
+
+log() { printf '\033[1;36m[flash-v5]\033[0m %s\n' "$*"; }
+die() { printf '\033[1;31m[flash-v5]\033[0m %s\n' "$*" >&2; exit 1; }
+
+if [ "${NO_BUILD:-0}" != "1" ]; then
+    "$ROOT/scripts/build-v5.sh"
 fi
 
-command -v idf.py >/dev/null 2>&1 || {
-  echo "flash-v5: idf.py not on PATH — run '. \$IDF_PATH/export.sh' first." >&2
-  exit 1
-}
+test -n "$PORT" || die "no /dev/cu.usbmodem* found; attach the board or set PORT"
+test -f "$BUILD_DIR/flasher_args.json" || die "missing build/flasher_args.json"
+test -f "$BUILD_DIR/jarvisrobot_v5.bin" || die "missing v5 app image"
 
-# --- ensure a build exists -------------------------------------------------
-if [ ! -f "${BUILD_DIR}/flash_args" ]; then
-  echo "flash-v5: no build found — running idf.py build"
-  ( cd "${PROJECT_DIR}" && idf.py set-target esp32s3 build )
+python3 - "$BUILD_DIR/flasher_args.json" <<'PY'
+import json
+import pathlib
+import sys
+
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+mode = manifest.get("flash_settings", {}).get("flash_mode")
+if mode != "dio":
+    raise SystemExit(f"flash-v5: refusing image with flash_mode={mode!r}; DIO is mandatory")
+PY
+
+if python3 - 2>/dev/null <<'PY'
+import sys
+import esptool
+major = int(getattr(esptool, "__version__", "0").split(".")[0] or 0)
+sys.exit(0 if major >= 5 else 1)
+PY
+then
+    ESPTOOL=(python3 -m esptool)
+elif command -v esptool >/dev/null 2>&1; then
+    ESPTOOL=(esptool)
+elif command -v esptool.py >/dev/null 2>&1; then
+    ESPTOOL=(esptool.py)
+else
+    if [ ! -x "$ESPTOOL_VENV/bin/python" ]; then
+        log "creating local esptool environment"
+        python3 -m venv "$ESPTOOL_VENV"
+    fi
+    if ! "$ESPTOOL_VENV/bin/python" -c 'import esptool' 2>/dev/null; then
+        "$ESPTOOL_VENV/bin/python" -m pip install --quiet --upgrade pip esptool
+    fi
+    ESPTOOL=("$ESPTOOL_VENV/bin/python" -m esptool)
 fi
 
-# --- DIO preflight: refuse to flash a QIO image ---------------------------
-if grep -q -- '--flash_mode qio' "${BUILD_DIR}/flash_args" 2>/dev/null; then
-  echo "flash-v5: REFUSING to flash — build/flash_args is QIO, not DIO." >&2
-  echo "          Set CONFIG_ESPTOOLPY_FLASHMODE_DIO=y and rebuild." >&2
-  exit 1
+cd "$BUILD_DIR"
+
+if [ "${ERASE_NVS:-0}" = "1" ]; then
+    log "erasing NVS at 0x9000..0xefff"
+    "${ESPTOOL[@]}" --chip esp32s3 -p "$PORT" -b 115200 \
+        --before default-reset --after no-reset erase-region 0x9000 0x6000
 fi
 
-echo "flash-v5: port=${PORT} baud=${BAUD} mode=DIO"
-cd "${PROJECT_DIR}"
-exec idf.py -p "${PORT}" -b "${BAUD}" flash monitor
+flash_argv=()
+while IFS= read -r arg; do
+    flash_argv+=("$arg")
+done < <(python3 - <<'PY'
+import json
+from pathlib import Path
+
+manifest = json.loads(Path("flasher_args.json").read_text())
+settings = manifest["flash_settings"]
+for key in ("flash_mode", "flash_size", "flash_freq"):
+    print("--" + key.replace("_", "-"))
+    print(settings[key])
+for offset, filename in sorted(
+    manifest["flash_files"].items(), key=lambda item: int(item[0], 16)
+):
+    print(offset)
+    print(filename)
+PY
+)
+
+log "port=$PORT baud=$BAUD mode=DIO (NVS preserved)"
+"${ESPTOOL[@]}" --chip esp32s3 -p "$PORT" -b "$BAUD" \
+    --connect-attempts 25 --before default-reset --after no-reset \
+    write-flash "${flash_argv[@]}"
+
+log "starting application with watchdog reset"
+if ! "${ESPTOOL[@]}" --chip esp32s3 -p "$PORT" -b 115200 \
+    --before no-reset --after watchdog-reset flash-id >/dev/null; then
+    log "reset command raced USB re-enumeration; flash itself was already verified"
+fi
+
+log "flash complete; monitor with: ./scripts/usb-monitor.py --port $PORT"

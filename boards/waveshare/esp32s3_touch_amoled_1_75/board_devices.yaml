@@ -74,16 +74,15 @@ devices:
         frequency: 400000
 
   # 32 GB microSD via SDMMC (1-bit). Pin map from Waveshare BSP:
-  # D0=GPIO3, CMD=GPIO1, CLK=GPIO2. format_if_mount_failed lets the
-  # firmware reformat a card that's blank or has a non-FAT filesystem,
-  # rather than panic-aborting board init.
+  # D0=GPIO3, CMD=GPIO1, CLK=GPIO2. Never format automatically: a transient
+  # mount/electrical failure must degrade safely, not erase a user's card.
   - name: fs_sdcard
     type: fs_fat
     sub_type: sdmmc
     version: default
     config:
       vfs_config:
-        format_if_mount_failed: true
+        format_if_mount_failed: false
       sub_config:
         bus_width: 1
         slot_flags: "SDMMC_SLOT_FLAG_INTERNAL_PULLUP"
@@ -95,7 +94,8 @@ devices:
   # CST9217 capacitive touch on shared I2C bus
   - name: lcd_touch
     chip: cst9217
-    type: lcd_touch_i2c
+    type: lcd_touch
+    sub_type: i2c
     version: default
     dependencies:
       esp_lcd_touch:
@@ -104,14 +104,16 @@ devices:
       waveshare/esp_lcd_touch_cst9217: "*"
     config:
       io_i2c_config:
-        dev_addr: [0x5A]                 # CST9217 default 7-bit address
         lcd_cmd_bits: 8
         scl_speed_hz: 400000
-        peripherals:
-          - name: i2c_master
+        flags:
+          disable_control_phase: true
 
       touch_config:
         x_max: 466
         y_max: 466
         int_gpio_num: 11
         rst_gpio_num: 40
+    peripherals:
+      - name: i2c_master
+        i2c_addr: [0xB4]                 # CST9217 7-bit 0x5A, left-shifted

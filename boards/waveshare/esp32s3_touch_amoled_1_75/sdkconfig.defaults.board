@@ -18,14 +18,12 @@ CONFIG_SPIRAM_SPEED_80M=y
 # you would have to hold BOOT + replug for every reflash. Confirmed: factory firmware ships
 # without this enabled, which is why the new unit only enumerates in download mode.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
-# Display backed by LCD subsystem.
-CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT=y
-
-# Board-manager peripheral support flags (required by esp-bmgr-assist >= 0.8 — earlier
-# versions inferred these from board_peripherals.yaml; newer versions need them explicit).
+# Board-manager peripheral support flags for buses it owns. The CO5300/SPI2
+# display is deliberately direct-owned by jarvis_board, so display/SPI manager
+# symbols must remain unset or the manager will claim a bus it must not own.
 CONFIG_ESP_BOARD_PERIPH_I2C_SUPPORT=y
-CONFIG_ESP_BOARD_PERIPH_SPI_SUPPORT=y
 CONFIG_ESP_BOARD_PERIPH_GPIO_SUPPORT=y
 
 # Audio: I2S0 duplex driving ES8311 codec (out) + ES7210 ADC (in). The ES7210

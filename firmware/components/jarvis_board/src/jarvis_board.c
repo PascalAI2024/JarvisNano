@@ -76,6 +76,7 @@ esp_err_t jarvis_board_display_get(jarvis_board_display_t *out_display)
     if (!s_display_ready) {
         esp_lcd_panel_handle_t panel = NULL;
         esp_lcd_panel_io_handle_t io = NULL;
+        bool bus_initialized = false;
 
         const spi_bus_config_t buscfg = CO5300_PANEL_BUS_QSPI_CONFIG(
             JARVIS_LCD_PCLK,
@@ -86,14 +87,15 @@ esp_err_t jarvis_board_display_get(jarvis_board_display_t *out_display)
             JARVIS_LCD_H_RES * JARVIS_LCD_V_RES * JARVIS_LCD_BITS_PER_PIXEL / 8);
         ESP_LOGI(TAG, "Initialize SPI bus for CO5300 QSPI display");
         ESP_GOTO_ON_ERROR(spi_bus_initialize(JARVIS_LCD_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO),
-                          fail, TAG, "spi_bus_initialize failed");
+                          fail_display, TAG, "spi_bus_initialize failed");
+        bus_initialized = true;
 
         esp_lcd_panel_io_spi_config_t io_config = CO5300_PANEL_IO_QSPI_CONFIG(JARVIS_LCD_CS, NULL, NULL);
         io_config.trans_queue_depth = JARVIS_LCD_TRANS_QUEUE_DEPTH;
         ESP_GOTO_ON_ERROR(
             esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)JARVIS_LCD_SPI_HOST,
                                      &io_config, &io),
-            fail, TAG, "esp_lcd_new_panel_io_spi failed");
+            fail_display, TAG, "esp_lcd_new_panel_io_spi failed");
 
         co5300_vendor_config_t vendor_config = {
             .init_cmds = s_lcd_init_cmds,
@@ -109,18 +111,18 @@ esp_err_t jarvis_board_display_get(jarvis_board_display_t *out_display)
             .vendor_config = &vendor_config,
         };
         ESP_GOTO_ON_ERROR(esp_lcd_new_panel_co5300(io, &panel_config, &panel),
-                          fail, TAG, "esp_lcd_new_panel_co5300 failed");
-        ESP_GOTO_ON_FALSE(panel && io, ESP_ERR_INVALID_STATE, fail, TAG,
+                          fail_display, TAG, "esp_lcd_new_panel_co5300 failed");
+        ESP_GOTO_ON_FALSE(panel && io, ESP_ERR_INVALID_STATE, fail_display, TAG,
                           "CO5300 display returned NULL handles");
-        ESP_GOTO_ON_ERROR(esp_lcd_panel_set_gap(panel, 0x06, 0), fail, TAG,
+        ESP_GOTO_ON_ERROR(esp_lcd_panel_set_gap(panel, 0x06, 0), fail_display, TAG,
                           "esp_lcd_panel_set_gap failed");
-        ESP_GOTO_ON_ERROR(esp_lcd_panel_reset(panel), fail, TAG,
+        ESP_GOTO_ON_ERROR(esp_lcd_panel_reset(panel), fail_display, TAG,
                           "esp_lcd_panel_reset failed");
-        ESP_GOTO_ON_ERROR(esp_lcd_panel_init(panel), fail, TAG,
+        ESP_GOTO_ON_ERROR(esp_lcd_panel_init(panel), fail_display, TAG,
                           "esp_lcd_panel_init failed");
-        ESP_GOTO_ON_ERROR(esp_lcd_panel_disp_on_off(panel, true), fail, TAG,
+        ESP_GOTO_ON_ERROR(esp_lcd_panel_disp_on_off(panel, true), fail_display, TAG,
                           "esp_lcd_panel_disp_on failed");
-        ESP_GOTO_ON_ERROR(esp_lcd_panel_co5300_set_brightness(panel, 100), fail, TAG,
+        ESP_GOTO_ON_ERROR(esp_lcd_panel_co5300_set_brightness(panel, 100), fail_display, TAG,
                           "esp_lcd_panel_co5300_set_brightness failed");
 
         jarvis_board_display_t display = {
@@ -135,11 +137,25 @@ esp_err_t jarvis_board_display_get(jarvis_board_display_t *out_display)
         ESP_LOGI(TAG, "CO5300 QSPI display ready: %ux%u panel=%p io=%p",
                  (unsigned)s_display.width, (unsigned)s_display.height,
                  (void *)s_display.panel, (void *)s_display.io);
+
+fail_display:
+        if (ret != ESP_OK && !s_display_ready) {
+            if (panel) {
+                (void)esp_lcd_panel_del(panel);
+            }
+            if (io) {
+                (void)esp_lcd_panel_io_del(io);
+            }
+            if (bus_initialized) {
+                (void)spi_bus_free(JARVIS_LCD_SPI_HOST);
+            }
+        }
     }
 
-    *out_display = s_display;
+    if (ret == ESP_OK) {
+        *out_display = s_display;
+    }
 
-fail:
     xSemaphoreGive(lock);
     return ret;
 }

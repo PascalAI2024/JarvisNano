@@ -36,12 +36,30 @@ CONFIG_COMPILER_OPTIMIZATION_PERF=y
 #     (hardware.md #11). Without this the board enumerates JTAG-only. ---
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
+# --- Boot composition root: board/network/audio/display construction plus the
+#     embedded diagnostics shell no longer fits IDF's 3.5 KB main-task default.
+#     Keep this separate from the 20 KB long-lived voice task. ---
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
 # --- lwIP TCP: triple the send buffer + window to 16 KB (default 5760 B). A
 #     Wi-Fi RTT spike must be absorbed, not surfaced as a would-block that the
 #     L2 framer would otherwise have to treat as backpressure. PSRAM is
 #     plentiful so the per-socket memory is free. ---
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
 CONFIG_LWIP_TCP_WND_DEFAULT=16384
+
+# --- Keep Wi-Fi/lwIP socket payloads in the 8 MB PSRAM first. The diagnostics
+#     server and Gemini WSS can be active together; leaving lwIP on the small
+#     internal heap made a few cockpit clients starve AES and stall response
+#     bodies even though PSRAM was mostly idle. Internal RAM remains the
+#     supported fallback. ---
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# --- Preserve a contiguous internal-RAM pool for the 20 KB voice owner, the
+#     Gemini WebSocket worker, codec DMA, and hardware AES. General allocations
+#     already have 8 MB of PSRAM; consuming this pool for ordinary mallocs made
+#     late-created real-time tasks fail despite ample total memory. ---
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
 
 # --- BT/BLE OFF. BT/Wi-Fi coex time-slices the single 2.4 GHz radio and
 #     starves WSS streaming audio; a boot-stability + audio invariant
@@ -63,3 +81,8 @@ CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 # --- Log levels: INFO default, DEBUG available for bring-up. ---
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
+
+# --- mbedTLS allocates from PSRAM (v4-proven). Internal heap cannot host the
+#     ~45 KB TLS handshake alongside voice+display+http: observed live as
+#     mbedtls_ssl_setup -0x7F00 (ALLOC_FAILED) on every Gemini WSS connect. ---
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
