@@ -304,6 +304,33 @@ static volatile bool s_pending_text_set;
 static char        s_last_said[192];   /* tail of JARVIS's last spoken transcript */
 static uint32_t    s_always_ready_rearm_ms;  /* cooldown gate for idle re-arm */
 
+/* Rolling caption accumulator (app task only). The output transcript arrives
+ * as fragments; the on-glass chip (STATE-04) shows the TAIL of the current
+ * turn so a reader can follow along. Front-clipped in place — a subtitle, not
+ * an archive. */
+static char s_caption_acc[128];
+static void caption_append(const char *part)
+{
+    size_t have = strlen(s_caption_acc);
+    size_t add = strlen(part);
+    if (add >= sizeof s_caption_acc) {
+        part += add - (sizeof s_caption_acc - 1U);
+        add = sizeof s_caption_acc - 1U;
+        have = 0;
+    } else if (have + add >= sizeof s_caption_acc) {
+        size_t drop = have + add - (sizeof s_caption_acc - 1U);
+        memmove(s_caption_acc, s_caption_acc + drop, have - drop + 1U);
+        have -= drop;
+    }
+    memcpy(s_caption_acc + have, part, add + 1U);
+    jr_display_caption_set(s_caption_acc);
+}
+static void caption_reset(void)
+{
+    s_caption_acc[0] = '\0';
+    jr_display_caption_clear();
+}
+
 /* ======================================================================== *
  *  VAD / barge diagnostic ring log — records every VAD decision with the    *
  *  numbers that drive barge tuning (mic_rms, floor, gate, peak playback,     *
@@ -965,10 +992,14 @@ static void rich_cb(void *u, const jr_gemini_event_t *ge)
         break;
     case JR_GEV_INTERRUPTED:
         a->terminal_pending = false;
+        caption_reset();   /* barged: those words were cut off mid-air */
         e = jr_event(JR_EV_SERVER_INTERRUPTED);
         break;
     case JR_GEV_TURN_COMPLETE:
         a->rx_turn_complete++;
+        s_caption_acc[0] = '\0';   /* next turn starts a fresh caption; the
+                                    * finished one stays readable until the
+                                    * phase leaves Speaking */
         if (jr_audio_playback_pending()) {
             a->terminal_pending = true;
             e = jr_event(JR_EV_HEARTBEAT);
@@ -978,6 +1009,7 @@ static void rich_cb(void *u, const jr_gemini_event_t *ge)
         break;
     case JR_GEV_GENERATION_COMPLETE:
         a->rx_generation_complete++;
+        s_caption_acc[0] = '\0';
         if (jr_audio_playback_pending()) {
             a->terminal_pending = true;
             e = jr_event(JR_EV_HEARTBEAT);
@@ -1080,10 +1112,12 @@ static void rich_cb(void *u, const jr_gemini_event_t *ge)
     case JR_GEV_TEXT:
         a->rx_text_parts++;
         /* Output-audio transcript: what JARVIS actually said. Log it (proof of
-         * English) and retain the tail for /api/gemini/live diag. */
+         * English), retain the tail for /api/gemini/live diag, and stream it
+         * onto the glass as the live caption (STATE-04). */
         if (ge->text && ge->text[0]) {
             ESP_LOGI(TAG, "jarvis says: %.*s", 160, ge->text);
             strlcpy(s_last_said, ge->text, sizeof s_last_said);
+            caption_append(ge->text);
         }
         e = jr_event(JR_EV_HEARTBEAT);
         break;
@@ -1310,6 +1344,7 @@ static void voice_exec(void *ctx, const jr_command_t *cmd)
         jr_tools_set_session_generation(a->orch.session.session_gen + 1U);
         device_tool_abort_pending_consent();
         device_tool_drop_local_results();
+        caption_reset();
         io->expect_up = false;
         io->last_ws = JR_WS_CLOSED;
         io->activity_open = false;
@@ -4390,6 +4425,9 @@ static void voice_task(void *arg)
                 jr_state_t previous = s_last_phase;
                 ESP_LOGI(TAG, "phase: %s -> %s", jr_state_name(s_last_phase), jr_state_name(ph));
                 s_last_phase = ph;
+                if (previous == JR_ST_SPEAKING && ph != JR_ST_SPEAKING) {
+                    caption_reset();   /* subtitles die with the voice */
+                }
                 /* (mic gain is now driven by playback state per-loop below,
                  * not the phase edge — see the jr_audio_set_speaking call.) */
                 if (ph == JR_ST_LISTENING && previous != JR_ST_LISTENING) {
@@ -4467,6 +4505,9 @@ static void voice_task(void *arg)
             atomic_store(&s_touch_last_duration_ms, iev.duration_ms);
             if (iev.kind == JR_INPUT_TAP) {
                 atomic_fetch_add(&s_touch_taps, 1U);
+                /* Universal touch feedback (TRANS-05): every tap ripples,
+                 * whatever it goes on to mean. Fire-and-forget, self-expiring. */
+                jr_display_ripple(iev.x, iev.y);
             } else if (iev.kind == JR_INPUT_LONG_PRESS) {
                 atomic_fetch_add(&s_touch_long_presses, 1U);
             } else if (iev.kind == JR_INPUT_SWIPE) {

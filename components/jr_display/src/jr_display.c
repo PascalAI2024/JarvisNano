@@ -747,6 +747,27 @@ static int              s_choice_label_x[HUD_CHOICE_MAX];
 static int              s_choice_label_y[HUD_CHOICE_MAX];
 static int              s_choice_label_len[HUD_CHOICE_MAX];
 
+/* STATE-04 caption chip. SAME DISCIPLINE as the choice statics: SINGLE-WRITER
+ * — only the app task calls jr_display_caption_set/clear — and everything the
+ * flush reads (wrapped lines, origins) is derived at set time and written
+ * BEFORE the s_caption_on release-store, so a set/flush race is bounded to
+ * one frame of stale caption text. The input is COPIED (96-char cap), so the
+ * caller's buffer only has to survive the call itself. */
+static char             s_caption_text[97];
+static char             s_caption_line[2][39];     /* hud_wrap2(caption, 38) */
+static int              s_caption_x[2];
+static int              s_caption_y[2];
+static volatile int     s_caption_on;
+
+/* TRANS-05 ripple slot: ONLY the app task writes (a new tap replaces the old
+ * — single slot, no queue); the flush only reads and age-gates, so expiry
+ * needs no write at all. x/y land before the start_ms release-store; a torn
+ * read across a replace is one frame of a misplaced ring, accepted under the
+ * module's one-frame-stale discipline. start_ms == 0 means never fired. */
+static volatile int      s_ripple_x;
+static volatile int      s_ripple_y;
+static volatile uint32_t s_ripple_start_ms;
+
 void jr_display_present_choices(const char *question,
                                 const char *const *labels, int n)
 {
@@ -827,6 +848,51 @@ void jr_display_dismiss_choices(void)
         s_choice_label_buf[i][0] = '\0';   /* owned copies end with the ask */
     }
     ESP_LOGI(TAG, "choices: dismissed");
+}
+
+void jr_display_caption_set(const char *text)
+{
+    if (text == NULL || text[0] == '\0') {
+        jr_display_caption_clear();
+        return;
+    }
+    /* Copy, wrap, and place BEFORE the release-store — the flush path only
+     * ever reads finished furniture. Scale 1 (6 px/char, 7 px tall): one line
+     * centres at y=403, two stack at 396/408, inside the 386..425 band.
+     * (466 - 6*len) is even, so the centred origin is exact and each line
+     * ends at HUD_W - x0. */
+    const size_t len = strnlen(text, 96U);
+    memcpy(s_caption_text, text, len);
+    s_caption_text[len] = '\0';
+    hud_wrap2(s_caption_text, 38, s_caption_line[0], s_caption_line[1]);
+    const int c1 = (int)strnlen(s_caption_line[0], 38U);
+    const int c2 = (int)strnlen(s_caption_line[1], 38U);
+    s_caption_x[0] = (HUD_W - 6 * c1) / 2;
+    s_caption_x[1] = (HUD_W - 6 * c2) / 2;
+    s_caption_y[0] = (c2 > 0) ? 396 : 403;
+    s_caption_y[1] = 408;
+    __atomic_store_n(&s_caption_on, 1, __ATOMIC_RELEASE);
+}
+
+void jr_display_caption_clear(void)
+{
+    if (__atomic_load_n(&s_caption_on, __ATOMIC_ACQUIRE) == 0) {
+        return;                            /* idempotent */
+    }
+    __atomic_store_n(&s_caption_on, 0, __ATOMIC_RELEASE);
+    s_caption_line[0][0] = '\0';
+    s_caption_line[1][0] = '\0';
+    s_caption_text[0] = '\0';
+}
+
+void jr_display_ripple(int x, int y)
+{
+    /* x/y first, then the timestamp release-store that arms the slot. */
+    s_ripple_x = x;
+    s_ripple_y = y;
+    __atomic_store_n(&s_ripple_start_ms,
+                     (uint32_t)(esp_timer_get_time() / 1000),
+                     __ATOMIC_RELEASE);
 }
 
 bool jr_display_choices_active(void)
@@ -963,6 +1029,58 @@ static void apply_ask_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     }
 }
 
+/* STATE-04: the caption chip — the ask presentation's look confined to a
+ * bottom band: rows JR_CAPTION_Y0..Y1 dimmed inside the glass chord for each
+ * row (hud_glass_chord; staying on the glass is the band's only geometric
+ * constraint), white scale-1 text centred on it. ~40 rows, so the cost is
+ * ~9% of the full-frame ask dim. The caller gates it off while an ask is up.
+ * Reads only statics published by jr_display_caption_set. Render task only;
+ * full-width strips guaranteed by the caller. */
+#define JR_CAPTION_Y0 386
+#define JR_CAPTION_Y1 425          /* inclusive */
+
+static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
+                                  uint16_t *pixels)
+{
+    int ys = y1 > JR_CAPTION_Y0 ? y1 : JR_CAPTION_Y0;
+    int ye = (y2 - 1) < JR_CAPTION_Y1 ? (y2 - 1) : JR_CAPTION_Y1;
+    if (ys > ye) {
+        return;                    /* strip misses the band: one compare */
+    }
+    const bool swap = ctx->board.swap_color_bytes;
+    const uint16_t px_white = 0xffffu;
+    for (int y = ys; y <= ye; ++y) {
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        const int half = hud_glass_chord(y);
+        int xlo = 233 - half;
+        int xhi = 233 + half;
+        if (xlo < 0)         xlo = 0;
+        if (xhi > HUD_W - 1) xhi = HUD_W - 1;
+        if (swap) {
+            for (int x = xlo; x <= xhi; ++x) {
+                row[x] = hud_dim565(row[x], true);
+            }
+        } else {
+            for (int x = xlo; x <= xhi; ++x) {
+                row[x] = hud_dim565(row[x], false);
+            }
+        }
+        for (int l = 0; l < 2; ++l) {
+            const char *text = s_caption_line[l];
+            const int ty = s_caption_y[l];
+            if (text[0] == '\0' || y < ty || y >= ty + 7) {
+                continue;
+            }
+            const int tx = s_caption_x[l];
+            for (int x = tx; x < HUD_W - tx; ++x) {
+                if (surface_text_pixel(text, 38U, x, y, tx, ty, 1)) {
+                    row[x] = px_white;
+                }
+            }
+        }
+    }
+}
+
 static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                               int x2, int y2, uint16_t *pixels)
 {
@@ -985,19 +1103,32 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
         .ox       = (int8_t)((w >> 16) & 0xFFu),
         .oy       = (int8_t)((w >> 24) & 0xFFu),
     };
-    hud_overlay_frame(pixels, y1, nrows,
-                      (uint32_t)(esp_timer_get_time() / 1000),
+    const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    hud_overlay_frame(pixels, y1, nrows, now_ms,
                       ctx->board.swap_color_bytes, &env);
+
+    /* TRANS-05 tap ripple: the EARLIEST overlay — it is feedback, not
+     * chrome, so the ask presentation and the caption both draw over it.
+     * Expiry is the age gate alone; only the app task writes the slot. */
+    const uint32_t rip_start =
+        __atomic_load_n(&s_ripple_start_ms, __ATOMIC_ACQUIRE);
+    if (rip_start != 0u && now_ms - rip_start < HUD_RIPPLE_MS) {
+        hud_overlay_ripple(pixels, y1, nrows, ctx->board.swap_color_bytes,
+                           s_ripple_x, s_ripple_y, now_ms - rip_start);
+    }
 
     /* Modal ask (STATE-05/06/07): dim everything drawn so far, lay the
      * question + labels over the dimmed face, then the arcs LAST — they are
      * the interactive layer and must sit bright above the face, the HUD
-     * accents, and the text. Same strip contract, same buffer. */
+     * accents, and the text. Same strip contract, same buffer. The caption
+     * (STATE-04) yields entirely while an ask is up: the ask owns the glass. */
     const int cn = __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE);
     if (cn > 0) {
         apply_ask_overlay(ctx, y1, y2, pixels, cn);
         hud_overlay_choices(pixels, y1, nrows, ctx->board.swap_color_bytes,
                             s_choices, cn, s_choice_selected);
+    } else if (__atomic_load_n(&s_caption_on, __ATOMIC_ACQUIRE) != 0) {
+        apply_caption_overlay(ctx, y1, y2, pixels);
     }
 }
 

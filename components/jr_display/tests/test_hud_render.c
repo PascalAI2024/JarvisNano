@@ -1068,6 +1068,152 @@ static void test_label_anchor_wrap_span(void)
           "wrap-span label strayed vertically: y=%d", y);
 }
 
+/* ---- caption chip (STATE-04) + tap ripple (TRANS-05) ------------------ */
+
+/* The caption's dim band trusts hud_glass_chord for its per-row extent, and
+ * the comment in the coordinator spec claims 38 columns of scale-1 text
+ * always fit on the chord at the caption rows. Prove it instead: for EVERY
+ * possible line length at every row of both line layouts, the centred text
+ * extent must sit inside the chord, and every text row inside the 386..425
+ * band. Also pin the chord function's own edges. */
+static void test_caption_text_fits_glass_chord(void)
+{
+    CHECK(hud_glass_chord(233) == 233, "chord at centre row should be 233");
+    CHECK(hud_glass_chord(0) == 0, "row 0 misses the glass (dy=-233)");
+    CHECK(hud_glass_chord(466) == 0, "row 466 misses the glass");
+    CHECK(hud_glass_chord(-5) == 0 && hud_glass_chord(500) == 0,
+          "off-frame rows must return 0");
+
+    /* single line rows 403..409; two-line rows 396..402 and 408..414 */
+    static const int bands[3][2] = { {403, 409}, {396, 402}, {408, 414} };
+    for (int len = 1; len <= 38; len++) {
+        const int x0 = (HUD_W - 6 * len) / 2;
+        const int x1 = x0 + 6 * len - 1;
+        for (size_t b = 0; b < 3; b++) {
+            for (int y = bands[b][0]; y <= bands[b][1]; y++) {
+                CHECK(y >= 386 && y <= 425,
+                      "text row %d outside the 386..425 band", y);
+                const int half = hud_glass_chord(y);
+                CHECK(x0 >= 233 - half && x1 <= 233 + half,
+                      "len=%d row=%d text [%d,%d] outside chord [%d,%d]",
+                      len, y, x0, x1, 233 - half, 233 + half);
+            }
+        }
+    }
+}
+
+/* Expiry, the ring annulus, and the glass clip, all at once. The innermost
+ * painted pixel of a scanline-solved annulus may sit up to a pixel inside
+ * r_in (isqrt flooring, same as ov_ring_row), hence the rad-2 inner bound. */
+static void test_ripple_geometry(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = calloc(px, sizeof *fb);
+    if (!fb) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
+
+    /* expired (== and >) paints nothing */
+    hud_overlay_ripple(fb, 0, HUD_H, false, 233, 233, HUD_RIPPLE_MS);
+    hud_overlay_ripple(fb, 0, HUD_H, false, 233, 233, 5000u);
+    size_t stale = 0;
+    for (size_t i = 0; i < px; i++) if (fb[i]) stale++;
+    CHECK(stale == 0, "expired ripple painted %zu px", stale);
+
+    /* mid-animation, tap well on-glass */
+    const uint32_t age = 200;
+    const int cx = 300, cy = 180;
+    const int rad = HUD_RIPPLE_R0 +
+        (int)(((HUD_RIPPLE_R1 - HUD_RIPPLE_R0) * age) / HUD_RIPPLE_MS);
+    hud_overlay_ripple(fb, 0, HUD_H, false, cx, cy, age);
+
+    size_t painted = 0, off_glass = 0, off_ring = 0;
+    for (int y = 0; y < HUD_H; y++) {
+        for (int x = 0; x < HUD_W; x++) {
+            if (fb[(size_t)y * HUD_W + x] == 0) {
+                continue;
+            }
+            painted++;
+            const int gx = x - 233, gy = y - 233;
+            if (gx * gx + gy * gy > 232 * 232) off_glass++;
+            const int dx = x - cx, dy = y - cy;
+            const int r2 = dx * dx + dy * dy;
+            if (r2 < (rad - 2) * (rad - 2) || r2 > (rad + 1) * (rad + 1)) {
+                off_ring++;
+            }
+        }
+    }
+    CHECK(painted > 200, "ripple painted only %zu px", painted);
+    CHECK(off_glass == 0, "%zu ripple px off-glass", off_glass);
+    CHECK(off_ring == 0, "%zu ripple px outside the age-%u annulus",
+          off_ring, (unsigned)age);
+    free(fb);
+}
+
+/* Same 12-row strip contract (with the ragged 10-row tail) as every other
+ * overlay: full-frame vs strips must be byte-identical mid-animation. */
+static void test_ripple_strip_invariance(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = malloc(px * sizeof *whole);
+    uint16_t *strips = malloc(px * sizeof *strips);
+    if (!whole || !strips) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(whole); free(strips); return;
+    }
+    for (size_t i = 0; i < px; i++) { whole[i] = strips[i] = (uint16_t)(i * 13u); }
+
+    hud_overlay_ripple(whole, 0, HUD_H, false, 150, 340, 137u);
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        int nrows = (y + STRIP_ROWS <= HUD_H) ? STRIP_ROWS : (HUD_H - y);
+        hud_overlay_ripple(strips + (size_t)y * HUD_W, y, nrows, false,
+                           150, 340, 137u);
+    }
+    size_t diffs = 0, painted = 0;
+    for (size_t i = 0; i < px; i++) {
+        if (whole[i] != strips[i]) diffs++;
+        if (whole[i] != (uint16_t)(i * 13u)) painted++;
+    }
+    CHECK(diffs == 0, "ripple strip/whole mismatch at %zu px", diffs);
+    CHECK(painted > 100, "ripple painted only %zu px — vacuous", painted);
+    free(whole); free(strips);
+}
+
+/* A corner tap sits at r~273, OFF the glass. Early the whole ring is outside
+ * (must paint nothing); late the ring's inner edge crosses onto the glass
+ * (must paint, on-glass only). Never a pixel outside r232 — the framebuffer
+ * corner around the tap point is exactly where an unclipped ring would go. */
+static void test_ripple_corner_tap_stays_on_glass(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = calloc(px, sizeof *fb);
+    if (!fb) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
+
+    static const uint32_t ages[] = { 60, 200, 380 };
+    for (size_t k = 0; k < sizeof ages / sizeof ages[0]; k++) {
+        memset(fb, 0, px * sizeof *fb);
+        hud_overlay_ripple(fb, 0, HUD_H, false, 40, 40, ages[k]);
+        size_t painted = 0, off_glass = 0;
+        for (int y = 0; y < HUD_H; y++) {
+            for (int x = 0; x < HUD_W; x++) {
+                if (fb[(size_t)y * HUD_W + x] == 0) continue;
+                painted++;
+                const int gx = x - 233, gy = y - 233;
+                if (gx * gx + gy * gy > 232 * 232) off_glass++;
+            }
+        }
+        CHECK(off_glass == 0, "age=%u: %zu corner-tap px off-glass",
+              (unsigned)ages[k], off_glass);
+        if (ages[k] == 60) {
+            CHECK(painted == 0,
+                  "age=60: ring is fully off-glass yet painted %zu px", painted);
+        }
+        if (ages[k] == 380) {
+            CHECK(painted > 0,
+                  "age=380: ring reaches the glass but painted nothing");
+        }
+    }
+    free(fb);
+}
+
 int main(void)
 {
     test_strip_invariance();
@@ -1099,6 +1245,10 @@ int main(void)
     test_label_anchor_wrap_span();
     test_label_anchor_radial_clamp_19_chars();
     test_dim565_matches_darken_chain();
+    test_caption_text_fits_glass_chord();
+    test_ripple_geometry();
+    test_ripple_strip_invariance();
+    test_ripple_corner_tap_stays_on_glass();
 
     if (g_failures) {
         printf("hud_render tests FAILED (%d)\n", g_failures);

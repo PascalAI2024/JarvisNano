@@ -188,6 +188,22 @@ int  jr_display_choice_hit(int x, int y);
 void jr_display_set_choice_selected(int index);
 bool jr_display_hud_enabled(void);
 
+/* STATE-04: live caption chip — a subtitle band at the bottom of the glass
+ * mirroring what the agent is saying. The text is COPIED at set time (up to
+ * 96 chars, wrapped to 2x38 display columns; the tail of a longer sentence is
+ * clipped — it is a rolling caption). SINGLE-WRITER: the app task calls
+ * set/clear, the render task only reads. Hidden automatically while a choice
+ * ask is on screen — the ask owns the glass. NULL or "" clears. */
+void jr_display_caption_set(const char *text);
+void jr_display_caption_clear(void);
+
+/* TRANS-05: transient tap ripple — an expanding, fading ring from panel
+ * point (x, y) that self-clears after ~400 ms. Fire-and-forget from the app
+ * task; a new tap replaces any ripple still in flight (single slot, no
+ * queue). Drawn under the ask presentation and the caption: feedback, not
+ * chrome. */
+void jr_display_ripple(int x, int y);
+
 #ifdef __cplusplus
 }
 #endif

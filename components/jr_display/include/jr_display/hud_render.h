@@ -253,6 +253,31 @@ void hud_overlay_choices(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 bool hud_choice_hit(const hud_choice_t *choices, int n, int x, int y,
                     int *out_index);
 
+/* ---- transient + caption support ----------------------------------------
+ * Pure helpers behind STATE-04 (caption chip) and TRANS-05 (tap ripple),
+ * host-testable like everything else here. */
+
+/* Half-chord of the glass at row y about (233, 233), radius 233: columns
+ * [233-half, 233+half] lie on (or within half a pixel of) the glass; 0 when
+ * the row misses it entirely. The caption band dims exactly this interval —
+ * staying inside the glass is its only geometric constraint. */
+int hud_glass_chord(int y);
+
+/* TRANS-05: transient tap ripple — an expanding, fading 2 px ring from the
+ * tap point (cx, cy). Radius grows linearly HUD_RIPPLE_R0 -> HUD_RIPPLE_R1
+ * over HUD_RIPPLE_MS while intensity fades to zero; age_ms >= HUD_RIPPLE_MS
+ * paints nothing, so expiry needs no state write. Pure motion that erases
+ * itself is what licenses it OVER the baked face (the design rule bans
+ * persistent furniture there, not feedback). Every painted pixel is clipped
+ * to the glass (r <= 232 about (233, 233)) — a rim tap cannot paint into the
+ * framebuffer corners. Same strip contract as the other overlays; strictly
+ * y-culled, stateless, integer-only. */
+#define HUD_RIPPLE_MS  400u
+#define HUD_RIPPLE_R0  4
+#define HUD_RIPPLE_R1  56
+void hud_overlay_ripple(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                        int cx, int cy, uint32_t age_ms);
+
 /* Map IMU tilt to a HUD parallax offset, clamped to +/-HUD_TILT_MAX px.
  *
  * This is the one place the device beats the browser mockup: a simulated HUD

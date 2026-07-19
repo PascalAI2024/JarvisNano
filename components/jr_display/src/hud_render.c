@@ -1265,3 +1265,77 @@ bool hud_choice_hit(const hud_choice_t *choices, int n, int x, int y,
     }
     return false;
 }
+
+/* ============================ transient overlays ======================== */
+/* STATE-04 / TRANS-05 support. See hud_render.h for the contracts. */
+
+int hud_glass_chord(int y)
+{
+    const int dy = y - 233;
+    const int d2 = 233 * 233 - dy * dy;
+    return d2 <= 0 ? 0 : (int)isqrt32((uint32_t)d2);
+}
+
+void hud_overlay_ripple(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                        int cx, int cy, uint32_t age_ms)
+{
+    if (dst == NULL || nrows <= 0 || age_ms >= HUD_RIPPLE_MS) {
+        return;                          /* expired: self-clearing, no state */
+    }
+    const int rad = HUD_RIPPLE_R0 +
+        (int)(((uint32_t)(HUD_RIPPLE_R1 - HUD_RIPPLE_R0) * age_ms) /
+              HUD_RIPPLE_MS);
+    const int level = (int)((255u * (HUD_RIPPLE_MS - age_ms)) / HUD_RIPPLE_MS);
+    if (level <= 0) {
+        return;                          /* fully faded: never stamp black */
+    }
+    const int r_in  = rad - 1;           /* 2 px band, like ov_ring_row */
+    const int r_out = rad + 1;
+
+    /* y-cull before the palette or any row work: strips that miss the ring's
+     * bounding box pay exactly this compare. */
+    int ys = cy - r_out;
+    int ye = cy + r_out;
+    if (ys < y0)             ys = y0;
+    if (ye > y0 + nrows - 1) ye = y0 + nrows - 1;
+    if (ys > ye) {
+        return;
+    }
+    overlay_palette(swap_bytes);
+    const uint16_t px = shade(s_ov_cyan, level);
+
+    const int ro2 = r_out * r_out;
+    const int ri2 = r_in * r_in;
+    for (int y = ys; y <= ye; ++y) {
+        const int dy = y - cy;
+        const int dy2 = dy * dy;
+        if (dy2 >= ro2) {
+            continue;
+        }
+        /* the glass chord clips BOTH arms: a rim (or off-glass) tap point
+         * must never paint outside the circle, framebuffer corners included */
+        const int gdy = y - 233;
+        const int g2 = 232 * 232 - gdy * gdy;
+        if (g2 <= 0) {
+            continue;
+        }
+        const int g = (int)isqrt32((uint32_t)g2);
+        int glo = 233 - g;
+        int ghi = 233 + g;
+        if (glo < 0)         glo = 0;
+        if (ghi > HUD_W - 1) ghi = HUD_W - 1;
+
+        const int xo = (int)isqrt32((uint32_t)(ro2 - dy2));
+        const int xi = (dy2 < ri2) ? (int)isqrt32((uint32_t)(ri2 - dy2)) : 0;
+        uint16_t *row = dst + (size_t)(y - y0) * HUD_W;
+        for (int side = 0; side < 2; ++side) {
+            int a = side ? cx + xi : cx - xo;
+            int b = side ? cx + xo : cx - xi;
+            if (a < glo) a = glo;
+            if (b > ghi) b = ghi;
+            for (int x = a; x <= b; ++x) {
+                row[x] = px;
+            }
+        }
+    }
+}
