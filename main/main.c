@@ -4428,6 +4428,21 @@ static void voice_task(void *arg)
                 if (previous == JR_ST_SPEAKING && ph != JR_ST_SPEAKING) {
                     caption_reset();   /* subtitles die with the voice */
                 }
+                /* The caption chip doubles as the status line (STATE-08).
+                 * MUTED matters most: the tap-mute once ate 12 taps in a row
+                 * with zero feedback and the device just looked dead. */
+                if (ph == JR_ST_BACKOFF) {
+                    jr_display_caption_set("CONNECTION LOST - RETRYING");
+                } else if (ph == JR_ST_FATAL) {
+                    jr_display_caption_set("OFFLINE - TAP TO RETRY");
+                } else if (ph == JR_ST_IDLE &&
+                           atomic_load(&s_voice_privacy_paused)) {
+                    jr_display_caption_set("MUTED - TAP TO WAKE");
+                } else if (previous == JR_ST_BACKOFF ||
+                           previous == JR_ST_FATAL ||
+                           previous == JR_ST_IDLE) {
+                    caption_reset();
+                }
                 /* (mic gain is now driven by playback state per-loop below,
                  * not the phase edge — see the jr_audio_set_speaking call.) */
                 if (ph == JR_ST_LISTENING && previous != JR_ST_LISTENING) {
