@@ -313,28 +313,24 @@ static void test_overlay_hides_absent_battery(void)
     free(a); free(b);
 }
 
-static void test_tilt_offset_clamps_and_signs(void)
+static void test_tilt_offset_is_disabled(void)
 {
-    int8_t ox = 99, oy = 99;
-
-    hud_tilt_offset(0.0f, 0.0f, &ox, &oy);
-    CHECK(ox == 0 && oy == 0, "level should not deflect (got %d,%d)", ox, oy);
-
-    hud_tilt_offset(1000.0f, 1000.0f, &ox, &oy);
-    CHECK(ox >= -HUD_TILT_MAX && ox <= HUD_TILT_MAX &&
-          oy >= -HUD_TILT_MAX && oy <= HUD_TILT_MAX,
-          "extreme tilt escaped the clamp (%d,%d)", ox, oy);
-
-    hud_tilt_offset(-1000.0f, -1000.0f, &ox, &oy);
-    CHECK(ox >= -HUD_TILT_MAX && ox <= HUD_TILT_MAX &&
-          oy >= -HUD_TILT_MAX && oy <= HUD_TILT_MAX,
-          "extreme negative tilt escaped the clamp (%d,%d)", ox, oy);
-
-    /* opposite rolls must deflect in opposite directions */
-    int8_t lx = 0, ly = 0, rx = 0, ry = 0;
-    hud_tilt_offset(-20.0f, 0.0f, &lx, &ly);
-    hud_tilt_offset( 20.0f, 0.0f, &rx, &ry);
-    CHECK(lx == -rx && lx != 0, "roll should be antisymmetric (%d vs %d)", lx, rx);
+    /* Parallax is deliberately off: only this overlay can move, the baked .eaf
+     * face cannot, so any offset is misregistration rather than depth. It must
+     * return 0,0 for EVERY input — including a flat, still device, which on
+     * this board reads roll ~= 178 deg (gz ~= -1 g face-up) and previously
+     * produced a permanent -10 px shift. */
+    const float cases[][2] = {
+        {0.0f, 0.0f}, {177.7f, 1.3f}, {-177.7f, -1.3f},
+        {30.0f, 30.0f}, {-30.0f, -30.0f}, {1000.0f, -1000.0f},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        int8_t ox = 99, oy = 99;
+        hud_tilt_offset(cases[i][0], cases[i][1], &ox, &oy);
+        CHECK(ox == 0 && oy == 0,
+              "tilt must not deflect (roll=%.1f pitch=%.1f -> %d,%d)",
+              (double)cases[i][0], (double)cases[i][1], ox, oy);
+    }
 }
 
 int main(void)
@@ -349,7 +345,7 @@ int main(void)
     test_overlay_strip_invariance();
     test_overlay_respects_bounds();
     test_overlay_hides_absent_battery();
-    test_tilt_offset_clamps_and_signs();
+    test_tilt_offset_is_disabled();
 
     if (g_failures) {
         printf("hud_render tests FAILED (%d)\n", g_failures);

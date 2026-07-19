@@ -577,15 +577,13 @@ void hud_overlay_thinking(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
 
     const strip_t s = { dst, y0, y0 + nrows };
 
-    /* Dim track ring the comet rides. Level is low so it reads as furniture
-     * under the face rather than competing with it. */
-    for (int y = s.y0; y < s.y1; ++y) {
-        if (y < 0 || y >= HUD_H) {
-            continue;
-        }
-        band_row(dst + (size_t)(y - s.y0) * HUD_W, y,
-                 OV_R_COMET - 1, OV_R_COMET + 1, s_ov_cyan, 40);
-    }
+    /* NO track ring. The comet rides an implied path.
+     *
+     * The prototype drew a dim ring for the comet to follow, which is right on
+     * a blank canvas — but the baked art is ALREADY built from concentric
+     * rings, so adding another reads as a competing HUD however dim it is, and
+     * however "free" its radius. A moving dot with a trail is unmistakably an
+     * accent; a static concentric ring is not. Only draw motion here. */
 
     const int head = (int)(((uint64_t)now_ms * 256u) / OV_SPIN_PERIOD_MS) & 255;
 
@@ -673,6 +671,29 @@ static void ov_ring_row(uint16_t *row, int y, int cx, int cy, int r_in,
 
 void hud_tilt_offset(float roll_deg, float pitch_deg, int8_t *ox, int8_t *oy)
 {
+    /* DISABLED 2026-07-19 — returns 0,0. Kept as a documented dead end.
+     *
+     * Two independent reasons, either fatal on its own:
+     *
+     * 1. IT CANNOT WORK WHILE THE FACE IS BAKED ART. Parallax needs the WHOLE
+     *    scene to shift together. Only this overlay can move; the .eaf face
+     *    cannot. Offsetting one layer against a fixed one is not depth, it is
+     *    misregistration — and it reads exactly like two HUDs sliding apart,
+     *    which is what a user reported seeing.
+     * 2. THE REST REFERENCE WAS WRONG. roll = atan2(gy, gz), and this board
+     *    reads gz ~= -1 g when face-up (see jr_imu.h), so a device lying flat
+     *    and perfectly still reports roll ~= 178 deg, not 0. That drove a
+     *    PERMANENT -10 px offset on a motionless desk. Any future version must
+     *    measure deflection from the resting orientation, not from zero.
+     *
+     * Revisit only if the baked clips are retired (decision D4) and
+     * hud_render_rows() draws the whole frame — then the entire scene can lean
+     * as one and the idea becomes sound. */
+    if (ox) *ox = 0;
+    if (oy) *oy = 0;
+    (void)roll_deg; (void)pitch_deg;
+    return;
+#if 0
     /* ~30 deg of tilt reaches full deflection; beyond that it clamps, so the
      * HUD leans convincingly on a desk nudge without sliding off under a big
      * gesture. Roll moves x, pitch moves y. Sign is chosen so the furniture
@@ -685,6 +706,7 @@ void hud_tilt_offset(float roll_deg, float pitch_deg, int8_t *ox, int8_t *oy)
     if (y < -HUD_TILT_MAX) y = -HUD_TILT_MAX;
     if (ox) *ox = (int8_t)x;
     if (oy) *oy = (int8_t)y;
+#endif
 }
 
 /* Battery rim: a thin arc at the outer bezel sweeping clockwise from 12
@@ -733,18 +755,10 @@ void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
     ov_battery(&s, cx, cy, env);
 
     switch ((hud_face_t)env->face) {
-    case HUD_FACE_IDLE: {
-        /* Breathing ring in the free r185-194 band — a slow sine on
-         * brightness. Present, not busy, and clear of the baked rings. */
-        const int lv = 26 + ((lsin((int)(now_ms / 24) & 255) * 22) >> 15) + 22;
-        for (int y = s.y0; y < s.y1; ++y) {
-            if (y >= 0 && y < HUD_H) {
-                ov_ring_row(dst + (size_t)(y - s.y0) * HUD_W, y, cx, cy,
-                            OV_R_BREATH - 1, OV_R_BREATH + 1, s_ov_cyan, lv);
-            }
-        }
+    case HUD_FACE_IDLE:
+        /* Nothing. The baked idle face already breathes; a second breathing
+         * ring is one more concentric ring in a design made of them. */
         break;
-    }
     case HUD_FACE_LISTEN:
     case HUD_FACE_SPEAK:
         /* Nothing: the baked reactive-wave face already carries these states.
