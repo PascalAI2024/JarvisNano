@@ -52,6 +52,7 @@ static struct {
     esp_websocket_client_handle_t client;
     QueueHandle_t                 rx_ring;      /* of jr_ws_frame_t             */
     char                          url[512];
+    char                          headers[400];   /* holds the key; NEVER log */
     volatile jr_ws_state_t        state;
     volatile uint64_t             last_rx_ms;
 
@@ -214,6 +215,9 @@ static jr_err_t dev_connect(void *ctx, const char *url)
     cfg.pingpong_timeout_sec   = 20;
     cfg.keep_alive_enable      = true;
     cfg.crt_bundle_attach      = esp_crt_bundle_attach;
+    if (s_ws.headers[0] != '\0') {
+        cfg.headers = s_ws.headers;   /* auth header; keeps the key off cfg.uri */
+    }
 
     s_ws.client = esp_websocket_client_init(&cfg);
     if (s_ws.client == NULL) {
@@ -302,6 +306,15 @@ static void dev_close(void *ctx)
             free(f.data);
         }
     }
+}
+
+void jr_gemini_ws_set_headers(const char *headers_crlf)
+{
+    if (headers_crlf == NULL) {
+        s_ws.headers[0] = '\0';
+        return;
+    }
+    strlcpy(s_ws.headers, headers_crlf, sizeof s_ws.headers);
 }
 
 esp_err_t jr_gemini_ws_init(const char *url)

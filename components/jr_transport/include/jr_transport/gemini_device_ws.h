@@ -30,6 +30,14 @@ extern "C" {
  * framer's cfg.url; a non-empty one there wins, else this default is used. */
 esp_err_t jr_gemini_ws_init(const char *url);
 
+/* Extra HTTP headers for the WS upgrade request — full "Name: value\r\n"
+ * lines, copied. NULL or "" clears. This exists so the API key can ride an
+ * x-goog-api-key header instead of the ?key= URL: esp_websocket_client logs
+ * its uri on every transport error, and a keyed URL put the key on the serial
+ * console and the SD log. The stored buffer therefore holds the key — it must
+ * NEVER be logged. Takes effect on the next connect. */
+void jr_gemini_ws_set_headers(const char *headers_crlf);
+
 /* The byte-level transport view to inject under the host-tested Gemini client. */
 jr_ws_transport_t jr_gemini_ws(void);
 

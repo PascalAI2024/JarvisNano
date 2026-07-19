@@ -247,6 +247,14 @@ static uint32_t s_demo_start_ms;   /* app task only; 0 = off */
 static int      s_demo_step = -1;
 static int      s_demo_last_ripple = -1;
 
+/* WS auth mode (see the endpoint-auth block in app_main). App task only.
+ * BOTH buffers hold the API key — never log either. */
+static char    s_ws_headers[400];
+static char    s_url_keyed[512];
+static bool    s_ws_auth_header_ok_logged;
+static bool    s_setup_seen_this_conn;
+static uint8_t s_auth_fail_streak;
+
 typedef struct {
     jr_event_t ev;
     char call_id_text[TOOL_ID_CAP];
@@ -986,6 +994,13 @@ static void rich_cb(void *u, const jr_gemini_event_t *ge)
     jr_event_t e = jr_event(JR_EV_HEARTBEAT);
     switch (ge->kind) {
     case JR_GEV_SETUP_COMPLETE:
+        s_setup_seen_this_conn = true;
+        s_auth_fail_streak = 0;
+        if (s_ws_headers[0] != '\0' && !s_ws_auth_header_ok_logged) {
+            s_ws_auth_header_ok_logged = true;
+            ESP_LOGI(TAG, "auth: x-goog-api-key header ACCEPTED — the key is "
+                     "out of the URL and out of the logs");
+        }
         e = jr_event(JR_EV_SETUP_COMPLETE);
         e.resumption_token = io->last_resumable_token;
         break;
@@ -1174,6 +1189,21 @@ static bool voice_poll(void *ctx, jr_event_t *out)
             } else if (st == JR_WS_CLOSED || st == JR_WS_ERROR) {
                 io->last_ws = st;
                 io->expect_up = false;
+                /* Auth-mode fallback: a connection that dies before Setup ever
+                 * completed, twice in a row, while we are on header auth, most
+                 * plausibly means the endpoint rejected the header. Flip this
+                 * boot to the proven ?key= URL. (A Wi-Fi flap can false-flip
+                 * us — benign: the fallback IS the long-standing behavior.) */
+                if (!s_setup_seen_this_conn && s_ws_headers[0] != '\0' &&
+                    s_url_keyed[0] != '\0') {
+                    if (++s_auth_fail_streak >= 2U) {
+                        jr_gemini_ws_set_headers(NULL);
+                        s_ws_headers[0] = '\0';
+                        strlcpy(s_app.url, s_url_keyed, sizeof s_app.url);
+                        ESP_LOGW(TAG, "auth: header mode failed setup twice; "
+                                 "falling back to ?key= URL for this boot");
+                    }
+                }
                 inq_push(io, jr_event(JR_EV_TRANSPORT_CLOSED));
             }
         }
@@ -1230,7 +1260,9 @@ static void voice_exec(void *ctx, const jr_command_t *cmd)
         /* Connecting is the generation boundary. In-flight results from an
          * older socket can never cross into this Gemini session. */
         jr_tools_set_session_generation(a->orch.session.session_gen);
-        ESP_LOGI(TAG, "exec: CONNECT -> ws.connect(%.40s...)", a->url);
+        ESP_LOGI(TAG, "exec: CONNECT -> ws.connect(%.40s...) auth=%s", a->url,
+                 s_ws_headers[0] != '\0' ? "header" : "url");
+        s_setup_seen_this_conn = false;
         jr_gemini_reset_tx(&a->client);
         io->last_ws = JR_WS_CONNECTING;
         io->expect_up = true;
@@ -5372,15 +5404,29 @@ void app_main(void)
     s_app.mic = jr_audio_source();
     s_app.spk = jr_audio_sink();
 
-    /* build the Gemini endpoint URL: base + key from NVS (never in-repo) */
+    /* Gemini endpoint auth (key from NVS, never in-repo). PRIMARY: the key
+     * rides an x-goog-api-key upgrade header and the URL stays bare — the ws
+     * client logs its uri on every transport error, and a ?key= URL put the
+     * key on the serial console and the SD log (the 2026-07 security finding).
+     * FALLBACK: if setup never completes on the header path (two strikes),
+     * the runtime flips this boot to the proven ?key= URL, so voice cannot be
+     * held hostage by an endpoint that ignores header auth. Both retained
+     * buffers hold the key by necessity; neither is ever logged. */
     char key[320] = {0};
     if (jr_cfg_get_str("llm_api_key", key, sizeof key) == ESP_OK && key[0] != '\0') {
-        snprintf(s_app.url, sizeof s_app.url, "%s?key=%s", GEMINI_WS_BASE, key);
-        ESP_LOGI(TAG, "gemini endpoint configured (key len=%u)", (unsigned)strlen(key));
+        snprintf(s_app.url, sizeof s_app.url, "%s", GEMINI_WS_BASE);
+        snprintf(s_url_keyed, sizeof s_url_keyed, "%s?key=%s",
+                 GEMINI_WS_BASE, key);
+        snprintf(s_ws_headers, sizeof s_ws_headers,
+                 "x-goog-api-key: %s\r\n", key);
+        jr_gemini_ws_set_headers(s_ws_headers);
+        ESP_LOGI(TAG, "gemini endpoint configured (key len=%u, auth=header)",
+                 (unsigned)strlen(key));
     } else {
         snprintf(s_app.url, sizeof s_app.url, "%s", GEMINI_WS_BASE);
         ESP_LOGW(TAG, "no llm_api_key in NVS 'app' — provision before a session will connect");
     }
+    secure_zero(key, sizeof key);
 
     /* L2 transport: device WS byte transport under the host-tested framer */
     esp_err_t ws_err = jr_gemini_ws_init(s_app.url);
