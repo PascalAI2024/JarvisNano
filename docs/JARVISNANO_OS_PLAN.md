@@ -65,6 +65,30 @@ it is a **downgrade in richness** today. The procedural idle is a thin ring and
 a faint core; the baked idle has depth, glow and segments. Retire the clips only
 if the flash/PSRAM is needed, not for looks.
 
+## Two features that turned out not to need building (2026-07-19)
+
+Found while working the board. Both would have been real effort spent on
+premises the firmware disproves — recorded so nobody starts them.
+
+**STATE-02's listen countdown rim has nothing to count.** The prototype assumes
+a 6000 ms windowed listen. This firmware is always-ready listening
+(`VOICE_ALWAYS_READY`): `s_listen_idle_deadline_ms` is declared and read by two
+diag handlers, but **all six of its assignments in `main.c` set it to 0**, so
+`auto_idle_ms` is permanently zero. There is no window. The product question —
+should listening be windowed at all? — has to be answered before any rim is
+drawn.
+
+**SVC-08's acceptance criterion is already met by the polling it was meant to
+replace.** The stated target was "state transition → face change under 30 ms".
+The voice pump paces at `vTaskDelay(1 or pdMS_TO_TICKS(20))` with
+`CONFIG_FREERTOS_HZ=100` (1 tick = 10 ms) and pushes the face on every iteration
+where it changed, so worst case is 20 ms and typical is 10 ms. `present()` is an
+atomic mailbox store, so feeding it every loop is nearly free. Build the event
+bus for **testability and the caption/status bus**, not for latency —
+`JR_CMD_PUBLISH_SNAPSHOT` still lands in a no-op default branch, so the core
+cannot notify observers and the display path has no host coverage. That is the
+real debt; the latency framing was wrong.
+
 ## Internal RAM budget — the real constraint on Phases 2–5 (measured 2026-07-18)
 
 The audit named PSRAM and flash as the hard ceilings. They are real, but the
