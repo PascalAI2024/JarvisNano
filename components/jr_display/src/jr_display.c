@@ -768,6 +768,12 @@ static volatile int      s_ripple_x;
 static volatile int      s_ripple_y;
 static volatile uint32_t s_ripple_start_ms;
 
+/* UI-01 clock state: (on << 16) | (hh << 8) | mm in ONE word, published with
+ * a single release-store, so the flush can never read a torn time (an on flag
+ * from one set with minutes from another). SINGLE-WRITER: the app task calls
+ * jr_display_clock_set at ~1 Hz; the flush only reads. 0 at boot = off. */
+static volatile uint32_t s_clock_word;
+
 void jr_display_present_choices(const char *question,
                                 const char *const *labels, int n)
 {
@@ -895,6 +901,19 @@ void jr_display_ripple(int x, int y)
                      __ATOMIC_RELEASE);
 }
 
+void jr_display_clock_set(bool on, int hh, int mm)
+{
+    if (hh < 0 || hh > 23) {
+        hh = 0;
+    }
+    if (mm < 0 || mm > 59) {
+        mm = 0;
+    }
+    const uint32_t word = (on ? (1u << 16) : 0u)
+                        | ((uint32_t)hh << 8) | (uint32_t)mm;
+    __atomic_store_n(&s_clock_word, word, __ATOMIC_RELEASE);
+}
+
 bool jr_display_choices_active(void)
 {
     return __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE) > 0;
@@ -949,6 +968,29 @@ static uint8_t hud_face_of(jr_face_t f)
     }
 }
 
+/* Full-strip backdrop dim shared by the ask overlay (STATE-07) and the clock
+ * (UI-01). hud_dim565 folds the panel_native -> native_darken ->
+ * panel_order_color chain into one masked shift (proven equal for all 65536
+ * values in the host suite) — two per-pixel byte swaps over 217k px/frame
+ * cost measurable frame rate. Unswitched on the hoisted byte-order flag so
+ * the inline folds to one constant path. */
+static void dim_strip(jr_display_ctx_t *ctx, int y1, int y2, uint16_t *pixels)
+{
+    const bool swap = ctx->board.swap_color_bytes;
+    for (int y = y1; y < y2; ++y) {
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        if (swap) {
+            for (int x = 0; x < HUD_W; ++x) {
+                row[x] = hud_dim565(row[x], true);
+            }
+        } else {
+            for (int x = 0; x < HUD_W; ++x) {
+                row[x] = hud_dim565(row[x], false);
+            }
+        }
+    }
+}
+
 /* STATE-07: the modal ask presentation, run per flushed strip only while a
  * question is on screen (a modal state measured in seconds, so a few fps of
  * cost is acceptable). The whole strip dims — the same transform
@@ -962,25 +1004,12 @@ static void apply_ask_overlay(jr_display_ctx_t *ctx, int y1, int y2,
 {
     const int sel = s_choice_selected;
     /* Hoisted per call: the byte order never changes mid-strip, and white is
-     * bswap-invariant. hud_dim565 folds the panel_native -> native_darken ->
-     * panel_order_color chain into one masked shift (proven equal for all
-     * 65536 values in the host suite) — two per-pixel byte swaps over 217k
-     * px/frame cost measurable frame rate. */
-    const bool swap = ctx->board.swap_color_bytes;
+     * bswap-invariant. */
     const uint16_t px_white = 0xffffu;
     const uint16_t px_cyan = panel_order_color(ctx, 0x07ff);
+    dim_strip(ctx, y1, y2, pixels);
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        /* unswitched on the hoisted flag so the inline folds to one path */
-        if (swap) {
-            for (int x = 0; x < HUD_W; ++x) {
-                row[x] = hud_dim565(row[x], true);
-            }
-        } else {
-            for (int x = 0; x < HUD_W; ++x) {
-                row[x] = hud_dim565(row[x], false);
-            }
-        }
 
         /* Question: up to two scale-2 lines, centred, white. The centred
          * origin is exact (see present), so the line ends at HUD_W - x0 and
@@ -1081,6 +1110,25 @@ static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     }
 }
 
+/* UI-01: the ambient watch — while privacy-muted the dimmed baked face IS
+ * the dial (its bezel ticks at r200-214), so this is the full ask-style dim
+ * plus hud_overlay_clock's two hands and hub. It gates ITSELF on the
+ * published word (rather than at the call site) so the host harness can
+ * prove off == paints-nothing directly. Never coexists with a choice ask —
+ * the caller's ask branch wins before this runs — and renders UNDER the
+ * caption so the muted/time status text stays readable. Render task only. */
+static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
+                                uint16_t *pixels)
+{
+    const uint32_t w = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
+    if ((w & (1u << 16)) == 0u) {
+        return;
+    }
+    dim_strip(ctx, y1, y2, pixels);
+    hud_overlay_clock(pixels, y1, y2 - y1, ctx->board.swap_color_bytes,
+                      (int)((w >> 8) & 0xFFu), (int)(w & 0xFFu));
+}
+
 static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                               int x2, int y2, uint16_t *pixels)
 {
@@ -1127,8 +1175,13 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
         apply_ask_overlay(ctx, y1, y2, pixels, cn);
         hud_overlay_choices(pixels, y1, nrows, ctx->board.swap_color_bytes,
                             s_choices, cn, s_choice_selected);
-    } else if (__atomic_load_n(&s_caption_on, __ATOMIC_ACQUIRE) != 0) {
-        apply_caption_overlay(ctx, y1, y2, pixels);
+    } else {
+        /* UI-01 clock under the STATE-04 caption: the watch dims the frame,
+         * the caption band dims again over it and carries the status text. */
+        apply_clock_overlay(ctx, y1, y2, pixels);      /* gates itself */
+        if (__atomic_load_n(&s_caption_on, __ATOMIC_ACQUIRE) != 0) {
+            apply_caption_overlay(ctx, y1, y2, pixels);
+        }
     }
 }
 

@@ -1339,3 +1339,61 @@ void hud_overlay_ripple(uint16_t *dst, int y0, int nrows, bool swap_bytes,
         }
     }
 }
+
+/* UI-01 watch geometry. Hands are runs of 3x3 dots stamped every radius step
+ * (polar_dot y-culls each stamp), so the whole watch tops out at r_tip + 2 px
+ * of dot spill — comfortably inside the r<=180 promise in the header. */
+#define HUD_CLOCK_R_HUB   5
+#define HUD_CLOCK_R_IN    20
+#define HUD_CLOCK_R_HOUR  110
+#define HUD_CLOCK_R_MIN   175
+
+void hud_overlay_clock(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                       int hh, int mm)
+{
+    if (dst == NULL || nrows <= 0) {
+        return;
+    }
+    /* coarse strip cull: the watch lives in rows 232 +/- (R_MIN + 2) */
+    if (y0 > 232 + HUD_CLOCK_R_MIN + 2 ||
+        y0 + nrows <= 232 - HUD_CLOCK_R_MIN - 2) {
+        return;
+    }
+    /* fold, never trust: the composition root clamps, but this is public */
+    hh = ((hh % 24) + 24) % 24;
+    mm = ((mm % 60) + 60) % 60;
+
+    overlay_palette(swap_bytes);
+    const strip_t s = { dst, y0, y0 + nrows };
+
+    /* 12 o'clock is a=192; clockwise on glass is increasing a, so minutes
+     * and hours sweep exactly like the LUT convention wants:
+     *   mm=15 -> 192+64 = 0 (3 o'clock), hh=6 -> 192+128 = 64 (6 o'clock). */
+    const int a_m = (192 + (mm * 256) / 60) & 255;
+    const int a_h = (192 + (((hh % 12) * 60 + mm) * 256) / 720) & 255;
+
+    const uint16_t px_min  = pack565(255, 255, 255, swap_bytes);
+    const uint16_t px_hour = shade(s_ov_cyan, 255);
+
+    /* hour first, minute second: an overlapping pair reads minute-on-top */
+    for (int r = HUD_CLOCK_R_IN; r <= HUD_CLOCK_R_HOUR; ++r) {
+        polar_dot(&s, a_h, r, px_hour, 3);
+    }
+    for (int r = HUD_CLOCK_R_IN; r <= HUD_CLOCK_R_MIN; ++r) {
+        polar_dot(&s, a_m, r, px_min, 3);
+    }
+
+    /* filled white hub, solved per row like every other disc here */
+    for (int dy = -HUD_CLOCK_R_HUB; dy <= HUD_CLOCK_R_HUB; ++dy) {
+        const int y = 232 + dy;
+        if (y < s.y0 || y >= s.y1) {
+            continue;
+        }
+        const int half = (int)isqrt32(
+            (uint32_t)(HUD_CLOCK_R_HUB * HUD_CLOCK_R_HUB - dy * dy));
+        uint16_t *row = dst + (size_t)(y - y0) * HUD_W;
+        for (int x = 232 - half; x <= 232 + half; ++x) {
+            row[x] = px_min;
+        }
+    }
+}

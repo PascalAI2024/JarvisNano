@@ -204,6 +204,15 @@ void jr_display_caption_clear(void);
  * chrome. */
 void jr_display_ripple(int x, int y);
 
+/* UI-01: ambient watch face for the privacy-muted state — the whole strip
+ * dims (the baked bezel ticks become the dial) and two hands plus a hub draw
+ * over it. SINGLE-WRITER: the app task calls this at ~1 Hz; the render task
+ * only reads. on/hh/mm are packed into one word and published with a single
+ * release-store, so the renderer can never see a torn time. hh 0..23,
+ * mm 0..59 (out-of-range folds to 0). Never coexists with a choice ask (the
+ * ask wins); renders UNDER the caption so status text stays readable. */
+void jr_display_clock_set(bool on, int hh, int mm);
+
 #ifdef __cplusplus
 }
 #endif

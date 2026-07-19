@@ -23,6 +23,7 @@
 #include <math.h>
 #include <stdatomic.h>
 #include <ctype.h>
+#include <time.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -36,6 +37,7 @@
 #include "esp_http_server.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "esp_netif_sntp.h"
 #include "cJSON.h"
 
 #include "jr_ports/ports.h"
@@ -4369,6 +4371,42 @@ static void voice_task(void *arg)
                     ESP_LOGI(TAG, "gesture: face-up -> listening again");
                 }
             }
+
+            /* UI-01 ambient watch: a muted, idle device is a clock, not a
+             * corpse. The baked bezel ticks already form the dial; the display
+             * layer dims the face and draws hands. Gated on a synced wall
+             * clock (SNTP) — hands at a wrong time are worse than no hands. */
+            static uint32_t s_clock_next_ms;
+            static int s_clock_last_min = -1;
+            if ((int32_t)((uint32_t)now - s_clock_next_ms) >= 0) {
+                s_clock_next_ms = (uint32_t)now + 1000U;
+                bool clock_on = false;
+                if (atomic_load(&s_voice_privacy_paused) &&
+                    jr_orch_phase(&s_app.orch) == JR_ST_IDLE) {
+                    time_t tt = time(NULL);
+                    struct tm tmv;
+                    localtime_r(&tt, &tmv);
+                    if (tmv.tm_year >= 2020 - 1900) {   /* SNTP has synced */
+                        clock_on = true;
+                        jr_display_clock_set(true, tmv.tm_hour, tmv.tm_min);
+                        if (tmv.tm_min != s_clock_last_min) {
+                            s_clock_last_min = tmv.tm_min;
+                            char cap[48];
+                            int h12 = tmv.tm_hour % 12;
+                            if (h12 == 0) h12 = 12;
+                            snprintf(cap, sizeof cap,
+                                     "%d:%02d %s - TAP TO WAKE", h12,
+                                     tmv.tm_min,
+                                     tmv.tm_hour < 12 ? "AM" : "PM");
+                            jr_display_caption_set(cap);
+                        }
+                    }
+                }
+                if (!clock_on) {
+                    jr_display_clock_set(false, 0, 0);
+                    s_clock_last_min = -1;
+                }
+            }
         }
 
         /* v4 barge fix, playback-driven: keep the mic PGA low (9 dB) whenever
@@ -5136,6 +5174,21 @@ void app_main(void)
         if (wc != ESP_OK) {
             ESP_LOGW(TAG, "wifi not connected (%s) — diag/session will retry once provisioned",
                      esp_err_to_name(wc));
+        }
+    }
+
+    /* Wall-clock time: the watch face, night theming and courtesy lines all
+     * need it, and until now the device had NONE (current_time is an external
+     * tool call). esp_netif_sntp retries internally until Wi-Fi is up, so
+     * starting it here is safe even before the first got-ip. TZ is compile-time
+     * for now; SVC-04 settings can make it NVS-backed later. */
+    setenv("TZ", "EST5EDT,M3.2.0,M11.1.0", 1);   /* US Eastern w/ DST rules */
+    tzset();
+    {
+        esp_sntp_config_t sntp_cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+        sntp_cfg.start = true;
+        if (esp_netif_sntp_init(&sntp_cfg) != ESP_OK) {
+            ESP_LOGW(TAG, "sntp init failed — clock features stay dormant");
         }
     }
 

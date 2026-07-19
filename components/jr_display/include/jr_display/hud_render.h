@@ -278,6 +278,18 @@ int hud_glass_chord(int y);
 void hud_overlay_ripple(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                         int cx, int cy, uint32_t age_ms);
 
+/* UI-01: ambient watch hands over a dimmed face. The baked bezel ticks at
+ * r200-214 already form the dial, so the whole watch is two hands and a hub:
+ * hour hand r20..110 in bright cyan, minute hand r20..175 in white, a 5 px
+ * white hub at the centre. 12 o'clock is a=192 in the LUT convention and both
+ * hands sweep clockwise with increasing a (mm=15 -> a=0, 3 o'clock).
+ * Everything stays inside r<=180 — far inside the glass, clear of the ticks.
+ * hh 0..23 (folded mod 12), mm 0..59; out-of-range values are folded, never
+ * trusted. Stateless, integer-only, y-culled; same strip contract as every
+ * other overlay. */
+void hud_overlay_clock(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                       int hh, int mm);
+
 /* Map IMU tilt to a HUD parallax offset, clamped to +/-HUD_TILT_MAX px.
  *
  * This is the one place the device beats the browser mockup: a simulated HUD

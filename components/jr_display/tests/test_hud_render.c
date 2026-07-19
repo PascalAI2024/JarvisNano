@@ -1214,6 +1214,102 @@ static void test_ripple_corner_tap_stays_on_glass(void)
     free(fb);
 }
 
+/* ---- ambient watch face (UI-01) --------------------------------------- */
+
+/* Hands are distinguishable by colour: the minute hand and hub are pure
+ * white 0xffff, the hour hand is the cyan ramp's bright end (any nonzero
+ * non-white pixel). Hand pixels are separated from the hub by radius: the
+ * hub ends at r=5, the hands start at r=20, so r^2 > 100 is cleanly a hand.
+ * Direction paper-check baked in: hh=3 -> hour RIGHT (a=0), mm=30 -> minute
+ * DOWN (a=64), mm=0 -> minute UP (a=192). */
+static void test_clock_hand_angles(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = calloc(px, sizeof *fb);
+    if (!fb) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
+
+    hud_overlay_clock(fb, 0, HUD_H, false, 3, 0);
+    size_t hour = 0, minute = 0, hour_bad = 0, min_bad = 0;
+    for (int y = 0; y < HUD_H; y++) {
+        for (int x = 0; x < HUD_W; x++) {
+            const uint16_t p = fb[(size_t)y * HUD_W + x];
+            if (p == 0) continue;
+            const int dx = x - 232, dy = y - 232;
+            const int r2 = dx * dx + dy * dy;
+            if (p != 0xffff) {                    /* hour hand: cyan */
+                hour++;
+                if (x <= 233) hour_bad++;
+            } else if (r2 > 100) {                /* minute hand, hub excluded */
+                minute++;
+                if (y >= 233) min_bad++;
+            }
+        }
+    }
+    CHECK(hour > 100, "hour hand painted only %zu px", hour);
+    CHECK(minute > 100, "minute hand painted only %zu px", minute);
+    CHECK(hour_bad == 0, "hh=3: %zu hour px not right of centre", hour_bad);
+    CHECK(min_bad == 0, "mm=0: %zu minute px not above centre", min_bad);
+
+    memset(fb, 0, px * sizeof *fb);
+    hud_overlay_clock(fb, 0, HUD_H, false, 0, 30);
+    size_t down_bad = 0;
+    for (int y = 0; y < HUD_H; y++) {
+        for (int x = 0; x < HUD_W; x++) {
+            const uint16_t p = fb[(size_t)y * HUD_W + x];
+            if (p != 0xffff) continue;
+            const int dx = x - 232, dy = y - 232;
+            if (dx * dx + dy * dy > 100 && y <= 233) down_bad++;
+        }
+    }
+    CHECK(down_bad == 0, "mm=30: %zu minute px not below centre", down_bad);
+    free(fb);
+}
+
+/* Everything inside r<=180 (measured from the overlay centre 232,232 — the
+ * longest hand tip plus 3x3 dot spill reaches ~178), and the same 12-row
+ * strip contract as every other overlay. */
+static void test_clock_bounds_and_strips(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = malloc(px * sizeof *whole);
+    uint16_t *strips = malloc(px * sizeof *strips);
+    if (!whole || !strips) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(whole); free(strips); return;
+    }
+
+    static const int times[][2] = { {3, 0}, {10, 47}, {6, 15}, {23, 59} };
+    for (size_t k = 0; k < sizeof times / sizeof times[0]; k++) {
+        memset(whole, 0, px * sizeof *whole);
+        hud_overlay_clock(whole, 0, HUD_H, false, times[k][0], times[k][1]);
+        size_t out = 0, painted = 0;
+        for (int y = 0; y < HUD_H; y++) {
+            for (int x = 0; x < HUD_W; x++) {
+                if (whole[(size_t)y * HUD_W + x] == 0) continue;
+                painted++;
+                const int dx = x - 232, dy = y - 232;
+                if (dx * dx + dy * dy > 180 * 180) out++;
+            }
+        }
+        CHECK(out == 0, "%02d:%02d painted %zu px past r180",
+              times[k][0], times[k][1], out);
+        CHECK(painted > 200, "%02d:%02d painted only %zu px",
+              times[k][0], times[k][1], painted);
+    }
+
+    /* strip invariance at a representative time */
+    for (size_t i = 0; i < px; i++) { whole[i] = strips[i] = (uint16_t)(i * 17u); }
+    hud_overlay_clock(whole, 0, HUD_H, false, 10, 47);
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        int nrows = (y + STRIP_ROWS <= HUD_H) ? STRIP_ROWS : (HUD_H - y);
+        hud_overlay_clock(strips + (size_t)y * HUD_W, y, nrows, false, 10, 47);
+    }
+    size_t diffs = 0;
+    for (size_t i = 0; i < px; i++) if (whole[i] != strips[i]) diffs++;
+    CHECK(diffs == 0, "clock strip/whole mismatch at %zu px", diffs);
+    free(whole); free(strips);
+}
+
 int main(void)
 {
     test_strip_invariance();
@@ -1249,6 +1345,8 @@ int main(void)
     test_ripple_geometry();
     test_ripple_strip_invariance();
     test_ripple_corner_tap_stays_on_glass();
+    test_clock_hand_angles();
+    test_clock_bounds_and_strips();
 
     if (g_failures) {
         printf("hud_render tests FAILED (%d)\n", g_failures);
