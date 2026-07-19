@@ -16,8 +16,13 @@ idf_component_register(
         jr_hal
         jr_net
         jr_audio
+        jr_tools
         jr_transport
+        jr_display
         nvs_flash
         esp_timer
         esp_http_server
+        json
+    EMBED_TXTFILES
+        "diagnostics.html"
 )
