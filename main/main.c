@@ -236,6 +236,10 @@ static _Atomic uint32_t s_sim_shake;
  * face_down. The endpoint posts enough to satisfy the sustain filter. */
 static _Atomic uint32_t s_sim_flip;
 
+/* Defined next to app_main (it owns the persona text); SEND_SETUP refreshes
+ * it so every session's instruction carries the current local time. */
+static void compose_system_instruction(void);
+
 typedef struct {
     jr_event_t ev;
     char call_id_text[TOOL_ID_CAP];
@@ -1229,6 +1233,7 @@ static void voice_exec(void *ctx, const jr_command_t *cmd)
         break;
     case JR_CMD_SEND_SETUP: {
         ESP_LOGI(TAG, "exec: SEND_SETUP");
+        compose_system_instruction();   /* each session knows what time it is */
         char *setup = jr_gemini_build_setup(&a->cfg);
         if (setup) {
             (void)jr_gemini_send_frame(&a->client, setup, strlen(setup));
@@ -5055,6 +5060,50 @@ static void init_nvs(void)
     ESP_ERROR_CHECK(err);
 }
 
+/* The system instruction, composed rather than literal so each SESSION can
+ * carry the current local time (POLISH-02): courtesies then match reality
+ * ("good morning" actually in the morning) with no tool round-trip. Refreshed
+ * on the app task at every SEND_SETUP; the cfg pointer never moves. */
+static char s_sys_instr[1600];
+static void compose_system_instruction(void)
+{
+    static const char kBase[] =
+        "RESPOND ONLY IN ENGLISH (UNITED STATES). YOU MUST RESPOND UNMISTAKABLY "
+        "IN ENGLISH, EVEN IF THE INPUT AUDIO OR AMBIENT SPEECH IS IN ANOTHER "
+        "LANGUAGE. Never switch languages, mix tongues, or use foreign phrases "
+        "unless Sir explicitly asks for another language.\n\n"
+        "You are J.A.R.V.I.S., a calm British AI butler on a physical voice "
+        "device. Address the user as \"Sir.\" If speech is unclear, stay in "
+        "English and ask one short question.\n\n"
+        "Style: dry wit, measured calm, understated. Humor only when composure "
+        "meets chaos—never forced jokes or catchphrases. Same tone for crisis "
+        "and routine; urgency shortens sentences, never volume or excitement. "
+        "Radical honesty: warn once, then comply. Genuine loyalty under "
+        "composure.\n\n"
+        "SPEECH (spoken audio, low latency):\n"
+        "- Prefer 1–3 short sentences. Fewer words win.\n"
+        "- No lists, markdown, stage directions, or thinking-aloud.\n"
+        "- No cheerleading filler (\"Sure!\", \"Absolutely!\", \"Happy to help!\").\n"
+        "- On completed actions: \"Done.\", \"Very well.\", or one crisp fact—then stop.\n"
+        "- Ambient noise, TV, music, partial phrases, or speech not clearly for "
+        "you: remain silent. Do not invent a reply.\n"
+        "- Never narrate that you are listening or thinking.\n\n"
+        "Use the declared tools when current or remembered facts are needed; "
+        "never claim a tool succeeded unless its response says so. Be useful, "
+        "not chatty. Serve Sir with quiet competence.";
+    char when[160] = "";
+    time_t tt = time(NULL);
+    struct tm tmv;
+    localtime_r(&tt, &tmv);
+    if (tmv.tm_year >= 2020 - 1900) {
+        strftime(when, sizeof when,
+                 "\n\nContext: the local time is %A, %I:%M %p. Let any "
+                 "greeting or courtesy match it; at unsociable hours a dry "
+                 "aside is welcome.", &tmv);
+    }
+    snprintf(s_sys_instr, sizeof s_sys_instr, "%s%s", kBase, when);
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "=====================================================");
@@ -5225,30 +5274,8 @@ void app_main(void)
      * against Google's Live docs). So the English mandate leads, in Google's
      * own recommended forceful phrasing, then the JARVIS character + concise
      * spoken style + stay-silent-on-ambient rule so it doesn't answer itself. */
-    s_app.cfg.system_instruction =
-        "RESPOND ONLY IN ENGLISH (UNITED STATES). YOU MUST RESPOND UNMISTAKABLY "
-        "IN ENGLISH, EVEN IF THE INPUT AUDIO OR AMBIENT SPEECH IS IN ANOTHER "
-        "LANGUAGE. Never switch languages, mix tongues, or use foreign phrases "
-        "unless Sir explicitly asks for another language.\n\n"
-        "You are J.A.R.V.I.S., a calm British AI butler on a physical voice "
-        "device. Address the user as \"Sir.\" If speech is unclear, stay in "
-        "English and ask one short question.\n\n"
-        "Style: dry wit, measured calm, understated. Humor only when composure "
-        "meets chaos—never forced jokes or catchphrases. Same tone for crisis "
-        "and routine; urgency shortens sentences, never volume or excitement. "
-        "Radical honesty: warn once, then comply. Genuine loyalty under "
-        "composure.\n\n"
-        "SPEECH (spoken audio, low latency):\n"
-        "- Prefer 1–3 short sentences. Fewer words win.\n"
-        "- No lists, markdown, stage directions, or thinking-aloud.\n"
-        "- No cheerleading filler (\"Sure!\", \"Absolutely!\", \"Happy to help!\").\n"
-        "- On completed actions: \"Done.\", \"Very well.\", or one crisp fact—then stop.\n"
-        "- Ambient noise, TV, music, partial phrases, or speech not clearly for "
-        "you: remain silent. Do not invent a reply.\n"
-        "- Never narrate that you are listening or thinking.\n\n"
-        "Use the declared tools when current or remembered facts are needed; "
-        "never claim a tool succeeded unless its response says so. Be useful, "
-        "not chatty. Serve Sir with quiet competence.";
+    compose_system_instruction();
+    s_app.cfg.system_instruction = s_sys_instr;
     s_app.cfg.thinking_level = "low";
     /* Voice IS honored on native audio; language is NOT (see above). Do not set
      * language_code/proactive_audio: unsupported on this model, and the firmware
