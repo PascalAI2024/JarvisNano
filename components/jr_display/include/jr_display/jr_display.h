@@ -149,6 +149,24 @@ void jr_display_surface_dismiss(void);
 bool jr_display_surface_is_active(void);
 int jr_display_surface_hit_test(uint16_t x, uint16_t y);
 
+
+/* Feed the HUD layer the world-state it cannot see from inside the display:
+ * battery charge and device tilt. Cheap and lock-free (one packed word), so the
+ * caller may push it from any task at any cadence — the flush path reads the
+ * most recent value. Keeping the sensor components out of jr_display's
+ * dependency list is deliberate: the composition root owns that wiring.
+ *
+ * batt_pct: 0..100, or 0xFF when no cell is present (the gauge then hides).
+ * roll_deg/pitch_deg: straight from jr_imu; 0,0 disables tilt parallax. */
+void jr_display_set_hud_env(uint8_t batt_pct, bool charging,
+                            float roll_deg, float pitch_deg);
+
+/* Enable/disable the procedural HUD overlay at runtime. Exists so the HUD's
+ * true frame-rate cost can be A/B measured on the panel instead of estimated —
+ * flip it and read actual_fps from /api/display. Enabled by default. */
+void jr_display_set_hud_enabled(bool enabled);
+bool jr_display_hud_enabled(void);
+
 #ifdef __cplusplus
 }
 #endif

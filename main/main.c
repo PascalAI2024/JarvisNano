@@ -1895,6 +1895,22 @@ static esp_err_t tasks_diag_handler(httpd_req_t *req)
 /* /api/sensors — live IMU + battery telemetry. Both reads are non-blocking
  * snapshot copies (their sampler tasks own the shared I2C bus), so this handler
  * never parks the httpd task on a transaction. Phase 1 acceptance gate. */
+/* POST /api/display/hud?on=0|1 — A/B the HUD's frame-rate cost on real glass. */
+static esp_err_t hud_toggle_handler(httpd_req_t *req)
+{
+    int on = 1;
+    if (!query_int(req, "on", &on) || (on != 0 && on != 1)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "on must be 0 or 1");
+        return ESP_OK;
+    }
+    jr_display_set_hud_enabled(on != 0);
+    char body[64];
+    int n = snprintf(body, sizeof body, "{\"hud\":%s}", on ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
 static esp_err_t sensors_handler(httpd_req_t *req)
 {
     /* Start the samplers on first use rather than at boot — see the note in
@@ -3816,6 +3832,8 @@ static void start_diag_http(void)
           .handler = sensors_handler },
         { .uri = "/api/diag/tasks", .method = HTTP_GET,
           .handler = tasks_diag_handler },
+        { .uri = "/api/display/hud", .method = HTTP_POST,
+          .handler = hud_toggle_handler },
         { .uri = "/api/diag/panel-touch", .method = HTTP_POST,
           .handler = panel_touch_control_handler },
         { .uri = "/api/ui/shade", .method = HTTP_POST,
@@ -3916,6 +3934,24 @@ static void voice_task(void *arg)
 
         /* 1) pump the pure orchestrator (drains inbound, executes commands) */
         jr_orch_step(&s_app.orch, now);
+
+        /* 1b) feed the HUD layer the world it cannot see: battery charge and
+         * device tilt. Throttled to ~10 Hz — tilt parallax is a slow lean, not
+         * a spirit level, and the battery moves on the scale of minutes. Both
+         * reads are non-blocking snapshot copies (their samplers own the shared
+         * I2C bus), which is precisely why they were built that way: this runs
+         * inside the voice pump and must never stall it. */
+        static uint32_t s_hud_env_next_ms;
+        if ((int32_t)((uint32_t)now - s_hud_env_next_ms) >= 0) {
+            s_hud_env_next_ms = (uint32_t)now + 100U;
+            jr_imu_t imu = {0};
+            jr_power_t bat = {0};
+            const bool have_imu = jr_imu_read(&imu) == ESP_OK;
+            (void)jr_power_read(&bat);
+            jr_display_set_hud_env(bat.percent, bat.charging,
+                                   have_imu ? imu.roll_deg : 0.0f,
+                                   have_imu ? imu.pitch_deg : 0.0f);
+        }
 
         /* v4 barge fix, playback-driven: keep the mic PGA low (9 dB) whenever
          * the speaker is actually emitting — SPEAKING phase OR the DAC tail is

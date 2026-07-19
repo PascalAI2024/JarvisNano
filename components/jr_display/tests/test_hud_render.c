@@ -220,6 +220,123 @@ static void test_swap_bytes_swaps_palette(void)
           checked);
 }
 
+
+/* ---- overlay mode ---------------------------------------------------- */
+
+/* The overlay must obey the same strip contract as the full renderer: the HUD
+ * is composited during the panel flush, one 12-row DMA strip at a time. */
+static void test_overlay_strip_invariance(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = malloc(px * sizeof *whole);
+    uint16_t *strips = malloc(px * sizeof *strips);
+    if (!whole || !strips) {
+        printf("FAIL %s: allocation failed\n", __func__);
+        g_failures++;
+        free(whole); free(strips);
+        return;
+    }
+    /* seed both identically — the overlay composites OVER existing content */
+    for (size_t i = 0; i < px; i++) { whole[i] = strips[i] = (uint16_t)(i * 7u); }
+
+    const hud_env_t env = { .face = HUD_FACE_SPEAK, .amp = 190,
+                            .batt_pct = 65, .charging = false,
+                            .ox = 4, .oy = -3 };
+    const uint32_t now = 123456;
+
+    hud_overlay_frame(whole, 0, HUD_H, now, false, &env);
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        int nrows = (y + STRIP_ROWS <= HUD_H) ? STRIP_ROWS : (HUD_H - y);
+        hud_overlay_frame(strips + (size_t)y * HUD_W, y, nrows, now, false, &env);
+    }
+    size_t diffs = 0; int fy = -1;
+    for (size_t i = 0; i < px; i++) {
+        if (whole[i] != strips[i]) { if (!diffs) fy = (int)(i / HUD_W); diffs++; }
+    }
+    CHECK(diffs == 0, "overlay strip/whole mismatch at %zu px (first row %d)",
+          diffs, fy);
+    free(whole); free(strips);
+}
+
+static void test_overlay_respects_bounds(void)
+{
+    enum { GUARD = 64, NROWS = 12 };
+    const size_t body = (size_t)NROWS * HUD_W;
+    uint16_t *buf = malloc((body + 2 * GUARD) * sizeof *buf);
+    if (!buf) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
+    for (size_t i = 0; i < body + 2 * GUARD; i++) buf[i] = 0xA5A5;
+
+    const hud_env_t env = { .face = HUD_FACE_LISTEN, .amp = 255,
+                            .batt_pct = 100, .charging = true,
+                            .ox = HUD_TILT_MAX, .oy = HUD_TILT_MAX };
+    hud_overlay_frame(buf + GUARD, 197, NROWS, 999, true, &env);
+
+    size_t head = 0, tail = 0;
+    for (int i = 0; i < GUARD; i++) {
+        if (buf[i] != 0xA5A5) head++;
+        if (buf[GUARD + body + i] != 0xA5A5) tail++;
+    }
+    CHECK(head == 0, "overlay wrote %zu px before the buffer", head);
+    CHECK(tail == 0, "overlay wrote %zu px past the buffer", tail);
+    free(buf);
+}
+
+/* A USB-powered puck with no cell must show NO gauge — a full-looking or
+ * empty-looking battery arc would both be lies. */
+static void test_overlay_hides_absent_battery(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *a = calloc(px, sizeof *a);
+    uint16_t *b = calloc(px, sizeof *b);
+    if (!a || !b) { printf("FAIL %s: alloc\n", __func__); g_failures++; free(a); free(b); return; }
+
+    hud_env_t env = { .face = HUD_FACE_IDLE, .amp = 0, .batt_pct = 0xFF,
+                      .charging = false, .ox = 0, .oy = 0 };
+    hud_overlay_frame(a, 0, HUD_H, 500, false, &env);   /* no battery */
+    env.batt_pct = 80;
+    hud_overlay_frame(b, 0, HUD_H, 500, false, &env);   /* with battery */
+
+    size_t diffs = 0;
+    for (size_t i = 0; i < px; i++) if (a[i] != b[i]) diffs++;
+    CHECK(diffs > 0, "battery arc drew nothing at 80%% — gauge is dead");
+
+    /* and the absent case must leave the rim radius untouched */
+    size_t rim = 0;
+    for (int y = 0; y < HUD_H; y++) {
+        for (int x = 0; x < HUD_W; x++) {
+            int dx = x - 232, dy = y - 232;
+            int r2 = dx * dx + dy * dy;
+            if (r2 >= 209 * 209 && r2 <= 215 * 215 && a[y * HUD_W + x] != 0) rim++;
+        }
+    }
+    CHECK(rim == 0, "absent battery still painted %zu rim px", rim);
+    free(a); free(b);
+}
+
+static void test_tilt_offset_clamps_and_signs(void)
+{
+    int8_t ox = 99, oy = 99;
+
+    hud_tilt_offset(0.0f, 0.0f, &ox, &oy);
+    CHECK(ox == 0 && oy == 0, "level should not deflect (got %d,%d)", ox, oy);
+
+    hud_tilt_offset(1000.0f, 1000.0f, &ox, &oy);
+    CHECK(ox >= -HUD_TILT_MAX && ox <= HUD_TILT_MAX &&
+          oy >= -HUD_TILT_MAX && oy <= HUD_TILT_MAX,
+          "extreme tilt escaped the clamp (%d,%d)", ox, oy);
+
+    hud_tilt_offset(-1000.0f, -1000.0f, &ox, &oy);
+    CHECK(ox >= -HUD_TILT_MAX && ox <= HUD_TILT_MAX &&
+          oy >= -HUD_TILT_MAX && oy <= HUD_TILT_MAX,
+          "extreme negative tilt escaped the clamp (%d,%d)", ox, oy);
+
+    /* opposite rolls must deflect in opposite directions */
+    int8_t lx = 0, ly = 0, rx = 0, ry = 0;
+    hud_tilt_offset(-20.0f, 0.0f, &lx, &ly);
+    hud_tilt_offset( 20.0f, 0.0f, &rx, &ry);
+    CHECK(lx == -rx && lx != 0, "roll should be antisymmetric (%d vs %d)", lx, rx);
+}
+
 int main(void)
 {
     test_strip_invariance();
@@ -229,6 +346,10 @@ int main(void)
     test_set_encodes_mailbox_and_clamps();
     test_tick_clamps_long_stall();
     test_swap_bytes_swaps_palette();
+    test_overlay_strip_invariance();
+    test_overlay_respects_bounds();
+    test_overlay_hides_absent_battery();
+    test_tilt_offset_clamps_and_signs();
 
     if (g_failures) {
         printf("hud_render tests FAILED (%d)\n", g_failures);

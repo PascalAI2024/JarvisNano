@@ -123,6 +123,43 @@ void hud_render_rows(hud_t *h, uint16_t *dst, int y0, int nrows);
 void hud_overlay_thinking(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
                           bool swap_bytes);
 
+/* Everything the HUD layer needs to know about the world for one frame.
+ * Plain data, no pointers — the caller snapshots it and the renderer stays
+ * stateless, so this is safe to build in one task and render in another. */
+typedef struct {
+    uint8_t face;        /* hud_face_t — selects the state element          */
+    uint8_t amp;         /* 0..255 audio amplitude, drives the waveform     */
+    uint8_t batt_pct;    /* 0..100, or 0xFF when unknown/absent             */
+    bool    charging;
+    int8_t  ox, oy;      /* parallax offset in px; see hud_tilt_offset()    */
+} hud_env_t;
+
+/* The whole HUD for one strip: battery rim + the state's own element, drawn
+ * over whatever the face engine already rendered.
+ *
+ *   IDLE     slow breathing ring — alive, not busy
+ *   LISTEN   reactive waveform, cyan, amplitude-driven
+ *   THINK    the orbital comet
+ *   SPEAK    reactive waveform, white-hot
+ *   ERROR    red rim
+ *
+ * Stateless and integer-only: no allocation, no float, safe to call directly
+ * from the panel flush path. */
+void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
+                       bool swap_bytes, const hud_env_t *env);
+
+/* Map IMU tilt to a HUD parallax offset, clamped to +/-HUD_TILT_MAX px.
+ *
+ * This is the one place the device beats the browser mockup: a simulated HUD
+ * can only ever loop, but this one is anchored to the physical world, so the
+ * furniture leans as you tilt the puck and the face reads as sitting behind
+ * glass rather than painted on it. Deliberately gentle — this is depth, not a
+ * spirit level.
+ *
+ * roll_deg/pitch_deg come straight from jr_imu. Pass 0,0 to disable. */
+#define HUD_TILT_MAX 10
+void hud_tilt_offset(float roll_deg, float pitch_deg, int8_t *ox, int8_t *oy);
+
 #ifdef __cplusplus
 }
 #endif

@@ -708,22 +708,73 @@ static uint16_t agent_native_color(jr_display_agent_state_t state)
  * Full-width strips only: hud_render works on a fixed HUD_W-wide frame, while
  * this callback carries an (x2-x1) stride. The engine emits full-width 12-row
  * strips today; if that ever changes, skipping is the correct failure mode. */
+/* World-state pushed in by the composition root. Packed into one word so the
+ * flush path reads it without a lock: battery in bits 0-7, charging in bit 8,
+ * and the two tilt offsets pre-resolved to signed pixels in bits 16-31. Doing
+ * the float trigonometry at push time keeps it out of the render path. */
+static volatile uint32_t s_hud_env_word =
+    0x000000FFu;   /* battery unknown, level, not charging */
+static volatile uint32_t s_hud_enabled = 1u;
+
+void jr_display_set_hud_enabled(bool enabled)
+{
+    __atomic_store_n(&s_hud_enabled, enabled ? 1u : 0u, __ATOMIC_RELAXED);
+}
+
+bool jr_display_hud_enabled(void)
+{
+    return __atomic_load_n(&s_hud_enabled, __ATOMIC_RELAXED) != 0u;
+}
+
+void jr_display_set_hud_env(uint8_t batt_pct, bool charging,
+                            float roll_deg, float pitch_deg)
+{
+    int8_t ox = 0, oy = 0;
+    hud_tilt_offset(roll_deg, pitch_deg, &ox, &oy);
+    const uint32_t word = (uint32_t)batt_pct
+                        | (charging ? (1u << 8) : 0u)
+                        | ((uint32_t)(uint8_t)ox << 16)
+                        | ((uint32_t)(uint8_t)oy << 24);
+    __atomic_store_n(&s_hud_env_word, word, __ATOMIC_RELAXED);
+}
+
+static uint8_t hud_face_of(jr_face_t f)
+{
+    switch (f) {
+    case JR_FACE_IDLE:      return HUD_FACE_IDLE;
+    case JR_FACE_LISTENING: return HUD_FACE_LISTEN;
+    case JR_FACE_THINKING:  return HUD_FACE_THINK;
+    case JR_FACE_SPEAKING:  return HUD_FACE_SPEAK;
+    case JR_FACE_ERROR:     return HUD_FACE_ERROR;
+    default:                return HUD_FACE_IDLE;
+    }
+}
+
 static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                               int x2, int y2, uint16_t *pixels)
 {
     if (pixels == NULL || x1 != 0 || (x2 - x1) != HUD_W) {
         return;
     }
-    if ((jr_face_t)diag_load(&ctx->applied_face) != JR_FACE_THINKING) {
+    if (__atomic_load_n(&s_hud_enabled, __ATOMIC_RELAXED) == 0u) {
         return;
     }
     const int nrows = y2 - y1;
     if (nrows <= 0) {
         return;
     }
-    hud_overlay_thinking(pixels, y1, nrows,
-                         (uint32_t)(esp_timer_get_time() / 1000),
-                         ctx->board.swap_color_bytes);
+    const uint32_t w = __atomic_load_n(&s_hud_env_word, __ATOMIC_RELAXED);
+    const hud_env_t env = {
+        .face     = hud_face_of((jr_face_t)diag_load(&ctx->applied_face)),
+        .amp      = (uint8_t)diag_load(&ctx->requested_amplitude),
+        .batt_pct = (uint8_t)(w & 0xFFu),
+        .charging = (w & (1u << 8)) != 0u,
+        .ox       = (int8_t)((w >> 16) & 0xFFu),
+        .oy       = (int8_t)((w >> 24) & 0xFFu),
+    };
+    hud_overlay_frame(pixels, y1, nrows,
+                      (uint32_t)(esp_timer_get_time() / 1000),
+                      ctx->board.swap_color_bytes, &env);
 }
 
 static void apply_shell_overlay(jr_display_ctx_t *ctx, int x1, int y1,

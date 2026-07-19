@@ -230,8 +230,13 @@ static inline void dot_n(const strip_t *s, int x, int y, uint16_t px, int n)
 /* Polar plot: n x n dot at (angle a in Q8 turns, radius r px) from center. */
 static inline void polar_dot(const strip_t *s, int a, int r, uint16_t px, int n)
 {
-    int x = 232 + ((lcos(a) * r) >> 15);
+    /* Cull before the cos(): called once per strip, so an off-strip dot must
+     * cost as little as possible. See ov_spoke for the full rationale. */
     int y = 232 + ((lsin(a) * r) >> 15);
+    if (y + n <= s->y0 || y >= s->y1) {
+        return;
+    }
+    int x = 232 + ((lcos(a) * r) >> 15);
     dot_n(s, x, y, px, n);
 }
 
@@ -514,6 +519,8 @@ void hud_render_rows(hud_t *h, uint16_t *dst, int y0, int nrows)
  * the ramps live here, rebuilt only if the panel byte order ever changes. */
 static uint16_t s_ov_cyan[HUD_RAMP_LEVELS];
 static uint16_t s_ov_tick[HUD_RAMP_LEVELS];
+static uint16_t s_ov_gold[HUD_RAMP_LEVELS];
+static uint16_t s_ov_red[HUD_RAMP_LEVELS];
 static bool     s_ov_ready;
 static bool     s_ov_swap;
 
@@ -525,6 +532,8 @@ static void overlay_palette(bool swap)
     luts_build();
     ramp_build(s_ov_cyan, 0, 229, 255, swap);
     ramp_build(s_ov_tick, 90, 200, 220, swap);
+    ramp_build(s_ov_gold, 255, 180, 40, swap);
+    ramp_build(s_ov_red,  255, 64,  48, swap);
     s_ov_swap  = swap;
     s_ov_ready = true;
 }
@@ -573,4 +582,196 @@ void hud_overlay_thinking(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
     const uint16_t blaze = shade(s_ov_tick, 255);
     polar_dot(&s, head, R_RING, blaze, 4);
     polar_dot(&s, (head + 1) & 255, R_RING, blaze, 3);
+}
+
+/* ---- offset-aware primitives -------------------------------------------
+ * The face renderer draws around a fixed centre; the HUD layer needs to shift
+ * with tilt, so these take an explicit centre. Same integer discipline. */
+
+static inline void ov_dot(const strip_t *s, int x, int y, uint16_t px, int n)
+{
+    for (int j = 0; j < n; ++j) {
+        const int yy = y + j;
+        if (yy < s->y0 || yy >= s->y1) {
+            continue;
+        }
+        uint16_t *row = s->base + (size_t)(yy - s->y0) * HUD_W;
+        for (int i = 0; i < n; ++i) {
+            const int xx = x + i;
+            if (xx >= 0 && xx < HUD_W) {
+                row[xx] = px;
+            }
+        }
+    }
+}
+
+static inline void ov_polar(const strip_t *s, int cx, int cy, int a, int r,
+                            uint16_t px, int n)
+{
+    const int y = cy + ((lsin(a) * r) >> 15);
+    if (y + n <= s->y0 || y >= s->y1) {
+        return;                 /* off-strip: skip the cos() and the writes */
+    }
+    ov_dot(s, cx + ((lcos(a) * r) >> 15), y, px, n);
+}
+
+/* Radial spoke from r0 to r1 at angle a — the waveform bar primitive.
+ *
+ * CRITICAL: this is called once per DMA strip, 39 times per frame. Drawing the
+ * whole spoke every time and letting ov_dot clip discards ~97% of the work and
+ * measurably costs frame rate (24 -> 14 fps when this culling was absent).
+ * y(r) is monotonic in r for a fixed angle, so the endpoints bound the span:
+ * reject the spoke outright unless that span meets the strip. */
+static void ov_spoke(const strip_t *s, int cx, int cy, int a, int r0, int r1,
+                     uint16_t px, bool wide)
+{
+    if (r1 < r0) {
+        return;
+    }
+    const int sa = lsin(a);
+    int ya = cy + ((sa * r0) >> 15);
+    int yb = cy + ((sa * r1) >> 15);
+    if (ya > yb) { const int tmp = ya; ya = yb; yb = tmp; }
+    if (yb + 2 < s->y0 || ya >= s->y1) {
+        return;                                  /* cannot touch this strip */
+    }
+    for (int r = r0; r <= r1; ++r) {
+        ov_polar(s, cx, cy, a, r, px, wide ? 2 : 1);
+    }
+}
+
+/* One row of an annulus about (cx,cy), filled analytically: solve the two x
+ * spans rather than testing every pixel, so cost is the band width and not the
+ * row width. */
+static void ov_ring_row(uint16_t *row, int y, int cx, int cy, int r_in,
+                        int r_out, const uint16_t *ramp, int level)
+{
+    if (level <= 0 || r_out <= r_in) {
+        return;
+    }
+    const int dy = y - cy;
+    const int dy2 = dy * dy;
+    if (dy2 >= r_out * r_out) {
+        return;                                  /* row misses the annulus */
+    }
+    const int xo = (int)isqrt32((uint32_t)(r_out * r_out - dy2));
+    const int xi = (dy2 < r_in * r_in)
+                 ? (int)isqrt32((uint32_t)(r_in * r_in - dy2)) : 0;
+    const uint16_t px = shade(ramp, level);
+    for (int side = 0; side < 2; ++side) {
+        const int a = side ? cx + xi : cx - xo;
+        const int b = side ? cx + xo : cx - xi;
+        for (int x = a; x <= b; ++x) {
+            if (x >= 0 && x < HUD_W) {
+                row[x] = px;
+            }
+        }
+    }
+}
+
+void hud_tilt_offset(float roll_deg, float pitch_deg, int8_t *ox, int8_t *oy)
+{
+    /* ~30 deg of tilt reaches full deflection; beyond that it clamps, so the
+     * HUD leans convincingly on a desk nudge without sliding off under a big
+     * gesture. Roll moves x, pitch moves y. Sign is chosen so the furniture
+     * lags the motion, which is what reads as parallax rather than drift. */
+    int x = (int)(-roll_deg * HUD_TILT_MAX / 30.0f);
+    int y = (int)(pitch_deg * HUD_TILT_MAX / 30.0f);
+    if (x >  HUD_TILT_MAX) x =  HUD_TILT_MAX;
+    if (x < -HUD_TILT_MAX) x = -HUD_TILT_MAX;
+    if (y >  HUD_TILT_MAX) y =  HUD_TILT_MAX;
+    if (y < -HUD_TILT_MAX) y = -HUD_TILT_MAX;
+    if (ox) *ox = (int8_t)x;
+    if (oy) *oy = (int8_t)y;
+}
+
+/* Battery rim: a thin arc at the outer bezel sweeping clockwise from 12
+ * o'clock, proportional to charge. Red under 20%, gold while charging, cyan
+ * otherwise. Skipped entirely when no cell is present (batt_pct == 0xFF), so a
+ * USB-powered puck shows no misleading gauge. */
+#define OV_R_BATT 212
+
+static void ov_battery(const strip_t *s, int cx, int cy, const hud_env_t *env)
+{
+    if (env->batt_pct > 100) {
+        return;
+    }
+    const uint16_t *ramp = (env->batt_pct < 20) ? s_ov_red
+                         : (env->charging ? s_ov_gold : s_ov_cyan);
+    const int steps = (256 * env->batt_pct) / 100;
+    for (int i = 0; i <= steps; ++i) {
+        const int a = (i - 64) & 255;            /* -64 Q8 == 12 o'clock */
+        ov_polar(s, cx, cy, a, OV_R_BATT, shade(ramp, 200), 2);
+    }
+}
+
+/* Reactive waveform: HUD_BARS spokes around the ring, length driven by
+ * amplitude, shaped so the crown is tallest and the skirt shortest, with a
+ * slow travelling ripple so it never looks like a static equaliser. */
+static void ov_waveform(const strip_t *s, int cx, int cy, uint32_t now_ms,
+                        const hud_env_t *env, const uint16_t *ramp, int base_lv)
+{
+    const int amp = env->amp;
+    for (int i = 0; i < HUD_BARS; ++i) {
+        const int a = (i * 256) / HUD_BARS;
+        /* envelope: full at the crown, tapering to the skirt */
+        const int env_q8 = 128 + ((lsin((i * 128) / HUD_BARS) * 127) >> 15);
+        /* travelling ripple keeps it alive even at constant amplitude */
+        const int rip = 180 + ((lsin((int)((now_ms >> 4) + i * 5) & 255) * 75) >> 15);
+        int len = 4 + (((amp * env_q8) >> 8) * rip) / 255 * 56 / 255;
+        if (len > 58) {
+            len = 58;
+        }
+        const int lv = base_lv + ((amp * (255 - base_lv)) >> 8);
+        ov_spoke(s, cx, cy, a, R_BAR_BASE, R_BAR_BASE + len,
+                 shade(ramp, lv), len > 24);
+    }
+}
+
+void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
+                       bool swap_bytes, const hud_env_t *env)
+{
+    if (dst == NULL || env == NULL || nrows <= 0) {
+        return;
+    }
+    overlay_palette(swap_bytes);
+
+    const strip_t s = { dst, y0, y0 + nrows };
+    const int cx = 232 + env->ox;
+    const int cy = 232 + env->oy;
+
+    ov_battery(&s, cx, cy, env);
+
+    switch ((hud_face_t)env->face) {
+    case HUD_FACE_IDLE: {
+        /* Breathing ring — a slow sine on brightness. Present, not busy. */
+        const int lv = 26 + ((lsin((int)(now_ms / 24) & 255) * 22) >> 15) + 22;
+        for (int y = s.y0; y < s.y1; ++y) {
+            if (y >= 0 && y < HUD_H) {
+                ov_ring_row(dst + (size_t)(y - s.y0) * HUD_W, y, cx, cy,
+                            R_RING - 1, R_RING + 1, s_ov_cyan, lv);
+            }
+        }
+        break;
+    }
+    case HUD_FACE_LISTEN:
+        ov_waveform(&s, cx, cy, now_ms, env, s_ov_cyan, 60);
+        break;
+    case HUD_FACE_SPEAK:
+        ov_waveform(&s, cx, cy, now_ms, env, s_ov_tick, 90);
+        break;
+    case HUD_FACE_THINK:
+        hud_overlay_thinking(dst, y0, nrows, now_ms, swap_bytes);
+        break;
+    case HUD_FACE_ERROR:
+        for (int y = s.y0; y < s.y1; ++y) {
+            if (y >= 0 && y < HUD_H) {
+                ov_ring_row(dst + (size_t)(y - s.y0) * HUD_W, y, cx, cy,
+                            R_TICK_IN, R_TICK_IN + 3, s_ov_red, 150);
+            }
+        }
+        break;
+    default:
+        break;
+    }
 }
