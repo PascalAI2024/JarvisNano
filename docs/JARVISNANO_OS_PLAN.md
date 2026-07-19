@@ -5,6 +5,29 @@
 
 # JarvisNano: Why the Device Looks Nothing Like the Prototype — and How to Fix It
 
+## Decisions taken (2026-07-18)
+
+- **Phase 0 commit — DONE.** The 10-day-old working tree (43 modified files,
+  +9,960/−1,381, plus untracked `jr_http` / `jr_memory` / `jr_tools` /
+  `hud_render.{c,h}` / `input_touch.c`) is committed in 8 logical commits and
+  pushed to `origin/v5`. The remaining Phase 0 items — wiring `hud_render.c`
+  into SRCS + a host target, the `emote_assets`/`emote` partition-label
+  mismatch, the three dead-code false signals, and the serial boot log —
+  are still open.
+- **D1 — RESOLVED: kill LVGL, extend the overlay compositor.** Interactive UI
+  (choice arcs, radial menu, cards) is built on `apply_*_overlay` +
+  `hud_render.c`, not LVGL. Rationale: LVGL links zero objects today
+  (`jarvisrobot_v5.map:34465,34528`), its draw buffers do not fit (largest free
+  internal DMA block measured 14,336 B; `spi_master` cannot DMA PSRAM here per
+  `jr_display.c:46-49`), and the compositor already draws hit-tested UI on
+  glass. This deletes an engine, the SVC-07 arbiter, and the shared-`panel_io`
+  freeze bug class from the plan. **Do not re-propose the two-engine split in
+  `UPGRADE_RESEARCH.md` §4 — it is superseded.**
+- Still open: **D3** (DOA — recommend hemisphere lean, no respin), **D4**
+  (retire the 5 baked `.eaf` clips? revisit end of Phase 3), **D5** (companion
+  app in the choice loop?), **D6** (dual-OTA before the partition table
+  calcifies). **D2** is answered by the Phase 0 commit above: land v5.
+
 ---
 
 # QUESTION 1 — The Diagnosis
