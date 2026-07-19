@@ -19,6 +19,8 @@ idf_component_register(
         jr_tools
         jr_transport
         jr_display
+        jr_imu
+        jr_power
         nvs_flash
         esp_timer
         esp_http_server

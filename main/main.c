@@ -51,6 +51,8 @@
 #include "jr_tools/jr_tools.h"
 #include "jr_transport/gemini_live.h"
 #include "jr_transport/gemini_device_ws.h"
+#include "jr_imu/jr_imu.h"
+#include "jr_power/jr_power.h"
 
 static const char *TAG = "jarvis_v5";
 
@@ -1830,6 +1832,63 @@ static int shade_control_from_point(uint16_t x, uint16_t y)
         }
     }
     return -1;
+}
+
+/* /api/sensors — live IMU + battery telemetry. Both reads are non-blocking
+ * snapshot copies (their sampler tasks own the shared I2C bus), so this handler
+ * never parks the httpd task on a transaction. Phase 1 acceptance gate. */
+static esp_err_t sensors_handler(httpd_req_t *req)
+{
+    /* Start the samplers on first use rather than at boot — see the note in
+     * app_main(). Both calls are idempotent. The first request after boot
+     * therefore reports available=false while the samplers warm up (one 10 ms
+     * period for the IMU, one 5 s period for the battery); the next is live. */
+    (void)jr_imu_start();
+    (void)jr_power_start();
+
+    jr_imu_t imu = {0};
+    jr_power_t bat = {0};
+    const bool have_imu = jr_imu_read(&imu) == ESP_OK;
+    const bool have_bat = jr_power_read(&bat) == ESP_OK;
+
+    char body[768];
+    int n = snprintf(body, sizeof body,
+        "{\"imu\":{\"available\":%s,\"present\":%s,\"i2c_addr\":\"0x%02X\","
+        "\"raw\":{\"ax\":%d,\"ay\":%d,\"az\":%d},"
+        "\"g\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},"
+        "\"pitch_deg\":%.1f,\"roll_deg\":%.1f,\"orientation\":\"%s\","
+        "\"motion_mg\":%.1f,\"moving\":%s,\"shake\":%s,"
+        "\"sample_seq\":%u,\"age_ms\":%u},"
+        "\"battery\":{\"available\":%s,\"present\":%s,\"charging\":%s,"
+        "\"usb_present\":%s,\"percent\":%d,\"millivolts\":%u,"
+        "\"sample_seq\":%u,\"age_ms\":%u}}",
+        have_imu ? "true" : "false",
+        imu.present ? "true" : "false",
+        (unsigned)imu.i2c_addr,
+        (int)imu.ax, (int)imu.ay, (int)imu.az,
+        (double)imu.gx, (double)imu.gy, (double)imu.gz,
+        (double)imu.pitch_deg, (double)imu.roll_deg,
+        imu.orientation ? imu.orientation : "unknown",
+        (double)imu.motion_mg,
+        imu.moving ? "true" : "false",
+        imu.shake ? "true" : "false",
+        (unsigned)imu.sample_seq, (unsigned)imu.age_ms,
+        have_bat ? "true" : "false",
+        bat.present ? "true" : "false",
+        bat.charging ? "true" : "false",
+        bat.usb_present ? "true" : "false",
+        bat.percent == 0xFF ? -1 : (int)bat.percent,
+        (unsigned)bat.millivolts,
+        (unsigned)bat.sample_seq, (unsigned)bat.age_ms);
+    if (n < 0 || (size_t)n >= sizeof body) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "sensor status encoding failed");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
 }
 
 static esp_err_t touch_status_handler(httpd_req_t *req)
@@ -3692,6 +3751,8 @@ static void start_diag_http(void)
           .handler = audio_tap_wav_handler },
         { .uri = "/api/touch", .method = HTTP_GET,
           .handler = touch_status_handler },
+        { .uri = "/api/sensors", .method = HTTP_GET,
+          .handler = sensors_handler },
         { .uri = "/api/diag/panel-touch", .method = HTTP_POST,
           .handler = panel_touch_control_handler },
         { .uri = "/api/ui/shade", .method = HTTP_POST,
@@ -4400,6 +4461,18 @@ void app_main(void)
     if (hal_err != ESP_OK) {
         ESP_LOGE(TAG, "jr_hal_init failed: %s — continuing headless", esp_err_to_name(hal_err));
     }
+
+    /* Sensor samplers are NOT started here — deliberately. Measured 2026-07-18:
+     * starting both at boot costs ~7 KB of internal RAM (two task stacks + TCBs),
+     * which drops free internal to ~13.8 KB and makes the Gemini TLS handshake
+     * fail with `esp-aes: Failed to allocate memory` — the AES accelerator needs
+     * DMA-capable INTERNAL memory, which PSRAM cannot serve. Voice regressed
+     * end-to-end. See docs/JARVISNANO_OS_PLAN.md "Internal RAM budget".
+     *
+     * They are started on demand instead (idempotently, from /api/sensors).
+     * Phase 2 must fix the internal-RAM budget properly before anything that
+     * renders continuously — the HUD, gestures, the battery arc — can depend on
+     * an always-on sampler. That is now a tracked prerequisite, not a surprise. */
 
     /* pull the concrete ports. The real presenter is preferred; its panel +
      * SPIFFS + gfx bring-up runs async in its own task, so this never stalls

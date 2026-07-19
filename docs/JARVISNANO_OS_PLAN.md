@@ -22,6 +22,69 @@
   app in the choice loop?), **D6** (dual-OTA before the partition table
   calcifies). **D2** is answered by the Phase 0 commit above: land v5.
 
+## Internal RAM budget — the real constraint on Phases 2–5 (measured 2026-07-18)
+
+The audit named PSRAM and flash as the hard ceilings. They are real, but the
+binding constraint for everything interactive turns out to be **largest
+contiguous INTERNAL block**, and it is far tighter than anyone had measured.
+
+Measured on hardware via `/api/cockpit`:
+
+| State | free internal | largest block | Gemini TLS handshake |
+|---|---|---|---|
+| Baseline (samplers off) | 22,771 B | 13,824 B | ✅ connects |
+| Both samplers running | 15,635 B | 10,752 B | ✅ connects, and **reconnects** |
+| Both samplers started at boot | 13,803 B | 7,680 B | ❌ `esp-aes: Failed to allocate memory` |
+
+The two sensor samplers cost **7,136 B** of internal RAM (two task stacks +
+TCBs). Starting them at boot pushed the largest block to 7,680 B and the Gemini
+TLS handshake failed outright — `esp-aes` needs DMA-capable INTERNAL memory,
+which PSRAM cannot serve. Voice regressed end to end.
+
+**The handshake threshold sits between 7,680 B and 10,752 B of largest
+contiguous block.** Total free is not the predictor; contiguity is.
+
+Consequences for the plan:
+- Phase 1 ships the samplers **on-demand** (started from `/api/sensors`), not at
+  boot. Phase 1's acceptance is met without spending the budget.
+- **Phase 2 gains a prerequisite task, ahead of the arc surface:** raise the
+  internal-RAM headroom. Cheapest lever first — `jr_voice` is created with a
+  **20,480 B** stack (`main.c`, `xTaskCreatePinnedToCore(... 20480 ...)`);
+  measure `uxTaskGetStackHighWaterMark()` and reclaim the slack. Other levers:
+  `CONFIG_MBEDTLS_HARDWARE_AES=n` (software AES frees DMA internal, costs CPU),
+  trimming WiFi static buffers, or PSRAM task stacks via `xTaskCreateWithCaps`
+  (only for tasks that never run with the flash cache disabled).
+- Until that lands, **nothing may depend on an always-on sampler** — which
+  includes GEST-01..06, the tilt UI, and PWR-06's battery arc. Phase 3 is
+  gated on it.
+
+## SECURITY — Google API key is logged in plaintext (found 2026-07-18)
+
+The key is correctly stored in NVS and is **not** hardcoded in source or present
+in any committed file. But `main.c:4513` builds the WS URL as
+`"%s?key=%s"`, and on any TLS failure `esp_websocket_client` / `transport_ws`
+logs the entire request line:
+
+```
+E (14889) transport_ws: Error write Upgrade header
+  GET /ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=AIza... HTTP/1.1
+```
+
+That reaches the serial console **and** the SD logger, which appends to
+`/sdcard/logs/jarvis.log` and is retrievable over HTTP (`/api/logs`). Anyone on
+the LAN can therefore read the key. It also means any shared serial capture
+leaks it — the Phase 1 boot logs in the scratchpad did, which is why they are
+NOT in `docs/evidence/`.
+
+Actions:
+1. **Rotate the key** — it has been written to device logs.
+2. Firmware fix: send the key as an `x-goog-api-key` header on the WS upgrade
+   instead of a query parameter, so the logged URI carries no secret. Verify the
+   Live endpoint accepts the header form before relying on it.
+3. Until then, treat any serial/SD capture from this device as secret-bearing
+   and redact before sharing. `scripts/check-secrets.sh` does not currently
+   catch `AIza…` in `.build_logs/` — add that pattern.
+
 ## Phase 0 results (2026-07-18)
 
 Executed in full. Three of the seven planned items turned out to rest on **wrong
