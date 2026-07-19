@@ -10,6 +10,7 @@
  * flush wait. Voice/audio tasks therefore never wait on flash, PSRAM, or LCD.
  */
 #include "jr_display/jr_display.h"
+#include "jr_display/hud_render.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -691,6 +692,40 @@ static uint16_t agent_native_color(jr_display_agent_state_t state)
     }
 }
 
+/* Procedural round-native furniture composited over the baked-EAF face.
+ *
+ * Today this is STATE-03 only — the thinking orbital spinner from
+ * docs/prototype/jarvisnano-os.html — drawn while the applied face is THINKING.
+ * It is the first element of the JarvisNano OS design to render on glass, and
+ * the seam the rest of it lands through (choice arcs, battery rim, listen
+ * countdown), because procedural drawing is the only option that fits: a baked
+ * 4-mood x 4-state clip matrix needs ~12-15 MiB against a 6.875 MiB partition.
+ *
+ * Runs INSIDE the flush, on the gfx-owned DMA strip, before the shell and
+ * surface overlays so those still win the z-order. hud_overlay_thinking() is
+ * stateless and integer-only, so this costs no allocation and no float work.
+ *
+ * Full-width strips only: hud_render works on a fixed HUD_W-wide frame, while
+ * this callback carries an (x2-x1) stride. The engine emits full-width 12-row
+ * strips today; if that ever changes, skipping is the correct failure mode. */
+static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
+                              int x2, int y2, uint16_t *pixels)
+{
+    if (pixels == NULL || x1 != 0 || (x2 - x1) != HUD_W) {
+        return;
+    }
+    if ((jr_face_t)diag_load(&ctx->applied_face) != JR_FACE_THINKING) {
+        return;
+    }
+    const int nrows = y2 - y1;
+    if (nrows <= 0) {
+        return;
+    }
+    hud_overlay_thinking(pixels, y1, nrows,
+                         (uint32_t)(esp_timer_get_time() / 1000),
+                         ctx->board.swap_color_bytes);
+}
+
 static void apply_shell_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                                 int x2, int y2, uint16_t *pixels)
 {
@@ -860,6 +895,7 @@ static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
     uint16_t *outbound = (uint16_t *)pixels;
     apply_test_pattern(ctx, x1, y1, x2, y2, outbound);
     if (diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF) {
+        apply_hud_overlay(ctx, x1, y1, x2, y2, outbound);
         apply_shell_overlay(ctx, x1, y1, x2, y2, outbound);
         apply_surface_overlay(ctx, x1, y1, x2, y2, outbound);
     }

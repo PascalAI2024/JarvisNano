@@ -504,3 +504,73 @@ void hud_render_rows(hud_t *h, uint16_t *dst, int y0, int nrows)
     }
     face_render(h, &s, h->cur, k);
 }
+
+/* ============================ overlay mode ============================== */
+/* See hud_render.h. These composite one element over an already-rendered
+ * strip rather than owning the frame, so the baked-EAF face keeps drawing
+ * underneath and the round-native furniture lands on top of it. */
+
+/* Lazily-built palette for overlay use. Overlays are stateless (no hud_t), so
+ * the ramps live here, rebuilt only if the panel byte order ever changes. */
+static uint16_t s_ov_cyan[HUD_RAMP_LEVELS];
+static uint16_t s_ov_tick[HUD_RAMP_LEVELS];
+static bool     s_ov_ready;
+static bool     s_ov_swap;
+
+static void overlay_palette(bool swap)
+{
+    if (s_ov_ready && s_ov_swap == swap) {
+        return;
+    }
+    luts_build();
+    ramp_build(s_ov_cyan, 0, 229, 255, swap);
+    ramp_build(s_ov_tick, 90, 200, 220, swap);
+    s_ov_swap  = swap;
+    s_ov_ready = true;
+}
+
+/* One revolution every ~2639 ms == the prototype's `angle = now/420` rad
+ * (2*pi*420 ms per turn), expressed in the Q8 turn units the LUT uses. */
+#define OV_SPIN_PERIOD_MS  2639
+/* ~1.1 rad of trail == 0.175 turns == 45 Q8 units. */
+#define OV_TRAIL_Q8        45
+
+void hud_overlay_thinking(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
+                          bool swap_bytes)
+{
+    if (dst == NULL || nrows <= 0) {
+        return;
+    }
+    overlay_palette(swap_bytes);
+
+    const strip_t s = { dst, y0, y0 + nrows };
+
+    /* Dim track ring the comet rides. Level is low so it reads as furniture
+     * under the face rather than competing with it. */
+    for (int y = s.y0; y < s.y1; ++y) {
+        if (y < 0 || y >= HUD_H) {
+            continue;
+        }
+        band_row(dst + (size_t)(y - s.y0) * HUD_W, y,
+                 R_RING - 1, R_RING + 1, s_ov_cyan, 40);
+    }
+
+    const int head = (int)(((uint64_t)now_ms * 256u) / OV_SPIN_PERIOD_MS) & 255;
+
+    /* Trailing tail, dimmest first so the head overwrites cleanly (draw order
+     * is the blend policy here, exactly as in layer_comets). */
+    for (int d = OV_TRAIL_Q8 - 1; d >= 0; --d) {
+        const int lv = (255 * (OV_TRAIL_Q8 - d)) / OV_TRAIL_Q8;
+        const uint16_t hot  = shade(s_ov_cyan, lv);
+        const uint16_t cool = shade(s_ov_cyan, (lv * 2) / 5);
+        const int a = (head - d) & 255;
+        /* 3-wide closes the ~3.7 px angular gap between adjacent Q8 steps. */
+        polar_dot(&s, a, R_RING, hot, 3);
+        polar_dot(&s, a, R_RING + 3, cool, 2);
+    }
+
+    /* White-hot head. */
+    const uint16_t blaze = shade(s_ov_tick, 255);
+    polar_dot(&s, head, R_RING, blaze, 4);
+    polar_dot(&s, (head + 1) & 255, R_RING, blaze, 3);
+}

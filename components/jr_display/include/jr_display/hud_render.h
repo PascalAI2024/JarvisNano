@@ -105,6 +105,24 @@ void hud_tick(hud_t *h, uint32_t now_ms);
  * (nrows * HUD_W uint16 pixels). Render-task only. */
 void hud_render_rows(hud_t *h, uint16_t *dst, int y0, int nrows);
 
+/* ---- Overlay mode -------------------------------------------------------
+ * Composite a single procedural element OVER an already-rendered strip,
+ * instead of taking over the whole frame. This is how the JarvisNano OS design
+ * lands incrementally on top of the existing baked-EAF faces: the emote engine
+ * still draws the face, and these draw the round-native furniture on top.
+ *
+ * Same strip contract as hud_render_rows: dst holds rows [y0, y0+nrows) of a
+ * full HUD_W-wide frame, and only those rows are touched. Stateless — the
+ * animation phase comes from now_ms — so any task may call them, and they are
+ * safe to invoke directly from the panel flush path.
+ */
+
+/* STATE-03: the "thinking" orbital spinner. A dim track ring at r=150 with a
+ * cyan comet orbiting it (~2.6 s/rev) and a ~1.1 rad trailing tail, matching
+ * docs/prototype/jarvisnano-os.html. Draw it while the agent is THINKING. */
+void hud_overlay_thinking(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
+                          bool swap_bytes);
+
 #ifdef __cplusplus
 }
 #endif
