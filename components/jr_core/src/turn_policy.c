@@ -14,9 +14,12 @@
  */
 #include "jr_core/turn_policy.h"
 
-/* A tiny non-zero floor so a dead-silent synthetic bed never yields a
- * zero-valued onset threshold (any energy would falsely commit). */
-#define JR_TP_MIN_FLOOR 1.0f
+/* Hardware-calibrated lower bound from the proven v4 Waveshare path. The
+ * post-AEC quiet bed can read in the low teens; treating that as the entire
+ * room floor makes ordinary codec noise clear a 2.2x onset gate and opens a
+ * phantom turn. A floor of 40 keeps onset at ~88 RMS while the EMA remains
+ * free to adapt upward in louder rooms. */
+#define JR_TP_MIN_FLOOR 40.0f
 
 void jr_turn_policy_init(jr_turn_policy_t *p)
 {
@@ -26,14 +29,27 @@ void jr_turn_policy_init(jr_turn_policy_t *p)
     p->noise_floor = 0.0f;
     p->seeded = false;
 
-    /* Seeds (spec §6.3): SNR_ON ~= x2.2 (85 RMS speech at a ~40 floor),
-     * SNR_OFF ~= x1.2 (< onset — the hysteresis that carries inter-word pauses),
-     * BARGE_RATIO 10 %. The EMA weights make the floor slow-attack. */
-    p->snr_on = 2.2f;
+    /* v4-PROVEN FIXED calibration at a pinned 40 floor: onset 85 (snr_on 2.125),
+     * offset 48 (snr_off 1.2 — MUST stay above the floor so a genuine silence at
+     * the ambient floor crosses `rms < offset_thr` and ends the turn; collapsing
+     * it to the floor would leave turns unable to end). The EMA weights are
+     * ZEROED: the v5 adaptive floor was the regression — it re-seeded from one
+     * frame on every LISTENING entry and could climb toward the user's ~130
+     * speech level, pushing the onset gate up until the device stopped hearing
+     * you ("stuck listening, not responding"). A pinned floor is what worked a
+     * month ago; JR_TP_MIN_FLOOR is now the single knob if mic gain drifts. */
+    p->snr_on = 2.125f;
     p->snr_off = 1.2f;
-    p->floor_up = 0.05f;    /* slow rise: don't let noise chase speech up */
-    p->floor_down = 0.10f;  /* fall a touch faster toward a quieter room  */
-    p->barge_ratio = 0.10f;
+    p->floor_up = 0.0f;     /* pinned: no adaptive drift */
+    p->floor_down = 0.0f;
+    /* Barge proportional term = 30% of peak-held playback. v4 used 10% because
+     * its AEC left only ~2% residual; v5's AEC leaks ~28% on loud syllables
+     * (measured residual 598-924 at playback ~3300), so the gate must sit above
+     * that to avoid self-barge. Cost is v4's known limit: interrupting DURING
+     * the model's loudest moments needs a raised voice; normal-volume barge
+     * works in pauses and quieter passages (where the ratio term is low and the
+     * 250 floor governs). */
+    p->barge_ratio = 0.30f;
 
     p->in_speech = false;
     p->speech_run = 0;
@@ -70,22 +86,32 @@ jr_turn_decision_t jr_turn_policy_eval(jr_turn_policy_t *p,
                                        jr_tp_substate_t substate,
                                        jr_clock_t clk)
 {
-    jr_turn_decision_t d = { false, true, false, JR_TP_EV_NONE, 0.0f };
+    jr_turn_decision_t d = {
+        .is_speech = false,
+        .is_silence = true,
+        .is_barge = false,
+        .event = JR_TP_EV_NONE,
+        .rms = 0.0f,
+        .noise_floor = 0.0f,
+    };
     if (p == NULL) {
         return d;
     }
 
     const uint64_t now = jr_clock_now_ms(&clk);
     const float rms = jr_dsp_rms(capture, capture_len);
+    d.rms = rms;
     const bool speaking = (substate == JR_TP_SPEAKING);
 
     /* --- time-window bookkeeping --------------------------------------- */
     if (!p->started) {
         p->started = true;
         p->start_ts = now;
-        /* seed the floor to the first observed frame so it is in the right
-         * ballpark immediately (no long warm-up) — but see cold-start below. */
-        p->noise_floor = (rms > JR_TP_MIN_FLOOR) ? rms : JR_TP_MIN_FLOOR;
+        /* Pin the floor to the fixed minimum — do NOT seed from the first frame.
+         * A breath, echo tail, or word landing on the LISTENING-entry frame
+         * would bias the onset gate high and swallow the user's next turn. v4
+         * used constants here, not a live seed. */
+        p->noise_floor = JR_TP_MIN_FLOOR;
         p->seeded = true;
     }
     /* Guard arms on the rising edge of playback (cold-AEC convergence window). */
@@ -123,19 +149,28 @@ jr_turn_decision_t jr_turn_policy_eval(jr_turn_policy_t *p,
      * Runs the latch even under Speaking so state is consistent, but the L3
      * event is suppressed there (a bare SpeechStarted during Speaking is a
      * no-op — only the barge gate acts; spec §4.6 / §6.2). */
-    if (!p->in_speech) {
+    if (speaking) {
+        /* Speaking has its own echo-aware barge gate below. Carrying the normal
+         * speech latch through model playback lets residual echo pre-latch a
+         * phantom user turn, which then survives into Listening. */
+        p->in_speech = false;
+        p->speech_run = 0;
+        p->silence_run = 0;
+    } else if (!p->in_speech) {
         if (rms > onset_thr) {
             p->speech_run++;
-        } else {
-            p->speech_run = 0;
+        } else if (rms < offset_thr && p->speech_run > 0) {
+            /* Match the field-proven VAD: genuine silence decays the onset
+             * accumulator; the hysteresis dead-zone holds it across syllable
+             * and inter-word dips. Requiring eight strictly consecutive loud
+             * frames swallowed normal speech on the attached device. */
+            p->speech_run--;
         }
         if (p->speech_run >= JR_TP_MIN_SPEECH_FRAMES && !cold_start) {
             p->in_speech = true;
             p->speech_run = 0;      /* accumulator reset on commit (spec §6.1) */
             p->silence_run = 0;
-            if (!speaking) {
-                d.event = JR_TP_EV_SPEECH_STARTED;
-            }
+            d.event = JR_TP_EV_SPEECH_STARTED;
         }
     } else {
         if (rms < offset_thr) {
@@ -146,9 +181,7 @@ jr_turn_decision_t jr_turn_policy_eval(jr_turn_policy_t *p,
         if (p->silence_run >= JR_TP_HANGOVER_FRAMES) {
             p->in_speech = false;
             p->silence_run = 0;
-            if (!speaking) {
-                d.event = JR_TP_EV_SPEECH_ENDED;
-            }
+            d.event = JR_TP_EV_SPEECH_ENDED;
         }
     }
     d.is_speech = p->in_speech;
@@ -163,8 +196,16 @@ jr_turn_decision_t jr_turn_policy_eval(jr_turn_policy_t *p,
          * barge IS user speech, so it must clear the same onset bar. Tracking
          * floor*snr_on reproduces "80" adaptively without hugging the ambient
          * noise (which would self-trigger). */
-        const float floor_barge = floor * p->snr_on;
+        /* Barge floor is a dedicated absolute (JR_TP_BARGE_FLOOR), NOT the VAD
+         * onset — a barge is louder speech OVER playback and must clear the
+         * echo residual, which sits above the ambient onset gate. */
+        float floor_barge = floor * p->snr_on;
+        if (floor_barge < JR_TP_BARGE_FLOOR) {
+            floor_barge = JR_TP_BARGE_FLOOR;
+        }
         const float gate = (ratio_gate > floor_barge) ? ratio_gate : floor_barge;
+        d.barge_gate = gate;        /* observability: what the barge had to beat */
+        d.peak_play = held;
         const bool past_guard = (now > p->guard_deadline_ts) && !cold_start;
 
         if (past_guard && rms > gate) {

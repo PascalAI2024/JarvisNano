@@ -73,9 +73,23 @@ typedef struct {
     const char *model;              /* NULL => JR_GEMINI_MODEL_PRIMARY        */
     const char *system_instruction; /* NULL => omit systemInstruction         */
     const char *thinking_level;     /* NULL => "low"; e.g. "minimal"/"low"    */
+    const char *voice_name;         /* prebuilt voice (e.g. "Charon"); NULL => omit
+                                     * speechConfig.voiceConfig, model default   */
+    const char *language_code;      /* BCP-47 output-language anchor (e.g."en-US");
+                                     * NULL => omit. Stops native-audio language
+                                     * drift when paired with a strong system
+                                     * instruction.                              */
     jr_vad_mode_t vad_mode;         /* MANUAL => PTT (disabled+NO_INTERRUPTION)*/
     bool  google_search;            /* include the googleSearch tool          */
     bool  input_transcription;      /* include inputAudioTranscription {}      */
+    bool  output_transcription;     /* include outputAudioTranscription {} — the
+                                     * server then streams a text transcript of
+                                     * the model's own speech (proves output
+                                     * language + gives a readable log).         */
+    bool  proactive_audio;          /* proactivity.proactiveAudio: let the model
+                                     * stay silent on ambient/out-of-context
+                                     * audio instead of inventing a reply — kills
+                                     * phantom self-triggered turns.             */
     const jr_gemini_fn_decl_t *fns; /* functionDeclarations (may be NULL)      */
     size_t fn_count;
 } jr_gemini_config_t;
@@ -92,6 +106,8 @@ char *jr_gemini_build_activity_start(void);   /* {"realtimeInput":{"activityStar
 char *jr_gemini_build_activity_end(void);     /* {"realtimeInput":{"activityEnd":{}}}   */
 char *jr_gemini_build_audio_stream_end(void); /* auto-VAD ONLY — never in manual mode   */
 char *jr_gemini_build_text_turn(const char *text); /* clientContent user turn, turnComplete */
+char *jr_gemini_build_tool_response(const char *call_id, const char *name,
+                                    const char *response_json);
 
 /* Encode a PCM16 mono frame as a realtimeInput audio blob. `samples` is the
  * count of int16 samples; `rate` is the mimeType rate (JR_GEMINI_TX_RATE).
@@ -141,6 +157,7 @@ typedef struct {
 
     /* TOOL_CALL / TOOL_CANCEL */
     uint32_t    call_id;
+    const char *call_id_text;  /* original Gemini id; required in toolResponse */
     const char *tool_name;
     const char *tool_args;
 
@@ -190,7 +207,7 @@ void jr_gemini_parse_free(jr_gemini_parse_t *out);
 /* Max inbound WS text frame the pump reads at once (a 24 kHz audio chunk in
  * base64 is the large case). */
 #ifndef JR_GEMINI_RX_MAX
-#define JR_GEMINI_RX_MAX 16384
+#define JR_GEMINI_RX_MAX (96 * 1024)
 #endif
 
 typedef struct {
@@ -206,6 +223,8 @@ typedef struct {
     uint32_t consecutive_tx_failures; /* uplink: soft-fails in a row (not w-b) */
     uint32_t tx_would_block;          /* backpressure count (NOT a failure)    */
     uint32_t tx_drops;                /* frames dropped-newest under overflow  */
+    uint32_t rx_parse_errors;         /* complete frames rejected as bad JSON  */
+    uint32_t rx_alloc_failures;       /* persistent receive-buffer OOM count   */
     bool     socket_open;
 } jr_gemini_liveness_t;
 
@@ -224,6 +243,11 @@ typedef struct jr_gemini_client {
 
     jr_gemini_liveness_t live;
 
+    /* Persistent receive scratch. Allocated lazily so the 96 KiB maximum lives
+     * in PSRAM through malloc on device, never on the owner task's stack. */
+    char   *rx_buf;
+    size_t  rx_cap;
+
     /* optional injected monitors this transport feeds (may be NULL) */
     jr_keepalive_monitor_t   *keepalive;
     jr_dead_uplink_monitor_t *dead_uplink;
@@ -237,6 +261,10 @@ typedef struct jr_gemini_client {
  * (its string pointers must outlive the client). */
 void jr_gemini_client_init(jr_gemini_client_t *c, jr_ws_transport_t ws,
                            jr_clock_t clk, const jr_gemini_config_t *cfg);
+
+/* Release persistent client scratch. Device firmware keeps one client for the
+ * process lifetime; host tests and short-lived clients should call this. */
+void jr_gemini_client_deinit(jr_gemini_client_t *c);
 
 /* Wire the injected monitors this transport feeds (optional). */
 void jr_gemini_client_set_monitors(jr_gemini_client_t *c,
@@ -263,6 +291,11 @@ jr_err_t jr_gemini_send_frame(jr_gemini_client_t *c, const char *json, size_t le
 /* Try to drain buffered frames onto a freed socket (partial-write aware). Call
  * from the owner's pump. Returns JR_OK / JR_ERR_WOULD_BLOCK / JR_ERR_CLOSED. */
 jr_err_t jr_gemini_flush(jr_gemini_client_t *c);
+
+/* Drop any buffered outbound frames at a session boundary. A reconnect must
+ * begin with Setup as its first frame; carrying audio/control from the dead
+ * socket into the new one corrupts the Gemini protocol ordering. */
+void jr_gemini_reset_tx(jr_gemini_client_t *c);
 
 /* Pump one inbound frame (if any): recv -> parse -> emit events + liveness tick.
  * Returns true if a frame was processed. */

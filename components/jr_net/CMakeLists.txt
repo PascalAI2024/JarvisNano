@@ -1,4 +1,4 @@
-# jr_net — L0 Wi-Fi station + NVS "app" config adapter.
+# jr_net — L0 bounded Wi-Fi/APSTA + typed NVS "app" config adapter.
 #
 # The device-side network/persistence bring-up the composition root uses before
 # it can build the Gemini endpoint URL. Credentials are read from NVS at runtime
@@ -12,4 +12,5 @@ idf_component_register(
         esp_netif
         esp_event
         nvs_flash
+        mbedtls
 )

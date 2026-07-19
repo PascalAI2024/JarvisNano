@@ -46,9 +46,23 @@ extern "C" {
 #define JR_TP_FRAME_MS          32u     /* 512-sample @ 16 kHz esp-sr AEC frame  */
 #define JR_TP_PEAK_FRAMES       4       /* barge peak-hold = 4 frames / 128 ms   */
 #define JR_TP_MIN_SPEECH_FRAMES 8       /* ~240-256 ms min-speech onset          */
-#define JR_TP_HANGOVER_FRAMES   8       /* ~256 ms end-of-turn hangover          */
-#define JR_TP_BARGE_LATCH       2       /* BARGE_LATCH_FRAMES                    */
-#define JR_TP_BARGE_GUARD_MS    500u    /* guard after playback starts (cold AEC)*/
+#define JR_TP_HANGOVER_FRAMES   22      /* ~704 ms field-tuned end-turn hangover */
+/* 4 frames (128 ms) sustained over-threshold to fire a barge. v4 used 2, but
+ * v5's AEC throws brief residual spikes (onset re-convergence, loud syllables)
+ * that a 2-frame latch caught as false self-barges; real user talk-over is
+ * easily >128 ms, so 4 filters the transients without losing genuine barges. */
+#define JR_TP_BARGE_LATCH       4
+/* Absolute barge floor (post-6x-gain RMS). The VAD onset (floor*snr_on=85) is
+ * too low for barge: between audio chunks the ratio term decays and the ~150
+ * residual echo cleared 85 and self-barged. v4 used a dedicated ~180 floor over
+ * a 24-162 residual; v5's residual is ~117-151, so 250 sits above it and below
+ * the user's ~400-800 talk-over. The gate is max(ratio*peak_playback, this). */
+#define JR_TP_BARGE_FLOOR       250.0f
+/* v4's 500 ms guard after playback starts (covers the mic-gain-drop +
+ * cold-AEC onset spike). Longer hurts responsiveness — you couldn't interrupt
+ * in the first second — so transient spikes past this window are filtered by
+ * the 4-frame latch instead. */
+#define JR_TP_BARGE_GUARD_MS    500u
 #define JR_TP_COLD_START_MS     500u    /* first ~500 ms: floor unconverged      */
 
 /* Substate the policy needs to know (subset of the L3 phase). Speaking flips on
@@ -75,7 +89,10 @@ typedef struct {
     bool          is_silence;  /* == !is_speech                                   */
     bool          is_barge;    /* adaptive gate crossed during Speaking           */
     jr_tp_event_t event;       /* the edge event for L3, or JR_TP_EV_NONE         */
+    float         rms;         /* capture RMS used for this decision               */
     float         noise_floor; /* the tracked floor at this frame (observability) */
+    float         barge_gate;  /* effective barge gate this frame (0 when not Speaking) */
+    float         peak_play;   /* peak-held playback ref driving the gate         */
 } jr_turn_decision_t;
 
 typedef struct {

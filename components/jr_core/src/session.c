@@ -30,8 +30,8 @@
 
 /* Enforce the contract counts at compile time (spec §8). */
 _Static_assert(JR_ST__COUNT == 10, "8 states, Live x3 substates -> 10 configs");
-_Static_assert(JR_EV__COUNT == 21, "21 typed events");
-_Static_assert(JR_CMD__COUNT == 26, "26 typed commands");
+_Static_assert(JR_EV__COUNT == 22, "22 typed events");
+_Static_assert(JR_CMD__COUNT == 27, "27 typed commands");
 
 /* ---------------------- command builders (readable rows) ----------------- */
 
@@ -97,15 +97,27 @@ static jr_command_t mk_dispatch(const jr_event_t *e, uint32_t gen)
 {
     jr_command_t c = mk(JR_CMD_DISPATCH_TOOL_CALL);
     c.call_id = e->call_id;
+    c.call_id_text = e->call_id_text;
     c.tool_name = e->tool_name;
     c.tool_args = e->tool_args;
     c.session_gen = gen;
     return c;
 }
-static jr_command_t mk_cancel_tool(uint32_t call_id)
+static jr_command_t mk_tool_response(const jr_event_t *e)
+{
+    jr_command_t c = mk(JR_CMD_SEND_TOOL_RESPONSE);
+    c.call_id = e->call_id;
+    c.call_id_text = e->call_id_text;
+    c.tool_name = e->tool_name;
+    c.tool_response = e->tool_response;
+    c.session_gen = e->session_gen;
+    return c;
+}
+static jr_command_t mk_cancel_tool(const jr_event_t *e)
 {
     jr_command_t c = mk(JR_CMD_CANCEL_TOOL_CALL);
-    c.call_id = call_id;
+    c.call_id = e->call_id;
+    c.call_id_text = e->call_id_text;
     return c;
 }
 static jr_command_t mk_diag(const char *reason, jr_event_kind_t et, jr_error_kind_t ek)
@@ -425,11 +437,21 @@ jr_outcome_t jr_transition(jr_session_t s, jr_event_t e, jr_clock_t clk)
         case JR_EV_SERVER_TOOL_CALL:
             if (e.is_cancellation) {
                 o = noop(s);
-                push(&o.cmds, mk_cancel_tool(e.call_id));
+                push(&o.cmds, mk_cancel_tool(&e));
             } else {
                 s.phase = JR_ST_THINKING;
                 o = noop(s);
                 push(&o.cmds, mk_dispatch(&e, s.session_gen));
+                push(&o.cmds, mk(JR_CMD_DISARM_NO_REPLY_WATCHDOG));
+            }
+            break;
+        case JR_EV_TOOL_RESULT_READY:
+            if (jr_session_gen_is_stale(s.session_gen, e.session_gen)) {
+                o = noop(s);
+            } else {
+                s.phase = JR_ST_THINKING;
+                o = noop(s);
+                push(&o.cmds, mk_tool_response(&e));
                 push(&o.cmds, mk_arm_noreply(JR_NOREPLY_MS));
             }
             break;
@@ -499,10 +521,18 @@ jr_outcome_t jr_transition(jr_session_t s, jr_event_t e, jr_clock_t clk)
         case JR_EV_SERVER_TOOL_CALL:
             o = noop(s);
             if (e.is_cancellation) {
-                push(&o.cmds, mk_cancel_tool(e.call_id));
+                push(&o.cmds, mk_cancel_tool(&e));
+                push(&o.cmds, mk_arm_noreply(JR_NOREPLY_MS));
             } else {
                 push(&o.cmds, mk_dispatch(&e, s.session_gen));
-                push(&o.cmds, mk_arm_noreply(JR_NOREPLY_MS));  /* refresh        */
+                push(&o.cmds, mk(JR_CMD_DISARM_NO_REPLY_WATCHDOG));
+            }
+            break;
+        case JR_EV_TOOL_RESULT_READY:
+            o = noop(s);
+            if (!jr_session_gen_is_stale(s.session_gen, e.session_gen)) {
+                push(&o.cmds, mk_tool_response(&e));
+                push(&o.cmds, mk_arm_noreply(JR_NOREPLY_MS));
             }
             break;
         case JR_EV_SERVER_TURN_COMPLETE:     /* text-only / empty turn          */
@@ -580,9 +610,15 @@ jr_outcome_t jr_transition(jr_session_t s, jr_event_t e, jr_clock_t clk)
         case JR_EV_SERVER_TOOL_CALL:
             o = noop(s);                     /* audio continues                 */
             if (e.is_cancellation) {
-                push(&o.cmds, mk_cancel_tool(e.call_id));
+                push(&o.cmds, mk_cancel_tool(&e));
             } else {
                 push(&o.cmds, mk_dispatch(&e, s.session_gen));
+            }
+            break;
+        case JR_EV_TOOL_RESULT_READY:
+            o = noop(s);
+            if (!jr_session_gen_is_stale(s.session_gen, e.session_gen)) {
+                push(&o.cmds, mk_tool_response(&e));
             }
             break;
         case JR_EV_HEARTBEAT:
@@ -746,6 +782,7 @@ const char *jr_event_name(jr_event_kind_t event)
     case JR_EV_SERVER_INTERRUPTED:   return "ServerInterrupted";
     case JR_EV_SERVER_TURN_COMPLETE: return "ServerTurnComplete";
     case JR_EV_SERVER_TOOL_CALL:     return "ServerToolCall";
+    case JR_EV_TOOL_RESULT_READY:    return "ToolResultReady";
     case JR_EV_SERVER_GO_AWAY:       return "ServerGoAway";
     case JR_EV_SERVER_ERROR:         return "ServerError";
     case JR_EV_TRANSPORT_CLOSED:     return "TransportClosed";
@@ -775,6 +812,7 @@ const char *jr_cmd_name(jr_cmd_kind_t cmd)
     case JR_CMD_SEND_AUDIO_STREAM_END:    return "SendAudioStreamEnd";
     case JR_CMD_SEND_TEXT:                return "SendText";
     case JR_CMD_SEND_AUDIO:               return "SendAudio";
+    case JR_CMD_SEND_TOOL_RESPONSE:       return "SendToolResponse";
     case JR_CMD_CLOSE_TRANSPORT:          return "CloseTransport";
     case JR_CMD_START_CAPTURE:            return "StartCapture";
     case JR_CMD_PAUSE_CAPTURE:            return "PauseCapture";

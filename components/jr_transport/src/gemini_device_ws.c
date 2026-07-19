@@ -26,16 +26,21 @@
 #include "esp_heap_caps.h"
 #include "esp_websocket_client.h"
 #include "esp_crt_bundle.h"
+#include "jr_transport/gemini_live.h"
 
 static const char *TAG = "jr_ws";
 
 /* Bound one inbound WS message; a 24 kHz base64 audio chunk is the large case.
  * Frames whose total payload exceeds this are dropped (bounded memory). */
-#define JR_WS_DEV_RX_MAX     (96 * 1024)
+#define JR_WS_DEV_RX_MAX     JR_GEMINI_RX_MAX
 #define JR_WS_DEV_RING_DEPTH 24
 /* Send timeout: short enough to never stall the pump, long enough that a small
  * RTT spike returns 0 (would-block, buffered) instead of a partial write. */
-#define JR_WS_DEV_SEND_TO_MS 30
+/* Lock-acquire patience for a WS send. Raised 30->60: under server-VAD the tx
+ * (mic uplink) contends with heavy rx audio for the single ws-client lock;
+ * 30 ms (3 ticks) lost the race constantly and floods "Could not lock
+ * ws-client". 60 ms still bounds the voice-loop stall below the 128 ms batch. */
+#define JR_WS_DEV_SEND_TO_MS 60
 
 /* A reassembled inbound frame handed to recv_frame() (heap, PSRAM-first). */
 typedef struct {
@@ -153,8 +158,10 @@ static void ws_event_handler(void *arg, esp_event_base_t base,
         ESP_LOGI(TAG, "ws connected");
         break;
     case WEBSOCKET_EVENT_DATA:
-        if (ev != NULL && (ev->op_code == 0x1 /*TEXT*/ || ev->op_code == 0x2 /*BIN*/)) {
+        if (ev != NULL) {
             s_ws.last_rx_ms = now_ms();
+        }
+        if (ev != NULL && (ev->op_code == 0x1 /*TEXT*/ || ev->op_code == 0x2 /*BIN*/)) {
             on_data(ev);
         }
         break;

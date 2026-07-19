@@ -425,6 +425,7 @@ static void test_T14_toolCall_generation_tagged(void)
     s.session_gen = 7;
     jr_event_t e = jr_event(JR_EV_SERVER_TOOL_CALL);
     e.call_id = 42;
+    e.call_id_text = "call_42";
     e.tool_name = "get_weather";
     e.tool_args = "{}";
     jr_outcome_t r = step(s, e);
@@ -434,6 +435,34 @@ static void test_T14_toolCall_generation_tagged(void)
     TEST_ASSERT_NOT_NULL(d);
     TEST_ASSERT_EQUAL_UINT32(7, d->session_gen);
     TEST_ASSERT_EQUAL_UINT32(42, d->call_id);
+    TEST_ASSERT_EQUAL_STRING("call_42", d->call_id_text);
+    TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_DISARM_NO_REPLY_WATCHDOG));
+    TEST_ASSERT_FALSE(has_cmd(&r.cmds, JR_CMD_ARM_NO_REPLY_WATCHDOG));
+}
+
+static void test_tool_result_rearms_reply_watchdog(void)
+{
+    jr_session_t s = sess_at(JR_ST_THINKING);
+    s.session_gen = 7;
+    jr_event_t e = jr_event(JR_EV_TOOL_RESULT_READY);
+    e.call_id = 42;
+    e.call_id_text = "call_42";
+    e.tool_name = "current_time";
+    e.tool_response = "{\"result\":\"12:34\"}";
+    e.session_gen = 7;
+    jr_outcome_t r = step(s, e);
+
+    const jr_command_t *send = find_cmd(&r.cmds, JR_CMD_SEND_TOOL_RESPONSE);
+    TEST_ASSERT_NOT_NULL(send);
+    TEST_ASSERT_EQUAL_STRING("call_42", send->call_id_text);
+    TEST_ASSERT_EQUAL_STRING("current_time", send->tool_name);
+    TEST_ASSERT_EQUAL_STRING("{\"result\":\"12:34\"}", send->tool_response);
+    TEST_ASSERT_TRUE(has_cmd(&r.cmds, JR_CMD_ARM_NO_REPLY_WATCHDOG));
+
+    e.session_gen = 6;
+    r = step(s, e);
+    TEST_ASSERT_FALSE(has_cmd(&r.cmds, JR_CMD_SEND_TOOL_RESPONSE));
+    TEST_ASSERT_FALSE(has_cmd(&r.cmds, JR_CMD_ARM_NO_REPLY_WATCHDOG));
 }
 
 /* T15 — toolCallCancellation cancels by id; a result stamped with a stale gen
@@ -445,11 +474,13 @@ static void test_T15_toolCancel_and_stale_gen_drop(void)
     jr_event_t cancel = jr_event(JR_EV_SERVER_TOOL_CALL);
     cancel.is_cancellation = true;
     cancel.call_id = 42;
+    cancel.call_id_text = "call_42";
     jr_outcome_t r = step(s, cancel);
 
     const jr_command_t *c = find_cmd(&r.cmds, JR_CMD_CANCEL_TOOL_CALL);
     TEST_ASSERT_NOT_NULL(c);
     TEST_ASSERT_EQUAL_UINT32(42, c->call_id);
+    TEST_ASSERT_EQUAL_STRING("call_42", c->call_id_text);
 
     /* a result tagged gen = N-1 arrives after the machine is at gen N -> stale */
     TEST_ASSERT_TRUE(jr_session_gen_is_stale(7, 6));
@@ -608,6 +639,26 @@ static void test_T20_talkover_barge_prompt(void)
     TEST_ASSERT_TRUE((barge_frame - K) <= 10);          /* within 300 ms (10 fr) */
 }
 
+static void test_speaking_echo_never_primes_next_user_turn(void)
+{
+    jr_turn_policy_t p;
+    jr_turn_policy_init(&p);
+    tp_warm(&p, 40.0f);
+
+    for (int i = 0; i < 30; ++i) {
+        jr_turn_decision_t d = tp_frame(&p, 700.0f, 8000.0f, true,
+                                        JR_TP_SPEAKING);
+        TEST_ASSERT_NOT_EQUAL(JR_TP_EV_SPEECH_STARTED, d.event);
+        TEST_ASSERT_FALSE(p.in_speech);
+    }
+
+    for (int i = 0; i < 30; ++i) {
+        jr_turn_decision_t d = tp_frame(&p, 60.0f, 0, false,
+                                        JR_TP_LISTENING);
+        TEST_ASSERT_EQUAL_INT(JR_TP_EV_NONE, d.event);
+    }
+}
+
 /* T21 — the silence threshold is the subtle killer. A speech utterance with
  * inter-word pauses at ~93-117 RMS (ABOVE the offset threshold) then a true
  * end-of-turn pause at the floor: hysteresis holds through the inter-word
@@ -626,55 +677,69 @@ static void test_T21_silence_threshold_regression(void)
     for (int k = 0; k < 10; ++k, ++i) { jr_turn_decision_t d=tp_frame(&p,120,0,false,JR_TP_LISTENING); if(d.event==JR_TP_EV_SPEECH_STARTED) starts++; if(d.event==JR_TP_EV_SPEECH_ENDED){ends++;end_frame=i;} }
     /* true end-of-turn pause @40 (< offset 48) held past hangover */
     int pause_start = i;
-    for (int k = 0; k < 15; ++k, ++i) { jr_turn_decision_t d=tp_frame(&p,40,0,false,JR_TP_LISTENING); if(d.event==JR_TP_EV_SPEECH_ENDED){ends++;end_frame=i;} if(d.event==JR_TP_EV_SPEECH_STARTED) starts++; }
+    for (int k = 0; k < 30; ++k, ++i) { jr_turn_decision_t d=tp_frame(&p,40,0,false,JR_TP_LISTENING); if(d.event==JR_TP_EV_SPEECH_ENDED){ends++;end_frame=i;} if(d.event==JR_TP_EV_SPEECH_STARTED) starts++; }
 
     TEST_ASSERT_EQUAL_INT(1, starts);                 /* one turn opened         */
     TEST_ASSERT_EQUAL_INT(1, ends);                   /* committed exactly once  */
     TEST_ASSERT_TRUE(end_frame >= pause_start);       /* at the REAL pause only  */
 }
 
-/* T22 — the noise floor ADAPTS across rooms: a fixed 85/40 fails the loud-floor
- * case (the ADR's core claim). Same-shaped utterance at a quiet (~40) and a
- * loud (~130) floor both fire their turn transitions; a burst that a fixed 85
- * would (wrongly) latch is correctly rejected at the loud floor; and the
- * tracker climbs across a rising-noise sweep. */
-static void test_T22_vad_adapts_across_rooms(void)
+/* T22 — the noise floor is PINNED (v4-proven fixed calibration), NOT adaptive.
+ * The v5 adaptive floor was the regression: fed rising room noise it climbed
+ * toward the user's speech level, driving the onset gate up until speech no
+ * longer cleared it ("stuck listening, not responding"). Assert the floor holds
+ * at 40 through a sustained loud sweep, so onset stays ~85 and a normal word
+ * always commits — the behavior that worked a month ago. */
+static void test_T22_floor_is_pinned_not_adaptive(void)
 {
-    /* quiet room: floor ~40, onset ~88. A 120-RMS word commits + a 40 pause ends. */
+    /* baseline: floor 40, onset ~85. A 120-RMS word commits + a 40 pause ends. */
     jr_turn_policy_t q;
     jr_turn_policy_init(&q);
     tp_warm(&q, 40.0f);
     int q_starts = 0, q_ends = 0;
     for (int k = 0; k < 12; ++k) if (tp_frame(&q,120,0,false,JR_TP_LISTENING).event==JR_TP_EV_SPEECH_STARTED) q_starts++;
-    for (int k = 0; k < 12; ++k) if (tp_frame(&q,40, 0,false,JR_TP_LISTENING).event==JR_TP_EV_SPEECH_ENDED)   q_ends++;
+    for (int k = 0; k < 30; ++k) if (tp_frame(&q,40, 0,false,JR_TP_LISTENING).event==JR_TP_EV_SPEECH_ENDED)   q_ends++;
     TEST_ASSERT_EQUAL_INT(1, q_starts);
     TEST_ASSERT_EQUAL_INT(1, q_ends);
 
-    /* loud room: floor ~130, onset ~286. The SAME 120 burst (which a fixed 85
-     * would latch, 120>85) must NOT commit; a scaled 400 burst does. */
-    jr_turn_policy_t h;
-    jr_turn_policy_init(&h);
-    tp_warm(&h, 130.0f);
-    int h_false = 0;
-    for (int k = 0; k < 12; ++k) if (tp_frame(&h,120,0,false,JR_TP_LISTENING).event==JR_TP_EV_SPEECH_STARTED) h_false++;
-    TEST_ASSERT_EQUAL_INT(0, h_false);            /* adaptive rejects; fixed-85 would fire */
-    TEST_ASSERT_TRUE(120.0f > 85.0f);             /* the fixed-threshold trap, made explicit */
-    int h_starts = 0;
-    for (int k = 0; k < 12; ++k) if (tp_frame(&h,400,0,false,JR_TP_LISTENING).event==JR_TP_EV_SPEECH_STARTED) h_starts++;
-    TEST_ASSERT_EQUAL_INT(1, h_starts);           /* a properly-scaled word commits */
-
-    /* rising-noise sweep: floor climbs from ~40 toward ~130. */
+    /* Anti-"stuck-listening": a sustained rising loud sweep must NOT drift the
+     * floor — it stays pinned at 40 (the v5 adaptive floor would have climbed
+     * toward ~130 and swallowed the next word). */
     jr_turn_policy_t s;
     jr_turn_policy_init(&s);
     tp_warm(&s, 40.0f);
-    jr_turn_decision_t d0 = tp_frame(&s, 40.0f, 0, false, JR_TP_LISTENING);
-    TEST_ASSERT_FLOAT_WITHIN(6.0f, 40.0f, d0.noise_floor);      /* started at ~40 */
-    float lvl = 40.0f;
-    for (int k = 0; k < 60; ++k) { lvl += 1.5f; tp_frame(&s, lvl, 0, false, JR_TP_LISTENING); }
     jr_turn_decision_t dz;
     memset(&dz, 0, sizeof dz);
-    for (int k = 0; k < 90; ++k) { dz = tp_frame(&s, 130.0f, 0, false, JR_TP_LISTENING); }
-    TEST_ASSERT_FLOAT_WITHIN(12.0f, 130.0f, dz.noise_floor);    /* tracked up to ~130 */
+    float lvl = 40.0f;
+    for (int k = 0; k < 120; ++k) { lvl += 1.5f; dz = tp_frame(&s, lvl, 0, false, JR_TP_LISTENING); }
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 40.0f, dz.noise_floor);      /* pinned, did NOT track up */
+}
+
+/* The attached Waveshare's post-AEC idle bed is commonly in the low teens.
+ * It must not become a ~29-RMS speech gate (13 * 2.2), which caused unattended
+ * phantom turns on hardware. The calibrated floor stays at 40, while real
+ * speech above the resulting ~88-RMS threshold still commits normally. */
+static void test_quiet_hardware_floor_does_not_false_start(void)
+{
+    jr_turn_policy_t p;
+    jr_turn_policy_init(&p);
+    int false_starts = 0;
+    jr_turn_decision_t quiet = {0};
+    for (int i = 0; i < 40; ++i) {
+        quiet = tp_frame(&p, 13.0f, 0, false, JR_TP_LISTENING);
+        if (quiet.event == JR_TP_EV_SPEECH_STARTED) { false_starts++; }
+    }
+    TEST_ASSERT_EQUAL_INT(0, false_starts);
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 40.0f, quiet.noise_floor);
+
+    int real_starts = 0;
+    for (int i = 0; i < 12; ++i) {
+        if (tp_frame(&p, 110.0f, 0, false, JR_TP_LISTENING).event ==
+            JR_TP_EV_SPEECH_STARTED) {
+            real_starts++;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(1, real_starts);
 }
 
 /* T23 — cold-start guard: while the floor is unconverged (first ~500 ms), no
@@ -1153,14 +1218,17 @@ int main(void)
     RUN_TEST(test_T12_interrupted_without_generationComplete);
     RUN_TEST(test_T13_interrupted_in_speaking);
     RUN_TEST(test_T14_toolCall_generation_tagged);
+    RUN_TEST(test_tool_result_rearms_reply_watchdog);
     RUN_TEST(test_T15_toolCancel_and_stale_gen_drop);
     RUN_TEST(test_T16_goAway_resumes_with_token);
     RUN_TEST(test_T17_serverChunk_before_boundary);
     RUN_TEST(test_T18_split_brain_dead_uplink);
     RUN_TEST(test_T19_zero_self_barge);
     RUN_TEST(test_T20_talkover_barge_prompt);
+    RUN_TEST(test_speaking_echo_never_primes_next_user_turn);
     RUN_TEST(test_T21_silence_threshold_regression);
-    RUN_TEST(test_T22_vad_adapts_across_rooms);
+    RUN_TEST(test_T22_floor_is_pinned_not_adaptive);
+    RUN_TEST(test_quiet_hardware_floor_does_not_false_start);
     RUN_TEST(test_T23_cold_start_guard);
     RUN_TEST(test_T24_backpressure_bounded_drop_newest);
     RUN_TEST(test_T25_wouldblock_is_not_death);

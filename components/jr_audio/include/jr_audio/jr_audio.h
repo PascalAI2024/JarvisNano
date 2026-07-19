@@ -23,6 +23,7 @@
 #define JR_AUDIO_JR_AUDIO_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -49,6 +50,12 @@ jr_audio_sink_t   jr_audio_sink(void);
  * gate reads this). 0 until the first AEC frame runs. */
 uint32_t jr_audio_last_aec_us(void);
 
+/* True while decoded PCM is queued, a codec write is in flight, or the final
+ * DMA/physical-output tail is still expected to be audible. The composition
+ * root uses this to defer Gemini's terminal marker until playback is really
+ * drained, preventing the speaker tail from reopening a phantom user turn. */
+bool jr_audio_playback_pending(void);
+
 /* ---- composition-root controls beyond the two port surfaces ---- */
 
 /* Clear the fast-kill mute (maps JR_CMD_UNMUTE_DAC). mute is asserted via the
@@ -62,6 +69,59 @@ void jr_audio_flush_playback(void);
  * are ES7210 per-channel PGA (chip-mic indices); out_vol is the ES8311 0..100
  * volume. */
 void jr_audio_set_gains(int mic_db, int ref_db, int out_vol);
+
+/* Runtime tune for the SPEAKING mic gain (the low PGA used while the model
+ * speaks so the echo stays unclipped for the AEC). < 0 leaves it unchanged. */
+void jr_audio_set_speak_mic_db(int speak_db);
+
+/* Select the capture PGA state. The app calls this on phase transitions:
+ * true while the model is SPEAKING (low mic gain -> unclipped echo -> the AEC
+ * cancels it, ~180 residual instead of a railed ~9000), false otherwise (full
+ * mic gain for the user's own voice). This is v4's barge-enabling fix. */
+void jr_audio_set_speaking(bool speaking);
+
+/* Rolling two-second diagnostics taps. They are fed at the existing single
+ * codec read/write seams—never by a competing I2S owner. Diagnostic producers
+ * are best-effort and never wait for a reader, so an export cannot stall the
+ * realtime audio path. MIC_CLEAN is the exact gained 16 kHz uplink PCM;
+ * PLAYBACK is PCM successfully accepted by the codec write seam (after any
+ * codec-dev software-volume mutation, but before analogue gain/speaker).
+ *
+ * jr_audio_diag_copy() requires capacity_samples >= available_samples at copy
+ * time. Allocate info.capacity_samples to avoid a producer racing the export.
+ * On ESP_ERR_INVALID_SIZE it copies nothing and returns the current requirement
+ * through out_info. Successful copies are chronological (oldest to newest). */
+typedef enum {
+    JR_AUDIO_TAP_MIC_CLEAN = 0,
+    JR_AUDIO_TAP_MIC_RAW,
+    JR_AUDIO_TAP_REFERENCE,
+    JR_AUDIO_TAP_PLAYBACK,
+    JR_AUDIO_TAP_COUNT,
+} jr_audio_tap_kind_t;
+
+typedef struct {
+    uint32_t sample_rate;
+    uint32_t available_samples;
+    uint32_t capacity_samples;
+    uint64_t total_samples;
+    int16_t peak;
+    float rms;
+    uint32_t clipped_samples;
+} jr_audio_tap_info_t;
+
+void jr_audio_diag_reset(void);
+esp_err_t jr_audio_diag_get_info(jr_audio_tap_kind_t kind,
+                                 jr_audio_tap_info_t *out_info);
+esp_err_t jr_audio_diag_copy(jr_audio_tap_kind_t kind, int16_t *dst,
+                             size_t capacity_samples,
+                             jr_audio_tap_info_t *out_info);
+
+/* Queue a bounded low-volume 400–2000 Hz linear chirp through the real playback
+ * ring. duration_ms is clamped to 100..1500 and level_percent to 1..30. The
+ * call is all-or-nothing, rejects active playback with ESP_ERR_INVALID_STATE,
+ * and unmutes the DAC only after the complete chirp has been queued. */
+esp_err_t jr_audio_diag_play_chirp(uint32_t duration_ms,
+                                   uint8_t level_percent);
 
 #ifdef __cplusplus
 }

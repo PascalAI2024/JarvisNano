@@ -144,6 +144,23 @@ char *jr_gemini_build_setup(const jr_gemini_config_t *cfg)
     cJSON_AddStringToObject(tcfg, "thinkingLevel",
                             (cfg && cfg->thinking_level) ? cfg->thinking_level : "low");
 
+    /* speechConfig — output-language anchor + fixed voice. Without a
+     * languageCode the native-audio model drifts into arbitrary languages
+     * (observed on hardware); the strong systemInstruction is the primary
+     * lever, this is the belt. languageCode is a sibling of voiceConfig inside
+     * generationConfig.speechConfig. Emitted only when configured. */
+    if (cfg && (cfg->voice_name || cfg->language_code)) {
+        cJSON *sc = cJSON_AddObjectToObject(gc, "speechConfig");
+        if (cfg->language_code) {
+            cJSON_AddStringToObject(sc, "languageCode", cfg->language_code);
+        }
+        if (cfg->voice_name) {
+            cJSON *vc = cJSON_AddObjectToObject(sc, "voiceConfig");
+            cJSON *pv = cJSON_AddObjectToObject(vc, "prebuiltVoiceConfig");
+            cJSON_AddStringToObject(pv, "voiceName", cfg->voice_name);
+        }
+    }
+
     /* realtimeInputConfig — manual PTT vs server VAD. Manual sets
      * automaticActivityDetection.disabled=true + activityHandling=NO_INTERRUPTION
      * so a client activityStart can't self-cancel the model's reply. */
@@ -190,6 +207,18 @@ char *jr_gemini_build_setup(const jr_gemini_config_t *cfg)
     if (cfg && cfg->input_transcription) {
         cJSON_AddItemToObject(setup, "inputAudioTranscription", cJSON_CreateObject());
     }
+    if (cfg && cfg->output_transcription) {
+        cJSON_AddItemToObject(setup, "outputAudioTranscription", cJSON_CreateObject());
+    }
+
+    /* proactivity.proactiveAudio — let the model decline to answer ambient or
+     * out-of-context audio and stay silent when no real request was made.
+     * Directly suppresses the phantom self-triggered turns the device's own
+     * speech tail was provoking (setup sibling of generationConfig). */
+    if (cfg && cfg->proactive_audio) {
+        cJSON *pro = cJSON_AddObjectToObject(setup, "proactivity");
+        cJSON_AddBoolToObject(pro, "proactiveAudio", true);
+    }
 
     if (cfg && cfg->system_instruction) {
         cJSON *si = cJSON_AddObjectToObject(setup, "systemInstruction");
@@ -233,6 +262,32 @@ char *jr_gemini_build_text_turn(const char *text)
     cJSON_AddItemToArray(parts, part);
     cJSON_AddItemToArray(turns, turn);
     cJSON_AddBoolToObject(cc, "turnComplete", true);
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json;
+}
+
+char *jr_gemini_build_tool_response(const char *call_id, const char *name,
+                                    const char *response_json)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (!root) { return NULL; }
+    cJSON *tr = cJSON_AddObjectToObject(root, "toolResponse");
+    cJSON *responses = cJSON_AddArrayToObject(tr, "functionResponses");
+    cJSON *fr = cJSON_CreateObject();
+    cJSON_AddStringToObject(fr, "id", call_id ? call_id : "");
+    cJSON_AddStringToObject(fr, "name", name ? name : "");
+
+    cJSON *response = response_json ? cJSON_Parse(response_json) : NULL;
+    if (!cJSON_IsObject(response)) {
+        if (response) { cJSON_Delete(response); }
+        response = cJSON_CreateObject();
+        cJSON_AddStringToObject(response, "error",
+                                response_json ? response_json : "empty tool response");
+    }
+    cJSON_AddItemToObject(fr, "response", response);
+    cJSON_AddItemToArray(responses, fr);
+
     char *json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     return json;
@@ -386,6 +441,17 @@ bool jr_gemini_parse(const char *json, jr_gemini_parse_t *out)
         if (cJSON_IsTrue(intr)) {
             push_ev(out, JR_GEV_INTERRUPTED);
         }
+        /* outputAudioTranscription: a running text transcript of the model's
+         * own spoken audio. Surfaced as a TEXT event so the owner can log what
+         * JARVIS actually said (proof of output language). */
+        cJSON *otr = cJSON_GetObjectItemCaseSensitive(svc, "outputTranscription");
+        if (otr) {
+            cJSON *ot = cJSON_GetObjectItemCaseSensitive(otr, "text");
+            if (cJSON_IsString(ot) && ot->valuestring && ot->valuestring[0]) {
+                jr_gemini_event_t *e = push_ev(out, JR_GEV_TEXT);
+                if (e) { e->text = ot->valuestring; }
+            }
+        }
         cJSON *turn = cJSON_GetObjectItemCaseSensitive(svc, "modelTurn");
         if (turn) {
             cJSON *parts = cJSON_GetObjectItemCaseSensitive(turn, "parts");
@@ -398,6 +464,20 @@ bool jr_gemini_parse(const char *json, jr_gemini_parse_t *out)
                 }
                 cJSON *blob = obj_compat(part, "inlineData", "inline_data");
                 if (blob) { parse_audio_part(out, blob); }
+
+                /* Some Live API revisions wrap audio blobs in mediaChunks
+                 * instead of inlineData. Accept both the documented array
+                 * shape and the single-object shape, as the proven v4 parser
+                 * does, so a server-side envelope change cannot mute replies. */
+                cJSON *chunks = cJSON_GetObjectItemCaseSensitive(part, "mediaChunks");
+                if (cJSON_IsArray(chunks)) {
+                    cJSON *chunk = NULL;
+                    cJSON_ArrayForEach(chunk, chunks) {
+                        parse_audio_part(out, chunk);
+                    }
+                } else if (cJSON_IsObject(chunks)) {
+                    parse_audio_part(out, chunks);
+                }
             }
         }
         if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(svc, "turnComplete"))) {
@@ -441,6 +521,7 @@ bool jr_gemini_parse(const char *json, jr_gemini_parse_t *out)
             cJSON *args = cJSON_GetObjectItemCaseSensitive(fc, "args");
             if (cJSON_IsString(name)) { e->tool_name = name->valuestring; }
             const char *idstr = cJSON_IsString(id) ? id->valuestring : NULL;
+            e->call_id_text = idstr;
             e->call_id = fnv1a(idstr ? idstr : (e->tool_name ? e->tool_name : ""));
             if (args) { e->tool_args = cJSON_PrintUnformatted(args); } /* owned; freed in _free */
         }
@@ -457,7 +538,7 @@ bool jr_gemini_parse(const char *json, jr_gemini_parse_t *out)
             jr_gemini_event_t *e = push_ev(out, JR_GEV_TOOL_CANCEL);
             if (!e) { break; }
             if (cJSON_IsString(id)) {
-                e->tool_name = id->valuestring;
+                e->call_id_text = id->valuestring;
                 e->call_id = fnv1a(id->valuestring);
             }
         }
@@ -587,6 +668,17 @@ jr_err_t jr_gemini_flush(jr_gemini_client_t *c)
     return JR_OK;
 }
 
+void jr_gemini_reset_tx(jr_gemini_client_t *c)
+{
+    if (c == NULL) {
+        return;
+    }
+    c->head = 0;
+    c->tail = 0;
+    c->depth = 0;
+    c->live.consecutive_tx_failures = 0;
+}
+
 jr_err_t jr_gemini_send_frame(jr_gemini_client_t *c, const char *json, size_t len)
 {
     /* Drain anything buffered first so frame ORDER is preserved. */
@@ -660,12 +752,30 @@ static void emit_neutral(jr_gemini_client_t *c, const jr_gemini_event_t *ge)
 
 bool jr_gemini_pump_rx(jr_gemini_client_t *c)
 {
-    char buf[JR_GEMINI_RX_MAX];
-    int n = c->ws.recv_frame(c->ws.ctx, buf, sizeof(buf) - 1);
+#ifdef ESP_PLATFORM
+    if (c->rx_buf == NULL) {
+        c->rx_buf = (char *)malloc(JR_GEMINI_RX_MAX);
+        if (c->rx_buf == NULL) {
+            c->live.rx_alloc_failures++;
+            return false;
+        }
+        c->rx_cap = JR_GEMINI_RX_MAX;
+    }
+    char *rx_buf = c->rx_buf;
+    size_t rx_cap = c->rx_cap;
+#else
+    /* The host runner has a conventional multi-megabyte stack and benefits
+     * from allocation-free leak checks. Device builds use persistent heap/PSRAM
+     * scratch above so the FreeRTOS owner stack stays small. */
+    char host_rx_buf[JR_GEMINI_RX_MAX];
+    char *rx_buf = host_rx_buf;
+    size_t rx_cap = sizeof host_rx_buf;
+#endif
+    int n = c->ws.recv_frame(c->ws.ctx, rx_buf, rx_cap);
     if (n <= 0) {
         return false;
     }
-    buf[n] = '\0';
+    rx_buf[n] = '\0';
 
     /* liveness: ANY inbound frame (incl. heartbeat) re-arms the KeepaliveMonitor
      * — v4 discarded heartbeats; here they are authoritative (spec §5.2). The
@@ -678,12 +788,14 @@ bool jr_gemini_pump_rx(jr_gemini_client_t *c)
     }
 
     jr_gemini_parse_t pr;
-    if (jr_gemini_parse(buf, &pr)) {
+    if (jr_gemini_parse(rx_buf, &pr)) {
         for (size_t i = 0; i < pr.count; i++) {
             if (c->rich_cb) { c->rich_cb(c->rich_user, &pr.events[i]); }
             emit_neutral(c, &pr.events[i]);
         }
         jr_gemini_parse_free(&pr);
+    } else {
+        c->live.rx_parse_errors++;
     }
     return true;
 }
@@ -696,6 +808,16 @@ void jr_gemini_client_init(jr_gemini_client_t *c, jr_ws_transport_t ws,
     c->clk = clk;
     if (cfg) { c->cfg = *cfg; }
     c->live.socket_open = false;
+}
+
+void jr_gemini_client_deinit(jr_gemini_client_t *c)
+{
+    if (c == NULL) {
+        return;
+    }
+    free(c->rx_buf);
+    c->rx_buf = NULL;
+    c->rx_cap = 0;
 }
 
 void jr_gemini_client_set_monitors(jr_gemini_client_t *c,
@@ -794,6 +916,7 @@ static void rvc_close(void *ctx)
     jr_gemini_client_t *c = (jr_gemini_client_t *)ctx;
     c->ws.close(c->ws.ctx);
     c->live.socket_open = false;
+    jr_gemini_reset_tx(c);
 }
 
 jr_realtime_voice_client_t jr_gemini_client_as_rvc(jr_gemini_client_t *c)

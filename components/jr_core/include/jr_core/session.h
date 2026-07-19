@@ -14,8 +14,8 @@
  * This is the full Phase-1 CORE contract from
  * gigabrain/specs/phase1-core-state-machine.md:
  *   - 8 states, Live has 3 substates -> 10 configurations (jr_state_t)
- *   - 21 typed events                              (jr_event_kind_t)
- *   - 26 typed commands                            (jr_cmd_kind_t)
+ *   - 22 typed events                              (jr_event_kind_t)
+ *   - 27 typed commands                            (jr_cmd_kind_t)
  *   - 86 legal transition rows + a shared DEATH handler
  *   - the ReconnectPolicy (capped exp backoff + park) used inside DEATH
  *
@@ -75,7 +75,7 @@ typedef enum {
 } jr_close_kind_t;
 
 /* ======================================================================== *
- *  2. Events (typed inputs — 21)                                           *
+ *  2. Events (typed inputs — 22)                                           *
  * ======================================================================== */
 typedef enum {
     /* --- 2.1 from transport (L2 RealtimeVoiceClient) — 10 --- */
@@ -85,6 +85,7 @@ typedef enum {
     JR_EV_SERVER_INTERRUPTED,  /* Gemini interrupted (may lack turnComplete) */
     JR_EV_SERVER_TURN_COMPLETE,/* Gemini turnComplete/generationComplete     */
     JR_EV_SERVER_TOOL_CALL,    /* toolCall or toolCallCancellation           */
+    JR_EV_TOOL_RESULT_READY,   /* worker result; owner must send response    */
     JR_EV_SERVER_GO_AWAY,      /* graceful server disconnect + resume handle */
     JR_EV_SERVER_ERROR,        /* server error frame {error_kind}            */
     JR_EV_TRANSPORT_CLOSED,    /* socket closed, any reason                  */
@@ -103,7 +104,7 @@ typedef enum {
     JR_EV_USER_START,          /* explicit arm (tap, /api/debug/say, boot)   */
     JR_EV_USER_STOP,           /* explicit stop — the ONLY route to Idle     */
     JR_EV_TAP,                 /* raw touch (arms / accelerates / no-op)     */
-    JR_EV__COUNT,              /* == 21                                      */
+    JR_EV__COUNT,              /* == 22                                      */
 } jr_event_kind_t;
 
 /* The Event value struct. Only the fields relevant to `kind` are meaningful;
@@ -120,8 +121,11 @@ typedef struct {
     /* ServerToolCall */
     bool            is_cancellation;
     uint32_t        call_id;
+    const char     *call_id_text;
     const char     *tool_name;
     const char     *tool_args;
+    const char     *tool_response;  /* ToolResultReady: JSON object text       */
+    uint32_t        session_gen;    /* ToolResultReady generation tag          */
 
     /* SetupComplete / ServerGoAway / Heartbeat: opaque resume handle,
      * 0 == none. Modeled as a small integer for the pure host machine. */
@@ -146,7 +150,7 @@ typedef struct {
 } jr_event_t;
 
 /* ======================================================================== *
- *  3. Commands (typed outputs — 26; the machine EXECUTES none of them)     *
+ *  3. Commands (typed outputs — 27; the machine EXECUTES none of them)     *
  * ======================================================================== */
 typedef enum {
     /* --- 3.1 transport (8) --- */
@@ -157,6 +161,7 @@ typedef enum {
     JR_CMD_SEND_AUDIO_STREAM_END,   /* auto-VAD keepalive ONLY (never manual)*/
     JR_CMD_SEND_TEXT,               /* SendText{ text } — /api/debug/say     */
     JR_CMD_SEND_AUDIO,              /* SendAudio{ frame } — pre-roll/inject  */
+    JR_CMD_SEND_TOOL_RESPONSE,      /* SendToolResponse{ id,name,response }  */
     JR_CMD_CLOSE_TRANSPORT,         /* CloseTransport{ graceful }            */
     /* --- 3.2 audio / DAC (6) --- */
     JR_CMD_START_CAPTURE,
@@ -180,7 +185,7 @@ typedef enum {
     /* --- 3.5 observability (2) --- */
     JR_CMD_PUBLISH_SNAPSHOT,        /* PublishSnapshot{ phase, counters }    */
     JR_CMD_EMIT_DIAG,               /* EmitDiag{ event_type, reason, kind? } */
-    JR_CMD__COUNT,                  /* == 26                                 */
+    JR_CMD__COUNT,                  /* == 27                                 */
 } jr_cmd_kind_t;
 
 /* The Command value struct. Only the fields relevant to `kind` are meaningful. */
@@ -196,8 +201,10 @@ typedef struct {
     uint32_t        timeout_ms;       /* ArmNoReplyWatchdog/ArmCapturePause  */
 
     uint32_t        call_id;          /* Dispatch/CancelToolCall             */
+    const char     *call_id_text;     /* Dispatch/Cancel/SendToolResponse    */
     const char     *tool_name;        /* DispatchToolCall                    */
     const char     *tool_args;        /* DispatchToolCall                    */
+    const char     *tool_response;    /* SendToolResponse JSON object        */
     uint32_t        session_gen;      /* DispatchToolCall (generation-tagged)*/
 
     const jr_pcm_t *pcm;              /* FeedPlayback / SendAudio            */

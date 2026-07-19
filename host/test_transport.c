@@ -180,6 +180,35 @@ static void test_build_audio_chunk_roundtrip(void)
     free(chunk);
 }
 
+static void test_build_tool_response_preserves_original_id(void)
+{
+    char *j = jr_gemini_build_tool_response(
+        "call_original_42", "current_time", "{\"result\":\"12:34\"}");
+    TEST_ASSERT_NOT_NULL(j);
+    cJSON *root = cJSON_Parse(j);
+    TEST_ASSERT_NOT_NULL(root);
+    cJSON *responses = cJSON_GetObjectItem(
+        cJSON_GetObjectItem(root, "toolResponse"), "functionResponses");
+    cJSON *fr = cJSON_GetArrayItem(responses, 0);
+    TEST_ASSERT_EQUAL_STRING("call_original_42",
+                             cJSON_GetObjectItem(fr, "id")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("current_time",
+                             cJSON_GetObjectItem(fr, "name")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("12:34",
+        cJSON_GetObjectItem(cJSON_GetObjectItem(fr, "response"), "result")->valuestring);
+    cJSON_Delete(root);
+    free(j);
+
+    j = jr_gemini_build_tool_response("id", "tool", "not-json");
+    root = cJSON_Parse(j);
+    fr = cJSON_GetArrayItem(cJSON_GetObjectItem(
+        cJSON_GetObjectItem(root, "toolResponse"), "functionResponses"), 0);
+    TEST_ASSERT_EQUAL_STRING("not-json",
+        cJSON_GetObjectItem(cJSON_GetObjectItem(fr, "response"), "error")->valuestring);
+    cJSON_Delete(root);
+    free(j);
+}
+
 /* ===================================================================== *
  *  FRAMER — would-block as backpressure (the load-bearing win)          *
  * ===================================================================== */
@@ -282,6 +311,28 @@ static void test_framer_real_close_is_death(void)
     TEST_ASSERT_FALSE(c.live.socket_open);
 }
 
+/* A reconnect is a protocol boundary: no frame buffered for the dead socket may
+ * precede Setup on the replacement socket. */
+static void test_framer_session_reset_drops_stale_tx(void)
+{
+    fake_ws_t f; fake_ws_init(&f); f.state = JR_WS_OPEN; f.send_mode = FWS_WOULD_BLOCK;
+    jr_gemini_config_t cfg = manual_cfg();
+    jr_gemini_client_t c;
+    jr_gemini_client_init(&c, fake_ws_make(&f), fake_clock_make(), &cfg);
+
+    TEST_ASSERT_EQUAL_INT(JR_ERR_WOULD_BLOCK,
+                          jr_gemini_send_frame(&c, "stale-audio", 11));
+    TEST_ASSERT_EQUAL_size_t(1, jr_gemini_txq_depth(&c));
+
+    jr_gemini_reset_tx(&c);
+    TEST_ASSERT_EQUAL_size_t(0, jr_gemini_txq_depth(&c));
+
+    f.send_mode = FWS_OK;
+    TEST_ASSERT_EQUAL_INT(JR_OK, jr_gemini_send_frame(&c, "setup", 5));
+    TEST_ASSERT_TRUE(fake_ws_sent_contains(&f, "setup"));
+    TEST_ASSERT_FALSE(fake_ws_sent_contains(&f, "stale-audio"));
+}
+
 /* ===================================================================== *
  *  RVC control guarantee — audioStreamEnd is IMPOSSIBLE in manual mode  *
  * ===================================================================== */
@@ -355,6 +406,29 @@ static void test_parse_audio_and_turnComplete(void)
     jr_gemini_parse_free(&p);
 }
 
+static void test_parse_mediaChunks_array_and_object(void)
+{
+    const char *array_frame =
+        "{\"serverContent\":{\"modelTurn\":{\"parts\":[{\"mediaChunks\":["
+        "{\"mimeType\":\"audio/pcm;rate=24000\",\"data\":\"AAAAAAAA\"},"
+        "{\"mimeType\":\"audio/pcm;rate=24000\",\"data\":\"AAAAAAAA\"}]}]}}}";
+    jr_gemini_parse_t p;
+    TEST_ASSERT_TRUE(jr_gemini_parse(array_frame, &p));
+    TEST_ASSERT_EQUAL_size_t(2, p.count);
+    TEST_ASSERT_EQUAL_INT(JR_GEV_AUDIO_CHUNK, p.events[0].kind);
+    TEST_ASSERT_EQUAL_INT(JR_GEV_AUDIO_CHUNK, p.events[1].kind);
+    jr_gemini_parse_free(&p);
+
+    const char *object_frame =
+        "{\"serverContent\":{\"modelTurn\":{\"parts\":[{\"mediaChunks\":"
+        "{\"mimeType\":\"audio/pcm;rate=16000\",\"data\":\"AAAAAAAA\"}}]}}}";
+    TEST_ASSERT_TRUE(jr_gemini_parse(object_frame, &p));
+    TEST_ASSERT_EQUAL_size_t(1, p.count);
+    TEST_ASSERT_EQUAL_INT(JR_GEV_AUDIO_CHUNK, p.events[0].kind);
+    TEST_ASSERT_EQUAL_UINT32(16000, p.events[0].sample_rate);
+    jr_gemini_parse_free(&p);
+}
+
 /* NASTY SEQUENCE: interrupted with NO generationComplete, then a bare
  * turnComplete — exactly the interrupted -> turnComplete path (generationComplete
  * is skipped on an interrupted turn). */
@@ -424,6 +498,7 @@ static void test_parse_toolCall_and_cancellation(void)
         "\"id\":\"call_42\",\"args\":{\"city\":\"Paris\"}}]}}", &call));
     TEST_ASSERT_EQUAL_INT(JR_GEV_TOOL_CALL, first_kind(&call));
     TEST_ASSERT_EQUAL_STRING("get_weather", call.events[0].tool_name);
+    TEST_ASSERT_EQUAL_STRING("call_42", call.events[0].call_id_text);
     TEST_ASSERT_NOT_NULL(strstr(call.events[0].tool_args, "Paris"));
     uint32_t id = call.events[0].call_id;
     TEST_ASSERT_NOT_EQUAL(0, id);
@@ -434,6 +509,7 @@ static void test_parse_toolCall_and_cancellation(void)
         "{\"toolCallCancellation\":{\"ids\":[\"call_42\"]}}", &cancel));
     TEST_ASSERT_EQUAL_INT(JR_GEV_TOOL_CANCEL, first_kind(&cancel));
     TEST_ASSERT_EQUAL_UINT32(id, cancel.events[0].call_id);      /* matches the call */
+    TEST_ASSERT_EQUAL_STRING("call_42", cancel.events[0].call_id_text);
     jr_gemini_parse_free(&cancel);
 }
 
@@ -553,18 +629,21 @@ void transport_tests_run(void)
     RUN_TEST(test_setup_tools_coexist);
     RUN_TEST(test_build_control_frames);
     RUN_TEST(test_build_audio_chunk_roundtrip);
+    RUN_TEST(test_build_tool_response_preserves_original_id);
     /* framer */
     RUN_TEST(test_framer_wouldblock_never_aborts);
     RUN_TEST(test_framer_drop_newest_oldest_retained);
     RUN_TEST(test_framer_partial_then_flush_completes);
     RUN_TEST(test_framer_ok_passthrough);
     RUN_TEST(test_framer_real_close_is_death);
+    RUN_TEST(test_framer_session_reset_drops_stale_tx);
     /* rvc control guarantee + connect */
     RUN_TEST(test_manual_never_emits_audioStreamEnd);
     RUN_TEST(test_connect_sends_setup);
     /* parser */
     RUN_TEST(test_parse_setupComplete);
     RUN_TEST(test_parse_audio_and_turnComplete);
+    RUN_TEST(test_parse_mediaChunks_array_and_object);
     RUN_TEST(test_parse_interrupted_without_generationComplete);
     RUN_TEST(test_parse_goAway_duration);
     RUN_TEST(test_parse_sessionResumption_resumable_gate);
