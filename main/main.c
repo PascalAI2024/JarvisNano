@@ -357,6 +357,8 @@ static _Atomic uint32_t s_touch_taps;
 static _Atomic uint32_t s_touch_long_presses;
 static _Atomic uint32_t s_touch_swipes;
 static _Atomic uint32_t s_touch_last_kind;
+/* UI-07: taps actually delivered to the session machine (vs merely counted). */
+static _Atomic uint32_t s_touch_taps_routed;
 static _Atomic uint32_t s_touch_last_x;
 static _Atomic uint32_t s_touch_last_y;
 static _Atomic int s_touch_last_dx;
@@ -1972,7 +1974,7 @@ static esp_err_t touch_status_handler(httpd_req_t *req)
     char body[768];
     int n = snprintf(body, sizeof body,
         "{\"available\":true,\"events\":%u,\"taps\":%u,"
-        "\"long_presses\":%u,\"swipes\":%u,\"last\":{"
+        "\"long_presses\":%u,\"swipes\":%u,\"taps_routed\":%u,\"last\":{"
         "\"kind\":\"%s\",\"x\":%u,\"y\":%u,\"dx\":%d,"
         "\"dy\":%d,\"duration_ms\":%u},\"shade_open\":%s,"
         "\"panel_touch_challenge\":{\"pending\":%s,\"active\":%s,"
@@ -1984,6 +1986,7 @@ static esp_err_t touch_status_handler(httpd_req_t *req)
         (unsigned)atomic_load(&s_touch_taps),
         (unsigned)atomic_load(&s_touch_long_presses),
         (unsigned)atomic_load(&s_touch_swipes),
+        (unsigned)atomic_load(&s_touch_taps_routed),
         touch_kind_name((jr_input_kind_t)atomic_load(&s_touch_last_kind)),
         (unsigned)atomic_load(&s_touch_last_x),
         (unsigned)atomic_load(&s_touch_last_y),
@@ -4165,6 +4168,24 @@ static void voice_task(void *arg)
                 atomic_fetch_add(&s_touch_long_presses, 1U);
             } else if (iev.kind == JR_INPUT_SWIPE) {
                 atomic_fetch_add(&s_touch_swipes, 1U);
+            }
+
+            /* UI-07: route taps into the session machine.
+             *
+             * JR_EV_TAP is handled in ALL TEN states (session.c) and is
+             * exercised by the 3000-turn soak, where a tap during Backoff
+             * accelerates the retry. But nothing ever injected it on hardware —
+             * the composition root counted taps and dropped them. So a recovery
+             * path that is proven in simulation has been unreachable on the
+             * physical device this whole time. This is the wire.
+             *
+             * Skipped when the panel-touch challenge or an interactive surface
+             * owns the tap; those consume it themselves below. */
+            if (iev.kind == JR_INPUT_TAP &&
+                !atomic_load(&s_touch_challenge_active) &&
+                !jr_display_surface_is_active()) {
+                jr_orch_inject(&s_app.orch, jr_event(JR_EV_TAP), now);
+                atomic_fetch_add(&s_touch_taps_routed, 1U);
             }
 
             if (atomic_load(&s_touch_challenge_active)) {
