@@ -224,6 +224,12 @@ static _Atomic uint32_t s_debug_choices_req;
  * toggle the instant the arcs synchronously dismiss. */
 static uint32_t s_ask_tap_grace_ms;
 
+/* Synthetic shake lane (GEST-03 verification): number of 10 Hz polls that
+ * should read as shake-positive. The endpoint posts 2 — exactly the sustained
+ * window the detector demands — so the sim exercises the REAL persistence
+ * filter, not a bypass. */
+static _Atomic uint32_t s_sim_shake;
+
 typedef struct {
     jr_event_t ev;
     char call_id_text[TOOL_ID_CAP];
@@ -2149,6 +2155,13 @@ static esp_err_t choices_debug_handler(httpd_req_t *req)
 static esp_err_t tap_sim_handler(httpd_req_t *req)
 {
     if (!control_intent_required(req)) {
+        return ESP_OK;
+    }
+    int shake = 0;
+    if (query_int(req, "shake", &shake) && shake == 1) {
+        atomic_store(&s_sim_shake, 2U);   /* two 10 Hz polls = a real shake */
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"queued\":true,\"gesture\":\"shake\"}");
         return ESP_OK;
     }
     int x = -1, y = -1;
@@ -4271,6 +4284,43 @@ static void voice_task(void *arg)
             jr_display_set_hud_env(bat.percent, bat.charging,
                                    have_imu ? imu.roll_deg : 0.0f,
                                    have_imu ? imu.pitch_deg : 0.0f);
+
+            /* GEST-03 shake-to-cancel, evaluated at the same 10 Hz cadence.
+             * imu.shake is the hardware-calibrated flag (motion std-dev >
+             * 350 mg over the sampler's 40 ms window). Two consecutive
+             * positive polls (~200 ms of sustained shaking) filter out a
+             * single table knock; a cooldown stops one long shake from
+             * re-firing every poll. Only an ACTIVE turn is cancellable —
+             * shaking a listening or idle device while carrying it must do
+             * nothing. No privacy pause: always-ready re-arms Listening. */
+            static uint8_t  s_shake_polls;
+            static uint32_t s_shake_cool_ms;
+            uint32_t sim_left = atomic_load(&s_sim_shake);
+            if (sim_left > 0U) {
+                atomic_store(&s_sim_shake, sim_left - 1U);
+            }
+            const bool shake_now =
+                (have_imu && imu.shake && imu.age_ms < 500U) ||
+                sim_left > 0U;
+            if (!shake_now) {
+                s_shake_polls = 0;
+            } else if ((int32_t)((uint32_t)now - s_shake_cool_ms) < 0) {
+                /* cooling down; ignore */
+            } else if (++s_shake_polls >= 2) {
+                s_shake_polls = 0;
+                s_shake_cool_ms = (uint32_t)now + 1500U;
+                jr_state_t sp = jr_orch_phase(&s_app.orch);
+                if (sp == JR_ST_SPEAKING || sp == JR_ST_THINKING ||
+                    sp == JR_ST_ASKING) {
+                    jr_audio_flush_playback();
+                    jr_audio_sink_mute_now(&s_app.spk);
+                    jr_display_caption_set("CANCELLED");
+                    jr_orch_inject(&s_app.orch, jr_event(JR_EV_USER_STOP),
+                                   now);
+                    ESP_LOGI(TAG, "gesture: shake cancelled %s",
+                             jr_state_name(sp));
+                }
+            }
         }
 
         /* v4 barge fix, playback-driven: keep the mic PGA low (9 dB) whenever
