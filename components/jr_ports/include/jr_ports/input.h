@@ -24,10 +24,33 @@ typedef enum {
     JR_INPUT_SWIPE,
 } jr_input_kind_t;
 
+typedef enum {
+    JR_INPUT_DIRECTION_NONE = 0,
+    JR_INPUT_DIRECTION_LEFT,
+    JR_INPUT_DIRECTION_RIGHT,
+    JR_INPUT_DIRECTION_UP,
+    JR_INPUT_DIRECTION_DOWN,
+} jr_input_direction_t;
+
+enum {
+    /* The press began in the display's top-edge gesture affordance. */
+    JR_INPUT_FLAG_TOP_EDGE = 1U << 0,
+};
+
 typedef struct {
     jr_input_kind_t kind;
+    /* Compatibility coordinates: always equal to end_x/end_y. */
     uint16_t x;
     uint16_t y;
+    uint16_t start_x;
+    uint16_t start_y;
+    uint16_t end_x;
+    uint16_t end_y;
+    int16_t delta_x;
+    int16_t delta_y;
+    uint32_t duration_ms;
+    jr_input_direction_t direction;
+    uint8_t flags;
 } jr_input_event_t;
 
 typedef struct jr_input {

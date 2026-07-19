@@ -81,22 +81,3 @@ jr_display_t jr_hal_display(void)
     d.present = hal_display_present;
     return d;
 }
-
-/* ============================ Input port ============================== */
-/* Phase 0 stub: no events. Phase 4 wires the CST9217 INT-edge ISR ->
- * semaphore -> event queue (hardware.md #9) behind this poll(). */
-
-static bool hal_input_poll(void *ctx, jr_input_event_t *out)
-{
-    (void)ctx;
-    (void)out;
-    return false;
-}
-
-jr_input_t jr_hal_input(void)
-{
-    jr_input_t i;
-    i.ctx = NULL;
-    i.poll = hal_input_poll;
-    return i;
-}
