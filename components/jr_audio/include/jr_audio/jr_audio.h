@@ -50,6 +50,12 @@ jr_audio_sink_t   jr_audio_sink(void);
  * gate reads this). 0 until the first AEC frame runs. */
 uint32_t jr_audio_last_aec_us(void);
 
+/* AEC-clean mic RMS (jr_dsp_rms scale, 0..32768), sampled before the uplink
+ * make-up gain. The buffer handed to the transport is amplified ~6x so the
+ * model can hear the user; judging voice activity on that same buffer scales
+ * the room's noise bed up with it. This is the unamplified view. */
+float jr_audio_clean_rms(void);
+
 /* True while decoded PCM is queued, a codec write is in flight, or the final
  * DMA/physical-output tail is still expected to be audible. The composition
  * root uses this to defer Gemini's terminal marker until playback is really

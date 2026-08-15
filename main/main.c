@@ -446,6 +446,12 @@ static bool s_mood_rest_disarmed;
  * it, to tell "the mood ladder put us to sleep" (tap may undo) apart from
  * "the user flipped the puck face-down" (tap must NOT undo). */
 static bool s_flip_muted;
+/* T12: judge voice activity on the AEC-clean (pre-uplink-gain) RMS instead of
+ * the 6x-amplified buffer. Measured on hardware 2026-08-15, ambient room:
+ * amplified median 132 (onset is 85 -> permanent false "speech"), clean median
+ * 22. Default OFF so the shipped behaviour is unchanged until it is calibrated
+ * against a real voice; flip live with POST /api/debug/gain?vadclean=1. */
+static _Atomic bool s_vad_use_clean;
 static uint8_t s_bright_now = 100;
 static uint8_t s_bright_tgt = 100;
 static bool s_rtc_seeded_os;
@@ -1891,19 +1897,25 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
     if (!control_intent_required(req)) {
         return ESP_OK;
     }
-    int mic = -1, ref = -1, vol = -1, barge = -1;
+    int mic = -1, ref = -1, vol = -1, barge = -1, vadclean = -1;
     query_int(req, "mic", &mic);
     query_int(req, "ref", &ref);
     query_int(req, "vol", &vol);
     query_int(req, "barge", &barge);
+    query_int(req, "vadclean", &vadclean);
     jr_audio_set_gains(mic, ref, vol);
     if (barge >= 0) {
         s_local_barge_enabled = barge != 0;
     }
-    char buf[128];
+    if (vadclean >= 0) {
+        atomic_store(&s_vad_use_clean, vadclean != 0);
+    }
+    char buf[192];
     int n = snprintf(buf, sizeof buf,
-                     "{\"ok\":true,\"mic\":%d,\"ref\":%d,\"vol\":%d,\"barge\":%s}",
-                     mic, ref, vol, s_local_barge_enabled ? "true" : "false");
+                     "{\"ok\":true,\"mic\":%d,\"ref\":%d,\"vol\":%d,"
+                     "\"barge\":%s,\"vadclean\":%s}",
+                     mic, ref, vol, s_local_barge_enabled ? "true" : "false",
+                     atomic_load(&s_vad_use_clean) ? "true" : "false");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, n);
     return ESP_OK;
@@ -3702,7 +3714,9 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         "\"voice_armed\":%s,\"always_ready\":true,"
         "\"privacy_paused\":%s,\"mood\":\"%s\",\"brightness\":%u,"
         "\"rtc\":%s,\"capturing\":%s,\"ws_connected\":%s,"
-        "\"auto_idle_ms\":%u,\"mic_rms\":%.1f,\"vad_starts\":%u,"
+        "\"auto_idle_ms\":%u,\"mic_rms\":%.1f,\"clean_rms\":%.1f,"
+        "\"vad_clean\":%s,"
+        "\"vad_starts\":%u,"
         "\"audio_diag_running\":%s},\"tools\":{"
         "\"execution\":\"on_device\",\"worker_ready\":%s,"
         "\"configured\":%s,\"declared\":%u,\"last_tool\":\"%s\","
@@ -3739,7 +3753,8 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         s_app.io.capturing ? "true" : "false",
         s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN ? "true" : "false",
         (unsigned)auto_idle_ms, (double)s_app.mic_rms,
-
+        (double)jr_audio_clean_rms(),
+        atomic_load(&s_vad_use_clean) ? "true" : "false",
         (unsigned)s_app.vad_starts,
         (int32_t)(atomic_load(&s_audio_diag_until_ms) - now) > 0
             ? "true" : "false",
@@ -5189,8 +5204,11 @@ static void voice_task(void *arg)
                     ((now >= s_app.last_playback_chunk_ms &&
                       now - s_app.last_playback_chunk_ms < 250) ||
                      jr_audio_playback_pending());
-                jr_turn_decision_t td = jr_turn_policy_eval(
-                    &s_app.turn, mic_frame, (size_t)n,
+                float vad_rms = atomic_load(&s_vad_use_clean)
+                                    ? jr_audio_clean_rms()
+                                    : jr_dsp_rms(mic_frame, (size_t)n);
+                jr_turn_decision_t td = jr_turn_policy_eval_rms(
+                    &s_app.turn, vad_rms,
                     playback_active ? s_app.playback_level : 0.0f,
                     playback_active, sub, s_app.clock);
                 s_app.mic_rms = td.rms;

@@ -26,6 +26,7 @@
 #include "dev_audio_codec.h"          /* dev_audio_codec_handles_t (double-cast) */
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_types.h"
+#include "jr_dsp/dsp.h"
 
 #include "esp_aec.h"                  /* esp-sr direct low-level AEC             */
 
@@ -100,6 +101,8 @@ static int16_t               *s_aec_mic;     /* 16-byte aligned, 512 int16 */
 static int16_t               *s_aec_ref;
 static int16_t               *s_aec_clean;
 static _Atomic uint32_t       s_last_aec_us;
+/* AEC-clean mic RMS in Q8, measured before the uplink make-up gain. */
+static _Atomic uint32_t       s_clean_rms_q8;
 
 static int16_t               *s_raw_cap;     /* 768*4 int16 (24k read)     */
 static int16_t               *s_raw16;       /* 512*4 int16 (16k demuxed)  */
@@ -395,11 +398,29 @@ static int src_read(void *ctx, jr_pcm_t *frame, size_t max_samples)
 
     size_t n = (max_samples < (size_t)GL_TX_SAMPLES_PER_CHUNK)
                    ? max_samples : (size_t)GL_TX_SAMPLES_PER_CHUNK;
+
+    /* Measure the AEC-clean signal BEFORE the uplink make-up gain.
+     *
+     * `frame` below is amplified GL_OUT_GAIN_Q8 (6x) so Gemini can hear the
+     * user, and until now the VAD judged that same amplified buffer — which
+     * multiplies the room's noise bed by 6 along with the voice. That is why a
+     * lived-in room reads 170-390 RMS against an onset of 85 and the device
+     * believes someone is talking indefinitely. Publishing the pre-gain RMS
+     * lets the turn policy judge the signal on its own scale. Measurement
+     * only — nothing consumes this yet, and the uplink is untouched. */
+    float clean_rms = jr_dsp_rms(clean, n);
+    atomic_store(&s_clean_rms_q8, (uint32_t)(clean_rms * 256.0f));
+
     for (size_t i = 0; i < n; ++i) {
         frame[i] = soft_gain((int32_t)clean[i]);
     }
     tap_write(JR_AUDIO_TAP_MIC_CLEAN, frame, n);
     return (int)n;
+}
+
+float jr_audio_clean_rms(void)
+{
+    return (float)atomic_load(&s_clean_rms_q8) / 256.0f;
 }
 
 /* ======================================================================== *

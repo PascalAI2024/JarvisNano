@@ -143,6 +143,20 @@ jr_turn_decision_t jr_turn_policy_eval(jr_turn_policy_t *p,
                                        jr_tp_substate_t substate,
                                        jr_clock_t clk);
 
+/* Same policy, but judging an RMS the caller already has.
+ *
+ * The device's capture frame is amplified ~6x for the uplink so the model can
+ * hear the user; that gain scales the room's noise bed up with the voice, so a
+ * VAD judging the amplified buffer reads a lived-in room as continuous speech.
+ * This entry point lets the composition root feed the un-amplified (AEC-clean)
+ * RMS instead, on the same threshold scale. */
+jr_turn_decision_t jr_turn_policy_eval_rms(jr_turn_policy_t *p,
+                                           float rms_in,
+                                           float playback_level,
+                                           bool playback_active,
+                                           jr_tp_substate_t substate,
+                                           jr_clock_t clk);
+
 #ifdef __cplusplus
 }
 #endif

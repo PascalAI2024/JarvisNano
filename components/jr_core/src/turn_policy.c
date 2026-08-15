@@ -79,12 +79,27 @@ static float peak_held(const jr_turn_policy_t *p)
     return m;
 }
 
+/* Thin wrapper: the frame is used for exactly one thing — its RMS. Callers that
+ * already hold a better-scaled RMS (see jr_turn_policy_eval_rms) should pass it
+ * directly rather than handing over a buffer to be re-measured. */
 jr_turn_decision_t jr_turn_policy_eval(jr_turn_policy_t *p,
                                        const jr_pcm_t *capture, size_t capture_len,
                                        float playback_level,
                                        bool playback_active,
                                        jr_tp_substate_t substate,
                                        jr_clock_t clk)
+{
+    return jr_turn_policy_eval_rms(p, jr_dsp_rms(capture, capture_len),
+                                   playback_level, playback_active,
+                                   substate, clk);
+}
+
+jr_turn_decision_t jr_turn_policy_eval_rms(jr_turn_policy_t *p,
+                                           float rms_in,
+                                           float playback_level,
+                                           bool playback_active,
+                                           jr_tp_substate_t substate,
+                                           jr_clock_t clk)
 {
     jr_turn_decision_t d = {
         .is_speech = false,
@@ -99,7 +114,7 @@ jr_turn_decision_t jr_turn_policy_eval(jr_turn_policy_t *p,
     }
 
     const uint64_t now = jr_clock_now_ms(&clk);
-    const float rms = jr_dsp_rms(capture, capture_len);
+    const float rms = rms_in;
     d.rms = rms;
     const bool speaking = (substate == JR_TP_SPEAKING);
 
