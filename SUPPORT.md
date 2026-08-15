@@ -9,7 +9,8 @@ to include exact hardware and logs.
 - Read [docs/HARDWARE.md](docs/HARDWARE.md) before wiring power, speaker, or
   battery hardware.
 - Read [docs/CAMERA.md](docs/CAMERA.md) before debugging the XIAO Sense camera.
-- Check [docs/PHASE2_TASKS.md](docs/PHASE2_TASKS.md) for known blockers.
+- Check [docs/NEXT_SESSION.md](docs/NEXT_SESSION.md) and
+  [docs/ROADMAP.md](docs/ROADMAP.md) for current blockers.
 
 ## Good Bug Reports Include
 

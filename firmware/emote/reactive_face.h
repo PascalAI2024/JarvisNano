@@ -15,7 +15,7 @@
  * panel), this implementation uses ONLY the engine's baked gfx_anim widget:
  * four pre-baked looping EAF animations (one per state), with the live audio
  * amplitude selecting the looping segment END for the reactive states. There is
- * NO runtime pixel drawing. See docs/REACTIVE_FACE_PLAN.md.
+ * NO runtime pixel drawing. See docs/ARCHIVE/REACTIVE_FACE_PLAN.md.
  */
 #pragma once
 

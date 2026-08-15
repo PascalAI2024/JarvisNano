@@ -6,6 +6,16 @@ The firmware integrates **Google Gemini Live API** (`cap_gemini_live`) for real-
 
 ## Build + flash one-liner
 
+Live v5 image (plain ESP-IDF, `main/` + `components/jr_*`):
+
+```bash
+./scripts/build-v5.sh
+./scripts/flash-v5.sh
+```
+
+The leftover esp-claw overlay is `scripts/bootstrap.sh` and is **not** the
+v5 image. If you must build that tree:
+
 ```bash
 ESP_CLAW_REF=$(cd esp-claw && git rev-parse HEAD) \
   BOARD_VENDOR=waveshare \
@@ -13,7 +23,8 @@ ESP_CLAW_REF=$(cd esp-claw && git rev-parse HEAD) \
   /abs/path/to/scripts/bootstrap.sh build
 ```
 
-Flash: `idf.py flash --flash-mode dio` (DIO mode required for the CO5300 QSPI display).
+Flash: DIO mode required for the CO5300 QSPI display (`flash-v5.sh` already
+does this).
 
 **⚠️ Edit canonical sources, never the esp-claw copies.** `bootstrap.sh` overwrites
 parts of the `esp-claw/` tree on EVERY build: `firmware/components/cap_gemini_live/`

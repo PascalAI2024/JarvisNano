@@ -1,7 +1,13 @@
 # Live Device Debug Framework
 
 Use this when the Waveshare board is on Wi-Fi and you need evidence from the
-device, not vibes.
+device, not vibes. USB first (`scripts/usb-monitor.py`) — a successful flash
+is not a boot.
+
+Live HTTP truth is [`PROTOCOL.md`](PROTOCOL.md): `/api/cockpit` is the
+combined surface. Overlay-era routes (`/api/health`, `/api/status`,
+`/api/display/face`, `/api/audio/level`, `/api/ui/snapshot.ppm`) are not the
+v5 contract.
 
 Default live device:
 
@@ -76,12 +82,11 @@ scripts/live-device.py restart --host $JARVIS_DEVICE_HOST --wait 60
 
 ## What It Checks
 
-- `/api/health`, `/api/status`
-- `/api/audio/level`
+- `/api/cockpit`
 - `/api/gemini/live`
-- `/api/display/face`
-- `/api/display/snapshot.json`
-- `/api/logs?tail=N`
+- `/api/display` and `/api/display/snapshot.json`
+- `/api/touch`
+- `/api/audio/taps`
 - Gemini start/text/stop state transitions
 - Gemini push-to-talk state transitions and counters:
   - `activity_open`

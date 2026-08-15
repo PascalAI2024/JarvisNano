@@ -1,130 +1,62 @@
 # Next Session Handoff
 
-Last updated: **2026-07-05**.
+Last updated: **2026-08-14**.
 
-This is the fast path back into the current Waveshare hardware state. Use USB
-first. Wi-Fi checks are runtime confirmation after USB proves the app booted.
+v5 on the Waveshare ESP32-S3-Touch-AMOLED-1.75 is the live product. USB first.
+Wi-Fi is confirmation after the app has actually booted.
 
 ## Current Board
 
-- Board: Waveshare ESP32-S3-Touch-AMOLED-1.75.
-- USB: ESP32-S3 native USB-Serial-JTAG. Use the detected `/dev/cu.usbmodem*`
-  or configured `PORT`.
-- Runtime AP: `esp-claw-XXXXXX` where the suffix is device-specific and must
-  not be committed.
-- Device host: use `JARVIS_DEVICE_HOST=<device-host>` locally; do not commit
-  LAN addresses.
+- Board: Waveshare ESP32-S3-Touch-AMOLED-1.75 (466×466 CO5300, CST9217, ES8311 + ES7210, AXP2101).
+- USB: ESP32-S3 native USB-Serial-JTAG. Typical macOS path `/dev/cu.usbmodem*`.
+- Live firmware: `components/jr_*` + `main/main.c` via `./scripts/build-v5.sh`.
+- Legacy `firmware/` + `esp-claw/` + `scripts/bootstrap.sh` is the old overlay stack. The v5 CMake does **not** compile it.
+- Device host: `JARVIS_DEVICE_HOST` locally. Never commit LAN addresses, SSIDs, MACs, or keys.
 
-## What Was Proven
-
-USB flashing works. The original trap was reset state: a host RTS hard reset
-can leave the ESP32-S3 in ROM download mode. In that state the board accepts
-flashes but does not boot the app.
-
-The working path is the repo flasher plus the reset-safe monitor:
+## Build and talk to the board
 
 ```bash
-./scripts/flash.sh
-./scripts/usb-monitor.py --seconds 5 --send status
+./scripts/build-v5.sh
+NO_BUILD=1 PORT=/dev/cu.usbmodemXXXX ./scripts/flash-v5.sh
+python3 scripts/usb-monitor.py --port /dev/cu.usbmodemXXXX --seconds 8 --send status
 ```
 
-Expected status after a good boot:
+Do not use a serial monitor that toggles DTR/RTS. That can leave the S3 in ROM
+download mode: flash succeeds, app never boots.
 
-```text
-JarvisNano USB diag ready. Type help.
-boot stage=app_main
-boot stage=runtime_state
-boot stage=nvs
-boot stage=config
-boot stage=board_manager
-boot stage=ui
-boot stage=fatfs
-boot stage=wifi_manager
-boot stage=http_init
-boot stage=wifi_start
-boot stage=http_start
-boot stage=app_claw_start
-status uptime_ms=<increasing> heap=<free> wifi_ready=1 http_ready=1 app_claw_ready=1
-```
-
-## Current Firmware State
-
-- Boot: current Waveshare lane boots with Wi-Fi and HTTP healthy when flashed
-  correctly.
-- Route slots: display diagnostics required a larger HTTP handler table.
-- Display:
-  - `/api/display/snapshot.json` reports `capture_source`,
-    `display_owner`, `panel_readback:false`, and freshness.
-  - `/api/display/snapshot.ppm` streams the active owner mirror.
-  - `/api/ui/snapshot.ppm` streams the UI-layer framebuffer.
-  - These are software mirrors, not CO5300 panel readback.
-- Display transfer: CO5300 flush waits for SPI transfer completion before
-  notifying the graphics runtime.
-- Touch: `/api/touch` reports CST9217 status. Physical short tap routes to
-  Gemini Live start/end in the current lane; long press remains reserved for
-  local cockpit/menu behavior.
-- Gemini Live text path: diagnostic text cycles should return audio parts and
-  settle back to a stable state.
-- Gemini Live voice path: push-to-talk uses manual activity boundaries.
-- Mic: ES7210 codec path is the expected source.
-- Speaker: firmware playback path can be inferred from Gemini audio parts;
-  acoustic proof still needs hearing it or adding a tone/loopback route.
-
-## Useful Commands
-
-Build Waveshare firmware:
+Host tests (no board required):
 
 ```bash
-BOARD_VENDOR=waveshare \
-BOARD_NAME=esp32s3_touch_amoled_1_75 \
-./scripts/bootstrap.sh build
+cmake -S host -B host/build && cmake --build host/build && (cd host/build && ctest --output-on-failure)
 ```
 
-Flash and boot:
+## What is already shipped on v5
 
-```bash
-./scripts/flash.sh
-```
+July 18–19 hardware evidence lives in [`docs/evidence/`](evidence/README.md):
+clean boot, thinking spinner, choice arcs, watch face, captions, attract reel.
 
-Wipe saved config when needed:
+Later commits on `v5` also landed flip-to-mute, shake-to-cancel, time-aware
+courtesy, and the Gemini API key on `x-goog-api-key` instead of the query
+string. Rotate any key that appeared in pre-fix serial/SD logs (owner: Pascal).
 
-```bash
-ERASE_NVS=1 STORAGE=1 ./scripts/flash.sh
-```
+## Still open (do not re-plan)
 
-Monitor without reset-line side effects:
-
-```bash
-./scripts/usb-monitor.py --seconds 5 --send status
-```
-
-Live Wi-Fi diagnostics:
-
-```bash
-export JARVIS_DEVICE_HOST=<device-host>
-scripts/live-device.py status --host "$JARVIS_DEVICE_HOST"
-scripts/live-device.py screen --host "$JARVIS_DEVICE_HOST" --save-sd
-scripts/live-device.py gemini-cycle --host "$JARVIS_DEVICE_HOST" --text "Say one short sentence." --report
-scripts/live-device.py logs --host "$JARVIS_DEVICE_HOST" --grep touch,rwave,gemini,audio,ws
-```
+- Phase 5 power moods need WakeNet. No `CONFIG_SR_WN*` in this image.
+- Pairing token on writes is not required in current public builds.
+- BLE, Android privacy mode, camera, XIAO parity are post-v1.
+- Uncommitted local WIP when this note was written: extra `idf.py reconfigure`
+  after `gen-bmgr-config` in `scripts/build-v5.sh`, plus
+  `CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM` in `sdkconfig.defaults`.
 
 ## Do Not Repeat
 
-- Do not start with AP access when the board is freshly flashed or confused.
-- Do not use a serial monitor that toggles modem-control lines when reset state
-  matters.
-- Do not assume a successful flash means the app booted.
+- Do not start from `docs/ARCHIVE/` or root `plan.md` (archived). Use this file + [`ROADMAP.md`](ROADMAP.md).
+- Do not edit `esp-claw/` copies. v5 does not consume them; bootstrap still overwrites that tree.
 - Do not treat `/api/display/snapshot.ppm` as panel readback.
-- Do not commit keys, local URLs, LAN addresses, MACs, SSIDs, or device logs.
+- Do not commit keys, LAN addresses, MACs, SSIDs, or device logs with those in them.
+- Do not draw a second HUD on top of the baked `rwave_*.eaf` art. Negative-space rule is in `JARVISNANO_OS_PLAN.md`.
 
-## Enclosure/STL Status
+## Docs
 
-OpenSCAD sources can be exported with:
-
-```bash
-./scripts/export-stl.sh xiao
-./scripts/export-stl.sh amoled
-```
-
-The AMOLED mascot-bust set is the relevant enclosure track for the connected
-Waveshare screen board.
+[`DOCUMENTATION_MAP.md`](../DOCUMENTATION_MAP.md) is the index.
+[`docs/reference/`](reference/README.md) is the gotcha knowledge base.

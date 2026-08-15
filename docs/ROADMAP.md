@@ -1,7 +1,10 @@
 # Roadmap
 
-JarvisNano is Waveshare-first for v1. The XIAO/camera/Android/BLE tracks remain
-important, but they no longer block the USB desktop assistant release.
+JarvisNano is Waveshare-first for v1. Last reconciled: **2026-08-14** against
+`origin/v5` (`3aff8e04`) plus `docs/evidence/` from 2026-07-18/19.
+
+XIAO / camera / Android / BLE remain post-v1. They do not block the USB
+desktop assistant.
 
 ## v1 Target
 
@@ -9,106 +12,72 @@ important, but they no longer block the USB desktop assistant release.
 - Form factor: USB-powered desktop assistant.
 - UX: voice + expressive round face + touch cockpit.
 - Client: device firmware + browser dashboard first.
-- Security: pairing token for writes/control; secrets only in NVS.
+- Security: pairing token for writes is still **open**; secrets only in NVS.
 - Tools: JarvisMCP bridge through Gemini Live tool calls.
-- Memory: on-device `claw_memory` without storing secrets.
+- Memory: on-device memory without storing secrets.
 
-## Phase 0 - Stabilize And Merge `gpt`
+## Phase 0 — Land v5
 
-- [x] Merge the `gpt` display/runtime recovery work onto `main`.
-- [x] Keep the direct `jarvis_board` CO5300 primitive for v1.
-- [x] Keep full Waveshare BSP/LVGL migration out of the critical path.
-- [x] Preserve existing NVS/storage by default during flash.
-- [x] Document the display snapshot contract and software-mirror limitation.
-- [ ] Re-run clean build, flash, 5-minute boot watch, display snapshot, and
-      secret scan before tagging a release candidate.
+- [x] Merge display/runtime recovery onto the live branch.
+- [x] Keep the direct CO5300 primitive (no LVGL migration).
+- [x] Soft-fail emote mount instead of bootlooping.
+- [x] Document the display snapshot contract (software mirror, not panel readback).
+- [x] v5 boots on hardware (`docs/evidence/20260718-v5-boot.log`).
 
-## Phase 1 - Touch And Display Runtime
+## Phase 1 — Touch, sensors, display runtime
 
-- [x] Expose `/api/touch` diagnostics.
-- [x] Preserve `/api/display/face`, `/api/display/snapshot.*`, and `/api/ui/*`.
-- [ ] Replace demo-dependent touch behavior with a dedicated CST9217 touch
-      service.
-- [ ] Short tap starts listening when idle and ends input while listening.
-- [ ] Long press opens a cockpit/menu scene.
-- [ ] Swipe/down or explicit control sleeps/dismisses UI.
-- [ ] Emote resumes after UI dismissal.
-- [ ] Add diagnostic-only touch injection behind the pairing token.
+- [x] CST9217 touch path into the session machine.
+- [x] QMI8658 IMU + AXP2101 battery in v5 components.
+- [x] Overlay compositor in the baked art's negative space (no second HUD).
+- [x] Short tap starts/stops listening; tap-to-interrupt while speaking.
+- [ ] Long-press cockpit/menu — verify on current image (was UI-layer on the old stack).
+- [ ] Diagnostic-only touch injection behind a pairing token.
 
-## Phase 2 - Voice And Face v1
+## Phase 2 — Voice and face
 
-- [ ] Make Gemini Live the primary interaction loop:
-      idle -> listening -> thinking -> speaking -> listening/idle.
-- [ ] Bind face states to real session state, not timers.
-- [ ] Prove ES7210 mic frames on Waveshare during a physical voice session.
-- [ ] Prove ES8311 speaker playback by audible output or loopback/tone route.
-- [ ] Add tap or voice-activity interrupt during speaking.
-- [ ] Ensure `/api/audio/level` pauses cleanly while Gemini owns the mic.
-- [ ] Keep display flush timeouts from wedging the face.
+- [x] Gemini Live as the primary loop (idle → listen → think → speak).
+- [x] Face states bound to session (thinking spinner, listen/speak waveform).
+- [x] ES7210 / ES8311 path in the v5 image; 16 kHz shared clock + resample.
+- [x] API key on `x-goog-api-key`, not the WebSocket query string (`a88a1941`).
+- [ ] `JR_CMD_PUBLISH_SNAPSHOT` is still a no-op in `main/main.c` — face still polls.
+- [ ] Host-testable UI port / consent flow (no `jr_ports/ui.h` yet).
+- [ ] Re-prove mic + speaker on the currently connected board (USB first).
+- [ ] Pairing-token gate for remaining diag POSTs (`/api/demo`, HUD, say).
 
-## Phase 3 - Memory And JarvisMCP Tools
+## Phase 3 — Cheap glass (shipped 2026-07-19)
 
-- [x] Add NVS-backed `jarvis_mcp_url`, `jarvis_mcp_key`, and pairing-token
-      config fields.
-- [x] Add `/api/tools/status` without exposing secrets.
-- [ ] Configure Gemini and JarvisMCP only through NVS-backed setup.
-- [ ] Return model-visible tool errors for unconfigured, timeout, and
-      unreachable JarvisMCP states.
-- [ ] Confirm successful Gemini tool call reaches JarvisMCP and returns a
-      concise result.
-- [ ] Keep `claw_memory` enabled while preventing secret extraction.
+- [x] Touch ripple, live captions, status captions (MUTED / CONNECTION LOST).
+- [x] Ambient watch face.
+- [x] Attract reel (`POST /api/demo`).
+- [x] Time-aware courtesy.
+- [x] Flip-to-mute, shake-to-cancel.
+- [ ] Listen countdown rim — **do not build** until listening is windowed.
+      `VOICE_ALWAYS_READY` keeps the deadline at 0.
 
-## Phase 4 - Secure Browser Setup
+## Phase 4 — Choice arcs (shipped 2026-07-19)
 
-- [ ] Require `X-JarvisNano-Token` for writes/control in public builds.
-- [ ] Generate or set the token on device storage, never source.
-- [ ] Protect config writes, restart/control, Gemini control, touch injection,
-      JarvisMCP config, and destructive file actions.
-- [ ] Make the dashboard Waveshare-first:
-      face preview, touch status, Gemini state, memory/tool status, masked
-      config, and setup verification.
-- [ ] Hide or mark camera/battery/Android/BLE as unavailable for USB desktop v1.
-- [ ] Run desktop and mobile-width visual QA.
+- [x] `ask_user` on glass; tap answers; `functionResponse` closes the loop.
+- [x] Hardware photos in `docs/evidence/20260719-choice-arcs.png`.
 
-## Phase 5 - Release Candidate
+## Phase 5 — Moods and leftover silicon (in progress)
 
-- [ ] Clean checkout build.
-- [ ] Preserve-config flash test.
-- [ ] Wiped-storage flash test.
-- [ ] 5-minute serial boot watch.
-- [ ] HTTP matrix.
-- [ ] Display screenshots for emote and UI.
-- [ ] Physical touch tests.
-- [ ] Gemini text and voice tests.
-- [ ] JarvisMCP success, timeout, and unconfigured tests.
-- [ ] Dashboard setup test from blank device.
+- [x] Four-mood rest ladder (AWAKE / AMBIENT / WHISPER / DREAM) — dim + clock + lift-to-wake. No deep sleep, no rail gating.
+- [x] CO5300 brightness follows mood.
+- [x] PCF85063 RTC claimed for the watch face when SNTP is dark.
+- [ ] WakeNet ("Hey Jarvis") — still the hands-free entry gate.
+- [ ] Clean checkout `./scripts/build-v5.sh`.
+- [ ] Preserve-config flash + wiped-storage flash.
+- [ ] 5-minute serial boot watch on the connected board.
+- [ ] Pairing token for writes/control in public builds.
+- [ ] Dashboard Waveshare-first (hide XIAO WebSerial blob as current firmware).
 - [ ] Public secret/identifier scan.
-- [ ] Docs review for Waveshare build, first boot, pairing token,
-      Gemini/JarvisMCP config, and troubleshooting.
+- [ ] Rotate any Gemini key that hit pre-fix serial/SD logs.
 
 ## Post-v1
 
-### Phase 6 - Better UI / Optional BSP-LVGL Migration
+- WakeNet ("Hey Jarvis") + AMBIENT / WHISPER / DREAM moods. Gated on esp-sr.
+- BLE state/control, then Android privacy mode.
+- Battery/PMIC polish beyond the current AXP read path.
+- Camera / XIAO parity. Do not block Waveshare v1.
 
-- Keep direct CO5300 path unless LVGL gives a clear measurable win.
-- If migrating, start with a standalone BSP probe branch.
-- Port cockpit scenes only after emote, voice, display, and touch acceptance
-  remain green.
-
-### Phase 7 - Android And BLE Privacy Mode
-
-- Implement BLE state/control first, then audio.
-- Make Android first-class after firmware service stability.
-- Privacy mode with phone-side local model is post-v1.
-
-### Phase 8 - Battery, Enclosure, Hardware Polish
-
-- Add battery/PMIC reporting after USB desktop v1 ships.
-- Fit-test enclosure, thermals, current draw, charging, and speaker loudness.
-- Add low-battery UI only after readings are real.
-
-### Phase 9 - Camera And XIAO Parity
-
-- Keep camera deferred for Waveshare v1.
-- Resume XIAO camera work separately with the `esp32-camera` path.
-- Do not let XIAO parity block the Waveshare desktop release.
+**Archive:** older finish lists live in [`ARCHIVE/`](ARCHIVE/README.md).

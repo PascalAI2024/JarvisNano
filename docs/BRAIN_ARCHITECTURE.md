@@ -1,7 +1,7 @@
 # JARVIS Brain Architecture — personal on-device self + company-brain access
 
-> Status: design (approved 2026-05-22). Build sequenced AFTER the voice/session
-> loop is stable. Captures the two-tier "his own brain + company info" model.
+> Status: May 2026 design sketch. Live v5 tools are `jr_tools` +
+> [`PROTOCOL.md`](PROTOCOL.md). This file is not the current implementation.
 
 ## Core principle: thin durable body, evolving brain
 

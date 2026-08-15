@@ -1,7 +1,12 @@
-> **Status:** analysis + plan, 2026-07-18. Produced by a 49-agent audit of the actual source
-> (7 subsystem audits + adversarial verification of every "missing" claim; 9 of 40 were refuted).
-> Yardstick: the interactive prototype at `docs/prototype/jarvisnano-os.html` (55 extracted features).
-> Every claim below cites `file:line`. Where an earlier belief was wrong, it is called out explicitly.
+> **Status:** design record, 2026-07-18, with Phase 0–4 mostly **shipped** by
+> 2026-07-19 (see `docs/evidence/` and `git log v5`). Do not re-execute Phases
+> 0–4 from this file. Remaining product work is Phase 5 (WakeNet + power moods)
+> and hardware re-verification. Current handoff: [`NEXT_SESSION.md`](NEXT_SESSION.md).
+>
+> Produced by a 49-agent audit of the actual source (7 subsystem audits +
+> adversarial verification of every "missing" claim; 9 of 40 were refuted).
+> Yardstick: `docs/prototype/jarvisnano-os.html`. Claims below cite `file:line`
+> as of 2026-07-18; later commits moved some of those lines.
 
 # JarvisNano: Why the Device Looks Nothing Like the Prototype — and How to Fix It
 
@@ -340,7 +345,7 @@ These are real and they *do* bound the design. But note they are last, not first
 | **Internal SRAM for DMA** | `jr_display.c:46-49` — PSRAM strips fail; `spi_master` can't DMA unaligned external RAM. Live: internal_free 47,935 B, **largest block 14,336 B**. | A full LVGL double buffer (2×434 KB) is impossible; even a 1/10-screen pair (2×43.8 KB) exceeds the largest free internal block. **LVGL cannot run the way the prototype assumes.** |
 | **QSPI bandwidth** | Panel already at ~23 fps against a 24 fps target (`jr_display.c:42-45`). Overlays iterate every pixel of every strip with no dirty-region culling (`jr_display.c:625-673`). | Rich per-frame overlay without bounding-box early-outs will drop frames. |
 | **AXP2101 rails locked** | `board_devices.yaml` `init_skip: true`; `jarvis_pmic.h:7-13` "NEVER touches rail configuration". | Codec/analog rail gating for WHISPER/DREAM requires reversing a documented safety decision. |
-| **AXP IRQ behind TCA9554** | `docs/UPGRADE_RESEARCH.md:510,517`; expander is all-output (`input_io_mask NULL`). | Power button (GEST-08) is not a deep-sleep wake source and is currently **unreadable**. |
+| **AXP IRQ behind TCA9554** | `docs/ARCHIVE/UPGRADE_RESEARCH.md:510,517`; expander is all-output (`input_io_mask NULL`). | Power button (GEST-08) is not a deep-sleep wake source and is currently **unreadable**. |
 | **No wake word compiled** | `grep ^CONFIG_SR_WN sdkconfig` → nothing enabled; zero `wakenet`/`esp_afe` refs. | Every mood below AWAKE is a dead end — exitable only by touch/motion. |
 | **DOA angular resolution** | Mic baseline is **undocumented anywhere in the repo** (`hardware/enclosure/amoled-1_75/README.md:23` gives port size and angle, no spacing). At 16 kHz a board-scale baseline = a handful of samples of delay. | You get **left/right hemisphere**, not a continuous angle. FACE-02's `cos(doa)*10, sin(doa)*6` becomes a 3-position lean. |
 

@@ -35,8 +35,9 @@ Expected application output:
 build/jarvisrobot_v5.bin
 ```
 
-Edit the canonical sources in `main/`, `components/`, `boards/`, and
-`firmware/components/`. Do not patch generated build output.
+Edit the canonical v5 sources in `main/`, `components/`, and `boards/`.
+`firmware/` is the leftover esp-claw overlay and is not part of the v5
+image. Do not patch generated build output.
 
 ## Flash
 

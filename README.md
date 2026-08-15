@@ -14,7 +14,7 @@
   <a href="https://github.com/PascalAI2024/JarvisNano/stargazers"><img src="https://img.shields.io/github/stars/PascalAI2024/JarvisNano?style=flat-square&color=00a6ff" alt="stars"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-00a6ff?style=flat-square" alt="license"></a>
   <img src="https://img.shields.io/badge/primary-Waveshare_AMOLED--1.75-00a6ff?style=flat-square" alt="primary board">
-  <img src="https://img.shields.io/badge/runtime-ESP--Claw-00a6ff?style=flat-square" alt="runtime">
+  <img src="https://img.shields.io/badge/runtime-ESP--IDF_v5-00a6ff?style=flat-square" alt="runtime">
   <img src="https://img.shields.io/badge/voice-Gemini_Live-00a6ff?style=flat-square" alt="voice">
 </p>
 
@@ -67,14 +67,13 @@ flowchart TB
         FATFS[FATFS memory and assets]
     end
 
-    subgraph Firmware[JarvisNano firmware on ESP-Claw]
-        Gemini[cap_gemini_live]
-        Face[reactive face and emote assets]
-        UI[ui_layer cockpit scenes]
-        Arbiter[display arbiter]
-        HTTP[HTTP diagnostics and dashboard API]
-        MCP[JarvisMCP tool bridge]
-        Memory[claw_memory]
+    subgraph Firmware[JarvisNano v5 firmware]
+        Gemini[jr_transport Gemini Live]
+        Face[jr_display + baked rwave faces]
+        HUD[overlay compositor]
+        HTTP[jr_http cockpit API]
+        MCP[jr_tools JarvisMCP]
+        IMU[jr_imu + jr_power]
     end
 
     subgraph External[External services]
@@ -92,23 +91,19 @@ flowchart TB
     Gemini --> Face
     Gemini <--> MCP
     MCP <--> JarvisMCP
-    Gemini <--> Memory
-    Face --> Arbiter
-    UI --> Arbiter
-    Arbiter --> Display
+    Face --> Display
+    HUD --> Display
+    IMU --> Face
     NVS --> Gemini
     NVS --> MCP
     FATFS --> Face
     HTTP <--> Browser
     HTTP --> Face
-    HTTP --> UI
     HTTP --> Touch
 ```
 
-Display screenshots are firmware software mirrors, not CO5300 panel readback.
-If the old reactor face owns the panel, the snapshot should show that reactor
-face. If a UI scene owns the panel, use `/api/ui/snapshot.ppm`. That distinction
-matters; it caused real confusion on hardware.
+Display screenshots are firmware software mirrors (`/api/display/snapshot.*`),
+not CO5300 panel readback. There is no separate `ui_layer` framebuffer on v5.
 
 For the deeper charts, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -121,17 +116,14 @@ ESP32-S3-Touch-AMOLED-1.75 board.
 git clone git@github.com:PascalAI2024/JarvisNano.git
 cd JarvisNano
 
-BOARD_VENDOR=waveshare \
-BOARD_NAME=esp32s3_touch_amoled_1_75 \
-./scripts/bootstrap.sh build
-
-./scripts/flash.sh
+./scripts/build-v5.sh
+./scripts/flash-v5.sh
 ```
 
-`flash.sh` preserves NVS and FATFS storage by default so Wi-Fi, Gemini, and
-JarvisMCP config survive normal firmware iteration. Use `STORAGE=1` only for a
-fresh install, partition-layout change, or deliberate wipe. Use `ERASE_NVS=1`
-when a bad saved config is causing trouble.
+`flash-v5.sh` preserves NVS by default so Wi-Fi, Gemini, and JarvisMCP config
+survive normal firmware iteration. Use `ERASE_NVS=1` when a bad saved config
+is causing trouble. The older `scripts/bootstrap.sh` path builds the leftover
+esp-claw overlay; it is not the v5 image.
 
 After flashing, use USB diagnostics first:
 
@@ -167,15 +159,14 @@ Key HTTP surfaces:
 
 | Endpoint | Purpose |
 |---|---|
-| `/api/status` | Boot/runtime health |
-| `/api/gemini/live` | Gemini Live state and control |
-| `/api/display/face` | Known face states: `idle`, `listen`, `think`, `speak`, `error`, `sleep` |
-| `/api/display/snapshot.json` | Display owner and mirror metadata |
-| `/api/display/snapshot.ppm` | Active display-owner software mirror |
-| `/api/ui/snapshot.ppm` | UI-layer framebuffer capture |
-| `/api/touch` | CST9217 touch health and last event |
-| `/api/audio/level` | Mic level sampler, paused while Gemini owns the mic |
-| `/api/tools/status` | Gemini/JarvisMCP configured state without exposing secrets |
+| `/api/cockpit` | Combined network, voice, tools, display, touch |
+| `/api/gemini/live` | Gemini / audio / tool counters |
+| `/api/display` | Display health |
+| `/api/display/snapshot.json` | Submission-mirror metadata |
+| `/api/display/snapshot.ppm` | Software mirror (not panel readback) |
+| `/api/touch` | CST9217 counters |
+| `/api/audio/taps` | Diagnostic tap metadata |
+| `/api/tools/config` | Redacted JarvisMCP status |
 
 See [docs/LIVE_DEVICE_DEBUG.md](docs/LIVE_DEVICE_DEBUG.md) for the acceptance
 commands and the known failure signatures.
@@ -187,89 +178,51 @@ setup and diagnostics. The dashboard should become Waveshare-first for v1:
 face preview, touch status, Gemini state, memory/tool health, masked config,
 and mobile/desktop visual QA.
 
-The WebSerial browser flasher in the existing dashboard is still the XIAO-era
-path unless a Waveshare firmware bundle is explicitly published. Developers
-should use the local build + `scripts/flash.sh` flow for Waveshare.
+The WebSerial button still serves a **legacy XIAO** blob. Flash Waveshare
+with `scripts/flash-v5.sh`.
 
 ## Current Status
 
-Waveshare runtime recovery is merged:
+v5 is the live image (`main/` + `components/jr_*`):
 
-- Direct CO5300 display primitive restored.
-- Boot is stable on preserve-mode flash in the current hardware lane.
-- Display software snapshots work for emote and UI owners.
-- Touch diagnostics route is live.
-- JarvisMCP config fields and masked tool status are present.
-- Gemini text/voice diagnostics exist, but physical voice quality and speaker
-  proof remain active QA items before v1 release.
+- Boots on the Waveshare 1.75" AMOLED (`docs/evidence/20260718-v5-boot.log`).
+- Gemini Live voice, baked reactive face, overlay HUD, choice arcs, watch
+  face, flip-to-mute, shake-to-cancel, attract reel.
+- API key rides `x-goog-api-key`, not the WebSocket query string.
+- Pairing token, wake word, BLE, and camera are not v1 blockers.
 
-The public release is not a finished consumer product yet. The release candidate
-requires two clean passes of the checklist in
-[docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md): clean build, preserve
-flash, wiped-storage flash, boot watch, display/touch/voice/JarvisMCP tests,
-dashboard setup, and secret scan.
+Doc index: [DOCUMENTATION_MAP.md](DOCUMENTATION_MAP.md). Release candidate
+checklist: [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
 
 ## Roadmap
 
-```mermaid
-timeline
-    title JarvisNano Waveshare-first roadmap
-    Phase 0 : Merge gpt recovery branch
-            : Clean build and public hygiene
-            : Display snapshot contract documented
-    Phase 1 : Dedicated CST9217 touch service
-            : Predictable display arbiter ownership
-            : Runtime screenshots for emote and UI
-    Phase 2 : Gemini Live voice and face binding
-            : ES7210 mic proof
-            : ES8311 speaker proof
-            : Tap-to-interrupt behavior
-    Phase 3 : NVS-only secrets
-            : JarvisMCP tool bridge
-            : On-device memory without secret extraction
-    Phase 4 : Pairing-token protected writes
-            : Waveshare-first dashboard setup
-            : Mobile and desktop visual QA
-    Phase 5 : Public v1 release candidate
-            : Docs, checklist, and repeatable hardware proof
-    Post-v1 : Android and BLE
-            : Battery and enclosure polish
-            : Camera and XIAO parity
-            : Optional BSP/LVGL migration
-```
-
-Full detail is in [docs/ROADMAP.md](docs/ROADMAP.md).
+Phases 0–4 of the glass/voice work shipped in July 2026. Open items are
+release-candidate proof on the connected board, pairing-token writes, and
+post-v1 WakeNet / BLE / camera. Full checkboxes: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Layout
 
 ```
 JarvisNano/
-├── boards/
-│   ├── waveshare/esp32s3_touch_amoled_1_75/  # primary v1 board
-│   └── seeed/xiao_esp32s3_sense/             # secondary camera/tiny-board track
-├── firmware/
-│   ├── components/                           # canonical firmware components
-│   ├── emote/                                # reactive face runtime
-│   ├── http_server/                          # diagnostic and control APIs
-│   ├── main/                                 # touch/demo integration
-│   ├── router_rules/                         # ESP-Claw event routing
-│   └── ui_layer/                             # cockpit/UI framebuffer layer
+├── boards/                                   # Waveshare + XIAO board YAMLs
+├── main/ + components/jr_*                   # live v5 firmware
+├── scripts/build-v5.sh + flash-v5.sh         # Docker IDF 5.5.4
+├── firmware/ + esp-claw/                     # leftover overlay (not in v5 image)
+├── dashboard/                                # browser cockpit
+├── android/                                  # companion, post-v1
+├── DOCUMENTATION_MAP.md
 ├── docs/
-│   ├── reference/                            # subsystem knowledge base
-│   ├── ARCHITECTURE.md
-│   ├── BUILD.md
-│   ├── LIVE_DEVICE_DEBUG.md
-│   ├── NEXT_SESSION.md
-│   ├── RELEASE_CHECKLIST.md
-│   └── ROADMAP.md
-├── dashboard/                                # browser cockpit and flasher
-├── scripts/                                  # bootstrap, flash, smoke, live QA
+│   ├── NEXT_SESSION.md + ROADMAP.md + BUILD.md
+│   ├── reference/                            # gotcha knowledge base
+│   ├── evidence/                             # hardware proof
+│   └── ARCHIVE/                              # superseded plans
+├── scripts/                                  # build-v5, flash-v5, live QA
 └── hardware/                                 # enclosure concepts
 ```
 
-Important: `scripts/bootstrap.sh` copies canonical sources into the ignored
-`esp-claw/` checkout on every build. Edit `firmware/`, `boards/`, and
-bootstrap patch functions, not generated copies under `esp-claw/`.
+v5 is `./scripts/build-v5.sh`. `scripts/bootstrap.sh` still overwrites
+`esp-claw/` from `firmware/` — only use that tree if you are touching the
+legacy overlay. Do not edit generated copies under `esp-claw/`.
 
 ## Security And Public Repo Hygiene
 

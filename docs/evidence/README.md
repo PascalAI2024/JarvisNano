@@ -32,5 +32,13 @@ intentional fixtures, not leaks.
 | `20260719-hud-speaking.png` | The 48-bar reactive waveform live on the panel at amplitude 246 — spoke length is driven by real playback audio, not a loop. Measured cost: 1.7 fps (18.0 -> 16.3), down from a 4 fps hit before per-strip culling was added. |
 | `20260719-hud-idle.png` | Idle breathing ring — the calm state. |
 | `20260719-thinking-spinner.png` | **STATE-03 on glass — the first element of the JarvisNano OS design to render on the physical panel.** A real panel-submission-mirror frame captured mid-THINKING: the baked reactor face underneath, the procedural dim cyan track ring at r=150, and the orbiting comet with its white-hot head. Verified numerically, not just visually — 0 cyan pixels on the r=150 ring when not thinking, 274 while thinking, clustered at 141-142 deg (a localized comet, not a ring artifact). |
+| `20260719-watch-face.png` | Ambient watch face (UI-01). |
+| `20260719-demo-reel.png` | Attract reel (`POST /api/demo`). |
+| `20260719-tap-ripple.png` | Touch ripple (TRANS-05). |
+| `20260719-live-caption.png` | Live captions on glass. |
+| `20260719-muted-caption.png` | MUTED status chip. |
+| `20260719-ask-real-gemini.png` | Real Gemini `ask_user` on glass. |
+| `20260719-ask-long-labels.png` | Long choice labels still hit-testable. |
+| `20260719-hud-listening.png` | Listening state on the baked face. |
 | `20260718-v5-boot-after-phase0.log` | The Phase 0 cleanup did not regress the device: identical boot path after removing the `jr_transport.c` placeholder, the `jr_vad_*` stub and `jr_dsp_resample_linear`, and after adding `hud_render.c` to the `jr_display` SRCS. |
 | `20260718-v5-boot.log` | v5 boots clean on the Waveshare 1.75" AMOLED: PSRAM 8 MB, SD mounted, CST9217 touch IRQ-driven, CO5300 466×466 @ 24 fps with 12-row internal DMA strips, emote assets mounted (3,929,405 / 6,619,121 bytes), faces 0/1/2 rendering, Wi-Fi associated, ES7210 MIC1+MIC2+MIC3 enabled, audio adc+dac+aec up, Gemini Live TLS + handshake → Listening, VAD firing. Two open issues visible: `sta disconnected (reason=2/205)` retries before association, and `transport_ws: Error transport_poll_write(0)` at ~23 s. |

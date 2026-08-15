@@ -1,6 +1,7 @@
 # Camera — current state + tomorrow plan
 
-Last updated: **2026-05-03**.
+Last updated: **2026-05-03**. **Post-v1 / XIAO only.** The Waveshare 1.75"
+v1 image has no camera path. Do not treat this file as a v5 blocker.
 
 ## TL;DR
 

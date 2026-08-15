@@ -18,29 +18,25 @@ target is the Waveshare ESP32-S3-Touch-AMOLED-1.75.
 - [ ] Run a clean Waveshare build:
 
   ```bash
-  BOARD_VENDOR=waveshare \
-  BOARD_NAME=esp32s3_touch_amoled_1_75 \
-  ./scripts/bootstrap.sh build
+  ./scripts/build-v5.sh
   ```
 
-- [ ] Run `./scripts/smoke-build.sh`.
-- [ ] Confirm generated firmware uses DIO flash mode for the CO5300/QSPI display
-      path.
-- [ ] Confirm no generated-source edits are required outside `bootstrap.sh`.
+- [ ] Confirm `build/jarvisrobot_v5.bin` exists and the flash args are DIO.
+- [ ] Confirm no generated-source edits under `build/` or `managed_components/`.
 
 ## 3. Flash And Boot
 
-- [ ] Flash in preserve mode with `./scripts/flash.sh`.
+- [ ] Flash in preserve mode with `./scripts/flash-v5.sh`.
 - [ ] Boot-watch for 5 minutes with no reboot loop.
 - [ ] Repeat once with wiped storage/NVS when intentionally validating a blank
       device:
 
   ```bash
-  ERASE_NVS=1 STORAGE=1 ./scripts/flash.sh
+  ERASE_NVS=1 ./scripts/flash-v5.sh
   ```
 
-- [ ] Capture serial boot through Wi-Fi, HTTP start, UI/display init, and
-      `app_claw_start`.
+- [ ] Capture serial boot through Wi-Fi, HTTP start, display init, and
+      Gemini listen. There is no `app_claw_start` on v5.
 - [ ] Confirm no panic, watchdog reset, or download-mode loop.
 
 ## 4. HTTP And Diagnostics
@@ -53,17 +49,14 @@ target is the Waveshare ESP32-S3-Touch-AMOLED-1.75.
   scripts/live-device.py report --host "$JARVIS_DEVICE_HOST"
   ```
 
-- [ ] Verify these routes:
-  - [ ] `/api/status`
-  - [ ] `/api/config` with sensitive fields masked/read-protected
-  - [ ] `/api/tools/status`
-  - [ ] `/api/touch`
-  - [ ] `/api/audio/level`
+- [ ] Verify these routes (see `docs/PROTOCOL.md`):
+  - [ ] `/api/cockpit`
   - [ ] `/api/gemini/live`
-  - [ ] `/api/display/face`
-  - [ ] `/api/display/snapshot.json`
+  - [ ] `/api/touch`
+  - [ ] `/api/display` and `/api/display/snapshot.json`
   - [ ] `/api/display/snapshot.ppm`
-  - [ ] `/api/ui/snapshot.ppm`
+  - [ ] `/api/tools/config` (redacted; pairing token as required)
+  - [ ] `/api/audio/taps`
 
 ## 5. Display And Touch
 
@@ -72,11 +65,10 @@ target is the Waveshare ESP32-S3-Touch-AMOLED-1.75.
       freshness, and `panel_readback:false`.
 - [ ] `/api/display/snapshot.ppm` captures the emote/software mirror without
       freezing later animation.
-- [ ] `/api/ui/snapshot.ppm` captures a cockpit/menu UI scene.
-- [ ] Physical short tap starts listening when idle.
-- [ ] Physical short tap ends input while listening.
-- [ ] Long press opens the cockpit/menu without crashing voice state.
-- [ ] Dismissal returns ownership to emote.
+- [ ] Overlay HUD (thinking comet, choice arcs, captions) is in the
+      snapshot when those states are active.
+- [ ] Physical short tap starts or interrupts listening.
+- [ ] Flip-to-mute and shake-to-cancel still work after the flash.
 
 ## 6. Voice
 
@@ -97,14 +89,14 @@ target is the Waveshare ESP32-S3-Touch-AMOLED-1.75.
 
 ## 7. Memory And JarvisMCP
 
-- [ ] Configure Gemini and JarvisMCP through NVS-backed `/api/config`; do not
-      commit or bake secrets.
+- [ ] Configure Gemini and JarvisMCP through NVS / pairing-gated
+      `/api/tools/config`; do not commit or bake secrets.
 - [ ] Readback never exposes raw keys or the private JarvisMCP URL.
-- [ ] `/api/tools/status` reports configured/unconfigured state without secrets.
+- [ ] `/api/tools/config` GET is redacted.
 - [ ] A Gemini tool call reaches JarvisMCP and returns a concise result.
 - [ ] Unconfigured, timeout, and unreachable JarvisMCP paths return a
       model-visible failure result without wedging the live session.
-- [ ] `claw_memory` stores local assistant facts but does not retain secrets.
+- [ ] On-device memory stores local assistant facts but does not retain secrets.
 
 ## 8. Security
 

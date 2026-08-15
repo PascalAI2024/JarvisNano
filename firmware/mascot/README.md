@@ -1,7 +1,7 @@
 # AMOLED mascot face — disc `.eaf` generation
 
 Produces the **center-disc mascot face** animation assets for the Waveshare
-AMOLED-1.75 board, per `docs/DISPLAY_UX_PLAN.md` §Phase 2A (RAW `.eaf` format +
+AMOLED-1.75 board, per `docs/ARCHIVE/DISPLAY_UX_PLAN.md` §Phase 2A (RAW `.eaf` format +
 `emit_eaf()` encoder) and §Phase 2B (composite layout: mascot is the 360×360
 center disc, art within ⌀352, corners transparent).
 

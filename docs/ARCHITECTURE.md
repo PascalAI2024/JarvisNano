@@ -1,7 +1,14 @@
 # Architecture
 
-JarvisNano is now organized around the Waveshare ESP32-S3-Touch-AMOLED-1.75
-desktop assistant path. The older XIAO/camera track remains supported, but it
+> **Live stack (2026-08-14):** v5 is a plain ESP-IDF app at `main/` +
+> `components/jr_*`. Root `CMakeLists.txt` does **not** compile `firmware/` or
+> `esp-claw/`. The diagram below still names the roles (voice, face, HTTP,
+> tools). Implementation names on v5 are `jr_audio`, `jr_display`,
+> `jr_transport` / Gemini Live, `jr_http`, `jr_imu`, `jr_power`. See
+> [`BUILD.md`](BUILD.md) and [`JARVISNANO_OS_PLAN.md`](JARVISNANO_OS_PLAN.md).
+
+JarvisNano is organized around the Waveshare ESP32-S3-Touch-AMOLED-1.75
+desktop assistant path. The older XIAO/camera track remains in-tree, but it
 does not define the v1 release architecture.
 
 ## Release Architecture
@@ -26,15 +33,14 @@ flowchart TB
         AudioSvc[audio codec path]
     end
 
-    subgraph Runtime[ESP-Claw application runtime]
-        Gemini[cap_gemini_live]
-        Face[reactive face / esp_emote_gfx]
-        UILayer[ui_layer cockpit]
-        Arbiter[display arbiter]
-        HTTP[HTTP diagnostics]
-        Config[NVS app_config]
-        Memory[claw_memory]
-        Tools[JarvisMCP bridge]
+    subgraph Runtime[v5 jr_* runtime]
+        Gemini[jr_transport Gemini Live]
+        Face[jr_display + rwave EAF]
+        HUD[hud_render overlays]
+        HTTP[jr_http]
+        Config[NVS]
+        Tools[jr_tools]
+        IMU[jr_imu / jr_power]
     end
 
     subgraph External[External clients and services]
@@ -65,9 +71,9 @@ flowchart TB
     Tools <--> MCP
     Config --> Gemini
     Config --> Tools
-    Face --> Arbiter
-    UILayer --> Arbiter
-    Arbiter --> DisplayHAL
+    Face --> DisplayHAL
+    HUD --> DisplayHAL
+    IMU --> HUD
     HTTP <--> Browser
     HTTP --> Face
     HTTP --> UILayer
@@ -80,50 +86,34 @@ flowchart TB
 
 ## Display Ownership
 
-The round display has two runtime producers:
-
-- `esp_emote_gfx` / reactive face for idle, listening, thinking, speaking,
-  error, and sleep states.
-- `ui_layer` for cockpit/menu scenes and diagnostics.
-
-They must not both push frames blindly. The display arbiter owns that handoff.
-
-```mermaid
-stateDiagram-v2
-    [*] --> EmoteOwner
-    EmoteOwner --> UiOwner: long press / local cockpit
-    UiOwner --> EmoteOwner: dismiss / timeout / sleep
-    EmoteOwner --> EmoteOwner: face state update
-    UiOwner --> UiOwner: scene redraw
-    EmoteOwner --> Error: flush timeout / mirror unavailable
-    UiOwner --> Error: framebuffer unavailable
-    Error --> EmoteOwner: recovered owner
-```
+v5 has one compositor. Baked `rwave_*.eaf` faces are the reactor art.
+`hud_render` draws only in the measured negative space (thinking comet,
+battery rim, choice arcs, captions). There is no `ui_layer` and no display
+arbiter. D1 in `JARVISNANO_OS_PLAN.md` killed the LVGL split.
 
 Snapshot routes report software mirrors, not physical panel readback:
 
 | Route | Source | Use |
 |---|---|---|
-| `/api/display/snapshot.json` | owner/mirror metadata | Fast health check |
-| `/api/display/snapshot.ppm` | active display owner, usually emote mirror | Face/runtime screenshot |
-| `/api/ui/snapshot.ppm` | `ui_layer` visible framebuffer | Cockpit/menu screenshot |
+| `/api/display` | display health | Fast check |
+| `/api/display/snapshot.json` | submission-mirror metadata | Freshness / size |
+| `/api/display/snapshot.ppm` | software mirror | Face + overlay screenshot |
 
 `panel_readback:false` is intentional. If the panel and snapshot disagree, the
-bug is in owner transfer, stale mirror freshness, or a physical flush path. Do
-not treat the software mirror as panel truth.
+bug is in the compositor or the flush path, not a second owner. There is no
+`/api/ui/snapshot.ppm` on v5.
 
 ## Voice Turn
 
-Gemini Live is the primary interaction loop for Waveshare v1. Manual touch
-start/end is the first stable path; hands-free VAD follows after that path is
-boring.
+Gemini Live is the primary loop. v5 is always-ready listen (`VOICE_ALWAYS_READY`),
+not tap-to-talk first. Playback is locked to the 16 kHz capture clock.
 
 ```mermaid
 sequenceDiagram
     participant U as User
     participant T as Touch service
     participant A as ES7210 mic
-    participant GL as cap_gemini_live
+    participant GL as jr_transport Gemini Live
     participant F as Face state
     participant G as Gemini Live API
     participant S as ES8311 speaker
@@ -227,29 +217,24 @@ It returns a short failure result to the model.
 
 ## Build Boundary
 
-Canonical sources live in this repo under `firmware/`, `boards/`, and
-`scripts/bootstrap.sh`. The ignored `esp-claw/` checkout is generated on every
-bootstrap/build.
+Canonical v5 sources are `main/`, `components/jr_*`, and `boards/`.
+`scripts/build-v5.sh` runs pinned ESP-IDF 5.5.4 in Docker and produces
+`build/jarvisrobot_v5.bin`. `firmware/` + `scripts/bootstrap.sh` + ignored
+`esp-claw/` is the leftover overlay and is not this image.
 
 ```mermaid
 flowchart LR
-    Canonical[Tracked JarvisNano sources]
-    Bootstrap[scripts/bootstrap.sh]
-    EspClaw[ignored esp-claw checkout]
-    Build[idf.py build]
-    Flash[scripts/flash.sh]
+    Canonical[main/ + components/jr_* + boards/]
+    Build[scripts/build-v5.sh]
+    Image[build/jarvisrobot_v5.bin]
+    Flash[scripts/flash-v5.sh]
     Device[Waveshare board]
 
-    Canonical --> Bootstrap
-    Bootstrap --> EspClaw
-    EspClaw --> Build
-    Build --> Flash
+    Canonical --> Build
+    Build --> Image
+    Image --> Flash
     Flash --> Device
 ```
-
-Edits made only under `esp-claw/` are disposable. If a generated file must be
-changed, add an idempotent patch function to `scripts/bootstrap.sh` or patch the
-canonical source that gets copied into the generated tree.
 
 ## Post-v1 Tracks
 

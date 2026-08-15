@@ -38,19 +38,17 @@ USB-C:             ESP32-S3 native USB-Serial-JTAG
 From the repo root:
 
 ```bash
-BOARD_VENDOR=waveshare \
-BOARD_NAME=esp32s3_touch_amoled_1_75 \
-./scripts/bootstrap.sh build
+./scripts/build-v5.sh
 ```
 
 ## Flash
 
 ```bash
-./scripts/flash.sh
+./scripts/flash-v5.sh
 ```
 
-The script preserves storage by default. Use `STORAGE=1` for a first install or
-intentional wipe, and `ERASE_NVS=1` when saved config is bad.
+The script preserves NVS by default. Use `ERASE_NVS=1` when saved config is
+bad.
 
 The board can land in ROM download mode if a host hard reset samples the boot
 strap incorrectly. Prefer the repo flash path and monitor without reset-line

@@ -688,7 +688,9 @@
     <div class="install-box">
       <esp-web-install-button manifest="firmware/manifest.json"></esp-web-install-button>
       <div class="fallback">
-        Button unavailable? Download <a href="firmware/jarvis-xiao-esp32s3-sense.bin">jarvis-xiao-esp32s3-sense.bin</a> and flash with <code>esptool.py --chip esp32s3 write_flash 0 jarvis-xiao-esp32s3-sense.bin</code>.
+        This browser button still points at a <strong>legacy XIAO</strong> image.
+        The live Waveshare v5 board is flashed with <code>./scripts/flash-v5.sh</code>
+        from a local <code>build/jarvisrobot_v5.bin</code>, not this blob.
       </div>
     </div>
   </div>

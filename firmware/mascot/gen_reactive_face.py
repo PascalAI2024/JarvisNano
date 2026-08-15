@@ -6,7 +6,7 @@ This produces FOUR looping EAF files — one per face state — for the
 all motion is in these pre-rendered frames (the engine has no canvas widget — a
 CPU-drawn RGB565A8 buffer spirals on the CO5300 panel, proven empirically). The
 runtime code (firmware/emote/reactive_face.c) only selects which baked frames to
-loop, using the live audio amplitude. See docs/REACTIVE_FACE_PLAN.md.
+loop, using the live audio amplitude. See docs/ARCHIVE/REACTIVE_FACE_PLAN.md.
 
 DESIGN (2026-06-10 redesign): "arc-reactor HUD ring" in Stark cyan/ice-blue.
 Shared anatomy across all four states so transitions feel coherent: outer tick

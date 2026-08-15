@@ -42,7 +42,7 @@
  *   gfx_obj_align(obj, GFX_ALIGN_CENTER, 0, 0)  core/gfx_obj.h
  *   emote_set_obj_visible / emote_set_anim_visible / emote_lock / emote_unlock  emote_api.h
  *
- * See docs/REACTIVE_FACE_PLAN.md for the full design + open questions.
+ * See docs/ARCHIVE/REACTIVE_FACE_PLAN.md for the full design + open questions.
  */
 
 #include "emote.h"   /* public face API: emote_face_state_t + emote_face_* (in include/) */

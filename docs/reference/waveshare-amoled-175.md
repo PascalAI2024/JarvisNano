@@ -67,7 +67,8 @@ is a real, wake-capable GPIO; the AXP IRQ and IMU INT1 are behind the TCA9554 IO
 | `AXP_IRQ` | `EXIO5` (TCA9554 pin 5) | **No** — behind I²C expander | PMIC IRQ (power-button/low-batt) is NOT a direct deep-sleep wake source |
 | `PWRON` | AXP2101 PWRON pin (not an ESP GPIO) | n/a | Physical power button handled internally by the AXP2101 (long-press off/on) |
 
-Consequences for the upgrade plan (`docs/UPGRADE_RESEARCH.md` §2.2 / §2.4 / §7):
+Consequences for sleep/wake (historical write-up:
+`docs/ARCHIVE/UPGRADE_RESEARCH.md` §2.2 / §2.4 / §7):
 - **IMU wake-on-motion is viable** — route the QMI8658 motion engine to **INT2 → GPIO21**,
   and use GPIO21 as the EXT0/EXT1 deep-sleep wake source.
 - **The AXP power-button cannot directly wake the ESP from deep sleep** (its IRQ is on

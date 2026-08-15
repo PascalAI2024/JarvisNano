@@ -1,8 +1,12 @@
 # Build Toolchain
 
-**What it is** — The build environment for JarvisRobot firmware: ESP-IDF `v5.5.4` in the `espressif/idf:v5.5.4` Docker image (pinned as `IDF_IMAGE` in `scripts/bootstrap.sh`), patched with `tools/esp-idf.patch`, with two version pins that must be applied before every build.
+> **Live recipe is [`docs/BUILD.md`](../BUILD.md)** (`./scripts/build-v5.sh`).
+> The pins below still apply. The `bootstrap.sh` / `esp-claw` narrative is the
+> leftover overlay, not the v5 image.
 
-**How we use it here** — `scripts/bootstrap.sh` orchestrates the build: it clones or validates `esp-claw`, applies patches, installs Python deps, and calls `idf.py build` inside the container. The flash path invokes `esptool.py` via the same container.
+**What it is** — ESP-IDF `v5.5.4` in `espressif/idf:v5.5.4`, plus
+`idf-component-manager==2.4.10` and `esp-bmgr-assist==0.5.0` before every
+container build. v5 uses those same pins inside `scripts/build-v5.sh`.
 
 ---
 

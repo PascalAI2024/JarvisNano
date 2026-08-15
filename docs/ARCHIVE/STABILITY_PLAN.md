@@ -260,7 +260,8 @@ touch-init cure, and the interactive `ui_layer` all landed today. Detailed
 design + evidence live in the new reference pages:
 [aec-barge-in.md](reference/aec-barge-in.md),
 [voice-remediation-2026-06-13.md](reference/voice-remediation-2026-06-13.md),
-[reliability-and-ui-2026-06-13.md](reference/reliability-and-ui-2026-06-13.md).
+[reliability-and-ui-2026-06-13.md](reference/reliability-and-ui-2026-06-13.md)
+(now under `docs/ARCHIVE/reference/`).
 
 ### Commits landed (chronological)
 
@@ -315,6 +316,7 @@ the generated `sdkconfig`).
 The board is connected over USB but was not on Wi-Fi, so none of today's landing
 is hardware-verified. After flashing the WS-resume fix, run the on-device
 checklist in [reliability-and-ui-2026-06-13.md](reference/reliability-and-ui-2026-06-13.md) §5
+(archived)
 plus: **(1)** WS-resume mid-SPEAKING (force a transport abort during a long
 reply; next turn must get audio within ~1 s, not after ~20 s) — confirm via
 `/api/gemini/live` that `ws_resume_count` incremented AND `audio_parts > 0`;

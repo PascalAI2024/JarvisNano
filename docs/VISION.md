@@ -24,7 +24,9 @@ and an interactive, animated, round-native UI.
 
 Everything is built on **silicon already soldered to the board** — the QMI8658 IMU, AXP2101 PMIC,
 PCF85063 RTC, and a 2-mic AEC array — that today's firmware doesn't yet use. The vision is mostly a
-*firmware + design* effort, not a hardware redesign. See [`UPGRADE_RESEARCH.md`](UPGRADE_RESEARCH.md).
+*firmware + design* effort, not a hardware redesign. Historical silicon
+research: [`ARCHIVE/UPGRADE_RESEARCH.md`](ARCHIVE/UPGRADE_RESEARCH.md)
+(LVGL split is superseded — see D1 in [`JARVISNANO_OS_PLAN.md`](JARVISNANO_OS_PLAN.md)).
 
 ---
 
@@ -74,9 +76,9 @@ That's the product. Eight beats, every one of them delightful.
 | Voice | ✅ WiFi-direct Gemini Live (16 k in / 24 k out), on-device VAD, on-device brain | wake-word entry, command words |
 | Face | ✅ reactive waveform (baked `.aaf` + `gfx_motion`) | full state-driven UI + transitions |
 | Screen | animated face only | watch face, menus, choice arcs, cards (LVGL @ 200–300 fps) |
-| Motion | ❌ QMI8658 disabled | tap / lift / flip / shake (hardware engines) |
-| Power | always full | 4 moods (AXP2101 rails + ESP sleep), lift-to-wake |
-| Battery | reads chip but ADC off | enable ADC → real %, low-batt UX |
+| Motion | ✅ flip-to-mute, shake-to-cancel, lift-to-wake | QMI8658 INT2 engines (no poll) |
+| Power | ✅ 4 moods (dim + rest; no rail cut / no deep sleep yet) | AXP rails + ESP deep sleep |
+| Battery | ✅ AXP2101 fuel gauge | low-batt UX polish |
 
 **Architecture stays put:** the device talks to Gemini Live directly over WiFi. No phone brain, no
 BLE audio service. (On-phone Gemma is a *future* privacy option, out of scope.)
@@ -88,11 +90,13 @@ BLE audio service. (On-phone Gemma is a *future* privacy option, out of scope.)
 3. QMI8658 enable → gestures + lift-to-wake (INT2 on `GPIO21`, schematic-confirmed)
 4. Ambient watch face
 5. "Hey Jarvis" wake word (esp-sr WakeNet + the on-board AEC)
-6. LVGL interactive layer — choice arcs, cards, radial menu
+6. Overlay compositor — choice arcs, cards, radial menu (LVGL was cut; see D1)
 7. State-driven UI + transitions
 8. Personality + polish
 
-Full detail, code, and library recs in [`UPGRADE_RESEARCH.md`](UPGRADE_RESEARCH.md). Every vendor
+Shipped July 2026: items 3–4 and 6–8 in v5 (watch face, gestures, choice
+arcs). Item 5 (wake word) is still the Phase 5 gate. Historical research:
+[`ARCHIVE/UPGRADE_RESEARCH.md`](ARCHIVE/UPGRADE_RESEARCH.md). Every vendor
 datasheet, the board schematic, and the official Waveshare driver examples are mirrored locally
 under [`docs/reference/vendor/`](reference/vendor/INDEX.md) (incl. ESP-IDF reference code for the
 AXP2101 ADC read and QMI8658 wake-on-motion — the first two build steps).

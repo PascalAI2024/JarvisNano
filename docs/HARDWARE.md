@@ -1,6 +1,10 @@
 # Hardware
 
-Pin map, schematic, BOM, and wiring diagrams for each phase.
+> **v1 board is Waveshare.** Pin-accurate Waveshare notes:
+> [`boards/waveshare/esp32s3_touch_amoled_1_75/README.md`](../boards/waveshare/esp32s3_touch_amoled_1_75/README.md)
+> and [`reference/waveshare-amoled-175.md`](reference/waveshare-amoled-175.md).
+> The body below is the older **XIAO ESP32-S3 Sense** map. Do not wire a
+> Waveshare board from the XIAO GPIO table.
 
 JarvisNano supports two boards. This file documents the **XIAO ESP32-S3 Sense**
 (the original target) in full. The **Waveshare ESP32-S3-Touch-AMOLED-1.75** has
