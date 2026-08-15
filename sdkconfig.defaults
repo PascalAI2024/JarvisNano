@@ -22,6 +22,12 @@ CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 
+# --- External task stacks: sampler, touch, tools, and websocket workers are
+#     task-context code and must live in PSRAM. Keep their stacks out of the
+#     DMA-constrained internal heap reserved for voice, codec, and TLS AES. ---
+CONFIG_FREERTOS_SUPPORT_STATIC_ALLOCATION=y
+CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
+
 # --- Partition table: hand-written 16 MB CSV, NO heredoc/codegen (hardware.md
 #     #8). Table ends flush at 0x1000000. ---
 CONFIG_PARTITION_TABLE_CUSTOM=y

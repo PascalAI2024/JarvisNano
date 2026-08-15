@@ -27,6 +27,10 @@ if [ ! -f sdkconfig ] || [ "$RECONFIGURE" = "1" ]; then
     idf.py set-target esp32s3
 fi
 idf.py gen-bmgr-config -c ./boards -b "$BOARD_NAME"
+# gen-bmgr-config removes sdkconfig so its board defaults cannot pollute the
+# first configuration pass. Recreate the project config before the bridge
+# synchronizes the generated CONFIG_ESP_BOARD_* symbols.
+idf.py reconfigure
 python3 scripts/sync-v5-sdkconfig.py
 idf.py reconfigure
 python3 scripts/patch-v5-managed.py
