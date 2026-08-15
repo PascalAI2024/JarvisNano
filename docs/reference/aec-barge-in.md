@@ -629,7 +629,7 @@ detector + `activityStart`) shipped. Server VAD stays behind `GL_USE_SERVER_VAD=
 | `esp-claw/.../espressif__esp_codec_dev/test_apps/codec_dev_test/main/test_board.c:1164-1169` | Canonical 4-channel ES7210 open precedent. |
 | `esp-claw/.../espressif__esp_board_manager/peripherals/periph_i2s/periph_i2s.c:101` | `I2S_CHANNEL_DEFAULT_CONFIG` → 6×240-frame TX DMA pool = 90 ms. |
 | `scripts/bootstrap.sh:64-80,2560-2612` | Canonical-source copy rule; full 16 MB partition table incl. 64 K coredump tail. Verified locally. |
-| `docs/STABILITY_PLAN.md` P2.1–P2.4, P3.1–P3.4 | Post-sprint architecture this design plugs into. |
+| `docs/ARCHIVE/STABILITY_PLAN.md` P2.1–P2.4, P3.1–P3.4 | Post-sprint architecture this design plugs into. |
 | [esp-sr AEC README](https://docs.espressif.com/projects/esp-sr/en/latest/esp32s3/acoustic_echo_cancellation/README.html) | Modes, NLP levels, resource table, frame sizes. Fetch-verified in 2026-06-12 research pass. |
 | [esp_aec.h](https://raw.githubusercontent.com/espressif/esp-sr/master/include/esp32s3/esp_aec.h) | `aec_config_t`, 16 kHz requirement, buffer alignment, `filter_length=4` guidance. Fetch-verified in research pass. |
 | [esp-sr CHANGELOG](https://raw.githubusercontent.com/espressif/esp-sr/master/CHANGELOG.md) | 2.4.3 FD modes; 2.4.5 S3/IDF-5.5.x fixes; 2.4.6 current. Fetch-verified in research pass. |
@@ -687,4 +687,56 @@ detector + `activityStart`) shipped. Server VAD stays behind `GL_USE_SERVER_VAD=
 - [gemini-live-api.md](./gemini-live-api.md) — WS protocol, model ids, 16/24 kHz contract.
 - [waveshare-amoled-175.md](./waveshare-amoled-175.md) — board hardware context (PA, PMIC, interrupts).
 - [build-toolchain.md](./build-toolchain.md) — component-manager pins, bootstrap copy rules.
-- `docs/STABILITY_PLAN.md` — the sprint this design layers onto (P2.x preconditions, P3.x tasks).
+- `docs/ARCHIVE/STABILITY_PLAN.md` — the sprint this design layers onto (P2.x preconditions, P3.x tasks).
+
+## 2026-08-15 — the VAD was judging the amplified uplink buffer (measured)
+
+The long-OWED "decouple the make-up gain from the VAD" item now has numbers.
+
+`src_read` (`components/jr_audio/src/jr_audio.c`) returns ONE buffer. It is the
+AEC-clean signal multiplied by `GL_OUT_GAIN_Q8` (6x) so Gemini can hear the
+user — and until now the turn policy judged that same amplified buffer, which
+scales the room's noise bed up along with the voice.
+
+Measured on the board, quiet room, 60 s (`/api/cockpit`):
+
+| domain | min | median | max | vs onset 85 |
+| --- | --- | --- | --- | --- |
+| amplified (what the VAD judged) | 104.9 | **132** | 361.6 | **always above** → permanent false "speech" |
+| clean (pre-gain) | 17.5 | **22** | 60.3 | always below → correctly silent |
+
+So an idle device believed someone was talking continuously. Consequences: the
+session never drained, `user_busy` pinned the mood ladder to AWAKE (the clock
+and dim states effectively never showed), and a Live session stayed open on
+quota indefinitely.
+
+**What shipped.** `jr_turn_policy_eval()` is now a thin wrapper over a new
+`jr_turn_policy_eval_rms()` — the frame was only ever used to derive one RMS —
+so the composition root can feed a better-scaled RMS without a second buffer or
+a re-measure. `jr_audio_clean_rms()` publishes the pre-gain RMS. The uplink is
+untouched: Gemini still receives the 6x signal.
+
+**Default is OFF.** Flip live, no reflash:
+
+```
+POST /api/debug/gain?vadclean=1     # header: X-JarvisNano-Control: 1
+```
+
+`/api/cockpit` reports `clean_rms` and `vad_clean` alongside `mic_rms`.
+
+**Still owed — needs a real voice.** Thresholds (onset 85 / offset 48) stay put,
+which is only correct if speech in the CLEAN domain still clears 85. A quiet room
+reads 22 there. A second sample taken while the room was ACTIVE read 33-178 —
+but that was ambient activity, **not** a calibrated speak-into-the-device test,
+and much of that window sat at 60-80, i.e. BELOW the 85 onset. Do not read
+"60-178" as evidence that a voice clears the gate; it is not.
+
+If a normal speaking voice lands under 85 in the clean domain the device goes
+deaf, which is worse than the bug being fixed. The calibration is therefore:
+flip `vadclean=1`, speak to it normally, and watch `clean_rms` while talking.
+Only if speech sustains above 85 (and turns still commit) should the default
+change. This is the same live-tune that took v4 six builds; do not shortcut it.
+
+Note also that `mic_rms` in `/api/cockpit` reports whichever RMS the policy
+actually used, so it silently becomes the clean value while `vad_clean` is true.
+Compare `clean_rms` across the flip, not `mic_rms`.

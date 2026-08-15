@@ -8,6 +8,39 @@
 
 ## Findings & gotchas
 
+**[2026-08-14] Panel commands may ONLY be issued from the render task — brightness included**
+
+The CO5300 frame flush and every other panel command (`set_brightness`, and any
+future `esp_lcd_panel_*` call) are transactions on the **same QSPI device**. v5
+deliberately has no display arbiter — `ARCHITECTURE.md` "Display Ownership" —
+so nothing catches a second writer. Issuing a panel command from another task
+races the flush and breaks the SPI bus acquire/release pairing:
+
+```
+E bus_lock: spi_bus_lock_acquire_end(755): Cannot release a lock that hasn't been acquired.
+assert failed: spi_device_release_bus spi_master.c:1413 (ret == ESP_OK)
+```
+
+Proven on hardware 2026-08-14: a mood-driven brightness ramp called
+`jr_display_set_brightness()` from the **voice task**, and the crash landed
+inside `panel_co5300_draw_bitmap` on the render task, mid-flush.
+
+**The pattern to follow** (see `jr_display.c`, `brightness_pump`): a public
+setter must only publish an atomic *target*; the value is applied from
+`panel_flush`, which runs on the gfx render task with the previous DMA already
+completed and the bus idle. Two properties come free and both matter — the
+caller may be any task at any rate, and the pump short-circuits unchanged
+values. Without that short-circuit an unconditional per-tick write produced
+**889 identical panel writes in 100 s (8.9/s)**, which both drowned the serial
+console and multiplied the race window ~9× per second.
+
+Note this rule is broader than the older `emote_lock` guidance in
+`ARCHIVE/ANIMATION_OPTIMIZATION.md` §4.3: that mutex serializes `gfx_*` calls
+and does **not** protect the QSPI bus from a raw `esp_lcd_*` command.
+
+Evidence: `docs/evidence/20260814-mood-rtc-flash-report.md` (decoded backtrace,
+before/after write counts).
+
 **[2026-05-21] There is NO `gfx_canvas` widget — runtime CPU-drawn buffers do not work**
 
 `esp_emote_gfx`'s `include/widget/` contains: `gfx_anim.h`, `gfx_img.h`, `gfx_label.h`, `gfx_button.h`, `gfx_qrcode.h`, `gfx_motion.h`, `gfx_motion_scene.h`, `gfx_mesh_img.h`. There is **no `gfx_canvas`**.
@@ -79,7 +112,7 @@ Source: `esp_emote_gfx/scripts/` (local managed component copy).
 
 ## Animation Performance: Known Issues & Fixes (2026-05-23)
 
-> Full analysis: **[docs/ANIMATION_OPTIMIZATION.md](../ANIMATION_OPTIMIZATION.md)**
+> Full analysis: **[docs/ARCHIVE/ANIMATION_OPTIMIZATION.md](../ARCHIVE/ANIMATION_OPTIMIZATION.md)**
 
 ### 🔴 Root causes of choppy/noisy animation (in priority order)
 
