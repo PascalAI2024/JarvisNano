@@ -740,3 +740,26 @@ change. This is the same live-tune that took v4 six builds; do not shortcut it.
 Note also that `mic_rms` in `/api/cockpit` reports whichever RMS the policy
 actually used, so it silently becomes the clean value while `vad_clean` is true.
 Compare `clean_rms` across the flip, not `mic_rms`.
+
+### CALIBRATED + ON BY DEFAULT (2026-08-15, same day)
+
+Measured against Pascal's actual voice on the board:
+
+| | clean-domain RMS |
+| --- | --- |
+| ambient room | 21 - 60 (occasional spike ~105) |
+| **onset gate** | **85** |
+| his speaking voice | **188 - 208** |
+
+The gate sits cleanly between the two, so `vadclean` is now **ON by default**.
+
+What the bug actually cost: judging the amplified buffer, ambient alone read
+200-630 and **never fell below the silence threshold (48)**. Speech latched on
+at boot and never ended, so no turn was ever committed — the device answered
+nothing while looking perfectly healthy (armed, capturing, socket open, phase
+stuck in `Listening`, `vad_starts` frozen). Symptom reported as "nothing
+happens". Enabling the clean signal produced immediate
+`Listening -> Thinking -> Speaking` cycles on the same hardware, and after a
+reboot a quiet room holds `vad_starts=0` instead of latching.
+
+Revert live if ever needed: `POST /api/debug/gain?vadclean=0`.

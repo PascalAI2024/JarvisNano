@@ -447,11 +447,24 @@ static bool s_mood_rest_disarmed;
  * "the user flipped the puck face-down" (tap must NOT undo). */
 static bool s_flip_muted;
 /* T12: judge voice activity on the AEC-clean (pre-uplink-gain) RMS instead of
- * the 6x-amplified buffer. Measured on hardware 2026-08-15, ambient room:
- * amplified median 132 (onset is 85 -> permanent false "speech"), clean median
- * 22. Default OFF so the shipped behaviour is unchanged until it is calibrated
- * against a real voice; flip live with POST /api/debug/gain?vadclean=1. */
-static _Atomic bool s_vad_use_clean;
+ * the 6x-amplified buffer, which scales the room's noise bed up with the voice.
+ *
+ * CALIBRATED ON HARDWARE against Pascal's actual voice, 2026-08-15:
+ *
+ *   ambient room   21 - 60   (occasional spike ~105)
+ *   his speech    188 - 208
+ *   onset gate     85        <- sits cleanly between the two
+ *
+ * Before this, the VAD judged the amplified buffer, where ambient alone read
+ * 200-630 and NEVER fell under the silence threshold (48). Speech therefore
+ * latched on and never ended, so no turn was ever committed and the device
+ * answered nothing while looking perfectly healthy: armed, capturing, socket
+ * open, phase stuck in Listening. Enabling this produced immediate
+ * Listening -> Thinking -> Speaking cycles on the same hardware.
+ *
+ * Default ON. Revert live, without a reflash, via
+ * POST /api/debug/gain?vadclean=0 (header X-JarvisNano-Control: 1). */
+static _Atomic bool s_vad_use_clean = true;
 static uint8_t s_bright_now = 100;
 static uint8_t s_bright_tgt = 100;
 static bool s_rtc_seeded_os;
