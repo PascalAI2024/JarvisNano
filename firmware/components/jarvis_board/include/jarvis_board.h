@@ -19,6 +19,7 @@ typedef struct {
 } jarvis_board_display_t;
 
 esp_err_t jarvis_board_display_get(jarvis_board_display_t *out_display);
+esp_err_t jarvis_board_set_brightness(uint8_t percent);
 
 #ifdef __cplusplus
 }

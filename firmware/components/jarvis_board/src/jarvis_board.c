@@ -59,6 +59,17 @@ static SemaphoreHandle_t jarvis_board_lock(void)
     return s_lock;
 }
 
+esp_err_t jarvis_board_set_brightness(uint8_t percent)
+{
+    if (!s_display_ready || s_display.panel == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (percent > 100) {
+        percent = 100;
+    }
+    return esp_lcd_panel_co5300_set_brightness(s_display.panel, percent);
+}
+
 esp_err_t jarvis_board_display_get(jarvis_board_display_t *out_display)
 {
     ESP_RETURN_ON_FALSE(out_display, ESP_ERR_INVALID_ARG, TAG, "out_display is NULL");
