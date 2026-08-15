@@ -1,0 +1,106 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Host tests for the four-mood rest ladder. No ESP-IDF.
+ */
+#include "unity.h"
+#include "jr_core/mood.h"
+
+static void test_mood_starts_awake(void)
+{
+    jr_mood_state_t s;
+    jr_mood_reset(&s, 0);
+    jr_mood_in_t in = { .now_ms = 100 };
+    jr_mood_out_t o = jr_mood_step(&s, &in);
+    TEST_ASSERT_EQUAL(JR_MOOD_AWAKE, o.mood);
+    TEST_ASSERT_EQUAL_UINT8(100, o.brightness);
+    TEST_ASSERT_TRUE(o.voice_armed);
+    TEST_ASSERT_FALSE(o.clock_on);
+}
+
+static void test_mood_still_climbs_ambient_whisper_dream(void)
+{
+    jr_mood_state_t s;
+    jr_mood_reset(&s, 0);
+    jr_mood_in_t in = {0};
+
+    in.now_ms = JR_MOOD_AMBIENT_MS - 1;
+    TEST_ASSERT_EQUAL(JR_MOOD_AWAKE, jr_mood_step(&s, &in).mood);
+
+    in.now_ms = JR_MOOD_AMBIENT_MS;
+    jr_mood_out_t amb = jr_mood_step(&s, &in);
+    TEST_ASSERT_EQUAL(JR_MOOD_AMBIENT, amb.mood);
+    TEST_ASSERT_TRUE(amb.clock_on);
+    TEST_ASSERT_TRUE(amb.voice_armed);
+    TEST_ASSERT_EQUAL_UINT8(48, amb.brightness);
+    TEST_ASSERT_TRUE(amb.changed);
+
+    in.now_ms = JR_MOOD_WHISPER_MS;
+    jr_mood_out_t wh = jr_mood_step(&s, &in);
+    TEST_ASSERT_EQUAL(JR_MOOD_WHISPER, wh.mood);
+    TEST_ASSERT_FALSE(wh.voice_armed);
+    TEST_ASSERT_EQUAL_UINT8(22, wh.brightness);
+
+    in.now_ms = JR_MOOD_DREAM_MS;
+    jr_mood_out_t dr = jr_mood_step(&s, &in);
+    TEST_ASSERT_EQUAL(JR_MOOD_DREAM, dr.mood);
+    TEST_ASSERT_FALSE(dr.voice_armed);
+    TEST_ASSERT_EQUAL_UINT8(8, dr.brightness);
+}
+
+static void test_mood_motion_wakes(void)
+{
+    jr_mood_state_t s;
+    jr_mood_reset(&s, 0);
+    jr_mood_in_t in = { .now_ms = JR_MOOD_DREAM_MS };
+    TEST_ASSERT_EQUAL(JR_MOOD_DREAM, jr_mood_step(&s, &in).mood);
+
+    in.now_ms = JR_MOOD_DREAM_MS + 50;
+    in.moving = true;
+    jr_mood_out_t o = jr_mood_step(&s, &in);
+    TEST_ASSERT_EQUAL(JR_MOOD_AWAKE, o.mood);
+    TEST_ASSERT_TRUE(o.voice_armed);
+    TEST_ASSERT_TRUE(o.changed);
+}
+
+static void test_mood_busy_holds_awake(void)
+{
+    jr_mood_state_t s;
+    jr_mood_reset(&s, 0);
+    jr_mood_in_t in = {
+        .now_ms = JR_MOOD_DREAM_MS,
+        .user_busy = true,
+    };
+    TEST_ASSERT_EQUAL(JR_MOOD_AWAKE, jr_mood_step(&s, &in).mood);
+}
+
+static void test_mood_face_down_is_dream(void)
+{
+    jr_mood_state_t s;
+    jr_mood_reset(&s, 0);
+    jr_mood_in_t in = { .now_ms = 200, .face_down = true };
+    jr_mood_out_t o = jr_mood_step(&s, &in);
+    TEST_ASSERT_EQUAL(JR_MOOD_DREAM, o.mood);
+    TEST_ASSERT_FALSE(o.voice_armed);
+}
+
+static void test_mood_poke_awake_resets_still(void)
+{
+    jr_mood_state_t s;
+    jr_mood_reset(&s, 0);
+    jr_mood_in_t in = { .now_ms = JR_MOOD_DREAM_MS };
+    (void)jr_mood_step(&s, &in);
+    jr_mood_poke_awake(&s, JR_MOOD_DREAM_MS + 10);
+    in.now_ms = JR_MOOD_DREAM_MS + 20;
+    TEST_ASSERT_EQUAL(JR_MOOD_AWAKE, jr_mood_step(&s, &in).mood);
+}
+
+void mood_tests_run(void)
+{
+    RUN_TEST(test_mood_starts_awake);
+    RUN_TEST(test_mood_still_climbs_ambient_whisper_dream);
+    RUN_TEST(test_mood_motion_wakes);
+    RUN_TEST(test_mood_busy_holds_awake);
+    RUN_TEST(test_mood_face_down_is_dream);
+    RUN_TEST(test_mood_poke_awake_resets_still);
+}

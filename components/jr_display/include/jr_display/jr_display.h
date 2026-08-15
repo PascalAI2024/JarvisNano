@@ -213,6 +213,13 @@ void jr_display_ripple(int x, int y);
  * ask wins); renders UNDER the caption so status text stays readable. */
 void jr_display_clock_set(bool on, int hh, int mm);
 
+/* CO5300 panel brightness 0..100. Safe to call from ANY task at ANY rate: this
+ * only publishes a target, which the render task applies during its next flush.
+ * The panel command must not be issued off the render task — it shares one QSPI
+ * device with the frame flush and racing it asserts in spi_device_release_bus.
+ * No-op until the presenter is ready. */
+esp_err_t jr_display_set_brightness(uint8_t percent);
+
 #ifdef __cplusplus
 }
 #endif

@@ -12,6 +12,7 @@ idf_component_register(
         "src/monitors.c"
         "src/snapshot.c"
         "src/orchestrator.c"
+        "src/mood.c"
     INCLUDE_DIRS "include"
     REQUIRES jr_ports jr_dsp
 )

@@ -24,6 +24,7 @@
 #include <stdatomic.h>
 #include <ctype.h>
 #include <time.h>
+#include <sys/time.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -44,6 +45,7 @@
 #include "jr_display/jr_display.h"
 #include "jr_display/hud_render.h"
 #include "jr_core/session.h"
+#include "jr_core/mood.h"
 #include "jr_core/orchestrator.h"
 #include "jr_core/snapshot.h"
 #include "jr_core/turn_policy.h"
@@ -56,6 +58,7 @@
 #include "jr_transport/gemini_device_ws.h"
 #include "jr_imu/jr_imu.h"
 #include "jr_power/jr_power.h"
+#include "jr_rtc/jr_rtc.h"
 
 static const char *TAG = "jarvis_v5";
 
@@ -435,6 +438,18 @@ typedef enum {
 
 static _Atomic int s_voice_control_request;
 static _Atomic bool s_voice_privacy_paused;
+static jr_mood_state_t s_mood;
+static _Atomic uint8_t s_mood_id;
+static _Atomic uint8_t s_mood_brightness;
+static bool s_mood_rest_disarmed;
+/* Hoisted out of the IMU block in voice_task: the tap-to-wake path also needs
+ * it, to tell "the mood ladder put us to sleep" (tap may undo) apart from
+ * "the user flipped the puck face-down" (tap must NOT undo). */
+static bool s_flip_muted;
+static uint8_t s_bright_now = 100;
+static uint8_t s_bright_tgt = 100;
+static bool s_rtc_seeded_os;
+static bool s_os_seeded_rtc;
 static _Atomic bool s_audio_diag_requested;
 static _Atomic uint32_t s_audio_diag_until_ms;
 static uint64_t s_listen_idle_deadline_ms;
@@ -537,6 +552,41 @@ static brain_action_event_t s_brain_events[BRAIN_EVENT_CAP];
 static uint32_t s_brain_inbox_seq_hwm;
 static uint32_t s_brain_event_seq;
 static uint32_t s_brain_last_seen_ms;
+
+static bool device_wall_time(struct tm *out)
+{
+    if (out == NULL) {
+        return false;
+    }
+    time_t tt = time(NULL);
+    localtime_r(&tt, out);
+    if (out->tm_year >= 2020 - 1900) {
+        return true;
+    }
+    if (jr_rtc_get(out) == ESP_OK && out->tm_year >= 2020 - 1900) {
+        struct timeval tv = { .tv_sec = mktime(out), .tv_usec = 0 };
+        if (tv.tv_sec > 0) {
+            (void)settimeofday(&tv, NULL);
+            s_rtc_seeded_os = true;
+        }
+        return true;
+    }
+    return false;
+}
+
+static void device_rtc_capture_os_time(void)
+{
+    if (s_os_seeded_rtc || !jr_rtc_present()) {
+        return;
+    }
+    time_t tt = time(NULL);
+    struct tm tmv;
+    localtime_r(&tt, &tmv);
+    if (tmv.tm_year >= 2020 - 1900 && jr_rtc_set(&tmv) == ESP_OK) {
+        s_os_seeded_rtc = true;
+        ESP_LOGI(TAG, "RTC seeded from wall clock");
+    }
+}
 
 static void secure_zero(void *ptr, size_t size);
 static bool brain_render_text_safe(const char *value, size_t capacity,
@@ -3650,7 +3700,8 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         "\"network\":{\"connected\":%s,"
         "\"ip\":\"%s\",\"rssi\":%d},\"voice\":{\"phase\":\"%s\","
         "\"voice_armed\":%s,\"always_ready\":true,"
-        "\"privacy_paused\":%s,\"capturing\":%s,\"ws_connected\":%s,"
+        "\"privacy_paused\":%s,\"mood\":\"%s\",\"brightness\":%u,"
+        "\"rtc\":%s,\"capturing\":%s,\"ws_connected\":%s,"
         "\"auto_idle_ms\":%u,\"mic_rms\":%.1f,\"vad_starts\":%u,"
         "\"audio_diag_running\":%s},\"tools\":{"
         "\"execution\":\"on_device\",\"worker_ready\":%s,"
@@ -3682,9 +3733,13 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         voice->phase != JR_ST_IDLE && voice->phase != JR_ST_DRAINING &&
             voice->phase != JR_ST_FATAL ? "true" : "false",
         atomic_load(&s_voice_privacy_paused) ? "true" : "false",
+        jr_mood_name((jr_mood_t)atomic_load(&s_mood_id)),
+        (unsigned)atomic_load(&s_mood_brightness),
+        jr_rtc_present() ? "true" : "false",
         s_app.io.capturing ? "true" : "false",
         s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN ? "true" : "false",
         (unsigned)auto_idle_ms, (double)s_app.mic_rms,
+
         (unsigned)s_app.vad_starts,
         (int32_t)(atomic_load(&s_audio_diag_until_ms) - now) > 0
             ? "true" : "false",
@@ -4497,7 +4552,6 @@ static void voice_task(void *arg)
              * it: a tap-mute or shade-mute stays muted through any amount of
              * turning the device over in your hands. */
             static uint8_t s_flip_polls, s_unflip_polls;
-            static bool    s_flip_muted;
             uint32_t sim_flip = atomic_load(&s_sim_flip);
             if (sim_flip > 0U) {
                 atomic_store(&s_sim_flip, sim_flip - 1U);
@@ -4527,30 +4581,85 @@ static void voice_task(void *arg)
                 }
             }
 
-            /* UI-01 ambient watch: a muted, idle device is a clock, not a
-             * corpse. The baked bezel ticks already form the dial; the display
-             * layer dims the face and draws hands. Gated on a synced wall
-             * clock (SNTP) — hands at a wrong time are worse than no hands. */
+            /* Phase 5 moods: rest on stillness, bloom on lift. Flip-to-mute
+             * still owns privacy; this ladder owns brightness, clock, and
+             * whether a quiet desk should keep listening. */
+            jr_state_t mood_phase = jr_orch_phase(&s_app.orch);
+            const bool user_busy =
+                mood_phase == JR_ST_SPEAKING ||
+                mood_phase == JR_ST_THINKING ||
+                mood_phase == JR_ST_ASKING ||
+                (mood_phase == JR_ST_LISTENING && s_listen_speech_active);
+            const bool moving = have_imu && imu.moving && imu.age_ms < 500U;
+            jr_mood_in_t min = {
+                .now_ms = (uint32_t)now,
+                .face_down = face_down,
+                .moving = moving && !face_down,
+                .user_busy = user_busy,
+            };
+            jr_mood_out_t mout = jr_mood_step(&s_mood, &min);
+            atomic_store(&s_mood_id, (uint8_t)mout.mood);
+            atomic_store(&s_mood_brightness, mout.brightness);
+            s_bright_tgt = mout.brightness;
+            if (s_bright_now < s_bright_tgt) {
+                uint8_t step = (uint8_t)(s_bright_tgt - s_bright_now);
+                s_bright_now = (uint8_t)(s_bright_now + (step > 8 ? 8 : step));
+            } else if (s_bright_now > s_bright_tgt) {
+                uint8_t step = (uint8_t)(s_bright_now - s_bright_tgt);
+                s_bright_now = (uint8_t)(s_bright_now - (step > 8 ? 8 : step));
+            }
+            (void)jr_display_set_brightness(s_bright_now);
+            if (mout.changed) {
+                ESP_LOGI(TAG, "mood -> %s brightness=%u voice=%d",
+                         jr_mood_name(mout.mood), (unsigned)mout.brightness,
+                         (int)mout.voice_armed);
+                if (mout.mood == JR_MOOD_AMBIENT) {
+                    jr_display_caption_set("AMBIENT");
+                } else if (mout.mood == JR_MOOD_WHISPER) {
+                    jr_display_caption_set("RESTING - TAP TO WAKE");
+                } else if (mout.mood == JR_MOOD_DREAM && !s_flip_muted) {
+                    jr_display_caption_set("ASLEEP - TAP TO WAKE");
+                }
+                if (!mout.voice_armed && !s_flip_muted) {
+                    /* Only claim a disarm we actually caused. If voice was
+                     * already off (shade, long-press, API, flip), that mute is
+                     * not ours to own or to reverse, and the flag must keep
+                     * meaning exactly "the rest ladder turned voice off".
+                     * (Tap remains the deliberate voice toggle either way —
+                     * that is a separate, pre-existing path below.) */
+                    if (!atomic_load(&s_voice_privacy_paused)) {
+                        atomic_store(&s_voice_control_request,
+                                     VOICE_CONTROL_DISARM);
+                        s_mood_rest_disarmed = true;
+                    }
+                } else if (mout.voice_armed && s_mood_rest_disarmed &&
+                           !s_flip_muted) {
+                    atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+                    s_mood_rest_disarmed = false;
+                }
+            }
+
+            /* UI-01 ambient watch: rest moods get hands. Time comes from
+             * SNTP or the on-board PCF85063 — wrong hands are worse than none. */
             static uint32_t s_clock_next_ms;
             static int s_clock_last_min = -1;
             if ((int32_t)((uint32_t)now - s_clock_next_ms) >= 0) {
                 s_clock_next_ms = (uint32_t)now + 1000U;
                 bool clock_on = false;
-                if (atomic_load(&s_voice_privacy_paused) &&
-                    jr_orch_phase(&s_app.orch) == JR_ST_IDLE) {
-                    time_t tt = time(NULL);
+                if (mout.clock_on) {
                     struct tm tmv;
-                    localtime_r(&tt, &tmv);
-                    if (tmv.tm_year >= 2020 - 1900) {   /* SNTP has synced */
+                    if (device_wall_time(&tmv)) {
                         clock_on = true;
                         jr_display_clock_set(true, tmv.tm_hour, tmv.tm_min);
+                        device_rtc_capture_os_time();
                         if (tmv.tm_min != s_clock_last_min) {
                             s_clock_last_min = tmv.tm_min;
                             char cap[48];
                             int h12 = tmv.tm_hour % 12;
-                            if (h12 == 0) h12 = 12;
-                            snprintf(cap, sizeof cap,
-                                     "%d:%02d %s - TAP TO WAKE", h12,
+                            if (h12 == 0) {
+                                h12 = 12;
+                            }
+                            snprintf(cap, sizeof cap, "%d:%02d %s", h12,
                                      tmv.tm_min,
                                      tmv.tm_hour < 12 ? "AM" : "PM");
                             jr_display_caption_set(cap);
@@ -4558,7 +4667,6 @@ static void voice_task(void *arg)
                     }
                 }
                 if (!clock_on && s_demo_start_ms == 0U) {
-                    /* the demo reel borrows the clock; don't fight it */
                     jr_display_clock_set(false, 0, 0);
                     s_clock_last_min = -1;
                 }
@@ -4589,6 +4697,12 @@ static void voice_task(void *arg)
         jr_state_t controlled_phase = jr_orch_phase(&s_app.orch);
         if (control == VOICE_CONTROL_ARM) {
             atomic_store(&s_voice_privacy_paused, false);
+            /* Voice is armed again by SOMEBODY, so the rest ladder no longer
+             * owns a disarm. This is the one choke point every arm passes
+             * through, and clearing here stops the flag going stale — an arm
+             * from the API, the shade or face-up used to leave it set, so the
+             * flag no longer described reality. */
+            s_mood_rest_disarmed = false;
             if (controlled_phase == JR_ST_IDLE ||
                 controlled_phase == JR_ST_BACKOFF ||
                 controlled_phase == JR_ST_FATAL) {
@@ -4800,7 +4914,7 @@ static void voice_task(void *arg)
             }
         }
 
-        /* 2) manual/PTT input (HAL touch; stub until the CST9217 path lands) */
+        /* 2) manual/PTT input (CST9217 via jr_hal input_touch) */
         jr_input_event_t iev;
         while (input_next(&s_app.input, &iev)) {
             atomic_fetch_add(&s_touch_events, 1U);
@@ -4815,6 +4929,19 @@ static void voice_task(void *arg)
                 /* Universal touch feedback (TRANS-05): every tap ripples,
                  * whatever it goes on to mean. Fire-and-forget, self-expiring. */
                 jr_display_ripple(iev.x, iev.y);
+                jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                /* Tap MUST be able to undo a rest disarm. The old guard here
+                 * was `!s_voice_privacy_paused`, which deadlocked the device:
+                 * the rest ladder disarms via VOICE_CONTROL_DISARM, that sets
+                 * privacy_paused, and this guard then refused to re-arm — so a
+                 * device that dozed off could never be woken by touch, only by
+                 * reboot. Rest is OUR decision, so we own reversing it; only
+                 * the user's own flip-to-mute may veto a tap-wake. */
+                if (s_mood_rest_disarmed && !s_flip_muted) {
+                    s_mood_rest_disarmed = false;
+                    atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+                    jr_display_caption_clear();
+                }
             } else if (iev.kind == JR_INPUT_LONG_PRESS) {
                 atomic_fetch_add(&s_touch_long_presses, 1U);
             } else if (iev.kind == JR_INPUT_SWIPE) {
@@ -5355,6 +5482,17 @@ void app_main(void)
     if (pwr_err != ESP_OK) {
         ESP_LOGW(TAG, "battery sampler unavailable: %s", esp_err_to_name(pwr_err));
     }
+    esp_err_t rtc_err = jr_rtc_start();
+    if (rtc_err != ESP_OK) {
+        ESP_LOGW(TAG, "PCF85063 unavailable: %s", esp_err_to_name(rtc_err));
+    }
+    /* Seed with the CURRENT tick, not 0: the first mood step runs ~14 s into
+     * boot, so a zero seed reads as 14 s of stillness and the device dropped
+     * straight to AMBIENT (48 %) about 10 ms after "boot complete" — dimming
+     * itself before anyone had touched it. */
+    jr_mood_reset(&s_mood, (uint32_t)(esp_timer_get_time() / 1000));
+    atomic_store(&s_mood_id, (uint8_t)JR_MOOD_AWAKE);
+    atomic_store(&s_mood_brightness, 100);
 
     /* pull the concrete ports. The real presenter is preferred; its panel +
      * SPIFFS + gfx bring-up runs async in its own task, so this never stalls
@@ -5394,6 +5532,12 @@ void app_main(void)
         sntp_cfg.start = true;
         if (esp_netif_sntp_init(&sntp_cfg) != ESP_OK) {
             ESP_LOGW(TAG, "sntp init failed — clock features stay dormant");
+        }
+        struct tm seeded;
+        if (device_wall_time(&seeded)) {
+            ESP_LOGI(TAG, "wall clock %04d-%02d-%02d %02d:%02d (rtc_seed=%d)",
+                     seeded.tm_year + 1900, seeded.tm_mon + 1, seeded.tm_mday,
+                     seeded.tm_hour, seeded.tm_min, (int)s_rtc_seeded_os);
         }
     }
 
@@ -5520,5 +5664,11 @@ void app_main(void)
         atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
     }
 
+    /* Start the stillness clock HERE, not at jr_mood_reset() above: that runs
+     * ~1 s in, while Wi-Fi and the codec still have ~13 s to go, so the device
+     * spent most of its rest budget before it could do anything and dimmed a
+     * few seconds after becoming usable. The user's first full AWAKE window
+     * should begin when JARVIS is actually ready. */
+    jr_mood_poke_awake(&s_mood, (uint32_t)(esp_timer_get_time() / 1000));
     ESP_LOGI(TAG, "boot complete — always-ready voice requested");
 }

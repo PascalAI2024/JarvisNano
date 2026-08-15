@@ -914,6 +914,41 @@ void jr_display_clock_set(bool on, int hh, int mm)
     __atomic_store_n(&s_clock_word, word, __ATOMIC_RELEASE);
 }
 
+/* Brightness target, published by any task; APPLIED only on the render task.
+ *
+ * The CO5300 brightness command and the frame flush are two transactions on
+ * the SAME QSPI device. Issuing brightness from a caller's task (the voice
+ * task ran the mood ramp) races the render task mid-flush and breaks the bus
+ * acquire/release pairing — observed on hardware as
+ *   "bus_lock: spi_bus_lock_acquire_end: Cannot release a lock that hasn't
+ *    been acquired" -> assert failed: spi_device_release_bus
+ * with the crash landing inside panel_co5300_draw_bitmap. So callers only
+ * store a target here; brightness_pump() applies it from panel_flush, where
+ * the render task owns the bus and no DMA is in flight. */
+static uint8_t s_brightness_want = 100;   /* written by any task (atomic) */
+static uint8_t s_brightness_have = 100;   /* render task only — no atomics */
+
+esp_err_t jr_display_set_brightness(uint8_t percent)
+{
+    if (percent > 100) {
+        percent = 100;
+    }
+    __atomic_store_n(&s_brightness_want, percent, __ATOMIC_RELEASE);
+    return ESP_OK;
+}
+
+/* Called at the top of panel_flush, on the render task, between strips. */
+static void brightness_pump(void)
+{
+    uint8_t want = __atomic_load_n(&s_brightness_want, __ATOMIC_ACQUIRE);
+    if (want == s_brightness_have) {
+        return;   /* also kills the 8.9 writes/sec of identical values */
+    }
+    if (jarvis_board_set_brightness(want) == ESP_OK) {
+        s_brightness_have = want;
+    }
+}
+
 bool jr_display_choices_active(void)
 {
     return __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE) > 0;
@@ -1347,6 +1382,11 @@ static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
         (void)gfx_disp_flush_ready(disp, true);
         return;
     }
+
+    /* Apply any pending brightness HERE, before the strip is submitted: we are
+     * on the render task, the previous flush has completed, and the QSPI bus is
+     * idle. This is the only place a panel command may be issued. */
+    brightness_pump();
 
     /* The gfx-owned DMA buffer is mutable until this submission. Diagnostics
      * may substitute a known pattern, then the mirror records the exact bytes
