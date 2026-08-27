@@ -23,12 +23,12 @@ out: fluid speech, native-style barge-in, and a device that is NEVER deaf.
 |---|------|-------|--------|
 | E1 | Seconds hand on the watch | backend | SHIPPED `05f4bc0`, verified on glass |
 | E2 | Remote canvas (any image → glass, TTL) + send-canvas.py | backend | SHIPPED `05f4bc0`, first push captured |
-| E3 | Tap redesign: tap-while-speaking = stop-talking, never privacy mute (trap killed) | backend | CODED, awaiting joint flash |
-| E4 | Double-tap = attention; swipe-left = status glance; swipe-right = watch peek | backend | CODED, awaiting joint flash |
-| E5 | Operator lease (/api/operator/lease, owner tap reclaims) + jarvisctl lease/release | backend | CODED, awaiting joint flash |
+| E3 | Tap redesign: tap-while-speaking = stop-talking, never privacy mute (trap killed) | backend | SHIPPED `dd5d48b` |
+| E4 | Double-tap = bloom attention; swipe-left = glance; swipe-right = watch peek | backend | SHIPPED `dd5d48b`+`db277ef`, glance captured on glass |
+| E5 | Operator lease (/api/operator/lease, owner tap reclaims) + jarvisctl lease/release | backend | SHIPPED `dd5d48b` |
 | E6 | jarvisctl operator CLI + CLAUDE.md doc | backend | SHIPPED `500b297`, live-tested |
-| E7 | Whole front experience: watch↔face fade, canvas easing, gesture visuals, wake bloom | glass-ux teammate | IN PROGRESS (jr_display domain) |
-| E8 | Joint build/flash/verify of E3-E5+E7, owner look | backend | BLOCKED on E7 handover |
+| E7 | Whole front experience: fades, wake bloom, listening ring, brightness slew, caption ease | glass-ux teammate | SHIPPED `dd5d48b`+`a615a52`, captures verified; choice-arc exit fade in flight |
+| E8 | Joint build/flash/verify + owner circuit | backend | FLASHED + captured; owner verdict pending |
 
 ## Elevation backlog (after reliability — reliability IS the elevation)
 

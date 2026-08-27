@@ -69,9 +69,11 @@ flowchart TB
 
     subgraph Firmware[JarvisNano v5 firmware]
         Gemini[jr_transport Gemini Live]
+        Wake[jr_wake WakeNet9 Jarvis]
         Face[jr_display + baked rwave faces]
-        HUD[overlay compositor]
-        HTTP[jr_http cockpit API]
+        HUD[overlay compositor + eased fades]
+        Canvas[pushed canvas]
+        HTTP[jr_http cockpit API + log ring]
         MCP[jr_tools JarvisMCP]
         IMU[jr_imu + jr_power]
     end
@@ -82,10 +84,15 @@ flowchart TB
         Browser[Browser dashboard]
     end
 
-    User -->|tap / long press| Touch
-    User -->|speech| Mic
+    User -->|tap / swipe / long press| Touch
+    User -->|speech + wake word| Mic
     Touch --> Gemini
     Mic --> Gemini
+    Mic --> Wake
+    Wake -->|"Jarvis" heard| Gemini
+    Wake -->|bloom| Face
+    HTTP --> Canvas
+    Canvas --> Display
     Gemini <--> GeminiAPI
     Gemini --> Speaker
     Gemini --> Face
@@ -167,6 +174,10 @@ Key HTTP surfaces:
 | `/api/touch` | CST9217 counters |
 | `/api/audio/taps` | Diagnostic tap metadata |
 | `/api/tools/config` | Redacted JarvisMCP status |
+| `/api/logs?tail=N` | On-device 128 KB log ring — read after the fact |
+| `/api/display/canvas` | Push a raw RGB565 466x466 image to the glass (TTL) |
+| `/api/operator/lease` | Bounded operator claim; any owner tap reclaims |
+| `/api/diag/vadlog` | Per-frame VAD/barge gate decisions (CSV) |
 
 See [docs/LIVE_DEVICE_DEBUG.md](docs/LIVE_DEVICE_DEBUG.md) for the acceptance
 commands and the known failure signatures.
@@ -183,22 +194,43 @@ with `scripts/flash-v5.sh`.
 
 ## Current Status
 
-v5 is the live image (`main/` + `components/jr_*`):
+v5 is the live image (`main/` + `components/jr_*`), running on the
+**1.75C** revision (the default build target since 2026-08-27):
 
-- Boots on the Waveshare 1.75" AMOLED (`docs/evidence/20260718-v5-boot.log`).
-- Gemini Live voice, baked reactive face, overlay HUD, choice arcs, watch
-  face, flip-to-mute, shake-to-cancel, attract reel.
+- **"Jarvis" wake word** (esp-sr WakeNet9, `wn9_jarvis_tts`): speak to a
+  sleeping device and a ring of light blooms from its center — Phase 5's
+  gate is open. Wake doubles as the recovery net: any non-deliberate silent
+  state is one spoken word from alive.
+- Gemini Live voice with hardware-calibrated barge-in (talk over it and it
+  stops), session resumption across the ~10-min connection lifecycle, and
+  on-device JarvisMCP tools.
+- An eased glass: watch, pushed canvas, captions, brightness, wake bloom,
+  and the breathing **listening ring** (present = it hears you, readable
+  across a room) all fade — nothing pops.
+- Organic gestures: tap = stop-talking/attention (never mute), double-tap =
+  bloom + "YES, SIR?", swipe-left = status glance, swipe-right = watch peek,
+  flip face-down = certain privacy mute (the passive mode), long-press =
+  mute + shade.
+- Remote canvas: `scripts/send-canvas.py any-image.png` puts pixels on the
+  glass (TTL-bounded); the ambient clock composites over it — pushed custom
+  watch faces for free.
+- Operator tooling: `scripts/jarvisctl.py` (status/say/screen/canvas/tune/
+  logs/lease) + a 128 KB on-device log ring at `/api/logs` — debug from
+  receipts, not live monitors.
 - API key rides `x-goog-api-key`, not the WebSocket query string.
-- Pairing token, wake word, BLE, and camera are not v1 blockers.
+- Pairing token, BLE, and camera remain post-v1.
 
-Doc index: [DOCUMENTATION_MAP.md](DOCUMENTATION_MAP.md). Release candidate
+Doc index: [DOCUMENTATION_MAP.md](DOCUMENTATION_MAP.md). Working plan:
+[PLAN.md](PLAN.md). Defect board: [BUGLOG.md](BUGLOG.md). Release candidate
 checklist: [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
 
 ## Roadmap
 
-Phases 0–4 of the glass/voice work shipped in July 2026. Open items are
-release-candidate proof on the connected board, pairing-token writes, and
-post-v1 WakeNet / BLE / camera. Full checkboxes: [docs/ROADMAP.md](docs/ROADMAP.md).
+Phases 0–4 of the glass/voice work shipped in July 2026; Phase 5's wake-word
+gate opened 2026-08-27 on the 1.75C alongside a full experience pass (eased
+glass, gestures, operator tooling — see [PLAN.md](PLAN.md) elevation waves).
+Open items are pairing-token writes, long-session soak, and post-v1
+BLE / camera. Full checkboxes: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Layout
 

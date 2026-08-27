@@ -1,73 +1,70 @@
 # Next Session Handoff
 
-Last updated: **2026-08-27**.
+Last updated: **2026-08-27** (the 1.75C elevation day).
 
-v5 now runs on the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** (the upgraded
-32 MB-flash revision in the aluminum case) — this is Pascal's live device.
-USB first. Wi-Fi is confirmation after the app has actually booted.
+v5 runs on the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** — the 32 MB-flash
+aluminum revision, the default build target. Milestones shipped today: board
+port (`56a799b`), "Jarvis" wake word (`9dcfe99`), every deaf-device path
+closed (`4c3a837`, `482c81d`), realtime playback feeder (`11e66a8`), remote
+canvas + seconds hand (`05f4bc0`), operator tooling (`500b297`), and the
+eased-glass experience wave with a teammate (`dd5d48b`, `a615a52`).
 
-## Current Board
+## Current Board + Build
 
-- Board: Waveshare ESP32-S3-Touch-AMOLED-1.75**C** (466×466 CO5300, CST9217,
-  ES8311 + ES7210, AXP2101, 32 MB flash). Delta table + gotchas:
-  [`reference/board-175c.md`](reference/board-175c.md).
-- `./scripts/build-v5.sh` now **defaults to the 1.75C**. Building for the
-  original 1.75 requires `BOARD_NAME=esp32s3_touch_amoled_1_75` — a mismatched
-  image black-screens either board (LCD reset moved GPIO39→1 on the C).
-- Verified on hardware 2026-08-27: clean boot, display + touch + gestures +
-  AXP2101 fuel gauge + full Gemini Live voice cycle. No PCF85063 on the C —
-  the RTC warning at boot is expected; NTP seeds the clock.
-- USB: ESP32-S3 native USB-Serial-JTAG. Typical macOS path `/dev/cu.usbmodem*`.
-- The original 1.75 unit still exists and remains supported via the default
-  board dir.
-- Live firmware: `components/jr_*` + `main/main.c` via `./scripts/build-v5.sh`.
-- Legacy `firmware/` + `esp-claw/` + `scripts/bootstrap.sh` is the old overlay stack. The v5 CMake does **not** compile it.
-- Device host: `JARVIS_DEVICE_HOST` locally. Never commit LAN addresses, SSIDs, MACs, or keys.
+- Board deltas, calibrations, and the provisioning-transplant recipe:
+  [`reference/board-175c.md`](reference/board-175c.md). **On ANY new board
+  revision, run [`reference/board-bringup-checklist.md`](reference/board-bringup-checklist.md)
+  first — physics does not port.**
+- `./scripts/build-v5.sh` targets the 1.75C by default; original 1.75 needs
+  `BOARD_NAME=esp32s3_touch_amoled_1_75`. Flipping an EXISTING sdkconfig
+  symbol needs `RECONFIGURE=1` (see build-toolchain.md — stale sdkconfig wins).
+- Serial is single-owner: kill any usb-monitor before flashing.
 
-## Build and talk to the board
+## Talk to the device (no serial needed)
 
 ```bash
-./scripts/build-v5.sh
-NO_BUILD=1 PORT=/dev/cu.usbmodemXXXX ./scripts/flash-v5.sh
-python3 scripts/usb-monitor.py --port /dev/cu.usbmodemXXXX --seconds 8 --send status
+export JARVIS_DEVICE_HOST=<device-ip>
+scripts/jarvisctl.py status     # one-line verdict; non-zero exit = deaf/muted
+scripts/jarvisctl.py logs       # on-device 128 KB log ring — read AFTER the fact
+scripts/jarvisctl.py screen     # capture the glass
+scripts/jarvisctl.py say "..."  # speak a turn
+scripts/jarvisctl.py canvas img.png   # pixels on the glass (TTL-bounded)
+scripts/jarvisctl.py lease 300 / release   # operator claim; owner tap evicts
+scripts/jarvisctl.py tune pbgain=250 speakmic=21   # live audio calibration
 ```
 
-Do not use a serial monitor that toggles DTR/RTS. That can leave the S3 in ROM
-download mode: flash succeeds, app never boots.
+**Before debugging "no response" as firmware: run `status`.** Nearly every
+"dead device" today was a privacy state (see BUGLOG.md B5/B6).
 
-Host tests (no board required):
+## Interaction model (post tap-redesign)
 
-```bash
-cmake -S host -B host/build && cmake --build host/build && (cd host/build && ctest --output-on-failure)
-```
+Tap = stop-talking / attention (NEVER mutes). Double-tap = bloom + "YES,
+SIR?". Swipe-left = status glance; swipe-right = 10 s watch peek; swipe-down
+from top = shade. Flip face-down = privacy mute / passive watch (the ONLY
+casual mute); long-press = mute + shade. "Jarvis" wakes from rest and from
+any non-deliberate silence — it never overrides a deliberate mute.
 
-## What is already shipped on v5
+## Open threads (see PLAN.md + BUGLOG.md for the full boards)
 
-July 18–19 hardware evidence lives in [`docs/evidence/`](evidence/README.md):
-clean boot, thinking spinner, choice arcs, watch face, captions, attract reel.
-
-Later commits on `v5` also landed flip-to-mute, shake-to-cancel, time-aware
-courtesy, and the Gemini API key on `x-goog-api-key` instead of the query
-string. Rotate any key that appeared in pre-fix serial/SD logs (owner: Pascal).
-
-## Still open (do not re-plan)
-
-- Phase 5 power moods need WakeNet. No `CONFIG_SR_WN*` in this image.
-- Pairing token on writes is not required in current public builds.
-- BLE, Android privacy mode, camera, XIAO parity are post-v1.
-- Uncommitted local WIP when this note was written: extra `idf.py reconfigure`
-  after `gen-bmgr-config` in `scripts/build-v5.sh`, plus
-  `CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM` in `sdkconfig.defaults`.
+- Owner's consolidated verdict pending — last rating 2/10 before the
+  experience wave; re-rate after the full circuit.
+- glass-ux teammate has an UNCOMMITTED in-flight slice in the working tree:
+  choice-arc dismissal fades (tapped arc stays lit through exit). Commit it
+  on their handover, not before.
+- Long-session soak (30+ min unattended) never run. B9 (one unexplained
+  reboot, coredump blank — suspect USB brownout) still WATCH.
+- Perceptual dim curve + ring seam latch: glass-ux has fixes ready if the
+  owner's eyes flag either.
+- 128 MB upper flash still unpartitioned beyond `model` — dual-OTA and
+  bigger asset space live there when wanted.
 
 ## Do Not Repeat
 
-- Do not start from `docs/ARCHIVE/` or root `plan.md` (archived). Use this file + [`ROADMAP.md`](ROADMAP.md).
-- Do not edit `esp-claw/` copies. v5 does not consume them; bootstrap still overwrites that tree.
-- Do not treat `/api/display/snapshot.ppm` as panel readback.
-- Do not commit keys, LAN addresses, MACs, SSIDs, or device logs with those in them.
-- Do not draw a second HUD on top of the baked `rwave_*.eaf` art. Negative-space rule is in `JARVISNANO_OS_PLAN.md`.
-
-## Docs
-
-[`DOCUMENTATION_MAP.md`](../DOCUMENTATION_MAP.md) is the index.
-[`docs/reference/`](reference/README.md) is the gotcha knowledge base.
+- Do not port calibrations between board revisions — measure (bringup checklist).
+- Do not add a second mute path to casual gestures; that trap cost hours.
+- Do not run builds while a teammate's domain has half-landed edits.
+- Do not commit LAN addresses, MACs, SSIDs, keys, or NVS dumps — and delete
+  local NVS dumps as soon as a transplant is done (they carry the keys).
+- `/api/display/snapshot.ppm` is a software mirror, not panel readback.
+- Negative-space rule stands: nothing new over the baked rwave art
+  (JARVISNANO_OS_PLAN.md).
