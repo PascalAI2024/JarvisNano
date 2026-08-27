@@ -5173,9 +5173,16 @@ static void voice_task(void *arg)
                 }
                 if (p == JR_ST_IDLE || p == JR_ST_BACKOFF || p == JR_ST_FATAL) {
                     atomic_store(&s_voice_privacy_paused, false);
+                    jr_display_caption_set("LISTENING");
                     jr_orch_inject(&s_app.orch, jr_event(JR_EV_USER_START), now);
                 } else if (p != JR_ST_DRAINING) {
                     atomic_store(&s_voice_privacy_paused, true);
+                    /* A silent mute is a design bug: the owner tapped mid-
+                     * session (often unknowingly — 2026-08-27, six taps left
+                     * the device "mysteriously" deaf and wake correctly
+                     * refused to override the explicit mute). Say so on the
+                     * glass, with the way out. */
+                    jr_display_caption_set("MUTED - TAP TO RESUME");
                     s_pending_text_set = false;
                     s_pending_text_inflight = false;
                     s_listen_idle_deadline_ms = 0;
