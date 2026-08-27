@@ -14,6 +14,14 @@
  */
 #include "jr_core/turn_policy.h"
 
+/* Board-calibration only — stays buildable on host where sdkconfig is absent
+ * (the #if below then resolves false and the original constants hold). */
+#if defined(__has_include)
+#if __has_include("sdkconfig.h")
+#include "sdkconfig.h"
+#endif
+#endif
+
 /* Hardware-calibrated lower bound from the proven v4 Waveshare path. The
  * post-AEC quiet bed can read in the low teens; treating that as the entire
  * room floor makes ordinary codec noise clear a 2.2x onset gate and opens a
@@ -49,7 +57,17 @@ void jr_turn_policy_init(jr_turn_policy_t *p)
      * the model's loudest moments needs a raised voice; normal-volume barge
      * works in pauses and quieter passages (where the ratio term is low and the
      * 250 floor governs). */
+#if defined(CONFIG_ESP_BOARD_ESP32S3_TOUCH_AMOLED_1_75C)
+    /* 1.75C: the 28%-leak measurement does not transfer. vadlog on the C
+     * (2026-08-27, pbgain 300%): echo residual MEDIAN 20 rms at playback
+     * peak-hold ~4216 — ~0.5% leak — while the 0.30 gate (~1265) sat 6x above
+     * anything the user's voice sustained, so barge never latched. v4's 0.10
+     * puts the gate ~420: >20x above the measured residual, and reachable by
+     * a raised voice. The 250 floor still governs quiet passages. */
+    p->barge_ratio = 0.10f;
+#else
     p->barge_ratio = 0.30f;
+#endif
 
     p->in_speech = false;
     p->speech_run = 0;

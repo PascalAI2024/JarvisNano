@@ -59,7 +59,16 @@ static const char *TAG = "jr_audio";
  * which is the one thing the linear AEC needs to actually cancel it (~18 dB
  * suppression -> echo residual ~180 instead of a railed ~9000). Restored to 24
  * dB on LISTENING so the user's own voice is loud for the local VAD. */
+#if defined(CONFIG_ESP_BOARD_ESP32S3_TOUCH_AMOLED_1_75C)
+/* 21, not 9: at 9 dB the owner's talk-over read ~20 rms on the C — inaudible
+ * to both the local barge gate and Gemini's server VAD, so barge-in was dead.
+ * At 21 dB (vadlog 2026-08-27) the AEC still held the echo residual to a
+ * median of ~20 rms, so the hotter capture costs nothing. Runtime knob:
+ * /api/debug/gain?speakmic=. */
+#define GL_MIC_PGA_SPEAK_DB      21
+#else
 #define GL_MIC_PGA_SPEAK_DB      9
+#endif
 #define GL_REF_PGA_DB            12
 #define GL_OUT_VOL_DEFAULT       100
 
@@ -74,9 +83,12 @@ static const char *TAG = "jr_audio";
  * crackle/chop). The C default is 2x, and the live value is runtime-tunable
  * via /api/debug/gain?pbgain=<percent> for on-device calibration. */
 #if defined(CONFIG_ESP_BOARD_ESP32S3_TOUCH_AMOLED_1_75C)
-#define GL_PLAYBACK_GAIN         2
+/* 2.5x, by-ear calibration 2026-08-27: 2x read as too quiet, 3x pushed loud
+ * passages into the knee compressor often enough to crackle "sometimes". Q8
+ * default below; GL_PLAYBACK_GAIN kept integer for the original board. */
+#define GL_PLAYBACK_GAIN_Q8_DEFAULT   640   /* 2.5x */
 #else
-#define GL_PLAYBACK_GAIN         4
+#define GL_PLAYBACK_GAIN_Q8_DEFAULT   1024  /* 4.0x — field-proven v4 value */
 #endif
 #define GL_PLAYBACK_LIMIT_KNEE   24000
 
@@ -471,7 +483,7 @@ static size_t pb_enqueue(const int16_t *frame, size_t samples,
 
 /* Runtime playback make-up gain in Q8 (256 == 1.0x). Tunable live so the
  * speaker chain can be calibrated by ear without a reflash. */
-static _Atomic int32_t s_pb_gain_q8 = GL_PLAYBACK_GAIN * 256;
+static _Atomic int32_t s_pb_gain_q8 = GL_PLAYBACK_GAIN_Q8_DEFAULT;
 
 void jr_audio_set_playback_gain_percent(int percent)
 {

@@ -1912,13 +1912,18 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
         return ESP_OK;
     }
     int mic = -1, ref = -1, vol = -1, barge = -1, vadclean = -1, pbgain = -1;
+    int speakmic = -1;
     query_int(req, "mic", &mic);
     query_int(req, "ref", &ref);
     query_int(req, "vol", &vol);
     query_int(req, "barge", &barge);
     query_int(req, "vadclean", &vadclean);
     query_int(req, "pbgain", &pbgain);
+    query_int(req, "speakmic", &speakmic);
     jr_audio_set_gains(mic, ref, vol);
+    if (speakmic >= 0) {
+        jr_audio_set_speak_mic_db(speakmic);
+    }
     if (barge >= 0) {
         s_local_barge_enabled = barge != 0;
     }
@@ -4820,6 +4825,11 @@ static void voice_task(void *arg)
         if (challenge_restore != 0U &&
             (int32_t)((uint32_t)now - challenge_restore) >= 0) {
             atomic_store(&s_touch_challenge_restore_ms, 0U);
+            /* Full teardown, not just display restore: an abandoned challenge
+             * reaches here via the deadline with `active` still true, and a
+             * stuck `active` suppresses the always-ready re-arm forever. */
+            atomic_store(&s_touch_challenge_active, false);
+            atomic_store(&s_touch_challenge_start_requested, false);
             (void)jr_display_set_test_pattern(JR_DISPLAY_TEST_OFF);
             if (VOICE_ALWAYS_READY &&
                 !atomic_load(&s_voice_privacy_paused)) {
@@ -4843,6 +4853,13 @@ static void voice_task(void *arg)
                 atomic_store(&s_touch_challenge_verified, false);
                 atomic_store(&s_touch_challenge_active, true);
                 atomic_store(&s_touch_challenge_start_requested, false);
+                /* Abandonment deadline. Without one, a challenge the user
+                 * walks away from leaves `active` set forever, which
+                 * suppresses the always-ready re-arm — a permanently deaf
+                 * device (hit live 2026-08-27 after shade play). The restore
+                 * sweep below tears the whole challenge down at deadline. */
+                atomic_store(&s_touch_challenge_restore_ms,
+                             (uint32_t)now + 45000U);
                 (void)jr_display_set_touch_challenge((int)expected, 0U);
                 ESP_LOGI(TAG, "panel/touch challenge started sector=%u",
                          (unsigned)expected);
@@ -5330,19 +5347,20 @@ static void voice_task(void *arg)
                 }
                 read_paced = true;
             }
-        } else if (jr_wake_ready() && s_mood_rest_disarmed && !s_flip_muted &&
+        } else if (jr_wake_ready() && !s_flip_muted &&
                    !atomic_load(&s_voice_privacy_paused) &&
+                   atomic_load(&s_audio_diag_until_ms) == 0U &&
                    (capture_phase == JR_ST_IDLE ||
                     capture_phase == JR_ST_BACKOFF)) {
-            /* Rest-mood wake watch (Phase 5). WHISPER/DREAM disarm the voice
-             * session, so the capture branch above stops pulling frames — the
-             * mic goes deaf exactly when "speak to a sleeping device" should
-             * work. Keep the SAME single-owner read seam alive here and hand
-             * the frames to WakeNet instead of the transport. Gated to the
-             * rest-ladder disarm only: a deliberate mute (flip, long-press,
-             * API, shade) is user intent and a spoken wake must not override
-             * it. The codec read paces this branch at the frame cadence, same
-             * as the uplink path. */
+            /* Wake watch (Phase 5) — and the recovery net. Whenever voice is
+             * off for any reason that is NOT the user's explicit choice
+             * (rest-ladder WHISPER/DREAM, a dead session, a stuck subsystem),
+             * keep the SAME single-owner read seam alive and hand frames to
+             * WakeNet instead of the transport: a spoken "Jarvis" always
+             * recovers a deaf device. Deliberate mutes are still honored —
+             * flip (s_flip_muted) and tap/long-press/API (privacy_paused)
+             * both gate this branch off. The codec read paces this branch at
+             * the frame cadence, same as the uplink path. */
             int n = jr_audio_source_read(&s_app.mic, mic_frame,
                                          VOICE_FRAME_SAMPLES);
             if (n > 0) {
