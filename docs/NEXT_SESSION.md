@@ -1,14 +1,25 @@
 # Next Session Handoff
 
-Last updated: **2026-08-14**.
+Last updated: **2026-08-27**.
 
-v5 on the Waveshare ESP32-S3-Touch-AMOLED-1.75 is the live product. USB first.
-Wi-Fi is confirmation after the app has actually booted.
+v5 now runs on the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** (the upgraded
+32 MB-flash revision in the aluminum case) — this is Pascal's live device.
+USB first. Wi-Fi is confirmation after the app has actually booted.
 
 ## Current Board
 
-- Board: Waveshare ESP32-S3-Touch-AMOLED-1.75 (466×466 CO5300, CST9217, ES8311 + ES7210, AXP2101).
+- Board: Waveshare ESP32-S3-Touch-AMOLED-1.75**C** (466×466 CO5300, CST9217,
+  ES8311 + ES7210, AXP2101, 32 MB flash). Delta table + gotchas:
+  [`reference/board-175c.md`](reference/board-175c.md).
+- `./scripts/build-v5.sh` now **defaults to the 1.75C**. Building for the
+  original 1.75 requires `BOARD_NAME=esp32s3_touch_amoled_1_75` — a mismatched
+  image black-screens either board (LCD reset moved GPIO39→1 on the C).
+- Verified on hardware 2026-08-27: clean boot, display + touch + gestures +
+  AXP2101 fuel gauge + full Gemini Live voice cycle. No PCF85063 on the C —
+  the RTC warning at boot is expected; NTP seeds the clock.
 - USB: ESP32-S3 native USB-Serial-JTAG. Typical macOS path `/dev/cu.usbmodem*`.
+- The original 1.75 unit still exists and remains supported via the default
+  board dir.
 - Live firmware: `components/jr_*` + `main/main.c` via `./scripts/build-v5.sh`.
 - Legacy `firmware/` + `esp-claw/` + `scripts/bootstrap.sh` is the old overlay stack. The v5 CMake does **not** compile it.
 - Device host: `JARVIS_DEVICE_HOST` locally. Never commit LAN addresses, SSIDs, MACs, or keys.

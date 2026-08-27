@@ -1,0 +1,91 @@
+version: 1.0.0
+# Devices Configuration — Waveshare 1.75C revision.
+# No TCA9554 IO expander on this board (removed vs the original 1.75); the
+# PWR button is read via AXP2101 PKEY IRQ status over I2C instead of an EXIO.
+# Init order: PMIC first (controls panel/codec analog supplies), then touch.
+devices:
+
+  - name: axp2101_power_manager
+    chip: axp2101
+    type: custom
+    version: default
+    init_skip: true                # factory AXP2101 defaults already power display/audio rails on this board
+    config:
+      frequency: 400000
+      i2c_addr: 0x34
+    peripherals:
+      - name: i2c_master
+
+  # ES8311 — speaker DAC + (unused here) onboard mic ADC. Mic ADC handled by ES7210 for AEC.
+  - name: audio_dac
+    chip: es8311
+    type: audio_codec
+    version: default
+    config:
+      adc_enabled: false
+      dac_enabled: true
+      dac_max_channel: 1
+      dac_channel_mask: "1"
+      dac_init_gain: 0
+      mclk_enabled: true
+    peripherals:
+      - name: gpio_pa_control
+        gain: 6
+        active_level: 1
+      - name: i2s_audio_out
+      - name: i2c_master
+        address: 0x30
+        frequency: 400000
+
+  # ES7210 — 4-channel ADC. It only DIGITIZES the AEC echo reference; echo
+  # cancellation itself is software (esp-sr) — the chip has no on-chip AEC.
+  # Schematic (docs/reference/aec-barge-in.md): MIC1+MIC2 = MEMS mics,
+  # MIC3 = speaker echo-reference loopback (ES8311 OUTP/OUTN via ~-23.5 dB
+  # pad), MIC4 = unconnected. Channel mask "0111" = MIC1|MIC2|MIC3.
+  # Labels below are TDM lane order, zero-based: lane 2 carries the reference.
+  - name: audio_adc
+    chip: es7210
+    type: audio_codec
+    version: default
+    config:
+      adc_enabled: true
+      adc_max_channel: 4
+      adc_channel_mask: "0111"
+      adc_channel_labels: ['MIC1', 'MIC2', 'REF', 'NC']
+      adc_init_gain: 0
+    peripherals:
+      - name: i2s_audio_in
+      - name: i2c_master
+        address: 0x80
+        frequency: 400000
+
+  # No microSD slot on the 1.75C — the original board's SDMMC pins were
+  # repurposed: GPIO1 is now LCD reset, GPIO2 is now touch reset. Registering
+  # SDMMC here would fight the panel. Runtime store falls back to flash FATFS.
+
+  # CST9217 capacitive touch on shared I2C bus
+  - name: lcd_touch
+    chip: cst9217
+    type: lcd_touch
+    sub_type: i2c
+    version: default
+    dependencies:
+      esp_lcd_touch:
+        version: "*"
+        require: public
+      waveshare/esp_lcd_touch_cst9217: "*"
+    config:
+      io_i2c_config:
+        lcd_cmd_bits: 8
+        scl_speed_hz: 400000
+        flags:
+          disable_control_phase: true
+
+      touch_config:
+        x_max: 466
+        y_max: 466
+        int_gpio_num: 11
+        rst_gpio_num: 2    # 1.75C: touch RST moved from GPIO40 to GPIO2
+    peripherals:
+      - name: i2c_master
+        i2c_addr: [0xB4]                 # CST9217 7-bit 0x5A, left-shifted

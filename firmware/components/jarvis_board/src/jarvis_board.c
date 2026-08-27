@@ -12,6 +12,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "sdkconfig.h"
 
 static const char *TAG = "jarvis_board";
 
@@ -25,7 +26,14 @@ static const char *TAG = "jarvis_board";
 #define JARVIS_LCD_DATA1 GPIO_NUM_5
 #define JARVIS_LCD_DATA2 GPIO_NUM_6
 #define JARVIS_LCD_DATA3 GPIO_NUM_7
+/* Panel reset differs by board revision: the 1.75C freed GPIO1 by dropping the
+ * SD slot and moved LCD RST there (original 1.75: GPIO39). Selected board comes
+ * from the esp_board_manager-generated CONFIG_ESP_BOARD_* symbol. */
+#if defined(CONFIG_ESP_BOARD_ESP32S3_TOUCH_AMOLED_1_75C)
+#define JARVIS_LCD_RST GPIO_NUM_1
+#else
 #define JARVIS_LCD_RST GPIO_NUM_39
+#endif
 #define JARVIS_LCD_TRANS_QUEUE_DEPTH 10
 
 static const co5300_lcd_init_cmd_t s_lcd_init_cmds[] = {

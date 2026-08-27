@@ -1,0 +1,56 @@
+peripherals:
+  # I2C master — shared bus for AXP2101, ES8311, ES7210, CST9217, QMI8658.
+  # (1.75C dropped the TCA9554 expander and PCF85063 RTC of the original 1.75.)
+  # GPIO15/14 unchanged from the original board, per Waveshare 1.75C BSP header.
+  - name: i2c_master
+    type: i2c
+    role: master
+    config:
+      port: 0
+      pins:
+        sda: 15
+        scl: 14
+
+  # I2S0 duplex — ES8311 DAC (out) and ES7210 ADC (in) share the same I2S clock domain.
+  # Pins from Waveshare 1.75C BSP: MCLK=16 (moved from 42 on the original 1.75),
+  # BCLK=9, WS=45, DOUT=8, DSIN=10.
+  - name: i2s_audio_out
+    type: i2s
+    role: master
+    format: std-out
+    config: &i2s0_config
+      port: 0
+      # native 24 kHz common clock for crisp Gemini 24 kHz output (capture
+      # downsampled 24->16 for uplink/AEC)
+      sample_rate_hz: 24000
+      mclk_multiple: 256
+      data_bit_width: 32
+      slot_bit_width: I2S_SLOT_BIT_WIDTH_AUTO
+      slot_mode: I2S_SLOT_MODE_STEREO
+      slot_mask: I2S_STD_SLOT_BOTH
+      ws_width: 32
+      pins:
+        mclk: 16
+        bclk: 9
+        ws: 45
+        dout: 8
+        din: 10
+
+  - name: i2s_audio_in
+    type: i2s
+    role: master
+    format: std-in
+    config: *i2s0_config
+
+  # ES8311 power-amp enable (drives the on-board class-D into the MX1.25 SPK connector).
+  - name: gpio_pa_control
+    type: gpio
+    role: io
+    config:
+      pin: 46
+      mode: GPIO_MODE_OUTPUT
+      pull_up: true
+
+  # CO5300 QSPI display is intentionally not registered here. esp_board_manager
+  # initializes all listed peripherals before devices, which pre-claims SPI2 and
+  # races the Waveshare BSP display primitive. jarvis_board owns this bus.

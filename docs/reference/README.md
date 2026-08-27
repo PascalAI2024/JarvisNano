@@ -13,6 +13,7 @@ Organized, navigable reference pages for the ESP32-S3-Touch-AMOLED-1.75 firmware
 | [board-manager.md](./board-manager.md) | `esp_board_manager` device handle API, the double-deref gotcha, generated code files |
 | [build-toolchain.md](./build-toolchain.md) | IDF v5.5.4 Docker image, `idf-component-manager==2.4.10` pin, `esp-bmgr-assist==0.5.0` pin, sdkconfig regeneration. Live recipe is `docs/BUILD.md` (`build-v5.sh`). |
 | [waveshare-amoled-175.md](./waveshare-amoled-175.md) | Board hardware summary (CO5300/CST9217/ES8311/ES7210/AXP2101), GPIO table, AXP2101 init-skip, QSPI flash mode |
+| [board-175c.md](./board-175c.md) | **1.75C revision delta** (32 MB flash; LCD RST→1, touch RST→2, MCLK→16; no TCA9554/PCF85063/SD), `BOARD_NAME` build footgun, NVS transplant provisioning |
 | [audio-es8311-es7210.md](./audio-es8311-es7210.md) | Codec chain, `esp_codec_dev` volume curve (0 dB ceiling), soft-knee limiter, choppy-audio PSRAM frame queue, 16kHz/24kHz I/O rates |
 | [display-emote-gfx.md](./display-emote-gfx.md) | `esp_emote_gfx` widget API, proven absence of `gfx_canvas`, why runtime CPU-drawn buffers produce a spiral, sanctioned reactive-face paths |
 | [gemini-live-api.md](./gemini-live-api.md) | Overlay-era Gemini notes. Prefer [gemini-live-api-v5.md](./gemini-live-api-v5.md) + header auth in `main.c`. |

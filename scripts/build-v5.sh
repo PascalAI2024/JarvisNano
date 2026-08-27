@@ -4,7 +4,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${IDF_DOCKER_IMAGE:-espressif/idf:v5.5.4}"
-BOARD="${BOARD_NAME:-esp32s3_touch_amoled_1_75}"
+# Default is the 1.75C (the live device since 2026-08). The original 1.75 stays
+# buildable with BOARD_NAME=esp32s3_touch_amoled_1_75 — the two differ in LCD/touch
+# reset and MCLK pins, so a mismatched image black-screens (reference/board-175c.md).
+BOARD="${BOARD_NAME:-esp32s3_touch_amoled_1_75c}"
 RECONFIGURE="${RECONFIGURE:-0}"
 
 log() { printf '\033[1;36m[build-v5]\033[0m %s\n' "$*"; }
