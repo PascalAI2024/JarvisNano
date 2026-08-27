@@ -4017,6 +4017,67 @@ static bool display_pattern_parse(const char *name,
     return true;
 }
 
+/* POST /api/display/canvas[?ttl=ms] — raw RGB565 little-endian, exactly
+ * 466*466*2 bytes: the glass as a remote canvas (owner request 2026-08-27).
+ * Body is streamed into a PSRAM staging buffer, handed to the display, and
+ * freed; the display keeps its own copy with a TTL so an abandoned image can
+ * never permanently cover the face. DELETE via ?clear=1. */
+static esp_err_t display_canvas_handler(httpd_req_t *req)
+{
+    if (!control_intent_required(req)) {
+        return ESP_OK;
+    }
+    char query[64];
+    uint32_t ttl_ms = 0;
+    if (httpd_req_get_url_query_str(req, query, sizeof query) == ESP_OK) {
+        char val[16] = {0};
+        if (httpd_query_key_value(query, "clear", val, sizeof val) == ESP_OK &&
+            val[0] == '1') {
+            jr_display_canvas_clear();
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req, "{\"ok\":true,\"cleared\":true}");
+            return ESP_OK;
+        }
+        if (httpd_query_key_value(query, "ttl", val, sizeof val) == ESP_OK) {
+            ttl_ms = (uint32_t)strtoul(val, NULL, 10);
+        }
+    }
+    const size_t want = 466U * 466U * 2U;
+    if (req->content_len != want) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "body must be raw RGB565 466x466 (434312 bytes)");
+        return ESP_OK;
+    }
+    uint8_t *buf = heap_caps_malloc(want, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no psram");
+        return ESP_OK;
+    }
+    size_t got = 0;
+    while (got < want) {
+        int r = httpd_req_recv(req, (char *)buf + got, want - got);
+        if (r <= 0) {
+            heap_caps_free(buf);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "short body");
+            return ESP_OK;
+        }
+        got += (size_t)r;
+    }
+    esp_err_t err = jr_display_canvas_show((const uint16_t *)buf, 466U, 466U,
+                                           ttl_ms);
+    heap_caps_free(buf);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            esp_err_to_name(err));
+        return ESP_OK;
+    }
+    ESP_LOGI(TAG, "canvas: image pushed (ttl=%u ms)",
+             (unsigned)(ttl_ms ? ttl_ms : 30000U));
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
 static esp_err_t display_test_handler(httpd_req_t *req)
 {
     if (!control_intent_required(req)) {
@@ -4282,7 +4343,7 @@ static void start_diag_http(void)
      * build, and diag handlers keep growing. Raised from 6144. Some of the
      * reclaim from the render/touch stacks is deliberately spent here. */
     cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 32;
+    cfg.max_uri_handlers = 40;
     cfg.max_resp_headers = 16;
     cfg.lru_purge_enable = false;
     if (httpd_start(&server, &cfg) != ESP_OK) {
@@ -4347,6 +4408,8 @@ static void start_diag_http(void)
           .handler = display_snapshot_rgb565_handler },
         { .uri = "/api/display/test", .method = HTTP_POST,
           .handler = display_test_handler },
+        { .uri = "/api/display/canvas", .method = HTTP_POST,
+          .handler = display_canvas_handler },
     };
     for (size_t i = 0; i < sizeof routes / sizeof routes[0]; ++i) {
         esp_err_t err = httpd_register_uri_handler(server, &routes[i]);
@@ -4394,7 +4457,7 @@ static void demo_stop(void)
     s_demo_start_ms = 0U;
     s_demo_step = -1;
     jr_display_dismiss_choices();
-    jr_display_clock_set(false, 0, 0);
+    jr_display_clock_set(false, 0, 0, 0);
     caption_reset();
     ESP_LOGI(TAG, "demo: reel ended");
 }
@@ -4442,12 +4505,12 @@ static void demo_tick(uint64_t now, jr_face_t *f, uint8_t *amp)
             time_t tt = time(NULL);
             struct tm tmv;
             localtime_r(&tt, &tmv);
-            jr_display_clock_set(true, tmv.tm_hour, tmv.tm_min);
+            jr_display_clock_set(true, tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
             jr_display_caption_set("AMBIENT WATCH WHEN MUTED");
             break;
         }
         case 4:
-            jr_display_clock_set(false, 0, 0);
+            jr_display_clock_set(false, 0, 0, 0);
             jr_display_caption_set("SELF-HEALING CONNECTION");
             break;
         default:
@@ -4691,7 +4754,7 @@ static void voice_task(void *arg)
                     struct tm tmv;
                     if (device_wall_time(&tmv)) {
                         clock_on = true;
-                        jr_display_clock_set(true, tmv.tm_hour, tmv.tm_min);
+                        jr_display_clock_set(true, tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
                         device_rtc_capture_os_time();
                         if (tmv.tm_min != s_clock_last_min) {
                             s_clock_last_min = tmv.tm_min;
@@ -4708,7 +4771,7 @@ static void voice_task(void *arg)
                     }
                 }
                 if (!clock_on && s_demo_start_ms == 0U) {
-                    jr_display_clock_set(false, 0, 0);
+                    jr_display_clock_set(false, 0, 0, 0);
                     s_clock_last_min = -1;
                 }
             }

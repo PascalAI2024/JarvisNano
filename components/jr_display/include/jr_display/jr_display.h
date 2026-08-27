@@ -211,7 +211,18 @@ void jr_display_ripple(int x, int y);
  * release-store, so the renderer can never see a torn time. hh 0..23,
  * mm 0..59 (out-of-range folds to 0). Never coexists with a choice ask (the
  * ask wins); renders UNDER the caption so status text stays readable. */
-void jr_display_clock_set(bool on, int hh, int mm);
+void jr_display_clock_set(bool on, int hh, int mm, int ss);
+
+/* Pushed canvas: a full-frame RGB565 (little-endian) image that temporarily
+ * replaces the face — the glass as a remote drawing surface for the paired
+ * companion / JarvisMCP. Exact panel dimensions only (466x466). The image is
+ * copied (caller keeps ownership) and converted to panel byte order once.
+ * ttl_ms is clamped to (0, 300000]; 0 picks the 30 s default. A test pattern,
+ * if set, still wins (diagnostics outrank decoration). Any-task safe. */
+esp_err_t jr_display_canvas_show(const uint16_t *rgb565, size_t width,
+                                 size_t height, uint32_t ttl_ms);
+void jr_display_canvas_clear(void);
+bool jr_display_canvas_active(void);
 
 /* CO5300 panel brightness 0..100. Safe to call from ANY task at ANY rate: this
  * only publishes a target, which the render task applies during its next flush.

@@ -461,6 +461,75 @@ static uint16_t test_pattern_pixel(const jr_display_ctx_t *ctx,
     return panel_order_color(ctx, native);
 }
 
+/* ---- pushed canvas: a full-frame RGB565 image supplied over the network
+ * (companion tool / JarvisMCP) that temporarily replaces the face, exactly
+ * like a test pattern does. The buffer lives in PSRAM, is written ONLY by
+ * jr_display_canvas_show (single copy, pre-converted to panel byte order),
+ * and read ONLY by the render task; `s_canvas_until_ms` gives it a TTL so an
+ * abandoned push can never permanently cover the face. ---- */
+static uint16_t         *s_canvas;              /* PSRAM, 466*466 */
+static volatile uint32_t s_canvas_until_ms;     /* 0 = inactive   */
+
+esp_err_t jr_display_canvas_show(const uint16_t *rgb565, size_t width,
+                                 size_t height, uint32_t ttl_ms)
+{
+    jr_display_ctx_t *ctx = &s_display;
+    if (rgb565 == NULL || width != ctx->board.width ||
+        height != ctx->board.height) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (ttl_ms == 0U || ttl_ms > 300000U) {
+        ttl_ms = 30000U;
+    }
+    const size_t px = (size_t)ctx->board.width * ctx->board.height;
+    if (s_canvas == NULL) {
+        s_canvas = heap_caps_malloc(px * sizeof(uint16_t),
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_canvas == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    /* convert once at push time so the render task can memcpy rows */
+    if (ctx->board.swap_color_bytes) {
+        for (size_t i = 0; i < px; ++i) {
+            uint16_t v = rgb565[i];
+            s_canvas[i] = (uint16_t)((v >> 8) | (v << 8));
+        }
+    } else {
+        memcpy(s_canvas, rgb565, px * sizeof(uint16_t));
+    }
+    __atomic_store_n(&s_canvas_until_ms,
+                     (uint32_t)(esp_timer_get_time() / 1000) + ttl_ms,
+                     __ATOMIC_RELEASE);
+    return ESP_OK;
+}
+
+void jr_display_canvas_clear(void)
+{
+    __atomic_store_n(&s_canvas_until_ms, 0U, __ATOMIC_RELEASE);
+}
+
+bool jr_display_canvas_active(void)
+{
+    uint32_t until = __atomic_load_n(&s_canvas_until_ms, __ATOMIC_ACQUIRE);
+    return until != 0U &&
+           (int32_t)((uint32_t)(esp_timer_get_time() / 1000) - until) < 0;
+}
+
+static void apply_canvas(jr_display_ctx_t *ctx, int x1, int y1,
+                         int x2, int y2, uint16_t *pixels)
+{
+    if (pixels == NULL || s_canvas == NULL || !jr_display_canvas_active()) {
+        return;
+    }
+    const int width = x2 - x1;
+    for (int row = y1; row < y2; ++row) {
+        memcpy(pixels + (size_t)(row - y1) * (size_t)width,
+               s_canvas + (size_t)row * ctx->board.width + (size_t)x1,
+               (size_t)width * sizeof(uint16_t));
+    }
+}
+
 static void apply_test_pattern(jr_display_ctx_t *ctx, int x1, int y1,
                                int x2, int y2, uint16_t *pixels)
 {
@@ -901,7 +970,7 @@ void jr_display_ripple(int x, int y)
                      __ATOMIC_RELEASE);
 }
 
-void jr_display_clock_set(bool on, int hh, int mm)
+void jr_display_clock_set(bool on, int hh, int mm, int ss)
 {
     if (hh < 0 || hh > 23) {
         hh = 0;
@@ -909,7 +978,13 @@ void jr_display_clock_set(bool on, int hh, int mm)
     if (mm < 0 || mm > 59) {
         mm = 0;
     }
+    if (ss < 0 || ss > 59) {
+        ss = 0;
+    }
+    /* seconds ride bits 17..22, above the on flag at 16 — still one word,
+     * still a single release-store, still untearable. */
     const uint32_t word = (on ? (1u << 16) : 0u)
+                        | ((uint32_t)ss << 17)
                         | ((uint32_t)hh << 8) | (uint32_t)mm;
     __atomic_store_n(&s_clock_word, word, __ATOMIC_RELEASE);
 }
@@ -1161,7 +1236,8 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     }
     dim_strip(ctx, y1, y2, pixels);
     hud_overlay_clock(pixels, y1, y2 - y1, ctx->board.swap_color_bytes,
-                      (int)((w >> 8) & 0xFFu), (int)(w & 0xFFu));
+                      (int)((w >> 8) & 0xFFu), (int)(w & 0xFFu),
+                      (int)((w >> 17) & 0x3Fu));
 }
 
 static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
@@ -1392,6 +1468,7 @@ static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
      * may substitute a known pattern, then the mirror records the exact bytes
      * that will be handed to the CO5300—not the pre-render intent. */
     uint16_t *outbound = (uint16_t *)pixels;
+    apply_canvas(ctx, x1, y1, x2, y2, outbound);
     apply_test_pattern(ctx, x1, y1, x2, y2, outbound);
     if (diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF) {
         apply_hud_overlay(ctx, x1, y1, x2, y2, outbound);

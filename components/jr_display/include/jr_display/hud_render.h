@@ -284,11 +284,12 @@ void hud_overlay_ripple(uint16_t *dst, int y0, int nrows, bool swap_bytes,
  * white hub at the centre. 12 o'clock is a=192 in the LUT convention and both
  * hands sweep clockwise with increasing a (mm=15 -> a=0, 3 o'clock).
  * Everything stays inside r<=180 — far inside the glass, clear of the ticks.
- * hh 0..23 (folded mod 12), mm 0..59; out-of-range values are folded, never
- * trusted. Stateless, integer-only, y-culled; same strip contract as every
- * other overlay. */
+ * hh 0..23 (folded mod 12), mm 0..59, ss 0..59; out-of-range values are
+ * folded, never trusted. Stateless, integer-only, y-culled; same strip
+ * contract as every other overlay. The gold 1 px seconds hand ticks at the
+ * publisher's cadence (~1 Hz) so the resting watch reads as alive. */
 void hud_overlay_clock(uint16_t *dst, int y0, int nrows, bool swap_bytes,
-                       int hh, int mm);
+                       int hh, int mm, int ss);
 
 /* Map IMU tilt to a HUD parallax offset, clamped to +/-HUD_TILT_MAX px.
  *

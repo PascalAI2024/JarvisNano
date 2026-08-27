@@ -1347,21 +1347,24 @@ void hud_overlay_ripple(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 #define HUD_CLOCK_R_IN    20
 #define HUD_CLOCK_R_HOUR  110
 #define HUD_CLOCK_R_MIN   175
+#define HUD_CLOCK_R_SEC   190
 
 void hud_overlay_clock(uint16_t *dst, int y0, int nrows, bool swap_bytes,
-                       int hh, int mm)
+                       int hh, int mm, int ss)
 {
     if (dst == NULL || nrows <= 0) {
         return;
     }
-    /* coarse strip cull: the watch lives in rows 232 +/- (R_MIN + 2) */
-    if (y0 > 232 + HUD_CLOCK_R_MIN + 2 ||
-        y0 + nrows <= 232 - HUD_CLOCK_R_MIN - 2) {
+    /* coarse strip cull: the watch lives in rows 232 +/- (R_SEC + 2) —
+     * the seconds hand is the longest element. */
+    if (y0 > 232 + HUD_CLOCK_R_SEC + 2 ||
+        y0 + nrows <= 232 - HUD_CLOCK_R_SEC - 2) {
         return;
     }
     /* fold, never trust: the composition root clamps, but this is public */
     hh = ((hh % 24) + 24) % 24;
     mm = ((mm % 60) + 60) % 60;
+    ss = ((ss % 60) + 60) % 60;
 
     overlay_palette(swap_bytes);
     const strip_t s = { dst, y0, y0 + nrows };
@@ -1371,16 +1374,24 @@ void hud_overlay_clock(uint16_t *dst, int y0, int nrows, bool swap_bytes,
      *   mm=15 -> 192+64 = 0 (3 o'clock), hh=6 -> 192+128 = 64 (6 o'clock). */
     const int a_m = (192 + (mm * 256) / 60) & 255;
     const int a_h = (192 + (((hh % 12) * 60 + mm) * 256) / 720) & 255;
+    const int a_s = (192 + (ss * 256) / 60) & 255;
 
     const uint16_t px_min  = pack565(255, 255, 255, swap_bytes);
     const uint16_t px_hour = shade(s_ov_cyan, 255);
+    const uint16_t px_sec  = shade(s_ov_gold, 255);
 
-    /* hour first, minute second: an overlapping pair reads minute-on-top */
+    /* hour first, minute second: an overlapping pair reads minute-on-top.
+     * The gold seconds hand goes last and thinnest — a 1 Hz heartbeat that
+     * makes the resting watch read as alive rather than frozen. It reaches
+     * past the minute hand toward the baked bezel ticks. */
     for (int r = HUD_CLOCK_R_IN; r <= HUD_CLOCK_R_HOUR; ++r) {
         polar_dot(&s, a_h, r, px_hour, 3);
     }
     for (int r = HUD_CLOCK_R_IN; r <= HUD_CLOCK_R_MIN; ++r) {
         polar_dot(&s, a_m, r, px_min, 3);
+    }
+    for (int r = HUD_CLOCK_R_IN; r <= HUD_CLOCK_R_SEC; ++r) {
+        polar_dot(&s, a_s, r, px_sec, 1);
     }
 
     /* filled white hub, solved per row like every other disc here */
