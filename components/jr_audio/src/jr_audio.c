@@ -692,29 +692,32 @@ esp_err_t jr_audio_init(void)
 
     /* start the playback feeder */
     /* Keep blocking DAC writes away from the capture/AEC/voice owner on core 1.
-     * This is the field-proven v4 placement; priority 5 timeshares with the
-     * network lane without starving either core's IDLE watchdog task.
      *
-     * Stack lives in PSRAM (same guarded pattern as jr_power/jr_imu/jr_tools):
-     * the feeder blocks on esp_codec_dev_write and never touches flash, and
-     * its 4 KB internal stack was the first casualty when WakeNet's scratch
-     * joined the internal-RAM budget. Internal-stack fallback preserved. */
-    BaseType_t feeder_ok = pdFAIL;
+     * Priority 19, not the historical 5: the feeder is the REALTIME consumer —
+     * if it misses its DMA refill the speaker emits an audible hole that no
+     * electrical tap can see (measured 2026-08-27: a 420 ms acoustic gap in
+     * the device's own mic pickup while the write-seam PCM was continuous).
+     * At prio 5 it lost the core to the Wi-Fi task (prio 23) for whole bursts,
+     * made longer by the IRAM-opts-off change. 19 keeps Wi-Fi above it (no
+     * net starvation) but everything ordinary below it. Its work per wake is
+     * tiny (memcpy + blocking DMA write), so the high priority is cheap.
+     *
+     * Stack INTERNAL first (fast, no PSRAM-cache-miss jitter in the realtime
+     * path), PSRAM fallback only if internal is exhausted at init. */
+    BaseType_t feeder_ok = xTaskCreatePinnedToCore(feeder_task, "jr_pb_feed",
+                                                   4096, NULL, 19, &s_feeder, 0);
 #if defined(CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM) && \
     CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM && defined(CONFIG_SPIRAM) && \
     CONFIG_SPIRAM
-    feeder_ok = xTaskCreatePinnedToCoreWithCaps(feeder_task, "jr_pb_feed", 4096,
-                                                NULL, 5, &s_feeder, 0,
-                                                MALLOC_CAP_SPIRAM |
-                                                MALLOC_CAP_8BIT);
     if (feeder_ok != pdPASS) {
         s_feeder = NULL;
+        feeder_ok = xTaskCreatePinnedToCoreWithCaps(feeder_task, "jr_pb_feed",
+                                                    4096, NULL, 19, &s_feeder,
+                                                    0,
+                                                    MALLOC_CAP_SPIRAM |
+                                                    MALLOC_CAP_8BIT);
     }
 #endif
-    if (feeder_ok != pdPASS) {
-        feeder_ok = xTaskCreatePinnedToCore(feeder_task, "jr_pb_feed", 4096,
-                                            NULL, 5, &s_feeder, 0);
-    }
     if (feeder_ok != pdPASS) {
         ESP_LOGE(TAG, "playback feeder task creation failed");
         s_feeder = NULL;
