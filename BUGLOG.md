@@ -17,9 +17,9 @@ when verified fixed ON HARDWARE.
 | B9 | Unexplained reboot (~16:40) | Coredump blank = no panic; suspect USB brownout at speaker+Wi-Fi peak or replug | WATCH — serial `rst:` banner will identify next occurrence |
 | B10 | Session drops every few minutes (StaleDeadline) | Gemini Live ~10-min connection cap is documented lifecycle; reconnect+resumption already wired; deaf-after-death fixed | MITIGATED; long-session soak pending |
 | B11 | PSRAM sag during heavy testing (1.6 MB free) | Canvas + clips + session buffers; no failure observed | WATCH |
+| B12 | Answers ambient room noise | START_SENSITIVITY_HIGH (my tuning) made server VAD trigger-happy | CLOSED `db277ef`: default sensitivity; local gate carries barge |
 
 Live capture: 5-minute serial log running during owner testing
 (`owner-test-serial.log` in session scratchpad); counters snapshotted before
 and after. Device state is queryable any time: `scripts/jarvisctl.py status`.
 
-| B12 | Answers ambient room noise | START_SENSITIVITY_HIGH (my tuning) made server VAD trigger-happy | CLOSED `db277ef`: default sensitivity; local gate carries barge |
