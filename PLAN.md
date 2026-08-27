@@ -17,6 +17,19 @@ out: fluid speech, native-style barge-in, and a device that is NEVER deaf.
 | 7 | Mystery reboot (suspect USB brownout at peak speaker+Wi-Fi current) | WATCH | Coredump partition blank = no panic; capture `rst:` banner on next natural reboot before chasing |
 | 8 | Consolidated owner test | BLOCKED on 1-5 flash | One session: converse, interrupt mid-reply, let it sleep, wake by voice — all four feel native |
 
+## Elevation wave 2 (2026-08-27 evening — owner directives)
+
+| # | Task | Owner | Status |
+|---|------|-------|--------|
+| E1 | Seconds hand on the watch | backend | SHIPPED `05f4bc0`, verified on glass |
+| E2 | Remote canvas (any image → glass, TTL) + send-canvas.py | backend | SHIPPED `05f4bc0`, first push captured |
+| E3 | Tap redesign: tap-while-speaking = stop-talking, never privacy mute (trap killed) | backend | CODED, awaiting joint flash |
+| E4 | Double-tap = attention; swipe-left = status glance; swipe-right = watch peek | backend | CODED, awaiting joint flash |
+| E5 | Operator lease (/api/operator/lease, owner tap reclaims) + jarvisctl lease/release | backend | CODED, awaiting joint flash |
+| E6 | jarvisctl operator CLI + CLAUDE.md doc | backend | SHIPPED `500b297`, live-tested |
+| E7 | Whole front experience: watch↔face fade, canvas easing, gesture visuals, wake bloom | glass-ux teammate | IN PROGRESS (jr_display domain) |
+| E8 | Joint build/flash/verify of E3-E5+E7, owner look | backend | BLOCKED on E7 handover |
+
 ## Elevation backlog (after reliability — reliability IS the elevation)
 
 | Idea | Note |
