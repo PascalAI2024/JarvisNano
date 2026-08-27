@@ -30,6 +30,16 @@ out: fluid speech, native-style barge-in, and a device that is NEVER deaf.
 | E7 | Whole front experience: fades, wake bloom, listening ring, brightness slew, caption ease | glass-ux teammate | SHIPPED `dd5d48b`+`a615a52`, captures verified; choice-arc exit fade in flight |
 | E8 | Joint build/flash/verify + owner circuit | backend | FLASHED + captured; owner verdict pending |
 
+## Wave 3 — gesture gaps from owner testing (2026-08-27 late; owner: "no swipe function? can't mute" / "slot is missing")
+
+| # | Gap (evidence) | Fix | Acceptance |
+|---|---|---|---|
+| W1 | **No obvious touch mute** — tap-mute removed (correctly), flip not always practical, long-press exists but owner's long_press counter = 0 (undiscovered) | Dedicate a clear mute slot: long-press becomes PURE mute/unmute toggle with "MUTED — HOLD TO RESUME" caption (pairing claim moves to shade-only); evaluate triple-tap as alternate | Owner can mute by touch in <2 s without reading docs; state always captioned |
+| W2 | Swipe L/R tolerance — owner's strokes classified vertical (log: dir=3/4, deltas ~220 px dy vs ~20 px dx); glance/peek never fired for them | Widen angular tolerance for L/R classification; require less dx dominance | Owner's natural sideways stroke fires glance/peek reliably |
+| W3 | Recognized-gesture feedback — a swipe that IS recognized shows its action, but a near-miss shows nothing, reading as "swipes don't work" | Brief on-glass hint on any unclassified swipe ("↕ shade · ↔ glance/watch") | No gesture attempt ends in silent nothing |
+| W4 | Gesture discoverability — every gesture tonight was learned via chat | Shade gains a one-card gesture guide; consider first-boot card | Owner never needs the chat cheat-card again |
+| W5 | Flip-mute unverified on the C by the owner | Owner test: flip face-down mutes <1.5 s, face-up resumes; fix orientation thresholds if not | Verified by owner's hands, logged |
+
 ## Elevation backlog (after reliability — reliability IS the elevation)
 
 | Idea | Note |
