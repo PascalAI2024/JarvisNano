@@ -5380,22 +5380,35 @@ static void voice_task(void *arg)
                     /* Gesture: swipe right = 10 s watch peek while awake. */
                     s_watch_peek_until_ms = (uint32_t)now + 10000U;
                     ESP_LOGI(TAG, "gesture: watch peek");
+                } else {
+                    /* Recognized swipe, no action in this context (UP with
+                     * no shade, DOWN off-edge). Hint instead of silence —
+                     * silent nothing is what read as "swipes don't work". */
+                    jr_display_caption_set("L GLANCE R WATCH HOLD MUTE");
+                    ESP_LOGI(TAG, "gesture: swipe hint (dir=%d)",
+                             (int)iev.direction);
                 }
             } else if (iev.kind == JR_INPUT_LONG_PRESS) {
-                if (p == JR_ST_IDLE) {
-                    atomic_store(&s_pairing_claim_until_ms,
-                                 (uint32_t)now + 60000U);
-                    s_ui_shade_open = true;
-                    ESP_LOGI(TAG,
-                        "pairing: physical claim window open for 60 seconds");
+                /* LONG-PRESS IS MUTE. One job, both directions, always
+                 * captioned. It was overloaded with pairing + shade and the
+                 * owner never found the mute inside it (long_press counter
+                 * read 0 while they reported "can't mute", 2026-08-27).
+                 * Pairing claim stays reachable via the shade's Agent Link
+                 * control — deliberate flows can afford two gestures; mute
+                 * cannot. */
+                if (atomic_load(&s_voice_privacy_paused)) {
+                    atomic_store(&s_voice_privacy_paused, false);
+                    atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+                    jr_display_caption_set("LISTENING");
+                    ESP_LOGI(TAG, "gesture: long-press unmute");
                 } else {
                     atomic_store(&s_voice_privacy_paused, true);
-                    atomic_store(&s_pairing_claim_until_ms,
-                                 (uint32_t)now + 60000U);
-                    s_ui_shade_open = true;
-                    jr_orch_inject(&s_app.orch, jr_event(JR_EV_USER_STOP), now);
-                    ESP_LOGI(TAG,
-                        "pairing: privacy stop + physical claim window open for 60 seconds");
+                    if (p != JR_ST_IDLE && p != JR_ST_DRAINING) {
+                        jr_orch_inject(&s_app.orch, jr_event(JR_EV_USER_STOP),
+                                       now);
+                    }
+                    jr_display_caption_set("MUTED - HOLD TO RESUME");
+                    ESP_LOGI(TAG, "gesture: long-press mute");
                 }
             } else if (iev.kind == JR_INPUT_TAP) {
                 if (s_ui_shade_open) {

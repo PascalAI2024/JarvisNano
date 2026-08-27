@@ -147,23 +147,20 @@ static bool touch_classify_swipe(uint16_t start_x, uint16_t start_y,
         return false;
     }
 
-    if (abs_x >= abs_y &&
-        (uint32_t)abs_x * 100U >=
-            (uint32_t)abs_y * TOUCH_SWIPE_DOMINANCE_PCT) {
+    /* Larger axis wins, no dominance gate. The old 125% dominance rule sent
+     * any flick with natural drift (dx 80 / dy 70) to NOWHERE — the owner
+     * read that silence as "swipes don't work" (2026-08-27). Every real
+     * swipe now classifies; a 45-degree stroke goes to its larger axis, and
+     * every downstream action is benign, so a misread costs a glance, not a
+     * state. The shade keeps its own high-confidence gate above. */
+    if (abs_x >= abs_y) {
         *direction = delta_x < 0 ? JR_INPUT_DIRECTION_LEFT
                                  : JR_INPUT_DIRECTION_RIGHT;
-        return true;
-    }
-
-    if (abs_y > abs_x &&
-        (uint32_t)abs_y * 100U >=
-            (uint32_t)abs_x * TOUCH_SWIPE_DOMINANCE_PCT) {
+    } else {
         *direction = delta_y < 0 ? JR_INPUT_DIRECTION_UP
                                  : JR_INPUT_DIRECTION_DOWN;
-        return true;
     }
-
-    return false;
+    return true;
 }
 
 static esp_lcd_touch_handle_t touch_resolve_board_handle(void)
