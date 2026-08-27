@@ -1070,13 +1070,13 @@ void jr_display_dismiss_choices(void)
     if (__atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE) == 0) {
         return;                            /* idempotent */
     }
+    /* Only the count clears. Question, labels, and the selected index all
+     * STAY: the render task keeps drawing them through the exit fade — the
+     * tapped arc staying lit as the presentation sinks IS the confirmation
+     * beat. The hit test gates on s_choice_n, so a fading ask can never
+     * answer a tap; the next present() rewrites everything before its own
+     * release-store. */
     __atomic_store_n(&s_choice_n, 0, __ATOMIC_RELEASE);
-    s_choice_selected = -1;
-    s_choice_q_line[0][0] = '\0';
-    s_choice_q_line[1][0] = '\0';
-    for (int i = 0; i < HUD_CHOICE_MAX; ++i) {
-        s_choice_label_buf[i][0] = '\0';   /* owned copies end with the ask */
-    }
     ESP_LOGI(TAG, "choices: dismissed");
 }
 
@@ -1320,8 +1320,8 @@ static void fade_strip(jr_display_ctx_t *ctx, int y1, int y2, uint16_t *pixels,
 }
 
 /* STATE-07: the modal ask presentation, run per flushed strip only while a
- * question is on screen (a modal state measured in seconds, so a few fps of
- * cost is acceptable). The whole strip dims — the same transform
+ * question is on screen or easing off it (a modal state measured in seconds,
+ * so a few fps of cost is acceptable). The whole strip dims — the same transform
  * apply_surface_overlay uses for its backdrop — then the question text and the
  * per-arc labels draw over the dimmed face; hud_overlay_choices follows in the
  * caller so the arcs stay bright ON TOP. Reads only the s_choice_* statics
@@ -1540,17 +1540,28 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
      * question + labels over the dimmed face, then the arcs LAST — they are
      * the interactive layer and must sit bright above the face, the HUD
      * accents, and the text. Same strip contract, same buffer. The caption
-     * (STATE-04) yields entirely while an ask is up: the ask owns the glass. */
+     * (STATE-04) yields entirely while an ask is up: the ask owns the glass.
+     * On dismissal the presentation SINKS over whatever returns underneath —
+     * the tap's selected arc stays lit through the exit, which is the demo
+     * script's "the arc fills and confirms" beat for free. */
     const int cn = __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE);
+    const int ae = s_ask_ease;
+    const int as = ae > 255 ? 255 : ae;
     if (cn > 0) {
-        apply_ask_overlay(ctx, y1, y2, pixels, cn);
+        apply_ask_overlay(ctx, y1, y2, pixels, cn, ae);
         hud_overlay_choices(pixels, y1, nrows, ctx->board.swap_color_bytes,
-                            s_choices, cn, s_choice_selected);
+                            s_choices, cn, s_choice_selected, as);
     } else {
         /* UI-01 clock under the STATE-04 caption: the watch dims the frame,
          * the caption band dims again over it and carries the status text. */
         apply_clock_overlay(ctx, y1, y2, pixels);      /* gates itself */
         apply_caption_overlay(ctx, y1, y2, pixels);    /* gates on its ease */
+        if (ae > 0 && s_ask_shown_n > 0) {
+            apply_ask_overlay(ctx, y1, y2, pixels, s_ask_shown_n, ae);
+            hud_overlay_choices(pixels, y1, nrows,
+                                ctx->board.swap_color_bytes, s_choices,
+                                s_ask_shown_n, s_choice_selected, as);
+        }
     }
 
     /* TRANS-01 wake bloom: TOPMOST transient. The wake moment must read over

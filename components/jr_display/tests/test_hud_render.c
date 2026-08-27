@@ -453,7 +453,7 @@ static void test_choices_strip_invariance(void)
     hud_choice_t c[HUD_CHOICE_MAX];
     t_fill_choices(c, HUD_CHOICE_MAX);
 
-    hud_overlay_choices(whole, 0, HUD_H, false, c, HUD_CHOICE_MAX, 1);
+    hud_overlay_choices(whole, 0, HUD_H, false, c, HUD_CHOICE_MAX, 1, 255);
 
     int nstrips = 0, ragged = 0;
     for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
@@ -462,7 +462,7 @@ static void test_choices_strip_invariance(void)
             ragged = nrows;
         }
         hud_overlay_choices(strips + (size_t)y * HUD_W, y, nrows, false,
-                            c, HUD_CHOICE_MAX, 1);
+                            c, HUD_CHOICE_MAX, 1, 255);
         nstrips++;
     }
     CHECK(ragged == 10, "expected a ragged final strip of 10 rows, got %d", ragged);
@@ -490,6 +490,45 @@ static void test_choices_strip_invariance(void)
     free(whole); free(strips);
 }
 
+/* The ask's exit fade runs THROUGH hud_overlay_choices with a decaying
+ * strength: 0 (and below) must paint nothing, and a mid strength must paint
+ * dimmer than settled — never brighter — for both the selected and the
+ * unselected arcs. */
+static void test_choices_strength_gate(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = calloc(px, sizeof *fb);
+    if (!fb) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
+
+    hud_choice_t c[HUD_CHOICE_MAX];
+    t_fill_choices(c, HUD_CHOICE_MAX);
+
+    hud_overlay_choices(fb, 0, HUD_H, false, c, HUD_CHOICE_MAX, 1, 0);
+    hud_overlay_choices(fb, 0, HUD_H, false, c, HUD_CHOICE_MAX, 1, -9);
+    size_t painted = 0;
+    for (size_t i = 0; i < px; i++) if (fb[i] != 0) painted++;
+    CHECK(painted == 0, "strength<=0 painted %zu px", painted);
+
+    hud_overlay_choices(fb, 0, HUD_H, false, c, HUD_CHOICE_MAX, 1, 128);
+    uint16_t *full = calloc(px, sizeof *full);
+    if (!full) { printf("FAIL %s: alloc\n", __func__); g_failures++; free(fb); return; }
+    hud_overlay_choices(full, 0, HUD_H, false, c, HUD_CHOICE_MAX, 1, 255);
+    size_t mid = 0, brighter = 0;
+    for (size_t i = 0; i < px; i++) {
+        if (fb[i] == 0) continue;
+        mid++;
+        /* per-channel: the faded pixel may never exceed the settled one */
+        const int rm = (fb[i] >> 11) & 31, rf = (full[i] >> 11) & 31;
+        const int gm = (fb[i] >> 5) & 63,  gf = (full[i] >> 5) & 63;
+        const int bm = fb[i] & 31,         bf = full[i] & 31;
+        if (rm > rf || gm > gf || bm > bf) brighter++;
+    }
+    CHECK(mid > 5000, "strength=128 painted only %zu px", mid);
+    CHECK(brighter == 0, "%zu px brighter at strength 128 than settled",
+          brighter);
+    free(fb); free(full);
+}
+
 static void test_choices_respect_bounds(void)
 {
     enum { GUARD = 64, NROWS = 12 };
@@ -502,7 +541,7 @@ static void test_choices_respect_bounds(void)
     t_fill_choices(c, HUD_CHOICE_MAX);
 
     /* y0 deliberately NOT strip-aligned */
-    hud_overlay_choices(buf + GUARD, 197, NROWS, true, c, HUD_CHOICE_MAX, 0);
+    hud_overlay_choices(buf + GUARD, 197, NROWS, true, c, HUD_CHOICE_MAX, 0, 255);
 
     size_t head = 0, tail = 0;
     for (int i = 0; i < GUARD; i++) {
@@ -537,7 +576,7 @@ static void test_choices_stay_in_free_band(void)
 
     hud_choice_t c[HUD_CHOICE_MAX];
     t_fill_choices(c, HUD_CHOICE_MAX);
-    hud_overlay_choices(fb, 0, HUD_H, false, c, HUD_CHOICE_MAX, 2);
+    hud_overlay_choices(fb, 0, HUD_H, false, c, HUD_CHOICE_MAX, 2, 255);
 
     /* doubled radii: r215 -> 430, the glass edge r232.5 -> 465 */
     const long r_near2 = 430L * 430L;
@@ -585,7 +624,7 @@ static void test_battery_and_choices_do_not_overlap(void)
 
     hud_choice_t c[HUD_CHOICE_MAX];
     t_fill_choices(c, HUD_CHOICE_MAX);
-    hud_overlay_choices(arc, 0, HUD_H, false, c, HUD_CHOICE_MAX, 0);
+    hud_overlay_choices(arc, 0, HUD_H, false, c, HUD_CHOICE_MAX, 0, 255);
 
     static const int pcts[] = { 5, 50, 100 };
     for (size_t k = 0; k < sizeof pcts / sizeof pcts[0]; k++) {
@@ -821,7 +860,7 @@ static void test_choice_render_and_hit_agree(void)
             }
         }
         memset(fb, 0, px * sizeof *fb);
-        hud_overlay_choices(fb, 0, HUD_H, false, solo, HUD_CHOICE_MAX, -1);
+        hud_overlay_choices(fb, 0, HUD_H, false, solo, HUD_CHOICE_MAX, -1, 255);
 
         for (int y = 0; y < HUD_H; y++) {
             for (int x = 0; x < HUD_W; x++) {
@@ -1544,6 +1583,7 @@ int main(void)
     test_listen_ring_band_and_exclusivity();
     test_tilt_offset_is_disabled();
     test_choices_strip_invariance();
+    test_choices_strength_gate();
     test_choices_respect_bounds();
     test_choices_stay_in_free_band();
     test_battery_and_choices_do_not_overlap();

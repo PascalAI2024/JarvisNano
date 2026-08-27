@@ -179,7 +179,11 @@ void jr_display_set_hud_enabled(bool enabled);
  * shown is a no-op, which is what JR_CMD_DISMISS_CHOICES requires.
  *
  * jr_display_choice_hit() maps a raw panel tap to a choice index, or -1. It
- * gates on the arc band, so taps on the face or the bezel ticks do NOT answer. */
+ * gates on the arc band, so taps on the face or the bezel ticks do NOT answer.
+ *
+ * The presentation eases in/out over ~250 ms render-side. A dismissal keeps
+ * the tapped arc lit through the exit fade (the confirmation beat); the hit
+ * test dies with the dismiss itself, so a fading ask never answers a tap. */
 void jr_display_present_choices(const char *question,
                                 const char *const *labels, int n);
 void jr_display_dismiss_choices(void);
