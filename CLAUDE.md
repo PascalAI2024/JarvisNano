@@ -42,6 +42,15 @@ Two version pins are required inside the build container before `idf.py build`:
 
 See `docs/reference/build-toolchain.md` for the full recipe and gotchas.
 
+## Operator tooling
+
+With the device on LAN (`export JARVIS_DEVICE_HOST=<ip>`), drive it as a tool:
+`scripts/jarvisctl.py status|listen|mute|say|screen|canvas|tune|taps|vadlog|reboot`.
+`status` exits non-zero when the device is deaf/muted — gate on it before
+debugging "no response" as a firmware bug (it is usually a privacy state).
+`canvas` pushes any image to the glass (TTL-bounded). Serial is single-owner:
+kill any monitor before flashing.
+
 ## Reference knowledge base
 
 `docs/reference/` — organized, navigable pages for every subsystem. Start there before touching a new area.
