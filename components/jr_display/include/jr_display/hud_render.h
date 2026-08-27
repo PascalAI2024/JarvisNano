@@ -137,10 +137,12 @@ typedef struct {
 /* The whole HUD for one strip: battery rim + the state's own element, drawn
  * over whatever the face engine already rendered.
  *
- *   IDLE     slow breathing ring — alive, not busy
- *   LISTEN   reactive waveform, cyan, amplitude-driven
+ *   IDLE     nothing — the baked idle face already breathes
+ *   LISTEN   the listening ring: breathing cyan band at r186-193 (the free
+ *            r185-194 band), amplitude-excited — the across-the-desk tell
+ *            that the device is listening and not merely idle
  *   THINK    the orbital comet
- *   SPEAK    reactive waveform, white-hot
+ *   SPEAK    nothing — the baked reactive face + the audio itself carry it
  *   ERROR    red rim
  *
  * Stateless and integer-only: no allocation, no float, safe to call directly
@@ -302,11 +304,15 @@ static inline uint16_t hud_mix565(uint16_t under, uint16_t over, int m,
 
 /* Draw the choice arcs over an already-rendered strip. `selected` renders
  * bright (tap confirmation), the rest dim; pass -1 for none. Slots with a NULL
- * label are skipped. Same strip contract as hud_overlay_frame: dst holds rows
- * [y0, y0+nrows) and only those rows are touched. Integer-only, stateless, no
- * allocation — safe to call from the panel flush path. */
+ * label are skipped. strength 0..255 scales the selected and unselected
+ * levels together (255 = the settled presentation; <= 0 paints nothing) — the
+ * presenter runs the ask's entrance/exit fade through it. Same strip contract
+ * as hud_overlay_frame: dst holds rows [y0, y0+nrows) and only those rows are
+ * touched. Integer-only, stateless, no allocation — safe to call from the
+ * panel flush path. */
 void hud_overlay_choices(uint16_t *dst, int y0, int nrows, bool swap_bytes,
-                         const hud_choice_t *choices, int n, int selected);
+                         const hud_choice_t *choices, int n, int selected,
+                         int strength);
 
 /* Hit-test a touch at panel pixel (x, y) against the arcs. Returns true and
  * writes the index to *out_index on a hit; returns false and writes -1

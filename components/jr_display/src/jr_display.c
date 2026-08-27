@@ -496,6 +496,20 @@ static uint32_t s_clock_shown_word;  /* last on-word: the fade-out must hold
                                       * 12:00 mid-fade would be a new pop.   */
 static int      s_canvas_prog;
 static int      s_canvas_ease;
+/* Captions ride a QUICKER fade than the watch/canvas: they follow speech
+ * rhythm, and 400 ms of entrance on a rolling caption reads as lag. Only the
+ * on/off edges fade — text swaps while visible stay immediate, which is what
+ * a live transcript wants. */
+#define JR_DISPLAY_CAPTION_FADE_MS 250U
+static int      s_caption_prog;
+static int      s_caption_ease;
+/* The modal ask rides the caption's quick rate — it follows conversation
+ * rhythm too. s_ask_shown_n is the render-side latch of the arc count: the
+ * fade-OUT keeps drawing the presentation s_choice_n no longer admits to,
+ * exactly as the watch fade-out holds its shown time. */
+static int      s_ask_prog;
+static int      s_ask_ease;
+static int      s_ask_shown_n;
 static uint32_t s_fade_prev_ms;
 
 static inline int fade_smoothstep(int p)     /* 0..256 -> 0..256, 3p^2-2p^3 */
@@ -907,6 +921,8 @@ static volatile uint32_t s_clock_word;
  * never band across strip boundaries. State lives beside the canvas section
  * above (its first consumer); this reads the intent words published there
  * and at s_clock_word. */
+static void brightness_slew(uint32_t dt_ms);   /* defined with the pump below */
+
 static void overlay_fade_tick(void)
 {
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
@@ -915,6 +931,7 @@ static void overlay_fade_tick(void)
     if (dt > 100u) {
         dt = 100u;                   /* clamp across stalls, like hud_tick */
     }
+    brightness_slew(dt);
     int step = (int)((dt * 256u) / JR_DISPLAY_FADE_MS);
     if (step < 1) {
         step = 1;
@@ -947,6 +964,38 @@ static void overlay_fade_tick(void)
         }
     }
     s_canvas_ease = fade_smoothstep(s_canvas_prog);
+
+    int cstep = (int)((dt * 256u) / JR_DISPLAY_CAPTION_FADE_MS);
+    if (cstep < 1) {
+        cstep = 1;
+    }
+    if (__atomic_load_n(&s_caption_on, __ATOMIC_ACQUIRE) != 0) {
+        s_caption_prog += cstep;
+        if (s_caption_prog > 256) {
+            s_caption_prog = 256;
+        }
+    } else {
+        s_caption_prog -= cstep;
+        if (s_caption_prog < 0) {
+            s_caption_prog = 0;
+        }
+    }
+    s_caption_ease = fade_smoothstep(s_caption_prog);
+
+    const int ask_n = __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE);
+    if (ask_n > 0) {
+        s_ask_shown_n = ask_n;
+        s_ask_prog += cstep;
+        if (s_ask_prog > 256) {
+            s_ask_prog = 256;
+        }
+    } else {
+        s_ask_prog -= cstep;
+        if (s_ask_prog < 0) {
+            s_ask_prog = 0;
+        }
+    }
+    s_ask_ease = fade_smoothstep(s_ask_prog);
 }
 
 void jr_display_present_choices(const char *question,
@@ -1060,10 +1109,11 @@ void jr_display_caption_clear(void)
     if (__atomic_load_n(&s_caption_on, __ATOMIC_ACQUIRE) == 0) {
         return;                            /* idempotent */
     }
+    /* Only the flag clears. The wrapped lines STAY: the render task keeps
+     * showing them through the exit fade — zeroing here made the text vanish
+     * a frame before its band, which read as the chip's contents being
+     * snatched. The next set() rewrites them before its own release-store. */
     __atomic_store_n(&s_caption_on, 0, __ATOMIC_RELEASE);
-    s_caption_line[0][0] = '\0';
-    s_caption_line[1][0] = '\0';
-    s_caption_text[0] = '\0';
 }
 
 void jr_display_ripple(int x, int y)
@@ -1112,9 +1162,19 @@ void jr_display_clock_set(bool on, int hh, int mm, int ss)
  *    been acquired" -> assert failed: spi_device_release_bus
  * with the crash landing inside panel_co5300_draw_bitmap. So callers only
  * store a target here; brightness_pump() applies it from panel_flush, where
- * the render task owns the bus and no DMA is in flight. */
+ * the render task owns the bus and no DMA is in flight.
+ *
+ * The pump applies the SLEWED value, not the raw target: overlay_fade_tick
+ * walks s_brightness_shown toward the target at full-scale-per-600-ms, so a
+ * mood pop (100 -> 8 in one publish) becomes a glide, while a caller-side
+ * ramp slower than the slew passes through untouched — this is a rate
+ * LIMITER, not a second animation. One panel write per frame at most while
+ * slewing (distinct values), and the unchanged-value short-circuit still
+ * kills idle-rate rewrites. */
+#define JR_DISPLAY_BRIGHT_SLEW_MS 600U
 static uint8_t s_brightness_want = 100;   /* written by any task (atomic) */
 static uint8_t s_brightness_have = 100;   /* render task only — no atomics */
+static int     s_brightness_shown = 100;  /* render task only: slewed value */
 
 esp_err_t jr_display_set_brightness(uint8_t percent)
 {
@@ -1125,10 +1185,32 @@ esp_err_t jr_display_set_brightness(uint8_t percent)
     return ESP_OK;
 }
 
+/* Once per frame, from overlay_fade_tick: walk the shown value toward the
+ * published target at the slew rate. Render task only. */
+static void brightness_slew(uint32_t dt_ms)
+{
+    const int want = __atomic_load_n(&s_brightness_want, __ATOMIC_ACQUIRE);
+    int step = (int)((dt_ms * 100u) / JR_DISPLAY_BRIGHT_SLEW_MS);
+    if (step < 1) {
+        step = 1;
+    }
+    if (want > s_brightness_shown) {
+        s_brightness_shown += step;
+        if (s_brightness_shown > want) {
+            s_brightness_shown = want;
+        }
+    } else if (want < s_brightness_shown) {
+        s_brightness_shown -= step;
+        if (s_brightness_shown < want) {
+            s_brightness_shown = want;
+        }
+    }
+}
+
 /* Called at the top of panel_flush, on the render task, between strips. */
 static void brightness_pump(void)
 {
-    uint8_t want = __atomic_load_n(&s_brightness_want, __ATOMIC_ACQUIRE);
+    uint8_t want = (uint8_t)s_brightness_shown;   /* slewed, render task */
     if (want == s_brightness_have) {
         return;   /* also kills the 8.9 writes/sec of identical values */
     }
@@ -1246,14 +1328,28 @@ static void fade_strip(jr_display_ctx_t *ctx, int y1, int y2, uint16_t *pixels,
  * published by jr_display_present_choices — nothing is derived here. Runs on
  * the render task; full-width strips guaranteed by the caller. */
 static void apply_ask_overlay(jr_display_ctx_t *ctx, int y1, int y2,
-                              uint16_t *pixels, int cn)
+                              uint16_t *pixels, int cn, int e)
 {
+    /* e = s_ask_ease (0..256): dim depth and text brightness ride it
+     * together, so the whole modal surfaces and sinks as one presentation
+     * instead of stamping. e==256 is the settled path — dim_strip fold,
+     * full-brightness text. */
+    const int k = (e * 32) >> 8;
+    if (k <= 0) {
+        return;
+    }
+    const int c = e > 255 ? 255 : e;
     const int sel = s_choice_selected;
-    /* Hoisted per call: the byte order never changes mid-strip, and white is
-     * bswap-invariant. */
-    const uint16_t px_white = 0xffffu;
-    const uint16_t px_cyan = panel_order_color(ctx, 0x07ff);
-    dim_strip(ctx, y1, y2, pixels);
+    /* Hoisted per call: the byte order never changes mid-strip. */
+    const uint16_t px_white = panel_order_color(
+        ctx, (uint16_t)(((c & 0xF8) << 8) | ((c & 0xFC) << 3) | (c >> 3)));
+    const uint16_t px_cyan = panel_order_color(
+        ctx, (uint16_t)((((63 * c / 255) & 0x3F) << 5) | (31 * c / 255)));
+    if (k >= 32) {
+        dim_strip(ctx, y1, y2, pixels);
+    } else {
+        fade_strip(ctx, y1, y2, pixels, k);
+    }
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
 
@@ -1322,8 +1418,19 @@ static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     if (ys > ye) {
         return;                    /* strip misses the band: one compare */
     }
+    /* Caption entrance/exit rides s_caption_ease: the band's dim deepens and
+     * the text brightens together, so the chip surfaces out of the face
+     * instead of stamping onto it. Settled (e==256) takes the exact
+     * pre-fade path — hud_dim565 fold, pure white text. */
+    const int e = s_caption_ease;
+    const int k = (e * 32) >> 8;
+    if (k <= 0) {
+        return;
+    }
     const bool swap = ctx->board.swap_color_bytes;
-    const uint16_t px_white = 0xffffu;
+    const int c = e > 255 ? 255 : e;
+    const uint16_t px_text = panel_order_color(
+        ctx, (uint16_t)(((c & 0xF8) << 8) | ((c & 0xFC) << 3) | (c >> 3)));
     for (int y = ys; y <= ye; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         const int half = hud_glass_chord(y);
@@ -1331,13 +1438,19 @@ static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
         int xhi = 233 + half;
         if (xlo < 0)         xlo = 0;
         if (xhi > HUD_W - 1) xhi = HUD_W - 1;
-        if (swap) {
-            for (int x = xlo; x <= xhi; ++x) {
-                row[x] = hud_dim565(row[x], true);
+        if (k >= 32) {
+            if (swap) {
+                for (int x = xlo; x <= xhi; ++x) {
+                    row[x] = hud_dim565(row[x], true);
+                }
+            } else {
+                for (int x = xlo; x <= xhi; ++x) {
+                    row[x] = hud_dim565(row[x], false);
+                }
             }
         } else {
             for (int x = xlo; x <= xhi; ++x) {
-                row[x] = hud_dim565(row[x], false);
+                row[x] = hud_fade565(row[x], swap, k);
             }
         }
         for (int l = 0; l < 2; ++l) {
@@ -1349,7 +1462,7 @@ static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
             const int tx = s_caption_x[l];
             for (int x = tx; x < HUD_W - tx; ++x) {
                 if (surface_text_pixel(text, 38U, x, y, tx, ty, 1)) {
-                    row[x] = px_white;
+                    row[x] = px_text;
                 }
             }
         }
@@ -1437,9 +1550,7 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
         /* UI-01 clock under the STATE-04 caption: the watch dims the frame,
          * the caption band dims again over it and carries the status text. */
         apply_clock_overlay(ctx, y1, y2, pixels);      /* gates itself */
-        if (__atomic_load_n(&s_caption_on, __ATOMIC_ACQUIRE) != 0) {
-            apply_caption_overlay(ctx, y1, y2, pixels);
-        }
+        apply_caption_overlay(ctx, y1, y2, pixels);    /* gates on its ease */
     }
 
     /* TRANS-01 wake bloom: TOPMOST transient. The wake moment must read over

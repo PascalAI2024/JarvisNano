@@ -791,10 +791,33 @@ void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
         /* Nothing. The baked idle face already breathes; a second breathing
          * ring is one more concentric ring in a design made of them. */
         break;
-    case HUD_FACE_LISTEN:
+    case HUD_FACE_LISTEN: {
+        /* The listening ring: a breathing cyan band filling the free
+         * r185-194 band (OV_R_BREATH — reserved for exactly this). The baked
+         * listen face's quiet-room floor is nearly identical to idle from
+         * across a desk; this ring is the unmistakable tell — present means
+         * listening, absent means idle. It BREATHES (~1.5 s period) so it
+         * reads as attention rather than a status LED, and the live mic
+         * amplitude rides on top so speech visibly excites it. A full ring,
+         * not a waveform: duplication of the baked art's spokes is exactly
+         * what the negative-space rule exists to prevent. */
+        const int a = (int)(((uint64_t)now_ms * 256u) / 1500u);
+        int lv = 120 + ((100 * (128 + (lsin(a) >> 8))) >> 8) + (env->amp >> 2);
+        if (lv > 255) {
+            lv = 255;
+        }
+        for (int y = s.y0; y < s.y1; ++y) {
+            if (y >= 0 && y < HUD_H) {
+                ov_ring_row(dst + (size_t)(y - s.y0) * HUD_W, y, cx, cy,
+                            186, 193, s_ov_cyan, lv);
+            }
+        }
+        break;
+    }
     case HUD_FACE_SPEAK:
-        /* Nothing: the baked reactive-wave face already carries these states.
-         * The listen-window countdown rim (STATE-02) belongs at OV_R_BREATH. */
+        /* Nothing: the baked reactive-wave face already carries speaking —
+         * and the audio itself is the tell. The listen ring above stays
+         * LISTEN-only so its presence keeps one meaning. */
         break;
     case HUD_FACE_THINK:
         hud_overlay_thinking(dst, y0, nrows, now_ms, swap_bytes);
@@ -1157,10 +1180,15 @@ void hud_choice_label_anchor(const hud_choice_t *c, int r, int w, int h,
 }
 
 void hud_overlay_choices(uint16_t *dst, int y0, int nrows, bool swap_bytes,
-                         const hud_choice_t *choices, int n, int selected)
+                         const hud_choice_t *choices, int n, int selected,
+                         int strength)
 {
-    if (dst == NULL || choices == NULL || nrows <= 0 || n <= 0) {
-        return;
+    if (dst == NULL || choices == NULL || nrows <= 0 || n <= 0 ||
+        strength <= 0) {
+        return;                      /* strength 0 must provably paint nothing */
+    }
+    if (strength > 255) {
+        strength = 255;
     }
     if (n > HUD_CHOICE_MAX) {
         n = HUD_CHOICE_MAX;
@@ -1169,14 +1197,16 @@ void hud_overlay_choices(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 
     /* Labels are NOT drawn here: this file owns no font, and the question and
      * its answers are text furniture drawn by the text layer. The pointer is
-     * the slot's occupancy flag. */
+     * the slot's occupancy flag. One strength scales the selected and
+     * unselected levels together so the whole presentation fades as one. */
     for (int i = 0; i < n; ++i) {
         if (choices[i].label == NULL) {
             continue;
         }
         const bool sel = (i == selected);
         choice_arc(dst, y0, nrows, choices[i].a0 & 255, choices[i].a1 & 255,
-                   sel ? s_ov_tick : s_ov_cyan, sel ? 255 : 96);
+                   sel ? s_ov_tick : s_ov_cyan,
+                   sel ? strength : (96 * strength) / 255);
     }
 }
 

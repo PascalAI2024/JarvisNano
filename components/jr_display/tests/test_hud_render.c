@@ -281,6 +281,62 @@ static void test_overlay_respects_bounds(void)
     free(buf);
 }
 
+/* The listening ring: LISTEN paints a full band strictly inside the free
+ * r185-194 band (measured negative space — nothing else may live there), and
+ * IDLE paints nothing at all with the battery absent, so the ring's presence
+ * carries exactly one meaning: listening. Louder input only brightens; it
+ * never moves the band. Strip invariance is structural (ov_ring_row is
+ * row-analytic) but pinned here anyway because this ring is a STATE signal —
+ * a seam would read as a glitch in the device's attention. */
+static void test_listen_ring_band_and_exclusivity(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = calloc(px, sizeof *fb);
+    uint16_t *strips = calloc(px, sizeof *strips);
+    if (!fb || !strips) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(fb); free(strips); return;
+    }
+
+    hud_env_t env = { .face = HUD_FACE_LISTEN, .amp = 0, .batt_pct = 0xFF,
+                      .charging = false, .ox = 0, .oy = 0 };
+    hud_overlay_frame(fb, 0, HUD_H, 1000, false, &env);
+    size_t painted = 0, out_of_band = 0;
+    for (int y = 0; y < HUD_H; y++) {
+        for (int x = 0; x < HUD_W; x++) {
+            if (fb[(size_t)y * HUD_W + x] == 0) continue;
+            painted++;
+            const long dx = x - 232, dy = y - 232;
+            const long r2 = dx * dx + dy * dy;
+            if (r2 < 185L * 185L || r2 > 194L * 194L) out_of_band++;
+        }
+    }
+    CHECK(painted > 1000, "listen ring painted only %zu px", painted);
+    CHECK(out_of_band == 0, "listen ring left the r185-194 band (%zu px)",
+          out_of_band);
+
+    /* strip invariance at the same instant */
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        int nrows = (y + STRIP_ROWS <= HUD_H) ? STRIP_ROWS : (HUD_H - y);
+        hud_overlay_frame(strips + (size_t)y * HUD_W, y, nrows, 1000,
+                          false, &env);
+    }
+    size_t diffs = 0;
+    for (size_t i = 0; i < px; i++) if (fb[i] != strips[i]) diffs++;
+    CHECK(diffs == 0, "listen ring strip/whole mismatch at %zu px", diffs);
+
+    /* IDLE with no cell paints NOTHING — absence is the other half of the
+     * signal. */
+    memset(fb, 0, px * sizeof *fb);
+    env.face = HUD_FACE_IDLE;
+    hud_overlay_frame(fb, 0, HUD_H, 1000, false, &env);
+    size_t idle_painted = 0;
+    for (size_t i = 0; i < px; i++) if (fb[i] != 0) idle_painted++;
+    CHECK(idle_painted == 0, "idle painted %zu px — ring exclusivity broken",
+          idle_painted);
+    free(fb); free(strips);
+}
+
 /* A USB-powered puck with no cell must show NO gauge — a full-looking or
  * empty-looking battery arc would both be lies. */
 static void test_overlay_hides_absent_battery(void)
@@ -1485,6 +1541,7 @@ int main(void)
     test_overlay_strip_invariance();
     test_overlay_respects_bounds();
     test_overlay_hides_absent_battery();
+    test_listen_ring_band_and_exclusivity();
     test_tilt_offset_is_disabled();
     test_choices_strip_invariance();
     test_choices_respect_bounds();

@@ -193,7 +193,9 @@ bool jr_display_hud_enabled(void);
  * 96 chars, wrapped to 2x38 display columns; the tail of a longer sentence is
  * clipped — it is a rolling caption). SINGLE-WRITER: the app task calls
  * set/clear, the render task only reads. Hidden automatically while a choice
- * ask is on screen — the ask owns the glass. NULL or "" clears. */
+ * ask is on screen — the ask owns the glass. NULL or "" clears. The on/off
+ * edges ease over ~250 ms render-side (band and text together); text swaps
+ * while visible stay immediate — a live transcript must not lag its voice. */
 void jr_display_caption_set(const char *text);
 void jr_display_caption_clear(void);
 
