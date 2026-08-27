@@ -1055,6 +1055,60 @@ static void test_dim565_matches_darken_chain(void)
           bad_swap, first_swap);
 }
 
+/* hud_fade565's endpoints, pinned exhaustively: k=0 is the identity and k=32
+ * is exactly hud_dim565 (itself proven against the darken chain above) — all
+ * 65536 values, both byte orders. Between the endpoints every channel must
+ * fall monotonically as k rises, or the watch fade would shimmer. */
+static void test_fade565_endpoints_and_monotonic(void)
+{
+    size_t bad_id = 0, bad_full = 0;
+    for (uint32_t v = 0; v <= 0xFFFFu; v++) {
+        const uint16_t p = (uint16_t)v;
+        if (hud_fade565(p, false, 0) != p || hud_fade565(p, true, 0) != p) {
+            bad_id++;
+        }
+        if (hud_fade565(p, false, 32) != hud_dim565(p, false) ||
+            hud_fade565(p, true, 32) != hud_dim565(p, true)) {
+            bad_full++;
+        }
+    }
+    CHECK(bad_id == 0, "%zu identity (k=0) mismatches", bad_id);
+    CHECK(bad_full == 0, "%zu full-dim (k=32) mismatches vs hud_dim565",
+          bad_full);
+
+    int pr = 31, pg = 63, pb = 31;
+    for (int k = 1; k <= 32; k++) {
+        const uint16_t v = hud_fade565(0xFFFFu, false, k);
+        const int r = (v >> 11) & 31, g = (v >> 5) & 63, b = v & 31;
+        CHECK(r <= pr && g <= pg && b <= pb,
+              "channel rose at k=%d (r%d g%d b%d)", k, r, g, b);
+        pr = r; pg = g; pb = b;
+    }
+}
+
+/* hud_mix565's endpoints: m=0 must return `under` and m=32 must return
+ * `over`, bit-exactly, both byte orders — for each operand paired against a
+ * fixed witness sweeping the operand exhausts both positions. Midpoint
+ * sanity: black mixed half toward white lands on the half-scale channels. */
+static void test_mix565_endpoints(void)
+{
+    size_t bad = 0;
+    for (uint32_t v = 0; v <= 0xFFFFu; v++) {
+        const uint16_t p = (uint16_t)v;
+        if (hud_mix565(p, 0x1234u, 0, false) != p ||
+            hud_mix565(p, 0x1234u, 0, true) != p ||
+            hud_mix565(0x1234u, p, 32, false) != p ||
+            hud_mix565(0x1234u, p, 32, true) != p) {
+            bad++;
+        }
+    }
+    CHECK(bad == 0, "%zu endpoint mismatches", bad);
+
+    const uint16_t half = hud_mix565(0x0000u, 0xFFFFu, 16, false);
+    CHECK(((half >> 11) & 31) == 15 && ((half >> 5) & 63) == 31 &&
+          (half & 31) == 15, "midpoint mix wrong (0x%04x)", half);
+}
+
 /* A wrapping span [240..20] crosses 3 o'clock; its midpoint is a=2, just past
  * 3 o'clock — NOT the complementary a=130 over by 9 o'clock. A naive
  * (a0+a1)/2 lands on the wrong side of the screen; the anchor must not. */
@@ -1214,44 +1268,118 @@ static void test_ripple_corner_tap_stays_on_glass(void)
     free(fb);
 }
 
+/* ---- wake bloom (TRANS-01) -------------------------------------------- */
+
+/* The wavefront expands monotonically with age (ease-out means later ==
+ * farther), every painted pixel stays inside r<=152 about (232,232) — always
+ * on the glass — and an expired age paints nothing at all, which is the
+ * whole self-clearing contract. */
+static void test_bloom_expands_expires_and_bounds(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = calloc(px, sizeof *fb);
+    if (!fb) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
+
+    hud_overlay_bloom(fb, 0, HUD_H, false, HUD_BLOOM_MS);
+    hud_overlay_bloom(fb, 0, HUD_H, false, HUD_BLOOM_MS + 1000u);
+    size_t painted = 0;
+    for (size_t i = 0; i < px; i++) if (fb[i] != 0) painted++;
+    CHECK(painted == 0, "expired bloom painted %zu px", painted);
+
+    long r2_max[2] = {0, 0};
+    static const uint32_t ages[2] = {60u, 420u};
+    for (int k = 0; k < 2; k++) {
+        memset(fb, 0, px * sizeof *fb);
+        hud_overlay_bloom(fb, 0, HUD_H, false, ages[k]);
+        size_t n = 0;
+        for (int y = 0; y < HUD_H; y++) {
+            for (int x = 0; x < HUD_W; x++) {
+                if (fb[(size_t)y * HUD_W + x] == 0) continue;
+                n++;
+                const long dx = x - 232, dy = y - 232;
+                const long r2 = dx * dx + dy * dy;
+                if (r2 > r2_max[k]) r2_max[k] = r2;
+            }
+        }
+        CHECK(n > 200, "age=%u painted only %zu px", ages[k], n);
+        CHECK(r2_max[k] <= 152L * 152L, "age=%u reached r^2=%ld past r152",
+              ages[k], r2_max[k]);
+    }
+    CHECK(r2_max[0] < r2_max[1],
+          "wavefront did not expand (r^2 %ld -> %ld)", r2_max[0], r2_max[1]);
+    free(fb);
+}
+
+/* Same strip contract as every other overlay, checked mid-flight while both
+ * the seed and the wavefront are live. */
+static void test_bloom_strip_invariance(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = malloc(px * sizeof *whole);
+    uint16_t *strips = malloc(px * sizeof *strips);
+    if (!whole || !strips) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(whole); free(strips); return;
+    }
+    for (size_t i = 0; i < px; i++) { whole[i] = strips[i] = (uint16_t)(i * 17u); }
+    hud_overlay_bloom(whole, 0, HUD_H, false, 180u);
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        int nrows = (y + STRIP_ROWS <= HUD_H) ? STRIP_ROWS : (HUD_H - y);
+        hud_overlay_bloom(strips + (size_t)y * HUD_W, y, nrows, false, 180u);
+    }
+    size_t diffs = 0;
+    for (size_t i = 0; i < px; i++) if (whole[i] != strips[i]) diffs++;
+    CHECK(diffs == 0, "bloom strip/whole mismatch at %zu px", diffs);
+    free(whole); free(strips);
+}
+
 /* ---- ambient watch face (UI-01) --------------------------------------- */
 
 /* Hands are distinguishable by colour: the minute hand and hub are pure
- * white 0xffff, the hour hand is the cyan ramp's bright end (any nonzero
- * non-white pixel). Hand pixels are separated from the hub by radius: the
- * hub ends at r=5, the hands start at r=20, so r^2 > 100 is cleanly a hand.
- * Direction paper-check baked in: hh=3 -> hour RIGHT (a=0), mm=30 -> minute
- * DOWN (a=64), mm=0 -> minute UP (a=192). */
+ * white 0xffff, the seconds hand is gold (the only non-white colour with a
+ * red component), the hour hand is cyan (no red). Hand pixels are separated
+ * from the hub by radius: the hub ends at r=5, the hands start at r=20, so
+ * r^2 > 100 is cleanly a hand. Direction paper-check baked in: hh=3 -> hour
+ * RIGHT (a=0), mm=0 -> minute UP (a=192), ss=30 -> seconds DOWN (a=64),
+ * mm=30 -> minute DOWN. */
 static void test_clock_hand_angles(void)
 {
     const size_t px = (size_t)HUD_W * HUD_H;
     uint16_t *fb = calloc(px, sizeof *fb);
     if (!fb) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
 
-    hud_overlay_clock(fb, 0, HUD_H, false, 3, 0);
-    size_t hour = 0, minute = 0, hour_bad = 0, min_bad = 0;
+    hud_overlay_clock(fb, 0, HUD_H, false, 3, 0, 30, 255);
+    size_t hour = 0, minute = 0, second = 0;
+    size_t hour_bad = 0, min_bad = 0, sec_bad = 0;
     for (int y = 0; y < HUD_H; y++) {
         for (int x = 0; x < HUD_W; x++) {
             const uint16_t p = fb[(size_t)y * HUD_W + x];
             if (p == 0) continue;
             const int dx = x - 232, dy = y - 232;
             const int r2 = dx * dx + dy * dy;
-            if (p != 0xffff) {                    /* hour hand: cyan */
+            if (p == 0xffff) {                    /* minute hand + hub */
+                if (r2 > 100) {
+                    minute++;
+                    if (y >= 233) min_bad++;
+                }
+            } else if ((p & 0xF800u) != 0) {      /* seconds hand: gold */
+                second++;
+                if (y <= 233) sec_bad++;
+            } else {                              /* hour hand: cyan */
                 hour++;
                 if (x <= 233) hour_bad++;
-            } else if (r2 > 100) {                /* minute hand, hub excluded */
-                minute++;
-                if (y >= 233) min_bad++;
             }
         }
     }
     CHECK(hour > 100, "hour hand painted only %zu px", hour);
     CHECK(minute > 100, "minute hand painted only %zu px", minute);
+    CHECK(second > 50, "seconds hand painted only %zu px", second);
     CHECK(hour_bad == 0, "hh=3: %zu hour px not right of centre", hour_bad);
     CHECK(min_bad == 0, "mm=0: %zu minute px not above centre", min_bad);
+    CHECK(sec_bad == 0, "ss=30: %zu seconds px not below centre", sec_bad);
 
     memset(fb, 0, px * sizeof *fb);
-    hud_overlay_clock(fb, 0, HUD_H, false, 0, 30);
+    hud_overlay_clock(fb, 0, HUD_H, false, 0, 30, 0, 255);
     size_t down_bad = 0;
     for (int y = 0; y < HUD_H; y++) {
         for (int x = 0; x < HUD_W; x++) {
@@ -1265,9 +1393,11 @@ static void test_clock_hand_angles(void)
     free(fb);
 }
 
-/* Everything inside r<=180 (measured from the overlay centre 232,232 — the
- * longest hand tip plus 3x3 dot spill reaches ~178), and the same 12-row
- * strip contract as every other overlay. */
+/* Everything inside r<=192 (measured from the overlay centre 232,232 — the
+ * seconds tip at r190 plus dot spill, riding the free r185-194 band, clear of
+ * the baked ticks at r200), and the same 12-row strip contract as every other
+ * overlay. Strip invariance is checked at a MID fade strength on purpose:
+ * transition frames must be as seam-free as settled ones. */
 static void test_clock_bounds_and_strips(void)
 {
     const size_t px = (size_t)HUD_W * HUD_H;
@@ -1278,36 +1408,69 @@ static void test_clock_bounds_and_strips(void)
         free(whole); free(strips); return;
     }
 
-    static const int times[][2] = { {3, 0}, {10, 47}, {6, 15}, {23, 59} };
+    static const int times[][3] = {
+        {3, 0, 15}, {10, 47, 33}, {6, 15, 0}, {23, 59, 59},
+    };
     for (size_t k = 0; k < sizeof times / sizeof times[0]; k++) {
         memset(whole, 0, px * sizeof *whole);
-        hud_overlay_clock(whole, 0, HUD_H, false, times[k][0], times[k][1]);
+        hud_overlay_clock(whole, 0, HUD_H, false,
+                          times[k][0], times[k][1], times[k][2], 255);
         size_t out = 0, painted = 0;
         for (int y = 0; y < HUD_H; y++) {
             for (int x = 0; x < HUD_W; x++) {
                 if (whole[(size_t)y * HUD_W + x] == 0) continue;
                 painted++;
                 const int dx = x - 232, dy = y - 232;
-                if (dx * dx + dy * dy > 180 * 180) out++;
+                if (dx * dx + dy * dy > 192 * 192) out++;
             }
         }
-        CHECK(out == 0, "%02d:%02d painted %zu px past r180",
-              times[k][0], times[k][1], out);
-        CHECK(painted > 200, "%02d:%02d painted only %zu px",
-              times[k][0], times[k][1], painted);
+        CHECK(out == 0, "%02d:%02d:%02d painted %zu px past r192",
+              times[k][0], times[k][1], times[k][2], out);
+        CHECK(painted > 200, "%02d:%02d:%02d painted only %zu px",
+              times[k][0], times[k][1], times[k][2], painted);
     }
 
-    /* strip invariance at a representative time */
+    /* strip invariance at a representative time, mid-fade */
     for (size_t i = 0; i < px; i++) { whole[i] = strips[i] = (uint16_t)(i * 17u); }
-    hud_overlay_clock(whole, 0, HUD_H, false, 10, 47);
+    hud_overlay_clock(whole, 0, HUD_H, false, 10, 47, 33, 140);
     for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
         int nrows = (y + STRIP_ROWS <= HUD_H) ? STRIP_ROWS : (HUD_H - y);
-        hud_overlay_clock(strips + (size_t)y * HUD_W, y, nrows, false, 10, 47);
+        hud_overlay_clock(strips + (size_t)y * HUD_W, y, nrows, false,
+                          10, 47, 33, 140);
     }
     size_t diffs = 0;
     for (size_t i = 0; i < px; i++) if (whole[i] != strips[i]) diffs++;
     CHECK(diffs == 0, "clock strip/whole mismatch at %zu px", diffs);
     free(whole); free(strips);
+}
+
+/* The presenter's fade-out runs THROUGH hud_overlay_clock with a decaying
+ * strength, so off == paints-nothing now lives at the strength gate: 0 (and
+ * anything below) must paint nothing. A mid strength paints, and paints no
+ * pure-white pixel — the minute hand scales down with everything else, hands
+ * fading as one object. */
+static void test_clock_strength_gate(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = calloc(px, sizeof *fb);
+    if (!fb) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
+
+    hud_overlay_clock(fb, 0, HUD_H, false, 10, 47, 33, 0);
+    hud_overlay_clock(fb, 0, HUD_H, false, 10, 47, 33, -7);
+    size_t painted = 0;
+    for (size_t i = 0; i < px; i++) if (fb[i] != 0) painted++;
+    CHECK(painted == 0, "strength<=0 painted %zu px", painted);
+
+    hud_overlay_clock(fb, 0, HUD_H, false, 10, 47, 33, 128);
+    size_t mid = 0, whites = 0;
+    for (size_t i = 0; i < px; i++) {
+        if (fb[i] == 0) continue;
+        mid++;
+        if (fb[i] == 0xffff) whites++;
+    }
+    CHECK(mid > 200, "strength=128 painted only %zu px", mid);
+    CHECK(whites == 0, "strength=128 left %zu full-white px", whites);
+    free(fb);
 }
 
 int main(void)
@@ -1341,12 +1504,17 @@ int main(void)
     test_label_anchor_wrap_span();
     test_label_anchor_radial_clamp_19_chars();
     test_dim565_matches_darken_chain();
+    test_fade565_endpoints_and_monotonic();
+    test_mix565_endpoints();
     test_caption_text_fits_glass_chord();
     test_ripple_geometry();
     test_ripple_strip_invariance();
     test_ripple_corner_tap_stays_on_glass();
+    test_bloom_expands_expires_and_bounds();
+    test_bloom_strip_invariance();
     test_clock_hand_angles();
     test_clock_bounds_and_strips();
+    test_clock_strength_gate();
 
     if (g_failures) {
         printf("hud_render tests FAILED (%d)\n", g_failures);

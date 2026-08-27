@@ -233,6 +233,73 @@ static inline uint16_t hud_dim565(uint16_t v, bool swap_bytes)
     return (uint16_t)(((v & 0x0003u) << 14) | ((v >> 2) & 0x2739u));
 }
 
+/* Variable-strength companion to hud_dim565: k=0 leaves v untouched, k=32 is
+ * exactly hud_dim565's quarter, and intermediate k interpolates each channel
+ * linearly (multiplier m = 32 - 3k/4 in 1/32 units). This exists because the
+ * watch dim POPPING between those two endpoints in one frame was the single
+ * most-felt transition on the glass — the dim itself has to ease. The
+ * red+blue fields multiply together in one pass: 31*32 = 992 stays below
+ * bit 10, so blue's product never reaches red's field; green rides alone
+ * (63*32 = 2016 < 2^11). At k=32, m=8 collapses to the same bit permutation
+ * hud_dim565 performs — pinned exhaustively over all 65536 values, both byte
+ * orders, in the host suite. Byte-swapped input round-trips through native
+ * order: the split-field fold that keeps hud_dim565 swap-free has no
+ * equivalent for a variable multiply, and this path only runs during the
+ * few-hundred-ms transition, never at steady state. */
+static inline uint16_t hud_fade565(uint16_t v, bool swap_bytes, int k)
+{
+    if (k <= 0) {
+        return v;
+    }
+    if (k > 32) {
+        k = 32;
+    }
+    if (swap_bytes) {
+        v = (uint16_t)((v >> 8) | (v << 8));
+    }
+    const uint32_t m = 32u - (uint32_t)((24 * k) >> 5);
+    uint16_t out = (uint16_t)((((v & 0xF81Fu) * m) >> 5) & 0xF81Fu);
+    out |= (uint16_t)((((v & 0x07E0u) * m) >> 5) & 0x07E0u);
+    if (swap_bytes) {
+        out = (uint16_t)((out >> 8) | (out << 8));
+    }
+    return out;
+}
+
+/* Per-pixel mix, m/32 toward `over` (m 0..32): the canvas entrance/exit
+ * crossfade. Both operands arrive in panel byte order; the swapped panel
+ * round-trips through native order (the split green field rules out an
+ * in-place fold, exactly as in hud_fade565). Weights summing to 32 keep each
+ * field's sum below the next field — max 31*32 for red+blue's shared pass,
+ * 63*32 < 2^11 for green — so one two-field multiply per operand suffices.
+ * Endpoints pinned exhaustively in the host suite: m=0 returns `under`
+ * bit-exactly, m=32 returns `over`, both byte orders. Transition frames only;
+ * a settled canvas is a memcpy. */
+static inline uint16_t hud_mix565(uint16_t under, uint16_t over, int m,
+                                  bool swap_bytes)
+{
+    if (m <= 0) {
+        return under;
+    }
+    if (m > 32) {
+        m = 32;
+    }
+    if (swap_bytes) {
+        under = (uint16_t)((under >> 8) | (under << 8));
+        over = (uint16_t)((over >> 8) | (over << 8));
+    }
+    const uint32_t wo = (uint32_t)m;
+    const uint32_t wu = 32u - wo;
+    uint16_t out = (uint16_t)(((((under & 0xF81Fu) * wu) +
+                                ((over & 0xF81Fu) * wo)) >> 5) & 0xF81Fu);
+    out |= (uint16_t)(((((under & 0x07E0u) * wu) +
+                        ((over & 0x07E0u) * wo)) >> 5) & 0x07E0u);
+    if (swap_bytes) {
+        out = (uint16_t)((out >> 8) | (out << 8));
+    }
+    return out;
+}
+
 /* Draw the choice arcs over an already-rendered strip. `selected` renders
  * bright (tap confirmation), the rest dim; pass -1 for none. Slots with a NULL
  * label are skipped. Same strip contract as hud_overlay_frame: dst holds rows
@@ -278,18 +345,38 @@ int hud_glass_chord(int y);
 void hud_overlay_ripple(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                         int cx, int cy, uint32_t age_ms);
 
+/* TRANS-01: the wake bloom — VISION.md's "point of light blooms into the
+ * ring". A small seed of light at the centre collapses as a cyan wavefront
+ * expands from it out to the baked face's ring radius over HUD_BLOOM_MS,
+ * ease-out cubic (fast birth, gentle landing), fading as it grows so it
+ * reads as light spreading, not a shape being drawn. Fired once when the
+ * wake word lands; age_ms >= HUD_BLOOM_MS paints nothing, so expiry needs no
+ * state write — the same self-erasing license the ripple holds for drawing
+ * transient motion OVER the baked face. Everything stays inside r<=152,
+ * always on the glass. Stateless, integer-only, y-culled; same strip
+ * contract as every other overlay. */
+#define HUD_BLOOM_MS   600u
+void hud_overlay_bloom(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                       uint32_t age_ms);
+
 /* UI-01: ambient watch hands over a dimmed face. The baked bezel ticks at
  * r200-214 already form the dial, so the whole watch is two hands and a hub:
  * hour hand r20..110 in bright cyan, minute hand r20..175 in white, a 5 px
  * white hub at the centre. 12 o'clock is a=192 in the LUT convention and both
  * hands sweep clockwise with increasing a (mm=15 -> a=0, 3 o'clock).
- * Everything stays inside r<=180 — far inside the glass, clear of the ticks.
+ * Everything stays inside r<=192 (seconds tip r190 plus dot spill, riding
+ * the free r185-194 band) — on the glass, clear of the baked ticks at r200.
  * hh 0..23 (folded mod 12), mm 0..59, ss 0..59; out-of-range values are
- * folded, never trusted. Stateless, integer-only, y-culled; same strip
- * contract as every other overlay. The gold 1 px seconds hand ticks at the
- * publisher's cadence (~1 Hz) so the resting watch reads as alive. */
+ * folded, never trusted. The gold 1 px seconds hand ticks at the publisher's
+ * cadence (~1 Hz) so the resting watch reads as alive.
+ *
+ * strength 0..255 scales every hand and the hub together; <= 0 paints
+ * NOTHING — that hard gate is what lets the presenter run the watch's
+ * fade-out through this call while the harness still proves off ==
+ * paints-nothing. 255 is the settled watch. Stateless, integer-only,
+ * y-culled; same strip contract as every other overlay. */
 void hud_overlay_clock(uint16_t *dst, int y0, int nrows, bool swap_bytes,
-                       int hh, int mm, int ss);
+                       int hh, int mm, int ss, int strength);
 
 /* Map IMU tilt to a HUD parallax offset, clamped to +/-HUD_TILT_MAX px.
  *

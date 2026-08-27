@@ -13,6 +13,8 @@ device over LAN. Host comes from --host or $JARVIS_DEVICE_HOST.
     jarvisctl tune [pbgain=250] [speakmic=21] [mic=24] [vol=90] [barge=1]
     jarvisctl taps [outdir]              # WAV taps + metrics
     jarvisctl vadlog [out.csv]           # barge/VAD decision log
+    jarvisctl logs [tail_bytes]          # device log ring — read AFTER, no monitor
+    jarvisctl lease [ttl_s] | release    # operator lease (owner tap reclaims)
     jarvisctl reboot                     # watchdog reset via esptool (USB)
 
 Exit code 0 = healthy/ok. `status` exits 1 when the device is deaf/muted so
@@ -171,8 +173,20 @@ def main() -> int:
         return cmd_taps(*rest[:1])
     if cmd == "vadlog":
         return cmd_vadlog(*rest[:1])
+    if cmd == "logs":
+        tail = rest[0] if rest else "16384"
+        sys.stdout.write(api(f"/api/logs?tail={tail}", timeout=20).decode(
+            "utf-8", "replace"))
+        return 0
     if cmd == "reboot":
         return cmd_reboot()
+    if cmd == "lease":
+        ttl = rest[0] if rest else "300"
+        print(api(f"/api/operator/lease?ttl={ttl}", "POST", b"").decode())
+        return 0
+    if cmd == "release":
+        print(api("/api/operator/lease?release=1", "POST", b"").decode())
+        return 0
     print(__doc__)
     return 2
 

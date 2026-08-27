@@ -39,6 +39,7 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "esp_netif_sntp.h"
+#include "esp_wifi.h"
 #include "cJSON.h"
 
 #include "jr_ports/ports.h"
@@ -239,6 +240,63 @@ static _Atomic uint32_t s_sim_shake;
 /* Synthetic flip lane (GEST-02): number of 10 Hz polls that should read as
  * face_down. The endpoint posts enough to satisfy the sustain filter. */
 static _Atomic uint32_t s_sim_flip;
+
+/* Gesture layer (app task only): swipe-right watch peek deadline, and the
+ * double-tap window for the attention gesture. */
+static uint32_t s_watch_peek_until_ms;
+static uint32_t s_last_tap_ms;
+
+/* ---- persistent log ring ------------------------------------------------
+ * Every ESP_LOG line also lands in a 128 KB PSRAM ring served at
+ * GET /api/logs?tail=N (the contract live-device.py has always probed for).
+ * This is the "read the logs AFTER" channel the owner asked for — the C
+ * board has no SD slot (those pins became the display/touch resets), and a
+ * network-readable ring beats a card anyway: no wear, no monitor babysitting,
+ * no serial-port contention with flashing. Lost on reboot by design; panics
+ * persist separately via the coredump partition. */
+#define LOGRING_CAP (128U * 1024U)
+static char *s_logring;                 /* PSRAM, alloc'd in app_main */
+static volatile size_t s_logring_head;  /* next write offset */
+static volatile size_t s_logring_len;   /* filled bytes, saturates at CAP */
+static portMUX_TYPE s_logring_mux = portMUX_INITIALIZER_UNLOCKED;
+static vprintf_like_t s_logring_prev;
+
+static int logring_vprintf(const char *fmt, va_list ap)
+{
+    if (s_logring != NULL) {
+        char line[256];
+        va_list ap2;
+        va_copy(ap2, ap);
+        int n = vsnprintf(line, sizeof line, fmt, ap2);
+        va_end(ap2);
+        if (n > 0) {
+            size_t w = (size_t)n < sizeof line ? (size_t)n : sizeof line - 1;
+            portENTER_CRITICAL(&s_logring_mux);
+            size_t head = s_logring_head;
+            for (size_t i = 0; i < w; ++i) {
+                s_logring[(head + i) % LOGRING_CAP] = line[i];
+            }
+            s_logring_head = (head + w) % LOGRING_CAP;
+            s_logring_len = s_logring_len + w > LOGRING_CAP
+                                ? LOGRING_CAP : s_logring_len + w;
+            portEXIT_CRITICAL(&s_logring_mux);
+        }
+    }
+    return s_logring_prev != NULL ? s_logring_prev(fmt, ap) : 0;
+}
+
+/* Operator lease: an operator (AI session / script) claims the device for a
+ * bounded window — voice disarmed, wake watch off, "at work" on the glass —
+ * so diagnostics never fight the owner for the mic. A LEASE, not a mode:
+ * TTL-bounded (never wedges) and any owner tap reclaims instantly (the owner
+ * always outranks the operator). */
+static _Atomic uint32_t s_operator_lease_until_ms;
+
+static bool operator_lease_active(uint32_t now_ms)
+{
+    uint32_t until = atomic_load(&s_operator_lease_until_ms);
+    return until != 0U && (int32_t)(now_ms - until) < 0;
+}
 
 /* Defined next to app_main (it owns the persona text); SEND_SETUP refreshes
  * it so every session's instruction carries the current local time. */
@@ -4078,6 +4136,89 @@ static esp_err_t display_canvas_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* GET /api/logs?tail=N — last N bytes of the log ring, chronological, plain
+ * text. Reads are chunked with the mux held only per-chunk, so a concurrent
+ * writer can at worst garble the OLDEST lines of a snapshot mid-read —
+ * acceptable for a diagnostic tail, and it never stalls logging. */
+static esp_err_t logs_handler(httpd_req_t *req)
+{
+    if (s_logring == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "log ring unavailable");
+        return ESP_OK;
+    }
+    size_t tail = 16384;
+    char query[48], val[16] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof query) == ESP_OK &&
+        httpd_query_key_value(query, "tail", val, sizeof val) == ESP_OK) {
+        tail = (size_t)strtoul(val, NULL, 10);
+    }
+    portENTER_CRITICAL(&s_logring_mux);
+    size_t len = s_logring_len;
+    size_t head = s_logring_head;
+    portEXIT_CRITICAL(&s_logring_mux);
+    if (tail > len) {
+        tail = len;
+    }
+    /* oldest byte of the requested window */
+    size_t start = (head + LOGRING_CAP - tail) % LOGRING_CAP;
+    httpd_resp_set_type(req, "text/plain");
+    char chunk[1024];
+    size_t sent = 0;
+    while (sent < tail) {
+        size_t n = tail - sent < sizeof chunk ? tail - sent : sizeof chunk;
+        portENTER_CRITICAL(&s_logring_mux);
+        for (size_t i = 0; i < n; ++i) {
+            chunk[i] = s_logring[(start + sent + i) % LOGRING_CAP];
+        }
+        portEXIT_CRITICAL(&s_logring_mux);
+        if (httpd_resp_send_chunk(req, chunk, (ssize_t)n) != ESP_OK) {
+            return ESP_OK;
+        }
+        sent += n;
+    }
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+/* POST /api/operator/lease?ttl=seconds — claim; ?release=1 — hand back. */
+static esp_err_t operator_lease_handler(httpd_req_t *req)
+{
+    if (!control_intent_required(req)) {
+        return ESP_OK;
+    }
+    char query[64];
+    char val[16] = {0};
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    if (httpd_req_get_url_query_str(req, query, sizeof query) == ESP_OK &&
+        httpd_query_key_value(query, "release", val, sizeof val) == ESP_OK &&
+        val[0] == '1') {
+        atomic_store(&s_operator_lease_until_ms, 0U);
+        atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+        jr_display_caption_set("LISTENING");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":true,\"leased\":false}");
+        return ESP_OK;
+    }
+    uint32_t ttl_s = 300U;
+    if (httpd_req_get_url_query_str(req, query, sizeof query) == ESP_OK &&
+        httpd_query_key_value(query, "ttl", val, sizeof val) == ESP_OK) {
+        ttl_s = (uint32_t)strtoul(val, NULL, 10);
+    }
+    if (ttl_s < 10U) ttl_s = 10U;
+    if (ttl_s > 900U) ttl_s = 900U;
+    atomic_store(&s_operator_lease_until_ms, now + ttl_s * 1000U);
+    atomic_store(&s_voice_control_request, VOICE_CONTROL_DISARM);
+    jr_display_caption_set("JARVIS AT WORK - TAP TO RECLAIM");
+    ESP_LOGI(TAG, "operator: lease claimed for %u s", (unsigned)ttl_s);
+    char body[64];
+    int n = snprintf(body, sizeof body, "{\"ok\":true,\"leased\":true,\"ttl_s\":%u}",
+                     (unsigned)ttl_s);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
 static esp_err_t display_test_handler(httpd_req_t *req)
 {
     if (!control_intent_required(req)) {
@@ -4410,6 +4551,10 @@ static void start_diag_http(void)
           .handler = display_test_handler },
         { .uri = "/api/display/canvas", .method = HTTP_POST,
           .handler = display_canvas_handler },
+        { .uri = "/api/operator/lease", .method = HTTP_POST,
+          .handler = operator_lease_handler },
+        { .uri = "/api/logs", .method = HTTP_GET,
+          .handler = logs_handler },
     };
     for (size_t i = 0; i < sizeof routes / sizeof routes[0]; ++i) {
         esp_err_t err = httpd_register_uri_handler(server, &routes[i]);
@@ -4750,7 +4895,13 @@ static void voice_task(void *arg)
             if ((int32_t)((uint32_t)now - s_clock_next_ms) >= 0) {
                 s_clock_next_ms = (uint32_t)now + 1000U;
                 bool clock_on = false;
-                if (mout.clock_on) {
+                bool peek = s_watch_peek_until_ms != 0U &&
+                            (int32_t)((uint32_t)now -
+                                      s_watch_peek_until_ms) < 0;
+                if (!peek) {
+                    s_watch_peek_until_ms = 0U;
+                }
+                if (mout.clock_on || peek) {
                     struct tm tmv;
                     if (device_wall_time(&tmv)) {
                         clock_on = true;
@@ -4845,6 +4996,7 @@ static void voice_task(void *arg)
          * not Idle); rate-limit so a persistently failing connect can't spin. */
         if (VOICE_ALWAYS_READY &&
             !atomic_load(&s_voice_privacy_paused) &&
+            !operator_lease_active((uint32_t)now) &&
             atomic_load(&s_audio_diag_until_ms) == 0U &&
             !atomic_load(&s_touch_challenge_active) &&
             atomic_load(&s_voice_control_request) == VOICE_CONTROL_NONE &&
@@ -5191,6 +5343,43 @@ static void voice_task(void *arg)
                            s_ui_shade_open) {
                     s_ui_shade_open = false;
                     ESP_LOGI(TAG, "ui: shade closed");
+                } else if (iev.direction == JR_INPUT_DIRECTION_LEFT &&
+                           !s_ui_shade_open) {
+                    /* Gesture: swipe left = status glance. One caption, no
+                     * new surface — battery, link, time at a flick (owner
+                     * ask 2026-08-27: gestures must DO things, with
+                     * feedback). */
+                    jr_power_t bat;
+                    wifi_ap_record_t ap;
+                    char glance[64];
+                    int off = 0;
+                    if (jr_power_read(&bat) == ESP_OK && bat.percent <= 100) {
+                        off += snprintf(glance + off, sizeof glance - off,
+                                        "BAT %u%%%s  ", (unsigned)bat.percent,
+                                        bat.charging ? "+" : "");
+                    }
+                    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+                        off += snprintf(glance + off, sizeof glance - off,
+                                        "WIFI %d  ", (int)ap.rssi);
+                    }
+                    time_t tt = time(NULL);
+                    struct tm tmv;
+                    localtime_r(&tt, &tmv);
+                    if (tmv.tm_year >= 2020 - 1900 &&
+                        (size_t)off < sizeof glance) {
+                        int h12 = tmv.tm_hour % 12;
+                        if (h12 == 0) h12 = 12;
+                        snprintf(glance + off, sizeof glance - off,
+                                 "%d:%02d %s", h12, tmv.tm_min,
+                                 tmv.tm_hour < 12 ? "AM" : "PM");
+                    }
+                    jr_display_caption_set(off > 0 ? glance : "NO STATUS");
+                    ESP_LOGI(TAG, "gesture: status glance");
+                } else if (iev.direction == JR_INPUT_DIRECTION_RIGHT &&
+                           !s_ui_shade_open) {
+                    /* Gesture: swipe right = 10 s watch peek while awake. */
+                    s_watch_peek_until_ms = (uint32_t)now + 10000U;
+                    ESP_LOGI(TAG, "gesture: watch peek");
                 }
             } else if (iev.kind == JR_INPUT_LONG_PRESS) {
                 if (p == JR_ST_IDLE) {
@@ -5247,19 +5436,42 @@ static void voice_task(void *arg)
                     atomic_store(&s_voice_privacy_paused, false);
                     jr_display_caption_set("LISTENING");
                     jr_orch_inject(&s_app.orch, jr_event(JR_EV_USER_START), now);
+                } else if (p == JR_ST_SPEAKING) {
+                    /* Tap while it talks = "stop talking" — cut playback but
+                     * STAY armed and listening. Tap-as-privacy-mute was a UX
+                     * trap: the most natural casual touch silently killed the
+                     * assistant twice in one evening (2026-08-27) even after
+                     * a caption warned. Deliberate privacy lives where
+                     * deliberation lives: flip face-down, long-press, shade. */
+                    jr_audio_sink_mute_now(&s_app.spk);
+                    jr_orch_inject(&s_app.orch, jr_event(JR_EV_BARGE_DETECTED),
+                                   now);
+                    jr_display_caption_set("LISTENING");
+                    ESP_LOGI(TAG, "gesture: tap stopped playback");
                 } else if (p != JR_ST_DRAINING) {
-                    atomic_store(&s_voice_privacy_paused, true);
-                    /* A silent mute is a design bug: the owner tapped mid-
-                     * session (often unknowingly — 2026-08-27, six taps left
-                     * the device "mysteriously" deaf and wake correctly
-                     * refused to override the explicit mute). Say so on the
-                     * glass, with the way out. */
-                    jr_display_caption_set("MUTED - TAP TO RESUME");
-                    s_pending_text_set = false;
-                    s_pending_text_inflight = false;
-                    s_listen_idle_deadline_ms = 0;
-                    jr_orch_inject(&s_app.orch, jr_event(JR_EV_USER_STOP), now);
+                    /* Tap in any other live phase: harmless attention. */
+                    jr_display_caption_set("YES, SIR?");
                 }
+                /* Any owner tap instantly reclaims an operator lease. */
+                if (operator_lease_active((uint32_t)now)) {
+                    atomic_store(&s_operator_lease_until_ms, 0U);
+                    atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+                    jr_display_caption_set("LISTENING");
+                    ESP_LOGI(TAG, "operator: lease reclaimed by owner tap");
+                }
+                /* Double-tap (second tap <400 ms): full attention — awake,
+                 * armed, greeted. Single-tap actions above are all benign,
+                 * so the pair composes safely. */
+                if ((uint32_t)now - s_last_tap_ms < 400U) {
+                    jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                    if (!s_flip_muted) {
+                        atomic_store(&s_voice_control_request,
+                                     VOICE_CONTROL_ARM);
+                        jr_display_caption_set("YES, SIR?");
+                        ESP_LOGI(TAG, "gesture: double-tap attention");
+                    }
+                }
+                s_last_tap_ms = (uint32_t)now;
             }
         }
 
@@ -5428,6 +5640,7 @@ static void voice_task(void *arg)
             }
         } else if (jr_wake_ready() && !s_flip_muted &&
                    !atomic_load(&s_voice_privacy_paused) &&
+                   !operator_lease_active((uint32_t)now) &&
                    atomic_load(&s_audio_diag_until_ms) == 0U &&
                    (capture_phase == JR_ST_IDLE ||
                     capture_phase == JR_ST_BACKOFF)) {
@@ -5566,6 +5779,15 @@ void app_main(void)
     }
     if (s_app.io.inq == NULL) {
         ESP_LOGE(TAG, "inbound event queue alloc failed — server events will drop");
+    }
+
+    /* Log ring FIRST so the whole boot lands in /api/logs. Non-fatal. */
+    s_logring = heap_caps_malloc(LOGRING_CAP,
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_logring != NULL) {
+        s_logring_prev = esp_log_set_vprintf(logring_vprintf);
+    } else {
+        ESP_LOGW(TAG, "log ring alloc failed — /api/logs disabled");
     }
 
     /* VAD/barge diagnostic ring (PSRAM) — records every decision for offline

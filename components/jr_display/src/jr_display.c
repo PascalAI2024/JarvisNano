@@ -466,9 +466,42 @@ static uint16_t test_pattern_pixel(const jr_display_ctx_t *ctx,
  * like a test pattern does. The buffer lives in PSRAM, is written ONLY by
  * jr_display_canvas_show (single copy, pre-converted to panel byte order),
  * and read ONLY by the render task; `s_canvas_until_ms` gives it a TTL so an
- * abandoned push can never permanently cover the face. ---- */
+ * abandoned push can never permanently cover the face. The word is the
+ * INTENT; the render task eases its own presentation level toward it (see
+ * overlay_fade_tick), so arrivals and departures crossfade with the face
+ * instead of popping. A show during the exit fade re-targets the SAME buffer
+ * with the new pixels already in it — accepted: a low-level content swap is
+ * barely visible and a second full-frame buffer is not worth it. ---- */
 static uint16_t         *s_canvas;              /* PSRAM, 466*466 */
 static volatile uint32_t s_canvas_until_ms;     /* 0 = inactive   */
+
+/* TRANS: watch + canvas entrance/exit easing. RENDER-TASK-OWNED — written
+ * only by overlay_fade_tick (once per frame, from panel_flush) and read only
+ * by the appliers on the same task, so nothing here needs atomics. The
+ * published intent words (s_canvas_until_ms, s_clock_word) remain the only
+ * cross-task surface: they carry the INTENT (on/off, active/expired); these
+ * carry the PRESENTATION, a linear progress that steps toward the intent's
+ * target each frame. Stepping from wherever progress currently is — rather
+ * than replaying a timestamped curve — makes a mid-fade reversal walk
+ * straight back with no snap. The appliers consume smoothstep(progress):
+ * ease-in-out is what turns the old single-frame pop into something that
+ * reads as the device breathing. */
+#define JR_DISPLAY_FADE_MS 400U
+
+static int      s_clock_prog;        /* linear 0..256 toward the on/off bit  */
+static int      s_clock_ease;        /* smoothstep(s_clock_prog), 0..256     */
+static uint32_t s_clock_shown_word;  /* last on-word: the fade-out must hold
+                                      * the last shown time — the off publish
+                                      * may zero hh/mm and hands snapping to
+                                      * 12:00 mid-fade would be a new pop.   */
+static int      s_canvas_prog;
+static int      s_canvas_ease;
+static uint32_t s_fade_prev_ms;
+
+static inline int fade_smoothstep(int p)     /* 0..256 -> 0..256, 3p^2-2p^3 */
+{
+    return (p * p * (768 - 2 * p)) >> 16;
+}
 
 esp_err_t jr_display_canvas_show(const uint16_t *rgb565, size_t width,
                                  size_t height, uint32_t ttl_ms)
@@ -519,14 +552,34 @@ bool jr_display_canvas_active(void)
 static void apply_canvas(jr_display_ctx_t *ctx, int x1, int y1,
                          int x2, int y2, uint16_t *pixels)
 {
-    if (pixels == NULL || s_canvas == NULL || !jr_display_canvas_active()) {
+    /* Gate on the eased level, not on canvas_active(): after a clear or TTL
+     * expiry the intent is off but the exit fade still needs the buffer —
+     * which outlives the fade (only the next show ever rewrites it). */
+    const int e = s_canvas_ease;
+    if (pixels == NULL || s_canvas == NULL || e <= 0) {
         return;
     }
     const int width = x2 - x1;
+    if (e >= 256) {                          /* settled: rows are a memcpy */
+        for (int row = y1; row < y2; ++row) {
+            memcpy(pixels + (size_t)(row - y1) * (size_t)width,
+                   s_canvas + (size_t)row * ctx->board.width + (size_t)x1,
+                   (size_t)width * sizeof(uint16_t));
+        }
+        return;
+    }
+    const int m = (e * 32) >> 8;
+    if (m <= 0) {
+        return;
+    }
+    const bool swap = ctx->board.swap_color_bytes;
     for (int row = y1; row < y2; ++row) {
-        memcpy(pixels + (size_t)(row - y1) * (size_t)width,
-               s_canvas + (size_t)row * ctx->board.width + (size_t)x1,
-               (size_t)width * sizeof(uint16_t));
+        const uint16_t *src =
+            s_canvas + (size_t)row * ctx->board.width + (size_t)x1;
+        uint16_t *dst = pixels + (size_t)(row - y1) * (size_t)width;
+        for (int col = 0; col < width; ++col) {
+            dst[col] = hud_mix565(dst[col], src[col], m, swap);
+        }
     }
 }
 
@@ -837,11 +890,64 @@ static volatile int      s_ripple_x;
 static volatile int      s_ripple_y;
 static volatile uint32_t s_ripple_start_ms;
 
+/* TRANS-01 wake bloom slot: SAME single-slot discipline as the ripple — only
+ * the app task writes (a re-fire restarts the bloom), the flush age-gates, so
+ * expiry needs no write. 0 means never fired. */
+static volatile uint32_t s_bloom_start_ms;
+
 /* UI-01 clock state: (on << 16) | (hh << 8) | mm in ONE word, published with
  * a single release-store, so the flush can never read a torn time (an on flag
  * from one set with minutes from another). SINGLE-WRITER: the app task calls
  * jr_display_clock_set at ~1 Hz; the flush only reads. 0 at boot = off. */
 static volatile uint32_t s_clock_word;
+
+/* Advance both fades ONE step. Called from panel_flush only at the y==0
+ * strip — the same frame-start definition snapshot_record_flush relies on —
+ * so every strip of a frame composites at the SAME level and a fade can
+ * never band across strip boundaries. State lives beside the canvas section
+ * above (its first consumer); this reads the intent words published there
+ * and at s_clock_word. */
+static void overlay_fade_tick(void)
+{
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    uint32_t dt = now - s_fade_prev_ms;
+    s_fade_prev_ms = now;
+    if (dt > 100u) {
+        dt = 100u;                   /* clamp across stalls, like hud_tick */
+    }
+    int step = (int)((dt * 256u) / JR_DISPLAY_FADE_MS);
+    if (step < 1) {
+        step = 1;
+    }
+
+    const uint32_t cw = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
+    if ((cw & (1u << 16)) != 0u) {
+        s_clock_shown_word = cw;
+        s_clock_prog += step;
+        if (s_clock_prog > 256) {
+            s_clock_prog = 256;
+        }
+    } else {
+        s_clock_prog -= step;
+        if (s_clock_prog < 0) {
+            s_clock_prog = 0;
+        }
+    }
+    s_clock_ease = fade_smoothstep(s_clock_prog);
+
+    if (jr_display_canvas_active()) {
+        s_canvas_prog += step;
+        if (s_canvas_prog > 256) {
+            s_canvas_prog = 256;
+        }
+    } else {
+        s_canvas_prog -= step;
+        if (s_canvas_prog < 0) {
+            s_canvas_prog = 0;
+        }
+    }
+    s_canvas_ease = fade_smoothstep(s_canvas_prog);
+}
 
 void jr_display_present_choices(const char *question,
                                 const char *const *labels, int n)
@@ -966,6 +1072,13 @@ void jr_display_ripple(int x, int y)
     s_ripple_x = x;
     s_ripple_y = y;
     __atomic_store_n(&s_ripple_start_ms,
+                     (uint32_t)(esp_timer_get_time() / 1000),
+                     __ATOMIC_RELEASE);
+}
+
+void jr_display_bloom(void)
+{
+    __atomic_store_n(&s_bloom_start_ms,
                      (uint32_t)(esp_timer_get_time() / 1000),
                      __ATOMIC_RELEASE);
 }
@@ -1101,6 +1214,29 @@ static void dim_strip(jr_display_ctx_t *ctx, int y1, int y2, uint16_t *pixels)
     }
 }
 
+/* Variable-strength companion to dim_strip for the watch fade: k 1..31 eases
+ * toward the full quarter dim via hud_fade565. ~3x dim_strip's per-pixel cost
+ * (the variable multiply cannot use the split-field fold), paid only for the
+ * ~JR_DISPLAY_FADE_MS of a transition — the settled watch stays on dim_strip.
+ * Unswitched on the hoisted byte-order flag for the same reason dim_strip is. */
+static void fade_strip(jr_display_ctx_t *ctx, int y1, int y2, uint16_t *pixels,
+                       int k)
+{
+    const bool swap = ctx->board.swap_color_bytes;
+    for (int y = y1; y < y2; ++y) {
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        if (swap) {
+            for (int x = 0; x < HUD_W; ++x) {
+                row[x] = hud_fade565(row[x], true, k);
+            }
+        } else {
+            for (int x = 0; x < HUD_W; ++x) {
+                row[x] = hud_fade565(row[x], false, k);
+            }
+        }
+    }
+}
+
 /* STATE-07: the modal ask presentation, run per flushed strip only while a
  * question is on screen (a modal state measured in seconds, so a few fps of
  * cost is acceptable). The whole strip dims — the same transform
@@ -1222,22 +1358,33 @@ static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
 
 /* UI-01: the ambient watch — while privacy-muted the dimmed baked face IS
  * the dial (its bezel ticks at r200-214), so this is the full ask-style dim
- * plus hud_overlay_clock's two hands and hub. It gates ITSELF on the
- * published word (rather than at the call site) so the host harness can
- * prove off == paints-nothing directly. Never coexists with a choice ask —
- * the caller's ask branch wins before this runs — and renders UNDER the
+ * plus hud_overlay_clock's hands and hub, both riding s_clock_ease: the dim
+ * deepens and the hands condense together over ~JR_DISPLAY_FADE_MS instead
+ * of switching on in one frame. It gates ITSELF on the eased level (which is
+ * 0 exactly while the published word is off and settled) so the host harness
+ * can prove off == paints-nothing directly. Time comes from the shown-word
+ * latch, not the live word — the off publish may zero hh/mm and the fade-out
+ * must keep showing the time it faded from. Never coexists with a choice ask
+ * — the caller's ask branch wins before this runs — and renders UNDER the
  * caption so the muted/time status text stays readable. Render task only. */
 static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
                                 uint16_t *pixels)
 {
-    const uint32_t w = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
-    if ((w & (1u << 16)) == 0u) {
+    const int e = s_clock_ease;
+    if (e <= 0) {
         return;
     }
-    dim_strip(ctx, y1, y2, pixels);
+    const int k = (e * 32) >> 8;
+    if (k >= 32) {
+        dim_strip(ctx, y1, y2, pixels);      /* settled: the fast fold */
+    } else if (k > 0) {
+        fade_strip(ctx, y1, y2, pixels, k);
+    }
+    const uint32_t w = s_clock_shown_word;
     hud_overlay_clock(pixels, y1, y2 - y1, ctx->board.swap_color_bytes,
                       (int)((w >> 8) & 0xFFu), (int)(w & 0xFFu),
-                      (int)((w >> 17) & 0x3Fu));
+                      (int)((w >> 17) & 0x3Fu),
+                      e > 255 ? 255 : e);
 }
 
 static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
@@ -1293,6 +1440,17 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
         if (__atomic_load_n(&s_caption_on, __ATOMIC_ACQUIRE) != 0) {
             apply_caption_overlay(ctx, y1, y2, pixels);
         }
+    }
+
+    /* TRANS-01 wake bloom: TOPMOST transient. The wake moment must read over
+     * whatever the glass held — most importantly a watch mid fade-out, which
+     * is the exact state a "Jarvis" from rest fires it in. It erases itself
+     * in HUD_BLOOM_MS, the same license the ripple holds. */
+    const uint32_t bloom_start =
+        __atomic_load_n(&s_bloom_start_ms, __ATOMIC_ACQUIRE);
+    if (bloom_start != 0u && now_ms - bloom_start < HUD_BLOOM_MS) {
+        hud_overlay_bloom(pixels, y1, nrows, ctx->board.swap_color_bytes,
+                          now_ms - bloom_start);
     }
 }
 
@@ -1463,6 +1621,12 @@ static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
      * on the render task, the previous flush has completed, and the QSPI bus is
      * idle. This is the only place a panel command may be issued. */
     brightness_pump();
+
+    /* Frame-start latch: fades advance once per frame so all of a frame's
+     * strips composite at one level (no banding across strip seams). */
+    if (x1 == 0 && y1 == 0) {
+        overlay_fade_tick();
+    }
 
     /* The gfx-owned DMA buffer is mutable until this submission. Diagnostics
      * may substitute a known pattern, then the mirror records the exact bytes

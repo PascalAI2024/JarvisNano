@@ -1340,9 +1340,63 @@ void hud_overlay_ripple(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     }
 }
 
+/* TRANS-01 wake bloom geometry. The wavefront lands at the baked face's
+ * outer-ring territory (r~150) — crossing the occupied bands on the way out
+ * is exactly the point: transient motion may sweep OVER the baked art (the
+ * ripple's license), only persistent furniture may not. */
+#define HUD_BLOOM_R_SEED   10   /* the initial point of light               */
+#define HUD_BLOOM_R_END   150   /* wavefront landing radius (face ring)     */
+
+void hud_overlay_bloom(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                       uint32_t age_ms)
+{
+    if (dst == NULL || nrows <= 0 || age_ms >= HUD_BLOOM_MS) {
+        return;                          /* expired: self-clearing, no state */
+    }
+    /* Ease-out cubic, exactly the boot bloom's curve: the wave leaps out of
+     * the seed and decelerates into the ring — birth is fast, landing soft. */
+    const int p = (int)((age_ms << 8) / HUD_BLOOM_MS);       /* 0..255 */
+    const int inv = 256 - p;
+    const int ease = 256 - ((((inv * inv) >> 8) * inv) >> 8);
+    const int rw = HUD_BLOOM_R_SEED +
+        (((HUD_BLOOM_R_END - HUD_BLOOM_R_SEED) * ease) >> 8);
+    /* The front fades as it expands (255 -> 60): spreading light thins. The
+     * seed does the complement — a bright point that dies as the wave leaves
+     * it, so the energy reads as TRANSFERRED, not duplicated. */
+    const int front_lv = 255 - ((195 * ease) >> 8);
+    const int seed_lv  = ((256 - ease) * 255) >> 8;
+
+    /* y-cull the whole call on the wavefront's bounding rows before any
+     * palette or row work, ripple-style. */
+    const int r_out = rw + 1;
+    int ys = 232 - r_out;
+    int ye = 232 + r_out;
+    if (ys < y0)             ys = y0;
+    if (ye > y0 + nrows - 1) ye = y0 + nrows - 1;
+    if (ys > ye) {
+        return;
+    }
+    overlay_palette(swap_bytes);
+
+    for (int y = ys; y <= ye; ++y) {
+        if (y < 0 || y >= HUD_H) {
+            continue;
+        }
+        uint16_t *row = dst + (size_t)(y - y0) * HUD_W;
+        /* 4 px wavefront band; max radius 151 keeps every pixel on glass. */
+        ov_ring_row(row, y, 232, 232, rw - 3 < 0 ? 0 : rw - 3, r_out,
+                    s_ov_cyan, front_lv);
+        if (seed_lv > 0) {
+            ov_ring_row(row, y, 232, 232, 0, HUD_BLOOM_R_SEED,
+                        s_ov_cyan, seed_lv);
+        }
+    }
+}
+
 /* UI-01 watch geometry. Hands are runs of 3x3 dots stamped every radius step
  * (polar_dot y-culls each stamp), so the whole watch tops out at r_tip + 2 px
- * of dot spill — comfortably inside the r<=180 promise in the header. */
+ * of dot spill — r192 for the seconds hand, inside the r<=192 promise in the
+ * header and clear of the baked bezel ticks at r200. */
 #define HUD_CLOCK_R_HUB   5
 #define HUD_CLOCK_R_IN    20
 #define HUD_CLOCK_R_HOUR  110
@@ -1350,10 +1404,13 @@ void hud_overlay_ripple(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 #define HUD_CLOCK_R_SEC   190
 
 void hud_overlay_clock(uint16_t *dst, int y0, int nrows, bool swap_bytes,
-                       int hh, int mm, int ss)
+                       int hh, int mm, int ss, int strength)
 {
-    if (dst == NULL || nrows <= 0) {
-        return;
+    if (dst == NULL || nrows <= 0 || strength <= 0) {
+        return;                      /* strength 0 must provably paint nothing */
+    }
+    if (strength > 255) {
+        strength = 255;
     }
     /* coarse strip cull: the watch lives in rows 232 +/- (R_SEC + 2) —
      * the seconds hand is the longest element. */
@@ -1376,9 +1433,12 @@ void hud_overlay_clock(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     const int a_h = (192 + (((hh % 12) * 60 + mm) * 256) / 720) & 255;
     const int a_s = (192 + (ss * 256) / 60) & 255;
 
-    const uint16_t px_min  = pack565(255, 255, 255, swap_bytes);
-    const uint16_t px_hour = shade(s_ov_cyan, 255);
-    const uint16_t px_sec  = shade(s_ov_gold, 255);
+    /* One strength scales all three hands and the hub, so the whole watch
+     * fades as one object — hands emerging at different rates would read as
+     * the two-competing-HUDs failure all over again. */
+    const uint16_t px_min  = pack565(strength, strength, strength, swap_bytes);
+    const uint16_t px_hour = shade(s_ov_cyan, strength);
+    const uint16_t px_sec  = shade(s_ov_gold, strength);
 
     /* hour first, minute second: an overlapping pair reads minute-on-top.
      * The gold seconds hand goes last and thinnest — a 1 Hz heartbeat that

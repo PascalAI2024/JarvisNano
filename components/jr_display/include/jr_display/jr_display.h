@@ -204,13 +204,31 @@ void jr_display_caption_clear(void);
  * chrome. */
 void jr_display_ripple(int x, int y);
 
+/* TRANS-01: the wake bloom — VISION.md's "point of light blooms into the
+ * ring", for the moment WakeNet hears "Jarvis" from rest. A centre seed of
+ * light collapses as a cyan wavefront expands to the face ring over ~600 ms,
+ * then erases itself. Fire-and-forget from ANY task (one release-store); a
+ * re-fire restarts it; no dismiss exists or is needed. Drawn topmost so it
+ * reads over a watch mid fade-out — the exact state a wake from rest is in.
+ * Renders only while frames flush: fired while the panel is blanked, the
+ * visible part is whatever remains of the 600 ms once the face returns, so
+ * call it AFTER (or simultaneously with) the mood poke that wakes the
+ * display, never before a deliberate delay. */
+void jr_display_bloom(void);
+
 /* UI-01: ambient watch face for the privacy-muted state — the whole strip
  * dims (the baked bezel ticks become the dial) and two hands plus a hub draw
  * over it. SINGLE-WRITER: the app task calls this at ~1 Hz; the render task
  * only reads. on/hh/mm are packed into one word and published with a single
  * release-store, so the renderer can never see a torn time. hh 0..23,
  * mm 0..59 (out-of-range folds to 0). Never coexists with a choice ask (the
- * ask wins); renders UNDER the caption so status text stays readable. */
+ * ask wins); renders UNDER the caption so status text stays readable.
+ *
+ * `on` is intent, not an instant switch: the presenter eases the dim and the
+ * hands in/out over ~400 ms (ease-in-out, render-side), so callers toggle
+ * freely — a reversal mid-fade walks back from wherever it is. During the
+ * fade-out the hands hold the LAST shown time; publishing zeros with off is
+ * therefore safe. */
 void jr_display_clock_set(bool on, int hh, int mm, int ss);
 
 /* Pushed canvas: a full-frame RGB565 (little-endian) image that temporarily
@@ -218,7 +236,10 @@ void jr_display_clock_set(bool on, int hh, int mm, int ss);
  * companion / JarvisMCP. Exact panel dimensions only (466x466). The image is
  * copied (caller keeps ownership) and converted to panel byte order once.
  * ttl_ms is clamped to (0, 300000]; 0 picks the 30 s default. A test pattern,
- * if set, still wins (diagnostics outrank decoration). Any-task safe. */
+ * if set, still wins (diagnostics outrank decoration). Any-task safe.
+ * Arrival and departure (clear or TTL expiry) crossfade with the face over
+ * ~400 ms render-side; a repeat show while already visible swaps content
+ * without re-fading, so streamed updates stay immediate. */
 esp_err_t jr_display_canvas_show(const uint16_t *rgb565, size_t width,
                                  size_t height, uint32_t ttl_ms);
 void jr_display_canvas_clear(void);
