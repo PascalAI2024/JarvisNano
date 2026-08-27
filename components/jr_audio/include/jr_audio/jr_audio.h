@@ -80,6 +80,13 @@ void jr_audio_set_gains(int mic_db, int ref_db, int out_vol);
  * speaks so the echo stays unclipped for the AEC). < 0 leaves it unchanged. */
 void jr_audio_set_speak_mic_db(int speak_db);
 
+/* Playback digital make-up gain as a percent of unity (100 == 1.0x). Applied
+ * before the soft-knee limiter at the sink-write seam. Board default: 400 on
+ * the original 1.75, 200 on the hotter 1.75C chain. Clamped to 25..800; out
+ * of range is ignored. Live-tunable via /api/debug/gain?pbgain=. */
+void jr_audio_set_playback_gain_percent(int percent);
+int  jr_audio_playback_gain_percent(void);
+
 /* Select the capture PGA state. The app calls this on phase transitions:
  * true while the model is SPEAKING (low mic gain -> unclipped echo -> the AEC
  * cancels it, ~180 residual instead of a railed ~9000), false otherwise (full

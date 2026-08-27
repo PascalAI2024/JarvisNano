@@ -59,6 +59,7 @@
 #include "jr_imu/jr_imu.h"
 #include "jr_power/jr_power.h"
 #include "jr_rtc/jr_rtc.h"
+#include "jr_wake/jr_wake.h"
 
 static const char *TAG = "jarvis_v5";
 
@@ -1910,12 +1911,13 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
     if (!control_intent_required(req)) {
         return ESP_OK;
     }
-    int mic = -1, ref = -1, vol = -1, barge = -1, vadclean = -1;
+    int mic = -1, ref = -1, vol = -1, barge = -1, vadclean = -1, pbgain = -1;
     query_int(req, "mic", &mic);
     query_int(req, "ref", &ref);
     query_int(req, "vol", &vol);
     query_int(req, "barge", &barge);
     query_int(req, "vadclean", &vadclean);
+    query_int(req, "pbgain", &pbgain);
     jr_audio_set_gains(mic, ref, vol);
     if (barge >= 0) {
         s_local_barge_enabled = barge != 0;
@@ -1923,12 +1925,16 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
     if (vadclean >= 0) {
         atomic_store(&s_vad_use_clean, vadclean != 0);
     }
-    char buf[192];
+    if (pbgain >= 0) {
+        jr_audio_set_playback_gain_percent(pbgain);
+    }
+    char buf[224];
     int n = snprintf(buf, sizeof buf,
                      "{\"ok\":true,\"mic\":%d,\"ref\":%d,\"vol\":%d,"
-                     "\"barge\":%s,\"vadclean\":%s}",
+                     "\"barge\":%s,\"vadclean\":%s,\"pbgain\":%d}",
                      mic, ref, vol, s_local_barge_enabled ? "true" : "false",
-                     atomic_load(&s_vad_use_clean) ? "true" : "false");
+                     atomic_load(&s_vad_use_clean) ? "true" : "false",
+                     jr_audio_playback_gain_percent());
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, n);
     return ESP_OK;
@@ -5324,6 +5330,32 @@ static void voice_task(void *arg)
                 }
                 read_paced = true;
             }
+        } else if (jr_wake_ready() && s_mood_rest_disarmed && !s_flip_muted &&
+                   !atomic_load(&s_voice_privacy_paused) &&
+                   (capture_phase == JR_ST_IDLE ||
+                    capture_phase == JR_ST_BACKOFF)) {
+            /* Rest-mood wake watch (Phase 5). WHISPER/DREAM disarm the voice
+             * session, so the capture branch above stops pulling frames — the
+             * mic goes deaf exactly when "speak to a sleeping device" should
+             * work. Keep the SAME single-owner read seam alive here and hand
+             * the frames to WakeNet instead of the transport. Gated to the
+             * rest-ladder disarm only: a deliberate mute (flip, long-press,
+             * API, shade) is user intent and a spoken wake must not override
+             * it. The codec read paces this branch at the frame cadence, same
+             * as the uplink path. */
+            int n = jr_audio_source_read(&s_app.mic, mic_frame,
+                                         VOICE_FRAME_SAMPLES);
+            if (n > 0) {
+                read_paced = true;
+                if (jr_wake_feed(mic_frame, (size_t)n)) {
+                    ESP_LOGI(TAG, "wake: \"%s\" heard — waking from rest",
+                             jr_wake_model());
+                    jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                    s_mood_rest_disarmed = false;
+                    atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+                    jr_display_caption_set("YES?");
+                }
+            }
         }
 
 capture_complete:
@@ -5688,6 +5720,16 @@ void app_main(void)
     } else {
         ESP_LOGE(TAG, "on-device tools unavailable: %s",
                  esp_err_to_name(tools_err));
+    }
+
+    /* Wake word LAST in the internal-RAM budget line. WakeNet's ~20 KB scratch
+     * competes with the feeder task, httpd, and the tools worker; those carry
+     * the product (speech out, diagnostics, tool calls) so they draw first and
+     * wake absorbs only the remainder. A failed init degrades to tap/lift wake
+     * exactly as before Phase 5 — never the other way around. */
+    esp_err_t wake_err = jr_wake_init();
+    if (wake_err != ESP_OK) {
+        ESP_LOGW(TAG, "wake word unavailable: %s", esp_err_to_name(wake_err));
     }
 
     atomic_store(&s_voice_start_gate, true);

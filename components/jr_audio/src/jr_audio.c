@@ -17,6 +17,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"   /* xTaskCreatePinnedToCoreWithCaps */
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
@@ -65,8 +66,18 @@ static const char *TAG = "jr_audio";
 /* Gemini PCM is intentionally conservative. The field-proven v4 path applied
  * 4x make-up gain before the ES8311, then compressed peaks above 24k so normal
  * speech stayed present without hard clipping. Keep codec volume at unity and
- * condition the PCM here; volume=100 alone does not restore that lost gain. */
+ * condition the PCM here; volume=100 alone does not restore that lost gain.
+ *
+ * The 4x figure is SPEAKER-CHAIN DEPENDENT: it was tuned on the original 1.75.
+ * On the 1.75C the chain runs hotter and 4x rails the PCM (measured 2026-08-27:
+ * 902/48000 samples pinned at 32767, flat-top runs to 0.8 ms — heard as
+ * crackle/chop). The C default is 2x, and the live value is runtime-tunable
+ * via /api/debug/gain?pbgain=<percent> for on-device calibration. */
+#if defined(CONFIG_ESP_BOARD_ESP32S3_TOUCH_AMOLED_1_75C)
+#define GL_PLAYBACK_GAIN         2
+#else
 #define GL_PLAYBACK_GAIN         4
+#endif
 #define GL_PLAYBACK_LIMIT_KNEE   24000
 
 /* Uplink digital make-up gain on the AEC-clean signal, with a soft knee. */
@@ -458,9 +469,26 @@ static size_t pb_enqueue(const int16_t *frame, size_t samples,
     return accepted;
 }
 
-static inline int16_t playback_gain(int16_t sample)
+/* Runtime playback make-up gain in Q8 (256 == 1.0x). Tunable live so the
+ * speaker chain can be calibrated by ear without a reflash. */
+static _Atomic int32_t s_pb_gain_q8 = GL_PLAYBACK_GAIN * 256;
+
+void jr_audio_set_playback_gain_percent(int percent)
 {
-    int32_t value = (int32_t)sample * GL_PLAYBACK_GAIN;
+    if (percent < 25 || percent > 800) {
+        return;
+    }
+    atomic_store(&s_pb_gain_q8, (int32_t)percent * 256 / 100);
+}
+
+int jr_audio_playback_gain_percent(void)
+{
+    return (int)(atomic_load(&s_pb_gain_q8) * 100 / 256);
+}
+
+static inline int16_t playback_gain(int16_t sample, int32_t gain_q8)
+{
+    int32_t value = ((int32_t)sample * gain_q8) >> 8;
     int32_t magnitude = value < 0 ? -value : value;
     if (magnitude > GL_PLAYBACK_LIMIT_KNEE) {
         magnitude = GL_PLAYBACK_LIMIT_KNEE +
@@ -482,13 +510,14 @@ static int sink_write(void *ctx, const jr_pcm_t *frame, size_t samples)
     }
     int16_t conditioned[PB_FEED_CHUNK];
     size_t accepted_total = 0;
+    const int32_t gain_q8 = atomic_load(&s_pb_gain_q8);
     while (accepted_total < samples) {
         size_t count = samples - accepted_total;
         if (count > PB_FEED_CHUNK) {
             count = PB_FEED_CHUNK;
         }
         for (size_t i = 0; i < count; ++i) {
-            conditioned[i] = playback_gain(frame[accepted_total + i]);
+            conditioned[i] = playback_gain(frame[accepted_total + i], gain_q8);
         }
         size_t accepted = pb_enqueue(conditioned, count, false);
         accepted_total += accepted;
@@ -652,9 +681,29 @@ esp_err_t jr_audio_init(void)
     /* start the playback feeder */
     /* Keep blocking DAC writes away from the capture/AEC/voice owner on core 1.
      * This is the field-proven v4 placement; priority 5 timeshares with the
-     * network lane without starving either core's IDLE watchdog task. */
-    if (xTaskCreatePinnedToCore(feeder_task, "jr_pb_feed", 4096, NULL, 5,
-                                &s_feeder, 0) != pdPASS) {
+     * network lane without starving either core's IDLE watchdog task.
+     *
+     * Stack lives in PSRAM (same guarded pattern as jr_power/jr_imu/jr_tools):
+     * the feeder blocks on esp_codec_dev_write and never touches flash, and
+     * its 4 KB internal stack was the first casualty when WakeNet's scratch
+     * joined the internal-RAM budget. Internal-stack fallback preserved. */
+    BaseType_t feeder_ok = pdFAIL;
+#if defined(CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM) && \
+    CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM && defined(CONFIG_SPIRAM) && \
+    CONFIG_SPIRAM
+    feeder_ok = xTaskCreatePinnedToCoreWithCaps(feeder_task, "jr_pb_feed", 4096,
+                                                NULL, 5, &s_feeder, 0,
+                                                MALLOC_CAP_SPIRAM |
+                                                MALLOC_CAP_8BIT);
+    if (feeder_ok != pdPASS) {
+        s_feeder = NULL;
+    }
+#endif
+    if (feeder_ok != pdPASS) {
+        feeder_ok = xTaskCreatePinnedToCore(feeder_task, "jr_pb_feed", 4096,
+                                            NULL, 5, &s_feeder, 0);
+    }
+    if (feeder_ok != pdPASS) {
         ESP_LOGE(TAG, "playback feeder task creation failed");
         s_feeder = NULL;
         return ESP_ERR_NO_MEM;

@@ -76,6 +76,14 @@ Why: `idf_ext.py` only injects `board_manager.defaults` when no `sdkconfig` file
 
 Source: memory file `feedback_sdkconfig_regeneration.md`.
 
+**[2026-08-27] Same trap, general form: flipping an EXISTING symbol in
+sdkconfig.defaults does nothing.** A NEW symbol (absent from `sdkconfig`) gets
+seeded on the next build; a symbol already present keeps its stale value —
+measured live when `CONFIG_ESP_WIFI_IRAM_OPT=n` in defaults left `=y` in the
+generated config through a full build+flash. `RECONFIGURE=1 ./scripts/build-v5.sh`
+(which re-runs `idf.py set-target`) is the reliable way to make an override of
+an existing symbol take.
+
 **[2026-05-21] USB-JTAG console is single-owner — boot-loop gotcha**
 
 If any component calls `usb_serial_jtag_driver_install()` before `app_claw_cli_start`, then `app_claw_cli_start` calls `esp_console_new_repl_usb_serial_jtag()` which aborts with `ESP_ERR_INVALID_STATE` → infinite boot loop (the emote/lobster animation flashes each reset).

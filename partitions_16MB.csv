@@ -8,13 +8,17 @@
 # coredump @0xFF0000.
 #
 # Sizes: factory 4 MiB, emote_assets 6.875 MiB (SPIFFS baked AAF/EAF art),
-# storage 4.9375 MiB (FAT; runtime store is the SD card, this is a fallback),
-# coredump 64 KiB (persists panic backtraces, CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH).
+# model 2 MiB (esp-sr srmodels.bin — WakeNet; label MUST be exactly "model",
+# esp-sr's build integration finds it by name and mmaps it XIP, no RAM copy),
+# storage 2.9375 MiB (FAT; carved from 4.9375 MiB when the model partition
+# landed — v5 never mounted it, it remains a fallback), coredump 64 KiB
+# (persists panic backtraces, CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH).
 #
 # Name,        Type, SubType,  Offset,   Size
 nvs,           data, nvs,      0x9000,   0x6000
 phy_init,      data, phy,      0xF000,   0x1000
 factory,       app,  factory,  0x20000,  0x400000
 emote_assets,  data, spiffs,   0x420000, 0x6E0000
-storage,       data, fat,      0xB00000, 0x4F0000
+model,         data, spiffs,   0xB00000, 0x200000
+storage,       data, fat,      0xD00000, 0x2F0000
 coredump,      data, coredump, 0xFF0000, 0x10000

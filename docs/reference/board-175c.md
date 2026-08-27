@@ -26,7 +26,7 @@ A mismatched image black-screens either board — the LCD reset pin differs.
 | PCF85063 RTC | present @0x51 | **removed** | `jr_rtc` probe fails gracefully (`ESP_ERR_INVALID_STATE` warning); NTP is the clock source. |
 | microSD | SDMMC 1-bit (CLK=2, CMD=1, D0=3) | **removed** — pins repurposed for LCD/touch reset | `fs_sdcard` dropped from YAML. Registering it on a C would fight the panel resets. |
 | AXP2101 PMIC | present @0x34 | present @0x34 — unchanged | Fuel gauge online at boot (factory Brookesia demo never used it). |
-| QMI8658 IMU | @0x6B, INT2→GPIO21 | @0x6B; INT routing UNVERIFIED (vendor BSP sets `BSP_CAPS_IMU 0`, examples poll) | `jr_imu` polls I2C — unaffected. Verify GPIO21 against the C schematic before Phase-5 deep-sleep wake. |
+| QMI8658 IMU | @0x6B, INT2→GPIO21 | @0x6B; INT routing UNVERIFIED (vendor BSP sets `BSP_CAPS_IMU 0`, examples poll); **Z axis mounted INVERTED** (measured on hardware 2026-08-27: face-up read gz>0, so flip-to-mute + mood ladder believed the device was face-down from boot) | `jr_imu` polls I2C — unaffected by INT. Z sign negated at the single read seam in `imu_read_axes()` under the C board symbol. Verify GPIO21 + X/Y orientation against the C schematic before Phase-5 deep-sleep wake. |
 | Expansion header | 8-pin UART/GPIO | not documented (UNVERIFIED) | — |
 | Case | bare / plastic | CNC aluminum standard | — |
 

@@ -185,6 +185,15 @@ static esp_err_t imu_read_axes(int16_t *ax, int16_t *ay, int16_t *az)
     *ax = (int16_t)(((uint16_t)raw[1] << 8) | raw[0]);
     *ay = (int16_t)(((uint16_t)raw[3] << 8) | raw[2]);
     *az = (int16_t)(((uint16_t)raw[5] << 8) | raw[4]);
+#if defined(CONFIG_ESP_BOARD_ESP32S3_TOUCH_AMOLED_1_75C)
+    /* The 1.75C mounts the QMI8658 with Z inverted relative to the original
+     * board: a face-up device on the desk read gz > 0 and the whole gesture
+     * stack (flip-to-mute, mood ladder, wake gating) believed it was face-down
+     * from boot (measured on hardware 2026-08-27: privacy_paused=true, instant
+     * DREAM while face-up). Negate at the single read seam so every consumer
+     * inherits the original board's convention. */
+    *az = (int16_t)-*az;
+#endif
     return ESP_OK;
 }
 

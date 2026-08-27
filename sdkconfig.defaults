@@ -22,6 +22,28 @@ CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 
+# --- XIP from PSRAM: tried 2026-08-27 (factory-demo technique), REVERTED the
+#     same day. It moves .text/.rodata into PSRAM so flash writes don't stall
+#     execution — but costs ~1.6 MB of PSRAM, and with WakeNet's buffers on
+#     board the live device bottomed out at ~400 KB free PSRAM: the display
+#     snapshot mirror (434 KB) could no longer allocate. PSRAM headroom for
+#     voice + wake + diagnostics outranks the stall polish. Re-evaluate only
+#     with a measured stall problem and a PSRAM budget to spend. ---
+# CONFIG_SPIRAM_FETCH_INSTRUCTIONS is not set
+# CONFIG_SPIRAM_RODATA is not set
+# CONFIG_SPIRAM_XIP_FROM_PSRAM is not set
+
+# --- Wi-Fi IRAM opts OFF: ~30 KB of internal RAM back. These pin Wi-Fi hot
+#     paths into IRAM for peak throughput; the Gemini voice stream is ~100 KB/s
+#     and nowhere near that regime, while WakeNet's ~20 KB scratch pushed the
+#     internal budget into task/TLS allocation failures (measured: esp-aes
+#     "Failed to allocate memory" on the WSS handshake). Demoted Wi-Fi code
+#     runs from flash cache — plenty for this stream rate.
+#     NOTE: flipping these requires RECONFIGURE=1 (build-toolchain.md — a stale
+#     sdkconfig silently keeps existing symbol values). ---
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+
 # --- External task stacks: sampler, touch, tools, and websocket workers are
 #     task-context code and must live in PSRAM. Keep their stacks out of the
 #     DMA-constrained internal heap reserved for voice, codec, and TLS AES. ---
@@ -32,6 +54,15 @@ CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
 #     #8). Table ends flush at 0x1000000. ---
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_16MB.csv"
+
+# --- Wake word: esp-sr WakeNet9 "Jarvis" (wn9_jarvis_tts, bundled in the
+#     pinned esp-sr 2.4.6). Selecting the model makes esp-sr pack srmodels.bin
+#     and flash it to the `model` partition; at runtime it is mmapped XIP from
+#     flash (no RAM copy — ~16-20 KB internal scratch only). jr_wake feeds it
+#     the AEC-clean 16 kHz frames while the rest ladder has voice disarmed, so
+#     "Jarvis" wakes WHISPER/DREAM by voice (Phase 5 gate). ---
+CONFIG_MODEL_IN_FLASH=y
+CONFIG_SR_WN_WN9_JARVIS_TTS=y
 
 # --- Compiler: -O2 perf. The AMOLED/emote path is timing-sensitive; -O0 makes
 #     correct rendering look broken (hardware.md #6). ---

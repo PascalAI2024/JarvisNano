@@ -22,6 +22,7 @@ idf_component_register(
         jr_imu
         jr_power
         jr_rtc
+        jr_wake
         nvs_flash
         esp_timer
         esp_http_server

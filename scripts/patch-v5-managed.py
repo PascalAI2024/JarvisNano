@@ -82,6 +82,30 @@ TASK_CREATE_INSERT = f"""    /* {TASK_MARKER}. This worker is never used by an I
 """
 
 
+GFX_ANIM = (
+    ROOT
+    / "managed_components"
+    / "espressif2022__esp_emote_gfx"
+    / "src"
+    / "widget"
+    / "gfx_anim.c"
+)
+PALETTE_MARKER = "JarvisNano v5: palette PSRAM fallback"
+PALETTE_ANCHOR = (
+    "        anim->frame.color_palette = (uint32_t *)heap_caps_malloc("
+    "palette_size * sizeof(uint32_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);\n"
+)
+PALETTE_INSERT = f"""        anim->frame.color_palette = (uint32_t *)heap_caps_malloc(palette_size * sizeof(uint32_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        /* {PALETTE_MARKER}. Internal RAM is the scarce pool on this build
+         * (WakeNet scratch joined the budget); a <=1 KB palette reads fine
+         * through the cache from PSRAM, while a failed alloc here drops every
+         * subsequent frame of the face. */
+        if (anim->frame.color_palette == NULL) {{
+            anim->frame.color_palette = (uint32_t *)heap_caps_malloc(palette_size * sizeof(uint32_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        }}
+"""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -143,13 +167,32 @@ def main() -> int:
                 source = source.replace(anchor, insert, 1)
             changed.append("PSRAM websocket task stack")
 
+    ws_changed = bool(changed)
+
+    if GFX_ANIM.is_file():
+        gfx_source = GFX_ANIM.read_text()
+        if PALETTE_MARKER not in gfx_source:
+            if args.check:
+                missing.append("gfx palette PSRAM fallback")
+            else:
+                if gfx_source.count(PALETTE_ANCHOR) != 1:
+                    raise SystemExit(
+                        "gfx_anim palette anchor changed; refusing a blind patch"
+                    )
+                gfx_source = gfx_source.replace(PALETTE_ANCHOR, PALETTE_INSERT, 1)
+                GFX_ANIM.write_text(gfx_source)
+                changed.append("gfx palette PSRAM fallback")
+    elif args.check:
+        missing.append("gfx palette PSRAM fallback (gfx_anim.c missing)")
+
     if missing:
         raise SystemExit("v5 managed patch missing: " + ", ".join(missing))
     if changed:
-        WS_CLIENT.write_text(source)
+        if ws_changed:
+            WS_CLIENT.write_text(source)
         print("v5 managed patch: applied " + ", ".join(changed))
     else:
-        print("v5 managed patch: esp_websocket_client fixes present")
+        print("v5 managed patch: all fixes present")
     return 0
 
 
