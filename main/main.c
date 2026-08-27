@@ -5467,6 +5467,7 @@ static void voice_task(void *arg)
                     if (!s_flip_muted) {
                         atomic_store(&s_voice_control_request,
                                      VOICE_CONTROL_ARM);
+                        jr_display_bloom();   /* same attention beat as wake */
                         jr_display_caption_set("YES, SIR?");
                         ESP_LOGI(TAG, "gesture: double-tap attention");
                     }
@@ -5661,6 +5662,11 @@ static void voice_task(void *arg)
                     ESP_LOGI(TAG, "wake: \"%s\" heard — waking from rest",
                              jr_wake_model());
                     jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                    /* Bloom AFTER the poke: it only renders while frames
+                     * flush, so the display must be waking first (glass-ux
+                     * contract). The VISION's beat: a point of light blooms
+                     * into the ring. */
+                    jr_display_bloom();
                     s_mood_rest_disarmed = false;
                     atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
                     jr_display_caption_set("YES?");

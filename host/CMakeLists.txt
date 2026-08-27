@@ -73,3 +73,9 @@ target_compile_options(jr_host_tests PRIVATE -Wall -Wextra)
 
 enable_testing()
 add_test(NAME jr_host_tests COMMAND jr_host_tests)
+
+# Display suite rides the same ctest run as its own binary — no include paths
+# leak between the trees (the jr_display tests drifted silently behind an API
+# change on 2026-08-27 precisely because they lived outside this run).
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../components/jr_display/tests
+                 ${CMAKE_BINARY_DIR}/jr_display_tests)

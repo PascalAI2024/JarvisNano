@@ -168,13 +168,11 @@ char *jr_gemini_build_setup(const jr_gemini_config_t *cfg)
     cJSON *aad = cJSON_AddObjectToObject(ric, "automaticActivityDetection");
     if (cfg && cfg->vad_mode == JR_VAD_SERVER) {
         cJSON_AddBoolToObject(aad, "disabled", false);
-        /* HIGH onset sensitivity: server-side barge is the primary interrupt
-         * path (docs: START_OF_ACTIVITY_INTERRUPTS fires on detected user
-         * speech DURING model audio). Our AEC keeps the echo residual ~0.5%
-         * on the 1.75C, so eager onset detection favors catching the owner's
-         * talk-over without self-triggering on the speaker loop. */
-        cJSON_AddStringToObject(aad, "startOfSpeechSensitivity",
-                                "START_SENSITIVITY_HIGH");
+        /* Default onset sensitivity, deliberately. HIGH was tried 2026-08-27
+         * to sharpen server-side barge and made the device answer AMBIENT
+         * ROOM NOISE (owner-reported within the hour). The local barge gate
+         * carries interrupts (owner session: 3/3 latched at the recalibrated
+         * gate), so the server can stay calm while listening. */
         cJSON_AddStringToObject(ric, "activityHandling", "START_OF_ACTIVITY_INTERRUPTS");
     } else {
         cJSON_AddBoolToObject(aad, "disabled", true);
