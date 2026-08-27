@@ -68,6 +68,10 @@ bool jr_audio_playback_pending(void);
  * sink's mute_now(). */
 void jr_audio_dac_unmute(void);
 
+/* True while the fast-kill mute is asserted (feeder discards everything).
+ * Diagnostic visibility: a stuck mute is "no sound with green counters". */
+bool jr_audio_dac_muted(void);
+
 /* Flush the playback ring without muting (maps JR_CMD_FLUSH_PLAYBACK_RING). */
 void jr_audio_flush_playback(void);
 

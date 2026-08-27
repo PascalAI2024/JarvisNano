@@ -1683,7 +1683,8 @@ static esp_err_t diag_get_handler(httpd_req_t *req)
         "\"rx_parse_errors\":%u,\"rx_alloc_failures\":%u,\"mic_rms\":%.1f,"
         "\"vad_floor\":%.1f,\"vad_starts\":%u,\"vad_ends\":%u,"
         "\"barge_enabled\":%s,\"barge_candidates\":%u,\"barge_events\":%u,"
-        "\"activity_open\":%s,\"playback_pending\":%s,\"terminal_pending\":%s,"
+        "\"activity_open\":%s,\"playback_pending\":%s,\"dac_muted\":%s,"
+        "\"terminal_pending\":%s,"
         "\"rx_frames\":%u,\"audio_chunks\":%u,"
         "\"audio_samples\":%u,\"audio_dropped_samples\":%u,"
         "\"text_parts\":%u,\"turn_complete\":%u,"
@@ -1733,6 +1734,7 @@ static esp_err_t diag_get_handler(httpd_req_t *req)
         (unsigned)s_app.barge_events,
         s_app.io.activity_open ? "true" : "false",
         jr_audio_playback_pending() ? "true" : "false",
+        jr_audio_dac_muted() ? "true" : "false",
         s_app.terminal_pending ? "true" : "false",
         (unsigned)s_app.rx_frames,
         (unsigned)s_app.rx_audio_chunks,
@@ -4742,6 +4744,13 @@ static void voice_task(void *arg)
              * from the API, the shade or face-up used to leave it set, so the
              * flag no longer described reality. */
             s_mood_rest_disarmed = false;
+            /* Same choke-point rule for the fast-kill DAC mute: an explicit
+             * arm means the owner wants a talking device, so no stale mute
+             * may survive it. A mute whose UNMUTE_DAC successor was lost left
+             * the feeder silently discarding every reply — "no sound at all"
+             * with all counters green (hit live 2026-08-27; the diag chirp's
+             * own unmute was what brought audio back). */
+            jr_audio_dac_unmute();
             if (controlled_phase == JR_ST_IDLE ||
                 controlled_phase == JR_ST_BACKOFF ||
                 controlled_phase == JR_ST_FATAL) {

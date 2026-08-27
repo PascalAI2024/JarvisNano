@@ -777,6 +777,11 @@ void jr_audio_dac_unmute(void)
     }
 }
 
+bool jr_audio_dac_muted(void)
+{
+    return atomic_load(&s_muted);
+}
+
 void jr_audio_flush_playback(void)
 {
     portENTER_CRITICAL(&s_pb_lock);
