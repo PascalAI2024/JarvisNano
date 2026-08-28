@@ -220,6 +220,7 @@ static jr_outcome_t death(jr_session_t s, jr_error_kind_t ek,
     jr_outcome_t o;
     memset(&o, 0, sizeof o);
     jr_cmd_list_t *L = &o.cmds;
+    s.goaway_pending = false;   /* a deferral never survives its session */
 
     uint64_t uptime = now - s.last_success_ts;
     jr_reconnect_decision_t p = jr_reconnect_policy(s.fail_count, uptime, ek);
@@ -358,6 +359,7 @@ static jr_outcome_t to_idle_reset(jr_session_t s, bool cancel_backoff,
     s.phase = JR_ST_IDLE;
     s.fail_count = 0;                        /* reset fail_count                */
     s.resumption_token = 0;                  /* clear resumption_token          */
+    s.goaway_pending = false;
     s.ask_call_id = 0;                       /* no ask survives a park          */
     s.ask_call_id_text = NULL;
     s.ask_tool_name = NULL;
@@ -474,6 +476,19 @@ jr_outcome_t jr_transition(jr_session_t s, jr_event_t e, jr_clock_t clk)
     if (is_death_source(s.phase) && is_death_event(ev)) {
         if (ev == JR_EV_SERVER_GO_AWAY && e.resumption_token != 0) {
             s.resumption_token = e.resumption_token;  /* retain resume handle    */
+        }
+        /* goAway mid-utterance is an ANNOUNCEMENT, not a corpse: the server
+         * grants timeLeft before it actually closes. Dying here beheads the
+         * reply the owner is listening to. Defer — finish the turn, then
+         * reconnect (with the token) at the natural boundary below. Any real
+         * close still lands here as TRANSPORT_CLOSED, so the deferral can
+         * never outlive the socket. */
+        if (ev == JR_EV_SERVER_GO_AWAY && s.phase == JR_ST_SPEAKING) {
+            /* SPEAKING only. ASKING deliberately still dies+resumes at once:
+             * a human deliberating can outlive the server's grace window,
+             * and an answer must never ride a socket that is being retired. */
+            s.goaway_pending = true;
+            return finalize(noop(s), prev);
         }
         jr_error_kind_t ek = (ev == JR_EV_SERVER_ERROR) ? e.error_kind
                                                         : JR_ERRK_TRANSIENT;
@@ -758,6 +773,14 @@ jr_outcome_t jr_transition(jr_session_t s, jr_event_t e, jr_clock_t clk)
             push(&o.cmds, mk_diag("barge", ev, JR_ERRK_UNKNOWN));
             break;
         case JR_EV_SERVER_TURN_COMPLETE:     /* ring drains tail; DAC unmuted   */
+            if (s.goaway_pending) {
+                /* The deferred goAway cashes in HERE — the reply the owner
+                 * heard is complete, so the reconnect (resuming via the
+                 * retained token) lands in the silence between turns. */
+                s.goaway_pending = false;
+                o = death(s, JR_ERRK_TRANSIENT, JR_EV_SERVER_GO_AWAY, now);
+                break;
+            }
             s.phase = JR_ST_LISTENING;
             o = noop(s);
             push(&o.cmds, mk(JR_CMD_START_CAPTURE));

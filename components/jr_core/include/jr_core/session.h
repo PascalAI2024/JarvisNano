@@ -285,6 +285,12 @@ typedef struct {
     uint16_t      fail_count;      /* consecutive involuntary deaths          */
     uint64_t      last_success_ts; /* time of last Handshaking->Live.Listening*/
     uint32_t      resumption_token;/* last server-issued resume handle (0=none)*/
+    bool          goaway_pending;  /* goAway arrived mid-utterance; reconnect
+                                    * (with the retained token) is DEFERRED to
+                                    * the turn boundary so the reply finishes
+                                    * instead of being beheaded. If the server
+                                    * closes first, normal death routing still
+                                    * fires — never worse than the old path. */
     uint32_t      session_gen;     /* ++ on entry to Connecting; stamps jobs  */
     jr_vad_mode_t vad_mode;        /* the injected L4 strategy (field)        */
 

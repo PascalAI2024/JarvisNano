@@ -179,6 +179,14 @@ char *jr_gemini_build_setup(const jr_gemini_config_t *cfg)
         cJSON_AddStringToObject(ric, "activityHandling", "NO_INTERRUPTION");
     }
 
+    /* contextWindowCompression — sliding window. Without it, audio sessions
+     * hit the documented 15-minute ceiling; with it, the session's lifetime
+     * is bounded only by the ~10-minute CONNECTION cap, which resumption +
+     * the deferred-goAway boundary reconnect already make invisible. This is
+     * the "always-on desk presence" spine (Live API session docs, 2026). */
+    cJSON *cwc = cJSON_AddObjectToObject(setup, "contextWindowCompression");
+    cJSON_AddItemToObject(cwc, "slidingWindow", cJSON_CreateObject());
+
     /* tools — functionDeclarations + googleSearch COEXISTING. */
     cJSON *tools = cJSON_AddArrayToObject(setup, "tools");
     if (cfg && cfg->google_search) {

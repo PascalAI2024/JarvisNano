@@ -280,6 +280,15 @@ static void test_T06_death_routing_matrix(void)
             }
             jr_outcome_t r = step(sess_at(states[st]), e);
             TEST_ASSERT_NOT_EQUAL(JR_ST_IDLE, r.next.phase);
+            if (deaths[d] == JR_EV_SERVER_GO_AWAY &&
+                states[st] == JR_ST_SPEAKING) {
+                /* The ONE deliberate exception: goAway mid-utterance DEFERS
+                 * (the reply finishes; reconnect cashes in at the turn
+                 * boundary — pinned by test_goaway_defers_in_speaking). It
+                 * still never reaches Idle. */
+                TEST_ASSERT_EQUAL_INT(JR_ST_SPEAKING, r.next.phase);
+                continue;
+            }
             TEST_ASSERT_TRUE(r.next.phase == JR_ST_RECONNECTING ||
                              r.next.phase == JR_ST_BACKOFF);
         }
@@ -476,12 +485,52 @@ static void test_T15_toolCancel_and_stale_gen_drop(void)
     TEST_ASSERT_FALSE(jr_session_gen_is_stale(7, 7));
 }
 
-/* T16 — goAway carries a resumption token; the auto-reconnect Connect uses it. */
+/* goAway mid-utterance defers: audio keeps flowing after the announcement, a
+ * REAL close during the deferral still dies immediately (the deferral can
+ * never outlive the socket), and the pending flag does not leak into the
+ * next session. */
+static void test_goaway_defers_in_speaking(void)
+{
+    jr_event_t go = jr_event(JR_EV_SERVER_GO_AWAY);
+    go.resumption_token = 0x1234;
+    jr_outcome_t d0 = step(sess_at(JR_ST_SPEAKING), go);
+    TEST_ASSERT_EQUAL_INT(JR_ST_SPEAKING, d0.next.phase);
+
+    /* the tail of the reply still feeds the speaker */
+    static const int16_t pcm[4] = {0};
+    jr_event_t chunk = jr_event(JR_EV_SERVER_AUDIO_CHUNK);
+    chunk.pcm = pcm;
+    chunk.pcm_len = 4;
+    jr_outcome_t d1 = step(d0.next, chunk);
+    TEST_ASSERT_EQUAL_INT(JR_ST_SPEAKING, d1.next.phase);
+    TEST_ASSERT_NOT_NULL(find_cmd(&d1.cmds, JR_CMD_FEED_PLAYBACK));
+
+    /* a real close mid-deferral dies NOW, token retained, flag cleared */
+    jr_outcome_t d2 = step(d1.next, jr_event(JR_EV_TRANSPORT_CLOSED));
+    TEST_ASSERT_EQUAL_INT(JR_ST_RECONNECTING, d2.next.phase);
+    TEST_ASSERT_EQUAL_UINT32(0x1234, d2.next.resumption_token);
+    TEST_ASSERT_FALSE(d2.next.goaway_pending);
+
+    /* after the boundary reconnect, the NEXT session's first turn-complete
+     * must not spuriously reconnect (no leak) */
+    jr_outcome_t d3 = step(d0.next, jr_event(JR_EV_SERVER_TURN_COMPLETE));
+    TEST_ASSERT_EQUAL_INT(JR_ST_RECONNECTING, d3.next.phase);
+    TEST_ASSERT_FALSE(d3.next.goaway_pending);
+}
+
+/* T16 — goAway carries a resumption token; the auto-reconnect Connect uses it.
+ * In SPEAKING the death is DEFERRED to the turn boundary (the reply finishes
+ * first), so the reconnect is reached via TURN_COMPLETE — and the token must
+ * survive the deferral. */
 static void test_T16_goAway_resumes_with_token(void)
 {
     jr_event_t go = jr_event(JR_EV_SERVER_GO_AWAY);
     go.resumption_token = 0xABCD;
-    jr_outcome_t r = step(sess_at(JR_ST_SPEAKING), go);
+    jr_outcome_t d0 = step(sess_at(JR_ST_SPEAKING), go);
+    TEST_ASSERT_EQUAL_INT(JR_ST_SPEAKING, d0.next.phase);   /* deferred */
+    TEST_ASSERT_EQUAL_UINT32(0xABCD, d0.next.resumption_token);
+
+    jr_outcome_t r = step(d0.next, jr_event(JR_EV_SERVER_TURN_COMPLETE));
     TEST_ASSERT_EQUAL_INT(JR_ST_RECONNECTING, r.next.phase);
     TEST_ASSERT_EQUAL_UINT32(0xABCD, r.next.resumption_token);
 
@@ -1812,6 +1861,7 @@ int main(void)
     RUN_TEST(test_T14_toolCall_generation_tagged);
     RUN_TEST(test_tool_result_rearms_reply_watchdog);
     RUN_TEST(test_T15_toolCancel_and_stale_gen_drop);
+    RUN_TEST(test_goaway_defers_in_speaking);
     RUN_TEST(test_T16_goAway_resumes_with_token);
     RUN_TEST(test_T17_serverChunk_before_boundary);
     RUN_TEST(test_T18_split_brain_dead_uplink);
