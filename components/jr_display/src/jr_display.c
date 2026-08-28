@@ -510,6 +510,10 @@ static int      s_caption_ease;
 static int      s_ask_prog;
 static int      s_ask_ease;
 static int      s_ask_shown_n;
+/* The shade rides the quick rate too — it answers a gesture, and a veil that
+ * lags its swipe feels broken, not graceful. */
+static int      s_shade_prog;
+static int      s_shade_ease;
 static uint32_t s_fade_prev_ms;
 
 static inline int fade_smoothstep(int p)     /* 0..256 -> 0..256, 3p^2-2p^3 */
@@ -996,6 +1000,19 @@ static void overlay_fade_tick(void)
         }
     }
     s_ask_ease = fade_smoothstep(s_ask_prog);
+
+    if ((diag_load(&s_display.shell_word) & JR_DISPLAY_SHELL_SHADE) != 0U) {
+        s_shade_prog += cstep;
+        if (s_shade_prog > 256) {
+            s_shade_prog = 256;
+        }
+    } else {
+        s_shade_prog -= cstep;
+        if (s_shade_prog < 0) {
+            s_shade_prog = 0;
+        }
+    }
+    s_shade_ease = fade_smoothstep(s_shade_prog);
 }
 
 void jr_display_present_choices(const char *question,
@@ -1582,7 +1599,13 @@ static void apply_shell_overlay(jr_display_ctx_t *ctx, int x1, int y1,
     uint32_t shell = diag_load(&ctx->shell_word);
     bool shade_open = (shell & JR_DISPLAY_SHELL_SHADE) != 0U;
     bool agent_active = (shell & JR_DISPLAY_SHELL_AGENT) != 0U;
-    if ((!shade_open && !agent_active) || pixels == NULL) {
+    /* The veil rides s_shade_ease so the shade answers its swipe with a
+     * surface, not a stamp; the controls stay gated on the live bit — they
+     * retract instantly and the veil lifts after them, which reads as the
+     * shade closing rather than dissolving. */
+    const int sk = (s_shade_ease * 32) >> 8;
+    const bool veil = sk > 0;
+    if ((!veil && !agent_active) || pixels == NULL) {
         return;
     }
     uint8_t progress = shell & JR_DISPLAY_SHELL_PROGRESS;
@@ -1602,8 +1625,11 @@ static void apply_shell_overlay(jr_display_ctx_t *ctx, int x1, int y1,
             uint16_t *slot = &pixels[(size_t)row * (size_t)width + (size_t)col];
             uint16_t native = panel_native(ctx, *slot);
 
+            if (veil && y < 194) {
+                native = (sk >= 32) ? native_darken(native)
+                                    : hud_fade565(native, false, sk);
+            }
             if (shade_open && y < 194) {
-                native = native_darken(native);
                 /* Pull handle. */
                 if (y >= 14 && y <= 18 && x >= 203 && x <= 262) {
                     native = 0x7DFF;
@@ -1643,6 +1669,88 @@ static void apply_shell_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                 }
             }
             *slot = panel_order_color(ctx, native);
+        }
+    }
+}
+
+/* W4 shade gesture guide: the glass teaches its own language. The owner
+ * learned every gesture over chat — a design failure for a product whose
+ * whole point is the glass. While the shade is open, the region under it
+ * (otherwise just live face) becomes the legend: a chord-clipped dim band
+ * from the shade's edge down to the caption band, six centred scale-2 lines,
+ * gesture in cyan and action in white so the language reads as call and
+ * response. It rides the shade's ease, so legend and veil surface and sink
+ * as one gesture-answer. Static content, zero state beyond the shared ease;
+ * strips compose per-pixel exactly like the shell overlay above. */
+#define JR_GUIDE_Y0        194   /* meets the shade's bottom edge            */
+#define JR_GUIDE_Y1        382   /* stops above the caption band (386..425)  */
+#define JR_GUIDE_TEXT_Y0   209   /* seven 14 px lines centred in the band    */
+#define JR_GUIDE_LINE_STEP 24
+
+/* The last line teaches the exit. The reader is already inside the shade,
+ * but tonight's failure theme was undiscoverable gestures — the one place a
+ * user is guaranteed to be reading is the one place the way out must be
+ * written down. */
+static const struct {
+    const char *text;
+    uint8_t gesture_chars;       /* chars before " - ": rendered cyan */
+    uint8_t chars;
+} s_guide_lines[7] = {
+    { "TAP - STOP / ATTENTION", 3, 22 },
+    { "TAP TAP - SUMMON", 7, 16 },
+    { "HOLD - MUTE / UNMUTE", 4, 20 },
+    { "SWIPE LEFT - GLANCE", 10, 19 },
+    { "SWIPE RIGHT - WATCH", 11, 19 },
+    { "FLIP DOWN - PRIVACY", 9, 19 },
+    { "SWIPE UP - CLOSE", 8, 16 },
+};
+
+static void apply_guide_overlay(jr_display_ctx_t *ctx, int x1, int y1,
+                                int x2, int y2, uint16_t *pixels)
+{
+    const int e = s_shade_ease;
+    const int sk = (e * 32) >> 8;
+    if (sk <= 0 || pixels == NULL) {
+        return;
+    }
+    int ys = y1 > JR_GUIDE_Y0 ? y1 : JR_GUIDE_Y0;
+    int ye = (y2 - 1) < JR_GUIDE_Y1 ? (y2 - 1) : JR_GUIDE_Y1;
+    if (ys > ye) {
+        return;                    /* strip misses the band: one compare */
+    }
+    const int c = e > 255 ? 255 : e;
+    const uint16_t px_action = panel_order_color(
+        ctx, (uint16_t)(((c & 0xF8) << 8) | ((c & 0xFC) << 3) | (c >> 3)));
+    const uint16_t px_gesture = panel_order_color(
+        ctx, (uint16_t)((((63 * c / 255) & 0x3F) << 5) | (31 * c / 255)));
+    const int width = x2 - x1;
+    for (int y = ys; y <= ye; ++y) {
+        uint16_t *row = pixels + (size_t)(y - y1) * (size_t)width;
+        const int half = hud_glass_chord(y);
+        int xlo = 233 - half;
+        int xhi = 233 + half;
+        if (xlo < x1)     xlo = x1;
+        if (xhi > x2 - 1) xhi = x2 - 1;
+        for (int x = xlo; x <= xhi; ++x) {
+            row[x - x1] = hud_fade565(row[x - x1],
+                                      ctx->board.swap_color_bytes, sk);
+        }
+        const int li = (y - JR_GUIDE_TEXT_Y0) / JR_GUIDE_LINE_STEP;
+        const int ly = JR_GUIDE_TEXT_Y0 + li * JR_GUIDE_LINE_STEP;
+        if (y < JR_GUIDE_TEXT_Y0 || li > 6 || y >= ly + 14) {
+            continue;
+        }
+        const char *text = s_guide_lines[li].text;
+        const int len = s_guide_lines[li].chars;
+        const int glen = s_guide_lines[li].gesture_chars;
+        const int tx = (HUD_W - 12 * len) / 2;
+        for (int x = tx; x < tx + 12 * len; ++x) {
+            if (x < x1 || x >= x2) {
+                continue;
+            }
+            if (surface_text_pixel(text, (size_t)len, x, y, tx, ly, 2)) {
+                row[x - x1] = ((x - tx) / 12) < glen ? px_gesture : px_action;
+            }
         }
     }
 }
@@ -1759,6 +1867,7 @@ static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
     if (diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF) {
         apply_hud_overlay(ctx, x1, y1, x2, y2, outbound);
         apply_shell_overlay(ctx, x1, y1, x2, y2, outbound);
+        apply_guide_overlay(ctx, x1, y1, x2, y2, outbound);
         apply_surface_overlay(ctx, x1, y1, x2, y2, outbound);
     }
     diag_inc(&ctx->flush_submissions);
