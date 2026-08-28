@@ -50,6 +50,12 @@ typedef struct {
     uint32_t age_ms;       /* ms since this snapshot was published               */
 } jr_power_t;
 
+/* Consume latched physical power-key presses (counts since last call). The
+ * AXP2101 latches PKEY short/long in INTSTS2 over I2C — no IRQ line needed
+ * on the 1.75C (the old TCA9554 route is gone). Polled at 500 ms by the
+ * sampler task; consumed by the composition root. Any-task safe. */
+void jr_power_pkey_take(uint32_t *out_short, uint32_t *out_long);
+
 /**
  * @brief Start the background battery sampler.
  *

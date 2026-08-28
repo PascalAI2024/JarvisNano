@@ -7,6 +7,7 @@
  */
 #include "jr_power/jr_power.h"
 
+#include <stdatomic.h>
 #include <string.h>
 
 #include "driver/i2c_master.h"
@@ -20,6 +21,16 @@
 #include "freertos/task.h"
 
 #define AXP2101_I2C_ADDR          0x34
+
+/* PKEY IRQ lives in INTSTS2/INTEN2 (XPowersLib AXP2101 map): bit3 = short
+ * press, bit2 = long press. On the 1.75C the old TCA9554 IRQ route is gone,
+ * but the STATUS register still latches over plain I2C — so the power key is
+ * readable by polling, no interrupt line needed. */
+#define AXP2101_REG_INTEN2        0x41
+#define AXP2101_REG_INTSTS2       0x49
+#define AXP2101_PKEY_SHORT_BIT    (1u << 3)
+#define AXP2101_PKEY_LONG_BIT     (1u << 2)
+#define POWER_PKEY_POLL_MS        500
 #define AXP2101_REG_STATUS1       0x00
 #define AXP2101_REG_STATUS2       0x01
 #define AXP2101_REG_ADC_CH_CTRL   0x30
@@ -38,6 +49,9 @@
 #define POWER_SAMPLE_PERIOD_MS  5000
 #define POWER_TASK_STACK        3072
 #define POWER_TASK_PRIO         2
+
+static _Atomic uint32_t s_pkey_short;
+static _Atomic uint32_t s_pkey_long;
 
 static const char *TAG = "jr_power";
 
@@ -127,6 +141,15 @@ static esp_err_t power_bring_up(void)
         pmic_write_reg(AXP2101_REG_BAT_DET_CTRL, det | AXP2101_BAT_DET_ENABLE);
     }
 
+    /* Arm PKEY short/long IRQ latching and clear anything stale. */
+    uint8_t inten2 = 0;
+    if (pmic_read_reg(AXP2101_REG_INTEN2, &inten2) == ESP_OK) {
+        (void)pmic_write_reg(AXP2101_REG_INTEN2,
+                             inten2 | AXP2101_PKEY_SHORT_BIT |
+                             AXP2101_PKEY_LONG_BIT);
+    }
+    (void)pmic_write_reg(AXP2101_REG_INTSTS2, 0xFF);
+
     s_ready = true;
     ESP_LOGI(TAG, "AXP2101 fuel gauge online (0x%02X)", AXP2101_I2C_ADDR);
     return ESP_OK;
@@ -168,17 +191,36 @@ static void power_task(void *arg)
     (void)arg;
     uint32_t seq = 0;
 
+    uint32_t pass = 0;
     while (s_run) {
-        jr_power_t s;
-        if (power_sample(&s)) {
-            s.sample_seq = ++seq;
-            if (xSemaphoreTake(s_snap_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
-                s_snap = s;
-                s_snap_us = esp_timer_get_time();
-                xSemaphoreGive(s_snap_lock);
+        /* PKEY every pass (a button must feel instant-ish); battery every
+         * POWER_SAMPLE_PERIOD_MS as before. Write-1-to-clear consumes the
+         * latch so each press counts once. */
+        uint8_t sts2 = 0;
+        if (pmic_read_reg(AXP2101_REG_INTSTS2, &sts2) == ESP_OK &&
+            (sts2 & (AXP2101_PKEY_SHORT_BIT | AXP2101_PKEY_LONG_BIT)) != 0) {
+            if (sts2 & AXP2101_PKEY_SHORT_BIT) {
+                atomic_fetch_add(&s_pkey_short, 1u);
+            }
+            if (sts2 & AXP2101_PKEY_LONG_BIT) {
+                atomic_fetch_add(&s_pkey_long, 1u);
+            }
+            (void)pmic_write_reg(AXP2101_REG_INTSTS2,
+                                 sts2 & (AXP2101_PKEY_SHORT_BIT |
+                                         AXP2101_PKEY_LONG_BIT));
+        }
+        if ((pass++ % (POWER_SAMPLE_PERIOD_MS / POWER_PKEY_POLL_MS)) == 0) {
+            jr_power_t s;
+            if (power_sample(&s)) {
+                s.sample_seq = ++seq;
+                if (xSemaphoreTake(s_snap_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+                    s_snap = s;
+                    s_snap_us = esp_timer_get_time();
+                    xSemaphoreGive(s_snap_lock);
+                }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(POWER_SAMPLE_PERIOD_MS));
+        vTaskDelay(pdMS_TO_TICKS(POWER_PKEY_POLL_MS));
     }
 
     const bool ext = s_ext_stack;
@@ -255,4 +297,13 @@ esp_err_t jr_power_read(jr_power_t *out)
     }
     xSemaphoreGive(s_snap_lock);
     return have ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+/* Consume latched power-key presses (counts since last call). Any task. */
+void jr_power_pkey_take(uint32_t *out_short, uint32_t *out_long)
+{
+    uint32_t sp = atomic_exchange(&s_pkey_short, 0u);
+    uint32_t lp = atomic_exchange(&s_pkey_long, 0u);
+    if (out_short) { *out_short = sp; }
+    if (out_long)  { *out_long  = lp; }
 }

@@ -5000,6 +5000,64 @@ static void voice_task(void *arg)
                 }
             }
 
+            /* Physical power key (AXP2101 PKEY, polled over I2C — the C
+             * board's unlock). Short press mirrors the hold gesture: mute /
+             * unmute, captioned. Long press = status glance. Never power-off
+             * from firmware — the PMIC's own 6 s forced cut stays the
+             * hardware escape hatch. */
+            {
+                uint32_t pkey_s = 0, pkey_l = 0;
+                jr_power_pkey_take(&pkey_s, &pkey_l);
+                if (pkey_s > 0) {
+                    if (atomic_load(&s_voice_privacy_paused)) {
+                        atomic_store(&s_voice_privacy_paused, false);
+                        s_flip_muted = false;
+                        atomic_store(&s_voice_control_request,
+                                     VOICE_CONTROL_ARM);
+                        jr_display_caption_set("LISTENING");
+                        ESP_LOGI(TAG, "pkey: unmute");
+                    } else {
+                        atomic_store(&s_voice_privacy_paused, true);
+                        jr_state_t pk_p = jr_orch_phase(&s_app.orch);
+                        if (pk_p != JR_ST_IDLE && pk_p != JR_ST_DRAINING) {
+                            jr_orch_inject(&s_app.orch,
+                                           jr_event(JR_EV_USER_STOP), now);
+                        }
+                        jr_display_caption_set("MUTED - PRESS TO RESUME");
+                        ESP_LOGI(TAG, "pkey: mute");
+                    }
+                }
+                if (pkey_l > 0) {
+                    jr_power_t pb;
+                    char pcap[32];
+                    if (jr_power_read(&pb) == ESP_OK && pb.percent <= 100) {
+                        snprintf(pcap, sizeof pcap, "BAT %u%%%s",
+                                 (unsigned)pb.percent,
+                                 pb.charging ? " CHARGING" : "");
+                        jr_display_caption_set(pcap);
+                    }
+                    ESP_LOGI(TAG, "pkey: long -> status");
+                }
+            }
+
+            /* Low battery speaks up ON GLASS, once per 5 minutes, discharge
+             * only. Quiet below the panic line beats a dead surprise. */
+            {
+                static uint32_t s_lowbat_next_ms;
+                jr_power_t lb;
+                if ((int32_t)((uint32_t)now - s_lowbat_next_ms) >= 0 &&
+                    jr_power_read(&lb) == ESP_OK && lb.present &&
+                    lb.percent <= 20 && lb.percent <= 100 && !lb.charging &&
+                    !lb.usb_present) {
+                    char lcap[28];
+                    snprintf(lcap, sizeof lcap, "BATTERY LOW %u%%",
+                             (unsigned)lb.percent);
+                    jr_display_caption_set(lcap);
+                    s_lowbat_next_ms = (uint32_t)now + 300000U;
+                    ESP_LOGW(TAG, "battery low: %u%%", (unsigned)lb.percent);
+                }
+            }
+
             /* UI-01 ambient watch: rest moods get hands. Time comes from
              * SNTP or the on-board PCF85063 — wrong hands are worse than none. */
             static uint32_t s_clock_next_ms;
