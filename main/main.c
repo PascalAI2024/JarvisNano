@@ -5674,6 +5674,7 @@ static void voice_task(void *arg)
                         atomic_store(&s_voice_control_request,
                                      VOICE_CONTROL_ARM);
                         jr_display_bloom();   /* same attention beat as wake */
+                        (void)jr_audio_diag_play_chirp(160U, 8U);
                         jr_display_caption_set("YES, SIR?");
                         ESP_LOGI(TAG, "gesture: double-tap attention");
                     }
@@ -5873,6 +5874,9 @@ static void voice_task(void *arg)
                      * contract). The VISION's beat: a point of light blooms
                      * into the ring. */
                     jr_display_bloom();
+                    /* the sound half of the attention moment — a short soft
+                     * rise; refuses on its own if a reply is playing */
+                    (void)jr_audio_diag_play_chirp(160U, 8U);
                     s_mood_rest_disarmed = false;
                     atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
                     jr_display_caption_set("YES?");
