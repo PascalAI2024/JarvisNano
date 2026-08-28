@@ -7,6 +7,7 @@ device over LAN. Host comes from --host or $JARVIS_DEVICE_HOST.
     jarvisctl status                     # one-line health verdict + key state
     jarvisctl listen | mute              # arm / privacy-pause the voice
     jarvisctl say "text"                 # speak a turn through Gemini
+    jarvisctl demo                       # queue the 27 s on-glass showcase reel
     jarvisctl screen [out.png]           # capture the glass (PNG via sips/PIL)
     jarvisctl canvas image.png [--ttl S] # push an image to the glass
     jarvisctl canvas --clear
@@ -99,6 +100,11 @@ def cmd_say(text: str) -> int:
     return 0 if ok >= 4 else 1
 
 
+def cmd_demo() -> int:
+    print(api("/api/demo", "POST", b"").decode())
+    return 0
+
+
 def cmd_screen(out: str = "glass.png") -> int:
     ppm = out + ".ppm"
     with open(ppm, "wb") as f:
@@ -137,6 +143,23 @@ def cmd_vadlog(out: str = "vadlog.csv") -> int:
     return 0
 
 
+def cmd_update() -> int:
+    """Courteous flash: claim the operator lease so the glass announces
+    "JARVIS AT WORK" BEFORE the write stalls rendering, then flash the
+    already-built image over USB and let boot release the lease naturally.
+    Never flash a device the owner is using without this."""
+    try:
+        api("/api/operator/lease?ttl=180", "POST", b"")
+        print("lease claimed — glass announces the update")
+    except Exception as exc:  # noqa: BLE001 - device may be wedged; flash anyway
+        print(f"lease skipped ({exc}) — flashing regardless")
+    import time
+    time.sleep(1.5)   # let the caption land before the stall
+    env = dict(os.environ, NO_BUILD="1")
+    return subprocess.call(
+        ["bash", os.path.join(HERE, "flash-v5.sh")], env=env)
+
+
 def cmd_reboot() -> int:
     esptool = os.path.join(HERE, "..", ".build_tools", "esptool", "bin",
                            "python")
@@ -163,6 +186,11 @@ def main() -> int:
         return cmd_mute()
     if cmd == "say":
         return cmd_say(" ".join(rest))
+    if cmd == "demo":
+        if rest:
+            print(__doc__)
+            return 2
+        return cmd_demo()
     if cmd == "screen":
         return cmd_screen(*rest[:1])
     if cmd == "canvas":
@@ -180,6 +208,8 @@ def main() -> int:
         return 0
     if cmd == "reboot":
         return cmd_reboot()
+    if cmd == "update":
+        return cmd_update()
     if cmd == "input":
         # jarvisctl input tap|double|long|swipe [left|right|up|down] [edge]
         kind = rest[0] if rest else "tap"
