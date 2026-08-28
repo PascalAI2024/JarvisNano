@@ -246,6 +246,34 @@ static _Atomic uint32_t s_sim_flip;
 static uint32_t s_watch_peek_until_ms;
 static uint32_t s_last_tap_ms;
 
+/* Speaker volume (app task only) — gesture-adjustable, NVS-persistent. */
+static int s_out_vol = 100;
+
+static void persist_out_vol(uint8_t vol)
+{
+    nvs_handle_t h;
+    if (nvs_open("app", NVS_READWRITE, &h) == ESP_OK) {
+        (void)nvs_set_u8(h, "out_vol", vol);
+        (void)nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static void restore_out_vol(void)
+{
+    nvs_handle_t h;
+    uint8_t vol = 0;
+    if (nvs_open("app", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_u8(h, "out_vol", &vol) == ESP_OK &&
+            vol >= 10 && vol <= 100) {
+            s_out_vol = vol;
+            jr_audio_set_gains(-1, -1, (int)vol);
+            ESP_LOGI(TAG, "volume restored: %u", (unsigned)vol);
+        }
+        nvs_close(h);
+    }
+}
+
 /* ---- persistent log ring ------------------------------------------------
  * Every ESP_LOG line also lands in a 128 KB PSRAM ring served at
  * GET /api/logs?tail=N (the contract live-device.py has always probed for).
@@ -4136,6 +4164,88 @@ static esp_err_t display_canvas_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* POST /api/debug/input?kind=tap|double|long|swipe&dir=left|right|up|down
+ * [&x=&y=&edge=1] — synthesize an input event through the REAL touch queue,
+ * so every gesture is machine-testable without a finger on the glass
+ * (owner: "you should be able to test all these inputs", 2026-08-28).
+ * "double" enqueues two taps inside the double-tap window. */
+static esp_err_t debug_input_handler(httpd_req_t *req)
+{
+    if (!control_intent_required(req)) {
+        return ESP_OK;
+    }
+    char query[96], kind[12] = {0}, dirs[12] = {0}, val[8] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof query) != ESP_OK ||
+        httpd_query_key_value(query, "kind", kind, sizeof kind) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "kind=tap|double|long|swipe required");
+        return ESP_OK;
+    }
+    jr_input_event_t ev = { .kind = JR_INPUT_TAP, .x = 233, .y = 233,
+                            .start_x = 233, .start_y = 233,
+                            .end_x = 233, .end_y = 233,
+                            .duration_ms = 80,
+                            .direction = JR_INPUT_DIRECTION_NONE, .flags = 0 };
+    if (httpd_query_key_value(query, "x", val, sizeof val) == ESP_OK) {
+        ev.x = ev.start_x = ev.end_x = (uint16_t)strtoul(val, NULL, 10);
+    }
+    if (httpd_query_key_value(query, "y", val, sizeof val) == ESP_OK) {
+        ev.y = ev.start_y = ev.end_y = (uint16_t)strtoul(val, NULL, 10);
+    }
+    int repeats = 1;
+    if (strcmp(kind, "long") == 0) {
+        ev.kind = JR_INPUT_LONG_PRESS;
+        ev.duration_ms = 1300;
+    } else if (strcmp(kind, "double") == 0) {
+        repeats = 2;
+    } else if (strcmp(kind, "swipe") == 0) {
+        ev.kind = JR_INPUT_SWIPE;
+        ev.duration_ms = 250;
+        (void)httpd_query_key_value(query, "dir", dirs, sizeof dirs);
+        if (strcmp(dirs, "left") == 0) {
+            ev.direction = JR_INPUT_DIRECTION_LEFT;
+            ev.start_x = 400; ev.end_x = 60; ev.delta_x = -340;
+        } else if (strcmp(dirs, "right") == 0) {
+            ev.direction = JR_INPUT_DIRECTION_RIGHT;
+            ev.start_x = 60; ev.end_x = 400; ev.delta_x = 340;
+        } else if (strcmp(dirs, "up") == 0) {
+            ev.direction = JR_INPUT_DIRECTION_UP;
+            ev.start_y = 400; ev.end_y = 60; ev.delta_y = -340;
+        } else if (strcmp(dirs, "down") == 0) {
+            ev.direction = JR_INPUT_DIRECTION_DOWN;
+            ev.start_y = 90; ev.end_y = 400; ev.delta_y = 310;
+            if (httpd_query_key_value(query, "edge", val, sizeof val)
+                    == ESP_OK && val[0] == '1') {
+                ev.start_y = 20; ev.delta_y = 380;
+                ev.flags = JR_INPUT_FLAG_TOP_EDGE;
+            }
+        } else {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "dir=left|right|up|down required for swipe");
+            return ESP_OK;
+        }
+    } else if (strcmp(kind, "tap") != 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "unknown kind");
+        return ESP_OK;
+    }
+    esp_err_t err = ESP_OK;
+    for (int i = 0; i < repeats && err == ESP_OK; ++i) {
+        err = jr_hal_input_inject(&ev);
+        if (repeats > 1 && i == 0) {
+            vTaskDelay(pdMS_TO_TICKS(120));   /* inside the 400 ms window */
+        }
+    }
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            esp_err_to_name(err));
+        return ESP_OK;
+    }
+    ESP_LOGI(TAG, "debug: injected input kind=%s dir=%s", kind, dirs);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
 /* GET /api/logs?tail=N — last N bytes of the log ring, chronological, plain
  * text. Reads are chunked with the mux held only per-chunk, so a concurrent
  * writer can at worst garble the OLDEST lines of a snapshot mid-read —
@@ -4555,6 +4665,8 @@ static void start_diag_http(void)
           .handler = operator_lease_handler },
         { .uri = "/api/logs", .method = HTTP_GET,
           .handler = logs_handler },
+        { .uri = "/api/debug/input", .method = HTTP_POST,
+          .handler = debug_input_handler },
     };
     for (size_t i = 0; i < sizeof routes / sizeof routes[0]; ++i) {
         esp_err_t err = httpd_register_uri_handler(server, &routes[i]);
@@ -5380,10 +5492,27 @@ static void voice_task(void *arg)
                     /* Gesture: swipe right = 10 s watch peek while awake. */
                     s_watch_peek_until_ms = (uint32_t)now + 10000U;
                     ESP_LOGI(TAG, "gesture: watch peek");
+                } else if ((iev.direction == JR_INPUT_DIRECTION_UP ||
+                            iev.direction == JR_INPUT_DIRECTION_DOWN) &&
+                           !s_ui_shade_open) {
+                    /* Gesture: vertical swipe (shade closed, non-edge) =
+                     * VOLUME. Up louder, down quieter, 10 per stroke,
+                     * captioned, persisted so a reboot keeps the level
+                     * (owner: "he can't control volume?", 2026-08-28). */
+                    int vol = s_out_vol;
+                    vol += iev.direction == JR_INPUT_DIRECTION_UP ? 10 : -10;
+                    if (vol > 100) vol = 100;
+                    if (vol < 10)  vol = 10;
+                    s_out_vol = vol;
+                    jr_audio_set_gains(-1, -1, vol);
+                    persist_out_vol((uint8_t)vol);
+                    char cap[24];
+                    snprintf(cap, sizeof cap, "VOLUME %d", vol);
+                    jr_display_caption_set(cap);
+                    ESP_LOGI(TAG, "gesture: volume %d", vol);
                 } else {
-                    /* Recognized swipe, no action in this context (UP with
-                     * no shade, DOWN off-edge). Hint instead of silence —
-                     * silent nothing is what read as "swipes don't work". */
+                    /* Recognized swipe, no action in this context. Hint
+                     * instead of silence. */
                     jr_display_caption_set("L GLANCE R WATCH HOLD MUTE");
                     ESP_LOGI(TAG, "gesture: swipe hint (dir=%d)",
                              (int)iev.direction);
@@ -5398,6 +5527,12 @@ static void voice_task(void *arg)
                  * cannot. */
                 if (atomic_load(&s_voice_privacy_paused)) {
                     atomic_store(&s_voice_privacy_paused, false);
+                    /* Also release the flip latch: a deliberate hold outranks
+                     * it — but if the device is STILL face-down, the IMU
+                     * re-mutes within ~2 s, so a hold cannot leave a
+                     * face-down device listening (found live 2026-08-28:
+                     * an injected unmute after a flip did exactly that). */
+                    s_flip_muted = false;
                     atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
                     jr_display_caption_set("LISTENING");
                     ESP_LOGI(TAG, "gesture: long-press unmute");
@@ -5946,6 +6081,7 @@ void app_main(void)
     if (jr_audio_init() != ESP_OK) {
         ESP_LOGW(TAG, "jr_audio_init degraded — capture may be silent until on-device tune");
     }
+    restore_out_vol();   /* gesture-set volume survives reboot */
     s_app.mic = jr_audio_source();
     s_app.spk = jr_audio_sink();
 

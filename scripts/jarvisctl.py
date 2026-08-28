@@ -180,6 +180,16 @@ def main() -> int:
         return 0
     if cmd == "reboot":
         return cmd_reboot()
+    if cmd == "input":
+        # jarvisctl input tap|double|long|swipe [left|right|up|down] [edge]
+        kind = rest[0] if rest else "tap"
+        q = f"kind={kind}"
+        if len(rest) > 1:
+            q += f"&dir={rest[1]}"
+        if "edge" in rest:
+            q += "&edge=1"
+        print(api(f"/api/debug/input?{q}", "POST", b"").decode())
+        return 0
     if cmd == "lease":
         ttl = rest[0] if rest else "300"
         print(api(f"/api/operator/lease?ttl={ttl}", "POST", b"").decode())

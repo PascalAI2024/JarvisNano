@@ -29,6 +29,12 @@ extern "C" {
  * touch). Returns ESP_OK on success. */
 esp_err_t jr_hal_init(void);
 
+/* Synthetic input injection — the operator's finger. Enqueues onto the same
+ * bounded queue as the physical CST9217 producer so a synthetic event walks
+ * every downstream path a real one does. ESP_ERR_INVALID_STATE before the
+ * input adapter starts; ESP_ERR_NO_MEM when the queue is full (not drained). */
+esp_err_t jr_hal_input_inject(const jr_input_event_t *event);
+
 /* Concrete port factories — each returns a struct the composition root injects
  * into the core. Valid only after jr_hal_init() (except the clock, which is
  * always valid). */

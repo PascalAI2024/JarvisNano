@@ -454,3 +454,20 @@ jr_input_t jr_hal_input(void)
     };
     return input;
 }
+
+/* Synthetic input injection — the operator's finger. Serializes onto the SAME
+ * queue the panel producer uses, so a synthetic tap/swipe/long-press walks
+ * every downstream path a physical one does (gesture handlers, challenge,
+ * shade). Exists so gesture regressions get caught by machine instead of by
+ * the owner (2026-08-28: "you should be able to test all these inputs"). */
+esp_err_t jr_hal_input_inject(const jr_input_event_t *event)
+{
+    if (event == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_input.queue == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return xQueueSend(s_input.queue, event, 0) == pdTRUE ? ESP_OK
+                                                         : ESP_ERR_NO_MEM;
+}
