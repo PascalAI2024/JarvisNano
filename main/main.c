@@ -1977,7 +1977,6 @@ static void publish_shell_state(uint32_t now_ms)
     static uint8_t cached_progress;
     static jr_display_agent_state_t cached_state;
     static char cached_title[13] = "STANDBY";
-    static bool content_seeded;
     static uint32_t next_status_ms;
 
     if (s_agent_link_lock != NULL &&
@@ -2011,14 +2010,18 @@ static void publish_shell_state(uint32_t now_ms)
     }
     jr_display_set_shell_state(s_ui_shade_open, cached_active,
                                cached_progress, cached_state);
-    jr_display_desk_set_task(cached_title, cached_progress, cached_state);
-    if (!content_seeded) {
-        static const char *const tools[] = {
-            "SEARCH", "MEMORY", "WEATHER", "MORE"
-        };
-        jr_display_tools_set(tools, 4, 0);
-        content_seeded = true;
-    }
+    /* DESK and TOOLS no longer have a destination to render into — horizontal
+     * swipe peeks the watch now, so nothing navigates to them. Their feeds are
+     * deleted here rather than left writing into pages nobody can reach.
+     *
+     * The TOOLS feed in particular was fake: a hardcoded
+     * {SEARCH, MEMORY, WEATHER, MORE} seeded ONCE behind a latch, with `recent`
+     * pinned to 0, so it never reflected a tool that actually ran. That is the
+     * "search screen" the owner asked the point of. There wasn't one.
+     *
+     * cached_title/progress/state are still computed above and still reach the
+     * shell via jr_display_set_shell_state(), which draws the agent rim
+     * segments — that part is real and stays. */
     const jr_state_snapshot_t *snapshot = jr_orch_snapshot(&s_app.orch);
     jr_display_jarvis_set_session(
         s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN,
