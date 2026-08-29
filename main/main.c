@@ -6604,7 +6604,16 @@ static void voice_task(void *arg)
                 continue;
             }
             codex_tap_pending = false;
-            if (iev.kind == JR_INPUT_TAP) {
+            /* An open ask OUTRANKS double-tap-home. Without this guard the
+             * double-tap branch sits above the ask branch below, so missing an
+             * arc and immediately retrying — the exact reflex a hand has, and
+             * the exact situation this session was debugging — had the retry
+             * stolen: the second contact fired nav_home + a bloom + the caption
+             * "JARVIS - RIGHT WATCH" over a live question instead of answering
+             * it. The 600 ms trailing-tap grace could only ever act in the
+             * 400-600 ms sliver left over. The question owns the glass while it
+             * is up; home is still one double-tap away the moment it closes. */
+            if (iev.kind == JR_INPUT_TAP && !jr_display_choices_active()) {
                 const bool double_tap = s_last_tap_ms != 0U &&
                     (uint32_t)now - s_last_tap_ms < 400U;
                 s_last_tap_ms = (uint32_t)now;
@@ -6705,7 +6714,13 @@ static void voice_task(void *arg)
                 if (edge_vertical && iev.start_x >= 326U) {
                     const int level = request_level_step(
                         &s_level_brightness_request, s_brightness_cap,
-                        iev.direction == JR_INPUT_DIRECTION_DOWN ? 5 : -5);
+                        /* UP increases, matching the volume slab beside it.
+                         * These two adjacent vertical gestures on one piece of
+                         * glass used to move OPPOSITE ways — brightness rose on
+                         * DOWN while volume rose on UP. That is a predictability
+                         * defect, not a preference: nothing about the device can
+                         * teach you which half you are on. */
+                        iev.direction == JR_INPUT_DIRECTION_UP ? 5 : -5);
                     char caption[24];
                     snprintf(caption, sizeof caption, "BRIGHTNESS %d", level);
                     jr_display_caption_set(caption);
