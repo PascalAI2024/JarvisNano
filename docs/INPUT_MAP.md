@@ -4,8 +4,9 @@
 This one decides *what every physical input does*, across every context, and —
 more importantly — **why a user can guess it.**
 
-Status: **plan.** Rows marked ✅ ship today; ⚠️ needs work; 🆕 is new. Every
-"today" claim carries a `file:line`; verify before trusting.
+Status: **largely shipped** — see §6 for what is on the device and what is
+blocked. Rows marked ✅ ship today; ⚠️ needs work; 🆕 is new. Every "today" claim
+carries a `file:line`; verify before trusting.
 
 ---
 
@@ -66,8 +67,8 @@ function development."* **There is no reset button.**
 |---|---|---|
 | PWR short / long | AXP2101 `INTSTS2` over I²C, latched at 2 Hz (`jr_power.c:214`) | ✅ two levels, hardware-provided |
 | BOOT press duration | GPIO0, **hand-rolled polled tick** at ~10 Hz, `GPIO_INTR_DISABLE` (`main.c:310-344`, `7287-7299`) | ✅ two bands: 200–1500 ms, 1500–5000 ms |
-| BOOT ≥5000 ms | — | ⚠️ **falls off the end of the if-chain, unbound** |
-| Button double-tap | — | 🆕 not detected; needs an app-level window like the glass already uses |
+| BOOT ≥5000 ms | GPIO0 | ✅ **panic-home** (`77824301`) — was unbound, fell off the end of the chain |
+| Button double-tap | — | ⛔ **PWR: not detectable.** The PKEY latch polls every 500 ms (`jr_power.c:33`), so a ~400 ms window cannot be resolved. BOOT could have one (GPIO, ~10 Hz tick) but does not yet. |
 
 > ⚠️ **`iot_button` is NOT linked in this tree** (zero hits). It would give
 > single/double/multiple-click and multi-threshold holds for free, and it is
@@ -86,8 +87,8 @@ gesture is our own classification (`input_touch.c`).
 | `JR_INPUT_SWIPE` + direction | travel ≥42 px, larger axis wins | ✅ |
 | `JR_INPUT_FLAG_TOP_EDGE` | `start_y<72` ∧ `Δy≥70` ∧ 135 % vertical | ✅ emitted, ⚠️ **only ever tested negatively** (`main.c:6695`) |
 | Double-tap | app-level 400 ms window (`main.c:6618`) | ✅ |
-| **Contact-down / hold progress** | — | 🆕 **does not exist.** The HAL emits only terminal events. **A filling ring has nothing to drive it** — this is the one new HAL event the plan needs. |
-| Rim-vs-centre | — | 🆕 today's "edges" are **vertical slabs** (`start_x≤140`, `≥326`) reaching r≈93 — *over the reactor core*. Not an annulus. |
+| `JR_INPUT_PRESS_DOWN` / `PRESS_UP` | contact confirmed / released | ✅ **added** (`1d07f621`). Excluded from the gesture counters so the doctor's tap:swipe ratio keeps its meaning. |
+| Rim-vs-centre | r ≥ 168 from centre | ✅ **a true annulus** (`3cbab992`). Was two vertical slabs reaching r≈93 — *over the reactor core*. |
 
 ### Body — QMI8658
 
@@ -96,7 +97,7 @@ gesture is our own classification (`input_touch.c`).
 | Flip face-down (6 sustained polls ≈600 ms) | ✅ privacy mute |
 | Shake (2 polls, 1.5 s cooldown) | ✅ cancels an active turn |
 | Tilt (pitch/roll) | ✅ sampled, ⚠️ used only for HUD env; `hud_tilt_offset` is **disabled** |
-| Lift / any-motion | 🆕 needs the on-chip engine + **INT2 pin, UNVERIFIED on the C** |
+| Lift / any-motion | 🔓 pin **RESOLVED: INT1**, and the WoM sequence is sourced — `docs/reference/imu-interrupt-routing.md`. Gated on hands-on: WoM mode outputs **no data**, so it disables flip and shake while armed. |
 | Knock (case tap) | 🆕 QMI8658 tap engine, unconfigured |
 
 ---
@@ -110,13 +111,13 @@ They mean the same thing on every surface. That is the entire point of a button.
 | Input | Meaning | Today | Voice equivalent (coverage) |
 |---|---|---|---|
 | **PWR tap** | **Wake / listen.** Never mutes. | ✅ `main.c:6044-6057` | say "Jarvis" |
-| **PWR double-tap** | **Privacy toggle.** Mute/unmute, always captioned. | 🆕 | "mute" / "unmute" |
+| **PWR double-tap** | ~~Privacy toggle~~ | ⛔ **undetectable** at the 500 ms PKEY poll — privacy stays on the glass hold, which now shows a ring | "mute" / "unmute" |
 | **PWR hold ~1 s** | **Speak status** — battery, link, state. Out loud, not on glass. | ✅ battery only (`main.c:6058-6066`); extend | "how's your battery" |
 | **PWR hold ~5 s** | **Power off / deepest rest.** | 🆕 | "go to sleep" |
 | **BOOT tap** | **Summon the Dial** (levels), showing the target before changing anything. | ⚠️ today toggles the shade *and clears the caption* (`main.c:327`) | "volume 40" |
 | **BOOT double-tap** | **Say that again** — repeat the last reply. | 🆕 | "what did you say" |
 | **BOOT hold 1.5–5 s** | **Pairing window, 60 s.** | ✅ `main.c:332-339` | — *(deliberately physical-only: security)* |
-| **BOOT hold ≥5 s** | **Panic-home.** Clear every modal, dismiss surfaces, return to the face. | 🆕 fills the unbound gap | double-tap the glass |
+| **BOOT hold ≥5 s** | **Panic-home.** Clear every modal, dismiss surfaces, return to the face. | ✅ `77824301` | double-tap the glass |
 
 **Why this split.** PWR is the *system* button — presence, privacy, power, status. BOOT is the *content* button — levels, repetition, escape. Both follow *tap → common, double → opposite, hold → consequential*. Neither depends on what is on screen, so both survive a confused glass.
 
@@ -128,7 +129,7 @@ They mean the same thing on every surface. That is the entire point of a button.
 |---|---|---|
 | **Tap** | act on what is under the finger — an arc, a card action, a control | **summon the Dial**, showing what it will change, changing nothing yet |
 | **Double-tap** | **home / clear everything** ⚠️ must never outrank a live ask — fixed in `20a921c5` | — *(the rim rolls; a reliable double-tap there is not available)* |
-| **Hold 850 ms** | **commit**, with a ring that fills and can be abandoned by lifting | — |
+| **Hold 850 ms** | ✅ **commit ring** (`1a081e7e`) — fills to 850 ms, lifting early abandons in silence. Still toggles privacy on completion until PWR can take it. | — |
 | **Slide** | — | **the level dial**, live readout under the thumb, clamped not wrapped |
 | **Swipe ↑** | **expand** — more detail on what was just said | — |
 | **Swipe ↓** | **dismiss / stop** | — |
