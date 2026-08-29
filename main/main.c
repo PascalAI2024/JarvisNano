@@ -750,7 +750,6 @@ static bool s_rtc_seeded_os;
 static bool s_os_seeded_rtc;
 static _Atomic bool s_audio_diag_requested;
 static _Atomic uint32_t s_audio_diag_until_ms;
-static uint64_t s_listen_idle_deadline_ms;
 static bool s_listen_speech_active;
 static _Atomic bool s_ui_shade_open;
 
@@ -2107,8 +2106,11 @@ static esp_err_t diag_get_handler(httpd_req_t *req)
     jr_state_t phase = jr_orch_phase(&s_app.orch);
     bool voice_armed = phase != JR_ST_IDLE && phase != JR_ST_DRAINING &&
                        phase != JR_ST_FATAL;
-    uint32_t auto_idle_ms = s_listen_idle_deadline_ms > now
-        ? (uint32_t)(s_listen_idle_deadline_ms - now) : 0U;
+    /* Always 0: this firmware is always-ready listening (VOICE_ALWAYS_READY),
+     * so there is no listen window to count down. The deadline it used to read
+     * was assigned only ever 0 at four sites. Kept as a field so existing
+     * tooling keeps parsing; do not build a countdown rim on it. */
+    const uint32_t auto_idle_ms = 0U;
     uint32_t audio_until = atomic_load(&s_audio_diag_until_ms);
     bool audio_diag_running = (int32_t)(audio_until - now32) > 0;
     unsigned stack_hwm = s_voice_task ?
@@ -4446,8 +4448,11 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         httpd_resp_sendstr(req, "cockpit snapshot unavailable");
         return ESP_OK;
     }
-    uint32_t auto_idle_ms = s_listen_idle_deadline_ms > now
-        ? (uint32_t)(s_listen_idle_deadline_ms - now) : 0U;
+    /* Always 0: this firmware is always-ready listening (VOICE_ALWAYS_READY),
+     * so there is no listen window to count down. The deadline it used to read
+     * was assigned only ever 0 at four sites. Kept as a field so existing
+     * tooling keeps parsing; do not build a countdown rim on it. */
+    const uint32_t auto_idle_ms = 0U;
     bool challenge_active = atomic_load(&s_touch_challenge_active);
     bool challenge_verified = atomic_load(&s_touch_challenge_verified);
     bool tools_ready = atomic_load(&s_tool_diag.worker_ready);
@@ -6197,7 +6202,6 @@ static void voice_task(void *arg)
             }
             s_pending_text_set = false;
             s_pending_text_inflight = false;
-            s_listen_idle_deadline_ms = 0;
             if (controlled_phase != JR_ST_IDLE &&
                 controlled_phase != JR_ST_DRAINING) {
                 jr_orch_inject(&s_app.orch, jr_event(JR_EV_USER_STOP), now);
@@ -6383,10 +6387,8 @@ static void voice_task(void *arg)
                      * from the turn that just completed. */
                     jr_turn_policy_init(&s_app.turn);
                     s_listen_speech_active = false;
-                    s_listen_idle_deadline_ms = 0;
                     ESP_LOGI(TAG, "voice: always-ready listening window");
                 } else if (ph != JR_ST_LISTENING) {
-                    s_listen_idle_deadline_ms = 0;
                 }
             }
             if (ph != JR_ST_THINKING) {
@@ -6768,16 +6770,27 @@ static void voice_task(void *arg)
                         ESP_LOGI(TAG, "ui: shade closed (dir=%d)",
                                  (int)iev.direction);
                     }
-                } else if (iev.direction == JR_INPUT_DIRECTION_LEFT) {
-                    jr_display_nav_next();
-                } else if (iev.direction == JR_INPUT_DIRECTION_RIGHT) {
-                    if (jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS &&
-                        overlay == JR_DISPLAY_OVERLAY_NONE) {
+                } else if (iev.direction == JR_INPUT_DIRECTION_LEFT ||
+                           iev.direction == JR_INPUT_DIRECTION_RIGHT) {
+                    /* THE SIDE PAGES ARE GONE. Horizontal swipe used to walk to
+                     * DESK / TOOLS / SETTINGS — three pages you could not act
+                     * from. TOOLS was the worst of them: a hardcoded
+                     * {SEARCH, MEMORY, WEATHER, MORE} seeded once at boot with
+                     * `recent` pinned to 0, so it never once reflected a tool
+                     * that actually ran. The owner's verdict was blunt and
+                     * correct: "whats the point of this search screen".
+                     *
+                     * Both directions now peek the watch, which is the one
+                     * glance a round screen is genuinely for. Peeking is
+                     * idempotent, so a repeated swipe re-arms it instead of
+                     * walking somewhere — no more being carried off the face by
+                     * a stroke that rolled. The composers and focal renderers
+                     * are still compiled; this deletes the DESTINATIONS, and
+                     * the drawing primitives get re-homed to summoned surfaces
+                     * (docs/GLASS_DESIGN.md §B). */
+                    if (overlay == JR_DISPLAY_OVERLAY_NONE) {
                         s_watch_peek_until_ms = (uint32_t)now + 10000U;
-                        jr_display_caption_set("WATCH - 10 SECONDS");
                         watch_opened = true;
-                    } else {
-                        jr_display_nav_prev();
                     }
                 } else if (iev.direction == JR_INPUT_DIRECTION_UP) {
                     jr_display_nav_up();
@@ -6786,16 +6799,9 @@ static void voice_task(void *arg)
                 }
                 s_ui_shade_open =
                     jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_SHADE;
-                static const char *const space_hint[JR_DISPLAY_SPACE_COUNT] = {
-                    "JARVIS - RIGHT WATCH", "DESK - UP DETAIL",
-                    "TOOLS - UP DETAIL", "SETTINGS - DOWN CONTROLS"
-                };
-                const jr_display_space_t space = jr_display_nav_space();
-                if (space != JR_DISPLAY_SPACE_JARVIS) {
-                    s_side_page_until_ms = (uint32_t)now + 12000U;
-                } else {
-                    s_side_page_until_ms = 0U;
-                }
+                /* One space now, so there is no page to name and nothing to
+                 * auto-return from. */
+                s_side_page_until_ms = 0U;
                 if (watch_opened) {
                     jr_display_caption_set("WATCH - 10 SECONDS");
                 } else if (jr_display_nav_overlay() ==
@@ -6808,10 +6814,15 @@ static void voice_task(void *arg)
                            JR_DISPLAY_OVERLAY_DETAIL) {
                     jr_display_caption_set("DETAIL - DOWN TO CLOSE");
                 } else {
-                    jr_display_caption_set(space_hint[space]);
+                    /* Nothing captured the stroke. Per the feedback contract
+                     * (docs/INPUT_MAP.md §5) an unbound gesture must not draw
+                     * the accept ripple and then sit there — it names what this
+                     * surface DOES accept, at the moment of curiosity. This is
+                     * the mechanism that replaces the gesture-card idea. */
+                    jr_display_caption_set("SWIPE UP DETAIL - DOWN CONTROLS");
                 }
-                ESP_LOGI(TAG, "ui: nav space=%d overlay=%d",
-                         (int)space, (int)jr_display_nav_overlay());
+                ESP_LOGI(TAG, "ui: nav overlay=%d",
+                         (int)jr_display_nav_overlay());
             } else if (iev.kind == JR_INPUT_LONG_PRESS) {
                 if (!physical) {
                     ESP_LOGW(TAG, "synthetic hold cannot change privacy");
@@ -7040,7 +7051,6 @@ static void voice_task(void *arg)
                     } else {
                         s_app.vad_starts++;
                         s_listen_speech_active = true;
-                        s_listen_idle_deadline_ms = 0;
                         ESP_LOGI(TAG, "vad: speech start rms=%.1f floor=%.1f",
                                  (double)td.rms, (double)td.noise_floor);
                         /* Server VAD: Gemini owns turn detection + barge; the
