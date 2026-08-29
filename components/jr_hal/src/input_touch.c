@@ -27,7 +27,11 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
-#define TOUCH_EVENT_QUEUE_LEN       8
+/* 16, not 8: PRESS_DOWN and PRESS_UP roughly TRIPLE the events per contact,
+ * and the overflow policy drops the OLDEST — which is the classified TAP or
+ * SWIPE, the one event that carries meaning. Cheap insurance against evicting
+ * intent in favour of a lifecycle marker. */
+#define TOUCH_EVENT_QUEUE_LEN      16
 /* Measured peak 2,132 B; 5120 leaves 2,988 B margin. Was 8192. */
 #define TOUCH_TASK_STACK_BYTES      5120
 #define TOUCH_TASK_PRIORITY         3
@@ -335,6 +339,14 @@ static void touch_worker(void *arg)
                 press_samples++;
                 gesture_confirmed =
                     press_samples >= TOUCH_PRESS_CONFIRM_SAMPLES;
+                if (gesture_confirmed) {
+                    /* Contact established. Emitted once per press, before any
+                     * classification, so a hold-to-commit ring can start
+                     * filling from the moment the finger lands. */
+                    touch_emit(ctx, JR_INPUT_PRESS_DOWN,
+                               first_x, first_y, last_x, last_y, 0U,
+                               JR_INPUT_DIRECTION_NONE, 0);
+                }
             }
 
             if (gesture_confirmed && !action_sent &&
@@ -411,6 +423,19 @@ static void touch_worker(void *arg)
                 ESP_LOGD(TAG,
                          "gesture ignored: drag was not a directional swipe");
             }
+        }
+
+        if (gesture_confirmed) {
+            /* Release, reported for EVERY confirmed contact and after any
+             * terminal event above. This is what distinguishes an abandoned
+             * hold from a completed one — the long-press fires once mid-hold
+             * and then suppresses the release report, so without this a
+             * consumer could see a hold start and never learn it ended. */
+            touch_emit(ctx, JR_INPUT_PRESS_UP,
+                       first_x, first_y, last_x, last_y,
+                       (uint32_t)((last_touch_tick - press_tick) *
+                                  portTICK_PERIOD_MS),
+                       JR_INPUT_DIRECTION_NONE, 0);
         }
 
         gesture_active = false;

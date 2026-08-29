@@ -2816,6 +2816,8 @@ static const char *touch_kind_name(jr_input_kind_t kind)
     case JR_INPUT_TAP:        return "tap";
     case JR_INPUT_LONG_PRESS: return "long_press";
     case JR_INPUT_SWIPE:      return "swipe";
+    case JR_INPUT_PRESS_DOWN: return "press_down";
+    case JR_INPUT_PRESS_UP:   return "press_up";
     default:                  return "none";
     }
 }
@@ -6448,13 +6450,24 @@ static void voice_task(void *arg)
         /* 2) manual/PTT input (CST9217 via jr_hal input_touch) */
         jr_input_event_t iev;
         while (input_next(&s_app.input, &iev)) {
-            atomic_fetch_add(&s_touch_events, 1U);
-            atomic_store(&s_touch_last_kind, (uint32_t)iev.kind);
-            atomic_store(&s_touch_last_x, iev.x);
-            atomic_store(&s_touch_last_y, iev.y);
-            atomic_store(&s_touch_last_dx, iev.delta_x);
-            atomic_store(&s_touch_last_dy, iev.delta_y);
-            atomic_store(&s_touch_last_duration_ms, iev.duration_ms);
+            /* PRESS_DOWN/PRESS_UP bracket a contact; they are plumbing, not
+             * intent. Keeping them OUT of the diagnostic counters preserves
+             * what those counters mean: `events` stays a count of gestures,
+             * and `last` stays the last thing the user actually DID rather
+             * than always reading "press_up". scripts/gesture-doctor.py reads
+             * exactly these fields, and its tap:swipe ratio — the signal that
+             * found the rim-roll bug — would be diluted into noise otherwise. */
+            const bool lifecycle = iev.kind == JR_INPUT_PRESS_DOWN ||
+                                   iev.kind == JR_INPUT_PRESS_UP;
+            if (!lifecycle) {
+                atomic_fetch_add(&s_touch_events, 1U);
+                atomic_store(&s_touch_last_kind, (uint32_t)iev.kind);
+                atomic_store(&s_touch_last_x, iev.x);
+                atomic_store(&s_touch_last_y, iev.y);
+                atomic_store(&s_touch_last_dx, iev.delta_x);
+                atomic_store(&s_touch_last_dy, iev.delta_y);
+                atomic_store(&s_touch_last_duration_ms, iev.duration_ms);
+            }
             const bool physical =
                 (iev.flags & JR_INPUT_FLAG_SYNTHETIC) == 0U;
             if (s_watch_peek_until_ms != 0U) {

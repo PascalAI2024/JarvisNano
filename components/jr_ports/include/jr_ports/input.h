@@ -22,6 +22,20 @@ typedef enum {
     JR_INPUT_TAP,
     JR_INPUT_LONG_PRESS,
     JR_INPUT_SWIPE,
+    /* Contact lifecycle, added for hold-to-commit. Everything above is
+     * TERMINAL — it reports what a finished gesture WAS — which is why a ring
+     * that fills while you hold had nothing to drive it. These two bracket the
+     * contact instead:
+     *
+     *   PRESS_DOWN  once, when the press is confirmed (~2 samples in)
+     *   PRESS_UP    always, on release, carrying the full duration
+     *
+     * PRESS_UP fires IN ADDITION to whatever terminal event was classified, so
+     * a consumer can tell a completed hold from an abandoned one. Consumers
+     * that do not care simply never match these kinds — every existing
+     * dispatch is a kind if/else chain, so they fall through harmlessly. */
+    JR_INPUT_PRESS_DOWN,
+    JR_INPUT_PRESS_UP,
 } jr_input_kind_t;
 
 typedef enum {
