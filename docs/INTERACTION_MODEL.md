@@ -39,8 +39,13 @@ Two consequences worth stating plainly, because both contradict the earlier draf
 > **Xiaozhi is the reference worth knowing.** [`78/xiaozhi-esp32`](https://github.com/78/xiaozhi-esp32)
 > ships a board file for *our exact hardware* and drives the same GPIO0 button
 > — via Espressif's **`iot_button`**, whose `iot_button_register_cb()` accepts a
-> per-callback `long_press.press_time`, i.e. **multiple hold thresholds on one
-> button, already built**. It hands touch wholly to LVGL, which D1 rules out
+> per-callback `long_press.press_time`, i.e. multiple hold thresholds on one
+> button. ⚠️ **`iot_button` is NOT linked in OUR tree** (zero hits in `main/` and
+> `components/`): our BOOT handling is a hand-rolled polled tick
+> (`boot_button_tick()`, `main.c:310-344`, `GPIO_INTR_DISABLE`, ~10 Hz) with two
+> thresholds by hand — 200-1500 ms → shade, 1500-5000 ms → pairing — and a hold
+> of **≥5000 ms falls off the end of that chain with no binding**. It is an
+> option to adopt, not something we already have. It hands touch wholly to LVGL, which D1 rules out
 > here, so our own touch classifier is necessary work rather than reinvention.
 > Its whole model is one button and two gestures — worth taking seriously as an
 > argument for restraint.
@@ -164,7 +169,7 @@ the board already has and the firmware does not reach for.
 | **D** | GPIO0 button ladder | ✅ done (PKEY) |
 | **E** | Double-tap + side pages | ✅ done |
 | **A** | Layer stack, `CONSUMED`/`PASS`, no behaviour change | open — §4; unblocks the rest |
-| **C** | Staged hold: preview → commit → system, with a filling ring | open — touch has one 850 ms threshold and no preview. `iot_button` already does this for the *button* |
+| **C** | Hold-to-commit: **one** stage with a filling ring, not three. A three-stage hold is a hidden menu with a timer | open — touch has one 850 ms threshold and no preview. ⚠️ The HAL emits no contact-down and no hold progress (long-press fires once at 850 ms, `input_touch.c:341-355`), so a filling ring has nothing to drive it — this needs one new HAL event, the only new plumbing the design asks for |
 | **F** | IMU interrupt engines + sleep | open — the biggest hardware win (§6) |
 | **G** | Auto-upright overlay rotation | open — render-side only |
 
