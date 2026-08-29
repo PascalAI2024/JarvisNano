@@ -6718,8 +6718,21 @@ static void voice_task(void *arg)
                             &s_level_volume_request, s_out_vol,
                             iev.direction == JR_INPUT_DIRECTION_RIGHT ? 10 : -10);
                         ESP_LOGI(TAG, "ui: shade swipe volume=%d", level);
-                    } else if (iev.direction == JR_INPUT_DIRECTION_UP) {
+                    } else {
+                        /* EITHER vertical direction leaves. Only UP used to,
+                         * and DOWN fell through to nothing at all — so a shade
+                         * opened by pulling DOWN could not be closed by pushing
+                         * DOWN again, the first thing a hand tries. Captured
+                         * from the owner's device: overlay=2 held across six
+                         * consecutive swipes including a DOWN, while left/right
+                         * silently moved the volume ("i cant even get past the
+                         * front screen", 2026-08-29). There is nothing BELOW
+                         * the shade, so down has no other meaning here — and a
+                         * control surface you can be trapped inside is worse
+                         * than one with a redundant exit. */
                         jr_display_nav_up();
+                        ESP_LOGI(TAG, "ui: shade closed (dir=%d)",
+                                 (int)iev.direction);
                     }
                 } else if (iev.direction == JR_INPUT_DIRECTION_LEFT) {
                     jr_display_nav_next();
@@ -6753,7 +6766,10 @@ static void voice_task(void *arg)
                     jr_display_caption_set("WATCH - 10 SECONDS");
                 } else if (jr_display_nav_overlay() ==
                            JR_DISPLAY_OVERLAY_SHADE) {
-                    jr_display_caption_clear();
+                    /* The shade used to CLEAR the caption, so the one surface
+                     * you can get stuck in was also the only one that told you
+                     * nothing. Name the way out, on the glass, always. */
+                    jr_display_caption_set("SHADE - UP TO CLOSE");
                 } else if (jr_display_nav_overlay() ==
                            JR_DISPLAY_OVERLAY_DETAIL) {
                     jr_display_caption_set("DETAIL - DOWN TO CLOSE");
