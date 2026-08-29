@@ -1,20 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# JarvisRobot v5 — project sdkconfig defaults (plain IDF; the ONE source of
-# truth, unlike v4 where the board's sdkconfig.defaults.board was inert and the
-# real values lived in a bootstrap.sh heredoc). Every line traces to a
-# hardware.md non-negotiable.
+# JarvisRobot v5 project-wide runtime defaults. Selected-board defaults declare
+# variant-specific flash/pin capability; `scripts/sync-v5-sdkconfig.py` reconciles
+# the generated board symbols with this baseline. Unlike v4, no bootstrap
+# heredoc secretly overrides these files.
 
 # --- Target: ESP32-S3, dual-core LX7 @ 240 MHz ---
 CONFIG_IDF_TARGET="esp32s3"
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
-# --- Flash: 16 MB @ 80 MHz, DIO mode. CO5300 QSPI display forces DIO; default
-#     QIO has caused boot failures (hardware.md #4). Also baked into the flash
-#     script as belt-and-suspenders. ---
+# --- Flash: 32 MB @ 80 MHz, DIO mode on the 1.75C default target. CO5300
+#     QSPI display forces DIO; QIO has caused boot failures (hardware.md #4).
+#     The original 1.75 requires its 16 MB table and flash size. ---
 CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
-CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+# Dual-OTA cutover on the 32 MB 1.75C; the first partition-table install is
+# the final update that requires USB.
+CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
 
 # --- PSRAM: 8 MB OCTAL @ 80 MHz, DMA-capable. Internal SRAM is the scarce
 #     resource, not PSRAM — large buffers/queues go here (hardware.md #7). ---
@@ -53,7 +55,7 @@ CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
 # --- Partition table: hand-written 16 MB CSV, NO heredoc/codegen (hardware.md
 #     #8). Table ends flush at 0x1000000. ---
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_16MB.csv"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_32MB.csv"
 
 # --- Wake word: esp-sr WakeNet9 "Jarvis" (wn9_jarvis_tts, bundled in the
 #     pinned esp-sr 2.4.6). Selecting the model makes esp-sr pack srmodels.bin
@@ -84,6 +86,19 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 #     plentiful so the per-socket memory is free. ---
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
 CONFIG_LWIP_TCP_WND_DEFAULT=16384
+
+# --- OTA rollback: a new slot stays pending until app_main reaches the full
+#     boot checkpoint (display/network/audio/http/tools/wake initialization).
+#     A reset before then returns to the previously working slot. ---
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# --- esp_websocket_client normally shares one lock between its receive task
+#     and every microphone/control send. Heavy model audio held that lock long
+#     enough to produce hundreds of TX lock failures in one 128 KB log ring.
+#     The component's supported separate-TX-lock mode keeps receive dispatch
+#     from blocking the real-time uplink. ---
+CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y
+CONFIG_ESP_WS_CLIENT_TX_LOCK_TIMEOUT_MS=20
 
 # --- Keep Wi-Fi/lwIP socket payloads in the 8 MB PSRAM first. The diagnostics
 #     server and Gemini WSS can be active together; leaving lwIP on the small

@@ -1,127 +1,78 @@
-# Build Toolchain
+# Build toolchain
 
-> **Live recipe is [`docs/BUILD.md`](../BUILD.md)** (`./scripts/build-v5.sh`).
-> The pins below still apply. The `bootstrap.sh` / `esp-claw` narrative is the
-> leftover overlay, not the v5 image.
+Current, release-target reference for the 32 MB Waveshare 1.75C. The executable
+recipe is [`../BUILD.md`](../BUILD.md); do not substitute the historical
+ESP-Claw/bootstrap path.
 
-**What it is** — ESP-IDF `v5.5.4` in `espressif/idf:v5.5.4`, plus
-`idf-component-manager==2.4.10` and `esp-bmgr-assist==0.5.0` before every
-container build. v5 uses those same pins inside `scripts/build-v5.sh`.
+## Pinned contract
 
----
+| Tool/component | Version | Authority |
+|---|---:|---|
+| ESP-IDF Docker image | `espressif/idf:v5.5.4` | `scripts/build-v5.sh` |
+| `idf-component-manager` | `2.4.10` | `scripts/build-v5.sh` |
+| `esp-bmgr-assist` | `0.5.0` | `scripts/build-v5.sh` |
+| Board manager | `0.5.15` | `main/idf_component.yml` |
+| CO5300 driver | `2.1.0` | `main/idf_component.yml` |
+| CST9217 driver | `2.0.0` | `main/idf_component.yml` |
+| ESP-SR | `2.4.6` | `main/idf_component.yml` |
+| codec-dev | `1.5.11` | `main/idf_component.yml` |
+| WebSocket client | `1.7.0` | `main/idf_component.yml` |
+| emote-gfx | `3.0.2` | `main/idf_component.yml` |
 
-## Findings & gotchas
+[`../../tools/idf-pins.txt`](../../tools/idf-pins.txt) is the compact review
+copy. `dependencies.lock` is generated and ignored; the final build plus
+`generate-third-party-notices.py` records the exact resolved graph.
 
-**[2026-05-21] Pin `idf-component-manager==2.4.10` before every build**
-
-`espressif/idf:v5.5.4` ships with `idf-component-manager==2.3.0`, which introduced a strict "Already defined root local requirement" check. This codebase intentionally declares some local components in both parent and child `idf_component.yml` files. `2.3.0` rejects this and aborts the build.
-
-Fix: always prepend the pip upgrade before `idf.py build`:
-```bash
-docker run --rm -v "$(pwd):/project" -e IDF_TARGET=esp32s3 \
-  -w /project/esp-claw/application/edge_agent espressif/idf:v5.5.4 \
-  bash -c "pip install -q 'idf-component-manager==2.4.10' && idf.py build"
-```
-
-`2.4.10` comes from the `release-v5.5` image; use the versioned `v5.5.4` image (not the rolling `release-v5.5` tag) because `tools/esp-idf.patch` applies cleanly only to the exact IDF in `v5.5.4`.
-
-Source: `scripts/bootstrap.sh` (build step); memory file `feedback_build_idf_component_manager.md`.
-
-**[2026-05-21] Pin `esp-bmgr-assist==0.5.0`**
-
-`esp-bmgr-assist` v0.8.x dropped the `-c <boards_dir>` flag and the `boards/<vendor>/<name>/` scan path. Versions 0.6 and 0.7 also broke `-c` / `-b` flags. Only `0.5.x` finds this project's `boards/waveshare/` and `boards/seeed/` directories.
-
-Apply to `scripts/bootstrap.sh` (around lines 62 and 104) and any ad-hoc docker invocations:
-```bash
-pip install "esp-bmgr-assist==0.5.0"
-```
-
-This affects all boards including the XIAO path. Failure mode: the build completes but generates wrong or empty board code without a clear error.
-
-Source: `scripts/bootstrap.sh`; memory file `feedback_esp_bmgr_assist_pin.md`.
-
-**[2026-05-21] Building with a dirty `esp-claw` clone: use `ESP_CLAW_REF`**
-
-`scripts/bootstrap.sh` has a `clone_or_update_esp_claw` guard that calls `die` if the clone HEAD differs from the pinned `ESP_CLAW_REF` (default: `6a211756`). During active development the clone will have local commits. Override it:
+## Canonical build
 
 ```bash
-ESP_CLAW_REF=$(cd esp-claw && git rev-parse HEAD) \
-  BOARD_VENDOR=waveshare \
-  BOARD_NAME=esp32s3_touch_amoled_1_75 \
-  /abs/path/to/scripts/bootstrap.sh build
+./scripts/build-v5.sh
+./scripts/smoke-build.sh
 ```
 
-Use an absolute path for `bootstrap.sh` — background shells reset `cwd` and a relative path exits with code 127. All `apply_*_patch` steps are idempotent (guard-checked), so re-running is safe.
+The build performs this order inside the pinned container:
 
-Recommended: commit the clone to a wip branch first (durable snapshot), then use that SHA as `ESP_CLAW_REF`.
+1. install the two pinned Python build tools;
+2. set the ESP32-S3 target when configuration is absent or explicitly reset;
+3. generate board-manager code for `esp32s3_touch_amoled_1_75c`;
+4. reconfigure and synchronize generated `CONFIG_ESP_BOARD_*` symbols;
+5. apply/check the small pinned managed-component fixes;
+6. build the image and verify sdkconfig/managed-source drift.
 
-Source: `scripts/bootstrap.sh`; memory file `feedback_build_and_flash_recipe.md`.
+The smoke gate then proves DIO, 80 MHz, 32 MB flash geometry; exact offsets;
+non-empty bootloader, partition table, OTA metadata, application, emote, and
+WakeNet artifacts; and the 4 MB application-slot ceiling.
 
-**[2026-05-21] New conditional components need two `idf.py build` passes on a clean tree**
+## Hard constraints
 
-On a completely clean build (after `rm -rf build/`), a new conditional component (e.g. `cap_gemini_live`) may require two successive `idf.py build` invocations. The first pass discovers the component and writes the sdkconfig; the second builds it. This is an IDF cmake artifact, not a bug in our code.
+- The release build refuses every board except the 1.75C. A mismatched image can
+  black-screen or overrun the original 16 MB board.
+- CO5300 QSPI ownership requires **DIO** flash mode. `flash-v5.sh` refuses QIO.
+- `sdkconfig.defaults` is the project baseline. The selected board file declares
+  only variant capability; `sync-v5-sdkconfig.py` bridges generated symbols.
+- `components/gen_bmgr_codes/`, `managed_components/`, `sdkconfig`,
+  `dependencies.lock`, and `build/` are generated. Never patch them as canonical
+  source.
+- `main/main.c`, `components/jr_*`, the 1.75C board definition, and
+  `partitions_32MB.csv` are canonical.
 
-Also: new conditional components must initially be declared unconditionally in `idf_component.yml` — the chicken-and-egg: IDF cannot detect the component exists until it is included.
+## Host suites
 
-**[2026-05-21] sdkconfig regeneration for new board devices**
+```bash
+cmake -S host -B build-host
+cmake --build build-host
+ctest --test-dir build-host --output-on-failure
 
-To enable a new device type in `esp_board_manager`:
+cmake -S components/jr_tools/host -B build-tools-host
+cmake --build build-tools-host
+ctest --test-dir build-tools-host --output-on-failure
+```
 
-1. Add the device to `board_devices.yaml`.
-2. Add `CONFIG_ESP_BOARD_DEV_*_SUPPORT=y` to `board_manager.defaults` AND `sdkconfig.defaults` (belt and suspenders).
-3. **Delete the project-root `sdkconfig`**.
-4. Run `idf.py build` — `idf_ext.py` injects `board_manager.defaults`, generates a fresh `sdkconfig`, cmake picks up new include paths, build succeeds.
+These suites intentionally have no ESP-IDF include path. Core/transport/display
+code that reaches into a driver or network header fails at compile time.
 
-Why: `idf_ext.py` only injects `board_manager.defaults` when no `sdkconfig` file exists. A stale `sdkconfig` always wins over `sdkconfig.defaults` and silently drops the new flags.
+## Historical path
 
-Source: memory file `feedback_sdkconfig_regeneration.md`.
-
-**[2026-08-27] Same trap, general form: flipping an EXISTING symbol in
-sdkconfig.defaults does nothing.** A NEW symbol (absent from `sdkconfig`) gets
-seeded on the next build; a symbol already present keeps its stale value —
-measured live when `CONFIG_ESP_WIFI_IRAM_OPT=n` in defaults left `=y` in the
-generated config through a full build+flash. `RECONFIGURE=1 ./scripts/build-v5.sh`
-(which re-runs `idf.py set-target`) is the reliable way to make an override of
-an existing symbol take.
-
-**[2026-05-21] USB-JTAG console is single-owner — boot-loop gotcha**
-
-If any component calls `usb_serial_jtag_driver_install()` before `app_claw_cli_start`, then `app_claw_cli_start` calls `esp_console_new_repl_usb_serial_jtag()` which aborts with `ESP_ERR_INVALID_STATE` → infinite boot loop (the emote/lobster animation flashes each reset).
-
-Rule: keep the `usb_diag` diagnostic shell (`jarvis-usb>` prompt) disabled. The `app>` CLI is the keeper — it has `status`, `wifi`, `scan`, and `reboot` commands.
-
-**[2026-05-21] Watchdog-reset flash recovery: BOOT hold**
-
-If a watchdog reset traps the board in an unflashable state:
-1. Unplug USB.
-2. Hold the BOOT button.
-3. Replug USB while holding BOOT.
-4. Release BOOT — board enters ROM download mode.
-5. Reflash normally.
-
-Flash command for this board: `idf.py flash --flash-mode dio` (DIO mode required; see [gemini-live-api.md](./gemini-live-api.md) for why this matters specifically for the `cap_gemini_live` build).
-
----
-
-## Primary sources
-
-| Source | Notes |
-|--------|-------|
-| `scripts/bootstrap.sh` | Authoritative build orchestrator. Check lines ~62 and ~104 for pip pins. |
-| `tools/esp-idf.patch` | The patch that must apply cleanly to `espressif/idf:v5.5.4`. |
-| `esp-claw/application/edge_agent/components/app_config/` | NVS field registration — three-file pattern. See [jarvismcp-bridge.md](./jarvismcp-bridge.md). |
-
----
-
-## Open questions
-
-- Is there a CI matrix that validates the `esp-bmgr-assist` pin after new releases? Without it, a `pip install` without the pin will silently break builds again.
-- Would pre-committing the patched `esp-claw` tree (instead of patching at bootstrap time) remove the `ESP_CLAW_REF` dance?
-
----
-
-## See also
-
-- [board-manager.md](./board-manager.md) — `esp-bmgr-assist`, sdkconfig regeneration, generated files.
-- [waveshare-amoled-175.md](./waveshare-amoled-175.md) — `BOARD_VENDOR` / `BOARD_NAME` values, flash mode.
-- [llm-config.md](./llm-config.md) — NVS recovery via `esptool erase-region`.
+`scripts/bootstrap.sh`, `firmware/`, `patches/`, and the ignored `esp-claw/`
+checkout preserve the pre-1.75C experiment. They are not release inputs. Its
+history is indexed in [`../ARCHIVE/`](../ARCHIVE/README.md).

@@ -702,6 +702,41 @@ static void test_framer_partial_then_flush_completes(void)
     TEST_ASSERT_EQUAL_UINT(0, f.close_calls);
 }
 
+static void test_framer_soft_fail_buffers_original_frame(void)
+{
+    fake_ws_t f; fake_ws_init(&f); f.state = JR_WS_OPEN;
+    f.send_mode = FWS_SOFT_FAIL;
+    jr_gemini_config_t cfg = manual_cfg();
+    jr_gemini_client_t c;
+    jr_gemini_client_init(&c, fake_ws_make(&f), fake_clock_make(), &cfg);
+
+    TEST_ASSERT_EQUAL_INT(
+        JR_ERR_WOULD_BLOCK,
+        jr_gemini_send_frame(&c, "CONTROL", strlen("CONTROL")));
+    TEST_ASSERT_EQUAL_size_t(1, jr_gemini_txq_depth(&c));
+    TEST_ASSERT_EQUAL_UINT32(0, c.live.tx_drops);
+
+    f.send_mode = FWS_OK;
+    TEST_ASSERT_EQUAL_INT(JR_OK, jr_gemini_flush(&c));
+    TEST_ASSERT_TRUE(fake_ws_sent_contains(&f, "CONTROL"));
+    TEST_ASSERT_EQUAL_size_t(0, jr_gemini_txq_depth(&c));
+    jr_gemini_client_deinit(&c);
+}
+
+static void test_framer_deinit_releases_queued_frames(void)
+{
+    fake_ws_t f; fake_ws_init(&f); f.state = JR_WS_OPEN;
+    f.send_mode = FWS_WOULD_BLOCK;
+    jr_gemini_config_t cfg = manual_cfg();
+    jr_gemini_client_t c;
+    jr_gemini_client_init(&c, fake_ws_make(&f), fake_clock_make(), &cfg);
+    TEST_ASSERT_EQUAL_INT(
+        JR_ERR_WOULD_BLOCK, jr_gemini_send_frame(&c, "queued", 6));
+    TEST_ASSERT_EQUAL_size_t(1, jr_gemini_txq_depth(&c));
+    jr_gemini_client_deinit(&c);
+    TEST_ASSERT_EQUAL_size_t(0, jr_gemini_txq_depth(&c));
+}
+
 static void test_framer_ok_passthrough(void)
 {
     fake_ws_t f; fake_ws_init(&f); f.state = JR_WS_OPEN; f.send_mode = FWS_OK;
@@ -1057,6 +1092,8 @@ void transport_tests_run(void)
     RUN_TEST(test_framer_wouldblock_never_aborts);
     RUN_TEST(test_framer_drop_newest_oldest_retained);
     RUN_TEST(test_framer_partial_then_flush_completes);
+    RUN_TEST(test_framer_soft_fail_buffers_original_frame);
+    RUN_TEST(test_framer_deinit_releases_queued_frames);
     RUN_TEST(test_framer_ok_passthrough);
     RUN_TEST(test_framer_real_close_is_death);
     RUN_TEST(test_framer_session_reset_drops_stale_tx);

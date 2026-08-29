@@ -1,8 +1,14 @@
 # JarvisRobot — Project Orientation
 
-JarvisRobot is ESP32-S3 firmware for a voice + display AI assistant. It runs on the `esp-claw` application framework (Espressif) with ESP-IDF v5.5.1. The primary target board is the **Waveshare ESP32-S3-Touch-AMOLED-1.75** (round 466×466 CO5300 AMOLED, CST9217 touch, ES8311 DAC + ES7210 ADC, AXP2101 PMIC, 16 MB flash / 8 MB PSRAM). A second board (Seeed XIAO ESP32-S3) is also supported.
+JarvisRobot is plain ESP32-S3 firmware for a voice + round-display AI
+assistant, built with ESP-IDF 5.5.4. The primary target is the **Waveshare
+ESP32-S3-Touch-AMOLED-1.75C**: 466×466 CO5300 AMOLED, CST9217 touch,
+ES8311/ES7210 audio, AXP2101 PMIC, 32 MB flash, and 8 MB PSRAM. The original
+16 MB 1.75 is a hardware/source reference; Seeed XIAO remains experimental.
 
-The firmware integrates **Google Gemini Live API** (`cap_gemini_live`) for real-time voice: 16 kHz PCM in / 24 kHz PCM out over a WebSocket. Display animations run on `esp_emote_gfx` with flash-baked AAF/EAF assets.
+The live image is rooted at `main/` + `components/jr_*`. Gemini Live runs
+through `jr_transport` with 16 kHz uplink and native 24 kHz playback; display
+animations use `esp_emote_gfx` EAF assets plus one procedural compositor.
 
 ## Build + flash one-liner
 
@@ -59,7 +65,7 @@ Quick links to the most common gotchas:
 - Board manager double-deref → `docs/reference/board-manager.md`
 - Build pins and sdkconfig regeneration → `docs/reference/build-toolchain.md`
 - `llm_profile` is a protocol enum (not a vendor name) → `docs/reference/llm-config.md`
-- Gemini Live API (`thinkingLevel`, tool calls, flash mode) → `docs/reference/gemini-live-api.md`
+- Gemini Live API (`thinkingLevel`, tools, current models) → `docs/reference/gemini-live-api-v5.md`
 - Display engine: no canvas, no runtime CPU buffers → `docs/reference/display-emote-gfx.md`
 - NVS three-file registration pattern → `docs/reference/jarvismcp-bridge.md`
 

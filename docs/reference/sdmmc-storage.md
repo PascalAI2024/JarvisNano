@@ -1,5 +1,8 @@
 # SDMMC Storage
 
+> **Compatibility reference only.** The primary 1.75C has no microSD slot.
+> This page applies to the original 16 MB Waveshare 1.75 board.
+
 **What it is** — A microSD card interface exposed as a FAT filesystem mounted at `/sdcard` via the ESP-IDF VFS layer. On this board it uses the SDMMC peripheral in 1-bit bus mode.
 
 **How we use it here** — The SD card provides a writable filesystem for logs, user data, and any assets too large to fit in the flash partition layout. Access via standard `fopen`/`fread`/`fwrite` after the VFS mount.

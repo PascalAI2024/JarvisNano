@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import getpass
 import hashlib
 import ipaddress
@@ -27,6 +28,8 @@ DEFAULT_TIMEOUT_SECONDS = 5.0
 DEFAULT_WATCH_INTERVAL_SECONDS = 0.75
 KEYCHAIN_SERVICE = "com.ingeniousdigital.jarvisnano.desk"
 MAX_RESPONSE_BYTES = 128 * 1024
+MIN_OTA_BYTES = 256 * 1024
+MAX_OTA_BYTES = 4 * 1024 * 1024
 MAX_TOKEN_BYTES = 64  # JR_CFG_PAIRING_TOKEN_CAP includes the trailing NUL
 MAX_CURSOR = 0x7FFFFFFF  # firmware query_int() parses a signed int
 
@@ -138,6 +141,15 @@ def bounded_ttl(value: str) -> int:
         raise argparse.ArgumentTypeError(
             f"must be between {MIN_TTL_SECONDS} and {MAX_TTL_SECONDS} seconds"
         )
+    return number
+
+def bounded_level(value: str) -> int:
+    try:
+        number = int(value, 10)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if number < 10 or number > 100:
+        raise argparse.ArgumentTypeError("must be between 10 and 100")
     return number
 
 
@@ -325,28 +337,143 @@ class DeviceClient:
     ) -> dict[str, Any]:
         return self.request("POST", path, body=body, token=token).payload
 
+    def post_binary(
+        self,
+        path: str,
+        body: bytes,
+        *,
+        token: str,
+        timeout: float = 300.0,
+    ) -> dict[str, Any]:
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/octet-stream",
+            "User-Agent": "JarvisDesk/1",
+            "X-JarvisNano-Control": "1",
+            "X-JarvisNano-Token": token,
+        }
+        request = urllib.request.Request(
+            self.base_url + path,
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with self._opener(request, timeout=timeout) as response:
+                return self._read_json(response, path)
+        except urllib.error.HTTPError as exc:
+            try:
+                exc.read(MAX_RESPONSE_BYTES + 1)
+            except Exception:
+                pass
+            raise DeskError(
+                "http_error",
+                f"device rejected POST {path}",
+                http_status=exc.code,
+            ) from None
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            reason = "timed out" if isinstance(exc, TimeoutError) else "failed"
+            raise DeskError(
+                "network_error",
+                f"device request {reason}: POST {path}",
+            ) from None
+
+
+    def get_text(
+        self,
+        path: str,
+        *,
+        token: str,
+        max_bytes: int = 16384,
+    ) -> str:
+        request = urllib.request.Request(
+            self.base_url + path,
+            headers={
+                "Accept": "text/plain",
+                "User-Agent": "JarvisDesk/1",
+                "X-JarvisNano-Token": token,
+            },
+            method="GET",
+        )
+        try:
+            with self._opener(request, timeout=self.timeout) as response:
+                raw = response.read(max_bytes + 1)
+        except urllib.error.HTTPError as exc:
+            raise DeskError(
+                "http_error", f"device rejected GET {path}",
+                http_status=exc.code) from None
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            reason = "timed out" if isinstance(exc, TimeoutError) else "failed"
+            raise DeskError(
+                "network_error", f"device request {reason}: GET {path}") from None
+        if len(raw) > max_bytes:
+            raw = raw[-max_bytes:]
+        return raw.decode("utf-8", "replace")
 
 class MacOSKeychain:
+    _ERR_ITEM_NOT_FOUND = -25300
+
     def __init__(
         self,
         service: str = KEYCHAIN_SERVICE,
         *,
-        runner: Callable[..., Any] = subprocess.run,
+        runner: Callable[..., Any] | None = None,
     ) -> None:
         self.service = service
         self._runner = runner
 
+    @staticmethod
+    def _native_libraries() -> tuple[Any, Any]:
+        try:
+            security = ctypes.CDLL(
+                "/System/Library/Frameworks/Security.framework/Security"
+            )
+            core = ctypes.CDLL(
+                "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+            )
+        except OSError:
+            raise DeskError("keychain_error",
+                            "macOS Keychain is unavailable") from None
+
+        security.SecKeychainFindGenericPassword.restype = ctypes.c_int32
+        security.SecKeychainAddGenericPassword.restype = ctypes.c_int32
+        security.SecKeychainItemModifyAttributesAndData.restype = ctypes.c_int32
+        security.SecKeychainItemFreeContent.restype = ctypes.c_int32
+        core.CFRelease.argtypes = [ctypes.c_void_p]
+        return security, core
+
+    def _native_load(self, account: str) -> str | None:
+        security, _ = self._native_libraries()
+        service = self.service.encode("utf-8")
+        account_bytes = account.encode("utf-8")
+        length = ctypes.c_uint32()
+        data = ctypes.c_void_p()
+        status = security.SecKeychainFindGenericPassword(
+            None,
+            len(service), service,
+            len(account_bytes), account_bytes,
+            ctypes.byref(length), ctypes.byref(data), None,
+        )
+        if status == self._ERR_ITEM_NOT_FOUND:
+            return None
+        if status != 0:
+            raise DeskError("keychain_error",
+                            "macOS Keychain credential lookup failed")
+        try:
+            raw = ctypes.string_at(data, length.value)
+        finally:
+            security.SecKeychainItemFreeContent(None, data)
+        value = raw.decode("utf-8")
+        return value or None
+
     def load(self, account: str) -> str | None:
+        if self._runner is None:
+            return self._native_load(account)
         try:
             result = self._runner(
                 [
-                    "security",
-                    "find-generic-password",
-                    "-a",
-                    account,
-                    "-s",
-                    self.service,
-                    "-w",
+                    "security", "find-generic-password",
+                    "-a", account, "-s", self.service, "-w",
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -355,40 +482,73 @@ class MacOSKeychain:
                 check=False,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            raise DeskError("keychain_error", "macOS Keychain is unavailable") from None
-        if result.returncode == 44:  # errSecItemNotFound from `security`
+            raise DeskError("keychain_error",
+                            "macOS Keychain is unavailable") from None
+        if result.returncode == 44:
             return None
         if result.returncode != 0:
-            raise DeskError("keychain_error", "macOS Keychain credential lookup failed")
+            raise DeskError("keychain_error",
+                            "macOS Keychain credential lookup failed")
         value = result.stdout.rstrip("\r\n")
         return value or None
 
-    def store(self, account: str, token: str) -> None:
-        # `-w` as the final option prompts on stdin. Supplying the token through
-        # the pipe keeps it out of argv, terminal output, and process listings.
-        try:
-            result = self._runner(
-                [
-                    "security",
-                    "add-generic-password",
-                    "-U",
-                    "-a",
-                    account,
-                    "-s",
-                    self.service,
-                    "-w",
-                ],
-                input=token + "\n",
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=10,
-                check=False,
+    def _native_store(self, account: str, token: str) -> None:
+        security, core = self._native_libraries()
+        service = self.service.encode("utf-8")
+        account_bytes = account.encode("utf-8")
+        secret = token.encode("utf-8")
+        item = ctypes.c_void_p()
+        status = security.SecKeychainFindGenericPassword(
+            None,
+            len(service), service,
+            len(account_bytes), account_bytes,
+            None, None, ctypes.byref(item),
+        )
+        if status == 0:
+            try:
+                status = security.SecKeychainItemModifyAttributesAndData(
+                    item, None, len(secret), secret
+                )
+            finally:
+                core.CFRelease(item)
+        elif status == self._ERR_ITEM_NOT_FOUND:
+            status = security.SecKeychainAddGenericPassword(
+                None,
+                len(service), service,
+                len(account_bytes), account_bytes,
+                len(secret), secret, None,
             )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            raise DeskError("keychain_error", "macOS Keychain is unavailable") from None
-        if result.returncode != 0:
-            raise DeskError("keychain_error", "macOS Keychain rejected the credential update")
+        if status != 0:
+            raise DeskError("keychain_error",
+                            "macOS Keychain rejected the credential update")
+
+    def store(self, account: str, token: str) -> None:
+        if self._runner is None:
+            self._native_store(account, token)
+        else:
+            # Test/fallback path keeps the secret out of argv.
+            try:
+                result = self._runner(
+                    [
+                        "security", "add-generic-password", "-U",
+                        "-a", account, "-s", self.service,
+                    ],
+                    input=token + "\n",
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                raise DeskError("keychain_error",
+                                "macOS Keychain is unavailable") from None
+            if result.returncode != 0:
+                raise DeskError("keychain_error",
+                                "macOS Keychain rejected the credential update")
+        if self.load(account) != token:
+            raise DeskError("keychain_error",
+                            "macOS Keychain did not persist the credential")
 
 
 def validate_token(token: str) -> str:
@@ -423,7 +583,7 @@ def resolve_token(
     if not token:
         raise DeskError(
             "not_paired",
-            "no Desk token found; physically hold the panel and run pair",
+            "no Desk token found; open shade > Agent Link and run pair",
         )
     return validate_token(token)
 
@@ -530,7 +690,7 @@ def command_pair(
         if exc.code == "http_error" and exc.http_status == 403:
             raise DeskError(
                 "physical_pairing_required",
-                "hold the idle panel for 1.2 seconds, then run pair again",
+                "hold BOOT for 1.5 seconds until PAIRING OPEN appears, then run pair again within 60 seconds",
                 http_status=403,
             ) from None
         raise
@@ -772,6 +932,77 @@ def watch_events(
     return 0
 
 
+def triage_logs(text: str) -> list[dict[str, Any]]:
+    signatures = (
+        ("websocket", ("transport_poll_write", "ws-client",
+                       "Websocket client is not connected")),
+        ("session", ("phase:", "Reconnecting", "StaleDeadline")),
+        ("ota", ("ota:", "rollback", "OTA")),
+        ("memory", ("NO_MEM", "allocate", "heap", "memory")),
+        ("display", ("flush", "display", "co5300")),
+        ("audio", ("audio", "feeder", "clipped", "dac")),
+        ("input", ("jr_hal_touch", "gesture:", "operator:")),
+        ("tools", ("jr_tools", "tool=", "JarvisMCP")),
+    )
+    grouped: dict[str, dict[str, Any]] = {}
+    for line in text.splitlines():
+        category = next(
+            (name for name, needles in signatures
+             if any(needle in line for needle in needles)),
+            None,
+        )
+        if category is None:
+            continue
+        item = grouped.setdefault(
+            category, {"category": category, "count": 0, "last": []})
+        item["count"] += 1
+        item["last"].append(line[-180:])
+        item["last"] = item["last"][-3:]
+    return sorted(grouped.values(),
+                  key=lambda item: item["count"], reverse=True)
+
+
+def command_doctor(
+    client: DeviceClient,
+    keychain: MacOSKeychain,
+    account: str,
+    env: Mapping[str, str],
+    *,
+    repair: bool,
+) -> dict[str, Any]:
+    token = resolve_token(keychain, account, env, client.base_url)
+    health = client.get("/api/device/health", token=token)
+    tasks = client.get("/api/diag/tasks")
+    audio = client.get("/api/audio/taps")
+    sensors = client.get("/api/sensors")
+    logs = client.get_text("/api/logs?tail=16384", token=token)
+    incidents = triage_logs(logs)
+    verdict = str(health.get("verdict", "unknown"))
+    repaired = False
+    repair_action = "none"
+    if repair and health.get("repairable") is True:
+        if (health.get("privacy") is not True and
+                health.get("flip_muted") is not True and
+                health.get("operator") is not True and
+                verdict in ("session-dead", "audio-fault")):
+            client.post("/api/voice/control?resume=1", {}, token=token)
+            repaired = True
+            repair_action = "safe-resume"
+    healthy = verdict in ("ok", "privacy-muted", "operator-active")
+    return {
+        "ok": healthy,
+        "command": "doctor",
+        "verdict": verdict,
+        "health": health,
+        "tasks": tasks,
+        "audio": audio,
+        "sensors": sensors,
+        "incidents": incidents,
+        "repair_requested": repair,
+        "repaired": repaired,
+        "repair_action": repair_action,
+    }
+
 def build_parser(env: Mapping[str, str] | None = None) -> JsonArgumentParser:
     environment = os.environ if env is None else env
     parser = JsonArgumentParser(description=__doc__)
@@ -788,8 +1019,30 @@ def build_parser(env: Mapping[str, str] | None = None) -> JsonArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("pair", help="claim after a physical panel hold and store in Keychain")
+    subparsers.add_parser("pair", help="claim during the shade Agent Link window and store in Keychain")
     subparsers.add_parser("status", help="read Desk outbox and device cockpit status")
+    takeover = subparsers.add_parser(
+        "takeover", help="claim bounded Codex glass ownership")
+    takeover.add_argument("--ttl", type=bounded_ttl, default=300)
+    subparsers.add_parser("normal", help="release Codex mode")
+    subparsers.add_parser("mode", help="read current glass owner")
+    ota = subparsers.add_parser("ota", help="upload a paired firmware image")
+    ota.add_argument("--image", required=True)
+    doctor = subparsers.add_parser(
+        "doctor", help="diagnose device state and bounded incidents")
+    doctor.add_argument("--repair", action="store_true")
+    levels = subparsers.add_parser(
+        "levels", help="set paired persistent volume/brightness")
+    levels.add_argument("--volume", type=bounded_level)
+    levels.add_argument("--brightness", type=bounded_level)
+    input_cmd = subparsers.add_parser(
+        "input", help="inject paired non-physical input for UI QA")
+    input_cmd.add_argument(
+        "kind", choices=("tap", "double", "long", "swipe"))
+    input_cmd.add_argument(
+        "direction", nargs="?",
+        choices=("left", "right", "up", "down"))
+    input_cmd.add_argument("--edge", action="store_true")
 
     present = subparsers.add_parser("present", help="present a bounded surface")
     present.add_argument("--id", required=True)
@@ -823,6 +1076,64 @@ def execute_command(
         return command_pair(client, keychain, account)
     if args.command == "status":
         return command_status(client, keychain, account, env)
+    if args.command == "doctor":
+        return command_doctor(
+            client, keychain, account, env, repair=args.repair)
+    if args.command == "levels":
+        if args.volume is None and args.brightness is None:
+            raise DeskError(
+                "invalid_input", "levels requires --volume or --brightness")
+        token = resolve_token(keychain, account, env, client.base_url)
+        query = urllib.parse.urlencode({
+            key: value for key, value in (
+                ("volume", args.volume),
+                ("brightness", args.brightness),
+            ) if value is not None
+        })
+        response = client.post(
+            f"/api/device/levels?{query}", {}, token=token)
+        return {"ok": True, "command": "levels", "response": response}
+    if args.command == "input":
+        if args.kind == "swipe" and args.direction is None:
+            raise DeskError("invalid_input", "swipe requires a direction")
+        token = resolve_token(keychain, account, env, client.base_url)
+        query = {"kind": args.kind}
+        if args.direction is not None:
+            query["dir"] = args.direction
+        if args.edge:
+            query["edge"] = "1"
+        response = client.post(
+            "/api/debug/input?" + urllib.parse.urlencode(query),
+            {}, token=token)
+        return {"ok": True, "command": "input", "response": response}
+    if args.command == "takeover":
+        token = resolve_token(keychain, account, env, client.base_url)
+        response = client.post(
+            f"/api/operator/lease?ttl={args.ttl}", {}, token=token)
+        return {"ok": True, "command": "takeover", "response": response}
+    if args.command == "normal":
+        token = resolve_token(keychain, account, env, client.base_url)
+        response = client.post(
+            "/api/operator/lease?release=1", {}, token=token)
+        return {"ok": True, "command": "normal", "response": response}
+    if args.command == "mode":
+        response = client.get("/api/operator/lease")
+        return {"ok": True, "command": "mode", "response": response}
+    if args.command == "ota":
+        token = resolve_token(keychain, account, env, client.base_url)
+        try:
+            with open(args.image, "rb") as image_file:
+                image = image_file.read(MAX_OTA_BYTES + 1)
+        except FileNotFoundError:
+            raise DeskError("missing_image",
+                            f"OTA image not found: {args.image}") from None
+        if len(image) < MIN_OTA_BYTES or len(image) > MAX_OTA_BYTES:
+            raise DeskError("invalid_image",
+                            "OTA image must be between 256 KiB and 4 MiB")
+        response = client.post_binary(
+            "/api/ota/upload", image, token=token)
+        return {"ok": True, "command": "ota",
+                "bytes": len(image), "response": response}
     if args.command == "present":
         return command_present(args, client, keychain, account, env, session)
     if args.command == "dismiss":
@@ -845,7 +1156,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return watch_events(args, client, token=token)
         result = execute_command(args, client, keychain, env)
         emit_json(sanitize(result))
-        return 0
+        return 0 if result.get("ok", True) else 1
     except DeskError as exc:
         emit_json(exc.as_payload(), sys.stderr)
         return 2

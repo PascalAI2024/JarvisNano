@@ -1,27 +1,37 @@
-# Waveshare ESP32-S3-Touch-AMOLED-1.75
+# Waveshare ESP32-S3-Touch-AMOLED-1.75 — compatibility reference
 
-This is the primary JarvisNano v1 board: round 466x466 AMOLED, capacitive
-touch, ES7210 microphones, ES8311 speaker output, AXP2101 PMIC, 16 MB flash,
+This is the original 16 MB board: round 466×466 AMOLED, CST9217 touch,
+ES7210/ES8311 audio, AXP2101 PMIC, TCA9554 expander, PCF85063 RTC, microSD,
 and 8 MB PSRAM.
 
-Live debug handoff: [`../../../docs/NEXT_SESSION.md`](../../../docs/NEXT_SESSION.md).
+The 32 MB **1.75C** is JarvisNano’s only release-gated product target. The
+original board definition and historical measurements remain for reference, but
+`./scripts/build-v5.sh` intentionally refuses this revision until its 16 MB
+partition, flash, OTA, audio, input, and security circuits are revalidated.
+Never flash a 1.75C image onto this board: LCD/touch reset pins, MCLK, flash
+geometry, and peripherals differ.
 
-## Hardware
+Canonical live product truth:
+[`../../../docs/HARDWARE.md`](../../../docs/HARDWARE.md).
 
-| Subsystem | Chip | Bus | JarvisNano use |
-|---|---|---|---|
-| SoC | ESP32-S3R8 | native | 16 MB flash, 8 MB octal PSRAM |
-| Display | CO5300 | QSPI on SPI2_HOST | 466x466 AMOLED face and cockpit |
-| Touch | CST9217 | I2C | Tap, long-press, and diagnostics |
-| Audio ADC | ES7210 | I2S + I2C | Dual mic input and echo-reference lane |
-| Audio DAC | ES8311 | I2S + I2C | Speaker output via board connector |
-| PMIC | AXP2101 | I2C | Factory defaults are enough for USB desktop v1 |
-| IO expander | TCA9554 | I2C | Expansion, currently not a release blocker |
-| RTC | PCF85063 | I2C | Battery-backed clock |
-| IMU | QMI8658 | I2C | Deferred |
-| Storage | microSD | SDMMC 1-bit | Deferred |
+## Hardware delta
 
-## Pin Map
+| Subsystem | Original 1.75 | 1.75C product |
+|---|---|---|
+| Flash | 16 MB | 32 MB |
+| Display reset | GPIO39 | GPIO1 |
+| Touch reset | GPIO40 | GPIO2 |
+| I²S MCLK | GPIO42 | GPIO16 |
+| TCA9554 | Present | Removed |
+| PCF85063 | Present | Removed; SNTP time |
+| microSD | Present, 1-bit SDMMC | Removed |
+| Expansion header | Present | Removed/undocumented |
+
+Shared hardware includes the ESP32-S3R8, 8 MB octal PSRAM, CO5300 display,
+CST9217 touch, ES7210 ADC, ES8311 DAC, AXP2101 PMIC, QMI8658 IMU, and native
+USB-Serial-JTAG.
+
+## Original pin map
 
 ```text
 I2C bus:           SDA = 15, SCL = 14
@@ -33,87 +43,23 @@ SD card:           D0 = 3, CMD = 1, CLK = 2
 USB-C:             ESP32-S3 native USB-Serial-JTAG
 ```
 
-## Build
+## Compatibility boundary
 
-From the repo root:
+- `boards/waveshare/esp32s3_touch_amoled_1_75/` preserves the board-manager
+  definition and pin data.
+- `partitions_16MB.csv` preserves the historical single-slot layout; it is not a
+  current release artifact.
+- [`../../../docs/reference/waveshare-amoled-175.md`](../../../docs/reference/waveshare-amoled-175.md)
+  and [`../../../docs/reference/sdmmc-storage.md`](../../../docs/reference/sdmmc-storage.md)
+  preserve subsystem findings.
+- No current voice, touch, display, tool, OTA, or security claim closes on this
+  revision without a new physical verification pass.
 
-```bash
-./scripts/build-v5.sh
-```
-
-## Flash
-
-```bash
-./scripts/flash-v5.sh
-```
-
-The script preserves NVS by default. Use `ERASE_NVS=1` when saved config is
-bad.
-
-The board can land in ROM download mode if a host hard reset samples the boot
-strap incorrectly. Prefer the repo flash path and monitor without reset-line
-side effects:
-
-```bash
-./scripts/usb-monitor.py --seconds 5 --send status
-```
-
-## Runtime Config
-
-Runtime secrets live in NVS only. Configure through `/api/config`; readback must
-mask sensitive fields.
-
-| Field | Purpose |
-|---|---|
-| `llm_api_key` / `gemini_api_key` | Gemini Live credential path used by the active build |
-| `jarvis_mcp_url` | JarvisMCP `/act` endpoint |
-| `jarvis_mcp_key` | JarvisMCP bearer token |
-| `pairing_token` | Protected write/control token |
-
-Do not commit keys, local endpoint URLs, Wi-Fi credentials, LAN addresses, MAC
-addresses, or device-specific logs.
-
-## Current Runtime Status
-
-- Direct `jarvis_board` CO5300 primitive is the v1 display path.
-- Display software snapshots are available through `/api/display/snapshot.json`,
-  `/api/display/snapshot.ppm`, and `/api/ui/snapshot.ppm`.
-- CST9217 touch diagnostics are exposed through `/api/touch`.
-- Known face states are `idle`, `listen`, `think`, `speak`, `error`, and
-  `sleep`.
-- JarvisMCP config fields are NVS-backed; `/api/tools/status` reports
-  configured state without exposing secrets.
-- Gemini Live text and voice diagnostics exist; physical voice quality and
-  speaker proof remain release-candidate QA items.
-
-## Display Snapshot Contract
-
-The snapshot API is a software mirror, not CO5300 panel readback.
-
-| Route | Capture source |
-|---|---|
-| `/api/display/snapshot.json` | owner/freshness metadata |
-| `/api/display/snapshot.ppm` | active display owner, usually emote |
-| `/api/ui/snapshot.ppm` | UI-layer framebuffer |
-
-If the physical panel shows the old reactor face, the emote snapshot should
-also show that face. If the cockpit/menu owns the display, capture the UI route.
-
-## Differences From XIAO
-
-| Aspect | XIAO Sense | Waveshare AMOLED |
-|---|---|---|
-| Release priority | Secondary | Primary v1 |
-| Flash | 8 MB | 16 MB |
-| Mic | PDM MEMS | ES7210 codec mic path |
-| Speaker | External analog amp path | ES8311 codec output |
-| Display | Optional add-on | Built-in 466x466 AMOLED |
-| Touch | None | CST9217 capacitive |
-| Camera | Built-in camera track | None |
-| Form factor | Tiny/camera experiments | USB desktop assistant |
+Do not copy NVS or flash dumps between board revisions. They contain credentials,
+pairing identity, and device-local state.
 
 ## References
 
-- Waveshare wiki: <https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75>
-- Schematic PDF: <https://files.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75/ESP32-S3-Touch-AMOLED-1.75.pdf>
+- Product page: <https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm>
+- Wiki: <https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75>
 - Official BSP: <https://github.com/waveshareteam/Waveshare-ESP32-components/tree/master/bsp/esp32_s3_touch_amoled_1_75>

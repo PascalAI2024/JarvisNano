@@ -1,193 +1,78 @@
 # Changelog
 
-All notable user-facing changes should be recorded here.
+Notable user-facing changes to the supported JarvisNano 1.75C product are
+recorded here. Historical ESP-Claw, XIAO, and original-1.75 development notes
+are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
 
 ## Unreleased
 
-### Firmware
+### Product target
 
-- **Conversation reliability + face fluidity round 2.** Four field-diagnosed
-  fixes: (1) local VAD speech threshold 1200→1000 (sat inside the measured
-  speech band, so quiet speech never committed a turn — "it never replies"),
-  min-speech 300→240 ms; (2) VAD accumulators reset at commit time — a race
-  re-fired a second `end_input` 20 ms after the first on every turn; (3) taps
-  during THINKING are ignored for 10 s — users tapping at a slow reply were
-  killing their own pending answer (after 10 s a tap still stops the session);
-  (4) face segment updates are fast-attack/slow-decay (600 ms hold) — every
-  segment reprogram resets the animation to frame 0, so per-bucket updates
-  during ramping speech strobed; and the listen ramp has a baked baseline
-  floor so LISTENING is visibly distinct from IDLE in a quiet room.
-- **Voice clarity + cutoff fixes (Gemini Live audio path).** Root-caused the
-  intermittent "deep, garbled, cut-off" playback: the ES8311 DAC and ES7210
-  ADC share one I2S port in STD duplex, so opening playback at the model's
-  native 24 kHz only lasted until the next record-path re-init slammed the
-  shared clock back to 16 kHz. Playback is now locked to the 16 kHz capture
-  rate for the whole session and the 24 kHz downlink is resampled with linear
-  interpolation (the old nearest-neighbour decimation caused metallic
-  aliasing). Also: audio chunks arriving before the DAC opened are no longer
-  dropped (start-of-utterance clipping) — the DAC opens on demand.
-  See `docs/reference/audio-es8311-es7210.md`.
-- **BLE GATT service disabled** (`bootstrap.sh::apply_ble_disable_patch`).
-  NimBLE kept the BT controller active and Wi-Fi/BT coexistence time-sliced
-  the radio — measured as repeated "apply reconnect coex policy" Wi-Fi
-  failures and audio stalls. With BLE off: `coexist: 0`, STA association in
-  ~6 s (was ~17.5 s with retries), and the internal-heap floor rose
-  76 KB → 244 KB. Restore `ble_gatt_init()` if a BLE companion app ships.
-- **Arc-reactor reactive face, smoother + bigger.** The four 466×466 rwave
-  EAF packs were redesigned (energy-field renderer, Stark cyan LUTs) and
-  re-baked with 25–37% more frames (idle 24→30, listen 16→22, think 24→32,
-  speak 16→22). The `emote` partition grew 6 MB → 6.875 MB (`0x6E0000`) by
-  folding in the former 896 KB top gap; `storage` moved to `0xB00000` (still
-  5 MB, ends exactly at 16 MB). Repartition flashes need `STORAGE=1`; Wi-Fi/
-  LLM config live in NVS and survive.
-- **Quiet-voice strobe fix (`firmware/emote/reactive_face.c`).** Low
-  amplitude used to map to a 2–4 frame loop window (~130 ms micro-loop that
-  strobed on the panel); listen/speak now enforce a floor of ⅓ of the ramp,
-  and the amplitude easing was retuned for the driver task's real cadence.
-- **Emote idle screen shows the active LLM model** (`patches/0009`). The emote
-  engine previously only reflected network status; it now caches that state and
-  exposes `emote_set_status_detail()`, which `app_claw` calls with the model
-  name as the LLM provider starts. The AMOLED idle screen reads
-  "Ready * MiniMax-M2.7" instead of a generic "Wi-Fi connected" — a visible
-  sign of life beyond the static idle animation. Re-applied on fresh clones by
-  `scripts/bootstrap.sh::apply_emote_status_detail_patch`.
-- **Second supported board: Waveshare ESP32-S3-Touch-AMOLED-1.75.** Adds a
-  full board adaptation at `boards/waveshare/esp32s3_touch_amoled_1_75/` —
-  1.75" CO5300 QSPI AMOLED (466×466), CST9217 capacitive touch, ES8311 DAC,
-  ES7210 4-channel ADC with on-chip AEC, TCA9554 IO expander, AXP2101 PMIC,
-  16 MB flash, 8 MB octal PSRAM. End-to-end chat round-trip verified on
-  hardware (MiniMax M2.7 via Anthropic-compatible endpoint, ~5.5 s).
-- **`bootstrap.sh` reproducibility:** pinned the IDF Docker tag to
-  `espressif/idf:v5.5.4` (was the rolling `release-v5.5`) and pinned
-  `esp-bmgr-assist==0.5.0`. Newer minor versions of `esp-bmgr-assist`
-  dropped customer-board discovery (`boards/<vendor>/<name>/`) and
-  changed CLI surface; pinning prevents the next person to bootstrap
-  from hitting the same wall.
-- Pinned the generated ESP-Claw checkout to a fixed commit in
-  `scripts/bootstrap.sh`, and recorded the resolved commit in build output.
-- Added `scripts/smoke-build.sh` for post-build firmware sanity checks
-  (binary size, storage image contents, expected log strings).
-- Added `scripts/check-patches.sh` to verify that each patch artifact applies
-  cleanly to the pinned ESP-Claw commit, or is an explicit bootstrap-managed
-  mutation.
-- Hardened `scripts/check-secrets.sh`: tightened the source-tree regexes to
-  reduce documentation false-positives, added Google API key / JWT /
-  Telegram bot token / Anthropic / OpenAI project-key patterns, and added a
-  second pass that runs `strings` over `dashboard/firmware/*.bin` so a
-  baked-in credential in the published WebSerial blob can no longer slip
-  through the scan.
-- Added native GPIO21 status LED heartbeat as `patches/0007-native-status-led.patch`,
-  starting after `app_claw_start()` so the event router and scheduler get first
-  claim on heap; LED allocation failure is non-fatal.
-- Disabled the heap-heavy App Claw serial REPL on the XIAO build to avoid
-  internal heap exhaustion after Phase-2 services start; USB serial logs still
-  work.
-- Disabled the long-running Lua status_led auto-start router rule on XIAO so
-  Lua heap is preserved at boot; the script remains in FATFS for future
-  state-pattern work.
-- Added `OPTIONS /api/*` CORS preflight handler
-  (`patches/0004-http-phase2-preflight-battery.patch`).
-- Added `/api/battery` not-wired JSON stub returning
-  `{wired:false, state:"not_wired", source:"stub"}` until ADC wiring lands
-  (same patch).
-- Added `/api/wifi/scan` route used by the onboarding wizard
-  (`patches/0006-http-wifi-scan.patch`).
-- Added `/api/health` cheap reachability probe with uptime, free heap, request
-  count, and Wi-Fi mode (`patches/0008-http-health-route.patch`).
-- Gated the `/api/camera/snapshot` route when the Lua camera module is not
-  built (`patches/0005-http-camera-gate-lua-module.patch`).
-- Added DVP camera scan-for-JPEG-SOI patch
-  (`patches/0003-dvp-cam-scan-for-jpeg-soi.patch`) for OV3660 frame capture
-  reliability.
-- Disabled Wi-Fi modem sleep
-  (`patches/0002-wifi-disable-modem-sleep.patch`) so HTTP responses are not
-  delayed by power-save wakeups during the dashboard's polling cadence.
+- Made the 32 MB **Waveshare ESP32-S3-Touch-AMOLED-1.75C** the only
+  release-gated target.
+- Replaced the generated ESP-Claw composition with a plain ESP-IDF 5.5.4 image
+  rooted at `main/` and `components/jr_*`.
+- Added a 32 MB DIO partition layout with two 4 MB application slots, emote
+  assets, WakeNet models, storage, and rollback metadata.
+- Kept the original 16 MB board and XIAO material as explicitly labeled
+  hardware/history references; the release build refuses mismatched targets.
 
-### Dashboard
+### Voice and audio
 
-- Hardened BLE behavior in Codex/in-app browsers: shows Chrome/Edge guidance
-  instead of opening the native chooser inside an embedded WebView.
-- Switched to the canonical JarvisNano BLE service UUID.
-- Camera tile distinguishes blocked vs pending vs failure and disables
-  auto-refresh after a gated/pending response, instead of looping a broken
-  image.
-- Battery tile distinguishes endpoint failure from intentional
-  `{wired:false, state:"not_wired"}`.
-- Added `scripts/check-dashboard-js.mjs` for repeatable JS syntax checks
-  (locally and in CI).
-- Added onboarding AP-to-STA Wi-Fi handoff: continue on AP when reachable,
-  otherwise verify the STA IP / `esp-claw.local` before advancing.
+- Moved Gemini Live framing and WebSocket state into `jr_transport` with bounded
+  reconnect, backpressure, and event queues.
+- Runs ES7210 capture and ES8311 playback on one native 24 kHz duplex clock;
+  AEC-clean uplink is downsampled to 16 kHz and Gemini output remains 24 kHz.
+- Made Gemini server VAD the normal interruption path. Local barge remains a
+  measured diagnostic fallback after echo-triggered self-interruption caused
+  reply hiccups.
+- Added PSRAM-backed uplink/playback buffering, electrical audio taps, VAD
+  decision logs, task watermarks, and explicit DAC/transport counters.
 
-### Android companion
+### Round-screen experience
 
-- BLE scan + connect flow is bounded (10 s scan, 15 s connect) with service
-  UUID filtering where supported and name-prefix fallback.
-- BLE GATT and scan status codes now surface in `BleClient.State.Failed` so the
-  Cockpit BLE tile can report missing-service / missing-permission diagnostics
-  instead of silently returning to idle.
-- mDNS discovery verifies the resolved host with `GET /api/status` before
-  marking it connected, instead of trusting the first
-  `_http._tcp.local.` `esp-claw*` result.
-- Repository status polling now recovers from a `200 → timeout → 200` sequence:
-  the app surfaces failure and returns to connected on the next successful
-  poll without an app restart.
-- Added unit tests for `DeviceConfig` patch typing (booleans/numbers/strings
-  preserved across save), `DeviceClient` HTTP behavior, and JSON
-  serialization round-trips.
-- Fixed config save type drift: editing a numeric or boolean config field no
-  longer round-trips it as a JSON string; unchanged fields remain omitted from
-  the patch.
-- Restored Android Gradle wrapper for reproducible CLI builds; documented
-  `JAVA_HOME` / `ANDROID_HOME` setup.
-- Added Android JVM test harness with a real assertion so
-  `:app:testDebugUnitTest` cannot pass as an empty source set.
+- Shipped one CO5300 compositor with baked reactor faces, listening halo,
+  captions, choices, Watch, controls, Desk/Tools/Settings spaces, remote canvas,
+  and bounded operator surfaces.
+- Consolidated physical input: global left-edge volume, right-edge brightness,
+  horizontal space navigation, top-edge controls, glass-hold/flip privacy,
+  PWR listen/battery, and BOOT controls/ROM recovery.
+- Removed the unreliable continuous circular-rotation experiment and its dead
+  event/state path.
+- Added physical provenance so synthetic input cannot clear privacy, approve
+  consent, answer asks, or escape operator ownership.
 
-### Hardware
+### Tools, diagnostics, and OTA
 
-- **Concept-5 mascot-bust enclosure** for the AMOLED-1.75 board, under
-  `hardware/enclosure/amoled-1_75/concept-5-mascot-bust/` — chibi character
-  bust where the round AMOLED forms the face. Parametric OpenSCAD model,
-  dimensions derived from Waveshare's authoritative 3D drawing
-  (PCB ⌀46.0 mm, cover-glass ⌀48.96 mm, 3× M2 on ⌀46 mm bolt circle).
+- Added typed JarvisMCP `/device/v1/invoke`, fixed safe tools, catalog discovery,
+  policy-gated execution, local persisted level tools, and physical approval for
+  the bounded `remember` write.
+- Added the Orbit Console, paired Desk/operator clients, 128 KB incident log,
+  display mirrors, panel-touch challenge, audio self-test, and evidence-first
+  host tooling.
+- Added trusted-LAN dual-slot OTA with power/network/memory preflight, inactive
+  slot writes, 45-second health eligibility, a 120-second rollback deadline,
+  and privacy-safe recovery.
+- Kept signed application verification and authenticated update transport as
+  explicit public-release blockers.
 
-### Docs
+### Repository and documentation
 
-- `boards/waveshare/esp32s3_touch_amoled_1_75/README.md` (new) — full
-  hardware table, pin map (verified against schematic), build + flash +
-  USB-CDC onboarding + LLM config recipes, and the gotcha that
-  `llm_profile` is a protocol enum (`anthropic`/`openai`/`qwen`/
-  `qwen_compatible`), not a vendor name.
-- README.md: front-page "Supported boards" table replacing the
-  XIAO-only intro paragraph; both boards now documented as first-class
-  targets.
-- Added `docs/FINISH_PLAN.md` — shortest practical path from current baseline
-  to a finished Phase-2 release.
-- Documented OV3660 sensor swap on 2026 XIAO Sense batches in
-  `docs/CAMERA.md`; UI labels are kept hardware-neutral or `OV3660 / OV2640`.
-- Reconciled BLE audio frame size to a single canonical value in
-  `docs/PROTOCOL.md` §6.5: 20 ms / 320 samples / 644 bytes per frame
-  (4-byte header + 640 PCM bytes), with explicit fragmentation and
-  backpressure rules.
-- Added explicit HTTP error / feature-gate schema to `docs/PROTOCOL.md` §3.6
-  with `feature_gated` (405), `feature_unavailable` (503),
-  `feature_not_wired` (200 with typed body), `upstream_timeout` (504), and
-  related error codes.
-- Reconciled Phase-3 runtime in `docs/PROTOCOL.md` §7 and
-  `android/app/src/main/kotlin/.../llm/README.md` to a single canonical stack:
-  `llama.cpp` Android NDK build (not `llama.rn`) loading
-  `unsloth/gemma-4-E4B-it-GGUF` at `Q4_K_M`.
+- Rebuilt the README, documentation map, architecture, hardware, protocol,
+  build, security, support, contribution, release, and debugging guides around
+  the live 1.75C product.
+- Archived completed/superseded plans and labeled dated subsystem research.
+- Replaced dead public commands and original-board defaults with fail-closed,
+  current paths.
+- Added deterministic host suites, cockpit JavaScript validation, secret and
+  identifier scanning, link validation, and clean generated-artifact ignores.
 
-### Tooling and CI
+## Release gates still open
 
-- Added GitHub Actions CI for repository checks, dashboard JavaScript syntax,
-  patch artifact checks, secret-pattern scanning, and Android CLI build/test
-  tasks.
-- Added open-source contribution, security, support, issue, and PR templates.
-- Added Android acceptance checklist covering sync, build, install, BLE
-  permission flow, scan, connect, missing-service diagnostic, HTTP
-  status/config, chat, and camera failure messaging.
-
-## 0.1.0
-
-- Initial public JarvisNano board adaptation, dashboard, Android companion
-  scaffold, documentation, firmware patches, and enclosure concepts.
+- One clean 30-minute natural conversation soak with playback-gap telemetry.
+- Byte-budgeted, cursor-bearing JarvisMCP catalog projection under the Gemini
+  result limit.
+- Physical confirmation of final PWR, BOOT controls, and BOOT pairing semantics.
+- Signed images, authenticated encrypted OTA, and attended at-rest credential
+  protection.
+- Exact third-party notice bundle and dependency inventory for binary releases.

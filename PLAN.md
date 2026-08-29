@@ -1,51 +1,78 @@
-# PLAN — Voice-UX parity on the 1.75C ("native Gemini feel")
+# JarvisNano product plan
 
-Working plan, 2026-08-27. Milestones 1 (board port) and 2 (wake word) shipped
-(`56a799b`, `9dcfe99`). This plan closes the experience gap the owner called
-out: fluid speech, native-style barge-in, and a device that is NEVER deaf.
+Current plan, reconciled **2026-08-28**. This file contains only active work and
+release gates. Completed interaction and reliability waves are preserved in
+[`docs/ARCHIVE/PLAN-2026-08-27-waves-1-5.md`](docs/ARCHIVE/PLAN-2026-08-27-waves-1-5.md).
 
-| # | Task | Status | Acceptance criteria |
-|---|------|--------|---------------------|
-| 1 | Deaf-Idle re-arm: any session death not caused by a deliberate mute re-arms voice (with backoff) in always-ready | DONE (pending flash) | Force a session death (kill Wi-Fi 30 s or wait for StaleDeadline); device returns to Listening without touch within 60 s |
-| 2 | Wake watch as recovery net: gate on "not deliberately muted" instead of rest-ladder-only | DONE (pending flash) | With session dead and voice off (non-deliberate), saying "Jarvis" wakes + re-arms; after tap-mute or flip, "Jarvis" does NOT wake |
-| 3 | Bake `speakmic=21` as C default (runtime tune lost on every reboot) | DONE (pending flash) | Reboot → vadlog during Speaking shows user talk-over crossing the barge gate without re-tuning |
-| 4 | Barge-in end-to-end | READY FOR OWNER TEST | Every stage now measured: speak-mic 21 dB (user ~100-400 rms vs residual ~20), gate 0.10 (≈420), server START_SENSITIVITY_HIGH. vadlog + `interrupted` + stop <500 ms confirm |
-| 5 | Crackle at 2.5x gain | READY FOR OWNER TEST | Electrical taps clean (0 clipped); owner ear confirms |
-| 5b | Speaker output holes (feeder starvation) | FIXED `11e66a8` | Feeder prio 5→19 + internal stack; acoustic re-measure shows no >170 ms unexplained gaps (was 420 ms) |
-| 5c | Full-gain speak-mic experiment | CLOSED — NOT VIABLE | 24 dB rails the echo (244 samples) and residual jumps 20→229 rms; 21 dB is the C's physical optimum, recorded in commit `11e66a8` |
-| 6 | Session lifetime: reconcile `goAway` / `sessionResumption` / activity-detection config against current Live API docs | RESEARCH LANDED — implement compression/resumption | Device holds a session (or resumes seamlessly) for 30+ min unattended; no deaf windows |
-| 7 | Mystery reboot (suspect USB brownout at peak speaker+Wi-Fi current) | WATCH | Coredump partition blank = no panic; capture `rst:` banner on next natural reboot before chasing |
-| 8 | Consolidated owner test | BLOCKED on 1-5 flash | One session: converse, interrupt mid-reply, let it sleep, wake by voice — all four feel native |
+The live product is the 32 MB **Waveshare ESP32-S3-Touch-AMOLED-1.75C** running
+plain ESP-IDF v5 from `main/` and `components/jr_*`.
 
-## Elevation wave 2 (2026-08-27 evening — owner directives)
+## Shipped baseline
 
-| # | Task | Owner | Status |
-|---|------|-------|--------|
-| E1 | Seconds hand on the watch | backend | SHIPPED `05f4bc0`, verified on glass |
-| E2 | Remote canvas (any image → glass, TTL) + send-canvas.py | backend | SHIPPED `05f4bc0`, first push captured |
-| E3 | Tap redesign: tap-while-speaking = stop-talking, never privacy mute (trap killed) | backend | SHIPPED `dd5d48b` |
-| E4 | Double-tap = bloom attention; swipe-left = glance; swipe-right = watch peek | backend | SHIPPED `dd5d48b`+`db277ef`, glance captured on glass |
-| E5 | Operator lease (/api/operator/lease, owner tap reclaims) + jarvisctl lease/release | backend | SHIPPED `dd5d48b` |
-| E6 | jarvisctl operator CLI + CLAUDE.md doc | backend | SHIPPED `500b297`, live-tested |
-| E7 | Whole front experience: fades, wake bloom, listening ring, brightness slew, caption ease | glass-ux teammate | SHIPPED `dd5d48b`+`a615a52`, captures verified; choice-arc exit fade in flight |
-| E8 | Joint build/flash/verify + owner circuit | backend | FLASHED + captured; owner verdict pending |
+- Native 24 kHz full-duplex codec path with 16 kHz AEC-cleaned Gemini uplink.
+- Direct Gemini Live transport, server VAD, reconnect/re-arm policy, and
+  privacy-safe recovery.
+- One overlay compositor with baked EAF faces, listening halo, Watch, Desk,
+  Tools, Settings, controls, captions, and remote canvas.
+- One physical grammar: global left volume, global right brightness, PWR
+  listen/battery, BOOT controls, glass hold privacy.
+- Operator lease, bounded diagnostics, incident log, Wi-Fi OTA probation, and
+  deterministic host suites.
+- Typed JarvisMCP server policy and catalog search. Device-side result projection
+  is still constrained by a temporary three-result limit.
 
-## Wave 3 — gesture gaps from owner testing (2026-08-27 late; owner: "no swipe function? can't mute" / "slot is missing")
+## Active wave — cleanup, reliability, refinement
 
-| # | Gap (evidence) | Fix | Acceptance |
-|---|---|---|---|
-| W1 | **No obvious touch mute** — tap-mute removed (correctly), flip not always practical, long-press exists but owner's long_press counter = 0 (undiscovered) | Dedicate a clear mute slot: long-press becomes PURE mute/unmute toggle with "MUTED — HOLD TO RESUME" caption (pairing claim moves to shade-only); evaluate triple-tap as alternate | Owner can mute by touch in <2 s without reading docs; state always captioned |
-| W2 | Swipe L/R tolerance — owner's strokes classified vertical (log: dir=3/4, deltas ~220 px dy vs ~20 px dx); glance/peek never fired for them | Widen angular tolerance for L/R classification; require less dx dominance | Owner's natural sideways stroke fires glance/peek reliably |
-| W3 | Recognized-gesture feedback — a swipe that IS recognized shows its action, but a near-miss shows nothing, reading as "swipes don't work" | Brief on-glass hint on any unclassified swipe ("↕ shade · ↔ glance/watch") | No gesture attempt ends in silent nothing |
-| W4 | Gesture discoverability — every gesture tonight was learned via chat | Shade gains a one-card gesture guide; consider first-boot card | Owner never needs the chat cheat-card again |
-| W5 | Flip-mute unverified on the C by the owner | Owner test: flip face-down mutes <1.5 s, face-up resumes; fix orientation thresholds if not | Verified by owner's hands, logged |
+Every behavioral row closes on physical 1.75C evidence, not compilation alone.
 
-## Elevation backlog (after reliability — reliability IS the elevation)
+| # | Priority | Deliverable | Status | Acceptance gate |
+|---|---|---|---|---|
+| N6.1 | P0 | Ship one interaction grammar; delete circular-rotation experiment | LIVE; PWR/BOOT hand proof pending | No rotate symbols; PWR short listens without muting; BOOT short toggles controls; BOOT hold opens one 60-second pairing claim; edge levels work from every surface |
+| N6.2 | P0 | Add playback-gap and ring-low-watermark telemetry | PENDING | Live diagnostics expose underruns, maximum empty gap, low-watermark, and DAC failures; 60 s reply has no unexplained gap >120 ms |
+| N6.3 | P0 | Byte-budget JarvisMCP results with cursor projection | TEMPORARY 3-result cap | Every normalized result is valid JSON ≤3071 bytes with `has_more` and cursor; voice search plus one returned read-only tool execute without `bad_response` |
+| N6.4 | P0 | Run uninterrupted powered conversation soak | PENDING N6.2/N6.3 | 30 min with TX drops/deaths/flush errors 0, playback gaps ≤120 ms, largest internal block ≥16 KB, and final state Listening |
+| N6.5 | P1 | Split `main/main.c` at existing ownership seams | PENDING | Input/buttons, HTTP diagnostics, and voice/power policy become three modules; `main.c` <4,000 lines; all builds/suites pass |
+| N6.6 | P1 | Make one canonical host-test command | PENDING | One command runs core, transport, display, tool-template, desk CLI, and shell suites; CI calls it |
+| N6.7 | P1 | Remove repository/document truth drift | IN PROGRESS | Root plan is current-only; historical plans are archived/labeled; all relative links resolve; no obsolete interaction claims remain |
+| N6.8 | P1 | Consolidate visual interaction specification | DOCS ALIGNED; final capture set pending | Vision, hardware, and protocol agree; Jarvis, Watch, controls, privacy, and side-space captures match |
+| N6.9 | P1 | Raise settled controls cadence | PENDING | Full controls remain present at ≥14 FPS, zero flush errors, largest internal block ≥24 KB |
+| N6.10 | P1 | Prewarm face assets without blocking short turns | PENDING | First Think and Speak apply in <150 ms; stale requested phases never flash late |
+| N6.11 | P2 | Add rolling frame/network-burst diagnostics | PENDING | Health exposes 1 s frame-gap max/p95 and rate-limited backpressure bursts; healthy Listening p95 ≤75 ms |
+| N6.12 | P2 | Move stillness detection to proven QMI8658 INT2 | PENDING HARDWARE PROBE | Scope-prove pin first; preserve flip/shake/lift; still task wakes <2/s |
+| N6.13 | P0 release | Complete authenticated, signed OTA | BLOCKED ON RELEASE CREDENTIALS | Wrong-key/unsigned images fail before write; upload is authenticated; Secure Boot eFuse remains separately attended |
+| N6.14 | P0 release | Protect Wi-Fi and cloud credentials at rest | BLOCKED ON ATTENDED KEY PROVISIONING | NVS/flash encryption is enabled through a separately attended procedure; a physical flash read cannot recover credentials; recovery is documented and tested |
+| N6.15 | P0 release | Ship complete third-party notices and dependency inventory | PENDING | The exact resolved firmware dependencies, versions, licenses, and required notice texts are generated after build and attached to every binary release |
 
-| Idea | Note |
-|---|---|
-| Server VAD sensitivity tuning (`automaticActivityDetection`) | Make Gemini itself hear talk-over — primary barge path, local gate as fallback |
-| Session resumption + context compression | Always-on desk presence without session cliffs |
-| AXP2101 PKEY power-button gesture | C-board unlock (button readable via I2C now) |
-| Wake feedback moment ("YES?" bloom + chirp) | The wake already works; make it delightful |
-| Boot-to-ready time budget | Measure + trim the 5 s cold boot |
+## Execution order
+
+1. **Correctness:** N6.1–N6.4.
+2. **Maintainability:** N6.5–N6.8.
+3. **Performance/hardware:** N6.9–N6.12.
+4. **Public release:** N6.13–N6.15 after credentials and attended device access exist.
+
+## Release gates
+
+- One clean 30-minute voice soak with the counters in N6.4.
+- Physical PWR, BOOT, both edge controls, glass privacy, flip privacy, and ROM
+  downloader recovery witnessed on the target board.
+- Host build/test command and release ESP-IDF build both green from a clean
+  checkout.
+- Relative-link, conflict-marker, secret, and generated-artifact checks clean.
+- Signed image verification and authenticated OTA proven with both positive and
+  negative cases.
+- At-rest credential protection proven against a physical flash/NVS read.
+- Exact third-party notice bundle and dependency inventory attached to the
+  firmware release.
+
+## Safety invariants
+
+- Synthetic input cannot clear privacy, answer asks, approve consent, or escape
+  operator ownership.
+- Remote repair never clears physical hold/flip privacy.
+- Brightness is a user ceiling; moods may dim below it, never exceed it.
+- Low contiguous memory refuses canvas, snapshot, OTA, or self-test before it
+  endangers TLS/voice.
+- Screenshots are software submission mirrors, not panel readback. PCM taps prove
+  codec-write data, not audible output.
+- No keys, tokens, private/device-specific endpoints or addresses, SSIDs, NVS
+  images, or device logs enter the repository.

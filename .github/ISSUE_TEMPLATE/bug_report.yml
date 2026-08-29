@@ -1,13 +1,17 @@
 name: Bug report
-description: Report a firmware, dashboard, Android, or hardware issue.
+description: Report a reproducible JarvisNano 1.75C firmware, hardware, tooling, or documentation defect.
 title: "[Bug]: "
 labels: ["bug"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        The supported product target is the 32 MB Waveshare ESP32-S3-Touch-AMOLED-1.75C. Remove credentials, tokens, addresses, SSIDs, MACs, NVS/flash dumps, private endpoints, and personal assistant content before submitting.
   - type: textarea
     id: summary
     attributes:
       label: Summary
-      description: What happened?
+      description: What failed, and what user-visible behavior did you expect?
     validations:
       required: true
   - type: dropdown
@@ -15,36 +19,38 @@ body:
     attributes:
       label: Area
       options:
-        - Firmware
-        - Dashboard
-        - Android
-        - Hardware
+        - 1.75C firmware/build
+        - Voice/audio/Gemini
+        - Display/touch/buttons
+        - Motion/power/hardware
+        - JarvisMCP/tools/HTTP/OTA
+        - Host CLI/diagnostics
         - Documentation
+        - Compatibility or historical track
     validations:
       required: true
   - type: textarea
     id: reproduce
     attributes:
-      label: Steps to reproduce
-      description: Include commands, URLs, wiring, and browser/phone details.
+      label: Minimal reproduction
+      description: Include the exact command or physical sequence, starting state, and frequency. Do not include secrets or private identifiers.
     validations:
       required: true
-  - type: textarea
-    id: expected
-    attributes:
-      label: Expected behavior
-    validations:
-      required: true
-  - type: textarea
-    id: logs
-    attributes:
-      label: Logs or screenshots
-      description: Remove Wi-Fi passwords, API keys, bot tokens, and private paths.
-      render: text
   - type: textarea
     id: environment
     attributes:
       label: Environment
-      description: Board, host OS, browser, Android phone/version, firmware commit.
+      description: Exact board revision, source commit, working-tree state, host OS, build command, and flash/OTA path.
     validations:
       required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Add sanitized counters/log excerpts. For panel, button, touch, motion, or audible-output claims, include physical evidence and distinguish it from software mirrors or PCM taps.
+      render: text
+  - type: textarea
+    id: attempted
+    attributes:
+      label: What you tried
+      description: List relevant diagnostics and whether privacy, operator mode, or OTA probation was active.

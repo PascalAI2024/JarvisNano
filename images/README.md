@@ -10,20 +10,17 @@ Brand assets for JarvisNano. Palette matches [Ingenious Digital](https://ingenio
 | [`logo-secondary.png`](logo-secondary.png) | Secondary stamp | Hex-frame JR monogram. Use sparingly — page footers, hardware etch, document watermark. |
 | [`wordmark.png`](wordmark.png) | README banner / lockup | Two-line "JARVIS / NANO" with mark on the left, mirrors Ingenious Digital header structure. |
 | [`mascot.png`](mascot.png) | Lineup add / hero portrait | Full-body chibi on a glowing orange ring — drops into the IGD 5-mascot lineup as #6 (*The J.A.R.V.I.S. — Voice Companion*). |
-| [`mascot-bust.png`](mascot-bust.png) | Avatar / social card | Bust crop with neon J on chest plate. Ideal as GitHub social preview or Discord/Telegram avatar. |
-| [`hero.png`](hero.png) | README hero | Phase-3 product render — Monolith with round AMOLED on, orange waveform, glowing under-ring. |
+| [`mascot-bust.png`](mascot-bust.png) | Avatar | Bust crop with neon J on chest plate. |
+| [`hero.png`](hero.png) | README / GitHub social preview | Wide product render with round AMOLED, orange waveform, and glowing under-ring. |
 | [`hero-phase2.png`](hero-phase2.png) | Roadmap Phase 2 illustration | Modern smoked-oak cabinet, orange backlit grille, round screen. Anchors the speaker phase. |
 | [`exploded-view.png`](exploded-view.png) | Hardware docs | Architectural exploded isometric of the Monolith. |
 | [`cross-section.png`](cross-section.png) | Hardware docs | Side-view cutaway showing internal stack. |
 
 ## Subdirs
 
-- [`dashboard/`](dashboard/) — live dashboard screenshots in demo mode (sensitive values masked):
-    - `cockpit.png` — README hero (Cockpit tab with all telemetry tiles populated).
-    - `cockpit-tab.png` — same as cockpit.png; canonical alias.
-    - `flash-tab.png` — ESP Web Tools install panel.
-    - `settings-tab.png` — full editable config form.
-    - `onboard-step1.png` — first-boot wizard welcome step.
+- [`dashboard/`](dashboard/) — historical XIAO/ESP-Claw dashboard screenshots
+  with masked values. The live 1.75C console is embedded from
+  `main/diagnostics.html`; do not use these screenshots as current product proof.
 - [`igd-rebrand/`](igd-rebrand/) — full source set of the brand-aligned generation pass (mascot variants, 3 logo concepts, 3 product hero variants, full mascot lineup). Keep as masters; the canonical `logo.png` / `wordmark.png` etc. above are copies.
 - [`enclosure/`](enclosure/) — 8 enclosure concept renders (4 exploded views + 1 cross-section + 3 Phase-3 hero shots) covering Monolith / Cube / Egg / Radio.
 - [`early-concepts/`](early-concepts/) — first-pass non-IGD-aligned renders. Kept for provenance only; don't use in marketing.

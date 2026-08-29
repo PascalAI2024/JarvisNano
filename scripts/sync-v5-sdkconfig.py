@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import os
 from pathlib import Path
 
 
@@ -60,6 +61,26 @@ def synchronized_text(current: str, desired: dict[str, str]) -> str:
     return "\n".join(output) + "\n"
 
 
+
+def validate_runtime_config(text: str) -> None:
+    board = os.environ.get("BOARD_NAME", "")
+    if board != "esp32s3_touch_amoled_1_75c":
+        return
+    required = (
+        "CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y",
+        'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_32MB.csv"',
+        "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y",
+        "CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y",
+        "CONFIG_ESP_WS_CLIENT_TX_LOCK_TIMEOUT_MS=20",
+    )
+    missing = [line for line in required if line not in text]
+    if missing:
+        joined = ", ".join(missing)
+        raise SystemExit(
+            "1.75C runtime sdkconfig is stale; run "
+            f"RECONFIGURE=1 scripts/build-v5.sh (missing: {joined})"
+        )
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true")
@@ -69,6 +90,7 @@ def main() -> int:
         raise SystemExit(f"missing sdkconfig: {SDKCONFIG}")
     current = SDKCONFIG.read_text(encoding="utf-8")
     updated = synchronized_text(current, desired_lines())
+    validate_runtime_config(updated)
     if args.check:
         if current != updated:
             raise SystemExit("sdkconfig is not synchronized with generated board defaults")

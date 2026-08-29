@@ -3,9 +3,10 @@
  *
  * jr_tools — bounded asynchronous JarvisMCP function-tool worker.
  *
- * This component is deliberately narrower than a generic code executor.  The
- * model may select one of the allowlisted tool names and provide JSON args;
- * only fixed, locally-owned templates can reach the JarvisMCP /act endpoint.
+ * This component is deliberately narrower than a generic code executor. The
+ * typed device route accepts only allowlisted tool names and JSON arguments;
+ * legacy /act compatibility uses fixed, locally-owned templates. Model-supplied
+ * code never crosses either path.
  */
 #ifndef JR_TOOLS_JR_TOOLS_H
 #define JR_TOOLS_JR_TOOLS_H
@@ -106,9 +107,9 @@ bool jr_tools_poll(jr_tool_result_t *out);
 
 const char *jr_tools_status_name(jr_tool_status_t status);
 
-/* Pure allowlist/template seam. This is public for isolated host tests and
- * diagnostics; it never accepts caller-supplied code. On success, out contains
- * one fixed-template JavaScript statement for the /act gateway. */
+/* Pure allowlist/template seam for the legacy /act compatibility path. This is
+ * public for isolated host tests and diagnostics; it never accepts
+ * caller-supplied code. */
 typedef enum {
     JR_TOOL_TEMPLATE_OK = 0,
     JR_TOOL_TEMPLATE_UNKNOWN_TOOL,

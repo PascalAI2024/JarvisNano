@@ -318,7 +318,7 @@ tap-to-listen battery life with hands-free feel once it's in your hand.
 ### 4.1 Rendering reality — what the engine *can* do (read this first)
 Earlier drafts assumed a runtime pixel canvas. **That path is dead and proven dead on hardware:**
 `esp_emote_gfx` has **no `gfx_canvas`**; feeding a runtime CPU-drawn buffer to `gfx_img_set_src`
-renders garbage (`WAVEFORM_ENABLED = 0`; see [`docs/reference/display-emote-gfx.md`](reference/display-emote-gfx.md)).
+renders garbage (`WAVEFORM_ENABLED = 0`; see [`docs/reference/display-emote-gfx.md`](../reference/display-emote-gfx.md)).
 So the whole interaction language below is built from the **sanctioned, flash-baked toolset** —
 which, used well, is plenty:
 
@@ -438,7 +438,7 @@ Small, rare, delightful — never gimmicky:
 - **Asset/partition budget.** New baked `.aaf` sequences (transitions, personality loops) live in
   the `emote` flash partition (recently bumped 6 → 6.875 MB). Prefer `gfx_motion` tweens of a few
   reusable baked sprites over baking many full-screen sequences — saves flash and keeps it smooth.
-  Pack via `esp_mmap_assets` (see [`docs/reference/asset-pipeline.md`](reference/asset-pipeline.md));
+  Pack via `esp_mmap_assets` (see [`docs/reference/asset-pipeline.md`](../reference/asset-pipeline.md));
   byte-swap with `image_converter.py --swap16` for the CO5300 QSPI panel.
 - **Theming & brightness.** Palette + brightness in `identity.md` / `POST /api/config`; **night
   dimming on the RTC schedule** + AXP2101 backlight-rail control (no ambient-light sensor on board;

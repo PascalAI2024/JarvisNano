@@ -1,0 +1,12 @@
+# Default maintainer for all public changes.
+* @PascalAI2024
+
+# Load-bearing firmware and release surfaces.
+/main/ @PascalAI2024
+/components/ @PascalAI2024
+/boards/waveshare/esp32s3_touch_amoled_1_75c/ @PascalAI2024
+/scripts/ @PascalAI2024
+/partitions_32MB.csv @PascalAI2024
+/sdkconfig.defaults @PascalAI2024
+/SECURITY.md @PascalAI2024
+/.github/ @PascalAI2024

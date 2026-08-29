@@ -1,10 +1,11 @@
-# Waveshare ESP32-S3-Touch-AMOLED-1.75
-# ESP32-S3R8: 16 MB flash, 8 MB octal PSRAM
+# Original Waveshare ESP32-S3-Touch-AMOLED-1.75 compatibility reference.
+# Not consumed by the supported release build. ESP32-S3R8: 16 MB flash,
+# 8 MB octal PSRAM.
 CONFIG_IDF_TARGET="esp32s3"
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
-# 16 MB QIO flash @ 80 MHz
-CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+# Historical CO5300-safe flash geometry: 16 MB DIO @ 80 MHz.
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 
@@ -32,52 +33,3 @@ CONFIG_ESP_BOARD_PERIPH_I2S_SUPPORT=y
 
 # Touch screen (CST9217 has known broken READ_ID register; skip the probe).
 # Matches the pattern esp_vocat uses for CST816S.
-
-CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
-CONFIG_LOG_DEFAULT_LEVEL_INFO=y
-
-# The AMOLED/emote path is timing-sensitive. Debug optimization (-O0) makes the
-# face look broken even when the rendering code is correct.
-CONFIG_COMPILER_OPTIMIZATION_PERF=y
-CONFIG_COMPILER_OPTIMIZATION_LEVEL_RELEASE=y
-
-# lwIP TCP TX buffer + window (root-cause #1, Part B). The default send buffer is
-# 5760 B (4xMSS). A Wi-Fi RTT spike fills it, the WS poll-write times out and
-# returns 0, and esp_websocket_client treats that benign would-block as fatal —
-# aborting the socket and (before the in-session resume) dropping the whole voice
-# session to IDLE. Tripling the buffer + window to 16 KB lets a brief stall be
-# absorbed instead of stalling the writer to a write-0. PSRAM is plentiful (8 MB),
-# so the extra per-socket TCP memory is free here.
-#
-# NOTE (INERT COPY): this sdkconfig.defaults.board file is NOT consumed by the
-# build. The override that actually reaches the generated sdkconfig is the
-# bootstrap.sh apply_ui_sdkconfig_seed heredoc — tune the value THERE, not here.
-# These two lines are kept as rationale near the board definition only.
-CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
-CONFIG_LWIP_TCP_WND_DEFAULT=16384
-
-# Lua display module — provides the display_hal 2D drawing API (fill_arc,
-# draw_text, draw_jpeg, ...) that firmware/ui_layer renders the interactive,
-# tappable UI with (choice arcs, data panels, images, radial menu). display_hal
-# lives inside lua_module_display, which only builds when the Lua capability +
-# this module are enabled. The shipping firmware had CAP_LUA on (the persisted
-# sdkconfig carried it); declaring it here makes the interactive-UI build
-# reproducible across a clean/fullclean regeneration instead of silently
-# dropping display_hal and failing to resolve ui_layer's REQUIRES.
-CONFIG_APP_CLAW_CAP_LUA=y
-CONFIG_APP_CLAW_LUA_MODULE_DISPLAY=y
-CONFIG_APP_CLAW_ENABLE_EMOTE=y
-
-# Scheduler, external IM demo bridges, and firmware MCP are optional for
-# JarvisNano and were boot-time failure points on this 8 MB PSRAM / constrained
-# internal-SRAM target. MCP is still available from the Mac/Codex side; the
-# device firmware must first keep the display, diagnostics, and Gemini path
-# stable. The build-enforced copy is in scripts/bootstrap.sh because this board
-# defaults file is currently inert.
-# CONFIG_APP_CLAW_CAP_SCHEDULER is not set
-# CONFIG_APP_CLAW_CAP_IM_QQ is not set
-# CONFIG_APP_CLAW_CAP_IM_FEISHU is not set
-# CONFIG_APP_CLAW_CAP_IM_TG is not set
-# CONFIG_APP_CLAW_CAP_IM_WECHAT is not set
-# CONFIG_APP_CLAW_CAP_MCP_CLIENT is not set
-# CONFIG_APP_CLAW_CAP_MCP_SERVER is not set

@@ -1,33 +1,74 @@
 # Hardware
 
-> **v1 board is Waveshare.** Pin-accurate Waveshare notes:
-> [`boards/waveshare/esp32s3_touch_amoled_1_75/README.md`](../boards/waveshare/esp32s3_touch_amoled_1_75/README.md)
-> and [`reference/waveshare-amoled-175.md`](reference/waveshare-amoled-175.md).
-> The body below is the older **XIAO ESP32-S3 Sense** map. Do not wire a
-> Waveshare board from the XIAO GPIO table.
+The live product target is the **Waveshare ESP32-S3-Touch-AMOLED-1.75C**.
+The [official C-board manual and examples](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.75C)
+and the pin-accurate local definition
+[`boards/waveshare/esp32s3_touch_amoled_1_75c/`](../boards/waveshare/esp32s3_touch_amoled_1_75c/)
+are the hardware sources of truth. Do not apply the XIAO or original-1.75 pin
+maps to the C revision.
 
-JarvisNano supports two boards. This file documents the **XIAO ESP32-S3 Sense**
-(the original target) in full. The **Waveshare ESP32-S3-Touch-AMOLED-1.75** has
-its own complete hardware reference at
-[`boards/waveshare/esp32s3_touch_amoled_1_75/README.md`](../boards/waveshare/esp32s3_touch_amoled_1_75/README.md);
-a summary table is below. The latest live hardware-debug handoff is in
-[`NEXT_SESSION.md`](NEXT_SESSION.md).
+## Live 1.75C capability map
 
-## Board comparison
+| Subsystem | Hardware | Live use |
+|---|---|---|
+| Compute | ESP32-S3R8, dual-core 240 MHz | Voice owner, display compositor, sensors, HTTP control |
+| Memory | 8 MB octal PSRAM | face assets, snapshots, audio/log/VAD rings, worker stacks |
+| Flash | **32 MB DIO @ 80 MHz** | dual 4 MB OTA slots, emote assets, WakeNet model, FAT fallback |
+| Display | CO5300 466×466 QSPI AMOLED | baked reactive faces plus one procedural overlay compositor |
+| Touch | CST9217 IRQ-driven capacitive panel | tap, 850 ms hold, four-way swipe, choice actions, synthetic-event provenance |
+| Audio | ES7210 dual mic + echo reference; ES8311 DAC | 24 kHz shared full-duplex clock, 16 kHz AEC-clean uplink, native Gemini server VAD |
+| Motion | QMI8658 | ±8 g accelerometer at 125 Hz ODR, sampled every 10 ms for flip/shake/lift/orientation; gyro off |
+| Power | AXP2101 | 1 Hz battery/voltage/USB/charge telemetry, PKEY, charging animation |
+| Network | 2.4 GHz Wi-Fi | direct Gemini Live, JarvisMCP, diagnostics, OTA; modem sleep only while voice/operator/OTA are parked |
+| USB | native USB-Serial-JTAG | initial provisioning and recovery |
 
-| Spec | XIAO ESP32-S3 Sense | Waveshare AMOLED-1.75 |
-| --- | --- | --- |
-| MCU | ESP32-S3R8 240 MHz | ESP32-S3R8 240 MHz |
-| Flash | 8 MB | **16 MB** |
-| PSRAM | 8 MB octal | 8 MB octal |
-| Display | none (Phase-3 add-on) | **1.75" AMOLED 466×466, CO5300 QSPI** |
-| Touch | none | **CST9217 capacitive** |
-| Mic | 1× PDM (on-board) | **2× MEMS via ES7210, hardware AEC** |
-| Speaker path | PDM-TX → PAM8002A | **ES8311 codec → MX1.25 → external 28 mm** |
-| Camera | OV3660 / OV2640 | none |
-| GNSS | no | LC76G on -B SKUs |
-| USB | native USB-Serial-JTAG | native USB-Serial-JTAG |
-| App CLI | disabled (heap) | enabled |
+### Physical interaction grammar
+
+| Input | Runtime action |
+|---|---|
+| PWR short press | Wake/re-arm voice and show `LISTENING`; never mutes |
+| PWR long press | Show battery/charging status; the PMIC still owns its forced-cut hold |
+| BOOT short press (runtime) | Open/close the controls shade |
+| BOOT hold 1.5–5 s (runtime) | Open a visible 60-second pairing claim window |
+| BOOT held during reset | Enter the ESP32-S3 ROM downloader; not an application gesture |
+| Left-edge vertical swipe | Volume +/− 5 from any screen |
+| Right-edge vertical swipe | Brightness +/− 5 from any screen |
+| Horizontal swipe | Navigate Jarvis/Desk/Tools/Settings |
+| Top-edge swipe down | Open controls |
+| Centre swipe up | Open detail or close controls |
+| Double tap | Return to Jarvis Home |
+| Glass hold | Physical privacy mute/unmute |
+| Sustained face-down / face-up | Enter flip privacy / clear only a flip-origin mute |
+
+The edge-swipe classifier is deliberate: the CST9217 reliably reports vertical
+start/end trajectories but did not produce stable continuous circular samples.
+There is one production gesture path, not a hidden rotary fallback.
+
+The 1.75C **does not have** the original board’s TCA9554, PCF85063 RTC, or
+microSD slot. Wall time is SNTP-backed. Diagnostics persist only in the bounded
+128 KB PSRAM log ring until fetched.
+
+## Binding constraints
+
+1. Largest contiguous internal RAM, not total PSRAM, gates TLS/AES and display
+   DMA. Preserve at least an 8 KB block at steady state and measure after every
+   release-shaped change.
+2. The CO5300 path requires 12-row internal-DMA strips. Do not add LVGL or a
+   second renderer beside the existing compositor.
+3. Realtime voice, OTA, provisioning, and operator mode force full Wi-Fi radio
+   availability. WHISPER/DREAM may use minimum modem sleep. CPU frequency,
+   light sleep, and PMIC rails remain blocked on physical latency/current and
+   wake-source measurements.
+4. QMI8658 still polls. INT wake is the next safe utilization step only after
+   the **C-revision** schematic/pin is proven; original-board GPIO21/expander
+   claims do not transfer.
+
+## Compatibility tracks
+
+The original Waveshare 1.75 is a 16 MB hardware/source reference with
+RTC/microSD; it is not a current release build. The Seeed XIAO ESP32-S3 Sense
+remains a camera experiment. The sections below document that XIAO wiring only;
+they are not instructions for the live product.
 
 ## XIAO ESP32-S3 Sense at a glance
 
@@ -229,7 +270,7 @@ This phase will need a new `spi_display` peripheral entry in
 
 Total Phase 1: **~$19**. Phase 2 (PAM8002A path): **+$7**. Phase 3 (touchscreen + enclosure): **+$14**.
 
-## Power budget
+## XIAO reference power budget
 
 Order-of-magnitude figures, USB-C 5 V input:
 

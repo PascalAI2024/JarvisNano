@@ -9,8 +9,8 @@ anyone auditing the repo. That is the mechanical reason the project reached
 2026-07-18 with no in-repo evidence that the v5 image had ever booted, despite
 it booting fine. Evidence that isn't tracked isn't evidence.
 
-**The rule** (see `docs/JARVISNANO_OS_PLAN.md`): no phase closes without a
-photo, video, or log of the device, committed here. A green test suite does not
+**The rule** (see `docs/ARCHIVE/JARVISNANO_OS_PLAN.md`): no phase closes without
+a photo, video, or log of the device, committed here. A green test suite does not
 substitute — the project had 90 passing host tests and a 3,000-turn soak while
 the display gap went unnoticed.
 
@@ -20,9 +20,9 @@ Device-specific identifiers are banned from this repo (see `CLAUDE.md`). Strip
 them from every capture: IPv4/IPv6 addresses, MAC addresses, SSIDs, bearer
 tokens, API keys. Run `./scripts/check-secrets.sh` before committing.
 
-Note that `check-secrets.sh` will also flag the `jr_memory` guard's own
-detection patterns and test vectors (`components/jr_memory/`) — those are
-intentional fixtures, not leaks.
+The scanner explicitly excludes `jr_memory`’s detector implementation and
+synthetic guard test vectors; those files contain the literals they are designed
+to reject.
 
 ## Contents
 
@@ -40,5 +40,6 @@ intentional fixtures, not leaks.
 | `20260719-ask-real-gemini.png` | Real Gemini `ask_user` on glass. |
 | `20260719-ask-long-labels.png` | Long choice labels still hit-testable. |
 | `20260719-hud-listening.png` | Listening state on the baked face. |
+| `20260814-mood-rtc-flash-report.md` | Historical hardware flash report for the mood ladder and PCF85063 RTC, including four defects found and their on-device re-verification. |
 | `20260718-v5-boot-after-phase0.log` | The Phase 0 cleanup did not regress the device: identical boot path after removing the `jr_transport.c` placeholder, the `jr_vad_*` stub and `jr_dsp_resample_linear`, and after adding `hud_render.c` to the `jr_display` SRCS. |
-| `20260718-v5-boot.log` | v5 boots clean on the Waveshare 1.75" AMOLED: PSRAM 8 MB, SD mounted, CST9217 touch IRQ-driven, CO5300 466×466 @ 24 fps with 12-row internal DMA strips, emote assets mounted (3,929,405 / 6,619,121 bytes), faces 0/1/2 rendering, Wi-Fi associated, ES7210 MIC1+MIC2+MIC3 enabled, audio adc+dac+aec up, Gemini Live TLS + handshake → Listening, VAD firing. Two open issues visible: `sta disconnected (reason=2/205)` retries before association, and `transport_ws: Error transport_poll_write(0)` at ~23 s. |
+| `20260718-v5-boot.log` | Historical boot proof from the earlier 1.75-inch board revision: PSRAM, SD, CST9217, CO5300, EAF assets, Wi-Fi, codec/AEC, and Gemini Live reached Listening. Its SD observation is not a 1.75C hardware claim; the primary 1.75C has no microSD slot. The log also preserves the then-open association retries and `transport_poll_write(0)` misclassification. |

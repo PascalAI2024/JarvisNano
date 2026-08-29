@@ -34,13 +34,10 @@ static const char *TAG = "jr_ws";
  * Frames whose total payload exceeds this are dropped (bounded memory). */
 #define JR_WS_DEV_RX_MAX     JR_GEMINI_RX_MAX
 #define JR_WS_DEV_RING_DEPTH 24
-/* Send timeout: short enough to never stall the pump, long enough that a small
- * RTT spike returns 0 (would-block, buffered) instead of a partial write. */
-/* Lock-acquire patience for a WS send. Raised 30->60: under server-VAD the tx
- * (mic uplink) contends with heavy rx audio for the single ws-client lock;
- * 30 ms (3 ticks) lost the race constantly and floods "Could not lock
- * ws-client". 60 ms still bounds the voice-loop stall below the 128 ms batch. */
-#define JR_WS_DEV_SEND_TO_MS 60
+/* Separate TX locking avoids receive contention. A 20 ms socket wait stays
+ * below one 32 ms capture frame while absorbing ordinary Wi-Fi jitter; the
+ * two-frame uplink batch halves call pressure without exceeding the TX slot. */
+#define JR_WS_DEV_SEND_TO_MS 20
 
 /* A reassembled inbound frame handed to recv_frame() (heap, PSRAM-first). */
 typedef struct {
@@ -245,9 +242,14 @@ static jr_ws_send_result_t dev_send_bytes(void *ctx, const uint8_t *buf, size_t 
     int sent = esp_websocket_client_send_text(s_ws.client, (const char *)buf,
                                               (int)len, pdMS_TO_TICKS(JR_WS_DEV_SEND_TO_MS));
     if (sent == (int)len) {
-        r.kind = JR_WS_TX_OK;      r.sent = (size_t)sent;
+        r.kind = JR_WS_TX_OK;
+        r.sent = (size_t)sent;
     } else if (sent > 0) {
-        r.kind = JR_WS_TX_PARTIAL; r.sent = (size_t)sent;
+        /* esp_websocket_client_send_text is a message API, not a resumable
+         * byte stream. A short send cannot be continued with another text
+         * opcode without corrupting JSON framing; reconnect cleanly. */
+        s_ws.state = JR_WS_ERROR;
+        r.kind = JR_WS_TX_CLOSED;
     } else if (sent == 0) {
         /* poll_write timed out with the socket still up: BACKPRESSURE, not a
          * teardown. THE fix — never abort here. */

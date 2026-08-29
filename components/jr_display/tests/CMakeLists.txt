@@ -21,5 +21,24 @@ add_executable(jr_display_hud_tests
 target_include_directories(jr_display_hud_tests PRIVATE ../include)
 target_compile_options(jr_display_hud_tests PRIVATE -Wall -Wextra -Werror)
 
+# The spatial shell lives in jr_display.c, which does touch IDF. It is pulled
+# into the test's own translation unit (not linked) so the tests can assert on
+# render-task state without widening the public API for testing's sake; the
+# IDF surface comes from probe/stubs, the same set the visual probe uses.
+add_executable(jr_display_shell_tests
+    test_shell.c
+    ../src/hud_render.c
+)
+target_include_directories(jr_display_shell_tests PRIVATE
+    ../include
+    ../src
+    ../../jr_ports/include
+    probe/stubs
+)
+target_compile_options(jr_display_shell_tests PRIVATE
+    -Wall -Wextra -Werror -Wno-unused-function
+)
+
 enable_testing()
 add_test(NAME jr_display_hud_tests COMMAND jr_display_hud_tests)
+add_test(NAME jr_display_shell_tests COMMAND jr_display_shell_tests)

@@ -314,9 +314,9 @@ def rgb565_be_to_ppm(data: bytes, width: int, height: int) -> bytes | None:
     return f"P6\n{width} {height}\n255\n".encode("ascii") + rgb
 
 
-def fetch_display_ppm(dev: Device, query: str = "") -> tuple[int, dict[str, str], bytes]:
+def fetch_display_ppm(dev: Device) -> tuple[int, dict[str, str], bytes]:
     """Prefer the smaller exact RGB565 route; fall back to legacy PPM."""
-    code, headers, raw = dev.get_bytes(f"/api/display/snapshot.rgb565{query}")
+    code, headers, raw = dev.get_bytes("/api/display/snapshot.rgb565")
     if code == 200:
         try:
             width = int(header_value(headers, "X-Jarvis-Display-Width"))
@@ -328,7 +328,7 @@ def fetch_display_ppm(dev: Device, query: str = "") -> tuple[int, dict[str, str]
             converted_headers = dict(headers)
             converted_headers["X-Jarvis-Mirror-Transport"] = "rgb565"
             return code, converted_headers, ppm
-    return dev.get_bytes(f"/api/display/snapshot.ppm{query}")
+    return dev.get_bytes("/api/display/snapshot.ppm")
 
 
 def wav_info(data: bytes) -> dict[str, Any] | None:
@@ -671,8 +671,7 @@ def convert_ppm_to_png(ppm_path: str) -> str | None:
 def command_screen(args: argparse.Namespace) -> int:
     dev = Device(args.host, args.timeout)
     info_result = capture_display_info(dev)
-    query = "?save=1" if args.save_sd else ""
-    code, headers, data = fetch_display_ppm(dev, query)
+    code, headers, data = fetch_display_ppm(dev)
     if code != 200:
         detail = data.decode("utf-8", errors="replace")[:500]
         print_check("FAIL", f"/api/display/snapshot.ppm http={code}", detail)
@@ -704,9 +703,6 @@ def command_screen(args: argparse.Namespace) -> int:
             "display evidence scope",
             "software mirror/control-path evidence; physical panel remains camera/person verified",
         )
-    saved_path = header_value(headers, "X-Jarvis-Saved-Path")
-    if saved_path:
-        print_check("OK", "device SD copy", saved_path)
     frame = header_value(headers, "X-Jarvis-Display-Frame")
     if frame:
         header_dims = (
@@ -757,7 +753,6 @@ def command_display_test(args: argparse.Namespace) -> int:
             host=args.host,
             timeout=args.timeout,
             tail=args.tail,
-            save_sd=False,
             png=True,
             logs=False,
         )
@@ -1075,69 +1070,9 @@ def command_evidence(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_restart(args: argparse.Namespace) -> int:
-    dev = Device(args.host, args.timeout)
-    before_uptime = None
-    try:
-        _, _, health = dev.get("/api/health")
-        if isinstance(health, dict):
-            before_uptime = health.get("uptime_ms")
-    except Exception:
-        pass
-
-    code, _, body = dev.post("/api/restart", {})
-    print_check("OK" if 200 <= code < 300 else "FAIL", f"POST /api/restart http={code}", short_json(body))
-    if not (200 <= code < 300):
-        return 1
-
-    saw_down = False
-    deadline = time.time() + args.wait
-    while time.time() < deadline:
-        time.sleep(args.interval)
-        try:
-            code, _, body = dev.get("/api/health")
-            if code == 200 and isinstance(body, dict):
-                uptime = body.get("uptime_ms")
-                if saw_down or before_uptime is None or (isinstance(uptime, (int, float)) and uptime < before_uptime):
-                    print_check("OK", "device back online", short_json(body))
-                    return 0
-                print_check("WAIT", "device still online", f"uptime_ms={uptime}")
-            else:
-                saw_down = True
-                print_check("WAIT", f"health http={code}", short_json(body))
-        except Exception as exc:  # noqa: BLE001
-            saw_down = True
-            print_check("WAIT", "device down", str(exc)[:160])
-    print_check("FAIL", "device did not return after restart", f"timeout={args.wait}s")
-    return 1
-
-
-def command_face(args: argparse.Namespace) -> int:
-    dev = Device(args.host, args.timeout)
-    body = {"state": args.state}
-    if args.amp is not None:
-        body["amp"] = args.amp
-    code, _, payload = dev.post("/api/display/face", body)
-    print_check("OK" if 200 <= code < 300 else "FAIL", f"POST /api/display/face http={code}", short_json(payload))
-    if not (200 <= code < 300):
-        return 1
-    if args.screen:
-        args.save_sd = args.save_sd_screen
-        args.png = True
-        args.logs = True
-        return command_screen(args)
-    return 0
-
-
 def command_touch(args: argparse.Namespace) -> int:
     dev = Device(args.host, args.timeout)
     failures = 0
-
-    if args.scene:
-        code, _, body = dev.post("/api/touch", {"scene": args.scene})
-        print_check("OK" if 200 <= code < 300 else "FAIL", f"POST /api/touch http={code}", short_json(body))
-        failures += 0 if 200 <= code < 300 else 1
-        time.sleep(args.wait)
 
     code, _, body = dev.get("/api/touch")
     print_check("OK" if code == 200 else "FAIL", f"GET /api/touch http={code}", short_json(body))
@@ -1151,7 +1086,6 @@ def command_touch(args: argparse.Namespace) -> int:
         print_check("WARN", f"/api/logs http={code}", raw[:300])
 
     if args.screen:
-        args.save_sd = args.save_sd_screen
         args.png = True
         args.logs = True
         screen_result = command_screen(args)
@@ -1165,25 +1099,35 @@ def command_audio(args: argparse.Namespace) -> int:
     samples: list[dict[str, Any]] = []
     while time.time() < deadline:
         try:
-            code, _, body = dev.get("/api/audio/level")
-            if code == 200 and isinstance(body, dict):
-                samples.append(body)
-                print_check("OK" if body.get("valid") else "WARN", "mic level",
-                            f"rms={body.get('rms_db')} peak={body.get('peak_db')} valid={body.get('valid')}")
+            code, _, body = dev.get("/api/audio/taps")
+            taps = body.get("taps", {}) if isinstance(body, dict) else {}
+            clean = taps.get("mic-clean") if isinstance(taps, dict) else None
+            if code == 200 and body.get("available") and isinstance(clean, dict):
+                samples.append(clean)
+                print_check(
+                    "OK",
+                    "AEC-clean mic tap",
+                    f"rms={clean.get('rms')} peak={clean.get('peak')} "
+                    f"total_samples={clean.get('total_samples')}",
+                )
             else:
-                print_check("FAIL", f"/api/audio/level http={code}", short_json(body))
+                print_check("FAIL", f"/api/audio/taps http={code}",
+                            short_json(body))
         except Exception as exc:  # noqa: BLE001
-            print_check("FAIL", "/api/audio/level", str(exc))
+            print_check("FAIL", "/api/audio/taps", str(exc))
         time.sleep(args.interval)
 
-    valid = [s for s in samples if s.get("valid")]
-    if valid:
-        rms_vals = [float(s.get("rms_db", -80.0)) for s in valid]
-        peak_vals = [float(s.get("peak_db", -80.0)) for s in valid]
-        print_check("OK", "mic summary",
-                    f"samples={len(samples)} valid={len(valid)} rms_range={min(rms_vals):.1f}..{max(rms_vals):.1f} peak_max={max(peak_vals):.1f}")
+    if samples:
+        rms_vals = [float(sample.get("rms", 0.0)) for sample in samples]
+        peak_vals = [int(sample.get("peak", 0)) for sample in samples]
+        print_check(
+            "OK",
+            "mic tap summary",
+            f"samples={len(samples)} rms_range={min(rms_vals):.1f}.."
+            f"{max(rms_vals):.1f} peak_max={max(peak_vals)}",
+        )
     else:
-        print_check("WARN", "mic summary", f"samples={len(samples)} valid=0")
+        print_check("WARN", "mic tap summary", "samples=0")
 
     if args.speaker:
         cycle_args = argparse.Namespace(
@@ -1197,7 +1141,7 @@ def command_audio(args: argparse.Namespace) -> int:
             report=args.report,
         )
         return command_gemini_cycle(cycle_args)
-    return 0 if valid else 1
+    return 0 if samples else 1
 
 
 def command_watch(args: argparse.Namespace) -> int:
@@ -1243,15 +1187,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(p_report)
     p_report.set_defaults(func=command_report)
 
-    p_restart = sub.add_parser("restart", help="restart the device and wait for it to return")
-    add_common(p_restart)
-    p_restart.add_argument("--wait", type=float, default=45.0, help="seconds to wait for device return")
-    p_restart.add_argument("--interval", type=float, default=1.0, help="poll interval seconds")
-    p_restart.set_defaults(func=command_restart)
-
     p_screen = sub.add_parser("screen", help="fetch display snapshot JSON plus the PPM software mirror")
     add_common(p_screen)
-    p_screen.add_argument("--save-sd", action="store_true", help="also save the PPM on the device SD card")
     p_screen.add_argument("--png", action="store_true", default=True, help="convert local PPM to PNG when possible")
     p_screen.add_argument("--no-png", dest="png", action="store_false", help="keep only the local PPM")
     p_screen.add_argument("--logs", action="store_true", default=True, help="classify device logs after capture")
@@ -1275,28 +1212,19 @@ def build_parser() -> argparse.ArgumentParser:
                                 help="restore the normal renderer after the optional wait/capture")
     p_display_test.set_defaults(func=command_display_test)
 
-    p_face = sub.add_parser("face", help="force a display face state through HTTP")
-    add_common(p_face)
-    p_face.add_argument("state", choices=["off", "idle", "listen", "listening", "think", "thinking", "speak", "speaking"])
-    p_face.add_argument("--amp", type=int, default=None, help="synthetic amplitude 0..1000 for listen/speak")
-    p_face.add_argument("--screen", action="store_true", help="capture the screen after changing state")
-    p_face.add_argument("--save-sd-screen", action="store_true", help="also save the captured screen to SD")
-    p_face.set_defaults(func=command_face)
-
-    p_touch = sub.add_parser("touch", help="read touch diagnostics or trigger a local scene")
+    p_touch = sub.add_parser("touch", help="read touch diagnostics and recent receipts")
     add_common(p_touch)
-    p_touch.add_argument("scene", nargs="?", choices=["listen", "think", "speak", "showcase"],
-                         help="optional local scene to trigger through /api/touch")
-    p_touch.add_argument("--wait", type=float, default=1.0, help="seconds to wait after triggering a scene")
     p_touch.add_argument("--lines", type=int, default=80, help="touch log lines to print")
     p_touch.add_argument("--screen", action="store_true", help="capture the screen after touch action")
-    p_touch.add_argument("--save-sd-screen", action="store_true", help="also save the captured screen to SD")
     p_touch.set_defaults(func=command_touch)
 
-    p_audio = sub.add_parser("audio", help="sample mic levels and optionally exercise speaker via Gemini")
+    p_audio = sub.add_parser(
+        "audio",
+        help="sample AEC-clean tap metrics and optionally exercise speaker via Gemini",
+    )
     add_common(p_audio)
-    p_audio.add_argument("--seconds", type=float, default=5.0, help="mic sampling duration")
-    p_audio.add_argument("--interval", type=float, default=0.5, help="mic sampling interval")
+    p_audio.add_argument("--seconds", type=float, default=5.0, help="tap sampling duration")
+    p_audio.add_argument("--interval", type=float, default=0.5, help="tap sampling interval")
     p_audio.add_argument("--speaker", action="store_true", help="also run a Gemini text turn to exercise speaker path")
     p_audio.add_argument("--text", default="Say one short sentence.", help="text used for speaker path")
     p_audio.add_argument("--turn-wait", type=float, default=6.0, help="seconds to wait after text turn")

@@ -1,0 +1,21 @@
+# JarvisRobot v5 — 32 MB dual-OTA partition table (1.75C).
+#
+# NVS, otadata, ota_0, and emote_assets retain their established offsets.
+# Both executable slots must begin below the ESP32-S3's 16 MB app-mapping
+# window: a byte-perfect image written to ota_1 @0x1000000 failed validation
+# with a bogus eFuse revision. Data-only coredump/storage may use upper flash.
+# The 1.75C's extra capacity therefore expands durable data, not app addresses.
+# Rollback stays pending until the 45 s voice/display probation passes. The
+# initial USB layout install populates only ota_0; rollback becomes meaningful
+# after the first successful OTA leaves a verified image in both slots.
+#
+# Name,        Type, SubType,  Offset,    Size
+nvs,           data, nvs,      0x9000,    0x6000
+phy_init,      data, phy,      0xF000,    0x1000
+otadata,       data, ota,      0x10000,   0x2000
+ota_0,         app,  ota_0,    0x20000,   0x400000
+emote_assets,  data, spiffs,   0x420000,  0x5E0000
+model,         data, spiffs,   0xA00000,  0x200000
+ota_1,         app,  ota_1,    0xC00000,  0x400000
+coredump,      data, coredump, 0x1000000, 0x10000
+storage,       data, fat,      0x1010000, 0x2F0000

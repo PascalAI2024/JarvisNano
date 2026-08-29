@@ -136,7 +136,7 @@ pattern already exists in this file (`vad_commit_request`) — extend it, don't 
 |---|---|---|---|
 | P3.1 | Immediate stopgap: tap-to-interrupt — tap during SPEAKING flushes the RX queue + DAC, sends `activityStart`, returns to LISTENING | Tap mid-reply stops her voice < 200 ms and she listens | done |
 | P3.2 | Honor server `interrupted` frames: on receipt, flush queued audio instead of draining the backlog | `interrupted` counter increments and playback halts promptly when it fires | done |
-| P3.3 | AEC bring-up: esp-sr AFE with ES7210 loopback reference channel; mic stays open during playback (prerequisite shared with the VISION wake-word milestone) | Loopback-referenced capture during playback; echo suppressed in `/api/audio/level` samples | **built** (`5f1005d`; direct `esp_aec.h`, not AFE — see [aec-barge-in.md](reference/aec-barge-in.md)) · HW-verify pending |
+| P3.3 | AEC bring-up: esp-sr AFE with ES7210 loopback reference channel; mic stays open during playback (prerequisite shared with the VISION wake-word milestone) | Loopback-referenced capture during playback; echo suppressed in `/api/audio/level` samples | **built** (`5f1005d`; direct `esp_aec.h`, not AFE — see [aec-barge-in.md](../reference/aec-barge-in.md)) · HW-verify pending |
 | P3.4 | Barge-in: with AEC live, stream mic during SPEAKING and re-test Gemini server VAD (previously documented broken — retest may have been confounded by echo, which AEC removes) | Speaking over her interrupts within ~500 ms hands-free | **built** (`feb198e`/`6264014`/`cf277e7`) · HW-verify pending |
 
 ### P4 — Resume the vision build order
@@ -258,7 +258,7 @@ plan was written. Statuses above reflect the verified state.
 P3.3/P3.4 (AEC + hands-free barge-in), the voice-mute remediation, the CST9217
 touch-init cure, and the interactive `ui_layer` all landed today. Detailed
 design + evidence live in the new reference pages:
-[aec-barge-in.md](reference/aec-barge-in.md),
+[aec-barge-in.md](../reference/aec-barge-in.md),
 [voice-remediation-2026-06-13.md](reference/voice-remediation-2026-06-13.md),
 [reliability-and-ui-2026-06-13.md](reference/reliability-and-ui-2026-06-13.md)
 (now under `docs/ARCHIVE/reference/`).

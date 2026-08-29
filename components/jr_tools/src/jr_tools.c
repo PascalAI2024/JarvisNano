@@ -239,9 +239,12 @@ static bool response_from_mcp(const char *raw, jr_tool_result_t *result)
         return false;
     }
     cJSON *upstream = cJSON_GetObjectItemCaseSensitive(root, "result");
+    /* Typed gateways historically wrapped payloads in {"result":...}; the
+     * current device endpoint may return the bounded result object directly.
+     * Normalize both shapes for Gemini instead of treating HTTP 200 as a
+     * transport failure. */
     if (upstream == NULL) {
-        cJSON_Delete(root);
-        return false;
+        upstream = root;
     }
 
     cJSON *response = cJSON_CreateObject();
@@ -281,6 +284,32 @@ static char *build_request_body(const char *url, const char *tool_name,
             cJSON_Delete(args);
             cJSON_Delete(request);
             return NULL;
+        }
+        if (strcmp(tool_name, "execute_tool") == 0) {
+            cJSON *target = cJSON_GetObjectItemCaseSensitive(args, "tool");
+            cJSON *nested_text =
+                cJSON_GetObjectItemCaseSensitive(args, "args_json");
+            cJSON *nested = cJSON_IsString(nested_text) &&
+                    nested_text->valuestring != NULL
+                ? cJSON_Parse(nested_text->valuestring) : NULL;
+            cJSON *translated = cJSON_CreateObject();
+            bool translated_ok = cJSON_IsString(target) &&
+                target->valuestring != NULL && cJSON_IsObject(nested) &&
+                translated != NULL &&
+                cJSON_AddStringToObject(translated, "tool",
+                                       target->valuestring);
+            if (translated_ok) {
+                cJSON_AddItemToObject(translated, "args", nested);
+                nested = NULL;
+            }
+            cJSON_Delete(nested);
+            cJSON_Delete(args);
+            args = translated;
+            if (!translated_ok) {
+                cJSON_Delete(args);
+                cJSON_Delete(request);
+                return NULL;
+            }
         }
         cJSON_AddItemToObject(request, "args", args);
         if (physical_confirmed) {

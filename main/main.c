@@ -35,11 +35,14 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
+#include "esp_app_desc.h"
 #include "esp_http_server.h"
 #include "esp_random.h"
+#include "esp_ota_ops.h"
 #include "esp_timer.h"
 #include "esp_netif_sntp.h"
 #include "esp_wifi.h"
+#include "driver/gpio.h"
 #include "cJSON.h"
 
 #include "jr_ports/ports.h"
@@ -89,10 +92,10 @@ extern const unsigned char diagnostics_html_end[]
 #define VOICE_ALWAYS_READY   1
 #define AUDIO_DIAG_CAPTURE_MS 1800U
 
-/* The model sees only this bounded, fixed-template catalogue. The worker
- * owns the HTTPS call on-device; no Android/Mac companion participates in the
- * voice -> tool -> voice path. `remember` is the only mutating capability and
- * is intercepted for a physical panel confirmation before submission. */
+/* The model sees fixed templates plus two server-policy meta-tools. The worker
+ * owns HTTPS on-device; no Android/Mac companion participates in the
+ * voice -> tool -> voice path. `remember` is intercepted for physical
+ * confirmation, and execute_tool can never bypass JarvisMCP server policy. */
 static const jr_gemini_fn_decl_t s_device_tool_fns[] = {
     {
         .name = "crypto_price",
@@ -138,6 +141,60 @@ static const jr_gemini_fn_decl_t s_device_tool_fns[] = {
         .arg_name = NULL,
         .arg_desc = NULL,
     },
+    {
+        .name = "search_tools",
+        .description =
+            "Search Jarvis capabilities when the fixed tools do not fit.",
+        .arg_name = "query",
+        .arg_desc =
+            "A concise description of the capability needed.",
+    },
+    {
+        .name = "execute_tool",
+        .description =
+            "Run one capability returned by search_tools through Jarvis policy.",
+        .params = {
+            {
+                .name = "tool",
+                .type = JR_GEMINI_PT_STRING,
+                .description =
+                    "Exact canonical service.method returned by search_tools.",
+                .required = true,
+            },
+            {
+                .name = "args_json",
+                .type = JR_GEMINI_PT_STRING,
+                .description =
+                    "A JSON object containing only that tool's documented arguments.",
+                .required = true,
+            },
+        },
+        .param_count = JR_GEMINI_PARAM_COUNT(2),
+    },
+    {
+        .name = "set_volume",
+        .description =
+            "Set Jarvis speaker volume from 10 to 100 and persist it.",
+        .params = {{
+            .name = "level",
+            .type = JR_GEMINI_PT_INTEGER,
+            .description = "Speaker volume from 10 to 100.",
+            .required = true,
+        }},
+        .param_count = JR_GEMINI_PARAM_COUNT(1),
+    },
+    {
+        .name = "set_brightness",
+        .description =
+            "Set the display brightness ceiling from 10 to 100 and persist it.",
+        .params = {{
+            .name = "level",
+            .type = JR_GEMINI_PT_INTEGER,
+            .description = "Brightness ceiling from 10 to 100.",
+            .required = true,
+        }},
+        .param_count = JR_GEMINI_PARAM_COUNT(1),
+    },
     /* ask_user never reaches the HTTPS tool worker: rich_cb intercepts it and
      * it becomes the Asking substate (choice arcs on glass, STATE-05/06). */
     JR_GEMINI_ASK_USER_DECL,
@@ -166,6 +223,7 @@ typedef struct {
     char args_json[JR_TOOLS_ARGS_CAP];
     uint32_t session_gen;
     uint32_t expires_ms;
+    uint32_t presented_ms;
 } pending_tool_consent_t;
 
 typedef struct {
@@ -244,10 +302,67 @@ static _Atomic uint32_t s_sim_flip;
 /* Gesture layer (app task only): swipe-right watch peek deadline, and the
  * double-tap window for the attention gesture. */
 static uint32_t s_watch_peek_until_ms;
+static uint32_t s_side_page_until_ms;
 static uint32_t s_last_tap_ms;
+static _Atomic uint32_t s_pairing_claim_until_ms;
+#define PAIRING_CLAIM_WINDOW_MS 60000U
+
+static void boot_button_tick(uint32_t now_ms)
+{
+#if defined(CONFIG_ESP_BOARD_ESP32S3_TOUCH_AMOLED_1_75C)
+    static bool was_down;
+    static uint32_t pressed_ms;
+    const bool down = gpio_get_level(GPIO_NUM_0) == 0;
+    if (down && !was_down) {
+        was_down = true;
+        pressed_ms = now_ms;
+    } else if (!down && was_down) {
+        const uint32_t held_ms = now_ms - pressed_ms;
+        was_down = false;
+        if (held_ms >= 200U && held_ms < 1500U) {
+            if (jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_SHADE) {
+                jr_display_nav_up();
+                jr_display_caption_set("CONTROLS CLOSED");
+            } else {
+                jr_display_nav_down();
+                jr_display_caption_clear();
+            }
+            ESP_LOGI(TAG, "boot button: controls toggle (%lu ms)",
+                     (unsigned long)held_ms);
+        } else if (held_ms >= 1500U && held_ms < 5000U) {
+            atomic_store(&s_pairing_claim_until_ms,
+                         now_ms + PAIRING_CLAIM_WINDOW_MS);
+            jr_display_nav_down();
+            jr_display_caption_set("PAIRING OPEN - 60 S");
+            ESP_LOGI(TAG, "boot button: physical pairing window open "
+                          "(%lu ms hold)", (unsigned long)held_ms);
+        }
+    }
+#else
+    (void)now_ms;
+#endif
+}
 
 /* Speaker volume (app task only) — gesture-adjustable, NVS-persistent. */
 static int s_out_vol = 100;
+static uint8_t s_brightness_cap = 100;
+static _Atomic int s_level_volume_request = -1;
+static _Atomic int s_level_brightness_request = -1;
+
+/* Input events can arrive faster than the app loop applies level requests.
+ * Step from the pending value when one exists so rapid taps/swipes accumulate
+ * instead of repeatedly publishing the same stale applied value. */
+static int request_level_step(_Atomic int *request, int applied, int delta)
+{
+    const int pending = atomic_load(request);
+    int level = (pending >= 10 && pending <= 100) ? pending : applied;
+    level += delta;
+    if (level > 100) level = 100;
+    if (level < 10) level = 10;
+    atomic_store(request, level);
+    return level;
+}
+static _Atomic int s_ota_attempt_slot = -1;
 
 static void persist_out_vol(uint8_t vol)
 {
@@ -274,6 +389,59 @@ static void restore_out_vol(void)
     }
 }
 
+static void persist_brightness_cap(uint8_t cap)
+{
+    nvs_handle_t h;
+    if (nvs_open("app", NVS_READWRITE, &h) == ESP_OK) {
+        (void)nvs_set_u8(h, "bright_cap", cap);
+        (void)nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static void restore_brightness_cap(void)
+{
+    nvs_handle_t h;
+    uint8_t cap = 0;
+    if (nvs_open("app", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_u8(h, "bright_cap", &cap) == ESP_OK &&
+            cap >= 10 && cap <= 100) {
+            s_brightness_cap = cap;
+            ESP_LOGI(TAG, "brightness cap restored: %u", (unsigned)cap);
+        }
+        nvs_close(h);
+    }
+}
+
+static void persist_ota_attempt(int slot)
+{
+    nvs_handle_t h;
+    if (nvs_open("app", NVS_READWRITE, &h) == ESP_OK) {
+        if (slot == 0 || slot == 1) {
+            (void)nvs_set_i8(h, "ota_attempt", (int8_t)slot);
+        } else {
+            (void)nvs_erase_key(h, "ota_attempt");
+        }
+        (void)nvs_commit(h);
+        nvs_close(h);
+    }
+    atomic_store(&s_ota_attempt_slot, slot);
+}
+
+static void restore_ota_attempt(void)
+{
+    nvs_handle_t h;
+    int8_t slot = -1;
+    if (nvs_open("app", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_i8(h, "ota_attempt", &slot) != ESP_OK ||
+            (slot != 0 && slot != 1)) {
+            slot = -1;
+        }
+        nvs_close(h);
+    }
+    atomic_store(&s_ota_attempt_slot, (int)slot);
+}
+
 /* ---- persistent log ring ------------------------------------------------
  * Every ESP_LOG line also lands in a 128 KB PSRAM ring served at
  * GET /api/logs?tail=N (the contract live-device.py has always probed for).
@@ -298,6 +466,13 @@ static int logring_vprintf(const char *fmt, va_list ap)
         int n = vsnprintf(line, sizeof line, fmt, ap2);
         va_end(ap2);
         if (n > 0) {
+            /* IDF tcp_transport ERROR-logs a full send window as
+             * transport_poll_write(0). That is WOULD_BLOCK, already handled.
+             * Drop only this line from ring and UART; every other log still
+             * reaches s_logring_prev. */
+            if (strstr(line, "transport_poll_write(0)") != NULL) {
+                return n;
+            }
             size_t w = (size_t)n < sizeof line ? (size_t)n : sizeof line - 1;
             portENTER_CRITICAL(&s_logring_mux);
             size_t head = s_logring_head;
@@ -313,17 +488,30 @@ static int logring_vprintf(const char *fmt, va_list ap)
     return s_logring_prev != NULL ? s_logring_prev(fmt, ap) : 0;
 }
 
-/* Operator lease: an operator (AI session / script) claims the device for a
- * bounded window — voice disarmed, wake watch off, "at work" on the glass —
- * so diagnostics never fight the owner for the mic. A LEASE, not a mode:
- * TTL-bounded (never wedges) and any owner tap reclaims instantly (the owner
- * always outranks the operator). */
+/* Operator mode: Codex/Desk owns the glass and bounded interaction surface.
+ * Voice and normal gestures pause for a TTL-bounded window. Single taps belong
+ * to the presented tool; double-tap is the physical escape hatch back to
+ * always-ready Jarvis. OTA may borrow the lease without entering this mode. */
 static _Atomic uint32_t s_operator_lease_until_ms;
+static _Atomic bool s_operator_mode_active;
+static _Atomic uint32_t s_operator_mode_entered_ms;
+static _Atomic bool s_ota_active;
+static _Atomic uint32_t s_ota_received_bytes;
+static _Atomic uint32_t s_ota_total_bytes;
+static _Atomic int s_ota_last_error;
+static _Atomic bool s_ota_preflight_blocked;
+static _Atomic bool s_http_ready;
 
 static bool operator_lease_active(uint32_t now_ms)
 {
     uint32_t until = atomic_load(&s_operator_lease_until_ms);
     return until != 0U && (int32_t)(now_ms - until) < 0;
+}
+
+static bool operator_mode_active(uint32_t now_ms)
+{
+    return atomic_load(&s_operator_mode_active) &&
+           operator_lease_active(now_ms);
 }
 
 /* Defined next to app_main (it owns the persona text); SEND_SETUP refreshes
@@ -337,13 +525,10 @@ static uint32_t s_demo_start_ms;   /* app task only; 0 = off */
 static int      s_demo_step = -1;
 static int      s_demo_last_ripple = -1;
 
-/* WS auth mode (see the endpoint-auth block in app_main). App task only.
- * BOTH buffers hold the API key — never log either. */
+/* WebSocket auth state (see endpoint-auth block in app_main). The header
+ * buffer holds the API key and must never be logged; the URI always stays bare. */
 static char    s_ws_headers[400];
-static char    s_url_keyed[512];
 static bool    s_ws_auth_header_ok_logged;
-static bool    s_setup_seen_this_conn;
-static uint8_t s_auth_fail_streak;
 
 typedef struct {
     jr_event_t ev;
@@ -413,6 +598,7 @@ typedef struct {
 } jr_app_t;
 
 static jr_app_t s_app;
+static _Atomic uint32_t s_last_tx_drop_ms;
 
 /* diag: say-mailbox drained by the app task */
 static QueueHandle_t s_say_q;   /* of char[200] */
@@ -455,10 +641,10 @@ static void caption_reset(void)
 /* ======================================================================== *
  *  VAD / barge diagnostic ring log — records every VAD decision with the    *
  *  numbers that drive barge tuning (mic_rms, floor, gate, peak playback,     *
- *  phase, event). Lives in PSRAM; dumped as CSV via /api/diag/vadlog. Lets   *
- *  a real on-device session (the user actually talking) be pulled + analysed *
- *  offline instead of guessing from live serial. Also mirrored to the SD     *
- *  card if mounted, so it survives across boots.                             *
+ *  phase, event). Lives in a bounded PSRAM ring and is dumped as CSV through *
+ *  /api/diag/vadlog. It lets a real on-device session be pulled and analysed *
+ *  offline instead of guessing from serial; the 1.75C has no persistent SD   *
+ *  mirror, so fetch it before reboot when it matters.                         *
  * ======================================================================== */
 typedef struct __attribute__((packed)) {
     uint32_t t_ms;
@@ -507,20 +693,21 @@ static volatile uint32_t s_voice_task_heartbeat_ms;
 static _Atomic bool s_voice_start_gate;
 static bool s_pending_text_inflight;
 static uint32_t s_pending_text_retry_ms;
-/* Barge default ON. The self-barge that forced it off was an AEC problem, now
- * fixed: v4's state-aware mic gain (9 dB while SPEAKING) keeps the echo
- * unclipped so the AEC cancels it — measured echo residual dropped from ~9000
- * to a median of 9 (2026-07-11), well under the barge gate, with the user's
- * talk-over at ~400-800. The 500 ms cold-AEC guard swallows the onset transient.
- * Runtime /api/debug/gain?barge=0 disables. */
-static volatile bool s_local_barge_enabled = true;
+/* Local barge is opt-in. Live 1.75C evidence showed the AEC residual clearing
+ * the local 0.10 gate during model speech, forcing Speaking->Listening->Speaking
+ * transitions that sound like hiccups. Gemini server VAD remains active and
+ * owns normal interruption; /api/debug/gain?barge=1 is the calibration switch
+ * for controlled local-gate experiments. */
+static volatile bool s_local_barge_enabled = false;
 
 /* Human/diagnostic controls are produced by HTTP and consumed only by the
  * voice task. The orchestrator therefore remains the sole SessionState writer. */
 typedef enum {
     VOICE_CONTROL_NONE = 0,
-    VOICE_CONTROL_ARM,
-    VOICE_CONTROL_DISARM,
+    VOICE_CONTROL_ARM,       /* explicit physical/API unmute */
+    VOICE_CONTROL_RESUME,    /* resume only when privacy permits */
+    VOICE_CONTROL_DISARM,    /* deliberate privacy mute */
+    VOICE_CONTROL_PAUSE,     /* operational stop; privacy unchanged */
 } voice_control_request_t;
 
 static _Atomic int s_voice_control_request;
@@ -621,7 +808,6 @@ static agent_link_state_t s_agent_link;
  * has one authenticated writer stream; retaining this high-water mark across
  * task switches prevents an older signed-in payload from becoming current. */
 static uint32_t s_agent_link_revision_hwm;
-static _Atomic uint32_t s_pairing_claim_until_ms;
 
 /* Brain Link is the backend-neutral optional companion seam. Gemini and the
  * bounded JarvisMCP worker run directly on the physical device today; a paired
@@ -1037,6 +1223,7 @@ static bool device_tool_present_consent(const jr_command_t *cmd, uint32_t now)
     s_tool_consent.call_id = cmd->call_id;
     s_tool_consent.session_gen = cmd->session_gen;
     s_tool_consent.expires_ms = surface.expires_ms;
+    s_tool_consent.presented_ms = now;
     strlcpy(s_tool_consent.call_id_text,
             cmd->call_id_text ? cmd->call_id_text : "",
             sizeof(s_tool_consent.call_id_text));
@@ -1130,6 +1317,65 @@ static jr_error_kind_t map_gem_err(jr_gemini_error_kind_t k)
     }
 }
 
+static bool handle_local_level_tool(jr_app_t *app,
+                                    const jr_gemini_event_t *event)
+{
+    if (event->tool_name == NULL ||
+        (strcmp(event->tool_name, "set_volume") != 0 &&
+         strcmp(event->tool_name, "set_brightness") != 0)) {
+        return false;
+    }
+
+    int level = -1;
+    const char *parse_end = NULL;
+    cJSON *args = cJSON_ParseWithOpts(
+        event->tool_args != NULL ? event->tool_args : "{}",
+        &parse_end, true);
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(args, "level");
+    bool valid = args != NULL && cJSON_IsObject(args) &&
+        cJSON_IsNumber(item) &&
+        item->valuedouble == (double)item->valueint &&
+        item->valueint >= 10 && item->valueint <= 100;
+    if (valid) {
+        level = item->valueint;
+        if (strcmp(event->tool_name, "set_volume") == 0) {
+            atomic_store(&s_level_volume_request, level);
+        } else {
+            atomic_store(&s_level_brightness_request, level);
+        }
+    }
+    cJSON_Delete(args);
+
+    char payload[112];
+    if (valid) {
+        snprintf(payload, sizeof payload,
+                 "{\"ok\":true,\"level\":%d,\"persisted\":true}", level);
+    } else {
+        strlcpy(payload,
+            "{\"error\":{\"code\":\"invalid_level\","
+            "\"message\":\"level must be an integer from 10 to 100\"}}",
+            sizeof payload);
+    }
+    if (event->call_id_text != NULL && event->call_id_text[0] != '\0') {
+        char *frame = jr_gemini_build_tool_response(
+            event->call_id_text, event->tool_name, payload);
+        if (frame != NULL) {
+            (void)jr_gemini_send_frame(&app->client, frame, strlen(frame));
+            free(frame);
+            atomic_fetch_add(&s_tool_diag.responses_sent, 1U);
+        } else {
+            atomic_fetch_add(&s_tool_diag.response_send_failed, 1U);
+        }
+    }
+    device_tool_record_result(
+        event->tool_name,
+        valid ? JR_TOOL_STATUS_OK : JR_TOOL_STATUS_INVALID_ARGS,
+        0U, 0);
+    ESP_LOGI(TAG, "local tool=%s level=%d valid=%d",
+             event->tool_name, level, (int)valid);
+    return true;
+}
+
 /* Map ONE rich transport event to the L3 vocabulary and enqueue it. For audio
  * chunks we feed the playback ring DIRECTLY here (same thread) because the
  * parser frees its decoded pcm the moment jr_gemini_pump_rx returns — so the
@@ -1150,8 +1396,6 @@ static void rich_cb(void *u, const jr_gemini_event_t *ge)
     jr_event_t e = jr_event(JR_EV_HEARTBEAT);
     switch (ge->kind) {
     case JR_GEV_SETUP_COMPLETE:
-        s_setup_seen_this_conn = true;
-        s_auth_fail_streak = 0;
         if (s_ws_headers[0] != '\0' && !s_ws_auth_header_ok_logged) {
             s_ws_auth_header_ok_logged = true;
             ESP_LOGI(TAG, "auth: x-goog-api-key header ACCEPTED — the key is "
@@ -1212,6 +1456,10 @@ static void rich_cb(void *u, const jr_gemini_event_t *ge)
         }
         break;
     case JR_GEV_TOOL_CALL:
+        if (handle_local_level_tool(a, ge)) {
+            e = jr_event(JR_EV_HEARTBEAT);
+            break;
+        }
         if (ge->tool_name != NULL &&
             strcmp(ge->tool_name, JR_GEMINI_ASK_USER_TOOL) == 0) {
             /* Snapshot NOW — the parse tree dies when this callback returns,
@@ -1345,21 +1593,6 @@ static bool voice_poll(void *ctx, jr_event_t *out)
             } else if (st == JR_WS_CLOSED || st == JR_WS_ERROR) {
                 io->last_ws = st;
                 io->expect_up = false;
-                /* Auth-mode fallback: a connection that dies before Setup ever
-                 * completed, twice in a row, while we are on header auth, most
-                 * plausibly means the endpoint rejected the header. Flip this
-                 * boot to the proven ?key= URL. (A Wi-Fi flap can false-flip
-                 * us — benign: the fallback IS the long-standing behavior.) */
-                if (!s_setup_seen_this_conn && s_ws_headers[0] != '\0' &&
-                    s_url_keyed[0] != '\0') {
-                    if (++s_auth_fail_streak >= 2U) {
-                        jr_gemini_ws_set_headers(NULL);
-                        s_ws_headers[0] = '\0';
-                        strlcpy(s_app.url, s_url_keyed, sizeof s_app.url);
-                        ESP_LOGW(TAG, "auth: header mode failed setup twice; "
-                                 "falling back to ?key= URL for this boot");
-                    }
-                }
                 inq_push(io, jr_event(JR_EV_TRANSPORT_CLOSED));
             }
         }
@@ -1417,8 +1650,7 @@ static void voice_exec(void *ctx, const jr_command_t *cmd)
          * older socket can never cross into this Gemini session. */
         jr_tools_set_session_generation(a->orch.session.session_gen);
         ESP_LOGI(TAG, "exec: CONNECT -> ws.connect(%.40s...) auth=%s", a->url,
-                 s_ws_headers[0] != '\0' ? "header" : "url");
-        s_setup_seen_this_conn = false;
+                 s_ws_headers[0] != '\0' ? "header" : "none");
         jr_gemini_reset_tx(&a->client);
         io->last_ws = JR_WS_CONNECTING;
         io->expect_up = true;
@@ -1503,9 +1735,8 @@ static void voice_exec(void *ctx, const jr_command_t *cmd)
         atomic_fetch_add(&s_tool_diag.calls_received, 1U);
         if (cmd->tool_name != NULL &&
             strcmp(cmd->tool_name, "remember") == 0) {
-            /* Validate the fixed template before asking the user to approve.
-             * This never reads confirmation from model args; only the later
-             * panel tap sets jr_tool_job_t.physical_confirmed. */
+            /* Validate the exact displayed note before asking; only the later
+             * physical tap sets jr_tool_job_t.physical_confirmed. */
             char validation[768];
             jr_tool_template_status_t template_status = jr_tools_build_code(
                 cmd->tool_name, cmd->tool_args, validation,
@@ -1680,21 +1911,83 @@ static jr_display_agent_state_t agent_state_to_display(const char *state)
     return JR_DISPLAY_AGENT_NONE;
 }
 
+typedef struct {
+    bool ok;
+    const char *reason;
+    const esp_partition_t *running;
+    const esp_partition_t *target;
+    uint8_t active_slot;
+    uint8_t target_slot;
+} ota_preflight_t;
+
+static ota_preflight_t ota_preflight(void)
+{
+    ota_preflight_t result = {
+        .ok = false,
+        .reason = "power telemetry unavailable",
+        .running = esp_ota_get_running_partition(),
+        .target = esp_ota_get_next_update_partition(NULL),
+        .active_slot = 0xFFU,
+        .target_slot = 0xFFU,
+    };
+    if (result.running != NULL) {
+        if (strcmp(result.running->label, "ota_0") == 0) {
+            result.active_slot = 0U;
+        } else if (strcmp(result.running->label, "ota_1") == 0) {
+            result.active_slot = 1U;
+        }
+    }
+    if (result.target != NULL) {
+        result.target_slot =
+            strcmp(result.target->label, "ota_0") == 0 ? 0U : 1U;
+    } else {
+        result.reason = "no inactive OTA slot";
+        return result;
+    }
+    if (!jr_net_is_connected()) {
+        result.reason = "network unavailable";
+        return result;
+    }
+    jr_power_t power = {0};
+    if (jr_power_read(&power) != ESP_OK) {
+        return result;
+    }
+    if (!power.usb_present &&
+        (!power.present || power.percent == 0xFFU || power.percent < 30U)) {
+        result.reason = "connect power or charge battery above 30 percent";
+        return result;
+    }
+    if (heap_caps_get_largest_free_block(
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) < 4096U) {
+        result.reason = "insufficient contiguous internal memory";
+        return result;
+    }
+    result.ok = true;
+    result.reason = "ready";
+    return result;
+}
+
 static void publish_shell_state(uint32_t now_ms)
 {
     static bool cached_active;
     static uint8_t cached_progress;
     static jr_display_agent_state_t cached_state;
+    static char cached_title[13] = "STANDBY";
+    static bool content_seeded;
+    static uint32_t next_status_ms;
 
     if (s_agent_link_lock != NULL &&
         xSemaphoreTake(s_agent_link_lock, 0) == pdTRUE) {
         if (s_agent_link.active &&
             (int32_t)(now_ms - s_agent_link.expires_ms) >= 0) {
-            s_agent_link.active = false;
         }
         cached_active = s_agent_link.active;
         cached_progress = s_agent_link.progress;
         cached_state = agent_state_to_display(s_agent_link.state);
+        strlcpy(cached_title,
+                s_agent_link.active && s_agent_link.title[0] != '\0'
+                    ? s_agent_link.title : "STANDBY",
+                sizeof(cached_title));
         xSemaphoreGive(s_agent_link_lock);
     }
     uint32_t pairing_until = atomic_load(&s_pairing_claim_until_ms);
@@ -1702,11 +1995,80 @@ static void publish_shell_state(uint32_t now_ms)
         cached_active = true;
         cached_progress = 100U;
         cached_state = JR_DISPLAY_AGENT_WAITING;
+        strlcpy(cached_title, "PAIR DEVICE", sizeof(cached_title));
     } else if (pairing_until != 0U) {
         atomic_store(&s_pairing_claim_until_ms, 0U);
     }
+    if (operator_mode_active(now_ms)) {
+        cached_active = true;
+        cached_progress = 100U;
+        cached_state = JR_DISPLAY_AGENT_WORKING;
+        strlcpy(cached_title, "CODEX", sizeof(cached_title));
+    }
     jr_display_set_shell_state(s_ui_shade_open, cached_active,
                                cached_progress, cached_state);
+    jr_display_desk_set_task(cached_title, cached_progress, cached_state);
+    if (!content_seeded) {
+        static const char *const tools[] = {
+            "SEARCH", "MEMORY", "WEATHER", "MORE"
+        };
+        jr_display_tools_set(tools, 4, 0);
+        content_seeded = true;
+    }
+    const jr_state_snapshot_t *snapshot = jr_orch_snapshot(&s_app.orch);
+    jr_display_jarvis_set_session(
+        s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN,
+        (uint16_t)(snapshot->transitions / 2U), now_ms / 1000U);
+    if ((int32_t)(now_ms - next_status_ms) >= 0) {
+        wifi_ap_record_t ap = {0};
+        const bool net_up = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+        jr_display_set_status(
+            (uint8_t)s_out_vol, net_up, net_up ? ap.rssi : 0,
+            (uint32_t)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024U));
+
+        const ota_preflight_t preflight = ota_preflight();
+        const esp_partition_t *running = preflight.running;
+        esp_ota_img_states_t image_state = ESP_OTA_IMG_UNDEFINED;
+        const bool have_image_state = running != NULL &&
+            esp_ota_get_state_partition(running, &image_state) == ESP_OK;
+        const uint8_t slot = preflight.active_slot;
+        jr_display_ota_state_t ota_display = JR_DISPLAY_OTA_IDLE;
+        uint8_t ota_percent = 0U;
+        const uint32_t ota_total = atomic_load(&s_ota_total_bytes);
+        if (preflight.ok) {
+            atomic_store(&s_ota_preflight_blocked, false);
+        }
+        if (atomic_load(&s_ota_active)) {
+            ota_display = JR_DISPLAY_OTA_RECEIVING;
+            if (ota_total > 0U) {
+                const uint64_t scaled =
+                    (uint64_t)atomic_load(&s_ota_received_bytes) * 100U;
+                ota_percent = (uint8_t)(scaled / ota_total);
+            }
+        } else if (atomic_load(&s_ota_preflight_blocked)) {
+            ota_display = JR_DISPLAY_OTA_BLOCKED;
+        } else if (atomic_load(&s_ota_last_error) != ESP_OK) {
+            ota_display = JR_DISPLAY_OTA_FAILED;
+        } else if (have_image_state &&
+                   image_state == ESP_OTA_IMG_PENDING_VERIFY) {
+            ota_display = JR_DISPLAY_OTA_PROBATION;
+        } else if (have_image_state && image_state == ESP_OTA_IMG_VALID) {
+            const int attempted = atomic_load(&s_ota_attempt_slot);
+            const esp_partition_t *last_invalid =
+                esp_ota_get_last_invalid_partition();
+            if ((attempted == 0 || attempted == 1) &&
+                slot != (uint8_t)attempted && last_invalid != NULL) {
+                ota_display = JR_DISPLAY_OTA_ROLLED_BACK;
+            } else {
+                ota_display = JR_DISPLAY_OTA_VALID;
+            }
+            ota_percent = 100U;
+        }
+        jr_display_ota_set(
+            ota_display, ota_percent, slot, preflight.target_slot,
+            preflight.ok);
+        next_status_ms = now_ms + 1000U;
+    }
 }
 
 /* Map a PCM RMS (jr_dsp_rms: 0..32768) to the HUD's 0..255 amplitude with
@@ -1725,8 +2087,13 @@ static uint8_t rms_to_amp(float rms, float k)
 /* ======================================================================== *
  *  diag HTTP: snapshot + /api/debug/say + /api/debug/gain                  *
  * ======================================================================== */
+static bool agent_require_auth(httpd_req_t *req);
+
 static esp_err_t diag_get_handler(httpd_req_t *req)
 {
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
     const jr_state_snapshot_t *s = jr_orch_snapshot(&s_app.orch);
     uint64_t now = jr_clock_now_ms(&s_app.clock);
     uint32_t now32 = (uint32_t)now;
@@ -2033,24 +2400,203 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t device_levels_get_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
+    char body[96];
+    int n = snprintf(body, sizeof body,
+                     "{\"volume\":%d,\"brightness\":%u}",
+                     s_out_vol, (unsigned)s_brightness_cap);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
+static esp_err_t device_levels_post_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    int volume = -1;
+    int brightness = -1;
+    const bool have_volume = query_int(req, "volume", &volume);
+    const bool have_brightness = query_int(req, "brightness", &brightness);
+    if ((!have_volume && !have_brightness) ||
+        (have_volume && (volume < 10 || volume > 100)) ||
+        (have_brightness && (brightness < 10 || brightness > 100))) {
+        httpd_resp_send_err(
+            req, HTTPD_400_BAD_REQUEST,
+            "volume/brightness must be 10..100");
+        return ESP_OK;
+    }
+    if (have_volume) {
+        atomic_store(&s_level_volume_request, volume);
+    }
+    if (have_brightness) {
+        atomic_store(&s_level_brightness_request, brightness);
+    }
+    char body[112];
+    int n = snprintf(body, sizeof body,
+        "{\"ok\":true,\"volume\":%d,\"brightness\":%d,"
+        "\"privacy_unchanged\":true}",
+        have_volume ? volume : -1,
+        have_brightness ? brightness : -1);
+    httpd_resp_set_status(req, "202 Accepted");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
+static const char *ota_image_state_name(esp_ota_img_states_t state)
+{
+    switch (state) {
+    case ESP_OTA_IMG_NEW:            return "new";
+    case ESP_OTA_IMG_PENDING_VERIFY: return "pending-verify";
+    case ESP_OTA_IMG_VALID:          return "valid";
+    case ESP_OTA_IMG_INVALID:        return "invalid";
+    case ESP_OTA_IMG_ABORTED:        return "aborted";
+    default:                         return "undefined";
+    }
+}
+
+static esp_err_t device_health_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    const jr_state_t phase = jr_orch_phase(&s_app.orch);
+    const bool privacy = atomic_load(&s_voice_privacy_paused);
+    const bool operator_active = operator_mode_active(now);
+    const jr_state_snapshot_t *snapshot = jr_orch_snapshot(&s_app.orch);
+    const bool voice_alive = s_voice_task_running &&
+        (uint32_t)(now - s_voice_task_heartbeat_ms) < 2000U;
+    const uint32_t largest = (uint32_t)heap_caps_get_largest_free_block(
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const uint32_t free_psram =
+        (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    jr_display_diag_t display = {0};
+    (void)jr_display_get_diag(&display);
+    const bool tool_status_valid =
+        atomic_load(&s_tool_diag.last_status_valid);
+    const jr_tool_status_t tool_status = tool_status_valid
+        ? (jr_tool_status_t)atomic_load(&s_tool_diag.last_status)
+        : JR_TOOL_STATUS_OK;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *last_invalid =
+        esp_ota_get_last_invalid_partition();
+    const esp_partition_t *boot = esp_ota_get_boot_partition();
+    esp_ota_img_states_t ota_state = ESP_OTA_IMG_UNDEFINED;
+    const bool ota_state_known = running != NULL &&
+        esp_ota_get_state_partition(running, &ota_state) == ESP_OK;
+    const int ota_last_error = atomic_load(&s_ota_last_error);
+    const uint32_t last_tx_drop_ms = atomic_load(&s_last_tx_drop_ms);
+    const bool recent_tx_drop = last_tx_drop_ms != 0U &&
+        (uint32_t)(now - last_tx_drop_ms) < 10000U;
+
+    const char *verdict = "ok";
+    bool repairable = false;
+    if (privacy || s_flip_muted) {
+        verdict = "privacy-muted";
+    } else if (operator_active) {
+        verdict = "operator-active";
+    } else if (!voice_alive ||
+               ((phase == JR_ST_IDLE || phase == JR_ST_BACKOFF ||
+                 phase == JR_ST_FATAL) && !s_mood_rest_disarmed)) {
+        verdict = "session-dead";
+        repairable = true;
+    } else if (recent_tx_drop) {
+        verdict = "uplink-dropping";
+    } else if (largest < 8192U || free_psram < 2U * 1024U * 1024U) {
+        verdict = "memory-critical";
+    } else if (display.flush_errors > 0U || display.actual_fps < 12U) {
+        verdict = "display-fault";
+    } else if (jr_audio_dac_muted()) {
+        verdict = "audio-fault";
+        repairable = true;
+    } else if (tool_status_valid && tool_status != JR_TOOL_STATUS_OK) {
+        verdict = "tool-fault";
+    }
+
+    char body[960];
+    int n = snprintf(body, sizeof body,
+        "{\"verdict\":\"%s\",\"repairable\":%s,"
+        "\"privacy\":%s,\"flip_muted\":%s,\"operator\":%s,"
+        "\"phase\":\"%s\",\"voice_alive\":%s,"
+        "\"levels\":{\"volume\":%d,\"brightness_cap\":%u,"
+        "\"brightness_actual\":%u},"
+        "\"memory\":{\"largest_internal\":%u,\"free_psram\":%u},"
+        "\"transport\":{\"would_block\":%u,\"drops\":%u,\"deaths\":%u},"
+        "\"display\":{\"fps\":%u,\"flush_errors\":%u},"
+        "\"ota\":{\"active\":%s,\"running\":\"%s\",\"boot\":\"%s\","
+        "\"state\":\"%s\",\"received\":%u,\"total\":%u,"
+        "\"last_error\":\"%s\",\"last_invalid\":\"%s\"},"
+        "\"tools\":{\"status\":\"%s\",\"http\":%d}}",
+        verdict, repairable ? "true" : "false",
+        privacy ? "true" : "false",
+        s_flip_muted ? "true" : "false",
+        operator_active ? "true" : "false",
+        jr_state_name(phase), voice_alive ? "true" : "false",
+        s_out_vol, (unsigned)s_brightness_cap,
+        (unsigned)atomic_load(&s_mood_brightness),
+        (unsigned)largest, (unsigned)free_psram,
+        (unsigned)s_app.client.live.tx_would_block,
+        (unsigned)s_app.client.live.tx_drops,
+        (unsigned)snapshot->deaths,
+        (unsigned)display.actual_fps, (unsigned)display.flush_errors,
+        atomic_load(&s_ota_active) ? "true" : "false",
+        running != NULL ? running->label : "unknown",
+        boot != NULL ? boot->label : "unknown",
+        ota_state_known ? ota_image_state_name(ota_state) : "unknown",
+        (unsigned)atomic_load(&s_ota_received_bytes),
+        (unsigned)atomic_load(&s_ota_total_bytes),
+        esp_err_to_name((esp_err_t)ota_last_error),
+        last_invalid != NULL ? last_invalid->label : "none",
+        jr_tools_status_name(tool_status),
+        tool_status_valid ? atomic_load(&s_tool_diag.last_http_status) : 0);
+    if (n < 0 || (size_t)n >= sizeof body) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "health response too large");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
 static esp_err_t voice_control_handler(httpd_req_t *req)
 {
-    if (!control_intent_required(req)) {
+    if (!control_intent_required(req) || !agent_require_auth(req)) {
         return ESP_OK;
     }
     int armed = -1;
-    if (!query_int(req, "armed", &armed) || (armed != 0 && armed != 1)) {
+    int resume = -1;
+    const bool have_armed = query_int(req, "armed", &armed);
+    const bool have_resume = query_int(req, "resume", &resume);
+    if (have_resume && resume == 1) {
+        atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
+        httpd_resp_set_status(req, "202 Accepted");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(
+            req, "{\"ok\":true,\"queued\":true,\"resume\":\"privacy-safe\"}");
+        return ESP_OK;
+    }
+    if (!have_armed || (armed != 0 && armed != 1) || have_resume) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                           "missing ?armed=0|1");
+                           "use ?armed=0|1 or paired ?resume=1");
         return ESP_OK;
     }
     atomic_store(&s_voice_control_request,
-                 armed ? VOICE_CONTROL_ARM : VOICE_CONTROL_DISARM);
+                 armed ? VOICE_CONTROL_RESUME : VOICE_CONTROL_DISARM);
     httpd_resp_set_status(req, "202 Accepted");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_sendstr(req, armed
-        ? "{\"ok\":true,\"queued\":true,\"armed\":true}"
+        ? "{\"ok\":true,\"queued\":true,\"resume\":\"privacy-safe\"}"
         : "{\"ok\":true,\"queued\":true,\"armed\":false}");
     return ESP_OK;
 }
@@ -2079,7 +2625,14 @@ static bool audio_tap_parse(const char *name, jr_audio_tap_kind_t *kind)
 
 static esp_err_t audio_self_test_handler(httpd_req_t *req)
 {
-    if (!control_intent_required(req)) {
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    if (atomic_load(&s_voice_privacy_paused) || s_flip_muted) {
+        httpd_resp_set_status(req, "423 Locked");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(
+            req, "{\"ok\":false,\"error\":\"privacy blocks self-test\"}");
         return ESP_OK;
     }
     bool already_queued = atomic_exchange(&s_audio_diag_requested, true);
@@ -2095,6 +2648,9 @@ static esp_err_t audio_self_test_handler(httpd_req_t *req)
 
 static esp_err_t audio_taps_handler(httpd_req_t *req)
 {
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
     jr_audio_tap_info_t info[JR_AUDIO_TAP_COUNT];
     for (int i = 0; i < JR_AUDIO_TAP_COUNT; ++i) {
         esp_err_t err = jr_audio_diag_get_info((jr_audio_tap_kind_t)i, &info[i]);
@@ -2170,6 +2726,9 @@ static void write_le32(uint8_t *dst, uint32_t value)
 
 static esp_err_t audio_tap_wav_handler(httpd_req_t *req)
 {
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
     char query[96];
     char source[24] = {0};
     jr_audio_tap_kind_t kind;
@@ -2269,21 +2828,6 @@ static int touch_sector_from_point(uint16_t x, uint16_t y)
     return dy < 0 ? 7 : 5;
 }
 
-/* Three circular controls rendered in the pull-down shade: voice, diagnostic
- * lab, and Agent Link pairing. A forgiving 42 px hit radius suits fingers on
- * the 466 px round panel while keeping the controls disjoint. */
-static int shade_control_from_point(uint16_t x, uint16_t y)
-{
-    static const int centers[3] = {145, 233, 321};
-    for (int i = 0; i < 3; ++i) {
-        int dx = (int)x - centers[i];
-        int dy = (int)y - 104;
-        if (dx * dx + dy * dy <= 42 * 42) {
-            return i;
-        }
-    }
-    return -1;
-}
 
 /* /api/diag/tasks — per-task stack high-water marks, for right-sizing stacks.
  *
@@ -2353,6 +2897,9 @@ static esp_err_t tasks_diag_handler(httpd_req_t *req)
  * contract in jr_display.h without any lifetime games. */
 static esp_err_t choices_debug_handler(httpd_req_t *req)
 {
+    if (!control_intent_required(req)) {
+        return ESP_OK;
+    }
     int n = 3;
     if (!query_int(req, "n", &n) || n < 0 || n > HUD_CHOICE_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "n must be 0..3");
@@ -2378,7 +2925,7 @@ static esp_err_t choices_debug_handler(httpd_req_t *req)
  * path runs exactly as it would under glass. */
 static esp_err_t tap_sim_handler(httpd_req_t *req)
 {
-    if (!control_intent_required(req)) {
+    if (!control_intent_required(req) || !agent_require_auth(req)) {
         return ESP_OK;
     }
     int shake = 0;
@@ -2453,6 +3000,9 @@ static esp_err_t choices_hit_handler(httpd_req_t *req)
 /* POST /api/display/hud?on=0|1 — A/B the HUD's frame-rate cost on real glass. */
 static esp_err_t hud_toggle_handler(httpd_req_t *req)
 {
+    if (!control_intent_required(req)) {
+        return ESP_OK;
+    }
     int on = 1;
     if (!query_int(req, "on", &on) || (on != 0 && on != 1)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "on must be 0 or 1");
@@ -2692,7 +3242,7 @@ static esp_err_t pairing_claim_handler(httpd_req_t *req)
         httpd_resp_set_status(req, "403 Forbidden");
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req,
-            "{\"ok\":false,\"error\":\"hold the idle panel for 1.2 seconds first\"}");
+            "{\"ok\":false,\"error\":\"hold BOOT 1.5-5 seconds; retry within 60 seconds\"}");
         return ESP_OK;
     }
 
@@ -2720,9 +3270,8 @@ static esp_err_t pairing_claim_handler(httpd_req_t *req)
     }
     atomic_store(&s_pairing_claim_until_ms, 0U);
     s_ui_shade_open = false;
-    atomic_store(&s_voice_privacy_paused, false);
     if (VOICE_ALWAYS_READY) {
-        atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+        atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
     }
     char body[128];
     int n = snprintf(body, sizeof body,
@@ -2977,7 +3526,8 @@ static bool brain_render_text_safe(const char *value, size_t capacity,
         if (isalnum(*p) || *p == '-' || *p == '_' || *p == '.' ||
             *p == ':' || *p == '/' || *p == '?' || *p == '!' ||
             *p == '+' || *p == ',' || *p == '\'' || *p == '(' ||
-            *p == ')' || *p == '&' || (allow_space && *p == ' ')) {
+            *p == ')' || *p == '&' || *p == '%' ||
+            (allow_space && *p == ' ')) {
             continue;
         }
         return false;
@@ -3050,7 +3600,8 @@ static void brain_surface_expire(uint32_t now)
 /* Returns true whenever a Desk surface owns the tap, even if the tap missed a
  * choice button. This prevents a card interaction from accidentally toggling
  * the always-ready microphone underneath it. */
-static bool brain_surface_handle_tap(uint16_t x, uint16_t y, uint32_t now)
+static bool brain_surface_handle_tap(uint16_t x, uint16_t y, uint32_t now,
+                                     bool physical, uint32_t emitted_ms)
 {
     /* Read glass ownership before taking the Brain mutex. If the mutex is
      * contended, swallowing a tap is safer than letting a visible card toggle
@@ -3070,6 +3621,11 @@ static bool brain_surface_handle_tap(uint16_t x, uint16_t y, uint32_t now)
         owned = true;
         int action_index = jr_display_surface_hit_test(x, y);
         if (s_brain_surface.local_owned) {
+            if (!physical || emitted_ms < s_tool_consent.presented_ms) {
+                ESP_LOGW(TAG, "consent ignored non-physical/stale tap");
+                xSemaphoreGive(s_brain_lock);
+                return true;
+            }
             if (action_index == 0) {
                 device_tool_resolve_consent_locked(TOOL_CONSENT_DENY);
             } else if (action_index == 1) {
@@ -3122,8 +3678,52 @@ static bool brain_surface_handle_tap(uint16_t x, uint16_t y, uint32_t now)
     return owned;
 }
 
+static bool operator_mode_release(uint32_t now, const char *reason,
+                                  bool physical_feedback,
+                                  bool only_if_expired)
+{
+    if (s_brain_lock == NULL ||
+        xSemaphoreTake(s_brain_lock, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
+    if (only_if_expired &&
+        (!atomic_load(&s_operator_mode_active) ||
+         operator_lease_active(now))) {
+        xSemaphoreGive(s_brain_lock);
+        return false;
+    }
+
+    atomic_store(&s_operator_mode_active, false);
+    atomic_store(&s_operator_mode_entered_ms, 0U);
+    atomic_store(&s_operator_lease_until_ms, 0U);
+    if (s_brain_surface.active && !s_brain_surface.local_owned) {
+        jr_display_surface_dismiss();
+        s_brain_surface.active = false;
+    }
+    const bool privacy_held =
+        atomic_load(&s_voice_privacy_paused) || s_flip_muted;
+    atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
+    if (privacy_held) {
+        jr_display_caption_set("MUTED - HOLD TO RESUME");
+    } else {
+        jr_mood_poke_awake(&s_mood, now);
+        jr_display_caption_set("LISTENING");
+    }
+    xSemaphoreGive(s_brain_lock);
+
+    if (physical_feedback && !privacy_held) {
+        jr_display_bloom();
+        (void)jr_audio_diag_play_chirp(160U, 8U);
+    }
+    ESP_LOGI(TAG, "operator: Codex mode released (%s)", reason);
+    return true;
+}
+
 static esp_err_t agent_link_get_handler(httpd_req_t *req)
 {
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
     agent_link_state_t state = {0};
     uint32_t revision_hwm = 0U;
     uint32_t next_revision = 0U;
@@ -3765,6 +4365,9 @@ static esp_err_t brain_outbox_handler(httpd_req_t *req)
 
 static esp_err_t cockpit_handler(httpd_req_t *req)
 {
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
     const jr_state_snapshot_t *voice = jr_orch_snapshot(&s_app.orch);
     jr_display_diag_t display = {0};
@@ -3998,6 +4601,9 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
  * data source: have the user talk to the device, then GET this. */
 static esp_err_t vadlog_csv_handler(httpd_req_t *req)
 {
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
     if (s_vadlog == NULL) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "vadlog unavailable");
         return ESP_OK;
@@ -4164,14 +4770,12 @@ static esp_err_t display_canvas_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-/* POST /api/debug/input?kind=tap|double|long|swipe&dir=left|right|up|down
- * [&x=&y=&edge=1] — synthesize an input event through the REAL touch queue,
- * so every gesture is machine-testable without a finger on the glass
- * (owner: "you should be able to test all these inputs", 2026-08-28).
- * "double" enqueues two taps inside the double-tap window. */
+/* POST /api/debug/input?kind=tap|double|long|swipe
+ * [&dir=left|right|up|down] [&x=&y=&edge=1] synthesizes an event through the
+ * real queue. "double" enqueues two taps inside the double-tap window. */
 static esp_err_t debug_input_handler(httpd_req_t *req)
 {
-    if (!control_intent_required(req)) {
+    if (!control_intent_required(req) || !agent_require_auth(req)) {
         return ESP_OK;
     }
     char query[96], kind[12] = {0}, dirs[12] = {0}, val[8] = {0};
@@ -4252,6 +4856,9 @@ static esp_err_t debug_input_handler(httpd_req_t *req)
  * acceptable for a diagnostic tail, and it never stalls logging. */
 static esp_err_t logs_handler(httpd_req_t *req)
 {
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
     if (s_logring == NULL) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             "log ring unavailable");
@@ -4273,6 +4880,7 @@ static esp_err_t logs_handler(httpd_req_t *req)
     /* oldest byte of the requested window */
     size_t start = (head + LOGRING_CAP - tail) % LOGRING_CAP;
     httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     char chunk[1024];
     size_t sent = 0;
     while (sent < tail) {
@@ -4291,10 +4899,259 @@ static esp_err_t logs_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static void ota_restore_control_state(bool was_privacy_paused,
+                                      uint32_t previous_lease_until_ms)
+{
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    /* Privacy is fail-closed: never arm if voice was private before OTA or a
+     * physical gesture made it private while the upload was running. */
+    const bool keep_private =
+        was_privacy_paused || atomic_load(&s_voice_privacy_paused);
+    atomic_store(&s_voice_control_request,
+                 keep_private ? VOICE_CONTROL_PAUSE : VOICE_CONTROL_RESUME);
+
+    /* A physical owner tap clears the OTA lease and must win. Otherwise restore
+     * a still-live pre-existing lease rather than inventing a new one. */
+    if (atomic_load(&s_operator_lease_until_ms) != 0U) {
+        atomic_store(&s_operator_lease_until_ms,
+                     (int32_t)(previous_lease_until_ms - now) > 0
+                         ? previous_lease_until_ms : 0U);
+    }
+}
+
+static bool ota_confirm_running_image_if_healthy(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    if (running == NULL) {
+        return false;
+    }
+    esp_err_t state_err = esp_ota_get_state_partition(running, &state);
+    if (state_err != ESP_OK || state != ESP_OTA_IMG_PENDING_VERIFY) {
+        return state_err == ESP_OK;
+    }
+
+    static uint32_t observed_flush_errors = UINT32_MAX;
+    static uint32_t observed_flush_completions;
+    static uint32_t flush_stable_since_ms;
+    static uint32_t last_flush_progress_ms;
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    if (now >= 120000U) {
+        ESP_LOGE(TAG, "ota: probation deadline failed; rolling back");
+        (void)esp_ota_mark_app_invalid_rollback_and_reboot();
+        return false;
+    }
+    const bool voice_alive = s_voice_task_running &&
+        (uint32_t)(now - s_voice_task_heartbeat_ms) < 2000U;
+    const bool subsystems_healthy =
+        voice_alive && jr_net_is_connected() &&
+        atomic_load(&s_tool_diag.worker_ready) &&
+        atomic_load(&s_http_ready) && jr_wake_ready();
+    if (!subsystems_healthy) {
+        flush_stable_since_ms = now;
+        return false;
+    }
+
+    jr_display_diag_t display = {0};
+    if (jr_display_get_diag(&display) != ESP_OK ||
+        display.init_state != JR_DISPLAY_INIT_READY ||
+        !display.task_running) {
+        return false;
+    }
+    /* Display stability must hold alongside every required subsystem. */
+    if (display.flush_completions != observed_flush_completions) {
+        observed_flush_completions = display.flush_completions;
+        last_flush_progress_ms = now;
+    }
+    if (display.flush_errors != observed_flush_errors) {
+        observed_flush_errors = display.flush_errors;
+        flush_stable_since_ms = now;
+        return false;
+    }
+    if (display.actual_fps < 12U ||
+        last_flush_progress_ms == 0U ||
+        (uint32_t)(now - last_flush_progress_ms) > 1000U) {
+        flush_stable_since_ms = now;
+        return false;
+    }
+    if ((uint32_t)(now - flush_stable_since_ms) < 10000U) {
+        return false;
+    }
+
+    esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    if (err == ESP_OK) {
+        uint8_t slot = strcmp(running->label, "ota_0") == 0 ? 0U :
+                       strcmp(running->label, "ota_1") == 0 ? 1U : 0xFFU;
+        jr_display_ota_set(JR_DISPLAY_OTA_VALID, 100U, slot, 0xFFU, true);
+        persist_ota_attempt(-1);
+        ESP_LOGI(TAG,
+                 "ota: image valid after voice/display stable window");
+        return true;
+    }
+    ESP_LOGE(TAG, "ota: could not mark running image valid: %s",
+             esp_err_to_name(err));
+    return false;
+}
+
+/* POST /api/ota/upload — stream a jarvisrobot_v5.bin into the IDLE app slot
+ * over Wi-Fi, set it as boot, reboot. The last cable-flash killer: the live
+ * app keeps running (UI may stutter during erase bursts — flash-cache
+ * physics — but Wi-Fi, voice state, and the glass survive), and a failed
+ * write leaves the RUNNING slot untouched. Control-gated; auto-claims the
+ * operator lease so the glass announces itself. */
+static esp_err_t ota_upload_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    const size_t len = req->content_len;
+    atomic_store(&s_ota_active, false);
+    atomic_store(&s_ota_received_bytes, 0U);
+    atomic_store(&s_ota_total_bytes, (uint32_t)len);
+    if (len < 256U * 1024U || len > 0x400000U) {
+        atomic_store(&s_ota_last_error, ESP_ERR_INVALID_SIZE);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "implausible app image size");
+        return ESP_OK;
+    }
+    atomic_store(&s_ota_preflight_blocked, false);
+    const ota_preflight_t preflight = ota_preflight();
+    jr_display_nav_set(JR_DISPLAY_SPACE_SETTINGS);
+    jr_display_nav_up();
+    jr_display_ota_set(JR_DISPLAY_OTA_PREFLIGHT, 0U,
+                       preflight.active_slot, preflight.target_slot,
+                       preflight.ok);
+    if (!preflight.ok) {
+        atomic_store(&s_ota_preflight_blocked, true);
+        atomic_store(&s_ota_last_error, ESP_OK);
+        jr_display_ota_set(JR_DISPLAY_OTA_BLOCKED, 0U,
+                           preflight.active_slot, preflight.target_slot,
+                           false);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_sendstr(req, preflight.reason);
+        return ESP_OK;
+    }
+    const esp_partition_t *next = preflight.target;
+    const uint32_t upload_started_ms =
+        (uint32_t)(esp_timer_get_time() / 1000);
+    const uint32_t upload_deadline_ms = upload_started_ms + 240000U;
+    const uint32_t previous_lease_until_ms =
+        atomic_load(&s_operator_lease_until_ms);
+    const bool was_privacy_paused =
+        atomic_load(&s_voice_privacy_paused);
+    atomic_store(&s_ota_last_error, ESP_OK);
+    atomic_store(&s_ota_active, true);
+    atomic_store(&s_operator_lease_until_ms, upload_started_ms + 180000U);
+    atomic_store(&s_voice_control_request, VOICE_CONTROL_PAUSE);
+    jr_display_caption_set("UPDATING - DO NOT UNPLUG");
+    ESP_LOGI(TAG, "ota: receiving %u bytes into %s", (unsigned)len,
+             next->label);
+
+    esp_ota_handle_t ota = 0;
+    esp_err_t err = esp_ota_begin(next, len, &ota);
+    if (err != ESP_OK) {
+        atomic_store(&s_ota_active, false);
+        atomic_store(&s_ota_last_error, err);
+        jr_display_caption_set("UPDATE FAILED - STILL ON OLD");
+        ota_restore_control_state(was_privacy_paused,
+                                  previous_lease_until_ms);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            esp_err_to_name(err));
+        ESP_LOGE(TAG, "ota: begin failed: %s", esp_err_to_name(err));
+        return ESP_OK;
+    }
+    const uint8_t active_slot = preflight.active_slot;
+    jr_display_ota_set(JR_DISPLAY_OTA_RECEIVING, 0U, active_slot,
+                       preflight.target_slot, true);
+    /* Settings detail already owns the glass from preflight. */
+    /* Keep the staging buffer internal: esp_ota_write performs flash
+     * operations with the cache disabled, so this avoids depending on
+     * external-memory cache behavior in the update path. */
+    const size_t chunk_size = 4096U;
+    char *buf = heap_caps_malloc(chunk_size,
+                                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    size_t got = 0;
+    unsigned recv_timeouts = 0U;
+    if (buf == NULL) {
+        err = ESP_ERR_NO_MEM;
+    }
+    while (got < len && err == ESP_OK) {
+        uint32_t receive_now = (uint32_t)(esp_timer_get_time() / 1000);
+        if ((int32_t)(receive_now - upload_deadline_ms) >= 0) {
+            err = ESP_ERR_TIMEOUT;
+            break;
+        }
+        int r = httpd_req_recv(req, buf,
+                               len - got < chunk_size
+                                   ? len - got : chunk_size);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+            if (++recv_timeouts < 6U) {
+                continue;
+            }
+            err = ESP_ERR_TIMEOUT;
+            break;
+        }
+        if (r <= 0) {
+            err = ESP_FAIL;
+            break;
+        }
+        recv_timeouts = 0U;
+        err = esp_ota_write(ota, buf, (size_t)r);
+        got += (size_t)r;
+        atomic_store(&s_ota_received_bytes, (uint32_t)got);
+        atomic_store(&s_operator_lease_until_ms,
+                     (uint32_t)(esp_timer_get_time() / 1000) + 180000U);
+    }
+    heap_caps_free(buf);
+    if (err == ESP_OK && got == len) {
+        err = esp_ota_end(ota);
+    } else {
+        (void)esp_ota_abort(ota);
+        err = err == ESP_OK ? ESP_FAIL : err;
+    }
+    if (err == ESP_OK) {
+        esp_app_desc_t app_desc = {0};
+        err = esp_ota_get_partition_description(next, &app_desc);
+        if (err == ESP_OK &&
+            strcmp(app_desc.project_name, "jarvisrobot_v5") != 0) {
+            ESP_LOGE(TAG, "ota: refusing project \"%s\"", app_desc.project_name);
+            err = ESP_ERR_INVALID_RESPONSE;
+        }
+    }
+    if (err == ESP_OK) {
+        err = esp_ota_set_boot_partition(next);
+    }
+    if (err != ESP_OK) {
+        atomic_store(&s_ota_active, false);
+        atomic_store(&s_ota_last_error, err);
+        jr_display_ota_set(
+            JR_DISPLAY_OTA_FAILED,
+            len > 0U ? (uint8_t)((got * 100U) / len) : 0U,
+            active_slot, strcmp(next->label, "ota_0") == 0 ? 0U : 1U, true);
+        jr_display_caption_set("UPDATE FAILED - STILL ON OLD");
+        ota_restore_control_state(was_privacy_paused,
+                                  previous_lease_until_ms);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            esp_err_to_name(err));
+        ESP_LOGE(TAG, "ota: failed: %s", esp_err_to_name(err));
+        return ESP_OK;
+    }
+    persist_ota_attempt(strcmp(next->label, "ota_0") == 0 ? 0 : 1);
+    ESP_LOGI(TAG, "ota: %u bytes verified into %s — rebooting to swap",
+             (unsigned)got, next->label);
+    jr_display_caption_set("UPDATE OK - RESTARTING");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true,\"rebooting\":true}");
+    vTaskDelay(pdMS_TO_TICKS(600));
+    esp_restart();
+    return ESP_OK;
+}
+
 /* POST /api/operator/lease?ttl=seconds — claim; ?release=1 — hand back. */
 static esp_err_t operator_lease_handler(httpd_req_t *req)
 {
-    if (!control_intent_required(req)) {
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
         return ESP_OK;
     }
     char query[64];
@@ -4303,9 +5160,7 @@ static esp_err_t operator_lease_handler(httpd_req_t *req)
     if (httpd_req_get_url_query_str(req, query, sizeof query) == ESP_OK &&
         httpd_query_key_value(query, "release", val, sizeof val) == ESP_OK &&
         val[0] == '1') {
-        atomic_store(&s_operator_lease_until_ms, 0U);
-        atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
-        jr_display_caption_set("LISTENING");
+        (void)operator_mode_release(now, "remote", false, false);
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"ok\":true,\"leased\":false}");
         return ESP_OK;
@@ -4317,14 +5172,43 @@ static esp_err_t operator_lease_handler(httpd_req_t *req)
     }
     if (ttl_s < 10U) ttl_s = 10U;
     if (ttl_s > 900U) ttl_s = 900U;
+    if (s_brain_lock == NULL ||
+        xSemaphoreTake(s_brain_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_sendstr(req, "operator mode unavailable");
+        return ESP_OK;
+    }
+    atomic_store(&s_operator_mode_entered_ms, now);
     atomic_store(&s_operator_lease_until_ms, now + ttl_s * 1000U);
-    atomic_store(&s_voice_control_request, VOICE_CONTROL_DISARM);
-    jr_display_caption_set("JARVIS AT WORK - TAP TO RECLAIM");
-    ESP_LOGI(TAG, "operator: lease claimed for %u s", (unsigned)ttl_s);
+    atomic_store(&s_voice_control_request, VOICE_CONTROL_PAUSE);
+    jr_display_caption_set("CODEX MODE - DOUBLE TAP TO EXIT");
+    atomic_store(&s_operator_mode_active, true); /* publish complete state last */
+    xSemaphoreGive(s_brain_lock);
+    ESP_LOGI(TAG, "operator: Codex mode claimed for %u s", (unsigned)ttl_s);
     char body[64];
-    int n = snprintf(body, sizeof body, "{\"ok\":true,\"leased\":true,\"ttl_s\":%u}",
+    int n = snprintf(body, sizeof body,
+                     "{\"ok\":true,\"leased\":true,\"mode\":\"codex\",\"ttl_s\":%u}",
                      (unsigned)ttl_s);
     httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
+static esp_err_t operator_status_handler(httpd_req_t *req)
+{
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    const uint32_t until = atomic_load(&s_operator_lease_until_ms);
+    const bool active = operator_mode_active(now);
+    const uint32_t ttl_ms = active && (int32_t)(until - now) > 0
+        ? until - now : 0U;
+    char body[96];
+    int n = snprintf(body, sizeof body,
+                     "{\"active\":%s,\"mode\":\"%s\",\"ttl_ms\":%u}",
+                     active ? "true" : "false",
+                     active ? "codex" : "normal",
+                     (unsigned)ttl_ms);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_send(req, body, n);
     return ESP_OK;
 }
@@ -4410,6 +5294,9 @@ static void panel_rgb565_to_rgb888(uint16_t panel_px, uint8_t out[3])
 
 static esp_err_t display_snapshot_ppm_handler(httpd_req_t *req)
 {
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
     enum { PPM_BATCH_ROWS = 8 };
     jr_display_snapshot_info_t info;
     esp_err_t err = jr_display_snapshot_get_info(&info);
@@ -4536,6 +5423,9 @@ static esp_err_t display_snapshot_ppm_handler(httpd_req_t *req)
  * RGB565 in big-endian order (high byte, low byte). */
 static esp_err_t display_snapshot_rgb565_handler(httpd_req_t *req)
 {
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
     jr_display_snapshot_info_t info;
     esp_err_t err = jr_display_snapshot_get_info(&info);
     uint16_t *frame = err == ESP_OK && info.bytes > 0U
@@ -4590,13 +5480,12 @@ static void start_diag_http(void)
     httpd_handle_t server = NULL;
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = 80;
-    /* Measured slack was only 1,224 B under load — the thinnest margin in the
-     * build, and diag handlers keep growing. Raised from 6144. Some of the
-     * reclaim from the render/touch stacks is deliberately spent here. */
-    cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 40;
+    /* Live watermark: 3,880 B free at 7,168 after doctor/snapshots/tools.
+     * 6,400 retains ~3.1 KB measured margin and returns another 768 B. */
+    cfg.stack_size = 6400;
+    cfg.max_uri_handlers = 48;
     cfg.max_resp_headers = 16;
-    cfg.lru_purge_enable = false;
+    cfg.lru_purge_enable = true;
     if (httpd_start(&server, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "diag httpd failed to start");
         return;
@@ -4647,10 +5536,16 @@ static void start_diag_http(void)
           .handler = device_tool_config_get_handler },
         { .uri = "/api/tools/config", .method = HTTP_POST,
           .handler = device_tool_config_post_handler },
+        { .uri = "/api/device/levels", .method = HTTP_GET,
+          .handler = device_levels_get_handler },
+        { .uri = "/api/device/levels", .method = HTTP_POST,
+          .handler = device_levels_post_handler },
         { .uri = "/api/pairing/claim", .method = HTTP_POST,
           .handler = pairing_claim_handler },
         { .uri = "/api/display",     .method = HTTP_GET, .handler = display_diag_handler },
         { .uri = "/api/diag/vadlog", .method = HTTP_GET, .handler = vadlog_csv_handler },
+        { .uri = "/api/device/health", .method = HTTP_GET,
+          .handler = device_health_handler },
         { .uri = "/api/display/snapshot.json", .method = HTTP_GET,
           .handler = display_snapshot_info_handler },
         { .uri = "/api/display/snapshot.ppm", .method = HTTP_GET,
@@ -4661,12 +5556,16 @@ static void start_diag_http(void)
           .handler = display_test_handler },
         { .uri = "/api/display/canvas", .method = HTTP_POST,
           .handler = display_canvas_handler },
+        { .uri = "/api/operator/lease", .method = HTTP_GET,
+          .handler = operator_status_handler },
         { .uri = "/api/operator/lease", .method = HTTP_POST,
           .handler = operator_lease_handler },
         { .uri = "/api/logs", .method = HTTP_GET,
           .handler = logs_handler },
         { .uri = "/api/debug/input", .method = HTTP_POST,
           .handler = debug_input_handler },
+        { .uri = "/api/ota/upload", .method = HTTP_POST,
+          .handler = ota_upload_handler },
     };
     for (size_t i = 0; i < sizeof routes / sizeof routes[0]; ++i) {
         esp_err_t err = httpd_register_uri_handler(server, &routes[i]);
@@ -4675,6 +5574,7 @@ static void start_diag_http(void)
                      routes[i].uri, esp_err_to_name(err));
         }
     }
+    atomic_store(&s_http_ready, true);
     ESP_LOGI(TAG, "diag http up: voice control, audio taps, display mirror/test");
 }
 
@@ -4808,6 +5708,8 @@ static bool input_next(jr_input_t *in, jr_input_event_t *iev)
         iev->kind = JR_INPUT_TAP;
         iev->x = (uint16_t)((sim >> 16) - 1U);
         iev->y = (uint16_t)((sim & 0xFFFFU) - 1U);
+        iev->flags = JR_INPUT_FLAG_SYNTHETIC;
+        iev->emitted_ms = (uint32_t)(esp_timer_get_time() / 1000);
         return true;
     }
     return jr_input_poll(in, iev);
@@ -4817,14 +5719,15 @@ static void voice_task(void *arg)
 {
     (void)arg;
     static jr_pcm_t mic_frame[VOICE_FRAME_SAMPLES];
-    /* Server-VAD uplink batch: 4 frames (128 ms) per WS send. The send rate,
-     * not throughput, is what floods esp_websocket_client's lock (worst during
-     * Speaking, when heavy rx audio contends with tx). 128 ms => ~8 sends/s.
-     * The direct send handles the ~5.6 KB message fine; only a would-blocked
-     * batch (rare once the rate is low) exceeds the 4096 B txq slot and is
-     * dropped — one lost 128 ms chunk is harmless for VAD. */
-    static jr_pcm_t mic_batch[4 * VOICE_FRAME_SAMPLES];
+    /* Server-VAD uplink batch: 2 frames (64 ms) per WS send. A four-frame
+     * JSON body is ~5.6 KB, larger than JR_GEMINI_TXQ_SLOT (4096), so every
+     * would-block dropped a full 128 ms of microphone audio. Two frames stay
+     * queueable under backpressure while halving the per-frame send rate. */
+    static jr_pcm_t mic_batch[2 * VOICE_FRAME_SAMPLES];
     static size_t   mic_batch_fill = 0;
+    static bool codex_tap_pending;
+    static jr_input_event_t codex_pending_tap;
+    static uint32_t codex_pending_tap_ms;
     char say[200];
 
     /* app_main creates this task before the tool queues on purpose: the voice
@@ -4840,6 +5743,21 @@ static void voice_task(void *arg)
         uint64_t now = jr_clock_now_ms(&s_app.clock);
         s_voice_task_heartbeat_ms = (uint32_t)now;
 
+        if (atomic_load(&s_operator_mode_active) &&
+            !operator_lease_active((uint32_t)now)) {
+            (void)operator_mode_release((uint32_t)now, "ttl", false, true);
+        }
+
+        /* Leave a freshly booted OTA slot pending through a real probation
+         * window. Reaching this point proves the voice owner is alive; display
+         * readiness and zero flush errors are checked before cancelling
+         * bootloader rollback. */
+        static bool s_ota_validation_complete;
+        if (!s_ota_validation_complete && now >= 45000U) {
+            s_ota_validation_complete =
+                ota_confirm_running_image_if_healthy();
+        }
+
         /* Gemini can deliver generationComplete before the decoded PCM ring
          * and codec DMA have finished. Keep Speaking until the actual output
          * tail drains, then feed exactly one terminal boundary to the core. */
@@ -4851,6 +5769,12 @@ static void voice_task(void *arg)
 
         /* 1) pump the pure orchestrator (drains inbound, executes commands) */
         jr_orch_step(&s_app.orch, now);
+        static uint32_t observed_tx_drops;
+        const uint32_t tx_drops = s_app.client.live.tx_drops;
+        if (tx_drops != observed_tx_drops) {
+            observed_tx_drops = tx_drops;
+            atomic_store(&s_last_tx_drop_ms, (uint32_t)now);
+        }
 
         /* 1b) feed the HUD layer the world it cannot see: battery charge and
          * device tilt. Throttled to ~10 Hz — tilt parallax is a slow lean, not
@@ -4864,10 +5788,45 @@ static void voice_task(void *arg)
             jr_imu_t imu = {0};
             jr_power_t bat = {0};
             const bool have_imu = jr_imu_read(&imu) == ESP_OK;
-            (void)jr_power_read(&bat);
-            jr_display_set_hud_env(bat.percent, bat.charging,
-                                   have_imu ? imu.roll_deg : 0.0f,
-                                   have_imu ? imu.pitch_deg : 0.0f);
+            const bool have_power = jr_power_read(&bat) == ESP_OK;
+            jr_display_set_hud_env(
+                bat.percent, bat.charging,
+                atomic_load(&s_voice_privacy_paused),
+                have_imu ? imu.roll_deg : 0.0f,
+                have_imu ? imu.pitch_deg : 0.0f);
+            jr_display_power_set(
+                have_power ? bat.percent : 0xFFU,
+                have_power ? bat.millivolts : 0U,
+                have_power && bat.usb_present,
+                have_power && bat.charging);
+
+            static bool power_seen;
+            static bool last_usb;
+            static bool last_charging;
+            static uint32_t last_power_seq;
+            if (have_power && bat.sample_seq != last_power_seq) {
+                if (power_seen && !last_usb && bat.usb_present) {
+                    char caption[24];
+                    if (bat.charging && bat.percent <= 100U) {
+                        snprintf(caption, sizeof caption, "CHARGING %u%%",
+                                 (unsigned)bat.percent);
+                    } else {
+                        strlcpy(caption, "POWER CONNECTED", sizeof caption);
+                    }
+                    jr_display_caption_set(caption);
+                    jr_display_bloom();
+                } else if (power_seen && last_charging && !bat.charging &&
+                           bat.usb_present) {
+                    jr_display_caption_set("CHARGE COMPLETE");
+                    jr_display_bloom();
+                } else if (power_seen && last_usb && !bat.usb_present) {
+                    jr_display_caption_set("ON BATTERY");
+                }
+                power_seen = true;
+                last_usb = bat.usb_present;
+                last_charging = bat.charging;
+                last_power_seq = bat.sample_seq;
+            }
 
             /* GEST-03 shake-to-cancel, evaluated at the same 10 Hz cadence.
              * imu.shake is the hardware-calibrated flag (motion std-dev >
@@ -4910,18 +5869,19 @@ static void voice_task(void *arg)
              * one gesture that reads unambiguously with the display hidden.
              * Six sustained polls (~600 ms) so handling the puck cannot
              * trigger it. Face-up UNDOES the mute only when the flip caused
-             * it: a tap-mute or shade-mute stays muted through any amount of
-             * turning the device over in your hands. */
+             * it: a glass-hold or controls mute survives any amount of
+             * reorientation. */
             static uint8_t s_flip_polls, s_unflip_polls;
             uint32_t sim_flip = atomic_load(&s_sim_flip);
             if (sim_flip > 0U) {
                 atomic_store(&s_sim_flip, sim_flip - 1U);
             }
-            const bool face_down = sim_flip > 0U ||
-                (have_imu && imu.orientation != NULL &&
-                 strcmp(imu.orientation, "face_down") == 0 &&
-                 imu.age_ms < 500U);
-            if (face_down) {
+            const bool physical_face_down =
+                have_imu && imu.orientation != NULL &&
+                strcmp(imu.orientation, "face_down") == 0 &&
+                imu.age_ms < 500U;
+            const bool face_down = sim_flip > 0U || physical_face_down;
+            if (physical_face_down) {
                 s_unflip_polls = 0;
                 if (!s_flip_muted && ++s_flip_polls >= 6) {
                     s_flip_polls = 0;
@@ -4942,37 +5902,79 @@ static void voice_task(void *arg)
                 }
             }
 
-            /* Phase 5 moods: rest on stillness, bloom on lift. Flip-to-mute
-             * still owns privacy; this ladder owns brightness, clock, and
-             * whether a quiet desk should keep listening. */
+            /* Rest only on battery. A USB-powered desk assistant stays awake
+             * and listening; privacy/face-down still outrank this below. */
             jr_state_t mood_phase = jr_orch_phase(&s_app.orch);
             const bool user_busy =
                 mood_phase == JR_ST_SPEAKING ||
                 mood_phase == JR_ST_THINKING ||
                 mood_phase == JR_ST_ASKING ||
                 (mood_phase == JR_ST_LISTENING && s_listen_speech_active);
-            const bool moving = have_imu && imu.moving && imu.age_ms < 500U;
+            const bool privacy_paused =
+                atomic_load(&s_voice_privacy_paused) || s_flip_muted;
+            static uint8_t s_move_polls, s_mood_fd_polls, s_mood_fu_polls;
+            static bool s_mood_face_down;
+            if (privacy_paused) {
+                s_move_polls = 0;
+            } else if (have_imu && imu.moving && imu.age_ms < 500U) {
+                if (s_move_polls < 255U) {
+                    s_move_polls++;
+                }
+            } else {
+                s_move_polls = 0;
+            }
+            if (face_down) {
+                s_mood_fu_polls = 0;
+                if (s_mood_fd_polls < 255U) {
+                    s_mood_fd_polls++;
+                }
+                if (s_mood_fd_polls >= 6U) {
+                    s_mood_face_down = true;
+                }
+            } else {
+                s_mood_fd_polls = 0;
+                if (s_mood_fu_polls < 255U) {
+                    s_mood_fu_polls++;
+                }
+                if (s_mood_fu_polls >= 6U) {
+                    s_mood_face_down = false;
+                }
+            }
+            /* 600 ms face-down/up and 300 ms motion, so 50 mg IMU noise cannot
+             * slew brightness and Wi-Fi PS every 500 ms after mute. */
+            const bool moving = !privacy_paused && !s_mood_face_down &&
+                                s_move_polls >= 3U;
             jr_mood_in_t min = {
                 .now_ms = (uint32_t)now,
-                .face_down = face_down,
-                .moving = moving && !face_down,
-                .user_busy = user_busy,
+                .face_down = s_mood_face_down || privacy_paused,
+                .moving = moving,
+                .user_busy = (user_busy || (have_power && bat.usb_present)) &&
+                             !privacy_paused,
             };
             jr_mood_out_t mout = jr_mood_step(&s_mood, &min);
+            const bool realtime_power =
+                mout.voice_armed || user_busy ||
+                operator_mode_active((uint32_t)now) ||
+                atomic_load(&s_ota_active);
+            (void)jr_net_set_power_save(!realtime_power);
+            uint8_t effective_brightness = (uint8_t)(
+                ((unsigned)mout.brightness * s_brightness_cap + 50U) / 100U);
             atomic_store(&s_mood_id, (uint8_t)mout.mood);
-            atomic_store(&s_mood_brightness, mout.brightness);
-            s_bright_tgt = mout.brightness;
+            atomic_store(&s_mood_brightness, effective_brightness);
+            s_bright_tgt = effective_brightness;
             if (s_bright_now < s_bright_tgt) {
                 uint8_t step = (uint8_t)(s_bright_tgt - s_bright_now);
-                s_bright_now = (uint8_t)(s_bright_now + (step > 8 ? 8 : step));
+                s_bright_now = (uint8_t)(s_bright_now + (step > 4 ? 4 : step));
             } else if (s_bright_now > s_bright_tgt) {
                 uint8_t step = (uint8_t)(s_bright_now - s_bright_tgt);
-                s_bright_now = (uint8_t)(s_bright_now - (step > 8 ? 8 : step));
+                s_bright_now = (uint8_t)(s_bright_now - (step > 4 ? 4 : step));
             }
             (void)jr_display_set_brightness(s_bright_now);
             if (mout.changed) {
-                ESP_LOGI(TAG, "mood -> %s brightness=%u voice=%d",
-                         jr_mood_name(mout.mood), (unsigned)mout.brightness,
+                ESP_LOGI(TAG, "mood -> %s brightness=%u cap=%u voice=%d",
+                         jr_mood_name(mout.mood),
+                         (unsigned)effective_brightness,
+                         (unsigned)s_brightness_cap,
                          (int)mout.voice_armed);
                 if (mout.mood == JR_MOOD_AMBIENT) {
                     jr_display_caption_set("AMBIENT");
@@ -4990,42 +5992,30 @@ static void voice_task(void *arg)
                      * that is a separate, pre-existing path below.) */
                     if (!atomic_load(&s_voice_privacy_paused)) {
                         atomic_store(&s_voice_control_request,
-                                     VOICE_CONTROL_DISARM);
+                                     VOICE_CONTROL_PAUSE);
                         s_mood_rest_disarmed = true;
                     }
                 } else if (mout.voice_armed && s_mood_rest_disarmed &&
                            !s_flip_muted) {
-                    atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+                    atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
                     s_mood_rest_disarmed = false;
                 }
             }
 
-            /* Physical power key (AXP2101 PKEY, polled over I2C — the C
-             * board's unlock). Short press mirrors the hold gesture: mute /
-             * unmute, captioned. Long press = status glance. Never power-off
-             * from firmware — the PMIC's own 6 s forced cut stays the
-             * hardware escape hatch. */
+            /* PWR/PKEY is a recovery button, never a mute trap. Short press
+             * wakes/re-arms or confirms LISTENING. Privacy remains on the
+             * explicit glass hold/MUTE action. Long press shows status; the
+             * PMIC's own 6 s forced cut remains the hardware escape hatch. */
             {
                 uint32_t pkey_s = 0, pkey_l = 0;
                 jr_power_pkey_take(&pkey_s, &pkey_l);
                 if (pkey_s > 0) {
-                    if (atomic_load(&s_voice_privacy_paused)) {
-                        atomic_store(&s_voice_privacy_paused, false);
-                        s_flip_muted = false;
-                        atomic_store(&s_voice_control_request,
-                                     VOICE_CONTROL_ARM);
-                        jr_display_caption_set("LISTENING");
-                        ESP_LOGI(TAG, "pkey: unmute");
-                    } else {
-                        atomic_store(&s_voice_privacy_paused, true);
-                        jr_state_t pk_p = jr_orch_phase(&s_app.orch);
-                        if (pk_p != JR_ST_IDLE && pk_p != JR_ST_DRAINING) {
-                            jr_orch_inject(&s_app.orch,
-                                           jr_event(JR_EV_USER_STOP), now);
-                        }
-                        jr_display_caption_set("MUTED - PRESS TO RESUME");
-                        ESP_LOGI(TAG, "pkey: mute");
-                    }
+                    s_flip_muted = false;
+                    atomic_store(&s_voice_privacy_paused, false);
+                    jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                    atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+                    jr_display_caption_set("LISTENING");
+                    ESP_LOGI(TAG, "pkey: listen");
                 }
                 if (pkey_l > 0) {
                     jr_power_t pb;
@@ -5039,6 +6029,7 @@ static void voice_task(void *arg)
                     ESP_LOGI(TAG, "pkey: long -> status");
                 }
             }
+            boot_button_tick((uint32_t)now);
 
             /* Low battery speaks up ON GLASS, once per 5 minutes, discharge
              * only. Quiet below the panic line beats a dead surprise. */
@@ -5058,8 +6049,24 @@ static void voice_task(void *arg)
                 }
             }
 
-            /* UI-01 ambient watch: rest moods get hands. Time comes from
-             * SNTP or the on-board PCF85063 — wrong hands are worse than none. */
+            /* Voice owns the primary glass. Side utilities time out, and any
+             * active voice turn reclaims Jarvis immediately. */
+            const jr_state_t ui_phase = jr_orch_phase(&s_app.orch);
+            const bool voice_visible =
+                ui_phase == JR_ST_THINKING || ui_phase == JR_ST_SPEAKING;
+            if (jr_display_nav_space() != JR_DISPLAY_SPACE_JARVIS &&
+                (voice_visible ||
+                 (s_side_page_until_ms != 0U &&
+                  (int32_t)((uint32_t)now - s_side_page_until_ms) >= 0))) {
+                jr_display_nav_home();
+                s_side_page_until_ms = 0U;
+                jr_display_caption_set("JARVIS - VOICE READY");
+                ESP_LOGI(TAG, "ui: voice reclaimed primary surface");
+            }
+
+            /* Watch is an explicit 10-second right-swipe utility. Ambient
+             * keeps Jarvis's voice face visible instead of dimming/compositing
+             * the entire frame and dropping the glass from 16 to 13 fps. */
             static uint32_t s_clock_next_ms;
             static int s_clock_last_min = -1;
             if ((int32_t)((uint32_t)now - s_clock_next_ms) >= 0) {
@@ -5071,7 +6078,7 @@ static void voice_task(void *arg)
                 if (!peek) {
                     s_watch_peek_until_ms = 0U;
                 }
-                if (mout.clock_on || peek) {
+                if (peek) {
                     struct tm tmv;
                     if (device_wall_time(&tmv)) {
                         clock_on = true;
@@ -5120,33 +6127,34 @@ static void voice_task(void *arg)
         voice_control_request_t control = (voice_control_request_t)
             atomic_exchange(&s_voice_control_request, VOICE_CONTROL_NONE);
         jr_state_t controlled_phase = jr_orch_phase(&s_app.orch);
-        if (control == VOICE_CONTROL_ARM) {
-            atomic_store(&s_voice_privacy_paused, false);
-            /* Voice is armed again by SOMEBODY, so the rest ladder no longer
-             * owns a disarm. This is the one choke point every arm passes
-             * through, and clearing here stops the flag going stale — an arm
-             * from the API, the shade or face-up used to leave it set, so the
-             * flag no longer described reality. */
-            s_mood_rest_disarmed = false;
-            /* Same choke-point rule for the fast-kill DAC mute: an explicit
-             * arm means the owner wants a talking device, so no stale mute
-             * may survive it. A mute whose UNMUTE_DAC successor was lost left
-             * the feeder silently discarding every reply — "no sound at all"
-             * with all counters green (hit live 2026-08-27; the diag chirp's
-             * own unmute was what brought audio back). */
-            jr_audio_dac_unmute();
-            if (controlled_phase == JR_ST_IDLE ||
-                controlled_phase == JR_ST_BACKOFF ||
-                controlled_phase == JR_ST_FATAL) {
-                jr_orch_inject(&s_app.orch, jr_event(JR_EV_USER_START), now);
-            } else if (controlled_phase == JR_ST_DRAINING) {
-                /* A resume request can race the graceful close. Preserve it
-                 * until SessionState reaches Idle instead of silently losing
-                 * the user's intent in the draining window. */
-                atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+        if (control == VOICE_CONTROL_ARM ||
+            control == VOICE_CONTROL_RESUME) {
+            const bool resume_blocked =
+                control == VOICE_CONTROL_RESUME &&
+                (atomic_load(&s_voice_privacy_paused) || s_flip_muted);
+            if (resume_blocked) {
+                ESP_LOGI(TAG, "voice: safe resume blocked by privacy");
+            } else {
+                if (control == VOICE_CONTROL_ARM) {
+                    atomic_store(&s_voice_privacy_paused, false);
+                }
+                s_mood_rest_disarmed = false;
+                jr_audio_dac_unmute();
+                if (controlled_phase == JR_ST_IDLE ||
+                    controlled_phase == JR_ST_BACKOFF ||
+                    controlled_phase == JR_ST_FATAL) {
+                    jr_orch_inject(&s_app.orch,
+                                   jr_event(JR_EV_USER_START), now);
+                } else if (controlled_phase == JR_ST_DRAINING) {
+                    /* Preserve the exact intent until graceful close finishes. */
+                    atomic_store(&s_voice_control_request, control);
+                }
             }
-        } else if (control == VOICE_CONTROL_DISARM) {
-            atomic_store(&s_voice_privacy_paused, true);
+        } else if (control == VOICE_CONTROL_DISARM ||
+                   control == VOICE_CONTROL_PAUSE) {
+            if (control == VOICE_CONTROL_DISARM) {
+                atomic_store(&s_voice_privacy_paused, true);
+            }
             s_pending_text_set = false;
             s_pending_text_inflight = false;
             s_listen_idle_deadline_ms = 0;
@@ -5154,6 +6162,37 @@ static void voice_task(void *arg)
                 controlled_phase != JR_ST_DRAINING) {
                 jr_orch_inject(&s_app.orch, jr_event(JR_EV_USER_STOP), now);
             }
+        }
+
+        int requested_volume =
+            atomic_exchange(&s_level_volume_request, -1);
+        int requested_brightness =
+            atomic_exchange(&s_level_brightness_request, -1);
+        if (requested_volume >= 10 && requested_volume <= 100) {
+            s_out_vol = requested_volume;
+            jr_audio_set_gains(-1, -1, requested_volume);
+            persist_out_vol((uint8_t)requested_volume);
+            ESP_LOGI(TAG, "levels: volume=%d", requested_volume);
+        }
+        if (requested_brightness >= 10 && requested_brightness <= 100) {
+            s_brightness_cap = (uint8_t)requested_brightness;
+            persist_brightness_cap((uint8_t)requested_brightness);
+            ESP_LOGI(TAG, "levels: brightness cap=%d", requested_brightness);
+        }
+        if (requested_volume >= 0 || requested_brightness >= 0) {
+            char levels_caption[40];
+            if (requested_volume >= 0 && requested_brightness >= 0) {
+                snprintf(levels_caption, sizeof levels_caption,
+                         "VOL %d BRIGHT %d",
+                         requested_volume, requested_brightness);
+            } else if (requested_volume >= 0) {
+                snprintf(levels_caption, sizeof levels_caption,
+                         "VOLUME %d", requested_volume);
+            } else {
+                snprintf(levels_caption, sizeof levels_caption,
+                         "BRIGHTNESS %d", requested_brightness);
+            }
+            jr_display_caption_set(levels_caption);
         }
 
         /* TRUE always-ready. In manual-VAD mode a quiet room sends no uplink
@@ -5166,6 +6205,8 @@ static void voice_task(void *arg)
          * not Idle); rate-limit so a persistently failing connect can't spin. */
         if (VOICE_ALWAYS_READY &&
             !atomic_load(&s_voice_privacy_paused) &&
+            !s_flip_muted &&
+            !s_mood_rest_disarmed &&
             !operator_lease_active((uint32_t)now) &&
             atomic_load(&s_audio_diag_until_ms) == 0U &&
             !atomic_load(&s_touch_challenge_active) &&
@@ -5173,7 +6214,7 @@ static void voice_task(void *arg)
             jr_orch_phase(&s_app.orch) == JR_ST_IDLE &&
             (s_always_ready_rearm_ms == 0U ||
              (int32_t)((uint32_t)now - s_always_ready_rearm_ms) >= 0)) {
-            atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+            atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
             s_always_ready_rearm_ms = (uint32_t)now + 3000U;  /* connect cooldown */
             ESP_LOGI(TAG, "voice: always-ready re-arm from Idle");
         }
@@ -5210,7 +6251,7 @@ static void voice_task(void *arg)
             (void)jr_display_set_test_pattern(JR_DISPLAY_TEST_OFF);
             if (VOICE_ALWAYS_READY &&
                 !atomic_load(&s_voice_privacy_paused)) {
-                atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+                atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
             }
             ESP_LOGI(TAG, "panel/touch challenge cancelled");
         }
@@ -5227,7 +6268,7 @@ static void voice_task(void *arg)
             (void)jr_display_set_test_pattern(JR_DISPLAY_TEST_OFF);
             if (VOICE_ALWAYS_READY &&
                 !atomic_load(&s_voice_privacy_paused)) {
-                atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+                atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
             }
         }
         brain_surface_expire((uint32_t)now);
@@ -5369,28 +6410,32 @@ static void voice_task(void *arg)
             atomic_store(&s_touch_last_dx, iev.delta_x);
             atomic_store(&s_touch_last_dy, iev.delta_y);
             atomic_store(&s_touch_last_duration_ms, iev.duration_ms);
+            const bool physical =
+                (iev.flags & JR_INPUT_FLAG_SYNTHETIC) == 0U;
+            if (s_watch_peek_until_ms != 0U) {
+                s_watch_peek_until_ms = 0U;
+            }
             if (iev.kind == JR_INPUT_TAP) {
                 atomic_fetch_add(&s_touch_taps, 1U);
                 /* Universal touch feedback (TRANS-05): every tap ripples,
                  * whatever it goes on to mean. Fire-and-forget, self-expiring. */
                 jr_display_ripple(iev.x, iev.y);
                 jr_mood_poke_awake(&s_mood, (uint32_t)now);
-                /* Tap MUST be able to undo a rest disarm. The old guard here
-                 * was `!s_voice_privacy_paused`, which deadlocked the device:
-                 * the rest ladder disarms via VOICE_CONTROL_DISARM, that sets
-                 * privacy_paused, and this guard then refused to re-arm — so a
-                 * device that dozed off could never be woken by touch, only by
-                 * reboot. Rest is OUR decision, so we own reversing it; only
-                 * the user's own flip-to-mute may veto a tap-wake. */
+                /* Tap may undo only a mood-owned operational pause. Deliberate
+                 * hold/flip privacy remains authoritative. */
                 if (s_mood_rest_disarmed && !s_flip_muted) {
                     s_mood_rest_disarmed = false;
-                    atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+                    atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
                     jr_display_caption_clear();
                 }
             } else if (iev.kind == JR_INPUT_LONG_PRESS) {
                 atomic_fetch_add(&s_touch_long_presses, 1U);
             } else if (iev.kind == JR_INPUT_SWIPE) {
                 atomic_fetch_add(&s_touch_swipes, 1U);
+                /* A classified swipe must acknowledge immediately, even when
+                 * its semantic result (watch already visible, volume at max)
+                 * would otherwise look unchanged. */
+                jr_display_ripple(iev.x, iev.y);
             }
 
             /* NOTE: taps are NOT injected as JR_EV_TAP here, and must not be.
@@ -5410,13 +6455,17 @@ static void voice_task(void *arg)
              * behavioural gain. Tried on 2026-07-19 and reverted. */
 
             if (atomic_load(&s_touch_challenge_active)) {
+                if (!physical) {
+                    ESP_LOGW(TAG, "synthetic input cannot answer touch challenge");
+                    continue;
+                }
                 if (iev.kind == JR_INPUT_LONG_PRESS) {
                     atomic_store(&s_touch_challenge_active, false);
                     (void)jr_display_set_test_pattern(JR_DISPLAY_TEST_OFF);
                     if (VOICE_ALWAYS_READY &&
                         !atomic_load(&s_voice_privacy_paused)) {
                         atomic_store(&s_voice_control_request,
-                                     VOICE_CONTROL_ARM);
+                                     VOICE_CONTROL_RESUME);
                     }
                     ESP_LOGI(TAG, "panel/touch challenge aborted by hold");
                 } else if (iev.kind == JR_INPUT_TAP) {
@@ -5466,8 +6515,79 @@ static void voice_task(void *arg)
                 demo_stop();   /* the reel yields to the first real finger */
                 continue;
             }
+
+            const bool codex_mode =
+                operator_mode_active((uint32_t)now);
+            if (codex_mode) {
+                if (!physical) {
+                    ESP_LOGW(TAG, "synthetic input cannot control Codex mode");
+                    continue;
+                }
+                if (iev.kind == JR_INPUT_LONG_PRESS) {
+                    if (atomic_load(&s_voice_privacy_paused)) {
+                        atomic_store(&s_voice_privacy_paused, false);
+                        s_flip_muted = false;
+                        atomic_store(&s_voice_control_request,
+                                     VOICE_CONTROL_ARM);
+                        jr_display_caption_set("LISTENING");
+                    } else {
+                        atomic_store(&s_voice_privacy_paused, true);
+                        atomic_store(&s_voice_control_request,
+                                     VOICE_CONTROL_DISARM);
+                        jr_display_caption_set("MUTED - HOLD TO RESUME");
+                    }
+                    continue;
+                }
+                if (iev.kind == JR_INPUT_TAP) {
+                    if (codex_tap_pending &&
+                        (uint32_t)now - codex_pending_tap_ms < 400U) {
+                        /* Escape takes precedence over every remote action:
+                         * neither contact of the double-tap is dispatched. */
+                        codex_tap_pending = false;
+                        (void)operator_mode_release(
+                            (uint32_t)now, "double-tap", true, false);
+                    } else {
+                        if (codex_tap_pending) {
+                            (void)brain_surface_handle_tap(
+                                codex_pending_tap.x, codex_pending_tap.y,
+                                codex_pending_tap_ms,
+                                (codex_pending_tap.flags &
+                                 JR_INPUT_FLAG_SYNTHETIC) == 0U,
+                                codex_pending_tap.emitted_ms);
+                        }
+                        codex_pending_tap = iev;
+                        codex_pending_tap_ms = (uint32_t)now;
+                        codex_tap_pending = true;
+                    }
+                } else {
+                    jr_display_caption_set(
+                        "CODEX MODE - DOUBLE TAP TO EXIT");
+                    ESP_LOGI(TAG,
+                             "operator: input retained by Codex mode kind=%d",
+                             (int)iev.kind);
+                }
+                continue;
+            }
+            codex_tap_pending = false;
+            if (iev.kind == JR_INPUT_TAP) {
+                const bool double_tap = s_last_tap_ms != 0U &&
+                    (uint32_t)now - s_last_tap_ms < 400U;
+                s_last_tap_ms = (uint32_t)now;
+                if (double_tap) {
+                    jr_display_nav_home();
+                    s_ui_shade_open = false;
+                    jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                    jr_display_bloom();
+                    jr_display_caption_set("JARVIS - RIGHT WATCH");
+                    ESP_LOGI(TAG, "gesture: double-tap home");
+                    continue;
+                }
+            }
             if (iev.kind == JR_INPUT_TAP &&
-                brain_surface_handle_tap(iev.x, iev.y, (uint32_t)now)) {
+                brain_surface_handle_tap(
+                    iev.x, iev.y, (uint32_t)now,
+                    (iev.flags & JR_INPUT_FLAG_SYNTHETIC) == 0U,
+                    iev.emitted_ms)) {
                 continue;
             }
             /* An open ask owns every tap: an arc hit answers it, a miss is
@@ -5475,16 +6595,19 @@ static void voice_task(void *arg)
              * the mute toggle mid-question. Timeout, voice answer and server
              * cancel are the session's own exits from Asking. */
             if (iev.kind == JR_INPUT_TAP && jr_display_choices_active()) {
+                if (!physical) {
+                    ESP_LOGW(TAG, "synthetic input cannot answer ask_user");
+                    continue;
+                }
                 int choice = jr_display_choice_hit(iev.x, iev.y);
                 if (choice >= 0 && choice < (int)s_ask.count) {
                     jr_display_set_choice_selected(choice);
-                    jr_event_t pick = jr_event(JR_EV_CHOICE_PICKED);
-                    pick.call_id = s_ask.call_id_hash;
-                    pick.choice_index = (uint8_t)choice;
-                    pick.choice_text = s_ask.options[choice];
-                    jr_orch_inject(&s_app.orch, pick, now);
+                    jr_event_t picked = jr_event(JR_EV_CHOICE_PICKED);
+                    picked.choice_index = (uint8_t)choice;
+                    picked.choice_text = s_ask.options[choice];
                     s_ask_tap_grace_ms = (uint32_t)now + 600U;
-                    ESP_LOGI(TAG, "ask: tapped arc %d = \"%s\"",
+                    jr_orch_inject(&s_app.orch, picked, now);
+                    ESP_LOGI(TAG, "ask: choice=%d text=%s",
                              choice, s_ask.options[choice]);
                 } else {
                     ESP_LOGI(TAG, "ask: tap (%u,%u) missed the arcs",
@@ -5504,85 +6627,90 @@ static void voice_task(void *arg)
             }
             jr_state_t p = jr_orch_phase(&s_app.orch);
             if (iev.kind == JR_INPUT_SWIPE) {
-                if (iev.direction == JR_INPUT_DIRECTION_DOWN &&
-                    (iev.flags & JR_INPUT_FLAG_TOP_EDGE) != 0U) {
-                    s_ui_shade_open = true;
-                    ESP_LOGI(TAG, "ui: shade opened dy=%d duration=%u",
-                             (int)iev.delta_y, (unsigned)iev.duration_ms);
-                } else if (iev.direction == JR_INPUT_DIRECTION_UP &&
-                           s_ui_shade_open) {
-                    s_ui_shade_open = false;
-                    ESP_LOGI(TAG, "ui: shade closed");
-                } else if (iev.direction == JR_INPUT_DIRECTION_LEFT &&
-                           !s_ui_shade_open) {
-                    /* Gesture: swipe left = status glance. One caption, no
-                     * new surface — battery, link, time at a flick (owner
-                     * ask 2026-08-27: gestures must DO things, with
-                     * feedback). */
-                    jr_power_t bat;
-                    wifi_ap_record_t ap;
-                    char glance[64];
-                    int off = 0;
-                    if (jr_power_read(&bat) == ESP_OK && bat.percent <= 100) {
-                        off += snprintf(glance + off, sizeof glance - off,
-                                        "BAT %u%%%s  ", (unsigned)bat.percent,
-                                        bat.charging ? "+" : "");
-                    }
-                    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
-                        off += snprintf(glance + off, sizeof glance - off,
-                                        "WIFI %d  ", (int)ap.rssi);
-                    }
-                    time_t tt = time(NULL);
-                    struct tm tmv;
-                    localtime_r(&tt, &tmv);
-                    if (tmv.tm_year >= 2020 - 1900 &&
-                        (size_t)off < sizeof glance) {
-                        int h12 = tmv.tm_hour % 12;
-                        if (h12 == 0) h12 = 12;
-                        snprintf(glance + off, sizeof glance - off,
-                                 "%d:%02d %s", h12, tmv.tm_min,
-                                 tmv.tm_hour < 12 ? "AM" : "PM");
-                    }
-                    jr_display_caption_set(off > 0 ? glance : "NO STATUS");
-                    ESP_LOGI(TAG, "gesture: status glance");
-                } else if (iev.direction == JR_INPUT_DIRECTION_RIGHT &&
-                           !s_ui_shade_open) {
-                    /* Gesture: swipe right = 10 s watch peek while awake. */
-                    s_watch_peek_until_ms = (uint32_t)now + 10000U;
-                    ESP_LOGI(TAG, "gesture: watch peek");
-                } else if ((iev.direction == JR_INPUT_DIRECTION_UP ||
-                            iev.direction == JR_INPUT_DIRECTION_DOWN) &&
-                           !s_ui_shade_open) {
-                    /* Gesture: vertical swipe (shade closed, non-edge) =
-                     * VOLUME. Up louder, down quieter, 10 per stroke,
-                     * captioned, persisted so a reboot keeps the level
-                     * (owner: "he can't control volume?", 2026-08-28). */
-                    int vol = s_out_vol;
-                    vol += iev.direction == JR_INPUT_DIRECTION_UP ? 10 : -10;
-                    if (vol > 100) vol = 100;
-                    if (vol < 10)  vol = 10;
-                    s_out_vol = vol;
-                    jr_audio_set_gains(-1, -1, vol);
-                    persist_out_vol((uint8_t)vol);
-                    char cap[24];
-                    snprintf(cap, sizeof cap, "VOLUME %d", vol);
-                    jr_display_caption_set(cap);
-                    ESP_LOGI(TAG, "gesture: volume %d", vol);
-                } else {
-                    /* Recognized swipe, no action in this context. Hint
-                     * instead of silence. */
-                    jr_display_caption_set("L GLANCE R WATCH HOLD MUTE");
-                    ESP_LOGI(TAG, "gesture: swipe hint (dir=%d)",
-                             (int)iev.direction);
+                const jr_display_overlay_t overlay =
+                    jr_display_nav_overlay();
+                bool watch_opened = false;
+                const bool edge_vertical =
+                    (iev.direction == JR_INPUT_DIRECTION_UP ||
+                     iev.direction == JR_INPUT_DIRECTION_DOWN) &&
+                    (iev.flags & JR_INPUT_FLAG_TOP_EDGE) == 0U;
+                if (edge_vertical && iev.start_x <= 140U) {
+                    const int level = request_level_step(
+                        &s_level_volume_request, s_out_vol,
+                        iev.direction == JR_INPUT_DIRECTION_UP ? 5 : -5);
+                    char caption[24];
+                    snprintf(caption, sizeof caption, "VOLUME %d", level);
+                    jr_display_caption_set(caption);
+                    continue;
                 }
+                if (edge_vertical && iev.start_x >= 326U) {
+                    const int level = request_level_step(
+                        &s_level_brightness_request, s_brightness_cap,
+                        iev.direction == JR_INPUT_DIRECTION_DOWN ? 5 : -5);
+                    char caption[24];
+                    snprintf(caption, sizeof caption, "BRIGHTNESS %d", level);
+                    jr_display_caption_set(caption);
+                    continue;
+                }
+                if (overlay == JR_DISPLAY_OVERLAY_SHADE) {
+                    if (iev.direction == JR_INPUT_DIRECTION_LEFT ||
+                        iev.direction == JR_INPUT_DIRECTION_RIGHT) {
+                        const int level = request_level_step(
+                            &s_level_volume_request, s_out_vol,
+                            iev.direction == JR_INPUT_DIRECTION_RIGHT ? 10 : -10);
+                        ESP_LOGI(TAG, "ui: shade swipe volume=%d", level);
+                    } else if (iev.direction == JR_INPUT_DIRECTION_UP) {
+                        jr_display_nav_up();
+                    }
+                } else if (iev.direction == JR_INPUT_DIRECTION_LEFT) {
+                    jr_display_nav_next();
+                } else if (iev.direction == JR_INPUT_DIRECTION_RIGHT) {
+                    if (jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS &&
+                        overlay == JR_DISPLAY_OVERLAY_NONE) {
+                        s_watch_peek_until_ms = (uint32_t)now + 10000U;
+                        jr_display_caption_set("WATCH - 10 SECONDS");
+                        watch_opened = true;
+                    } else {
+                        jr_display_nav_prev();
+                    }
+                } else if (iev.direction == JR_INPUT_DIRECTION_UP) {
+                    jr_display_nav_up();
+                } else if (iev.direction == JR_INPUT_DIRECTION_DOWN) {
+                    jr_display_nav_down();
+                }
+                s_ui_shade_open =
+                    jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_SHADE;
+                static const char *const space_hint[JR_DISPLAY_SPACE_COUNT] = {
+                    "JARVIS - RIGHT WATCH", "DESK - UP DETAIL",
+                    "TOOLS - UP DETAIL", "SETTINGS - DOWN CONTROLS"
+                };
+                const jr_display_space_t space = jr_display_nav_space();
+                if (space != JR_DISPLAY_SPACE_JARVIS) {
+                    s_side_page_until_ms = (uint32_t)now + 12000U;
+                } else {
+                    s_side_page_until_ms = 0U;
+                }
+                if (watch_opened) {
+                    jr_display_caption_set("WATCH - 10 SECONDS");
+                } else if (jr_display_nav_overlay() ==
+                           JR_DISPLAY_OVERLAY_SHADE) {
+                    jr_display_caption_clear();
+                } else if (jr_display_nav_overlay() ==
+                           JR_DISPLAY_OVERLAY_DETAIL) {
+                    jr_display_caption_set("DETAIL - DOWN TO CLOSE");
+                } else {
+                    jr_display_caption_set(space_hint[space]);
+                }
+                ESP_LOGI(TAG, "ui: nav space=%d overlay=%d",
+                         (int)space, (int)jr_display_nav_overlay());
             } else if (iev.kind == JR_INPUT_LONG_PRESS) {
-                /* LONG-PRESS IS MUTE. One job, both directions, always
-                 * captioned. It was overloaded with pairing + shade and the
-                 * owner never found the mute inside it (long_press counter
-                 * read 0 while they reported "can't mute", 2026-08-27).
-                 * Pairing claim stays reachable via the shade's Agent Link
-                 * control — deliberate flows can afford two gestures; mute
-                 * cannot. */
+                if (!physical) {
+                    ESP_LOGW(TAG, "synthetic hold cannot change privacy");
+                    continue;
+                }
+                /* LONG-PRESS IS PRIVACY. One job, both directions, always
+                 * captioned. Pairing and side utilities never share this
+                 * safety gesture or the minimal voice shade. */
                 if (atomic_load(&s_voice_privacy_paused)) {
                     atomic_store(&s_voice_privacy_paused, false);
                     /* Also release the flip latch: a deliberate hold outranks
@@ -5604,51 +6732,71 @@ static void voice_task(void *arg)
                     ESP_LOGI(TAG, "gesture: long-press mute");
                 }
             } else if (iev.kind == JR_INPUT_TAP) {
-                if (s_ui_shade_open) {
-                    int shade_control = shade_control_from_point(iev.x, iev.y);
-                    if (shade_control == 0) {
-                        s_ui_shade_open = false;
-                        if (p == JR_ST_IDLE || p == JR_ST_BACKOFF ||
-                            p == JR_ST_FATAL) {
-                            atomic_store(&s_voice_privacy_paused, false);
-                            jr_orch_inject(&s_app.orch,
-                                           jr_event(JR_EV_USER_START), now);
-                        } else if (p != JR_ST_DRAINING) {
-                            atomic_store(&s_voice_privacy_paused, true);
-                            s_pending_text_set = false;
-                            s_pending_text_inflight = false;
-                            s_listen_idle_deadline_ms = 0;
-                            jr_orch_inject(&s_app.orch,
-                                           jr_event(JR_EV_USER_STOP), now);
-                        }
-                        ESP_LOGI(TAG, "ui: shade voice control");
-                    } else if (shade_control == 1) {
-                        s_ui_shade_open = false;
-                        atomic_store(&s_touch_challenge_cancel_requested, false);
-                        atomic_store(&s_touch_challenge_start_requested, true);
-                        ESP_LOGI(TAG, "ui: shade diagnostics challenge queued");
-                    } else if (shade_control == 2) {
-                        atomic_store(&s_pairing_claim_until_ms,
-                                     (uint32_t)now + 60000U);
-                        ESP_LOGI(TAG,
-                            "ui: shade Agent Link claim window open for 60 seconds");
-                    } else {
-                        s_ui_shade_open = false;
-                        ESP_LOGI(TAG, "ui: shade dismissed");
+                const jr_display_action_t shell_action =
+                    jr_display_hit(iev.x, iev.y);
+                if (shell_action != JR_DISPLAY_ACT_NONE) {
+                    switch (shell_action) {
+                    case JR_DISPLAY_ACT_VOLUME_UP:
+                    case JR_DISPLAY_ACT_VOLUME_DOWN: {
+                        const int volume = request_level_step(
+                            &s_level_volume_request, s_out_vol,
+                            shell_action == JR_DISPLAY_ACT_VOLUME_UP ? 10 : -10);
+                        ESP_LOGI(TAG, "ui: shade tap volume=%d", volume);
+                        break;
                     }
+                    case JR_DISPLAY_ACT_PRIVACY_TOGGLE:
+                        if (!physical) {
+                            ESP_LOGW(TAG,
+                                     "synthetic tap cannot change privacy");
+                        } else if (atomic_load(&s_voice_privacy_paused)) {
+                            s_flip_muted = false;
+                            atomic_store(&s_voice_privacy_paused, false);
+                            atomic_store(&s_voice_control_request,
+                                         VOICE_CONTROL_ARM);
+                            jr_display_caption_set("LISTENING");
+                        } else {
+                            atomic_store(&s_voice_privacy_paused, true);
+                            if (p != JR_ST_IDLE && p != JR_ST_DRAINING) {
+                                jr_orch_inject(&s_app.orch,
+                                               jr_event(JR_EV_USER_STOP), now);
+                            }
+                            jr_display_caption_set("MUTED - HOLD TO RESUME");
+                        }
+                        break;
+                    case JR_DISPLAY_ACT_DISMISS:
+                        if (jr_display_nav_overlay() ==
+                            JR_DISPLAY_OVERLAY_SHADE) {
+                            jr_display_nav_up();
+                        } else {
+                            jr_display_nav_down();
+                        }
+                        break;
+                    case JR_DISPLAY_ACT_FOCUS:
+                        jr_display_nav_up();
+                        jr_display_caption_set("DETAIL - DOWN TO CLOSE");
+                        s_side_page_until_ms = (uint32_t)now + 12000U;
+                        break;
+                    default:
+                        break;
+                    }
+                    s_ui_shade_open =
+                        jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_SHADE;
+                    continue;
+                }
+                if (jr_display_nav_overlay() != JR_DISPLAY_OVERLAY_NONE) {
                     continue;
                 }
                 if (p == JR_ST_IDLE || p == JR_ST_BACKOFF || p == JR_ST_FATAL) {
-                    atomic_store(&s_voice_privacy_paused, false);
-                    jr_display_caption_set("LISTENING");
-                    jr_orch_inject(&s_app.orch, jr_event(JR_EV_USER_START), now);
+                    if (atomic_load(&s_voice_privacy_paused) || s_flip_muted) {
+                        jr_display_caption_set("MUTED - HOLD TO RESUME");
+                    } else {
+                        jr_display_caption_set("LISTENING");
+                        jr_orch_inject(&s_app.orch,
+                                       jr_event(JR_EV_USER_START), now);
+                    }
                 } else if (p == JR_ST_SPEAKING) {
-                    /* Tap while it talks = "stop talking" — cut playback but
-                     * STAY armed and listening. Tap-as-privacy-mute was a UX
-                     * trap: the most natural casual touch silently killed the
-                     * assistant twice in one evening (2026-08-27) even after
-                     * a caption warned. Deliberate privacy lives where
-                     * deliberation lives: flip face-down, long-press, shade. */
+                    /* Tap while it talks = stop playback but stay armed.
+                     * Deliberate privacy lives on hold, flip, and shade. */
                     jr_audio_sink_mute_now(&s_app.spk);
                     jr_orch_inject(&s_app.orch, jr_event(JR_EV_BARGE_DETECTED),
                                    now);
@@ -5657,29 +6805,28 @@ static void voice_task(void *arg)
                 } else if (p != JR_ST_DRAINING) {
                     /* Tap in any other live phase: harmless attention. */
                     jr_display_caption_set("YES, SIR?");
+                    ESP_LOGI(TAG, "gesture: tap attention phase=%s",
+                             jr_state_name(p));
                 }
-                /* Any owner tap instantly reclaims an operator lease. */
-                if (operator_lease_active((uint32_t)now)) {
-                    atomic_store(&s_operator_lease_until_ms, 0U);
-                    atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
-                    jr_display_caption_set("LISTENING");
-                    ESP_LOGI(TAG, "operator: lease reclaimed by owner tap");
+            }
+        }
+
+        if (codex_tap_pending) {
+            const uint32_t tap_now =
+                (uint32_t)jr_clock_now_ms(&s_app.clock);
+            if (!operator_mode_active(tap_now)) {
+                codex_tap_pending = false;
+            } else if (tap_now - codex_pending_tap_ms >= 400U) {
+                bool owned = brain_surface_handle_tap(
+                    codex_pending_tap.x, codex_pending_tap.y,
+                    codex_pending_tap_ms,
+                    (codex_pending_tap.flags & JR_INPUT_FLAG_SYNTHETIC) == 0U,
+                    codex_pending_tap.emitted_ms);
+                if (!owned) {
+                    jr_display_caption_set(
+                        "CODEX MODE - DOUBLE TAP TO EXIT");
                 }
-                /* Double-tap (second tap <400 ms): full attention — awake,
-                 * armed, greeted. Single-tap actions above are all benign,
-                 * so the pair composes safely. */
-                if ((uint32_t)now - s_last_tap_ms < 400U) {
-                    jr_mood_poke_awake(&s_mood, (uint32_t)now);
-                    if (!s_flip_muted) {
-                        atomic_store(&s_voice_control_request,
-                                     VOICE_CONTROL_ARM);
-                        jr_display_bloom();   /* same attention beat as wake */
-                        (void)jr_audio_diag_play_chirp(160U, 8U);
-                        jr_display_caption_set("YES, SIR?");
-                        ESP_LOGI(TAG, "gesture: double-tap attention");
-                    }
-                }
-                s_last_tap_ms = (uint32_t)now;
+                codex_tap_pending = false;
             }
         }
 
@@ -5716,7 +6863,7 @@ static void voice_task(void *arg)
             jr_audio_sink_mute_now(&s_app.spk);
             if (VOICE_ALWAYS_READY &&
                 !atomic_load(&s_voice_privacy_paused)) {
-                atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+                atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
             }
             ESP_LOGI(TAG, "audio diag: capture complete; WAV taps ready");
         }
@@ -5728,6 +6875,8 @@ static void voice_task(void *arg)
                     read_paced = true;
                     goto capture_complete;
                 }
+                jr_capture_pause_on_capture(
+                    &s_app.orch.capture_pause, now);
                 jr_state_t ph = capture_phase;
                 jr_tp_substate_t sub = ph == JR_ST_SPEAKING ? JR_TP_SPEAKING :
                                        ph == JR_ST_THINKING ? JR_TP_THINKING :
@@ -5800,14 +6949,17 @@ static void voice_task(void *arg)
                                  (double)td.rms);
                     }
                 }
-                /* Server VAD streams continuously — BATCH 2 frames per WS send
-                 * so the send rate stays under the ws-client lock-contention
-                 * flood. Manual mode sends per-frame ONLY inside an activity
-                 * (streaming ambient frames outside activity filled the TX queue
-                 * and tripped the dead-uplink monitor); that path is proven, so
-                 * leave it unbatched. */
-                if (s_app.cfg.vad_mode == JR_VAD_SERVER) {
-                    size_t cap = 4 * VOICE_FRAME_SAMPLES;
+                /* Both VAD modes batch two 32 ms frames. The manual path used
+                 * to send every frame and exhausted the bounded TX queue in a
+                 * real conversation (1620 would-blocks / 449 drops). Two
+                 * frames remain below the 4096-byte queue slot while halving
+                 * lock/socket pressure. Flush a partial batch at speech end. */
+                const bool send_uplink =
+                    s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN &&
+                    (s_app.cfg.vad_mode == JR_VAD_SERVER ||
+                     s_app.io.activity_open);
+                if (send_uplink) {
+                    const size_t cap = 2 * VOICE_FRAME_SAMPLES;
                     size_t take = (size_t)n;
                     if (mic_batch_fill + take > cap) {
                         take = cap - mic_batch_fill;
@@ -5815,20 +6967,19 @@ static void voice_task(void *arg)
                     memcpy(mic_batch + mic_batch_fill, mic_frame,
                            take * sizeof(jr_pcm_t));
                     mic_batch_fill += take;
-                    if (mic_batch_fill >= cap) {
+                    if (mic_batch_fill >= cap ||
+                        (td.event == JR_TP_EV_SPEECH_ENDED &&
+                         mic_batch_fill > 0U)) {
                         jr_err_t r = s_app.rvc.send_audio(
                             s_app.rvc.ctx, mic_batch, mic_batch_fill);
                         if (r == JR_ERR_CLOSED) {
-                            ESP_LOGW(TAG, "mic uplink observed closed transport");
+                            ESP_LOGW(TAG,
+                                     "mic uplink observed closed transport");
                         }
-                        mic_batch_fill = 0;
+                        mic_batch_fill = 0U;
                     }
-                } else if (s_app.io.activity_open) {
-                    jr_err_t r = s_app.rvc.send_audio(
-                        s_app.rvc.ctx, mic_frame, (size_t)n);
-                    if (r == JR_ERR_CLOSED) {
-                        ESP_LOGW(TAG, "mic uplink observed closed transport");
-                    }
+                } else {
+                    mic_batch_fill = 0U;
                 }
                 if (td.event == JR_TP_EV_SPEECH_ENDED) {
                     s_app.vad_ends++;
@@ -5878,7 +7029,7 @@ static void voice_task(void *arg)
                      * rise; refuses on its own if a reply is playing */
                     (void)jr_audio_diag_play_chirp(160U, 8U);
                     s_mood_rest_disarmed = false;
-                    atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+                    atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
                     jr_display_caption_set("YES?");
                 }
             }
@@ -6030,7 +7181,7 @@ void app_main(void)
      * making the audio owner depend on PSRAM/cache availability. */
     ESP_LOGI(TAG, "reserving voice task before hardware bring-up");
     BaseType_t task_ok = xTaskCreatePinnedToCore(
-        voice_task, "jr_voice", 24576, NULL, 7, &s_voice_task, 1);
+        voice_task, "jr_voice", 23040, NULL, 7, &s_voice_task, 1);
     /* THE DEEPEST-STACK TASK IN THE BUILD — sized by incident, not by guess.
      *
      * A first pass measured peak use at 15,236 B and cut this to 17,408. Three
@@ -6038,10 +7189,10 @@ void app_main(void)
      * (peak 15,996 B) — the reconnect path is deeper than a steady voice turn —
      * so it went back to 20480. Then the ask_user path (toolCall parse ->
      * snapshot -> session outcome -> PresentChoices exec, 2026-07-19) blew
-     * straight through 20480 the first time it ever ran: instant stack-overflow
-     * panic, seconds after the model called the tool. Every new event/command
-     * lane deepens this task's worst case, so it gets 24576 and a rule: drive
-     * the NEW deepest path, read /api/diag/tasks, and only then judge margins.
+     * straight through 20480 the first time it ran: instant stack overflow.
+     * Every new event/command lane deepens this task's worst case. The latest
+     * native-duplex/tool path measured 2,972 B free at 23,552; 23,040 retains
+     * ~2.46 KB margin.
      *
      * The other stacks in this build WERE reduced, because their call graphs are
      * simple and bounded (render, touch, present, websocket). This one is not. */
@@ -6058,6 +7209,20 @@ void app_main(void)
     if (hal_err != ESP_OK) {
         ESP_LOGE(TAG, "jr_hal_init failed: %s — continuing headless", esp_err_to_name(hal_err));
     }
+#if defined(CONFIG_ESP_BOARD_ESP32S3_TOUCH_AMOLED_1_75C)
+    const gpio_config_t boot_button = {
+        .pin_bit_mask = 1ULL << GPIO_NUM_0,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    esp_err_t boot_err = gpio_config(&boot_button);
+    if (boot_err != ESP_OK) {
+        ESP_LOGW(TAG, "BOOT button unavailable: %s",
+                 esp_err_to_name(boot_err));
+    }
+#endif
 
     /* Sensor samplers, always-on from boot. This was NOT safe on 2026-07-18 —
      * two internal-RAM task stacks cost ~7 KB, dropped the largest contiguous
@@ -6080,10 +7245,14 @@ void app_main(void)
     if (pwr_err != ESP_OK) {
         ESP_LOGW(TAG, "battery sampler unavailable: %s", esp_err_to_name(pwr_err));
     }
+#if !defined(CONFIG_ESP_BOARD_ESP32S3_TOUCH_AMOLED_1_75C)
     esp_err_t rtc_err = jr_rtc_start();
     if (rtc_err != ESP_OK) {
         ESP_LOGW(TAG, "PCF85063 unavailable: %s", esp_err_to_name(rtc_err));
     }
+#else
+    ESP_LOGI(TAG, "wall clock: 1.75C has no PCF85063; using SNTP");
+#endif
     /* Seed with the CURRENT tick, not 0: the first mood step runs ~14 s into
      * boot, so a zero seed reads as 14 s of stillness and the device dropped
      * straight to AMBIENT (48 %) about 10 ms after "boot complete" — dimming
@@ -6117,6 +7286,7 @@ void app_main(void)
                      esp_err_to_name(wc));
         }
     }
+    restore_ota_attempt();
 
     /* Wall-clock time: the watch face, night theming and courtesy lines all
      * need it, and until now the device had NONE (current_time is an external
@@ -6144,22 +7314,18 @@ void app_main(void)
         ESP_LOGW(TAG, "jr_audio_init degraded — capture may be silent until on-device tune");
     }
     restore_out_vol();   /* gesture-set volume survives reboot */
+    restore_brightness_cap();
     s_app.mic = jr_audio_source();
     s_app.spk = jr_audio_sink();
 
-    /* Gemini endpoint auth (key from NVS, never in-repo). PRIMARY: the key
-     * rides an x-goog-api-key upgrade header and the URL stays bare — the ws
-     * client logs its uri on every transport error, and a ?key= URL put the
-     * key on the serial console and the SD log (the 2026-07 security finding).
-     * FALLBACK: if setup never completes on the header path (two strikes),
-     * the runtime flips this boot to the proven ?key= URL, so voice cannot be
-     * held hostage by an endpoint that ignores header auth. Both retained
-     * buffers hold the key by necessity; neither is ever logged. */
+    /* Gemini endpoint auth (key from NVS, never in-repo). The key rides only
+     * the x-goog-api-key upgrade header and the URL stays bare. The WebSocket
+     * client logs its URI on transport errors, so query-string key fallback is
+     * intentionally forbidden: authentication failure stays bounded and
+     * fail-closed instead of leaking the credential into serial or /api/logs. */
     char key[320] = {0};
     if (jr_cfg_get_str("llm_api_key", key, sizeof key) == ESP_OK && key[0] != '\0') {
         snprintf(s_app.url, sizeof s_app.url, "%s", GEMINI_WS_BASE);
-        snprintf(s_url_keyed, sizeof s_url_keyed, "%s?key=%s",
-                 GEMINI_WS_BASE, key);
         snprintf(s_ws_headers, sizeof s_ws_headers,
                  "x-goog-api-key: %s\r\n", key);
         jr_gemini_ws_set_headers(s_ws_headers);
@@ -6195,15 +7361,15 @@ void app_main(void)
      * post-speech refractory is the real phantom-turn defense. */
     s_app.cfg.voice_name    = "Charon";   /* composed, assured — the butler canvas */
     s_app.cfg.output_transcription = true; /* log what JARVIS says (English proof) */
-    /* Manual local VAD — the STABLE path. SERVER VAD (Gemini native barge) was
-     * pushed hard 2026-07-11 (uplink batching 128ms + send-timeout 60ms) and
-     * DID survive controlled single replies with no echo self-interrupt — but
-     * under real continuous use it death-loops (deaths climb, session parks in
-     * Idle): this hardware's esp_websocket_client cannot sustain the continuous
-     * mic stream server VAD requires. Reverted to the rock-solid manual path.
-     * The batching code stays dormant (gated on JR_VAD_SERVER) for any future
-     * transport-hardening attempt. Reliable barge = tap-to-interrupt (touch). */
-    s_app.cfg.vad_mode     = JR_VAD_MANUAL_LOCAL_RMS;
+    /* Gemini server VAD is the native full-duplex path: microphone audio keeps
+     * flowing through Listening, Thinking, and Speaking so the service can
+     * retain first syllables and interrupt its own reply. The earlier rollback
+     * used four-frame/128 ms payloads that exceeded JR_GEMINI_TXQ_SLOT and a
+     * 60 ms socket wait. The current two-frame/64 ms batches fit the slot and
+     * the transport wait is bounded to 20 ms, so those failure conditions no
+     * longer apply. Local VAD remains diagnostic only; deliberate privacy still
+     * stops capture at the owner boundary. */
+    s_app.cfg.vad_mode     = JR_VAD_SERVER;
     s_app.cfg.fns          = s_device_tool_fns;
     s_app.cfg.fn_count     = DEVICE_TOOL_DECL_COUNT;
 
@@ -6270,7 +7436,7 @@ void app_main(void)
 
     atomic_store(&s_voice_start_gate, true);
     if (task_ok == pdPASS && VOICE_ALWAYS_READY) {
-        atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+        atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
     }
 
     /* Start the stillness clock HERE, not at jr_mood_reset() above: that runs

@@ -4,14 +4,15 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${IDF_DOCKER_IMAGE:-espressif/idf:v5.5.4}"
-# Default is the 1.75C (the live device since 2026-08). The original 1.75 stays
-# buildable with BOARD_NAME=esp32s3_touch_amoled_1_75 — the two differ in LCD/touch
-# reset and MCLK pins, so a mismatched image black-screens (reference/board-175c.md).
+# The release build has one target. Original-1.75 sources remain as a hardware
+# reference, but its 16 MB partition/flash contract is not release-gated.
 BOARD="${BOARD_NAME:-esp32s3_touch_amoled_1_75c}"
 RECONFIGURE="${RECONFIGURE:-0}"
 
 log() { printf '\033[1;36m[build-v5]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[build-v5]\033[0m %s\n' "$*" >&2; exit 1; }
+[ "$BOARD" = "esp32s3_touch_amoled_1_75c" ] ||
+    die "unsupported release target '$BOARD'; build-v5 currently supports only esp32s3_touch_amoled_1_75c"
 
 command -v docker >/dev/null 2>&1 || die "Docker is required for the pinned ESP-IDF build"
 docker info >/dev/null 2>&1 || die "Docker is not running"

@@ -1,13 +1,15 @@
-# Camera — current state + tomorrow plan
+# Camera — XIAO experimental history
 
-Last updated: **2026-05-03**. **Post-v1 / XIAO only.** The Waveshare 1.75"
-v1 image has no camera path. Do not treat this file as a v5 blocker.
+> **Compatibility reference only, last measured 2026-05-03.** The supported
+> Waveshare 1.75C has no camera, and `build-v5.sh` refuses the XIAO target. This
+> page preserves the Seeed XIAO ESP32-S3 Sense investigation; “current firmware”
+> below means that historical experimental composition.
 
 ## TL;DR
 
-The on-board camera is **disabled in the current firmware build** because of two cascading upstream driver bugs. Everything else on the board works (chat, mic, dashboard, Wi-Fi, BLE skeleton, FATFS, MCP, mDNS).
-
-To get the camera working tomorrow we need to **switch the firmware from `esp_cam_sensor` (V4L2-based) to the legacy `esp32-camera` driver** — that's the path Khangura's Feb-2026 write-up confirms works on this exact hardware.
+The XIAO camera experiment was disabled after two cascading upstream driver
+defects. Restoring it requires a new build and physical verification pass,
+likely using the legacy `esp32-camera` driver rather than `esp_cam_sensor`.
 
 ## What the hardware actually is
 

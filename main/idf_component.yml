@@ -1,27 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# Managed (registry) dependencies for JarvisRobot v5. Versions pinned to the v4
-# dependencies.lock (proven-good on this board) so Phase 0 does not chase a
-# floating registry. These are pulled by `idf.py reconfigure`; the local
-# components/ tree (jr_*) is auto-discovered and NOT listed here.
+# Managed registry dependencies for the supported 1.75C image. Versions are
+# pinned to the hardware-verified ESP-IDF 5.5.4 composition so a clean build
+# does not chase registry drift. `idf.py reconfigure` pulls these dependencies;
+# local `components/jr_*` sources are auto-discovered and not listed here.
 dependencies:
   idf: ">=5.5.0"
 
   # --- L0 board bring-up ---------------------------------------------------
-  # esp_board_manager owns the TCA9554 -> AXP2101 -> ES8311 -> ES7210 ->
-  # CST9217 -> SDMMC device tree from boards/. `idf.py gen-bmgr-config` turns
-  # the board YAML into the generated gen_bmgr_codes component.
+  # esp_board_manager generates the selected board's declared I2C/audio device
+  # tree. The 1.75C owns AXP2101, ES8311, ES7210, CST9217, and QMI8658; the
+  # original compatibility board additionally declares TCA9554/RTC/SDMMC.
   espressif/esp_board_manager: "==0.5.15"
 
   # CO5300 466x466 QSPI AMOLED panel driver (hardware.md #4/#5).
   espressif/esp_lcd_co5300: "==2.1.0"
 
   # CST9217 interrupt-driven capacitive touch (hardware.md #9).
-  esp_lcd_touch: "==1.2.1"
+  espressif/esp_lcd_touch: "==1.2.1"
   waveshare/esp_lcd_touch_cst9217: "==2.0.0"
-
-  # TCA9554 IO expander (init order head, hardware.md peripheral map).
-  espressif/esp_io_expander_tca9554: "==2.0.3"
 
   # --- L1 audio ------------------------------------------------------------
   # esp-sr provides the software AEC (AEC_MODE_FD_LOW_COST) — the ES7210 has no

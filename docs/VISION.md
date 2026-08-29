@@ -22,84 +22,92 @@ and an interactive, animated, round-native UI.
 | Tap a button to talk | Lift to wake · double-tap · "Hey Jarvis" · flip to mute |
 | Shows text | **Asks you questions you tap to answer** on the rim |
 
-Everything is built on **silicon already soldered to the board** — the QMI8658 IMU, AXP2101 PMIC,
-PCF85063 RTC, and a 2-mic AEC array — that today's firmware doesn't yet use. The vision is mostly a
-*firmware + design* effort, not a hardware redesign. Historical silicon
-research: [`ARCHIVE/UPGRADE_RESEARCH.md`](ARCHIVE/UPGRADE_RESEARCH.md)
-(LVGL split is superseded — see D1 in [`JARVISNANO_OS_PLAN.md`](JARVISNANO_OS_PLAN.md)).
+The live 1.75C firmware now uses nearly every product-relevant chip already
+soldered to the board: QMI8658 motion sensing, AXP2101 battery/PKEY telemetry,
+the dual-microphone ES7210/ES8311 audio path, touch, and the AMOLED. The
+remaining hardware work is narrower and measurable: move motion wake from
+polling to QMI8658 INT2, prove safe low-power states, and use the microphone
+array for directional expression. The 1.75C has no PCF85063 RTC or microSD;
+those belong only to the original 1.75 hardware.
 
 ---
 
-## See it now — the interactive showpiece
+## Explore the design reference
 
-A faithful, clickable simulation of the whole experience runs in a browser:
+The browser prototype preserves the visual design space:
 
 ```bash
-# from the repo root
 python3 -m http.server 8771 --directory docs/prototype
-# then open http://localhost:8771/jarvisnano-os.html
+# open http://localhost:8771/jarvisnano-os.html
 ```
 
-Or just open [`docs/prototype/jarvisnano-os.html`](prototype/jarvisnano-os.html) directly.
+[`docs/prototype/jarvisnano-os.html`](prototype/jarvisnano-os.html) is a
+prototype, not firmware evidence. It deliberately includes unshipped ideas such
+as the radial menu, swipeable notification stack, directional face lean,
+automatic Watch transition, and iris sleep. Use the live-truth table below when
+deciding what the device does today.
 
-It renders the real 466×466 round screen with: the live arc-reactor **voice-state faces**
-(idle / listening / thinking / speaking), the **four power moods** with their wake-bloom and
-sleep-iris transitions, **tap-to-answer choice arcs**, the **radial dial menu**, **swipeable
-notification cards**, the **ambient watch face** (clock + battery rim), and personality
-(flip-to-mute, lift-to-wake). Hit **Demo Reel** and it performs the whole thing on its own.
+## The live 60-second demonstration
 
----
+1. Start on the calm reactor face; show the 466×466 submission mirror beside the
+   physical panel and call out that it is a software mirror, not panel readback.
+2. Press **PWR** once. The device shows **LISTENING** and never mutes.
+3. Ask a natural question. Listening becomes Thinking, then Speaking; the halo
+   and waveform are driven by live audio state.
+4. Interrupt the reply by voice or tap. Playback stops and the same session
+   returns to Listening.
+5. Trigger a real Gemini choice. Three round-safe choice arcs appear and a
+   physical tap resolves one.
+6. Use a horizontal swipe to move through Desk, Tools, and Settings. Use the
+   left and right edges to change volume and brightness without leaving the
+   current surface.
+7. Press **BOOT** or swipe from the top edge to open controls. The glass itself
+   repeats the map: `L VOL`, `R LIGHT`, `PWR LISTEN`, `BOOT CLOSE`, and
+   MUTE/LISTEN.
+8. Hold the glass to enter physical privacy. The persistent gold ring and muted
+   caption agree; hold again to resume.
 
-## The 60-second demo script
+That is the implemented product loop: voice, interruption, tools, round-screen
+interaction, physical privacy, and observable recovery—without a phone brain or
+a hidden second control grammar. Final PWR/BOOT hand proof remains an explicit
+release item in [`../PLAN.md`](../PLAN.md).
 
-1. **It's asleep** on the desk (DREAM — black screen, µA). *"It's basically off — but it's
-   watching for motion."*
-2. **Pick it up** → a point of light **blooms** into the arc-reactor ring, WiFi connects on an
-   orbiting dot. *"Good morning, Sir."*
-3. **Say "Hey Jarvis"** → the face bursts into the **listening** waveform, a rim ring counts down.
-4. It **thinks** (a dot orbits the center), then **speaks** — the waveform reacts and the face
-   **leans toward you** (it heard which side you spoke from).
-5. **It asks a question** — *"Reply to Sarah?"* — and three **choice arcs** wrap the bezel.
-   **Tap "Yes."** The arc fills and confirms. *"Done."*
-6. **Spin the radial menu** with a flick (or tilt the device like a dial). **Swipe through cards.**
-7. **Turn it face-down** → it **winks and mutes**. *"It knows when you want privacy."*
-8. **Set it down** → the face settles, the clock fades in, then an **iris closes** to sleep.
+## From simulation to silicon — current truth
 
-That's the product. Eight beats, every one of them delightful.
-
----
-
-## From simulation to silicon — what's real
-
-| Layer | Today | The vision adds |
+| Layer | Live on 1.75C | Next bounded refinement |
 |---|---|---|
-| Voice | ✅ WiFi-direct Gemini Live (16 k in / 24 k out), on-device VAD, on-device brain | wake-word entry, command words |
-| Face | ✅ reactive waveform (baked `.aaf` + `gfx_motion`) | full state-driven UI + transitions |
-| Screen | animated face only | watch face, menus, choice arcs, cards (LVGL @ 200–300 fps) |
-| Motion | ✅ flip-to-mute, shake-to-cancel, lift-to-wake | QMI8658 INT2 engines (no poll) |
-| Power | ✅ 4 moods (dim + rest; no rail cut / no deep sleep yet) | AXP rails + ESP deep sleep |
-| Battery | ✅ AXP2101 fuel gauge | low-batt UX polish |
+| Voice | Gemini Live, WakeNet9 “Jarvis,” on-device VAD/AEC, barge-in | long-session recovery and measured reconnect headroom |
+| Face | five baked reactive faces plus one procedural overlay compositor | iris sleep, Wi-Fi orbit, and measured directional lean |
+| Screen | explicit Watch, choice arcs, minimal controls, captions, remote canvas, bounded Desk surfaces | card navigation only after reliability gates |
+| Input | global edge volume/brightness, horizontal spaces, top-edge controls, centre detail, physical hold/flip privacy, PWR listen, BOOT controls/pairing | enclosure legends and gesture receipt polish |
+| Motion | QMI8658 at 125 Hz ODR with a 100 Hz sampler: flip, shake, lift, orientation | INT2 any/no-motion wake so DREAM can stop polling |
+| Power | four visual moods, brightness slew, battery telemetry, listen-only PWR | measure dynamic-frequency/light-sleep safely; rail gating only with wake proof |
+| Storage | 32 MB flash, dual 4 MB OTA slots, emote/model partitions | decide whether the unused FAT partition becomes durable device memory |
 
-**Architecture stays put:** the device talks to Gemini Live directly over WiFi. No phone brain, no
-BLE audio service. (On-phone Gemma is a *future* privacy option, out of scope.)
+**Architecture stays put:** the device talks to Gemini Live directly over Wi-Fi.
+No phone brain and no concurrent BLE audio service. On-phone local inference is
+a future privacy route, not part of the live product.
 
-## Build order (front-loads the silicon already on the board)
+## Refinement order
 
-1. AXP2101 ADC-enable → real battery (the live device proves the chip ACKs; the ADC is just off)
-2. Four-mood power state machine + transitions
-3. QMI8658 enable → gestures + lift-to-wake (INT2 on `GPIO21`, schematic-confirmed)
-4. Ambient watch face
-5. "Hey Jarvis" wake word (esp-sr WakeNet + the on-board AEC)
-6. Overlay compositor — choice arcs, cards, radial menu (LVGL was cut; see D1)
-7. State-driven UI + transitions
-8. Personality + polish
+1. Protect the product loop: OTA recovery, session longevity, and internal
+   contiguous-memory headroom.
+2. Replace 100 Hz IMU polling with QMI8658 INT2 wake while preserving the
+   measured flip/shake/lift behavior.
+3. Measure CPU frequency scaling and light sleep against voice latency, Wi-Fi
+   stability, and idle current before enabling either by default.
+4. Add the missing transition signatures: iris sleep and Wi-Fi orbit wake.
+5. Prototype two-microphone direction-of-arrival only if raw-lane captures
+   prove stable left/right separation on the physical enclosure.
+6. Add radial menu/cards through the existing compositor; do not introduce a
+   second UI engine or spend the internal DMA block voice requires.
+7. Give the otherwise-unused FAT partition a deliberate role or reclaim it;
+   do not create a storage API with no durable product behavior.
 
-Shipped July 2026: items 3–4 and 6–8 in v5 (watch face, gestures, choice
-arcs). Item 5 (wake word) is still the Phase 5 gate. Historical research:
-[`ARCHIVE/UPGRADE_RESEARCH.md`](ARCHIVE/UPGRADE_RESEARCH.md). Every vendor
-datasheet, the board schematic, and the official Waveshare driver examples are mirrored locally
-under [`docs/reference/vendor/`](reference/vendor/INDEX.md) (incl. ESP-IDF reference code for the
-AXP2101 ADC read and QMI8658 wake-on-motion — the first two build steps).
+Historical research and the original phase plan remain in
+[`ARCHIVE/UPGRADE_RESEARCH.md`](ARCHIVE/UPGRADE_RESEARCH.md) and
+[`ARCHIVE/JARVISNANO_OS_PLAN.md`](ARCHIVE/JARVISNANO_OS_PLAN.md). Vendor sources
+are mirrored under [`reference/vendor/`](reference/vendor/INDEX.md).
 
 ---
 

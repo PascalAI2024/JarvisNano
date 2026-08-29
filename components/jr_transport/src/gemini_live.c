@@ -1,11 +1,10 @@
 /*
  * SPDX-License-Identifier: Apache-2.0
  *
- * jr_transport/gemini_live.c — L2 Gemini Live transport (builders + framer +
- * parser). ESP-IDF-free: depends only on jr_ports headers, jr_core types, libc,
- * and cJSON (vendored on host / IDF `json` on device). The SAME translation is
- * exercised by the host Unity suite (host/test_transport.c) and compiled into
- * the device build; only the byte-level ws_transport adapter differs per target.
+ * parser). Host builds depend only on portable libc/cJSON; ESP-IDF builds use
+ * heap capabilities solely to place queued WebSocket payloads in PSRAM. The
+ * SAME framer/parser behavior is exercised by the host Unity suite; only the
+ * allocator placement and byte-level ws_transport adapter differ.
  *
  * The load-bearing correctness win is the FRAMER (jr_gemini_send_frame /
  * jr_gemini_flush): a would-block / 0-byte / partial send buffers-or-drops
@@ -20,6 +19,9 @@
 #include <stdio.h>
 
 #include "cJSON.h"
+#ifdef ESP_PLATFORM
+#include "esp_heap_caps.h"
+#endif
 
 /* ======================================================================== *
  *  base64 (portable, endian-safe)                                          *
@@ -805,16 +807,33 @@ static void feed_tx(jr_gemini_client_t *c, jr_err_t r)
     }
 }
 
-/* Enqueue a (possibly partial) frame; drop-newest when the bounded ring is full
- * or the frame exceeds a slot. Hard-bounded memory under a starved consumer. */
+static char *txq_alloc(size_t len)
+{
+#ifdef ESP_PLATFORM
+    char *buf = heap_caps_malloc(len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf != NULL) {
+        return buf;
+    }
+#endif
+    return malloc(len);
+}
+
+/* Enqueue a (possibly partial) frame; drop-newest at the bounded depth, on
+ * oversize input, or on allocation failure. */
 static void txq_enqueue(jr_gemini_client_t *c, const char *data, size_t len)
 {
     if (len > JR_GEMINI_TXQ_SLOT || c->depth == JR_GEMINI_TXQ_DEPTH) {
-        c->live.tx_drops++;   /* drop-newest */
+        c->live.tx_drops++;
         return;
     }
+    char *copy = txq_alloc(len);
+    if (copy == NULL) {
+        c->live.tx_drops++;
+        return;
+    }
+    memcpy(copy, data, len);
     jr_gemini_txframe_t *f = &c->txq[c->tail];
-    memcpy(f->buf, data, len);
+    f->buf = copy;
     f->len = len;
     f->off = 0;
     c->tail = (c->tail + 1) % JR_GEMINI_TXQ_DEPTH;
@@ -830,19 +849,30 @@ jr_err_t jr_gemini_flush(jr_gemini_client_t *c)
                                                   f->len - f->off);
         switch (r.kind) {
         case JR_WS_TX_OK:
+            free(f->buf);
+            f->buf = NULL;
+            f->len = 0;
+            f->off = 0;
             c->head = (c->head + 1) % JR_GEMINI_TXQ_DEPTH;
             c->depth--;
             feed_tx(c, JR_OK);
             break;                       /* try the next buffered frame */
-        case JR_WS_TX_PARTIAL:
+        case JR_WS_TX_PARTIAL: {
+            const size_t remaining = f->len - f->off;
+            if (r.sent == 0U || r.sent > remaining) {
+                c->live.socket_open = false;
+                feed_tx(c, JR_ERR_FAIL);
+                return JR_ERR_CLOSED;
+            }
             f->off += r.sent;
             feed_tx(c, JR_ERR_WOULD_BLOCK);
-            return JR_ERR_WOULD_BLOCK;    /* socket filled again */
+            return JR_ERR_WOULD_BLOCK;
+        }
         case JR_WS_TX_WOULD_BLOCK:
             feed_tx(c, JR_ERR_WOULD_BLOCK);
             return JR_ERR_WOULD_BLOCK;
         case JR_WS_TX_SOFT_FAIL:
-            feed_tx(c, JR_ERR_FAIL);      /* count; keep the connection */
+            feed_tx(c, JR_ERR_FAIL);
             return JR_ERR_WOULD_BLOCK;
         case JR_WS_TX_CLOSED:
             c->live.socket_open = false;
@@ -858,9 +888,17 @@ void jr_gemini_reset_tx(jr_gemini_client_t *c)
     if (c == NULL) {
         return;
     }
+    while (c->depth > 0) {
+        jr_gemini_txframe_t *f = &c->txq[c->head];
+        free(f->buf);
+        f->buf = NULL;
+        f->len = 0;
+        f->off = 0;
+        c->head = (c->head + 1) % JR_GEMINI_TXQ_DEPTH;
+        c->depth--;
+    }
     c->head = 0;
     c->tail = 0;
-    c->depth = 0;
     c->live.consecutive_tx_failures = 0;
 }
 
@@ -884,6 +922,11 @@ jr_err_t jr_gemini_send_frame(jr_gemini_client_t *c, const char *json, size_t le
         feed_tx(c, JR_OK);
         return JR_OK;
     case JR_WS_TX_PARTIAL:
+        if (r.sent == 0U || r.sent > len) {
+            c->live.socket_open = false;
+            feed_tx(c, JR_ERR_FAIL);
+            return JR_ERR_CLOSED;
+        }
         txq_enqueue(c, json + r.sent, len - r.sent);
         feed_tx(c, JR_ERR_WOULD_BLOCK);
         return JR_ERR_WOULD_BLOCK;
@@ -892,8 +935,8 @@ jr_err_t jr_gemini_send_frame(jr_gemini_client_t *c, const char *json, size_t le
         feed_tx(c, JR_ERR_WOULD_BLOCK);
         return JR_ERR_WOULD_BLOCK;
     case JR_WS_TX_SOFT_FAIL:
-        /* socket still OPEN: count for the DeadUplinkMonitor, keep the
-         * connection. A single soft-fail is NOT a teardown. */
+        /* Preserve transient failures; queue-full/OOM increments tx_drops. */
+        txq_enqueue(c, json, len);
         feed_tx(c, JR_ERR_FAIL);
         return JR_ERR_WOULD_BLOCK;
     case JR_WS_TX_CLOSED:
@@ -1000,6 +1043,7 @@ void jr_gemini_client_deinit(jr_gemini_client_t *c)
     if (c == NULL) {
         return;
     }
+    jr_gemini_reset_tx(c);
     free(c->rx_buf);
     c->rx_buf = NULL;
     c->rx_cap = 0;

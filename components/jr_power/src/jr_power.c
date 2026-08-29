@@ -45,8 +45,10 @@
 
 #define AXP2101_I2C_TIMEOUT_MS  100
 
-/* Battery state moves on a scale of minutes; 5 s is already generous. */
-#define POWER_SAMPLE_PERIOD_MS  5000
+/* USB/charging edges are visible product events; the official C-board example
+ * samples at 1 Hz. This remains negligible I2C load while keeping feedback
+ * under one second. */
+#define POWER_SAMPLE_PERIOD_MS  1000
 #define POWER_TASK_STACK        3072
 #define POWER_TASK_PRIO         2
 

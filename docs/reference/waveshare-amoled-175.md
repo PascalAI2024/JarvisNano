@@ -1,10 +1,13 @@
 # Waveshare ESP32-S3-Touch-AMOLED-1.75
 
-**What it is** — The primary target board for JarvisRobot. A round 1.75" AMOLED development board built on the ESP32-S3-WROOM-1, with integrated touch, audio codec chain, PMIC, and optional peripherals. Hardware V1.0.
+> **Compatibility reference only.** This page preserves the original 16 MB
+> Waveshare 1.75 hardware. The primary product is the 32 MB 1.75C; use
+> [`board-175c.md`](./board-175c.md) and
+> [`../HARDWARE.md`](../HARDWARE.md) for current truth.
 
-**How we use it here** — The board provides the display, touch, microphones, speaker DAC, and PSRAM that all JarvisRobot subsystems rely on. Its full description string (from the generated board info) is: "Waveshare ESP32-S3-Touch-AMOLED-1.75 (16 MB flash, 8 MB octal PSRAM, 1.75in 466x466 AMOLED CO5300 QSPI + CST9217 touch, AXP2101 PMIC, TCA9554 IO expander, ES8311+ES7210 audio chain with AEC, dual MEMS mic, QMI8658 IMU, PCF85063 RTC, optional LC76G GNSS)."
-
-Source: `esp-claw/application/edge_agent/components/gen_bmgr_codes/gen_board_info.c:18`.
+The pin map and optional peripherals below apply only to the original board.
+`build-v5.sh` does not release-build this revision; revalidate its 16 MB
+partition, flash, and physical circuits before restoring support.
 
 ---
 
@@ -18,7 +21,7 @@ Source: `esp-claw/application/edge_agent/components/gen_bmgr_codes/gen_board_inf
 | Display | CO5300 AMOLED, 466x466 | QSPI (4-wire SPI) on SPI2_HOST, 16 bpp RGB565 |
 | Touch | CST9217 | Capacitive, I2C `0x5A`, interrupt-driven |
 | Speaker DAC | ES8311 | I2C `0x30`, I2S out, external PA (NS4150-class) |
-| Mic ADC | ES7210 | I2C `0x80`, 4-channel, hardware AEC |
+| Mic ADC | ES7210 | I2C `0x80`, 4-channel; MIC3 digitizes the echo reference and `esp-sr` performs AEC |
 | PMIC | AXP2101 | I2C `0x34`, controls display/audio rails |
 | IO expander | TCA9554 | I2C `0x40` (A0=A1=A2=GND) |
 | IMU | QMI8658 | Accelerometer + gyroscope |

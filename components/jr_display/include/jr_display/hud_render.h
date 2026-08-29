@@ -131,13 +131,16 @@ typedef struct {
     uint8_t amp;         /* 0..255 audio amplitude, drives the waveform     */
     uint8_t batt_pct;    /* 0..100, or 0xFF when unknown/absent             */
     bool    charging;
+    bool    privacy_muted; /* persistent outer gold ring when voice is off  */
     int8_t  ox, oy;      /* parallax offset in px; see hud_tilt_offset()    */
 } hud_env_t;
 
-/* The whole HUD for one strip: battery rim + the state's own element, drawn
- * over whatever the face engine already rendered.
+/* The whole HUD for one strip: battery rim + privacy state + the face element,
+ * drawn over whatever the face engine already rendered.
  *
- *   IDLE     nothing — the baked idle face already breathes
+ *   PRIVACY  a persistent gold ring at r221-222; unlike a caption it survives
+ *            long enough to remain readable across the room
+ *   IDLE     nothing else — the baked idle face already breathes
  *   LISTEN   the listening ring: breathing cyan band at r186-193 (the free
  *            r185-194 band), amplitude-excited — the across-the-desk tell
  *            that the device is listening and not merely idle
@@ -166,10 +169,9 @@ void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
  *
  * RADII: the arcs live at r223..231. The baked face leaves r215-239 empty, but
  * the glass ends at r232.5 (466 px about a half-unit centre), so the usable
- * band is r215-232 and it is SPLIT — battery rim r215-220, arcs r223-231 — so
- * the gauge and the arcs can both be live without overdrawing each other. See
- * the radii note in hud_render.c for the measurement and the split. Nothing
- * else may go there, and these must not stray out of it.
+ * band is r215-232 and is split between battery r215-220, privacy r221-222,
+ * and arcs r223-231. The three states can coexist without overdrawing. See the
+ * radii note in hud_render.c; nothing else may enter this band.
  */
 #define HUD_CHOICE_MAX 3
 

@@ -16,4 +16,5 @@ idf_component_register(
         espressif__esp_codec_dev
         espressif__esp-sr
         esp_timer
+        esp_driver_gpio
 )

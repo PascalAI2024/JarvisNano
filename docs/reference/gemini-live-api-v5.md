@@ -1,19 +1,21 @@
 # Gemini Live API — v5 Transport Verification (2026-07-07)
 
-**What it is** — A fresh, web-verified pass over Google's Gemini Live API
-(`BidiGenerateContent` over WSS) to confirm the v5 `RealtimeVoiceClient` /
-Gemini adapter is being built against CURRENT reality, not the stale
-`gemini-3.x 404` pin the repo's notes warn about. This page does NOT replace
-[gemini-live-api.md](./gemini-live-api.md) (the v4 firmware's working
-knowledge, still accurate for the shipped `cap_gemini_live.c` client) — it is
-a targeted delta pass for the v5 transport rewrite, fetch-verified against
-official `ai.google.dev` pages by four parallel research passes on 2026-07-07.
+**Status** — current v5 protocol reference. External API findings were
+source-verified on 2026-07-07 and reconciled with the live firmware on
+2026-08-28. The older [`gemini-live-api.md`](./gemini-live-api.md) is retained
+only as a v4 history record.
 
-**How we use it here** — v4's `cap_gemini_live.c` has a WORKING integration
-today against `models/gemini-2.5-flash-native-audio-latest`. v5 is rebuilding
-the transport layer (`RealtimeVoiceClient` / Gemini adapter); this note exists
-so that rebuild uses verified-current field names, model IDs, and session
-semantics instead of assumptions carried over from v4 or from training data.
+**How we use it here** — `components/jr_transport` owns
+`BidiGenerateContent` framing, setup, server VAD events, audio parsing, tool
+calls, and bounded session state. `main/main.c` supplies policy and
+`components/jr_audio` supplies a 16 kHz AEC-clean uplink; native downlink is
+24 kHz. The primary model constant is
+`models/gemini-3.1-flash-live-preview`, with
+`models/gemini-2.5-flash-native-audio-preview-12-2025` as fallback.
+
+Model availability is provider-controlled. Recheck the official catalog before
+a release rather than treating this dated research pass as an availability
+guarantee.
 
 ---
 

@@ -19,6 +19,7 @@
 #include "esp_lcd_touch.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
@@ -36,9 +37,10 @@
 #define TOUCH_RETRY_MAX_MS          30000
 #define TOUCH_PRESS_CONFIRM_SAMPLES 2
 #define TOUCH_RELEASE_SAMPLES       2
-#define TOUCH_LONG_PRESS_MS         1200
-#define TOUCH_TAP_SLOP_PX           18
-#define TOUCH_SWIPE_MIN_TRAVEL_PX   54
+#define TOUCH_LONG_PRESS_MS         850
+#define TOUCH_TAP_SLOP_PX           30
+#define TOUCH_HOLD_SLOP_PX          48
+#define TOUCH_SWIPE_MIN_TRAVEL_PX   42
 #define TOUCH_SWIPE_DOMINANCE_PCT   125
 #define TOUCH_TOP_EDGE_MAX_Y        72
 #define TOUCH_SHADE_MIN_TRAVEL_PX   70
@@ -83,6 +85,7 @@ static void touch_emit(touch_input_ctx_t *ctx, jr_input_kind_t kind,
         .delta_x = (int16_t)end_x - (int16_t)start_x,
         .delta_y = (int16_t)end_y - (int16_t)start_y,
         .duration_ms = duration_ms,
+        .emitted_ms = (uint32_t)(esp_timer_get_time() / 1000),
         .direction = direction,
         .flags = flags,
     };
@@ -115,6 +118,16 @@ static bool touch_moved_beyond_tap_slop(uint16_t start_x, uint16_t start_y,
     return touch_abs_delta(delta_x) > TOUCH_TAP_SLOP_PX ||
            touch_abs_delta(delta_y) > TOUCH_TAP_SLOP_PX;
 }
+
+static bool touch_moved_beyond_hold_slop(uint16_t start_x, uint16_t start_y,
+                                         uint16_t end_x, uint16_t end_y)
+{
+    int16_t delta_x = (int16_t)end_x - (int16_t)start_x;
+    int16_t delta_y = (int16_t)end_y - (int16_t)start_y;
+    return touch_abs_delta(delta_x) > TOUCH_HOLD_SLOP_PX ||
+           touch_abs_delta(delta_y) > TOUCH_HOLD_SLOP_PX;
+}
+
 
 static bool touch_classify_swipe(uint16_t start_x, uint16_t start_y,
                                  uint16_t end_x, uint16_t end_y,
@@ -262,8 +275,10 @@ static void touch_worker(void *arg)
     bool action_sent = false;
     bool moved_beyond_tap = false;
     unsigned press_samples = 0;
+    bool moved_beyond_hold = false;
     unsigned release_samples = 0;
     TickType_t press_tick = 0;
+    TickType_t last_touch_tick = 0;
     uint16_t first_x = 0;
     uint16_t first_y = 0;
     uint16_t last_x = 0;
@@ -285,6 +300,7 @@ static void touch_worker(void *arg)
         bool touching = touch_read_point(touch, &x, &y);
 
         if (touching) {
+            TickType_t touch_tick = xTaskGetTickCount();
             release_samples = 0;
             if (!gesture_active) {
                 gesture_active = true;
@@ -292,15 +308,21 @@ static void touch_worker(void *arg)
                 action_sent = false;
                 moved_beyond_tap = false;
                 press_samples = 0;
-                press_tick = xTaskGetTickCount();
+                moved_beyond_hold = false;
+                press_tick = touch_tick;
                 first_x = x;
                 first_y = y;
             }
 
             last_x = x;
             last_y = y;
+            last_touch_tick = touch_tick;
             if (!moved_beyond_tap) {
                 moved_beyond_tap = touch_moved_beyond_tap_slop(
+                    first_x, first_y, last_x, last_y);
+            }
+            if (!moved_beyond_hold) {
+                moved_beyond_hold = touch_moved_beyond_hold_slop(
                     first_x, first_y, last_x, last_y);
             }
             if (press_samples < TOUCH_PRESS_CONFIRM_SAMPLES) {
@@ -309,11 +331,12 @@ static void touch_worker(void *arg)
                     press_samples >= TOUCH_PRESS_CONFIRM_SAMPLES;
             }
 
-            if (gesture_confirmed && !action_sent && !moved_beyond_tap &&
-                (xTaskGetTickCount() - press_tick) >=
+            if (gesture_confirmed && !action_sent &&
+                !moved_beyond_hold &&
+                (touch_tick - press_tick) >=
                     pdMS_TO_TICKS(TOUCH_LONG_PRESS_MS)) {
                 uint32_t duration_ms = (uint32_t)(
-                    (xTaskGetTickCount() - press_tick) * portTICK_PERIOD_MS);
+                    (touch_tick - press_tick) * portTICK_PERIOD_MS);
                 touch_emit(ctx, JR_INPUT_LONG_PRESS,
                            first_x, first_y, last_x, last_y, duration_ms,
                            JR_INPUT_DIRECTION_NONE, 0);
@@ -341,12 +364,22 @@ static void touch_worker(void *arg)
 
         if (gesture_confirmed && !action_sent) {
             uint32_t duration_ms = (uint32_t)(
-                (xTaskGetTickCount() - press_tick) * portTICK_PERIOD_MS);
+                (last_touch_tick - press_tick) * portTICK_PERIOD_MS);
             jr_input_direction_t direction = JR_INPUT_DIRECTION_NONE;
             uint8_t flags = 0;
 
-            if (touch_classify_swipe(first_x, first_y, last_x, last_y,
-                                     &direction, &flags)) {
+            if (duration_ms >= TOUCH_LONG_PRESS_MS &&
+                !moved_beyond_hold) {
+                touch_emit(ctx, JR_INPUT_LONG_PRESS,
+                           first_x, first_y, last_x, last_y, duration_ms,
+                           JR_INPUT_DIRECTION_NONE, 0);
+                action_sent = true;
+                ESP_LOGI(TAG,
+                         "long press release end=%u,%u start=%u,%u duration=%" PRIu32 "ms",
+                         (unsigned)last_x, (unsigned)last_y,
+                         (unsigned)first_x, (unsigned)first_y, duration_ms);
+            } else if (touch_classify_swipe(first_x, first_y, last_x, last_y,
+                                            &direction, &flags)) {
                 touch_emit(ctx, JR_INPUT_SWIPE,
                            first_x, first_y, last_x, last_y, duration_ms,
                            direction, flags);
@@ -455,11 +488,9 @@ jr_input_t jr_hal_input(void)
     return input;
 }
 
-/* Synthetic input injection — the operator's finger. Serializes onto the SAME
- * queue the panel producer uses, so a synthetic tap/swipe/long-press walks
- * every downstream path a physical one does (gesture handlers, challenge,
- * shade). Exists so gesture regressions get caught by machine instead of by
- * the owner (2026-08-28: "you should be able to test all these inputs"). */
+/* Synthetic events share the bounded queue for behavioral QA, but carry
+ * explicit non-physical provenance. Security-sensitive consumers must reject
+ * this flag; tests can still exercise navigation and harmless feedback. */
 esp_err_t jr_hal_input_inject(const jr_input_event_t *event)
 {
     if (event == NULL) {
@@ -468,6 +499,9 @@ esp_err_t jr_hal_input_inject(const jr_input_event_t *event)
     if (s_input.queue == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-    return xQueueSend(s_input.queue, event, 0) == pdTRUE ? ESP_OK
-                                                         : ESP_ERR_NO_MEM;
+    jr_input_event_t injected = *event;
+    injected.flags |= JR_INPUT_FLAG_SYNTHETIC;
+    injected.emitted_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    return xQueueSend(s_input.queue, &injected, 0) == pdTRUE ? ESP_OK
+                                                            : ESP_ERR_NO_MEM;
 }

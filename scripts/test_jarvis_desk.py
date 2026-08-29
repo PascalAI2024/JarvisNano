@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +22,13 @@ assert SPEC is not None and SPEC.loader is not None
 desk = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = desk
 SPEC.loader.exec_module(desk)
+
+CTL_PATH = Path(__file__).with_name("jarvisctl.py")
+CTL_SPEC = importlib.util.spec_from_file_location("jarvisctl", CTL_PATH)
+assert CTL_SPEC is not None and CTL_SPEC.loader is not None
+ctl = importlib.util.module_from_spec(CTL_SPEC)
+sys.modules[CTL_SPEC.name] = ctl
+CTL_SPEC.loader.exec_module(ctl)
 
 
 class FakeKeychain:
@@ -45,6 +53,8 @@ class FakeClient:
         self.next_inbox_seq = 7
         self.next_after = 4
         self.events: list[dict[str, Any]] = []
+        self.binary_posts: list[tuple[str, int, str]] = []
+        self.text_gets: list[tuple[str, str]] = []
         self.surface: dict[str, Any] = {
             "active": True,
             "session": "desk-session",
@@ -62,6 +72,19 @@ class FakeClient:
             }
         if path == "/api/cockpit":
             return {"voice": {"phase": "Listening"}}
+        if path == "/api/operator/lease":
+            return {"active": False, "mode": "normal", "ttl_ms": 0}
+        if path == "/api/device/health":
+            return {
+                "verdict": "ok", "repairable": False,
+                "privacy": False, "flip_muted": False, "operator": False,
+            }
+        if path == "/api/diag/tasks":
+            return {"tasks": [], "largest_internal": 12000}
+        if path == "/api/audio/taps":
+            return {"available": True, "taps": {}}
+        if path == "/api/sensors":
+            return {"imu": {"available": True}, "battery": {"available": True}}
         raise AssertionError(f"unexpected GET {path}")
 
     def post(
@@ -75,6 +98,28 @@ class FakeClient:
         if path.startswith("/api/pairing/claim"):
             return {"ok": True, "token": "claimed-secret-token"}
         return {"ok": True, "accepted": True}
+
+    def post_binary(
+        self,
+        path: str,
+        body: bytes,
+        *,
+        token: str,
+        timeout: float = 300.0,
+    ) -> dict[str, Any]:
+        self.binary_posts.append((path, len(body), token))
+        return {"ok": True, "rebooting": True}
+
+
+    def get_text(
+        self,
+        path: str,
+        *,
+        token: str,
+        max_bytes: int = 16384,
+    ) -> str:
+        self.text_gets.append((path, token))
+        return "E transport_ws: Error transport_poll_write(0)\n"
 
 
 class FakeResponse:
@@ -149,13 +194,16 @@ class DeskCliTests(unittest.TestCase):
 
         def runner(command: list[str], **kwargs: Any) -> SimpleNamespace:
             calls.append((command, kwargs))
+            if "find-generic-password" in command:
+                return SimpleNamespace(returncode=0,
+                                       stdout=kwargs.get("input", "never-in-argv"))
             return SimpleNamespace(returncode=0, stdout="")
 
         keychain = desk.MacOSKeychain(runner=runner)
         keychain.store("desk-account", "never-in-argv")
         command, kwargs = calls[0]
         self.assertNotIn("never-in-argv", command)
-        self.assertEqual(command[-1], "-w")
+        self.assertNotIn("-w", command)
         self.assertEqual(kwargs["input"], "never-in-argv\n")
 
     def test_pair_stores_claim_without_returning_secret(self) -> None:
@@ -166,14 +214,15 @@ class DeskCliTests(unittest.TestCase):
         self.assertNotIn("claimed-secret-token", json.dumps(result))
         self.assertEqual(client.posts[0][2], None)
 
-    def test_pair_turns_forbidden_into_physical_hold_instruction(self) -> None:
+    def test_pair_turns_forbidden_into_physical_claim_instruction(self) -> None:
         class ForbiddenClient(FakeClient):
             def post(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
                 raise desk.DeskError("http_error", "rejected", http_status=403)
 
-        with self.assertRaisesRegex(desk.DeskError, "hold the idle panel") as raised:
+        with self.assertRaisesRegex(desk.DeskError, "hold BOOT") as raised:
             desk.command_pair(ForbiddenClient(), FakeKeychain(None), "account")
         self.assertEqual(raised.exception.code, "physical_pairing_required")
+        self.assertIn("60 seconds", raised.exception.message)
 
     def test_present_posts_canonical_envelope_with_keychain_token(self) -> None:
         client = FakeClient()
@@ -220,6 +269,64 @@ class DeskCliTests(unittest.TestCase):
                 ("/api/brain/outbox?after=0", "desk-token"),
                 ("/api/cockpit", None),
             ],
+        )
+
+    def test_takeover_and_release_use_paired_token(self) -> None:
+        client = FakeClient()
+        keychain = FakeKeychain("desk-token")
+        takeover = self.parse("takeover", "--ttl", "45")
+        normal = self.parse("normal")
+        desk.execute_command(takeover, client, keychain, {})
+        desk.execute_command(normal, client, keychain, {})
+        self.assertEqual(
+            client.posts,
+            [
+                ("/api/operator/lease?ttl=45", {}, "desk-token"),
+                ("/api/operator/lease?release=1", {}, "desk-token"),
+            ],
+        )
+
+    def test_mode_is_public_read_only(self) -> None:
+        client = FakeClient()
+        mode = self.parse("mode")
+        result = desk.execute_command(mode, client, FakeKeychain(), {})
+        self.assertEqual(result["response"]["mode"], "normal")
+        self.assertEqual(client.gets, [("/api/operator/lease", None)])
+
+    def test_ota_uses_paired_binary_request(self) -> None:
+        client = FakeClient()
+        with tempfile.NamedTemporaryFile() as image:
+            image.write(b"x" * desk.MIN_OTA_BYTES)
+            image.flush()
+            args = self.parse("ota", "--image", image.name)
+            result = desk.execute_command(
+                args, client, FakeKeychain("desk-token"), {})
+        self.assertEqual(result["bytes"], desk.MIN_OTA_BYTES)
+        self.assertEqual(
+            client.binary_posts,
+            [("/api/ota/upload", desk.MIN_OTA_BYTES, "desk-token")],
+        )
+
+
+    def test_doctor_triages_logs_without_mutation(self) -> None:
+        client = FakeClient()
+        args = self.parse("doctor")
+        result = desk.execute_command(
+            args, client, FakeKeychain("desk-token"), {})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["verdict"], "ok")
+        self.assertEqual(result["incidents"][0]["category"], "websocket")
+        self.assertEqual(client.posts, [])
+
+    def test_levels_posts_paired_bounded_values(self) -> None:
+        client = FakeClient()
+        args = self.parse(
+            "levels", "--volume", "40", "--brightness", "60")
+        desk.execute_command(args, client, FakeKeychain("desk-token"), {})
+        self.assertEqual(
+            client.posts,
+            [("/api/device/levels?volume=40&brightness=60",
+              {}, "desk-token")],
         )
 
     def test_dismiss_fetches_sequence_and_posts_empty_payload(self) -> None:
@@ -390,6 +497,47 @@ class DeskCliTests(unittest.TestCase):
         self.assertEqual(lines[3]["state"], "caught_up")
         self.assertEqual(lines[3]["next_after"], 5)
         self.assertEqual(client.gets, [("/api/brain/outbox?after=3", "desk-token")])
+
+class FakeUrlResponse:
+    def __enter__(self) -> "FakeUrlResponse":
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return b'{"ok":true}'
+
+
+class JarvisCtlAuthTests(unittest.TestCase):
+    def test_pairing_token_uses_host_bound_keychain_account(self) -> None:
+        completed = SimpleNamespace(returncode=0, stdout="t" * 32)
+        with patch.object(ctl, "host", return_value="device.local"), \
+             patch.object(ctl.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(ctl.pairing_token(), "t" * 32)
+        self.assertIn("jarvis-desk@device.local", run.call_args.args[0])
+
+    def test_api_attaches_keychain_token_to_protected_requests(self) -> None:
+        captured: list[Any] = []
+
+        def open_request(request: Any, timeout: int) -> FakeUrlResponse:
+            captured.append((request, timeout))
+            return FakeUrlResponse()
+
+        with patch.object(ctl, "host", return_value="https://device.local/"), \
+             patch.object(ctl, "pairing_token", return_value="t" * 32), \
+             patch.object(ctl.urllib.request, "urlopen", side_effect=open_request):
+            self.assertEqual(
+                ctl.api("/api/voice/control?armed=1", "POST", b""),
+                b'{"ok":true}',
+            )
+        request = captured[0][0]
+        self.assertEqual(request.get_header("X-jarvisnano-token"), "t" * 32)
+        self.assertEqual(request.get_header("X-jarvisnano-control"), "1")
+        self.assertEqual(
+            request.full_url,
+            "https://device.local/api/voice/control?armed=1",
+        )
 
 
 if __name__ == "__main__":

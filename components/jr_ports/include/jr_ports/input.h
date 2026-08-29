@@ -35,6 +35,8 @@ typedef enum {
 enum {
     /* The press began in the display's top-edge gesture affordance. */
     JR_INPUT_FLAG_TOP_EDGE = 1U << 0,
+    /* Injected through the paired diagnostics route, never physical authority. */
+    JR_INPUT_FLAG_SYNTHETIC = 1U << 1,
 };
 
 typedef struct {
@@ -49,6 +51,7 @@ typedef struct {
     int16_t delta_x;
     int16_t delta_y;
     uint32_t duration_ms;
+    uint32_t emitted_ms; /* monotonic publication time; rejects stale consent */
     jr_input_direction_t direction;
     uint8_t flags;
 } jr_input_event_t;

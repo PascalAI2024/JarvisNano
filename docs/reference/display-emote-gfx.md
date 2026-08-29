@@ -103,7 +103,7 @@ Source: `esp_emote_gfx/scripts/` (local managed component copy).
 | Source | Notes |
 |--------|-------|
 | [`espressif2022/esp_emote_gfx`](https://github.com/espressif2022/esp_emote_gfx) | Engine source. Widget APIs in `include/widget/`. |
-| [`managed_components/espressif2022__esp_emote_gfx/`](../firmware/components/) | Local copy in this repo's managed components. Check `gfx_img.c` and `gfx_blend.c` for blend internals. |
+| [`managed_components/espressif2022__esp_emote_gfx/`](../../managed_components/espressif2022__esp_emote_gfx/) | Local managed component. Check `gfx_img.c` and `gfx_blend.c` for blend internals. |
 | [`xiaozhi-esp32 emoji_display.cc`](https://github.com/78/xiaozhi-esp32/blob/main/main/boards/esp-hi/emoji_display.cc) | Template for state→animation mapping and `anim_player_set_segment` usage. |
 | [`xiaozhi-esp32 assets.cc`](https://github.com/78/xiaozhi-esp32/blob/main/main/assets.cc) | AAF asset mounting from a flash partition labelled `"assets"`. |
 | [`esp-brookesia`](https://github.com/espressif/esp-brookesia) | Checked and ruled out — no `gfx_canvas`, no `anim_player` symbols. Skip for the runtime-buffer question. |
@@ -194,4 +194,4 @@ Source: `esp_emote_gfx/scripts/` (local managed component copy).
 - [asset-pipeline.md](./asset-pipeline.md) — AAF packer, EAF encoder, `emote_assets.bin` build.
 - [waveshare-amoled-175.md](./waveshare-amoled-175.md) — CO5300 panel specs (466×466, QSPI).
 - [audio-es8311-es7210.md](./audio-es8311-es7210.md) — Audio RMS source for amplitude-reactive face.
-- [ANIMATION_OPTIMIZATION.md](../ANIMATION_OPTIMIZATION.md) — Full performance audit: bandwidth budget, all fixes with line numbers, change sequence.
+- [ANIMATION_OPTIMIZATION.md](../ARCHIVE/ANIMATION_OPTIMIZATION.md) — Historical performance audit and change sequence.

@@ -22,3 +22,8 @@ JarvisNano follows a simple standard: be direct, respectful, and useful.
 
 Maintainers may edit, hide, or delete comments; close issues; block users; or
 otherwise moderate project spaces to keep the project productive and safe.
+
+Report conduct concerns privately to `security@ingeniousdigital.com`. Include
+links or screenshots when safe; do not forward credentials, private logs, or
+personal information. Maintainers will limit disclosure to the people required
+to investigate and respond.

@@ -15,9 +15,18 @@ device over LAN. Host comes from --host or $JARVIS_DEVICE_HOST.
     jarvisctl taps [outdir]              # WAV taps + metrics
     jarvisctl vadlog [out.csv]           # barge/VAD decision log
     jarvisctl logs [tail_bytes]          # device log ring — read AFTER, no monitor
-    jarvisctl lease [ttl_s] | release    # operator lease (owner tap reclaims)
+    jarvisctl gestures [lines]           # recent physical inputs + resolved actions
+    jarvisctl input tap|double|long|swipe [left|right|up|down] [edge]
+    jarvisctl takeover [ttl_s]           # Codex owns glass; double-tap exits
+    jarvisctl normal                     # release Codex mode explicitly
+    jarvisctl mode                       # read current glass owner
+    jarvisctl desk present ...           # bounded interactive Desk surface
+    jarvisctl doctor [--repair]           # diagnose logs/counters safely
+    jarvisctl volume 10..100              # paired persistent speaker level
+    jarvisctl brightness 10..100          # paired persistent mood ceiling
+    jarvisctl ota                        # upload built firmware over Wi-Fi
+    jarvisctl update                     # flash built firmware over USB
     jarvisctl reboot                     # watchdog reset via esptool (USB)
-
 Exit code 0 = healthy/ok. `status` exits 1 when the device is deaf/muted so
 scripts and agents can gate on it.
 """
@@ -28,26 +37,61 @@ import os
 import subprocess
 import sys
 import urllib.request
+import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+KEYCHAIN_SERVICE = "com.ingeniousdigital.jarvisnano.desk"
 
 
 def host() -> str:
-    h = None
+    value = None
     argv = sys.argv[1:]
     if "--host" in argv:
-        h = argv[argv.index("--host") + 1]
-    h = h or os.environ.get("JARVIS_DEVICE_HOST")
-    if not h:
+        value = argv[argv.index("--host") + 1]
+    value = value or os.environ.get("JARVIS_DEVICE_HOST")
+    if not value:
         raise SystemExit("--host or JARVIS_DEVICE_HOST required")
-    return h
+    return value
+
+
+def base_url() -> str:
+    value = host().rstrip("/")
+    return value if value.startswith(("http://", "https://")) else "http://" + value
+
+
+def pairing_token() -> str | None:
+    """Load this host's pairing token without exposing it in argv or output."""
+    account = "jarvis-desk@" + urllib.parse.urlsplit(base_url()).netloc
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-a", account,
+             "-s", KEYCHAIN_SERVICE, "-w"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return None
+    if result.returncode != 0:
+        return None
+    token = result.stdout.rstrip("\r\n")
+    encoded = token.encode("utf-8")
+    if not (32 <= len(encoded) <= 64) or any(
+            byte <= 0x20 or byte == 0x7F for byte in encoded):
+        return None
+    return token
 
 
 def api(path: str, method: str = "GET", body: bytes | None = None,
         timeout: int = 10):
-    req = urllib.request.Request(f"http://{host()}{path}", data=body,
-                                 method=method)
+    req = urllib.request.Request(base_url() + path, data=body, method=method)
     req.add_header("X-JarvisNano-Control", "1")
+    token = pairing_token()
+    if token:
+        req.add_header("X-JarvisNano-Token", token)
+    if body is not None:
+        req.add_header("Content-Type", "application/octet-stream")
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
 
@@ -66,6 +110,9 @@ def cmd_status() -> int:
         problems.append("dac-muted")
     if g.get("phase") in ("Idle", "Backoff", "Fatal"):
         problems.append(f"voice off ({g.get('last_reason')})")
+    largest = g.get("largest_internal_block")
+    if isinstance(largest, (int, float)) and largest < 8192:
+        problems.append(f"internal fragmented (largest={int(largest)}B)")
     if d.get("flush_errors", 0):
         problems.append(f"display flush errors={d['flush_errors']}")
     verdict = "HEALTHY" if not problems else "ATTENTION: " + ", ".join(problems)
@@ -73,6 +120,7 @@ def cmd_status() -> int:
           f"  phase={g.get('phase')} mic_rms={g.get('mic_rms')} "
           f"deaths={g.get('deaths')}\n"
           f"  internal={g.get('free_internal_heap')}B "
+          f"largest={g.get('largest_internal_block')}B "
           f"psram={g.get('free_psram')}B "
           f"display={d.get('actual_fps')}fps")
     return 0 if not problems else 1
@@ -142,6 +190,41 @@ def cmd_vadlog(out: str = "vadlog.csv") -> int:
     print(out)
     return 0
 
+def cmd_gestures(limit_arg: str = "40") -> int:
+    try:
+        limit = max(1, min(200, int(limit_arg)))
+    except ValueError:
+        print("gesture line count must be an integer", file=sys.stderr)
+        return 2
+    log = api("/api/logs?tail=131072", timeout=20).decode("utf-8", "replace")
+    markers = (
+        "jr_hal_touch:",
+        "jarvis_v5: gesture:",
+        "jarvis_v5: ui:",
+        "jarvis_v5: ask:",
+        "jarvis_v5: operator:",
+    )
+    events = [line for line in log.splitlines()
+              if any(marker in line for marker in markers)]
+    if not events:
+        print("no gesture events remain in the device log ring")
+        return 1
+    print("\n".join(events[-limit:]))
+    return 0
+
+
+def cmd_desk(argv: list[str]) -> int:
+    if not argv:
+        print("desk requires present|dismiss|events|status|doctor|levels",
+              file=sys.stderr)
+        return 2
+    return subprocess.call([
+        sys.executable,
+        os.path.join(HERE, "jarvis-desk.py"),
+        "--host",
+        host(),
+        *argv,
+    ])
 
 def cmd_update() -> int:
     """Courteous flash: claim the operator lease so the glass announces
@@ -149,10 +232,11 @@ def cmd_update() -> int:
     already-built image over USB and let boot release the lease naturally.
     Never flash a device the owner is using without this."""
     try:
-        api("/api/operator/lease?ttl=180", "POST", b"")
-        print("lease claimed — glass announces the update")
+        if cmd_desk(["takeover", "--ttl", "180"]) != 0:
+            raise RuntimeError("paired takeover failed")
+        print("Codex mode claimed — glass announces the update")
     except Exception as exc:  # noqa: BLE001 - device may be wedged; flash anyway
-        print(f"lease skipped ({exc}) — flashing regardless")
+        print(f"takeover skipped ({exc}) — flashing regardless")
     import time
     time.sleep(1.5)   # let the caption land before the stall
     env = dict(os.environ, NO_BUILD="1")
@@ -206,27 +290,40 @@ def main() -> int:
         sys.stdout.write(api(f"/api/logs?tail={tail}", timeout=20).decode(
             "utf-8", "replace"))
         return 0
+    if cmd == "gestures":
+        return cmd_gestures(*rest[:1])
     if cmd == "reboot":
         return cmd_reboot()
     if cmd == "update":
         return cmd_update()
+    if cmd == "ota":
+        img = os.path.join(HERE, "..", "build", "jarvisrobot_v5.bin")
+        return cmd_desk(["ota", "--image", img])
     if cmd == "input":
-        # jarvisctl input tap|double|long|swipe [left|right|up|down] [edge]
-        kind = rest[0] if rest else "tap"
-        q = f"kind={kind}"
-        if len(rest) > 1:
-            q += f"&dir={rest[1]}"
-        if "edge" in rest:
-            q += "&edge=1"
-        print(api(f"/api/debug/input?{q}", "POST", b"").decode())
-        return 0
-    if cmd == "lease":
+        # Paired synthetic input is intentionally non-physical authority.
+        return cmd_desk(["input", *rest])
+    if cmd == "takeover":
         ttl = rest[0] if rest else "300"
-        print(api(f"/api/operator/lease?ttl={ttl}", "POST", b"").decode())
+        return cmd_desk(["takeover", "--ttl", ttl])
+    if cmd == "normal":
+        return cmd_desk(["normal"])
+    if cmd == "mode":
+        print(api("/api/operator/lease").decode())
         return 0
-    if cmd == "release":
-        print(api("/api/operator/lease?release=1", "POST", b"").decode())
-        return 0
+    if cmd == "doctor":
+        return cmd_desk(["doctor", *rest])
+    if cmd == "volume":
+        if not rest:
+            print("volume requires 10..100", file=sys.stderr)
+            return 2
+        return cmd_desk(["levels", "--volume", rest[0]])
+    if cmd == "brightness":
+        if not rest:
+            print("brightness requires 10..100", file=sys.stderr)
+            return 2
+        return cmd_desk(["levels", "--brightness", rest[0]])
+    if cmd == "desk":
+        return cmd_desk(rest)
     print(__doc__)
     return 2
 

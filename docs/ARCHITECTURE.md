@@ -1,245 +1,241 @@
 # Architecture
 
-> **Live stack (2026-08-14):** v5 is a plain ESP-IDF app at `main/` +
-> `components/jr_*`. Root `CMakeLists.txt` does **not** compile `firmware/` or
-> `esp-claw/`. The diagram below still names the roles (voice, face, HTTP,
-> tools). Implementation names on v5 are `jr_audio`, `jr_display`,
-> `jr_transport` / Gemini Live, `jr_http`, `jr_imu`, `jr_power`. See
-> [`BUILD.md`](BUILD.md) and [`JARVISNANO_OS_PLAN.md`](JARVISNANO_OS_PLAN.md).
+> **Live target:** plain ESP-IDF v5 on the Waveshare
+> ESP32-S3-Touch-AMOLED-1.75C. Last reconciled: **2026-08-28**.
 
-JarvisNano is organized around the Waveshare ESP32-S3-Touch-AMOLED-1.75
-desktop assistant path. The older XIAO/camera track remains in-tree, but it
-does not define the v1 release architecture.
+The release composition is rooted in `main/`, `components/jr_*`, and the selected
+board definition. `firmware/`, `esp-claw/`, and the older dashboard are not
+part of the image produced by `scripts/build-v5.sh`.
 
-## Release Architecture
+## System overview
 
 ```mermaid
 flowchart TB
-    subgraph HW[Waveshare ESP32-S3-Touch-AMOLED-1.75]
-        S3[ESP32-S3R8<br/>16 MB flash / 8 MB PSRAM]
-        AMOLED[CO5300 AMOLED<br/>466x466 QSPI]
-        TOUCH[CST9217 touch<br/>I2C]
-        ADC[ES7210 audio ADC<br/>dual MEMS microphones]
-        DAC[ES8311 audio DAC<br/>speaker output]
-        PMIC[AXP2101 PMIC]
-        USB[USB-Serial-JTAG]
-        WIFI[Wi-Fi]
+    Human[Voice · touch · PWR/BOOT · motion]
+
+    subgraph Board[Waveshare ESP32-S3-Touch-AMOLED-1.75C]
+        S3[ESP32-S3R8<br/>240 MHz · 8 MB PSRAM · 32 MB flash]
+        Mic[ES7210 microphones]
+        DAC[ES8311 speaker output]
+        Screen[CO5300 466×466 AMOLED]
+        Touch[CST9217 touch]
+        IMU[QMI8658]
+        PMIC[AXP2101 + PWR]
+        Boot[GPIO0 BOOT]
     end
 
-    subgraph BSP[Jarvis board primitives]
-        Board[jarvis_board<br/>display, touch, codec, PMIC helpers]
-        DisplayHAL[display HAL<br/>chunked CO5300 flush]
-        TouchSvc[touch service<br/>diagnostic events]
-        AudioSvc[audio codec path]
+    subgraph Runtime[JarvisNano v5]
+        HAL[jr_hal · jr_audio · jr_imu · jr_power]
+        Core[jr_core session / turn / monitors / mood]
+        Voice[jr_transport Gemini Live]
+        Tools[jr_tools bounded worker]
+        Display[jr_display + hud_render]
+        HTTP[main HTTP control and diagnostics]
+        OTA[app_update dual-slot OTA]
+        NVS[(NVS config and persisted levels)]
     end
 
-    subgraph Runtime[v5 jr_* runtime]
-        Gemini[jr_transport Gemini Live]
-        Face[jr_display + rwave EAF]
-        HUD[hud_render overlays]
-        HTTP[jr_http]
-        Config[NVS]
-        Tools[jr_tools]
-        IMU[jr_imu / jr_power]
-    end
+    Gemini[Google Gemini Live]
+    MCP[JarvisMCP typed device gateway]
+    Desk[Paired desk/operator client]
 
-    subgraph External[External clients and services]
-        GeminiAPI[Gemini Live API]
-        MCP[JarvisMCP /act]
-        Browser[Browser dashboard]
-        Human[User]
-    end
-
-    S3 --> Board
-    AMOLED --> DisplayHAL
-    TOUCH --> TouchSvc
-    ADC --> AudioSvc
-    DAC --> AudioSvc
-    PMIC --> Board
-    USB --> Runtime
-    WIFI --> HTTP
-    Board --> DisplayHAL
-    Board --> TouchSvc
-    Board --> AudioSvc
-    TouchSvc --> Gemini
-    AudioSvc --> Gemini
-    Gemini <--> GeminiAPI
-    Gemini --> AudioSvc
-    Gemini --> Face
-    Gemini <--> Memory
-    Gemini <--> Tools
-    Tools <--> MCP
-    Config --> Gemini
-    Config --> Tools
-    Face --> DisplayHAL
-    HUD --> DisplayHAL
-    IMU --> HUD
-    HTTP <--> Browser
-    HTTP --> Face
-    HTTP --> UILayer
-    HTTP --> TouchSvc
-    Human --> TOUCH
-    Human --> ADC
-    DAC --> Human
-    AMOLED --> Human
+    Human --> Touch --> HAL
+    Human --> Mic --> HAL
+    Human --> PMIC --> HAL
+    Human --> Boot --> HAL
+    IMU --> HAL
+    HAL --> Core
+    Core <--> Voice <--> Gemini
+    Core <--> Tools <--> MCP
+    Core --> Display --> Screen --> Human
+    Core --> HAL --> DAC --> Human
+    NVS --> Voice
+    NVS --> Tools
+    Desk <--> HTTP
+    HTTP --> Core
+    HTTP --> Display
+    HTTP --> OTA
 ```
 
-## Display Ownership
+## Ownership and tasks
 
-v5 has one compositor. Baked `rwave_*.eaf` faces are the reactor art.
-`hud_render` draws only in the measured negative space (thinking comet,
-battery rim, choice arcs, captions). There is no `ui_layer` and no display
-arbiter. D1 in `JARVISNANO_OS_PLAN.md` killed the LVGL split.
+The runtime is intentionally single-owner at every load-bearing boundary.
 
-Snapshot routes report software mirrors, not physical panel readback:
+| Owner | Responsibility |
+|---|---|
+| `jr_voice` | `jr_orch_step`, Gemini events/commands, physical input policy, mood, privacy, level requests |
+| `websocket_task` | TLS/WebSocket transport events only |
+| `jr_pb_feed` | Drain bounded playback ring into `esp_codec_dev_write` |
+| `gfx_render` | Decode/render one display frame and submit synchronous DMA strips |
+| `jr_present` | Load/cache face assets and apply the latest requested face/bucket |
+| `jr_tools` | Execute one bounded local/JarvisMCP job and publish a bounded result |
+| `httpd` | Parse/authenticate requests and post bounded commands; never own realtime state |
+| `jr_imu` / `jr_power` | Publish non-blocking sensor snapshots |
 
-| Route | Source | Use |
-|---|---|---|
-| `/api/display` | display health | Fast check |
-| `/api/display/snapshot.json` | submission-mirror metadata | Freshness / size |
-| `/api/display/snapshot.ppm` | software mirror | Face + overlay screenshot |
+The composition root owns concrete wiring. Pure `jr_core` code does not call
+ESP-IDF, touch, audio, display, HTTP, or network APIs.
 
-`panel_readback:false` is intentional. If the panel and snapshot disagree, the
-bug is in the compositor or the flush path, not a second owner. There is no
-`/api/ui/snapshot.ppm` on v5.
+## Voice path
 
-## Voice Turn
-
-Gemini Live is the primary loop. v5 is always-ready listen (`VOICE_ALWAYS_READY`),
-not tap-to-talk first. Playback is locked to the 16 kHz capture clock.
+The 1.75C shares one 24 kHz I²S clock between ES7210 capture and ES8311 playback.
+Capture is read as four TDM lanes, demultiplexed, and downsampled 24→16 kHz for
+AEC/VAD/Gemini input. Gemini output remains native 24 kHz PCM.
 
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant T as Touch service
-    participant A as ES7210 mic
-    participant GL as jr_transport Gemini Live
-    participant F as Face state
-    participant G as Gemini Live API
-    participant S as ES8311 speaker
-    participant M as JarvisMCP bridge
+    participant A as jr_audio
+    participant C as jr_core
+    participant T as jr_transport
+    participant G as Gemini Live
+    participant P as Playback feeder
+    participant D as jr_display
 
-    U->>T: short tap
-    T->>GL: start listening
-    GL->>F: listen
-    U->>A: speech
-    A->>GL: 16 kHz PCM frames
-    U->>T: short tap
-    T->>GL: end input
-    GL->>F: think
-    GL->>G: activityEnd + buffered audio
-    G-->>GL: transcript / toolCall / audio
-    opt tool call
-        GL->>M: dispatch tool
-        M-->>GL: concise result or model-visible error
-        GL->>G: toolResponse
-    end
-    GL->>F: speak
-    GL->>S: 24 kHz PCM playback
-    S-->>U: audio
-    GL->>F: listen or idle
+    U->>A: speech at microphones
+    A->>A: demux + AEC + 24→16 kHz
+    A->>T: bounded two-frame audio batches
+    T->>G: realtimeInput.audio
+    G-->>T: server VAD / text / audio / tool calls
+    T-->>C: typed server events
+    C->>D: Listening / Thinking / Speaking
+    T-->>P: 24 kHz PCM chunks
+    P->>U: ES8311 speaker output
 ```
 
-Known face states are intentionally small:
+Gemini server VAD owns native turn boundaries and interruption semantics. Local
+RMS/VAD remains observability and pacing input; local barge is disabled unless a
+measured fallback is deliberately enabled. Uplink backpressure is buffered in a
+bounded PSRAM queue; a transient full TCP window is not treated as a socket
+death.
 
-| Public value | Meaning |
+## Physical input policy
+
+Touch reports tap, long press, and four-way swipe events with original/end
+coordinates and synthetic provenance. There is one production gesture path:
+
+| Input | Action |
 |---|---|
-| `idle` | Ready, not currently listening |
-| `listen` | Capturing user input |
-| `think` | Waiting for Gemini or a tool result |
-| `speak` | Playing model audio |
-| `error` | Recoverable fault |
-| `sleep` | Dismissed or inactive |
+| PWR short | Listen/wake only |
+| PWR long | Battery/charging status |
+| BOOT short after boot | Controls open/close |
+| BOOT hold 1.5–5 s after boot | Visible 60-second pairing claim window |
+| BOOT held during reset | ROM downloader |
+| Left-edge vertical | Volume |
+| Right-edge vertical | Brightness |
+| Horizontal swipe | Move temporary side spaces |
+| Top-edge down | Controls |
+| Centre up | Detail or controls close |
+| Double tap | Jarvis Home |
+| Glass hold | Physical privacy |
+| Sustained face-down / face-up | Enter flip privacy / clear only a flip-origin mute |
 
-## Config And Secrets
+Top-edge down outranks edge-level handling. Vertical edge intent is accepted only
+after the swipe classifier selects UP/DOWN, so horizontal navigation remains
+unchanged. Synthetic input may test benign routing but cannot clear privacy,
+approve consent, answer asks, or escape operator ownership.
 
-Runtime secrets are NVS values. They are not source files, sample configs, or
-generated firmware defaults.
+## Display path
 
-```mermaid
-flowchart LR
-    Browser[Dashboard or setup script]
-    Token[X-JarvisNano-Token]
-    ConfigAPI[/api/config]
-    NVS[(NVS app namespace)]
-    GeminiKey[Gemini key<br/>masked on readback]
-    MCPURL[JarvisMCP URL<br/>masked/read protected]
-    MCPKey[JarvisMCP key<br/>masked on readback]
-    Pairing[Pairing token<br/>never displayed raw]
-    Tools[/api/tools/status]
+There is one display engine. Baked `rwave_*.eaf` assets provide the reactor face;
+`hud_render` and `jr_display` add battery, privacy, captions, choices, Watch,
+controls, side spaces, and operator state in measured negative space.
 
-    Browser --> Token
-    Token --> ConfigAPI
-    Browser --> ConfigAPI
-    ConfigAPI --> NVS
-    NVS --> GeminiKey
-    NVS --> MCPURL
-    NVS --> MCPKey
-    NVS --> Pairing
-    NVS --> Tools
-    Tools --> Browser
-```
+The render task uses 12-row internal-DMA strips. The listening tell is a sparse
+precomputed halo rather than a full procedural annulus; settled Jarvis and Watch
+hold roughly 15–16 FPS on the live panel. Controls are more expensive and remain
+an explicit optimization item in `PLAN.md`.
 
-For public builds, reads can remain open on a trusted LAN. Writes and control
-routes need pairing-token protection. Protected routes include config writes,
-restart/control, Gemini control, touch injection, JarvisMCP config, and
-destructive file actions.
+Snapshot routes are software mirrors of submitted RGB565—not panel readback:
 
-## Memory And Tools
+| Route | Meaning |
+|---|---|
+| `/api/display` | Presenter health/counters |
+| `/api/display/snapshot.json` | Mirror metadata and freshness |
+| `/api/display/snapshot.ppm` | Exact submitted software frame |
 
-`claw_memory` remains on-device for local assistant memory. It must not extract
-or store secrets. JarvisMCP is the v1 tool execution path:
+## Tool path
 
-```mermaid
-flowchart TB
-    User[User request]
-    Gemini[Gemini Live session]
-    Memory[claw_memory<br/>local facts]
-    ToolCall[Gemini function call]
-    Bridge[JarvisMCP bridge]
-    MCP[JarvisMCP /act]
-    Result[Concise tool result]
-    Failure[Model-visible tool error]
-
-    User --> Gemini
-    Memory --> Gemini
-    Gemini --> ToolCall
-    ToolCall --> Bridge
-    Bridge -->|configured and reachable| MCP
-    MCP --> Result
-    Bridge -->|unconfigured / timeout| Failure
-    Result --> Gemini
-    Failure --> Gemini
-```
-
-Unconfigured or unreachable JarvisMCP must not crash or wedge the live session.
-It returns a short failure result to the model.
-
-## Build Boundary
-
-Canonical v5 sources are `main/`, `components/jr_*`, and `boards/`.
-`scripts/build-v5.sh` runs pinned ESP-IDF 5.5.4 in Docker and produces
-`build/jarvisrobot_v5.bin`. `firmware/` + `scripts/bootstrap.sh` + ignored
-`esp-claw/` is the leftover overlay and is not this image.
+Gemini sees a fixed, bounded tool catalog plus `search_tools` and
+`execute_tool`. Local level tools are handled in firmware. Other work runs on the
+`jr_tools` worker and uses a dedicated JarvisMCP device route.
 
 ```mermaid
 flowchart LR
-    Canonical[main/ + components/jr_* + boards/]
-    Build[scripts/build-v5.sh]
-    Image[build/jarvisrobot_v5.bin]
-    Flash[scripts/flash-v5.sh]
-    Device[Waveshare board]
-
-    Canonical --> Build
-    Build --> Image
-    Image --> Flash
-    Flash --> Device
+    Call[Gemini function call] --> Local{Local tool?}
+    Local -->|yes| App[App-task request]
+    Local -->|no| Worker[jr_tools worker]
+    Worker --> Fixed[Fixed safe template]
+    Worker --> Search[JarvisMCP search]
+    Worker --> Execute[Policy-gated canonical method]
+    Search --> Result[≤3 KB model result]
+    Execute --> Result
+    Fixed --> Result
+    Result --> Reply[Gemini functionResponse]
 ```
 
-## Post-v1 Tracks
+The server denies unknown, destructive, executable, credential, site-scoped,
+and unclassified capabilities. Device response projection must also fit the
+3,072-byte Gemini result slot; cursor-aware byte budgeting remains active work.
 
-- BSP/LVGL migration only after direct CO5300 display, touch, voice, and
-  diagnostics stay green.
-- Android/BLE after firmware service stability.
-- Battery/enclosure polish after USB desktop v1 ships.
-- Camera/XIAO parity after Waveshare voice/display release candidate.
+## HTTP and authority
+
+`main/main.c` is the live route authority. The root page and coarse hardware
+counters are available on a trusted development LAN. Content-bearing reads and
+mutating routes require the proof named for that surface—pairing token, control
+header, or both—in [`PROTOCOL.md`](PROTOCOL.md).
+
+Physical authority is stronger than remote control:
+
+- Remote input is tagged synthetic.
+- Remote resume never clears physical hold/flip privacy.
+- Consent accepts only physical post-prompt taps.
+- Operator mode has a physical double-tap escape.
+- OTA cannot override deliberate privacy state.
+
+See [`PROTOCOL.md`](PROTOCOL.md) for the route/auth matrix.
+
+## Memory discipline
+
+Internal contiguous RAM—not total PSRAM—is the binding resource for TLS/AES,
+DMA, and task creation. Large queue payloads, logs, snapshots, audio taps, and
+worker stacks live in PSRAM. Display DMA buffers remain internal.
+
+Runtime gates refuse optional work when:
+
+- largest internal block is below 8 KB;
+- PSRAM is below 2 MB;
+- display is unstable;
+- OTA power/network/slot preflight fails.
+
+No failure path may allocate unbounded retries, queue unbounded work, or reboot
+merely because a diagnostic counter increased.
+
+## OTA and release boundary
+
+The 32 MB partition table has two 4 MB application slots. OTA writes only the
+inactive slot, then boots under a probation window that requires voice, network,
+tools, HTTP, wake, and display progress before marking the image valid.
+
+Trusted-LAN OTA is operational. Public release still requires signed images,
+authenticated encrypted upload, attended at-rest credential protection, and an
+exact third-party notice bundle. Secure Boot, anti-rollback, flash encryption,
+and eFuses remain separately attended hardware operations.
+
+## Build boundary
+
+```mermaid
+flowchart LR
+    Source[main/ · components/jr_* · boards/]
+    Docker[ESP-IDF 5.5.4 Docker build]
+    Image[jarvisrobot_v5.bin]
+    USB[Verified USB flash]
+    OTA[Preflight + inactive slot + probation]
+    Device[Physical 1.75C]
+
+    Source --> Docker --> Image
+    Image --> USB --> Device
+    Image --> OTA --> Device
+```
+
+Use [`BUILD.md`](BUILD.md), [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md), and
+[`../PLAN.md`](../PLAN.md) for commands, gates, and incomplete work.

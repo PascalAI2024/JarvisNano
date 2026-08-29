@@ -33,8 +33,8 @@
     <string name="settings_section_misc">Miscellaneous</string>
 
     <string name="about_tagline">A measured voice in your robot.</string>
-    <string name="about_description">JarvisNano is the open-source Android companion for the JarvisNano XIAO ESP32-S3 Sense device. Phase 1 talks to the device over Wi-Fi (HTTP + WebSocket). Phase 2 adds BLE scan/connect readiness for the direct GATT bridge. Phase 3 brings on-device Gemma 4 E4B for fully-offline private mode.</string>
+    <string name="about_description">Experimental JarvisNano companion scaffold. The supported 1.75C product runs Gemini Live directly and does not expose a camera or BLE audio service; Android cockpit compatibility, XIAO camera support, and private on-phone inference remain future tracks.</string>
     <string name="about_link_github">View source on GitHub</string>
     <string name="about_link_igd">Built by Ingenious Digital</string>
-    <string name="about_version">JarvisNano · 1.0</string>
+    <string name="about_version">JarvisNano · pre-1.0</string>
 </resources>

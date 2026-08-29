@@ -24,9 +24,11 @@ idf_component_register(
         jr_rtc
         jr_wake
         nvs_flash
+        app_update
         esp_timer
         esp_http_server
         json
+        esp_driver_gpio
     EMBED_TXTFILES
         "diagnostics.html"
 )

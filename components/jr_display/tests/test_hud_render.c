@@ -281,13 +281,10 @@ static void test_overlay_respects_bounds(void)
     free(buf);
 }
 
-/* The listening ring: LISTEN paints a full band strictly inside the free
- * r185-194 band (measured negative space — nothing else may live there), and
- * IDLE paints nothing at all with the battery absent, so the ring's presence
- * carries exactly one meaning: listening. Louder input only brightens; it
- * never moves the band. Strip invariance is structural (ov_ring_row is
- * row-analytic) but pinned here anyway because this ring is a STATE signal —
- * a seam would read as a glitch in the device's attention. */
+/* The listening halo: LISTEN paints sparse points strictly inside the free
+ * r185-194 band, and IDLE paints nothing with the battery absent. The halo's
+ * presence carries exactly one meaning: listening; louder input brightens it.
+ * Whole-frame and strip rendering must remain identical. */
 static void test_listen_ring_band_and_exclusivity(void)
 {
     const size_t px = (size_t)HUD_W * HUD_H;
@@ -311,7 +308,7 @@ static void test_listen_ring_band_and_exclusivity(void)
             if (r2 < 185L * 185L || r2 > 194L * 194L) out_of_band++;
         }
     }
-    CHECK(painted > 1000, "listen ring painted only %zu px", painted);
+    CHECK(painted > 200, "listen halo painted only %zu px", painted);
     CHECK(out_of_band == 0, "listen ring left the r185-194 band (%zu px)",
           out_of_band);
 
@@ -335,6 +332,63 @@ static void test_listen_ring_band_and_exclusivity(void)
     CHECK(idle_painted == 0, "idle painted %zu px — ring exclusivity broken",
           idle_painted);
     free(fb); free(strips);
+}
+
+/* Privacy is persistent hardware state, not a transient caption. It owns the
+ * two-pixel gap between the battery and choice bands. */
+static void test_privacy_ring_is_persistent_and_bounded(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *clear = calloc(px, sizeof *clear);
+    uint16_t *muted = calloc(px, sizeof *muted);
+    if (!clear || !muted) {
+        printf("FAIL %s: alloc\n", __func__);
+        g_failures++;
+        free(clear); free(muted);
+        return;
+    }
+    hud_env_t env = { .face = HUD_FACE_IDLE, .amp = 0, .batt_pct = 0xFF,
+                      .charging = false, .privacy_muted = false,
+                      .ox = 0, .oy = 0 };
+    hud_overlay_frame(clear, 0, HUD_H, 1000, false, &env);
+    env.privacy_muted = true;
+    hud_overlay_frame(muted, 0, HUD_H, 1000, false, &env);
+
+    size_t painted = 0, out_of_band = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            if (clear[(size_t)y * HUD_W + x] ==
+                muted[(size_t)y * HUD_W + x]) {
+                continue;
+            }
+            painted++;
+            const long dx = x - 232, dy = y - 232;
+            const long r2 = dx * dx + dy * dy;
+            if (r2 < 220L * 220L || r2 > 223L * 223L) {
+                out_of_band++;
+            }
+        }
+    }
+    CHECK(painted > 500, "privacy ring painted only %zu px", painted);
+    CHECK(out_of_band == 0, "privacy ring left r220-223 (%zu px)",
+          out_of_band);
+
+    memset(clear, 0, px * sizeof *clear);
+    memset(muted, 0, px * sizeof *muted);
+    env.batt_pct = 100;
+    env.privacy_muted = false;
+    hud_overlay_frame(clear, 0, HUD_H, 1000, false, &env);
+    env.privacy_muted = true;
+    hud_overlay_frame(muted, 0, HUD_H, 1000, false, &env);
+    size_t battery_overwritten = 0;
+    for (size_t i = 0; i < px; ++i) {
+        if (clear[i] != 0 && clear[i] != muted[i]) {
+            battery_overwritten++;
+        }
+    }
+    CHECK(battery_overwritten == 0,
+          "privacy ring overwrote %zu battery pixels", battery_overwritten);
+    free(clear); free(muted);
 }
 
 /* A USB-powered puck with no cell must show NO gauge — a full-looking or
@@ -369,6 +423,39 @@ static void test_overlay_hides_absent_battery(void)
         }
     }
     CHECK(rim == 0, "absent battery still painted %zu rim px", rim);
+    free(a); free(b);
+}
+
+static void test_charging_rim_animates_inside_battery_band(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *a = calloc(px, sizeof *a);
+    uint16_t *b = calloc(px, sizeof *b);
+    CHECK(a != NULL && b != NULL, "alloc");
+    if (a == NULL || b == NULL) {
+        free(a); free(b);
+        return;
+    }
+    const hud_env_t env = {
+        .face = HUD_FACE_IDLE, .amp = 0, .batt_pct = 74,
+        .charging = true, .privacy_muted = false, .ox = 0, .oy = 0
+    };
+    hud_overlay_frame(a, 0, HUD_H, 100U, false, &env);
+    hud_overlay_frame(b, 0, HUD_H, 900U, false, &env);
+    size_t changed = 0, escaped = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            const size_t i = (size_t)y * HUD_W + x;
+            if (a[i] == b[i]) continue;
+            changed++;
+            const int dx = x - 232, dy = y - 232;
+            const int r2 = dx * dx + dy * dy;
+            if (r2 < 215 * 215 || r2 > 221 * 221) escaped++;
+        }
+    }
+    CHECK(changed > 0, "charging rim did not animate");
+    CHECK(escaped == 0, "charging animation escaped battery band: %zu",
+          escaped);
     free(a); free(b);
 }
 
@@ -632,7 +719,8 @@ static void test_battery_and_choices_do_not_overlap(void)
             memset(rim, 0, px * sizeof *rim);
             hud_env_t env = { .face = err ? HUD_FACE_ERROR : HUD_FACE_IDLE,
                               .amp = 0, .batt_pct = (uint8_t)pcts[k],
-                              .charging = false, .ox = 0, .oy = 0 };
+                              .charging = false, .privacy_muted = true,
+                              .ox = 0, .oy = 0 };
             hud_overlay_frame(rim, 0, HUD_H, 500, false, &env);
 
             size_t clash = 0;
@@ -1580,7 +1668,9 @@ int main(void)
     test_overlay_strip_invariance();
     test_overlay_respects_bounds();
     test_overlay_hides_absent_battery();
+    test_charging_rim_animates_inside_battery_band();
     test_listen_ring_band_and_exclusivity();
+    test_privacy_ring_is_persistent_and_bounded();
     test_tilt_offset_is_disabled();
     test_choices_strip_invariance();
     test_choices_strength_gate();

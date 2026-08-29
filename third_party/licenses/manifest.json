@@ -1,0 +1,7 @@
+{
+  "espressif/dl_fft@0.6.0": {
+    "path": "third_party/licenses/espressif__dl_fft-LICENSE.txt",
+    "upstream_url": "https://raw.githubusercontent.com/espressif/esp-dl/a8a7b60ea5bfd6ce46960ea061641fffa9589440/LICENSE",
+    "sha256": "3513f1605ebcc227f7364956f6c30a303412597e232648cb3090e76697ca5aa3"
+  }
+}

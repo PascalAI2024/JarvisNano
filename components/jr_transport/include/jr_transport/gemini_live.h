@@ -355,10 +355,12 @@ bool jr_gemini_event_to_ask(const jr_gemini_event_t *ev, jr_gemini_ask_t *out);
  *  CLIENT — the RealtimeVoiceClient impl over a ws_transport (framer + pump)*
  * ======================================================================== */
 
-/* Bounded outbound buffer: drop-newest past capacity keeps memory hard-bounded
- * under a starved consumer. Each slot holds one (possibly partial) frame. */
+/* Bounded outbound ring. Payloads are allocated per queued frame so device
+ * builds can place them in PSRAM instead of permanently pinning ~32 KiB of
+ * internal SRAM inside the client. Depth 16 covers about one second of the
+ * two-frame/64 ms microphone cadence while remaining strictly bounded. */
 #ifndef JR_GEMINI_TXQ_DEPTH
-#define JR_GEMINI_TXQ_DEPTH 8
+#define JR_GEMINI_TXQ_DEPTH 16
 #endif
 #ifndef JR_GEMINI_TXQ_SLOT
 #define JR_GEMINI_TXQ_SLOT 4096
@@ -370,7 +372,7 @@ bool jr_gemini_event_to_ask(const jr_gemini_event_t *ev, jr_gemini_ask_t *out);
 #endif
 
 typedef struct {
-    char   buf[JR_GEMINI_TXQ_SLOT];
+    char  *buf;
     size_t len;
     size_t off;   /* bytes already written (partial-frame resume) */
 } jr_gemini_txframe_t;

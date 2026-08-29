@@ -523,6 +523,8 @@ static uint16_t s_ov_gold[HUD_RAMP_LEVELS];
 static uint16_t s_ov_red[HUD_RAMP_LEVELS];
 static bool     s_ov_ready;
 static bool     s_ov_swap;
+static int16_t  s_ov_halo_dx[32];
+static int16_t  s_ov_halo_dy[32];
 
 static void overlay_palette(bool swap)
 {
@@ -530,6 +532,11 @@ static void overlay_palette(bool swap)
         return;
     }
     luts_build();
+    for (int i = 0; i < 32; ++i) {
+        const int a = i * 8;   /* Q8 turn: 32 evenly spaced points */
+        s_ov_halo_dx[i] = (int16_t)((lcos(a) * 190) >> 15);
+        s_ov_halo_dy[i] = (int16_t)((lsin(a) * 190) >> 15);
+    }
     ramp_build(s_ov_cyan, 0, 229, 255, swap);
     ramp_build(s_ov_tick, 90, 200, 220, swap);
     ramp_build(s_ov_gold, 255, 180, 40, swap);
@@ -567,17 +574,13 @@ static void overlay_palette(bool swap)
  *    r215..232, not r215..239. An earlier choice-arc pass put 16% of its
  *    pixels off-panel this way and lost a whole shading zone to the clip.
  *
- * 2. THE OUTER BAND HAS TWO TENANTS, SO IT IS SPLIT. The battery rim and the
- *    tap-to-answer choice arcs are both live at the same time (hud_overlay_frame
- *    draws the battery unconditionally, every frame, including while a question
- *    is on screen), and they used to overlap: whichever drew second won, and a
- *    gauge sweeping clockwise through 81% of the arcs made both unreadable.
- *    The band is split rather than time-multiplexed, so no caller has to know
- *    about the conflict and no state can get it wrong:
+ * 2. THE OUTER BAND HAS THREE TENANTS, SO IT IS SPLIT. The battery rim,
+ *    persistent privacy ring, and tap-to-answer arcs may all be live at once.
+ *    They occupy disjoint radii so no caller has to know about the others:
  *
- *        r215-220   battery rim + the ERROR ring  (inner half)
- *        r221-222   dead gap
- *        r223-231   choice arcs                   (outer half)
+ *        r215-220   battery rim + the ERROR ring
+ *        r221-222   persistent gold privacy ring
+ *        r223-231   choice arcs
  *
  *    Note the primitives here use the INTEGER centre 232, so a pixel drawn at
  *    nominal radius r reaches true radius r+0.5 on the -x/-y side. Every bound
@@ -586,6 +589,8 @@ static void overlay_palette(bool swap)
 #define OV_R_BREATH  190   /* centre of the free r185-194 band */
 #define OV_R_BATT    218   /* inner half of the outer band; see the split above */
 #define OV_R_FACE    232   /* last displayable radius (glass edge is 232.5)     */
+#define OV_R_PRIVACY_IN  221 /* mute ring between battery and choice arcs */
+#define OV_R_PRIVACY_OUT 222
 
 /* One revolution every ~2639 ms == the prototype's `angle = now/420` rad
  * (2*pi*420 ms per turn), expressed in the Q8 turn units the LUT uses. */
@@ -736,16 +741,16 @@ void hud_tilt_offset(float roll_deg, float pitch_deg, int8_t *ox, int8_t *oy)
 }
 
 /* Battery rim: a thin arc at the outer bezel sweeping clockwise from 12
- * o'clock, proportional to charge. Red under 20%, gold while charging, cyan
- * otherwise. Skipped entirely when no cell is present (batt_pct == 0xFF), so a
- * USB-powered puck shows no misleading gauge.
+ * o'clock, proportional to charge. Red under 20%, cyan when discharging, and
+ * gold while charging. Charging adds a short bright comet that repeatedly
+ * travels only through the FILLED portion of the gauge: unmistakable motion
+ * without ever claiming charge the battery does not have.
  *
  * It rides the INNER half of the outer free band (OV_R_BATT, see the split in
  * the RADII note) precisely so it can coexist with the choice arcs, which own
- * the outer half. Do not move it outward without moving them too — this
- * collision was invisible on the bench only because no cell was attached
- * (batt_pct 0xFF) and the gauge never drew. */
-static void ov_battery(const strip_t *s, int cx, int cy, const hud_env_t *env)
+ * the outer half. */
+static void ov_battery(const strip_t *s, int cx, int cy, uint32_t now_ms,
+                       const hud_env_t *env)
 {
     if (env->batt_pct > 100) {
         return;
@@ -753,9 +758,18 @@ static void ov_battery(const strip_t *s, int cx, int cy, const hud_env_t *env)
     const uint16_t *ramp = (env->batt_pct < 20) ? s_ov_red
                          : (env->charging ? s_ov_gold : s_ov_cyan);
     const int steps = (256 * env->batt_pct) / 100;
+    const uint16_t rim = shade(ramp, 200);
     for (int i = 0; i <= steps; ++i) {
         const int a = (i - 64) & 255;            /* -64 Q8 == 12 o'clock */
-        ov_polar(s, cx, cy, a, OV_R_BATT, shade(ramp, 200), 2);
+        ov_polar(s, cx, cy, a, OV_R_BATT, rim, 2);
+    }
+    if (env->charging && steps > 0) {
+        const int head = (int)((now_ms / 12U) % (uint32_t)(steps + 1));
+        for (int tail = 0; tail < 14 && head - tail >= 0; ++tail) {
+            const int a = (head - tail - 64) & 255;
+            ov_polar(s, cx, cy, a, OV_R_BATT,
+                     shade(s_ov_gold, 255 - tail * 7), 3);
+        }
     }
 }
 
@@ -784,7 +798,16 @@ void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
     const int cx = 232 + env->ox;
     const int cy = 232 + env->oy;
 
-    ov_battery(&s, cx, cy, env);
+    ov_battery(&s, cx, cy, now_ms, env);
+    if (env->privacy_muted) {
+        for (int y = s.y0; y < s.y1; ++y) {
+            if (y >= 0 && y < HUD_H) {
+                ov_ring_row(dst + (size_t)(y - s.y0) * HUD_W, y, cx, cy,
+                            OV_R_PRIVACY_IN, OV_R_PRIVACY_OUT,
+                            s_ov_gold, 230);
+            }
+        }
+    }
 
     switch ((hud_face_t)env->face) {
     case HUD_FACE_IDLE:
@@ -792,25 +815,23 @@ void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
          * ring is one more concentric ring in a design made of them. */
         break;
     case HUD_FACE_LISTEN: {
-        /* The listening ring: a breathing cyan band filling the free
-         * r185-194 band (OV_R_BREATH — reserved for exactly this). The baked
-         * listen face's quiet-room floor is nearly identical to idle from
-         * across a desk; this ring is the unmistakable tell — present means
-         * listening, absent means idle. It BREATHES (~1.5 s period) so it
-         * reads as attention rather than a status LED, and the live mic
-         * amplitude rides on top so speech visibly excites it. A full ring,
-         * not a waveform: duplication of the baked art's spokes is exactly
-         * what the negative-space rule exists to prevent. */
+        /* A 32-point breathing halo in the free r185-194 band. The old solid
+         * annulus solved two square roots and wrote ~13k pixels every frame,
+         * dropping the healthy panel from 16 to 12 fps. The baked listening
+         * face carries the waveform; these sparse points retain the unambiguous
+         * listening tell without redrawing another full ring. */
         const int a = (int)(((uint64_t)now_ms * 256u) / 1500u);
         int lv = 120 + ((100 * (128 + (lsin(a) >> 8))) >> 8) + (env->amp >> 2);
         if (lv > 255) {
             lv = 255;
         }
-        for (int y = s.y0; y < s.y1; ++y) {
-            if (y >= 0 && y < HUD_H) {
-                ov_ring_row(dst + (size_t)(y - s.y0) * HUD_W, y, cx, cy,
-                            186, 193, s_ov_cyan, lv);
+        const uint16_t px = shade(s_ov_cyan, lv);
+        for (int i = 0; i < 32; ++i) {
+            const int y = cy + s_ov_halo_dy[i];
+            if (y + 3 <= s.y0 || y >= s.y1) {
+                continue;
             }
+            ov_dot(&s, cx + s_ov_halo_dx[i], y, px, 3);
         }
         break;
     }

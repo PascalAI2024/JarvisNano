@@ -159,6 +159,11 @@ esp_err_t jr_net_wifi_connect(void);
 bool jr_net_is_connected(void);
 esp_err_t jr_net_get_status(jr_net_status_t *out);
 
+/* Toggle station modem sleep without stopping Wi-Fi or changing credentials.
+ * The requested policy survives reconnects; provisioning always forces full
+ * radio availability. Use false for realtime voice, OTA, and operator mode. */
+esp_err_t jr_net_set_power_save(bool enabled);
+
 /* Provisioning uses a device-unique WPA2 AP and an independent random password
  * persisted in NVS. The password is only returned through the explicit local
  * display API below; status/readback never includes it. */

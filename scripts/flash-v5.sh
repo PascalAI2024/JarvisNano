@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and safely flash JarvisRobot v5 to the Waveshare AMOLED-1.75.
+# Build and safely flash JarvisNano v5; 1.75C is the default board target.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

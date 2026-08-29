@@ -24,8 +24,14 @@ for patch in patches/*.patch; do
   fi
 
   if [ ! -d "$ESP_CLAW_DIR/.git" ]; then
-    echo "$patch: syntax only, esp-claw/ is not bootstrapped"
-    git apply --check --allow-empty "$patch" >/dev/null 2>&1 || true
+    if git apply --numstat --summary "$patch" >/dev/null 2>&1; then
+      echo "$patch: legacy ESP-Claw patch syntax valid"
+    elif grep -qiE 'bootstrap|generated|managed_components|Patch target[s]?:' "$patch"; then
+      echo "$patch: bootstrap-managed documentary patch"
+    else
+      echo "$patch: malformed legacy patch without bootstrap ownership marker" >&2
+      missing=1
+    fi
     continue
   fi
 

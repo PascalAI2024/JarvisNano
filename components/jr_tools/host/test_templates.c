@@ -79,6 +79,13 @@ int main(void)
               "return await jarvis.time(\"America/New_York\")");
     expect_ok("current_time", "{\"timezone\":\"Europe/London\"}",
               "return await jarvis.time(\"Europe/London\")");
+    expect_ok("search_tools", "{\"query\":\"read calendar events\"}",
+              "return await jarvis.meta.search(\"read calendar events\","
+              "{limit:3,detail:\"compact\"})");
+    expect_ok("execute_tool",
+              "{\"tool\":\"calendar.list_events\","
+              "\"args_json\":\"{\\\"limit\\\":3}\"}",
+              "return {error:\"execute_tool requires typed device gateway\"}");
 
     /* A memory consent must be exactly representable on the panel. */
     char out[768];
@@ -113,6 +120,20 @@ int main(void)
                "remember",
                "{\"note\":\"123456789012345678901234567890123456789012345678\"}",
                out, sizeof(out)) == JR_TOOL_TEMPLATE_INVALID_ARGS);
+    assert(jr_tools_build_code(
+               "execute_tool",
+               "{\"tool\":\"calendar.list_events;globalThis.pwned=true\","
+               "\"args_json\":\"{}\"}", out, sizeof(out)) ==
+           JR_TOOL_TEMPLATE_INVALID_ARGS);
+    assert(jr_tools_build_code(
+               "execute_tool",
+               "{\"tool\":\"calendar.list_events\",\"args_json\":\"[]\"}",
+               out, sizeof(out)) == JR_TOOL_TEMPLATE_INVALID_ARGS);
+    assert(jr_tools_build_code(
+               "execute_tool",
+               "{\"tool\":\"calendar.list_events\",\"args_json\":\"{}\","
+               "\"code\":\"return 1\"}", out, sizeof(out)) ==
+           JR_TOOL_TEMPLATE_INVALID_ARGS);
 
     char tiny[8];
     assert(jr_tools_build_code("current_time", "{}", tiny, sizeof(tiny)) ==

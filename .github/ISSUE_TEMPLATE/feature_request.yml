@@ -1,20 +1,24 @@
 name: Feature request
-description: Suggest an improvement or new capability.
+description: Propose a focused improvement to the supported JarvisNano 1.75C product.
 title: "[Feature]: "
 labels: ["enhancement"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        JarvisNano has one release target: the 32 MB Waveshare 1.75C. Proposals must preserve physical privacy, one compositor, one interaction grammar, bounded memory, and trusted-LAN security boundaries.
   - type: textarea
     id: problem
     attributes:
-      label: Problem
-      description: What user or hardware workflow should this improve?
+      label: User problem
+      description: What concrete user or hardware workflow is missing or difficult?
     validations:
       required: true
   - type: textarea
     id: proposal
     attributes:
-      label: Proposal
-      description: Describe the desired behavior.
+      label: Proposed behavior
+      description: Describe the observable outcome, not just an implementation or library.
     validations:
       required: true
   - type: dropdown
@@ -22,13 +26,25 @@ body:
     attributes:
       label: Area
       options:
-        - Firmware
-        - Dashboard
-        - Android
-        - Hardware
-        - Documentation
+        - Voice/audio/Gemini
+        - Display/interaction
+        - Motion/power/hardware
+        - JarvisMCP/tools
+        - Diagnostics/OTA/security
+        - Host tooling
+        - Documentation/developer experience
+        - Compatibility or future track
+    validations:
+      required: true
   - type: textarea
-    id: notes
+    id: acceptance
     attributes:
-      label: Notes
-      description: Include links, diagrams, protocol ideas, or hardware constraints.
+      label: Acceptance evidence
+      description: What command, counter, physical circuit, or user-visible result would prove this complete?
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and alternatives
+      description: Note memory, power, security, hardware, compatibility, or rejected alternatives.

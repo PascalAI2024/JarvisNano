@@ -25,11 +25,11 @@ extern "C" {
 /* Rest thresholds, in ms of continuous stillness.
  *
  * The split that matters is AMBIENT vs the rest: AMBIENT still ARMS VOICE, so
- * it is purely cosmetic (dim + clock hands) and is safe to reach quickly.
- * WHISPER and DREAM switch the microphone OFF, so they are a real loss of
- * function and must be far out. The first tuning shipped 33 s to voice-off,
- * which made a desk assistant stop listening while its owner read one email. */
-#define JR_MOOD_AMBIENT_MS  20000u  /* 20 s — dim + clock, STILL LISTENING */
+ * it is purely cosmetic (dim only) and is safe to reach quickly. WHISPER and
+ * DREAM switch the microphone OFF, so they are a real loss of function and
+ * remain far out. The first tuning shipped 33 s to voice-off, which made a
+ * desk assistant stop listening while its owner read one email. */
+#define JR_MOOD_AMBIENT_MS  20000u  /* 20 s — dim, STILL LISTENING */
 #define JR_MOOD_WHISPER_MS 300000u  /* 5 min — mic off */
 #define JR_MOOD_DREAM_MS   900000u  /* 15 min — deep rest */
 

@@ -45,6 +45,9 @@ static const template_desc_t s_templates[] = {
      "return await jarvis.weather(g.results[0].lat,g.results[0].lon,{days:3})"},
     {"current_time", "timezone", 79U, true,
      "return await jarvis.time(", ")"},
+    {"search_tools", "query", 191U, false,
+     "return await jarvis.meta.search(",
+     ",{limit:3,detail:\"compact\"})"},
 };
 
 static const template_desc_t *find_template(const char *name)
@@ -148,6 +151,52 @@ jr_tool_template_status_t jr_tools_build_code(const char *name,
         return JR_TOOL_TEMPLATE_INVALID_ARGS;
     }
     out[0] = '\0';
+    if (name != NULL && strcmp(name, "execute_tool") == 0) {
+        const char *json =
+            (args_json == NULL || args_json[0] == '\0') ? "{}" : args_json;
+        const char *parse_end = NULL;
+        cJSON *args = cJSON_ParseWithOpts(json, &parse_end, true);
+        cJSON *tool = cJSON_GetObjectItemCaseSensitive(args, "tool");
+        cJSON *nested_text =
+            cJSON_GetObjectItemCaseSensitive(args, "args_json");
+        bool valid = args != NULL && cJSON_IsObject(args) &&
+            cJSON_IsString(tool) && tool->valuestring != NULL &&
+            cJSON_IsString(nested_text) && nested_text->valuestring != NULL;
+        unsigned fields = 0U;
+        for (const cJSON *item = valid ? args->child : NULL;
+             item != NULL; item = item->next) {
+            if (item->string == NULL ||
+                (strcmp(item->string, "tool") != 0 &&
+                 strcmp(item->string, "args_json") != 0)) {
+                valid = false;
+            }
+            fields++;
+        }
+        size_t tool_len = valid
+            ? strnlen(tool->valuestring, JR_TOOLS_NAME_CAP) : 0U;
+        for (size_t i = 0; valid && i < tool_len; ++i) {
+            unsigned char ch = (unsigned char)tool->valuestring[i];
+            if (!isalnum(ch) && ch != '.' && ch != '_' && ch != '-') {
+                valid = false;
+            }
+        }
+        cJSON *nested = valid
+            ? cJSON_ParseWithOpts(nested_text->valuestring, NULL, true) : NULL;
+        valid = valid && fields == 2U && tool_len > 0U &&
+            tool_len < JR_TOOLS_NAME_CAP && cJSON_IsObject(nested);
+        cJSON_Delete(nested);
+        cJSON_Delete(args);
+        if (!valid) {
+            return JR_TOOL_TEMPLATE_INVALID_ARGS;
+        }
+        int written = snprintf(out, out_cap, "%s",
+            "return {error:\"execute_tool requires typed device gateway\"}");
+        if (written < 0 || (size_t)written >= out_cap) {
+            out[0] = '\0';
+            return JR_TOOL_TEMPLATE_TOO_LARGE;
+        }
+        return JR_TOOL_TEMPLATE_OK;
+    }
 
     const template_desc_t *desc = find_template(name);
     if (desc == NULL) {

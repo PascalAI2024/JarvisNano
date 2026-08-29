@@ -135,9 +135,17 @@ jr_display_test_pattern_t jr_display_get_test_pattern(void);
  * the presenter into JR_DISPLAY_TEST_TOUCH_CHALLENGE until test_pattern=OFF. */
 esp_err_t jr_display_set_touch_challenge(int sector, uint8_t progress);
 
-/* Lightweight shell compositor over the animated face. A top-edge shade is
- * visible on-device; Agent Link occupies only the outer violet/status rim and
- * therefore never steals Listening/Speaking foreground. */
+/* Operator/agent identity, plus a second way in to the control shade.
+ *
+ * agent_active/progress/state own the OUTER rim segments (r224-230) and
+ * nothing else, so Agent Link never steals Listening/Speaking foreground and
+ * never collides with the spatial shell, which stops at
+ * JR_DISPLAY_SHELL_R_MAX. The same state tints the Desk focal ring.
+ *
+ * shade_open is OR-ed with jr_display_nav_down()'s overlay state: either
+ * source opens the one control shade described under SPATIAL SHELL below, so
+ * an existing caller that tracks its own shade flag keeps working unchanged
+ * while gesture routing moves to the nav API. */
 void jr_display_set_shell_state(bool shade_open, bool agent_active,
                                 uint8_t agent_progress,
                                 jr_display_agent_state_t agent_state);
@@ -151,14 +159,17 @@ int jr_display_surface_hit_test(uint16_t x, uint16_t y);
 
 
 /* Feed the HUD layer the world-state it cannot see from inside the display:
- * battery charge and device tilt. Cheap and lock-free (one packed word), so the
- * caller may push it from any task at any cadence — the flush path reads the
- * most recent value. Keeping the sensor components out of jr_display's
- * dependency list is deliberate: the composition root owns that wiring.
+ * battery charge, privacy state, and device tilt. Cheap and lock-free (one
+ * packed word), so the caller may push it from any task at any cadence — the
+ * flush path reads the most recent value. Keeping sensor/session components
+ * out of jr_display's dependency list is deliberate: the composition root
+ * owns that wiring.
  *
- * batt_pct: 0..100, or 0xFF when no cell is present (the gauge then hides).
+ * batt_pct: 0..100, or 0xFF when no battery/unknown.
+ * privacy_muted: true renders the persistent outer gold privacy ring.
  * roll_deg/pitch_deg: straight from jr_imu; 0,0 disables tilt parallax. */
 void jr_display_set_hud_env(uint8_t batt_pct, bool charging,
+                            bool privacy_muted,
                             float roll_deg, float pitch_deg);
 
 /* Enable/disable the procedural HUD overlay at runtime. Exists so the HUD's
@@ -257,6 +268,247 @@ bool jr_display_canvas_active(void);
  * device with the frame flush and racing it asserts in spi_device_release_bus.
  * No-op until the presenter is ready. */
 esp_err_t jr_display_set_brightness(uint8_t percent);
+
+/* ===== SPATIAL SHELL =====================================================
+ *
+ * THE VISUAL CONTRACT (this comment is the design document; there is no
+ * DESIGN.md). The glass is a 466 px circle, not a small rectangle, so the
+ * shell is built from rings, arcs and a centre — never from a drawer, a card,
+ * or a list whose corners the bezel would eat.
+ *
+ * FOUR SPACES ON ONE HORIZONTAL RING, CLAMPED AT BOTH ENDS
+ *
+ *      JARVIS  <->  DESK  <->  TOOLS  <->  SETTINGS
+ *
+ * The ring deliberately does NOT wrap. A wrap would make the page indicator
+ * jump the full width of the dial on one swipe, and it would make "am I at
+ * the end" unanswerable. Clamped, the indicator can interpolate straight from
+ * mark to mark, and a swipe past the end is an honest no-op.
+ *
+ * Edge controls are global; the vertical centre axis owns overlays:
+ *
+ *      left edge UP/DOWN  -> volume +/− from any screen.
+ *      right edge DOWN/UP -> brightness +/− from any screen.
+ *      top-edge down      -> SHADE with values and physical MUTE/LISTEN.
+ *      centre swipe up    -> DETAIL, or closes an open shade.
+ *      swipe L/R          -> move one temporary side space and close overlays.
+ *                             Active voice immediately returns to JARVIS.
+ *      double tap -> JARVIS, no overlay. The global escape, from anywhere.
+ *      tap        -> jr_display_hit() resolves what was under the finger.
+ *      hold       -> privacy. Owned entirely by the caller; the display only
+ *                    reflects it through jr_display_set_hud_env().
+ *
+ * RADIAL BUDGET. The outer band already has three tenants that must stay
+ * legible across a room, so THE SPATIAL SHELL NEVER WRITES A PIXEL BEYOND
+ * JR_DISPLAY_SHELL_R_MAX — not even its backdrop dim. The battery rim
+ * (r215-220), the gold privacy ring (r221-222) and the choice arcs (r223-231)
+ * are therefore structurally safe from it: THE CONTROL SHADE CANNOT CONFLICT
+ * WITH THE PRIVACY RING BECAUSE IT CANNOT REACH IT. This is enforced in one
+ * place — every shell primitive clips its span to this circle — rather than
+ * trusted to each renderer.
+ *
+ *      r <= 104   semantic focal object (the centre means the space)
+ *      r <= 168   JR_DISPLAY_SAFE_R — all KEY content: focal object, labels,
+ *                 detail rows, shade controls. Nothing readable sits outside,
+ *                 so nothing readable is ever cut by the bezel.
+ *      r 184-196  the orbital page indicator (peripheral chrome only)
+ *      r <= 214   JR_DISPLAY_SHELL_R_MAX — the backdrop veil, and the hard
+ *                 clip every shell primitive is bounded by.
+ *
+ * WHAT EACH SPACE MEANS, AND WHAT ITS CENTRE SHOWS
+ *
+ *      JARVIS    the animated face, untouched. The shell draws NOTHING here
+ *                at rest — no veil, no label — so every existing scene (face,
+ *                caption, ask, watch, canvas, bloom, ripple) is bit-identical
+ *                to the pre-shell presenter. Detail: session facts.
+ *      DESK      a progress ring around a big percentage: the active task.
+ *                Ring colour is the agent state from set_shell_state.
+ *      TOOLS     one petal per available capability around a live core; the
+ *                most recently used petal is lit and thickened.
+ *      SETTINGS  four cardinal gauges — volume, brightness, link, memory —
+ *                around a privacy heart: a filled cyan core when live, a
+ *                slashed gold ring when muted.
+ *
+ * IDENTITY. Privacy is the loudest thing on the glass: when muted, the
+ * indicator, the Tools core and the shade's privacy control all turn gold and
+ * the Settings heart is struck through. Nothing else in the shell uses gold.
+ *
+ * COST. All of this is procedural and strip-local. The shell adds NO frame
+ * buffer, allocates nothing per frame, and holds no unbounded string: every
+ * drawable string is a fixed-capacity static array, truncated once at the
+ * setter. In JARVIS at rest the whole layer costs one boolean test per strip.
+ */
+
+#define JR_DISPLAY_SAFE_R        168   /* readable content stays inside     */
+#define JR_DISPLAY_SHELL_R_MAX   214   /* hard clip; privacy ring is beyond */
+#define JR_DISPLAY_SPACE_MS      260   /* space-to-space slide, ease-in-out */
+#define JR_DISPLAY_SPACE_HOLD_MS 900   /* page indicator lingers this long  */
+#define JR_DISPLAY_TOOLS_MAX     4     /* petals that stay distinguishable  */
+
+typedef enum {
+    JR_DISPLAY_SPACE_JARVIS = 0,
+    JR_DISPLAY_SPACE_DESK,
+    JR_DISPLAY_SPACE_TOOLS,
+    JR_DISPLAY_SPACE_SETTINGS,
+    JR_DISPLAY_SPACE_COUNT,
+} jr_display_space_t;
+
+typedef enum {
+    JR_DISPLAY_OVERLAY_NONE = 0,
+    JR_DISPLAY_OVERLAY_DETAIL,   /* swipe up:   this space's context sheet */
+    JR_DISPLAY_OVERLAY_SHADE,    /* swipe down: the global control shade   */
+} jr_display_overlay_t;
+
+/* What jr_display_hit() found under a tap. The display resolves geometry — it
+ * is the only thing that knows where it drew — and the caller decides policy.
+ * Nothing here mutates state except through the caller: a PRIVACY_TOGGLE hit
+ * does NOT mute the mic, it reports that the user pressed the mute control. */
+typedef enum {
+    JR_DISPLAY_ACT_NONE = 0,      /* not the shell's — run your own tap path */
+    JR_DISPLAY_ACT_FOCUS,         /* the focal object: open/act on the space */
+    JR_DISPLAY_ACT_DISMISS,       /* outside a live overlay: close it        */
+    JR_DISPLAY_ACT_VOLUME_UP,
+    JR_DISPLAY_ACT_VOLUME_DOWN,
+    JR_DISPLAY_ACT_PRIVACY_TOGGLE,
+} jr_display_action_t;
+
+/* NAVIGATION. Call these from gesture routing; they are the whole state API.
+ *
+ * Lock-free and safe from ANY task: each is one compare-exchange on a single
+ * packed word plus a task notify. They never block, never allocate, and never
+ * touch the panel — the render task picks the change up on its next frame and
+ * eases into it, so a caller may fire them as fast as a finger moves.
+ *
+ * next/prev clamp at the ends. up/down toggle: up opens DETAIL (or closes the
+ * shade), down opens the SHADE (or closes the detail), which is what makes a
+ * two-overlay vertical axis feel like one axis. Every call is idempotent —
+ * re-issuing the current state does not restart an animation. */
+void jr_display_nav_next(void);
+void jr_display_nav_prev(void);
+void jr_display_nav_up(void);
+void jr_display_nav_down(void);
+void jr_display_nav_home(void);   /* JARVIS, no overlay: the global escape */
+void jr_display_nav_set(jr_display_space_t space);
+
+jr_display_space_t   jr_display_nav_space(void);
+jr_display_overlay_t jr_display_nav_overlay(void);
+
+/* Resolve a raw panel tap against what is actually on the glass right now.
+ *
+ * Returns JR_DISPLAY_ACT_NONE whenever the shell does not own the point —
+ * including while a test pattern, a choice ask, or a companion surface is up,
+ * since each of those owns the glass and has its own hit test. A caller can
+ * therefore run its existing tap path unchanged and consult this first:
+ *
+ *      int idx = jr_display_choice_hit(x, y);       // existing paths first
+ *      if (idx >= 0) { answer(idx); }
+ *      else switch (jr_display_hit(x, y)) { ... }   // then the shell
+ *
+ * Pure geometry, no side effects, any task. */
+jr_display_action_t jr_display_hit(int x, int y);
+
+/* CONTENT. Each setter is the single writer for its space and copies every
+ * string it is given (capped at 12 display columns — a longer label is
+ * truncated, never wrapped and never allocated). Callers keep ownership and
+ * may pass NULL to clear. All are any-task safe and lock-free; text lands
+ * before the packed word that gates it, so a racing frame shows stale text at
+ * worst, never a partial length. Setting content does NOT navigate. */
+void jr_display_space_set_label(jr_display_space_t space, const char *headline,
+                                const char *note);
+
+/* JARVIS detail: the live conversation. turns is the exchange count, elapsed_s
+ * the session age, linked whether the transport is up. */
+void jr_display_jarvis_set_session(bool linked, uint16_t turns,
+                                   uint32_t elapsed_s);
+
+/* DESK focal object and detail: the active task. progress 0..100 drives the
+ * ring; state tints it with the same palette as the agent rim. */
+void jr_display_desk_set_task(const char *task, uint8_t progress,
+                              jr_display_agent_state_t state);
+
+/* TOOLS focal object and detail: the capabilities this device can actually
+ * reach. names[0..n) are copied; n is clamped to JR_DISPLAY_TOOLS_MAX. recent
+ * is the index of the last-used tool, or <0 for none. */
+void jr_display_tools_set(const char *const *names, int n, int recent);
+
+/* ---- firmware update, as a SETTINGS citizen ----------------------------
+ *
+ * An OTA is the one background job that can brick the device, so it does not
+ * get a toast that scrolls away. It lives in Settings — where a worried owner
+ * actually goes to look — and it stays there through probation and rollback.
+ *
+ * This is deliberately STATUS, NOT CONTROL. The display renders what the
+ * updater reports and never starts, confirms, or aborts anything: there is no
+ * OTA hit target and no OTA member in jr_display_action_t, so no tap on a
+ * progress ring can ever influence a flash write.
+ *
+ * Where it shows up, all inside the existing Settings geometry:
+ *
+ *   - a progress ring at r140-154, concentric with the Settings gauges and
+ *     just outside the headline's worst-case glyph corner (r131.5). It is
+ *     round-native, inside JR_DISPLAY_SAFE_R, and — like every shell
+ *     primitive — clipped to JR_DISPLAY_SHELL_R_MAX, so it cannot reach the
+ *     battery rim, the gold privacy ring, or the choice arcs.
+ *   - the Settings headline, which an update in flight outranks.
+ *   - two rows of the Settings detail sheet: UPDATE and SLOT.
+ *
+ * IDLE and VALID are the two HEALTHY RESTING states and draw NO ring at all,
+ * so a device with nothing to report keeps a quiet Settings dial; the facts
+ * stay one swipe up, in the detail sheet. Every other state rings.
+ *
+ * ARC SEMANTICS. percent drives the arc for RECEIVING only. PREFLIGHT draws
+ * an empty track (armed, nothing written yet) and every other ringing state
+ * draws a FULL ring in its own colour, because a half-filled ring would imply
+ * progress that is not happening.
+ *
+ *      PREFLIGHT    dim cyan, empty track   checks running
+ *      BLOCKED      amber, full             refused; nothing was written
+ *      RECEIVING    cyan, percent           writing the target slot
+ *      PROBATION    violet, full            new image up, not yet confirmed
+ *      VALID        (no ring)               confirmed good
+ *      ROLLED_BACK  amber, full             reverted to the previous slot
+ *      FAILED       red, full
+ *
+ * SLOTS are partition indices, 0 or 1; anything else means unknown and
+ * renders as "?". active_slot is what is running now, target_slot is what an
+ * update would be (or is being) written into — the sheet shows them as
+ * "0/1", which answers "where am I, where am I going" in three visible glyphs.
+ * Passing 0xFF for target_slot, or the same value as active_slot, reads as
+ * nothing staged and renders the active slot alone.
+ *
+ * preflight_ok is the updater's own readiness verdict (power, link, free
+ * space). It is what separates PREFLIGHT from BLOCKED, and at rest it is what
+ * the UPDATE row reports — so Settings answers "could this device take an
+ * update right now" without an update having to be in flight.
+ *
+ * Any task, lock-free, no allocation: one packed word, one release-store. */
+typedef enum {
+    JR_DISPLAY_OTA_IDLE = 0,     /* nothing staged; slot + readiness only   */
+    JR_DISPLAY_OTA_PREFLIGHT,    /* readiness checks running                */
+    JR_DISPLAY_OTA_BLOCKED,      /* preflight refused (power/link/space)    */
+    JR_DISPLAY_OTA_RECEIVING,    /* writing the target slot; percent live   */
+    JR_DISPLAY_OTA_PROBATION,    /* booted the new image, not yet confirmed */
+    JR_DISPLAY_OTA_VALID,        /* confirmed good; the healthy resting end */
+    JR_DISPLAY_OTA_FAILED,
+    JR_DISPLAY_OTA_ROLLED_BACK,  /* reverted; keep LAST (range clamp)       */
+} jr_display_ota_state_t;
+
+void jr_display_ota_set(jr_display_ota_state_t state, uint8_t percent,
+                        uint8_t active_slot, uint8_t target_slot,
+                        bool preflight_ok);
+
+/* AXP2101 truth for Settings and the charging rim. percent is 0..100 or
+ * 0xff when no battery sample exists. Edge animations are owned by the caller;
+ * this setter only publishes bounded state. */
+void jr_display_power_set(uint8_t percent, uint16_t millivolts,
+                          bool usb_present, bool charging);
+
+/* SETTINGS focal object, detail, and the control shade readouts: the real
+ * numbers, not a mood. Brightness is not passed — the display already owns it
+ * and reads back its own target, so the shade can never disagree with the
+ * panel. rssi_dbm is ignored when net_up is false. */
+void jr_display_set_status(uint8_t volume, bool net_up, int8_t rssi_dbm,
+                           uint32_t free_psram_kib);
 
 #ifdef __cplusplus
 }

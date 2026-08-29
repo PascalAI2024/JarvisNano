@@ -1,8 +1,10 @@
-# Gemini Live API
+# Gemini Live API — historical v4 notes
 
-**What it is** — Google's low-latency bidirectional audio API, exposed as `BidiGenerateContent` over a WebSocket (WSS). The current model is `gemini-2.5-flash-native-audio-latest`. It accepts 16 kHz PCM audio in and returns 24 kHz PCM audio out. Native audio mode — no STT/TTS pipeline needed.
-
-**How we use it here** — `firmware/components/cap_gemini_live/cap_gemini_live.c` implements the full five-phase Gemini Live client: WSS+TLS handshake, setup frame, `setupComplete` wait, half-duplex I2S audio loop, and function-calling dispatch via the JarvisMCP bridge. Touch toggles the session on/off.
+> **Superseded for current model/runtime decisions by
+> [`gemini-live-api-v5.md`](./gemini-live-api-v5.md).** This page preserves
+> May 2026 observations from the old `cap_gemini_live` implementation. Model
+> availability, half-duplex behavior, touch toggling, and source paths below
+> are not live v5 claims.
 
 ---
 

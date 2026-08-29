@@ -1,22 +1,22 @@
 # AEC + Barge-In Design (Echo Cancellation, Hands-Free Interrupt)
 
-**What it is** — Implementation-ready design for STABILITY_PLAN P3.3 (AEC bring-up) and
-P3.4 (hands-free barge-in): the user speaks over the assistant and playback stops within
-~500 ms, with no echo-triggered self-interruption. Built on esp-sr **v2.4.6** (direct
-`esp_aec.h` API, ESP-IDF ≥5.0, compatible with our v5.5.1) and the ES7210's
-schematic-verified hardware echo-reference channel. Synthesized 2026-06-12 from three
-research passes (board/schematic, esp-sr, Gemini Live API); every claim cited below.
+> **Status: historical design record.** This June 2026 document established the
+> direct `esp_aec.h` approach, ES7210 MIC3 echo reference, and hands-free
+> interruption requirements. It is not the live source map: paths below may
+> reference `cap_gemini_live`, the original 16 MB board, or pre-v5.5.4 code.
+> Current ownership and runtime behavior are in
+> [`../ARCHITECTURE.md`](../ARCHITECTURE.md) and
+> [`../PROTOCOL.md`](../PROTOCOL.md).
 
-**How we use it here** — `cap_gemini_live` keeps the mic streaming during playback,
-cancels the speaker echo against a hardware loopback reference (ES7210 **MIC3**), and
-lets Gemini's server VAD (primary) or the local RMS VAD (fallback) interrupt playback via
-the P3.1/P3.2 flush path. This document assumes the **post-sprint** architecture
-(STABILITY_PLAN P2.1–P2.4, P3.1–P3.2: session task = decode/control, PCM playback ring +
-dedicated feeder task, capture task decoupled from sender task, codec open all session).
+The shipped path lives in `components/jr_audio` and `main/main.c`: capture and
+playback share a native 24 kHz clock, AEC uses the ES7210 MIC3 reference, uplink
+is downsampled to 16 kHz, and Gemini server VAD owns normal interruption. The
+local RMS barge gate remains a controlled diagnostic fallback because
+echo-triggered self-interruption caused audible reply hiccups.
 
-> ⚠️ `cap_gemini_live.c` line numbers below were re-verified against `main` on
-> 2026-06-12 but the file is being restructured by the stability sprint **right now** —
-> anchor on the cited symbol names, not raw line numbers.
+The measurements, tradeoffs, and cited upstream APIs below remain useful design
+rationale. Treat old file paths, partition budgets, and status labels as dated
+evidence rather than current instructions.
 
 ---
 

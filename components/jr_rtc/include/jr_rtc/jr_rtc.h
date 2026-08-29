@@ -3,9 +3,10 @@
  *
  * jr_rtc — PCF85063 on the shared Waveshare I2C bus (7-bit 0x51).
  *
- * The chip is on the board and was never claimed by v5. The watch face used
- * to require SNTP; this lets a desk puck keep time after a power cycle
- * without Wi-Fi. No IRQ, no alarm — read/write civil time only.
+ * The chip exists only on the original 1.75 compatibility board; the 1.75C
+ * composition deliberately does not start this component and uses SNTP. On
+ * the original board this provides read/write civil time across power cycles.
+ * No IRQ or alarm support.
  */
 #pragma once
 

@@ -68,6 +68,8 @@ static volatile bool s_provisioning;
 static volatile uint8_t s_retry;
 static volatile uint16_t s_last_disconnect_reason;
 static volatile esp_err_t s_last_error;
+static volatile wifi_ps_type_t s_requested_ps = WIFI_PS_NONE;
+static volatile wifi_ps_type_t s_applied_ps = WIFI_PS_NONE;
 static char s_ap_ssid[JR_CFG_WIFI_SSID_CAP];
 
 static bool field_valid(jr_cfg_field_t field)
@@ -622,6 +624,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
     }
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         s_wifi_started = true;
+        if (esp_wifi_set_ps(s_requested_ps) == ESP_OK) {
+            s_applied_ps = s_requested_ps;
+        }
         if (s_connect_requested) {
             esp_err_t err = esp_wifi_connect();
             if (err != ESP_OK) {
@@ -641,6 +646,10 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
             (const wifi_event_sta_disconnected_t *)data;
         s_connected = false;
         s_last_disconnect_reason = event != NULL ? event->reason : 0U;
+        s_applied_ps = (wifi_ps_type_t)-1;
+        if (esp_wifi_set_ps(s_requested_ps) == ESP_OK) {
+            s_applied_ps = s_requested_ps;
+        }
         xEventGroupClearBits(s_wifi_events, JR_NET_CONNECTED_BIT);
         if (s_connect_requested && s_retry < JR_NET_MAX_RETRY) {
             ++s_retry;
@@ -662,10 +671,16 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
     if (base == WIFI_EVENT && id == WIFI_EVENT_AP_START) {
         s_wifi_started = true;
         s_provisioning = true;
+        if (esp_wifi_set_ps(WIFI_PS_NONE) == ESP_OK) {
+            s_applied_ps = WIFI_PS_NONE;
+        }
         return;
     }
     if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STOP) {
         s_provisioning = false;
+        if (esp_wifi_set_ps(s_requested_ps) == ESP_OK) {
+            s_applied_ps = s_requested_ps;
+        }
         return;
     }
     if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
@@ -673,7 +688,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         s_retry = 0U;
         s_connected = true;
         set_last_error(ESP_OK);
-        (void)esp_wifi_set_ps(WIFI_PS_NONE);
+        const wifi_ps_type_t ps =
+            s_provisioning ? WIFI_PS_NONE : s_requested_ps;
+        if (esp_wifi_set_ps(ps) == ESP_OK) {
+            s_applied_ps = ps;
+        }
         xEventGroupClearBits(s_wifi_events, JR_NET_FAIL_BIT);
         xEventGroupSetBits(s_wifi_events, JR_NET_CONNECTED_BIT);
         if (event != NULL) {
@@ -683,6 +702,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
          * network. Tear it down as soon as the station has proved connectivity. */
         if (s_provisioning && esp_wifi_set_mode(WIFI_MODE_STA) == ESP_OK) {
             s_provisioning = false;
+            if (esp_wifi_set_ps(s_requested_ps) == ESP_OK) {
+                s_applied_ps = s_requested_ps;
+            }
             s_ap_ssid[0] = '\0';
         }
     }
@@ -1166,6 +1188,26 @@ esp_err_t jr_net_get_status(jr_net_status_t *out)
         }
     }
     return ESP_OK;
+}
+
+esp_err_t jr_net_set_power_save(bool enabled)
+{
+    const wifi_ps_type_t requested =
+        enabled && !s_provisioning ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE;
+    if (s_requested_ps == requested && s_applied_ps == requested) {
+        return ESP_OK;
+    }
+    s_requested_ps = requested;
+    if (!s_wifi_started) {
+        return ESP_OK;
+    }
+    esp_err_t err = esp_wifi_set_ps(requested);
+    if (err == ESP_OK) {
+        s_applied_ps = requested;
+        ESP_LOGI(TAG, "wifi power save: %s",
+                 requested == WIFI_PS_NONE ? "realtime" : "min-modem");
+    }
+    return err;
 }
 
 esp_err_t jr_net_mdns_start(const char *hostname)

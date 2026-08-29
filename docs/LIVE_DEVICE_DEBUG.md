@@ -1,183 +1,137 @@
-# Live Device Debug Framework
+# Live device debugging
 
-Use this when the Waveshare board is on Wi-Fi and you need evidence from the
-device, not vibes. USB first (`scripts/usb-monitor.py`) — a successful flash
-is not a boot.
+Use this guide against the primary 1.75C firmware. The route authority is
+[`PROTOCOL.md`](PROTOCOL.md); `/api/cockpit` and `/api/gemini/live` are the
+combined runtime surfaces. Old overlay routes such as `/api/display/face`,
+`/api/audio/level`, and `/api/ui/snapshot.ppm` are not v5 contracts.
 
-Live HTTP truth is [`PROTOCOL.md`](PROTOCOL.md): `/api/cockpit` is the
-combined surface. Overlay-era routes (`/api/health`, `/api/status`,
-`/api/display/face`, `/api/audio/level`, `/api/ui/snapshot.ppm`) are not the
-v5 contract.
+A successful flash is not a successful boot. Prefer USB serial first, then use
+Wi-Fi diagnostics after the device is visibly running.
 
-Default live device:
-
-```bash
-scripts/live-device.py status
-```
-
-Override the target:
+## Connect
 
 ```bash
-export JARVIS_DEVICE_HOST=<device-host-or-ip>
-scripts/live-device.py status --host $JARVIS_DEVICE_HOST
+export JARVIS_DEVICE_HOST='<device-ip>'
+
+python3 scripts/usb-monitor.py --seconds 10 --send status
+python3 scripts/jarvisctl.py status
+python3 scripts/jarvis-desk.py --host "$JARVIS_DEVICE_HOST" doctor
 ```
 
-Write a timestamped diagnostic report:
+The firmware does not advertise mDNS. Keep host addresses and all captured
+logs outside the repository.
+
+## Core commands
 
 ```bash
-scripts/live-device.py report --host $JARVIS_DEVICE_HOST
+# Timestamped health/report capture
+python3 scripts/live-device.py report --host "$JARVIS_DEVICE_HOST"
+
+# Local PPM/PNG submission mirror; never panel readback
+python3 scripts/live-device.py screen --host "$JARVIS_DEVICE_HOST"
+python3 scripts/jarvisctl.py screen
+
+# Physical input receipt ring
+python3 scripts/jarvisctl.py gestures 80
+
+# Bounded incident log
+python3 scripts/jarvisctl.py logs 131072
+
+# Audio metadata and optional bounded diagnostic turn
+python3 scripts/live-device.py audio --host "$JARVIS_DEVICE_HOST" --seconds 5
+python3 scripts/live-device.py gemini-cycle \
+  --host "$JARVIS_DEVICE_HOST" \
+  --text 'Say one short sentence.' \
+  --report
+
+# Observe without mutating
+python3 scripts/live-device.py watch --host "$JARVIS_DEVICE_HOST"
 ```
 
-Reports and local display captures land in:
+Reports and local display captures land under `.build_logs/live-device/`, which
+is ignored. Redact addresses, SSIDs, MACs, tokens, endpoints, and device-specific
+logs before promoting any artifact to `docs/evidence/`.
 
-```text
-.build_logs/live-device/
-```
+## What to inspect
 
-## Core Commands
+### Voice and transport
 
-Run a Gemini start/text/stop cycle:
+`/api/gemini/live` should show a live session, capture enabled while listening,
+server activity detection, and stable generations. During a clean natural turn:
+
+- codec reads and transmitted frames increase;
+- `tx_drops`, transport deaths, parse errors, and allocation failures do not;
+- `audio_parts` increases during the answer;
+- the device returns to Listening after completion or interruption;
+- deliberate hold/flip privacy remains set across reconnect, operator, and
+  repair actions.
+
+`/api/diag/vadlog` is a bounded PSRAM CSV ring. It records mic RMS, floor, gate,
+playback peak, phase, and decisions. The 1.75C has no SD mirror, so fetch the
+ring before reboot when it is evidence.
+
+### Audio proof boundary
+
+`/api/audio/taps` and `/api/audio/tap.wav?source=...` prove samples at firmware
+seams: raw mic, AEC-clean mic, echo reference, and playback write. They do not
+prove that the speaker was audible. Close acoustic-output claims with a human
+listen, microphone capture, or documented loopback.
+
+### Display proof boundary
+
+- `/api/display/snapshot.json` reports source, owner, freshness, and
+  `panel_readback:false`.
+- `/api/display/snapshot.ppm` and `.rgb565` are the same submitted software
+  mirror in different encodings.
+- A mirror proves renderer/control behavior, not CO5300 glass output.
+- Use `/api/diag/panel-touch?action=start` and the randomized physical challenge
+  when a human must bind software state to the panel and touch hardware.
+
+Healthy Jarvis/Watch cadence is roughly 15–16 FPS. The controls surface remains
+a known optimization target; treat `flush_errors > 0`, a stalled frame ID, or a
+shrinking internal block as a fault, not cosmetic noise.
+
+### Input proof
+
+Keep `jarvisctl gestures 80` visible while exercising:
+
+1. PWR short → `LISTENING`, never privacy mute.
+2. PWR long → battery/charging status.
+3. BOOT short after boot → controls open/close.
+4. Left-edge vertical from every space → persisted volume ±5.
+5. Right-edge vertical from every space → persisted brightness ±5.
+6. Horizontal swipe → Jarvis/Desk/Tools/Settings navigation.
+7. Top-edge down → controls; double tap → Jarvis Home.
+8. Glass hold and flip → physical privacy; remote resume must refuse to clear it.
+
+HTTP input injection proves queue routing only. It cannot prove PWR, BOOT,
+physical touch, motion orientation, audio, or panel output.
+
+## Release-shaped acceptance circuit
+
+After a clean build/flash or OTA:
 
 ```bash
-scripts/live-device.py gemini-cycle --host $JARVIS_DEVICE_HOST --text "Say one short sentence." --report
+python3 scripts/jarvisctl.py status
+python3 scripts/jarvis-desk.py --host "$JARVIS_DEVICE_HOST" doctor
+python3 scripts/live-device.py screen --host "$JARVIS_DEVICE_HOST"
+python3 scripts/live-device.py gemini-cycle \
+  --host "$JARVIS_DEVICE_HOST" \
+  --text 'Use current_time, then answer in one sentence.' \
+  --report
+python3 scripts/jarvisctl.py gestures 80
+python3 scripts/jarvisctl.py logs 131072
 ```
 
-Capture the emote display mirror locally and on SD:
+Then perform one physical conversation: speak, interrupt mid-reply, accept a
+choice arc, navigate every space, use both edge levels, open controls with BOOT,
+enter/leave hold privacy, flip privacy, and press PWR. Close only what the
+captured evidence actually observed.
 
-```bash
-scripts/live-device.py screen --host $JARVIS_DEVICE_HOST --save-sd
-```
+## Security boundary
 
-Force a face state and optionally capture it:
-
-```bash
-scripts/live-device.py face --host $JARVIS_DEVICE_HOST listen --amp 700 --screen --save-sd-screen
-scripts/live-device.py face --host $JARVIS_DEVICE_HOST idle
-```
-
-Sample the mic and optionally exercise the speaker path through Gemini:
-
-```bash
-scripts/live-device.py audio --host $JARVIS_DEVICE_HOST --seconds 5
-scripts/live-device.py audio --host $JARVIS_DEVICE_HOST --speaker --text "Say one short sentence." --report
-```
-
-Watch the board while tapping or testing animations:
-
-```bash
-scripts/live-device.py watch --host $JARVIS_DEVICE_HOST
-```
-
-Filter logs for the current problem lanes:
-
-```bash
-scripts/live-device.py logs --host $JARVIS_DEVICE_HOST --grep touch,rwave,gemini,audio,ws,flush
-```
-
-Restart over HTTP and wait for Wi-Fi to return:
-
-```bash
-scripts/live-device.py restart --host $JARVIS_DEVICE_HOST --wait 60
-```
-
-## What It Checks
-
-- `/api/cockpit`
-- `/api/gemini/live`
-- `/api/display` and `/api/display/snapshot.json`
-- `/api/touch`
-- `/api/audio/taps`
-- Gemini start/text/stop state transitions
-- Gemini push-to-talk state transitions and counters:
-  - `activity_open`
-  - `tx_frames_sent`
-  - `tx_codec_reads`
-  - `tx_raw_reads`
-  - `tx_send_failures`
-  - `tx_read_failures`
-- Known failure signatures:
-  - `Gateway stop timed out`
-  - `WS connect timeout`
-  - `WS start returned ESP_FAIL`
-  - `setupComplete timeout`
-  - `Current mode playback conflict`
-  - `Tap: local scene`
-  - `Touch controller must be initialized`
-  - `rwave_task skip`
-  - `display arbiter NOT owned`
-  - `display flush completion timeout`
-  - `display flush sync disabled`
-  - `i2s_channel_disable`
-
-## Acceptance Test
-
-After flashing a build with the display, touch-routing, and Gemini fixes:
-
-```bash
-scripts/live-device.py status --host $JARVIS_DEVICE_HOST
-scripts/live-device.py face --host $JARVIS_DEVICE_HOST listen --amp 700
-sleep 25
-curl -s http://$JARVIS_DEVICE_HOST/api/display/face
-curl -s http://$JARVIS_DEVICE_HOST/api/display/snapshot.json
-scripts/live-device.py screen --host $JARVIS_DEVICE_HOST --save-sd
-scripts/live-device.py audio --host $JARVIS_DEVICE_HOST --speaker --text "Say one short sentence." --report
-```
-
-Expected:
-
-- `driver_ticks` and `frame_id` keep increasing after 25+ seconds.
-- Screenshot PNG has a black background, not the old pink/black-key artefact.
-- Screenshot capture does not freeze the reactive face afterward.
-- Mic samples return `valid=true`.
-- Gemini reaches `connected=true` / `listening=true`, text POST returns `200`, and `audio_parts > 0`.
-- After stop, `/api/gemini/live` returns `state=IDLE`.
-
-Voice push-to-talk acceptance test:
-
-```bash
-scripts/live-device.py gemini-cycle --host $JARVIS_DEVICE_HOST --text "Say audio check passed." --turn-wait 8
-```
-
-Then start a live voice session, speak near the board, and end input by tapping
-again or by posting `{"action":"end_input"}` to `/api/gemini/live`.
-
-Expected:
-
-- Listening starts with `activity_open=true`.
-- `tx_codec_reads` and `tx_frames_sent` increase while speaking.
-- `tx_raw_reads=0`, unless the codec path genuinely failed and raw fallback is
-  being diagnosed.
-- Ending input logs `Audio activity end requested`.
-- The board enters `SPEAKING`, `audio_parts > 0`, then returns to `LISTENING`
-  with `turn_complete=1` or `generation_complete=1`.
-- `drops=0`, `tx_send_failures=0`, and no live `Current mode playback conflict`.
-
-Then physically short-tap the display while watching logs:
-
-```bash
-scripts/live-device.py logs --host $JARVIS_DEVICE_HOST --grep touch,Tap,gemini --lines 120
-```
-
-Expected:
-
-- Short tap logs `Tap: toggling Gemini Live on` when idle.
-- A second short tap while listening logs `Tap: ending Gemini Live input`.
-- Short tap does not log `Tap: local scene`.
-- Long press can still start the local hardware demo.
-
-## Current Limitations
-
-- The screen capture is a firmware software mirror, not CO5300 panel readback.
-  `/api/display/snapshot.json` reports `capture_source`, `display_owner`, and
-  `panel_readback:false`; `/api/display/snapshot.ppm` follows the active owner
-  (`emote_mirror` or `ui_framebuffer`) and returns a `mirror_fresh` hint. If the
-  old reactor face owns the panel, the capture should show that face. `valid`
-  means a mirror buffer exists; freshness is tracked separately.
-- The tooling cannot physically tap the capacitive glass. A person must tap
-  while `logs` or `watch` is running, or a future diagnostic route must inject a
-  touch event.
-- Speaker verification is indirect. `audio --speaker` proves Gemini returned
-  audio frames and the firmware drove the playback path; it does not prove
-  acoustic output unless someone hears it or a loopback test is added.
-- Full PPM capture is intentionally slower than `/api/display/snapshot.json`.
-  Use JSON for animation heartbeat checks and PPM/PNG only when pixels matter.
+The root page and coarse hardware counters are intended for a trusted
+development LAN. Cockpit/session detail, logs, audio taps, Agent Link, and
+display pixels require the host-bound pairing token. Mutating control routes
+also require `X-JarvisNano-Control: 1`. Plain HTTP does not encrypt either
+header; never use these surfaces on an untrusted network.

@@ -1,14 +1,19 @@
 #!/usr/bin/env node
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-const files = process.argv.slice(2);
-if (files.length === 0) {
+const requested = process.argv.slice(2);
+if (requested.length === 0) {
   console.error("usage: node scripts/check-dashboard-js.mjs <html> [html...]");
   process.exit(2);
 }
+const liveCockpit = "main/diagnostics.html";
+const files = [...new Set([
+  ...requested,
+  ...(existsSync(liveCockpit) ? [liveCockpit] : []),
+])];
 
 const scriptTag = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
 let failures = 0;

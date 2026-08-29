@@ -1,74 +1,93 @@
 # Documentation Map
 
-Last updated: 2026-08-14.
+Last reconciled with the live 1.75C firmware: **2026-08-28**.
 
-v5 on the Waveshare ESP32-S3-Touch-AMOLED-1.75 is the live product. If two
-docs disagree, prefer this order: `docs/NEXT_SESSION.md` →
-`docs/reference/` → `docs/ROADMAP.md` → `docs/JARVISNANO_OS_PLAN.md` (design
-record) → `docs/ARCHIVE/` (history only).
+JarvisNano has one active product target and one canonical documentation set.
+Historical plans remain useful evidence, but they do not define current behavior.
 
-## Quick Links
+## Source-of-truth order
 
-| Start here | Why |
+When two files disagree, use this order:
+
+1. Compiled source in `main/`, `components/jr_*`, and the selected board definition.
+2. [`README.md`](README.md) and the canonical live documents below.
+3. [`PLAN.md`](PLAN.md) for incomplete work and explicit blockers.
+4. `docs/reference/` for dated subsystem evidence and implementation gotchas.
+5. `docs/ARCHIVE/` for superseded plans and historical decisions.
+
+## Start here
+
+| Document | Owns |
 |---|---|
-| [README](./README.md) | What the device is |
-| [Next session](./docs/NEXT_SESSION.md) | USB, build, do-not-repeat |
-| [Build](./docs/BUILD.md) | `build-v5.sh` / `flash-v5.sh` |
-| [Roadmap](./docs/ROADMAP.md) | What is shipped vs still open |
-| [Reference](./docs/reference/README.md) | Gotchas with file:line |
-| [Evidence](./docs/evidence/README.md) | Hardware proof |
-| [Archive](./docs/ARCHIVE/README.md) | Superseded plans |
+| [README](README.md) | Product story, capabilities, quick start, truth boundaries |
+| [Vision](docs/VISION.md) | Experience contract and refinement principles |
+| [Architecture](docs/ARCHITECTURE.md) | Live v5 components, ownership, and data flow |
+| [Hardware](docs/HARDWARE.md) | 1.75C hardware, constraints, pins, and physical controls |
+| [Protocol](docs/PROTOCOL.md) | HTTP routes, authentication, paired operations, state contracts |
+| [Build](docs/BUILD.md) | Reproducible build, USB flash, Wi-Fi OTA, verification |
+| [Release checklist](docs/RELEASE_CHECKLIST.md) | Public release gates and evidence |
+| [Plan](PLAN.md) | Current actionable roadmap and blockers |
 
-## Live vs leftover trees
+## Canonical live set
 
-| Tree | Role |
-|---|---|
-| `main/` + `components/jr_*` + `boards/` | **Live v5 firmware** |
-| `docs/reference/` | Canonical subsystem notes |
-| `firmware/` + `esp-claw/` + `scripts/bootstrap.sh` | Legacy overlay. Not compiled by v5 CMake |
-| `dashboard/` | Browser cockpit. WebSerial blob is a **legacy XIAO** image |
-| `android/` | Companion app, post-v1 |
-| `docs/ARCHIVE/` | Finished or superseded plans |
+### Product and design
 
-## By category
+- [`README.md`](README.md) — public showcase and entry point.
+- [`docs/VISION.md`](docs/VISION.md) — why the product behaves this way.
+- [`PLAN.md`](PLAN.md) — what remains, with measurable acceptance gates.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — release phases; must agree with PLAN.
 
-### Product
+### System
 
-| Document | Notes |
-|---|---|
-| [VISION.md](./docs/VISION.md) | Character / moods. LVGL item is obsolete. |
-| [ROADMAP.md](./docs/ROADMAP.md) | Current checkbox truth |
-| [JARVISNANO_OS_PLAN.md](./docs/JARVISNANO_OS_PLAN.md) | July 18 design record; Phases 0–4 shipped |
-| [prototype](./docs/prototype/jarvisnano-os.html) | Clickable OS mock |
-
-### Architecture and hardware
-
-| Document | Notes |
-|---|---|
-| [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Roles. v5 names are `jr_*` |
-| [HARDWARE.md](./docs/HARDWARE.md) | Board wiring |
-| [PROTOCOL.md](./docs/PROTOCOL.md) | HTTP / BLE contract (BLE is post-v1) |
-| [CAMERA.md](./docs/CAMERA.md) | XIAO camera track |
-| [BRAIN_ARCHITECTURE.md](./docs/BRAIN_ARCHITECTURE.md) | Memory / tools sketch |
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — active ESP-IDF v5 architecture.
+- [`docs/HARDWARE.md`](docs/HARDWARE.md) — primary 1.75C capability map.
+- [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — live route and authority contract.
+- [`docs/BRAIN_ARCHITECTURE.md`](docs/BRAIN_ARCHITECTURE.md) — Gemini, local tools,
+  JarvisMCP, Desk, and future private routes.
 
 ### Operations
 
-| Document | Notes |
+- [`docs/BUILD.md`](docs/BUILD.md) — build/flash/OTA workflow.
+- [`docs/LIVE_DEVICE_DEBUG.md`](docs/LIVE_DEVICE_DEBUG.md) — evidence-first runtime debugging.
+- [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md) — tag/publish gate.
+- [`SECURITY.md`](SECURITY.md) — secret handling and vulnerability reporting.
+- [`SUPPORT.md`](SUPPORT.md) — user support boundary.
+- [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — binary redistribution and exact notice-bundle policy.
+
+## Evidence and reference
+
+- [`docs/evidence/README.md`](docs/evidence/README.md) — captured hardware evidence.
+- [`docs/reference/README.md`](docs/reference/README.md) — dated engineering references.
+- [`docs/reference/board-175c.md`](docs/reference/board-175c.md) — C-board deltas.
+- [`docs/reference/board-bringup-checklist.md`](docs/reference/board-bringup-checklist.md)
+  — mandatory checklist for any new board revision.
+- [`boards/waveshare/esp32s3_touch_amoled_1_75c/README.md`](boards/waveshare/esp32s3_touch_amoled_1_75c/README.md)
+  — board-local integration details.
+
+Reference files may preserve failed experiments and old measurements. Each
+reference should state its date and whether a newer canonical document supersedes
+its conclusions.
+
+## Compatibility and future tracks
+
+| Path | Status |
 |---|---|
-| [BUILD.md](./docs/BUILD.md) | Docker IDF 5.5.4 |
-| [LIVE_DEVICE_DEBUG.md](./docs/LIVE_DEVICE_DEBUG.md) | HTTP diag after USB proves boot |
-| [RELEASE_CHECKLIST.md](./docs/RELEASE_CHECKLIST.md) | Before a public tag |
-| [reference/build-toolchain.md](./docs/reference/build-toolchain.md) | Pins, sdkconfig, flash mode |
+| `boards/waveshare/esp32s3_touch_amoled_1_75/` | Original 16 MB hardware/source reference; not release-built |
+| `boards/seeed/xiao_esp32s3_sense/` | Camera/compact experimental track |
+| `android/` | Post-v1 private companion scaffold |
+| `hardware/enclosure/` | Physical enclosure concepts and fabrication |
+| `dashboard/` | Legacy browser/XIAO track, not the v5 route authority |
 
-### Do not start from these
+## Historical trees
 
-Everything under [`docs/ARCHIVE/`](./docs/ARCHIVE/README.md), including the
-NullClaw `plan.md`, the May XIAO finish list, and the "Gemini not started"
-plan.
+- `docs/ARCHIVE/` — completed or superseded plans.
+- `docs/ARCHIVE/JARVISNANO_OS_PLAN.md` — historical OS design record.
+- `firmware/` and `esp-claw/` — earlier architecture/experiments, not built by
+  `scripts/build-v5.sh`.
 
-## Leftover binaries
+## Documentation rule
 
-`dashboard/firmware/jarvis-xiao-esp32s3-sense.bin` (~8 MB) is a published
-XIAO WebSerial image, not the v5 AMOLED firmware. Flash Waveshare with
-`scripts/flash-v5.sh`. Removing the blob is a product decision (breaks the
-old in-browser XIAO installer).
+A behavior is documented as **live** only when the physical 1.75C or a bounded
+runtime counter proves it. Otherwise mark it planned, experimental, blocked, or
+historical. Never promote an HTTP 200, software mirror, PCM buffer, or synthetic
+touch into physical proof.

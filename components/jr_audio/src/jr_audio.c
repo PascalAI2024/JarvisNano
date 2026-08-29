@@ -21,6 +21,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
+#include "driver/gpio.h"
 
 #include "esp_board_manager.h"
 #include "esp_board_manager_defs.h"
@@ -32,6 +33,16 @@
 #include "esp_aec.h"                  /* esp-sr direct low-level AEC             */
 
 static const char *TAG = "jr_audio";
+
+static void speaker_pa_enable(void)
+{
+#if defined(CONFIG_ESP_BOARD_ESP32S3_TOUCH_AMOLED_1_75C)
+    /* Board-manager/codec owns PA lifecycle; this idempotent board-specific
+     * latch preserves the known C-board unmute behavior without remuxing GPIO. */
+    (void)gpio_set_level(GPIO_NUM_46, 1);
+#endif
+}
+
 
 /* ------------------------ sizing constants (spec) ----------------------- */
 #define GL_TX_SAMPLE_RATE        16000
@@ -80,13 +91,13 @@ static const char *TAG = "jr_audio";
  * The 4x figure is SPEAKER-CHAIN DEPENDENT: it was tuned on the original 1.75.
  * On the 1.75C the chain runs hotter and 4x rails the PCM (measured 2026-08-27:
  * 902/48000 samples pinned at 32767, flat-top runs to 0.8 ms — heard as
- * crackle/chop). The C default is 2x, and the live value is runtime-tunable
+ * crackle/chop). The C default is 2.75x, and the live value is runtime-tunable
  * via /api/debug/gain?pbgain=<percent> for on-device calibration. */
 #if defined(CONFIG_ESP_BOARD_ESP32S3_TOUCH_AMOLED_1_75C)
-/* 2.5x, by-ear calibration 2026-08-27: 2x read as too quiet, 3x pushed loud
- * passages into the knee compressor often enough to crackle "sometimes". Q8
- * default below; GL_PLAYBACK_GAIN kept integer for the original board. */
-#define GL_PLAYBACK_GAIN_Q8_DEFAULT   640   /* 2.5x */
+/* 2.75x: the owner found 2.5x too quiet; 3x pushed loud passages into the
+ * knee compressor and crackled. Q8 default below; GL_PLAYBACK_GAIN stays
+ * integer for the original board. */
+#define GL_PLAYBACK_GAIN_Q8_DEFAULT   704   /* 2.75x */
 #else
 #define GL_PLAYBACK_GAIN_Q8_DEFAULT   1024  /* 4.0x — field-proven v4 value */
 #endif
@@ -337,6 +348,7 @@ static esp_err_t open_dac(void)
     s_dac_open = true;
     esp_codec_dev_set_out_mute(s_dac, false);
     esp_codec_dev_set_out_vol(s_dac, atomic_load(&s_out_vol));
+    speaker_pa_enable();
     return ESP_OK;
 }
 
@@ -774,6 +786,7 @@ void jr_audio_dac_unmute(void)
     atomic_store(&s_muted, false);
     if (s_dac_open) {
         esp_codec_dev_set_out_mute(s_dac, false);
+        speaker_pa_enable();
     }
 }
 

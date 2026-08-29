@@ -1,70 +1,103 @@
 # Next Session Handoff
 
-Last updated: **2026-08-27** (the 1.75C elevation day).
+Last reconciled: **2026-08-28**.
 
-v5 runs on the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** — the 32 MB-flash
-aluminum revision, the default build target. Milestones shipped today: board
-port (`56a799b`), "Jarvis" wake word (`9dcfe99`), every deaf-device path
-closed (`4c3a837`, `482c81d`), realtime playback feeder (`11e66a8`), remote
-canvas + seconds hand (`05f4bc0`), operator tooling (`500b297`), and the
-eased-glass experience wave with a teammate (`dd5d48b`, `a615a52`).
+The live target is the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** with 32 MB
+flash. The active image is plain ESP-IDF v5 rooted at `main/` and
+`components/jr_*`.
 
-## Current Board + Build
-
-- Board deltas, calibrations, and the provisioning-transplant recipe:
-  [`reference/board-175c.md`](reference/board-175c.md). **On ANY new board
-  revision, run [`reference/board-bringup-checklist.md`](reference/board-bringup-checklist.md)
-  first — physics does not port.**
-- `./scripts/build-v5.sh` targets the 1.75C by default; original 1.75 needs
-  `BOARD_NAME=esp32s3_touch_amoled_1_75`. Flipping an EXISTING sdkconfig
-  symbol needs `RECONFIGURE=1` (see build-toolchain.md — stale sdkconfig wins).
-- Serial is single-owner: kill any usb-monitor before flashing.
-
-## Talk to the device (no serial needed)
+## Start here
 
 ```bash
-export JARVIS_DEVICE_HOST=<device-ip>
-scripts/jarvisctl.py status     # one-line verdict; non-zero exit = deaf/muted
-scripts/jarvisctl.py logs       # on-device 128 KB log ring — read AFTER the fact
-scripts/jarvisctl.py screen     # capture the glass
-scripts/jarvisctl.py say "..."  # speak a turn
-scripts/jarvisctl.py canvas img.png   # pixels on the glass (TTL-bounded)
-scripts/jarvisctl.py lease 300 / release   # operator claim; owner tap evicts
-scripts/jarvisctl.py tune pbgain=250 speakmic=21   # live audio calibration
+./scripts/build-v5.sh
+./scripts/flash-v5.sh
+
+export JARVIS_DEVICE_HOST='<device-ip>'
+# Blank host/device only: hold BOOT 1.5–5 s, then run:
+python3 scripts/jarvis-desk.py --host "$JARVIS_DEVICE_HOST" pair
+python3 scripts/jarvisctl.py status
+python3 scripts/jarvis-desk.py --host "$JARVIS_DEVICE_HOST" doctor
+python3 scripts/jarvisctl.py gestures 80
+python3 scripts/jarvisctl.py logs 131072
+python3 scripts/jarvisctl.py screen
 ```
 
-**Before debugging "no response" as firmware: run `status`.** Nearly every
-"dead device" today was a privacy state (see BUGLOG.md B5/B6).
+USB-Serial-JTAG is single-owner. Stop an active monitor before flashing. A
+charge-only cable can power the board without creating `/dev/cu.usbmodem*`;
+Wi-Fi OTA may still pass preflight when USB power is present.
 
-## Interaction model (post tap-redesign)
+## Current interaction grammar
 
-Tap = stop-talking / attention (NEVER mutes). Double-tap = bloom + "YES,
-SIR?". Swipe-left = status glance; swipe-right = 10 s watch peek; swipe-down
-from top = shade. Flip face-down = privacy mute / passive watch (the ONLY
-casual mute); long-press = mute + shade. "Jarvis" wakes from rest and from
-any non-deliberate silence — it never overrides a deliberate mute.
+| Input | Action |
+|---|---|
+| PWR short | Listen/wake only; never mute |
+| PWR long | Battery and charging status |
+| BOOT short after boot | Open/close controls |
+| BOOT hold 1.5–5 s after boot | Open a visible 60-second pairing claim window |
+| BOOT held during reset | Enter ROM downloader |
+| Left-edge vertical | Volume +/− 5 globally |
+| Right-edge vertical | Brightness +/− 5 globally |
+| Horizontal swipe | Jarvis ↔ Desk ↔ Tools ↔ Settings |
+| Top-edge down | Open controls |
+| Centre up | Detail or controls close |
+| Double tap | Jarvis Home |
+| Glass hold | Physical privacy mute/unmute |
+| Sustained face-down / face-up | Enter flip privacy / clear only a flip-origin mute |
 
-## Open threads (see PLAN.md + BUGLOG.md for the full boards)
+The controls surface is the on-device legend: `L VOL`, `R LIGHT`,
+`PWR LISTEN`, `BOOT CLOSE`, and centre MUTE/LISTEN. Do not reintroduce the
+failed continuous circular-rotation recognizer; the CST9217’s reliable signal
+is the classified edge-origin swipe.
 
-- Owner's consolidated verdict pending — last rating 2/10 before the
-  experience wave; re-rate after the full circuit.
-- glass-ux teammate has an UNCOMMITTED in-flight slice in the working tree:
-  choice-arc dismissal fades (tapped arc stays lit through exit). Commit it
-  on their handover, not before.
-- Long-session soak (30+ min unattended) never run. B9 (one unexplained
-  reboot, coredump blank — suspect USB brownout) still WATCH.
-- Perceptual dim curve + ring seam latch: glass-ux has fixes ready if the
-  owner's eyes flag either.
-- 128 MB upper flash still unpartitioned beyond `model` — dual-OTA and
-  bigger asset space live there when wanted.
+## Current runtime truth
 
-## Do Not Repeat
+- Gemini Live is direct from the device over Wi-Fi.
+- Capture/playback share a native 24 kHz I²S clock; uplink is AEC-cleaned and
+  downsampled to 16 kHz.
+- Server VAD owns turn boundaries. Local VAD is observability/pacing; local
+  barge is not the primary path.
+- Display uses one compositor, 12-row internal-DMA strips, baked EAF faces, and
+  a sparse listening halo. Normal Jarvis/Watch cadence is roughly 15–16 FPS.
+- PWR and USB-powered mood policy keep the desk assistant listening; deliberate
+  glass/flip privacy still wins.
+- OTA uses two 4 MB slots and validates voice/network/tools/HTTP/wake/display
+  before marking a new image valid.
+- JarvisMCP server policy is live; byte-budgeted device catalog projection and
+  cursor semantics remain incomplete.
 
-- Do not port calibrations between board revisions — measure (bringup checklist).
-- Do not add a second mute path to casual gestures; that trap cost hours.
-- Do not run builds while a teammate's domain has half-landed edits.
-- Do not commit LAN addresses, MACs, SSIDs, keys, or NVS dumps — and delete
-  local NVS dumps as soon as a transplant is done (they carry the keys).
-- `/api/display/snapshot.ppm` is a software mirror, not panel readback.
-- Negative-space rule stands: nothing new over the baked rwave art
-  (JARVISNANO_OS_PLAN.md).
+## Current blockers
+
+1. **Long-session voice:** run N6.2/N6.4 playback-gap telemetry and a clean
+   30-minute conversation soak.
+2. **JarvisMCP:** replace fixed-count search output with a ≤3071-byte projection
+   carrying `has_more` and a cursor; prove voice search + execution.
+3. **Controls shade:** raise settled controls cadence to ≥14 FPS without losing
+   behavior or internal memory.
+4. **First face transitions:** prewarm assets so first Think/Speak applies under
+   150 ms and stale requests never flash late.
+5. **Release security:** trusted-LAN OTA works, but signed images, authenticated
+   encrypted upload, at-rest credential protection, and exact third-party
+   notices remain public-release gates.
+
+The actionable order and acceptance criteria are in [`../PLAN.md`](../PLAN.md).
+
+## Safety invariants
+
+- Synthetic input cannot clear privacy, answer asks, approve consent, or escape
+  operator ownership.
+- Remote resume never clears physical hold/flip privacy.
+- Screenshots are submitted software buffers, not panel readback.
+- PCM taps prove codec-write data, not audible speaker output.
+- Never print or commit keys, tokens, endpoints, SSIDs, addresses, NVS images,
+  or device-specific logs.
+- Secure Boot/eFuse work is physically attended and separate from ordinary OTA.
+
+## Do not repeat
+
+- Do not build `firmware/` or `esp-claw/` when validating v5.
+- Do not add LVGL or a second renderer beside the live compositor.
+- Do not put display DMA buffers in PSRAM.
+- Do not treat `transport_poll_write(0)` as a socket death.
+- Do not use raw tool result count as a byte-budget guarantee.
+- Do not turn a normal tap or PWR press into an accidental privacy toggle.
+- Do not claim physical proof from an HTTP response alone.

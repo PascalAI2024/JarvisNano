@@ -97,7 +97,7 @@ The direct-display path uses `espressif/esp_lcd_co5300` `^2.1.0`, which the ESP 
 
 ## See also
 
-- [waveshare-amoled-175.md](./waveshare-amoled-175.md) — exact board hardware notes.
-- [display-emote-gfx.md](./display-emote-gfx.md) — current emote engine constraints.
-- [audio-es8311-es7210.md](./audio-es8311-es7210.md) — current Gemini audio path.
-- [build-toolchain.md](./build-toolchain.md) — IDF image and build tool pins.
+- [waveshare-amoled-175.md](../../reference/waveshare-amoled-175.md) — original-board hardware notes.
+- [display-emote-gfx.md](../../reference/display-emote-gfx.md) — current emote engine constraints.
+- [audio-es8311-es7210.md](../../reference/audio-es8311-es7210.md) — current Gemini audio path.
+- [build-toolchain.md](../../reference/build-toolchain.md) — IDF image and build tool pins.

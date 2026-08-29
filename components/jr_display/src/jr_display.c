@@ -34,8 +34,9 @@ static const char *TAG = "jr_display";
 
 #define JR_DISPLAY_MOUNT_POINT       "/emote"
 #define JR_DISPLAY_PARTITION         "emote_assets"
-/* Measured peak 2,496 B; 5120 leaves 2,624 B margin. Was 6144. */
-#define JR_DISPLAY_TASK_STACK        5120
+/* Live spatial/OTA exercise: 2,288 B free at 5,120. 4,608 retains ~1.77 KB
+ * measured margin and returns 512 B of internal SRAM. */
+#define JR_DISPLAY_TASK_STACK        4608
 #define JR_DISPLAY_TASK_PRIORITY     3
 #define JR_DISPLAY_TASK_CORE         0
 /* Right-sized 2026-07-19 from measured high-water: peak use 1,784 B under a
@@ -50,10 +51,10 @@ static const char *TAG = "jr_display";
  * shipped 24 for exactly this reason (P2.7); 30 only renders frames the
  * panel cannot take (live counter confirmed 20 actual at fps=30). */
 #define JR_DISPLAY_RENDER_FPS        24
-/* 12-row internal-SRAM DMA strips — the v4-proven shipping config. PSRAM
- * strips (116-row) fail on hardware: spi_master can't DMA from unaligned
- * external RAM and tries a 108 KB internal bounce alloc per flush, which
- * never succeeds (verified live: setup_dma_priv_buffer alloc failures). */
+/* 12-row internal-SRAM DMA strips — the live-safe memory configuration.
+ * A 20-row hardware A/B left FPS unchanged at 12 while shrinking the largest
+ * internal block from 32 KB to 12.8 KB, proving strip waits were not the
+ * current bottleneck. PSRAM strips still require a failing bounce allocation. */
 #define JR_DISPLAY_STRIP_ROWS        12
 #define JR_DISPLAY_DRIVER_MS         33
 #define JR_DISPLAY_AMP_BUCKETS       8U
@@ -679,6 +680,7 @@ static uint8_t surface_glyph_column(char ch, unsigned col)
     static const uint8_t DOT[] = {0x00,0x60,0x60,0x00,0x00};
     static const uint8_t COLON[] = {0x00,0x36,0x36,0x00,0x00};
     static const uint8_t SLASH[] = {0x20,0x10,0x08,0x04,0x02};
+    static const uint8_t PERCENT[] = {0x13,0x0b,0x04,0x32,0x31};
     static const uint8_t QMARK[] = {0x02,0x01,0x51,0x09,0x06};
     static const uint8_t BANG[] = {0x00,0x00,0x5f,0x00,0x00};
     static const uint8_t PLUS[] = {0x08,0x08,0x3e,0x08,0x08};
@@ -702,6 +704,7 @@ static uint8_t surface_glyph_column(char ch, unsigned col)
     case '6': g=N6; break; case '7': g=N7; break; case '8': g=N8; break;
     case '9': g=N9; break; case '-': case '_': g=DASH; break;
     case '.': g=DOT; break; case ':': g=COLON; break; case '/': g=SLASH; break;
+    case '%': g=PERCENT; break;
     case '?': g=QMARK; break; case '!': g=BANG; break; case '+': g=PLUS; break;
     case ',': g=COMMA; break; case '\'': g=APOSTROPHE; break;
     case '(': g=LPAREN; break; case ')': g=RPAREN; break; case '&': g=AMP; break;
@@ -850,10 +853,11 @@ static uint16_t agent_native_color(jr_display_agent_state_t state)
  * strips today; if that ever changes, skipping is the correct failure mode. */
 /* World-state pushed in by the composition root. Packed into one word so the
  * flush path reads it without a lock: battery in bits 0-7, charging in bit 8,
- * and the two tilt offsets pre-resolved to signed pixels in bits 16-31. Doing
- * the float trigonometry at push time keeps it out of the render path. */
+ * privacy mute in bit 9, and the two tilt offsets pre-resolved to signed
+ * pixels in bits 16-31. Doing the float trigonometry at push time keeps it out
+ * of the render path. */
 static volatile uint32_t s_hud_env_word =
-    0x000000FFu;   /* battery unknown, level, not charging */
+    0x000000FFu;   /* battery unknown, level, listening */
 static volatile uint32_t s_hud_enabled = 1u;
 
 /* ---- STATE-05 choice arcs -------------------------------------------------
@@ -894,7 +898,7 @@ static int              s_choice_label_len[HUD_CHOICE_MAX];
  * one frame of stale caption text. The input is COPIED (96-char cap), so the
  * caller's buffer only has to survive the call itself. */
 static char             s_caption_text[97];
-static char             s_caption_line[2][39];     /* hud_wrap2(caption, 38) */
+static char             s_caption_line[2][39];     /* wrapped at 19 for scale 2 */
 static int              s_caption_x[2];
 static int              s_caption_y[2];
 static volatile int     s_caption_on;
@@ -926,6 +930,7 @@ static volatile uint32_t s_clock_word;
  * above (its first consumer); this reads the intent words published there
  * and at s_clock_word. */
 static void brightness_slew(uint32_t dt_ms);   /* defined with the pump below */
+static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep);
 
 static void overlay_fade_tick(void)
 {
@@ -1001,18 +1006,7 @@ static void overlay_fade_tick(void)
     }
     s_ask_ease = fade_smoothstep(s_ask_prog);
 
-    if ((diag_load(&s_display.shell_word) & JR_DISPLAY_SHELL_SHADE) != 0U) {
-        s_shade_prog += cstep;
-        if (s_shade_prog > 256) {
-            s_shade_prog = 256;
-        }
-    } else {
-        s_shade_prog -= cstep;
-        if (s_shade_prog < 0) {
-            s_shade_prog = 0;
-        }
-    }
-    s_shade_ease = fade_smoothstep(s_shade_prog);
+    sp_fade_tick(now, dt, cstep);
 }
 
 void jr_display_present_choices(const char *question,
@@ -1111,13 +1105,13 @@ void jr_display_caption_set(const char *text)
     const size_t len = strnlen(text, 96U);
     memcpy(s_caption_text, text, len);
     s_caption_text[len] = '\0';
-    hud_wrap2(s_caption_text, 38, s_caption_line[0], s_caption_line[1]);
-    const int c1 = (int)strnlen(s_caption_line[0], 38U);
-    const int c2 = (int)strnlen(s_caption_line[1], 38U);
-    s_caption_x[0] = (HUD_W - 6 * c1) / 2;
-    s_caption_x[1] = (HUD_W - 6 * c2) / 2;
-    s_caption_y[0] = (c2 > 0) ? 396 : 403;
-    s_caption_y[1] = 408;
+    hud_wrap2(s_caption_text, 19, s_caption_line[0], s_caption_line[1]);
+    const int c1 = (int)strnlen(s_caption_line[0], 19U);
+    const int c2 = (int)strnlen(s_caption_line[1], 19U);
+    s_caption_x[0] = (HUD_W - 12 * c1) / 2;
+    s_caption_x[1] = (HUD_W - 12 * c2) / 2;
+    s_caption_y[0] = (c2 > 0) ? 374 : 394;
+    s_caption_y[1] = 402;
     __atomic_store_n(&s_caption_on, 1, __ATOMIC_RELEASE);
 }
 
@@ -1236,6 +1230,523 @@ static void brightness_pump(void)
     }
 }
 
+/* ===== SPATIAL SHELL: state, content, easing =============================
+ *
+ * Four horizontal spaces and two overlays, held in ONE 32-bit word so the app
+ * task can publish navigation with a single compare-exchange and the render
+ * task can sample it with a single load. No lock, no queue, no allocation:
+ *
+ *   bits  1:0   current space          (jr_display_space_t)
+ *   bits  3:2   space we came from     (only meaningful for one transition)
+ *   bits  5:4   overlay                (jr_display_overlay_t)
+ *   bit   6     travel direction       (1 = toward higher space index)
+ *   bits 15:8   change serial          (wraps; render task edge-detects it)
+ *
+ * The serial is what makes the slide correct without a shared clock. The app
+ * task never touches animation state; it bumps the serial, and the render
+ * task notices the edge on its next frame and restarts the ease from zero.
+ * Two swipes inside one frame therefore cost one slide from the first origin
+ * to the last destination, which is what a fast flick should look like.
+ *
+ * Every string the shell can draw lives in a fixed-size static array with a
+ * hard cap, written once by the app task and read by the render task. Text is
+ * furniture, not truth: a torn read shows one frame of stale characters and
+ * never a runaway length, because the caps bound the draw regardless.
+ */
+
+#define NAV_SPACE_MASK    0x3u
+#define NAV_PREV_SHIFT    2
+#define NAV_OVL_SHIFT     4
+#define NAV_OVL_MASK      0x30u
+#define NAV_FORWARD_BIT   0x40u
+#define NAV_SERIAL_SHIFT  8
+
+#define SP_LABEL_CAP      13   /* 12 glyphs at scale 2 = 144 px, fits r<=96 */
+#define SP_COL_MAX        11   /* detail column: 10 glyphs at scale 2       */
+#define SP_ROWS_MAX       6   /* Settings needs 5; one spare        */
+
+static volatile uint32_t s_nav_word;
+
+static char s_space_head[JR_DISPLAY_SPACE_COUNT][SP_LABEL_CAP];
+static char s_space_note[JR_DISPLAY_SPACE_COUNT][SP_LABEL_CAP];
+static char s_desk_task[SP_LABEL_CAP];
+static char s_tool_name[JR_DISPLAY_TOOLS_MAX][SP_LABEL_CAP];
+
+static volatile uint32_t s_jarvis_word;      /* turns | linked<<16          */
+static volatile uint32_t s_jarvis_secs;
+static volatile uint32_t s_desk_word;        /* progress | state<<8         */
+static volatile uint32_t s_tools_word;       /* count | recent<<8           */
+static volatile uint32_t s_status_word;      /* vol | net<<8 | rssi<<16     */
+static volatile uint32_t s_status_free_kib;
+static volatile uint32_t s_power_word = 0xFFu; /* pct | mv<<8 | usb/charge */
+/* OTA status, packed like every other shell word so the updater can publish
+ * from its own task with one release-store and the render task can sample it
+ * with one load:
+ *
+ *   bits  3:0   jr_display_ota_state_t
+ *   bits 15:8   percent 0..100
+ *   bits 19:16  active slot   (0, 1, or 0xF = unknown)
+ *   bits 23:20  target slot   (0, 1, or 0xF = none staged)
+ *   bit  24     preflight verdict, 1 = ready
+ *
+ * No strings: ESP-IDF OTA slots are indices, so rendering them as digits
+ * costs no storage and cannot truncate. */
+#define OTA_SLOT_NONE 0xFu
+
+static volatile uint32_t s_ota_word = ((uint32_t)OTA_SLOT_NONE << 16) |
+                                      ((uint32_t)OTA_SLOT_NONE << 20);
+
+/* Composed once per presented frame, then read by every strip in that frame.
+ * Composing per strip would redo the same integer formatting eleven times. */
+static char s_detail_head[SP_LABEL_CAP];
+static char s_detail_label[SP_ROWS_MAX][SP_COL_MAX];
+static char s_detail_value[SP_ROWS_MAX][SP_COL_MAX];
+static int  s_detail_rows;
+static char s_settings_label[SP_LABEL_CAP];
+static char s_shade_vol[SP_COL_MAX];
+static char s_shade_light[SP_COL_MAX];
+
+static uint8_t  s_space_serial_seen;
+static uint8_t  s_space_from;
+static uint8_t  s_space_to;
+static int8_t   s_space_dir = 1;
+static int      s_space_prog = 256;
+static int      s_space_ease = 256;
+static int      s_detail_prog;
+static int      s_detail_ease;
+static int      s_space_veil;
+static bool     s_space_on;
+static uint8_t  s_detail_space;
+static uint32_t s_space_hold_ms;
+
+/* Bounded copy with a guaranteed terminator. The public setters are the only
+ * writers, so an over-long caller string is truncated here once instead of
+ * being trusted anywhere downstream. */
+static void sp_copy(char *dst, const char *src)
+{
+    size_t i = 0;
+    if (src != NULL) {
+        for (; i + 1U < (size_t)SP_LABEL_CAP && src[i] != '\0'; ++i) {
+            dst[i] = src[i];
+        }
+    }
+    dst[i] = '\0';
+}
+
+/* Integer-only formatting into a caller buffer with an explicit cap. The
+ * presenter has no room for snprintf here: it drags in float formatting and
+ * several hundred bytes of stack, and this task shares a 6 KiB stack with the
+ * strip machinery. Each helper returns the new length so calls chain. */
+static int sp_str(char *dst, int len, int cap, const char *src)
+{
+    while (src != NULL && *src != '\0' && len + 1 < cap) {
+        dst[len++] = *src++;
+    }
+    dst[len] = '\0';
+    return len;
+}
+
+static int sp_num(char *dst, int len, int cap, uint32_t v)
+{
+    char tmp[10];
+    int n = 0;
+    do {
+        tmp[n++] = (char)('0' + (v % 10u));
+        v /= 10u;
+    } while (v != 0u && n < (int)sizeof tmp);
+    while (n > 0 && len + 1 < cap) {
+        dst[len++] = tmp[--n];
+    }
+    dst[len] = '\0';
+    return len;
+}
+
+static int sp_pct(char *dst, int len, int cap, uint32_t v)
+{
+    return sp_str(dst, sp_num(dst, len, cap, v), cap, "%");
+}
+
+/* Elapsed session time as M:SS up to an hour, then H:MM. */
+static int sp_clock_str(char *dst, int cap, uint32_t secs)
+{
+    const uint32_t big = secs >= 3600u ? secs / 3600u : secs / 60u;
+    const uint32_t small = secs >= 3600u ? (secs / 60u) % 60u : secs % 60u;
+    int len = sp_num(dst, 0, cap, big);
+    len = sp_str(dst, len, cap, ":");
+    if (small < 10u) {
+        len = sp_str(dst, len, cap, "0");
+    }
+    return sp_num(dst, len, cap, small);
+}
+
+/* Privacy comes from the one place that already owns it: the HUD env word
+ * jr_display_set_hud_env publishes, bit 9. The shell never keeps a second
+ * copy, so the ring and the shell can never disagree about the mic. */
+static bool sp_privacy_muted(void)
+{
+    return (diag_load(&s_hud_env_word) & (1u << 9)) != 0U;
+}
+
+/* The shade opens from either door: the nav overlay (swipe down through the
+ * new API) or the legacy JR_DISPLAY_SHELL_SHADE bit that existing callers of
+ * jr_display_set_shell_state already drive. One visual, two sources. */
+static bool sp_shade_open(void)
+{
+    if ((diag_load(&s_display.shell_word) & JR_DISPLAY_SHELL_SHADE) != 0U) {
+        return true;
+    }
+    const uint32_t nav = __atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE);
+    return ((nav & NAV_OVL_MASK) >> NAV_OVL_SHIFT) ==
+           (uint32_t)JR_DISPLAY_OVERLAY_SHADE;
+}
+
+/* Link quality as a 0-100 fill. -55 dBm or better is full, -90 or worse is
+ * empty; the span between them is where a user can actually feel the signal
+ * change, so that is where the whole arc is spent. */
+static int sp_net_quality(int rssi_dbm, bool up)
+{
+    if (!up) {
+        return 0;
+    }
+    if (rssi_dbm >= -55) {
+        return 100;
+    }
+    if (rssi_dbm <= -90) {
+        return 4;
+    }
+    return ((rssi_dbm + 90) * 100) / 35;
+}
+
+/* Free PSRAM as a 0-100 fill against a 4 MiB nominal pool. */
+static int sp_mem_quality(uint32_t free_kib)
+{
+    const uint32_t pct = free_kib / 41u;
+    return pct > 100u ? 100 : (int)pct;
+}
+
+static const char *sp_agent_name(jr_display_agent_state_t st)
+{
+    switch (st) {
+    case JR_DISPLAY_AGENT_WORKING:   return "WORKING";
+    case JR_DISPLAY_AGENT_VERIFYING: return "VERIFY";
+    case JR_DISPLAY_AGENT_WAITING:   return "WAITING";
+    case JR_DISPLAY_AGENT_SUCCEEDED: return "DONE";
+    case JR_DISPLAY_AGENT_FAILED:    return "FAILED";
+    default:                         return "IDLE";
+    }
+}
+/* Names stay inside SP_COL_MAX-1 (10 glyphs), so a state change can never
+ * truncate the detail sheet's value column. */
+static const char *sp_ota_name(jr_display_ota_state_t state)
+{
+    switch (state) {
+    case JR_DISPLAY_OTA_PREFLIGHT:  return "CHECKING";
+    case JR_DISPLAY_OTA_BLOCKED:    return "BLOCKED";
+    case JR_DISPLAY_OTA_RECEIVING:  return "WRITING";
+    case JR_DISPLAY_OTA_PROBATION:  return "PROBATION";
+    case JR_DISPLAY_OTA_VALID:      return "VALID";
+    case JR_DISPLAY_OTA_FAILED:     return "FAILED";
+    case JR_DISPLAY_OTA_ROLLED_BACK:return "ROLLBACK";
+    default:                        return "IDLE";
+    }
+}
+
+/* IDLE and VALID are the healthy resting states: no ring, so a device with
+ * nothing to say keeps a quiet dial. Everything else rings. */
+static bool sp_ota_ringing(jr_display_ota_state_t state)
+{
+    return state != JR_DISPLAY_OTA_IDLE && state != JR_DISPLAY_OTA_VALID;
+}
+
+/* Arc fill 0..100. Only RECEIVING is a real measurement; PREFLIGHT is armed
+ * but has written nothing, and the rest are conditions rather than progress,
+ * so they fill the ring completely instead of implying movement. */
+static int sp_ota_fill(jr_display_ota_state_t state, int percent)
+{
+    switch (state) {
+    case JR_DISPLAY_OTA_RECEIVING:
+        return percent < 0 ? 0 : (percent > 100 ? 100 : percent);
+    case JR_DISPLAY_OTA_PREFLIGHT:
+        return 0;
+    default:
+        return 100;
+    }
+}
+
+/* "0/1" when an update is staged, "0" when it is not, "?" when the updater
+ * has not reported a slot. Slash is in the physical 5x7 glyph set. */
+static void sp_ota_slots(char *dst, int cap, uint32_t active, uint32_t target)
+{
+    int len;
+    if (active > 1u) {
+        len = sp_str(dst, 0, cap, "?");
+    } else {
+        len = sp_num(dst, 0, cap, active);
+    }
+    if (target <= 1u && target != active) {
+        len = sp_str(dst, len, cap, "/");
+        (void)sp_num(dst, len, cap, target);
+    }
+}
+
+
+/* Per-space detail: the answer to "what is actually going on in here", not a
+ * repeat of the ambient telemetry the face already shows. Every row is a
+ * short left label and a right-aligned value, so the sheet scans as a column
+ * of facts rather than a paragraph. */
+static void sp_compose_detail(int space)
+{
+    s_detail_rows = 0;
+    switch (space) {
+    case JR_DISPLAY_SPACE_JARVIS: {
+        const uint32_t w = __atomic_load_n(&s_jarvis_word, __ATOMIC_ACQUIRE);
+        sp_copy(s_detail_head, "SESSION");
+        sp_str(s_detail_label[0], 0, SP_COL_MAX, "LINK");
+        sp_str(s_detail_value[0], 0, SP_COL_MAX,
+               (w & (1u << 16)) != 0u ? "UP" : "DOWN");
+        sp_str(s_detail_label[1], 0, SP_COL_MAX, "TURNS");
+        sp_num(s_detail_value[1], 0, SP_COL_MAX, w & 0xFFFFu);
+        sp_str(s_detail_label[2], 0, SP_COL_MAX, "ELAPSED");
+        sp_clock_str(s_detail_value[2], SP_COL_MAX, diag_load(&s_jarvis_secs));
+        sp_str(s_detail_label[3], 0, SP_COL_MAX, "MIC");
+        sp_str(s_detail_value[3], 0, SP_COL_MAX,
+               sp_privacy_muted() ? "MUTED" : "LIVE");
+        s_detail_rows = 4;
+        break;
+    }
+    case JR_DISPLAY_SPACE_DESK: {
+        const uint32_t w = __atomic_load_n(&s_desk_word, __ATOMIC_ACQUIRE);
+        sp_copy(s_detail_head, "TASK");
+        sp_str(s_detail_label[0], 0, SP_COL_MAX, "STATE");
+        sp_str(s_detail_value[0], 0, SP_COL_MAX,
+               sp_agent_name((jr_display_agent_state_t)((w >> 8) & 0xFu)));
+        sp_str(s_detail_label[1], 0, SP_COL_MAX, "DONE");
+        sp_pct(s_detail_value[1], 0, SP_COL_MAX, w & 0xFFu);
+        sp_str(s_detail_label[2], 0, SP_COL_MAX, "JOB");
+        sp_str(s_detail_value[2], 0, SP_COL_MAX,
+               s_desk_task[0] != '\0' ? s_desk_task : "NONE");
+        s_detail_rows = 3;
+        break;
+    }
+    case JR_DISPLAY_SPACE_TOOLS: {
+        const uint32_t w = __atomic_load_n(&s_tools_word, __ATOMIC_ACQUIRE);
+        const uint32_t n = w & 0xFFu;
+        const uint32_t recent = (w >> 8) & 0xFFu;
+        sp_copy(s_detail_head, "TOOLS");
+        sp_str(s_detail_label[0], 0, SP_COL_MAX, "READY");
+        sp_num(s_detail_value[0], 0, SP_COL_MAX, n);
+        sp_str(s_detail_label[1], 0, SP_COL_MAX, "LAST");
+        sp_str(s_detail_value[1], 0, SP_COL_MAX,
+               recent < n ? s_tool_name[recent] : "NONE");
+        s_detail_rows = 2;
+        for (uint32_t i = 0; i < n && s_detail_rows < SP_ROWS_MAX; ++i) {
+            if (i == recent) {
+                continue;
+            }
+            sp_str(s_detail_label[s_detail_rows], 0, SP_COL_MAX, "READY");
+            sp_str(s_detail_value[s_detail_rows], 0, SP_COL_MAX, s_tool_name[i]);
+            ++s_detail_rows;
+        }
+        break;
+    }
+    default: {
+        const uint32_t w = __atomic_load_n(&s_status_word, __ATOMIC_ACQUIRE);
+        const uint32_t ota = __atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE);
+        const jr_display_ota_state_t ota_state =
+            (jr_display_ota_state_t)(ota & 0xFu);
+        sp_copy(s_detail_head, "SETTINGS");
+        /* Volume and brightness are deliberately NOT rows here: they live in
+         * the headline (where they are read) and in the shade (where they are
+         * changed). The sheet carries what neither of those can show. */
+        sp_str(s_detail_label[0], 0, SP_COL_MAX, "PRIVACY");
+        sp_str(s_detail_value[0], 0, SP_COL_MAX,
+               sp_privacy_muted() ? "MUTED" : "LIVE");
+        sp_str(s_detail_label[1], 0, SP_COL_MAX, "LINK");
+        if ((w & (1u << 8)) != 0u) {
+            int len = sp_str(s_detail_value[1], 0, SP_COL_MAX, "-");
+            len = sp_num(s_detail_value[1], len, SP_COL_MAX,
+                         (uint32_t)(-(int)(int8_t)((w >> 16) & 0xFFu)));
+            sp_str(s_detail_value[1], len, SP_COL_MAX, "DB");
+        } else {
+            sp_str(s_detail_value[1], 0, SP_COL_MAX, "DOWN");
+        }
+        sp_str(s_detail_label[2], 0, SP_COL_MAX, "POWER");
+        {
+            const uint32_t power =
+                __atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE);
+            const uint32_t percent = power & 0xFFu;
+            const uint32_t millivolts = (power >> 8) & 0xFFFFu;
+            if (percent <= 100U) {
+                int len = sp_pct(s_detail_value[2], 0, SP_COL_MAX, percent);
+                if ((power & (1u << 25)) != 0U) {
+                    len = sp_str(s_detail_value[2], len, SP_COL_MAX, "+");
+                }
+                if (millivolts >= 1000U) {
+                    len = sp_num(s_detail_value[2], len, SP_COL_MAX,
+                                 millivolts / 1000U);
+                    len = sp_str(s_detail_value[2], len, SP_COL_MAX, ".");
+                    len = sp_num(s_detail_value[2], len, SP_COL_MAX,
+                                 (millivolts % 1000U) / 100U);
+                    (void)sp_str(s_detail_value[2], len, SP_COL_MAX, "V");
+                }
+            } else {
+                sp_str(s_detail_value[2], 0, SP_COL_MAX,
+                       (power & (1u << 24)) != 0U ? "USB" : "UNKNOWN");
+            }
+        }
+        /* At rest the UPDATE row reports READINESS rather than a state noun,
+         * so Settings answers "could this take an update right now" without
+         * an update having to be in flight. */
+        sp_str(s_detail_label[3], 0, SP_COL_MAX, "UPDATE");
+        if (ota_state == JR_DISPLAY_OTA_RECEIVING) {
+            sp_pct(s_detail_value[3], 0, SP_COL_MAX, (ota >> 8) & 0xFFu);
+        } else if (ota_state == JR_DISPLAY_OTA_IDLE) {
+            sp_str(s_detail_value[3], 0, SP_COL_MAX,
+                   (ota & (1u << 24)) != 0u ? "READY" : "HOLD");
+        } else {
+            sp_str(s_detail_value[3], 0, SP_COL_MAX, sp_ota_name(ota_state));
+        }
+        sp_str(s_detail_label[4], 0, SP_COL_MAX, "SLOT");
+        sp_ota_slots(s_detail_value[4], SP_COL_MAX, (ota >> 16) & 0xFu,
+                     (ota >> 20) & 0xFu);
+        s_detail_rows = 5;
+        break;
+    }
+    }
+}
+
+/* One composition pass per frame: the settings headline, the shade readouts,
+ * and the detail sheet if it is showing. */
+static void sp_compose(void)
+{
+    const uint32_t w = __atomic_load_n(&s_status_word, __ATOMIC_ACQUIRE);
+    const uint32_t vol = (w & 0xFFu) > 100u ? 100u : (w & 0xFFu);
+    uint32_t brt = (uint32_t)__atomic_load_n(&s_brightness_want, __ATOMIC_ACQUIRE);
+    if (brt > 100u) {
+        brt = 100u;
+    }
+
+    /* An update in flight outranks the volume/brightness readout: while the
+     * flash is being written, that is what Settings is about. The two healthy
+     * resting states (IDLE, VALID) hand the headline straight back. */
+    const uint32_t ota = __atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE);
+    const jr_display_ota_state_t ota_state =
+        (jr_display_ota_state_t)(ota & 0xFu);
+    int len = 0;
+    if (ota_state == JR_DISPLAY_OTA_RECEIVING) {
+        len = sp_str(s_settings_label, 0, SP_LABEL_CAP, "UPDATE ");
+        (void)sp_pct(s_settings_label, len, SP_LABEL_CAP,
+                     (ota >> 8) & 0xFFu);
+    } else if (sp_ota_ringing(ota_state)) {
+        (void)sp_str(s_settings_label, 0, SP_LABEL_CAP, sp_ota_name(ota_state));
+    } else {
+        len = sp_str(s_settings_label, 0, SP_LABEL_CAP, "VOL ");
+        len = sp_pct(s_settings_label, len, SP_LABEL_CAP, vol);
+        len = sp_str(s_settings_label, len, SP_LABEL_CAP, "  ");
+        (void)sp_pct(s_settings_label, len, SP_LABEL_CAP, brt);
+    }
+
+    len = sp_str(s_shade_vol, 0, SP_COL_MAX, "L VOL ");
+    (void)sp_pct(s_shade_vol, len, SP_COL_MAX, vol);
+    len = sp_str(s_shade_light, 0, SP_COL_MAX, "R LIGHT ");
+    (void)sp_pct(s_shade_light, len, SP_COL_MAX, brt);
+
+    if (s_detail_ease > 0) {
+        sp_compose_detail(s_detail_space);
+    }
+}
+
+/* Advance every shell ease. Called once per frame from overlay_fade_tick, on
+ * the render task, with the same cstep the rest of the presenter fades on so
+ * the shell and the existing overlays stay visually in step. */
+static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
+{
+    const uint32_t nav = __atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE);
+    const uint8_t serial = (uint8_t)(nav >> NAV_SERIAL_SHIFT);
+    const uint8_t space = (uint8_t)(nav & NAV_SPACE_MASK);
+    const uint8_t overlay = (uint8_t)((nav & NAV_OVL_MASK) >> NAV_OVL_SHIFT);
+
+    if (serial != s_space_serial_seen) {
+        s_space_serial_seen = serial;
+        s_space_from = (uint8_t)((nav >> NAV_PREV_SHIFT) & NAV_SPACE_MASK);
+        s_space_to = space;
+        s_space_dir = (nav & NAV_FORWARD_BIT) != 0U ? 1 : -1;
+        s_space_prog = 0;
+        s_space_hold_ms = now_ms + (uint32_t)JR_DISPLAY_SPACE_HOLD_MS;
+    } else if (s_space_to != space) {
+        s_space_to = space;          /* serial wrap: snap rather than lie */
+        s_space_from = space;
+    }
+
+    int sstep = (int)((dt_ms * 256u) / (uint32_t)JR_DISPLAY_SPACE_MS);
+    if (sstep < 1) {
+        sstep = 1;
+    }
+    s_space_prog += sstep;
+    if (s_space_prog > 256) {
+        s_space_prog = 256;
+    }
+    s_space_ease = fade_smoothstep(s_space_prog);
+
+    /* The sheet keeps the space it was opened on for the whole of its own
+     * fade-out, so dismissing it never flashes another space's facts. */
+    if (overlay == (uint8_t)JR_DISPLAY_OVERLAY_DETAIL) {
+        s_detail_space = space;
+        s_detail_prog += cstep;
+        if (s_detail_prog > 256) {
+            s_detail_prog = 256;
+        }
+    } else {
+        s_detail_prog -= cstep;
+        if (s_detail_prog < 0) {
+            s_detail_prog = 0;
+        }
+    }
+    s_detail_ease = fade_smoothstep(s_detail_prog);
+
+    if (sp_shade_open()) {
+        s_shade_prog += cstep;
+        if (s_shade_prog > 256) {
+            s_shade_prog = 256;
+        }
+    } else {
+        s_shade_prog -= cstep;
+        if (s_shade_prog < 0) {
+            s_shade_prog = 0;
+        }
+    }
+    s_shade_ease = fade_smoothstep(s_shade_prog);
+
+    /* The backdrop veil is the deepest any live element asks for. Because a
+     * slide out of JARVIS still carries the outgoing space's weight, going
+     * home fades the veil away with the slide instead of cutting it a frame
+     * early. */
+    int veil = 0;
+    if (s_space_to != (uint8_t)JR_DISPLAY_SPACE_JARVIS) {
+        veil = s_space_ease;
+    }
+    if (s_space_from != (uint8_t)JR_DISPLAY_SPACE_JARVIS &&
+        256 - s_space_ease > veil) {
+        veil = 256 - s_space_ease;
+    }
+    if (s_detail_ease > veil) {
+        veil = s_detail_ease;
+    }
+    if (s_shade_ease > veil) {
+        veil = s_shade_ease;
+    }
+    s_space_veil = veil;
+
+    /* The orbital indicator outlives the slide by a short hold, so a swipe
+     * leaves a readable trace of where you landed and then goes away and
+     * JARVIS is a clean face again. */
+    s_space_on = veil > 0 || s_space_prog < 256 ||
+                 (int32_t)(now_ms - s_space_hold_ms) < 0;
+    if (s_space_on) {
+        sp_compose();
+    }
+}
+
 bool jr_display_choices_active(void)
 {
     return __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE) > 0;
@@ -1267,12 +1778,14 @@ bool jr_display_hud_enabled(void)
 }
 
 void jr_display_set_hud_env(uint8_t batt_pct, bool charging,
+                            bool privacy_muted,
                             float roll_deg, float pitch_deg)
 {
     int8_t ox = 0, oy = 0;
     hud_tilt_offset(roll_deg, pitch_deg, &ox, &oy);
     const uint32_t word = (uint32_t)batt_pct
                         | (charging ? (1u << 8) : 0u)
+                        | (privacy_muted ? (1u << 9) : 0u)
                         | ((uint32_t)(uint8_t)ox << 16)
                         | ((uint32_t)(uint8_t)oy << 24);
     __atomic_store_n(&s_hud_env_word, word, __ATOMIC_RELAXED);
@@ -1417,15 +1930,12 @@ static void apply_ask_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     }
 }
 
-/* STATE-04: the caption chip — the ask presentation's look confined to a
- * bottom band: rows JR_CAPTION_Y0..Y1 dimmed inside the glass chord for each
- * row (hud_glass_chord; staying on the glass is the band's only geometric
- * constraint), white scale-1 text centred on it. ~40 rows, so the cost is
- * ~9% of the full-frame ask dim. The caller gates it off while an ask is up.
- * Reads only statics published by jr_display_caption_set. Render task only;
- * full-width strips guaranteed by the caller. */
-#define JR_CAPTION_Y0 386
-#define JR_CAPTION_Y1 425          /* inclusive */
+/* STATE-04: the caption chip — a round-safe lower band with scale-2 text.
+ * Scale 1 was technically legible in screenshots but unreadable on the
+ * physical 1.75-inch panel. Nineteen characters per line fit the glass chord
+ * at this radius; the band eases with the existing caption transition. */
+#define JR_CAPTION_Y0 360
+#define JR_CAPTION_Y1 430          /* inclusive */
 
 static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
                                   uint16_t *pixels)
@@ -1473,12 +1983,12 @@ static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
         for (int l = 0; l < 2; ++l) {
             const char *text = s_caption_line[l];
             const int ty = s_caption_y[l];
-            if (text[0] == '\0' || y < ty || y >= ty + 7) {
+            if (text[0] == '\0' || y < ty || y >= ty + 14) {
                 continue;
             }
             const int tx = s_caption_x[l];
             for (int x = tx; x < HUD_W - tx; ++x) {
-                if (surface_text_pixel(text, 38U, x, y, tx, ty, 1)) {
+                if (surface_text_pixel(text, 19U, x, y, tx, ty, 2)) {
                     row[x] = px_text;
                 }
             }
@@ -1486,17 +1996,12 @@ static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     }
 }
 
-/* UI-01: the ambient watch — while privacy-muted the dimmed baked face IS
- * the dial (its bezel ticks at r200-214), so this is the full ask-style dim
- * plus hud_overlay_clock's hands and hub, both riding s_clock_ease: the dim
- * deepens and the hands condense together over ~JR_DISPLAY_FADE_MS instead
- * of switching on in one frame. It gates ITSELF on the eased level (which is
- * 0 exactly while the published word is off and settled) so the host harness
- * can prove off == paints-nothing directly. Time comes from the shown-word
- * latch, not the live word — the off publish may zero hh/mm and the fade-out
- * must keep showing the time it faded from. Never coexists with a choice ask
- * — the caller's ask branch wins before this runs — and renders UNDER the
- * caption so the muted/time status text stays readable. Render task only. */
+/* Explicit Watch: the baked face is the dial (bezel ticks at r200-214), with
+ * hud_overlay_clock's hands and hub riding s_clock_ease. The old ask-style
+ * full-frame dim transformed 217k pixels and dropped Watch from 15-16 to
+ * 11 FPS; the already-dark face needs no second dim. Choice asks outrank it,
+ * and it renders under the caption. Time comes from the shown-word latch so
+ * fade-out retains the prior time. Render task only. */
 static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
                                 uint16_t *pixels)
 {
@@ -1504,17 +2009,802 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     if (e <= 0) {
         return;
     }
-    const int k = (e * 32) >> 8;
-    if (k >= 32) {
-        dim_strip(ctx, y1, y2, pixels);      /* settled: the fast fold */
-    } else if (k > 0) {
-        fade_strip(ctx, y1, y2, pixels, k);
-    }
     const uint32_t w = s_clock_shown_word;
     hud_overlay_clock(pixels, y1, y2 - y1, ctx->board.swap_color_bytes,
                       (int)((w >> 8) & 0xFFu), (int)(w & 0xFFu),
                       (int)((w >> 17) & 0x3Fu),
                       e > 255 ? 255 : e);
+}
+
+/* ===== SPATIAL SHELL: geometry and drawing ===============================
+ *
+ * Strip-local, allocation-free, integer-only. Every primitive takes the strip
+ * row it is writing and returns immediately if the shape does not reach that
+ * row, so a shape costs one multiply on the rows it misses.
+ *
+ * THE CLIP IS THE CONTRACT. sp_clip() folds every x interval into the
+ * JR_DISPLAY_SHELL_R_MAX circle before a single pixel is written. That is why
+ * the shell provably cannot touch the battery rim, the privacy ring, or the
+ * choice arcs: not one renderer below is trusted to stay in its lane, they
+ * are all bounded by one function.
+ */
+
+#define SP_CX          (HUD_W / 2)
+#define SP_CY          (HUD_H / 2)
+#define SP_R_SHELL     JR_DISPLAY_SHELL_R_MAX
+#define SP_SLIDE_PX    150            /* how far a space travels on a swipe */
+
+/* Angles are 1/256 turn, matching the LUT convention hud_render uses for the
+ * glass: 0 is 3 o'clock, 64 is 6 o'clock, 192 is 12 o'clock, increasing
+ * clockwise. */
+#define SP_A_TOP       192
+
+#define SP_ORB_TRACK_IN  184
+#define SP_ORB_TRACK_OUT 196
+#define SP_ORB_R         190
+#define SP_ORB_MARK_IN   186
+#define SP_ORB_MARK_OUT  194
+
+#define SP_FOCAL_IN    76
+#define SP_FOCAL_OUT   96
+/* The Settings firmware-update ring. The inner edge clears the headline's
+ * worst-case glyph corner (12 glyphs at scale 2, centred on SP_LABEL_Y, reach
+ * r131.5); the outer edge stays well inside JR_DISPLAY_SAFE_R. */
+#define SP_OTA_IN      140
+#define SP_OTA_OUT     154
+#define SP_FOCAL_HIT   116
+#define SP_FOCAL_TEXT_Y 219
+#define SP_LABEL_Y     330
+
+#define SP_SHEET_Y0    150
+#define SP_SHEET_Y1    346
+#define SP_SHEET_HEAD_Y 162
+/* Six 14 px rows at a 26 px pitch run 196..340, clearing SP_SHEET_Y1 (346)
+ * — the sheet grew a row when the firmware update moved in. */
+#define SP_SHEET_ROW_Y 196
+#define SP_SHEET_ROW_DY 26
+#define SP_SHEET_LEFT  128
+#define SP_SHEET_RIGHT 338
+
+/* The minimal voice shade: one volume arc above one privacy action. Display
+ * brightness stays in Settings; Home stays on the global double-tap. */
+#define SP_VOL_IN      130
+#define SP_VOL_OUT     144
+#define SP_ARC_A0      136
+#define SP_ARC_A1      248
+#define SP_ARC_SPAN    112
+#define SP_VOL_CAP_R   158
+#define SP_VOL_TEXT_Y  176
+#define SP_LIGHT_TEXT_Y 196
+#define SP_HINT_Y      214
+#define SP_BTN_CY      292
+#define SP_BTN_R       62
+#define SP_BTN_PRIV_CX SP_CX
+
+#define SP_ARC_HIT_DY  10
+#define SP_VOL_HIT_IN  124
+#define SP_VOL_HIT_OUT 160
+
+#define SP_C_CYAN      0x07FF
+#define SP_C_CYAN_DIM  0x0330
+#define SP_C_INK       0xF79E   /* cool white: never pure, never clinical */
+#define SP_C_GREY      0x8C71
+#define SP_C_AMBER     0xFD20
+#define SP_C_GOLD      0xFEA0
+#define SP_C_GOLD_DIM  0x6300
+#define SP_C_TRACK     0x2124
+#define SP_C_PLATE     0x1082
+#define SP_C_VIOLET    0xA81F
+
+/* Q15 sine, quarter wave, mirrored. 130 bytes of rodata buys every arc in
+ * this layer with no float, no libm, and no atan anywhere. */
+static const int16_t s_sp_sin[65] = {
+        0,   804,  1608,  2410,  3212,  4011,  4808,  5602,
+     6393,  7179,  7962,  8739,  9512, 10278, 11039, 11793,
+    12539, 13279, 14010, 14732, 15446, 16151, 16846, 17530,
+    18204, 18868, 19519, 20159, 20787, 21403, 22005, 22594,
+    23170, 23731, 24279, 24811, 25329, 25832, 26319, 26790,
+    27245, 27683, 28105, 28510, 28898, 29268, 29621, 29956,
+    30273, 30571, 30852, 31113, 31356, 31580, 31785, 31971,
+    32137, 32285, 32412, 32521, 32609, 32678, 32728, 32757,
+    32767,
+};
+
+static int sp_sin(int a)
+{
+    a &= 255;
+    if (a <= 64) {
+        return s_sp_sin[a];
+    }
+    if (a <= 128) {
+        return s_sp_sin[128 - a];
+    }
+    if (a <= 192) {
+        return -s_sp_sin[a - 128];
+    }
+    return -s_sp_sin[256 - a];
+}
+
+static inline int sp_cos(int a)
+{
+    return sp_sin(a + 64);
+}
+
+/* Integer square root by the classic restoring shift-and-subtract. The seed
+ * is 4^8, which covers every radius the shell can ask about (214^2 = 45796). */
+static int sp_isqrt(int v)
+{
+    if (v <= 0) {
+        return 0;
+    }
+    int rem = v, root = 0, bit = 1 << 16;
+    while (bit > rem) {
+        bit >>= 2;
+    }
+    while (bit != 0) {
+        if (rem >= root + bit) {
+            rem -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+    return root;
+}
+
+/* THE round safe-area guard. Folds [*xlo, *xhi] into both the panel and the
+ * shell circle for this row; false means the row has nothing to draw. */
+static bool sp_clip(int y, int *xlo, int *xhi)
+{
+    const int dy = y - SP_CY;
+    const int d2 = SP_R_SHELL * SP_R_SHELL - dy * dy;
+    if (d2 <= 0) {
+        return false;
+    }
+    const int half = sp_isqrt(d2);
+    if (*xlo < SP_CX - half) {
+        *xlo = SP_CX - half;
+    }
+    if (*xhi > SP_CX + half) {
+        *xhi = SP_CX + half;
+    }
+    if (*xlo < 0) {
+        *xlo = 0;
+    }
+    if (*xhi > HUD_W - 1) {
+        *xhi = HUD_W - 1;
+    }
+    return *xlo <= *xhi;
+}
+
+/* An angular span held as two edge normals, so testing a pixel is two
+ * multiplies and two compares — no atan2, no division, no float. Spans are
+ * always measured about the panel axis. */
+typedef struct {
+    int c0, s0, c1, s1;
+} sp_span_t;
+
+static void sp_span_set(sp_span_t *sp, int a0, int a1)
+{
+    sp->c0 = sp_cos(a0);
+    sp->s0 = sp_sin(a0);
+    sp->c1 = sp_cos(a1);
+    sp->s1 = sp_sin(a1);
+}
+
+static inline bool sp_in_span(const sp_span_t *sp, int dx, int dy)
+{
+    return (sp->c0 * dy - sp->s0 * dx) >= 0 && (dx * sp->s1 - dy * sp->c1) >= 0;
+}
+
+/* One primitive covers ring, arc, disc and button: rin <= 0 means filled,
+ * span == NULL means the whole turn. */
+static void sp_annulus_row(uint16_t *row, int y, int cx, int cy, int rin,
+                           int rout, const sp_span_t *span, uint16_t px)
+{
+    const int dy = y - cy;
+    const int out = rout * rout - dy * dy;
+    if (out <= 0) {
+        return;
+    }
+    const int xo = sp_isqrt(out);
+    const int in2 = rin > 0 ? rin * rin - dy * dy : -1;
+    const int xi = in2 > 0 ? sp_isqrt(in2) : -1;
+    const int sdy = y - SP_CY;
+    for (int side = 0; side < 2; ++side) {
+        int lo, hi;
+        if (xi < 0) {
+            if (side != 0) {
+                break;
+            }
+            lo = cx - xo;
+            hi = cx + xo;
+        } else if (side == 0) {
+            lo = cx - xo;
+            hi = cx - xi;
+        } else {
+            lo = cx + xi;
+            hi = cx + xo;
+        }
+        if (!sp_clip(y, &lo, &hi)) {
+            continue;
+        }
+        if (span == NULL) {
+            for (int x = lo; x <= hi; ++x) {
+                row[x] = px;
+            }
+        } else {
+            for (int x = lo; x <= hi; ++x) {
+                if (sp_in_span(span, x - cx, sdy)) {
+                    row[x] = px;
+                }
+            }
+        }
+    }
+}
+
+static void sp_dot_row(uint16_t *row, int y, int cx, int cy, int n, uint16_t px)
+{
+    const int half = n / 2;
+    if (y < cy - half || y > cy - half + n - 1) {
+        return;
+    }
+    int lo = cx - half, hi = cx - half + n - 1;
+    if (!sp_clip(y, &lo, &hi)) {
+        return;
+    }
+    for (int x = lo; x <= hi; ++x) {
+        row[x] = px;
+    }
+}
+
+/* Reuses the surface layer's 5x7 glyph sampler: one font on the glass, and
+ * the shell inherits its exact metrics for free. */
+static void sp_text_row(uint16_t *row, int y, const char *text, int len,
+                        int x0, int y0, int scale, uint16_t px)
+{
+    if (len <= 0 || y < y0 || y >= y0 + 7 * scale) {
+        return;
+    }
+    int lo = x0, hi = x0 + 6 * scale * len - 1;
+    if (!sp_clip(y, &lo, &hi)) {
+        return;
+    }
+    for (int x = lo; x <= hi; ++x) {
+        if (surface_text_pixel(text, (size_t)len, x, y, x0, y0, scale)) {
+            row[x] = px;
+        }
+    }
+}
+
+static inline int sp_text_cx(int len, int scale, int ox)
+{
+    return SP_CX + ox - (6 * scale * len) / 2;
+}
+
+static inline int sp_len(const char *s, int cap)
+{
+    int n = 0;
+    while (n < cap && s[n] != '\0') {
+        ++n;
+    }
+    return n;
+}
+
+/* Colour in panel byte order, pre-scaled by the element's own 0..255 fade so
+ * a slide cross-dissolves without ever reading back the frame. */
+static uint16_t sp_tint(const jr_display_ctx_t *ctx, uint16_t native, int st)
+{
+    if (st < 255) {
+        const int r = (((native >> 11) & 0x1F) * st) / 255;
+        const int g = (((native >> 5) & 0x3F) * st) / 255;
+        const int b = ((native & 0x1F) * st) / 255;
+        native = (uint16_t)((r << 11) | (g << 5) | b);
+    }
+    return panel_order_color(ctx, native);
+}
+
+/* Round-clipped backdrop. Identical fold to dim_strip/fade_strip, but bounded
+ * by the shell circle so the veil never darkens the battery rim or the
+ * privacy ring. */
+static void sp_veil(const jr_display_ctx_t *ctx, int y1, int y2,
+                    uint16_t *pixels, int k)
+{
+    const bool swap = ctx->board.swap_color_bytes;
+    for (int y = y1; y < y2; ++y) {
+        int lo = 0, hi = HUD_W - 1;
+        if (!sp_clip(y, &lo, &hi)) {
+            continue;
+        }
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        if (k >= 32) {
+            if (swap) {
+                for (int x = lo; x <= hi; ++x) {
+                    row[x] = hud_dim565(row[x], true);
+                }
+            } else {
+                for (int x = lo; x <= hi; ++x) {
+                    row[x] = hud_dim565(row[x], false);
+                }
+            }
+        } else {
+            for (int x = lo; x <= hi; ++x) {
+                row[x] = hud_fade565(row[x], swap, k);
+            }
+        }
+    }
+}
+
+/* DESK: a progress ring around the number, broken into <=96-unit segments
+ * because a span is a wedge intersection and a wedge cannot exceed a half
+ * turn. Segmenting also gives the ring visible joints, which reads as
+ * mechanical travel rather than a plain pie. */
+static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
+                          uint16_t *pixels, int ox, int st)
+{
+    const uint32_t w = __atomic_load_n(&s_desk_word, __ATOMIC_ACQUIRE);
+    int prog = (int)(w & 0xFFu);
+    if (prog > 100) {
+        prog = 100;
+    }
+    const jr_display_agent_state_t state =
+        (jr_display_agent_state_t)((w >> 8) & 0xFu);
+    const uint16_t track = sp_tint(ctx, SP_C_TRACK, st);
+    const uint16_t fill = sp_tint(ctx, state == JR_DISPLAY_AGENT_NONE
+                                           ? SP_C_CYAN
+                                           : agent_native_color(state), st);
+    const uint16_t ink = sp_tint(ctx, SP_C_INK, st);
+    const int cx = SP_CX + ox;
+
+    char num[6];
+    const int len = sp_pct(num, 0, (int)sizeof num, (uint32_t)prog);
+    const int tx = cx - (18 * len) / 2;
+
+    sp_span_t seg[3];
+    int nseg = 0;
+    int sweep = (prog * 256) / 100;
+    int start = SP_A_TOP;
+    while (sweep > 0 && nseg < 3) {
+        const int step = sweep > 96 ? 96 : sweep;
+        sp_span_set(&seg[nseg++], start, start + step);
+        start += step;
+        sweep -= step;
+    }
+
+    for (int y = y1; y < y2; ++y) {
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        sp_annulus_row(row, y, cx, SP_CY, SP_FOCAL_IN, SP_FOCAL_OUT, NULL, track);
+        for (int i = 0; i < nseg; ++i) {
+            sp_annulus_row(row, y, cx, SP_CY, SP_FOCAL_IN, SP_FOCAL_OUT,
+                           &seg[i], fill);
+        }
+        sp_text_row(row, y, num, len, tx, SP_FOCAL_TEXT_Y, 3, ink);
+    }
+}
+
+/* TOOLS: one petal per capability around a live core. The most recent petal
+ * is thicker and lit, so "what did it just do" is answered at a glance. */
+static void sp_focal_tools(const jr_display_ctx_t *ctx, int y1, int y2,
+                           uint16_t *pixels, int ox, int st)
+{
+    const uint32_t w = __atomic_load_n(&s_tools_word, __ATOMIC_ACQUIRE);
+    int count = (int)(w & 0xFFu);
+    if (count > JR_DISPLAY_TOOLS_MAX) {
+        count = JR_DISPLAY_TOOLS_MAX;
+    }
+    const int recent = (int)((w >> 8) & 0xFFu);
+    const bool muted = sp_privacy_muted();
+    const uint16_t hot = sp_tint(ctx, muted ? SP_C_GOLD : SP_C_CYAN, st);
+    const uint16_t cool = sp_tint(ctx, muted ? SP_C_GOLD_DIM : SP_C_CYAN_DIM, st);
+    const int cx = SP_CX + ox;
+
+    sp_span_t petal[JR_DISPLAY_TOOLS_MAX] = {{0, 0, 0, 0}};
+    for (int i = 0; i < count; ++i) {
+        const int c = SP_A_TOP + (i * 256) / count;
+        sp_span_set(&petal[i], c - 26, c + 26);
+    }
+
+    for (int y = y1; y < y2; ++y) {
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        if (count == 0) {
+            sp_annulus_row(row, y, cx, SP_CY, SP_FOCAL_IN, SP_FOCAL_OUT,
+                           NULL, cool);
+        } else {
+            for (int i = 0; i < count; ++i) {
+                const bool on = i == recent;
+                sp_annulus_row(row, y, cx, SP_CY, on ? 68 : SP_FOCAL_IN,
+                               on ? 104 : SP_FOCAL_OUT, &petal[i],
+                               on ? hot : cool);
+            }
+        }
+        sp_annulus_row(row, y, cx, SP_CY, 0, 14, NULL, hot);
+    }
+}
+
+/* The update ring's colour IS its meaning, so the palette is the contract:
+ * cyan is progress, violet is on-trial, amber is "look at this", red is
+ * broken. Nothing here is gold — gold is privacy's alone. */
+static uint16_t sp_ota_native(jr_display_ota_state_t state)
+{
+    switch (state) {
+    case JR_DISPLAY_OTA_PREFLIGHT:  return SP_C_CYAN_DIM;
+    case JR_DISPLAY_OTA_RECEIVING:  return SP_C_CYAN;
+    case JR_DISPLAY_OTA_PROBATION:  return SP_C_VIOLET;
+    case JR_DISPLAY_OTA_FAILED:     return 0xF800;   /* red */
+    case JR_DISPLAY_OTA_BLOCKED:
+    case JR_DISPLAY_OTA_ROLLED_BACK:
+    default:                        return SP_C_AMBER;
+    }
+}
+
+/* SETTINGS: four cardinal gauges around a privacy heart. Real numbers — the
+ * arcs are volume, brightness, link quality and free memory, in that order
+ * clockwise from noon. */
+static void sp_focal_settings(const jr_display_ctx_t *ctx, int y1, int y2,
+                              uint16_t *pixels, int ox, int st)
+{
+    const uint32_t w = __atomic_load_n(&s_status_word, __ATOMIC_ACQUIRE);
+    int vol = (int)(w & 0xFFu);
+    int brt = (int)__atomic_load_n(&s_brightness_want, __ATOMIC_ACQUIRE);
+    if (vol > 100) {
+        vol = 100;
+    }
+    if (brt > 100) {
+        brt = 100;
+    }
+    const int net = sp_net_quality((int)(int8_t)((w >> 16) & 0xFFu),
+                                   (w & (1u << 8)) != 0u);
+    const int value[4] = { vol, brt, net,
+                           sp_mem_quality(diag_load(&s_status_free_kib)) };
+    const uint16_t hue[4] = {
+        sp_tint(ctx, SP_C_CYAN, st),
+        sp_tint(ctx, SP_C_AMBER, st),
+        sp_tint(ctx, net > 0 ? 0x07E0 : 0xF800, st),
+        sp_tint(ctx, SP_C_VIOLET, st),
+    };
+    const uint16_t track = sp_tint(ctx, SP_C_TRACK, st);
+    const bool muted = sp_privacy_muted();
+    const uint16_t heart = sp_tint(ctx, muted ? SP_C_GOLD : SP_C_CYAN, st);
+    const int cx = SP_CX + ox;
+
+    sp_span_t bed[4], fill[4] = {{0, 0, 0, 0}};
+    int filled[4];
+    for (int i = 0; i < 4; ++i) {
+        const int c = SP_A_TOP + i * 64;
+        sp_span_set(&bed[i], c - 26, c + 26);
+        filled[i] = (value[i] * 52) / 100;
+        if (filled[i] > 0) {
+            sp_span_set(&fill[i], c - 26, c - 26 + filled[i]);
+        }
+    }
+
+    /* Firmware update ring, concentric with the gauges at r140-154: outside
+     * the headline's worst-case glyph corner (r131.5) and well inside
+     * JR_DISPLAY_SAFE_R, so it reads at arm's length without crowding either.
+     * Segmented at 96 units because a span is a wedge intersection and a
+     * wedge cannot exceed a half turn; the joints also read as mechanical
+     * travel rather than as a pie. */
+    const uint32_t ota = __atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE);
+    const jr_display_ota_state_t ota_state =
+        (jr_display_ota_state_t)(ota & 0xFu);
+    const bool ota_on = sp_ota_ringing(ota_state);
+    const uint16_t ota_px = sp_tint(ctx, sp_ota_native(ota_state), st);
+    sp_span_t ota_seg[3];
+    int ota_nseg = 0;
+    if (ota_on) {
+        int sweep =
+            (sp_ota_fill(ota_state, (int)((ota >> 8) & 0xFFu)) * 256) / 100;
+        int start = SP_A_TOP;
+        while (sweep > 0 && ota_nseg < 3) {
+            const int step = sweep > 96 ? 96 : sweep;
+            sp_span_set(&ota_seg[ota_nseg++], start, start + step);
+            start += step;
+            sweep -= step;
+        }
+    }
+
+    for (int y = y1; y < y2; ++y) {
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        if (ota_on) {
+            sp_annulus_row(row, y, cx, SP_CY, SP_OTA_IN, SP_OTA_OUT, NULL,
+                           track);
+            for (int i = 0; i < ota_nseg; ++i) {
+                sp_annulus_row(row, y, cx, SP_CY, SP_OTA_IN, SP_OTA_OUT,
+                               &ota_seg[i], ota_px);
+            }
+        }
+        for (int i = 0; i < 4; ++i) {
+            sp_annulus_row(row, y, cx, SP_CY, SP_FOCAL_IN, SP_FOCAL_OUT,
+                           &bed[i], track);
+            if (filled[i] > 0) {
+                sp_annulus_row(row, y, cx, SP_CY, SP_FOCAL_IN, SP_FOCAL_OUT,
+                               &fill[i], hue[i]);
+            }
+        }
+        if (muted) {
+            sp_annulus_row(row, y, cx, SP_CY, 26, 32, NULL, heart);
+            const int dy = y - SP_CY;
+            int lo = cx - 34, hi = cx + 34;
+            if (sp_clip(y, &lo, &hi)) {
+                for (int x = lo; x <= hi; ++x) {
+                    const int dx = x - cx;
+                    const int d = dx - dy;
+                    if (dx * dx + dy * dy <= 34 * 34 && d <= 2 && d >= -2) {
+                        row[x] = heart;
+                    }
+                }
+            }
+        } else {
+            sp_annulus_row(row, y, cx, SP_CY, 0, 20, NULL, heart);
+        }
+    }
+}
+
+/* The short, useful label under the focal object. Callers can override it per
+ * space; SETTINGS falls back to its live numbers, which beat any noun. */
+static const char *sp_headline(int space)
+{
+    if (s_space_head[space][0] != '\0') {
+        return s_space_head[space];
+    }
+    switch (space) {
+    case JR_DISPLAY_SPACE_DESK:
+        return s_desk_task[0] != '\0' ? s_desk_task : "NO TASK";
+    case JR_DISPLAY_SPACE_TOOLS: {
+        const uint32_t w = __atomic_load_n(&s_tools_word, __ATOMIC_ACQUIRE);
+        const uint32_t recent = (w >> 8) & 0xFFu;
+        return recent < (w & 0xFFu) ? s_tool_name[recent] : "TOOLS";
+    }
+    case JR_DISPLAY_SPACE_SETTINGS:
+        return s_settings_label;
+    default:
+        return "";
+    }
+}
+
+static void sp_draw_space(const jr_display_ctx_t *ctx, int y1, int y2,
+                          uint16_t *pixels, int space, int ox, int st)
+{
+    /* JARVIS is the face itself: the shell contributes nothing, which is what
+     * keeps every existing scene bit-identical at rest. */
+    if (space == JR_DISPLAY_SPACE_JARVIS || st <= 0) {
+        return;
+    }
+    switch (space) {
+    case JR_DISPLAY_SPACE_DESK:
+        sp_focal_desk(ctx, y1, y2, pixels, ox, st);
+        break;
+    case JR_DISPLAY_SPACE_TOOLS:
+        sp_focal_tools(ctx, y1, y2, pixels, ox, st);
+        break;
+    default:
+        sp_focal_settings(ctx, y1, y2, pixels, ox, st);
+        break;
+    }
+    const char *label = sp_headline(space);
+    const int len = sp_len(label, SP_LABEL_CAP - 1);
+    if (len <= 0) {
+        return;
+    }
+    const uint16_t ink = sp_tint(ctx, SP_C_INK, st);
+    const int tx = sp_text_cx(len, 2, ox);
+    for (int y = y1; y < y2; ++y) {
+        sp_text_row(pixels + (size_t)(y - y1) * HUD_W, y, label, len, tx,
+                    SP_LABEL_Y, 2, ink);
+    }
+}
+
+/* The context sheet: label left, value right, one fact per row. It replaces
+ * the focal object rather than crowding it, and it dims its own band a second
+ * time so the rows read against whatever was behind them. */
+static void sp_draw_detail(const jr_display_ctx_t *ctx, int y1, int y2,
+                           uint16_t *pixels, int st)
+{
+    if (st <= 0) {
+        return;
+    }
+    const int ys = y1 > SP_SHEET_Y0 ? y1 : SP_SHEET_Y0;
+    const int ye = (y2 - 1) < SP_SHEET_Y1 ? (y2 - 1) : SP_SHEET_Y1;
+    if (ys > ye) {
+        return;
+    }
+    const bool swap = ctx->board.swap_color_bytes;
+    const int k = (st * 32) / 255;
+    const uint16_t head = sp_tint(ctx, SP_C_CYAN, st);
+    const uint16_t key = sp_tint(ctx, SP_C_GREY, st);
+    const uint16_t val = sp_tint(ctx, SP_C_INK, st);
+    const int hlen = sp_len(s_detail_head, SP_LABEL_CAP - 1);
+
+    for (int y = ys; y <= ye; ++y) {
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        int lo = 0, hi = HUD_W - 1;
+        if (sp_clip(y, &lo, &hi)) {
+            if (k >= 32) {
+                for (int x = lo; x <= hi; ++x) {
+                    row[x] = hud_dim565(row[x], swap);
+                }
+            } else if (k > 0) {
+                for (int x = lo; x <= hi; ++x) {
+                    row[x] = hud_fade565(row[x], swap, k);
+                }
+            }
+        }
+        sp_text_row(row, y, s_detail_head, hlen, sp_text_cx(hlen, 2, 0),
+                    SP_SHEET_HEAD_Y, 2, head);
+        for (int i = 0; i < s_detail_rows; ++i) {
+            const int ry = SP_SHEET_ROW_Y + i * SP_SHEET_ROW_DY;
+            if (y < ry || y >= ry + 14) {
+                continue;
+            }
+            const int klen = sp_len(s_detail_label[i], SP_COL_MAX - 1);
+            const int vlen = sp_len(s_detail_value[i], SP_COL_MAX - 1);
+            sp_text_row(row, y, s_detail_label[i], klen, SP_SHEET_LEFT, ry, 2,
+                        key);
+            sp_text_row(row, y, s_detail_value[i], vlen,
+                        SP_SHEET_RIGHT - 12 * vlen, ry, 2, val);
+        }
+    }
+}
+
+
+/* The minimal voice shade: volume plus an explicit MUTE/LISTEN action. */
+static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
+                          uint16_t *pixels, int st)
+{
+    if (st <= 0) {
+        return;
+    }
+    const uint32_t w = __atomic_load_n(&s_status_word, __ATOMIC_ACQUIRE);
+    int vol = (int)(w & 0xFFu);
+    if (vol > 100) {
+        vol = 100;
+    }
+    const bool muted = sp_privacy_muted();
+    const uint16_t track = sp_tint(ctx, SP_C_TRACK, st);
+    const uint16_t cyan = sp_tint(ctx, SP_C_CYAN, st);
+    const uint16_t gold = sp_tint(ctx, SP_C_GOLD, st);
+    const uint16_t amber = sp_tint(ctx, SP_C_AMBER, st);
+    const uint16_t grey = sp_tint(ctx, SP_C_GREY, st);
+    const uint16_t plate = sp_tint(ctx, SP_C_PLATE, st);
+    const uint16_t priv = muted ? gold : cyan;
+
+    const int vspan = (vol * SP_ARC_SPAN) / 100;
+    sp_span_t track_span, vfill;
+    sp_span_set(&track_span, SP_ARC_A0, SP_ARC_A1);
+    if (vspan > 0) {
+        sp_span_set(&vfill, SP_ARC_A0, SP_ARC_A0 + vspan);
+    }
+
+    const int vcap_y = SP_CY + ((sp_sin(SP_ARC_A0) * SP_VOL_CAP_R) >> 15) - 7;
+    const int vcap_lx = SP_CX + ((sp_cos(SP_ARC_A0) * SP_VOL_CAP_R) >> 15) - 6;
+    const int vcap_rx = SP_CX + ((sp_cos(SP_ARC_A1) * SP_VOL_CAP_R) >> 15) - 6;
+
+    static const char k_hint[] = "PWR LISTEN  BOOT CLOSE";
+    const int hintlen = (int)(sizeof k_hint - 1U);
+    const char *plabel = muted ? "LISTEN" : "MUTE";
+    const int plen = muted ? 6 : 4;
+    const int vlen = sp_len(s_shade_vol, SP_COL_MAX - 1);
+    const int llen = sp_len(s_shade_light, SP_COL_MAX - 1);
+
+
+    for (int y = y1; y < y2; ++y) {
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        sp_annulus_row(row, y, SP_CX, SP_CY, SP_VOL_IN, SP_VOL_OUT,
+                       &track_span, track);
+        if (vspan > 0) {
+            sp_annulus_row(row, y, SP_CX, SP_CY, SP_VOL_IN, SP_VOL_OUT,
+                           &vfill, cyan);
+        }
+
+
+        sp_text_row(row, y, "-", 1, vcap_lx, vcap_y, 2, cyan);
+        sp_text_row(row, y, "+", 1, vcap_rx, vcap_y, 2, cyan);
+
+        sp_text_row(row, y, s_shade_vol, vlen, sp_text_cx(vlen, 2, 0),
+                    SP_VOL_TEXT_Y, 2, cyan);
+        sp_text_row(row, y, s_shade_light, llen, sp_text_cx(llen, 2, 0),
+                    SP_LIGHT_TEXT_Y, 2, amber);
+        sp_text_row(row, y, k_hint, hintlen, sp_text_cx(hintlen, 2, 0),
+                    SP_HINT_Y, 2, grey);
+
+        sp_annulus_row(row, y, SP_BTN_PRIV_CX, SP_BTN_CY, 0, SP_BTN_R - 4,
+                       NULL, plate);
+        sp_annulus_row(row, y, SP_BTN_PRIV_CX, SP_BTN_CY, SP_BTN_R - 3,
+                       SP_BTN_R, NULL, priv);
+        if (muted) {
+            const int dy = y - SP_BTN_CY;
+            int lo = SP_BTN_PRIV_CX - SP_BTN_R, hi = SP_BTN_PRIV_CX + SP_BTN_R;
+            if (sp_clip(y, &lo, &hi)) {
+                for (int x = lo; x <= hi; ++x) {
+                    const int dx = x - SP_BTN_PRIV_CX;
+                    const int d = dx - dy;
+                    if (dx * dx + dy * dy <= (SP_BTN_R - 6) * (SP_BTN_R - 6) &&
+                        d <= 2 && d >= -2) {
+                        row[x] = gold;
+                    }
+                }
+            }
+        }
+        sp_text_row(row, y, plabel, plen,
+                    sp_text_cx(plen, 2, SP_BTN_PRIV_CX - SP_CX),
+                    SP_BTN_CY - 7, 2, priv);
+    }
+}
+
+/* The orbital page indicator: four marks on a short arc at the top of the
+ * dial. The lit mark travels between them on the SAME eased progress the
+ * content slides on, so the indicator IS the transition rather than a caption
+ * on it. Straight interpolation is exact because the space ring is clamped,
+ * never wrapped. Gold when muted — privacy outranks position. */
+static void sp_draw_orbit(const jr_display_ctx_t *ctx, int y1, int y2,
+                          uint16_t *pixels, int st)
+{
+    const bool muted = sp_privacy_muted();
+    const uint16_t rail = sp_tint(ctx, SP_C_PLATE, st);
+    const uint16_t cool = sp_tint(ctx, muted ? SP_C_GOLD_DIM : SP_C_CYAN_DIM, st);
+    const uint16_t hot = sp_tint(ctx, muted ? SP_C_GOLD : SP_C_CYAN, st);
+
+    const int a_from = SP_A_TOP + (2 * (int)s_space_from - 3) * 7;
+    const int a_to = SP_A_TOP + (2 * (int)s_space_to - 3) * 7;
+    const int a_act = a_from + ((a_to - a_from) * s_space_ease) / 256;
+
+    sp_span_t rail_span, act;
+    sp_span_set(&rail_span, SP_A_TOP - 30, SP_A_TOP + 30);
+    sp_span_set(&act, a_act - 5, a_act + 5);
+
+    for (int y = y1; y < y2; ++y) {
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        sp_annulus_row(row, y, SP_CX, SP_CY, SP_ORB_TRACK_IN, SP_ORB_TRACK_OUT,
+                       &rail_span, rail);
+        for (int i = 0; i < JR_DISPLAY_SPACE_COUNT; ++i) {
+            const int a = SP_A_TOP + (2 * i - 3) * 7;
+            sp_dot_row(row, y, SP_CX + ((sp_cos(a) * SP_ORB_R) >> 15),
+                       SP_CY + ((sp_sin(a) * SP_ORB_R) >> 15), 5, cool);
+        }
+        sp_annulus_row(row, y, SP_CX, SP_CY, SP_ORB_MARK_IN, SP_ORB_MARK_OUT,
+                       &act, hot);
+    }
+}
+
+/* The whole shell for one strip, in z-order: veil, the outgoing and incoming
+ * spaces cross-dissolving as they slide, context sheet, shade, then an orbital
+ * position marker that fades out with the side surfaces under the shade. */
+static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
+                                uint16_t *pixels)
+{
+    if (!s_space_on) {
+        return;            /* JARVIS at rest: the layer costs one compare */
+    }
+    const int veil = (s_space_veil * 32) >> 8;
+    if (veil > 0) {
+        sp_veil(ctx, y1, y2, pixels, veil);
+    }
+    const int shade = (s_shade_ease * 255) / 256;
+    const int under = 255 - shade;
+    if (under > 0) {
+        const int e = s_space_ease;
+        const int focal = (under * (256 - s_detail_ease)) / 256;
+        if (focal > 0) {
+            const int slide = (SP_SLIDE_PX * e) / 256;
+            if (e < 256) {
+                sp_draw_space(ctx, y1, y2, pixels, s_space_from,
+                              -s_space_dir * slide,
+                              (focal * (256 - e)) / 256);
+            }
+            sp_draw_space(ctx, y1, y2, pixels, s_space_to,
+                          s_space_dir * (SP_SLIDE_PX - slide),
+                          (focal * e) / 256);
+        }
+        if (s_detail_ease > 0) {
+            sp_draw_detail(ctx, y1, y2, pixels,
+                           (under * s_detail_ease) / 256);
+        }
+    }
+    if (shade > 0) {
+        sp_draw_shade(ctx, y1, y2, pixels, shade);
+    }
+    sp_draw_orbit(ctx, y1, y2, pixels, under);
 }
 
 static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
@@ -1536,6 +2826,7 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
         .amp      = (uint8_t)diag_load(&ctx->requested_amplitude),
         .batt_pct = (uint8_t)(w & 0xFFu),
         .charging = (w & (1u << 8)) != 0u,
+        .privacy_muted = (w & (1u << 9)) != 0u,
         .ox       = (int8_t)((w >> 16) & 0xFFu),
         .oy       = (int8_t)((w >> 24) & 0xFFu),
     };
@@ -1569,9 +2860,19 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
         hud_overlay_choices(pixels, y1, nrows, ctx->board.swap_color_bytes,
                             s_choices, cn, s_choice_selected, as);
     } else {
+        /* The spatial shell owns the glass between the face and the caption:
+         * the four spaces, the context sheet, and the control shade. It is
+         * skipped entirely while an ask is up (the ask owns the glass) and
+         * draws nothing at all in JARVIS at rest. */
+        apply_space_overlay(ctx, y1, y2, pixels);
+
         /* UI-01 clock under the STATE-04 caption: the watch dims the frame,
-         * the caption band dims again over it and carries the status text. */
-        apply_clock_overlay(ctx, y1, y2, pixels);      /* gates itself */
+         * the caption band dims again over it and carries the status text.
+         * The watch is JARVIS's ambient face, so it yields the moment the
+         * shell is presenting rather than fighting it for the centre. */
+        if (!s_space_on) {
+            apply_clock_overlay(ctx, y1, y2, pixels);  /* gates itself */
+        }
         apply_caption_overlay(ctx, y1, y2, pixels);    /* gates on its ease */
         if (ae > 0 && s_ask_shown_n > 0) {
             apply_ask_overlay(ctx, y1, y2, pixels, s_ask_shown_n, ae);
@@ -1593,163 +2894,57 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
     }
 }
 
+/* Operator / agent identity: the outer rim, and nothing else.
+ *
+ * This function used to draw the control shade as well — a rectangular top
+ * drawer with a pull handle, three quick-action pucks and a progress bar,
+ * plus a seven-line gesture legend beneath it. On a round panel the bezel ate
+ * the corners of all of it, and the legend documented a gesture map the
+ * spatial shell replaces. Both moved into the shell, which draws one control
+ * shade in round-native geometry inside JR_DISPLAY_SHELL_R_MAX.
+ *
+ * What stays here is the part that genuinely belongs to the operator rather
+ * than to navigation: eight rim segments at r224-230 in the agent's colour.
+ * That band is OUTSIDE everything the shell can reach and clear of the gold
+ * privacy ring at r221-222, so Agent Link can never be confused with either
+ * the mic state or the space you are in. */
 static void apply_shell_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                                 int x2, int y2, uint16_t *pixels)
 {
-    uint32_t shell = diag_load(&ctx->shell_word);
-    bool shade_open = (shell & JR_DISPLAY_SHELL_SHADE) != 0U;
-    bool agent_active = (shell & JR_DISPLAY_SHELL_AGENT) != 0U;
-    /* The veil rides s_shade_ease so the shade answers its swipe with a
-     * surface, not a stamp; the controls stay gated on the live bit — they
-     * retract instantly and the veil lifts after them, which reads as the
-     * shade closing rather than dissolving. */
-    const int sk = (s_shade_ease * 32) >> 8;
-    const bool veil = sk > 0;
-    if ((!veil && !agent_active) || pixels == NULL) {
+    const uint32_t shell = diag_load(&ctx->shell_word);
+    if ((shell & JR_DISPLAY_SHELL_AGENT) == 0U || pixels == NULL) {
         return;
     }
-    uint8_t progress = shell & JR_DISPLAY_SHELL_PROGRESS;
-    jr_display_agent_state_t agent_state = (jr_display_agent_state_t)
+    const uint8_t progress = shell & JR_DISPLAY_SHELL_PROGRESS;
+    const int completed = progress == 0U ? 0 : ((int)progress * 8 + 99) / 100;
+    if (completed <= 0) {
+        return;
+    }
+    const jr_display_agent_state_t agent_state = (jr_display_agent_state_t)
         ((shell & JR_DISPLAY_SHELL_STATE_MASK) >>
          JR_DISPLAY_SHELL_STATE_SHIFT);
-    uint16_t accent = agent_native_color(agent_state);
-    int completed_segments = progress == 0U
-        ? 0 : ((int)progress * 8 + 99) / 100;
-    int width = x2 - x1;
-    int height = y2 - y1;
-
-    for (int row = 0; row < height; ++row) {
-        int y = y1 + row;
-        for (int col = 0; col < width; ++col) {
-            int x = x1 + col;
-            uint16_t *slot = &pixels[(size_t)row * (size_t)width + (size_t)col];
-            uint16_t native = panel_native(ctx, *slot);
-
-            if (veil && y < 194) {
-                native = (sk >= 32) ? native_darken(native)
-                                    : hud_fade565(native, false, sk);
-            }
-            if (shade_open && y < 194) {
-                /* Pull handle. */
-                if (y >= 14 && y <= 18 && x >= 203 && x <= 262) {
-                    native = 0x7DFF;
-                }
-                /* Three radial quick-action controls: voice, lab, Agent Link. */
-                static const int centers[3] = {145, 233, 321};
-                for (int i = 0; i < 3; ++i) {
-                    int dx = x - centers[i];
-                    int dy = y - 104;
-                    int d2 = dx * dx + dy * dy;
-                    if (d2 >= 21 * 21 && d2 <= 27 * 27) {
-                        native = i == 2 && agent_active ? accent : 0x07FF;
-                    } else if (d2 < 8 * 8) {
-                        native = i == 0 ? 0x07FF : i == 1 ? 0xFD20 : accent;
-                    }
-                }
-                if (y >= 166 && y <= 169 && x >= 92 && x <= 373) {
-                    native = 0x18C3;
-                }
-                if (agent_active && y >= 178 && y <= 184 &&
-                    x >= 112 && x <= 353) {
-                    int filled = 112 + ((int)progress * 241) / 100;
-                    native = x <= filled ? accent : 0x2104;
-                }
-            }
-
-            if (agent_active && completed_segments > 0) {
-                int dx = 2 * x - ((int)ctx->board.width - 1);
-                int dy = 2 * y - ((int)ctx->board.height - 1);
-                int r2 = dx * dx + dy * dy;
-                if (r2 >= (2 * 224) * (2 * 224) &&
-                    r2 <= (2 * 230) * (2 * 230)) {
-                    int sector = challenge_sector_from_vector(dx, dy);
-                    if (sector < completed_segments) {
-                        native = accent;
-                    }
-                }
-            }
-            *slot = panel_order_color(ctx, native);
-        }
-    }
-}
-
-/* W4 shade gesture guide: the glass teaches its own language. The owner
- * learned every gesture over chat — a design failure for a product whose
- * whole point is the glass. While the shade is open, the region under it
- * (otherwise just live face) becomes the legend: a chord-clipped dim band
- * from the shade's edge down to the caption band, six centred scale-2 lines,
- * gesture in cyan and action in white so the language reads as call and
- * response. It rides the shade's ease, so legend and veil surface and sink
- * as one gesture-answer. Static content, zero state beyond the shared ease;
- * strips compose per-pixel exactly like the shell overlay above. */
-#define JR_GUIDE_Y0        194   /* meets the shade's bottom edge            */
-#define JR_GUIDE_Y1        382   /* stops above the caption band (386..425)  */
-#define JR_GUIDE_TEXT_Y0   209   /* seven 14 px lines centred in the band    */
-#define JR_GUIDE_LINE_STEP 24
-
-/* The last line teaches the exit. The reader is already inside the shade,
- * but tonight's failure theme was undiscoverable gestures — the one place a
- * user is guaranteed to be reading is the one place the way out must be
- * written down. */
-static const struct {
-    const char *text;
-    uint8_t gesture_chars;       /* chars before " - ": rendered cyan */
-    uint8_t chars;
-} s_guide_lines[7] = {
-    { "TAP - STOP / ATTENTION", 3, 22 },
-    { "TAP TAP - SUMMON", 7, 16 },
-    { "HOLD - MUTE / UNMUTE", 4, 20 },
-    { "SWIPE LEFT - GLANCE", 10, 19 },
-    { "SWIPE RIGHT - WATCH", 11, 19 },
-    { "FLIP DOWN - PRIVACY", 9, 19 },
-    { "SWIPE UP - CLOSE", 8, 16 },
-};
-
-static void apply_guide_overlay(jr_display_ctx_t *ctx, int x1, int y1,
-                                int x2, int y2, uint16_t *pixels)
-{
-    const int e = s_shade_ease;
-    const int sk = (e * 32) >> 8;
-    if (sk <= 0 || pixels == NULL) {
-        return;
-    }
-    int ys = y1 > JR_GUIDE_Y0 ? y1 : JR_GUIDE_Y0;
-    int ye = (y2 - 1) < JR_GUIDE_Y1 ? (y2 - 1) : JR_GUIDE_Y1;
-    if (ys > ye) {
-        return;                    /* strip misses the band: one compare */
-    }
-    const int c = e > 255 ? 255 : e;
-    const uint16_t px_action = panel_order_color(
-        ctx, (uint16_t)(((c & 0xF8) << 8) | ((c & 0xFC) << 3) | (c >> 3)));
-    const uint16_t px_gesture = panel_order_color(
-        ctx, (uint16_t)((((63 * c / 255) & 0x3F) << 5) | (31 * c / 255)));
+    /* Written straight in panel order: the old path round-tripped every pixel
+     * of every strip through panel_native() to composite a shade that is no
+     * longer drawn here. */
+    const uint16_t accent = panel_order_color(ctx,
+                                              agent_native_color(agent_state));
     const int width = x2 - x1;
-    for (int y = ys; y <= ye; ++y) {
+    const int rim_out = 2 * 230, rim_in = 2 * 224;
+
+    for (int y = y1; y < y2; ++y) {
+        const int dy = 2 * y - ((int)ctx->board.height - 1);
+        if (dy * dy > rim_out * rim_out) {
+            continue;                  /* strip row misses the rim entirely */
+        }
         uint16_t *row = pixels + (size_t)(y - y1) * (size_t)width;
-        const int half = hud_glass_chord(y);
-        int xlo = 233 - half;
-        int xhi = 233 + half;
-        if (xlo < x1)     xlo = x1;
-        if (xhi > x2 - 1) xhi = x2 - 1;
-        for (int x = xlo; x <= xhi; ++x) {
-            row[x - x1] = hud_fade565(row[x - x1],
-                                      ctx->board.swap_color_bytes, sk);
-        }
-        const int li = (y - JR_GUIDE_TEXT_Y0) / JR_GUIDE_LINE_STEP;
-        const int ly = JR_GUIDE_TEXT_Y0 + li * JR_GUIDE_LINE_STEP;
-        if (y < JR_GUIDE_TEXT_Y0 || li > 6 || y >= ly + 14) {
-            continue;
-        }
-        const char *text = s_guide_lines[li].text;
-        const int len = s_guide_lines[li].chars;
-        const int glen = s_guide_lines[li].gesture_chars;
-        const int tx = (HUD_W - 12 * len) / 2;
-        for (int x = tx; x < tx + 12 * len; ++x) {
-            if (x < x1 || x >= x2) {
+        for (int col = 0; col < width; ++col) {
+            const int dx = 2 * (x1 + col) - ((int)ctx->board.width - 1);
+            const int r2 = dx * dx + dy * dy;
+            if (r2 < rim_in * rim_in || r2 > rim_out * rim_out) {
                 continue;
             }
-            if (surface_text_pixel(text, (size_t)len, x, y, tx, ly, 2)) {
-                row[x - x1] = ((x - tx) / 12) < glen ? px_gesture : px_action;
+            if (challenge_sector_from_vector(dx, dy) < completed) {
+                row[col] = accent;
             }
         }
     }
@@ -1867,7 +3062,6 @@ static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
     if (diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF) {
         apply_hud_overlay(ctx, x1, y1, x2, y2, outbound);
         apply_shell_overlay(ctx, x1, y1, x2, y2, outbound);
-        apply_guide_overlay(ctx, x1, y1, x2, y2, outbound);
         apply_surface_overlay(ctx, x1, y1, x2, y2, outbound);
     }
     diag_inc(&ctx->flush_submissions);
@@ -1965,8 +3159,12 @@ static esp_err_t program_segment(jr_display_ctx_t *ctx, jr_face_t face,
     return err;
 }
 
-static esp_err_t apply_face(jr_display_ctx_t *ctx, jr_face_t face, uint8_t amplitude)
+static esp_err_t apply_face(jr_display_ctx_t *ctx, jr_face_t face,
+                            uint8_t amplitude, bool *stale)
 {
+    if (stale != NULL) {
+        *stale = false;
+    }
     uint8_t bucket = (uint8_t)(((uint32_t)amplitude * JR_DISPLAY_AMP_BUCKETS + 127U) /
                                255U);
     if (bucket > JR_DISPLAY_AMP_BUCKETS) {
@@ -1981,6 +3179,18 @@ static esp_err_t apply_face(jr_display_ctx_t *ctx, jr_face_t face, uint8_t ampli
     if (face > JR_FACE_ERROR) {         /* defensive: cb clamps already */
         face = JR_FACE_ERROR;
     }
+    const uint32_t requested_before =
+        __atomic_load_n(&ctx->requested_word, __ATOMIC_ACQUIRE);
+    const jr_face_t latest_before = (jr_face_t)(
+        (requested_before & JR_DISPLAY_CMD_FACE_MASK) >>
+        JR_DISPLAY_CMD_FACE_SHIFT);
+    if ((requested_before & JR_DISPLAY_CMD_BLANK) != 0U ||
+        latest_before != face) {
+        if (stale != NULL) {
+            *stale = true;
+        }
+        return ESP_OK;
+    }
     jr_display_clip_t *clip = &ctx->clips[face];
     if (clip->data == NULL) {
         esp_err_t load_err = clip_load(face, clip);
@@ -1988,6 +3198,20 @@ static esp_err_t apply_face(jr_display_ctx_t *ctx, jr_face_t face, uint8_t ampli
             diag_inc(&ctx->asset_load_failures);
             return load_err;
         }
+    }
+    /* Asset reads can take longer than a very short Gemini turn. Do not show
+     * the completed turn's stale face after the request already returned to
+     * Listening; leave the current face running and consume the latest word
+     * on the next presenter pass. */
+    const uint32_t requested =
+        __atomic_load_n(&ctx->requested_word, __ATOMIC_ACQUIRE);
+    const jr_face_t latest = (jr_face_t)(
+        (requested & JR_DISPLAY_CMD_FACE_MASK) >> JR_DISPLAY_CMD_FACE_SHIFT);
+    if ((requested & JR_DISPLAY_CMD_BLANK) != 0U || latest != face) {
+        if (stale != NULL) {
+            *stale = true;
+        }
+        return ESP_OK;
     }
 
     esp_err_t err = gfx_emote_lock(ctx->gfx);
@@ -2162,8 +3386,11 @@ static void display_task(void *arg)
                 if ((changed && now_ms >= ctx->apply_retry_gate_ms) || decay_due) {
                     jr_face_t before = (jr_face_t)diag_load(&ctx->applied_face);
                     bool was_blanked = __atomic_load_n(&ctx->blanked, __ATOMIC_RELAXED);
-                    err = apply_face(ctx, face, amplitude);
-                    if (err == ESP_OK) {
+                    bool stale = false;
+                    err = apply_face(ctx, face, amplitude, &stale);
+                    if (stale) {
+                        ctx->apply_retry_gate_ms = 0;
+                    } else if (err == ESP_OK) {
                         if (was_blanked || before != face) {
                             diag_inc(&ctx->state_changes);
                         }
@@ -2468,4 +3695,292 @@ int jr_display_surface_hit_test(uint16_t x, uint16_t y)
         }
     }
     return -1;
+}
+
+/* ===== SPATIAL SHELL: public navigation, hit test and content ============
+ *
+ * Everything below runs on the CALLER's task. The only shared mutable state
+ * is one packed word plus the fixed-capacity text arrays, so no navigation
+ * call blocks, allocates, or touches the panel. */
+
+static void nav_wake(void)
+{
+    /* The render task sleeps between frames when nothing is moving; a nav
+     * change has to draw, so poke it rather than wait out the idle tick. */
+    TaskHandle_t task = __atomic_load_n(&s_display.task, __ATOMIC_ACQUIRE);
+    if (task != NULL) {
+        xTaskNotifyGive(task);
+    }
+}
+
+typedef enum {
+    NAV_OP_NEXT = 0,
+    NAV_OP_PREV,
+    NAV_OP_UP,
+    NAV_OP_DOWN,
+    NAV_OP_HOME,
+    NAV_OP_SET,
+} nav_op_t;
+
+static void nav_step(nav_op_t op, uint32_t arg)
+{
+    uint32_t cur = __atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE);
+    for (;;) {
+        const uint32_t space = cur & NAV_SPACE_MASK;
+        const uint32_t ovl = (cur & NAV_OVL_MASK) >> NAV_OVL_SHIFT;
+        uint32_t prev = (cur >> NAV_PREV_SHIFT) & NAV_SPACE_MASK;
+        uint32_t serial = (cur >> NAV_SERIAL_SHIFT) & 0xFFu;
+        uint32_t nspace = space;
+        uint32_t novl = ovl;
+        uint32_t fwd = cur & NAV_FORWARD_BIT;
+
+        switch (op) {
+        case NAV_OP_NEXT:
+            /* Clamped, not wrapped — see the ring note in the header. */
+            if (space + 1u < (uint32_t)JR_DISPLAY_SPACE_COUNT) {
+                nspace = space + 1u;
+                fwd = NAV_FORWARD_BIT;
+            }
+            novl = (uint32_t)JR_DISPLAY_OVERLAY_NONE;
+            break;
+        case NAV_OP_PREV:
+            if (space > 0u) {
+                nspace = space - 1u;
+                fwd = 0u;
+            }
+            novl = (uint32_t)JR_DISPLAY_OVERLAY_NONE;
+            break;
+        case NAV_OP_UP:
+            /* One vertical axis: up closes the shade if it is open, else it
+             * opens the detail. Down is the mirror. */
+            novl = ovl == (uint32_t)JR_DISPLAY_OVERLAY_SHADE
+                       ? (uint32_t)JR_DISPLAY_OVERLAY_NONE
+                       : (uint32_t)JR_DISPLAY_OVERLAY_DETAIL;
+            break;
+        case NAV_OP_DOWN:
+            novl = ovl == (uint32_t)JR_DISPLAY_OVERLAY_DETAIL
+                       ? (uint32_t)JR_DISPLAY_OVERLAY_NONE
+                       : (uint32_t)JR_DISPLAY_OVERLAY_SHADE;
+            break;
+        case NAV_OP_HOME:
+            nspace = (uint32_t)JR_DISPLAY_SPACE_JARVIS;
+            novl = (uint32_t)JR_DISPLAY_OVERLAY_NONE;
+            fwd = 0u;
+            break;
+        case NAV_OP_SET:
+        default:
+            nspace = arg & NAV_SPACE_MASK;
+            novl = (uint32_t)JR_DISPLAY_OVERLAY_NONE;
+            fwd = nspace > space ? NAV_FORWARD_BIT : 0u;
+            break;
+        }
+
+        /* The origin and the serial move ONLY on a real space change. An
+         * overlay toggle between a swipe and the next rendered frame must not
+         * be able to erase the slide that swipe started. */
+        if (nspace != space) {
+            prev = space;
+            serial = (serial + 1u) & 0xFFu;
+        }
+        const uint32_t next = nspace | (prev << NAV_PREV_SHIFT) |
+                              (novl << NAV_OVL_SHIFT) | fwd |
+                              (serial << NAV_SERIAL_SHIFT);
+        if (next == cur) {
+            return;      /* idempotent: no restarted animation, no wake */
+        }
+        if (__atomic_compare_exchange_n(&s_nav_word, &cur, next, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            break;
+        }
+    }
+    nav_wake();
+}
+
+void jr_display_nav_next(void) { nav_step(NAV_OP_NEXT, 0u); }
+void jr_display_nav_prev(void) { nav_step(NAV_OP_PREV, 0u); }
+void jr_display_nav_up(void)   { nav_step(NAV_OP_UP, 0u); }
+void jr_display_nav_down(void) { nav_step(NAV_OP_DOWN, 0u); }
+void jr_display_nav_home(void) { nav_step(NAV_OP_HOME, 0u); }
+
+void jr_display_nav_set(jr_display_space_t space)
+{
+    if (space < JR_DISPLAY_SPACE_JARVIS || space >= JR_DISPLAY_SPACE_COUNT) {
+        return;
+    }
+    nav_step(NAV_OP_SET, (uint32_t)space);
+}
+
+jr_display_space_t jr_display_nav_space(void)
+{
+    return (jr_display_space_t)
+        (__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) & NAV_SPACE_MASK);
+}
+
+jr_display_overlay_t jr_display_nav_overlay(void)
+{
+    return (jr_display_overlay_t)
+        ((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) & NAV_OVL_MASK) >>
+         NAV_OVL_SHIFT);
+}
+
+jr_display_action_t jr_display_hit(int x, int y)
+{
+    /* Diagnostics and modal presentations outrank the shell: a test pattern,
+     * a choice ask and a companion surface each own the glass and carry their
+     * own hit tests, so the shell must not answer for them. */
+    if (diag_load(&s_display.test_pattern) != (uint32_t)JR_DISPLAY_TEST_OFF ||
+        jr_display_choices_active() || jr_display_surface_is_active()) {
+        return JR_DISPLAY_ACT_NONE;
+    }
+    const int dx = x - SP_CX;
+    const int dy = y - SP_CY;
+    const int r2 = dx * dx + dy * dy;
+    if (r2 > SP_R_SHELL * SP_R_SHELL) {
+        return JR_DISPLAY_ACT_NONE;   /* the outer band is not the shell's */
+    }
+
+    if (sp_shade_open()) {
+        /* One large action target below the volume arc. */
+        const int bdx = x - SP_BTN_PRIV_CX;
+        const int bdy = y - SP_BTN_CY;
+        if (bdx * bdx + bdy * bdy <= SP_BTN_R * SP_BTN_R) {
+            return JR_DISPLAY_ACT_PRIVACY_TOGGLE;
+        }
+        /* The arcs live above the centre line; left half decrements, right
+         * half increments, exactly as the -/+ end caps show. */
+        if (dy <= SP_ARC_HIT_DY) {
+            if (r2 >= SP_VOL_HIT_IN * SP_VOL_HIT_IN &&
+                r2 <= SP_VOL_HIT_OUT * SP_VOL_HIT_OUT) {
+                return dx < 0 ? JR_DISPLAY_ACT_VOLUME_DOWN
+                              : JR_DISPLAY_ACT_VOLUME_UP;
+            }
+        }
+        return JR_DISPLAY_ACT_DISMISS;
+    }
+
+    const uint32_t nav = __atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE);
+    if (((nav & NAV_OVL_MASK) >> NAV_OVL_SHIFT) ==
+        (uint32_t)JR_DISPLAY_OVERLAY_DETAIL) {
+        return (y >= SP_SHEET_Y0 && y <= SP_SHEET_Y1) ? JR_DISPLAY_ACT_NONE
+                                                      : JR_DISPLAY_ACT_DISMISS;
+    }
+    if ((nav & NAV_SPACE_MASK) == (uint32_t)JR_DISPLAY_SPACE_JARVIS) {
+        /* JARVIS draws no shell furniture, so it claims no taps: the caller's
+         * existing tap-to-attention path keeps the centre of the glass. */
+        return JR_DISPLAY_ACT_NONE;
+    }
+    return r2 <= SP_FOCAL_HIT * SP_FOCAL_HIT ? JR_DISPLAY_ACT_FOCUS
+                                             : JR_DISPLAY_ACT_NONE;
+}
+
+void jr_display_space_set_label(jr_display_space_t space, const char *headline,
+                                const char *note)
+{
+    if (space < JR_DISPLAY_SPACE_JARVIS || space >= JR_DISPLAY_SPACE_COUNT) {
+        return;
+    }
+    sp_copy(s_space_head[space], headline);
+    sp_copy(s_space_note[space], note);
+    nav_wake();
+}
+
+void jr_display_jarvis_set_session(bool linked, uint16_t turns,
+                                   uint32_t elapsed_s)
+{
+    diag_store(&s_jarvis_secs, elapsed_s);
+    __atomic_store_n(&s_jarvis_word,
+                     (uint32_t)turns | (linked ? (1u << 16) : 0u),
+                     __ATOMIC_RELEASE);
+}
+
+void jr_display_desk_set_task(const char *task, uint8_t progress,
+                              jr_display_agent_state_t state)
+{
+    if (progress > 100U) {
+        progress = 100U;
+    }
+    if (state < JR_DISPLAY_AGENT_NONE || state > JR_DISPLAY_AGENT_FAILED) {
+        state = JR_DISPLAY_AGENT_NONE;
+    }
+    sp_copy(s_desk_task, task);
+    /* Release AFTER the text: a racing frame can read a stale word, never a
+     * word that points at half-written characters. */
+    __atomic_store_n(&s_desk_word,
+                     (uint32_t)progress | ((uint32_t)state << 8),
+                     __ATOMIC_RELEASE);
+}
+
+void jr_display_tools_set(const char *const *names, int n, int recent)
+{
+    if (names == NULL || n < 0) {
+        n = 0;
+    }
+    if (n > JR_DISPLAY_TOOLS_MAX) {
+        n = JR_DISPLAY_TOOLS_MAX;
+    }
+    for (int i = 0; i < JR_DISPLAY_TOOLS_MAX; ++i) {
+        sp_copy(s_tool_name[i], i < n ? names[i] : NULL);
+    }
+    if (recent < 0 || recent >= n) {
+        recent = 0xFF;                     /* out of range: no petal is lit */
+    }
+    __atomic_store_n(&s_tools_word,
+                     (uint32_t)n | ((uint32_t)(recent & 0xFF) << 8),
+                     __ATOMIC_RELEASE);
+}
+
+void jr_display_power_set(uint8_t percent, uint16_t millivolts,
+                          bool usb_present, bool charging)
+{
+    if (percent > 100U) {
+        percent = 0xFFU;
+    }
+    const uint32_t word =
+        (uint32_t)percent | ((uint32_t)millivolts << 8) |
+        (usb_present ? (1u << 24) : 0u) |
+        (charging ? (1u << 25) : 0u);
+    if (__atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE) == word) {
+        return;
+    }
+    __atomic_store_n(&s_power_word, word, __ATOMIC_RELEASE);
+    nav_wake();
+}
+void jr_display_ota_set(jr_display_ota_state_t state, uint8_t percent,
+                        uint8_t active_slot, uint8_t target_slot,
+                        bool preflight_ok)
+{
+    if (state < JR_DISPLAY_OTA_IDLE || state > JR_DISPLAY_OTA_ROLLED_BACK) {
+        state = JR_DISPLAY_OTA_IDLE;
+    }
+    if (percent > 100U) {
+        percent = 100U;
+    }
+    /* Anything that is not a real partition index becomes the unknown/none
+     * nibble, so the renderer never has to distrust what it reads. */
+    if (active_slot > 1U) {
+        active_slot = (uint8_t)OTA_SLOT_NONE;
+    }
+    if (target_slot > 1U) {
+        target_slot = (uint8_t)OTA_SLOT_NONE;
+    }
+    __atomic_store_n(&s_ota_word,
+                     (uint32_t)state | ((uint32_t)percent << 8) |
+                         ((uint32_t)active_slot << 16) |
+                         ((uint32_t)target_slot << 20) |
+                         (preflight_ok ? (1u << 24) : 0u),
+                     __ATOMIC_RELEASE);
+    nav_wake();
+}
+
+void jr_display_set_status(uint8_t volume, bool net_up, int8_t rssi_dbm,
+                           uint32_t free_psram_kib)
+{
+    if (volume > 100U) {
+        volume = 100U;
+    }
+    diag_store(&s_status_free_kib, free_psram_kib);
+    __atomic_store_n(&s_status_word,
+                     (uint32_t)volume | (net_up ? (1u << 8) : 0u) |
+                         ((uint32_t)(uint8_t)rssi_dbm << 16),
+                     __ATOMIC_RELEASE);
 }

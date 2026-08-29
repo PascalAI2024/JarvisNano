@@ -2,7 +2,7 @@
 
 **What it is** — `espressif__esp_board_manager` is an Espressif component that reads `board_devices.yaml`, generates device-handle code at build time via `esp-bmgr-assist`, and provides a runtime registry so application code can acquire typed handles to peripherals without hard-coding GPIO or bus config.
 
-**How we use it here** — Every peripheral (display, touch, audio DAC/ADC, SD card) is declared in `boards/waveshare/esp32s3_touch_amoled_1_75/board_devices.yaml`. Application code calls `esp_board_manager_get_device_handle(name, &out_ptr)` to receive a handle, then casts it to the appropriate device struct. The generated stubs live in `esp-claw/application/edge_agent/components/gen_bmgr_codes/`.
+**How we use it here** — The build selects `boards/waveshare/esp32s3_touch_amoled_1_75c/` and generates `components/gen_bmgr_codes/`. Board manager provides the shared I2C/audio/touch handles; `jarvis_board` directly owns the CO5300 display so the QSPI bus is not claimed twice. The original-1.75 YAML additionally declares its expander/RTC/SD hardware; those devices are absent from the C revision.
 
 ---
 

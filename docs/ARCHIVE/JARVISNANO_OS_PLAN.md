@@ -1,7 +1,7 @@
 > **Status:** design record, 2026-07-18, with Phase 0–4 mostly **shipped** by
 > 2026-07-19 (see `docs/evidence/` and `git log v5`). Do not re-execute Phases
 > 0–4 from this file. Remaining product work is Phase 5 (WakeNet + power moods)
-> and hardware re-verification. Current handoff: [`NEXT_SESSION.md`](NEXT_SESSION.md).
+> and hardware re-verification. Current handoff: [`NEXT_SESSION.md`](../NEXT_SESSION.md).
 >
 > Produced by a 49-agent audit of the actual source (7 subsystem audits +
 > adversarial verification of every "missing" claim; 9 of 40 were refuted).
@@ -344,10 +344,10 @@ These are real and they *do* bound the design. But note they are last, not first
 | **Flash emote partition** | 6.875 MiB, table ends flush at `0x1000000` (`partitions_16MB.csv:15-20`). Measured **34.7 KiB/frame** at 466×466 RLE. | 16 baked clips ≈ 2× the whole partition. Also hard stop. |
 | **Internal SRAM for DMA** | `jr_display.c:46-49` — PSRAM strips fail; `spi_master` can't DMA unaligned external RAM. Live: internal_free 47,935 B, **largest block 14,336 B**. | A full LVGL double buffer (2×434 KB) is impossible; even a 1/10-screen pair (2×43.8 KB) exceeds the largest free internal block. **LVGL cannot run the way the prototype assumes.** |
 | **QSPI bandwidth** | Panel already at ~23 fps against a 24 fps target (`jr_display.c:42-45`). Overlays iterate every pixel of every strip with no dirty-region culling (`jr_display.c:625-673`). | Rich per-frame overlay without bounding-box early-outs will drop frames. |
-| **AXP2101 rails locked** | `board_devices.yaml` `init_skip: true`; `jarvis_pmic.h:7-13` "NEVER touches rail configuration". | Codec/analog rail gating for WHISPER/DREAM requires reversing a documented safety decision. |
-| **AXP IRQ behind TCA9554** | `docs/ARCHIVE/UPGRADE_RESEARCH.md:510,517`; expander is all-output (`input_io_mask NULL`). | Power button (GEST-08) is not a deep-sleep wake source and is currently **unreadable**. |
-| **No wake word compiled** | `grep ^CONFIG_SR_WN sdkconfig` → nothing enabled; zero `wakenet`/`esp_afe` refs. | Every mood below AWAKE is a dead end — exitable only by touch/motion. |
-| **DOA angular resolution** | Mic baseline is **undocumented anywhere in the repo** (`hardware/enclosure/amoled-1_75/README.md:23` gives port size and angle, no spacing). At 16 kHz a board-scale baseline = a handful of samples of delay. | You get **left/right hemisphere**, not a continuous angle. FACE-02's `cos(doa)*10, sin(doa)*6` becomes a 3-position lean. |
+| **AXP2101 rails locked** | C-board `board_devices.yaml` keeps `init_skip: true`; runtime reads ADC/fuel/PKEY only. | Keep factory rail sequencing until current and rail ownership are measured. |
+| **AXP2101 PKEY** | C revision removed TCA9554; short/long PKEY latches are polled directly at AXP2101 `0x34` and are live. | Soft power gestures are available; PMIC hard-cut behavior remains factory-owned. |
+| **WakeNet9 active** | `jr_wake` is live and feeds from the always-open codec path. | WHISPER/DREAM can park Gemini, but CPU/light sleep still needs a proven wake-source/current budget. |
+| **DOA angular resolution** | Mic baseline remains too small for a trustworthy continuous angle. | Use coarse directional expression only after physical calibration. |
 
 ---
 
@@ -470,7 +470,7 @@ Everything here is 80% there. Ordered by ratio of visual impact to effort.
 | **TRANS-01/02/03 bloom / iris / settle** | `hud_render.c` has boot bloom + crossfade. Iris is an even-odd fill = one radius comparison per pixel. Durations 900/900/700, easing `easeInOutQuad`. | 1.5d |
 | **PWR-06 battery rim arc** | `jr_power` lands in Phase 1; arc primitive lands in 2.4. r=212 w=5, red <20% / cyan charging / green else. | 4h |
 | **STATE-02 listen countdown rim** | Arc primitive + a 6000 ms modulo. r=150 w=3 draining from 12 o'clock. | 3h |
-| **UI-01 watch face** | Ticks and hands are lines from center — trivially strip-renderable. **Needs the PCF85063 RTC declared in `board_devices.yaml`** (it currently is not, on any branch). | 1.5d |
+| **UI-01 watch face** | Procedural SNTP-backed ticks/hands; the C revision has no PCF85063. | 1.5d |
 | **STATE-08 error / no-network** | Red rim shudder + a plain-language line. You already have `error.eaf` and a `FATAL`/`Backoff` state. | 4h |
 | **POLISH-06 attract reel** | 20 scripted steps at 2100 ms. Cancels on manual input. Doubles as your **end-to-end visual soak** — carry it over verbatim from `jarvisnano-os.html:481-507`. | 6h |
 
@@ -520,8 +520,8 @@ Do **not** start this until Phase 4 ships. It is the largest genuinely-new work 
 | Feature | Verdict | Substitute |
 |---|---|---|
 | **FACE-02 conversational compass (DOA)** | **NOT blocked — correct the premise.** Two live mics confirmed (`cap_gemini_live.c:181-186`). But mic baseline is undocumented; at 16 kHz a board-scale baseline gives a handful of samples of delay. | Ship **3-position hemisphere lean** (left / center / right), not a continuous angle. Measure the physical mic spacing first — it is not written down anywhere. Note lane 3 currently gets no independent PGA (`jr_audio.c:268-272` sets MIC1\|MIC2 as one masked pair). |
-| **UI-03/04 tilt-to-scroll radial menu** | Possible but I'd cut it. Continuous IMU sampling contends with the shared 400 kHz I2C bus against touch + PMIC + RTC. | Swipe-arc only (`jarvisnano-os.html:433`, 0.6 rad quantum). Tilt is the third input path for a menu that already has two. |
-| **GEST-08 power button** | **HARDWARE-BLOCKED.** AXP IRQ sits on EXIO5 behind the TCA9554, which is configured all-output (`input_io_mask NULL`) — the pin cannot be read at all, and it is not a deep-sleep wake source. | Use **Key1/BOOT on GPIO0** — directly readable and EXT1-wakeable. Flip EXIO5 to input in `board_devices.yaml` only if you want soft power-off. |
+| **UI-03/04 tilt-to-scroll radial menu** | Continuous IMU polling contends with touch, PMIC, and codecs on the shared 400 kHz I2C bus; the C revision has no RTC/expander. | Keep swipe navigation; move QMI8658 to a proven interrupt path before adding more continuous motion UI. |
+| **GEST-08 power button** | **LIVE ON C:** AXP2101 PKEY short/long latches are polled over I2C; short press controls privacy and long press shows status. | Keep PMIC hard power-off factory-owned; do not invent an expander/IRQ path removed on C. |
 | **POLISH-05 haptic tick** | **HARDWARE-BLOCKED.** No LRA on the board. | Defer. If you respin: PWM LRA + MOSFET on a spare GPIO, deliberately **off** the I2C bus (a DRV2605L adds load to an already-crowded bus). |
 | **4 moods × 4 states baked matrix** | **HARDWARE-BLOCKED.** ~12-15 MiB needed; partition is 6.875 MiB and PSRAM is ~7.4 MiB total with 5.49 already spoken for. | **Procedural, not baked.** `hud_render.c` is the answer and it is already written — integer-only, no assets, no PSRAM residency. Moods become *palette + brightness + amplitude parameters* on one procedural face, not 16 clips. This is the single most important design substitution in the plan. |
 | **LVGL for interactive UI** | **HARDWARE-BLOCKED in the form the prototype assumes.** A full double buffer is 2×434 KB; a 1/10-screen pair is 2×43.8 KB; measured largest internal free block is **14,336 B**, and PSRAM can't be DMA'd by `spi_master` here. | See D1. |
