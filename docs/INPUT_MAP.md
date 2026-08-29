@@ -203,14 +203,15 @@ find, on the surface you visit least, in a 10-character uppercase font.
 
 ## 6. What has to be built, in order
 
-| Stage | Work | Unlocks |
+| Stage | Work | Status |
 |---|---|---|
-| **1** | Feedback classes (§5) + the two exit-caption fixes | Every input answers meaningfully. No new gestures. |
-| **2** | Delete the four spaces and the nav axis | Frees ↕ and ↔ for the conversation meanings in §3.2 |
-| **3** | Adopt **`iot_button`** for both buttons | Every button row in §3.1 at once, debounced, power-save aware |
-| **4** | New HAL **contact-down + hold-progress** event | The commit ring (§3.2) — the one genuinely new piece of plumbing |
-| **5** | Rim-vs-centre as a true annulus, replacing the x-slabs | The place axis, and it stops the knobs bleeding over the reactor core |
-| **6** | QMI8658 engines on **INT2** ⚠️ *pin unverified on the C* | Lift-to-wake, knock, and sleep |
+| **1** | Feedback classes + the two exit-caption fixes | ✅ **shipped** `956d194a` — ADJUST no longer ripples; every capturing surface names its exit |
+| **2** | Delete the side pages and the fake feeds | ✅ **shipped** `6de40bd2`, `1a7485dd` — destinations gone, hardcoded TOOLS list deleted, unbound swipe now teaches |
+| **4** | HAL contact lifecycle + the commit ring | ✅ **shipped** `1d07f621`, `1a081e7e` — `PRESS_DOWN`/`PRESS_UP`; the 850 ms hold now fills a ring and can be abandoned |
+| **5** | Rim as a true annulus (r ≥ 168), replacing the x-slabs | ✅ **shipped** `3cbab992` — the knobs no longer reach over the reactor core |
+| **3a** | BOOT ≥5 s → panic-home | ✅ **shipped** `77824301` — filled a binding that fell off the end of the chain |
+| **3b** | `iot_button` adoption; **PWR double-tap** | ⛔ **blocked, by measurement.** PWR is an I²C latch polled at **500 ms** (`jr_power.c:33`), so a ~400 ms double-tap window is undetectable — two presses inside one poll are indistinguishable from one. `iot_button` cannot help: it drives GPIO/ADC, not an I²C latch. Needs a faster PKEY poll (more traffic on a shared bus) or an AXP multi-press feature. **Privacy therefore stays on the glass hold** — moving it would strand it. |
+| **6** | QMI8658 wake engines on **INT1** + sleep | 🔓 **unblocked, not built.** Pin resolved from the schematic (**INT1**, not INT2) and the WoM register sequence sourced — both in `docs/reference/imu-interrupt-routing.md`. Gated on hands-on: WoM mode produces **no data output**, so it disables flip-to-mute and shake while armed. |
 
 **Sequencing note:** delete (2) before refactoring the dispatch chain. Refactoring
 first means carefully re-homing layers that stage 2 then deletes.
@@ -219,6 +220,7 @@ first means carefully re-homing layers that stage 2 then deletes.
 
 ## 7. Open decisions — yours
 
-1. **Privacy on PWR-double-tap, or on the glass hold?** The map puts it on PWR and frees the 850 ms hold for commit. Evidence for moving it: the owner's long-press counter read **0** — nobody discovered it. It works either way; it cannot be both.
+1. ~~Privacy on PWR-double-tap, or on the glass hold?~~ **Settled by measurement, not preference:** PWR double-tap is undetectable at the 500 ms PKEY poll, so privacy stays on the glass hold — which now at least *shows* itself, via the commit ring. Revisit if the poll rate is raised.
+1b. **Privacy on PWR-double-tap, or on the glass hold?** The map puts it on PWR and frees the 850 ms hold for commit. Evidence for moving it: the owner's long-press counter read **0** — nobody discovered it. It works either way; it cannot be both.
 2. **Adopt `iot_button`, or keep hand-rolling?** Adopting gives §3.1 nearly free and matches the board's most-deployed firmware; it adds a managed dependency.
 3. **Does horizontal swipe move through the conversation, or stay unbound?** It is the largest new capability here and the least proven.
