@@ -63,3 +63,75 @@ Lift-to-wake, any-motion wake and every deep-sleep wake source depend on this pi
 It is also the prerequisite for retiring the continuous IMU poll. Carrying 1.75
 routing onto the C is the same class of error that caused a wrong-variant flash
 and a phantom "IMU inverted" bug in one session — see the board-variant notes.
+
+---
+
+## The wake-on-motion register sequence — sourced, not guessed
+
+Resolved 2026-08-29 from [`lewisxhe/SensorLib`](https://github.com/lewisxhe/SensorLib)
+(`src/SensorQMI8658.hpp`, `configWakeOnMotion()`), a mature and widely-deployed
+QMI8658 driver. This is recorded here because the sequence is **not** in this
+repo — `jr_imu.c` implements only `WHO_AM_I`, `CTRL1/2/7` and the axis burst —
+and it must never be written from memory.
+
+### Registers
+
+```
+CTRL1 0x02   CTRL2 0x03   CTRL3 0x04   CTRL5 0x06
+CTRL7 0x08   CTRL8 0x09   CTRL9 0x0A
+CAL1_L 0x0B  CAL1_H 0x0C  STATUS1 0x2F  RESET 0x60
+```
+
+### Sequence
+
+1. Reset the device.
+2. Clear `CTRL7` bit 0 (disable sensors).
+3. `CTRL2`: set accel range (bits 4-6) and ODR (low bits) — low-power 128 Hz is the driver's default for WoM.
+4. `CAL1_L` ← **WoM threshold**, resolution 1 mg (driver default 200 mg).
+5. `CAL1_H` ← `(pin_sel << 6) | (blanking_time & 0x3F)`, where **`pin_sel = 0x02` selects INT1** with an initial value of 1 (`0x00` selects INT1 initial 0; `0x01`/`0x03` select INT2). Blanking time is a count of accelerometer samples ignored after enabling, to suppress false triggers — driver default `0x20`.
+6. Issue CTRL9 command **`0x08`** (`CTRL_CMD_WRITE_WOM_SETTING`): write the command to `CTRL9` (0x0A), then poll `STATUS_INT` until the command-done bit sets.
+7. Re-enable the accelerometer, then enable the chosen interrupt pin.
+
+Motion then reports through `STATUS1` bit 9 (`WOM_MOTION`, mask `0x0200`).
+
+**`pin_sel = 0x02` is the value this board needs**, because our routed interrupt
+is INT1 (above).
+
+### ⚠️ The constraint that changes the design
+
+The driver documents it plainly:
+
+> *"Configuring WoM will reset the sensor, set the function to WoM, and there
+> will be no data output."*
+
+**WoM mode and normal sampling are MUTUALLY EXCLUSIVE.** While WoM is armed the
+part produces no readings — so `pitch/roll`, `orientation`, `motion_mg`,
+`moving` and `shake` all stop. That means **flip-to-mute (GEST-02) and
+shake-to-cancel (GEST-03) do not work while WoM is armed**, and neither does the
+tilt feed to the HUD.
+
+So WoM cannot simply be "turned on". It has to be a **mode switch tied to the
+rest ladder**:
+
+- **AWAKE / AMBIENT** — normal sampling. Flip, shake and tilt all live. This is
+  where the user actually interacts, so nothing is lost.
+- **WHISPER / DREAM** — stop the sampler (`jr_imu_stop()` already exists and has
+  zero callers), arm WoM on INT1, and let the interrupt bring the device back.
+  Flip and shake are unavailable here, which is acceptable *only because* the
+  device is at rest and any motion at all is about to wake it anyway.
+
+The transition back must reconfigure normal mode and restart the sampler before
+anything reads a snapshot, or the first post-wake `jr_imu_read()` returns stale
+data.
+
+### Do not implement this blind
+
+It is a sensor mode-switch that, if wrong, silently disables flip-to-mute and
+shake-to-cancel — two shipped gestures, one of them a privacy control. It needs:
+
+1. The GPIO21 probe (confirm the pin toggles when WoM fires) — the schematic
+   evidence above is strong but unproven on hardware.
+2. A physical test of the full cycle: rest → WoM armed → move → wake → flip and
+   shake still work.
+
+Neither can be done without hands on the device.
