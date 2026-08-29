@@ -325,7 +325,12 @@ static void boot_button_tick(uint32_t now_ms)
                 jr_display_caption_set("CONTROLS CLOSED");
             } else {
                 jr_display_nav_down();
-                jr_display_caption_clear();
+                /* Was caption_clear(). Opening a capturing surface and then
+                 * wiping the one line that could say how to leave it is the
+                 * same defect the swipe path shed in 80636399 — it just
+                 * survived on the button path. Any surface that captures input
+                 * captions its own exit, for as long as it is up. */
+                jr_display_caption_set("CONTROLS - UP TO CLOSE");
             }
             ESP_LOGI(TAG, "boot button: controls toggle (%lu ms)",
                      (unsigned long)held_ms);
@@ -6469,8 +6474,22 @@ static void voice_task(void *arg)
                 atomic_fetch_add(&s_touch_swipes, 1U);
                 /* A classified swipe must acknowledge immediately, even when
                  * its semantic result (watch already visible, volume at max)
-                 * would otherwise look unchanged. */
-                jr_display_ripple(iev.x, iev.y);
+                 * would otherwise look unchanged.
+                 *
+                 * EXCEPT a level slide. ADJUST is its own feedback class: the
+                 * value moving under the thumb IS the acknowledgement, and a
+                 * ripple per step at panel rate is noise that sits on top of
+                 * the number you are trying to read. This predicate mirrors
+                 * the slab test in the swipe handler below — they must stay in
+                 * step, so if one moves, move both. */
+                const bool level_slide =
+                    (iev.direction == JR_INPUT_DIRECTION_UP ||
+                     iev.direction == JR_INPUT_DIRECTION_DOWN) &&
+                    (iev.flags & JR_INPUT_FLAG_TOP_EDGE) == 0U &&
+                    (iev.start_x <= 140U || iev.start_x >= 326U);
+                if (!level_slide) {
+                    jr_display_ripple(iev.x, iev.y);
+                }
             }
 
             /* NOTE: taps are NOT injected as JR_EV_TAP here, and must not be.
@@ -6854,11 +6873,18 @@ static void voice_task(void *arg)
                         }
                         break;
                     case JR_DISPLAY_ACT_DISMISS:
+                        /* Same invariant as the swipe and button paths: a
+                         * surface that captures input names its own exit.
+                         * Opening the shade here used to set no caption at
+                         * all, which is how a tap could drop you into the one
+                         * surface that told you nothing. */
                         if (jr_display_nav_overlay() ==
                             JR_DISPLAY_OVERLAY_SHADE) {
                             jr_display_nav_up();
+                            jr_display_caption_set("CONTROLS CLOSED");
                         } else {
                             jr_display_nav_down();
+                            jr_display_caption_set("CONTROLS - UP TO CLOSE");
                         }
                         break;
                     case JR_DISPLAY_ACT_FOCUS:
