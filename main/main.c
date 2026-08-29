@@ -3290,8 +3290,34 @@ static esp_err_t pairing_claim_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── DEV MODE ────────────────────────────────────────────────────────────────
+ * Set to 0 before shipping. One digit, and grep for JR_DEV_OPEN_DIAGNOSTICS.
+ *
+ * While this is 1 the pairing token is NOT required on the diagnostic and
+ * control endpoints — /api/logs, /api/cockpit, the /api/audio routes,
+ * /api/debug/input and the rest answer any caller that can reach the device
+ * on the LAN. That is
+ * the whole point: during bring-up the token was pure friction, it lives in a
+ * keychain entry that may not exist on a fresh machine, and claiming a new one
+ * needs a physical long-press on the very device you are trying to debug
+ * remotely.
+ *
+ * What it costs: anything on your network can read the logs, hear the mic taps,
+ * drive the display and inject input. On a home LAN behind a router that is a
+ * considered trade; on any shared or public network it is not. The boot log
+ * says so loudly on every boot so this cannot ship unnoticed.
+ *
+ * The X-JarvisNano-Control header gate on mutating POSTs is deliberately NOT
+ * bypassed — it costs a caller nothing and still blocks drive-by cross-origin
+ * requests and link prefetchers. */
+#define JR_DEV_OPEN_DIAGNOSTICS 1
+
 static bool agent_require_auth(httpd_req_t *req)
 {
+#if JR_DEV_OPEN_DIAGNOSTICS
+    (void)req;
+    return true;
+#else
     static const char *header = "X-JarvisNano-Token";
     size_t length = httpd_req_get_hdr_value_len(req, header);
     if (length == 0U || length >= JR_CFG_PAIRING_TOKEN_CAP) {
@@ -3320,6 +3346,7 @@ static bool agent_require_auth(httpd_req_t *req)
         return false;
     }
     return true;
+#endif /* JR_DEV_OPEN_DIAGNOSTICS */
 }
 
 static bool url_ends_with(const char *url, const char *suffix)
@@ -5576,6 +5603,14 @@ static void start_diag_http(void)
     }
     atomic_store(&s_http_ready, true);
     ESP_LOGI(TAG, "diag http up: voice control, audio taps, display mirror/test");
+#if JR_DEV_OPEN_DIAGNOSTICS
+    ESP_LOGW(TAG, "************************************************************");
+    ESP_LOGW(TAG, "DEV MODE: pairing token NOT required on diagnostic endpoints");
+    ESP_LOGW(TAG, "Anything on this LAN can read logs, hear mic taps, drive the");
+    ESP_LOGW(TAG, "display and inject input. Set JR_DEV_OPEN_DIAGNOSTICS 0 to");
+    ESP_LOGW(TAG, "restore auth before shipping.");
+    ESP_LOGW(TAG, "************************************************************");
+#endif
 }
 
 /* ======================================================================== *
