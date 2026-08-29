@@ -16,7 +16,7 @@ Most of the gesture vocabulary is built. Recorded here so nobody re-solves it:
 
 | Capability | Where |
 |---|---|
-| **TWO physical buttons** — GPIO0 boot button (`boot_button_tick()`, `main.c`) AND the AXP2101 **PKEY**, read over I2C from `INTSTS2` (`jr_power.c:25-33`). They are different buttons; older docs wrongly said PKEY was blocked behind a TCA9554 — that expander does not exist on the C | `main.c`, `jr_power.c` |
+| **TWO physical buttons.** GPIO0 **BOOT** (`boot_button_tick()`, `main.c`) and the AXP2101 **PWR/PKEY**, read over I2C from `INTSTS2` (`jr_power.c:25-33`). Waveshare's own 1.75C product page lists both and says PWR *"supports custom function"*. Older docs claimed PWR was blocked behind an all-output TCA9554 — **that expander does not exist on the C** (`board_info.yaml`: "no TCA9554 expander, no PCF85063 RTC, no microSD slot"), and the vendor's C hardware table lists no expander and no RTC either. That was 1.75 lore. | `main.c`, `jr_power.c` |
 | **Double-tap attention** | `s_last_tap_ms`, `main.c:306` |
 | **Swipe-right watch peek / side pages** | `s_watch_peek_until_ms`, `s_side_page_until_ms` |
 | **Attention beat (sight + sound + words)** | `jr_display_bloom()` + a 160 ms rising note |
@@ -132,7 +132,7 @@ the board already has and the firmware does not reach for.
 | Capability | Status | Friction it removes |
 |---|---|---|
 | **CPU sleep** | ❌ **`esp_sleep` has zero uses**. But Wi-Fi **modem** sleep is already mood-driven (`WIFI_PS_MIN_MODEM` at rest), so the gap is CPU sleep specifically — not "no power management" | Battery anxiety. Caveat: the audio codec is never closed, so it holds an APB lock and automatic light sleep would save ~nothing as built. |
-| **QMI8658 interrupt engines** (any/no-motion, tap on INT2→GPIO21) | ❌ a comment only; we poll at 10 Hz | The wake gesture you never have to learn — pick it up, it is ready. Also the *prerequisite* for sleeping at all. |
+| **QMI8658 interrupt engines** (any/no-motion, tap). ⚠️ **INT2→GPIO21 is 1.75 routing and is UNVERIFIED on the C** — the vendor BSP sets `BSP_CAPS_IMU 0` and its examples poll. Resolve from the C schematic PDF before writing any wake code. | ❌ a comment only; we poll at 10 Hz | The wake gesture you never have to learn — pick it up, it is ready. Also the *prerequisite* for sleeping at all. |
 | **Auto-upright from pitch/roll** | ❌ zero rotation uses | Reading the screen at any angle. Round glass means no aspect change, and the data already crosses the HUD boundary unused. |
 | Second mic / DOA | ❌ unused (ES7210 is 4-channel) | Knowing *who* spoke. Optional, not planned. |
 | Multi-touch | ❌ capped at 1 point by our own call | Nothing needs it yet. |
