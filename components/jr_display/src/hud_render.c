@@ -1231,6 +1231,40 @@ void hud_overlay_choices(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     }
 }
 
+/* Hold-to-commit ring (docs/GLASS_DESIGN.md F1, docs/INPUT_MAP.md).
+ *
+ * One arc in the choice band, sweeping CLOCKWISE from 12 o'clock in proportion
+ * to how long the finger has been down. It shares r223-231 with the choice arcs
+ * and is mutually exclusive with them by construction — an ask owns the glass,
+ * so a commit can never be in flight while a question is up.
+ *
+ * Cyan, not gold: the persistent privacy ring sits immediately inside at
+ * r221-222 in gold, and two gold rings a pixel apart would read as one. The
+ * distinguishing quality here is MOTION — a ring that fills is unlike anything
+ * else on the glass — not hue.
+ *
+ * Drawn with the same primitive as a choice arc, so it inherits the same bbox
+ * cull and the same strip contract: stateless, y-culled, integer-only. */
+void hud_overlay_commit(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                        uint8_t pct, int level)
+{
+    if (dst == NULL || nrows <= 0 || level <= 0 || pct == 0U) {
+        return;
+    }
+    if (pct > 100U) {
+        pct = 100U;
+    }
+    overlay_palette(swap_bytes);
+    /* 12 o'clock is a=192 in the LUT convention, matching the clock hands and
+     * the battery rim's -64 base. Sweep is a full turn scaled by pct. */
+    const int a0 = 192;
+    int sweep = (255 * (int)pct) / 100;
+    if (sweep < 2) {
+        sweep = 2;              /* always visible once the contact confirms */
+    }
+    choice_arc(dst, y0, nrows, a0 & 255, (a0 + sweep) & 255, s_ov_cyan, level);
+}
+
 /* Integer atan2: (dx,dy) -> Q8 turn units 0..255, in the LUT's convention.
  * Touch arrives as cartesian pixels but spans are angular, and there is no
  * float in this file, so:

@@ -360,6 +360,13 @@ typedef enum {
     HUD_RIPPLE_REJECT,
 } hud_ripple_kind_t;
 
+/* Hold-to-commit ring: one arc in the choice band (r223-231) sweeping clockwise
+ * from 12 o'clock in proportion to `pct` (0..100). Mutually exclusive with the
+ * choice arcs by construction — an ask owns the glass, so a commit is never in
+ * flight while a question is up. `level` is the usual 0..255 strength. */
+void hud_overlay_commit(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                        uint8_t pct, int level);
+
 void hud_overlay_ripple(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                         int cx, int cy, uint32_t age_ms,
                         hud_ripple_kind_t kind);

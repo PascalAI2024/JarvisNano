@@ -227,6 +227,11 @@ void jr_display_ripple(int x, int y);
  * transient — the rejecting one. docs/INTERACTION_MODEL.md §7. */
 void jr_display_ripple_reject(int x, int y);
 
+/* Hold-to-commit ring, 0..100 (0 clears it). Fire-and-forget from the app
+ * task; the render task reads the published value. Shares the choice band and
+ * is drawn only when no ask is up, so the two can never collide. */
+void jr_display_commit_ring(uint8_t pct);
+
 /* TRANS-01: the wake bloom — VISION.md's "point of light blooms into the
  * ring", for the moment WakeNet hears "Jarvis" from rest. A centre seed of
  * light collapses as a cyan wavefront expands to the face ring over ~600 ms,

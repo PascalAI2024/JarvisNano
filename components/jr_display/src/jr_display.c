@@ -912,6 +912,9 @@ static volatile int      s_ripple_x;
 static volatile int      s_ripple_y;
 static volatile uint32_t s_ripple_start_ms;
 static volatile uint8_t  s_ripple_kind;   /* hud_ripple_kind_t */
+/* Hold-to-commit ring: 0 = not in flight. Single writer (the app task), read
+ * by the render task, same discipline as the ripple slot. */
+static volatile uint8_t  s_commit_pct;
 
 /* TRANS-01 wake bloom slot: SAME single-slot discipline as the ripple — only
  * the app task writes (a re-fire restarts the bloom), the flush age-gates, so
@@ -1149,6 +1152,11 @@ void jr_display_ripple(int x, int y)
 void jr_display_ripple_reject(int x, int y)
 {
     ripple_arm(x, y, HUD_RIPPLE_REJECT);
+}
+
+void jr_display_commit_ring(uint8_t pct)
+{
+    __atomic_store_n(&s_commit_pct, pct > 100U ? 100U : pct, __ATOMIC_RELEASE);
 }
 
 void jr_display_bloom(void)
@@ -2887,6 +2895,15 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
          * shell is presenting rather than fighting it for the centre. */
         if (!s_space_on) {
             apply_clock_overlay(ctx, y1, y2, pixels);  /* gates itself */
+        }
+        {
+            /* The commit ring shares the choice band and is drawn only on the
+             * no-ask path, which is what makes the two mutually exclusive. */
+            const uint8_t cpct = __atomic_load_n(&s_commit_pct, __ATOMIC_ACQUIRE);
+            if (cpct > 0U) {
+                hud_overlay_commit(pixels, y1, nrows,
+                                   ctx->board.swap_color_bytes, cpct, 255);
+            }
         }
         apply_caption_overlay(ctx, y1, y2, pixels);    /* gates on its ease */
         if (ae > 0 && s_ask_shown_n > 0) {

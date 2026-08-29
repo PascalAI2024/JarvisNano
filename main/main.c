@@ -304,6 +304,9 @@ static _Atomic uint32_t s_sim_flip;
 static uint32_t s_watch_peek_until_ms;
 static uint32_t s_side_page_until_ms;
 static uint32_t s_last_tap_ms;
+/* Hold-to-commit: ms at which the current physical contact was confirmed, or 0
+ * when no hold is in flight. App task only. */
+static uint32_t s_hold_start_ms;
 static _Atomic uint32_t s_pairing_claim_until_ms;
 #define PAIRING_CLAIM_WINDOW_MS 60000U
 
@@ -6114,6 +6117,16 @@ static void voice_task(void *arg)
                 ESP_LOGI(TAG, "ui: voice reclaimed primary surface");
             }
 
+            /* Fill the hold-to-commit ring. 850 ms mirrors TOUCH_LONG_PRESS_MS
+             * in the HAL — the threshold the classifier actually fires at — so
+             * the ring reaches full exactly as the action commits. Cheap: one
+             * compare per tick when idle, one store while a finger is down. */
+            if (s_hold_start_ms != 0U) {
+                const uint32_t held = (uint32_t)now - s_hold_start_ms;
+                const uint32_t pct = held >= 850U ? 100U : (held * 100U) / 850U;
+                jr_display_commit_ring((uint8_t)pct);
+            }
+
             /* Watch is an explicit 10-second right-swipe utility. Ambient
              * keeps Jarvis's voice face visible instead of dimming/compositing
              * the entire frame and dropping the glass from 16 to 13 fps. */
@@ -6470,6 +6483,27 @@ static void voice_task(void *arg)
             }
             const bool physical =
                 (iev.flags & JR_INPUT_FLAG_SYNTHETIC) == 0U;
+
+            /* Hold-to-commit ring. PRESS_DOWN starts it, PRESS_UP ends it, and
+             * the per-tick update below fills it. Releasing before the 850 ms
+             * threshold ABANDONS: the ring simply clears, with no reject tone.
+             * Abandon is not refusal — the device did not say no, you changed
+             * your mind, and punishing that teaches people not to explore.
+             *
+             * This does not reassign the hold yet. Today it still toggles
+             * privacy on completion; the ring only makes a previously INVISIBLE
+             * gesture visible and escapable. Privacy moves to the PWR button
+             * once that button grows a double-tap (docs/INPUT_MAP.md §3.1) —
+             * moving it before its replacement exists would strand it. */
+            if (iev.kind == JR_INPUT_PRESS_DOWN) {
+                s_hold_start_ms = physical ? (uint32_t)now : 0U;
+                continue;
+            }
+            if (iev.kind == JR_INPUT_PRESS_UP) {
+                s_hold_start_ms = 0U;
+                jr_display_commit_ring(0U);
+                continue;
+            }
             if (s_watch_peek_until_ms != 0U) {
                 s_watch_peek_until_ms = 0U;
             }
