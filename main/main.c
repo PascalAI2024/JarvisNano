@@ -308,6 +308,9 @@ static uint32_t s_last_tap_ms;
  * when no hold is in flight. App task only. */
 static uint32_t s_hold_start_ms;
 static _Atomic uint32_t s_pairing_claim_until_ms;
+/* Set by the boot-button tick (which runs before most UI statics are declared)
+ * and serviced in the app loop, where they are in scope. */
+static _Atomic bool s_panic_home_request;
 #define PAIRING_CLAIM_WINDOW_MS 60000U
 
 static void boot_button_tick(uint32_t now_ms)
@@ -344,6 +347,21 @@ static void boot_button_tick(uint32_t now_ms)
             jr_display_caption_set("PAIRING OPEN - 60 S");
             ESP_LOGI(TAG, "boot button: physical pairing window open "
                           "(%lu ms hold)", (unsigned long)held_ms);
+        } else if (held_ms >= 5000U) {
+            /* PANIC-HOME. A hold past 5 s used to fall off the end of this
+             * chain with NO binding at all — you could hold the button
+             * forever and nothing happened, which is the worst possible
+             * response to someone who is already lost.
+             *
+             * It is the one input that must work when the glass is confusing:
+             * clear every overlay, drop the pairing window, dismiss any
+             * surface, and return to the face. Deliberately on the BUTTON
+             * rather than the glass, because a button cannot be swallowed by
+             * a modal (docs/INPUT_MAP.md §4). */
+            atomic_store(&s_pairing_claim_until_ms, 0U);
+            atomic_store(&s_panic_home_request, true);
+            ESP_LOGI(TAG, "boot button: panic-home (%lu ms hold)",
+                     (unsigned long)held_ms);
         }
     }
 #else
@@ -6115,6 +6133,21 @@ static void voice_task(void *arg)
                 s_side_page_until_ms = 0U;
                 jr_display_caption_set("JARVIS - VOICE READY");
                 ESP_LOGI(TAG, "ui: voice reclaimed primary surface");
+            }
+
+            if (atomic_exchange(&s_panic_home_request, false)) {
+                jr_display_surface_dismiss();
+                jr_display_dismiss_choices();
+                jr_display_nav_home();
+                s_ui_shade_open = false;
+                s_watch_peek_until_ms = 0U;
+                s_side_page_until_ms = 0U;
+                s_hold_start_ms = 0U;
+                jr_display_commit_ring(0U);
+                jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                jr_display_bloom();
+                jr_display_caption_set("HOME - ALL CLEAR");
+                ESP_LOGI(TAG, "ui: panic-home serviced");
             }
 
             /* Fill the hold-to-commit ring. 850 ms mirrors TOUCH_LONG_PRESS_MS
