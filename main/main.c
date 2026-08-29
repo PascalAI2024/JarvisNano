@@ -6534,11 +6534,13 @@ static void voice_task(void *arg)
                  * the number you are trying to read. This predicate mirrors
                  * the slab test in the swipe handler below — they must stay in
                  * step, so if one moves, move both. */
+                const int ls_dx = (int)iev.start_x - 232;
+                const int ls_dy = (int)iev.start_y - 232;
                 const bool level_slide =
                     (iev.direction == JR_INPUT_DIRECTION_UP ||
                      iev.direction == JR_INPUT_DIRECTION_DOWN) &&
                     (iev.flags & JR_INPUT_FLAG_TOP_EDGE) == 0U &&
-                    (iev.start_x <= 140U || iev.start_x >= 326U);
+                    (ls_dx * ls_dx + ls_dy * ls_dy) >= (168 * 168);
                 if (!level_slide) {
                     jr_display_ripple(iev.x, iev.y);
                 }
@@ -6769,11 +6771,30 @@ static void voice_task(void *arg)
                 const jr_display_overlay_t overlay =
                     jr_display_nav_overlay();
                 bool watch_opened = false;
+                /* PLACE IS SCOPE: the rim carries the device's own knobs, the
+                 * centre carries the conversation (docs/INPUT_MAP.md §1).
+                 *
+                 * This used to be two vertical SLABS — start_x <= 140 and
+                 * >= 326 — which is rectangular thinking on a round glass. A
+                 * point at x=140, y=233 is only r=93 from centre: INSIDE the
+                 * baked face's core band (r0-94). So a vertical swipe straight
+                 * across the reactor core changed the volume, and nothing on
+                 * the device could teach you where the boundary was.
+                 *
+                 * An annulus instead. The threshold is JR_DISPLAY_SAFE_R (168),
+                 * the same radius inside which all UI text is kept — so the
+                 * boundary is not arbitrary: inside it is where the
+                 * conversation is drawn, outside it is furniture. */
+                const int rim_dx = (int)iev.start_x - 232;
+                const int rim_dy = (int)iev.start_y - 232;
+                const bool on_rim =
+                    (rim_dx * rim_dx + rim_dy * rim_dy) >= (168 * 168);
                 const bool edge_vertical =
                     (iev.direction == JR_INPUT_DIRECTION_UP ||
                      iev.direction == JR_INPUT_DIRECTION_DOWN) &&
-                    (iev.flags & JR_INPUT_FLAG_TOP_EDGE) == 0U;
-                if (edge_vertical && iev.start_x <= 140U) {
+                    (iev.flags & JR_INPUT_FLAG_TOP_EDGE) == 0U &&
+                    on_rim;
+                if (edge_vertical && iev.start_x <= 232U) {
                     const int level = request_level_step(
                         &s_level_volume_request, s_out_vol,
                         iev.direction == JR_INPUT_DIRECTION_UP ? 5 : -5);
@@ -6782,7 +6803,7 @@ static void voice_task(void *arg)
                     jr_display_caption_set(caption);
                     continue;
                 }
-                if (edge_vertical && iev.start_x >= 326U) {
+                if (edge_vertical && iev.start_x > 232U) {
                     const int level = request_level_step(
                         &s_level_brightness_request, s_brightness_cap,
                         /* UP increases, matching the volume slab beside it.
