@@ -38,7 +38,14 @@
 #define TOUCH_PRESS_CONFIRM_SAMPLES 2
 #define TOUCH_RELEASE_SAMPLES       2
 #define TOUCH_LONG_PRESS_MS         850
-#define TOUCH_TAP_SLOP_PX           30
+/* Must equal TOUCH_SWIPE_MIN_TRAVEL_PX. The two thresholds are the two halves
+ * of one decision: the classifier tries swipe FIRST and falls back to tap, so
+ * any gap between them is a band where a real contact produces NO EVENT AT
+ * ALL. At 30 vs 42 that band was 12 px wide and it swallowed gestures in
+ * silence — the exact "no gesture attempt ends in silent nothing" failure in
+ * PLAN.md wave 3 (W3). Keep them equal; if the swipe threshold moves, this
+ * moves with it. */
+#define TOUCH_TAP_SLOP_PX           42
 #define TOUCH_HOLD_SLOP_PX          48
 #define TOUCH_SWIPE_MIN_TRAVEL_PX   42
 #define TOUCH_SWIPE_DOMINANCE_PCT   125

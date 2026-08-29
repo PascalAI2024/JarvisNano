@@ -6594,12 +6594,27 @@ static void voice_task(void *arg)
              * swallowed — a stray poke at the face must not fall through to
              * the mute toggle mid-question. Timeout, voice answer and server
              * cancel are the session's own exits from Asking. */
-            if (iev.kind == JR_INPUT_TAP && jr_display_choices_active()) {
+            if ((iev.kind == JR_INPUT_TAP || iev.kind == JR_INPUT_SWIPE) &&
+                jr_display_choices_active()) {
                 if (!physical) {
                     ESP_LOGW(TAG, "synthetic input cannot answer ask_user");
                     continue;
                 }
-                int choice = jr_display_choice_hit(iev.x, iev.y);
+                /* An open ask claims the SWIPE too, and hit-tests where the
+                 * finger LANDED rather than where it lifted.
+                 *
+                 * The arcs live at r=215..255 on a 466 round glass — the
+                 * extreme outer rim — and a rim contact always rolls. The
+                 * classifier tries swipe before tap, so a rim press with >=42
+                 * px of roll was emitted as a SWIPE and fell through to the
+                 * spatial nav, which walked the owner off the question
+                 * entirely: measured 44 swipes against 12 taps while trying to
+                 * answer a 3-option ask, and "I can't select any" (2026-08-29).
+                 *
+                 * Where the finger goes DOWN is the intent; the drift is
+                 * incidental. For a tap start and end differ by at most the
+                 * slop, so this is identical to the old behaviour for taps. */
+                int choice = jr_display_choice_hit(iev.start_x, iev.start_y);
                 if (choice >= 0 && choice < (int)s_ask.count) {
                     jr_display_set_choice_selected(choice);
                     jr_event_t picked = jr_event(JR_EV_CHOICE_PICKED);
