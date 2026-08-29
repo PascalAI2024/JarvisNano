@@ -911,6 +911,7 @@ static volatile int     s_caption_on;
 static volatile int      s_ripple_x;
 static volatile int      s_ripple_y;
 static volatile uint32_t s_ripple_start_ms;
+static volatile uint8_t  s_ripple_kind;   /* hud_ripple_kind_t */
 
 /* TRANS-01 wake bloom slot: SAME single-slot discipline as the ripple — only
  * the app task writes (a re-fire restarts the bloom), the flush age-gates, so
@@ -1127,14 +1128,27 @@ void jr_display_caption_clear(void)
     __atomic_store_n(&s_caption_on, 0, __ATOMIC_RELEASE);
 }
 
-void jr_display_ripple(int x, int y)
+static void ripple_arm(int x, int y, hud_ripple_kind_t kind)
 {
-    /* x/y first, then the timestamp release-store that arms the slot. */
+    /* x/y and kind first, then the timestamp release-store that arms the slot
+     * — the renderer acquires on that timestamp, so everything it will read
+     * must already be published. */
     s_ripple_x = x;
     s_ripple_y = y;
+    s_ripple_kind = (uint8_t)kind;
     __atomic_store_n(&s_ripple_start_ms,
                      (uint32_t)(esp_timer_get_time() / 1000),
                      __ATOMIC_RELEASE);
+}
+
+void jr_display_ripple(int x, int y)
+{
+    ripple_arm(x, y, HUD_RIPPLE_ACCEPT);
+}
+
+void jr_display_ripple_reject(int x, int y)
+{
+    ripple_arm(x, y, HUD_RIPPLE_REJECT);
 }
 
 void jr_display_bloom(void)
@@ -2841,7 +2855,8 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
         __atomic_load_n(&s_ripple_start_ms, __ATOMIC_ACQUIRE);
     if (rip_start != 0u && now_ms - rip_start < HUD_RIPPLE_MS) {
         hud_overlay_ripple(pixels, y1, nrows, ctx->board.swap_color_bytes,
-                           s_ripple_x, s_ripple_y, now_ms - rip_start);
+                           s_ripple_x, s_ripple_y, now_ms - rip_start,
+                           (hud_ripple_kind_t)s_ripple_kind);
     }
 
     /* Modal ask (STATE-05/06/07): dim everything drawn so far, lay the

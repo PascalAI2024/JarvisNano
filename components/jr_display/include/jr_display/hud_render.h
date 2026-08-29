@@ -350,8 +350,19 @@ int hud_glass_chord(int y);
 #define HUD_RIPPLE_MS  400u
 #define HUD_RIPPLE_R0  4
 #define HUD_RIPPLE_R1  56
+/* A refused gesture must not look like an accepted one. ACCEPT expands in
+ * bright cyan (the long-standing tap ripple); REJECT runs the same radius
+ * arithmetic BACKWARDS so the ring collapses inward, in dim neutral at half
+ * level. Two independent differences — direction AND colour — so the two read
+ * apart peripherally, not just under inspection. docs/INTERACTION_MODEL.md §7. */
+typedef enum {
+    HUD_RIPPLE_ACCEPT = 0,
+    HUD_RIPPLE_REJECT,
+} hud_ripple_kind_t;
+
 void hud_overlay_ripple(uint16_t *dst, int y0, int nrows, bool swap_bytes,
-                        int cx, int cy, uint32_t age_ms);
+                        int cx, int cy, uint32_t age_ms,
+                        hud_ripple_kind_t kind);
 
 /* TRANS-01: the wake bloom — VISION.md's "point of light blooms into the
  * ring". A small seed of light at the centre collapses as a cyan wavefront

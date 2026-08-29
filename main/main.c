@@ -6610,6 +6610,15 @@ static void voice_task(void *arg)
                     ESP_LOGI(TAG, "ask: choice=%d text=%s",
                              choice, s_ask.options[choice]);
                 } else {
+                    /* Until now this branch logged and did nothing else: the
+                     * user saw the SAME cyan ripple layer 0 draws for a hit,
+                     * heard nothing, and the arcs just sat there. Feedback
+                     * that is identical on success and failure is not
+                     * feedback. A contracting ring plus a falling note says
+                     * "seen, but that was not a choice".
+                     * docs/INTERACTION_MODEL.md §7. */
+                    jr_display_ripple_reject(iev.x, iev.y);
+                    (void)jr_audio_play_sweep(700U, 300U, 100U, 6U);
                     ESP_LOGI(TAG, "ask: tap (%u,%u) missed the arcs",
                              (unsigned)iev.x, (unsigned)iev.y);
                 }

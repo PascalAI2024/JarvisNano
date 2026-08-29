@@ -1349,8 +1349,8 @@ static void test_ripple_geometry(void)
     if (!fb) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
 
     /* expired (== and >) paints nothing */
-    hud_overlay_ripple(fb, 0, HUD_H, false, 233, 233, HUD_RIPPLE_MS);
-    hud_overlay_ripple(fb, 0, HUD_H, false, 233, 233, 5000u);
+    hud_overlay_ripple(fb, 0, HUD_H, false, 233, 233, HUD_RIPPLE_MS, HUD_RIPPLE_ACCEPT);
+    hud_overlay_ripple(fb, 0, HUD_H, false, 233, 233, 5000u, HUD_RIPPLE_ACCEPT);
     size_t stale = 0;
     for (size_t i = 0; i < px; i++) if (fb[i]) stale++;
     CHECK(stale == 0, "expired ripple painted %zu px", stale);
@@ -1360,7 +1360,7 @@ static void test_ripple_geometry(void)
     const int cx = 300, cy = 180;
     const int rad = HUD_RIPPLE_R0 +
         (int)(((HUD_RIPPLE_R1 - HUD_RIPPLE_R0) * age) / HUD_RIPPLE_MS);
-    hud_overlay_ripple(fb, 0, HUD_H, false, cx, cy, age);
+    hud_overlay_ripple(fb, 0, HUD_H, false, cx, cy, age, HUD_RIPPLE_ACCEPT);
 
     size_t painted = 0, off_glass = 0, off_ring = 0;
     for (int y = 0; y < HUD_H; y++) {
@@ -1398,11 +1398,11 @@ static void test_ripple_strip_invariance(void)
     }
     for (size_t i = 0; i < px; i++) { whole[i] = strips[i] = (uint16_t)(i * 13u); }
 
-    hud_overlay_ripple(whole, 0, HUD_H, false, 150, 340, 137u);
+    hud_overlay_ripple(whole, 0, HUD_H, false, 150, 340, 137u, HUD_RIPPLE_ACCEPT);
     for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
         int nrows = (y + STRIP_ROWS <= HUD_H) ? STRIP_ROWS : (HUD_H - y);
         hud_overlay_ripple(strips + (size_t)y * HUD_W, y, nrows, false,
-                           150, 340, 137u);
+                           150, 340, 137u, HUD_RIPPLE_ACCEPT);
     }
     size_t diffs = 0, painted = 0;
     for (size_t i = 0; i < px; i++) {
@@ -1427,7 +1427,7 @@ static void test_ripple_corner_tap_stays_on_glass(void)
     static const uint32_t ages[] = { 60, 200, 380 };
     for (size_t k = 0; k < sizeof ages / sizeof ages[0]; k++) {
         memset(fb, 0, px * sizeof *fb);
-        hud_overlay_ripple(fb, 0, HUD_H, false, 40, 40, ages[k]);
+        hud_overlay_ripple(fb, 0, HUD_H, false, 40, 40, ages[k], HUD_RIPPLE_ACCEPT);
         size_t painted = 0, off_glass = 0;
         for (int y = 0; y < HUD_H; y++) {
             for (int x = 0; x < HUD_W; x++) {

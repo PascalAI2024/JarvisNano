@@ -140,6 +140,19 @@ esp_err_t jr_audio_diag_copy(jr_audio_tap_kind_t kind, int16_t *dst,
 esp_err_t jr_audio_diag_play_chirp(uint32_t duration_ms,
                                    uint8_t level_percent);
 
+/* The same bounded, low-volume sweep with its endpoints exposed. duration_ms
+ * clamps to 100..1500, level_percent to 1..30, and the frequencies to
+ * 80..8000 Hz; it rejects active playback exactly as the chirp does, so it can
+ * never talk over a reply.
+ *
+ * This exists so a cue can FALL as well as rise. The attention beat is a
+ * rising note, and until now every cue rode that same sweep — which meant a
+ * refused gesture sounded identical to an accepted one. A descending note is
+ * the cheapest unmistakable "no" available on a device with one speaker and
+ * no haptics. See docs/INTERACTION_MODEL.md §7. */
+esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
+                              uint32_t duration_ms, uint8_t level_percent);
+
 #ifdef __cplusplus
 }
 #endif

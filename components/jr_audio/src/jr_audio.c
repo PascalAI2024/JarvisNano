@@ -949,8 +949,8 @@ esp_err_t jr_audio_diag_copy(jr_audio_tap_kind_t kind, int16_t *dst,
     return ESP_OK;
 }
 
-esp_err_t jr_audio_diag_play_chirp(uint32_t duration_ms,
-                                   uint8_t level_percent)
+esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
+                              uint32_t duration_ms, uint8_t level_percent)
 {
     if (!s_ready || !s_dac_open || s_pb == NULL || s_feeder == NULL) {
         return ESP_ERR_INVALID_STATE;
@@ -974,6 +974,10 @@ esp_err_t jr_audio_diag_play_chirp(uint32_t duration_ms,
     if (duration_ms > 1500U) duration_ms = 1500U;
     if (level_percent < 1U) level_percent = 1U;
     if (level_percent > 30U) level_percent = 30U;
+    if (start_hz < 80U)   start_hz = 80U;
+    if (start_hz > 8000U) start_hz = 8000U;
+    if (end_hz   < 80U)   end_hz   = 80U;
+    if (end_hz   > 8000U) end_hz   = 8000U;
 
     const size_t total = (size_t)GL_RX_SAMPLE_RATE * duration_ms / 1000U;
     portENTER_CRITICAL(&s_pb_lock);
@@ -986,7 +990,8 @@ esp_err_t jr_audio_diag_play_chirp(uint32_t duration_ms,
 
     int16_t chunk[DIAG_CHIRP_CHUNK];
     const float duration_s = (float)duration_ms / 1000.0f;
-    const float sweep_hz_per_s = (2000.0f - 400.0f) / duration_s;
+    const float sweep_hz_per_s =
+        ((float)end_hz - (float)start_hz) / duration_s;
     const float amplitude = 32767.0f * (float)level_percent / 100.0f;
     const size_t fade_samples = GL_RX_SAMPLE_RATE / 100U; /* 10 ms */
 
@@ -1000,7 +1005,8 @@ esp_err_t jr_audio_diag_play_chirp(uint32_t duration_ms,
             size_t sample_index = queued + i;
             float t = (float)sample_index / (float)GL_RX_SAMPLE_RATE;
             float phase = 2.0f * (float)M_PI *
-                          (400.0f * t + 0.5f * sweep_hz_per_s * t * t);
+                          ((float)start_hz * t +
+                           0.5f * sweep_hz_per_s * t * t);
             float envelope = 1.0f;
             if (sample_index < fade_samples) {
                 envelope = (float)(sample_index + 1U) / (float)fade_samples;
@@ -1030,4 +1036,12 @@ esp_err_t jr_audio_diag_play_chirp(uint32_t duration_ms,
     jr_audio_dac_unmute();
     atomic_store(&s_diag_chirp_enqueuing, false);
     return ESP_OK;
+}
+
+esp_err_t jr_audio_diag_play_chirp(uint32_t duration_ms, uint8_t level_percent)
+{
+    /* The original 400 -> 2000 Hz diagnostic sweep, unchanged. Every existing
+     * caller (the attention beat, the audio self-test) keeps its exact sound;
+     * jr_audio_play_sweep() only exposes the endpoints the body always had. */
+    return jr_audio_play_sweep(400U, 2000U, duration_ms, level_percent);
 }

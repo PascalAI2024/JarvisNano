@@ -221,6 +221,12 @@ void jr_display_caption_clear(void);
  * chrome. */
 void jr_display_ripple(int x, int y);
 
+/* The same single slot, drawn as a REFUSAL: the ring contracts in dim neutral
+ * instead of expanding in cyan. A layer that rejects an event overwrites the
+ * accept ripple already fired for that tap, so the user sees exactly one
+ * transient — the rejecting one. docs/INTERACTION_MODEL.md §7. */
+void jr_display_ripple_reject(int x, int y);
+
 /* TRANS-01: the wake bloom — VISION.md's "point of light blooms into the
  * ring", for the moment WakeNet hears "Jarvis" from rest. A centre seed of
  * light collapses as a cyan wavefront expands to the face ring over ~600 ms,

@@ -1328,14 +1328,19 @@ int hud_glass_chord(int y)
 }
 
 void hud_overlay_ripple(uint16_t *dst, int y0, int nrows, bool swap_bytes,
-                        int cx, int cy, uint32_t age_ms)
+                        int cx, int cy, uint32_t age_ms,
+                        hud_ripple_kind_t kind)
 {
     if (dst == NULL || nrows <= 0 || age_ms >= HUD_RIPPLE_MS) {
         return;                          /* expired: self-clearing, no state */
     }
-    const int rad = HUD_RIPPLE_R0 +
-        (int)(((uint32_t)(HUD_RIPPLE_R1 - HUD_RIPPLE_R0) * age_ms) /
-              HUD_RIPPLE_MS);
+    /* REJECT mirrors the sweep: same arithmetic, run backwards, so the ring
+     * collapses instead of spreading. No extra state, no second slot. */
+    const int span = (int)(((uint32_t)(HUD_RIPPLE_R1 - HUD_RIPPLE_R0) *
+                            age_ms) / HUD_RIPPLE_MS);
+    const int rad = (kind == HUD_RIPPLE_REJECT)
+                        ? (HUD_RIPPLE_R1 - span)
+                        : (HUD_RIPPLE_R0 + span);
     const int level = (int)((255u * (HUD_RIPPLE_MS - age_ms)) / HUD_RIPPLE_MS);
     if (level <= 0) {
         return;                          /* fully faded: never stamp black */
@@ -1353,7 +1358,9 @@ void hud_overlay_ripple(uint16_t *dst, int y0, int nrows, bool swap_bytes,
         return;
     }
     overlay_palette(swap_bytes);
-    const uint16_t px = shade(s_ov_cyan, level);
+    const uint16_t px = (kind == HUD_RIPPLE_REJECT)
+                            ? shade(s_ov_tick, level / 2)
+                            : shade(s_ov_cyan, level);
 
     const int ro2 = r_out * r_out;
     const int ri2 = r_in * r_in;
