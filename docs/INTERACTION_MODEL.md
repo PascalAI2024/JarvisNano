@@ -45,6 +45,20 @@ Two consequences worth stating plainly, because both contradict the earlier draf
 > Its whole model is one button and two gestures — worth taking seriously as an
 > argument for restraint.
 
+> **Physical facts, settled 2026-08-29 against the vendor's own 1.75C page and
+> `board_info.yaml`, because 1.75 lore keeps leaking onto this board:**
+>
+> - **Two buttons, both programmable** — Waveshare: *"Onboard PWR and BOOT
+>   programmable buttons for easy custom function development."* PWR/PKEY is the
+>   AXP2101 key read over I2C; BOOT is GPIO0.
+> - **No reset button.** It is not in the vendor's 14-item callout. Reset is the
+>   USB path or a PWR long-press through the PMIC.
+> - **The small hole in the case is a MICROPHONE PORT**, not reset —
+>   `hardware/enclosure/amoled-1_75/README.md:23`: *"MIC1 + MIC2, edge-mounted
+>   MEMS mics, far-field AEC pair."* Covering it degrades wake-word range and the
+>   AEC reference. Worth saying out loud in any enclosure or grip design.
+> - **No TCA9554 expander, no PCF85063 RTC, no microSD** on the C.
+
 ---
 
 ## 2. The model
