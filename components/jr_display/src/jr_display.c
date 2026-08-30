@@ -3194,6 +3194,22 @@ static void apply_shell_overlay(jr_display_ctx_t *ctx, int x1, int y1,
     if ((shell & JR_DISPLAY_SHELL_AGENT) == 0U || pixels == NULL) {
         return;
     }
+    /* THE INTERACTIVE BAND OUTRANKS THE AGENT RIM.
+     *
+     * r223-231 is the choice/commit band, and it is exclusive by design. The
+     * flush order is apply_hud_overlay (choice arcs, commit ring) and THEN
+     * this function (agent segments at r224-230), with nothing stopping the
+     * second from painting over the first. A tool running while an ask is open
+     * therefore buried the very arcs the device was waiting for the owner to
+     * touch — the question stayed on the glass while its answers were
+     * overwritten by progress from an unrelated job.
+     *
+     * Ask state wins because it is the only one of the two the owner can act
+     * on. The agent rim resumes the moment the ask, its fade, and any commit
+     * preview are done; the agent's progress is still on DESK meanwhile. */
+    if (s_choice_n > 0 || s_ask_ease > 0 || s_commit_pct > 0U) {
+        return;
+    }
     const uint8_t progress = shell & JR_DISPLAY_SHELL_PROGRESS;
     const int completed = progress == 0U ? 0 : ((int)progress * 8 + 99) / 100;
     if (completed <= 0) {
