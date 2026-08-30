@@ -5994,13 +5994,9 @@ static void voice_task(void *arg)
                 mood_phase == JR_ST_THINKING ||
                 mood_phase == JR_ST_ASKING ||
                 (mood_phase == JR_ST_LISTENING && s_listen_speech_active);
-            const bool privacy_paused =
-                atomic_load(&s_voice_privacy_paused) || s_flip_muted;
             static uint8_t s_move_polls, s_mood_fd_polls, s_mood_fu_polls;
             static bool s_mood_face_down;
-            if (privacy_paused) {
-                s_move_polls = 0;
-            } else if (have_imu && imu.moving && imu.age_ms < 500U) {
+            if (have_imu && imu.moving && imu.age_ms < 500U) {
                 if (s_move_polls < 255U) {
                     s_move_polls++;
                 }
@@ -6026,14 +6022,33 @@ static void voice_task(void *arg)
             }
             /* 600 ms face-down/up and 300 ms motion, so 50 mg IMU noise cannot
              * slew brightness and Wi-Fi PS every 500 ms after mute. */
-            const bool moving = !privacy_paused && !s_mood_face_down &&
-                                s_move_polls >= 3U;
+            const bool moving = !s_mood_face_down && s_move_polls >= 3U;
+            /* PRIVACY SILENCES THE MICROPHONE. IT DOES NOT BLIND THE GLASS.
+             *
+             * Muting used to count as face-down AND cancel user_busy, so a
+             * muted device slammed to DREAM at brightness 6 — even while it
+             * was mid-interaction. Caught live with mood=DREAM, brightness=6
+             * and phase=ASKING at the same instant: the device was asking the
+             * owner a question on a screen too dark to read. The owner's words
+             * were "device too dark when its working and i need to read why".
+             *
+             * Booting muted (a deliberate privacy default) made this constant
+             * rather than occasional, which is how it surfaced.
+             *
+             * Rest is now driven by what it always should have been: physical
+             * stillness, and having nothing to show. A muted device with an
+             * ask, a card or a reply on the glass stays lit long enough to be
+             * read. Flip-to-mute still forces rest, because turning a device
+             * face-down is an unambiguous "I am done looking at it".
+             *
+             * Motion is physical and is read the same way whether the mic is
+             * live or not — gating it on privacy meant a boot-muted device
+             * could not be woken by being picked up at all. */
             jr_mood_in_t min = {
                 .now_ms = (uint32_t)now,
-                .face_down = s_mood_face_down || privacy_paused,
+                .face_down = s_mood_face_down,
                 .moving = moving,
-                .user_busy = (user_busy || (have_power && bat.usb_present)) &&
-                             !privacy_paused,
+                .user_busy = user_busy || (have_power && bat.usb_present),
             };
             jr_mood_out_t mout = jr_mood_step(&s_mood, &min);
             const bool realtime_power =

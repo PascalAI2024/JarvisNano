@@ -32,9 +32,36 @@ try:
 except ImportError:
     sys.exit("needs Pillow:  pip install pillow")
 
-# The ring, in slide-down order. Keep in step with jr_display_space_t.
-RING = ["JARVIS", "WATCH", "POWER", "MOTION", "DESK", "TOOLS", "SETTINGS"]
 TILE = 466
+
+# The ring, in slide-down order, PARSED FROM THE FIRMWARE ENUM rather than
+# copied. A hand-kept copy drifted: it still listed a "MOTION" screen that the
+# firmware does not have, so every tile from the fourth on was captioned with
+# the wrong name and the sheet looked like the ring was skipping a screen and
+# wrapping early. A QA tool that mislabels its own evidence is worse than no
+# tool, because it manufactures bugs that were never in the firmware.
+_HEADER = "components/jr_display/include/jr_display/jr_display.h"
+
+
+def ring_from_header(root: str) -> list[str]:
+    """Screen names in enum order, read from jr_display_space_t itself."""
+    import re
+    src = open(os.path.join(root, _HEADER)).read()
+    # Anchor on the enum's CLOSING tag and walk back to its own opening brace.
+    # Searching forward from the first "typedef enum {" instead swept in the
+    # #defines above it (JR_DISPLAY_SPACE_MS, _SPACE_HOLD_MS), which share the
+    # JR_DISPLAY_SPACE_ prefix but are not screens.
+    end = src.find("} jr_display_space_t;")
+    if end < 0:
+        raise SystemExit(f"could not find jr_display_space_t in {_HEADER}")
+    start = src.rfind("typedef enum {", 0, end)
+    if start < 0:
+        raise SystemExit(f"malformed jr_display_space_t in {_HEADER}")
+    names = re.findall(r"JR_DISPLAY_SPACE_([A-Z0-9_]+)", src[start:end])
+    ring = [n for n in names if n != "COUNT"]
+    if not ring:
+        raise SystemExit("parsed zero screens from jr_display_space_t")
+    return ring
 
 
 def _req(host: str, path: str, method: str = "GET", timeout: float = 25.0):
@@ -84,6 +111,9 @@ def main() -> int:
     ap.add_argument("--settle", type=float, default=1.2,
                     help="seconds to wait after each swipe (default 1.2)")
     a = ap.parse_args()
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ring = ring_from_header(root)
+    print(f"ring ({len(ring)} screens, from jr_display_space_t): {', '.join(ring)}")
     if not a.host:
         print("set JARVIS_DEVICE_HOST or pass --host "
               "(find it with: arp -a | grep jarvisnano)", file=sys.stderr)
@@ -103,7 +133,7 @@ def main() -> int:
     post(a.host, "/api/debug/input?kind=double&x=233&y=233")
     time.sleep(a.settle)
 
-    for i, name in enumerate(RING):
+    for i, name in enumerate(ring):
         if i:
             post(a.host, "/api/debug/input?kind=swipe&dir=down")
             time.sleep(a.settle)
