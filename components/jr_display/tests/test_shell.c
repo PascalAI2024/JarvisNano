@@ -750,6 +750,96 @@ static void test_every_space_composes_its_own_sheet(void)
           "midnight hour should zero-pad, got '%s'", s_detail_value[1]);
 }
 
+/* The clock's disc clear must not eat a shell surface the owner opened.
+ *
+ * apply_clock_overlay clears every pixel inside JR_DISPLAY_SHELL_R_MAX and
+ * runs AFTER apply_space_overlay, so on WATCH it wiped whatever the shell had
+ * just drawn. The first fix rescued the detail sheet only, leaving the CONTROL
+ * SHADE invisible-but-live: jr_display_hit still routed taps to a volume arc
+ * and a privacy button nobody could see.
+ *
+ * Two traps this test had to avoid, both of which made an earlier version of
+ * it pass while the bug was present:
+ *   - render_frame() calls only apply_space_overlay, so the clock never runs
+ *     and nothing can fail. The real flush order is composed by hand instead.
+ *   - "some pixels survive inside the disc" is satisfied by the clock's own
+ *     HANDS, which are drawn after the clear. So this compares POSITIONS: the
+ *     pixels the shell drew must still hold the shell's values afterwards.
+ * Verified by mutation — reverting the guard to detail-only fails this. */
+static void test_clock_clear_spares_open_shell_surfaces(void)
+{
+    static const int overlays[] = {
+        JR_DISPLAY_OVERLAY_SHADE, JR_DISPLAY_OVERLAY_DETAIL,
+    };
+    static const char *const names[] = { "shade", "detail" };
+    const size_t px = (size_t)HUD_W * HUD_H;
+
+    for (size_t o = 0; o < sizeof overlays / sizeof *overlays; ++o) {
+        uint16_t *base = malloc(px * sizeof *base);
+        uint16_t *withclock = malloc(px * sizeof *withclock);
+        if (!base || !withclock) {
+            printf("FAIL %s: allocation failed\n", __func__);
+            g_failures++;
+            free(base); free(withclock);
+            return;
+        }
+        for (int pass = 0; pass < 2; ++pass) {
+            uint16_t *fb = pass == 0 ? base : withclock;
+            stage_settings(JR_DISPLAY_OTA_IDLE, 0U, overlays[o]);
+            s_space_from = (uint8_t)JR_DISPLAY_SPACE_WATCH;
+            s_space_to = (uint8_t)JR_DISPLAY_SPACE_WATCH;
+            s_detail_space = (uint8_t)JR_DISPLAY_SPACE_WATCH;
+            __atomic_store_n(&s_nav_word,
+                             (uint32_t)JR_DISPLAY_SPACE_WATCH |
+                                 ((uint32_t)overlays[o] << NAV_OVL_SHIFT),
+                             __ATOMIC_RELEASE);
+            /* Drive the eases directly: sp_fade_tick is time-based and this
+             * test must not depend on a clock it cannot advance. */
+            s_shade_ease = overlays[o] == JR_DISPLAY_OVERLAY_SHADE ? 256 : 0;
+            s_detail_ease = overlays[o] == JR_DISPLAY_OVERLAY_DETAIL ? 256 : 0;
+            s_space_veil = 256;
+            jr_display_clock_set(true, 10, 8, 30);
+            s_clock_ease = 256;
+            sp_compose();
+
+            for (size_t i = 0; i < px; ++i) {
+                fb[i] = POISON;
+            }
+            for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+                const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+                uint16_t *strip = fb + (size_t)y * HUD_W;
+                apply_space_overlay(&s_display, y, y2, strip);
+                if (pass == 1) {
+                    apply_clock_overlay(&s_display, y, y2, strip);
+                }
+            }
+        }
+
+        int drawn = 0, survived = 0;
+        for (size_t i = 0; i < px; ++i) {
+            if (base[i] == POISON || base[i] == 0U) {
+                continue;
+            }
+            const int r = radius_of((int)i);
+            if (r > 40 && r <= JR_DISPLAY_SHELL_R_MAX) {
+                drawn++;
+                if (withclock[i] == base[i]) {
+                    survived++;
+                }
+            }
+        }
+        /* Empty is not pass: if the surface drew nothing, the comparison
+         * proves nothing and must fail rather than read as success. */
+        CHECK(drawn > 500, "WATCH + %s drew only %d pixels — test is vacuous",
+              names[o], drawn);
+        CHECK(drawn > 0 && survived * 10 >= drawn * 8,
+              "WATCH + %s: %d of %d shell pixels survived the clock clear — "
+              "the surface is invisible but still hit-tested",
+              names[o], survived, drawn);
+        free(base); free(withclock);
+    }
+}
+
 int main(void)
 {
     test_space_ring_wraps_both_ways();
@@ -775,6 +865,7 @@ int main(void)
     test_shade_hits_resolve_to_controls();
 
     test_every_space_composes_its_own_sheet();
+    test_clock_clear_spares_open_shell_surfaces();
 
     if (g_failures) {
         printf("%d failure(s)\n", g_failures);
