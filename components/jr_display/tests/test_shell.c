@@ -62,27 +62,49 @@ static void reset_nav(void)
     __atomic_store_n(&s_display.shell_word, 0U, __ATOMIC_RELEASE);
 }
 
-static void test_spaces_clamp_and_never_wrap(void)
+static void test_space_ring_wraps_both_ways(void)
 {
+    /* The ring WRAPS (changed 2026-08-29). This test previously asserted the
+     * opposite — that PREV off the first screen was an honest no-op, because a
+     * wrap made "am I at the end" unanswerable. An endless ring never raises
+     * that question: there is no end, and a swipe never dies against a wall.
+     * The old assertions are inverted here rather than deleted, so the change
+     * of contract stays visible to whoever reads this next. */
     reset_nav();
     CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS, "cold start");
 
-    /* Backwards off the left end is an honest no-op, not a wrap to SETTINGS:
-     * a wrapping ring makes "am I at the end" unanswerable. */
+    /* Backwards off the first screen lands on the LAST one. */
     jr_display_nav_prev();
-    CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS, "clamped left");
+    CHECK((int)jr_display_nav_space() == (int)JR_DISPLAY_SPACE_COUNT - 1,
+          "prev from first wraps to last");
 
+    /* Forward from the last screen returns to the first. */
     jr_display_nav_next();
-    CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_DESK, "->desk");
-    jr_display_nav_next();
-    CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_TOOLS, "->tools");
-    jr_display_nav_next();
-    CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_SETTINGS, "->settings");
-    jr_display_nav_next();
-    CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_SETTINGS, "clamped right");
+    CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS,
+          "next from last wraps to first");
 
-    jr_display_nav_prev();
-    CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_TOOLS, "back to tools");
+    /* A full lap returns exactly where it started — the property that makes
+     * "endless" true rather than merely long. */
+    for (int i = 0; i < (int)JR_DISPLAY_SPACE_COUNT; ++i) {
+        jr_display_nav_next();
+    }
+    CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS,
+          "a full lap forward returns home");
+
+    for (int i = 0; i < (int)JR_DISPLAY_SPACE_COUNT; ++i) {
+        jr_display_nav_prev();
+    }
+    CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS,
+          "a full lap backward returns home");
+
+    /* Every screen is reachable going forward — a ring with a gap is a bug
+     * that only shows up when the count changes. */
+    reset_nav();
+    for (int i = 1; i < (int)JR_DISPLAY_SPACE_COUNT; ++i) {
+        jr_display_nav_next();
+        CHECK((int)jr_display_nav_space() == i,
+              "every screen reachable forward");
+    }
 }
 
 static void test_overlay_axis_is_unambiguous(void)
@@ -114,19 +136,22 @@ static void test_sideways_resets_and_home_escapes(void)
     reset_nav();
     jr_display_nav_up();
     jr_display_nav_next();
-    CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_DESK, "moved");
+    CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_WATCH, "moved");
     CHECK(jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE, "detail dropped");
 
     jr_display_nav_down();
     jr_display_nav_prev();
     CHECK(jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE, "shade dropped");
 
-    /* A swipe that CANNOT move (already clamped) still closes overlays: the
-     * gesture was made, so the reset is what the user asked for. */
+    /* A move still closes overlays even when it wraps. Nothing is "clamped"
+     * any more, so this asserts the RESET rather than the no-op: the gesture
+     * was made, so dropping the overlay is what the user asked for, and where
+     * they land is the previous screen on the ring. */
     reset_nav();
     jr_display_nav_up();
     jr_display_nav_prev();
-    CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS, "still home");
+    CHECK((int)jr_display_nav_space() == (int)JR_DISPLAY_SPACE_COUNT - 1,
+          "prev from home wraps to the last screen");
     CHECK(jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE,
           "clamped swipe still resets");
 
@@ -653,7 +678,7 @@ static void test_shade_hits_resolve_to_controls(void)
 
 int main(void)
 {
-    test_spaces_clamp_and_never_wrap();
+    test_space_ring_wraps_both_ways();
     test_overlay_axis_is_unambiguous();
     test_sideways_resets_and_home_escapes();
     test_transition_publishes_a_new_serial();

@@ -1293,12 +1293,26 @@ static void brightness_pump(void)
  * never a runaway length, because the caps bound the draw regardless.
  */
 
-#define NAV_SPACE_MASK    0x3u
-#define NAV_PREV_SHIFT    2
-#define NAV_OVL_SHIFT     4
-#define NAV_OVL_MASK      0x30u
-#define NAV_FORWARD_BIT   0x40u
-#define NAV_SERIAL_SHIFT  8
+/* THREE bits per space, not two. The old layout gave the space field 0x3 —
+ * four values — which was exactly enough while the ring held four screens and
+ * silently truncated the moment it held more: with seven, screens 4/5/6 folded
+ * onto 0/1/2, so sliding past MOTION appeared to wrap early and DESK, TOOLS
+ * and SETTINGS were unreachable. Nothing warned; the field just dropped the
+ * high bit.
+ *
+ * Widened to 3 bits (8 screens) and every downstream field moved with it. If
+ * the ring ever needs a ninth screen this must widen again — the guard below
+ * turns that into a build failure instead of another silent truncation. */
+#define NAV_SPACE_MASK    0x7u
+#define NAV_PREV_SHIFT    3
+#define NAV_OVL_SHIFT     6
+#define NAV_OVL_MASK      0xC0u
+#define NAV_FORWARD_BIT   0x100u
+#define NAV_SERIAL_SHIFT  9
+
+_Static_assert((uint32_t)JR_DISPLAY_SPACE_COUNT <= NAV_SPACE_MASK + 1u,
+               "JR_DISPLAY_SPACE_COUNT exceeds the nav word's space field — "
+               "widen NAV_SPACE_MASK and shift NAV_PREV/OVL/FORWARD/SERIAL");
 
 #define SP_LABEL_CAP      13   /* 12 glyphs at scale 2 = 144 px, fits r<=96 */
 #define SP_COL_MAX        11   /* detail column: 10 glyphs at scale 2       */
