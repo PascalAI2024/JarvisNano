@@ -700,6 +700,56 @@ static void test_shade_hits_resolve_to_controls(void)
           "outer band is not the shell's");
 }
 
+/* Every ring screen's detail sheet must be ABOUT that screen.
+ *
+ * WATCH and POWER used to fall through to the composer's `default:` case,
+ * which builds the SETTINGS sheet — so tapping the clock or the battery
+ * opened a sheet headed SETTINGS listing privacy, link, update and slot rows.
+ * The screen you touched was not the screen you got.
+ *
+ * This asserts the heading of each space individually AND that no space other
+ * than SETTINGS is headed "SETTINGS", which is the shape of the original bug:
+ * a new space added without its own case would silently inherit that sheet
+ * again, and this test is what refuses it. */
+static void test_every_space_composes_its_own_sheet(void)
+{
+    static const struct { int space; const char *head; } expect[] = {
+        { JR_DISPLAY_SPACE_JARVIS,   "SESSION"  },
+        { JR_DISPLAY_SPACE_WATCH,    "TIME"     },
+        { JR_DISPLAY_SPACE_POWER,    "POWER"    },
+        { JR_DISPLAY_SPACE_TOOLS,    "TOOLS"    },
+        { JR_DISPLAY_SPACE_SETTINGS, "SETTINGS" },
+    };
+    for (size_t i = 0; i < sizeof expect / sizeof expect[0]; ++i) {
+        sp_compose_detail(expect[i].space);
+        CHECK(strcmp(s_detail_head, expect[i].head) == 0,
+              "space %d should head '%s', got '%s'",
+              expect[i].space, expect[i].head, s_detail_head);
+        CHECK(s_detail_rows > 0, "space %d composed no rows", expect[i].space);
+    }
+
+    /* No space may borrow the SETTINGS sheet. */
+    for (int space = 0; space < (int)JR_DISPLAY_SPACE_COUNT; ++space) {
+        if (space == (int)JR_DISPLAY_SPACE_SETTINGS) {
+            continue;
+        }
+        sp_compose_detail(space);
+        CHECK(strcmp(s_detail_head, "SETTINGS") != 0,
+              "space %d borrowed the SETTINGS sheet", space);
+    }
+
+    /* WATCH must not present a duration where a wall time belongs: an
+     * unsynced clock reads --:--, never 0:00, which looks like midnight. */
+    jr_display_clock_set(false, 0, 0, 0);
+    sp_compose_detail(JR_DISPLAY_SPACE_WATCH);
+    CHECK(strcmp(s_detail_value[1], "--:--") == 0,
+          "unsynced clock should read --:--, got '%s'", s_detail_value[1]);
+    jr_display_clock_set(true, 0, 7, 0);
+    sp_compose_detail(JR_DISPLAY_SPACE_WATCH);
+    CHECK(strcmp(s_detail_value[1], "00:07") == 0,
+          "midnight hour should zero-pad, got '%s'", s_detail_value[1]);
+}
+
 int main(void)
 {
     test_space_ring_wraps_both_ways();
@@ -723,6 +773,8 @@ int main(void)
     test_jarvis_at_rest_draws_nothing();
 
     test_shade_hits_resolve_to_controls();
+
+    test_every_space_composes_its_own_sheet();
 
     if (g_failures) {
         printf("%d failure(s)\n", g_failures);

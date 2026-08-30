@@ -1592,7 +1592,77 @@ static void sp_compose_detail(int space)
         }
         break;
     }
-    default: {
+    /* WATCH AND POWER OWN THEIR OWN SHEETS.
+     *
+     * Both used to fall through to the default below, so tapping the clock or
+     * the battery opened a sheet headed SETTINGS listing privacy, link, update
+     * and slot rows. The screen you touched was not the screen you got, and
+     * the heading said so in the wrong direction — it named SETTINGS while you
+     * were standing on WATCH. A sheet is the context of ONE space; borrowing
+     * another space's context is worse than showing nothing. */
+    case JR_DISPLAY_SPACE_WATCH: {
+        const uint32_t w = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
+        const bool synced = (w & (1u << 16)) != 0u;
+        const uint32_t hh = (w >> 8) & 0xFFu;
+        const uint32_t mm = w & 0xFFu;
+        sp_copy(s_detail_head, "TIME");
+        sp_str(s_detail_label[0], 0, SP_COL_MAX, "CLOCK");
+        sp_str(s_detail_value[0], 0, SP_COL_MAX, synced ? "SYNCED" : "NO SYNC");
+        sp_str(s_detail_label[1], 0, SP_COL_MAX, "NOW");
+        if (synced) {
+            /* Built digit by digit rather than through sp_clock_str, which
+             * switches to minutes:seconds below 3600 s and would render the
+             * midnight hour as though it were a duration. */
+            int len = 0;
+            if (hh < 10u) {
+                len = sp_str(s_detail_value[1], len, SP_COL_MAX, "0");
+            }
+            len = sp_num(s_detail_value[1], len, SP_COL_MAX, hh);
+            len = sp_str(s_detail_value[1], len, SP_COL_MAX, ":");
+            if (mm < 10u) {
+                len = sp_str(s_detail_value[1], len, SP_COL_MAX, "0");
+            }
+            (void)sp_num(s_detail_value[1], len, SP_COL_MAX, mm);
+        } else {
+            sp_str(s_detail_value[1], 0, SP_COL_MAX, "--:--");
+        }
+        sp_str(s_detail_label[2], 0, SP_COL_MAX, "MIC");
+        sp_str(s_detail_value[2], 0, SP_COL_MAX,
+               sp_privacy_muted() ? "MUTED" : "LIVE");
+        s_detail_rows = 3;
+        break;
+    }
+    case JR_DISPLAY_SPACE_POWER: {
+        const uint32_t w = __atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE);
+        const uint32_t percent = w & 0xFFu;
+        const uint32_t millivolts = (w >> 8) & 0xFFFFu;
+        sp_copy(s_detail_head, "POWER");
+        sp_str(s_detail_label[0], 0, SP_COL_MAX, "LEVEL");
+        if (percent <= 100U) {
+            sp_pct(s_detail_value[0], 0, SP_COL_MAX, percent);
+        } else {
+            sp_str(s_detail_value[0], 0, SP_COL_MAX, "NONE");
+        }
+        sp_str(s_detail_label[1], 0, SP_COL_MAX, "VOLTS");
+        if (millivolts >= 1000U) {
+            int len = sp_num(s_detail_value[1], 0, SP_COL_MAX, millivolts);
+            (void)sp_str(s_detail_value[1], len, SP_COL_MAX, "MV");
+        } else {
+            sp_str(s_detail_value[1], 0, SP_COL_MAX, "NONE");
+        }
+        /* Bit 24 is USB-present and bit 25 is CHARGING. They are separate rows
+         * here precisely because conflating them is what made POWER claim
+         * "100% CHG" on a full battery sitting on a cable. */
+        sp_str(s_detail_label[2], 0, SP_COL_MAX, "USB");
+        sp_str(s_detail_value[2], 0, SP_COL_MAX,
+               (w & (1u << 24)) != 0u ? "YES" : "NO");
+        sp_str(s_detail_label[3], 0, SP_COL_MAX, "CHARGE");
+        sp_str(s_detail_value[3], 0, SP_COL_MAX,
+               (w & (1u << 25)) != 0u ? "YES" : "NO");
+        s_detail_rows = 4;
+        break;
+    }
+    case JR_DISPLAY_SPACE_SETTINGS: {
         const uint32_t w = __atomic_load_n(&s_status_word, __ATOMIC_ACQUIRE);
         const uint32_t ota = __atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE);
         const jr_display_ota_state_t ota_state =
@@ -1655,6 +1725,15 @@ static void sp_compose_detail(int space)
         s_detail_rows = 5;
         break;
     }
+    default:
+        /* Unreachable: every space in jr_display_space_t is named above. This
+         * is deliberately EMPTY rather than a copy of some other screen's
+         * sheet — when a new space is added, showing nothing is an obvious
+         * gap, whereas silently inheriting SETTINGS is a lie that looks like
+         * a feature. That is exactly how WATCH and POWER went wrong. */
+        s_detail_head[0] = '\0';
+        s_detail_rows = 0;
+        break;
     }
 }
 
