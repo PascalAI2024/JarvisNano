@@ -2689,17 +2689,16 @@ static const char *sp_headline(int space)
         return s_space_head[space];
     }
     switch (space) {
-    case JR_DISPLAY_SPACE_WATCH: {
-        static char buf[SP_LABEL_CAP];
-        const uint32_t w = s_clock_shown_word;
-        if (w == 0u) {
-            return "NO TIME";      /* SNTP has not landed — say so */
-        }
-        int hh = (int)((w >> 8) & 0xFFu), mm = (int)(w & 0xFFu);
-        int h12 = hh % 12; if (h12 == 0) h12 = 12;
-        snprintf(buf, sizeof buf, "%d:%02d %s", h12, mm, hh < 12 ? "AM" : "PM");
-        return buf;
-    }
+    case JR_DISPLAY_SPACE_WATCH:
+        /* NO HEADLINE. The hands are the readout; printing "11:29 PM" under
+         * them stacks a second clock on the first, which is exactly the
+         * clutter this screen is supposed to remove. An empty label draws
+         * nothing (sp_draw_space returns on len <= 0).
+         *
+         * The one thing worth saying in words is when there is NO time to
+         * show — hands frozen at 12:00 look like a stopped clock rather than
+         * an unsynced one. */
+        return s_clock_shown_word == 0u ? "NO TIME" : "";
     case JR_DISPLAY_SPACE_POWER: {
         static char buf[SP_LABEL_CAP];
         const uint32_t w = __atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE);
@@ -3077,11 +3076,19 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
          * draws nothing at all in JARVIS at rest. */
         apply_space_overlay(ctx, y1, y2, pixels);
 
-        /* UI-01 clock under the STATE-04 caption: the watch dims the frame,
-         * the caption band dims again over it and carries the status text.
-         * The watch is JARVIS's ambient face, so it yields the moment the
-         * shell is presenting rather than fighting it for the centre. */
-        if (!s_space_on) {
+        /* UI-01 clock under the STATE-04 caption. The watch is JARVIS's
+         * ambient face, so it yields whenever the shell is presenting ANOTHER
+         * screen rather than fighting it for the centre — but it must NOT
+         * yield on the WATCH screen itself, which exists to show it.
+         *
+         * That exception is the whole bug behind "I don't see the clock at all
+         * anymore": the ring gained a WATCH screen, and `!s_space_on`
+         * suppressed the clock on precisely the one space that wanted it, so
+         * the screen rendered the bare baked face with the time reduced to a
+         * caption. */
+        if (!s_space_on ||
+            (jr_display_space_t)(__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE)
+                                 & NAV_SPACE_MASK) == JR_DISPLAY_SPACE_WATCH) {
             apply_clock_overlay(ctx, y1, y2, pixels);  /* gates itself */
         }
         {

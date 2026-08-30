@@ -302,7 +302,6 @@ static _Atomic uint32_t s_sim_flip;
 /* Gesture layer (app task only): swipe-right watch peek deadline, and the
  * double-tap window for the attention gesture. */
 static uint32_t s_watch_peek_until_ms;
-static uint32_t s_side_page_until_ms;
 static uint32_t s_last_tap_ms;
 /* Hold-to-commit: ms at which the current physical contact was confirmed, or 0
  * when no hold is in flight. App task only. */
@@ -6168,20 +6167,23 @@ static void voice_task(void *arg)
                 }
             }
 
-            /* Voice owns the primary glass. Side utilities time out, and any
-             * active voice turn reclaims Jarvis immediately. */
-            const jr_state_t ui_phase = jr_orch_phase(&s_app.orch);
-            const bool voice_visible =
-                ui_phase == JR_ST_THINKING || ui_phase == JR_ST_SPEAKING;
-            if (jr_display_nav_space() != JR_DISPLAY_SPACE_JARVIS &&
-                (voice_visible ||
-                 (s_side_page_until_ms != 0U &&
-                  (int32_t)((uint32_t)now - s_side_page_until_ms) >= 0))) {
-                jr_display_nav_home();
-                s_side_page_until_ms = 0U;
-                jr_display_caption_set("JARVIS - VOICE READY");
-                ESP_LOGI(TAG, "ui: voice reclaimed primary surface");
-            }
+            /* VOICE NO LONGER STEALS THE SCREEN YOU CHOSE.
+             *
+             * This used to pull the ring back to JARVIS on any THINKING or
+             * SPEAKING turn. That was right when the spaces were temporary
+             * side utilities you fell out of; it is wrong now that the ring IS
+             * the navigation — you slide to WATCH, the assistant says one
+             * word, and the screen you deliberately opened vanishes under a
+             * "JARVIS - VOICE READY" caption. Observed on the device while
+             * screenshotting the ring: every swipe was followed within a
+             * second by "voice reclaimed primary surface".
+             *
+             * It is also redundant. An ask already owns the glass by
+             * construction — apply_hud_overlay draws the choice arcs and skips
+             * the shell entirely whenever an ask is up — and captions draw over
+             * every space. Voice stays fully visible without confiscating
+             * navigation, so nothing is lost by letting the user stay where
+             * they put themselves. Double-tap remains the way home. */
 
             if (atomic_exchange(&s_panic_home_request, false)) {
                 jr_display_surface_dismiss();
@@ -6189,7 +6191,6 @@ static void voice_task(void *arg)
                 jr_display_nav_home();
                 s_ui_shade_open = false;
                 s_watch_peek_until_ms = 0U;
-                s_side_page_until_ms = 0U;
                 s_hold_start_ms = 0U;
                 jr_display_commit_ring(0U);
                 jr_mood_poke_awake(&s_mood, (uint32_t)now);
@@ -6248,7 +6249,12 @@ static void voice_task(void *arg)
                         clock_on = true;
                         jr_display_clock_set(true, tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
                         device_rtc_capture_os_time();
-                        if (tmv.tm_min != s_clock_last_min) {
+                        /* Only the PEEK narrates the time. On the WATCH
+                         * screen the hands ARE the readout, so adding a
+                         * "11:25 PM" caption under them just stacks a second
+                         * clock on the first — that is the clutter the owner
+                         * called out. */
+                        if (peek && tmv.tm_min != s_clock_last_min) {
                             s_clock_last_min = tmv.tm_min;
                             char cap[48];
                             int h12 = tmv.tm_hour % 12;
@@ -6983,7 +6989,6 @@ static void voice_task(void *arg)
                     jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_SHADE;
                 /* One space now, so there is no page to name and nothing to
                  * auto-return from. */
-                s_side_page_until_ms = 0U;
                 if (watch_opened) {
                     jr_display_caption_set("WATCH - 10 SECONDS");
                 } else if (jr_display_nav_overlay() ==
@@ -7097,7 +7102,6 @@ static void voice_task(void *arg)
                     case JR_DISPLAY_ACT_FOCUS:
                         jr_display_nav_up();
                         jr_display_caption_set("DETAIL - DOWN TO CLOSE");
-                        s_side_page_until_ms = (uint32_t)now + 12000U;
                         break;
                     default:
                         break;
