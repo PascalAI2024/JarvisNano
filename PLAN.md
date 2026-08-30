@@ -153,6 +153,48 @@ fail loudly or be derived from the tree.
 Both benches independently reported N8.2, N8.4 and N8.5. Two models converging
 on the same lines is why those were treated as confirmed rather than plausible.
 
+### Adversarial sweep — 34 agents, 26 findings, 6 refuted, 20 confirmed
+
+Eight independent lenses over the firmware, every finding then handed to a
+verifier told to REFUTE it and to default to refuted when uncertain. Six died
+there, which is the point of running it that way.
+
+**Fixed and on the device:**
+
+| # | Finding | Commit | Evidence |
+|---|---|---|---|
+| S1 | **The clock clear still ate the control shade.** The previous guard tested only `s_detail_ease`, so on WATCH the shade drew and was then wiped: a black dial, the caption "CONTROLS - UP TO CLOSE", and an invisible-but-LIVE volume arc and privacy button that `jr_display_hit` still routed taps to. A blind tap in the lower disc could flip the microphone | `2093da40` | **Mutation-verified.** Reverting the guard: `0 of 123556 shell pixels survived`. Pinned by `test_clock_clear_spares_open_shell_surfaces` (`ac936a92`) |
+| S2 | **Gold in the outer band meant two different things.** The battery rim (r215-220) painted gold while charging, one pixel from the gold privacy ring (r221-222), so a charging device read as a muted one | `2093da40` | **Measured while charging.** r=217 gold=0, cyan over an 18 deg wedge (the battery arc); the gold at r219-223 spans 0..359 deg, i.e. the privacy ring, not a wedge |
+| S3 | POWER drew the alarm-amber core when the fuel gauge did not answer — an amber "low battery" core floating in a deliberately empty ring | `2093da40` | Core is now track-coloured when `have_gauge` is false |
+| S4 | **Codex-mode tap precedence was inverted in both directions.** The TAP branch set `codex_tap_pending` and then fell straight onto `codex_tap_pending = false` in the same iteration, so the flag could never be true when the next tap tested it: the double-tap escape never fired and the deferred tap was never dispatched. Meanwhile the `else` arm `continue`d, swallowing swipes — the opposite of the comment beneath it | `3175d822` | Direct cause of "there's something on screen, can't even click it". I had previously read this block, found the 400 ms flush, and wrongly concluded taps were deferred rather than discarded |
+| S5 | `mood.h` claimed three times that WHISPER and DREAM "switch the microphone OFF". They close the Gemini session; the codec keeps sampling and WakeNet keeps running, which is what lets "Jarvis" wake the device from DREAM | `3175d822` | Rest is a power state, privacy is a capability state. A header that conflates them is trusted instead of the code |
+
+**Confirmed, still open** — each carries a file:line and a verifier's evidence
+in the run transcript:
+
+| # | Finding | Severity |
+|---|---|---|
+| S6 | TOOLS clamps the 8-tool catalog to 4 slots and DROPS the last-run index, so `execute_tool`, `set_volume`, `set_brightness` and `ask_user` all collapse to -1 and read as "LAST NONE" | high |
+| S7 | The DESK JOB row re-cuts the 12-glyph title to 10, deleting the "." mark `title_shorten()` adds — a truncation of a truncation, with the evidence of it removed | high |
+| S8 | Panic-home clears every overlay EXCEPT the two that replace the whole frame: it never calls `jr_display_set_test_pattern(TEST_OFF)` or `jr_display_canvas_clear()`, and never tears down a touch challenge | high |
+| S9 | Panic-home dismisses the glass surface without `s_brain_lock` and without clearing `s_brain_surface.active`, breaking the invariant every other one of the nine dismiss sites maintains | high |
+| S10 | `sp_annulus_row` measures the wedge about the panel centre while drawing the annulus about the OFFSET centre, so every focal arc warps mid-slide | medium |
+| S11 | The agent-link card is a rectangle on round glass: corners fall off the bezel and it overwrites the battery rim and privacy ring | medium |
+| S12 | The watch peek's caption outlives the peek and freezes on the glass | medium |
+| S13 | Double-tap-home outranks every shell control, so a rapid second tap on the shade ejects you to the face | medium |
+| S14 | A contact shorter than one 40 ms poll produces NO event at all — not even PRESS_UP | medium |
+| S15 | The caption chip is documented single-writer but HTTP handlers write it concurrently with the voice task; the OTA "DO NOT UNPLUG" warning can be overwritten | medium |
+| S16 | `POST /api/agent/link` is the only mutating POST that skips the control-intent gate | medium |
+| S17 | `/api/debug/gain` reports the request back as if it were device state, so tuning reads -1 | medium |
+| S18 | The demo reel wipes a real ask's choice arcs in the same loop iteration they are drawn | low |
+| S19 | The pushed-canvas buffer is rewritten in place from the HTTP task while the render task reads it at full opacity | low |
+| S20 | `/api/demo` answers `queued:true` unconditionally, but the reel is silently dropped in most phases | low |
+
+**Open question raised by the S2 measurement, not yet a finding:** at 8%
+battery the persistent rim rendered CYAN, but `ov_battery` paints red below
+20%. That branch was not touched by S2's fix, so the `batt_pct` reaching the
+HUD env word may disagree with the fuel gauge. Measure before assuming.
+
 ### Power management — answering "there are 4 modes on this chip"
 
 Research: Grok `grok-4.6` against the firmware as it actually runs, not generic
