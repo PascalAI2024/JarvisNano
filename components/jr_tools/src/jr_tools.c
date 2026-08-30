@@ -233,8 +233,19 @@ static bool snapshot_config(char *url, size_t url_cap, char *key, size_t key_cap
 
 static bool response_from_mcp(const char *raw, jr_tool_result_t *result)
 {
+    /* Diagnostic, added because every tool call was returning bad_response on
+     * an HTTP 200 and nothing said why. Three distinct failures all collapsed
+     * into one status: unparseable JSON, a non-object root, and a normalized
+     * result too large for the 3072-byte response buffer. The upstream payload
+     * measured only ~1.7 KB, so "too big" was a guess — this replaces the
+     * guess with the number. Body is tool output, not credentials, and it is
+     * capped hard at 160 characters. */
+    const size_t raw_len = raw ? strlen(raw) : 0U;
     cJSON *root = cJSON_Parse(raw);
     if (root == NULL || !cJSON_IsObject(root)) {
+        ESP_LOGE(TAG, "mcp parse failed: %s len=%u head=\"%.160s\"",
+                 root == NULL ? "not JSON" : "root not an object",
+                 (unsigned)raw_len, raw ? raw : "");
         cJSON_Delete(root);
         return false;
     }
@@ -258,6 +269,59 @@ static bool response_from_mcp(const char *raw, jr_tool_result_t *result)
     cJSON_AddItemToObject(response, "result", copy);
     bool ok = cJSON_PrintPreallocated(response, result->response_json,
                                      sizeof(result->response_json), false);
+    if (!ok) {
+        /* OVER BUDGET IS NOT A FAILURE. It used to be: a result one byte past
+         * the cap became bad_response, Gemini got nothing, and the owner's
+         * experience was "I can't get any help" — intermittently, because
+         * whether a search fits depends on the query. Measured on the device:
+         * need=3728 against cap=3072, over by 656 bytes.
+         *
+         * A truncated answer beats no answer. Emit a bounded object that says
+         * plainly it was cut, carries the byte counts, and includes as much of
+         * the real payload as fits — Gemini can use a partial catalogue, and
+         * the `truncated` flag lets it say so rather than inventing the rest.
+         *
+         * The proper fix is server-side projection with a cursor (PLAN N6.3);
+         * this is the floor that stops a size overrun from being total data
+         * loss while that lands. */
+        char *measured = cJSON_PrintUnformatted(response);
+        const unsigned need = (unsigned)(measured ? strlen(measured) : 0U);
+        ESP_LOGW(TAG, "mcp result over budget: need=%u cap=%u raw=%u — truncating",
+                 need, (unsigned)sizeof(result->response_json), (unsigned)raw_len);
+
+        /* Reserve room for the envelope, then fill the remainder with payload. */
+        static const char *const head =
+            "{\"result\":{\"truncated\":true,\"note\":"
+            "\"payload exceeded the device budget; content is cut\",\"text\":\"";
+        static const char *const tail = "\"}}";
+        const size_t cap = sizeof(result->response_json);
+        const size_t hlen = strlen(head), tlen = strlen(tail);
+        if (measured != NULL && cap > hlen + tlen + 16U) {
+            size_t room = cap - hlen - tlen - 1U;
+            memcpy(result->response_json, head, hlen);
+            size_t w = hlen;
+            /* Copy payload, JSON-escaping the few characters that would break
+             * the string, and stop on a whole escape rather than mid-sequence. */
+            for (size_t i = 0; measured[i] != '\0' && w + 8U < hlen + room; ++i) {
+                unsigned char ch = (unsigned char)measured[i];
+                if (ch == '"' || ch == '\\') {
+                    result->response_json[w++] = '\\';
+                    result->response_json[w++] = (char)ch;
+                } else if (ch < 0x20) {
+                    w += (size_t)snprintf(result->response_json + w,
+                                          cap - w, "\\u%04x", ch);
+                } else {
+                    result->response_json[w++] = (char)ch;
+                }
+            }
+            memcpy(result->response_json + w, tail, tlen);
+            result->response_json[w + tlen] = '\0';
+            ok = true;
+        }
+        if (measured != NULL) {
+            cJSON_free(measured);
+        }
+    }
     cJSON_Delete(response);
     cJSON_Delete(root);
     return ok;
