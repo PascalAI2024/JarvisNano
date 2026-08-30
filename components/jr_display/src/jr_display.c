@@ -2906,11 +2906,21 @@ static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
     }
 }
 
-/* The orbital page indicator: four marks on a short arc at the top of the
- * dial. The lit mark travels between them on the SAME eased progress the
- * content slides on, so the indicator IS the transition rather than a caption
- * on it. Straight interpolation is exact because the space ring is clamped,
- * never wrapped. Gold when muted — privacy outranks position. */
+/* The orbital page indicator: one mark per screen, spaced evenly around the
+ * WHOLE dial, with the lit mark travelling on the SAME eased progress the
+ * content slides on — so the indicator IS the transition, not a caption on it.
+ * Gold when muted: privacy outranks position.
+ *
+ * It used to be N marks on a short ±30 arc at 12 o'clock, positioned by
+ * (2*i - 3) * 7. That was tuned for exactly FOUR spaces and broke twice when
+ * the ring grew to seven: the outer marks landed at ±63, outside the ±30 rail
+ * they were supposed to sit on, and a wrap from the last screen to the first
+ * swept the lit mark backwards across the entire arc.
+ *
+ * A full circle fixes both by construction. Evenly spaced marks always fit
+ * however many screens exist, and the active mark takes the SHORT way round —
+ * so a wrap advances one step forward like every other move, instead of
+ * rewinding past everything. Position on a ring should be drawn as a ring. */
 static void sp_draw_orbit(const jr_display_ctx_t *ctx, int y1, int y2,
                           uint16_t *pixels, int st)
 {
@@ -2919,20 +2929,24 @@ static void sp_draw_orbit(const jr_display_ctx_t *ctx, int y1, int y2,
     const uint16_t cool = sp_tint(ctx, muted ? SP_C_GOLD_DIM : SP_C_CYAN_DIM, st);
     const uint16_t hot = sp_tint(ctx, muted ? SP_C_GOLD : SP_C_CYAN, st);
 
-    const int a_from = SP_A_TOP + (2 * (int)s_space_from - 3) * 7;
-    const int a_to = SP_A_TOP + (2 * (int)s_space_to - 3) * 7;
-    const int a_act = a_from + ((a_to - a_from) * s_space_ease) / 256;
+    const int n = (int)JR_DISPLAY_SPACE_COUNT;
+    const int a_from = SP_A_TOP + ((int)s_space_from * 256) / n;
+    const int a_to = SP_A_TOP + ((int)s_space_to * 256) / n;
+    /* Signed shortest way round, in Q8 turn units: a wrap is one step forward,
+     * not n-1 steps back. */
+    const int d = (((a_to - a_from) + 128) & 255) - 128;
+    const int a_act = a_from + (d * s_space_ease) / 256;
 
-    sp_span_t rail_span, act;
-    sp_span_set(&rail_span, SP_A_TOP - 30, SP_A_TOP + 30);
+    sp_span_t act;
     sp_span_set(&act, a_act - 5, a_act + 5);
 
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        /* The rail is now the whole ring — NULL span means all the way round. */
         sp_annulus_row(row, y, SP_CX, SP_CY, SP_ORB_TRACK_IN, SP_ORB_TRACK_OUT,
-                       &rail_span, rail);
-        for (int i = 0; i < JR_DISPLAY_SPACE_COUNT; ++i) {
-            const int a = SP_A_TOP + (2 * i - 3) * 7;
+                       NULL, rail);
+        for (int i = 0; i < n; ++i) {
+            const int a = SP_A_TOP + (i * 256) / n;
             sp_dot_row(row, y, SP_CX + ((sp_cos(a) * SP_ORB_R) >> 15),
                        SP_CY + ((sp_sin(a) * SP_ORB_R) >> 15), 5, cool);
         }
