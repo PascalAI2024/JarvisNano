@@ -72,11 +72,27 @@ def _req(host: str, path: str, method: str = "GET", timeout: float = 25.0):
     return urllib.request.urlopen(r, timeout=timeout).read()
 
 
-def post(host: str, path: str) -> bool:
+class SweepError(RuntimeError):
+    """A control call the sweep depends on did not take effect."""
+
+
+def post(host: str, path: str, required: bool = True) -> bool:
+    """POST a control call. LOUD by default.
+
+    This used to swallow every failure and return False, which nothing
+    checked. The shade call had the wrong parameter for a while (the handler
+    wants ?action=open, not ?open=1), so the shade never opened, the sweep
+    captured the plain JARVIS screen, captioned it CONTROLS, and presented it
+    as a rendering defect. A silent failure in a QA tool does not leave a gap
+    in the evidence; it produces confident WRONG evidence, which is worse.
+    """
     try:
         _req(host, path, "POST", 12.0)
         return True
-    except Exception:
+    except Exception as exc:
+        if required:
+            raise SweepError(f"{path} failed: {exc}") from exc
+        print(f"  (optional call failed: {path}: {exc})")
         return False
 
 
@@ -125,7 +141,7 @@ def main() -> int:
     # taken under one used to return the same frame seven times — every tile
     # identical, which is how the swallowing bug was found in the first place.
     # Start from an un-inhabited body, then capture companion mode last.
-    post(a.host, "/api/operator/lease?release=1")
+    post(a.host, "/api/operator/lease?release=1", required=False)
     time.sleep(0.5)
 
     # Home next, so the sweep starts from a known screen rather than wherever
@@ -147,13 +163,13 @@ def main() -> int:
     if a.extras:
         post(a.host, "/api/debug/input?kind=double&x=233&y=233")
         time.sleep(a.settle)
-        post(a.host, "/api/ui/shade?open=1")
+        post(a.host, "/api/ui/shade?action=open")
         time.sleep(a.settle)
         im = grab(a.host)
         if im:
             shots.append(caption(im, "CONTROLS", "shade"))
             print("  CONTROLS: ok")
-        post(a.host, "/api/ui/shade?open=0")
+        post(a.host, "/api/ui/shade?action=close")
         time.sleep(a.settle)
 
         post(a.host, "/api/operator/lease?ttl=60")
@@ -162,7 +178,7 @@ def main() -> int:
         if im:
             shots.append(caption(im, "COMPANION", "operator lease"))
             print("  COMPANION: ok")
-        post(a.host, "/api/operator/lease?release=1")
+        post(a.host, "/api/operator/lease?release=1", required=False)
 
     if not shots:
         print("nothing captured — is the device reachable and dev mode on?")

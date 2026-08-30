@@ -7016,8 +7016,12 @@ static void voice_task(void *arg)
                      * the caption IS the position indicator — it answers
                      * "where am I" without a dial mark that has to jump when
                      * the ring wraps. */
+                    /* WATCH is deliberately blank: a clock face is the one
+                     * screen that needs no caption to identify it, and the
+                     * word sat directly under the hands as pure clutter.
+                     * caption_set("") routes to caption_clear(). */
                     static const char *const mode_name[JR_DISPLAY_SPACE_COUNT] =
-                        { "JARVIS", "WATCH", "POWER",
+                        { "JARVIS", "", "POWER",
                           "DESK", "TOOLS", "SETTINGS" };
                     const jr_display_space_t sp = jr_display_nav_space();
                     jr_display_caption_set(
