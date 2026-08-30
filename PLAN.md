@@ -175,6 +175,41 @@ Deep-sleep**.
 | N8.17 | Weather screen (Fort Lauderdale) as a seventh ring screen | Enum growth is mechanically safe: 7 fits the 3-bit nav field, the `_Static_assert` guards it, and `screens.py` now tracks the enum. Settle the data path first (device-pull via the jarvismcp bridge vs host-push via the brain surface). City in code; endpoint and keys in NVS per the repo rule; refresh on entering the screen, never a timer that drags Wi-Fi out of min-modem during rest; render the data age, because it will be stale after rest |
 | N8.18 | TOOLS may now be dead weight — with the redundant tools removed the screen is three unlabelled arcs | Propose cut or repurpose. Subtraction is a legitimate deliverable; do not delete a ring screen unilaterally |
 
+### N8 execution queue — worked top to bottom, no check-in between items
+
+Every row has a concrete acceptance test. "Looks better" is not one. Items are
+ordered by user-visible impact, with cheap high-impact fixes first so the glass
+improves continuously rather than in one late lump.
+
+| Order | Item | Acceptance test |
+|---|---|---|
+| 1 | N8.6 SETTINGS headline clips at volume 100 (`VOL 100%  10`) | Set vol=100, brt=100; headline renders both numbers complete, and a host assertion pins the worst-case length |
+| 2 | N8.7 Shade brightness clips (`R LIGHT 10`) | Same two levels at 100; shade shows a complete percentage |
+| 3 | N8.23 `recall_memory` renders `RECALL-MEMOR` | Display aliases exist separately from canonical tool ids; no label exceeds the 12-glyph shell |
+| 4 | N8.24 Agent-link titles: 48 chars into a 13-byte cache, silent truncation | Long title either wraps 2x19 or carries an explicit short display title; nothing is cut mid-word without a mark |
+| 5 | N8.8 Agent rim (r224-230) paints over choice/commit arcs (r223-231) | With an ask open AND a tool in flight, sample the band: exactly one tenant present |
+| 6 | N8.9 Tapping WATCH or POWER opens a sheet headed `SETTINGS` | WATCH and POWER get explicit cases or `ACT_NONE`; the default becomes an unreachable fallback |
+| 7 | N8.21 Card corners sit at ~r242, outside the r232.5 glass, so the bezel chops them | Round-native plate inside the glass; sample the four corners for clipped pixels |
+| 8 | N8.22 Every transient surface prints `CODEX DESK`, including local `SAVE MEMORY?` consent | Local consent surfaces carry no foreign header |
+| 9 | N8.26 Orbit rail occupies r184-196 against a measured free band of r185-194 | Rail constrained to r185-194, or the band formally re-reserved and documented |
+| 10 | N8.27 POWER uses amber below 20% while the battery arc uses red | One battery-state palette, one threshold, both renderers |
+| 11 | N8.10 The same percentage in three type systems (DESK, POWER, SETTINGS) | One numeric style for one kind of readout; verified on a fresh contact sheet |
+| 12 | N8.25 Only the first four tools are displayable; later ones show `LAST NONE` | After `execute_tool`, TOOLS names the tool actually used |
+| 13 | **SETTINGS rebuild** — four saturated arcs (cyan/orange/magenta/green) plus a yellow ring plus overlapping text, in a build whose language is amber and gold elsewhere | A sheet where SETTINGS is visibly the same product as the other five screens |
+| 14 | N8.18 TOOLS is three unlabelled arcs now the redundant tools are gone | Cut or repurposed with a stated reason; not left as decoration |
+| 15 | N8.17 **Weather screen (Fort Lauderdale)** | Seventh ring screen. Settle the data path first: device-pull via the jarvismcp bridge vs host-push via the brain surface. City in code; endpoint and key in NVS, never the repo. Refresh on entering the screen, never a timer that drags Wi-Fi out of min-modem during rest. **Render the data age** — it will be stale after rest |
+| 16 | N8.13 `mood.h` says WHISPER/DREAM switch the microphone off; the code does not | Comment corrected, then a decision recorded on whether behaviour should match it |
+| 17 | N8.12 **DREAM becomes a real power mode** | Today WHISPER and DREAM are electrically identical — same radios, I2S, 24 fps compositor, 100 Hz IMU poll — differing only in brightness, so DREAM is a caption. Stop the emote, paint near-black, refresh a few clock pixels once a minute. **Only from genuine idle**: asks, busy and USB keep the glass lit, per `db3bb607`. Measure battery percent drop over a fixed soak, before and after |
+| 18 | Companion: mic ring is 2 s, so the leaseholder must poll every ~1.5 s or drop audio | Longer ring or a streaming endpoint; a 30 s utterance survives without gaps |
+| 19 | Companion: a reply path back to the glass during a lease | The leaseholder can speak or caption without borrowing the Gemini session |
+| 20 | Re-run the full sheet and re-read it | `screens.py --extras` after the batch; every screen shares one visual language, and the sheet is captioned correctly |
+
+**Standing rules for this queue.** Host suites do not cover arc geometry or
+layout — they were green throughout the POWER arc bug — so a rendering claim is
+evidenced by a panel measurement, never by a green suite. Every fix builds,
+runs both suites, and is OTA'd and re-measured before the next item starts.
+`JR_DEV_OPEN_DIAGNOSTICS` must return to 0 before any release tag.
+
 ## Execution order
 
 1. **Correctness:** N6.1–N6.4.
