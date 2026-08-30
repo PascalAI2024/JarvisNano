@@ -2046,6 +2046,31 @@ static void publish_shell_state(uint32_t now_ms)
      * cached_title/progress/state also reach the shell via
      * jr_display_set_shell_state(), which draws the agent rim segments. */
     jr_display_desk_set_task(cached_title, cached_progress, cached_state);
+
+    /* TOOLS, with real content at last (N7.14). The petals are the FIRST FOUR
+     * ENTRIES OF THE ACTUAL DECLARED CATALOG — s_device_tool_fns, the same
+     * array handed to Gemini — and the lit one is the tool that genuinely last
+     * executed, from device_tool_last_name()/last_tool_slot.
+     *
+     * The old feed was a hardcoded {SEARCH, MEMORY, WEATHER, MORE} seeded once
+     * with `recent` pinned to 0, so it never reflected anything that ran. This
+     * re-derives every pass, so when nothing has run yet NOTHING is lit —
+     * which is the honest answer, not a decorative default. */
+    {
+        const char *tool_names[JR_DISPLAY_TOOLS_MAX];
+        int tool_n = (int)DEVICE_TOOL_DECL_COUNT;
+        if (tool_n > JR_DISPLAY_TOOLS_MAX) {
+            tool_n = JR_DISPLAY_TOOLS_MAX;
+        }
+        for (int i = 0; i < tool_n; ++i) {
+            tool_names[i] = s_device_tool_fns[i].name;
+        }
+        const uint32_t slot = atomic_load(&s_tool_diag.last_tool_slot);
+        /* slot is 1-based; 0 means nothing has run. -1 lights no petal. */
+        const int recent = (slot > 0U && (int)slot <= tool_n)
+                               ? (int)slot - 1 : -1;
+        jr_display_tools_set(tool_names, tool_n, recent);
+    }
     const jr_state_snapshot_t *snapshot = jr_orch_snapshot(&s_app.orch);
     jr_display_jarvis_set_session(
         s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN,
@@ -6208,7 +6233,16 @@ static void voice_task(void *arg)
                 if (!peek) {
                     s_watch_peek_until_ms = 0U;
                 }
-                if (peek) {
+                /* The WATCH screen shows the REAL watch face — hour, minute
+                 * and second hands with a hub, drawn by hud_overlay_clock and
+                 * covered by its own host test. An earlier pass gave the
+                 * screen a home-made two-arc clock instead; it was a worse
+                 * clock built beside a better one that already existed. The
+                 * space now simply asks for the real face, exactly as the
+                 * watch peek does. */
+                const bool watch_space =
+                    jr_display_nav_space() == JR_DISPLAY_SPACE_WATCH;
+                if (peek || watch_space) {
                     struct tm tmv;
                     if (device_wall_time(&tmv)) {
                         clock_on = true;

@@ -2471,33 +2471,14 @@ static void sp_focal_tools(const jr_display_ctx_t *ctx, int y1, int y2,
 /* WATCH: a radial clock. The hour is a short fat span, the minute a long thin
  * one, so the two read apart at a glance without needing a dial or numerals —
  * the font is uppercase-only 5x7 and would lose to a bare arc here. */
-static void sp_focal_watch(const jr_display_ctx_t *ctx, int y1, int y2,
-                           uint16_t *pixels, int oy, int st)
-{
-    const uint32_t w = s_clock_shown_word;
-    const int hh = (int)((w >> 8) & 0xFFu);
-    const int mm = (int)(w & 0xFFu);
-    const bool muted = sp_privacy_muted();
-    const uint16_t hot = sp_tint(ctx, muted ? SP_C_GOLD : SP_C_CYAN, st);
-    const uint16_t cool = sp_tint(ctx, muted ? SP_C_GOLD_DIM : SP_C_CYAN_DIM, st);
-    const int cx = SP_CX;
-
-    /* SP_A_TOP is 12 o'clock in the span convention; a full turn is 256. */
-    const int a_min = SP_A_TOP + (mm * 256) / 60;
-    const int a_hr  = SP_A_TOP + (((hh % 12) * 256) / 12) + (mm * 256) / (12 * 60);
-    sp_span_t s_min, s_hr;
-    sp_span_set(&s_min, a_min - 3, a_min + 3);
-    sp_span_set(&s_hr,  a_hr  - 7, a_hr  + 7);
-
-    for (int y = y1; y < y2; ++y) {
-        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        sp_annulus_row(row, y, cx, SP_CY + oy, SP_FOCAL_IN, SP_FOCAL_OUT,
-                       NULL, cool);                       /* the dial       */
-        sp_annulus_row(row, y, cx, SP_CY + oy, 44, 104, &s_min, hot);
-        sp_annulus_row(row, y, cx, SP_CY + oy, 62, 92,  &s_hr,  hot);
-        sp_annulus_row(row, y, cx, SP_CY + oy, 0, 12, NULL, hot);  /* hub   */
-    }
-}
+/* WATCH draws NO focal object. The real watch face is hud_overlay_clock —
+ * hour, minute and second hands with a hub, strip-tested, already shipping for
+ * the ambient rest face and the watch peek. The WATCH screen asks for that
+ * overlay (main.c) rather than drawing a second, worse clock underneath it.
+ *
+ * This function existed for one commit and drew a two-arc clock. It was a
+ * home-made replacement for something better that was already in the tree —
+ * kept here as a comment so nobody re-adds it. */
 
 /* POWER: charge as a filled arc from 12 o'clock, plus a solid core while the
  * charger is in. Reads s_power_word, which jr_power already publishes. */
@@ -2753,7 +2734,9 @@ static void sp_draw_space(const jr_display_ctx_t *ctx, int y1, int y2,
     }
     switch (space) {
     case JR_DISPLAY_SPACE_WATCH:
-        sp_focal_watch(ctx, y1, y2, pixels, oy, st);
+        /* Nothing here on purpose: hud_overlay_clock draws the real watch face
+         * over the top. Drawing a focal object as well would put a second
+         * clock underneath the good one. */
         break;
     case JR_DISPLAY_SPACE_POWER:
         sp_focal_power(ctx, y1, y2, pixels, oy, st);
