@@ -950,8 +950,11 @@ static void span_bbox(int a0, int a1, int r_in, int r_out,
     *ymax = yh + 1;
 }
 
-/* One arc: a filled [a0,a1] wedge of the r217..236 annulus, shaded in three
- * radial zones so the band reads as a lit tube rather than a flat slab. */
+/* One arc: a filled [a0,a1] wedge of the choice annulus, shaded in three radial
+ * zones so the band reads as a lit tube rather than a flat slab. The radii come
+ * from OV_R_CHOICE_IN/MID/HI/OUT (223/226/229/231) — an earlier comment here
+ * said "r217..236", which predates the band being narrowed to clear the
+ * privacy ring at r221-222 and the glass edge at r232.5. */
 static void choice_arc(uint16_t *dst, int y0, int nrows, int a0, int a1,
                        const uint16_t *ramp, int level)
 {
@@ -1392,9 +1395,9 @@ void hud_overlay_ripple(uint16_t *dst, int y0, int nrows, bool swap_bytes,
         return;
     }
     overlay_palette(swap_bytes);
-    const uint16_t px = (kind == HUD_RIPPLE_REJECT)
-                            ? shade(s_ov_tick, level / 2)
-                            : shade(s_ov_cyan, level);
+    const uint16_t px = (kind == HUD_RIPPLE_ACCEPT)
+                            ? shade(s_ov_cyan, level)
+                            : shade(s_ov_tick, level / 2);
 
     const int ro2 = r_out * r_out;
     const int ri2 = r_in * r_in;

@@ -6156,8 +6156,19 @@ static void voice_task(void *arg)
              * compare per tick when idle, one store while a finger is down. */
             if (s_hold_start_ms != 0U) {
                 const uint32_t held = (uint32_t)now - s_hold_start_ms;
-                const uint32_t pct = held >= 850U ? 100U : (held * 100U) / 850U;
-                jr_display_commit_ring((uint8_t)pct);
+                /* PREVIEW THRESHOLD. The ring must not appear for an ordinary
+                 * tap — a contact lasting ~120 ms would otherwise flash a
+                 * sliver of arc and vanish, which reads as a glitch and puts
+                 * noise on every single touch. Nothing is drawn until 400 ms,
+                 * by which point the contact is clearly a deliberate hold;
+                 * from there the ring fills across the remaining 450 ms and
+                 * closes exactly as the 850 ms action commits. */
+                if (held >= 400U) {
+                    const uint32_t span = held - 400U;
+                    const uint32_t pct =
+                        span >= 450U ? 100U : (span * 100U) / 450U;
+                    jr_display_commit_ring((uint8_t)pct);
+                }
             }
 
             /* Watch is an explicit 10-second right-swipe utility. Ambient
@@ -6922,7 +6933,13 @@ static void voice_task(void *arg)
                      * (docs/INPUT_MAP.md §5) an unbound gesture must not draw
                      * the accept ripple and then sit there — it names what this
                      * surface DOES accept, at the moment of curiosity. This is
-                     * the mechanism that replaces the gesture-card idea. */
+                     * the mechanism that replaces the gesture-card idea.
+                     *
+                     * The neutral ripple OVERWRITES the accept ripple layer 0
+                     * already fired for this stroke (single slot), so the user
+                     * sees exactly one transient and it is the honest one. No
+                     * tone: nothing was refused. */
+                    jr_display_ripple_neutral(iev.x, iev.y);
                     jr_display_caption_set("SWIPE UP DETAIL - DOWN CONTROLS");
                 }
                 ESP_LOGI(TAG, "ui: nav overlay=%d",
@@ -6945,6 +6962,10 @@ static void voice_task(void *arg)
                     s_flip_muted = false;
                     atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
                     jr_display_caption_set("LISTENING");
+                    /* The ring closing is the visual half; this is the other.
+                     * A completed commit rises — the same shape as the
+                     * attention beat — where a refusal falls. */
+                    (void)jr_audio_play_sweep(500U, 1100U, 100U, 7U);
                     ESP_LOGI(TAG, "gesture: long-press unmute");
                 } else {
                     atomic_store(&s_voice_privacy_paused, true);
@@ -6953,6 +6974,12 @@ static void voice_task(void *arg)
                                        now);
                     }
                     jr_display_caption_set("MUTED - HOLD TO RESUME");
+                    /* Muting is a commit too, so it gets a completion tone —
+                     * but a DESCENDING one. Going quiet and coming back are
+                     * opposite outcomes of the same gesture and must not sound
+                     * alike; with the glass possibly face-down or unread, the
+                     * tone may be the only signal that reaches the user. */
+                    (void)jr_audio_play_sweep(1100U, 500U, 100U, 7U);
                     ESP_LOGI(TAG, "gesture: long-press mute");
                 }
             } else if (iev.kind == JR_INPUT_TAP) {

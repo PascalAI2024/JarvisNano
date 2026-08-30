@@ -227,6 +227,11 @@ void jr_display_ripple(int x, int y);
  * transient — the rejecting one. docs/INTERACTION_MODEL.md §7. */
 void jr_display_ripple_reject(int x, int y);
 
+/* Received, but bound to nothing on this surface: expands like an accept so it
+ * reads as "seen", but dim like a reject so it does not claim something
+ * happened. Pairs with a caption naming what this surface DOES accept. */
+void jr_display_ripple_neutral(int x, int y);
+
 /* Hold-to-commit ring, 0..100 (0 clears it). Fire-and-forget from the app
  * task; the render task reads the published value. Shares the choice band and
  * is drawn only when no ask is up, so the two can never collide. */

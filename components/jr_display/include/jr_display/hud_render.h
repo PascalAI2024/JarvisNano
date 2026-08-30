@@ -117,9 +117,15 @@ void hud_render_rows(hud_t *h, uint16_t *dst, int y0, int nrows);
  * safe to invoke directly from the panel flush path.
  */
 
-/* STATE-03: the "thinking" orbital spinner. A dim track ring at r=150 with a
- * cyan comet orbiting it (~2.6 s/rev) and a ~1.1 rad trailing tail, matching
- * docs/prototype/jarvisnano-os.html. Draw it while the agent is THINKING. */
+/* STATE-03: the "thinking" orbital spinner. A cyan comet at r=OV_R_COMET (142,
+ * the centre of the free r135-149 band) with a ~1.1 rad trailing tail,
+ * ~2.6 s/rev. Draw it while the agent is THINKING.
+ *
+ * There is deliberately NO track ring, despite the prototype having one and
+ * despite an earlier version of this comment promising one at r=150: the baked
+ * art is already built from concentric rings, so another reads as a competing
+ * HUD however dim it is. The comet rides an implied path. See the note at the
+ * implementation. */
 void hud_overlay_thinking(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
                           bool swap_bytes);
 
@@ -356,8 +362,12 @@ int hud_glass_chord(int y);
  * level. Two independent differences — direction AND colour — so the two read
  * apart peripherally, not just under inspection. docs/INTERACTION_MODEL.md §7. */
 typedef enum {
-    HUD_RIPPLE_ACCEPT = 0,
-    HUD_RIPPLE_REJECT,
+    HUD_RIPPLE_ACCEPT = 0,  /* expanding, bright — it did something          */
+    HUD_RIPPLE_REJECT,      /* contracting, dim  — the device said no        */
+    HUD_RIPPLE_NEUTRAL,     /* expanding, dim    — received, but bound to
+                             * nothing here. Direction says "seen", brightness
+                             * says "nothing happened", so all three read apart
+                             * without inventing a third motion. */
 } hud_ripple_kind_t;
 
 /* Hold-to-commit ring: one arc in the choice band (r223-231) sweeping clockwise

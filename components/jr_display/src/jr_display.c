@@ -1102,8 +1102,10 @@ void jr_display_caption_set(const char *text)
         return;
     }
     /* Copy, wrap, and place BEFORE the release-store — the flush path only
-     * ever reads finished furniture. Scale 1 (6 px/char, 7 px tall): one line
-     * centres at y=403, two stack at 396/408, inside the 386..425 band.
+     * ever reads finished furniture. Scale 2 (12 px/char, 14 px tall), wrapped
+     * at 19 characters: one line sits at y=394, two stack at 374/402. An
+     * earlier comment here described scale 1 at y=403 / 396+408, which the
+     * code has not done since the caption was doubled for legibility.
      * (466 - 6*len) is even, so the centred origin is exact and each line
      * ends at HUD_W - x0. */
     const size_t len = strnlen(text, 96U);
@@ -1152,6 +1154,11 @@ void jr_display_ripple(int x, int y)
 void jr_display_ripple_reject(int x, int y)
 {
     ripple_arm(x, y, HUD_RIPPLE_REJECT);
+}
+
+void jr_display_ripple_neutral(int x, int y)
+{
+    ripple_arm(x, y, HUD_RIPPLE_NEUTRAL);
 }
 
 void jr_display_commit_ring(uint8_t pct)
