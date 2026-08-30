@@ -237,6 +237,15 @@ void jr_display_ripple_neutral(int x, int y);
  * is drawn only when no ask is up, so the two can never collide. */
 void jr_display_commit_ring(uint8_t pct);
 
+/* Live tilt for the MOTION screen as IN-PLANE GRAVITY, in hundredths of g
+ * (±100 == ±1 g), fed at the IMU's existing ~10 Hz cadence.
+ *
+ * Deliberately NOT roll/pitch degrees. roll is atan2(gy, gz) and this board
+ * reads gz ~= -1 g face-up, so a device sitting flat reports roll ~= 177, not
+ * 0 — a bubble driven from it pins at the rim and never moves. gx/gy are zero
+ * when flat and grow as you tilt, which is exactly what a level wants. */
+void jr_display_motion_set(int8_t gx_centig, int8_t gy_centig);
+
 /* TRANS-01: the wake bloom — VISION.md's "point of light blooms into the
  * ring", for the moment WakeNet hears "Jarvis" from rest. A centre seed of
  * light collapses as a cyan wavefront expands to the face ring over ~600 ms,
@@ -375,6 +384,9 @@ esp_err_t jr_display_set_brightness(uint8_t percent);
 
 typedef enum {
     JR_DISPLAY_SPACE_JARVIS = 0,
+    JR_DISPLAY_SPACE_WATCH,     /* time, the canonical glance                */
+    JR_DISPLAY_SPACE_POWER,     /* battery: charge, charging, millivolts     */
+    JR_DISPLAY_SPACE_MOTION,    /* live tilt — a bubble level on round glass */
     JR_DISPLAY_SPACE_DESK,
     JR_DISPLAY_SPACE_TOOLS,
     JR_DISPLAY_SPACE_SETTINGS,

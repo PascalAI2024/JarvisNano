@@ -5863,6 +5863,26 @@ static void voice_task(void *arg)
             jr_power_t bat = {0};
             const bool have_imu = jr_imu_read(&imu) == ESP_OK;
             const bool have_power = jr_power_read(&bat) == ESP_OK;
+            /* MOTION screen: live tilt at the IMU's existing cadence, no new
+             * sampling. Clamped to int8 degrees — the renderer maps ±90 to the
+             * focal radius and pins beyond it. */
+            if (have_imu) {
+                /* In-plane gravity, hundredths of g. NOT roll/pitch: roll is
+                 * atan2(gy, gz) and this board reads gz ~= -1 g face-up, so a
+                 * flat device reports roll ~= 177 and a bubble driven from it
+                 * pins at the rim forever (measured 2026-08-29). gx/gy are
+                 * ~0 when flat, which is what a level needs.
+                 *
+                 * If the bubble runs the wrong way on hardware, flip a sign
+                 * HERE, not in jr_imu — this codebase has already been bitten
+                 * twice by IMU axis conventions being "fixed" at the source. */
+                float gx = imu.gx * 100.0f, gy = imu.gy * 100.0f;
+                if (gx >  100.0f) gx =  100.0f;
+                if (gx < -100.0f) gx = -100.0f;
+                if (gy >  100.0f) gy =  100.0f;
+                if (gy < -100.0f) gy = -100.0f;
+                jr_display_motion_set((int8_t)gx, (int8_t)gy);
+            }
             jr_display_set_hud_env(
                 bat.percent, bat.charging,
                 atomic_load(&s_voice_privacy_paused),
@@ -6947,7 +6967,8 @@ static void voice_task(void *arg)
                      * "where am I" without a dial mark that has to jump when
                      * the ring wraps. */
                     static const char *const mode_name[JR_DISPLAY_SPACE_COUNT] =
-                        { "JARVIS", "DESK", "TOOLS", "SETTINGS" };
+                        { "JARVIS", "WATCH", "POWER", "MOTION",
+                          "DESK", "TOOLS", "SETTINGS" };
                     const jr_display_space_t sp = jr_display_nav_space();
                     jr_display_caption_set(
                         sp < JR_DISPLAY_SPACE_COUNT ? mode_name[sp] : "JARVIS");
