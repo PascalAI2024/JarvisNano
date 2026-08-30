@@ -127,6 +127,32 @@ fail loudly or be derived from the tree.
 | N8.9 | Tapping WATCH or POWER opens a sheet headed `SETTINGS` — both fall through to the `default` case in the detail composer. JARVIS's own `SESSION` sheet is unreachable | Detail composer only has cases for JARVIS/DESK/TOOLS |
 | N8.10 | The same percentage is drawn in three type systems across DESK, POWER and SETTINGS | Visible in the sweep: DESK sets `0%` large in-ring, POWER sets `85%` small under the arc |
 
+### Fixed since the sweep — verified on the panel
+
+| # | Fix | Commit | Evidence |
+|---|---|---|---|
+| N8.1 | POWER segments its arc; `sp_arc_segments()` replaces three open-coded copies | `f456a027` | Before: 79% battery drew **70 deg at 111 deg**. After: 77% battery draws **278 deg, against 277 expected**. Measured on the panel after a confirmed fresh boot |
+| N8.2 | WATCH's clear is bounded by `JR_DISPLAY_SHELL_R_MAX` | `f456a027` | Gold privacy ring rgb(222,158,33) present at r221 (161/360 lit) and the cyan battery arc at r217, while r190/r210 stay fully cleared. Both were previously blanked |
+| N8.4 | `" CHG"` and the charging core decode bit 25, not bit 24 (USB) | `f456a027` | Packing confirmed at `jr_display_power_set`; the SETTINGS sheet already tested bit 25 |
+| N8.5 | An unanswered fuel gauge draws the bare track, never a full ring | `f456a027` | Was a full ring beneath the headline "NO BATTERY" |
+| N8.19 | **Expired agent links now clear the glass.** The TTL branch in `publish_shell_state()` had an EMPTY body, so `active` was never cleared: DESK kept rendering a dead task and the agent rim stayed lit indefinitely with no way to dismiss it | `eee9bb1c` | A stale surface that outlives its owner reads as a frozen device. Strongly suspected cause of "there's something on screen stuck, can't even click it" |
+| N8.20 | **Live captions show the newest words.** The accumulator holds 128 chars but the band renders 2x19=38 and `hud_wrap2` fills from the FRONT, so a reply over 38 characters displayed its opening and froze | `eee9bb1c` | Caption only moved once the buffer overflowed 128 and dropped from the head — far too late, and it reads as a device that stopped listening mid-answer |
+
+### Also reported by gpt-5.6-sol — validate before scheduling
+
+| # | Finding |
+|---|---|
+| N8.21 | The transient-surface card is a rectangle whose corner (52,72) sits at ~r242 while the glass ends at r232.5, so the bezel chops all four corners. Wants a round-native plate |
+| N8.22 | Every transient surface prints the fixed header `CODEX DESK`, including local `SAVE MEMORY?` consent prompts, which are not Codex Desk content |
+| N8.23 | Canonical tool ids are used directly as labels: `recall_memory` is 13 glyphs against a 12-glyph shell, rendering `RECALL-MEMOR`. Needs display aliases separate from canonical names |
+| N8.24 | Agent Link titles accept 48 characters into a 13-byte display cache — silent truncation with no wrap or ellipsis |
+| N8.25 | Only the first four catalog tools are displayable; every later tool maps to recent `-1`, so after `execute_tool` / `set_volume` / `set_brightness` TOOLS shows a blank headline and `LAST NONE` |
+| N8.26 | The orbit rail occupies r184-196 where the measured free band is r185-194, overwriting baked art at r184 and r195-196 |
+| N8.27 | POWER uses amber below 20% while the persistent battery arc uses red — the same battery state in two alarm hues at once |
+
+Both benches independently reported N8.2, N8.4 and N8.5. Two models converging
+on the same lines is why those were treated as confirmed rather than plausible.
+
 ### Power management — answering "there are 4 modes on this chip"
 
 Research: Grok `grok-4.6` against the firmware as it actually runs, not generic
