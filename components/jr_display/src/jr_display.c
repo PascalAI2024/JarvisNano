@@ -2045,6 +2045,10 @@ static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
  * 11 FPS; the already-dark face needs no second dim. Choice asks outrank it,
  * and it renders under the caption. Time comes from the shown-word latch so
  * fade-out retains the prior time. Render task only. */
+/* Defined with the shell primitives further down; the watch's disc-bounded
+ * clear needs it up here. */
+static int sp_isqrt(int v);
+
 static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
                                 uint16_t *pixels)
 {
@@ -2063,8 +2067,38 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
      * A strip clear is ~11 KB of straight-line writes, and on an AMOLED black
      * costs no backlight either. The caption is drawn AFTER this, so status
      * text survives; the orbit indicator does not, which is the deliberate
-     * trade for a clean dial. */
-    memset(pixels, 0, (size_t)(y2 - y1) * HUD_W * sizeof(uint16_t));
+     * trade for a clean dial.
+     *
+     * BUT THE CLEAR STOPS AT THE SHELL RADIUS. It used to blank the whole row,
+     * which also erased the two tenants that live OUTSIDE the shell and are
+     * supposed to be permanent: the battery arc at r215-220 and the gold
+     * privacy ring at r221-222. The cost of that was worst exactly where it
+     * mattered — the watch is the screen you glance at, and it was the one
+     * screen that could not tell you the microphone was muted.
+     *
+     * r214 is not a new number: JR_DISPLAY_SHELL_R_MAX is already the contract
+     * boundary between shell territory and the persistent rim, and the hands
+     * only reach r190, so the dial still clears completely. Rows that miss the
+     * disc entirely are skipped rather than cleared. */
+    for (int y = y1; y < y2; ++y) {
+        const int dy = y - HUD_H / 2;
+        const int d2 = JR_DISPLAY_SHELL_R_MAX * JR_DISPLAY_SHELL_R_MAX
+                       - dy * dy;
+        if (d2 <= 0) {
+            continue;
+        }
+        const int half = sp_isqrt(d2);
+        int xlo = HUD_W / 2 - half;
+        int xhi = HUD_W / 2 + half;
+        if (xlo < 0) {
+            xlo = 0;
+        }
+        if (xhi > HUD_W - 1) {
+            xhi = HUD_W - 1;
+        }
+        memset(pixels + (size_t)(y - y1) * HUD_W + xlo, 0,
+               (size_t)(xhi - xlo + 1) * sizeof(uint16_t));
+    }
 
     const uint32_t w = s_clock_shown_word;
     hud_overlay_clock(pixels, y1, y2 - y1, ctx->board.swap_color_bytes,
@@ -2255,6 +2289,36 @@ static inline bool sp_in_span(const sp_span_t *sp, int dx, int dy)
     return (sp->c0 * dy - sp->s0 * dx) >= 0 && (dx * sp->s1 - dy * sp->c1) >= 0;
 }
 
+/* Build the spans for an arc that may exceed a half turn.
+ *
+ * sp_in_span is the INTERSECTION of two half-planes, so one span cannot
+ * express more than 180 degrees. Past that the intersection starts shrinking
+ * as the requested sweep grows, and at a full turn the two edges coincide and
+ * the fill collapses to a ray. A battery at 79% was measured painting a 70 deg
+ * wedge parked at the lower right instead of a nearly-full ring: predicted
+ * 360 - pct*3.6 degrees starting at pct*3.6 - 180, and the panel agreed on
+ * both the length and the position.
+ *
+ * DESK and the OTA ring had each open-coded this chunking; POWER was written
+ * without it, which is the whole bug. One helper now, so the next ring cannot
+ * forget. Chunking at 96 units keeps every span well inside a half turn, and
+ * three of them cover a full 256-unit circle.
+ *
+ * Returns the number of spans written. `sweep` is in 256ths of a turn. */
+#define SP_ARC_SEG_MAX 3
+
+static int sp_arc_segments(sp_span_t *seg, int nmax, int start, int sweep)
+{
+    int n = 0;
+    while (sweep > 0 && n < nmax) {
+        const int step = sweep > 96 ? 96 : sweep;
+        sp_span_set(&seg[n++], start, start + step);
+        start += step;
+        sweep -= step;
+    }
+    return n;
+}
+
 /* One primitive covers ring, arc, disc and button: rin <= 0 means filled,
  * span == NULL means the whole turn. */
 static void sp_annulus_row(uint16_t *row, int y, int cx, int cy, int rin,
@@ -2418,16 +2482,9 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
     const int len = sp_pct(num, 0, (int)sizeof num, (uint32_t)prog);
     const int tx = cx - (18 * len) / 2;
 
-    sp_span_t seg[3];
-    int nseg = 0;
-    int sweep = (prog * 256) / 100;
-    int start = SP_A_TOP;
-    while (sweep > 0 && nseg < 3) {
-        const int step = sweep > 96 ? 96 : sweep;
-        sp_span_set(&seg[nseg++], start, start + step);
-        start += step;
-        sweep -= step;
-    }
+    sp_span_t seg[SP_ARC_SEG_MAX];
+    const int nseg = sp_arc_segments(seg, SP_ARC_SEG_MAX, SP_A_TOP,
+                                     (prog * 256) / 100);
 
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
@@ -2504,11 +2561,18 @@ static void sp_focal_power(const jr_display_ctx_t *ctx, int y1, int y2,
                            uint16_t *pixels, int oy, int st)
 {
     const uint32_t w = __atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE);
-    int pct = (int)(w & 0xFFu);
-    if (pct > 100) {
-        pct = 100;                    /* 0xFF = fuel gauge unavailable */
-    }
-    const bool charging = (w & (1u << 24)) != 0u;
+    const int raw_pct = (int)(w & 0xFFu);
+    /* 0xFF means the fuel gauge did not answer. Clamping that to 100 drew a
+     * FULL ring directly beneath the headline "NO BATTERY" — the most
+     * confident possible rendering of a number we do not have. Draw the bare
+     * track instead: an empty track reads as "no reading", which is true. */
+    const bool have_gauge = raw_pct <= 100;
+    const int pct = have_gauge ? raw_pct : 0;
+    /* bit 24 is USB-present, bit 25 is CHARGING. This tested bit 24, so a full
+     * battery sitting on a cable read "100% CHG" with the fat charging core,
+     * while the SETTINGS sheet — which tests bit 25 — disagreed on the same
+     * screen-swipe. Plugged in is not charging. */
+    const bool charging = (w & (1u << 25)) != 0u;
     const bool muted = sp_privacy_muted();
     const uint16_t base = muted ? SP_C_GOLD_DIM : SP_C_CYAN_DIM;
     /* Red below 20% is the one place colour carries meaning here. */
@@ -2517,16 +2581,18 @@ static void sp_focal_power(const jr_display_ctx_t *ctx, int y1, int y2,
     const uint16_t cool = sp_tint(ctx, base, st);
     const int cx = SP_CX;
 
-    sp_span_t arc;
-    sp_span_set(&arc, SP_A_TOP, SP_A_TOP + (pct * 256) / 100);
+    sp_span_t arc[SP_ARC_SEG_MAX];
+    const int narc = have_gauge
+        ? sp_arc_segments(arc, SP_ARC_SEG_MAX, SP_A_TOP, (pct * 256) / 100)
+        : 0;
 
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         sp_annulus_row(row, y, cx, SP_CY + oy, SP_FOCAL_IN, SP_FOCAL_OUT,
                        NULL, cool);
-        if (pct > 0) {
+        for (int i = 0; i < narc; ++i) {
             sp_annulus_row(row, y, cx, SP_CY + oy, SP_FOCAL_IN, SP_FOCAL_OUT,
-                           &arc, fill);
+                           &arc[i], fill);
         }
         sp_annulus_row(row, y, cx, SP_CY + oy, 0, charging ? 26 : 12, NULL,
                        fill);
@@ -2613,18 +2679,12 @@ static void sp_focal_settings(const jr_display_ctx_t *ctx, int y1, int y2,
         (jr_display_ota_state_t)(ota & 0xFu);
     const bool ota_on = sp_ota_ringing(ota_state);
     const uint16_t ota_px = sp_tint(ctx, sp_ota_native(ota_state), st);
-    sp_span_t ota_seg[3];
+    sp_span_t ota_seg[SP_ARC_SEG_MAX];
     int ota_nseg = 0;
     if (ota_on) {
-        int sweep =
-            (sp_ota_fill(ota_state, (int)((ota >> 8) & 0xFFu)) * 256) / 100;
-        int start = SP_A_TOP;
-        while (sweep > 0 && ota_nseg < 3) {
-            const int step = sweep > 96 ? 96 : sweep;
-            sp_span_set(&ota_seg[ota_nseg++], start, start + step);
-            start += step;
-            sweep -= step;
-        }
+        ota_nseg = sp_arc_segments(
+            ota_seg, SP_ARC_SEG_MAX, SP_A_TOP,
+            (sp_ota_fill(ota_state, (int)((ota >> 8) & 0xFFu)) * 256) / 100);
     }
 
     for (int y = y1; y < y2; ++y) {
@@ -2695,7 +2755,7 @@ static const char *sp_headline(int space)
             return "NO BATTERY";
         }
         snprintf(buf, sizeof buf, "%u%%%s", pct,
-                 (w & (1u << 24)) != 0u ? " CHG" : "");
+                 (w & (1u << 25)) != 0u ? " CHG" : "");
         return buf;
     }
     case JR_DISPLAY_SPACE_DESK:
