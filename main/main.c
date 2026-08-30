@@ -178,6 +178,36 @@ static const jr_gemini_fn_decl_t s_device_tool_fns[] = {
 
 #define DEVICE_TOOL_DECL_COUNT \
     (sizeof(s_device_tool_fns) / sizeof(s_device_tool_fns[0]))
+
+/* DISPLAY LABELS ARE NOT CANONICAL TOOL IDS.
+ *
+ * TOOLS used to publish s_device_tool_fns[i].name straight to the glass, but
+ * those strings are the protocol identifiers Gemini is given, and the shell
+ * stores twelve glyphs. "recall_memory" is thirteen and rendered as
+ * "RECALL_MEMOR"; "set_brightness" is fourteen. A name chosen for a wire
+ * format has no reason to fit a round display, and truncating it silently is
+ * the worst of both.
+ *
+ * The row width is the enforcement: each entry is char[13], so a label that
+ * does not fit is a COMPILE error ("initializer-string for array of chars is
+ * too long"), not a defect discovered on the panel. The static assert keeps
+ * this table and the catalog the same length, so adding a tool without naming
+ * it fails the build rather than shipping a blank petal. Order matches
+ * s_device_tool_fns exactly. */
+static const char s_device_tool_labels[][13] = {
+    "RECALL",       /* recall_memory  */
+    "REMEMBER",     /* remember       */
+    "TIME",         /* current_time   */
+    "SEARCH",       /* search_tools   */
+    "EXECUTE",      /* execute_tool   */
+    "VOLUME",       /* set_volume     */
+    "LIGHT",        /* set_brightness */
+    "ASK",          /* ask_user       */
+};
+
+_Static_assert(sizeof(s_device_tool_labels) / sizeof(s_device_tool_labels[0]) ==
+                   DEVICE_TOOL_DECL_COUNT,
+               "every declared tool needs exactly one display label");
 #define LOCAL_TOOL_RESULT_CAP 4U
 #define LOCAL_TOOL_ERROR_CAP  160U
 #define TOOL_CONSENT_TIMEOUT_MS 15000U
@@ -2003,6 +2033,37 @@ static ota_preflight_t ota_preflight(void)
     return result;
 }
 
+/* Fit a title into the shell's twelve glyphs without cutting it mid-word and
+ * without pretending it was whole.
+ *
+ * Agent-link titles carry up to 48 characters and were strlcpy'd into a
+ * 13-byte cache, so anything longer lost its tail with no wrap and no mark —
+ * "DEPLOY STAGING BUILD" arrived as "DEPLOY STAG" and read like a different,
+ * complete task. Back up to a word boundary when one is near enough to be
+ * worth the space, and always spend the last glyph on a full stop so a
+ * shortened title is visibly shortened. */
+static void title_shorten(char *dst, size_t cap, const char *src)
+{
+    const size_t max = cap - 1U;
+    const size_t n = strnlen(src, AGENT_TITLE_CAP);
+    if (n <= max) {
+        memcpy(dst, src, n);
+        dst[n] = '\0';
+        return;
+    }
+    size_t keep = max - 1U;                  /* one glyph for the mark */
+    size_t cut = keep;
+    while (cut > 0U && src[cut] != ' ') {
+        cut--;
+    }
+    if (cut >= max / 2U) {                   /* boundary close enough to use */
+        keep = cut;
+    }
+    memcpy(dst, src, keep);
+    dst[keep] = '.';
+    dst[keep + 1U] = '\0';
+}
+
 static void publish_shell_state(uint32_t now_ms)
 {
     static bool cached_active;
@@ -2037,10 +2098,9 @@ static void publish_shell_state(uint32_t now_ms)
         cached_active = s_agent_link.active;
         cached_progress = s_agent_link.progress;
         cached_state = agent_state_to_display(s_agent_link.state);
-        strlcpy(cached_title,
-                s_agent_link.active && s_agent_link.title[0] != '\0'
-                    ? s_agent_link.title : "STANDBY",
-                sizeof(cached_title));
+        title_shorten(cached_title, sizeof(cached_title),
+                      s_agent_link.active && s_agent_link.title[0] != '\0'
+                          ? s_agent_link.title : "STANDBY");
         xSemaphoreGive(s_agent_link_lock);
     }
     uint32_t pairing_until = atomic_load(&s_pairing_claim_until_ms);
@@ -2092,7 +2152,7 @@ static void publish_shell_state(uint32_t now_ms)
             tool_n = JR_DISPLAY_TOOLS_MAX;
         }
         for (int i = 0; i < tool_n; ++i) {
-            tool_names[i] = s_device_tool_fns[i].name;
+            tool_names[i] = s_device_tool_labels[i];
         }
         const uint32_t slot = atomic_load(&s_tool_diag.last_tool_slot);
         /* slot is 1-based; 0 means nothing has run. -1 lights no petal. */
