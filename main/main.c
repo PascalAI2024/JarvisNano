@@ -7253,11 +7253,34 @@ static void voice_task(void *arg)
             }
             ESP_LOGI(TAG, "audio diag: capture complete; WAV taps ready");
         }
-        if ((s_app.io.capturing && phase_allows_capture) || audio_diag_active) {
+        /* A COMPANION LEASE MUST BE ABLE TO HEAR YOU.
+         *
+         * Taking an operator lease already pauses the Gemini session, which
+         * drops the phase to IDLE — and IDLE is not in phase_allows_capture,
+         * so the codec was never read and every mic tap stayed empty. The
+         * companion was structurally deaf: you could talk to the device all
+         * you liked during companion mode and nothing was listening, which is
+         * the opposite of what companion mode is for.
+         *
+         * The read follows the audio-diag lane, not the voice lane: it fills
+         * the WAV taps and then jumps straight to capture_complete, so no
+         * frame reaches VAD, the orchestrator, or the Gemini uplink. The
+         * leaseholder pulls /api/audio/tap.wav; Gemini stays paused and hears
+         * nothing.
+         *
+         * PRIVACY IS STILL ABSOLUTE. This is gated on the mic being live by
+         * the owner's own hand. A lease is a remote grant, and a remote grant
+         * must never be able to switch a microphone on — holding the glass or
+         * flipping the device face-down outranks any leaseholder. */
+        const bool companion_listen =
+            operator_mode_active((uint32_t)now) &&
+            !atomic_load(&s_voice_privacy_paused) && !s_flip_muted;
+        if ((s_app.io.capturing && phase_allows_capture) || audio_diag_active ||
+            companion_listen) {
             int n = jr_audio_source_read(&s_app.mic, mic_frame, VOICE_FRAME_SAMPLES);
             if (n > 0) {
                 s_app.mic_level = jr_dsp_rms(mic_frame, (size_t)n);
-                if (audio_diag_active) {
+                if (audio_diag_active || companion_listen) {
                     read_paced = true;
                     goto capture_complete;
                 }
