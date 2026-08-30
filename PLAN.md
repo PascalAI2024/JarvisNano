@@ -183,6 +183,27 @@ improves continuously rather than in one late lump.
 
 | Order | Item | Acceptance test |
 |---|---|---|
+**Items 1-5: DONE.** Evidence below; the rest of the table stands.
+
+| Done | Item | Commit | Panel evidence |
+|---|---|---|---|
+| 1-2 | SETTINGS + shade clipping | `1f0f9a1` | Now "V100% L100%" (11 of 12) and "R LGT 100%" (10 of 10). The old test asserted `strstr(label,"VOL")`, which stayed green while brightness was cut off; it now stages 100/100 and pins the exact strings — and immediately caught a wrong expectation in its own commit (`sp_pct` appends `%`) |
+| 3 | Tool petals used canonical ids (`RECALL_MEMOR`) | `1f0f9a1` | Labels are a separate `char[13]` table, so an over-long label is a COMPILE error; a `_Static_assert` ties it to the catalog and confirmed it is exactly 8 tools |
+| 4 | Agent titles: 48 chars into a 13-byte cache | `1f0f9a1` | `title_shorten()` backs to a word boundary and always marks the cut |
+| 5 | Agent rim painted over the choice band | `de0d2a5` | **Measured.** Rim alone: 1324 lit, all violet (173,0,255). Rim + ask open: 76 lit, all cyan (0,255,255), **zero violet**. Exactly one tenant |
+| N8.19 | Expired agent links never cleared | `eee9bb1c` | **Measured.** With `ttl_s=30` the rim went 1324 -> 0. Before the fix the expiry branch was empty and it stayed lit indefinitely |
+
+**API schemas learned the hard way, recorded so the next session does not
+re-derive them.** `/api/brain/inbox` requires EXACTLY `v, type, seq, session,
+id, ttl_ms, payload` (no extras, none missing — dismiss included, which is why
+a dismiss without `payload` returns 422), `payload` requires exactly `kind,
+title, body, actions`, `actions` are objects of exactly `{id, label}`, `kind`
+is one of notice/progress/result/choice/consent, and `seq` must equal the
+session's `next_inbox_seq`, starting at 1. `/api/agent/link` requires
+`task_id, revision, state, progress, title, summary`; `revision` must equal
+`hwm + 1` (409 otherwise), `ttl_s` is optional but bounded **30..3600** and
+defaults to **900**, and `state` must be a known name — "done" is not one.
+
 | 1 | N8.6 SETTINGS headline clips at volume 100 (`VOL 100%  10`) | Set vol=100, brt=100; headline renders both numbers complete, and a host assertion pins the worst-case length |
 | 2 | N8.7 Shade brightness clips (`R LIGHT 10`) | Same two levels at 100; shade shows a complete percentage |
 | 3 | N8.23 `recall_memory` renders `RECALL-MEMOR` | Display aliases exist separately from canonical tool ids; no label exceeds the 12-glyph shell |
