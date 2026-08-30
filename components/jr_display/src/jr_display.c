@@ -2161,8 +2161,19 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
      *
      * The clock keeps its clean dial by clearing, so it cannot also be the
      * bottom layer of a stack. It steps aside for the one surface the owner
-     * explicitly asked for, exactly as the agent rim steps aside for an ask. */
-    if (s_detail_ease > 0) {
+     * explicitly asked for, exactly as the agent rim steps aside for an ask.
+     *
+     * BOTH shell surfaces, not just the sheet. The first version of this guard
+     * tested only s_detail_ease, which left the CONTROL SHADE in the same
+     * hole — and the shade is the worse place to lose: every one of its
+     * primitives is folded through sp_clip into the same r<=214 disc this
+     * function clears, so on WATCH the owner got a black dial, the caption
+     * "CONTROLS - UP TO CLOSE", and an invisible-but-LIVE volume arc and
+     * privacy button. jr_display_hit still routed taps to them, so a blind
+     * tap in the lower disc could flip the microphone with nothing on screen
+     * to warn of it. A control you cannot see but can still hit is worse than
+     * one that is merely missing. */
+    if (s_detail_ease > 0 || s_shade_ease > 0) {
         return;
     }
     /* THE WATCH REPLACES THE FACE — they are never on the glass together.
@@ -2703,8 +2714,10 @@ static void sp_focal_power(const jr_display_ctx_t *ctx, int y1, int y2,
             sp_annulus_row(row, y, cx, SP_CY + oy, SP_FOCAL_IN, SP_FOCAL_OUT,
                            &arc[i], fill);
         }
+        /* Track-coloured when there is no reading: an amber core over an
+         * empty track claims a low battery we did not measure. */
         sp_annulus_row(row, y, cx, SP_CY + oy, 0, charging ? 26 : 12, NULL,
-                       fill);
+                       have_gauge ? fill : cool);
     }
 }
 

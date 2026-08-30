@@ -755,8 +755,17 @@ static void ov_battery(const strip_t *s, int cx, int cy, uint32_t now_ms,
     if (env->batt_pct > 100) {
         return;
     }
-    const uint16_t *ramp = (env->batt_pct < 20) ? s_ov_red
-                         : (env->charging ? s_ov_gold : s_ov_cyan);
+    /* GOLD IN THIS BAND MEANS MUTED, AND NOTHING ELSE.
+     *
+     * The battery rim sits at r215-220 and the privacy ring at r221-222 — one
+     * pixel apart. Painting the rim gold while charging put a second gold
+     * tenant against the only ring whose whole job is to say the microphone
+     * is off, so a charging device read as a muted one at a glance.
+     *
+     * Nothing is lost by dropping the hue: the comet below is the charging
+     * tell, and this function's own contract is that MOTION carries that
+     * meaning. Red under 20% stays, because that is a different claim. */
+    const uint16_t *ramp = (env->batt_pct < 20) ? s_ov_red : s_ov_cyan;
     const int steps = (256 * env->batt_pct) / 100;
     const uint16_t rim = shade(ramp, 200);
     for (int i = 0; i <= steps; ++i) {
@@ -768,7 +777,7 @@ static void ov_battery(const strip_t *s, int cx, int cy, uint32_t now_ms,
         for (int tail = 0; tail < 14 && head - tail >= 0; ++tail) {
             const int a = (head - tail - 64) & 255;
             ov_polar(s, cx, cy, a, OV_R_BATT,
-                     shade(s_ov_gold, 255 - tail * 7), 3);
+                     shade(s_ov_cyan, 255 - tail * 7), 3);
         }
     }
 }
