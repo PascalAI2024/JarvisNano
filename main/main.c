@@ -6871,14 +6871,23 @@ static void voice_task(void *arg)
                         codex_pending_tap_ms = (uint32_t)now;
                         codex_tap_pending = true;
                     }
-                } else {
-                    jr_display_caption_set(
-                        "CODEX MODE - DOUBLE TAP TO EXIT");
-                    ESP_LOGI(TAG,
-                             "operator: input retained by Codex mode kind=%d",
-                             (int)iev.kind);
+                    /* THE TAP IS THE LEASE'S, SO IT STOPS HERE.
+                     *
+                     * Without this the branch fell out of the codex block and
+                     * straight onto `codex_tap_pending = false` below, which
+                     * cleared the flag in the SAME loop iteration that set it.
+                     * It could therefore never be true when the next tap
+                     * tested it: the double-tap escape never fired, and the
+                     * deferred single tap was never dispatched to the card.
+                     * A guest you cannot evict, holding a card you cannot
+                     * press — "there's something on screen, can't even click
+                     * it". Taps now stay with the lease and are flushed by the
+                     * 400 ms timeout below. */
                     continue;
                 }
+                jr_display_caption_set("CODEX MODE - DOUBLE TAP TO EXIT");
+                ESP_LOGI(TAG, "operator: guest holds the glass, kind=%d",
+                         (int)iev.kind);
                 /* EVERYTHING ELSE FALLS THROUGH. A guest holds the glass, not
                  * the body: swipes still walk the ring, the shade still opens,
                  * shake still cancels, flip still mutes. This block used to

@@ -5,8 +5,9 @@
  *
  * AWAKE   full face, voice wanted
  * AMBIENT still + idle: dim, clock, still listening
- * WHISPER longer rest: quieter glass, voice off
- * DREAM   asleep glow, voice off; lift / tap / motion wakes
+ * WHISPER longer rest: quieter glass, Gemini session closed; the local
+ *         wake watch still listens
+ * DREAM   asleep glow, session closed; lift / tap / motion / "Jarvis" wakes
  *
  * Face-down is immediate DREAM (privacy). Busy voice (listen/think/speak/ask)
  * holds AWAKE. Deep-sleep and rail gating stay out — this only names the
@@ -26,12 +27,21 @@ extern "C" {
  *
  * The split that matters is AMBIENT vs the rest: AMBIENT still ARMS VOICE, so
  * it is purely cosmetic (dim only) and is safe to reach quickly. WHISPER and
- * DREAM switch the microphone OFF, so they are a real loss of function and
- * remain far out. The first tuning shipped 33 s to voice-off, which made a
- * desk assistant stop listening while its owner read one email. */
+ * DREAM close the Gemini session and stop uplinking audio, so conversation
+ * costs a reconnect and they remain far out. The first tuning shipped 33 s to
+ * voice-off, which made a desk assistant stop listening while its owner read
+ * one email.
+ *
+ * THESE MOODS DO NOT TURN THE MICROPHONE OFF, and this header used to say
+ * three times that they did. The codec keeps sampling and WakeNet keeps
+ * running locally, which is exactly what lets "Jarvis" still wake the device
+ * from DREAM. Only PRIVACY silences the microphone — the glass hold, the flip
+ * latch, or an explicit disarm. Rest is a power and attention state; privacy
+ * is a capability state. Writing rest down as if it were privacy is the kind
+ * of comment someone later trusts instead of reading the code. */
 #define JR_MOOD_AMBIENT_MS  20000u  /* 20 s — dim, STILL LISTENING */
-#define JR_MOOD_WHISPER_MS 300000u  /* 5 min — mic off */
-#define JR_MOOD_DREAM_MS   900000u  /* 15 min — deep rest */
+#define JR_MOOD_WHISPER_MS 300000u  /* 5 min — session closed, wake armed */
+#define JR_MOOD_DREAM_MS   900000u  /* 15 min — deep rest, wake armed */
 
 typedef enum {
     JR_MOOD_AWAKE = 0,
