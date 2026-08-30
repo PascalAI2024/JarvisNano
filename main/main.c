@@ -2031,18 +2031,21 @@ static void publish_shell_state(uint32_t now_ms)
     }
     jr_display_set_shell_state(s_ui_shade_open, cached_active,
                                cached_progress, cached_state);
-    /* DESK and TOOLS no longer have a destination to render into — horizontal
-     * swipe peeks the watch now, so nothing navigates to them. Their feeds are
-     * deleted here rather than left writing into pages nobody can reach.
+    /* DESK is on the mode ring again, so its feed is restored — and unlike
+     * TOOLS it was never fake: cached_title/progress/state come from the real
+     * agent-link push. TOOLS stays unfed on purpose; it now renders an honest
+     * "READY 0 / LAST NONE" instead of the hardcoded
+     * {SEARCH, MEMORY, WEATHER, MORE} that never reflected a tool that ran.
+     * An empty screen telling the truth beats a full one that lies.
      *
      * The TOOLS feed in particular was fake: a hardcoded
      * {SEARCH, MEMORY, WEATHER, MORE} seeded ONCE behind a latch, with `recent`
      * pinned to 0, so it never reflected a tool that actually ran. That is the
      * "search screen" the owner asked the point of. There wasn't one.
      *
-     * cached_title/progress/state are still computed above and still reach the
-     * shell via jr_display_set_shell_state(), which draws the agent rim
-     * segments — that part is real and stays. */
+     * cached_title/progress/state also reach the shell via
+     * jr_display_set_shell_state(), which draws the agent rim segments. */
+    jr_display_desk_set_task(cached_title, cached_progress, cached_state);
     const jr_state_snapshot_t *snapshot = jr_orch_snapshot(&s_app.orch);
     jr_display_jarvis_set_session(
         s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN,
@@ -6907,10 +6910,20 @@ static void voice_task(void *arg)
                         s_watch_peek_until_ms = (uint32_t)now + 10000U;
                         watch_opened = true;
                     }
-                } else if (iev.direction == JR_INPUT_DIRECTION_UP) {
-                    jr_display_nav_up();
                 } else if (iev.direction == JR_INPUT_DIRECTION_DOWN) {
-                    jr_display_nav_down();
+                    /* THE MODE RING. Sliding down walks forward through the
+                     * screens, endlessly — there is no end to hit and no wall
+                     * to bounce off, which is the whole point: you find what
+                     * the device can do by continuing, not by remembering.
+                     *
+                     * Vertical used to open the shade (down) and the detail
+                     * sheet (up). The shade now lives on the BOOT button,
+                     * which is a better home for it anyway: a control surface
+                     * should be reachable when the glass is confusing, and a
+                     * button cannot be swallowed by whatever is on screen. */
+                    jr_display_nav_next();
+                } else if (iev.direction == JR_INPUT_DIRECTION_UP) {
+                    jr_display_nav_prev();
                 }
                 s_ui_shade_open =
                     jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_SHADE;
@@ -6929,18 +6942,15 @@ static void voice_task(void *arg)
                            JR_DISPLAY_OVERLAY_DETAIL) {
                     jr_display_caption_set("DETAIL - DOWN TO CLOSE");
                 } else {
-                    /* Nothing captured the stroke. Per the feedback contract
-                     * (docs/INPUT_MAP.md §5) an unbound gesture must not draw
-                     * the accept ripple and then sit there — it names what this
-                     * surface DOES accept, at the moment of curiosity. This is
-                     * the mechanism that replaces the gesture-card idea.
-                     *
-                     * The neutral ripple OVERWRITES the accept ripple layer 0
-                     * already fired for this stroke (single slot), so the user
-                     * sees exactly one transient and it is the honest one. No
-                     * tone: nothing was refused. */
-                    jr_display_ripple_neutral(iev.x, iev.y);
-                    jr_display_caption_set("SWIPE UP DETAIL - DOWN CONTROLS");
+                    /* Name the screen you just landed on. On an endless ring
+                     * the caption IS the position indicator — it answers
+                     * "where am I" without a dial mark that has to jump when
+                     * the ring wraps. */
+                    static const char *const mode_name[JR_DISPLAY_SPACE_COUNT] =
+                        { "JARVIS", "DESK", "TOOLS", "SETTINGS" };
+                    const jr_display_space_t sp = jr_display_nav_space();
+                    jr_display_caption_set(
+                        sp < JR_DISPLAY_SPACE_COUNT ? mode_name[sp] : "JARVIS");
                 }
                 ESP_LOGI(TAG, "ui: nav overlay=%d",
                          (int)jr_display_nav_overlay());

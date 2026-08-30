@@ -3775,16 +3775,24 @@ static void nav_step(nav_op_t op, uint32_t arg)
 
         switch (op) {
         case NAV_OP_NEXT:
-            /* Clamped, not wrapped — see the ring note in the header. */
-            if (space + 1u < (uint32_t)JR_DISPLAY_SPACE_COUNT) {
-                nspace = space + 1u;
-                fwd = NAV_FORWARD_BIT;
-            }
+            /* WRAPS. The ring was clamped for two stated reasons; the owner's
+             * endless-scroll model answers one and accepts the other.
+             *
+             * "Am I at the end" is not a question an endless ring raises —
+             * there is no end, by design, and a swipe never dies against a
+             * wall. What we accept in exchange is that the page indicator
+             * jumps the width of the dial when it wraps; the fix for that is
+             * to draw position as a rotating mark rather than a linear one,
+             * which is a render change, not a navigation one. */
+            nspace = (space + 1u) % (uint32_t)JR_DISPLAY_SPACE_COUNT;
+            fwd = NAV_FORWARD_BIT;
             novl = (uint32_t)JR_DISPLAY_OVERLAY_NONE;
             break;
         case NAV_OP_PREV:
-            if (space > 0u) {
-                nspace = space - 1u;
+            {
+                nspace = (space == 0u)
+                    ? (uint32_t)JR_DISPLAY_SPACE_COUNT - 1u
+                    : space - 1u;
                 fwd = 0u;
             }
             novl = (uint32_t)JR_DISPLAY_OVERLAY_NONE;

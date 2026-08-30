@@ -296,18 +296,30 @@ esp_err_t jr_display_set_brightness(uint8_t percent);
  *
  *      JARVIS  <->  DESK  <->  TOOLS  <->  SETTINGS
  *
- * The ring deliberately does NOT wrap. A wrap would make the page indicator
- * jump the full width of the dial on one swipe, and it would make "am I at
- * the end" unanswerable. Clamped, the indicator can interpolate straight from
- * mark to mark, and a swipe past the end is an honest no-op.
+ * THE RING WRAPS (changed 2026-08-29, owner's endless-scroll model). Sliding
+ * down walks forward forever and sliding up walks back; there is no end to hit
+ * and no wall to bounce off. You find what the device can do by CONTINUING,
+ * rather than by remembering a gesture — which is the discoverability problem
+ * this shell previously solved by hoping you would read a caption.
+ *
+ * The old clamp had two stated reasons. One is answered outright: "am I at the
+ * end" is not a question an endless ring raises. The other is accepted as a
+ * debt — the page indicator jumps the width of the dial when it wraps, and the
+ * fix is to draw position as a ROTATING mark rather than a linear one. That is
+ * a render change, not a navigation one. Until then the caption names the
+ * screen you land on, which answers "where am I" without any dial at all.
  *
  * Edge controls are global; the vertical centre axis owns overlays:
  *
  *      left edge UP/DOWN  -> volume +/− from any screen.
  *      right edge DOWN/UP -> brightness +/− from any screen.
- *      top-edge down      -> SHADE with values and physical MUTE/LISTEN.
- *      centre swipe up    -> DETAIL, or closes an open shade.
- *      swipe L/R          -> move one temporary side space and close overlays.
+ *      centre swipe DOWN  -> next screen on the ring (endless).
+ *      centre swipe UP    -> previous screen on the ring (endless).
+ *      BOOT button tap    -> SHADE. A control surface must stay reachable when
+ *                            the glass is confusing, and a button cannot be
+ *                            swallowed by whatever is on screen.
+ *      double-tap         -> home, the global escape.
+ *      swipe L/R          -> watch peek (idempotent; it re-arms, never walks).
  *                             Active voice immediately returns to JARVIS.
  *      double tap -> JARVIS, no overlay. The global escape, from anywhere.
  *      tap        -> jr_display_hit() resolves what was under the finger.
