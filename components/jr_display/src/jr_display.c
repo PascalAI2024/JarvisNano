@@ -2610,6 +2610,13 @@ static void sp_focal_settings(const jr_display_ctx_t *ctx, int y1, int y2,
 
     sp_span_t bed[4], fill[4] = {{0, 0, 0, 0}};
     int filled[4];
+    int lab_x[4], lab_y[4];
+    /* Four arcs in four colours, and nothing said which was which — the owner's
+     * verdict on seeing it was "what the hell even is that". A gauge you cannot
+     * name is decoration. Each now carries a three-letter tag sitting just
+     * inside its own arc, at that arc's own angle, so the label and the thing
+     * it labels cannot drift apart. */
+    static const char *const tag[4] = { "VOL", "LGT", "NET", "MEM" };
     for (int i = 0; i < 4; ++i) {
         const int c = SP_A_TOP + i * 64;
         sp_span_set(&bed[i], c - 26, c + 26);
@@ -2617,6 +2624,11 @@ static void sp_focal_settings(const jr_display_ctx_t *ctx, int y1, int y2,
         if (filled[i] > 0) {
             sp_span_set(&fill[i], c - 26, c - 26 + filled[i]);
         }
+        /* Centre of the arc, pulled inside it by ~22 px, then offset by half
+         * the glyph run so the tag is centred on its own radius. */
+        const int lr = SP_FOCAL_IN - 22;
+        lab_x[i] = cx + ((sp_cos(c) * lr) >> 15) - 9;
+        lab_y[i] = SP_CY + oy + ((sp_sin(c) * lr) >> 15) - 3;
     }
 
     /* Firmware update ring, concentric with the gauges at r140-154: outside
@@ -2678,6 +2690,11 @@ static void sp_focal_settings(const jr_display_ctx_t *ctx, int y1, int y2,
         } else {
             sp_annulus_row(row, y, cx, SP_CY + oy, 0, 20, NULL, heart);
         }
+        /* The tags last, so they sit over their own arcs. Scale 1 keeps three
+         * glyphs inside the gauge band without crowding the heart. */
+        for (int i = 0; i < 4; ++i) {
+            sp_text_row(row, y, tag[i], 3, lab_x[i], lab_y[i], 1, hue[i]);
+        }
     }
 }
 
@@ -2728,7 +2745,12 @@ static const char *sp_headline(int space)
     case JR_DISPLAY_SPACE_TOOLS: {
         const uint32_t w = __atomic_load_n(&s_tools_word, __ATOMIC_ACQUIRE);
         const uint32_t recent = (w >> 8) & 0xFFu;
-        return recent < (w & 0xFFu) ? s_tool_name[recent] : "TOOLS";
+        /* The last tool that actually ran, or NOTHING. Returning "TOOLS" here
+         * printed the screen's own name a second time, directly above the
+         * caption already saying it — two identical words stacked, which is
+         * the clutter pattern every screen had. A headline is for the DATA;
+         * the caption is for the place. */
+        return recent < (w & 0xFFu) ? s_tool_name[recent] : "";
     }
     case JR_DISPLAY_SPACE_SETTINGS:
         return s_settings_label;

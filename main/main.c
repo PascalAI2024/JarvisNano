@@ -98,12 +98,6 @@ extern const unsigned char diagnostics_html_end[]
  * confirmation, and execute_tool can never bypass JarvisMCP server policy. */
 static const jr_gemini_fn_decl_t s_device_tool_fns[] = {
     {
-        .name = "crypto_price",
-        .description = "Get the current price for one cryptocurrency symbol.",
-        .arg_name = "symbol",
-        .arg_desc = "Coin name or market symbol, for example bitcoin or BTC-USD.",
-    },
-    {
         .name = "recall_memory",
         .description = "Search Pascal's Jarvis memory for relevant context.",
         .arg_name = "query",
@@ -116,24 +110,6 @@ static const jr_gemini_fn_decl_t s_device_tool_fns[] = {
         .arg_name = "note",
         .arg_desc =
             "Panel-safe note, at most 47 characters; it is shown before approval.",
-    },
-    {
-        .name = "wikipedia",
-        .description = "Look up a factual topic on Wikipedia.",
-        .arg_name = "topic",
-        .arg_desc = "The topic to look up.",
-    },
-    {
-        .name = "country_info",
-        .description = "Get factual information about a country.",
-        .arg_name = "country",
-        .arg_desc = "Country name.",
-    },
-    {
-        .name = "weather",
-        .description = "Get a three-day weather forecast for a location.",
-        .arg_name = "location",
-        .arg_desc = "City and region or country, for example Fort Lauderdale, FL.",
     },
     {
         .name = "current_time",
@@ -6802,7 +6778,11 @@ static void voice_task(void *arg)
                     s_ui_shade_open = false;
                     jr_mood_poke_awake(&s_mood, (uint32_t)now);
                     jr_display_bloom();
-                    jr_display_caption_set("JARVIS - RIGHT WATCH");
+                    /* Was "JARVIS - RIGHT WATCH", which instructed a gesture
+                     * that no longer navigates — right swipe peeks the watch,
+                     * it does not walk to it. Home says where you are; the
+                     * ring teaches itself by being slid. */
+                    jr_display_caption_set("JARVIS");
                     ESP_LOGI(TAG, "gesture: double-tap home");
                     continue;
                 }

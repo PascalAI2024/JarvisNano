@@ -20,8 +20,6 @@ typedef struct {
 /* These strings are the complete executable vocabulary. There is no generic
  * `code` tool and no path that copies model text outside a quoted literal. */
 static const template_desc_t s_templates[] = {
-    {"crypto_price", "symbol", 39U, true,
-     "return await jarvis.crypto(", ")"},
     {"recall_memory", "query", 255U, false,
      "return await jarvis.memory.search({query:", ",area:\"all\",limit:5})"},
     {"remember", "note", 47U, false,
@@ -30,19 +28,6 @@ static const template_desc_t s_templates[] = {
      "title:\"JarvisNano \"+h.slice(0,12),body:b,"
      "tags:[\"jarvisnano\",\"voice\"],source:\"jarvisnano\","
      "confidence:\"confirmed\"})"},
-    {"wikipedia", "topic", 191U, false,
-     "const r=await jarvis.wiki(", ");if(Array.isArray(r.results))"
-     "return {query:r.query,results:r.results.slice(0,3).map(x=>({"
-     "title:x.title,description:x.description,"
-     "extract:(x.extract||\"\").slice(0,400),url:x.url}))};"
-     "return {title:r.title,description:r.description,"
-     "extract:(r.extract||\"\").slice(0,1800),url:r.url}"},
-    {"country_info", "country", 119U, false,
-     "return await jarvis.country(", ")"},
-    {"weather", "location", 159U, false,
-     "const g=await jarvis.geocode(",
-     ",{limit:1});if(!g.results?.length)return {error:\"Location not found\"};"
-     "return await jarvis.weather(g.results[0].lat,g.results[0].lon,{days:3})"},
     {"current_time", "timezone", 79U, true,
      "return await jarvis.time(", ")"},
     {"search_tools", "query", 191U, false,
@@ -63,15 +48,6 @@ static const template_desc_t *find_template(const char *name)
     return NULL;
 }
 
-static bool valid_crypto_symbol(const char *value)
-{
-    for (const unsigned char *p = (const unsigned char *)value; *p; ++p) {
-        if (!isalnum(*p) && *p != '-' && *p != '_' && *p != ' ' && *p != '.') {
-            return false;
-        }
-    }
-    return true;
-}
 
 static bool valid_panel_note(const char *value)
 {
@@ -236,14 +212,12 @@ jr_tool_template_status_t jr_tools_build_code(const char *name,
         return JR_TOOL_TEMPLATE_INVALID_ARGS;
     }
 
-    /* crypto_price retains its useful default. The legacy /act path needs an
-     * explicit timezone because jarvis.time() with no argument lists zones
-     * rather than returning the current time. The typed gateway applies its
-     * own configured device timezone to the original empty args object. */
+    /* The legacy /act path needs an explicit timezone because jarvis.time()
+     * with no argument lists zones rather than returning the current time. The
+     * typed gateway applies its own configured device timezone to the original
+     * empty args object. */
     if (value == NULL || value[0] == '\0') {
-        if (strcmp(desc->name, "crypto_price") == 0) {
-            value = "bitcoin";
-        } else if (strcmp(desc->name, "current_time") == 0) {
+        if (strcmp(desc->name, "current_time") == 0) {
             value = "America/New_York";
         } else if (desc->optional) {
             int n = snprintf(out, out_cap, "%s%s", desc->prefix, desc->suffix);
@@ -258,7 +232,6 @@ jr_tool_template_status_t jr_tools_build_code(const char *name,
 
     size_t value_len = strnlen(value, desc->max_len + 1U);
     if (value_len == 0U || value_len > desc->max_len ||
-        (strcmp(desc->name, "crypto_price") == 0 && !valid_crypto_symbol(value)) ||
         (strcmp(desc->name, "remember") == 0 && !valid_panel_note(value))) {
         cJSON_Delete(args);
         return JR_TOOL_TEMPLATE_INVALID_ARGS;
