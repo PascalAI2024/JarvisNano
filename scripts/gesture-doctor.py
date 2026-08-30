@@ -104,9 +104,26 @@ def check_thresholds() -> list[str]:
         h = float(edge)
         cap = R * R * math.acos((R - h) / R) - (R - h) * math.sqrt(max(2 * R * h - h * h, 0))
         pct = 100.0 * cap / (math.pi * R * R)
-        tag = WARN if pct < 15 else OK
-        lines.append(f"{tag} shade top-edge band start_y<{edge} = {pct:.1f}% of "
-                     f"the ROUND glass (a cap, not a strip — area falls off fast)")
+        # This used to WARN that the crescent was too small to reach. That was
+        # a false alarm: nothing REQUIRES the top edge. main.c tests the flag
+        # only negatively (`== 0U`), to keep a top pull out of the rim dial —
+        # the shade opens on any centre-down swipe, which is a far larger
+        # target. Flag it only if someone starts gating on it positively.
+        try:
+            main_c = open(os.path.join(REPO, "main", "main.c"),
+                          encoding="utf-8", errors="replace").read()
+        except OSError:
+            main_c = ""
+        positive = re.search(r"flags\s*&\s*JR_INPUT_FLAG_TOP_EDGE\s*\)\s*(?:!=\s*0|\))",
+                             main_c) is not None
+        if positive:
+            lines.append(f"{WARN} something now gates POSITIVELY on the top "
+                         f"edge, and start_y<{edge} is only {pct:.1f}% of a "
+                         f"ROUND glass — a thin crescent, not a strip")
+        else:
+            lines.append(f"{OK} top-edge flag is used only to EXCLUDE (never to "
+                         f"gate): the shade opens on any centre-down swipe, so "
+                         f"the {pct:.1f}% crescent is not load-bearing")
     return lines
 
 
