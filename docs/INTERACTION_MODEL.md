@@ -165,13 +165,14 @@ the board already has and the firmware does not reach for.
 
 | Phase | What | Status |
 |---|---|---|
-| **B** | Refusal feedback: contracting ring + falling note | ✅ **done** |
-| **D** | GPIO0 button ladder | ✅ done (PKEY) |
-| **E** | Double-tap + side pages | ✅ done |
-| **A** | Layer stack, `CONSUMED`/`PASS`, no behaviour change | open — §4; unblocks the rest |
-| **C** | Hold-to-commit: **one** stage with a filling ring, not three. A three-stage hold is a hidden menu with a timer | open — touch has one 850 ms threshold and no preview. ⚠️ The HAL emits no contact-down and no hold progress (long-press fires once at 850 ms, `input_touch.c:341-355`), so a filling ring has nothing to drive it — this needs one new HAL event, the only new plumbing the design asks for |
-| **F** | IMU interrupt engines + sleep | open — the biggest hardware win (§6) |
-| **G** | Auto-upright overlay rotation | open — render-side only |
+| **B** | Refusal feedback: contracting ring + falling note; neutral ack for unbound | ✅ **done** `1e585570`, `617d37e3` |
+| **D** | Physical buttons | ✅ mostly — BOOT gained panic-home at ≥5 s (`77824301`). ⛔ **PWR double-tap is undetectable**: the PKEY latch polls at 500 ms, so a ~400 ms window cannot be resolved, and `iot_button` cannot help (it drives GPIO/ADC, not an I²C latch) |
+| **E** | Double-tap + horizontal swipe | ✅ done — and the side pages were **deleted** (`6de40bd2`); horizontal now peeks the watch |
+| **A** | Layer stack, `CONSUMED`/`PASS`, no behaviour change | **open** — §4. Deliberately sequenced AFTER the deletions: refactoring first means carefully re-homing layers that Stage 2 then removes |
+| **C** | Hold-to-commit: **one** stage with a filling ring, not three | ✅ **done** `1d07f621`, `1a081e7e`, `617d37e3`. The HAL now emits `PRESS_DOWN`/`PRESS_UP`; the ring previews at 400 ms, fills to 850 ms, and lifting early abandons in silence. Still completes into the privacy toggle — see **D** for why it cannot move to PWR yet |
+| **F** | IMU wake engines + sleep | 🔓 **unblocked, not built.** Pin resolved to **INT1** (not INT2) and the WoM sequence sourced — `docs/reference/imu-interrupt-routing.md`. Gated on hands-on because WoM mode outputs **no data**, disabling flip-to-mute and shake while armed |
+| **R** | Rim as a true annulus (r ≥ 168) replacing the x-slabs | ✅ **done** `3cbab992` — the knobs no longer reach over the reactor core |
+| **G** | Auto-upright overlay rotation | **open** — render-side only. Note `hud_tilt_offset()` is a *deliberately* documented dead end (disabled, returns 0,0) and is the wrong hook: it emits a translation, not a rotation, and pairs the wrong axes |
 
 **F is where "use the hardware right" actually cashes out**: the interrupt
 engines and sleep are one item, because the engines are what make sleeping
