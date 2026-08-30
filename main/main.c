@@ -712,7 +712,17 @@ typedef enum {
 } voice_control_request_t;
 
 static _Atomic int s_voice_control_request;
-static _Atomic bool s_voice_privacy_paused;
+/* BOOTS MUTED, deliberately. A voice assistant that comes up listening is a
+ * privacy problem: after a power cut, a flash, or a battery swap the mic would
+ * be live before anyone in the room knows the device is on. Starting paused
+ * means the first thing the owner does is DELIBERATELY open the mic — long-
+ * press, PWR, or the shade control — and the gold privacy ring says plainly
+ * that it is shut until they do.
+ *
+ * This costs a wake-word cold start: "Jarvis" will not open a session until
+ * the owner unmutes once. That is the correct trade for an always-on
+ * microphone on a desk. */
+static _Atomic bool s_voice_privacy_paused = true;
 static jr_mood_state_t s_mood;
 static _Atomic uint8_t s_mood_id;
 static _Atomic uint8_t s_mood_brightness;
@@ -5863,26 +5873,6 @@ static void voice_task(void *arg)
             jr_power_t bat = {0};
             const bool have_imu = jr_imu_read(&imu) == ESP_OK;
             const bool have_power = jr_power_read(&bat) == ESP_OK;
-            /* MOTION screen: live tilt at the IMU's existing cadence, no new
-             * sampling. Clamped to int8 degrees — the renderer maps ±90 to the
-             * focal radius and pins beyond it. */
-            if (have_imu) {
-                /* In-plane gravity, hundredths of g. NOT roll/pitch: roll is
-                 * atan2(gy, gz) and this board reads gz ~= -1 g face-up, so a
-                 * flat device reports roll ~= 177 and a bubble driven from it
-                 * pins at the rim forever (measured 2026-08-29). gx/gy are
-                 * ~0 when flat, which is what a level needs.
-                 *
-                 * If the bubble runs the wrong way on hardware, flip a sign
-                 * HERE, not in jr_imu — this codebase has already been bitten
-                 * twice by IMU axis conventions being "fixed" at the source. */
-                float gx = imu.gx * 100.0f, gy = imu.gy * 100.0f;
-                if (gx >  100.0f) gx =  100.0f;
-                if (gx < -100.0f) gx = -100.0f;
-                if (gy >  100.0f) gy =  100.0f;
-                if (gy < -100.0f) gy = -100.0f;
-                jr_display_motion_set((int8_t)gx, (int8_t)gy);
-            }
             jr_display_set_hud_env(
                 bat.percent, bat.charging,
                 atomic_load(&s_voice_privacy_paused),
@@ -7012,7 +7002,7 @@ static void voice_task(void *arg)
                      * "where am I" without a dial mark that has to jump when
                      * the ring wraps. */
                     static const char *const mode_name[JR_DISPLAY_SPACE_COUNT] =
-                        { "JARVIS", "WATCH", "POWER", "MOTION",
+                        { "JARVIS", "WATCH", "POWER",
                           "DESK", "TOOLS", "SETTINGS" };
                     const jr_display_space_t sp = jr_display_nav_space();
                     jr_display_caption_set(
@@ -7777,5 +7767,10 @@ void app_main(void)
      * few seconds after becoming usable. The user's first full AWAKE window
      * should begin when JARVIS is actually ready. */
     jr_mood_poke_awake(&s_mood, (uint32_t)(esp_timer_get_time() / 1000));
-    ESP_LOGI(TAG, "boot complete — always-ready voice requested");
+    /* Say WHY the mic is shut. Booting muted without announcing it reads as a
+     * broken device — the owner says "Jarvis", nothing happens, and there is
+     * no way to tell a privacy state from a fault. The gold ring carries the
+     * same fact for anyone across the room. */
+    jr_display_caption_set("MUTED - HOLD TO LISTEN");
+    ESP_LOGI(TAG, "boot complete — starting MUTED (privacy default)");
 }

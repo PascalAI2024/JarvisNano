@@ -915,9 +915,6 @@ static volatile uint8_t  s_ripple_kind;   /* hud_ripple_kind_t */
 /* Hold-to-commit ring: 0 = not in flight. Single writer (the app task), read
  * by the render task, same discipline as the ripple slot. */
 static volatile uint8_t  s_commit_pct;
-/* MOTION screen tilt: roll | pitch<<8, both int8 degrees. Single writer (the
- * app task), read by the render task — same discipline as the slots above. */
-static volatile uint32_t s_motion_word;
 
 /* TRANS-01 wake bloom slot: SAME single-slot discipline as the ripple — only
  * the app task writes (a re-fire restarts the bloom), the flush age-gates, so
@@ -1162,13 +1159,6 @@ void jr_display_ripple_reject(int x, int y)
 void jr_display_ripple_neutral(int x, int y)
 {
     ripple_arm(x, y, HUD_RIPPLE_NEUTRAL);
-}
-
-void jr_display_motion_set(int8_t roll_deg, int8_t pitch_deg)
-{
-    const uint32_t word = (uint32_t)(uint8_t)roll_deg
-                        | ((uint32_t)(uint8_t)pitch_deg << 8);
-    __atomic_store_n(&s_motion_word, word, __ATOMIC_RELEASE);
 }
 
 void jr_display_commit_ring(uint8_t pct)
@@ -2489,7 +2479,7 @@ static void sp_focal_tools(const jr_display_ctx_t *ctx, int y1, int y2,
     }
 }
 
-/* ---- WATCH / POWER / MOTION: three screens that show only live data -------
+/* ---- WATCH / POWER: screens that show only live data ---------------------
  *
  * Each is one focal object, procedural, strip-local, and reading a value that
  * something else already publishes. None of them invents content — the side
@@ -2540,39 +2530,6 @@ static void sp_focal_power(const jr_display_ctx_t *ctx, int y1, int y2,
         }
         sp_annulus_row(row, y, cx, SP_CY + oy, 0, charging ? 26 : 12, NULL,
                        fill);
-    }
-}
-
-/* MOTION: a bubble level. The dot rides the gravity vector, so the screen is
- * alive in the hand — which is the point: it is the one screen that proves the
- * device knows where it is. Clamped inside the focal circle so it can never
- * escape the safe radius. */
-static void sp_focal_motion(const jr_display_ctx_t *ctx, int y1, int y2,
-                            uint16_t *pixels, int oy, int st)
-{
-    const uint32_t w = __atomic_load_n(&s_motion_word, __ATOMIC_ACQUIRE);
-    const int gx = (int)(int8_t)(w & 0xFFu);       /* hundredths of g */
-    const int gy = (int)(int8_t)((w >> 8) & 0xFFu);
-    /* 1 g of in-plane tilt maps to the focal radius; beyond that it pins. */
-    int bx = (gx * SP_FOCAL_OUT) / 100;
-    int by = (gy * SP_FOCAL_OUT) / 100;
-    const int lim = SP_FOCAL_OUT - 18;
-    if (bx >  lim) bx =  lim;
-    if (bx < -lim) bx = -lim;
-    if (by >  lim) by =  lim;
-    if (by < -lim) by = -lim;
-
-    const bool muted = sp_privacy_muted();
-    const uint16_t hot = sp_tint(ctx, muted ? SP_C_GOLD : SP_C_CYAN, st);
-    const uint16_t cool = sp_tint(ctx, muted ? SP_C_GOLD_DIM : SP_C_CYAN_DIM, st);
-    const int cx = SP_CX;
-
-    for (int y = y1; y < y2; ++y) {
-        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        sp_annulus_row(row, y, cx, SP_CY + oy, SP_FOCAL_IN, SP_FOCAL_OUT,
-                       NULL, cool);                        /* the vial      */
-        sp_annulus_row(row, y, cx, SP_CY + oy, 0, 6, NULL, cool); /* centre */
-        sp_annulus_row(row, y, cx + bx, SP_CY + oy + by, 0, 16, NULL, hot);
     }
 }
 
@@ -2741,19 +2698,6 @@ static const char *sp_headline(int space)
                  (w & (1u << 24)) != 0u ? " CHG" : "");
         return buf;
     }
-    case JR_DISPLAY_SPACE_MOTION: {
-        static char buf[SP_LABEL_CAP];
-        const uint32_t w = __atomic_load_n(&s_motion_word, __ATOMIC_ACQUIRE);
-        const int gx = (int)(int8_t)(w & 0xFFu);
-        const int gy = (int)(int8_t)((w >> 8) & 0xFFu);
-        /* A level has one question, so show one number: deviation from flat.
-         * Integer magnitude — no floats on the render path. */
-        const int t2 = gx * gx + gy * gy;
-        int mag = 0;
-        while ((mag + 1) * (mag + 1) <= t2) { mag++; }
-        snprintf(buf, sizeof buf, mag <= 3 ? "LEVEL" : "TILT %d", mag);
-        return buf;
-    }
     case JR_DISPLAY_SPACE_DESK:
         return s_desk_task[0] != '\0' ? s_desk_task : "NO TASK";
     case JR_DISPLAY_SPACE_TOOLS: {
@@ -2789,9 +2733,6 @@ static void sp_draw_space(const jr_display_ctx_t *ctx, int y1, int y2,
         break;
     case JR_DISPLAY_SPACE_POWER:
         sp_focal_power(ctx, y1, y2, pixels, oy, st);
-        break;
-    case JR_DISPLAY_SPACE_MOTION:
-        sp_focal_motion(ctx, y1, y2, pixels, oy, st);
         break;
     case JR_DISPLAY_SPACE_DESK:
         sp_focal_desk(ctx, y1, y2, pixels, oy, st);
