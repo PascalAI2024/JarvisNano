@@ -32,7 +32,7 @@ Every behavioral row closes on physical 1.75C evidence, not compilation alone.
 | N6.3 | P0 | Byte-budget JarvisMCP results with cursor projection | TEMPORARY 3-result cap | Every normalized result is valid JSON ≤3071 bytes with `has_more` and cursor; voice search plus one returned read-only tool execute without `bad_response` |
 | N6.4 | P0 | Run uninterrupted powered conversation soak | PENDING N6.2/N6.3 | 30 min with TX drops/deaths/flush errors 0, playback gaps ≤120 ms, largest internal block ≥16 KB, and final state Listening |
 | N6.5 | P1 | Split `main/main.c` at existing ownership seams | PENDING | Input/buttons, HTTP diagnostics, and voice/power policy become three modules; `main.c` <4,000 lines; all builds/suites pass |
-| N6.6 | P1 | Make one canonical host-test command | PENDING | One command runs core, transport, display, tool-template, desk CLI, and shell suites; CI calls it |
+| N6.6 | P1 | Make one canonical host-test command | PARTIAL — `scripts/host-tests.sh` | One command runs core, transport, display, tool-template, desk CLI, and shell suites; CI calls it |
 | N6.7 | P1 | Remove repository/document truth drift | IN PROGRESS | Root plan is current-only; historical plans are archived/labeled; all relative links resolve; no obsolete interaction claims remain |
 | N6.8 | P1 | Consolidate visual interaction specification | DOCS ALIGNED; final capture set pending | Vision, hardware, and protocol agree; Jarvis, Watch, controls, privacy, and side-space captures match |
 | N6.9 | P1 | Raise settled controls cadence | PENDING | Full controls remain present at ≥14 FPS, zero flush errors, largest internal block ≥24 KB |
@@ -68,13 +68,19 @@ invariants from the tree and must stay green.
 | N7.12 | Endless mode ring, vertical slide | `d66db45a`, `5f8d12bd` | Wraps both ways; slide axis corrected from horizontal to vertical to match the finger |
 | N7.13 | Dev mode: no pairing token on diagnostics | `2be528e8` | ⚠️ **Set `JR_DEV_OPEN_DIAGNOSTICS 0` before any release.** Boot logs warn every boot |
 
+| N7.14 | Give TOOLS real content | `2dc86bf4` | Petals are the real declared catalog (`s_device_tool_fns`); lit petal is the tool that actually ran; nothing lit when nothing has run |
+| N7.15 | WATCH / POWER / MOTION on the ring | `2dc86bf4`, `2700d113` | Live data only. WATCH uses the EXISTING `hud_overlay_clock` — an earlier pass wrongly replaced it with a home-made two-arc clock |
+| N7.16 | Position indicator survives a wrap | `708dd280` | Was worse than recorded: `(2*i-3)*7` was tuned for 4 screens, so 5 and 6 fell outside the rail. Now evenly spaced on the full dial, active mark takes the signed shortest path |
+| N7.23 | Nav word held only 4 screens | `307c8d24` | `NAV_SPACE_MASK` was 2 bits, so DESK/TOOLS/SETTINGS were unreachable. Widened to 3 + `_Static_assert` so a 9th screen fails the build |
+| N7.24 | One canonical host-test command | `scripts/host-tests.sh` | Runs BOTH suites and asserts a positive count — "nothing ran" exits 2. Written because only one suite was being run and 8 failures sat unnoticed |
+
 ### Open
 
 | # | Priority | Deliverable | Status | Acceptance gate |
 |---|---|---|---|---|
-| N7.14 | P1 | Give TOOLS real content, or drop it from the ring | OPEN | TOOLS renders a tool that actually ran (name + outcome) within 2 s of a real tool call, or the screen is removed from the ring. **No hardcoded lists** — an empty screen telling the truth beats a full one that lies |
-| N7.15 | P1 | Add WATCH, POWER and MOTION to the ring | OPEN | Each shows only live data: WATCH via `hud_overlay_clock` (exists, strip-tested); POWER via `jr_power` (%, charging, mV); MOTION via `jr_imu` (live tilt). Each passes strip invariance and holds ≥14 FPS |
-| N7.16 | P1 | Position indicator that survives a wrap | OPEN | Wrapping must not jump the indicator the width of the dial. Draw position as a **rotating** mark; the caption naming each screen is the interim answer |
+| ~~N7.14~~ | — | done — see shipped table | DONE | TOOLS renders a tool that actually ran (name + outcome) within 2 s of a real tool call, or the screen is removed from the ring. **No hardcoded lists** — an empty screen telling the truth beats a full one that lies |
+| ~~N7.15~~ | — | done — see shipped table | DONE | Each shows only live data: WATCH via `hud_overlay_clock` (exists, strip-tested); POWER via `jr_power` (%, charging, mV); MOTION via `jr_imu` (live tilt). Each passes strip invariance and holds ≥14 FPS |
+| ~~N7.16~~ | — | done — see shipped table | DONE | Wrapping must not jump the indicator the width of the dial. Draw position as a **rotating** mark; the caption naming each screen is the interim answer |
 | N7.17 | P1 | Input layer stack (`CONSUMED`/`PASS`) | OPEN — sequenced after deletions | Dispatch is ~430 lines with 20+ `continue`s. Precedence becomes a declared table; every affordance in `INTERACTION_MODEL.md` §5 still reachable; no binding changes |
 | N7.18 | P2 | Enforce the coverage invariant in a host test | OPEN | A table lists every binding and its non-gesture (voice) equivalent; a binding with no equivalent fails the build. Pairing is the one allowed exception (physical-presence proof) |
 | N7.19 | P2 | Re-home the OTA ring, then delete the SETTINGS renderer | OPEN | OTA progress stays visible without `nav_set(SETTINGS)`; only then may `sp_focal_settings` go. **Do not delete first** — it would blind a firmware update |
