@@ -10,6 +10,13 @@ question in seconds once the right things were asked, in this order:
   2. are they the RIGHT KIND of event?              -> the tap:swipe ratio
   3. is anything actually hittable right now?       -> sweep the arc band
   4. does the classifier have a hole in it?         -> read the thresholds
+  5. are the design invariants still true?          -> lint the source
+
+Check 5 exists because comments assert rules that nothing enforces, and every
+rule it checks has already been broken once in this codebase: the ADJUST guard
+drifting from the rim test, a capturing surface blanking its own exit caption,
+a preview threshold that could outrun the hold, and double-tap-home outranking
+a live question. An assertion nobody checks is a wish.
 
 Check 2 is the one a human eye skips and the one that mattered: 44 swipes to 12
 taps, while the owner believed they were tapping. Check 3 must sweep the RIGHT
@@ -103,6 +110,69 @@ def check_thresholds() -> list[str]:
     return lines
 
 
+def check_invariants() -> list[str]:
+    """Lint the design invariants that live as comments in the source.
+
+    Each of these is a rule some comment ASSERTS. An assertion nobody checks is
+    a wish, and every one of these has already been broken once."""
+    lines = []
+    try:
+        main_c = open(os.path.join(REPO, "main", "main.c"),
+                      encoding="utf-8", errors="replace").read()
+    except OSError:
+        return [f"{WARN} could not read main/main.c"]
+
+    # 1. The ADJUST no-ripple predicate must match the rim test it mirrors.
+    #    Their comments say so; if they drift, a level slide starts rippling.
+    rim_tests = main_c.count("(168 * 168)")
+    if rim_tests >= 2:
+        lines.append(f"{OK} rim annulus predicate appears {rim_tests}x "
+                     f"(layer-0 ADJUST guard and the swipe handler agree)")
+    else:
+        lines.append(f"{BAD} rim annulus predicate appears {rim_tests}x — the "
+                     f"ADJUST no-ripple guard has drifted from the rim test, "
+                     f"so a level slide will ripple again")
+
+    # 2. No capturing surface may wipe the caption that names its exit.
+    clears = main_c.count("jr_display_caption_clear()")
+    if clears <= 2:
+        lines.append(f"{OK} caption_clear() used {clears}x — both known-good "
+                     f"(the accumulator helper, and clearing REST on wake)")
+    else:
+        lines.append(f"{WARN} caption_clear() used {clears}x — audit each: a "
+                     f"surface that CAPTURES input must name its exit, not "
+                     f"blank it")
+
+    # 3. The commit ring's preview must sit inside the hold threshold, or it
+    #    either flashes on taps or never completes.
+    hal = ""
+    try:
+        hal = open(TOUCH_SRC, encoding="utf-8", errors="replace").read()
+    except OSError:
+        pass
+    m = re.search(r"^#define\s+TOUCH_LONG_PRESS_MS\s+(\d+)", hal, re.M)
+    hold = int(m.group(1)) if m else None
+    preview = 400 if "held >= 400U" in main_c else None
+    if hold and preview:
+        if preview < hold:
+            lines.append(f"{OK} commit ring previews at {preview} ms and "
+                         f"commits at {hold} ms (fills over {hold - preview} ms)")
+        else:
+            lines.append(f"{BAD} commit ring preview {preview} ms >= hold "
+                         f"{hold} ms — the ring can never fill")
+    else:
+        lines.append(f"{WARN} could not read the commit-ring thresholds")
+
+    # 4. An open ask must outrank double-tap-home.
+    if "!jr_display_choices_active()" in main_c:
+        lines.append(f"{OK} double-tap is guarded on !choices_active — a live "
+                     f"ask keeps a fast retry instead of losing it to home")
+    else:
+        lines.append(f"{BAD} double-tap-home is NOT guarded on an open ask — "
+                     f"missing an arc and retrying will fire home instead")
+    return lines
+
+
 def arc_band() -> tuple[int, int, int]:
     d = defines(HUD_SRC, ["OV_CENTER", "OV_R_CHOICE_IN", "OV_R_CHOICE_OUT",
                           "OV_CHOICE_HIT_SLOP_IN", "OV_CHOICE_HIT_SLOP_OUT"])
@@ -189,6 +259,7 @@ def run(base: str) -> int:
         ("reachability + display", lambda: check_display(base)),
         ("touch events (is the gesture the RIGHT KIND?)", lambda: check_touch(base)),
         ("classifier thresholds (source of truth: the tree)", check_thresholds),
+        ("design invariants (comments that must stay true)", check_invariants),
         ("live arc hit sweep (is anything hittable NOW?)", lambda: sweep_arcs(base)),
     ]
     worst = 0
