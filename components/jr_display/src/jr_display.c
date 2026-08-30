@@ -2370,7 +2370,7 @@ static void sp_veil(const jr_display_ctx_t *ctx, int y1, int y2,
  * turn. Segmenting also gives the ring visible joints, which reads as
  * mechanical travel rather than a plain pie. */
 static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
-                          uint16_t *pixels, int ox, int st)
+                          uint16_t *pixels, int oy, int st)
 {
     const uint32_t w = __atomic_load_n(&s_desk_word, __ATOMIC_ACQUIRE);
     int prog = (int)(w & 0xFFu);
@@ -2384,7 +2384,7 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
                                            ? SP_C_CYAN
                                            : agent_native_color(state), st);
     const uint16_t ink = sp_tint(ctx, SP_C_INK, st);
-    const int cx = SP_CX + ox;
+    const int cx = SP_CX;
 
     char num[6];
     const int len = sp_pct(num, 0, (int)sizeof num, (uint32_t)prog);
@@ -2403,9 +2403,9 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
 
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        sp_annulus_row(row, y, cx, SP_CY, SP_FOCAL_IN, SP_FOCAL_OUT, NULL, track);
+        sp_annulus_row(row, y, cx, SP_CY + oy, SP_FOCAL_IN, SP_FOCAL_OUT, NULL, track);
         for (int i = 0; i < nseg; ++i) {
-            sp_annulus_row(row, y, cx, SP_CY, SP_FOCAL_IN, SP_FOCAL_OUT,
+            sp_annulus_row(row, y, cx, SP_CY + oy, SP_FOCAL_IN, SP_FOCAL_OUT,
                            &seg[i], fill);
         }
         sp_text_row(row, y, num, len, tx, SP_FOCAL_TEXT_Y, 3, ink);
@@ -2415,7 +2415,7 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
 /* TOOLS: one petal per capability around a live core. The most recent petal
  * is thicker and lit, so "what did it just do" is answered at a glance. */
 static void sp_focal_tools(const jr_display_ctx_t *ctx, int y1, int y2,
-                           uint16_t *pixels, int ox, int st)
+                           uint16_t *pixels, int oy, int st)
 {
     const uint32_t w = __atomic_load_n(&s_tools_word, __ATOMIC_ACQUIRE);
     int count = (int)(w & 0xFFu);
@@ -2426,7 +2426,7 @@ static void sp_focal_tools(const jr_display_ctx_t *ctx, int y1, int y2,
     const bool muted = sp_privacy_muted();
     const uint16_t hot = sp_tint(ctx, muted ? SP_C_GOLD : SP_C_CYAN, st);
     const uint16_t cool = sp_tint(ctx, muted ? SP_C_GOLD_DIM : SP_C_CYAN_DIM, st);
-    const int cx = SP_CX + ox;
+    const int cx = SP_CX;
 
     sp_span_t petal[JR_DISPLAY_TOOLS_MAX] = {{0, 0, 0, 0}};
     for (int i = 0; i < count; ++i) {
@@ -2437,17 +2437,17 @@ static void sp_focal_tools(const jr_display_ctx_t *ctx, int y1, int y2,
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         if (count == 0) {
-            sp_annulus_row(row, y, cx, SP_CY, SP_FOCAL_IN, SP_FOCAL_OUT,
+            sp_annulus_row(row, y, cx, SP_CY + oy, SP_FOCAL_IN, SP_FOCAL_OUT,
                            NULL, cool);
         } else {
             for (int i = 0; i < count; ++i) {
                 const bool on = i == recent;
-                sp_annulus_row(row, y, cx, SP_CY, on ? 68 : SP_FOCAL_IN,
+                sp_annulus_row(row, y, cx, SP_CY + oy, on ? 68 : SP_FOCAL_IN,
                                on ? 104 : SP_FOCAL_OUT, &petal[i],
                                on ? hot : cool);
             }
         }
-        sp_annulus_row(row, y, cx, SP_CY, 0, 14, NULL, hot);
+        sp_annulus_row(row, y, cx, SP_CY + oy, 0, 14, NULL, hot);
     }
 }
 
@@ -2471,7 +2471,7 @@ static uint16_t sp_ota_native(jr_display_ota_state_t state)
  * arcs are volume, brightness, link quality and free memory, in that order
  * clockwise from noon. */
 static void sp_focal_settings(const jr_display_ctx_t *ctx, int y1, int y2,
-                              uint16_t *pixels, int ox, int st)
+                              uint16_t *pixels, int oy, int st)
 {
     const uint32_t w = __atomic_load_n(&s_status_word, __ATOMIC_ACQUIRE);
     int vol = (int)(w & 0xFFu);
@@ -2495,7 +2495,7 @@ static void sp_focal_settings(const jr_display_ctx_t *ctx, int y1, int y2,
     const uint16_t track = sp_tint(ctx, SP_C_TRACK, st);
     const bool muted = sp_privacy_muted();
     const uint16_t heart = sp_tint(ctx, muted ? SP_C_GOLD : SP_C_CYAN, st);
-    const int cx = SP_CX + ox;
+    const int cx = SP_CX;
 
     sp_span_t bed[4], fill[4] = {{0, 0, 0, 0}};
     int filled[4];
@@ -2536,23 +2536,23 @@ static void sp_focal_settings(const jr_display_ctx_t *ctx, int y1, int y2,
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         if (ota_on) {
-            sp_annulus_row(row, y, cx, SP_CY, SP_OTA_IN, SP_OTA_OUT, NULL,
+            sp_annulus_row(row, y, cx, SP_CY + oy, SP_OTA_IN, SP_OTA_OUT, NULL,
                            track);
             for (int i = 0; i < ota_nseg; ++i) {
-                sp_annulus_row(row, y, cx, SP_CY, SP_OTA_IN, SP_OTA_OUT,
+                sp_annulus_row(row, y, cx, SP_CY + oy, SP_OTA_IN, SP_OTA_OUT,
                                &ota_seg[i], ota_px);
             }
         }
         for (int i = 0; i < 4; ++i) {
-            sp_annulus_row(row, y, cx, SP_CY, SP_FOCAL_IN, SP_FOCAL_OUT,
+            sp_annulus_row(row, y, cx, SP_CY + oy, SP_FOCAL_IN, SP_FOCAL_OUT,
                            &bed[i], track);
             if (filled[i] > 0) {
-                sp_annulus_row(row, y, cx, SP_CY, SP_FOCAL_IN, SP_FOCAL_OUT,
+                sp_annulus_row(row, y, cx, SP_CY + oy, SP_FOCAL_IN, SP_FOCAL_OUT,
                                &fill[i], hue[i]);
             }
         }
         if (muted) {
-            sp_annulus_row(row, y, cx, SP_CY, 26, 32, NULL, heart);
+            sp_annulus_row(row, y, cx, SP_CY + oy, 26, 32, NULL, heart);
             const int dy = y - SP_CY;
             int lo = cx - 34, hi = cx + 34;
             if (sp_clip(y, &lo, &hi)) {
@@ -2565,7 +2565,7 @@ static void sp_focal_settings(const jr_display_ctx_t *ctx, int y1, int y2,
                 }
             }
         } else {
-            sp_annulus_row(row, y, cx, SP_CY, 0, 20, NULL, heart);
+            sp_annulus_row(row, y, cx, SP_CY + oy, 0, 20, NULL, heart);
         }
     }
 }
@@ -2593,7 +2593,7 @@ static const char *sp_headline(int space)
 }
 
 static void sp_draw_space(const jr_display_ctx_t *ctx, int y1, int y2,
-                          uint16_t *pixels, int space, int ox, int st)
+                          uint16_t *pixels, int space, int oy, int st)
 {
     /* JARVIS is the face itself: the shell contributes nothing, which is what
      * keeps every existing scene bit-identical at rest. */
@@ -2602,13 +2602,13 @@ static void sp_draw_space(const jr_display_ctx_t *ctx, int y1, int y2,
     }
     switch (space) {
     case JR_DISPLAY_SPACE_DESK:
-        sp_focal_desk(ctx, y1, y2, pixels, ox, st);
+        sp_focal_desk(ctx, y1, y2, pixels, oy, st);
         break;
     case JR_DISPLAY_SPACE_TOOLS:
-        sp_focal_tools(ctx, y1, y2, pixels, ox, st);
+        sp_focal_tools(ctx, y1, y2, pixels, oy, st);
         break;
     default:
-        sp_focal_settings(ctx, y1, y2, pixels, ox, st);
+        sp_focal_settings(ctx, y1, y2, pixels, oy, st);
         break;
     }
     const char *label = sp_headline(space);
@@ -2617,10 +2617,12 @@ static void sp_draw_space(const jr_display_ctx_t *ctx, int y1, int y2,
         return;
     }
     const uint16_t ink = sp_tint(ctx, SP_C_INK, st);
-    const int tx = sp_text_cx(len, 2, ox);
+    const int tx = sp_text_cx(len, 2, 0);
     for (int y = y1; y < y2; ++y) {
+        /* The label rides the same vertical offset as the focal object, so the
+         * whole screen moves as one piece with the finger. */
         sp_text_row(pixels + (size_t)(y - y1) * HUD_W, y, label, len, tx,
-                    SP_LABEL_Y, 2, ink);
+                    SP_LABEL_Y + oy, 2, ink);
     }
 }
 
@@ -2815,6 +2817,14 @@ static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
         const int e = s_space_ease;
         const int focal = (under * (256 - s_detail_ease)) / 256;
         if (focal > 0) {
+            /* VERTICAL slide, matching the gesture that drives it. The ring
+             * is walked by swiping up and down, so content that moved
+             * left/right contradicted the finger — it read as the screen
+             * sliding sideways while you pushed it down.
+             *
+             * Sign: going FORWARD (swipe down) the outgoing screen leaves
+             * upward and the incoming one arrives from below, so the stack
+             * appears to move with the finger rather than against it. */
             const int slide = (SP_SLIDE_PX * e) / 256;
             if (e < 256) {
                 sp_draw_space(ctx, y1, y2, pixels, s_space_from,
