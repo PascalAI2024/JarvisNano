@@ -1683,15 +1683,30 @@ static void sp_compose(void)
     } else if (sp_ota_ringing(ota_state)) {
         (void)sp_str(s_settings_label, 0, SP_LABEL_CAP, sp_ota_name(ota_state));
     } else {
-        len = sp_str(s_settings_label, 0, SP_LABEL_CAP, "VOL ");
+        /* BOTH NUMBERS MUST SURVIVE AT 100.
+         *
+         * "VOL 100%  100%" is 14 glyphs against a 12-glyph store, so whenever
+         * volume reached 100 the brightness lost its digits and the headline
+         * read "VOL 100%  10" — the two levels this screen exists to show,
+         * and one of them silently wrong rather than absent.
+         *
+         * "V100% L100%" is 11 against a 12-glyph store — both numbers whole,
+         * with a glyph to spare. V and L match the VOL and LGT tags already
+         * drawn on the arcs, so the short form is decoded by the screen it
+         * sits on. A host assertion pins this exact worst case. */
+        len = sp_str(s_settings_label, 0, SP_LABEL_CAP, "V");
         len = sp_pct(s_settings_label, len, SP_LABEL_CAP, vol);
-        len = sp_str(s_settings_label, len, SP_LABEL_CAP, "  ");
+        len = sp_str(s_settings_label, len, SP_LABEL_CAP, " L");
         (void)sp_pct(s_settings_label, len, SP_LABEL_CAP, brt);
     }
 
+    /* Same failure, tighter budget: the detail column stores 10 glyphs.
+     * "L VOL 100%" is exactly 10 and survived; "R LIGHT 100%" is 12 and read
+     * "R LIGHT 10". LGT matches the SETTINGS tag and restores the symmetry —
+     * both columns are now exactly 10 in the worst case. */
     len = sp_str(s_shade_vol, 0, SP_COL_MAX, "L VOL ");
     (void)sp_pct(s_shade_vol, len, SP_COL_MAX, vol);
-    len = sp_str(s_shade_light, 0, SP_COL_MAX, "R LIGHT ");
+    len = sp_str(s_shade_light, 0, SP_COL_MAX, "R LGT ");
     (void)sp_pct(s_shade_light, len, SP_COL_MAX, brt);
 
     if (s_detail_ease > 0) {

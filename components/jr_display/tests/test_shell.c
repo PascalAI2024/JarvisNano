@@ -347,15 +347,39 @@ static void test_update_outranks_the_settings_headline(void)
     CHECK(strcmp(s_settings_label, "ROLLBACK") == 0, "rollback, got '%s'",
           s_settings_label);
 
-    /* Both healthy resting states hand the headline back to the numbers. */
+    /* Both healthy resting states hand the headline back to the numbers.
+     *
+     * Staged at the WORST CASE — 100 and 100 — because that is the only place
+     * this breaks. The previous assertion here searched for the substring
+     * "VOL", which stayed green while the label was rendering "VOL 100%  10"
+     * with the brightness digits cut off: it pinned a word that happened to be
+     * present rather than the numbers the screen exists to show. Assert both
+     * values survive, and that the string still fits its store. */
+    s_status_word = 100U;                     /* volume 100 */
+    __atomic_store_n(&s_brightness_want, 100U, __ATOMIC_RELEASE);
+
     jr_display_ota_set(JR_DISPLAY_OTA_VALID, 100U, 1U, 0xFFU, true);
     sp_compose();
-    CHECK(strstr(s_settings_label, "VOL") != NULL, "valid yields, got '%s'",
-          s_settings_label);
+    CHECK(strcmp(s_settings_label, "V100% L100%") == 0,
+          "valid yields both levels, got '%s'", s_settings_label);
+    CHECK(strlen(s_settings_label) < (size_t)SP_LABEL_CAP,
+          "headline fits its store, got %zu of %d",
+          strlen(s_settings_label), SP_LABEL_CAP);
+
     jr_display_ota_set(JR_DISPLAY_OTA_IDLE, 0U, 1U, 0xFFU, true);
     sp_compose();
-    CHECK(strstr(s_settings_label, "VOL") != NULL, "idle yields, got '%s'",
-          s_settings_label);
+    CHECK(strcmp(s_settings_label, "V100% L100%") == 0,
+          "idle yields both levels, got '%s'", s_settings_label);
+
+    /* The shade columns have a tighter budget (10 glyphs) and the same trap:
+     * "R LIGHT 100%" is 12 and used to render "R LIGHT 10". */
+    CHECK(strcmp(s_shade_vol, "L VOL 100%") == 0,
+          "shade volume complete, got '%s'", s_shade_vol);
+    CHECK(strcmp(s_shade_light, "R LGT 100%") == 0,
+          "shade light complete, got '%s'", s_shade_light);
+    CHECK(strlen(s_shade_light) < (size_t)SP_COL_MAX,
+          "shade light fits its store, got %zu of %d",
+          strlen(s_shade_light), SP_COL_MAX);
 }
 
 /* --------------------------------------------------------------- geometry -- */
