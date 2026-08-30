@@ -2150,6 +2150,21 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     if (e <= 0) {
         return;
     }
+    /* THE SHEET OUTRANKS THE FACE.
+     *
+     * Tapping the focal object opens that space's detail sheet, but on WATCH
+     * the clear below then painted over it, so the sheet opened INVISIBLY:
+     * the tap was accepted, the overlay state changed, the caption said
+     * "DETAIL - DOWN TO CLOSE", and the glass still showed only the hands.
+     * Measured as 966 -> 944 lit pixels across the tap, against 10741 -> 2312
+     * for the same tap on POWER.
+     *
+     * The clock keeps its clean dial by clearing, so it cannot also be the
+     * bottom layer of a stack. It steps aside for the one surface the owner
+     * explicitly asked for, exactly as the agent rim steps aside for an ask. */
+    if (s_detail_ease > 0) {
+        return;
+    }
     /* THE WATCH REPLACES THE FACE — they are never on the glass together.
      * The hands used to be drawn straight over the baked arc-reactor art, so
      * two unrelated HUDs shared the same pixels and read as one cluttered
