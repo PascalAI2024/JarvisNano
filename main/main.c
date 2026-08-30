@@ -617,6 +617,32 @@ static uint32_t    s_always_ready_rearm_ms;  /* cooldown gate for idle re-arm */
  * turn so a reader can follow along. Front-clipped in place — a subtitle, not
  * an archive. */
 static char s_caption_acc[128];
+/* A LIVE CAPTION MUST SHOW THE NEWEST WORDS, NOT THE OLDEST.
+ *
+ * The accumulator holds 128 characters, but the caption band renders two lines
+ * of 19 glyphs — 38 characters — and hud_wrap2 takes them from the FRONT. So a
+ * reply longer than 38 characters displayed its opening and then froze there,
+ * while the rest of the sentence accumulated invisibly. The caption only ever
+ * moved once the buffer overflowed 128 and began dropping from the head, which
+ * is both far too late and reads as a device that has stopped listening.
+ *
+ * Show the last 38 characters instead, and step forward to a word boundary
+ * when one is close enough that the jump costs less than starting mid-word. */
+static void caption_show_tail(const char *acc)
+{
+    enum { CAP = 38U };                 /* 2 lines x 19 glyphs */
+    const size_t n = strlen(acc);
+    const char *tail = acc;
+    if (n > (size_t)CAP) {
+        tail = acc + (n - (size_t)CAP);
+        const char *sp = strchr(tail, ' ');
+        if (sp != NULL && (size_t)(sp + 1 - tail) <= 12U) {
+            tail = sp + 1;              /* don't open mid-word */
+        }
+    }
+    jr_display_caption_set(tail);
+}
+
 static void caption_append(const char *part)
 {
     size_t have = strlen(s_caption_acc);
@@ -631,7 +657,7 @@ static void caption_append(const char *part)
         have -= drop;
     }
     memcpy(s_caption_acc + have, part, add + 1U);
-    jr_display_caption_set(s_caption_acc);
+    caption_show_tail(s_caption_acc);
 }
 static void caption_reset(void)
 {
@@ -1987,8 +2013,26 @@ static void publish_shell_state(uint32_t now_ms)
 
     if (s_agent_link_lock != NULL &&
         xSemaphoreTake(s_agent_link_lock, 0) == pdTRUE) {
+        /* AN EXPIRED LINK MUST ACTUALLY GO AWAY.
+         *
+         * This branch computed the TTL and then did nothing, so `active` was
+         * never cleared: DESK kept rendering a task that had finished or died,
+         * and the agent rim stayed lit indefinitely with no way to dismiss it.
+         * A stale surface that outlives its owner reads as a frozen device,
+         * because the one thing it will not do is respond.
+         *
+         * The counters (updates, rejects) are lifetime statistics and survive;
+         * everything the glass reads is cleared. */
         if (s_agent_link.active &&
             (int32_t)(now_ms - s_agent_link.expires_ms) >= 0) {
+            ESP_LOGI(TAG, "agent: link expired, clearing task_id=%s",
+                     s_agent_link.task_id);
+            s_agent_link.active = false;
+            s_agent_link.progress = 0;
+            s_agent_link.state[0] = '\0';
+            s_agent_link.title[0] = '\0';
+            s_agent_link.summary[0] = '\0';
+            s_agent_link.evidence_count = 0;
         }
         cached_active = s_agent_link.active;
         cached_progress = s_agent_link.progress;
