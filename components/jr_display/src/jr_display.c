@@ -2062,6 +2062,20 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     if (e <= 0) {
         return;
     }
+    /* THE WATCH REPLACES THE FACE — they are never on the glass together.
+     * The hands used to be drawn straight over the baked arc-reactor art, so
+     * two unrelated HUDs shared the same pixels and read as one cluttered
+     * image ("the arc reactor and watch should never be on screen at the same
+     * time").
+     *
+     * Cleared with a memset rather than the per-pixel dim that was tried
+     * before: that transformed 217k pixels and cost the Watch 15-16 -> 11 fps.
+     * A strip clear is ~11 KB of straight-line writes, and on an AMOLED black
+     * costs no backlight either. The caption is drawn AFTER this, so status
+     * text survives; the orbit indicator does not, which is the deliberate
+     * trade for a clean dial. */
+    memset(pixels, 0, (size_t)(y2 - y1) * HUD_W * sizeof(uint16_t));
+
     const uint32_t w = s_clock_shown_word;
     hud_overlay_clock(pixels, y1, y2 - y1, ctx->board.swap_color_bytes,
                       (int)((w >> 8) & 0xFFu), (int)(w & 0xFFu),

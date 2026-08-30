@@ -6590,6 +6590,18 @@ static void voice_task(void *arg)
             if (s_watch_peek_until_ms != 0U) {
                 s_watch_peek_until_ms = 0U;
             }
+            /* ANY physical contact is activity. The mood ladder was poked
+             * only by TAP, so a hand actively sliding the ring — swipe after
+             * swipe — still counted as stillness and the device dozed off
+             * mid-use. Caught by a screenshot sweep: the later tiles came back
+             * gold and captioned "ASLEEP - TAP TO WAKE" while the sweep was
+             * driving it. Rest is for a device nobody is touching. */
+            if (physical && (iev.kind == JR_INPUT_TAP ||
+                             iev.kind == JR_INPUT_SWIPE ||
+                             iev.kind == JR_INPUT_LONG_PRESS ||
+                             iev.kind == JR_INPUT_PRESS_DOWN)) {
+                jr_mood_poke_awake(&s_mood, (uint32_t)now);
+            }
             if (iev.kind == JR_INPUT_TAP) {
                 atomic_fetch_add(&s_touch_taps, 1U);
                 /* Universal touch feedback (TRANS-05): every tap ripples,
@@ -6756,8 +6768,22 @@ static void voice_task(void *arg)
                     ESP_LOGI(TAG,
                              "operator: input retained by Codex mode kind=%d",
                              (int)iev.kind);
+                    continue;
                 }
-                continue;
+                /* EVERYTHING ELSE FALLS THROUGH. A guest holds the glass, not
+                 * the body: swipes still walk the ring, the shade still opens,
+                 * shake still cancels, flip still mutes. This block used to
+                 * `continue` unconditionally, so a lease froze the device on
+                 * whatever screen it happened to be showing and swallowed
+                 * every gesture — proven by a screenshot sweep taken under a
+                 * lease, where all seven ring positions returned the same
+                 * frame.
+                 *
+                 * A body that cannot feel is a screensaver. The guest keeps
+                 * exactly what it needs — tap for its own card actions, and
+                 * the double-tap escape that evicts it — and the owner keeps
+                 * everything else. Ownership is the point: the violet ring
+                 * says who is in, it does not say who is in charge. */
             }
             codex_tap_pending = false;
             /* An open ask OUTRANKS double-tap-home. Without this guard the
