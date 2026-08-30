@@ -778,17 +778,38 @@ static void apply_surface_overlay(jr_display_ctx_t *ctx, int x1, int y1,
             int x = x1 + col;
             uint16_t *slot = &pixels[(size_t)row * (size_t)width + (size_t)col];
             uint16_t native = panel_native(ctx, *slot);
-            bool card = x >= 52 && x <= 413 && y >= 72 && y <= 388;
+            /* A ROUND PLATE ON ROUND GLASS.
+             *
+             * This card was a rectangle spanning x 52..413, y 72..388. Its
+             * corners sit at r~242 on a panel whose glass ends at r232.5, so
+             * the bezel sliced all four of them off — and because everything
+             * outside the rectangle was darkened, the card also flattened the
+             * face, the orbit and the rim into a grey surround. On a circular
+             * display a rectangle cannot be centred, only cropped.
+             *
+             * The plate is now the shell disc itself, bounded by the same
+             * JR_DISPLAY_SHELL_R_MAX every other shell primitive obeys, with
+             * the accent as a ring around its edge instead of four straight
+             * borders. Every text row and both action buttons already fall
+             * inside r214 (the farthest corner of a button is r~203), so no
+             * content moved.
+             *
+             * Outside the plate is left ALONE rather than darkened: r215-222
+             * is where the battery arc and the gold privacy ring live, and a
+             * card has no business dimming the indicator that says the
+             * microphone is off. */
+            const int cdx = x - (int)(HUD_W / 2);
+            const int cdy = y - (int)(HUD_H / 2);
+            const int cr2 = cdx * cdx + cdy * cdy;
+            const bool card = cr2 <= JR_DISPLAY_SHELL_R_MAX *
+                                     JR_DISPLAY_SHELL_R_MAX;
             if (!card) {
-                native = native_darken(native);
+                /* rim tenants keep their full brightness */
             } else {
-                bool border = x < 56 || x > 409 || y < 76 || y > 384;
+                const bool border = cr2 >= (JR_DISPLAY_SHELL_R_MAX - 6) *
+                                           (JR_DISPLAY_SHELL_R_MAX - 6);
                 native = border ? accent : 0x0842;
-                if (y >= 88 && y <= 108 && x >= 178 && x <= 287)
-                    native = (x <= 181 || x >= 284 || y <= 91 || y >= 105)
-                        ? accent : 0x1084;
-                if (surface_text_pixel("CODEX DESK", 10U, x, y, 202, 95, 1) ||
-                    surface_text_pixel(surface.title, 24U, x, y, 88, 128, 2) ||
+                if (surface_text_pixel(surface.title, 24U, x, y, 88, 128, 2) ||
                     surface_text_pixel(body_first, 24U, x, y, 88, 184, 2) ||
                     surface_text_pixel(body_second, 24U, x, y, 88, 210, 2)) {
                     native = 0xffff;
