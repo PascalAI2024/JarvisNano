@@ -195,6 +195,44 @@ battery the persistent rim rendered CYAN, but `ov_battery` paints red below
 20%. That branch was not touched by S2's fix, so the `batt_pct` reaching the
 HUD env word may disagree with the fuel gauge. Measure before assuming.
 
+### S21 — an operator lease FREEZES the display composition (open, high)
+
+Found while demonstrating companion mode, and it is not the bug I thought I
+had already fixed.
+
+**Measured.** Coarse 10x10 luminance signature of the panel mirror, which
+survives the face pulsing but moves when the layout changes:
+
+| condition | signature delta | reading |
+|---|---|---|
+| same screen, no input (noise floor) | 1.9 | the face animating |
+| four swipes, NO lease | 2.7, 9.1, 3.5, 5.3 | navigation reaches the glass |
+| four swipes, UNDER a lease | 0.1, 0.2, 0.1, 0.2 | **below the noise floor** |
+| no input at all, under a lease | 0.38 over 4 s | composition is frozen |
+
+Under a lease the glass does not merely ignore swipes — it stops repainting
+altogether, including the idle face animation. Navigation may well be
+happening internally and never reaching the panel.
+
+**This is NOT the input-routing bug fixed in `3175d822`.** That one was real
+(taps were discarded and non-tap events were swallowed by a stray `continue`)
+and its fix stands, but it addressed routing, not painting. Two demonstration
+runs walked the ring under a lease and returned six visually identical frames
+each time.
+
+**Method note worth keeping.** The first three attempts to test this reported
+"NAV WORKS" and were all worthless: they compared raw MD5 hashes of the panel
+mirror, and the arc-reactor face animates, so consecutive frames differ
+whether or not anything navigated. The instrument measured animation and was
+read as navigation. Any future display assertion must be structural — a coarse
+signature with a measured noise floor — never a pixel hash.
+
+**Candidate, unconfirmed:** `main.c:6944` swallows synthetic TAP and SWIPE
+whenever `jr_display_choices_active()` is true, which would explain lost input
+but NOT a frozen idle face. `choices_active` is not exposed in `/api/cockpit`,
+so this could not be confirmed or ruled out from the host. Expose it, or
+instrument the render path, before proposing a fix.
+
 ### Power management — answering "there are 4 modes on this chip"
 
 Research: Grok `grok-4.6` against the firmware as it actually runs, not generic
