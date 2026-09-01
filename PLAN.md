@@ -28,7 +28,7 @@ Every behavioral row closes on physical 1.75C evidence, not compilation alone.
 | # | Priority | Deliverable | Status | Acceptance gate |
 |---|---|---|---|---|
 | N6.1 | P0 | Ship one interaction grammar; delete circular-rotation experiment | LIVE; PWR/BOOT hand proof pending | No rotate symbols; PWR short listens without muting; BOOT short toggles controls; BOOT hold opens one 60-second pairing claim; edge levels work from every surface |
-| N6.2 | P0 | Add playback-gap and ring-low-watermark telemetry | PENDING | Live diagnostics expose underruns, maximum empty gap, low-watermark, and DAC failures; 60 s reply has no unexplained gap >120 ms |
+| N6.2 | P0 | Add playback-gap and ring-low-watermark telemetry | TELEMETRY LIVE 2026-09-01; soak reading pending N6.4 | `/api/device/health` → `playback:{underruns,max_gap_ms,low_water_ms,dac_failures,replies}`. An underrun is the feeder finding the ring empty mid-reply with audio resuming within 1.5 s (end-of-reply silence is not counted); low-water is the emptiest the ring was when a chunk ARRIVED during a reply, sampled producer-side. Remaining gate: a 60 s reply with no unexplained gap >120 ms |
 | N6.3 | P0 | Byte-budget JarvisMCP results with cursor projection | TEMPORARY 3-result cap | Every normalized result is valid JSON ≤3071 bytes with `has_more` and cursor; voice search plus one returned read-only tool execute without `bad_response` |
 | N6.4 | P0 | Run uninterrupted powered conversation soak | PENDING N6.2/N6.3 | 30 min with TX drops/deaths/flush errors 0, playback gaps ≤120 ms, largest internal block ≥16 KB, and final state Listening |
 | N6.5 | P1 | Split `main/main.c` at existing ownership seams | PENDING | Input/buttons, HTTP diagnostics, and voice/power policy become three modules; `main.c` <4,000 lines; all builds/suites pass |
@@ -178,17 +178,17 @@ in the run transcript:
 | ~~S7~~ | **fixed 2026-09-01** — the marked title IS the DESK sheet's head (12 glyphs, exactly what `title_shorten()` yields); the JOB row is gone. **Panel:** sheet heads `DEPLOY.` for "DEPLOY STAGING BUILD TO THE FLEET", mark intact | high |
 | ~~S8~~ | **fixed 2026-09-01** — `panic_home_clear_glass()` stops the demo reel, tears down the touch challenge, turns the test pattern off and clears the canvas before the overlays. Not panel-provable without a BOOT hand hold; code-verified | high |
 | ~~S9~~ | **fixed 2026-09-01** — same helper takes `s_brain_lock`, resolves a local consent prompt as a timeout (denial), and clears `s_brain_surface.active`; falls back to clearing the glass alone with a warning if the lock is busy | high |
-| S10 | `sp_annulus_row` measures the wedge about the panel centre while drawing the annulus about the OFFSET centre, so every focal arc warps mid-slide | medium |
+| ~~S10~~ | **fixed 2026-09-01** — the span test now uses the same `dy` as the annulus. Host test draws POWER at rest and 60 px into the slide and requires the focal band to be a pure translation; the old code fails it by 979 pixels | medium |
 | ~~S11~~ | **fixed** `569fadc2` — the card is a round plate bounded by `JR_DISPLAY_SHELL_R_MAX`; the outside is left alone | medium |
-| S12 | The watch peek's caption outlives the peek and freezes on the glass | medium |
-| S13 | Double-tap-home outranks every shell control, so a rapid second tap on the shade ejects you to the face | medium |
+| ~~S12~~ | **fixed 2026-09-01** — `caption_reset()` at peek expiry and at the input-drain clear. **Panel:** peek showed `4:09 PM`; 12.5 s later the caption band held only the baked face | medium |
+| ~~S13~~ | **fixed 2026-09-01** — the double-tap guard also yields to an open shade (both doors: nav overlay and the HTTP shell bit). Found on the way: ONE tap on an HTTP-opened shade re-derived "closed" and shut it, because the re-derivation read only the nav door; each door now closes its own. **Panel:** taps 270 ms apart stepped volume 60→70→80 with the shade still open | medium |
 | S14 | A contact shorter than one 40 ms poll produces NO event at all — not even PRESS_UP | medium |
 | S15 | The caption chip is documented single-writer but HTTP handlers write it concurrently with the voice task; the OTA "DO NOT UNPLUG" warning can be overwritten | medium |
-| S16 | `POST /api/agent/link` is the only mutating POST that skips the control-intent gate | medium |
-| S17 | `/api/debug/gain` reports the request back as if it were device state, so tuning reads -1 | medium |
-| S18 | The demo reel wipes a real ask's choice arcs in the same loop iteration they are drawn | low |
+| ~~S16~~ | **fixed 2026-09-01** — gated like the other nineteen. **Measured:** a POST without `X-JarvisNano-Control` now answers 403 | medium |
+| ~~S17~~ | **fixed 2026-09-01** — `jr_audio` exports readbacks for mic/ref/out-vol/speak-mic and the endpoint reports them (plus `speakmic`, which was applied but never echoed). **Measured:** a bare POST reads `mic 24, ref 12, vol 100, speakmic 21` | medium |
+| ~~S18~~ | **fixed 2026-09-01** — `demo_stop()` dismisses only arcs the reel put up (`s_demo_owns_choices`); a real ask's arcs survive the reel yielding to it | low |
 | S19 | The pushed-canvas buffer is rewritten in place from the HTTP task while the render task reads it at full opacity | low |
-| S20 | `/api/demo` answers `queued:true` unconditionally, but the reel is silently dropped in most phases | low |
+| ~~S20~~ | **fixed 2026-09-01** — the handler answers `queued:false` with `reason: running` or `reason: phase` (+ the phase name); the consumer logs the rare late drop. **Measured:** second POST while running → `{"queued":false,"reason":"running"}` | low |
 
 **Open question raised by the S2 measurement, not yet a finding:** at 8%
 battery the persistent rim rendered CYAN, but `ov_battery` paints red below
