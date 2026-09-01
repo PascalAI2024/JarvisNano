@@ -350,8 +350,9 @@ class DeviceClient:
             "Content-Type": "application/octet-stream",
             "User-Agent": "JarvisDesk/1",
             "X-JarvisNano-Control": "1",
-            "X-JarvisNano-Token": token,
         }
+        if token:
+            headers["X-JarvisNano-Token"] = token
         request = urllib.request.Request(
             self.base_url + path,
             data=body,
@@ -581,10 +582,15 @@ def resolve_token(
             )
         token = env_token
     if not token:
-        raise DeskError(
-            "not_paired",
-            "no Desk token found; open shade > Agent Link and run pair",
-        )
+        # DEVELOPMENT LAN: no key gate on the client side. The firmware decides
+        # whether a token is required (JR_DEV_OPEN_DIAGNOSTICS opens every
+        # diagnostic route, and a release build answers 401 with its own
+        # message). This used to raise "not_paired" here and refused an OTA
+        # that the device would have accepted — a client refusing on behalf of
+        # a device that had already said yes.
+        print("desk: no Desk token in the keychain or JARVIS_DESK_TOKEN; "
+              "relying on the device's open LAN diagnostics", file=sys.stderr)
+        return ""
     return validate_token(token)
 
 
