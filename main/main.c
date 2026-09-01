@@ -120,7 +120,10 @@ static const jr_gemini_fn_decl_t s_device_tool_fns[] = {
     {
         .name = "search_tools",
         .description =
-            "Search Jarvis capabilities when the fixed tools do not fit.",
+            "Find a Jarvis capability by describing it: web search, weather, "
+            "Wikipedia, crypto and stock prices, exchange rates, news, "
+            "translation, research papers, memory. Returns tool names with "
+            "their parameters, in order, for execute_tool.",
         .arg_name = "query",
         .arg_desc =
             "A concise description of the capability needed.",
@@ -128,7 +131,12 @@ static const jr_gemini_fn_decl_t s_device_tool_fns[] = {
     {
         .name = "execute_tool",
         .description =
-            "Run one capability returned by search_tools through Jarvis policy.",
+            "Run one Jarvis capability. Common tools need no search first: "
+            "websearch {\"query\"} for anything on the live web or in the news; "
+            "weather {\"latitude\",\"longitude\"} (Fort Lauderdale is 26.12, "
+            "-80.14); wiki {\"query\"}; crypto {\"coin\",\"currency\"}; "
+            "stocks.quote {\"symbols\"}; time {\"timezone\"}. Otherwise use "
+            "the tool and params search_tools returned, keys in that order.",
         .params = {
             {
                 .name = "tool",

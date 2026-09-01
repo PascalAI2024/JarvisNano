@@ -30,10 +30,30 @@ static const template_desc_t s_templates[] = {
      "confidence:\"confirmed\"})"},
     {"current_time", "timezone", 79U, true,
      "return await jarvis.time(", ")"},
+    /* PROJECTED, not raw: three raw matches were 4-5 KB against a 3 KB
+     * device budget and were cut mid-JSON, so Gemini read a broken answer.
+     * Eight matches projected to {tool, what, params} are ~1.6 KB, and the
+     * three basics are pinned so a web question never depends on ranking. */
     {"search_tools", "query", 191U, false,
-     "return await jarvis.meta.search(",
-     ",{limit:3,detail:\"compact\"})"},
+     "const r=await jarvis.meta.search(",
+     ",{limit:8,detail:\"compact\"});"
+     "const seen=new Set();const out=[];"
+     "for(const m of (r.matches||[])){const t=m.method&&m.method.startsWith(m.service+\".\")?m.method:(m.service===m.method?m.method:m.service+\".\"+m.method);"
+     "if(seen.has(t))continue;seen.add(t);"
+     "out.push({tool:t,what:String(m.description||\"\").replace(/\\[[^\\]]*\\]\\s*/,\"\").slice(0,140),"
+     "params:Object.keys(m.parameters||{}).join(\",\")})}"
+     "for(const b of [[\"websearch\",\"Search the live web; returns titles, links, snippets\",\"query\"],"
+     "[\"weather\",\"Current weather + forecast for coordinates\",\"latitude,longitude\"],"
+     "[\"wiki\",\"Wikipedia summary\",\"query\"]]){if(!seen.has(b[0]))out.push({tool:b[0],what:b[1],params:b[2]})}"
+     "return {tools:out,has_more:!!(r.page&&r.page.hasMore),note:\"call execute_tool with tool and args_json keyed by params, in that order\"}"},
 };
+
+/* The execute_tool program. %s twice: the path array, then the args object.
+ * ORD pins the documented positional order for the tools a voice assistant
+ * actually reaches for, because Object.values() follows the model's key
+ * order and weather(longitude, latitude) is a different place. */
+#define JR_TOOLS_EXEC_JS \
+    "const P=%s;const A=%s;const ORD={websearch:[\"query\"],weather:[\"latitude\",\"longitude\"],wiki:[\"query\"],time:[\"timezone\"],crypto:[\"coin\",\"currency\"],exchange:[\"base\",\"targets\"],country:[\"name\"],geocode:[\"query\"],translate:[\"text\",\"target\",\"source\"],hackernews:[\"type\",\"count\"],research:[\"question\"],\"stocks.quote\":[\"symbols\"],\"reddit.search\":[\"query\"],\"memory.search\":[\"query\"],\"holidays.list\":[\"country\",\"year\"]};let o=jarvis;for(const k of P.slice(0,-1)){o=o[k];if(o==null)return{error:\"unknown tool\"}}const f=o[P[P.length-1]];if(typeof f!==\"function\")return{error:\"unknown tool\"};const ord=ORD[P.join(\".\")];const v=ord?ord.map(k=>A[k]):Object.values(A);let r;try{r=await f.call(o,...v)}catch(e1){try{r=await f.call(o,A)}catch(e2){return{error:String(e1&&e1.message||e1).slice(0,200)}}}const T=(x,d)=>{if(typeof x===\"string\")return x.length>320?x.slice(0,320)+\"\\u2026\":x;if(Array.isArray(x))return x.slice(0,6).map(y=>T(y,d+1));if(x&&typeof x===\"object\"&&d<4){const q={};for(const[k,y]of Object.entries(x).slice(0,24))q[k]=T(y,d+1);return q}return x};return T(r,0)"
 
 static const template_desc_t *find_template(const char *name)
 {
@@ -160,13 +180,74 @@ jr_tool_template_status_t jr_tools_build_code(const char *name,
             ? cJSON_ParseWithOpts(nested_text->valuestring, NULL, true) : NULL;
         valid = valid && fields == 2U && tool_len > 0U &&
             tool_len < JR_TOOLS_NAME_CAP && cJSON_IsObject(nested);
-        cJSON_Delete(nested);
-        cJSON_Delete(args);
         if (!valid) {
+            cJSON_Delete(nested);
+            cJSON_Delete(args);
             return JR_TOOL_TEMPLATE_INVALID_ARGS;
         }
-        int written = snprintf(out, out_cap, "%s",
-            "return {error:\"execute_tool requires typed device gateway\"}");
+        /* THE DEVICE'S OWN POLICY. The legacy bearer carries the gateway
+         * authority of its key — a probe from this session ran
+         * dokploy.project.all() with it — and the typed route that would
+         * enforce policy server-side is not provisioned. So the device only
+         * ever generates calls into read-only services. Anything else is
+         * refused here, before any code exists. */
+        static const char *const allow[] = {
+            "websearch", "research", "fetch", "wiki", "weather", "geocode",
+            "country", "crypto", "exchange", "stocks", "massive", "time",
+            "holidays", "hackernews", "reddit", "rss", "gdelt", "polymarket",
+            "arxiv", "pubmed", "scholar", "openalex", "edgar", "openfda",
+            "translate", "dns", "whois", "ipgeo", "cve", "pkg", "vuln",
+            "npmsearch", "dockerhub", "context7", "memory.search",
+            "memory.list", "memory.read", "meta.search", "meta.help",
+            "assets.search",
+        };
+        bool allowed = false;
+        for (size_t i = 0; i < sizeof allow / sizeof allow[0]; ++i) {
+            const size_t n = strlen(allow[i]);
+            if (strncmp(tool->valuestring, allow[i], n) == 0 &&
+                (tool->valuestring[n] == '\0' || tool->valuestring[n] == '.')) {
+                allowed = true;
+                break;
+            }
+        }
+        if (!allowed) {
+            cJSON_Delete(nested);
+            cJSON_Delete(args);
+            int written = snprintf(out, out_cap, "%s",
+                "return {error:\"that tool is not permitted from the device\"}");
+            return (written > 0 && (size_t)written < out_cap)
+                       ? JR_TOOL_TEMPLATE_OK : JR_TOOL_TEMPLATE_TOO_LARGE;
+        }
+        /* Path as a JSON array of segments, resolved with bracket access on
+         * the gateway, so a name can never read as an expression. Args are
+         * re-printed by cJSON: a JSON literal, never code. Positional first
+         * (most jarvis tools are), named on failure. */
+        cJSON *path = cJSON_CreateArray();
+        char seg[JR_TOOLS_NAME_CAP];
+        size_t si = 0;
+        for (size_t i = 0; path != NULL && i <= tool_len; ++i) {
+            const char ch = tool->valuestring[i];
+            if (ch == '.' || ch == '\0') {
+                seg[si] = '\0';
+                cJSON_AddItemToArray(path, cJSON_CreateString(seg));
+                si = 0;
+            } else if (si + 1U < sizeof seg) {
+                seg[si++] = ch;
+            }
+        }
+        char *path_json = path ? cJSON_PrintUnformatted(path) : NULL;
+        char *args_out = cJSON_PrintUnformatted(nested);
+        cJSON_Delete(path);
+        cJSON_Delete(nested);
+        cJSON_Delete(args);
+        if (path_json == NULL || args_out == NULL) {
+            free(path_json);
+            free(args_out);
+            return JR_TOOL_TEMPLATE_TOO_LARGE;
+        }
+        int written = snprintf(out, out_cap, JR_TOOLS_EXEC_JS, path_json, args_out);
+        free(path_json);
+        free(args_out);
         if (written < 0 || (size_t)written >= out_cap) {
             out[0] = '\0';
             return JR_TOOL_TEMPLATE_TOO_LARGE;
