@@ -179,7 +179,7 @@ in the run transcript:
 | ~~S8~~ | **fixed 2026-09-01** — `panic_home_clear_glass()` stops the demo reel, tears down the touch challenge, turns the test pattern off and clears the canvas before the overlays. Not panel-provable without a BOOT hand hold; code-verified | high |
 | ~~S9~~ | **fixed 2026-09-01** — same helper takes `s_brain_lock`, resolves a local consent prompt as a timeout (denial), and clears `s_brain_surface.active`; falls back to clearing the glass alone with a warning if the lock is busy | high |
 | S10 | `sp_annulus_row` measures the wedge about the panel centre while drawing the annulus about the OFFSET centre, so every focal arc warps mid-slide | medium |
-| S11 | The agent-link card is a rectangle on round glass: corners fall off the bezel and it overwrites the battery rim and privacy ring | medium |
+| ~~S11~~ | **fixed** `569fadc2` — the card is a round plate bounded by `JR_DISPLAY_SHELL_R_MAX`; the outside is left alone | medium |
 | S12 | The watch peek's caption outlives the peek and freezes on the glass | medium |
 | S13 | Double-tap-home outranks every shell control, so a rapid second tap on the shade ejects you to the face | medium |
 | S14 | A contact shorter than one 40 ms poll produces NO event at all — not even PRESS_UP | medium |
@@ -321,7 +321,7 @@ defaults to **900**, and `state` must be a known name — "done" is not one.
 | 13 | **SETTINGS rebuild** — four saturated arcs (cyan/orange/magenta/green) plus a yellow ring plus overlapping text, in a build whose language is amber and gold elsewhere | A sheet where SETTINGS is visibly the same product as the other five screens |
 | 14 | N8.18 TOOLS is three unlabelled arcs now the redundant tools are gone | Cut or repurposed with a stated reason; not left as decoration |
 | 15 | N8.17 **Weather screen (Fort Lauderdale)** | Seventh ring screen. Settle the data path first: device-pull via the jarvismcp bridge vs host-push via the brain surface. City in code; endpoint and key in NVS, never the repo. Refresh on entering the screen, never a timer that drags Wi-Fi out of min-modem during rest. **Render the data age** — it will be stale after rest |
-| 16 | N8.13 `mood.h` says WHISPER/DREAM switch the microphone off; the code does not | Comment corrected, then a decision recorded on whether behaviour should match it |
+| ~~16~~ | N8.13 `mood.h` says WHISPER/DREAM switch the microphone off; the code does not | **Done** `3175d822` (S5): the header now says rest is a power state and privacy a capability state. Decision: behaviour stays — WakeNet keeping the codec sampling is what lets "Jarvis" wake the device from DREAM; the microphone is turned off by privacy, never by rest |
 | 17 | N8.12 **DREAM becomes a real power mode** | Today WHISPER and DREAM are electrically identical — same radios, I2S, 24 fps compositor, 100 Hz IMU poll — differing only in brightness, so DREAM is a caption. Stop the emote, paint near-black, refresh a few clock pixels once a minute. **Only from genuine idle**: asks, busy and USB keep the glass lit, per `db3bb607`. Measure battery percent drop over a fixed soak, before and after |
 | 18 | Companion: mic ring is 2 s, so the leaseholder must poll every ~1.5 s or drop audio | Longer ring or a streaming endpoint; a 30 s utterance survives without gaps |
 | 19 | Companion: a reply path back to the glass during a lease | The leaseholder can speak or caption without borrowing the Gemini session |
