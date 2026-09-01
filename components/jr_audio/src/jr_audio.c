@@ -178,7 +178,7 @@ static _Atomic bool           s_diag_chirp_enqueuing;
  *                consumer side trivially reaches zero at every reply's end.
  *   dac_failures esp_codec_dev_write() returning an error.
  * Reset via jr_audio_playback_stats_reset() so a soak starts from zero. */
-#define PB_GAP_REPLY_MS 1500u
+#define PB_GAP_REPLY_MS 2500u
 static _Atomic uint32_t       s_pb_underruns;
 static _Atomic uint32_t       s_pb_max_gap_ms;
 static _Atomic uint32_t       s_pb_low_water_samples;   /* UINT32_MAX = unset */
@@ -201,13 +201,17 @@ static bool                   s_pb_in_gap;              /* feeder task only */
  * diagnostic tones, which are UI feedback and must be immediate. The ring is
  * 512 KiB (~11 s), so holding never drops anything. Priming re-arms once the
  * ring has been empty for PB_GAP_REPLY_MS: the next reply, not a hole. */
-/* Measured 2026-09-01 over nine spoken turns: server stalls inside a reply
- * ran 0.8-1.34 s. At 300/700 one hole of 81-407 ms per turn survived; at
- * 600/1000 none did, for +0.3 s before a first word that already waits
- * 2-4 s on thinking. Tune live: /api/debug/gain?preroll=&refill=. */
-#define PB_PREROLL_MS_DEFAULT    600u   /* lead before a reply's first word */
-#define PB_REFILL_MS_DEFAULT     1000u  /* lead rebuilt after a hole         */
-#define PB_PRIME_MAX_WAIT_MS     1200u  /* never hold longer than this       */
+/* Measured 2026-09-01. Nine spoken turns: server stalls inside a reply ran
+ * 0.8-1.34 s; at 300/700 one hole of 81-407 ms per turn survived, at 600/1000
+ * none. Then a 30-minute soak (18 turns): clean for eleven turns, then seven
+ * holes to 955 ms, every one at a reply START where only the pre-roll
+ * applied (a 1313 ms stall minus 600 ms = the 713 ms hole measured). So the
+ * pre-roll now matches the stalls actually seen, and the refill exceeds
+ * them, for +0.4 s before a first word that already waits 2-4 s on
+ * thinking. Tune live: /api/debug/gain?preroll=&refill=. */
+#define PB_PREROLL_MS_DEFAULT    1000u  /* lead before a reply's first word */
+#define PB_REFILL_MS_DEFAULT     1500u  /* lead rebuilt after a hole         */
+#define PB_PRIME_MAX_WAIT_MS     2000u  /* never hold longer than this       */
 static _Atomic uint32_t       s_pb_preroll_ms = PB_PREROLL_MS_DEFAULT;
 static _Atomic uint32_t       s_pb_refill_ms  = PB_REFILL_MS_DEFAULT;
 static bool                   s_pb_primed;              /* feeder task only */

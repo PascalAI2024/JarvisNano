@@ -58,7 +58,7 @@ typedef struct {
  * clocks answer it — the gap between successive frame ARRIVALS (network)
  * and how long a frame WAITED in the queue before the parser took it (us).
  * Gaps over 1.5 s are turn boundaries, not stalls, and are not recorded. */
-#define JR_WS_RX_GAP_TURN_MS 1500u
+#define JR_WS_RX_GAP_TURN_MS 2500u   /* stalls to 1.3 s were measured; see them all */
 static _Atomic uint32_t s_rx_frames;
 static _Atomic uint32_t s_rx_max_gap_ms;
 static _Atomic uint32_t s_rx_queue_wait_max_ms;
