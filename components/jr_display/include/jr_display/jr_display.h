@@ -212,6 +212,11 @@ bool jr_display_hud_enabled(void);
  * edges ease over ~250 ms render-side (band and text together); text swaps
  * while visible stay immediate — a live transcript must not lag its voice. */
 void jr_display_caption_set(const char *text);
+/* Pin a caption so no other writer can replace it until unpinned (the OTA
+ * "DO NOT UNPLUG" instruction). set/clear are ignored while pinned. */
+void jr_display_caption_pin(const char *text);
+void jr_display_caption_unpin(void);
+bool jr_display_caption_pinned(void);
 void jr_display_caption_clear(void);
 
 /* TRANS-05: transient tap ripple — an expanding, fading ring from panel

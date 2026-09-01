@@ -10,6 +10,7 @@
  * flush wait. Voice/audio tasks therefore never wait on flash, PSRAM, or LCD.
  */
 #include "jr_display/jr_display.h"
+#include <stdatomic.h>
 #include "jr_display/hud_render.h"
 
 #include <stdio.h>
@@ -625,14 +626,6 @@ static uint16_t panel_native(const jr_display_ctx_t *ctx, uint16_t pixel)
     return ctx->board.swap_color_bytes ? __builtin_bswap16(pixel) : pixel;
 }
 
-static uint16_t native_darken(uint16_t pixel)
-{
-    uint16_t r = (pixel >> 11) & 0x1fU;
-    uint16_t g = (pixel >> 5) & 0x3fU;
-    uint16_t b = pixel & 0x1fU;
-    return (uint16_t)(((r >> 2) << 11) | ((g >> 2) << 5) | (b >> 2));
-}
-
 /* Compact 5x7 font for the companion card. Columns use bit 0 as the top row.
  * Lowercase is folded to uppercase; unsupported glyphs render as a space. */
 static uint8_t surface_glyph_column(char ch, unsigned col)
@@ -1116,8 +1109,37 @@ void jr_display_dismiss_choices(void)
     ESP_LOGI(TAG, "choices: dismissed");
 }
 
+/* A PINNED CAPTION SURVIVES EVERY OTHER WRITER. The chip is documented
+ * single-writer and is not: 56 call sites across the voice task and the HTTP
+ * handlers. Most of the time the last writer winning is fine — captions are
+ * ephemeral — but "UPDATING - DO NOT UNPLUG" is a safety instruction, and a
+ * live transcript word or "LISTENING" from the voice task could replace it
+ * mid-flash. While pinned, ordinary set/clear calls are ignored; only unpin
+ * (or a new pin) changes the glass. */
+static _Atomic bool s_caption_pinned;
+
+void jr_display_caption_pin(const char *text)
+{
+    atomic_store(&s_caption_pinned, false);
+    jr_display_caption_set(text);
+    atomic_store(&s_caption_pinned, true);
+}
+
+void jr_display_caption_unpin(void)
+{
+    atomic_store(&s_caption_pinned, false);
+}
+
+bool jr_display_caption_pinned(void)
+{
+    return atomic_load(&s_caption_pinned);
+}
+
 void jr_display_caption_set(const char *text)
 {
+    if (atomic_load(&s_caption_pinned)) {
+        return;
+    }
     if (text == NULL || text[0] == '\0') {
         jr_display_caption_clear();
         return;
@@ -1144,6 +1166,9 @@ void jr_display_caption_set(const char *text)
 
 void jr_display_caption_clear(void)
 {
+    if (atomic_load(&s_caption_pinned)) {
+        return;
+    }
     if (__atomic_load_n(&s_caption_on, __ATOMIC_ACQUIRE) == 0) {
         return;                            /* idempotent */
     }
@@ -1870,7 +1895,7 @@ static uint8_t hud_face_of(jr_face_t f)
 }
 
 /* Full-strip backdrop dim shared by the ask overlay (STATE-07) and the clock
- * (UI-01). hud_dim565 folds the panel_native -> native_darken ->
+ * (UI-01). hud_dim565 folds the panel_native -> darken (>>2 per channel) ->
  * panel_order_color chain into one masked shift (proven equal for all 65536
  * values in the host suite) — two per-pixel byte swaps over 217k px/frame
  * cost measurable frame rate. Unswitched on the hoisted byte-order flag so

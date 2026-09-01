@@ -5342,7 +5342,7 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     atomic_store(&s_ota_active, true);
     atomic_store(&s_operator_lease_until_ms, upload_started_ms + 180000U);
     atomic_store(&s_voice_control_request, VOICE_CONTROL_PAUSE);
-    jr_display_caption_set("UPDATING - DO NOT UNPLUG");
+    jr_display_caption_pin("UPDATING - DO NOT UNPLUG");
     ESP_LOGI(TAG, "ota: receiving %u bytes into %s", (unsigned)len,
              next->label);
 
@@ -5351,6 +5351,7 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     if (err != ESP_OK) {
         atomic_store(&s_ota_active, false);
         atomic_store(&s_ota_last_error, err);
+        jr_display_caption_unpin();
         jr_display_caption_set("UPDATE FAILED - STILL ON OLD");
         ota_restore_control_state(was_privacy_paused,
                                   previous_lease_until_ms);
@@ -5427,6 +5428,7 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
             JR_DISPLAY_OTA_FAILED,
             len > 0U ? (uint8_t)((got * 100U) / len) : 0U,
             active_slot, strcmp(next->label, "ota_0") == 0 ? 0U : 1U, true);
+        jr_display_caption_unpin();
         jr_display_caption_set("UPDATE FAILED - STILL ON OLD");
         ota_restore_control_state(was_privacy_paused,
                                   previous_lease_until_ms);
@@ -5438,6 +5440,7 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     persist_ota_attempt(strcmp(next->label, "ota_0") == 0 ? 0 : 1);
     ESP_LOGI(TAG, "ota: %u bytes verified into %s — rebooting to swap",
              (unsigned)got, next->label);
+    jr_display_caption_unpin();
     jr_display_caption_set("UPDATE OK - RESTARTING");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true,\"rebooting\":true}");

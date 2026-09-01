@@ -1180,6 +1180,24 @@ static void test_focal_wedge_follows_the_slide(void)
     free(slid);
 }
 
+/* The OTA warning is pinned: nothing else may replace it until the upload
+ * ends. The voice task's captions used to win by being last. */
+static void test_pinned_caption_survives_other_writers(void)
+{
+    jr_display_caption_unpin();
+    jr_display_caption_pin("UPDATING - DO NOT UNPLUG");
+    jr_display_caption_set("LISTENING");
+    CHECK(strcmp(s_caption_text, "UPDATING - DO NOT UNPLUG") == 0,
+          "a pinned caption was replaced, got '%s'", s_caption_text);
+    jr_display_caption_clear();
+    CHECK(s_caption_text[0] != '\0', "a pinned caption was cleared");
+    jr_display_caption_unpin();
+    jr_display_caption_set("LISTENING");
+    CHECK(strcmp(s_caption_text, "LISTENING") == 0,
+          "after unpin the next writer should win, got '%s'", s_caption_text);
+    jr_display_caption_clear();
+}
+
 int main(void)
 {
     test_space_ring_wraps_both_ways();
@@ -1214,6 +1232,7 @@ int main(void)
     test_orbit_stays_in_free_band();
     test_low_battery_uses_the_rim_palette();
     test_focal_wedge_follows_the_slide();
+    test_pinned_caption_survives_other_writers();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);
