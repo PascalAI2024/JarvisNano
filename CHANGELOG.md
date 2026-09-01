@@ -8,6 +8,20 @@ are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
 
 ### The glass (2026-09-01)
 
+- Search works by voice. `execute_tool` runs on the device's legacy route
+  behind a device-side read-only allowlist, and `search_tools` returns a
+  compact projection with web search, weather and Wikipedia pinned. One tool
+  call per question.
+- A new ring: JARVIS, WATCH, **WEATHER** (Fort Lauderdale, live, with its age),
+  **STATUS** (battery, USB, charge, update, slot, link, mic, uptime — POWER and
+  its sheet folded in), DESK only while an agent or companion is live, and
+  **ACTIVITY** (the last three things Jarvis did). TOOLS is gone.
+- The glass can talk about what it shows: tap an open sheet on WEATHER, WATCH
+  or ACTIVITY and the assistant says it aloud.
+- Lift to glance: picked up after a rest, the weather shows for eight seconds
+  and the glass goes home by itself. A first fetch with rain in the day leaves
+  one "RAIN TODAY" line.
+
 - Removed the SETTINGS screen. The firmware-update ring now draws on every
   screen; UPDATE and SLOT rows moved to the POWER sheet; volume and brightness
   readouts live on the control shade.

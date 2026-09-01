@@ -335,6 +335,25 @@ evidenced by a panel measurement, never by a green suite. Every fix builds,
 runs both suites, and is OTA'd and re-measured before the next item starts.
 `JR_DEV_OPEN_DIAGNOSTICS` must return to 0 before any release tag.
 
+## Wave N9 — a glass that is useful, and alive (2026-09-01, in progress)
+
+Owner's direction, verbatim in spirit: *no search, no JarvisMCP, still some
+useless screens — make it cool and useful; don't waste a screen on power, one
+status screen; be creative, use the hardware for a one-of-a-kind experience
+that is useful, fun, and feels alive.*
+
+| # | Deliverable | Status | Acceptance |
+|---|---|---|---|
+| N9.1 | **Search and tools work by voice** | DONE `ac3af81c` | One tool call per question; SpaceX headline, Fort Lauderdale weather, Bitcoin price answered aloud |
+| N9.2 | **WEATHER on the ring** — Fort Lauderdale, live, aged | **ON THE GLASS** `11de51d3` + data path |  Temperature, condition, hi/lo, rain, age from `jr_display_weather_t`; fetched once after boot and on entering the screen (≥10 min old); never a timer; `NO WEATHER` when nothing was ever fetched |
+| N9.3 | **ACTIVITY replaces TOOLS** — what Jarvis actually did | **ON THE GLASS** (three rows after three turns: SAID / WEATHER / PRICE) | Last three turns: kind (WEB / WEATHER / PRICE / MEMORY / TIME / ASK / SAID) + the first words of the reply; `NOTHING YET` when empty |
+| N9.4 | **STATUS replaces POWER** — one screen for everything you'd look up | **ON THE GLASS** (`100% USB`; sheet of nine rows) | Battery arc stays; sheet carries level, volts, USB, charge, update, slot, link, mic, uptime |
+| N9.5 | **DESK only while live** | **ON THE GLASS** — the sweep walks five screens with no lease, six with one | Ring skips DESK unless an agent link or lease is active; no stranding when it goes quiet |
+| N9.6 | **The glass can talk about what it shows** | **PROVEN** — a tap on the open WEATHER sheet spoke "around 83 degrees, high 86, dropping to 76" | Tap an open sheet on WEATHER / WATCH / ACTIVITY → the assistant speaks it (a text turn; the mic is untouched) |
+| N9.7 | **Lift to glance** | flashed; needs a hand test: rest the device 5+ min, pick it up | Picked up after a rest → weather for 8 s → home by itself; any input keeps the screen |
+| N9.8 | **Rain today** | flashed; fires once per boot when today's rain ≥10 mm | First good fetch with ≥10 mm today → one caption line, no speech |
+| N9.9 | Ideas not yet built | — | Tilt parallax on the procedural layer (N7.22 first); a sunrise/sunset arc on WATCH (needs the fields from the gateway); a soft completion chime; proactive hourly rain warning (needs hourly data) |
+
 ## Execution order
 
 1. **Correctness:** N6.1–N6.4.
