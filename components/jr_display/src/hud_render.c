@@ -765,7 +765,9 @@ static void ov_battery(const strip_t *s, int cx, int cy, uint32_t now_ms,
      * Nothing is lost by dropping the hue: the comet below is the charging
      * tell, and this function's own contract is that MOTION carries that
      * meaning. Red under 20% stays, because that is a different claim. */
-    const uint16_t *ramp = (env->batt_pct < 20) ? s_ov_red : s_ov_cyan;
+    const uint16_t *ramp =
+        (env->batt_pct < HUD_BATT_LOW_PCT && !env->charging) ? s_ov_red
+                                                             : s_ov_cyan;
     const int steps = (256 * env->batt_pct) / 100;
     const uint16_t rim = shade(ramp, 200);
     for (int i = 0; i <= steps; ++i) {

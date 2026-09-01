@@ -136,6 +136,11 @@ typedef struct {
     uint8_t face;        /* hud_face_t — selects the state element          */
     uint8_t amp;         /* 0..255 audio amplitude, drives the waveform     */
     uint8_t batt_pct;    /* 0..100, or 0xFF when unknown/absent             */
+    /* ONE battery alarm rule for every renderer: red below this, unless a
+     * charger is in. The persistent rim and the POWER focal arc used to
+     * disagree — red at r215 while the centre showed amber for the same
+     * cell — two alarm hues for one state. */
+#define HUD_BATT_LOW_PCT 20
     bool    charging;
     bool    privacy_muted; /* persistent outer gold ring when voice is off  */
     int8_t  ox, oy;      /* parallax offset in px; see hud_tilt_offset()    */

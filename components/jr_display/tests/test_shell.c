@@ -840,6 +840,193 @@ static void test_clock_clear_spares_open_shell_surfaces(void)
     }
 }
 
+/* ------------------------------------------------------------ batch N8 -- */
+
+/* Stage an arbitrary ring screen at rest: no slide, no sheet, no shade, and
+ * no veil, so the only writer outside the focal object is whatever the test
+ * is measuring. */
+static void stage_space(int space)
+{
+    stage_settings(JR_DISPLAY_OTA_IDLE, 0U, JR_DISPLAY_OVERLAY_NONE);
+    s_space_from = (uint8_t)space;
+    s_space_to = (uint8_t)space;
+    s_detail_space = (uint8_t)space;
+    s_space_veil = 0;
+    __atomic_store_n(&s_nav_word, (uint32_t)space, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_hud_env_word, 74U, __ATOMIC_RELEASE);
+    sp_compose();
+}
+
+/* TOOLS clamped the eight-tool catalog to four petals and DROPPED the last-run
+ * index for the other four, so EXECUTE / VOLUME / LIGHT / ASK all collapsed
+ * to "LAST NONE". Assert the eighth tool is both named and LIT: the frame
+ * with it recent must differ from the frame with nothing recent, and only
+ * inside the petal band. Reverting JR_DISPLAY_TOOLS_MAX to 4 fails this. */
+static void test_tools_names_and_lights_the_eighth_tool(void)
+{
+    static const char *const eight[] = { "RECALL", "REMEMBER", "TIME",
+                                         "SEARCH", "EXECUTE", "VOLUME",
+                                         "LIGHT", "ASK" };
+    jr_display_tools_set(eight, 8, 7);
+    sp_compose_detail(JR_DISPLAY_SPACE_TOOLS);
+    CHECK(strcmp(s_detail_value[0], "8") == 0,
+          "READY should count all eight, got '%s'", s_detail_value[0]);
+    CHECK(strcmp(s_detail_value[1], "ASK") == 0,
+          "LAST should name the eighth tool, got '%s'", s_detail_value[1]);
+
+    stage_space(JR_DISPLAY_SPACE_TOOLS);
+    jr_display_tools_set(eight, 8, 7);
+    uint16_t *lit = render_frame();
+    jr_display_tools_set(eight, 8, -1);
+    uint16_t *dark = render_frame();
+    if (!lit || !dark) {
+        printf("FAIL %s: allocation failed\n", __func__);
+        g_failures++;
+        free(lit);
+        free(dark);
+        return;
+    }
+    /* Two things legitimately change: the petal band (r67-104; the annulus
+     * inner edge floors one unit under 68) and the headline under it, which
+     * names the last tool. Nothing outside the safe radius may. */
+    size_t in_band = 0, escaped = 0;
+    for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
+        if (lit[i] == dark[i]) {
+            continue;
+        }
+        const int r = radius_of((int)i);
+        if (r >= 67 && r <= 104) {
+            in_band++;
+        } else if (r > JR_DISPLAY_SAFE_R) {
+            escaped++;
+        }
+    }
+    CHECK(in_band > 0, "the eighth petal is not lit — the last-run index was dropped");
+    CHECK(escaped == 0, "%zu changed pixels outside the safe radius", escaped);
+    free(lit);
+    free(dark);
+
+    /* Eight petals must stay eight: neighbours may not fuse into a ring. At
+     * the petal's mid-radius, walk the circle and count lit-to-dark edges. */
+    stage_space(JR_DISPLAY_SPACE_TOOLS);
+    jr_display_tools_set(eight, 8, -1);
+    uint16_t *fb = render_frame();
+    if (!fb) {
+        printf("FAIL %s: allocation failed\n", __func__);
+        g_failures++;
+        return;
+    }
+    int edges = 0;
+    bool prev_on = false;
+    for (int a = 0; a < 720; ++a) {
+        const int x = SP_CX + ((sp_cos((a * 256) / 720) * 86) >> 15);
+        const int y = SP_CY + ((sp_sin((a * 256) / 720) * 86) >> 15);
+        const bool on = fb[(size_t)y * HUD_W + x] != POISON;
+        if (a > 0 && on && !prev_on) {
+            edges++;
+        }
+        prev_on = on;
+    }
+    CHECK(edges == 8, "expected 8 distinct petals at r86, counted %d", edges);
+    free(fb);
+}
+
+/* The DESK sheet re-cut main.c's 12-glyph title to the 10-glyph value column,
+ * deleting the "." mark title_shorten() spends its last glyph on. The marked
+ * title is now the sheet's head, intact. */
+static void test_desk_sheet_heads_with_the_marked_task(void)
+{
+    jr_display_desk_set_task("DEPLOY STAG.", 64U, JR_DISPLAY_AGENT_WORKING);
+    sp_compose_detail(JR_DISPLAY_SPACE_DESK);
+    CHECK(strcmp(s_detail_head, "DEPLOY STAG.") == 0,
+          "the whole marked title should head the sheet, got '%s'",
+          s_detail_head);
+    for (int i = 0; i < s_detail_rows; ++i) {
+        CHECK(strcmp(s_detail_label[i], "JOB") != 0,
+              "the JOB row is back, and it truncates");
+    }
+    jr_display_desk_set_task("", 0U, JR_DISPLAY_AGENT_NONE);
+    sp_compose_detail(JR_DISPLAY_SPACE_DESK);
+    CHECK(strcmp(s_detail_head, "TASK") == 0,
+          "no task should head TASK, got '%s'", s_detail_head);
+}
+
+/* The orbit rail spanned r184-196 against a measured free band of r185-194,
+ * so it overwrote baked art at both edges every frame. Everything the shell
+ * draws outside the safe radius must now sit inside the band. */
+static void test_orbit_stays_in_free_band(void)
+{
+    stage_space(JR_DISPLAY_SPACE_JARVIS);
+    uint16_t *fb = render_frame();
+    if (!fb) {
+        printf("FAIL %s: allocation failed\n", __func__);
+        g_failures++;
+        return;
+    }
+    size_t inside = 0, outside = 0;
+    int omin = 0, omax = 0;
+    for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
+        if (fb[i] == POISON) {
+            continue;
+        }
+        const int r = radius_of((int)i);
+        if (r <= JR_DISPLAY_SAFE_R) {
+            continue;
+        }
+        if (r >= 185 && r <= 194) {
+            inside++;
+        } else {
+            outside++;
+            if (outside == 1 || r < omin) omin = r;
+            if (outside == 1 || r > omax) omax = r;
+        }
+    }
+    CHECK(inside > 0, "the orbit drew nothing in r185-194");
+    CHECK(outside == 0, "%zu orbit pixels outside r185-194 (r%d..%d)", outside, omin, omax);
+    free(fb);
+}
+
+/* One battery alarm: the POWER arc must use the rim's red, on the rim's rule
+ * (low AND not charging). It used amber, so a low cell wore two alarm hues
+ * at once on the one screen about the battery. */
+static void test_low_battery_uses_the_rim_palette(void)
+{
+    stage_space(JR_DISPLAY_SPACE_POWER);
+    jr_display_power_set(8U, 3600U, false, false);
+    uint16_t *fb = render_frame();
+    if (!fb) {
+        printf("FAIL %s: allocation failed\n", __func__);
+        g_failures++;
+        return;
+    }
+    size_t red = 0, amber = 0;
+    for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
+        if (fb[i] == SP_C_RED) {
+            red++;
+        } else if (fb[i] == SP_C_AMBER) {
+            amber++;
+        }
+    }
+    CHECK(red > 0, "8%% battery drew no red");
+    CHECK(amber == 0, "8%% battery drew %zu amber pixels", amber);
+    free(fb);
+
+    /* A low cell on the charger is not an alarm — same rule as the rim. */
+    jr_display_power_set(8U, 3600U, true, true);
+    fb = render_frame();
+    if (!fb) {
+        return;
+    }
+    red = 0;
+    for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
+        if (fb[i] == SP_C_RED) {
+            red++;
+        }
+    }
+    CHECK(red == 0, "charging at 8%% still drew %zu red pixels", red);
+    free(fb);
+}
+
 int main(void)
 {
     test_space_ring_wraps_both_ways();
@@ -866,6 +1053,11 @@ int main(void)
 
     test_every_space_composes_its_own_sheet();
     test_clock_clear_spares_open_shell_surfaces();
+
+    test_tools_names_and_lights_the_eighth_tool();
+    test_desk_sheet_heads_with_the_marked_task();
+    test_orbit_stays_in_free_band();
+    test_low_battery_uses_the_rim_palette();
 
     if (g_failures) {
         printf("%d failure(s)\n", g_failures);

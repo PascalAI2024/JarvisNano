@@ -1580,16 +1580,19 @@ static void sp_compose_detail(int space)
     }
     case JR_DISPLAY_SPACE_DESK: {
         const uint32_t w = __atomic_load_n(&s_desk_word, __ATOMIC_ACQUIRE);
-        sp_copy(s_detail_head, "TASK");
+        /* THE TASK IS THE HEAD. It used to be a JOB row in the 10-glyph
+         * value column, which re-cut the 12-glyph title main.c had already
+         * shortened — and cut off the "." mark that says it was shortened.
+         * A truncation of a truncation, with the evidence removed. The head
+         * holds 12 glyphs, exactly what title_shorten() produces, so the
+         * whole marked title lands intact and the sheet is about the job. */
+        sp_copy(s_detail_head, s_desk_task[0] != '\0' ? s_desk_task : "TASK");
         sp_str(s_detail_label[0], 0, SP_COL_MAX, "STATE");
         sp_str(s_detail_value[0], 0, SP_COL_MAX,
                sp_agent_name((jr_display_agent_state_t)((w >> 8) & 0xFu)));
         sp_str(s_detail_label[1], 0, SP_COL_MAX, "DONE");
         sp_pct(s_detail_value[1], 0, SP_COL_MAX, w & 0xFFu);
-        sp_str(s_detail_label[2], 0, SP_COL_MAX, "JOB");
-        sp_str(s_detail_value[2], 0, SP_COL_MAX,
-               s_desk_task[0] != '\0' ? s_desk_task : "NONE");
-        s_detail_rows = 3;
+        s_detail_rows = 2;
         break;
     }
     case JR_DISPLAY_SPACE_TOOLS: {
@@ -2271,10 +2274,14 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
  * clockwise. */
 #define SP_A_TOP       192
 
-#define SP_ORB_TRACK_IN  184
-#define SP_ORB_TRACK_OUT 196
+/* The free band is r185-194, measured: baked art sits at r184 and r195. The
+ * rail used to span 184-196 and overwrote both edges every frame. The inner
+ * radius of sp_annulus_row is inclusive of pixels whose true radius floors to
+ * one less (185 painted r184), so the inner edges sit one unit inside. */
+#define SP_ORB_TRACK_IN  186
+#define SP_ORB_TRACK_OUT 194
 #define SP_ORB_R         190
-#define SP_ORB_MARK_IN   186
+#define SP_ORB_MARK_IN   187
 #define SP_ORB_MARK_OUT  194
 
 #define SP_FOCAL_IN    76
@@ -2322,6 +2329,7 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
 #define SP_C_INK       0xF79E   /* cool white: never pure, never clinical */
 #define SP_C_GREY      0x8C71
 #define SP_C_AMBER     0xFD20
+#define SP_C_RED       0xF800   /* low battery: the rim's red, not amber */
 #define SP_C_GOLD      0xFEA0
 #define SP_C_GOLD_DIM  0x6300
 #define SP_C_TRACK     0x2124
@@ -2654,10 +2662,17 @@ static void sp_focal_tools(const jr_display_ctx_t *ctx, int y1, int y2,
     const uint16_t cool = sp_tint(ctx, muted ? SP_C_GOLD_DIM : SP_C_CYAN_DIM, st);
     const int cx = SP_CX;
 
+    /* Petal half-width follows the count. ±26 was tuned for four petals
+     * (64 apart); at eight (32 apart) it would fuse them into one ring.
+     * Keep a 6-unit gap (~8°) between neighbours, capped at the old width. */
+    int half = (256 / (count > 0 ? count : 1)) / 2 - 3;
+    if (half > 26) {
+        half = 26;
+    }
     sp_span_t petal[JR_DISPLAY_TOOLS_MAX] = {{0, 0, 0, 0}};
     for (int i = 0; i < count; ++i) {
         const int c = SP_A_TOP + (i * 256) / count;
-        sp_span_set(&petal[i], c - 26, c + 26);
+        sp_span_set(&petal[i], c - half, c + half);
     }
 
     for (int y = y1; y < y2; ++y) {
@@ -2716,8 +2731,12 @@ static void sp_focal_power(const jr_display_ctx_t *ctx, int y1, int y2,
     const bool charging = (w & (1u << 25)) != 0u;
     const bool muted = sp_privacy_muted();
     const uint16_t base = muted ? SP_C_GOLD_DIM : SP_C_CYAN_DIM;
-    /* Red below 20% is the one place colour carries meaning here. */
-    const uint16_t fill = sp_tint(ctx, pct < 20 && !charging ? SP_C_AMBER
+    /* Red below HUD_BATT_LOW_PCT is the one place colour carries meaning
+     * here — and it is the SAME red, on the SAME rule, as the persistent
+     * battery rim at r215. This was amber, so a low cell wore two alarm
+     * hues at once on the one screen about the battery. */
+    const bool low = have_gauge && pct < HUD_BATT_LOW_PCT && !charging;
+    const uint16_t fill = sp_tint(ctx, low ? SP_C_RED
                                        : (muted ? SP_C_GOLD : SP_C_CYAN), st);
     const uint16_t cool = sp_tint(ctx, base, st);
     const int cx = SP_CX;

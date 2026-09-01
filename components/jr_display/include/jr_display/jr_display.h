@@ -340,7 +340,9 @@ esp_err_t jr_display_set_brightness(uint8_t percent);
  *      r <= 168   JR_DISPLAY_SAFE_R — all KEY content: focal object, labels,
  *                 detail rows, shade controls. Nothing readable sits outside,
  *                 so nothing readable is ever cut by the bezel.
- *      r 184-196  the orbital page indicator (peripheral chrome only)
+ *      r 185-194  the orbital page indicator (peripheral chrome only) —
+ *                 the measured free band between baked art at r184 and
+ *                 r195; the listening halo shares it
  *      r <= 214   JR_DISPLAY_SHELL_R_MAX — the backdrop veil, and the hard
  *                 clip every shell primitive is bounded by.
  *
@@ -372,7 +374,11 @@ esp_err_t jr_display_set_brightness(uint8_t percent);
 #define JR_DISPLAY_SHELL_R_MAX   214   /* hard clip; privacy ring is beyond */
 #define JR_DISPLAY_SPACE_MS      260   /* space-to-space slide, ease-in-out */
 #define JR_DISPLAY_SPACE_HOLD_MS 900   /* page indicator lingers this long  */
-#define JR_DISPLAY_TOOLS_MAX     4     /* petals that stay distinguishable  */
+#define JR_DISPLAY_TOOLS_MAX     8     /* one petal per declared tool: the
+                                        * catalog has eight, and a cap of 4
+                                        * dropped the last-run index for the
+                                        * other four, so EXECUTE, VOLUME,
+                                        * LIGHT and ASK all read LAST NONE */
 
 typedef enum {
     JR_DISPLAY_SPACE_JARVIS = 0,

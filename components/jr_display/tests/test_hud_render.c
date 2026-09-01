@@ -1656,6 +1656,39 @@ static void test_clock_strength_gate(void)
     free(fb);
 }
 
+/* The rim's alarm rule is shared with the POWER focal arc via
+ * HUD_BATT_LOW_PCT: red below it, never while charging. */
+static void test_battery_rim_alarm_rule(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *a = calloc(px, sizeof *a);
+    uint16_t *b = calloc(px, sizeof *b);
+    if (!a || !b) { printf("FAIL %s: alloc\n", __func__); g_failures++; free(a); free(b); return; }
+
+    hud_env_t env = { .face = HUD_FACE_IDLE, .amp = 0, .batt_pct = 8,
+                      .charging = false, .ox = 0, .oy = 0 };
+    hud_overlay_frame(a, 0, HUD_H, 500, false, &env);
+    env.charging = true;
+    hud_overlay_frame(b, 0, HUD_H, 500, false, &env);
+
+    size_t red_a = 0, red_b = 0;
+    for (int y = 0; y < HUD_H; y++) {
+        for (int x = 0; x < HUD_W; x++) {
+            int dx = x - 232, dy = y - 232;
+            int r2 = dx * dx + dy * dy;
+            if (r2 < 215 * 215 || r2 > 221 * 221) continue;
+            uint16_t pa = a[y * HUD_W + x], pb = b[y * HUD_W + x];
+            /* The rim is shade(ramp, 200): red 24/31, green 12/63 — a red
+             * dominant channel with the green well under half of it. */
+            if (((pa >> 11) & 0x1F) >= 16 && ((pa >> 5) & 0x3F) < 20) red_a++;
+            if (((pb >> 11) & 0x1F) >= 16 && ((pb >> 5) & 0x3F) < 20) red_b++;
+        }
+    }
+    CHECK(red_a > 0, "8%% on battery drew no red rim");
+    CHECK(red_b == 0, "8%% on the charger drew %zu red rim px", red_b);
+    free(a); free(b);
+}
+
 int main(void)
 {
     test_strip_invariance();
@@ -1677,6 +1710,7 @@ int main(void)
     test_choices_respect_bounds();
     test_choices_stay_in_free_band();
     test_battery_and_choices_do_not_overlap();
+    test_battery_rim_alarm_rule();
     test_choice_layout_spans();
     test_choice_hit();
     test_choice_hit_rejects_face_and_bezel();

@@ -3855,6 +3855,54 @@ static bool brain_surface_handle_tap(uint16_t x, uint16_t y, uint32_t now,
     return owned;
 }
 
+static void demo_stop(void);
+
+/* PANIC-HOME CLEARS THE WHOLE GLASS, NOT MOST OF IT.
+ *
+ * BOOT held past 5 s is the owner's last resort, so it has to win against
+ * every tenant. The old service block cleared the overlays and left the two
+ * lanes that replace the ENTIRE frame — a diagnostic test pattern and a
+ * pushed canvas — plus the touch challenge, which consumes taps before
+ * cards. A panic-home under any of those visibly did nothing.
+ *
+ * It also dismissed the brain surface without s_brain_lock and without
+ * clearing s_brain_surface.active, the one invariant every other dismiss
+ * site keeps (brain state and glass are one transaction, lock order brain ->
+ * display). A local consent prompt is resolved as a timeout, i.e. denial —
+ * a panic gesture must never count as approval. */
+static void panic_home_clear_glass(void)
+{
+    demo_stop();
+    atomic_store(&s_touch_challenge_start_requested, false);
+    atomic_store(&s_touch_challenge_cancel_requested, false);
+    atomic_store(&s_touch_challenge_active, false);
+    atomic_store(&s_touch_challenge_restore_ms, 0U);
+    (void)jr_display_set_test_pattern(JR_DISPLAY_TEST_OFF);
+    jr_display_canvas_clear();
+    if (s_brain_lock != NULL &&
+        xSemaphoreTake(s_brain_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (s_brain_surface.local_owned && s_tool_consent.active) {
+            device_tool_resolve_consent_locked(TOOL_CONSENT_TIMEOUT);
+        } else {
+            jr_display_surface_dismiss();
+            s_brain_surface.active = false;
+        }
+        configASSERT(!jr_display_surface_is_active());
+        xSemaphoreGive(s_brain_lock);
+    } else {
+        /* The glass must clear even if the brain is busy; the state skew is
+         * repaired by the next brain_surface_expire() pass. */
+        jr_display_surface_dismiss();
+        ESP_LOGW(TAG, "ui: panic-home cleared glass without brain lock");
+    }
+    jr_display_dismiss_choices();
+    jr_display_nav_home();
+    s_ui_shade_open = false;
+    s_watch_peek_until_ms = 0U;
+    s_hold_start_ms = 0U;
+    jr_display_commit_ring(0U);
+}
+
 static bool operator_mode_release(uint32_t now, const char *reason,
                                   bool physical_feedback,
                                   bool only_if_expired)
@@ -4626,7 +4674,8 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         "\"consent_denied\":%u,\"consent_timed_out\":%u,"
         "\"consent_cancelled\":%u},\"display\":{\"init\":\"%s\","
         "\"actual_fps\":%u,\"flush_completions\":%u,\"flush_errors\":%u,"
-        "\"requested_face\":%d,\"applied_face\":%d},\"touch\":{"
+        "\"requested_face\":%d,\"applied_face\":%d,"
+        "\"choices_active\":%s},\"touch\":{"
         "\"events\":%u,\"last\":{\"kind\":\"%s\",\"x\":%u,\"y\":%u},"
         "\"shade_open\":%s,\"panel_touch_challenge\":{\"pending\":%s,"
         "\"active\":%s,\"verified\":%s,\"correct_rounds\":%u,"
@@ -4683,6 +4732,7 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         (unsigned)display.flush_completions,
         (unsigned)display.flush_errors,
         (int)display.requested_face, (int)display.applied_face,
+        jr_display_choices_active() ? "true" : "false",
         (unsigned)atomic_load(&s_touch_events),
         touch_kind_name((jr_input_kind_t)atomic_load(&s_touch_last_kind)),
         (unsigned)atomic_load(&s_touch_last_x),
@@ -6271,13 +6321,7 @@ static void voice_task(void *arg)
              * they put themselves. Double-tap remains the way home. */
 
             if (atomic_exchange(&s_panic_home_request, false)) {
-                jr_display_surface_dismiss();
-                jr_display_dismiss_choices();
-                jr_display_nav_home();
-                s_ui_shade_open = false;
-                s_watch_peek_until_ms = 0U;
-                s_hold_start_ms = 0U;
-                jr_display_commit_ring(0U);
+                panic_home_clear_glass();
                 jr_mood_poke_awake(&s_mood, (uint32_t)now);
                 jr_display_bloom();
                 jr_display_caption_set("HOME - ALL CLEAR");
@@ -6831,7 +6875,16 @@ static void voice_task(void *arg)
             const bool codex_mode =
                 operator_mode_active((uint32_t)now);
             if (codex_mode) {
-                if (!physical) {
+                /* Synthetic input cannot ESCAPE a lease — the double-tap
+                 * exit, the card actions and the privacy hold are physical
+                 * only. A swipe escapes nothing: it walks the ring under the
+                 * guest exactly as a finger would. This guard used to drop
+                 * every synthetic kind, so two screenshot sweeps taken under
+                 * a lease returned six identical frames each and were read
+                 * as the composition freezing (S21). It never froze: the
+                 * compositor held 19 fps throughout; the sweep's swipes were
+                 * being refused here. */
+                if (!physical && iev.kind != JR_INPUT_SWIPE) {
                     ESP_LOGW(TAG, "synthetic input cannot control Codex mode");
                     continue;
                 }
