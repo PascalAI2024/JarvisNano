@@ -99,19 +99,33 @@ is the classified edge-origin swipe.
   ~45 s, back in ~5 s. `jarvisctl ota` no longer refuses without a keychain
   token.
 
+- **Later still: STATUS is the device, and the device sleeps.** STATUS was
+  rebuilt after the owner called the first cut a junk screen: LINK/TOOLS
+  lamps, the battery arc with the percentage inside, Wi-Fi bars + dBm, a
+  headline that says the worst thing or the uptime, and a nine-row sheet
+  (battery, power, Wi-Fi, IP, link, tools, chip temperature, radio mode,
+  update). Deep sleep ten minutes into DREAM on battery; wake on lift (QMI8658
+  WoM on INT1), touch (GPIO11) or a 4 h timer; `GET/POST /api/debug/sleep`.
+  A deaf-session watchdog reconnects after two unanswered utterances. The
+  weather refreshes while idle (`JR_TOOLS_SESSION_ANY`). Jarvis names its
+  tools when asked. `docs/reference/power-modes.md` has the recipe and the
+  two gotchas (probation rollback, no `CmdDone`).
+
 ## Current blockers
 
-1. **Long-session voice:** the counters exist; read them over a clean
-   30-minute conversation soak (N6.4) and record the numbers in PLAN.md.
-2. **JarvisMCP:** replace fixed-count search output with a ≤3071-byte projection
-   carrying `has_more` and a cursor; prove voice search + execution.
-3. **Controls shade:** raise settled controls cadence to ≥14 FPS without losing
-   behavior or internal memory.
-4. **First face transitions:** prewarm assets so first Think/Speak applies under
-   150 ms and stale requests never flash late.
-5. **Release security:** trusted-LAN OTA works, but signed images, authenticated
-   encrypted upload, at-rest credential protection, and exact third-party
-   notices remain public-release gates.
+1. **Lift wake by hand:** off USB, face-down ten minutes, lift; expect
+   `wake: lift` from `/api/debug/sleep`. Lower `SLEEP_WOM_MG` if it reads
+   `timer`.
+2. **Deaf-session watchdog in the wild:** watch for `utterance unanswered` /
+   `session is deaf` in the log; raise `UTT_DEAF_COUNT` if ambient chatter
+   trips it.
+3. **Frame rate on the ring:** cache the shell veil so ring screens match the
+   face's 19 fps (N9.10).
+4. **Two violets:** the update ring in probation and the companion rim share a
+   hue (N9.11).
+5. **Release security:** `JR_DEV_OPEN_DIAGNOSTICS` back to 0, signed images,
+   authenticated encrypted upload, at-rest credential protection, exact
+   third-party notices.
 
 The actionable order and acceptance criteria are in [`../PLAN.md`](../PLAN.md).
 

@@ -379,7 +379,7 @@ static void links(bool wifi, int rssi, const char *ip, bool link, uint8_t tools,
 static void test_status_sheet_is_the_device_in_nine_rows(void)
 {
     stage_power(JR_DISPLAY_OTA_RECEIVING, 42U, JR_DISPLAY_OVERLAY_DETAIL);
-    links(true, -34, "192.168.1.20", false, 0U, false, false);
+    links(true, -34, "192.0.2.20", false, 0U, false, false);
     sp_compose();
     CHECK(strcmp(s_detail_head, "STATUS") == 0, "status sheet, got '%s'",
           s_detail_head);
@@ -399,7 +399,7 @@ static void test_status_sheet_is_the_device_in_nine_rows(void)
           s_detail_value[1]);
     CHECK(strcmp(s_detail_value[2], "GOOD -34") == 0, "wifi, got '%s'",
           s_detail_value[2]);
-    CHECK(strcmp(s_detail_value[3], "192.168.1.20") == 0, "ip, got '%s'",
+    CHECK(strcmp(s_detail_value[3], "192.0.2.20") == 0, "ip, got '%s'",
           s_detail_value[3]);
     CHECK(strcmp(s_detail_value[4], "STANDBY") == 0,
           "a closed socket is standby, got '%s'", s_detail_value[4]);
@@ -413,18 +413,18 @@ static void test_status_sheet_is_the_device_in_nine_rows(void)
           s_detail_value[8]);
 
     /* Every link the other way. */
-    links(true, -70, "10.0.0.7", true, 2U, true, true);
+    links(true, -70, "198.51.100.7", true, 2U, true, true);
     sp_compose();
     CHECK(strcmp(s_detail_value[2], "FAIR -70") == 0, "fair wifi, got '%s'",
           s_detail_value[2]);
-    CHECK(strcmp(s_detail_value[3], "10.0.0.7") == 0, "ip follows, got '%s'",
+    CHECK(strcmp(s_detail_value[3], "198.51.100.7") == 0, "ip follows, got '%s'",
           s_detail_value[3]);
     CHECK(strcmp(s_detail_value[4], "OPEN") == 0, "open socket, got '%s'",
           s_detail_value[4]);
     CHECK(strcmp(s_detail_value[5], "READY") == 0, "tools ready, got '%s'",
           s_detail_value[5]);
     g_chip_c = -100;
-    links(true, -70, "10.0.0.7", true, 2U, true, true);
+    links(true, -70, "198.51.100.7", true, 2U, true, true);
     sp_compose();
     CHECK(strcmp(s_detail_value[6], "NONE") == 0, "no thermometer, got '%s'",
           s_detail_value[6]);
@@ -473,10 +473,10 @@ static void test_status_sheet_is_the_device_in_nine_rows(void)
           s_detail_value[8]);
 
     /* The one wide row: 15 glyphs right-aligned still clear the label. */
-    links(true, -34, "192.168.100.200", false, 2U, false, false);
+    links(true, -34, "255.255.255.255", false, 2U, false, false);
     sp_compose();
-    CHECK(strcmp(s_detail_value[3], "192.168.100.200") == 0,
-          "a 15-glyph address is whole, got '%s'", s_detail_value[3]);
+    CHECK(strcmp(s_detail_value[3], "255.255.255.255") == 0,
+          "the widest address is whole, got '%s'", s_detail_value[3]);
     const int vx = SP_SHEET_RIGHT - 12 * (int)strlen(s_detail_value[3]);
     const int kend = SP_SHEET_LEFT + 12 * (int)strlen(s_detail_label[3]);
     CHECK(vx >= kend + 4, "ip value at x=%d collides with its label ending %d",
@@ -491,7 +491,7 @@ static void test_status_headline_says_the_worst_thing_first(void)
 {
     stage_power(JR_DISPLAY_OTA_IDLE, 0U, JR_DISPLAY_OVERLAY_NONE);
     jr_display_ota_set(JR_DISPLAY_OTA_VALID, 100U, 0U, 0xFFU, true);
-    links(true, -40, "10.0.0.7", false, 2U, false, true);
+    links(true, -40, "198.51.100.7", false, 2U, false, true);
     jr_display_jarvis_set_session(false, 0U, 3725U);
     const char *h = sp_headline(JR_DISPLAY_SPACE_STATUS);
     CHECK(strcmp(h, "UP 1H 2M") == 0, "healthy says uptime, got '%s'", h);
@@ -509,18 +509,18 @@ static void test_status_headline_says_the_worst_thing_first(void)
           "the longest uptime fits, got '%s'", h);
 
     g_chip_c = 70;
-    links(true, -40, "10.0.0.7", false, 2U, false, true);
+    links(true, -40, "198.51.100.7", false, 2U, false, true);
     h = sp_headline(JR_DISPLAY_SPACE_STATUS);
     CHECK(strcmp(h, "RUNNING HOT") == 0, "70C is hot, got '%s'", h);
     g_chip_c = 69;
-    links(true, -40, "10.0.0.7", false, 2U, false, true);
+    links(true, -40, "198.51.100.7", false, 2U, false, true);
     h = sp_headline(JR_DISPLAY_SPACE_STATUS);
     CHECK(strncmp(h, "UP ", 3) == 0, "69C is not, got '%s'", h);
     g_chip_c = 52;
-    links(true, -40, "10.0.0.7", false, 0U, false, true);
+    links(true, -40, "198.51.100.7", false, 0U, false, true);
     h = sp_headline(JR_DISPLAY_SPACE_STATUS);
     CHECK(strcmp(h, "NO TOOLS") == 0, "no key, got '%s'", h);
-    links(true, -40, "10.0.0.7", false, 1U, false, true);
+    links(true, -40, "198.51.100.7", false, 1U, false, true);
     h = sp_headline(JR_DISPLAY_SPACE_STATUS);
     CHECK(strncmp(h, "UP ", 3) == 0, "a starting worker is quiet, got '%s'", h);
     links(false, -40, "", false, 0U, false, true);
@@ -572,7 +572,7 @@ static void test_status_face_follows_the_links(void)
     const int bx0 = SP_CX - 68, bx1 = SP_CX + 68;   /* inside the r76 chord */
     const int by0 = SP_ST_WIFI_Y, by1 = SP_ST_WIFI_Y + 14;
 
-    links(true, -34, "10.0.0.7", true, 2U, false, false);
+    links(true, -34, "198.51.100.7", true, 2U, false, false);
     uint16_t *fb = render_frame();
     if (!fb) {
         printf("FAIL %s: allocation failed\n", __func__);
@@ -589,7 +589,7 @@ static void test_status_face_follows_the_links(void)
           "four bars of accent, got %zu", bars4);
     CHECK(big > 100, "the percentage is the big ink, got %zu", big);
 
-    links(true, -80, "10.0.0.7", false, 0U, false, false);
+    links(true, -80, "198.51.100.7", false, 0U, false, false);
     fb = render_frame();
     if (!fb) {
         return;
@@ -614,7 +614,7 @@ static void test_status_face_follows_the_links(void)
 
     /* Nothing of the face reaches the update ring's band: the lamps sit
      * under r140 by design, so a flash in progress never overdraws them. */
-    links(true, -34, "10.0.0.7", true, 2U, false, false);
+    links(true, -34, "198.51.100.7", true, 2U, false, false);
     fb = render_frame();
     if (!fb) {
         return;

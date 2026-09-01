@@ -28,6 +28,8 @@ to reject.
 
 | File | What it proves |
 |---|---|
+| `20260901-ring.png` | **The ring as shipped 2026-09-01**, five stops photographed in one walk by `scripts/screens.py` on the live panel, off USB: JARVIS, WATCH, WEATHER (Fort Lauderdale, fetched by the device, aged "5M AGO"), STATUS (LINK/TOOLS lamps, the cell at 89 %, four Wi-Fi bars at −40 dBm, `UP 5M`), ACTIVITY (the last spoken turn). DESK is absent because no companion was live — the ring admits it only then. |
+| `20260901-status-closed.png` | STATUS at a glance, closed: the battery arc with the percentage inside it, the power word, Wi-Fi bars with the dBm, and the headline that says the worst thing or the uptime. The open sheet is not committed: its IP row is a device identifier. |
 | `20260719-choice-arcs.png` | **STATE-05/06 choice arcs on glass — the centerpiece.** Three arcs hugging the bezel at r223-231 with the 12 o'clock gap reserved for the question, drawn entirely in the baked art's free band. Hit geometry verified against the rendered pixels: a sweep at r=227 returns 9 samples each for arcs 0/1/2 and 9 for the gap; a centre tap and a tap on the face both correctly refuse to answer. |
 | `20260719-hud-speaking.png` | The 48-bar reactive waveform live on the panel at amplitude 246 — spoke length is driven by real playback audio, not a loop. Measured cost: 1.7 fps (18.0 -> 16.3), down from a 4 fps hit before per-strip culling was added. |
 | `20260719-hud-idle.png` | Idle breathing ring — the calm state. |

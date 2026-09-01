@@ -150,14 +150,14 @@ the board already has and the firmware does not reach for.
 
 | Capability | Status | Friction it removes |
 |---|---|---|
-| **CPU sleep** | ❌ **`esp_sleep` has zero uses**. But Wi-Fi **modem** sleep is already mood-driven (`WIFI_PS_MIN_MODEM` at rest), so the gap is CPU sleep specifically — not "no power management" | Battery anxiety. Caveat: the audio codec is never closed, so it holds an APB lock and automatic light sleep would save ~nothing as built. |
-| **QMI8658 interrupt engines** (any/no-motion, tap). ⚠️ **INT2→GPIO21 is 1.75 routing and is UNVERIFIED on the C** — the vendor BSP sets `BSP_CAPS_IMU 0` and its examples poll. Resolve from the C schematic PDF before writing any wake code. | ❌ a comment only; we poll at 10 Hz | The wake gesture you never have to learn — pick it up, it is ready. Also the *prerequisite* for sleeping at all. |
+| **CPU sleep** | ✅ **deep sleep, 2026-09-01**: ten minutes into DREAM on battery (`jr_mood_sleep_due`, `enter_deep_sleep`), wake on lift, touch or a 4 h timer. Wi-Fi **modem** sleep stays mood-driven. Light sleep remains out: the audio codec is never closed, so it holds an APB lock and automatic light sleep would save ~nothing as built. See `docs/reference/power-modes.md` | Battery anxiety. |
+| **QMI8658 interrupt engines** (any/no-motion, tap). Pin resolved from the C schematic: **INT1 → GPIO21**, INT2 goes nowhere (`docs/reference/imu-interrupt-routing.md`). | ✅ **Wake-on-Motion armed on INT1 before every deep sleep** (`jr_imu_arm_wake_on_motion`); the 100 Hz sampler still runs while awake. Tap engine unused. | The wake gesture you never have to learn — pick it up, it is ready. |
 | **Auto-upright from pitch/roll** | ❌ zero rotation uses | Reading the screen at any angle. Round glass means no aspect change, and the data already crosses the HUD boundary unused. |
 | Second mic / DOA | ❌ unused (ES7210 is 4-channel) | Knowing *who* spoke. Optional, not planned. |
 | Multi-touch | ❌ capped at 1 point by our own call | Nothing needs it yet. |
 | DAC for UI sound | ✅ used — cues now rise *and* fall | |
 | Buttons / battery / tilt-to-HUD | ✅ used | |
-| Hardware RTC | 🚫 **does not exist on the 1.75C** (no PCF85063). Wall time is SNTP-only, so it resets across any reboot-class wake — this constrains deep sleep | |
+| Hardware RTC | 🚫 **does not exist on the 1.75C** (no PCF85063). Wall time is SNTP-only, so it resets across any reboot-class wake; a deep-sleep wake re-syncs on Wi-Fi like any boot | |
 
 ---
 
@@ -170,7 +170,7 @@ the board already has and the firmware does not reach for.
 | **E** | Double-tap + horizontal swipe | ✅ done — and the side pages were **deleted** (`6de40bd2`); horizontal now peeks the watch |
 | **A** | Layer stack, `CONSUMED`/`PASS`, no behaviour change | **open** — §4. Deliberately sequenced AFTER the deletions: refactoring first means carefully re-homing layers that Stage 2 then removes |
 | **C** | Hold-to-commit: **one** stage with a filling ring, not three | ✅ **done** `1d07f621`, `1a081e7e`, `617d37e3`. The HAL now emits `PRESS_DOWN`/`PRESS_UP`; the ring previews at 400 ms, fills to 850 ms, and lifting early abandons in silence. Still completes into the privacy toggle — see **D** for why it cannot move to PWR yet |
-| **F** | IMU wake engines + sleep | 🔓 **unblocked, not built.** Pin resolved to **INT1** (not INT2) and the WoM sequence sourced — `docs/reference/imu-interrupt-routing.md`. Gated on hands-on because WoM mode outputs **no data**, disabling flip-to-mute and shake while armed |
+| **F** | IMU wake engines + sleep | ✅ **done 2026-09-01** `37bf45db` — deep sleep ten minutes into DREAM on battery; WoM on **INT1** armed only for the sleep itself (the sampler runs while awake, so flip and shake are unaffected); touch INT and a 4 h timer as the other roads back; a sleep during OTA probation is refused. Lift wake proven armed and quiet from the desk, not yet by a hand |
 | **R** | Rim as a true annulus (r ≥ 168) replacing the x-slabs | ✅ **done** `3cbab992` — the knobs no longer reach over the reactor core |
 | **G** | Auto-upright overlay rotation | **open** — render-side only. Note `hud_tilt_offset()` is a *deliberately* documented dead end (disabled, returns 0,0) and is the wrong hook: it emits a translation, not a rotation, and pairs the wrong axes |
 

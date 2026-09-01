@@ -97,7 +97,7 @@ gesture is our own classification (`input_touch.c`).
 | Flip face-down (6 sustained polls ≈600 ms) | ✅ privacy mute |
 | Shake (2 polls, 1.5 s cooldown) | ✅ cancels an active turn |
 | Tilt (pitch/roll) | ✅ sampled, ⚠️ used only for HUD env; `hud_tilt_offset` is **disabled** |
-| Lift / any-motion | 🔓 pin **RESOLVED: INT1**, and the WoM sequence is sourced — `docs/reference/imu-interrupt-routing.md`. Gated on hands-on: WoM mode outputs **no data**, so it disables flip and shake while armed. |
+| Lift / any-motion | ✅ **INT1** Wake-on-Motion wakes the chip from deep sleep (2026-09-01); armed only for the sleep, so flip and shake keep the sampler while awake — `docs/reference/imu-interrupt-routing.md`, `docs/reference/power-modes.md` |
 | Knock (case tap) | 🆕 QMI8658 tap engine, unconfigured |
 
 ---
@@ -212,7 +212,7 @@ find, on the surface you visit least, in a 10-character uppercase font.
 | **5** | Rim as a true annulus (r ≥ 168), replacing the x-slabs | ✅ **shipped** `3cbab992` — the knobs no longer reach over the reactor core |
 | **3a** | BOOT ≥5 s → panic-home | ✅ **shipped** `77824301` — filled a binding that fell off the end of the chain |
 | **3b** | `iot_button` adoption; **PWR double-tap** | ⛔ **blocked, by measurement.** PWR is an I²C latch polled at **500 ms** (`jr_power.c:33`), so a ~400 ms double-tap window is undetectable — two presses inside one poll are indistinguishable from one. `iot_button` cannot help: it drives GPIO/ADC, not an I²C latch. Needs a faster PKEY poll (more traffic on a shared bus) or an AXP multi-press feature. **Privacy therefore stays on the glass hold** — moving it would strand it. |
-| **6** | QMI8658 wake engines on **INT1** + sleep | 🔓 **unblocked, not built.** Pin resolved from the schematic (**INT1**, not INT2) and the WoM register sequence sourced — both in `docs/reference/imu-interrupt-routing.md`. Gated on hands-on: WoM mode produces **no data output**, so it disables flip-to-mute and shake while armed. |
+| **6** | QMI8658 wake engines on **INT1** + sleep | ✅ **done 2026-09-01** `37bf45db`: deep sleep ten minutes into DREAM on battery, WoM on INT1 armed only for the sleep, touch INT and a timer as the other wake sources. `POST /api/debug/sleep?now=1&wake_s=45` proves the lines from a desk. The lift itself still wants a hand. |
 
 **Sequencing note:** delete (2) before refactoring the dispatch chain. Refactoring
 first means carefully re-homing layers that stage 2 then deletes.

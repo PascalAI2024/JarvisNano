@@ -38,6 +38,8 @@ The original WS receive path used a single shared `rx_buf` + `xTaskNotifyGive`. 
 
 Fix: PSRAM-backed frame queue, depth 128. At that depth, drops go to zero under normal network conditions. A depth of 16 dropped frames at approximately every 12 seconds.
 
+**v5 (2026-09-01):** the live transport (`components/jr_transport/src/gemini_device_ws.c`, `JR_WS_DEV_RING_DEPTH`) runs a 96-deep receive queue, and the remaining stutter was not the queue but Gemini's own pacing — the fix there is the playback jitter buffer (pre-roll 1000 ms, refill 1500 ms) in `components/jr_audio`. See `docs/reference/gemini-live-api-v5.md` §7.
+
 Source: memory file `project_waveform_solo_state.md`.
 
 **[2026-05-21] ~~16 kHz capture in / 24 kHz playback out — no resample needed~~ DISPROVEN 2026-06-10: the shared I2S duplex clock cannot hold 16 kHz RX + 24 kHz TX**

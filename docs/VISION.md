@@ -25,9 +25,10 @@ and an interactive, animated, round-native UI.
 The live 1.75C firmware now uses nearly every product-relevant chip already
 soldered to the board: QMI8658 motion sensing, AXP2101 battery/PKEY telemetry,
 the dual-microphone ES7210/ES8311 audio path, touch, and the AMOLED. The
-remaining hardware work is narrower and measurable: move motion wake from
-polling to QMI8658 INT2, prove safe low-power states, and use the microphone
-array for directional expression. The 1.75C has no PCF85063 RTC or microSD;
+remaining hardware work is narrower and measurable: the QMI8658's own
+Wake-on-Motion engine already wakes the chip from deep sleep (INT1, GPIO21);
+what is left is a measured current budget per mode and the microphone array
+for directional expression. The 1.75C has no PCF85063 RTC or microSD;
 those belong only to the original 1.75 hardware.
 
 ---
@@ -58,7 +59,9 @@ deciding what the device does today.
    returns to Listening.
 5. Trigger a real Gemini choice. Three round-safe choice arcs appear and a
    physical tap resolves one.
-6. Swipe vertically through the centre to walk Watch, Power, Desk, and Tools. Use the
+6. Swipe vertically through the centre to walk the ring — Watch, Weather, Status,
+   Activity, and Desk while a companion is live. Tap an open sheet and Jarvis
+   says it. Use the
    left and right edges to change volume and brightness without leaving the
    current surface.
 7. Press **BOOT** or swipe from the top edge to open controls. The glass itself
@@ -80,8 +83,8 @@ release item in [`../PLAN.md`](../PLAN.md).
 | Face | five baked reactive faces plus one procedural overlay compositor | iris sleep, Wi-Fi orbit, and measured directional lean |
 | Screen | explicit Watch, choice arcs, minimal controls, captions, remote canvas, bounded Desk surfaces | card navigation only after reliability gates |
 | Input | global edge volume/brightness, horizontal spaces, top-edge controls, centre detail, physical hold/flip privacy, PWR listen, BOOT controls/pairing | enclosure legends and gesture receipt polish |
-| Motion | QMI8658 at 125 Hz ODR with a 100 Hz sampler: flip, shake, lift, orientation | INT2 any/no-motion wake so DREAM can stop polling |
-| Power | four visual moods, brightness slew, battery telemetry, listen-only PWR | measure dynamic-frequency/light-sleep safely; rail gating only with wake proof |
+| Motion | QMI8658 at 125 Hz ODR with a 100 Hz sampler: flip, shake, lift, orientation; its Wake-on-Motion engine on INT1 wakes the chip from deep sleep | tap engine as a knock gesture |
+| Power | four visual moods, brightness slew, battery telemetry, listen-only PWR, Wi-Fi modem sleep at rest, deep sleep ten minutes into DREAM on battery | a measured current budget per mode; DFS only if the numbers say so |
 | Storage | 32 MB flash, dual 4 MB OTA slots, emote/model partitions | decide whether the unused FAT partition becomes durable device memory |
 
 **Architecture stays put:** the device talks to Gemini Live directly over Wi-Fi.
@@ -92,10 +95,11 @@ a future privacy route, not part of the live product.
 
 1. Protect the product loop: OTA recovery, session longevity, and internal
    contiguous-memory headroom.
-2. Replace 100 Hz IMU polling with QMI8658 INT2 wake while preserving the
-   measured flip/shake/lift behavior.
-3. Measure CPU frequency scaling and light sleep against voice latency, Wi-Fi
-   stability, and idle current before enabling either by default.
+2. Prove the lift wake by hand and measure percent-over-night on the cell; the
+   sleep itself shipped 2026-09-01 (`docs/reference/power-modes.md`).
+3. Measure CPU frequency scaling against voice latency, Wi-Fi stability and
+   idle current before enabling it; light sleep cannot engage under the
+   always-on microphone capture.
 4. Add the missing transition signatures: iris sleep and Wi-Fi orbit wake.
 5. Prototype two-microphone direction-of-arrival only if raw-lane captures
    prove stable left/right separation on the physical enclosure.

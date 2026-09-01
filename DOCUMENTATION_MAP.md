@@ -1,6 +1,6 @@
 # Documentation Map
 
-Last reconciled with the live 1.75C firmware: **2026-08-28**.
+Last reconciled with the live 1.75C firmware: **2026-09-01**.
 
 JarvisNano has one active product target and one canonical documentation set.
 Historical plans remain useful evidence, but they do not define current behavior.
@@ -59,6 +59,8 @@ When two files disagree, use this order:
 - [`docs/evidence/README.md`](docs/evidence/README.md) — captured hardware evidence.
 - [`docs/reference/README.md`](docs/reference/README.md) — dated engineering references.
 - [`docs/reference/board-175c.md`](docs/reference/board-175c.md) — C-board deltas.
+- [`docs/reference/power-modes.md`](docs/reference/power-modes.md) — what sleeps, how it wakes, what was measured.
+- [`docs/GLASS_DESIGN.md`](docs/GLASS_DESIGN.md) — the glass as designed and as shipped, screen by screen.
 - [`docs/reference/board-bringup-checklist.md`](docs/reference/board-bringup-checklist.md)
   — mandatory checklist for any new board revision.
 - [`boards/waveshare/esp32s3_touch_amoled_1_75c/README.md`](boards/waveshare/esp32s3_touch_amoled_1_75c/README.md)

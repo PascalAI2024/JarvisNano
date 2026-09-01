@@ -100,7 +100,7 @@ Keep `jarvisctl gestures 80` visible while exercising:
 3. BOOT short after boot → controls open/close.
 4. Left-edge vertical from every space → persisted volume ±5.
 5. Right-edge vertical from every space → persisted brightness ±5.
-6. Centre vertical swipe → Jarvis/Watch/Power/Desk/Tools ring (wraps); horizontal → Watch peek.
+6. Centre vertical swipe → the ring: Jarvis/Watch/Weather/Status/(Desk while live)/Activity, wrapping; horizontal → Watch peek; `scripts/screens.py` photographs the whole walk.
 7. Top-edge down → controls; double tap → Jarvis Home.
 8. Glass hold and flip → physical privacy; remote resume must refuse to clear it.
 

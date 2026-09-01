@@ -23,6 +23,8 @@ Organized reference pages for JarvisNano’s primary 1.75C firmware and labeled 
 | [llm-config.md](./llm-config.md) | `llm_profile` protocol enum (not a vendor name), boot-loop recovery via `esptool erase-region`, full config field table |
 | [asset-pipeline.md](./asset-pipeline.md) | EAF/AAF format, `gen_mascot_eaf.py` local encoder, `esp_mmap_assets` packer, silent `"lack":true` blank face, `emote_assets.bin` build flow |
 | [sdmmc-storage.md](./sdmmc-storage.md) | Original-1.75 SDMMC compatibility reference; not 1.75C hardware |
+| [imu-interrupt-routing.md](./imu-interrupt-routing.md) | QMI8658 INT1 → GPIO21 on the 1.75C (INT2 goes nowhere), resolved from the schematic; the Wake-on-Motion register recipe in use since 2026-09-01 |
+| [power-modes.md](./power-modes.md) | The S3's four power modes and which the firmware drives: modem sleep from the mood ladder, deep sleep ten minutes into DREAM with lift/touch/timer wake; the probation-rollback and CmdDone gotchas |
 
 ---
 
@@ -49,3 +51,6 @@ The most expensive lessons learned, with page links:
 - **Choppy Gemini audio** — single `rx_buf` overwritten; fix: PSRAM frame queue depth 128 → [audio-es8311-es7210.md](./audio-es8311-es7210.md)
 - **Flat gain hard-clips speech** — use soft-knee limiter → [audio-es8311-es7210.md](./audio-es8311-es7210.md)
 - **Display snapshots are software mirrors, not panel readback** — `/api/display/snapshot.*` only
+- **A deep sleep during OTA probation rolls the image back** — it is a reboot through the bootloader → [power-modes.md](./power-modes.md)
+- **The QMI8658 never reports `CmdDone` on this board** — tolerate the handshake, clear WoM with a soft reset → [power-modes.md](./power-modes.md)
+- **`esptool` cannot sync over USB-JTAG while the firmware runs** — flash a live device with `POST /api/ota/upload` → `docs/BUILD.md`

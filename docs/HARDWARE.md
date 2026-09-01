@@ -17,9 +17,9 @@ maps to the C revision.
 | Display | CO5300 466×466 QSPI AMOLED | baked reactive faces plus one procedural overlay compositor |
 | Touch | CST9217 IRQ-driven capacitive panel | tap, 850 ms hold, four-way swipe, choice actions, synthetic-event provenance |
 | Audio | ES7210 dual mic + echo reference; ES8311 DAC | 24 kHz shared full-duplex clock, 16 kHz AEC-clean uplink, native Gemini server VAD |
-| Motion | QMI8658 | ±8 g accelerometer at 125 Hz ODR, sampled every 10 ms for flip/shake/lift/orientation; gyro off |
-| Power | AXP2101 | 1 Hz battery/voltage/USB/charge telemetry, PKEY, charging animation |
-| Network | 2.4 GHz Wi-Fi | direct Gemini Live, JarvisMCP, diagnostics, OTA; modem sleep only while voice/operator/OTA are parked |
+| Motion | QMI8658 | ±8 g accelerometer at 125 Hz ODR, sampled every 10 ms for flip/shake/lift/orientation; gyro off. Its Wake-on-Motion engine on **INT1 → GPIO21** wakes the chip from deep sleep |
+| Power | AXP2101 | 0.2 Hz battery/voltage/USB/charge telemetry, PKEY, charging animation. No current reading. The PWR key cannot wake the S3 from deep sleep |
+| Network | 2.4 GHz Wi-Fi | direct Gemini Live, JarvisMCP, diagnostics, OTA; modem sleep while the device rests (STATUS `RADIO` row); off entirely in deep sleep |
 | USB | native USB-Serial-JTAG | initial provisioning and recovery |
 
 ### Physical interaction grammar
@@ -33,7 +33,10 @@ maps to the C revision.
 | BOOT held during reset | Enter the ESP32-S3 ROM downloader; not an application gesture |
 | Left-edge vertical swipe | Volume +/− 5 from any screen |
 | Right-edge vertical swipe | Brightness +/− 5 from any screen |
-| Centre vertical swipe | Walk the ring: Jarvis/Watch/Power/Desk/Tools (wraps) |
+| Centre vertical swipe | Walk the ring: Jarvis/Watch/Weather/Status/(Desk while live)/Activity (wraps) |
+| Tap on an open sheet | Jarvis speaks what the screen shows |
+| Lift after a rest | Weather glance for eight seconds |
+| Still ten minutes past DREAM, on battery | Deep sleep; lift, touch or a 4 h timer wakes it |
 | Horizontal swipe | Watch peek, 10 s |
 | Top-edge swipe down | Open controls |
 | Centre swipe up | Open detail or close controls |
@@ -57,12 +60,32 @@ microSD slot. Wall time is SNTP-backed. Diagnostics persist only in the bounded
 2. The CO5300 path requires 12-row internal-DMA strips. Do not add LVGL or a
    second renderer beside the existing compositor.
 3. Realtime voice, OTA, provisioning, and operator mode force full Wi-Fi radio
-   availability. WHISPER/DREAM may use minimum modem sleep. CPU frequency,
-   light sleep, and PMIC rails remain blocked on physical latency/current and
-   wake-source measurements.
-4. QMI8658 still polls. INT wake is the next safe utilization step only after
-   the **C-revision** schematic/pin is proven; original-board GPIO21/expander
-   claims do not transfer.
+   availability; rest uses minimum modem sleep; deep sleep follows ten minutes
+   of DREAM on battery. Light sleep cannot engage while the codec captures,
+   and CPU frequency scaling stays off until current is measured
+   (`docs/reference/power-modes.md`).
+4. QMI8658 polls at 100 Hz while awake; before deep sleep its Wake-on-Motion
+   engine is armed on **INT1 → GPIO21** (resolved from the C schematic — INT2
+   is not connected). The touch INT is GPIO11. Both are RTC-capable wake pins.
+
+## Wake sources in deep sleep
+
+```mermaid
+flowchart LR
+    subgraph S3[ESP32-S3 in deep sleep]
+        EXT0[ext0 · GPIO21 · level high]
+        EXT1[ext1 · GPIO11 · any low]
+        TMR[RTC timer · 4 h]
+    end
+    IMU[QMI8658 INT1<br/>Wake-on-Motion, 100 mg] --> EXT0
+    TP[CST9217 INT<br/>pull-up kept on] --> EXT1
+    EXT0 --> Boot[Boot → LISTENING if it was]
+    EXT1 --> Boot
+    TMR --> Rest[Boot → resume at DREAM]
+```
+
+Each line is armed only if it reads its resting level at that moment; the
+timer is always armed. The AXP2101 PWR key is not a wake source on this board.
 
 ## Compatibility tracks
 

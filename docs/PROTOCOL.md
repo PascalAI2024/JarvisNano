@@ -1,6 +1,6 @@
 # JarvisNano v5 protocol
 
-> Runtime truth as of 2026-08-28. The active hardware is the 32 MB Waveshare
+> Runtime truth as of 2026-09-01. The active hardware is the 32 MB Waveshare
 > ESP32-S3 Touch AMOLED 1.75C (466×466). The original 1.75 and retired
 > ESP-Claw/Seeed protocol remain compatibility tracks, not route authorities.
 
@@ -58,7 +58,9 @@ X-JarvisNano-Control: 1
 | GET | `/api/cockpit` | Paired network, voice, tool, display, touch, Agent Link, and Brain Link truth |
 | GET | `/api/gemini/live` | Paired detailed Gemini/audio/tool counters and transcript tail |
 | POST | `/api/debug/say?text=...` | Queue a text turn through the live device voice session |
-| POST | `/api/debug/gain?...` | Bench-only audio tuning |
+| GET/POST | `/api/debug/gain?...` | Audio tuning with readbacks; `preroll=` / `refill=` set the playback jitter buffer |
+| POST | `/api/debug/audio-stats?reset=1` | Reset the playback and receive-queue counters that `/api/device/health` reports |
+| GET/POST | `/api/debug/sleep` | How the device last woke and what was armed; `?now=1&wake_s=N` forces a deep sleep with an N-second timer (refused with 409 while the image is on OTA probation) |
 | POST | `/api/voice/control?armed=0|1` or paired `?resume=1` | Explicit privacy mute/unmute or privacy-safe operational resume |
 | POST | `/api/audio/self-test` | Run the speaker-to-microphone diagnostic capture |
 | GET | `/api/audio/taps` | Paired audio tap metadata |
