@@ -615,6 +615,23 @@ void jr_display_ota_set(jr_display_ota_state_t state, uint8_t percent,
 void jr_display_power_set(uint8_t percent, uint16_t millivolts,
                           bool usb_present, bool charging);
 
+/* The device's connections, for STATUS: what the glass can be trusted to say
+ * about the outside world. Any task, lock-free, no allocation: the IP lands
+ * before the packed word that gates it. tools is 0 = no gateway key,
+ * 1 = worker starting, 2 = ready. radio_saving is the one power mode this
+ * firmware drives today — Wi-Fi modem sleep while the device rests. */
+typedef struct {
+    bool    wifi_up;
+    int8_t  rssi_dbm;       /* meaningful only while wifi_up               */
+    char    ip[16];         /* dotted quad, "" when there is none          */
+    bool    link_open;      /* the Gemini session socket is open right now */
+    uint8_t tools;
+    bool    desk_live;      /* a companion spoke within the last seconds   */
+    bool    radio_saving;
+} jr_display_links_t;
+
+void jr_display_links_set(const jr_display_links_t *links);
+
 /* The control shade's volume readout: the real number, not a mood. Brightness
  * is not passed — the display already owns it and reads back its own target,
  * so the shade can never disagree with the panel. Link quality and free

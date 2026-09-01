@@ -1352,7 +1352,8 @@ _Static_assert((uint32_t)JR_DISPLAY_SPACE_COUNT <= NAV_SPACE_MASK + 1u,
 
 #define SP_LABEL_CAP      13   /* 12 glyphs at scale 2 = 144 px, fits r<=96 */
 #define SP_COL_MAX        11   /* detail column: 10 glyphs at scale 2       */
-#define SP_ROWS_MAX       9   /* STATUS: battery, update, link, mic, uptime */
+#define SP_ROWS_MAX       9   /* STATUS: battery .. update, nine facts      */
+#define SP_VAL_MAX       16   /* value column: the IP row is 15 glyphs      */
 
 static volatile uint32_t s_nav_word;
 
@@ -1385,6 +1386,10 @@ static char     s_act_sum[ACT_MAX][ACT_SUM_CAP];
 static uint32_t s_act_ms[ACT_MAX];
 static volatile uint32_t s_act_count;
 static volatile uint32_t s_power_word = 0xFFu; /* pct | mv<<8 | usb/charge */
+/* STATUS links: bit0 wifi, bit1 session open, bits3:2 tools (0 none,
+ * 1 starting, 2 ready), bit4 desk live, bit5 radio saving, bits15:8 -dBm. */
+static volatile uint32_t s_links_word;
+static char s_links_ip[16];
 /* OTA status, packed like every other shell word so the updater can publish
  * from its own task with one release-store and the render task can sample it
  * with one load:
@@ -1406,7 +1411,7 @@ static volatile uint32_t s_ota_word = ((uint32_t)OTA_SLOT_NONE << 16) |
  * Composing per strip would redo the same integer formatting eleven times. */
 static char s_detail_head[SP_LABEL_CAP];
 static char s_detail_label[SP_ROWS_MAX][SP_COL_MAX];
-static char s_detail_value[SP_ROWS_MAX][SP_COL_MAX];
+static char s_detail_value[SP_ROWS_MAX][SP_VAL_MAX];
 static int  s_detail_rows;
 static char s_shade_vol[SP_COL_MAX];
 static char s_shade_light[SP_COL_MAX];
@@ -1524,6 +1529,67 @@ static int sp_int(char *dst, int len, int cap, int v)
         v = -v;
     }
     return sp_num(dst, len, cap, (uint32_t)v);
+}
+
+/* Battery volts as the gauge reports them: "4.02V". Two decimals because the
+ * AXP2101 resolves millivolts and a tenth hides a whole hour of discharge. */
+static int sp_volts(char *dst, int len, int cap, uint32_t mv)
+{
+    len = sp_num(dst, len, cap, mv / 1000u);
+    len = sp_str(dst, len, cap, ".");
+    const uint32_t cs = (mv % 1000u) / 10u;
+    if (cs < 10u) {
+        len = sp_str(dst, len, cap, "0");
+    }
+    len = sp_num(dst, len, cap, cs);
+    return sp_str(dst, len, cap, "V");
+}
+
+/* How long the device has been up, in the two largest units that matter:
+ * "12M", "6H 10M", "2D 14H". Days are what an owner reads as "stable". */
+static int sp_uptime(char *dst, int len, int cap, uint32_t secs)
+{
+    const uint32_t mins = secs / 60u;
+    if (mins < 60u) {
+        len = sp_num(dst, len, cap, mins);
+        return sp_str(dst, len, cap, "M");
+    }
+    const uint32_t hours = mins / 60u;
+    if (hours < 24u) {
+        len = sp_num(dst, len, cap, hours);
+        len = sp_str(dst, len, cap, "H ");
+        len = sp_num(dst, len, cap, mins % 60u);
+        return sp_str(dst, len, cap, "M");
+    }
+    len = sp_num(dst, len, cap, hours / 24u);
+    len = sp_str(dst, len, cap, "D ");
+    len = sp_num(dst, len, cap, hours % 24u);
+    return sp_str(dst, len, cap, "H");
+}
+
+/* The one word for where the power comes from. Charging outranks the cable,
+ * a full cell on the cable is FULL, and a device with no gauge on USB is
+ * still honestly ON USB. */
+static const char *sp_power_word(uint32_t w)
+{
+    const uint32_t pct = w & 0xFFu;
+    if ((w & (1u << 25)) != 0u) {
+        return "CHARGING";
+    }
+    if ((w & (1u << 24)) != 0u) {
+        return pct == 100u ? "FULL" : "ON USB";
+    }
+    return "ON CELL";
+}
+
+/* Wi-Fi bars from RSSI, the thresholds every phone uses: 0 means no link. */
+static int sp_wifi_bars(uint32_t lk)
+{
+    if ((lk & 1u) == 0u) {
+        return 0;
+    }
+    const int dbm = -(int)((lk >> 8) & 0xFFu);
+    return dbm >= -55 ? 4 : dbm >= -65 ? 3 : dbm >= -75 ? 2 : 1;
 }
 
 /* An age in minutes as the shortest honest unit: "12M", "3H", "2D". Shared by
@@ -1668,23 +1734,6 @@ static int sp_ota_fill(jr_display_ota_state_t state, int percent)
         return 100;
     }
 }
-
-/* "0/1" when an update is staged, "0" when it is not, "?" when the updater
- * has not reported a slot. Slash is in the physical 5x7 glyph set. */
-static void sp_ota_slots(char *dst, int cap, uint32_t active, uint32_t target)
-{
-    int len;
-    if (active > 1u) {
-        len = sp_str(dst, 0, cap, "?");
-    } else {
-        len = sp_num(dst, 0, cap, active);
-    }
-    if (target <= 1u && target != active) {
-        len = sp_str(dst, len, cap, "/");
-        (void)sp_num(dst, len, cap, target);
-    }
-}
-
 
 /* Per-space detail: the answer to "what is actually going on in here", not a
  * repeat of the ambient telemetry the face already shows. Every row is a
@@ -1834,72 +1883,92 @@ static void sp_compose_detail(int space)
         break;
     }
     case JR_DISPLAY_SPACE_STATUS: {
-        /* ONE STATUS SHEET. The owner asked why the battery needed a screen
-         * of its own; it does not. Everything a worried owner would ever
-         * look up is one column here: the cell, the charger, the update,
-         * the link, the microphone, and how long the device has been up.
-         * Nothing on it is a mood — every row is a value something else
-         * already publishes. */
+        /* THE DEVICE IN NINE FACTS. The owner's brief, verbatim in spirit:
+         * "it should show data connections, battery, etc", with zero junk.
+         * So every row is a live reading of something outside the glass —
+         * the cell, the charger, the Wi-Fi, this device's address, the
+         * session socket, the tools bridge, the companion, the radio's
+         * power mode, and the firmware update. Nothing here is a mood, and
+         * nothing here is printed elsewhere on the ring: the clock and the
+         * microphone live on WATCH and on the gold rim. Two former rows
+         * (VOLTS, SLOT) folded into their neighbours; UPTIME moved to the
+         * closed face's headline, where it is the quiet a healthy device
+         * says. */
         const uint32_t w = __atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE);
+        const uint32_t lk = __atomic_load_n(&s_links_word, __ATOMIC_ACQUIRE);
         const uint32_t percent = w & 0xFFu;
         const uint32_t millivolts = (w >> 8) & 0xFFFFu;
         sp_copy(s_detail_head, "STATUS");
-        sp_str(s_detail_label[0], 0, SP_COL_MAX, "LEVEL");
+        sp_str(s_detail_label[0], 0, SP_COL_MAX, "BATTERY");
         if (percent <= 100U) {
-            sp_pct(s_detail_value[0], 0, SP_COL_MAX, percent);
+            int len = sp_pct(s_detail_value[0], 0, SP_COL_MAX, percent);
+            if (millivolts >= 1000U) {
+                len = sp_str(s_detail_value[0], len, SP_COL_MAX, " ");
+                (void)sp_volts(s_detail_value[0], len, SP_COL_MAX, millivolts);
+            }
         } else {
             sp_str(s_detail_value[0], 0, SP_COL_MAX, "NONE");
         }
-        sp_str(s_detail_label[1], 0, SP_COL_MAX, "VOLTS");
-        if (millivolts >= 1000U) {
-            int len = sp_num(s_detail_value[1], 0, SP_COL_MAX, millivolts);
-            (void)sp_str(s_detail_value[1], len, SP_COL_MAX, "MV");
-        } else {
-            sp_str(s_detail_value[1], 0, SP_COL_MAX, "NONE");
+        sp_str(s_detail_label[1], 0, SP_COL_MAX, "POWER");
+        sp_str(s_detail_value[1], 0, SP_COL_MAX, sp_power_word(w));
+        /* WIFI is a word and the number: the word is what the owner reads,
+         * the dBm is what they quote when moving the device to a better
+         * spot. The tiers are the ones the closed face's bars use. */
+        sp_str(s_detail_label[2], 0, SP_COL_MAX, "WIFI");
+        {
+            const int bars = sp_wifi_bars(lk);
+            if (bars == 0) {
+                sp_str(s_detail_value[2], 0, SP_COL_MAX, "DOWN");
+            } else {
+                int len = sp_str(s_detail_value[2], 0, SP_COL_MAX,
+                                 bars >= 3 ? "GOOD " : bars == 2 ? "FAIR "
+                                                                 : "WEAK ");
+                (void)sp_int(s_detail_value[2], len, SP_COL_MAX,
+                             -(int)((lk >> 8) & 0xFFu));
+            }
         }
-        /* Bit 24 is USB-present and bit 25 is CHARGING. They are separate rows
-         * here precisely because conflating them is what made POWER claim
-         * "100% CHG" on a full battery sitting on a cable. */
-        sp_str(s_detail_label[2], 0, SP_COL_MAX, "USB");
-        sp_str(s_detail_value[2], 0, SP_COL_MAX,
-               (w & (1u << 24)) != 0u ? "YES" : "NO");
-        sp_str(s_detail_label[3], 0, SP_COL_MAX, "CHARGE");
-        sp_str(s_detail_value[3], 0, SP_COL_MAX,
-               (w & (1u << 25)) != 0u ? "YES" : "NO");
-        /* THE FIRMWARE UPDATE LIVES HERE. It used to be two rows of a SETTINGS
-         * sheet that nothing but the updater ever visited. Power is where a
-         * worried owner looks for "can this device survive a flash", and the
-         * preflight verdict is mostly a power verdict anyway.
-         *
-         * At rest the UPDATE row reports READINESS rather than a state noun,
-         * so POWER answers "could this take an update right now" without an
+        /* The address is the one row wider than the column: 15 glyphs,
+         * right-aligned, which still clears a two-glyph label by 6 px. It is
+         * what every operator tool on the LAN needs first. */
+        sp_str(s_detail_label[3], 0, SP_COL_MAX, "IP");
+        sp_str(s_detail_value[3], 0, SP_VAL_MAX,
+               s_links_ip[0] != '\0' ? s_links_ip : "NONE");
+        /* The session socket opens on demand and closes at rest, so a
+         * closed socket is STANDBY, not an alarm. */
+        sp_str(s_detail_label[4], 0, SP_COL_MAX, "LINK");
+        sp_str(s_detail_value[4], 0, SP_COL_MAX,
+               (lk & (1u << 1)) != 0u ? "OPEN" : "STANDBY");
+        sp_str(s_detail_label[5], 0, SP_COL_MAX, "TOOLS");
+        {
+            const uint32_t tools = (lk >> 2) & 3u;
+            sp_str(s_detail_value[5], 0, SP_COL_MAX,
+                   tools == 2u ? "READY" : tools == 1u ? "STARTING" : "NO KEY");
+        }
+        sp_str(s_detail_label[6], 0, SP_COL_MAX, "DESK");
+        sp_str(s_detail_value[6], 0, SP_COL_MAX,
+               (lk & (1u << 4)) != 0u ? "LIVE" : "NONE");
+        /* The chip's power mode, as far as this firmware drives one: the
+         * radio sleeps between beacons while the device rests and runs
+         * realtime for voice, updates and a companion. The CPU does not
+         * scale yet — see PLAN.md — so this row is the whole truth. */
+        sp_str(s_detail_label[7], 0, SP_COL_MAX, "RADIO");
+        sp_str(s_detail_value[7], 0, SP_COL_MAX,
+               (lk & (1u << 5)) != 0u ? "SAVING" : "REALTIME");
+        /* At rest the UPDATE row reports READINESS rather than a state noun,
+         * so STATUS answers "could this take an update right now" without an
          * update having to be in flight. */
         const uint32_t ota = __atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE);
         const jr_display_ota_state_t ota_state =
             (jr_display_ota_state_t)(ota & 0xFu);
-        sp_str(s_detail_label[4], 0, SP_COL_MAX, "UPDATE");
+        sp_str(s_detail_label[8], 0, SP_COL_MAX, "UPDATE");
         if (ota_state == JR_DISPLAY_OTA_RECEIVING) {
-            sp_pct(s_detail_value[4], 0, SP_COL_MAX, (ota >> 8) & 0xFFu);
+            sp_pct(s_detail_value[8], 0, SP_COL_MAX, (ota >> 8) & 0xFFu);
         } else if (ota_state == JR_DISPLAY_OTA_IDLE) {
-            sp_str(s_detail_value[4], 0, SP_COL_MAX,
+            sp_str(s_detail_value[8], 0, SP_COL_MAX,
                    (ota & (1u << 24)) != 0u ? "READY" : "HOLD");
         } else {
-            sp_str(s_detail_value[4], 0, SP_COL_MAX, sp_ota_name(ota_state));
+            sp_str(s_detail_value[8], 0, SP_COL_MAX, sp_ota_name(ota_state));
         }
-        sp_str(s_detail_label[5], 0, SP_COL_MAX, "SLOT");
-        sp_ota_slots(s_detail_value[5], SP_COL_MAX, (ota >> 16) & 0xFu,
-                     (ota >> 20) & 0xFu);
-        /* LINK and UPTIME read the SESSION word main.c already publishes;
-         * MIC reads the one privacy bit the whole glass shares. */
-        const uint32_t sw = __atomic_load_n(&s_jarvis_word, __ATOMIC_ACQUIRE);
-        sp_str(s_detail_label[6], 0, SP_COL_MAX, "LINK");
-        sp_str(s_detail_value[6], 0, SP_COL_MAX,
-               (sw & (1u << 16)) != 0u ? "UP" : "DOWN");
-        sp_str(s_detail_label[7], 0, SP_COL_MAX, "MIC");
-        sp_str(s_detail_value[7], 0, SP_COL_MAX,
-               sp_privacy_muted() ? "MUTED" : "LIVE");
-        sp_str(s_detail_label[8], 0, SP_COL_MAX, "UPTIME");
-        sp_clock_str(s_detail_value[8], SP_COL_MAX, diag_load(&s_jarvis_secs));
         s_detail_rows = 9;
         break;
     }
@@ -3123,10 +3192,35 @@ static void sp_focal_activity(const jr_display_ctx_t *ctx, int y1, int y2,
 
 /* POWER: charge as a filled arc from 12 o'clock, plus a solid core while the
  * charger is in. Reads s_power_word, which jr_power already publishes. */
-static void sp_focal_power(const jr_display_ctx_t *ctx, int y1, int y2,
-                           uint16_t *pixels, int oy, int st)
+/* STATUS at a glance, the geometry:
+ *
+ *   y 116..129  LINK  TOOLS      two lamps, lit ink when up, dim when not;
+ *                                 10 glyphs, corners r131.5 — under the
+ *                                 update ring at r140 and above the focal
+ *                                 ring's top at y137
+ *   r 76..96    the battery arc  from the top, clockwise, by percent
+ *   y 196..209  CHARGING         the power word, grey
+ *   y 219..239  74%              scale 3, ink — the number the owner wants
+ *   y 250..263  ▂▄▆█ -34         Wi-Fi bars and dBm, lit by the same tiers
+ *                                 phones use
+ *   y 330       UP 6H 10M        the headline (sp_headline)
+ *
+ * Everything inside the ring stays within the r76 chord for its row; the
+ * lamps are the only text outside it, and they sit below the update ring's
+ * inner edge so a flash in progress never overdraws them. */
+#define SP_ST_LAMP_Y   116
+#define SP_ST_WORD_Y   SP_WX_AGE_Y
+#define SP_ST_WIFI_Y   SP_WX_HILO_Y
+#define SP_ST_BAR_W    4
+#define SP_ST_BAR_STEP 6            /* bar width plus a 2 px gap */
+#define SP_ST_BARS_W   (3 * SP_ST_BAR_STEP + SP_ST_BAR_W)
+#define SP_ST_BARS_GAP 6            /* between the bars and the number */
+
+static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
+                            uint16_t *pixels, int oy, int st)
 {
     const uint32_t w = __atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE);
+    const uint32_t lk = __atomic_load_n(&s_links_word, __ATOMIC_ACQUIRE);
     const int raw_pct = (int)(w & 0xFFu);
     /* 0xFF means the fuel gauge did not answer. Clamping that to 100 drew a
      * FULL ring directly beneath the headline "NO BATTERY" — the most
@@ -3134,40 +3228,80 @@ static void sp_focal_power(const jr_display_ctx_t *ctx, int y1, int y2,
      * track instead: an empty track reads as "no reading", which is true. */
     const bool have_gauge = raw_pct <= 100;
     const int pct = have_gauge ? raw_pct : 0;
-    /* bit 24 is USB-present, bit 25 is CHARGING. This tested bit 24, so a full
-     * battery sitting on a cable read "100% CHG" with the fat charging core,
-     * while the SETTINGS sheet — which tests bit 25 — disagreed on the same
-     * screen-swipe. Plugged in is not charging. */
     const bool charging = (w & (1u << 25)) != 0u;
     const bool muted = sp_privacy_muted();
-    const uint16_t base = muted ? SP_C_GOLD_DIM : SP_C_CYAN_DIM;
-    /* Red below HUD_BATT_LOW_PCT is the one place colour carries meaning
-     * here — and it is the SAME red, on the SAME rule, as the persistent
-     * battery rim at r215. This was amber, so a low cell wore two alarm
-     * hues at once on the one screen about the battery. */
+    /* Red below HUD_BATT_LOW_PCT is the one place colour carries meaning on
+     * the arc — the SAME red, on the SAME rule, as the battery rim at r215.
+     * Gold means muted everywhere on this glass, so the arc and the bars
+     * wear it too. */
     const bool low = have_gauge && pct < HUD_BATT_LOW_PCT && !charging;
-    const uint16_t fill = sp_tint(ctx, low ? SP_C_RED
-                                       : (muted ? SP_C_GOLD : SP_C_CYAN), st);
-    const uint16_t cool = sp_tint(ctx, base, st);
+    const uint16_t lamp = sp_tint(ctx, muted ? SP_C_GOLD : SP_C_CYAN, st);
+    const uint16_t fill = low ? sp_tint(ctx, SP_C_RED, st) : lamp;
+    const uint16_t cool = sp_tint(ctx, muted ? SP_C_GOLD_DIM : SP_C_CYAN_DIM,
+                                  st);
+    const uint16_t track = sp_tint(ctx, SP_C_TRACK, st);
+    const uint16_t ink = sp_tint(ctx, SP_C_INK, st);
+    const uint16_t grey = sp_tint(ctx, SP_C_GREY, st);
+    const uint16_t dim = sp_tint(ctx, SP_C_GREY, (st * 96) / 255);
     const int cx = SP_CX;
+    const int cy = SP_CY + oy;
 
     sp_span_t arc[SP_ARC_SEG_MAX];
     const int narc = have_gauge
         ? sp_arc_segments(arc, SP_ARC_SEG_MAX, SP_A_TOP, (pct * 256) / 100)
         : 0;
 
+    /* The words, formatted once per strip from the two words the frame
+     * already has: a few digits, no snprintf on this stack. */
+    char pctbuf[6];
+    const int plen = have_gauge ? sp_pct(pctbuf, 0, (int)sizeof pctbuf,
+                                         (uint32_t)pct)
+                                : sp_str(pctbuf, 0, (int)sizeof pctbuf, "--");
+    const char *word = sp_power_word(w);
+    const int wlen = sp_len(word, SP_LABEL_CAP - 1);
+    const int bars = sp_wifi_bars(lk);
+    char dbm[6];
+    const int dlen = bars > 0
+        ? sp_int(dbm, 0, (int)sizeof dbm, -(int)((lk >> 8) & 0xFFu))
+        : sp_str(dbm, 0, (int)sizeof dbm, "DOWN");
+    const int bx = cx - (SP_ST_BARS_W + SP_ST_BARS_GAP + 12 * dlen) / 2;
+    const int lx = sp_text_cx(10, 2, 0);
+    const bool link_on = (lk & (1u << 1)) != 0u;
+    const bool tools_on = ((lk >> 2) & 3u) == 2u;
+
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        sp_annulus_row(row, y, cx, SP_CY + oy, SP_FOCAL_IN, SP_FOCAL_OUT,
-                       NULL, cool);
+        sp_annulus_row(row, y, cx, cy, SP_FOCAL_IN, SP_FOCAL_OUT, NULL, cool);
         for (int i = 0; i < narc; ++i) {
-            sp_annulus_row(row, y, cx, SP_CY + oy, SP_FOCAL_IN, SP_FOCAL_OUT,
-                           &arc[i], fill);
+            sp_annulus_row(row, y, cx, cy, SP_FOCAL_IN, SP_FOCAL_OUT, &arc[i],
+                           fill);
         }
-        /* Track-coloured when there is no reading: an amber core over an
-         * empty track claims a low battery we did not measure. */
-        sp_annulus_row(row, y, cx, SP_CY + oy, 0, charging ? 26 : 12, NULL,
-                       have_gauge ? fill : cool);
+        sp_text_row(row, y, "LINK", 4, lx, SP_ST_LAMP_Y + oy, 2,
+                    link_on ? ink : dim);
+        sp_text_row(row, y, "TOOLS", 5, lx + 60, SP_ST_LAMP_Y + oy, 2,
+                    tools_on ? ink : dim);
+        sp_text_row(row, y, word, wlen, sp_text_cx(wlen, 2, 0),
+                    SP_ST_WORD_Y + oy, 2, grey);
+        sp_text_row(row, y, pctbuf, plen, cx - (18 * plen) / 2,
+                    SP_FOCAL_TEXT_Y + oy, 3, ink);
+        /* Four bars, 4/7/10/13 px tall, bottom-aligned with the number's
+         * baseline; unlit bars keep the track colour so the glyph reads as
+         * a gauge and not as a hole. */
+        const int by0 = SP_ST_WIFI_Y + oy;
+        if (y >= by0 && y < by0 + 14) {
+            for (int i = 0; i < 4; ++i) {
+                const int h = 4 + 3 * i;
+                if (y >= by0 + 14 - h) {
+                    const uint16_t px = i < bars ? lamp : track;
+                    const int x0 = bx + i * SP_ST_BAR_STEP;
+                    for (int x = x0; x < x0 + SP_ST_BAR_W; ++x) {
+                        row[x] = px;
+                    }
+                }
+            }
+        }
+        sp_text_row(row, y, dbm, dlen, bx + SP_ST_BARS_W + SP_ST_BARS_GAP,
+                    SP_ST_WIFI_Y + oy, 2, grey);
     }
 }
 
@@ -3256,13 +3390,14 @@ static const char *sp_headline(int space)
          * an unsynced one. */
         return s_clock_shown_word == 0u ? "NO TIME" : "";
     case JR_DISPLAY_SPACE_STATUS: {
-        /* THE PERCENTAGE AND ONE WORD: whatever matters most right now, in
-         * this order — an update in flight outranks everything (it can
-         * brick the device), then a missing gauge, a low cell, a dead link,
-         * the charger, the cable, and finally nothing at all, which is the
-         * quiet a healthy device deserves. Twelve glyphs, always: "100%
-         * CHARGING" would be thirteen, so a full cell on the charger says
-         * FULL. */
+        /* THE ONE THING THAT MATTERS MOST, or the quiet: an update in flight
+         * outranks everything (it can brick the device), then a missing
+         * gauge, a low cell, no Wi-Fi, no tools key — and when nothing is
+         * wrong, how long the device has been up, which is the sentence a
+         * healthy device gets to say. The percentage is no longer here: it
+         * is the big number inside the ring. A closed session socket is
+         * NOT an alarm any more — it closes at rest by design, so the old
+         * "NO LINK" fired on every idle device. */
         static char buf[SP_LABEL_CAP];
         const uint32_t ota = __atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE);
         const jr_display_ota_state_t ota_state =
@@ -3276,25 +3411,23 @@ static const char *sp_headline(int space)
             return sp_ota_name(ota_state);
         }
         const uint32_t w = __atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE);
+        const uint32_t lk = __atomic_load_n(&s_links_word, __ATOMIC_ACQUIRE);
         const uint32_t pct = w & 0xFFu;
+        const bool charging = (w & (1u << 25)) != 0u;
         if (pct > 100u) {
             return "NO BATTERY";
         }
-        const bool charging = (w & (1u << 25)) != 0u;
-        const bool usb = (w & (1u << 24)) != 0u;
-        const bool linked = (__atomic_load_n(&s_jarvis_word, __ATOMIC_ACQUIRE)
-                             & (1u << 16)) != 0u;
-        const char *word = "";
         if (pct < HUD_BATT_LOW_PCT && !charging) {
-            word = " LOW";
-        } else if (!linked) {
-            word = " NO LINK";
-        } else if (charging) {
-            word = pct >= 100u ? " FULL" : " CHARGING";
-        } else if (usb) {
-            word = " USB";
+            return "LOW BATTERY";
         }
-        (void)sp_str(buf, sp_pct(buf, 0, SP_LABEL_CAP, pct), SP_LABEL_CAP, word);
+        if ((lk & 1u) == 0u) {
+            return "NO WIFI";
+        }
+        if (((lk >> 2) & 3u) == 0u) {
+            return "NO TOOLS";
+        }
+        (void)sp_uptime(buf, sp_str(buf, 0, SP_LABEL_CAP, "UP "), SP_LABEL_CAP,
+                        diag_load(&s_jarvis_secs));
         return buf;
     }
     case JR_DISPLAY_SPACE_DESK:
@@ -3328,7 +3461,7 @@ static void sp_draw_space(const jr_display_ctx_t *ctx, int y1, int y2,
          * clock underneath the good one. */
         break;
     case JR_DISPLAY_SPACE_STATUS:
-        sp_focal_power(ctx, y1, y2, pixels, oy, st);
+        sp_focal_status(ctx, y1, y2, pixels, oy, st);
         break;
     case JR_DISPLAY_SPACE_DESK:
         sp_focal_desk(ctx, y1, y2, pixels, oy, st);
@@ -3400,7 +3533,7 @@ static void sp_draw_detail(const jr_display_ctx_t *ctx, int y1, int y2,
                 continue;
             }
             const int klen = sp_len(s_detail_label[i], SP_COL_MAX - 1);
-            const int vlen = sp_len(s_detail_value[i], SP_COL_MAX - 1);
+            const int vlen = sp_len(s_detail_value[i], SP_VAL_MAX - 1);
             sp_text_row(row, y, s_detail_label[i], klen, SP_SHEET_LEFT, ry, 2,
                         key);
             sp_text_row(row, y, s_detail_value[i], vlen,
@@ -4860,6 +4993,33 @@ void jr_display_ota_set(jr_display_ota_state_t state, uint8_t percent,
                          ((uint32_t)target_slot << 20) |
                          (preflight_ok ? (1u << 24) : 0u),
                      __ATOMIC_RELEASE);
+    nav_wake();
+}
+
+void jr_display_links_set(const jr_display_links_t *links)
+{
+    if (links == NULL) {
+        return;
+    }
+    /* The address lands before the word that gates it (the labels' rule),
+     * so a racing frame shows the old address at worst, never a torn one. */
+    size_t i = 0;
+    for (; i + 1U < sizeof s_links_ip && links->ip[i] != '\0'; ++i) {
+        s_links_ip[i] = links->ip[i];
+    }
+    s_links_ip[i] = '\0';
+    const int neg = links->rssi_dbm < 0 ? -(int)links->rssi_dbm : 0;
+    const uint32_t word =
+        (links->wifi_up ? 1u : 0u) |
+        (links->link_open ? (1u << 1) : 0u) |
+        (((uint32_t)(links->tools > 2U ? 2U : links->tools)) << 2) |
+        (links->desk_live ? (1u << 4) : 0u) |
+        (links->radio_saving ? (1u << 5) : 0u) |
+        ((uint32_t)(neg > 255 ? 255 : neg) << 8);
+    if (__atomic_load_n(&s_links_word, __ATOMIC_ACQUIRE) == word) {
+        return;
+    }
+    __atomic_store_n(&s_links_word, word, __ATOMIC_RELEASE);
     nav_wake();
 }
 

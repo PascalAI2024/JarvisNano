@@ -2425,6 +2425,33 @@ static void publish_shell_state(uint32_t now_ms)
         jr_display_ota_set(
             ota_display, ota_percent, slot, preflight.target_slot,
             preflight.ok);
+
+        /* STATUS's connections, once a second: the same readings the
+         * cockpit serves, so the glass and /api/cockpit can never disagree.
+         * The Wi-Fi query is a round trip into the radio task, which is why
+         * it lives in this 1 Hz block and not in the per-tick path above. */
+        jr_net_status_t net = {0};
+        (void)jr_net_get_status(&net);
+        bool desk_live = false;
+        if (s_brain_lock != NULL &&
+            xSemaphoreTake(s_brain_lock, 0) == pdTRUE) {
+            desk_live = s_brain_last_seen_ms != 0U &&
+                (uint32_t)(now_ms - s_brain_last_seen_ms) <=
+                    BRAIN_DESK_FRESH_MS;
+            xSemaphoreGive(s_brain_lock);
+        }
+        jr_display_links_t links = {
+            .wifi_up = net.sta_connected,
+            .rssi_dbm = net.rssi,
+            .link_open = s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN,
+            .tools = !jr_tools_is_configured() ? 0U
+                     : atomic_load(&s_tool_diag.worker_ready) ? 2U : 1U,
+            .desk_live = desk_live,
+            .radio_saving = jr_net_power_save_active(),
+        };
+        strlcpy(links.ip, net.sta_connected ? net.sta_ip : "",
+                sizeof links.ip);
+        jr_display_links_set(&links);
         next_status_ms = now_ms + 1000U;
     }
 }

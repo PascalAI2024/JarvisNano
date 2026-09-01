@@ -13,8 +13,10 @@ are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
   compact projection with web search, weather and Wikipedia pinned. One tool
   call per question.
 - A new ring: JARVIS, WATCH, **WEATHER** (Fort Lauderdale, live, with its age),
-  **STATUS** (battery, USB, charge, update, slot, link, mic, uptime — POWER and
-  its sheet folded in), DESK only while an agent or companion is live, and
+  **STATUS** (the device at a glance: LINK and TOOLS lamps, the battery arc
+  with the percentage inside it, Wi-Fi bars with the dBm, and a sheet of nine
+  facts — battery, power, Wi-Fi, IP, link, tools, desk, radio power mode,
+  update), DESK only while an agent or companion is live, and
   **ACTIVITY** (the last three things Jarvis did). TOOLS is gone.
 - The glass can talk about what it shows: tap an open sheet on WEATHER, WATCH
   or ACTIVITY and the assistant says it aloud.

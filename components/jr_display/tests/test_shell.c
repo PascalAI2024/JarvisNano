@@ -311,23 +311,6 @@ static void test_ota_names_fit_their_column(void)
     }
 }
 
-static void test_ota_slot_pair_reads_as_a_journey(void)
-{
-    char buf[SP_COL_MAX];
-
-    sp_ota_slots(buf, SP_COL_MAX, 0u, 1u);
-    CHECK(strcmp(buf, "0/1") == 0, "staged reads as a journey, got '%s'", buf);
-
-    /* Nothing staged: the destination is not invented. */
-    sp_ota_slots(buf, SP_COL_MAX, 1u, OTA_SLOT_NONE);
-    CHECK(strcmp(buf, "1") == 0, "unstaged is the active slot, got '%s'", buf);
-    sp_ota_slots(buf, SP_COL_MAX, 1u, 1u);
-    CHECK(strcmp(buf, "1") == 0, "self-target is not a journey, got '%s'", buf);
-
-    sp_ota_slots(buf, SP_COL_MAX, OTA_SLOT_NONE, OTA_SLOT_NONE);
-    CHECK(strcmp(buf, "?") == 0, "unknown is admitted, got '%s'", buf);
-}
-
 /* Stage POWER, fully presented, with the given OTA state. POWER is where the
  * update's UPDATE and SLOT rows live now that SETTINGS is gone; the ring
  * itself belongs to no space, and stage_ring_at_rest below stages each one. */
@@ -375,52 +358,263 @@ static void stage_ring_at_rest(int space, jr_display_ota_state_t st,
     sp_compose();
 }
 
-static void test_power_sheet_reports_update_and_slot(void)
+static void links(bool wifi, int rssi, const char *ip, bool link, uint8_t tools,
+                  bool desk, bool saving)
+{
+    jr_display_links_t l = {
+        .wifi_up = wifi, .rssi_dbm = (int8_t)rssi, .link_open = link,
+        .tools = tools, .desk_live = desk, .radio_saving = saving,
+    };
+    strncpy(l.ip, ip, sizeof l.ip - 1);
+    jr_display_links_set(&l);
+}
+
+/* THE DEVICE IN NINE FACTS. Every row is checked by value, in order, and
+ * every value is driven both ways, so a row that stops reading its input
+ * (say, RADIO pinned to REALTIME) fails here rather than lying on the glass.
+ * stage_power publishes 74 %, 4020 mV, on USB, charging. */
+static void test_status_sheet_is_the_device_in_nine_rows(void)
 {
     stage_power(JR_DISPLAY_OTA_RECEIVING, 42U, JR_DISPLAY_OVERLAY_DETAIL);
+    links(true, -34, "192.168.1.20", false, 0U, false, false);
+    sp_compose();
     CHECK(strcmp(s_detail_head, "STATUS") == 0, "status sheet, got '%s'",
           s_detail_head);
     CHECK(s_detail_rows == 9, "nine rows, got %d", s_detail_rows);
     CHECK(s_detail_rows <= SP_ROWS_MAX, "within the row budget");
-    /* The three rows STATUS gathered from elsewhere, each a published value. */
-    jr_display_jarvis_set_session(true, 3U, 3725U);
+    static const char *const order[9] = {
+        "BATTERY", "POWER", "WIFI", "IP", "LINK", "TOOLS", "DESK", "RADIO",
+        "UPDATE",
+    };
+    for (int i = 0; i < 9; ++i) {
+        CHECK(strcmp(s_detail_label[i], order[i]) == 0,
+              "row %d is %s, got '%s'", i, order[i], s_detail_label[i]);
+    }
+    CHECK(strcmp(s_detail_value[0], "74% 4.02V") == 0,
+          "battery folds the volts in, got '%s'", s_detail_value[0]);
+    CHECK(strcmp(s_detail_value[1], "CHARGING") == 0, "power word, got '%s'",
+          s_detail_value[1]);
+    CHECK(strcmp(s_detail_value[2], "GOOD -34") == 0, "wifi, got '%s'",
+          s_detail_value[2]);
+    CHECK(strcmp(s_detail_value[3], "192.168.1.20") == 0, "ip, got '%s'",
+          s_detail_value[3]);
+    CHECK(strcmp(s_detail_value[4], "STANDBY") == 0,
+          "a closed socket is standby, got '%s'", s_detail_value[4]);
+    CHECK(strcmp(s_detail_value[5], "NO KEY") == 0, "tools, got '%s'",
+          s_detail_value[5]);
+    CHECK(strcmp(s_detail_value[6], "NONE") == 0, "desk, got '%s'",
+          s_detail_value[6]);
+    CHECK(strcmp(s_detail_value[7], "REALTIME") == 0, "radio, got '%s'",
+          s_detail_value[7]);
+    CHECK(strcmp(s_detail_value[8], "42%") == 0, "update percent, got '%s'",
+          s_detail_value[8]);
+
+    /* Every link the other way. */
+    links(true, -70, "10.0.0.7", true, 2U, true, true);
     sp_compose();
-    CHECK(strcmp(s_detail_label[6], "LINK") == 0 &&
-              strcmp(s_detail_value[6], "UP") == 0,
-          "link row: '%s' '%s'", s_detail_label[6], s_detail_value[6]);
-    CHECK(strcmp(s_detail_label[7], "MIC") == 0 &&
-              strcmp(s_detail_value[7], "LIVE") == 0,
-          "mic row: '%s' '%s'", s_detail_label[7], s_detail_value[7]);
-    CHECK(strcmp(s_detail_label[8], "UPTIME") == 0 &&
-              strcmp(s_detail_value[8], "1:02") == 0,
-          "uptime row: '%s' '%s'", s_detail_label[8], s_detail_value[8]);
-    /* The battery rows keep their places; the update is appended, so a
-     * reader who learned the sheet before the move finds nothing shifted. */
-    CHECK(strcmp(s_detail_label[0], "LEVEL") == 0, "level row first");
-    CHECK(strcmp(s_detail_value[0], "74%") == 0, "level shown, got '%s'",
-          s_detail_value[0]);
-    CHECK(strcmp(s_detail_label[3], "CHARGE") == 0, "charge row still fourth");
-    CHECK(strcmp(s_detail_label[4], "UPDATE") == 0, "update row present");
-    CHECK(strcmp(s_detail_value[4], "42%") == 0, "percent shown, got '%s'",
+    CHECK(strcmp(s_detail_value[2], "FAIR -70") == 0, "fair wifi, got '%s'",
+          s_detail_value[2]);
+    CHECK(strcmp(s_detail_value[3], "10.0.0.7") == 0, "ip follows, got '%s'",
+          s_detail_value[3]);
+    CHECK(strcmp(s_detail_value[4], "OPEN") == 0, "open socket, got '%s'",
           s_detail_value[4]);
-    CHECK(strcmp(s_detail_label[5], "SLOT") == 0, "slot row present");
-    CHECK(strcmp(s_detail_value[5], "0/1") == 0, "slots shown, got '%s'",
+    CHECK(strcmp(s_detail_value[5], "READY") == 0, "tools ready, got '%s'",
+          s_detail_value[5]);
+    CHECK(strcmp(s_detail_value[6], "LIVE") == 0, "desk live, got '%s'",
+          s_detail_value[6]);
+    CHECK(strcmp(s_detail_value[7], "SAVING") == 0, "radio saving, got '%s'",
+          s_detail_value[7]);
+    links(false, -34, "", false, 1U, false, false);
+    sp_compose();
+    CHECK(strcmp(s_detail_value[2], "DOWN") == 0, "wifi down, got '%s'",
+          s_detail_value[2]);
+    CHECK(strcmp(s_detail_value[3], "NONE") == 0, "no ip, got '%s'",
+          s_detail_value[3]);
+    CHECK(strcmp(s_detail_value[5], "STARTING") == 0, "tools starting, got '%s'",
           s_detail_value[5]);
 
-    /* At rest the row answers readiness instead of naming a non-event. */
+    /* Power the other way: on the cell, and full on the cable. */
+    jr_display_power_set(61U, 3870U, false, false);
+    sp_compose();
+    CHECK(strcmp(s_detail_value[0], "61% 3.87V") == 0, "on cell, got '%s'",
+          s_detail_value[0]);
+    CHECK(strcmp(s_detail_value[1], "ON CELL") == 0, "cell word, got '%s'",
+          s_detail_value[1]);
+    jr_display_power_set(100U, 4180U, true, false);
+    sp_compose();
+    CHECK(strcmp(s_detail_value[1], "FULL") == 0, "full word, got '%s'",
+          s_detail_value[1]);
+    jr_display_power_set(0xFFU, 0U, true, false);
+    sp_compose();
+    CHECK(strcmp(s_detail_value[0], "NONE") == 0, "no gauge, got '%s'",
+          s_detail_value[0]);
+    CHECK(strcmp(s_detail_value[1], "ON USB") == 0, "no gauge on usb, got '%s'",
+          s_detail_value[1]);
+
+    /* At rest the UPDATE row answers readiness instead of naming a non-event. */
     jr_display_ota_set(JR_DISPLAY_OTA_IDLE, 0U, 0U, 0xFFU, true);
     sp_compose();
-    CHECK(strcmp(s_detail_value[4], "READY") == 0, "idle+ok, got '%s'",
-          s_detail_value[4]);
+    CHECK(strcmp(s_detail_value[8], "READY") == 0, "idle+ok, got '%s'",
+          s_detail_value[8]);
     jr_display_ota_set(JR_DISPLAY_OTA_IDLE, 0U, 0U, 0xFFU, false);
     sp_compose();
-    CHECK(strcmp(s_detail_value[4], "HOLD") == 0, "idle+blocked, got '%s'",
-          s_detail_value[4]);
-
+    CHECK(strcmp(s_detail_value[8], "HOLD") == 0, "idle+blocked, got '%s'",
+          s_detail_value[8]);
     jr_display_ota_set(JR_DISPLAY_OTA_PROBATION, 0U, 1U, 0xFFU, true);
     sp_compose();
-    CHECK(strcmp(s_detail_value[4], "PROBATION") == 0, "probation, got '%s'",
-          s_detail_value[4]);
+    CHECK(strcmp(s_detail_value[8], "PROBATION") == 0, "probation, got '%s'",
+          s_detail_value[8]);
+
+    /* The one wide row: 15 glyphs right-aligned still clear the label. */
+    links(true, -34, "192.168.100.200", false, 2U, false, false);
+    sp_compose();
+    CHECK(strcmp(s_detail_value[3], "192.168.100.200") == 0,
+          "a 15-glyph address is whole, got '%s'", s_detail_value[3]);
+    const int vx = SP_SHEET_RIGHT - 12 * (int)strlen(s_detail_value[3]);
+    const int kend = SP_SHEET_LEFT + 12 * (int)strlen(s_detail_label[3]);
+    CHECK(vx >= kend + 4, "ip value at x=%d collides with its label ending %d",
+          vx, kend);
+}
+
+/* THE HEADLINE SAYS THE WORST THING, or the quiet. Each priority is entered
+ * from a healthy device and left again, so the order is pinned as well as
+ * the words. A closed session socket is NOT on the list any more: it closes
+ * at rest by design, and the old "NO LINK" fired on every idle device. */
+static void test_status_headline_says_the_worst_thing_first(void)
+{
+    stage_power(JR_DISPLAY_OTA_IDLE, 0U, JR_DISPLAY_OVERLAY_NONE);
+    jr_display_ota_set(JR_DISPLAY_OTA_VALID, 100U, 0U, 0xFFU, true);
+    links(true, -40, "10.0.0.7", false, 2U, false, true);
+    jr_display_jarvis_set_session(false, 0U, 3725U);
+    const char *h = sp_headline(JR_DISPLAY_SPACE_STATUS);
+    CHECK(strcmp(h, "UP 1H 2M") == 0, "healthy says uptime, got '%s'", h);
+    CHECK(strlen(h) < (size_t)SP_LABEL_CAP, "headline fits");
+
+    jr_display_jarvis_set_session(false, 0U, 600U);
+    h = sp_headline(JR_DISPLAY_SPACE_STATUS);
+    CHECK(strcmp(h, "UP 10M") == 0, "minutes alone, got '%s'", h);
+    jr_display_jarvis_set_session(false, 0U, 2U * 86400U + 14U * 3600U + 59U);
+    h = sp_headline(JR_DISPLAY_SPACE_STATUS);
+    CHECK(strcmp(h, "UP 2D 14H") == 0, "days and hours, got '%s'", h);
+    jr_display_jarvis_set_session(false, 0U, 99U * 86400U + 23U * 3600U);
+    h = sp_headline(JR_DISPLAY_SPACE_STATUS);
+    CHECK(strcmp(h, "UP 99D 23H") == 0 && strlen(h) < (size_t)SP_LABEL_CAP,
+          "the longest uptime fits, got '%s'", h);
+
+    links(true, -40, "10.0.0.7", false, 0U, false, true);
+    h = sp_headline(JR_DISPLAY_SPACE_STATUS);
+    CHECK(strcmp(h, "NO TOOLS") == 0, "no key, got '%s'", h);
+    links(true, -40, "10.0.0.7", false, 1U, false, true);
+    h = sp_headline(JR_DISPLAY_SPACE_STATUS);
+    CHECK(strncmp(h, "UP ", 3) == 0, "a starting worker is quiet, got '%s'", h);
+    links(false, -40, "", false, 0U, false, true);
+    h = sp_headline(JR_DISPLAY_SPACE_STATUS);
+    CHECK(strcmp(h, "NO WIFI") == 0, "no wifi outranks tools, got '%s'", h);
+    jr_display_power_set(8U, 3600U, false, false);
+    h = sp_headline(JR_DISPLAY_SPACE_STATUS);
+    CHECK(strcmp(h, "LOW BATTERY") == 0, "low cell outranks wifi, got '%s'", h);
+    jr_display_power_set(8U, 3600U, true, true);
+    h = sp_headline(JR_DISPLAY_SPACE_STATUS);
+    CHECK(strcmp(h, "NO WIFI") == 0, "a low cell on the charger is no alarm");
+    jr_display_power_set(0xFFU, 0U, true, false);
+    h = sp_headline(JR_DISPLAY_SPACE_STATUS);
+    CHECK(strcmp(h, "NO BATTERY") == 0, "no gauge outranks all, got '%s'", h);
+    jr_display_ota_set(JR_DISPLAY_OTA_RECEIVING, 42U, 0U, 1U, true);
+    h = sp_headline(JR_DISPLAY_SPACE_STATUS);
+    CHECK(strcmp(h, "UPDATE 42%") == 0, "an update outranks everything");
+}
+
+/* THE CLOSED FACE FOLLOWS THE LINKS. Lamps: "LINK TOOLS" above the ring,
+ * ink when up, dim when not — counted as ink pixels in the lamp band. Bars:
+ * accent pixels inside the ring's bottom line rise with RSSI and vanish when
+ * Wi-Fi is down (the word DOWN is grey). The big percentage is ink inside
+ * the ring. Each count is asserted positive where it should be, so an
+ * empty frame cannot pass. */
+static void stage_space(int space);
+static uint16_t *render_frame(void);
+
+static size_t count_in(const uint16_t *fb, uint16_t px, int x0, int x1,
+                       int y0, int y1)
+{
+    size_t n = 0;
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            if (fb[(size_t)y * HUD_W + x] == px) {
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+static void test_status_face_follows_the_links(void)
+{
+    stage_space(JR_DISPLAY_SPACE_STATUS);
+    jr_display_power_set(74U, 4020U, true, true);
+    const int lx0 = SP_CX - 60, lx1 = SP_CX + 60;
+    const int ly0 = SP_ST_LAMP_Y, ly1 = SP_ST_LAMP_Y + 14;
+    const int bx0 = SP_CX - 68, bx1 = SP_CX + 68;   /* inside the r76 chord */
+    const int by0 = SP_ST_WIFI_Y, by1 = SP_ST_WIFI_Y + 14;
+
+    links(true, -34, "10.0.0.7", true, 2U, false, false);
+    uint16_t *fb = render_frame();
+    if (!fb) {
+        printf("FAIL %s: allocation failed\n", __func__);
+        g_failures++;
+        return;
+    }
+    const size_t lamps_on = count_in(fb, SP_C_INK, lx0, lx1, ly0, ly1);
+    const size_t bars4 = count_in(fb, SP_C_CYAN, bx0, bx1, by0, by1);
+    const size_t big = count_in(fb, SP_C_INK, SP_CX - 40, SP_CX + 40,
+                                SP_FOCAL_TEXT_Y, SP_FOCAL_TEXT_Y + 21);
+    free(fb);
+    CHECK(lamps_on > 40, "both lamps lit draw ink, got %zu", lamps_on);
+    CHECK(bars4 >= 4 * 4 + 7 * 4 + 10 * 4 + 13 * 4,
+          "four bars of accent, got %zu", bars4);
+    CHECK(big > 100, "the percentage is the big ink, got %zu", big);
+
+    links(true, -80, "10.0.0.7", false, 0U, false, false);
+    fb = render_frame();
+    if (!fb) {
+        return;
+    }
+    const size_t lamps_off = count_in(fb, SP_C_INK, lx0, lx1, ly0, ly1);
+    const size_t bars1 = count_in(fb, SP_C_CYAN, bx0, bx1, by0, by1);
+    free(fb);
+    CHECK(lamps_off == 0, "dim lamps draw no ink, got %zu", lamps_off);
+    CHECK(bars1 > 0 && bars1 < bars4, "one bar is fewer than four: %zu vs %zu",
+          bars1, bars4);
+
+    links(false, -34, "", false, 2U, false, false);
+    fb = render_frame();
+    if (!fb) {
+        return;
+    }
+    const size_t bars0 = count_in(fb, SP_C_CYAN, bx0, bx1, by0, by1);
+    const size_t down = count_in(fb, SP_C_GREY, bx0, bx1, by0, by1);
+    free(fb);
+    CHECK(bars0 == 0, "no wifi lights no bar, got %zu", bars0);
+    CHECK(down > 20, "DOWN is written in grey, got %zu", down);
+
+    /* Nothing of the face reaches the update ring's band: the lamps sit
+     * under r140 by design, so a flash in progress never overdraws them. */
+    links(true, -34, "10.0.0.7", true, 2U, false, false);
+    fb = render_frame();
+    if (!fb) {
+        return;
+    }
+    size_t leaked = 0;
+    for (int y = ly0; y < ly1; ++y) {
+        for (int x = lx0; x < lx1; ++x) {
+            const int dx = x - SP_CX, dy = y - SP_CY;
+            if (fb[(size_t)y * HUD_W + x] == SP_C_INK &&
+                sp_isqrt(dx * dx + dy * dy) >= SP_OTA_IN) {
+                leaked++;
+            }
+        }
+    }
+    free(fb);
+    CHECK(leaked == 0, "%zu lamp pixels reach the update ring", leaked);
 }
 
 /* The shade's two readouts are where volume and light are read now that the
@@ -1656,8 +1850,9 @@ int main(void)
     test_ota_word_clamps_everything();
     test_ota_arc_semantics();
     test_ota_names_fit_their_column();
-    test_ota_slot_pair_reads_as_a_journey();
-    test_power_sheet_reports_update_and_slot();
+    test_status_sheet_is_the_device_in_nine_rows();
+    test_status_headline_says_the_worst_thing_first();
+    test_status_face_follows_the_links();
     test_shade_readouts_survive_at_100();
 
     test_never_leaves_shell_radius();

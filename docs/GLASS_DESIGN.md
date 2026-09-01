@@ -266,18 +266,29 @@ caption already names the place, and the rows are the data. The sheet says
 24-glyph text to a 10-glyph column — the truncation-of-a-truncation the DESK
 sheet was cured of.
 
-**STATUS — one status screen.** POWER renamed, its measured battery arc kept
-as the focal object. The headline is the percentage plus the one word that
-matters most, in this order: an update in flight (`UPDATE 42%`, or the state
-noun while it rings), `NO BATTERY`, `LOW`, `NO LINK`, `CHARGING` (`FULL` at
-100 %, because thirteen glyphs do not fit), `USB`, then nothing — the quiet a
-healthy device deserves (`jr_display.c:3266`). The sheet gathers everything a
-worried owner would look up: LEVEL, VOLTS, USB, CHARGE, UPDATE, SLOT, LINK,
-MIC, UPTIME — nine rows, so the sheet's pitch shrank from 26 to 20 px and its
-band grew to y 358, two rows shy of the caption band; the last row's corner is
-r163 (`jr_display.c:2583`, `test_detail_sheet_rows_stay_inside`). LINK and
-UPTIME read the SESSION word main.c already publishes; there is no RSSI in the
-display any more, so LINK is UP/DOWN.
+**STATUS — the device at a glance (redesigned 2026-09-01, evening).** The
+owner's verdict on the first cut: "the status should not be this junk screen —
+it should show data connections, battery etc." It did not: a yellow ring, a
+dot, `100% USB`, and a sheet of raw PMIC rows. The screen is now, closed: two
+lamps above the focal ring (`LINK` = the session socket is open, `TOOLS` = the
+bridge is ready; ink when up, dim when not, 10 glyphs at y116 so their corners
+sit at r131.5, under the update ring at r140); the battery arc; inside the
+ring the power word (`CHARGING` / `FULL` / `ON USB` / `ON CELL`), the
+percentage at scale 3, and four Wi-Fi bars with the dBm (phone tiers: ≥−55
+four, ≥−65 three, ≥−75 two); and the headline says the worst thing or the
+quiet — `UPDATE 42%`, `NO BATTERY`, `LOW BATTERY`, `NO WIFI`, `NO TOOLS`, else
+`UP 6H 10M`. A closed socket is no longer an alarm: it closes at rest by
+design, so the old `NO LINK` fired on every idle device. Open, the sheet is the
+device in nine facts: BATTERY (`74% 4.02V`), POWER, WIFI (`GOOD -34`), IP (the
+one 15-glyph row, `SP_VAL_MAX`), LINK (`OPEN` / `STANDBY`), TOOLS (`READY` /
+`STARTING` / `NO KEY`), DESK (`LIVE` / `NONE`), RADIO (`SAVING` / `REALTIME` —
+the one power mode this firmware drives, Wi-Fi modem sleep while resting),
+UPDATE (readiness at rest). VOLTS and SLOT folded into their neighbours; MIC
+and the clock live on WATCH and the gold rim; UPTIME is the headline. The
+feed is `jr_display_links_set()` from the 1 Hz block of `publish_shell_state`,
+the same readings `/api/cockpit` serves. The earlier line here — "there is no
+RSSI in the display any more" — is reversed by the owner's brief; the RSSI is
+back, with a glyph, on the screen whose job it is.
 
 **DESK — only while live.** The gate is the one bit main.c already publishes
 for the agent rim, `JR_DISPLAY_SHELL_AGENT` — an agent link, a pairing claim or

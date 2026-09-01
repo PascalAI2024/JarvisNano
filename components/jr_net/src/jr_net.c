@@ -1210,6 +1210,11 @@ esp_err_t jr_net_set_power_save(bool enabled)
     return err;
 }
 
+bool jr_net_power_save_active(void)
+{
+    return s_wifi_started && s_applied_ps != WIFI_PS_NONE;
+}
+
 esp_err_t jr_net_mdns_start(const char *hostname)
 {
     if (hostname == NULL || hostname[0] == '\0' || has_control_or_space(hostname)) {

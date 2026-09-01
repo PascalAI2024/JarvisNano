@@ -164,6 +164,10 @@ esp_err_t jr_net_get_status(jr_net_status_t *out);
  * radio availability. Use false for realtime voice, OTA, and operator mode. */
 esp_err_t jr_net_set_power_save(bool enabled);
 
+/* Whether modem sleep is in force right now — the APPLIED policy, not the
+ * requested one, so the glass reports what the radio is doing. */
+bool jr_net_power_save_active(void);
+
 /* Provisioning uses a device-unique WPA2 AP and an independent random password
  * persisted in NVS. The password is only returned through the explicit local
  * display API below; status/readback never includes it. */
