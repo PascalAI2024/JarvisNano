@@ -2890,7 +2890,9 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         verdict = "uplink-dropping";
     } else if (largest < 8192U || free_psram < 2U * 1024U * 1024U) {
         verdict = "memory-critical";
-    } else if (display.flush_errors > 0U || display.actual_fps < 12U) {
+    } else if (display.flush_errors > 0U || display.actual_fps < 10U) {
+        /* 12 straddled the shell screens' real cadence (measured 12-14 fps
+         * with JARVIS at 19), so a healthy ring screen read as a fault. */
         verdict = "display-fault";
     } else if (jr_audio_dac_muted()) {
         verdict = "audio-fault";

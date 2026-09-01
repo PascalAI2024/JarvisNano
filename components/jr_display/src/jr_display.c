@@ -2898,19 +2898,29 @@ static void sp_veil(const jr_display_ctx_t *ctx, int y1, int y2,
             continue;
         }
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        /* Black stays black: most of the face outside the reactor is 0x0000,
+         * and folding it was the single largest per-frame cost of the shell
+         * (217k pixels a frame, every shell screen). A compare beats the
+         * shift-and-mask on the pixels that need nothing. */
         if (k >= 32) {
             if (swap) {
                 for (int x = lo; x <= hi; ++x) {
-                    row[x] = hud_dim565(row[x], true);
+                    if (row[x] != 0U) {
+                        row[x] = hud_dim565(row[x], true);
+                    }
                 }
             } else {
                 for (int x = lo; x <= hi; ++x) {
-                    row[x] = hud_dim565(row[x], false);
+                    if (row[x] != 0U) {
+                        row[x] = hud_dim565(row[x], false);
+                    }
                 }
             }
         } else {
             for (int x = lo; x <= hi; ++x) {
-                row[x] = hud_fade565(row[x], swap, k);
+                if (row[x] != 0U) {
+                    row[x] = hud_fade565(row[x], swap, k);
+                }
             }
         }
     }
