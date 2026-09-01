@@ -41,6 +41,19 @@ void jr_gemini_ws_set_headers(const char *headers_crlf);
 /* The byte-level transport view to inject under the host-tested Gemini client. */
 jr_ws_transport_t jr_gemini_ws(void);
 
+/* Receive-side burst diagnostics: frame arrival gaps (network) versus queue
+ * wait (the voice task), so a stuttering reply can be blamed correctly. */
+typedef struct {
+    uint32_t frames;             /* frames queued since reset */
+    uint32_t max_gap_ms;         /* longest arrival gap inside a turn (<1.5 s) */
+    uint32_t queue_wait_max_ms;  /* longest a frame sat before the parser took it */
+    uint32_t queue_hwm;          /* most frames waiting at once */
+    uint32_t drops;              /* frames dropped because the queue was full */
+} jr_ws_rx_diag_t;
+
+void jr_gemini_ws_rx_diag(jr_ws_rx_diag_t *out);
+void jr_gemini_ws_rx_diag_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

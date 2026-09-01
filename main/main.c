@@ -2518,6 +2518,10 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
     query_int(req, "barge", &barge);
     query_int(req, "vadclean", &vadclean);
     query_int(req, "pbgain", &pbgain);
+    int preroll = -1, refill = -1;
+    query_int(req, "preroll", &preroll);
+    query_int(req, "refill", &refill);
+    jr_audio_set_jitter_ms(preroll, refill);
     query_int(req, "speakmic", &speakmic);
     jr_audio_set_gains(mic, ref, vol);
     if (speakmic >= 0) {
@@ -2539,12 +2543,14 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
     int n = snprintf(buf, sizeof buf,
                      "{\"ok\":true,\"mic\":%d,\"ref\":%d,\"vol\":%d,"
                      "\"speakmic\":%d,"
-                     "\"barge\":%s,\"vadclean\":%s,\"pbgain\":%d}",
+                     "\"barge\":%s,\"vadclean\":%s,\"pbgain\":%d,"
+                     "\"preroll\":%d,\"refill\":%d}",
                      jr_audio_mic_db(), jr_audio_ref_db(), jr_audio_out_vol(),
                      jr_audio_speak_mic_db(),
                      s_local_barge_enabled ? "true" : "false",
                      atomic_load(&s_vad_use_clean) ? "true" : "false",
-                     jr_audio_playback_gain_percent());
+                     jr_audio_playback_gain_percent(),
+                     jr_audio_preroll_ms(), jr_audio_refill_ms());
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, n);
     return ESP_OK;
@@ -2649,6 +2655,8 @@ static esp_err_t device_health_handler(httpd_req_t *req)
 
     jr_audio_playback_stats_t playback = {0};
     jr_audio_playback_stats(&playback);
+    jr_ws_rx_diag_t rx = {0};
+    jr_gemini_ws_rx_diag(&rx);
 
     const char *verdict = "ok";
     bool repairable = false;
@@ -2674,7 +2682,7 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         verdict = "tool-fault";
     }
 
-    char body[1152];
+    char body[1280];
     int n = snprintf(body, sizeof body,
         "{\"verdict\":\"%s\",\"repairable\":%s,"
         "\"privacy\":%s,\"flip_muted\":%s,\"operator\":%s,"
@@ -2684,7 +2692,10 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         "\"memory\":{\"largest_internal\":%u,\"free_psram\":%u},"
         "\"transport\":{\"would_block\":%u,\"drops\":%u,\"deaths\":%u},"
         "\"playback\":{\"underruns\":%u,\"max_gap_ms\":%u,"
-        "\"low_water_ms\":%d,\"dac_failures\":%u,\"replies\":%u},"
+        "\"low_water_ms\":%d,\"dac_failures\":%u,\"replies\":%u,"
+        "\"prerolls\":%u,\"preroll_short\":%u},"
+        "\"rx\":{\"frames\":%u,\"max_gap_ms\":%u,\"queue_wait_max_ms\":%u,"
+        "\"queue_hwm\":%u,\"drops\":%u},"
         "\"display\":{\"fps\":%u,\"flush_errors\":%u},"
         "\"ota\":{\"active\":%s,\"running\":\"%s\",\"boot\":\"%s\","
         "\"state\":\"%s\",\"received\":%u,\"total\":%u,"
@@ -2704,6 +2715,10 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         (unsigned)playback.underruns, (unsigned)playback.max_gap_ms,
         playback.low_water_valid ? (int)playback.low_water_ms : -1,
         (unsigned)playback.dac_failures, (unsigned)playback.replies_ended,
+        (unsigned)playback.prerolls, (unsigned)playback.preroll_timeouts,
+        (unsigned)rx.frames, (unsigned)rx.max_gap_ms,
+        (unsigned)rx.queue_wait_max_ms, (unsigned)rx.queue_hwm,
+        (unsigned)rx.drops,
         (unsigned)display.actual_fps, (unsigned)display.flush_errors,
         atomic_load(&s_ota_active) ? "true" : "false",
         running != NULL ? running->label : "unknown",
@@ -5033,6 +5048,25 @@ static esp_err_t display_canvas_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* POST /api/debug/audio-stats?reset=1 — zero the playback and receive
+ * counters so a soak, or one spoken turn, is read from a clean slate. */
+static esp_err_t audio_stats_handler(httpd_req_t *req)
+{
+    if (!control_intent_required(req)) {
+        return ESP_OK;
+    }
+    int reset = 0;
+    query_int(req, "reset", &reset);
+    if (reset) {
+        jr_audio_playback_stats_reset();
+        jr_gemini_ws_rx_diag_reset();
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, reset ? "{\"ok\":true,\"reset\":true}"
+                                  : "{\"ok\":true,\"reset\":false}");
+    return ESP_OK;
+}
+
 /* POST /api/debug/input?kind=tap|double|long|swipe
  * [&dir=left|right|up|down] [&x=&y=&edge=1] synthesizes an event through the
  * real queue. "double" enqueues two taps inside the double-tap window. */
@@ -5828,6 +5862,8 @@ static void start_diag_http(void)
           .handler = logs_handler },
         { .uri = "/api/debug/input", .method = HTTP_POST,
           .handler = debug_input_handler },
+        { .uri = "/api/debug/audio-stats", .method = HTTP_POST,
+          .handler = audio_stats_handler },
         { .uri = "/api/ota/upload", .method = HTTP_POST,
           .handler = ota_upload_handler },
     };

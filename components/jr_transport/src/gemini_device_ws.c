@@ -16,6 +16,7 @@
  */
 #include "jr_transport/gemini_device_ws.h"
 
+#include <stdatomic.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -33,7 +34,12 @@ static const char *TAG = "jr_ws";
 /* Bound one inbound WS message; a 24 kHz base64 audio chunk is the large case.
  * Frames whose total payload exceeds this are dropped (bounded memory). */
 #define JR_WS_DEV_RX_MAX     JR_GEMINI_RX_MAX
-#define JR_WS_DEV_RING_DEPTH 24
+/* 24 was measured full: after a server stall TCP delivers the backlog at
+ * once — 121 frames in one four-sentence reply, 24 deep in a few ms — and the
+ * overflow was dropped BEFORE parsing, so whole chunks of speech went missing
+ * while the parser was never more than 81 ms behind. Entries are 12 bytes of
+ * internal RAM; the payloads live in PSRAM. */
+#define JR_WS_DEV_RING_DEPTH 96
 /* Separate TX locking avoids receive contention. A 20 ms socket wait stays
  * below one 32 ms capture frame while absorbing ordinary Wi-Fi jitter; the
  * two-frame uplink batch halves call pressure without exceeding the TX slot. */
@@ -41,9 +47,45 @@ static const char *TAG = "jr_ws";
 
 /* A reassembled inbound frame handed to recv_frame() (heap, PSRAM-first). */
 typedef struct {
-    size_t len;
-    char  *data;   /* NUL-terminated, len bytes + '\0' */
+    size_t   len;
+    char    *data;   /* NUL-terminated, len bytes + '\0' */
+    uint32_t at_ms;  /* when the frame was queued: measures parser lag */
 } jr_ws_frame_t;
+
+/* RECEIVE-SIDE BURST DIAGNOSTICS. A reply that stutters shows up as playback
+ * underruns, but that alone cannot say WHO was late: the network delivering
+ * frames in bursts, or the voice task draining the queue too slowly. Two
+ * clocks answer it — the gap between successive frame ARRIVALS (network)
+ * and how long a frame WAITED in the queue before the parser took it (us).
+ * Gaps over 1.5 s are turn boundaries, not stalls, and are not recorded. */
+#define JR_WS_RX_GAP_TURN_MS 1500u
+static _Atomic uint32_t s_rx_frames;
+static _Atomic uint32_t s_rx_max_gap_ms;
+static _Atomic uint32_t s_rx_queue_wait_max_ms;
+static _Atomic uint32_t s_rx_queue_hwm;
+static _Atomic uint32_t s_rx_drops;
+static uint32_t         s_rx_last_push_ms;   /* websocket task only */
+
+void jr_gemini_ws_rx_diag(jr_ws_rx_diag_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    out->frames = atomic_load(&s_rx_frames);
+    out->max_gap_ms = atomic_load(&s_rx_max_gap_ms);
+    out->queue_wait_max_ms = atomic_load(&s_rx_queue_wait_max_ms);
+    out->queue_hwm = atomic_load(&s_rx_queue_hwm);
+    out->drops = atomic_load(&s_rx_drops);
+}
+
+void jr_gemini_ws_rx_diag_reset(void)
+{
+    atomic_store(&s_rx_frames, 0u);
+    atomic_store(&s_rx_max_gap_ms, 0u);
+    atomic_store(&s_rx_queue_wait_max_ms, 0u);
+    atomic_store(&s_rx_queue_hwm, 0u);
+    atomic_store(&s_rx_drops, 0u);
+}
 
 static struct {
     esp_websocket_client_handle_t client;
@@ -82,8 +124,23 @@ static void push_frame(const char *data, size_t len)
     }
     memcpy(f.data, data, len);
     f.data[len] = '\0';
+    f.at_ms = (uint32_t)now_ms();
+    if (s_rx_last_push_ms != 0u) {
+        const uint32_t gap = f.at_ms - s_rx_last_push_ms;
+        if (gap <= JR_WS_RX_GAP_TURN_MS && gap > atomic_load(&s_rx_max_gap_ms)) {
+            atomic_store(&s_rx_max_gap_ms, gap);
+        }
+    }
+    s_rx_last_push_ms = f.at_ms;
+    atomic_fetch_add(&s_rx_frames, 1u);
     if (xQueueSend(s_ws.rx_ring, &f, 0) != pdTRUE) {
+        atomic_fetch_add(&s_rx_drops, 1u);
         free(f.data);                        /* ring full -> drop-oldest-less: drop */
+        return;
+    }
+    const uint32_t waiting = (uint32_t)uxQueueMessagesWaiting(s_ws.rx_ring);
+    if (waiting > atomic_load(&s_rx_queue_hwm)) {
+        atomic_store(&s_rx_queue_hwm, waiting);
     }
 }
 
@@ -277,6 +334,10 @@ static int dev_recv_frame(void *ctx, char *buf, size_t cap)
     buf[n] = '\0';
     free(f.data);
     s_ws.last_rx_ms = now_ms();
+    const uint32_t waited = (uint32_t)s_ws.last_rx_ms - f.at_ms;
+    if (waited > atomic_load(&s_rx_queue_wait_max_ms)) {
+        atomic_store(&s_rx_queue_wait_max_ms, waited);
+    }
     return (int)n;
 }
 

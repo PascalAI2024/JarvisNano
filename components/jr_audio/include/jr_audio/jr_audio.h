@@ -71,6 +71,8 @@ typedef struct {
     uint32_t low_water_ms;    /* emptiest the ring was when a chunk arrived */
     uint32_t dac_failures;    /* codec write errors */
     uint32_t replies_ended;   /* ring-empty episodes followed by silence */
+    uint32_t prerolls;        /* replies that started with a full pre-roll */
+    uint32_t preroll_timeouts;/* replies that started short (max wait hit) */
 } jr_audio_playback_stats_t;
 
 void jr_audio_playback_stats(jr_audio_playback_stats_t *out);
@@ -101,6 +103,14 @@ void jr_audio_set_speak_mic_db(int speak_db);
 /* Readbacks for the values above. /api/debug/gain used to echo its own
  * request arguments (-1 = "unchanged") as if they were device state, so a
  * plain read of the tuning returned three impossible numbers. */
+/* Jitter buffer: lead built before a reply's first word (preroll) and the
+ * larger lead rebuilt after a hole (refill), both in ms; -1 leaves a value
+ * unchanged. Measured need: Gemini paces audio near real time with stalls
+ * over a second, so the speaker must run behind the network to be smooth. */
+void jr_audio_set_jitter_ms(int preroll_ms, int refill_ms);
+int  jr_audio_preroll_ms(void);
+int  jr_audio_refill_ms(void);
+
 int jr_audio_mic_db(void);
 int jr_audio_ref_db(void);
 int jr_audio_out_vol(void);

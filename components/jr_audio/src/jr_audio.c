@@ -187,6 +187,50 @@ static _Atomic uint32_t       s_pb_gaps_ended_by_silence;
 static uint32_t               s_pb_gap_start_ms;        /* feeder task only */
 static bool                   s_pb_in_gap;              /* feeder task only */
 
+/* START-OF-REPLY PRE-ROLL. The feeder used to play the first sample the
+ * moment it landed, so the speaker was only ever as far ahead of the network
+ * as the last chunk — and the network delivers Gemini's audio in bursts with
+ * holes between them (measured on one turn: frames arriving 9 deep with gaps
+ * to 1.2 s, the parser never more than 91 ms behind, and the ring down to
+ * 8 ms). Each hole came straight out of the speaker as a stutter.
+ *
+ * A reply now starts only once PB_PREROLL_SAMPLES are buffered, or after
+ * PB_PREROLL_MAX_WAIT_MS with whatever has arrived, so the first burst's
+ * lead absorbs the holes that follow. It costs up to 300 ms before the first
+ * word of a reply that already took seconds to think; it does not apply to
+ * diagnostic tones, which are UI feedback and must be immediate. The ring is
+ * 512 KiB (~11 s), so holding never drops anything. Priming re-arms once the
+ * ring has been empty for PB_GAP_REPLY_MS: the next reply, not a hole. */
+/* Measured 2026-09-01 over nine spoken turns: server stalls inside a reply
+ * ran 0.8-1.34 s. At 300/700 one hole of 81-407 ms per turn survived; at
+ * 600/1000 none did, for +0.3 s before a first word that already waits
+ * 2-4 s on thinking. Tune live: /api/debug/gain?preroll=&refill=. */
+#define PB_PREROLL_MS_DEFAULT    600u   /* lead before a reply's first word */
+#define PB_REFILL_MS_DEFAULT     1000u  /* lead rebuilt after a hole         */
+#define PB_PRIME_MAX_WAIT_MS     1200u  /* never hold longer than this       */
+static _Atomic uint32_t       s_pb_preroll_ms = PB_PREROLL_MS_DEFAULT;
+static _Atomic uint32_t       s_pb_refill_ms  = PB_REFILL_MS_DEFAULT;
+static bool                   s_pb_primed;              /* feeder task only */
+static uint32_t               s_pb_prime_target;        /* samples; feeder  */
+static uint32_t               s_pb_prime_start_ms;      /* feeder task only */
+static uint32_t               s_pb_empty_since_ms;      /* feeder task only */
+static _Atomic bool           s_pb_skip_prime;          /* diagnostic queued */
+static _Atomic uint32_t       s_pb_prerolls;
+static _Atomic uint32_t       s_pb_preroll_timeouts;
+
+void jr_audio_set_jitter_ms(int preroll_ms, int refill_ms)
+{
+    if (preroll_ms >= 0) {
+        atomic_store(&s_pb_preroll_ms, preroll_ms > 3000 ? 3000u : (uint32_t)preroll_ms);
+    }
+    if (refill_ms >= 0) {
+        atomic_store(&s_pb_refill_ms, refill_ms > 3000 ? 3000u : (uint32_t)refill_ms);
+    }
+}
+
+int jr_audio_preroll_ms(void) { return (int)atomic_load(&s_pb_preroll_ms); }
+int jr_audio_refill_ms(void)  { return (int)atomic_load(&s_pb_refill_ms); }
+
 static bool pb_tail_active(uint32_t now_ms)
 {
     const uint32_t tail = atomic_load(&s_playback_tail_until_ms);
@@ -504,6 +548,9 @@ static size_t pb_enqueue(const int16_t *frame, size_t samples,
     portENTER_CRITICAL(&s_pb_lock);
     /* Recheck under the ring lock so a normal writer that raced the chirp flag
      * cannot interleave with its all-or-nothing enqueue. */
+    if (diagnostic) {
+        atomic_store(&s_pb_skip_prime, true);
+    }
     if (diagnostic || !atomic_load(&s_diag_chirp_enqueuing)) {
         const size_t level = pb_count_locked();
         size_t free_slots = PB_RING_SAMPLES - 1 - level;
@@ -606,15 +653,34 @@ static void feeder_task(void *arg)
 {
     (void)arg;
     int16_t chunk[PB_FEED_CHUNK];
+    s_pb_prime_target = atomic_load(&s_pb_preroll_ms) * 24u;
     for (;;) {
         if (atomic_load(&s_muted) || !s_dac_open) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
         size_t got = 0;
+        const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        bool hold = false;
         portENTER_CRITICAL(&s_pb_lock);
         size_t avail = pb_count_locked();
-        size_t take = (avail < PB_FEED_CHUNK) ? avail : PB_FEED_CHUNK;
+        if (avail > 0 && !s_pb_primed) {
+            if (atomic_exchange(&s_pb_skip_prime, false)) {
+                s_pb_primed = true;                 /* a tone: play it now */
+            } else if (avail >= s_pb_prime_target) {
+                s_pb_primed = true;
+                atomic_fetch_add(&s_pb_prerolls, 1u);
+            } else if (s_pb_prime_start_ms == 0u) {
+                s_pb_prime_start_ms = now_ms;
+                hold = true;
+            } else if (now_ms - s_pb_prime_start_ms >= PB_PRIME_MAX_WAIT_MS) {
+                s_pb_primed = true;                 /* short reply: go */
+                atomic_fetch_add(&s_pb_preroll_timeouts, 1u);
+            } else {
+                hold = true;
+            }
+        }
+        size_t take = hold ? 0 : (avail < PB_FEED_CHUNK) ? avail : PB_FEED_CHUNK;
         for (size_t i = 0; i < take; ++i) {
             chunk[i] = s_pb[s_pb_head];
             s_pb_head = (s_pb_head + 1) % PB_RING_SAMPLES;
@@ -622,35 +688,56 @@ static void feeder_task(void *arg)
         got = take;
         portEXIT_CRITICAL(&s_pb_lock);
 
-        const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        /* Data is back (held or not): close any hole that was open. The gap
+         * is measured to ARRIVAL, so a refill hold is not counted as more
+         * hole than the network actually left. */
+        if (avail > 0) {
+            s_pb_empty_since_ms = 0u;
+            if (s_pb_in_gap) {
+                const uint32_t gap = now_ms - s_pb_gap_start_ms;
+                s_pb_in_gap = false;
+                if (gap <= PB_GAP_REPLY_MS) {
+                    atomic_fetch_add(&s_pb_underruns, 1u);
+                    if (gap > atomic_load(&s_pb_max_gap_ms)) {
+                        atomic_store(&s_pb_max_gap_ms, gap);
+                    }
+                    ESP_LOGW(TAG, "playback underrun: %u ms hole mid-reply",
+                             (unsigned)gap);
+                }
+            }
+        }
+        if (hold) {
+            vTaskDelay(1);
+            continue;
+        }
         if (got == 0) {
-            /* The ring ran dry while the tail of the last write was still
-             * audible: a candidate gap. Whether it was a hole or the end of
-             * the reply is decided when (if) audio resumes. */
             if (!s_pb_in_gap && pb_tail_active(now_ms)) {
+                /* The ring ran dry while the tail of the last write was still
+                 * audible: a hole. Whatever arrives next must rebuild a
+                 * bigger lead before playing, so the NEXT hole is absorbed. */
                 s_pb_in_gap = true;
                 s_pb_gap_start_ms = now_ms;
+                s_pb_primed = false;
+                s_pb_prime_start_ms = 0u;
+                s_pb_prime_target = atomic_load(&s_pb_refill_ms) * 24u;
             } else if (s_pb_in_gap &&
                        now_ms - s_pb_gap_start_ms > PB_GAP_REPLY_MS) {
                 s_pb_in_gap = false;    /* silence followed: a reply ended */
                 atomic_fetch_add(&s_pb_gaps_ended_by_silence, 1u);
             }
+            /* Once the ring has been empty long enough that whatever comes
+             * next is a new reply, re-arm the smaller start-of-reply lead. */
+            if (s_pb_empty_since_ms == 0u) {
+                s_pb_empty_since_ms = now_ms;
+            } else if (now_ms - s_pb_empty_since_ms > PB_GAP_REPLY_MS) {
+                s_pb_primed = false;
+                s_pb_prime_start_ms = 0u;
+                s_pb_prime_target = atomic_load(&s_pb_preroll_ms) * 24u;
+            }
             /* CONFIG_FREERTOS_HZ=100: pdMS_TO_TICKS(5) truncates to zero and
              * merely yields to equal-priority tasks, starving IDLE0 forever. */
             vTaskDelay(1);
             continue;
-        }
-        if (s_pb_in_gap) {
-            const uint32_t gap = now_ms - s_pb_gap_start_ms;
-            s_pb_in_gap = false;
-            if (gap <= PB_GAP_REPLY_MS) {
-                atomic_fetch_add(&s_pb_underruns, 1u);
-                if (gap > atomic_load(&s_pb_max_gap_ms)) {
-                    atomic_store(&s_pb_max_gap_ms, gap);
-                }
-                ESP_LOGW(TAG, "playback underrun: %u ms hole mid-reply",
-                         (unsigned)gap);
-            }
         }
         atomic_store(&s_feeder_writing, true);
         int wr = esp_codec_dev_write(s_dac, chunk,
@@ -841,6 +928,8 @@ void jr_audio_playback_stats(jr_audio_playback_stats_t *out)
     out->low_water_ms = low == UINT32_MAX ? 0u : low / 24u;
     out->dac_failures = atomic_load(&s_pb_dac_failures);
     out->replies_ended = atomic_load(&s_pb_gaps_ended_by_silence);
+    out->prerolls = atomic_load(&s_pb_prerolls);
+    out->preroll_timeouts = atomic_load(&s_pb_preroll_timeouts);
 }
 
 void jr_audio_playback_stats_reset(void)
@@ -850,6 +939,8 @@ void jr_audio_playback_stats_reset(void)
     atomic_store(&s_pb_low_water_samples, UINT32_MAX);
     atomic_store(&s_pb_dac_failures, 0u);
     atomic_store(&s_pb_gaps_ended_by_silence, 0u);
+    atomic_store(&s_pb_prerolls, 0u);
+    atomic_store(&s_pb_preroll_timeouts, 0u);
 }
 
 bool jr_audio_playback_pending(void)
