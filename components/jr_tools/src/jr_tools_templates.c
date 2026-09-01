@@ -30,6 +30,15 @@ static const template_desc_t s_templates[] = {
      "confidence:\"confirmed\"})"},
     {"current_time", "timezone", 79U, true,
      "return await jarvis.time(", ")"},
+    /* The WEATHER screen's own fetch: no model, no arguments, the city in
+     * code (Fort Lauderdale) per the repo rule that only endpoints and keys
+     * live in NVS. Projected to what the glass shows, nothing more. Metric
+     * in, converted on the device. */
+    {"weather_glance", "query", 1U, true,
+     "const w=await jarvis.weather(26.1224,-80.1373);const c=w.current||{};"
+     "const d=(w.daily||[])[0]||{};return {t:c.temperature,f:c.feelsLike,"
+     "h:c.humidity,c:String(c.condition||\"\"),ws:c.windSpeed,hi:d.tempMax,"
+     "lo:d.tempMin,r:d.precipitation,dc:String(d.condition||\"\")}", ""},
     /* PROJECTED, not raw: three raw matches were 4-5 KB against a 3 KB
      * device budget and were cut mid-JSON, so Gemini read a broken answer.
      * Eight matches projected to {tool, what, params} are ~1.6 KB, and the

@@ -401,11 +401,6 @@ esp_err_t jr_display_set_brightness(uint8_t percent);
 #define JR_DISPLAY_SHELL_R_MAX   214   /* hard clip; privacy ring is beyond */
 #define JR_DISPLAY_SPACE_MS      260   /* space-to-space slide, ease-in-out */
 #define JR_DISPLAY_SPACE_HOLD_MS 900   /* page indicator lingers this long  */
-#define JR_DISPLAY_TOOLS_MAX     8     /* one petal per declared tool: the
-                                        * catalog has eight, and a cap of 4
-                                        * dropped the last-run index for the
-                                        * other four, so EXECUTE, VOLUME,
-                                        * LIGHT and ASK all read LAST NONE */
 
 typedef enum {
     JR_DISPLAY_SPACE_JARVIS = 0,
@@ -448,7 +443,8 @@ typedef struct {
     int16_t  feels_f;
     int16_t  hi_f;
     int16_t  lo_f;
-    uint8_t  rain_pct;       /* today's precipitation chance, 0..100        */
+    uint8_t  rain_pct;       /* today's rain 0..100: amount scaled, 25 mm = 100
+                              * (the source has no probability; none is invented) */
     uint8_t  humidity_pct;
     uint8_t  wind_mph;
     jr_display_sky_t sky;
@@ -538,9 +534,6 @@ void jr_display_jarvis_set_session(bool linked, uint16_t turns,
 void jr_display_desk_set_task(const char *task, uint8_t progress,
                               jr_display_agent_state_t state);
 
-/* TOOLS focal object and detail: the capabilities this device can actually
- * reach. names[0..n) are copied; n is clamped to JR_DISPLAY_TOOLS_MAX. recent
- * is the index of the last-used tool, or <0 for none. */
 /* jr_display_tools_set() is gone with the TOOLS screen; see ACTIVITY. */
 
 /* ---- firmware update, shell-wide ----------------------------------------

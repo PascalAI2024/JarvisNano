@@ -987,6 +987,230 @@ static const char *device_tool_last_name(void)
         ? s_device_tool_fns[slot - 1U].name : "none";
 }
 
+/* ---- WEATHER: the glass's own fetch through the tool worker ---------------
+ *
+ * A device-originated job, not a Gemini one: it carries a reserved call id,
+ * never reaches the orchestrator, and never produces a toolResponse. Fetched
+ * once after the worker is ready and then only when the WEATHER screen is
+ * entered and the data is over ten minutes old — never on a timer, which
+ * would drag Wi-Fi out of min-modem during rest. */
+#define LOCAL_WEATHER_CALL_ID   0x4C574558u          /* "LWEX" */
+#define LOCAL_WEATHER_CALL_TEXT "local:weather"
+#define WEATHER_REFRESH_MS      600000u
+#define WEATHER_FIRST_FETCH_MS  20000u
+static uint32_t s_weather_last_fetch_ms;   /* app task only; 0 = never */
+static bool     s_weather_inflight;        /* app task only */
+static jr_display_weather_t s_weather;     /* last good data; app task only */
+
+static jr_display_sky_t weather_sky_from(const char *cond)
+{
+    char low[40];
+    size_t i = 0;
+    for (; cond != NULL && cond[i] != '\0' && i + 1U < sizeof low; ++i) {
+        low[i] = (char)tolower((unsigned char)cond[i]);
+    }
+    low[i] = '\0';
+    if (strstr(low, "thunder") || strstr(low, "storm")) return JR_DISPLAY_SKY_STORM;
+    if (strstr(low, "snow") || strstr(low, "sleet") || strstr(low, "ice")) return JR_DISPLAY_SKY_SNOW;
+    if (strstr(low, "rain") || strstr(low, "drizzle") || strstr(low, "shower")) return JR_DISPLAY_SKY_RAIN;
+    if (strstr(low, "fog") || strstr(low, "mist") || strstr(low, "haze")) return JR_DISPLAY_SKY_FOG;
+    if (strstr(low, "overcast")) return JR_DISPLAY_SKY_CLOUDS;
+    if (strstr(low, "cloud")) return JR_DISPLAY_SKY_PARTLY;
+    if (strstr(low, "clear") || strstr(low, "sun")) return JR_DISPLAY_SKY_CLEAR;
+    return JR_DISPLAY_SKY_UNKNOWN;
+}
+
+static int16_t c_to_f(double c) { return (int16_t)lrint(c * 9.0 / 5.0 + 32.0); }
+
+static void weather_apply_result(const jr_tool_result_t *result, uint32_t now)
+{
+    s_weather_inflight = false;
+    s_weather_last_fetch_ms = now;
+    if (result->status != JR_TOOL_STATUS_OK) {
+        ESP_LOGW(TAG, "weather: fetch failed (%s); glass keeps %s data",
+                 jr_tools_status_name(result->status),
+                 s_weather.valid ? "the previous" : "no");
+        return;
+    }
+    cJSON *root = cJSON_Parse(result->response_json);
+    cJSON *r = cJSON_GetObjectItemCaseSensitive(root, "result");
+    if (r == NULL) {
+        r = root;
+    }
+    const cJSON *t = cJSON_GetObjectItemCaseSensitive(r, "t");
+    if (!cJSON_IsNumber(t)) {
+        ESP_LOGW(TAG, "weather: no temperature in result; keeping old data");
+        cJSON_Delete(root);
+        return;
+    }
+    jr_display_weather_t w = {0};
+    const cJSON *f = cJSON_GetObjectItemCaseSensitive(r, "f");
+    const cJSON *h = cJSON_GetObjectItemCaseSensitive(r, "h");
+    const cJSON *c = cJSON_GetObjectItemCaseSensitive(r, "c");
+    const cJSON *ws = cJSON_GetObjectItemCaseSensitive(r, "ws");
+    const cJSON *hi = cJSON_GetObjectItemCaseSensitive(r, "hi");
+    const cJSON *lo = cJSON_GetObjectItemCaseSensitive(r, "lo");
+    const cJSON *rain = cJSON_GetObjectItemCaseSensitive(r, "r");
+    w.valid = true;
+    w.temp_f = c_to_f(t->valuedouble);
+    w.feels_f = cJSON_IsNumber(f) ? c_to_f(f->valuedouble) : w.temp_f;
+    w.hi_f = cJSON_IsNumber(hi) ? c_to_f(hi->valuedouble) : w.temp_f;
+    w.lo_f = cJSON_IsNumber(lo) ? c_to_f(lo->valuedouble) : w.temp_f;
+    w.humidity_pct = cJSON_IsNumber(h) && h->valuedouble >= 0 && h->valuedouble <= 100
+                         ? (uint8_t)lrint(h->valuedouble) : 0U;
+    w.wind_mph = cJSON_IsNumber(ws) && ws->valuedouble >= 0
+                     ? (uint8_t)(lrint(ws->valuedouble * 0.621) > 255 ? 255 : lrint(ws->valuedouble * 0.621)) : 0U;
+    double mm = cJSON_IsNumber(rain) && rain->valuedouble > 0 ? rain->valuedouble : 0.0;
+    w.rain_pct = (uint8_t)(mm >= 25.0 ? 100 : lrint(mm * 4.0));
+    const char *cond = cJSON_IsString(c) && c->valuestring ? c->valuestring : "";
+    w.sky = weather_sky_from(cond);
+    size_t n = 0;
+    for (; cond[n] != '\0' && n + 1U < sizeof w.condition; ++n) {
+        w.condition[n] = (char)toupper((unsigned char)cond[n]);
+    }
+    w.condition[n] = '\0';
+    w.fetched_ms = now;
+    cJSON_Delete(root);
+    s_weather = w;
+    jr_display_weather_set(&s_weather);
+    static bool s_rain_announced;
+    if (!s_rain_announced && w.rain_pct >= 40U) {
+        /* Once per boot, one line, no speech: the glass mentions the day. */
+        s_rain_announced = true;
+        jr_display_caption_set("RAIN TODAY");
+    }
+    ESP_LOGI(TAG, "weather: %d F (%s) hi %d lo %d rain %u%% wind %u mph",
+             w.temp_f, w.condition, w.hi_f, w.lo_f, w.rain_pct, w.wind_mph);
+}
+
+static const char *screen_voice_prompt(jr_display_space_t space)
+{
+    switch (space) {
+    case JR_DISPLAY_SPACE_WEATHER:
+        return "In two sentences, brief me on the weather in Fort Lauderdale "
+               "right now, with today's high and low, in Fahrenheit.";
+    case JR_DISPLAY_SPACE_WATCH:
+        return "Tell me the time and today's date in one short sentence.";
+    case JR_DISPLAY_SPACE_ACTIVITY:
+        return "In two sentences, recap what we talked about most recently.";
+    default:
+        return NULL;
+    }
+}
+
+/* LIFT TO GLANCE. Picked up after a rest, the glass shows the weather for a
+ * few seconds and then goes home by itself — a device that noticed you,
+ * without saying a word. Any input keeps whatever screen is up. */
+#define GLANCE_MS 8000u
+static uint32_t s_glance_until_ms;        /* voice task only; 0 = none */
+
+static void weather_maybe_fetch(uint32_t now)
+{
+    if (s_weather_inflight || !atomic_load(&s_tool_diag.worker_ready) ||
+        !jr_tools_is_configured()) {
+        return;
+    }
+    const bool first = s_weather_last_fetch_ms == 0U;
+    const bool on_screen = jr_display_nav_space() == JR_DISPLAY_SPACE_WEATHER;
+    if (first ? now < WEATHER_FIRST_FETCH_MS
+              : !(on_screen && now - s_weather_last_fetch_ms >= WEATHER_REFRESH_MS)) {
+        return;
+    }
+    jr_tool_job_t job = {
+        .call_id = LOCAL_WEATHER_CALL_ID,
+        .call_id_text = LOCAL_WEATHER_CALL_TEXT,
+        .name = "weather_glance",
+        .args_json = "{}",
+        .session_gen = s_app.orch.session.session_gen,
+    };
+    if (jr_tools_submit(&job) == ESP_OK) {
+        s_weather_inflight = true;
+        s_weather_last_fetch_ms = now;    /* also rate-limits a failing fetch */
+        ESP_LOGI(TAG, "weather: fetch submitted (%s)", first ? "first" : "screen entered");
+    }
+}
+
+/* ---- ACTIVITY: what Jarvis actually did this turn ------------------------
+ *
+ * The kind is decided when a tool is dispatched (WEB, WEATHER, PRICE, ...),
+ * the summary is the first words Jarvis spoke in reply, captured from the
+ * transcript's HEAD — the caption accumulator keeps the newest words, which
+ * is right for a live caption and wrong for a log line. Pushed at turn end. */
+static void title_shorten(char *dst, size_t cap, const char *src);
+static char s_turn_kind[9] = "SAID";     /* voice task only */
+static char s_turn_head[40];             /* voice task only */
+
+static void activity_note_tool(const char *tool_name, const char *args_json)
+{
+    const char *kind = NULL;
+    char target[JR_TOOLS_NAME_CAP] = {0};
+    if (tool_name != NULL && strcmp(tool_name, "execute_tool") == 0) {
+        cJSON *args = cJSON_Parse(args_json != NULL ? args_json : "{}");
+        const cJSON *t = cJSON_GetObjectItemCaseSensitive(args, "tool");
+        if (cJSON_IsString(t) && t->valuestring != NULL) {
+            strlcpy(target, t->valuestring, sizeof target);
+        }
+        cJSON_Delete(args);
+        if (strncmp(target, "websearch", 9) == 0 || strncmp(target, "research", 8) == 0 ||
+            strncmp(target, "fetch", 5) == 0) kind = "WEB";
+        else if (strncmp(target, "weather", 7) == 0) kind = "WEATHER";
+        else if (strncmp(target, "wiki", 4) == 0) kind = "WIKI";
+        else if (strncmp(target, "crypto", 6) == 0 || strncmp(target, "stocks", 6) == 0 ||
+                 strncmp(target, "exchange", 8) == 0 || strncmp(target, "massive", 7) == 0) kind = "PRICE";
+        else if (strncmp(target, "memory", 6) == 0) kind = "MEMORY";
+        else if (strncmp(target, "time", 4) == 0) kind = "TIME";
+        else if (target[0] != '\0') {
+            /* the service name, uppercased, at most 8 glyphs */
+            size_t n = 0;
+            for (; target[n] != '\0' && target[n] != '.' && n < 8U; ++n) {
+                s_turn_kind[n] = (char)toupper((unsigned char)target[n]);
+            }
+            s_turn_kind[n] = '\0';
+            return;
+        }
+    } else if (tool_name != NULL) {
+        if (strcmp(tool_name, "recall_memory") == 0 || strcmp(tool_name, "remember") == 0) kind = "MEMORY";
+        else if (strcmp(tool_name, "current_time") == 0) kind = "TIME";
+        else if (strcmp(tool_name, "ask_user") == 0) kind = "ASK";
+        else if (strcmp(tool_name, "search_tools") == 0) kind = "SEARCH";
+    }
+    if (kind != NULL) {
+        strlcpy(s_turn_kind, kind, sizeof s_turn_kind);
+    }
+}
+
+static void activity_note_said(const char *text)
+{
+    const size_t have = strlen(s_turn_head);
+    if (have + 1U >= sizeof s_turn_head || text == NULL) {
+        return;
+    }
+    strlcpy(s_turn_head + have, text, sizeof s_turn_head - have);
+}
+
+static void activity_note_turn_end(void)
+{
+    /* Skip leading spaces the transcript chunks carry, then cut to 24 glyphs
+     * at a word boundary with the mark title_shorten() uses. */
+    const char *src = s_turn_head;
+    while (*src == ' ') {
+        src++;
+    }
+    if (*src != '\0') {
+        /* One 24-glyph row holds "KIND summary": the summary gets what the
+         * tag and its space leave, cut at a word with the mark. */
+        char summary[25];
+        size_t cap = 24U - strlen(s_turn_kind) - 1U;
+        if (cap < 8U) {
+            cap = 8U;
+        }
+        title_shorten(summary, cap + 1U, src);
+        jr_display_activity_push(s_turn_kind, summary);
+    }
+    s_turn_head[0] = '\0';
+    strlcpy(s_turn_kind, "SAID", sizeof s_turn_kind);
+}
+
 static void device_tool_record_result(const char *name, jr_tool_status_t status,
                                       uint32_t duration_ms, int http_status)
 {
@@ -1095,6 +1319,11 @@ static void device_tool_drain_results(jr_app_t *a, uint64_t now)
     }
     while (jr_tools_poll(s_tool_poll_result)) {
         jr_tool_result_t *result = s_tool_poll_result;
+        if (result->call_id == LOCAL_WEATHER_CALL_ID) {
+            weather_apply_result(result, (uint32_t)now);
+            memset(result, 0, sizeof(*result));
+            continue;
+        }
         device_tool_record_result(result->name, result->status, result->duration_ms,
                                   result->http_status);
         if (result->status == JR_TOOL_STATUS_CANCELLED) {
@@ -1509,6 +1738,7 @@ static void rich_cb(void *u, const jr_gemini_event_t *ge)
         break;
     case JR_GEV_TURN_COMPLETE:
         a->rx_turn_complete++;
+        activity_note_turn_end();
         s_caption_acc[0] = '\0';   /* next turn starts a fresh caption; the
                                     * finished one stays readable until the
                                     * phase leaves Speaking */
@@ -1634,6 +1864,7 @@ static void rich_cb(void *u, const jr_gemini_event_t *ge)
             ESP_LOGI(TAG, "jarvis says: %.*s", 160, ge->text);
             strlcpy(s_last_said, ge->text, sizeof s_last_said);
             caption_append(ge->text);
+            activity_note_said(ge->text);
         }
         e = jr_event(JR_EV_HEARTBEAT);
         break;
@@ -1831,6 +2062,7 @@ static void voice_exec(void *ctx, const jr_command_t *cmd)
             .args_json = cmd->tool_args,
             .session_gen = cmd->session_gen,
         };
+        activity_note_tool(cmd->tool_name, cmd->tool_args);
         esp_err_t submitted = atomic_load(&s_tool_diag.worker_ready)
             ? jr_tools_submit(&job) : ESP_ERR_INVALID_STATE;
         if (submitted == ESP_OK) {
@@ -2144,30 +2376,7 @@ static void publish_shell_state(uint32_t now_ms)
      * jr_display_set_shell_state(), which draws the agent rim segments. */
     jr_display_desk_set_task(cached_title, cached_progress, cached_state);
 
-    /* TOOLS, with real content at last (N7.14). The petals are the FIRST FOUR
-     * ENTRIES OF THE ACTUAL DECLARED CATALOG — s_device_tool_fns, the same
-     * array handed to Gemini — and the lit one is the tool that genuinely last
-     * executed, from device_tool_last_name()/last_tool_slot.
-     *
-     * The old feed was a hardcoded {SEARCH, MEMORY, WEATHER, MORE} seeded once
-     * with `recent` pinned to 0, so it never reflected anything that ran. This
-     * re-derives every pass, so when nothing has run yet NOTHING is lit —
-     * which is the honest answer, not a decorative default. */
-    {
-        const char *tool_names[JR_DISPLAY_TOOLS_MAX];
-        int tool_n = (int)DEVICE_TOOL_DECL_COUNT;
-        if (tool_n > JR_DISPLAY_TOOLS_MAX) {
-            tool_n = JR_DISPLAY_TOOLS_MAX;
-        }
-        for (int i = 0; i < tool_n; ++i) {
-            tool_names[i] = s_device_tool_labels[i];
-        }
-        const uint32_t slot = atomic_load(&s_tool_diag.last_tool_slot);
-        /* slot is 1-based; 0 means nothing has run. -1 lights no petal. */
-        const int recent = (slot > 0U && (int)slot <= tool_n)
-                               ? (int)slot - 1 : -1;
-        jr_display_tools_set(tool_names, tool_n, recent);
-    }
+    /* TOOLS is gone; ACTIVITY is fed at turn end (activity_note_turn). */
     const jr_state_snapshot_t *snapshot = jr_orch_snapshot(&s_app.orch);
     jr_display_jarvis_set_session(
         s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN,
@@ -6308,6 +6517,30 @@ static void voice_task(void *arg)
             (void)jr_net_set_power_save(!realtime_power);
             uint8_t effective_brightness = (uint8_t)(
                 ((unsigned)mout.brightness * s_brightness_cap + 50U) / 100U);
+            {
+                static uint8_t prev_mood = (uint8_t)JR_MOOD_AWAKE;
+                const bool rested = prev_mood == (uint8_t)JR_MOOD_WHISPER ||
+                                    prev_mood == (uint8_t)JR_MOOD_DREAM;
+                if (mout.changed && mout.mood == JR_MOOD_AWAKE && rested &&
+                    moving && s_weather.valid &&
+                    jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE &&
+                    !jr_display_choices_active()) {
+                    jr_display_nav_set(JR_DISPLAY_SPACE_WEATHER);
+                    jr_display_bloom();
+                    s_glance_until_ms = (uint32_t)now + GLANCE_MS;
+                    ESP_LOGI(TAG, "glance: lifted after rest, showing weather");
+                }
+                prev_mood = (uint8_t)mout.mood;
+            }
+            if (s_glance_until_ms != 0U &&
+                (int32_t)((uint32_t)now - s_glance_until_ms) >= 0) {
+                s_glance_until_ms = 0U;
+                if (jr_display_nav_space() == JR_DISPLAY_SPACE_WEATHER &&
+                    jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE) {
+                    jr_display_nav_home();
+                    jr_display_caption_set("JARVIS");
+                }
+            }
             atomic_store(&s_mood_id, (uint8_t)mout.mood);
             atomic_store(&s_mood_brightness, effective_brightness);
             s_bright_tgt = effective_brightness;
@@ -6844,6 +7077,7 @@ static void voice_task(void *arg)
                 s_watch_peek_until_ms = 0U;
                 caption_reset();   /* a swallowed tap must not strand it */
             }
+            s_glance_until_ms = 0U;   /* a touched glance is a chosen screen */
             /* ANY physical contact is activity. The mood ladder was poked
              * only by TAP, so a hand actively sliding the ring — swipe after
              * swipe — still counted as stillness and the device dozed off
@@ -7295,7 +7529,7 @@ static void voice_task(void *arg)
                      * word sat directly under the hands as pure clutter.
                      * caption_set("") routes to caption_clear(). */
                     static const char *const mode_name[JR_DISPLAY_SPACE_COUNT] =
-                        { "JARVIS", "", "POWER", "DESK", "TOOLS" };
+                        { "JARVIS", "", "WEATHER", "STATUS", "DESK", "ACTIVITY" };
                     const jr_display_space_t sp = jr_display_nav_space();
                     jr_display_caption_set(
                         sp < JR_DISPLAY_SPACE_COUNT ? mode_name[sp] : "JARVIS");
@@ -7409,6 +7643,20 @@ static void voice_task(void *arg)
                         s_ui_shade_open = true;
                     }
                     continue;
+                }
+                /* THE GLASS CAN TALK ABOUT WHAT IT SHOWS. A tap on an open
+                 * sheet asks the assistant to say it aloud — the weather
+                 * brief, the time and date, a recap of what we did. Screens
+                 * are not just pictures; they are the shortest possible
+                 * question. A text turn, so privacy (the mic) is untouched. */
+                if (jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_DETAIL) {
+                    const char *ask = screen_voice_prompt(jr_display_nav_space());
+                    if (ask != NULL) {
+                        jr_display_caption_set("ONE MOMENT");
+                        handle_say(ask);
+                        ESP_LOGI(TAG, "ui: sheet tap speaks the screen");
+                        continue;
+                    }
                 }
                 if (jr_display_nav_overlay() != JR_DISPLAY_OVERLAY_NONE) {
                     continue;
@@ -7688,6 +7936,7 @@ capture_complete:
         ;
 
         publish_shell_state((uint32_t)now);
+        weather_maybe_fetch((uint32_t)now);
 
         /* 5) reflect phase + live amplitude on the face. With the HUD
          * presenter, present() is an atomic mailbox store, so feeding it

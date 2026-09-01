@@ -3060,31 +3060,14 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
 static void sp_focal_activity(const jr_display_ctx_t *ctx, int y1, int y2,
                               uint16_t *pixels, int oy, int st)
 {
-    const bool swap = ctx->board.swap_color_bytes;
-    const int k = (st * 32) / 255;
+    /* No second dim over the disc: the shell veil already quiets the face,
+     * and a per-pixel fold over r<=168 cost ~88k pixels a frame — measured
+     * 10 fps on this screen against 16-18 elsewhere. Text on the veil. */
     const uint16_t ink = sp_tint(ctx, SP_C_INK, st);
     const uint16_t grey = sp_tint(ctx, SP_C_GREY, st);
-    const int cy = SP_CY + oy;
 
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        const int dy = y - cy;
-        const int d2 = JR_DISPLAY_SAFE_R * JR_DISPLAY_SAFE_R - dy * dy;
-        if (d2 > 0) {
-            const int half = sp_isqrt(d2);
-            int lo = SP_CX - half, hi = SP_CX + half;
-            if (sp_clip(y, &lo, &hi)) {
-                if (k >= 32) {
-                    for (int x = lo; x <= hi; ++x) {
-                        row[x] = hud_dim565(row[x], swap);
-                    }
-                } else if (k > 0) {
-                    for (int x = lo; x <= hi; ++x) {
-                        row[x] = hud_fade565(row[x], swap, k);
-                    }
-                }
-            }
-        }
         if (s_act_rows == 0) {
             static const char k_empty[] = "NOTHING YET";
             const int elen = (int)(sizeof k_empty - 1U);
