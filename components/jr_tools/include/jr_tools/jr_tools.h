@@ -93,6 +93,13 @@ bool jr_tools_is_configured(void);
  * queue is full; no caller pointer is retained. */
 esp_err_t jr_tools_submit(const jr_tool_job_t *job);
 
+/* session_gen for a job the DEVICE owns (a weather glance, a status probe):
+ * never stale, whatever Gemini session is or is not open. A job tagged with
+ * the orchestrator's generation is dropped once that session closes, which
+ * is right for a model's tool call and wrong for the glass's own fetch —
+ * the weather could not refresh on an idle device until this existed. */
+#define JR_TOOLS_SESSION_ANY 0xFFFFFFFFu
+
 /* Marks a queued or in-flight call cancelled. Matching prefers the original
  * Gemini id when supplied, avoiding hash-collision ambiguity. The blocking
  * HTTPS operation is not killed cross-task; its result is suppressed and a

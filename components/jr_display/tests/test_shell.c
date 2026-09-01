@@ -358,12 +358,15 @@ static void stage_ring_at_rest(int space, jr_display_ota_state_t st,
     sp_compose();
 }
 
+static int g_chip_c = 52;   /* the die reading the links helper publishes */
+
 static void links(bool wifi, int rssi, const char *ip, bool link, uint8_t tools,
                   bool desk, bool saving)
 {
     jr_display_links_t l = {
         .wifi_up = wifi, .rssi_dbm = (int8_t)rssi, .link_open = link,
         .tools = tools, .desk_live = desk, .radio_saving = saving,
+        .chip_c = (int8_t)g_chip_c, .chip_c_valid = g_chip_c > -100,
     };
     strncpy(l.ip, ip, sizeof l.ip - 1);
     jr_display_links_set(&l);
@@ -383,7 +386,7 @@ static void test_status_sheet_is_the_device_in_nine_rows(void)
     CHECK(s_detail_rows == 9, "nine rows, got %d", s_detail_rows);
     CHECK(s_detail_rows <= SP_ROWS_MAX, "within the row budget");
     static const char *const order[9] = {
-        "BATTERY", "POWER", "WIFI", "IP", "LINK", "TOOLS", "DESK", "RADIO",
+        "BATTERY", "POWER", "WIFI", "IP", "LINK", "TOOLS", "CHIP", "RADIO",
         "UPDATE",
     };
     for (int i = 0; i < 9; ++i) {
@@ -402,7 +405,7 @@ static void test_status_sheet_is_the_device_in_nine_rows(void)
           "a closed socket is standby, got '%s'", s_detail_value[4]);
     CHECK(strcmp(s_detail_value[5], "NO KEY") == 0, "tools, got '%s'",
           s_detail_value[5]);
-    CHECK(strcmp(s_detail_value[6], "NONE") == 0, "desk, got '%s'",
+    CHECK(strcmp(s_detail_value[6], "52C") == 0, "chip, got '%s'",
           s_detail_value[6]);
     CHECK(strcmp(s_detail_value[7], "REALTIME") == 0, "radio, got '%s'",
           s_detail_value[7]);
@@ -420,8 +423,12 @@ static void test_status_sheet_is_the_device_in_nine_rows(void)
           s_detail_value[4]);
     CHECK(strcmp(s_detail_value[5], "READY") == 0, "tools ready, got '%s'",
           s_detail_value[5]);
-    CHECK(strcmp(s_detail_value[6], "LIVE") == 0, "desk live, got '%s'",
+    g_chip_c = -100;
+    links(true, -70, "10.0.0.7", true, 2U, true, true);
+    sp_compose();
+    CHECK(strcmp(s_detail_value[6], "NONE") == 0, "no thermometer, got '%s'",
           s_detail_value[6]);
+    g_chip_c = 52;
     CHECK(strcmp(s_detail_value[7], "SAVING") == 0, "radio saving, got '%s'",
           s_detail_value[7]);
     links(false, -34, "", false, 1U, false, false);
@@ -501,6 +508,15 @@ static void test_status_headline_says_the_worst_thing_first(void)
     CHECK(strcmp(h, "UP 99D 23H") == 0 && strlen(h) < (size_t)SP_LABEL_CAP,
           "the longest uptime fits, got '%s'", h);
 
+    g_chip_c = 70;
+    links(true, -40, "10.0.0.7", false, 2U, false, true);
+    h = sp_headline(JR_DISPLAY_SPACE_STATUS);
+    CHECK(strcmp(h, "RUNNING HOT") == 0, "70C is hot, got '%s'", h);
+    g_chip_c = 69;
+    links(true, -40, "10.0.0.7", false, 2U, false, true);
+    h = sp_headline(JR_DISPLAY_SPACE_STATUS);
+    CHECK(strncmp(h, "UP ", 3) == 0, "69C is not, got '%s'", h);
+    g_chip_c = 52;
     links(true, -40, "10.0.0.7", false, 0U, false, true);
     h = sp_headline(JR_DISPLAY_SPACE_STATUS);
     CHECK(strcmp(h, "NO TOOLS") == 0, "no key, got '%s'", h);

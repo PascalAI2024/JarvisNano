@@ -26,6 +26,12 @@ are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
   IMU's own motion engine), tap it, or wait for the four-hour check-in, and it
   boots back the way it went, listening if it was listening. STATUS's RADIO
   row shows the one other power mode: Wi-Fi modem sleep while resting.
+- A deaf session gets a fresh one: two utterances in a row with no server
+  frame back within seven seconds and the device reconnects instead of
+  listening to a wall. STATUS gained a CHIP row (die temperature) and a
+  `RUNNING HOT` headline at 70 °C; DESK left the sheet (the ring already says
+  it). The weather can refresh while no session is open. Asked what it can
+  do, Jarvis now names its tools.
 - Lift to glance: picked up after a rest, the weather shows for eight seconds
   and the glass goes home by itself. A first fetch with rain in the day leaves
   one "RAIN TODAY" line.

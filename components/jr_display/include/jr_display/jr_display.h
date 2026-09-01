@@ -635,6 +635,8 @@ typedef struct {
     uint8_t tools;
     bool    desk_live;      /* a companion spoke within the last seconds   */
     bool    radio_saving;
+    int8_t  chip_c;         /* die temperature, Celsius                    */
+    bool    chip_c_valid;
 } jr_display_links_t;
 
 void jr_display_links_set(const jr_display_links_t *links);

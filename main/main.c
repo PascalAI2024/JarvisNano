@@ -46,6 +46,7 @@
 #include "driver/rtc_io.h"
 #include "esp_attr.h"
 #include "esp_sleep.h"
+#include "driver/temperature_sensor.h"
 #include "cJSON.h"
 
 #include "jr_ports/ports.h"
@@ -816,6 +817,26 @@ RTC_DATA_ATTR static uint32_t s_rtc_sleep_magic;
 RTC_DATA_ATTR static uint32_t s_rtc_sleeps;
 RTC_DATA_ATTR static uint8_t  s_rtc_was_listening;
 RTC_DATA_ATTR static uint8_t  s_rtc_armed;
+/* ---- a deaf session gets a fresh one ------------------------------------
+ *
+ * Gemini owns turn detection here, so when the server goes quiet the device
+ * has nothing to wake it: the local VAD sees whole utterances, the uplink
+ * runs, no frame comes back, and the owner talks to a wall. Seen on the
+ * glass 2026-09-01: three questions in 40 s, no reply, then it answered
+ * again as if nothing happened. So every utterance of some length that ends
+ * in Listening starts a clock; ANY server frame or a phase change stops it;
+ * two unanswered in a row are a deaf session and the core is told
+ * StaleDeadline, which is exactly what it does for a keepalive miss —
+ * reconnect with the resume handle. Ambient chatter Gemini rightly ignores
+ * can trip this too; the cost is one reconnect. */
+#define UTT_MIN_MS          800U
+#define UTT_REPLY_WAIT_MS   7000U
+#define UTT_DEAF_COUNT      2U
+static uint32_t         s_utt_start_ms;
+static _Atomic uint32_t s_reply_deadline_ms;
+static uint8_t          s_unanswered;
+static _Atomic uint32_t s_unanswered_total;
+static temperature_sensor_handle_t s_tsens;
 static _Atomic bool     s_sleep_force;
 static _Atomic uint32_t s_sleep_timer_s;
 static int              s_boot_wake_cause;
@@ -1155,7 +1176,7 @@ static void weather_maybe_fetch(uint32_t now)
         .call_id_text = LOCAL_WEATHER_CALL_TEXT,
         .name = "weather_glance",
         .args_json = "{}",
-        .session_gen = s_app.orch.session.session_gen,
+        .session_gen = JR_TOOLS_SESSION_ANY,   /* the glass's own fetch */
     };
     if (jr_tools_submit(&job) == ESP_OK) {
         s_weather_inflight = true;
@@ -1729,6 +1750,9 @@ static void rich_cb(void *u, const jr_gemini_event_t *ge)
         ESP_LOGD(TAG, "rx: server event kind=%d", (int)ge->kind);
     } else {
         ESP_LOGI(TAG, "rx: server event kind=%d", (int)ge->kind);
+    }
+    if (ge->kind != JR_GEV_RESUMPTION_UPDATE && ge->kind != JR_GEV_UNKNOWN) {
+        atomic_store(&s_reply_deadline_ms, 0U);   /* the server is there */
     }
     jr_event_t e = jr_event(JR_EV_HEARTBEAT);
     switch (ge->kind) {
@@ -2474,7 +2498,12 @@ static void publish_shell_state(uint32_t now_ms)
                     BRAIN_DESK_FRESH_MS;
             xSemaphoreGive(s_brain_lock);
         }
+        float chip_c = 0.0f;
+        const bool chip_ok = s_tsens != NULL &&
+            temperature_sensor_get_celsius(s_tsens, &chip_c) == ESP_OK;
         jr_display_links_t links = {
+            .chip_c = (int8_t)(chip_ok ? lroundf(chip_c) : 0),
+            .chip_c_valid = chip_ok,
             .wifi_up = net.sta_connected,
             .rssi_dbm = net.rssi,
             .link_open = s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN,
@@ -7207,6 +7236,28 @@ static void voice_task(void *arg)
             if (ph != JR_ST_THINKING) {
                 s_pending_text_inflight = false;
             }
+            {
+                const uint32_t deadline = atomic_load(&s_reply_deadline_ms);
+                if (deadline != 0U && ph != JR_ST_LISTENING) {
+                    atomic_store(&s_reply_deadline_ms, 0U);
+                    s_unanswered = 0U;
+                } else if (deadline != 0U &&
+                           (int32_t)((uint32_t)now - deadline) >= 0) {
+                    atomic_store(&s_reply_deadline_ms, 0U);
+                    s_unanswered++;
+                    atomic_fetch_add(&s_unanswered_total, 1U);
+                    ESP_LOGW(TAG, "voice: utterance unanswered (%u in a row)",
+                             (unsigned)s_unanswered);
+                    if (s_unanswered >= UTT_DEAF_COUNT) {
+                        s_unanswered = 0U;
+                        ESP_LOGW(TAG, "voice: session is deaf — fresh session");
+                        jr_display_caption_set("RECONNECTING");
+                        jr_orch_inject(&s_app.orch,
+                                       jr_event(JR_EV_STALE_DEADLINE), now);
+                        ph = jr_orch_phase(&s_app.orch);
+                    }
+                }
+            }
             if (ph == JR_ST_LISTENING && s_pending_text_set) {
                 /* Reuse the existing turn-commit transition: it pauses the mic,
                  * enters Thinking, and arms the no-reply watchdog. voice_exec
@@ -8048,6 +8099,7 @@ static void voice_task(void *arg)
                     } else {
                         s_app.vad_starts++;
                         s_listen_speech_active = true;
+                        s_utt_start_ms = (uint32_t)now;
                         ESP_LOGI(TAG, "vad: speech start rms=%.1f floor=%.1f",
                                  (double)td.rms, (double)td.noise_floor);
                         /* Server VAD: Gemini owns turn detection + barge; the
@@ -8109,6 +8161,12 @@ static void voice_task(void *arg)
                     s_listen_speech_active = false;
                     ESP_LOGI(TAG, "vad: speech end rms=%.1f floor=%.1f",
                              (double)td.rms, (double)td.noise_floor);
+                    if (jr_orch_phase(&s_app.orch) == JR_ST_LISTENING &&
+                        !s_pending_text_set &&
+                        (uint32_t)now - s_utt_start_ms >= UTT_MIN_MS) {
+                        atomic_store(&s_reply_deadline_ms,
+                                     (uint32_t)now + UTT_REPLY_WAIT_MS);
+                    }
                     /* Server VAD: Gemini decides end-of-turn (it sends the
                      * response audio, which drives Listening->Speaking). A local
                      * SPEECH_ENDED here would fire audioStreamEnd and commit the
@@ -8211,7 +8269,7 @@ static void init_nvs(void)
  * carry the current local time (POLISH-02): courtesies then match reality
  * ("good morning" actually in the morning) with no tool round-trip. Refreshed
  * on the app task at every SEND_SETUP; the cfg pointer never moves. */
-static char s_sys_instr[1600];
+static char s_sys_instr[2048];
 static void compose_system_instruction(void)
 {
     static const char kBase[] =
@@ -8237,7 +8295,11 @@ static void compose_system_instruction(void)
         "- Never narrate that you are listening or thinking.\n\n"
         "Use the declared tools when current or remembered facts are needed; "
         "never claim a tool succeeded unless its response says so. Be useful, "
-        "not chatty. Serve Sir with quiet competence.";
+        "not chatty. Serve Sir with quiet competence.\n\n"
+        "Capabilities, for when Sir asks what you can do: live web search and "
+        "news, weather, Wikipedia, crypto and stock prices, exchange rates, "
+        "time zones, translation, research papers, a memory of Sir's notes, "
+        "and this device's volume and brightness.";
     char when[160] = "";
     time_t tt = time(NULL);
     struct tm tmv;
@@ -8553,6 +8615,17 @@ void app_main(void)
      * the product (speech out, diagnostics, tool calls) so they draw first and
      * wake absorbs only the remainder. A failed init degrades to tap/lift wake
      * exactly as before Phase 5 — never the other way around. */
+    /* The die thermometer, for STATUS. The owner's "the device is hot" had
+     * no number behind it; now it has one. */
+    {
+        temperature_sensor_config_t tcfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
+        if (temperature_sensor_install(&tcfg, &s_tsens) != ESP_OK ||
+            temperature_sensor_enable(s_tsens) != ESP_OK) {
+            s_tsens = NULL;
+            ESP_LOGW(TAG, "chip temperature sensor unavailable");
+        }
+    }
+
     esp_err_t wake_err = jr_wake_init();
     if (wake_err != ESP_OK) {
         ESP_LOGW(TAG, "wake word unavailable: %s", esp_err_to_name(wake_err));

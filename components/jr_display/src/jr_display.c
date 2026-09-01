@@ -1387,7 +1387,9 @@ static uint32_t s_act_ms[ACT_MAX];
 static volatile uint32_t s_act_count;
 static volatile uint32_t s_power_word = 0xFFu; /* pct | mv<<8 | usb/charge */
 /* STATUS links: bit0 wifi, bit1 session open, bits3:2 tools (0 none,
- * 1 starting, 2 ready), bit4 desk live, bit5 radio saving, bits15:8 -dBm. */
+ * 1 starting, 2 ready), bit4 desk live, bit5 radio saving, bits15:8 -dBm,
+ * bits23:16 die temperature + 40 (0 = no reading). */
+#define SP_CHIP_HOT_C  70
 static volatile uint32_t s_links_word;
 static char s_links_ip[16];
 /* 0 running, 1 panel-off requested, 2 panel is off (render task only). */
@@ -1946,9 +1948,19 @@ static void sp_compose_detail(int space)
             sp_str(s_detail_value[5], 0, SP_COL_MAX,
                    tools == 2u ? "READY" : tools == 1u ? "STARTING" : "NO KEY");
         }
-        sp_str(s_detail_label[6], 0, SP_COL_MAX, "DESK");
-        sp_str(s_detail_value[6], 0, SP_COL_MAX,
-               (lk & (1u << 4)) != 0u ? "LIVE" : "NONE");
+        /* The die thermometer. DESK left this sheet: the ring itself admits
+         * DESK only while a companion is live, so the row said nothing the
+         * ring did not. "Is it hot" deserves a number. */
+        sp_str(s_detail_label[6], 0, SP_COL_MAX, "CHIP");
+        {
+            const uint32_t t = (lk >> 16) & 0xFFu;
+            if (t == 0u) {
+                sp_str(s_detail_value[6], 0, SP_COL_MAX, "NONE");
+            } else {
+                int len = sp_int(s_detail_value[6], 0, SP_COL_MAX, (int)t - 40);
+                (void)sp_str(s_detail_value[6], len, SP_COL_MAX, "C");
+            }
+        }
         /* The chip's power mode, as far as this firmware drives one: the
          * radio sleeps between beacons while the device rests and runs
          * realtime for voice, updates and a companion. The CPU does not
@@ -3427,6 +3439,9 @@ static const char *sp_headline(int space)
         }
         if (((lk >> 2) & 3u) == 0u) {
             return "NO TOOLS";
+        }
+        if (((lk >> 16) & 0xFFu) >= (uint32_t)(SP_CHIP_HOT_C + 40)) {
+            return "RUNNING HOT";
         }
         (void)sp_uptime(buf, sp_str(buf, 0, SP_LABEL_CAP, "UP "), SP_LABEL_CAP,
                         diag_load(&s_jarvis_secs));
@@ -5045,7 +5060,10 @@ void jr_display_links_set(const jr_display_links_t *links)
         (((uint32_t)(links->tools > 2U ? 2U : links->tools)) << 2) |
         (links->desk_live ? (1u << 4) : 0u) |
         (links->radio_saving ? (1u << 5) : 0u) |
-        ((uint32_t)(neg > 255 ? 255 : neg) << 8);
+        ((uint32_t)(neg > 255 ? 255 : neg) << 8) |
+        ((uint32_t)(links->chip_c_valid
+                        ? (links->chip_c < -40 ? 0 : links->chip_c + 40)
+                        : 0) << 16);
     if (__atomic_load_n(&s_links_word, __ATOMIC_ACQUIRE) == word) {
         return;
     }

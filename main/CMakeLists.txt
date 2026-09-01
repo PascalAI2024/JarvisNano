@@ -29,6 +29,7 @@ idf_component_register(
         esp_http_server
         json
         esp_driver_gpio
+        esp_driver_tsens
     EMBED_TXTFILES
         "diagnostics.html"
 )

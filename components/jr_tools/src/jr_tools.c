@@ -161,8 +161,10 @@ static bool job_stale(const owned_job_t *job)
     taskENTER_CRITICAL(&s_tools.lock);
     current = s_tools.session_gen;
     taskEXIT_CRITICAL(&s_tools.lock);
-    /* Generation zero means the composition root has not enabled filtering. */
-    return current != 0U && job->session_gen != current;
+    /* Generation zero means the composition root has not enabled filtering;
+     * SESSION_ANY marks a job the device owns, which no session can orphan. */
+    return current != 0U && job->session_gen != JR_TOOLS_SESSION_ANY &&
+           job->session_gen != current;
 }
 
 static void set_error_json(jr_tool_result_t *result, jr_tool_status_t status)
