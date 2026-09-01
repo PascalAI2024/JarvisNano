@@ -116,8 +116,6 @@ fail loudly or be derived from the tree.
 | N8.2 | **WATCH wipes the battery arc and the gold privacy ring.** `apply_clock_overlay` `memset`s the whole strip after `hud_overlay_frame` has painted the persistent outer band (r215–222) | Code read: the `memset` is unconditional and runs after the frame. Consequence: **mute state is invisible on the one screen you glance at** — which bears directly on "privacy not working well" | Clear only inside the clock bbox (hands reach r190), or repaint battery + privacy after the clear |
 | N8.3 | WATCH printed the word `WATCH` under the hands — the caption is the ring's position indicator, but a clock face is the one screen that identifies itself | Seen in the sweep; hands reach y≈407–423, inside the caption band y360–430, so it also collided with the art | **fixed** — `mode_name[WATCH]` is `""`; `caption_set("")` routes to `caption_clear()` |
 
-**Finding, not this pass's diff:** `native_darken()` in `jr_display.c` has been unused since `569fadc2` (the round plate) and warns on every device build. Delete it in a tidy commit.
-
 ### Reported by the bench, not yet validated — validate before scheduling
 
 | # | Finding | Why it is plausible |
@@ -186,7 +184,7 @@ in the run transcript:
 | ~~S12~~ | **fixed 2026-09-01** — `caption_reset()` at peek expiry and at the input-drain clear. **Panel:** peek showed `4:09 PM`; 12.5 s later the caption band held only the baked face | medium |
 | ~~S13~~ | **fixed 2026-09-01** — the double-tap guard also yields to an open shade (both doors: nav overlay and the HTTP shell bit). Found on the way: ONE tap on an HTTP-opened shade re-derived "closed" and shut it, because the re-derivation read only the nav door; each door now closes its own. **Panel:** taps 270 ms apart stepped volume 60→70→80 with the shade still open | medium |
 | S14 | A contact shorter than one 40 ms poll produces NO event at all — not even PRESS_UP | medium |
-| S15 | The caption chip is documented single-writer but HTTP handlers write it concurrently with the voice task; the OTA "DO NOT UNPLUG" warning can be overwritten | medium |
+| ~~S15~~ | **fixed 2026-09-01** — `jr_display_caption_pin()`: while the OTA warning is pinned, every other set/clear is ignored until the upload path unpins (both failure exits and the success exit do). Host test pins, writes "LISTENING", asserts the warning survives. The chip is still multi-writer for ordinary captions; that is by design, they are ephemeral | medium |
 | ~~S16~~ | **fixed 2026-09-01** — gated like the other nineteen. **Measured:** a POST without `X-JarvisNano-Control` now answers 403 | medium |
 | ~~S17~~ | **fixed 2026-09-01** — `jr_audio` exports readbacks for mic/ref/out-vol/speak-mic and the endpoint reports them (plus `speakmic`, which was applied but never echoed). **Measured:** a bare POST reads `mic 24, ref 12, vol 100, speakmic 21` | medium |
 | ~~S18~~ | **fixed 2026-09-01** — `demo_stop()` dismisses only arcs the reel put up (`s_demo_owns_choices`); a real ask's arcs survive the reel yielding to it | low |

@@ -1,6 +1,6 @@
 # Next Session Handoff
 
-Last reconciled: **2026-08-28**.
+Last reconciled: **2026-09-01**.
 
 The live target is the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** with 32 MB
 flash. The active image is plain ESP-IDF v5 rooted at `main/` and
@@ -66,10 +66,33 @@ is the classified edge-origin swipe.
 - JarvisMCP server policy is live; byte-budgeted device catalog projection and
   cursor semantics remain incomplete.
 
+## What changed on 2026-09-01
+
+- **Voice is smooth.** The speaker now runs behind the network: 600 ms pre-roll
+  before a reply's first word, a 1000 ms lead rebuilt after any hole, and a
+  96-deep WebSocket queue. Cause, measured: Gemini paces native audio near real
+  time with 0.8–1.34 s stalls mid-sentence. Counters live at
+  `/api/device/health` (`playback`, `rx`); reset with
+  `POST /api/debug/audio-stats?reset=1`; tune with
+  `/api/debug/gain?preroll=&refill=`. Probe: reset → `/api/debug/say` → poll →
+  read. See `docs/reference/gemini-live-api-v5.md` §7.
+- **SETTINGS is gone.** The update ring draws on every screen; UPDATE/SLOT rows
+  live on the POWER sheet; volume/brightness readouts are on the shade.
+- **TOOLS shows all eight tools**, the DESK sheet heads with the task, the orbit
+  rail stays in r185–194, one battery red, panic-home clears everything, the
+  shade survives rapid volume taps, the peek caption leaves with the peek.
+- **S21 refuted:** a lease never froze the glass; synthetic swipes were being
+  refused under a lease. They now walk the ring; taps/holds stay physical-only.
+- **Flashing a live device:** esptool could not sync over USB-JTAG while the
+  firmware ran. POST `build/jarvisrobot_v5.bin` to `/api/ota/upload` with
+  `X-JarvisNano-Control: 1` (no token while `JR_DEV_OPEN_DIAGNOSTICS` is 1);
+  ~45 s, back in ~5 s. `jarvisctl ota` no longer refuses without a keychain
+  token.
+
 ## Current blockers
 
-1. **Long-session voice:** run N6.2/N6.4 playback-gap telemetry and a clean
-   30-minute conversation soak.
+1. **Long-session voice:** the counters exist; read them over a clean
+   30-minute conversation soak (N6.4) and record the numbers in PLAN.md.
 2. **JarvisMCP:** replace fixed-count search output with a ≤3071-byte projection
    carrying `has_more` and a cursor; prove voice search + execution.
 3. **Controls shade:** raise settled controls cadence to ≥14 FPS without losing
