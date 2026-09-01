@@ -129,7 +129,16 @@ def main() -> int:
     a = ap.parse_args()
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     ring = ring_from_header(root)
-    print(f"ring ({len(ring)} screens, from jr_display_space_t): {', '.join(ring)}")
+    # DESK is on the ring ONLY while an agent link, a pairing claim or an
+    # operator lease is live (JR_DISPLAY_SHELL_AGENT), and the sweep below
+    # starts by releasing the lease — so a sweep that expected DESK at its
+    # enum slot would caption the screen after it with the wrong name. Walk
+    # the ring the device actually shows, and photograph DESK under the lease
+    # with the other off-ring states.
+    desk_slot = ring.index("DESK") if "DESK" in ring else -1
+    ring_dark = [n for n in ring if n != "DESK"]
+    print(f"ring ({len(ring_dark)} screens, from jr_display_space_t; DESK only "
+          f"while live): {', '.join(ring_dark)}")
     if not a.host:
         print("set JARVIS_DEVICE_HOST or pass --host "
               "(find it with: arp -a | grep jarvisnano)", file=sys.stderr)
@@ -149,7 +158,7 @@ def main() -> int:
     post(a.host, "/api/debug/input?kind=double&x=233&y=233")
     time.sleep(a.settle)
 
-    for i, name in enumerate(ring):
+    for i, name in enumerate(ring_dark):
         if i:
             post(a.host, "/api/debug/input?kind=swipe&dir=down")
             time.sleep(a.settle)
@@ -178,6 +187,18 @@ def main() -> int:
         if im:
             shots.append(caption(im, "COMPANION", "operator lease"))
             print("  COMPANION: ok")
+        # The lease is what puts DESK on the ring: walk to its slot while it
+        # is held, so the sheet shows the screen as the owner would meet it.
+        if desk_slot >= 0:
+            post(a.host, "/api/debug/input?kind=double&x=233&y=233")
+            time.sleep(a.settle)
+            for _ in range(desk_slot):
+                post(a.host, "/api/debug/input?kind=swipe&dir=down")
+                time.sleep(a.settle)
+            im = grab(a.host)
+            if im:
+                shots.append(caption(im, "DESK", "ring, while live"))
+                print("  DESK: ok")
         post(a.host, "/api/operator/lease?release=1", required=False)
 
     if not shots:

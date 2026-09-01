@@ -298,9 +298,9 @@ esp_err_t jr_display_set_brightness(uint8_t percent);
  * shell is built from rings, arcs and a centre — never from a drawer, a card,
  * or a list whose corners the bezel would eat.
  *
- * FIVE SPACES ON ONE VERTICAL RING
+ * SIX SPACES ON ONE VERTICAL RING — FIVE WHILE NOTHING LIVES ON DESK
  *
- *      JARVIS  <->  WATCH  <->  POWER  <->  DESK  <->  TOOLS
+ *      JARVIS <-> WATCH <-> WEATHER <-> STATUS <-> (DESK) <-> ACTIVITY
  *
  * THE RING WRAPS (changed 2026-08-29, owner's endless-scroll model). Sliding
  * down walks forward forever and sliding up walks back; there is no end to hit
@@ -357,10 +357,27 @@ esp_err_t jr_display_set_brightness(uint8_t percent);
  *                at rest — no veil, no label — so every existing scene (face,
  *                caption, ask, watch, canvas, bloom, ripple) is bit-identical
  *                to the pre-shell presenter. Detail: session facts.
+ *      WATCH     hud_overlay_clock's hands; the shell draws no focal object.
+ *      WEATHER   the arc IS the day: a 270-degree gauge for 40..100 F with
+ *                the low-to-high span filled in the sky's accent and the
+ *                temperature now as a bright mark standing proud of the
+ *                ring; a thin inner ring for the chance of rain; the number
+ *                large in the disc with the high/low under it and the age
+ *                above it once it is old enough to matter. Stale turns the
+ *                accents grey; no data draws two bare tracks and no digit.
+ *      STATUS    the battery arc, a headline of the percentage plus the one
+ *                word that matters most now, and the sheet with everything.
  *      DESK      a progress ring around a big percentage: the active task.
- *                Ring colour is the agent state from set_shell_state.
- *      TOOLS     one petal per available capability around a live core; the
- *                most recently used petal is lit and thickened.
+ *                Ring colour is the agent state from set_shell_state. On
+ *                the ring ONLY while JR_DISPLAY_SHELL_AGENT is set; dark,
+ *                the ring steps over it and a DESK under the owner's feet
+ *                moves them on to ACTIVITY.
+ *      ACTIVITY  the last three things Jarvis did, newest first, as rows of
+ *                text on a hushed disc; "NOTHING YET" when nothing has.
+ *
+ * There is no TOOLS space. It was one petal per declared capability with
+ * the last-run one lit — a catalog, not a fact about the moment — and it is
+ * replaced by ACTIVITY, which shows what actually ran.
  *
  * There is no SETTINGS space. It was four saturated gauges (volume, light,
  * link, memory) around a privacy heart — a diagnostics page wearing a face,
@@ -370,8 +387,9 @@ esp_err_t jr_display_set_brightness(uint8_t percent);
  * the SESSION sheet, and free memory belongs to /api/cockpit, not the glass.
  *
  * IDENTITY. Privacy is the loudest thing on the glass: when muted, the
- * indicator, the Tools core and the shade's privacy control all turn gold.
- * Nothing else in the shell uses gold.
+ * indicator, every focal accent (the battery arc, the weather gauge) and the
+ * shade's privacy control all turn gold. Nothing else in the shell uses
+ * gold — a CLEAR sky is amber for exactly that reason.
  *
  * COST. All of this is procedural and strip-local. The shell adds NO frame
  * buffer, allocates nothing per frame, and holds no unbounded string: every
@@ -393,7 +411,13 @@ typedef enum {
     JR_DISPLAY_SPACE_JARVIS = 0,
     JR_DISPLAY_SPACE_WATCH,     /* time, the canonical glance                */
     JR_DISPLAY_SPACE_WEATHER,   /* Fort Lauderdale now: live data, aged      */
-    JR_DISPLAY_SPACE_POWER,     /* battery: charge, charging, millivolts     */
+    JR_DISPLAY_SPACE_STATUS,    /* one status screen: battery arc, the one
+                                 * thing that matters now as its headline,
+                                 * and a sheet with everything else — level,
+                                 * volts, USB, charge, update, slot, link,
+                                 * mic, uptime. It was POWER; the owner asked
+                                 * why the battery needed a screen of its own
+                                 * when everything could share one          */
     JR_DISPLAY_SPACE_DESK,      /* only while an agent link or lease is live */
     JR_DISPLAY_SPACE_ACTIVITY,  /* the last things Jarvis actually did       */
     JR_DISPLAY_SPACE_COUNT,
@@ -543,12 +567,12 @@ void jr_display_desk_set_task(const char *task, uint8_t progress,
  *     privacy ring, or the choice arcs. It is drawn AFTER the watch, so the
  *     dial's clear cannot wipe it, and at the focal layer's own weight, so it
  *     yields to an open sheet or shade exactly as a focal object does.
- *   - two rows of the POWER detail sheet: UPDATE and SLOT. Power is where a
+ *   - two rows of the STATUS detail sheet: UPDATE and SLOT. Status is where a
  *     worried owner looks for "can this device survive a flash".
  *
  * IDLE and VALID are the two HEALTHY RESTING states and draw NO ring at all,
  * so a device with nothing to report keeps a quiet glass — JARVIS at rest
- * stays bit-identical — and the facts stay one tap away, in the POWER sheet.
+ * stays bit-identical — and the facts stay one tap away, in the STATUS sheet.
  * Every other state rings.
  *
  * ARC SEMANTICS. percent drives the arc for RECEIVING only. PREFLIGHT draws
@@ -573,7 +597,7 @@ void jr_display_desk_set_task(const char *task, uint8_t progress,
  *
  * preflight_ok is the updater's own readiness verdict (power, link, free
  * space). It is what separates PREFLIGHT from BLOCKED, and at rest it is what
- * the UPDATE row reports — so POWER answers "could this device take an
+ * the UPDATE row reports — so STATUS answers "could this device take an
  * update right now" without an update having to be in flight.
  *
  * Any task, lock-free, no allocation: one packed word, one release-store. */
@@ -592,7 +616,7 @@ void jr_display_ota_set(jr_display_ota_state_t state, uint8_t percent,
                         uint8_t active_slot, uint8_t target_slot,
                         bool preflight_ok);
 
-/* AXP2101 truth for POWER and the charging rim. percent is 0..100 or
+/* AXP2101 truth for STATUS and the charging rim. percent is 0..100 or
  * 0xff when no battery sample exists. Edge animations are owned by the caller;
  * this setter only publishes bounded state. */
 void jr_display_power_set(uint8_t percent, uint16_t millivolts,

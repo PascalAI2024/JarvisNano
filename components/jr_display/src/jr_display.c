@@ -1352,20 +1352,38 @@ _Static_assert((uint32_t)JR_DISPLAY_SPACE_COUNT <= NAV_SPACE_MASK + 1u,
 
 #define SP_LABEL_CAP      13   /* 12 glyphs at scale 2 = 144 px, fits r<=96 */
 #define SP_COL_MAX        11   /* detail column: 10 glyphs at scale 2       */
-#define SP_ROWS_MAX       6   /* POWER needs 6: battery + update    */
+#define SP_ROWS_MAX       9   /* STATUS: battery, update, link, mic, uptime */
 
 static volatile uint32_t s_nav_word;
 
 static char s_space_head[JR_DISPLAY_SPACE_COUNT][SP_LABEL_CAP];
 static char s_space_note[JR_DISPLAY_SPACE_COUNT][SP_LABEL_CAP];
 static char s_desk_task[SP_LABEL_CAP];
-static char s_tool_name[JR_DISPLAY_TOOLS_MAX][SP_LABEL_CAP];
 
 static volatile uint32_t s_jarvis_word;      /* turns | linked<<16          */
 static volatile uint32_t s_jarvis_secs;
 static volatile uint32_t s_desk_word;        /* progress | state<<8         */
-static volatile uint32_t s_tools_word;       /* count | recent<<8           */
 static volatile uint32_t s_status_word;      /* vol                         */
+
+/* WEATHER is a whole struct, not a word, so it is double-buffered: the setter
+ * fills the slot the render task is NOT reading and then publishes the slot
+ * index with one release-store. A frame can read stale weather, never a
+ * half-written one. Fetches arrive at most every ten minutes, so the two
+ * slots never race in practice either. */
+static jr_display_weather_t s_weather[2];
+static volatile uint32_t    s_weather_slot;
+
+/* ACTIVITY: the last three things Jarvis did, newest at index 0, plus WHEN
+ * each happened (esp_timer ms at the push). The count is the gate: rows land
+ * before it is released, so a racing frame shows the previous list at worst.
+ * Single writer, the app task. */
+#define ACT_MAX      3
+#define ACT_KIND_CAP 9    /* 8 glyphs */
+#define ACT_SUM_CAP  25   /* 24 glyphs */
+static char     s_act_kind[ACT_MAX][ACT_KIND_CAP];
+static char     s_act_sum[ACT_MAX][ACT_SUM_CAP];
+static uint32_t s_act_ms[ACT_MAX];
+static volatile uint32_t s_act_count;
 static volatile uint32_t s_power_word = 0xFFu; /* pct | mv<<8 | usb/charge */
 /* OTA status, packed like every other shell word so the updater can publish
  * from its own task with one release-store and the render task can sample it
@@ -1393,6 +1411,41 @@ static int  s_detail_rows;
 static char s_shade_vol[SP_COL_MAX];
 static char s_shade_light[SP_COL_MAX];
 
+/* Angles are 1/256 turn, matching the LUT convention hud_render uses for the
+ * glass: 0 is 3 o'clock, 64 is 6 o'clock, 192 is 12 o'clock, increasing
+ * clockwise. */
+#define SP_A_TOP       192
+
+/* WEATHER, composed once per frame from the live slot: every string the
+ * focal object prints and every angle its arcs sweep. The renderer reads
+ * these, never the struct, so eleven strips agree on one age and one mark. */
+#define SP_WX_A0     96    /* the gauge opens at 7:30 ...                     */
+#define SP_WX_SWEEP  192   /* ... and closes 270 degrees later at 4:30, so the
+                            * bottom stays empty above the headline           */
+#define SP_WX_LO_F   40    /* the fixed range the arc IS: a Fort Lauderdale   */
+#define SP_WX_HI_F   100   /* year lives inside 40..100 F                     */
+#define SP_WX_STALE_MIN 30 /* beyond this the accent loses its colour         */
+#define SP_WX_AGE_MIN   2  /* below this the age is not worth a line          */
+static char s_wx_head[SP_LABEL_CAP];  /* "OVERCAST 83" / "NO WEATHER"         */
+static char s_wx_age[10];             /* "12M AGO" / "STALE 45M" / ""         */
+static char s_wx_temp[6];             /* "83" / "-12" / ""                    */
+static char s_wx_hilo[10];            /* "H86 L76" / ""                       */
+static bool s_wx_valid;
+static bool s_wx_stale;
+static jr_display_sky_t s_wx_sky;
+static int  s_wx_mark_a;              /* 1/256 turn, the current temperature  */
+static int  s_wx_band_a0;             /* lo..hi as an arc on the same scale   */
+static int  s_wx_band_sweep;
+static int  s_wx_rain_sweep;          /* 0..256, from 12 o'clock               */
+
+/* ACTIVITY, composed once per frame: one row per entry, "KIND SUMMARY", cut
+ * to the row's width with the tree's own shortening mark. */
+#define SP_ACT_ROW_GLYPHS 24
+#define SP_ACT_ROW_CAP    (SP_ACT_ROW_GLYPHS + 1)
+static char    s_act_row[ACT_MAX][SP_ACT_ROW_CAP];
+static uint8_t s_act_row_klen[ACT_MAX];   /* where the kind ends, for colour */
+static int     s_act_rows;
+
 static uint8_t  s_space_serial_seen;
 static uint8_t  s_space_from;
 static uint8_t  s_space_to;
@@ -1405,6 +1458,15 @@ static int      s_space_veil;
 static bool     s_space_on;
 static uint8_t  s_detail_space;
 static uint32_t s_space_hold_ms;
+
+/* The orbit mark's angle, in 1/4096 turn (Q4 on the 256-unit circle), plus
+ * the residue of the last re-spacing. When DESK appears or disappears every
+ * slot moves, and the mark for the screen you are standing on would jump with
+ * them; instead the difference is banked as an offset that decays over one
+ * slide, so the mark eases to its new slot the way it eases between screens. */
+static int      s_orbit_a16;
+static int      s_orbit_off16;
+static int      s_orbit_n_seen;
 
 /* Bounded copy with a guaranteed terminator. The public setters are the only
  * writers, so an over-long caller string is truncated here once instead of
@@ -1453,6 +1515,41 @@ static int sp_pct(char *dst, int len, int cap, uint32_t v)
     return sp_str(dst, sp_num(dst, len, cap, v), cap, "%");
 }
 
+/* Signed, for temperatures: the font has a dash, and a winter morning has a
+ * minus sign. */
+static int sp_int(char *dst, int len, int cap, int v)
+{
+    if (v < 0) {
+        len = sp_str(dst, len, cap, "-");
+        v = -v;
+    }
+    return sp_num(dst, len, cap, (uint32_t)v);
+}
+
+/* An age in minutes as the shortest honest unit: "12M", "3H", "2D". Shared by
+ * WEATHER (how old the fetch is) and ACTIVITY (how long ago it happened), so
+ * the two screens cannot disagree about what a minute is. */
+static int sp_age(char *dst, int len, int cap, uint32_t age_min)
+{
+    if (age_min < 60u) {
+        return sp_str(dst, sp_num(dst, len, cap, age_min), cap, "M");
+    }
+    if (age_min < 48u * 60u) {
+        return sp_str(dst, sp_num(dst, len, cap, age_min / 60u), cap, "H");
+    }
+    return sp_str(dst, sp_num(dst, len, cap, age_min / (24u * 60u)), cap, "D");
+}
+
+static inline int sp_len(const char *s, int cap);
+
+/* Milliseconds since an esp_timer stamp, in minutes. Unsigned subtraction so
+ * a stamp taken before the 49-day wrap still reads correctly after it. */
+static uint32_t sp_age_min(uint32_t stamp_ms)
+{
+    const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    return (now_ms - stamp_ms) / 60000u;
+}
+
 /* Elapsed session time as M:SS up to an hour, then H:MM. */
 static int sp_clock_str(char *dst, int cap, uint32_t secs)
 {
@@ -1472,6 +1569,42 @@ static int sp_clock_str(char *dst, int cap, uint32_t secs)
 static bool sp_privacy_muted(void)
 {
     return (diag_load(&s_hud_env_word) & (1u << 9)) != 0U;
+}
+
+/* DESK IS ON THE RING ONLY WHILE SOMETHING LIVES THERE. The gate is the one
+ * bit main.c already publishes for the agent rim — an agent link, a pairing
+ * claim or an operator lease all set it — so the screen and the rim segments
+ * cannot disagree about whether there is a job. With the bit clear the ring
+ * steps over DESK in both directions, the orbit draws one mark fewer, and a
+ * DESK that goes dark under the owner's feet moves them on rather than
+ * leaving them on a screen the ring no longer admits. A screen that says
+ * "STANDBY" in a progress ring is the useless screen the owner named. */
+static bool sp_desk_live(void)
+{
+    return (diag_load(&s_display.shell_word) & JR_DISPLAY_SHELL_AGENT) != 0U;
+}
+
+/* How many screens the ring shows right now, and which slot a space holds on
+ * the orbit. A hidden DESK that is nonetheless current (an explicit nav_set)
+ * keeps its full-ring slot, so the mark has somewhere honest to sit. */
+static int sp_ring_n(bool desk_live)
+{
+    return desk_live ? (int)JR_DISPLAY_SPACE_COUNT
+                     : (int)JR_DISPLAY_SPACE_COUNT - 1;
+}
+
+static int sp_orbit_angle(int space, bool desk_live)
+{
+    int n = sp_ring_n(desk_live);
+    int idx = space;
+    if (!desk_live) {
+        if (space == (int)JR_DISPLAY_SPACE_DESK) {
+            n = (int)JR_DISPLAY_SPACE_COUNT;
+        } else if (space > (int)JR_DISPLAY_SPACE_DESK) {
+            idx = space - 1;
+        }
+    }
+    return SP_A_TOP + (idx * 256) / n;
 }
 
 /* The shade opens from either door: the nav overlay (swipe down through the
@@ -1594,25 +1727,70 @@ static void sp_compose_detail(int space)
         s_detail_rows = 2;
         break;
     }
-    case JR_DISPLAY_SPACE_TOOLS: {
-        const uint32_t w = __atomic_load_n(&s_tools_word, __ATOMIC_ACQUIRE);
-        const uint32_t n = w & 0xFFu;
-        const uint32_t recent = (w >> 8) & 0xFFu;
-        sp_copy(s_detail_head, "TOOLS");
-        sp_str(s_detail_label[0], 0, SP_COL_MAX, "READY");
-        sp_num(s_detail_value[0], 0, SP_COL_MAX, n);
-        sp_str(s_detail_label[1], 0, SP_COL_MAX, "LAST");
-        sp_str(s_detail_value[1], 0, SP_COL_MAX,
-               recent < n ? s_tool_name[recent] : "NONE");
-        s_detail_rows = 2;
-        for (uint32_t i = 0; i < n && s_detail_rows < SP_ROWS_MAX; ++i) {
-            if (i == recent) {
-                continue;
-            }
-            sp_str(s_detail_label[s_detail_rows], 0, SP_COL_MAX, "READY");
-            sp_str(s_detail_value[s_detail_rows], 0, SP_COL_MAX, s_tool_name[i]);
-            ++s_detail_rows;
+    case JR_DISPLAY_SPACE_WEATHER: {
+        const jr_display_weather_t *w =
+            &s_weather[__atomic_load_n(&s_weather_slot, __ATOMIC_ACQUIRE) & 1u];
+        sp_copy(s_detail_head, "WEATHER");
+        if (!w->valid) {
+            /* One honest row. Five rows of "--" would be five placeholders
+             * shaped like readings. */
+            sp_str(s_detail_label[0], 0, SP_COL_MAX, "DATA");
+            sp_str(s_detail_value[0], 0, SP_COL_MAX, "NONE");
+            s_detail_rows = 1;
+            break;
         }
+        const uint32_t age_min = sp_age_min(w->fetched_ms);
+        sp_str(s_detail_label[0], 0, SP_COL_MAX, "FEELS");
+        sp_int(s_detail_value[0], 0, SP_COL_MAX, w->feels_f);
+        sp_str(s_detail_label[1], 0, SP_COL_MAX, "RAIN");
+        sp_pct(s_detail_value[1], 0, SP_COL_MAX, w->rain_pct);
+        sp_str(s_detail_label[2], 0, SP_COL_MAX, "HUMIDITY");
+        sp_pct(s_detail_value[2], 0, SP_COL_MAX, w->humidity_pct);
+        sp_str(s_detail_label[3], 0, SP_COL_MAX, "WIND");
+        sp_str(s_detail_value[3], sp_num(s_detail_value[3], 0, SP_COL_MAX,
+                                         w->wind_mph),
+               SP_COL_MAX, " MPH");
+        sp_str(s_detail_label[4], 0, SP_COL_MAX, "AGE");
+        if (age_min == 0u) {
+            sp_str(s_detail_value[4], 0, SP_COL_MAX, "NOW");
+        } else {
+            int len = sp_age(s_detail_value[4], 0, SP_COL_MAX, age_min);
+            if (age_min > SP_WX_STALE_MIN) {
+                (void)sp_str(s_detail_value[4], len, SP_COL_MAX, " STALE");
+            }
+        }
+        s_detail_rows = 5;
+        break;
+    }
+    case JR_DISPLAY_SPACE_ACTIVITY: {
+        /* THE FOCAL SAYS WHAT, THE SHEET SAYS WHEN. Repeating the three
+         * summaries here would re-cut 24-glyph text to a 10-glyph column —
+         * the truncation-of-a-truncation the DESK sheet was cured of — and
+         * a sheet that duplicates its own screen is the clutter this tree
+         * keeps deleting. The push time is measured, not invented. */
+        uint32_t n = __atomic_load_n(&s_act_count, __ATOMIC_ACQUIRE);
+        if (n > (uint32_t)ACT_MAX) {
+            n = (uint32_t)ACT_MAX;
+        }
+        sp_copy(s_detail_head, "ACTIVITY");
+        if (n == 0u) {
+            sp_str(s_detail_label[0], 0, SP_COL_MAX, "LOG");
+            sp_str(s_detail_value[0], 0, SP_COL_MAX, "EMPTY");
+            s_detail_rows = 1;
+            break;
+        }
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint32_t age_min = sp_age_min(s_act_ms[i]);
+            sp_str(s_detail_label[i], 0, SP_COL_MAX, s_act_kind[i]);
+            if (age_min == 0u) {
+                sp_str(s_detail_value[i], 0, SP_COL_MAX, "JUST NOW");
+            } else {
+                (void)sp_str(s_detail_value[i],
+                             sp_age(s_detail_value[i], 0, SP_COL_MAX, age_min),
+                             SP_COL_MAX, " AGO");
+            }
+        }
+        s_detail_rows = (int)n;
         break;
     }
     /* WATCH AND POWER OWN THEIR OWN SHEETS.
@@ -1655,11 +1833,17 @@ static void sp_compose_detail(int space)
         s_detail_rows = 3;
         break;
     }
-    case JR_DISPLAY_SPACE_POWER: {
+    case JR_DISPLAY_SPACE_STATUS: {
+        /* ONE STATUS SHEET. The owner asked why the battery needed a screen
+         * of its own; it does not. Everything a worried owner would ever
+         * look up is one column here: the cell, the charger, the update,
+         * the link, the microphone, and how long the device has been up.
+         * Nothing on it is a mood — every row is a value something else
+         * already publishes. */
         const uint32_t w = __atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE);
         const uint32_t percent = w & 0xFFu;
         const uint32_t millivolts = (w >> 8) & 0xFFFFu;
-        sp_copy(s_detail_head, "POWER");
+        sp_copy(s_detail_head, "STATUS");
         sp_str(s_detail_label[0], 0, SP_COL_MAX, "LEVEL");
         if (percent <= 100U) {
             sp_pct(s_detail_value[0], 0, SP_COL_MAX, percent);
@@ -1705,7 +1889,18 @@ static void sp_compose_detail(int space)
         sp_str(s_detail_label[5], 0, SP_COL_MAX, "SLOT");
         sp_ota_slots(s_detail_value[5], SP_COL_MAX, (ota >> 16) & 0xFu,
                      (ota >> 20) & 0xFu);
-        s_detail_rows = 6;
+        /* LINK and UPTIME read the SESSION word main.c already publishes;
+         * MIC reads the one privacy bit the whole glass shares. */
+        const uint32_t sw = __atomic_load_n(&s_jarvis_word, __ATOMIC_ACQUIRE);
+        sp_str(s_detail_label[6], 0, SP_COL_MAX, "LINK");
+        sp_str(s_detail_value[6], 0, SP_COL_MAX,
+               (sw & (1u << 16)) != 0u ? "UP" : "DOWN");
+        sp_str(s_detail_label[7], 0, SP_COL_MAX, "MIC");
+        sp_str(s_detail_value[7], 0, SP_COL_MAX,
+               sp_privacy_muted() ? "MUTED" : "LIVE");
+        sp_str(s_detail_label[8], 0, SP_COL_MAX, "UPTIME");
+        sp_clock_str(s_detail_value[8], SP_COL_MAX, diag_load(&s_jarvis_secs));
+        s_detail_rows = 9;
         break;
     }
     default:
@@ -1721,10 +1916,129 @@ static void sp_compose_detail(int space)
     }
 }
 
-/* One composition pass per frame: the shade readouts, and the detail sheet
- * if it is showing. */
+/* The temperature's place on the gauge. The arc IS the day: a fixed 40..100 F
+ * range opening at 7:30 and closing at 4:30, so lo, hi and now read as
+ * positions before anyone reads a numeral. Out-of-range weather pins to the
+ * end it exceeds rather than leaving the dial. */
+static int sp_wx_angle(int f)
+{
+    if (f < SP_WX_LO_F) {
+        f = SP_WX_LO_F;
+    }
+    if (f > SP_WX_HI_F) {
+        f = SP_WX_HI_F;
+    }
+    return SP_WX_A0 + ((f - SP_WX_LO_F) * SP_WX_SWEEP) / (SP_WX_HI_F - SP_WX_LO_F);
+}
+
+/* WEATHER for this frame. Everything numeric is gated on valid: an unfetched
+ * or failed weather prints NO number anywhere — not a zero, not a dash pair
+ * shaped like one — and the headline says why. */
+static void sp_compose_weather(void)
+{
+    const jr_display_weather_t *w =
+        &s_weather[__atomic_load_n(&s_weather_slot, __ATOMIC_ACQUIRE) & 1u];
+    s_wx_valid = w->valid;
+    s_wx_sky = w->sky;
+    s_wx_age[0] = '\0';
+    s_wx_temp[0] = '\0';
+    s_wx_hilo[0] = '\0';
+    s_wx_stale = false;
+    s_wx_mark_a = -1;
+    s_wx_band_a0 = 0;
+    s_wx_band_sweep = 0;
+    s_wx_rain_sweep = 0;
+    if (!w->valid) {
+        sp_str(s_wx_head, 0, SP_LABEL_CAP, "NO WEATHER");
+        return;
+    }
+
+    /* Headline: the word, then the number if both fit twelve glyphs. When a
+     * long condition leaves no room the number is dropped whole rather than
+     * cut mid-digit — it is still the largest thing on the screen. */
+    int len = sp_str(s_wx_head, 0, SP_LABEL_CAP, w->condition);
+    char tail[6];
+    int tlen = 0;
+    if (len > 0) {
+        tlen = sp_str(tail, 0, (int)sizeof tail, " ");
+    }
+    tlen = sp_int(tail, tlen, (int)sizeof tail, w->temp_f);
+    if (len + tlen <= SP_LABEL_CAP - 1) {
+        (void)sp_str(s_wx_head, len, SP_LABEL_CAP, tail);
+    }
+
+    (void)sp_int(s_wx_temp, 0, (int)sizeof s_wx_temp, w->temp_f);
+    len = sp_str(s_wx_hilo, 0, (int)sizeof s_wx_hilo, "H");
+    len = sp_int(s_wx_hilo, len, (int)sizeof s_wx_hilo, w->hi_f);
+    len = sp_str(s_wx_hilo, len, (int)sizeof s_wx_hilo, " L");
+    (void)sp_int(s_wx_hilo, len, (int)sizeof s_wx_hilo, w->lo_f);
+
+    const uint32_t age_min = sp_age_min(w->fetched_ms);
+    s_wx_stale = age_min > SP_WX_STALE_MIN;
+    if (s_wx_stale) {
+        /* "STALE 49D" is the worst case: fetched_ms is a uint32 of
+         * milliseconds, so no age past 49 days can be expressed, and nine
+         * glyphs is exactly what fits inside the rain ring. */
+        len = sp_str(s_wx_age, 0, (int)sizeof s_wx_age, "STALE ");
+        (void)sp_age(s_wx_age, len, (int)sizeof s_wx_age, age_min);
+    } else if (age_min >= SP_WX_AGE_MIN) {
+        len = sp_age(s_wx_age, 0, (int)sizeof s_wx_age, age_min);
+        (void)sp_str(s_wx_age, len, (int)sizeof s_wx_age, " AGO");
+    }
+
+    int lo = w->lo_f, hi = w->hi_f;
+    if (lo > hi) {
+        const int t = lo;
+        lo = hi;
+        hi = t;
+    }
+    s_wx_band_a0 = sp_wx_angle(lo);
+    s_wx_band_sweep = sp_wx_angle(hi) - s_wx_band_a0;
+    s_wx_mark_a = sp_wx_angle(w->temp_f);
+    s_wx_rain_sweep = ((int)(w->rain_pct > 100u ? 100u : w->rain_pct) * 256) / 100;
+}
+
+/* ACTIVITY rows for this frame: "KIND SUMMARY" in the row's 24 glyphs. A
+ * summary that does not fit is cut and its last glyph spent on a "." — the
+ * same mark title_shorten() leaves on a DESK title, so a reader knows the
+ * sentence went on. */
+static void sp_compose_activity(void)
+{
+    uint32_t n = __atomic_load_n(&s_act_count, __ATOMIC_ACQUIRE);
+    if (n > (uint32_t)ACT_MAX) {
+        n = (uint32_t)ACT_MAX;
+    }
+    s_act_rows = (int)n;
+    for (uint32_t i = 0; i < n; ++i) {
+        char *row = s_act_row[i];
+        int len = sp_str(row, 0, SP_ACT_ROW_CAP, s_act_kind[i]);
+        s_act_row_klen[i] = (uint8_t)len;
+        const int slen = sp_len(s_act_sum[i], ACT_SUM_CAP - 1);
+        if (slen == 0) {
+            continue;
+        }
+        if (len > 0) {
+            len = sp_str(row, len, SP_ACT_ROW_CAP, " ");
+        }
+        const int room = SP_ACT_ROW_GLYPHS - len;
+        if (slen <= room) {
+            (void)sp_str(row, len, SP_ACT_ROW_CAP, s_act_sum[i]);
+        } else {
+            for (int k = 0; k + 1 < room; ++k) {
+                row[len++] = s_act_sum[i][k];
+            }
+            row[len++] = '.';
+            row[len] = '\0';
+        }
+    }
+}
+
+/* One composition pass per frame: the shade readouts, the two live-data
+ * screens, and the detail sheet if it is showing. */
 static void sp_compose(void)
 {
+    sp_compose_weather();
+    sp_compose_activity();
     const uint32_t w = __atomic_load_n(&s_status_word, __ATOMIC_ACQUIRE);
     const uint32_t vol = (w & 0xFFu) > 100u ? 100u : (w & 0xFFu);
     uint32_t brt = (uint32_t)__atomic_load_n(&s_brightness_want, __ATOMIC_ACQUIRE);
@@ -1778,6 +2092,37 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
         s_space_prog = 256;
     }
     s_space_ease = fade_smoothstep(s_space_prog);
+
+    /* The orbit mark: where the slide puts it this frame, on the ring as it
+     * is NOW, minus whatever re-spacing residue is still easing out. Computed
+     * once here, not per strip, so every strip draws the same mark. */
+    {
+        const bool live = sp_desk_live();
+        const int n = sp_ring_n(live);
+        const int a_from = sp_orbit_angle(s_space_from, live) * 16;
+        const int a_to = sp_orbit_angle(s_space_to, live) * 16;
+        /* Signed shortest way round: a wrap is one step forward, not n-1
+         * steps back. */
+        const int d = (((a_to - a_from) + 2048) & 4095) - 2048;
+        const int target = a_from + (d * s_space_ease) / 256;
+        if (n != s_orbit_n_seen) {
+            if (s_orbit_n_seen != 0) {
+                s_orbit_off16 += (((target - s_orbit_a16) + 2048) & 4095) - 2048;
+            }
+            s_orbit_n_seen = n;
+        }
+        if (s_orbit_off16 != 0) {
+            const bool neg = s_orbit_off16 < 0;
+            int mag = neg ? -s_orbit_off16 : s_orbit_off16;
+            int step = (mag * sstep) / 256;
+            if (step < 1) {
+                step = 1;
+            }
+            mag = mag > step ? mag - step : 0;
+            s_orbit_off16 = neg ? -mag : mag;
+        }
+        s_orbit_a16 = target - s_orbit_off16;
+    }
 
     /* The sheet keeps the space it was opened on for the whole of its own
      * fade-out, so dismissing it never flashes another space's facts. */
@@ -2199,10 +2544,8 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
 #define SP_R_SHELL     JR_DISPLAY_SHELL_R_MAX
 #define SP_SLIDE_PX    150            /* how far a space travels on a swipe */
 
-/* Angles are 1/256 turn, matching the LUT convention hud_render uses for the
- * glass: 0 is 3 o'clock, 64 is 6 o'clock, 192 is 12 o'clock, increasing
- * clockwise. */
-#define SP_A_TOP       192
+/* SP_A_TOP (12 o'clock) is defined with the compose-side state above: the
+ * orbit slot arithmetic needs it before the drawing section begins. */
 
 /* The free band is r185-194, measured: baked art sits at r184 and r195. The
  * rail used to span 184-196 and overwrote both edges every frame. The inner
@@ -2227,12 +2570,17 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
 #define SP_LABEL_Y     330
 
 #define SP_SHEET_Y0    150
-#define SP_SHEET_Y1    346
+#define SP_SHEET_Y1    358   /* two rows shy of the caption band at 360  */
 #define SP_SHEET_HEAD_Y 162
-/* Six 14 px rows at a 26 px pitch run 196..340, clearing SP_SHEET_Y1 (346)
- * — the sheet grew a row when the firmware update moved in. */
-#define SP_SHEET_ROW_Y 196
-#define SP_SHEET_ROW_DY 26
+/* Nine 14 px rows at a 20 px pitch run 184..357, ending at SP_SHEET_Y1.
+ * The sheet was six rows at 26 px until STATUS gathered link, mic and
+ * uptime under the battery and the update; the pitch shrank rather than
+ * the glyphs, and the band grew down to the caption's edge rather than
+ * clipping a row. Both text columns' worst corner (x 128/338 at y 357) is
+ * r163, inside JR_DISPLAY_SAFE_R; test_detail_sheet_rows_stay_inside pins
+ * it. */
+#define SP_SHEET_ROW_Y 184
+#define SP_SHEET_ROW_DY 20
 #define SP_SHEET_LEFT  128
 #define SP_SHEET_RIGHT 338
 
@@ -2266,6 +2614,34 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
 #define SP_C_TRACK     0x2124
 #define SP_C_PLATE     0x1082
 #define SP_C_VIOLET    0xA81F
+/* WEATHER's sky accents. Every one is a hue the glass already speaks or a
+ * dimming of one — and none is gold: CLEAR is amber, because gold means
+ * muted everywhere on this glass and a sunny day must not read as a closed
+ * microphone. */
+#define SP_C_FOG       0x03EF   /* cyan at half: the sky is there, softened */
+#define SP_C_RAIN      0x049F   /* blue-cyan: also the rain-chance ring     */
+#define SP_C_SNOW      SP_C_INK
+
+/* WEATHER geometry. The gauge rides the standard focal ring; the current
+ * temperature is a mark that stands proud of it on both sides, the way the
+ * lit petal did, so it reads at arm's length. The rain ring is a thin inner
+ * band, and the disc inside it holds three lines of text whose worst-case
+ * corners (nine glyphs at scale 2, "STALE 45M" / "H104 L-12") reach r65.5. */
+#define SP_WX_MARK_IN   72
+#define SP_WX_MARK_OUT  100
+#define SP_WX_MARK_HALF 3      /* +-3/256 turn, about four degrees each way */
+#define SP_WX_RAIN_IN   66
+#define SP_WX_RAIN_OUT  70
+#define SP_WX_AGE_Y     196    /* scale 2, rows 196..209                     */
+#define SP_WX_HILO_Y    250    /* scale 2, rows 250..263                     */
+
+/* ACTIVITY geometry: three rows at a 36 px pitch about the centre, each 24
+ * glyphs at scale 2 centred on the axis (x 89..374). The worst corner is
+ * r150 — inside JR_DISPLAY_SAFE_R, outside every focal ring, and crossed by
+ * the update ring only while an update is actually in flight. */
+#define SP_ACT_X0      (SP_CX - (6 * 2 * SP_ACT_ROW_GLYPHS) / 2)
+#define SP_ACT_PITCH   36
+#define SP_ACT_Y0      (SP_CY - SP_ACT_PITCH - 7)
 
 /* Q15 sine, quarter wave, mirrored. 130 bytes of rodata buys every arc in
  * this layer with no float, no libm, and no atan anywhere. */
@@ -2580,49 +2956,156 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
     }
 }
 
-/* TOOLS: one petal per capability around a live core. The most recent petal
- * is thicker and lit, so "what did it just do" is answered at a glance. */
-static void sp_focal_tools(const jr_display_ctx_t *ctx, int y1, int y2,
-                           uint16_t *pixels, int oy, int st)
+/* The sky picks the accent. Cyan is the glass's own colour, so an ordinary
+ * sky is the ordinary glass; the others are the hues already given meaning
+ * elsewhere (amber: look, violet: on-trial) borrowed for a day that is worth
+ * a glance. Gold is never returned here — see the palette. */
+static uint16_t sp_sky_native(jr_display_sky_t sky)
 {
-    const uint32_t w = __atomic_load_n(&s_tools_word, __ATOMIC_ACQUIRE);
-    int count = (int)(w & 0xFFu);
-    if (count > JR_DISPLAY_TOOLS_MAX) {
-        count = JR_DISPLAY_TOOLS_MAX;
+    switch (sky) {
+    case JR_DISPLAY_SKY_CLEAR:  return SP_C_AMBER;
+    case JR_DISPLAY_SKY_FOG:    return SP_C_FOG;
+    case JR_DISPLAY_SKY_RAIN:   return SP_C_RAIN;
+    case JR_DISPLAY_SKY_STORM:  return SP_C_VIOLET;
+    case JR_DISPLAY_SKY_SNOW:   return SP_C_SNOW;
+    case JR_DISPLAY_SKY_PARTLY:
+    case JR_DISPLAY_SKY_CLOUDS:
+    default:                    return SP_C_CYAN;
     }
-    const int recent = (int)((w >> 8) & 0xFFu);
-    const bool muted = sp_privacy_muted();
-    const uint16_t hot = sp_tint(ctx, muted ? SP_C_GOLD : SP_C_CYAN, st);
-    const uint16_t cool = sp_tint(ctx, muted ? SP_C_GOLD_DIM : SP_C_CYAN_DIM, st);
-    const int cx = SP_CX;
+}
 
-    /* Petal half-width follows the count. ±26 was tuned for four petals
-     * (64 apart); at eight (32 apart) it would fuse them into one ring.
-     * Keep a 6-unit gap (~8°) between neighbours, capped at the old width. */
-    int half = (256 / (count > 0 ? count : 1)) / 2 - 3;
-    if (half > 26) {
-        half = 26;
+/* WEATHER: the arc is the day. A 270-degree track stands for 40..100 F; the
+ * span from today's low to its high fills in the sky's accent, dimmed, and
+ * the temperature right now is a bright mark standing proud of the ring on
+ * both sides — so "cool morning, hot afternoon, and it is nearly there" reads
+ * as a shape before it reads as numbers. Inside: a thin ring for the chance
+ * of rain, and the numbers themselves — the temperature large, the high and
+ * low under it, and above it how old all of this is once it is old enough to
+ * matter.
+ *
+ * Honesty rules, in order: muted turns every accent gold like every other
+ * screen; stale (> 30 min) turns them grey, because a number from an hour ago
+ * is still a number but no longer a colour; and !valid draws the two bare
+ * tracks and not one digit. */
+static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
+                             uint16_t *pixels, int oy, int st)
+{
+    const bool muted = sp_privacy_muted();
+    const uint16_t accent_native =
+        muted ? SP_C_GOLD : (s_wx_stale ? SP_C_GREY : sp_sky_native(s_wx_sky));
+    const uint16_t rain_native =
+        muted ? SP_C_GOLD_DIM : (s_wx_stale ? SP_C_GREY : SP_C_RAIN);
+    const uint16_t track = sp_tint(ctx, SP_C_TRACK, st);
+    const uint16_t band = sp_tint(ctx, accent_native, (st * 104) / 255);
+    const uint16_t mark = sp_tint(ctx, accent_native, st);
+    const uint16_t rain = sp_tint(ctx, rain_native, st);
+    const uint16_t ink = sp_tint(ctx, SP_C_INK, st);
+    const uint16_t grey = sp_tint(ctx, SP_C_GREY, st);
+    const int cx = SP_CX;
+    const int cy = SP_CY + oy;
+
+    sp_span_t trk[SP_ARC_SEG_MAX], bnd[SP_ARC_SEG_MAX], rn[SP_ARC_SEG_MAX];
+    sp_span_t mk = {0, 0, 0, 0};
+    const int ntrk = sp_arc_segments(trk, SP_ARC_SEG_MAX, SP_WX_A0, SP_WX_SWEEP);
+    const int nbnd = s_wx_valid
+        ? sp_arc_segments(bnd, SP_ARC_SEG_MAX, s_wx_band_a0, s_wx_band_sweep)
+        : 0;
+    const int nrn = s_wx_valid
+        ? sp_arc_segments(rn, SP_ARC_SEG_MAX, SP_A_TOP, s_wx_rain_sweep)
+        : 0;
+    if (s_wx_valid) {
+        sp_span_set(&mk, s_wx_mark_a - SP_WX_MARK_HALF,
+                    s_wx_mark_a + SP_WX_MARK_HALF);
     }
-    sp_span_t petal[JR_DISPLAY_TOOLS_MAX] = {{0, 0, 0, 0}};
-    for (int i = 0; i < count; ++i) {
-        const int c = SP_A_TOP + (i * 256) / count;
-        sp_span_set(&petal[i], c - half, c + half);
-    }
+    const int alen = sp_len(s_wx_age, (int)sizeof s_wx_age - 1);
+    const int tlen = sp_len(s_wx_temp, (int)sizeof s_wx_temp - 1);
+    const int hlen = sp_len(s_wx_hilo, (int)sizeof s_wx_hilo - 1);
+    const int ax = sp_text_cx(alen, 2, 0);
+    const int tx = cx - (18 * tlen) / 2;
+    const int hx = sp_text_cx(hlen, 2, 0);
 
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        if (count == 0) {
-            sp_annulus_row(row, y, cx, SP_CY + oy, SP_FOCAL_IN, SP_FOCAL_OUT,
-                           NULL, cool);
-        } else {
-            for (int i = 0; i < count; ++i) {
-                const bool on = i == recent;
-                sp_annulus_row(row, y, cx, SP_CY + oy, on ? 68 : SP_FOCAL_IN,
-                               on ? 104 : SP_FOCAL_OUT, &petal[i],
-                               on ? hot : cool);
+        for (int i = 0; i < ntrk; ++i) {
+            sp_annulus_row(row, y, cx, cy, SP_FOCAL_IN, SP_FOCAL_OUT, &trk[i],
+                           track);
+        }
+        for (int i = 0; i < nbnd; ++i) {
+            sp_annulus_row(row, y, cx, cy, SP_FOCAL_IN, SP_FOCAL_OUT, &bnd[i],
+                           band);
+        }
+        sp_annulus_row(row, y, cx, cy, SP_WX_RAIN_IN, SP_WX_RAIN_OUT, NULL,
+                       track);
+        for (int i = 0; i < nrn; ++i) {
+            sp_annulus_row(row, y, cx, cy, SP_WX_RAIN_IN, SP_WX_RAIN_OUT,
+                           &rn[i], rain);
+        }
+        if (s_wx_valid) {
+            sp_annulus_row(row, y, cx, cy, SP_WX_MARK_IN, SP_WX_MARK_OUT, &mk,
+                           mark);
+        }
+        sp_text_row(row, y, s_wx_age, alen, ax, SP_WX_AGE_Y + oy, 2, grey);
+        sp_text_row(row, y, s_wx_temp, tlen, tx, SP_FOCAL_TEXT_Y + oy, 3, ink);
+        sp_text_row(row, y, s_wx_hilo, hlen, hx, SP_WX_HILO_Y + oy, 2, ink);
+    }
+}
+
+/* ACTIVITY: three rows, newest first, on a quiet disc. The disc is the safe
+ * area dimmed a second time — the same treatment the detail sheet gives its
+ * own band — so twenty-four glyphs of ink sit on a hush rather than on the
+ * arc reactor. No ring, no petals: this screen is the receipt, and a receipt
+ * is text. The kind is grey and the summary is ink, one scale, one line, so
+ * the eye lands on what happened and only then on what did it. With nothing
+ * pushed the one honest line is centred where the first row would be. */
+static void sp_focal_activity(const jr_display_ctx_t *ctx, int y1, int y2,
+                              uint16_t *pixels, int oy, int st)
+{
+    const bool swap = ctx->board.swap_color_bytes;
+    const int k = (st * 32) / 255;
+    const uint16_t ink = sp_tint(ctx, SP_C_INK, st);
+    const uint16_t grey = sp_tint(ctx, SP_C_GREY, st);
+    const int cy = SP_CY + oy;
+
+    for (int y = y1; y < y2; ++y) {
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        const int dy = y - cy;
+        const int d2 = JR_DISPLAY_SAFE_R * JR_DISPLAY_SAFE_R - dy * dy;
+        if (d2 > 0) {
+            const int half = sp_isqrt(d2);
+            int lo = SP_CX - half, hi = SP_CX + half;
+            if (sp_clip(y, &lo, &hi)) {
+                if (k >= 32) {
+                    for (int x = lo; x <= hi; ++x) {
+                        row[x] = hud_dim565(row[x], swap);
+                    }
+                } else if (k > 0) {
+                    for (int x = lo; x <= hi; ++x) {
+                        row[x] = hud_fade565(row[x], swap, k);
+                    }
+                }
             }
         }
-        sp_annulus_row(row, y, cx, SP_CY + oy, 0, 14, NULL, hot);
+        if (s_act_rows == 0) {
+            static const char k_empty[] = "NOTHING YET";
+            const int elen = (int)(sizeof k_empty - 1U);
+            sp_text_row(row, y, k_empty, elen, sp_text_cx(elen, 2, 0),
+                        SP_CY - 7 + oy, 2, grey);
+            continue;
+        }
+        for (int i = 0; i < s_act_rows; ++i) {
+            const int ry = SP_ACT_Y0 + i * SP_ACT_PITCH + oy;
+            if (y < ry || y >= ry + 14) {
+                continue;
+            }
+            const int klen = (int)s_act_row_klen[i];
+            const int len = sp_len(s_act_row[i], SP_ACT_ROW_CAP - 1);
+            const int sx = klen > 0 ? klen + 1 : 0;   /* past "KIND " */
+            sp_text_row(row, y, s_act_row[i], klen, SP_ACT_X0, ry, 2, grey);
+            if (len > sx) {
+                sp_text_row(row, y, s_act_row[i] + sx, len - sx,
+                            SP_ACT_X0 + 12 * sx, ry, 2, ink);
+            }
+        }
     }
 }
 
@@ -2779,29 +3262,59 @@ static const char *sp_headline(int space)
          * show — hands frozen at 12:00 look like a stopped clock rather than
          * an unsynced one. */
         return s_clock_shown_word == 0u ? "NO TIME" : "";
-    case JR_DISPLAY_SPACE_POWER: {
+    case JR_DISPLAY_SPACE_STATUS: {
+        /* THE PERCENTAGE AND ONE WORD: whatever matters most right now, in
+         * this order — an update in flight outranks everything (it can
+         * brick the device), then a missing gauge, a low cell, a dead link,
+         * the charger, the cable, and finally nothing at all, which is the
+         * quiet a healthy device deserves. Twelve glyphs, always: "100%
+         * CHARGING" would be thirteen, so a full cell on the charger says
+         * FULL. */
         static char buf[SP_LABEL_CAP];
+        const uint32_t ota = __atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE);
+        const jr_display_ota_state_t ota_state =
+            (jr_display_ota_state_t)(ota & 0xFu);
+        if (sp_ota_ringing(ota_state)) {
+            if (ota_state == JR_DISPLAY_OTA_RECEIVING) {
+                (void)sp_pct(buf, sp_str(buf, 0, SP_LABEL_CAP, "UPDATE "),
+                             SP_LABEL_CAP, (ota >> 8) & 0xFFu);
+                return buf;
+            }
+            return sp_ota_name(ota_state);
+        }
         const uint32_t w = __atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE);
-        const unsigned pct = w & 0xFFu;
+        const uint32_t pct = w & 0xFFu;
         if (pct > 100u) {
             return "NO BATTERY";
         }
-        snprintf(buf, sizeof buf, "%u%%%s", pct,
-                 (w & (1u << 25)) != 0u ? " CHG" : "");
+        const bool charging = (w & (1u << 25)) != 0u;
+        const bool usb = (w & (1u << 24)) != 0u;
+        const bool linked = (__atomic_load_n(&s_jarvis_word, __ATOMIC_ACQUIRE)
+                             & (1u << 16)) != 0u;
+        const char *word = "";
+        if (pct < HUD_BATT_LOW_PCT && !charging) {
+            word = " LOW";
+        } else if (!linked) {
+            word = " NO LINK";
+        } else if (charging) {
+            word = pct >= 100u ? " FULL" : " CHARGING";
+        } else if (usb) {
+            word = " USB";
+        }
+        (void)sp_str(buf, sp_pct(buf, 0, SP_LABEL_CAP, pct), SP_LABEL_CAP, word);
         return buf;
     }
     case JR_DISPLAY_SPACE_DESK:
         return s_desk_task[0] != '\0' ? s_desk_task : "NO TASK";
-    case JR_DISPLAY_SPACE_TOOLS: {
-        const uint32_t w = __atomic_load_n(&s_tools_word, __ATOMIC_ACQUIRE);
-        const uint32_t recent = (w >> 8) & 0xFFu;
-        /* The last tool that actually ran, or NOTHING. Returning "TOOLS" here
-         * printed the screen's own name a second time, directly above the
-         * caption already saying it — two identical words stacked, which is
-         * the clutter pattern every screen had. A headline is for the DATA;
-         * the caption is for the place. */
-        return recent < (w & 0xFFu) ? s_tool_name[recent] : "";
-    }
+    case JR_DISPLAY_SPACE_WEATHER:
+        /* "OVERCAST 83", or "NO WEATHER" — composed with the arcs, so the
+         * word and the mark can never describe two different fetches. */
+        return s_wx_head;
+    case JR_DISPLAY_SPACE_ACTIVITY:
+        /* NO HEADLINE, on the rule TOOLS taught: the caption already names
+         * the place, and the rows ARE the data. Printing "ACTIVITY" here
+         * would stack the screen's name over the caption saying it. */
+        return "";
     default:
         return "";
     }
@@ -2821,14 +3334,17 @@ static void sp_draw_space(const jr_display_ctx_t *ctx, int y1, int y2,
          * over the top. Drawing a focal object as well would put a second
          * clock underneath the good one. */
         break;
-    case JR_DISPLAY_SPACE_POWER:
+    case JR_DISPLAY_SPACE_STATUS:
         sp_focal_power(ctx, y1, y2, pixels, oy, st);
         break;
     case JR_DISPLAY_SPACE_DESK:
         sp_focal_desk(ctx, y1, y2, pixels, oy, st);
         break;
-    case JR_DISPLAY_SPACE_TOOLS:
-        sp_focal_tools(ctx, y1, y2, pixels, oy, st);
+    case JR_DISPLAY_SPACE_WEATHER:
+        sp_focal_weather(ctx, y1, y2, pixels, oy, st);
+        break;
+    case JR_DISPLAY_SPACE_ACTIVITY:
+        sp_focal_activity(ctx, y1, y2, pixels, oy, st);
         break;
     default:
         break;                /* a space with no focal object draws none */
@@ -3008,13 +3524,11 @@ static void sp_draw_orbit(const jr_display_ctx_t *ctx, int y1, int y2,
     const uint16_t cool = sp_tint(ctx, muted ? SP_C_GOLD_DIM : SP_C_CYAN_DIM, st);
     const uint16_t hot = sp_tint(ctx, muted ? SP_C_GOLD : SP_C_CYAN, st);
 
-    const int n = (int)JR_DISPLAY_SPACE_COUNT;
-    const int a_from = SP_A_TOP + ((int)s_space_from * 256) / n;
-    const int a_to = SP_A_TOP + ((int)s_space_to * 256) / n;
-    /* Signed shortest way round, in Q8 turn units: a wrap is one step forward,
-     * not n-1 steps back. */
-    const int d = (((a_to - a_from) + 128) & 255) - 128;
-    const int a_act = a_from + (d * s_space_ease) / 256;
+    /* One mark per screen the ring shows RIGHT NOW — DESK only while live —
+     * and the active mark at the angle sp_fade_tick eased for this frame,
+     * which already carries the slide and the re-spacing residue. */
+    const int n = sp_ring_n(sp_desk_live());
+    const int a_act = (s_orbit_a16 + 8) >> 4;
 
     sp_span_t act;
     sp_span_set(&act, a_act - 5, a_act + 5);
@@ -3916,6 +4430,18 @@ esp_err_t jr_display_set_touch_challenge(int sector, uint8_t progress)
     return ESP_OK;
 }
 
+/* Navigation is defined with the rest of the shell's public API below; the
+ * shell-state setter needs one step of it for the DESK strand. */
+typedef enum {
+    NAV_OP_NEXT = 0,
+    NAV_OP_PREV,
+    NAV_OP_UP,
+    NAV_OP_DOWN,
+    NAV_OP_HOME,
+    NAV_OP_SET,
+} nav_op_t;
+static void nav_step(nav_op_t op, uint32_t arg);
+
 void jr_display_set_shell_state(bool shade_open, bool agent_active,
                                 uint8_t agent_progress,
                                 jr_display_agent_state_t agent_state)
@@ -3932,6 +4458,18 @@ void jr_display_set_shell_state(bool shade_open, bool agent_active,
                                              __ATOMIC_RELAXED);
     if (previous == word) {
         return;
+    }
+    /* THE STRAND. If the job ends while DESK is the screen under the owner's
+     * eyes, the ring no longer admits DESK — so walk them one step forward,
+     * to ACTIVITY, where what just finished is the newest row. Forward, not
+     * back: the finished job's receipt is the natural next thing to see. The
+     * step goes through nav_step, so the slide, the serial and the orbit all
+     * treat it as an ordinary move, and any open sheet closes with it. Only
+     * on the live->dark EDGE: an explicit nav_set(DESK) while dark is a
+     * caller's decision and is left alone. */
+    if ((previous & JR_DISPLAY_SHELL_AGENT) != 0U && !agent_active &&
+        jr_display_nav_space() == JR_DISPLAY_SPACE_DESK) {
+        nav_step(NAV_OP_NEXT, 0u);
     }
     if (s_display.task != NULL) {
         xTaskNotifyGive(s_display.task);
@@ -4027,15 +4565,6 @@ static void nav_wake(void)
     }
 }
 
-typedef enum {
-    NAV_OP_NEXT = 0,
-    NAV_OP_PREV,
-    NAV_OP_UP,
-    NAV_OP_DOWN,
-    NAV_OP_HOME,
-    NAV_OP_SET,
-} nav_op_t;
-
 static void nav_step(nav_op_t op, uint32_t arg)
 {
     uint32_t cur = __atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE);
@@ -4060,16 +4589,25 @@ static void nav_step(nav_op_t op, uint32_t arg)
              * to draw position as a rotating mark rather than a linear one,
              * which is a render change, not a navigation one. */
             nspace = (space + 1u) % (uint32_t)JR_DISPLAY_SPACE_COUNT;
+            /* DESK is stepped OVER while nothing lives there, in both
+             * directions and across the wrap: the ring is shorter by one,
+             * not the same ring with a hole in it. */
+            if (nspace == (uint32_t)JR_DISPLAY_SPACE_DESK && !sp_desk_live()) {
+                nspace = (nspace + 1u) % (uint32_t)JR_DISPLAY_SPACE_COUNT;
+            }
             fwd = NAV_FORWARD_BIT;
             novl = (uint32_t)JR_DISPLAY_OVERLAY_NONE;
             break;
         case NAV_OP_PREV:
-            {
-                nspace = (space == 0u)
+            nspace = (space == 0u)
+                ? (uint32_t)JR_DISPLAY_SPACE_COUNT - 1u
+                : space - 1u;
+            if (nspace == (uint32_t)JR_DISPLAY_SPACE_DESK && !sp_desk_live()) {
+                nspace = (nspace == 0u)
                     ? (uint32_t)JR_DISPLAY_SPACE_COUNT - 1u
-                    : space - 1u;
-                fwd = 0u;
+                    : nspace - 1u;
             }
+            fwd = 0u;
             novl = (uint32_t)JR_DISPLAY_OVERLAY_NONE;
             break;
         case NAV_OP_UP:
@@ -4232,23 +4770,61 @@ void jr_display_desk_set_task(const char *task, uint8_t progress,
                      __ATOMIC_RELEASE);
 }
 
-void jr_display_tools_set(const char *const *names, int n, int recent)
+void jr_display_weather_set(const jr_display_weather_t *weather)
 {
-    if (names == NULL || n < 0) {
-        n = 0;
+    const uint32_t cur = __atomic_load_n(&s_weather_slot, __ATOMIC_ACQUIRE) & 1u;
+    jr_display_weather_t *dst = &s_weather[cur ^ 1u];
+    if (weather == NULL) {
+        memset(dst, 0, sizeof *dst);            /* valid=false: NO WEATHER */
+    } else {
+        *dst = *weather;
+        /* The condition is the one string; bound it here once so the
+         * composer can trust the terminator. Sky outside the enum reads as
+         * UNKNOWN, which draws in the ordinary cyan. */
+        dst->condition[sizeof dst->condition - 1] = '\0';
+        if (dst->sky < JR_DISPLAY_SKY_UNKNOWN || dst->sky > JR_DISPLAY_SKY_SNOW) {
+            dst->sky = JR_DISPLAY_SKY_UNKNOWN;
+        }
     }
-    if (n > JR_DISPLAY_TOOLS_MAX) {
-        n = JR_DISPLAY_TOOLS_MAX;
+    /* The slot flips AFTER the copy: a racing frame reads the old weather
+     * whole, never the new one half-written. */
+    __atomic_store_n(&s_weather_slot, cur ^ 1u, __ATOMIC_RELEASE);
+    nav_wake();
+}
+
+void jr_display_activity_push(const char *kind, const char *summary)
+{
+    if ((kind == NULL || kind[0] == '\0') &&
+        (summary == NULL || summary[0] == '\0')) {
+        return;                                 /* nothing happened: no row */
     }
-    for (int i = 0; i < JR_DISPLAY_TOOLS_MAX; ++i) {
-        sp_copy(s_tool_name[i], i < n ? names[i] : NULL);
+    uint32_t n = __atomic_load_n(&s_act_count, __ATOMIC_ACQUIRE);
+    if (n > (uint32_t)ACT_MAX) {
+        n = (uint32_t)ACT_MAX;
     }
-    if (recent < 0 || recent >= n) {
-        recent = 0xFF;                     /* out of range: no petal is lit */
+    /* Newest first: shift the older rows down and drop the fourth. */
+    for (int i = ACT_MAX - 1; i > 0; --i) {
+        memcpy(s_act_kind[i], s_act_kind[i - 1], sizeof s_act_kind[i]);
+        memcpy(s_act_sum[i], s_act_sum[i - 1], sizeof s_act_sum[i]);
+        s_act_ms[i] = s_act_ms[i - 1];
     }
-    __atomic_store_n(&s_tools_word,
-                     (uint32_t)n | ((uint32_t)(recent & 0xFF) << 8),
+    size_t k = 0;
+    for (; kind != NULL && k + 1U < sizeof s_act_kind[0] && kind[k] != '\0'; ++k) {
+        s_act_kind[0][k] = kind[k];
+    }
+    s_act_kind[0][k] = '\0';
+    size_t s = 0;
+    for (; summary != NULL && s + 1U < sizeof s_act_sum[0] && summary[s] != '\0';
+         ++s) {
+        s_act_sum[0][s] = summary[s];
+    }
+    s_act_sum[0][s] = '\0';
+    s_act_ms[0] = (uint32_t)(esp_timer_get_time() / 1000);
+    /* The count lands last, so a frame that reads the new count reads the
+     * rows it was written for. */
+    __atomic_store_n(&s_act_count, n < (uint32_t)ACT_MAX ? n + 1u : n,
                      __ATOMIC_RELEASE);
+    nav_wake();
 }
 
 void jr_display_power_set(uint8_t percent, uint16_t millivolts,

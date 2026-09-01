@@ -66,6 +66,46 @@ static void reset_nav(void)
     __atomic_store_n(&s_display.shell_word, 0U, __ATOMIC_RELEASE);
 }
 
+/* Publish one weather sample through the public setter, exactly as main.c
+ * will. feels/rain/humidity/wind are fixed so the sheet rows are checkable. */
+static void set_weather(bool valid, int temp, int hi, int lo,
+                        jr_display_sky_t sky, const char *cond,
+                        uint32_t fetched_ms)
+{
+    jr_display_weather_t w;
+    memset(&w, 0, sizeof w);
+    w.valid = valid;
+    w.temp_f = (int16_t)temp;
+    w.feels_f = (int16_t)(temp + 2);
+    w.hi_f = (int16_t)hi;
+    w.lo_f = (int16_t)lo;
+    w.rain_pct = 40U;
+    w.humidity_pct = 72U;
+    w.wind_mph = 12U;
+    w.sky = sky;
+    strncpy(w.condition, cond, sizeof w.condition - 1U);
+    w.fetched_ms = fetched_ms;
+    jr_display_weather_set(&w);
+}
+
+static void reset_activity(void)
+{
+    __atomic_store_n(&s_act_count, 0U, __ATOMIC_RELEASE);
+    memset(s_act_kind, 0, sizeof s_act_kind);
+    memset(s_act_sum, 0, sizeof s_act_sum);
+    memset(s_act_ms, 0, sizeof s_act_ms);
+}
+
+static bool space_is(int space, const char *what)
+{
+    const bool ok = (int)jr_display_nav_space() == space;
+    if (!ok) {
+        printf("  (%s: on space %d, wanted %d)\n", what,
+               (int)jr_display_nav_space(), space);
+    }
+    return ok;
+}
+
 static void test_space_ring_wraps_both_ways(void)
 {
     /* The ring WRAPS (changed 2026-08-29). This test previously asserted the
@@ -73,8 +113,13 @@ static void test_space_ring_wraps_both_ways(void)
      * wrap made "am I at the end" unanswerable. An endless ring never raises
      * that question: there is no end, and a swipe never dies against a wall.
      * The old assertions are inverted here rather than deleted, so the change
-     * of contract stays visible to whoever reads this next. */
+     * of contract stays visible to whoever reads this next.
+     *
+     * DESK is made live first: this test walks the WHOLE ring, and DESK is on
+     * it only while an agent, a claim or a lease is. The shorter dark ring
+     * has its own test. */
     reset_nav();
+    jr_display_set_shell_state(false, true, 40U, JR_DISPLAY_AGENT_WORKING);
     CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS, "cold start");
 
     /* Backwards off the first screen lands on the LAST one. */
@@ -104,6 +149,7 @@ static void test_space_ring_wraps_both_ways(void)
     /* Every screen is reachable going forward — a ring with a gap is a bug
      * that only shows up when the count changes. */
     reset_nav();
+    jr_display_set_shell_state(false, true, 40U, JR_DISPLAY_AGENT_WORKING);
     for (int i = 1; i < (int)JR_DISPLAY_SPACE_COUNT; ++i) {
         jr_display_nav_next();
         CHECK((int)jr_display_nav_space() == i,
@@ -159,7 +205,7 @@ static void test_sideways_resets_and_home_escapes(void)
     CHECK(jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE,
           "clamped swipe still resets");
 
-    jr_display_nav_set(JR_DISPLAY_SPACE_TOOLS);
+    jr_display_nav_set(JR_DISPLAY_SPACE_ACTIVITY);
     jr_display_nav_up();
     jr_display_nav_home();
     CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS, "home space");
@@ -288,21 +334,21 @@ static void test_ota_slot_pair_reads_as_a_journey(void)
 static void stage_power(jr_display_ota_state_t st, uint8_t pct, int overlay)
 {
     reset_nav();
-    jr_display_nav_set(JR_DISPLAY_SPACE_POWER);
+    jr_display_nav_set(JR_DISPLAY_SPACE_STATUS);
     s_display.board.width = HUD_W;
     s_display.board.height = HUD_H;
     s_display.board.swap_color_bytes = false;
     s_space_on = true;
-    s_space_from = JR_DISPLAY_SPACE_POWER;
-    s_space_to = JR_DISPLAY_SPACE_POWER;
+    s_space_from = JR_DISPLAY_SPACE_STATUS;
+    s_space_to = JR_DISPLAY_SPACE_STATUS;
     s_space_prog = 256;
     s_space_ease = 256;
     s_space_veil = 256;
-    s_detail_space = JR_DISPLAY_SPACE_POWER;
+    s_detail_space = JR_DISPLAY_SPACE_STATUS;
     s_detail_ease = overlay == JR_DISPLAY_OVERLAY_DETAIL ? 256 : 0;
     s_shade_ease = overlay == JR_DISPLAY_OVERLAY_SHADE ? 256 : 0;
     __atomic_store_n(&s_nav_word,
-                     (uint32_t)JR_DISPLAY_SPACE_POWER |
+                     (uint32_t)JR_DISPLAY_SPACE_STATUS |
                          ((uint32_t)overlay << NAV_OVL_SHIFT),
                      __ATOMIC_RELEASE);
     jr_display_set_status(90U);
@@ -332,10 +378,22 @@ static void stage_ring_at_rest(int space, jr_display_ota_state_t st,
 static void test_power_sheet_reports_update_and_slot(void)
 {
     stage_power(JR_DISPLAY_OTA_RECEIVING, 42U, JR_DISPLAY_OVERLAY_DETAIL);
-    CHECK(strcmp(s_detail_head, "POWER") == 0, "power sheet, got '%s'",
+    CHECK(strcmp(s_detail_head, "STATUS") == 0, "status sheet, got '%s'",
           s_detail_head);
-    CHECK(s_detail_rows == 6, "six rows, got %d", s_detail_rows);
+    CHECK(s_detail_rows == 9, "nine rows, got %d", s_detail_rows);
     CHECK(s_detail_rows <= SP_ROWS_MAX, "within the row budget");
+    /* The three rows STATUS gathered from elsewhere, each a published value. */
+    jr_display_jarvis_set_session(true, 3U, 3725U);
+    sp_compose();
+    CHECK(strcmp(s_detail_label[6], "LINK") == 0 &&
+              strcmp(s_detail_value[6], "UP") == 0,
+          "link row: '%s' '%s'", s_detail_label[6], s_detail_value[6]);
+    CHECK(strcmp(s_detail_label[7], "MIC") == 0 &&
+              strcmp(s_detail_value[7], "LIVE") == 0,
+          "mic row: '%s' '%s'", s_detail_label[7], s_detail_value[7]);
+    CHECK(strcmp(s_detail_label[8], "UPTIME") == 0 &&
+              strcmp(s_detail_value[8], "1:02") == 0,
+          "uptime row: '%s' '%s'", s_detail_label[8], s_detail_value[8]);
     /* The battery rows keep their places; the update is appended, so a
      * reader who learned the sheet before the move finds nothing shifted. */
     CHECK(strcmp(s_detail_label[0], "LEVEL") == 0, "level row first");
@@ -430,12 +488,18 @@ static void test_never_leaves_shell_radius(void)
         JR_DISPLAY_OVERLAY_NONE, JR_DISPLAY_OVERLAY_DETAIL,
         JR_DISPLAY_OVERLAY_SHADE,
     };
-    static const char *const tools[] = { "AUDIO", "VISION", "MEMORY", "WEB" };
     int worst = 0;
 
     jr_display_desk_set_task("REINDEX", 64U, JR_DISPLAY_AGENT_WORKING);
-    jr_display_tools_set(tools, 4, 2);
     jr_display_jarvis_set_session(true, 17U, 900U);
+    /* Feed the two live-data screens so they draw their full content — an
+     * empty WEATHER is two bare tracks, which proves nothing about the mark
+     * or the text; an empty ACTIVITY is one line. */
+    set_weather(true, 83, 86, 76, JR_DISPLAY_SKY_CLOUDS, "OVERCAST", 0U);
+    reset_activity();
+    jr_display_activity_push("WEATHER", "83 OVERCAST FORT LAUDERDALE");
+    jr_display_activity_push("WEB", "FOUND THREE RESULTS");
+    jr_display_activity_push("SAID", "VOLUME IS NOW FORTY");
 
     for (int space = 0; space < JR_DISPLAY_SPACE_COUNT; ++space) {
         for (size_t o = 0; o < sizeof overlays / sizeof *overlays; ++o) {
@@ -819,8 +883,9 @@ static void test_every_space_composes_its_own_sheet(void)
     static const struct { int space; const char *head; } expect[] = {
         { JR_DISPLAY_SPACE_JARVIS,   "SESSION"  },
         { JR_DISPLAY_SPACE_WATCH,    "TIME"     },
-        { JR_DISPLAY_SPACE_POWER,    "POWER"    },
-        { JR_DISPLAY_SPACE_TOOLS,    "TOOLS"    },
+        { JR_DISPLAY_SPACE_WEATHER,  "WEATHER"  },
+        { JR_DISPLAY_SPACE_STATUS,   "STATUS"   },
+        { JR_DISPLAY_SPACE_ACTIVITY, "ACTIVITY" },
     };
     for (size_t i = 0; i < sizeof expect / sizeof expect[0]; ++i) {
         sp_compose_detail(expect[i].space);
@@ -956,78 +1021,445 @@ static void stage_space(int space)
     sp_compose();
 }
 
-/* TOOLS clamped the eight-tool catalog to four petals and DROPPED the last-run
- * index for the other four, so EXECUTE / VOLUME / LIGHT / ASK all collapsed
- * to "LAST NONE". Assert the eighth tool is both named and LIT: the frame
- * with it recent must differ from the frame with nothing recent, and only
- * inside the petal band. Reverting JR_DISPLAY_TOOLS_MAX to 4 fails this. */
-static void test_tools_names_and_lights_the_eighth_tool(void)
-{
-    static const char *const eight[] = { "RECALL", "REMEMBER", "TIME",
-                                         "SEARCH", "EXECUTE", "VOLUME",
-                                         "LIGHT", "ASK" };
-    jr_display_tools_set(eight, 8, 7);
-    sp_compose_detail(JR_DISPLAY_SPACE_TOOLS);
-    CHECK(strcmp(s_detail_value[0], "8") == 0,
-          "READY should count all eight, got '%s'", s_detail_value[0]);
-    CHECK(strcmp(s_detail_value[1], "ASK") == 0,
-          "LAST should name the eighth tool, got '%s'", s_detail_value[1]);
+/* ------------------------------------------------------- DESK, while live -- */
 
-    stage_space(JR_DISPLAY_SPACE_TOOLS);
-    jr_display_tools_set(eight, 8, 7);
-    uint16_t *lit = render_frame();
-    jr_display_tools_set(eight, 8, -1);
-    uint16_t *dark = render_frame();
-    if (!lit || !dark) {
-        printf("FAIL %s: allocation failed\n", __func__);
-        g_failures++;
-        free(lit);
-        free(dark);
-        return;
+/* DESK is on the ring only while JR_DISPLAY_SHELL_AGENT is set. Dark, the
+ * ring steps over it in both directions and a lap is one screen shorter;
+ * live, the full ring is back. Both laps are walked and every landing named,
+ * so a wrap that quietly re-admits DESK cannot pass. Mutation: dropping
+ * either sp_desk_live() test in nav_step fails the matching half. */
+static void test_desk_is_on_the_ring_only_while_live(void)
+{
+    const int count = (int)JR_DISPLAY_SPACE_COUNT;
+
+    reset_nav();                            /* shell word 0: DESK is dark */
+    jr_display_nav_set(JR_DISPLAY_SPACE_STATUS);
+    jr_display_nav_next();
+    CHECK(space_is(JR_DISPLAY_SPACE_ACTIVITY, "next"),
+          "next from POWER steps over a dark DESK");
+    jr_display_nav_prev();
+    CHECK(space_is(JR_DISPLAY_SPACE_STATUS, "prev"),
+          "prev from ACTIVITY steps over a dark DESK");
+
+    /* Forward lap, dark: count-1 steps, DESK never seen, home again. */
+    reset_nav();
+    bool saw_desk = false;
+    for (int i = 0; i < count - 1; ++i) {
+        jr_display_nav_next();
+        saw_desk |= jr_display_nav_space() == JR_DISPLAY_SPACE_DESK;
     }
-    /* Two things legitimately change: the petal band (r67-104; the annulus
-     * inner edge floors one unit under 68) and the headline under it, which
-     * names the last tool. Nothing outside the safe radius may. */
-    size_t in_band = 0, escaped = 0;
+    CHECK(!saw_desk, "a dark DESK was landed on going forward");
+    CHECK(space_is(JR_DISPLAY_SPACE_JARVIS, "dark lap fwd"),
+          "a dark-DESK lap forward is %d steps", count - 1);
+
+    /* Backward lap, dark, through the wrap first. */
+    reset_nav();
+    saw_desk = false;
+    for (int i = 0; i < count - 1; ++i) {
+        jr_display_nav_prev();
+        saw_desk |= jr_display_nav_space() == JR_DISPLAY_SPACE_DESK;
+    }
+    CHECK(!saw_desk, "a dark DESK was landed on going backward");
+    CHECK(space_is(JR_DISPLAY_SPACE_JARVIS, "dark lap back"),
+          "a dark-DESK lap backward is %d steps", count - 1);
+
+    /* Live: the ring is whole again, in both directions. */
+    jr_display_set_shell_state(false, true, 40U, JR_DISPLAY_AGENT_WORKING);
+    jr_display_nav_set(JR_DISPLAY_SPACE_STATUS);
+    jr_display_nav_next();
+    CHECK(space_is(JR_DISPLAY_SPACE_DESK, "live next"),
+          "next from POWER reaches a live DESK");
+    jr_display_nav_next();
+    CHECK(space_is(JR_DISPLAY_SPACE_ACTIVITY, "live next 2"), "and on");
+    jr_display_nav_prev();
+    CHECK(space_is(JR_DISPLAY_SPACE_DESK, "live prev"),
+          "prev from ACTIVITY reaches a live DESK");
+    jr_display_nav_home();
+    for (int i = 0; i < count; ++i) {
+        jr_display_nav_next();
+    }
+    CHECK(space_is(JR_DISPLAY_SPACE_JARVIS, "live lap"),
+          "a live lap is the full %d steps", count);
+
+    /* The wrap itself, both states: the last screen's neighbour forward is
+     * home, and home's neighbour backward is the last screen. */
+    for (int live = 0; live <= 1; ++live) {
+        reset_nav();
+        jr_display_set_shell_state(false, live != 0, 40U,
+                                   live ? JR_DISPLAY_AGENT_WORKING
+                                        : JR_DISPLAY_AGENT_NONE);
+        jr_display_nav_set(JR_DISPLAY_SPACE_ACTIVITY);
+        jr_display_nav_next();
+        CHECK(space_is(JR_DISPLAY_SPACE_JARVIS, "wrap fwd"),
+              "live=%d: next from the last screen wraps home", live);
+        jr_display_nav_prev();
+        CHECK(space_is(JR_DISPLAY_SPACE_ACTIVITY, "wrap back"),
+              "live=%d: prev from home wraps to the last screen", live);
+    }
+    reset_nav();
+}
+
+/* A job that ends while DESK is the current screen must not leave the owner
+ * on a screen the ring no longer admits: they move one step forward, to
+ * ACTIVITY, and any sheet they had open closes with the move. Going dark on
+ * any OTHER screen moves nobody, and an explicit nav_set(DESK) while dark is
+ * a caller's decision and stays. Mutation: deleting the edge in
+ * jr_display_set_shell_state fails the first check only. */
+static void test_desk_going_dark_moves_the_owner_on(void)
+{
+    reset_nav();
+    jr_display_set_shell_state(false, true, 50U, JR_DISPLAY_AGENT_WORKING);
+    jr_display_nav_set(JR_DISPLAY_SPACE_DESK);
+    jr_display_nav_up();
+    CHECK(jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_DETAIL, "sheet open");
+    jr_display_set_shell_state(false, false, 0U, JR_DISPLAY_AGENT_NONE);
+    CHECK(space_is(JR_DISPLAY_SPACE_ACTIVITY, "strand"),
+          "DESK going dark moves the owner on to ACTIVITY");
+    CHECK(jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE,
+          "the move closed the sheet");
+
+    jr_display_set_shell_state(false, true, 50U, JR_DISPLAY_AGENT_WORKING);
+    jr_display_nav_set(JR_DISPLAY_SPACE_STATUS);
+    jr_display_set_shell_state(false, false, 0U, JR_DISPLAY_AGENT_NONE);
+    CHECK(space_is(JR_DISPLAY_SPACE_STATUS, "no strand"),
+          "going dark elsewhere moves nobody");
+
+    jr_display_nav_set(JR_DISPLAY_SPACE_DESK);
+    jr_display_set_shell_state(false, false, 0U, JR_DISPLAY_AGENT_NONE);
+    CHECK(space_is(JR_DISPLAY_SPACE_DESK, "explicit"),
+          "an explicit nav_set(DESK) while dark is honoured");
+    reset_nav();
+}
+
+/* The orbit has one mark per VISIBLE screen, so when DESK appears every slot
+ * moves. The mark for the screen you are standing on must not jump with
+ * them: it eases to its new slot over a slide. Drive sp_fade_tick by hand —
+ * one frame after DESK appears the mark must have moved only part of the
+ * way, and after a slide's worth of frames it must have arrived. Mutation:
+ * removing the s_orbit_off16 bank makes the first frame land on the target
+ * and fails the "did not jump" check. */
+static void test_orbit_mark_eases_when_desk_appears(void)
+{
+    stage_space(JR_DISPLAY_SPACE_ACTIVITY);        /* reset_nav: DESK dark */
+    s_space_serial_seen = 0;
+    s_orbit_n_seen = 0;
+    s_orbit_off16 = 0;
+    sp_fade_tick(1000U, 60U, 60);
+    const int a_dark = s_orbit_a16;
+    CHECK(a_dark == sp_orbit_angle(JR_DISPLAY_SPACE_ACTIVITY, false) * 16,
+          "settled on the five-screen slot, got %d", a_dark);
+
+    jr_display_set_shell_state(false, true, 50U, JR_DISPLAY_AGENT_WORKING);
+    const int a_target = sp_orbit_angle(JR_DISPLAY_SPACE_ACTIVITY, true) * 16;
+    CHECK(a_target != a_dark, "the slot actually moved");
+    sp_fade_tick(1060U, 60U, 60);
+    const int first = s_orbit_a16 - a_dark;
+    const int full = a_target - a_dark;
+    CHECK((first < 0 ? -first : first) < (full < 0 ? -full : full),
+          "the mark jumped: first frame moved %d of %d", first, full);
+    CHECK(first != 0, "the mark did not start moving");
+    for (int i = 0; i < 60; ++i) {
+        sp_fade_tick(1120U + (uint32_t)i * 60U, 60U, 60);
+    }
+    CHECK(s_orbit_a16 == a_target, "the mark settles on its new slot: %d vs %d",
+          s_orbit_a16, a_target);
+
+    /* The dots re-space at once: six of them now, evenly spaced. */
+    uint16_t *fb = render_frame();
+    if (fb) {
+        int dots = 0;
+        bool prev_on = false;
+        for (int a = 0; a < 2048; ++a) {
+            const int x = SP_CX + ((sp_cos((a * 256) / 2048) * SP_ORB_R) >> 15);
+            const int y = SP_CY + ((sp_sin((a * 256) / 2048) * SP_ORB_R) >> 15);
+            const uint16_t px = fb[(size_t)y * HUD_W + x];
+            const bool on = px == SP_C_CYAN_DIM || px == SP_C_CYAN;
+            if (a > 0 && on && !prev_on) {
+                dots++;
+            }
+            prev_on = on;
+        }
+        CHECK(dots == (int)JR_DISPLAY_SPACE_COUNT,
+              "expected %d orbit marks with DESK live, counted %d",
+              (int)JR_DISPLAY_SPACE_COUNT, dots);
+        free(fb);
+    }
+    reset_nav();
+}
+
+/* ---------------------------------------------------------------- WEATHER -- */
+
+static size_t count_color_within(const uint16_t *fb, uint16_t c, int rmin,
+                                 int rmax, int ymax)
+{
+    size_t n = 0;
     for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
-        if (lit[i] == dark[i]) {
+        if ((int)(i / HUD_W) >= ymax || fb[i] != c) {
             continue;
         }
         const int r = radius_of((int)i);
-        if (r >= 67 && r <= 104) {
-            in_band++;
-        } else if (r > JR_DISPLAY_SAFE_R) {
-            escaped++;
+        if (r >= rmin && r <= rmax) {
+            ++n;
         }
     }
-    CHECK(in_band > 0, "the eighth petal is not lit — the last-run index was dropped");
-    CHECK(escaped == 0, "%zu changed pixels outside the safe radius", escaped);
-    free(lit);
-    free(dark);
+    return n;
+}
 
-    /* Eight petals must stay eight: neighbours may not fuse into a ring. At
-     * the petal's mid-radius, walk the circle and count lit-to-dark edges. */
-    stage_space(JR_DISPLAY_SPACE_TOOLS);
-    jr_display_tools_set(eight, 8, -1);
+/* No weather means NO NUMBER: the headline says why, the disc is empty, and
+ * the focal object is two bare tracks — not a zero, not "--", nothing shaped
+ * like a reading. The sheet is one honest row. */
+static void test_weather_without_data_prints_no_number(void)
+{
+    stage_space(JR_DISPLAY_SPACE_WEATHER);
+    jr_display_weather_set(NULL);
+    sp_compose();
+    CHECK(strcmp(s_wx_head, "NO WEATHER") == 0, "headline, got '%s'", s_wx_head);
+    CHECK(s_wx_temp[0] == '\0' && s_wx_hilo[0] == '\0' && s_wx_age[0] == '\0',
+          "no number composed: '%s' '%s' '%s'", s_wx_temp, s_wx_hilo, s_wx_age);
+    for (const char *p = s_wx_head; *p; ++p) {
+        CHECK(*p < '0' || *p > '9', "a digit in the no-data headline");
+    }
+    sp_compose_detail(JR_DISPLAY_SPACE_WEATHER);
+    CHECK(s_detail_rows == 1 && strcmp(s_detail_value[0], "NONE") == 0,
+          "the sheet admits it has nothing: %d rows, '%s'", s_detail_rows,
+          s_detail_value[0]);
+
     uint16_t *fb = render_frame();
     if (!fb) {
         printf("FAIL %s: allocation failed\n", __func__);
         g_failures++;
         return;
     }
-    int edges = 0;
-    bool prev_on = false;
-    for (int a = 0; a < 720; ++a) {
-        const int x = SP_CX + ((sp_cos((a * 256) / 720) * 86) >> 15);
-        const int y = SP_CY + ((sp_sin((a * 256) / 720) * 86) >> 15);
-        const bool on = fb[(size_t)y * HUD_W + x] != POISON;
-        if (a > 0 && on && !prev_on) {
-            edges++;
+    size_t interior = 0, nontrack = 0, track = 0;
+    for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
+        if (fb[i] == POISON || (int)(i / HUD_W) >= SP_LABEL_Y) {
+            continue;                 /* the headline rows are text, by design */
         }
-        prev_on = on;
+        const int r = radius_of((int)i);
+        /* The rain track's inner edge floors one unit under SP_WX_RAIN_IN,
+         * as every annulus does; the disc proper starts inside that. */
+        if (r < SP_WX_RAIN_IN - 1) {
+            ++interior;
+        } else if (r <= SP_WX_MARK_OUT) {
+            if (fb[i] == SP_C_TRACK) {
+                ++track;
+            } else {
+                ++nontrack;
+            }
+        }
     }
-    CHECK(edges == 8, "expected 8 distinct petals at r86, counted %d", edges);
+    CHECK(interior == 0, "%zu pixels inside the disc with no weather", interior);
+    CHECK(nontrack == 0, "%zu coloured pixels on the gauge with no weather",
+          nontrack);
+    CHECK(track > 1000, "the bare tracks drew (%zu track pixels)", track);
     free(fb);
+}
+
+/* The mark is the temperature. 70 F is the middle of a 40..100 gauge that
+ * opens at 7:30 and sweeps 270 degrees, so it sits at 12 o'clock exactly;
+ * the ends pin to the ends. Measure the CENTROID of the mark-coloured pixels
+ * rather than trust the angle arithmetic. */
+static void test_weather_mark_sits_at_the_temperature(void)
+{
+    static const struct { int temp; int angle; } cases[] = {
+        { 70, SP_A_TOP }, { 85, 240 }, { 40, SP_WX_A0 },
+        { 100, SP_WX_A0 + SP_WX_SWEEP }, { -20, SP_WX_A0 },
+    };
+    for (size_t c = 0; c < sizeof cases / sizeof *cases; ++c) {
+        stage_space(JR_DISPLAY_SPACE_WEATHER);
+        set_weather(true, cases[c].temp, 100, 40, JR_DISPLAY_SKY_CLOUDS,
+                    "OVERCAST", 0U);
+        sp_compose();
+        CHECK(s_wx_mark_a == cases[c].angle, "%d F composed at %d, wanted %d",
+              cases[c].temp, s_wx_mark_a, cases[c].angle);
+
+        uint16_t *fb = render_frame();
+        if (!fb) {
+            printf("FAIL %s: allocation failed\n", __func__);
+            g_failures++;
+            return;
+        }
+        long sx = 0, sy = 0, n = 0;
+        for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
+            if (fb[i] != SP_C_CYAN || radius_of((int)i) > SP_WX_MARK_OUT) {
+                continue;             /* the orbit's mark is cyan too, at r187+ */
+            }
+            sx += (long)(i % HUD_W);
+            sy += (long)(i / HUD_W);
+            ++n;
+        }
+        CHECK(n > 40, "%d F: the mark drew only %ld pixels", cases[c].temp, n);
+        if (n > 0) {
+            const int a = cases[c].angle;
+            const int R = (SP_WX_MARK_IN + SP_WX_MARK_OUT) / 2;
+            const int ex = SP_CX + ((sp_cos(a) * R) >> 15);
+            const int ey = SP_CY + ((sp_sin(a) * R) >> 15);
+            const int cx = (int)(sx / n), cy = (int)(sy / n);
+            CHECK(cx >= ex - 4 && cx <= ex + 4 && cy >= ey - 4 && cy <= ey + 4,
+                  "%d F: mark centroid (%d,%d), expected (%d,%d)",
+                  cases[c].temp, cx, cy, ex, ey);
+        }
+        free(fb);
+    }
+    /* The band is lo..hi on the same scale, and lo/hi order is not trusted. */
+    set_weather(true, 80, 76, 86, JR_DISPLAY_SKY_CLOUDS, "OVERCAST", 0U);
+    sp_compose();
+    CHECK(s_wx_band_a0 == sp_wx_angle(76) &&
+              s_wx_band_sweep == sp_wx_angle(86) - sp_wx_angle(76),
+          "band from lo to hi regardless of order: a0 %d sweep %d",
+          s_wx_band_a0, s_wx_band_sweep);
+    CHECK(strcmp(s_wx_hilo, "H76 L86") == 0, "hi/lo line, got '%s'", s_wx_hilo);
+    CHECK(strcmp(s_wx_head, "OVERCAST 80") == 0, "headline, got '%s'", s_wx_head);
+}
+
+/* Age is honest in three steps: under two minutes it is not worth a line;
+ * up to thirty it is a line; beyond that the data is STALE and the accent
+ * loses its colour — a CLEAR day stops being amber. Muted outranks all of
+ * it with gold, as on every screen. Mutation: deleting the s_wx_stale branch
+ * in sp_focal_weather leaves amber on the stale frame. */
+static void test_stale_weather_loses_its_colour(void)
+{
+    stage_space(JR_DISPLAY_SPACE_WEATHER);
+    set_weather(true, 83, 86, 76, JR_DISPLAY_SKY_CLEAR, "CLEAR", 0U);
+    s_fake_us = 0;
+    sp_compose();
+    CHECK(s_wx_age[0] == '\0', "fresh: no age line, got '%s'", s_wx_age);
+    uint16_t *fb = render_frame();
+    if (fb) {
+        CHECK(count_color_within(fb, SP_C_AMBER, SP_WX_MARK_IN, SP_WX_MARK_OUT,
+                                 HUD_H) > 40,
+              "a fresh CLEAR day draws its mark in amber");
+        free(fb);
+    }
+
+    s_fake_us = 12LL * 60 * 1000 * 1000;
+    sp_compose();
+    CHECK(strcmp(s_wx_age, "12M AGO") == 0, "12 min: got '%s'", s_wx_age);
+    CHECK(!s_wx_stale, "12 min is not stale");
+
+    s_fake_us = 45LL * 60 * 1000 * 1000;
+    sp_compose();
+    CHECK(s_wx_stale, "45 min is stale");
+    CHECK(strcmp(s_wx_age, "STALE 45M") == 0, "45 min: got '%s'", s_wx_age);
+    CHECK(strcmp(s_wx_temp, "83") == 0, "the number survives, got '%s'", s_wx_temp);
+    fb = render_frame();
+    if (fb) {
+        CHECK(count_color_within(fb, SP_C_AMBER, 0, JR_DISPLAY_SHELL_R_MAX,
+                                 HUD_H) == 0,
+              "stale weather still drew amber");
+        CHECK(count_color_within(fb, SP_C_GREY, SP_WX_MARK_IN, SP_WX_MARK_OUT,
+                                 HUD_H) > 40,
+              "the stale mark is grey");
+        free(fb);
+    }
+    sp_compose_detail(JR_DISPLAY_SPACE_WEATHER);
+    CHECK(strcmp(s_detail_label[4], "AGE") == 0 &&
+              strcmp(s_detail_value[4], "45M STALE") == 0,
+          "the sheet says so too: '%s' '%s'", s_detail_label[4],
+          s_detail_value[4]);
+
+    /* Days. fetched_ms is a uint32 of esp_timer ms, so the largest age the
+     * contract can express is 49 days — "STALE 49D" is the nine-glyph worst
+     * case the disc was measured for. */
+    s_fake_us = 3LL * 24 * 60 * 60 * 1000 * 1000;
+    sp_compose();
+    CHECK(strcmp(s_wx_age, "STALE 3D") == 0, "3 days: got '%s'", s_wx_age);
+    s_fake_us = 49LL * 24 * 60 * 60 * 1000 * 1000;
+    sp_compose();
+    CHECK(strcmp(s_wx_age, "STALE 49D") == 0, "49 days: got '%s'", s_wx_age);
+
+    /* Muted: gold, whatever the sky or the age. */
+    s_fake_us = 0;
+    __atomic_store_n(&s_hud_env_word, 74U | (1U << 9), __ATOMIC_RELEASE);
+    sp_compose();
+    fb = render_frame();
+    if (fb) {
+        CHECK(count_color_within(fb, SP_C_AMBER, 0, JR_DISPLAY_SHELL_R_MAX,
+                                 HUD_H) == 0, "muted still drew amber");
+        CHECK(count_color_within(fb, SP_C_GOLD, SP_WX_MARK_IN, SP_WX_MARK_OUT,
+                                 HUD_H) > 40, "muted draws the mark in gold");
+        free(fb);
+    }
+    __atomic_store_n(&s_hud_env_word, 74U, __ATOMIC_RELEASE);
+    s_fake_us = 0;
+}
+
+/* --------------------------------------------------------------- ACTIVITY -- */
+
+/* Empty is one honest line and nothing else; three pushes are three rows,
+ * newest first; a fourth push drops the oldest. A summary too long for the
+ * row is cut and marked. The sheet says WHEN, not what, so it never re-cuts
+ * the summary to a ten-glyph column. */
+static void test_activity_is_honest_when_empty_and_newest_first(void)
+{
+    reset_activity();
+    stage_space(JR_DISPLAY_SPACE_ACTIVITY);
+    sp_compose();
+    CHECK(s_act_rows == 0, "empty composes no rows, got %d", s_act_rows);
+    uint16_t *fb = render_frame();
+    if (fb) {
+        const size_t centre = count_color_within(fb, SP_C_GREY, 0, 168, SP_CY + 7)
+                            - count_color_within(fb, SP_C_GREY, 0, 168, SP_CY - 7);
+        const size_t top = count_color_within(fb, SP_C_GREY, 0, 168, SP_ACT_Y0 + 14)
+                         + count_color_within(fb, SP_C_INK, 0, 168, SP_ACT_Y0 + 14);
+        CHECK(centre > 100, "NOTHING YET is drawn on the centre row (%zu)", centre);
+        CHECK(top == 0, "an empty feed drew a top row (%zu pixels)", top);
+        free(fb);
+    }
+    sp_compose_detail(JR_DISPLAY_SPACE_ACTIVITY);
+    CHECK(s_detail_rows == 1 && strcmp(s_detail_value[0], "EMPTY") == 0,
+          "empty sheet: %d rows, '%s'", s_detail_rows, s_detail_value[0]);
+
+    s_fake_us = 0;
+    jr_display_activity_push("WEB", "FOUND THREE RESULTS");
+    jr_display_activity_push("TIME", "SAID 4:20 PM");
+    jr_display_activity_push("ASK", "TAP ONE OF THREE");
+    jr_display_activity_push("SAID", "VOLUME IS NOW FORTY");
+    sp_compose();
+    CHECK(s_act_rows == 3, "three rows kept, got %d", s_act_rows);
+    CHECK(strncmp(s_act_row[0], "SAID ", 5) == 0, "newest first, got '%s'",
+          s_act_row[0]);
+    CHECK(strncmp(s_act_row[1], "ASK ", 4) == 0, "then, got '%s'", s_act_row[1]);
+    CHECK(strncmp(s_act_row[2], "TIME ", 5) == 0, "then, got '%s'", s_act_row[2]);
+    CHECK(strcmp(s_act_row[0], "SAID VOLUME IS NOW FORTY") == 0,
+          "kind and summary on one line, got '%s'", s_act_row[0]);
+    for (int i = 0; i < 3; ++i) {
+        CHECK(strstr(s_act_row[i], "WEB") == NULL, "the fourth-oldest survived");
+    }
+    fb = render_frame();
+    if (fb) {
+        for (int i = 0; i < 3; ++i) {
+            const int y0 = SP_ACT_Y0 + i * SP_ACT_PITCH;
+            const size_t ink = count_color_within(fb, SP_C_INK, 0, 168, y0 + 14)
+                             - count_color_within(fb, SP_C_INK, 0, 168, y0);
+            CHECK(ink > 100, "row %d drew no summary ink (%zu)", i, ink);
+        }
+        /* Rows are readable content: inside the safe radius, every pixel. */
+        CHECK(count_color_within(fb, SP_C_INK, JR_DISPLAY_SAFE_R + 1, 999, HUD_H)
+                  == 0, "row ink outside the safe radius");
+        free(fb);
+    }
+
+    sp_compose_detail(JR_DISPLAY_SPACE_ACTIVITY);
+    CHECK(s_detail_rows == 3, "sheet rows %d", s_detail_rows);
+    CHECK(strcmp(s_detail_label[0], "SAID") == 0 &&
+              strcmp(s_detail_value[0], "JUST NOW") == 0,
+          "sheet says when: '%s' '%s'", s_detail_label[0], s_detail_value[0]);
+    s_fake_us = 7LL * 60 * 1000 * 1000;
+    sp_compose_detail(JR_DISPLAY_SPACE_ACTIVITY);
+    CHECK(strcmp(s_detail_value[2], "7M AGO") == 0, "aged: '%s'",
+          s_detail_value[2]);
+    s_fake_us = 0;
+
+    /* A long summary is cut at the row and marked, never silently. */
+    jr_display_activity_push("WEATHER", "83 OVERCAST FORT LAUDERDALE");
+    sp_compose();
+    CHECK(strlen(s_act_row[0]) == SP_ACT_ROW_GLYPHS,
+          "row fills its width exactly, got %zu", strlen(s_act_row[0]));
+    CHECK(s_act_row[0][SP_ACT_ROW_GLYPHS - 1] == '.',
+          "the cut is marked, got '%s'", s_act_row[0]);
+    CHECK(s_act_row_klen[0] == 7, "kind length recorded for the colour split");
+    reset_activity();
 }
 
 /* The DESK sheet re-cut main.c's 12-glyph title to the 10-glyph value column,
@@ -1090,7 +1522,7 @@ static void test_orbit_stays_in_free_band(void)
  * at once on the one screen about the battery. */
 static void test_low_battery_uses_the_rim_palette(void)
 {
-    stage_space(JR_DISPLAY_SPACE_POWER);
+    stage_space(JR_DISPLAY_SPACE_STATUS);
     jr_display_power_set(8U, 3600U, false, false);
     uint16_t *fb = render_frame();
     if (!fb) {
@@ -1132,11 +1564,13 @@ static void test_low_battery_uses_the_rim_palette(void)
  * slid frame must be the resting frame translated by 60 rows, pixel for
  * pixel, inside the focal band. Reverting sp_annulus_row's `dy` to
  * `y - SP_CY` fails this. */
-static void test_focal_wedge_follows_the_slide(void)
+static void check_focal_follows_the_slide(int space, int rmax)
 {
     const int oy = 60;
-    stage_space(JR_DISPLAY_SPACE_POWER);
+    stage_space(space);
     jr_display_power_set(37U, 3800U, false, false);
+    set_weather(true, 83, 86, 76, JR_DISPLAY_SKY_RAIN, "RAIN", 0U);
+    sp_compose();
     const size_t px = (size_t)HUD_W * HUD_H;
     uint16_t *rest = malloc(px * sizeof *rest);
     uint16_t *slid = malloc(px * sizeof *slid);
@@ -1153,31 +1587,44 @@ static void test_focal_wedge_follows_the_slide(void)
     }
     for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
         const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
-        sp_draw_space(&s_display, y, y2, rest + (size_t)y * HUD_W,
-                      JR_DISPLAY_SPACE_POWER, 0, 255);
-        sp_draw_space(&s_display, y, y2, slid + (size_t)y * HUD_W,
-                      JR_DISPLAY_SPACE_POWER, oy, 255);
+        sp_draw_space(&s_display, y, y2, rest + (size_t)y * HUD_W, space, 0,
+                      255);
+        sp_draw_space(&s_display, y, y2, slid + (size_t)y * HUD_W, space, oy,
+                      255);
     }
-    size_t compared = 0, mismatched = 0;
+    size_t compared = 0, mismatched = 0, drawn = 0;
     for (int y = 0; y < HUD_H - oy; ++y) {
         for (int x = 0; x < HUD_W; ++x) {
             const int dx = x - SP_CX, dy = y - SP_CY;
-            if (dx * dx + dy * dy > SP_FOCAL_OUT * SP_FOCAL_OUT) {
-                continue;            /* the focal band only: text also slides */
+            if (dx * dx + dy * dy > rmax * rmax) {
+                continue;            /* the focal object only: text also slides */
             }
             const uint16_t a = rest[(size_t)y * HUD_W + x];
             const uint16_t b = slid[(size_t)(y + oy) * HUD_W + x];
             compared++;
+            drawn += a != POISON;
             if (a != b) {
                 mismatched++;
             }
         }
     }
-    CHECK(compared > 0, "nothing compared");
-    CHECK(mismatched == 0, "%zu of %zu focal pixels differ after the slide",
+    CHECK(compared > 0, "space %d: nothing compared", space);
+    CHECK(drawn > 1000, "space %d: the focal object drew only %zu pixels",
+          space, drawn);
+    CHECK(mismatched == 0,
+          "space %d: %zu of %zu focal pixels differ after the slide", space,
           mismatched, compared);
     free(rest);
     free(slid);
+}
+
+static void test_focal_wedge_follows_the_slide(void)
+{
+    check_focal_follows_the_slide(JR_DISPLAY_SPACE_STATUS, SP_FOCAL_OUT);
+    /* WEATHER has three arcs, a mark and three lines of text, all placed
+     * about SP_CY + oy; one of them measured about the panel centre would
+     * shear exactly as the POWER wedge once did. */
+    check_focal_follows_the_slide(JR_DISPLAY_SPACE_WEATHER, SP_WX_MARK_OUT);
 }
 
 /* The OTA warning is pinned: nothing else may replace it until the upload
@@ -1227,7 +1674,13 @@ int main(void)
     test_every_space_composes_its_own_sheet();
     test_clock_clear_spares_open_shell_surfaces();
 
-    test_tools_names_and_lights_the_eighth_tool();
+    test_desk_is_on_the_ring_only_while_live();
+    test_desk_going_dark_moves_the_owner_on();
+    test_orbit_mark_eases_when_desk_appears();
+    test_weather_without_data_prints_no_number();
+    test_weather_mark_sits_at_the_temperature();
+    test_stale_weather_loses_its_colour();
+    test_activity_is_honest_when_empty_and_newest_first();
     test_desk_sheet_heads_with_the_marked_task();
     test_orbit_stays_in_free_band();
     test_low_battery_uses_the_rim_palette();
