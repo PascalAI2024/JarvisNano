@@ -360,6 +360,31 @@ No fields were found renamed or removed relative to the v4 baseline's known set.
 
 ---
 
+## 7. Server pacing, measured on the device (2026-09-01)
+
+Native-audio replies are **not** delivered faster than real time. Over nine
+spoken turns (`/api/debug/say`, `gemini-3.1-flash-live-preview`, RSSI −32,
+power save off), the device's receive counters (`/api/device/health` →
+`rx`) showed:
+
+| Quantity | Measured |
+|---|---|
+| Longest gap between WS frames inside one reply | 0.81–1.34 s |
+| Frames queued at once after a stall (TCP backlog) | 9–24 |
+| Parser lag (queue wait) | ≤ 142 ms |
+| Frames per 3–4 sentence reply | 55–121 |
+
+The output transcription events arrive on the same cadence as the audio, and
+a playback hole sat exactly inside a 1.75 s silence between two consecutive
+transcript words — so the stalls are the server's generation, not the radio
+or the device. Consequence for any client: the speaker must run **behind**
+the network. JarvisRobot v5 pre-rolls 600 ms before a reply's first word and
+rebuilds a 1000 ms lead after any hole (`jr_audio.c`, `PB_PREROLL_MS_DEFAULT`
+/ `PB_REFILL_MS_DEFAULT`, tunable via `/api/debug/gain?preroll=&refill=`);
+below that, one hole of 81–407 ms per reply survived. A WebSocket receive
+queue of 24 frames overflowed on the post-stall burst and dropped speech
+before parsing; 96 does not.
+
 ## Open questions
 
 - Why did `gemini-3.1-flash-live-preview` 404 on 2026-05-23 when its official release
