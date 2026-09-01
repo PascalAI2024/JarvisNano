@@ -202,9 +202,12 @@ A surface exists only if it passes **both**:
 | **Listen halo** (32-point sparse, r185-194) | ✅ state | ✅ | **KEEP** | `hud_render.c:817-836` |
 | **Watch peek** (10 s, swipe-right, JARVIS only) | ❌ you swipe for it | ✅ time is *the* canonical glance | **KEEP the content, DELETE the summon** | `main.c:6739-6744`; `hud_render.c:1464` |
 | **Control shade** (vol ±, privacy button) | ❌ a place you enter | ⚠️ continuous values do beat speech | **DEMOTE to a transient dial** | `jr_display.c:2666-2748`, `3857-3872` |
-| **DESK** — `STATE / DONE% / JOB` | ❌ navigated to | ❌ telemetry | **DELETE** | `jr_display.c:1531-1544` |
-| **TOOLS** — `READY n / LAST x` + 4 petals | ❌ navigated to | ❌ | **DELETE** | `jr_display.c:1545-1567` |
-| **SETTINGS** — `PRIVACY / LINK / POWER / UPDATE / SLOT` | ❌ navigated to | ❌ a diagnostics page wearing a face | **DELETED** (2026-09-01; the update ring went shell-wide, UPDATE/SLOT to POWER) | — |
+| **DESK** — progress ring + `STATE / DONE%` | ⚠️ **now summoned** — on the ring only while an agent link, pairing claim or operator lease is live (2026-09-01) | ❌ telemetry | **DEMOTED to a summoned surface**, not deleted: dark, the ring steps over it and a DESK under your feet moves you on | `jr_display.c:1582`, `:4592`, `:4462` |
+| **TOOLS** — `READY n / LAST x` + petals | ❌ navigated to | ❌ | **DELETED** (2026-09-01; a catalog is not a fact about the moment — replaced by ACTIVITY, below) | — |
+| **SETTINGS** — `PRIVACY / LINK / POWER / UPDATE / SLOT` | ❌ navigated to | ❌ a diagnostics page wearing a face | **DELETED** (2026-09-01; the update ring went shell-wide, UPDATE/SLOT to STATUS) | — |
+| **WEATHER** — a 40–100 °F gauge, the day as an arc, honest about its age | ❌ navigated to | ⚠️ "83 and overcast, high 86" is sayable — but it is gone the moment it is said, and a glance is not a question | **KEEP while it stays honest** — the one ring screen with live external data, and it says how old that data is | `jr_display.c:2990`, `:1937` |
+| **STATUS** — battery arc, `83% CHARGING`, a nine-row sheet | ❌ navigated to | ⚠️ PWR-long already speaks the battery | **KEEP as the one status screen** — the owner asked why the battery needed a screen of its own; it does not | `jr_display.c:3266`, `:1837` |
+| **ACTIVITY** — the last three things Jarvis did, newest first | ❌ navigated to | ⚠️ "what did you just do" is askable, but three at once is not | **KEEP — it is the receipt**, and an empty receipt says so | `jr_display.c:3060`, `:2005` |
 | **DETAIL sheet** (≤6 rows × 10 chars) | ❌ swipe-up inside a place | ❌ | **DELETE** | `jr_display.c:1279-1280`, `2615` |
 
 The owner's verdict is confirmed by the hit test, not just by taste. **JARVIS
@@ -214,6 +217,82 @@ each accept exactly **one** target — the focal object, `r ≤ SP_FOCAL_HIT 116
 `main.c:6849-6853` as **`nav_up()` plus a caption**. That is navigation. So:
 across three of the four spaces there is literally **not one action that is not
 navigation.** "You cannot ACT from them" is structurally true.
+
+### The ring as shipped, 2026-09-01
+
+The owner's words: *"still have some useless screens — make this cool and
+useful."* The §B rule still holds — nothing on the glass may be invented, and an
+empty screen that tells the truth beats a full one that lies — and within it
+the ring became **JARVIS ↔ WATCH ↔ WEATHER ↔ STATUS ↔ (DESK) ↔ ACTIVITY**
+(`jr_display.h`, `jr_display_space_t`). Every claim below is pinned by
+`components/jr_display/tests/test_shell.c` (512 checks), and the load-bearing
+ones were mutation-checked: each deliberate break failed its test and nothing
+else.
+
+**WEATHER — the arc is the day.** The standard focal ring (r76–96) is a
+270-degree gauge for a fixed 40–100 °F, opening at 7:30 and closing at 4:30 so
+the bottom stays empty above the headline (`SP_WX_A0 96`, `SP_WX_SWEEP 192`,
+`jr_display.c:1422`). The span from today's low to its high fills in the sky's
+accent, dimmed; the temperature now is a bright ±4° mark standing proud of the
+ring on both sides (r72–100, `jr_display.c:2630`), so *cool morning, hot
+afternoon, nearly there* reads as a shape before it reads as numerals. A thin
+inner ring (r66–70) is the chance of rain. Inside the disc: the temperature at
+scale 3, `H86 L76` under it, and above it the age once it is two minutes old.
+The accent is the sky — amber for CLEAR, cyan for clouds, a softened cyan for
+fog, blue-cyan for rain, violet for storm, ink for snow — and **never gold**,
+because gold means muted everywhere on this glass and a sunny day must not read
+as a closed microphone. Three honesty rules, in order: muted turns every accent
+gold like every other screen; past thirty minutes the data is STALE and the
+accents go grey (a number from an hour ago is still a number but no longer a
+colour); and with no data at all the focal draws two bare tracks, the headline
+says `NO WEATHER`, and **not one digit** is composed (`sp_compose_weather`,
+`jr_display.c:1937`). `fetched_ms` is a uint32 of esp_timer ms, so the oldest
+age the contract can express is 49 days — `STALE 49D` is the nine-glyph worst
+case the disc was measured for (corner r65.5, inside the rain ring). The sheet
+is FEELS / RAIN / HUMIDITY / WIND / AGE, values from the struct only; without
+data it is one row, `DATA NONE`, not five placeholders shaped like readings.
+
+**ACTIVITY — the receipt.** TOOLS listed a catalog; ACTIVITY shows what ran.
+Three rows, newest first, `KIND SUMMARY` on one line at one scale — the kind
+grey, the summary ink — on the safe disc dimmed a second time, the same
+treatment the detail sheet gives its own band (`sp_focal_activity`,
+`jr_display.c:3060`). Rows are 24 glyphs at x 89–374 on a 36 px pitch about the
+centre; the worst corner is r150, inside `JR_DISPLAY_SAFE_R`. A summary that
+does not fit is cut and its last glyph spent on `.`, the mark `title_shorten()`
+already leaves on a DESK title. Nothing pushed is one centred line, `NOTHING
+YET`. The headline is empty on the rule `a10b256b` established: the landing
+caption already names the place, and the rows are the data. The sheet says
+*when* (kind → `12M AGO`), not *what*: repeating the summaries would re-cut
+24-glyph text to a 10-glyph column — the truncation-of-a-truncation the DESK
+sheet was cured of.
+
+**STATUS — one status screen.** POWER renamed, its measured battery arc kept
+as the focal object. The headline is the percentage plus the one word that
+matters most, in this order: an update in flight (`UPDATE 42%`, or the state
+noun while it rings), `NO BATTERY`, `LOW`, `NO LINK`, `CHARGING` (`FULL` at
+100 %, because thirteen glyphs do not fit), `USB`, then nothing — the quiet a
+healthy device deserves (`jr_display.c:3266`). The sheet gathers everything a
+worried owner would look up: LEVEL, VOLTS, USB, CHARGE, UPDATE, SLOT, LINK,
+MIC, UPTIME — nine rows, so the sheet's pitch shrank from 26 to 20 px and its
+band grew to y 358, two rows shy of the caption band; the last row's corner is
+r163 (`jr_display.c:2583`, `test_detail_sheet_rows_stay_inside`). LINK and
+UPTIME read the SESSION word main.c already publishes; there is no RSSI in the
+display any more, so LINK is UP/DOWN.
+
+**DESK — only while live.** The gate is the one bit main.c already publishes
+for the agent rim, `JR_DISPLAY_SHELL_AGENT` — an agent link, a pairing claim or
+an operator lease all set it (`main.c`, `publish_shell_state`) — so the screen
+and the rim segments cannot disagree about whether there is a job
+(`sp_desk_live`, `jr_display.c:1582`). Dark, `nav_next`/`nav_prev` step over it
+in both directions and across the wrap (`jr_display.c:4592`); the orbit draws
+one mark fewer, evenly spaced, and the active mark **eases** to its new slot
+over one slide instead of jumping when the ring re-spaces (`jr_display.c:2096`).
+A job that ends while DESK is the screen under the owner's eyes moves them one
+step forward, to ACTIVITY, where what just finished is the newest row — through
+`nav_step`, so any open sheet closes with the move (`jr_display.c:4462`). An
+explicit `nav_set(DESK)` while dark is a caller's decision and stays. A
+`STANDBY` in a progress ring was the useless screen the owner named; it no
+longer exists as a place you can arrive at.
 
 ### The critical call: delete the destinations, keep the renderer
 

@@ -37,7 +37,7 @@ Wi-Fi OTA may still pass preflight when USB power is present.
 | BOOT held during reset | Enter ROM downloader |
 | Left-edge vertical | Volume +/− 5 globally |
 | Right-edge vertical | Brightness +/− 5 globally |
-| Centre vertical swipe | The ring: Jarvis ↔ Watch ↔ Power ↔ Desk ↔ Tools (wraps) |
+| Centre vertical swipe | The ring: Jarvis ↔ Watch ↔ Weather ↔ Status ↔ (Desk, only while an agent/claim/lease is live) ↔ Activity (wraps) |
 | Horizontal swipe | Watch peek, 10 s |
 | Top-edge down | Open controls |
 | Centre up | Detail or controls close |
@@ -81,6 +81,16 @@ is the classified edge-origin swipe.
 - **TOOLS shows all eight tools**, the DESK sheet heads with the task, the orbit
   rail stays in r185–194, one battery red, panic-home clears everything, the
   shade survives rapid volume taps, the peek caption leaves with the peek.
+- **The useless screens are gone, later the same day.** TOOLS is replaced by
+  ACTIVITY (the last three things Jarvis did, newest first, or "NOTHING
+  YET"); WEATHER is new (a 40–100 °F gauge whose low-to-high span is the day
+  and whose mark is the temperature now, honest about its age); POWER became
+  STATUS (battery arc, "83% CHARGING"-style headline, a nine-row sheet with
+  link, mic and uptime); DESK is on the ring only while an agent, claim or
+  lease is live, and a DESK that goes dark under you moves you to ACTIVITY.
+  `docs/GLASS_DESIGN.md` §B has the ring as shipped; the host suite pins the
+  DESK skip, the strand, the weather mark angle, the stale dim and the
+  activity order (mutation-checked).
 - **S21 refuted:** a lease never froze the glass; synthetic swipes were being
   refused under a lease. They now walk the ring; taps/holds stay physical-only.
 - **Flashing a live device:** esptool could not sync over USB-JTAG while the
