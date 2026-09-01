@@ -42,6 +42,10 @@ extern "C" {
 #define JR_MOOD_AMBIENT_MS  20000u  /* 20 s — dim, STILL LISTENING */
 #define JR_MOOD_WHISPER_MS 300000u  /* 5 min — session closed, wake armed */
 #define JR_MOOD_DREAM_MS   900000u  /* 15 min — deep rest, wake armed */
+/* DREAM this long, on battery, and the chip itself sleeps (main.c owns the
+ * world: no USB, no update, no companion). Ten minutes past DREAM is 25 min
+ * of stillness face-up, or 10 min face-down. */
+#define JR_MOOD_SLEEP_MS   600000u
 
 typedef enum {
     JR_MOOD_AWAKE = 0,
@@ -75,6 +79,10 @@ void jr_mood_reset(jr_mood_state_t *s, uint32_t now_ms);
 void jr_mood_poke_awake(jr_mood_state_t *s, uint32_t now_ms);
 jr_mood_out_t jr_mood_step(jr_mood_state_t *s, const jr_mood_in_t *in);
 const char *jr_mood_name(jr_mood_t mood);
+
+/* True once the ladder has sat in DREAM for JR_MOOD_SLEEP_MS. Pure: it says
+ * nothing about power or links, which the composition root adds. */
+bool jr_mood_sleep_due(const jr_mood_state_t *s, uint32_t now_ms);
 
 #ifdef __cplusplus
 }

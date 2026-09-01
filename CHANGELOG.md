@@ -20,6 +20,12 @@ are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
   **ACTIVITY** (the last three things Jarvis did). TOOLS is gone.
 - The glass can talk about what it shows: tap an open sheet on WEATHER, WATCH
   or ACTIVITY and the assistant says it aloud.
+- The device deep-sleeps when it is not in use: ten minutes into DREAM on
+  battery (25 minutes still face-up, 10 minutes face-down) the chip sleeps,
+  never on USB, never mid-update, never with a companion in. Lift it (the
+  IMU's own motion engine), tap it, or wait for the four-hour check-in, and it
+  boots back the way it went, listening if it was listening. STATUS's RADIO
+  row shows the one other power mode: Wi-Fi modem sleep while resting.
 - Lift to glance: picked up after a rest, the weather shows for eight seconds
   and the glass goes home by itself. A first fetch with rain in the day leaves
   one "RAIN TODAY" line.

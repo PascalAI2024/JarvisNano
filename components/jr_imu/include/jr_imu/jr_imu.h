@@ -77,6 +77,22 @@ esp_err_t jr_imu_start(void);
 void jr_imu_stop(void);
 
 /**
+ * @brief Arm the QMI8658 Wake-on-Motion engine on INT1 for deep sleep.
+ *
+ * Call AFTER jr_imu_stop() has let the sampler leave the bus. Writes the
+ * threshold (milli-g), selects INT1 with an initial level of 0, issues the
+ * CTRL9 WRITE_WOM_SETTING command and enables INT1 — so INT1 (GPIO21 on the
+ * 1.75C, docs/reference/imu-interrupt-routing.md) rises on the first motion
+ * above threshold and stays high. The next boot's jr_imu_start() clears WoM
+ * again before the normal configuration.
+ *
+ * @return ESP_OK when the engine is armed; an error when the sensor is not
+ *         present or the command handshake failed (the caller then sleeps
+ *         without a lift wake and relies on touch and the timer).
+ */
+esp_err_t jr_imu_arm_wake_on_motion(uint8_t threshold_mg);
+
+/**
  * @brief Copy the most recent snapshot. NON-BLOCKING — safe from the voice
  *        pump, the render task, or an httpd handler.
  *

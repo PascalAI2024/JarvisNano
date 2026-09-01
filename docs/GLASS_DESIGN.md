@@ -781,6 +781,21 @@ Cheapest item here, among the most felt, and the visible half of F4.
 
 ### F4. Sleep — give DREAM teeth
 
+**Shipped 2026-09-01, as deep sleep rather than light sleep.** Light sleep
+cannot engage under always-on I2S capture, and the owner's brief was plain:
+"if not being used it should deep sleep." `jr_mood_sleep_due()` is true ten
+minutes into DREAM; `main.c` adds the world (no USB, no update in flight, no
+companion, three minutes up) and calls `enter_deep_sleep()`: caption, IMU
+sampler off, QMI8658 Wake-on-Motion armed on **INT1 → GPIO21**
+(`jr_imu_arm_wake_on_motion`, 100 mg, low-power 21 Hz), panel DISPOFF + SLPIN
+on the render task (`jr_display_panel_off_request`), then ext0 on GPIO21
+(high), ext1 on the CST9217 INT **GPIO11** (low), and a four-hour timer. Each
+line is armed only if it is quiet at that moment, so a wrong polarity costs a
+wake source, never a boot loop. RTC memory carries whether the mic was live;
+a lifted device comes back `LISTENING`, a timer wake resumes at DREAM.
+`GET /api/debug/sleep` reports the last wake cause and what was armed;
+`POST /api/debug/sleep?now=1&wake_s=60` proves the lines from a desk.
+
 **What.** Light sleep at the deepest mood rung; wake on the QMI8658 any-motion
 interrupt.
 

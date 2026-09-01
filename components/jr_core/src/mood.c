@@ -94,6 +94,12 @@ jr_mood_out_t jr_mood_step(jr_mood_state_t *s, const jr_mood_in_t *in)
     return pack(s, changed);
 }
 
+bool jr_mood_sleep_due(const jr_mood_state_t *s, uint32_t now_ms)
+{
+    return s != NULL && s->mood == JR_MOOD_DREAM &&
+           (uint32_t)(now_ms - s->last_change_ms) >= JR_MOOD_SLEEP_MS;
+}
+
 const char *jr_mood_name(jr_mood_t mood)
 {
     switch (mood) {

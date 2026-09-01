@@ -43,6 +43,9 @@
 #include "esp_netif_sntp.h"
 #include "esp_wifi.h"
 #include "driver/gpio.h"
+#include "driver/rtc_io.h"
+#include "esp_attr.h"
+#include "esp_sleep.h"
 #include "cJSON.h"
 
 #include "jr_ports/ports.h"
@@ -787,6 +790,37 @@ static _Atomic int s_voice_control_request;
  * the owner unmutes once. That is the correct trade for an always-on
  * microphone on a desk. */
 static _Atomic bool s_voice_privacy_paused = true;
+
+/* ---- deep sleep when not in use ------------------------------------------
+ *
+ * The owner: "if not being used it should deep sleep". The rest ladder names
+ * the state (DREAM); this is the mechanism under it. Ten minutes into DREAM on
+ * battery — never on USB, never mid-update, never with a companion in — the
+ * chip sleeps. Three ways back: the QMI8658's own motion engine on INT1
+ * (GPIO21: lift it), the CST9217 touch line (GPIO11: tap it), and a timer as
+ * the guaranteed road home if both lines are ever wrong. What survives the
+ * sleep lives in RTC memory: whether the mic was live, so a lifted device
+ * comes back listening instead of asking to be held. */
+#define SLEEP_WAKE_IMU_GPIO    GPIO_NUM_21
+#define SLEEP_WAKE_TOUCH_GPIO  GPIO_NUM_11
+#define SLEEP_WOM_MG           100U
+#define SLEEP_TIMER_WAKE_S     (4U * 3600U)
+#define SLEEP_MIN_UPTIME_MS    180000U   /* three minutes of reachability */
+#define SLEEP_RTC_MAGIC        0x534C5031u
+#define SLEEP_ARMED_LIFT       1U
+#define SLEEP_ARMED_TOUCH      2U
+#define SLEEP_ARMED_TIMER      4U
+#define SLEEP_LIFT_ARM_FAILED  8U    /* the WoM write failed              */
+#define SLEEP_LIFT_LINE_HIGH   16U   /* INT1 already high, wake skipped    */
+RTC_DATA_ATTR static uint32_t s_rtc_sleep_magic;
+RTC_DATA_ATTR static uint32_t s_rtc_sleeps;
+RTC_DATA_ATTR static uint8_t  s_rtc_was_listening;
+RTC_DATA_ATTR static uint8_t  s_rtc_armed;
+static _Atomic bool     s_sleep_force;
+static _Atomic uint32_t s_sleep_timer_s;
+static int              s_boot_wake_cause;
+static const char *wake_cause_name(int cause);
+static bool image_in_probation(void);
 static jr_mood_state_t s_mood;
 static _Atomic uint8_t s_mood_id;
 static _Atomic uint8_t s_mood_brightness;
@@ -5313,6 +5347,54 @@ static esp_err_t audio_stats_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* GET  /api/debug/sleep            -> how the device last woke, how often it
+ *                                     has slept, which wake sources were armed
+ * POST /api/debug/sleep?now=1[&wake_s=N]
+ *                                  -> sleep on the next mood tick with an
+ *                                     N-second timer (default 60) as the
+ *                                     guaranteed way back. Proves the wake
+ *                                     lines from a desk: a wake before the
+ *                                     timer means a line was at its wake
+ *                                     level, a timer wake means both were
+ *                                     quiet. */
+static esp_err_t debug_sleep_handler(httpd_req_t *req)
+{
+    if (!control_intent_required(req)) {
+        return ESP_OK;
+    }
+    if (req->method == HTTP_POST) {
+        int now = 0, wake_s = 60;
+        query_int(req, "now", &now);
+        query_int(req, "wake_s", &wake_s);
+        if (now && image_in_probation()) {
+            httpd_resp_set_status(req, "409 Conflict");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req, "{\"error\":\"image in probation; a sleep "
+                                    "would roll it back\"}");
+            return ESP_OK;
+        }
+        if (now) {
+            atomic_store(&s_sleep_timer_s, (uint32_t)(wake_s < 5 ? 5 : wake_s));
+            atomic_store(&s_sleep_force, true);
+        }
+    }
+    char body[224];
+    snprintf(body, sizeof body,
+             "{\"wake\":\"%s\",\"sleeps\":%u,\"armed\":{\"lift\":%s,"
+             "\"touch\":%s},\"lift_fail\":\"%s\",\"force\":%s,"
+             "\"after_dream_ms\":%u}",
+             wake_cause_name(s_boot_wake_cause), (unsigned)s_rtc_sleeps,
+             (s_rtc_armed & SLEEP_ARMED_LIFT) ? "true" : "false",
+             (s_rtc_armed & SLEEP_ARMED_TOUCH) ? "true" : "false",
+             (s_rtc_armed & SLEEP_LIFT_ARM_FAILED) ? "arm"
+                 : (s_rtc_armed & SLEEP_LIFT_LINE_HIGH) ? "high" : "none",
+             atomic_load(&s_sleep_force) ? "true" : "false",
+             (unsigned)JR_MOOD_SLEEP_MS);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, body);
+    return ESP_OK;
+}
+
 /* POST /api/debug/input?kind=tap|double|long|swipe
  * [&dir=left|right|up|down] [&x=&y=&edge=1] synthesizes an event through the
  * real queue. "double" enqueues two taps inside the double-tap window. */
@@ -6113,6 +6195,10 @@ static void start_diag_http(void)
           .handler = debug_input_handler },
         { .uri = "/api/debug/audio-stats", .method = HTTP_POST,
           .handler = audio_stats_handler },
+        { .uri = "/api/debug/sleep", .method = HTTP_GET,
+          .handler = debug_sleep_handler },
+        { .uri = "/api/debug/sleep", .method = HTTP_POST,
+          .handler = debug_sleep_handler },
         { .uri = "/api/ota/upload", .method = HTTP_POST,
           .handler = ota_upload_handler },
     };
@@ -6164,6 +6250,97 @@ static void handle_say(const char *text)
  * Reality always wins: a live ask aborts the reel, and any tap ends it.
  * (State lives with the other request lanes near the top of the file.) */
 static bool s_demo_owns_choices;   /* app task only: reel arcs are up */
+
+static const char *wake_cause_name(int cause)
+{
+    switch (cause) {
+    case ESP_SLEEP_WAKEUP_EXT0:  return "lift";
+    case ESP_SLEEP_WAKEUP_EXT1:  return "touch";
+    case ESP_SLEEP_WAKEUP_TIMER: return "timer";
+    default:                     return "power";
+    }
+}
+
+/* Does not return. Each wake source is armed only if its line is quiet right
+ * now: a line already at its wake level would bring the chip straight back,
+ * and a boot loop is worse than a missing wake — the timer is always armed. */
+static bool image_in_probation(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t st = ESP_OTA_IMG_UNDEFINED;
+    return running != NULL &&
+           esp_ota_get_state_partition(running, &st) == ESP_OK &&
+           st == ESP_OTA_IMG_PENDING_VERIFY;
+}
+
+static void enter_deep_sleep(const char *why, uint32_t timer_s)
+{
+    /* A deep sleep is a reboot to the bootloader, and a freshly flashed image
+     * that has not been confirmed yet is ROLLED BACK by that reboot. Learned
+     * the hard way: a forced sleep at 40 s uptime woke on the old firmware.
+     * The real path waits three minutes (validation is at 45 s); this is the
+     * guard for everything else. */
+    if (image_in_probation()) {
+        ESP_LOGW(TAG, "deep sleep refused: image in probation");
+        atomic_store(&s_sleep_force, false);
+        return;
+    }
+    ESP_LOGI(TAG, "deep sleep: %s (timer %u s)", why, (unsigned)timer_s);
+    s_rtc_sleep_magic = SLEEP_RTC_MAGIC;
+    s_rtc_sleeps++;
+    s_rtc_was_listening = !atomic_load(&s_voice_privacy_paused);
+    s_rtc_armed = SLEEP_ARMED_TIMER;
+    jr_display_caption_set("SLEEPING - LIFT TO WAKE");
+    vTaskDelay(pdMS_TO_TICKS(1200));
+
+    /* The sampler must leave the bus before the wake engine is written. */
+    jr_imu_stop();
+    vTaskDelay(pdMS_TO_TICKS(80));
+    const bool lift = jr_imu_arm_wake_on_motion(SLEEP_WOM_MG) == ESP_OK;
+    if (!lift) {
+        s_rtc_armed |= SLEEP_LIFT_ARM_FAILED;
+    }
+
+    jr_display_panel_off_request();
+    for (int i = 0; i < 30 && !jr_display_panel_is_off(); ++i) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
+    if (lift) {
+        rtc_gpio_init(SLEEP_WAKE_IMU_GPIO);
+        rtc_gpio_set_direction(SLEEP_WAKE_IMU_GPIO, RTC_GPIO_MODE_INPUT_ONLY);
+        rtc_gpio_pullup_dis(SLEEP_WAKE_IMU_GPIO);
+        rtc_gpio_pulldown_en(SLEEP_WAKE_IMU_GPIO);
+        vTaskDelay(pdMS_TO_TICKS(5));
+        if (rtc_gpio_get_level(SLEEP_WAKE_IMU_GPIO) == 0) {
+            if (esp_sleep_enable_ext0_wakeup(SLEEP_WAKE_IMU_GPIO, 1) == ESP_OK) {
+                s_rtc_armed |= SLEEP_ARMED_LIFT;
+            }
+        } else {
+            s_rtc_armed |= SLEEP_LIFT_LINE_HIGH;
+            ESP_LOGW(TAG, "deep sleep: INT1 already high, no lift wake");
+        }
+    }
+    rtc_gpio_init(SLEEP_WAKE_TOUCH_GPIO);
+    rtc_gpio_set_direction(SLEEP_WAKE_TOUCH_GPIO, RTC_GPIO_MODE_INPUT_ONLY);
+    rtc_gpio_pulldown_dis(SLEEP_WAKE_TOUCH_GPIO);
+    rtc_gpio_pullup_en(SLEEP_WAKE_TOUCH_GPIO);
+    vTaskDelay(pdMS_TO_TICKS(5));
+    if (rtc_gpio_get_level(SLEEP_WAKE_TOUCH_GPIO) != 0) {
+        if (esp_sleep_enable_ext1_wakeup_io(1ULL << SLEEP_WAKE_TOUCH_GPIO,
+                                            ESP_EXT1_WAKEUP_ANY_LOW) == ESP_OK) {
+            s_rtc_armed |= SLEEP_ARMED_TOUCH;
+        }
+    } else {
+        ESP_LOGW(TAG, "deep sleep: touch INT already low, no touch wake");
+    }
+    (void)esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+    (void)esp_sleep_enable_timer_wakeup((uint64_t)timer_s * 1000000ULL);
+    ESP_LOGI(TAG, "deep sleep: armed lift=%d touch=%d timer=%u s",
+             (s_rtc_armed & SLEEP_ARMED_LIFT) != 0U,
+             (s_rtc_armed & SLEEP_ARMED_TOUCH) != 0U, (unsigned)timer_s);
+    esp_deep_sleep_start();
+}
 
 static void demo_stop(void)
 {
@@ -6560,6 +6737,26 @@ static void voice_task(void *arg)
                     ESP_LOGI(TAG, "glance: lifted after rest, showing weather");
                 }
                 prev_mood = (uint8_t)mout.mood;
+            }
+            /* DEEP SLEEP WHEN NOT IN USE. The ladder says when (DREAM for
+             * JR_MOOD_SLEEP_MS); the world says whether: never on USB (a
+             * desk device on its cable is a desk device), never mid-update,
+             * never with a companion in, and never in the first three
+             * minutes, so a device is always reachable for a while after
+             * any boot. A forced sleep (the debug route) skips the gates:
+             * it exists to prove the wake sources from a desk. */
+            {
+                const bool forced = atomic_load(&s_sleep_force);
+                const bool in_use =
+                    (have_power && bat.usb_present) ||
+                    atomic_load(&s_ota_active) ||
+                    operator_mode_active((uint32_t)now);
+                if (forced) {
+                    enter_deep_sleep("forced", atomic_load(&s_sleep_timer_s));
+                } else if (jr_mood_sleep_due(&s_mood, (uint32_t)now) &&
+                           !in_use && now >= SLEEP_MIN_UPTIME_MS) {
+                    enter_deep_sleep("not in use", SLEEP_TIMER_WAKE_S);
+                }
             }
             if (s_glance_until_ms != 0U &&
                 (int32_t)((uint32_t)now - s_glance_until_ms) >= 0) {
@@ -8376,6 +8573,32 @@ void app_main(void)
      * broken device — the owner says "Jarvis", nothing happens, and there is
      * no way to tell a privacy state from a fault. The gold ring carries the
      * same fact for anyone across the room. */
-    jr_display_caption_set("MUTED - HOLD TO LISTEN");
-    ESP_LOGI(TAG, "boot complete — starting MUTED (privacy default)");
+    /* HOW WE GOT HERE. A boot out of deep sleep is not a fresh boot: the
+     * owner lifted or touched a sleeping device, and it should come back the
+     * way it went — listening if it was listening. A timer wake is a health
+     * check with nobody there: the ladder resumes at DREAM so the glass stays
+     * dark and the chip sleeps again in JR_MOOD_SLEEP_MS unless something
+     * happens. Everything else is the privacy default. */
+    const esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+    s_boot_wake_cause = (int)cause;
+    const bool from_sleep = s_rtc_sleep_magic == SLEEP_RTC_MAGIC &&
+        (cause == ESP_SLEEP_WAKEUP_EXT0 || cause == ESP_SLEEP_WAKEUP_EXT1 ||
+         cause == ESP_SLEEP_WAKEUP_TIMER);
+    if (from_sleep && cause == ESP_SLEEP_WAKEUP_TIMER) {
+        s_mood.still_since_ms =
+            (uint32_t)(esp_timer_get_time() / 1000) - JR_MOOD_DREAM_MS;
+        jr_display_caption_set("ASLEEP - TAP TO WAKE");
+        ESP_LOGI(TAG, "boot complete — timer wake %u, resting on",
+                 (unsigned)s_rtc_sleeps);
+    } else if (from_sleep && s_rtc_was_listening) {
+        atomic_store(&s_voice_privacy_paused, false);
+        atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+        jr_display_caption_set("LISTENING");
+        ESP_LOGI(TAG, "boot complete — woke by %s, listening again",
+                 wake_cause_name((int)cause));
+    } else {
+        jr_display_caption_set("MUTED - HOLD TO LISTEN");
+        ESP_LOGI(TAG, "boot complete — starting MUTED (privacy default)%s",
+                 from_sleep ? ", woke from sleep" : "");
+    }
 }

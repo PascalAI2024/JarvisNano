@@ -291,6 +291,13 @@ bool jr_display_canvas_active(void);
  * No-op until the presenter is ready. */
 esp_err_t jr_display_set_brightness(uint8_t percent);
 
+/* Deep-sleep hand-off: ask the render task to switch the CO5300 off (display
+ * off, then sleep-in) at its next flush and stop drawing. Any task; returns
+ * at once. Poll jr_display_panel_is_off() — it turns true within one frame.
+ * There is no way back but a reboot, which is what deep sleep is. */
+void jr_display_panel_off_request(void);
+bool jr_display_panel_is_off(void);
+
 /* ===== SPATIAL SHELL =====================================================
  *
  * THE VISUAL CONTRACT (this comment is the design document; there is no

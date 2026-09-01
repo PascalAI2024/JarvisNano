@@ -37,6 +37,19 @@ So **any plan targeting INT2 is dead on this board.** Use **INT1**, and configur
 the QMI8658 to map its wake/any-motion/no-motion/tap engines onto **INT1** rather
 than INT2.
 
+## In use since 2026-09-01
+
+`jr_imu_arm_wake_on_motion()` (`components/jr_imu/src/jr_imu.c`) programs the
+QMI8658 Wake-on-Motion engine onto **INT1** before deep sleep: CTRL7 off,
+CTRL2 `0x2D` (±8 g, low-power 21 Hz), CAL1_L = threshold in mg, CAL1_H `0x20`
+(bit7 initial level 0, bit6 INT1, blanking 32 samples), CTRL9 `0x08`
+WRITE_WOM_SETTING with the CmdDone/ACK handshake on STATUSINT bit 7, CTRL7
+`0x01`, CTRL1 `0x48` (ADDR_AI | INT1_EN). `main.c` then arms ext0 on GPIO21
+level 1 — only if the line reads low at that moment. `jr_imu_start()` clears
+the engine again on every boot (threshold 0 + the same command) before the
+data configuration. Recipe cross-checked against lewisxhe/SensorLib
+`configWakeOnMotion()` (not fetch-verified against the datasheet PDF).
+
 ## What this corrects
 
 `components/jr_imu/include/jr_imu/jr_imu.h` states Phase 5 "replaces the poll

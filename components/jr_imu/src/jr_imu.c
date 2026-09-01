@@ -28,6 +28,14 @@
 #define QMI8658_REG_CTRL1       0x02
 #define QMI8658_REG_CTRL2       0x03
 #define QMI8658_REG_CTRL7       0x08
+#define QMI8658_REG_CTRL8       0x09   /* bit7: CTRL9 handshake on STATUSINT */
+#define QMI8658_REG_CTRL9       0x0A   /* command register                 */
+#define QMI8658_REG_CAL1_L      0x0B   /* WoM threshold, milli-g           */
+#define QMI8658_REG_CAL1_H      0x0C   /* WoM pin select | initial | blank */
+#define QMI8658_REG_STATUSINT   0x2D   /* bit7 CmdDone                     */
+#define QMI8658_REG_REVISION    0x01
+#define QMI8658_REG_RESET       0x60   /* 0xB0 = soft reset                */
+#define QMI8658_RESET_CMD       0xB0
 #define QMI8658_REG_AX_L        0x35   /* AX_L..AZ_H = 0x35..0x3A */
 
 #define QMI8658_WHOAMI_VALUE    0x05
@@ -38,6 +46,16 @@
 #define QMI8658_CTRL2_CFG       0x26
 /* CTRL7: aEN = 1 (accelerometer on), gyro off. */
 #define QMI8658_CTRL7_CFG       0x01
+/* CTRL1 with INT1 enabled (bit3) for Wake-on-Motion; CTRL2 for the low-power
+ * 21 Hz accel ODR the engine runs at (aFS ±8 g | aODR 1101). CAL1_H: bit7
+ * initial INT level 0, bit6 INT1, low six bits blanking samples. */
+#define QMI8658_CTRL1_WOM       0x48
+#define QMI8658_CTRL2_WOM       0x2D
+#define QMI8658_CAL1_H_WOM      0x20
+#define QMI8658_CMD_WRITE_WOM   0x08
+#define QMI8658_CMD_ACK         0x00
+#define QMI8658_STATUSINT_DONE  0x80
+#define QMI8658_CTRL8_HS_STATUS 0x80   /* CmdDone in STATUSINT, not on INT1 */
 
 /* ±8 g full scale -> 4096 LSB/g. */
 #define QMI8658_ACC_LSB_PER_G   4096.0f
@@ -126,6 +144,108 @@ static bool imu_probe_addr(i2c_master_bus_handle_t bus, uint8_t addr)
     return false;
 }
 
+/* CTRL9 command handshake, QMI8658A datasheet §"CTRL9 usage": write the
+ * command, wait for STATUSINT.CmdDone, acknowledge, wait for it to clear.
+ * A timeout is reported, not fatal — the engine setting has usually taken. */
+static esp_err_t imu_ctrl9(uint8_t cmd)
+{
+    /* The part's default handshake type signals CmdDone by pulsing INT1 and
+     * never sets STATUSINT.bit7 — which is why the first cut timed out on
+     * every command. CTRL8.bit7 selects the register handshake; it also
+     * keeps INT1 quiet for the level wake that follows. */
+    esp_err_t err = imu_write_reg(QMI8658_REG_CTRL8, QMI8658_CTRL8_HS_STATUS);
+    if (err == ESP_OK) {
+        err = imu_write_reg(QMI8658_REG_CTRL9, cmd);
+    }
+    if (err != ESP_OK) {
+        return err;
+    }
+    uint8_t st = 0;
+    int tries = 50;
+    while (tries-- > 0) {
+        if (imu_read_reg(QMI8658_REG_STATUSINT, &st) == ESP_OK &&
+            (st & QMI8658_STATUSINT_DONE) != 0) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    const bool done = (st & QMI8658_STATUSINT_DONE) != 0;
+    (void)imu_write_reg(QMI8658_REG_CTRL9, QMI8658_CMD_ACK);
+    tries = 50;
+    while (tries-- > 0) {
+        if (imu_read_reg(QMI8658_REG_STATUSINT, &st) == ESP_OK &&
+            (st & QMI8658_STATUSINT_DONE) == 0) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    /* MEASURED ON THE 1.75C: CmdDone is never observed in STATUSINT, with
+     * either handshake type, for any command — 100 ms of polling, both
+     * boots. The write itself lands (the register readback and the wake
+     * line agree), so a missing handshake is logged, not fatal. Treating
+     * it as fatal left the device sleeping with no lift wake at all. */
+    if (!done) {
+        ESP_LOGW(TAG, "QMI8658 CTRL9 0x%02X: CmdDone not observed", cmd);
+    }
+    return ESP_OK;
+}
+
+/* Clear a Wake-on-Motion left armed by the previous deep sleep with a soft
+ * reset — the one thing that needs no command handshake. Idempotent on a
+ * fresh part; the normal configuration follows. */
+static void imu_soft_reset(void)
+{
+    (void)imu_write_reg(QMI8658_REG_RESET, QMI8658_RESET_CMD);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    uint8_t rev = 0;
+    if (imu_read_reg(QMI8658_REG_REVISION, &rev) == ESP_OK) {
+        ESP_LOGI(TAG, "QMI8658 reset, revision 0x%02X", rev);
+    }
+}
+
+esp_err_t jr_imu_arm_wake_on_motion(uint8_t threshold_mg)
+{
+    if (!s_ready || s_dev == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* The sampler owns the bus while it runs; give it its last tick. */
+    for (int i = 0; i < 20 && s_task != NULL; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (s_task != NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (threshold_mg == 0U) {
+        threshold_mg = 1U;
+    }
+    esp_err_t err = imu_write_reg(QMI8658_REG_CTRL7, 0x00);
+    if (err == ESP_OK) {
+        err = imu_write_reg(QMI8658_REG_CTRL2, QMI8658_CTRL2_WOM);
+    }
+    if (err == ESP_OK) {
+        err = imu_write_reg(QMI8658_REG_CAL1_L, threshold_mg);
+    }
+    if (err == ESP_OK) {
+        err = imu_write_reg(QMI8658_REG_CAL1_H, QMI8658_CAL1_H_WOM);
+    }
+    if (err == ESP_OK) {
+        err = imu_ctrl9(QMI8658_CMD_WRITE_WOM);
+    }
+    if (err == ESP_OK) {
+        err = imu_write_reg(QMI8658_REG_CTRL7, QMI8658_CTRL7_CFG);
+    }
+    if (err == ESP_OK) {
+        err = imu_write_reg(QMI8658_REG_CTRL1, QMI8658_CTRL1_WOM);
+    }
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "QMI8658 wake-on-motion armed: %u mg on INT1",
+                 (unsigned)threshold_mg);
+    } else {
+        ESP_LOGW(TAG, "QMI8658 wake-on-motion failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
 static esp_err_t imu_bring_up(void)
 {
     if (s_ready) {
@@ -145,6 +265,10 @@ static esp_err_t imu_bring_up(void)
                  QMI8658_ADDR_PRIMARY, QMI8658_ADDR_SECONDARY);
         return ESP_ERR_NOT_FOUND;
     }
+
+    /* A boot out of deep sleep finds the Wake-on-Motion engine still armed
+     * (it is what woke us); clear it before the data configuration. */
+    imu_soft_reset();
 
     /* Accelerometer only: ±8 g, 125 Hz. Gyro stays off (power). A failed CTRL
      * write means the device is NOT configured — unwind rather than latch

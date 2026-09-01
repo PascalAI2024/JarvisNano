@@ -1390,6 +1390,8 @@ static volatile uint32_t s_power_word = 0xFFu; /* pct | mv<<8 | usb/charge */
  * 1 starting, 2 ready), bit4 desk live, bit5 radio saving, bits15:8 -dBm. */
 static volatile uint32_t s_links_word;
 static char s_links_ip[16];
+/* 0 running, 1 panel-off requested, 2 panel is off (render task only). */
+static volatile uint32_t s_panel_off;
 /* OTA status, packed like every other shell word so the updater can publish
  * from its own task with one release-store and the render task can sample it
  * with one load:
@@ -4001,6 +4003,21 @@ static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
      * idle. This is the only place a panel command may be issued. */
     brightness_pump();
 
+    /* Deep-sleep hand-off, on the same rule: the bus is idle here, so the
+     * panel takes DISPOFF and SLPIN safely, and no strip is submitted after
+     * them. An unsupported SLPIN is fine — DISPOFF already blanks it. */
+    const uint32_t off = diag_load(&s_panel_off);
+    if (off == 1U) {
+        (void)jarvis_board_set_brightness(0);
+        (void)esp_lcd_panel_disp_on_off(ctx->board.panel, false);
+        (void)esp_lcd_panel_disp_sleep(ctx->board.panel, true);
+        diag_store(&s_panel_off, 2U);
+    }
+    if (off != 0U) {
+        (void)gfx_disp_flush_ready(disp, true);
+        return;
+    }
+
     /* Frame-start latch: fades advance once per frame so all of a frame's
      * strips composite at one level (no banding across strip seams). */
     if (x1 == 0 && y1 == 0) {
@@ -4994,6 +5011,19 @@ void jr_display_ota_set(jr_display_ota_state_t state, uint8_t percent,
                          (preflight_ok ? (1u << 24) : 0u),
                      __ATOMIC_RELEASE);
     nav_wake();
+}
+
+void jr_display_panel_off_request(void)
+{
+    if (diag_load(&s_panel_off) == 0U) {
+        diag_store(&s_panel_off, 1U);
+        nav_wake();
+    }
+}
+
+bool jr_display_panel_is_off(void)
+{
+    return diag_load(&s_panel_off) == 2U;
 }
 
 void jr_display_links_set(const jr_display_links_t *links)

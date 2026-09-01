@@ -84,6 +84,39 @@ static void test_mood_face_down_is_dream(void)
     TEST_ASSERT_FALSE(o.voice_armed);
 }
 
+/* Sleep is due ten minutes into DREAM and not a tick sooner, by either road
+ * (face-down, or still); a poke or a move cancels it. Both roads are walked
+ * so a rule that only counted from boot, or only from face-down, fails. */
+static void test_mood_sleep_is_due_ten_minutes_into_dream(void)
+{
+    jr_mood_state_t s;
+    jr_mood_reset(&s, 0);
+    jr_mood_in_t in = { .now_ms = 1000, .face_down = true };
+    TEST_ASSERT_EQUAL(JR_MOOD_DREAM, jr_mood_step(&s, &in).mood);
+    TEST_ASSERT_FALSE(jr_mood_sleep_due(&s, 1000));
+    TEST_ASSERT_FALSE(jr_mood_sleep_due(&s, 1000 + JR_MOOD_SLEEP_MS - 1));
+    TEST_ASSERT_TRUE(jr_mood_sleep_due(&s, 1000 + JR_MOOD_SLEEP_MS));
+    /* Lifted: awake, and the clock starts over. */
+    in.face_down = false;
+    in.moving = true;
+    in.now_ms = 1000 + JR_MOOD_SLEEP_MS;
+    TEST_ASSERT_EQUAL(JR_MOOD_AWAKE, jr_mood_step(&s, &in).mood);
+    TEST_ASSERT_FALSE(jr_mood_sleep_due(&s, in.now_ms + JR_MOOD_SLEEP_MS));
+
+    /* The still road: DREAM at 15 min, sleep due at 25. */
+    jr_mood_reset(&s, 0);
+    jr_mood_in_t still = { .now_ms = JR_MOOD_DREAM_MS };
+    TEST_ASSERT_EQUAL(JR_MOOD_DREAM, jr_mood_step(&s, &still).mood);
+    TEST_ASSERT_FALSE(jr_mood_sleep_due(&s, JR_MOOD_DREAM_MS + JR_MOOD_SLEEP_MS - 1));
+    TEST_ASSERT_TRUE(jr_mood_sleep_due(&s, JR_MOOD_DREAM_MS + JR_MOOD_SLEEP_MS));
+    /* WHISPER is not DREAM: a device that has rested 5 min never sleeps. */
+    jr_mood_reset(&s, 0);
+    still.now_ms = JR_MOOD_WHISPER_MS;
+    TEST_ASSERT_EQUAL(JR_MOOD_WHISPER, jr_mood_step(&s, &still).mood);
+    TEST_ASSERT_FALSE(jr_mood_sleep_due(&s, JR_MOOD_WHISPER_MS + 2 * JR_MOOD_SLEEP_MS));
+    TEST_ASSERT_FALSE(jr_mood_sleep_due(NULL, 0));
+}
+
 static void test_mood_poke_awake_resets_still(void)
 {
     jr_mood_state_t s;
@@ -103,4 +136,5 @@ void mood_tests_run(void)
     RUN_TEST(test_mood_busy_holds_awake);
     RUN_TEST(test_mood_face_down_is_dream);
     RUN_TEST(test_mood_poke_awake_resets_still);
+    RUN_TEST(test_mood_sleep_is_due_ten_minutes_into_dream);
 }
