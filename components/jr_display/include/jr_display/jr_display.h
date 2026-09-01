@@ -392,11 +392,54 @@ esp_err_t jr_display_set_brightness(uint8_t percent);
 typedef enum {
     JR_DISPLAY_SPACE_JARVIS = 0,
     JR_DISPLAY_SPACE_WATCH,     /* time, the canonical glance                */
+    JR_DISPLAY_SPACE_WEATHER,   /* Fort Lauderdale now: live data, aged      */
     JR_DISPLAY_SPACE_POWER,     /* battery: charge, charging, millivolts     */
-    JR_DISPLAY_SPACE_DESK,
-    JR_DISPLAY_SPACE_TOOLS,
+    JR_DISPLAY_SPACE_DESK,      /* only while an agent link or lease is live */
+    JR_DISPLAY_SPACE_ACTIVITY,  /* the last things Jarvis actually did       */
     JR_DISPLAY_SPACE_COUNT,
 } jr_display_space_t;
+
+/* ---- WEATHER: one screen of live data, honest about its age -------------
+ *
+ * main.c fetches through the JarvisMCP bridge when the screen is entered (at
+ * most every ten minutes) and publishes the whole struct; the renderer owns
+ * how it looks. fetched_ms is esp_timer time so the glass can show the age —
+ * after rest the number WILL be stale, and a stale number that says so is
+ * honest where a fresh-looking one lies. sky picks the accent; condition is
+ * the word the glass prints (12 glyphs). */
+typedef enum {
+    JR_DISPLAY_SKY_UNKNOWN = 0,
+    JR_DISPLAY_SKY_CLEAR,
+    JR_DISPLAY_SKY_PARTLY,
+    JR_DISPLAY_SKY_CLOUDS,
+    JR_DISPLAY_SKY_FOG,
+    JR_DISPLAY_SKY_RAIN,
+    JR_DISPLAY_SKY_STORM,
+    JR_DISPLAY_SKY_SNOW,
+} jr_display_sky_t;
+
+typedef struct {
+    bool     valid;          /* false: never fetched, or the fetch failed   */
+    int16_t  temp_f;
+    int16_t  feels_f;
+    int16_t  hi_f;
+    int16_t  lo_f;
+    uint8_t  rain_pct;       /* today's precipitation chance, 0..100        */
+    uint8_t  humidity_pct;
+    uint8_t  wind_mph;
+    jr_display_sky_t sky;
+    char     condition[13];  /* uppercase-safe, e.g. "OVERCAST"             */
+    uint32_t fetched_ms;     /* esp_timer ms when the data was received     */
+} jr_display_weather_t;
+
+void jr_display_weather_set(const jr_display_weather_t *weather);
+
+/* ---- ACTIVITY: what Jarvis actually did, newest first --------------------
+ *
+ * kind is a short tag (<= 8 glyphs: WEB, WEATHER, MEMORY, TIME, ASK, PRICE,
+ * SAID), summary is what happened in <= 24 glyphs. The renderer keeps the
+ * last three. Nothing is invented: an empty feed says so. */
+void jr_display_activity_push(const char *kind, const char *summary);
 
 typedef enum {
     JR_DISPLAY_OVERLAY_NONE = 0,
@@ -474,7 +517,7 @@ void jr_display_desk_set_task(const char *task, uint8_t progress,
 /* TOOLS focal object and detail: the capabilities this device can actually
  * reach. names[0..n) are copied; n is clamped to JR_DISPLAY_TOOLS_MAX. recent
  * is the index of the last-used tool, or <0 for none. */
-void jr_display_tools_set(const char *const *names, int n, int recent);
+/* jr_display_tools_set() is gone with the TOOLS screen; see ACTIVITY. */
 
 /* ---- firmware update, shell-wide ----------------------------------------
  *
