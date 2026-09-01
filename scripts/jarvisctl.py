@@ -12,6 +12,7 @@ device over LAN. Host comes from --host or $JARVIS_DEVICE_HOST.
     jarvisctl canvas image.png [--ttl S] # push an image to the glass
     jarvisctl canvas --clear
     jarvisctl tune [pbgain=250] [speakmic=21] [mic=24] [vol=90] [barge=1]
+    jarvisctl tune preroll=600 refill=1000  # jitter buffer, ms (live)
     jarvisctl taps [outdir]              # WAV taps + metrics
     jarvisctl vadlog [out.csv]           # barge/VAD decision log
     jarvisctl logs [tail_bytes]          # device log ring — read AFTER, no monitor
@@ -115,6 +116,23 @@ def cmd_status() -> int:
         problems.append(f"internal fragmented (largest={int(largest)}B)")
     if d.get("flush_errors", 0):
         problems.append(f"display flush errors={d['flush_errors']}")
+    # Playback holes are the one thing the transport counters cannot see:
+    # every byte arrived and the speaker still stuttered. Show them here so
+    # "choppy" is a number before it is a debugging session.
+    try:
+        h = get_json("/api/device/health")
+        pb, rx = h.get("playback", {}), h.get("rx", {})
+        if pb.get("underruns"):
+            problems.append(f"playback underruns={pb['underruns']} "
+                            f"(max hole {pb.get('max_gap_ms')} ms)")
+        if rx.get("drops"):
+            problems.append(f"rx frames dropped={rx['drops']}")
+        audio = (f"  playback: underruns={pb.get('underruns')} "
+                 f"max_gap={pb.get('max_gap_ms')}ms "
+                 f"low_water={pb.get('low_water_ms')}ms "
+                 f"rx_gap={rx.get('max_gap_ms')}ms rx_drops={rx.get('drops')}")
+    except Exception:  # noqa: BLE001 - an older image has no such route
+        audio = "  playback: (no /api/device/health playback counters)"
     verdict = "HEALTHY" if not problems else "ATTENTION: " + ", ".join(problems)
     print(f"{verdict}\n"
           f"  phase={g.get('phase')} mic_rms={g.get('mic_rms')} "
@@ -122,7 +140,8 @@ def cmd_status() -> int:
           f"  internal={g.get('free_internal_heap')}B "
           f"largest={g.get('largest_internal_block')}B "
           f"psram={g.get('free_psram')}B "
-          f"display={d.get('actual_fps')}fps")
+          f"display={d.get('actual_fps')}fps\n"
+          f"{audio}")
     return 0 if not problems else 1
 
 

@@ -6,6 +6,28 @@ are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
 
 ## Unreleased
 
+### The glass (2026-09-01)
+
+- Removed the SETTINGS screen. The firmware-update ring now draws on every
+  screen; UPDATE and SLOT rows moved to the POWER sheet; volume and brightness
+  readouts live on the control shade.
+- TOOLS shows all eight declared tools and lights the one that actually ran.
+- The DESK sheet heads with the (marked, shortened) task title.
+- One battery alarm colour on one rule: red below 20 %, never while charging,
+  on both the rim and the POWER arc.
+- The orbit rail stays inside its r185–194 band.
+- Panic-home (BOOT held 5 s) also clears test patterns, pushed canvases, the
+  touch challenge and the demo reel, and releases the brain surface correctly.
+- Rapid taps on the shade's volume arc no longer fire double-tap-home; a single
+  tap on an HTTP-opened shade no longer closes it.
+- The watch-peek caption leaves with the peek.
+- Synthetic swipes walk the ring under a companion lease (taps and holds stay
+  physical-only); the "lease freezes the glass" report was a measurement
+  artifact of that guard.
+- The OTA "DO NOT UNPLUG" caption is pinned until the upload ends.
+- `POST /api/agent/link` requires the control-intent header like every other
+  mutating route; `/api/demo` answers honestly when the reel cannot start.
+
 ### Product target
 
 - Made the 32 MB **Waveshare ESP32-S3-Touch-AMOLED-1.75C** the only
@@ -19,6 +41,16 @@ are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
 
 ### Voice and audio
 
+- Fixed choppy replies. The speaker now runs behind the network with an
+  adaptive jitter buffer (600 ms pre-roll, 1000 ms refill after a hole) and a
+  96-deep WebSocket receive queue; measured cause was Gemini pacing native
+  audio near real time with 0.8–1.34 s stalls. Zero underruns and zero dropped
+  frames across the confirmation turns, from seven underruns and an 834 ms hole
+  before. Counters at `/api/device/health` (`playback`, `rx`), reset via
+  `POST /api/debug/audio-stats?reset=1`, knobs via
+  `/api/debug/gain?preroll=&refill=`; `jarvisctl status` reports them.
+- `/api/debug/gain` reports device state (mic, ref, vol, speakmic) instead of
+  echoing the request.
 - Moved Gemini Live framing and WebSocket state into `jr_transport` with bounded
   reconnect, backpressure, and event queues.
 - Runs ES7210 capture and ES8311 playback on one native 24 kHz duplex clock;
