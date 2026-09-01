@@ -62,6 +62,20 @@ float jr_audio_clean_rms(void);
  * drained, preventing the speaker tail from reopening a phantom user turn. */
 bool jr_audio_playback_pending(void);
 
+/* Playback telemetry (N6.2): holes the speaker actually heard. See the
+ * definitions above the feeder in jr_audio.c for exactly what each counts. */
+typedef struct {
+    uint32_t underruns;       /* ring ran dry mid-reply, audio resumed <1.5 s */
+    uint32_t max_gap_ms;      /* longest such hole */
+    bool     low_water_valid; /* false until a reply has been fed */
+    uint32_t low_water_ms;    /* emptiest the ring was when a chunk arrived */
+    uint32_t dac_failures;    /* codec write errors */
+    uint32_t replies_ended;   /* ring-empty episodes followed by silence */
+} jr_audio_playback_stats_t;
+
+void jr_audio_playback_stats(jr_audio_playback_stats_t *out);
+void jr_audio_playback_stats_reset(void);
+
 /* ---- composition-root controls beyond the two port surfaces ---- */
 
 /* Clear the fast-kill mute (maps JR_CMD_UNMUTE_DAC). mute is asserted via the
@@ -83,6 +97,14 @@ void jr_audio_set_gains(int mic_db, int ref_db, int out_vol);
 /* Runtime tune for the SPEAKING mic gain (the low PGA used while the model
  * speaks so the echo stays unclipped for the AEC). < 0 leaves it unchanged. */
 void jr_audio_set_speak_mic_db(int speak_db);
+
+/* Readbacks for the values above. /api/debug/gain used to echo its own
+ * request arguments (-1 = "unchanged") as if they were device state, so a
+ * plain read of the tuning returned three impossible numbers. */
+int jr_audio_mic_db(void);
+int jr_audio_ref_db(void);
+int jr_audio_out_vol(void);
+int jr_audio_speak_mic_db(void);
 
 /* Playback digital make-up gain as a percent of unity (100 == 1.0x). Applied
  * before the soft-knee limiter at the sink-write seam. Board default: 400 on

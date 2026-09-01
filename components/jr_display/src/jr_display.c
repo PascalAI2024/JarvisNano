@@ -2481,7 +2481,10 @@ static void sp_annulus_row(uint16_t *row, int y, int cx, int cy, int rin,
     const int xo = sp_isqrt(out);
     const int in2 = rin > 0 ? rin * rin - dy * dy : -1;
     const int xi = in2 > 0 ? sp_isqrt(in2) : -1;
-    const int sdy = y - SP_CY;
+    /* The wedge test used `y - SP_CY` here while the annulus itself is placed
+     * about `cy` (= SP_CY + oy during the vertical slide). One vector, two
+     * origins: the span sheared by exactly the slide offset, so every focal
+     * arc's endpoints walked round the ring mid-transition. Same origin now. */
     for (int side = 0; side < 2; ++side) {
         int lo, hi;
         if (xi < 0) {
@@ -2506,7 +2509,7 @@ static void sp_annulus_row(uint16_t *row, int y, int cx, int cy, int rin,
             }
         } else {
             for (int x = lo; x <= hi; ++x) {
-                if (sp_in_span(span, x - cx, sdy)) {
+                if (sp_in_span(span, x - cx, dy)) {
                     row[x] = px;
                 }
             }

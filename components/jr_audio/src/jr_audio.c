@@ -163,6 +163,36 @@ static _Atomic bool           s_feeder_writing;
 static _Atomic uint32_t       s_playback_tail_until_ms;
 static _Atomic bool           s_diag_chirp_enqueuing;
 
+/* PLAYBACK TELEMETRY (N6.2). A 60 s reply that stutters once leaves no trace
+ * in the transport counters — the socket delivered every byte — so "choppy"
+ * had to be diagnosed by ear. These count what the speaker actually got.
+ *
+ *   underruns    the feeder found the ring EMPTY mid-reply and audio resumed
+ *                within PB_GAP_REPLY_MS: a real hole in the sound. The ring
+ *                also empties at the end of every reply; that is followed by
+ *                silence, not by more audio, so it is not counted.
+ *   max_gap_ms   the longest such hole.
+ *   low_water    the emptiest the ring has been when a NEW chunk arrived while
+ *                a reply was in flight — how close the network came to
+ *                starving the DAC. Sampled on the producer side because the
+ *                consumer side trivially reaches zero at every reply's end.
+ *   dac_failures esp_codec_dev_write() returning an error.
+ * Reset via jr_audio_playback_stats_reset() so a soak starts from zero. */
+#define PB_GAP_REPLY_MS 1500u
+static _Atomic uint32_t       s_pb_underruns;
+static _Atomic uint32_t       s_pb_max_gap_ms;
+static _Atomic uint32_t       s_pb_low_water_samples;   /* UINT32_MAX = unset */
+static _Atomic uint32_t       s_pb_dac_failures;
+static _Atomic uint32_t       s_pb_gaps_ended_by_silence;
+static uint32_t               s_pb_gap_start_ms;        /* feeder task only */
+static bool                   s_pb_in_gap;              /* feeder task only */
+
+static bool pb_tail_active(uint32_t now_ms)
+{
+    const uint32_t tail = atomic_load(&s_playback_tail_until_ms);
+    return (int32_t)(tail - now_ms) > 0;
+}
+
 typedef struct {
     int16_t *samples;
     size_t capacity;
@@ -475,8 +505,13 @@ static size_t pb_enqueue(const int16_t *frame, size_t samples,
     /* Recheck under the ring lock so a normal writer that raced the chirp flag
      * cannot interleave with its all-or-nothing enqueue. */
     if (diagnostic || !atomic_load(&s_diag_chirp_enqueuing)) {
-        size_t free_slots = PB_RING_SAMPLES - 1 - pb_count_locked();
+        const size_t level = pb_count_locked();
+        size_t free_slots = PB_RING_SAMPLES - 1 - level;
         size_t take = (samples < free_slots) ? samples : free_slots;
+        if (!diagnostic && level < atomic_load(&s_pb_low_water_samples) &&
+            pb_tail_active((uint32_t)(esp_timer_get_time() / 1000))) {
+            atomic_store(&s_pb_low_water_samples, (uint32_t)level);
+        }
         size_t first = PB_RING_SAMPLES - s_pb_tail;
         if (first > take) {
             first = take;
@@ -587,11 +622,35 @@ static void feeder_task(void *arg)
         got = take;
         portEXIT_CRITICAL(&s_pb_lock);
 
+        const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
         if (got == 0) {
+            /* The ring ran dry while the tail of the last write was still
+             * audible: a candidate gap. Whether it was a hole or the end of
+             * the reply is decided when (if) audio resumes. */
+            if (!s_pb_in_gap && pb_tail_active(now_ms)) {
+                s_pb_in_gap = true;
+                s_pb_gap_start_ms = now_ms;
+            } else if (s_pb_in_gap &&
+                       now_ms - s_pb_gap_start_ms > PB_GAP_REPLY_MS) {
+                s_pb_in_gap = false;    /* silence followed: a reply ended */
+                atomic_fetch_add(&s_pb_gaps_ended_by_silence, 1u);
+            }
             /* CONFIG_FREERTOS_HZ=100: pdMS_TO_TICKS(5) truncates to zero and
              * merely yields to equal-priority tasks, starving IDLE0 forever. */
             vTaskDelay(1);
             continue;
+        }
+        if (s_pb_in_gap) {
+            const uint32_t gap = now_ms - s_pb_gap_start_ms;
+            s_pb_in_gap = false;
+            if (gap <= PB_GAP_REPLY_MS) {
+                atomic_fetch_add(&s_pb_underruns, 1u);
+                if (gap > atomic_load(&s_pb_max_gap_ms)) {
+                    atomic_store(&s_pb_max_gap_ms, gap);
+                }
+                ESP_LOGW(TAG, "playback underrun: %u ms hole mid-reply",
+                         (unsigned)gap);
+            }
         }
         atomic_store(&s_feeder_writing, true);
         int wr = esp_codec_dev_write(s_dac, chunk,
@@ -602,6 +661,7 @@ static void feeder_task(void *arg)
              * the successful write to reflect the submitted PCM exactly. */
             tap_write(JR_AUDIO_TAP_PLAYBACK, chunk, got);
         } else {
+            atomic_fetch_add(&s_pb_dac_failures, 1u);
             ESP_LOGW(TAG, "DAC write failed: codec rc=%d samples=%u", wr,
                      (unsigned)got);
         }
@@ -661,6 +721,7 @@ esp_err_t jr_audio_init(void)
         return ESP_ERR_NO_MEM;
     }
     s_pb_head = s_pb_tail = 0;
+    jr_audio_playback_stats_reset();
 
     /* Diagnostics are deliberately optional. A low-memory device still gets
      * the complete voice path; only its rolling evidence buffers disappear. */
@@ -767,6 +828,30 @@ uint32_t jr_audio_last_aec_us(void)
     return atomic_load(&s_last_aec_us);
 }
 
+void jr_audio_playback_stats(jr_audio_playback_stats_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    const uint32_t low = atomic_load(&s_pb_low_water_samples);
+    out->underruns = atomic_load(&s_pb_underruns);
+    out->max_gap_ms = atomic_load(&s_pb_max_gap_ms);
+    out->low_water_valid = low != UINT32_MAX;
+    /* 24 kHz mono: 24 samples per millisecond. */
+    out->low_water_ms = low == UINT32_MAX ? 0u : low / 24u;
+    out->dac_failures = atomic_load(&s_pb_dac_failures);
+    out->replies_ended = atomic_load(&s_pb_gaps_ended_by_silence);
+}
+
+void jr_audio_playback_stats_reset(void)
+{
+    atomic_store(&s_pb_underruns, 0u);
+    atomic_store(&s_pb_max_gap_ms, 0u);
+    atomic_store(&s_pb_low_water_samples, UINT32_MAX);
+    atomic_store(&s_pb_dac_failures, 0u);
+    atomic_store(&s_pb_gaps_ended_by_silence, 0u);
+}
+
 bool jr_audio_playback_pending(void)
 {
     bool buffered = false;
@@ -817,6 +902,11 @@ void jr_audio_set_gains(int mic_db, int ref_db, int out_vol)
         }
     }
 }
+
+int jr_audio_mic_db(void)       { return atomic_load(&s_mic_db); }
+int jr_audio_ref_db(void)       { return atomic_load(&s_ref_db); }
+int jr_audio_out_vol(void)      { return atomic_load(&s_out_vol); }
+int jr_audio_speak_mic_db(void) { return atomic_load(&s_mic_speak_db); }
 
 void jr_audio_set_speak_mic_db(int speak_db)
 {

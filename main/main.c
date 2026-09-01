@@ -2536,11 +2536,17 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
     if (pbgain >= 0) {
         jr_audio_set_playback_gain_percent(pbgain);
     }
-    char buf[224];
+    /* Report DEVICE state, never the request: a read with no arguments used
+     * to answer mic/ref/vol = -1, and a partial write echoed the requested
+     * value even when nothing was applied. */
+    char buf[256];
     int n = snprintf(buf, sizeof buf,
                      "{\"ok\":true,\"mic\":%d,\"ref\":%d,\"vol\":%d,"
+                     "\"speakmic\":%d,"
                      "\"barge\":%s,\"vadclean\":%s,\"pbgain\":%d}",
-                     mic, ref, vol, s_local_barge_enabled ? "true" : "false",
+                     jr_audio_mic_db(), jr_audio_ref_db(), jr_audio_out_vol(),
+                     jr_audio_speak_mic_db(),
+                     s_local_barge_enabled ? "true" : "false",
                      atomic_load(&s_vad_use_clean) ? "true" : "false",
                      jr_audio_playback_gain_percent());
     httpd_resp_set_type(req, "application/json");
@@ -2645,6 +2651,9 @@ static esp_err_t device_health_handler(httpd_req_t *req)
     const bool recent_tx_drop = last_tx_drop_ms != 0U &&
         (uint32_t)(now - last_tx_drop_ms) < 10000U;
 
+    jr_audio_playback_stats_t playback = {0};
+    jr_audio_playback_stats(&playback);
+
     const char *verdict = "ok";
     bool repairable = false;
     if (privacy || s_flip_muted) {
@@ -2669,7 +2678,7 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         verdict = "tool-fault";
     }
 
-    char body[960];
+    char body[1152];
     int n = snprintf(body, sizeof body,
         "{\"verdict\":\"%s\",\"repairable\":%s,"
         "\"privacy\":%s,\"flip_muted\":%s,\"operator\":%s,"
@@ -2678,6 +2687,8 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         "\"brightness_actual\":%u},"
         "\"memory\":{\"largest_internal\":%u,\"free_psram\":%u},"
         "\"transport\":{\"would_block\":%u,\"drops\":%u,\"deaths\":%u},"
+        "\"playback\":{\"underruns\":%u,\"max_gap_ms\":%u,"
+        "\"low_water_ms\":%d,\"dac_failures\":%u,\"replies\":%u},"
         "\"display\":{\"fps\":%u,\"flush_errors\":%u},"
         "\"ota\":{\"active\":%s,\"running\":\"%s\",\"boot\":\"%s\","
         "\"state\":\"%s\",\"received\":%u,\"total\":%u,"
@@ -2694,6 +2705,9 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         (unsigned)s_app.client.live.tx_would_block,
         (unsigned)s_app.client.live.tx_drops,
         (unsigned)snapshot->deaths,
+        (unsigned)playback.underruns, (unsigned)playback.max_gap_ms,
+        playback.low_water_valid ? (int)playback.low_water_ms : -1,
+        (unsigned)playback.dac_failures, (unsigned)playback.replies_ended,
         (unsigned)display.actual_fps, (unsigned)display.flush_errors,
         atomic_load(&s_ota_active) ? "true" : "false",
         running != NULL ? running->label : "unknown",
@@ -3124,8 +3138,26 @@ static esp_err_t demo_handler(httpd_req_t *req)
     if (!control_intent_required(req)) {
         return ESP_OK;
     }
-    atomic_store(&s_demo_req, true);
+    /* Answer what will actually happen. The consumer only starts the reel
+     * from LISTENING or IDLE and only when one is not already running; every
+     * other request was consumed and dropped while this said "queued". The
+     * phase can still move before the app task looks, so a rare late drop
+     * remains possible — it is now logged there too. */
+    const jr_state_t p = jr_orch_phase(&s_app.orch);
     httpd_resp_set_type(req, "application/json");
+    if (s_demo_start_ms != 0U) {
+        httpd_resp_sendstr(req, "{\"queued\":false,\"reason\":\"running\"}");
+        return ESP_OK;
+    }
+    if (p != JR_ST_LISTENING && p != JR_ST_IDLE) {
+        char buf[96];
+        int n = snprintf(buf, sizeof buf,
+                         "{\"queued\":false,\"reason\":\"phase\","
+                         "\"phase\":\"%s\"}", jr_state_name(p));
+        httpd_resp_send(req, buf, n);
+        return ESP_OK;
+    }
+    atomic_store(&s_demo_req, true);
     httpd_resp_sendstr(req, "{\"queued\":true,\"reel_s\":27}");
     return ESP_OK;
 }
@@ -4032,7 +4064,12 @@ static esp_err_t agent_link_get_handler(httpd_req_t *req)
 
 static esp_err_t agent_link_post_handler(httpd_req_t *req)
 {
-    if (!agent_require_auth(req)) {
+    /* The one mutating POST that skipped the control-intent gate. With
+     * JR_DEV_OPEN_DIAGNOSTICS on, agent_require_auth() is unconditionally
+     * true, so this route had NO gate at all: any page the owner visited could
+     * push agent-link state cross-origin, and it bypassed the 423 consent
+     * lock every other mutating route honours. */
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
         return ESP_OK;
     }
     if (req->content_len <= 0 || req->content_len > 1536) {
@@ -5844,6 +5881,8 @@ static void handle_say(const char *text)
  * task (every display call below is app-task single-writer by contract).
  * Reality always wins: a live ask aborts the reel, and any tap ends it.
  * (State lives with the other request lanes near the top of the file.) */
+static bool s_demo_owns_choices;   /* app task only: reel arcs are up */
+
 static void demo_stop(void)
 {
     if (s_demo_start_ms == 0U) {
@@ -5851,7 +5890,15 @@ static void demo_stop(void)
     }
     s_demo_start_ms = 0U;
     s_demo_step = -1;
-    jr_display_dismiss_choices();
+    /* Dismiss only the arcs the REEL put up. This was unconditional, and the
+     * reel's yield-to-a-real-ask path runs later in the same loop iteration
+     * that presented the real ask's arcs — so it erased them, left the
+     * orchestrator parked in ASKING with nothing to tap, and the ask could
+     * only end by timeout. */
+    if (s_demo_owns_choices) {
+        s_demo_owns_choices = false;
+        jr_display_dismiss_choices();
+    }
     jr_display_clock_set(false, 0, 0, 0);
     caption_reset();
     ESP_LOGI(TAG, "demo: reel ended");
@@ -5869,6 +5916,9 @@ static void demo_tick(uint64_t now, jr_face_t *f, uint8_t *amp)
             s_demo_start_ms = (uint32_t)now;
             s_demo_step = -1;
             ESP_LOGI(TAG, "demo: reel started");
+        } else {
+            ESP_LOGW(TAG, "demo: request dropped (phase=%s, running=%d)",
+                     jr_state_name(p), s_demo_start_ms != 0U);
         }
     }
     if (s_demo_start_ms == 0U) {
@@ -5891,8 +5941,10 @@ static void demo_tick(uint64_t now, jr_face_t *f, uint8_t *amp)
             s_demo_last_ripple = -1;
             jr_display_present_choices("Tap arcs answer Gemini",
                                        kDemoLabels, 3);
+            s_demo_owns_choices = true;
             break;
         case 2:
+            s_demo_owns_choices = false;
             jr_display_dismiss_choices();
             jr_display_caption_set("LIVE CAPTIONS AS I SPEAK");
             break;
@@ -6360,8 +6412,12 @@ static void voice_task(void *arg)
                 bool peek = s_watch_peek_until_ms != 0U &&
                             (int32_t)((uint32_t)now -
                                       s_watch_peek_until_ms) < 0;
-                if (!peek) {
+                if (!peek && s_watch_peek_until_ms != 0U) {
+                    /* The peek's caption ("WATCH - 10 SECONDS", or the wall
+                     * time it rolled to) used to outlive the peek: the hands
+                     * left on schedule and the words stayed burned on. */
                     s_watch_peek_until_ms = 0U;
+                    caption_reset();
                 }
                 /* The WATCH screen shows the REAL watch face — hour, minute
                  * and second hands with a hub, drawn by hud_overlay_clock and
@@ -6742,6 +6798,7 @@ static void voice_task(void *arg)
             }
             if (s_watch_peek_until_ms != 0U) {
                 s_watch_peek_until_ms = 0U;
+                caption_reset();   /* a swallowed tap must not strand it */
             }
             /* ANY physical contact is activity. The mood ladder was poked
              * only by TAP, so a hand actively sliding the ring — swipe after
@@ -6966,7 +7023,14 @@ static void voice_task(void *arg)
              * it. The 600 ms trailing-tap grace could only ever act in the
              * 400-600 ms sliver left over. The question owns the glass while it
              * is up; home is still one double-tap away the moment it closes. */
-            if (iev.kind == JR_INPUT_TAP && !jr_display_choices_active()) {
+            /* The SHADE outranks double-tap-home too. Its volume arcs step
+             * +-10, so adjusting volume IS a rapid repeated tap — and any
+             * second contact inside 400 ms was reclassified as the home
+             * gesture, ejecting the owner to the face mid-adjustment. The
+             * shade names its own exits (BOOT, centre up, tap outside). */
+            if (iev.kind == JR_INPUT_TAP && !jr_display_choices_active() &&
+                !s_ui_shade_open &&
+                jr_display_nav_overlay() != JR_DISPLAY_OVERLAY_SHADE) {
                 const bool double_tap = s_last_tap_ms != 0U &&
                     (uint32_t)now - s_last_tap_ms < 400U;
                 s_last_tap_ms = (uint32_t)now;
@@ -7271,9 +7335,20 @@ static void voice_task(void *arg)
                          * Opening the shade here used to set no caption at
                          * all, which is how a tap could drop you into the one
                          * surface that told you nothing. */
+                        /* TWO DOORS, ONE SHADE. A finger opens it through the
+                         * nav overlay; /api/ui/shade opens it through the
+                         * shell bit (s_ui_shade_open). The re-derivation
+                         * after this switch used to read only the nav door,
+                         * so ONE tap on an HTTP-opened shade — a volume step —
+                         * re-derived "closed" and shut it. Each door now
+                         * closes its own. */
                         if (jr_display_nav_overlay() ==
                             JR_DISPLAY_OVERLAY_SHADE) {
                             jr_display_nav_up();
+                            s_ui_shade_open = false;
+                            jr_display_caption_set("CONTROLS CLOSED");
+                        } else if (s_ui_shade_open) {
+                            s_ui_shade_open = false;
                             jr_display_caption_set("CONTROLS CLOSED");
                         } else {
                             jr_display_nav_down();
@@ -7287,8 +7362,9 @@ static void voice_task(void *arg)
                     default:
                         break;
                     }
-                    s_ui_shade_open =
-                        jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_SHADE;
+                    if (jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_SHADE) {
+                        s_ui_shade_open = true;
+                    }
                     continue;
                 }
                 if (jr_display_nav_overlay() != JR_DISPLAY_OVERLAY_NONE) {

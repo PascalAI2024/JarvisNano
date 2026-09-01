@@ -1027,6 +1027,60 @@ static void test_low_battery_uses_the_rim_palette(void)
     free(fb);
 }
 
+/* Mid-slide, a focal arc is drawn about the OFFSET centre but its wedge was
+ * measured about the panel centre, so the arc's endpoints walked round the
+ * ring as the screen slid. Draw POWER at rest and 60 px down the slide: the
+ * slid frame must be the resting frame translated by 60 rows, pixel for
+ * pixel, inside the focal band. Reverting sp_annulus_row's `dy` to
+ * `y - SP_CY` fails this. */
+static void test_focal_wedge_follows_the_slide(void)
+{
+    const int oy = 60;
+    stage_space(JR_DISPLAY_SPACE_POWER);
+    jr_display_power_set(37U, 3800U, false, false);
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *rest = malloc(px * sizeof *rest);
+    uint16_t *slid = malloc(px * sizeof *slid);
+    if (!rest || !slid) {
+        printf("FAIL %s: allocation failed\n", __func__);
+        g_failures++;
+        free(rest);
+        free(slid);
+        return;
+    }
+    for (size_t i = 0; i < px; ++i) {
+        rest[i] = POISON;
+        slid[i] = POISON;
+    }
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+        sp_draw_space(&s_display, y, y2, rest + (size_t)y * HUD_W,
+                      JR_DISPLAY_SPACE_POWER, 0, 255);
+        sp_draw_space(&s_display, y, y2, slid + (size_t)y * HUD_W,
+                      JR_DISPLAY_SPACE_POWER, oy, 255);
+    }
+    size_t compared = 0, mismatched = 0;
+    for (int y = 0; y < HUD_H - oy; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            const int dx = x - SP_CX, dy = y - SP_CY;
+            if (dx * dx + dy * dy > SP_FOCAL_OUT * SP_FOCAL_OUT) {
+                continue;            /* the focal band only: text also slides */
+            }
+            const uint16_t a = rest[(size_t)y * HUD_W + x];
+            const uint16_t b = slid[(size_t)(y + oy) * HUD_W + x];
+            compared++;
+            if (a != b) {
+                mismatched++;
+            }
+        }
+    }
+    CHECK(compared > 0, "nothing compared");
+    CHECK(mismatched == 0, "%zu of %zu focal pixels differ after the slide",
+          mismatched, compared);
+    free(rest);
+    free(slid);
+}
+
 int main(void)
 {
     test_space_ring_wraps_both_ways();
@@ -1058,6 +1112,7 @@ int main(void)
     test_desk_sheet_heads_with_the_marked_task();
     test_orbit_stays_in_free_band();
     test_low_battery_uses_the_rim_palette();
+    test_focal_wedge_follows_the_slide();
 
     if (g_failures) {
         printf("%d failure(s)\n", g_failures);
