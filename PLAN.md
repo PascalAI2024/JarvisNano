@@ -174,10 +174,10 @@ in the run transcript:
 
 | # | Finding | Severity |
 |---|---|---|
-| S6 | TOOLS clamps the 8-tool catalog to 4 slots and DROPS the last-run index, so `execute_tool`, `set_volume`, `set_brightness` and `ask_user` all collapse to -1 and read as "LAST NONE" | high |
-| S7 | The DESK JOB row re-cuts the 12-glyph title to 10, deleting the "." mark `title_shorten()` adds — a truncation of a truncation, with the evidence of it removed | high |
-| S8 | Panic-home clears every overlay EXCEPT the two that replace the whole frame: it never calls `jr_display_set_test_pattern(TEST_OFF)` or `jr_display_canvas_clear()`, and never tears down a touch challenge | high |
-| S9 | Panic-home dismisses the glass surface without `s_brain_lock` and without clearing `s_brain_surface.active`, breaking the invariant every other one of the nine dismiss sites maintains | high |
+| ~~S6~~ | **fixed 2026-09-01** — `JR_DISPLAY_TOOLS_MAX` is 8, petal width follows the count. **Panel:** 8 distinct arcs at r86 (was 4). Host test lights the eighth petal and counts eight arcs; mutation to 4 fails all four assertions | high |
+| ~~S7~~ | **fixed 2026-09-01** — the marked title IS the DESK sheet's head (12 glyphs, exactly what `title_shorten()` yields); the JOB row is gone. **Panel:** sheet heads `DEPLOY.` for "DEPLOY STAGING BUILD TO THE FLEET", mark intact | high |
+| ~~S8~~ | **fixed 2026-09-01** — `panic_home_clear_glass()` stops the demo reel, tears down the touch challenge, turns the test pattern off and clears the canvas before the overlays. Not panel-provable without a BOOT hand hold; code-verified | high |
+| ~~S9~~ | **fixed 2026-09-01** — same helper takes `s_brain_lock`, resolves a local consent prompt as a timeout (denial), and clears `s_brain_surface.active`; falls back to clearing the glass alone with a warning if the lock is busy | high |
 | S10 | `sp_annulus_row` measures the wedge about the panel centre while drawing the annulus about the OFFSET centre, so every focal arc warps mid-slide | medium |
 | S11 | The agent-link card is a rectangle on round glass: corners fall off the bezel and it overwrites the battery rim and privacy ring | medium |
 | S12 | The watch peek's caption outlives the peek and freezes on the glass | medium |
@@ -195,7 +195,22 @@ battery the persistent rim rendered CYAN, but `ov_battery` paints red below
 20%. That branch was not touched by S2's fix, so the `batt_pct` reaching the
 HUD env word may disagree with the fuel gauge. Measure before assuming.
 
-### S21 — an operator lease FREEZES the display composition (open, high)
+### S21 — "an operator lease FREEZES the display composition" — REFUTED as a render bug; real cause fixed
+
+**Resolution (2026-09-01).** The composition never froze. Measured on the
+panel: `actual_fps` 19 with and without a lease, `flush_errors` 0, and the
+idle face's structural delta under a lease (0.49) sat at the no-lease noise
+floor (0.31). What both demonstration sweeps had actually hit was
+`main.c`'s Codex guard, which dropped EVERY synthetic input kind under a
+lease — including the synthetic swipes `screens.py` walks the ring with. The
+sweep's navigation was being refused, and the six identical frames were the
+honest result. The guard now refuses only the kinds that can escape or act on
+a lease (tap, double-tap, hold); a synthetic swipe walks the ring exactly as a
+finger does. **Re-measured after the fix:** swipe deltas under a lease
+4.7 / 12.5 / 7.0 against 4.3 / 12.5 / 7.9 without one. `choices_active` is now
+exposed in `/api/cockpit` under `display`, as the candidate below asked for.
+
+The original record follows, kept for the method note, which is still right.
 
 Found while demonstrating companion mode, and it is not the bug I thought I
 had already fixed.
@@ -263,15 +278,22 @@ improves continuously rather than in one late lump.
 
 | Order | Item | Acceptance test |
 |---|---|---|
-**Items 1-5: DONE.** Evidence below; the rest of the table stands.
+**Items 1-12: DONE** (6-7 by the two commits before this pass, 8 refuted, 9-12 on 2026-09-01). Evidence below; the rest of the table stands.
 
 | Done | Item | Commit | Panel evidence |
 |---|---|---|---|
-| 1-2 | SETTINGS + shade clipping | `1f0f9a1` | Now "V100% L100%" (11 of 12) and "R LGT 100%" (10 of 10). The old test asserted `strstr(label,"VOL")`, which stayed green while brightness was cut off; it now stages 100/100 and pins the exact strings — and immediately caught a wrong expectation in its own commit (`sp_pct` appends `%`) |
-| 3 | Tool petals used canonical ids (`RECALL_MEMOR`) | `1f0f9a1` | Labels are a separate `char[13]` table, so an over-long label is a COMPILE error; a `_Static_assert` ties it to the catalog and confirmed it is exactly 8 tools |
-| 4 | Agent titles: 48 chars into a 13-byte cache | `1f0f9a1` | `title_shorten()` backs to a word boundary and always marks the cut |
-| 5 | Agent rim painted over the choice band | `de0d2a5` | **Measured.** Rim alone: 1324 lit, all violet (173,0,255). Rim + ask open: 76 lit, all cyan (0,255,255), **zero violet**. Exactly one tenant |
+| 1-2 | SETTINGS + shade clipping | `543fe75c` | Now "V100% L100%" (11 of 12) and "R LGT 100%" (10 of 10). The old test asserted `strstr(label,"VOL")`, which stayed green while brightness was cut off; it now stages 100/100 and pins the exact strings — and immediately caught a wrong expectation in its own commit (`sp_pct` appends `%`) |
+| 3 | Tool petals used canonical ids (`RECALL_MEMOR`) | `efe6504d` | Labels are a separate `char[13]` table, so an over-long label is a COMPILE error; a `_Static_assert` ties it to the catalog and confirmed it is exactly 8 tools |
+| 4 | Agent titles: 48 chars into a 13-byte cache | `efe6504d` | `title_shorten()` backs to a word boundary and always marks the cut |
+| 5 | Agent rim painted over the choice band | `e5544763` | **Measured.** Rim alone: 1324 lit, all violet (173,0,255). Rim + ask open: 76 lit, all cyan (0,255,255), **zero violet**. Exactly one tenant |
 | N8.19 | Expired agent links never cleared | `eee9bb1c` | **Measured.** With `ttl_s=30` the rim went 1324 -> 0. Before the fix the expiry branch was empty and it stayed lit indefinitely |
+| 6 | N8.9 WATCH / POWER opened a SETTINGS sheet | `16ffb530` | Both compose their own sheet; host test asserts no space borrows SETTINGS |
+| 7 | N8.21 Card corners outside the glass | `569fadc2` | Round plate bounded by `JR_DISPLAY_SHELL_R_MAX`; the outside is left alone so the battery rim and privacy ring survive |
+| 8 | N8.22 `CODEX DESK` header on local consent | — | **Refuted.** No such string exists anywhere in `main/`, `components/` or `scripts/`; the local consent surface is titled `SAVE MEMORY?` and remote surfaces carry the title the host sent |
+| 9 | N8.26 Orbit rail r184-196 vs the r185-194 band | this pass | **Panel:** lit fraction at r184 0.72 -> 0.01 and at r195 0.69 -> 0.01; r186-190 unchanged at 0.72-0.74. Host test pins every shell pixel outside `JR_DISPLAY_SAFE_R` to r185-194 |
+| 10 | N8.27 POWER amber vs rim red below 20% | this pass | One rule, `HUD_BATT_LOW_PCT`, one hue (`SP_C_RED`), both renderers, and neither alarms while charging. Host tests on both renderers at 8%, charging and not. Not panel-provable at 77% charge |
+| 11 | N8.10 one numeric style | — | **Left alone, deliberately.** DESK sets its percentage inside the ring at scale 3 because it is the focal object; POWER's number sits under the arc because the arc is; SETTINGS lists values in a sheet. Three placements, one font. Re-open only with a contact sheet that reads wrong |
+| 12 | N8.25 Later tools show `LAST NONE` | this pass | Same fix as S6 — the cap was the bug |
 
 **API schemas learned the hard way, recorded so the next session does not
 re-derive them.** `/api/brain/inbox` requires EXACTLY `v, type, seq, session,
