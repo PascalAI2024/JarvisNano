@@ -352,6 +352,8 @@ that is useful, fun, and feels alive.*
 | N9.6 | **The glass can talk about what it shows** | **PROVEN** — a tap on the open WEATHER sheet spoke "around 83 degrees, high 86, dropping to 76" | Tap an open sheet on WEATHER / WATCH / ACTIVITY → the assistant speaks it (a text turn; the mic is untouched) |
 | N9.7 | **Lift to glance** | flashed; needs a hand test: rest the device 5+ min, pick it up | Picked up after a rest → weather for 8 s → home by itself; any input keeps the screen |
 | N9.8 | **Rain today** | flashed; fires once per boot when today's rain ≥10 mm | First good fetch with ≥10 mm today → one caption line, no speech |
+| N9.10 | Frame rate on the ring | MEASURED 2026-09-01 | JARVIS 19, WATCH 14, WEATHER 13, STATUS 12, ACTIVITY 13 fps with the mic idle, after the veil stopped folding black pixels (was 10-11). The shell still costs ~5 fps: the veil, the orbit rail and the focal are recomputed every strip of every frame; caching the veil under a static space is the next win. Health's `display-fault` threshold moved 12→10 so a healthy ring screen no longer reads as a fault |
+| N9.11 | Violet means two things | FINDING | The shell-wide update ring in PROBATION (violet, r140-154) and the companion agent rim (violet, r224-230) share a hue. Not a defect, but a first glance after every OTA reads as "a companion is in". Pick a second hue for one of them |
 | N9.9 | Ideas not yet built | — | Tilt parallax on the procedural layer (N7.22 first); a sunrise/sunset arc on WATCH (needs the fields from the gateway); a soft completion chime; proactive hourly rain warning (needs hourly data) |
 
 ## Execution order
