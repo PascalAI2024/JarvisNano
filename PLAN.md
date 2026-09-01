@@ -12,8 +12,8 @@ plain ESP-IDF v5 from `main/` and `components/jr_*`.
 - Native 24 kHz full-duplex codec path with 16 kHz AEC-cleaned Gemini uplink.
 - Direct Gemini Live transport, server VAD, reconnect/re-arm policy, and
   privacy-safe recovery.
-- One overlay compositor with baked EAF faces, listening halo, Watch, Desk,
-  Tools, Settings, controls, captions, and remote canvas.
+- One overlay compositor with baked EAF faces, listening halo, Watch, Power,
+  Desk, Tools, controls, captions, and remote canvas.
 - One physical grammar: global left volume, global right brightness, PWR
   listen/battery, BOOT controls, glass hold privacy.
 - Operator lease, bounded diagnostics, incident log, Wi-Fi OTA probation, and
@@ -83,8 +83,8 @@ invariants from the tree and must stay green.
 | ~~N7.16~~ | — | done — see shipped table | DONE | Wrapping must not jump the indicator the width of the dial. Draw position as a **rotating** mark; the caption naming each screen is the interim answer |
 | N7.17 | P1 | Input layer stack (`CONSUMED`/`PASS`) | OPEN — sequenced after deletions | Dispatch is ~430 lines with 20+ `continue`s. Precedence becomes a declared table; every affordance in `INTERACTION_MODEL.md` §5 still reachable; no binding changes |
 | N7.18 | P2 | Enforce the coverage invariant in a host test | OPEN | A table lists every binding and its non-gesture (voice) equivalent; a binding with no equivalent fails the build. Pairing is the one allowed exception (physical-presence proof) |
-| N7.19 | P2 | Re-home the OTA ring, then delete the SETTINGS renderer | OPEN | OTA progress stays visible without `nav_set(SETTINGS)`; only then may `sp_focal_settings` go. **Do not delete first** — it would blind a firmware update |
-| N7.20 | P2 | Remove the orphaned shell setters | OPEN | `jr_display_desk_set_task` / `tools_set` / `space_set_label` have no production callers but are exercised by `test_shell.c`; remove implementations and their tests in one change |
+| N7.19 | P2 | Re-home the OTA ring, then delete the SETTINGS renderer | DONE — this pass | The ring is shell-wide (`apply_ota_ring`, drawn above the watch, gated on the OTA word alone) so it reaches JARVIS at rest; UPDATE/SLOT rows moved to the POWER sheet; `nav_set(SETTINGS)` in the upload path and the SETTINGS space, focal, composer, headline and gauge helpers are gone. Host tests ring every space and prove JARVIS at rest still draws nothing when idle; mutation (gating the ring on `s_space_on`) fails two tests |
+| N7.20 | P2 | Remove the orphaned shell setters | REFUTED | `jr_display_desk_set_task` and `jr_display_tools_set` HAVE a production caller — `publish_shell_state()` in `main/main.c` feeds both every status tick — so they are not orphans. Only `jr_display_space_set_label` is test-only; it is the caller-override hook the headline tests rely on. Nothing to remove |
 | N7.21 | P2 | PWR double-tap for privacy | BLOCKED BY MEASUREMENT | The AXP2101 PKEY latch polls at 500 ms (`jr_power.c:33`), so a ~400 ms window cannot be resolved; `iot_button` cannot help (GPIO/ADC only). Needs a faster PKEY poll (costs shared-bus traffic) or an AXP multi-press feature. Until then privacy stays on the glass hold |
 | N7.22 | P2 | Auto-upright the procedural overlay | OPEN | 4-way quadrant snap with hysteresis + debounce, procedural layer only. **The choice-arc hit test must take the same offset** or taps target pre-rotation positions. Baked faces stay fixed; `hud_tilt_offset()` is the wrong hook (translation, wrong axes) |
 
@@ -294,6 +294,7 @@ improves continuously rather than in one late lump.
 | 10 | N8.27 POWER amber vs rim red below 20% | this pass | One rule, `HUD_BATT_LOW_PCT`, one hue (`SP_C_RED`), both renderers, and neither alarms while charging. Host tests on both renderers at 8%, charging and not. Not panel-provable at 77% charge |
 | 11 | N8.10 one numeric style | — | **Left alone, deliberately.** DESK sets its percentage inside the ring at scale 3 because it is the focal object; POWER's number sits under the arc because the arc is; SETTINGS lists values in a sheet. Three placements, one font. Re-open only with a contact sheet that reads wrong |
 | 12 | N8.25 Later tools show `LAST NONE` | this pass | Same fix as S6 — the cap was the bug |
+| 13 | SETTINGS rebuild | this pass | **Closed by subtraction** (N7.19). `GLASS_DESIGN.md` already called it a diagnostics page wearing a face; rebuilding four gauges in the house palette would have kept a screen whose only production visitor was the OTA updater. What it carried is re-homed: the update ring draws on every space, UPDATE/SLOT live on POWER, volume/light read on the shade, privacy is gold everywhere, LINK is on the SESSION sheet. NET and MEM are diagnostics and stay at `/api/cockpit` |
 
 **API schemas learned the hard way, recorded so the next session does not
 re-derive them.** `/api/brain/inbox` requires EXACTLY `v, type, seq, session,
@@ -318,7 +319,7 @@ defaults to **900**, and `state` must be a known name — "done" is not one.
 | 10 | N8.27 POWER uses amber below 20% while the battery arc uses red | One battery-state palette, one threshold, both renderers |
 | 11 | N8.10 The same percentage in three type systems (DESK, POWER, SETTINGS) | One numeric style for one kind of readout; verified on a fresh contact sheet |
 | 12 | N8.25 Only the first four tools are displayable; later ones show `LAST NONE` | After `execute_tool`, TOOLS names the tool actually used |
-| 13 | **SETTINGS rebuild** — four saturated arcs (cyan/orange/magenta/green) plus a yellow ring plus overlapping text, in a build whose language is amber and gold elsewhere | A sheet where SETTINGS is visibly the same product as the other five screens |
+| 13 | ~~**SETTINGS rebuild**~~ — closed by subtraction, see the done table | The screen is gone; a contact sheet shows four screens in one language |
 | 14 | N8.18 TOOLS is three unlabelled arcs now the redundant tools are gone | Cut or repurposed with a stated reason; not left as decoration |
 | 15 | N8.17 **Weather screen (Fort Lauderdale)** | Seventh ring screen. Settle the data path first: device-pull via the jarvismcp bridge vs host-push via the brain surface. City in code; endpoint and key in NVS, never the repo. Refresh on entering the screen, never a timer that drags Wi-Fi out of min-modem during rest. **Render the data age** — it will be stale after rest |
 | ~~16~~ | N8.13 `mood.h` says WHISPER/DREAM switch the microphone off; the code does not | **Done** `3175d822` (S5): the header now says rest is a power state and privacy a capability state. Decision: behaviour stays — WakeNet keeping the codec sampling is what lets "Jarvis" wake the device from DREAM; the microphone is turned off by privacy, never by rest |

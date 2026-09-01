@@ -1327,7 +1327,7 @@ _Static_assert((uint32_t)JR_DISPLAY_SPACE_COUNT <= NAV_SPACE_MASK + 1u,
 
 #define SP_LABEL_CAP      13   /* 12 glyphs at scale 2 = 144 px, fits r<=96 */
 #define SP_COL_MAX        11   /* detail column: 10 glyphs at scale 2       */
-#define SP_ROWS_MAX       6   /* Settings needs 5; one spare        */
+#define SP_ROWS_MAX       6   /* POWER needs 6: battery + update    */
 
 static volatile uint32_t s_nav_word;
 
@@ -1340,8 +1340,7 @@ static volatile uint32_t s_jarvis_word;      /* turns | linked<<16          */
 static volatile uint32_t s_jarvis_secs;
 static volatile uint32_t s_desk_word;        /* progress | state<<8         */
 static volatile uint32_t s_tools_word;       /* count | recent<<8           */
-static volatile uint32_t s_status_word;      /* vol | net<<8 | rssi<<16     */
-static volatile uint32_t s_status_free_kib;
+static volatile uint32_t s_status_word;      /* vol                         */
 static volatile uint32_t s_power_word = 0xFFu; /* pct | mv<<8 | usb/charge */
 /* OTA status, packed like every other shell word so the updater can publish
  * from its own task with one release-store and the render task can sample it
@@ -1366,7 +1365,6 @@ static char s_detail_head[SP_LABEL_CAP];
 static char s_detail_label[SP_ROWS_MAX][SP_COL_MAX];
 static char s_detail_value[SP_ROWS_MAX][SP_COL_MAX];
 static int  s_detail_rows;
-static char s_settings_label[SP_LABEL_CAP];
 static char s_shade_vol[SP_COL_MAX];
 static char s_shade_light[SP_COL_MAX];
 
@@ -1462,30 +1460,6 @@ static bool sp_shade_open(void)
     const uint32_t nav = __atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE);
     return ((nav & NAV_OVL_MASK) >> NAV_OVL_SHIFT) ==
            (uint32_t)JR_DISPLAY_OVERLAY_SHADE;
-}
-
-/* Link quality as a 0-100 fill. -55 dBm or better is full, -90 or worse is
- * empty; the span between them is where a user can actually feel the signal
- * change, so that is where the whole arc is spent. */
-static int sp_net_quality(int rssi_dbm, bool up)
-{
-    if (!up) {
-        return 0;
-    }
-    if (rssi_dbm >= -55) {
-        return 100;
-    }
-    if (rssi_dbm <= -90) {
-        return 4;
-    }
-    return ((rssi_dbm + 90) * 100) / 35;
-}
-
-/* Free PSRAM as a 0-100 fill against a 4 MiB nominal pool. */
-static int sp_mem_quality(uint32_t free_kib)
-{
-    const uint32_t pct = free_kib / 41u;
-    return pct > 100u ? 100 : (int)pct;
 }
 
 static const char *sp_agent_name(jr_display_agent_state_t st)
@@ -1683,86 +1657,47 @@ static void sp_compose_detail(int space)
         sp_str(s_detail_label[3], 0, SP_COL_MAX, "CHARGE");
         sp_str(s_detail_value[3], 0, SP_COL_MAX,
                (w & (1u << 25)) != 0u ? "YES" : "NO");
-        s_detail_rows = 4;
-        break;
-    }
-    case JR_DISPLAY_SPACE_SETTINGS: {
-        const uint32_t w = __atomic_load_n(&s_status_word, __ATOMIC_ACQUIRE);
+        /* THE FIRMWARE UPDATE LIVES HERE. It used to be two rows of a SETTINGS
+         * sheet that nothing but the updater ever visited. Power is where a
+         * worried owner looks for "can this device survive a flash", and the
+         * preflight verdict is mostly a power verdict anyway.
+         *
+         * At rest the UPDATE row reports READINESS rather than a state noun,
+         * so POWER answers "could this take an update right now" without an
+         * update having to be in flight. */
         const uint32_t ota = __atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE);
         const jr_display_ota_state_t ota_state =
             (jr_display_ota_state_t)(ota & 0xFu);
-        sp_copy(s_detail_head, "SETTINGS");
-        /* Volume and brightness are deliberately NOT rows here: they live in
-         * the headline (where they are read) and in the shade (where they are
-         * changed). The sheet carries what neither of those can show. */
-        sp_str(s_detail_label[0], 0, SP_COL_MAX, "PRIVACY");
-        sp_str(s_detail_value[0], 0, SP_COL_MAX,
-               sp_privacy_muted() ? "MUTED" : "LIVE");
-        sp_str(s_detail_label[1], 0, SP_COL_MAX, "LINK");
-        if ((w & (1u << 8)) != 0u) {
-            int len = sp_str(s_detail_value[1], 0, SP_COL_MAX, "-");
-            len = sp_num(s_detail_value[1], len, SP_COL_MAX,
-                         (uint32_t)(-(int)(int8_t)((w >> 16) & 0xFFu)));
-            sp_str(s_detail_value[1], len, SP_COL_MAX, "DB");
-        } else {
-            sp_str(s_detail_value[1], 0, SP_COL_MAX, "DOWN");
-        }
-        sp_str(s_detail_label[2], 0, SP_COL_MAX, "POWER");
-        {
-            const uint32_t power =
-                __atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE);
-            const uint32_t percent = power & 0xFFu;
-            const uint32_t millivolts = (power >> 8) & 0xFFFFu;
-            if (percent <= 100U) {
-                int len = sp_pct(s_detail_value[2], 0, SP_COL_MAX, percent);
-                if ((power & (1u << 25)) != 0U) {
-                    len = sp_str(s_detail_value[2], len, SP_COL_MAX, "+");
-                }
-                if (millivolts >= 1000U) {
-                    len = sp_num(s_detail_value[2], len, SP_COL_MAX,
-                                 millivolts / 1000U);
-                    len = sp_str(s_detail_value[2], len, SP_COL_MAX, ".");
-                    len = sp_num(s_detail_value[2], len, SP_COL_MAX,
-                                 (millivolts % 1000U) / 100U);
-                    (void)sp_str(s_detail_value[2], len, SP_COL_MAX, "V");
-                }
-            } else {
-                sp_str(s_detail_value[2], 0, SP_COL_MAX,
-                       (power & (1u << 24)) != 0U ? "USB" : "UNKNOWN");
-            }
-        }
-        /* At rest the UPDATE row reports READINESS rather than a state noun,
-         * so Settings answers "could this take an update right now" without
-         * an update having to be in flight. */
-        sp_str(s_detail_label[3], 0, SP_COL_MAX, "UPDATE");
+        sp_str(s_detail_label[4], 0, SP_COL_MAX, "UPDATE");
         if (ota_state == JR_DISPLAY_OTA_RECEIVING) {
-            sp_pct(s_detail_value[3], 0, SP_COL_MAX, (ota >> 8) & 0xFFu);
+            sp_pct(s_detail_value[4], 0, SP_COL_MAX, (ota >> 8) & 0xFFu);
         } else if (ota_state == JR_DISPLAY_OTA_IDLE) {
-            sp_str(s_detail_value[3], 0, SP_COL_MAX,
+            sp_str(s_detail_value[4], 0, SP_COL_MAX,
                    (ota & (1u << 24)) != 0u ? "READY" : "HOLD");
         } else {
-            sp_str(s_detail_value[3], 0, SP_COL_MAX, sp_ota_name(ota_state));
+            sp_str(s_detail_value[4], 0, SP_COL_MAX, sp_ota_name(ota_state));
         }
-        sp_str(s_detail_label[4], 0, SP_COL_MAX, "SLOT");
-        sp_ota_slots(s_detail_value[4], SP_COL_MAX, (ota >> 16) & 0xFu,
+        sp_str(s_detail_label[5], 0, SP_COL_MAX, "SLOT");
+        sp_ota_slots(s_detail_value[5], SP_COL_MAX, (ota >> 16) & 0xFu,
                      (ota >> 20) & 0xFu);
-        s_detail_rows = 5;
+        s_detail_rows = 6;
         break;
     }
     default:
         /* Unreachable: every space in jr_display_space_t is named above. This
          * is deliberately EMPTY rather than a copy of some other screen's
          * sheet — when a new space is added, showing nothing is an obvious
-         * gap, whereas silently inheriting SETTINGS is a lie that looks like
-         * a feature. That is exactly how WATCH and POWER went wrong. */
+         * gap, whereas silently inheriting another screen's sheet is a lie
+         * that looks like a feature. That is exactly how WATCH and POWER went
+         * wrong, back when a SETTINGS sheet sat here. */
         s_detail_head[0] = '\0';
         s_detail_rows = 0;
         break;
     }
 }
 
-/* One composition pass per frame: the settings headline, the shade readouts,
- * and the detail sheet if it is showing. */
+/* One composition pass per frame: the shade readouts, and the detail sheet
+ * if it is showing. */
 static void sp_compose(void)
 {
     const uint32_t w = __atomic_load_n(&s_status_word, __ATOMIC_ACQUIRE);
@@ -1772,42 +1707,12 @@ static void sp_compose(void)
         brt = 100u;
     }
 
-    /* An update in flight outranks the volume/brightness readout: while the
-     * flash is being written, that is what Settings is about. The two healthy
-     * resting states (IDLE, VALID) hand the headline straight back. */
-    const uint32_t ota = __atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE);
-    const jr_display_ota_state_t ota_state =
-        (jr_display_ota_state_t)(ota & 0xFu);
-    int len = 0;
-    if (ota_state == JR_DISPLAY_OTA_RECEIVING) {
-        len = sp_str(s_settings_label, 0, SP_LABEL_CAP, "UPDATE ");
-        (void)sp_pct(s_settings_label, len, SP_LABEL_CAP,
-                     (ota >> 8) & 0xFFu);
-    } else if (sp_ota_ringing(ota_state)) {
-        (void)sp_str(s_settings_label, 0, SP_LABEL_CAP, sp_ota_name(ota_state));
-    } else {
-        /* BOTH NUMBERS MUST SURVIVE AT 100.
-         *
-         * "VOL 100%  100%" is 14 glyphs against a 12-glyph store, so whenever
-         * volume reached 100 the brightness lost its digits and the headline
-         * read "VOL 100%  10" — the two levels this screen exists to show,
-         * and one of them silently wrong rather than absent.
-         *
-         * "V100% L100%" is 11 against a 12-glyph store — both numbers whole,
-         * with a glyph to spare. V and L match the VOL and LGT tags already
-         * drawn on the arcs, so the short form is decoded by the screen it
-         * sits on. A host assertion pins this exact worst case. */
-        len = sp_str(s_settings_label, 0, SP_LABEL_CAP, "V");
-        len = sp_pct(s_settings_label, len, SP_LABEL_CAP, vol);
-        len = sp_str(s_settings_label, len, SP_LABEL_CAP, " L");
-        (void)sp_pct(s_settings_label, len, SP_LABEL_CAP, brt);
-    }
-
-    /* Same failure, tighter budget: the detail column stores 10 glyphs.
+    /* BOTH NUMBERS MUST SURVIVE AT 100. The detail column stores 10 glyphs:
      * "L VOL 100%" is exactly 10 and survived; "R LIGHT 100%" is 12 and read
-     * "R LIGHT 10". LGT matches the SETTINGS tag and restores the symmetry —
-     * both columns are now exactly 10 in the worst case. */
-    len = sp_str(s_shade_vol, 0, SP_COL_MAX, "L VOL ");
+     * "R LIGHT 10" — one of the two levels the shade exists to show, silently
+     * wrong rather than absent. LGT keeps both columns at exactly 10 in the
+     * worst case; a host assertion pins that case. */
+    int len = sp_str(s_shade_vol, 0, SP_COL_MAX, "L VOL ");
     (void)sp_pct(s_shade_vol, len, SP_COL_MAX, vol);
     len = sp_str(s_shade_light, 0, SP_COL_MAX, "R LGT ");
     (void)sp_pct(s_shade_light, len, SP_COL_MAX, brt);
@@ -2286,9 +2191,10 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
 
 #define SP_FOCAL_IN    76
 #define SP_FOCAL_OUT   96
-/* The Settings firmware-update ring. The inner edge clears the headline's
- * worst-case glyph corner (12 glyphs at scale 2, centred on SP_LABEL_Y, reach
- * r131.5); the outer edge stays well inside JR_DISPLAY_SAFE_R. */
+/* The firmware-update ring, on every space. The inner edge clears every focal
+ * object (r<=104) and the headline's worst-case glyph corner (12 glyphs at
+ * scale 2, centred on SP_LABEL_Y, reach r131.5); the outer edge stays well
+ * inside JR_DISPLAY_SAFE_R. */
 #define SP_OTA_IN      140
 #define SP_OTA_OUT     154
 #define SP_FOCAL_HIT   116
@@ -2780,122 +2686,58 @@ static uint16_t sp_ota_native(jr_display_ota_state_t state)
     }
 }
 
-/* SETTINGS: four cardinal gauges around a privacy heart. Real numbers — the
- * arcs are volume, brightness, link quality and free memory, in that order
- * clockwise from noon. */
-static void sp_focal_settings(const jr_display_ctx_t *ctx, int y1, int y2,
-                              uint16_t *pixels, int oy, int st)
+/* THE FIRMWARE UPDATE RING, SHELL-WIDE. Concentric with every focal object
+ * at r140-154: outside the focal band (r<=104) and the headline's worst-case
+ * glyph corner (r131.5), well inside JR_DISPLAY_SAFE_R.
+ *
+ * It used to be drawn by the SETTINGS focal renderer, so the updater had to
+ * navigate the glass to SETTINGS before an upload was visible — and a screen
+ * whose only production visitor was the OTA path was a diagnostics page
+ * wearing a face. The ring now belongs to no space. It is drawn on whatever
+ * is up, AFTER the watch (whose disc clear would otherwise wipe it), and at
+ * the focal layer's own weight, so it yields to an open sheet or shade exactly
+ * as a focal object does and never meets the sheet's last row.
+ *
+ * On JARVIS at rest this is the ONE thing the shell may draw. The gate is the
+ * OTA word itself, not s_space_on, so the face need not wake the veil, the
+ * orbit or a headline to show an update; IDLE and VALID draw nothing at all,
+ * which is what keeps every pre-shell scene bit-identical.
+ *
+ * Segmented because a span is a wedge intersection and a wedge cannot exceed
+ * a half turn; the joints also read as mechanical travel rather than a pie. */
+static void apply_ota_ring(const jr_display_ctx_t *ctx, int y1, int y2,
+                           uint16_t *pixels)
 {
-    const uint32_t w = __atomic_load_n(&s_status_word, __ATOMIC_ACQUIRE);
-    int vol = (int)(w & 0xFFu);
-    int brt = (int)__atomic_load_n(&s_brightness_want, __ATOMIC_ACQUIRE);
-    if (vol > 100) {
-        vol = 100;
-    }
-    if (brt > 100) {
-        brt = 100;
-    }
-    const int net = sp_net_quality((int)(int8_t)((w >> 16) & 0xFFu),
-                                   (w & (1u << 8)) != 0u);
-    const int value[4] = { vol, brt, net,
-                           sp_mem_quality(diag_load(&s_status_free_kib)) };
-    const uint16_t hue[4] = {
-        sp_tint(ctx, SP_C_CYAN, st),
-        sp_tint(ctx, SP_C_AMBER, st),
-        sp_tint(ctx, net > 0 ? 0x07E0 : 0xF800, st),
-        sp_tint(ctx, SP_C_VIOLET, st),
-    };
-    const uint16_t track = sp_tint(ctx, SP_C_TRACK, st);
-    const bool muted = sp_privacy_muted();
-    const uint16_t heart = sp_tint(ctx, muted ? SP_C_GOLD : SP_C_CYAN, st);
-    const int cx = SP_CX;
-
-    sp_span_t bed[4], fill[4] = {{0, 0, 0, 0}};
-    int filled[4];
-    int lab_x[4], lab_y[4];
-    /* Four arcs in four colours, and nothing said which was which — the owner's
-     * verdict on seeing it was "what the hell even is that". A gauge you cannot
-     * name is decoration. Each now carries a three-letter tag sitting just
-     * inside its own arc, at that arc's own angle, so the label and the thing
-     * it labels cannot drift apart. */
-    static const char *const tag[4] = { "VOL", "LGT", "NET", "MEM" };
-    for (int i = 0; i < 4; ++i) {
-        const int c = SP_A_TOP + i * 64;
-        sp_span_set(&bed[i], c - 26, c + 26);
-        filled[i] = (value[i] * 52) / 100;
-        if (filled[i] > 0) {
-            sp_span_set(&fill[i], c - 26, c - 26 + filled[i]);
-        }
-        /* Centre of the arc, pulled inside it by ~22 px, then offset by half
-         * the glyph run so the tag is centred on its own radius. */
-        const int lr = SP_FOCAL_IN - 22;
-        lab_x[i] = cx + ((sp_cos(c) * lr) >> 15) - 9;
-        lab_y[i] = SP_CY + oy + ((sp_sin(c) * lr) >> 15) - 3;
-    }
-
-    /* Firmware update ring, concentric with the gauges at r140-154: outside
-     * the headline's worst-case glyph corner (r131.5) and well inside
-     * JR_DISPLAY_SAFE_R, so it reads at arm's length without crowding either.
-     * Segmented at 96 units because a span is a wedge intersection and a
-     * wedge cannot exceed a half turn; the joints also read as mechanical
-     * travel rather than as a pie. */
     const uint32_t ota = __atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE);
-    const jr_display_ota_state_t ota_state =
-        (jr_display_ota_state_t)(ota & 0xFu);
-    const bool ota_on = sp_ota_ringing(ota_state);
-    const uint16_t ota_px = sp_tint(ctx, sp_ota_native(ota_state), st);
-    sp_span_t ota_seg[SP_ARC_SEG_MAX];
-    int ota_nseg = 0;
-    if (ota_on) {
-        ota_nseg = sp_arc_segments(
-            ota_seg, SP_ARC_SEG_MAX, SP_A_TOP,
-            (sp_ota_fill(ota_state, (int)((ota >> 8) & 0xFFu)) * 256) / 100);
+    const jr_display_ota_state_t state = (jr_display_ota_state_t)(ota & 0xFu);
+    if (!sp_ota_ringing(state)) {
+        return;
     }
+    const int under = 255 - (s_shade_ease * 255) / 256;
+    const int st = (under * (256 - s_detail_ease)) / 256;
+    if (st <= 0) {
+        return;
+    }
+    const uint16_t track = sp_tint(ctx, SP_C_TRACK, st);
+    const uint16_t ink = sp_tint(ctx, sp_ota_native(state), st);
+    sp_span_t seg[SP_ARC_SEG_MAX];
+    const int nseg = sp_arc_segments(
+        seg, SP_ARC_SEG_MAX, SP_A_TOP,
+        (sp_ota_fill(state, (int)((ota >> 8) & 0xFFu)) * 256) / 100);
 
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        if (ota_on) {
-            sp_annulus_row(row, y, cx, SP_CY + oy, SP_OTA_IN, SP_OTA_OUT, NULL,
-                           track);
-            for (int i = 0; i < ota_nseg; ++i) {
-                sp_annulus_row(row, y, cx, SP_CY + oy, SP_OTA_IN, SP_OTA_OUT,
-                               &ota_seg[i], ota_px);
-            }
-        }
-        for (int i = 0; i < 4; ++i) {
-            sp_annulus_row(row, y, cx, SP_CY + oy, SP_FOCAL_IN, SP_FOCAL_OUT,
-                           &bed[i], track);
-            if (filled[i] > 0) {
-                sp_annulus_row(row, y, cx, SP_CY + oy, SP_FOCAL_IN, SP_FOCAL_OUT,
-                               &fill[i], hue[i]);
-            }
-        }
-        if (muted) {
-            sp_annulus_row(row, y, cx, SP_CY + oy, 26, 32, NULL, heart);
-            const int dy = y - SP_CY;
-            int lo = cx - 34, hi = cx + 34;
-            if (sp_clip(y, &lo, &hi)) {
-                for (int x = lo; x <= hi; ++x) {
-                    const int dx = x - cx;
-                    const int d = dx - dy;
-                    if (dx * dx + dy * dy <= 34 * 34 && d <= 2 && d >= -2) {
-                        row[x] = heart;
-                    }
-                }
-            }
-        } else {
-            sp_annulus_row(row, y, cx, SP_CY + oy, 0, 20, NULL, heart);
-        }
-        /* The tags last, so they sit over their own arcs. Scale 1 keeps three
-         * glyphs inside the gauge band without crowding the heart. */
-        for (int i = 0; i < 4; ++i) {
-            sp_text_row(row, y, tag[i], 3, lab_x[i], lab_y[i], 1, hue[i]);
+        sp_annulus_row(row, y, SP_CX, SP_CY, SP_OTA_IN, SP_OTA_OUT, NULL,
+                       track);
+        for (int i = 0; i < nseg; ++i) {
+            sp_annulus_row(row, y, SP_CX, SP_CY, SP_OTA_IN, SP_OTA_OUT,
+                           &seg[i], ink);
         }
     }
 }
 
 /* The short, useful label under the focal object. Callers can override it per
- * space; SETTINGS falls back to its live numbers, which beat any noun. */
+ * space; otherwise it is the space's own live fact, which beats any noun. */
 static const char *sp_headline(int space)
 {
     if (s_space_head[space][0] != '\0') {
@@ -2935,8 +2777,6 @@ static const char *sp_headline(int space)
          * the caption is for the place. */
         return recent < (w & 0xFFu) ? s_tool_name[recent] : "";
     }
-    case JR_DISPLAY_SPACE_SETTINGS:
-        return s_settings_label;
     default:
         return "";
     }
@@ -2966,8 +2806,7 @@ static void sp_draw_space(const jr_display_ctx_t *ctx, int y1, int y2,
         sp_focal_tools(ctx, y1, y2, pixels, oy, st);
         break;
     default:
-        sp_focal_settings(ctx, y1, y2, pixels, oy, st);
-        break;
+        break;                /* a space with no focal object draws none */
     }
     const char *label = sp_headline(space);
     const int len = sp_len(label, SP_LABEL_CAP - 1);
@@ -3293,6 +3132,11 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                                  & NAV_SPACE_MASK) == JR_DISPLAY_SPACE_WATCH) {
             apply_clock_overlay(ctx, y1, y2, pixels);  /* gates itself */
         }
+        /* The firmware update ring sits ABOVE the watch: the clock keeps its
+         * dial clean by clearing the disc, and the one job that can brick the
+         * device must not be the thing that clear erases. Gated on the OTA
+         * word alone, so it shows on JARVIS at rest without waking the shell. */
+        apply_ota_ring(ctx, y1, y2, pixels);
         {
             /* The commit ring shares the choice band and is drawn only on the
              * no-ask path, which is what makes the two mutually exclusive. */
@@ -4425,15 +4269,10 @@ void jr_display_ota_set(jr_display_ota_state_t state, uint8_t percent,
     nav_wake();
 }
 
-void jr_display_set_status(uint8_t volume, bool net_up, int8_t rssi_dbm,
-                           uint32_t free_psram_kib)
+void jr_display_set_status(uint8_t volume)
 {
     if (volume > 100U) {
         volume = 100U;
     }
-    diag_store(&s_status_free_kib, free_psram_kib);
-    __atomic_store_n(&s_status_word,
-                     (uint32_t)volume | (net_up ? (1u << 8) : 0u) |
-                         ((uint32_t)(uint8_t)rssi_dbm << 16),
-                     __ATOMIC_RELEASE);
+    __atomic_store_n(&s_status_word, (uint32_t)volume, __ATOMIC_RELEASE);
 }

@@ -204,7 +204,7 @@ A surface exists only if it passes **both**:
 | **Control shade** (vol ±, privacy button) | ❌ a place you enter | ⚠️ continuous values do beat speech | **DEMOTE to a transient dial** | `jr_display.c:2666-2748`, `3857-3872` |
 | **DESK** — `STATE / DONE% / JOB` | ❌ navigated to | ❌ telemetry | **DELETE** | `jr_display.c:1531-1544` |
 | **TOOLS** — `READY n / LAST x` + 4 petals | ❌ navigated to | ❌ | **DELETE** | `jr_display.c:1545-1567` |
-| **SETTINGS** — `PRIVACY / LINK / POWER / UPDATE / SLOT` | ❌ navigated to | ❌ a diagnostics page wearing a face | **DELETE** | `jr_display.c:1568-1631` |
+| **SETTINGS** — `PRIVACY / LINK / POWER / UPDATE / SLOT` | ❌ navigated to | ❌ a diagnostics page wearing a face | **DELETED** (2026-09-01; the update ring went shell-wide, UPDATE/SLOT to POWER) | — |
 | **DETAIL sheet** (≤6 rows × 10 chars) | ❌ swipe-up inside a place | ❌ | **DELETE** | `jr_display.c:1279-1280`, `2615` |
 
 The owner's verdict is confirmed by the hit test, not just by taste. **JARVIS
@@ -229,7 +229,7 @@ powerful surfaces in §F need:
 | Built for | Re-homed to |
 |---|---|
 | DESK's segmented progress ring + big percentage (`sp_focal_desk`, `jr_display.c:2357`) | **the gauge** (F5) |
-| SETTINGS' four cardinal gauges (`sp_focal_settings`, `jr_display.c:2458`) | **the dial readout** (F2) |
+| SETTINGS' four cardinal gauges (`sp_focal_settings`) | **the dial readout** (F2) — the renderer was deleted with the screen; F2 starts from the shade's `L VOL` / `R LGT` readouts, not from these arcs |
 | `jr_display_hit()` → `ACT_*` (`jr_display.c:3841-3889`) | the hit path every summoned surface needs |
 | `sp_annulus_row` / `sp_dot_row` / `sp_text_row` / `sp_veil` (`jr_display.c:2217-2325`) | unchanged, reused |
 | `JR_DISPLAY_SAFE_R 168` clip discipline (`jr_display.h:349`) | unchanged, applied to new surfaces |

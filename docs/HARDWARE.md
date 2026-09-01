@@ -33,7 +33,8 @@ maps to the C revision.
 | BOOT held during reset | Enter the ESP32-S3 ROM downloader; not an application gesture |
 | Left-edge vertical swipe | Volume +/− 5 from any screen |
 | Right-edge vertical swipe | Brightness +/− 5 from any screen |
-| Horizontal swipe | Navigate Jarvis/Desk/Tools/Settings |
+| Centre vertical swipe | Walk the ring: Jarvis/Watch/Power/Desk/Tools (wraps) |
+| Horizontal swipe | Watch peek, 10 s |
 | Top-edge swipe down | Open controls |
 | Centre swipe up | Open detail or close controls |
 | Double tap | Return to Jarvis Home |

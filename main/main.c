@@ -2165,11 +2165,7 @@ static void publish_shell_state(uint32_t now_ms)
         s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN,
         (uint16_t)(snapshot->transitions / 2U), now_ms / 1000U);
     if ((int32_t)(now_ms - next_status_ms) >= 0) {
-        wifi_ap_record_t ap = {0};
-        const bool net_up = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
-        jr_display_set_status(
-            (uint8_t)s_out_vol, net_up, net_up ? ap.rssi : 0,
-            (uint32_t)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024U));
+        jr_display_set_status((uint8_t)s_out_vol);
 
         const ota_preflight_t preflight = ota_preflight();
         const esp_partition_t *running = preflight.running;
@@ -5283,8 +5279,9 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     }
     atomic_store(&s_ota_preflight_blocked, false);
     const ota_preflight_t preflight = ota_preflight();
-    jr_display_nav_set(JR_DISPLAY_SPACE_SETTINGS);
-    jr_display_nav_up();
+    /* No navigation: the update ring is shell-wide and draws on whatever is
+     * up. This used to jump the glass to SETTINGS and open its sheet, which
+     * was the only production visit that screen ever had. */
     jr_display_ota_set(JR_DISPLAY_OTA_PREFLIGHT, 0U,
                        preflight.active_slot, preflight.target_slot,
                        preflight.ok);
@@ -7251,8 +7248,7 @@ static void voice_task(void *arg)
                      * word sat directly under the hands as pure clutter.
                      * caption_set("") routes to caption_clear(). */
                     static const char *const mode_name[JR_DISPLAY_SPACE_COUNT] =
-                        { "JARVIS", "", "POWER",
-                          "DESK", "TOOLS", "SETTINGS" };
+                        { "JARVIS", "", "POWER", "DESK", "TOOLS" };
                     const jr_display_space_t sp = jr_display_nav_space();
                     jr_display_caption_set(
                         sp < JR_DISPLAY_SPACE_COUNT ? mode_name[sp] : "JARVIS");

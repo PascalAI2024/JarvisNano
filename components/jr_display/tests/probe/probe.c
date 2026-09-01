@@ -56,11 +56,11 @@ int main(int argc, char **argv)
     s_display.board.swap_color_bytes = false;
     s_nav_word = 0U;
     jr_display_nav_next();
-    assert(jr_display_nav_space() == JR_DISPLAY_SPACE_DESK);
+    assert(jr_display_nav_space() == JR_DISPLAY_SPACE_WATCH);
     jr_display_nav_next();
     jr_display_nav_next();
-    jr_display_nav_next();  /* clamped at SETTINGS */
-    assert(jr_display_nav_space() == JR_DISPLAY_SPACE_SETTINGS);
+    jr_display_nav_next();  /* the last screen on the ring */
+    assert(jr_display_nav_space() == JR_DISPLAY_SPACE_TOOLS);
     jr_display_nav_up();
     assert(jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_DETAIL);
     jr_display_nav_down();
@@ -72,24 +72,27 @@ int main(int argc, char **argv)
     assert(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS);
     assert(jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE);
 
-    /* Spatial Settings shade by default; pass "detail" for OTA/status rows. */
+    /* POWER under the shade by default; pass "detail" for the battery and
+     * OTA rows. POWER is where the update's rows live now that SETTINGS is
+     * gone; the ring itself draws on every space. */
     s_space_on = true;
-    s_space_from = JR_DISPLAY_SPACE_SETTINGS;
-    s_space_to = JR_DISPLAY_SPACE_SETTINGS;
+    s_space_from = JR_DISPLAY_SPACE_POWER;
+    s_space_to = JR_DISPLAY_SPACE_POWER;
     s_space_prog = 256;
     s_space_ease = 256;
     s_space_veil = 256;
     s_shade_ease = detail ? 0 : 256;
     s_detail_ease = detail ? 256 : 0;
-    s_detail_space = JR_DISPLAY_SPACE_SETTINGS;
-    s_nav_word = JR_DISPLAY_SPACE_SETTINGS |
+    s_detail_space = JR_DISPLAY_SPACE_POWER;
+    s_nav_word = JR_DISPLAY_SPACE_POWER |
         ((uint32_t)(detail ? JR_DISPLAY_OVERLAY_DETAIL
                           : JR_DISPLAY_OVERLAY_SHADE) << NAV_OVL_SHIFT);
     s_hud_env_word = 74U | (1U << 9);  /* battery 74, privacy gold */
     jr_display_set_brightness(60U);
-    jr_display_set_status(90U, true, -61, 1893U);
+    jr_display_set_status(90U);
+    jr_display_power_set(74U, 4020U, true, true);
     /* Mid-update, staged app0 -> ota_1: the state that exercises the most
-     * of the Settings space at once (ring, headline override, both rows). */
+     * at once (the shell-wide ring, both POWER rows). */
     jr_display_ota_set(JR_DISPLAY_OTA_RECEIVING, 63U, 0U, 1U, true);
     sp_compose();
 
@@ -103,6 +106,7 @@ int main(int argc, char **argv)
         int y2 = y + 12 > 466 ? 466 : y + 12;
         apply_space_overlay(&s_display, y, y2,
                             fb + (size_t)y * 466);
+        apply_ota_ring(&s_display, y, y2, fb + (size_t)y * 466);
     }
 
     FILE *f = fopen("probe_out.ppm", "wb");
