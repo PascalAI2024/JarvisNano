@@ -20,10 +20,12 @@
  *      matrix over a poisoned frame and checking that every pixel outside the
  *      circle is untouched.
  *
- *   2. The firmware update ring at r140-154 clears BOTH the Settings headline
- *      beneath it and JR_DISPLAY_SAFE_R above it. That is an arithmetic claim
- *      about glyph corners, so test_ota_ring_band measures the actual drawn
- *      pixels instead of trusting the comment.
+ *   2. The firmware update ring at r140-154 is drawn on EVERY space, clears
+ *      every space's headline beneath it and JR_DISPLAY_SAFE_R above it, and
+ *      is the one thing that may appear on JARVIS at rest. Those are
+ *      arithmetic claims about glyph corners and a gating claim about the
+ *      shell, so test_ota_ring_band and its neighbours measure the actual
+ *      drawn pixels instead of trusting the comment.
  *
  * Strip invariance gets the same treatment as hud_render: the presenter blits
  * 12-row strips (466 = 38*12 + 10, ragged tail), so any y-dependent state that
@@ -39,9 +41,11 @@
 #include "idf_stubs.inc"
 
 static int g_failures;
+static int g_checks;   /* empty is not pass: the summary names the count */
 
 #define CHECK(cond, ...)                                                       \
     do {                                                                       \
+        g_checks++;                                                            \
         if (!(cond)) {                                                         \
             printf("FAIL %s:%d: ", __func__, __LINE__);                        \
             printf(__VA_ARGS__);                                               \
@@ -155,7 +159,7 @@ static void test_sideways_resets_and_home_escapes(void)
     CHECK(jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE,
           "clamped swipe still resets");
 
-    jr_display_nav_set(JR_DISPLAY_SPACE_SETTINGS);
+    jr_display_nav_set(JR_DISPLAY_SPACE_TOOLS);
     jr_display_nav_up();
     jr_display_nav_home();
     CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS, "home space");
@@ -278,101 +282,100 @@ static void test_ota_slot_pair_reads_as_a_journey(void)
     CHECK(strcmp(buf, "?") == 0, "unknown is admitted, got '%s'", buf);
 }
 
-/* Stage SETTINGS, fully presented, with the given OTA state. */
-static void stage_settings(jr_display_ota_state_t st, uint8_t pct, int overlay)
+/* Stage POWER, fully presented, with the given OTA state. POWER is where the
+ * update's UPDATE and SLOT rows live now that SETTINGS is gone; the ring
+ * itself belongs to no space, and stage_ring_at_rest below stages each one. */
+static void stage_power(jr_display_ota_state_t st, uint8_t pct, int overlay)
 {
     reset_nav();
-    jr_display_nav_set(JR_DISPLAY_SPACE_SETTINGS);
+    jr_display_nav_set(JR_DISPLAY_SPACE_POWER);
     s_display.board.width = HUD_W;
     s_display.board.height = HUD_H;
     s_display.board.swap_color_bytes = false;
     s_space_on = true;
-    s_space_from = JR_DISPLAY_SPACE_SETTINGS;
-    s_space_to = JR_DISPLAY_SPACE_SETTINGS;
+    s_space_from = JR_DISPLAY_SPACE_POWER;
+    s_space_to = JR_DISPLAY_SPACE_POWER;
     s_space_prog = 256;
     s_space_ease = 256;
     s_space_veil = 256;
-    s_detail_space = JR_DISPLAY_SPACE_SETTINGS;
+    s_detail_space = JR_DISPLAY_SPACE_POWER;
     s_detail_ease = overlay == JR_DISPLAY_OVERLAY_DETAIL ? 256 : 0;
     s_shade_ease = overlay == JR_DISPLAY_OVERLAY_SHADE ? 256 : 0;
     __atomic_store_n(&s_nav_word,
-                     (uint32_t)JR_DISPLAY_SPACE_SETTINGS |
+                     (uint32_t)JR_DISPLAY_SPACE_POWER |
                          ((uint32_t)overlay << NAV_OVL_SHIFT),
                      __ATOMIC_RELEASE);
-    jr_display_set_status(90U, true, -61, 1893U);
+    jr_display_set_status(90U);
     jr_display_power_set(74U, 4020U, true, true);
     jr_display_ota_set(st, pct, 0U, 1U, true);
     sp_compose();
 }
 
-static void test_settings_detail_reports_update_and_slot(void)
+/* Stage any ring screen at rest — no sheet, no shade, no slide — with the
+ * given OTA state. JARVIS at rest means the shell is OFF (s_space_on false,
+ * no veil), exactly as the presenter leaves it, so whatever this draws on
+ * JARVIS is drawn without the shell's help. */
+static void stage_ring_at_rest(int space, jr_display_ota_state_t st,
+                               uint8_t pct)
 {
-    stage_settings(JR_DISPLAY_OTA_RECEIVING, 42U, JR_DISPLAY_OVERLAY_DETAIL);
-    CHECK(s_detail_rows == 5, "five rows, got %d", s_detail_rows);
+    stage_power(st, pct, JR_DISPLAY_OVERLAY_NONE);
+    s_space_from = (uint8_t)space;
+    s_space_to = (uint8_t)space;
+    s_detail_space = (uint8_t)space;
+    s_space_veil = space == JR_DISPLAY_SPACE_JARVIS ? 0 : 256;
+    s_space_on = space != JR_DISPLAY_SPACE_JARVIS;
+    __atomic_store_n(&s_nav_word, (uint32_t)space, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_hud_env_word, 74U, __ATOMIC_RELEASE);
+    sp_compose();
+}
+
+static void test_power_sheet_reports_update_and_slot(void)
+{
+    stage_power(JR_DISPLAY_OTA_RECEIVING, 42U, JR_DISPLAY_OVERLAY_DETAIL);
+    CHECK(strcmp(s_detail_head, "POWER") == 0, "power sheet, got '%s'",
+          s_detail_head);
+    CHECK(s_detail_rows == 6, "six rows, got %d", s_detail_rows);
     CHECK(s_detail_rows <= SP_ROWS_MAX, "within the row budget");
-    CHECK(strcmp(s_detail_label[2], "POWER") == 0, "power row present");
-    CHECK(strcmp(s_detail_value[2], "74%+4.0V") == 0,
-          "power shown, got '%s'", s_detail_value[2]);
-    CHECK(strcmp(s_detail_label[3], "UPDATE") == 0, "update row present");
-    CHECK(strcmp(s_detail_value[3], "42%") == 0, "percent shown, got '%s'",
-          s_detail_value[3]);
-    CHECK(strcmp(s_detail_label[4], "SLOT") == 0, "slot row present");
-    CHECK(strcmp(s_detail_value[4], "0/1") == 0, "slots shown, got '%s'",
+    /* The battery rows keep their places; the update is appended, so a
+     * reader who learned the sheet before the move finds nothing shifted. */
+    CHECK(strcmp(s_detail_label[0], "LEVEL") == 0, "level row first");
+    CHECK(strcmp(s_detail_value[0], "74%") == 0, "level shown, got '%s'",
+          s_detail_value[0]);
+    CHECK(strcmp(s_detail_label[3], "CHARGE") == 0, "charge row still fourth");
+    CHECK(strcmp(s_detail_label[4], "UPDATE") == 0, "update row present");
+    CHECK(strcmp(s_detail_value[4], "42%") == 0, "percent shown, got '%s'",
           s_detail_value[4]);
+    CHECK(strcmp(s_detail_label[5], "SLOT") == 0, "slot row present");
+    CHECK(strcmp(s_detail_value[5], "0/1") == 0, "slots shown, got '%s'",
+          s_detail_value[5]);
 
     /* At rest the row answers readiness instead of naming a non-event. */
     jr_display_ota_set(JR_DISPLAY_OTA_IDLE, 0U, 0U, 0xFFU, true);
     sp_compose();
-    CHECK(strcmp(s_detail_value[3], "READY") == 0, "idle+ok, got '%s'",
-          s_detail_value[3]);
+    CHECK(strcmp(s_detail_value[4], "READY") == 0, "idle+ok, got '%s'",
+          s_detail_value[4]);
     jr_display_ota_set(JR_DISPLAY_OTA_IDLE, 0U, 0U, 0xFFU, false);
     sp_compose();
-    CHECK(strcmp(s_detail_value[3], "HOLD") == 0, "idle+blocked, got '%s'",
-          s_detail_value[3]);
+    CHECK(strcmp(s_detail_value[4], "HOLD") == 0, "idle+blocked, got '%s'",
+          s_detail_value[4]);
 
     jr_display_ota_set(JR_DISPLAY_OTA_PROBATION, 0U, 1U, 0xFFU, true);
     sp_compose();
-    CHECK(strcmp(s_detail_value[3], "PROBATION") == 0, "probation, got '%s'",
-          s_detail_value[3]);
+    CHECK(strcmp(s_detail_value[4], "PROBATION") == 0, "probation, got '%s'",
+          s_detail_value[4]);
 }
 
-static void test_update_outranks_the_settings_headline(void)
+/* The shade's two readouts are where volume and light are read now that the
+ * SETTINGS headline is gone. Staged at the WORST CASE — 100 and 100 — because
+ * that is the only place this breaks: the column stores 10 glyphs, and
+ * "R LIGHT 100%" is 12, which used to render "R LIGHT 10" — one of the two
+ * levels the shade exists to show, silently wrong rather than absent. */
+static void test_shade_readouts_survive_at_100(void)
 {
-    stage_settings(JR_DISPLAY_OTA_RECEIVING, 42U, JR_DISPLAY_OVERLAY_NONE);
-    CHECK(strcmp(s_settings_label, "UPDATE 42%") == 0, "writing, got '%s'",
-          s_settings_label);
-
-    jr_display_ota_set(JR_DISPLAY_OTA_ROLLED_BACK, 0U, 0U, 0xFFU, true);
-    sp_compose();
-    CHECK(strcmp(s_settings_label, "ROLLBACK") == 0, "rollback, got '%s'",
-          s_settings_label);
-
-    /* Both healthy resting states hand the headline back to the numbers.
-     *
-     * Staged at the WORST CASE — 100 and 100 — because that is the only place
-     * this breaks. The previous assertion here searched for the substring
-     * "VOL", which stayed green while the label was rendering "VOL 100%  10"
-     * with the brightness digits cut off: it pinned a word that happened to be
-     * present rather than the numbers the screen exists to show. Assert both
-     * values survive, and that the string still fits its store. */
+    stage_power(JR_DISPLAY_OTA_IDLE, 0U, JR_DISPLAY_OVERLAY_SHADE);
     s_status_word = 100U;                     /* volume 100 */
     __atomic_store_n(&s_brightness_want, 100U, __ATOMIC_RELEASE);
-
-    jr_display_ota_set(JR_DISPLAY_OTA_VALID, 100U, 1U, 0xFFU, true);
     sp_compose();
-    CHECK(strcmp(s_settings_label, "V100% L100%") == 0,
-          "valid yields both levels, got '%s'", s_settings_label);
-    CHECK(strlen(s_settings_label) < (size_t)SP_LABEL_CAP,
-          "headline fits its store, got %zu of %d",
-          strlen(s_settings_label), SP_LABEL_CAP);
-
-    jr_display_ota_set(JR_DISPLAY_OTA_IDLE, 0U, 1U, 0xFFU, true);
-    sp_compose();
-    CHECK(strcmp(s_settings_label, "V100% L100%") == 0,
-          "idle yields both levels, got '%s'", s_settings_label);
-
-    /* The shade columns have a tighter budget (10 glyphs) and the same trap:
-     * "R LIGHT 100%" is 12 and used to render "R LIGHT 10". */
     CHECK(strcmp(s_shade_vol, "L VOL 100%") == 0,
           "shade volume complete, got '%s'", s_shade_vol);
     CHECK(strcmp(s_shade_light, "R LGT 100%") == 0,
@@ -394,9 +397,12 @@ static uint16_t *render_frame(void)
     for (size_t i = 0; i < px; ++i) {
         fb[i] = POISON;
     }
+    /* The presenter's order, minus the clock (which has its own test): the
+     * shell first, then the update ring above it. */
     for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
         const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
         apply_space_overlay(&s_display, y, y2, fb + (size_t)y * HUD_W);
+        apply_ota_ring(&s_display, y, y2, fb + (size_t)y * HUD_W);
     }
     return fb;
 }
@@ -435,7 +441,7 @@ static void test_never_leaves_shell_radius(void)
         for (size_t o = 0; o < sizeof overlays / sizeof *overlays; ++o) {
             for (size_t s = 0; s < sizeof ota / sizeof *ota; ++s) {
                 for (int muted = 0; muted <= 1; ++muted) {
-                    stage_settings(ota[s], 63U, overlays[o]);
+                    stage_power(ota[s], 63U, overlays[o]);
                     s_space_from = (uint8_t)space;
                     s_space_to = (uint8_t)space;
                     s_detail_space = (uint8_t)space;
@@ -485,101 +491,117 @@ static void test_never_leaves_shell_radius(void)
 
 /* The update ring's two neighbours are the headline inside it and the safe
  * area outside it. Measure the pixels actually drawn rather than trust the
- * arithmetic in the comment. */
+ * arithmetic in the comment — on EVERY space, because the ring belongs to
+ * none of them: a firmware update must be visible wherever the glass is,
+ * including the face at rest, where the shell itself draws nothing. */
 static void test_ota_ring_band(void)
 {
-    /* Pin the headline so the OTA state change cannot move it: a caller
-     * label outranks the composed one, which leaves the ring as the only
-     * difference between the two frames. */
-    stage_settings(JR_DISPLAY_OTA_IDLE, 0U, JR_DISPLAY_OVERLAY_NONE);
-    jr_display_space_set_label(JR_DISPLAY_SPACE_SETTINGS, "PINNED", NULL);
-    sp_compose();
-    uint16_t *quiet = render_frame();
-    stage_settings(JR_DISPLAY_OTA_RECEIVING, 63U, JR_DISPLAY_OVERLAY_NONE);
-    sp_compose();
-    uint16_t *ringing = render_frame();
-    if (!quiet || !ringing) {
-        printf("FAIL %s: allocation failed\n", __func__);
-        g_failures++;
-        free(quiet);
-        free(ringing);
-        return;
-    }
-
-    int lo = 9999, hi = -1, changed = 0;
-    for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
-        if (quiet[i] == ringing[i]) {
-            continue;
+    for (int space = 0; space < (int)JR_DISPLAY_SPACE_COUNT; ++space) {
+        /* Pin the headline so the OTA state change cannot move it: a caller
+         * label outranks the composed one, which leaves the ring as the only
+         * difference between the two frames. JARVIS has no headline. */
+        stage_ring_at_rest(space, JR_DISPLAY_OTA_IDLE, 0U);
+        if (space != JR_DISPLAY_SPACE_JARVIS) {
+            jr_display_space_set_label((jr_display_space_t)space, "PINNED",
+                                       NULL);
+            sp_compose();
         }
-        const int r = radius_of((int)i);
-        if (r < lo) {
-            lo = r;
+        uint16_t *quiet = render_frame();
+        stage_ring_at_rest(space, JR_DISPLAY_OTA_RECEIVING, 63U);
+        uint16_t *ringing = render_frame();
+        if (!quiet || !ringing) {
+            printf("FAIL %s: allocation failed\n", __func__);
+            g_failures++;
+            free(quiet);
+            free(ringing);
+            return;
         }
-        if (r > hi) {
-            hi = r;
-        }
-        ++changed;
-    }
 
-    CHECK(changed > 0, "the ring drew something");
-    CHECK(lo >= SP_OTA_IN - 1, "inner edge at r=%d, expected >= %d", lo,
-          SP_OTA_IN - 1);
-    CHECK(hi <= SP_OTA_OUT + 1, "outer edge at r=%d, expected <= %d", hi,
-          SP_OTA_OUT + 1);
-    CHECK(hi <= JR_DISPLAY_SAFE_R, "readable content stays in the safe area");
-    CHECK(hi < 215, "clears the battery rim, the privacy ring and the arcs");
-
-    /* IDLE and VALID are both quiet, so moving between them must change
-     * nothing at all on the dial. */
-    free(ringing);
-    stage_settings(JR_DISPLAY_OTA_VALID, 100U, JR_DISPLAY_OVERLAY_NONE);
-    sp_compose();
-    ringing = render_frame();
-    if (ringing) {
-        CHECK(memcmp(quiet, ringing,
-                     (size_t)HUD_W * HUD_H * sizeof *quiet) == 0,
-              "VALID draws no ring");
-    }
-    jr_display_space_set_label(JR_DISPLAY_SPACE_SETTINGS, NULL, NULL);
-    free(quiet);
-    free(ringing);
-}
-
-/* The ring sits outside the headline's worst-case glyph corner. Find that
- * corner by diffing against a headline of maximum width. */
-static void test_ota_ring_clears_the_headline(void)
-{
-    stage_settings(JR_DISPLAY_OTA_IDLE, 0U, JR_DISPLAY_OVERLAY_NONE);
-    uint16_t *a = render_frame();
-    jr_display_space_set_label(JR_DISPLAY_SPACE_SETTINGS, "WWWWWWWWWWWW",
-                               NULL);
-    sp_compose();
-    uint16_t *b = render_frame();
-    if (!a || !b) {
-        printf("FAIL %s: allocation failed\n", __func__);
-        g_failures++;
-        free(a);
-        free(b);
-        return;
-    }
-
-    int hi = -1;
-    for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
-        if (a[i] != b[i]) {
+        int lo = 9999, hi = -1, changed = 0;
+        for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
+            if (quiet[i] == ringing[i]) {
+                continue;
+            }
             const int r = radius_of((int)i);
+            if (r < lo) {
+                lo = r;
+            }
             if (r > hi) {
                 hi = r;
             }
+            ++changed;
         }
-    }
-    CHECK(hi > 0, "the headline drew something");
-    CHECK(hi < SP_OTA_IN, "headline reaches r=%d, ring starts at r=%d", hi,
-          SP_OTA_IN);
-    CHECK(hi <= JR_DISPLAY_SAFE_R, "headline stays readable");
 
-    jr_display_space_set_label(JR_DISPLAY_SPACE_SETTINGS, NULL, NULL);
-    free(a);
-    free(b);
+        CHECK(changed > 0, "space %d: the ring drew something", space);
+        CHECK(lo >= SP_OTA_IN - 1, "space %d: inner edge at r=%d, expected >= %d",
+              space, lo, SP_OTA_IN - 1);
+        CHECK(hi <= SP_OTA_OUT + 1, "space %d: outer edge at r=%d, expected <= %d",
+              space, hi, SP_OTA_OUT + 1);
+        CHECK(hi <= JR_DISPLAY_SAFE_R,
+              "space %d: readable content stays in the safe area", space);
+        CHECK(hi < 215,
+              "space %d: clears the battery rim, the privacy ring and the arcs",
+              space);
+
+        /* IDLE and VALID are both quiet, so moving between them must change
+         * nothing at all on the glass. */
+        free(ringing);
+        stage_ring_at_rest(space, JR_DISPLAY_OTA_VALID, 100U);
+        ringing = render_frame();
+        if (ringing) {
+            CHECK(memcmp(quiet, ringing,
+                         (size_t)HUD_W * HUD_H * sizeof *quiet) == 0,
+                  "space %d: VALID draws no ring", space);
+        }
+        if (space != JR_DISPLAY_SPACE_JARVIS) {
+            jr_display_space_set_label((jr_display_space_t)space, NULL, NULL);
+        }
+        free(quiet);
+        free(ringing);
+    }
+}
+
+/* The ring sits outside the headline's worst-case glyph corner, on every
+ * space that has a headline. Find that corner by diffing against a headline
+ * of maximum width: an update in flight must never be crossed by the words
+ * under the focal object. */
+static void test_ota_ring_clears_the_headline(void)
+{
+    for (int space = JR_DISPLAY_SPACE_JARVIS + 1;
+         space < (int)JR_DISPLAY_SPACE_COUNT; ++space) {
+        stage_ring_at_rest(space, JR_DISPLAY_OTA_IDLE, 0U);
+        uint16_t *a = render_frame();
+        jr_display_space_set_label((jr_display_space_t)space, "WWWWWWWWWWWW",
+                                   NULL);
+        sp_compose();
+        uint16_t *b = render_frame();
+        if (!a || !b) {
+            printf("FAIL %s: allocation failed\n", __func__);
+            g_failures++;
+            free(a);
+            free(b);
+            return;
+        }
+
+        int hi = -1;
+        for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
+            if (a[i] != b[i]) {
+                const int r = radius_of((int)i);
+                if (r > hi) {
+                    hi = r;
+                }
+            }
+        }
+        CHECK(hi > 0, "space %d: the headline drew something", space);
+        CHECK(hi < SP_OTA_IN, "space %d: headline reaches r=%d, ring starts at r=%d",
+              space, hi, SP_OTA_IN);
+        CHECK(hi <= JR_DISPLAY_SAFE_R, "space %d: headline stays readable",
+              space);
+
+        jr_display_space_set_label((jr_display_space_t)space, NULL, NULL);
+        free(a);
+        free(b);
+    }
 }
 
 /* The detail sheet grew a row for the update; prove the last one still lands
@@ -605,7 +627,7 @@ static void test_detail_sheet_rows_stay_inside(void)
  * leaks between calls becomes a seam on glass and nowhere else. */
 static void test_strip_invariance(void)
 {
-    stage_settings(JR_DISPLAY_OTA_RECEIVING, 63U, JR_DISPLAY_OVERLAY_DETAIL);
+    stage_power(JR_DISPLAY_OTA_RECEIVING, 63U, JR_DISPLAY_OVERLAY_DETAIL);
 
     const size_t px = (size_t)HUD_W * HUD_H;
     uint16_t *whole = malloc(px * sizeof *whole);
@@ -622,9 +644,11 @@ static void test_strip_invariance(void)
     }
 
     apply_space_overlay(&s_display, 0, HUD_H, whole);
+    apply_ota_ring(&s_display, 0, HUD_H, whole);
     for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
         const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
         apply_space_overlay(&s_display, y, y2, strips + (size_t)y * HUD_W);
+        apply_ota_ring(&s_display, y, y2, strips + (size_t)y * HUD_W);
     }
 
     size_t diff = 0;
@@ -640,17 +664,11 @@ static void test_strip_invariance(void)
 }
 
 /* JARVIS at rest is the compatibility contract: every pre-shell scene stays
- * bit-identical, which requires the shell to write nothing whatsoever. */
+ * bit-identical, which requires the shell to write nothing whatsoever while
+ * there is nothing to report. */
 static void test_jarvis_at_rest_draws_nothing(void)
 {
-    stage_settings(JR_DISPLAY_OTA_RECEIVING, 63U, JR_DISPLAY_OVERLAY_NONE);
-    reset_nav();
-    s_space_from = JR_DISPLAY_SPACE_JARVIS;
-    s_space_to = JR_DISPLAY_SPACE_JARVIS;
-    s_space_veil = 0;
-    s_detail_ease = 0;
-    s_shade_ease = 0;
-    s_space_on = false;
+    stage_ring_at_rest(JR_DISPLAY_SPACE_JARVIS, JR_DISPLAY_OTA_IDLE, 0U);
 
     uint16_t *fb = render_frame();
     if (!fb) {
@@ -665,6 +683,91 @@ static void test_jarvis_at_rest_draws_nothing(void)
         }
     }
     CHECK(touched == 0, "%zu pixels written in JARVIS at rest", touched);
+    free(fb);
+}
+
+/* The ONE exception to that contract. A firmware update used to be visible
+ * only on SETTINGS, so the updater navigated the glass there to show it;
+ * with that screen gone, the ring must reach the face at rest on its own —
+ * the shell is OFF here (no veil, no orbit, no headline), and the update
+ * word alone lights the band. Mutation: gating the ring on s_space_on fails
+ * this test and nothing else. */
+static void test_jarvis_at_rest_still_shows_the_update(void)
+{
+    stage_ring_at_rest(JR_DISPLAY_SPACE_JARVIS, JR_DISPLAY_OTA_RECEIVING, 63U);
+
+    uint16_t *fb = render_frame();
+    if (!fb) {
+        printf("FAIL %s: allocation failed\n", __func__);
+        g_failures++;
+        return;
+    }
+    size_t touched = 0, outside = 0;
+    for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
+        if (fb[i] == POISON) {
+            continue;
+        }
+        ++touched;
+        const int r = radius_of((int)i);
+        if (r < SP_OTA_IN - 1 || r > SP_OTA_OUT + 1) {
+            ++outside;
+        }
+    }
+    /* A full track at r140-154 is ~13k pixels; demand most of it so a single
+     * stray write cannot pass as "the ring". */
+    CHECK(touched > 10000, "only %zu pixels: the update ring did not reach "
+          "JARVIS at rest", touched);
+    CHECK(outside == 0, "%zu pixels outside the ring band: the shell woke up "
+          "for an update", outside);
+    free(fb);
+}
+
+/* On WATCH the clock keeps its dial clean by clearing the disc AFTER the
+ * shell has drawn, so a ring drawn as shell furniture was wiped on precisely
+ * the screen an owner glances at. The ring is therefore drawn above the
+ * watch. Compose the presenter's real order and demand the band survives.
+ * Mutation: moving apply_ota_ring before the clock fails this. */
+static void test_update_ring_outlives_the_watch_clear(void)
+{
+    stage_ring_at_rest(JR_DISPLAY_SPACE_WATCH, JR_DISPLAY_OTA_RECEIVING, 63U);
+    jr_display_clock_set(true, 10, 8, 30);
+    s_clock_ease = 256;
+    sp_compose();
+
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb);
+    if (!fb) {
+        printf("FAIL %s: allocation failed\n", __func__);
+        g_failures++;
+        return;
+    }
+    for (size_t i = 0; i < px; ++i) {
+        fb[i] = POISON;
+    }
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+        uint16_t *strip = fb + (size_t)y * HUD_W;
+        apply_space_overlay(&s_display, y, y2, strip);
+        apply_clock_overlay(&s_display, y, y2, strip);
+        apply_ota_ring(&s_display, y, y2, strip);
+    }
+
+    size_t band = 0, lit = 0;
+    for (size_t i = 0; i < px; ++i) {
+        const int r = radius_of((int)i);
+        if (r < SP_OTA_IN || r > SP_OTA_OUT) {
+            continue;
+        }
+        ++band;
+        if (fb[i] != 0U && fb[i] != POISON) {
+            ++lit;
+        }
+    }
+    CHECK(band > 10000, "band is %zu pixels — test is vacuous", band);
+    CHECK(lit * 10 >= band * 8,
+          "%zu of %zu band pixels lit on WATCH: the clock clear ate the update",
+          lit, band);
+    s_clock_ease = 0;
     free(fb);
 }
 
@@ -703,14 +806,14 @@ static void test_shade_hits_resolve_to_controls(void)
 /* Every ring screen's detail sheet must be ABOUT that screen.
  *
  * WATCH and POWER used to fall through to the composer's `default:` case,
- * which builds the SETTINGS sheet — so tapping the clock or the battery
- * opened a sheet headed SETTINGS listing privacy, link, update and slot rows.
- * The screen you touched was not the screen you got.
+ * which built the (since deleted) SETTINGS sheet — so tapping the clock or
+ * the battery opened a sheet headed SETTINGS listing privacy, link, update
+ * and slot rows. The screen you touched was not the screen you got.
  *
- * This asserts the heading of each space individually AND that no space other
- * than SETTINGS is headed "SETTINGS", which is the shape of the original bug:
- * a new space added without its own case would silently inherit that sheet
- * again, and this test is what refuses it. */
+ * This asserts the heading of each space individually AND that no space
+ * composes an EMPTY sheet, which is what the default case now yields: a new
+ * space added without its own case would show nothing, and this test is what
+ * refuses it. DESK heads with its task, so it is covered by its own test. */
 static void test_every_space_composes_its_own_sheet(void)
 {
     static const struct { int space; const char *head; } expect[] = {
@@ -718,7 +821,6 @@ static void test_every_space_composes_its_own_sheet(void)
         { JR_DISPLAY_SPACE_WATCH,    "TIME"     },
         { JR_DISPLAY_SPACE_POWER,    "POWER"    },
         { JR_DISPLAY_SPACE_TOOLS,    "TOOLS"    },
-        { JR_DISPLAY_SPACE_SETTINGS, "SETTINGS" },
     };
     for (size_t i = 0; i < sizeof expect / sizeof expect[0]; ++i) {
         sp_compose_detail(expect[i].space);
@@ -728,14 +830,11 @@ static void test_every_space_composes_its_own_sheet(void)
         CHECK(s_detail_rows > 0, "space %d composed no rows", expect[i].space);
     }
 
-    /* No space may borrow the SETTINGS sheet. */
+    /* No space may fall into the empty default. */
     for (int space = 0; space < (int)JR_DISPLAY_SPACE_COUNT; ++space) {
-        if (space == (int)JR_DISPLAY_SPACE_SETTINGS) {
-            continue;
-        }
         sp_compose_detail(space);
-        CHECK(strcmp(s_detail_head, "SETTINGS") != 0,
-              "space %d borrowed the SETTINGS sheet", space);
+        CHECK(s_detail_head[0] != '\0' && s_detail_rows > 0,
+              "space %d has no sheet of its own", space);
     }
 
     /* WATCH must not present a duration where a wall time belongs: an
@@ -785,7 +884,7 @@ static void test_clock_clear_spares_open_shell_surfaces(void)
         }
         for (int pass = 0; pass < 2; ++pass) {
             uint16_t *fb = pass == 0 ? base : withclock;
-            stage_settings(JR_DISPLAY_OTA_IDLE, 0U, overlays[o]);
+            stage_power(JR_DISPLAY_OTA_IDLE, 0U, overlays[o]);
             s_space_from = (uint8_t)JR_DISPLAY_SPACE_WATCH;
             s_space_to = (uint8_t)JR_DISPLAY_SPACE_WATCH;
             s_detail_space = (uint8_t)JR_DISPLAY_SPACE_WATCH;
@@ -847,7 +946,7 @@ static void test_clock_clear_spares_open_shell_surfaces(void)
  * is measuring. */
 static void stage_space(int space)
 {
-    stage_settings(JR_DISPLAY_OTA_IDLE, 0U, JR_DISPLAY_OVERLAY_NONE);
+    stage_power(JR_DISPLAY_OTA_IDLE, 0U, JR_DISPLAY_OVERLAY_NONE);
     s_space_from = (uint8_t)space;
     s_space_to = (uint8_t)space;
     s_detail_space = (uint8_t)space;
@@ -1039,8 +1138,8 @@ int main(void)
     test_ota_arc_semantics();
     test_ota_names_fit_their_column();
     test_ota_slot_pair_reads_as_a_journey();
-    test_settings_detail_reports_update_and_slot();
-    test_update_outranks_the_settings_headline();
+    test_power_sheet_reports_update_and_slot();
+    test_shade_readouts_survive_at_100();
 
     test_never_leaves_shell_radius();
     test_ota_ring_band();
@@ -1048,6 +1147,8 @@ int main(void)
     test_detail_sheet_rows_stay_inside();
     test_strip_invariance();
     test_jarvis_at_rest_draws_nothing();
+    test_jarvis_at_rest_still_shows_the_update();
+    test_update_ring_outlives_the_watch_clear();
 
     test_shade_hits_resolve_to_controls();
 
@@ -1060,9 +1161,9 @@ int main(void)
     test_low_battery_uses_the_rim_palette();
 
     if (g_failures) {
-        printf("%d failure(s)\n", g_failures);
+        printf("%d failure(s) of %d checks\n", g_failures, g_checks);
         return 1;
     }
-    printf("all shell tests passed\n");
+    printf("all shell tests passed (%d checks)\n", g_checks);
     return 0;
 }

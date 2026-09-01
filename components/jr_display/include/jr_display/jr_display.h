@@ -293,9 +293,9 @@ esp_err_t jr_display_set_brightness(uint8_t percent);
  * shell is built from rings, arcs and a centre — never from a drawer, a card,
  * or a list whose corners the bezel would eat.
  *
- * FOUR SPACES ON ONE HORIZONTAL RING, CLAMPED AT BOTH ENDS
+ * FIVE SPACES ON ONE VERTICAL RING
  *
- *      JARVIS  <->  DESK  <->  TOOLS  <->  SETTINGS
+ *      JARVIS  <->  WATCH  <->  POWER  <->  DESK  <->  TOOLS
  *
  * THE RING WRAPS (changed 2026-08-29, owner's endless-scroll model). Sliding
  * down walks forward forever and sliding up walks back; there is no end to hit
@@ -356,13 +356,17 @@ esp_err_t jr_display_set_brightness(uint8_t percent);
  *                Ring colour is the agent state from set_shell_state.
  *      TOOLS     one petal per available capability around a live core; the
  *                most recently used petal is lit and thickened.
- *      SETTINGS  four cardinal gauges — volume, brightness, link, memory —
- *                around a privacy heart: a filled cyan core when live, a
- *                slashed gold ring when muted.
+ *
+ * There is no SETTINGS space. It was four saturated gauges (volume, light,
+ * link, memory) around a privacy heart — a diagnostics page wearing a face,
+ * in a palette nothing else on the glass used — and its only production
+ * visitor was the firmware updater, which navigated there to show its ring.
+ * Volume and light read on the shade, privacy is gold everywhere, link is on
+ * the SESSION sheet, and free memory belongs to /api/cockpit, not the glass.
  *
  * IDENTITY. Privacy is the loudest thing on the glass: when muted, the
- * indicator, the Tools core and the shade's privacy control all turn gold and
- * the Settings heart is struck through. Nothing else in the shell uses gold.
+ * indicator, the Tools core and the shade's privacy control all turn gold.
+ * Nothing else in the shell uses gold.
  *
  * COST. All of this is procedural and strip-local. The shell adds NO frame
  * buffer, allocates nothing per frame, and holds no unbounded string: every
@@ -386,7 +390,6 @@ typedef enum {
     JR_DISPLAY_SPACE_POWER,     /* battery: charge, charging, millivolts     */
     JR_DISPLAY_SPACE_DESK,
     JR_DISPLAY_SPACE_TOOLS,
-    JR_DISPLAY_SPACE_SETTINGS,
     JR_DISPLAY_SPACE_COUNT,
 } jr_display_space_t;
 
@@ -468,30 +471,37 @@ void jr_display_desk_set_task(const char *task, uint8_t progress,
  * is the index of the last-used tool, or <0 for none. */
 void jr_display_tools_set(const char *const *names, int n, int recent);
 
-/* ---- firmware update, as a SETTINGS citizen ----------------------------
+/* ---- firmware update, shell-wide ----------------------------------------
  *
  * An OTA is the one background job that can brick the device, so it does not
- * get a toast that scrolls away. It lives in Settings — where a worried owner
- * actually goes to look — and it stays there through probation and rollback.
+ * get a toast that scrolls away, and it does not live on a screen you have to
+ * find. It rings on WHATEVER IS UP — the face at rest, the watch, any ring
+ * screen — and it stays there through probation and rollback. It used to be
+ * a citizen of a SETTINGS screen, and the updater had to navigate the glass
+ * there before an upload was visible; that screen is gone, and the ring no
+ * longer needs a home.
  *
  * This is deliberately STATUS, NOT CONTROL. The display renders what the
  * updater reports and never starts, confirms, or aborts anything: there is no
  * OTA hit target and no OTA member in jr_display_action_t, so no tap on a
  * progress ring can ever influence a flash write.
  *
- * Where it shows up, all inside the existing Settings geometry:
+ * Where it shows up:
  *
- *   - a progress ring at r140-154, concentric with the Settings gauges and
- *     just outside the headline's worst-case glyph corner (r131.5). It is
- *     round-native, inside JR_DISPLAY_SAFE_R, and — like every shell
- *     primitive — clipped to JR_DISPLAY_SHELL_R_MAX, so it cannot reach the
- *     battery rim, the gold privacy ring, or the choice arcs.
- *   - the Settings headline, which an update in flight outranks.
- *   - two rows of the Settings detail sheet: UPDATE and SLOT.
+ *   - a progress ring at r140-154 on EVERY space: outside every focal object
+ *     (r<=104) and the headline's worst-case glyph corner (r131.5), inside
+ *     JR_DISPLAY_SAFE_R, and — like every shell primitive — clipped to
+ *     JR_DISPLAY_SHELL_R_MAX, so it cannot reach the battery rim, the gold
+ *     privacy ring, or the choice arcs. It is drawn AFTER the watch, so the
+ *     dial's clear cannot wipe it, and at the focal layer's own weight, so it
+ *     yields to an open sheet or shade exactly as a focal object does.
+ *   - two rows of the POWER detail sheet: UPDATE and SLOT. Power is where a
+ *     worried owner looks for "can this device survive a flash".
  *
  * IDLE and VALID are the two HEALTHY RESTING states and draw NO ring at all,
- * so a device with nothing to report keeps a quiet Settings dial; the facts
- * stay one swipe up, in the detail sheet. Every other state rings.
+ * so a device with nothing to report keeps a quiet glass — JARVIS at rest
+ * stays bit-identical — and the facts stay one tap away, in the POWER sheet.
+ * Every other state rings.
  *
  * ARC SEMANTICS. percent drives the arc for RECEIVING only. PREFLIGHT draws
  * an empty track (armed, nothing written yet) and every other ringing state
@@ -515,7 +525,7 @@ void jr_display_tools_set(const char *const *names, int n, int recent);
  *
  * preflight_ok is the updater's own readiness verdict (power, link, free
  * space). It is what separates PREFLIGHT from BLOCKED, and at rest it is what
- * the UPDATE row reports — so Settings answers "could this device take an
+ * the UPDATE row reports — so POWER answers "could this device take an
  * update right now" without an update having to be in flight.
  *
  * Any task, lock-free, no allocation: one packed word, one release-store. */
@@ -534,18 +544,18 @@ void jr_display_ota_set(jr_display_ota_state_t state, uint8_t percent,
                         uint8_t active_slot, uint8_t target_slot,
                         bool preflight_ok);
 
-/* AXP2101 truth for Settings and the charging rim. percent is 0..100 or
+/* AXP2101 truth for POWER and the charging rim. percent is 0..100 or
  * 0xff when no battery sample exists. Edge animations are owned by the caller;
  * this setter only publishes bounded state. */
 void jr_display_power_set(uint8_t percent, uint16_t millivolts,
                           bool usb_present, bool charging);
 
-/* SETTINGS focal object, detail, and the control shade readouts: the real
- * numbers, not a mood. Brightness is not passed — the display already owns it
- * and reads back its own target, so the shade can never disagree with the
- * panel. rssi_dbm is ignored when net_up is false. */
-void jr_display_set_status(uint8_t volume, bool net_up, int8_t rssi_dbm,
-                           uint32_t free_psram_kib);
+/* The control shade's volume readout: the real number, not a mood. Brightness
+ * is not passed — the display already owns it and reads back its own target,
+ * so the shade can never disagree with the panel. Link quality and free
+ * memory used to ride along for the SETTINGS gauges; with that screen gone
+ * they are /api/cockpit's, not the glass's. */
+void jr_display_set_status(uint8_t volume);
 
 #ifdef __cplusplus
 }

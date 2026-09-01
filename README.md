@@ -41,7 +41,7 @@ and Seeed XIAO experiments as reference tracks, not release builds. The
 - Interrupt or stop a reply without turning a normal tap into a privacy trap.
 - Hold the glass, use centre MUTE/LISTEN, or turn the puck face-down for physical privacy.
 - Glance at an explicit ten-second Watch without replacing the voice-first home.
-- Move through Desk, Tools, and Settings as temporary side spaces.
+- Walk the ring — Watch, Power, Desk, Tools — with a centre vertical swipe; it wraps.
 - Adjust volume and brightness from any screen using the physical edges.
 - Inspect the real device through a paired diagnostics and operator surface.
 
@@ -73,7 +73,8 @@ capability and safety matrix.
 | BOOT held during reset | Enter the ROM downloader |
 | Left-edge vertical | Volume +/− 5 from any screen |
 | Right-edge vertical | Brightness +/− 5 from any screen |
-| Horizontal swipe | Jarvis ↔ Desk ↔ Tools ↔ Settings |
+| Centre vertical swipe | Jarvis ↔ Watch ↔ Power ↔ Desk ↔ Tools (wraps) |
+| Horizontal swipe | Watch peek, 10 s |
 | Top-edge down | Open controls |
 | Centre up | Open detail, or close controls |
 | Double tap | Return to Jarvis Home |

@@ -37,7 +37,8 @@ Wi-Fi OTA may still pass preflight when USB power is present.
 | BOOT held during reset | Enter ROM downloader |
 | Left-edge vertical | Volume +/− 5 globally |
 | Right-edge vertical | Brightness +/− 5 globally |
-| Horizontal swipe | Jarvis ↔ Desk ↔ Tools ↔ Settings |
+| Centre vertical swipe | The ring: Jarvis ↔ Watch ↔ Power ↔ Desk ↔ Tools (wraps) |
+| Horizontal swipe | Watch peek, 10 s |
 | Top-edge down | Open controls |
 | Centre up | Detail or controls close |
 | Double tap | Jarvis Home |

@@ -58,7 +58,7 @@ deciding what the device does today.
    returns to Listening.
 5. Trigger a real Gemini choice. Three round-safe choice arcs appear and a
    physical tap resolves one.
-6. Use a horizontal swipe to move through Desk, Tools, and Settings. Use the
+6. Swipe vertically through the centre to walk Watch, Power, Desk, and Tools. Use the
    left and right edges to change volume and brightness without leaving the
    current surface.
 7. Press **BOOT** or swipe from the top edge to open controls. The glass itself
