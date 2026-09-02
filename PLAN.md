@@ -368,6 +368,19 @@ that is useful, fun, and feels alive.*
 | N10.12 | **PWR hold = off completely** | BUILT 2026-09-01 | `jr_power_off()`: AXP2101 0x27 ON-level → 1 s, 0x10 bit0 soft power-off. PWR long (PMIC IRQ, ~1.5 s) → caption, panel off, rails off. `POST /api/debug/sleep?off=1` proved the off half from a desk (rails gone in 5 s with USB present); the on half — a 1 s hold of PWR — was NOT yet observed at push time. If a 2 s hold does nothing, a USB replug powers the PMIC on; then change the ON-level to a plain press (0x27 bits 1:0 = 0) |
 | N9.9 | Ideas not yet built | — | Tilt parallax on the procedural layer (N7.22 first); a sunrise/sunset arc on WATCH (needs the fields from the gateway); a soft completion chime; proactive hourly rain warning (needs hourly data) |
 
+## Wave N11 — hands elsewhere (2026-09-02, built, not yet flashed)
+
+Owner's direction: *Jarvis doesn't do work; he has a tool that calls agents
+on other machines (a small Docker first, swapped later), and they do tasks.*
+
+| # | Deliverable | Status | Acceptance |
+|---|---|---|---|
+| N11.1 | `delegate_task(goal)` + `delegated_tasks()` | BUILT 2026-09-02, host-tested (72 checks) | Spoken "have someone …" → one `createWorkItem` on `jarvisnano-desk` with the device identity, tool returns `{id,title,status}` in < 3 s, Gemini says it is queued. Priority is not an argument (one-string template contract) |
+| N11.2 | The announce loop (`board_poll`, 90 s, awake + Wi-Fi, not DREAM) | BUILT 2026-09-02, unproven on the device | Complete an item on the board from a desk; within 90 s the device speaks "<title> is done: …" with a session open, or shows `DONE: <title>` muted; ACTIVITY shows a TASK row; a reboot does not re-announce it (first poll seeds the ring) |
+| N11.3 | `tools/board-worker/worker.py` | BUILT 2026-09-02, not run against a live board yet | On one machine with `claude` on PATH: claims the item from N11.1, runs it, `completeWorkItem` with a ≤300-char summary, or `blockWorkItem` with the reason; leases never overlap |
+| N11.4 | The devbox worker | OPEN — host and key unresolved | The owner's Docker devbox runs `worker.py` under a supervisor with the three env vars outside any repo; survives a restart; one job end to end from voice to speech |
+| N11.5 | `project_id` in `/api/tools/config` | BUILT 2026-09-02 | GET shows it, POST with a bad charset answers 422, `""` restores `jarvisnano-desk`, the next delegate uses the new id (log shows the create against it) |
+
 ## Execution order
 
 1. **Correctness:** N6.1–N6.4.

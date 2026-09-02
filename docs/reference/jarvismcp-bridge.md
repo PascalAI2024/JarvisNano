@@ -38,22 +38,41 @@ cancellation, and session generations are bounded.
 
 ## Catalogue
 
-Read tools:
+The fixed templates (`components/jr_tools/src/jr_tools_templates.c`, pinned
+by `components/jr_tools/host/test_templates.c`), as of 2026-09-02:
 
-- `current_time`
-- `weather`
-- `crypto_price`
-- `recall_memory`
-- `wikipedia`
-- `country_info`
+- `recall_memory` — five hits, 200 characters each
+- `remember` — one append-only capture event, 200 characters
+- `current_time` — the owner's zone unless one is given
+- `search_tools` — eight compact matches with the three basics pinned
+- `execute_tool` — one allowlisted `service.method` with JSON args; the
+  device refuses `delete*/remove*/destroy*/purge*/wipe*/archive*` names
+- `delegate_task` — one work item on the paired board; returns `{id, title,
+  status}`
+- `delegated_tasks` — six items, newest first, 60 of title, 120 of result
+- device-owned, never declared to the model: `weather_glance`, `board_poll`
 
-`remember` is mutating and is dispatched only after an ALLOW tap on the
-physical consent card. Its note is limited to 47 panel-renderable characters.
-The firmware rejects invalid or unrenderable notes before consent and displays
-the exact accepted note on the DENY/ALLOW card. `physical_confirmed` is an
-internal job field, not a Gemini argument; the typed request sends it as
-confirmation together with the stable top-level `request_id` required for the
-write.
+`remember` needs no tap since 2026-09-01 (`REMEMBER_NEEDS_TAP 0`): the
+owner's asking is the approval. `physical_confirmed` is still an internal job
+field, not a Gemini argument, for any future write that keeps the card.
+
+## Findings
+
+**[2026-09-02] The board, as seen from the device.** `coordination.*`
+takes its arguments directly (never wrapped in `{input:…}` whatever a
+generated schema says) and every write needs an identity tuple
+`{runtime, agentId, hostId, sessionId}`; the templates use the device's own
+(`pi/jarvisnano/jarvisnano/<date>`). `createWorkItem({projectId, title,
+description, priority})` answers with the item (`id`, `status`);
+`listWorkItems({projectId, detail:"summary"})` answers with an array whose
+items carry `id, title, status, resultSummary, lastProgressAt` and lease
+state, description bodies omitted. Raw items do not fit the 3 KB response
+slot, so every board template projects: `board_poll` keeps six of
+`{i:40, s:12, n:48, r:120}` (worst case under 1.6 KB). The project id is
+spliced into the program as `const PJ="…";` and is therefore validated to
+`[A-Za-z0-9._-]` at both the NVS field and the template setter, with the
+host suite proving a quote or a space is refused. The `jarvisnano-desk`
+project was created on the live board on 2026-09-02.
 
 The local consent card owns the panel and control-intent lane until ALLOW,
 DENY, cancellation, or the 15-second timeout resolves it. Other control-intent

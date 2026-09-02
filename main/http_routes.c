@@ -1388,12 +1388,14 @@ static void device_tool_config_reply(httpd_req_t *req)
     device_tool_config_snapshot(&configured, &typed, &legacy);
     const char *kind = typed ? "typed_device" :
         legacy ? "legacy_fixed_template" : "none";
-    char body[192];
+    char body[256];
     int n = snprintf(body, sizeof(body),
         "{\"configured\":%s,\"route_kind\":\"%s\","
-        "\"typed_device\":%s,\"legacy_fixed_template\":%s}",
+        "\"typed_device\":%s,\"legacy_fixed_template\":%s,"
+        "\"project_id\":\"%s\"}",
         configured ? "true" : "false", kind,
-        typed ? "true" : "false", legacy ? "true" : "false");
+        typed ? "true" : "false", legacy ? "true" : "false",
+        jr_tools_board_project());
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_send(req, body,
@@ -1448,12 +1450,18 @@ static esp_err_t device_tool_config_post_handler(httpd_req_t *req)
 
     cJSON *url = cJSON_GetObjectItemCaseSensitive(root, "url");
     cJSON *key = cJSON_GetObjectItemCaseSensitive(root, "key");
+    /* Optional third field: the coordination project the device queues
+     * spoken jobs on. Not a secret; "" restores the default. */
+    cJSON *project = cJSON_GetObjectItemCaseSensitive(root, "project_id");
     bool valid = cJSON_IsObject(root) && cJSON_IsString(url) &&
         cJSON_IsString(key) && url->valuestring != NULL &&
-        key->valuestring != NULL;
+        key->valuestring != NULL &&
+        (project == NULL ||
+         (cJSON_IsString(project) && project->valuestring != NULL));
     unsigned fields = 0U;
     bool saw_url = false;
     bool saw_key = false;
+    bool saw_project = false;
     for (cJSON *item = valid ? root->child : NULL;
          item != NULL; item = item->next) {
         fields++;
@@ -1461,9 +1469,12 @@ static esp_err_t device_tool_config_post_handler(httpd_req_t *req)
             !saw_url) saw_url = true;
         else if (item->string != NULL && strcmp(item->string, "key") == 0 &&
                  !saw_key) saw_key = true;
+        else if (item->string != NULL &&
+                 strcmp(item->string, "project_id") == 0 && !saw_project)
+            saw_project = true;
         else valid = false;
     }
-    valid = valid && fields == 2U && saw_url && saw_key;
+    valid = valid && fields == (saw_project ? 3U : 2U) && saw_url && saw_key;
 
     jr_net_config_t next = {0};
     if (valid) {
@@ -1486,6 +1497,16 @@ static esp_err_t device_tool_config_post_handler(httpd_req_t *req)
                 jr_cfg_validate(JR_CFG_JARVIS_MCP_KEY,
                                 next.jarvis_mcp_key) == ESP_OK;
         }
+        if (valid && saw_project) {
+            valid = strnlen(project->valuestring, sizeof(next.board_project)) <
+                        sizeof(next.board_project) &&
+                    jr_cfg_validate(JR_CFG_BOARD_PROJECT,
+                                    project->valuestring) == ESP_OK;
+            if (valid) {
+                strlcpy(next.board_project, project->valuestring,
+                        sizeof(next.board_project));
+            }
+        }
     }
     if (cJSON_IsString(key) && key->valuestring != NULL) {
         secure_zero(key->valuestring, strlen(key->valuestring));
@@ -1501,7 +1522,8 @@ static esp_err_t device_tool_config_post_handler(httpd_req_t *req)
     }
 
     esp_err_t applied = jr_cfg_apply(&next,
-        JR_CFG_F_JARVIS_MCP_URL | JR_CFG_F_JARVIS_MCP_KEY);
+        JR_CFG_F_JARVIS_MCP_URL | JR_CFG_F_JARVIS_MCP_KEY |
+        (saw_project ? JR_CFG_F_BOARD_PROJECT : 0U));
     secure_zero(&next, sizeof(next));
     if (applied == ESP_OK) {
         applied = jr_tools_reload_config();

@@ -647,6 +647,9 @@ esp_err_t jr_tools_init(const jr_tools_config_t *config)
                           ? config->mcp_url : stored.jarvis_mcp_url;
     const char *key = (config != NULL && config->mcp_key != NULL)
                           ? config->mcp_key : stored.jarvis_mcp_key;
+    if (need_stored) {
+        (void)jr_tools_set_board_project(stored.board_project);
+    }
 
     s_tools.jobs = tools_queue_create(JR_TOOLS_JOB_QUEUE_DEPTH,
                                       sizeof(owned_job_t));
@@ -733,6 +736,7 @@ esp_err_t jr_tools_reload_config(void)
     esp_err_t err = jr_cfg_load(&stored, JR_CFG_VIEW_INTERNAL);
     if (err == ESP_OK) {
         err = apply_config(stored.jarvis_mcp_url, stored.jarvis_mcp_key);
+        (void)jr_tools_set_board_project(stored.board_project);
     }
     secure_zero(&stored, sizeof(stored));
     return err;

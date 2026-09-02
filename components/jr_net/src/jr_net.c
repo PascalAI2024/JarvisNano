@@ -51,6 +51,7 @@ static const cfg_field_desc_t s_cfg_fields[JR_CFG_FIELD_COUNT] = {
     [JR_CFG_JARVIS_MCP_KEY] = {"jarvis_mcp_key", JR_CFG_MCP_KEY_CAP, true},
     /* Pairing tokens are write-only and stored as SHA-256, not plaintext. */
     [JR_CFG_PAIRING_TOKEN]  = {"pairing_token",  JR_CFG_PAIRING_TOKEN_CAP, true},
+    [JR_CFG_BOARD_PROJECT]  = {"board_project",  JR_CFG_BOARD_PROJECT_CAP, false},
 };
 
 static EventGroupHandle_t s_wifi_events;
@@ -183,6 +184,16 @@ esp_err_t jr_cfg_validate(jr_cfg_field_t field, const char *value)
             return ESP_ERR_INVALID_ARG;
         }
         break;
+    case JR_CFG_BOARD_PROJECT:
+        /* A board id is spliced into generated JavaScript as a literal, so
+         * the charset is the whole defence: letters, digits, . _ - only. */
+        for (size_t i = 0; i < len; ++i) {
+            const unsigned char ch = (unsigned char)value[i];
+            if (!isalnum(ch) && ch != '.' && ch != '_' && ch != '-') {
+                return ESP_ERR_INVALID_ARG;
+            }
+        }
+        break;
     default:
         return ESP_ERR_INVALID_ARG;
     }
@@ -301,6 +312,7 @@ static const char *cfg_value(const jr_net_config_t *config, jr_cfg_field_t field
     case JR_CFG_JARVIS_MCP_URL: return config->jarvis_mcp_url;
     case JR_CFG_JARVIS_MCP_KEY: return config->jarvis_mcp_key;
     case JR_CFG_PAIRING_TOKEN:  return config->pairing_token;
+    case JR_CFG_BOARD_PROJECT:  return config->board_project;
     default:                    return NULL;
     }
 }
@@ -317,6 +329,7 @@ static char *cfg_value_mut(jr_net_config_t *config, jr_cfg_field_t field,
     case JR_CFG_JARVIS_MCP_URL: return config->jarvis_mcp_url;
     case JR_CFG_JARVIS_MCP_KEY: return config->jarvis_mcp_key;
     case JR_CFG_PAIRING_TOKEN:  return config->pairing_token;
+    case JR_CFG_BOARD_PROJECT:  return config->board_project;
     default:                    return NULL;
     }
 }

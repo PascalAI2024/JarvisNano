@@ -139,6 +139,28 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
         }},
         .param_count = JR_GEMINI_PARAM_COUNT(1),
     },
+    /* HANDS ELSEWHERE: the job goes on the durable board, a worker on
+     * another machine does it, and board_poll announces the result. */
+    {
+        .name = "delegate_task",
+        .description =
+            "Queue a job for Sir's agents on other machines: anything that "
+            "needs a browser, a repository, a document, or several steps. "
+            "Returns at once with the job id; the result is announced on this "
+            "device when it lands. Never for what one tool call answers now.",
+        .arg_name = "goal",
+        .arg_desc =
+            "The job in plain words with everything the agent needs, at most "
+            "600 characters.",
+    },
+    {
+        .name = "delegated_tasks",
+        .description =
+            "List the jobs queued for Sir's agents, newest first, with their "
+            "status and result.",
+        .arg_name = NULL,
+        .arg_desc = NULL,
+    },
     /* ask_user never reaches the HTTPS tool worker: rich_cb intercepts it and
      * it becomes the Asking substate (choice arcs on glass, STATE-05/06). */
     JR_GEMINI_ASK_USER_DECL,
@@ -172,6 +194,8 @@ static const char s_device_tool_labels[][13] = {
     "EXECUTE",      /* execute_tool   */
     "VOLUME",       /* set_volume     */
     "LIGHT",        /* set_brightness */
+    "DELEGATE",     /* delegate_task  */
+    "TASKS",        /* delegated_tasks */
     "ASK",          /* ask_user       */
 };
 
@@ -470,7 +494,7 @@ bool operator_mode_active(uint32_t now_ms)
 /* Defined next to app_main (it owns the persona text); SEND_SETUP refreshes
  * it so every session's instruction carries the current local time. */
 static void compose_system_instruction(void);
-static void handle_say(const char *text);
+void handle_say(const char *text);
 
 /* Attract-reel state (POLISH-06). The httpd handler only posts the request;
  * everything else is app-task single-writer. */
@@ -1667,7 +1691,7 @@ static uint8_t rms_to_amp(float rms, float k)
 /* ======================================================================== *
  *  the single-writer voice task                                            *
  * ======================================================================== */
-static void handle_say(const char *text)
+void handle_say(const char *text)
 {
     /* Arm a session if idle, then QUEUE the text turn. It is flushed by
      * voice_task only once the session reaches Listening — sending it here
@@ -3623,6 +3647,7 @@ capture_complete:
 
         publish_shell_state((uint32_t)now);
         weather_maybe_fetch((uint32_t)now);
+        board_maybe_poll((uint32_t)now);
 
         /* 5) reflect phase + live amplitude on the face. With the HUD
          * presenter, present() is an atomic mailbox store, so feeding it
@@ -3683,9 +3708,23 @@ static void init_nvs(void)
  * carry the current local time (POLISH-02): courtesies then match reality
  * ("good morning" actually in the morning) with no tool round-trip. Refreshed
  * on the app task at every SEND_SETUP; the cfg pointer never moves. */
-static char s_sys_instr[2560];
+/* PSRAM, not .bss: the persona grew past 2.5 KB and internal RAM is the
+ * scarce pool. Allocated once; the transport reads it per session. */
+#define SYS_INSTR_CAP 3584U
+static char *s_sys_instr;
 static void compose_system_instruction(void)
 {
+    if (s_sys_instr == NULL) {
+        s_sys_instr = heap_caps_calloc(1, SYS_INSTR_CAP,
+                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_sys_instr == NULL) {
+            s_sys_instr = calloc(1, SYS_INSTR_CAP);
+        }
+        if (s_sys_instr == NULL) {
+            ESP_LOGE(TAG, "sys_instr: no memory");
+            return;
+        }
+    }
     static const char kBase[] =
         "RESPOND ONLY IN ENGLISH (UNITED STATES). YOU MUST RESPOND UNMISTAKABLY "
         "IN ENGLISH, EVEN IF THE INPUT AUDIO OR AMBIENT SPEECH IS IN ANOTHER "
@@ -3722,11 +3761,19 @@ static void compose_system_instruction(void)
         "add to his calendar, keep his work board, search the world. Use them "
         "without being asked twice; never claim a tool succeeded unless its "
         "response says so.\n\n"
+        "You also have hands elsewhere. delegate_task queues a job for Sir's "
+        "agents, who work on their own machines and report back to this "
+        "device; delegated_tasks lists what is queued, running, done or "
+        "blocked. Anything one tool call answers is answered now: a fact, the "
+        "weather, a price, a note. Anything that needs a browser, a "
+        "repository, a document, or several steps is delegated in one call, "
+        "with Sir told it is queued and that the result will be announced "
+        "here when it lands. Nothing that can be answered now is delegated.\n\n"
         "Capabilities, for when Sir asks what you can do: live web search and "
         "news, weather, Wikipedia, crypto and stock prices, exchange rates, "
         "time zones, translation, research papers, remembering and recalling "
-        "Sir's notes, his calendar, his work board, and this device's volume "
-        "and brightness.";
+        "Sir's notes, his calendar, his work board, jobs for his agents, and "
+        "this device's volume and brightness.";
     char when[160] = "";
     time_t tt = time(NULL);
     struct tm tmv;
@@ -3737,7 +3784,11 @@ static void compose_system_instruction(void)
                  "greeting or courtesy match it; at unsociable hours a dry "
                  "aside is welcome.", &tmv);
     }
-    snprintf(s_sys_instr, sizeof s_sys_instr, "%s%s", kBase, when);
+    int n = snprintf(s_sys_instr, SYS_INSTR_CAP, "%s%s", kBase, when);
+    if (n < 0 || (size_t)n >= SYS_INSTR_CAP) {
+        /* A cut persona is a changed persona: say so where it can be read. */
+        ESP_LOGE(TAG, "sys_instr truncated: %d >= %u", n, (unsigned)SYS_INSTR_CAP);
+    }
 }
 
 void app_main(void)

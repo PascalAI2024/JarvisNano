@@ -15,7 +15,38 @@ typedef struct {
     bool optional;
     const char *prefix;
     const char *suffix;
+    /* A board template: the program starts with `const PJ=<project id>;`
+     * so the same bytes address whichever board the device is paired to. */
+    bool board;
 } template_desc_t;
+
+static char s_board_project[JR_TOOLS_BOARD_PROJECT_CAP] =
+    JR_TOOLS_BOARD_PROJECT_DEFAULT;
+
+bool jr_tools_set_board_project(const char *project_id)
+{
+    if (project_id == NULL || project_id[0] == '\0') {
+        strcpy(s_board_project, JR_TOOLS_BOARD_PROJECT_DEFAULT);
+        return true;
+    }
+    const size_t len = strnlen(project_id, JR_TOOLS_BOARD_PROJECT_CAP);
+    if (len >= JR_TOOLS_BOARD_PROJECT_CAP) {
+        return false;
+    }
+    for (size_t i = 0; i < len; ++i) {
+        const unsigned char ch = (unsigned char)project_id[i];
+        if (!isalnum(ch) && ch != '.' && ch != '_' && ch != '-') {
+            return false;
+        }
+    }
+    memcpy(s_board_project, project_id, len + 1U);
+    return true;
+}
+
+const char *jr_tools_board_project(void)
+{
+    return s_board_project;
+}
 
 /* These strings are the complete executable vocabulary. There is no generic
  * `code` tool and no path that copies model text outside a quoted literal. */
@@ -29,7 +60,7 @@ static const template_desc_t s_templates[] = {
      "return {hits:(r.results||[]).slice(0,5).map(h=>({title:h.title||h.path,"
      "when:h.updated||h.date||\"\",text:String(h.snippet||h.body||\"\")"
      ".replace(/^---[\\s\\S]*?---\\s*/,\"\").slice(0,200)})),"
-     "total:r.total_scanned||0}"},
+     "total:r.total_scanned||0}", false},
     /* 200 characters now: the note is no longer shown for a tap, so the
      * panel's 47-glyph limit no longer applies; the character whitelist
      * stays, it is what keeps the note a string and not a program. The
@@ -39,9 +70,9 @@ static const template_desc_t s_templates[] = {
      "return await jarvis.memory.capture({type:\"note\","
      "title:b.slice(0,60),body:b,"
      "tags:[\"jarvisnano\",\"voice\"],source:\"jarvisnano\","
-     "confidence:\"confirmed\"})"},
+     "confidence:\"confirmed\"})", false},
     {"current_time", "timezone", 79U, true,
-     "return await jarvis.time(", ")"},
+     "return await jarvis.time(", ")", false},
     /* The WEATHER screen's own fetch: no model, no arguments, the city in
      * code (Fort Lauderdale) per the repo rule that only endpoints and keys
      * live in NVS. Projected to what the glass shows, nothing more. Metric
@@ -50,7 +81,7 @@ static const template_desc_t s_templates[] = {
      "const w=await jarvis.weather(26.1224,-80.1373);const c=w.current||{};"
      "const d=(w.daily||[])[0]||{};return {t:c.temperature,f:c.feelsLike,"
      "h:c.humidity,c:String(c.condition||\"\"),ws:c.windSpeed,hi:d.tempMax,"
-     "lo:d.tempMin,r:d.precipitation,dc:String(d.condition||\"\")}", ""},
+     "lo:d.tempMin,r:d.precipitation,dc:String(d.condition||\"\")}", "", false},
     /* PROJECTED, not raw: three raw matches were 4-5 KB against a 3 KB
      * device budget and were cut mid-JSON, so Gemini read a broken answer.
      * Eight matches projected to {tool, what, params} are ~1.6 KB, and the
@@ -66,7 +97,47 @@ static const template_desc_t s_templates[] = {
      "for(const b of [[\"websearch\",\"Search the live web; returns titles, links, snippets\",\"query\"],"
      "[\"weather\",\"Current weather + forecast for coordinates\",\"latitude,longitude\"],"
      "[\"wiki\",\"Wikipedia summary\",\"query\"]]){if(!seen.has(b[0]))out.push({tool:b[0],what:b[1],params:b[2]})}"
-     "return {tools:out,has_more:!!(r.page&&r.page.hasMore),note:\"call execute_tool with tool and args_json keyed by params, in that order\"}"},
+     "return {tools:out,has_more:!!(r.page&&r.page.hasMore),note:\"call execute_tool with tool and args_json keyed by params, in that order\"}", false},
+    /* HANDS ELSEWHERE. A spoken job becomes one work item on the durable
+     * board (PJ is the paired project, spliced in by jr_tools_build_code);
+     * a worker on another machine claims it, and the device announces the
+     * result from board_poll. The tool returns in one round trip and never
+     * waits: the 30 s sandbox and the utterance watchdog both forbid it.
+     * Identity is the device's own, the same as execute_tool's board path.
+     * Priority is not an argument: the template contract is one string, and
+     * the worker treats every spoken job as normal. */
+    {"delegate_task", "goal", 600U, false,
+     "const g=",
+     ";const r=await jarvis.coordination.createWorkItem({projectId:PJ,"
+     "title:g.slice(0,80),description:g,priority:\"normal\","
+     "identity:{runtime:\"pi\",agentId:\"jarvisnano\",hostId:\"jarvisnano\","
+     "sessionId:new Date().toISOString().slice(0,10)}});"
+     "return {id:String(r.id||r.workItemId||\"\").slice(0,40),"
+     "title:String(r.title||g.slice(0,80)),status:String(r.status||\"queued\")}",
+     true},
+    /* The board as a voice answer: six items, newest first, 60 glyphs of
+     * title and 120 of result. Nothing raw crosses the 3 KB response. */
+    {"delegated_tasks", "query", 1U, true,
+     "const L=await jarvis.coordination.listWorkItems({projectId:PJ,detail:\"summary\"});"
+     "const a=(Array.isArray(L)?L:(L&&(L.items||L.workItems))||[]).slice();"
+     "const k=w=>String(w.updatedAt||w.completedAt||w.lastProgressAt||w.createdAt||\"\");"
+     "a.sort((x,y)=>k(y).localeCompare(k(x)));"
+     "return {tasks:a.slice(0,6).map(w=>({id:String(w.id||\"\").slice(0,12),"
+     "title:String(w.title||\"\").slice(0,60),status:String(w.status||\"\"),"
+     "result:String(w.resultSummary||w.blockReason||w.blockedReason||w.reason||w.decisionNeeded||\"\").slice(0,120)})),"
+     "total:a.length}", "", true},
+    /* The device's own poll (never declared to the model): the six most
+     * recently touched items as {i,s,n,r} — id, status, name, result — so a
+     * completed or blocked job can be announced once. Worst case ~1.4 KB. */
+    {"board_poll", "query", 1U, true,
+     "const L=await jarvis.coordination.listWorkItems({projectId:PJ,detail:\"summary\"});"
+     "const a=(Array.isArray(L)?L:(L&&(L.items||L.workItems))||[]).slice();"
+     "const k=w=>String(w.updatedAt||w.completedAt||w.lastProgressAt||w.createdAt||\"\");"
+     "a.sort((x,y)=>k(y).localeCompare(k(x)));"
+     "return {t:a.slice(0,6).map(w=>({i:String(w.id||\"\").slice(0,40),"
+     "s:String(w.status||\"\").slice(0,12),n:String(w.title||\"\").slice(0,48),"
+     "r:String(w.resultSummary||w.blockReason||w.blockedReason||w.reason||w.decisionNeeded||\"\").slice(0,120)}))}",
+     "", true},
 };
 
 /* The execute_tool program. %s twice: the path array, then the args object.
@@ -75,6 +146,18 @@ static const template_desc_t s_templates[] = {
  * order and weather(longitude, latitude) is a different place. */
 #define JR_TOOLS_EXEC_JS \
     "const P=%s;let A=%s;const ORD={websearch:[\"query\"],weather:[\"latitude\",\"longitude\"],wiki:[\"query\"],time:[\"timezone\"],crypto:[\"coin\",\"currency\"],exchange:[\"base\",\"targets\"],country:[\"name\"],geocode:[\"query\"],translate:[\"text\",\"target\",\"source\"],hackernews:[\"type\",\"count\"],research:[\"question\"],\"stocks.quote\":[\"symbols\"],\"reddit.search\":[\"query\"],\"memory.search\":[\"query\"],\"holidays.list\":[\"country\",\"year\"]};const name=P.join(\".\");let o=jarvis;for(const k of P.slice(0,-1)){o=o[k];if(o==null)return{error:\"unknown tool\"}}const f=o[P[P.length-1]];if(typeof f!==\"function\")return{error:\"unknown tool\"};const board=P[0]===\"coordination\";const note=name===\"memory.capture\";if(board){const i=A.input||A;if(!i.identity)i.identity={runtime:\"pi\",agentId:\"jarvisnano\",hostId:\"jarvisnano\",sessionId:new Date().toISOString().slice(0,10)};A=i}if(note){const i=A.input||A;i.type=i.type||\"note\";i.source=i.source||\"jarvisnano\";i.title=i.title||String(i.body||\"\").slice(0,60);A=i}const named=P.length>=3||board||note;const ord=ORD[name];const v=ord?ord.map(k=>A[k]):Object.values(A);const first=named?[A]:v;const second=named?v:[A];let r;try{r=await f.call(o,...first)}catch(e1){try{r=await f.call(o,...second)}catch(e2){return{error:String(e1&&e1.message||e1).slice(0,200)}}}const T=(x,d)=>{if(typeof x===\"string\")return x.length>320?x.slice(0,320)+\"\\u2026\":x;if(Array.isArray(x))return x.slice(0,6).map(y=>T(y,d+1));if(x&&typeof x===\"object\"&&d<4){const q={};for(const[k,y]of Object.entries(x).slice(0,24))q[k]=T(y,d+1);return q}return x};return T(r,0)"
+
+/* `const PJ="<project>";` for board templates, "" for the rest. The id
+ * passed jr_tools_set_board_project's charset, so it needs no escaping. */
+static const char *board_prelude(const template_desc_t *desc)
+{
+    static char prelude[16U + JR_TOOLS_BOARD_PROJECT_CAP];
+    if (!desc->board) {
+        return "";
+    }
+    snprintf(prelude, sizeof prelude, "const PJ=\"%s\";", s_board_project);
+    return prelude;
+}
 
 static const template_desc_t *find_template(const char *name)
 {
@@ -341,7 +424,8 @@ jr_tool_template_status_t jr_tools_build_code(const char *name,
         if (strcmp(desc->name, "current_time") == 0) {
             value = "America/New_York";
         } else if (desc->optional) {
-            int n = snprintf(out, out_cap, "%s%s", desc->prefix, desc->suffix);
+            int n = snprintf(out, out_cap, "%s%s%s", board_prelude(desc),
+                             desc->prefix, desc->suffix);
             cJSON_Delete(args);
             return (n >= 0 && (size_t)n < out_cap)
                        ? JR_TOOL_TEMPLATE_OK : JR_TOOL_TEMPLATE_TOO_LARGE;
@@ -364,8 +448,8 @@ jr_tool_template_status_t jr_tools_build_code(const char *name,
     char *literal = NULL;
     jr_tool_template_status_t status = json_string_literal(value, &literal);
     if (status == JR_TOOL_TEMPLATE_OK) {
-        int n = snprintf(out, out_cap, "%s%s%s", desc->prefix, literal,
-                         desc->suffix);
+        int n = snprintf(out, out_cap, "%s%s%s%s", board_prelude(desc),
+                         desc->prefix, literal, desc->suffix);
         if (n < 0 || (size_t)n >= out_cap) {
             out[0] = '\0';
             status = JR_TOOL_TEMPLATE_TOO_LARGE;

@@ -183,6 +183,154 @@ void weather_maybe_fetch(uint32_t now)
     }
 }
 
+/* ---- THE BOARD: announcing what the hands elsewhere finished -------------
+ *
+ * Another device-owned job. Every BOARD_POLL_MS while the device is up, on
+ * Wi-Fi, and not in DREAM, the six most recently touched work items on the
+ * paired project come back as {i,s,n,r}. A completed or blocked item whose
+ * id is not in the ring is announced once: an ACTIVITY row, and a spoken
+ * line when a session is open with the mic live, else a caption. The first
+ * poll only seeds the ring, so nothing finished before boot is re-announced
+ * after every restart. */
+#define LOCAL_BOARD_CALL_ID   0x4C425244u          /* "LBRD" */
+#define LOCAL_BOARD_CALL_TEXT "local:board"
+#define BOARD_POLL_MS         90000u
+#define BOARD_FIRST_POLL_MS   30000u
+#define BOARD_SEEN_CAP        16U
+#define BOARD_ID_CAP          41U
+static uint32_t s_board_last_poll_ms;             /* app task only; 0 = never */
+static bool     s_board_inflight;                 /* app task only */
+static bool     s_board_seeded;                   /* first poll landed */
+static char     s_board_seen[BOARD_SEEN_CAP][BOARD_ID_CAP];
+static uint8_t  s_board_seen_next;
+
+static bool board_seen(const char *id)
+{
+    for (size_t i = 0; i < BOARD_SEEN_CAP; ++i) {
+        if (s_board_seen[i][0] != '\0' && strcmp(s_board_seen[i], id) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void board_mark_seen(const char *id)
+{
+    strlcpy(s_board_seen[s_board_seen_next], id, BOARD_ID_CAP);
+    s_board_seen_next = (uint8_t)((s_board_seen_next + 1U) % BOARD_SEEN_CAP);
+}
+
+/* completed/done vs blocked; anything else is still in flight. */
+static int board_terminal(const char *status)
+{
+    if (strncasecmp(status, "complet", 7) == 0 || strncasecmp(status, "done", 4) == 0) {
+        return 1;
+    }
+    if (strncasecmp(status, "block", 5) == 0) {
+        return 2;
+    }
+    return 0;
+}
+
+static void board_announce(const char *title, int terminal, const char *result)
+{
+    char row[25];
+    title_shorten(row, sizeof row - 5U, title);      /* "TASK " + 19 glyphs */
+    jr_display_activity_push("TASK", row);
+
+    const jr_state_t p = jr_orch_phase(&s_app.orch);
+    const bool open = p == JR_ST_LISTENING || p == JR_ST_SPEAKING ||
+                      p == JR_ST_THINKING;
+    if (open && !atomic_load(&s_voice_privacy_paused)) {
+        char line[200];
+        snprintf(line, sizeof line, "%.60s is %s%s%.110s", title,
+                 terminal == 2 ? "blocked" : "done",
+                 result[0] != '\0' ? ": " : ".", result);
+        handle_say(line);
+    } else {
+        char cap[40];
+        snprintf(cap, sizeof cap, "%s: %.30s", terminal == 2 ? "BLOCKED" : "DONE", title);
+        for (char *c = cap; *c != '\0'; ++c) {
+            *c = (char)toupper((unsigned char)*c);
+        }
+        jr_display_caption_set(cap);
+    }
+    ESP_LOGI(TAG, "board: %s %s", terminal == 2 ? "blocked" : "done", title);
+}
+
+static void board_apply_result(const jr_tool_result_t *result)
+{
+    s_board_inflight = false;
+    if (result->status != JR_TOOL_STATUS_OK) {
+        ESP_LOGW(TAG, "board: poll failed (%s)", jr_tools_status_name(result->status));
+        return;
+    }
+    cJSON *root = cJSON_Parse(result->response_json);
+    cJSON *r = cJSON_GetObjectItemCaseSensitive(root, "result");
+    if (r == NULL) {
+        r = root;
+    }
+    const cJSON *items = cJSON_GetObjectItemCaseSensitive(r, "t");
+    if (!cJSON_IsArray(items)) {
+        ESP_LOGW(TAG, "board: poll had no items");
+        cJSON_Delete(root);
+        return;
+    }
+    const bool seeding = !s_board_seeded;
+    const cJSON *w = NULL;
+    cJSON_ArrayForEach(w, items) {
+        const cJSON *i = cJSON_GetObjectItemCaseSensitive(w, "i");
+        const cJSON *s = cJSON_GetObjectItemCaseSensitive(w, "s");
+        const cJSON *n = cJSON_GetObjectItemCaseSensitive(w, "n");
+        const cJSON *res = cJSON_GetObjectItemCaseSensitive(w, "r");
+        if (!cJSON_IsString(i) || i->valuestring[0] == '\0' || !cJSON_IsString(s)) {
+            continue;
+        }
+        const int terminal = board_terminal(s->valuestring);
+        if (terminal == 0 || board_seen(i->valuestring)) {
+            continue;
+        }
+        board_mark_seen(i->valuestring);
+        if (!seeding) {
+            board_announce(cJSON_IsString(n) ? n->valuestring : "a task", terminal,
+                           cJSON_IsString(res) ? res->valuestring : "");
+        }
+    }
+    s_board_seeded = true;
+    cJSON_Delete(root);
+}
+
+void board_maybe_poll(uint32_t now)
+{
+    if (s_board_inflight || !atomic_load(&s_tool_diag.worker_ready) ||
+        !jr_tools_is_configured()) {
+        return;
+    }
+    const bool first = s_board_last_poll_ms == 0U;
+    if (first ? now < BOARD_FIRST_POLL_MS
+              : now - s_board_last_poll_ms < BOARD_POLL_MS) {
+        return;
+    }
+    if (atomic_load(&s_mood_id) == (uint8_t)JR_MOOD_DREAM) {
+        return;                       /* a dark glass keeps Wi-Fi in min-modem */
+    }
+    jr_net_status_t net = {0};
+    if (jr_net_get_status(&net) != ESP_OK || !net.sta_connected) {
+        return;
+    }
+    jr_tool_job_t job = {
+        .call_id = LOCAL_BOARD_CALL_ID,
+        .call_id_text = LOCAL_BOARD_CALL_TEXT,
+        .name = "board_poll",
+        .args_json = "{}",
+        .session_gen = JR_TOOLS_SESSION_ANY,   /* the device's own poll */
+    };
+    if (jr_tools_submit(&job) == ESP_OK) {
+        s_board_inflight = true;
+        s_board_last_poll_ms = now;        /* also rate-limits a failing poll */
+    }
+}
+
 /* ---- ACTIVITY: what Jarvis actually did this turn ------------------------
  *
  * The kind is decided when a tool is dispatched (WEB, WEATHER, PRICE, ...),
@@ -225,6 +373,8 @@ void activity_note_tool(const char *tool_name, const char *args_json)
         else if (strcmp(tool_name, "current_time") == 0) kind = "TIME";
         else if (strcmp(tool_name, "ask_user") == 0) kind = "ASK";
         else if (strcmp(tool_name, "search_tools") == 0) kind = "SEARCH";
+        else if (strcmp(tool_name, "delegate_task") == 0) kind = "DELEGATE";
+        else if (strcmp(tool_name, "delegated_tasks") == 0) kind = "TASKS";
     }
     if (kind != NULL) {
         strlcpy(s_turn_kind, kind, sizeof s_turn_kind);
@@ -373,6 +523,11 @@ void device_tool_drain_results(jr_app_t *a, uint64_t now)
         jr_tool_result_t *result = s_tool_poll_result;
         if (result->call_id == LOCAL_WEATHER_CALL_ID) {
             weather_apply_result(result, (uint32_t)now);
+            memset(result, 0, sizeof(*result));
+            continue;
+        }
+        if (result->call_id == LOCAL_BOARD_CALL_ID) {
+            board_apply_result(result);
             memset(result, 0, sizeof(*result));
             continue;
         }
