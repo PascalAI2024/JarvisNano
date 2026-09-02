@@ -381,6 +381,21 @@ on other machines (a small Docker first, swapped later), and they do tasks.*
 | N11.4 | The worker lives in the gateway (owner, 2026-09-02: "scrap the devbox, use the sandbox agent in JarvisMCP") | PROVEN 2026-09-02 on the 1.75C: "Delegate this task: find out what the CO5300 … supports for brightness control" → `createWorkItem` in 4.0 s, "queued, Sir"; the next poll claimed, researched (cited, 5 sources), filed the answer as a company-brain inbox event and completed it in 26.0 s, and announced `board: done Find technical specs for the CO5300…` in that same poll. 26 s is close to the 30 s cap, so research now runs 2 queries / 5 sources, and the spoken 300 characters are stripped of markdown and `[n]` citations. Repo path and the expired-lease recovery are built, not yet exercised | One spoken job with no repo: completed and announced within two polls, the full cited answer in the company brain under `jarvisnano-desk`; one spoken job naming an allowlisted repo: a branch delivered and announced; an unlisted repo blocks the item with `repo_not_allowed`; a poll killed at 30 s leaves an expired lease that a later poll recovers |
 | N11.5 | `project_id` in `/api/tools/config` | BUILT 2026-09-02 | GET shows it, POST with a bad charset answers 422, `""` restores `jarvisnano-desk`, the next delegate uses the new id (log shows the create against it) |
 
+## Wave N12 — the watches (2026-09-02 evening, in progress)
+
+Owner: *"one can be Rolex"*, *"swipe right and left for different styles"*,
+*"very low quality, this is a luxury device"*, *"a futuristic option with
+date, weather etc."* Design: `docs/GLASS_DESIGN.md` "second cut — luxury".
+
+| # | Item | Acceptance | Status |
+|---|---|---|---|
+| N12.1 | Six styles on WATCH, horizontal swipe, persisted | JARVIS · DIVER · DRESS · PILOT · MINIMAL · FUTURE wrap both ways; NVS survives reboot; cockpit reports `watch_style` | first cut shipped 7f97e496 (four styles); six in flight |
+| N12.2 | Hands drawn like hands | anti-aliased tapered polygons, bevel, outline, shadow; 360-angle probe shows no combing; JARVIS checksum unchanged; sweeping seconds | in flight |
+| N12.3 | Baked dials from the concept art | `dial_diver/dress/pilot/future.eaf` from the owner's picks (Codex 01 TL, 02 TL, 03 TL, 05 TR); a missing clip falls back to the procedural dial, one log line | in flight — **SPIFFS is full**: 4728 KB of faces + 852 KB of dials against ≈ 5170 KB usable (SPIFFS keeps 2 of 16 pages per block for lookup). Ship what fits in priority FUTURE, PILOT, DIVER, DRESS |
+| N12.4 | Complications read the device | PILOT: seconds / battery % / today's °F on baked sub-dials; DIVER: live date in the window; FUTURE: date, weather glance, battery, link in the baked cells; nothing invented, stale weather dimmed | in flight |
+| N12.5 | **A `dials` partition in the 13 MB reserve** | `partitions_32MB.csv` gains `dials, data, spiffs` at ≥ 0x1300000 (after `storage`, nothing existing moves, `ota_*` stay under 16 MB); `jr_display` mounts it at `/dials` and looks for `dial_*.eaf` there first; `jarvisctl art --dials` streams it over a new `POST /api/ota/dials` (same shape as `/api/ota/assets`). Requires ONE attended USB flash of the partition table (hold BOOT, `esptool write_flash 0x8000`), NVS untouched. After it, all four dials plus future art ship without touching the faces | queued — needs the owner at the device |
+| N12.6 | Proof on the panel | six framebuffers in `docs/evidence/20260902-watch2-*.png` plus one photograph of the panel; AWAKE fps on WATCH ≥ 17; PSRAM free ≥ 1 MB with all resident dials | pending |
+
 ## Execution order
 
 1. **Correctness:** N6.1–N6.4.
