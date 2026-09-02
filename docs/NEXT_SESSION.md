@@ -104,7 +104,10 @@ is the classified edge-origin swipe.
   CST9217 driver has no hardware one. Every vertical gesture the docs
   describe was physically inverted before this and nobody noticed, because
   the ring's direction is arbitrary and the shade also opens on BOOT.
-  Re-verify by finger: left-edge up = volume up, top-edge down = shade.
+  Verified by finger on the flashed image: two upward strokes on the left
+  edge read `dy −193` and `dy −199` and the volume climbed 85 → 90 → 95;
+  sideways strokes on WATCH read RIGHT and walked the styles. The shade's
+  top edge is the physical top again — untested by finger, same axis.
 - **Weather retries.** A failed `weather_glance` is retried every two
   minutes from any screen (never in DREAM, never off Wi-Fi) until it
   succeeds; a good fetch still refreshes only on the WEATHER screen after
