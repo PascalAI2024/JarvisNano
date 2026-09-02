@@ -50,6 +50,13 @@ extern "C" {
  * divided by this, so a device that is running out rests in seconds, closes
  * its session in a minute or two, and sleeps in six instead of twenty-five. */
 #define JR_MOOD_SAVER_DIV  4u
+/* QUIET: the microphone is off by the owner's hand (privacy), so there is
+ * nothing to listen for and the glass becomes a watch: WHISPER after this
+ * much stillness, AMBIENT skipped (it exists to keep listening). Motion, a
+ * touch and a busy phase still light it, so a muted device that is asking
+ * or answering stays readable — the mistake this replaces was mute forcing
+ * DREAM at brightness 8 mid-question. DREAM and sleep keep their own clocks. */
+#define JR_MOOD_QUIET_MS    5000u
 
 typedef enum {
     JR_MOOD_AWAKE = 0,
@@ -71,6 +78,7 @@ typedef struct {
     bool moving;
     bool user_busy;
     bool saver;             /* low cell on battery: every wait / SAVER_DIV */
+    bool quiet;             /* privacy mute: rest as a watch after QUIET_MS */
 } jr_mood_in_t;
 
 typedef struct {

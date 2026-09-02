@@ -58,6 +58,19 @@ field, not a Gemini argument, for any future write that keeps the card.
 
 ## Findings
 
+**[2026-09-02] Open-Meteo can fail with a 200.** For about an hour the
+gateway's `jarvis.weather` threw `Unexpected token 'U' … is not valid JSON`
+or timed out at 15 s, while the same URL answered a laptop in 150 ms: the
+body the gateway received was HTTP 200, `content-type: application/json`,
+text `Unexpected error while streaming data: allEndpointsUnavailable` — a
+regional edge failure on the provider's side. On the device it read as
+`weather_glance status=http_error http_status=500` (the sandbox turns the
+throw into a 500) and `execute_tool` for a spoken weather question spent
+31 s (two 15 s timeouts, positional then named) and failed the same way.
+`weather_glance` now retries every two minutes until it succeeds; the
+gateway's `sandbox/sdk/weather.ts` could turn a non-JSON 200 into a named
+upstream error, but that is the gateway's change to make.
+
 **[2026-09-02] `completeWorkItem` wants `result` as an object.** A top-level
 `resultSummary` is refused with `bad_input - result must be an object`; the
 accepted shape is `{ result: { summary, evidence?: string[] } }`, and the

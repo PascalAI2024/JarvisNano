@@ -16,7 +16,7 @@ static uint8_t mood_brightness(jr_mood_t mood)
     }
 }
 
-static jr_mood_t mood_from_still(uint32_t still_ms, bool saver)
+static jr_mood_t mood_from_still(uint32_t still_ms, bool saver, bool quiet)
 {
     const uint32_t div = saver ? JR_MOOD_SAVER_DIV : 1u;
     if (still_ms >= JR_MOOD_DREAM_MS / div) {
@@ -24,6 +24,10 @@ static jr_mood_t mood_from_still(uint32_t still_ms, bool saver)
     }
     if (still_ms >= JR_MOOD_WHISPER_MS / div) {
         return JR_MOOD_WHISPER;
+    }
+    if (quiet) {
+        /* nothing to listen for: a watch, not a dimmed listener */
+        return still_ms >= JR_MOOD_QUIET_MS ? JR_MOOD_WHISPER : JR_MOOD_AWAKE;
     }
     if (still_ms >= JR_MOOD_AMBIENT_MS / div) {
         return JR_MOOD_AMBIENT;
@@ -85,7 +89,7 @@ jr_mood_out_t jr_mood_step(jr_mood_state_t *s, const jr_mood_in_t *in)
         s->still_since_ms = now;
     } else {
         uint32_t still = now - s->still_since_ms;
-        next = mood_from_still(still, in->saver);
+        next = mood_from_still(still, in->saver, in->quiet);
     }
 
     const bool changed = (next != s->mood);

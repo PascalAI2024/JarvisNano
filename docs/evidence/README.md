@@ -38,6 +38,7 @@ to reject.
 | `20260719-demo-reel.png` | Attract reel (`POST /api/demo`). |
 | `20260719-tap-ripple.png` | Touch ripple (TRANS-05). |
 | `20260902-glass-done.png` | The first announced delegation: `DONE: WRITE A TWO-LINE…` caption on the muted glass at the poll after a desk completed the item on the board (caption wrap fixed the same evening). |
+| `20260902-muted-watch.png` | Muted is a watch: the framebuffer six seconds after a muted boot on USB — hands and hub over a black dial inside the gold privacy ring, the ladder at WHISPER (log: `mood -> WHISPER brightness=22`, `cpu gear: 160 MHz`), 5 fps measured, and the image confirmed valid at 56 s under the cadence-following fps floor. A framebuffer does not prove the panel brightness; the CO5300 log lines in the same capture do. |
 | `20260902-face-muted.png` | The muted face on the 1.75C after the art partition landed over `/api/ota/assets`: the closed gold iris, the gold bezel, and the muted caption from the same snapshot. |
 | `20260719-live-caption.png` | Live captions on glass. |
 | `20260719-muted-caption.png` | MUTED status chip. |

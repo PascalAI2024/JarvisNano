@@ -142,6 +142,50 @@ static void test_mood_saver_ladder_is_four_times_faster(void)
     TEST_ASSERT_EQUAL(JR_MOOD_AMBIENT, jr_mood_step(&s, &in).mood);
 }
 
+/* QUIET (privacy mute): five seconds still and the glass is a WHISPER watch,
+ * never AMBIENT (a dimmed listener with nothing to listen for). A pickup, a
+ * busy phase, and face-down keep their meanings, and DREAM keeps its own
+ * clock — mute must not be a shortcut to a black glass. Mutation-checked in
+ * both directions: a ladder that ignores quiet fails the 5 s check; one that
+ * jumps straight to DREAM fails the 1 minute check. */
+static void test_mood_quiet_rests_as_a_watch_in_five_seconds(void)
+{
+    jr_mood_state_t s;
+    jr_mood_reset(&s, 0);
+    jr_mood_in_t in = { .now_ms = JR_MOOD_QUIET_MS - 1U, .quiet = true };
+    TEST_ASSERT_EQUAL(JR_MOOD_AWAKE, jr_mood_step(&s, &in).mood);
+    in.now_ms = JR_MOOD_QUIET_MS;
+    jr_mood_out_t o = jr_mood_step(&s, &in);
+    TEST_ASSERT_EQUAL(JR_MOOD_WHISPER, o.mood);
+    TEST_ASSERT_TRUE(o.clock_on);
+    TEST_ASSERT_FALSE(o.voice_armed);
+    TEST_ASSERT_EQUAL(22, o.brightness);
+    in.now_ms = 60000U;
+    TEST_ASSERT_EQUAL(JR_MOOD_WHISPER, jr_mood_step(&s, &in).mood);
+    in.now_ms = JR_MOOD_DREAM_MS;
+    TEST_ASSERT_EQUAL(JR_MOOD_DREAM, jr_mood_step(&s, &in).mood);
+
+    /* a pickup lights it, and it settles again in five seconds, not five minutes */
+    in.now_ms = JR_MOOD_DREAM_MS + 1000U;
+    in.moving = true;
+    TEST_ASSERT_EQUAL(JR_MOOD_AWAKE, jr_mood_step(&s, &in).mood);
+    in.moving = false;
+    in.now_ms += JR_MOOD_QUIET_MS;
+    TEST_ASSERT_EQUAL(JR_MOOD_WHISPER, jr_mood_step(&s, &in).mood);
+
+    /* answering a question outranks quiet; face-down still outranks both */
+    in.user_busy = true;
+    TEST_ASSERT_EQUAL(JR_MOOD_AWAKE, jr_mood_step(&s, &in).mood);
+    in.user_busy = false;
+    in.face_down = true;
+    TEST_ASSERT_EQUAL(JR_MOOD_DREAM, jr_mood_step(&s, &in).mood);
+
+    /* not quiet: the same five seconds is still AWAKE */
+    jr_mood_reset(&s, 0);
+    jr_mood_in_t loud = { .now_ms = JR_MOOD_QUIET_MS };
+    TEST_ASSERT_EQUAL(JR_MOOD_AWAKE, jr_mood_step(&s, &loud).mood);
+}
+
 static void test_mood_poke_awake_resets_still(void)
 {
     jr_mood_state_t s;
@@ -160,6 +204,7 @@ void mood_tests_run(void)
     RUN_TEST(test_mood_motion_wakes);
     RUN_TEST(test_mood_busy_holds_awake);
     RUN_TEST(test_mood_face_down_is_dream);
+    RUN_TEST(test_mood_quiet_rests_as_a_watch_in_five_seconds);
     RUN_TEST(test_mood_poke_awake_resets_still);
     RUN_TEST(test_mood_sleep_is_due_ten_minutes_into_dream);
     RUN_TEST(test_mood_saver_ladder_is_four_times_faster);

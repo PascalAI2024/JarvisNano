@@ -2090,12 +2090,23 @@ static void voice_task(void *arg)
             const bool on_cell = have_power && bat.present && !bat.usb_present;
             const bool saver = on_cell && bat.percent <= 100U &&
                                bat.percent <= BATTERY_SAVER_PCT;
+            /* MUTED IS A WATCH. With the microphone off by the owner's hand
+             * there is nothing to listen for, so the cable no longer holds
+             * the glass awake: five seconds still and it is a dim watch at
+             * the rest gear and cadence (owner, 2026-09-02: "when in mute
+             * mode should go in low power mode with watch with low
+             * brightness"). A touch, a pickup or a live phase still lights
+             * it, which is the part the DREAM-at-brightness-8 version got
+             * wrong. Unmuting pokes the ladder awake in the input loop. */
+            const bool quiet = atomic_load(&s_voice_privacy_paused);
             jr_mood_in_t min = {
                 .now_ms = (uint32_t)now,
                 .face_down = s_mood_face_down,
                 .moving = moving,
-                .user_busy = user_busy || (have_power && bat.usb_present),
+                .user_busy = user_busy ||
+                             (have_power && bat.usb_present && !quiet),
                 .saver = saver,
+                .quiet = quiet,
             };
             jr_mood_out_t mout = jr_mood_step(&s_mood, &min);
             const bool realtime_power =
@@ -2109,7 +2120,7 @@ static void voice_task(void *arg)
             {
                 const int forced = atomic_load(&s_cpu_force);
                 cpu_gear_set(forced != 0 ? forced
-                             : (!on_cell || realtime_power ||
+                             : ((!on_cell && !quiet) || realtime_power ||
                                 atomic_load(&s_audio_diag_until_ms) != 0U)
                                    ? CPU_MHZ_LIVE : CPU_MHZ_REST);
             }
@@ -2188,7 +2199,7 @@ static void voice_task(void *arg)
                          (int)mout.voice_armed);
                 if (mout.mood == JR_MOOD_AMBIENT) {
                     jr_display_caption_set("AMBIENT");
-                } else if (mout.mood == JR_MOOD_WHISPER) {
+                } else if (mout.mood == JR_MOOD_WHISPER && !quiet) {
                     jr_display_caption_set("RESTING - TAP TO WAKE");
                 } else if (mout.mood == JR_MOOD_DREAM && !s_flip_muted) {
                     jr_display_caption_set("ASLEEP - TAP TO WAKE");

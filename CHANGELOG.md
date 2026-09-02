@@ -24,6 +24,18 @@ are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
 - `main.c` is four files over one header: HTTP routes, power, device tools,
   and the wiring. 140 functions before and after, image size unchanged.
 
+### Muted is a watch, and the weather comes back (2026-09-02)
+
+- Mute the microphone and the glass becomes a dim watch five seconds later:
+  brightness 22, six frames a second, the rest gear, even on the cable. A
+  touch, a pickup or a question lights it, unmuting wakes it, and a muted
+  device that is mid-answer stays readable.
+- A weather fetch that fails is retried from any screen every two minutes
+  until it succeeds, instead of leaving `NO WEATHER` on the glass for ten
+  minutes. The morning's outage was upstream: Open-Meteo answered the
+  gateway with HTTP 200 and the text `Unexpected error while streaming
+  data: allEndpointsUnavailable`.
+
 ### Hands elsewhere (2026-09-02)
 
 - Proven on the device the same evening: a spoken job reached the board in

@@ -11,6 +11,19 @@
  */
 #include "app.h"
 
+/* THE FPS FLOOR FOLLOWS THE CADENCE. Health and probation both ask for a
+ * live frame rate, but since 2026-09-02 the ladder deliberately renders at
+ * 6 or 3 fps when resting — and a device boots muted, which is a watch in
+ * five seconds. A floor that ignored the requested cadence would fail an
+ * image for doing exactly what it was told; below the floor the request
+ * itself is the promise, and the flush-progress check still catches a
+ * renderer that has actually stopped. */
+static unsigned display_fps_floor(unsigned live_floor)
+{
+    const unsigned requested = jr_display_render_fps();
+    return requested < live_floor ? 2U : live_floor;
+}
+
 static const char *TAG = "jarvis_v5";
 
 extern const unsigned char diagnostics_html_start[]
@@ -471,7 +484,8 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         verdict = "uplink-dropping";
     } else if (largest < 8192U || free_psram < 2U * 1024U * 1024U) {
         verdict = "memory-critical";
-    } else if (display.flush_errors > 0U || display.actual_fps < 10U) {
+    } else if (display.flush_errors > 0U ||
+               display.actual_fps < display_fps_floor(10U)) {
         /* 12 straddled the shell screens' real cadence (measured 12-14 fps
          * with JARVIS at 19), so a healthy ring screen read as a fault. */
         verdict = "display-fault";
@@ -3150,7 +3164,7 @@ bool ota_confirm_running_image_if_healthy(void)
         flush_stable_since_ms = now;
         return false;
     }
-    if (display.actual_fps < 12U ||
+    if (display.actual_fps < display_fps_floor(12U) ||
         last_flush_progress_ms == 0U ||
         (uint32_t)(now - last_flush_progress_ms) > 1000U) {
         flush_stable_since_ms = now;

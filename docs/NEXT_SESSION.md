@@ -80,6 +80,19 @@ is the classified edge-origin swipe.
   host, no keys beyond the one already in NVS. `tools/board-worker/worker.py`
   is a reference for jobs the gateway cannot do. An SSH key pasted into chat
   on 2026-09-02 should be rotated — it was never installed.
+- **Muted is a watch.** Privacy mute feeds the ladder a `quiet` input:
+  five seconds still and the glass is the WHISPER watch (brightness 22,
+  6 fps, 160 MHz) with USB no longer holding it awake; touch, pickup, a live
+  phase and face-down keep their meanings. Verified on the device: see the
+  evidence note in `docs/reference/power-modes.md`.
+- **Weather retries.** A failed `weather_glance` is retried every two
+  minutes from any screen (never in DREAM, never off Wi-Fi) until it
+  succeeds; a good fetch still refreshes only on the WEATHER screen after
+  ten minutes. The failure that prompted it was Open-Meteo answering the
+  gateway with a 200 and a text body (`allEndpointsUnavailable`) while
+  answering a laptop normally; the gateway's `weather` service surfaces that
+  as a JSON parse error and `execute_tool weather` burned the 30 s budget on
+  two 15 s timeouts. Nothing on the device could have fixed that morning.
 - **Three quiet faces** (rest, muted, linking) from the same generator, 0.93 MB;
   the art partition ships separately: `jarvisctl art` → `POST /api/ota/assets`
   (~150 s, refused in app probation). A firmware that names a clip the
@@ -96,7 +109,12 @@ is the classified edge-origin swipe.
   The criteria (`ota_confirm_running_image_if_healthy`, `main/http_routes.c`):
   voice heartbeat < 2 s, Wi-Fi up, tools worker ready, HTTP up, WakeNet up,
   display ready with no new flush errors, ≥ 12 fps and progress within 1 s,
-  all stable for 10 s. If it happens again, sample `/api/cockpit` and
+  all stable for 10 s. **Since the muted watch, the fps floor follows the
+  requested cadence** (`display_fps_floor`, `main/http_routes.c`): a device
+  boots muted and is a 6 fps watch in five seconds, and the first image with
+  the watch would have rolled back for it — the floor is 2 fps whenever the
+  ladder asked for less than 12, with flush progress still required. If it
+  happens again, sample `/api/cockpit` and
   `/api/device/health` every 10 s from boot to 130 s and read which column
   dips; the sampler is a 15-line script and the columns are `network`,
   `tools.worker_ready`, `voice.phase`, `display.flush_errors`,

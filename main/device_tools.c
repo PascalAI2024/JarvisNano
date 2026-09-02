@@ -51,9 +51,11 @@ const char *device_tool_last_name(void)
 #define LOCAL_WEATHER_CALL_ID   0x4C574558u          /* "LWEX" */
 #define LOCAL_WEATHER_CALL_TEXT "local:weather"
 #define WEATHER_REFRESH_MS      600000u
+#define WEATHER_RETRY_MS        120000u   /* after a failure, from any screen */
 #define WEATHER_FIRST_FETCH_MS  20000u
 static uint32_t s_weather_last_fetch_ms;   /* app task only; 0 = never */
 static bool     s_weather_inflight;        /* app task only */
+static bool     s_weather_failed;          /* app task only; the last fetch brought nothing */
 jr_display_weather_t s_weather;     /* last good data; app task only */
 
 static jr_display_sky_t weather_sky_from(const char *cond)
@@ -81,6 +83,7 @@ static void weather_apply_result(const jr_tool_result_t *result, uint32_t now)
     s_weather_inflight = false;
     s_weather_last_fetch_ms = now;
     if (result->status != JR_TOOL_STATUS_OK) {
+        s_weather_failed = true;
         ESP_LOGW(TAG, "weather: fetch failed (%s); glass keeps %s data",
                  jr_tools_status_name(result->status),
                  s_weather.valid ? "the previous" : "no");
@@ -93,10 +96,12 @@ static void weather_apply_result(const jr_tool_result_t *result, uint32_t now)
     }
     const cJSON *t = cJSON_GetObjectItemCaseSensitive(r, "t");
     if (!cJSON_IsNumber(t)) {
+        s_weather_failed = true;
         ESP_LOGW(TAG, "weather: no temperature in result; keeping old data");
         cJSON_Delete(root);
         return;
     }
+    s_weather_failed = false;
     jr_display_weather_t w = {0};
     const cJSON *f = cJSON_GetObjectItemCaseSensitive(r, "f");
     const cJSON *h = cJSON_GetObjectItemCaseSensitive(r, "h");
@@ -165,9 +170,25 @@ void weather_maybe_fetch(uint32_t now)
     }
     const bool first = s_weather_last_fetch_ms == 0U;
     const bool on_screen = jr_display_nav_space() == JR_DISPLAY_SPACE_WEATHER;
-    if (first ? now < WEATHER_FIRST_FETCH_MS
-              : !(on_screen && now - s_weather_last_fetch_ms >= WEATHER_REFRESH_MS)) {
+    const uint32_t since = now - s_weather_last_fetch_ms;
+    /* A good glass refreshes only when looked at. A failed fetch (an upstream
+     * outage took the first one on 2026-09-02 and left NO WEATHER for ten
+     * minutes) is retried from any screen, at the board poll's cadence and
+     * behind its gates: never in DREAM, never without the network. */
+    const bool due = first          ? now >= WEATHER_FIRST_FETCH_MS
+                     : s_weather_failed ? since >= WEATHER_RETRY_MS
+                                        : on_screen && since >= WEATHER_REFRESH_MS;
+    if (!due) {
         return;
+    }
+    if (!first && s_weather_failed) {
+        if (atomic_load(&s_mood_id) == (uint8_t)JR_MOOD_DREAM) {
+            return;
+        }
+        jr_net_status_t net = {0};
+        if (jr_net_get_status(&net) != ESP_OK || !net.sta_connected) {
+            return;
+        }
     }
     jr_tool_job_t job = {
         .call_id = LOCAL_WEATHER_CALL_ID,
@@ -179,7 +200,8 @@ void weather_maybe_fetch(uint32_t now)
     if (jr_tools_submit(&job) == ESP_OK) {
         s_weather_inflight = true;
         s_weather_last_fetch_ms = now;    /* also rate-limits a failing fetch */
-        ESP_LOGI(TAG, "weather: fetch submitted (%s)", first ? "first" : "screen entered");
+        ESP_LOGI(TAG, "weather: fetch submitted (%s)",
+                 first ? "first" : s_weather_failed ? "retry" : "screen entered");
     }
 }
 
