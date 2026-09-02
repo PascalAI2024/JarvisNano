@@ -8,6 +8,33 @@
 
 ## Findings & gotchas
 
+**[2026-09-02] Baked watch dials: the encoding byte is per block, RAW beats RLE on a sunburst, and SPIFFS holds ~5.5 MB of the 6 MB partition**
+
+`firmware/mascot/gen_watch_dials.py all` cuts the four owner-chosen dials
+out of the concept sheets in `docs/evidence/20260902-dial-concepts-*.png`
+(2×2 grids, one quadrant each), fits each disc to 466 px, fills the
+photographed centre hole along the radius, blanks the diver's printed date,
+quantises to 255 colours without dithering and emits one-frame EAFs in the
+byte-verified container, choosing RAW or RLE **per 32-row block** — the
+decoder reads `encoding_type = block_data[0]` per block
+(`gfx_eaf_dec.c:372`), so a file may mix them. Measurements: a sunburst's
+radial grain makes whole-frame RLE LARGER than raw (diver 263–285 KB RLE vs
+217 KB raw; dress 284 KB RLE); a matte or near-black dial collapses under RLE
+once a black floor is applied (pilot 296 KB → 82 KB, future 256 KB → 141 KB
+at floor 28); per-block mixing then takes the black corners off the raw
+dials too (diver 204 KB, dress 206 KB). Budget: with
+`spiffsgen.py 6160384 … --page-size 256 --block-size 4096 --obj-name-len 32
+--meta-len 4 --use-magic --use-magic-len` (the sdkconfig values), the
+6,016 KB partition holds about 5.5 MB of files; the eight face clips take
+4,728 KB, four raw dials (5,592 KB total) overflow, the shipped mix
+(5,356 KB) builds and leaves 128–144 KB (padding-file probe in 16 KB
+steps). Overhead arithmetic: 1,504 blocks of 16 pages, 2 lookup pages per
+block, ~5 header bytes per data page, index pages per file, 2 blocks kept
+free ≈ 86–88 % usable. Run spiffsgen on a staging directory before trusting
+arithmetic — and write its output OUTSIDE the staging directory, or the
+image counts itself on the next run. The `.eaf` byte sizes: diver 204,059,
+dress 205,999, pilot 85,369, future 143,191.
+
 **[2026-05-21] Missing EAF file → silent `"lack":true` blank face — build does NOT fail**
 
 If an `.eaf` file named in `emote.json` is absent from the emoji collection directory (`assets_local/emoji_large/`), `build.py` does NOT abort. It logs `Warning: EAF file not found` and marks the entry `"lack": true`. The face renders blank/fallback at runtime with no error message on device.

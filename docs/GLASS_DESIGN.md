@@ -370,6 +370,109 @@ Proven on the 1.75C: right walks JARVIS → DIVER → DIGITAL → MINIMAL →
 JARVIS, left walks back, the choice survives a reboot, the image confirmed
 valid under it. Evidence: `docs/evidence/20260902-watch-*.png`.
 
+### The watches, second cut — luxury (2026-09-02, evening)
+
+The owner, on the first cut: *"those watches very low quality, you can do
+much better"*, *"this is a luxury device"*, *"have Codex and Grok use image
+gen for some ideas, four per image, for this form."* Dot-stamped hands on a
+black disc are a sketch. A watch is a **dial** and **hands**, and on this
+hardware those are two different materials:
+
+- **The dial is baked art.** One EAF frame per style (`dial_<style>.eaf`,
+  466×466, 256-colour palette, **RAW encoding — a sunburst's radial grain
+  makes RLE larger than raw, measured 263 KB vs 217 KB**; 217 KB each; the
+  partition has 1288 KB free before filesystem overhead, so **four** fit
+  and five do not) cut from the concept sheets: the chosen quadrant is
+  cropped to its disc, fitted to 466 px, masked to the circle on black,
+  quantised to 256 colours without dithering (dithering buys nothing at
+  this size and costs runs), the printed date digits blanked to an empty
+  window and the centre hole filled from its neighbours, so sunburst,
+  applied indices with bevel light, lume, printed tracks and numerals are
+  photographic — nothing the strip compositor could draw live. DIVER,
+  DRESS, PILOT and FUTURE are baked; JARVIS and MINIMAL are procedural
+  (a flat warm-white disc with a hairline track and twelve dots loses
+  nothing to a photograph). Every dial stays resident in PSRAM once
+  shown: 868 KB for the four. It shows through the face pipeline as
+  `JR_FACE_DIAL_<STYLE>`; a firmware whose partition lacks a dial falls back
+  to the first cut's procedural black dial for that style.
+- **The hands are live geometry, drawn like hands.** Anti-aliased scanline
+  polygons (tapered, per-row edge solve with 1 px coverage), a two-tone
+  bevel split along the hand's axis (light flank / dark flank), a 1 px dark
+  outline, a soft shadow offset (+2, +3) at ~40 %, lume inserts where the
+  style has them, a hub with a highlight. The seconds hand sweeps from
+  milliseconds at the render cadence instead of jumping once a second.
+  Hands reach r ≤ 214 (the same disc the shell clips to); the art owns
+  everything beyond.
+- **Complications read the device.** Sub-dials are baked rings; their
+  needles are live and show something true: seconds, battery, the day's
+  temperature from the WEATHER fetch. No invented data.
+
+| Style | Dial (baked) | Hands (live) | Complications |
+|---|---|---|---|
+| **JARVIS** | none — the black disc, unchanged and checksum-pinned | today's cyan/white/gold | seconds |
+| **DIVER** | black sunburst, cream lume triangle at 12, bars at 3/6/9, discs elsewhere, printed minute track, "cyclops" date box at 3 | Mercedes hour, sword minute, lollipop seconds, cream lume | date (from the clock) |
+| **DRESS** | champagne sunburst, gold applied batons, fine printed minute track, no text | dauphine (faceted two-tone gold), no seconds | none |
+| **PILOT** | matte black, white Arabic numerals, printed chapter ring, three sub-dial rings at 3 / 6 / 9 | sword hands with lume, white | 6: seconds · 9: battery % · 3: today's temperature |
+| **MINIMAL** | procedural: warm white disc to r 214, hairline minute track, tiny black dots | thin blued (steel-blue two-tone) hour and minute, no seconds | none |
+| **FUTURE** | the owner's ask, *"a nice futuristic option with date, weather etc."*: near-black with concentric cyan tech rings, a thin outer 60-tick scale, faint circuit hairlines, and four baked data cells — a wide cell above centre and below centre, a small cell each at 9 and 3 — with cyan hairline frames; no numerals | slim cyan hour and minute with a white core, a hairline gold seconds; a glowing hub | above: date, `TUE 02 SEP`; below: the weather glance, `77° OVERCAST`, hi/lo beneath, dimmed when stale or absent (never invented); 9: battery percent as a short arc + number; 3: link — Wi-Fi bars + `LIVE`/`MUTED` |
+
+Style order and the swipe are the first cut's, with DIGITAL retired: a
+seven-segment face on a luxury piece was the wrong reference. Six styles
+(JARVIS · DIVER · DRESS · PILOT · MINIMAL · FUTURE) need three bits in the
+nav word; the shell suite pins the new layout. FUTURE's cells are the one
+place the watch carries words, and every word is a number the device
+already holds (the clock, `jr_display_weather_t`, the battery and links
+words); the glyphs are the shell's own, so the type matches the ring.
+
+**As shipped — the art (2026-09-02, `firmware/mascot/gen_watch_dials.py`).**
+Sources, all Codex sheets, 1024 px copies in `docs/evidence/20260902-dial-
+concepts-codex-{diver,dress,pilot,future}.png`: DIVER top-left of the diver
+sheet, DRESS top-left of the dress sheet, PILOT top-left of the pilot sheet
+(three empty recessed sub-dial rings, no printed scales), FUTURE top-right
+of the future sheet (cyan rings, gold accents, an arc-reactor centre). The
+budget turned out tighter than the headroom figure above: SPIFFS holds
+about 5.5 MB of files in the 6,016 KB partition (two of every sixteen
+pages are lookup, plus index pages and two free blocks), the eight face
+clips take 4,728 KB, and four raw dials (5,592 KB) overflow it. The decoder
+reads the encoding byte per 32-row block, so every block takes the smaller
+of RAW and RLE: the black corners and dark fields run, sunburst bands stay
+raw. PILOT and FUTURE also take a black floor of 28 (every pixel darker
+than that becomes the black the AMOLED shows anyway). Sizes: DIVER
+204,059 B (11 raw / 4 RLE blocks), DRESS 205,999 B (12 / 3), PILOT
+85,369 B (0 / 15), FUTURE 143,191 B (2 / 13) — 624 KB for the four. All
+four are staged and on the glass; `./scripts/build-v5.sh` passes with
+5,356 KB staged and spiffsgen measures 128–144 KB of partition left.
+**There is no room for a fifth clip**; the next one needs the `dials`
+partition in the 13 MB reserve (wave N12) or shorter face animations.
+Geometry measured in the baked 466-px frames, origin
+top-left, centre (233, 233), inclusive pixel coordinates — the firmware
+places its live elements here:
+
+| Style | Element | Where |
+|---|---|---|
+| DIVER | date window, paper blanked, frame kept | x 376–416, y 231–256 (41×26); the day is drawn in dark glyphs centred at (396, 243) |
+| DIVER | centre hole filled | r ≤ 6 (hub must cover r ≤ 12) |
+| PILOT | sub-dial 9 (battery) | centre (117, 233), r 59 |
+| PILOT | sub-dial 3 (temperature) | centre (349, 233), r 59 |
+| PILOT | sub-dial 6 (seconds) | centre (233, 337), r 60 |
+| FUTURE | cell above centre (date) | x 136–328, y 91–132 (193×42) |
+| FUTURE | cell below centre (weather) | x 136–328, y 337–379 (193×43) |
+| FUTURE | cell at 9 (battery) | x 36–107, y 210–251 (72×42) |
+| FUTURE | cell at 3 (link) | x 357–429, y 210–251 (73×42) |
+| FUTURE | arc-reactor centre | the art's own rings fill r ≤ 70; the hub sits on them |
+
+The cells are the frames' outer edges; text sits inside with 6 px of
+inset. DRESS carries nothing live but the hands.
+
+**Acceptance.** Each style photographed on the glass (framebuffer plus the
+panel); no dot combing on any hand at any angle (a probe renders 360
+angles and asserts every hand row is contiguous); a dial clip missing from
+the partition falls back to the first cut's black dial and logs once; AWAKE
+cadence with a dial under live hands ≥ 17 fps on JARVIS-equivalent load;
+free PSRAM ≥ 1 MB after all four dials are resident; host suites green with
+positive-count tests per style. The concept sheets that chose the art live
+in `docs/evidence/20260902-dial-concepts-*.png`.
+
 ### The critical call: delete the destinations, keep the renderer
 
 This is the sharp decision in the document, and "delete the four spaces" and

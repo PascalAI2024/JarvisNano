@@ -38,6 +38,20 @@ to reject.
 | `20260719-demo-reel.png` | Attract reel (`POST /api/demo`). |
 | `20260719-tap-ripple.png` | Touch ripple (TRANS-05). |
 | `20260902-glass-done.png` | The first announced delegation: `DONE: WRITE A TWO-LINE…` caption on the muted glass at the poll after a desk completed the item on the board (caption wrap fixed the same evening). |
+| `20260902-dial-concepts-codex-diver.png` | Codex image-gen concept sheet (2×2, dial only, no hands) for the diver family; the owner chose the top-left (black sunburst, gold-rimmed lume dots, gold-framed date window). 1024 px copy of the 1244 px original; the generator reads this file. |
+| `20260902-dial-concepts-codex-dress.png` | Codex concept sheet for the dress family; chosen: top-left (brushed champagne, applied gold batons). |
+| `20260902-dial-concepts-codex-pilot.png` | Codex concept sheet for the pilot family; chosen: top-left (matte black, white Arabic numerals, three empty recessed sub-dial rings — no printed scales, so live needles read cleanly). |
+| `20260902-dial-concepts-codex-future.png` | Codex concept sheet for the futuristic HUD family; chosen: top-right (cyan rings, gold accents, arc-reactor centre, four empty data cells). |
+| `20260902-dial-diver.png` | The baked DIVER dial exactly as the palette EAF stores it (466 px, 255 colours, RAW/RLE per block): centre hole filled along the radius, the date window's paper blanked at x 376–416 / y 231–256 for the live day. A preview of the clip bytes, not a panel photograph. |
+| `20260902-dial-dress.png` | The baked DRESS dial (255 colours, RAW/RLE per block). |
+| `20260902-dial-pilot.png` | The baked PILOT dial (RLE under a black floor of 28): sub-dial rings measured at (117,233) r59, (349,233) r59, (233,337) r60. |
+| `20260902-dial-future.png` | The baked FUTURE dial (RLE, floor 28): cells measured at x 136–328 / y 91–132 (top), x 136–328 / y 337–379 (bottom), x 36–107 / y 210–251 (9), x 357–429 / y 210–251 (3). |
+| `20260902-watch2-diver.png` | The baked DIVER dial on the glass after `jarvisctl art` (2026-09-02 evening): the Codex sunburst with gold-rimmed lume markers under the anti-aliased Mercedes/sword/lollipop hands, the live day `02` in the blanked window at 3, caption `WATCH - DIVER`. Captured muted at WHISPER (brightness 22), which is why the art reads darker than `20260902-dial-diver.png`. |
+| `20260902-watch2-dress.png` | The baked DRESS dial on the glass: brushed champagne, applied batons, gold dauphine hands, no seconds. Muted/WHISPER capture. |
+| `20260902-watch2-pilot.png` | The baked PILOT dial on the glass: matte black, white numerals, three recessed sub-dials with live needles (6 seconds, 9 battery, 3 temperature). Muted/WHISPER capture. |
+| `20260902-watch2-future.png` | The baked FUTURE dial on the glass with the four live cells: `WED 02 SEP`, `77° OVERCAST / 87 / 76`, `100%` with the battery arc, Wi-Fi bars + `MUTED`; slim cyan hands, hairline gold seconds, the art's arc-reactor centre under the hub. |
+| `20260902-watch2-jarvis.png` | JARVIS style on the same image and art — the black disc and the original hands, unchanged. |
+| `20260902-watch2-minimal.png` | MINIMAL style — the procedural warm-white disc, no clip. |
 | `20260902-watch-jarvis.png` | The WATCH screen as arrived at from JARVIS on the 2026-09-02 watch-styles image, style JARVIS (cyan hour, white minute, gold seconds; pixel-identical to the shipped face, checksum-pinned in `test_watch_jarvis_is_pixel_identical`). The violet ring is OTA probation, not a companion. |
 | `20260902-watch-diver.png` | Style DIVER after one `POST /api/debug/input?kind=swipe&dir=right` on WATCH: cream triangle at 12, bars at 3/6/9, discs elsewhere, broad hands with the lume disc, the lollipop seconds; caption `WATCH - DIVER`. Retaken after the triangle became a per-row solve (the first cut combed). |
 | `20260902-watch-digital.png` | Style DIGITAL, one more swipe right: seven-segment 24-hour `02:08` in cyan and the seconds as gold dots filling clockwise from 12 at r=182; caption `WATCH - DIGITAL`. |

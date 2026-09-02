@@ -58,5 +58,15 @@ configure_file(
 configure_file(
     "${CMAKE_CURRENT_LIST_DIR}/../../firmware/mascot/reactive/rwave_link.eaf"
     "${JR_DISPLAY_ASSET_STAGE}/rwave_link.eaf" COPYONLY)
+# 2026-09-02 (evening): the four baked watch dials, one frame each, RAW or
+# RLE chosen per block (diver 204 KB, dress 206 KB, pilot 83 KB, future
+# 140 KB). gen_watch_dials.py bakes them from the concept sheets in
+# docs/evidence/. 624 KB together; spiffsgen measures 128–144 KB of partition
+# left after them. The next clip does not fit here (see wave N12, dials).
+foreach(dial diver dress pilot future)
+    configure_file(
+        "${CMAKE_CURRENT_LIST_DIR}/../../firmware/mascot/reactive/dial_${dial}.eaf"
+        "${JR_DISPLAY_ASSET_STAGE}/dial_${dial}.eaf" COPYONLY)
+endforeach()
 
 spiffs_create_partition_image(emote_assets "${JR_DISPLAY_ASSET_STAGE}" FLASH_IN_PROJECT)
