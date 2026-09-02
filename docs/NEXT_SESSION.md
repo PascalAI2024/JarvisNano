@@ -68,8 +68,8 @@ is the classified edge-origin swipe.
 
 ## What changed on 2026-09-01
 
-- **Voice is smooth.** The speaker now runs behind the network: 600 ms pre-roll
-  before a reply's first word, a 1000 ms lead rebuilt after any hole, and a
+- **Voice is smooth.** The speaker now runs behind the network: 600 ms pre-roll (was 1000 for an hour on 2026-09-01; the owner chose latency)
+  before a reply's first word, a 1500 ms lead rebuilt after any hole, and a
   96-deep WebSocket queue. Cause, measured: Gemini paces native audio near real
   time with 0.8–1.34 s stalls mid-sentence. Counters live at
   `/api/device/health` (`playback`, `rx`); reset with

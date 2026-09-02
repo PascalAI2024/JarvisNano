@@ -379,7 +379,7 @@ a playback hole sat exactly inside a 1.75 s silence between two consecutive
 transcript words — so the stalls are the server's generation, not the radio
 or the device. Consequence for any client: the speaker must run **behind**
 the network. JarvisRobot v5 pre-rolls 600 ms before a reply's first word and
-rebuilds a 1000 ms lead after any hole (`jr_audio.c`, `PB_PREROLL_MS_DEFAULT`
+rebuilds a 1500 ms lead after any hole; the pre-roll before a first word is 600 ms (`jr_audio.c`, `PB_PREROLL_MS_DEFAULT`
 / `PB_REFILL_MS_DEFAULT`, tunable via `/api/debug/gain?preroll=&refill=`);
 below that, one hole of 81–407 ms per reply survived. A WebSocket receive
 queue of 24 frames overflowed on the post-stall burst and dropped speech

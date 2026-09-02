@@ -209,7 +209,7 @@ static bool                   s_pb_in_gap;              /* feeder task only */
  * pre-roll now matches the stalls actually seen, and the refill exceeds
  * them, for +0.4 s before a first word that already waits 2-4 s on
  * thinking. Tune live: /api/debug/gain?preroll=&refill=. */
-#define PB_PREROLL_MS_DEFAULT    1000u  /* lead before a reply's first word */
+#define PB_PREROLL_MS_DEFAULT     600u  /* lead before a reply's first word */
 #define PB_REFILL_MS_DEFAULT     1500u  /* lead rebuilt after a hole         */
 #define PB_PRIME_MAX_WAIT_MS     2000u  /* never hold longer than this       */
 static _Atomic uint32_t       s_pb_preroll_ms = PB_PREROLL_MS_DEFAULT;

@@ -106,7 +106,7 @@ sequenceDiagram
     T-->>C: typed server events (96-deep queue)
     C->>D: Listening / Thinking / Speaking
     T-->>P: 24 kHz PCM into a 512 KiB ring
-    P->>P: pre-roll 1000 ms, refill 1500 ms after a hole
+    P->>P: pre-roll 600 ms, refill 1500 ms after a hole
     P->>U: ES8311 speaker output
 ```
 
@@ -117,7 +117,7 @@ unanswered-utterance watchdog below.
 **Why the speaker runs a second behind the network.** Measured from the
 transcript timing, Gemini paces native audio near real time and stalls
 0.8–2.2 s mid-sentence. Draining as fast as it arrives produced holes; the
-feeder now waits for a 1000 ms lead before a reply's first word and rebuilds a
+feeder now waits for a 600 ms lead before a reply's first word and rebuilds a
 1500 ms lead after any underrun, capped so a reply boundary never waits more
 than 2.5 s. Counters: `/api/device/health` → `playback`, `rx`.
 
