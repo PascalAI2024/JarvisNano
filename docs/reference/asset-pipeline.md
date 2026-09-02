@@ -50,6 +50,32 @@ States: idle breathing line / listen = mic RMS / think = scan pulse / speak = ou
 
 Source: memory file `project_mascot_pivot_minimalist.md`.
 
+**[2026-09-02] Three quiet faces baked procedurally; the v5 asset budget**
+
+`rwave_rest.eaf` (24 frames, 8 fps, 223 KB), `rwave_muted.eaf` (16, 8 fps,
+236 KB) and `rwave_link.eaf` (24, 12 fps, 474 KB) come from the same field
+renderer as the four live faces — `firmware/mascot/gen_reactive_face.py`
+(`render_rest_frame`, `render_muted_frame`, `render_link_frame`; RLE, 466×466,
+96-colour palette). No image model was used: everything on these faces is a
+line or a glow, and the procedural route is deterministic and byte-reproducible
+(`python3 gen_reactive_face.py one rwave_rest`). Dark coils RLE to roughly a
+third of an idle frame, which is why three clips cost 0.93 MB against
+3.9 MB for the original five.
+
+Budget on the 1.75C (`partitions_32MB.csv`): `emote_assets` is 0x5E0000 =
+6,160,384 B. Used after this change: 4,829,828 B of clip data
+(`build/emote_assets.bin` is always the full partition size; SPIFFS keeps
+~1.3 MB of headroom). Every clip stays resident in PSRAM after first load
+(`jr_display.c` clip cache), so the same 0.93 MB is also the PSRAM cost.
+
+The v5 staging list is `components/jr_display/CMakeLists.txt` (`configure_file`
+per clip into `build/jr_display_assets`, then `spiffs_create_partition_image`);
+`face_asset()` / `face_fps()` / `hud_face_of()` in `jr_display.c` are the
+runtime table, and `test_every_face_has_a_clip_and_a_hud_face`
+(`components/jr_display/tests/test_shell.c`) pins basename, fps and stand-in
+per `jr_face_t` so a face added without a clip fails on the host instead of
+rendering blank on glass.
+
 ---
 
 ## Primary sources

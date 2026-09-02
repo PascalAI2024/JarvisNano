@@ -6,6 +6,15 @@ are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
 
 ## Unreleased
 
+### Three quiet faces (2026-09-02)
+
+- The face now tells rest, privacy and connecting apart. RESTING is the iris
+  asleep (a slit that breathes once every three seconds), MUTED is the same
+  closed iris in gold with the bezel lit, LINKING is a dot orbiting the bezel
+  while the reactor idles. All three are baked from the same generator as the
+  live faces, slow on purpose (8–12 fps), and cost 0.93 MB of the emote
+  partition.
+
 ### The glass (2026-09-01)
 
 - Search works by voice. `execute_tool` runs on the device's legacy route

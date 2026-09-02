@@ -48,5 +48,15 @@ configure_file(
 configure_file(
     "${CMAKE_CURRENT_LIST_DIR}/../../firmware/mascot/eaf/offline.eaf"
     "${JR_DISPLAY_ASSET_STAGE}/error.eaf" COPYONLY)
+# 2026-09-02: the quiet faces (rest / muted / link), 0.93 MB together.
+configure_file(
+    "${CMAKE_CURRENT_LIST_DIR}/../../firmware/mascot/reactive/rwave_rest.eaf"
+    "${JR_DISPLAY_ASSET_STAGE}/rwave_rest.eaf" COPYONLY)
+configure_file(
+    "${CMAKE_CURRENT_LIST_DIR}/../../firmware/mascot/reactive/rwave_muted.eaf"
+    "${JR_DISPLAY_ASSET_STAGE}/rwave_muted.eaf" COPYONLY)
+configure_file(
+    "${CMAKE_CURRENT_LIST_DIR}/../../firmware/mascot/reactive/rwave_link.eaf"
+    "${JR_DISPLAY_ASSET_STAGE}/rwave_link.eaf" COPYONLY)
 
 spiffs_create_partition_image(emote_assets "${JR_DISPLAY_ASSET_STAGE}" FLASH_IN_PROJECT)

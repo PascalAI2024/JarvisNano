@@ -114,7 +114,7 @@ typedef struct {
      * (~3.9 MB total of ~7.4 MB free; v4 kept clips resident too). Reloading
      * ~1 MB from SPIFFS per face change dropped 1-2 frames (whole-payload
      * checksum under the render lock) and churned the PSRAM heap for hours. */
-    jr_display_clip_t clips[JR_FACE_ERROR + 1];
+    jr_display_clip_t clips[JR_FACE_COUNT];
     const jr_display_clip_t *active;    /* cache entry bound to the gfx anim */
     jr_face_t loaded_face;
     volatile bool blanked;
@@ -205,7 +205,7 @@ static void display_blank_cb(void *ctx)
 static void display_present_cb(void *ctx, jr_face_t face, uint8_t amplitude)
 {
     (void)ctx;
-    if (face < JR_FACE_IDLE || face > JR_FACE_ERROR) {
+    if (face < JR_FACE_IDLE || face >= JR_FACE_COUNT) {
         face = JR_FACE_ERROR;
     }
     display_publish(((uint32_t)face << JR_DISPLAY_CMD_FACE_SHIFT) | amplitude);
@@ -219,6 +219,9 @@ static const char *face_asset(jr_face_t face)
     case JR_FACE_THINKING:  return JR_DISPLAY_MOUNT_POINT "/rwave_think.eaf";
     case JR_FACE_SPEAKING:  return JR_DISPLAY_MOUNT_POINT "/rwave_speak.eaf";
     case JR_FACE_ERROR:     return JR_DISPLAY_MOUNT_POINT "/error.eaf";
+    case JR_FACE_RESTING:   return JR_DISPLAY_MOUNT_POINT "/rwave_rest.eaf";
+    case JR_FACE_MUTED:     return JR_DISPLAY_MOUNT_POINT "/rwave_muted.eaf";
+    case JR_FACE_LINKING:   return JR_DISPLAY_MOUNT_POINT "/rwave_link.eaf";
     default:                return NULL;
     }
 }
@@ -226,8 +229,14 @@ static const char *face_asset(jr_face_t face)
 static uint32_t face_fps(jr_face_t face)
 {
     switch (face) {
-    case JR_FACE_ERROR: return 8;
-    default:            return 24;   /* engine + panel ceiling (P2.7) */
+    case JR_FACE_ERROR:   return 8;
+    /* The quiet faces are baked slow on purpose: one breath per 3 s loop at
+     * rest, a 2 s orbit while linking. Fewer decoded frames per second is
+     * also the cheapest render-cadence win the rest ladder gets for free. */
+    case JR_FACE_RESTING: return 8;
+    case JR_FACE_MUTED:   return 8;
+    case JR_FACE_LINKING: return 12;
+    default:              return 24;   /* engine + panel ceiling (P2.7) */
     }
 }
 
@@ -2326,6 +2335,9 @@ static uint8_t hud_face_of(jr_face_t f)
     case JR_FACE_THINKING:  return HUD_FACE_THINK;
     case JR_FACE_SPEAKING:  return HUD_FACE_SPEAK;
     case JR_FACE_ERROR:     return HUD_FACE_ERROR;
+    case JR_FACE_RESTING:   return HUD_FACE_IDLE;
+    case JR_FACE_MUTED:     return HUD_FACE_IDLE;
+    case JR_FACE_LINKING:   return HUD_FACE_THINK;
     default:                return HUD_FACE_IDLE;
     }
 }
@@ -4170,7 +4182,7 @@ static esp_err_t apply_face(jr_display_ctx_t *ctx, jr_face_t face,
         return program_segment(ctx, face, bucket, false);
     }
 
-    if (face > JR_FACE_ERROR) {         /* defensive: cb clamps already */
+    if (face >= JR_FACE_COUNT) {        /* defensive: cb clamps already */
         face = JR_FACE_ERROR;
     }
     const uint32_t requested_before =
