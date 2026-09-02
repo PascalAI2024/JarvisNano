@@ -119,8 +119,12 @@ is the classified edge-origin swipe.
   ring). The first unanswered utterance gets a nudge, the second reconnects.
   Pre-roll is adaptive 600–1500 ms. CPU gears 240/160 by mood
   (`cpu_gear_set`, `CONFIG_PM_ENABLE`, no DFS), a four-times-faster ladder
-  below 20 % on the cell, run-time counters on `/api/diag/tasks`. Not yet
-  seen in the wild: the lift wake and the 160 gear engaging on their own.
+  below 20 % on the cell, run-time counters on `/api/diag/tasks`. PWR hold
+  now powers off completely through the PMIC (`jr_power_off`): the off half
+  is proven from the desk, the on half (a one-second hold of PWR, or a USB
+  replug as the guaranteed way back) had not been seen when this was written.
+  Also not yet seen in the wild: the lift wake and the 160 gear engaging on
+  their own.
 
 ## Current blockers
 
