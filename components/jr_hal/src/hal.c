@@ -61,6 +61,9 @@ static const char *face_name(jr_face_t f)
     case JR_FACE_THINKING:  return "THINKING";
     case JR_FACE_SPEAKING:  return "SPEAKING";
     case JR_FACE_ERROR:     return "ERROR";
+    case JR_FACE_RESTING:   return "RESTING";
+    case JR_FACE_MUTED:     return "MUTED";
+    case JR_FACE_LINKING:   return "LINKING";
     default:                return "?";
     }
 }

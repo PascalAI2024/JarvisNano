@@ -26,6 +26,12 @@ typedef enum {
     JR_FACE_THINKING,
     JR_FACE_SPEAKING,
     JR_FACE_ERROR,
+    /* 2026-09-02: states that used to borrow a face. Appended after ERROR so
+     * the numbers the cockpit and the demo reel already report do not move. */
+    JR_FACE_RESTING,    /* WHISPER/DREAM: the iris asleep, breathing slowly */
+    JR_FACE_MUTED,      /* privacy: the closed iris held still, in gold */
+    JR_FACE_LINKING,    /* connecting/reconnecting: the Wi-Fi orbit */
+    JR_FACE_COUNT       /* bound, not a face: clip caches and clamps use it */
 } jr_face_t;
 
 typedef struct jr_display {

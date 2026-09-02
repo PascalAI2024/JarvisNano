@@ -1888,8 +1888,54 @@ static void test_pinned_caption_survives_other_writers(void)
     jr_display_caption_clear();
 }
 
+/* Every face the port can name has a clip on the partition, a frame rate the
+ * panel can hold, and a procedural stand-in. A face added to jr_face_t without
+ * all three renders blank on glass and nothing on the device says why (the
+ * asset pipeline marks a missing clip "lack": true and carries on), so the
+ * table is pinned here, by basename, against the CMake staging list. */
+static void test_every_face_has_a_clip_and_a_hud_face(void)
+{
+    static const struct { jr_face_t face; const char *base; } expect[] = {
+        { JR_FACE_IDLE,      "rwave_idle.eaf" },
+        { JR_FACE_LISTENING, "rwave_listen.eaf" },
+        { JR_FACE_THINKING,  "rwave_think.eaf" },
+        { JR_FACE_SPEAKING,  "rwave_speak.eaf" },
+        { JR_FACE_ERROR,     "error.eaf" },
+        { JR_FACE_RESTING,   "rwave_rest.eaf" },
+        { JR_FACE_MUTED,     "rwave_muted.eaf" },
+        { JR_FACE_LINKING,   "rwave_link.eaf" },
+    };
+    CHECK(sizeof expect / sizeof expect[0] == (size_t)JR_FACE_COUNT,
+          "face table has %zu rows for %d faces",
+          sizeof expect / sizeof expect[0], (int)JR_FACE_COUNT);
+    for (size_t i = 0; i < sizeof expect / sizeof expect[0]; i++) {
+        const char *path = face_asset(expect[i].face);
+        CHECK(path != NULL, "face %d has no clip path", (int)expect[i].face);
+        if (path) {
+            const char *slash = strrchr(path, '/');
+            CHECK(slash && strcmp(slash + 1, expect[i].base) == 0,
+                  "face %d maps to %s, expected %s",
+                  (int)expect[i].face, path, expect[i].base);
+        }
+        uint32_t fps = face_fps(expect[i].face);
+        CHECK(fps >= 8 && fps <= 24, "face %d fps %u outside 8..24",
+              (int)expect[i].face, (unsigned)fps);
+        CHECK(hud_face_of(expect[i].face) < HUD_FACE_COUNT,
+              "face %d has no procedural stand-in", (int)expect[i].face);
+    }
+    CHECK(face_asset((jr_face_t)JR_FACE_COUNT) == NULL,
+          "the bound is not a face");
+    /* The quiet faces are slow by design; a 24 fps rest clip would spend the
+     * DREAM budget decoding a breath nobody can see. */
+    CHECK(face_fps(JR_FACE_RESTING) <= 8, "rest clip runs at %u fps",
+          (unsigned)face_fps(JR_FACE_RESTING));
+    CHECK(face_fps(JR_FACE_MUTED) <= 8, "muted clip runs at %u fps",
+          (unsigned)face_fps(JR_FACE_MUTED));
+}
+
 int main(void)
 {
+    test_every_face_has_a_clip_and_a_hud_face();
     test_space_ring_wraps_both_ways();
     test_overlay_axis_is_unambiguous();
     test_sideways_resets_and_home_escapes();

@@ -190,11 +190,36 @@ A surface exists only if it passes **both**:
 2. **Voice test.** Could this have been said, or been told to me? If yes, it is
    not a surface. It is a caption, or it is Jarvis's job.
 
+### The face set
+
+One anatomy (bezel, ten-segment coil, inner ring, core), one generator
+(`firmware/mascot/gen_reactive_face.py`), one palette — cyan, except the one
+face that means *closed*. Three faces were added 2026-09-02 for states that had
+been borrowing IDLE or THINKING: VISION.md already asked for "iris sleep" and a
+"Wi-Fi orbit", and this document already says gold means muted.
+
+| Face | State | Clip · frames · fps | What you see | Bytes |
+|---|---|---|---|---|
+| IDLE | awake, nothing happening | `rwave_idle` · 30 · 24 | dim reactor, core breathes, bezel creeps a tick | 723 KB |
+| LISTENING | mic open, amplitude ramp | `rwave_listen` · 22 · 24 | coil and core brighten, intake spokes grow | 937 KB |
+| THINKING | waiting on the model | `rwave_think` · 32 · 24 | counter-rotating scanner arcs, orbiting dot | 1007 KB |
+| SPEAKING | playback, amplitude ramp | `rwave_speak` · 22 · 24 | ice-white core, expanding shock ring | 1098 KB |
+| ERROR | backoff, fatal | `error` · 1 · 8 | the offline mascot | 131 KB |
+| **RESTING** | WHISPER, DREAM | `rwave_rest` · 24 · 8 | coil dark, bezel still, the core a slit that breathes once per 3 s | 223 KB |
+| **MUTED** | privacy (mic zeroed) | `rwave_muted` · 16 · 8 | the same closed iris held still, in **gold**, bezel lit | 236 KB |
+| **LINKING** | connecting, handshaking, reconnecting | `rwave_link` · 24 · 12 | a dot with a fading trail circles the bezel once per 2 s | 474 KB |
+
+The quiet faces are baked slow on purpose: a breath needs eight frames a
+second, not twenty-four, and the render task decodes a third as many frames
+while the device rests. Emote partition after the three: 4.83 MB of 6.16 MB
+(`build/emote_assets.bin`). Wiring lives in `phase_to_face()` and the face
+presentation block of the voice task (`main/main.c`).
+
 ### Today's surfaces against the rule
 
 | Surface | Summon | Voice | Verdict | Cite |
 |---|---|---|---|---|
-| **Face** (5 baked `rwave_*.eaf`, 24 fps) | ✅ it *is* the ground state | ✅ liveness is not sayable | **KEEP** | `jr_display.c:213-231` |
+| **Face** (8 baked `.eaf`; 24 fps live, 8–12 fps quiet — table below) | ✅ it *is* the ground state | ✅ liveness is not sayable | **KEEP** | `jr_display.c:213-245` |
 | **Caption chip** (2 × 19 chars, scale 2, rows 360-430) | ✅ follows the conversation | ✅ | **KEEP** | `jr_display.c:1109`, `1951-1952`, `2005` |
 | **Ask arcs** (≤3, r223-231, question 2 × 24 chars) | ✅ Gemini summons it | ✅ choosing among 3 by voice is genuinely bad | **KEEP — the flagship** | `gemini_live.h:121-146`; `hud_render.c:1203`; `jr_display.c:1065` |
 | **Privacy ring** (gold r221-222) | ✅ state, not a place | ✅ must be visible unasked | **KEEP** | `hud_render.c:802-810` |

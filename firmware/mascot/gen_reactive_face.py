@@ -20,6 +20,17 @@ States (names are a HARD CONTRACT with reactive_face.c's RWAVE_ASSET_* strings):
   rwave_think   azure scanner: counter-rotating sweep arcs + orbiting dot
   rwave_speak   transmit ramp: hotter ice-white core, expanding shock ring
 
+Three more states (2026-09-02), same anatomy, for states that used to borrow a
+face they should not have (VISION.md "iris sleep", "Wi-Fi orbit"; GLASS_DESIGN
+"gold means muted everywhere on this glass"):
+  rwave_rest    iris sleep: coil dark, bezel still, the core narrowed to a slit
+                that breathes once per loop — WHISPER/DREAM, 8 fps
+  rwave_muted   the same closed iris held still in GOLD, bezel lit — privacy
+                (mic zeroed), 8 fps; the one face that is not cyan
+  rwave_link    Wi-Fi orbit: a dot with a fading trail circles the bezel once
+                per loop while the reactor idles dim — connecting/reconnecting,
+                12 fps
+
 The listen/speak files are baked as a MONOTONIC amplitude ramp so the runtime can
 select small loop windows around the current loudness bucket. Louder voice = a
 deeper, brighter section of the ramp without resetting playback every tick. The
@@ -144,12 +155,25 @@ LUT_THINK = [(0.00, (0, 0, 0)), (0.30, (8, 28, 60)), (0.58, (48, 128, 228)),
 LUT_SPEAK = [(0.00, (0, 0, 0)), (0.28, (8, 44, 56)), (0.55, (36, 186, 214)),
              (0.82, (130, 236, 252)), (1.00, (224, 252, 255))]
 
+# Rest is the idle ramp with the lights down: deep teal, never ice.
+LUT_REST = [(0.00, (0, 0, 0)), (0.35, (3, 18, 26)), (0.65, (10, 70, 92)),
+            (0.88, (36, 122, 150)), (1.00, (92, 172, 202))]
+# Muted is GOLD — the one non-cyan face. Top stop stays under the white-ish
+# guard (no channel > 245) and clear of the pink guard (green stays high).
+LUT_MUTED = [(0.00, (0, 0, 0)), (0.30, (40, 22, 2)), (0.60, (150, 88, 8)),
+             (0.85, (228, 152, 28)), (1.00, (245, 222, 120))]
+# Link sits between rest and idle: teal, a shade under the idle top stop, so
+# the orbit reads as "looking for the room", not "thinking about you".
+LUT_LINK = [(0.00, (0, 0, 0)), (0.30, (4, 26, 36)), (0.60, (14, 110, 140)),
+            (0.85, (60, 190, 220)), (1.00, (170, 236, 250))]
+
 DEFAULT_CANVAS = 466                       # FULL panel — use every pixel of the AMOLED
 DEFAULT_FRAMES = 28                        # calmer motion without bloating the asset pack
 PALETTE_COLORS = 96                        # stylized gradients, sane RLE output
 
 # State -> (renderer key). Names are the HARD CONTRACT with reactive_face.c.
-STATE_ORDER = ["rwave_idle", "rwave_listen", "rwave_think", "rwave_speak"]
+STATE_ORDER = ["rwave_idle", "rwave_listen", "rwave_think", "rwave_speak",
+               "rwave_rest", "rwave_muted", "rwave_link"]
 
 # Per-state frame counts (used when --frames is left at the default). The
 # runtime reads the real frame count from each EAF, so states may differ:
@@ -158,7 +182,10 @@ STATE_ORDER = ["rwave_idle", "rwave_listen", "rwave_think", "rwave_speak"]
 # (7,208,960 B) and the non-rwave eye assets take ~3.40 MB, leaving ~3.8 MB
 # for the four rwave packs — these counts land ~3.7 MB at canvas 466 / RLE.
 STATE_FRAMES = {"rwave_idle": 30, "rwave_listen": 22,
-                "rwave_think": 32, "rwave_speak": 22}
+                "rwave_think": 32, "rwave_speak": 22,
+                # 2026-09-02: three quiet states. Dark coils RLE to ~1/3 the
+                # bytes of an idle frame; measured total 0.93 MB for the three.
+                "rwave_rest": 24, "rwave_muted": 16, "rwave_link": 24}
 
 
 def state_frames(state, args_frames):
@@ -353,11 +380,65 @@ def render_think_frame(canvas, i, n):
     return _apply_lut(E, LUT_THINK)
 
 
+def _f_iris(dx, dy, sx, sy):
+    """Horizontal slit: a Gaussian orb squashed to width sx, height sy."""
+    return np.exp(-((dx * dx) / (2.0 * sx * sx) + (dy * dy) / (2.0 * sy * sy)))
+
+
+def render_rest_frame(canvas, i, n):
+    """Rest (WHISPER/DREAM): the iris asleep. Coil dark, bezel still, inner
+    ring faint; the core is a horizontal slit that opens a few pixels and
+    closes again once per loop — one breath, slow, seamless wrap."""
+    ph = 2.0 * math.pi * i / n
+    breath = 0.5 - 0.5 * math.cos(ph)          # 0 at the seam, 1 mid-loop
+    E, (dx, dy, dist, theta) = _reactor(canvas, coil_gain=0.0, core_r=30.0,
+                                        core_gain=0.0, ring_gain=0.58)
+    # The slit peaks near the top of LUT_REST (~0.85) so it survives the DREAM
+    # brightness cap; the halo stays in the teal floor.
+    E += (0.62 + 0.22 * breath) * _f_iris(dx, dy, 36.0, 5.0 + 5.0 * breath)
+    E += 0.22 * _f_orb(dist * dist, 26.0 + 6.0 * breath)      # faint halo
+    return _apply_lut(E, LUT_REST)
+
+
+def render_muted_frame(canvas, i, n):
+    """Muted (privacy): the same closed iris, held still, in gold. The bezel
+    stays lit so the device reads as awake-but-not-listening; only the halo
+    pulses, faintly, so a glance can tell it from a photograph."""
+    ph = 2.0 * math.pi * i / n
+    pulse = 0.5 - 0.5 * math.cos(ph)
+    E, (dx, dy, dist, theta) = _reactor(canvas, coil_gain=0.0, core_r=30.0,
+                                        core_gain=0.0, ring_gain=0.62)
+    E += 0.55 * _f_iris(dx, dy, 40.0, 4.5)
+    E += (0.14 + 0.06 * pulse) * _f_orb(dist * dist, 30.0)
+    return _apply_lut(E, LUT_MUTED)
+
+
+def render_link_frame(canvas, i, n):
+    """Link (connecting/reconnecting): the Wi-Fi orbit. The reactor idles dim
+    while a dot circles the bezel once per loop, trailing a fading arc; the
+    core pulses once per orbit. Integer cycles, seamless wrap."""
+    t = i / n
+    sweep = 2.0 * math.pi * t
+    E, (dx, dy, dist, theta) = _reactor(canvas, coil_gain=0.20, core_r=34.0,
+                                        core_gain=0.26 + 0.08 * math.sin(sweep),
+                                        ring_gain=0.55)
+    trail = _f_angwin(theta, sweep - 0.55, 0.55, 0.30)
+    behind = np.clip(((sweep - theta + np.pi) % (2.0 * np.pi)) / 1.2, 0.0, 1.0)
+    E += 0.50 * _f_ring(dist, 196.0, 2.4) * trail * (1.0 - 0.8 * behind)
+    px = 196.0 * math.cos(sweep)
+    py = 196.0 * math.sin(sweep)
+    E += 0.90 * _f_orb((dx - px) ** 2 + (dy - py) ** 2, 5.5)
+    return _apply_lut(E, LUT_LINK)
+
+
 RENDERERS = {
     "rwave_idle": lambda c, i, n: render_idle_frame(c, i, n),
     "rwave_listen": lambda c, i, n: render_ramp_frame(c, i, n, hot_bias=0.0),
     "rwave_think": lambda c, i, n: render_think_frame(c, i, n),
     "rwave_speak": lambda c, i, n: render_ramp_frame(c, i, n, hot_bias=1.0),
+    "rwave_rest": lambda c, i, n: render_rest_frame(c, i, n),
+    "rwave_muted": lambda c, i, n: render_muted_frame(c, i, n),
+    "rwave_link": lambda c, i, n: render_link_frame(c, i, n),
 }
 
 
