@@ -31,7 +31,7 @@ Wi-Fi OTA may still pass preflight when USB power is present.
 | Input | Action |
 |---|---|
 | PWR short | Listen/wake only; never mute |
-| PWR long | Battery and charging status |
+| PWR hold | Power off completely; hold PWR 1 s to start (2026-09-01) |
 | BOOT short after boot | Open/close controls |
 | BOOT hold 1.5–5 s after boot | Open a visible 60-second pairing claim window |
 | BOOT held during reset | Enter ROM downloader |

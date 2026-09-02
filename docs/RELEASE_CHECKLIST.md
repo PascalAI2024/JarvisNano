@@ -91,7 +91,7 @@ target is the Waveshare ESP32-S3-Touch-AMOLED-1.75C.
       this check.
 - [ ] Start `/api/diag/panel-touch?action=start`, complete all three randomized
       physical sectors, and confirm the challenge reports physical success.
-- [ ] PWR short listens without muting; PWR long shows battery; BOOT short
+- [ ] PWR short listens without muting; PWR long powers off and a 1 s hold starts it; BOOT short
       toggles controls.
 - [ ] Global left/right edge level gestures and horizontal navigation work.
 - [ ] Glass hold privacy, flip-to-mute/face-up recovery, and shake-to-cancel

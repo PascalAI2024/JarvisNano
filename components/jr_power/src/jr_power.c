@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * See jr_power.h. Register access is verbatim from
- * firmware/components/jarvis_pmic/src/jarvis_pmic.c. READ-ONLY: no rail writes.
+ * firmware/components/jarvis_pmic/src/jarvis_pmic.c. No rail configuration;
+ * the one write beyond telemetry is jr_power_off(), the PMIC's soft power-off.
  */
 #include "jr_power/jr_power.h"
 
@@ -37,6 +38,11 @@
 #define AXP2101_REG_VBAT_H        0x34  /* ADC_DATA_RELUST0 */
 #define AXP2101_REG_BAT_DET_CTRL  0x68  /* battery presence detection */
 #define AXP2101_REG_BAT_PERCENT   0xA4
+#define AXP2101_REG_COMMON_CFG    0x10  /* bit0: soft power-off (all rails)  */
+#define AXP2101_REG_PWRON_CFG     0x27  /* bits1:0 ON hold: 0=128ms 1=512ms 2=1s 3=2s */
+#define AXP2101_COMMON_PWROFF     0x01
+#define AXP2101_ONLEVEL_MASK      0x03
+#define AXP2101_ONLEVEL_1S        0x02
 
 #define AXP2101_STATUS1_VBUS_GOOD   (1u << 5)
 #define AXP2101_STATUS1_BAT_PRESENT (1u << 3)
@@ -98,6 +104,33 @@ static esp_err_t pmic_write_reg(uint8_t reg, uint8_t val)
 {
     uint8_t buf[2] = { reg, val };
     return i2c_master_transmit(s_dev, buf, sizeof(buf), AXP2101_I2C_TIMEOUT_MS);
+}
+
+esp_err_t jr_power_off(void)
+{
+    if (s_dev == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* First the way back: the PMIC's own power-on hold set to one second, so
+     * a brush of the key in a bag does not boot it, a deliberate hold does.
+     * The register lives in the PMIC's always-on domain and survives the
+     * off state. Then the soft power-off: every rail, the ESP32 included. */
+    uint8_t on = 0;
+    esp_err_t err = pmic_read_reg(AXP2101_REG_PWRON_CFG, &on);
+    if (err == ESP_OK) {
+        on = (uint8_t)((on & ~AXP2101_ONLEVEL_MASK) | AXP2101_ONLEVEL_1S);
+        err = pmic_write_reg(AXP2101_REG_PWRON_CFG, on);
+    }
+    if (err != ESP_OK) {
+        return err;
+    }
+    uint8_t common = 0;
+    err = pmic_read_reg(AXP2101_REG_COMMON_CFG, &common);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return pmic_write_reg(AXP2101_REG_COMMON_CFG,
+                          (uint8_t)(common | AXP2101_COMMON_PWROFF));
 }
 
 static esp_err_t power_bring_up(void)

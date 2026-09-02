@@ -57,6 +57,10 @@ are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
   600 ms, stepping up after a reply with a hole and back down after clean
   ones. STATUS shows the gear on its CPU row; `/api/diag/tasks` carries
   per-task run-time counters.
+- Hold PWR to power off completely: the PMIC drops every rail, the lowest
+  state the board has, and only a one-second hold of PWR starts it again.
+  Charging keeps working while off. The battery readout the long press used
+  to give lives on STATUS and in Jarvis's mouth.
 - Lift to glance: picked up after a rest, the weather shows for eight seconds
   and the glass goes home by itself. A first fetch with rain in the day leaves
   one "RAIN TODAY" line.

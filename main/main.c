@@ -862,6 +862,7 @@ static temperature_sensor_handle_t s_tsens;
 #define BATTERY_SAVER_PCT 20U
 static _Atomic int s_cpu_mhz;
 static _Atomic int s_cpu_force;   /* bench: /api/debug/gain?cpu=160; 0 = auto */
+static _Atomic bool s_power_off_req;   /* PWR long, or /api/debug/sleep?off=1 */
 
 static void cpu_gear_set(int mhz)
 {
@@ -5458,9 +5459,17 @@ static esp_err_t debug_sleep_handler(httpd_req_t *req)
         return ESP_OK;
     }
     if (req->method == HTTP_POST) {
-        int now = 0, wake_s = 60;
+        int now = 0, wake_s = 60, off = 0;
         query_int(req, "now", &now);
         query_int(req, "wake_s", &wake_s);
+        query_int(req, "off", &off);
+        if (off) {
+            /* The same road PWR long takes: rails off, hold PWR to start. */
+            atomic_store(&s_power_off_req, true);
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req, "{\"ok\":true,\"off\":true}");
+            return ESP_OK;
+        }
         if (now && image_in_probation()) {
             httpd_resp_set_status(req, "409 Conflict");
             httpd_resp_set_type(req, "application/json");
@@ -6935,15 +6944,35 @@ static void voice_task(void *arg)
                     ESP_LOGI(TAG, "pkey: listen");
                 }
                 if (pkey_l > 0) {
-                    jr_power_t pb;
-                    char pcap[32];
-                    if (jr_power_read(&pb) == ESP_OK && pb.percent <= 100) {
-                        snprintf(pcap, sizeof pcap, "BAT %u%%%s",
-                                 (unsigned)pb.percent,
-                                 pb.charging ? " CHARGING" : "");
-                        jr_display_caption_set(pcap);
+                    /* HOLD PWR: OFF. The owner: "the big button hold should
+                     * put it in the lowest state and only turn back on when
+                     * held again — or off completely, might be better."
+                     * Off completely it is: the PMIC drops every rail and
+                     * only a one-second hold of the same key brings it
+                     * back. The battery it used to read out lives on STATUS
+                     * and in Jarvis's mouth. */
+                    atomic_store(&s_power_off_req, true);
+                    ESP_LOGI(TAG, "pkey: long -> power off");
+                }
+                if (atomic_load(&s_power_off_req) && image_in_probation()) {
+                    /* A cold boot through the bootloader rolls back an image
+                     * still on probation — the deep sleep taught this. */
+                    atomic_store(&s_power_off_req, false);
+                    jr_display_caption_set("UPDATING - TRY AGAIN IN A MINUTE");
+                    ESP_LOGW(TAG, "power off refused: image in probation");
+                }
+                if (atomic_load(&s_power_off_req)) {
+                    atomic_store(&s_power_off_req, false);
+                    jr_display_caption_set("POWERING OFF - HOLD PWR TO START");
+                    vTaskDelay(pdMS_TO_TICKS(1500));
+                    jr_display_panel_off_request();
+                    for (int i = 0; i < 30 && !jr_display_panel_is_off(); ++i) {
+                        vTaskDelay(pdMS_TO_TICKS(20));
                     }
-                    ESP_LOGI(TAG, "pkey: long -> status");
+                    const esp_err_t off_err = jr_power_off();
+                    /* Only reached if the PMIC refused. */
+                    ESP_LOGE(TAG, "power off refused: %s", esp_err_to_name(off_err));
+                    jr_display_caption_set("POWER OFF FAILED");
                 }
             }
             boot_button_tick((uint32_t)now);

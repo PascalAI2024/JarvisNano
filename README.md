@@ -81,7 +81,7 @@ for what sleeps and how it wakes.
 | Input | Action |
 |---|---|
 | "Jarvis" / PWR short | Wake and listen; never mutes |
-| PWR long | Speak the battery state |
+| PWR hold | Power off completely (the PMIC drops every rail); hold PWR one second to start |
 | BOOT short | Open/close the control shade |
 | BOOT hold 1.5–5 s | Open a visible 60-second pairing window |
 | BOOT held during reset | ROM downloader |

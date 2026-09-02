@@ -419,7 +419,7 @@ Round-glass corollaries the map obeys:
 |---|---|---|---|
 | Voice | Gemini Live + WakeNet9 "Jarvis" (`main.c:7094-7109`) | unchanged | the product |
 | PWR short | wake/listen, never mutes (`main.c:6044-6057`) | unchanged | correct |
-| PWR long | speaks battery (`main.c:6058-6066`) | unchanged | telemetry belongs in the mouth — the model this design generalises |
+| PWR long | powers off completely since 2026-09-01 (was: speaks battery) | changed | the off switch belongs on the key — the model this design generalises |
 | BOOT short (0.2–1.5 s) | shade toggle, and **clears the caption** (`main.c:322-331`) | **summon the Dial**; never clear the caption | same intent, no room to be trapped in |
 | BOOT hold (1.5–5 s) | 60 s pairing (`main.c:332-339`) | unchanged | security; explicit and rare |
 | BOOT hold ≥5 s | **no binding** | leave unbound | a hold with no ceiling is a hold with no feedback |

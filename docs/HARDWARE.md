@@ -27,7 +27,7 @@ maps to the C revision.
 | Input | Runtime action |
 |---|---|
 | PWR short press | Wake/re-arm voice and show `LISTENING`; never mutes |
-| PWR long press | Show battery/charging status; the PMIC still owns its forced-cut hold |
+| PWR long press | Power off completely: `jr_power_off()` sets the PMIC's power-on hold to 1 s and asserts its soft power-off; every rail drops, charging keeps working; hold PWR 1 s to start. The PMIC's own forced-cut hold (several seconds) remains beneath it |
 | BOOT short press (runtime) | Open/close the controls shade |
 | BOOT hold 1.5–5 s (runtime) | Open a visible 60-second pairing claim window |
 | BOOT held during reset | Enter the ESP32-S3 ROM downloader; not an application gesture |

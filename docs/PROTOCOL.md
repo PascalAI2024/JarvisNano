@@ -60,7 +60,7 @@ X-JarvisNano-Control: 1
 | POST | `/api/debug/say?text=...` | Queue a text turn through the live device voice session |
 | GET/POST | `/api/debug/gain?...` | Audio tuning with readbacks; `preroll=` / `refill=` pin the playback jitter buffer (`preroll=0` returns it to adaptive); `cpu=80|160|240` forces a CPU gear for a bench, `cpu=0` returns to auto |
 | POST | `/api/debug/audio-stats?reset=1` | Reset the playback and receive-queue counters that `/api/device/health` reports |
-| GET/POST | `/api/debug/sleep` | How the device last woke and what was armed; `?now=1&wake_s=N` forces a deep sleep with an N-second timer (refused with 409 while the image is on OTA probation) |
+| GET/POST | `/api/debug/sleep` | How the device last woke and what was armed; `?now=1&wake_s=N` forces a deep sleep with an N-second timer (refused with 409 while the image is on OTA probation); `?off=1` powers the device off through the PMIC (hold PWR 1 s to start) |
 | POST | `/api/voice/control?armed=0|1` or paired `?resume=1` | Explicit privacy mute/unmute or privacy-safe operational resume |
 | POST | `/api/audio/self-test` | Run the speaker-to-microphone diagnostic capture |
 | GET | `/api/audio/taps` | Paired audio tap metadata |
@@ -303,7 +303,7 @@ and puts a receipt on glass.
 Global physical edge swipes, paired level commands, and the two local Gemini
 level tools converge on the same persisted app-task state and on-glass receipt.
 Left-edge UP/DOWN controls volume; right-edge DOWN/UP controls brightness.
-PWR short is listen-only recovery, PWR long is battery status, BOOT short
+PWR short is listen-only recovery, PWR long powers the device off, BOOT short
 opens/closes controls, and a 1.5–5 second runtime BOOT hold opens pairing.
 Sustained face-down enters flip privacy; sustained face-up clears it only when
 the flip created the mute. A hold/controls mute survives reorientation.

@@ -77,6 +77,17 @@ void jr_power_stop(void);
  */
 esp_err_t jr_power_read(jr_power_t *out);
 
+/**
+ * @brief Power the whole device off through the PMIC: every rail, the ESP32
+ *        included — the lowest state the board has, microamps from the cell.
+ *
+ * Sets the PMIC's power-on hold to one second first, so only a deliberate
+ * hold of PWR brings it back (a cold boot; charging keeps working while
+ * off). Does not return on success: the rails drop within milliseconds.
+ * Callers say goodbye on the glass and settle storage before calling.
+ */
+esp_err_t jr_power_off(void);
+
 #ifdef __cplusplus
 }
 #endif

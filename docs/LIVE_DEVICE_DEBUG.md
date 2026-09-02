@@ -96,7 +96,7 @@ shrinking internal block as a fault, not cosmetic noise.
 Keep `jarvisctl gestures 80` visible while exercising:
 
 1. PWR short → `LISTENING`, never privacy mute.
-2. PWR long → battery/charging status.
+2. PWR long → power off completely (hold PWR 1 s to start). `POST /api/debug/sleep?off=1` takes the same road from a desk.
 3. BOOT short after boot → controls open/close.
 4. Left-edge vertical from every space → persisted volume ±5.
 5. Right-edge vertical from every space → persisted brightness ±5.

@@ -145,7 +145,7 @@ coordinates and synthetic provenance. One production gesture path:
 | Input | Action |
 |---|---|
 | "Jarvis" / PWR short | Listen; never mutes |
-| PWR long | Speak the battery |
+| PWR hold | Power off completely via the PMIC; a one-second hold of PWR starts it again |
 | BOOT short | Control shade open/close |
 | BOOT hold 1.5–5 s | Visible 60-second pairing window |
 | BOOT held during reset | ROM downloader |
