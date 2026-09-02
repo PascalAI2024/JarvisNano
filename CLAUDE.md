@@ -59,7 +59,7 @@ response" as a firmware bug. `scripts/gesture-doctor.py` reads the touch
 counters; ask the device before reading source for input questions. Serial is
 single-owner: kill any monitor before flashing.
 
-`JR_DEV_OPEN_DIAGNOSTICS` in `main/main.c` opens the debug routes without
+`JR_DEV_OPEN_DIAGNOSTICS` in `main/http_routes.c` opens the debug routes without
 pairing during development and **must be 0 before a release**.
 
 OTA images boot into a ~45 s probation. A reboot through the bootloader during
@@ -71,11 +71,15 @@ refuses those while `image_in_probation()`.
 Read `docs/ARCHITECTURE.md` for the diagrams; the invariants that shape every
 change are:
 
-- **`main/main.c` is the composition root** (large, single file). It owns all
-  concrete wiring: tasks, the HTTP control plane, the 1 Hz shell publish, the
-  mood/rest ladder decisions, deep sleep, persona text, and the privacy gate.
+- **`main/` is the composition root**, four files over one internal seam,
+  `main/app.h` (the shared types, caps, and every global or function that
+  crosses a file). `main.c` keeps the wiring, the voice task, the 1 Hz shell
+  publish, persona text, and the privacy gate; `http_routes.c` is the HTTP
+  control plane; `power.c` the CPU gears, deep sleep and wake state;
+  `device_tools.c` the device-tool queue, consent, weather and activity.
   Feature work usually lands as a pure piece in a `jr_*` component plus wiring
-  here.
+  here. A symbol that must cross files loses `static` and gets one line in
+  `app.h`; do not add a second header.
 - **`jr_core` and `jr_dsp` are pure.** They call no ESP-IDF, driver, network,
   or display API and compile on the host with a plain compiler
   (`host/CMakeLists.txt` enforces this by having no IDF include path). Hardware
