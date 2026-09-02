@@ -1384,10 +1384,12 @@ static jr_face_t phase_to_face(jr_state_t p)
 {
     switch (p) {
     case JR_ST_LISTENING: return JR_FACE_LISTENING;
-    case JR_ST_THINKING:
+    case JR_ST_THINKING:  return JR_FACE_THINKING;
+    /* Connecting is not thinking: the reactor idles while a dot orbits the
+     * bezel, so a slow handshake reads as "reaching", not "considering". */
     case JR_ST_CONNECTING:
     case JR_ST_HANDSHAKING:
-    case JR_ST_RECONNECTING: return JR_FACE_THINKING;
+    case JR_ST_RECONNECTING: return JR_FACE_LINKING;
     case JR_ST_SPEAKING:  return JR_FACE_SPEAKING;
     /* Asking keeps the LISTENING face: the device is waiting on the human, and
      * the choice arcs are drawn over it. Falling through to `default` here sent
@@ -2086,6 +2088,16 @@ static void voice_task(void *arg)
                                 atomic_load(&s_audio_diag_until_ms) != 0U)
                                    ? CPU_MHZ_LIVE : CPU_MHZ_REST);
             }
+            /* THE CADENCE. The engine draws every period whether or not a
+             * pixel changed, so at rest the frame rate is the display's whole
+             * cost. Anything live keeps the panel ceiling; the ladder steps
+             * it down as the device settles. A touch restores 24 at once in
+             * the input loop, before this tick can notice. */
+            (void)jr_display_set_render_fps(
+                (realtime_power || mout.mood == JR_MOOD_AWAKE) ? RENDER_FPS_LIVE
+                : mout.mood == JR_MOOD_AMBIENT                ? RENDER_FPS_AMBIENT
+                : mout.mood == JR_MOOD_WHISPER                ? RENDER_FPS_WHISPER
+                                                              : RENDER_FPS_DREAM);
             uint8_t effective_brightness = (uint8_t)(
                 ((unsigned)mout.brightness * s_brightness_cap + 50U) / 100U);
             {
@@ -2676,6 +2688,9 @@ static void voice_task(void *arg)
         /* 2) manual/PTT input (CST9217 via jr_hal input_touch) */
         jr_input_event_t iev;
         while (input_next(&s_app.input, &iev)) {
+            /* A finger on the glass wants frames now, not at the next mood
+             * tick; unchanged values cost nothing. */
+            (void)jr_display_set_render_fps(RENDER_FPS_LIVE);
             /* PRESS_DOWN/PRESS_UP bracket a contact; they are plumbing, not
              * intent. Keeping them OUT of the diagnostic counters preserves
              * what those counters mean: `events` stays a count of gestures,
@@ -3614,6 +3629,18 @@ capture_complete:
          * every loop is free; with the logging stub, amp stays 0 and the
          * call still fires only on face change (no log spam). */
         jr_face_t f = phase_to_face(jr_orch_phase(&s_app.orch));
+        if (f == JR_FACE_IDLE) {
+            /* Idle has three truths the face used to hide: muted is gold and
+             * still; resting (WHISPER/DREAM) is a breathing slit; only a
+             * live, awake idle keeps the open cyan reactor. */
+            const uint8_t mood = atomic_load(&s_mood_id);
+            if (atomic_load(&s_voice_privacy_paused)) {
+                f = JR_FACE_MUTED;
+            } else if (mood == (uint8_t)JR_MOOD_WHISPER ||
+                       mood == (uint8_t)JR_MOOD_DREAM) {
+                f = JR_FACE_RESTING;
+            }
+        }
         uint8_t amp = 0;
         if (jr_display_is_ready()) {
             if (f == JR_FACE_SPEAKING) {

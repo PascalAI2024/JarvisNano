@@ -76,6 +76,15 @@
  * main.c static-asserts it against the real array, so adding a tool
  * without bumping this is a compile error, not a blank petal. */
 #define DEVICE_TOOL_DECL_COUNT 8U
+
+/* Render cadence per rung of the rest ladder (frames per second). 24 is the
+ * measured CO5300 ceiling; 12 keeps AMBIENT's dimmed ring fluid under a
+ * finger; 6 breathes the WHISPER slit; 3 is a dark DREAM face and a caption
+ * that can still change. Measured in docs/reference/power-modes.md. */
+#define RENDER_FPS_LIVE     24U
+#define RENDER_FPS_AMBIENT  12U
+#define RENDER_FPS_WHISPER   6U
+#define RENDER_FPS_DREAM     3U
 #define LOCAL_TOOL_RESULT_CAP 4U
 #define LOCAL_TOOL_ERROR_CAP  160U
 #define TOOL_CONSENT_TIMEOUT_MS 15000U
