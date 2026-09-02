@@ -637,6 +637,7 @@ typedef struct {
     bool    radio_saving;
     int8_t  chip_c;         /* die temperature, Celsius                    */
     bool    chip_c_valid;
+    uint16_t cpu_mhz;       /* the gear: 240, 160, 80 (0 = unknown)        */
 } jr_display_links_t;
 
 void jr_display_links_set(const jr_display_links_t *links);

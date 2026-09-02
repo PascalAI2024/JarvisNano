@@ -214,6 +214,47 @@ static bool                   s_pb_in_gap;              /* feeder task only */
 #define PB_PRIME_MAX_WAIT_MS     2000u  /* never hold longer than this       */
 static _Atomic uint32_t       s_pb_preroll_ms = PB_PREROLL_MS_DEFAULT;
 static _Atomic uint32_t       s_pb_refill_ms  = PB_REFILL_MS_DEFAULT;
+/* ADAPTIVE PRE-ROLL. 600 ms is a second of latency won back; 1500 ms is
+ * what the worst measured server stall (2.2 s) needs to stay seamless. The
+ * feeder walks between them: any reply with a hole steps the lead up, three
+ * clean replies in a row step it back down. A pin from the gain route
+ * (preroll > 0) stops the walk; preroll 0 restarts it. */
+#define PB_PREROLL_FLOOR_MS      600u
+#define PB_PREROLL_CEIL_MS      1500u
+#define PB_PREROLL_STEP_UP_MS    300u
+#define PB_PREROLL_STEP_DOWN_MS  200u
+#define PB_CLEAN_REPLIES_TO_STEP   3u
+static _Atomic bool           s_pb_adaptive = true;
+static bool                   s_pb_reply_open;      /* feeder task only */
+static uint32_t               s_pb_reply_holes;     /* feeder task only */
+static uint32_t               s_pb_clean_replies;   /* feeder task only */
+
+static void pb_adapt_preroll(void)
+{
+    if (!atomic_load(&s_pb_adaptive)) {
+        return;
+    }
+    uint32_t pre = atomic_load(&s_pb_preroll_ms);
+    if (s_pb_reply_holes > 0u) {
+        s_pb_clean_replies = 0u;
+        const uint32_t next = pre + PB_PREROLL_STEP_UP_MS > PB_PREROLL_CEIL_MS
+                                  ? PB_PREROLL_CEIL_MS : pre + PB_PREROLL_STEP_UP_MS;
+        if (next != pre) {
+            atomic_store(&s_pb_preroll_ms, next);
+            ESP_LOGI(TAG, "pre-roll %u -> %u ms after %u hole(s)",
+                     (unsigned)pre, (unsigned)next, (unsigned)s_pb_reply_holes);
+        }
+    } else if (++s_pb_clean_replies >= PB_CLEAN_REPLIES_TO_STEP) {
+        s_pb_clean_replies = 0u;
+        const uint32_t next = pre > PB_PREROLL_FLOOR_MS + PB_PREROLL_STEP_DOWN_MS
+                                  ? pre - PB_PREROLL_STEP_DOWN_MS : PB_PREROLL_FLOOR_MS;
+        if (next != pre) {
+            atomic_store(&s_pb_preroll_ms, next);
+            ESP_LOGI(TAG, "pre-roll %u -> %u ms after clean replies",
+                     (unsigned)pre, (unsigned)next);
+        }
+    }
+}
 static bool                   s_pb_primed;              /* feeder task only */
 static uint32_t               s_pb_prime_target;        /* samples; feeder  */
 static uint32_t               s_pb_prime_start_ms;      /* feeder task only */
@@ -224,8 +265,12 @@ static _Atomic uint32_t       s_pb_preroll_timeouts;
 
 void jr_audio_set_jitter_ms(int preroll_ms, int refill_ms)
 {
-    if (preroll_ms >= 0) {
+    if (preroll_ms == 0) {
+        atomic_store(&s_pb_preroll_ms, PB_PREROLL_FLOOR_MS);
+        atomic_store(&s_pb_adaptive, true);    /* back to the walk */
+    } else if (preroll_ms > 0) {
         atomic_store(&s_pb_preroll_ms, preroll_ms > 3000 ? 3000u : (uint32_t)preroll_ms);
+        atomic_store(&s_pb_adaptive, false);   /* pinned by hand */
     }
     if (refill_ms >= 0) {
         atomic_store(&s_pb_refill_ms, refill_ms > 3000 ? 3000u : (uint32_t)refill_ms);
@@ -697,11 +742,13 @@ static void feeder_task(void *arg)
          * hole than the network actually left. */
         if (avail > 0) {
             s_pb_empty_since_ms = 0u;
+            s_pb_reply_open = true;
             if (s_pb_in_gap) {
                 const uint32_t gap = now_ms - s_pb_gap_start_ms;
                 s_pb_in_gap = false;
                 if (gap <= PB_GAP_REPLY_MS) {
                     atomic_fetch_add(&s_pb_underruns, 1u);
+                    s_pb_reply_holes++;
                     if (gap > atomic_load(&s_pb_max_gap_ms)) {
                         atomic_store(&s_pb_max_gap_ms, gap);
                     }
@@ -734,6 +781,11 @@ static void feeder_task(void *arg)
             if (s_pb_empty_since_ms == 0u) {
                 s_pb_empty_since_ms = now_ms;
             } else if (now_ms - s_pb_empty_since_ms > PB_GAP_REPLY_MS) {
+                if (s_pb_reply_open) {           /* once, as the reply ends */
+                    s_pb_reply_open = false;
+                    pb_adapt_preroll();
+                    s_pb_reply_holes = 0u;
+                }
                 s_pb_primed = false;
                 s_pb_prime_start_ms = 0u;
                 s_pb_prime_target = atomic_load(&s_pb_preroll_ms) * 24u;

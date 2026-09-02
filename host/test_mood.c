@@ -117,6 +117,31 @@ static void test_mood_sleep_is_due_ten_minutes_into_dream(void)
     TEST_ASSERT_FALSE(jr_mood_sleep_due(NULL, 0));
 }
 
+/* The saver ladder is the same ladder, four times faster, and it is an
+ * INPUT: the moment the cell is charging again the normal waits apply. */
+static void test_mood_saver_ladder_is_four_times_faster(void)
+{
+    jr_mood_state_t s;
+    jr_mood_reset(&s, 0);
+    jr_mood_in_t in = { .saver = true };
+    in.now_ms = JR_MOOD_AMBIENT_MS / JR_MOOD_SAVER_DIV - 1;
+    TEST_ASSERT_EQUAL(JR_MOOD_AWAKE, jr_mood_step(&s, &in).mood);
+    in.now_ms = JR_MOOD_AMBIENT_MS / JR_MOOD_SAVER_DIV;
+    TEST_ASSERT_EQUAL(JR_MOOD_AMBIENT, jr_mood_step(&s, &in).mood);
+    in.now_ms = JR_MOOD_WHISPER_MS / JR_MOOD_SAVER_DIV;
+    TEST_ASSERT_EQUAL(JR_MOOD_WHISPER, jr_mood_step(&s, &in).mood);
+    in.now_ms = JR_MOOD_DREAM_MS / JR_MOOD_SAVER_DIV;
+    TEST_ASSERT_EQUAL(JR_MOOD_DREAM, jr_mood_step(&s, &in).mood);
+    const uint32_t dream_at = in.now_ms;
+    TEST_ASSERT_FALSE(jr_mood_sleep_due(&s, dream_at + JR_MOOD_SLEEP_MS / JR_MOOD_SAVER_DIV - 1));
+    TEST_ASSERT_TRUE(jr_mood_sleep_due(&s, dream_at + JR_MOOD_SLEEP_MS / JR_MOOD_SAVER_DIV));
+    /* Plugged in (saver off) the same stillness is not yet DREAM. */
+    jr_mood_reset(&s, 0);
+    in.saver = false;
+    in.now_ms = JR_MOOD_DREAM_MS / JR_MOOD_SAVER_DIV;
+    TEST_ASSERT_EQUAL(JR_MOOD_AMBIENT, jr_mood_step(&s, &in).mood);
+}
+
 static void test_mood_poke_awake_resets_still(void)
 {
     jr_mood_state_t s;
@@ -137,4 +162,5 @@ void mood_tests_run(void)
     RUN_TEST(test_mood_face_down_is_dream);
     RUN_TEST(test_mood_poke_awake_resets_still);
     RUN_TEST(test_mood_sleep_is_due_ten_minutes_into_dream);
+    RUN_TEST(test_mood_saver_ladder_is_four_times_faster);
 }

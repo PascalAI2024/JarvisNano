@@ -367,6 +367,7 @@ static void links(bool wifi, int rssi, const char *ip, bool link, uint8_t tools,
         .wifi_up = wifi, .rssi_dbm = (int8_t)rssi, .link_open = link,
         .tools = tools, .desk_live = desk, .radio_saving = saving,
         .chip_c = (int8_t)g_chip_c, .chip_c_valid = g_chip_c > -100,
+        .cpu_mhz = (uint16_t)(saving ? 160 : 240),
     };
     strncpy(l.ip, ip, sizeof l.ip - 1);
     jr_display_links_set(&l);
@@ -386,7 +387,7 @@ static void test_status_sheet_is_the_device_in_nine_rows(void)
     CHECK(s_detail_rows == 9, "nine rows, got %d", s_detail_rows);
     CHECK(s_detail_rows <= SP_ROWS_MAX, "within the row budget");
     static const char *const order[9] = {
-        "BATTERY", "POWER", "WIFI", "IP", "LINK", "TOOLS", "CHIP", "RADIO",
+        "BATTERY", "POWER", "WIFI", "IP", "LINK", "TOOLS", "CHIP", "CPU",
         "UPDATE",
     };
     for (int i = 0; i < 9; ++i) {
@@ -407,7 +408,7 @@ static void test_status_sheet_is_the_device_in_nine_rows(void)
           s_detail_value[5]);
     CHECK(strcmp(s_detail_value[6], "52C") == 0, "chip, got '%s'",
           s_detail_value[6]);
-    CHECK(strcmp(s_detail_value[7], "REALTIME") == 0, "radio, got '%s'",
+    CHECK(strcmp(s_detail_value[7], "240 LIVE") == 0, "cpu row, got '%s'",
           s_detail_value[7]);
     CHECK(strcmp(s_detail_value[8], "42%") == 0, "update percent, got '%s'",
           s_detail_value[8]);
@@ -429,7 +430,7 @@ static void test_status_sheet_is_the_device_in_nine_rows(void)
     CHECK(strcmp(s_detail_value[6], "NONE") == 0, "no thermometer, got '%s'",
           s_detail_value[6]);
     g_chip_c = 52;
-    CHECK(strcmp(s_detail_value[7], "SAVING") == 0, "radio saving, got '%s'",
+    CHECK(strcmp(s_detail_value[7], "160 SAVE") == 0, "cpu saving, got '%s'",
           s_detail_value[7]);
     links(false, -34, "", false, 1U, false, false);
     sp_compose();

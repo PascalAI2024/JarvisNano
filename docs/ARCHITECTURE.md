@@ -106,7 +106,7 @@ sequenceDiagram
     T-->>C: typed server events (96-deep queue)
     C->>D: Listening / Thinking / Speaking
     T-->>P: 24 kHz PCM into a 512 KiB ring
-    P->>P: pre-roll 600 ms, refill 1500 ms after a hole
+    P->>P: adaptive pre-roll 600–1500 ms, refill 1500 ms after a hole
     P->>U: ES8311 speaker output
 ```
 
@@ -117,9 +117,10 @@ unanswered-utterance watchdog below.
 **Why the speaker runs a second behind the network.** Measured from the
 transcript timing, Gemini paces native audio near real time and stalls
 0.8–2.2 s mid-sentence. Draining as fast as it arrives produced holes; the
-feeder now waits for a 600 ms lead before a reply's first word and rebuilds a
-1500 ms lead after any underrun, capped so a reply boundary never waits more
-than 2.5 s. Counters: `/api/device/health` → `playback`, `rx`.
+feeder waits for a lead before a reply's first word (600 ms, stepping up 300 ms
+after any reply with a hole and down 200 ms after three clean ones, between 600
+and 1500) and rebuilds a 1500 ms lead after any underrun, capped so a reply
+boundary never waits more than 2.5 s. Counters: `/api/device/health` → `playback`, `rx`.
 
 ### Session liveness
 
@@ -228,9 +229,12 @@ provisioned. Jobs the device owns (the weather glance) are tagged
 ## Power ladder
 
 The rest ladder in `jr_core` names the state; `main.c` drives the hardware
-under it. Of the S3's four power modes the firmware uses two — active and
-Wi-Fi modem sleep — plus deep sleep at the bottom of the ladder. Light sleep
-cannot engage while the microphones capture, which is always.
+under it: the CPU gear (240 MHz while anything is happening, 160 at rest on
+the cell, max pinned to min so nothing scales under a peripheral), Wi-Fi
+modem sleep, and deep sleep at the bottom. Below 20 % on the cell the
+ladder runs four times faster. Light sleep cannot engage while the
+microphones capture, which is always. Measurements and the gear rationale:
+[`reference/power-modes.md`](reference/power-modes.md).
 
 ```mermaid
 stateDiagram-v2

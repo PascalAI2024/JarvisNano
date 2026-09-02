@@ -1388,7 +1388,7 @@ static volatile uint32_t s_act_count;
 static volatile uint32_t s_power_word = 0xFFu; /* pct | mv<<8 | usb/charge */
 /* STATUS links: bit0 wifi, bit1 session open, bits3:2 tools (0 none,
  * 1 starting, 2 ready), bit4 desk live, bit5 radio saving, bits15:8 -dBm,
- * bits23:16 die temperature + 40 (0 = no reading). */
+ * bits23:16 die temperature + 40 (0 = no reading), bits27:24 CPU MHz / 20. */
 #define SP_CHIP_HOT_C  70
 static volatile uint32_t s_links_word;
 static char s_links_ip[16];
@@ -1965,9 +1965,17 @@ static void sp_compose_detail(int space)
          * radio sleeps between beacons while the device rests and runs
          * realtime for voice, updates and a companion. The CPU does not
          * scale yet — see PLAN.md — so this row is the whole truth. */
-        sp_str(s_detail_label[7], 0, SP_COL_MAX, "RADIO");
-        sp_str(s_detail_value[7], 0, SP_COL_MAX,
-               (lk & (1u << 5)) != 0u ? "SAVING" : "REALTIME");
+        /* The gear and the radio in one row: "240 LIVE" while anything is
+         * happening, "160 SAVE" at rest on the cell. */
+        sp_str(s_detail_label[7], 0, SP_COL_MAX, "CPU");
+        {
+            const uint32_t mhz = ((lk >> 24) & 0xFu) * 20u;
+            int len = mhz != 0u ? sp_num(s_detail_value[7], 0, SP_COL_MAX, mhz)
+                                : sp_str(s_detail_value[7], 0, SP_COL_MAX, "--");
+            len = sp_str(s_detail_value[7], len, SP_COL_MAX, " ");
+            (void)sp_str(s_detail_value[7], len, SP_COL_MAX,
+                         (lk & (1u << 5)) != 0u ? "SAVE" : "LIVE");
+        }
         /* At rest the UPDATE row reports READINESS rather than a state noun,
          * so STATUS answers "could this take an update right now" without an
          * update having to be in flight. */
@@ -5063,7 +5071,8 @@ void jr_display_links_set(const jr_display_links_t *links)
         ((uint32_t)(neg > 255 ? 255 : neg) << 8) |
         ((uint32_t)(links->chip_c_valid
                         ? (links->chip_c < -40 ? 0 : links->chip_c + 40)
-                        : 0) << 16);
+                        : 0) << 16) |
+        ((uint32_t)((links->cpu_mhz / 20u) & 0xFu) << 24);
     if (__atomic_load_n(&s_links_word, __ATOMIC_ACQUIRE) == word) {
         return;
     }

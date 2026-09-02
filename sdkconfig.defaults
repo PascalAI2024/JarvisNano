@@ -171,3 +171,14 @@ CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=4
 #     over. See docs/JARVISNANO_OS_PLAN.md "Internal RAM budget". ---
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS=y
+
+# Power management APIs, for the CPU gears (esp_pm_configure with max == min
+# per mood: no dynamic scaling, no light sleep — the I2S capture holds the
+# APB lock anyway). DFS is NOT auto-initialised: the firmware picks the gear.
+CONFIG_PM_ENABLE=y
+# CONFIG_PM_DFS_INIT_AUTO is not set
+# CONFIG_FREERTOS_USE_TICKLESS_IDLE is not set
+# Per-task run-time counters, so /api/diag/tasks can say how idle each core
+# is — the number the gears are chosen from.
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER=y

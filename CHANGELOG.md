@@ -49,6 +49,14 @@ are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
   speech detection, nothing from the room leaves the device. Text turns still
   work, and answer in three seconds because the server hears a quiet room
   rather than nothing.
+- Smarter on battery. The CPU runs in gears: 240 MHz whenever anything is
+  happening, 160 MHz at rest on the cell, chosen from measured idle share
+  (the renderer is half of core 0; 80 MHz would starve it). Below 20 % the
+  rest ladder runs four times faster, so a device that is running out rests
+  in seconds and deep-sleeps in six minutes. The speaker's pre-roll adapts:
+  600 ms, stepping up after a reply with a hole and back down after clean
+  ones. STATUS shows the gear on its CPU row; `/api/diag/tasks` carries
+  per-task run-time counters.
 - Lift to glance: picked up after a rest, the weather shows for eight seconds
   and the glass goes home by itself. A first fetch with rain in the day leaves
   one "RAIN TODAY" line.

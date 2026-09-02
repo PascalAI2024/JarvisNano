@@ -181,7 +181,8 @@ gotchas and the verification recipe are in [`docs/BUILD.md`](docs/BUILD.md).
   live connections, battery and die temperature; ACTIVITY with the last three
   things Jarvis did; DESK only while a companion is live.
 - A rest ladder that ends in deep sleep on battery, with the IMU's own
-  motion engine, the touch line and a timer as the ways back.
+  motion engine, the touch line and a timer as the ways back; CPU gears by
+  mood and a four-times-faster ladder below 20 %.
 - Physical authority: synthetic input cannot clear privacy, approve consent,
   answer asks, or escape a companion's lease.
 - Dual-slot OTA with preflight, probation, and rollback; deep sleep refuses to

@@ -16,15 +16,16 @@ static uint8_t mood_brightness(jr_mood_t mood)
     }
 }
 
-static jr_mood_t mood_from_still(uint32_t still_ms)
+static jr_mood_t mood_from_still(uint32_t still_ms, bool saver)
 {
-    if (still_ms >= JR_MOOD_DREAM_MS) {
+    const uint32_t div = saver ? JR_MOOD_SAVER_DIV : 1u;
+    if (still_ms >= JR_MOOD_DREAM_MS / div) {
         return JR_MOOD_DREAM;
     }
-    if (still_ms >= JR_MOOD_WHISPER_MS) {
+    if (still_ms >= JR_MOOD_WHISPER_MS / div) {
         return JR_MOOD_WHISPER;
     }
-    if (still_ms >= JR_MOOD_AMBIENT_MS) {
+    if (still_ms >= JR_MOOD_AMBIENT_MS / div) {
         return JR_MOOD_AMBIENT;
     }
     return JR_MOOD_AWAKE;
@@ -74,6 +75,7 @@ jr_mood_out_t jr_mood_step(jr_mood_state_t *s, const jr_mood_in_t *in)
 
     const uint32_t now = in->now_ms;
     jr_mood_t next = s->mood;
+    s->saver = in->saver;
 
     if (in->face_down) {
         next = JR_MOOD_DREAM;
@@ -83,7 +85,7 @@ jr_mood_out_t jr_mood_step(jr_mood_state_t *s, const jr_mood_in_t *in)
         s->still_since_ms = now;
     } else {
         uint32_t still = now - s->still_since_ms;
-        next = mood_from_still(still);
+        next = mood_from_still(still, in->saver);
     }
 
     const bool changed = (next != s->mood);
@@ -97,7 +99,8 @@ jr_mood_out_t jr_mood_step(jr_mood_state_t *s, const jr_mood_in_t *in)
 bool jr_mood_sleep_due(const jr_mood_state_t *s, uint32_t now_ms)
 {
     return s != NULL && s->mood == JR_MOOD_DREAM &&
-           (uint32_t)(now_ms - s->last_change_ms) >= JR_MOOD_SLEEP_MS;
+           (uint32_t)(now_ms - s->last_change_ms) >=
+               JR_MOOD_SLEEP_MS / (s->saver ? JR_MOOD_SAVER_DIV : 1u);
 }
 
 const char *jr_mood_name(jr_mood_t mood)

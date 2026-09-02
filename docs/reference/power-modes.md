@@ -12,12 +12,20 @@ rediscover the two gotchas at the bottom.
 
 | Mode | Used | How |
 |---|---|---|
-| Active | yes | CPU pinned at 240 MHz (`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240`); no `CONFIG_PM_ENABLE`, no `esp_pm` |
+| Active, in gears | yes | `CONFIG_PM_ENABLE` with **max pinned to min** per gear (`cpu_gear_set`, `main/main.c`): 240 MHz whenever anything is happening (voice armed, an update, a lease, USB present, the audio self-test), 160 MHz at rest on the cell once the session is closed. No dynamic scaling, no `PM_DFS_INIT_AUTO`, no tickless idle. `/api/debug/gain?cpu=160` forces a gear for a bench; `cpu=0` returns to auto |
 | Modem-sleep | yes | `jr_net_set_power_save()` toggles `WIFI_PS_MIN_MODEM` from the mood ladder: realtime while voice is armed, an update is in flight, or a companion holds the device; saving otherwise (`main/main.c`, the mood tick) |
 | Light-sleep | no | Automatic light sleep cannot engage: the I²S capture that keeps WakeNet listening holds the APB clock lock the whole time the device is awake. DFS on its own is unmeasurable here — the AXP2101 exposes no current reading (`jr_power_t` has voltage and percent only) |
 | Deep-sleep | yes | `enter_deep_sleep()` in `main/main.c`, ten minutes into DREAM on battery |
 
-STATUS reports the modem state on its `RADIO` row (`SAVING` / `REALTIME`) and
+**Battery saver.** Below 20 % on the cell every wait on the ladder is divided
+by four (`JR_MOOD_SAVER_DIV`): AMBIENT at 5 s, WHISPER at 75 s, DREAM at
+3 min 45 s, deep sleep 2 min 30 s later. It is an input to the pure ladder,
+so plugging in restores the normal waits at once. The speaker's pre-roll is
+adaptive too (`components/jr_audio`): 600 ms, +300 after any reply with a
+hole, −200 after three clean replies, between 600 and 1500.
+
+STATUS reports the gear and the modem state on its `CPU` row (`240 LIVE` /
+`160 SAVE`) and
 the die temperature on `CHIP` (the S3's own thermometer, `esp_driver_tsens`;
 43 °C at rest on the cell, `RUNNING HOT` headline from 70 °C).
 
@@ -75,7 +83,8 @@ stateDiagram-v2
 | 2026-09-01 | Forced sleep at 80 s uptime with a 45 s timer: HTTP gone in 10 s, back in 51 s, `wake: timer`, `armed: lift true, touch true`, IMU sampler live after the wake with fresh samples | PLAN.md N10.4 |
 | 2026-09-01 | **A deep sleep during OTA probation rolls the image back.** Deep sleep is a reboot through the bootloader; an image still `PENDING_VERIFY` is treated as a failed boot. The first forced test woke on the previous firmware. Now `enter_deep_sleep()` refuses while the running image is in probation and the debug route answers `409` | `main/main.c` `image_in_probation()` |
 | 2026-09-01 | **The QMI8658 on this board never sets `STATUSINT.CmdDone`** for any CTRL9 command, with either `CTRL8` handshake type, over 100 ms of polling. The command still lands (the wake line and the readback agree), so the handshake is logged and not fatal; the engine is cleared at boot with a soft reset (`0x60 = 0xB0`) instead of a command. Revision register reads `0x7C` | `components/jr_imu/src/jr_imu.c` `imu_ctrl9()` |
-| 2026-09-01 | Die temperature 43 °C at rest on the cell with Wi-Fi up; the owner's "it is hot" was the enclosure over charging + AMOLED + a 240 MHz core that never scales | STATUS `CHIP` row |
+| 2026-09-01 | Die temperature 43 °C at rest on the cell with Wi-Fi up; the owner's "it is hot" was the enclosure over charging + AMOLED + a 240 MHz core that never scaled | STATUS `CHIP` row |
+| 2026-09-01 | **Idle share per core, awake and muted, 240 MHz:** core 0 ≈ 43 % idle with the renderer alone ≈ 50 % of it; core 1 ≈ 96 % idle (≈ 72 % with a session open, the AFE on it). **At 160 MHz:** core 0 37 % idle, renderer 55 %, 16 fps, a spoken reply with one 12 ms hole. 80 MHz would starve the renderer; 160 is the rest gear. Enabling `CONFIG_PM_ENABLE` + run-time stats cost ≈ 5 KB of free internal RAM; the largest block stayed 32 KB | `/api/diag/tasks` (`run` counters, `total_runtime`), `/api/debug/gain?cpu=` |
 
 ## Open questions
 
@@ -85,9 +94,9 @@ stateDiagram-v2
 - Real current in each mode is unknown; the PMIC cannot report it. A
   percent-over-time reading across a night on the cell is the practical proxy
   (PLAN.md N10.3 acceptance).
-- DFS (`CONFIG_PM_ENABLE` with 80 MHz minimum) would only pay while the CPU is
-  genuinely idle, which WakeNet and the render loop rarely allow. Measure before
-  enabling; a reconfigure once cost 16 KB of internal RAM and broke voice.
+- Dynamic scaling (min 80, max 240 with locks) is still untried; the gears are
+  the measured, lock-free version of it. The renderer is the daytime load —
+  a lower render cadence at rest would save more than any clock.
 
 ## Sources
 

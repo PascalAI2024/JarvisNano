@@ -46,6 +46,10 @@ extern "C" {
  * world: no USB, no update, no companion). Ten minutes past DREAM is 25 min
  * of stillness face-up, or 10 min face-down. */
 #define JR_MOOD_SLEEP_MS   600000u
+/* BATTERY SAVER: below the low-cell line on battery every wait above is
+ * divided by this, so a device that is running out rests in seconds, closes
+ * its session in a minute or two, and sleeps in six instead of twenty-five. */
+#define JR_MOOD_SAVER_DIV  4u
 
 typedef enum {
     JR_MOOD_AWAKE = 0,
@@ -58,6 +62,7 @@ typedef struct {
     jr_mood_t mood;
     uint32_t still_since_ms;
     uint32_t last_change_ms;
+    bool saver;             /* the saver ladder is in force (input, kept) */
 } jr_mood_state_t;
 
 typedef struct {
@@ -65,6 +70,7 @@ typedef struct {
     bool face_down;
     bool moving;
     bool user_busy;
+    bool saver;             /* low cell on battery: every wait / SAVER_DIV */
 } jr_mood_in_t;
 
 typedef struct {

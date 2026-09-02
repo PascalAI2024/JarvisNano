@@ -47,6 +47,7 @@
 #include "esp_attr.h"
 #include "esp_sleep.h"
 #include "driver/temperature_sensor.h"
+#include "esp_pm.h"
 #include "cJSON.h"
 
 #include "jr_ports/ports.h"
@@ -848,6 +849,38 @@ static _Atomic uint32_t s_reply_deadline_ms;
 static uint8_t          s_unanswered;
 static _Atomic uint32_t s_unanswered_total;
 static temperature_sensor_handle_t s_tsens;
+
+/* ---- CPU gears ------------------------------------------------------------
+ *
+ * The owner: "are we optimizing the megahertz for battery?" We were not: 240
+ * from boot to deep sleep. Now the mood picks a gear, max pinned to min so
+ * nothing scales underneath a running peripheral and light sleep stays out.
+ * LIVE (240) whenever anything is happening — voice armed, an update, a
+ * lease, USB present. REST_MHZ once the session is closed on the cell. */
+#define CPU_MHZ_LIVE   240
+#define CPU_MHZ_REST   160
+#define BATTERY_SAVER_PCT 20U
+static _Atomic int s_cpu_mhz;
+static _Atomic int s_cpu_force;   /* bench: /api/debug/gain?cpu=160; 0 = auto */
+
+static void cpu_gear_set(int mhz)
+{
+    if (atomic_load(&s_cpu_mhz) == mhz) {
+        return;
+    }
+    esp_pm_config_t cfg = {
+        .max_freq_mhz = mhz,
+        .min_freq_mhz = mhz,
+        .light_sleep_enable = false,
+    };
+    const esp_err_t err = esp_pm_configure(&cfg);
+    if (err == ESP_OK) {
+        atomic_store(&s_cpu_mhz, mhz);
+        ESP_LOGI(TAG, "cpu gear: %d MHz", mhz);
+    } else {
+        ESP_LOGW(TAG, "cpu gear %d MHz refused: %s", mhz, esp_err_to_name(err));
+    }
+}
 static _Atomic bool     s_sleep_force;
 static _Atomic uint32_t s_sleep_timer_s;
 static int              s_boot_wake_cause;
@@ -2523,6 +2556,7 @@ static void publish_shell_state(uint32_t now_ms)
         jr_display_links_t links = {
             .chip_c = (int8_t)(chip_ok ? lroundf(chip_c) : 0),
             .chip_c_valid = chip_ok,
+            .cpu_mhz = (uint16_t)atomic_load(&s_cpu_mhz),
             .wifi_up = net.sta_connected,
             .rssi_dbm = net.rssi,
             .link_open = s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN,
@@ -2848,6 +2882,11 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
     query_int(req, "preroll", &preroll);
     query_int(req, "refill", &refill);
     jr_audio_set_jitter_ms(preroll, refill);
+    int cpu = -1;
+    query_int(req, "cpu", &cpu);
+    if (cpu == 0 || cpu == 80 || cpu == 160 || cpu == 240) {
+        atomic_store(&s_cpu_force, cpu);   /* bench: force a gear, 0 = auto */
+    }
     query_int(req, "speakmic", &speakmic);
     jr_audio_set_gains(mic, ref, vol);
     if (speakmic >= 0) {
@@ -3352,7 +3391,8 @@ static esp_err_t tasks_diag_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
         return ESP_OK;
     }
-    const UBaseType_t got = uxTaskGetSystemState(snap, count, NULL);
+    uint32_t total_runtime = 0;
+    const UBaseType_t got = uxTaskGetSystemState(snap, count, &total_runtime);
 
     char *body = malloc(4096);
     if (body == NULL) {
@@ -3360,18 +3400,25 @@ static esp_err_t tasks_diag_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
         return ESP_OK;
     }
+    /* total_runtime and each task's run counter come from the esp_timer
+     * (CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS): two snapshots a few seconds
+     * apart give each core's idle share from IDLE0/IDLE1 — the number the
+     * CPU gears are chosen from. */
     int off = snprintf(body, 4096,
-        "{\"free_internal\":%u,\"largest_internal_block\":%u,\"tasks\":[",
+        "{\"free_internal\":%u,\"largest_internal_block\":%u,"
+        "\"cpu_mhz\":%d,\"total_runtime\":%u,\"tasks\":[",
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+        atomic_load(&s_cpu_mhz), (unsigned)total_runtime);
 
     for (UBaseType_t i = 0; i < got && off > 0 && off < 4000; ++i) {
         off += snprintf(body + off, (size_t)(4096 - off),
-            "%s{\"name\":\"%s\",\"prio\":%u,\"stack_free\":%u}",
+            "%s{\"name\":\"%s\",\"prio\":%u,\"stack_free\":%u,\"run\":%u}",
             i ? "," : "",
             snap[i].pcTaskName ? snap[i].pcTaskName : "?",
             (unsigned)snap[i].uxCurrentPriority,
-            (unsigned)snap[i].usStackHighWaterMark);
+            (unsigned)snap[i].usStackHighWaterMark,
+            (unsigned)snap[i].ulRunTimeCounter);
     }
     if (off > 0 && off < 4090) {
         off += snprintf(body + off, (size_t)(4096 - off), "]}");
@@ -6757,11 +6804,15 @@ static void voice_task(void *arg)
              * Motion is physical and is read the same way whether the mic is
              * live or not — gating it on privacy meant a boot-muted device
              * could not be woken by being picked up at all. */
+            const bool on_cell = have_power && bat.present && !bat.usb_present;
+            const bool saver = on_cell && bat.percent <= 100U &&
+                               bat.percent <= BATTERY_SAVER_PCT;
             jr_mood_in_t min = {
                 .now_ms = (uint32_t)now,
                 .face_down = s_mood_face_down,
                 .moving = moving,
                 .user_busy = user_busy || (have_power && bat.usb_present),
+                .saver = saver,
             };
             jr_mood_out_t mout = jr_mood_step(&s_mood, &min);
             const bool realtime_power =
@@ -6769,6 +6820,16 @@ static void voice_task(void *arg)
                 operator_mode_active((uint32_t)now) ||
                 atomic_load(&s_ota_active);
             (void)jr_net_set_power_save(!realtime_power);
+            /* THE GEAR. Anything happening, or a cable: 240. Resting on the
+             * cell with the session closed: REST. Never lower while the
+             * audio self-test owns the codec. */
+            {
+                const int forced = atomic_load(&s_cpu_force);
+                cpu_gear_set(forced != 0 ? forced
+                             : (!on_cell || realtime_power ||
+                                atomic_load(&s_audio_diag_until_ms) != 0U)
+                                   ? CPU_MHZ_LIVE : CPU_MHZ_REST);
+            }
             uint8_t effective_brightness = (uint8_t)(
                 ((unsigned)mout.brightness * s_brightness_cap + 50U) / 100U);
             {
@@ -8678,6 +8739,8 @@ void app_main(void)
      * the product (speech out, diagnostics, tool calls) so they draw first and
      * wake absorbs only the remainder. A failed init degrades to tap/lift wake
      * exactly as before Phase 5 — never the other way around. */
+    cpu_gear_set(CPU_MHZ_LIVE);   /* explicit, so the first switch has a baseline */
+
     /* The die thermometer, for STATUS. The owner's "the device is hot" had
      * no number behind it; now it has one. */
     {

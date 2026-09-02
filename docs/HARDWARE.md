@@ -61,9 +61,9 @@ microSD slot. Wall time is SNTP-backed. Diagnostics persist only in the bounded
    second renderer beside the existing compositor.
 3. Realtime voice, OTA, provisioning, and operator mode force full Wi-Fi radio
    availability; rest uses minimum modem sleep; deep sleep follows ten minutes
-   of DREAM on battery. Light sleep cannot engage while the codec captures,
-   and CPU frequency scaling stays off until current is measured
-   (`docs/reference/power-modes.md`).
+   of DREAM on battery. The CPU runs in gears, 240 MHz live and 160 at rest
+   on the cell, chosen from measured idle share; light sleep cannot engage
+   while the codec captures (`docs/reference/power-modes.md`).
 4. QMI8658 polls at 100 Hz while awake; before deep sleep its Wake-on-Motion
    engine is armed on **INT1 → GPIO21** (resolved from the C schematic — INT2
    is not connected). The touch INT is GPIO11. Both are RTC-capable wake pins.
