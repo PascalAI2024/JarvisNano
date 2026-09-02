@@ -1758,13 +1758,14 @@ static void test_watch_styles_paint_their_own_regions(void)
     uint16_t *fb = calloc(px, sizeof *fb);
     uint16_t *whole = calloc(px, sizeof *whole);
     if (!fb || !whole) { printf("FAIL %s: alloc\n", __func__); g_failures++; free(fb); free(whole); return; }
-    /* cream = pack565(232,226,200) unswapped */
     const uint16_t cream = (uint16_t)(((232 & 0xF8) << 8) | ((226 & 0xFC) << 3) | (200 >> 3));
-    const uint16_t gold_full = (uint16_t)(((255 & 0xF8) << 8) | ((180 & 0xFC) << 3) | (40 >> 3));
+    const uint16_t ivory = (uint16_t)(((245 & 0xF8) << 8) | ((242 & 0xFC) << 3) | (232 >> 3));
+    const uint16_t cyan  = (uint16_t)(((0 & 0xF8) << 8) | ((229 & 0xFC) << 3) | (255 >> 3));
+    const uint16_t gold  = (uint16_t)(((214 & 0xF8) << 8) | ((178 & 0xFC) << 3) | (62 >> 3));
 
-    for (int style = 0; style < 4; ++style) {
+    for (int style = 1; style <= 5; ++style) {
         render_style_strips(fb, 6, 30, 15, style);   /* hands away from 12 */
-        size_t tri = 0, cream_any = 0, gold = 0, far = 0, lit = 0;
+        size_t tri = 0, cream_any = 0, lit = 0, iv = 0, cy = 0, au = 0, far = 0;
         for (int y = 0; y < HUD_H; ++y) {
             for (int x = 0; x < HUD_W; ++x) {
                 const uint16_t p = fb[(size_t)y * HUD_W + x];
@@ -1772,29 +1773,37 @@ static void test_watch_styles_paint_their_own_regions(void)
                 lit++;
                 const int dx = x - 232, dy = y - 232;
                 const int r2 = dx * dx + dy * dy;
-                CHECK(r2 <= 192 * 192, "style %d paints at r>192 (%d,%d)", style, x, y);
+                if (r2 > 216 * 216) far++;
                 if (p == cream) {
                     cream_any++;
                     if (x >= 205 && x <= 259 && y >= 52 && y <= 78) tri++;
                 }
-                if (p == gold_full) gold++;
-                if (r2 >= 186 * 186) far++;
+                if (p == ivory) iv++;
+                if (p == cyan) cy++;
+                if (p == gold) au++;
             }
         }
-        CHECK(lit > 200, "style %d lit only %zu px", style, lit);
-        if (style == 1) {
+        CHECK(far == 0, "style %d paints %zu px beyond r216", style, far);
+        CHECK(lit > 400, "style %d lit only %zu px", style, lit);
+        switch (style) {
+        case 1:
             CHECK(tri > 150, "DIVER: 12 o'clock triangle only %zu cream px", tri);
-            CHECK(cream_any > 1500, "DIVER: only %zu cream px", cream_any);
-        } else {
-            CHECK(cream_any == 0, "style %d painted %zu cream px", style, cream_any);
-        }
-        if (style == 3) {
-            CHECK(gold == 0, "MINIMAL has %zu gold px (a seconds hand)", gold);
-            CHECK(far == 0, "MINIMAL paints %zu px at r>=186", far);
-        } else if (style == 1) {
-            CHECK(gold == 0, "DIVER has %zu gold px (its seconds are white lume)", gold);
-        } else {
-            CHECK(gold > 20, "style %d has only %zu gold px", style, gold);
+            CHECK(cream_any > 1200, "DIVER: only %zu cream px", cream_any);
+            break;
+        case 2:
+            CHECK(au > 300, "DRESS: only %zu gold px (batons + dauphine)", au);
+            CHECK(cream_any == 0, "DRESS painted %zu cream px", cream_any);
+            break;
+        case 3:
+            CHECK(cream_any > 200, "PILOT: only %zu lume px", cream_any);
+            break;
+        case 4:
+            CHECK(iv > 100000, "MINIMAL: only %zu ivory px (the dial is drawn)", iv);
+            CHECK(cream_any == 0, "MINIMAL painted %zu cream px", cream_any);
+            break;
+        default:
+            CHECK(cy > 300, "FUTURE: only %zu cyan px", cy);
+            break;
         }
         /* strip rendering must equal the whole-frame render */
         memset(whole, 0, px * sizeof *whole);
@@ -1802,24 +1811,8 @@ static void test_watch_styles_paint_their_own_regions(void)
         CHECK(memcmp(whole, fb, px * sizeof *fb) == 0,
               "style %d: strips differ from the whole frame", style);
     }
-    /* DIGITAL at 20:34: the leading '2' fills the left digit slab; JARVIS
-     * hands never reach it. */
-    render_style_strips(fb, 20, 34, 0, 2);
-    size_t d2 = 0, gold_dots = 0;
-    render_style_strips(whole, 20, 34, 0, 0);
-    size_t d0 = 0;
-    for (int y = 172; y <= 292; ++y) {
-        for (int x = 68; x < 120; ++x) {
-            if (fb[(size_t)y * HUD_W + x]) d2++;
-            if (whole[(size_t)y * HUD_W + x]) d0++;
-        }
-    }
-    for (size_t k = 0; k < px; ++k) if (fb[k] == gold_full) gold_dots++;
-    CHECK(d2 > 800, "DIGITAL: left digit slab only %zu px", d2);
-    CHECK(d0 == 0, "JARVIS painted %zu px in the digit slab", d0);
-    CHECK(gold_dots >= 9 && gold_dots <= 27, "DIGITAL ss=0: %zu gold px (one 3x3 dot expected)", gold_dots);
     /* strength 0 paints nothing in every style */
-    for (int style = 0; style < 4; ++style) {
+    for (int style = 0; style < 6; ++style) {
         memset(fb, 0, px * sizeof *fb);
         hud_overlay_clock_style(fb, 0, HUD_H, false, 6, 30, 15, 0, style);
         size_t any = 0;
@@ -1827,6 +1820,89 @@ static void test_watch_styles_paint_their_own_regions(void)
         CHECK(any == 0, "style %d paints %zu px at strength 0", style, any);
     }
     free(fb); free(whole);
+}
+
+/* No combing, at any angle: every row a hand touches is ONE contiguous run
+ * of pixels. Dot-stamped hands (the first cut) left one-pixel teeth along
+ * both edges at most angles; a scanline polygon cannot. The sweep is the
+ * hand alone, without its shadow (the shadow is a second object two pixels
+ * away, legitimately separate at the tip). */
+static void test_watch_hands_never_comb(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = calloc(px, sizeof *fb);
+    if (!fb) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
+    static const int kinds[][2] = { {1,0},{1,1},{1,2},{2,0},{2,1},{3,0},{3,1},{3,2},{4,0},{4,1},{5,0},{5,1},{5,2} };
+    size_t angles_checked = 0, rows_checked = 0;
+    for (size_t k = 0; k < sizeof kinds / sizeof *kinds; ++k) {
+        for (int deg = 0; deg < 360; ++deg) {
+            const uint32_t a16 = (uint32_t)(((uint64_t)deg * 65536u) / 360u) + (192u << 8);
+            memset(fb, 0, px * sizeof *fb);
+            hud_watch_hand(fb, 0, HUD_H, false, kinds[k][0], kinds[k][1], a16, false);
+            size_t lit = 0;
+            int bad_row = -1;
+            for (int y = 0; y < HUD_H && bad_row < 0; ++y) {
+                const uint16_t *row = fb + (size_t)y * HUD_W;
+                int runs = 0; bool in = false;
+                for (int x = 0; x < HUD_W; ++x) {
+                    const bool on = row[x] != 0;
+                    if (on) lit++;
+                    if (on && !in) runs++;
+                    in = on;
+                }
+                if (runs > 1) bad_row = y;
+                if (runs == 1) rows_checked++;
+            }
+            CHECK(lit > 20, "style %d hand %d at %d deg lit only %zu px", kinds[k][0], kinds[k][1], deg, lit);
+            CHECK(bad_row < 0, "style %d hand %d at %d deg combs on row %d", kinds[k][0], kinds[k][1], deg, bad_row);
+            angles_checked++;
+        }
+    }
+    CHECK(angles_checked == 13u * 360u, "swept %zu angle/hand pairs", angles_checked);
+    CHECK(rows_checked > 100000, "only %zu hand rows checked", rows_checked);
+    free(fb);
+}
+
+/* Over a baked dial the hands BLEND: pixels the hands do not touch keep the
+ * art, nothing outside r214 changes, and the edges are mixed rather than
+ * hard. The dial is a flat mid grey here; the art worker's is not, and the
+ * property is the same. */
+static void test_watch_hands_blend_and_spare_the_dial(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb);
+    if (!fb) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
+    const uint16_t grey = 0x4208;
+    for (int style = 1; style <= 5; ++style) {
+        if (style == 4) continue;                   /* MINIMAL draws its own dial */
+        for (size_t k = 0; k < px; ++k) fb[k] = grey;
+        const hud_watch_t w = { .hh = 10, .mm = 8, .ss = 30, .ms = 500,
+                                .batt_pct = 83, .wx_valid = true, .temp_f = 77,
+                                .dial_baked = true };
+        for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+            const int n = y + STRIP_ROWS > HUD_H ? HUD_H - y : STRIP_ROWS;
+            hud_overlay_watch(fb + (size_t)y * HUD_W, y, n, false, &w, 255, style);
+        }
+        size_t changed_in = 0, changed_out = 0, mixed = 0, kept = 0;
+        for (int y = 0; y < HUD_H; ++y) {
+            for (int x = 0; x < HUD_W; ++x) {
+                const uint16_t p = fb[(size_t)y * HUD_W + x];
+                const int dx = x - 232, dy = y - 232;
+                const bool inside = dx * dx + dy * dy <= 214 * 214;
+                if (p == grey) { if (inside) kept++; continue; }
+                if (inside) changed_in++; else changed_out++;
+                /* a mixed pixel is neither the grey nor a solid hand colour:
+                 * grey's channels partly survive in it */
+                const int r = (p >> 11) & 31, g = (p >> 5) & 63;
+                if (r != 8 && g != 16 && r > 2 && g > 4 && r < 28 && g < 58) mixed++;
+            }
+        }
+        CHECK(changed_out == 0, "style %d touched %zu px outside r214", style, changed_out);
+        CHECK(changed_in > 300 && changed_in < 40000, "style %d changed %zu px inside", style, changed_in);
+        CHECK(kept > 100000, "style %d kept only %zu dial px", style, kept);
+        CHECK(mixed > 100, "style %d has only %zu anti-aliased edge px", style, mixed);
+    }
+    free(fb);
 }
 
 int main(void)
@@ -1878,6 +1954,8 @@ int main(void)
     test_clock_strength_gate();
     test_watch_jarvis_is_pixel_identical();
     test_watch_styles_paint_their_own_regions();
+    test_watch_hands_never_comb();
+    test_watch_hands_blend_and_spare_the_dial();
 
     if (g_failures) {
         printf("hud_render tests FAILED (%d)\n", g_failures);

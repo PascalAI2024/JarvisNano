@@ -38,7 +38,7 @@ Wi-Fi OTA may still pass preflight when USB power is present.
 | Left-edge vertical | Volume +/− 5 globally |
 | Right-edge vertical | Brightness +/− 5 globally |
 | Centre vertical swipe | The ring: Jarvis ↔ Watch ↔ Weather ↔ Status ↔ (Desk, only while an agent/claim/lease is live) ↔ Activity (wraps) |
-| Horizontal swipe | Watch peek, 10 s; on WATCH itself: RIGHT = next watch style, LEFT = previous (JARVIS, DIVER, DIGITAL, MINIMAL), kept in NVS |
+| Horizontal swipe | Watch peek, 10 s; on WATCH itself: RIGHT = next watch style, LEFT = previous (JARVIS, DIVER, DRESS, PILOT, MINIMAL, FUTURE), kept in NVS |
 | Top-edge down | Open controls |
 | Centre up | Detail or controls close |
 | Double tap | Jarvis Home |
@@ -80,16 +80,26 @@ is the classified edge-origin swipe.
   host, no keys beyond the one already in NVS. `tools/board-worker/worker.py`
   is a reference for jobs the gateway cannot do. An SSH key pasted into chat
   on 2026-09-02 should be rotated — it was never installed.
-- **Four watches.** On WATCH a horizontal swipe steps the style — JARVIS
-  (the shipped face, checksum-pinned), DIVER (lume markers, broad hands,
-  lollipop seconds), DIGITAL (seven-segment 24 h, seconds as a gold dot
-  ring), MINIMAL (thin hands, twelve dots, no seconds) — RIGHT next, LEFT
-  previous, wrapping, caption `WATCH - <STYLE>`, a bloom. Two bits in the nav
-  word (17–18), NVS `app/watch_style`, `display.watch_style` in
-  `/api/cockpit`, walkable from the desk with
-  `POST /api/debug/input?kind=swipe&dir=right` while on WATCH. Evidence:
-  `docs/evidence/20260902-watch-*.png`. Elsewhere on the ring a horizontal
-  swipe still peeks the watch.
+- **Six watches, second cut.** Dial = baked art through the face pipeline
+  (`JR_FACE_DIAL_*`, requested by `watch_dial_face()` on WATCH with the
+  clock on; a missing clip falls back to IDLE underneath and the watch
+  clears its disc and draws the black stand-in). Hands = `hud_overlay_watch`
+  in `hud_render.c`: anti-aliased scanline polygons (16 sub-rows, half-pixel
+  tips, so no combing — the probe sweeps 13 hands × 360°), a two-tone bevel
+  that follows a fixed top-left light, hairline outline, soft shadow, lume,
+  hubs ≥ 12 px over the art's centre hole. Seconds sweep from
+  `s_clock_phase_ms`, latched once per frame. Text (DIVER's day, FUTURE's
+  four cells) is drawn in `watch_cells()` with the shell's glyphs; the
+  geometry table is `HUD_WATCH_*` in `hud_render.h`, on the art's measured
+  numbers. Three style bits (17–19) in the nav word; `jr_display_clock_set_date`
+  carries the day. The four dial clips overflowed the SPIFFS image at first
+  staging — the art lane's call. **Not met: the ≥ 17 fps awake gate.**
+  Measured at 160 MHz per frame: JARVIS 69 ms, DRESS 89, DIVER 108, MINIMAL
+  109, PILOT 112, FUTURE 127 (≈ 12–17 fps at 240 MHz); numbers and the
+  remaining levers in `docs/GLASS_DESIGN.md` "As shipped — the firmware".
+  Also seen once: an unexplained reboot right after the first walk of the
+  six styles on the first second-cut image (before the coverage row moved
+  off the render stack); not reproduced on the next three images.
 - **Muted is a watch.** Privacy mute feeds the ladder a `quiet` input:
   five seconds still and the glass is the WHISPER watch (brightness 22,
   6 fps, 160 MHz) with USB no longer holding it awake; touch, pickup, a live

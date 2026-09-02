@@ -31,6 +31,13 @@ typedef enum {
     JR_FACE_RESTING,    /* WHISPER/DREAM: the iris asleep, breathing slowly */
     JR_FACE_MUTED,      /* privacy: the closed iris held still, in gold */
     JR_FACE_LINKING,    /* connecting/reconnecting: the Wi-Fi orbit */
+    /* 2026-09-02 evening: the watch dials. Baked art shown under live hands
+     * on the WATCH screen; one clip each, chosen by jr_watch_style_t. MINIMAL
+     * and JARVIS have no clip — their dials are drawn by the compositor. */
+    JR_FACE_DIAL_DIVER,
+    JR_FACE_DIAL_DRESS,
+    JR_FACE_DIAL_PILOT,
+    JR_FACE_DIAL_FUTURE,
     JR_FACE_COUNT       /* bound, not a face: clip caches and clamps use it */
 } jr_face_t;
 

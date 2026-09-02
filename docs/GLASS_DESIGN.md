@@ -473,6 +473,48 @@ free PSRAM ≥ 1 MB after all four dials are resident; host suites green with
 positive-count tests per style. The concept sheets that chose the art live
 in `docs/evidence/20260902-dial-concepts-*.png`.
 
+**As shipped — the firmware (2026-09-02, evening).** `hud_overlay_watch`
+draws styles 1–5 over whatever the strip holds; `hud_overlay_clock` is
+JARVIS untouched (checksum-pinned). A hand is a tapered quad in hand-local
+coordinates rotated at a Q16-turn angle, filled per row from eight sample
+lines (two monotone chains, one edge solve each per line) into a coverage
+row and blended (read-modify-write) at coverage × strength; each flank is its own polygon so the bevel is a real
+split along the axis, with the light flank chosen against a fixed top-left
+light as the hand turns. Order per hand: shadow (+2, +3 px at ~40 %),
+hairline outline, light flank, dark flank, lume inset, then discs (Mercedes,
+lollipop, counterweight) and the hub. Tips are never thinner than half a
+pixel per flank — that, with eight sample lines, is what makes the
+360-degree combing sweep pass; four lines left one-pixel holes in the edge
+row of a near-horizontal dauphine. **Measured cost, muted WATCH at 160 MHz
+(render-task run time per frame, `/api/diag/tasks`):** JARVIS 69 ms, DRESS
+89, DIVER 108, MINIMAL 109, PILOT 112, FUTURE 127 — a bevelled hand is
+about 13 ms at 160 MHz, the MINIMAL disc about 20. Scaled to the 240 MHz
+awake gear that is DRESS ≈ 17 fps, DIVER/MINIMAL/PILOT ≈ 13–14, FUTURE ≈ 12
+against the ≥ 17 fps gate: **the gate is not met** for four of five styles
+(and the sixteen-line, per-edge-division first version was 20 ms a hand).
+What is left on the table without a frame buffer: fewer polygons per hand
+(the outline could be folded into the flanks), and the hour and minute
+hands redrawn only when they move — which needs the engine's dirty
+tracking, not this renderer. The fills carry `optimize("O2")` inside the
+`-Os` image; the coverage row is a static, since the render task has 2 KB
+of headroom on its 5 KB stack. Hand lengths (px from centre): DIVER
+hour 112 / minute 170 / seconds 186 (tail 34); DRESS 104 / 166; PILOT
+108 / 174 / 184; MINIMAL 98 / 162; FUTURE 100 / 166 / 192. Hubs: 12 px on
+every baked dial, 4 px on MINIMAL, a 20-px glow on FUTURE. Sub-dial needles
+reach r − 7 of their ring. The seconds phase is `now − s_clock_set_ms`,
+latched once per frame in `overlay_fade_tick`, clamped to 999 ms, never
+ahead of the published second. The dial rides the face pipeline: on WATCH
+with the clock on, `watch_dial_face()` swaps the requested face for the
+style's `JR_FACE_DIAL_*` where the render loop reads the request word, so a
+style step re-applies like any face change; `ctx->shown_face` tells the
+overlay whether the art is really under it (no clear) or the fallback is
+(clear, stand-in dial). The words on the watch — DIVER's day, FUTURE's
+date, weather, battery and link cells — are `watch_cells()` in
+`jr_display.c`, in the shell's glyphs, at the `HUD_WATCH_*` rectangles from
+the art table above; `'*'` now draws a degree ring. Every number comes from
+the clock and date words, the weather slot (dim past 120 min), the power
+word and the links word.
+
 ### The critical call: delete the destinations, keep the renderer
 
 This is the sharp decision in the document, and "delete the four spaces" and

@@ -419,10 +419,78 @@ void hud_overlay_bloom(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 void hud_overlay_clock(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                        int hh, int mm, int ss, int strength);
 
-/* The same watch in one of four styles (jr_watch_style_t in jr_display.h:
- * 0 JARVIS, 1 DIVER, 2 DIGITAL, 3 MINIMAL). Style 0 is hud_overlay_clock,
- * pixel for pixel; an unknown style draws style 0. Everything stays inside
- * r <= 192 and the strip contract. */
+/* THE WATCHES, SECOND CUT (2026-09-02). Six styles (jr_watch_style_t in
+ * jr_display.h: 0 JARVIS, 1 DIVER, 2 DRESS, 3 PILOT, 4 MINIMAL, 5 FUTURE).
+ * Style 0 is hud_overlay_clock, pixel for pixel; an unknown style draws
+ * style 0. Styles 1-5 draw anti-aliased bevelled hands (a tapered polygon
+ * per flank, a hairline outline, a soft shadow, lume where the style has it)
+ * over whatever the strip already holds — the baked dial when `dial_baked`,
+ * otherwise a black stand-in dial drawn first. The seconds hand sweeps from
+ * `ms`. PILOT reads `batt_pct` (-1 = unknown) and the temperature into its
+ * sub-dials; nothing is invented when a value is absent. Everything stays
+ * inside r <= 214 and the strip contract. */
+/* WHERE THE ART PUTS THINGS. The dials are cut from photographic concept
+ * art, so the date window, the sub-dial centres and the data cells are
+ * wherever the art has them. This table follows the art worker's
+ * measurements (docs/GLASS_DESIGN.md, "As shipped — the art"): pixels in
+ * the 466-px frame, origin top-left, rectangles [X0, X1) x [Y0, Y1). */
+#define HUD_WATCH_SUB3_CX     349    /* PILOT: sub-dial at 3 (temperature) */
+#define HUD_WATCH_SUB3_CY     233
+#define HUD_WATCH_SUB3_R       59
+#define HUD_WATCH_SUB6_CX     233    /* PILOT: sub-dial at 6 (seconds)     */
+#define HUD_WATCH_SUB6_CY     337
+#define HUD_WATCH_SUB6_R       60
+#define HUD_WATCH_SUB9_CX     117    /* PILOT: sub-dial at 9 (battery)     */
+#define HUD_WATCH_SUB9_CY     233
+#define HUD_WATCH_SUB9_R       59
+#define HUD_WATCH_DATE_X0     376    /* DIVER: the blanked date window     */
+#define HUD_WATCH_DATE_Y0     231
+#define HUD_WATCH_DATE_X1     417
+#define HUD_WATCH_DATE_Y1     257
+#define HUD_WATCH_CELL_DATE_X0  136  /* FUTURE: the four baked cells        */
+#define HUD_WATCH_CELL_DATE_Y0   91
+#define HUD_WATCH_CELL_DATE_X1  329
+#define HUD_WATCH_CELL_DATE_Y1  133
+#define HUD_WATCH_CELL_WX_X0    136
+#define HUD_WATCH_CELL_WX_Y0    337
+#define HUD_WATCH_CELL_WX_X1    329
+#define HUD_WATCH_CELL_WX_Y1    380
+#define HUD_WATCH_CELL_BAT_X0    36
+#define HUD_WATCH_CELL_BAT_Y0   210
+#define HUD_WATCH_CELL_BAT_X1   108
+#define HUD_WATCH_CELL_BAT_Y1   252
+#define HUD_WATCH_CELL_LINK_X0  357
+#define HUD_WATCH_CELL_LINK_Y0  210
+#define HUD_WATCH_CELL_LINK_X1  430
+#define HUD_WATCH_CELL_LINK_Y1  252
+#define HUD_WATCH_CELL_DATE_CX ((HUD_WATCH_CELL_DATE_X0 + HUD_WATCH_CELL_DATE_X1) / 2)
+#define HUD_WATCH_CELL_DATE_CY ((HUD_WATCH_CELL_DATE_Y0 + HUD_WATCH_CELL_DATE_Y1) / 2)
+#define HUD_WATCH_CELL_WX_CX   ((HUD_WATCH_CELL_WX_X0 + HUD_WATCH_CELL_WX_X1) / 2)
+#define HUD_WATCH_CELL_WX_CY   ((HUD_WATCH_CELL_WX_Y0 + HUD_WATCH_CELL_WX_Y1) / 2)
+#define HUD_WATCH_CELL_BAT_CX  ((HUD_WATCH_CELL_BAT_X0 + HUD_WATCH_CELL_BAT_X1) / 2)
+#define HUD_WATCH_CELL_BAT_CY  ((HUD_WATCH_CELL_BAT_Y0 + HUD_WATCH_CELL_BAT_Y1) / 2)
+#define HUD_WATCH_CELL_LINK_CX ((HUD_WATCH_CELL_LINK_X0 + HUD_WATCH_CELL_LINK_X1) / 2)
+#define HUD_WATCH_CELL_LINK_CY ((HUD_WATCH_CELL_LINK_Y0 + HUD_WATCH_CELL_LINK_Y1) / 2)
+
+typedef struct {
+    int  hh, mm, ss, ms;     /* ms 0..999: the phase inside the second     */
+    int  batt_pct;           /* 0..100, or -1 when the gauge has no answer */
+    bool wx_valid;           /* temp_f is a real reading                   */
+    int  temp_f;
+    bool dial_baked;         /* the baked dial is under the hands          */
+} hud_watch_t;
+
+void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                       const hud_watch_t *w, int strength, int style);
+
+/* One hand alone (0 hour, 1 minute, 2 seconds) at a Q16-turn angle
+ * (65536 per revolution, 12 o'clock at 192 << 8, clockwise), with or
+ * without its shadow. The building block the probe sweeps for combing. */
+void hud_watch_hand(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                    int style, int hand, uint32_t angle_q16, bool shadow);
+
+/* Compatibility: the six styles from the three clock numbers alone (no
+ * sweep, no data, no baked dial). Style 0 is hud_overlay_clock. */
 void hud_overlay_clock_style(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                              int hh, int mm, int ss, int strength, int style);
 

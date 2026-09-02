@@ -275,12 +275,20 @@ void jr_display_clock_set(bool on, int hh, int mm, int ss);
  * persisted by the composition root. A horizontal swipe on WATCH steps it
  * (RIGHT = next, LEFT = previous, wrapping). docs/GLASS_DESIGN.md §B. */
 typedef enum {
-    JR_WATCH_JARVIS = 0,   /* cyan hour, white minute, gold seconds */
-    JR_WATCH_DIVER,        /* lume markers, broad hands, lollipop seconds */
-    JR_WATCH_DIGITAL,      /* seven-segment HH:MM, seconds as a dot ring */
-    JR_WATCH_MINIMAL,      /* thin hands, twelve dots, no seconds */
+    JR_WATCH_JARVIS = 0,   /* cyan hour, white minute, gold seconds; no dial */
+    JR_WATCH_DIVER,        /* baked black sunburst + lume; Mercedes hands, date */
+    JR_WATCH_DRESS,        /* baked champagne sunburst; dauphine gold, no seconds */
+    JR_WATCH_PILOT,        /* baked matte black; sword hands, three sub-dials */
+    JR_WATCH_MINIMAL,      /* drawn warm-white dial; thin blued hands, no seconds */
+    JR_WATCH_FUTURE,       /* baked tech dial; slim cyan hands, four data cells */
     JR_WATCH_STYLE_COUNT
 } jr_watch_style_t;
+
+/* The day for the dials that show one (DIVER's window, FUTURE's date cell).
+ * wday 0 = Sunday, mday 1..31, mon 0..11 — struct tm's own numbering. Any
+ * task; one release-store. Unset (all zero) means "no date": the cells stay
+ * blank rather than inventing one. */
+void jr_display_clock_set_date(int wday, int mday, int mon);
 
 void             jr_display_watch_style_set(jr_watch_style_t style);
 void             jr_display_watch_style_step(int dir);   /* +1 next, -1 prev */

@@ -569,6 +569,10 @@ static void test_missing_clip_falls_back_to_the_face_it_grew_from(void)
     CHECK(face_fallback(JR_FACE_RESTING) == JR_FACE_IDLE, "rest -> idle");
     CHECK(face_fallback(JR_FACE_MUTED) == JR_FACE_IDLE, "muted -> idle");
     CHECK(face_fallback(JR_FACE_LINKING) == JR_FACE_THINKING, "linking -> thinking");
+    CHECK(face_fallback(JR_FACE_DIAL_DIVER) == JR_FACE_IDLE, "dial diver -> idle");
+    CHECK(face_fallback(JR_FACE_DIAL_DRESS) == JR_FACE_IDLE, "dial dress -> idle");
+    CHECK(face_fallback(JR_FACE_DIAL_PILOT) == JR_FACE_IDLE, "dial pilot -> idle");
+    CHECK(face_fallback(JR_FACE_DIAL_FUTURE) == JR_FACE_IDLE, "dial future -> idle");
     for (int f = 0; f < (int)JR_FACE_COUNT; ++f) {
         const jr_face_t p = face_fallback((jr_face_t)f);
         CHECK(p == (jr_face_t)f || face_fallback(p) == p,
@@ -1293,34 +1297,71 @@ static void stage_space(int space)
  * paints cream. Mutation-checked: a step that drops the style bits fails the
  * "survives nav_next" check; a renderer that ignores the style fails the
  * triangle count. */
-static void test_watch_style_is_two_nav_bits_that_wrap(void)
+static void test_watch_style_is_three_nav_bits_that_wrap(void)
 {
     reset_nav();
     CHECK(jr_display_watch_style() == JR_WATCH_JARVIS, "cold start is JARVIS");
     jr_display_watch_style_set(JR_WATCH_DIVER);
-    CHECK(((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 17) & 3u) == 1u,
-          "DIVER is not bit pattern 01 at bit 17 (word 0x%08x)",
+    CHECK(((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 17) & 7u) == 1u,
+          "DIVER is not bit pattern 001 at bit 17 (word 0x%08x)",
           (unsigned)__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE));
-    jr_display_watch_style_step(1);
-    CHECK(jr_display_watch_style() == JR_WATCH_DIGITAL, "right of DIVER is DIGITAL");
-    jr_display_watch_style_step(1);
-    CHECK(jr_display_watch_style() == JR_WATCH_MINIMAL, "right of DIGITAL is MINIMAL");
-    jr_display_watch_style_step(1);
-    CHECK(jr_display_watch_style() == JR_WATCH_JARVIS, "right of MINIMAL wraps to JARVIS");
+    jr_display_watch_style_set(JR_WATCH_FUTURE);
+    CHECK(((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 17) & 7u) == 5u,
+          "FUTURE is not bit pattern 101 at bit 17");
+    CHECK((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 20) == 0u,
+          "the style spilled above bit 19");
+    jr_display_watch_style_set(JR_WATCH_DIVER);
+    static const jr_watch_style_t walk[] = {
+        JR_WATCH_DRESS, JR_WATCH_PILOT, JR_WATCH_MINIMAL, JR_WATCH_FUTURE,
+        JR_WATCH_JARVIS, JR_WATCH_DIVER };
+    for (size_t i = 0; i < sizeof walk / sizeof *walk; ++i) {
+        jr_display_watch_style_step(1);
+        CHECK(jr_display_watch_style() == walk[i], "step %zu right landed on %d, wanted %d",
+              i, (int)jr_display_watch_style(), (int)walk[i]);
+    }
     jr_display_watch_style_step(-1);
-    CHECK(jr_display_watch_style() == JR_WATCH_MINIMAL, "left of JARVIS wraps to MINIMAL");
+    CHECK(jr_display_watch_style() == JR_WATCH_JARVIS, "left of DIVER is JARVIS");
+    jr_display_watch_style_step(-1);
+    CHECK(jr_display_watch_style() == JR_WATCH_FUTURE, "left of JARVIS wraps to FUTURE");
     jr_display_nav_next();
     jr_display_nav_up();
     jr_display_nav_home();
-    CHECK(jr_display_watch_style() == JR_WATCH_MINIMAL,
+    CHECK(jr_display_watch_style() == JR_WATCH_FUTURE,
           "the style did not survive next/up/home (now %d)", (int)jr_display_watch_style());
     CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS, "home still goes home");
     jr_display_watch_style_set((jr_watch_style_t)JR_WATCH_STYLE_COUNT);
-    CHECK(jr_display_watch_style() == JR_WATCH_MINIMAL, "an out-of-range style is refused");
-    CHECK(strcmp(jr_display_watch_style_name(JR_WATCH_DIVER), "DIVER") == 0, "DIVER is named");
-    CHECK(strcmp(jr_display_watch_style_name(JR_WATCH_DIGITAL), "DIGITAL") == 0, "DIGITAL is named");
-    CHECK(strcmp(jr_display_watch_style_name(JR_WATCH_MINIMAL), "MINIMAL") == 0, "MINIMAL is named");
+    CHECK(jr_display_watch_style() == JR_WATCH_FUTURE, "an out-of-range style is refused");
+    static const char *const names[] = { "JARVIS", "DIVER", "DRESS", "PILOT", "MINIMAL", "FUTURE" };
+    for (int i = 0; i < (int)JR_WATCH_STYLE_COUNT; ++i) {
+        CHECK(strcmp(jr_display_watch_style_name((jr_watch_style_t)i), names[i]) == 0,
+              "style %d is named %s", i, jr_display_watch_style_name((jr_watch_style_t)i));
+    }
     reset_nav();
+}
+
+static void render_watch_frame(uint16_t *fb, int style, jr_face_t shown)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    stage_power(JR_DISPLAY_OTA_IDLE, 0U, JR_DISPLAY_OVERLAY_NONE);
+    s_space_from = (uint8_t)JR_DISPLAY_SPACE_WATCH;
+    s_space_to = (uint8_t)JR_DISPLAY_SPACE_WATCH;
+    __atomic_store_n(&s_nav_word, (uint32_t)JR_DISPLAY_SPACE_WATCH, __ATOMIC_RELEASE);
+    jr_display_watch_style_set((jr_watch_style_t)style);
+    s_display.shown_face = shown;
+    s_shade_ease = 0;
+    s_detail_ease = 0;
+    s_space_veil = 256;
+    jr_display_clock_set(true, 6, 30, 15);
+    s_clock_shown_word = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
+    s_clock_ease = 256;
+    sp_compose();
+    for (size_t k = 0; k < px; ++k) fb[k] = 0x4208;     /* "the art" */
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+        uint16_t *strip = fb + (size_t)y * HUD_W;
+        apply_space_overlay(&s_display, y, y2, strip);
+        apply_clock_overlay(&s_display, y, y2, strip);
+    }
 }
 
 static void test_watch_style_reaches_the_glass(void)
@@ -1332,24 +1373,7 @@ static void test_watch_style_reaches_the_glass(void)
     static const int styles[] = { JR_WATCH_JARVIS, JR_WATCH_DIVER };
     int tri[2] = { 0, 0 };
     for (int k = 0; k < 2; ++k) {
-        stage_power(JR_DISPLAY_OTA_IDLE, 0U, JR_DISPLAY_OVERLAY_NONE);
-        s_space_from = (uint8_t)JR_DISPLAY_SPACE_WATCH;
-        s_space_to = (uint8_t)JR_DISPLAY_SPACE_WATCH;
-        __atomic_store_n(&s_nav_word, (uint32_t)JR_DISPLAY_SPACE_WATCH, __ATOMIC_RELEASE);
-        jr_display_watch_style_set((jr_watch_style_t)styles[k]);
-        s_shade_ease = 0;
-        s_detail_ease = 0;
-        s_space_veil = 256;
-        jr_display_clock_set(true, 6, 30, 15);
-        s_clock_ease = 256;
-        sp_compose();
-        memset(fb, 0, px * sizeof *fb);
-        for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
-            const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
-            uint16_t *strip = fb + (size_t)y * HUD_W;
-            apply_space_overlay(&s_display, y, y2, strip);
-            apply_clock_overlay(&s_display, y, y2, strip);
-        }
+        render_watch_frame(fb, styles[k], JR_FACE_IDLE);
         for (int y = 52; y <= 78; ++y) {
             for (int x = 205; x <= 259; ++x) {
                 if (fb[(size_t)y * HUD_W + x] == cream) tri[k]++;
@@ -1358,6 +1382,72 @@ static void test_watch_style_reaches_the_glass(void)
     }
     CHECK(tri[0] == 0, "JARVIS painted %d cream px at 12 o'clock", tri[0]);
     CHECK(tri[1] > 150, "DIVER painted only %d cream px at 12 o'clock", tri[1]);
+    free(fb);
+    reset_nav();
+}
+
+/* The dial is a face: on WATCH with the clock published, a style with baked
+ * art asks the face pipeline for its dial; JARVIS and MINIMAL ask for
+ * nothing; off WATCH, or with the clock off, nothing either. */
+static void test_watch_dial_face_follows_the_style_and_the_screen(void)
+{
+    reset_nav();
+    jr_display_clock_set(true, 6, 30, 15);
+    __atomic_store_n(&s_nav_word, (uint32_t)JR_DISPLAY_SPACE_WATCH, __ATOMIC_RELEASE);
+    static const struct { jr_watch_style_t st; jr_face_t face; } want[] = {
+        { JR_WATCH_JARVIS,  JR_FACE_COUNT },
+        { JR_WATCH_DIVER,   JR_FACE_DIAL_DIVER },
+        { JR_WATCH_DRESS,   JR_FACE_DIAL_DRESS },
+        { JR_WATCH_PILOT,   JR_FACE_DIAL_PILOT },
+        { JR_WATCH_MINIMAL, JR_FACE_COUNT },
+        { JR_WATCH_FUTURE,  JR_FACE_DIAL_FUTURE },
+    };
+    for (size_t i = 0; i < sizeof want / sizeof *want; ++i) {
+        jr_display_watch_style_set(want[i].st);
+        CHECK(watch_dial_face() == want[i].face, "style %d asks for face %d, wanted %d",
+              (int)want[i].st, (int)watch_dial_face(), (int)want[i].face);
+    }
+    jr_display_watch_style_set(JR_WATCH_PILOT);
+    jr_display_nav_home();
+    CHECK(watch_dial_face() == JR_FACE_COUNT, "off WATCH the dial is still requested");
+    __atomic_store_n(&s_nav_word,
+                     (uint32_t)JR_DISPLAY_SPACE_WATCH |
+                         ((uint32_t)JR_WATCH_PILOT << 17), __ATOMIC_RELEASE);
+    jr_display_clock_set(false, 0, 0, 0);
+    CHECK(watch_dial_face() == JR_FACE_COUNT, "with the clock off the dial is still requested");
+    jr_display_clock_set(true, 6, 30, 15);
+    CHECK(watch_dial_face() == JR_FACE_DIAL_PILOT, "clock back on, PILOT's dial is not requested");
+    reset_nav();
+}
+
+/* Baked or fallen back: with the dial clip shown, the watch keeps the art
+ * under the hands (the grey survives everywhere the hands are not); with the
+ * pipeline fallen back to RESTING (clip missing), the watch clears its disc
+ * and draws the stand-in dial on black, so no grey survives inside r214. */
+static void test_watch_keeps_a_baked_dial_and_clears_a_missing_one(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb);
+    if (!fb) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; return; }
+    /* the shell veils the space, so "the art survived" is "not black" */
+    size_t kept[2] = { 0, 0 }, outside[2] = { 0, 0 };
+    const jr_face_t shown[2] = { JR_FACE_DIAL_DRESS, JR_FACE_IDLE };
+    for (int k = 0; k < 2; ++k) {
+        render_watch_frame(fb, JR_WATCH_DRESS, shown[k]);
+        for (int y = 0; y < HUD_H; ++y) {
+            for (int x = 0; x < HUD_W; ++x) {
+                const int dx = x - 232, dy = y - 232;
+                const bool in = dx * dx + dy * dy <= 200 * 200;
+                if (fb[(size_t)y * HUD_W + x] != 0) {
+                    if (in) kept[k]++; else outside[k]++;
+                }
+            }
+        }
+    }
+    CHECK(kept[0] > 100000, "baked DRESS kept only %zu art px under the hands", kept[0]);
+    CHECK(kept[1] < 20000, "fallen-back DRESS left %zu lit px inside the dial (not cleared)", kept[1]);
+    CHECK(outside[1] > 0, "the fallback clear reached outside the shell disc");
+    s_display.shown_face = JR_FACE_IDLE;
     free(fb);
     reset_nav();
 }
@@ -1995,6 +2085,10 @@ static void test_every_face_has_a_clip_and_a_hud_face(void)
         { JR_FACE_RESTING,   "rwave_rest.eaf" },
         { JR_FACE_MUTED,     "rwave_muted.eaf" },
         { JR_FACE_LINKING,   "rwave_link.eaf" },
+        { JR_FACE_DIAL_DIVER,  "dial_diver.eaf" },
+        { JR_FACE_DIAL_DRESS,  "dial_dress.eaf" },
+        { JR_FACE_DIAL_PILOT,  "dial_pilot.eaf" },
+        { JR_FACE_DIAL_FUTURE, "dial_future.eaf" },
     };
     CHECK(sizeof expect / sizeof expect[0] == (size_t)JR_FACE_COUNT,
           "face table has %zu rows for %d faces",
@@ -2054,7 +2148,9 @@ int main(void)
 
     test_every_space_composes_its_own_sheet();
     test_clock_clear_spares_open_shell_surfaces();
-    test_watch_style_is_two_nav_bits_that_wrap();
+    test_watch_style_is_three_nav_bits_that_wrap();
+    test_watch_dial_face_follows_the_style_and_the_screen();
+    test_watch_keeps_a_baked_dial_and_clears_a_missing_one();
     test_watch_style_reaches_the_glass();
 
     test_desk_is_on_the_ring_only_while_live();

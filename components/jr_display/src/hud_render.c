@@ -1511,178 +1511,709 @@ void hud_overlay_bloom(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 #define HUD_CLOCK_R_MIN   175
 #define HUD_CLOCK_R_SEC   190
 
-/* ---- The other three watches (2026-09-02) ---------------------------------
+/* ==================== THE WATCHES, SECOND CUT (2026-09-02) =================
  *
- * Same numbers, same strip contract, same r <= 192 promise. Each style is a
- * handful of polar stamps and per-row disc solves; none keeps state. */
-static void ov_disc(const strip_t *s, int cx, int cy, int rad, uint16_t px)
+ * A watch is a dial and hands, and on this hardware those are two different
+ * materials. The dial is baked art shown through the face pipeline (or, when
+ * the partition lacks it, a black procedural stand-in drawn here). The hands
+ * are live geometry drawn the way hands are made: tapered polygons with an
+ * anti-aliased edge, a two-tone bevel whose light flank follows a fixed
+ * top-left light as the hand turns, a hairline outline, a soft shadow, and
+ * lume where the style has it. Everything is solved per strip row from a
+ * few vertices — no buffers beyond one row of coverage on the stack.
+ *
+ * Fixed point: screen coordinates in Q4 (1/16 px), angles in Q16 turns
+ * (65536 per revolution, 12 o'clock at 192 << 8, clockwise increasing) so the
+ * seconds hand can sweep between the 1 Hz ticks; the 256-entry LUT is
+ * interpolated linearly, which is smooth to the pixel at r = 214.
+ *
+ * Every style draws inside r <= 214 (WATCH_R_MAX): the shell's own disc. The
+ * art owns everything beyond. */
+
+#define WATCH_R_MAX      214
+#define WATCH_CX16       (232 * 16 + 8)      /* the true centre, 232.5 */
+#define WATCH_CY16       (232 * 16 + 8)
+#define WATCH_A12        (192u << 8)          /* 12 o'clock in Q16 turns */
+/* PILOT's three sub-dials as the art placed them: index 0 = 3 o'clock
+ * (temperature), 1 = 6 (seconds), 2 = 9 (battery); Q4 centres, px radius. */
+static const struct { int32_t cx, cy; int r; } s_subdial[3] = {
+    { HUD_WATCH_SUB3_CX * 16 + 8, HUD_WATCH_SUB3_CY * 16 + 8, HUD_WATCH_SUB3_R },
+    { HUD_WATCH_SUB6_CX * 16 + 8, HUD_WATCH_SUB6_CY * 16 + 8, HUD_WATCH_SUB6_R },
+    { HUD_WATCH_SUB9_CX * 16 + 8, HUD_WATCH_SUB9_CY * 16 + 8, HUD_WATCH_SUB9_R },
+};
+#define WATCH_SHADOW_A   100                  /* /256 ~ 40 %             */
+
+static int32_t sin_q16(uint32_t a16)
 {
-    for (int dy = -rad; dy <= rad; ++dy) {
-        const int y = cy + dy;
-        if (y < s->y0 || y >= s->y1) {
+    const int i = (int)((a16 >> 8) & 255u);
+    const int f = (int)(a16 & 255u);
+    const int s0 = s_sin16[i];
+    const int s1 = s_sin16[(i + 1) & 255];
+    return s0 + (((s1 - s0) * f) >> 8);
+}
+
+static inline int32_t cos_q16(uint32_t a16)
+{
+    return sin_q16(a16 + (64u << 8));
+}
+
+typedef struct { int r, g, b; } wrgb_t;
+
+/* One row of coverage, shared by every anti-aliased fill. File scope, not
+ * the stack: the render task runs on 5 KB of internal RAM and was 2.1 KB
+ * from the end before the watch; a 932-byte row per fill on top of the
+ * hand's own frames is how a task overflows on the one style that draws
+ * the most. Single writer — the render task — and the host probes are
+ * single-threaded, so a static row is exactly as safe as a local one. */
+static uint16_t s_cov[HUD_W];
+
+typedef struct {
+    int n;
+    int32_t x[8], y[8];          /* Q4 screen coordinates */
+} wpoly_t;
+
+/* 565 <- 565 over 565 at alpha/256, in the panel's byte order. */
+static inline uint16_t w_blend(uint16_t bg, wrgb_t fg, int a, bool swap)
+{
+    if (a <= 0) {
+        return bg;
+    }
+    if (swap) {
+        bg = (uint16_t)((bg >> 8) | (bg << 8));
+    }
+    int r = (bg >> 11) & 31, g = (bg >> 5) & 63, b = bg & 31;
+    r = (r << 3) | (r >> 2);
+    g = (g << 2) | (g >> 4);
+    b = (b << 3) | (b >> 2);
+    if (a >= 256) {
+        r = fg.r; g = fg.g; b = fg.b;
+    } else {
+        r += ((fg.r - r) * a) >> 8;
+        g += ((fg.g - g) * a) >> 8;
+        b += ((fg.b - b) * a) >> 8;
+    }
+    return pack565(r, g, b, swap);
+}
+
+/* Coverage accumulation for one pixel row: AA_SUB sub-rows x 16 sub-pixels
+ * per fully covered pixel (AA_FULL). Eight sample lines, not four: a hand's
+ * flank near horizontal is a sliver a fraction of a pixel deep, and four
+ * lines let it fall between them in one column and not the next — a
+ * one-pixel hole in the edge row, which is exactly the combing this
+ * renderer exists to end. With every flank at least half a pixel across
+ * (watch_hand_spec) a sliver always meets four of eight lines; the probe
+ * sweeps 13 hands through 360 degrees to hold that. Sixteen lines cost the
+ * same again per frame for no visible gain. `lo`/`hi` track the range.
+ *
+ * The fills below are compiled at O2 inside an -Os image: they are the
+ * hot loop of every watch frame (measured 10 ms a hand at 160 MHz at -Os). */
+#define AA_SUB   8
+#define AA_STEP  (16 / AA_SUB)
+#define AA_FULL  (AA_SUB * 16)
+#if defined(__GNUC__) && !defined(__clang__)
+#define HOT __attribute__((optimize("O2")))   /* the device toolchain */
+#else
+#define HOT                                   /* the host probes (clang) */
+#endif
+static inline void cov_span(uint16_t *cov, int32_t xl, int32_t xr, int *lo, int *hi)
+{
+    if (xr <= xl) {
+        return;
+    }
+    if (xl < 0) {
+        xl = 0;
+    }
+    if (xr > (HUD_W << 4)) {
+        xr = HUD_W << 4;
+    }
+    if (xr <= xl) {
+        return;
+    }
+    const int p0 = (int)(xl >> 4);
+    const int p1 = (int)((xr - 1) >> 4);
+    if (p0 < *lo) {
+        *lo = p0;
+    }
+    if (p1 > *hi) {
+        *hi = p1;
+    }
+    if (p0 == p1) {
+        cov[p0] = (uint16_t)(cov[p0] + (xr - xl));
+        return;
+    }
+    cov[p0] = (uint16_t)(cov[p0] + (16 - (xl & 15)));
+    for (int p = p0 + 1; p < p1; ++p) {
+        cov[p] = (uint16_t)(cov[p] + 16);
+    }
+    cov[p1] = (uint16_t)(cov[p1] + (xr - (p1 << 4)));
+}
+
+static inline void HOT cov_blend(uint16_t *row, const uint16_t *cov, int lo, int hi,
+                                 wrgb_t c, int alpha, bool swap)
+{
+    /* full coverage at full alpha is a straight write: the MINIMAL dial is
+     * a 214 px disc every frame and must not cost a blend per pixel */
+    const uint16_t solid = pack565(c.r, c.g, c.b, swap);
+    for (int x = lo; x <= hi; ++x) {
+        const int cv = cov[x];
+        if (cv >= AA_FULL && alpha >= 256) {
+            row[x] = solid;
+        } else if (cv != 0) {
+            row[x] = w_blend(row[x], c,
+                             (cv >= AA_FULL ? alpha : (cv * alpha) / AA_FULL),
+                             swap);
+        }
+    }
+}
+
+/* Anti-aliased convex polygon fill over whatever the strip already holds.
+ *
+ * Two monotone chains, not an edge list: a convex polygon's boundary from
+ * its top vertex to its bottom vertex is one chain each way, so every
+ * sample line crosses exactly one edge of each and the inner loop is two
+ * multiply-adds, no search. Each edge is solved from its own start (no
+ * accumulated error) with a Q8 slope; coordinates are Q4 so every product
+ * fits 32 bits. The first cut of this fill divided per sample line per
+ * edge in 64-bit and cost a hand 20 ms a frame at 160 MHz. The coverage
+ * row is cleared after use over the touched range only. */
+typedef struct {
+    int32_t x0, y0, y1, slope;   /* y0 < y1; slope = dx * 256 / dy         */
+} aa_edge_t;
+
+/* Walk the vertices from `top` in direction `dir` to `bot`, keeping the
+ * edges that descend; returns the count. */
+static int aa_chain(const wpoly_t *p, int top, int bot, int dir, aa_edge_t *out)
+{
+    int n = 0;
+    int i = top;
+    while (i != bot) {
+        const int j = (i + dir + p->n) % p->n;
+        const int32_t y0 = p->y[i], y1 = p->y[j];
+        if (y1 > y0) {
+            out[n].x0 = p->x[i];
+            out[n].y0 = y0;
+            out[n].y1 = y1;
+            out[n].slope = ((p->x[j] - p->x[i]) * 256) / (y1 - y0);
+            n++;
+        }
+        i = j;
+    }
+    return n;
+}
+
+static inline int32_t aa_chain_x(const aa_edge_t *e, int n, int *at, int32_t ys)
+{
+    while (*at + 1 < n && e[*at].y1 <= ys) {
+        (*at)++;
+    }
+    const aa_edge_t *k = &e[*at];
+    return k->x0 + (((ys - k->y0) * k->slope) >> 8);
+}
+
+static void HOT aa_fill(const strip_t *s, const wpoly_t *p, wrgb_t c, int alpha,
+                        bool swap)
+{
+    if (p->n < 3 || alpha <= 0) {
+        return;
+    }
+    int top = 0, bot = 0;
+    for (int i = 1; i < p->n; ++i) {
+        if (p->y[i] < p->y[top]) top = i;
+        if (p->y[i] > p->y[bot]) bot = i;
+    }
+    const int32_t ymin = p->y[top], ymax = p->y[bot];
+    int y_lo = (int)(ymin >> 4), y_hi = (int)((ymax + 15) >> 4);
+    if (y_lo < s->y0) y_lo = s->y0;
+    if (y_hi > s->y1 - 1) y_hi = s->y1 - 1;
+    if (y_lo > y_hi || ymax <= ymin) {
+        return;
+    }
+    aa_edge_t ca[8], cb[8];
+    const int na = aa_chain(p, top, bot, +1, ca);
+    const int nb = aa_chain(p, top, bot, -1, cb);
+    if (na == 0 || nb == 0) {
+        return;
+    }
+    int ia = 0, ib = 0;
+    uint16_t *const cov = s_cov;
+    for (int y = y_lo; y <= y_hi; ++y) {
+        int lo = HUD_W, hi = -1;
+        const int32_t yr = (int32_t)y << 4;
+        for (int sub = 0; sub < AA_SUB; ++sub) {
+            const int32_t ys = yr + sub * AA_STEP + AA_STEP / 2;
+            if (ys < ymin || ys >= ymax) {
+                continue;
+            }
+            const int32_t xa = aa_chain_x(ca, na, &ia, ys);
+            const int32_t xb = aa_chain_x(cb, nb, &ib, ys);
+            if (xa < xb) {
+                cov_span(cov, xa, xb, &lo, &hi);
+            } else if (xb < xa) {
+                cov_span(cov, xb, xa, &lo, &hi);
+            }
+        }
+        if (hi >= lo) {
+            cov_blend(s->base + (size_t)(y - s->y0) * HUD_W, cov, lo, hi, c,
+                      alpha, swap);
+            memset(cov + lo, 0, (size_t)(hi - lo + 1) * sizeof cov[0]);
+        }
+    }
+}
+
+/* Anti-aliased disc; centre and radius in Q4. The interior — every pixel
+ * inside the narrowest of the sixteen sample chords — is written straight;
+ * only the two edge runs go through coverage, so the MINIMAL dial (a 214 px
+ * disc every frame) costs a row write, not a row of arithmetic. */
+static void HOT aa_disc(const strip_t *s, int32_t cx, int32_t cy, int32_t rad,
+                        wrgb_t c, int alpha, bool swap)
+{
+    if (rad <= 0 || alpha <= 0) {
+        return;
+    }
+    int y_lo = (int)((cy - rad) >> 4), y_hi = (int)((cy + rad + 15) >> 4);
+    if (y_lo < s->y0) y_lo = s->y0;
+    if (y_hi > s->y1 - 1) y_hi = s->y1 - 1;
+    if (y_lo > y_hi) {
+        return;
+    }
+    uint16_t *const cov = s_cov;
+    const int32_t r2 = rad * rad;                 /* <= 3424^2, fits */
+    const uint16_t solid = pack565(c.r, c.g, c.b, swap);
+    for (int y = y_lo; y <= y_hi; ++y) {
+        int32_t hmin = INT32_MAX, hmax = -1;
+        int32_t halves[AA_SUB];
+        for (int sub = 0; sub < AA_SUB; ++sub) {
+            const int32_t dy = ((int32_t)y << 4) + sub * AA_STEP + AA_STEP / 2 - cy;
+            const int32_t d2 = r2 - dy * dy;
+            const int32_t half = d2 > 0 ? (int32_t)isqrt32((uint32_t)d2) : -1;
+            halves[sub] = half;
+            if (half >= 0) {
+                if (half < hmin) hmin = half;
+                if (half > hmax) hmax = half;
+            }
+        }
+        if (hmax < 0) {
             continue;
         }
-        const int half = (int)isqrt32((uint32_t)(rad * rad - dy * dy));
         uint16_t *row = s->base + (size_t)(y - s->y0) * HUD_W;
-        for (int x = cx - half; x <= cx + half; ++x) {
-            if (x >= 0 && x < HUD_W) {
-                row[x] = px;
+        /* pixels wholly inside every chord: [cx - hmin, cx + hmin) in Q4 */
+        int in0 = (int)((cx - hmin + 15) >> 4), in1 = (int)((cx + hmin) >> 4) - 1;
+        if (hmin == INT32_MAX || in1 < in0) {
+            in0 = 1; in1 = 0;                       /* empty */
+        }
+        if (in0 < 0) in0 = 0;
+        if (in1 > HUD_W - 1) in1 = HUD_W - 1;
+        if (in1 >= in0) {
+            if (alpha >= 256) {
+                for (int x = in0; x <= in1; ++x) {
+                    row[x] = solid;
+                }
+            } else {
+                for (int x = in0; x <= in1; ++x) {
+                    row[x] = w_blend(row[x], c, alpha, swap);
+                }
+            }
+        }
+        /* the edges: coverage over the two runs outside the solid span */
+        int lo = HUD_W, hi = -1;
+        for (int sub = 0; sub < AA_SUB; ++sub) {
+            const int32_t half = halves[sub];
+            if (half < 0) {
+                continue;
+            }
+            const int32_t xl = cx - half, xr = cx + half;
+            if (in1 >= in0) {
+                cov_span(cov, xl, (int32_t)in0 << 4, &lo, &hi);
+                cov_span(cov, (int32_t)(in1 + 1) << 4, xr, &lo, &hi);
+            } else {
+                cov_span(cov, xl, xr, &lo, &hi);
+            }
+        }
+        if (hi >= lo) {
+            cov_blend(row, cov, lo, hi, c, alpha, swap);
+            memset(cov + lo, 0, (size_t)(hi - lo + 1) * sizeof cov[0]);
+        }
+    }
+}
+
+/* A hand-local (u along the axis, v across; Q4 px) point to the screen. */
+static inline void w_rot(int32_t cx, int32_t cy, int32_t c, int32_t sn,
+                         int32_t u, int32_t v, int32_t *x, int32_t *y)
+{
+    /* |u|, |v| <= 466 * 16 and |c|, |sn| <= 32767: the products fit 32 bits */
+    *x = cx + ((u * c - v * sn) >> 15);
+    *y = cy + ((u * sn + v * c) >> 15);
+}
+
+/* Tapered quad u0..u1 with half-widths w0 -> w1 (all Q4), clipped to one
+ * flank when `side` is -1 (light) or +1 (dark); 0 is the whole hand. */
+static void hand_poly(wpoly_t *p, int32_t cx, int32_t cy, uint32_t a16,
+                      int32_t u0, int32_t u1, int32_t w0, int32_t w1, int side)
+{
+    const int32_t c = cos_q16(a16), sn = sin_q16(a16);
+    const int32_t va0 = side > 0 ? 0 : -w0, vb0 = side < 0 ? 0 : w0;
+    const int32_t va1 = side > 0 ? 0 : -w1, vb1 = side < 0 ? 0 : w1;
+    p->n = 4;
+    w_rot(cx, cy, c, sn, u0, va0, &p->x[0], &p->y[0]);
+    w_rot(cx, cy, c, sn, u1, va1, &p->x[1], &p->y[1]);
+    w_rot(cx, cy, c, sn, u1, vb1, &p->x[2], &p->y[2]);
+    w_rot(cx, cy, c, sn, u0, vb0, &p->x[3], &p->y[3]);
+}
+
+static inline wrgb_t w_scale(wrgb_t c, int num, int den)
+{
+    wrgb_t o = { c.r * num / den, c.g * num / den, c.b * num / den };
+    if (o.r > 255) o.r = 255;
+    if (o.g > 255) o.g = 255;
+    if (o.b > 255) o.b = 255;
+    return o;
+}
+
+/* One bevelled hand about (cx, cy) at angle a16. The light sits at the top
+ * left of the glass, so the flank facing it is bright and the other dark,
+ * and the split moves with the hand instead of being painted on. */
+typedef struct {
+    int32_t u0, u1, w0, w1;      /* Q4: tail, tip, half-width at each   */
+    wrgb_t  body;                /* the metal                            */
+    int     bevel;               /* 0..128: how far the flanks part      */
+    bool    outline;             /* hairline dark rim                    */
+    bool    shadow;              /* soft (+2,+3) shadow at ~40 %         */
+    int32_t lume_u0, lume_u1, lume_w;  /* Q4 inset, lume_w 0 = none     */
+    bool    core;                /* FUTURE: white core stripe            */
+} hand_spec_t;
+
+static const wrgb_t W_CREAM  = { 232, 226, 200 };
+static const wrgb_t W_DARK   = {  12,  12,  14 };
+static const wrgb_t W_WHITE  = { 255, 255, 255 };
+static const wrgb_t W_CYAN   = {   0, 229, 255 };
+static const wrgb_t W_GOLD   = { 255, 180,  40 };
+static const wrgb_t W_IVORY  = { 245, 242, 232 };
+
+static void draw_hand(const strip_t *s, int32_t cx, int32_t cy, uint32_t a16,
+                      const hand_spec_t *h, int strength, bool swap)
+{
+    wpoly_t p;
+    const int32_t c = cos_q16(a16), sn = sin_q16(a16);
+    /* light L = (-0.6, -0.8): flank -v has normal (sn, -c)/32767 */
+    const int dot = (sn * -19661 + c * 26214) >> 15;   /* |.| < 2^31 */
+    const int light_side = dot >= 0 ? -1 : 1;
+    const int k = (h->bevel * (dot < 0 ? -dot : dot)) >> 15;   /* 0..bevel */
+    const wrgb_t light = w_scale(h->body, 128 + k, 128);
+    const wrgb_t dark  = w_scale(h->body, 128 - k, 128);
+    const int A = strength >= 255 ? 256 : strength + 1;
+
+    if (h->shadow) {
+        hand_poly(&p, cx + 32, cy + 48, a16, h->u0, h->u1, h->w0 + 8, h->w1 + 8, 0);
+        aa_fill(s, &p, W_DARK, (WATCH_SHADOW_A * A) >> 8, swap);
+    }
+    if (h->core) {
+        /* a cyan glow beneath the slim hand */
+        hand_poly(&p, cx, cy, a16, h->u0 - 16, h->u1 + 16, h->w0 + 40, h->w1 + 40, 0);
+        aa_fill(s, &p, h->body, (56 * A) >> 8, swap);
+    }
+    if (h->outline) {
+        hand_poly(&p, cx, cy, a16, h->u0 - 12, h->u1 + 14, h->w0 + 14, h->w1 + 14, 0);
+        aa_fill(s, &p, W_DARK, (220 * A) >> 8, swap);
+    }
+    hand_poly(&p, cx, cy, a16, h->u0, h->u1, h->w0, h->w1, light_side);
+    aa_fill(s, &p, light, A, swap);
+    hand_poly(&p, cx, cy, a16, h->u0, h->u1, h->w0, h->w1, -light_side);
+    aa_fill(s, &p, dark, A, swap);
+    if (h->lume_w > 0) {
+        hand_poly(&p, cx, cy, a16, h->lume_u0, h->lume_u1, h->lume_w, h->lume_w / 2, 0);
+        aa_fill(s, &p, W_CREAM, A, swap);
+    }
+    if (h->core) {
+        hand_poly(&p, cx, cy, a16, h->u0 + 8, h->u1 - 24, 12, 6, 0);
+        aa_fill(s, &p, W_WHITE, (230 * A) >> 8, swap);
+    }
+}
+
+/* Polar helpers about the true centre. */
+static inline void w_polar(int32_t r16, uint32_t a16, int32_t *x, int32_t *y)
+{
+    *x = WATCH_CX16 + ((r16 * cos_q16(a16)) >> 15);
+    *y = WATCH_CY16 + ((r16 * sin_q16(a16)) >> 15);
+}
+
+static void w_hub(const strip_t *s, int32_t rad16, wrgb_t body, int A, bool swap)
+{
+    aa_disc(s, WATCH_CX16, WATCH_CY16, rad16 + 16, W_DARK, (200 * A) >> 8, swap);
+    aa_disc(s, WATCH_CX16, WATCH_CY16, rad16, body, A, swap);
+    aa_disc(s, WATCH_CX16 - rad16 / 3, WATCH_CY16 - rad16 / 3, rad16 / 3 + 8,
+            W_WHITE, (150 * A) >> 8, swap);
+}
+
+/* The black stand-in dial for a style whose baked art is not on the
+ * partition: the markers only, in the style's own vocabulary, so the watch
+ * still reads before /api/ota/assets brings the real dial. */
+static void fallback_dial(const strip_t *s, int style, int A, bool swap)
+{
+    wpoly_t p;
+    for (int i = 0; i < 12; ++i) {
+        const uint32_t a = WATCH_A12 + (uint32_t)i * (65536u / 12u);
+        int32_t x, y;
+        switch (style) {
+        case 1: /* DIVER: triangle at 12, bars at 3/6/9, discs elsewhere */
+            if (i == 0) {
+                p.n = 3;
+                p.x[0] = WATCH_CX16;      p.y[0] = WATCH_CY16 - 178 * 16;
+                p.x[1] = WATCH_CX16 + 22 * 16; p.y[1] = WATCH_CY16 - 156 * 16;
+                p.x[2] = WATCH_CX16 - 22 * 16; p.y[2] = WATCH_CY16 - 156 * 16;
+                aa_fill(s, &p, W_CREAM, A, swap);
+            } else if (i % 3 == 0) {
+                hand_poly(&p, WATCH_CX16, WATCH_CY16, a, 154 * 16, 180 * 16, 4 * 16, 4 * 16, 0);
+                aa_fill(s, &p, W_CREAM, A, swap);
+            } else {
+                w_polar(168 * 16, a, &x, &y);
+                aa_disc(s, x, y, 6 * 16 + 8, W_CREAM, A, swap);
+            }
+            break;
+        case 2: /* DRESS: gold batons */
+            hand_poly(&p, WATCH_CX16, WATCH_CY16, a, 150 * 16, 176 * 16, 32, 32, 0);
+            aa_fill(s, &p, (wrgb_t){ 212, 175, 55 }, A, swap);
+            break;
+        case 3: /* PILOT: white dots; the sub-dial rings below */
+            w_polar(176 * 16, a, &x, &y);
+            aa_disc(s, x, y, i % 3 == 0 ? 4 * 16 : 2 * 16 + 8, W_WHITE, A, swap);
+            break;
+        case 4: /* MINIMAL has no baked clip: the dial is drawn here every
+                 * frame — warm white to r 214, a hairline minute track, twelve
+                 * small black dots */
+            if (i == 0) {
+                aa_disc(s, WATCH_CX16, WATCH_CY16, WATCH_R_MAX * 16, W_IVORY, A, swap);
+                for (int t = 0; t < 60; ++t) {
+                    const uint32_t ta = WATCH_A12 + (uint32_t)t * (65536u / 60u);
+                    hand_poly(&p, WATCH_CX16, WATCH_CY16, ta, (t % 5 == 0 ? 196 : 202) * 16, 208 * 16, 8, 8, 0);
+                    aa_fill(s, &p, W_DARK, ((t % 5 == 0 ? 200 : 90) * A) >> 8, swap);
+                }
+            }
+            w_polar(176 * 16, a, &x, &y);
+            aa_disc(s, x, y, 2 * 16 + 8, W_DARK, A, swap);
+            break;
+        default: /* FUTURE: a 60-tick scale, cell frames below */
+            break;
+        }
+    }
+    if (style == 3) {
+        for (int i = 0; i < 3; ++i) {
+            aa_disc(s, s_subdial[i].cx, s_subdial[i].cy, s_subdial[i].r * 16,
+                    W_WHITE, (160 * A) >> 8, swap);
+            aa_disc(s, s_subdial[i].cx, s_subdial[i].cy, s_subdial[i].r * 16 - 24,
+                    W_DARK, A, swap);
+        }
+    }
+    if (style == 5) {
+        for (int i = 0; i < 60; ++i) {
+            const uint32_t a = WATCH_A12 + (uint32_t)i * (65536u / 60u);
+            hand_poly(&p, WATCH_CX16, WATCH_CY16, a, (i % 5 == 0 ? 198 : 204) * 16, 210 * 16, 12, 12, 0);
+            aa_fill(s, &p, W_CYAN, ((i % 5 == 0 ? 200 : 110) * A) >> 8, swap);
+        }
+        /* the four cell frames: hairline cyan boxes at the cell rectangles */
+        static const int cells[4][4] = {
+            { HUD_WATCH_CELL_DATE_X0, HUD_WATCH_CELL_DATE_Y0, HUD_WATCH_CELL_DATE_X1 - 1, HUD_WATCH_CELL_DATE_Y1 - 1 },
+            { HUD_WATCH_CELL_WX_X0, HUD_WATCH_CELL_WX_Y0, HUD_WATCH_CELL_WX_X1 - 1, HUD_WATCH_CELL_WX_Y1 - 1 },
+            { HUD_WATCH_CELL_BAT_X0, HUD_WATCH_CELL_BAT_Y0, HUD_WATCH_CELL_BAT_X1 - 1, HUD_WATCH_CELL_BAT_Y1 - 1 },
+            { HUD_WATCH_CELL_LINK_X0, HUD_WATCH_CELL_LINK_Y0, HUD_WATCH_CELL_LINK_X1 - 1, HUD_WATCH_CELL_LINK_Y1 - 1 } };
+        for (int i = 0; i < 4; ++i) {
+            const int x0 = cells[i][0], y0 = cells[i][1], x1 = cells[i][2], y1 = cells[i][3];
+            const int32_t e[4][4] = {
+                { x0, y0, x1, y0 }, { x0, y1, x1, y1 }, { x0, y0, x0, y1 }, { x1, y0, x1, y1 } };
+            for (int k = 0; k < 4; ++k) {
+                p.n = 4;
+                p.x[0] = e[k][0] * 16; p.y[0] = e[k][1] * 16;
+                p.x[1] = e[k][2] * 16 + 16; p.y[1] = e[k][1] * 16;
+                p.x[2] = e[k][2] * 16 + 16; p.y[2] = e[k][3] * 16 + 16;
+                p.x[3] = e[k][0] * 16; p.y[3] = e[k][3] * 16 + 16;
+                aa_fill(s, &p, W_CYAN, (90 * A) >> 8, swap);
             }
         }
     }
 }
 
-static void ov_polar_disc(const strip_t *s, int a, int r, int rad, uint16_t px)
+/* Per-style hand specs, in Q4. Index: 0 hour, 1 minute, 2 seconds. */
+static bool watch_hand_spec(int style, int hand, hand_spec_t *h)
 {
-    const int cy = 232 + ((lsin(a) * r) >> 15);
-    if (cy + rad < s->y0 || cy - rad >= s->y1) {
+    memset(h, 0, sizeof *h);
+    switch (style) {
+    case 1: /* DIVER: steel with lume, Mercedes hour, sword minute, lollipop */
+        h->body = (wrgb_t){ 205, 210, 215 }; h->bevel = 60; h->outline = true; h->shadow = true;
+        if (hand == 0) { h->u0 = -14 * 16; h->u1 = 112 * 16; h->w0 = 5 * 16; h->w1 = 3 * 16 + 8; h->lume_u0 = 20 * 16; h->lume_u1 = 74 * 16; h->lume_w = 2 * 16 + 8; }
+        else if (hand == 1) { h->u0 = -14 * 16; h->u1 = 170 * 16; h->w0 = 5 * 16; h->w1 = 24; h->lume_u0 = 24 * 16; h->lume_u1 = 150 * 16; h->lume_w = 2 * 16 + 8; }
+        else { h->u0 = -34 * 16; h->u1 = 186 * 16; h->w0 = 22; h->w1 = 12; h->outline = false; h->shadow = false; }
+        return true;
+    case 2: /* DRESS: dauphine gold, no seconds */
+        h->body = (wrgb_t){ 214, 178, 62 }; h->bevel = 110; h->outline = false; h->shadow = true;
+        /* tips are half a pixel, never a point: see cov_span */
+        if (hand == 0) { h->u0 = -10 * 16; h->u1 = 104 * 16; h->w0 = 6 * 16; h->w1 = 8; }
+        else if (hand == 1) { h->u0 = -10 * 16; h->u1 = 166 * 16; h->w0 = 5 * 16; h->w1 = 8; }
+        else return false;
+        return true;
+    case 3: /* PILOT: white sword hands with lume, hairline seconds */
+        h->body = (wrgb_t){ 236, 236, 236 }; h->bevel = 40; h->outline = true; h->shadow = true;
+        if (hand == 0) { h->u0 = -16 * 16; h->u1 = 108 * 16; h->w0 = 7 * 16; h->w1 = 2 * 16 + 8; h->lume_u0 = 22 * 16; h->lume_u1 = 92 * 16; h->lume_w = 3 * 16 + 8; }
+        else if (hand == 1) { h->u0 = -16 * 16; h->u1 = 174 * 16; h->w0 = 6 * 16; h->w1 = 2 * 16; h->lume_u0 = 26 * 16; h->lume_u1 = 156 * 16; h->lume_w = 3 * 16; }
+        else { h->u0 = -30 * 16; h->u1 = 184 * 16; h->w0 = 20; h->w1 = 10; h->outline = false; h->shadow = false; }
+        return true;
+    case 4: /* MINIMAL: thin blued steel, no seconds */
+        h->body = (wrgb_t){ 70, 105, 175 }; h->bevel = 70; h->outline = false; h->shadow = true;
+        if (hand == 0) { h->u0 = -8 * 16; h->u1 = 98 * 16; h->w0 = 2 * 16 + 8; h->w1 = 24; }
+        else if (hand == 1) { h->u0 = -8 * 16; h->u1 = 162 * 16; h->w0 = 2 * 16; h->w1 = 16; }
+        else return false;
+        return true;
+    case 5: /* FUTURE: slim cyan with a white core, hairline gold seconds */
+        h->body = W_CYAN; h->bevel = 30; h->outline = false; h->shadow = false; h->core = true;
+        if (hand == 0) { h->u0 = -10 * 16; h->u1 = 100 * 16; h->w0 = 3 * 16 + 8; h->w1 = 2 * 16; }
+        else if (hand == 1) { h->u0 = -10 * 16; h->u1 = 166 * 16; h->w0 = 3 * 16; h->w1 = 24; }
+        else { h->body = W_GOLD; h->core = false; h->u0 = -22 * 16; h->u1 = 192 * 16; h->w0 = 16; h->w1 = 10; }
+        return true;
+    default:
+        return false;
+    }
+}
+
+void hud_watch_hand(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                    int style, int hand, uint32_t angle_q16, bool shadow)
+{
+    hand_spec_t h;
+    if (dst == NULL || nrows <= 0 || !watch_hand_spec(style, hand, &h)) {
         return;
     }
-    ov_disc(s, 232 + ((lcos(a) * r) >> 15), cy, rad, px);
+    overlay_palette(swap_bytes);
+    luts_build();
+    h.shadow = h.shadow && shadow;
+    const strip_t s = { dst, y0, y0 + nrows };
+    draw_hand(&s, WATCH_CX16, WATCH_CY16, angle_q16, &h, 255, swap_bytes);
 }
 
-static void ov_hand(const strip_t *s, int a, int r0, int r1, uint16_t px, int n)
+/* A needle in a PILOT sub-dial: (cx, cy) Q4, value 0..1000 across a 270
+ * degree throw from 7:30 to 4:30, or a full turn for `full`. */
+static void sub_needle(const strip_t *s, int32_t cx, int32_t cy, int rad,
+                       int permille, bool full, int A, bool swap)
 {
-    for (int r = r0; r <= r1; ++r) {
-        polar_dot(s, a, r, px, n);
+    uint32_t a;
+    if (full) {
+        a = WATCH_A12 + (uint32_t)(((int64_t)permille * 65536) / 1000);
+    } else {
+        a = (96u << 8) + (uint32_t)(((int64_t)permille * (192 << 8)) / 1000);
     }
+    hand_spec_t h = {
+        .u0 = -(rad * 16) / 5, .u1 = (rad - 7) * 16, .w0 = 28, .w1 = 8,
+        .body = W_WHITE, .bevel = 20, .outline = false, .shadow = true,
+    };
+    draw_hand(s, cx, cy, a, &h, (A * 255) >> 8, swap);
+    aa_disc(s, cx, cy, 3 * 16, W_WHITE, A, swap);
 }
 
-/* axis-aligned filled box [x0,x1) x [y0,y1), strip-clipped */
-static void ov_box(const strip_t *s, int x0, int y0, int x1, int y1, uint16_t px)
+void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                       const hud_watch_t *w, int strength, int style)
 {
-    if (x0 < 0) {
-        x0 = 0;
-    }
-    if (x1 > HUD_W) {
-        x1 = HUD_W;
-    }
-    for (int y = y0; y < y1; ++y) {
-        if (y < s->y0 || y >= s->y1) {
-            continue;
-        }
-        uint16_t *row = s->base + (size_t)(y - s->y0) * HUD_W;
-        for (int x = x0; x < x1; ++x) {
-            row[x] = px;
-        }
-    }
-}
-
-/* DIVER: twelve lume markers at r~168 (triangle at 12, bars at 3/6/9, discs
- * elsewhere), a broad hour hand with a lume disc near its tip, a broad
- * minute hand, a thin seconds hand with a lollipop. No text, no marks. */
-static void clock_diver(const strip_t *s, int a_h, int a_m, int a_s,
-                        int strength, bool swap)
-{
-    const uint16_t lume  = shade(s_ov_lume, strength);
-    const uint16_t white = pack565(strength, strength, strength, swap);
-    for (int i = 0; i < 12; ++i) {
-        const int a = 192 + (i * 256) / 12;
-        if (i == 0) {
-            /* the triangle sits on the vertical axis, so it is solved per
-             * row: apex at r=158, a 44 px base at r=178, no comb gaps */
-            for (int r = 158; r <= 178; ++r) {
-                const int half = ((r - 158) * 11) / 10;
-                ov_box(s, 232 - half, 232 - r, 232 + half + 1, 233 - r, lume);
-            }
-        } else if (i % 3 == 0) {
-            ov_hand(s, a, 154, 180, lume, 5);
-        } else {
-            ov_polar_disc(s, a, 168, 6, lume);
-        }
-    }
-    ov_hand(s, a_h, 20, 112, lume, 5);
-    ov_polar_disc(s, a_h, 96, 9, lume);
-    ov_polar_disc(s, a_h, 96, 3, 0);                 /* the open centre */
-    ov_hand(s, a_m, 20, 168, lume, 5);
-    ov_hand(s, a_s, 20, 184, white, 1);
-    ov_polar_disc(s, a_s, 150, 5, lume);
-    ov_disc(s, 232, 232, 6, lume);
-}
-
-/* DIGITAL: seven-segment HH:MM (24 h, like the WATCH sheet) in cyan, centred
- * in a 318 x 110 box whose corners sit at r~170; the seconds are sixty gold
- * dots at r=182 filling clockwise from 12. */
-#define DIG_H  110
-#define DIG_W  60
-#define DIG_T  11
-static void seg_digit(const strip_t *s, int x, int y, int d, uint16_t px)
-{
-    static const uint8_t mask[10] = {
-        0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F };
-    const int m = mask[d % 10];
-    const int hm = y + DIG_H / 2;
-    if (m & 0x01) ov_box(s, x, y, x + DIG_W, y + DIG_T, px);                  /* a */
-    if (m & 0x02) ov_box(s, x + DIG_W - DIG_T, y, x + DIG_W, hm, px);         /* b */
-    if (m & 0x04) ov_box(s, x + DIG_W - DIG_T, hm, x + DIG_W, y + DIG_H, px); /* c */
-    if (m & 0x08) ov_box(s, x, y + DIG_H - DIG_T, x + DIG_W, y + DIG_H, px);  /* d */
-    if (m & 0x10) ov_box(s, x, hm, x + DIG_T, y + DIG_H, px);                 /* e */
-    if (m & 0x20) ov_box(s, x, y, x + DIG_T, hm, px);                         /* f */
-    if (m & 0x40) ov_box(s, x, hm - DIG_T / 2, x + DIG_W, hm + DIG_T / 2 + 1, px); /* g */
-}
-
-static void clock_digital(const strip_t *s, int hh, int mm, int ss, int strength)
-{
-    const uint16_t cyan = shade(s_ov_cyan, strength);
-    const uint16_t gold = shade(s_ov_gold, strength);
-    const int y = 232 - DIG_H / 2;
-    seg_digit(s, 72,  y, hh / 10, cyan);
-    seg_digit(s, 146, y, hh % 10, cyan);
-    ov_box(s, 227, 200, 237, 210, cyan);
-    ov_box(s, 227, 254, 237, 264, cyan);
-    seg_digit(s, 256, y, mm / 10, cyan);
-    seg_digit(s, 330, y, mm % 10, cyan);
-    for (int i = 0; i <= ss; ++i) {
-        polar_dot(s, 192 + (i * 256) / 60, 182, gold, 3);
-    }
-}
-
-/* MINIMAL: thin white hour and minute hands, twelve 2 px dots, a tiny hub,
- * no seconds. */
-static void clock_minimal(const strip_t *s, int a_h, int a_m, int strength,
-                          bool swap)
-{
-    const uint16_t white = pack565(strength, strength, strength, swap);
-    for (int i = 0; i < 12; ++i) {
-        polar_dot(s, 192 + (i * 256) / 12, 176, white, 2);
-    }
-    ov_hand(s, a_h, 14, 100, white, 2);
-    ov_hand(s, a_m, 14, 160, white, 2);
-    ov_disc(s, 232, 232, 3, white);
-}
-
-void hud_overlay_clock_style(uint16_t *dst, int y0, int nrows, bool swap_bytes,
-                             int hh, int mm, int ss, int strength, int style)
-{
-    if (style <= 0 || style > 3) {
-        hud_overlay_clock(dst, y0, nrows, swap_bytes, hh, mm, ss, strength);
+    if (dst == NULL || nrows <= 0 || strength <= 0 || w == NULL) {
         return;
     }
-    if (dst == NULL || nrows <= 0 || strength <= 0) {
+    if (style <= 0 || style > 5) {
+        hud_overlay_clock(dst, y0, nrows, swap_bytes, w->hh, w->mm, w->ss, strength);
+        return;
+    }
+    if (y0 > 232 + WATCH_R_MAX + 2 || y0 + nrows <= 232 - WATCH_R_MAX - 2) {
         return;
     }
     if (strength > 255) {
         strength = 255;
     }
-    if (y0 > 232 + HUD_CLOCK_R_SEC + 2 ||
-        y0 + nrows <= 232 - HUD_CLOCK_R_SEC - 2) {
-        return;
-    }
-    hh = ((hh % 24) + 24) % 24;
-    mm = ((mm % 60) + 60) % 60;
-    ss = ((ss % 60) + 60) % 60;
+    const int hh = ((w->hh % 24) + 24) % 24;
+    const int mm = ((w->mm % 60) + 60) % 60;
+    const int ss = ((w->ss % 60) + 60) % 60;
+    const int ms = w->ms < 0 ? 0 : w->ms > 999 ? 999 : w->ms;
     overlay_palette(swap_bytes);
     const strip_t s = { dst, y0, y0 + nrows };
-    const int a_m = (192 + (mm * 256) / 60) & 255;
-    const int a_h = (192 + (((hh % 12) * 60 + mm) * 256) / 720) & 255;
-    const int a_s = (192 + (ss * 256) / 60) & 255;
-    if (style == 1) {
-        clock_diver(&s, a_h, a_m, a_s, strength, swap_bytes);
-    } else if (style == 2) {
-        clock_digital(&s, hh, mm, ss, strength);
-    } else {
-        clock_minimal(&s, a_h, a_m, strength, swap_bytes);
+    const int A = strength >= 255 ? 256 : strength + 1;
+
+    /* angles in Q16 turns from 12 o'clock */
+    const uint32_t a_h = WATCH_A12 + (uint32_t)(((int64_t)((hh % 12) * 3600 + mm * 60 + ss) * 65536) / 43200);
+    const uint32_t a_m = WATCH_A12 + (uint32_t)(((int64_t)(mm * 60 + ss) * 65536) / 3600);
+    const uint32_t a_s = WATCH_A12 + (uint32_t)(((int64_t)(ss * 1000 + ms) * 65536) / 60000);
+
+    if (!w->dial_baked) {
+        fallback_dial(&s, style, A, swap_bytes);
     }
+
+    if (style == 3) {
+        /* PILOT complications: 6 = seconds, 9 = battery, 3 = temperature */
+        sub_needle(&s, s_subdial[1].cx, s_subdial[1].cy, s_subdial[1].r,
+                   (ss * 1000 + ms) / 60, true, A, swap_bytes);
+        if (w->batt_pct >= 0) {
+            sub_needle(&s, s_subdial[2].cx, s_subdial[2].cy, s_subdial[2].r,
+                       (w->batt_pct > 100 ? 100 : w->batt_pct) * 10, false, A, swap_bytes);
+        }
+        if (w->wx_valid) {
+            int t = w->temp_f < 40 ? 40 : w->temp_f > 100 ? 100 : w->temp_f;
+            sub_needle(&s, s_subdial[0].cx, s_subdial[0].cy, s_subdial[0].r,
+                       (t - 40) * 1000 / 60, false, A, swap_bytes);
+        } else {
+            sub_needle(&s, s_subdial[0].cx, s_subdial[0].cy, s_subdial[0].r,
+                       0, false, (A * 90) >> 8, swap_bytes);
+        }
+    }
+
+    hand_spec_t h;
+    if (watch_hand_spec(style, 0, &h)) {
+        draw_hand(&s, WATCH_CX16, WATCH_CY16, a_h, &h, strength, swap_bytes);
+    }
+    if (style == 1) {
+        /* the Mercedes: a lume disc in the hour hand near its tip */
+        int32_t x, y;
+        w_polar(84 * 16, a_h, &x, &y);
+        aa_disc(&s, x, y, 11 * 16, (wrgb_t){ 205, 210, 215 }, A, swap_bytes);
+        aa_disc(&s, x, y, 9 * 16, W_CREAM, A, swap_bytes);
+        aa_disc(&s, x, y, 3 * 16, (wrgb_t){ 205, 210, 215 }, A, swap_bytes);
+    }
+    if (watch_hand_spec(style, 1, &h)) {
+        draw_hand(&s, WATCH_CX16, WATCH_CY16, a_m, &h, strength, swap_bytes);
+    }
+    if (watch_hand_spec(style, 2, &h)) {
+        draw_hand(&s, WATCH_CX16, WATCH_CY16, a_s, &h, strength, swap_bytes);
+        int32_t x, y;
+        if (style == 1) {
+            w_polar(150 * 16, a_s, &x, &y);
+            aa_disc(&s, x, y, 7 * 16, (wrgb_t){ 205, 210, 215 }, A, swap_bytes);
+            aa_disc(&s, x, y, 5 * 16, W_CREAM, A, swap_bytes);
+            w_polar(-28 * 16, a_s, &x, &y);
+            aa_disc(&s, x, y, 4 * 16, (wrgb_t){ 205, 210, 215 }, A, swap_bytes);
+        } else if (style == 3) {
+            w_polar(-24 * 16, a_s, &x, &y);
+            aa_disc(&s, x, y, 4 * 16, W_WHITE, A, swap_bytes);
+        }
+    }
+
+    switch (style) {
+    /* Hubs on a baked dial are >= 12 px: the concept art the dials come from
+     * has a centre hole of about 10 px that must never show. */
+    case 1: w_hub(&s, 12 * 16, (wrgb_t){ 205, 210, 215 }, A, swap_bytes); break;
+    case 2: w_hub(&s, 12 * 16, (wrgb_t){ 214, 178, 62 }, A, swap_bytes); break;
+    case 3: w_hub(&s, 12 * 16, W_WHITE, A, swap_bytes); break;
+    case 4: w_hub(&s, 4 * 16, (wrgb_t){ 70, 105, 175 }, A, swap_bytes); break;
+    default:
+        aa_disc(&s, WATCH_CX16, WATCH_CY16, 20 * 16, W_CYAN, (40 * A) >> 8, swap_bytes);
+        aa_disc(&s, WATCH_CX16, WATCH_CY16, 15 * 16, W_CYAN, (90 * A) >> 8, swap_bytes);
+        aa_disc(&s, WATCH_CX16, WATCH_CY16, 12 * 16, W_CYAN, A, swap_bytes);
+        aa_disc(&s, WATCH_CX16, WATCH_CY16, 4 * 16, W_WHITE, A, swap_bytes);
+        break;
+    }
+}
+
+void hud_overlay_clock_style(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                             int hh, int mm, int ss, int strength, int style)
+{
+    if (style <= 0 || style > 5) {
+        hud_overlay_clock(dst, y0, nrows, swap_bytes, hh, mm, ss, strength);
+        return;
+    }
+    const hud_watch_t w = {
+        .hh = hh, .mm = mm, .ss = ss, .ms = 0,
+        .batt_pct = -1, .wx_valid = false, .temp_f = 0, .dial_baked = false,
+    };
+    hud_overlay_watch(dst, y0, nrows, swap_bytes, &w, strength, style);
 }
 
 void hud_overlay_clock(uint16_t *dst, int y0, int nrows, bool swap_bytes,

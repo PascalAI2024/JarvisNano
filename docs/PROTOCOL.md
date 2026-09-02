@@ -55,7 +55,7 @@ X-JarvisNano-Control: 1
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/` | Orbit Console |
-| GET | `/api/cockpit` | Paired network, voice, tool, display, touch, Agent Link, and Brain Link truth; `display.watch_style` names the WATCH face (`JARVIS`, `DIVER`, `DIGITAL`, `MINIMAL`) |
+| GET | `/api/cockpit` | Paired network, voice, tool, display, touch, Agent Link, and Brain Link truth; `display.watch_style` names the WATCH face (`JARVIS`, `DIVER`, `DRESS`, `PILOT`, `MINIMAL`, `FUTURE`) |
 | GET | `/api/gemini/live` | Paired detailed Gemini/audio/tool counters and transcript tail |
 | POST | `/api/debug/say?text=...` | Queue a text turn through the live device voice session |
 | GET/POST | `/api/debug/gain?...` | Audio tuning with readbacks; `preroll=` / `refill=` pin the playback jitter buffer (`preroll=0` returns it to adaptive); `cpu=80|160|240` forces a CPU gear for a bench, `cpu=0` returns to auto |

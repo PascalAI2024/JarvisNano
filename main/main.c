@@ -1816,6 +1816,7 @@ static void demo_tick(uint64_t now, jr_face_t *f, uint8_t *amp)
             struct tm tmv;
             localtime_r(&tt, &tmv);
             jr_display_clock_set(true, tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+            jr_display_clock_set_date(tmv.tm_wday, tmv.tm_mday, tmv.tm_mon);
             jr_display_caption_set("AMBIENT WATCH WHEN MUTED");
             break;
         }
@@ -2395,6 +2396,7 @@ static void voice_task(void *arg)
                     if (device_wall_time(&tmv)) {
                         clock_on = true;
                         jr_display_clock_set(true, tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+                        jr_display_clock_set_date(tmv.tm_wday, tmv.tm_mday, tmv.tm_mon);
                         device_rtc_capture_os_time();
                         /* Only the PEEK narrates the time. On the WATCH
                          * screen the hands ARE the readout, so adding a

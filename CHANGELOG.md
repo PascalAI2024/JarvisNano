@@ -24,15 +24,24 @@ are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
 - `main.c` is four files over one header: HTTP routes, power, device tools,
   and the wiring. 140 functions before and after, image size unchanged.
 
-### Four watches (2026-09-02)
+### Six watches, cut for a luxury device (2026-09-02, evening)
 
-- On the WATCH screen a swipe right or left steps through four faces and
-  keeps the choice: JARVIS (the face that shipped, pixel for pixel), DIVER
-  (twelve lume markers, broad hands, a lollipop seconds hand), DIGITAL
-  (seven-segment 24-hour time with the seconds as a ring of gold dots) and
-  MINIMAL (thin hands, twelve dots, no seconds). The caption names the
-  result; everywhere else on the ring a sideways swipe still peeks the
-  watch. `/api/cockpit` reports `display.watch_style`.
+- The owner on the first cut: *"those watches very low quality, you can do
+  much better. This is a luxury device."* The watch is now a dial and hands
+  in two materials. The dial is baked art (DIVER, DRESS, PILOT, FUTURE,
+  cut from concept sheets; MINIMAL draws its own warm-white dial; JARVIS
+  keeps its black disc). The hands are anti-aliased bevelled polygons with a
+  hairline outline, a soft shadow and lume, drawn over the art; the seconds
+  hand sweeps between the 1 Hz ticks. DIGITAL is retired.
+- Complications read the device, never invent: DIVER shows the day in its
+  window; PILOT's three sub-dials are seconds, battery and today's
+  temperature; FUTURE carries the date, the weather glance with hi/lo
+  (dimmed when stale or absent), battery and link cells in the shell's own
+  type.
+- A dial the art partition lacks falls back to the black stand-in dial for
+  that style, once, logged; a swipe on WATCH still steps the six styles
+  (JARVIS, DIVER, DRESS, PILOT, MINIMAL, FUTURE), kept in NVS.
+
 
 ### Muted is a watch, and the weather comes back (2026-09-02)
 

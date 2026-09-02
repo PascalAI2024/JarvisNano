@@ -228,6 +228,10 @@ static const char *face_asset(jr_face_t face)
     case JR_FACE_RESTING:   return JR_DISPLAY_MOUNT_POINT "/rwave_rest.eaf";
     case JR_FACE_MUTED:     return JR_DISPLAY_MOUNT_POINT "/rwave_muted.eaf";
     case JR_FACE_LINKING:   return JR_DISPLAY_MOUNT_POINT "/rwave_link.eaf";
+    case JR_FACE_DIAL_DIVER:  return JR_DISPLAY_MOUNT_POINT "/dial_diver.eaf";
+    case JR_FACE_DIAL_DRESS:  return JR_DISPLAY_MOUNT_POINT "/dial_dress.eaf";
+    case JR_FACE_DIAL_PILOT:  return JR_DISPLAY_MOUNT_POINT "/dial_pilot.eaf";
+    case JR_FACE_DIAL_FUTURE: return JR_DISPLAY_MOUNT_POINT "/dial_future.eaf";
     default:                return NULL;
     }
 }
@@ -241,6 +245,13 @@ static jr_face_t face_fallback(jr_face_t face)
     case JR_FACE_RESTING:  return JR_FACE_IDLE;
     case JR_FACE_MUTED:    return JR_FACE_IDLE;
     case JR_FACE_LINKING:  return JR_FACE_THINKING;
+    /* A dial the partition lacks: the idle face (always present) loads
+     * underneath and the watch clears its disc and draws the black stand-in
+     * dial over it. One level, like every other fallback. */
+    case JR_FACE_DIAL_DIVER:
+    case JR_FACE_DIAL_DRESS:
+    case JR_FACE_DIAL_PILOT:
+    case JR_FACE_DIAL_FUTURE: return JR_FACE_IDLE;
     default:               return face;
     }
 }
@@ -255,6 +266,11 @@ static uint32_t face_fps(jr_face_t face)
     case JR_FACE_RESTING: return 8;
     case JR_FACE_MUTED:   return 8;
     case JR_FACE_LINKING: return 12;
+    /* one frame, scheduled like the quiet faces (the suite pins 8..24) */
+    case JR_FACE_DIAL_DIVER:
+    case JR_FACE_DIAL_DRESS:
+    case JR_FACE_DIAL_PILOT:
+    case JR_FACE_DIAL_FUTURE: return 8;
     default:              return 24;   /* engine + panel ceiling (P2.7) */
     }
 }
@@ -710,6 +726,7 @@ static uint8_t surface_glyph_column(char ch, unsigned col)
     static const uint8_t LPAREN[] = {0x00,0x1c,0x22,0x41,0x00};
     static const uint8_t RPAREN[] = {0x00,0x41,0x22,0x1c,0x00};
     static const uint8_t AMP[] = {0x36,0x49,0x55,0x22,0x50};
+    static const uint8_t DEG[] = {0x00,0x06,0x09,0x09,0x06};   /* '*' draws a degree ring */
     switch (ch) {
     case 'A': g=A; break; case 'B': g=B; break; case 'C': g=C; break;
     case 'D': g=D; break; case 'E': g=E; break; case 'F': g=F; break;
@@ -729,6 +746,7 @@ static uint8_t surface_glyph_column(char ch, unsigned col)
     case '?': g=QMARK; break; case '!': g=BANG; break; case '+': g=PLUS; break;
     case ',': g=COMMA; break; case '\'': g=APOSTROPHE; break;
     case '(': g=LPAREN; break; case ')': g=RPAREN; break; case '&': g=AMP; break;
+    case '*': g=DEG; break;
     default: return 0U;
     }
     return g[col];
@@ -963,6 +981,14 @@ static volatile uint8_t  s_commit_pct;
  * expiry needs no write. 0 means never fired. */
 static volatile uint32_t s_bloom_start_ms;
 
+/* The day for the dials that carry one, and the millisecond phase of the
+ * seconds hand. s_clock_set_ms is the esp_timer ms at which the published
+ * second last changed; the flush latches (now - set) once per frame into
+ * s_clock_phase_ms so every strip of a frame draws the same sweep angle. */
+static volatile uint32_t s_clock_date_word;   /* mday | mon<<5 | wday<<9 | valid<<12 */
+static volatile uint32_t s_clock_set_ms;
+static int s_clock_phase_ms;                  /* render task only, 0..999 */
+
 /* UI-01 clock state: (on << 16) | (hh << 8) | mm in ONE word, published with
  * a single release-store, so the flush can never read a torn time (an on flag
  * from one set with minutes from another). SINGLE-WRITER: the app task calls
@@ -995,6 +1021,9 @@ static void overlay_fade_tick(void)
     const uint32_t cw = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
     if ((cw & (1u << 16)) != 0u) {
         s_clock_shown_word = cw;
+        const uint32_t since =
+            now - __atomic_load_n(&s_clock_set_ms, __ATOMIC_RELAXED);
+        s_clock_phase_ms = since > 999u ? 999 : (int)since;
         s_clock_prog += step;
         if (s_clock_prog > 256) {
             s_clock_prog = 256;
@@ -1263,7 +1292,26 @@ void jr_display_clock_set(bool on, int hh, int mm, int ss)
     const uint32_t word = (on ? (1u << 16) : 0u)
                         | ((uint32_t)ss << 17)
                         | ((uint32_t)hh << 8) | (uint32_t)mm;
+    const uint32_t prev = __atomic_load_n(&s_clock_word, __ATOMIC_RELAXED);
+    if (on && ((prev & (1u << 16)) == 0u ||
+               ((prev >> 17) & 0x3Fu) != (uint32_t)ss)) {
+        __atomic_store_n(&s_clock_set_ms,
+                         (uint32_t)(esp_timer_get_time() / 1000),
+                         __ATOMIC_RELAXED);
+    }
     __atomic_store_n(&s_clock_word, word, __ATOMIC_RELEASE);
+}
+
+void jr_display_clock_set_date(int wday, int mday, int mon)
+{
+    if (wday < 0 || wday > 6 || mday < 1 || mday > 31 || mon < 0 || mon > 11) {
+        __atomic_store_n(&s_clock_date_word, 0u, __ATOMIC_RELEASE);
+        return;
+    }
+    __atomic_store_n(&s_clock_date_word,
+                     (uint32_t)mday | ((uint32_t)mon << 5) |
+                         ((uint32_t)wday << 9) | (1u << 12),
+                     __ATOMIC_RELEASE);
 }
 
 /* Brightness target, published by any task; APPLIED only on the render task.
@@ -1398,11 +1446,11 @@ static void brightness_pump(void)
 #define NAV_OVL_MASK      0xC0u
 #define NAV_FORWARD_BIT   0x100u
 #define NAV_SERIAL_SHIFT  9
-/* WATCH STYLE: two bits above the 8-bit serial, preserved by every nav step,
+/* WATCH STYLE: three bits above the 8-bit serial, preserved by every nav step,
  * changed only by NAV_OP_STYLE. Pinned by the shell suite. */
 #define NAV_STYLE_SHIFT   17
-#define NAV_STYLE_MASK    (0x3u << NAV_STYLE_SHIFT)
-_Static_assert((uint32_t)JR_WATCH_STYLE_COUNT <= 4u,
+#define NAV_STYLE_MASK    (0x7u << NAV_STYLE_SHIFT)
+_Static_assert((uint32_t)JR_WATCH_STYLE_COUNT <= 8u,
                "JR_WATCH_STYLE_COUNT exceeds the nav word's style field");
 
 _Static_assert((uint32_t)JR_DISPLAY_SPACE_COUNT <= NAV_SPACE_MASK + 1u,
@@ -2388,6 +2436,10 @@ static uint8_t hud_face_of(jr_face_t f)
     case JR_FACE_RESTING:   return HUD_FACE_IDLE;
     case JR_FACE_MUTED:     return HUD_FACE_IDLE;
     case JR_FACE_LINKING:   return HUD_FACE_THINK;
+    case JR_FACE_DIAL_DIVER:
+    case JR_FACE_DIAL_DRESS:
+    case JR_FACE_DIAL_PILOT:
+    case JR_FACE_DIAL_FUTURE: return HUD_FACE_IDLE;
     default:                return HUD_FACE_IDLE;
     }
 }
@@ -2594,6 +2646,161 @@ static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
 /* Defined with the shell primitives further down; the watch's disc-bounded
  * clear needs it up here. */
 static int sp_isqrt(int v);
+static void sp_text_row(uint16_t *row, int y, const char *text, int len,
+                        int x0, int y0, int scale, uint16_t px);
+static void sp_dot_row(uint16_t *row, int y, int cx, int cy, int n, uint16_t px);
+static uint16_t sp_tint(const jr_display_ctx_t *ctx, uint16_t native, int st);
+static bool sp_clip(int y, int *xlo, int *xhi);
+static int sp_wifi_bars(uint32_t lk);
+static bool sp_privacy_muted(void);
+
+/* WHICH DIAL, IF ANY. On WATCH with the clock published and a style whose
+ * dial is baked art, the face under the hands is that dial. JARVIS keeps its
+ * black disc and MINIMAL draws its own dial, so both answer JR_FACE_COUNT. */
+static jr_face_t watch_dial_face(void)
+{
+    const uint32_t nav = __atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE);
+    if ((nav & NAV_SPACE_MASK) != (uint32_t)JR_DISPLAY_SPACE_WATCH) {
+        return JR_FACE_COUNT;
+    }
+    if ((__atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE) & (1u << 16)) == 0u) {
+        return JR_FACE_COUNT;
+    }
+    switch ((nav & NAV_STYLE_MASK) >> NAV_STYLE_SHIFT) {
+    case JR_WATCH_DIVER:  return JR_FACE_DIAL_DIVER;
+    case JR_WATCH_DRESS:  return JR_FACE_DIAL_DRESS;
+    case JR_WATCH_PILOT:  return JR_FACE_DIAL_PILOT;
+    case JR_WATCH_FUTURE: return JR_FACE_DIAL_FUTURE;
+    default:              return JR_FACE_COUNT;
+    }
+}
+
+/* THE WORDS ON THE WATCH. DIVER's date window and FUTURE's four cells are
+ * the only text a dial carries, drawn with the shell's own glyphs after the
+ * hands so the type matches the ring. Every value is one the display already
+ * holds — the clock and date words, the weather slot, the power and links
+ * words — and an absent value leaves its cell blank or dim, never invented.
+ *
+ * Geometry comes from the HUD_WATCH_* table in hud_render.h — the one place
+ * the art's measured boxes live — so this file and the stand-in dial agree. */
+#define WX_STALE_MIN 120u
+
+static void watch_cells(const jr_display_ctx_t *ctx, int y1, int y2,
+                        uint16_t *pixels, int style, int st, bool baked)
+{
+    static const char *const WD[7] = { "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
+    static const char *const MO[12] = { "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                                        "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
+    const uint32_t dw = __atomic_load_n(&s_clock_date_word, __ATOMIC_ACQUIRE);
+    const bool have_date = (dw & (1u << 12)) != 0u;
+    const int mday = (int)(dw & 0x1Fu), mon = (int)((dw >> 5) & 0xFu), wday = (int)((dw >> 9) & 0x7u);
+
+    if (style == JR_WATCH_DIVER) {
+        if (!have_date) {
+            return;
+        }
+        char d[3] = { (char)('0' + mday / 10), (char)('0' + mday % 10), '\0' };
+        const uint16_t ink = sp_tint(ctx, 0x0000, 255);
+        const uint16_t paper = sp_tint(ctx, 0xFFFF, st);
+        for (int y = y1; y < y2; ++y) {
+            uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+            if (!baked && y >= HUD_WATCH_DATE_Y0 && y < HUD_WATCH_DATE_Y1) {
+                int lo = HUD_WATCH_DATE_X0, hi = HUD_WATCH_DATE_X1 - 1;
+                if (sp_clip(y, &lo, &hi)) {
+                    for (int x = lo; x <= hi; ++x) {
+                        row[x] = paper;
+                    }
+                }
+            }
+            if (st >= 128) {
+                sp_text_row(row, y, d, 2,
+                            (HUD_WATCH_DATE_X0 + HUD_WATCH_DATE_X1) / 2 - 11,
+                            (HUD_WATCH_DATE_Y0 + HUD_WATCH_DATE_Y1) / 2 - 7, 2, ink);
+            }
+        }
+        return;
+    }
+    if (style != JR_WATCH_FUTURE || st < 128) {
+        return;
+    }
+    const uint16_t cyan = sp_tint(ctx, 0x073F, st);
+    const uint16_t dim  = sp_tint(ctx, 0x073F, st / 3);
+    const uint16_t white = sp_tint(ctx, 0xFFFF, st);
+
+    char line[20];
+    int n;
+    /* the date */
+    if (have_date) {
+        n = snprintf(line, sizeof line, "%s %02d %s", WD[wday], mday, MO[mon]);
+    } else {
+        n = snprintf(line, sizeof line, "NO DATE");
+    }
+    const int dx0 = HUD_WATCH_CELL_DATE_CX - (6 * 2 * n) / 2;
+    /* the weather */
+    const jr_display_weather_t *wx =
+        &s_weather[__atomic_load_n(&s_weather_slot, __ATOMIC_ACQUIRE) & 1u];
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    const bool wx_ok = wx->valid;
+    const bool wx_stale = wx_ok && (now - wx->fetched_ms) / 60000u >= WX_STALE_MIN;
+    char w1[20], w2[12];
+    int n1, n2;
+    if (wx_ok) {
+        n1 = snprintf(w1, sizeof w1, "%d* %s", (int)wx->temp_f, wx->condition);
+        n2 = snprintf(w2, sizeof w2, "%d / %d", (int)wx->hi_f, (int)wx->lo_f);
+    } else {
+        n1 = snprintf(w1, sizeof w1, "NO WEATHER");
+        n2 = 0;
+    }
+    if (n1 > 15) {
+        n1 = 15;                 /* the cell is 193 px: 15 glyphs at scale 2 */
+    }
+    const uint16_t wxpx = (wx_ok && !wx_stale) ? cyan : dim;
+    const int wx0 = HUD_WATCH_CELL_WX_CX - (6 * 2 * n1) / 2;
+    const int wl0 = HUD_WATCH_CELL_WX_CX - (6 * 2 * n2) / 2;
+    /* battery and link */
+    const uint32_t pw = __atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE);
+    const uint32_t lk = __atomic_load_n(&s_links_word, __ATOMIC_ACQUIRE);
+    const int pct = (int)(pw & 0xFFu);
+    char bt[6];
+    const int nb = pct <= 100 ? snprintf(bt, sizeof bt, "%d%%", pct) : snprintf(bt, sizeof bt, "--");
+    const int bars = sp_wifi_bars(lk);
+    const char *link = sp_privacy_muted() ? "MUTED" : ((lk & 2u) != 0u ? "LIVE" : "IDLE");
+    const int nl = (int)strlen(link);
+
+    for (int y = y1; y < y2; ++y) {
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        sp_text_row(row, y, line, n, dx0, HUD_WATCH_CELL_DATE_CY - 7, 2, have_date ? cyan : dim);
+        sp_text_row(row, y, w1, n1, wx0, HUD_WATCH_CELL_WX_CY - 16, 2, wxpx);
+        if (n2 > 0) {
+            sp_text_row(row, y, w2, n2, wl0, HUD_WATCH_CELL_WX_CY + 2, 2, wxpx);
+        }
+        /* battery: ten dots in a shallow arc over the number */
+        if (y >= HUD_WATCH_CELL_BAT_CY - 16 && y <= HUD_WATCH_CELL_BAT_CY - 6) {
+            for (int i = 0; i < 10; ++i) {
+                const int cx = HUD_WATCH_CELL_BAT_CX - 22 + i * 5;
+                const int cy = HUD_WATCH_CELL_BAT_CY - 8 - ((i < 5 ? i : 9 - i) * 3) / 2;
+                const bool lit = pct <= 100 && pct >= (i + 1) * 10 - 5;
+                if (y >= cy && y < cy + 3) {
+                    sp_dot_row(row, y, cx, cy, 3, lit ? cyan : dim);
+                }
+            }
+        }
+        sp_text_row(row, y, bt, nb, HUD_WATCH_CELL_BAT_CX - (6 * 2 * nb) / 2, HUD_WATCH_CELL_BAT_CY, 2, pct <= 100 ? white : dim);
+        /* link: four bars, then the word */
+        for (int i = 0; i < 4; ++i) {
+            const int h = 4 + i * 3, x0 = HUD_WATCH_CELL_LINK_CX - 13 + i * 6;
+            if (y >= HUD_WATCH_CELL_LINK_CY - h && y < HUD_WATCH_CELL_LINK_CY) {
+                int lo = x0, hi = x0 + 3;
+                if (sp_clip(y, &lo, &hi)) {
+                    for (int x = lo; x <= hi; ++x) {
+                        row[x] = i < bars ? cyan : dim;
+                    }
+                }
+            }
+        }
+        sp_text_row(row, y, link, nl, HUD_WATCH_CELL_LINK_CX - (6 * nl) / 2, HUD_WATCH_CELL_LINK_CY + 6, 1, white);
+    }
+}
 
 static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
                                 uint16_t *pixels)
@@ -2652,32 +2859,61 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
      * boundary between shell territory and the persistent rim, and the hands
      * only reach r190, so the dial still clears completely. Rows that miss the
      * disc entirely are skipped rather than cleared. */
-    for (int y = y1; y < y2; ++y) {
-        const int dy = y - HUD_H / 2;
-        const int d2 = JR_DISPLAY_SHELL_R_MAX * JR_DISPLAY_SHELL_R_MAX
-                       - dy * dy;
-        if (d2 <= 0) {
-            continue;
+    /* THE DIAL, BAKED OR NOT. A style with baked art shows it as the face
+     * under the hands (watch_dial_face), so the disc is NOT cleared: the
+     * hands blend over the art. When the partition lacks that clip the face
+     * pipeline fell back to RESTING, ctx->shown_face says so, and the watch
+     * clears the disc and draws its black stand-in dial as before. JARVIS
+     * and MINIMAL never have art; MINIMAL paints its own warm-white dial. */
+    const int style = (int)jr_display_watch_style();
+    const jr_face_t dial = watch_dial_face();
+    const bool baked = dial != JR_FACE_COUNT && ctx->shown_face == dial;
+    if (!baked) {
+        for (int y = y1; y < y2; ++y) {
+            const int dy = y - HUD_H / 2;
+            const int d2 = JR_DISPLAY_SHELL_R_MAX * JR_DISPLAY_SHELL_R_MAX
+                           - dy * dy;
+            if (d2 <= 0) {
+                continue;
+            }
+            const int half = sp_isqrt(d2);
+            int xlo = HUD_W / 2 - half;
+            int xhi = HUD_W / 2 + half;
+            if (xlo < 0) {
+                xlo = 0;
+            }
+            if (xhi > HUD_W - 1) {
+                xhi = HUD_W - 1;
+            }
+            memset(pixels + (size_t)(y - y1) * HUD_W + xlo, 0,
+                   (size_t)(xhi - xlo + 1) * sizeof(uint16_t));
         }
-        const int half = sp_isqrt(d2);
-        int xlo = HUD_W / 2 - half;
-        int xhi = HUD_W / 2 + half;
-        if (xlo < 0) {
-            xlo = 0;
-        }
-        if (xhi > HUD_W - 1) {
-            xhi = HUD_W - 1;
-        }
-        memset(pixels + (size_t)(y - y1) * HUD_W + xlo, 0,
-               (size_t)(xhi - xlo + 1) * sizeof(uint16_t));
     }
 
     const uint32_t w = s_clock_shown_word;
-    hud_overlay_clock_style(pixels, y1, y2 - y1, ctx->board.swap_color_bytes,
-                            (int)((w >> 8) & 0xFFu), (int)(w & 0xFFu),
-                            (int)((w >> 17) & 0x3Fu),
-                            e > 255 ? 255 : e,
-                            (int)jr_display_watch_style());
+    const int strength = e > 255 ? 255 : e;
+    if (style == (int)JR_WATCH_JARVIS) {
+        hud_overlay_clock(pixels, y1, y2 - y1, ctx->board.swap_color_bytes,
+                          (int)((w >> 8) & 0xFFu), (int)(w & 0xFFu),
+                          (int)((w >> 17) & 0x3Fu), strength);
+        return;
+    }
+    const uint32_t pw = __atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE);
+    const jr_display_weather_t *wx =
+        &s_weather[__atomic_load_n(&s_weather_slot, __ATOMIC_ACQUIRE) & 1u];
+    const hud_watch_t hw = {
+        .hh = (int)((w >> 8) & 0xFFu),
+        .mm = (int)(w & 0xFFu),
+        .ss = (int)((w >> 17) & 0x3Fu),
+        .ms = s_clock_phase_ms,
+        .batt_pct = (pw & 0xFFu) <= 100u ? (int)(pw & 0xFFu) : -1,
+        .wx_valid = wx->valid,
+        .temp_f = wx->temp_f,
+        .dial_baked = baked,
+    };
+    hud_overlay_watch(pixels, y1, y2 - y1, ctx->board.swap_color_bytes, &hw,
+                      strength, style);
+    watch_cells(ctx, y1, y2, pixels, style, strength, baked);
 }
 
 /* ===== SPATIAL SHELL: geometry and drawing ===============================
@@ -4217,7 +4453,8 @@ static esp_err_t program_segment(jr_display_ctx_t *ctx, jr_face_t face,
 }
 
 static esp_err_t apply_face(jr_display_ctx_t *ctx, jr_face_t face,
-                            uint8_t amplitude, bool *stale)
+                            jr_face_t requested_face, uint8_t amplitude,
+                            bool *stale)
 {
     if (stale != NULL) {
         *stale = false;
@@ -4242,7 +4479,7 @@ static esp_err_t apply_face(jr_display_ctx_t *ctx, jr_face_t face,
         (requested_before & JR_DISPLAY_CMD_FACE_MASK) >>
         JR_DISPLAY_CMD_FACE_SHIFT);
     if ((requested_before & JR_DISPLAY_CMD_BLANK) != 0U ||
-        latest_before != face) {
+        latest_before != requested_face) {
         if (stale != NULL) {
             *stale = true;
         }
@@ -4281,7 +4518,7 @@ static esp_err_t apply_face(jr_display_ctx_t *ctx, jr_face_t face,
         __atomic_load_n(&ctx->requested_word, __ATOMIC_ACQUIRE);
     const jr_face_t latest = (jr_face_t)(
         (requested & JR_DISPLAY_CMD_FACE_MASK) >> JR_DISPLAY_CMD_FACE_SHIFT);
-    if ((requested & JR_DISPLAY_CMD_BLANK) != 0U || latest != face) {
+    if ((requested & JR_DISPLAY_CMD_BLANK) != 0U || latest != requested_face) {
         if (stale != NULL) {
             *stale = true;
         }
@@ -4444,6 +4681,21 @@ static void display_task(void *arg)
             jr_face_t face = (jr_face_t)((word & JR_DISPLAY_CMD_FACE_MASK) >>
                                          JR_DISPLAY_CMD_FACE_SHIFT);
             uint8_t amplitude = word & JR_DISPLAY_CMD_AMP_MASK;
+            /* THE DIAL IS A FACE. On WATCH with a style that has baked art,
+             * the glass shows that dial under the live hands. The swap is
+             * made here, where the requested word is read, so a style step
+             * or a walk onto WATCH re-applies exactly like a face change:
+             * the effective word differs from the last one applied. The
+             * composition root's own request still decides staleness. */
+            const jr_face_t requested_face = face;
+            {
+                const jr_face_t dial = watch_dial_face();
+                if (dial != JR_FACE_COUNT) {
+                    face = dial;
+                    word = (word & ~JR_DISPLAY_CMD_FACE_MASK) |
+                           ((uint32_t)dial << JR_DISPLAY_CMD_FACE_SHIFT);
+                }
+            }
 
             if (blank) {
                 if (!__atomic_load_n(&ctx->blanked, __ATOMIC_RELAXED)) {
@@ -4462,7 +4714,7 @@ static void display_task(void *arg)
                     jr_face_t before = (jr_face_t)diag_load(&ctx->applied_face);
                     bool was_blanked = __atomic_load_n(&ctx->blanked, __ATOMIC_RELAXED);
                     bool stale = false;
-                    err = apply_face(ctx, face, amplitude, &stale);
+                    err = apply_face(ctx, face, requested_face, amplitude, &stale);
                     if (stale) {
                         ctx->apply_retry_gate_ms = 0;
                     } else if (err == ESP_OK) {
@@ -4877,7 +5129,7 @@ static void nav_step(nav_op_t op, uint32_t arg)
             fwd = 0u;
             break;
         case NAV_OP_STYLE:
-            style = (arg & 0x3u) << NAV_STYLE_SHIFT;
+            style = (arg & 0x7u) << NAV_STYLE_SHIFT;
             break;
         case NAV_OP_SET:
         default:
@@ -4949,7 +5201,7 @@ jr_watch_style_t jr_display_watch_style(void)
 const char *jr_display_watch_style_name(jr_watch_style_t style)
 {
     static const char *const names[JR_WATCH_STYLE_COUNT] = {
-        "JARVIS", "DIVER", "DIGITAL", "MINIMAL" };
+        "JARVIS", "DIVER", "DRESS", "PILOT", "MINIMAL", "FUTURE" };
     return ((int)style >= 0 && style < JR_WATCH_STYLE_COUNT) ? names[style]
                                                              : names[0];
 }
