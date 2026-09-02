@@ -73,8 +73,12 @@ is the classified edge-origin swipe.
   and `board_poll` (90 s, awake, Wi-Fi, not DREAM) announces a completed or
   blocked item once: spoken with an open unmuted session, `DONE: <title>`
   caption when muted, always an ACTIVITY `TASK` row. Proven end to end from
-  a desk. The other end is `tools/board-worker/worker.py`; the owner's Docker
-  devbox host is still unknown (PLAN N11.4), and an SSH key pasted into chat
+  a desk. **The worker is the gateway itself:** the same poll claims one item
+  and settles it in the call — repo goals to the managed Pi sandbox worker
+  (branch delivery, allowlisted repos only), everything else researched with
+  the owner's notes as context and filed in the company brain. No devbox, no
+  host, no keys beyond the one already in NVS. `tools/board-worker/worker.py`
+  is a reference for jobs the gateway cannot do. An SSH key pasted into chat
   on 2026-09-02 should be rotated — it was never installed.
 - **Three quiet faces** (rest, muted, linking) from the same generator, 0.93 MB;
   the art partition ships separately: `jarvisctl art` → `POST /api/ota/assets`

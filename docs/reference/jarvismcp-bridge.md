@@ -65,6 +65,20 @@ summary then appears as `resultSummary` in the summary projection that
 `listWorkItems` and the device's `board_poll` read. `tools/board-worker/worker.py`
 was corrected the same day.
 
+**[2026-09-02] The managed sandbox worker is a coding agent, not a general
+one.** `sandboxes.workerSubmit` with `kind:'pi'` refuses `delivery:'none'`
+(`invalid_delivery`) and any repository off the gateway's allowlist
+(`repo_not_allowed`, HTTP 403); it delivers a branch or a pull request on an
+allowlisted repo, with model and GitHub credentials held server-side. A
+`kind:'probe'` job ran the full lifecycle in 18 s (queued → started → exit 0
+→ sandbox verified deleted). So the device's poll routes only goals that
+name `owner/repo` there, and answers everything else with `research` (M3,
+cited, measured 21 s including claim, `memory.search` context, `memory.capture`
+and `completeWorkItem`) — inside the gateway's 30 s call budget, which is why
+the poll settles one item at a time. `listWorkItems` summary rows carry
+`leaseState` (`active`/`expired`/…), which is what makes a poll killed at 30 s
+recoverable on a later one via `recoverWorkItem`.
+
 **[2026-09-02] The board, as seen from the device.** `coordination.*`
 takes its arguments directly (never wrapped in `{input:…}` whatever a
 generated schema says) and every write needs an identity tuple

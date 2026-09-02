@@ -30,6 +30,11 @@ are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
   6.3 s, and a job completed from a desk was announced on the glass at the
   next poll. Board results are projected inside `execute_tool` as well, so a
   raw portfolio can no longer overflow the reply budget.
+- The worker is the gateway. Each poll claims one open job and settles it
+  in the same call: a goal naming a repository goes to the managed sandbox
+  coding agent and comes back as a branch; anything else is researched with
+  the owner's own notes as context, filed in the company brain, and spoken
+  in 300 characters. Nothing runs on any other machine.
 
 - Jarvis can delegate. `delegate_task` puts a spoken job on the JarvisMCP
   coordination board and returns at once; `delegated_tasks` lists the board

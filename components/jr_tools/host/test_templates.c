@@ -24,7 +24,7 @@ static int g_checks;
         }                                                                     \
     } while (0)
 
-static char g_out[3072];   /* JR_TOOLS_CODE_CAP: execute_tool alone is ~1.3 KB */
+static char g_out[4096];   /* JR_TOOLS_CODE_CAP: board_poll alone is ~3 KB */
 
 static jr_tool_template_status_t build(const char *name, const char *args)
 {
@@ -200,9 +200,23 @@ static int test_delegated_tasks_and_poll_are_projected(void)
           "no filter argument exists");
 
     CHECK(build("board_poll", "{}") == JR_TOOL_TEMPLATE_OK, "board_poll builds");
-    CHECK(strstr(g_out, "return {t:a.slice(0,6).map(w=>({i:String(w.id||\"\").slice(0,40),"
+    CHECK(strstr(g_out, "return {d:did,t:a.slice(0,6).map(w=>({i:String(w.id||\"\").slice(0,40),"
                         "s:String(w.status||\"\").slice(0,12),n:String(w.title||\"\").slice(0,48),") != NULL,
           "the poll is {i,s,n,r} with a 40-glyph id the ring can dedupe on");
+    /* The poll is also the worker: one item claimed, worked, settled, in
+     * the gateway, in the same call. Pin the four verbs so a "simplification"
+     * that drops the work cannot stay green. */
+    CHECK(strstr(g_out, "C.claimWorkItem({...B,workItemId:id,leaseSeconds:180})") != NULL,
+          "the poll claims one eligible item");
+    CHECK(strstr(g_out, "jarvis.sandboxes.workerSubmit({idempotencyKey:\"jn-\"+id,kind:\"pi\",delivery:\"branch\"") != NULL,
+          "a repo goal goes to the managed sandbox worker as a branch");
+    CHECK(strstr(g_out, "jarvis.research((ctx?") != NULL &&
+          strstr(g_out, "jarvis.memory.search(goal,{limit:3})") != NULL,
+          "anything else is researched with the owner's notes as context");
+    CHECK(strstr(g_out, "C.completeWorkItem({...B,workItemId:id,result:{summary:ans.slice(0,300)") != NULL &&
+          strstr(g_out, "C.blockWorkItem({...B,workItemId:id,reason:String(e&&e.message||e).slice(0,160)})") != NULL,
+          "success completes with a 300-char summary, any error blocks with the reason");
+    CHECK(strlen(g_out) < 4096U - 256U, "the poll program leaves 256 B of headroom under the 4 KB code cap");
     /* Worst case on the wire: six of {i:40,s:12,n:48,r:120} + keys and
      * quotes = 6 * (220 + 34) < 1.6 KB, under the 3 KB response slot. */
     CHECK(6U * (40U + 12U + 48U + 120U + 34U) < 1600U, "worst-case poll under 1.6 KB");

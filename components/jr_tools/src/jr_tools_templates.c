@@ -126,17 +126,51 @@ static const template_desc_t s_templates[] = {
      "title:String(w.title||\"\").slice(0,60),status:String(w.status||\"\"),"
      "result:String(w.resultSummary||w.blockReason||w.blockedReason||w.reason||w.decisionNeeded||\"\").slice(0,120)})),"
      "total:a.length}", "", true},
-    /* The device's own poll (never declared to the model): the six most
-     * recently touched items as {i,s,n,r} — id, status, name, result — so a
-     * completed or blocked job can be announced once. Worst case ~1.4 KB. */
+    /* The device's own poll (never declared to the model), and the worker.
+     * Every 90 s the device is the scheduler's heartbeat and the gateway does
+     * the work in the same call: one eligible item is claimed (or an expired
+     * lease recovered), then either handed to the managed Pi sandbox worker
+     * (a goal that names owner/repo and says repo/branch/PR — delivery is a
+     * branch) or answered by the gateway's cited research agent with the
+     * owner's own notes as context, filed into the company brain, and
+     * completed with a <=300-char summary; any failure blocks the item with
+     * the reason. Then the six most recently touched items come back as
+     * {i,s,n,r} — id, status, name, result — so the device can announce a
+     * finish once. Measured 21 s for a research item; the 30 s gateway cap
+     * is why it is one item per poll. Nothing runs on any other host. */
     {"board_poll", "query", 1U, true,
-     "const L=await jarvis.coordination.listWorkItems({projectId:PJ,detail:\"summary\"});"
+     "const ID={runtime:\"pi\",agentId:\"jarvisnano-desk-worker\",hostId:\"jarvismcp\",sessionId:new Date().toISOString().slice(0,10)};"
+     "const C=jarvis.coordination;const B={projectId:PJ,identity:ID};"
+     "const ls=async()=>{const L=await C.listWorkItems({projectId:PJ,detail:\"summary\"});"
      "const a=(Array.isArray(L)?L:(L&&(L.items||L.workItems))||[]).slice();"
      "const k=w=>String(w.updatedAt||w.completedAt||w.lastProgressAt||w.createdAt||\"\");"
-     "a.sort((x,y)=>k(y).localeCompare(k(x)));"
-     "return {t:a.slice(0,6).map(w=>({i:String(w.id||\"\").slice(0,40),"
+     "a.sort((x,y)=>k(y).localeCompare(k(x)));return a};"
+     "let a=await ls();const st=w=>String(w.status||\"\").toLowerCase();"
+     "const act=w=>String(w.leaseState||\"\")===\"active\";"
+     "const c=a.find(w=>st(w)===\"open\"&&!act(w))||a.find(w=>st(w)===\"in_progress\"&&String(w.leaseState||\"\")===\"expired\");"
+     "let did=\"\";if(c){const id=c.id,goal=String(c.title||\"\");try{"
+     "if(st(c)===\"open\")await C.claimWorkItem({...B,workItemId:id,leaseSeconds:180});"
+     "else await C.recoverWorkItem({...B,workItemId:id,recoveryId:\"rec-\"+id,idempotencyKey:\"rec-\"+id+\"-\"+Date.now().toString(36),reason:\"lease expired mid-run\",evidence:[\"board_poll reconciler\"],leaseSeconds:180});"
+     "const m=goal.match(/\\b([A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+)\\b/);"
+     "if(m&&/\\b(repo|github|branch|pull request|PR)\\b/i.test(goal)){"
+     "const j=await jarvis.sandboxes.workerSubmit({idempotencyKey:\"jn-\"+id,kind:\"pi\",delivery:\"branch\",repo:m[1],task:goal,maxRuntimeSeconds:1800});"
+     "const s=String(j.status||\"\");"
+     "if(s===\"succeeded\")await C.completeWorkItem({...B,workItemId:id,result:{summary:\"Delivered on \"+m[1]+(j.delivery&&j.delivery.branch?\", branch \"+j.delivery.branch:\"\")+\".\",evidence:[\"worker \"+j.jobId]}});"
+     "else if(s===\"failed\"||s===\"canceled\")await C.blockWorkItem({...B,workItemId:id,reason:\"worker \"+s,evidence:[\"worker \"+j.jobId]});"
+     "else await C.reportProgress({...B,workItemId:id,message:\"worker \"+s,evidence:[\"worker \"+j.jobId]});did=s;"
+     "}else{"
+     "let ctx=\"\";try{const h=await jarvis.memory.search(goal,{limit:3});const hs=Array.isArray(h)?h:(h&&h.results)||[];"
+     "ctx=hs.map(x=>String(x.snippet||x.excerpt||x.content||\"\").replace(/\\s+/g,\" \").slice(0,300)).filter(Boolean).join(\" | \")}catch(e){}"
+     "const r=await jarvis.research((ctx?\"Context from the owner's own notes: \"+ctx+\"\\n\\nTask: \":\"\")+goal,{queries:3,maxSources:6});"
+     "const ans=String(r&&r.answer||\"\").replace(/\\s+/g,\" \").trim();"
+     "if(!ans)throw new Error(\"research returned nothing\");const src=(r.sources||[]).slice(0,6);"
+     "try{await jarvis.memory.capture({type:\"note\",source:\"jarvisnano-desk\",title:goal.slice(0,60),body:String(r.answer)+\"\\n\\nSources:\\n\"+src.map(s=>\"[\"+s.n+\"] \"+s.title+\" \"+s.url).join(\"\\n\")})}catch(e){}"
+     "await C.completeWorkItem({...B,workItemId:id,result:{summary:ans.slice(0,300),evidence:src.map(s=>String(s.url)).slice(0,5)}});did=\"done\";"
+     "}}catch(e){try{await C.blockWorkItem({...B,workItemId:id,reason:String(e&&e.message||e).slice(0,160)})}catch(e2){}did=\"blocked\"}"
+     "a=await ls();}"
+     "return {d:did,t:a.slice(0,6).map(w=>({i:String(w.id||\"\").slice(0,40),"
      "s:String(w.status||\"\").slice(0,12),n:String(w.title||\"\").slice(0,48),"
-     "r:String(w.resultSummary||w.blockReason||w.blockedReason||w.reason||w.decisionNeeded||\"\").slice(0,120)}))}",
+     "r:String(w.resultSummary||w.blockReason||w.decisionNeeded||\"\").slice(0,120)}))}",
      "", true},
 };
 
