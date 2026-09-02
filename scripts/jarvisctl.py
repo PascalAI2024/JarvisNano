@@ -26,6 +26,7 @@ device over LAN. Host comes from --host or $JARVIS_DEVICE_HOST.
     jarvisctl volume 10..100              # paired persistent speaker level
     jarvisctl brightness 10..100          # paired persistent mood ceiling
     jarvisctl ota                        # upload built firmware over Wi-Fi
+    jarvisctl art                        # upload the built face clips (emote_assets.bin)
     jarvisctl update                     # flash built firmware over USB
     jarvisctl reboot                     # watchdog reset via esptool (USB)
 Exit code 0 = healthy/ok. `status` exits 1 when the device is deaf/muted so
@@ -318,6 +319,10 @@ def main() -> int:
     if cmd == "ota":
         img = os.path.join(HERE, "..", "build", "jarvisrobot_v5.bin")
         return cmd_desk(["ota", "--image", img])
+    if cmd == "art":
+        # The faces live in their own partition and do not ride with the app.
+        img = os.path.join(HERE, "..", "build", "emote_assets.bin")
+        return cmd_desk(["ota", "--assets", "--image", img])
     if cmd == "input":
         # Paired synthetic input is intentionally non-physical authority.
         return cmd_desk(["input", *rest])

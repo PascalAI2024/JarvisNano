@@ -29,6 +29,8 @@ DEFAULT_WATCH_INTERVAL_SECONDS = 0.75
 KEYCHAIN_SERVICE = "com.ingeniousdigital.jarvisnano.desk"
 MAX_RESPONSE_BYTES = 128 * 1024
 MIN_OTA_BYTES = 256 * 1024
+MIN_ART_BYTES = 1024 * 1024
+MAX_ART_BYTES = 0x5E0000
 MAX_OTA_BYTES = 4 * 1024 * 1024
 MAX_TOKEN_BYTES = 64  # JR_CFG_PAIRING_TOKEN_CAP includes the trailing NUL
 MAX_CURSOR = 0x7FFFFFFF  # firmware query_int() parses a signed int
@@ -1034,6 +1036,8 @@ def build_parser(env: Mapping[str, str] | None = None) -> JsonArgumentParser:
     subparsers.add_parser("mode", help="read current glass owner")
     ota = subparsers.add_parser("ota", help="upload a paired firmware image")
     ota.add_argument("--image", required=True)
+    ota.add_argument("--assets", action="store_true",
+                     help="the art image (emote_assets.bin) via /api/ota/assets")
     doctor = subparsers.add_parser(
         "doctor", help="diagnose device state and bounded incidents")
     doctor.add_argument("--repair", action="store_true")
@@ -1129,15 +1133,21 @@ def execute_command(
         token = resolve_token(keychain, account, env, client.base_url)
         try:
             with open(args.image, "rb") as image_file:
-                image = image_file.read(MAX_OTA_BYTES + 1)
+                image = image_file.read(
+                    (MAX_ART_BYTES if args.assets else MAX_OTA_BYTES) + 1)
         except FileNotFoundError:
             raise DeskError("missing_image",
                             f"OTA image not found: {args.image}") from None
-        if len(image) < MIN_OTA_BYTES or len(image) > MAX_OTA_BYTES:
+        if args.assets:
+            if len(image) < MIN_ART_BYTES or len(image) > MAX_ART_BYTES:
+                raise DeskError("invalid_image",
+                                "art image must be between 1 MiB and 6 MiB")
+        elif len(image) < MIN_OTA_BYTES or len(image) > MAX_OTA_BYTES:
             raise DeskError("invalid_image",
                             "OTA image must be between 256 KiB and 4 MiB")
         response = client.post_binary(
-            "/api/ota/upload", image, token=token)
+            "/api/ota/assets" if args.assets else "/api/ota/upload",
+            image, token=token)
         return {"ok": True, "command": "ota",
                 "bytes": len(image), "response": response}
     if args.command == "present":

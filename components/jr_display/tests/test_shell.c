@@ -564,6 +564,22 @@ static size_t count_in(const uint16_t *fb, uint16_t px, int x0, int x1,
     return n;
 }
 
+static void test_missing_clip_falls_back_to_the_face_it_grew_from(void)
+{
+    CHECK(face_fallback(JR_FACE_RESTING) == JR_FACE_IDLE, "rest -> idle");
+    CHECK(face_fallback(JR_FACE_MUTED) == JR_FACE_IDLE, "muted -> idle");
+    CHECK(face_fallback(JR_FACE_LINKING) == JR_FACE_THINKING, "linking -> thinking");
+    for (int f = 0; f < (int)JR_FACE_COUNT; ++f) {
+        const jr_face_t p = face_fallback((jr_face_t)f);
+        CHECK(p == (jr_face_t)f || face_fallback(p) == p,
+              "face %d falls back at most once (parent %d has none)", f, (int)p);
+    }
+    for (int f = 0; f <= (int)JR_FACE_ERROR; ++f) {
+        CHECK(face_fallback((jr_face_t)f) == (jr_face_t)f,
+              "the original five faces are their own fallback (%d)", f);
+    }
+}
+
 static void test_render_cadence_reaches_the_engine_and_clamps(void)
 {
     gfx_handle_t saved = s_display.gfx;
@@ -1977,6 +1993,7 @@ int main(void)
     test_focal_wedge_follows_the_slide();
     test_pinned_caption_survives_other_writers();
     test_render_cadence_reaches_the_engine_and_clamps();
+    test_missing_clip_falls_back_to_the_face_it_grew_from();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);

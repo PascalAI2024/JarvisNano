@@ -126,6 +126,8 @@ typedef struct {
     int last_end;
     uint64_t decay_gate_ms;
     uint64_t apply_retry_gate_ms;   /* backoff after a failed apply_face */
+    uint32_t missing_faces;         /* bit per face whose clip this art image lacks */
+    jr_face_t shown_face;           /* the clip actually bound: face, or its fallback */
 
     volatile uint32_t requested_word;
     volatile uint32_t started;
@@ -227,6 +229,19 @@ static const char *face_asset(jr_face_t face)
     case JR_FACE_MUTED:     return JR_DISPLAY_MOUNT_POINT "/rwave_muted.eaf";
     case JR_FACE_LINKING:   return JR_DISPLAY_MOUNT_POINT "/rwave_link.eaf";
     default:                return NULL;
+    }
+}
+
+/* The face a newer firmware shows when the art partition predates the clip:
+ * each quiet face grew out of an older one and degrades back to it. A face
+ * with no parent returns itself, which is how the loader knows to stop. */
+static jr_face_t face_fallback(jr_face_t face)
+{
+    switch (face) {
+    case JR_FACE_RESTING:  return JR_FACE_IDLE;
+    case JR_FACE_MUTED:    return JR_FACE_IDLE;
+    case JR_FACE_LINKING:  return JR_FACE_THINKING;
+    default:               return face;
     }
 }
 
@@ -4208,7 +4223,7 @@ static esp_err_t apply_face(jr_display_ctx_t *ctx, jr_face_t face,
 
     if (ctx->active != NULL && ctx->loaded_face == face &&
             !__atomic_load_n(&ctx->blanked, __ATOMIC_RELAXED)) {
-        return program_segment(ctx, face, bucket, false);
+        return program_segment(ctx, ctx->shown_face, bucket, false);
     }
 
     if (face >= JR_FACE_COUNT) {        /* defensive: cb clamps already */
@@ -4226,13 +4241,30 @@ static esp_err_t apply_face(jr_display_ctx_t *ctx, jr_face_t face,
         }
         return ESP_OK;
     }
-    jr_display_clip_t *clip = &ctx->clips[face];
-    if (clip->data == NULL) {
-        esp_err_t load_err = clip_load(face, clip);
-        if (load_err != ESP_OK) {
-            diag_inc(&ctx->asset_load_failures);
-            return load_err;
+    /* A clip this art image lacks (new firmware over an old partition)
+     * degrades to its parent face — once, remembered, no retry storm. */
+    jr_face_t shown = face;
+    while ((ctx->missing_faces & (1U << shown)) != 0U &&
+           face_fallback(shown) != shown) {
+        shown = face_fallback(shown);
+    }
+    jr_display_clip_t *clip = &ctx->clips[shown];
+    while (clip->data == NULL) {
+        esp_err_t load_err = clip_load(shown, clip);
+        if (load_err == ESP_OK) {
+            break;
         }
+        diag_inc(&ctx->asset_load_failures);
+        if (load_err == ESP_ERR_NOT_FOUND && face_fallback(shown) != shown) {
+            ctx->missing_faces |= 1U << shown;
+            ESP_LOGW(TAG, "face=%d has no clip on this art image; showing face=%d "
+                     "until /api/ota/assets brings it", (int)shown,
+                     (int)face_fallback(shown));
+            shown = face_fallback(shown);
+            clip = &ctx->clips[shown];
+            continue;
+        }
+        return load_err;
     }
     /* Asset reads can take longer than a very short Gemini turn. Do not show
      * the completed turn's stale face after the request already returned to
@@ -4270,15 +4302,16 @@ static esp_err_t apply_face(jr_display_ctx_t *ctx, jr_face_t face,
 
     ctx->active = clip;
     ctx->loaded_face = face;
+    ctx->shown_face = shown;
     ctx->last_end = -1;
     __atomic_store_n(&ctx->applied_bucket, -1, __ATOMIC_RELAXED);
     __atomic_store_n(&ctx->blanked, false, __ATOMIC_RELAXED);
     diag_store(&ctx->current_asset_bytes, (uint32_t)clip->size);
 
-    err = program_segment(ctx, face, bucket, true);
+    err = program_segment(ctx, shown, bucket, true);
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "face=%d asset=%u bytes frames=%u bucket=%u",
-                 (int)face, (unsigned)clip->size,
+                 (int)shown, (unsigned)clip->size,
                  (unsigned)(clip->total_frames - 1U), (unsigned)bucket);
     }
     return err;

@@ -3312,6 +3312,119 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* POST /api/ota/assets — the art image, whole, into the emote_assets
+ * partition. The app image travels over /api/ota/upload and the faces do not
+ * ride with it, so a firmware that names a new clip lands on a partition that
+ * lacks it (it shows the parent face, see jr_display face_fallback) until this
+ * runs. Whole-partition erase, streamed write, reboot to remount. Refused in
+ * probation: that reboot would roll the app back. */
+static esp_err_t ota_assets_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    if (image_in_probation()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"ok\":false,\"error\":\"app image in probation; try again in a minute\"}");
+        return ESP_OK;
+    }
+    if (atomic_load(&s_ota_active)) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"an update is in flight\"}");
+        return ESP_OK;
+    }
+    const esp_partition_t *part = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, "emote_assets");
+    if (part == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "no emote_assets partition");
+        return ESP_OK;
+    }
+    const size_t len = req->content_len;
+    if (len < 1024U * 1024U || len > part->size) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "art image must be between 1 MiB and the partition size");
+        return ESP_OK;
+    }
+    const uint32_t started_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    const uint32_t deadline_ms = started_ms + 420000U;
+    const uint32_t previous_lease_until_ms =
+        atomic_load(&s_operator_lease_until_ms);
+    const bool was_privacy_paused = atomic_load(&s_voice_privacy_paused);
+    atomic_store(&s_ota_active, true);
+    atomic_store(&s_ota_received_bytes, 0U);
+    atomic_store(&s_ota_total_bytes, (uint32_t)len);
+    atomic_store(&s_operator_lease_until_ms, started_ms + 180000U);
+    atomic_store(&s_voice_control_request, VOICE_CONTROL_PAUSE);
+    jr_display_caption_pin("UPDATING ART - DO NOT UNPLUG");
+    ESP_LOGI(TAG, "art: receiving %u bytes into %s (%u bytes)", (unsigned)len,
+             part->label, (unsigned)part->size);
+
+    esp_err_t err = esp_partition_erase_range(part, 0, part->size);
+    const size_t chunk_size = 4096U;
+    char *buf = err == ESP_OK
+        ? heap_caps_malloc(chunk_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+        : NULL;
+    if (err == ESP_OK && buf == NULL) {
+        err = ESP_ERR_NO_MEM;
+    }
+    size_t got = 0;
+    unsigned recv_timeouts = 0U;
+    while (got < len && err == ESP_OK) {
+        const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if ((int32_t)(now_ms - deadline_ms) >= 0) {
+            err = ESP_ERR_TIMEOUT;
+            break;
+        }
+        int r = httpd_req_recv(req, buf,
+                               len - got < chunk_size ? len - got : chunk_size);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+            if (++recv_timeouts < 6U) {
+                continue;
+            }
+            err = ESP_ERR_TIMEOUT;
+            break;
+        }
+        if (r <= 0) {
+            err = ESP_FAIL;
+            break;
+        }
+        recv_timeouts = 0U;
+        err = esp_partition_write(part, got, buf, (size_t)r);
+        got += (size_t)r;
+        atomic_store(&s_ota_received_bytes, (uint32_t)got);
+        atomic_store(&s_operator_lease_until_ms, now_ms + 180000U);
+    }
+    heap_caps_free(buf);
+    if (err == ESP_OK && got != len) {
+        err = ESP_FAIL;
+    }
+    atomic_store(&s_ota_active, false);
+    atomic_store(&s_ota_last_error, err);
+    if (err != ESP_OK) {
+        jr_display_caption_unpin();
+        jr_display_caption_set("ART UPDATE FAILED - SEND IT AGAIN");
+        ota_restore_control_state(was_privacy_paused, previous_lease_until_ms);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            esp_err_to_name(err));
+        ESP_LOGE(TAG, "art: failed after %u bytes: %s", (unsigned)got,
+                 esp_err_to_name(err));
+        return ESP_OK;
+    }
+    ESP_LOGI(TAG, "art: %u bytes written into %s — rebooting to remount",
+             (unsigned)got, part->label);
+    jr_display_caption_unpin();
+    jr_display_caption_set("ART OK - RESTARTING");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true,\"rebooting\":true}");
+    vTaskDelay(pdMS_TO_TICKS(600));
+    esp_restart();
+    return ESP_OK;
+}
+
 /* POST /api/operator/lease?ttl=seconds — claim; ?release=1 — hand back. */
 static esp_err_t operator_lease_handler(httpd_req_t *req)
 {
@@ -3736,6 +3849,8 @@ void start_diag_http(void)
           .handler = debug_sleep_handler },
         { .uri = "/api/ota/upload", .method = HTTP_POST,
           .handler = ota_upload_handler },
+        { .uri = "/api/ota/assets", .method = HTTP_POST,
+          .handler = ota_assets_handler },
     };
     for (size_t i = 0; i < sizeof routes / sizeof routes[0]; ++i) {
         esp_err_t err = httpd_register_uri_handler(server, &routes[i]);
