@@ -27,6 +27,8 @@ esp_err_t gfx_disp_flush_ready(gfx_disp_t *d, bool ok);
 void gfx_disp_refresh_all(gfx_disp_t *d);
 esp_err_t gfx_emote_lock(gfx_handle_t h);
 esp_err_t gfx_emote_unlock(gfx_handle_t h);
+esp_err_t gfx_emote_set_fps(gfx_handle_t h, uint32_t fps);
+extern uint32_t g_stub_render_fps;   /* last fps handed to the engine */
 gfx_obj_t *gfx_anim_create(gfx_disp_t *d);
 esp_err_t gfx_obj_align(gfx_obj_t *o, gfx_align_t a, int x, int y);
 esp_err_t gfx_obj_set_visible(gfx_obj_t *o, bool v);

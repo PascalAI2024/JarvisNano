@@ -53,6 +53,8 @@ esp_err_t gfx_disp_flush_ready(gfx_disp_t *d, bool ok) { (void)d; (void)ok; retu
 void gfx_disp_refresh_all(gfx_disp_t *d) { (void)d; }
 esp_err_t gfx_emote_lock(gfx_handle_t h) { (void)h; return ESP_OK; }
 esp_err_t gfx_emote_unlock(gfx_handle_t h) { (void)h; return ESP_OK; }
+uint32_t g_stub_render_fps;
+esp_err_t gfx_emote_set_fps(gfx_handle_t h, uint32_t fps) { (void)h; g_stub_render_fps = fps; return ESP_OK; }
 gfx_obj_t *gfx_anim_create(gfx_disp_t *d) { (void)d; return NULL; }
 esp_err_t gfx_obj_align(gfx_obj_t *o, gfx_align_t a, int x, int y)
 { (void)o; (void)a; (void)x; (void)y; return ESP_OK; }

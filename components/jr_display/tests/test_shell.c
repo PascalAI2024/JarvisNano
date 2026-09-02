@@ -564,6 +564,38 @@ static size_t count_in(const uint16_t *fb, uint16_t px, int x0, int x1,
     return n;
 }
 
+static void test_render_cadence_reaches_the_engine_and_clamps(void)
+{
+    gfx_handle_t saved = s_display.gfx;
+    s_display.gfx = (gfx_handle_t)&saved;          /* "up": the stub records */
+    __atomic_store_n(&s_render_fps, JR_DISPLAY_RENDER_FPS, __ATOMIC_RELEASE);
+
+    g_stub_render_fps = 0;
+    CHECK(jr_display_set_render_fps(4) == ESP_OK, "set 4 ok");
+    CHECK(g_stub_render_fps == 4, "engine got 4, saw %u", (unsigned)g_stub_render_fps);
+    CHECK(jr_display_render_fps() == 4, "getter follows");
+
+    g_stub_render_fps = 0;
+    jr_display_set_render_fps(4);
+    CHECK(g_stub_render_fps == 0, "an unchanged value never reaches the engine");
+
+    jr_display_set_render_fps(0);
+    CHECK(g_stub_render_fps == JR_DISPLAY_RENDER_FPS_MIN,
+          "0 clamps to the floor, saw %u", (unsigned)g_stub_render_fps);
+    jr_display_set_render_fps(90);
+    CHECK(g_stub_render_fps == JR_DISPLAY_RENDER_FPS,
+          "90 clamps to the panel ceiling, saw %u", (unsigned)g_stub_render_fps);
+
+    s_display.gfx = NULL;                            /* before the presenter */
+    g_stub_render_fps = 0;
+    CHECK(jr_display_set_render_fps(6) == ESP_OK, "pre-init set is remembered");
+    CHECK(g_stub_render_fps == 0 && jr_display_render_fps() == 6,
+          "init will read 6 from the getter");
+
+    __atomic_store_n(&s_render_fps, JR_DISPLAY_RENDER_FPS, __ATOMIC_RELEASE);
+    s_display.gfx = saved;
+}
+
 static void test_status_face_follows_the_links(void)
 {
     stage_space(JR_DISPLAY_SPACE_STATUS);
@@ -1898,6 +1930,7 @@ int main(void)
     test_low_battery_uses_the_rim_palette();
     test_focal_wedge_follows_the_slide();
     test_pinned_caption_survives_other_writers();
+    test_render_cadence_reaches_the_engine_and_clamps();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);

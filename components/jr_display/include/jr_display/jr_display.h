@@ -291,6 +291,12 @@ bool jr_display_canvas_active(void);
  * No-op until the presenter is ready. */
 esp_err_t jr_display_set_brightness(uint8_t percent);
 
+/* Render cadence, 2..24 fps. Any task, any rate; unchanged values are free.
+ * The engine draws every period regardless of change, so this is the knob
+ * that decides what an idle glass costs. The rest ladder owns it. */
+esp_err_t jr_display_set_render_fps(uint8_t fps);
+uint8_t jr_display_render_fps(void);
+
 /* Deep-sleep hand-off: ask the render task to switch the CO5300 off (display
  * off, then sleep-in) at its next flush and stop drawing. Any task; returns
  * at once. Poll jr_display_panel_is_off() — it turns true within one frame.

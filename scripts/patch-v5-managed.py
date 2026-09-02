@@ -106,6 +106,53 @@ PALETTE_INSERT = f"""        anim->frame.color_palette = (uint32_t *)heap_caps_m
 """
 
 
+GFX_CORE_C = (
+    ROOT
+    / "managed_components"
+    / "espressif2022__esp_emote_gfx"
+    / "src"
+    / "core"
+    / "gfx_core.c"
+)
+GFX_CORE_H = (
+    ROOT
+    / "managed_components"
+    / "espressif2022__esp_emote_gfx"
+    / "include"
+    / "core"
+    / "gfx_core.h"
+)
+FPS_MARKER = "JarvisNano v5: runtime render cadence"
+FPS_C_ANCHOR = """    if (xSemaphoreGiveRecursive(ctx->sync.render_mutex) != pdTRUE) {
+        ESP_LOGE(TAG, "Failed to release graphics lock");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    return ESP_OK;
+}
+"""
+FPS_C_INSERT = FPS_C_ANCHOR + f"""
+/* {FPS_MARKER}. The loop renders every 1000/fps ms whether or not
+ * anything changed, so the target fps IS the idle cost of the display; the
+ * owner lowers it at rest. One u32 store the render task reads on its next
+ * pass — no lock needed. */
+esp_err_t gfx_emote_set_fps(gfx_handle_t handle, uint32_t fps)
+{{
+    gfx_core_context_t *ctx = (gfx_core_context_t *)handle;
+    if (ctx == NULL || fps == 0) {{
+        return ESP_ERR_INVALID_ARG;
+    }}
+    ctx->timer_mgr.fps = fps;
+    return ESP_OK;
+}}
+"""
+FPS_H_ANCHOR = "esp_err_t gfx_emote_unlock(gfx_handle_t handle);\n"
+FPS_H_INSERT = FPS_H_ANCHOR + f"""
+/* {FPS_MARKER}: change the target render rate after init. */
+esp_err_t gfx_emote_set_fps(gfx_handle_t handle, uint32_t fps);
+"""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -184,6 +231,28 @@ def main() -> int:
                 changed.append("gfx palette PSRAM fallback")
     elif args.check:
         missing.append("gfx palette PSRAM fallback (gfx_anim.c missing)")
+
+    if GFX_CORE_C.is_file() and GFX_CORE_H.is_file():
+        core_c = GFX_CORE_C.read_text()
+        core_h = GFX_CORE_H.read_text()
+        present = (FPS_MARKER in core_c, FPS_MARKER in core_h)
+        if any(present) and not all(present):
+            raise SystemExit(
+                "gfx_core render-cadence patch is partial; refusing a blind repair"
+            )
+        if not all(present):
+            if args.check:
+                missing.append("gfx runtime render cadence")
+            else:
+                if core_c.count(FPS_C_ANCHOR) != 1 or core_h.count(FPS_H_ANCHOR) != 1:
+                    raise SystemExit(
+                        "gfx_core cadence anchor changed; refusing a blind patch"
+                    )
+                GFX_CORE_C.write_text(core_c.replace(FPS_C_ANCHOR, FPS_C_INSERT, 1))
+                GFX_CORE_H.write_text(core_h.replace(FPS_H_ANCHOR, FPS_H_INSERT, 1))
+                changed.append("gfx runtime render cadence")
+    elif args.check:
+        missing.append("gfx runtime render cadence (gfx_core.c missing)")
 
     if missing:
         raise SystemExit("v5 managed patch missing: " + ", ".join(missing))

@@ -52,6 +52,10 @@ static const char *TAG = "jr_display";
  * shipped 24 for exactly this reason (P2.7); 30 only renders frames the
  * panel cannot take (live counter confirmed 20 actual at fps=30). */
 #define JR_DISPLAY_RENDER_FPS        24
+/* The engine renders every period whether or not a pixel changed, so the
+ * target fps is the idle cost of the glass (~half of core 0 at 24). The rest
+ * ladder lowers it; 2 keeps a dark DREAM face and captions alive. */
+#define JR_DISPLAY_RENDER_FPS_MIN    2
 /* 12-row internal-SRAM DMA strips — the live-safe memory configuration.
  * A 20-row hardware A/B left FPS unchanged at 12 while shrinking the largest
  * internal block from 32 KB to 12.8 KB, proving strip waits were not the
@@ -1269,6 +1273,31 @@ esp_err_t jr_display_set_brightness(uint8_t percent)
     }
     __atomic_store_n(&s_brightness_want, percent, __ATOMIC_RELEASE);
     return ESP_OK;
+}
+
+static uint8_t s_render_fps = JR_DISPLAY_RENDER_FPS;   /* any task (atomic) */
+
+esp_err_t jr_display_set_render_fps(uint8_t fps)
+{
+    if (fps < JR_DISPLAY_RENDER_FPS_MIN) {
+        fps = JR_DISPLAY_RENDER_FPS_MIN;
+    }
+    if (fps > JR_DISPLAY_RENDER_FPS) {
+        fps = JR_DISPLAY_RENDER_FPS;
+    }
+    if (__atomic_exchange_n(&s_render_fps, fps, __ATOMIC_ACQ_REL) == fps) {
+        return ESP_OK;
+    }
+    gfx_handle_t gfx = s_display.gfx;
+    if (gfx == NULL) {
+        return ESP_OK;   /* not up yet: init reads s_render_fps */
+    }
+    return gfx_emote_set_fps(gfx, fps);
+}
+
+uint8_t jr_display_render_fps(void)
+{
+    return __atomic_load_n(&s_render_fps, __ATOMIC_ACQUIRE);
 }
 
 /* Once per frame, from overlay_fade_tick: walk the shown value toward the
@@ -4264,7 +4293,7 @@ static esp_err_t display_engine_init(jr_display_ctx_t *ctx)
     }
 
     const gfx_core_config_t gfx_cfg = {
-        .fps = JR_DISPLAY_RENDER_FPS,
+        .fps = jr_display_render_fps(),
         .task = {
             .task_priority = JR_DISPLAY_RENDER_PRIORITY,
             .task_stack = JR_DISPLAY_RENDER_STACK,
