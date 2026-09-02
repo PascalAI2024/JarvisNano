@@ -1,6 +1,6 @@
 # Next Session Handoff
 
-Last reconciled: **2026-09-01**.
+Last reconciled: **2026-09-02**.
 
 The live target is the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** with 32 MB
 flash. The active image is plain ESP-IDF v5 rooted at `main/` and
@@ -65,6 +65,27 @@ is the classified edge-origin swipe.
   before marking a new image valid.
 - JarvisMCP server policy is live; byte-budgeted device catalog projection and
   cursor semantics remain incomplete.
+
+## What changed on 2026-09-02
+
+- **Jarvis delegates.** `delegate_task` → `coordination.createWorkItem` on
+  project `jarvisnano-desk` (config `project_id`), `delegated_tasks` lists it,
+  and `board_poll` (90 s, awake, Wi-Fi, not DREAM) announces a completed or
+  blocked item once: spoken with an open unmuted session, `DONE: <title>`
+  caption when muted, always an ACTIVITY `TASK` row. Proven end to end from
+  a desk. The other end is `tools/board-worker/worker.py`; the owner's Docker
+  devbox host is still unknown (PLAN N11.4), and an SSH key pasted into chat
+  on 2026-09-02 should be rotated — it was never installed.
+- **Three quiet faces** (rest, muted, linking) from the same generator, 0.93 MB;
+  the art partition ships separately: `jarvisctl art` → `POST /api/ota/assets`
+  (~150 s, refused in app probation). A firmware that names a clip the
+  partition lacks shows the parent face once and logs it.
+- **The display has a cadence** (24/12/6/3 fps per ladder rung, touch restores
+  24). Unmeasured on the cell: on USB the ladder holds AWAKE.
+- **`main/` is four files** (`app.h`, `main.c`, `http_routes.c`, `power.c`,
+  `device_tools.c`); 140 functions before and after.
+- **Muted under a live session** now shows the gold slit too (LISTENING was
+  the open reactor under a gold ring).
 
 ## What changed on 2026-09-01
 

@@ -58,6 +58,13 @@ field, not a Gemini argument, for any future write that keeps the card.
 
 ## Findings
 
+**[2026-09-02] `completeWorkItem` wants `result` as an object.** A top-level
+`resultSummary` is refused with `bad_input - result must be an object`; the
+accepted shape is `{ result: { summary, evidence?: string[] } }`, and the
+summary then appears as `resultSummary` in the summary projection that
+`listWorkItems` and the device's `board_poll` read. `tools/board-worker/worker.py`
+was corrected the same day.
+
 **[2026-09-02] The board, as seen from the device.** `coordination.*`
 takes its arguments directly (never wrapped in `{input:…}` whatever a
 generated schema says) and every write needs an identity tuple

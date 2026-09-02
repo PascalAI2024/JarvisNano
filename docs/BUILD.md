@@ -172,6 +172,7 @@ python3 scripts/live-device.py gemini-cycle \
   --report
 # After the 32 MB dual-slot table is installed:
 python3 scripts/jarvisctl.py ota
+python3 scripts/jarvisctl.py art      # the faces: build/emote_assets.bin, ~150 s, after probation
 
 # Codex display/interaction tool
 python3 scripts/jarvisctl.py takeover 300

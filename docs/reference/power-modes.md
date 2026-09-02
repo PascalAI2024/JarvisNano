@@ -84,6 +84,7 @@ stateDiagram-v2
 | 2026-09-01 | **A deep sleep during OTA probation rolls the image back.** Deep sleep is a reboot through the bootloader; an image still `PENDING_VERIFY` is treated as a failed boot. The first forced test woke on the previous firmware. Now `enter_deep_sleep()` refuses while the running image is in probation and the debug route answers `409` | `main/main.c` `image_in_probation()` |
 | 2026-09-01 | **The QMI8658 on this board never sets `STATUSINT.CmdDone`** for any CTRL9 command, with either `CTRL8` handshake type, over 100 ms of polling. The command still lands (the wake line and the readback agree), so the handshake is logged and not fatal; the engine is cleared at boot with a soft reset (`0x60 = 0xB0`) instead of a command. Revision register reads `0x7C` | `components/jr_imu/src/jr_imu.c` `imu_ctrl9()` |
 | 2026-09-01 | Die temperature 43 °C at rest on the cell with Wi-Fi up; the owner's "it is hot" was the enclosure over charging + AMOLED + a 240 MHz core that never scaled | STATUS `CHIP` row |
+| 2026-09-02 | **The renderer was 63 % of core 0 over nine minutes of a dark, muted DREAM** (`gfx_render` 1,092 M of 1,744 M run-time ticks): `esp_emote_gfx` draws every `1000/fps` ms with no dirty check. `jr_display_set_render_fps()` now follows the ladder — 24 AWAKE or anything live, 12 AMBIENT, 6 WHISPER, 3 DREAM — and the input loop restores 24 on the first touch. Requires the managed patch `gfx_emote_set_fps` (`scripts/patch-v5-managed.py`) | `/api/diag/tasks` `run` counters; `docs/reference/display-emote-gfx.md` |
 | 2026-09-01 | **Idle share per core, awake and muted, 240 MHz:** core 0 ≈ 43 % idle with the renderer alone ≈ 50 % of it; core 1 ≈ 96 % idle (≈ 72 % with a session open, the AFE on it). **At 160 MHz:** core 0 37 % idle, renderer 55 %, 16 fps, a spoken reply with one 12 ms hole. 80 MHz would starve the renderer; 160 is the rest gear. Enabling `CONFIG_PM_ENABLE` + run-time stats cost ≈ 5 KB of free internal RAM; the largest block stayed 32 KB | `/api/diag/tasks` (`run` counters, `total_runtime`), `/api/debug/gain?cpu=` |
 
 ## Open questions
@@ -95,8 +96,11 @@ stateDiagram-v2
   percent-over-time reading across a night on the cell is the practical proxy
   (PLAN.md N10.3 acceptance).
 - Dynamic scaling (min 80, max 240 with locks) is still untried; the gears are
-  the measured, lock-free version of it. The renderer is the daytime load —
-  a lower render cadence at rest would save more than any clock.
+  the measured, lock-free version of it.
+- The render cadence (below) is wired and built but its saving is unmeasured:
+  on USB the ladder holds AWAKE, so the 12/6/3 fps rungs only engage on the
+  cell. Expect the renderer's share of core 0 in DREAM to fall from 63 % to
+  well under 15 %; read `/api/diag/tasks` twice over a known interval.
 
 ## Sources
 

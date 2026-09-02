@@ -6,7 +6,30 @@ are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
 
 ## Unreleased
 
+### The glass at rest (2026-09-02)
+
+- The face tells three more states apart: **resting** (WHISPER/DREAM, a slit
+  breathing once every three seconds), **muted** (privacy, the same closed
+  iris held still in gold), and **linking** (a dot orbiting the bezel while
+  the session connects). All three are procedural clips from the existing
+  generator; 0.93 MB more art, 1.33 MB of partition left.
+- The faces ship separately from the app. `jarvisctl art` pushes the whole
+  art partition over Wi-Fi (`POST /api/ota/assets`); a firmware that names a
+  clip the partition lacks shows that face's parent (idle or thinking) once
+  and says so, instead of retrying twice a second.
+- The display has a cadence. The engine drew 24 frames a second of a dark
+  DREAM face, 63 % of core 0; the ladder now sets 24/12/6/3 fps per rung and
+  a touch restores 24 before the next tick. On USB the ladder stays AWAKE,
+  so the saving is a battery one.
+- `main.c` is four files over one header: HTTP routes, power, device tools,
+  and the wiring. 140 functions before and after, image size unchanged.
+
 ### Hands elsewhere (2026-09-02)
+
+- Proven on the device the same evening: a spoken job reached the board in
+  6.3 s, and a job completed from a desk was announced on the glass at the
+  next poll. Board results are projected inside `execute_tool` as well, so a
+  raw portfolio can no longer overflow the reply budget.
 
 - Jarvis can delegate. `delegate_task` puts a spoken job on the JarvisMCP
   coordination board and returns at once; `delegated_tasks` lists the board

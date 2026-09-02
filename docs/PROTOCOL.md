@@ -93,6 +93,7 @@ X-JarvisNano-Control: 1
 | POST | `/api/debug/input?kind=...` | Synthetic tap/hold/swipe through the real input queue |
 | GET/POST | `/api/operator/lease` | Read/enter/exit bounded Codex glass ownership |
 | POST | `/api/ota/upload` | Stream an app image into the idle OTA slot and reboot |
+| POST | `/api/ota/assets` | Stream the whole art image (`emote_assets.bin`) into its partition and reboot; `409` during app probation |
 
 Authentication is route-specific:
 

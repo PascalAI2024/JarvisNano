@@ -49,7 +49,12 @@ references. The **1.75C is the product and the only supported build target**.
   the dBm, the session and tools lamps, the address, the chip temperature, the
   CPU gear and radio mode, and how long it has been up.
 - Privacy is physical: hold the glass, turn it face-down, or press the centre
-  control. A gold ring says the mic is off, from across the room.
+  control. A gold ring says the mic is off, from across the room, and the
+  face closes to a still gold slit; at rest the slit breathes; while the
+  session connects a dot orbits the bezel.
+- Hands elsewhere: "Jarvis, get me a two-page brief on X" goes onto the
+  JarvisMCP work board at once, a worker on any machine picks it up, and the
+  device announces the result when it lands.
 - Left alone on battery it rests, dims, and finally **deep-sleeps**; lift it or
   tap it and it boots back listening.
 
@@ -243,6 +248,8 @@ Start with [`DOCUMENTATION_MAP.md`](DOCUMENTATION_MAP.md).
 The open work in [`PLAN.md`](PLAN.md), wave N10:
 
 1. Prove the lift wake by hand: a device off USB, face-down ten minutes, lifted.
+   On the same night, read the renderer's share of core 0 in DREAM: the
+   cadence is wired (24/12/6/3 fps) but only engages on the cell.
 2. Watch the unanswered-utterance watchdog in real use; tune its count if
    ambient chatter trips it.
 3. Cache the shell veil so ring screens render at the face's 19 fps.

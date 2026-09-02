@@ -8,6 +8,31 @@
 
 ## Findings & gotchas
 
+**[2026-09-02] The engine renders every period whether or not a pixel changed — the target fps is the idle cost**
+
+`gfx_render_loop_task` calls `gfx_render_handler` whenever `1000/fps` ms have
+elapsed; there is no dirty check. Measured on the 1.75C: 63 % of core 0 for
+nine minutes of a dark, muted DREAM face. The fps is fixed at
+`gfx_emote_init` upstream, so `scripts/patch-v5-managed.py` adds a five-line
+`gfx_emote_set_fps()` (one u32 store the loop reads each pass) and
+`jr_display_set_render_fps(2..24)` publishes it from any task; unchanged
+values never reach the engine. The rest ladder owns it (`main/main.c`, mood
+tick: 24/12/6/3 per rung; the input loop restores 24 on the first event).
+
+**[2026-09-02] The faces do not ride with the app image — and a missing clip must not retry**
+
+`/api/ota/upload` writes an app slot only. The first boot of the firmware
+that named `rwave_muted.eaf` found no such file on the art partition and
+logged `apply failed (retry in 500 ms)` at 2 Hz with no face shown. Now
+`apply_face` records the face in `missing_faces` on `ESP_ERR_NOT_FOUND`,
+logs once, and binds `face_fallback()` (rest and muted → idle, linking →
+thinking; the original five are their own fallback) — `shown_face` keeps the
+bound clip apart from the requested face. `POST /api/ota/assets`
+(`jarvisctl art`) erases and rewrites the whole `emote_assets` partition
+from `build/emote_assets.bin` and reboots to remount; it answers `409` in
+app probation because that reboot would roll the app back. A full write is
+about 150 s.
+
 **[2026-08-14] Panel commands may ONLY be issued from the render task — brightness included**
 
 The CO5300 frame flush and every other panel command (`set_brightness`, and any
