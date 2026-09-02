@@ -281,9 +281,9 @@ quiet — `UPDATE 42%`, `NO BATTERY`, `LOW BATTERY`, `NO WIFI`, `NO TOOLS`, else
 design, so the old `NO LINK` fired on every idle device. Open, the sheet is the
 device in nine facts: BATTERY (`74% 4.02V`), POWER, WIFI (`GOOD -34`), IP (the
 one 15-glyph row, `SP_VAL_MAX`), LINK (`OPEN` / `STANDBY`), TOOLS (`READY` /
-`STARTING` / `NO KEY`), DESK (`LIVE` / `NONE`), RADIO (`SAVING` / `REALTIME` —
-the one power mode this firmware drives, Wi-Fi modem sleep while resting),
-UPDATE (readiness at rest). VOLTS and SLOT folded into their neighbours; MIC
+`STARTING` / `NO KEY`), CHIP (the die temperature; DESK left the sheet, the
+ring already admits it only while live), CPU (`240 LIVE` / `160 SAVE` — the
+gear and the radio's modem state), UPDATE (readiness at rest). VOLTS and SLOT folded into their neighbours; MIC
 and the clock live on WATCH and the gold rim; UPTIME is the headline. The
 feed is `jr_display_links_set()` from the 1 Hz block of `publish_shell_state`,
 the same readings `/api/cockpit` serves. The earlier line here — "there is no

@@ -47,7 +47,7 @@ references. The **1.75C is the product and the only supported build target**.
   aloud. Pick the device up after a rest and it glances at the weather.
 - **STATUS** is the device at a glance: the cell, the charger, Wi-Fi bars with
   the dBm, the session and tools lamps, the address, the chip temperature, the
-  radio's power mode, and how long it has been up.
+  CPU gear and radio mode, and how long it has been up.
 - Privacy is physical: hold the glass, turn it face-down, or press the centre
   control. A gold ring says the mic is off, from across the room.
 - Left alone on battery it rests, dims, and finally **deep-sleeps**; lift it or

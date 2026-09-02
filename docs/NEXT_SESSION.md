@@ -111,6 +111,17 @@ is the classified edge-origin swipe.
   tools when asked. `docs/reference/power-modes.md` has the recipe and the
   two gotchas (probation rollback, no `CmdDone`).
 
+- **Late evening: the assistant, the mic, and the battery.** Persona rewritten
+  as the owner's personal AI (it declined out-of-"domestic" topics); tools
+  widened to notes, calendar, work board (destructive names refused on the
+  device); a spoken "remember" needs no tap; recall projected. Privacy now
+  gates the microphone frames themselves (they were flowing under a muted
+  ring). The first unanswered utterance gets a nudge, the second reconnects.
+  Pre-roll is adaptive 600–1500 ms. CPU gears 240/160 by mood
+  (`cpu_gear_set`, `CONFIG_PM_ENABLE`, no DFS), a four-times-faster ladder
+  below 20 % on the cell, run-time counters on `/api/diag/tasks`. Not yet
+  seen in the wild: the lift wake and the 160 gear engaging on their own.
+
 ## Current blockers
 
 1. **Lift wake by hand:** off USB, face-down ten minutes, lift; expect

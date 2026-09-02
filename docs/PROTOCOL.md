@@ -58,7 +58,7 @@ X-JarvisNano-Control: 1
 | GET | `/api/cockpit` | Paired network, voice, tool, display, touch, Agent Link, and Brain Link truth |
 | GET | `/api/gemini/live` | Paired detailed Gemini/audio/tool counters and transcript tail |
 | POST | `/api/debug/say?text=...` | Queue a text turn through the live device voice session |
-| GET/POST | `/api/debug/gain?...` | Audio tuning with readbacks; `preroll=` / `refill=` set the playback jitter buffer |
+| GET/POST | `/api/debug/gain?...` | Audio tuning with readbacks; `preroll=` / `refill=` pin the playback jitter buffer (`preroll=0` returns it to adaptive); `cpu=80|160|240` forces a CPU gear for a bench, `cpu=0` returns to auto |
 | POST | `/api/debug/audio-stats?reset=1` | Reset the playback and receive-queue counters that `/api/device/health` reports |
 | GET/POST | `/api/debug/sleep` | How the device last woke and what was armed; `?now=1&wake_s=N` forces a deep sleep with an N-second timer (refused with 409 while the image is on OTA probation) |
 | POST | `/api/voice/control?armed=0|1` or paired `?resume=1` | Explicit privacy mute/unmute or privacy-safe operational resume |
@@ -67,7 +67,7 @@ X-JarvisNano-Control: 1
 | GET | `/api/audio/tap.wav?source=...` | Paired bounded WAV capture (`mic-clean`, `mic-raw`, `reference`, or `playback`) |
 | GET | `/api/touch` | Touch counters and panel challenge state |
 | POST | `/api/diag/panel-touch?action=start|cancel` | Physical panel/touch proof |
-| GET | `/api/diag/tasks` | Internal-memory and per-task stack high-water state |
+| GET | `/api/diag/tasks` | Internal-memory and per-task stack high-water state; per-task `run` counters and `total_runtime` (esp_timer µs) give each core's idle share between two snapshots |
 | GET | `/api/diag/vadlog` | Paired bounded VAD/barge decision CSV |
 | GET | `/api/logs?tail=N` | Paired 128 KB in-memory device log ring |
 | GET | `/api/sensors` | QMI8658 motion and AXP2101 battery telemetry |
