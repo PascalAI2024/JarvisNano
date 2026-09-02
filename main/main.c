@@ -570,6 +570,7 @@ static bool operator_mode_active(uint32_t now_ms)
 /* Defined next to app_main (it owns the persona text); SEND_SETUP refreshes
  * it so every session's instruction carries the current local time. */
 static void compose_system_instruction(void);
+static void handle_say(const char *text);
 
 /* Attract-reel state (POLISH-06). The httpd handler only posts the request;
  * everything else is app-task single-writer. */
@@ -7266,6 +7267,17 @@ static void voice_task(void *arg)
                     atomic_fetch_add(&s_unanswered_total, 1U);
                     ESP_LOGW(TAG, "voice: utterance unanswered (%u in a row)",
                              (unsigned)s_unanswered);
+                    if (s_unanswered < UTT_DEAF_COUNT) {
+                        /* THE FIRST MISS GETS A NUDGE, NOT SILENCE. The model
+                         * still holds the audio it did not answer; a short
+                         * text turn asks it to answer what it heard or ask
+                         * for a repeat. Seen on the glass: a clear 3 s
+                         * question straight after connecting, ignored, and
+                         * the owner waiting at a device that looked fine. */
+                        handle_say("Sir just spoke and you did not answer. "
+                                   "If you heard a question, answer it now; "
+                                   "if it was unclear, ask one short question.");
+                    }
                     if (s_unanswered >= UTT_DEAF_COUNT) {
                         s_unanswered = 0U;
                         ESP_LOGW(TAG, "voice: session is deaf — fresh session");
