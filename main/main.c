@@ -157,7 +157,8 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
         .name = "delegated_tasks",
         .description =
             "List the jobs queued for Sir's agents, newest first, with their "
-            "status and result.",
+            "status and result. The only tool for anything about the board, "
+            "the tasks, or a delegated job; never execute_tool for that.",
         .arg_name = NULL,
         .arg_desc = NULL,
     },
@@ -3654,15 +3655,19 @@ capture_complete:
          * every loop is free; with the logging stub, amp stays 0 and the
          * call still fires only on face change (no log spam). */
         jr_face_t f = phase_to_face(jr_orch_phase(&s_app.orch));
-        if (f == JR_FACE_IDLE) {
+        if (f == JR_FACE_IDLE || f == JR_FACE_LISTENING) {
             /* Idle has three truths the face used to hide: muted is gold and
              * still; resting (WHISPER/DREAM) is a breathing slit; only a
-             * live, awake idle keeps the open cyan reactor. */
+             * live, awake idle keeps the open cyan reactor. A session that is
+             * "listening" to a zeroed microphone is muted too — the open
+             * reactor under a gold ring told the owner the device was
+             * listening when it was not. */
             const uint8_t mood = atomic_load(&s_mood_id);
             if (atomic_load(&s_voice_privacy_paused)) {
                 f = JR_FACE_MUTED;
-            } else if (mood == (uint8_t)JR_MOOD_WHISPER ||
-                       mood == (uint8_t)JR_MOOD_DREAM) {
+            } else if (f == JR_FACE_IDLE &&
+                       (mood == (uint8_t)JR_MOOD_WHISPER ||
+                        mood == (uint8_t)JR_MOOD_DREAM)) {
                 f = JR_FACE_RESTING;
             }
         }

@@ -248,8 +248,17 @@ static void board_announce(const char *title, int terminal, const char *result)
                  result[0] != '\0' ? ": " : ".", result);
         handle_say(line);
     } else {
+        /* The caption wraps by glyph count, so cut the title at a word
+         * boundary: "DONE: WRITE A TWO-L / INE DESCRIPTION O" was the first
+         * one the glass showed. */
         char cap[40];
-        snprintf(cap, sizeof cap, "%s: %.30s", terminal == 2 ? "BLOCKED" : "DONE", title);
+        int n = snprintf(cap, sizeof cap, "%s: %.28s", terminal == 2 ? "BLOCKED" : "DONE", title);
+        if (n > 0 && strlen(title) > 28U) {
+            char *sp = strrchr(cap, ' ');
+            if (sp != NULL && sp > cap + 8) {
+                *sp = '\0';
+            }
+        }
         for (char *c = cap; *c != '\0'; ++c) {
             *c = (char)toupper((unsigned char)*c);
         }

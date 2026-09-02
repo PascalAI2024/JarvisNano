@@ -124,8 +124,11 @@ def work(item: dict):
     ok, summary = run_agent(task)
     elapsed = int(time.time() - started)
     if ok:
-        board("completeWorkItem", {"workItemId": wid, "resultSummary": summary,
-                                   "evidence": [f"{RUNTIME} on {HOST}, {elapsed}s"]})
+        # The board wants the outcome as one object; a bare resultSummary is
+        # refused with "result must be an object" (seen 2026-09-02).
+        board("completeWorkItem", {"workItemId": wid,
+                                   "result": {"summary": summary,
+                                              "evidence": [f"{RUNTIME} on {HOST}, {elapsed}s"]}})
         print(f"[worker] completed {wid} in {elapsed}s", flush=True)
     else:
         board("blockWorkItem", {"workItemId": wid, "reason": summary[:200],
