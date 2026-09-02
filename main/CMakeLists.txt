@@ -7,7 +7,7 @@
 # NVS, esp_timer, and the diag esp_http_server. This is the composition root —
 # it sits at the top of the dependency graph; nothing depends on it.
 idf_component_register(
-    SRCS "main.c"
+    SRCS "main.c" "http_routes.c" "power.c" "device_tools.c"
     INCLUDE_DIRS "."
     REQUIRES
         jr_ports

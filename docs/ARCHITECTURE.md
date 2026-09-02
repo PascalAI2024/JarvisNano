@@ -77,9 +77,13 @@ The runtime is single-owner at every load-bearing boundary.
 | `httpd` | Parse and authenticate requests, post bounded commands; never owns realtime state |
 | `jr_imu` / `jr_power` | Publish non-blocking sensor snapshots; the IMU sampler stops before deep sleep hands the part its wake engine |
 
-The composition root owns concrete wiring. Pure `jr_core` code calls no
+The composition root owns concrete wiring. It is four files under `main/`
+over one internal seam, `app.h`: `main.c` (wiring, the voice task,
+presentation, the 1 Hz shell publish), `http_routes.c` (the control plane),
+`power.c` (CPU gears, deep sleep, wake state) and `device_tools.c` (the
+device-tool queue, consent, weather, activity). Pure `jr_core` code calls no
 ESP-IDF, touch, audio, display, HTTP or network API, and is tested on the host
-(`host/`, 121 tests) alongside the display's own harness
+(`host/`, 122 tests) alongside the display's own harness
 (`components/jr_display/tests`, 556 checks).
 
 ## Voice path
@@ -228,8 +232,8 @@ provisioned. Jobs the device owns (the weather glance) are tagged
 
 ## Power ladder
 
-The rest ladder in `jr_core` names the state; `main.c` drives the hardware
-under it: the CPU gear (240 MHz while anything is happening, 160 at rest on
+The rest ladder in `jr_core` names the state; `main/power.c`, called from the
+mood tick in `main.c`, drives the hardware under it: the CPU gear (240 MHz while anything is happening, 160 at rest on
 the cell, max pinned to min so nothing scales under a peripheral), Wi-Fi
 modem sleep, and deep sleep at the bottom. Below 20 % on the cell the
 ladder runs four times faster. Light sleep cannot engage while the
@@ -262,7 +266,9 @@ image back. Recipe, measurements and gotchas:
 
 ## HTTP and authority
 
-`main/main.c` is the route authority. Content-bearing reads and mutating
+`main/http_routes.c` is the route authority (the handlers were split out of
+`main.c` on 2026-09-02; they still post into the voice task's lanes and own
+no realtime state). Content-bearing reads and mutating
 routes require the proof named for that surface — pairing token, control
 header, or both — in [`PROTOCOL.md`](PROTOCOL.md). With
 `JR_DEV_OPEN_DIAGNOSTICS` set the control header alone suffices on the LAN;
