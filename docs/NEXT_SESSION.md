@@ -90,6 +90,19 @@ is the classified edge-origin swipe.
   `device_tools.c`); 140 functions before and after.
 - **Muted under a live session** now shows the gold slit too (LISTENING was
   the open reactor under a gold ring).
+- **One probation rollback, not reproduced.** The last OTA of the evening
+  stayed `pending-verify` past 100 s and the 120 s deadline rolled it back
+  (`last_invalid: ota_0`); the identical image re-flashed confirmed at 58 s.
+  The criteria (`ota_confirm_running_image_if_healthy`, `main/http_routes.c`):
+  voice heartbeat < 2 s, Wi-Fi up, tools worker ready, HTTP up, WakeNet up,
+  display ready with no new flush errors, ≥ 12 fps and progress within 1 s,
+  all stable for 10 s. If it happens again, sample `/api/cockpit` and
+  `/api/device/health` every 10 s from boot to 130 s and read which column
+  dips; the sampler is a 15-line script and the columns are `network`,
+  `tools.worker_ready`, `voice.phase`, `display.flush_errors`,
+  `display.actual_fps`. With the cadence knob live, a ladder that ever left
+  AWAKE during probation would put the fps under 12 and fail it by design;
+  on USB it cannot.
 
 ## What changed on 2026-09-01
 
