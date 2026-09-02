@@ -27,6 +27,10 @@ extern "C" {
 #define JR_CFG_MCP_URL_CAP         257U
 #define JR_CFG_MCP_KEY_CAP         320U
 #define JR_CFG_PAIRING_TOKEN_CAP   65U
+/* The coordination project the device queues spoken jobs on. Not a
+ * secret; [A-Za-z0-9._-] only, so it can sit inside generated JS as a
+ * literal. Empty means the built-in default (jarvisnano-desk). */
+#define JR_CFG_BOARD_PROJECT_CAP   49U
 
 #define JR_NET_IPV4_CAP            16U
 #define JR_NET_AP_PASSWORD_CAP     17U
@@ -44,6 +48,7 @@ typedef enum {
     JR_CFG_JARVIS_MCP_URL,
     JR_CFG_JARVIS_MCP_KEY,
     JR_CFG_PAIRING_TOKEN,
+    JR_CFG_BOARD_PROJECT,
     JR_CFG_FIELD_COUNT,
 } jr_cfg_field_t;
 
@@ -55,6 +60,7 @@ enum {
     JR_CFG_F_JARVIS_MCP_URL  = 1U << JR_CFG_JARVIS_MCP_URL,
     JR_CFG_F_JARVIS_MCP_KEY  = 1U << JR_CFG_JARVIS_MCP_KEY,
     JR_CFG_F_PAIRING_TOKEN   = 1U << JR_CFG_PAIRING_TOKEN,
+    JR_CFG_F_BOARD_PROJECT   = 1U << JR_CFG_BOARD_PROJECT,
     JR_CFG_F_ALL             = (1U << JR_CFG_FIELD_COUNT) - 1U,
 };
 
@@ -71,6 +77,7 @@ typedef struct {
     char jarvis_mcp_url[JR_CFG_MCP_URL_CAP];
     char jarvis_mcp_key[JR_CFG_MCP_KEY_CAP];
     char pairing_token[JR_CFG_PAIRING_TOKEN_CAP];
+    char board_project[JR_CFG_BOARD_PROJECT_CAP];
 } jr_net_config_t;
 
 /* Typed NVS access. Empty strings erase a field. jr_cfg_apply() validates all

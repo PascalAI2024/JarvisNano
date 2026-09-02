@@ -129,6 +129,16 @@ jr_tool_template_status_t jr_tools_build_code(const char *name,
                                                const char *args_json,
                                                char *out, size_t out_cap);
 
+/* The coordination project the board templates (delegate_task,
+ * delegated_tasks, board_poll) address. Not a secret. NULL or "" restores
+ * the default; anything outside [A-Za-z0-9._-] or longer than 48 is refused
+ * and the previous value stays. Any task; the templates copy it under no
+ * lock because a project id changes once per pairing, never per call. */
+#define JR_TOOLS_BOARD_PROJECT_CAP     49U
+#define JR_TOOLS_BOARD_PROJECT_DEFAULT "jarvisnano-desk"
+bool jr_tools_set_board_project(const char *project_id);
+const char *jr_tools_board_project(void);
+
 /* Stable idempotency key for physically confirmed mutations. The boot/session
  * namespace prevents provider-local ids (for example, "call_1") from
  * colliding across sessions while retries of the same job remain identical.

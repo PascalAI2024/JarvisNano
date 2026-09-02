@@ -6,6 +6,16 @@ are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
 
 ## Unreleased
 
+### Hands elsewhere (2026-09-02)
+
+- Jarvis can delegate. `delegate_task` puts a spoken job on the JarvisMCP
+  coordination board and returns at once; `delegated_tasks` lists the board
+  by voice; every 90 s while awake the device polls the board and announces
+  a finished or blocked job once (spoken with a live session, a caption when
+  muted, always an ACTIVITY row). `tools/board-worker/worker.py` is the
+  other end for any machine with Claude Code or Codex. The project id is
+  `project_id` in `POST /api/tools/config`.
+
 ### Three quiet faces (2026-09-02)
 
 - The face now tells rest, privacy and connecting apart. RESTING is the iris

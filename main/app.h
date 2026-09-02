@@ -75,7 +75,7 @@
 /* The catalog lives in main.c; this literal is what the other files see.
  * main.c static-asserts it against the real array, so adding a tool
  * without bumping this is a compile error, not a blank petal. */
-#define DEVICE_TOOL_DECL_COUNT 8U
+#define DEVICE_TOOL_DECL_COUNT 10U
 
 /* Render cadence per rung of the rest ladder (frames per second). 24 is the
  * measured CO5300 ceiling; 12 keeps AMBIENT's dimmed ring fluid under a
@@ -389,6 +389,7 @@ extern uint32_t s_brain_event_seq;
 extern uint32_t s_brain_last_seen_ms;
 
 void persist_ota_attempt(int slot);
+void handle_say(const char *text);
 bool operator_lease_active(uint32_t now_ms);
 bool operator_mode_active(uint32_t now_ms);
 ota_preflight_t ota_preflight(void);
@@ -438,6 +439,7 @@ const char *device_tool_last_status(void);
 const char *device_tool_last_name(void);
 const char *screen_voice_prompt(jr_display_space_t space);
 void weather_maybe_fetch(uint32_t now);
+void board_maybe_poll(uint32_t now);
 void activity_note_tool(const char *tool_name, const char *args_json);
 void activity_note_said(const char *text);
 void activity_note_turn_end(void);

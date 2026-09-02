@@ -192,12 +192,16 @@ browser-visible response.
 Provision or clear the device after pairing with `POST /api/tools/config`:
 
 ```json
-{"url":"https://gateway.example/device/v1/invoke","key":"<device-key>"}
+{"url":"https://gateway.example/device/v1/invoke","key":"<device-key>","project_id":"jarvisnano-desk"}
 ```
 
-The body must contain exactly `url` and `key`. The URL must be HTTPS and end in
-`/device/v1/invoke` or legacy `/act`. Sending two empty strings clears both.
-`GET /api/tools/config` returns booleans and route kind only, never values.
+The body must contain `url` and `key`, and may contain `project_id`: the
+coordination project the device queues spoken jobs on (`delegate_task`), up
+to 48 characters of `[A-Za-z0-9._-]`, `""` restoring the default
+`jarvisnano-desk`. The URL must be HTTPS and end in `/device/v1/invoke` or
+legacy `/act`. Sending two empty strings clears both credentials.
+`GET /api/tools/config` returns booleans, route kind and `project_id` only,
+never credential values.
 
 ## Pairing and Brain Link surfaces
 
