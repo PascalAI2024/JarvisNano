@@ -1571,6 +1571,7 @@ static int      s_space_ease = 256;
 static int      s_detail_prog;
 static int      s_detail_ease;
 static int      s_space_veil;
+static bool     watch_art_is_content(void);   /* a baked dial on WATCH is the screen */
 static bool     s_space_on;
 static uint8_t  s_detail_space;
 static uint32_t s_space_hold_ms;
@@ -2356,8 +2357,8 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
      * home fades the veil away with the slide instead of cutting it a frame
      * early. */
     int veil = 0;
-    if (s_space_to != (uint8_t)JR_DISPLAY_SPACE_JARVIS) {
-        veil = s_space_ease;
+    if (s_space_to != (uint8_t)JR_DISPLAY_SPACE_JARVIS && !watch_art_is_content()) {
+        veil = s_space_ease;     /* WATCH with its dial: the art is the screen */
     }
     if (s_space_from != (uint8_t)JR_DISPLAY_SPACE_JARVIS &&
         256 - s_space_ease > veil) {
@@ -4001,13 +4002,30 @@ static void sp_draw_orbit(const jr_display_ctx_t *ctx, int y1, int y2,
 /* The whole shell for one strip, in z-order: veil, the outgoing and incoming
  * spaces cross-dissolving as they slide, context sheet, shade, then an orbital
  * position marker that fades out with the side surfaces under the shade. */
+/* THE DIAL IS THE SCREEN, NOT ITS BACKDROP. The veil exists to push the
+ * reactor back behind a ring screen's content. On WATCH with a baked dial
+ * the art IS the content, and a half-brightness Submariner is a broken one
+ * (measured 2026-09-02 on the panel: the 12 o'clock lume at 62 against 130
+ * in the art, every dial "not black" but dim). A sheet or the shade over the
+ * watch still veils it, as anywhere else; a slide into WATCH keeps the
+ * outgoing screen's veil and fades it with the slide. */
+static bool watch_art_is_content(void)
+{
+    const jr_face_t dial = watch_dial_face();
+    return s_space_to == (uint8_t)JR_DISPLAY_SPACE_WATCH &&
+           dial != JR_FACE_COUNT && s_display.shown_face == dial &&
+           s_detail_ease == 0 && s_shade_ease == 0;
+}
+
 static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
                                 uint16_t *pixels)
 {
     if (!s_space_on) {
         return;            /* JARVIS at rest: the layer costs one compare */
     }
-    const int veil = (s_space_veil * 32) >> 8;
+    const bool settled = s_space_from == s_space_to || s_space_ease >= 256;
+    const int veil = (settled && watch_art_is_content())
+                         ? 0 : (s_space_veil * 32) >> 8;
     if (veil > 0) {
         sp_veil(ctx, y1, y2, pixels, veil);
     }

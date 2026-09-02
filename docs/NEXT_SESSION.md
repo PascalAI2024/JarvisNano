@@ -93,7 +93,11 @@ is the classified edge-origin swipe.
   geometry table is `HUD_WATCH_*` in `hud_render.h`, on the art's measured
   numbers. Three style bits (17–19) in the nav word; `jr_display_clock_set_date`
   carries the day. The four dial clips overflowed the SPIFFS image at first
-  staging — the art lane's call. **Not met: the ≥ 17 fps awake gate.**
+  staging — the art lane's call. **Found from the captures and fixed after
+  both lanes landed:** the ring's backdrop veil halved every baked dial
+  (`watch_art_is_content`, `jr_display.c`; the shell test now demands the
+  art's exact pixel value survive on a settled WATCH and be veiled under a
+  sheet). **Not met: the ≥ 17 fps awake gate.**
   Measured at 160 MHz per frame: JARVIS 69 ms, DRESS 89, DIVER 108, MINIMAL
   109, PILOT 112, FUTURE 127 (≈ 12–17 fps at 240 MHz); numbers and the
   remaining levers in `docs/GLASS_DESIGN.md` "As shipped — the firmware".

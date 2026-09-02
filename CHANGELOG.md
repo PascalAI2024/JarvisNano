@@ -43,6 +43,12 @@ are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
   (JARVIS, DIVER, DRESS, PILOT, MINIMAL, FUTURE), kept in NVS.
 
 
+- The dial is the screen, not its backdrop. The ring's veil, which pushes
+  the reactor back behind every screen, was halving the baked dials too
+  (the diver's lume measured 62 against 130 in the art). A settled WATCH
+  showing its dial is no longer veiled; a sheet or the shade over it still
+  is.
+
 ### Muted is a watch, and the weather comes back (2026-09-02)
 
 - Mute the microphone and the glass becomes a dim watch five seconds later:

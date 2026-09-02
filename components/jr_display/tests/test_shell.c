@@ -1445,6 +1445,32 @@ static void test_watch_keeps_a_baked_dial_and_clears_a_missing_one(void)
         }
     }
     CHECK(kept[0] > 100000, "baked DRESS kept only %zu art px under the hands", kept[0]);
+    /* Kept means UNVEILED: the art is the screen, so its pixels come through
+     * at their own value, not halved by the space veil (2026-09-02: every
+     * dial on the panel was dim). Under a sheet the veil returns. */
+    size_t exact = 0, exact_sheet = 0;
+    render_watch_frame(fb, JR_WATCH_DRESS, JR_FACE_DIAL_DRESS);
+    for (int y = 32; y < HUD_H - 32; ++y) {
+        for (int x = 32; x < HUD_W - 32; ++x) {
+            const int dx = x - 232, dy = y - 232;
+            if (dx * dx + dy * dy <= 200 * 200) exact += fb[(size_t)y * HUD_W + x] == 0x4208;
+        }
+    }
+    s_detail_ease = 256;
+    for (size_t k = 0; k < px; ++k) fb[k] = 0x4208;
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+        apply_space_overlay(&s_display, y, y2, fb + (size_t)y * HUD_W);
+    }
+    for (int y = 32; y < HUD_H - 32; ++y) {
+        for (int x = 32; x < HUD_W - 32; ++x) {
+            const int dx = x - 232, dy = y - 232;
+            if (dx * dx + dy * dy <= 200 * 200) exact_sheet += fb[(size_t)y * HUD_W + x] == 0x4208;
+        }
+    }
+    s_detail_ease = 0;
+    CHECK(exact > 100000, "baked DRESS art was veiled: only %zu px at their own value", exact);
+    CHECK(exact_sheet < exact / 4, "under a sheet the dial is not veiled (%zu px untouched)", exact_sheet);
     CHECK(kept[1] < 20000, "fallen-back DRESS left %zu lit px inside the dial (not cleared)", kept[1]);
     CHECK(outside[1] > 0, "the fallback clear reached outside the shell disc");
     s_display.shown_face = JR_FACE_IDLE;
