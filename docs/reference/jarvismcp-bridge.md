@@ -73,9 +73,14 @@ allowlisted repo, with model and GitHub credentials held server-side. A
 `kind:'probe'` job ran the full lifecycle in 18 s (queued → started → exit 0
 → sandbox verified deleted). So the device's poll routes only goals that
 name `owner/repo` there, and answers everything else with `research` (M3,
-cited, measured 21 s including claim, `memory.search` context, `memory.capture`
-and `completeWorkItem`) — inside the gateway's 30 s call budget, which is why
-the poll settles one item at a time. `listWorkItems` summary rows carry
+cited; measured 21 s and then 26 s for the whole poll including claim,
+`memory.search` context, `memory.capture` and `completeWorkItem`, hence
+`queries:2, maxSources:5` now) — inside the gateway's 30 s call budget,
+which is why the poll settles one item at a time. `memory.capture` lands as
+an append-only inbox event (`company-brain/inbox/events/<date>/…`), which
+`memory.search` does not index — read it back with `memory.list` on the
+inbox, not by searching. The research answer arrives as markdown with `[n]`
+citations; the spoken 300 characters strip both. `listWorkItems` summary rows carry
 `leaseState` (`active`/`expired`/…), which is what makes a poll killed at 30 s
 recoverable on a later one via `recoverWorkItem`.
 
