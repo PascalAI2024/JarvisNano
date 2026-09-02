@@ -37,6 +37,7 @@
 #define TOUCH_TASK_PRIORITY         3
 #define TOUCH_ACTIVE_POLL_MS        40
 #define TOUCH_FALLBACK_POLL_MS      80
+#define TOUCH_MIRROR_Y          1   /* 1.75C: controller Y is inverted vs the panel */
 #define TOUCH_RETRY_INITIAL_MS      500
 #define TOUCH_RETRY_MAX_MS          30000
 #define TOUCH_PRESS_CONFIRM_SAMPLES 2
@@ -270,6 +271,18 @@ static void touch_worker(void *arg)
 {
     touch_input_ctx_t *ctx = (touch_input_ctx_t *)arg;
     esp_lcd_touch_handle_t touch = touch_acquire_with_retry();
+    /* THE PANEL'S Y RUNS THE OTHER WAY. Measured on the 1.75C on 2026-09-02:
+     * the owner swiped UP on the left edge and the controller reported
+     * dy = +190 and +219 (start y 131 -> end y 321), so an upward finger
+     * read as DOWN, volume fell on every "up", the shade's top edge was the
+     * physical bottom, and the ring walked backwards. X was never affected,
+     * which is why the left/right ask arcs kept proving "touch works".
+     * esp_lcd_touch mirrors in software when the driver has no hardware
+     * mirror (y' = y_max - y), before any classifier here sees a point. */
+    if (TOUCH_MIRROR_Y) {
+        esp_err_t merr = esp_lcd_touch_set_mirror_y(touch, true);
+        ESP_LOGI(TAG, "touch: mirror_y %s", merr == ESP_OK ? "on" : esp_err_to_name(merr));
+    }
     SemaphoreHandle_t irq_sem = (SemaphoreHandle_t)touch->config.user_data;
 
     if (irq_sem != NULL) {

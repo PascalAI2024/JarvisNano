@@ -85,6 +85,16 @@ is the classified edge-origin swipe.
   6 fps, 160 MHz) with USB no longer holding it awake; touch, pickup, a live
   phase and face-down keep their meanings. Verified on the device: see the
   evidence note in `docs/reference/power-modes.md`.
+- **Touch Y was mirrored.** Owner: "the edge gesture for volume and
+  brightness are backwards, up should make volume go up." Measured with
+  `/api/touch` during a real upward stroke on the left edge: start y 131,
+  end y 321, dy +190 — the controller's Y grows toward the top of the
+  glass. `TOUCH_MIRROR_Y` in `components/jr_hal/src/input_touch.c` sets
+  `esp_lcd_touch_set_mirror_y`, a software flip (`y' = 466 − y`) because the
+  CST9217 driver has no hardware one. Every vertical gesture the docs
+  describe was physically inverted before this and nobody noticed, because
+  the ring's direction is arbitrary and the shade also opens on BOOT.
+  Re-verify by finger: left-edge up = volume up, top-edge down = shade.
 - **Weather retries.** A failed `weather_glance` is retried every two
   minutes from any screen (never in DREAM, never off Wi-Fi) until it
   succeeds; a good fetch still refreshes only on the WEATHER screen after

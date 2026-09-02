@@ -30,6 +30,11 @@ are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
   brightness 22, six frames a second, the rest gear, even on the cable. A
   touch, a pickup or a question lights it, unmuting wakes it, and a muted
   device that is mid-answer stays readable.
+- Up is up. The CST9217's Y axis is inverted against the panel on the
+  1.75C: an upward finger read as a downward swipe, so volume and
+  brightness fell on every "up", the shade's top edge was the physical
+  bottom and the ring walked backwards. The HAL now mirrors Y at
+  acquisition; left and right were never affected.
 - A weather fetch that fails is retried from any screen every two minutes
   until it succeeds, instead of leaving `NO WEATHER` on the glass for ten
   minutes. The morning's outage was upstream: Open-Meteo answered the
