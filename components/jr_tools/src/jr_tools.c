@@ -28,7 +28,7 @@ static const char *TAG = "jr_tools";
 #define JR_TOOLS_JOB_QUEUE_DEPTH     4U
 #define JR_TOOLS_RESULT_QUEUE_DEPTH  4U
 #define JR_TOOLS_CANCEL_SLOTS        12U
-#define JR_TOOLS_CODE_CAP            2048U  /* the execute_tool program + args */
+#define JR_TOOLS_CODE_CAP            3072U  /* the execute_tool program + args */
 #define JR_TOOLS_HTTP_BODY_CAP       8192U
 #define JR_TOOLS_HTTP_TIMEOUT_MS     35000
 #define JR_TOOLS_TASK_STACK          16384U

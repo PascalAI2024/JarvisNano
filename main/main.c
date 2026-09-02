@@ -100,6 +100,8 @@ extern const unsigned char diagnostics_html_end[]
  * owns HTTPS on-device; no Android/Mac companion participates in the
  * voice -> tool -> voice path. `remember` is intercepted for physical
  * confirmation, and execute_tool can never bypass JarvisMCP server policy. */
+#define REMEMBER_NEEDS_TAP 0
+
 static const jr_gemini_fn_decl_t s_device_tool_fns[] = {
     {
         .name = "recall_memory",
@@ -110,10 +112,12 @@ static const jr_gemini_fn_decl_t s_device_tool_fns[] = {
     {
         .name = "remember",
         .description =
-            "Save a note to Jarvis memory after Pascal approves on the device.",
+            "Save something Sir tells you to remember into Jarvis memory. His "
+            "asking is the approval; say back what you saved.",
         .arg_name = "note",
         .arg_desc =
-            "Panel-safe note, at most 47 characters; it is shown before approval.",
+            "The note in plain words, at most 200 characters: letters, digits, "
+            "spaces and simple punctuation only.",
     },
     {
         .name = "current_time",
@@ -139,8 +143,14 @@ static const jr_gemini_fn_decl_t s_device_tool_fns[] = {
             "websearch {\"query\"} for anything on the live web or in the news; "
             "weather {\"latitude\",\"longitude\"} (Fort Lauderdale is 26.12, "
             "-80.14); wiki {\"query\"}; crypto {\"coin\",\"currency\"}; "
-            "stocks.quote {\"symbols\"}; time {\"timezone\"}. Otherwise use "
-            "the tool and params search_tools returned, keys in that order.",
+            "stocks.quote {\"symbols\"}; time {\"timezone\"}. For Sir's own "
+            "life and work: memory.capture {\"title\",\"body\",\"tags\"} to "
+            "remember anything he tells you (say what you remembered); "
+            "memory.search {\"query\"} to recall it; butlercrm.calendar.upcoming "
+            "{} and butlercrm.calendar.create {\"title\",\"starts_at\"} for his "
+            "calendar; coordination.portfolio {} and coordination.createWorkItem "
+            "{\"projectId\",\"title\"} for the work board. Otherwise use the "
+            "tool and params search_tools returned, keys in that order.",
         .params = {
             {
                 .name = "tool",
@@ -2096,7 +2106,15 @@ static void voice_exec(void *ctx, const jr_command_t *cmd)
     }
     case JR_CMD_DISPATCH_TOOL_CALL: {
         atomic_fetch_add(&s_tool_diag.calls_received, 1U);
-        if (cmd->tool_name != NULL &&
+        /* A SPOKEN "REMEMBER" IS THE APPROVAL. The consent arc that used to
+         * intercept this tool asked the owner to tap the glass to confirm a
+         * note they had just dictated; from across the room the tap never
+         * came, the prompt timed out, and Jarvis apologised for not saving
+         * what he had been told twice. The owner's instruction is physical
+         * authority already (it is his voice in his room); synthetic input
+         * cannot dictate a note because it cannot speak. The arc stays in
+         * the tree for tools that do warrant it. */
+        if (REMEMBER_NEEDS_TAP && cmd->tool_name != NULL &&
             strcmp(cmd->tool_name, "remember") == 0) {
             /* Validate the exact displayed note before asking; only the later
              * physical tap sets jr_tool_job_t.physical_confirmed. */
@@ -8269,7 +8287,7 @@ static void init_nvs(void)
  * carry the current local time (POLISH-02): courtesies then match reality
  * ("good morning" actually in the morning) with no tool round-trip. Refreshed
  * on the app task at every SEND_SETUP; the cfg pointer never moves. */
-static char s_sys_instr[2048];
+static char s_sys_instr[2560];
 static void compose_system_instruction(void)
 {
     static const char kBase[] =
@@ -8277,29 +8295,42 @@ static void compose_system_instruction(void)
         "IN ENGLISH, EVEN IF THE INPUT AUDIO OR AMBIENT SPEECH IS IN ANOTHER "
         "LANGUAGE. Never switch languages, mix tongues, or use foreign phrases "
         "unless Sir explicitly asks for another language.\n\n"
-        "You are J.A.R.V.I.S., a calm British AI butler on a physical voice "
-        "device. Address the user as \"Sir.\" If speech is unclear, stay in "
-        "English and ask one short question.\n\n"
+        "You are J.A.R.V.I.S., the owner's personal AI, on a small voice "
+        "device on their desk. Your voice is that of a calm British butler; "
+        "your scope is not a household. The owner builds software and "
+        "hardware and runs a business, and you help with anything they ask: "
+        "engineering, code, product, business, research, the news, the "
+        "world, games, this device. Address the owner as \"Sir.\"\n\n"
+        "Never refuse a reasonable request and never say a subject is "
+        "outside your role. If something is impossible from this device, "
+        "say so in one sentence and give the nearest thing you can do. Warn "
+        "once if you must, then help. If speech is unclear, ask one short "
+        "question rather than guessing or going quiet.\n\n"
         "Style: dry wit, measured calm, understated. Humor only when composure "
-        "meets chaos—never forced jokes or catchphrases. Same tone for crisis "
-        "and routine; urgency shortens sentences, never volume or excitement. "
-        "Radical honesty: warn once, then comply. Genuine loyalty under "
-        "composure.\n\n"
+        "meets chaos, never forced jokes or catchphrases. Same tone for crisis "
+        "and routine; urgency shortens sentences, never volume. Radical "
+        "honesty and genuine loyalty.\n\n"
         "SPEECH (spoken audio, low latency):\n"
-        "- Prefer 1–3 short sentences. Fewer words win.\n"
+        "- Prefer 1-3 short sentences. Fewer words win. For a long answer, "
+        "give the essence first and offer more.\n"
         "- No lists, markdown, stage directions, or thinking-aloud.\n"
         "- No cheerleading filler (\"Sure!\", \"Absolutely!\", \"Happy to help!\").\n"
-        "- On completed actions: \"Done.\", \"Very well.\", or one crisp fact—then stop.\n"
-        "- Ambient noise, TV, music, partial phrases, or speech not clearly for "
-        "you: remain silent. Do not invent a reply.\n"
+        "- On completed actions: \"Done.\", \"Very well.\", or one crisp fact, "
+        "then stop.\n"
+        "- Stay silent only for speech plainly not addressed to you: a "
+        "television, music, other people talking to each other. When in "
+        "doubt, answer briefly.\n"
         "- Never narrate that you are listening or thinking.\n\n"
-        "Use the declared tools when current or remembered facts are needed; "
-        "never claim a tool succeeded unless its response says so. Be useful, "
-        "not chatty. Serve Sir with quiet competence.\n\n"
+        "You exist to help with Sir's life and work, and the Jarvis tools are "
+        "how you act: remember what he tells you, recall it later, read and "
+        "add to his calendar, keep his work board, search the world. Use them "
+        "without being asked twice; never claim a tool succeeded unless its "
+        "response says so.\n\n"
         "Capabilities, for when Sir asks what you can do: live web search and "
         "news, weather, Wikipedia, crypto and stock prices, exchange rates, "
-        "time zones, translation, research papers, a memory of Sir's notes, "
-        "and this device's volume and brightness.";
+        "time zones, translation, research papers, remembering and recalling "
+        "Sir's notes, his calendar, his work board, and this device's volume "
+        "and brightness.";
     char when[160] = "";
     time_t tt = time(NULL);
     struct tm tmv;

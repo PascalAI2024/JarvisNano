@@ -20,12 +20,24 @@ typedef struct {
 /* These strings are the complete executable vocabulary. There is no generic
  * `code` tool and no path that copies model text outside a quoted literal. */
 static const template_desc_t s_templates[] = {
+    /* PROJECTED: five raw hits ran to 3.6 KB against the 3 KB slot and were
+     * cut mid-JSON, so the model read a broken answer and said it remembered
+     * nothing. Title, date, and 200 characters of snippet is what a voice
+     * answer needs. */
     {"recall_memory", "query", 255U, false,
-     "return await jarvis.memory.search({query:", ",area:\"all\",limit:5})"},
-    {"remember", "note", 47U, false,
-     "const b=", ";const h=await jarvis.utils.hash(b);"
+     "const r=await jarvis.memory.search({query:", ",area:\"all\",limit:5});"
+     "return {hits:(r.results||[]).slice(0,5).map(h=>({title:h.title||h.path,"
+     "when:h.updated||h.date||\"\",text:String(h.snippet||h.body||\"\")"
+     ".replace(/^---[\\s\\S]*?---\\s*/,\"\").slice(0,200)})),"
+     "total:r.total_scanned||0}"},
+    /* 200 characters now: the note is no longer shown for a tap, so the
+     * panel's 47-glyph limit no longer applies; the character whitelist
+     * stays, it is what keeps the note a string and not a program. The
+     * title is the note's own first words, readable in the vault. */
+    {"remember", "note", 200U, false,
+     "const b=", ";"
      "return await jarvis.memory.capture({type:\"note\","
-     "title:\"JarvisNano \"+h.slice(0,12),body:b,"
+     "title:b.slice(0,60),body:b,"
      "tags:[\"jarvisnano\",\"voice\"],source:\"jarvisnano\","
      "confidence:\"confirmed\"})"},
     {"current_time", "timezone", 79U, true,
@@ -62,7 +74,7 @@ static const template_desc_t s_templates[] = {
  * actually reaches for, because Object.values() follows the model's key
  * order and weather(longitude, latitude) is a different place. */
 #define JR_TOOLS_EXEC_JS \
-    "const P=%s;const A=%s;const ORD={websearch:[\"query\"],weather:[\"latitude\",\"longitude\"],wiki:[\"query\"],time:[\"timezone\"],crypto:[\"coin\",\"currency\"],exchange:[\"base\",\"targets\"],country:[\"name\"],geocode:[\"query\"],translate:[\"text\",\"target\",\"source\"],hackernews:[\"type\",\"count\"],research:[\"question\"],\"stocks.quote\":[\"symbols\"],\"reddit.search\":[\"query\"],\"memory.search\":[\"query\"],\"holidays.list\":[\"country\",\"year\"]};let o=jarvis;for(const k of P.slice(0,-1)){o=o[k];if(o==null)return{error:\"unknown tool\"}}const f=o[P[P.length-1]];if(typeof f!==\"function\")return{error:\"unknown tool\"};const ord=ORD[P.join(\".\")];const v=ord?ord.map(k=>A[k]):Object.values(A);let r;try{r=await f.call(o,...v)}catch(e1){try{r=await f.call(o,A)}catch(e2){return{error:String(e1&&e1.message||e1).slice(0,200)}}}const T=(x,d)=>{if(typeof x===\"string\")return x.length>320?x.slice(0,320)+\"\\u2026\":x;if(Array.isArray(x))return x.slice(0,6).map(y=>T(y,d+1));if(x&&typeof x===\"object\"&&d<4){const q={};for(const[k,y]of Object.entries(x).slice(0,24))q[k]=T(y,d+1);return q}return x};return T(r,0)"
+    "const P=%s;let A=%s;const ORD={websearch:[\"query\"],weather:[\"latitude\",\"longitude\"],wiki:[\"query\"],time:[\"timezone\"],crypto:[\"coin\",\"currency\"],exchange:[\"base\",\"targets\"],country:[\"name\"],geocode:[\"query\"],translate:[\"text\",\"target\",\"source\"],hackernews:[\"type\",\"count\"],research:[\"question\"],\"stocks.quote\":[\"symbols\"],\"reddit.search\":[\"query\"],\"memory.search\":[\"query\"],\"holidays.list\":[\"country\",\"year\"]};const name=P.join(\".\");let o=jarvis;for(const k of P.slice(0,-1)){o=o[k];if(o==null)return{error:\"unknown tool\"}}const f=o[P[P.length-1]];if(typeof f!==\"function\")return{error:\"unknown tool\"};const board=P[0]===\"coordination\";const note=name===\"memory.capture\";if(board){const i=A.input||A;if(!i.identity)i.identity={runtime:\"pi\",agentId:\"jarvisnano\",hostId:\"jarvisnano\",sessionId:new Date().toISOString().slice(0,10)};A=i}if(note){const i=A.input||A;i.type=i.type||\"note\";i.source=i.source||\"jarvisnano\";i.title=i.title||String(i.body||\"\").slice(0,60);A=i}const named=P.length>=3||board||note;const ord=ORD[name];const v=ord?ord.map(k=>A[k]):Object.values(A);const first=named?[A]:v;const second=named?v:[A];let r;try{r=await f.call(o,...first)}catch(e1){try{r=await f.call(o,...second)}catch(e2){return{error:String(e1&&e1.message||e1).slice(0,200)}}}const T=(x,d)=>{if(typeof x===\"string\")return x.length>320?x.slice(0,320)+\"\\u2026\":x;if(Array.isArray(x))return x.slice(0,6).map(y=>T(y,d+1));if(x&&typeof x===\"object\"&&d<4){const q={};for(const[k,y]of Object.entries(x).slice(0,24))q[k]=T(y,d+1);return q}return x};return T(r,0)"
 
 static const template_desc_t *find_template(const char *name)
 {
@@ -209,6 +221,15 @@ jr_tool_template_status_t jr_tools_build_code(const char *name,
             "npmsearch", "dockerhub", "context7", "memory.search",
             "memory.list", "memory.read", "meta.search", "meta.help",
             "assets.search",
+            /* The owner's life and work, 2026-09-01: notes into the company
+             * brain (append-only events), the work board, the CRM calendar
+             * and Overwatch. The servers gate their own dangerous methods
+             * (proposals, confirm flags); the device refuses the plainly
+             * destructive names below regardless. */
+            "memory.capture", "coordination", "butlercrm", "overwatch",
+        };
+        static const char *const deny_prefix[] = {
+            "delete", "remove", "destroy", "purge", "wipe", "archive",
         };
         bool allowed = false;
         for (size_t i = 0; i < sizeof allow / sizeof allow[0]; ++i) {
@@ -217,6 +238,16 @@ jr_tool_template_status_t jr_tools_build_code(const char *name,
                 (tool->valuestring[n] == '\0' || tool->valuestring[n] == '.')) {
                 allowed = true;
                 break;
+            }
+        }
+        if (allowed) {
+            const char *last = strrchr(tool->valuestring, '.');
+            last = last != NULL ? last + 1 : tool->valuestring;
+            for (size_t i = 0; i < sizeof deny_prefix / sizeof deny_prefix[0]; ++i) {
+                if (strncasecmp(last, deny_prefix[i], strlen(deny_prefix[i])) == 0) {
+                    allowed = false;
+                    break;
+                }
             }
         }
         if (!allowed) {

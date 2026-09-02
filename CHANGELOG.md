@@ -32,6 +32,15 @@ are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
   `RUNNING HOT` headline at 70 °C; DESK left the sheet (the ring already says
   it). The weather can refresh while no session is open. Asked what it can
   do, Jarvis now names its tools.
+- Jarvis is the owner's personal AI, not a household butler. The persona
+  said "butler" and "serve", so Gemini invented a domestic scope and declined
+  anything outside it ("my focus is your domestic assistance"). It now knows
+  it exists to help with the owner's life and work through the Jarvis tools,
+  never says a subject is outside its role, and answers when in doubt instead
+  of staying silent. The tool allowlist gained notes into memory, the work
+  board, the CRM calendar and Overwatch (destructive method names stay refused
+  on the device); a spoken "remember" no longer waits for a tap; recall is
+  projected to fit the model's slot.
 - Lift to glance: picked up after a rest, the weather shows for eight seconds
   and the glass goes home by itself. A first fetch with rain in the day leaves
   one "RAIN TODAY" line.
