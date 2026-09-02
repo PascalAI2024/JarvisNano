@@ -41,6 +41,14 @@ are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
   board, the CRM calendar and Overwatch (destructive method names stay refused
   on the device); a spoken "remember" no longer waits for a tap; recall is
   projected to fit the model's slot.
+- **Privacy is the microphone.** The privacy flag used to gate only the
+  automatic re-arm, so any other road into a live session (a text turn from
+  the desk route, a companion, a reconnect) brought the uplink up under a gold
+  ring that said MUTED. Now every mic frame is zeroed before the VAD and the
+  uplink while privacy is on, whatever the session is doing: no level, no
+  speech detection, nothing from the room leaves the device. Text turns still
+  work, and answer in three seconds because the server hears a quiet room
+  rather than nothing.
 - Lift to glance: picked up after a rest, the weather shows for eight seconds
   and the glass goes home by itself. A first fetch with rain in the day leaves
   one "RAIN TODAY" line.

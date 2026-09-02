@@ -268,6 +268,9 @@ Physical authority is stronger than remote control:
 
 - Remote input is tagged synthetic.
 - Remote resume never clears physical hold or flip privacy.
+- Privacy gates the microphone frames themselves, not just the re-arm: while
+  paused, every frame is zeroed before the VAD and the uplink, whatever the
+  session is doing. A text turn from the desk works with the mic shut.
 - Consent accepts only physical post-prompt taps.
 - A companion's lease has a physical double-tap escape.
 - OTA cannot override deliberate privacy state.

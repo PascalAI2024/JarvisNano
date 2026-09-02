@@ -8068,6 +8068,25 @@ static void voice_task(void *arg)
                     read_paced = true;
                     goto capture_complete;
                 }
+                /* PRIVACY IS THE MICROPHONE, NOT A FLAG ON THE RE-ARM. The
+                 * flag used to gate only the always-ready re-arm, so any
+                 * other road into a live session — a text turn from the desk
+                 * route, a companion, a reconnect — brought the uplink up
+                 * under a gold ring that said MUTED. Seen by the owner: "it's
+                 * on privacy mode but look, it's listening to me". Here the
+                 * frame is read (the codec keeps its pace) and dropped: no
+                 * VAD, no uplink, no level, whatever the session is doing.
+                 * Text turns still work with the mic shut.
+                 *
+                 * The frame is ZEROED rather than dropped: with no frames at
+                 * all the server's turn detection has no silence to conclude a
+                 * text turn on, and a desk turn under privacy took 47 s to
+                 * answer. Zeros are a quiet room, not the room. */
+                const bool mic_gated = atomic_load(&s_voice_privacy_paused);
+                if (mic_gated) {
+                    memset(mic_frame, 0, (size_t)n * sizeof(jr_pcm_t));
+                    s_app.mic_level = 0.0f;
+                }
                 jr_capture_pause_on_capture(
                     &s_app.orch.capture_pause, now);
                 jr_state_t ph = capture_phase;
@@ -8081,7 +8100,8 @@ static void voice_task(void *arg)
                     ((now >= s_app.last_playback_chunk_ms &&
                       now - s_app.last_playback_chunk_ms < 250) ||
                      jr_audio_playback_pending());
-                float vad_rms = atomic_load(&s_vad_use_clean)
+                float vad_rms = mic_gated ? 0.0f
+                                : atomic_load(&s_vad_use_clean)
                                     ? jr_audio_clean_rms()
                                     : jr_dsp_rms(mic_frame, (size_t)n);
                 jr_turn_decision_t td = jr_turn_policy_eval_rms(
