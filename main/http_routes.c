@@ -2566,7 +2566,7 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         "\"consent_cancelled\":%u},\"display\":{\"init\":\"%s\","
         "\"actual_fps\":%u,\"flush_completions\":%u,\"flush_errors\":%u,"
         "\"requested_face\":%d,\"applied_face\":%d,"
-        "\"choices_active\":%s},\"touch\":{"
+        "\"choices_active\":%s,\"watch_style\":\"%s\"},\"touch\":{"
         "\"events\":%u,\"last\":{\"kind\":\"%s\",\"x\":%u,\"y\":%u},"
         "\"shade_open\":%s,\"panel_touch_challenge\":{\"pending\":%s,"
         "\"active\":%s,\"verified\":%s,\"correct_rounds\":%u,"
@@ -2624,6 +2624,7 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         (unsigned)display.flush_errors,
         (int)display.requested_face, (int)display.applied_face,
         jr_display_choices_active() ? "true" : "false",
+        jr_display_watch_style_name(jr_display_watch_style()),
         (unsigned)atomic_load(&s_touch_events),
         touch_kind_name((jr_input_kind_t)atomic_load(&s_touch_last_kind)),
         (unsigned)atomic_load(&s_touch_last_x),

@@ -392,6 +392,32 @@ static void restore_brightness_cap(void)
     }
 }
 
+/* The watch style is the owner's choice, kept the way the brightness cap is. */
+static void persist_watch_style(uint8_t style)
+{
+    nvs_handle_t h;
+    if (nvs_open("app", NVS_READWRITE, &h) == ESP_OK) {
+        (void)nvs_set_u8(h, "watch_style", style);
+        (void)nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static void restore_watch_style(void)
+{
+    nvs_handle_t h;
+    uint8_t style = 0;
+    if (nvs_open("app", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_u8(h, "watch_style", &style) == ESP_OK &&
+            style < (uint8_t)JR_WATCH_STYLE_COUNT) {
+            jr_display_watch_style_set((jr_watch_style_t)style);
+            ESP_LOGI(TAG, "watch style restored: %s",
+                     jr_display_watch_style_name((jr_watch_style_t)style));
+        }
+        nvs_close(h);
+    }
+}
+
 void persist_ota_attempt(int slot)
 {
     nvs_handle_t h;
@@ -3092,6 +3118,7 @@ static void voice_task(void *arg)
                 const jr_display_overlay_t overlay =
                     jr_display_nav_overlay();
                 bool watch_opened = false;
+                bool style_changed = false;
                 /* PLACE IS SCOPE: the rim carries the device's own knobs, the
                  * centre carries the conversation (docs/INPUT_MAP.md §1).
                  *
@@ -3180,7 +3207,23 @@ static void voice_task(void *arg)
                      * are still compiled; this deletes the DESTINATIONS, and
                      * the drawing primitives get re-homed to summoned surfaces
                      * (docs/GLASS_DESIGN.md §B). */
-                    if (overlay == JR_DISPLAY_OVERLAY_NONE) {
+                    if (overlay == JR_DISPLAY_OVERLAY_NONE &&
+                        jr_display_nav_space() == JR_DISPLAY_SPACE_WATCH &&
+                        !jr_display_choices_active()) {
+                        /* ON THE WATCH, sideways chooses the watch. A peek
+                         * of the screen you are standing on earns nothing;
+                         * RIGHT is the next style, LEFT the previous, and
+                         * the choice is kept (owner, 2026-09-02: "swipe
+                         * right and left and get different watch styles"). */
+                        jr_display_watch_style_step(
+                            iev.direction == JR_INPUT_DIRECTION_RIGHT ? 1 : -1);
+                        persist_watch_style((uint8_t)jr_display_watch_style());
+                        jr_display_bloom();
+                        style_changed = true;
+                        ESP_LOGI(TAG, "ui: watch style %s",
+                                 jr_display_watch_style_name(
+                                     jr_display_watch_style()));
+                    } else if (overlay == JR_DISPLAY_OVERLAY_NONE) {
                         s_watch_peek_until_ms = (uint32_t)now + 10000U;
                         watch_opened = true;
                     }
@@ -3203,7 +3246,13 @@ static void voice_task(void *arg)
                     jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_SHADE;
                 /* One space now, so there is no page to name and nothing to
                  * auto-return from. */
-                if (watch_opened) {
+                if (style_changed) {
+                    char cap[24];
+                    snprintf(cap, sizeof cap, "WATCH - %s",
+                             jr_display_watch_style_name(
+                                 jr_display_watch_style()));
+                    jr_display_caption_set(cap);
+                } else if (watch_opened) {
                     jr_display_caption_set("WATCH - 10 SECONDS");
                 } else if (jr_display_nav_overlay() ==
                            JR_DISPLAY_OVERLAY_SHADE) {
@@ -3995,6 +4044,7 @@ void app_main(void)
     }
     restore_out_vol();   /* gesture-set volume survives reboot */
     restore_brightness_cap();
+    restore_watch_style();
     s_app.mic = jr_audio_source();
     s_app.spk = jr_audio_sink();
 

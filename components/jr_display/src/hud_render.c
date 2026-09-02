@@ -521,6 +521,7 @@ static uint16_t s_ov_cyan[HUD_RAMP_LEVELS];
 static uint16_t s_ov_tick[HUD_RAMP_LEVELS];
 static uint16_t s_ov_gold[HUD_RAMP_LEVELS];
 static uint16_t s_ov_red[HUD_RAMP_LEVELS];
+static uint16_t s_ov_lume[HUD_RAMP_LEVELS];   /* warm cream: the diver's markers */
 static bool     s_ov_ready;
 static bool     s_ov_swap;
 static int16_t  s_ov_halo_dx[32];
@@ -541,6 +542,7 @@ static void overlay_palette(bool swap)
     ramp_build(s_ov_tick, 90, 200, 220, swap);
     ramp_build(s_ov_gold, 255, 180, 40, swap);
     ramp_build(s_ov_red,  255, 64,  48, swap);
+    ramp_build(s_ov_lume, 232, 226, 200, swap);
     s_ov_swap  = swap;
     s_ov_ready = true;
 }
@@ -1508,6 +1510,180 @@ void hud_overlay_bloom(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 #define HUD_CLOCK_R_HOUR  110
 #define HUD_CLOCK_R_MIN   175
 #define HUD_CLOCK_R_SEC   190
+
+/* ---- The other three watches (2026-09-02) ---------------------------------
+ *
+ * Same numbers, same strip contract, same r <= 192 promise. Each style is a
+ * handful of polar stamps and per-row disc solves; none keeps state. */
+static void ov_disc(const strip_t *s, int cx, int cy, int rad, uint16_t px)
+{
+    for (int dy = -rad; dy <= rad; ++dy) {
+        const int y = cy + dy;
+        if (y < s->y0 || y >= s->y1) {
+            continue;
+        }
+        const int half = (int)isqrt32((uint32_t)(rad * rad - dy * dy));
+        uint16_t *row = s->base + (size_t)(y - s->y0) * HUD_W;
+        for (int x = cx - half; x <= cx + half; ++x) {
+            if (x >= 0 && x < HUD_W) {
+                row[x] = px;
+            }
+        }
+    }
+}
+
+static void ov_polar_disc(const strip_t *s, int a, int r, int rad, uint16_t px)
+{
+    const int cy = 232 + ((lsin(a) * r) >> 15);
+    if (cy + rad < s->y0 || cy - rad >= s->y1) {
+        return;
+    }
+    ov_disc(s, 232 + ((lcos(a) * r) >> 15), cy, rad, px);
+}
+
+static void ov_hand(const strip_t *s, int a, int r0, int r1, uint16_t px, int n)
+{
+    for (int r = r0; r <= r1; ++r) {
+        polar_dot(s, a, r, px, n);
+    }
+}
+
+/* axis-aligned filled box [x0,x1) x [y0,y1), strip-clipped */
+static void ov_box(const strip_t *s, int x0, int y0, int x1, int y1, uint16_t px)
+{
+    if (x0 < 0) {
+        x0 = 0;
+    }
+    if (x1 > HUD_W) {
+        x1 = HUD_W;
+    }
+    for (int y = y0; y < y1; ++y) {
+        if (y < s->y0 || y >= s->y1) {
+            continue;
+        }
+        uint16_t *row = s->base + (size_t)(y - s->y0) * HUD_W;
+        for (int x = x0; x < x1; ++x) {
+            row[x] = px;
+        }
+    }
+}
+
+/* DIVER: twelve lume markers at r~168 (triangle at 12, bars at 3/6/9, discs
+ * elsewhere), a broad hour hand with a lume disc near its tip, a broad
+ * minute hand, a thin seconds hand with a lollipop. No text, no marks. */
+static void clock_diver(const strip_t *s, int a_h, int a_m, int a_s,
+                        int strength, bool swap)
+{
+    const uint16_t lume  = shade(s_ov_lume, strength);
+    const uint16_t white = pack565(strength, strength, strength, swap);
+    for (int i = 0; i < 12; ++i) {
+        const int a = 192 + (i * 256) / 12;
+        if (i == 0) {
+            /* the triangle sits on the vertical axis, so it is solved per
+             * row: apex at r=158, a 44 px base at r=178, no comb gaps */
+            for (int r = 158; r <= 178; ++r) {
+                const int half = ((r - 158) * 11) / 10;
+                ov_box(s, 232 - half, 232 - r, 232 + half + 1, 233 - r, lume);
+            }
+        } else if (i % 3 == 0) {
+            ov_hand(s, a, 154, 180, lume, 5);
+        } else {
+            ov_polar_disc(s, a, 168, 6, lume);
+        }
+    }
+    ov_hand(s, a_h, 20, 112, lume, 5);
+    ov_polar_disc(s, a_h, 96, 9, lume);
+    ov_polar_disc(s, a_h, 96, 3, 0);                 /* the open centre */
+    ov_hand(s, a_m, 20, 168, lume, 5);
+    ov_hand(s, a_s, 20, 184, white, 1);
+    ov_polar_disc(s, a_s, 150, 5, lume);
+    ov_disc(s, 232, 232, 6, lume);
+}
+
+/* DIGITAL: seven-segment HH:MM (24 h, like the WATCH sheet) in cyan, centred
+ * in a 318 x 110 box whose corners sit at r~170; the seconds are sixty gold
+ * dots at r=182 filling clockwise from 12. */
+#define DIG_H  110
+#define DIG_W  60
+#define DIG_T  11
+static void seg_digit(const strip_t *s, int x, int y, int d, uint16_t px)
+{
+    static const uint8_t mask[10] = {
+        0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F };
+    const int m = mask[d % 10];
+    const int hm = y + DIG_H / 2;
+    if (m & 0x01) ov_box(s, x, y, x + DIG_W, y + DIG_T, px);                  /* a */
+    if (m & 0x02) ov_box(s, x + DIG_W - DIG_T, y, x + DIG_W, hm, px);         /* b */
+    if (m & 0x04) ov_box(s, x + DIG_W - DIG_T, hm, x + DIG_W, y + DIG_H, px); /* c */
+    if (m & 0x08) ov_box(s, x, y + DIG_H - DIG_T, x + DIG_W, y + DIG_H, px);  /* d */
+    if (m & 0x10) ov_box(s, x, hm, x + DIG_T, y + DIG_H, px);                 /* e */
+    if (m & 0x20) ov_box(s, x, y, x + DIG_T, hm, px);                         /* f */
+    if (m & 0x40) ov_box(s, x, hm - DIG_T / 2, x + DIG_W, hm + DIG_T / 2 + 1, px); /* g */
+}
+
+static void clock_digital(const strip_t *s, int hh, int mm, int ss, int strength)
+{
+    const uint16_t cyan = shade(s_ov_cyan, strength);
+    const uint16_t gold = shade(s_ov_gold, strength);
+    const int y = 232 - DIG_H / 2;
+    seg_digit(s, 72,  y, hh / 10, cyan);
+    seg_digit(s, 146, y, hh % 10, cyan);
+    ov_box(s, 227, 200, 237, 210, cyan);
+    ov_box(s, 227, 254, 237, 264, cyan);
+    seg_digit(s, 256, y, mm / 10, cyan);
+    seg_digit(s, 330, y, mm % 10, cyan);
+    for (int i = 0; i <= ss; ++i) {
+        polar_dot(s, 192 + (i * 256) / 60, 182, gold, 3);
+    }
+}
+
+/* MINIMAL: thin white hour and minute hands, twelve 2 px dots, a tiny hub,
+ * no seconds. */
+static void clock_minimal(const strip_t *s, int a_h, int a_m, int strength,
+                          bool swap)
+{
+    const uint16_t white = pack565(strength, strength, strength, swap);
+    for (int i = 0; i < 12; ++i) {
+        polar_dot(s, 192 + (i * 256) / 12, 176, white, 2);
+    }
+    ov_hand(s, a_h, 14, 100, white, 2);
+    ov_hand(s, a_m, 14, 160, white, 2);
+    ov_disc(s, 232, 232, 3, white);
+}
+
+void hud_overlay_clock_style(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                             int hh, int mm, int ss, int strength, int style)
+{
+    if (style <= 0 || style > 3) {
+        hud_overlay_clock(dst, y0, nrows, swap_bytes, hh, mm, ss, strength);
+        return;
+    }
+    if (dst == NULL || nrows <= 0 || strength <= 0) {
+        return;
+    }
+    if (strength > 255) {
+        strength = 255;
+    }
+    if (y0 > 232 + HUD_CLOCK_R_SEC + 2 ||
+        y0 + nrows <= 232 - HUD_CLOCK_R_SEC - 2) {
+        return;
+    }
+    hh = ((hh % 24) + 24) % 24;
+    mm = ((mm % 60) + 60) % 60;
+    ss = ((ss % 60) + 60) % 60;
+    overlay_palette(swap_bytes);
+    const strip_t s = { dst, y0, y0 + nrows };
+    const int a_m = (192 + (mm * 256) / 60) & 255;
+    const int a_h = (192 + (((hh % 12) * 60 + mm) * 256) / 720) & 255;
+    const int a_s = (192 + (ss * 256) / 60) & 255;
+    if (style == 1) {
+        clock_diver(&s, a_h, a_m, a_s, strength, swap_bytes);
+    } else if (style == 2) {
+        clock_digital(&s, hh, mm, ss, strength);
+    } else {
+        clock_minimal(&s, a_h, a_m, strength, swap_bytes);
+    }
+}
 
 void hud_overlay_clock(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                        int hh, int mm, int ss, int strength)

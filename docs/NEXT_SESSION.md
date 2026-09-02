@@ -38,7 +38,7 @@ Wi-Fi OTA may still pass preflight when USB power is present.
 | Left-edge vertical | Volume +/− 5 globally |
 | Right-edge vertical | Brightness +/− 5 globally |
 | Centre vertical swipe | The ring: Jarvis ↔ Watch ↔ Weather ↔ Status ↔ (Desk, only while an agent/claim/lease is live) ↔ Activity (wraps) |
-| Horizontal swipe | Watch peek, 10 s |
+| Horizontal swipe | Watch peek, 10 s; on WATCH itself: RIGHT = next watch style, LEFT = previous (JARVIS, DIVER, DIGITAL, MINIMAL), kept in NVS |
 | Top-edge down | Open controls |
 | Centre up | Detail or controls close |
 | Double tap | Jarvis Home |
@@ -80,6 +80,16 @@ is the classified edge-origin swipe.
   host, no keys beyond the one already in NVS. `tools/board-worker/worker.py`
   is a reference for jobs the gateway cannot do. An SSH key pasted into chat
   on 2026-09-02 should be rotated — it was never installed.
+- **Four watches.** On WATCH a horizontal swipe steps the style — JARVIS
+  (the shipped face, checksum-pinned), DIVER (lume markers, broad hands,
+  lollipop seconds), DIGITAL (seven-segment 24 h, seconds as a gold dot
+  ring), MINIMAL (thin hands, twelve dots, no seconds) — RIGHT next, LEFT
+  previous, wrapping, caption `WATCH - <STYLE>`, a bloom. Two bits in the nav
+  word (17–18), NVS `app/watch_style`, `display.watch_style` in
+  `/api/cockpit`, walkable from the desk with
+  `POST /api/debug/input?kind=swipe&dir=right` while on WATCH. Evidence:
+  `docs/evidence/20260902-watch-*.png`. Elsewhere on the ring a horizontal
+  swipe still peeks the watch.
 - **Muted is a watch.** Privacy mute feeds the ladder a `quiet` input:
   five seconds still and the glass is the WHISPER watch (brightness 22,
   6 fps, 160 MHz) with USB no longer holding it awake; touch, pickup, a live

@@ -270,6 +270,23 @@ void jr_display_bloom(void);
  * therefore safe. */
 void jr_display_clock_set(bool on, int hh, int mm, int ss);
 
+/* WATCH STYLES (2026-09-02). The same three numbers drawn four ways; the
+ * choice is two bits in the nav word, read lock-free by the render task,
+ * persisted by the composition root. A horizontal swipe on WATCH steps it
+ * (RIGHT = next, LEFT = previous, wrapping). docs/GLASS_DESIGN.md §B. */
+typedef enum {
+    JR_WATCH_JARVIS = 0,   /* cyan hour, white minute, gold seconds */
+    JR_WATCH_DIVER,        /* lume markers, broad hands, lollipop seconds */
+    JR_WATCH_DIGITAL,      /* seven-segment HH:MM, seconds as a dot ring */
+    JR_WATCH_MINIMAL,      /* thin hands, twelve dots, no seconds */
+    JR_WATCH_STYLE_COUNT
+} jr_watch_style_t;
+
+void             jr_display_watch_style_set(jr_watch_style_t style);
+void             jr_display_watch_style_step(int dir);   /* +1 next, -1 prev */
+jr_watch_style_t jr_display_watch_style(void);
+const char      *jr_display_watch_style_name(jr_watch_style_t style);
+
 /* Pushed canvas: a full-frame RGB565 (little-endian) image that temporarily
  * replaces the face — the glass as a remote drawing surface for the paired
  * companion / JarvisMCP. Exact panel dimensions only (466x466). The image is

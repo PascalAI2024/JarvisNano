@@ -1689,6 +1689,146 @@ static void test_battery_rim_alarm_rule(void)
     free(a); free(b);
 }
 
+/* FOUR WATCHES, ONE CONTRACT (2026-09-02). Each style must paint a region
+ * only it paints, and JARVIS must be the watch that shipped: four FNV-1a
+ * checksums of the whole frame, taken from the tree before the styles
+ * existed (scratch harness, 2026-09-02), so a stray pixel in the original
+ * fails here. Colours: lume cream is the diver's alone; the digits are cyan
+ * in a box no hand of the JARVIS watch reaches (x < 120 at 20:34); the
+ * minimal watch has no gold and nothing beyond r=178. */
+static uint32_t fnv_frame(const uint16_t *fb, size_t px)
+{
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < px; ++i) {
+        h ^= fb[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void test_watch_jarvis_is_pixel_identical(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = calloc(px, sizeof *fb);
+    if (!fb) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
+    static const struct { int hh, mm, ss; uint32_t fnv; size_t lit; } pins[] = {
+        { 10,  8, 30, 0x708eb205u, 1176 },
+        {  3,  0, 30, 0x74835b5eu, 1005 },
+        {  0, 30,  0, 0x5f6c77f1u, 1040 },
+        { 23, 59, 59, 0x1a665dccu,  875 },
+    };
+    for (size_t i = 0; i < sizeof pins / sizeof *pins; ++i) {
+        for (int via_style = 0; via_style < 2; ++via_style) {
+            memset(fb, 0, px * sizeof *fb);
+            if (via_style) {
+                hud_overlay_clock_style(fb, 0, HUD_H, false, pins[i].hh,
+                                        pins[i].mm, pins[i].ss, 255, 0);
+            } else {
+                hud_overlay_clock(fb, 0, HUD_H, false, pins[i].hh,
+                                  pins[i].mm, pins[i].ss, 255);
+            }
+            size_t lit = 0;
+            for (size_t k = 0; k < px; ++k) {
+                if (fb[k]) lit++;
+            }
+            const uint32_t h = fnv_frame(fb, px);
+            CHECK(lit == pins[i].lit, "%02d:%02d:%02d via_style=%d lit %zu != %zu",
+                  pins[i].hh, pins[i].mm, pins[i].ss, via_style, lit, pins[i].lit);
+            CHECK(h == pins[i].fnv, "%02d:%02d:%02d via_style=%d fnv 0x%08x != 0x%08x",
+                  pins[i].hh, pins[i].mm, pins[i].ss, via_style, h, pins[i].fnv);
+        }
+    }
+    free(fb);
+}
+
+static void render_style_strips(uint16_t *fb, int hh, int mm, int ss, int style)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    memset(fb, 0, px * sizeof *fb);
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        const int n = y + STRIP_ROWS > HUD_H ? HUD_H - y : STRIP_ROWS;
+        hud_overlay_clock_style(fb + (size_t)y * HUD_W, y, n, false,
+                                hh, mm, ss, 255, style);
+    }
+}
+
+static void test_watch_styles_paint_their_own_regions(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = calloc(px, sizeof *fb);
+    uint16_t *whole = calloc(px, sizeof *whole);
+    if (!fb || !whole) { printf("FAIL %s: alloc\n", __func__); g_failures++; free(fb); free(whole); return; }
+    /* cream = pack565(232,226,200) unswapped */
+    const uint16_t cream = (uint16_t)(((232 & 0xF8) << 8) | ((226 & 0xFC) << 3) | (200 >> 3));
+    const uint16_t gold_full = (uint16_t)(((255 & 0xF8) << 8) | ((180 & 0xFC) << 3) | (40 >> 3));
+
+    for (int style = 0; style < 4; ++style) {
+        render_style_strips(fb, 6, 30, 15, style);   /* hands away from 12 */
+        size_t tri = 0, cream_any = 0, gold = 0, far = 0, lit = 0;
+        for (int y = 0; y < HUD_H; ++y) {
+            for (int x = 0; x < HUD_W; ++x) {
+                const uint16_t p = fb[(size_t)y * HUD_W + x];
+                if (p == 0) continue;
+                lit++;
+                const int dx = x - 232, dy = y - 232;
+                const int r2 = dx * dx + dy * dy;
+                CHECK(r2 <= 192 * 192, "style %d paints at r>192 (%d,%d)", style, x, y);
+                if (p == cream) {
+                    cream_any++;
+                    if (x >= 205 && x <= 259 && y >= 52 && y <= 78) tri++;
+                }
+                if (p == gold_full) gold++;
+                if (r2 >= 186 * 186) far++;
+            }
+        }
+        CHECK(lit > 200, "style %d lit only %zu px", style, lit);
+        if (style == 1) {
+            CHECK(tri > 150, "DIVER: 12 o'clock triangle only %zu cream px", tri);
+            CHECK(cream_any > 1500, "DIVER: only %zu cream px", cream_any);
+        } else {
+            CHECK(cream_any == 0, "style %d painted %zu cream px", style, cream_any);
+        }
+        if (style == 3) {
+            CHECK(gold == 0, "MINIMAL has %zu gold px (a seconds hand)", gold);
+            CHECK(far == 0, "MINIMAL paints %zu px at r>=186", far);
+        } else if (style == 1) {
+            CHECK(gold == 0, "DIVER has %zu gold px (its seconds are white lume)", gold);
+        } else {
+            CHECK(gold > 20, "style %d has only %zu gold px", style, gold);
+        }
+        /* strip rendering must equal the whole-frame render */
+        memset(whole, 0, px * sizeof *whole);
+        hud_overlay_clock_style(whole, 0, HUD_H, false, 6, 30, 15, 255, style);
+        CHECK(memcmp(whole, fb, px * sizeof *fb) == 0,
+              "style %d: strips differ from the whole frame", style);
+    }
+    /* DIGITAL at 20:34: the leading '2' fills the left digit slab; JARVIS
+     * hands never reach it. */
+    render_style_strips(fb, 20, 34, 0, 2);
+    size_t d2 = 0, gold_dots = 0;
+    render_style_strips(whole, 20, 34, 0, 0);
+    size_t d0 = 0;
+    for (int y = 172; y <= 292; ++y) {
+        for (int x = 68; x < 120; ++x) {
+            if (fb[(size_t)y * HUD_W + x]) d2++;
+            if (whole[(size_t)y * HUD_W + x]) d0++;
+        }
+    }
+    for (size_t k = 0; k < px; ++k) if (fb[k] == gold_full) gold_dots++;
+    CHECK(d2 > 800, "DIGITAL: left digit slab only %zu px", d2);
+    CHECK(d0 == 0, "JARVIS painted %zu px in the digit slab", d0);
+    CHECK(gold_dots >= 9 && gold_dots <= 27, "DIGITAL ss=0: %zu gold px (one 3x3 dot expected)", gold_dots);
+    /* strength 0 paints nothing in every style */
+    for (int style = 0; style < 4; ++style) {
+        memset(fb, 0, px * sizeof *fb);
+        hud_overlay_clock_style(fb, 0, HUD_H, false, 6, 30, 15, 0, style);
+        size_t any = 0;
+        for (size_t k = 0; k < px; ++k) if (fb[k]) any++;
+        CHECK(any == 0, "style %d paints %zu px at strength 0", style, any);
+    }
+    free(fb); free(whole);
+}
+
 int main(void)
 {
     test_strip_invariance();
@@ -1736,6 +1876,8 @@ int main(void)
     test_clock_hand_angles();
     test_clock_bounds_and_strips();
     test_clock_strength_gate();
+    test_watch_jarvis_is_pixel_identical();
+    test_watch_styles_paint_their_own_regions();
 
     if (g_failures) {
         printf("hud_render tests FAILED (%d)\n", g_failures);

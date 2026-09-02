@@ -95,7 +95,7 @@ for what sleeps and how it wakes.
 | Centre vertical swipe | The ring: JARVIS ↔ WATCH ↔ WEATHER ↔ STATUS ↔ (DESK while live) ↔ ACTIVITY, wrapping |
 | Centre up on a ring screen | Open the screen's sheet; down closes it |
 | Tap an open sheet | Jarvis speaks what the screen shows |
-| Horizontal swipe | Ten-second WATCH peek |
+| Horizontal swipe | Ten-second WATCH peek; on WATCH, the next or previous watch style |
 | Double tap | Home |
 | Glass hold | Physical privacy mute/unmute |
 | Face-down ~600 ms | Flip privacy; face-up clears only a flip-origin mute |

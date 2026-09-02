@@ -419,6 +419,13 @@ void hud_overlay_bloom(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 void hud_overlay_clock(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                        int hh, int mm, int ss, int strength);
 
+/* The same watch in one of four styles (jr_watch_style_t in jr_display.h:
+ * 0 JARVIS, 1 DIVER, 2 DIGITAL, 3 MINIMAL). Style 0 is hud_overlay_clock,
+ * pixel for pixel; an unknown style draws style 0. Everything stays inside
+ * r <= 192 and the strip contract. */
+void hud_overlay_clock_style(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                             int hh, int mm, int ss, int strength, int style);
+
 /* Map IMU tilt to a HUD parallax offset, clamped to +/-HUD_TILT_MAX px.
  *
  * This is the one place the device beats the browser mockup: a simulated HUD

@@ -1287,6 +1287,81 @@ static void stage_space(int space)
  * live, the full ring is back. Both laps are walked and every landing named,
  * so a wrap that quietly re-admits DESK cannot pass. Mutation: dropping
  * either sp_desk_live() test in nav_step fails the matching half. */
+/* THE WATCH STYLE LIVES IN THE NAV WORD (2026-09-02): bits 17-18, wrapping
+ * both ways, untouched by every nav step, and it reaches the render path —
+ * DIVER's cream triangle at 12 o'clock is painted on WATCH and nothing else
+ * paints cream. Mutation-checked: a step that drops the style bits fails the
+ * "survives nav_next" check; a renderer that ignores the style fails the
+ * triangle count. */
+static void test_watch_style_is_two_nav_bits_that_wrap(void)
+{
+    reset_nav();
+    CHECK(jr_display_watch_style() == JR_WATCH_JARVIS, "cold start is JARVIS");
+    jr_display_watch_style_set(JR_WATCH_DIVER);
+    CHECK(((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 17) & 3u) == 1u,
+          "DIVER is not bit pattern 01 at bit 17 (word 0x%08x)",
+          (unsigned)__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE));
+    jr_display_watch_style_step(1);
+    CHECK(jr_display_watch_style() == JR_WATCH_DIGITAL, "right of DIVER is DIGITAL");
+    jr_display_watch_style_step(1);
+    CHECK(jr_display_watch_style() == JR_WATCH_MINIMAL, "right of DIGITAL is MINIMAL");
+    jr_display_watch_style_step(1);
+    CHECK(jr_display_watch_style() == JR_WATCH_JARVIS, "right of MINIMAL wraps to JARVIS");
+    jr_display_watch_style_step(-1);
+    CHECK(jr_display_watch_style() == JR_WATCH_MINIMAL, "left of JARVIS wraps to MINIMAL");
+    jr_display_nav_next();
+    jr_display_nav_up();
+    jr_display_nav_home();
+    CHECK(jr_display_watch_style() == JR_WATCH_MINIMAL,
+          "the style did not survive next/up/home (now %d)", (int)jr_display_watch_style());
+    CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS, "home still goes home");
+    jr_display_watch_style_set((jr_watch_style_t)JR_WATCH_STYLE_COUNT);
+    CHECK(jr_display_watch_style() == JR_WATCH_MINIMAL, "an out-of-range style is refused");
+    CHECK(strcmp(jr_display_watch_style_name(JR_WATCH_DIVER), "DIVER") == 0, "DIVER is named");
+    CHECK(strcmp(jr_display_watch_style_name(JR_WATCH_DIGITAL), "DIGITAL") == 0, "DIGITAL is named");
+    CHECK(strcmp(jr_display_watch_style_name(JR_WATCH_MINIMAL), "MINIMAL") == 0, "MINIMAL is named");
+    reset_nav();
+}
+
+static void test_watch_style_reaches_the_glass(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb);
+    if (!fb) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; return; }
+    const uint16_t cream = (uint16_t)(((232 & 0xF8) << 8) | ((226 & 0xFC) << 3) | (200 >> 3));
+    static const int styles[] = { JR_WATCH_JARVIS, JR_WATCH_DIVER };
+    int tri[2] = { 0, 0 };
+    for (int k = 0; k < 2; ++k) {
+        stage_power(JR_DISPLAY_OTA_IDLE, 0U, JR_DISPLAY_OVERLAY_NONE);
+        s_space_from = (uint8_t)JR_DISPLAY_SPACE_WATCH;
+        s_space_to = (uint8_t)JR_DISPLAY_SPACE_WATCH;
+        __atomic_store_n(&s_nav_word, (uint32_t)JR_DISPLAY_SPACE_WATCH, __ATOMIC_RELEASE);
+        jr_display_watch_style_set((jr_watch_style_t)styles[k]);
+        s_shade_ease = 0;
+        s_detail_ease = 0;
+        s_space_veil = 256;
+        jr_display_clock_set(true, 6, 30, 15);
+        s_clock_ease = 256;
+        sp_compose();
+        memset(fb, 0, px * sizeof *fb);
+        for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+            const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+            uint16_t *strip = fb + (size_t)y * HUD_W;
+            apply_space_overlay(&s_display, y, y2, strip);
+            apply_clock_overlay(&s_display, y, y2, strip);
+        }
+        for (int y = 52; y <= 78; ++y) {
+            for (int x = 205; x <= 259; ++x) {
+                if (fb[(size_t)y * HUD_W + x] == cream) tri[k]++;
+            }
+        }
+    }
+    CHECK(tri[0] == 0, "JARVIS painted %d cream px at 12 o'clock", tri[0]);
+    CHECK(tri[1] > 150, "DIVER painted only %d cream px at 12 o'clock", tri[1]);
+    free(fb);
+    reset_nav();
+}
+
 static void test_desk_is_on_the_ring_only_while_live(void)
 {
     const int count = (int)JR_DISPLAY_SPACE_COUNT;
@@ -1979,6 +2054,8 @@ int main(void)
 
     test_every_space_composes_its_own_sheet();
     test_clock_clear_spares_open_shell_surfaces();
+    test_watch_style_is_two_nav_bits_that_wrap();
+    test_watch_style_reaches_the_glass();
 
     test_desk_is_on_the_ring_only_while_live();
     test_desk_going_dark_moves_the_owner_on();

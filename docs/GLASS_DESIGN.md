@@ -330,6 +330,46 @@ explicit `nav_set(DESK)` while dark is a caller's decision and stays. A
 `STANDBY` in a progress ring was the useless screen the owner named; it no
 longer exists as a place you can arrive at.
 
+### The watch styles, 2026-09-02
+
+The owner's words: *"how about the watch can have different styles, like one
+can be Rolex"* and *"when on the watch screen I should be able to swipe right
+and left and get different watch styles."* Under the §B rule a style is not a
+new surface and invents nothing: it is the same three numbers drawn four
+ways, and a horizontal swipe on WATCH — which today re-arms a watch peek on
+the screen that already *is* the watch, the one place that gesture earns
+nothing — becomes the way to choose.
+
+| Style | What it draws (all procedural, `hud_overlay_clock`, r ≤ 192) |
+|---|---|
+| **JARVIS** | Today's face, pixel for pixel: cyan hour, white minute, gold seconds, white hub. Pinned by checksum. |
+| **DIVER** | Submariner-inspired, no marks, no text: twelve lume markers in warm cream (232,226,200) at r≈168 — a triangle at 12, bars at 3/6/9, discs elsewhere — a broad hour hand with a lume disc near its tip, a broad minute hand, a thin seconds hand with a lollipop dot, black dial. |
+| **DIGITAL** | Seven-segment `HH:MM`, cyan, centred, 24-hour like the WATCH sheet; the seconds are sixty gold dots at r≈182 filling clockwise from 12. |
+| **MINIMAL** | Bauhaus: thin white hour and minute hands, twelve 2 px dots at r≈176, a tiny hub, no seconds. |
+
+**Where the choice lives.** Two bits in the nav word (bits 17–18,
+`NAV_STYLE_SHIFT`), read lock-free by the render task like the space and the
+overlay, preserved across every nav step, pinned by the shell suite;
+persisted in NVS `app/watch_style` and restored at boot.
+
+**The gesture.** On WATCH with no overlay, no sheet, no shade and no ask:
+swipe RIGHT = next style, LEFT = previous, wrapping. Feedback is the §D
+contract: the caption names the result (`WATCH - DIVER`), a bloom, the
+touch itself restores 24 fps. On every other screen a horizontal swipe still
+peeks the watch. The desk route `POST /api/debug/input?kind=swipe&dir=left|right`
+walks the same path, and `/api/cockpit` reports `display.watch_style`.
+
+**Rejected.** A style picker sheet (a surface for a choice a swipe makes);
+a date window, a bezel that turns, brand text (invention, and not ours).
+
+**As shipped, 2026-09-02.** `hud_overlay_clock_style()` beside the original
+`hud_overlay_clock()` (style 0 calls it, so JARVIS is the same code, not a
+copy); `jr_display_watch_style_*` in `jr_display.c`; the swipe in `main.c`
+beside the watch peek; `persist_watch_style` next to the brightness cap.
+Proven on the 1.75C: right walks JARVIS → DIVER → DIGITAL → MINIMAL →
+JARVIS, left walks back, the choice survives a reboot, the image confirmed
+valid under it. Evidence: `docs/evidence/20260902-watch-*.png`.
+
 ### The critical call: delete the destinations, keep the renderer
 
 This is the sharp decision in the document, and "delete the four spaces" and

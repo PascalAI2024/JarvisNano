@@ -24,6 +24,16 @@ are preserved in [`docs/ARCHIVE/CHANGELOG-v4.md`](docs/ARCHIVE/CHANGELOG-v4.md).
 - `main.c` is four files over one header: HTTP routes, power, device tools,
   and the wiring. 140 functions before and after, image size unchanged.
 
+### Four watches (2026-09-02)
+
+- On the WATCH screen a swipe right or left steps through four faces and
+  keeps the choice: JARVIS (the face that shipped, pixel for pixel), DIVER
+  (twelve lume markers, broad hands, a lollipop seconds hand), DIGITAL
+  (seven-segment 24-hour time with the seconds as a ring of gold dots) and
+  MINIMAL (thin hands, twelve dots, no seconds). The caption names the
+  result; everywhere else on the ring a sideways swipe still peeks the
+  watch. `/api/cockpit` reports `display.watch_style`.
+
 ### Muted is a watch, and the weather comes back (2026-09-02)
 
 - Mute the microphone and the glass becomes a dim watch five seconds later:

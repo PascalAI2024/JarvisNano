@@ -1398,6 +1398,12 @@ static void brightness_pump(void)
 #define NAV_OVL_MASK      0xC0u
 #define NAV_FORWARD_BIT   0x100u
 #define NAV_SERIAL_SHIFT  9
+/* WATCH STYLE: two bits above the 8-bit serial, preserved by every nav step,
+ * changed only by NAV_OP_STYLE. Pinned by the shell suite. */
+#define NAV_STYLE_SHIFT   17
+#define NAV_STYLE_MASK    (0x3u << NAV_STYLE_SHIFT)
+_Static_assert((uint32_t)JR_WATCH_STYLE_COUNT <= 4u,
+               "JR_WATCH_STYLE_COUNT exceeds the nav word's style field");
 
 _Static_assert((uint32_t)JR_DISPLAY_SPACE_COUNT <= NAV_SPACE_MASK + 1u,
                "JR_DISPLAY_SPACE_COUNT exceeds the nav word's space field — "
@@ -2667,10 +2673,11 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     }
 
     const uint32_t w = s_clock_shown_word;
-    hud_overlay_clock(pixels, y1, y2 - y1, ctx->board.swap_color_bytes,
-                      (int)((w >> 8) & 0xFFu), (int)(w & 0xFFu),
-                      (int)((w >> 17) & 0x3Fu),
-                      e > 255 ? 255 : e);
+    hud_overlay_clock_style(pixels, y1, y2 - y1, ctx->board.swap_color_bytes,
+                            (int)((w >> 8) & 0xFFu), (int)(w & 0xFFu),
+                            (int)((w >> 17) & 0x3Fu),
+                            e > 255 ? 255 : e,
+                            (int)jr_display_watch_style());
 }
 
 /* ===== SPATIAL SHELL: geometry and drawing ===============================
@@ -4678,6 +4685,7 @@ typedef enum {
     NAV_OP_UP,
     NAV_OP_DOWN,
     NAV_OP_HOME,
+    NAV_OP_STYLE,     /* arg = jr_watch_style_t; space and overlay untouched */
     NAV_OP_SET,
 } nav_op_t;
 static void nav_step(nav_op_t op, uint32_t arg);
@@ -4816,6 +4824,7 @@ static void nav_step(nav_op_t op, uint32_t arg)
         uint32_t nspace = space;
         uint32_t novl = ovl;
         uint32_t fwd = cur & NAV_FORWARD_BIT;
+        uint32_t style = cur & NAV_STYLE_MASK;
 
         switch (op) {
         case NAV_OP_NEXT:
@@ -4867,6 +4876,9 @@ static void nav_step(nav_op_t op, uint32_t arg)
             novl = (uint32_t)JR_DISPLAY_OVERLAY_NONE;
             fwd = 0u;
             break;
+        case NAV_OP_STYLE:
+            style = (arg & 0x3u) << NAV_STYLE_SHIFT;
+            break;
         case NAV_OP_SET:
         default:
             nspace = arg & NAV_SPACE_MASK;
@@ -4883,7 +4895,7 @@ static void nav_step(nav_op_t op, uint32_t arg)
             serial = (serial + 1u) & 0xFFu;
         }
         const uint32_t next = nspace | (prev << NAV_PREV_SHIFT) |
-                              (novl << NAV_OVL_SHIFT) | fwd |
+                              (novl << NAV_OVL_SHIFT) | fwd | style |
                               (serial << NAV_SERIAL_SHIFT);
         if (next == cur) {
             return;      /* idempotent: no restarted animation, no wake */
@@ -4908,6 +4920,38 @@ void jr_display_nav_set(jr_display_space_t space)
         return;
     }
     nav_step(NAV_OP_SET, (uint32_t)space);
+}
+
+void jr_display_watch_style_set(jr_watch_style_t style)
+{
+    if ((int)style < 0 || style >= JR_WATCH_STYLE_COUNT) {
+        return;
+    }
+    nav_step(NAV_OP_STYLE, (uint32_t)style);
+}
+
+void jr_display_watch_style_step(int dir)
+{
+    const int n = (int)JR_WATCH_STYLE_COUNT;
+    const int cur = (int)jr_display_watch_style();
+    const int next = (cur + n + (dir < 0 ? -1 : 1)) % n;
+    nav_step(NAV_OP_STYLE, (uint32_t)next);
+}
+
+jr_watch_style_t jr_display_watch_style(void)
+{
+    const uint32_t nav = __atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE);
+    const uint32_t st = (nav & NAV_STYLE_MASK) >> NAV_STYLE_SHIFT;
+    return st < (uint32_t)JR_WATCH_STYLE_COUNT ? (jr_watch_style_t)st
+                                               : JR_WATCH_JARVIS;
+}
+
+const char *jr_display_watch_style_name(jr_watch_style_t style)
+{
+    static const char *const names[JR_WATCH_STYLE_COUNT] = {
+        "JARVIS", "DIVER", "DIGITAL", "MINIMAL" };
+    return ((int)style >= 0 && style < JR_WATCH_STYLE_COUNT) ? names[style]
+                                                             : names[0];
 }
 
 jr_display_space_t jr_display_nav_space(void)
