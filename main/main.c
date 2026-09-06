@@ -3887,6 +3887,11 @@ void app_main(void)
     } else {
         ESP_LOGW(TAG, "log ring alloc failed — /api/logs disabled");
     }
+    /* The CO5300 driver logs every brightness step at INFO, and a mood fade
+     * is fifteen steps: 97 of the 271 lines in a 16 KB tail were
+     * "set brightness to NN%" (2026-09-05), so the tail covered fifty seconds
+     * of uptime. Our own "mood -> ..." line is the record of a fade. */
+    esp_log_level_set("co5300_spi", ESP_LOG_WARN);
 
     /* VAD/barge diagnostic ring (PSRAM) — records every decision for offline
      * barge tuning; pulled via /api/diag/vadlog. Non-fatal if it fails. */
