@@ -188,9 +188,10 @@ engine CPU (bg memset, block decode, palette expand) + 21.7 ms of QSPI DMA
 the engine waits for before filling the next strip + up to 10 ms of forced
 tick delay, all serialized; and every baked dial's anim timer ran at 8 fps,
 which is the only thing that marks the glass dirty, so the four dials could
-never flush more than 8 frames a second. The timer is 24 now (N14.1, in the
-last image of the evening); the dial-off-the-engine blit and the deferred DMA
-wait are N14.2–N14.4 with the arithmetic. The overlay
+never flush more than 8 frames a second. The timer is 24 now (N14.1, measured:
+DRESS 8.2 → 12.0 fps, DIVER 8.4 → 10.5, the expensive three unchanged because
+their frame is already longer than 1/8 s); the dial-off-the-engine blit and
+the deferred DMA wait are N14.2–N14.4 with the arithmetic. The overlay
 (the hands, cells and arc) is 17–61 ms of a 51–92 ms frame; the rest —
 31 ms on JARVIS, which has no dial at all — is the engine's own work (the
 face/dial decode per strip and the QSPI flush), and it barely moves between
