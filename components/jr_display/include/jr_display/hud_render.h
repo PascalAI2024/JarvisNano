@@ -478,6 +478,7 @@ typedef struct {
     bool wx_valid;           /* temp_f is a real reading                   */
     int  temp_f;
     bool dial_baked;         /* the baked dial is under the hands          */
+    bool shadow;             /* the hands cast shadows: the awake cadence  */
 } hud_watch_t;
 
 void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,

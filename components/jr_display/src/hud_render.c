@@ -1605,11 +1605,24 @@ static inline uint16_t w_blend(uint16_t bg, wrgb_t fg, int a, bool swap)
  * sweeps 13 hands through 360 degrees to hold that. Sixteen lines cost the
  * same again per frame for no visible gain. `lo`/`hi` track the range.
  *
+ * EIGHT LINES FOR HAIRLINES, FOUR FOR THE WIDE HANDS (2026-09-05). The
+ * sliver argument above is about flanks a fraction of a pixel across; a
+ * hand more than six pixels wide with a tip of a pixel or more meets every
+ * one of four lines on every row it crosses, and four lines halve the
+ * sample work of the fills that dominate PILOT and DIVER. poly_sub()
+ * chooses per polygon; the 13 x 360 combing sweep holds either way.
+ *
  * The fills below are compiled at O2 inside an -Os image: they are the
  * hot loop of every watch frame (measured 10 ms a hand at 160 MHz at -Os). */
 #define AA_SUB   8
 #define AA_STEP  (16 / AA_SUB)
 #define AA_FULL  (AA_SUB * 16)
+#define AA_SUB_WIDE 4
+
+static inline int poly_sub(int32_t w0, int32_t w1)
+{
+    return (w0 > 3 * 16 && w1 >= 16) ? AA_SUB_WIDE : AA_SUB;
+}
 #if defined(__GNUC__) && !defined(__clang__)
 #define HOT __attribute__((optimize("O2")))   /* the device toolchain */
 #else
@@ -1649,18 +1662,18 @@ static inline void cov_span(uint16_t *cov, int32_t xl, int32_t xr, int *lo, int 
 }
 
 static inline void HOT cov_blend(uint16_t *row, const uint16_t *cov, int lo, int hi,
-                                 wrgb_t c, int alpha, bool swap)
+                                 wrgb_t c, int alpha, bool swap, int full)
 {
     /* full coverage at full alpha is a straight write: the MINIMAL dial is
      * a 214 px disc every frame and must not cost a blend per pixel */
     const uint16_t solid = pack565(c.r, c.g, c.b, swap);
     for (int x = lo; x <= hi; ++x) {
         const int cv = cov[x];
-        if (cv >= AA_FULL && alpha >= 256) {
+        if (cv >= full && alpha >= 256) {
             row[x] = solid;
         } else if (cv != 0) {
             row[x] = w_blend(row[x], c,
-                             (cv >= AA_FULL ? alpha : (cv * alpha) / AA_FULL),
+                             (cv >= full ? alpha : (cv * alpha) / full),
                              swap);
         }
     }
@@ -1711,11 +1724,12 @@ static inline int32_t aa_chain_x(const aa_edge_t *e, int n, int *at, int32_t ys)
 }
 
 static void HOT aa_fill(const strip_t *s, const wpoly_t *p, wrgb_t c, int alpha,
-                        bool swap)
+                        bool swap, int sub)
 {
     if (p->n < 3 || alpha <= 0) {
         return;
     }
+    const int step = 16 / sub, full = sub * 16;
     int top = 0, bot = 0;
     for (int i = 1; i < p->n; ++i) {
         if (p->y[i] < p->y[top]) top = i;
@@ -1739,8 +1753,8 @@ static void HOT aa_fill(const strip_t *s, const wpoly_t *p, wrgb_t c, int alpha,
     for (int y = y_lo; y <= y_hi; ++y) {
         int lo = HUD_W, hi = -1;
         const int32_t yr = (int32_t)y << 4;
-        for (int sub = 0; sub < AA_SUB; ++sub) {
-            const int32_t ys = yr + sub * AA_STEP + AA_STEP / 2;
+        for (int k = 0; k < sub; ++k) {
+            const int32_t ys = yr + k * step + step / 2;
             if (ys < ymin || ys >= ymax) {
                 continue;
             }
@@ -1754,7 +1768,7 @@ static void HOT aa_fill(const strip_t *s, const wpoly_t *p, wrgb_t c, int alpha,
         }
         if (hi >= lo) {
             cov_blend(s->base + (size_t)(y - s->y0) * HUD_W, cov, lo, hi, c,
-                      alpha, swap);
+                      alpha, swap, full);
             memset(cov + lo, 0, (size_t)(hi - lo + 1) * sizeof cov[0]);
         }
     }
@@ -1830,7 +1844,7 @@ static void HOT aa_disc(const strip_t *s, int32_t cx, int32_t cy, int32_t rad,
             }
         }
         if (hi >= lo) {
-            cov_blend(row, cov, lo, hi, c, alpha, swap);
+            cov_blend(row, cov, lo, hi, c, alpha, swap, AA_FULL);
             memset(cov + lo, 0, (size_t)(hi - lo + 1) * sizeof cov[0]);
         }
     }
@@ -1904,28 +1918,29 @@ static void draw_hand(const strip_t *s, int32_t cx, int32_t cy, uint32_t a16,
 
     if (h->shadow) {
         hand_poly(&p, cx + 32, cy + 48, a16, h->u0, h->u1, h->w0 + 8, h->w1 + 8, 0);
-        aa_fill(s, &p, W_DARK, (WATCH_SHADOW_A * A) >> 8, swap);
+        aa_fill(s, &p, W_DARK, (WATCH_SHADOW_A * A) >> 8, swap, poly_sub(h->w0 + 8, h->w1 + 8));
     }
     if (h->core) {
         /* a cyan glow beneath the slim hand */
         hand_poly(&p, cx, cy, a16, h->u0 - 16, h->u1 + 16, h->w0 + 40, h->w1 + 40, 0);
-        aa_fill(s, &p, h->body, (56 * A) >> 8, swap);
+        aa_fill(s, &p, h->body, (56 * A) >> 8, swap, poly_sub(h->w0 + 40, h->w1 + 40));
     }
     if (h->outline) {
         hand_poly(&p, cx, cy, a16, h->u0 - 12, h->u1 + 14, h->w0 + 14, h->w1 + 14, 0);
-        aa_fill(s, &p, W_DARK, (220 * A) >> 8, swap);
+        aa_fill(s, &p, W_DARK, (220 * A) >> 8, swap, poly_sub(h->w0 + 14, h->w1 + 14));
     }
+    const int sub = poly_sub(h->w0, h->w1);
     hand_poly(&p, cx, cy, a16, h->u0, h->u1, h->w0, h->w1, light_side);
-    aa_fill(s, &p, light, A, swap);
+    aa_fill(s, &p, light, A, swap, sub);
     hand_poly(&p, cx, cy, a16, h->u0, h->u1, h->w0, h->w1, -light_side);
-    aa_fill(s, &p, dark, A, swap);
+    aa_fill(s, &p, dark, A, swap, sub);
     if (h->lume_w > 0) {
         hand_poly(&p, cx, cy, a16, h->lume_u0, h->lume_u1, h->lume_w, h->lume_w / 2, 0);
-        aa_fill(s, &p, W_CREAM, A, swap);
+        aa_fill(s, &p, W_CREAM, A, swap, poly_sub(h->lume_w, h->lume_w / 2));
     }
     if (h->core) {
         hand_poly(&p, cx, cy, a16, h->u0 + 8, h->u1 - 24, 12, 6, 0);
-        aa_fill(s, &p, W_WHITE, (230 * A) >> 8, swap);
+        aa_fill(s, &p, W_WHITE, (230 * A) >> 8, swap, AA_SUB);
     }
 }
 
@@ -1944,6 +1959,24 @@ static void w_hub(const strip_t *s, int32_t rad16, wrgb_t body, int A, bool swap
             W_WHITE, (150 * A) >> 8, swap);
 }
 
+/* Can a radial tick from r0 to r1 (Q4, at angle a) reach this strip? Its y
+ * extent is that of its two axis ends, widened by two pixels for the
+ * half-width, the end corners and the anti-aliased edge — conservative, so
+ * a tick that touches the strip is never skipped and the output is the
+ * strip-independent one. MINIMAL and the FUTURE stand-in used to rotate
+ * and fill all sixty ticks in every strip; a strip holds a handful. */
+static inline bool tick_in_strip(const strip_t *s, uint32_t a, int32_t r0, int32_t r1)
+{
+    const int32_t sn = sin_q16(a);
+    int32_t ya = WATCH_CY16 + ((r0 * sn) >> 15);
+    int32_t yb = WATCH_CY16 + ((r1 * sn) >> 15);
+    if (ya > yb) {
+        const int32_t t = ya; ya = yb; yb = t;
+    }
+    const int y_lo = (int)((ya - 32) >> 4), y_hi = (int)((yb + 32 + 15) >> 4);
+    return y_hi >= s->y0 && y_lo < s->y1;
+}
+
 /* The black stand-in dial for a style whose baked art is not on the
  * partition: the markers only, in the style's own vocabulary, so the watch
  * still reads before /api/ota/assets brings the real dial. */
@@ -1960,10 +1993,10 @@ static void fallback_dial(const strip_t *s, int style, int A, bool swap)
                 p.x[0] = WATCH_CX16;      p.y[0] = WATCH_CY16 - 178 * 16;
                 p.x[1] = WATCH_CX16 + 22 * 16; p.y[1] = WATCH_CY16 - 156 * 16;
                 p.x[2] = WATCH_CX16 - 22 * 16; p.y[2] = WATCH_CY16 - 156 * 16;
-                aa_fill(s, &p, W_CREAM, A, swap);
+                aa_fill(s, &p, W_CREAM, A, swap, AA_SUB);
             } else if (i % 3 == 0) {
                 hand_poly(&p, WATCH_CX16, WATCH_CY16, a, 154 * 16, 180 * 16, 4 * 16, 4 * 16, 0);
-                aa_fill(s, &p, W_CREAM, A, swap);
+                aa_fill(s, &p, W_CREAM, A, swap, AA_SUB);
             } else {
                 w_polar(168 * 16, a, &x, &y);
                 aa_disc(s, x, y, 6 * 16 + 8, W_CREAM, A, swap);
@@ -1971,7 +2004,7 @@ static void fallback_dial(const strip_t *s, int style, int A, bool swap)
             break;
         case 2: /* DRESS: gold batons */
             hand_poly(&p, WATCH_CX16, WATCH_CY16, a, 150 * 16, 176 * 16, 32, 32, 0);
-            aa_fill(s, &p, (wrgb_t){ 212, 175, 55 }, A, swap);
+            aa_fill(s, &p, (wrgb_t){ 212, 175, 55 }, A, swap, AA_SUB);
             break;
         case 3: /* PILOT: white dots; the sub-dial rings below */
             w_polar(176 * 16, a, &x, &y);
@@ -1984,8 +2017,12 @@ static void fallback_dial(const strip_t *s, int style, int A, bool swap)
                 aa_disc(s, WATCH_CX16, WATCH_CY16, WATCH_R_MAX * 16, W_IVORY, A, swap);
                 for (int t = 0; t < 60; ++t) {
                     const uint32_t ta = WATCH_A12 + (uint32_t)t * (65536u / 60u);
-                    hand_poly(&p, WATCH_CX16, WATCH_CY16, ta, (t % 5 == 0 ? 196 : 202) * 16, 208 * 16, 8, 8, 0);
-                    aa_fill(s, &p, W_DARK, ((t % 5 == 0 ? 200 : 90) * A) >> 8, swap);
+                    const int32_t r0 = (t % 5 == 0 ? 196 : 202) * 16;
+                    if (!tick_in_strip(s, ta, r0, 208 * 16)) {
+                        continue;
+                    }
+                    hand_poly(&p, WATCH_CX16, WATCH_CY16, ta, r0, 208 * 16, 8, 8, 0);
+                    aa_fill(s, &p, W_DARK, ((t % 5 == 0 ? 200 : 90) * A) >> 8, swap, AA_SUB);
                 }
             }
             w_polar(176 * 16, a, &x, &y);
@@ -2006,8 +2043,12 @@ static void fallback_dial(const strip_t *s, int style, int A, bool swap)
     if (style == 5) {
         for (int i = 0; i < 60; ++i) {
             const uint32_t a = WATCH_A12 + (uint32_t)i * (65536u / 60u);
-            hand_poly(&p, WATCH_CX16, WATCH_CY16, a, (i % 5 == 0 ? 198 : 204) * 16, 210 * 16, 12, 12, 0);
-            aa_fill(s, &p, W_CYAN, ((i % 5 == 0 ? 200 : 110) * A) >> 8, swap);
+            const int32_t r0 = (i % 5 == 0 ? 198 : 204) * 16;
+            if (!tick_in_strip(s, a, r0, 210 * 16)) {
+                continue;
+            }
+            hand_poly(&p, WATCH_CX16, WATCH_CY16, a, r0, 210 * 16, 12, 12, 0);
+            aa_fill(s, &p, W_CYAN, ((i % 5 == 0 ? 200 : 110) * A) >> 8, swap, AA_SUB);
         }
         /* the four cell frames: hairline cyan boxes at the cell rectangles */
         static const int cells[4][4] = {
@@ -2025,7 +2066,7 @@ static void fallback_dial(const strip_t *s, int style, int A, bool swap)
                 p.x[1] = e[k][2] * 16 + 16; p.y[1] = e[k][1] * 16;
                 p.x[2] = e[k][2] * 16 + 16; p.y[2] = e[k][3] * 16 + 16;
                 p.x[3] = e[k][0] * 16; p.y[3] = e[k][3] * 16 + 16;
-                aa_fill(s, &p, W_CYAN, (90 * A) >> 8, swap);
+                aa_fill(s, &p, W_CYAN, (90 * A) >> 8, swap, AA_SUB);
             }
         }
     }
@@ -2086,10 +2127,25 @@ void hud_watch_hand(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     draw_hand(&s, WATCH_CX16, WATCH_CY16, angle_q16, &h, 255, swap_bytes);
 }
 
+/* What a frame of the watch derives from its inputs, kept across the
+ * strips of that frame (hud_overlay_watch). Single writer, the render
+ * task; the host probes are single-threaded. */
+typedef struct {
+    bool        valid;
+    int         style, hh, mm, ss, ms;   /* the inputs it was built from   */
+    bool        shadow;
+    uint32_t    a_h, a_m, a_s;           /* Q16 turns from 12 o'clock       */
+    int         sec_permille;            /* the seconds sub-dial's reading  */
+    hand_spec_t h[3];
+    bool        has[3];
+} watch_frame_t;
+
+static watch_frame_t s_wf;
+
 /* A needle in a PILOT sub-dial: (cx, cy) Q4, value 0..1000 across a 270
  * degree throw from 7:30 to 4:30, or a full turn for `full`. */
 static void sub_needle(const strip_t *s, int32_t cx, int32_t cy, int rad,
-                       int permille, bool full, int A, bool swap)
+                       int permille, bool full, bool shadow, int A, bool swap)
 {
     uint32_t a;
     if (full) {
@@ -2099,7 +2155,7 @@ static void sub_needle(const strip_t *s, int32_t cx, int32_t cy, int rad,
     }
     hand_spec_t h = {
         .u0 = -(rad * 16) / 5, .u1 = (rad - 7) * 16, .w0 = 28, .w1 = 8,
-        .body = W_WHITE, .bevel = 20, .outline = false, .shadow = true,
+        .body = W_WHITE, .bevel = 20, .outline = false, .shadow = shadow,
     };
     draw_hand(s, cx, cy, a, &h, (A * 255) >> 8, swap);
     aa_disc(s, cx, cy, 3 * 16, W_WHITE, A, swap);
@@ -2121,18 +2177,41 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     if (strength > 255) {
         strength = 255;
     }
-    const int hh = ((w->hh % 24) + 24) % 24;
-    const int mm = ((w->mm % 60) + 60) % 60;
-    const int ss = ((w->ss % 60) + 60) % 60;
-    const int ms = w->ms < 0 ? 0 : w->ms > 999 ? 999 : w->ms;
     overlay_palette(swap_bytes);
     const strip_t s = { dst, y0, y0 + nrows };
     const int A = strength >= 255 ? 256 : strength + 1;
 
-    /* angles in Q16 turns from 12 o'clock */
-    const uint32_t a_h = WATCH_A12 + (uint32_t)(((int64_t)((hh % 12) * 3600 + mm * 60 + ss) * 65536) / 43200);
-    const uint32_t a_m = WATCH_A12 + (uint32_t)(((int64_t)(mm * 60 + ss) * 65536) / 3600);
-    const uint32_t a_s = WATCH_A12 + (uint32_t)(((int64_t)(ss * 1000 + ms) * 65536) / 60000);
+    /* ONCE PER FRAME, NOT PER STRIP. This is a strip call with no frame
+     * hook, so the derivations — three angles, three hand specs — are kept
+     * across calls and rebuilt only when their inputs change; every strip
+     * of a frame carries the same inputs, so a frame solves them once. Pure
+     * functions of the inputs: a strip render equals the whole-frame one. */
+    watch_frame_t *f = &s_wf;
+    if (!f->valid || f->style != style || f->hh != w->hh || f->mm != w->mm ||
+        f->ss != w->ss || f->ms != w->ms || f->shadow != w->shadow) {
+        const int hh = ((w->hh % 24) + 24) % 24;
+        const int mm = ((w->mm % 60) + 60) % 60;
+        const int ss = ((w->ss % 60) + 60) % 60;
+        const int ms = w->ms < 0 ? 0 : w->ms > 999 ? 999 : w->ms;
+        /* angles in Q16 turns from 12 o'clock */
+        f->a_h = WATCH_A12 + (uint32_t)(((int64_t)((hh % 12) * 3600 + mm * 60 + ss) * 65536) / 43200);
+        f->a_m = WATCH_A12 + (uint32_t)(((int64_t)(mm * 60 + ss) * 65536) / 3600);
+        f->a_s = WATCH_A12 + (uint32_t)(((int64_t)(ss * 1000 + ms) * 65536) / 60000);
+        f->sec_permille = (ss * 1000 + ms) / 60;
+        for (int i = 0; i < 3; ++i) {
+            f->has[i] = watch_hand_spec(style, i, &f->h[i]);
+            /* SHADOWS AT THE AWAKE CADENCE ONLY. The shadow is the widest
+             * polygon of a hand at 40 %, every pixel a read-modify-write;
+             * at rest the ladder has already slowed the frame, and nobody
+             * is looking for a shadow on a resting watch. */
+            f->h[i].shadow = f->h[i].shadow && w->shadow;
+        }
+        f->style = style;
+        f->hh = w->hh; f->mm = w->mm; f->ss = w->ss; f->ms = w->ms;
+        f->shadow = w->shadow;
+        f->valid = true;
+    }
+    const uint32_t a_h = f->a_h, a_m = f->a_m, a_s = f->a_s;
 
     if (!w->dial_baked) {
         fallback_dial(&s, style, A, swap_bytes);
@@ -2141,24 +2220,24 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     if (style == 3) {
         /* PILOT complications: 6 = seconds, 9 = battery, 3 = temperature */
         sub_needle(&s, s_subdial[1].cx, s_subdial[1].cy, s_subdial[1].r,
-                   (ss * 1000 + ms) / 60, true, A, swap_bytes);
+                   f->sec_permille, true, w->shadow, A, swap_bytes);
         if (w->batt_pct >= 0) {
             sub_needle(&s, s_subdial[2].cx, s_subdial[2].cy, s_subdial[2].r,
-                       (w->batt_pct > 100 ? 100 : w->batt_pct) * 10, false, A, swap_bytes);
+                       (w->batt_pct > 100 ? 100 : w->batt_pct) * 10, false,
+                       w->shadow, A, swap_bytes);
         }
         if (w->wx_valid) {
             int t = w->temp_f < 40 ? 40 : w->temp_f > 100 ? 100 : w->temp_f;
             sub_needle(&s, s_subdial[0].cx, s_subdial[0].cy, s_subdial[0].r,
-                       (t - 40) * 1000 / 60, false, A, swap_bytes);
+                       (t - 40) * 1000 / 60, false, w->shadow, A, swap_bytes);
         } else {
             sub_needle(&s, s_subdial[0].cx, s_subdial[0].cy, s_subdial[0].r,
-                       0, false, (A * 90) >> 8, swap_bytes);
+                       0, false, w->shadow, (A * 90) >> 8, swap_bytes);
         }
     }
 
-    hand_spec_t h;
-    if (watch_hand_spec(style, 0, &h)) {
-        draw_hand(&s, WATCH_CX16, WATCH_CY16, a_h, &h, strength, swap_bytes);
+    if (f->has[0]) {
+        draw_hand(&s, WATCH_CX16, WATCH_CY16, a_h, &f->h[0], strength, swap_bytes);
     }
     if (style == 1) {
         /* the Mercedes: a lume disc in the hour hand near its tip */
@@ -2168,11 +2247,11 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
         aa_disc(&s, x, y, 9 * 16, W_CREAM, A, swap_bytes);
         aa_disc(&s, x, y, 3 * 16, (wrgb_t){ 205, 210, 215 }, A, swap_bytes);
     }
-    if (watch_hand_spec(style, 1, &h)) {
-        draw_hand(&s, WATCH_CX16, WATCH_CY16, a_m, &h, strength, swap_bytes);
+    if (f->has[1]) {
+        draw_hand(&s, WATCH_CX16, WATCH_CY16, a_m, &f->h[1], strength, swap_bytes);
     }
-    if (watch_hand_spec(style, 2, &h)) {
-        draw_hand(&s, WATCH_CX16, WATCH_CY16, a_s, &h, strength, swap_bytes);
+    if (f->has[2]) {
+        draw_hand(&s, WATCH_CX16, WATCH_CY16, a_s, &f->h[2], strength, swap_bytes);
         int32_t x, y;
         if (style == 1) {
             w_polar(150 * 16, a_s, &x, &y);
@@ -2212,6 +2291,7 @@ void hud_overlay_clock_style(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     const hud_watch_t w = {
         .hh = hh, .mm = mm, .ss = ss, .ms = 0,
         .batt_pct = -1, .wx_valid = false, .temp_f = 0, .dial_baked = false,
+        .shadow = true,
     };
     hud_overlay_watch(dst, y0, nrows, swap_bytes, &w, strength, style);
 }

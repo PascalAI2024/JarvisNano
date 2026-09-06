@@ -616,6 +616,45 @@ static void test_render_cadence_reaches_the_engine_and_clamps(void)
     s_display.gfx = saved;
 }
 
+/* The render's own clock (E1): strip costs add up, frames count at frame
+ * starts only, and a whole second of whole frames latches its average into
+ * render_frame_us — the number /api/display serves. Four strips of 100 us
+ * per frame, a frame every 400 ms: the first second closes on three frames
+ * at exactly 400 us each. */
+static void test_render_clock_counts_frames_and_latches_a_second(void)
+{
+    diag_store(&s_display.render_us, 0U);
+    diag_store(&s_display.render_frames, 0U);
+    diag_store(&s_display.render_frame_us, 0U);
+    s_render_win_ms = 0U;
+    s_render_win_us = 0U;
+    s_render_win_frames = 0U;
+    for (int f = 0; f < 4; ++f) {
+        const uint32_t now_ms = 1000U + (uint32_t)f * 400U;
+        for (int strip = 0; strip < 4; ++strip) {
+            render_account(&s_display, strip == 0, 100U, now_ms);
+        }
+        if (f == 2) {
+            CHECK(diag_load(&s_display.render_frame_us) == 0U,
+                  "the window latched before a second had passed (%u)",
+                  (unsigned)diag_load(&s_display.render_frame_us));
+        }
+    }
+    jr_display_diag_t d;
+    CHECK(jr_display_get_diag(&d) == ESP_OK, "diag reads");
+    CHECK(d.render_us == 1600U, "render_us %u, wanted 1600", (unsigned)d.render_us);
+    CHECK(d.render_frames == 4U, "render_frames %u, wanted 4", (unsigned)d.render_frames);
+    CHECK(d.render_frame_us == 400U, "render_frame_us %u, wanted 400 (three whole frames)",
+          (unsigned)d.render_frame_us);
+    /* a strip that is not a frame start moves the cost, not the count */
+    render_account(&s_display, false, 50U, 2300U);
+    CHECK(diag_load(&s_display.render_us) == 1650U && diag_load(&s_display.render_frames) == 4U,
+          "a mid-frame strip counted as a frame");
+    s_render_win_ms = 0U;
+    s_render_win_us = 0U;
+    s_render_win_frames = 0U;
+}
+
 static void test_status_face_follows_the_links(void)
 {
     stage_space(JR_DISPLAY_SPACE_STATUS);
@@ -1339,7 +1378,8 @@ static void test_watch_style_is_three_nav_bits_that_wrap(void)
     reset_nav();
 }
 
-static void render_watch_frame(uint16_t *fb, int style, jr_face_t shown)
+static void render_watch_frame_at(uint16_t *fb, int style, jr_face_t shown,
+                                  int hh, int mm, int ss)
 {
     const size_t px = (size_t)HUD_W * HUD_H;
     stage_power(JR_DISPLAY_OTA_IDLE, 0U, JR_DISPLAY_OVERLAY_NONE);
@@ -1351,10 +1391,11 @@ static void render_watch_frame(uint16_t *fb, int style, jr_face_t shown)
     s_shade_ease = 0;
     s_detail_ease = 0;
     s_space_veil = 256;
-    jr_display_clock_set(true, 6, 30, 15);
+    jr_display_clock_set(true, hh, mm, ss);
     s_clock_shown_word = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
     s_clock_ease = 256;
     sp_compose();
+    watch_compose();                 /* the frame-start latch, as the flush does */
     for (size_t k = 0; k < px; ++k) fb[k] = 0x4208;     /* "the art" */
     for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
         const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
@@ -1362,6 +1403,201 @@ static void render_watch_frame(uint16_t *fb, int style, jr_face_t shown)
         apply_space_overlay(&s_display, y, y2, strip);
         apply_clock_overlay(&s_display, y, y2, strip);
     }
+}
+
+static void render_watch_frame(uint16_t *fb, int style, jr_face_t shown)
+{
+    render_watch_frame_at(fb, style, shown, 6, 30, 15);
+}
+
+/* Read FUTURE's weather line back off the glass: the top line of the cell is
+ * `want` exactly when every cyan pixel in the line's rows sits where the
+ * shell's own glyph sampler puts `want` at the cell's centre, and nowhere
+ * else. A different string lands on different pixels (the run is centred on
+ * its own length), so this is "the cell reads X", not "something is lit". */
+static bool future_wx_line_reads(const uint16_t *fb, const char *want,
+                                 size_t *ink_out)
+{
+    const int n = (int)strlen(want);
+    const int x0 = HUD_WATCH_CELL_WX_CX - (6 * 2 * n) / 2;
+    const int y0 = HUD_WATCH_CELL_WX_CY - 16;
+    const uint16_t cyan = sp_tint(&s_display, 0x073F, 255);
+    uint16_t ref[HUD_W];
+    size_t ink = 0, wrong = 0;
+    for (int y = y0; y < y0 + TEXT_H; ++y) {
+        memset(ref, 0, sizeof ref);
+        sp_text_row(ref, y, want, n, x0, y0, 2, 0xFFFF);
+        for (int x = HUD_WATCH_CELL_WX_X0 + 1; x < HUD_WATCH_CELL_WX_X1 - 1; ++x) {
+            const bool lit = fb[(size_t)y * HUD_W + x] == cyan;
+            const bool exp = ref[x] != 0;
+            if (exp) ink++;
+            if (lit != exp) wrong++;
+        }
+    }
+    *ink_out = ink;
+    return wrong == 0 && ink > 0;
+}
+
+/* F3: the FUTURE weather cell shortens, never cuts a word. The panel showed
+ * "75* LIGHT DRIZZ" (2026-09-05): a 17-glyph line hard-clipped to 15 — and
+ * the 12-glyph condition cap had already made it "LIGHT DRIZZL" on the way
+ * in. Now the cap holds the whole phrase, the qualifier goes first
+ * ("75* DRIZZLE"), and what still does not fit is cut at a word or, for one
+ * long word, mid-word with the "." mark spent on the last glyph, so a cut is
+ * always declared. The WEATHER headline fits by the same rule. 10:10:00
+ * keeps every hand out of the cell below centre; the cyan the hands are
+ * drawn in is the cell's own cyan. */
+static void test_future_weather_cell_shortens_instead_of_cutting(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb);
+    if (!fb) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; return; }
+    static const struct { const char *cond; int temp; const char *want; } cases[] = {
+        { "LIGHT DRIZZLE",          75, "75* DRIZZLE" },      /* qualifier dropped   */
+        { "MODERATE RAIN SHOWERS",  75, "75* RAIN." },        /* dropped, then a word */
+        { "THUNDERSTORM",           75, "75* THUNDERSTO." },  /* one word: cut+mark  */
+        { "FREEZING FOG",           75, "75* FREEZING." },    /* at the space + mark */
+        { "HEAVY RAIN",             75, "75* HEAVY RAIN" },   /* fits: nothing lost  */
+        { "HEAVY SLEET",           100, "100* SLEET" },       /* three digits: less room */
+        { "OVERCAST",              100, "100* OVERCAST" },
+        { "OVERCAST",              -12, "-12* OVERCAST" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; ++i) {
+        char line[24];
+        const int n = watch_wx_line(line, sizeof line, cases[i].temp, cases[i].cond);
+        CHECK(strcmp(line, cases[i].want) == 0 && n == (int)strlen(cases[i].want),
+              "%s at %d composes '%s' (%d), wanted '%s'",
+              cases[i].cond, cases[i].temp, line, n, cases[i].want);
+        CHECK(n <= WATCH_WX_GLYPHS, "'%s' is %d glyphs in a %d-glyph cell",
+              line, n, WATCH_WX_GLYPHS);
+    }
+    /* The setter keeps the whole phrase: a 21-glyph condition survives it. */
+    set_weather(true, 75, 82, 68, JR_DISPLAY_SKY_RAIN, "MODERATE RAIN SHOWERS",
+                (uint32_t)(s_fake_us / 1000));
+    CHECK(strcmp(s_weather[__atomic_load_n(&s_weather_slot, __ATOMIC_ACQUIRE) & 1u].condition,
+                 "MODERATE RAIN SHOWERS") == 0,
+          "the condition was cut on the way in: '%s'",
+          s_weather[__atomic_load_n(&s_weather_slot, __ATOMIC_ACQUIRE) & 1u].condition);
+    /* The WEATHER headline: the word fitted at a word, then the number. */
+    static const struct { const char *cond; const char *want; } head[] = {
+        { "LIGHT DRIZZLE",         "DRIZZLE 75" },
+        { "MODERATE RAIN SHOWERS", "RAIN SHOWERS" },
+        { "THUNDERSTORMS",         "THUNDERSTOR." },
+        { "OVERCAST",              "OVERCAST 75" },
+    };
+    for (size_t i = 0; i < sizeof head / sizeof *head; ++i) {
+        set_weather(true, 75, 82, 68, JR_DISPLAY_SKY_RAIN, head[i].cond,
+                    (uint32_t)(s_fake_us / 1000));
+        sp_compose_weather();
+        CHECK(strcmp(s_wx_head, head[i].want) == 0, "%s heads '%s', wanted '%s'",
+              head[i].cond, s_wx_head, head[i].want);
+    }
+    /* On the glass, not just in the buffer: stage the weather and read the
+     * cell back. Both the dropped qualifier and the marked cut must render. */
+    static const struct { const char *cond; const char *want; } glass[] = {
+        { "LIGHT DRIZZLE", "75* DRIZZLE" },
+        { "THUNDERSTORM",  "75* THUNDERSTO." },
+    };
+    for (size_t i = 0; i < sizeof glass / sizeof *glass; ++i) {
+        set_weather(true, 75, 82, 68, JR_DISPLAY_SKY_RAIN, glass[i].cond,
+                    (uint32_t)(s_fake_us / 1000));
+        render_watch_frame_at(fb, JR_WATCH_FUTURE, JR_FACE_DIAL_FUTURE, 10, 10, 0);
+        size_t ink = 0;
+        const bool reads = future_wx_line_reads(fb, glass[i].want, &ink);
+        CHECK(reads, "with %s the cell does not read '%s'", glass[i].cond, glass[i].want);
+        CHECK(ink > 200, "'%s' put only %zu ink px in the cell", glass[i].want, ink);
+    }
+    set_weather(false, 0, 0, 0, JR_DISPLAY_SKY_UNKNOWN, "", 0U);
+    s_display.shown_face = JR_FACE_IDLE;
+    free(fb);
+    reset_nav();
+}
+
+/* The words are composed once a frame (watch_compose) and placed per strip:
+ * the strip render of FUTURE, words and all, equals one whole-frame call,
+ * and recomposing with new weather moves the cell. */
+static void test_watch_words_are_composed_once_and_strip_invariant(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb);
+    uint16_t *whole = malloc(px * sizeof *whole);
+    if (!fb || !whole) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; free(fb); free(whole); return; }
+    set_weather(true, 75, 82, 68, JR_DISPLAY_SKY_RAIN, "OVERCAST", (uint32_t)(s_fake_us / 1000));
+    render_watch_frame_at(fb, JR_WATCH_FUTURE, JR_FACE_DIAL_FUTURE, 10, 10, 0);
+    for (size_t k = 0; k < px; ++k) whole[k] = 0x4208;
+    apply_space_overlay(&s_display, 0, HUD_H, whole);
+    apply_clock_overlay(&s_display, 0, HUD_H, whole);
+    CHECK(memcmp(whole, fb, px * sizeof *fb) == 0, "FUTURE strips differ from the whole frame");
+    size_t ink = 0;
+    CHECK(future_wx_line_reads(fb, "75* OVERCAST", &ink) && ink > 200,
+          "the cell does not read the composed line (%zu ink px)", ink);
+    /* new weather, no recompose: the strips still say OVERCAST */
+    set_weather(true, 75, 82, 68, JR_DISPLAY_SKY_CLEAR, "CLEAR", (uint32_t)(s_fake_us / 1000));
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+        for (size_t k = (size_t)y * HUD_W; k < (size_t)y2 * HUD_W; ++k) fb[k] = 0x4208;
+        apply_space_overlay(&s_display, y, y2, fb + (size_t)y * HUD_W);
+        apply_clock_overlay(&s_display, y, y2, fb + (size_t)y * HUD_W);
+    }
+    CHECK(memcmp(whole, fb, px * sizeof *fb) == 0, "a strip recomposed the words by itself");
+    /* the frame-start latch moves it */
+    watch_compose();
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+        for (size_t k = (size_t)y * HUD_W; k < (size_t)y2 * HUD_W; ++k) fb[k] = 0x4208;
+        apply_space_overlay(&s_display, y, y2, fb + (size_t)y * HUD_W);
+        apply_clock_overlay(&s_display, y, y2, fb + (size_t)y * HUD_W);
+    }
+    CHECK(future_wx_line_reads(fb, "75* CLEAR", &ink) && ink > 150,
+          "after the latch the cell does not read CLEAR (%zu ink px)", ink);
+    set_weather(false, 0, 0, 0, JR_DISPLAY_SKY_UNKNOWN, "", 0U);
+    s_display.shown_face = JR_FACE_IDLE;
+    free(fb); free(whole);
+    reset_nav();
+}
+
+/* Shadows follow the cadence: at the 24 fps awake rung the hands cast them
+ * — neutral pixels darker than the mid-grey dial beside the gold, which no
+ * gold flank can be (its blue channel collapses first) and the hub's own
+ * dark ring is inside r20 — and at the ambient rung (main's 12) they do
+ * not, while the hands are the same hands. */
+static void test_watch_shadows_only_at_the_awake_cadence(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb);
+    if (!fb) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; return; }
+    size_t dark[2] = { 0, 0 }, lit[2] = { 0, 0 };
+    static const uint8_t fps[2] = { JR_DISPLAY_RENDER_FPS, 12U };
+    for (int k = 0; k < 2; ++k) {
+        __atomic_store_n(&s_render_fps, fps[k], __ATOMIC_RELEASE);
+        render_watch_frame_at(fb, JR_WATCH_DRESS, JR_FACE_DIAL_DRESS, 10, 10, 0);
+        for (int y = 0; y < HUD_H; ++y) {
+            for (int x = 0; x < HUD_W; ++x) {
+                const int dx = x - 232, dy = y - 232;
+                /* the hands reach r166 (+3 for the shadow); the orbit track
+                 * at r186-194 and the hub ring inside r13 are not the hands */
+                if (dx * dx + dy * dy > 178 * 178 || dx * dx + dy * dy < 20 * 20) continue;
+                const uint16_t p = fb[(size_t)y * HUD_W + x];
+                if (p == 0x4208) continue;
+                lit[k]++;
+                const int r = (p >> 11) & 31, g = (p >> 5) & 63, b = p & 31;
+                const int r8 = (r << 3) | (r >> 2), g8 = (g << 2) | (g >> 4), b8 = (b << 3) | (b >> 2);
+                const bool neutral = r8 - b8 <= 16 && b8 - r8 <= 16 && g8 - r8 <= 20 && r8 - g8 <= 20;
+                if (neutral && r8 + g8 + b8 < 190) dark[k]++;
+            }
+        }
+    }
+    __atomic_store_n(&s_render_fps, JR_DISPLAY_RENDER_FPS, __ATOMIC_RELEASE);
+    CHECK(dark[0] > dark[1] + 300, "awake cast %zu dark px, ambient %zu: no shadow at 24 fps",
+          dark[0], dark[1]);
+    /* what is left at ambient is the dark flank's own anti-aliased edge over
+     * the grey, under a hundred pixels on two hands; a shadow is hundreds */
+    CHECK(dark[1] < 150, "ambient still casts %zu dark px", dark[1]);
+    CHECK(lit[1] > 1000 && lit[0] > lit[1] + 300,
+          "hands at ambient lit %zu px (awake %zu): the shadow is not the difference", lit[1], lit[0]);
+    s_display.shown_face = JR_FACE_IDLE;
+    free(fb);
+    reset_nav();
 }
 
 static void test_watch_style_reaches_the_glass(void)
@@ -2178,6 +2414,9 @@ int main(void)
     test_watch_dial_face_follows_the_style_and_the_screen();
     test_watch_keeps_a_baked_dial_and_clears_a_missing_one();
     test_watch_style_reaches_the_glass();
+    test_future_weather_cell_shortens_instead_of_cutting();
+    test_watch_words_are_composed_once_and_strip_invariant();
+    test_watch_shadows_only_at_the_awake_cadence();
 
     test_desk_is_on_the_ring_only_while_live();
     test_desk_going_dark_moves_the_owner_on();
@@ -2192,6 +2431,7 @@ int main(void)
     test_focal_wedge_follows_the_slide();
     test_pinned_caption_survives_other_writers();
     test_render_cadence_reaches_the_engine_and_clamps();
+    test_render_clock_counts_frames_and_latches_a_second();
     test_missing_clip_falls_back_to_the_face_it_grew_from();
 
     if (g_failures) {

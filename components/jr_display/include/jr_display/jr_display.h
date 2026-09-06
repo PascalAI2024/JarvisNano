@@ -105,6 +105,13 @@ typedef struct {
     uint32_t current_asset_bytes;
     uint32_t free_psram_bytes;
     uint32_t task_stack_hwm;
+    /* The software render's own cost, apart from the DMA wait: microseconds
+     * compositing strips (wrapping) over frames since boot, and the last
+     * whole second's average per frame — ms/frame for the style on the
+     * glass from one GET of /api/display. */
+    uint32_t render_us;
+    uint32_t render_frames;
+    uint32_t render_frame_us;
 } jr_display_diag_t;
 
 /* Start the fail-soft presenter and return its nonblocking display port.
@@ -486,7 +493,10 @@ typedef struct {
     uint8_t  humidity_pct;
     uint8_t  wind_mph;
     jr_display_sky_t sky;
-    char     condition[13];  /* uppercase-safe, e.g. "OVERCAST"             */
+    /* Uppercase-safe, e.g. "OVERCAST". 23 glyphs: room for "MODERATE RAIN
+     * SHOWERS" whole, so the display shortens at a word (wx_cond_fit) rather
+     * than receiving "LIGHT DRIZZL" already cut by a 12-glyph copy. */
+    char     condition[24];
     uint32_t fetched_ms;     /* esp_timer ms when the data was received     */
 } jr_display_weather_t;
 

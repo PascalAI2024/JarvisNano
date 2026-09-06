@@ -1813,6 +1813,19 @@ static void test_watch_styles_paint_their_own_regions(void)
         CHECK(memcmp(whole, fb, px * sizeof *fb) == 0,
               "style %d: strips differ from the whole frame", style);
     }
+    /* The per-frame cache follows its inputs: a new time on the same style,
+     * rendered in strips right after a whole frame at the old time, equals
+     * a whole frame at the new time and differs from the old one. */
+    for (int style = 1; style <= 5; ++style) {
+        hud_overlay_clock_style(whole, 0, HUD_H, false, 6, 30, 15, 255, style);
+        render_style_strips(fb, 10, 8, 45, style);
+        CHECK(memcmp(whole, fb, px * sizeof *fb) != 0,
+              "style %d: 10:08:45 rendered as 6:30:15 (stale frame cache)", style);
+        memset(whole, 0, px * sizeof *whole);
+        hud_overlay_clock_style(whole, 0, HUD_H, false, 10, 8, 45, 255, style);
+        CHECK(memcmp(whole, fb, px * sizeof *fb) == 0,
+              "style %d at 10:08:45: strips differ from the whole frame", style);
+    }
     /* strength 0 paints nothing in every style */
     for (int style = 0; style < 6; ++style) {
         memset(fb, 0, px * sizeof *fb);
@@ -1822,6 +1835,86 @@ static void test_watch_styles_paint_their_own_regions(void)
         CHECK(any == 0, "style %d paints %zu px at strength 0", style, any);
     }
     free(fb); free(whole);
+}
+
+/* The sixty ticks of the two procedural rims, pinned. The strip-vs-whole
+ * memcmp cannot tell a tick skipped rightly from one skipped wrongly (both
+ * paths skip it), so the band r >= 196 — MINIMAL's ticks at 196-208 and
+ * FUTURE's at 198-210, where no hand reaches — is checksummed against the
+ * renderer as it was before tick_in_strip (2026-09-05). */
+static void test_watch_rim_ticks_are_pinned(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = calloc(px, sizeof *fb);
+    if (!fb) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
+    static const struct { int style; uint32_t fnv; size_t lit; } pins[] = {
+        { 4, 0x5d8ecf5eu, 23932 },
+        { 5, 0xb7417481u,  1259 },
+    };
+    for (size_t i = 0; i < sizeof pins / sizeof *pins; ++i) {
+        render_style_strips(fb, 6, 30, 15, pins[i].style);
+        uint32_t h = 2166136261u;
+        size_t lit = 0;
+        for (int y = 0; y < HUD_H; ++y) {
+            for (int x = 0; x < HUD_W; ++x) {
+                const int dx = x - 232, dy = y - 232;
+                if (dx * dx + dy * dy < 196 * 196) continue;
+                const uint16_t p = fb[(size_t)y * HUD_W + x];
+                h ^= p; h *= 16777619u;
+                if (p) lit++;
+            }
+        }
+        CHECK(h == pins[i].fnv && lit == pins[i].lit,
+              "style %d rim: fnv 0x%08x lit %zu, pinned 0x%08x / %zu",
+              pins[i].style, h, lit, pins[i].fnv, pins[i].lit);
+    }
+    free(fb);
+}
+
+/* The outline is a rim. An outlined hand (DIVER, PILOT) on a
+ * mid-grey dial (66 per channel) leaves a band of pixels darker than the
+ * dial along both flanks and the caps — the 0.875 px rim of W_DARK at 86 %
+ * covers at least half of one pixel per row and side, and that pixel sums
+ * under 150 across its channels. A hand whose flanks stay bright (steel
+ * or white seconds, cyan FUTURE) darkens nothing. Two angles, so both a
+ * steep and a shallow hand carry it. */
+static void test_outlined_hands_keep_their_rim(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb);
+    if (!fb) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
+    static const struct { int style, hand; bool outlined; } kinds[] = {
+        { 1, 0, true }, { 1, 1, true }, { 3, 0, true }, { 3, 1, true },
+        { 1, 2, false }, { 3, 2, false }, { 5, 0, false }, { 5, 1, false },
+    };
+    static const int degs[] = { 33, 100 };
+    for (size_t k = 0; k < sizeof kinds / sizeof *kinds; ++k) {
+        for (size_t d = 0; d < sizeof degs / sizeof *degs; ++d) {
+            const uint32_t a16 = (uint32_t)(((uint64_t)degs[d] * 65536u) / 360u) + (192u << 8);
+            for (size_t i = 0; i < px; ++i) fb[i] = 0x4208;
+            hud_watch_hand(fb, 0, HUD_H, false, kinds[k].style, kinds[k].hand, a16, false);
+            size_t rim = 0, lit = 0;
+            for (size_t i = 0; i < px; ++i) {
+                const uint16_t p = fb[i];
+                if (p == 0x4208) continue;
+                lit++;
+                const int r = (p >> 11) & 31, g = (p >> 5) & 63, b = p & 31;
+                const int sum = ((r << 3) | (r >> 2)) + ((g << 2) | (g >> 4)) + ((b << 3) | (b >> 2));
+                if (sum < 150) rim++;
+            }
+            CHECK(lit > 100, "style %d hand %d at %d deg lit %zu px", kinds[k].style, kinds[k].hand, degs[d], lit);
+            if (kinds[k].outlined) {
+                CHECK(rim > 120, "style %d hand %d at %d deg: only %zu rim px of %zu",
+                      kinds[k].style, kinds[k].hand, degs[d], rim, lit);
+                CHECK(rim < lit / 2, "style %d hand %d at %d deg: the rim (%zu of %zu) swallowed the body",
+                      kinds[k].style, kinds[k].hand, degs[d], rim, lit);
+            } else {
+                CHECK(rim == 0, "style %d hand %d at %d deg grew a rim of %zu px",
+                      kinds[k].style, kinds[k].hand, degs[d], rim);
+            }
+        }
+    }
+    free(fb);
 }
 
 /* No combing, at any angle: every row a hand touches is ONE contiguous run
@@ -1956,6 +2049,8 @@ int main(void)
     test_clock_strength_gate();
     test_watch_jarvis_is_pixel_identical();
     test_watch_styles_paint_their_own_regions();
+    test_watch_rim_ticks_are_pinned();
+    test_outlined_hands_keep_their_rim();
     test_watch_hands_never_comb();
     test_watch_hands_blend_and_spare_the_dial();
 
