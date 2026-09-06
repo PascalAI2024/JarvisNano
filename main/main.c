@@ -834,6 +834,8 @@ static bool device_wall_time(struct tm *out)
  * the device's. Muted, it is one caption in the shell's glyphs. Nothing
  * here opens the microphone: privacy is checked exactly as board_announce
  * checks it. */
+static void briefing_deliver(const struct tm *tmv, const jr_power_t *bat, bool forced);
+
 static void morning_briefing_maybe(bool lifted_after_rest, const jr_power_t *bat)
 {
     struct tm tmv;
@@ -844,6 +846,39 @@ static void morning_briefing_maybe(bool lifted_after_rest, const jr_power_t *bat
         return;
     }
     persist_briefing_day(tmv.tm_yday);
+    briefing_deliver(&tmv, bat, false);
+}
+
+/* THE BENCH ROUTE: POST /api/debug/briefing delivers the briefing now, at
+ * any hour, without touching the once-a-day latch — so the composed turn
+ * and the spoken path can be heard from a desk in the evening instead of
+ * waiting for a morning. Dev-gated like every other debug route. */
+static _Atomic bool s_briefing_force_req;   /* httpd sets, the voice task takes */
+
+void morning_briefing_force(void)
+{
+    atomic_store(&s_briefing_force_req, true);
+}
+
+/* On the voice task, beside the real gate: the same delivery, any hour,
+ * the latch untouched. handle_say is app-task-only, so the route only
+ * raises a flag. */
+static void morning_briefing_forced_maybe(const jr_power_t *bat)
+{
+    if (!atomic_exchange(&s_briefing_force_req, false)) {
+        return;
+    }
+    struct tm tmv;
+    if (!device_wall_time(&tmv)) {
+        ESP_LOGW(TAG, "briefing: forced, but the clock is not set");
+        return;
+    }
+    briefing_deliver(&tmv, bat, true);
+}
+
+static void briefing_deliver(const struct tm *tmvp, const jr_power_t *bat, bool forced)
+{
+    const struct tm tmv = *tmvp;
     char title[64];
     int done = 0;
     board_take_done(&done, title, sizeof title);
@@ -868,15 +903,15 @@ static void morning_briefing_maybe(bool lifted_after_rest, const jr_power_t *bat
         char cap[JR_BRIEF_CAPTION_GLYPHS + 1];
         (void)jr_briefing_caption(cap, sizeof cap, &f);
         jr_display_caption_set(cap);
-        ESP_LOGI(TAG, "briefing: caption, muted (%s)", cap);
+        ESP_LOGI(TAG, "briefing: caption, muted%s (%s)", forced ? ", forced" : "", cap);
         return;
     }
     char text[400];
     (void)jr_briefing_compose(text, sizeof text, &f);
     handle_say(text);
     jr_display_caption_set("GOOD MORNING");
-    ESP_LOGI(TAG, "briefing: spoken (%d task%s done, rain in %d h)", done,
-             done == 1 ? "" : "s", f.rain_in_h);
+    ESP_LOGI(TAG, "briefing: spoken%s (%d task%s done, rain in %d h): %s",
+             forced ? ", forced" : "", done, done == 1 ? "" : "s", f.rain_in_h, text);
 }
 
 static void device_rtc_capture_os_time(void)
@@ -2278,6 +2313,7 @@ static void voice_task(void *arg)
                     }
                 }
                 morning_briefing_maybe(lifted || boot_lift, have_power ? &bat : NULL);
+                morning_briefing_forced_maybe(have_power ? &bat : NULL);
             }
             /* DEEP SLEEP WHEN NOT IN USE. The ladder says when (DREAM for
              * JR_MOOD_SLEEP_MS); the world says whether: never on USB (a

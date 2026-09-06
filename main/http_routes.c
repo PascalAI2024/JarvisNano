@@ -280,6 +280,17 @@ static bool control_intent_required(httpd_req_t *req)
     return true;
 }
 
+/* POST /api/debug/briefing — the morning glance, now, from the bench. */
+static esp_err_t briefing_post_handler(httpd_req_t *req)
+{
+    if (!control_intent_required(req)) {
+        return ESP_OK;
+    }
+    morning_briefing_force();
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true,\"briefing\":\"delivered\"}");
+}
+
 static esp_err_t say_get_handler(httpd_req_t *req)
 {
     if (!control_intent_required(req)) {
@@ -3814,6 +3825,7 @@ void start_diag_http(void)
         { .uri = "/api/cockpit",     .method = HTTP_GET, .handler = cockpit_handler },
         { .uri = "/api/gemini/live", .method = HTTP_GET, .handler = diag_get_handler },
         { .uri = "/api/debug/say",   .method = HTTP_POST, .handler = say_get_handler  },
+        { .uri = "/api/debug/briefing", .method = HTTP_POST, .handler = briefing_post_handler },
         { .uri = "/api/debug/gain",  .method = HTTP_POST, .handler = gain_get_handler },
         { .uri = "/api/voice/control", .method = HTTP_POST,
           .handler = voice_control_handler },

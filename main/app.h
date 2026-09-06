@@ -391,6 +391,7 @@ extern uint32_t s_brain_last_seen_ms;
 
 void persist_ota_attempt(int slot);
 void handle_say(const char *text);
+void morning_briefing_force(void);          /* POST /api/debug/briefing */
 bool operator_lease_active(uint32_t now_ms);
 bool operator_mode_active(uint32_t now_ms);
 ota_preflight_t ota_preflight(void);
