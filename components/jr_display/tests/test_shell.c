@@ -616,6 +616,45 @@ static void test_render_cadence_reaches_the_engine_and_clamps(void)
     s_display.gfx = saved;
 }
 
+/* The render's own clock (E1): strip costs add up, frames count at frame
+ * starts only, and a whole second of whole frames latches its average into
+ * render_frame_us — the number /api/display serves. Four strips of 100 us
+ * per frame, a frame every 400 ms: the first second closes on three frames
+ * at exactly 400 us each. */
+static void test_render_clock_counts_frames_and_latches_a_second(void)
+{
+    diag_store(&s_display.render_us, 0U);
+    diag_store(&s_display.render_frames, 0U);
+    diag_store(&s_display.render_frame_us, 0U);
+    s_render_win_ms = 0U;
+    s_render_win_us = 0U;
+    s_render_win_frames = 0U;
+    for (int f = 0; f < 4; ++f) {
+        const uint32_t now_ms = 1000U + (uint32_t)f * 400U;
+        for (int strip = 0; strip < 4; ++strip) {
+            render_account(&s_display, strip == 0, 100U, now_ms);
+        }
+        if (f == 2) {
+            CHECK(diag_load(&s_display.render_frame_us) == 0U,
+                  "the window latched before a second had passed (%u)",
+                  (unsigned)diag_load(&s_display.render_frame_us));
+        }
+    }
+    jr_display_diag_t d;
+    CHECK(jr_display_get_diag(&d) == ESP_OK, "diag reads");
+    CHECK(d.render_us == 1600U, "render_us %u, wanted 1600", (unsigned)d.render_us);
+    CHECK(d.render_frames == 4U, "render_frames %u, wanted 4", (unsigned)d.render_frames);
+    CHECK(d.render_frame_us == 400U, "render_frame_us %u, wanted 400 (three whole frames)",
+          (unsigned)d.render_frame_us);
+    /* a strip that is not a frame start moves the cost, not the count */
+    render_account(&s_display, false, 50U, 2300U);
+    CHECK(diag_load(&s_display.render_us) == 1650U && diag_load(&s_display.render_frames) == 4U,
+          "a mid-frame strip counted as a frame");
+    s_render_win_ms = 0U;
+    s_render_win_us = 0U;
+    s_render_win_frames = 0U;
+}
+
 static void test_status_face_follows_the_links(void)
 {
     stage_space(JR_DISPLAY_SPACE_STATUS);
@@ -2302,6 +2341,7 @@ int main(void)
     test_focal_wedge_follows_the_slide();
     test_pinned_caption_survives_other_writers();
     test_render_cadence_reaches_the_engine_and_clamps();
+    test_render_clock_counts_frames_and_latches_a_second();
     test_missing_clip_falls_back_to_the_face_it_grew_from();
 
     if (g_failures) {

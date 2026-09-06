@@ -148,6 +148,13 @@ typedef struct {
     volatile uint32_t current_asset_bytes;
     volatile uint32_t free_psram_bytes;
     volatile uint32_t task_stack_hwm;
+    /* The software render's own cost, apart from the DMA wait: microseconds
+     * spent compositing strips (render_us, wrapping) over render_frames
+     * frames, and the last whole second's average per frame. One GET of
+     * /api/display then gives ms/frame for whatever is on the glass. */
+    volatile uint32_t render_us;
+    volatile uint32_t render_frames;
+    volatile uint32_t render_frame_us;
 } jr_display_ctx_t;
 
 static jr_display_ctx_t s_display = {
@@ -4376,6 +4383,39 @@ static bool IRAM_ATTR panel_color_done(esp_lcd_panel_io_handle_t panel_io,
     return false;
 }
 
+/* The render's own clock. Every strip's software pass — canvas, test
+ * pattern, the three overlays — is timed around its call in panel_flush and
+ * added here; the DMA submit and the wait for it are the panel's cost, not
+ * the render's. The frame count moves at each frame start, and once a
+ * second the window's average is latched into render_frame_us, so one GET
+ * of /api/display says how long the style on the glass takes to draw.
+ * Render task only. */
+static uint32_t s_render_win_ms;
+static uint32_t s_render_win_us;
+static uint32_t s_render_win_frames;
+
+static void render_account(jr_display_ctx_t *ctx, bool frame_start,
+                           uint32_t us, uint32_t now_ms)
+{
+    if (frame_start) {
+        diag_inc(&ctx->render_frames);
+        if (s_render_win_ms == 0u) {
+            s_render_win_ms = now_ms;
+        }
+        /* the window closes on whole frames: latch before this one counts */
+        if (s_render_win_frames > 0u && now_ms - s_render_win_ms >= 1000u) {
+            diag_store(&ctx->render_frame_us,
+                       s_render_win_us / s_render_win_frames);
+            s_render_win_us = 0u;
+            s_render_win_frames = 0u;
+            s_render_win_ms = now_ms;
+        }
+        s_render_win_frames++;
+    }
+    __atomic_add_fetch(&ctx->render_us, us, __ATOMIC_RELAXED);
+    s_render_win_us += us;
+}
+
 static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
                         const void *pixels)
 {
@@ -4419,7 +4459,8 @@ static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
 
     /* Frame-start latch: fades advance once per frame so all of a frame's
      * strips composite at one level (no banding across strip seams). */
-    if (x1 == 0 && y1 == 0) {
+    const bool frame_start = x1 == 0 && y1 == 0;
+    if (frame_start) {
         overlay_fade_tick();
     }
 
@@ -4427,6 +4468,7 @@ static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
      * may substitute a known pattern, then the mirror records the exact bytes
      * that will be handed to the CO5300—not the pre-render intent. */
     uint16_t *outbound = (uint16_t *)pixels;
+    const int64_t t0 = esp_timer_get_time();
     apply_canvas(ctx, x1, y1, x2, y2, outbound);
     apply_test_pattern(ctx, x1, y1, x2, y2, outbound);
     if (diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF) {
@@ -4434,6 +4476,8 @@ static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
         apply_shell_overlay(ctx, x1, y1, x2, y2, outbound);
         apply_surface_overlay(ctx, x1, y1, x2, y2, outbound);
     }
+    render_account(ctx, frame_start, (uint32_t)(esp_timer_get_time() - t0),
+                   (uint32_t)(t0 / 1000));
     diag_inc(&ctx->flush_submissions);
     esp_err_t err = esp_lcd_panel_draw_bitmap(ctx->board.panel, x1, y1, x2, y2,
                                               outbound);
@@ -4885,6 +4929,9 @@ esp_err_t jr_display_get_diag(jr_display_diag_t *out_diag)
     out_diag->current_asset_bytes = diag_load(&s_display.current_asset_bytes);
     out_diag->free_psram_bytes = diag_load(&s_display.free_psram_bytes);
     out_diag->task_stack_hwm = diag_load(&s_display.task_stack_hwm);
+    out_diag->render_us = diag_load(&s_display.render_us);
+    out_diag->render_frames = diag_load(&s_display.render_frames);
+    out_diag->render_frame_us = diag_load(&s_display.render_frame_us);
     return ESP_OK;
 }
 

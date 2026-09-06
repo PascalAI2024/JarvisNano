@@ -2762,7 +2762,7 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
     static const char *init_names[] = { "stopped", "starting", "ready", "failed" };
     const char *init_name = d.init_state <= JR_DISPLAY_INIT_FAILED
                                 ? init_names[d.init_state] : "?";
-    char buf[512];
+    char buf[640];
     int n = snprintf(buf, sizeof buf,
         "{\"init\":\"%s\",\"last_error\":\"%s\",\"task_running\":%s,"
         "\"blanked\":%s,\"requested_face\":%d,\"applied_face\":%d,"
@@ -2770,6 +2770,7 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         "\"requests\":%u,\"state_changes\":%u,\"segment_sets\":%u,"
         "\"asset_load_failures\":%u,\"flush_submissions\":%u,"
         "\"flush_completions\":%u,\"flush_errors\":%u,\"actual_fps\":%u,"
+        "\"render_us\":%u,\"render_frames\":%u,\"render_frame_us\":%u,"
         "\"current_asset_bytes\":%u,\"free_psram\":%u,\"stack_hwm\":%u}",
         init_name, esp_err_to_name(d.last_error),
         d.task_running ? "true" : "false",
@@ -2780,6 +2781,8 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         (unsigned)d.segment_sets, (unsigned)d.asset_load_failures,
         (unsigned)d.flush_submissions, (unsigned)d.flush_completions,
         (unsigned)d.flush_errors, (unsigned)d.actual_fps,
+        (unsigned)d.render_us, (unsigned)d.render_frames,
+        (unsigned)d.render_frame_us,
         (unsigned)d.current_asset_bytes, (unsigned)d.free_psram_bytes,
         (unsigned)d.task_stack_hwm);
     if (n < 0) {
