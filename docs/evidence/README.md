@@ -64,6 +64,8 @@ to reject.
 | `20260719-muted-caption.png` | MUTED status chip. |
 | `20260719-ask-real-gemini.png` | Real Gemini `ask_user` on glass. |
 | `20260719-ask-long-labels.png` | Long choice labels still hit-testable. |
+| `20260905-future-cut-word.png` | The FUTURE watch on 2026-09-05 before wave N13: the weather cell read `75* LIGHT DRIZZ`, a word cut mid-glyph by the 15-glyph clip. |
+| `20260905-earcon-preroll.log` | The mute earcon booked as a reply: four "holes mid-reply" during a long-press mute and the pre-roll stepping 600 -> 900 ms with no Gemini reply ever played (redacted device log, wave N13 F1). |
 | `20260719-hud-listening.png` | Listening state on the baked face. |
 | `20260814-mood-rtc-flash-report.md` | Historical hardware flash report for the mood ladder and PCF85063 RTC, including four defects found and their on-device re-verification. |
 | `20260718-v5-boot-after-phase0.log` | The Phase 0 cleanup did not regress the device: identical boot path after removing the `jr_transport.c` placeholder, the `jr_vad_*` stub and `jr_dsp_resample_linear`, and after adding `hud_render.c` to the `jr_display` SRCS. |

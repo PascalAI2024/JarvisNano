@@ -1,0 +1,9 @@
+I (40840) jr_hal_touch: long press end=48,143 start=47,101 duration=870ms
+W (41150) jr_audio: playback underrun: 9 ms hole mid-reply
+W (41160) jr_audio: playback underrun: 9 ms hole mid-reply
+W (41180) jr_audio: playback underrun: 19 ms hole mid-reply
+I (41180) jarvis_v5: gesture: long-press mute
+W (41190) jr_audio: playback underrun: 9 ms hole mid-reply
+I (41200) jarvis_v5: phase: Listening -> Draining
+I (43200) jarvis_v5: phase: Draining -> Idle
+I (43700) jr_audio: pre-roll 600 -> 900 ms after 4 hole(s)
