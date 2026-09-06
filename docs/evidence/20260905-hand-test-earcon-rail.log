@@ -1,0 +1,20 @@
+# 2026-09-05, image with wave N13 F1/F2/F4/F5 (pre-display), counters reset before the hand test
+# health.playback after two centre holds (mute, unmute) and three left-edge drags:
+#   {'underruns': 0, 'max_gap_ms': 0, 'replies': 0, 'prerolls': 0}  privacy False  volume 100
+I (290814) jr_hal_touch: swipe dir=4 start=344,43 end=455,278 delta=111,235 duration=360ms flags=0x01
+I (291584) jr_hal_touch: swipe dir=3 start=427,363 end=407,115 delta=-20,-248 duration=240ms flags=0x00
+I (292154) jr_hal_touch: swipe dir=3 start=451,328 end=433,140 delta=-18,-188 duration=190ms flags=0x00
+I (292794) jr_hal_touch: swipe dir=3 start=444,326 end=409,103 delta=-35,-223 duration=200ms flags=0x00
+I (293304) jr_hal_touch: swipe dir=4 start=408,150 end=447,311 delta=39,161 duration=160ms flags=0x00
+I (294004) jr_hal_touch: swipe dir=3 start=435,326 end=428,170 delta=-7,-156 duration=200ms flags=0x00
+I (298774) jr_hal_touch: swipe dir=4 start=378,80 end=449,230 delta=71,150 duration=120ms flags=0x00
+I (299564) jr_hal_touch: swipe dir=3 start=30,318 end=111,73 delta=81,-245 duration=240ms flags=0x00
+I (299634) jarvis_v5: levels: volume=100
+I (299994) jr_hal_touch: swipe dir=4 start=108,76 end=21,287 delta=-87,211 duration=160ms flags=0x00
+I (300054) jarvis_v5: levels: volume=95
+I (300834) jr_hal_touch: swipe dir=3 start=27,222 end=164,36 delta=137,-186 duration=520ms flags=0x00
+I (300894) jarvis_v5: levels: volume=100
+I (302604) jr_hal_touch: long press end=244,204 start=244,204 duration=870ms
+I (303554) jarvis_v5: gesture: long-press mute
+I (304884) jr_hal_touch: long press end=252,215 start=252,215 duration=880ms
+I (304924) jarvis_v5: gesture: long-press unmute

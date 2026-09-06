@@ -1,6 +1,6 @@
 # Next Session Handoff
 
-Last reconciled: **2026-09-02**.
+Last reconciled: **2026-09-05**.
 
 The live target is the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** with 32 MB
 flash. The active image is plain ESP-IDF v5 rooted at `main/` and
@@ -42,7 +42,7 @@ Wi-Fi OTA may still pass preflight when USB power is present.
 | Top-edge down | Open controls |
 | Centre up | Detail or controls close |
 | Double tap | Jarvis Home |
-| Glass hold | Physical privacy mute/unmute |
+| Glass hold (inner disc, r < 168) | Physical privacy mute/unmute; a hold that starts on the rim is ignored (2026-09-05) |
 | Sustained face-down / face-up | Enter flip privacy / clear only a flip-origin mute |
 
 The controls surface is the on-device legend: `L VOL`, `R LIGHT`,
@@ -65,6 +65,127 @@ is the classified edge-origin swipe.
   before marking a new image valid.
 - JarvisMCP server policy is live; byte-budgeted device catalog projection and
   cursor semantics remain incomplete.
+
+## What changed on 2026-09-05 (wave N13)
+
+The owner asked for polish and enhancement over Wi-Fi. A read-only baseline
+came first (`/api/cockpit`, `/api/device/health`, `/api/diag/tasks`,
+`/api/logs`, the panel mirror) and found seven things the 2026-09-02 handoff
+did not know. Fixes first, then the features; `PLAN.md` wave N13 has the
+rows and gates, `docs/evidence/20260905-*` the proof.
+
+- **A privacy long-press cost every reply 300 ms.** The mute sweep went
+  through the reply-underrun accounting (`docs/evidence/20260905-earcon-preroll.log`):
+  four "holes mid-reply", `replies 1`, pre-roll 600 → 900 with no Gemini
+  reply ever played. N10.11's "stepped 600→900 on its own after a hole" was
+  this. Now earcon samples are counted at `pb_enqueue` and the feeder books
+  nothing while they drain (+80 ms tail); tones render whole; the walk is a
+  pure `jr_dsp` stepper (`host/test_jitter.c`, eight tests; the mutation
+  fails three). **Proven by hand on the glass:** mute + unmute sweeps →
+  `replies 0, underruns 0`; one spoken turn → `replies 1, underruns 0`
+  (`docs/evidence/20260905-hand-test-earcon-rail.log`); twelve spoken turns
+  during the fps runs read `replies 12, prerolls 12, underruns 0`. Reference page:
+  `docs/reference/playback-jitter.md`.
+- **`jr_pb_feed` had 524 bytes of stack.** The 1536-byte chunk is a static
+  now: 3196 bytes free on the same 4096 stack (`/api/diag/tasks`). The
+  largest internal block read 31744 after (32768 before) — the static costs
+  1 KB of internal RAM, deliberately, for a feeder that cannot overflow.
+- **The brightness fade wrote fifteen log lines.** `co5300_spi` is at WARN
+  from boot; 97 of 271 lines in the 16 KB tail were a fade. After: zero.
+- **A slow finger on the volume rail muted the device** (log:
+  `long press … dy 42 … 870 ms` → `gesture: long-press mute`). The hold
+  slop (48) exceeded the swipe minimum (42), so 43–48 px of drift was a
+  hold that fired mid-press before the swipe classifier could run, and the
+  privacy consumer read no coordinates. Now the three slops agree at 42, a
+  hold that starts on the rim (r ≥ 168) is ignored with the neutral ack,
+  `gesture-doctor` asserts `hold_slop <= swipe_min`, `INPUT_MAP.md` says
+  "inner disc only". Hand test: three rail drags moved the volume, the
+  centre holds toggled privacy, nothing else did.
+- **The FUTURE weather cell cut a word** (`75* LIGHT DRIZZ`,
+  `docs/evidence/20260905-future-cut-word.png`). Found on the way: the
+  12-glyph `condition` cap had already made it `LIGHT DRIZZL` before the
+  cell saw it. Cap 24; one fitter (`wx_cond_fit`) serves the cell and the
+  WEATHER headline: drop the qualifier, else cut at a word with the "." mark.
+  Shell test with a mutation check (the old clip fails 7 checks).
+- **WATCH fps levers** (N12.6): `render_us`/`render_frames`/`render_frame_us`
+  on `/api/display`; per-strip work hoisted to per-frame (words, angles,
+  hand specs, tick pre-check — output identical, strip-vs-whole memcmp
+  pinned); shadows only at the 24 fps cadence; four AA sample lines for
+  hands wider than 6 px, eight for hairlines. The outline fold was tried,
+  measured null (±5 %), cost 932 B of internal RAM, and was reverted — do
+  not retry it. Numbers on the panel: see the table below.
+- **The glance asks for the sun and the hours.** `weather_glance` also
+  fetches Open-Meteo sunrise/sunset and 36 hourly rain probabilities in its
+  own `try` (226 bytes measured); an AWAKE/AMBIENT device refreshes every
+  30 min from any screen (`weather: fetch submitted (half hour)`), never at
+  rest. `/api/cockpit` carries `sun_rise_min`/`sun_set_min`.
+- **Rain in the next three hours, once per front** (`jr_core/glance.c`,
+  `jr_rain_warning_step`, six host tests on the real day's answer): a
+  `RAIN IN 2H` caption when muted, spoken with an open session, always a
+  `RAIN` ACTIVITY row; re-arms only under 30 %.
+- **The day arc.** FUTURE and PILOT draw the daylight as a thin gold band
+  at r204–208 on a 24-hour scale (noon at 12) with a dot for now;
+  `jr_display_sun_set` at 1 Hz beside the clock; shell test pins the angles
+  for 07:02/19:35, "no sun → nothing", "DRESS → nothing", "inverted → nothing".
+- **The morning glance speaks.** First lift after a rest (or a deep-sleep
+  wake by lift/touch, counted once after the first weather fetch had its
+  chance), once per day in 05:00–11:00 (NVS `brief_yday` — the morning lift
+  is usually a fresh boot): one text turn through `handle_say` naming the
+  date, the weather, rain within 12 h, delegated tasks finished since the
+  last briefing, and the battery under 30 % off USB. Muted: a
+  `GOOD MORNING 75* DRIZZLE 2 DONE` caption. Pure `jr_briefing_*` with host
+  tests. **Not yet seen in the wild** (built in the evening): the first
+  proof is tomorrow's first lift — expect `briefing: spoken` or
+  `briefing: caption, muted` in the log.
+- **A chime when a delegated task lands.** `jr_audio_play_chime` (raised-
+  cosine notes) plays E5–G5–B5 in `board_announce()` before the caption or
+  the spoken line, half volume at WHISPER, never over a reply. Not yet
+  heard: needs an item completed on the board.
+- **The scripts run on Windows** (PIL before `sips`, `JARVIS_PAIRING_TOKEN`
+  env fallback, UTF-8 stdout, `tempfile`, no `termios` at import, a clean
+  no-host message) and **one host-tests entry**: `./scripts/host-tests.sh`
+  runs all five suites with positive counts and takes a Docker lane
+  (`jarvisnano-hosttests`) when there is no `cc`. Git Bash rewrites
+  `/project` to `C:/Program Files/Git/project` before Docker sees it;
+  `MSYS_NO_PATHCONV=1` in `build-v5.sh` stops that
+  (`docs/reference/build-toolchain.md`).
+
+**WATCH render cost per frame, muted at the 160 MHz rest gear
+(`gfx_render` run-time delta ÷ frames, `/api/diag/tasks`), before → after:**
+
+| Style | 2026-09-02 doc | 2026-09-05 before | after |
+|---|---|---|---|
+| JARVIS | 69 | 65 | 67 |
+| DRESS | 89 | 59 | 55 |
+| DIVER | 108 | 79 | 71 |
+| PILOT | 112 | 87 | 88 |
+| FUTURE | 127 | 103 | 100 |
+| MINIMAL | 109 | 110 | 108 |
+
+**And at the live gear, unmuted, a session open (240 MHz, AWAKE, Listening)
+— the case the ≥ 17 fps gate names** (`docs/evidence/20260905-watch-fps.md`):
+
+| Style | actual fps | frames/4 s | `gfx_render` ms/frame | overlay `render_frame_us` |
+|---|---|---|---|---|
+| DRESS | 12 | 32.9 | 51 | 16.8 ms |
+| JARVIS | 10 | 45.5 | 54 | 23.3 ms |
+| DIVER | 10 | 33.5 | 66 | 29.4 ms |
+| PILOT | 11 | 33.2 | 74 | 34.8 ms |
+| FUTURE | 7 | 33.5 | 79 | 33.6 ms |
+| MINIMAL | 8 | 31.0 | 92 | 60.8 ms |
+
+**The gate is not met, and the levers were the wrong ones.** The overlay
+(the hands, cells and arc) is 17–61 ms of a 51–92 ms frame; the rest —
+31 ms on JARVIS, which has no dial at all — is the engine's own work (the
+face/dial decode per strip and the QSPI flush), and it barely moves between
+160 and 240 MHz, so it is not CPU-bound. With a live session the render task
+also shares the chip with AEC, WakeNet and the uplink. What would move the
+gate: decode a resident dial ONCE into a raw RGB565 frame in PSRAM
+(434 KB each; four fit) and blit it per strip instead of re-decoding it
+39 times a frame, and let a static dial skip the engine's face path
+entirely; then MINIMAL's 61 ms procedural disc is the last big overlay
+cost. The 2026-09-02 estimate ("≈ 12–17 fps at 240") scaled the 160 MHz
+number by 1.5 and was wrong for the same reason.
 
 ## What changed on 2026-09-02
 

@@ -64,6 +64,9 @@ to reject.
 | `20260719-muted-caption.png` | MUTED status chip. |
 | `20260719-ask-real-gemini.png` | Real Gemini `ask_user` on glass. |
 | `20260719-ask-long-labels.png` | Long choice labels still hit-testable. |
+| `20260905-future-day-arc.png` | FUTURE on the wave N13 image: `77° OVERCAST` uncut, the day arc (gold band from sunrise at lower-left over the top to sunset just under 3 o'clock) with the now-dot near 6 o'clock at 23:30. |
+| `20260905-hand-test-earcon-rail.log` | Two centre holds (mute, unmute) and three rail drags on the N13 image: the sweeps booked no reply and no hole, the rail moved the volume, only the centre holds touched privacy. |
+| `20260905-watch-fps.md` | The six watch styles measured twice on the N13 image: rest gear (160 MHz, muted) and live gear (240 MHz, unmuted, session open). The ≥ 17 fps gate is not met; the engine's per-frame cost, not the overlay, is the binding constraint. |
 | `20260905-future-cut-word.png` | The FUTURE watch on 2026-09-05 before wave N13: the weather cell read `75* LIGHT DRIZZ`, a word cut mid-glyph by the 15-glyph clip. |
 | `20260905-earcon-preroll.log` | The mute earcon booked as a reply: four "holes mid-reply" during a long-press mute and the pre-roll stepping 600 -> 900 ms with no Gemini reply ever played (redacted device log, wave N13 F1). |
 | `20260719-hud-listening.png` | Listening state on the baked face. |

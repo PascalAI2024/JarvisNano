@@ -493,7 +493,7 @@ awake gear that is DRESS ≈ 17 fps, DIVER/MINIMAL/PILOT ≈ 13–14, FUTURE ≈
 against the ≥ 17 fps gate: **the gate is not met** for four of five styles
 (and the sixteen-line, per-edge-division first version was 20 ms a hand).
 What is left on the table without a frame buffer: fewer polygons per hand
-(the outline could be folded into the flanks), and the hour and minute
+(the outline could be folded into the flanks — tried 2026-09-05, nothing measurable, reverted), and the hour and minute
 hands redrawn only when they move — which needs the engine's dirty
 tracking, not this renderer. The fills carry `optimize("O2")` inside the
 `-Os` image; the coverage row is a static, since the render task has 2 KB
@@ -533,6 +533,55 @@ powerful surfaces in §F need:
 | `jr_display_hit()` → `ACT_*` (`jr_display.c:3841-3889`) | the hit path every summoned surface needs |
 | `sp_annulus_row` / `sp_dot_row` / `sp_text_row` / `sp_veil` (`jr_display.c:2217-2325`) | unchanged, reused |
 | `JR_DISPLAY_SAFE_R 168` clip discipline (`jr_display.h:349`) | unchanged, applied to new surfaces |
+
+**As shipped — the firmware, second pass (2026-09-05, wave N13).** Four
+levers were pulled against the fps gate and one was put back. (1) The
+render has its own clock: `render_us`, `render_frames` and the last whole
+second's `render_frame_us` on `/api/display`, measured around the strip
+loop, so a style's cost is one GET. (2) The watch solves a frame once —
+FUTURE's cell words, the three hand angles, the hand specs and the
+fallback-dial tick pre-check are latched at frame start (`watch_compose`)
+instead of per strip; output-identical, pinned by the strip-vs-whole-frame
+memcmp at two times and an FNV of the r ≥ 196 tick band. (3) Shadows are
+cast only at the 24 fps AWAKE cadence (`hud_watch_t.shadow`); a resting
+watch casts none, which is a battery win, not a gate win. (4) Four sample
+lines for hands wider than 6 px, eight for hairlines — the combing sweep
+and the `mixed > 100` anti-aliasing check both hold. **Put back:** folding
+the outline into the flanks measured nothing (±5 %: the sample-line work
+dominates a fill, not the blend) and cost 932 B of `.bss` in internal RAM;
+reverted before merge. Measured on the panel, muted at the 160 MHz rest
+gear (`gfx_render` run-time per frame): JARVIS 65 → 67 ms, DRESS
+59 → 55, DIVER 79 → 71, PILOT 87 → 88, FUTURE
+103 → 100, MINIMAL 110 → 108. **At the live gear, unmuted, session open
+(240 MHz, AWAKE): 7–12 fps — the gate is not met.** The overlay
+(`render_frame_us`) is 17–61 ms of a 51–92 ms frame; the remainder is the
+engine's per-strip decode and QSPI flush, which does not scale with the CPU
+clock (JARVIS, with no dial, still costs 54 ms a frame at 240 MHz). The
+lever that is left is the engine's: decode a resident dial once into a raw
+RGB565 frame in PSRAM and blit it, and let a static dial skip the face path.
+Numbers: `docs/evidence/20260905-watch-fps.md`.
+
+**The day arc (2026-09-05).** FUTURE and PILOT — the two dials with a data
+vocabulary — carry the daylight: a thin gold band (`0xFD20` at 150/255,
+r204–208, the tick scale) from sunrise round the top to sunset on a
+24-hour scale with noon at 12 o'clock, and a brighter 3-px dot on the band
+for now. The sun comes with the weather glance (Open-Meteo sunrise/sunset
+in minutes past local midnight, `jr_display_sun_set` at 1 Hz beside the
+clock) and nothing is drawn without it; a sunset before sunrise is refused,
+not drawn as a night arc. Drawn before the hands so a tip crossing the band
+stays a hand. JARVIS, DIVER, DRESS and MINIMAL stay as designed: a luxury
+dial does not grow a gadget. Shell test: the band at noon, night at
+midnight, the ends at 07:02/19:35 (angles 139 and 17), the dot at 13:15
+(angle 205), DRESS blank, no sun blank.
+
+**The weather cell never cuts a word (2026-09-05).** The 12-glyph
+`condition` cap had already turned "LIGHT DRIZZLE" into `LIGHT DRIZZL`
+before the cell's 15-glyph clip made it `LIGHT DRIZZ` on the glass
+(`docs/evidence/20260905-future-cut-word.png`). The cap is 24 and one
+fitter, `wx_cond_fit`, serves the FUTURE cell and the WEATHER headline: drop
+the leading qualifier (LIGHT, HEAVY, MODERATE, PARTLY, SLIGHT, MOSTLY),
+else cut at the last space, else mid-word — always with the "." mark the
+tree uses for a cut. `75* DRIZZLE`, `75* RAIN.`, `75* THUNDERSTO.`.
 
 **Delete the four destinations, the nav axis and the telemetry composers. Keep
 the drawing primitives and re-point them at summoned surfaces.** That turns a
