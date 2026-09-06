@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Build the plain-ESP-IDF JarvisRobot v5 image reproducibly in the pinned image.
 set -euo pipefail
+# Git Bash on Windows rewrites "/project" into "C:/Program Files/Git/project"
+# before docker sees it; this stops that and is inert everywhere else.
+export MSYS_NO_PATHCONV=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${IDF_DOCKER_IMAGE:-espressif/idf:v5.5.4}"
