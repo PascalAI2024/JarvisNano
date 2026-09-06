@@ -59,6 +59,16 @@ WakeNet artifacts; and the 4 MB application-slot ceiling.
 ## Host suites
 
 ```bash
+./scripts/host-tests.sh          # all five suites; exits 2 when nothing ran
+```
+
+That is the one entry. It runs the two `jr_display` suites, `host/`
+(`jr_host_tests`: jr_core + jr_dsp + jr_transport), `components/jr_tools/host`
+(`jr_tools_template_tests`, through ctest) and
+`python3 -m unittest scripts/test_jarvis_desk.py`, and requires a positive test
+count from each. The individual commands still work by hand:
+
+```bash
 cmake -S host -B build-host
 cmake --build build-host
 ctest --test-dir build-host --output-on-failure
@@ -70,6 +80,28 @@ ctest --test-dir build-tools-host --output-on-failure
 
 These suites intentionally have no ESP-IDF include path. Core/transport/display
 code that reaches into a driver or network header fails at compile time.
+
+### Findings & gotchas
+
+**[2026-09-05] Windows: no compiler, and Git Bash rewrites the container paths**
+A Windows desk has cmake and ninja but no `cc`/`gcc`. cmake will still
+configure there when Visual Studio Build Tools are installed, and the build
+then dies on the suites' GCC flags (`cl : command line error D8021: invalid
+numeric argument '/Wextra'`), so the gate is `cc`/`gcc` on PATH, not "cmake
+found a compiler". Without one, `host-tests.sh`
+re-runs its four C suites inside the `jarvisnano-hosttests` image (`gcc:14` +
+cmake + ninja + python3, recipe in `scripts/host-tests.Dockerfile`, built on
+first use) and runs the Python suite natively; `JR_HOST_TESTS_INNER=1` marks
+the container run so it cannot recurse. The mount needed a second fix: Git Bash
+(MSYS) rewrites any argument that looks like a POSIX path, so `-v "$ROOT:/w"
+-w /w` reached docker as `C:/Program Files/Git/w`, and `/project` in
+`build-v5.sh` became `C:/Program Files/Git/project`. `MSYS_NO_PATHCONV=1` on
+the `docker run` line stops the rewrite and is inert on Linux and macOS;
+`scripts/build-v5.sh` exports it for the whole script (commit `7df68ee`),
+`host-tests.sh` sets it on its one `docker run`. A build directory configured
+on one side of that boundary carries the other side's source path in its
+`CMakeCache.txt` (`/w/...` versus the desk's `C:/` path); cmake refuses to reuse it,
+so the script compares `CMAKE_HOME_DIRECTORY` and starts that directory over.
 
 ## Historical path
 
