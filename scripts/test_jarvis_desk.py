@@ -11,7 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -189,6 +189,34 @@ class DeskCliTests(unittest.TestCase):
                 "https://other.example.com",
             )
 
+    def test_pairing_token_env_name_is_accepted_as_alias(self) -> None:
+        token = desk.resolve_token(
+            FakeKeychain(None),
+            "account",
+            {"JARVIS_PAIRING_TOKEN": "from-env", "JARVIS_DEVICE_HOST": "192.0.2.10"},
+            "http://192.0.2.10",
+        )
+        self.assertEqual(token, "from-env")
+
+    def test_missing_security_binary_reads_as_nothing_stored(self) -> None:
+        # Windows/Linux: no `security` on PATH. That must be "no token here"
+        # so resolve_token() reaches the env fallback, not a keychain_error.
+        def runner(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            raise FileNotFoundError("security")
+
+        self.assertIsNone(desk.MacOSKeychain(runner=runner).load("account"))
+        token = desk.resolve_token(
+            desk.MacOSKeychain(runner=runner),
+            "account",
+            {"JARVIS_PAIRING_TOKEN": "from-env", "JARVIS_DEVICE_HOST": "192.0.2.10"},
+            "http://192.0.2.10",
+        )
+        self.assertEqual(token, "from-env")
+
+    def test_native_keychain_is_absent_off_macos(self) -> None:
+        with patch.object(desk.sys, "platform", "win32"):
+            self.assertIsNone(desk.MacOSKeychain().load("account"))
+
     def test_keychain_store_uses_stdin_not_argv(self) -> None:
         calls: list[tuple[list[str], dict[str, Any]]] = []
 
@@ -295,10 +323,13 @@ class DeskCliTests(unittest.TestCase):
 
     def test_ota_uses_paired_binary_request(self) -> None:
         client = FakeClient()
-        with tempfile.NamedTemporaryFile() as image:
-            image.write(b"x" * desk.MIN_OTA_BYTES)
-            image.flush()
-            args = self.parse("ota", "--image", image.name)
+        # A directory, not NamedTemporaryFile: Windows refuses a second open
+        # of a file that is still held open, so the OTA path could never be
+        # tested there (2026-09-05).
+        with tempfile.TemporaryDirectory() as tmp:
+            image = Path(tmp) / "jarvisrobot_v5.bin"
+            image.write_bytes(b"x" * desk.MIN_OTA_BYTES)
+            args = self.parse("ota", "--image", str(image))
             result = desk.execute_command(
                 args, client, FakeKeychain("desk-token"), {})
         self.assertEqual(result["bytes"], desk.MIN_OTA_BYTES)
@@ -517,6 +548,31 @@ class JarvisCtlAuthTests(unittest.TestCase):
             self.assertEqual(ctl.pairing_token(), "t" * 32)
         self.assertIn("jarvis-desk@device.local", run.call_args.args[0])
 
+    def test_pairing_token_falls_back_to_host_bound_env_without_keychain(self) -> None:
+        env = {"JARVIS_PAIRING_TOKEN": "t" * 32, "JARVIS_DEVICE_HOST": "device.local"}
+        with patch.object(ctl, "host", return_value="device.local"), \
+             patch.object(ctl.subprocess, "run", side_effect=FileNotFoundError("security")), \
+             patch.dict(ctl.os.environ, env, clear=True):
+            self.assertEqual(ctl.pairing_token(), "t" * 32)
+
+    def test_env_token_never_rides_to_another_host(self) -> None:
+        no_keychain = patch.object(ctl.subprocess, "run",
+                                   side_effect=FileNotFoundError("security"))
+        # --host names a different device than the one the token is bound to.
+        env = {"JARVIS_PAIRING_TOKEN": "t" * 32, "JARVIS_DEVICE_HOST": "other.local"}
+        with patch.object(ctl, "host", return_value="device.local"), no_keychain, \
+             patch.dict(ctl.os.environ, env, clear=True):
+            self.assertIsNone(ctl.pairing_token())
+        # No binding host at all: the token stays home.
+        with patch.object(ctl, "host", return_value="device.local"), no_keychain, \
+             patch.dict(ctl.os.environ, {"JARVIS_PAIRING_TOKEN": "t" * 32}, clear=True):
+            self.assertIsNone(ctl.pairing_token())
+        # A malformed env token is not a token.
+        env = {"JARVIS_PAIRING_TOKEN": "short", "JARVIS_DEVICE_HOST": "device.local"}
+        with patch.object(ctl, "host", return_value="device.local"), no_keychain, \
+             patch.dict(ctl.os.environ, env, clear=True):
+            self.assertIsNone(ctl.pairing_token())
+
     def test_api_attaches_keychain_token_to_protected_requests(self) -> None:
         captured: list[Any] = []
 
@@ -538,6 +594,88 @@ class JarvisCtlAuthTests(unittest.TestCase):
             request.full_url,
             "https://device.local/api/voice/control?armed=1",
         )
+
+
+TWO_BY_TWO_PPM = b"P6\n2 2\n255\n" + bytes(range(12))
+
+
+class JarvisCtlPortabilityTests(unittest.TestCase):
+    """Pins for the paths that broke on Windows (2026-09-05): a missing host
+    tracebacked, `screen` called sips blind, `reboot` assumed bin/python."""
+
+    def test_missing_host_is_one_line_and_exit_2(self) -> None:
+        err = io.StringIO()
+        with patch.object(ctl.sys, "argv", ["jarvisctl", "status"]), \
+             patch.dict(ctl.os.environ, {}, clear=True), \
+             patch.object(ctl.sys, "stderr", err):
+            with self.assertRaises(SystemExit) as raised:
+                ctl.host()
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(err.getvalue().count("\n"), 1)
+        self.assertIn("JARVIS_DEVICE_HOST", err.getvalue())
+
+    def _fake_pil(self, marker: bytes) -> ModuleType:
+        pil = ModuleType("PIL")
+
+        def open_image(path: str) -> SimpleNamespace:
+            self.assertTrue(Path(path).read_bytes().startswith(b"P6"))
+            return SimpleNamespace(save=lambda out: Path(out).write_bytes(marker))
+
+        pil.Image = SimpleNamespace(open=open_image)  # type: ignore[attr-defined]
+        return pil
+
+    def test_screen_converts_with_pil_and_never_calls_sips(self) -> None:
+        def never(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("sips must not be run when PIL is present")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = str(Path(tmp) / "glass.png")
+            with patch.dict(sys.modules, {"PIL": self._fake_pil(b"PNG")}), \
+                 patch.object(ctl, "api", return_value=TWO_BY_TWO_PPM), \
+                 patch.object(ctl.shutil, "which", return_value=None), \
+                 patch.object(ctl.subprocess, "run", side_effect=never), \
+                 patch.object(ctl.sys, "stdout", io.StringIO()):
+                self.assertEqual(ctl.cmd_screen(out), 0)
+            self.assertEqual(Path(out).read_bytes(), b"PNG")
+            self.assertFalse(Path(out + ".ppm").exists())
+
+    def test_screen_without_any_converter_keeps_the_ppm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = str(Path(tmp) / "glass.png")
+            with patch.dict(sys.modules, {"PIL": None}), \
+                 patch.object(ctl, "api", return_value=TWO_BY_TWO_PPM), \
+                 patch.object(ctl.shutil, "which", return_value=None), \
+                 patch.object(ctl.sys, "stderr", io.StringIO()):
+                self.assertEqual(ctl.cmd_screen(out), 1)
+            self.assertFalse(Path(out).exists())
+            self.assertEqual(Path(out + ".ppm").read_bytes(), TWO_BY_TWO_PPM)
+
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "Pillow not installed")
+    def test_screen_real_pil_writes_a_png(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = str(Path(tmp) / "glass.png")
+            with patch.object(ctl, "api", return_value=TWO_BY_TWO_PPM), \
+                 patch.object(ctl.shutil, "which", return_value=None), \
+                 patch.object(ctl.sys, "stdout", io.StringIO()):
+                self.assertEqual(ctl.cmd_screen(out), 0)
+            self.assertTrue(Path(out).read_bytes().startswith(b"\x89PNG"))
+
+    def test_esptool_python_resolves_windows_venv_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            scripts_dir = Path(tmp) / "scripts"
+            scripts_dir.mkdir()
+            with patch.object(ctl, "HERE", str(scripts_dir)):
+                self.assertEqual(ctl.esptool_python(), sys.executable)
+                win = Path(tmp) / ".build_tools" / "esptool" / "Scripts"
+                win.mkdir(parents=True)
+                (win / "python.exe").write_bytes(b"")
+                self.assertEqual(Path(ctl.esptool_python()).resolve(),
+                                 (win / "python.exe").resolve())
+                posix = Path(tmp) / ".build_tools" / "esptool" / "bin"
+                posix.mkdir(parents=True)
+                (posix / "python").write_bytes(b"")
+                self.assertEqual(Path(ctl.esptool_python()).resolve(),
+                                 (posix / "python").resolve())
 
 
 if __name__ == "__main__":
