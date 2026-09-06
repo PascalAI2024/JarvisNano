@@ -1010,6 +1010,7 @@ static volatile uint32_t s_clock_word;
  * and at s_clock_word. */
 static void brightness_slew(uint32_t dt_ms);   /* defined with the pump below */
 static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep);
+static void watch_compose(void);               /* defined with the watch below */
 
 static void overlay_fade_tick(void)
 {
@@ -1031,6 +1032,7 @@ static void overlay_fade_tick(void)
         const uint32_t since =
             now - __atomic_load_n(&s_clock_set_ms, __ATOMIC_RELAXED);
         s_clock_phase_ms = since > 999u ? 999 : (int)since;
+        watch_compose();             /* the words on the watch, once a frame */
         s_clock_prog += step;
         if (s_clock_prog > 256) {
             s_clock_prog = 256;
@@ -2755,21 +2757,89 @@ static int watch_wx_line(char *dst, size_t cap, int temp_f, const char *cond)
     return n + wx_cond_fit(dst + n, cap - (size_t)n, cond, WATCH_WX_GLYPHS - n);
 }
 
-static void watch_cells(const jr_display_ctx_t *ctx, int y1, int y2,
-                        uint16_t *pixels, int style, int st, bool baked)
+/* THE WORDS, ONCE PER FRAME. watch_cells used to compose every string —
+ * four snprintfs, three atomic word loads, the weather slot — in every one
+ * of the 39 strips, though nothing in them changes between strips.
+ * watch_compose runs at the frame start (overlay_fade_tick, the same latch
+ * that fixes the sweep phase) and leaves the strings, their lengths and
+ * their x origins here; the strips only place glyphs. Render task only. */
+typedef struct {
+    bool have_date;
+    char day[3];                 /* DIVER's window: the day of the month */
+    char date[20];               /* FUTURE, above: "TUE 02 SEP"          */
+    int  date_n, date_x0;
+    bool wx_ok, wx_stale;
+    char wx1[24];                /* FUTURE, below: "75* DRIZZLE"          */
+    int  wx1_n, wx1_x0;
+    char wx2[12];                /* "82 / 68"                             */
+    int  wx2_n, wx2_x0;
+    int  pct;                    /* battery, or >100 for no answer        */
+    char bat[6];
+    int  bat_n;
+    int  bars;                   /* Wi-Fi bars 0..4                       */
+    const char *link;            /* "LIVE" / "IDLE" / "MUTED"             */
+    int  link_n;
+} watch_words_t;
+
+static watch_words_t s_watch_words;
+
+static void watch_compose(void)
 {
     static const char *const WD[7] = { "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
     static const char *const MO[12] = { "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
                                         "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
+    watch_words_t *w = &s_watch_words;
+    if ((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) & NAV_SPACE_MASK) !=
+        (uint32_t)JR_DISPLAY_SPACE_WATCH) {
+        return;                      /* only the watch carries these words */
+    }
     const uint32_t dw = __atomic_load_n(&s_clock_date_word, __ATOMIC_ACQUIRE);
-    const bool have_date = (dw & (1u << 12)) != 0u;
     const int mday = (int)(dw & 0x1Fu), mon = (int)((dw >> 5) & 0xFu), wday = (int)((dw >> 9) & 0x7u);
+    w->have_date = (dw & (1u << 12)) != 0u;
+    w->day[0] = (char)('0' + mday / 10);
+    w->day[1] = (char)('0' + mday % 10);
+    w->day[2] = '\0';
+    if (w->have_date) {
+        w->date_n = snprintf(w->date, sizeof w->date, "%s %02d %s", WD[wday], mday, MO[mon]);
+    } else {
+        w->date_n = snprintf(w->date, sizeof w->date, "NO DATE");
+    }
+    w->date_x0 = HUD_WATCH_CELL_DATE_CX - (6 * 2 * w->date_n) / 2;
+
+    const jr_display_weather_t *wx =
+        &s_weather[__atomic_load_n(&s_weather_slot, __ATOMIC_ACQUIRE) & 1u];
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    w->wx_ok = wx->valid;
+    w->wx_stale = w->wx_ok && (now - wx->fetched_ms) / 60000u >= WX_STALE_MIN;
+    if (w->wx_ok) {
+        w->wx1_n = watch_wx_line(w->wx1, sizeof w->wx1, (int)wx->temp_f, wx->condition);
+        w->wx2_n = snprintf(w->wx2, sizeof w->wx2, "%d / %d", (int)wx->hi_f, (int)wx->lo_f);
+    } else {
+        w->wx1_n = snprintf(w->wx1, sizeof w->wx1, "NO WEATHER");
+        w->wx2_n = 0;
+    }
+    w->wx1_x0 = HUD_WATCH_CELL_WX_CX - (6 * 2 * w->wx1_n) / 2;
+    w->wx2_x0 = HUD_WATCH_CELL_WX_CX - (6 * 2 * w->wx2_n) / 2;
+
+    const uint32_t pw = __atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE);
+    const uint32_t lk = __atomic_load_n(&s_links_word, __ATOMIC_ACQUIRE);
+    w->pct = (int)(pw & 0xFFu);
+    w->bat_n = w->pct <= 100 ? snprintf(w->bat, sizeof w->bat, "%d%%", w->pct)
+                             : snprintf(w->bat, sizeof w->bat, "--");
+    w->bars = sp_wifi_bars(lk);
+    w->link = sp_privacy_muted() ? "MUTED" : ((lk & 2u) != 0u ? "LIVE" : "IDLE");
+    w->link_n = (int)strlen(w->link);
+}
+
+static void watch_cells(const jr_display_ctx_t *ctx, int y1, int y2,
+                        uint16_t *pixels, int style, int st, bool baked)
+{
+    const watch_words_t *w = &s_watch_words;
 
     if (style == JR_WATCH_DIVER) {
-        if (!have_date) {
+        if (!w->have_date) {
             return;
         }
-        char d[3] = { (char)('0' + mday / 10), (char)('0' + mday % 10), '\0' };
         const uint16_t ink = sp_tint(ctx, 0x0000, 255);
         const uint16_t paper = sp_tint(ctx, 0xFFFF, st);
         for (int y = y1; y < y2; ++y) {
@@ -2783,7 +2853,7 @@ static void watch_cells(const jr_display_ctx_t *ctx, int y1, int y2,
                 }
             }
             if (st >= 128) {
-                sp_text_row(row, y, d, 2,
+                sp_text_row(row, y, w->day, 2,
                             (HUD_WATCH_DATE_X0 + HUD_WATCH_DATE_X1) / 2 - 11,
                             (HUD_WATCH_DATE_Y0 + HUD_WATCH_DATE_Y1) / 2 - 7, 2, ink);
             }
@@ -2796,50 +2866,16 @@ static void watch_cells(const jr_display_ctx_t *ctx, int y1, int y2,
     const uint16_t cyan = sp_tint(ctx, 0x073F, st);
     const uint16_t dim  = sp_tint(ctx, 0x073F, st / 3);
     const uint16_t white = sp_tint(ctx, 0xFFFF, st);
-
-    char line[20];
-    int n;
-    /* the date */
-    if (have_date) {
-        n = snprintf(line, sizeof line, "%s %02d %s", WD[wday], mday, MO[mon]);
-    } else {
-        n = snprintf(line, sizeof line, "NO DATE");
-    }
-    const int dx0 = HUD_WATCH_CELL_DATE_CX - (6 * 2 * n) / 2;
-    /* the weather */
-    const jr_display_weather_t *wx =
-        &s_weather[__atomic_load_n(&s_weather_slot, __ATOMIC_ACQUIRE) & 1u];
-    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
-    const bool wx_ok = wx->valid;
-    const bool wx_stale = wx_ok && (now - wx->fetched_ms) / 60000u >= WX_STALE_MIN;
-    char w1[20], w2[12];
-    int n1, n2;
-    if (wx_ok) {
-        n1 = watch_wx_line(w1, sizeof w1, (int)wx->temp_f, wx->condition);
-        n2 = snprintf(w2, sizeof w2, "%d / %d", (int)wx->hi_f, (int)wx->lo_f);
-    } else {
-        n1 = snprintf(w1, sizeof w1, "NO WEATHER");
-        n2 = 0;
-    }
-    const uint16_t wxpx = (wx_ok && !wx_stale) ? cyan : dim;
-    const int wx0 = HUD_WATCH_CELL_WX_CX - (6 * 2 * n1) / 2;
-    const int wl0 = HUD_WATCH_CELL_WX_CX - (6 * 2 * n2) / 2;
-    /* battery and link */
-    const uint32_t pw = __atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE);
-    const uint32_t lk = __atomic_load_n(&s_links_word, __ATOMIC_ACQUIRE);
-    const int pct = (int)(pw & 0xFFu);
-    char bt[6];
-    const int nb = pct <= 100 ? snprintf(bt, sizeof bt, "%d%%", pct) : snprintf(bt, sizeof bt, "--");
-    const int bars = sp_wifi_bars(lk);
-    const char *link = sp_privacy_muted() ? "MUTED" : ((lk & 2u) != 0u ? "LIVE" : "IDLE");
-    const int nl = (int)strlen(link);
+    const uint16_t wxpx = (w->wx_ok && !w->wx_stale) ? cyan : dim;
+    const int pct = w->pct;
 
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        sp_text_row(row, y, line, n, dx0, HUD_WATCH_CELL_DATE_CY - 7, 2, have_date ? cyan : dim);
-        sp_text_row(row, y, w1, n1, wx0, HUD_WATCH_CELL_WX_CY - 16, 2, wxpx);
-        if (n2 > 0) {
-            sp_text_row(row, y, w2, n2, wl0, HUD_WATCH_CELL_WX_CY + 2, 2, wxpx);
+        sp_text_row(row, y, w->date, w->date_n, w->date_x0, HUD_WATCH_CELL_DATE_CY - 7, 2,
+                    w->have_date ? cyan : dim);
+        sp_text_row(row, y, w->wx1, w->wx1_n, w->wx1_x0, HUD_WATCH_CELL_WX_CY - 16, 2, wxpx);
+        if (w->wx2_n > 0) {
+            sp_text_row(row, y, w->wx2, w->wx2_n, w->wx2_x0, HUD_WATCH_CELL_WX_CY + 2, 2, wxpx);
         }
         /* battery: ten dots in a shallow arc over the number */
         if (y >= HUD_WATCH_CELL_BAT_CY - 16 && y <= HUD_WATCH_CELL_BAT_CY - 6) {
@@ -2852,7 +2888,8 @@ static void watch_cells(const jr_display_ctx_t *ctx, int y1, int y2,
                 }
             }
         }
-        sp_text_row(row, y, bt, nb, HUD_WATCH_CELL_BAT_CX - (6 * 2 * nb) / 2, HUD_WATCH_CELL_BAT_CY, 2, pct <= 100 ? white : dim);
+        sp_text_row(row, y, w->bat, w->bat_n, HUD_WATCH_CELL_BAT_CX - (6 * 2 * w->bat_n) / 2,
+                    HUD_WATCH_CELL_BAT_CY, 2, pct <= 100 ? white : dim);
         /* link: four bars, then the word */
         for (int i = 0; i < 4; ++i) {
             const int h = 4 + i * 3, x0 = HUD_WATCH_CELL_LINK_CX - 13 + i * 6;
@@ -2860,12 +2897,13 @@ static void watch_cells(const jr_display_ctx_t *ctx, int y1, int y2,
                 int lo = x0, hi = x0 + 3;
                 if (sp_clip(y, &lo, &hi)) {
                     for (int x = lo; x <= hi; ++x) {
-                        row[x] = i < bars ? cyan : dim;
+                        row[x] = i < w->bars ? cyan : dim;
                     }
                 }
             }
         }
-        sp_text_row(row, y, link, nl, HUD_WATCH_CELL_LINK_CX - (6 * nl) / 2, HUD_WATCH_CELL_LINK_CY + 6, 1, white);
+        sp_text_row(row, y, w->link, w->link_n, HUD_WATCH_CELL_LINK_CX - (6 * w->link_n) / 2,
+                    HUD_WATCH_CELL_LINK_CY + 6, 1, white);
     }
 }
 

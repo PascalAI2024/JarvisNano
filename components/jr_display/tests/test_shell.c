@@ -1395,6 +1395,7 @@ static void render_watch_frame_at(uint16_t *fb, int style, jr_face_t shown,
     s_clock_shown_word = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
     s_clock_ease = 256;
     sp_compose();
+    watch_compose();                 /* the frame-start latch, as the flush does */
     for (size_t k = 0; k < px; ++k) fb[k] = 0x4208;     /* "the art" */
     for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
         const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
@@ -1509,6 +1510,49 @@ static void test_future_weather_cell_shortens_instead_of_cutting(void)
     set_weather(false, 0, 0, 0, JR_DISPLAY_SKY_UNKNOWN, "", 0U);
     s_display.shown_face = JR_FACE_IDLE;
     free(fb);
+    reset_nav();
+}
+
+/* The words are composed once a frame (watch_compose) and placed per strip:
+ * the strip render of FUTURE, words and all, equals one whole-frame call,
+ * and recomposing with new weather moves the cell. */
+static void test_watch_words_are_composed_once_and_strip_invariant(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb);
+    uint16_t *whole = malloc(px * sizeof *whole);
+    if (!fb || !whole) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; free(fb); free(whole); return; }
+    set_weather(true, 75, 82, 68, JR_DISPLAY_SKY_RAIN, "OVERCAST", (uint32_t)(s_fake_us / 1000));
+    render_watch_frame_at(fb, JR_WATCH_FUTURE, JR_FACE_DIAL_FUTURE, 10, 10, 0);
+    for (size_t k = 0; k < px; ++k) whole[k] = 0x4208;
+    apply_space_overlay(&s_display, 0, HUD_H, whole);
+    apply_clock_overlay(&s_display, 0, HUD_H, whole);
+    CHECK(memcmp(whole, fb, px * sizeof *fb) == 0, "FUTURE strips differ from the whole frame");
+    size_t ink = 0;
+    CHECK(future_wx_line_reads(fb, "75* OVERCAST", &ink) && ink > 200,
+          "the cell does not read the composed line (%zu ink px)", ink);
+    /* new weather, no recompose: the strips still say OVERCAST */
+    set_weather(true, 75, 82, 68, JR_DISPLAY_SKY_CLEAR, "CLEAR", (uint32_t)(s_fake_us / 1000));
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+        for (size_t k = (size_t)y * HUD_W; k < (size_t)y2 * HUD_W; ++k) fb[k] = 0x4208;
+        apply_space_overlay(&s_display, y, y2, fb + (size_t)y * HUD_W);
+        apply_clock_overlay(&s_display, y, y2, fb + (size_t)y * HUD_W);
+    }
+    CHECK(memcmp(whole, fb, px * sizeof *fb) == 0, "a strip recomposed the words by itself");
+    /* the frame-start latch moves it */
+    watch_compose();
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+        for (size_t k = (size_t)y * HUD_W; k < (size_t)y2 * HUD_W; ++k) fb[k] = 0x4208;
+        apply_space_overlay(&s_display, y, y2, fb + (size_t)y * HUD_W);
+        apply_clock_overlay(&s_display, y, y2, fb + (size_t)y * HUD_W);
+    }
+    CHECK(future_wx_line_reads(fb, "75* CLEAR", &ink) && ink > 150,
+          "after the latch the cell does not read CLEAR (%zu ink px)", ink);
+    set_weather(false, 0, 0, 0, JR_DISPLAY_SKY_UNKNOWN, "", 0U);
+    s_display.shown_face = JR_FACE_IDLE;
+    free(fb); free(whole);
     reset_nav();
 }
 
@@ -2327,6 +2371,7 @@ int main(void)
     test_watch_keeps_a_baked_dial_and_clears_a_missing_one();
     test_watch_style_reaches_the_glass();
     test_future_weather_cell_shortens_instead_of_cutting();
+    test_watch_words_are_composed_once_and_strip_invariant();
 
     test_desk_is_on_the_ring_only_while_live();
     test_desk_going_dark_moves_the_owner_on();
