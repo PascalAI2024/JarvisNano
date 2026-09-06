@@ -36,6 +36,7 @@ extern void transport_tests_run(void);
  * defined in host/test_soak.c; registered inside this file's UNITY_BEGIN/END. */
 extern void soak_tests_run(void);
 extern void mood_tests_run(void);
+extern void jitter_tests_run(void);
 
 /* ---- shared fixtures ---- */
 static jr_clock_t g_clk;
@@ -1921,6 +1922,9 @@ int main(void)
 
     /* Four-mood rest ladder (Phase 5 product, no hardware). */
     mood_tests_run();
+
+    /* The playback feeder's reply / hole / pre-roll walk, and its earcon guard. */
+    jitter_tests_run();
 
     return UNITY_END();
 }

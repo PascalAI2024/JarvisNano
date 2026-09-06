@@ -260,6 +260,14 @@ static void board_announce(const char *title, int terminal, const char *result)
     title_shorten(row, sizeof row - 5U, title);      /* "TASK " + 19 glyphs */
     jr_display_activity_push("TASK", row);
 
+    /* Three rising notes before the words: E5 G5 B5, 60 ms each, at half
+     * volume in WHISPER. The chime refuses to talk over a reply, so while the
+     * model is speaking the spoken line below carries the news alone. */
+    static const uint16_t chime_hz[] = { 659U, 784U, 988U };
+    const uint8_t chime_vol = s_mood.mood == JR_MOOD_WHISPER ? 4U : 8U;
+    const esp_err_t chime = jr_audio_play_chime(chime_hz, 3U, 60U, chime_vol);
+    ESP_LOGI(TAG, "chime: done%s", chime == ESP_OK ? "" : " (skipped)");
+
     const jr_state_t p = jr_orch_phase(&s_app.orch);
     const bool open = p == JR_ST_LISTENING || p == JR_ST_SPEAKING ||
                       p == JR_ST_THINKING;
