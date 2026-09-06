@@ -23,6 +23,7 @@ import argparse
 import io
 import os
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -46,7 +47,7 @@ _HEADER = "components/jr_display/include/jr_display/jr_display.h"
 def ring_from_header(root: str) -> list[str]:
     """Screen names in enum order, read from jr_display_space_t itself."""
     import re
-    src = open(os.path.join(root, _HEADER)).read()
+    src = open(os.path.join(root, _HEADER), encoding="utf-8").read()
     # Anchor on the enum's CLOSING tag and walk back to its own opening brace.
     # Searching forward from the first "typedef enum {" instead swept in the
     # #defines above it (JR_DISPLAY_SPACE_MS, _SPACE_HOLD_MS), which share the
@@ -121,7 +122,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default=os.environ.get("JARVIS_DEVICE_HOST", ""))
-    ap.add_argument("--out", default="/tmp/jarvisnano-screens.png")
+    ap.add_argument("--out", default=os.path.join(tempfile.gettempdir(),
+                                                  "jarvisnano-screens.png"))
     ap.add_argument("--extras", action="store_true",
                     help="also capture controls-open and companion mode")
     ap.add_argument("--settle", type=float, default=1.2,
@@ -140,8 +142,9 @@ def main() -> int:
     print(f"ring ({len(ring_dark)} screens, from jr_display_space_t; DESK only "
           f"while live): {', '.join(ring_dark)}")
     if not a.host:
-        print("set JARVIS_DEVICE_HOST or pass --host "
-              "(find it with: arp -a | grep jarvisnano)", file=sys.stderr)
+        print("set JARVIS_DEVICE_HOST or pass --host (the address is on the "
+              "device's STATUS screen, or in your router's client list as "
+              "jarvisnano)", file=sys.stderr)
         return 2
 
     shots = []

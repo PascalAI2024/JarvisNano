@@ -6,11 +6,19 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import termios
 import time
 
 
 def open_raw_serial(path: str, baud: int) -> int:
+    # termios is POSIX-only; importing it at module level made the script
+    # crash with ImportError on Windows before --help could even print.
+    try:
+        import termios
+    except ImportError:
+        print("usb-monitor.py is POSIX only (termios); on Windows use "
+              "`python -m serial.tools.miniterm` or `idf.py monitor`",
+              file=sys.stderr)
+        raise SystemExit(2) from None
     fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
     attrs = termios.tcgetattr(fd)
     speed = getattr(termios, f"B{baud}")

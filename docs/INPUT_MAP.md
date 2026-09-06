@@ -83,7 +83,7 @@ gesture is our own classification (`input_touch.c`).
 | Kind | Emitted by | Today |
 |---|---|---|
 | `JR_INPUT_TAP` | drift ≤42 px | ✅ |
-| `JR_INPUT_LONG_PRESS` | ≥850 ms, drift ≤48 px | ✅ fires **once, mid-hold**; release is then suppressed |
+| `JR_INPUT_LONG_PRESS` | ≥850 ms, drift ≤42 px | ✅ fires **once, mid-hold**; release is then suppressed. **Inner disc only; a hold that starts on the rim is ignored** (`main.c`, the long-press consumer). The hold slop was 48 while swipe was 42, so a 43–48 px slide on the volume rail aged into a hold and muted the device (2026-09-05); the three slops now agree and `gesture-doctor.py` fails on any gap |
 | `JR_INPUT_SWIPE` + direction | travel ≥42 px, larger axis wins | ✅ |
 | `JR_INPUT_FLAG_TOP_EDGE` | `start_y<72` ∧ `Δy≥70` ∧ 135 % vertical | ✅ emitted, ⚠️ **only ever tested negatively** (`main.c:6695`) |
 | Double-tap | app-level 400 ms window (`main.c:6618`) | ✅ |
@@ -129,7 +129,7 @@ They mean the same thing on every surface. That is the entire point of a button.
 |---|---|---|
 | **Tap** | act on what is under the finger — an arc, a card action, a control | **summon the Dial**, showing what it will change, changing nothing yet |
 | **Double-tap** | **home / clear everything** ⚠️ must never outrank a live ask — fixed in `20a921c5` | — *(the rim rolls; a reliable double-tap there is not available)* |
-| **Hold 850 ms** | ✅ **commit ring** (`1a081e7e`) — fills to 850 ms, lifting early abandons in silence. Still toggles privacy on completion until PWR can take it. | — |
+| **Hold 850 ms** | ✅ **commit ring** (`1a081e7e`) — fills to 850 ms, lifting early abandons in silence. Still toggles privacy on completion until PWR can take it. | **ignored** — a hold that *starts* on the rim (r ≥ 168) is not a privacy toggle; it gets the neutral ack and the caption names what the rim accepts (a slow slide on the volume rail muted the device, 2026-09-05) |
 | **Slide** | — | **the level dial**, live readout under the thumb, clamped not wrapped |
 | **Swipe ↑** | **expand** — more detail on what was just said | — |
 | **Swipe ↓** | **dismiss / stop** | — |

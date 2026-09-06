@@ -470,7 +470,14 @@ class MacOSKeychain:
         return value or None
 
     def load(self, account: str) -> str | None:
+        # No keychain on this platform is "nothing stored", not an error:
+        # resolve_token() then falls through to the host-bound environment
+        # token, which is the only store Windows and Linux get. Raising here
+        # made every Desk command on Windows die in the keychain before the
+        # env fallback was even consulted (2026-09-05).
         if self._runner is None:
+            if sys.platform != "darwin":
+                return None
             return self._native_load(account)
         try:
             result = self._runner(
@@ -484,7 +491,9 @@ class MacOSKeychain:
                 timeout=5,
                 check=False,
             )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        except FileNotFoundError:
+            return None
+        except (subprocess.TimeoutExpired, OSError):
             raise DeskError("keychain_error",
                             "macOS Keychain is unavailable") from None
         if result.returncode == 44:
@@ -573,7 +582,9 @@ def resolve_token(
 ) -> str:
     token = keychain.load(account)
     if token is None:
-        env_token = env.get("JARVIS_DESK_TOKEN", "")
+        # JARVIS_PAIRING_TOKEN is the name jarvisctl reads; JARVIS_DESK_TOKEN
+        # is this tool's older spelling. One secret, either name.
+        env_token = env.get("JARVIS_PAIRING_TOKEN") or env.get("JARVIS_DESK_TOKEN", "")
         configured_base = normalize_base_url(
             env.get("JARVIS_DEVICE_HOST") or DEFAULT_DEVICE_HOST
         )

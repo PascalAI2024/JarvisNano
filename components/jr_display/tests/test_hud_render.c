@@ -20,9 +20,11 @@
 #include <string.h>
 
 static int g_failures;
+static int g_checks;   /* empty is not pass: the summary names the count */
 
 #define CHECK(cond, ...)                                                       \
     do {                                                                       \
+        g_checks++;                                                            \
         if (!(cond)) {                                                         \
             printf("FAIL %s:%d: ", __func__, __LINE__);                        \
             printf(__VA_ARGS__);                                               \
@@ -1958,9 +1960,10 @@ int main(void)
     test_watch_hands_blend_and_spare_the_dial();
 
     if (g_failures) {
+        printf("%d failure(s) of %d checks\n", g_failures, g_checks);
         printf("hud_render tests FAILED (%d)\n", g_failures);
         return 1;
     }
-    printf("hud_render tests passed\n");
+    printf("hud_render tests passed (%d checks)\n", g_checks);
     return 0;
 }

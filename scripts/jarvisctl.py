@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import urllib.request
@@ -52,18 +53,38 @@ def host() -> str:
         value = argv[argv.index("--host") + 1]
     value = value or os.environ.get("JARVIS_DEVICE_HOST")
     if not value:
-        raise SystemExit("--host or JARVIS_DEVICE_HOST required")
+        # One line, exit 2 — an operator error, not a traceback.
+        print("jarvisctl: --host or JARVIS_DEVICE_HOST required", file=sys.stderr)
+        raise SystemExit(2)
     return value
 
 
-def base_url() -> str:
-    value = host().rstrip("/")
+def normalize_host(value: str) -> str:
+    value = value.strip().rstrip("/")
     return value if value.startswith(("http://", "https://")) else "http://" + value
 
 
+def base_url() -> str:
+    return normalize_host(host())
+
+
+def valid_pairing_token(token: str) -> bool:
+    encoded = token.encode("utf-8")
+    return (32 <= len(encoded) <= 64) and not any(
+        byte <= 0x20 or byte == 0x7F for byte in encoded)
+
+
 def pairing_token() -> str | None:
-    """Load this host's pairing token without exposing it in argv or output."""
-    account = "jarvis-desk@" + urllib.parse.urlsplit(base_url()).netloc
+    """Load this host's pairing token without exposing it in argv or output.
+
+    The macOS keychain is the store of record. Where there is no keychain
+    (Windows, Linux, CI) the token may come from the environment instead —
+    JARVIS_PAIRING_TOKEN (or the Desk's JARVIS_DESK_TOKEN) — but only when
+    JARVIS_DEVICE_HOST names the same device this command is talking to,
+    the rule live-device.py and jarvis-desk.py already apply. A token bound
+    to one Nano must never ride along to another because --host changed."""
+    base = base_url()
+    account = "jarvis-desk@" + urllib.parse.urlsplit(base).netloc
     try:
         result = subprocess.run(
             ["security", "find-generic-password", "-a", account,
@@ -73,14 +94,18 @@ def pairing_token() -> str | None:
             text=True,
             check=False,
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
+        result = None
+    if result is not None and result.returncode == 0:
+        token = result.stdout.rstrip("\r\n")
+        return token if valid_pairing_token(token) else None
+
+    token = (os.environ.get("JARVIS_PAIRING_TOKEN")
+             or os.environ.get("JARVIS_DESK_TOKEN") or "")
+    bound_host = os.environ.get("JARVIS_DEVICE_HOST", "").strip()
+    if not token or not bound_host:
         return None
-    if result.returncode != 0:
-        return None
-    token = result.stdout.rstrip("\r\n")
-    encoded = token.encode("utf-8")
-    if not (32 <= len(encoded) <= 64) or any(
-            byte <= 0x20 or byte == 0x7F for byte in encoded):
+    if normalize_host(bound_host) != base or not valid_pairing_token(token):
         return None
     return token
 
@@ -173,15 +198,36 @@ def cmd_demo() -> int:
     return 0
 
 
+def ppm_to_png(ppm: str, out: str) -> bool:
+    """PIL first — it is on every platform we run this from. `sips` is the
+    macOS-only fallback and is consulted only when it exists: calling it
+    blind raised FileNotFoundError on Windows before the PIL branch could
+    run (2026-09-05)."""
+    try:
+        from PIL import Image
+    except ImportError:
+        Image = None
+    if Image is not None:
+        Image.open(ppm).save(out)
+        return True
+    if shutil.which("sips"):
+        return subprocess.run(["sips", "-s", "format", "png", ppm, "--out", out],
+                              capture_output=True).returncode == 0
+    return False
+
+
 def cmd_screen(out: str = "glass.png") -> int:
     ppm = out + ".ppm"
     with open(ppm, "wb") as f:
         f.write(api("/api/display/snapshot.ppm", timeout=20))
-    if subprocess.run(["sips", "-s", "format", "png", ppm, "--out", out],
-                      capture_output=True).returncode != 0:
-        from PIL import Image
-        Image.open(ppm).save(out)
-    os.unlink(ppm)
+    try:
+        if not ppm_to_png(ppm, out):
+            print(f"{ppm} kept — no PNG converter (pip install pillow)",
+                  file=sys.stderr)
+            return 1
+    finally:
+        if os.path.exists(out):
+            os.unlink(ppm)
     print(out)
     return 0
 
@@ -264,10 +310,20 @@ def cmd_update() -> int:
         ["bash", os.path.join(HERE, "flash-v5.sh")], env=env)
 
 
+def esptool_python() -> str:
+    """The esptool venv's interpreter: bin/python on POSIX, Scripts\\python.exe
+    on Windows. Falls back to this interpreter, where esptool may be installed
+    globally, rather than failing on a path that was only ever true on a Mac."""
+    venv = os.path.join(HERE, "..", ".build_tools", "esptool")
+    for candidate in (os.path.join(venv, "bin", "python"),
+                      os.path.join(venv, "Scripts", "python.exe")):
+        if os.path.exists(candidate):
+            return candidate
+    return sys.executable
+
+
 def cmd_reboot() -> int:
-    esptool = os.path.join(HERE, "..", ".build_tools", "esptool", "bin",
-                           "python")
-    return subprocess.call([esptool, "-m", "esptool", "--after",
+    return subprocess.call([esptool_python(), "-m", "esptool", "--after",
                             "watchdog-reset", "flash-id"],
                            stdout=subprocess.DEVNULL)
 

@@ -98,6 +98,24 @@ def check_thresholds() -> list[str]:
     else:
         lines.append(f"{OK} no dead band (tap slop {tap} >= swipe min {swipe}) "
                      f"— every contact classifies as tap or swipe")
+    # The hold slop must not exceed the swipe threshold either. The 850 ms
+    # timer fires LONG_PRESS mid-hold and suppresses the release classifier,
+    # so any drift that is "still a hold" but "already a swipe" is decided by
+    # the clock, not the finger: a slow slide on the volume rail becomes a
+    # hold. At 48 vs 42 that muted the device (2026-09-05, start (47,101),
+    # 42 px in 870 ms).
+    hold_slop = d.get("TOUCH_HOLD_SLOP_PX")
+    if hold_slop is None:
+        lines.append(f"{WARN} could not read TOUCH_HOLD_SLOP_PX")
+    elif hold_slop > swipe:
+        lines.append(
+            f"{BAD} HOLD/SWIPE OVERLAP: drift {swipe}..{hold_slop} px is still a "
+            f"hold (hold slop {hold_slop} > swipe min {swipe}), and the 850 ms "
+            f"timer fires first — a slow slide on the rim becomes a privacy "
+            f"toggle. Set TOUCH_HOLD_SLOP_PX <= TOUCH_SWIPE_MIN_TRAVEL_PX.")
+    else:
+        lines.append(f"{OK} no hold/swipe overlap (hold slop {hold_slop} <= "
+                     f"swipe min {swipe}) — a slide can never age into a hold")
     edge = d.get("TOUCH_TOP_EDGE_MAX_Y")
     if edge:
         R = 233.0
@@ -139,16 +157,21 @@ def check_invariants() -> list[str]:
     except OSError:
         return [f"{WARN} could not read main/main.c"]
 
-    # 1. The ADJUST no-ripple predicate must match the rim test it mirrors.
-    #    Their comments say so; if they drift, a level slide starts rippling.
+    # 1. The ADJUST no-ripple predicate, the swipe handler's rim test and the
+    #    rim-hold guard in the long-press consumer must all be the same
+    #    annulus. Their comments say so; if they drift, a level slide starts
+    #    rippling, or a hold that started on the volume rail mutes the device
+    #    again (2026-09-05).
     rim_tests = main_c.count("(168 * 168)")
-    if rim_tests >= 2:
+    if rim_tests >= 3:
         lines.append(f"{OK} rim annulus predicate appears {rim_tests}x "
-                     f"(layer-0 ADJUST guard and the swipe handler agree)")
+                     f"(layer-0 ADJUST guard, the swipe handler and the "
+                     f"rim-hold guard agree)")
     else:
-        lines.append(f"{BAD} rim annulus predicate appears {rim_tests}x — the "
-                     f"ADJUST no-ripple guard has drifted from the rim test, "
-                     f"so a level slide will ripple again")
+        lines.append(f"{BAD} rim annulus predicate appears {rim_tests}x, "
+                     f"expected 3 — one of the ADJUST no-ripple guard, the "
+                     f"swipe rim test or the long-press rim guard has drifted: "
+                     f"a level slide ripples, or a rim hold toggles privacy")
 
     # 2. No capturing surface may wipe the caption that names its exit.
     clears = main_c.count("jr_display_caption_clear()")
@@ -272,12 +295,22 @@ def check_display(base: str) -> list[str]:
 
 def run(base: str) -> int:
     print(f"gesture-doctor -> {base}\n")
+    # An unreachable device must fail in seconds, not minutes: the arc sweep
+    # is 36 GETs, each with its own timeout, and against a dead host that is
+    # several minutes of silence before a verdict. Probe once; if the device
+    # is not there, still lint the tree (those checks need no device) and
+    # skip every section that would only time out again.
+    display = check_display(base)
+    reachable = not display[0].startswith(BAD)
+    unreachable = [f"{WARN} skipped — device unreachable (see above)"]
     sections = [
-        ("reachability + display", lambda: check_display(base)),
-        ("touch events (is the gesture the RIGHT KIND?)", lambda: check_touch(base)),
+        ("reachability + display", lambda: display),
+        ("touch events (is the gesture the RIGHT KIND?)",
+         (lambda: check_touch(base)) if reachable else (lambda: unreachable)),
         ("classifier thresholds (source of truth: the tree)", check_thresholds),
         ("design invariants (comments that must stay true)", check_invariants),
-        ("live arc hit sweep (is anything hittable NOW?)", lambda: sweep_arcs(base)),
+        ("live arc hit sweep (is anything hittable NOW?)",
+         (lambda: sweep_arcs(base)) if reachable else (lambda: unreachable)),
     ]
     worst = 0
     for title, fn in sections:
@@ -294,6 +327,12 @@ def run(base: str) -> int:
 
 
 def main() -> int:
+    # The report draws box rules (U+2500). A Windows console defaults to
+    # cp1252 and Python then dies with UnicodeEncodeError on the first one —
+    # the doctor crashed before printing a single check (2026-09-05).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default=os.environ.get("JARVIS_DEVICE_HOST", ""),
@@ -303,8 +342,9 @@ def main() -> int:
                          "the counters move")
     args = ap.parse_args()
     if not args.host:
-        print("set JARVIS_DEVICE_HOST or pass --host "
-              "(find it with: arp -a | grep jarvisnano)", file=sys.stderr)
+        print("set JARVIS_DEVICE_HOST or pass --host (the address is on the "
+              "device's STATUS screen, or in your router's client list as "
+              "jarvisnano)", file=sys.stderr)
         return 2
     base = args.host if args.host.startswith("http") else "http://" + args.host
     base = base.rstrip("/")
