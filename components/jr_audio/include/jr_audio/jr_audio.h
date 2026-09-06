@@ -185,6 +185,15 @@ esp_err_t jr_audio_diag_play_chirp(uint32_t duration_ms,
 esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
                               uint32_t duration_ms, uint8_t level_percent);
 
+/* A short melody: `notes` sine notes at hz[] (80..8000), note_ms each
+ * (20..500), back to back, each under a raised-cosine attack and release so
+ * the boundaries do not click. volume clamps to 1..30 percent like the
+ * sweeps. Rendered whole and queued in one enqueue as UI feedback: it never
+ * counts as a reply for the jitter walk, and it rejects active playback
+ * exactly as the sweeps do, so it can never talk over a reply. */
+esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
+                              uint16_t note_ms, uint8_t volume);
+
 #ifdef __cplusplus
 }
 #endif

@@ -118,7 +118,13 @@ static void speaker_pa_enable(void)
 #define PB_FEED_CHUNK            768        /* one 32 ms 24 kHz write */
 #define DIAG_TAP_SECONDS         2U
 #define DIAG_CLIP_THRESHOLD      32760
-#define DIAG_CHIRP_CHUNK         256U
+/* Earcons are rendered WHOLE into heap scratch and enqueued in one call. They
+ * used to be fed 256 samples at a time from the app task, and the prio-19
+ * feeder drained 768 at a time — a tone starved its own ring (measured
+ * 2026-09-05: four 9 ms holes inside one 100 ms mute sweep). 1500 ms is the
+ * longest tone accepted: 36000 samples, 72 KB, from PSRAM. */
+#define EARCON_MAX_MS            1500U
+#define EARCON_MAX_NOTES         8U
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -168,7 +174,7 @@ static _Atomic bool           s_diag_chirp_enqueuing;
  * had to be diagnosed by ear. These count what the speaker actually got.
  *
  *   underruns    the feeder found the ring EMPTY mid-reply and audio resumed
- *                within PB_GAP_REPLY_MS: a real hole in the sound. The ring
+ *                within JR_JITTER_REPLY_GAP_MS: a real hole in the sound. The ring
  *                also empties at the end of every reply; that is followed by
  *                silence, not by more audio, so it is not counted.
  *   max_gap_ms   the longest such hole.
@@ -177,15 +183,23 @@ static _Atomic bool           s_diag_chirp_enqueuing;
  *                starving the DAC. Sampled on the producer side because the
  *                consumer side trivially reaches zero at every reply's end.
  *   dac_failures esp_codec_dev_write() returning an error.
- * Reset via jr_audio_playback_stats_reset() so a soak starts from zero. */
-#define PB_GAP_REPLY_MS 2500u
+ * Reset via jr_audio_playback_stats_reset() so a soak starts from zero.
+ *
+ * The reply / gap / hole inference itself is jr_jitter in jr_dsp (pure, host
+ * tested); the feeder feeds it once per pass and books what it reports. */
 static _Atomic uint32_t       s_pb_underruns;
 static _Atomic uint32_t       s_pb_max_gap_ms;
 static _Atomic uint32_t       s_pb_low_water_samples;   /* UINT32_MAX = unset */
 static _Atomic uint32_t       s_pb_dac_failures;
 static _Atomic uint32_t       s_pb_gaps_ended_by_silence;
-static uint32_t               s_pb_gap_start_ms;        /* feeder task only */
-static bool                   s_pb_in_gap;              /* feeder task only */
+static jr_jitter_t            s_jitter;                 /* feeder task only */
+
+/* EARCON SAMPLES OUTSTANDING. Every sample a tone enqueues is counted here
+ * and counted back out as the feeder writes it, so the feeder can tell the
+ * stepper "this is UI feedback, not a reply". Without it a mute sweep booked
+ * four holes and stepped the pre-roll 600 -> 900 (2026-09-05). Zeroed by
+ * every ring flush, since the samples go with the ring. */
+static _Atomic uint32_t       s_pb_earcon_samples;
 
 /* START-OF-REPLY PRE-ROLL. The feeder used to play the first sample the
  * moment it landed, so the speaker was only ever as far ahead of the network
@@ -200,7 +214,7 @@ static bool                   s_pb_in_gap;              /* feeder task only */
  * word of a reply that already took seconds to think; it does not apply to
  * diagnostic tones, which are UI feedback and must be immediate. The ring is
  * 512 KiB (~11 s), so holding never drops anything. Priming re-arms once the
- * ring has been empty for PB_GAP_REPLY_MS: the next reply, not a hole. */
+ * ring has been empty for JR_JITTER_REPLY_GAP_MS: the next reply, not a hole. */
 /* Measured 2026-09-01. Nine spoken turns: server stalls inside a reply ran
  * 0.8-1.34 s; at 300/700 one hole of 81-407 ms per turn survived, at 600/1000
  * none. Then a 30-minute soak (18 turns): clean for eleven turns, then seven
@@ -209,68 +223,32 @@ static bool                   s_pb_in_gap;              /* feeder task only */
  * pre-roll now matches the stalls actually seen, and the refill exceeds
  * them, for +0.4 s before a first word that already waits 2-4 s on
  * thinking. Tune live: /api/debug/gain?preroll=&refill=. */
-#define PB_PREROLL_MS_DEFAULT     600u  /* lead before a reply's first word */
+#define PB_PREROLL_MS_DEFAULT    JR_JITTER_PREROLL_FLOOR_MS /* 600: first word */
 #define PB_REFILL_MS_DEFAULT     1500u  /* lead rebuilt after a hole         */
 #define PB_PRIME_MAX_WAIT_MS     2000u  /* never hold longer than this       */
 static _Atomic uint32_t       s_pb_preroll_ms = PB_PREROLL_MS_DEFAULT;
 static _Atomic uint32_t       s_pb_refill_ms  = PB_REFILL_MS_DEFAULT;
-/* ADAPTIVE PRE-ROLL. 600 ms is a second of latency won back; 1500 ms is
- * what the worst measured server stall (2.2 s) needs to stay seamless. The
- * feeder walks between them: any reply with a hole steps the lead up, three
- * clean replies in a row step it back down. A pin from the gain route
- * (preroll > 0) stops the walk; preroll 0 restarts it. */
-#define PB_PREROLL_FLOOR_MS      600u
-#define PB_PREROLL_CEIL_MS      1500u
-#define PB_PREROLL_STEP_UP_MS    300u
-#define PB_PREROLL_STEP_DOWN_MS  200u
-#define PB_CLEAN_REPLIES_TO_STEP   3u
-static _Atomic bool           s_pb_adaptive = true;
-static bool                   s_pb_reply_open;      /* feeder task only */
-static uint32_t               s_pb_reply_holes;     /* feeder task only */
-static uint32_t               s_pb_clean_replies;   /* feeder task only */
-
-static void pb_adapt_preroll(void)
-{
-    if (!atomic_load(&s_pb_adaptive)) {
-        return;
-    }
-    uint32_t pre = atomic_load(&s_pb_preroll_ms);
-    if (s_pb_reply_holes > 0u) {
-        s_pb_clean_replies = 0u;
-        const uint32_t next = pre + PB_PREROLL_STEP_UP_MS > PB_PREROLL_CEIL_MS
-                                  ? PB_PREROLL_CEIL_MS : pre + PB_PREROLL_STEP_UP_MS;
-        if (next != pre) {
-            atomic_store(&s_pb_preroll_ms, next);
-            ESP_LOGI(TAG, "pre-roll %u -> %u ms after %u hole(s)",
-                     (unsigned)pre, (unsigned)next, (unsigned)s_pb_reply_holes);
-        }
-    } else if (++s_pb_clean_replies >= PB_CLEAN_REPLIES_TO_STEP) {
-        s_pb_clean_replies = 0u;
-        const uint32_t next = pre > PB_PREROLL_FLOOR_MS + PB_PREROLL_STEP_DOWN_MS
-                                  ? pre - PB_PREROLL_STEP_DOWN_MS : PB_PREROLL_FLOOR_MS;
-        if (next != pre) {
-            atomic_store(&s_pb_preroll_ms, next);
-            ESP_LOGI(TAG, "pre-roll %u -> %u ms after clean replies",
-                     (unsigned)pre, (unsigned)next);
-        }
-    }
-}
+/* ADAPTIVE PRE-ROLL. The walk (600 floor, 1500 ceiling, +300 per holey
+ * reply, -200 per three clean) lives in jr_jitter, owned by the feeder.
+ * s_pb_preroll_ms is its published value for the prime target and the gain
+ * route's readback; s_pb_preroll_req is the gain route's mailbox to the
+ * feeder (-1 = nothing pending, 0 = reset the walk, >0 = pin), applied on
+ * the feeder's next pass so the stepper stays single-owner. */
+static _Atomic int32_t        s_pb_preroll_req = -1;
 static bool                   s_pb_primed;              /* feeder task only */
 static uint32_t               s_pb_prime_target;        /* samples; feeder  */
 static uint32_t               s_pb_prime_start_ms;      /* feeder task only */
-static uint32_t               s_pb_empty_since_ms;      /* feeder task only */
 static _Atomic bool           s_pb_skip_prime;          /* diagnostic queued */
 static _Atomic uint32_t       s_pb_prerolls;
 static _Atomic uint32_t       s_pb_preroll_timeouts;
 
 void jr_audio_set_jitter_ms(int preroll_ms, int refill_ms)
 {
-    if (preroll_ms == 0) {
-        atomic_store(&s_pb_preroll_ms, PB_PREROLL_FLOOR_MS);
-        atomic_store(&s_pb_adaptive, true);    /* back to the walk */
-    } else if (preroll_ms > 0) {
-        atomic_store(&s_pb_preroll_ms, preroll_ms > 3000 ? 3000u : (uint32_t)preroll_ms);
-        atomic_store(&s_pb_adaptive, false);   /* pinned by hand */
+    if (preroll_ms >= 0) {
+        const uint32_t pre = preroll_ms > 3000 ? 3000u : (uint32_t)preroll_ms;
+        /* Publish now so the route's readback sees it; the feeder pins. */
+        atomic_store(&s_pb_preroll_ms, pre == 0u ? JR_JITTER_PREROLL_FLOOR_MS : pre);
+        atomic_store(&s_pb_preroll_req, (int32_t)pre);
     }
     if (refill_ms >= 0) {
         atomic_store(&s_pb_refill_ms, refill_ms > 3000 ? 3000u : (uint32_t)refill_ms);
@@ -619,9 +597,33 @@ static size_t pb_enqueue(const int16_t *frame, size_t samples,
         }
         s_pb_tail = (s_pb_tail + take) % PB_RING_SAMPLES;
         accepted = take;
+        if (diagnostic) {
+            atomic_fetch_add(&s_pb_earcon_samples, (uint32_t)take);
+        }
     }
     portEXIT_CRITICAL(&s_pb_lock);
     return accepted;
+}
+
+/* The feeder wrote `samples` from the ring: that many fewer earcon samples
+ * are outstanding. Clamped at zero because a chunk can straddle the end of a
+ * tone and the start of a reply queued behind it. */
+static void pb_earcon_drained(size_t samples)
+{
+    uint32_t cur = atomic_load(&s_pb_earcon_samples);
+    while (cur != 0u) {
+        const uint32_t next = cur > samples ? cur - (uint32_t)samples : 0u;
+        if (atomic_compare_exchange_weak(&s_pb_earcon_samples, &cur, next)) {
+            break;
+        }
+    }
+}
+
+/* Empty the ring. Any earcon samples in it go with it. */
+static void pb_flush_locked(void)
+{
+    s_pb_head = s_pb_tail = 0;
+    atomic_store(&s_pb_earcon_samples, 0u);
 }
 
 /* Runtime playback make-up gain in Q8 (256 == 1.0x). Tunable live so the
@@ -693,24 +695,38 @@ static void sink_mute_now(void *ctx)
         esp_codec_dev_set_out_mute(s_dac, true);
     }
     portENTER_CRITICAL(&s_pb_lock);
-    s_pb_head = s_pb_tail = 0;
+    pb_flush_locked();
     portEXIT_CRITICAL(&s_pb_lock);
     atomic_store(&s_playback_tail_until_ms, 0);
 }
 
+/* The feeder's one write chunk. Static, not on the task stack: 1536 B on a
+ * 4096 B internal-RAM stack left 524 B of headroom once ESP_LOGW's vprintf
+ * ran on the hole path (measured 2026-09-05). The feeder is its only user. */
+static int16_t s_feed_chunk[PB_FEED_CHUNK];
+
 static void feeder_task(void *arg)
 {
     (void)arg;
-    int16_t chunk[PB_FEED_CHUNK];
+    int16_t *const chunk = s_feed_chunk;
+    jr_jitter_init(&s_jitter, atomic_load(&s_pb_preroll_ms));
     s_pb_prime_target = atomic_load(&s_pb_preroll_ms) * 24u;
     for (;;) {
         if (atomic_load(&s_muted) || !s_dac_open) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
+        const int32_t req = atomic_exchange(&s_pb_preroll_req, -1);
+        if (req >= 0) {
+            jr_jitter_pin(&s_jitter, (uint32_t)req);
+            atomic_store(&s_pb_preroll_ms, s_jitter.preroll_ms);
+        }
         size_t got = 0;
         const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
         bool hold = false;
+        /* Read BEFORE this pass's write decrements it, so the chunk about to
+         * be written still counts as the tone's. */
+        const bool earcon = atomic_load(&s_pb_earcon_samples) > 0u;
         portENTER_CRITICAL(&s_pb_lock);
         size_t avail = pb_count_locked();
         if (avail > 0 && !s_pb_primed) {
@@ -737,24 +753,32 @@ static void feeder_task(void *arg)
         got = take;
         portEXIT_CRITICAL(&s_pb_lock);
 
-        /* Data is back (held or not): close any hole that was open. The gap
-         * is measured to ARRIVAL, so a refill hold is not counted as more
-         * hole than the network actually left. */
-        if (avail > 0) {
-            s_pb_empty_since_ms = 0u;
-            s_pb_reply_open = true;
-            if (s_pb_in_gap) {
-                const uint32_t gap = now_ms - s_pb_gap_start_ms;
-                s_pb_in_gap = false;
-                if (gap <= PB_GAP_REPLY_MS) {
-                    atomic_fetch_add(&s_pb_underruns, 1u);
-                    s_pb_reply_holes++;
-                    if (gap > atomic_load(&s_pb_max_gap_ms)) {
-                        atomic_store(&s_pb_max_gap_ms, gap);
-                    }
-                    ESP_LOGW(TAG, "playback underrun: %u ms hole mid-reply",
-                             (unsigned)gap);
-                }
+        /* One pass of the reply / hole inference; book what it reports. It
+         * sees nothing while an earcon owns the ring — the pure stepper's
+         * host tests pin exactly which passes count. */
+        jr_jitter_out_t jo;
+        jr_jitter_feed(&s_jitter, now_ms, (uint32_t)avail,
+                       pb_tail_active(now_ms), earcon, &jo);
+        if (jo.hole_booked) {
+            atomic_fetch_add(&s_pb_underruns, 1u);
+            if (jo.hole_ms > atomic_load(&s_pb_max_gap_ms)) {
+                atomic_store(&s_pb_max_gap_ms, jo.hole_ms);
+            }
+            ESP_LOGW(TAG, "playback underrun: %u ms hole mid-reply",
+                     (unsigned)jo.hole_ms);
+        }
+        if (jo.gap_ended) {
+            atomic_fetch_add(&s_pb_gaps_ended_by_silence, 1u);
+        }
+        if (jo.preroll_changed) {
+            atomic_store(&s_pb_preroll_ms, jo.preroll_ms);
+            if (jo.reply_holes > 0u) {
+                ESP_LOGI(TAG, "pre-roll %u -> %u ms after %u hole(s)",
+                         (unsigned)jo.preroll_prev_ms, (unsigned)jo.preroll_ms,
+                         (unsigned)jo.reply_holes);
+            } else {
+                ESP_LOGI(TAG, "pre-roll %u -> %u ms after clean replies",
+                         (unsigned)jo.preroll_prev_ms, (unsigned)jo.preroll_ms);
             }
         }
         if (hold) {
@@ -762,30 +786,17 @@ static void feeder_task(void *arg)
             continue;
         }
         if (got == 0) {
-            if (!s_pb_in_gap && pb_tail_active(now_ms)) {
+            if (jo.gap_opened) {
                 /* The ring ran dry while the tail of the last write was still
                  * audible: a hole. Whatever arrives next must rebuild a
                  * bigger lead before playing, so the NEXT hole is absorbed. */
-                s_pb_in_gap = true;
-                s_pb_gap_start_ms = now_ms;
                 s_pb_primed = false;
                 s_pb_prime_start_ms = 0u;
                 s_pb_prime_target = atomic_load(&s_pb_refill_ms) * 24u;
-            } else if (s_pb_in_gap &&
-                       now_ms - s_pb_gap_start_ms > PB_GAP_REPLY_MS) {
-                s_pb_in_gap = false;    /* silence followed: a reply ended */
-                atomic_fetch_add(&s_pb_gaps_ended_by_silence, 1u);
             }
             /* Once the ring has been empty long enough that whatever comes
              * next is a new reply, re-arm the smaller start-of-reply lead. */
-            if (s_pb_empty_since_ms == 0u) {
-                s_pb_empty_since_ms = now_ms;
-            } else if (now_ms - s_pb_empty_since_ms > PB_GAP_REPLY_MS) {
-                if (s_pb_reply_open) {           /* once, as the reply ends */
-                    s_pb_reply_open = false;
-                    pb_adapt_preroll();
-                    s_pb_reply_holes = 0u;
-                }
+            if (jo.idle) {
                 s_pb_primed = false;
                 s_pb_prime_start_ms = 0u;
                 s_pb_prime_target = atomic_load(&s_pb_preroll_ms) * 24u;
@@ -799,6 +810,11 @@ static void feeder_task(void *arg)
         int wr = esp_codec_dev_write(s_dac, chunk,
                                      (int)(got * sizeof(int16_t)));
         atomic_store(&s_feeder_writing, false);
+        /* After the write, so the earcon's tail in the stepper starts where
+         * the DAC's does: the first pass with no outstanding samples. */
+        if (earcon) {
+            pb_earcon_drained(got);
+        }
         if (wr == ESP_CODEC_DEV_OK) {
             /* codec-dev may apply software volume in place, so capture after
              * the successful write to reflect the submitted PCM exactly. */
@@ -1030,7 +1046,7 @@ bool jr_audio_dac_muted(void)
 void jr_audio_flush_playback(void)
 {
     portENTER_CRITICAL(&s_pb_lock);
-    s_pb_head = s_pb_tail = 0;
+    pb_flush_locked();
     portEXIT_CRITICAL(&s_pb_lock);
     atomic_store(&s_playback_tail_until_ms, 0);
 }
@@ -1186,14 +1202,17 @@ esp_err_t jr_audio_diag_copy(jr_audio_tap_kind_t kind, int16_t *dst,
     return ESP_OK;
 }
 
-esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
-                              uint32_t duration_ms, uint8_t level_percent)
+/* ---- earcons: rendered whole, queued once ----
+ *
+ * Claim the earcon lane for a tone of `total` samples. Never disturbs a live
+ * response: rejects while playback is pending, rechecks after claiming the
+ * lane to close the race with the normal sink writer, and reserves ring
+ * capacity. On ESP_OK the caller owns the lane until earcon_release(). */
+static esp_err_t earcon_claim(size_t total)
 {
     if (!s_ready || !s_dac_open || s_pb == NULL || s_feeder == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-    /* Never disturb a live response. Recheck after claiming the enqueue lane
-     * to close the race with the normal sink writer. */
     if (jr_audio_playback_pending()) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -1206,9 +1225,55 @@ esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
         atomic_store(&s_diag_chirp_enqueuing, false);
         return ESP_ERR_INVALID_STATE;
     }
+    portENTER_CRITICAL(&s_pb_lock);
+    size_t free_slots = PB_RING_SAMPLES - 1U - pb_count_locked();
+    portEXIT_CRITICAL(&s_pb_lock);
+    if (total > free_slots) {
+        atomic_store(&s_diag_chirp_enqueuing, false);
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
 
+static void earcon_release(void)
+{
+    atomic_store(&s_diag_chirp_enqueuing, false);
+}
+
+/* Scratch for one whole tone. PSRAM first: the tone is copied into the
+ * PSRAM ring anyway, and 72 KB of internal RAM is the TLS budget. */
+static int16_t *earcon_scratch(size_t total)
+{
+    int16_t *pcm = (int16_t *)heap_caps_malloc(total * sizeof(int16_t),
+                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (pcm == NULL) {
+        pcm = (int16_t *)heap_caps_malloc(total * sizeof(int16_t), MALLOC_CAP_8BIT);
+    }
+    return pcm;
+}
+
+/* Queue a rendered tone in ONE enqueue, unmute, release the lane. */
+static esp_err_t earcon_commit(const int16_t *pcm, size_t total)
+{
+    if (pb_enqueue(pcm, total, true) != total) {
+        /* Capacity was reserved and normal writers are excluded, so this is
+         * defensive rather than expected. Do not release a fragment. */
+        portENTER_CRITICAL(&s_pb_lock);
+        pb_flush_locked();
+        portEXIT_CRITICAL(&s_pb_lock);
+        earcon_release();
+        return ESP_FAIL;
+    }
+    jr_audio_dac_unmute();
+    earcon_release();
+    return ESP_OK;
+}
+
+esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
+                              uint32_t duration_ms, uint8_t level_percent)
+{
     if (duration_ms < 100U) duration_ms = 100U;
-    if (duration_ms > 1500U) duration_ms = 1500U;
+    if (duration_ms > EARCON_MAX_MS) duration_ms = EARCON_MAX_MS;
     if (level_percent < 1U) level_percent = 1U;
     if (level_percent > 30U) level_percent = 30U;
     if (start_hz < 80U)   start_hz = 80U;
@@ -1217,62 +1282,101 @@ esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
     if (end_hz   > 8000U) end_hz   = 8000U;
 
     const size_t total = (size_t)GL_RX_SAMPLE_RATE * duration_ms / 1000U;
-    portENTER_CRITICAL(&s_pb_lock);
-    size_t free_slots = PB_RING_SAMPLES - 1U - pb_count_locked();
-    portEXIT_CRITICAL(&s_pb_lock);
-    if (total > free_slots) {
-        atomic_store(&s_diag_chirp_enqueuing, false);
+    esp_err_t err = earcon_claim(total);
+    if (err != ESP_OK) {
+        return err;
+    }
+    int16_t *pcm = earcon_scratch(total);
+    if (pcm == NULL) {
+        earcon_release();
         return ESP_ERR_NO_MEM;
     }
 
-    int16_t chunk[DIAG_CHIRP_CHUNK];
     const float duration_s = (float)duration_ms / 1000.0f;
     const float sweep_hz_per_s =
         ((float)end_hz - (float)start_hz) / duration_s;
     const float amplitude = 32767.0f * (float)level_percent / 100.0f;
     const size_t fade_samples = GL_RX_SAMPLE_RATE / 100U; /* 10 ms */
 
-    size_t queued = 0;
-    while (queued < total) {
-        size_t count = total - queued;
-        if (count > DIAG_CHIRP_CHUNK) {
-            count = DIAG_CHIRP_CHUNK;
+    for (size_t i = 0; i < total; ++i) {
+        float t = (float)i / (float)GL_RX_SAMPLE_RATE;
+        float phase = 2.0f * (float)M_PI *
+                      ((float)start_hz * t + 0.5f * sweep_hz_per_s * t * t);
+        float envelope = 1.0f;
+        if (i < fade_samples) {
+            envelope = (float)(i + 1U) / (float)fade_samples;
         }
-        for (size_t i = 0; i < count; ++i) {
-            size_t sample_index = queued + i;
-            float t = (float)sample_index / (float)GL_RX_SAMPLE_RATE;
-            float phase = 2.0f * (float)M_PI *
-                          ((float)start_hz * t +
-                           0.5f * sweep_hz_per_s * t * t);
-            float envelope = 1.0f;
-            if (sample_index < fade_samples) {
-                envelope = (float)(sample_index + 1U) / (float)fade_samples;
+        size_t remaining = total - i;
+        if (remaining < fade_samples) {
+            float fade_out = (float)remaining / (float)fade_samples;
+            if (fade_out < envelope) {
+                envelope = fade_out;
             }
-            size_t remaining = total - sample_index;
-            if (remaining < fade_samples) {
-                float fade_out = (float)remaining / (float)fade_samples;
-                if (fade_out < envelope) {
-                    envelope = fade_out;
-                }
-            }
-            chunk[i] = (int16_t)(amplitude * envelope * sinf(phase));
         }
-        size_t accepted = pb_enqueue(chunk, count, true);
-        if (accepted != count) {
-            /* Capacity was reserved and normal writers are excluded, so this
-             * is defensive rather than expected. Do not release a fragment. */
-            portENTER_CRITICAL(&s_pb_lock);
-            s_pb_head = s_pb_tail = 0;
-            portEXIT_CRITICAL(&s_pb_lock);
-            atomic_store(&s_diag_chirp_enqueuing, false);
-            return ESP_FAIL;
-        }
-        queued += count;
+        pcm[i] = (int16_t)(amplitude * envelope * sinf(phase));
     }
 
-    jr_audio_dac_unmute();
-    atomic_store(&s_diag_chirp_enqueuing, false);
-    return ESP_OK;
+    err = earcon_commit(pcm, total);
+    heap_caps_free(pcm);
+    return err;
+}
+
+esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
+                              uint16_t note_ms, uint8_t volume)
+{
+    if (hz == NULL || notes == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (notes > EARCON_MAX_NOTES) notes = EARCON_MAX_NOTES;
+    if (note_ms < 20U)  note_ms = 20U;
+    if (note_ms > 500U) note_ms = 500U;
+    if (volume < 1U)  volume = 1U;
+    if (volume > 30U) volume = 30U;
+
+    const size_t per_note = (size_t)GL_RX_SAMPLE_RATE * note_ms / 1000U;
+    const size_t total = per_note * notes;
+    esp_err_t err = earcon_claim(total);
+    if (err != ESP_OK) {
+        return err;
+    }
+    int16_t *pcm = earcon_scratch(total);
+    if (pcm == NULL) {
+        earcon_release();
+        return ESP_ERR_NO_MEM;
+    }
+
+    /* Each note starts at phase zero under a raised-cosine attack and ends
+     * under the matching release, so a note boundary is a zero crossing with
+     * a zero slope on both sides: no click between notes, none at the ends.
+     * 8 ms ramps, or a quarter of the note when the note is shorter. */
+    const float amplitude = 32767.0f * (float)volume / 100.0f;
+    size_t ramp = (size_t)GL_RX_SAMPLE_RATE * 8U / 1000U;
+    if (ramp > per_note / 4U) {
+        ramp = per_note / 4U;
+    }
+    if (ramp == 0U) {
+        ramp = 1U;
+    }
+    for (size_t n = 0; n < notes; ++n) {
+        uint16_t f = hz[n];
+        if (f < 80U)   f = 80U;
+        if (f > 8000U) f = 8000U;
+        const float step = 2.0f * (float)M_PI * (float)f / (float)GL_RX_SAMPLE_RATE;
+        int16_t *note = &pcm[n * per_note];
+        for (size_t i = 0; i < per_note; ++i) {
+            float envelope = 1.0f;
+            if (i < ramp) {
+                envelope = 0.5f * (1.0f - cosf((float)M_PI * (float)i / (float)ramp));
+            } else if (per_note - i <= ramp) {
+                envelope = 0.5f * (1.0f - cosf((float)M_PI * (float)(per_note - i) / (float)ramp));
+            }
+            note[i] = (int16_t)(amplitude * envelope * sinf(step * (float)i));
+        }
+    }
+
+    err = earcon_commit(pcm, total);
+    heap_caps_free(pcm);
+    return err;
 }
 
 esp_err_t jr_audio_diag_play_chirp(uint32_t duration_ms, uint8_t level_percent)

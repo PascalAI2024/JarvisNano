@@ -47,6 +47,7 @@ add_executable(jr_host_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_transport.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_soak.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_mood.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_jitter.c
     ${CMAKE_CURRENT_SOURCE_DIR}/fakes/fake_clock.c
     ${CMAKE_CURRENT_SOURCE_DIR}/fakes/fake_ws_transport.c
     ${CMAKE_CURRENT_SOURCE_DIR}/unity/unity.c

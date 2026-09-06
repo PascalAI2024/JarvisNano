@@ -38,6 +38,8 @@ extern void soak_tests_run(void);
 extern void mood_tests_run(void);
 /* The rain warning and the morning briefing (wave N13), pure. */
 extern void glance_tests_run(void);
+/* The playback feeder's reply / hole / pre-roll walk and its earcon guard. */
+extern void jitter_tests_run(void);
 
 /* ---- shared fixtures ---- */
 static jr_clock_t g_clk;
@@ -1926,6 +1928,9 @@ int main(void)
 
     /* What the glass says unasked: the rain window and the morning glance. */
     glance_tests_run();
+
+    /* The playback feeder's reply / hole / pre-roll walk, and its earcon guard. */
+    jitter_tests_run();
 
     return UNITY_END();
 }
