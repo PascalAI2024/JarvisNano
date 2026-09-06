@@ -1661,43 +1661,6 @@ static inline void cov_span(uint16_t *cov, int32_t xl, int32_t xr, int *lo, int 
     cov[p1] = (uint16_t)(cov[p1] + (xr - (p1 << 4)));
 }
 
-/* cov_span into one byte of a packed row: sh 0 is the low byte, 8 the high.
- * A byte holds AA_FULL, and the two flanks of a hand never overlap, so the
- * low byte cannot carry into the high one. */
-static inline void cov_span_sh(uint16_t *cov, int32_t xl, int32_t xr, int *lo,
-                               int *hi, int sh)
-{
-    if (xr <= xl) {
-        return;
-    }
-    if (xl < 0) {
-        xl = 0;
-    }
-    if (xr > (HUD_W << 4)) {
-        xr = HUD_W << 4;
-    }
-    if (xr <= xl) {
-        return;
-    }
-    const int p0 = (int)(xl >> 4);
-    const int p1 = (int)((xr - 1) >> 4);
-    if (p0 < *lo) {
-        *lo = p0;
-    }
-    if (p1 > *hi) {
-        *hi = p1;
-    }
-    if (p0 == p1) {
-        cov[p0] = (uint16_t)(cov[p0] + ((xr - xl) << sh));
-        return;
-    }
-    cov[p0] = (uint16_t)(cov[p0] + ((16 - (xl & 15)) << sh));
-    for (int p = p0 + 1; p < p1; ++p) {
-        cov[p] = (uint16_t)(cov[p] + (16 << sh));
-    }
-    cov[p1] = (uint16_t)(cov[p1] + ((xr - (p1 << 4)) << sh));
-}
-
 static inline void HOT cov_blend(uint16_t *row, const uint16_t *cov, int lo, int hi,
                                  wrgb_t c, int alpha, bool swap, int full)
 {
@@ -1808,108 +1771,6 @@ static void HOT aa_fill(const strip_t *s, const wpoly_t *p, wrgb_t c, int alpha,
                       alpha, swap, full);
             memset(cov + lo, 0, (size_t)(hi - lo + 1) * sizeof cov[0]);
         }
-    }
-}
-
-/* THE OUTLINE, FOLDED INTO THE FLANKS. A bevelled hand's hairline rim used
- * to be a third full-width fill under the two flanks: every pixel of the
- * body blended once for a rim the flanks then covered, and each of the
- * three fills walked its own rows. Here the three polygons — `outer`, the
- * whole hand widened and lengthened by the rim, in rc at ra; `light` and
- * `dark`, the two flanks, in cl and cd at alpha — are solved in ONE pass:
- * the outer coverage in s_cov, the two flanks packed into s_cov2 (light in
- * the low byte, dark in the high; a byte holds AA_FULL = 128). The rim is
- * the outer coverage the flanks leave, so its caps and edges keep the full
- * polygon's coverage, and the body is written once. Three rows of setup and
- * three blend passes become one: an outlined hand costs one fill more than
- * a plain one, not three. */
-static uint16_t s_cov2[HUD_W];
-
-static void HOT aa_fill_hand(const strip_t *s, const wpoly_t *outer,
-                             const wpoly_t *light, const wpoly_t *dark,
-                             wrgb_t rc, int ra, wrgb_t cl, wrgb_t cd,
-                             int alpha, bool swap, int sub)
-{
-    if (outer->n < 3 || light->n < 3 || dark->n < 3 || alpha <= 0) {
-        return;
-    }
-    const int step = 16 / sub, full = sub * 16;
-    const wpoly_t *poly[3] = { outer, light, dark };
-    int32_t ymin[3], ymax[3];
-    aa_edge_t ea[3][8], eb[3][8];
-    int na[3], nb[3], ia[3] = { 0, 0, 0 }, ib[3] = { 0, 0, 0 };
-    for (int k = 0; k < 3; ++k) {
-        const wpoly_t *p = poly[k];
-        int top = 0, bot = 0;
-        for (int i = 1; i < p->n; ++i) {
-            if (p->y[i] < p->y[top]) top = i;
-            if (p->y[i] > p->y[bot]) bot = i;
-        }
-        ymin[k] = p->y[top];
-        ymax[k] = p->y[bot];
-        na[k] = aa_chain(p, top, bot, +1, ea[k]);
-        nb[k] = aa_chain(p, top, bot, -1, eb[k]);
-        if (na[k] == 0 || nb[k] == 0) {
-            ymax[k] = ymin[k];                  /* degenerate: contributes nothing */
-        }
-    }
-    int y_lo = (int)(ymin[0] >> 4), y_hi = (int)((ymax[0] + 15) >> 4);
-    if (y_lo < s->y0) y_lo = s->y0;
-    if (y_hi > s->y1 - 1) y_hi = s->y1 - 1;
-    if (y_lo > y_hi || ymax[0] <= ymin[0]) {
-        return;
-    }
-    uint16_t *const cov = s_cov, *const cov2 = s_cov2;
-    const uint16_t solid_l = pack565(cl.r, cl.g, cl.b, swap);
-    const uint16_t solid_d = pack565(cd.r, cd.g, cd.b, swap);
-    for (int y = y_lo; y <= y_hi; ++y) {
-        int lo = HUD_W, hi = -1;
-        const int32_t yr = (int32_t)y << 4;
-        for (int l = 0; l < sub; ++l) {
-            const int32_t ys = yr + l * step + step / 2;
-            for (int k = 0; k < 3; ++k) {
-                if (ys < ymin[k] || ys >= ymax[k]) {
-                    continue;
-                }
-                const int32_t xa = aa_chain_x(ea[k], na[k], &ia[k], ys);
-                const int32_t xb = aa_chain_x(eb[k], nb[k], &ib[k], ys);
-                const int32_t xl = xa < xb ? xa : xb, xr = xa < xb ? xb : xa;
-                if (k == 0) {
-                    cov_span(cov, xl, xr, &lo, &hi);
-                } else {
-                    cov_span_sh(cov2, xl, xr, &lo, &hi, k == 1 ? 0 : 8);
-                }
-            }
-        }
-        if (hi < lo) {
-            continue;
-        }
-        uint16_t *row = s->base + (size_t)(y - s->y0) * HUD_W;
-        for (int x = lo; x <= hi; ++x) {
-            const int c_l = cov2[x] & 0xFF, c_d = cov2[x] >> 8;
-            const int body = c_l + c_d;
-            const int co = cov[x] > body ? cov[x] : body;   /* never inside the body */
-            const int rim = co - body;
-            if (rim != 0 && ra > 0) {
-                row[x] = w_blend(row[x], rc, (rim * ra) / full, swap);
-            }
-            if (c_l >= full && alpha >= 256) {
-                row[x] = solid_l;
-            } else if (c_l != 0) {
-                row[x] = w_blend(row[x], cl,
-                                 (c_l >= full ? alpha : (c_l * alpha) / full),
-                                 swap);
-            }
-            if (c_d >= full && alpha >= 256) {
-                row[x] = solid_d;
-            } else if (c_d != 0) {
-                row[x] = w_blend(row[x], cd,
-                                 (c_d >= full ? alpha : (c_d * alpha) / full),
-                                 swap);
-            }
-        }
-        memset(cov + lo, 0, (size_t)(hi - lo + 1) * sizeof cov[0]);
-        memset(cov2 + lo, 0, (size_t)(hi - lo + 1) * sizeof cov2[0]);
     }
 }
 
@@ -2065,20 +1926,14 @@ static void draw_hand(const strip_t *s, int32_t cx, int32_t cy, uint32_t a16,
         aa_fill(s, &p, h->body, (56 * A) >> 8, swap, poly_sub(h->w0 + 40, h->w1 + 40));
     }
     if (h->outline) {
-        /* the hairline rim and both flanks in one pass */
-        wpoly_t o, q;
-        hand_poly(&o, cx, cy, a16, h->u0 - 12, h->u1 + 14, h->w0 + 14, h->w1 + 14, 0);
-        hand_poly(&p, cx, cy, a16, h->u0, h->u1, h->w0, h->w1, light_side);
-        hand_poly(&q, cx, cy, a16, h->u0, h->u1, h->w0, h->w1, -light_side);
-        aa_fill_hand(s, &o, &p, &q, W_DARK, (220 * A) >> 8, light, dark, A, swap,
-                     poly_sub(h->w0, h->w1));
-    } else {
-        const int sub = poly_sub(h->w0, h->w1);
-        hand_poly(&p, cx, cy, a16, h->u0, h->u1, h->w0, h->w1, light_side);
-        aa_fill(s, &p, light, A, swap, sub);
-        hand_poly(&p, cx, cy, a16, h->u0, h->u1, h->w0, h->w1, -light_side);
-        aa_fill(s, &p, dark, A, swap, sub);
+        hand_poly(&p, cx, cy, a16, h->u0 - 12, h->u1 + 14, h->w0 + 14, h->w1 + 14, 0);
+        aa_fill(s, &p, W_DARK, (220 * A) >> 8, swap, poly_sub(h->w0 + 14, h->w1 + 14));
     }
+    const int sub = poly_sub(h->w0, h->w1);
+    hand_poly(&p, cx, cy, a16, h->u0, h->u1, h->w0, h->w1, light_side);
+    aa_fill(s, &p, light, A, swap, sub);
+    hand_poly(&p, cx, cy, a16, h->u0, h->u1, h->w0, h->w1, -light_side);
+    aa_fill(s, &p, dark, A, swap, sub);
     if (h->lume_w > 0) {
         hand_poly(&p, cx, cy, a16, h->lume_u0, h->lume_u1, h->lume_w, h->lume_w / 2, 0);
         aa_fill(s, &p, W_CREAM, A, swap, poly_sub(h->lume_w, h->lume_w / 2));

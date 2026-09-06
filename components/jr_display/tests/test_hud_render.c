@@ -1869,7 +1869,7 @@ static void test_watch_rim_ticks_are_pinned(void)
     free(fb);
 }
 
-/* The folded outline is still a rim. An outlined hand (DIVER, PILOT) on a
+/* The outline is a rim. An outlined hand (DIVER, PILOT) on a
  * mid-grey dial (66 per channel) leaves a band of pixels darker than the
  * dial along both flanks and the caps — the 0.875 px rim of W_DARK at 86 %
  * covers at least half of one pixel per row and side, and that pixel sums
