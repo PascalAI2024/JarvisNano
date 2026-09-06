@@ -66,6 +66,14 @@ static int test_fixed_templates(void)
     CHECK(build("weather_glance", "{}") == JR_TOOL_TEMPLATE_OK, "weather_glance builds");
     CHECK(starts(g_out, "const w=await jarvis.weather(26.1224,-80.1373);"),
           "weather_glance is Fort Lauderdale in code");
+    CHECK(strstr(g_out, "api.open-meteo.com/v1/forecast?latitude=26.1224&longitude=-80.1373"
+                        "&daily=sunrise,sunset&hourly=precipitation_probability") != NULL,
+          "weather_glance asks Open-Meteo for the sun and the hours");
+    CHECK(strstr(g_out, "try{") != NULL && strstr(g_out, "}catch(e){}") != NULL,
+          "the extra fetch cannot fail the glance");
+    CHECK(strstr(g_out, "v==null?255:") != NULL,
+          "a missing hour reads 255, never 0");
+    CHECK(strstr(g_out, ".slice(0,36)") != NULL, "36 hours from today's midnight");
 
     CHECK(build("search_tools", "{\"query\":\"read calendar events\"}") == JR_TOOL_TEMPLATE_OK,
           "search_tools builds");

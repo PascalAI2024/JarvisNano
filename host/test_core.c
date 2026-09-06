@@ -36,6 +36,8 @@ extern void transport_tests_run(void);
  * defined in host/test_soak.c; registered inside this file's UNITY_BEGIN/END. */
 extern void soak_tests_run(void);
 extern void mood_tests_run(void);
+/* The rain warning and the morning briefing (wave N13), pure. */
+extern void glance_tests_run(void);
 
 /* ---- shared fixtures ---- */
 static jr_clock_t g_clk;
@@ -1921,6 +1923,9 @@ int main(void)
 
     /* Four-mood rest ladder (Phase 5 product, no hardware). */
     mood_tests_run();
+
+    /* What the glass says unasked: the rain window and the morning glance. */
+    glance_tests_run();
 
     return UNITY_END();
 }

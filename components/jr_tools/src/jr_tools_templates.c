@@ -79,9 +79,23 @@ static const template_desc_t s_templates[] = {
      * in, converted on the device. */
     {"weather_glance", "query", 1U, true,
      "const w=await jarvis.weather(26.1224,-80.1373);const c=w.current||{};"
-     "const d=(w.daily||[])[0]||{};return {t:c.temperature,f:c.feelsLike,"
+     "const d=(w.daily||[])[0]||{};"
+     /* The gateway's weather has no sun and no hours, so the same call asks
+      * Open-Meteo for today's sunrise/sunset (minutes past local midnight)
+      * and 36 hourly rain probabilities from today's midnight — 226 bytes
+      * all told, measured 2026-09-05. Its own try: a glance never fails
+      * because the extra did, and a missing hour reads 255, never 0. */
+     "let x={};try{const m=await jarvis.fetch(\"https://api.open-meteo.com/v1/forecast"
+     "?latitude=26.1224&longitude=-80.1373&daily=sunrise,sunset"
+     "&hourly=precipitation_probability&forecast_days=2&timezone=America%2FNew_York\");"
+     "const b=m.body||{};const mm=s=>{const t=String(s||\"\").slice(11,16).split(\":\");"
+     "return t.length===2?(+t[0])*60+(+t[1]):-1};"
+     "x={sr:mm(((b.daily||{}).sunrise||[])[0]),ss:mm(((b.daily||{}).sunset||[])[0]),"
+     "pp:(((b.hourly||{}).precipitation_probability)||[]).slice(0,36)"
+     ".map(v=>v==null?255:Math.round(v))}}catch(e){}"
+     "return {t:c.temperature,f:c.feelsLike,"
      "h:c.humidity,c:String(c.condition||\"\"),ws:c.windSpeed,hi:d.tempMax,"
-     "lo:d.tempMin,r:d.precipitation,dc:String(d.condition||\"\")}", "", false},
+     "lo:d.tempMin,r:d.precipitation,dc:String(d.condition||\"\"),...x}", "", false},
     /* PROJECTED, not raw: three raw matches were 4-5 KB against a 3 KB
      * device budget and were cut mid-JSON, so Gemini read a broken answer.
      * Eight matches projected to {tool, what, params} are ~1.6 KB, and the
