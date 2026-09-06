@@ -2261,6 +2261,7 @@ void hud_watch_hand(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 typedef struct {
     bool        valid;
     int         style, hh, mm, ss, ms;   /* the inputs it was built from   */
+    bool        shadow;
     uint32_t    a_h, a_m, a_s;           /* Q16 turns from 12 o'clock       */
     int         sec_permille;            /* the seconds sub-dial's reading  */
     hand_spec_t h[3];
@@ -2272,7 +2273,7 @@ static watch_frame_t s_wf;
 /* A needle in a PILOT sub-dial: (cx, cy) Q4, value 0..1000 across a 270
  * degree throw from 7:30 to 4:30, or a full turn for `full`. */
 static void sub_needle(const strip_t *s, int32_t cx, int32_t cy, int rad,
-                       int permille, bool full, int A, bool swap)
+                       int permille, bool full, bool shadow, int A, bool swap)
 {
     uint32_t a;
     if (full) {
@@ -2282,7 +2283,7 @@ static void sub_needle(const strip_t *s, int32_t cx, int32_t cy, int rad,
     }
     hand_spec_t h = {
         .u0 = -(rad * 16) / 5, .u1 = (rad - 7) * 16, .w0 = 28, .w1 = 8,
-        .body = W_WHITE, .bevel = 20, .outline = false, .shadow = true,
+        .body = W_WHITE, .bevel = 20, .outline = false, .shadow = shadow,
     };
     draw_hand(s, cx, cy, a, &h, (A * 255) >> 8, swap);
     aa_disc(s, cx, cy, 3 * 16, W_WHITE, A, swap);
@@ -2315,7 +2316,7 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
      * functions of the inputs: a strip render equals the whole-frame one. */
     watch_frame_t *f = &s_wf;
     if (!f->valid || f->style != style || f->hh != w->hh || f->mm != w->mm ||
-        f->ss != w->ss || f->ms != w->ms) {
+        f->ss != w->ss || f->ms != w->ms || f->shadow != w->shadow) {
         const int hh = ((w->hh % 24) + 24) % 24;
         const int mm = ((w->mm % 60) + 60) % 60;
         const int ss = ((w->ss % 60) + 60) % 60;
@@ -2327,9 +2328,15 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
         f->sec_permille = (ss * 1000 + ms) / 60;
         for (int i = 0; i < 3; ++i) {
             f->has[i] = watch_hand_spec(style, i, &f->h[i]);
+            /* SHADOWS AT THE AWAKE CADENCE ONLY. The shadow is the widest
+             * polygon of a hand at 40 %, every pixel a read-modify-write;
+             * at rest the ladder has already slowed the frame, and nobody
+             * is looking for a shadow on a resting watch. */
+            f->h[i].shadow = f->h[i].shadow && w->shadow;
         }
         f->style = style;
         f->hh = w->hh; f->mm = w->mm; f->ss = w->ss; f->ms = w->ms;
+        f->shadow = w->shadow;
         f->valid = true;
     }
     const uint32_t a_h = f->a_h, a_m = f->a_m, a_s = f->a_s;
@@ -2341,18 +2348,19 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     if (style == 3) {
         /* PILOT complications: 6 = seconds, 9 = battery, 3 = temperature */
         sub_needle(&s, s_subdial[1].cx, s_subdial[1].cy, s_subdial[1].r,
-                   f->sec_permille, true, A, swap_bytes);
+                   f->sec_permille, true, w->shadow, A, swap_bytes);
         if (w->batt_pct >= 0) {
             sub_needle(&s, s_subdial[2].cx, s_subdial[2].cy, s_subdial[2].r,
-                       (w->batt_pct > 100 ? 100 : w->batt_pct) * 10, false, A, swap_bytes);
+                       (w->batt_pct > 100 ? 100 : w->batt_pct) * 10, false,
+                       w->shadow, A, swap_bytes);
         }
         if (w->wx_valid) {
             int t = w->temp_f < 40 ? 40 : w->temp_f > 100 ? 100 : w->temp_f;
             sub_needle(&s, s_subdial[0].cx, s_subdial[0].cy, s_subdial[0].r,
-                       (t - 40) * 1000 / 60, false, A, swap_bytes);
+                       (t - 40) * 1000 / 60, false, w->shadow, A, swap_bytes);
         } else {
             sub_needle(&s, s_subdial[0].cx, s_subdial[0].cy, s_subdial[0].r,
-                       0, false, (A * 90) >> 8, swap_bytes);
+                       0, false, w->shadow, (A * 90) >> 8, swap_bytes);
         }
     }
 
@@ -2411,6 +2419,7 @@ void hud_overlay_clock_style(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     const hud_watch_t w = {
         .hh = hh, .mm = mm, .ss = ss, .ms = 0,
         .batt_pct = -1, .wx_valid = false, .temp_f = 0, .dial_baked = false,
+        .shadow = true,
     };
     hud_overlay_watch(dst, y0, nrows, swap_bytes, &w, strength, style);
 }

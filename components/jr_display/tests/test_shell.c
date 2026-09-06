@@ -1556,6 +1556,50 @@ static void test_watch_words_are_composed_once_and_strip_invariant(void)
     reset_nav();
 }
 
+/* Shadows follow the cadence: at the 24 fps awake rung the hands cast them
+ * — neutral pixels darker than the mid-grey dial beside the gold, which no
+ * gold flank can be (its blue channel collapses first) and the hub's own
+ * dark ring is inside r20 — and at the ambient rung (main's 12) they do
+ * not, while the hands are the same hands. */
+static void test_watch_shadows_only_at_the_awake_cadence(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb);
+    if (!fb) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; return; }
+    size_t dark[2] = { 0, 0 }, lit[2] = { 0, 0 };
+    static const uint8_t fps[2] = { JR_DISPLAY_RENDER_FPS, 12U };
+    for (int k = 0; k < 2; ++k) {
+        __atomic_store_n(&s_render_fps, fps[k], __ATOMIC_RELEASE);
+        render_watch_frame_at(fb, JR_WATCH_DRESS, JR_FACE_DIAL_DRESS, 10, 10, 0);
+        for (int y = 0; y < HUD_H; ++y) {
+            for (int x = 0; x < HUD_W; ++x) {
+                const int dx = x - 232, dy = y - 232;
+                /* the hands reach r166 (+3 for the shadow); the orbit track
+                 * at r186-194 and the hub ring inside r13 are not the hands */
+                if (dx * dx + dy * dy > 178 * 178 || dx * dx + dy * dy < 20 * 20) continue;
+                const uint16_t p = fb[(size_t)y * HUD_W + x];
+                if (p == 0x4208) continue;
+                lit[k]++;
+                const int r = (p >> 11) & 31, g = (p >> 5) & 63, b = p & 31;
+                const int r8 = (r << 3) | (r >> 2), g8 = (g << 2) | (g >> 4), b8 = (b << 3) | (b >> 2);
+                const bool neutral = r8 - b8 <= 16 && b8 - r8 <= 16 && g8 - r8 <= 20 && r8 - g8 <= 20;
+                if (neutral && r8 + g8 + b8 < 190) dark[k]++;
+            }
+        }
+    }
+    __atomic_store_n(&s_render_fps, JR_DISPLAY_RENDER_FPS, __ATOMIC_RELEASE);
+    CHECK(dark[0] > dark[1] + 300, "awake cast %zu dark px, ambient %zu: no shadow at 24 fps",
+          dark[0], dark[1]);
+    /* what is left at ambient is the dark flank's own anti-aliased edge over
+     * the grey, under a hundred pixels on two hands; a shadow is hundreds */
+    CHECK(dark[1] < 150, "ambient still casts %zu dark px", dark[1]);
+    CHECK(lit[1] > 1000 && lit[0] > lit[1] + 300,
+          "hands at ambient lit %zu px (awake %zu): the shadow is not the difference", lit[1], lit[0]);
+    s_display.shown_face = JR_FACE_IDLE;
+    free(fb);
+    reset_nav();
+}
+
 static void test_watch_style_reaches_the_glass(void)
 {
     const size_t px = (size_t)HUD_W * HUD_H;
@@ -2372,6 +2416,7 @@ int main(void)
     test_watch_style_reaches_the_glass();
     test_future_weather_cell_shortens_instead_of_cutting();
     test_watch_words_are_composed_once_and_strip_invariant();
+    test_watch_shadows_only_at_the_awake_cadence();
 
     test_desk_is_on_the_ring_only_while_live();
     test_desk_going_dark_moves_the_owner_on();

@@ -3015,6 +3015,10 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
         .wx_valid = wx->valid,
         .temp_f = wx->temp_f,
         .dial_baked = baked,
+        /* shadows at the awake cadence only: the ladder's slower frames are
+         * a resting watch nobody is studying, and the shadow is the widest
+         * blend a hand carries */
+        .shadow = jr_display_render_fps() >= JR_DISPLAY_RENDER_FPS,
     };
     hud_overlay_watch(pixels, y1, y2 - y1, ctx->board.swap_color_bytes, &hw,
                       strength, style);
