@@ -1778,6 +1778,8 @@ static void publish_shell_state(uint32_t now_ms)
         strlcpy(links.ip, net.sta_connected ? net.sta_ip : "",
                 sizeof links.ip);
         jr_display_links_set(&links);
+        /* The day arc: the sun from the last glance, or nothing at all. */
+        jr_display_sun_set((int)s_wx_sun_rise_min, (int)s_wx_sun_set_min);
         next_status_ms = now_ms + 1000U;
     }
 }

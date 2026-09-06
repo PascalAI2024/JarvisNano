@@ -1600,6 +1600,81 @@ static void test_watch_shadows_only_at_the_awake_cadence(void)
     reset_nav();
 }
 
+/* THE DAY ARC. FUTURE and PILOT draw the daylight on the tick scale from the
+ * published sunrise round the top to sunset, and a dot for now; the other
+ * dials draw nothing, and no dial draws anything without a sun. Sampled by
+ * angle on the band's centre line (r206), away from where the hands point
+ * (13:15:45 — hour near 1, minute at 3, seconds at 9 — so noon and midnight
+ * are clear), on the flat grey stand-in art. */
+static uint16_t sun_px(const uint16_t *fb, int angle_256)
+{
+    /* 1/256 turn, clockwise from 3 o'clock — the shell's own sine, so the
+     * sample lands where the renderer put the pixel */
+    const int x = SP_CX + ((sp_cos(angle_256) * 206) >> 15);
+    const int y = SP_CY + ((sp_sin(angle_256) * 206) >> 15);
+    return fb[(size_t)y * HUD_W + x];
+}
+
+static size_t sun_band_ink(const uint16_t *fb)
+{
+    size_t n = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            const int dx = x - 232, dy = y - 232, r2 = dx * dx + dy * dy;
+            if (r2 < 203 * 203 || r2 > 209 * 209) continue;
+            if (fb[(size_t)y * HUD_W + x] != 0x4208) n++;
+        }
+    }
+    return n;
+}
+
+static void test_watch_day_arc_is_the_sun_on_the_data_dials(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb);
+    if (!fb) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; return; }
+
+    /* 07:02 -> 19:35, the real Fort Lauderdale day of 2026-09-05 */
+    jr_display_sun_set(422, 1175);
+    render_watch_frame_at(fb, JR_WATCH_FUTURE, JR_FACE_DIAL_FUTURE, 13, 15, 45);
+    const size_t with = sun_band_ink(fb);
+    CHECK(with > 1500, "FUTURE with a sun inks %zu px on the band (want > 1500)", with);
+    CHECK(sun_px(fb, 192) != 0x4208, "noon (12 o'clock) is inside the daylight");
+    CHECK(sun_px(fb, 64) == 0x4208, "midnight (6 o'clock) is night: untouched art");
+    /* 07:02 is angle 139, 19:35 is 17: just inside each end is day, just
+     * outside is night */
+    CHECK(sun_px(fb, 143) != 0x4208, "just after sunrise is day");
+    CHECK(sun_px(fb, 133) == 0x4208, "before sunrise is night");
+    CHECK(sun_px(fb, 13) != 0x4208, "just before sunset is day");
+    CHECK(sun_px(fb, 23) == 0x4208, "after sunset is night");
+    /* the dot for 13:15 (75 min past noon) sits on the band at angle
+     * 192 + 75*256/1440 = 205, brighter than the band */
+    const uint16_t band = sun_px(fb, 215), dot = sun_px(fb, 205);
+    CHECK(dot != band && dot != 0x4208, "now is a dot on the band (band %04x, dot %04x)", band, dot);
+
+    render_watch_frame_at(fb, JR_WATCH_PILOT, JR_FACE_DIAL_PILOT, 13, 15, 45);
+    CHECK(sun_px(fb, 192) != 0x4208 && sun_px(fb, 64) == 0x4208, "PILOT carries the same arc");
+
+    render_watch_frame_at(fb, JR_WATCH_DRESS, JR_FACE_DIAL_DRESS, 13, 15, 45);
+    CHECK(sun_px(fb, 192) == 0x4208 && sun_band_ink(fb) < 200,
+          "DRESS draws no arc (%zu px on the band)", sun_band_ink(fb));
+
+    /* no sun published: nothing on the band beyond the hands' own reach */
+    jr_display_sun_set(-1, -1);
+    render_watch_frame_at(fb, JR_WATCH_FUTURE, JR_FACE_DIAL_FUTURE, 13, 15, 45);
+    const size_t without = sun_band_ink(fb);
+    CHECK(without < 200 && sun_px(fb, 192) == 0x4208,
+          "FUTURE without a sun inks %zu px on the band (want < 200)", without);
+    /* a sunset before sunrise is refused, not drawn backwards */
+    jr_display_sun_set(1175, 422);
+    render_watch_frame_at(fb, JR_WATCH_FUTURE, JR_FACE_DIAL_FUTURE, 13, 15, 45);
+    CHECK(sun_px(fb, 192) == 0x4208, "an inverted sun is not a night arc");
+
+    s_display.shown_face = JR_FACE_IDLE;
+    free(fb);
+    reset_nav();
+}
+
 static void test_watch_style_reaches_the_glass(void)
 {
     const size_t px = (size_t)HUD_W * HUD_H;
@@ -2417,6 +2492,7 @@ int main(void)
     test_future_weather_cell_shortens_instead_of_cutting();
     test_watch_words_are_composed_once_and_strip_invariant();
     test_watch_shadows_only_at_the_awake_cadence();
+    test_watch_day_arc_is_the_sun_on_the_data_dials();
 
     test_desk_is_on_the_ring_only_while_live();
     test_desk_going_dark_moves_the_owner_on();

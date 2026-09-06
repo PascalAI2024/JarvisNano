@@ -296,6 +296,11 @@ typedef enum {
  * task; one release-store. Unset (all zero) means "no date": the cells stay
  * blank rather than inventing one. */
 void jr_display_clock_set_date(int wday, int mday, int mon);
+/* THE DAY ARC (wave N13): today's sunrise and sunset in minutes past local
+ * midnight, published at 1 Hz beside the clock; -1 for either clears it.
+ * FUTURE and PILOT draw the daylight as a thin gold arc on a 24-hour scale
+ * (noon at 12 o'clock) with a dot for now; the other dials stay as designed. */
+void jr_display_sun_set(int rise_min, int set_min);
 
 void             jr_display_watch_style_set(jr_watch_style_t style);
 void             jr_display_watch_style_step(int dir);   /* +1 next, -1 prev */

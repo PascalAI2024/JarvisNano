@@ -993,6 +993,7 @@ static volatile uint32_t s_bloom_start_ms;
  * second last changed; the flush latches (now - set) once per frame into
  * s_clock_phase_ms so every strip of a frame draws the same sweep angle. */
 static volatile uint32_t s_clock_date_word;   /* mday | mon<<5 | wday<<9 | valid<<12 */
+static volatile uint32_t s_sun_word;          /* rise | set<<11 | valid<<22 (minutes) */
 static volatile uint32_t s_clock_set_ms;
 static int s_clock_phase_ms;                  /* render task only, 0..999 */
 
@@ -1309,6 +1310,18 @@ void jr_display_clock_set(bool on, int hh, int mm, int ss)
                          __ATOMIC_RELAXED);
     }
     __atomic_store_n(&s_clock_word, word, __ATOMIC_RELEASE);
+}
+
+void jr_display_sun_set(int rise_min, int set_min)
+{
+    if (rise_min < 0 || set_min < 0 || rise_min >= 1440 || set_min >= 1440 ||
+        set_min <= rise_min) {
+        __atomic_store_n(&s_sun_word, 0u, __ATOMIC_RELEASE);
+        return;
+    }
+    __atomic_store_n(&s_sun_word,
+                     (uint32_t)rise_min | ((uint32_t)set_min << 11) | (1u << 22),
+                     __ATOMIC_RELEASE);
 }
 
 void jr_display_clock_set_date(int wday, int mday, int mon)
@@ -2668,6 +2681,8 @@ static uint16_t sp_tint(const jr_display_ctx_t *ctx, uint16_t native, int st);
 static bool sp_clip(int y, int *xlo, int *xhi);
 static int sp_wifi_bars(uint32_t lk);
 static bool sp_privacy_muted(void);
+static void watch_sun_arc(const jr_display_ctx_t *ctx, int y1, int y2,
+                          uint16_t *pixels, int style, int st, int hh, int mm);
 
 /* WHICH DIAL, IF ANY. On WATCH with the clock published and a style whose
  * dial is baked art, the face under the hands is that dial. JARVIS keeps its
@@ -3020,6 +3035,7 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
          * blend a hand carries */
         .shadow = jr_display_render_fps() >= JR_DISPLAY_RENDER_FPS,
     };
+    watch_sun_arc(ctx, y1, y2, pixels, style, strength, hw.hh, hw.mm);
     hud_overlay_watch(pixels, y1, y2 - y1, ctx->board.swap_color_bytes, &hw,
                       strength, style);
     watch_cells(ctx, y1, y2, pixels, style, strength, baked);
@@ -3319,6 +3335,58 @@ static void sp_annulus_row(uint16_t *row, int y, int cx, int cy, int rin,
                     row[x] = px;
                 }
             }
+        }
+    }
+}
+
+/* THE DAY ARC. A 24-hour scale with noon at 12 o'clock: the daylight is a
+ * thin gold band on the tick scale from sunrise round the top to sunset, and
+ * a dot on the band is now. Only the two dials with a data vocabulary carry
+ * it (FUTURE, PILOT); a luxury dial does not grow a gadget. Drawn before the
+ * hands so a tip crossing the band stays a hand. Nothing is drawn without a
+ * published sun, and nothing is invented for the dot when the clock is off. */
+#define SP_SUN_R_IN   204
+#define SP_SUN_R_OUT  208
+#define SP_SUN_A_NOON 192   /* SP_A_TOP: 12 o'clock */
+static int sp_sun_angle(int minute)
+{
+    /* 1440 minutes on 256 units, noon at the top, clockwise. */
+    return (SP_SUN_A_NOON + ((minute - 720) * 256) / 1440 + 512) & 255;
+}
+
+static void watch_sun_arc(const jr_display_ctx_t *ctx, int y1, int y2,
+                          uint16_t *pixels, int style, int st, int hh, int mm)
+{
+    if (style != JR_WATCH_FUTURE && style != JR_WATCH_PILOT) {
+        return;
+    }
+    const uint32_t sw = __atomic_load_n(&s_sun_word, __ATOMIC_ACQUIRE);
+    if ((sw & (1u << 22)) == 0u || st < 128) {
+        return;
+    }
+    const int rise = (int)(sw & 0x7FFu), set = (int)((sw >> 11) & 0x7FFu);
+    const int a0 = sp_sun_angle(rise);
+    const int sweep = ((sp_sun_angle(set) - a0) + 256) & 255;
+    sp_span_t seg[SP_ARC_SEG_MAX];
+    const int nseg = sp_arc_segments(seg, SP_ARC_SEG_MAX, a0, sweep);
+    const uint16_t gold = sp_tint(ctx, 0xFD20, (st * 150) / 255);
+    const uint16_t now_px = sp_tint(ctx, 0xFFE0, st);
+    const bool have_now = hh >= 0 && hh < 24 && mm >= 0 && mm < 60;
+    int dx = 0, dy = 0;
+    if (have_now) {
+        /* The dot: a small square on the band's centre line at now's angle
+         * (the orbit rail's own arithmetic, 1/256 turns, Q15 sine). */
+        const int a = sp_sun_angle(hh * 60 + mm);
+        dx = (sp_cos(a) * ((SP_SUN_R_IN + SP_SUN_R_OUT) / 2)) >> 15;
+        dy = (sp_sin(a) * ((SP_SUN_R_IN + SP_SUN_R_OUT) / 2)) >> 15;
+    }
+    for (int y = y1; y < y2; ++y) {
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        for (int i = 0; i < nseg; ++i) {
+            sp_annulus_row(row, y, SP_CX, SP_CY, SP_SUN_R_IN, SP_SUN_R_OUT, &seg[i], gold);
+        }
+        if (have_now) {
+            sp_dot_row(row, y, SP_CX + dx, SP_CY + dy, 3, now_px);
         }
     }
 }

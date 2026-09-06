@@ -2566,7 +2566,8 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         "\"consent_cancelled\":%u},\"display\":{\"init\":\"%s\","
         "\"actual_fps\":%u,\"flush_completions\":%u,\"flush_errors\":%u,"
         "\"requested_face\":%d,\"applied_face\":%d,"
-        "\"choices_active\":%s,\"watch_style\":\"%s\"},\"touch\":{"
+        "\"choices_active\":%s,\"watch_style\":\"%s\","
+        "\"sun_rise_min\":%d,\"sun_set_min\":%d},\"touch\":{"
         "\"events\":%u,\"last\":{\"kind\":\"%s\",\"x\":%u,\"y\":%u},"
         "\"shade_open\":%s,\"panel_touch_challenge\":{\"pending\":%s,"
         "\"active\":%s,\"verified\":%s,\"correct_rounds\":%u,"
@@ -2625,6 +2626,7 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         (int)display.requested_face, (int)display.applied_face,
         jr_display_choices_active() ? "true" : "false",
         jr_display_watch_style_name(jr_display_watch_style()),
+        (int)s_wx_sun_rise_min, (int)s_wx_sun_set_min,
         (unsigned)atomic_load(&s_touch_events),
         touch_kind_name((jr_input_kind_t)atomic_load(&s_touch_last_kind)),
         (unsigned)atomic_load(&s_touch_last_x),
