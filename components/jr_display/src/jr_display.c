@@ -2133,6 +2133,8 @@ static int sp_wx_angle(int f)
 /* WEATHER for this frame. Everything numeric is gated on valid: an unfetched
  * or failed weather prints NO number anywhere — not a zero, not a dash pair
  * shaped like one — and the headline says why. */
+static int wx_cond_fit(char *dst, size_t cap, const char *cond, int room);
+
 static void sp_compose_weather(void)
 {
     const jr_display_weather_t *w =
@@ -2154,8 +2156,11 @@ static void sp_compose_weather(void)
 
     /* Headline: the word, then the number if both fit twelve glyphs. When a
      * long condition leaves no room the number is dropped whole rather than
-     * cut mid-digit — it is still the largest thing on the screen. */
-    int len = sp_str(s_wx_head, 0, SP_LABEL_CAP, w->condition);
+     * cut mid-digit — it is still the largest thing on the screen. The word
+     * itself is fitted at a word (wx_cond_fit), never clipped mid-glyph. */
+    char cond[SP_LABEL_CAP];
+    (void)wx_cond_fit(cond, sizeof cond, w->condition, SP_LABEL_CAP - 1);
+    int len = sp_str(s_wx_head, 0, SP_LABEL_CAP, cond);
     char tail[6];
     int tlen = 0;
     if (len > 0) {
@@ -2686,6 +2691,63 @@ static jr_face_t watch_dial_face(void)
  * the art's measured boxes live — so this file and the stand-in dial agree. */
 #define WX_STALE_MIN 120u
 
+/* FUTURE's weather line, shortened rather than cut. The cell is 193 px:
+ * 15 glyphs at scale 2, and "75* " plus a 13-glyph condition is 17, so a
+ * hard clip showed "75* LIGHT DRIZZ" on the panel (2026-09-05). A condition
+ * that does not fit its room first loses its leading qualifier (light
+ * drizzle is still drizzle); if that is not enough it is cut at the last
+ * space that leaves a word, else mid-word, with the last glyph spent on the
+ * "." mark, so a reader knows the word went on. The WEATHER headline fits
+ * its twelve glyphs by the same rule. Returns the length written. */
+static int wx_cond_fit(char *dst, size_t cap, const char *cond, int room)
+{
+    static const char *const QUAL[] = {
+        "LIGHT ", "HEAVY ", "MODERATE ", "PARTLY ", "SLIGHT ", "MOSTLY ",
+    };
+    if (room < 2 || (size_t)room >= cap) {
+        room = (int)cap - 1 < 2 ? 2 : (int)cap - 1;
+    }
+    int n = (int)strlen(cond);
+    if (n > room) {
+        for (size_t i = 0; i < sizeof QUAL / sizeof *QUAL; ++i) {
+            const size_t ql = strlen(QUAL[i]);
+            if (strncmp(cond, QUAL[i], ql) == 0 && cond[ql] != '\0') {
+                cond += ql;
+                n = (int)strlen(cond);
+                break;
+            }
+        }
+    }
+    if (n <= room) {
+        memcpy(dst, cond, (size_t)n + 1);
+        return n;
+    }
+    int keep = room - 1;                        /* one glyph for the mark */
+    int cut = keep;
+    while (cut > 0 && cond[cut] != ' ') {
+        cut--;
+    }
+    if (cut >= 4) {                             /* what is left is a word */
+        keep = cut;
+    }
+    memcpy(dst, cond, (size_t)keep);
+    dst[keep] = '.';
+    dst[keep + 1] = '\0';
+    return keep + 1;
+}
+
+#define WATCH_WX_GLYPHS 15
+
+static int watch_wx_line(char *dst, size_t cap, int temp_f, const char *cond)
+{
+    int n = snprintf(dst, cap, "%d* ", temp_f);
+    if (n < 0 || (size_t)n + 2 >= cap) {
+        dst[0] = '\0';
+        return 0;
+    }
+    return n + wx_cond_fit(dst + n, cap - (size_t)n, cond, WATCH_WX_GLYPHS - n);
+}
+
 static void watch_cells(const jr_display_ctx_t *ctx, int y1, int y2,
                         uint16_t *pixels, int style, int st, bool baked)
 {
@@ -2746,14 +2808,11 @@ static void watch_cells(const jr_display_ctx_t *ctx, int y1, int y2,
     char w1[20], w2[12];
     int n1, n2;
     if (wx_ok) {
-        n1 = snprintf(w1, sizeof w1, "%d* %s", (int)wx->temp_f, wx->condition);
+        n1 = watch_wx_line(w1, sizeof w1, (int)wx->temp_f, wx->condition);
         n2 = snprintf(w2, sizeof w2, "%d / %d", (int)wx->hi_f, (int)wx->lo_f);
     } else {
         n1 = snprintf(w1, sizeof w1, "NO WEATHER");
         n2 = 0;
-    }
-    if (n1 > 15) {
-        n1 = 15;                 /* the cell is 193 px: 15 glyphs at scale 2 */
     }
     const uint16_t wxpx = (wx_ok && !wx_stale) ? cyan : dim;
     const int wx0 = HUD_WATCH_CELL_WX_CX - (6 * 2 * n1) / 2;

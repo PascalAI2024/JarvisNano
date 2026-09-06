@@ -1339,7 +1339,8 @@ static void test_watch_style_is_three_nav_bits_that_wrap(void)
     reset_nav();
 }
 
-static void render_watch_frame(uint16_t *fb, int style, jr_face_t shown)
+static void render_watch_frame_at(uint16_t *fb, int style, jr_face_t shown,
+                                  int hh, int mm, int ss)
 {
     const size_t px = (size_t)HUD_W * HUD_H;
     stage_power(JR_DISPLAY_OTA_IDLE, 0U, JR_DISPLAY_OVERLAY_NONE);
@@ -1351,7 +1352,7 @@ static void render_watch_frame(uint16_t *fb, int style, jr_face_t shown)
     s_shade_ease = 0;
     s_detail_ease = 0;
     s_space_veil = 256;
-    jr_display_clock_set(true, 6, 30, 15);
+    jr_display_clock_set(true, hh, mm, ss);
     s_clock_shown_word = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
     s_clock_ease = 256;
     sp_compose();
@@ -1362,6 +1363,114 @@ static void render_watch_frame(uint16_t *fb, int style, jr_face_t shown)
         apply_space_overlay(&s_display, y, y2, strip);
         apply_clock_overlay(&s_display, y, y2, strip);
     }
+}
+
+static void render_watch_frame(uint16_t *fb, int style, jr_face_t shown)
+{
+    render_watch_frame_at(fb, style, shown, 6, 30, 15);
+}
+
+/* Read FUTURE's weather line back off the glass: the top line of the cell is
+ * `want` exactly when every cyan pixel in the line's rows sits where the
+ * shell's own glyph sampler puts `want` at the cell's centre, and nowhere
+ * else. A different string lands on different pixels (the run is centred on
+ * its own length), so this is "the cell reads X", not "something is lit". */
+static bool future_wx_line_reads(const uint16_t *fb, const char *want,
+                                 size_t *ink_out)
+{
+    const int n = (int)strlen(want);
+    const int x0 = HUD_WATCH_CELL_WX_CX - (6 * 2 * n) / 2;
+    const int y0 = HUD_WATCH_CELL_WX_CY - 16;
+    const uint16_t cyan = sp_tint(&s_display, 0x073F, 255);
+    uint16_t ref[HUD_W];
+    size_t ink = 0, wrong = 0;
+    for (int y = y0; y < y0 + TEXT_H; ++y) {
+        memset(ref, 0, sizeof ref);
+        sp_text_row(ref, y, want, n, x0, y0, 2, 0xFFFF);
+        for (int x = HUD_WATCH_CELL_WX_X0 + 1; x < HUD_WATCH_CELL_WX_X1 - 1; ++x) {
+            const bool lit = fb[(size_t)y * HUD_W + x] == cyan;
+            const bool exp = ref[x] != 0;
+            if (exp) ink++;
+            if (lit != exp) wrong++;
+        }
+    }
+    *ink_out = ink;
+    return wrong == 0 && ink > 0;
+}
+
+/* F3: the FUTURE weather cell shortens, never cuts a word. The panel showed
+ * "75* LIGHT DRIZZ" (2026-09-05): a 17-glyph line hard-clipped to 15 — and
+ * the 12-glyph condition cap had already made it "LIGHT DRIZZL" on the way
+ * in. Now the cap holds the whole phrase, the qualifier goes first
+ * ("75* DRIZZLE"), and what still does not fit is cut at a word or, for one
+ * long word, mid-word with the "." mark spent on the last glyph, so a cut is
+ * always declared. The WEATHER headline fits by the same rule. 10:10:00
+ * keeps every hand out of the cell below centre; the cyan the hands are
+ * drawn in is the cell's own cyan. */
+static void test_future_weather_cell_shortens_instead_of_cutting(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb);
+    if (!fb) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; return; }
+    static const struct { const char *cond; int temp; const char *want; } cases[] = {
+        { "LIGHT DRIZZLE",          75, "75* DRIZZLE" },      /* qualifier dropped   */
+        { "MODERATE RAIN SHOWERS",  75, "75* RAIN." },        /* dropped, then a word */
+        { "THUNDERSTORM",           75, "75* THUNDERSTO." },  /* one word: cut+mark  */
+        { "FREEZING FOG",           75, "75* FREEZING." },    /* at the space + mark */
+        { "HEAVY RAIN",             75, "75* HEAVY RAIN" },   /* fits: nothing lost  */
+        { "HEAVY SLEET",           100, "100* SLEET" },       /* three digits: less room */
+        { "OVERCAST",              100, "100* OVERCAST" },
+        { "OVERCAST",              -12, "-12* OVERCAST" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; ++i) {
+        char line[24];
+        const int n = watch_wx_line(line, sizeof line, cases[i].temp, cases[i].cond);
+        CHECK(strcmp(line, cases[i].want) == 0 && n == (int)strlen(cases[i].want),
+              "%s at %d composes '%s' (%d), wanted '%s'",
+              cases[i].cond, cases[i].temp, line, n, cases[i].want);
+        CHECK(n <= WATCH_WX_GLYPHS, "'%s' is %d glyphs in a %d-glyph cell",
+              line, n, WATCH_WX_GLYPHS);
+    }
+    /* The setter keeps the whole phrase: a 21-glyph condition survives it. */
+    set_weather(true, 75, 82, 68, JR_DISPLAY_SKY_RAIN, "MODERATE RAIN SHOWERS",
+                (uint32_t)(s_fake_us / 1000));
+    CHECK(strcmp(s_weather[__atomic_load_n(&s_weather_slot, __ATOMIC_ACQUIRE) & 1u].condition,
+                 "MODERATE RAIN SHOWERS") == 0,
+          "the condition was cut on the way in: '%s'",
+          s_weather[__atomic_load_n(&s_weather_slot, __ATOMIC_ACQUIRE) & 1u].condition);
+    /* The WEATHER headline: the word fitted at a word, then the number. */
+    static const struct { const char *cond; const char *want; } head[] = {
+        { "LIGHT DRIZZLE",         "DRIZZLE 75" },
+        { "MODERATE RAIN SHOWERS", "RAIN SHOWERS" },
+        { "THUNDERSTORMS",         "THUNDERSTOR." },
+        { "OVERCAST",              "OVERCAST 75" },
+    };
+    for (size_t i = 0; i < sizeof head / sizeof *head; ++i) {
+        set_weather(true, 75, 82, 68, JR_DISPLAY_SKY_RAIN, head[i].cond,
+                    (uint32_t)(s_fake_us / 1000));
+        sp_compose_weather();
+        CHECK(strcmp(s_wx_head, head[i].want) == 0, "%s heads '%s', wanted '%s'",
+              head[i].cond, s_wx_head, head[i].want);
+    }
+    /* On the glass, not just in the buffer: stage the weather and read the
+     * cell back. Both the dropped qualifier and the marked cut must render. */
+    static const struct { const char *cond; const char *want; } glass[] = {
+        { "LIGHT DRIZZLE", "75* DRIZZLE" },
+        { "THUNDERSTORM",  "75* THUNDERSTO." },
+    };
+    for (size_t i = 0; i < sizeof glass / sizeof *glass; ++i) {
+        set_weather(true, 75, 82, 68, JR_DISPLAY_SKY_RAIN, glass[i].cond,
+                    (uint32_t)(s_fake_us / 1000));
+        render_watch_frame_at(fb, JR_WATCH_FUTURE, JR_FACE_DIAL_FUTURE, 10, 10, 0);
+        size_t ink = 0;
+        const bool reads = future_wx_line_reads(fb, glass[i].want, &ink);
+        CHECK(reads, "with %s the cell does not read '%s'", glass[i].cond, glass[i].want);
+        CHECK(ink > 200, "'%s' put only %zu ink px in the cell", glass[i].want, ink);
+    }
+    set_weather(false, 0, 0, 0, JR_DISPLAY_SKY_UNKNOWN, "", 0U);
+    s_display.shown_face = JR_FACE_IDLE;
+    free(fb);
+    reset_nav();
 }
 
 static void test_watch_style_reaches_the_glass(void)
@@ -2178,6 +2287,7 @@ int main(void)
     test_watch_dial_face_follows_the_style_and_the_screen();
     test_watch_keeps_a_baked_dial_and_clears_a_missing_one();
     test_watch_style_reaches_the_glass();
+    test_future_weather_cell_shortens_instead_of_cutting();
 
     test_desk_is_on_the_ring_only_while_live();
     test_desk_going_dark_moves_the_owner_on();
