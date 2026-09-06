@@ -134,13 +134,18 @@ rows and gates, `docs/evidence/20260905-*` the proof.
   date, the weather, rain within 12 h, delegated tasks finished since the
   last briefing, and the battery under 30 % off USB. Muted: a
   `GOOD MORNING 75* DRIZZLE 2 DONE` caption. Pure `jr_briefing_*` with host
-  tests. **Not yet seen in the wild** (built in the evening): the first
-  proof is tomorrow's first lift — expect `briefing: spoken` or
-  `briefing: caption, muted` in the log.
+  tests. `POST /api/debug/briefing` (dev-gated) delivers it now at any hour
+  without touching the latch, for the bench. **Not yet seen in the wild**
+  (built in the evening): the first proof is tomorrow's first lift — expect
+  `briefing: spoken` or `briefing: caption, muted` in the log.
 - **A chime when a delegated task lands.** `jr_audio_play_chime` (raised-
   cosine notes) plays E5–G5–B5 in `board_announce()` before the caption or
-  the spoken line, half volume at WHISPER, never over a reply. Not yet
-  heard: needs an item completed on the board.
+  the spoken line, half volume at WHISPER, never over a reply. **Proven
+  23:50:** an item created from the desk was claimed by the poll, researched
+  by the gateway (two polls hit the 30 s cap with `http_error 500` on the
+  way; the recovery path completed it), then `chime: done` and
+  `board: done Find the CO5300 …` with the `DONE:` caption on the muted
+  glass (`docs/evidence/20260905-hand-test-earcon-rail.log`).
 - **The scripts run on Windows** (PIL before `sips`, `JARVIS_PAIRING_TOKEN`
   env fallback, UTF-8 stdout, `tempfile`, no `termios` at import, a clean
   no-host message) and **one host-tests entry**: `./scripts/host-tests.sh`

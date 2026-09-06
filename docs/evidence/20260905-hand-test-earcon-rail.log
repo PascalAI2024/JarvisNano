@@ -18,3 +18,11 @@ I (302604) jr_hal_touch: long press end=244,204 start=244,204 duration=870ms
 I (303554) jarvis_v5: gesture: long-press mute
 I (304884) jr_hal_touch: long press end=252,215 start=252,215 duration=880ms
 I (304924) jarvis_v5: gesture: long-press unmute
+
+# 2026-09-05 23:50 — a work item created from the desk on jarvisnano-desk; the device's poll claimed it, the gateway
+# researched it (two polls hit the 30 s cap with http 500, the recovery path took it over), then:
+I (872192) jr_tools: tool=board_poll status=http_error duration_ms=31274 http_status=500
+W (872192) jarvis_v5: board: poll failed (http_error)
+I (933022) jr_tools: tool=board_poll status=ok duration_ms=2085 http_status=200
+I (933082) jarvis_v5: chime: done
+I (933082) jarvis_v5: board: done Find the CO5300 AMOLED controller's maximum QSPI

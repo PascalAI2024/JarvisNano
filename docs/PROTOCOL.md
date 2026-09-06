@@ -55,9 +55,10 @@ X-JarvisNano-Control: 1
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/` | Orbit Console |
-| GET | `/api/cockpit` | Paired network, voice, tool, display, touch, Agent Link, and Brain Link truth; `display.watch_style` names the WATCH face (`JARVIS`, `DIVER`, `DRESS`, `PILOT`, `MINIMAL`, `FUTURE`) |
+| GET | `/api/cockpit` | Paired network, voice, tool, display, touch, Agent Link, and Brain Link truth; `display.watch_style` names the WATCH face (`JARVIS`, `DIVER`, `DRESS`, `PILOT`, `MINIMAL`, `FUTURE`); `display.sun_rise_min` / `sun_set_min` are today's sun in minutes past local midnight from the weather glance, −1 until fetched |
 | GET | `/api/gemini/live` | Paired detailed Gemini/audio/tool counters and transcript tail |
 | POST | `/api/debug/say?text=...` | Queue a text turn through the live device voice session |
+| POST | `/api/debug/briefing` | Deliver the morning glance now, at any hour, without touching its once-a-day latch (a flag the voice task takes; spoken when unmuted, a caption when muted) |
 | GET/POST | `/api/debug/gain?...` | Audio tuning with readbacks; `preroll=` / `refill=` pin the playback jitter buffer (`preroll=0` returns it to adaptive); `cpu=80|160|240` forces a CPU gear for a bench, `cpu=0` returns to auto |
 | POST | `/api/debug/audio-stats?reset=1` | Reset the playback and receive-queue counters that `/api/device/health` reports |
 | GET/POST | `/api/debug/sleep` | How the device last woke and what was armed; `?now=1&wake_s=N` forces a deep sleep with an N-second timer (refused with 409 while the image is on OTA probation); `?off=1` powers the device off through the PMIC (hold PWR 1 s to start) |
@@ -84,7 +85,7 @@ X-JarvisNano-Control: 1
 | GET | `/api/device/health` | Paired derived diagnosis and repairability verdict |
 | GET/POST | `/api/device/levels` | Paired persistent volume and mood-capped brightness |
 | POST | `/api/pairing/claim?rotate=1` | One-time token claim during the physical BOOT-hold window |
-| GET | `/api/display` | Display health |
+| GET | `/api/display` | Display health; since wave N13 also the render's own clock — `render_us`, `render_frames` and `render_frame_us` (the last whole second's microseconds per frame for the strip overlay) |
 | GET | `/api/display/snapshot.json` | Submission-mirror metadata |
 | GET | `/api/display/snapshot.ppm` | Paired PPM display mirror |
 | GET | `/api/display/snapshot.rgb565` | Paired raw 466×466 RGB565 display mirror |
