@@ -3287,6 +3287,28 @@ static void voice_task(void *arg)
                     ESP_LOGW(TAG, "synthetic hold cannot change privacy");
                     continue;
                 }
+                /* PLACE IS SCOPE for the hold as well as the slide. The same
+                 * annulus the swipe handler uses (r >= 168 from centre, the
+                 * radius inside which the conversation is drawn) decides it:
+                 * a hold that BEGAN on the rim is a thumb on the device's
+                 * knobs, not a commit on the conversation. Found on the
+                 * device 2026-09-05: a slow finger on the volume rail —
+                 * start (47,101), 42 px of drift in 870 ms — fired the 850 ms
+                 * LONG_PRESS before the release classifier could call it a
+                 * swipe, and the device MUTED. The HAL now keeps its hold slop
+                 * equal to the swipe threshold; this is the other half. The
+                 * privacy hold is an inner-disc gesture. A rim hold is
+                 * unbound, so it gets the neutral ack and the legend of what
+                 * the rim DOES accept (docs/INPUT_MAP.md §5) — not a
+                 * refusal, because nothing was said no to. */
+                const int hold_dx = (int)iev.start_x - 232;
+                const int hold_dy = (int)iev.start_y - 232;
+                if ((hold_dx * hold_dx + hold_dy * hold_dy) >= (168 * 168)) {
+                    jr_display_ripple_neutral(iev.start_x, iev.start_y);
+                    jr_display_caption_set("RIM - SLIDE FOR VOLUME OR LIGHT");
+                    ESP_LOGI(TAG, "gesture: hold on the rim ignored");
+                    continue;
+                }
                 /* LONG-PRESS IS PRIVACY. One job, both directions, always
                  * captioned. Pairing and side utilities never share this
                  * safety gesture or the minimal voice shade. */
