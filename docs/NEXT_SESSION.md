@@ -135,9 +135,12 @@ rows and gates, `docs/evidence/20260905-*` the proof.
   last briefing, and the battery under 30 % off USB. Muted: a
   `GOOD MORNING 75* DRIZZLE 2 DONE` caption. Pure `jr_briefing_*` with host
   tests. `POST /api/debug/briefing` (dev-gated) delivers it now at any hour
-  without touching the latch, for the bench. **Not yet seen in the wild**
-  (built in the evening): the first proof is tomorrow's first lift — expect
-  `briefing: spoken` or `briefing: caption, muted` in the log.
+  without touching the latch, for the bench. **Proven from the bench at
+  23:52:** muted it captioned `GOOD MORNING 76* OVERCAST`; unmuted it spoke
+  the composed turn (`briefing: spoken, forced … It is Saturday 5 September.
+  Fort Lauderdale is 76 degrees and OVERCAST, high 91, low 76 …`). The
+  first lift of a morning is still unseen — expect `briefing: spoken` or
+  `briefing: caption, muted` in the log.
 - **A chime when a delegated task lands.** `jr_audio_play_chime` (raised-
   cosine notes) plays E5–G5–B5 in `board_announce()` before the caption or
   the spoken line, half volume at WHISPER, never over a reply. **Proven
@@ -179,7 +182,15 @@ rows and gates, `docs/evidence/20260905-*` the proof.
 | FUTURE | 7 | 33.5 | 79 | 33.6 ms |
 | MINIMAL | 8 | 31.0 | 92 | 60.8 ms |
 
-**The gate is not met, and the levers were the wrong ones.** The overlay
+**The gate is not met, and the levers were the wrong ones** — and the
+scout that followed found why (PLAN wave N14): the frame is overlay +
+engine CPU (bg memset, block decode, palette expand) + 21.7 ms of QSPI DMA
+the engine waits for before filling the next strip + up to 10 ms of forced
+tick delay, all serialized; and every baked dial's anim timer ran at 8 fps,
+which is the only thing that marks the glass dirty, so the four dials could
+never flush more than 8 frames a second. The timer is 24 now (N14.1, in the
+last image of the evening); the dial-off-the-engine blit and the deferred DMA
+wait are N14.2–N14.4 with the arithmetic. The overlay
 (the hands, cells and arc) is 17–61 ms of a 51–92 ms frame; the rest —
 31 ms on JARVIS, which has no dial at all — is the engine's own work (the
 face/dial decode per strip and the QSPI flush), and it barely moves between
@@ -353,7 +364,10 @@ number by 1.5 and was wrong for the same reason.
 2. **Deaf-session watchdog in the wild:** watch for `utterance unanswered` /
    `session is deaf` in the log; raise `UTT_DEAF_COUNT` if ambient chatter
    trips it.
-3. **Frame rate on the ring:** cache the shell veil so ring screens match the
+3. **Frame rate on the watch:** N14.2 (dial decoded once, blitted) and N14.3
+   (DMA wait one strip later) are the two that move it; the veil lever below
+   is spent on WATCH.
+3b. **Frame rate on the ring:** cache the shell veil so ring screens match the
    face's 19 fps (N9.10).
 4. **Two violets:** the update ring in probation and the companion rim share a
    hue (N9.11).

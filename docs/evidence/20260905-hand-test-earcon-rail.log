@@ -26,3 +26,5 @@ W (872192) jarvis_v5: board: poll failed (http_error)
 I (933022) jr_tools: tool=board_poll status=ok duration_ms=2085 http_status=200
 I (933082) jarvis_v5: chime: done
 I (933082) jarvis_v5: board: done Find the CO5300 AMOLED controller's maximum QSPI
+I (71382) jarvis_v5: briefing: caption, muted, forced (GOOD MORNING 76* OVERCAST)
+I (637982) jarvis_v5: briefing: spoken, forced (0 tasks done, rain in 0 h): Give Sir his morning briefing in two or three short spoken sentences, no list, only these facts. It is Saturday 5 September. Fort Lauderdale is 76 degrees and OVERCAST, high 91, lI (637982) jarvis_v5: arm: session live -> send text turn
