@@ -1605,11 +1605,24 @@ static inline uint16_t w_blend(uint16_t bg, wrgb_t fg, int a, bool swap)
  * sweeps 13 hands through 360 degrees to hold that. Sixteen lines cost the
  * same again per frame for no visible gain. `lo`/`hi` track the range.
  *
+ * EIGHT LINES FOR HAIRLINES, FOUR FOR THE WIDE HANDS (2026-09-05). The
+ * sliver argument above is about flanks a fraction of a pixel across; a
+ * hand more than six pixels wide with a tip of a pixel or more meets every
+ * one of four lines on every row it crosses, and four lines halve the
+ * sample work of the fills that dominate PILOT and DIVER. poly_sub()
+ * chooses per polygon; the 13 x 360 combing sweep holds either way.
+ *
  * The fills below are compiled at O2 inside an -Os image: they are the
  * hot loop of every watch frame (measured 10 ms a hand at 160 MHz at -Os). */
 #define AA_SUB   8
 #define AA_STEP  (16 / AA_SUB)
 #define AA_FULL  (AA_SUB * 16)
+#define AA_SUB_WIDE 4
+
+static inline int poly_sub(int32_t w0, int32_t w1)
+{
+    return (w0 > 3 * 16 && w1 >= 16) ? AA_SUB_WIDE : AA_SUB;
+}
 #if defined(__GNUC__) && !defined(__clang__)
 #define HOT __attribute__((optimize("O2")))   /* the device toolchain */
 #else
@@ -1686,18 +1699,18 @@ static inline void cov_span_sh(uint16_t *cov, int32_t xl, int32_t xr, int *lo,
 }
 
 static inline void HOT cov_blend(uint16_t *row, const uint16_t *cov, int lo, int hi,
-                                 wrgb_t c, int alpha, bool swap)
+                                 wrgb_t c, int alpha, bool swap, int full)
 {
     /* full coverage at full alpha is a straight write: the MINIMAL dial is
      * a 214 px disc every frame and must not cost a blend per pixel */
     const uint16_t solid = pack565(c.r, c.g, c.b, swap);
     for (int x = lo; x <= hi; ++x) {
         const int cv = cov[x];
-        if (cv >= AA_FULL && alpha >= 256) {
+        if (cv >= full && alpha >= 256) {
             row[x] = solid;
         } else if (cv != 0) {
             row[x] = w_blend(row[x], c,
-                             (cv >= AA_FULL ? alpha : (cv * alpha) / AA_FULL),
+                             (cv >= full ? alpha : (cv * alpha) / full),
                              swap);
         }
     }
@@ -1748,11 +1761,12 @@ static inline int32_t aa_chain_x(const aa_edge_t *e, int n, int *at, int32_t ys)
 }
 
 static void HOT aa_fill(const strip_t *s, const wpoly_t *p, wrgb_t c, int alpha,
-                        bool swap)
+                        bool swap, int sub)
 {
     if (p->n < 3 || alpha <= 0) {
         return;
     }
+    const int step = 16 / sub, full = sub * 16;
     int top = 0, bot = 0;
     for (int i = 1; i < p->n; ++i) {
         if (p->y[i] < p->y[top]) top = i;
@@ -1776,8 +1790,8 @@ static void HOT aa_fill(const strip_t *s, const wpoly_t *p, wrgb_t c, int alpha,
     for (int y = y_lo; y <= y_hi; ++y) {
         int lo = HUD_W, hi = -1;
         const int32_t yr = (int32_t)y << 4;
-        for (int sub = 0; sub < AA_SUB; ++sub) {
-            const int32_t ys = yr + sub * AA_STEP + AA_STEP / 2;
+        for (int k = 0; k < sub; ++k) {
+            const int32_t ys = yr + k * step + step / 2;
             if (ys < ymin || ys >= ymax) {
                 continue;
             }
@@ -1791,7 +1805,7 @@ static void HOT aa_fill(const strip_t *s, const wpoly_t *p, wrgb_t c, int alpha,
         }
         if (hi >= lo) {
             cov_blend(s->base + (size_t)(y - s->y0) * HUD_W, cov, lo, hi, c,
-                      alpha, swap);
+                      alpha, swap, full);
             memset(cov + lo, 0, (size_t)(hi - lo + 1) * sizeof cov[0]);
         }
     }
@@ -1814,11 +1828,12 @@ static uint16_t s_cov2[HUD_W];
 static void HOT aa_fill_hand(const strip_t *s, const wpoly_t *outer,
                              const wpoly_t *light, const wpoly_t *dark,
                              wrgb_t rc, int ra, wrgb_t cl, wrgb_t cd,
-                             int alpha, bool swap)
+                             int alpha, bool swap, int sub)
 {
     if (outer->n < 3 || light->n < 3 || dark->n < 3 || alpha <= 0) {
         return;
     }
+    const int step = 16 / sub, full = sub * 16;
     const wpoly_t *poly[3] = { outer, light, dark };
     int32_t ymin[3], ymax[3];
     aa_edge_t ea[3][8], eb[3][8];
@@ -1850,8 +1865,8 @@ static void HOT aa_fill_hand(const strip_t *s, const wpoly_t *outer,
     for (int y = y_lo; y <= y_hi; ++y) {
         int lo = HUD_W, hi = -1;
         const int32_t yr = (int32_t)y << 4;
-        for (int sub = 0; sub < AA_SUB; ++sub) {
-            const int32_t ys = yr + sub * AA_STEP + AA_STEP / 2;
+        for (int l = 0; l < sub; ++l) {
+            const int32_t ys = yr + l * step + step / 2;
             for (int k = 0; k < 3; ++k) {
                 if (ys < ymin[k] || ys >= ymax[k]) {
                     continue;
@@ -1876,20 +1891,20 @@ static void HOT aa_fill_hand(const strip_t *s, const wpoly_t *outer,
             const int co = cov[x] > body ? cov[x] : body;   /* never inside the body */
             const int rim = co - body;
             if (rim != 0 && ra > 0) {
-                row[x] = w_blend(row[x], rc, (rim * ra) / AA_FULL, swap);
+                row[x] = w_blend(row[x], rc, (rim * ra) / full, swap);
             }
-            if (c_l >= AA_FULL && alpha >= 256) {
+            if (c_l >= full && alpha >= 256) {
                 row[x] = solid_l;
             } else if (c_l != 0) {
                 row[x] = w_blend(row[x], cl,
-                                 (c_l >= AA_FULL ? alpha : (c_l * alpha) / AA_FULL),
+                                 (c_l >= full ? alpha : (c_l * alpha) / full),
                                  swap);
             }
-            if (c_d >= AA_FULL && alpha >= 256) {
+            if (c_d >= full && alpha >= 256) {
                 row[x] = solid_d;
             } else if (c_d != 0) {
                 row[x] = w_blend(row[x], cd,
-                                 (c_d >= AA_FULL ? alpha : (c_d * alpha) / AA_FULL),
+                                 (c_d >= full ? alpha : (c_d * alpha) / full),
                                  swap);
             }
         }
@@ -1968,7 +1983,7 @@ static void HOT aa_disc(const strip_t *s, int32_t cx, int32_t cy, int32_t rad,
             }
         }
         if (hi >= lo) {
-            cov_blend(row, cov, lo, hi, c, alpha, swap);
+            cov_blend(row, cov, lo, hi, c, alpha, swap, AA_FULL);
             memset(cov + lo, 0, (size_t)(hi - lo + 1) * sizeof cov[0]);
         }
     }
@@ -2042,12 +2057,12 @@ static void draw_hand(const strip_t *s, int32_t cx, int32_t cy, uint32_t a16,
 
     if (h->shadow) {
         hand_poly(&p, cx + 32, cy + 48, a16, h->u0, h->u1, h->w0 + 8, h->w1 + 8, 0);
-        aa_fill(s, &p, W_DARK, (WATCH_SHADOW_A * A) >> 8, swap);
+        aa_fill(s, &p, W_DARK, (WATCH_SHADOW_A * A) >> 8, swap, poly_sub(h->w0 + 8, h->w1 + 8));
     }
     if (h->core) {
         /* a cyan glow beneath the slim hand */
         hand_poly(&p, cx, cy, a16, h->u0 - 16, h->u1 + 16, h->w0 + 40, h->w1 + 40, 0);
-        aa_fill(s, &p, h->body, (56 * A) >> 8, swap);
+        aa_fill(s, &p, h->body, (56 * A) >> 8, swap, poly_sub(h->w0 + 40, h->w1 + 40));
     }
     if (h->outline) {
         /* the hairline rim and both flanks in one pass */
@@ -2055,20 +2070,22 @@ static void draw_hand(const strip_t *s, int32_t cx, int32_t cy, uint32_t a16,
         hand_poly(&o, cx, cy, a16, h->u0 - 12, h->u1 + 14, h->w0 + 14, h->w1 + 14, 0);
         hand_poly(&p, cx, cy, a16, h->u0, h->u1, h->w0, h->w1, light_side);
         hand_poly(&q, cx, cy, a16, h->u0, h->u1, h->w0, h->w1, -light_side);
-        aa_fill_hand(s, &o, &p, &q, W_DARK, (220 * A) >> 8, light, dark, A, swap);
+        aa_fill_hand(s, &o, &p, &q, W_DARK, (220 * A) >> 8, light, dark, A, swap,
+                     poly_sub(h->w0, h->w1));
     } else {
+        const int sub = poly_sub(h->w0, h->w1);
         hand_poly(&p, cx, cy, a16, h->u0, h->u1, h->w0, h->w1, light_side);
-        aa_fill(s, &p, light, A, swap);
+        aa_fill(s, &p, light, A, swap, sub);
         hand_poly(&p, cx, cy, a16, h->u0, h->u1, h->w0, h->w1, -light_side);
-        aa_fill(s, &p, dark, A, swap);
+        aa_fill(s, &p, dark, A, swap, sub);
     }
     if (h->lume_w > 0) {
         hand_poly(&p, cx, cy, a16, h->lume_u0, h->lume_u1, h->lume_w, h->lume_w / 2, 0);
-        aa_fill(s, &p, W_CREAM, A, swap);
+        aa_fill(s, &p, W_CREAM, A, swap, poly_sub(h->lume_w, h->lume_w / 2));
     }
     if (h->core) {
         hand_poly(&p, cx, cy, a16, h->u0 + 8, h->u1 - 24, 12, 6, 0);
-        aa_fill(s, &p, W_WHITE, (230 * A) >> 8, swap);
+        aa_fill(s, &p, W_WHITE, (230 * A) >> 8, swap, AA_SUB);
     }
 }
 
@@ -2121,10 +2138,10 @@ static void fallback_dial(const strip_t *s, int style, int A, bool swap)
                 p.x[0] = WATCH_CX16;      p.y[0] = WATCH_CY16 - 178 * 16;
                 p.x[1] = WATCH_CX16 + 22 * 16; p.y[1] = WATCH_CY16 - 156 * 16;
                 p.x[2] = WATCH_CX16 - 22 * 16; p.y[2] = WATCH_CY16 - 156 * 16;
-                aa_fill(s, &p, W_CREAM, A, swap);
+                aa_fill(s, &p, W_CREAM, A, swap, AA_SUB);
             } else if (i % 3 == 0) {
                 hand_poly(&p, WATCH_CX16, WATCH_CY16, a, 154 * 16, 180 * 16, 4 * 16, 4 * 16, 0);
-                aa_fill(s, &p, W_CREAM, A, swap);
+                aa_fill(s, &p, W_CREAM, A, swap, AA_SUB);
             } else {
                 w_polar(168 * 16, a, &x, &y);
                 aa_disc(s, x, y, 6 * 16 + 8, W_CREAM, A, swap);
@@ -2132,7 +2149,7 @@ static void fallback_dial(const strip_t *s, int style, int A, bool swap)
             break;
         case 2: /* DRESS: gold batons */
             hand_poly(&p, WATCH_CX16, WATCH_CY16, a, 150 * 16, 176 * 16, 32, 32, 0);
-            aa_fill(s, &p, (wrgb_t){ 212, 175, 55 }, A, swap);
+            aa_fill(s, &p, (wrgb_t){ 212, 175, 55 }, A, swap, AA_SUB);
             break;
         case 3: /* PILOT: white dots; the sub-dial rings below */
             w_polar(176 * 16, a, &x, &y);
@@ -2150,7 +2167,7 @@ static void fallback_dial(const strip_t *s, int style, int A, bool swap)
                         continue;
                     }
                     hand_poly(&p, WATCH_CX16, WATCH_CY16, ta, r0, 208 * 16, 8, 8, 0);
-                    aa_fill(s, &p, W_DARK, ((t % 5 == 0 ? 200 : 90) * A) >> 8, swap);
+                    aa_fill(s, &p, W_DARK, ((t % 5 == 0 ? 200 : 90) * A) >> 8, swap, AA_SUB);
                 }
             }
             w_polar(176 * 16, a, &x, &y);
@@ -2176,7 +2193,7 @@ static void fallback_dial(const strip_t *s, int style, int A, bool swap)
                 continue;
             }
             hand_poly(&p, WATCH_CX16, WATCH_CY16, a, r0, 210 * 16, 12, 12, 0);
-            aa_fill(s, &p, W_CYAN, ((i % 5 == 0 ? 200 : 110) * A) >> 8, swap);
+            aa_fill(s, &p, W_CYAN, ((i % 5 == 0 ? 200 : 110) * A) >> 8, swap, AA_SUB);
         }
         /* the four cell frames: hairline cyan boxes at the cell rectangles */
         static const int cells[4][4] = {
@@ -2194,7 +2211,7 @@ static void fallback_dial(const strip_t *s, int style, int A, bool swap)
                 p.x[1] = e[k][2] * 16 + 16; p.y[1] = e[k][1] * 16;
                 p.x[2] = e[k][2] * 16 + 16; p.y[2] = e[k][3] * 16 + 16;
                 p.x[3] = e[k][0] * 16; p.y[3] = e[k][3] * 16 + 16;
-                aa_fill(s, &p, W_CYAN, (90 * A) >> 8, swap);
+                aa_fill(s, &p, W_CYAN, (90 * A) >> 8, swap, AA_SUB);
             }
         }
     }
