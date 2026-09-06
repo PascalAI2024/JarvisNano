@@ -273,11 +273,16 @@ static uint32_t face_fps(jr_face_t face)
     case JR_FACE_RESTING: return 8;
     case JR_FACE_MUTED:   return 8;
     case JR_FACE_LINKING: return 12;
-    /* one frame, scheduled like the quiet faces (the suite pins 8..24) */
+    /* ONE FRAME, BUT ITS TIMER IS THE ONLY THING THAT INVALIDATES THE
+     * GLASS. The anim timer's tick is what marks the display dirty, so a
+     * dial scheduled at 8 fps capped every baked-dial watch — hands, sweep
+     * and all — at 8 flushed frames a second whatever the ladder asked
+     * (measured 7.8–8.4 fps on all four dials against 11.4 on JARVIS,
+     * 2026-09-05). The ladder's render cadence still slows it at rest. */
     case JR_FACE_DIAL_DIVER:
     case JR_FACE_DIAL_DRESS:
     case JR_FACE_DIAL_PILOT:
-    case JR_FACE_DIAL_FUTURE: return 8;
+    case JR_FACE_DIAL_FUTURE: return 24;
     default:              return 24;   /* engine + panel ceiling (P2.7) */
     }
 }
