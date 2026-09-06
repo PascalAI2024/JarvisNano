@@ -56,6 +56,17 @@ const char *device_tool_last_name(void)
 static uint32_t s_weather_last_fetch_ms;   /* app task only; 0 = never */
 static bool     s_weather_inflight;        /* app task only */
 static bool     s_weather_failed;          /* app task only; the last fetch brought nothing */
+/* THE SUN AND THE HOURS (wave N13). The same glance carries today's
+ * sunrise/sunset in minutes past local midnight and 36 hourly rain
+ * probabilities from today's midnight; the watch draws the day arc from
+ * the first, the rain latch reads the second. -1 / 255 mean "not in the
+ * answer", never zero. */
+int16_t  s_wx_sun_rise_min = -1;           /* app task writes; the shell publish reads */
+int16_t  s_wx_sun_set_min  = -1;
+uint8_t  s_wx_rain_pp[JR_RAIN_HOURS];      /* app task only */
+static bool           s_wx_rain_valid;     /* app task only */
+static jr_rain_warn_t s_rain_warn = { .armed = true };
+#define WEATHER_IDLE_REFRESH_MS 1800000u   /* awake or ambient, any screen: keep the cell honest */
 jr_display_weather_t s_weather;     /* last good data; app task only */
 
 static jr_display_sky_t weather_sky_from(const char *cond)
@@ -77,6 +88,56 @@ static jr_display_sky_t weather_sky_from(const char *cond)
 }
 
 static int16_t c_to_f(double c) { return (int16_t)lrint(c * 9.0 / 5.0 + 32.0); }
+
+/* One line, once per front: an ACTIVITY row always, spoken when a session
+ * is open with the microphone live, a caption otherwise — the same rule the
+ * board's announcements follow. The hour is the first in the next three at
+ * or above JR_RAIN_WARN_PCT; the latch in jr_core keeps it to one. */
+static void rain_announce(int ahead_h, uint8_t pct)
+{
+    char row[40];                       /* the ACTIVITY row cuts at 24 glyphs */
+    snprintf(row, sizeof row, "IN %dH %u%% LIKELY", ahead_h, (unsigned)pct);
+    jr_display_activity_push("RAIN", row);
+    const jr_state_t p = jr_orch_phase(&s_app.orch);
+    const bool open = p == JR_ST_LISTENING || p == JR_ST_SPEAKING ||
+                      p == JR_ST_THINKING;
+    if (open && !atomic_load(&s_voice_privacy_paused)) {
+        char line[120];
+        snprintf(line, sizeof line,
+                 "Rain is likely in about %d hour%s, %u percent chance.",
+                 ahead_h, ahead_h == 1 ? "" : "s", (unsigned)pct);
+        handle_say(line);
+    } else {
+        char cap[24];
+        snprintf(cap, sizeof cap, "RAIN IN %dH", ahead_h);
+        jr_display_caption_set(cap);
+    }
+    ESP_LOGI(TAG, "weather: rain in %d h (%u%%)", ahead_h, (unsigned)pct);
+}
+
+/* For the morning briefing: hours until the first hour at or above the
+ * warning line within `horizon_h` hours of now, or 0. Reads the data, not
+ * the latch, so a briefing can name rain the afternoon warning will later
+ * repeat. */
+int weather_rain_ahead_h(int horizon_h)
+{
+    if (!s_wx_rain_valid) {
+        return 0;
+    }
+    struct tm tmv;
+    time_t tt = time(NULL);
+    localtime_r(&tt, &tmv);
+    if (tmv.tm_year < 2020 - 1900) {
+        return 0;
+    }
+    for (int k = 1; k <= horizon_h && tmv.tm_hour + k < JR_RAIN_HOURS; ++k) {
+        const uint8_t v = s_wx_rain_pp[tmv.tm_hour + k];
+        if (v != JR_RAIN_PP_UNKNOWN && v >= JR_RAIN_WARN_PCT) {
+            return k;
+        }
+    }
+    return 0;
+}
 
 static void weather_apply_result(const jr_tool_result_t *result, uint32_t now)
 {
@@ -129,9 +190,46 @@ static void weather_apply_result(const jr_tool_result_t *result, uint32_t now)
     }
     w.condition[n] = '\0';
     w.fetched_ms = now;
+    /* The sun and the hours: absent when the extra fetch failed, and then
+     * the previous answer's values stand (the sun moves a minute a day). */
+    const cJSON *sr = cJSON_GetObjectItemCaseSensitive(r, "sr");
+    const cJSON *ss = cJSON_GetObjectItemCaseSensitive(r, "ss");
+    if (cJSON_IsNumber(sr) && cJSON_IsNumber(ss) && sr->valuedouble >= 0 &&
+        ss->valuedouble >= 0 && sr->valuedouble < 1440 && ss->valuedouble < 1440) {
+        s_wx_sun_rise_min = (int16_t)sr->valuedouble;
+        s_wx_sun_set_min = (int16_t)ss->valuedouble;
+    }
+    const cJSON *pp = cJSON_GetObjectItemCaseSensitive(r, "pp");
+    if (cJSON_IsArray(pp) && cJSON_GetArraySize(pp) > 0) {
+        memset(s_wx_rain_pp, JR_RAIN_PP_UNKNOWN, sizeof s_wx_rain_pp);
+        int k = 0;
+        const cJSON *v = NULL;
+        cJSON_ArrayForEach(v, pp) {
+            if (k >= JR_RAIN_HOURS) {
+                break;
+            }
+            if (cJSON_IsNumber(v) && v->valuedouble >= 0 && v->valuedouble <= 100) {
+                s_wx_rain_pp[k] = (uint8_t)lrint(v->valuedouble);
+            }
+            ++k;
+        }
+        s_wx_rain_valid = true;
+    }
     cJSON_Delete(root);
     s_weather = w;
     jr_display_weather_set(&s_weather);
+    if (s_wx_rain_valid) {
+        struct tm tmv;
+        time_t tt = time(NULL);
+        localtime_r(&tt, &tmv);
+        if (tmv.tm_year >= 2020 - 1900) {
+            const int ahead = jr_rain_warning_step(&s_rain_warn, s_wx_rain_pp,
+                                                   JR_RAIN_HOURS, tmv.tm_hour);
+            if (ahead > 0) {
+                rain_announce(ahead, s_wx_rain_pp[tmv.tm_hour + ahead]);
+            }
+        }
+    }
     static bool s_rain_announced;
     if (!s_rain_announced && w.rain_pct >= 40U) {
         /* Once per boot, one line, no speech: the glass mentions the day. */
@@ -175,14 +273,21 @@ void weather_maybe_fetch(uint32_t now)
      * outage took the first one on 2026-09-02 and left NO WEATHER for ten
      * minutes) is retried from any screen, at the board poll's cadence and
      * behind its gates: never in DREAM, never without the network. */
+    /* Since the watch shows the weather and the rain latch reads the hours,
+     * an AWAKE or AMBIENT device also refreshes every thirty minutes from
+     * any screen (2026-09-05); WHISPER and DREAM still never fetch, so rest
+     * never drags Wi-Fi out of min-modem. */
+    const uint8_t mood = atomic_load(&s_mood_id);
+    const bool lit = mood == (uint8_t)JR_MOOD_AWAKE || mood == (uint8_t)JR_MOOD_AMBIENT;
     const bool due = first          ? now >= WEATHER_FIRST_FETCH_MS
                      : s_weather_failed ? since >= WEATHER_RETRY_MS
-                                        : on_screen && since >= WEATHER_REFRESH_MS;
+                                        : (on_screen && since >= WEATHER_REFRESH_MS) ||
+                                          (lit && since >= WEATHER_IDLE_REFRESH_MS);
     if (!due) {
         return;
     }
-    if (!first && s_weather_failed) {
-        if (atomic_load(&s_mood_id) == (uint8_t)JR_MOOD_DREAM) {
+    if (!first) {
+        if (mood == (uint8_t)JR_MOOD_DREAM) {
             return;
         }
         jr_net_status_t net = {0};
@@ -201,7 +306,8 @@ void weather_maybe_fetch(uint32_t now)
         s_weather_inflight = true;
         s_weather_last_fetch_ms = now;    /* also rate-limits a failing fetch */
         ESP_LOGI(TAG, "weather: fetch submitted (%s)",
-                 first ? "first" : s_weather_failed ? "retry" : "screen entered");
+                 first ? "first" : s_weather_failed ? "retry"
+                       : on_screen ? "screen entered" : "half hour");
     }
 }
 
@@ -254,11 +360,32 @@ static int board_terminal(const char *status)
     return 0;
 }
 
+/* What finished since the last morning briefing took it: a count and the
+ * newest title. Reset when the briefing reads it. */
+static int  s_board_done_count;                   /* app task only */
+static char s_board_done_title[64];               /* app task only */
+
+void board_take_done(int *count, char *title, size_t cap)
+{
+    *count = s_board_done_count;
+    if (title != NULL && cap > 0) {
+        strlcpy(title, s_board_done_title, cap);
+    }
+    s_board_done_count = 0;
+    s_board_done_title[0] = '\0';
+}
+
 static void board_announce(const char *title, int terminal, const char *result)
 {
     char row[25];
     title_shorten(row, sizeof row - 5U, title);      /* "TASK " + 19 glyphs */
     jr_display_activity_push("TASK", row);
+    if (terminal == 1) {
+        if (s_board_done_count < 999) {
+            s_board_done_count++;
+        }
+        strlcpy(s_board_done_title, title, sizeof s_board_done_title);
+    }
 
     const jr_state_t p = jr_orch_phase(&s_app.orch);
     const bool open = p == JR_ST_LISTENING || p == JR_ST_SPEAKING ||

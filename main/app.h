@@ -49,6 +49,7 @@
 #include "jr_display/hud_render.h"
 #include "jr_core/session.h"
 #include "jr_core/mood.h"
+#include "jr_core/glance.h"
 #include "jr_core/orchestrator.h"
 #include "jr_core/snapshot.h"
 #include "jr_core/turn_policy.h"
@@ -434,6 +435,10 @@ void enter_deep_sleep(const char *why, uint32_t timer_s);
 
 extern jr_display_weather_t s_weather;
 extern uint32_t s_glance_until_ms;
+extern int16_t s_wx_sun_rise_min;          /* minutes past local midnight; -1 unknown */
+extern int16_t s_wx_sun_set_min;
+int weather_rain_ahead_h(int horizon_h);
+void board_take_done(int *count, char *title, size_t cap);
 
 const char *device_tool_last_status(void);
 const char *device_tool_last_name(void);

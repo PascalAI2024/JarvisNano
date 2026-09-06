@@ -403,6 +403,33 @@ static void persist_watch_style(uint8_t style)
     }
 }
 
+/* THE MORNING BRIEFING'S LATCH survives the night: the first lift of the
+ * morning is usually a deep-sleep wake, which is a fresh boot, and a boot
+ * that forgot it had briefed would brief again at the next lift. */
+static void persist_briefing_day(int yday)
+{
+    nvs_handle_t h;
+    if (nvs_open("app", NVS_READWRITE, &h) == ESP_OK) {
+        (void)nvs_set_u16(h, "brief_yday", (uint16_t)yday);
+        (void)nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static jr_briefing_t s_briefing = { .last_yday = -1 };   /* voice task only */
+
+static void restore_briefing_day(void)
+{
+    nvs_handle_t h;
+    uint16_t yday = 0;
+    if (nvs_open("app", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_u16(h, "brief_yday", &yday) == ESP_OK && yday <= 366U) {
+            s_briefing.last_yday = (int16_t)yday;
+        }
+        nvs_close(h);
+    }
+}
+
 static void restore_watch_style(void)
 {
     nvs_handle_t h;
@@ -796,6 +823,60 @@ static bool device_wall_time(struct tm *out)
         return true;
     }
     return false;
+}
+
+/* THE MORNING GLANCE SPEAKS (wave N13). The first lift after a rest, once
+ * per calendar day inside the morning window, earns one briefing made only
+ * of what the device already holds: the date, the weather glance, the rain
+ * hours, the delegated tasks that finished since the last briefing, and the
+ * battery when it is worth a sentence. The words are the model's (a text
+ * turn through handle_say, so the persona speaks them); the numbers are
+ * the device's. Muted, it is one caption in the shell's glyphs. Nothing
+ * here opens the microphone: privacy is checked exactly as board_announce
+ * checks it. */
+static void morning_briefing_maybe(bool lifted_after_rest, const jr_power_t *bat)
+{
+    struct tm tmv;
+    if (!lifted_after_rest || !device_wall_time(&tmv)) {
+        return;
+    }
+    if (!jr_briefing_due(&s_briefing, tmv.tm_hour, tmv.tm_yday, true)) {
+        return;
+    }
+    persist_briefing_day(tmv.tm_yday);
+    char title[64];
+    int done = 0;
+    board_take_done(&done, title, sizeof title);
+    const bool gauge = bat != NULL && bat->present && bat->percent <= 100U;
+    jr_briefing_facts_t f = {
+        .have_date = true,
+        .wday = tmv.tm_wday,
+        .mday = tmv.tm_mday,
+        .mon = tmv.tm_mon,
+        .have_weather = s_weather.valid,
+        .temp_f = s_weather.temp_f,
+        .hi_f = s_weather.hi_f,
+        .lo_f = s_weather.lo_f,
+        .condition = s_weather.condition,
+        .rain_in_h = weather_rain_ahead_h(12),
+        .tasks_done = done,
+        .task_title = done > 0 ? title : NULL,
+        .battery_pct = gauge ? (int)bat->percent : -1,
+        .on_usb = bat != NULL && bat->usb_present,
+    };
+    if (atomic_load(&s_voice_privacy_paused)) {
+        char cap[JR_BRIEF_CAPTION_GLYPHS + 1];
+        (void)jr_briefing_caption(cap, sizeof cap, &f);
+        jr_display_caption_set(cap);
+        ESP_LOGI(TAG, "briefing: caption, muted (%s)", cap);
+        return;
+    }
+    char text[400];
+    (void)jr_briefing_compose(text, sizeof text, &f);
+    handle_say(text);
+    jr_display_caption_set("GOOD MORNING");
+    ESP_LOGI(TAG, "briefing: spoken (%d task%s done, rain in %d h)", done,
+             done == 1 ? "" : "s", f.rain_in_h);
 }
 
 static void device_rtc_capture_os_time(void)
@@ -2167,8 +2248,9 @@ static void voice_task(void *arg)
                 static uint8_t prev_mood = (uint8_t)JR_MOOD_AWAKE;
                 const bool rested = prev_mood == (uint8_t)JR_MOOD_WHISPER ||
                                     prev_mood == (uint8_t)JR_MOOD_DREAM;
-                if (mout.changed && mout.mood == JR_MOOD_AWAKE && rested &&
-                    moving && s_weather.valid &&
+                const bool lifted = mout.changed && mout.mood == JR_MOOD_AWAKE &&
+                                    rested && moving;
+                if (lifted && s_weather.valid &&
                     jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE &&
                     !jr_display_choices_active()) {
                     jr_display_nav_set(JR_DISPLAY_SPACE_WEATHER);
@@ -2177,6 +2259,23 @@ static void voice_task(void *arg)
                     ESP_LOGI(TAG, "glance: lifted after rest, showing weather");
                 }
                 prev_mood = (uint8_t)mout.mood;
+                /* A deep-sleep wake by lift or touch is the same gesture seen
+                 * from a fresh boot: the ladder starts AWAKE, so no rest ever
+                 * "ended". Count it once, after the first weather fetch had
+                 * its chance (it is submitted at 20 s), so the briefing has
+                 * the day's numbers instead of "no weather". */
+                static bool boot_lift_pending = true;
+                bool boot_lift = false;
+                if (boot_lift_pending &&
+                    (s_weather.valid || now >= 45000)) {
+                    boot_lift_pending = false;
+                    boot_lift = s_boot_wake_cause != ESP_SLEEP_WAKEUP_UNDEFINED &&
+                                s_boot_wake_cause != ESP_SLEEP_WAKEUP_TIMER;
+                    if (boot_lift) {
+                        ESP_LOGI(TAG, "glance: woke by %s", wake_cause_name(s_boot_wake_cause));
+                    }
+                }
+                morning_briefing_maybe(lifted || boot_lift, have_power ? &bat : NULL);
             }
             /* DEEP SLEEP WHEN NOT IN USE. The ladder says when (DREAM for
              * JR_MOOD_SLEEP_MS); the world says whether: never on USB (a
@@ -4052,6 +4151,7 @@ void app_main(void)
     restore_out_vol();   /* gesture-set volume survives reboot */
     restore_brightness_cap();
     restore_watch_style();
+    restore_briefing_day();
     s_app.mic = jr_audio_source();
     s_app.spk = jr_audio_sink();
 
