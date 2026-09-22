@@ -261,6 +261,8 @@ static uint32_t s_last_tap_ms;
  * when no hold is in flight. App task only. */
 uint32_t s_hold_start_ms;
 _Atomic uint32_t s_pairing_claim_until_ms;
+_Atomic uint32_t s_pairing_claim_code;
+_Atomic uint32_t s_pairing_claim_attempts;
 /* Set by the boot-button tick (which runs before most UI statics are declared)
  * and serviced in the app loop, where they are in scope. */
 static _Atomic bool s_panic_home_request;
@@ -294,10 +296,16 @@ static void boot_button_tick(uint32_t now_ms)
             ESP_LOGI(TAG, "boot button: controls toggle (%lu ms)",
                      (unsigned long)held_ms);
         } else if (held_ms >= 1500U && held_ms < 5000U) {
+            const uint32_t code = 100000U + esp_random() % 900000U;
+            atomic_store(&s_pairing_claim_code, code);
+            atomic_store(&s_pairing_claim_attempts, 0U);
             atomic_store(&s_pairing_claim_until_ms,
                          now_ms + PAIRING_CLAIM_WINDOW_MS);
             jr_display_nav_down();
-            jr_display_caption_set("PAIRING OPEN - 60 S");
+            char caption[32];
+            snprintf(caption, sizeof caption, "PAIR CODE %06lu - 60 S",
+                     (unsigned long)code);
+            jr_display_caption_set(caption);
             ESP_LOGI(TAG, "boot button: physical pairing window open "
                           "(%lu ms hold)", (unsigned long)held_ms);
         } else if (held_ms >= 5000U) {
@@ -312,6 +320,8 @@ static void boot_button_tick(uint32_t now_ms)
              * rather than the glass, because a button cannot be swallowed by
              * a modal (docs/INPUT_MAP.md §4). */
             atomic_store(&s_pairing_claim_until_ms, 0U);
+            atomic_store(&s_pairing_claim_code, 0U);
+            atomic_store(&s_pairing_claim_attempts, 0U);
             atomic_store(&s_panic_home_request, true);
             ESP_LOGI(TAG, "boot button: panic-home (%lu ms hold)",
                      (unsigned long)held_ms);
@@ -519,13 +529,15 @@ static int logring_vprintf(const char *fmt, va_list ap)
     return s_logring_prev != NULL ? s_logring_prev(fmt, ap) : 0;
 }
 
-/* Operator mode: Codex/Desk owns the glass and bounded interaction surface.
- * Voice and normal gestures pause for a TTL-bounded window. Single taps belong
- * to the presented tool; double-tap is the physical escape hatch back to
- * always-ready Jarvis. OTA may borrow the lease without entering this mode. */
+/* Operator mode: a paired desk client owns the glass and bounded interaction
+ * surface. Voice and normal gestures pause for a TTL-bounded window. Single
+ * taps belong to the presented tool; double-tap is the physical escape hatch
+ * back to always-ready Jarvis. OTA may borrow the lease without entering this
+ * mode. */
 _Atomic uint32_t s_operator_lease_until_ms;
 _Atomic bool s_operator_mode_active;
 _Atomic uint32_t s_operator_mode_entered_ms;
+_Atomic int s_operator_mode_owner;
 _Atomic bool s_ota_active;
 _Atomic uint32_t s_ota_received_bytes;
 _Atomic uint32_t s_ota_total_bytes;
@@ -1706,12 +1718,17 @@ static void publish_shell_state(uint32_t now_ms)
         strlcpy(cached_title, "PAIR DEVICE", sizeof(cached_title));
     } else if (pairing_until != 0U) {
         atomic_store(&s_pairing_claim_until_ms, 0U);
+        atomic_store(&s_pairing_claim_code, 0U);
+        atomic_store(&s_pairing_claim_attempts, 0U);
     }
     if (operator_mode_active(now_ms)) {
         cached_active = true;
         cached_progress = 100U;
         cached_state = JR_DISPLAY_AGENT_WORKING;
-        strlcpy(cached_title, "CODEX", sizeof(cached_title));
+        strlcpy(cached_title,
+                atomic_load(&s_operator_mode_owner) == OPERATOR_OWNER_ZEROCHAT
+                    ? "ZEROCHAT" : "CODEX",
+                sizeof(cached_title));
     }
     jr_display_set_shell_state(s_ui_shade_open, cached_active,
                                cached_progress, cached_state);
@@ -2017,7 +2034,8 @@ static void voice_task(void *arg)
 
         if (atomic_load(&s_operator_mode_active) &&
             !operator_lease_active((uint32_t)now)) {
-            (void)operator_mode_release((uint32_t)now, "ttl", false, true);
+            (void)operator_mode_release((uint32_t)now, "ttl", false, true,
+                                        OPERATOR_OWNER_NONE, 0U);
         }
 
         /* Leave a freshly booted OTA slot pending through a real probation
@@ -3080,7 +3098,7 @@ static void voice_task(void *arg)
                  * compositor held 19 fps throughout; the sweep's swipes were
                  * being refused here. */
                 if (!physical && iev.kind != JR_INPUT_SWIPE) {
-                    ESP_LOGW(TAG, "synthetic input cannot control Codex mode");
+                    ESP_LOGW(TAG, "synthetic input cannot control operator mode");
                     continue;
                 }
                 if (iev.kind == JR_INPUT_LONG_PRESS) {
@@ -3105,7 +3123,8 @@ static void voice_task(void *arg)
                          * neither contact of the double-tap is dispatched. */
                         codex_tap_pending = false;
                         (void)operator_mode_release(
-                            (uint32_t)now, "double-tap", true, false);
+                            (uint32_t)now, "double-tap", true, false,
+                            OPERATOR_OWNER_NONE, 0U);
                     } else {
                         if (codex_tap_pending) {
                             (void)brain_surface_handle_tap(
@@ -3133,7 +3152,11 @@ static void voice_task(void *arg)
                      * 400 ms timeout below. */
                     continue;
                 }
-                jr_display_caption_set("CODEX MODE - DOUBLE TAP TO EXIT");
+                jr_display_caption_set(
+                    atomic_load(&s_operator_mode_owner) ==
+                            OPERATOR_OWNER_ZEROCHAT
+                        ? "ZEROCHAT MODE - DOUBLE TAP TO EXIT"
+                        : "CODEX MODE - DOUBLE TAP TO EXIT");
                 ESP_LOGI(TAG, "operator: guest holds the glass, kind=%d",
                          (int)iev.kind);
                 /* EVERYTHING ELSE FALLS THROUGH. A guest holds the glass, not
@@ -3604,7 +3627,10 @@ static void voice_task(void *arg)
                     codex_pending_tap.emitted_ms);
                 if (!owned) {
                     jr_display_caption_set(
-                        "CODEX MODE - DOUBLE TAP TO EXIT");
+                        atomic_load(&s_operator_mode_owner) ==
+                                OPERATOR_OWNER_ZEROCHAT
+                            ? "ZEROCHAT MODE - DOUBLE TAP TO EXIT"
+                            : "CODEX MODE - DOUBLE TAP TO EXIT");
                 }
                 codex_tap_pending = false;
             }
@@ -3668,6 +3694,7 @@ static void voice_task(void *arg)
          * flipping the device face-down outranks any leaseholder. */
         const bool companion_listen =
             operator_mode_active((uint32_t)now) &&
+            atomic_load(&s_operator_mode_owner) == OPERATOR_OWNER_ZEROCHAT &&
             !atomic_load(&s_voice_privacy_paused) && !s_flip_muted;
         if ((s_app.io.capturing && phase_allows_capture) || audio_diag_active ||
             companion_listen) {

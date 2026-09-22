@@ -28,11 +28,13 @@ microphone -> ESP32 voice task -> Gemini Live
 | Route | Status | What owns reasoning and audio |
 | --- | --- | --- |
 | `cloud_gemini` | Active | Gemini Live, with JarvisMCP calls executed directly by the ESP32 |
+| `private_wifi` | Active while leased | Paired ZeroChat receives microphone PCM, runs STT/reasoning/TTS, and returns speaker PCM over trusted local Wi-Fi |
 | `desk_codex` | Optional surface | Gemini still owns voice; a paired Mac may publish bounded cards and receive touch actions |
 | `private_android` | Not implemented | Future mutually exclusive BLE audio route to a private Android STT/LLM/TTS stack |
 
-There is no automatic cloud fallback from the future private route. Switching
-to it must explicitly close Gemini/Wi-Fi voice before BLE audio starts.
+There is no automatic cloud fallback from either private route. Entering a
+ZeroChat lease explicitly pauses Gemini; release, expiry, or double-tap restores
+the prior privacy-safe voice state.
 
 ## Discovery
 
@@ -66,6 +68,8 @@ X-JarvisNano-Control: 1
 | POST | `/api/audio/self-test` | Run the speaker-to-microphone diagnostic capture |
 | GET | `/api/audio/taps` | Paired audio tap metadata |
 | GET | `/api/audio/tap.wav?source=...` | Paired bounded WAV capture (`mic-clean`, `mic-raw`, `reference`, or `playback`) |
+| GET | `/api/companion/audio/in?after=latest|N&max_samples=512..8192` | ZeroChat microphone PCM16 LE at 16 kHz with absolute cursor headers |
+| POST | `/api/companion/audio/out?seq=N&end=0|1` | Sequenced ZeroChat speaker PCM16 LE at 24 kHz with explicit partial-write receipts |
 | GET | `/api/touch` | Touch counters and panel challenge state |
 | POST | `/api/diag/panel-touch?action=start|cancel` | Physical panel/touch proof |
 | GET | `/api/diag/tasks` | Internal-memory and per-task stack high-water state; per-task `run` counters and `total_runtime` (esp_timer µs) give each core's idle share between two snapshots |
@@ -84,7 +88,7 @@ X-JarvisNano-Control: 1
 | GET/POST | `/api/tools/config` | Redacted JarvisMCP status / paired provisioning |
 | GET | `/api/device/health` | Paired derived diagnosis and repairability verdict |
 | GET/POST | `/api/device/levels` | Paired persistent volume and mood-capped brightness |
-| POST | `/api/pairing/claim?rotate=1` | One-time token claim during the physical BOOT-hold window |
+| POST | `/api/pairing/claim?rotate=1` | One-time token claim using the six-digit code shown during the physical BOOT-hold window |
 | GET | `/api/display` | Display health; since wave N13 also the render's own clock — `render_us`, `render_frames` and `render_frame_us` (the last whole second's microseconds per frame for the strip overlay) |
 | GET | `/api/display/snapshot.json` | Submission-mirror metadata |
 | GET | `/api/display/snapshot.ppm` | Paired PPM display mirror |
@@ -92,7 +96,7 @@ X-JarvisNano-Control: 1
 | POST | `/api/display/test?pattern=...` | Deterministic display diagnostic |
 | POST | `/api/display/canvas?ttl=ms` | TTL-bounded RGB565 remote canvas |
 | POST | `/api/debug/input?kind=...` | Synthetic tap/hold/swipe through the real input queue |
-| GET/POST | `/api/operator/lease` | Read/enter/exit bounded Codex glass ownership |
+| GET/POST | `/api/operator/lease` | Read/enter/exit bounded `codex` or `zerochat` ownership |
 | POST | `/api/ota/upload` | Stream an app image into the idle OTA slot and reboot |
 | POST | `/api/ota/assets` | Stream the whole art image (`emote_assets.bin`) into its partition and reboot; `409` during app probation |
 
@@ -100,14 +104,16 @@ Authentication is route-specific:
 
 | Surface | Required proof |
 | --- | --- |
-| Control-only diagnostics (say/gain/audio self-test/panel challenge/HUD/choices/demo/shade/display test/canvas) | control header |
+| Control diagnostics (say/gain/audio self-test/panel challenge/HUD/choices/demo/shade/display test/canvas) | pairing token plus control header |
 | Paired synthetic input (`/api/input/tap`, `/api/debug/input`) | pairing token plus control header |
 | Agent Link GET/POST | pairing token |
 | Brain outbox | pairing token |
 | Brain inbox | pairing token plus control header |
 | Tools config GET/POST | pairing token plus control header |
-| Pairing claim | control header plus the 60-second window opened by a 1.5–5 s runtime BOOT hold |
-| Operator takeover/release | pairing token plus control header |
+| Pairing claim | control header, the displayed six-digit code, and the 60-second window opened by a 1.5–5 s runtime BOOT hold |
+| Operator takeover/release | pairing token plus control header; ZeroChat renew/release also requires its active lease identifier |
+| Companion microphone input | pairing token plus the active `zerochat` lease identifier |
+| Companion speaker output | pairing token, control header, and the active `zerochat` lease identifier |
 | Operator mode GET | none |
 | OTA upload | pairing token plus control header |
 | Device health GET | pairing token |
@@ -120,9 +126,11 @@ and the control-intent lane. Other control-intent routes return `423 Locked`;
 Brain inbox requests return `409 Conflict` so a paired remote client cannot
 replace, update, or dismiss the local approval prompt.
 
-The HTTP control plane is plaintext and therefore trusted-LAN-only. Pairing
-tokens authorise protected routes; they do not encrypt traffic. BLE, USB, or
-device HTTPS is required before the same bearer can be considered safe on an
+The HTTP control plane is plaintext and therefore suitable only on an isolated
+WPA2/WPA3 network controlled by the device owner—not guest or shared Wi-Fi.
+Pairing tokens authorize protected routes; they do not encrypt traffic or
+defeat passive capture. BLE, USB, or device HTTPS with a pinned per-device
+identity is required before the same bearer can be considered safe on an
 untrusted network.
 
 ## Direct JarvisMCP tools
@@ -208,10 +216,12 @@ never credential values.
 ## Pairing and Brain Link surfaces
 
 The controls surface exposes volume, brightness, physical **MUTE/LISTEN**, and
-the PWR/BOOT role legend. Holding BOOT for 1.5–5 seconds after startup opens a
-visible 60-second pairing claim window; `jarvis-desk.py pair` claims exactly one
-token and stores it in the host Keychain. BOOT held during reset remains the ROM
-downloader path. Glass hold remains exclusively privacy mute/unmute.
+the PWR/BOOT role legend. Holding BOOT for 1.5–5 seconds after startup shows a
+random six-digit code and opens a 60-second pairing claim window. A claim sends
+that code in `X-JarvisNano-Pair-Code`; three wrong attempts close the window.
+`jarvis-desk.py pair --code NNNNNN` claims exactly one token and stores it in
+the host Keychain. BOOT held during reset remains the ROM downloader path.
+Glass hold remains exclusively privacy mute/unmute.
 
 Authenticated Brain Link calls additionally send:
 
@@ -270,25 +280,65 @@ trusted-LAN-only.
 - `scripts/jarvisctl.py gestures [lines]` extracts physical input receipts and
   their resolved actions from the device log ring.
 
-## Codex operator mode
+## Operator modes
 
-`POST /api/operator/lease?ttl=seconds` enters a bounded tool mode. Gemini voice
-and normal gestures pause; the violet Agent rim identifies the external glass
-owner. A paired Desk client may present one bounded notice/progress/result/
-choice/consent surface through `/api/brain/inbox` and receive touch actions from
-`/api/brain/outbox`.
+`POST /api/operator/lease?ttl=seconds&mode=codex|zerochat` enters bounded
+external ownership. Every owner requires a valid pairing token. Gemini voice
+and normal gestures pause; the violet Agent rim identifies the external owner.
+A different live owner receives `409 Conflict`. Codex may renew its own lease;
+ZeroChat renews only by presenting its current lease identifier.
+
+A paired Desk client in `codex` mode may present one bounded
+notice/progress/result/choice/consent surface through `/api/brain/inbox` and
+receive touch actions from `/api/brain/outbox`.
 
 - Single taps belong to the active Desk surface and return `surface.action`.
-- Inputs without a surface are retained by Codex mode, not routed to voice.
-- **Double-tap always exits** and dismisses the remote surface. If privacy was
+- Inputs without a surface are retained by operator mode, not routed to voice.
+- **Double-tap always exits** and dismisses any remote surface. If privacy was
   already held, gold mute remains; otherwise always-ready Jarvis resumes.
 - TTL expiry performs the same privacy-safe recovery without a client.
+- `POST /api/operator/lease?release=1` releases the current owner; ZeroChat must present its current lease identifier.
 - `GET /api/operator/lease` returns `{active,mode,ttl_ms}`.
-- `jarvisctl takeover`, `mode`, `normal`, and `desk ...` are the operator CLI.
+- `jarvisctl takeover`, `mode`, `normal`, and `desk ...` are the Codex operator
+  CLI.
 
-This is external tool ownership, not autonomous JarvisMCP push. JarvisMCP
-remains the on-device bounded tool gateway used by Gemini; Desk surfaces are
-the paired display/action channel used by Codex.
+This is external ownership, not autonomous JarvisMCP push. JarvisMCP remains
+the on-device bounded tool gateway used by Gemini; Desk surfaces are the paired
+display/action channel used by Codex.
+
+## ZeroChat Wi-Fi voice
+
+ZeroChat establishes `mode=zerochat`; the successful response contains a
+random nonzero `lease_id`. Every companion audio request sends that value in
+`X-JarvisNano-Lease`. Renewal and release require the same header, are checked
+against the current ID under the ownership lock, and never turn a stale renewal
+into a new lease. Release, expiry, physical double-tap, or token rotation clears
+the ID and flushes queued companion playback, so a packet from an earlier lease
+cannot replay into a later one.
+
+ZeroChat starts its microphone cursor with `after=latest` so buffered audio from
+before the lease is never replayed. Subsequent input requests use the prior
+`X-Jarvis-Audio-End` value. Responses carry `X-Jarvis-Audio-Oldest`, `Start`,
+`End`, `Rate`, and `Dropped`; a dropped cursor must discard the in-progress
+utterance instead of stitching audio across the overrun. Physical privacy
+returns `423 Locked` and no microphone bytes.
+
+Speaker writes use monotonically increasing `seq` values starting at one for
+each new ZeroChat lease. A receipt returns `accepted_samples` and `next_seq`.
+The unsigned sequence rolls from `4294967295` back to one. ZeroChat advances by
+exactly the accepted samples and uses the returned sequence even after a partial
+or zero-length ring write. Repeating only the immediately previous sequence
+under the same lease identifier is idempotent and cannot replay audio; the
+client retries that exact tuple once when transport loses its receipt. After all
+response PCM is accepted, ZeroChat sends an empty `end=1` terminator. PCM formats
+are fixed: 16 kHz mono signed little-endian input and 24 kHz mono signed
+little-endian output.
+
+Clients require a valid `Content-Length` on every non-`204` response and keep
+their request deadline active until the body is consumed. Firmware rejects a
+speaker upload that does not complete within 12 seconds. Microphone bodies must
+not exceed the requested sample window, JSON responses are limited to 4096
+bytes, and error bodies to 1024 bytes.
 
 ## Self-diagnosis and paired levels
 

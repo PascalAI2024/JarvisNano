@@ -145,6 +145,15 @@ def bounded_ttl(value: str) -> int:
         )
     return number
 
+
+def pairing_code(value: str) -> str:
+    if len(value) != 6 or not value.isascii() or not value.isdigit():
+        raise argparse.ArgumentTypeError(
+            "must be the six-digit code shown on JarvisNano"
+        )
+    return value
+
+
 def bounded_level(value: str) -> int:
     try:
         number = int(value, 10)
@@ -288,6 +297,7 @@ class DeviceClient:
         *,
         body: Mapping[str, Any] | None = None,
         token: str | None = None,
+        pair_code: str | None = None,
     ) -> HttpResult:
         headers = {
             "Accept": "application/json",
@@ -295,6 +305,8 @@ class DeviceClient:
         }
         if token:
             headers["X-JarvisNano-Token"] = token
+        if pair_code is not None:
+            headers["X-JarvisNano-Pair-Code"] = pairing_code(pair_code)
         data: bytes | None = None
         if method != "GET":
             headers["X-JarvisNano-Control"] = "1"
@@ -336,8 +348,11 @@ class DeviceClient:
         body: Mapping[str, Any] | None,
         *,
         token: str | None,
+        pair_code: str | None = None,
     ) -> dict[str, Any]:
-        return self.request("POST", path, body=body, token=token).payload
+        return self.request(
+            "POST", path, body=body, token=token, pair_code=pair_code
+        ).payload
 
     def post_binary(
         self,
@@ -595,15 +610,10 @@ def resolve_token(
             )
         token = env_token
     if not token:
-        # DEVELOPMENT LAN: no key gate on the client side. The firmware decides
-        # whether a token is required (JR_DEV_OPEN_DIAGNOSTICS opens every
-        # diagnostic route, and a release build answers 401 with its own
-        # message). This used to raise "not_paired" here and refused an OTA
-        # that the device would have accepted — a client refusing on behalf of
-        # a device that had already said yes.
-        print("desk: no Desk token in the keychain or JARVIS_DESK_TOKEN; "
-              "relying on the device's open LAN diagnostics", file=sys.stderr)
-        return ""
+        raise DeskError(
+            "not_paired",
+            "no Desk token found; open pairing on JarvisNano and run pair --code NNNNNN",
+        )
     return validate_token(token)
 
 
@@ -702,14 +712,17 @@ def command_pair(
     client: DeviceClient,
     keychain: MacOSKeychain,
     account: str,
+    code: str,
 ) -> dict[str, Any]:
     try:
-        response = client.post("/api/pairing/claim?rotate=1", {}, token=None)
+        response = client.post(
+            "/api/pairing/claim?rotate=1", {}, token=None, pair_code=code
+        )
     except DeskError as exc:
         if exc.code == "http_error" and exc.http_status == 403:
             raise DeskError(
                 "physical_pairing_required",
-                "hold BOOT for 1.5 seconds until PAIRING OPEN appears, then run pair again within 60 seconds",
+                "hold BOOT for 1.5 seconds, then retry with the six-digit displayed code within 60 seconds",
                 http_status=403,
             ) from None
         raise
@@ -1038,7 +1051,10 @@ def build_parser(env: Mapping[str, str] | None = None) -> JsonArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("pair", help="claim during the shade Agent Link window and store in Keychain")
+    pair = subparsers.add_parser(
+        "pair", help="claim a displayed physical pairing code and store in Keychain"
+    )
+    pair.add_argument("--code", required=True, type=pairing_code)
     subparsers.add_parser("status", help="read Desk outbox and device cockpit status")
     takeover = subparsers.add_parser(
         "takeover", help="claim bounded Codex glass ownership")
@@ -1094,7 +1110,7 @@ def execute_command(
     account = keychain_account(client.base_url)
     session = bounded_identifier(stable_session_id(client.base_url), "session", MAX_SESSION_BYTES)
     if args.command == "pair":
-        return command_pair(client, keychain, account)
+        return command_pair(client, keychain, account, args.code)
     if args.command == "status":
         return command_status(client, keychain, account, env)
     if args.command == "doctor":

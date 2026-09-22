@@ -158,12 +158,34 @@ typedef struct {
     uint32_t clipped_samples;
 } jr_audio_tap_info_t;
 
+/* Cursor window returned by jr_audio_diag_copy_since(). Sample positions are
+ * absolute and end-exclusive, so callers can pass end_sample back as their
+ * next `after` cursor without overlap. */
+typedef struct {
+    uint32_t sample_rate;
+    uint64_t oldest_sample;
+    uint64_t start_sample;
+    uint64_t end_sample;
+    uint32_t copied_samples;
+    bool dropped;
+} jr_audio_tap_window_t;
+
 void jr_audio_diag_reset(void);
 esp_err_t jr_audio_diag_get_info(jr_audio_tap_kind_t kind,
                                  jr_audio_tap_info_t *out_info);
 esp_err_t jr_audio_diag_copy(jr_audio_tap_kind_t kind, int16_t *dst,
                              size_t capacity_samples,
                              jr_audio_tap_info_t *out_info);
+/* Copy at most max_samples newer than the absolute `after_sample` cursor.
+ * When `latest` is true, establish a cursor at the current producer head and
+ * copy nothing. If the requested cursor fell out of the rolling tap, copying
+ * resumes at the oldest retained sample and `dropped` is set. A cursor newer
+ * than the producer head is rejected. `dst` may be NULL only when latest is
+ * true or max_samples is zero. */
+esp_err_t jr_audio_diag_copy_since(jr_audio_tap_kind_t kind,
+                                   uint64_t after_sample, bool latest,
+                                   int16_t *dst, size_t max_samples,
+                                   jr_audio_tap_window_t *out_window);
 
 /* Queue a bounded low-volume 400–2000 Hz linear chirp through the real playback
  * ring. duration_ms is clamped to 100..1500 and level_percent to 1..30. The

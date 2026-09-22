@@ -270,12 +270,24 @@ typedef struct {
     size_t head;
     size_t count;
     uint64_t total;
+    _Atomic uint32_t skipped;
     uint32_t sample_rate;
     SemaphoreHandle_t lock;
 } audio_tap_t;
 
 static audio_tap_t s_taps[JR_AUDIO_TAP_COUNT];
 static _Atomic bool s_taps_ready;
+static void tap_account_skips_locked(audio_tap_t *tap)
+{
+    const uint64_t skipped = (uint64_t)atomic_exchange(&tap->skipped, 0U);
+    if (skipped == 0U) {
+        return;
+    }
+    tap->total += skipped;
+    tap->head = 0U;
+    tap->count = 0U;
+}
+
 
 static bool                   s_ready;
 
@@ -288,11 +300,14 @@ static void tap_write(jr_audio_tap_kind_t kind, const int16_t *samples,
     }
 
     audio_tap_t *tap = &s_taps[kind];
-    /* Exports may copy a complete two-second window. Missing a diagnostic
-     * chunk is preferable to delaying capture, AEC, or DAC feeding. */
-    if (tap->lock == NULL || xSemaphoreTake(tap->lock, 0) != pdTRUE) {
+    if (tap->lock == NULL) {
         return;
     }
+    if (xSemaphoreTake(tap->lock, 0) != pdTRUE) {
+        atomic_fetch_add(&tap->skipped, (uint32_t)count);
+        return;
+    }
+    tap_account_skips_locked(tap);
 
     size_t observed = count;
     if (count >= tap->capacity) {
@@ -1156,6 +1171,7 @@ esp_err_t jr_audio_diag_get_info(jr_audio_tap_kind_t kind,
         xSemaphoreTake(tap->lock, portMAX_DELAY) != pdTRUE) {
         return ESP_ERR_INVALID_STATE;
     }
+    tap_account_skips_locked(tap);
     tap_fill_info_locked(tap, out_info);
     xSemaphoreGive(tap->lock);
     return ESP_OK;
@@ -1177,6 +1193,7 @@ esp_err_t jr_audio_diag_copy(jr_audio_tap_kind_t kind, int16_t *dst,
         xSemaphoreTake(tap->lock, portMAX_DELAY) != pdTRUE) {
         return ESP_ERR_INVALID_STATE;
     }
+    tap_account_skips_locked(tap);
 
     jr_audio_tap_info_t info;
     tap_fill_info_locked(tap, &info);
@@ -1197,6 +1214,73 @@ esp_err_t jr_audio_diag_copy(jr_audio_tap_kind_t kind, int16_t *dst,
     size_t second = tap->count - first;
     if (second > 0) {
         memcpy(&dst[first], tap->samples, second * sizeof(int16_t));
+    }
+    xSemaphoreGive(tap->lock);
+    return ESP_OK;
+}
+
+esp_err_t jr_audio_diag_copy_since(jr_audio_tap_kind_t kind,
+                                   uint64_t after_sample, bool latest,
+                                   int16_t *dst, size_t max_samples,
+                                   jr_audio_tap_window_t *out_window)
+{
+    if (kind < 0 || kind >= JR_AUDIO_TAP_COUNT || out_window == NULL ||
+        (!latest && max_samples > 0U && dst == NULL)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!atomic_load(&s_taps_ready)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    audio_tap_t *tap = &s_taps[kind];
+    if (tap->lock == NULL ||
+        xSemaphoreTake(tap->lock, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    tap_account_skips_locked(tap);
+
+    const uint64_t producer_end = tap->total;
+    const uint64_t oldest = producer_end - tap->count;
+    memset(out_window, 0, sizeof *out_window);
+    out_window->sample_rate = tap->sample_rate;
+    out_window->oldest_sample = oldest;
+
+    if (latest) {
+        out_window->start_sample = producer_end;
+        out_window->end_sample = producer_end;
+        xSemaphoreGive(tap->lock);
+        return ESP_OK;
+    }
+    if (after_sample > producer_end) {
+        xSemaphoreGive(tap->lock);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint64_t start = after_sample;
+    if (start < oldest) {
+        start = oldest;
+        out_window->dropped = true;
+    }
+    uint64_t available = producer_end - start;
+    size_t take = available < max_samples ? (size_t)available : max_samples;
+    out_window->start_sample = start;
+    out_window->end_sample = start + take;
+    out_window->copied_samples = (uint32_t)take;
+
+    if (take > 0U) {
+        size_t oldest_pos =
+            (tap->head + tap->capacity - tap->count) % tap->capacity;
+        size_t offset = (size_t)(start - oldest);
+        size_t pos = (oldest_pos + offset) % tap->capacity;
+        size_t first = tap->capacity - pos;
+        if (first > take) {
+            first = take;
+        }
+        memcpy(dst, &tap->samples[pos], first * sizeof(int16_t));
+        size_t second = take - first;
+        if (second > 0U) {
+            memcpy(&dst[first], tap->samples, second * sizeof(int16_t));
+        }
     }
     xSemaphoreGive(tap->lock);
     return ESP_OK;

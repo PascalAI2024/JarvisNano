@@ -34,7 +34,34 @@ extern const unsigned char diagnostics_html_end[]
 /* ======================================================================== *
  *  diag HTTP: snapshot + /api/debug/say + /api/debug/gain                  *
  * ======================================================================== */
+static bool pairing_token_required(httpd_req_t *req);
 static bool agent_require_auth(httpd_req_t *req);
+static bool companion_query_u64(const char *value, uint64_t *out);
+
+static _Atomic uint32_t s_companion_audio_expected_seq = 1U;
+static _Atomic uint32_t s_companion_audio_last_seq;
+static _Atomic uint32_t s_companion_audio_last_accepted;
+static _Atomic bool s_companion_audio_last_end;
+static _Atomic uint32_t s_companion_audio_lease_id;
+
+#define COMPANION_INPUT_MIN_SAMPLES 512U
+#define COMPANION_INPUT_MAX_SAMPLES 8192U
+#define COMPANION_OUTPUT_MAX_BYTES 16384U
+
+static const char *operator_owner_name(operator_mode_owner_t owner)
+{
+    switch (owner) {
+    case OPERATOR_OWNER_CODEX: return "codex";
+    case OPERATOR_OWNER_ZEROCHAT: return "zerochat";
+    default: return "normal";
+    }
+}
+
+static bool zerochat_operator_active(uint32_t now_ms)
+{
+    return operator_mode_active(now_ms) &&
+           atomic_load(&s_operator_mode_owner) == OPERATOR_OWNER_ZEROCHAT;
+}
 
 static esp_err_t diag_get_handler(httpd_req_t *req)
 {
@@ -283,7 +310,7 @@ static bool control_intent_required(httpd_req_t *req)
 /* POST /api/debug/briefing — the morning glance, now, from the bench. */
 static esp_err_t briefing_post_handler(httpd_req_t *req)
 {
-    if (!control_intent_required(req)) {
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
         return ESP_OK;
     }
     morning_briefing_force();
@@ -293,7 +320,7 @@ static esp_err_t briefing_post_handler(httpd_req_t *req)
 
 static esp_err_t say_get_handler(httpd_req_t *req)
 {
-    if (!control_intent_required(req)) {
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
         return ESP_OK;
     }
     char q[256];
@@ -324,7 +351,7 @@ static esp_err_t say_get_handler(httpd_req_t *req)
 
 static esp_err_t gain_get_handler(httpd_req_t *req)
 {
-    if (!control_intent_required(req)) {
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
         return ESP_OK;
     }
     int mic = -1, ref = -1, vol = -1, barge = -1, vadclean = -1, pbgain = -1;
@@ -905,7 +932,7 @@ static esp_err_t tasks_diag_handler(httpd_req_t *req)
  * contract in jr_display.h without any lifetime games. */
 static esp_err_t choices_debug_handler(httpd_req_t *req)
 {
-    if (!control_intent_required(req)) {
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
         return ESP_OK;
     }
     int n = 3;
@@ -979,7 +1006,7 @@ static esp_err_t tap_sim_handler(httpd_req_t *req)
  * quiet Listening/Idle; a live ask aborts it and any tap ends it. */
 static esp_err_t demo_handler(httpd_req_t *req)
 {
-    if (!control_intent_required(req)) {
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
         return ESP_OK;
     }
     /* Answer what will actually happen. The consumer only starts the reel
@@ -1026,7 +1053,7 @@ static esp_err_t choices_hit_handler(httpd_req_t *req)
 /* POST /api/display/hud?on=0|1 — A/B the HUD's frame-rate cost on real glass. */
 static esp_err_t hud_toggle_handler(httpd_req_t *req)
 {
-    if (!control_intent_required(req)) {
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
         return ESP_OK;
     }
     int on = 1;
@@ -1144,7 +1171,7 @@ static esp_err_t touch_status_handler(httpd_req_t *req)
 
 static esp_err_t panel_touch_control_handler(httpd_req_t *req)
 {
-    if (!control_intent_required(req)) {
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
         return ESP_OK;
     }
     char query[64];
@@ -1178,7 +1205,7 @@ static esp_err_t panel_touch_control_handler(httpd_req_t *req)
 
 static esp_err_t ui_shade_control_handler(httpd_req_t *req)
 {
-    if (!control_intent_required(req)) {
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
         return ESP_OK;
     }
     char query[64];
@@ -1265,6 +1292,8 @@ static esp_err_t pairing_claim_handler(httpd_req_t *req)
     uint32_t until = atomic_load(&s_pairing_claim_until_ms);
     if (until == 0U || (int32_t)(until - now) <= 0) {
         atomic_store(&s_pairing_claim_until_ms, 0U);
+        atomic_store(&s_pairing_claim_code, 0U);
+        atomic_store(&s_pairing_claim_attempts, 0U);
         httpd_resp_set_status(req, "403 Forbidden");
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req,
@@ -1272,9 +1301,38 @@ static esp_err_t pairing_claim_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    static const char *code_header = "X-JarvisNano-Pair-Code";
+    char code_text[8] = {0};
+    size_t code_length = httpd_req_get_hdr_value_len(req, code_header);
+    uint64_t parsed_code = 0U;
+    const uint32_t expected_code = atomic_load(&s_pairing_claim_code);
+    bool code_ok = code_length == 6U &&
+        httpd_req_get_hdr_value_str(req, code_header, code_text,
+                                    sizeof code_text) == ESP_OK &&
+        companion_query_u64(code_text, &parsed_code) &&
+        parsed_code == expected_code;
+    secure_zero(code_text, sizeof code_text);
+    if (!code_ok || expected_code == 0U) {
+        const uint32_t attempts =
+            atomic_fetch_add(&s_pairing_claim_attempts, 1U) + 1U;
+        if (attempts >= 3U) {
+            atomic_store(&s_pairing_claim_until_ms, 0U);
+            atomic_store(&s_pairing_claim_code, 0U);
+        }
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            attempts >= 3U
+                ? "{\"ok\":false,\"error\":\"pairing code rejected; open a new physical window\"}"
+                : "{\"ok\":false,\"error\":\"pairing code rejected\"}");
+        return ESP_OK;
+    }
+
     int rotate = 0;
     (void)query_int(req, "rotate", &rotate);
     if (rotate != 0) {
+        (void)operator_mode_release(now, "pairing rotation", false, false,
+                                    OPERATOR_OWNER_NONE, 0U);
         esp_err_t clear_err = jr_cfg_set(JR_CFG_PAIRING_TOKEN, "");
         if (clear_err != ESP_OK) {
             httpd_resp_set_status(req, "503 Service Unavailable");
@@ -1295,6 +1353,8 @@ static esp_err_t pairing_claim_handler(httpd_req_t *req)
         return ESP_OK;
     }
     atomic_store(&s_pairing_claim_until_ms, 0U);
+    atomic_store(&s_pairing_claim_code, 0U);
+    atomic_store(&s_pairing_claim_attempts, 0U);
     s_ui_shade_open = false;
     if (VOICE_ALWAYS_READY) {
         atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
@@ -1336,14 +1396,10 @@ static esp_err_t pairing_claim_handler(httpd_req_t *req)
  * The X-JarvisNano-Control header gate on mutating POSTs is deliberately NOT
  * bypassed — it costs a caller nothing and still blocks drive-by cross-origin
  * requests and link prefetchers. */
-#define JR_DEV_OPEN_DIAGNOSTICS 1
+#define JR_DEV_OPEN_DIAGNOSTICS 0
 
-static bool agent_require_auth(httpd_req_t *req)
+static bool pairing_token_required(httpd_req_t *req)
 {
-#if JR_DEV_OPEN_DIAGNOSTICS
-    (void)req;
-    return true;
-#else
     static const char *header = "X-JarvisNano-Token";
     size_t length = httpd_req_get_hdr_value_len(req, header);
     if (length == 0U || length >= JR_CFG_PAIRING_TOKEN_CAP) {
@@ -1372,6 +1428,15 @@ static bool agent_require_auth(httpd_req_t *req)
         return false;
     }
     return true;
+}
+
+static bool agent_require_auth(httpd_req_t *req)
+{
+#if JR_DEV_OPEN_DIAGNOSTICS
+    (void)req;
+    return true;
+#else
+    return pairing_token_required(req);
 #endif /* JR_DEV_OPEN_DIAGNOSTICS */
 }
 
@@ -1801,8 +1866,9 @@ void panic_home_clear_glass(void)
 }
 
 bool operator_mode_release(uint32_t now, const char *reason,
-                                  bool physical_feedback,
-                                  bool only_if_expired)
+                           bool physical_feedback, bool only_if_expired,
+                           operator_mode_owner_t expected_owner,
+                           uint32_t expected_lease_id)
 {
     if (s_brain_lock == NULL ||
         xSemaphoreTake(s_brain_lock, portMAX_DELAY) != pdTRUE) {
@@ -1814,10 +1880,29 @@ bool operator_mode_release(uint32_t now, const char *reason,
         xSemaphoreGive(s_brain_lock);
         return false;
     }
+    if (expected_owner != OPERATOR_OWNER_NONE &&
+        atomic_load(&s_operator_mode_owner) != expected_owner) {
+        xSemaphoreGive(s_brain_lock);
+        return false;
+    }
+    if (expected_lease_id != 0U &&
+        atomic_load(&s_companion_audio_lease_id) != expected_lease_id) {
+        xSemaphoreGive(s_brain_lock);
+        return false;
+    }
 
+    const operator_mode_owner_t released_owner =
+        (operator_mode_owner_t)atomic_load(&s_operator_mode_owner);
+    jr_audio_flush_playback();
     atomic_store(&s_operator_mode_active, false);
     atomic_store(&s_operator_mode_entered_ms, 0U);
     atomic_store(&s_operator_lease_until_ms, 0U);
+    atomic_store(&s_operator_mode_owner, OPERATOR_OWNER_NONE);
+    atomic_store(&s_companion_audio_expected_seq, 1U);
+    atomic_store(&s_companion_audio_last_seq, 0U);
+    atomic_store(&s_companion_audio_last_accepted, 0U);
+    atomic_store(&s_companion_audio_lease_id, 0U);
+    atomic_store(&s_companion_audio_last_end, false);
     if (s_brain_surface.active && !s_brain_surface.local_owned) {
         jr_display_surface_dismiss();
         s_brain_surface.active = false;
@@ -1831,13 +1916,15 @@ bool operator_mode_release(uint32_t now, const char *reason,
         jr_mood_poke_awake(&s_mood, now);
         jr_display_caption_set("LISTENING");
     }
+    jr_audio_set_speaking(false);
     xSemaphoreGive(s_brain_lock);
 
     if (physical_feedback && !privacy_held) {
         jr_display_bloom();
         (void)jr_audio_diag_play_chirp(160U, 8U);
     }
-    ESP_LOGI(TAG, "operator: Codex mode released (%s)", reason);
+    ESP_LOGI(TAG, "operator: %s mode released (%s)",
+             operator_owner_name(released_owner), reason);
     return true;
 }
 
@@ -2402,6 +2489,8 @@ static esp_err_t brain_outbox_handler(httpd_req_t *req)
     (void)query_int(req, "after", &after_query);
     uint32_t after = after_query > 0 ? (uint32_t)after_query : 0U;
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    const char *voice_route =
+        zerochat_operator_active(now) ? "private_wifi" : "cloud_gemini";
     brain_surface_state_t surface = {0};
     brain_action_event_t events[BRAIN_EVENT_CAP] = {0};
     size_t event_count = 0U;
@@ -2442,10 +2531,10 @@ static esp_err_t brain_outbox_handler(httpd_req_t *req)
         return ESP_OK;
     }
     int n = snprintf(body, 3072U,
-        "{\"v\":1,\"voice_route\":\"cloud_gemini\","
+        "{\"v\":1,\"voice_route\":\"%s\","
         "\"desk_connected\":true,\"next_after\":%u,"
         "\"next_inbox_seq\":%u,\"surface\":{\"active\":%s",
-        (unsigned)latest, (unsigned)next_inbox,
+        voice_route, (unsigned)latest, (unsigned)next_inbox,
         surface.active ? "true" : "false");
     size_t used = n > 0 ? (size_t)n : 3072U;
     if (surface.active && used < 3072U) {
@@ -2496,6 +2585,8 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         return ESP_OK;
     }
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    const char *voice_route =
+        zerochat_operator_active(now) ? "private_wifi" : "cloud_gemini";
     const jr_state_snapshot_t *voice = jr_orch_snapshot(&s_app.orch);
     jr_display_diag_t display = {0};
     jr_net_status_t net = {0};
@@ -2695,13 +2786,13 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
             (int32_t)(brain_surface.expires_ms - now) > 0
             ? brain_surface.expires_ms - now : 0U;
         n = snprintf(body + used, 4096U - used,
-            "},\"brain\":{\"voice_route\":\"cloud_gemini\","
+            "},\"brain\":{\"voice_route\":\"%s\","
             "\"desk_connected\":%s,\"private_android_ready\":false,"
             "\"private_android_reason\":\"BLE firmware not enabled\","
             "\"next_inbox_seq\":%u,\"event_cursor\":%u,"
             "\"surface_active\":%s,\"surface_kind\":\"%s\","
             "\"surface_title\":\"%s\",\"surface_ttl_ms\":%u}}",
-            desk_connected ? "true" : "false",
+            voice_route, desk_connected ? "true" : "false",
             (unsigned)brain_inbox_next, (unsigned)brain_event_cursor,
             brain_surface.active ? "true" : "false",
             brain_surface.active
@@ -2854,7 +2945,7 @@ static bool display_pattern_parse(const char *name,
  * never permanently cover the face. DELETE via ?clear=1. */
 static esp_err_t display_canvas_handler(httpd_req_t *req)
 {
-    if (!control_intent_required(req)) {
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
         return ESP_OK;
     }
     char query[64];
@@ -2912,7 +3003,7 @@ static esp_err_t display_canvas_handler(httpd_req_t *req)
  * counters so a soak, or one spoken turn, is read from a clean slate. */
 static esp_err_t audio_stats_handler(httpd_req_t *req)
 {
-    if (!control_intent_required(req)) {
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
         return ESP_OK;
     }
     int reset = 0;
@@ -2939,7 +3030,7 @@ static esp_err_t audio_stats_handler(httpd_req_t *req)
  *                                     quiet. */
 static esp_err_t debug_sleep_handler(httpd_req_t *req)
 {
-    if (!control_intent_required(req)) {
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
         return ESP_OK;
     }
     if (req->method == HTTP_POST) {
@@ -3478,25 +3569,446 @@ static esp_err_t ota_assets_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-/* POST /api/operator/lease?ttl=seconds — claim; ?release=1 — hand back. */
+static bool companion_request_lease_id(httpd_req_t *req, bool required,
+                                       uint32_t *out_lease_id)
+{
+    static const char *lease_header = "X-JarvisNano-Lease";
+    char lease_text[16] = {0};
+    uint64_t parsed_lease = 0U;
+    const size_t lease_length =
+        httpd_req_get_hdr_value_len(req, lease_header);
+    if (lease_length == 0U && !required) {
+        *out_lease_id = 0U;
+        return true;
+    }
+    if (lease_length == 0U || lease_length >= sizeof lease_text ||
+        httpd_req_get_hdr_value_str(req, lease_header, lease_text,
+                                    sizeof lease_text) != ESP_OK ||
+        !companion_query_u64(lease_text, &parsed_lease) ||
+        parsed_lease == 0U || parsed_lease > UINT32_MAX) {
+        secure_zero(lease_text, sizeof lease_text);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"ok\":false,\"error\":\"companion lease identifier rejected\"}");
+        return false;
+    }
+    secure_zero(lease_text, sizeof lease_text);
+    *out_lease_id = (uint32_t)parsed_lease;
+    return true;
+}
+
+static bool companion_require_live_lease(httpd_req_t *req, bool microphone,
+                                         uint32_t *out_lease_id)
+{
+    if (!pairing_token_required(req)) {
+        return false;
+    }
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    if (!zerochat_operator_active(now)) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"ok\":false,\"error\":\"ZeroChat does not own a live lease\"}");
+        return false;
+    }
+    uint32_t request_lease_id = 0U;
+    if (!companion_request_lease_id(req, true, &request_lease_id) ||
+        request_lease_id != atomic_load(&s_companion_audio_lease_id)) {
+        if (request_lease_id != 0U) {
+            httpd_resp_set_status(req, "409 Conflict");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req,
+                "{\"ok\":false,\"error\":\"companion lease identifier rejected\"}");
+        }
+        return false;
+    }
+    if (out_lease_id != NULL) {
+        *out_lease_id = request_lease_id;
+    }
+    if (microphone &&
+        (atomic_load(&s_voice_privacy_paused) || s_flip_muted)) {
+        httpd_resp_set_status(req, "423 Locked");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"ok\":false,\"error\":\"physical microphone privacy is active\"}");
+        return false;
+    }
+    return true;
+}
+
+static bool companion_query_u64(const char *value, uint64_t *out)
+{
+    if (value == NULL || value[0] == '\0' || out == NULL) {
+        return false;
+    }
+    uint64_t parsed = 0U;
+    for (const unsigned char *cursor = (const unsigned char *)value;
+         *cursor != '\0'; ++cursor) {
+        if (!isdigit(*cursor)) {
+            return false;
+        }
+        const uint64_t digit = (uint64_t)(*cursor - (unsigned char)'0');
+        if (parsed > (UINT64_MAX - digit) / 10U) {
+            return false;
+        }
+        parsed = parsed * 10U + digit;
+    }
+    *out = parsed;
+    return true;
+}
+
+static void companion_audio_window_headers(
+    httpd_req_t *req, const jr_audio_tap_window_t *window)
+{
+    char rate[16];
+    char oldest[24];
+    char start[24];
+    char end[24];
+    snprintf(rate, sizeof rate, "%u", (unsigned)window->sample_rate);
+    snprintf(oldest, sizeof oldest, "%llu",
+             (unsigned long long)window->oldest_sample);
+    snprintf(start, sizeof start, "%llu",
+             (unsigned long long)window->start_sample);
+    snprintf(end, sizeof end, "%llu",
+             (unsigned long long)window->end_sample);
+    httpd_resp_set_hdr(req, "X-Jarvis-Audio-Rate", rate);
+    httpd_resp_set_hdr(req, "X-Jarvis-Audio-Oldest", oldest);
+    httpd_resp_set_hdr(req, "X-Jarvis-Audio-Start", start);
+    httpd_resp_set_hdr(req, "X-Jarvis-Audio-End", end);
+    httpd_resp_set_hdr(req, "X-Jarvis-Audio-Dropped",
+                       window->dropped ? "1" : "0");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+}
+
+/* GET /api/companion/audio/in — bounded cursor reads from the sole clean-mic
+ * tap. The absolute cursor makes ring overrun observable instead of silently
+ * stitching unrelated audio together. */
+static esp_err_t companion_audio_in_handler(httpd_req_t *req)
+{
+    uint32_t request_lease_id = 0U;
+    if (!companion_require_live_lease(req, true, &request_lease_id)) {
+        return ESP_OK;
+    }
+
+    char query[96] = {0};
+    char after_text[24] = {0};
+    char max_text[16] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof query) != ESP_OK ||
+        httpd_query_key_value(query, "after", after_text,
+                              sizeof after_text) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "missing after cursor");
+        return ESP_OK;
+    }
+    bool latest = strcmp(after_text, "latest") == 0;
+    uint64_t after = 0U;
+    if (!latest && !companion_query_u64(after_text, &after)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "after must be latest or an absolute cursor");
+        return ESP_OK;
+    }
+
+    size_t max_samples = COMPANION_INPUT_MAX_SAMPLES;
+    if (httpd_query_key_value(query, "max_samples", max_text,
+                              sizeof max_text) == ESP_OK) {
+        uint64_t parsed = 0U;
+        if (!companion_query_u64(max_text, &parsed) ||
+            parsed < COMPANION_INPUT_MIN_SAMPLES ||
+            parsed > COMPANION_INPUT_MAX_SAMPLES) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "max_samples must be 512..8192");
+            return ESP_OK;
+        }
+        max_samples = (size_t)parsed;
+    }
+
+    int16_t *pcm = latest ? NULL :
+        heap_caps_malloc(max_samples * sizeof(int16_t),
+                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!latest && pcm == NULL) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_sendstr(req, "audio window unavailable");
+        return ESP_OK;
+    }
+    jr_audio_tap_window_t window = {0};
+    esp_err_t err = jr_audio_diag_copy_since(
+        JR_AUDIO_TAP_MIC_CLEAN, after, latest, pcm,
+        latest ? 0U : max_samples, &window);
+    if (err != ESP_OK) {
+        heap_caps_free(pcm);
+        httpd_resp_set_status(req,
+            err == ESP_ERR_INVALID_ARG ? "409 Conflict"
+                                       : "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, err == ESP_ERR_INVALID_ARG
+            ? "{\"ok\":false,\"error\":\"audio cursor is ahead of producer\"}"
+            : "{\"ok\":false,\"error\":\"microphone audio unavailable\"}");
+        return ESP_OK;
+    }
+    const uint32_t response_now =
+        (uint32_t)(esp_timer_get_time() / 1000);
+    if (!zerochat_operator_active(response_now) ||
+        atomic_load(&s_companion_audio_lease_id) != request_lease_id) {
+        heap_caps_free(pcm);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"ok\":false,\"error\":\"companion lease ended during capture\"}");
+        return ESP_OK;
+    }
+
+    if (!jr_audio_playback_pending()) {
+        jr_audio_set_speaking(false);
+    }
+    companion_audio_window_headers(req, &window);
+    if (window.copied_samples == 0U) {
+        heap_caps_free(pcm);
+        httpd_resp_set_status(req, "204 No Content");
+        return httpd_resp_send(req, NULL, 0);
+    }
+    httpd_resp_set_type(req, "application/octet-stream");
+    err = httpd_resp_send(req, (const char *)pcm,
+                          window.copied_samples * sizeof(int16_t));
+    heap_caps_free(pcm);
+    return err;
+}
+
+static uint32_t companion_audio_next_seq(uint32_t seq)
+{
+    return seq == UINT32_MAX ? 1U : seq + 1U;
+}
+
+static esp_err_t companion_audio_receipt(httpd_req_t *req, uint32_t seq,
+                                         uint32_t accepted, bool end)
+{
+    char body[160];
+    const uint32_t next = companion_audio_next_seq(seq);
+    int n = snprintf(body, sizeof body,
+        "{\"ok\":true,\"accepted_samples\":%u,\"next_seq\":%u,"
+        "\"end\":%s,\"playback_pending\":%s}",
+        (unsigned)accepted, (unsigned)next, end ? "true" : "false",
+        jr_audio_playback_pending() ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, body, n);
+}
+
+/* POST /api/companion/audio/out — one bounded, receipt-bearing PCM chunk.
+ * Duplicate delivery of the immediately previous sequence is idempotent, so a
+ * lost HTTP response cannot make a retry play twice. */
+static esp_err_t companion_audio_out_handler(httpd_req_t *req)
+{
+    uint32_t request_lease_id = 0U;
+    if (!companion_require_live_lease(req, false, &request_lease_id) ||
+        !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    char query[80] = {0};
+    char seq_text[16] = {0};
+    char end_text[8] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof query) != ESP_OK ||
+        httpd_query_key_value(query, "seq", seq_text,
+                              sizeof seq_text) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing seq");
+        return ESP_OK;
+    }
+    uint64_t parsed_seq = 0U;
+    if (!companion_query_u64(seq_text, &parsed_seq) ||
+        parsed_seq == 0U || parsed_seq > UINT32_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "seq must be 1..4294967295");
+        return ESP_OK;
+    }
+    const uint32_t seq = (uint32_t)parsed_seq;
+    bool end = false;
+    if (httpd_query_key_value(query, "end", end_text,
+                              sizeof end_text) == ESP_OK) {
+        if (strcmp(end_text, "1") == 0) {
+            end = true;
+        } else if (strcmp(end_text, "0") != 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "end must be 0 or 1");
+            return ESP_OK;
+        }
+    }
+    const size_t bytes = req->content_len;
+    if (bytes > COMPANION_OUTPUT_MAX_BYTES || (bytes & 1U) != 0U ||
+        (bytes == 0U && !end)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "body must be even PCM16 bytes <=16384; empty only with end=1");
+        return ESP_OK;
+    }
+
+    uint8_t *body = bytes > 0U
+        ? heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+        : NULL;
+    if (bytes > 0U && body == NULL) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_sendstr(req, "speaker buffer unavailable");
+        return ESP_OK;
+    }
+    size_t received = 0U;
+    unsigned timeouts = 0U;
+    bool receive_failed = false;
+    const uint32_t receive_deadline =
+        (uint32_t)(esp_timer_get_time() / 1000) + 12000U;
+    while (received < bytes) {
+        const uint32_t receive_now =
+            (uint32_t)(esp_timer_get_time() / 1000);
+        if ((int32_t)(receive_now - receive_deadline) >= 0) {
+            receive_failed = true;
+            break;
+        }
+        int r = httpd_req_recv(req, (char *)body + received, bytes - received);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < 4U) {
+            continue;
+        }
+        if (r <= 0) {
+            receive_failed = true;
+            break;
+        }
+        timeouts = 0U;
+        received += (size_t)r;
+    }
+    if (receive_failed ||
+        (int32_t)((uint32_t)(esp_timer_get_time() / 1000) -
+                  receive_deadline) >= 0) {
+        heap_caps_free(body);
+        httpd_resp_set_status(req, "408 Request Timeout");
+        httpd_resp_sendstr(req, "incomplete audio chunk");
+        return ESP_OK;
+    }
+
+    if (s_brain_lock == NULL ||
+        xSemaphoreTake(s_brain_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+        heap_caps_free(body);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_sendstr(req, "operator mode unavailable");
+        return ESP_OK;
+    }
+    const uint32_t commit_now =
+        (uint32_t)(esp_timer_get_time() / 1000);
+    if (!zerochat_operator_active(commit_now) ||
+        atomic_load(&s_companion_audio_lease_id) != request_lease_id) {
+        xSemaphoreGive(s_brain_lock);
+        heap_caps_free(body);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"ok\":false,\"error\":\"companion lease ended during upload\"}");
+        return ESP_OK;
+    }
+
+    const uint32_t expected = atomic_load(&s_companion_audio_expected_seq);
+    const uint32_t last = atomic_load(&s_companion_audio_last_seq);
+    if (last != 0U && seq == last &&
+        expected == companion_audio_next_seq(last)) {
+        const uint32_t accepted =
+            atomic_load(&s_companion_audio_last_accepted);
+        const bool last_end = atomic_load(&s_companion_audio_last_end);
+        xSemaphoreGive(s_brain_lock);
+        heap_caps_free(body);
+        return companion_audio_receipt(req, seq, accepted, last_end);
+    }
+    if (seq != expected) {
+        xSemaphoreGive(s_brain_lock);
+        heap_caps_free(body);
+        char error[112];
+        int n = snprintf(error, sizeof error,
+            "{\"ok\":false,\"error\":\"audio sequence mismatch\","
+            "\"expected_seq\":%u}", (unsigned)expected);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, error, n);
+        return ESP_OK;
+    }
+
+    int accepted = 0;
+    if (bytes > 0U) {
+        jr_audio_set_speaking(true);
+        jr_audio_dac_unmute();
+        accepted = jr_audio_sink_write(&s_app.spk, (const int16_t *)body,
+                                       bytes / sizeof(int16_t));
+    }
+    heap_caps_free(body);
+    if (accepted < 0) {
+        xSemaphoreGive(s_brain_lock);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"ok\":false,\"error\":\"speaker rejected audio\"}");
+        return ESP_OK;
+    }
+
+    atomic_store(&s_companion_audio_last_seq, seq);
+    atomic_store(&s_companion_audio_last_accepted, (uint32_t)accepted);
+    atomic_store(&s_companion_audio_last_end, end);
+    atomic_store(&s_companion_audio_expected_seq,
+                 companion_audio_next_seq(seq));
+    xSemaphoreGive(s_brain_lock);
+    return companion_audio_receipt(req, seq, (uint32_t)accepted, end);
+}
+
+/* POST /api/operator/lease?ttl=seconds&mode=codex|zerochat — claim/renew;
+ * ?release=1 hands the current owner back. ZeroChat always requires a real
+ * pairing token even while development diagnostics are open. */
 static esp_err_t operator_lease_handler(httpd_req_t *req)
 {
-    if (!agent_require_auth(req) || !control_intent_required(req)) {
-        return ESP_OK;
-    }
-    char query[64];
+    char query[96] = {0};
     char val[16] = {0};
-    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
-    if (httpd_req_get_url_query_str(req, query, sizeof query) == ESP_OK &&
+    const bool have_query =
+        httpd_req_get_url_query_str(req, query, sizeof query) == ESP_OK;
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    const bool release = have_query &&
         httpd_query_key_value(query, "release", val, sizeof val) == ESP_OK &&
-        val[0] == '1') {
-        (void)operator_mode_release(now, "remote", false, false);
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"ok\":true,\"leased\":false}");
+        val[0] == '1';
+
+    operator_mode_owner_t requested_owner = OPERATOR_OWNER_CODEX;
+    memset(val, 0, sizeof val);
+    if (have_query &&
+        httpd_query_key_value(query, "mode", val, sizeof val) == ESP_OK) {
+        if (strcmp(val, "zerochat") == 0) {
+            requested_owner = OPERATOR_OWNER_ZEROCHAT;
+        } else if (strcmp(val, "codex") != 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "mode must be codex or zerochat");
+            return ESP_OK;
+        }
+    }
+    if (!pairing_token_required(req) || !control_intent_required(req)) {
         return ESP_OK;
     }
+    uint32_t request_lease_id = 0U;
+    const bool zerochat_live =
+        requested_owner == OPERATOR_OWNER_ZEROCHAT &&
+        zerochat_operator_active(now);
+    if (requested_owner == OPERATOR_OWNER_ZEROCHAT &&
+        !companion_request_lease_id(req, release || zerochat_live,
+                                    &request_lease_id)) {
+        return ESP_OK;
+    }
+
+
+
+    if (release) {
+        const bool released = operator_mode_release(
+            now, "remote", false, false, requested_owner, request_lease_id);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+        if (!released) {
+            httpd_resp_set_status(req, "409 Conflict");
+            httpd_resp_sendstr(req,
+                "{\"ok\":false,\"error\":\"lease mode does not own the operator\"}");
+        } else {
+            httpd_resp_sendstr(req, "{\"ok\":true,\"leased\":false}");
+        }
+        return ESP_OK;
+    }
+
     uint32_t ttl_s = 300U;
-    if (httpd_req_get_url_query_str(req, query, sizeof query) == ESP_OK &&
+    memset(val, 0, sizeof val);
+    if (have_query &&
         httpd_query_key_value(query, "ttl", val, sizeof val) == ESP_OK) {
         ttl_s = (uint32_t)strtoul(val, NULL, 10);
     }
@@ -3508,18 +4020,75 @@ static esp_err_t operator_lease_handler(httpd_req_t *req)
         httpd_resp_sendstr(req, "operator mode unavailable");
         return ESP_OK;
     }
-    atomic_store(&s_operator_mode_entered_ms, now);
+
+    const bool renewing = operator_mode_active(now);
+    const operator_mode_owner_t owner =
+        (operator_mode_owner_t)atomic_load(&s_operator_mode_owner);
+    if (renewing && owner != requested_owner) {
+        xSemaphoreGive(s_brain_lock);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"ok\":false,\"error\":\"another operator owns the live lease\"}");
+        return ESP_OK;
+    }
+    if (renewing && requested_owner == OPERATOR_OWNER_ZEROCHAT &&
+        (request_lease_id == 0U ||
+         request_lease_id != atomic_load(&s_companion_audio_lease_id))) {
+        xSemaphoreGive(s_brain_lock);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"ok\":false,\"error\":\"companion lease identifier rejected\"}");
+        return ESP_OK;
+    }
+    if (!renewing && requested_owner == OPERATOR_OWNER_ZEROCHAT &&
+        request_lease_id != 0U) {
+        xSemaphoreGive(s_brain_lock);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"ok\":false,\"error\":\"companion lease is no longer active\"}");
+        return ESP_OK;
+    }
+    if (!renewing) {
+        atomic_store(&s_operator_mode_entered_ms, now);
+        if (requested_owner == OPERATOR_OWNER_ZEROCHAT) {
+            atomic_store(&s_companion_audio_expected_seq, 1U);
+            atomic_store(&s_companion_audio_last_seq, 0U);
+            atomic_store(&s_companion_audio_last_accepted, 0U);
+            atomic_store(&s_companion_audio_last_end, false);
+            uint32_t lease_id = 0U;
+            while (lease_id == 0U) {
+                lease_id = esp_random();
+            }
+            atomic_store(&s_companion_audio_lease_id, lease_id);
+        }
+    }
+    atomic_store(&s_operator_mode_owner, requested_owner);
     atomic_store(&s_operator_lease_until_ms, now + ttl_s * 1000U);
     atomic_store(&s_voice_control_request, VOICE_CONTROL_PAUSE);
-    jr_display_caption_set("CODEX MODE - DOUBLE TAP TO EXIT");
+    jr_display_caption_set(requested_owner == OPERATOR_OWNER_ZEROCHAT
+        ? "ZEROCHAT MODE - DOUBLE TAP TO EXIT"
+        : "CODEX MODE - DOUBLE TAP TO EXIT");
     atomic_store(&s_operator_mode_active, true); /* publish complete state last */
     xSemaphoreGive(s_brain_lock);
-    ESP_LOGI(TAG, "operator: Codex mode claimed for %u s", (unsigned)ttl_s);
-    char body[64];
-    int n = snprintf(body, sizeof body,
-                     "{\"ok\":true,\"leased\":true,\"mode\":\"codex\",\"ttl_s\":%u}",
-                     (unsigned)ttl_s);
+
+    const char *mode = operator_owner_name(requested_owner);
+    ESP_LOGI(TAG, "operator: %s mode %s for %u s", mode,
+             renewing ? "renewed" : "claimed", (unsigned)ttl_s);
+    char body[128];
+    int n = requested_owner == OPERATOR_OWNER_ZEROCHAT
+        ? snprintf(body, sizeof body,
+                   "{\"ok\":true,\"leased\":true,\"mode\":\"%s\","
+                   "\"ttl_s\":%u,\"lease_id\":%u}",
+                   mode, (unsigned)ttl_s,
+                   (unsigned)atomic_load(&s_companion_audio_lease_id))
+        : snprintf(body, sizeof body,
+                   "{\"ok\":true,\"leased\":true,\"mode\":\"%s\",\"ttl_s\":%u}",
+                   mode, (unsigned)ttl_s);
     httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_send(req, body, n);
     return ESP_OK;
 }
@@ -3531,11 +4100,13 @@ static esp_err_t operator_status_handler(httpd_req_t *req)
     const bool active = operator_mode_active(now);
     const uint32_t ttl_ms = active && (int32_t)(until - now) > 0
         ? until - now : 0U;
+    const operator_mode_owner_t owner = active
+        ? (operator_mode_owner_t)atomic_load(&s_operator_mode_owner)
+        : OPERATOR_OWNER_NONE;
     char body[96];
     int n = snprintf(body, sizeof body,
                      "{\"active\":%s,\"mode\":\"%s\",\"ttl_ms\":%u}",
-                     active ? "true" : "false",
-                     active ? "codex" : "normal",
+                     active ? "true" : "false", operator_owner_name(owner),
                      (unsigned)ttl_ms);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -3545,7 +4116,7 @@ static esp_err_t operator_status_handler(httpd_req_t *req)
 
 static esp_err_t display_test_handler(httpd_req_t *req)
 {
-    if (!control_intent_required(req)) {
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
         return ESP_OK;
     }
     char query[96];
@@ -3873,6 +4444,10 @@ void start_diag_http(void)
           .handler = device_levels_post_handler },
         { .uri = "/api/pairing/claim", .method = HTTP_POST,
           .handler = pairing_claim_handler },
+        { .uri = "/api/companion/audio/in", .method = HTTP_GET,
+          .handler = companion_audio_in_handler },
+        { .uri = "/api/companion/audio/out", .method = HTTP_POST,
+          .handler = companion_audio_out_handler },
         { .uri = "/api/display",     .method = HTTP_GET, .handler = display_diag_handler },
         { .uri = "/api/diag/vadlog", .method = HTTP_GET, .handler = vadlog_csv_handler },
         { .uri = "/api/device/health", .method = HTTP_GET,

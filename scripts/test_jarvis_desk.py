@@ -50,6 +50,7 @@ class FakeClient:
         self.base_url = "http://192.0.2.10"
         self.gets: list[tuple[str, str | None]] = []
         self.posts: list[tuple[str, dict[str, Any], str | None]] = []
+        self.pair_codes: list[str | None] = []
         self.next_inbox_seq = 7
         self.next_after = 4
         self.events: list[dict[str, Any]] = []
@@ -93,8 +94,10 @@ class FakeClient:
         body: dict[str, Any] | None,
         *,
         token: str | None,
+        pair_code: str | None = None,
     ) -> dict[str, Any]:
         self.posts.append((path, dict(body or {}), token))
+        self.pair_codes.append(pair_code)
         if path.startswith("/api/pairing/claim"):
             return {"ok": True, "token": "claimed-secret-token"}
         return {"ok": True, "accepted": True}
@@ -237,10 +240,11 @@ class DeskCliTests(unittest.TestCase):
     def test_pair_stores_claim_without_returning_secret(self) -> None:
         client = FakeClient()
         keychain = FakeKeychain(None)
-        result = desk.command_pair(client, keychain, "account")
+        result = desk.command_pair(client, keychain, "account", "123456")
         self.assertEqual(keychain.stores, [("account", "claimed-secret-token")])
         self.assertNotIn("claimed-secret-token", json.dumps(result))
         self.assertEqual(client.posts[0][2], None)
+        self.assertEqual(client.pair_codes[0], "123456")
 
     def test_pair_turns_forbidden_into_physical_claim_instruction(self) -> None:
         class ForbiddenClient(FakeClient):
@@ -248,7 +252,9 @@ class DeskCliTests(unittest.TestCase):
                 raise desk.DeskError("http_error", "rejected", http_status=403)
 
         with self.assertRaisesRegex(desk.DeskError, "hold BOOT") as raised:
-            desk.command_pair(ForbiddenClient(), FakeKeychain(None), "account")
+            desk.command_pair(
+                ForbiddenClient(), FakeKeychain(None), "account", "123456"
+            )
         self.assertEqual(raised.exception.code, "physical_pairing_required")
         self.assertIn("60 seconds", raised.exception.message)
 
@@ -459,12 +465,18 @@ class DeskCliTests(unittest.TestCase):
             return FakeResponse({"ok": True})
 
         client = desk.DeviceClient("https://device.test", 3.5, opener=opener)
-        client.post("/api/brain/inbox", {"v": 1}, token="desk-secret")
+        client.post(
+            "/api/brain/inbox",
+            {"v": 1},
+            token="desk-secret",
+            pair_code="123456",
+        )
         request, timeout = opened[0]
         headers = {key.lower(): value for key, value in request.header_items()}
         self.assertEqual(timeout, 3.5)
         self.assertEqual(headers["x-jarvisnano-control"], "1")
         self.assertEqual(headers["x-jarvisnano-token"], "desk-secret")
+        self.assertEqual(headers["x-jarvisnano-pair-code"], "123456")
         self.assertEqual(json.loads(request.data), {"v": 1})
 
     def test_sanitize_redacts_secret_fields_and_values(self) -> None:

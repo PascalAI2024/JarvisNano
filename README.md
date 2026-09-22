@@ -26,13 +26,19 @@
 ## What It Is
 
 JarvisNano turns the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** into a small,
-always-available desk assistant. The firmware runs directly on the ESP32-S3:
-the microphones stream to Gemini Live, the reply plays through the ES8311
-speaker path at its native 24 kHz, and one compositor drives the 466×466 round
-AMOLED. No phone, no hub, no cloud relay of your audio beyond Gemini itself.
+always-available desk assistant. By default the firmware runs directly on the
+ESP32-S3: the microphones stream to Gemini Live, the reply plays through the
+ES8311 speaker path at its native 24 kHz, and one compositor drives the 466×466
+round AMOLED. It needs no phone or hub in that standalone mode. An explicitly
+paired ZeroChat phone can instead claim the displayed physical pairing code,
+hold a private Wi-Fi operator lease, receive the Nano's 16 kHz microphone PCM,
+run ZeroChat's selected brain, and return 24 kHz speech PCM to the Nano speaker.
 
 The original Waveshare 1.75 and the Seeed XIAO tracks are kept as hardware
 references. The **1.75C is the product and the only supported build target**.
+
+Current implementation and physical acceptance status:
+[`CURRENT_WORK.md`](CURRENT_WORK.md).
 
 ## The Experience
 
@@ -88,7 +94,7 @@ for what sleeps and how it wakes.
 | "Jarvis" / PWR short | Wake and listen; never mutes |
 | PWR hold | Power off completely (the PMIC drops every rail); hold PWR one second to start |
 | BOOT short | Open/close the control shade |
-| BOOT hold 1.5–5 s | Open a visible 60-second pairing window |
+| BOOT hold 1.5–5 s | Show a random six-digit code and open its 60-second pairing window |
 | BOOT held during reset | ROM downloader |
 | Left-edge vertical | Volume ± 5, from any screen |
 | Right-edge vertical | Brightness ± 5, from any screen |
@@ -125,6 +131,7 @@ flowchart LR
     Gemini[Google Gemini Live]
     MCP[JarvisMCP gateway]
     Operator[Paired desk client]
+    ZeroChat[Paired ZeroChat brain]
 
     Human --> HAL --> Core
     Core <--> Voice <--> Gemini
@@ -135,6 +142,7 @@ flowchart LR
     NVS --> Voice
     NVS --> Tools
     Operator <--> HTTP
+    ZeroChat <-->|paired mic and speaker PCM| HTTP
     HTTP --> Core
     HTTP --> Glass
 ```
@@ -185,6 +193,10 @@ gotchas and the verification recipe are in [`docs/BUILD.md`](docs/BUILD.md).
 - The ring: WEATHER fetched by the device itself and aged honestly; STATUS with
   live connections, battery and die temperature; ACTIVITY with the last three
   things Jarvis did; DESK only while a companion is live.
+- Optional ZeroChat companion mode: a phone paired with the displayed six-digit
+  code claims the `zerochat` operator lease, receives 16 kHz PCM, and returns
+  sequenced 24 kHz PCM while the firmware continues to enforce privacy and
+  control ownership.
 - A rest ladder that ends in deep sleep on battery, with the IMU's own
   motion engine, the touch line and a timer as the ways back; CPU gears by
   mood and a four-times-faster ladder below 20 %.

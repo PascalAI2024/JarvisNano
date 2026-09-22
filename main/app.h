@@ -302,6 +302,12 @@ typedef struct {
     uint8_t target_slot;
 } ota_preflight_t;
 
+typedef enum {
+    OPERATOR_OWNER_NONE = 0,
+    OPERATOR_OWNER_CODEX,
+    OPERATOR_OWNER_ZEROCHAT,
+} operator_mode_owner_t;
+
 /* ---- owned by main.c — composition root, the voice task, presentation ---- */
 
 extern const jr_gemini_fn_decl_t s_device_tool_fns[];
@@ -318,6 +324,8 @@ extern _Atomic uint32_t s_sim_flip;
 extern uint32_t s_watch_peek_until_ms;
 extern uint32_t s_hold_start_ms;
 extern _Atomic uint32_t s_pairing_claim_until_ms;
+extern _Atomic uint32_t s_pairing_claim_code;
+extern _Atomic uint32_t s_pairing_claim_attempts;
 extern int s_out_vol;
 extern uint8_t s_brightness_cap;
 extern _Atomic int s_level_volume_request;
@@ -329,6 +337,7 @@ extern portMUX_TYPE s_logring_mux;
 extern _Atomic uint32_t s_operator_lease_until_ms;
 extern _Atomic bool s_operator_mode_active;
 extern _Atomic uint32_t s_operator_mode_entered_ms;
+extern _Atomic int s_operator_mode_owner;
 extern _Atomic bool s_ota_active;
 extern _Atomic uint32_t s_ota_received_bytes;
 extern _Atomic uint32_t s_ota_total_bytes;
@@ -409,8 +418,9 @@ bool brain_surface_handle_tap(uint16_t x, uint16_t y, uint32_t now,
                                      bool physical, uint32_t emitted_ms);
 void panic_home_clear_glass(void);
 bool operator_mode_release(uint32_t now, const char *reason,
-                                  bool physical_feedback,
-                                  bool only_if_expired);
+                           bool physical_feedback, bool only_if_expired,
+                           operator_mode_owner_t expected_owner,
+                           uint32_t expected_lease_id);
 bool ota_confirm_running_image_if_healthy(void);
 void start_diag_http(void);
 
