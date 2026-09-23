@@ -94,6 +94,8 @@ static void reset_activity(void)
     memset(s_act_kind, 0, sizeof s_act_kind);
     memset(s_act_sum, 0, sizeof s_act_sum);
     memset(s_act_ms, 0, sizeof s_act_ms);
+    memset(s_act_wall, 0, sizeof s_act_wall);
+    s_act_live = 0U;
 }
 
 static bool space_is(int space, const char *what)
@@ -2289,6 +2291,119 @@ static void test_activity_is_honest_when_empty_and_newest_first(void)
     reset_activity();
 }
 
+/* A deep sleep or a reset restarts esp_timer and wipes RAM: what the RTC
+ * copy holds is all that comes back. Simulated here by clearing the RAM rows
+ * and the timer, then restoring as jr_display_start does at boot. */
+static void act_simulate_boot(void)
+{
+    reset_activity();
+    s_act_restored = false;
+    s_fake_us = 0;
+}
+
+static void act_rtc_seal(void)
+{
+    s_act_rtc.check = act_rtc_sum(&s_act_rtc);
+}
+
+/* THE RECEIPT OUTLIVES THE SLEEP. Rows pushed before a sleep come back in
+ * order after it, aged by the wall clock (their esp_timer stamps died with
+ * the boot), EARLIER when no clock stamped them; and whatever a cold
+ * power-on leaves in RTC memory is refused whole. Mutations: dropping the
+ * act_rtc_save call empties the restored feed; dropping the checksum test
+ * lets the sealed-then-flipped block through. */
+static void test_activity_survives_the_sleep(void)
+{
+    act_simulate_boot();
+    memset(&s_act_rtc, 0, sizeof s_act_rtc);
+    s_fake_us = 5LL * 60 * 1000 * 1000;
+    jr_display_activity_push("WEB", "FOUND THREE RESULTS");
+    jr_display_activity_push("RAIN", "IN 2H 70% LIKELY");
+    CHECK(s_act_rtc.magic == ACT_RTC_MAGIC && s_act_rtc.count == 2U,
+          "a push writes the RTC copy (magic %08x, count %u)",
+          (unsigned)s_act_rtc.magic, (unsigned)s_act_rtc.count);
+
+    /* the sleep: RAM gone, timer back at zero, one row stamped 10 min ago
+     * by the wall clock and one never stamped at all */
+    const uint32_t now = act_wall_now();
+    CHECK(now != 0U, "the host clock is a valid wall clock");
+    s_act_rtc.wall[0] = now - 600U;
+    s_act_rtc.wall[1] = 0U;
+    act_rtc_seal();
+    act_simulate_boot();
+    CHECK(act_rtc_restore() == 2U, "two rows come back");
+    CHECK(act_rtc_restore() == 0U, "restore runs once per boot");
+    stage_space(JR_DISPLAY_SPACE_ACTIVITY);
+    sp_compose();
+    CHECK(s_act_rows == 2, "rows after the sleep: %d", s_act_rows);
+    CHECK(strcmp(s_act_row[0], "RAIN IN 2H 70% LIKELY") == 0 &&
+              strcmp(s_act_row[1], "WEB FOUND THREE RESULTS") == 0,
+          "same rows, same order: '%s' / '%s'", s_act_row[0], s_act_row[1]);
+    sp_compose_detail(JR_DISPLAY_SPACE_ACTIVITY);
+    CHECK(strcmp(s_detail_value[0], "10M AGO") == 0,
+          "aged by the wall clock, not the restarted timer: '%s'", s_detail_value[0]);
+    CHECK(strcmp(s_detail_value[1], "EARLIER") == 0,
+          "no stamp, no invented age: '%s'", s_detail_value[1]);
+
+    /* a push after the wake is newest, live, and the older rows keep theirs */
+    s_fake_us = 3LL * 60 * 1000 * 1000;
+    jr_display_activity_push("SAID", "GOOD MORNING");
+    s_fake_us = 4LL * 60 * 1000 * 1000;
+    sp_compose();
+    sp_compose_detail(JR_DISPLAY_SPACE_ACTIVITY);
+    CHECK(s_act_rows == 3 && strncmp(s_act_row[0], "SAID ", 5) == 0 &&
+              strncmp(s_act_row[1], "RAIN ", 5) == 0,
+          "new row on top: '%s' / '%s'", s_act_row[0], s_act_row[1]);
+    CHECK(strcmp(s_detail_value[0], "1M AGO") == 0 &&
+              strcmp(s_detail_value[1], "10M AGO") == 0 &&
+              strcmp(s_detail_value[2], "EARLIER") == 0,
+          "ages: '%s' '%s' '%s'", s_detail_value[0], s_detail_value[1],
+          s_detail_value[2]);
+    CHECK(s_act_rtc.count == 3U, "the RTC copy follows, count %u",
+          (unsigned)s_act_rtc.count);
+
+    /* a cold power-on: RTC noise, even noise that happens to carry the magic */
+    act_rtc_t good = s_act_rtc;
+    memset(&s_act_rtc, 0xA5, sizeof s_act_rtc);
+    act_simulate_boot();
+    CHECK(act_rtc_restore() == 0U && s_act_count == 0U, "noise is refused");
+    s_act_rtc = good;
+    s_act_rtc.sum[1][0] ^= 0x01;                       /* flipped, not resealed */
+    act_simulate_boot();
+    CHECK(act_rtc_restore() == 0U, "a bad checksum is refused");
+    s_act_rtc = good;
+    s_act_rtc.magic = ACT_RTC_MAGIC + 1U;              /* another layout version */
+    act_rtc_seal();
+    act_simulate_boot();
+    CHECK(act_rtc_restore() == 0U, "another version is refused");
+    s_act_rtc = good;
+    s_act_rtc.count = ACT_MAX + 1U;
+    act_rtc_seal();
+    act_simulate_boot();
+    CHECK(act_rtc_restore() == 0U, "a count past the cap is refused");
+    s_act_rtc = good;
+    memset(s_act_rtc.kind[2], 'X', ACT_KIND_CAP);      /* no terminator */
+    act_rtc_seal();
+    act_simulate_boot();
+    CHECK(act_rtc_restore() == 0U, "an unterminated kind is refused");
+    s_act_rtc = good;
+    s_act_rtc.sum[0][2] = '\x07';
+    act_rtc_seal();
+    act_simulate_boot();
+    CHECK(act_rtc_restore() == 0U, "a control byte is refused");
+    sp_compose();
+    CHECK(s_act_rows == 0, "a refused block shows NOTHING YET, got %d rows",
+          s_act_rows);
+    s_act_rtc = good;
+    act_simulate_boot();
+    CHECK(act_rtc_restore() == 3U, "the intact block still restores");
+
+    memset(&s_act_rtc, 0, sizeof s_act_rtc);
+    act_simulate_boot();
+    s_act_restored = true;
+    reset_nav();
+}
+
 /* The DESK sheet re-cut main.c's 12-glyph title to the 10-glyph value column,
  * deleting the "." mark title_shorten() spends its last glyph on. The marked
  * title is now the sheet's head, intact. */
@@ -2567,6 +2682,7 @@ int main(void)
     test_weather_mark_sits_at_the_temperature();
     test_stale_weather_loses_its_colour();
     test_activity_is_honest_when_empty_and_newest_first();
+    test_activity_survives_the_sleep();
     test_desk_sheet_heads_with_the_marked_task();
     test_orbit_stays_in_free_band();
     test_low_battery_uses_the_rim_palette();

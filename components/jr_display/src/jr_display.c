@@ -14,8 +14,10 @@
 #include "jr_display/hud_render.h"
 
 #include <stdio.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_attr.h"
 #include "esp_check.h"
@@ -1547,7 +1549,29 @@ static volatile uint32_t    s_weather_slot;
 static char     s_act_kind[ACT_MAX][ACT_KIND_CAP];
 static char     s_act_sum[ACT_MAX][ACT_SUM_CAP];
 static uint32_t s_act_ms[ACT_MAX];
+static uint32_t s_act_wall[ACT_MAX];  /* wall-clock s at the push; 0 = no valid clock */
+static uint8_t  s_act_live;           /* bit i: s_act_ms[i] is from this boot */
 static volatile uint32_t s_act_count;
+
+/* THE RECEIPT OUTLIVES THE SLEEP. On battery the device deep-sleeps whenever
+ * it is left alone, so a RAM-only list was empty nearly every time the owner
+ * looked. A copy lives in RTC slow memory the loader never initialises
+ * (RTC_NOINIT_ATTR): it survives deep sleep and a software reset, and holds
+ * garbage after a cold power-on — hence the magic (version in the low byte),
+ * the per-field bounds and the checksum, all checked before a row is
+ * believed. Written on push only (rows are rare); no flash is touched. */
+#define ACT_RTC_MAGIC   0x41435401u        /* "ACT" v1 */
+#define ACT_WALL_VALID  1577836800u        /* 2020-01-01: main's own clock test */
+typedef struct {
+    uint32_t magic;
+    uint32_t count;
+    char     kind[ACT_MAX][ACT_KIND_CAP];
+    char     sum[ACT_MAX][ACT_SUM_CAP];
+    uint32_t wall[ACT_MAX];
+    uint32_t check;
+} act_rtc_t;
+static RTC_NOINIT_ATTR act_rtc_t s_act_rtc;
+static bool s_act_restored;               /* app task only */
 static volatile uint32_t s_power_word = 0xFFu; /* pct | mv<<8 | usb/charge */
 /* STATUS links: bit0 wifi, bit1 session open, bits3:2 tools (0 none,
  * 1 starting, 2 ready), bit4 desk live, bit5 radio saving, bits15:8 -dBm,
@@ -1784,6 +1808,27 @@ static uint32_t sp_age_min(uint32_t stamp_ms)
     return (now_ms - stamp_ms) / 60000u;
 }
 
+static uint32_t act_wall_now(void);
+static uint32_t act_rtc_restore(void);
+
+/* How long ago ACTIVITY row i happened, when that is known. A row from this
+ * boot ages by esp_timer; a row carried over a sleep or a reset ages by the
+ * wall clock, and only when both its stamp and now are real. Anything else
+ * has no age — the sheet says EARLIER rather than invent one. */
+static bool act_age_min(uint32_t i, uint32_t *out)
+{
+    if ((s_act_live & (1u << i)) != 0u) {
+        *out = sp_age_min(s_act_ms[i]);
+        return true;
+    }
+    const uint32_t now = act_wall_now();
+    if (s_act_wall[i] == 0u || now == 0u || now < s_act_wall[i]) {
+        return false;
+    }
+    *out = (now - s_act_wall[i]) / 60u;
+    return true;
+}
+
 /* Elapsed session time as M:SS up to an hour, then H:MM. */
 static int sp_clock_str(char *dst, int cap, uint32_t secs)
 {
@@ -1997,9 +2042,11 @@ static void sp_compose_detail(int space)
             break;
         }
         for (uint32_t i = 0; i < n; ++i) {
-            const uint32_t age_min = sp_age_min(s_act_ms[i]);
+            uint32_t age_min = 0u;
             sp_str(s_detail_label[i], 0, SP_COL_MAX, s_act_kind[i]);
-            if (age_min == 0u) {
+            if (!act_age_min(i, &age_min)) {
+                sp_str(s_detail_value[i], 0, SP_COL_MAX, "EARLIER");
+            } else if (age_min == 0u) {
                 sp_str(s_detail_value[i], 0, SP_COL_MAX, "JUST NOW");
             } else {
                 (void)sp_str(s_detail_value[i],
@@ -5141,6 +5188,7 @@ esp_err_t jr_display_start(jr_display_t *out_port)
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         return ESP_OK;
     }
+    (void)act_rtc_restore();   /* the receipt from before the sleep */
 
     BaseType_t created = xTaskCreatePinnedToCore(
         display_task, "jr_present", JR_DISPLAY_TASK_STACK, &s_display,
@@ -5708,12 +5756,89 @@ void jr_display_weather_set(const jr_display_weather_t *weather)
     nav_wake();
 }
 
+/* Wall-clock seconds, or 0 when the clock has never been set (SNTP, or the
+ * board RTC main seeds from it). An unset clock stamps nothing. */
+static uint32_t act_wall_now(void)
+{
+    const time_t t = time(NULL);
+    return t >= (time_t)ACT_WALL_VALID ? (uint32_t)t : 0u;
+}
+
+/* FNV-1a over everything but the checksum itself. */
+static uint32_t act_rtc_sum(const act_rtc_t *r)
+{
+    const uint8_t *p = (const uint8_t *)r;
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < offsetof(act_rtc_t, check); ++i) {
+        h = (h ^ p[i]) * 16777619u;
+    }
+    return h;
+}
+
+/* A field is believed only if it ends inside its cap and every glyph before
+ * the end is printable ASCII — the only thing a push can have written. */
+static bool act_text_ok(const char *s, size_t cap)
+{
+    for (size_t i = 0; i < cap; ++i) {
+        if (s[i] == '\0') {
+            return true;
+        }
+        if ((unsigned char)s[i] < 0x20u || (unsigned char)s[i] > 0x7Eu) {
+            return false;
+        }
+    }
+    return false;
+}
+
+static void act_rtc_save(uint32_t n)
+{
+    act_rtc_t r;
+    memset(&r, 0, sizeof r);
+    r.magic = ACT_RTC_MAGIC;
+    r.count = n;
+    memcpy(r.kind, s_act_kind, sizeof r.kind);
+    memcpy(r.sum, s_act_sum, sizeof r.sum);
+    memcpy(r.wall, s_act_wall, sizeof r.wall);
+    r.check = act_rtc_sum(&r);
+    s_act_rtc = r;
+}
+
+/* Once per boot, before the first push: the rows from before the sleep come
+ * back with their wall stamps and no esp_timer stamp (that clock restarted).
+ * Anything that fails a check is dropped whole — an empty feed that says so
+ * beats one row of cold-boot noise. Returns the rows restored. */
+static uint32_t act_rtc_restore(void)
+{
+    if (s_act_restored) {
+        return 0u;
+    }
+    s_act_restored = true;
+    const act_rtc_t r = s_act_rtc;
+    if (r.magic != ACT_RTC_MAGIC || r.count == 0u || r.count > (uint32_t)ACT_MAX ||
+        r.check != act_rtc_sum(&r)) {
+        return 0u;
+    }
+    for (uint32_t i = 0; i < r.count; ++i) {
+        if (!act_text_ok(r.kind[i], ACT_KIND_CAP) || !act_text_ok(r.sum[i], ACT_SUM_CAP)) {
+            return 0u;
+        }
+    }
+    memcpy(s_act_kind, r.kind, sizeof s_act_kind);
+    memcpy(s_act_sum, r.sum, sizeof s_act_sum);
+    memcpy(s_act_wall, r.wall, sizeof s_act_wall);
+    memset(s_act_ms, 0, sizeof s_act_ms);
+    s_act_live = 0u;
+    __atomic_store_n(&s_act_count, r.count, __ATOMIC_RELEASE);
+    return r.count;
+}
+
 void jr_display_activity_push(const char *kind, const char *summary)
 {
     if ((kind == NULL || kind[0] == '\0') &&
         (summary == NULL || summary[0] == '\0')) {
         return;                                 /* nothing happened: no row */
     }
+    (void)act_rtc_restore();
     uint32_t n = __atomic_load_n(&s_act_count, __ATOMIC_ACQUIRE);
     if (n > (uint32_t)ACT_MAX) {
         n = (uint32_t)ACT_MAX;
@@ -5723,7 +5848,9 @@ void jr_display_activity_push(const char *kind, const char *summary)
         memcpy(s_act_kind[i], s_act_kind[i - 1], sizeof s_act_kind[i]);
         memcpy(s_act_sum[i], s_act_sum[i - 1], sizeof s_act_sum[i]);
         s_act_ms[i] = s_act_ms[i - 1];
+        s_act_wall[i] = s_act_wall[i - 1];
     }
+    s_act_live = (uint8_t)(((uint32_t)s_act_live << 1) & ((1u << ACT_MAX) - 1u));
     size_t k = 0;
     for (; kind != NULL && k + 1U < sizeof s_act_kind[0] && kind[k] != '\0'; ++k) {
         s_act_kind[0][k] = kind[k];
@@ -5736,10 +5863,13 @@ void jr_display_activity_push(const char *kind, const char *summary)
     }
     s_act_sum[0][s] = '\0';
     s_act_ms[0] = (uint32_t)(esp_timer_get_time() / 1000);
+    s_act_wall[0] = act_wall_now();
+    s_act_live |= 1u;
     /* The count lands last, so a frame that reads the new count reads the
      * rows it was written for. */
-    __atomic_store_n(&s_act_count, n < (uint32_t)ACT_MAX ? n + 1u : n,
-                     __ATOMIC_RELEASE);
+    n = n < (uint32_t)ACT_MAX ? n + 1u : n;
+    __atomic_store_n(&s_act_count, n, __ATOMIC_RELEASE);
+    act_rtc_save(n);
     nav_wake();
 }
 
