@@ -241,6 +241,42 @@ static void gfx_render_wait_flush(gfx_disp_t *disp, uint32_t sent)
 )
 
 
+YIELD_MARKER = "JarvisNano v5: no tick floor on an overdue frame"
+YIELD_EDITS = (
+    (
+        GFX_SRC / "gfx_core.c",
+        """            uint32_t task_delay = gfx_cal_task_delay(timer_delay);
+
+            xSemaphoreGiveRecursive(ctx->sync.render_mutex);
+            vTaskDelay(pdMS_TO_TICKS(task_delay));
+""",
+        f"""            uint32_t task_delay = gfx_cal_task_delay(timer_delay);
+            /* {YIELD_MARKER}. The floor sleeps to the next
+             * tick, 0-10 ms at CONFIG_FREERTOS_HZ=100, even when the frame
+             * just drawn overran its period and the next one is already due.
+             * Then yield instead: drop to one above idle so every ready task
+             * on this core runs first (the presenter at 3 takes the render
+             * lock for faces and refreshes), then come back. A plain
+             * taskYIELD would hand the lock straight back to this task.
+             * IDLE still runs in the per-frame DMA waits. A frame not yet
+             * due sleeps as before. */
+            uint32_t fps_period = (ctx->timer_mgr.fps > 0) ? (1000 / ctx->timer_mgr.fps) : 30;
+            bool frame_due = gfx_timer_tick_elaps(ctx->timer_mgr.last_tick) >= fps_period;
+
+            xSemaphoreGiveRecursive(ctx->sync.render_mutex);
+            if (frame_due) {{
+                UBaseType_t prio = uxTaskPriorityGet(NULL);
+                vTaskPrioritySet(NULL, tskIDLE_PRIORITY + 1);
+                taskYIELD();
+                vTaskPrioritySet(NULL, prio);
+            }} else {{
+                vTaskDelay(pdMS_TO_TICKS(task_delay));
+            }}
+""",
+    ),
+)
+
+
 def patch_group(marker: str, edits, label: str, check: bool,
                 changed: list[str], missing: list[str]) -> None:
     """All-or-nothing anchored edits across several files under one marker."""
@@ -369,6 +405,8 @@ def main() -> int:
         missing.append("gfx runtime render cadence (gfx_core.c missing)")
 
     patch_group(PIPE_MARKER, PIPE_EDITS, "gfx pipelined strip flush",
+                args.check, changed, missing)
+    patch_group(YIELD_MARKER, YIELD_EDITS, "gfx no tick floor on an overdue frame",
                 args.check, changed, missing)
 
     if missing:
