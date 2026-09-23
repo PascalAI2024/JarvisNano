@@ -1351,7 +1351,9 @@ void jr_display_clock_set_date(int wday, int mday, int mon)
  *    been acquired" -> assert failed: spi_device_release_bus
  * with the crash landing inside panel_co5300_draw_bitmap. So callers only
  * store a target here; brightness_pump() applies it from panel_flush, where
- * the render task owns the bus and no DMA is in flight.
+ * the render task owns the bus. The previous strip's DMA may still be in
+ * flight there (the engine pipelines strips, N14.3); esp_lcd's tx_param
+ * drains queued color transactions before it sends a command.
  *
  * The pump applies the SLEWED value, not the raw target: overlay_fade_tick
  * walks s_brightness_shown toward the target at full-scale-per-600-ms, so a
@@ -4553,11 +4555,12 @@ static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
     }
 
     /* Apply any pending brightness HERE, before the strip is submitted: we are
-     * on the render task, the previous flush has completed, and the QSPI bus is
-     * idle. This is the only place a panel command may be issued. */
+     * on the render task, and the command's tx_param waits out the previous
+     * strip's DMA before it goes on the bus. This is the only place a panel
+     * command may be issued. */
     brightness_pump();
 
-    /* Deep-sleep hand-off, on the same rule: the bus is idle here, so the
+    /* Deep-sleep hand-off, on the same rule: the render task owns the bus, so the
      * panel takes DISPOFF and SLPIN safely, and no strip is submitted after
      * them. An unsupported SLPIN is fine — DISPOFF already blanks it. */
     const uint32_t off = diag_load(&s_panel_off);
