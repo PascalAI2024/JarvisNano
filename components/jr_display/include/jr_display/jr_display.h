@@ -511,7 +511,9 @@ void jr_display_weather_set(const jr_display_weather_t *weather);
  *
  * kind is a short tag (<= 8 glyphs: WEB, WEATHER, MEMORY, TIME, ASK, PRICE,
  * SAID), summary is what happened in <= 24 glyphs. The renderer keeps the
- * last three. Nothing is invented: an empty feed says so. */
+ * last three, mirrored to RTC memory so they survive deep sleep and a soft
+ * reset (not a power-on). Nothing is invented: an empty feed says so, and a
+ * row whose time is not known reads EARLIER on the sheet. */
 void jr_display_activity_push(const char *kind, const char *summary);
 
 typedef enum {
