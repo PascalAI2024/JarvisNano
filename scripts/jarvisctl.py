@@ -39,6 +39,7 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 import urllib.parse
 
@@ -99,6 +100,18 @@ def pairing_token() -> str | None:
     if result is not None and result.returncode == 0:
         token = result.stdout.rstrip("\r\n")
         return token if valid_pairing_token(token) else None
+
+    if sys.platform == "win32":
+        # jarvis-desk.py pair stores Windows tokens here, keyed by account.
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\JarvisNano\Desk") as key:
+                token, kind = winreg.QueryValueEx(key, account)
+            if kind == winreg.REG_SZ and valid_pairing_token(token):
+                return token
+        except OSError:
+            pass
 
     token = (os.environ.get("JARVIS_PAIRING_TOKEN")
              or os.environ.get("JARVIS_DESK_TOKEN") or "")
@@ -409,4 +422,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except urllib.error.HTTPError as exc:
+        if exc.code != 401:
+            raise
+        # A traceback here read as a firmware fault; it is a missing pairing.
+        print("401: this host is not paired with the device. Hold BOOT "
+              "1.5-5 s, then: python3 scripts/jarvis-desk.py --host "
+              f"{host()} pair --code NNNNNN", file=sys.stderr)
+        raise SystemExit(3) from None

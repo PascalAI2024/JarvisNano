@@ -293,7 +293,9 @@ class DeskCliTests(unittest.TestCase):
         )
         self.assertEqual(result["seq"], 7)
 
-    def test_status_authenticates_brain_read_but_not_public_cockpit(self) -> None:
+    def test_status_authenticates_brain_and_cockpit_reads(self) -> None:
+        # /api/cockpit answers 401 once JR_DEV_OPEN_DIAGNOSTICS is 0; the
+        # public-cockpit assumption only held on a dev-open image.
         client = FakeClient()
         result = desk.command_status(client, FakeKeychain("desk-token"), "account", {})
         self.assertTrue(result["ok"])
@@ -301,7 +303,7 @@ class DeskCliTests(unittest.TestCase):
             client.gets,
             [
                 ("/api/brain/outbox?after=0", "desk-token"),
-                ("/api/cockpit", None),
+                ("/api/cockpit", "desk-token"),
             ],
         )
 
@@ -606,6 +608,45 @@ class JarvisCtlAuthTests(unittest.TestCase):
             request.full_url,
             "https://device.local/api/voice/control?armed=1",
         )
+
+
+@unittest.skipUnless(sys.platform == "win32", "Windows credential store")
+class WindowsStoreTests(unittest.TestCase):
+    """pair rotates the device token, so a store that cannot persist loses the
+    only valid credential. Round-trip through the real HKCU store that Desk
+    writes and jarvisctl reads, under a throwaway key."""
+
+    KEY = r"Software\JarvisNano\DeskTest"
+
+    def tearDown(self) -> None:
+        import winreg
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, self.KEY)
+        except OSError:
+            pass
+
+    def test_desk_store_round_trips_and_jarvisctl_reads_it(self) -> None:
+        account = "jarvis-desk@device.local"
+        with patch.object(desk, "WINDOWS_STORE_KEY", self.KEY):
+            keychain = desk.MacOSKeychain()
+            self.assertIsNone(keychain.load(account))
+            keychain.store(account, "t" * 32)
+            self.assertEqual(keychain.load(account), "t" * 32)
+            self.assertIsNone(keychain.load("jarvis-desk@other.local"))
+        source = Path(ctl.__file__).read_text(encoding="utf-8")
+        # jarvisctl must read the very key Desk writes.
+        self.assertIn('r"' + desk.WINDOWS_STORE_KEY + '"', source)
+        no_keychain = patch.object(ctl.subprocess, "run",
+                                   side_effect=FileNotFoundError("security"))
+        real_open = __import__("winreg").OpenKey
+
+        def open_test_key(root: Any, _key: str, *args: Any) -> Any:
+            return real_open(root, self.KEY, *args)
+
+        with patch.object(ctl, "host", return_value="device.local"), no_keychain, \
+             patch.dict(ctl.os.environ, {}, clear=True), \
+             patch("winreg.OpenKey", side_effect=open_test_key):
+            self.assertEqual(ctl.pairing_token(), "t" * 32)
 
 
 TWO_BY_TWO_PPM = b"P6\n2 2\n255\n" + bytes(range(12))

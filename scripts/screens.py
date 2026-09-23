@@ -66,9 +66,15 @@ def ring_from_header(root: str) -> list[str]:
 
 
 def _req(host: str, path: str, method: str = "GET", timeout: float = 25.0):
+    headers = {"X-JarvisNano-Control": "1"}
+    # The docstring promised a paired token and nothing sent one: with
+    # JR_DEV_OPEN_DIAGNOSTICS 0 every call answered 401.
+    token = (os.environ.get("JARVIS_PAIRING_TOKEN")
+             or os.environ.get("JARVIS_DESK_TOKEN"))
+    if token:
+        headers["X-JarvisNano-Token"] = token
     r = urllib.request.Request(
-        f"http://{host}{path}", method=method,
-        headers={"X-JarvisNano-Control": "1"},
+        f"http://{host}{path}", method=method, headers=headers,
         data=b"" if method == "POST" else None)
     return urllib.request.urlopen(r, timeout=timeout).read()
 
@@ -159,6 +165,10 @@ def main() -> int:
     # Home next, so the sweep starts from a known screen rather than wherever
     # the last person left it. Double-tap is the global escape.
     post(a.host, "/api/debug/input?kind=double&x=233&y=233")
+    time.sleep(a.settle)
+    # Home does not dismiss an open shade: a sweep that began with it open
+    # captioned the shade JARVIS and every later tile one screen early.
+    post(a.host, "/api/ui/shade?action=close")
     time.sleep(a.settle)
 
     for i, name in enumerate(ring_dark):

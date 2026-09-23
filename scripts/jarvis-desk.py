@@ -27,6 +27,9 @@ DEFAULT_DEVICE_HOST = "esp-claw.local"
 DEFAULT_TIMEOUT_SECONDS = 5.0
 DEFAULT_WATCH_INTERVAL_SECONDS = 0.75
 KEYCHAIN_SERVICE = "com.ingeniousdigital.jarvisnano.desk"
+# Windows has no Keychain: the token lives in a per-user HKCU value named by
+# the host-bound account, readable only by this user (jarvisctl reads it too).
+WINDOWS_STORE_KEY = r"Software\JarvisNano\Desk"
 MAX_RESPONSE_BYTES = 128 * 1024
 MIN_OTA_BYTES = 256 * 1024
 MIN_ART_BYTES = 1024 * 1024
@@ -491,6 +494,8 @@ class MacOSKeychain:
         # made every Desk command on Windows die in the keychain before the
         # env fallback was even consulted (2026-09-05).
         if self._runner is None:
+            if sys.platform == "win32":
+                return windows_store_load(account)
             if sys.platform != "darwin":
                 return None
             return self._native_load(account)
@@ -550,7 +555,12 @@ class MacOSKeychain:
                             "macOS Keychain rejected the credential update")
 
     def store(self, account: str, token: str) -> None:
-        if self._runner is None:
+        # pair claims with rotate=1, so the device has already revoked the old
+        # token by the time this runs: a store that cannot persist on this
+        # platform loses the only valid credential. Windows used to do that.
+        if self._runner is None and sys.platform == "win32":
+            windows_store_save(account, token)
+        elif self._runner is None:
             self._native_store(account, token)
         else:
             # Test/fallback path keeps the secret out of argv.
@@ -575,7 +585,32 @@ class MacOSKeychain:
                                 "macOS Keychain rejected the credential update")
         if self.load(account) != token:
             raise DeskError("keychain_error",
-                            "macOS Keychain did not persist the credential")
+                            "credential store did not persist the credential")
+
+
+def windows_store_load(account: str) -> str | None:
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, WINDOWS_STORE_KEY) as key:
+            value, kind = winreg.QueryValueEx(key, account)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise DeskError("keychain_error",
+                        "Windows credential lookup failed") from None
+    return value if kind == winreg.REG_SZ and value else None
+
+
+def windows_store_save(account: str, token: str) -> None:
+    import winreg
+
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, WINDOWS_STORE_KEY) as key:
+            winreg.SetValueEx(key, account, 0, winreg.REG_SZ, token)
+    except OSError:
+        raise DeskError("keychain_error",
+                        "Windows credential store rejected the update") from None
 
 
 def validate_token(token: str) -> str:
@@ -735,7 +770,8 @@ def command_pair(
         "ok": True,
         "command": "pair",
         "paired": True,
-        "storage": "macos-keychain",
+        "storage": ("windows-user-registry" if sys.platform == "win32"
+                    else "macos-keychain"),
     }
 
 
@@ -752,7 +788,7 @@ def command_status(
     )
     cockpit: Any
     try:
-        cockpit = client.get("/api/cockpit")
+        cockpit = client.get("/api/cockpit", token=token)
     except DeskError as exc:
         if exc.code == "http_error" and exc.http_status in (404, 405, 410, 501):
             cockpit = {"available": False, "http_status": exc.http_status}
@@ -1005,7 +1041,7 @@ def command_doctor(
     token = resolve_token(keychain, account, env, client.base_url)
     health = client.get("/api/device/health", token=token)
     tasks = client.get("/api/diag/tasks")
-    audio = client.get("/api/audio/taps")
+    audio = client.get("/api/audio/taps", token=token)
     sensors = client.get("/api/sensors")
     logs = client.get_text("/api/logs?tail=16384", token=token)
     incidents = triage_logs(logs)
