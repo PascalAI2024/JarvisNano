@@ -64,6 +64,8 @@ static bool     s_weather_failed;          /* app task only; the last fetch brou
 int16_t  s_wx_sun_rise_min = -1;           /* app task writes; the shell publish reads */
 int16_t  s_wx_sun_set_min  = -1;
 uint8_t  s_wx_rain_pp[JR_RAIN_HOURS];      /* app task only */
+_Static_assert(JR_DISPLAY_RAIN_HOURS == JR_RAIN_HOURS &&
+               JR_RAIN_PP_UNKNOWN == 255, "the glass reads the glance's hours as-is");
 static bool           s_wx_rain_valid;     /* app task only */
 static jr_rain_warn_t s_rain_warn = { .armed = true };
 #define WEATHER_IDLE_REFRESH_MS 1800000u   /* awake or ambient, any screen: keep the cell honest */
@@ -199,6 +201,9 @@ static void weather_apply_result(const jr_tool_result_t *result, uint32_t now)
         s_wx_sun_rise_min = (int16_t)sr->valuedouble;
         s_wx_sun_set_min = (int16_t)ss->valuedouble;
     }
+    /* The glass gets this answer's hours or none: an older array would be
+     * anchored to a midnight the glass cannot check. */
+    memset(w.rain_hours, JR_RAIN_PP_UNKNOWN, sizeof w.rain_hours);
     const cJSON *pp = cJSON_GetObjectItemCaseSensitive(r, "pp");
     if (cJSON_IsArray(pp) && cJSON_GetArraySize(pp) > 0) {
         memset(s_wx_rain_pp, JR_RAIN_PP_UNKNOWN, sizeof s_wx_rain_pp);
@@ -214,6 +219,13 @@ static void weather_apply_result(const jr_tool_result_t *result, uint32_t now)
             ++k;
         }
         s_wx_rain_valid = true;
+        struct tm tmv;
+        time_t tt = time(NULL);
+        localtime_r(&tt, &tmv);
+        if (tmv.tm_year >= 2020 - 1900) {    /* no clock, no anchor, no ring */
+            memcpy(w.rain_hours, s_wx_rain_pp, sizeof w.rain_hours);
+            w.rain_hours_mday = (uint8_t)tmv.tm_mday;
+        }
     }
     cJSON_Delete(root);
     s_weather = w;

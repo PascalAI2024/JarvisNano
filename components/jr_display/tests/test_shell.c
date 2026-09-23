@@ -1546,12 +1546,13 @@ static void test_future_weather_cell_shortens_instead_of_cutting(void)
                  "MODERATE RAIN SHOWERS") == 0,
           "the condition was cut on the way in: '%s'",
           s_weather[__atomic_load_n(&s_weather_slot, __ATOMIC_ACQUIRE) & 1u].condition);
-    /* The WEATHER headline: the word fitted at a word, then the number. */
+    /* The WEATHER headline: the word fitted at a word, and no number — the
+     * disc already prints it large (the panel read "76" over "OVERCAST 76"). */
     static const struct { const char *cond; const char *want; } head[] = {
-        { "LIGHT DRIZZLE",         "DRIZZLE 75" },
+        { "LIGHT DRIZZLE",         "DRIZZLE" },
         { "MODERATE RAIN SHOWERS", "RAIN SHOWERS" },
         { "THUNDERSTORMS",         "THUNDERSTOR." },
-        { "OVERCAST",              "OVERCAST 75" },
+        { "OVERCAST",              "OVERCAST" },
     };
     for (size_t i = 0; i < sizeof head / sizeof *head; ++i) {
         set_weather(true, 75, 82, 68, JR_DISPLAY_SKY_RAIN, head[i].cond,
@@ -2138,7 +2139,7 @@ static void test_weather_mark_sits_at_the_temperature(void)
           "band from lo to hi regardless of order: a0 %d sweep %d",
           s_wx_band_a0, s_wx_band_sweep);
     CHECK(strcmp(s_wx_hilo, "H76 L86") == 0, "hi/lo line, got '%s'", s_wx_hilo);
-    CHECK(strcmp(s_wx_head, "OVERCAST 80") == 0, "headline, got '%s'", s_wx_head);
+    CHECK(strcmp(s_wx_head, "OVERCAST") == 0, "headline, got '%s'", s_wx_head);
 }
 
 /* Age is honest in three steps: under two minutes it is not worth a line;
@@ -2211,6 +2212,193 @@ static void test_stale_weather_loses_its_colour(void)
     }
     __atomic_store_n(&s_hud_env_word, 74U, __ATOMIC_RELEASE);
     s_fake_us = 0;
+}
+
+/* THE NEXT TWELVE HOURS. Hour k from now takes slot k of twelve on the
+ * gauge's own 270 degrees, lit by its chance of rain; an hour the answer
+ * lacks draws nothing; stale, hourless or clockless weather draws no ring.
+ * Sampled on the ring's centre line at each slot's middle. Mutations:
+ * starting the selection at midnight (now_idx 0) turns slot 0 into a 0 %
+ * track; dropping the +24 for yesterday's anchor reads the wrong hours;
+ * dropping the stale gate leaves a ring on a 45-minute-old frame. */
+static uint16_t hour_px(const uint16_t *fb, int k)
+{
+    const int a = SP_WX_A0 + k * (SP_WX_SWEEP / SP_WX_HOURS) + SP_WX_SWEEP / SP_WX_HOURS / 2;
+    const int r = (SP_WX_HOUR_IN + SP_WX_HOUR_OUT) / 2;
+    const int x = SP_CX + ((sp_cos(a) * r) >> 15);
+    const int y = SP_CY + ((sp_sin(a) * r) >> 15);
+    return fb[(size_t)y * HUD_W + x];
+}
+
+static size_t hour_ring_ink(const uint16_t *fb)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
+        const int r = radius_of((int)i);
+        if ((int)(i / HUD_W) >= SP_LABEL_Y) {
+            continue;                 /* the headline crosses r104-110 at 6 */
+        }
+        if (r >= SP_WX_HOUR_IN - 1 && r <= SP_WX_HOUR_OUT && fb[i] != POISON) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+static void set_weather_hours(const uint8_t *pp, int mday, uint32_t fetched_ms)
+{
+    jr_display_weather_t w;
+    memset(&w, 0, sizeof w);
+    w.valid = true;
+    w.temp_f = 76;
+    w.feels_f = 78;
+    w.hi_f = 82;
+    w.lo_f = 76;
+    w.sky = JR_DISPLAY_SKY_CLOUDS;
+    strncpy(w.condition, "OVERCAST", sizeof w.condition - 1U);
+    w.fetched_ms = fetched_ms;
+    memcpy(w.rain_hours, pp, sizeof w.rain_hours);
+    w.rain_hours_mday = (uint8_t)mday;
+    jr_display_weather_set(&w);
+}
+
+static void test_weather_hours_ring_starts_now(void)
+{
+    /* the pure pieces: which hour is now, and what the twelve slots hold */
+    jr_display_clock_set(true, 14, 5, 0);
+    jr_display_clock_set_date(3, 23, 8);
+    const uint32_t cw = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
+    const uint32_t dw = __atomic_load_n(&s_clock_date_word, __ATOMIC_ACQUIRE);
+    CHECK(sp_rain_now_idx(cw, dw, 23) == 14, "same day: hour 14, got %d",
+          sp_rain_now_idx(cw, dw, 23));
+    CHECK(sp_rain_now_idx(cw, dw, 22) == 38, "yesterday's midnight: 14 + 24, got %d",
+          sp_rain_now_idx(cw, dw, 22));
+    CHECK(sp_rain_now_idx(cw, dw, 0) == -1, "no hours in the answer");
+    CHECK(sp_rain_now_idx(cw & ~(1u << 16), dw, 23) == -1, "clock off");
+    CHECK(sp_rain_now_idx(cw, 0u, 23) == -1, "no date");
+
+    uint8_t pp[JR_DISPLAY_RAIN_HOURS];
+    for (int i = 0; i < JR_DISPLAY_RAIN_HOURS; ++i) {
+        pp[i] = (uint8_t)i;
+    }
+    pp[16] = SP_WX_HOUR_NONE;
+    pp[17] = 101;                              /* not a percentage */
+    uint8_t out[SP_WX_HOURS];
+    CHECK(sp_rain_hours(out, pp, JR_DISPLAY_RAIN_HOURS, 14) == 10,
+          "twelve slots, two unknown");
+    CHECK(out[0] == 14 && out[1] == 15 && out[11] == 25,
+          "slot k is hour now+k: %u %u %u", out[0], out[1], out[11]);
+    CHECK(out[2] == SP_WX_HOUR_NONE && out[3] == SP_WX_HOUR_NONE,
+          "unknown and out-of-range hours stay unknown: %u %u", out[2], out[3]);
+    CHECK(sp_rain_hours(out, pp, JR_DISPLAY_RAIN_HOURS, 30) == 6 &&
+              out[5] == 35 && out[6] == SP_WX_HOUR_NONE,
+          "past the answer's 36th hour nothing is invented");
+    CHECK(sp_rain_hours(out, pp, JR_DISPLAY_RAIN_HOURS, -1) == 0 &&
+              out[0] == SP_WX_HOUR_NONE, "no now, no hours");
+    int a0 = 0, sw = 0;
+    sp_rain_hour_span(0, &a0, &sw);
+    CHECK(a0 > SP_WX_A0 && a0 + sw < SP_WX_A0 + SP_WX_SWEEP / SP_WX_HOURS,
+          "slot 0 sits inside the gauge's first twelfth: %d+%d", a0, sw);
+    sp_rain_hour_span(SP_WX_HOURS - 1, &a0, &sw);
+    CHECK(a0 + sw < SP_WX_A0 + SP_WX_SWEEP && sw > 8,
+          "slot 11 ends before the gauge does: %d+%d", a0, sw);
+
+    /* on the glass: 14:05, now is 100 %, the next hour dry, the one after
+     * unknown, six hours out 50 %, and midnight..13:00 all dry */
+    memset(pp, 0, sizeof pp);
+    pp[14] = 100;
+    pp[16] = SP_WX_HOUR_NONE;
+    pp[20] = 50;
+    s_fake_us = 0;
+    stage_space(JR_DISPLAY_SPACE_WEATHER);
+    set_weather_hours(pp, 23, 0U);
+    sp_compose();
+    CHECK(strcmp(s_wx_head, "OVERCAST") == 0, "the headline is the word: '%s'", s_wx_head);
+    uint16_t *fb = render_frame();
+    if (!fb) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; return; }
+    CHECK(hour_px(fb, 0) == SP_C_RAIN, "now at 100 %% is full rain, got %04x", hour_px(fb, 0));
+    CHECK(hour_px(fb, 1) == SP_C_TRACK, "a dry hour is bare track, got %04x", hour_px(fb, 1));
+    CHECK(hour_px(fb, 2) == POISON, "an unknown hour draws nothing, got %04x", hour_px(fb, 2));
+    const uint16_t half = hour_px(fb, 6);
+    CHECK(half != SP_C_RAIN && half != SP_C_TRACK && half != POISON &&
+              (half & 0x1F) < (SP_C_RAIN & 0x1F),
+          "50 %% is rain, dimmer than 100 %%: %04x", half);
+    CHECK(hour_ring_ink(fb) > 800, "the ring drew (%zu px)", hour_ring_ink(fb));
+    free(fb);
+
+    /* just after midnight the 23:40 fetch is still fresh: 00:10 is its hour 24 */
+    memset(pp, 0, sizeof pp);
+    pp[24] = 100;
+    jr_display_clock_set(true, 0, 10, 0);
+    set_weather_hours(pp, 22, 0U);
+    sp_compose();
+    fb = render_frame();
+    if (fb) {
+        CHECK(hour_px(fb, 0) == SP_C_RAIN, "yesterday's fetch, hour 24 is now: %04x",
+              hour_px(fb, 0));
+        free(fb);
+    }
+
+    /* muted: gold, like every accent */
+    __atomic_store_n(&s_hud_env_word, 74U | (1U << 9), __ATOMIC_RELEASE);
+    fb = render_frame();
+    if (fb) {
+        CHECK(hour_px(fb, 0) == SP_C_GOLD, "muted hour is gold: %04x", hour_px(fb, 0));
+        free(fb);
+    }
+    __atomic_store_n(&s_hud_env_word, 74U, __ATOMIC_RELEASE);
+
+    /* stale, hourless, clockless: no ring at all */
+    s_fake_us = 45LL * 60 * 1000 * 1000;
+    sp_compose();
+    fb = render_frame();
+    if (fb) {
+        CHECK(hour_ring_ink(fb) == 0, "stale drew %zu ring px", hour_ring_ink(fb));
+        free(fb);
+    }
+    s_fake_us = 0;
+    set_weather_hours(pp, 0, 0U);
+    sp_compose();
+    fb = render_frame();
+    if (fb) {
+        CHECK(hour_ring_ink(fb) == 0, "hourless drew %zu ring px", hour_ring_ink(fb));
+        free(fb);
+    }
+    set_weather_hours(pp, 22, 0U);
+    jr_display_clock_set(false, 0, 0, 0);
+    sp_compose();
+    fb = render_frame();
+    if (fb) {
+        CHECK(hour_ring_ink(fb) == 0, "clockless drew %zu ring px", hour_ring_ink(fb));
+        free(fb);
+    }
+
+    /* the sun, compact, under the disc; only with weather and a sun */
+    jr_display_sun_set(422, 1175);
+    sp_compose();
+    CHECK(strcmp(s_wx_sun, "7:02 19:35") == 0, "sun line '%s'", s_wx_sun);
+    fb = render_frame();
+    if (fb) {
+        size_t grey = 0;
+        for (int y = SP_WX_SUN_Y; y < SP_WX_SUN_Y + TEXT_H; ++y) {
+            for (int x = 0; x < HUD_W; ++x) {
+                grey += fb[(size_t)y * HUD_W + x] == SP_C_GREY;
+            }
+        }
+        CHECK(grey > 100, "the sun line drew %zu grey px", grey);
+        free(fb);
+    }
+    jr_display_sun_set(-1, -1);
+    sp_compose();
+    CHECK(s_wx_sun[0] == '\0', "no sun, no line: '%s'", s_wx_sun);
+    jr_display_sun_set(422, 1175);
+    jr_display_weather_set(NULL);
+    sp_compose();
+    CHECK(s_wx_sun[0] == '\0', "no weather, no digits: '%s'", s_wx_sun);
+
+    jr_display_sun_set(-1, -1);
+    jr_display_clock_set_date(0, 0, 0);
+    reset_nav();
 }
 
 /* --------------------------------------------------------------- ACTIVITY -- */
@@ -2681,6 +2869,7 @@ int main(void)
     test_weather_without_data_prints_no_number();
     test_weather_mark_sits_at_the_temperature();
     test_stale_weather_loses_its_colour();
+    test_weather_hours_ring_starts_now();
     test_activity_is_honest_when_empty_and_newest_first();
     test_activity_survives_the_sleep();
     test_desk_sheet_heads_with_the_marked_task();
