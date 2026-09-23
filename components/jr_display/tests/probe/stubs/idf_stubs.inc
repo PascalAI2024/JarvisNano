@@ -66,6 +66,26 @@ esp_err_t gfx_anim_set_segment(gfx_obj_t *o, uint32_t a, uint32_t b, uint32_t f,
 esp_err_t gfx_anim_start(gfx_obj_t *o) { (void)o; return ESP_OK; }
 esp_err_t gfx_anim_stop(gfx_obj_t *o) { (void)o; return ESP_OK; }
 uint32_t gfx_timer_get_actual_fps(gfx_handle_t h) { (void)h; return 0; }
+/* The dial decode: the header a test sets, and a frame whose pixel i is
+ * (uint16_t)(i ^ 0x5a5a) so a blit can be checked row by row. */
+static eaf_header_t s_stub_eaf_head = { 8, 466, 466 };
+static int s_stub_eaf_decodes;
+esp_err_t eaf_init(const uint8_t *d, size_t n, eaf_format_handle_t *h)
+{ (void)d; (void)n; *h = (eaf_format_handle_t)1; return ESP_OK; }
+esp_err_t eaf_deinit(eaf_format_handle_t h) { (void)h; return ESP_OK; }
+eaf_format_type_t eaf_get_frame_info(eaf_format_handle_t h, int i, eaf_header_t *o)
+{ (void)h; (void)i; *o = s_stub_eaf_head; return EAF_FORMAT_VALID; }
+void eaf_free_header(eaf_header_t *h) { (void)h; }
+esp_err_t eaf_frame_decode(eaf_format_handle_t h, int i, uint8_t *buf, size_t n, bool swap)
+{
+    (void)h; (void)i; (void)swap;
+    uint16_t *px = (uint16_t *)buf;
+    for (size_t k = 0; k < n / sizeof(uint16_t); ++k) {
+        px[k] = (uint16_t)(k ^ 0x5a5au);
+    }
+    s_stub_eaf_decodes++;
+    return ESP_OK;
+}
 esp_err_t jarvis_board_display_get(jarvis_board_display_t *o) { (void)o; return ESP_OK; }
 esp_err_t jarvis_board_set_brightness(uint8_t p) { (void)p; return ESP_OK; }
 

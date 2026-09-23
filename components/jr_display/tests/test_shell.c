@@ -584,6 +584,72 @@ static void test_missing_clip_falls_back_to_the_face_it_grew_from(void)
     }
 }
 
+/* N14.2: a baked dial is decoded once and copied into every strip; the
+ * anim path stays the answer for anything the blit cannot take. */
+static void test_dial_decodes_once_and_blits_every_strip(void)
+{
+    jr_display_ctx_t *ctx = &s_display;
+    static uint8_t fake_clip[32];
+    ctx->board.width = HUD_W;
+    ctx->board.height = HUD_H;
+    ctx->board.swap_color_bytes = false;
+    s_stub_eaf_head = (eaf_header_t){ 8, HUD_W, HUD_H };
+    s_dial_frame_face = JR_FACE_COUNT;
+    s_dial_blit = false;
+    s_stub_eaf_decodes = 0;
+    ctx->missing_faces = 0;
+    ctx->clips[JR_FACE_DIAL_DIVER].data = fake_clip;
+    ctx->clips[JR_FACE_DIAL_DIVER].size = sizeof fake_clip;
+    ctx->clips[JR_FACE_DIAL_DRESS].data = fake_clip;
+    ctx->clips[JR_FACE_DIAL_DRESS].size = sizeof fake_clip;
+
+    CHECK(!dial_show(ctx, JR_FACE_IDLE), "a face that is not a dial stays on the anim");
+    CHECK(!s_dial_blit && s_stub_eaf_decodes == 0, "and decodes nothing");
+
+    CHECK(dial_show(ctx, JR_FACE_DIAL_DIVER), "a resident dial goes to the blit");
+    CHECK(s_dial_blit && ctx->shown_face == JR_FACE_DIAL_DIVER &&
+          ctx->active == NULL, "blit on, dial shown, no anim bound");
+    CHECK(dial_show(ctx, JR_FACE_DIAL_DIVER), "again");
+    CHECK(s_stub_eaf_decodes == 1, "the same dial is decoded once, got %d",
+          s_stub_eaf_decodes);
+
+    static uint16_t strip[HUD_W * STRIP_ROWS];
+    const int y1 = 227 - STRIP_ROWS / 2;
+    const int x1 = 10, x2 = HUD_W - 10;
+    apply_dial(ctx, x1, y1, x2, y1 + STRIP_ROWS, strip);
+    int bad = 0;
+    for (int r = 0; r < STRIP_ROWS; ++r) {
+        for (int c = 0; c < x2 - x1; ++c) {
+            const size_t i = (size_t)(y1 + r) * HUD_W + (size_t)(x1 + c);
+            if (strip[(size_t)r * (size_t)(x2 - x1) + (size_t)c] !=
+                (uint16_t)(i ^ 0x5a5au)) {
+                bad++;
+            }
+        }
+    }
+    CHECK(bad == 0, "every strip pixel is the decoded frame's, %d wrong", bad);
+
+    CHECK(dial_show(ctx, JR_FACE_DIAL_DRESS) && s_stub_eaf_decodes == 2,
+          "a style change re-decodes the one shared frame");
+
+    s_dial_frame_face = JR_FACE_COUNT;
+    s_dial_blit = false;
+    s_stub_eaf_head.width = 400;
+    CHECK(!dial_show(ctx, JR_FACE_DIAL_DIVER) && !s_dial_blit,
+          "a dial that is not panel-sized stays on the anim");
+    s_stub_eaf_head.width = HUD_W;
+    ctx->missing_faces = 1U << JR_FACE_DIAL_DIVER;
+    CHECK(!dial_show(ctx, JR_FACE_DIAL_DIVER), "a missing clip keeps its fallback");
+
+    ctx->missing_faces = 0;
+    ctx->clips[JR_FACE_DIAL_DIVER].data = NULL;
+    ctx->clips[JR_FACE_DIAL_DRESS].data = NULL;
+    free(s_dial_frame);
+    s_dial_frame = NULL;
+    s_dial_frame_face = JR_FACE_COUNT;
+    s_dial_blit = false;
+}
+
 static void test_render_cadence_reaches_the_engine_and_clamps(void)
 {
     gfx_handle_t saved = s_display.gfx;
@@ -2509,6 +2575,7 @@ int main(void)
     test_render_cadence_reaches_the_engine_and_clamps();
     test_render_clock_counts_frames_and_latches_a_second();
     test_missing_clip_falls_back_to_the_face_it_grew_from();
+    test_dial_decodes_once_and_blits_every_strip();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);

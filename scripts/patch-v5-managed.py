@@ -277,6 +277,22 @@ YIELD_EDITS = (
 )
 
 
+CLEAR_MARKER = "JarvisNano v5: transparent decodes as black"
+CLEAR_EDITS = (
+    (
+        GFX_SRC.parent / "lib" / "eaf" / "gfx_eaf_dec.c",
+        """                    gfx_color_t eaf_color;
+                    eaf_palette_get_color(&frame_header, index, swap_bytes, &eaf_color);
+""",
+        f"""                    /* {CLEAR_MARKER}: the palette
+                     * lookup leaves a fully transparent entry unwritten. */
+                    gfx_color_t eaf_color = {{ .full = 0 }};
+                    eaf_palette_get_color(&frame_header, index, swap_bytes, &eaf_color);
+""",
+    ),
+)
+
+
 def patch_group(marker: str, edits, label: str, check: bool,
                 changed: list[str], missing: list[str]) -> None:
     """All-or-nothing anchored edits across several files under one marker."""
@@ -407,6 +423,8 @@ def main() -> int:
     patch_group(PIPE_MARKER, PIPE_EDITS, "gfx pipelined strip flush",
                 args.check, changed, missing)
     patch_group(YIELD_MARKER, YIELD_EDITS, "gfx no tick floor on an overdue frame",
+                args.check, changed, missing)
+    patch_group(CLEAR_MARKER, CLEAR_EDITS, "eaf transparent decodes as black",
                 args.check, changed, missing)
 
     if missing:
