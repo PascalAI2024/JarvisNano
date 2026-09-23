@@ -14,8 +14,10 @@
 #include "jr_display/hud_render.h"
 
 #include <stdio.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_attr.h"
 #include "esp_check.h"
@@ -1547,7 +1549,29 @@ static volatile uint32_t    s_weather_slot;
 static char     s_act_kind[ACT_MAX][ACT_KIND_CAP];
 static char     s_act_sum[ACT_MAX][ACT_SUM_CAP];
 static uint32_t s_act_ms[ACT_MAX];
+static uint32_t s_act_wall[ACT_MAX];  /* wall-clock s at the push; 0 = no valid clock */
+static uint8_t  s_act_live;           /* bit i: s_act_ms[i] is from this boot */
 static volatile uint32_t s_act_count;
+
+/* THE RECEIPT OUTLIVES THE SLEEP. On battery the device deep-sleeps whenever
+ * it is left alone, so a RAM-only list was empty nearly every time the owner
+ * looked. A copy lives in RTC slow memory the loader never initialises
+ * (RTC_NOINIT_ATTR): it survives deep sleep and a software reset, and holds
+ * garbage after a cold power-on — hence the magic (version in the low byte),
+ * the per-field bounds and the checksum, all checked before a row is
+ * believed. Written on push only (rows are rare); no flash is touched. */
+#define ACT_RTC_MAGIC   0x41435401u        /* "ACT" v1 */
+#define ACT_WALL_VALID  1577836800u        /* 2020-01-01: main's own clock test */
+typedef struct {
+    uint32_t magic;
+    uint32_t count;
+    char     kind[ACT_MAX][ACT_KIND_CAP];
+    char     sum[ACT_MAX][ACT_SUM_CAP];
+    uint32_t wall[ACT_MAX];
+    uint32_t check;
+} act_rtc_t;
+static RTC_NOINIT_ATTR act_rtc_t s_act_rtc;
+static bool s_act_restored;               /* app task only */
 static volatile uint32_t s_power_word = 0xFFu; /* pct | mv<<8 | usb/charge */
 /* STATUS links: bit0 wifi, bit1 session open, bits3:2 tools (0 none,
  * 1 starting, 2 ready), bit4 desk live, bit5 radio saving, bits15:8 -dBm,
@@ -1609,6 +1633,13 @@ static int  s_wx_mark_a;              /* 1/256 turn, the current temperature  */
 static int  s_wx_band_a0;             /* lo..hi as an arc on the same scale   */
 static int  s_wx_band_sweep;
 static int  s_wx_rain_sweep;          /* 0..256, from 12 o'clock               */
+/* THE NEXT TWELVE HOURS, one slot each on the gauge's own 270 degrees (so
+ * the open bottom stays clear for the headline), now at the cold end. */
+#define SP_WX_HOURS      12
+#define SP_WX_HOUR_NONE  255          /* not in the answer: the slot is dark   */
+static uint8_t s_wx_hour_pct[SP_WX_HOURS];
+static int     s_wx_hours;            /* known slots; 0 draws no ring          */
+static char    s_wx_sun[12];          /* "7:02 19:35" / ""                     */
 
 /* ACTIVITY, composed once per frame: one row per entry, "KIND SUMMARY", cut
  * to the row's width with the tree's own shortening mark. */
@@ -1782,6 +1813,27 @@ static uint32_t sp_age_min(uint32_t stamp_ms)
 {
     const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     return (now_ms - stamp_ms) / 60000u;
+}
+
+static uint32_t act_wall_now(void);
+static uint32_t act_rtc_restore(void);
+
+/* How long ago ACTIVITY row i happened, when that is known. A row from this
+ * boot ages by esp_timer; a row carried over a sleep or a reset ages by the
+ * wall clock, and only when both its stamp and now are real. Anything else
+ * has no age — the sheet says EARLIER rather than invent one. */
+static bool act_age_min(uint32_t i, uint32_t *out)
+{
+    if ((s_act_live & (1u << i)) != 0u) {
+        *out = sp_age_min(s_act_ms[i]);
+        return true;
+    }
+    const uint32_t now = act_wall_now();
+    if (s_act_wall[i] == 0u || now == 0u || now < s_act_wall[i]) {
+        return false;
+    }
+    *out = (now - s_act_wall[i]) / 60u;
+    return true;
 }
 
 /* Elapsed session time as M:SS up to an hour, then H:MM. */
@@ -1997,9 +2049,11 @@ static void sp_compose_detail(int space)
             break;
         }
         for (uint32_t i = 0; i < n; ++i) {
-            const uint32_t age_min = sp_age_min(s_act_ms[i]);
+            uint32_t age_min = 0u;
             sp_str(s_detail_label[i], 0, SP_COL_MAX, s_act_kind[i]);
-            if (age_min == 0u) {
+            if (!act_age_min(i, &age_min)) {
+                sp_str(s_detail_value[i], 0, SP_COL_MAX, "EARLIER");
+            } else if (age_min == 0u) {
                 sp_str(s_detail_value[i], 0, SP_COL_MAX, "JUST NOW");
             } else {
                 (void)sp_str(s_detail_value[i],
@@ -2191,6 +2245,51 @@ static int sp_wx_angle(int f)
  * shaped like one — and the headline says why. */
 static int wx_cond_fit(char *dst, size_t cap, const char *cond, int room);
 
+/* Which of the answer's hours is this one: the clock's hour on the fetch
+ * day, +24 the day after (the stale gate keeps the answer within a day);
+ * -1 when the clock or the date is unset, or the answer had no hours. */
+static int sp_rain_now_idx(uint32_t clock_word, uint32_t date_word, int anchor_mday)
+{
+    if ((clock_word & (1u << 16)) == 0u || (date_word & (1u << 12)) == 0u ||
+        anchor_mday <= 0) {
+        return -1;
+    }
+    const int hh = (int)((clock_word >> 8) & 0xFFu);
+    return (int)(date_word & 0x1Fu) == anchor_mday ? hh : hh + 24;
+}
+
+/* Slot k holds hour now+k: 0..100, or SP_WX_HOUR_NONE where the answer
+ * has nothing (a gap, a value that is not a percentage, past its end).
+ * Returns the known slots. */
+static int sp_rain_hours(uint8_t out[SP_WX_HOURS], const uint8_t *pp, int n,
+                         int now_idx)
+{
+    int known = 0;
+    for (int k = 0; k < SP_WX_HOURS; ++k) {
+        const int i = now_idx + k;
+        const uint8_t v = (now_idx >= 0 && i < n) ? pp[i] : SP_WX_HOUR_NONE;
+        out[k] = v <= 100u ? v : SP_WX_HOUR_NONE;
+        known += out[k] != SP_WX_HOUR_NONE;
+    }
+    return known;
+}
+
+/* Slot k's span in 1/256 turn: a twelfth of the gauge less one unit each
+ * side, so the hours read as twelve pieces rather than one band. */
+static void sp_rain_hour_span(int k, int *a0, int *sweep)
+{
+    *a0 = SP_WX_A0 + k * (SP_WX_SWEEP / SP_WX_HOURS) + 1;
+    *sweep = SP_WX_SWEEP / SP_WX_HOURS - 2;
+}
+
+/* Minutes past midnight as H:MM, 24-hour. */
+static int sp_hhmm(char *dst, int len, int cap, int minute)
+{
+    len = sp_num(dst, len, cap, (uint32_t)(minute / 60));
+    len = sp_str(dst, len, cap, minute % 60 < 10 ? ":0" : ":");
+    return sp_num(dst, len, cap, (uint32_t)(minute % 60));
+}
+
 static void sp_compose_weather(void)
 {
     const jr_display_weather_t *w =
@@ -2205,30 +2304,22 @@ static void sp_compose_weather(void)
     s_wx_band_a0 = 0;
     s_wx_band_sweep = 0;
     s_wx_rain_sweep = 0;
+    s_wx_hours = 0;
+    s_wx_sun[0] = '\0';
     if (!w->valid) {
         sp_str(s_wx_head, 0, SP_LABEL_CAP, "NO WEATHER");
         return;
     }
 
-    /* Headline: the word, then the number if both fit twelve glyphs. When a
-     * long condition leaves no room the number is dropped whole rather than
-     * cut mid-digit — it is still the largest thing on the screen. The word
-     * itself is fitted at a word (wx_cond_fit), never clipped mid-glyph. */
+    /* Headline: the word alone, fitted at a word (wx_cond_fit), never
+     * clipped mid-glyph. The number is the disc's — the panel read "76"
+     * over "OVERCAST 76", one reading printed twice. */
     char cond[SP_LABEL_CAP];
     (void)wx_cond_fit(cond, sizeof cond, w->condition, SP_LABEL_CAP - 1);
-    int len = sp_str(s_wx_head, 0, SP_LABEL_CAP, cond);
-    char tail[6];
-    int tlen = 0;
-    if (len > 0) {
-        tlen = sp_str(tail, 0, (int)sizeof tail, " ");
-    }
-    tlen = sp_int(tail, tlen, (int)sizeof tail, w->temp_f);
-    if (len + tlen <= SP_LABEL_CAP - 1) {
-        (void)sp_str(s_wx_head, len, SP_LABEL_CAP, tail);
-    }
+    (void)sp_str(s_wx_head, 0, SP_LABEL_CAP, cond);
 
     (void)sp_int(s_wx_temp, 0, (int)sizeof s_wx_temp, w->temp_f);
-    len = sp_str(s_wx_hilo, 0, (int)sizeof s_wx_hilo, "H");
+    int len = sp_str(s_wx_hilo, 0, (int)sizeof s_wx_hilo, "H");
     len = sp_int(s_wx_hilo, len, (int)sizeof s_wx_hilo, w->hi_f);
     len = sp_str(s_wx_hilo, len, (int)sizeof s_wx_hilo, " L");
     (void)sp_int(s_wx_hilo, len, (int)sizeof s_wx_hilo, w->lo_f);
@@ -2256,6 +2347,22 @@ static void sp_compose_weather(void)
     s_wx_band_sweep = sp_wx_angle(hi) - s_wx_band_a0;
     s_wx_mark_a = sp_wx_angle(w->temp_f);
     s_wx_rain_sweep = ((int)(w->rain_pct > 100u ? 100u : w->rain_pct) * 256) / 100;
+
+    /* The hours only while fresh: a stale answer's "now" is a guess. */
+    if (!s_wx_stale) {
+        const int now_idx = sp_rain_now_idx(
+            __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE),
+            __atomic_load_n(&s_clock_date_word, __ATOMIC_ACQUIRE),
+            (int)w->rain_hours_mday);
+        s_wx_hours = sp_rain_hours(s_wx_hour_pct, w->rain_hours,
+                                   JR_DISPLAY_RAIN_HOURS, now_idx);
+    }
+    const uint32_t sw = __atomic_load_n(&s_sun_word, __ATOMIC_ACQUIRE);
+    if ((sw & (1u << 22)) != 0u) {
+        len = sp_hhmm(s_wx_sun, 0, (int)sizeof s_wx_sun, (int)(sw & 0x7FFu));
+        len = sp_str(s_wx_sun, len, (int)sizeof s_wx_sun, " ");
+        (void)sp_hhmm(s_wx_sun, len, (int)sizeof s_wx_sun, (int)((sw >> 11) & 0x7FFu));
+    }
 }
 
 /* ACTIVITY rows for this frame: "KIND SUMMARY" in the row's 24 glyphs. A
@@ -3183,6 +3290,14 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
 #define SP_WX_RAIN_OUT  70
 #define SP_WX_AGE_Y     196    /* scale 2, rows 196..209                     */
 #define SP_WX_HILO_Y    250    /* scale 2, rows 250..263                     */
+/* The hour ring sits just outside the mark (r100), on the gauge's sweep
+ * only. The sun line lives in the gauge's open bottom, above the headline
+ * (y330): ten glyphs at scale 2 put its corners at r98-109 and 38 degrees
+ * off the vertical, inside the 45-degree gap and outside the rain ring. */
+#define SP_WX_HOUR_IN   104
+#define SP_WX_HOUR_OUT  110
+#define SP_WX_HOUR_DRY  10     /* under this an hour is bare track           */
+#define SP_WX_SUN_Y     310    /* scale 2, rows 310..323                     */
 
 /* ACTIVITY geometry: three rows at a 36 px pitch about the centre, each 24
  * glyphs at scale 2 centred on the axis (x 89..374). The worst corner is
@@ -3592,7 +3707,9 @@ static uint16_t sp_sky_native(jr_display_sky_t sky)
  * as a shape before it reads as numbers. Inside: a thin ring for the chance
  * of rain, and the numbers themselves — the temperature large, the high and
  * low under it, and above it how old all of this is once it is old enough to
- * matter.
+ * matter. Outside the gauge the next twelve hours ride the same sweep, now
+ * at the cold end, each lit by its chance of rain; under the disc, the sun
+ * as "7:02 19:35". The headline is the condition word alone.
  *
  * Honesty rules, in order: muted turns every accent gold like every other
  * screen; stale (> 30 min) turns them grey, because a number from an hour ago
@@ -3628,12 +3745,33 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
         sp_span_set(&mk, s_wx_mark_a - SP_WX_MARK_HALF,
                     s_wx_mark_a + SP_WX_MARK_HALF);
     }
+    /* The hours: one short span per known slot, bare track while dry, the
+     * rain hue brightening with the chance (a quarter-lit floor at 10 %,
+     * full at 100 %). An unknown hour gets no span at all. */
+    sp_span_t hr[SP_WX_HOURS];
+    uint16_t hr_px[SP_WX_HOURS];
+    int nhr = 0;
+    const uint16_t hour_native = muted ? SP_C_GOLD : SP_C_RAIN;
+    for (int k = 0; k < SP_WX_HOURS && s_wx_hours > 0; ++k) {
+        const int pct = s_wx_hour_pct[k];
+        if (pct == SP_WX_HOUR_NONE) {
+            continue;
+        }
+        int a0 = 0, sweep = 0;
+        sp_rain_hour_span(k, &a0, &sweep);
+        sp_span_set(&hr[nhr], a0, a0 + sweep);
+        hr_px[nhr++] = pct < SP_WX_HOUR_DRY
+            ? track
+            : sp_tint(ctx, hour_native, (st * (64 + (191 * pct) / 100)) / 255);
+    }
     const int alen = sp_len(s_wx_age, (int)sizeof s_wx_age - 1);
     const int tlen = sp_len(s_wx_temp, (int)sizeof s_wx_temp - 1);
     const int hlen = sp_len(s_wx_hilo, (int)sizeof s_wx_hilo - 1);
+    const int slen = sp_len(s_wx_sun, (int)sizeof s_wx_sun - 1);
     const int ax = sp_text_cx(alen, 2, 0);
     const int tx = cx - (18 * tlen) / 2;
     const int hx = sp_text_cx(hlen, 2, 0);
+    const int sx = sp_text_cx(slen, 2, 0);
 
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
@@ -3655,9 +3793,14 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
             sp_annulus_row(row, y, cx, cy, SP_WX_MARK_IN, SP_WX_MARK_OUT, &mk,
                            mark);
         }
+        for (int i = 0; i < nhr; ++i) {
+            sp_annulus_row(row, y, cx, cy, SP_WX_HOUR_IN, SP_WX_HOUR_OUT, &hr[i],
+                           hr_px[i]);
+        }
         sp_text_row(row, y, s_wx_age, alen, ax, SP_WX_AGE_Y + oy, 2, grey);
         sp_text_row(row, y, s_wx_temp, tlen, tx, SP_FOCAL_TEXT_Y + oy, 3, ink);
         sp_text_row(row, y, s_wx_hilo, hlen, hx, SP_WX_HILO_Y + oy, 2, ink);
+        sp_text_row(row, y, s_wx_sun, slen, sx, SP_WX_SUN_Y + oy, 2, grey);
     }
 }
 
@@ -5141,6 +5284,7 @@ esp_err_t jr_display_start(jr_display_t *out_port)
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         return ESP_OK;
     }
+    (void)act_rtc_restore();   /* the receipt from before the sleep */
 
     BaseType_t created = xTaskCreatePinnedToCore(
         display_task, "jr_present", JR_DISPLAY_TASK_STACK, &s_display,
@@ -5708,12 +5852,89 @@ void jr_display_weather_set(const jr_display_weather_t *weather)
     nav_wake();
 }
 
+/* Wall-clock seconds, or 0 when the clock has never been set (SNTP, or the
+ * board RTC main seeds from it). An unset clock stamps nothing. */
+static uint32_t act_wall_now(void)
+{
+    const time_t t = time(NULL);
+    return t >= (time_t)ACT_WALL_VALID ? (uint32_t)t : 0u;
+}
+
+/* FNV-1a over everything but the checksum itself. */
+static uint32_t act_rtc_sum(const act_rtc_t *r)
+{
+    const uint8_t *p = (const uint8_t *)r;
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < offsetof(act_rtc_t, check); ++i) {
+        h = (h ^ p[i]) * 16777619u;
+    }
+    return h;
+}
+
+/* A field is believed only if it ends inside its cap and every glyph before
+ * the end is printable ASCII — the only thing a push can have written. */
+static bool act_text_ok(const char *s, size_t cap)
+{
+    for (size_t i = 0; i < cap; ++i) {
+        if (s[i] == '\0') {
+            return true;
+        }
+        if ((unsigned char)s[i] < 0x20u || (unsigned char)s[i] > 0x7Eu) {
+            return false;
+        }
+    }
+    return false;
+}
+
+static void act_rtc_save(uint32_t n)
+{
+    act_rtc_t r;
+    memset(&r, 0, sizeof r);
+    r.magic = ACT_RTC_MAGIC;
+    r.count = n;
+    memcpy(r.kind, s_act_kind, sizeof r.kind);
+    memcpy(r.sum, s_act_sum, sizeof r.sum);
+    memcpy(r.wall, s_act_wall, sizeof r.wall);
+    r.check = act_rtc_sum(&r);
+    s_act_rtc = r;
+}
+
+/* Once per boot, before the first push: the rows from before the sleep come
+ * back with their wall stamps and no esp_timer stamp (that clock restarted).
+ * Anything that fails a check is dropped whole — an empty feed that says so
+ * beats one row of cold-boot noise. Returns the rows restored. */
+static uint32_t act_rtc_restore(void)
+{
+    if (s_act_restored) {
+        return 0u;
+    }
+    s_act_restored = true;
+    const act_rtc_t r = s_act_rtc;
+    if (r.magic != ACT_RTC_MAGIC || r.count == 0u || r.count > (uint32_t)ACT_MAX ||
+        r.check != act_rtc_sum(&r)) {
+        return 0u;
+    }
+    for (uint32_t i = 0; i < r.count; ++i) {
+        if (!act_text_ok(r.kind[i], ACT_KIND_CAP) || !act_text_ok(r.sum[i], ACT_SUM_CAP)) {
+            return 0u;
+        }
+    }
+    memcpy(s_act_kind, r.kind, sizeof s_act_kind);
+    memcpy(s_act_sum, r.sum, sizeof s_act_sum);
+    memcpy(s_act_wall, r.wall, sizeof s_act_wall);
+    memset(s_act_ms, 0, sizeof s_act_ms);
+    s_act_live = 0u;
+    __atomic_store_n(&s_act_count, r.count, __ATOMIC_RELEASE);
+    return r.count;
+}
+
 void jr_display_activity_push(const char *kind, const char *summary)
 {
     if ((kind == NULL || kind[0] == '\0') &&
         (summary == NULL || summary[0] == '\0')) {
         return;                                 /* nothing happened: no row */
     }
+    (void)act_rtc_restore();
     uint32_t n = __atomic_load_n(&s_act_count, __ATOMIC_ACQUIRE);
     if (n > (uint32_t)ACT_MAX) {
         n = (uint32_t)ACT_MAX;
@@ -5723,7 +5944,9 @@ void jr_display_activity_push(const char *kind, const char *summary)
         memcpy(s_act_kind[i], s_act_kind[i - 1], sizeof s_act_kind[i]);
         memcpy(s_act_sum[i], s_act_sum[i - 1], sizeof s_act_sum[i]);
         s_act_ms[i] = s_act_ms[i - 1];
+        s_act_wall[i] = s_act_wall[i - 1];
     }
+    s_act_live = (uint8_t)(((uint32_t)s_act_live << 1) & ((1u << ACT_MAX) - 1u));
     size_t k = 0;
     for (; kind != NULL && k + 1U < sizeof s_act_kind[0] && kind[k] != '\0'; ++k) {
         s_act_kind[0][k] = kind[k];
@@ -5736,10 +5959,13 @@ void jr_display_activity_push(const char *kind, const char *summary)
     }
     s_act_sum[0][s] = '\0';
     s_act_ms[0] = (uint32_t)(esp_timer_get_time() / 1000);
+    s_act_wall[0] = act_wall_now();
+    s_act_live |= 1u;
     /* The count lands last, so a frame that reads the new count reads the
      * rows it was written for. */
-    __atomic_store_n(&s_act_count, n < (uint32_t)ACT_MAX ? n + 1u : n,
-                     __ATOMIC_RELEASE);
+    n = n < (uint32_t)ACT_MAX ? n + 1u : n;
+    __atomic_store_n(&s_act_count, n, __ATOMIC_RELEASE);
+    act_rtc_save(n);
     nav_wake();
 }
 

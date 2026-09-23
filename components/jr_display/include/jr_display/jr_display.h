@@ -413,8 +413,12 @@ bool jr_display_panel_is_off(void);
  *                temperature now as a bright mark standing proud of the
  *                ring; a thin inner ring for the chance of rain; the number
  *                large in the disc with the high/low under it and the age
- *                above it once it is old enough to matter. Stale turns the
- *                accents grey; no data draws two bare tracks and no digit.
+ *                above it once it is old enough to matter. Outside the
+ *                gauge, twelve hour segments on the same 270 degrees, now
+ *                first, lit by each hour's chance of rain; the sunrise and
+ *                sunset under the disc; the headline is the condition
+ *                word alone. Stale turns the accents grey and drops the
+ *                hours; no data draws two bare tracks and no digit.
  *      STATUS    the battery arc, a headline of the percentage plus the one
  *                word that matters most now, and the sheet with everything.
  *      DESK      a progress ring around a big percentage: the active task.
@@ -487,6 +491,8 @@ typedef enum {
     JR_DISPLAY_SKY_SNOW,
 } jr_display_sky_t;
 
+#define JR_DISPLAY_RAIN_HOURS 36   /* today's 24 + tomorrow's first 12 */
+
 typedef struct {
     bool     valid;          /* false: never fetched, or the fetch failed   */
     int16_t  temp_f;
@@ -503,6 +509,12 @@ typedef struct {
      * than receiving "LIGHT DRIZZL" already cut by a 12-glyph copy. */
     char     condition[24];
     uint32_t fetched_ms;     /* esp_timer ms when the data was received     */
+    /* THE NEXT HOURS (wave N13): this fetch's hourly chances of rain from
+     * local midnight of the fetch day, 255 where the answer had none, and
+     * that midnight's day of month — 0 when this fetch brought no hours,
+     * and then WEATHER draws no hour ring at all. */
+    uint8_t  rain_hours[JR_DISPLAY_RAIN_HOURS];
+    uint8_t  rain_hours_mday;
 } jr_display_weather_t;
 
 void jr_display_weather_set(const jr_display_weather_t *weather);
@@ -511,7 +523,9 @@ void jr_display_weather_set(const jr_display_weather_t *weather);
  *
  * kind is a short tag (<= 8 glyphs: WEB, WEATHER, MEMORY, TIME, ASK, PRICE,
  * SAID), summary is what happened in <= 24 glyphs. The renderer keeps the
- * last three. Nothing is invented: an empty feed says so. */
+ * last three, mirrored to RTC memory so they survive deep sleep and a soft
+ * reset (not a power-on). Nothing is invented: an empty feed says so, and a
+ * row whose time is not known reads EARLIER on the sheet. */
 void jr_display_activity_push(const char *kind, const char *summary);
 
 typedef enum {

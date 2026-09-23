@@ -94,6 +94,8 @@ static void reset_activity(void)
     memset(s_act_kind, 0, sizeof s_act_kind);
     memset(s_act_sum, 0, sizeof s_act_sum);
     memset(s_act_ms, 0, sizeof s_act_ms);
+    memset(s_act_wall, 0, sizeof s_act_wall);
+    s_act_live = 0U;
 }
 
 static bool space_is(int space, const char *what)
@@ -1544,12 +1546,13 @@ static void test_future_weather_cell_shortens_instead_of_cutting(void)
                  "MODERATE RAIN SHOWERS") == 0,
           "the condition was cut on the way in: '%s'",
           s_weather[__atomic_load_n(&s_weather_slot, __ATOMIC_ACQUIRE) & 1u].condition);
-    /* The WEATHER headline: the word fitted at a word, then the number. */
+    /* The WEATHER headline: the word fitted at a word, and no number — the
+     * disc already prints it large (the panel read "76" over "OVERCAST 76"). */
     static const struct { const char *cond; const char *want; } head[] = {
-        { "LIGHT DRIZZLE",         "DRIZZLE 75" },
+        { "LIGHT DRIZZLE",         "DRIZZLE" },
         { "MODERATE RAIN SHOWERS", "RAIN SHOWERS" },
         { "THUNDERSTORMS",         "THUNDERSTOR." },
-        { "OVERCAST",              "OVERCAST 75" },
+        { "OVERCAST",              "OVERCAST" },
     };
     for (size_t i = 0; i < sizeof head / sizeof *head; ++i) {
         set_weather(true, 75, 82, 68, JR_DISPLAY_SKY_RAIN, head[i].cond,
@@ -2136,7 +2139,7 @@ static void test_weather_mark_sits_at_the_temperature(void)
           "band from lo to hi regardless of order: a0 %d sweep %d",
           s_wx_band_a0, s_wx_band_sweep);
     CHECK(strcmp(s_wx_hilo, "H76 L86") == 0, "hi/lo line, got '%s'", s_wx_hilo);
-    CHECK(strcmp(s_wx_head, "OVERCAST 80") == 0, "headline, got '%s'", s_wx_head);
+    CHECK(strcmp(s_wx_head, "OVERCAST") == 0, "headline, got '%s'", s_wx_head);
 }
 
 /* Age is honest in three steps: under two minutes it is not worth a line;
@@ -2209,6 +2212,193 @@ static void test_stale_weather_loses_its_colour(void)
     }
     __atomic_store_n(&s_hud_env_word, 74U, __ATOMIC_RELEASE);
     s_fake_us = 0;
+}
+
+/* THE NEXT TWELVE HOURS. Hour k from now takes slot k of twelve on the
+ * gauge's own 270 degrees, lit by its chance of rain; an hour the answer
+ * lacks draws nothing; stale, hourless or clockless weather draws no ring.
+ * Sampled on the ring's centre line at each slot's middle. Mutations:
+ * starting the selection at midnight (now_idx 0) turns slot 0 into a 0 %
+ * track; dropping the +24 for yesterday's anchor reads the wrong hours;
+ * dropping the stale gate leaves a ring on a 45-minute-old frame. */
+static uint16_t hour_px(const uint16_t *fb, int k)
+{
+    const int a = SP_WX_A0 + k * (SP_WX_SWEEP / SP_WX_HOURS) + SP_WX_SWEEP / SP_WX_HOURS / 2;
+    const int r = (SP_WX_HOUR_IN + SP_WX_HOUR_OUT) / 2;
+    const int x = SP_CX + ((sp_cos(a) * r) >> 15);
+    const int y = SP_CY + ((sp_sin(a) * r) >> 15);
+    return fb[(size_t)y * HUD_W + x];
+}
+
+static size_t hour_ring_ink(const uint16_t *fb)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
+        const int r = radius_of((int)i);
+        if ((int)(i / HUD_W) >= SP_LABEL_Y) {
+            continue;                 /* the headline crosses r104-110 at 6 */
+        }
+        if (r >= SP_WX_HOUR_IN - 1 && r <= SP_WX_HOUR_OUT && fb[i] != POISON) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+static void set_weather_hours(const uint8_t *pp, int mday, uint32_t fetched_ms)
+{
+    jr_display_weather_t w;
+    memset(&w, 0, sizeof w);
+    w.valid = true;
+    w.temp_f = 76;
+    w.feels_f = 78;
+    w.hi_f = 82;
+    w.lo_f = 76;
+    w.sky = JR_DISPLAY_SKY_CLOUDS;
+    strncpy(w.condition, "OVERCAST", sizeof w.condition - 1U);
+    w.fetched_ms = fetched_ms;
+    memcpy(w.rain_hours, pp, sizeof w.rain_hours);
+    w.rain_hours_mday = (uint8_t)mday;
+    jr_display_weather_set(&w);
+}
+
+static void test_weather_hours_ring_starts_now(void)
+{
+    /* the pure pieces: which hour is now, and what the twelve slots hold */
+    jr_display_clock_set(true, 14, 5, 0);
+    jr_display_clock_set_date(3, 23, 8);
+    const uint32_t cw = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
+    const uint32_t dw = __atomic_load_n(&s_clock_date_word, __ATOMIC_ACQUIRE);
+    CHECK(sp_rain_now_idx(cw, dw, 23) == 14, "same day: hour 14, got %d",
+          sp_rain_now_idx(cw, dw, 23));
+    CHECK(sp_rain_now_idx(cw, dw, 22) == 38, "yesterday's midnight: 14 + 24, got %d",
+          sp_rain_now_idx(cw, dw, 22));
+    CHECK(sp_rain_now_idx(cw, dw, 0) == -1, "no hours in the answer");
+    CHECK(sp_rain_now_idx(cw & ~(1u << 16), dw, 23) == -1, "clock off");
+    CHECK(sp_rain_now_idx(cw, 0u, 23) == -1, "no date");
+
+    uint8_t pp[JR_DISPLAY_RAIN_HOURS];
+    for (int i = 0; i < JR_DISPLAY_RAIN_HOURS; ++i) {
+        pp[i] = (uint8_t)i;
+    }
+    pp[16] = SP_WX_HOUR_NONE;
+    pp[17] = 101;                              /* not a percentage */
+    uint8_t out[SP_WX_HOURS];
+    CHECK(sp_rain_hours(out, pp, JR_DISPLAY_RAIN_HOURS, 14) == 10,
+          "twelve slots, two unknown");
+    CHECK(out[0] == 14 && out[1] == 15 && out[11] == 25,
+          "slot k is hour now+k: %u %u %u", out[0], out[1], out[11]);
+    CHECK(out[2] == SP_WX_HOUR_NONE && out[3] == SP_WX_HOUR_NONE,
+          "unknown and out-of-range hours stay unknown: %u %u", out[2], out[3]);
+    CHECK(sp_rain_hours(out, pp, JR_DISPLAY_RAIN_HOURS, 30) == 6 &&
+              out[5] == 35 && out[6] == SP_WX_HOUR_NONE,
+          "past the answer's 36th hour nothing is invented");
+    CHECK(sp_rain_hours(out, pp, JR_DISPLAY_RAIN_HOURS, -1) == 0 &&
+              out[0] == SP_WX_HOUR_NONE, "no now, no hours");
+    int a0 = 0, sw = 0;
+    sp_rain_hour_span(0, &a0, &sw);
+    CHECK(a0 > SP_WX_A0 && a0 + sw < SP_WX_A0 + SP_WX_SWEEP / SP_WX_HOURS,
+          "slot 0 sits inside the gauge's first twelfth: %d+%d", a0, sw);
+    sp_rain_hour_span(SP_WX_HOURS - 1, &a0, &sw);
+    CHECK(a0 + sw < SP_WX_A0 + SP_WX_SWEEP && sw > 8,
+          "slot 11 ends before the gauge does: %d+%d", a0, sw);
+
+    /* on the glass: 14:05, now is 100 %, the next hour dry, the one after
+     * unknown, six hours out 50 %, and midnight..13:00 all dry */
+    memset(pp, 0, sizeof pp);
+    pp[14] = 100;
+    pp[16] = SP_WX_HOUR_NONE;
+    pp[20] = 50;
+    s_fake_us = 0;
+    stage_space(JR_DISPLAY_SPACE_WEATHER);
+    set_weather_hours(pp, 23, 0U);
+    sp_compose();
+    CHECK(strcmp(s_wx_head, "OVERCAST") == 0, "the headline is the word: '%s'", s_wx_head);
+    uint16_t *fb = render_frame();
+    if (!fb) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; return; }
+    CHECK(hour_px(fb, 0) == SP_C_RAIN, "now at 100 %% is full rain, got %04x", hour_px(fb, 0));
+    CHECK(hour_px(fb, 1) == SP_C_TRACK, "a dry hour is bare track, got %04x", hour_px(fb, 1));
+    CHECK(hour_px(fb, 2) == POISON, "an unknown hour draws nothing, got %04x", hour_px(fb, 2));
+    const uint16_t half = hour_px(fb, 6);
+    CHECK(half != SP_C_RAIN && half != SP_C_TRACK && half != POISON &&
+              (half & 0x1F) < (SP_C_RAIN & 0x1F),
+          "50 %% is rain, dimmer than 100 %%: %04x", half);
+    CHECK(hour_ring_ink(fb) > 800, "the ring drew (%zu px)", hour_ring_ink(fb));
+    free(fb);
+
+    /* just after midnight the 23:40 fetch is still fresh: 00:10 is its hour 24 */
+    memset(pp, 0, sizeof pp);
+    pp[24] = 100;
+    jr_display_clock_set(true, 0, 10, 0);
+    set_weather_hours(pp, 22, 0U);
+    sp_compose();
+    fb = render_frame();
+    if (fb) {
+        CHECK(hour_px(fb, 0) == SP_C_RAIN, "yesterday's fetch, hour 24 is now: %04x",
+              hour_px(fb, 0));
+        free(fb);
+    }
+
+    /* muted: gold, like every accent */
+    __atomic_store_n(&s_hud_env_word, 74U | (1U << 9), __ATOMIC_RELEASE);
+    fb = render_frame();
+    if (fb) {
+        CHECK(hour_px(fb, 0) == SP_C_GOLD, "muted hour is gold: %04x", hour_px(fb, 0));
+        free(fb);
+    }
+    __atomic_store_n(&s_hud_env_word, 74U, __ATOMIC_RELEASE);
+
+    /* stale, hourless, clockless: no ring at all */
+    s_fake_us = 45LL * 60 * 1000 * 1000;
+    sp_compose();
+    fb = render_frame();
+    if (fb) {
+        CHECK(hour_ring_ink(fb) == 0, "stale drew %zu ring px", hour_ring_ink(fb));
+        free(fb);
+    }
+    s_fake_us = 0;
+    set_weather_hours(pp, 0, 0U);
+    sp_compose();
+    fb = render_frame();
+    if (fb) {
+        CHECK(hour_ring_ink(fb) == 0, "hourless drew %zu ring px", hour_ring_ink(fb));
+        free(fb);
+    }
+    set_weather_hours(pp, 22, 0U);
+    jr_display_clock_set(false, 0, 0, 0);
+    sp_compose();
+    fb = render_frame();
+    if (fb) {
+        CHECK(hour_ring_ink(fb) == 0, "clockless drew %zu ring px", hour_ring_ink(fb));
+        free(fb);
+    }
+
+    /* the sun, compact, under the disc; only with weather and a sun */
+    jr_display_sun_set(422, 1175);
+    sp_compose();
+    CHECK(strcmp(s_wx_sun, "7:02 19:35") == 0, "sun line '%s'", s_wx_sun);
+    fb = render_frame();
+    if (fb) {
+        size_t grey = 0;
+        for (int y = SP_WX_SUN_Y; y < SP_WX_SUN_Y + TEXT_H; ++y) {
+            for (int x = 0; x < HUD_W; ++x) {
+                grey += fb[(size_t)y * HUD_W + x] == SP_C_GREY;
+            }
+        }
+        CHECK(grey > 100, "the sun line drew %zu grey px", grey);
+        free(fb);
+    }
+    jr_display_sun_set(-1, -1);
+    sp_compose();
+    CHECK(s_wx_sun[0] == '\0', "no sun, no line: '%s'", s_wx_sun);
+    jr_display_sun_set(422, 1175);
+    jr_display_weather_set(NULL);
+    sp_compose();
+    CHECK(s_wx_sun[0] == '\0', "no weather, no digits: '%s'", s_wx_sun);
+
+    jr_display_sun_set(-1, -1);
+    jr_display_clock_set_date(0, 0, 0);
+    reset_nav();
 }
 
 /* --------------------------------------------------------------- ACTIVITY -- */
@@ -2287,6 +2477,119 @@ static void test_activity_is_honest_when_empty_and_newest_first(void)
           "the cut is marked, got '%s'", s_act_row[0]);
     CHECK(s_act_row_klen[0] == 7, "kind length recorded for the colour split");
     reset_activity();
+}
+
+/* A deep sleep or a reset restarts esp_timer and wipes RAM: what the RTC
+ * copy holds is all that comes back. Simulated here by clearing the RAM rows
+ * and the timer, then restoring as jr_display_start does at boot. */
+static void act_simulate_boot(void)
+{
+    reset_activity();
+    s_act_restored = false;
+    s_fake_us = 0;
+}
+
+static void act_rtc_seal(void)
+{
+    s_act_rtc.check = act_rtc_sum(&s_act_rtc);
+}
+
+/* THE RECEIPT OUTLIVES THE SLEEP. Rows pushed before a sleep come back in
+ * order after it, aged by the wall clock (their esp_timer stamps died with
+ * the boot), EARLIER when no clock stamped them; and whatever a cold
+ * power-on leaves in RTC memory is refused whole. Mutations: dropping the
+ * act_rtc_save call empties the restored feed; dropping the checksum test
+ * lets the sealed-then-flipped block through. */
+static void test_activity_survives_the_sleep(void)
+{
+    act_simulate_boot();
+    memset(&s_act_rtc, 0, sizeof s_act_rtc);
+    s_fake_us = 5LL * 60 * 1000 * 1000;
+    jr_display_activity_push("WEB", "FOUND THREE RESULTS");
+    jr_display_activity_push("RAIN", "IN 2H 70% LIKELY");
+    CHECK(s_act_rtc.magic == ACT_RTC_MAGIC && s_act_rtc.count == 2U,
+          "a push writes the RTC copy (magic %08x, count %u)",
+          (unsigned)s_act_rtc.magic, (unsigned)s_act_rtc.count);
+
+    /* the sleep: RAM gone, timer back at zero, one row stamped 10 min ago
+     * by the wall clock and one never stamped at all */
+    const uint32_t now = act_wall_now();
+    CHECK(now != 0U, "the host clock is a valid wall clock");
+    s_act_rtc.wall[0] = now - 600U;
+    s_act_rtc.wall[1] = 0U;
+    act_rtc_seal();
+    act_simulate_boot();
+    CHECK(act_rtc_restore() == 2U, "two rows come back");
+    CHECK(act_rtc_restore() == 0U, "restore runs once per boot");
+    stage_space(JR_DISPLAY_SPACE_ACTIVITY);
+    sp_compose();
+    CHECK(s_act_rows == 2, "rows after the sleep: %d", s_act_rows);
+    CHECK(strcmp(s_act_row[0], "RAIN IN 2H 70% LIKELY") == 0 &&
+              strcmp(s_act_row[1], "WEB FOUND THREE RESULTS") == 0,
+          "same rows, same order: '%s' / '%s'", s_act_row[0], s_act_row[1]);
+    sp_compose_detail(JR_DISPLAY_SPACE_ACTIVITY);
+    CHECK(strcmp(s_detail_value[0], "10M AGO") == 0,
+          "aged by the wall clock, not the restarted timer: '%s'", s_detail_value[0]);
+    CHECK(strcmp(s_detail_value[1], "EARLIER") == 0,
+          "no stamp, no invented age: '%s'", s_detail_value[1]);
+
+    /* a push after the wake is newest, live, and the older rows keep theirs */
+    s_fake_us = 3LL * 60 * 1000 * 1000;
+    jr_display_activity_push("SAID", "GOOD MORNING");
+    s_fake_us = 4LL * 60 * 1000 * 1000;
+    sp_compose();
+    sp_compose_detail(JR_DISPLAY_SPACE_ACTIVITY);
+    CHECK(s_act_rows == 3 && strncmp(s_act_row[0], "SAID ", 5) == 0 &&
+              strncmp(s_act_row[1], "RAIN ", 5) == 0,
+          "new row on top: '%s' / '%s'", s_act_row[0], s_act_row[1]);
+    CHECK(strcmp(s_detail_value[0], "1M AGO") == 0 &&
+              strcmp(s_detail_value[1], "10M AGO") == 0 &&
+              strcmp(s_detail_value[2], "EARLIER") == 0,
+          "ages: '%s' '%s' '%s'", s_detail_value[0], s_detail_value[1],
+          s_detail_value[2]);
+    CHECK(s_act_rtc.count == 3U, "the RTC copy follows, count %u",
+          (unsigned)s_act_rtc.count);
+
+    /* a cold power-on: RTC noise, even noise that happens to carry the magic */
+    act_rtc_t good = s_act_rtc;
+    memset(&s_act_rtc, 0xA5, sizeof s_act_rtc);
+    act_simulate_boot();
+    CHECK(act_rtc_restore() == 0U && s_act_count == 0U, "noise is refused");
+    s_act_rtc = good;
+    s_act_rtc.sum[1][0] ^= 0x01;                       /* flipped, not resealed */
+    act_simulate_boot();
+    CHECK(act_rtc_restore() == 0U, "a bad checksum is refused");
+    s_act_rtc = good;
+    s_act_rtc.magic = ACT_RTC_MAGIC + 1U;              /* another layout version */
+    act_rtc_seal();
+    act_simulate_boot();
+    CHECK(act_rtc_restore() == 0U, "another version is refused");
+    s_act_rtc = good;
+    s_act_rtc.count = ACT_MAX + 1U;
+    act_rtc_seal();
+    act_simulate_boot();
+    CHECK(act_rtc_restore() == 0U, "a count past the cap is refused");
+    s_act_rtc = good;
+    memset(s_act_rtc.kind[2], 'X', ACT_KIND_CAP);      /* no terminator */
+    act_rtc_seal();
+    act_simulate_boot();
+    CHECK(act_rtc_restore() == 0U, "an unterminated kind is refused");
+    s_act_rtc = good;
+    s_act_rtc.sum[0][2] = '\x07';
+    act_rtc_seal();
+    act_simulate_boot();
+    CHECK(act_rtc_restore() == 0U, "a control byte is refused");
+    sp_compose();
+    CHECK(s_act_rows == 0, "a refused block shows NOTHING YET, got %d rows",
+          s_act_rows);
+    s_act_rtc = good;
+    act_simulate_boot();
+    CHECK(act_rtc_restore() == 3U, "the intact block still restores");
+
+    memset(&s_act_rtc, 0, sizeof s_act_rtc);
+    act_simulate_boot();
+    s_act_restored = true;
+    reset_nav();
 }
 
 /* The DESK sheet re-cut main.c's 12-glyph title to the 10-glyph value column,
@@ -2566,7 +2869,9 @@ int main(void)
     test_weather_without_data_prints_no_number();
     test_weather_mark_sits_at_the_temperature();
     test_stale_weather_loses_its_colour();
+    test_weather_hours_ring_starts_now();
     test_activity_is_honest_when_empty_and_newest_first();
+    test_activity_survives_the_sleep();
     test_desk_sheet_heads_with_the_marked_task();
     test_orbit_stays_in_free_band();
     test_low_battery_uses_the_rim_palette();
