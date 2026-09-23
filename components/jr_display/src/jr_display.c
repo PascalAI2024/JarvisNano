@@ -29,6 +29,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "gfx.h"
+#include "lib/eaf/gfx_eaf_dec.h"   /* engine-private: the one-shot dial decode */
 #include "jarvis_board.h"
 
 static const char *TAG = "jr_display";
@@ -623,6 +624,32 @@ bool jr_display_canvas_active(void)
     uint32_t until = __atomic_load_n(&s_canvas_until_ms, __ATOMIC_ACQUIRE);
     return until != 0U &&
            (int32_t)((uint32_t)(esp_timer_get_time() / 1000) - until) < 0;
+}
+
+/* THE DIAL OFF THE ENGINE (N14.2). A baked dial is one still frame, yet as
+ * an anim the engine decoded it again every frame: 224 KB of blocks and a
+ * 434 KB palette expand, most of the ~37 ms engine share on DIVER. It is
+ * decoded once, in panel byte order, into one shared PSRAM frame
+ * (dial_show); on WATCH the anim is hidden and each strip copies the frame's
+ * rows here, in the anim's place under every overlay. s_dial_blit and the
+ * frame change only under the render lock, which the render task holds for
+ * the whole frame, so a strip never sees a half-decoded dial. */
+static uint16_t *s_dial_frame;                       /* width*height, PSRAM */
+static jr_face_t s_dial_frame_face = JR_FACE_COUNT;  /* the art it holds */
+static bool      s_dial_blit;
+
+static void apply_dial(const jr_display_ctx_t *ctx, int x1, int y1,
+                       int x2, int y2, uint16_t *pixels)
+{
+    if (!s_dial_blit || s_dial_frame == NULL || pixels == NULL) {
+        return;
+    }
+    const int width = x2 - x1;
+    for (int row = y1; row < y2; ++row) {
+        memcpy(pixels + (size_t)(row - y1) * (size_t)width,
+               s_dial_frame + (size_t)row * ctx->board.width + (size_t)x1,
+               (size_t)width * sizeof(uint16_t));
+    }
 }
 
 static void apply_canvas(jr_display_ctx_t *ctx, int x1, int y1,
@@ -4587,6 +4614,7 @@ static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
      * that will be handed to the CO5300—not the pre-render intent. */
     uint16_t *outbound = (uint16_t *)pixels;
     const int64_t t0 = esp_timer_get_time();
+    apply_dial(ctx, x1, y1, x2, y2, outbound);
     apply_canvas(ctx, x1, y1, x2, y2, outbound);
     apply_test_pattern(ctx, x1, y1, x2, y2, outbound);
     if (diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF) {
@@ -4620,6 +4648,7 @@ static esp_err_t apply_blank(jr_display_ctx_t *ctx)
     ESP_RETURN_ON_ERROR(gfx_emote_lock(ctx->gfx), TAG, "gfx lock failed");
     (void)gfx_anim_stop(ctx->anim);
     (void)gfx_obj_set_visible(ctx->anim, false);
+    s_dial_blit = false;
     gfx_disp_refresh_all(ctx->disp);
     (void)gfx_emote_unlock(ctx->gfx);
     /* Reset the segment latch: a later present() of the SAME face must not
@@ -4689,6 +4718,102 @@ static esp_err_t program_segment(jr_display_ctx_t *ctx, jr_face_t face,
         diag_inc(&ctx->segment_sets);
     }
     return err;
+}
+
+/* Decode frame 0 of a resident dial clip into the shared frame. Runs on the
+ * presenter; the decode itself holds the render lock (one stalled frame per
+ * style change) because the frame may be on the glass. Any mismatch — size,
+ * depth, a bad clip — answers an error and the caller keeps the anim. */
+static esp_err_t dial_decode(jr_display_ctx_t *ctx, jr_face_t dial,
+                             const jr_display_clip_t *clip)
+{
+    const size_t bytes =
+        (size_t)ctx->board.width * ctx->board.height * sizeof(uint16_t);
+    if (s_dial_frame == NULL) {
+        s_dial_frame = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_dial_frame == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    eaf_format_handle_t eaf = NULL;
+    esp_err_t err = eaf_init(clip->data, clip->size, &eaf);
+    if (err != ESP_OK) {
+        return err;
+    }
+    eaf_header_t head;
+    if (eaf_get_frame_info(eaf, 0, &head) != EAF_FORMAT_VALID) {
+        (void)eaf_deinit(eaf);
+        return ESP_ERR_INVALID_CRC;
+    }
+    /* eaf_frame_decode trusts the header, not the buffer size */
+    const bool fits = head.width == ctx->board.width &&
+                      head.height == ctx->board.height && head.bit_depth == 8;
+    eaf_free_header(&head);
+    if (!fits) {
+        (void)eaf_deinit(eaf);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    err = gfx_emote_lock(ctx->gfx);
+    if (err == ESP_OK) {
+        memset(s_dial_frame, 0, bytes);     /* a failed block stays black */
+        err = eaf_frame_decode(eaf, 0, (uint8_t *)s_dial_frame, bytes,
+                               ctx->board.swap_color_bytes);
+        s_dial_frame_face = err == ESP_OK ? dial : JR_FACE_COUNT;
+        if (err != ESP_OK) {
+            s_dial_blit = false;
+        }
+        (void)gfx_emote_unlock(ctx->gfx);
+    }
+    (void)eaf_deinit(eaf);
+    return err;
+}
+
+/* Put a baked dial on the glass without the engine: load, decode once,
+ * hide the anim, blit. false leaves everything as it was, and the caller
+ * shows the dial through the anim as before (including the missing-clip
+ * fallback). No anim is bound afterwards, so the next face rebinds. */
+static bool dial_show(jr_display_ctx_t *ctx, jr_face_t dial)
+{
+    switch (dial) {
+    case JR_FACE_DIAL_DIVER:
+    case JR_FACE_DIAL_DRESS:
+    case JR_FACE_DIAL_PILOT:
+    case JR_FACE_DIAL_FUTURE: break;
+    default:                  return false;
+    }
+    if ((ctx->missing_faces & (1U << dial)) != 0U) {
+        return false;
+    }
+    jr_display_clip_t *clip = &ctx->clips[dial];
+    if (clip->data == NULL && clip_load(dial, clip) != ESP_OK) {
+        return false;
+    }
+    if (s_dial_frame_face != dial) {
+        esp_err_t err = dial_decode(ctx, dial, clip);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "dial=%d decode failed (%s); anim path",
+                     (int)dial, esp_err_to_name(err));
+            return false;
+        }
+    }
+    if (gfx_emote_lock(ctx->gfx) != ESP_OK) {
+        return false;
+    }
+    (void)gfx_anim_stop(ctx->anim);
+    (void)gfx_obj_set_visible(ctx->anim, false);
+    s_dial_blit = true;
+    gfx_disp_refresh_all(ctx->disp);
+    (void)gfx_emote_unlock(ctx->gfx);
+
+    ctx->active = NULL;
+    ctx->loaded_face = dial;
+    ctx->shown_face = dial;
+    ctx->last_end = -1;
+    __atomic_store_n(&ctx->applied_bucket, -1, __ATOMIC_RELAXED);
+    __atomic_store_n(&ctx->blanked, false, __ATOMIC_RELAXED);
+    diag_store(&ctx->current_asset_bytes, (uint32_t)clip->size);
+    ESP_LOGI(TAG, "face=%d dial blit, anim hidden", (int)dial);
+    return true;
 }
 
 static esp_err_t apply_face(jr_display_ctx_t *ctx, jr_face_t face,
@@ -4769,6 +4894,9 @@ static esp_err_t apply_face(jr_display_ctx_t *ctx, jr_face_t face,
         return err;                     /* clip stays cached for the retry */
     }
     err = gfx_anim_set_src(ctx->anim, clip->data, clip->size);
+    if (err == ESP_OK) {
+        s_dial_blit = false;            /* the anim is the face again */
+    }
     (void)gfx_emote_unlock(ctx->gfx);
     if (err != ESP_OK) {
         /* A rejected replacement must not leave the last valid face stopped.
@@ -4953,7 +5081,9 @@ static void display_task(void *arg)
                     jr_face_t before = (jr_face_t)diag_load(&ctx->applied_face);
                     bool was_blanked = __atomic_load_n(&ctx->blanked, __ATOMIC_RELAXED);
                     bool stale = false;
-                    err = apply_face(ctx, face, requested_face, amplitude, &stale);
+                    err = dial_show(ctx, face)
+                        ? ESP_OK
+                        : apply_face(ctx, face, requested_face, amplitude, &stale);
                     if (stale) {
                         ctx->apply_retry_gate_ms = 0;
                     } else if (err == ESP_OK) {
@@ -4974,6 +5104,14 @@ static void display_task(void *arg)
                                  (int)face, esp_err_to_name(err));
                     }
                 }
+            }
+            /* THE BLITTED DIAL HAS NO TIMER. The anim's tick was the only
+             * thing invalidating the glass; with it hidden, this pass is the
+             * cadence. Every pass, unconditionally, or the hands freeze
+             * silently. The engine's fps (the ladder) still paces frames. */
+            if (s_dial_blit && gfx_emote_lock(ctx->gfx) == ESP_OK) {
+                gfx_disp_refresh_all(ctx->disp);
+                (void)gfx_emote_unlock(ctx->gfx);
             }
         }
 

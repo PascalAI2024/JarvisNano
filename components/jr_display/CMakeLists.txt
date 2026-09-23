@@ -27,6 +27,11 @@ idf_component_register(
         espressif__esp_lcd_co5300
 )
 
+# N14.2: the one-shot dial decode calls the engine's EAF decoder, which the
+# component keeps under its private src/ include root.
+idf_component_get_property(JR_GFX_DIR espressif2022__esp_emote_gfx COMPONENT_DIR)
+target_include_directories(${COMPONENT_LIB} PRIVATE "${JR_GFX_DIR}/src")
+
 # Produce the emote_assets SPIFFS image exclusively from tracked canonical EAF
 # sources. Staging in CMAKE_BINARY_DIR keeps generated copies out of the repo,
 # while configure_file makes source changes participate in CMake regeneration.
