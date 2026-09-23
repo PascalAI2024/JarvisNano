@@ -277,6 +277,18 @@ case the disc was measured for (corner r65.5, inside the rain ring). The sheet
 is FEELS / RAIN / HUMIDITY / WIND / AGE, values from the struct only; without
 data it is one row, `DATA NONE`, not five placeholders shaped like readings.
 
+*The hours and the sun (2026-09-23).* The panel read `76` in the disc over an
+`OVERCAST 76` headline while the device held 36 hourly rain chances and the
+sun times and showed neither. The headline is now the condition word alone.
+Outside the mark, at r104–110, twelve hour slots ride the gauge's own 270°
+(now at the 7:30 end, +11 h at 4:30, so the bottom stays clear): an hour
+under 10 % is bare track, above it the rain hue brightens with the chance
+(gold when muted), and an hour the answer lacks draws nothing. The ring
+needs this fetch's hours, a set clock and date, and fresh data — stale,
+hourless or clockless weather draws no ring (`sp_rain_now_idx`,
+`sp_rain_hours`, `sp_rain_hour_span`). The sun is one grey line, `7:02
+19:35`, in the gauge's open bottom at y310–323, above the headline.
+
 **ACTIVITY — the receipt.** TOOLS listed a catalog; ACTIVITY shows what ran.
 Three rows, newest first, `KIND SUMMARY` on one line at one scale — the kind
 grey, the summary ink — on the safe disc dimmed a second time, the same
