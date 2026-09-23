@@ -153,6 +153,120 @@ esp_err_t gfx_emote_set_fps(gfx_handle_t handle, uint32_t fps);
 """
 
 
+GFX_SRC = ROOT / "managed_components" / "espressif2022__esp_emote_gfx" / "src" / "core"
+PIPE_MARKER = "JarvisNano v5: pipelined strip flush"
+PIPE_EDITS = (
+    (
+        GFX_SRC / "gfx_disp_priv.h",
+        "    bool swap_act_buf;\n",
+        f"""    bool swap_act_buf;
+    /* {PIPE_MARKER}: completions counted by flush_ready,
+     * submissions by the render task. The count, not the bit, frees a buffer. */
+    uint32_t flush_done;
+    uint32_t flush_sent;
+""",
+    ),
+    (
+        GFX_SRC / "gfx_disp.c",
+        "    disp->swap_act_buf = swap_act_buf;\n",
+        f"""    disp->swap_act_buf = swap_act_buf;
+    /* {PIPE_MARKER}: count before the bit is set. */
+    __atomic_add_fetch(&disp->flush_done, 1, __ATOMIC_RELEASE);
+""",
+    ),
+    (
+        GFX_SRC / "gfx_render.c",
+        """/**
+ * @brief Render a single dirty area with dynamic height-based blocking
+ */
+""",
+        f"""/* {PIPE_MARKER}. Block until `sent` strips have completed. The
+ * completion count is the truth; WAIT_FLUSH_DONE is only the wake-up and is
+ * cleared as the wait returns, so a stale or merged bit re-checks the count
+ * instead of releasing a buffer still under DMA. Every flush_cb must end in
+ * exactly one gfx_disp_flush_ready (the DMA ISR or the callback's own error
+ * path), as before. */
+static void gfx_render_wait_flush(gfx_disp_t *disp, uint32_t sent)
+{{
+    while ((int32_t)(__atomic_load_n(&disp->flush_done, __ATOMIC_ACQUIRE) - sent) < 0) {{
+        xEventGroupWaitBits(disp->event_group, WAIT_FLUSH_DONE, pdTRUE, pdFALSE, portMAX_DELAY);
+    }}
+}}
+
+/**
+ * @brief Render a single dirty area with dynamic height-based blocking
+ */
+""",
+    ),
+    (
+        GFX_SRC / "gfx_render.c",
+        """        if (flush_cb) {
+            xEventGroupClearBits(disp->event_group, WAIT_FLUSH_DONE);
+
+            uint32_t chunk_pixels""",
+        """        if (flush_cb) {
+            uint32_t chunk_pixels""",
+    ),
+    (
+        GFX_SRC / "gfx_render.c",
+        """            flush_cb(disp, x1, y1, x2, y2, buf_act);
+            xEventGroupWaitBits(disp->event_group, WAIT_FLUSH_DONE, pdTRUE, pdFALSE, portMAX_DELAY);
+""",
+        f"""            flush_cb(disp, x1, y1, x2, y2, buf_act);
+            /* {PIPE_MARKER}: wait for the PREVIOUS strip, whose
+             * buffer is the one filled next, so this strip's DMA overlaps the
+             * next strip's render. Single-buffered, wait for this one. */
+            disp->flush_sent++;
+            gfx_render_wait_flush(disp, disp->buf2 != NULL ? disp->flush_sent - 1 : disp->flush_sent);
+""",
+    ),
+    (
+        GFX_SRC / "gfx_render.c",
+        """        rendered_blocks += gfx_render_part_area(disp, area, i, rendered_blocks);
+    }
+
+    return rendered_blocks;
+""",
+        f"""        rendered_blocks += gfx_render_part_area(disp, area, i, rendered_blocks);
+    }}
+
+    /* {PIPE_MARKER}: the frame's last strip lands before the render
+     * lock is released, so the next frame (and any object change) starts with
+     * no DMA in flight. */
+    gfx_render_wait_flush(disp, disp->flush_sent);
+
+    return rendered_blocks;
+""",
+    ),
+)
+
+
+def patch_group(marker: str, edits, label: str, check: bool,
+                changed: list[str], missing: list[str]) -> None:
+    """All-or-nothing anchored edits across several files under one marker."""
+    paths = sorted({path for path, _, _ in edits})
+    if not all(path.is_file() for path in paths):
+        if check:
+            missing.append(f"{label} (source missing)")
+        return
+    texts = {path: path.read_text() for path in paths}
+    present = [marker in texts[path] for path in paths]
+    if all(present):
+        return
+    if any(present):
+        raise SystemExit(f"{label} patch is partial; refusing a blind repair")
+    if check:
+        missing.append(label)
+        return
+    for path, anchor, insert in edits:
+        if texts[path].count(anchor) != 1:
+            raise SystemExit(f"{label} anchor changed in {path.name}; refusing a blind patch")
+        texts[path] = texts[path].replace(anchor, insert, 1)
+    for path in paths:
+        path.write_text(texts[path])
+    changed.append(label)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -253,6 +367,9 @@ def main() -> int:
                 changed.append("gfx runtime render cadence")
     elif args.check:
         missing.append("gfx runtime render cadence (gfx_core.c missing)")
+
+    patch_group(PIPE_MARKER, PIPE_EDITS, "gfx pipelined strip flush",
+                args.check, changed, missing)
 
     if missing:
         raise SystemExit("v5 managed patch missing: " + ", ".join(missing))
