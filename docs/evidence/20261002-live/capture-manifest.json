@@ -1,0 +1,292 @@
+{
+  "capture_source": "panel_submission_mirror",
+  "panel_readback": false,
+  "transport": "paired LAN HTTP",
+  "physical_panel_film": false,
+  "state_before": {
+    "phase": "Idle",
+    "privacy_paused": true,
+    "capturing": false,
+    "ws_connected": false
+  },
+  "state_after": {
+    "phase": "Idle",
+    "privacy_paused": true,
+    "capturing": false,
+    "ws_connected": false
+  },
+  "frames": [
+    {
+      "file": "JarvisNano_live_00.ppm",
+      "request_started_utc": "2026-10-02T18:21:46.699871+00:00",
+      "request_finished_utc": "2026-10-02T18:21:48.085011+00:00",
+      "sha256": "98acca559b5af9ccbb1409c8e482860c34069b11f2289e2bcf946caab66975cd",
+      "metadata_before": {
+        "available": true,
+        "capture_source": "panel_submission_mirror",
+        "panel_readback": false,
+        "width": 466,
+        "height": 466,
+        "bytes": 434312,
+        "frame_id": 25,
+        "last_flush_ms": 653141,
+        "valid": true,
+        "mirror_fresh": true,
+        "test_pattern": "off"
+      },
+      "metadata_after": {
+        "available": true,
+        "capture_source": "panel_submission_mirror",
+        "panel_readback": false,
+        "width": 466,
+        "height": 466,
+        "bytes": 434312,
+        "frame_id": 31,
+        "last_flush_ms": 654312,
+        "valid": true,
+        "mirror_fresh": true,
+        "test_pattern": "off"
+      },
+      "png_file": "JarvisNano_live_00.png",
+      "png_sha256": "1d3e08b9f4f730ec02cc265e02d52631833cc6c9802faf505b26a35b39ece3c3"
+    },
+    {
+      "file": "JarvisNano_live_01.ppm",
+      "request_started_utc": "2026-10-02T18:21:48.486054+00:00",
+      "request_finished_utc": "2026-10-02T18:21:49.953013+00:00",
+      "sha256": "19890240fd2012ae795fae1183363b6fd05b3f569a0fd601bc7a0a2a4b747834",
+      "metadata_before": {
+        "available": true,
+        "capture_source": "panel_submission_mirror",
+        "panel_readback": false,
+        "width": 466,
+        "height": 466,
+        "bytes": 434312,
+        "frame_id": 35,
+        "last_flush_ms": 654990,
+        "valid": true,
+        "mirror_fresh": true,
+        "test_pattern": "off"
+      },
+      "metadata_after": {
+        "available": true,
+        "capture_source": "panel_submission_mirror",
+        "panel_readback": false,
+        "width": 466,
+        "height": 466,
+        "bytes": 434312,
+        "frame_id": 41,
+        "last_flush_ms": 656082,
+        "valid": true,
+        "mirror_fresh": true,
+        "test_pattern": "off"
+      },
+      "png_file": "JarvisNano_live_01.png",
+      "png_sha256": "eae15f103831da28cc9391793fe3f13b1ff1005e25ebf7842eebc75ae5943f75"
+    },
+    {
+      "file": "JarvisNano_live_02.ppm",
+      "request_started_utc": "2026-10-02T18:21:50.354655+00:00",
+      "request_finished_utc": "2026-10-02T18:21:51.627826+00:00",
+      "sha256": "d9b0318d158ab916ea448dbf6b072ff5926e10cf96639ce2a319804e3e914f31",
+      "metadata_before": {
+        "available": true,
+        "capture_source": "panel_submission_mirror",
+        "panel_readback": false,
+        "width": 466,
+        "height": 466,
+        "bytes": 434312,
+        "frame_id": 46,
+        "last_flush_ms": 656929,
+        "valid": true,
+        "mirror_fresh": true,
+        "test_pattern": "off"
+      },
+      "metadata_after": {
+        "available": true,
+        "capture_source": "panel_submission_mirror",
+        "panel_readback": false,
+        "width": 466,
+        "height": 466,
+        "bytes": 434312,
+        "frame_id": 50,
+        "last_flush_ms": 657867,
+        "valid": true,
+        "mirror_fresh": true,
+        "test_pattern": "off"
+      },
+      "png_file": "JarvisNano_live_02.png",
+      "png_sha256": "cd9383962f52661d08e8b8edd3dc51d39ac1637bcc8f3732bcdfe2ea7e4da28f"
+    },
+    {
+      "file": "JarvisNano_live_03.ppm",
+      "request_started_utc": "2026-10-02T18:21:52.028761+00:00",
+      "request_finished_utc": "2026-10-02T18:21:53.244965+00:00",
+      "sha256": "c4962fee06a93cdcd6237ea9c7a2d0148c1fddd2707efca323e20f2fff26796b",
+      "metadata_before": {
+        "available": true,
+        "capture_source": "panel_submission_mirror",
+        "panel_readback": false,
+        "width": 466,
+        "height": 466,
+        "bytes": 434312,
+        "frame_id": 54,
+        "last_flush_ms": 658433,
+        "valid": true,
+        "mirror_fresh": true,
+        "test_pattern": "off"
+      },
+      "metadata_after": {
+        "available": true,
+        "capture_source": "panel_submission_mirror",
+        "panel_readback": false,
+        "width": 466,
+        "height": 466,
+        "bytes": 434312,
+        "frame_id": 59,
+        "last_flush_ms": 659484,
+        "valid": true,
+        "mirror_fresh": true,
+        "test_pattern": "off"
+      },
+      "png_file": "JarvisNano_live_03.png",
+      "png_sha256": "f752cd1ce45d2f3cda9234adba5dd7173bb11d694d13895d2a1284cce12e06d7"
+    },
+    {
+      "file": "JarvisNano_live_04.ppm",
+      "request_started_utc": "2026-10-02T18:21:53.646137+00:00",
+      "request_finished_utc": "2026-10-02T18:21:55.113430+00:00",
+      "sha256": "b6f16c8b5b609a8f3ed52abb849752dd96115990ec674f43c2617b212dcf2de0",
+      "metadata_before": {
+        "available": true,
+        "capture_source": "panel_submission_mirror",
+        "panel_readback": false,
+        "width": 466,
+        "height": 466,
+        "bytes": 434312,
+        "frame_id": 63,
+        "last_flush_ms": 660141,
+        "valid": true,
+        "mirror_fresh": true,
+        "test_pattern": "off"
+      },
+      "metadata_after": {
+        "available": true,
+        "capture_source": "panel_submission_mirror",
+        "panel_readback": false,
+        "width": 466,
+        "height": 466,
+        "bytes": 434312,
+        "frame_id": 68,
+        "last_flush_ms": 661343,
+        "valid": true,
+        "mirror_fresh": true,
+        "test_pattern": "off"
+      },
+      "png_file": "JarvisNano_live_04.png",
+      "png_sha256": "f9823543158a5aee6e3b88e1b9c22d22e546d6b1393b99a545b52d616bf17b75"
+    },
+    {
+      "file": "JarvisNano_live_05.ppm",
+      "request_started_utc": "2026-10-02T18:21:55.514045+00:00",
+      "request_finished_utc": "2026-10-02T18:21:56.712406+00:00",
+      "sha256": "0f944e931d33c206e40d84b3109d828d1d97f187276298fe30d21aed550d5e2c",
+      "metadata_before": {
+        "available": true,
+        "capture_source": "panel_submission_mirror",
+        "panel_readback": false,
+        "width": 466,
+        "height": 466,
+        "bytes": 434312,
+        "frame_id": 72,
+        "last_flush_ms": 662025,
+        "valid": true,
+        "mirror_fresh": true,
+        "test_pattern": "off"
+      },
+      "metadata_after": {
+        "available": true,
+        "capture_source": "panel_submission_mirror",
+        "panel_readback": false,
+        "width": 466,
+        "height": 466,
+        "bytes": 434312,
+        "frame_id": 76,
+        "last_flush_ms": 662926,
+        "valid": true,
+        "mirror_fresh": true,
+        "test_pattern": "off"
+      },
+      "png_file": "JarvisNano_live_05.png",
+      "png_sha256": "979ee3a206a0d4641a78390e9848bc5eba2740d0538c516028bf4509a1787b53"
+    },
+    {
+      "file": "JarvisNano_live_06.ppm",
+      "request_started_utc": "2026-10-02T18:21:57.113401+00:00",
+      "request_finished_utc": "2026-10-02T18:21:58.453591+00:00",
+      "sha256": "98acca559b5af9ccbb1409c8e482860c34069b11f2289e2bcf946caab66975cd",
+      "metadata_before": {
+        "available": true,
+        "capture_source": "panel_submission_mirror",
+        "panel_readback": false,
+        "width": 466,
+        "height": 466,
+        "bytes": 434312,
+        "frame_id": 80,
+        "last_flush_ms": 663591,
+        "valid": true,
+        "mirror_fresh": true,
+        "test_pattern": "off"
+      },
+      "metadata_after": {
+        "available": true,
+        "capture_source": "panel_submission_mirror",
+        "panel_readback": false,
+        "width": 466,
+        "height": 466,
+        "bytes": 434312,
+        "frame_id": 85,
+        "last_flush_ms": 664577,
+        "valid": true,
+        "mirror_fresh": true,
+        "test_pattern": "off"
+      },
+      "png_file": "JarvisNano_live_06.png",
+      "png_sha256": "1d3e08b9f4f730ec02cc265e02d52631833cc6c9802faf505b26a35b39ece3c3"
+    },
+    {
+      "file": "JarvisNano_live_07.ppm",
+      "request_started_utc": "2026-10-02T18:21:58.854417+00:00",
+      "request_finished_utc": "2026-10-02T18:22:00.456121+00:00",
+      "sha256": "fcfaffea2ed6052a7fdfbe70110f8d6070586cae627fd686df6b2e545f5917b2",
+      "metadata_before": {
+        "available": true,
+        "capture_source": "panel_submission_mirror",
+        "panel_readback": false,
+        "width": 466,
+        "height": 466,
+        "bytes": 434312,
+        "frame_id": 90,
+        "last_flush_ms": 665418,
+        "valid": true,
+        "mirror_fresh": true,
+        "test_pattern": "off"
+      },
+      "metadata_after": {
+        "available": true,
+        "capture_source": "panel_submission_mirror",
+        "panel_readback": false,
+        "width": 466,
+        "height": 466,
+        "bytes": 434312,
+        "frame_id": 97,
+        "last_flush_ms": 666690,
+        "valid": true,
+        "mirror_fresh": true,
+        "test_pattern": "off"
+      },
+      "png_file": "JarvisNano_live_07.png",
+      "png_sha256": "c2a0759bef0550383be9fdadabf1c3edc5f054c65b3362a89f64922cf4c42d2e"
+    }
+  ]
+}

@@ -24,6 +24,11 @@ The scanner explicitly excludes `jr_memory`’s detector implementation and
 synthetic guard test vectors; those files contain the literals they are designed
 to reject.
 
+## Latest capture
+
+[2026-10-02 live framebuffer captures and sampled clips](20261002-live/README.md)
+include UTC timestamps, original pixels, and explicit firmware/USB limits.
+
 ## Contents
 
 | File | What it proves |

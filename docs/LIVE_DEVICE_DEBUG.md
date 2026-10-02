@@ -135,3 +135,28 @@ development LAN. Cockpit/session detail, logs, audio taps, Agent Link, and
 display pixels require the host-bound pairing token. Mutating control routes
 also require `X-JarvisNano-Control: 1`. Plain HTTP does not encrypt either
 header; never use these surfaces on an untrusted network.
+
+## Windows screenshot capture
+
+For an already paired device, the existing Windows client resolves its bound
+pairing credential internally. Do not paste that credential into shell arguments
+or published logs. Supply the device address locally, and save outside the repo:
+
+```powershell
+python scripts/jarvisctl.py --host '<device-ip>' screen '<local-output.png>'
+```
+
+PNG conversion uses Pillow when already available. If no converter is present,
+the command retains `<local-output.png>.ppm` and exits nonzero even though the
+pixel download succeeded. An existing FFmpeg installation can convert that PPM
+losslessly; no new software is required when FFmpeg is already installed:
+
+```powershell
+ffmpeg -i '<local-output.png>.ppm' -frames:v 1 '<local-output.png>'
+```
+
+Check `/api/display/snapshot.json` for source and freshness and preserve request
+timestamps beside the capture. A framebuffer capture over LAN does not verify
+USB or the physical panel. Synthetic swipes can expose STATUS addresses or
+ACTIVITY/DESK task text; inspect and redact pixels before publication.
+See the [2026-10-02 example](evidence/20261002-live/README.md).

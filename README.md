@@ -3,7 +3,8 @@
 </p>
 
 <p align="center">
-  <img src="images/hero.png" alt="JarvisNano round AMOLED desktop assistant" width="900">
+  <img src="images/hero.png" alt="JarvisNano enclosure concept artwork" width="900">
+  <br><em>Enclosure concept artwork. Current device display captures appear below.</em>
 </p>
 
 <p align="center">
@@ -66,8 +67,20 @@ Current implementation and physical acceptance status:
 
 <p align="center">
   <img src="docs/evidence/20260901-ring.png" alt="The ring as shipped: JARVIS, WATCH, WEATHER, STATUS, ACTIVITY" width="900">
-  <br><em>The ring, photographed from the live panel in one walk (<code>scripts/screens.py</code>), off USB.</em>
+  <br><em>The ring, captured from the panel-submission mirror in one walk (<code>scripts/screens.py</code>), off USB.</em>
 </p>
+
+## Current Display Captures
+
+<p align="center">
+  <img src="docs/evidence/20261002-live/JarvisNano_live_00.png" alt="Current privacy-muted face, captured from the running device" width="320">
+  <img src="docs/evidence/20261002-live/JarvisNano_watch_00.png" alt="Current digital watch peek, captured from the running device" width="320">
+  <br><em>Captured 2026-10-02 via the paired diagnostic client: actual submitted display pixels, with the microphone muted.</em>
+</p>
+
+[View the timestamped sampled clips and provenance](docs/evidence/20261002-live/README.md).
+These captures are software framebuffer mirrors. The running binary's exact
+revision and a USB connection were not established during this capture session.
 
 ## Hardware Used
 
@@ -171,7 +184,7 @@ the firmware owns the port). Update it over Wi-Fi instead:
 export JARVIS_DEVICE_HOST='<device-ip>'
 python3 scripts/jarvisctl.py ota build/jarvisrobot_v5.bin   # ~30 s, back in ~5 s
 python3 scripts/jarvisctl.py status                         # exits non-zero when deaf or muted
-python3 scripts/screens.py --out ring.png                   # photograph the ring
+python3 scripts/screens.py --out ring.png                   # capture the submitted display pixels
 ```
 
 `jarvis-desk.py` owns pairing and the desk workflows, `jarvisctl.py` is the

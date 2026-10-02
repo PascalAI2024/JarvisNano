@@ -1,9 +1,22 @@
-# CURRENT WORK — ZeroChat companion protocol
+# Current work — live display documentation
+
+**Updated:** 2026-10-02
+
+Added current privacy-muted face and transient digital watch captures, sampled
+clips, original pixels, and timestamped metadata. The existing paired diagnostic
+client captured over LAN; USB and the running binary's immutable revision were
+not established. Public source baseline: `63c30a8`. No firmware or configuration
+change was performed. Existing uncommitted development work remains separate.
+
+See [the capture record](docs/evidence/20261002-live/README.md) for evidence and
+limits. The earlier companion implementation record is retained below.
+
+## Previous work — ZeroChat companion protocol
 
 **Updated:** 2026-09-13  
 **Owner:** Main  
 **Jarvis work item:** `jarvisnano-desk / zerochat-jarvisnano-companion-20260913`  
-**Checkout:** `C:/Users/pasca/dev/projects/JarvisNano`, branch `main`, local uncommitted implementation; not flashed, deployed, or accepted on physical hardware.
+**Checkout:** `<local-workspace-path>`, branch `main`, local uncommitted implementation; not flashed, deployed, or accepted on physical hardware.
 
 ## Objective
 
@@ -23,7 +36,7 @@ Keep native Gemini Live as JarvisNano's standalone default while allowing an exp
 - Preflight synchronization preserved every tracked and untracked local change through a temporary stash, fetched `origin/main`, and confirmed `main` was already current at `3760ce6b6455bba4f4bbb7ecfc243e545c37ae23`; the stash reapplied without conflicts and was removed.
 - `scripts/host-tests.sh`: all five suites passed — display HUD **11,451 checks**, shell **725 checks**, host core **137 tests**, tool templates **81 checks**, desk Python **37 tests**.
 - `scripts/build-v5.sh`: ESP-IDF 5.5.4 build passed after visibly recompiling `http_routes.c` and `main.c`; `build/jarvisrobot_v5.bin` is `0x1c1ff0` bytes with 56% of the smallest app partition free.
-- Live trusted-LAN OTA passed on the physical 1.75C at `192.168.50.221`: the previous firmware's physical BOOT window issued a one-time legacy token, `/api/ota/upload` accepted all **1,843,184 bytes** and returned HTTP 200 with `rebooting:true`, and the rebuilt device returned authenticated health with OTA `running=ota_0`, `boot=ota_0`, `state=valid`, `last_error=ESP_OK`, and no invalid image.
+- Live trusted-LAN OTA passed on the physical 1.75C at `<device-ip>`: the previous firmware's physical BOOT window issued a one-time legacy token, `/api/ota/upload` accepted all **1,843,184 bytes** and returned HTTP 200 with `rebooting:true`, and the rebuilt device returned authenticated health with OTA `running=ota_0`, `boot=ota_0`, `state=valid`, `last_error=ESP_OK`, and no invalid image.
 - ZeroChat's focused integration test exercises the protocol against a real local mock HTTP device through pair → cockpit → lease → lease-ID renewal → mic pull → speaker push → lease-ID release. Independent final behavior and security re-reviews found no remaining blocker.
 
 ## Verification limits
