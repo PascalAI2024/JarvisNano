@@ -1,4 +1,4 @@
-# Current work — t107 build passed, OTA blocked on device wake
+# Current work — t107 OTA valid, ready for owner voice check
 
 **Updated:** 2026-10-11
 
@@ -14,15 +14,21 @@ owner removed the incomplete generated `build/`, the authorized ESP-IDF 5.5.4
 `RECONFIGURE=1` build passed on the unchanged tested source. The image is
 1,854,464 bytes, with 2,339,840 bytes (55.786%) free in the smallest 4 MiB app
 partition; SHA-256 is recorded in the report. The local candidate and proof are
-committed before OTA as requested. The pre-OTA readiness request times out:
-the owner must wake the device while keeping privacy muted. No candidate upload,
-after measurements/captures, measured improvement or hardware acceptance is
-claimed. OTA and muted device gates remain pending.
+committed before OTA as requested (`0b4108f`). After the owner wake, the initial
+health read unexpectedly showed privacy false; the parent restored mute with
+`armed=0` and verified it before upload. The paired upload succeeded, and
+`ota_1` passed probation to valid at 57,495 ms. Authenticated health shows zero
+flush errors, a 31,744-byte largest internal block and mic/ADC/DAC/PA off.
+Matched 300-second idle/WATCH windows and timer sleep are complete. Timer wake
+returned after 317.484 seconds with privacy muted. Live idle/WATCH/DREAM captures
+were opened; DREAM renders both the no-time `--:--` fallback and a valid `16:57`
+clock. Voltage rebound and different charge levels confound the lower apparent
+drain fits: measured battery-life improvement remains unproven.
 Listening-state power measurement is excluded by the orchestrator. Voice is
-**owner check pending**; stop after muted device checks for a physical unmute
+**owner check pending**, ready now; stop for a physical unmute
 and one spoken turn, then restore mute.
 
-The last successful pre-change authenticated readback confirmed privacy muted,
+The successful candidate authenticated readback confirmed privacy muted,
 inactive lease and running OTA state `valid`. See the
 [t107 report](docs/evidence/t107-power-baseline.md) and its retained evidence.
 Four waves used seven unique subagents; the parent alone operates the device.

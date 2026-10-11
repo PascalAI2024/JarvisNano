@@ -1,8 +1,10 @@
 # t107 power baseline
 
 Status: resumed pinned build passed with 55.786% app-partition headroom.
-OTA readiness is blocked on a nonresponding device; owner wake is pending.
-Candidate hardware acceptance and measured improvement remain pending.
+The committed candidate passed paired OTA and probation to `state=valid`.
+Muted idle, WATCH and timer sleep after windows and panel captures are complete.
+Voice remains owner check pending, ready for physical unmute and one spoken turn.
+The apparent drain slopes are lower, but battery-life improvement is not established.
 Source baseline: `42060d18bbcba590b843c72e513c15bbc35c662f`.
 
 ## Method and acceptance boundary
@@ -11,7 +13,8 @@ The paired trusted-LAN client reads AXP2101 voltage, percentage, battery/USB/
 charge flags, voice state, and display counters every 15 seconds. Each state
 uses a 300-second window after 30 seconds settling. The required states after
 the orchestrator's ruling are privacy-muted idle, privacy-muted WATCH, and
-timer deep sleep. Listening and the spoken-turn proof are owner check pending.
+timer deep sleep. Listening-state power is excluded; the spoken-turn proof is
+owner check pending.
 Deep sleep has no HTTP polling; its endpoint readings include shutdown,
 boot, and reconnect overhead and must be reported separately from awake slopes.
 USB and charging must remain absent. The operator lease must remain inactive.
@@ -212,3 +215,109 @@ The local candidate and its proof are committed before OTA under the explicit
 orchestrator order. No hardware closure, after voltage result, new panel proof,
 or measured improvement is claimed. Listening-state measurement is excluded;
 voice remains **owner check pending**. Four waves used seven unique subagents.
+
+### Owner wake and successful OTA
+
+The owner subsequently reported the device awake. The paired readiness read
+returned successfully, but observed privacy **false**, phase Listening and
+capture active on the original image. The parent immediately sent only
+`armed=0`, then verified privacy true, capture stopped, inactive lease, valid
+original slot and adequate internal memory before uploading. This observed
+state differs from the owner's report; the cause is not established. No remote
+unmute or synthetic privacy bypass was attempted.
+
+The exact image built from the tested source committed as
+`0b4108fc9c25b7dc2ac87a06f853c3728108713f` was uploaded through the paired
+`jarvisctl.py ota` path. The upload returned success for all 1,854,464 bytes.
+Candidate telemetry showed `ota_1` transitioning from `pending-verify` to
+`valid`; running and boot slots match, last error is `ESP_OK`, and acceptance
+uptime was 57,495 ms. Authenticated candidate health confirmed privacy muted,
+voice task alive, zero display flush errors and a 31,744-byte largest internal
+block. Mic, ADC, DAC and PA were all reported off, with zero hardware reads
+and zero audio power failures. These fields report software handle/latch state,
+not electrical current.
+
+The upload handler's bounded lease and OTA flag prevent automatic sleep;
+probation refuses deep sleep as well. No extra lease was needed. The after
+windows restore baseline brightness cap 65 and volume 95 without changing
+privacy. Additional audio/health boundary checks occur outside the timed awake
+windows; the inside-window sampling cadence stays unchanged.
+
+The separately captured synthetic DREAM frame was opened and compared with
+the before frame: the emote and caption are replaced by near-black glass,
+with the privacy and battery rims retained. It renders the supported `--:--`
+placeholder because no valid device time was available. A second live DREAM
+capture after the timer wake shows **16:57**, verifying valid-time digits on
+hardware as well as the fallback. Minute rollover has host proof only.
+Framebuffer captures do not measure panel emission or acoustic output.
+Matched power windows and captures are complete; one audible voice turn remains
+a separate owner-controlled physical-unmute check.
+
+### Matched after awake windows
+
+The after run used the same 300-second windows, 15-second cadence, 30-second
+settling, sampling sequence and five-minute-block fit as the baseline. All 42
+awake samples were battery-only, not charging, privacy muted, Idle/WHISPER.
+Brightness cap was restored to 65, actual brightness 14, and volume 95. Lease
+checks outside the timed windows were inactive. The after sequence ran once;
+no repeat was selected to improve the result.
+
+| State | Before drain mV/h | After drain mV/h | Before / after indicative 95% scatter | Rounding budget in each fit | After voltage | After charge gauge |
+|---|---:|---:|---|---|---|---|
+| Muted idle, WHISPER | 296.2 | -55.9 | +/-84.7 / +/-263.5 mV/h | +/-29.1 mV/h | 3876 -> 3905 mV | 77 -> 76% |
+| Muted WATCH, WHISPER | 42.4 | -20.8 | +/-205.9 / +/-224.6 mV/h | +/-29.1 mV/h | 3861 -> 3892 mV | 76 -> 75% |
+
+Negative fitted drain means the sampled voltage rebounded; it does **not** mean
+the battery gained energy. The lower apparent drain point estimates are
+observations. They do not establish longer battery life: relaxation and
+different starting state of charge are not bounded by the scatter/rounding
+terms, and WATCH's difference is smaller than its sampling uncertainty. The
+coarse charge gauge dropped one point per after window versus two per before
+window, also insufficient to infer a runtime multiplier. No estimated-current
+savings or software-state telemetry substitutes for the requested measured
+battery improvement. The battery acceptance claim remains open.
+
+The start/end idle, end WATCH and end sleep health records report mic/ADC/DAC/PA off,
+zero hardware microphone reads, zero audio power failures, zero display flush
+errors and no active operator lease. These establish observed software power
+gating while muted, without measuring electrical current.
+
+The before and after idle/WATCH/DREAM framebuffer PNGs have been opened.
+Idle retains the emote, caption and battery/privacy rims. WATCH is the
+checkout's FUTURE face with readable battery percent and muted status; the
+unknown original image's PRISM face was different. DREAM's no-time placeholder
+and [valid 16:57 clock capture](t107-power/after-clock-dream.png) are retained.
+Existing N8 visual fixes
+were already present; no new claim is made for N7.21.
+
+### Matched timer sleep and final muted state
+
+Both runs used the same 300-second timer without HTTP polling while asleep.
+The after cycle woke by timer, with lift and touch wake armed, no lift setup
+failure, and privacy still muted. Its observed 317.484 seconds include
+shutdown, cold boot, reconnect and the same post-wake settling as the baseline.
+
+| Sleep cycle | Observed duration | Drain mV/h | Rounding budget | Voltage | Gauge |
+|---|---:|---:|---:|---|---|
+| Before | 313.844 s | 11.5 | +/-22.9 mV/h | 3997 -> 3996 mV | 92 -> 91% |
+| After | 317.484 s | -124.7 | +/-22.7 mV/h | 3892 -> 3903 mV | 75 -> 75% |
+
+Two endpoints do not identify sampling scatter. The rising after voltage
+shows rebound, with electrochemical uncertainty unbounded by rounding. This
+cycle cannot establish reduced sleep current or longer battery life.
+See [after samples](t107-power/after-samples.jsonl),
+[summary](t107-power/after-summary.json), and
+[boundary health](t107-power/after-boundaries.jsonl).
+
+After all captures, final authenticated health at **20:58:59Z** confirmed
+`running=boot=ota_1`, `state=valid`, voice task alive, privacy true, no capture,
+inactive lease, zero flush errors and a 31,744-byte largest internal block.
+Audio handles remained off with zero hardware reads or power failures.
+The parent restored ordinary AWAKE state without changing privacy.
+See [final muted record](t107-power/muted-final.json).
+
+The requested muted device proof is recorded. Full acceptance remains open:
+the owner must physically unmute for one audible spoken turn, and **measured
+battery-life improvement is not established**. Listening-state power remains
+excluded. Source commit is `0b4108f`; this continuation adds only device
+evidence and status documentation. Four waves used seven unique subagents.

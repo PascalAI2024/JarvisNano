@@ -35,7 +35,7 @@ Live capture: 5-minute serial log running during owner testing
 (`owner-test-serial.log` in session scratchpad); counters snapshotted before
 and after. Device state is queryable any time: `scripts/jarvisctl.py status`.
 
-## t107 local candidate — 2026-10-11
+## t107 deployed candidate, acceptance pending — 2026-10-11
 
 Independent review found retained half-batch PCM across privacy/transport gaps,
 automatic diagnostic clearing that reset the absolute companion cursor, and
@@ -47,9 +47,15 @@ The candidate also gates muted audio power, adds the guarded N8.12 quiet clock,
 and applies rest/network guards to weather's first and retry fetches. The owner
 removed the interrupted generated build directory, and the explicitly authorized
 ESP-IDF 5.5.4 rebuild passed with 55.786% app-partition headroom. The local
-candidate and proof are committed before OTA. None is closed on hardware:
-the pre-OTA readiness request times out, so owner wake with privacy still muted
-is required. No upload or after measurement/capture occurred. Listening-state
-power is excluded; voice remains owner check pending after muted verification.
+candidate and proof were committed before OTA (`0b4108f`). After owner wake,
+the parent restored unexpectedly unmuted privacy before the paired upload.
+Candidate `ota_1` passed probation to valid with authenticated health, zero
+flush errors and mic/ADC/DAC/PA reported off. Live idle/WATCH/DREAM captures were
+reviewed; DREAM shows both the no-time fallback and valid 16:57 digits. Matched
+idle/WATCH windows and timer sleep completed with privacy muted; timer wake
+returned after 317.484 seconds. Voltage rebound and differing charge levels
+leave battery-life improvement unproven. Listening-state power is excluded;
+voice remains owner check pending, ready for physical unmute. The fixes are
+not closed solely by software telemetry.
 N7.21 remains blocked on physical PKEY event resolution. See
 [the t107 report](docs/evidence/t107-power-baseline.md).
