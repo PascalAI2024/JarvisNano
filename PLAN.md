@@ -23,6 +23,20 @@ plain ESP-IDF v5 from `main/` and `components/jr_*`.
 
 ## Active wave — cleanup, reliability, refinement
 
+### t107 Addendum A checkpoint — 2026-10-11
+
+The muted live sweep covered every ordinary panel and reachable sheet, all
+watch styles, controls, cards, choices and canvas. Selected daily fixes are
+DETAIL close/navigation feedback and finite transitions at rest cadence;
+measured snapshot exhaustion also justifies safe baked-source cache release.
+Code work removes proved dead/duplicate paths and retries failed refreshes.
+The WATCH renderer is the largest measured remaining task; same-pixel
+optimization retains all 28,566 compared frames and improves all 21 paired
+host runs. All six host suites and the firmware build (55.769% free) pass;
+OTA and matched longer after windows are pending. Listening/voice remains an owner
+check by hand. Battery improvement is unproven until the new paired evidence
+supports it. See [Addendum A](docs/evidence/t107-addendum-a.md).
+
 Every behavioral row closes on physical 1.75C evidence, not compilation alone.
 
 | # | Priority | Deliverable | Status | Acceptance gate |

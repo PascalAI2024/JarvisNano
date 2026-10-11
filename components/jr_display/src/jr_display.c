@@ -116,12 +116,13 @@ typedef struct {
     volatile uint32_t challenge_progress;
     volatile uint32_t shell_word;
 
-    /* Resident clip cache: every face's EAF stays in PSRAM after first load
-     * (~3.9 MB total of ~7.4 MB free; v4 kept clips resident too). Reloading
-     * ~1 MB from SPIFFS per face change dropped 1-2 frames (whole-payload
-     * checksum under the render lock) and churned the PSRAM heap for hours. */
+    /* Fast voice faces stay resident: reloading ~1 MB from SPIFFS per face
+     * change dropped 1-2 frames and churned PSRAM. Baked dials instead retain
+     * one decoded shared frame; their compressed data is released only once
+     * neither that decode nor the vendor animation parser needs it. */
     jr_display_clip_t clips[JR_FACE_COUNT];
-    const jr_display_clip_t *active;    /* cache entry bound to the gfx anim */
+    const jr_display_clip_t *active;    /* visible anim, NULL while a dial blits */
+    const jr_display_clip_t *bound;     /* vendor parser retains this even stopped */
     jr_face_t loaded_face;
     volatile bool blanked;
     volatile int applied_bucket;
@@ -713,11 +714,6 @@ static void apply_test_pattern(jr_display_ctx_t *ctx, int x1, int y1,
     }
 }
 
-static uint16_t panel_native(const jr_display_ctx_t *ctx, uint16_t pixel)
-{
-    return ctx->board.swap_color_bytes ? __builtin_bswap16(pixel) : pixel;
-}
-
 /* Compact 5x7 font for the companion card. Columns use bit 0 as the top row.
  * Lowercase is folded to uppercase; unsupported glyphs render as a space. */
 static uint8_t surface_glyph_column(char ch, unsigned col)
@@ -864,7 +860,7 @@ static void apply_surface_overlay(jr_display_ctx_t *ctx, int x1, int y1,
         for (int col = 0; col < width; ++col) {
             int x = x1 + col;
             uint16_t *slot = &pixels[(size_t)row * (size_t)width + (size_t)col];
-            uint16_t native = panel_native(ctx, *slot);
+            uint16_t native = panel_order_color(ctx, *slot);
             /* A ROUND PLATE ON ROUND GLASS.
              *
              * This card was a rectangle spanning x 52..413, y 72..388. Its
@@ -1064,10 +1060,13 @@ static void overlay_fade_tick(void)
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
     uint32_t dt = now - s_fade_prev_ms;
     s_fade_prev_ms = now;
-    if (dt > 100u) {
-        dt = 100u;                   /* clamp across stalls, like hud_tick */
+    /* Physical brightness keeps its slew cap; finite UI transitions consume
+     * elapsed time so a 200/500 ms rest frame does not stretch a 250 ms fade
+     * over several seconds. The longest fade bounds the integer products. */
+    brightness_slew(dt > 100u ? 100u : dt);
+    if (dt > JR_DISPLAY_FADE_MS) {
+        dt = JR_DISPLAY_FADE_MS;
     }
-    brightness_slew(dt);
     int step = (int)((dt * 256u) / JR_DISPLAY_FADE_MS);
     if (step < 1) {
         step = 1;
@@ -2700,7 +2699,7 @@ static uint8_t hud_face_of(jr_face_t f)
 }
 
 /* Full-strip backdrop dim shared by the ask overlay (STATE-07) and the clock
- * (UI-01). hud_dim565 folds the panel_native -> darken (>>2 per channel) ->
+ * (UI-01). hud_dim565 folds the panel_order_color -> darken (>>2 per channel) ->
  * panel_order_color chain into one masked shift (proven equal for all 65536
  * values in the host suite) — two per-pixel byte swaps over 217k px/frame
  * cost measurable frame rate. Unswitched on the hoisted byte-order flag so
@@ -4732,7 +4731,7 @@ static void apply_shell_overlay(jr_display_ctx_t *ctx, int x1, int y1,
         ((shell & JR_DISPLAY_SHELL_STATE_MASK) >>
          JR_DISPLAY_SHELL_STATE_SHIFT);
     /* Written straight in panel order: the old path round-tripped every pixel
-     * of every strip through panel_native() to composite a shade that is no
+     * of every strip through panel_order_color() to composite a shade that is no
      * longer drawn here. */
     const uint16_t accent = panel_order_color(ctx,
                                               agent_native_color(agent_state));
@@ -4977,21 +4976,39 @@ static uint32_t presenter_wait_ms(const jr_display_ctx_t *ctx)
     return (1000U + jr_display_render_fps() - 1U) / jr_display_render_fps();
 }
 
-static void presenter_refresh(jr_display_ctx_t *ctx)
+static bool presenter_refresh(jr_display_ctx_t *ctx)
 {
-    if (gfx_emote_lock(ctx->gfx) == ESP_OK) {
-        gfx_disp_refresh_all(ctx->disp);
-        (void)gfx_emote_unlock(ctx->gfx);
+    if (gfx_emote_lock(ctx->gfx) != ESP_OK) {
+        return false;
     }
+    gfx_disp_refresh_all(ctx->disp);
+    (void)gfx_emote_unlock(ctx->gfx);
+    return true;
 }
 
-static void presenter_refresh_pending(jr_display_ctx_t *ctx, bool pattern_changed)
+static bool presenter_refresh_pending(jr_display_ctx_t *ctx, bool pattern_changed)
 {
     const bool snapshot = diag_exchange(&ctx->snapshot_refresh_requested, 0U) != 0U;
     if (pattern_changed || snapshot || diag_load(&s_panel_off) == 1U) {
         /* A stopped emote has no dirty frame. Screenshots and SLPIN still
          * require a flush through the sole panel-command owner. */
-        presenter_refresh(ctx);
+        if (!presenter_refresh(ctx)) {
+            if (snapshot) {
+                diag_store(&ctx->snapshot_refresh_requested, 1U);
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+static void presenter_pattern_tick(jr_display_ctx_t *ctx, uint32_t *last_pattern)
+{
+    const uint32_t pattern = diag_load(&ctx->test_pattern);
+    const bool changed = pattern != *last_pattern;
+    if (presenter_refresh_pending(ctx, changed) && changed) {
+        *last_pattern = pattern;
+        ESP_LOGI(TAG, "panel test pattern=%u", (unsigned)pattern);
     }
 }
 
@@ -5019,9 +5036,10 @@ static bool presenter_dream_tick(jr_display_ctx_t *ctx, uint32_t *last_word)
         diag_inc(&ctx->state_changes);
     } else if (ctx->dream_clock_key != clock || ctx->dream_rim_key != rim ||
                brightness_pending()) {
-        presenter_refresh(ctx);
-        ctx->dream_clock_key = clock;
-        ctx->dream_rim_key = rim;
+        if (presenter_refresh(ctx)) {
+            ctx->dream_clock_key = clock;
+            ctx->dream_rim_key = rim;
+        }
     }
     return true;
 }
@@ -5134,10 +5152,28 @@ static esp_err_t dial_decode(jr_display_ctx_t *ctx, jr_face_t dial,
     return err;
 }
 
+/* Release a baked dial after a successful decode or replacement binding.
+ * gfx_anim_stop/hide retain the vendor EAF parser's pointers into that source;
+ * a successful gfx_anim_set_src releases the old parser before we free it. */
+static void clip_release_unbound_dial(jr_display_ctx_t *ctx,
+                                      const jr_display_clip_t *clip)
+{
+    const jr_face_t dials[] = { JR_FACE_DIAL_DIVER, JR_FACE_DIAL_DRESS,
+                               JR_FACE_DIAL_PILOT, JR_FACE_DIAL_FUTURE };
+    for (size_t i = 0; i < sizeof dials / sizeof dials[0]; ++i) {
+        jr_display_clip_t *candidate = &ctx->clips[dials[i]];
+        if (clip == candidate && clip != ctx->bound && candidate->data != NULL) {
+            heap_caps_free(candidate->data);
+            memset(candidate, 0, sizeof *candidate);
+            return;
+        }
+    }
+}
+
 /* Put a baked dial on the glass without the engine: load, decode once,
  * hide the anim, blit. false leaves everything as it was, and the caller
  * shows the dial through the anim as before (including the missing-clip
- * fallback). No anim is bound afterwards, so the next face rebinds. */
+ * fallback). The hidden vendor anim still owns its previously bound source. */
 static bool dial_show(jr_display_ctx_t *ctx, jr_face_t dial)
 {
     switch (dial) {
@@ -5151,10 +5187,10 @@ static bool dial_show(jr_display_ctx_t *ctx, jr_face_t dial)
         return false;
     }
     jr_display_clip_t *clip = &ctx->clips[dial];
-    if (clip->data == NULL && clip_load(dial, clip) != ESP_OK) {
-        return false;
-    }
     if (s_dial_frame_face != dial) {
+        if (clip->data == NULL && clip_load(dial, clip) != ESP_OK) {
+            return false;
+        }
         esp_err_t err = dial_decode(ctx, dial, clip);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "dial=%d decode failed (%s); anim path",
@@ -5169,6 +5205,7 @@ static bool dial_show(jr_display_ctx_t *ctx, jr_face_t dial)
     (void)gfx_obj_set_visible(ctx->anim, false);
     s_dial_blit = true;
     gfx_disp_refresh_all(ctx->disp);
+    clip_release_unbound_dial(ctx, clip);
     (void)gfx_emote_unlock(ctx->gfx);
 
     ctx->active = NULL;
@@ -5177,7 +5214,8 @@ static bool dial_show(jr_display_ctx_t *ctx, jr_face_t dial)
     ctx->last_end = -1;
     __atomic_store_n(&ctx->applied_bucket, -1, __ATOMIC_RELAXED);
     __atomic_store_n(&ctx->blanked, false, __ATOMIC_RELAXED);
-    diag_store(&ctx->current_asset_bytes, (uint32_t)clip->size);
+    diag_store(&ctx->current_asset_bytes,
+               (uint32_t)((size_t)ctx->board.width * ctx->board.height * sizeof(uint16_t)));
     ESP_LOGI(TAG, "face=%d dial blit, anim hidden", (int)dial);
     return true;
 }
@@ -5261,6 +5299,10 @@ static esp_err_t apply_face(jr_display_ctx_t *ctx, jr_face_t face,
     }
     err = gfx_anim_set_src(ctx->anim, clip->data, clip->size);
     if (err == ESP_OK) {
+        const jr_display_clip_t *previous = ctx->bound;
+        ctx->bound = clip;
+        ctx->active = clip;
+        clip_release_unbound_dial(ctx, previous);
         s_dial_blit = false;            /* the anim is the face again */
     }
     (void)gfx_emote_unlock(ctx->gfx);
@@ -5394,13 +5436,7 @@ static void display_task(void *arg)
         uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
 
         if (diag_load(&ctx->init_state) == JR_DISPLAY_INIT_READY) {
-            uint32_t test_pattern = diag_load(&ctx->test_pattern);
-            bool test_pattern_changed = test_pattern != last_test_pattern;
-            presenter_refresh_pending(ctx, test_pattern_changed);
-            if (test_pattern_changed) {
-                last_test_pattern = test_pattern;
-                ESP_LOGI(TAG, "panel test pattern=%u", (unsigned)test_pattern);
-            }
+            presenter_pattern_tick(ctx, &last_test_pattern);
             uint32_t word = __atomic_load_n(&ctx->requested_word, __ATOMIC_ACQUIRE);
             bool blank = (word & JR_DISPLAY_CMD_BLANK) != 0;
             jr_face_t face = (jr_face_t)((word & JR_DISPLAY_CMD_FACE_MASK) >>

@@ -11,9 +11,10 @@
 # runs is worse than no suite, because it looks like coverage. Add new suites
 # HERE, not to a habit.
 #
-# The five suites, in the order they run:
+# The six suites, in the order they run:
 #   jr_display_hud_tests      components/jr_display/tests   procedural renderer
 #   jr_display_shell_tests    components/jr_display/tests   spatial shell
+#   jr_main_shell_tests       main/tests/                   production input routing
 #   jr_host_tests             host/                         jr_core + jr_dsp + jr_transport
 #   jr_tools_template_tests   components/jr_tools/host      the generated JS template
 #   test_jarvis_desk          scripts/                      the desk CLI (Python)
@@ -21,7 +22,7 @@
 # A suite must run a positive number of tests to pass; "0 Tests" is a failure,
 # and a run in which nothing ran at all exits 2.
 #
-# No C compiler on PATH (a Windows desk)? With Docker present the four C suites
+# No C compiler on PATH (a Windows desk)? With Docker present the five C suites
 # re-run inside the jarvisnano-hosttests image (gcc:14 + cmake + ninja +
 # python3, built from scripts/host-tests.Dockerfile on first use); the Python
 # suite runs natively either way. docs/reference/build-toolchain.md has the
@@ -130,11 +131,22 @@ run_ctest_suite() {  # src bdir name
     finish_c "$name" "$rc" "$out"
 }
 
+run_main_shell_suite() {
+    local py out rc
+    if ! py="$(pick_python)"; then
+        fail "jr_main_shell_tests" "no working python3/python on PATH"; return
+    fi
+    [ $QUIET -eq 1 ] || printf "${DIM}build${NC} jr_main_shell_tests\n"
+    out="$("$py" "$ROOT/main/tests/test_shell_input.py" 2>&1)"; rc=$?
+    finish_c "jr_main_shell_tests" "$rc" "$out"
+}
+
 run_c_suites() {
     run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build" \
         jr_display_hud_tests "$ROOT/components/jr_display/tests/build/jr_display_hud_tests"
     run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build" \
         jr_display_shell_tests "$ROOT/components/jr_display/tests/build/jr_display_shell_tests"
+    run_main_shell_suite
     run_cmake_suite "$ROOT/host" "$ROOT/host/build" jr_host_tests "$ROOT/host/build/jr_host_tests"
     run_ctest_suite "$ROOT/components/jr_tools/host" "$ROOT/build-tools-host" jr_tools_template_tests
 }

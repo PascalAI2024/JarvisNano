@@ -1,4 +1,26 @@
-# Current work — t107 OTA valid, ready for owner voice check
+# Current work — t107 Addendum A, combined proof in progress
+
+**Updated:** 2026-10-11
+
+Continuing `t107/codex` from `6f97afb`. The muted live panel sweep is complete.
+The candidate repairs DETAIL DOWN and dismissal feedback, elapsed-time finite
+fades, compressed dial source lifetime, and presenter refresh retry. It removes
+dead tilt math and the duplicate byte-order helper. The measured WATCH render
+path now uses a bounded battery-rim traversal without changing cadence or hand
+sweeps. All 28,566 pixel comparisons match; 21 paired host timing runs improve.
+
+Production main routing now participates in `scripts/host-tests.sh` as a sixth
+suite, with 109 focused checks and two restored-defect mutations rejected.
+The six-suite combined host gate passes (11451/2200/109/166/81/38).
+The pinned firmware build passes with 55.769% app partition headroom.
+The prespecified longer battery baseline is running; source commit, OTA,
+after windows and final capture proof remain pending. No battery improvement
+is claimed. Privacy stays muted; listening and voice are owner check pending,
+and this addendum does not wait for the owner's later spoken turn.
+
+See [the Addendum A report](docs/evidence/t107-addendum-a.md).
+
+## Previous work — t107 OTA valid, owner voice check pending
 
 **Updated:** 2026-10-11
 

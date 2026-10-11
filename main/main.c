@@ -1593,6 +1593,52 @@ static jr_display_agent_state_t agent_state_to_display(const char *state)
     return JR_DISPLAY_AGENT_NONE;
 }
 
+static void shell_caption_space(void)
+{
+    /* WATCH identifies itself without a caption beneath its hands. */
+    static const char *const mode_name[JR_DISPLAY_SPACE_COUNT] =
+        { "JARVIS", "", "WEATHER", "STATUS", "DESK", "ACTIVITY" };
+    const jr_display_space_t sp = jr_display_nav_space();
+    jr_display_caption_set(
+        sp < JR_DISPLAY_SPACE_COUNT ? mode_name[sp] : "JARVIS");
+}
+
+static void shell_vertical_navigation(jr_input_direction_t direction)
+{
+    if (direction == JR_INPUT_DIRECTION_DOWN) {
+        /* A detail sheet promises DOWN TO CLOSE. Its underlying panel must
+         * remain selected; the next stroke can resume the mode ring. */
+        if (jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_DETAIL) {
+            jr_display_nav_down();
+        } else {
+            jr_display_nav_next();
+        }
+    } else if (direction == JR_INPUT_DIRECTION_UP) {
+        jr_display_nav_prev();
+    }
+}
+
+static void shell_dismiss(void)
+{
+    const jr_display_overlay_t overlay = jr_display_nav_overlay();
+    /* The nav overlay and /api/ui/shade each have a door into controls. */
+    if (overlay == JR_DISPLAY_OVERLAY_SHADE) {
+        jr_display_nav_up();
+        s_ui_shade_open = false;
+        jr_display_caption_set("CONTROLS CLOSED");
+    } else if (s_ui_shade_open) {
+        s_ui_shade_open = false;
+        jr_display_caption_set("CONTROLS CLOSED");
+    } else {
+        jr_display_nav_down();
+        if (overlay == JR_DISPLAY_OVERLAY_DETAIL) {
+            shell_caption_space();
+        } else {
+            jr_display_caption_set("CONTROLS - UP TO CLOSE");
+        }
+    }
+}
+
 
 ota_preflight_t ota_preflight(void)
 {
@@ -3403,20 +3449,8 @@ static void voice_task(void *arg)
                         s_watch_peek_until_ms = (uint32_t)now + 10000U;
                         watch_opened = true;
                     }
-                } else if (iev.direction == JR_INPUT_DIRECTION_DOWN) {
-                    /* THE MODE RING. Sliding down walks forward through the
-                     * screens, endlessly — there is no end to hit and no wall
-                     * to bounce off, which is the whole point: you find what
-                     * the device can do by continuing, not by remembering.
-                     *
-                     * Vertical used to open the shade (down) and the detail
-                     * sheet (up). The shade now lives on the BOOT button,
-                     * which is a better home for it anyway: a control surface
-                     * should be reachable when the glass is confusing, and a
-                     * button cannot be swallowed by whatever is on screen. */
-                    jr_display_nav_next();
-                } else if (iev.direction == JR_INPUT_DIRECTION_UP) {
-                    jr_display_nav_prev();
+                } else {
+                    shell_vertical_navigation(iev.direction);
                 }
                 s_ui_shade_open =
                     jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_SHADE;
@@ -3440,19 +3474,7 @@ static void voice_task(void *arg)
                            JR_DISPLAY_OVERLAY_DETAIL) {
                     jr_display_caption_set("DETAIL - DOWN TO CLOSE");
                 } else {
-                    /* Name the screen you just landed on. On an endless ring
-                     * the caption IS the position indicator — it answers
-                     * "where am I" without a dial mark that has to jump when
-                     * the ring wraps. */
-                    /* WATCH is deliberately blank: a clock face is the one
-                     * screen that needs no caption to identify it, and the
-                     * word sat directly under the hands as pure clutter.
-                     * caption_set("") routes to caption_clear(). */
-                    static const char *const mode_name[JR_DISPLAY_SPACE_COUNT] =
-                        { "JARVIS", "", "WEATHER", "STATUS", "DESK", "ACTIVITY" };
-                    const jr_display_space_t sp = jr_display_nav_space();
-                    jr_display_caption_set(
-                        sp < JR_DISPLAY_SPACE_COUNT ? mode_name[sp] : "JARVIS");
+                    shell_caption_space();
                 }
                 ESP_LOGI(TAG, "ui: nav overlay=%d",
                          (int)jr_display_nav_overlay());
@@ -3549,30 +3571,7 @@ static void voice_task(void *arg)
                         }
                         break;
                     case JR_DISPLAY_ACT_DISMISS:
-                        /* Same invariant as the swipe and button paths: a
-                         * surface that captures input names its own exit.
-                         * Opening the shade here used to set no caption at
-                         * all, which is how a tap could drop you into the one
-                         * surface that told you nothing. */
-                        /* TWO DOORS, ONE SHADE. A finger opens it through the
-                         * nav overlay; /api/ui/shade opens it through the
-                         * shell bit (s_ui_shade_open). The re-derivation
-                         * after this switch used to read only the nav door,
-                         * so ONE tap on an HTTP-opened shade — a volume step —
-                         * re-derived "closed" and shut it. Each door now
-                         * closes its own. */
-                        if (jr_display_nav_overlay() ==
-                            JR_DISPLAY_OVERLAY_SHADE) {
-                            jr_display_nav_up();
-                            s_ui_shade_open = false;
-                            jr_display_caption_set("CONTROLS CLOSED");
-                        } else if (s_ui_shade_open) {
-                            s_ui_shade_open = false;
-                            jr_display_caption_set("CONTROLS CLOSED");
-                        } else {
-                            jr_display_nav_down();
-                            jr_display_caption_set("CONTROLS - UP TO CLOSE");
-                        }
+                        shell_dismiss();
                         break;
                     case JR_DISPLAY_ACT_FOCUS:
                         jr_display_nav_up();

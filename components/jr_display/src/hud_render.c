@@ -704,42 +704,13 @@ static void ov_ring_row(uint16_t *row, int y, int cx, int cy, int r_in,
 
 void hud_tilt_offset(float roll_deg, float pitch_deg, int8_t *ox, int8_t *oy)
 {
-    /* DISABLED 2026-07-19 — returns 0,0. Kept as a documented dead end.
-     *
-     * Two independent reasons, either fatal on its own:
-     *
-     * 1. IT CANNOT WORK WHILE THE FACE IS BAKED ART. Parallax needs the WHOLE
-     *    scene to shift together. Only this overlay can move; the .eaf face
-     *    cannot. Offsetting one layer against a fixed one is not depth, it is
-     *    misregistration — and it reads exactly like two HUDs sliding apart,
-     *    which is what a user reported seeing.
-     * 2. THE REST REFERENCE WAS WRONG. roll = atan2(gy, gz), and this board
-     *    reads gz ~= -1 g when face-up (see jr_imu.h), so a device lying flat
-     *    and perfectly still reports roll ~= 178 deg, not 0. That drove a
-     *    PERMANENT -10 px offset on a motionless desk. Any future version must
-     *    measure deflection from the resting orientation, not from zero.
-     *
-     * Revisit only if the baked clips are retired (decision D4) and
-     * hud_render_rows() draws the whole frame — then the entire scene can lean
-     * as one and the idea becomes sound. */
+    /* Parallax stays disabled: shifting only the HUD misregisters the baked
+     * face. Face-up roll is also about 178 degrees on this board, not zero.
+     * Revisit only when the whole scene can move together, using deflection
+     * from the resting orientation. */
     if (ox) *ox = 0;
     if (oy) *oy = 0;
     (void)roll_deg; (void)pitch_deg;
-    return;
-#if 0
-    /* ~30 deg of tilt reaches full deflection; beyond that it clamps, so the
-     * HUD leans convincingly on a desk nudge without sliding off under a big
-     * gesture. Roll moves x, pitch moves y. Sign is chosen so the furniture
-     * lags the motion, which is what reads as parallax rather than drift. */
-    int x = (int)(-roll_deg * HUD_TILT_MAX / 30.0f);
-    int y = (int)(pitch_deg * HUD_TILT_MAX / 30.0f);
-    if (x >  HUD_TILT_MAX) x =  HUD_TILT_MAX;
-    if (x < -HUD_TILT_MAX) x = -HUD_TILT_MAX;
-    if (y >  HUD_TILT_MAX) y =  HUD_TILT_MAX;
-    if (y < -HUD_TILT_MAX) y = -HUD_TILT_MAX;
-    if (ox) *ox = (int8_t)x;
-    if (oy) *oy = (int8_t)y;
-#endif
 }
 
 /* Battery rim: a thin arc at the outer bezel sweeping clockwise from 12
@@ -751,6 +722,22 @@ void hud_tilt_offset(float roll_deg, float pitch_deg, int8_t *ox, int8_t *oy)
  * It rides the INNER half of the outer free band (OV_R_BATT, see the split in
  * the RADII note) precisely so it can coexist with the choice arcs, which own
  * the outer half. */
+/* First arc index whose y reaches target, on one monotone half. */
+static int ov_battery_bound(int cy, int begin, int end, int target,
+                            bool descending)
+{
+    while (begin < end) {
+        const int mid = begin + (end - begin) / 2;
+        const int y = cy + ((lsin((mid - 64) & 255) * OV_R_BATT) >> 15);
+        if (descending ? y > target : y < target) {
+            begin = mid + 1;
+        } else {
+            end = mid;
+        }
+    }
+    return begin;
+}
+
 static void ov_battery(const strip_t *s, int cx, int cy, uint32_t now_ms,
                        const hud_env_t *env)
 {
@@ -772,9 +759,21 @@ static void ov_battery(const strip_t *s, int cx, int cy, uint32_t now_ms,
                                                              : s_ov_cyan;
     const int steps = (256 * env->batt_pct) / 100;
     const uint16_t rim = shade(ramp, 200);
-    for (int i = 0; i <= steps; ++i) {
-        const int a = (i - 64) & 255;            /* -64 Q8 == 12 o'clock */
-        ov_polar(s, cx, cy, a, OV_R_BATT, rim, 2);
+    /* Each half of the clockwise arc is monotone in y. Restrict the
+     * original ascending writes to dots whose two rows reach this strip;
+     * the repeated twelve-o'clock endpoint at i=256 remains intentional. */
+    const int middle = steps < 128 ? steps + 1 : 129;
+    int begin = ov_battery_bound(cy, 0, middle, s->y0 - 1, false);
+    int end = ov_battery_bound(cy, begin, middle, s->y1, false);
+    for (int i = begin; i < end; ++i) {
+        ov_polar(s, cx, cy, (i - 64) & 255, OV_R_BATT, rim, 2);
+    }
+    if (steps >= 129) {
+        begin = ov_battery_bound(cy, 129, steps + 1, s->y1 - 1, true);
+        end = ov_battery_bound(cy, begin, steps + 1, s->y0 - 2, true);
+        for (int i = begin; i < end; ++i) {
+            ov_polar(s, cx, cy, (i - 64) & 255, OV_R_BATT, rim, 2);
+        }
     }
     if (env->charging && steps > 0) {
         const int head = (int)((now_ms / 12U) % (uint32_t)(steps + 1));

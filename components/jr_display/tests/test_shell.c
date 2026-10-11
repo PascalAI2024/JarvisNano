@@ -591,7 +591,6 @@ static void test_missing_clip_falls_back_to_the_face_it_grew_from(void)
 static void test_dial_decodes_once_and_blits_every_strip(void)
 {
     jr_display_ctx_t *ctx = &s_display;
-    static uint8_t fake_clip[32];
     ctx->board.width = HUD_W;
     ctx->board.height = HUD_H;
     ctx->board.swap_color_bytes = false;
@@ -600,17 +599,19 @@ static void test_dial_decodes_once_and_blits_every_strip(void)
     s_dial_blit = false;
     s_stub_eaf_decodes = 0;
     ctx->missing_faces = 0;
-    ctx->clips[JR_FACE_DIAL_DIVER].data = fake_clip;
-    ctx->clips[JR_FACE_DIAL_DIVER].size = sizeof fake_clip;
-    ctx->clips[JR_FACE_DIAL_DRESS].data = fake_clip;
-    ctx->clips[JR_FACE_DIAL_DRESS].size = sizeof fake_clip;
+    ctx->clips[JR_FACE_DIAL_DIVER] = (jr_display_clip_t){
+        heap_caps_malloc(32U, MALLOC_CAP_SPIRAM), 32U, 8U, 7U };
+    ctx->clips[JR_FACE_DIAL_DRESS] = (jr_display_clip_t){
+        heap_caps_malloc(32U, MALLOC_CAP_SPIRAM), 32U, 8U, 7U };
 
     CHECK(!dial_show(ctx, JR_FACE_IDLE), "a face that is not a dial stays on the anim");
     CHECK(!s_dial_blit && s_stub_eaf_decodes == 0, "and decodes nothing");
 
     CHECK(dial_show(ctx, JR_FACE_DIAL_DIVER), "a resident dial goes to the blit");
     CHECK(s_dial_blit && ctx->shown_face == JR_FACE_DIAL_DIVER &&
-          ctx->active == NULL, "blit on, dial shown, no anim bound");
+          ctx->active == NULL, "blit on, dial shown, no visible anim");
+    CHECK(ctx->clips[JR_FACE_DIAL_DIVER].data == NULL,
+          "successfully decoded unbound dial releases its compressed source");
     CHECK(dial_show(ctx, JR_FACE_DIAL_DIVER), "again");
     CHECK(s_stub_eaf_decodes == 1, "the same dial is decoded once, got %d",
           s_stub_eaf_decodes);
@@ -637,6 +638,8 @@ static void test_dial_decodes_once_and_blits_every_strip(void)
     s_dial_frame_face = JR_FACE_COUNT;
     s_dial_blit = false;
     s_stub_eaf_head.width = 400;
+    ctx->clips[JR_FACE_DIAL_DIVER] = (jr_display_clip_t){
+        heap_caps_malloc(32U, MALLOC_CAP_SPIRAM), 32U, 8U, 7U };
     CHECK(!dial_show(ctx, JR_FACE_DIAL_DIVER) && !s_dial_blit,
           "a dial that is not panel-sized stays on the anim");
     s_stub_eaf_head.width = HUD_W;
@@ -644,9 +647,9 @@ static void test_dial_decodes_once_and_blits_every_strip(void)
     CHECK(!dial_show(ctx, JR_FACE_DIAL_DIVER), "a missing clip keeps its fallback");
 
     ctx->missing_faces = 0;
-    ctx->clips[JR_FACE_DIAL_DIVER].data = NULL;
-    ctx->clips[JR_FACE_DIAL_DRESS].data = NULL;
-    free(s_dial_frame);
+    heap_caps_free(ctx->clips[JR_FACE_DIAL_DIVER].data);
+    memset(&ctx->clips[JR_FACE_DIAL_DIVER], 0, sizeof ctx->clips[0]);
+    heap_caps_free(s_dial_frame);
     s_dial_frame = NULL;
     s_dial_frame_face = JR_FACE_COUNT;
     s_dial_blit = false;
@@ -3106,6 +3109,283 @@ static void test_dream_capture_panel_off_and_input_wake(void)
     s_display.task = NULL;
 }
 
+static void test_panel_order_color_covers_both_wire_orders(void)
+{
+    for (int swap = 0; swap < 2; ++swap) {
+        s_display.board.swap_color_bytes = swap != 0;
+        unsigned bad = 0U;
+        for (unsigned c = 0U; c <= UINT16_MAX; ++c) {
+            const uint16_t expected = swap ? (uint16_t)((c >> 8) | (c << 8)) : (uint16_t)c;
+            if (panel_order_color(&s_display, (uint16_t)c) != expected) { bad++; }
+        }
+        CHECK(bad == 0U, "retained byte helper covers all65536 colors, swap%d (%u)", swap, bad);
+    }
+    s_display.board.swap_color_bytes = false;
+}
+
+static void snapshot_arrives_while_locking(void)
+{
+    s_display.snapshot_refresh_requested = 1U;
+}
+
+static void test_refresh_failure_retries_keys_snapshot_and_pattern(void)
+{
+    dream_fixture();
+    uint32_t last_word = s_display.requested_word;
+    jr_display_clock_set(true, 17, 42, 1);
+    CHECK(presenter_dream_tick(&s_display, &last_word), "enter DREAM before fault injection");
+    const unsigned before = s_stub_refreshes;
+    const uint32_t old_clock = s_display.dream_clock_key;
+    const uint32_t old_rim = s_display.dream_rim_key;
+    jr_display_clock_set(true, 17, 43, 0);
+    jr_display_set_hud_env(73U, false, true, 0, 0);
+    s_stub_lock_failures = 1U;
+    CHECK(presenter_dream_tick(&s_display, &last_word) && s_stub_refreshes == before,
+          "failed DREAM lock submits nothing");
+    CHECK(s_display.dream_clock_key == old_clock && s_display.dream_rim_key == old_rim,
+          "failed lock preserves both retry keys");
+    presenter_dream_tick(&s_display, &last_word);
+    CHECK(s_stub_refreshes == before + 1U && s_display.dream_clock_key != old_clock &&
+          s_display.dream_rim_key != old_rim, "successful retry commits both changed keys");
+    presenter_dream_tick(&s_display, &last_word);
+    CHECK(s_stub_refreshes == before + 1U, "unchanged successful keys stay sparse");
+
+    s_display.snapshot_refresh_requested = 1U;
+    s_stub_lock_failures = 1U;
+    CHECK(!presenter_refresh_pending(&s_display, false) &&
+          s_display.snapshot_refresh_requested == 1U, "failed snapshot remains pending");
+    CHECK(presenter_refresh_pending(&s_display, false) &&
+          s_display.snapshot_refresh_requested == 0U && s_stub_refreshes == before + 2U,
+          "snapshot retry submits once");
+    s_display.snapshot_refresh_requested = 1U;
+    s_stub_lock_hook = snapshot_arrives_while_locking;
+    s_stub_lock_failures = 1U;
+    CHECK(!presenter_refresh_pending(&s_display, false) &&
+          s_display.snapshot_refresh_requested == 1U, "concurrent snapshot survives failed lock");
+    s_stub_lock_hook = NULL;
+    presenter_refresh_pending(&s_display, false);
+    CHECK(s_display.snapshot_refresh_requested == 0U && s_stub_refreshes == before + 3U,
+          "coalesced concurrent snapshot retries once");
+
+    uint32_t last_pattern = JR_DISPLAY_TEST_OFF;
+    s_display.test_pattern = JR_DISPLAY_TEST_WHITE;
+    s_stub_lock_failures = 1U;
+    presenter_pattern_tick(&s_display, &last_pattern);
+    CHECK(last_pattern == JR_DISPLAY_TEST_OFF && s_stub_refreshes == before + 3U,
+          "failed pattern refresh is not acknowledged");
+    presenter_pattern_tick(&s_display, &last_pattern);
+    CHECK(last_pattern == JR_DISPLAY_TEST_WHITE && s_stub_refreshes == before + 4U,
+          "pattern retries then acknowledges");
+    presenter_pattern_tick(&s_display, &last_pattern);
+    CHECK(s_stub_refreshes == before + 4U, "pattern acknowledgement consumes exactly once");
+    s_display.test_pattern = JR_DISPLAY_TEST_OFF;
+    s_display.gfx = NULL;
+    s_display.task = NULL;
+}
+
+static void test_finite_fades_use_elapsed_time_at_rest(void)
+{
+    const uint32_t periods[] = { 50U, 200U, 500U };
+    for (size_t p = 0; p < sizeof periods / sizeof periods[0]; ++p) {
+        dream_fixture();
+        jr_display_dream_set(false);
+        s_clock_word = (1u << 16) | (12u << 8) | 34U;
+        s_clock_prog = s_canvas_prog = s_caption_prog = s_ask_prog = 0;
+        s_detail_prog = s_shade_prog = 0;
+        s_clock_ease = s_canvas_ease = s_caption_ease = s_ask_ease = 0;
+        s_detail_ease = s_shade_ease = 0;
+        s_canvas_until_ms = 10000U;
+        s_caption_on = 1;
+        s_choice_n = 1;
+        s_nav_word = JR_DISPLAY_SPACE_WEATHER | (1u << NAV_SERIAL_SHIFT) |
+                     ((uint32_t)JR_DISPLAY_OVERLAY_DETAIL << NAV_OVL_SHIFT);
+        s_display.shell_word = JR_DISPLAY_SHELL_SHADE;
+        s_space_serial_seen = 0U;
+        s_fade_prev_ms = 1000U;
+        const uint32_t period = periods[p];
+        uint32_t elapsed = 0U;
+        while (elapsed < JR_DISPLAY_FADE_MS + period) {
+            elapsed += period;
+            s_fake_us = (int64_t)(1000U + elapsed) * 1000;
+            overlay_fade_tick();
+            if (elapsed >= JR_DISPLAY_CAPTION_FADE_MS + period) {
+                CHECK(s_caption_prog == 256 && s_ask_prog == 256 &&
+                      s_detail_prog == 256 && s_shade_prog == 256,
+                      "250ms lanes settle by nominal+one frame at%ums", period);
+            }
+            if (elapsed >= JR_DISPLAY_SPACE_MS + period) {
+                CHECK(s_space_prog == 256, "slide settles by nominal+one frame at%ums", period);
+            }
+        }
+        CHECK(s_clock_prog == 256 && s_canvas_prog == 256,
+              "400ms lanes settle by nominal+one frame at%ums", period);
+        s_clock_word = 0U;
+        s_canvas_until_ms = 0U;
+        s_caption_on = 0;
+        s_choice_n = 0;
+        s_nav_word = JR_DISPLAY_SPACE_JARVIS | (2u << NAV_SERIAL_SHIFT);
+        s_display.shell_word = 0U;
+        const uint32_t start = elapsed;
+        while (elapsed - start < JR_DISPLAY_FADE_MS + period) {
+            elapsed += period;
+            s_fake_us = (int64_t)(1000U + elapsed) * 1000;
+            overlay_fade_tick();
+        }
+        CHECK(s_clock_prog == 0 && s_canvas_prog == 0 && s_caption_prog == 0 &&
+              s_ask_prog == 0 && s_detail_prog == 0 && s_shade_prog == 0,
+              "every finite lane exits at%ums", period);
+    }
+    /* Unsigned elapsed time across a very long stall cannot overflow products
+     * or accelerate the separately capped physical brightness slew. */
+    s_clock_prog = 0;
+    s_clock_word = 1u << 16;
+    s_fade_prev_ms = (uint32_t)(s_fake_us / 1000) - UINT32_MAX + 10U;
+    atomic_store(&s_brightness_shown, 0);
+    s_brightness_want = 100U;
+    overlay_fade_tick();
+    CHECK(s_clock_prog == 256, "long stall completes finite fade without overflow");
+    CHECK(atomic_load(&s_brightness_shown) == 100U * 100U / JR_DISPLAY_BRIGHT_SLEW_MS,
+          "brightness retains100ms slew cap");
+    s_display.gfx = NULL;
+    s_display.task = NULL;
+    s_clock_word = 0U;
+}
+
+static jr_display_clip_t *allocate_test_clip(jr_face_t face, size_t bytes)
+{
+    jr_display_clip_t *clip = &s_display.clips[face];
+    *clip = (jr_display_clip_t){ heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM), bytes, 8U, 7U };
+    CHECK(clip->data != NULL, "tracked clip allocation for face%d", face);
+    return clip;
+}
+
+static void test_dial_sources_release_without_invalidating_vendor_ownership(void)
+{
+    dream_fixture();
+    jr_display_ctx_t *ctx = &s_display;
+    ctx->active = ctx->bound = NULL;
+    s_stub_anim_source = NULL;
+    s_stub_bound_frees = 0U;
+    s_dial_frame_face = JR_FACE_COUNT;
+    s_stub_eaf_head = (eaf_header_t){ 8, HUD_W, HUD_H };
+    const size_t baseline = s_stub_heap_bytes;
+    const size_t frame_bytes = (size_t)HUD_W * HUD_H * sizeof(uint16_t);
+    const jr_face_t dials[] = { JR_FACE_DIAL_FUTURE, JR_FACE_DIAL_DIVER,
+                               JR_FACE_DIAL_DRESS, JR_FACE_DIAL_PILOT };
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        for (size_t i = 0; i < sizeof dials / sizeof dials[0]; ++i) {
+            jr_display_clip_t *clip = allocate_test_clip(dials[i], 64U + i);
+            CHECK(dial_show(ctx, dials[i]), "style%d decodes", dials[i]);
+            CHECK(!clip->data && s_stub_heap_bytes == baseline + frame_bytes,
+                  "style cycling retains one decoded frame without compressed growth");
+            const int decodes = s_stub_eaf_decodes;
+            CHECK(dial_show(ctx, dials[i]) && s_stub_eaf_decodes == decodes,
+                  "same dial reuses decoded frame after source release, no load/decode");
+        }
+    }
+
+    jr_display_clip_t *dial = allocate_test_clip(JR_FACE_DIAL_DIVER, 96U);
+    s_stub_lock_failures = 1;
+    CHECK(!dial_show(ctx, JR_FACE_DIAL_DIVER) && dial->data &&
+          s_dial_frame_face == JR_FACE_DIAL_PILOT,
+          "failed decode lock keeps old frame and retry source");
+    s_stub_eaf_decode_error = ESP_FAIL;
+    CHECK(!dial_show(ctx, JR_FACE_DIAL_DIVER) && dial->data,
+          "decode failure retains compressed fallback source");
+    s_stub_eaf_decode_error = ESP_OK;
+    ctx->requested_word = (uint32_t)JR_FACE_DIAL_DIVER << JR_DISPLAY_CMD_FACE_SHIFT;
+    bool stale = false;
+    CHECK(apply_face(ctx, JR_FACE_DIAL_DIVER, JR_FACE_DIAL_DIVER, 0U, &stale) == ESP_OK,
+          "failed baked decode can fall back to vendor anim");
+    CHECK(ctx->bound == dial && s_stub_anim_source == dial->data,
+          "vendor source is tracked separately from visible anim");
+    const void *bound_data = dial->data;
+    CHECK(dial_decode(ctx, JR_FACE_DIAL_DIVER, dial) == ESP_OK,
+          "fallback dial later decodes successfully");
+    s_stub_lock_failures = 1;
+    CHECK(!dial_show(ctx, JR_FACE_DIAL_DIVER) && ctx->active == dial &&
+          ctx->bound == dial && dial->data == bound_data,
+          "failed hide lock preserves bound source for retry");
+    CHECK(dial_show(ctx, JR_FACE_DIAL_DIVER) && ctx->active == NULL &&
+          ctx->bound == dial && dial->data == bound_data && s_stub_bound_frees == 0U,
+          "successful later decode/hide keeps stopped vendor parser's source alive");
+
+    jr_display_clip_t *voice = allocate_test_clip(JR_FACE_LISTENING, 128U);
+    ctx->requested_word = (uint32_t)JR_FACE_LISTENING << JR_DISPLAY_CMD_FACE_SHIFT;
+    s_stub_lock_failures = 1;
+    CHECK(apply_face(ctx, JR_FACE_LISTENING, JR_FACE_LISTENING, 0U, &stale) != ESP_OK &&
+          ctx->bound == dial && dial->data == bound_data && s_stub_anim_source == bound_data,
+          "failed rebind lock retains hidden old parser and new cached source");
+    s_stub_set_src_error = ESP_FAIL;
+    CHECK(apply_face(ctx, JR_FACE_LISTENING, JR_FACE_LISTENING, 0U, &stale) != ESP_OK &&
+          ctx->bound == dial && dial->data == bound_data && s_stub_anim_source == bound_data,
+          "failed rebind preserves hidden old parser and retry source");
+    s_stub_set_src_error = ESP_OK;
+    CHECK(apply_face(ctx, JR_FACE_LISTENING, JR_FACE_LISTENING, 0U, &stale) == ESP_OK &&
+          ctx->bound == voice && ctx->active == voice && !dial->data &&
+          s_stub_anim_source == voice->data && s_stub_bound_frees == 0U,
+          "successful rebind releases only old unreferenced baked source");
+    CHECK(dial_show(ctx, JR_FACE_DIAL_DIVER) && voice->data && ctx->bound == voice,
+          "showing decoded dial keeps fast voice source resident and vendor-bound");
+    CHECK(s_stub_heap_bytes == baseline + frame_bytes + 128U,
+          "retained heap consists of shared frame and voice source only");
+    ctx->bound = ctx->active = NULL;
+    s_stub_anim_source = NULL;
+    heap_caps_free(voice->data);
+    memset(voice, 0, sizeof *voice);
+    heap_caps_free(s_dial_frame);
+    s_dial_frame = NULL;
+    s_dial_frame_face = JR_FACE_COUNT;
+    s_dial_blit = false;
+    CHECK(s_stub_heap_bytes == baseline && s_stub_bound_frees == 0U,
+          "tracked test allocations balance, never freeing retained vendor source");
+    s_display.gfx = NULL;
+    s_display.task = NULL;
+}
+
+/* A strip must keep a rim stamp whose first row lies just above it. Exercise
+ * every battery value, both panel orders and centre shifts through the real
+ * overlay, including the 100% repeated endpoint and absent-battery sentinel. */
+static void test_battery_rim_is_strip_invariant_at_every_percent(void)
+{
+    const size_t n = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = malloc(n * sizeof *whole);
+    uint16_t *strips = malloc(n * sizeof *strips);
+    CHECK(whole && strips, "battery strip fixtures allocate");
+    if (!whole || !strips) { free(whole); free(strips); return; }
+    static const int offsets[] = {-128, 0, 127};
+    for (int pct = 0; pct <= 102; ++pct) {
+        const uint8_t batt = pct == 102 ? 255U : (uint8_t)pct;
+        for (int swap = 0; swap < 2; ++swap) {
+            for (int charge = 0; charge < 2; ++charge) {
+                for (int shift = 0; shift < 3; ++shift) {
+                    const hud_env_t env = { .face = HUD_FACE_IDLE,
+                        .batt_pct = batt, .charging = charge != 0,
+                        .ox = (int8_t)offsets[shift], .oy = (int8_t)offsets[2 - shift] };
+                    const uint32_t ms = (uint32_t)pct * 37U * 12U;
+                    for (size_t i = 0; i < n; ++i) whole[i] = strips[i] = POISON;
+                    hud_overlay_frame(whole, 0, HUD_H, ms, swap != 0, &env);
+                    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+                        const int rows = y + STRIP_ROWS > HUD_H ? HUD_H - y : STRIP_ROWS;
+                        hud_overlay_frame(strips + (size_t)y * HUD_W, y, rows,
+                                          ms, swap != 0, &env);
+                    }
+                    CHECK(memcmp(whole, strips, n * sizeof *whole) == 0,
+                          "battery %u charge%d order%d offset%d remains strip invariant",
+                          (unsigned)batt, charge, swap, offsets[shift]);
+                    if (shift == 1 && (batt == 0U || batt > 100U)) {
+                        size_t drawn = 0;
+                        for (size_t i = 0; i < n; ++i) drawn += whole[i] != POISON;
+                        CHECK(drawn == (batt == 0U ? 4U : 0U),
+                              "zero battery keeps its initial 2px stamp; absent battery draws nothing (%zu)", drawn);
+                    }
+                }
+            }
+        }
+    }
+    free(whole); free(strips);
+}
+
 int main(void)
 {
     test_every_face_has_a_clip_and_a_hud_face();
@@ -3168,6 +3448,11 @@ int main(void)
     test_dream_glass_is_black_clock_and_intact_rims();
     test_dream_stops_emote_and_refreshes_only_for_real_changes();
     test_dream_capture_panel_off_and_input_wake();
+    test_panel_order_color_covers_both_wire_orders();
+    test_refresh_failure_retries_keys_snapshot_and_pattern();
+    test_finite_fades_use_elapsed_time_at_rest();
+    test_dial_sources_release_without_invalidating_vendor_ownership();
+    test_battery_rim_is_strip_invariant_at_every_percent();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);
