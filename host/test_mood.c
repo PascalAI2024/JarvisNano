@@ -5,6 +5,178 @@
  */
 #include "unity.h"
 #include "jr_core/mood.h"
+#include <string.h>
+
+/* Execute the real sleep coordinator with fake peripherals. Guard ordering
+ * matters: probation or failed audio shutdown must precede every RTC write,
+ * stopped IMU and darkened panel, not merely precede the final sleep call. */
+#define JR_POWER_HOST_TEST 1
+#include "../main/power.c"
+
+_Atomic bool s_voice_privacy_paused;
+enum { POWER_AUDIO = 1, POWER_CAPTION, POWER_IMU_STOP, POWER_IMU_ARM,
+       POWER_PANEL_OFF, POWER_GPIO, POWER_WAKE, POWER_SLEEP };
+static struct {
+    esp_ota_img_states_t ota_state;
+    esp_err_t audio_result;
+    esp_err_t imu_result;
+    unsigned events[48];
+    unsigned count;
+    bool audio_saw_untouched_rtc;
+    uint64_t timer_us;
+} power_fake;
+static void power_event(unsigned event)
+{
+    if (power_fake.count < sizeof power_fake.events / sizeof power_fake.events[0]) {
+        power_fake.events[power_fake.count++] = event;
+    }
+}
+esp_err_t esp_pm_configure(const esp_pm_config_t *cfg)
+{ (void)cfg; return ESP_OK; }
+const char *esp_err_to_name(esp_err_t err)
+{ (void)err; return "fake"; }
+const esp_partition_t *esp_ota_get_running_partition(void)
+{ static const esp_partition_t p = {0}; return &p; }
+esp_err_t esp_ota_get_state_partition(const esp_partition_t *p,
+                                     esp_ota_img_states_t *state)
+{ (void)p; *state = power_fake.ota_state; return ESP_OK; }
+esp_err_t jr_audio_prepare_sleep(void)
+{
+    power_fake.audio_saw_untouched_rtc = s_rtc_sleep_magic == 0U &&
+        s_rtc_sleeps == 7U && s_rtc_was_listening == 0U && s_rtc_armed == 0U;
+    power_event(POWER_AUDIO);
+    return power_fake.audio_result;
+}
+void jr_display_caption_set(const char *text)
+{ (void)text; power_event(POWER_CAPTION); }
+void vTaskDelay(unsigned ticks) { (void)ticks; }
+void jr_imu_stop(void) { power_event(POWER_IMU_STOP); }
+esp_err_t jr_imu_arm_wake_on_motion(unsigned mg)
+{ (void)mg; power_event(POWER_IMU_ARM); return power_fake.imu_result; }
+void jr_display_panel_off_request(void) { power_event(POWER_PANEL_OFF); }
+bool jr_display_panel_is_off(void) { return true; }
+void rtc_gpio_init(int gpio) { (void)gpio; power_event(POWER_GPIO); }
+void rtc_gpio_set_direction(int gpio, int direction)
+{ (void)gpio; (void)direction; }
+void rtc_gpio_pullup_dis(int gpio) { (void)gpio; }
+void rtc_gpio_pulldown_en(int gpio) { (void)gpio; }
+void rtc_gpio_pulldown_dis(int gpio) { (void)gpio; }
+void rtc_gpio_pullup_en(int gpio) { (void)gpio; }
+int rtc_gpio_get_level(int gpio) { return gpio == GPIO_NUM_21 ? 0 : 1; }
+esp_err_t esp_sleep_enable_ext0_wakeup(int gpio, int level)
+{ (void)gpio; (void)level; power_event(POWER_WAKE); return ESP_OK; }
+esp_err_t esp_sleep_enable_ext1_wakeup_io(uint64_t mask, int mode)
+{ (void)mask; (void)mode; power_event(POWER_WAKE); return ESP_OK; }
+esp_err_t esp_sleep_pd_config(int domain, int option)
+{ (void)domain; (void)option; return ESP_OK; }
+esp_err_t esp_sleep_enable_timer_wakeup(uint64_t usec)
+{ power_fake.timer_us = usec; power_event(POWER_WAKE); return ESP_OK; }
+void esp_deep_sleep_start(void) { power_event(POWER_SLEEP); }
+static void power_fake_reset(void)
+{
+    memset(&power_fake, 0, sizeof power_fake);
+    power_fake.ota_state = ESP_OTA_IMG_VALID;
+    s_rtc_sleep_magic = 0U;
+    s_rtc_sleeps = 7U;
+    s_rtc_was_listening = 0U;
+    s_rtc_armed = 0U;
+    atomic_store(&s_sleep_force, true);
+    atomic_store(&s_voice_privacy_paused, true);
+}
+
+static void test_sleep_probation_refuses_before_audio_or_rtc(void)
+{
+    power_fake_reset();
+    power_fake.ota_state = ESP_OTA_IMG_PENDING_VERIFY;
+    enter_deep_sleep("test", 300U);
+    TEST_ASSERT_EQUAL_UINT(0, power_fake.count);
+    TEST_ASSERT_EQUAL_UINT32(0, s_rtc_sleep_magic);
+    TEST_ASSERT_EQUAL_UINT32(7, s_rtc_sleeps);
+    TEST_ASSERT_FALSE(atomic_load(&s_sleep_force));
+}
+
+static void test_sleep_failed_audio_leaves_rtc_and_peripherals_untouched(void)
+{
+    power_fake_reset();
+    power_fake.audio_result = ESP_ERR_TIMEOUT;
+    enter_deep_sleep("test", 300U);
+    TEST_ASSERT_EQUAL_UINT(1, power_fake.count);
+    TEST_ASSERT_EQUAL_UINT(POWER_AUDIO, power_fake.events[0]);
+    TEST_ASSERT_TRUE(power_fake.audio_saw_untouched_rtc);
+    TEST_ASSERT_EQUAL_UINT32(0, s_rtc_sleep_magic);
+    TEST_ASSERT_EQUAL_UINT32(7, s_rtc_sleeps);
+    TEST_ASSERT_EQUAL_UINT8(0, s_rtc_armed);
+    TEST_ASSERT_FALSE(atomic_load(&s_sleep_force));
+}
+
+static void test_sleep_quiesces_audio_then_records_and_arms_wake(void)
+{
+    power_fake_reset();
+    enter_deep_sleep("test", 300U);
+    TEST_ASSERT_TRUE(power_fake.audio_saw_untouched_rtc);
+    TEST_ASSERT_EQUAL_UINT(POWER_AUDIO, power_fake.events[0]);
+    TEST_ASSERT_EQUAL_UINT(POWER_CAPTION, power_fake.events[1]);
+    TEST_ASSERT_EQUAL_UINT(POWER_IMU_STOP, power_fake.events[2]);
+    TEST_ASSERT_EQUAL_UINT(POWER_IMU_ARM, power_fake.events[3]);
+    TEST_ASSERT_EQUAL_UINT(POWER_PANEL_OFF, power_fake.events[4]);
+    TEST_ASSERT_EQUAL_UINT(POWER_SLEEP, power_fake.events[power_fake.count - 1U]);
+    TEST_ASSERT_EQUAL_UINT32(SLEEP_RTC_MAGIC, s_rtc_sleep_magic);
+    TEST_ASSERT_EQUAL_UINT32(8, s_rtc_sleeps);
+    TEST_ASSERT_EQUAL_UINT8(0, s_rtc_was_listening);
+    TEST_ASSERT_EQUAL_UINT8(SLEEP_ARMED_TIMER | SLEEP_ARMED_LIFT | SLEEP_ARMED_TOUCH,
+                           s_rtc_armed);
+    TEST_ASSERT_EQUAL_UINT64(300000000ULL, power_fake.timer_us);
+    /* Unmuted sleep still remembers the owner's capability for the wake. */
+    power_fake_reset();
+    atomic_store(&s_voice_privacy_paused, false);
+    power_fake.imu_result = ESP_ERR_TIMEOUT;
+    enter_deep_sleep("test", 300U);
+    TEST_ASSERT_EQUAL_UINT8(1, s_rtc_was_listening);
+    TEST_ASSERT_EQUAL_UINT8(SLEEP_ARMED_TIMER | SLEEP_ARMED_TOUCH |
+                           SLEEP_LIFT_ARM_FAILED, s_rtc_armed);
+}
+
+static void test_dream_glass_requires_genuine_idle(void)
+{
+    for (jr_mood_t mood = JR_MOOD_AWAKE; mood <= JR_MOOD_DREAM; ++mood) {
+        TEST_ASSERT_EQUAL(mood == JR_MOOD_DREAM,
+            jr_mood_dream_glass(mood, false, false, false, false));
+    }
+    TEST_ASSERT_FALSE(jr_mood_dream_glass(JR_MOOD_DREAM, true, false, false, false));
+    TEST_ASSERT_FALSE(jr_mood_dream_glass(JR_MOOD_DREAM, false, true, false, false));
+    TEST_ASSERT_FALSE(jr_mood_dream_glass(JR_MOOD_DREAM, false, false, true, false));
+    TEST_ASSERT_FALSE(jr_mood_dream_glass(JR_MOOD_DREAM, false, false, false, true));
+    TEST_ASSERT_FALSE(jr_mood_dream_glass((jr_mood_t)255, false, false, false, false));
+}
+
+static void test_weather_first_and_retries_respect_rest_and_network(void)
+{
+    for (jr_mood_t mood = JR_MOOD_AWAKE; mood <= JR_MOOD_DREAM; ++mood) {
+        const bool lit = mood == JR_MOOD_AWAKE || mood == JR_MOOD_AMBIENT;
+        TEST_ASSERT_EQUAL(lit, jr_mood_weather_due(mood, true, 20000, 0, false, false));
+        TEST_ASSERT_EQUAL(lit, jr_mood_weather_due(mood, true, 140000, 20000, true, false));
+        TEST_ASSERT_EQUAL(lit, jr_mood_weather_due(mood, true, 620000, 20000, false, true));
+        TEST_ASSERT_EQUAL(lit, jr_mood_weather_due(mood, true, 1820000, 20000, false, false));
+        TEST_ASSERT_FALSE(jr_mood_weather_due(mood, false, 20000, 0, false, false));
+        TEST_ASSERT_FALSE(jr_mood_weather_due(mood, false, 140000, 20000, true, false));
+        TEST_ASSERT_FALSE(jr_mood_weather_due(mood, false, 1820000, 20000, false, true));
+    }
+}
+
+static void test_weather_cadence_and_wraparound_are_preserved(void)
+{
+    TEST_ASSERT_FALSE(jr_mood_weather_due(JR_MOOD_AWAKE, true, 19999, 0, false, true));
+    TEST_ASSERT_FALSE(jr_mood_weather_due(JR_MOOD_AWAKE, true, 139999, 20000, true, true));
+    TEST_ASSERT_FALSE(jr_mood_weather_due(JR_MOOD_AWAKE, true, 619999, 20000, false, true));
+    TEST_ASSERT_FALSE(jr_mood_weather_due(JR_MOOD_AWAKE, true, 1819999, 20000, false, false));
+    /* A screen refresh is not also a background refresh. */
+    TEST_ASSERT_FALSE(jr_mood_weather_due(JR_MOOD_AWAKE, true, 620000, 20000, false, false));
+    const uint32_t before_wrap = UINT32_MAX - 10000U;
+    TEST_ASSERT_FALSE(jr_mood_weather_due(JR_MOOD_AMBIENT, true,
+        before_wrap + 119999U, before_wrap, true, false));
+    TEST_ASSERT_TRUE(jr_mood_weather_due(JR_MOOD_AMBIENT, true,
+        before_wrap + 120000U, before_wrap, true, false));
+}
 
 static void test_mood_starts_awake(void)
 {
@@ -199,6 +371,12 @@ static void test_mood_poke_awake_resets_still(void)
 
 void mood_tests_run(void)
 {
+    RUN_TEST(test_sleep_probation_refuses_before_audio_or_rtc);
+    RUN_TEST(test_sleep_failed_audio_leaves_rtc_and_peripherals_untouched);
+    RUN_TEST(test_sleep_quiesces_audio_then_records_and_arms_wake);
+    RUN_TEST(test_dream_glass_requires_genuine_idle);
+    RUN_TEST(test_weather_first_and_retries_respect_rest_and_network);
+    RUN_TEST(test_weather_cadence_and_wraparound_are_preserved);
     RUN_TEST(test_mood_starts_awake);
     RUN_TEST(test_mood_still_climbs_ambient_whisper_dream);
     RUN_TEST(test_mood_motion_wakes);

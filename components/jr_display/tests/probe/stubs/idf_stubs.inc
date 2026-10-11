@@ -36,7 +36,8 @@ void taskEXIT_CRITICAL(portMUX_TYPE *m) { (void)m; }
 BaseType_t xTaskCreatePinnedToCore(void (*fn)(void *), const char *n, uint32_t s,
                                    void *a, UBaseType_t p, TaskHandle_t *o, BaseType_t c)
 { (void)fn; (void)n; (void)s; (void)a; (void)p; (void)o; (void)c; return pdPASS; }
-void xTaskNotifyGive(TaskHandle_t t) { (void)t; }
+static unsigned s_stub_notifies;
+void xTaskNotifyGive(TaskHandle_t t) { (void)t; s_stub_notifies++; }
 uint32_t ulTaskNotifyTake(BaseType_t c, TickType_t t) { (void)c; (void)t; return 0; }
 TaskHandle_t xTaskGetCurrentTaskHandle(void) { return NULL; }
 TickType_t xTaskGetTickCount(void) { return 0; }
@@ -48,9 +49,11 @@ BaseType_t xSemaphoreGive(SemaphoreHandle_t s) { (void)s; return pdTRUE; }
 void vSemaphoreDelete(SemaphoreHandle_t s) { (void)s; }
 gfx_handle_t gfx_emote_init(const gfx_core_config_t *c) { (void)c; return NULL; }
 gfx_disp_t *gfx_disp_add(gfx_handle_t h, const gfx_disp_config_t *c) { (void)h; (void)c; return NULL; }
-void *gfx_disp_get_user_data(gfx_disp_t *d) { (void)d; return NULL; }
+static void *s_stub_disp_user_data;
+void *gfx_disp_get_user_data(gfx_disp_t *d) { (void)d; return s_stub_disp_user_data; }
 esp_err_t gfx_disp_flush_ready(gfx_disp_t *d, bool ok) { (void)d; (void)ok; return ESP_OK; }
-void gfx_disp_refresh_all(gfx_disp_t *d) { (void)d; }
+static unsigned s_stub_refreshes;
+void gfx_disp_refresh_all(gfx_disp_t *d) { (void)d; s_stub_refreshes++; }
 esp_err_t gfx_emote_lock(gfx_handle_t h) { (void)h; return ESP_OK; }
 esp_err_t gfx_emote_unlock(gfx_handle_t h) { (void)h; return ESP_OK; }
 uint32_t g_stub_render_fps;
@@ -58,13 +61,16 @@ esp_err_t gfx_emote_set_fps(gfx_handle_t h, uint32_t fps) { (void)h; g_stub_rend
 gfx_obj_t *gfx_anim_create(gfx_disp_t *d) { (void)d; return NULL; }
 esp_err_t gfx_obj_align(gfx_obj_t *o, gfx_align_t a, int x, int y)
 { (void)o; (void)a; (void)x; (void)y; return ESP_OK; }
-esp_err_t gfx_obj_set_visible(gfx_obj_t *o, bool v) { (void)o; (void)v; return ESP_OK; }
+static bool s_stub_anim_visible;
+esp_err_t gfx_obj_set_visible(gfx_obj_t *o, bool v) { (void)o; s_stub_anim_visible = v; return ESP_OK; }
 esp_err_t gfx_anim_set_src(gfx_obj_t *o, const void *d, size_t s)
 { (void)o; (void)d; (void)s; return ESP_OK; }
 esp_err_t gfx_anim_set_segment(gfx_obj_t *o, uint32_t a, uint32_t b, uint32_t f, bool r)
 { (void)o; (void)a; (void)b; (void)f; (void)r; return ESP_OK; }
-esp_err_t gfx_anim_start(gfx_obj_t *o) { (void)o; return ESP_OK; }
-esp_err_t gfx_anim_stop(gfx_obj_t *o) { (void)o; return ESP_OK; }
+static unsigned s_stub_anim_starts;
+static unsigned s_stub_anim_stops;
+esp_err_t gfx_anim_start(gfx_obj_t *o) { (void)o; s_stub_anim_starts++; return ESP_OK; }
+esp_err_t gfx_anim_stop(gfx_obj_t *o) { (void)o; s_stub_anim_stops++; return ESP_OK; }
 uint32_t gfx_timer_get_actual_fps(gfx_handle_t h) { (void)h; return 0; }
 /* The dial decode: the header a test sets, and a frame whose pixel i is
  * (uint16_t)(i ^ 0x5a5a) so a blit can be checked row by row. */
@@ -87,6 +93,7 @@ esp_err_t eaf_frame_decode(eaf_format_handle_t h, int i, uint8_t *buf, size_t n,
     return ESP_OK;
 }
 esp_err_t jarvis_board_display_get(jarvis_board_display_t *o) { (void)o; return ESP_OK; }
-esp_err_t jarvis_board_set_brightness(uint8_t p) { (void)p; return ESP_OK; }
+static uint8_t s_stub_panel_brightness;
+esp_err_t jarvis_board_set_brightness(uint8_t p) { s_stub_panel_brightness = p; return ESP_OK; }
 
 #endif /* JR_DISPLAY_TEST_IDF_STUBS_INC */

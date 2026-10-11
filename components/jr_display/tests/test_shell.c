@@ -2824,6 +2824,288 @@ static void test_every_face_has_a_clip_and_a_hud_face(void)
           (unsigned)face_fps(JR_FACE_MUTED));
 }
 
+/* N8.12 exercises the production intent, presenter and strip seams. No test
+ * reimplementation stands in for the stopped-emote or refresh decisions. */
+static void dream_fixture(void)
+{
+    static uint8_t clip[32];
+    reset_nav();
+    s_display.task = (TaskHandle_t)1;
+    s_display.gfx = (gfx_handle_t)1;
+    s_display.disp = (gfx_disp_t *)1;
+    s_display.anim = (gfx_obj_t *)1;
+    s_display.board.width = HUD_W;
+    s_display.board.height = HUD_H;
+    s_display.board.panel = (esp_lcd_panel_handle_t)1;
+    s_display.board.swap_color_bytes = false;
+    s_display.clips[JR_FACE_RESTING] = (jr_display_clip_t){ clip, sizeof clip, 8U, 7U };
+    s_display.active = &s_display.clips[JR_FACE_RESTING];
+    s_display.loaded_face = s_display.shown_face = JR_FACE_RESTING;
+    s_display.last_end = 7;
+    s_display.blanked = false;
+    s_display.dream_active = false;
+    s_display.requested_word = (uint32_t)JR_FACE_RESTING << JR_DISPLAY_CMD_FACE_SHIFT;
+    s_display.applied_face = JR_FACE_RESTING;
+    s_display.requested_amplitude = 0U;
+    s_display.test_pattern = JR_DISPLAY_TEST_OFF;
+    s_display.snapshot_refresh_requested = 0U;
+    s_display.apply_retry_gate_ms = 0U;
+    s_hud_env_word = 0xffu;
+    s_hud_enabled = 1U;
+    s_choice_n = 0;
+    s_commit_pct = 0U;
+    s_ripple_start_ms = s_bloom_start_ms = 0U;
+    s_canvas_until_ms = 0U;
+    s_surface_active = false;
+    s_caption_on = 0;
+    atomic_store(&s_caption_pinned, false);
+    s_panel_off = 0U;
+    s_power_word = 74U;
+    s_ota_word = JR_DISPLAY_OTA_IDLE;
+    s_clock_word = 0U;
+    s_brightness_want = 8U;
+    atomic_store(&s_brightness_have, 8U);
+    atomic_store(&s_brightness_shown, 8);
+    s_render_fps = 2U;
+    s_fake_us = 1000000;
+    jr_display_set_hud_env(74U, false, true, 0, 0);
+    jr_display_dream_set(true);
+    jr_display_caption_set("ASLEEP. TAP TO WAKE");
+    s_stub_notifies = s_stub_refreshes = 0U;
+    s_stub_anim_starts = s_stub_anim_stops = 0U;
+    s_stub_anim_visible = true;
+    s_dial_blit = false;
+}
+
+static void test_dream_intent_preserves_env_and_ignores_unchanged_publish(void)
+{
+    dream_fixture();
+    jr_display_set_hud_env(61U, false, true, 12, -8);
+    CHECK(s_hud_env_word & JR_DISPLAY_ENV_DREAM, "env publication preserves DREAM intent");
+    const uint32_t env = s_hud_env_word & ~JR_DISPLAY_ENV_DREAM;
+    jr_display_dream_set(false);
+    CHECK(s_hud_env_word == env, "DREAM clear preserves battery/privacy/tilt");
+    jr_display_dream_set(true);
+    CHECK((s_hud_env_word & ~JR_DISPLAY_ENV_DREAM) == env, "DREAM set preserves env");
+    jr_display_clock_set(true, 17, 42, 1);
+    s_stub_notifies = 0U;
+    jr_display_dream_set(true);
+    jr_display_set_hud_env(61U, false, true, 12, -8);
+    display_publish(s_display.requested_word);
+    jr_display_caption_set("ASLEEP. TAP TO WAKE");
+    jr_display_clock_set(true, 17, 42, 2);
+    CHECK(s_stub_notifies == 0U, "unchanged publishers/seconds do not wake DREAM (%u)", s_stub_notifies);
+    CHECK(((s_clock_word >> 17) & 0x3fu) == 2U, "seconds still reach WATCH intent");
+    jr_display_set_hud_env(61U, false, true, -12, 8);
+    CHECK(s_stub_notifies == 0U, "tilt cannot animate the DREAM rim");
+    jr_display_clock_set(true, 17, 43, 0);
+    CHECK(s_stub_notifies == 1U, "minute change wakes presenter");
+    jr_display_set_hud_env(60U, false, true, -12, 8);
+    CHECK(s_stub_notifies == 2U, "battery change wakes presenter");
+    jr_display_dream_set(false);
+    s_stub_notifies = 0U;
+    jr_display_clock_set(true, 17, 43, 1);
+    CHECK(s_stub_notifies == 1U, "awake WATCH seconds wake presenter");
+    display_publish((uint32_t)JR_FACE_ERROR << JR_DISPLAY_CMD_FACE_SHIFT);
+    CHECK(s_stub_notifies == 2U, "changed face wakes immediately");
+}
+
+static void test_dream_never_hides_foreground_or_ota(void)
+{
+    dream_fixture();
+    const char *quiet[] = { "JARVIS", "MUTED - HOLD TO LISTEN", "MUTED - HOLD TO RESUME",
+        "MUTED - TAP TO WAKE", "ASLEEP - TAP TO WAKE", "ASLEEP. TAP TO WAKE" };
+    for (size_t i = 0; i < sizeof quiet / sizeof quiet[0]; ++i) {
+        jr_display_caption_set(quiet[i]);
+        CHECK(dream_eligible(&s_display), "quiet hint permits DREAM: %s", quiet[i]);
+    }
+    const char *foreground[] = { "DONE", "ERROR - RETRY", "CONSENT REQUIRED",
+        "MUTED - NETWORK ERROR", "ASLEEP. OTA FAILED" };
+    for (size_t i = 0; i < sizeof foreground / sizeof foreground[0]; ++i) {
+        jr_display_caption_set(foreground[i]);
+        CHECK(!dream_eligible(&s_display), "foreground remains lit: %s", foreground[i]);
+    }
+    jr_display_caption_pin("JARVIS");
+    CHECK(!dream_eligible(&s_display), "even an ambient pinned instruction stays lit");
+    jr_display_caption_unpin();
+    const char *answers[] = { "YES", "NO" };
+    s_stub_notifies = 0U;
+    jr_display_present_choices("Allow?", answers, 2);
+    CHECK(s_stub_notifies > 0U && !dream_eligible(&s_display), "ask wakes and defeats stale DREAM");
+    jr_display_dismiss_choices();
+    CHECK(dream_eligible(&s_display), "dismissed ask releases guard");
+    jr_display_surface_t card = { .kind = JR_DISPLAY_SURFACE_CONSENT };
+    strcpy(card.title, "Allow camera?");
+    CHECK(jr_display_surface_present(&card) == ESP_OK && !dream_eligible(&s_display),
+          "consent card defeats stale DREAM");
+    jr_display_surface_dismiss();
+    s_canvas_until_ms = 2000U;
+    CHECK(!dream_eligible(&s_display), "canvas remains visible");
+    jr_display_canvas_clear();
+    for (int state = JR_DISPLAY_OTA_PREFLIGHT; state <= JR_DISPLAY_OTA_ROLLED_BACK; ++state) {
+        jr_display_ota_set((jr_display_ota_state_t)state, 25U, 0U, 1U, true);
+        CHECK(dream_eligible(&s_display) == (state == JR_DISPLAY_OTA_VALID),
+              "OTA state %d keeps its correct foreground", state);
+    }
+    jr_display_ota_set(JR_DISPLAY_OTA_IDLE, 0U, 0U, 1U, true);
+    s_nav_word = (uint32_t)JR_DISPLAY_OVERLAY_SHADE << NAV_OVL_SHIFT;
+    CHECK(!dream_eligible(&s_display), "shade stays lit");
+    s_nav_word = JR_DISPLAY_SPACE_WEATHER;
+    CHECK(!dream_eligible(&s_display), "weather remains foreground");
+    s_nav_word = JR_DISPLAY_SPACE_WATCH;
+    CHECK(dream_eligible(&s_display), "quiet WATCH permits DREAM");
+    s_display.requested_word = (uint32_t)JR_FACE_SPEAKING << JR_DISPLAY_CMD_FACE_SHIFT;
+    CHECK(!dream_eligible(&s_display), "busy face remains foreground");
+    s_display.requested_word = (uint32_t)JR_FACE_RESTING << JR_DISPLAY_CMD_FACE_SHIFT;
+    jr_display_set_hud_env(74U, true, true, 0, 0);
+    CHECK(!dream_eligible(&s_display), "charging never enters local DREAM");
+    jr_display_set_hud_env(74U, false, true, 0, 0);
+    jr_display_power_set(74U, 3996U, true, false);
+    CHECK(!dream_eligible(&s_display), "USB stays lit even when not charging");
+    jr_display_power_set(74U, 3996U, false, false);
+    s_display.shell_word = JR_DISPLAY_SHELL_AGENT;
+    CHECK(!dream_eligible(&s_display), "operator remains foreground");
+    s_display.shell_word = 0U;
+    s_display.test_pattern = JR_DISPLAY_TEST_WHITE;
+    CHECK(!dream_eligible(&s_display), "panel diagnostic remains foreground");
+}
+
+static void test_dream_glass_is_black_clock_and_intact_rims(void)
+{
+    dream_fixture();
+    const size_t n = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = malloc(n * sizeof *whole);
+    uint16_t *strips = malloc(n * sizeof *strips);
+    uint16_t *rim = calloc(n, sizeof *rim);
+    CHECK(whole && strips && rim, "DREAM pixel fixtures allocate");
+    if (!whole || !strips || !rim) { free(whole); free(strips); free(rim); return; }
+    jr_display_clock_set(true, 17, 42, 59);
+    for (size_t i = 0; i < n; ++i) { whole[i] = strips[i] = POISON; }
+    apply_hud_overlay(&s_display, 0, 0, HUD_W, HUD_H, whole);
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        const int end = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+        apply_hud_overlay(&s_display, 0, y, HUD_W, end, strips + (size_t)y * HUD_W);
+    }
+    CHECK(memcmp(whole, strips, n * sizeof *whole) == 0, "minute clock is strip invariant");
+    const hud_env_t env = { .face = HUD_FACE_IDLE, .batt_pct = 74U, .privacy_muted = true };
+    hud_overlay_frame(rim, 0, HUD_H, 0U, false, &env);
+    size_t unexpected = 0U, rim_pixels = 0U, black = 0U, clock_pixels = 0U;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            const size_t i = (size_t)y * HUD_W + x;
+            const bool clock_box = x >= 188 && x < 278 && y >= 222 && y < 243;
+            if (!clock_box && whole[i] != rim[i]) { unexpected++; }
+            if (rim[i]) { rim_pixels++; }
+            if (!whole[i]) { black++; }
+            if (clock_box && whole[i] == 0x2104U) { clock_pixels++; }
+        }
+    }
+    CHECK(unexpected == 0U, "only clock pixels differ from the original privacy/battery rims (%zu)", unexpected);
+    CHECK(rim_pixels > 100U && clock_pixels > 100U, "both rims and dim clock are present (%zu/%zu)", rim_pixels, clock_pixels);
+    CHECK(black * 100U > n * 90U, "DREAM is more than 90 percent black (%zu/%zu)", black, n);
+    char text[6];
+    dream_clock_text(text, s_clock_word);
+    CHECK(strcmp(text, "17:42") == 0, "known time is honest HH:MM");
+    jr_display_clock_set(false, 0, 0, 0);
+    dream_clock_text(text, s_clock_word);
+    CHECK(strcmp(text, "--:--") == 0, "unknown time never retains an invented clock");
+    apply_hud_overlay(&s_display, 0, 0, HUD_W, HUD_H, strips);
+    CHECK(memcmp(whole, strips, n * sizeof *whole) != 0, "unknown mark replaces prior time pixels");
+    free(whole); free(strips); free(rim);
+}
+
+static void test_dream_stops_emote_and_refreshes_only_for_real_changes(void)
+{
+    dream_fixture();
+    uint32_t last_word = s_display.requested_word;
+    jr_display_clock_set(true, 17, 42, 1);
+    CHECK(presenter_dream_tick(&s_display, &last_word), "DREAM enters production presenter");
+    CHECK(s_stub_anim_stops == 1U && !s_stub_anim_visible && s_display.blanked,
+          "emote stops and hides");
+    const unsigned initial = s_stub_refreshes;
+    CHECK(presenter_wait_ms(&s_display) == 1000U, "settled DREAM sleeps between diagnostics");
+    jr_display_clock_set(true, 17, 42, 2);
+    presenter_dream_tick(&s_display, &last_word);
+    CHECK(s_stub_refreshes == initial && s_stub_anim_stops == 1U, "seconds neither refresh nor restop emote");
+    jr_display_set_hud_env(74U, false, true, 15, -10);
+    presenter_dream_tick(&s_display, &last_word);
+    CHECK(s_stub_refreshes == initial, "tilt leaves DREAM static");
+    jr_display_clock_set(true, 17, 43, 0);
+    presenter_dream_tick(&s_display, &last_word);
+    CHECK(s_stub_refreshes == initial + 1U, "minute creates one fresh frame");
+    jr_display_set_hud_env(73U, false, true, 15, -10);
+    presenter_dream_tick(&s_display, &last_word);
+    CHECK(s_stub_refreshes == initial + 2U, "battery creates one fresh frame");
+    jr_display_set_brightness(50U);
+    CHECK(presenter_wait_ms(&s_display) == 500U, "brightness settles at requested FPS");
+    s_fade_prev_ms = 1000U;
+    for (int i = 0; i < 8; ++i) {
+        s_fake_us += 500000;
+        const unsigned frames = s_stub_refreshes;
+        presenter_dream_tick(&s_display, &last_word);
+        if (s_stub_refreshes != frames) {
+            overlay_fade_tick();
+            brightness_pump();
+        }
+    }
+    CHECK(!brightness_pending() && s_stub_panel_brightness == 50U, "static DREAM still applies target brightness");
+    const unsigned settled = s_stub_refreshes;
+    presenter_dream_tick(&s_display, &last_word);
+    CHECK(s_stub_refreshes == settled && presenter_wait_ms(&s_display) == 1000U,
+          "brightness burst ends when panel settles");
+    jr_display_caption_set("ERROR - RETRY");
+    CHECK(!presenter_dream_tick(&s_display, &last_word) && last_word == UINT32_MAX,
+          "foreground invalidates same-face latch immediately");
+    bool stale = false;
+    CHECK(apply_face(&s_display, JR_FACE_RESTING, JR_FACE_RESTING, 0U, &stale) == ESP_OK &&
+          !stale && s_stub_anim_starts > 0U && s_stub_anim_visible && !s_display.blanked,
+          "same face animation is restored on exit");
+    jr_display_set_render_fps(5U);
+    CHECK(presenter_wait_ms(&s_display) == 200U, "awake presenter respects 5 FPS rather than 33 ms polling");
+}
+
+static void test_dream_capture_panel_off_and_input_wake(void)
+{
+    dream_fixture();
+    uint32_t last_word = s_display.requested_word;
+    presenter_dream_tick(&s_display, &last_word);
+    const unsigned before = s_stub_refreshes;
+    s_display.snapshot_refresh_requested = 1U;
+    presenter_refresh_pending(&s_display, false);
+    CHECK(s_stub_refreshes == before + 1U && s_display.snapshot_refresh_requested == 0U,
+          "snapshot gets a full frame with emote stopped");
+    presenter_refresh_pending(&s_display, false);
+    CHECK(s_stub_refreshes == before + 1U, "snapshot request consumed once");
+    jr_display_panel_off_request();
+    presenter_refresh_pending(&s_display, false);
+    CHECK(s_stub_refreshes == before + 2U, "panel-off request creates a flush despite static clock");
+    s_stub_disp_user_data = &s_display;
+    uint16_t strip[HUD_W] = {0};
+    panel_flush(s_display.disp, 0, 0, HUD_W, 1, strip);
+    CHECK(jr_display_panel_is_off() && s_stub_panel_brightness == 0U,
+          "flush owner applies panel sleep handoff");
+    s_stub_disp_user_data = NULL;
+    s_panel_off = 0U;
+    s_stub_notifies = 0U;
+    jr_display_nav_next();
+    CHECK(s_stub_notifies > 0U && !(s_hud_env_word & JR_DISPLAY_ENV_DREAM), "navigation clears DREAM and wakes");
+    CHECK(!presenter_dream_tick(&s_display, &last_word), "input immediately releases stopped presenter");
+    jr_display_dream_set(true);
+    jr_display_ripple(233, 233);
+    CHECK(!(s_hud_env_word & JR_DISPLAY_ENV_DREAM), "tap feedback clears DREAM");
+    jr_display_dream_set(true);
+    CHECK(!dream_eligible(&s_display), "stale mood cannot erase an active tap ripple");
+    s_fake_us += (int64_t)HUD_RIPPLE_MS * 1000;
+    CHECK(dream_eligible(&s_display), "expired ripple releases local guard");
+    jr_display_dream_set(true);
+    jr_display_bloom();
+    CHECK(!(s_hud_env_word & JR_DISPLAY_ENV_DREAM), "wake bloom clears DREAM");
+    jr_display_dream_set(true);
+    CHECK(!dream_eligible(&s_display), "stale mood cannot erase an active wake bloom");
+    s_display.gfx = NULL;
+    s_display.task = NULL;
+}
+
 int main(void)
 {
     test_every_face_has_a_clip_and_a_hud_face();
@@ -2881,6 +3163,11 @@ int main(void)
     test_render_clock_counts_frames_and_latches_a_second();
     test_missing_clip_falls_back_to_the_face_it_grew_from();
     test_dial_decodes_once_and_blits_every_strip();
+    test_dream_intent_preserves_env_and_ignores_unchanged_publish();
+    test_dream_never_hides_foreground_or_ota();
+    test_dream_glass_is_black_clock_and_intact_rims();
+    test_dream_stops_emote_and_refreshes_only_for_real_changes();
+    test_dream_capture_panel_off_and_input_wake();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);

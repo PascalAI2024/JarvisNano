@@ -1,0 +1,8 @@
+REJECTED weather-first-bypasses-gates: .evidence/t107/power_runner.c:160:test_weather_first_and_retries_respect_rest_and_network:FAIL: Expected FALSE Was TRUE | 15 Tests 1 Failures 0 Ignored
+REJECTED weather-retry-bypasses-rest: .evidence/t107/power_runner.c:157:test_weather_first_and_retries_respect_rest_and_network:FAIL: Expected 0 Was 1 | 15 Tests 1 Failures 0 Ignored
+REJECTED weather-ignores-network: .evidence/t107/power_runner.c:160:test_weather_first_and_retries_respect_rest_and_network:FAIL: Expected FALSE Was TRUE | 15 Tests 1 Failures 0 Ignored
+REJECTED dream-ignores-busy-usb-lease-ota: .evidence/t107/power_runner.c:145:test_dream_glass_requires_genuine_idle:FAIL: Expected FALSE Was TRUE | 15 Tests 1 Failures 0 Ignored
+REJECTED sleep-omits-audio-shutdown: .evidence/t107/power_runner.c:103:test_sleep_failed_audio_leaves_rtc_and_peripherals_untouched:FAIL: Expected 1 Was 10 | .evidence/t107/power_runner.c:116:test_sleep_quiesces_audio_then_records_and_arms_wake:FAIL: Expected TRUE Was FALSE | 15 Tests 2 Failures 0 Ignored
+REJECTED sleep-ignores-shutdown-failure: .evidence/t107/power_runner.c:103:test_sleep_failed_audio_leaves_rtc_and_peripherals_untouched:FAIL: Expected 1 Was 11 | 15 Tests 1 Failures 0 Ignored
+REJECTED sleep-shuts-audio-before-probation: .evidence/t107/power_runner.c:92:test_sleep_probation_refuses_before_audio_or_rtc:FAIL: Expected 0 Was 1 | 15 Tests 1 Failures 0 Ignored
+7/7 mutants rejected by assertions

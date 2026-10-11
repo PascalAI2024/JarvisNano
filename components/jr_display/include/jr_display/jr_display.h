@@ -179,6 +179,11 @@ void jr_display_set_hud_env(uint8_t batt_pct, bool charging,
                             bool privacy_muted,
                             float roll_deg, float pitch_deg);
 
+/* Genuine idle DREAM intent. Local foreground/OTA guards still win. This
+ * publishes a packed bit; panel work remains on the presenter/render tasks.
+ * The composition root must disable this throughout OTA image probation. */
+void jr_display_dream_set(bool enabled);
+
 /* Enable/disable the procedural HUD overlay at runtime. Exists so the HUD's
  * true frame-rate cost can be A/B measured on the panel instead of estimated —
  * flip it and read actual_fps from /api/display. Enabled by default. */

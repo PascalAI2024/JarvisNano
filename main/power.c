@@ -8,7 +8,11 @@
  * wake sources, and the probation guard that keeps a sleep from rolling an
  * update back. Split out of main.c on 2026-09-02 with no behavior change.
  */
+#ifdef JR_POWER_HOST_TEST
+#include "power_app.h"
+#else
 #include "app.h"
+#endif
 
 static const char *TAG = "jarvis_v5";
 
@@ -95,6 +99,16 @@ void enter_deep_sleep(const char *why, uint32_t timer_s)
      * guard for everything else. */
     if (image_in_probation()) {
         ESP_LOGW(TAG, "deep sleep refused: image in probation");
+        atomic_store(&s_sleep_force, false);
+        return;
+    }
+    /* Deep sleep stops the S3, not the external codecs or speaker amp.
+     * Quiesce their paired I2S clocks before recording a sleep or changing
+     * any wake/peripheral state. A blocked feeder leaves the device awake. */
+    const esp_err_t audio_err = jr_audio_prepare_sleep();
+    if (audio_err != ESP_OK) {
+        ESP_LOGW(TAG, "deep sleep refused: audio shutdown: %s",
+                 esp_err_to_name(audio_err));
         atomic_store(&s_sleep_force, false);
         return;
     }

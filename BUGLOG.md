@@ -35,3 +35,21 @@ Live capture: 5-minute serial log running during owner testing
 (`owner-test-serial.log` in session scratchpad); counters snapshotted before
 and after. Device state is queryable any time: `scripts/jarvisctl.py status`.
 
+## t107 local candidate — 2026-10-11
+
+Independent review found retained half-batch PCM across privacy/transport gaps,
+automatic diagnostic clearing that reset the absolute companion cursor, and
+missing companion privacy revalidation after copying PCM. All three are
+repaired in the local candidate, with executable sequence regressions and
+production wiring checks. Final host suites pass 11,451 / 854 / 166 / 81 / 38.
+
+The candidate also gates muted audio power, adds the guarded N8.12 quiet clock,
+and applies rest/network guards to weather's first and retry fetches. The owner
+removed the interrupted generated build directory, and the explicitly authorized
+ESP-IDF 5.5.4 rebuild passed with 55.786% app-partition headroom. The local
+candidate and proof are committed before OTA. None is closed on hardware:
+the pre-OTA readiness request times out, so owner wake with privacy still muted
+is required. No upload or after measurement/capture occurred. Listening-state
+power is excluded; voice remains owner check pending after muted verification.
+N7.21 remains blocked on physical PKEY event resolution. See
+[the t107 report](docs/evidence/t107-power-baseline.md).

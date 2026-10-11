@@ -23,6 +23,7 @@
  * device-tool lane. Ownership did not move — only the line numbers did.
  */
 #include "app.h"
+#include "jr_dsp/audio_power.h"
 
 static const char *TAG = "jarvis_v5";
 
@@ -2013,7 +2014,7 @@ static void voice_task(void *arg)
      * would-block dropped a full 128 ms of microphone audio. Two frames stay
      * queueable under backpressure while halving the per-frame send rate. */
     static jr_pcm_t mic_batch[2 * VOICE_FRAME_SAMPLES];
-    static size_t   mic_batch_fill = 0;
+    static jr_audio_uplink_batch_t mic_batch_state;
     static bool codex_tap_pending;
     static jr_input_event_t codex_pending_tap;
     static uint32_t codex_pending_tap_ms;
@@ -2272,6 +2273,11 @@ static void voice_task(void *arg)
                 .quiet = quiet,
             };
             jr_mood_out_t mout = jr_mood_step(&s_mood, &min);
+            const bool dream_glass = jr_mood_dream_glass(
+                mout.mood, user_busy, have_power && bat.usb_present,
+                operator_mode_active((uint32_t)now),
+                atomic_load(&s_ota_active) || image_in_probation());
+            jr_display_dream_set(dream_glass);
             const bool realtime_power =
                 mout.voice_armed || user_busy ||
                 operator_mode_active((uint32_t)now) ||
@@ -2546,7 +2552,7 @@ static void voice_task(void *arg)
                  * watch peek does. */
                 const bool watch_space =
                     jr_display_nav_space() == JR_DISPLAY_SPACE_WATCH;
-                if (peek || watch_space) {
+                if (peek || watch_space || dream_glass) {
                     struct tm tmv;
                     if (device_wall_time(&tmv)) {
                         clock_on = true;
@@ -2600,6 +2606,9 @@ static void voice_task(void *arg)
          * half-commit button that leaves the microphone armed forever. */
         voice_control_request_t control = (voice_control_request_t)
             atomic_exchange(&s_voice_control_request, VOICE_CONTROL_NONE);
+        if (control != VOICE_CONTROL_NONE)
+            jr_audio_uplink_batch_reset(&mic_batch_state, mic_batch,
+                                       2U * VOICE_FRAME_SAMPLES);
         jr_state_t controlled_phase = jr_orch_phase(&s_app.orch);
         if (control == VOICE_CONTROL_ARM ||
             control == VOICE_CONTROL_RESUME) {
@@ -2695,6 +2704,11 @@ static void voice_task(void *arg)
         /* A self-test owns the codec only through the existing audio seams. If
          * voice is live, stop it gracefully first; once Idle, reset all four
          * taps, enqueue the chirp, and let this task pace ADC capture. */
+        if (atomic_load(&s_audio_diag_requested) &&
+            (atomic_load(&s_voice_privacy_paused) || s_flip_muted)) {
+            atomic_store(&s_audio_diag_requested, false);
+            atomic_store(&s_audio_diag_until_ms, 0U);
+        }
         if (atomic_load(&s_audio_diag_requested)) {
             jr_state_t p = jr_orch_phase(&s_app.orch);
             if (p == JR_ST_IDLE) {
@@ -3647,6 +3661,8 @@ static void voice_task(void *arg)
          * there can synthesize SpeechStarted/activityStart and cancel the
          * model reply before its first audio chunk. Server VAD intentionally
          * keeps streaming through Thinking. This matches the proven v4 lane. */
+        jr_audio_set_microphone_enabled(
+            !atomic_load(&s_voice_privacy_paused) && !s_flip_muted);
         bool read_paced = false;
         jr_state_t capture_phase = jr_orch_phase(&s_app.orch);
         bool phase_allows_capture = capture_phase == JR_ST_LISTENING ||
@@ -3661,6 +3677,8 @@ static void voice_task(void *arg)
                                     capture_phase == JR_ST_ASKING ||
                                     (capture_phase == JR_ST_THINKING &&
                                      s_app.cfg.vad_mode == JR_VAD_SERVER);
+        if (atomic_load(&s_voice_privacy_paused) || s_flip_muted)
+            atomic_store(&s_audio_diag_until_ms, 0U);
         uint32_t audio_diag_until = atomic_load(&s_audio_diag_until_ms);
         bool audio_diag_active =
             (int32_t)(audio_diag_until - (uint32_t)now) > 0;
@@ -3696,33 +3714,29 @@ static void voice_task(void *arg)
             operator_mode_active((uint32_t)now) &&
             atomic_load(&s_operator_mode_owner) == OPERATOR_OWNER_ZEROCHAT &&
             !atomic_load(&s_voice_privacy_paused) && !s_flip_muted;
+        /* A stopped capture, diagnostic/companion lane, closed transport, or
+         * privacy edge cannot leave a live half for a later text turn. */
+        const bool voice_uplink_capture = s_app.io.capturing &&
+            phase_allows_capture && !audio_diag_active && !companion_listen;
+        jr_audio_uplink_batch_guard(&mic_batch_state, mic_batch,
+            2U * VOICE_FRAME_SAMPLES,
+            voice_uplink_capture &&
+                s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN &&
+                (s_app.cfg.vad_mode == JR_VAD_SERVER || s_app.io.activity_open),
+            !atomic_load(&s_voice_privacy_paused) && !s_flip_muted);
         if ((s_app.io.capturing && phase_allows_capture) || audio_diag_active ||
             companion_listen) {
             int n = jr_audio_source_read(&s_app.mic, mic_frame, VOICE_FRAME_SAMPLES);
             if (n > 0) {
-                s_app.mic_level = jr_dsp_rms(mic_frame, (size_t)n);
+                /* The source supplies paced zeros under privacy. Recheck the
+                 * app latch after a blocking read, before diagnostics or levels,
+                 * so a privacy edge in flight cannot publish a live frame. */
+                const bool mic_gated = atomic_load(&s_voice_privacy_paused) || s_flip_muted;
+                if (mic_gated) memset(mic_frame, 0, (size_t)n * sizeof(jr_pcm_t));
+                s_app.mic_level = mic_gated ? 0.0f : jr_dsp_rms(mic_frame, (size_t)n);
                 if (audio_diag_active || companion_listen) {
                     read_paced = true;
                     goto capture_complete;
-                }
-                /* PRIVACY IS THE MICROPHONE, NOT A FLAG ON THE RE-ARM. The
-                 * flag used to gate only the always-ready re-arm, so any
-                 * other road into a live session — a text turn from the desk
-                 * route, a companion, a reconnect — brought the uplink up
-                 * under a gold ring that said MUTED. Seen by the owner: "it's
-                 * on privacy mode but look, it's listening to me". Here the
-                 * frame is read (the codec keeps its pace) and dropped: no
-                 * VAD, no uplink, no level, whatever the session is doing.
-                 * Text turns still work with the mic shut.
-                 *
-                 * The frame is ZEROED rather than dropped: with no frames at
-                 * all the server's turn detection has no silence to conclude a
-                 * text turn on, and a desk turn under privacy took 47 s to
-                 * answer. Zeros are a quiet room, not the room. */
-                const bool mic_gated = atomic_load(&s_voice_privacy_paused);
-                if (mic_gated) {
-                    memset(mic_frame, 0, (size_t)n * sizeof(jr_pcm_t));
-                    s_app.mic_level = 0.0f;
                 }
                 jr_capture_pause_on_capture(
                     &s_app.orch.capture_pause, now);
@@ -3805,31 +3819,47 @@ static void voice_task(void *arg)
                  * frames remain below the 4096-byte queue slot while halving
                  * lock/socket pressure. Flush a partial batch at speech end. */
                 const bool send_uplink =
+                    voice_uplink_capture && s_app.io.capturing &&
                     s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN &&
                     (s_app.cfg.vad_mode == JR_VAD_SERVER ||
                      s_app.io.activity_open);
+                const bool upload_microphone_enabled =
+                    !atomic_load(&s_voice_privacy_paused) && !s_flip_muted;
+                jr_audio_uplink_batch_guard(&mic_batch_state, mic_batch,
+                    2U * VOICE_FRAME_SAMPLES, send_uplink,
+                    upload_microphone_enabled);
                 if (send_uplink) {
                     const size_t cap = 2 * VOICE_FRAME_SAMPLES;
                     size_t take = (size_t)n;
-                    if (mic_batch_fill + take > cap) {
-                        take = cap - mic_batch_fill;
+                    if (mic_batch_state.filled + take > cap) {
+                        take = cap - mic_batch_state.filled;
                     }
-                    memcpy(mic_batch + mic_batch_fill, mic_frame,
-                           take * sizeof(jr_pcm_t));
-                    mic_batch_fill += take;
-                    if (mic_batch_fill >= cap ||
+                    if (upload_microphone_enabled)
+                        memcpy(mic_batch + mic_batch_state.filled, mic_frame,
+                               take * sizeof(jr_pcm_t));
+                    else
+                        memset(mic_batch + mic_batch_state.filled, 0,
+                               take * sizeof(jr_pcm_t));
+                    mic_batch_state.filled += take;
+                    if (mic_batch_state.filled >= cap ||
                         (td.event == JR_TP_EV_SPEECH_ENDED &&
-                         mic_batch_fill > 0U)) {
-                        jr_err_t r = s_app.rvc.send_audio(
-                            s_app.rvc.ctx, mic_batch, mic_batch_fill);
-                        if (r == JR_ERR_CLOSED) {
-                            ESP_LOGW(TAG,
-                                     "mic uplink observed closed transport");
+                         mic_batch_state.filled > 0U)) {
+                        /* Recheck after VAD and buffer work, immediately before
+                         * handing bytes to the transport builder. */
+                        jr_audio_uplink_batch_guard(&mic_batch_state, mic_batch,
+                            cap, s_app.io.capturing &&
+                                s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN,
+                            !atomic_load(&s_voice_privacy_paused) && !s_flip_muted);
+                        if (mic_batch_state.filled > 0U) {
+                            jr_err_t r = s_app.rvc.send_audio(
+                                s_app.rvc.ctx, mic_batch, mic_batch_state.filled);
+                            if (r == JR_ERR_CLOSED) {
+                                ESP_LOGW(TAG,
+                                         "mic uplink observed closed transport");
+                            }
                         }
-                        mic_batch_fill = 0U;
+                        jr_audio_uplink_batch_reset(&mic_batch_state, mic_batch, cap);
                     }
-                } else {
-                    mic_batch_fill = 0U;
                 }
                 if (td.event == JR_TP_EV_SPEECH_ENDED) {
                     s_app.vad_ends++;
@@ -3852,6 +3882,9 @@ static void voice_task(void *arg)
                     }
                 }
                 read_paced = true;
+            } else {
+                jr_audio_uplink_batch_reset(&mic_batch_state, mic_batch,
+                                           2U * VOICE_FRAME_SAMPLES);
             }
         } else if (jr_wake_ready() && !s_flip_muted &&
                    !atomic_load(&s_voice_privacy_paused) &&

@@ -30,6 +30,7 @@ set(CORE_SRCS
     ${REPO_ROOT}/components/jr_core/src/mood.c
     ${REPO_ROOT}/components/jr_core/src/glance.c
     ${REPO_ROOT}/components/jr_dsp/src/dsp.c
+    ${REPO_ROOT}/components/jr_dsp/src/audio_power.c
 )
 
 # --- Run 3: the L2 Gemini transport (builders/framer/parser) compiles here too.
@@ -48,6 +49,7 @@ add_executable(jr_host_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_soak.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_mood.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_jitter.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_audio_power.c
     ${CMAKE_CURRENT_SOURCE_DIR}/fakes/fake_clock.c
     ${CMAKE_CURRENT_SOURCE_DIR}/fakes/fake_ws_transport.c
     ${CMAKE_CURRENT_SOURCE_DIR}/unity/unity.c
@@ -73,6 +75,7 @@ target_link_libraries(jr_host_tests PRIVATE m)
 # third-party single-file lib — keep OUR code clean but do not fail on cJSON's
 # own style, so build with warnings on but never as errors.
 target_compile_options(jr_host_tests PRIVATE -Wall -Wextra)
+target_compile_definitions(jr_host_tests PRIVATE JR_TEST_REPO_ROOT="${REPO_ROOT}")
 
 enable_testing()
 add_test(NAME jr_host_tests COMMAND jr_host_tests)

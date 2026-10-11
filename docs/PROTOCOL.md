@@ -64,7 +64,7 @@ X-JarvisNano-Control: 1
 | GET/POST | `/api/debug/gain?...` | Audio tuning with readbacks; `preroll=` / `refill=` pin the playback jitter buffer (`preroll=0` returns it to adaptive); `cpu=80|160|240` forces a CPU gear for a bench, `cpu=0` returns to auto |
 | POST | `/api/debug/audio-stats?reset=1` | Reset the playback and receive-queue counters that `/api/device/health` reports |
 | GET/POST | `/api/debug/sleep` | How the device last woke and what was armed; `?now=1&wake_s=N` forces a deep sleep with an N-second timer (refused with 409 while the image is on OTA probation); `?off=1` powers the device off through the PMIC (hold PWR 1 s to start) |
-| POST | `/api/voice/control?armed=0|1` or paired `?resume=1` | Explicit privacy mute/unmute or privacy-safe operational resume |
+| POST | `/api/voice/control?armed=0|1` or paired `?resume=1` | `armed=0` mutes; `armed=1` and `resume=1` resume only when privacy permits. Unmute requires a physical gesture |
 | POST | `/api/audio/self-test` | Run the speaker-to-microphone diagnostic capture |
 | GET | `/api/audio/taps` | Paired audio tap metadata |
 | GET | `/api/audio/tap.wav?source=...` | Paired bounded WAV capture (`mic-clean`, `mic-raw`, `reference`, or `playback`) |
@@ -118,7 +118,7 @@ Authentication is route-specific:
 | OTA upload | pairing token plus control header |
 | Device health GET | pairing token |
 | Device levels GET/POST | pairing token; POST also requires control header |
-| Voice control (mute, unmute, or privacy-safe resume) | pairing token plus control header |
+| Voice control (mute or privacy-safe resume) | pairing token plus control header; physical unmute only |
 | Content diagnostics (cockpit, Gemini detail, audio taps/WAV, VAD log, logs, display pixels) | pairing token |
 
 While a local `remember` consent card is active, it owns the physical panel

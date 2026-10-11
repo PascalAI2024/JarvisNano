@@ -10,6 +10,7 @@
  * handlers use stay static here.
  */
 #include "app.h"
+#include "jr_dsp/audio_power.h"
 
 /* THE FPS FLOOR FOLLOWS THE CADENCE. Health and probation both ask for a
  * live frame rate, but since 2026-09-02 the ladder deliberately renders at
@@ -504,6 +505,8 @@ static esp_err_t device_health_handler(httpd_req_t *req)
 
     jr_audio_playback_stats_t playback = {0};
     jr_audio_playback_stats(&playback);
+    jr_audio_power_stats_t audio_power = {0};
+    jr_audio_power_stats(&audio_power);
     jr_ws_rx_diag_t rx = {0};
     jr_gemini_ws_rx_diag(&rx);
 
@@ -534,13 +537,15 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         verdict = "tool-fault";
     }
 
-    char body[1280];
+    char body[1536];
     int n = snprintf(body, sizeof body,
         "{\"verdict\":\"%s\",\"repairable\":%s,"
         "\"privacy\":%s,\"flip_muted\":%s,\"operator\":%s,"
         "\"phase\":\"%s\",\"voice_alive\":%s,"
         "\"levels\":{\"volume\":%d,\"brightness_cap\":%u,"
         "\"brightness_actual\":%u},"
+        "\"audio_power\":{\"mic\":%s,\"adc\":%s,\"dac\":%s,\"pa\":%s,"
+        "\"reads\":%u,\"silent\":%u,\"failures\":%u},"
         "\"memory\":{\"largest_internal\":%u,\"free_psram\":%u},"
         "\"transport\":{\"would_block\":%u,\"drops\":%u,\"deaths\":%u},"
         "\"playback\":{\"underruns\":%u,\"max_gap_ms\":%u,"
@@ -560,6 +565,12 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         jr_state_name(phase), voice_alive ? "true" : "false",
         s_out_vol, (unsigned)s_brightness_cap,
         (unsigned)atomic_load(&s_mood_brightness),
+        audio_power.microphone_enabled ? "true" : "false",
+        audio_power.adc_open ? "true" : "false",
+        audio_power.dac_open ? "true" : "false",
+        audio_power.pa_on ? "true" : "false",
+        (unsigned)audio_power.hardware_reads, (unsigned)audio_power.silent_frames,
+        (unsigned)audio_power.failures,
         (unsigned)largest, (unsigned)free_psram,
         (unsigned)s_app.client.live.tx_would_block,
         (unsigned)s_app.client.live.tx_drops,
@@ -765,6 +776,14 @@ static esp_err_t audio_tap_wav_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    if (kind != JR_AUDIO_TAP_PLAYBACK &&
+        (atomic_load(&s_voice_privacy_paused) || s_flip_muted)) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"privacy muted\"}");
+        return ESP_OK;
+    }
+
     jr_audio_tap_info_t info;
     esp_err_t err = jr_audio_diag_get_info(kind, &info);
     size_t capacity = err == ESP_OK ? info.capacity_samples : 0U;
@@ -780,6 +799,15 @@ static esp_err_t audio_tap_wav_handler(httpd_req_t *req)
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req,
             "{\"available\":false,\"error\":\"audio tap empty\"}");
+        return ESP_OK;
+    }
+
+    if (kind != JR_AUDIO_TAP_PLAYBACK &&
+        (atomic_load(&s_voice_privacy_paused) || s_flip_muted)) {
+        heap_caps_free(pcm);
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"privacy muted\"}");
         return ESP_OK;
     }
 
@@ -813,6 +841,11 @@ static esp_err_t audio_tap_wav_handler(httpd_req_t *req)
         size_t chunk = data_bytes - sent;
         if (chunk > 4096U) {
             chunk = 4096U;
+        }
+        if (kind != JR_AUDIO_TAP_PLAYBACK &&
+            (atomic_load(&s_voice_privacy_paused) || s_flip_muted)) {
+            err = ESP_ERR_INVALID_STATE;
+            break;
         }
         err = httpd_resp_send_chunk(req, (const char *)bytes + sent, chunk);
         sent += chunk;
@@ -3681,6 +3714,22 @@ static void companion_audio_window_headers(
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 }
 
+static bool companion_microphone_privacy_rejected(httpd_req_t *req)
+{
+    jr_audio_power_stats_t power;
+    jr_audio_power_stats(&power);
+    if (jr_audio_microphone_export_allowed(
+            atomic_load(&s_voice_privacy_paused), s_flip_muted,
+            power.microphone_enabled)) {
+        return false;
+    }
+    httpd_resp_set_status(req, "423 Locked");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req,
+        "{\"ok\":false,\"error\":\"physical microphone privacy is active\"}");
+    return true;
+}
+
 /* GET /api/companion/audio/in — bounded cursor reads from the sole clean-mic
  * tap. The absolute cursor makes ring overrun observable instead of silently
  * stitching unrelated audio together. */
@@ -3735,6 +3784,10 @@ static esp_err_t companion_audio_in_handler(httpd_req_t *req)
     esp_err_t err = jr_audio_diag_copy_since(
         JR_AUDIO_TAP_MIC_CLEAN, after, latest, pcm,
         latest ? 0U : max_samples, &window);
+    if (companion_microphone_privacy_rejected(req)) {
+        heap_caps_free(pcm);
+        return ESP_OK;
+    }
     if (err != ESP_OK) {
         heap_caps_free(pcm);
         httpd_resp_set_status(req,
@@ -3764,10 +3817,15 @@ static esp_err_t companion_audio_in_handler(httpd_req_t *req)
     companion_audio_window_headers(req, &window);
     if (window.copied_samples == 0U) {
         heap_caps_free(pcm);
+        if (companion_microphone_privacy_rejected(req)) return ESP_OK;
         httpd_resp_set_status(req, "204 No Content");
         return httpd_resp_send(req, NULL, 0);
     }
     httpd_resp_set_type(req, "application/octet-stream");
+    if (companion_microphone_privacy_rejected(req)) {
+        heap_caps_free(pcm);
+        return ESP_OK;
+    }
     err = httpd_resp_send(req, (const char *)pcm,
                           window.copied_samples * sizeof(int16_t));
     heap_caps_free(pcm);

@@ -1,4 +1,33 @@
-# Current work — live display documentation
+# Current work — t107 build passed, OTA blocked on device wake
+
+**Updated:** 2026-10-11
+
+Candidate on `t107/codex`: privacy-muted ADC/DAC/PA shutdown,
+paced silent text input, guarded near-black DREAM minute clock (N8.12),
+rest-aware first/retry weather fetches, and privacy batch/cursor/export repairs.
+The existing N8 battery/rim/charging/heading fixes were already present.
+N7.21 remains blocked on physical PKEY event resolution.
+
+Before measurements on battery completed with privacy muted. Final host suites
+passed 11,451 / 854 / 166 / 81 / 38, with 54 scratch mutants rejected. After the
+owner removed the incomplete generated `build/`, the authorized ESP-IDF 5.5.4
+`RECONFIGURE=1` build passed on the unchanged tested source. The image is
+1,854,464 bytes, with 2,339,840 bytes (55.786%) free in the smallest 4 MiB app
+partition; SHA-256 is recorded in the report. The local candidate and proof are
+committed before OTA as requested. The pre-OTA readiness request times out:
+the owner must wake the device while keeping privacy muted. No candidate upload,
+after measurements/captures, measured improvement or hardware acceptance is
+claimed. OTA and muted device gates remain pending.
+Listening-state power measurement is excluded by the orchestrator. Voice is
+**owner check pending**; stop after muted device checks for a physical unmute
+and one spoken turn, then restore mute.
+
+The last successful pre-change authenticated readback confirmed privacy muted,
+inactive lease and running OTA state `valid`. See the
+[t107 report](docs/evidence/t107-power-baseline.md) and its retained evidence.
+Four waves used seven unique subagents; the parent alone operates the device.
+
+## Previous work — live display documentation
 
 **Updated:** 2026-10-02
 

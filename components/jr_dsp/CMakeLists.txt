@@ -3,7 +3,7 @@
 # compiles this exact source with no IDF in the include path — a broken edge
 # fails there immediately (architecture.md §Enforcement).
 idf_component_register(
-    SRCS "src/dsp.c"
+    SRCS "src/dsp.c" "src/audio_power.c"
     INCLUDE_DIRS "include"
 )
 

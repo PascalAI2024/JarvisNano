@@ -1,0 +1,42 @@
+[ 50%] Built target jr_display_hud_tests
+[ 66%] Building C object CMakeFiles/jr_display_shell_tests.dir/test_shell.c.o
+[ 83%] Linking C executable jr_display_shell_tests
+[100%] Built target jr_display_shell_tests
+Internal ctest changing into directory: /project/.evidence/t107/build-display
+UpdateCTestConfiguration  from :/project/.evidence/t107/build-display/DartConfiguration.tcl
+UpdateCTestConfiguration  from :/project/.evidence/t107/build-display/DartConfiguration.tcl
+Test project /project/.evidence/t107/build-display
+Constructing a list of tests
+Done constructing a list of tests
+Updating test list for fixtures
+Added 0 tests to meet fixture requirements
+Checking test dependency graph...
+Checking test dependency graph end
+test 1
+    Start 1: jr_display_hud_tests
+
+1: Test command: /project/.evidence/t107/build-display/jr_display_hud_tests
+1: Working Directory: /project/.evidence/t107/build-display
+1: Test timeout computed to be: 10000000
+1:       [agree] painted=9445 answering=19140 (2.03x) worst-gap=9 px
+1: hud_render tests passed (11451 checks)
+1/2 Test #1: jr_display_hud_tests .............   Passed    2.37 sec
+test 2
+    Start 2: jr_display_shell_tests
+
+2: Test command: /project/.evidence/t107/build-display/jr_display_shell_tests
+2: Working Directory: /project/.evidence/t107/build-display
+2: Test timeout computed to be: 10000000
+2: face=8 dial blit, anim hidden
+2: face=8 dial blit, anim hidden
+2: face=9 dial blit, anim hidden
+2: dial=8 decode failed (err); anim path
+2: choices: presenting 2 arcs + question
+2: choices: dismissed
+2: face=5 asset=32 bytes frames=7 bucket=0
+2: all shell tests passed (854 checks)
+2/2 Test #2: jr_display_shell_tests ...........   Passed    1.37 sec
+
+100% tests passed, 0 tests failed out of 2
+
+Total Test time (real) =   3.84 sec
