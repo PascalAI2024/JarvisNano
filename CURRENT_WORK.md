@@ -1,4 +1,4 @@
-# Current work â€” t107 Addendum A, power gate blocked
+# Current work — t107 Addendum A, power gate blocked
 
 **Updated:** 2026-10-12 UTC
 
@@ -25,12 +25,12 @@ cleanup and final health also timed out. Last authenticated boundary: valid,
 muted, all audio off, no lease, flush errors zero, internal block 30,720 bytes.
 The owner subsequently woke it by hand. No USB flash or privacy bypass is attempted.
 
-Voltage drain fits were larger after OTA (idle 29.42â†’100.20, WATCH
-65.83â†’126.56 mV/h), with different SoC and rebound. Battery savings remain
-unproven. Long WATCH software rendering was 45.438â†’43.790 ms/frame; the
-short profile was slower, 37.154â†’46.078. Both results are retained.
+Voltage drain fits were larger after OTA (idle 29.42→100.20, WATCH
+65.83→126.56 mV/h), with different SoC and rebound. Battery savings remain
+unproven. Long WATCH software rendering was 45.438→43.790 ms/frame; the
+short profile was slower, 37.154→46.078. Both results are retained.
 
-At 00:10:37â€“00:11:01Z on 2026-10-12, authenticated health, cockpit and sleep
+At 00:10:37–00:11:01Z on 2026-10-12, authenticated health, cockpit and sleep
 GET retries all timed out despite orchestrator-reported ping replies. Wake
 timing/reason and current privacy were unreadable at that retry. Compared with the
 successful baseline cycle, this is an acceptance regression and a possible
@@ -53,7 +53,7 @@ is needed to distinguish late timer from late API or another wake.
 See [the Addendum A report](docs/evidence/t107-addendum-a.md) for error bounds,
 receipts, capture links and the three waves with three unique executors.
 
-## Previous work â€” t107 OTA valid, retained checkpoint
+## Previous work — t107 OTA valid, retained checkpoint
 
 The voice-pending text below is the earlier checkpoint. Owner acceptance
 arrived later (2026-10-11, reply `yes`, tested image unspecified); the current
@@ -92,7 +92,7 @@ inactive lease and running OTA state `valid`. See the
 [t107 report](docs/evidence/t107-power-baseline.md) and its retained evidence.
 Four waves used seven unique subagents; the parent alone operates the device.
 
-## Previous work â€” live display documentation
+## Previous work — live display documentation
 
 **Updated:** 2026-10-02
 
@@ -105,7 +105,7 @@ change was performed. Existing uncommitted development work remains separate.
 See [the capture record](docs/evidence/20261002-live/README.md) for evidence and
 limits. The earlier companion implementation record is retained below.
 
-## Previous work â€” ZeroChat companion protocol
+## Previous work — ZeroChat companion protocol
 
 **Updated:** 2026-09-13  
 **Owner:** Main  
@@ -128,10 +128,10 @@ Keep native Gemini Live as JarvisNano's standalone default while allowing an exp
 ## Verification
 
 - Preflight synchronization preserved every tracked and untracked local change through a temporary stash, fetched `origin/main`, and confirmed `main` was already current at `3760ce6b6455bba4f4bbb7ecfc243e545c37ae23`; the stash reapplied without conflicts and was removed.
-- `scripts/host-tests.sh`: all five suites passed â€” display HUD **11,451 checks**, shell **725 checks**, host core **137 tests**, tool templates **81 checks**, desk Python **37 tests**.
+- `scripts/host-tests.sh`: all five suites passed — display HUD **11,451 checks**, shell **725 checks**, host core **137 tests**, tool templates **81 checks**, desk Python **37 tests**.
 - `scripts/build-v5.sh`: ESP-IDF 5.5.4 build passed after visibly recompiling `http_routes.c` and `main.c`; `build/jarvisrobot_v5.bin` is `0x1c1ff0` bytes with 56% of the smallest app partition free.
 - Live trusted-LAN OTA passed on the physical 1.75C at `<device-ip>`: the previous firmware's physical BOOT window issued a one-time legacy token, `/api/ota/upload` accepted all **1,843,184 bytes** and returned HTTP 200 with `rebooting:true`, and the rebuilt device returned authenticated health with OTA `running=ota_0`, `boot=ota_0`, `state=valid`, `last_error=ESP_OK`, and no invalid image.
-- ZeroChat's focused integration test exercises the protocol against a real local mock HTTP device through pair â†’ cockpit â†’ lease â†’ lease-ID renewal â†’ mic pull â†’ speaker push â†’ lease-ID release. Independent final behavior and security re-reviews found no remaining blocker.
+- ZeroChat's focused integration test exercises the protocol against a real local mock HTTP device through pair → cockpit → lease → lease-ID renewal → mic pull → speaker push → lease-ID release. Independent final behavior and security re-reviews found no remaining blocker.
 
 ## Verification limits
 

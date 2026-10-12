@@ -1,7 +1,7 @@
-# t107 Addendum A â€” muted UX and render-path work
+# t107 Addendum A — muted UX and render-path work
 
 Date: 2026-10-11. Branch: `t107/codex`, continued from `6f97afb`.
-Status: **BLOCKED â€” gate `after-long` failed: `timer wake failed`.**
+Status: **BLOCKED — gate `after-long` failed: `timer wake failed`.**
 After the owner's reported manual wake at 00:12Z on 2026-10-12, paired reads
 at 00:15:40Z succeed: uptime 231,756 ms, wake `touch`, `ota_0 state=valid`,
 privacy muted, capture stopped and mic/ADC/DAC/PA off. The current manual
@@ -102,26 +102,26 @@ Missing data is not substituted or selectively rerun.
 
 | State | Before drain mV/h | After drain mV/h | Conservative rounding bound mV/h |
 |---|---:|---:|---:|
-| Idle, 12 min | 29.42 Â±34.84 | 100.20 Â±25.77 | Â±15.26 each fit |
-| WATCH, 12 min | 65.83 Â±10.52 | 126.56 Â±14.52 | Â±15.26 each fit |
-| DREAM, 7 min | 40.70 Â±101.37 | Missing | Â±25.33 before fit |
-| Sleep cycle, 30 min | âˆ’7.99 | Missing | Â±4.00 before endpoint slope |
+| Idle, 12 min | 29.42 ±34.84 | 100.20 ±25.77 | ±15.26 each fit |
+| WATCH, 12 min | 65.83 ±10.52 | 126.56 ±14.52 | ±15.26 each fit |
+| DREAM, 7 min | 40.70 ±101.37 | Missing | ±25.33 before fit |
+| Sleep cycle, 30 min | −7.99 | Missing | ±4.00 before endpoint slope |
 
-The Â± values beside awake fits are conditional 95% residual-scatter
+The ± values beside awake fits are conditional 95% residual-scatter
 intervals, separate from rounding and the unbounded systematic effects
-described above. Baseline idle endpoints rose 3784â†’3815 mV; after idle fell
-3759â†’3738 mV. WATCH endpoints were 3805â†’3802 versus 3737â†’3712 mV.
-SoC was 66â†’64% versus 57â†’54% in idle, and 64â†’62% versus 53â†’49% in WATCH.
+described above. Baseline idle endpoints rose 3784→3815 mV; after idle fell
+3759→3738 mV. WATCH endpoints were 3805→3802 versus 3737→3712 mV.
+SoC was 66→64% versus 57→54% in idle, and 64→62% versus 53→49% in WATCH.
 These larger after voltage-drain fits do **not** demonstrate a saving or
 isolate firmware effects from cell state. They are a **possible battery
 regression**, not explained away by cell state. Battery acceptance is unproven.
 The [plot](t107-addendum-a/battery-windows.png) retains every point and labels
 the absent after observations.
 
-The short live WATCH profiles averaged 37.154â†’46.078 ms/software frame
-(24.02% slower), with `gfx_render` 31.079â†’36.191% of one core. The full
-12-minute WATCH windows instead averaged 45.438â†’43.790 ms/frame (3.63%
-lower), at 5.875â†’5.878 frames/s. The short profiles both use 160 MHz; all
+The short live WATCH profiles averaged 37.154→46.078 ms/software frame
+(24.02% slower), with `gfx_render` 31.079→36.191% of one core. The full
+12-minute WATCH windows instead averaged 45.438→43.790 ms/frame (3.63%
+lower), at 5.875→5.878 frames/s. The short profiles both use 160 MHz; all
 windows use brightness 14. Clock content, scheduling, memory and SoC differ.
 The before short profile did not
 retain battery values; its nearby capture was 69%, versus 58% after.
@@ -216,8 +216,8 @@ scheduling or memory fault without diagnostics from the affected boot.
 
 **Drain assessment:** the idle fit is 3.41 times baseline and WATCH is 1.92
 times baseline; both are adverse observations and a **possible battery
-regression**. Different SoC is measured (idle 66â†’64% before versus 57â†’54%
-after; WATCH 64â†’62% versus 53â†’49%). Baseline idle voltage rises 31 mV despite
+regression**. Different SoC is measured (idle 66→64% before versus 57→54%
+after; WATCH 64→62% versus 53→49%). Baseline idle voltage rises 31 mV despite
 falling reported SoC, showing that voltage is not a direct consumption meter
 in this run. This supports relaxation/SoC as plausible confounds, not a proven
 explanation for the worse fits. There is no matched-SoC crossover, temperature
@@ -288,9 +288,9 @@ preserved. No unmute, USB flash, OTA, reboot, or repeated power window was run.
 
 | Wave | Executors | Outcome |
 |---|---|---|
-| 1 â€” read | `a1_ux`, `a1_code`, `w2_power` | Live/test navigation map, bounded code audit, PMIC/method and measured remaining-cost audit. |
-| 2 â€” build | `a1_ux`, `a1_code`, `w2_power` | Separate main routing, HUD subtraction, display fade/cache/retry and measured hot-path work. HUD ownership transfers only after subtraction is frozen. |
-| 3 â€” prove | Parent plus reused `a1_code` break-it executor | Host/build/mutations and independent immutable-patch review pass; parent OTA valid and captures pass; after timer-wake power gate fails. |
+| 1 — read | `a1_ux`, `a1_code`, `w2_power` | Live/test navigation map, bounded code audit, PMIC/method and measured remaining-cost audit. |
+| 2 — build | `a1_ux`, `a1_code`, `w2_power` | Separate main routing, HUD subtraction, display fade/cache/retry and measured hot-path work. HUD ownership transfers only after subtraction is frozen. |
+| 3 — prove | Parent plus reused `a1_code` break-it executor | Host/build/mutations and independent immutable-patch review pass; parent OTA valid and captures pass; after timer-wake power gate fails. |
 
 Three waves use three unique executors. The orchestrator owns the Jarvis board;
 the brief prohibits Jarvis/MCP calls, so this run uses a parent-owned local
