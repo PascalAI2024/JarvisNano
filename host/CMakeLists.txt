@@ -43,6 +43,11 @@ set(TRANSPORT_SRCS
     ${REPO_ROOT}/components/jr_transport/vendor/cJSON/cJSON.c
 )
 
+# Fixed-register decoding is portable; the PMIC/I2C adapter is excluded.
+set(POWER_DIAGNOSTIC_SRCS
+    ${REPO_ROOT}/components/jr_power/src/charge.c
+)
+
 add_executable(jr_host_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_core.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_transport.c
@@ -50,17 +55,20 @@ add_executable(jr_host_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_mood.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_jitter.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_audio_power.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_power_charge.c
     ${CMAKE_CURRENT_SOURCE_DIR}/fakes/fake_clock.c
     ${CMAKE_CURRENT_SOURCE_DIR}/fakes/fake_ws_transport.c
     ${CMAKE_CURRENT_SOURCE_DIR}/unity/unity.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_glance.c
     ${CORE_SRCS}
     ${TRANSPORT_SRCS}
+    ${POWER_DIAGNOSTIC_SRCS}
 )
 
 target_include_directories(jr_host_tests PRIVATE
     ${REPO_ROOT}/components/jr_core/include
     ${REPO_ROOT}/components/jr_dsp/include
+    ${REPO_ROOT}/components/jr_power/include
     ${REPO_ROOT}/components/jr_ports/include
     ${REPO_ROOT}/components/jr_transport/include
     ${REPO_ROOT}/components/jr_transport/vendor/cJSON

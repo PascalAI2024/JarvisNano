@@ -1102,6 +1102,91 @@ static esp_err_t hud_toggle_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* The charge route copies only the sampler's fixed cache. Request input never
+ * chooses an address or starts I2C, and settings are limits, not current draw.
+ * Small chunks avoid a multi-kilobyte allocation from the TLS internal heap. */
+static esp_err_t power_charge_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req)) { return ESP_OK; }
+    jr_power_charge_t sample;
+    const esp_err_t read_error = jr_power_charge_read(&sample);
+    jr_power_charge_decoded_t decoded;
+    jr_power_charge_decode(&sample, &decoded);
+    char body[384];
+    int n = snprintf(body, sizeof body,
+        "{\"read_error\":\"%s\",\"complete\":%s,\"sample_seq\":%u,"
+        "\"age_ms\":%u,\"span_ms\":%u,\"started_ms\":%llu,\"completed_ms\":%llu,"
+        "\"atomic_snapshot\":false,\"measured_current\":false,\"registers\":[",
+        esp_err_to_name(read_error), sample.complete ? "true" : "false",
+        (unsigned)sample.sample_seq, (unsigned)sample.age_ms,
+        (unsigned)sample.span_ms, (unsigned long long)sample.started_ms,
+        (unsigned long long)sample.completed_ms);
+    if (n < 0 || (size_t)n >= sizeof body) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "charge encoding failed");
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t err = httpd_resp_send_chunk(req, body, (size_t)n);
+    if (err != ESP_OK) { return err; }
+    for (size_t i = 0; i < JR_POWER_CHARGE_REG_COUNT; ++i) {
+        const jr_power_charge_reg_t *reg = &sample.regs[i];
+        n = snprintf(body, sizeof body,
+            "%s{\"address\":%u,\"raw\":%u,\"attempted\":%s,\"read_ok\":%s,"
+            "\"available\":%s,\"has_success\":%s,\"error\":%ld,"
+            "\"attempt_age_ms\":%u,\"last_success_age_ms\":%u}",
+            i ? "," : "", (unsigned)reg->address, (unsigned)reg->raw,
+            reg->attempted ? "true" : "false", reg->read_ok ? "true" : "false",
+            reg->available ? "true" : "false", reg->has_success ? "true" : "false",
+            (long)reg->error, (unsigned)reg->attempt_age_ms,
+            (unsigned)reg->last_success_age_ms);
+        if (n < 0 || (size_t)n >= sizeof body) { return ESP_FAIL; }
+        err = httpd_resp_send_chunk(req, body, (size_t)n);
+        if (err != ESP_OK) { return err; }
+    }
+    err = httpd_resp_sendstr_chunk(req, "],\"decoded\":{");
+    if (err != ESP_OK) { return err; }
+    const struct {
+        const char *name;
+        jr_power_charge_value_t value;
+    } fields[] = {
+        {"usb_present", decoded.usb_present},
+        {"battery_present", decoded.battery_present},
+        {"thermal_regulation", decoded.thermal_regulation},
+        {"current_limited", decoded.current_limited},
+        {"direction", decoded.direction},
+        {"charge_phase", decoded.charge_phase},
+        {"vindpm_active", decoded.vindpm_active},
+        {"vindpm_millivolts", decoded.vindpm_millivolts},
+        {"input_limit_milliamps", decoded.input_limit_milliamps},
+        {"charge_enabled", decoded.charge_enabled},
+        {"precharge_milliamps", decoded.precharge_milliamps},
+        {"constant_current_milliamps", decoded.constant_current_milliamps},
+        {"termination_enabled", decoded.termination_enabled},
+        {"termination_milliamps", decoded.termination_milliamps},
+        {"cv_millivolts", decoded.cv_millivolts},
+        {"thermal_threshold_c", decoded.thermal_threshold_c},
+        {"precharge_timeout_enabled", decoded.precharge_timeout_enabled},
+        {"precharge_timeout_minutes", decoded.precharge_timeout_minutes},
+        {"charge_timeout_enabled", decoded.charge_timeout_enabled},
+        {"charge_timeout_hours", decoded.charge_timeout_hours},
+        {"timeout_slows_when_limited", decoded.timeout_slows_when_limited},
+    };
+    for (size_t i = 0; i < sizeof fields / sizeof fields[0]; ++i) {
+        char value[16] = "null";
+        if (fields[i].value.available) {
+            (void)snprintf(value, sizeof value, "%u", (unsigned)fields[i].value.value);
+        }
+        n = snprintf(body, sizeof body, "%s\"%s\":%s",
+                     i ? "," : "", fields[i].name, value);
+        if (n < 0 || (size_t)n >= sizeof body) { return ESP_FAIL; }
+        err = httpd_resp_send_chunk(req, body, (size_t)n);
+        if (err != ESP_OK) { return err; }
+    }
+    err = httpd_resp_sendstr_chunk(req, "}}");
+    return err == ESP_OK ? httpd_resp_send_chunk(req, NULL, 0) : err;
+}
+
 static esp_err_t sensors_handler(httpd_req_t *req)
 {
     /* Start the samplers on first use rather than at boot — see the note in
@@ -2899,7 +2984,7 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
     static const char *init_names[] = { "stopped", "starting", "ready", "failed" };
     const char *init_name = d.init_state <= JR_DISPLAY_INIT_FAILED
                                 ? init_names[d.init_state] : "?";
-    char buf[640];
+    char buf[1024];
     int n = snprintf(buf, sizeof buf,
         "{\"init\":\"%s\",\"last_error\":\"%s\",\"task_running\":%s,"
         "\"blanked\":%s,\"requested_face\":%d,\"applied_face\":%d,"
@@ -2908,7 +2993,12 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         "\"asset_load_failures\":%u,\"flush_submissions\":%u,"
         "\"flush_completions\":%u,\"flush_errors\":%u,\"actual_fps\":%u,"
         "\"render_us\":%u,\"render_frames\":%u,\"render_frame_us\":%u,"
-        "\"current_asset_bytes\":%u,\"free_psram\":%u,\"stack_hwm\":%u}",
+        "\"current_asset_bytes\":%u,\"free_psram\":%u,\"stack_hwm\":%u,"
+        "\"boot_timing\":{\"time_base\":\"esp_timer_since_boot\","
+        "\"optical\":false,\"includes_rom\":false,"
+        "\"init_started\":%s,\"init_finished\":%s,\"first_transfer_valid\":%s,"
+        "\"init_start_boot_ms\":%u,\"init_end_boot_ms\":%u,"
+        "\"first_transfer_done_boot_ms\":%u}}",
         init_name, esp_err_to_name(d.last_error),
         d.task_running ? "true" : "false",
         d.blanked ? "true" : "false",
@@ -2921,15 +3011,20 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         (unsigned)d.render_us, (unsigned)d.render_frames,
         (unsigned)d.render_frame_us,
         (unsigned)d.current_asset_bytes, (unsigned)d.free_psram_bytes,
-        (unsigned)d.task_stack_hwm);
-    if (n < 0) {
+        (unsigned)d.task_stack_hwm,
+        d.boot_timing.init_started ? "true" : "false",
+        d.boot_timing.init_finished ? "true" : "false",
+        d.boot_timing.first_transfer_valid ? "true" : "false",
+        (unsigned)d.boot_timing.init_start_boot_ms,
+        (unsigned)d.boot_timing.init_end_boot_ms,
+        (unsigned)d.boot_timing.first_transfer_done_boot_ms);
+    if (n < 0 || (size_t)n >= sizeof buf) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "encoding failed");
         return ESP_OK;
     }
-    size_t len = (size_t)n < sizeof buf ? (size_t)n : sizeof buf - 1;
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    httpd_resp_send(req, buf, len);
+    httpd_resp_send(req, buf, (size_t)n);
     return ESP_OK;
 }
 
@@ -4507,6 +4602,7 @@ void start_diag_http(void)
         { .uri = "/api/companion/audio/out", .method = HTTP_POST,
           .handler = companion_audio_out_handler },
         { .uri = "/api/display",     .method = HTTP_GET, .handler = display_diag_handler },
+        { .uri = "/api/power/charge", .method = HTTP_GET, .handler = power_charge_handler },
         { .uri = "/api/diag/vadlog", .method = HTTP_GET, .handler = vadlog_csv_handler },
         { .uri = "/api/device/health", .method = HTTP_GET,
           .handler = device_health_handler },

@@ -1,4 +1,22 @@
-# Current work — t107 Addendum A, power gate blocked
+# Current work — t107 charged A/B, B diagnosis, then companion
+
+**Updated:** 2026-10-12 UTC
+
+Main is merged at `3b5dbd7`. The charged old/new idle comparison waits for
+fresh battery SoC >=50% with USB and charging both disconnected. Only battery
+reads run during that wait. Frozen `7578238` and rebuilt `0b4108f` images are
+retained; no diagnostic or companion image is flashed before the pair ends.
+
+The B diagnostic adds a paired, fixed-register charge cache and software
+display startup timing. Charge and rail settings remain unchanged. Charge
+limits are configuration, not measured net current. First completed display
+transfer is a software proxy, not optical wake-to-first-pixel proof.
+
+C read waves are complete. Companion device acceptance precedes Deck device
+acceptance. Owner-reported voice acceptance below does not prove later images;
+privacy stays muted and new-image voice remains an owner check.
+
+## Retained Addendum A checkpoint — power gate blocked
 
 **Updated:** 2026-10-12 UTC
 

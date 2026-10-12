@@ -469,6 +469,19 @@ The QSPI ceiling itself is 40 MHz × 4 lanes = 20 MB/s: 21.7 ms a frame, ~46 fps
 
 ## Execution order
 
+### t107 B/C bounded follow-up
+
+| Item | State | Acceptance |
+|---|---|---|
+| Read-only AXP2101 charge diagnosis | Built; host/device proof pending | Paired cached raw registers, explicit errors/ages and reserved-code rejection; net gauge rate and conditional safe current proposal. No charge-setting writes. |
+| Living companion | Read wave complete; build/device proof pending | USB Nightstand, local Glance, measured ladder and wake/power proof with privacy authoritative. |
+| Deck face | Offline bridge built; firmware/device proof pending | Atomic producer/operator fence, strict compact projection, live-worker and attention captures after companion passes. |
+
+The charged frozen-image A/B finishes before any new firmware flash. The
+historical 1800-second timer failure remains open; three 300-second successes
+do not close it. Software display transfer timing does not replace optical
+wake proof. No battery-life gain is accepted from voltage fits alone.
+
 1. **Correctness:** N6.1–N6.4.
 2. **The glass, content first:** N7.14–N7.16. The ring is live but two of its
    four screens have nothing worth reading; that is the same failure the side

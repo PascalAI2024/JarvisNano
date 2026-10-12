@@ -6,18 +6,19 @@
  *
  * Ported 2026-07-18 from firmware/components/jarvis_pmic (Phase 1 of
  * docs/JARVISNANO_OS_PLAN.md). Register access is carried over verbatim.
- * As there, this component is READ-ONLY and NEVER touches rail configuration:
+ * Telemetry and charge diagnostics NEVER touch charge or rail configuration:
  * the board declares the AXP2101 with init_skip:true because the factory
  * power-on defaults already bring up the display and audio rails, and
  * re-sequencing them is risky. It only enables two detection bits (battery ADC
- * channel, battery-presence detect), neither of which is a power rail.
+ * channel, battery-presence detect), neither of which is a power rail. PKEY
+ * IRQ setup/ack and explicit jr_power_off() retain their existing writes.
  *
  * Threading, as with jr_imu, is inverted relative to the original: a slow
- * sampler task owns the I2C traffic and jr_power_read() is a non-blocking
- * snapshot copy. The battery rim arc (PWR-06) is drawn every frame at 24 fps,
+ * sampler task owns the telemetry I2C traffic and readers copy the cache.
+ * The battery rim arc (PWR-06) is drawn every frame at 24 fps,
  * and I2C in the render path would be a frame-rate bug waiting to happen.
- * Battery state moves on a scale of minutes, so the sampler runs at 0.2 Hz —
- * ~5 transactions per 5 s, negligible on the shared bus.
+ * Battery samples run at 1 Hz and PKEY polling at 500 ms. Fixed read-only
+ * charge diagnostics start every 5 s, one bounded burst per sampler pass.
  *
  * Register facts from XPowersLib (lewisxhe/XPowersLib, MIT):
  *   STATUS1 0x00  bit5 = VBUS good, bit3 = battery present
@@ -35,6 +36,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "jr_power/charge.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -60,7 +62,7 @@ void jr_power_pkey_take(uint32_t *out_short, uint32_t *out_long);
  * @brief Start the background battery sampler.
  *
  * Lazily acquires the shared bus and AXP2101 handle, enables the battery ADC
- * channel and presence detection, then spawns a 0.2 Hz sampler. Safe to call
+ * channel and presence detection, then spawns a 1 Hz battery sampler. Safe to call
  * twice. Never fatal: on failure the device reports present=false.
  */
 esp_err_t jr_power_start(void);
@@ -69,13 +71,23 @@ esp_err_t jr_power_start(void);
 void jr_power_stop(void);
 
 /**
- * @brief Copy the most recent snapshot. NON-BLOCKING — safe from the render
- *        task or an httpd handler.
+ * @brief Copy the most recent battery snapshot, waiting at most 20 ms for
+ *        its cache mutex. Performs no I2C.
  *
  * @param[out] out  filled on ESP_OK; ESP_ERR_INVALID_STATE before the first
  *                  sample lands (the sampler takes one period to warm up).
  */
 esp_err_t jr_power_read(jr_power_t *out);
+
+/**
+ * Copy a completed fixed-register charge diagnostic. Try-lock only; performs
+ * no I2C. ESP_ERR_INVALID_STATE until the first batch completes (about 3 s);
+ * ESP_ERR_TIMEOUT if the cache is busy. All-failed batches still return ESP_OK:
+ * inspect each register's attempted/read_ok/error/available and ages. Aged
+ * values (>10 s since their actual read) are unavailable to the pure decoder.
+ * Reads occur over span_ms; this is not an atomic hardware snapshot.
+ */
+esp_err_t jr_power_charge_read(jr_power_charge_t *out);
 
 /**
  * @brief Power the whole device off through the PMIC: every rail, the ESP32

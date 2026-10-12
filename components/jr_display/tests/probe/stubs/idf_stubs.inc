@@ -53,14 +53,18 @@ void heap_caps_free(void *p)
 size_t heap_caps_get_free_size(unsigned c) { (void)c; return 0; }
 static int64_t s_fake_us;
 int64_t esp_timer_get_time(void) { return s_fake_us; }
-esp_err_t esp_vfs_spiffs_register(const esp_vfs_spiffs_conf_t *c) { (void)c; return ESP_OK; }
+static esp_err_t s_stub_spiffs_error;
+esp_err_t esp_vfs_spiffs_register(const esp_vfs_spiffs_conf_t *c) { (void)c; return s_stub_spiffs_error; }
 esp_err_t esp_spiffs_info(const char *l, size_t *t, size_t *u) { (void)l; *t = *u = 0; return ESP_OK; }
+static esp_lcd_panel_io_callbacks_t s_stub_panel_callbacks;
+static void *s_stub_panel_callback_ctx;
 esp_err_t esp_lcd_panel_io_register_event_callbacks(
     esp_lcd_panel_io_handle_t io, const esp_lcd_panel_io_callbacks_t *cb, void *ctx)
-{ (void)io; (void)cb; (void)ctx; return ESP_OK; }
+{ (void)io; s_stub_panel_callbacks = *cb; s_stub_panel_callback_ctx = ctx; return ESP_OK; }
+static esp_err_t s_stub_draw_error;
 esp_err_t esp_lcd_panel_draw_bitmap(esp_lcd_panel_handle_t p, int a, int b,
                                     int c, int d, const void *px)
-{ (void)p; (void)a; (void)b; (void)c; (void)d; (void)px; return ESP_OK; }
+{ (void)p; (void)a; (void)b; (void)c; (void)d; (void)px; return s_stub_draw_error; }
 void taskENTER_CRITICAL(portMUX_TYPE *m) { (void)m; }
 void taskEXIT_CRITICAL(portMUX_TYPE *m) { (void)m; }
 BaseType_t xTaskCreatePinnedToCore(void (*fn)(void *), const char *n, uint32_t s,
@@ -68,7 +72,9 @@ BaseType_t xTaskCreatePinnedToCore(void (*fn)(void *), const char *n, uint32_t s
 { (void)fn; (void)n; (void)s; (void)a; (void)p; (void)o; (void)c; return pdPASS; }
 static unsigned s_stub_notifies;
 void xTaskNotifyGive(TaskHandle_t t) { (void)t; s_stub_notifies++; }
-uint32_t ulTaskNotifyTake(BaseType_t c, TickType_t t) { (void)c; (void)t; return 0; }
+static void (*s_stub_notify_take_hook)(void);
+uint32_t ulTaskNotifyTake(BaseType_t c, TickType_t t)
+{ (void)c; (void)t; if (s_stub_notify_take_hook) { s_stub_notify_take_hook(); } return 0; }
 TaskHandle_t xTaskGetCurrentTaskHandle(void) { return NULL; }
 TickType_t xTaskGetTickCount(void) { return 0; }
 void vTaskDelay(TickType_t t) { (void)t; }
@@ -77,11 +83,20 @@ SemaphoreHandle_t xSemaphoreCreateMutex(void) { return (SemaphoreHandle_t)1; }
 BaseType_t xSemaphoreTake(SemaphoreHandle_t s, TickType_t t) { (void)s; (void)t; return pdTRUE; }
 BaseType_t xSemaphoreGive(SemaphoreHandle_t s) { (void)s; return pdTRUE; }
 void vSemaphoreDelete(SemaphoreHandle_t s) { (void)s; }
-gfx_handle_t gfx_emote_init(const gfx_core_config_t *c) { (void)c; return NULL; }
-gfx_disp_t *gfx_disp_add(gfx_handle_t h, const gfx_disp_config_t *c) { (void)h; (void)c; return NULL; }
+static bool s_stub_engine_ready;
+static void (*s_stub_disp_add_hook)(gfx_disp_t *, const gfx_disp_config_t *);
+gfx_handle_t gfx_emote_init(const gfx_core_config_t *c) { (void)c; return s_stub_engine_ready ? (gfx_handle_t)1 : NULL; }
+gfx_disp_t *gfx_disp_add(gfx_handle_t h, const gfx_disp_config_t *c)
+{
+    (void)h;
+    gfx_disp_t *disp = s_stub_engine_ready ? (gfx_disp_t *)2 : NULL;
+    if (disp && s_stub_disp_add_hook) { s_stub_disp_add_hook(disp, c); }
+    return disp;
+}
 static void *s_stub_disp_user_data;
 void *gfx_disp_get_user_data(gfx_disp_t *d) { (void)d; return s_stub_disp_user_data; }
-esp_err_t gfx_disp_flush_ready(gfx_disp_t *d, bool ok) { (void)d; (void)ok; return ESP_OK; }
+static unsigned s_stub_flush_ready_calls;
+esp_err_t gfx_disp_flush_ready(gfx_disp_t *d, bool ok) { (void)d; (void)ok; s_stub_flush_ready_calls++; return ESP_OK; }
 static unsigned s_stub_refreshes;
 void gfx_disp_refresh_all(gfx_disp_t *d) { (void)d; s_stub_refreshes++; }
 static unsigned s_stub_lock_failures;
@@ -96,7 +111,7 @@ esp_err_t gfx_emote_lock(gfx_handle_t h)
 esp_err_t gfx_emote_unlock(gfx_handle_t h) { (void)h; return ESP_OK; }
 uint32_t g_stub_render_fps;
 esp_err_t gfx_emote_set_fps(gfx_handle_t h, uint32_t fps) { (void)h; g_stub_render_fps = fps; return ESP_OK; }
-gfx_obj_t *gfx_anim_create(gfx_disp_t *d) { (void)d; return NULL; }
+gfx_obj_t *gfx_anim_create(gfx_disp_t *d) { (void)d; return s_stub_engine_ready ? (gfx_obj_t *)3 : NULL; }
 esp_err_t gfx_obj_align(gfx_obj_t *o, gfx_align_t a, int x, int y)
 { (void)o; (void)a; (void)x; (void)y; return ESP_OK; }
 static bool s_stub_anim_visible;
@@ -139,7 +154,16 @@ esp_err_t eaf_frame_decode(eaf_format_handle_t h, int i, uint8_t *buf, size_t n,
     s_stub_eaf_decodes++;
     return ESP_OK;
 }
-esp_err_t jarvis_board_display_get(jarvis_board_display_t *o) { (void)o; return ESP_OK; }
+static esp_err_t s_stub_board_get_error;
+static int64_t s_stub_board_init_us;
+static jarvis_board_display_t s_stub_board_display;
+esp_err_t jarvis_board_display_get(jarvis_board_display_t *o)
+{
+    s_fake_us += s_stub_board_init_us;
+    if (s_stub_board_get_error != ESP_OK) { return s_stub_board_get_error; }
+    *o = s_stub_board_display;
+    return ESP_OK;
+}
 static uint8_t s_stub_panel_brightness;
 esp_err_t jarvis_board_set_brightness(uint8_t p) { s_stub_panel_brightness = p; return ESP_OK; }
 

@@ -161,6 +161,13 @@ typedef struct {
     volatile uint32_t render_us;
     volatile uint32_t render_frames;
     volatile uint32_t render_frame_us;
+    volatile uint32_t init_start_boot_ms;
+    volatile uint32_t init_end_boot_ms;
+    volatile uint32_t first_transfer_done_boot_ms;
+    volatile uint32_t init_started;
+    volatile uint32_t init_finished;
+    /* 0 = no callback, 2 = publishing, 1 = timestamp available. */
+    volatile uint32_t first_transfer_state;
 } jr_display_ctx_t;
 
 static jr_display_ctx_t s_display = {
@@ -4821,6 +4828,17 @@ static bool IRAM_ATTR panel_color_done(esp_lcd_panel_io_handle_t panel_io,
     (void)event;
     jr_display_ctx_t *ctx = (jr_display_ctx_t *)user_ctx;
     if (ctx && ctx->disp) {
+        uint32_t expected = 0U;
+        if (__atomic_compare_exchange_n(&ctx->first_transfer_state, &expected,
+                                        2U, false, __ATOMIC_RELAXED,
+                                        __ATOMIC_RELAXED)) {
+            /* This callback can run before init finishes: gfx_disp_add may
+             * immediately flush. Submission/snapshot bytes alone never mark
+             * transfer completion. No optical or complete-frame claim. */
+            diag_store(&ctx->first_transfer_done_boot_ms,
+                       (uint32_t)(esp_timer_get_time() / 1000));
+            __atomic_store_n(&ctx->first_transfer_state, 1U, __ATOMIC_RELEASE);
+        }
         diag_inc(&ctx->flush_completions);
         (void)gfx_disp_flush_ready(ctx->disp, true);
     }
@@ -5408,6 +5426,18 @@ static esp_err_t display_engine_init(jr_display_ctx_t *ctx)
     return ESP_OK;
 }
 
+static esp_err_t display_engine_init_timed(jr_display_ctx_t *ctx)
+{
+    diag_store(&ctx->init_start_boot_ms,
+               (uint32_t)(esp_timer_get_time() / 1000));
+    __atomic_store_n(&ctx->init_started, 1U, __ATOMIC_RELEASE);
+    esp_err_t err = display_engine_init(ctx);
+    diag_store(&ctx->init_end_boot_ms,
+               (uint32_t)(esp_timer_get_time() / 1000));
+    __atomic_store_n(&ctx->init_finished, 1U, __ATOMIC_RELEASE);
+    return err;
+}
+
 static void display_task(void *arg)
 {
     jr_display_ctx_t *ctx = (jr_display_ctx_t *)arg;
@@ -5415,7 +5445,7 @@ static void display_task(void *arg)
     diag_store(&ctx->task_running, true);
     diag_store(&ctx->init_state, JR_DISPLAY_INIT_STARTING);
 
-    esp_err_t err = display_engine_init(ctx);
+    esp_err_t err = display_engine_init_timed(ctx);
     if (err != ESP_OK) {
         __atomic_store_n(&ctx->last_error, err, __ATOMIC_RELAXED);
         diag_store(&ctx->init_state, JR_DISPLAY_INIT_FAILED);
@@ -5585,6 +5615,24 @@ esp_err_t jr_display_get_diag(jr_display_diag_t *out_diag)
     out_diag->render_us = diag_load(&s_display.render_us);
     out_diag->render_frames = diag_load(&s_display.render_frames);
     out_diag->render_frame_us = diag_load(&s_display.render_frame_us);
+    jr_display_boot_timing_t *timing = &out_diag->boot_timing;
+    /* Read end first: observing its release also includes the start publish. */
+    timing->init_finished =
+        __atomic_load_n(&s_display.init_finished, __ATOMIC_ACQUIRE) != 0U;
+    timing->init_started =
+        __atomic_load_n(&s_display.init_started, __ATOMIC_ACQUIRE) != 0U;
+    timing->first_transfer_valid =
+        __atomic_load_n(&s_display.first_transfer_state, __ATOMIC_ACQUIRE) == 1U;
+    if (timing->init_started) {
+        timing->init_start_boot_ms = diag_load(&s_display.init_start_boot_ms);
+    }
+    if (timing->init_finished) {
+        timing->init_end_boot_ms = diag_load(&s_display.init_end_boot_ms);
+    }
+    if (timing->first_transfer_valid) {
+        timing->first_transfer_done_boot_ms =
+            diag_load(&s_display.first_transfer_done_boot_ms);
+    }
     return ESP_OK;
 }
 

@@ -34,6 +34,7 @@
 #include "jr_display.c"
 
 #include <assert.h>
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -3386,6 +3387,191 @@ static void test_battery_rim_is_strip_invariant_at_every_percent(void)
     free(whole); free(strips);
 }
 
+static jmp_buf s_boot_init_done;
+static bool s_boot_fail_after_early_transfer;
+
+static void boot_init_reached_presenter_loop(void)
+{
+    longjmp(s_boot_init_done, 1);
+}
+
+/* Run the real display_task initialization, leaving its infinite presenter
+ * loop at the first scheduler wait. This also proves the timed wrapper is
+ * actually wired into production, rather than testing an unused helper. */
+static void run_boot_init(void)
+{
+    s_stub_notify_take_hook = boot_init_reached_presenter_loop;
+    if (setjmp(s_boot_init_done) == 0) {
+        display_task(&s_display);
+    }
+    s_stub_notify_take_hook = NULL;
+}
+
+static void boot_timing_fixture(void)
+{
+    memset(&s_display, 0, sizeof s_display);
+    s_display.test_pattern = JR_DISPLAY_TEST_WHITE;
+    s_stub_board_display = (jarvis_board_display_t){
+        .panel = (esp_lcd_panel_handle_t)1,
+        .io = (esp_lcd_panel_io_handle_t)1,
+        .width = HUD_W, .height = HUD_H,
+    };
+    s_stub_board_get_error = s_stub_spiffs_error = s_stub_draw_error = ESP_OK;
+    s_stub_board_init_us = 17000;
+    s_stub_engine_ready = true;
+    s_stub_disp_add_hook = NULL;
+    s_boot_fail_after_early_transfer = false;
+    s_stub_disp_user_data = NULL;
+    s_stub_panel_callbacks = (esp_lcd_panel_io_callbacks_t){0};
+    s_stub_panel_callback_ctx = NULL;
+    s_stub_flush_ready_calls = 0;
+    s_stub_lock_failures = 0;
+    s_stub_lock_hook = NULL;
+    s_panel_off = 0U;
+    s_dial_blit = false;
+    s_fake_us = 100123;
+}
+
+static jr_display_boot_timing_t boot_timing_read(void)
+{
+    jr_display_diag_t diag;
+    CHECK(jr_display_get_diag(&diag) == ESP_OK, "boot timing uses public diagnostic readback");
+    return diag.boot_timing;
+}
+
+static void test_boot_timing_waits_for_a_real_completion(void)
+{
+    const jr_display_ctx_t saved = s_display;
+    boot_timing_fixture();
+    jr_display_boot_timing_t timing = boot_timing_read();
+    CHECK(!timing.init_started && !timing.init_finished &&
+          !timing.first_transfer_valid && timing.first_transfer_done_boot_ms == 0U,
+          "no boot timing exists before initialization or a callback");
+    run_boot_init();
+    timing = boot_timing_read();
+    CHECK(s_display.init_state == JR_DISPLAY_INIT_READY && timing.init_started &&
+          timing.init_finished && timing.init_start_boot_ms == 100U &&
+          timing.init_end_boot_ms == 117U,
+          "actual init task records timer-relative start/end, including elapsed board work");
+    CHECK(!timing.first_transfer_valid, "successful init alone is not a completed transfer");
+
+    uint16_t strip[HUD_W] = {0};
+    s_stub_disp_user_data = &s_display;
+    s_stub_draw_error = ESP_FAIL;
+    panel_flush(s_display.disp, 0, 0, HUD_W, 1, strip);
+    timing = boot_timing_read();
+    CHECK(!timing.first_transfer_valid && s_display.flush_errors == 1U &&
+          s_stub_flush_ready_calls == 1U && s_display.snapshot_frame_dropped == 1U,
+          "failed submission does not invent DMA completion and still releases renderer");
+    s_stub_draw_error = ESP_OK;
+    panel_flush(s_display.disp, 0, 0, HUD_W, 1, strip);
+    CHECK(!boot_timing_read().first_transfer_valid,
+          "successful submission and mirror handling are not transfer completion");
+    s_fake_us = 238765;
+    CHECK(s_stub_panel_callbacks.on_color_trans_done && s_stub_panel_callback_ctx == &s_display,
+          "real init registered the production callback with its context");
+    (void)s_stub_panel_callbacks.on_color_trans_done(NULL, NULL, s_stub_panel_callback_ctx);
+    timing = boot_timing_read();
+    CHECK(timing.first_transfer_valid && timing.first_transfer_done_boot_ms == 238U &&
+          s_display.flush_completions == 1U && s_stub_flush_ready_calls == 2U,
+          "callback latches milliseconds and preserves completion/flush-ready semantics");
+    s_fake_us = 999999;
+    (void)s_stub_panel_callbacks.on_color_trans_done(NULL, NULL, s_stub_panel_callback_ctx);
+    CHECK(boot_timing_read().first_transfer_done_boot_ms == 238U &&
+          s_display.flush_completions == 2U && s_stub_flush_ready_calls == 3U,
+          "later callbacks release strips but never replace the first timestamp");
+    s_display = saved;
+    s_stub_disp_user_data = NULL;
+    s_stub_engine_ready = false;
+}
+
+static void boot_init_immediate_transfer(gfx_disp_t *disp, const gfx_disp_config_t *cfg)
+{
+    s_stub_disp_user_data = cfg->user_data;
+    uint16_t strip[HUD_W] = {0};
+    cfg->flush_cb(disp, 0, 0, HUD_W, 1, strip);
+    CHECK(s_display.disp == disp && !boot_timing_read().first_transfer_valid,
+          "first-flush race publishes display handle without inventing completion");
+    s_fake_us += 5333;
+    (void)s_stub_panel_callbacks.on_color_trans_done(NULL, NULL, s_stub_panel_callback_ctx);
+    jr_display_boot_timing_t timing = boot_timing_read();
+    CHECK(timing.init_started && !timing.init_finished && timing.first_transfer_valid &&
+          timing.first_transfer_done_boot_ms == 122U,
+          "actual early callback is valid before init finishes");
+    s_fake_us += 9000;
+    if (s_boot_fail_after_early_transfer) {
+        s_stub_engine_ready = false;
+    }
+}
+
+static void test_boot_timing_records_init_failure_and_early_callback(void)
+{
+    const jr_display_ctx_t saved = s_display;
+    for (int fail_at = 0; fail_at < 3; ++fail_at) {
+        boot_timing_fixture();
+        if (fail_at == 0) s_stub_board_get_error = ESP_FAIL;
+        if (fail_at == 1) s_stub_spiffs_error = ESP_FAIL;
+        if (fail_at == 2) s_stub_engine_ready = false;
+        run_boot_init();
+        jr_display_boot_timing_t timing = boot_timing_read();
+        CHECK(s_display.init_state == JR_DISPLAY_INIT_FAILED && s_display.last_error == ESP_FAIL &&
+              timing.init_started && timing.init_finished && timing.init_start_boot_ms == 100U &&
+              timing.init_end_boot_ms == 117U && !timing.first_transfer_valid,
+              "init failure %d still ends timing without fabricating a transfer", fail_at);
+    }
+    boot_timing_fixture();
+    s_stub_disp_add_hook = boot_init_immediate_transfer;
+    run_boot_init();
+    jr_display_boot_timing_t timing = boot_timing_read();
+    CHECK(s_display.init_state == JR_DISPLAY_INIT_READY && timing.init_finished &&
+          timing.init_end_boot_ms == 131U && timing.first_transfer_valid &&
+          timing.first_transfer_done_boot_ms < timing.init_end_boot_ms,
+          "callback-before-init-end remains coherent after successful init");
+    boot_timing_fixture();
+    s_stub_disp_add_hook = boot_init_immediate_transfer;
+    s_boot_fail_after_early_transfer = true;
+    run_boot_init();
+    timing = boot_timing_read();
+    CHECK(s_display.init_state == JR_DISPLAY_INIT_FAILED &&
+          s_display.last_error == ESP_ERR_NO_MEM && timing.init_finished &&
+          timing.init_end_boot_ms == 131U && timing.first_transfer_valid &&
+          timing.first_transfer_done_boot_ms == 122U,
+          "later init failure cannot erase a genuinely completed early transfer");
+    s_stub_disp_add_hook = NULL;
+    s_stub_disp_user_data = NULL;
+    s_stub_engine_ready = false;
+    s_display = saved;
+}
+
+static void test_boot_timing_ignores_unusable_callbacks_and_unpublished_stamp(void)
+{
+    const jr_display_ctx_t saved = s_display;
+    boot_timing_fixture();
+    (void)panel_color_done(NULL, NULL, NULL);
+    (void)panel_color_done(NULL, NULL, &s_display);
+    CHECK(!boot_timing_read().first_transfer_valid && s_display.flush_completions == 0U &&
+          s_stub_flush_ready_calls == 0U, "missing context/display cannot publish a timing marker");
+    s_display.first_transfer_done_boot_ms = 42U;
+    s_display.first_transfer_state = 2U;
+    CHECK(!boot_timing_read().first_transfer_valid &&
+          boot_timing_read().first_transfer_done_boot_ms == 0U,
+          "in-progress publication is unavailable through the public API");
+    s_display.first_transfer_state = 0U;
+    s_display.disp = (gfx_disp_t *)2;
+    s_fake_us = 999;
+    (void)panel_color_done(NULL, NULL, &s_display);
+    jr_display_boot_timing_t timing = boot_timing_read();
+    CHECK(timing.first_transfer_valid && timing.first_transfer_done_boot_ms == 0U,
+          "a genuine sub-millisecond callback remains valid; zero is not a validity sentinel");
+    s_fake_us = 1000000;
+    (void)panel_color_done(NULL, NULL, &s_display);
+    CHECK(boot_timing_read().first_transfer_valid &&
+          boot_timing_read().first_transfer_done_boot_ms == 0U,
+          "zero first timestamp is still latched exactly once");
+    s_display = saved;
+    s_stub_engine_ready = false;
+}
+
 int main(void)
 {
     test_every_face_has_a_clip_and_a_hud_face();
@@ -3453,6 +3639,9 @@ int main(void)
     test_finite_fades_use_elapsed_time_at_rest();
     test_dial_sources_release_without_invalidating_vendor_ownership();
     test_battery_rim_is_strip_invariant_at_every_percent();
+    test_boot_timing_waits_for_a_real_completion();
+    test_boot_timing_records_init_failure_and_early_callback();
+    test_boot_timing_ignores_unusable_callbacks_and_unpublished_stamp();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);

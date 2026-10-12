@@ -90,3 +90,17 @@ this boot and RTC holds no timed wake history. Count 3 permits an intervening
 wake/resleep inference but cannot identify when or why. Timer/API acceptance
 and battery regressions remain open; manual recovery cannot close them.
 See [Addendum A](docs/evidence/t107-addendum-a.md).
+
+## t107 B diagnosis — 2026-10-12
+
+The deployed sensor API does not expose charge-limit registers or measured
+net charge current. A fixed sampler-only AXP2101 cache is added for paired
+diagnosis: per-register errors, attempt age and last successful-read age are
+retained; failed or stale values cannot decode as current configuration.
+HTTP reads perform no PMIC transaction. Charge and rail registers are not
+written by this diagnostic. Live readback remains pending the charged A/B.
+
+Display startup previously had no first-transfer timing. The diagnostic
+records init start/end and the first successful color-transfer callback,
+including early callbacks and failed init. It is a boot software proxy;
+physical first-light and a complete Glance remain unmeasured.

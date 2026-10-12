@@ -1,9 +1,10 @@
-# jr_power — AXP2101 battery telemetry (READ-ONLY; never touches power rails).
+# jr_power — AXP2101 battery/charge telemetry; diagnostics add no PMIC writes.
 # Ported from firmware/components/jarvis_pmic in Phase 1; register access is
 # verbatim, threading is a slow sampler + non-blocking read (see the header).
 idf_component_register(
     SRCS
         "src/jr_power.c"
+        "src/charge.c"
     INCLUDE_DIRS
         "include"
     REQUIRES

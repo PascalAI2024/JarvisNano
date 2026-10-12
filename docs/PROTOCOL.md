@@ -364,6 +364,34 @@ opens/closes controls, and a 1.5–5 second runtime BOOT hold opens pairing.
 Sustained face-down enters flip privacy; sustained face-up clears it only when
 the flip created the mute. A hold/controls mute survives reorientation.
 
+## Paired charge diagnosis
+
+`GET /api/power/charge` requires the existing bearer pairing token. It copies
+the sampler's fixed AXP2101 register cache; it never starts an I2C read and
+accepts no address or programming argument. There is no charge write route.
+The fixed addresses are `00,01,15,16,18,50,58,59,5a,5b,61,62,63,64,65,67`.
+Seven read bursts span several sampler passes, so `atomic_snapshot` is false.
+
+The response reports `read_error`, `complete`, `sample_seq`, `age_ms`,
+`span_ms`, monotonic `started_ms` and `completed_ms`. Each register includes
+its raw byte, attempt/result/availability flags, numeric driver error,
+`attempt_age_ms` and `last_success_age_ms`. Never-attempted ages are
+`4294967295`. `has_success` describes history; it does not make a failed
+latest attempt usable. Values older than 10 seconds are unavailable.
+
+`decoded` uses numbers for available fields and null for failed, stale,
+never-read or reserved codes. Boolean values use 0/1. `direction` is
+0 standby, 1 charge, 2 discharge. `charge_phase` is 0 trickle, 1 precharge,
+2 constant current, 3 constant voltage, 4 done, 5 not charging.
+Milliamps fields are configured limits; `measured_current` is false.
+TS/JEITA bytes remain raw where decoding has not been implemented.
+
+`GET /api/display` additionally reports `boot_timing`, with init start/end
+and first completed color-transfer times in milliseconds since `esp_timer`
+boot. Flags distinguish missing events from a valid zero timestamp. These
+times exclude ROM startup and do not measure optical first-light or prove a
+complete face reached the panel.
+
 ## Private Android route
 
 The Android project currently provides cockpit compatibility and a BLE/client

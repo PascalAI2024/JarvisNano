@@ -83,6 +83,20 @@ typedef struct {
     jr_display_test_pattern_t test_pattern;
 } jr_display_snapshot_info_t;
 
+/* Milliseconds since this boot's esp_timer startup, not the external wake
+ * edge: ROM/startup latency is excluded. The first actual color-DMA callback
+ * marks one completed transfer, not optical first-light or a full frame.
+ * A false validity flag means the corresponding timestamp is unavailable.
+ * init_finished includes failed init attempts; init_state gives the outcome. */
+typedef struct {
+    uint32_t init_start_boot_ms;
+    uint32_t init_end_boot_ms;
+    uint32_t first_transfer_done_boot_ms;
+    bool init_started;
+    bool init_finished;
+    bool first_transfer_valid;
+} jr_display_boot_timing_t;
+
 typedef struct {
     jr_display_init_state_t init_state;
     esp_err_t last_error;
@@ -112,6 +126,7 @@ typedef struct {
     uint32_t render_us;
     uint32_t render_frames;
     uint32_t render_frame_us;
+    jr_display_boot_timing_t boot_timing;
 } jr_display_diag_t;
 
 /* Start the fail-soft presenter and return its nonblocking display port.
