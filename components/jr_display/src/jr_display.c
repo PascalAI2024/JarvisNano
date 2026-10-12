@@ -148,6 +148,9 @@ typedef struct {
     uint32_t missing_faces;         /* bit per face whose clip this art image lacks */
     jr_face_t shown_face;           /* the clip actually bound: face, or its fallback */
     bool dream_active;             /* presenter-owned stopped emote */
+    bool quiet_active;             /* visible one-shot muted HOME frame */
+    uint32_t quiet_clock_key, quiet_env_key, quiet_caption_key;
+    uint32_t quiet_flush_error_key;
     uint32_t dream_clock_key;
     uint32_t dream_rim_key;
     jr_display_rest_mode_t rest_mode;
@@ -1085,6 +1088,7 @@ static int s_clock_phase_ms;                  /* render task only, 0..999 */
  * from one set with minutes from another). SINGLE-WRITER: the app task calls
  * jr_display_clock_set at ~1 Hz; the flush only reads. 0 at boot = off. */
 static volatile uint32_t s_clock_word;
+static volatile uint32_t s_caption_revision; /* changed caption bytes, not ticks */
 
 /* Advance both fades ONE step. Called from panel_flush only at the y==0
  * strip — the same frame-start definition snapshot_record_flush relies on —
@@ -1360,6 +1364,7 @@ void jr_display_caption_set(const char *text)
     __atomic_store_n(&s_caption_on, JR_DISPLAY_CAPTION_ACTIVE |
                      (caption_is_ambient(s_caption_text)
                          ? JR_DISPLAY_CAPTION_AMBIENT : 0), __ATOMIC_RELEASE);
+    __atomic_add_fetch(&s_caption_revision, 1U, __ATOMIC_RELEASE);
     nav_wake();
 }
 
@@ -1376,6 +1381,7 @@ void jr_display_caption_clear(void)
      * a frame before its band, which read as the chip's contents being
      * snatched. The next set() rewrites them before its own release-store. */
     __atomic_store_n(&s_caption_on, 0, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&s_caption_revision, 1U, __ATOMIC_RELEASE);
     nav_wake();
 }
 
@@ -4632,6 +4638,47 @@ static bool dream_eligible(const jr_display_ctx_t *ctx)
     return rest_eligible(ctx) == JR_DISPLAY_REST_DREAM;
 }
 
+/* WHISPER's cadence is only a ceiling. A muted, settled HOME has no moving
+ * face to justify dirtying it on every engine period. Keep every foreground
+ * owner and every finite fade on the normal animation path. WATCH and the
+ * charging comet remain dynamic; clock/rim facts are explicitly refreshed. */
+static bool quiet_eligible(const jr_display_ctx_t *ctx)
+{
+    const uint32_t env = __atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE);
+    const uint32_t request = __atomic_load_n(&ctx->requested_word, __ATOMIC_ACQUIRE);
+    const jr_face_t face = (jr_face_t)((request & JR_DISPLAY_CMD_FACE_MASK) >>
+                                      JR_DISPLAY_CMD_FACE_SHIFT);
+    const uint32_t nav = __atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE);
+    const int caption = __atomic_load_n(&s_caption_on, __ATOMIC_ACQUIRE);
+    const uint32_t clock = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    const uint32_t ripple = __atomic_load_n(&s_ripple_start_ms, __ATOMIC_ACQUIRE);
+    const uint32_t bloom = __atomic_load_n(&s_bloom_start_ms, __ATOMIC_ACQUIRE);
+    return (env & (1u << 9)) && !(env & ((1u << 8) | JR_DISPLAY_ENV_VOICE_BUSY |
+                                      JR_DISPLAY_ENV_MODE_MASK)) &&
+           jr_display_render_fps() <= 6U && !(request & JR_DISPLAY_CMD_BLANK) &&
+           (face == JR_FACE_IDLE || face == JR_FACE_RESTING || face == JR_FACE_MUTED) &&
+           (nav & (NAV_SPACE_MASK | NAV_OVL_MASK)) == JR_DISPLAY_SPACE_JARVIS &&
+           !(diag_load(&ctx->shell_word) & (JR_DISPLAY_SHELL_SHADE | JR_DISPLAY_SHELL_AGENT)) &&
+           __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE) == 0 &&
+           __atomic_load_n(&s_commit_pct, __ATOMIC_ACQUIRE) == 0U &&
+           (!ripple || now - ripple >= HUD_RIPPLE_MS) &&
+           (!bloom || now - bloom >= HUD_BLOOM_MS) &&
+           !jr_display_canvas_active() && !jr_display_surface_is_active() &&
+           (!caption || (caption & JR_DISPLAY_CAPTION_AMBIENT)) &&
+           !atomic_load(&s_caption_pinned) &&
+           s_space_to == JR_DISPLAY_SPACE_JARVIS && s_space_prog == 256 &&
+           s_space_serial_seen == (uint8_t)(nav >> NAV_SERIAL_SHIFT) &&
+           s_detail_ease == 0 && s_shade_ease == 0 &&
+           s_ask_ease == 0 && s_canvas_ease == 0 &&
+           s_caption_prog == (caption ? 256 : 0) &&
+           s_clock_prog == ((clock & (1u << 16)) ? 256 : 0) &&
+           !sp_ota_ringing((jr_display_ota_state_t)
+               (__atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE) & 0xfu)) &&
+           diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF &&
+           jr_display_hud_enabled();
+}
+
 static void companion_view(jr_display_rest_mode_t mode, jr_companion_view_t *view)
 {
     const uint32_t env = __atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE);
@@ -5284,6 +5331,7 @@ static esp_err_t apply_blank(jr_display_ctx_t *ctx)
      * early-return in program_segment with the anim still stopped+hidden —
      * that left the panel permanently black on resume-from-blank. */
     ctx->last_end = -1;
+    ctx->quiet_active = false;
     __atomic_store_n(&ctx->applied_bucket, -1, __ATOMIC_RELAXED);
     __atomic_store_n(&ctx->blanked, true, __ATOMIC_RELAXED);
     return ESP_OK;
@@ -5298,7 +5346,7 @@ static bool brightness_pending(void)
 
 static uint32_t presenter_wait_ms(const jr_display_ctx_t *ctx)
 {
-    if (ctx->dream_active && !brightness_pending()) {
+    if ((ctx->dream_active || ctx->quiet_active) && !brightness_pending()) {
         return 1000U; /* diagnostics/TTL checks; no minute-clock invalidation */
     }
     return (1000U + jr_display_render_fps() - 1U) / jr_display_render_fps();
@@ -5440,6 +5488,68 @@ static esp_err_t program_segment(jr_display_ctx_t *ctx, jr_face_t face,
         diag_inc(&ctx->segment_sets);
     }
     return err;
+}
+
+static bool presenter_quiet_tick(jr_display_ctx_t *ctx, uint32_t *last_word)
+{
+    const uint32_t request = __atomic_load_n(&ctx->requested_word, __ATOMIC_ACQUIRE);
+    const jr_face_t face = (jr_face_t)((request & JR_DISPLAY_CMD_FACE_MASK) >>
+                                      JR_DISPLAY_CMD_FACE_SHIFT);
+    if (!quiet_eligible(ctx) || !ctx->active || ctx->active->last_frame < 1U ||
+        ctx->loaded_face != face || ctx->blanked) {
+        if (ctx->quiet_active) {
+            ctx->quiet_active = false;
+            ctx->last_end = -1;
+            *last_word = UINT32_MAX; /* restart even the same visible asset */
+            ctx->apply_retry_gate_ms = 0U;
+        }
+        return false;
+    }
+    /* Bind/load through apply_face first, retaining missing-art fallback and
+     * its retries. Never freeze an old foreground asset or a hidden blank. */
+    const uint32_t clock = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
+    const uint32_t env = __atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE);
+    const uint32_t caption = __atomic_load_n(&s_caption_revision, __ATOMIC_ACQUIRE);
+    const uint32_t flush_errors = diag_load(&ctx->flush_errors);
+    if (!ctx->quiet_active) {
+        if (gfx_emote_lock(ctx->gfx) != ESP_OK) { return false; }
+        if (!quiet_eligible(ctx) || request !=
+            __atomic_load_n(&ctx->requested_word, __ATOMIC_ACQUIRE)) {
+            (void)gfx_emote_unlock(ctx->gfx);
+            return false;
+        }
+        /* Pinned vendor callback prepares frame0 only while current<end.
+         * [0,0] stops before decoding; [0,1], nonrepeat, decodes0 once and
+         * retains that visible frame after stopping. No framebuffer copy. */
+        esp_err_t err = gfx_anim_stop(ctx->anim);
+        if (err == ESP_OK) {
+            err = gfx_anim_set_segment(ctx->anim, 0U, 1U, face_fps(ctx->shown_face), false);
+        }
+        if (err == ESP_OK) { err = gfx_anim_start(ctx->anim); }
+        if (err == ESP_OK) { err = gfx_obj_set_visible(ctx->anim, true); }
+        (void)gfx_emote_unlock(ctx->gfx);
+        if (err != ESP_OK) {
+            (void)program_segment(ctx, ctx->shown_face, 0U, true);
+            return false;
+        }
+        ctx->quiet_active = true;
+        ctx->quiet_clock_key = clock;
+        ctx->quiet_env_key = env;
+        ctx->quiet_caption_key = caption;
+        ctx->quiet_flush_error_key = flush_errors;
+        diag_inc(&ctx->segment_sets);
+    } else if (ctx->quiet_clock_key != clock || ctx->quiet_env_key != env ||
+               ctx->quiet_caption_key != caption ||
+               ctx->quiet_flush_error_key != flush_errors || brightness_pending()) {
+        if (presenter_refresh(ctx)) {
+            ctx->quiet_clock_key = clock;
+            ctx->quiet_env_key = env;
+            ctx->quiet_caption_key = caption;
+            ctx->quiet_flush_error_key = flush_errors;
+        }
+    }
+    *last_word = request;
+    return true;
 }
 
 /* Decode frame 0 of a resident dial clip into the shared frame. Runs on the
@@ -5819,6 +5929,8 @@ static void display_task(void *arg)
 
             if (presenter_dream_tick(ctx, &last_word)) {
                 /* The stopped emote yields to the minute clock. */
+            } else if (presenter_quiet_tick(ctx, &last_word)) {
+                /* Visible quiet face; changed facts explicitly dirty it. */
             } else if (blank) {
                 if (!__atomic_load_n(&ctx->blanked, __ATOMIC_RELAXED)) {
                     err = apply_blank(ctx);

@@ -2856,6 +2856,7 @@ static void dream_fixture(void)
     s_display.last_end = 7;
     s_display.blanked = false;
     s_display.dream_active = false;
+    s_display.quiet_active = false;
     s_display.panel_touched = s_display.panel_prepared = false;
     s_display.panel_sleep_attempted = false;
     memset(s_display.transfer_tags, 0, sizeof s_display.transfer_tags);
@@ -4040,6 +4041,248 @@ static void test_glance_proxy_tracks_actual_successful_inflight_content(void)
     CHECK(s_stub_draw_calls == draws + 1, "tag FIFO wraps after completed transfers");
 }
 
+/* Quiet HOME keeps its visible baked frame. These checks run the production
+ * presenter decisions; pinned-vendor one-shot playback is tested separately. */
+static void quiet_fixture(void)
+{
+    dream_fixture();
+    jr_display_dream_set(false);
+    jr_display_caption_clear();
+    s_caption_prog = s_caption_ease = 0;
+    s_clock_prog = s_clock_ease = 0;
+    s_space_from = s_space_to = JR_DISPLAY_SPACE_JARVIS;
+    s_space_serial_seen = 0U;
+    s_space_prog = s_space_ease = 256;
+    s_space_on = false;
+    s_detail_prog = s_shade_prog = s_ask_prog = s_canvas_prog = 0;
+    s_render_fps = 6U;
+    s_stub_segments = 0U;
+    s_stub_segment_error = ESP_OK;
+    s_stub_refreshes = s_stub_anim_starts = s_stub_anim_stops = 0U;
+    s_stub_lock_failures = 0U;
+    s_stub_lock_hook = NULL;
+}
+
+static void test_quiet_home_one_frame_and_sparse_facts(void)
+{
+    quiet_fixture();
+    uint32_t word = s_display.requested_word;
+    CHECK(quiet_eligible(&s_display) && presenter_quiet_tick(&s_display, &word),
+          "muted settled HOME selects visible quiet frame");
+    CHECK(s_display.quiet_active && s_stub_segment_start == 0U &&
+          s_stub_segment_end == 1U && !s_stub_segment_repeat &&
+          s_stub_segment_fps == face_fps(s_display.shown_face) &&
+          s_stub_anim_starts == 1U && s_stub_anim_stops == 1U && s_stub_anim_visible,
+          "single frame is decoded once, stays visible, and never loops");
+    CHECK(presenter_wait_ms(&s_display) == 1000U, "settled quiet presenter only checks TTL/diagnostics");
+    for (unsigned i = 0; i < 720U; ++i) {
+        s_fake_us += 1000000;
+        jr_display_set_hud_env(74U, false, true, (float)i, -(float)i);
+        CHECK(presenter_quiet_tick(&s_display, &word), "quiet stays eligible at second%u", i);
+    }
+    CHECK(s_stub_segments == 1U && s_stub_refreshes == 0U,
+          "720 unchanged seconds never replay or dirty the quiet face");
+    jr_display_set_hud_env(73U, false, true, 0, 0);
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 1U,
+          "changed battery redraws its truthful rim");
+    jr_display_set_hud_env(73U, false, true, 1, -1);
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 1U,
+          "disabled parallax and repeated same facts do not dirty quiet HOME");
+    s_hud_env_word ^= 1U << 16;
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 2U,
+          "a genuine packed rim position change remains visible");
+    jr_display_caption_set("MUTED - TAP TO WAKE");
+    s_caption_prog = s_caption_ease = 256;
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 3U,
+          "new ambient caption redraws even with unchanged flag bits");
+    jr_display_caption_set("ON BATTERY");
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 4U,
+          "second ambient caption bytes reach the glass");
+    const uint32_t same_caption_revision = s_caption_revision;
+    jr_display_caption_set("ON BATTERY");
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 4U,
+          "idempotent caption stays still");
+    CHECK(s_caption_revision == same_caption_revision,
+          "identical caption bytes do not advance revision");
+    jr_display_clock_set(true, 12, 34, 0);
+    s_clock_prog = s_clock_ease = 256;
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 5U,
+          "valid clock admission redraws");
+    jr_display_clock_set(true, 12, 34, 1);
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 6U,
+          "clock seconds tick honestly without repeating the face");
+    jr_display_clock_set(true, 12, 35, 0);
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 7U,
+          "minute boundary redraws honestly");
+    CHECK(s_stub_segments == 1U, "fact updates do not restart animation");
+    jr_display_set_brightness(22U);
+    CHECK(presenter_wait_ms(&s_display) == 167U, "brightness slew keeps existing cadence");
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 8U,
+          "brightness pending forces render-owned pump");
+    s_display.snapshot_refresh_requested = 1U;
+    CHECK(presenter_refresh_pending(&s_display, false) && s_stub_refreshes == 9U,
+          "stopped quiet face still services a fresh snapshot");
+    jr_display_panel_off_request();
+    CHECK(presenter_refresh_pending(&s_display, false) && s_stub_refreshes == 10U,
+          "stopped quiet face still services panel off");
+    jr_display_panel_on_request();
+    CHECK(presenter_refresh_pending(&s_display, false) && s_stub_refreshes == 11U,
+          "stopped quiet face still services recovery");
+}
+
+static void test_quiet_refuses_dynamic_owners_and_unfinished_fades(void)
+{
+    for (unsigned guard = 0; guard < 30U; ++guard) {
+        quiet_fixture();
+        uint32_t word = s_display.requested_word;
+        CHECK(presenter_quiet_tick(&s_display, &word), "quiet guard%u starts active", guard);
+        switch (guard) {
+        case 0: s_hud_env_word &= ~(1u << 9); break;
+        case 1: s_hud_env_word |= 1u << 8; break;
+        case 2: jr_display_rest_voice_busy_set(true); break;
+        case 3: s_render_fps = 12U; break;
+        case 4: s_display.requested_word |= JR_DISPLAY_CMD_BLANK; break;
+        case 5: s_display.requested_word = (uint32_t)JR_FACE_LISTENING << 8; break;
+        case 6: s_display.requested_word = (uint32_t)JR_FACE_SPEAKING << 8; break;
+        case 7: s_display.requested_word = (uint32_t)JR_FACE_THINKING << 8; break;
+        case 8: s_display.requested_word = (uint32_t)JR_FACE_ERROR << 8; break;
+        case 9: s_nav_word = JR_DISPLAY_SPACE_WATCH; break;
+        case 10: s_nav_word = JR_DISPLAY_SPACE_WEATHER; break;
+        case 11: s_nav_word = (uint32_t)JR_DISPLAY_OVERLAY_SHADE << NAV_OVL_SHIFT; break;
+        case 12: s_display.shell_word = JR_DISPLAY_SHELL_AGENT; break;
+        case 13: s_choice_n = 1; break;
+        case 14: s_commit_pct = 20U; break;
+        case 15: s_ripple_start_ms = 999U; break;
+        case 16: s_bloom_start_ms = 999U; break;
+        case 17: s_canvas_until_ms = 2000U; break;
+        case 18: s_surface_active = true; break;
+        case 19:
+            jr_display_caption_set("NETWORK ERROR");
+            s_caption_prog = 256; /* settled foreground, independent of fade guard */
+            break;
+        case 20: atomic_store(&s_caption_pinned, true); break;
+        case 21: s_space_prog = 128; break;
+        case 22: s_nav_word = 1U << NAV_SERIAL_SHIFT; break;
+        case 23: s_detail_ease = 1; break;
+        case 24: s_shade_ease = 1; break;
+        case 25: s_ask_ease = 1; break;
+        case 26: s_canvas_ease = 1; break;
+        case 27: s_caption_prog = 1; break;
+        case 28: s_clock_prog = 1; break;
+        case 29: s_ota_word = JR_DISPLAY_OTA_RECEIVING; break;
+        }
+        CHECK(!quiet_eligible(&s_display) && !presenter_quiet_tick(&s_display, &word),
+              "dynamic owner/fade%u exits quiet", guard);
+        CHECK(!s_display.quiet_active && s_display.last_end == -1 && word == UINT32_MAX,
+              "exit%u forces same-face reapplication", guard);
+        if (guard == 1U) {
+            bool stale;
+            CHECK(apply_face(&s_display, JR_FACE_RESTING, JR_FACE_RESTING, 0U, &stale) == ESP_OK &&
+                  s_stub_segment_repeat && s_stub_segment_end == 7U && s_stub_anim_visible,
+                  "charging restores repeating same face and comet");
+        }
+    }
+    quiet_fixture(); s_display.test_pattern = JR_DISPLAY_TEST_WHITE;
+    CHECK(!quiet_eligible(&s_display), "panel diagnostic remains dynamic");
+    quiet_fixture(); s_hud_enabled = 0U;
+    CHECK(!quiet_eligible(&s_display), "HUD-disabled art stays on normal path");
+    quiet_fixture(); jr_display_rest_set(JR_DISPLAY_REST_GLANCE, false, false);
+    CHECK(!quiet_eligible(&s_display), "explicit Rest owns its own presentation");
+}
+
+static void quiet_late_speech(void)
+{
+    s_stub_lock_hook = NULL;
+    jr_display_rest_voice_busy_set(true);
+}
+
+static void test_quiet_failures_retry_and_never_freeze_old_assets(void)
+{
+    quiet_fixture();
+    uint32_t word = s_display.requested_word;
+    s_stub_lock_failures = 1U;
+    CHECK(!presenter_quiet_tick(&s_display, &word) && !s_display.quiet_active,
+          "failed entry lock cannot latch quiet");
+    CHECK(presenter_quiet_tick(&s_display, &word), "entry retries after lock failure");
+    jr_display_set_hud_env(72U, false, true, 0, 0);
+    const uint32_t old_env = s_display.quiet_env_key;
+    s_stub_lock_failures = 1U;
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_display.quiet_env_key == old_env,
+          "failed fact refresh cannot consume the new rim");
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_display.quiet_env_key == s_hud_env_word,
+          "failed fact refresh retries the new rim");
+    quiet_fixture(); CHECK(presenter_quiet_tick(&s_display, &word), "quiet before DMA fault");
+    jr_display_set_hud_env(72U, false, true, 0, 0);
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 1U,
+          "new rim schedules sparse transfer");
+    flush_test_strip(0); /* the real panel callback receives a failed transport */
+    const uint32_t good_errors = s_display.quiet_flush_error_key;
+    s_stub_draw_error = ESP_FAIL;
+    flush_test_strip(12);
+    s_stub_draw_error = ESP_OK;
+    s_stub_lock_failures = 1U;
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 1U &&
+          s_display.quiet_flush_error_key == good_errors,
+          "failed retry lock preserves unacknowledged DMA error");
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 2U &&
+          s_display.quiet_flush_error_key == s_display.flush_errors,
+          "actual failed strip retries the whole stopped frame despite unchanged fact keys");
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 2U,
+          "successful sparse retry returns to zero periodic redraw");
+    quiet_fixture(); s_stub_segment_error = ESP_FAIL;
+    CHECK(!presenter_quiet_tick(&s_display, &word) && !s_display.quiet_active,
+          "failed segment command cannot latch quiet");
+    s_stub_segment_error = ESP_OK;
+    CHECK(presenter_quiet_tick(&s_display, &word), "segment entry retries");
+    quiet_fixture(); s_stub_lock_hook = quiet_late_speech;
+    CHECK(!presenter_quiet_tick(&s_display, &word) && s_stub_segments == 0U,
+          "late speech under render lock refuses one-shot programming");
+    quiet_fixture(); s_display.loaded_face = JR_FACE_ERROR;
+    CHECK(!presenter_quiet_tick(&s_display, &word), "old error asset cannot freeze as a quiet face");
+    quiet_fixture(); s_display.blanked = true;
+    CHECK(!presenter_quiet_tick(&s_display, &word), "hidden blank must rebind before quiet");
+    quiet_fixture(); s_display.active = NULL;
+    CHECK(!presenter_quiet_tick(&s_display, &word), "unloaded asset retains loader/retry path");
+    quiet_fixture();
+    jr_display_clip_t one_frame_clip = *s_display.active;
+    one_frame_clip.last_frame = 0U;
+    s_display.active = &one_frame_clip;
+    CHECK(!presenter_quiet_tick(&s_display, &word),
+          "vendor would clamp a one-frame asset to0 before preparing; keep normal fallback");
+    quiet_fixture(); CHECK(presenter_quiet_tick(&s_display, &word), "quiet before asset change");
+    s_display.requested_word = (uint32_t)JR_FACE_MUTED << 8;
+    CHECK(!presenter_quiet_tick(&s_display, &word) && !s_display.quiet_active,
+          "different quiet asset releases old one-shot latch");
+    s_display.loaded_face = JR_FACE_MUTED;
+    CHECK(presenter_quiet_tick(&s_display, &word), "newly bound quiet asset gets its own one-shot");
+    CHECK(apply_blank(&s_display) == ESP_OK && !s_display.quiet_active,
+          "DREAM/blank entry clears quiet ownership");
+}
+
+static jmp_buf s_quiet_task_done;
+static unsigned s_quiet_task_passes;
+static void quiet_task_step(void)
+{
+    if (++s_quiet_task_passes > 721U) { longjmp(s_quiet_task_done, 1); }
+    s_fake_us += 1000000;
+}
+static void test_actual_presenter_runs_quiet_not_repeat(void)
+{
+    quiet_fixture();
+    s_stub_engine_ready = true;
+    s_stub_board_get_error = s_stub_spiffs_error = ESP_OK;
+    s_stub_board_display = s_display.board;
+    s_stub_board_init_us = 0;
+    s_stub_disp_add_hook = NULL;
+    s_quiet_task_passes = 0U;
+    s_stub_notify_take_hook = quiet_task_step;
+    if (setjmp(s_quiet_task_done) == 0) { display_task(&s_display); }
+    s_stub_notify_take_hook = NULL;
+    CHECK(s_display.quiet_active && s_stub_segments == 1U && !s_stub_segment_repeat &&
+          s_stub_anim_visible && s_stub_refreshes == 1U,
+          "actual task721 passes: one startup pattern refresh, one visible one-shot, zero periodic refresh");
+}
+
 int main(void)
 {
     test_every_face_has_a_clip_and_a_hud_face();
@@ -4121,6 +4364,10 @@ int main(void)
     test_panel_opposite_request_at_ack_boundary();
     test_panel_cancellation_failures_and_old_completions();
     test_glance_proxy_tracks_actual_successful_inflight_content();
+    test_quiet_home_one_frame_and_sparse_facts();
+    test_quiet_refuses_dynamic_owners_and_unfinished_fades();
+    test_quiet_failures_retry_and_never_freeze_old_assets();
+    test_actual_presenter_runs_quiet_not_repeat();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);

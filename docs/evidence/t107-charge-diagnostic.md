@@ -74,3 +74,7 @@ Image SHA-256:
 `ac73185ce279c02e7d58e27e790463015eada3e6cd18951f4a3bd39e301a3e9b`.
 The existing failed 1,800-second wake and possible awake-drain regression
 remain unresolved by these offline checks.
+
+## Owner ruling, 2026-10-12
+
+**B: CHARGE closed. Retain 200mA; write no PMIC register.** The setting is a configured limit, not a current measurement. The ruling does not establish cell capacity or projected battery life. No diagnostic or charge-setting write was issued.

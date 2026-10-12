@@ -136,8 +136,13 @@ esp_err_t gfx_anim_set_src(gfx_obj_t *o, const void *d, size_t s)
     s_stub_anim_source = d;
     return ESP_OK;
 }
+static uint32_t s_stub_segment_start, s_stub_segment_end, s_stub_segment_fps;
+static bool s_stub_segment_repeat;
+static esp_err_t s_stub_segment_error;
+static unsigned s_stub_segments;
 esp_err_t gfx_anim_set_segment(gfx_obj_t *o, uint32_t a, uint32_t b, uint32_t f, bool r)
-{ (void)o; (void)a; (void)b; (void)f; (void)r; return ESP_OK; }
+{ (void)o; s_stub_segments++; s_stub_segment_start = a; s_stub_segment_end = b;
+  s_stub_segment_fps = f; s_stub_segment_repeat = r; return s_stub_segment_error; }
 static unsigned s_stub_anim_starts;
 static unsigned s_stub_anim_stops;
 esp_err_t gfx_anim_start(gfx_obj_t *o) { (void)o; s_stub_anim_starts++; return ESP_OK; }

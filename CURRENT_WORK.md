@@ -2,6 +2,15 @@
 
 **Updated:** 2026-10-12 UTC
 
+Owner follow-up: CHARGE is closed at 200mA with no new PMIC write. The seven-step
+physical/voice session is prepared in `.evidence/t107/OWNER-CHECKLIST.md` and
+waits for `owner ready`. C2's five offline source/test files are committed at
+`c4681ad`, still outside the target image. Muted static HOME's repeating clip
+now retains a one-shot with sparse fact refresh. All 15 host suites pass and
+the target build has 55.461% app-partition headroom. Matched 45-minute B/repair
+windows and one natural ladder/default 4h timer run remain the live acceptance
+checks. This does not close C1 physical acceptance.
+
 Main is merged at `3b5dbd7`. The charge wait and both 12-minute HOME idle
 windows completed; `7578238` was restored and authenticated valid/muted at
 04:14:30Z. Voltage fits were 207.44 versus 87.67mV/h (new versus old), with
@@ -14,7 +23,8 @@ display startup timing. Charge and rail settings remain unchanged. Charge
 limits are configuration, not measured net current. First completed display
 transfer is a software proxy, not optical wake-to-first-pixel proof. Frozen
 diagnostic image `03864cc` is valid after the A/B. Three charge scans report
-200mA CC and 4.2V CV; retain 200mA until the cell rating is known. Its
+200mA CC and 4.2V CV; owner ruling: retain 200mA; no PMIC register write.
+CHARGE is closed. Its
 300-second timer cycle passed at 305.937 seconds to API. See
 [B: CHARGE](docs/evidence/t107-charge-diagnostic.md).
 

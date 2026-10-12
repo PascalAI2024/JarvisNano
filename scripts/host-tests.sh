@@ -11,11 +11,12 @@
 # runs is worse than no suite, because it looks like coverage. Add new suites
 # HERE, not to a habit.
 #
-# The fourteen suites, in the order they run:
+# The fifteen suites, in the order they run:
 #   jr_display_hud_tests      components/jr_display/tests   procedural renderer
 #   jr_display_shell_tests    components/jr_display/tests   spatial shell
 #   jr_display_companion_tests components/jr_display/tests  portable Rest policy
 #   jr_display_board_tests    components/jr_display/tests   production panel transport
+#   jr_display_quiet_vendor_tests components/jr_display/tests pinned playback and frame retry
 #   jr_main_shell_tests       main/tests/                   production input routing
 #   jr_charge_http_tests      main/tests/                   actual paired charge handler
 #   jr_display_http_tests     main/tests/                   actual transfer timing JSON
@@ -176,6 +177,7 @@ run_c_suites() {
     run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build" \
         jr_display_companion_tests "$ROOT/components/jr_display/tests/build/jr_display_companion_tests"
     run_production_python_c_suite jr_display_board_tests components/jr_display/tests/test_board.py
+    run_production_python_c_suite jr_display_quiet_vendor_tests components/jr_display/tests/test_quiet_vendor.py
     run_main_shell_suite
     run_charge_http_suite
     run_production_python_c_suite jr_display_http_tests main/tests/test_display_http.py

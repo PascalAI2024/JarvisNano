@@ -101,7 +101,7 @@ HTTP reads perform no PMIC transaction. Charge and rail registers are not
 written by this diagnostic. Live image `03864cc` is valid and muted after
 the charged A/B: 200mA constant-charge limit, 4.2V target, three complete
 scans. Its 300-second timer wake passed at a 305.937-second API upper bound.
-Retain 200mA until the cell rating is verified; no PMIC setting was changed.
+Owner ruling: retain 200mA, write no PMIC register; CHARGE is closed.
 See [B: CHARGE](docs/evidence/t107-charge-diagnostic.md).
 
 Display startup previously had no first-transfer timing. The diagnostic
@@ -110,6 +110,13 @@ including early callbacks and failed init. It is a boot software proxy;
 physical first-light and a complete Glance remain unmeasured.
 
 ## t107 C1 companion — 2026-10-12
+
+Muted HOME/WHISPER rendered 5.879 frames/s because the repeating 8fps MUTED clip
+invalidated every decoded frame while the engine ceiling was 6fps. Quiet HOME
+now retains a visible one-shot frame; changed clock/rim/caption/brightness facts
+refresh explicitly. Foreground, speech, USB/Nightstand and fades keep their
+existing paths. Review also repaired first-frame decode retry and sparse-DMA
+retry. Live 45-minute drain/fps and natural default 4h wake proof remain pending.
 
 Break-it reproduced a late OTA/operator-lease claim during sleep's caption
 or panel wait: the old path accepted the claim and still entered deep sleep.

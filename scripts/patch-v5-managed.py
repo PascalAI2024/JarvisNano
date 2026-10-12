@@ -105,6 +105,27 @@ PALETTE_INSERT = f"""        anim->frame.color_palette = (uint32_t *)heap_caps_m
         }}
 """
 
+FRAME_RETRY_MARKER = "JarvisNano v5: retry an unprepared animation frame"
+FRAME_RETRY_ANCHOR = "        gfx_anim_prepare_frame(obj);\n"
+FRAME_RETRY_INSERT = f"""        /* {FRAME_RETRY_MARKER}. A transient allocation or parser
+         * failure must not advance a one-shot past its only frame. Retry on
+         * the next timer tick without publishing completion or dirty pixels. */
+        if (gfx_anim_prepare_frame(obj) != ESP_OK) {{
+            return;
+        }}
+"""
+
+
+def apply_frame_retry(source: str) -> str:
+    """Patch the pinned playback callback, rejecting partial or changed input."""
+    if FRAME_RETRY_MARKER in source:
+        if source.count(FRAME_RETRY_INSERT) != 1 or FRAME_RETRY_ANCHOR in source:
+            raise SystemExit("gfx_anim frame retry patch is partial; refusing a blind repair")
+        return source
+    if source.count(FRAME_RETRY_ANCHOR) != 1:
+        raise SystemExit("gfx_anim frame prepare anchor changed; refusing a blind patch")
+    return source.replace(FRAME_RETRY_ANCHOR, FRAME_RETRY_INSERT, 1)
+
 
 GFX_CORE_C = (
     ROOT
@@ -393,10 +414,19 @@ def main() -> int:
                         "gfx_anim palette anchor changed; refusing a blind patch"
                     )
                 gfx_source = gfx_source.replace(PALETTE_ANCHOR, PALETTE_INSERT, 1)
-                GFX_ANIM.write_text(gfx_source)
                 changed.append("gfx palette PSRAM fallback")
+        if FRAME_RETRY_MARKER in gfx_source:
+            apply_frame_retry(gfx_source)  # validate the complete idempotent patch
+        else:
+            if args.check:
+                missing.append("gfx animation frame prepare retry")
+            else:
+                gfx_source = apply_frame_retry(gfx_source)
+                changed.append("gfx animation frame prepare retry")
+        if not args.check:
+            GFX_ANIM.write_text(gfx_source)
     elif args.check:
-        missing.append("gfx palette PSRAM fallback (gfx_anim.c missing)")
+        missing.append("gfx palette/frame retry fixes (gfx_anim.c missing)")
 
     if GFX_CORE_C.is_file() and GFX_CORE_H.is_file():
         core_c = GFX_CORE_C.read_text()

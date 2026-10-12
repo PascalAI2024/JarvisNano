@@ -44,6 +44,8 @@ enable_testing()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME jr_display_board_tests COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/test_board.py)
+add_test(NAME jr_display_quiet_vendor_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_quiet_vendor.py)
 add_executable(jr_display_companion_tests test_companion.c ../src/companion.c)
 target_include_directories(jr_display_companion_tests PRIVATE ../include)
 target_compile_options(jr_display_companion_tests PRIVATE -Wall -Wextra -Werror)

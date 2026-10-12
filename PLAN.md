@@ -471,9 +471,15 @@ The QSPI ceiling itself is 40 MHz × 4 lanes = 20 MB/s: 21.7 ms a frame, ~46 fps
 
 ### t107 B/C bounded follow-up
 
+Owner follow-up: C2 offline sources/tests committed `c4681ad`, excluded from
+the image. Seven-step physical/voice checklist awaits `owner ready`. Static
+muted HOME repair passed 15 host suites and the target build; matched 45-minute
+B/repair drain and one untouched natural ladder/default 4h timer cycle precede
+owner acceptance. CHARGE is closed: retain 200mA and issue no new PMIC register write.
+
 | Item | State | Acceptance |
 |---|---|---|
-| Read-only AXP2101 charge diagnosis | Complete; 03864cc valid/muted | Three complete scans: CC 200mA, CV 4.2V. Net gauge charge 39.27±2.18pp/h; retain 200mA with cell rating unverified. 300s timer passed. No PMIC writes. See B report. |
+| Read-only AXP2101 charge diagnosis | Complete; 03864cc valid/muted | Three complete scans: CC 200mA, CV 4.2V. Net gauge charge 39.27±2.18pp/h; owner ruling retains 200mA; CHARGE closed. 300s timer passed. No PMIC writes. See B report. |
 | Living companion | 0b9645d OTA-valid/muted; 14 host suites pass; 55.483% free | Forced300s timer wake passes. First boot DMA1899->819ms, optical=false. Matched DREAM/HOME windows complete; no resolved saving or life projection. Physical Nightstand/Glance, natural ladder, optical timing, new-image voice and life acceptance pending. |
 | Deck face | Offline bridge built; firmware/device proof pending | Atomic producer/operator fence, strict compact projection, live-worker and attention captures after companion passes. |
 
