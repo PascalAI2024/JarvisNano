@@ -13,8 +13,10 @@ The B diagnostic adds a paired, fixed-register charge cache and software
 display startup timing. Charge and rail settings remain unchanged. Charge
 limits are configuration, not measured net current. First completed display
 transfer is a software proxy, not optical wake-to-first-pixel proof. Frozen
-diagnostic image `03864cc` is valid after the A/B; its charge readback and
-300-second timer cycle are in progress. No companion image has been flashed.
+diagnostic image `03864cc` is valid after the A/B. Three charge scans report
+200mA CC and 4.2V CV; retain 200mA until the cell rating is known. Its
+300-second timer cycle passed at 305.937 seconds to API. No companion image
+has been flashed. See [B: CHARGE](docs/evidence/t107-charge-diagnostic.md).
 
 C read waves are complete. Companion device acceptance precedes Deck device
 acceptance. Owner-reported voice acceptance below does not prove later images;

@@ -98,7 +98,11 @@ net charge current. A fixed sampler-only AXP2101 cache is added for paired
 diagnosis: per-register errors, attempt age and last successful-read age are
 retained; failed or stale values cannot decode as current configuration.
 HTTP reads perform no PMIC transaction. Charge and rail registers are not
-written by this diagnostic. Live readback remains pending the charged A/B.
+written by this diagnostic. Live image `03864cc` is valid and muted after
+the charged A/B: 200mA constant-charge limit, 4.2V target, three complete
+scans. Its 300-second timer wake passed at a 305.937-second API upper bound.
+Retain 200mA until the cell rating is verified; no PMIC setting was changed.
+See [B: CHARGE](docs/evidence/t107-charge-diagnostic.md).
 
 Display startup previously had no first-transfer timing. The diagnostic
 records init start/end and the first successful color-transfer callback,
