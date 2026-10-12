@@ -1,0 +1,170 @@
+{
+  "method": {
+    "order": [
+      "7578238",
+      "0b4108f"
+    ],
+    "duration_s": 720,
+    "settle_s": 120,
+    "cadence_s": 15,
+    "samples": 49,
+    "brightness_cap": 65,
+    "brightness_actual": 14,
+    "volume": 95,
+    "privacy_muted": true,
+    "usb_present": false,
+    "charging": false,
+    "uncertainty": "Original six two-minute mean OLS, t(4)=2.776 conditional scatter, conservative 1 mV/block rounding; SoC difference \u00b12 percentage points per window. Cell relaxation, charge history, temperature, chronological order and correlated samples remain unbounded."
+  },
+  "fits": {
+    "7578238": {
+      "samples": 49,
+      "duration_s": 720.938,
+      "drain_mv_h": 207.44,
+      "conditional95_scatter_mv_h": 33.3,
+      "conservative_rounding_mv_h": 15.23,
+      "endpoint_drain_mv_h": 154.8,
+      "endpoint_rounding_mv_h": 9.99,
+      "endpoint_mv": [
+        3875,
+        3844
+      ],
+      "endpoint_pct": [
+        59,
+        62
+      ],
+      "moods": [
+        "WHISPER"
+      ],
+      "watch_styles": [
+        "FUTURE"
+      ],
+      "brightness": [
+        14
+      ],
+      "frames": 4238,
+      "frames_per_s": 5.878,
+      "render_wall_percent": 3.872,
+      "render_mean_us": 6587.1,
+      "flushes": 165282,
+      "max_flush_errors": 0,
+      "block_means": [
+        [
+          0.01468486111111111,
+          3890.125
+        ],
+        [
+          0.04800902777777778,
+          3885.25
+        ],
+        [
+          0.08195270833333333,
+          3880.125
+        ],
+        [
+          0.11473701388888889,
+          3871.625
+        ],
+        [
+          0.14825809027777775,
+          3862.375
+        ],
+        [
+          0.18357172839506175,
+          3856.6666666666665
+        ]
+      ],
+      "uncertainty_note": "Conditional residual scatter assumes independent blocks; ADC calibration, correlated relaxation, SoC, temperature and chronological image order remain unbounded.",
+      "source": "7578238",
+      "start_utc": "2026-10-12T03:44:23.528172+00:00",
+      "end_utc": "2026-10-12T03:56:24.033577+00:00",
+      "soc_start": 59,
+      "soc_end": 62,
+      "soc_loss_points": -3,
+      "soc_loss_rounding_points": 2,
+      "conditional_interval_mv_h": [
+        158.91,
+        255.97
+      ]
+    },
+    "0b4108f": {
+      "samples": 49,
+      "duration_s": 720.407,
+      "drain_mv_h": 87.67,
+      "conditional95_scatter_mv_h": 44.62,
+      "conservative_rounding_mv_h": 15.26,
+      "endpoint_drain_mv_h": 89.95,
+      "endpoint_rounding_mv_h": 9.99,
+      "endpoint_mv": [
+        3849,
+        3831
+      ],
+      "endpoint_pct": [
+        63,
+        63
+      ],
+      "moods": [
+        "WHISPER"
+      ],
+      "watch_styles": [
+        "FUTURE"
+      ],
+      "brightness": [
+        14
+      ],
+      "frames": 4236,
+      "frames_per_s": 5.88,
+      "render_wall_percent": 4.025,
+      "render_mean_us": 6844.8,
+      "flushes": 165198,
+      "max_flush_errors": 0,
+      "block_means": [
+        [
+          0.014695798611111111,
+          3846.25
+        ],
+        [
+          0.048037777777777776,
+          3842.375
+        ],
+        [
+          0.08141666666666668,
+          3835.25
+        ],
+        [
+          0.11471149305555554,
+          3834.25
+        ],
+        [
+          0.14802368055555556,
+          3834.25
+        ],
+        [
+          0.18343527777777777,
+          3830.6666666666665
+        ]
+      ],
+      "uncertainty_note": "Conditional residual scatter assumes independent blocks; ADC calibration, correlated relaxation, SoC, temperature and chronological image order remain unbounded.",
+      "source": "0b4108f",
+      "start_utc": "2026-10-12T04:01:03.198543+00:00",
+      "end_utc": "2026-10-12T04:13:03.348937+00:00",
+      "soc_start": 63,
+      "soc_end": 63,
+      "soc_loss_points": 0,
+      "soc_loss_rounding_points": 2,
+      "conditional_interval_mv_h": [
+        27.79,
+        147.55
+      ]
+    }
+  },
+  "comparison": {
+    "new_minus_old_mv_h": 119.77,
+    "conservative_conditional_difference_halfwidth_mv_h": 108.41,
+    "voltage_intervals_favor_old": true,
+    "soc_intervals_favor_old": false,
+    "baseline_clearly_better": false
+  },
+  "selected_image": "7578238",
+  "selection_note": "Retain baseline only when both prespecified conservative voltage and SoC intervals favor it. Otherwise return to candidate. This single ordered A/B cannot establish a causal battery/energy saving."
+}

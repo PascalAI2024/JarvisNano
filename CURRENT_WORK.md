@@ -2,15 +2,19 @@
 
 **Updated:** 2026-10-12 UTC
 
-Main is merged at `3b5dbd7`. The charged old/new idle comparison waits for
-fresh battery SoC >=50% with USB and charging both disconnected. Only battery
-reads run during that wait. Frozen `7578238` and rebuilt `0b4108f` images are
-retained; no diagnostic or companion image is flashed before the pair ends.
+Main is merged at `3b5dbd7`. The charge wait and both 12-minute HOME idle
+windows completed; `7578238` was restored and authenticated valid/muted at
+04:14:30Z. Voltage fits were 207.44 versus 87.67mV/h (new versus old), with
+conditional half-widths 48.53/59.88. The unplugged gauge rose on the new image;
+energy consumption and projected life remain unresolved, with a possible
+battery regression. See [the charged A/B report](docs/evidence/t107-idle-ab-charged.md).
 
 The B diagnostic adds a paired, fixed-register charge cache and software
 display startup timing. Charge and rail settings remain unchanged. Charge
 limits are configuration, not measured net current. First completed display
-transfer is a software proxy, not optical wake-to-first-pixel proof.
+transfer is a software proxy, not optical wake-to-first-pixel proof. Frozen
+diagnostic image `03864cc` is valid after the A/B; its charge readback and
+300-second timer cycle are in progress. No companion image has been flashed.
 
 C read waves are complete. Companion device acceptance precedes Deck device
 acceptance. Owner-reported voice acceptance below does not prove later images;
