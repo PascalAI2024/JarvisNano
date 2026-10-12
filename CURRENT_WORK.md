@@ -10,12 +10,18 @@ now retains a one-shot with sparse fact refresh, committed `ff18294`. All 15
 host suites pass, 53/53 compiled runtime faults are rejected, and the target
 build has 55.461% app-partition headroom. B's 45-minute control passed at
 06:34Z: SoC 45->21%, voltage fit 97.22±8.17mV/h (conditional bound), settled
-redraw 5.882fps. At 06:34:40Z B `03864cc` remains `ota_1` valid/muted/audio off.
-Charge 21% blocks the repaired OTA under the existing unplugged 30% guard.
-After-image live fps/drain and the natural ladder/default 4h timer are pending;
-no new-image saving is claimed. Resume a fresh back-to-back B/repair pair after
-full charge/disconnection and
-`owner ready`. See [quiet HOME follow-up](docs/evidence/t107-quiet-home.md).
+redraw 5.882fps. The owner then supplied USB power: frozen `ff18294` was
+uploaded through the existing USB guard and reached `ota_0` valid/muted at
+09:40:03Z. Nightstand made 3 redraws/117 completed strip flushes in 120.250s,
+0.02495 redraw fps, zero errors. Forced charging HOME still animates at
+7.57–7.78 redraw fps; the quiet path excludes charging, so settled quiet HOME
+proof remains for the unplugged session. READY FOR OWNER handoff at 09:49:28Z:
+USB/charging present, battery 22%, valid/muted/audio off. Read-only battery/USB
+polls ran at two-minute intervals through this handoff. No drain window was started;
+the fresh >=45-minute B/repair pair follows the owner session. The untouched
+natural ladder/default 4h wake also remains pending; no saving is claimed.
+See [USB handoff and captures](docs/evidence/t107-quiet-usb.md) and
+[quiet HOME source proof](docs/evidence/t107-quiet-home.md).
 This does not close C1 physical acceptance.
 
 Main is merged at `3b5dbd7`. The charge wait and both 12-minute HOME idle

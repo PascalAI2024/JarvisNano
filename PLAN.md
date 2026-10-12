@@ -476,17 +476,20 @@ the image. Seven-step physical/voice checklist awaits `owner ready`. Static
 muted HOME repair `ff18294` passed 15 host suites, 53 compiled runtime faults
 and the target build (55.461% free). B's full 45-minute control passed:
 45->21% SoC, 97.22±8.17mV/h conditional fit, settled 5.882 redraws/s. The device
-ends on B `03864cc`, authenticated valid/muted at 06:34:40Z. Charge 21% prevents
-the repaired OTA under the existing 30% unplugged guard. A fresh back-to-back
-45-minute B/repair pair and untouched natural ladder/default 4h timer remain
-blocked on recharge; no saving or life projection is accepted. See
-[quiet HOME follow-up](docs/evidence/t107-quiet-home.md).
+now runs frozen `ff18294`, authenticated `ota_0` valid/muted on USB at
+09:49:28Z (22% charging), READY FOR OWNER. Nightstand made 3 redraws/117 completed strip flushes
+in 120.250s with zero errors; forced charging HOME still animates at
+7.57–7.78fps, because charging excludes the quiet path. Settled unplugged HOME
+proof, the fresh >=45-minute B/repair pair and natural ladder/default 4h timer
+are deferred until after the owner session. No saving or life projection is
+accepted. See [USB handoff](docs/evidence/t107-quiet-usb.md) and
+[quiet HOME source proof](docs/evidence/t107-quiet-home.md).
 CHARGE is closed: retain 200mA and issue no new PMIC register write.
 
 | Item | State | Acceptance |
 |---|---|---|
 | Read-only AXP2101 charge diagnosis | Complete; 03864cc valid/muted | Three complete scans: CC 200mA, CV 4.2V. Net gauge charge 39.27±2.18pp/h; owner ruling retains 200mA; CHARGE closed. 300s timer passed. No PMIC writes. See B report. |
-| Living companion | 0b9645d OTA-valid/muted; 14 host suites pass; 55.483% free | Forced300s timer wake passes. First boot DMA1899->819ms, optical=false. Matched DREAM/HOME windows complete; no resolved saving or life projection. Physical Nightstand/Glance, natural ladder, optical timing, new-image voice and life acceptance pending. |
+| Living companion | ff18294 OTA-valid/muted on USB; 15 host suites pass; 55.461% free | USB Nightstand snapshot and sparse redraw proved: 3 redraws/120.250s, zero flush errors. Charging HOME remains animated; quiet HOME proof and >=45-minute pair follow owner session. Earlier forced300s timer passed; first boot DMA1899->819ms, optical=false. Physical Glance/Nightstand, natural default4h wake, optical timing, new-image voice and battery-life acceptance pending. |
 | Deck face | Offline source/tests committed c4681ad; excluded from target image | Projection 17 tests/34372 parses, bridge 51 tests. Live-worker and attention captures remain after companion acceptance. |
 
 The charged frozen-image A/B finishes before any new firmware flash. The

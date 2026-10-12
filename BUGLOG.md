@@ -118,10 +118,14 @@ refresh explicitly. Foreground, speech, USB/Nightstand and fades keep their
 existing paths. Review also repaired first-frame decode retry and sparse-DMA
 retry. Source `ff18294` passes 15 host suites/53 compiled runtime faults and the
 build (55.461% free). B's 45-minute control passed at 06:34Z, settled 5.882fps and
-97.22±8.17mV/h conditional voltage fit, SoC 45->21%. B remains valid/muted;
-charge 21% blocks the repaired OTA under the existing 30% guard. A fresh
-back-to-back B/repair pair, live repaired fps and natural default 4h wake remain
-pending on recharge. The
+97.22±8.17mV/h conditional voltage fit, SoC 45->21%. Owner-supplied USB allowed
+frozen `ff18294` OTA without changing the 30% unplugged guard; `ota_0` is
+authenticated valid/muted at 09:44:32Z. Nightstand redraw is 0.02495fps over
+120.250s, 117 completed strip flushes and zero errors. Forced charging HOME
+still animates (7.57–7.78fps); its charging exclusion prevents quiet-path
+proof on USB. Settled unplugged fps, the fresh >=45-minute B/repair pair and
+natural default 4h wake remain pending after the owner session. See
+[USB proof and limitation](docs/evidence/t107-quiet-usb.md). The
 loop is also present on B; it is a shared cost, not a proven cause of the
 earlier after-image drain increase. See [quiet HOME report](docs/evidence/t107-quiet-home.md).
 

@@ -1,0 +1,15 @@
+{
+  "source_commit": "ff1829473ddbdae979b9129376b9d1d767222ed1",
+  "files": {
+    "docs/evidence/t107-quiet-usb/.gitattributes": "705fd4d6451a31d36b3df7de96f83f30ac976c9b4a6d1e51671d8e2f33e2d0da",
+    "docs/evidence/t107-quiet-usb/battery-polls.json": "e7faf509a2a6dccba88a80d126cf83c868e13dc08b0a8950a2224a2c981c6d40",
+    "docs/evidence/t107-quiet-usb/forced-home.json": "d06d5349160d4074300f6ad8224999a0d8bee7884e8351ce137fd74fdb32020f",
+    "docs/evidence/t107-quiet-usb/forced-home.png": "b814d4750ab6042cd9fa096a1988b332e96fdd40c248420aa3ebf78337eba1c5",
+    "docs/evidence/t107-quiet-usb/nightstand.json": "1b374971acbc9165dfcd46002149e99234727404e718773dd5f97f935c1f9d35",
+    "docs/evidence/t107-quiet-usb/nightstand.png": "13251eb05450ac18d6d0b79a6242af6b8094bc22915949f9cbee6261a91008d1",
+    "docs/evidence/t107-quiet-usb/ota.json": "0fcc036e9134da90f8182206bef84084b5305dc36a4be807ddbf3570f050de99",
+    "docs/evidence/t107-quiet-usb/owner-handoff.json": "7f135148d2b236e0306b25e5f59852ac37358108e88c4fcdc00ef1bfe170832a",
+    "docs/evidence/t107-quiet-usb.md": "0d9cb2523ffbe239b66f9e3b0fc2c6d7ba447d7a1bcc814af3103426ee875af8"
+  },
+  "scan": "No configured secret, private IPv4, MAC, AP identifier or local user path in the explicit public files"
+}
