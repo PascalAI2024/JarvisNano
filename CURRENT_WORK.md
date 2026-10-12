@@ -1,26 +1,44 @@
-# Current work — t107 Addendum A, combined proof in progress
+# Current work — t107 Addendum A, power gate blocked
 
 **Updated:** 2026-10-11
 
-Continuing `t107/codex` from `6f97afb`. The muted live panel sweep is complete.
-The candidate repairs DETAIL DOWN and dismissal feedback, elapsed-time finite
-fades, compressed dial source lifetime, and presenter refresh retry. It removes
-dead tilt math and the duplicate byte-order helper. The measured WATCH render
-path now uses a bounded battery-rim traversal without changing cadence or hand
-sweeps. All 28,566 pixel comparisons match; 21 paired host timing runs improve.
+Source `7578238` on `t107/codex` repairs DETAIL close/navigation and dismissal
+captions, finite fades, baked dial source lifetime and presenter refresh retry.
+Dead tilt math and duplicate byte-order code are removed. Bounded battery-rim
+traversal keeps all 28,566 compared frames identical; 21 paired host timings
+improve. Production source removes 133 lines and adds 160.
 
-Production main routing now participates in `scripts/host-tests.sh` as a sixth
-suite, with 109 focused checks and two restored-defect mutations rejected.
-The six-suite combined host gate passes (11451/2200/109/166/81/38).
-The pinned firmware build passes with 55.769% app partition headroom.
-The prespecified longer battery baseline is running; source commit, OTA,
-after windows and final capture proof remain pending. No battery improvement
-is claimed. Privacy stays muted; listening and voice are owner check pending,
-and this addendum does not wait for the owner's later spoken turn.
+All six host suites pass (11451/2200/109/166/81/38), behavior mutations fail
+as expected, and the ESP-IDF build leaves 55.769% app headroom. Paired OTA
+reached `ota_0 state=valid` at 59,727 ms; 32 panel captures and three complete
+style cycles succeeded without asset-load/flush errors.
 
-See [the Addendum A report](docs/evidence/t107-addendum-a.md).
+Owner voice acceptance is recorded (reply `yes`, 2026-10-11, audible answer;
+owner-observed, tested image unspecified). Privacy was already muted on receipt
+and remained muted in every subsequent authenticated check and power sample.
+Listening-state power remains excluded.
 
-## Previous work — t107 OTA valid, owner voice check pending
+**BLOCKED: gate `after-long` failed: `timer wake failed`.** Both 720-second
+awake windows completed, but the after 1800-second sleep did not become
+reachable within the wake retry period. Sleep-end/DREAM evidence is missing;
+cleanup and final health also timed out. Last authenticated boundary: valid,
+muted, all audio off, no lease, flush errors zero, internal block 30,720 bytes.
+The owner must wake the device by hand for authenticated readback and wake
+investigation. No USB flash or privacy bypass is attempted.
+
+Voltage drain fits were larger after OTA (idle 29.42→100.20, WATCH
+65.83→126.56 mV/h), with different SoC and rebound. Battery savings remain
+unproven. Long WATCH software rendering was 45.438→43.790 ms/frame; the
+short profile was slower, 37.154→46.078. Both results are retained.
+
+See [the Addendum A report](docs/evidence/t107-addendum-a.md) for error bounds,
+receipts, capture links and the three waves with three unique executors.
+
+## Previous work — t107 OTA valid, retained checkpoint
+
+The voice-pending text below is the earlier checkpoint. Owner acceptance
+arrived later (2026-10-11, reply `yes`, tested image unspecified); the current
+Addendum A report records it and verifies mute restored.
 
 **Updated:** 2026-10-11
 

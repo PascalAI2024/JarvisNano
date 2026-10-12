@@ -37,6 +37,9 @@ and after. Device state is queryable any time: `scripts/jarvisctl.py status`.
 
 ## t107 deployed candidate, acceptance pending — 2026-10-11
 
+This is the earlier checkpoint; voice was subsequently accepted on owner
+observation (2026-10-11, tested image unspecified). See Addendum A below.
+
 Independent review found retained half-batch PCM across privacy/transport gaps,
 automatic diagnostic clearing that reset the absolute companion cursor, and
 missing companion privacy revalidation after copying PCM. All three are
@@ -64,12 +67,16 @@ N7.21 remains blocked on physical PKEY event resolution. See
 
 | Defect | Evidence | Status |
 |---|---|---|
-| DETAIL DOWN advances after closing | Live WATCH sheet followed by DOWN showed WEATHER; production routing called `nav_next` unconditionally. | Candidate closes on the same panel; full gate and post-OTA capture pending. |
-| Detail dismissal shows a controls exit hint | Live WEATHER outside-sheet tap showed `CONTROLS - UP TO CLOSE`. | Candidate restores the retained panel caption; full gate and post-OTA capture pending. |
-| Rest cadence stretches finite UI transitions | Actual fade tick discarded elapsed time above 100 ms. | Production 50/200/500 ms fake-clock regression; combined gate/live endpoint proof pending. |
-| Dial cycling exhausts snapshot headroom | The muted sweep reached HTTP 503 after loading FUTURE/JARVIS/DIVER; free PSRAM was below one snapshot allocation. | Candidate releases only successfully decoded, unbound baked sources; ownership/failure regressions pass, live style sweep pending. |
-| Failed presenter locks consume refresh keys | DREAM keys, snapshot and test-pattern acknowledgement advanced without a submitted refresh. | Candidate retains keys/request on failure; injected-fault tests, combined gate pending. |
+| DETAIL DOWN advances after closing | Live WATCH sheet followed by DOWN showed WEATHER; production routing called `nav_next` unconditionally. | Fixed in `7578238`; actual routing tests/mutation pass; post-OTA mirror stays on WATCH. Physical gesture proof remains separate. |
+| Detail dismissal shows a controls exit hint | Live WEATHER outside-sheet tap showed `CONTROLS - UP TO CLOSE`. | Fixed in `7578238`; panel caption tests/mutation pass; post-OTA WEATHER mirror has the correct caption. |
+| Rest cadence stretches finite UI transitions | Actual fade tick discarded elapsed time above 100 ms. | Fixed in `7578238`; production 50/200/500 ms fake-clock regression and mutation pass; live endpoints captured. CLI latency prevents physical duration proof. |
+| Dial cycling exhausts snapshot headroom | The muted sweep reached HTTP 503 after loading FUTURE/JARVIS/DIVER; free PSRAM was below one snapshot allocation. | Fixed in `7578238`; ownership/failure regressions pass; 18 live style captures across three cycles succeed without cache reset or asset/flush errors. |
+| Failed presenter locks consume refresh keys | DREAM keys, snapshot and test-pattern acknowledgement advanced without a submitted refresh. | Fixed in `7578238`; retained-key injected-fault tests/mutations and combined gate pass. No live fault injection. |
 
 Dead excluded tilt code and a duplicate byte-order helper were removed without
-claiming a runtime gain. Battery acceptance, physical listening and speech are
-still pending. See [Addendum A](docs/evidence/t107-addendum-a.md).
+claiming a runtime gain. Battery acceptance is unproven. The after power gate failed timer
+wake; its sleep-end/DREAM proof is missing and the API remains unreachable.
+Owner wake by hand is required for authenticated readback and investigation. Listening-state power is excluded. Voice acceptance is owner-observed
+(reply `yes`, 2026-10-11); its tested image was not supplied. The last authenticated
+readback verified privacy muted; a fresh final readback is blocked by reachability.
+See [Addendum A](docs/evidence/t107-addendum-a.md).

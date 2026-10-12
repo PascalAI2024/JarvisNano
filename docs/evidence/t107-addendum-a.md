@@ -1,8 +1,15 @@
 # t107 Addendum A — muted UX and render-path work
 
 Date: 2026-10-11. Branch: `t107/codex`, continued from `6f97afb`.
-The owner will perform the listening/voice check by hand later. Privacy stays
-muted throughout this run. The parent alone operates the device and commits.
+Status: **BLOCKED — gate `after-long` failed: `timer wake failed`.**
+The device is currently unreachable over the paired API. The owner must wake
+it by hand for authenticated readback and investigation of the failed wake.
+The owner reported one hand-unmuted spoken turn and an audible answer
+(reply `yes`, 2026-10-11). This is accepted as owner-observed voice evidence.
+The tested image was not supplied, and the Addendum image had not been
+uploaded when the report arrived. Paired readback verified privacy already
+muted, capture stopped and mic/ADC/DAC/PA off. The parent never unmutes the
+device and alone operates it and commits. Listening-state power is excluded.
 
 ## Evidence and selected work
 
@@ -11,23 +18,26 @@ DESK, their production-reachable detail sheets, controls, all six watch styles,
 three choice layouts, five transient card kinds and a remote canvas fixture.
 Screenshots were opened as contact sheets. Failure/empty states are exercised
 by shell fixtures rather than deliberately disrupting live services. JARVIS's
-SESSION sheet has no production hit target; physical pairing, hardware test,
-listening and speech remain owner checks. No typography defect justified a
+SESSION sheet has no production hit target; physical pairing, hardware test
+and listening remain owner checks. No typography defect justified a
 new layout change.
 
 Ranked by daily exposure:
 
 | Rank | Defect and change | Before/after proof |
 |---|---|---|
-| 1 | DOWN from DETAIL closed the sheet and advanced to another panel. It now closes on the same panel; the following DOWN resumes navigation. | Live WATCH detail/DOWN captures; production-routing regression and restored-defect mutation. |
-| 2 | Outside-sheet dismissal printed `CONTROLS - UP TO CLOSE` on an ordinary panel. It now restores that panel's caption, with WATCH's caption cleared. | Live WEATHER dismissal captures; all five reachable detail panels in production-routing tests. |
-| 3 | Finite fades consumed at most 100 ms per frame, stretching transitions at rest cadence. They now consume elapsed time, bounded by the longest fade; brightness keeps its existing slew cap. | Fake-clock production fade tests at 50/200/500 ms, endpoint captures. CLI latency prevents a subframe live timing claim. |
-| 4 | Cycling baked dials retained compressed sources and exhausted snapshot headroom. Successfully decoded, unbound dial sources can be released; the stopped vendor parser's source remains alive until successful rebinding. | Before sweep snapshot returned HTTP 503; tracked allocation, decode/rebind fault tests and post-change style sweep. |
+| 1 | DOWN from DETAIL closed the sheet and advanced to another panel. It now closes on the same panel; the following DOWN resumes navigation. | WATCH [before](t107-addendum-a/live-before/watch-detail-down.png) / [after](t107-addendum-a/live-after/watch-detail-down.png); production-routing regression and restored-defect mutation. |
+| 2 | Outside-sheet dismissal printed `CONTROLS - UP TO CLOSE` on an ordinary panel. It now restores that panel's caption, with WATCH's caption cleared. | WEATHER [before](t107-addendum-a/live-before/weather-detail-dismiss.png) / [after](t107-addendum-a/live-after/weather-detail-dismiss.png); all five detail panels in routing tests. |
+| 3 | Finite fades consumed at most 100 ms per frame, stretching transitions at rest cadence. They now consume elapsed time, bounded by the longest fade; brightness keeps its existing slew cap. | Fake-clock production tests at 50/200/500 ms; endpoint [before](t107-addendum-a/live-before/slide-800.png) / [after](t107-addendum-a/live-after/slide-800.png). CLI latency prevents a subframe live timing claim. |
+| 4 | Cycling baked dials retained compressed sources and exhausted snapshot headroom. Successfully decoded, unbound dial sources can be released; the stopped vendor parser's source remains alive until successful rebinding. | [Before HTTP 503](t107-addendum-a/cache-before.json) / [after DIVER](t107-addendum-a/live-after/style-2-diver.png); allocation/decode/rebind fault tests and three successful style cycles. |
 
 Code subtraction removes preprocessor-excluded tilt arithmetic and a duplicate
 RGB565 byte-order helper. Failed presenter locks now preserve DREAM keys,
 snapshot requests and pattern acknowledgement for retry. No new task, mutex,
 cross-main header, privacy path or cadence policy is introduced.
+Production `.c`/`.h` changes remove 133 lines and add 160. The dead-path
+subtraction alone removes 42 and adds six (net 36 removed); test and evidence
+lines are counted separately from runtime source.
 
 ## Power method
 
@@ -62,8 +72,11 @@ Longer matched battery windows were prespecified before inspecting outcomes:
 fresh muted timer boot; 120 s settling then 720 s each of HOME idle and FUTURE
 WATCH; 1800 s timer sleep; genuine timer-wake DREAM with 120 s settling and
 420 s retained. Awake samples use identical endpoints every 15 s. No lease,
-USB, charging, screenshots or extra operator requests occur inside retained
-windows. Brightness cap/volume remain 65/95 and the cell must remain above 20%.
+USB, charging or screenshots occur inside retained windows. The owner privacy
+verification made two health GETs and one cockpit GET at 22:46:42Z, coinciding
+with the baseline DREAM first-sample timestamp. This extra boundary traffic
+is retained and disclosed; no control write was needed. Brightness cap/volume
+remain 65/95 and the cell must remain above 20%.
 
 Awake fits use six two-minute block means (`t(4)=2.776`); DREAM uses seven
 one-minute means (`t(5)=2.571`). Conditional scatter intervals assume independent
@@ -76,6 +89,54 @@ battery-life percentage.
 
 ## Acceptance record
 
+### Measured power and runtime
+
+Both images retain 49 samples across 720 seconds for idle and WATCH, at
+15-second cadence, muted WHISPER, brightness 14, cap/volume 65/95, no USB,
+charging or lease. The baseline also completed 1801.532 seconds of timer
+sleep and 29 DREAM samples over 420 seconds at brightness 5. The after run
+retains its sleep-start point only: no sleep-end or DREAM observations exist.
+Missing data is not substituted or selectively rerun.
+
+| State | Before drain mV/h | After drain mV/h | Conservative rounding bound mV/h |
+|---|---:|---:|---:|
+| Idle, 12 min | 29.42 ±34.84 | 100.20 ±25.77 | ±15.26 each fit |
+| WATCH, 12 min | 65.83 ±10.52 | 126.56 ±14.52 | ±15.26 each fit |
+| DREAM, 7 min | 40.70 ±101.37 | Missing | ±25.33 before fit |
+| Sleep cycle, 30 min | −7.99 | Missing | ±4.00 before endpoint slope |
+
+The ± values beside awake fits are conditional 95% residual-scatter
+intervals, separate from rounding and the unbounded systematic effects
+described above. Baseline idle endpoints rose 3784→3815 mV; after idle fell
+3759→3738 mV. WATCH endpoints were 3805→3802 versus 3737→3712 mV.
+SoC was 66→64% versus 57→54% in idle, and 64→62% versus 53→49% in WATCH.
+These larger after voltage-drain fits do **not** demonstrate a saving or
+isolate firmware effects from cell state. Battery acceptance is unproven.
+The [plot](t107-addendum-a/battery-windows.png) retains every point and labels
+the absent after observations.
+
+The short live WATCH profiles averaged 37.154→46.078 ms/software frame
+(24.02% slower), with `gfx_render` 31.079→36.191% of one core. The full
+12-minute WATCH windows instead averaged 45.438→43.790 ms/frame (3.63%
+lower), at 5.875→5.878 frames/s. The short profiles both use 160 MHz; all
+windows use brightness 14. Clock content, scheduling, memory and SoC differ.
+The before short profile did not
+retain battery values; its nearby capture was 69%, versus 58% after.
+Both runtime results are retained. Neither proves electrical improvement.
+
+### Failed after gate
+
+The 1800-second timer sleep began at 2026-10-11T23:30:28Z. The bounded
+timer-wake retry ended with `RuntimeError: timer wake failed`; the cleanup
+`armed=0` request also timed out. `after-long.exit` is 1. One final
+authenticated health request timed out at 2026-10-12T00:02:41Z.
+This establishes API unavailability, not whether the timer, boot or Wi-Fi
+caused it. No USB flash, remote unmute or extra power-window run was attempted.
+The last authenticated sleep boundary was `ota_0 state=valid`, privacy muted,
+voice alive, mic/ADC/DAC/PA off, no lease, zero flush errors and 30,720 bytes
+of contiguous internal memory. Current reachability prevents a fresh final
+privacy/health readback. The owner-observed voice acceptance remains recorded.
+
 The combined host gate passes all six suites: HUD 11,451; shell 2,200;
 production main routing 109; core 166; templates 81; desk 38. No prior check
 count dropped. Ten display correctness mutants, two routing mutants and the
@@ -83,9 +144,31 @@ disabled-tilt mutant fail their assertions; rim work and strip-edge mutations
 also fail, with the duplicate endpoint mutant identified as equivalent.
 The pinned ESP-IDF 5.5.4 firmware build passes. Its 1,855,168-byte image
 leaves 2,339,136 bytes (55.769%) free in each 4 MiB app partition.
-Source commit, OTA probation/readback, matched after windows and final captures
-remain pending at this checkpoint. The prior t107
-measurements remain in [their separate report](t107-power-baseline.md).
+Source commit `7578238` is bound to the unchanged image SHA-256
+`7f2c42e3b9f3552912ce7188e859ddba2ff9d3725488adf36703ad746686e4b3`.
+The full-length paired upload succeeded. Running/boot slot changed from
+`ota_1` to `ota_0`, which reached `state=valid` at uptime 59,727 ms.
+Authenticated health reports zero flush errors, privacy muted, audio off,
+inactive operator lease and 31,744 bytes of contiguous internal memory.
+The build's project version is `1`; the device API exposes no partition hash
+or app version, so identity is the local source/image manifest plus upload,
+slot change and authenticated reboot readback rather than a device hash.
+
+Post-OTA capture proof includes ordinary panels, detail/DOWN endpoints and
+three complete cycles of all six watch styles without resetting the cache.
+All 32 captures succeeded; asset-load and flush errors remained zero.
+Minimum contiguous internal memory was 31,744 bytes. Per-cycle minimum free
+PSRAM was 3,881,584 / 3,878,000 / 3,881,124 bytes, avoiding the prior snapshot
+exhaustion. Selected safe images were opened and reviewed. STATUS detail and
+ACTIVITY owner-bearing captures remain private. Routing and captions are
+verified in composed mirrors; fade duration is proved by fake-clock tests,
+since CLI latency prevents physical subframe timing acceptance.
+
+The source fixes, host/mutation/build gates, OTA probation and composed panel
+captures are verified. Complete paired sleep/DREAM proof and measured battery
+improvement remain unaccepted. The prior t107 measurements remain in
+[their separate report](t107-power-baseline.md). The reviewed receipts and
+reproduction commands are in [the evidence bundle](t107-addendum-a/README.md).
 
 ## Waves
 
@@ -93,12 +176,19 @@ measurements remain in [their separate report](t107-power-baseline.md).
 |---|---|---|
 | 1 — read | `a1_ux`, `a1_code`, `w2_power` | Live/test navigation map, bounded code audit, PMIC/method and measured remaining-cost audit. |
 | 2 — build | `a1_ux`, `a1_code`, `w2_power` | Separate main routing, HUD subtraction, display fade/cache/retry and measured hot-path work. HUD ownership transfers only after subtraction is frozen. |
-| 3 — prove | Parent plus reused `a1_code` break-it executor | Combined gates and independent immutable-patch review; parent alone owns OTA and live measurement. |
+| 3 — prove | Parent plus reused `a1_code` break-it executor | Host/build/mutations and independent immutable-patch review pass; parent OTA valid and captures pass; after timer-wake power gate fails. |
 
 Three waves use three unique executors. The orchestrator owns the Jarvis board;
 the brief prohibits Jarvis/MCP calls, so this run uses a parent-owned local
 task register without claiming a shared board.
 
 Frame mirrors prove composed pixels, not physical panel illumination, finger
-recognition, audible speech or listening latency. Listening and voice remain
-owner check pending.
+recognition, audible speech or listening latency. Voice acceptance is the
+owner observation above; listening-state power remains excluded.
+
+Report: **BLOCKED: Can the owner wake the Nano by hand so the failed
+timer-wake gate can be checked?** Device: OTA `7578238` reached `state=valid`;
+tests: host 11451/2200/109/166/81/38, build 55.769% free; waves: 3 waves,
+3 subagents; ux: detail navigation/captions, finite fades and dial-cache
+headroom; code: 133 production lines removed, 160 added. Source is committed;
+the following evidence commit changes documentation only.

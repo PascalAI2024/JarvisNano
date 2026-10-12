@@ -1,0 +1,20 @@
+{
+  "source_commit": "7578238fb766f4774f2fe772c6310e93512e5b41",
+  "image_sha256": "7f2c42e3b9f3552912ce7188e859ddba2ff9d3725488adf36703ad746686e4b3",
+  "bytes": 1855168,
+  "local_project_version": "1",
+  "ota": {
+    "active": false,
+    "running": "ota_0",
+    "boot": "ota_0",
+    "state": "valid",
+    "received": 0,
+    "total": 0,
+    "last_error": "ESP_OK",
+    "last_invalid": "none"
+  },
+  "acceptance_uptime_ms": 59727,
+  "privacy_muted": true,
+  "largest_internal": 31744,
+  "note": "Local hash and source manifest bound to successful full-length paired upload, changed running/boot slot and post-reboot authenticated health. Device API exposes no partition hash or app version."
+}

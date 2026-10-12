@@ -1,0 +1,197 @@
+{
+  "idle-rest": {
+    "samples": 49,
+    "duration_s": 720.0,
+    "drain_mv_h": 29.42,
+    "conditional95_scatter_mv_h": 34.84,
+    "conservative_rounding_mv_h": 15.26,
+    "endpoint_drain_mv_h": -155.0,
+    "endpoint_rounding_mv_h": 10.0,
+    "endpoint_mv": [
+      3784,
+      3815
+    ],
+    "endpoint_pct": [
+      66,
+      64
+    ],
+    "moods": [
+      "WHISPER"
+    ],
+    "watch_styles": [
+      "FUTURE"
+    ],
+    "brightness": [
+      14
+    ],
+    "frames": 4235,
+    "frames_per_s": 5.882,
+    "render_wall_percent": 4.048,
+    "render_mean_us": 6882.8,
+    "flushes": 165182,
+    "max_flush_errors": 0,
+    "block_means": [
+      [
+        0.014583333333333334,
+        3822.5
+      ],
+      [
+        0.04791666666666667,
+        3825.125
+      ],
+      [
+        0.08125104166666666,
+        3824.75
+      ],
+      [
+        0.11458333333333333,
+        3821.625
+      ],
+      [
+        0.14791666666666667,
+        3821.25
+      ],
+      [
+        0.1833337962962963,
+        3818.5555555555557
+      ]
+    ],
+    "uncertainty_note": "Conditional residual scatter assumes independent blocks; ADC calibration, correlated relaxation, SoC, temperature and chronological image order remain unbounded."
+  },
+  "watch": {
+    "samples": 49,
+    "duration_s": 720.0,
+    "drain_mv_h": 65.83,
+    "conditional95_scatter_mv_h": 10.52,
+    "conservative_rounding_mv_h": 15.26,
+    "endpoint_drain_mv_h": 15.0,
+    "endpoint_rounding_mv_h": 10.0,
+    "endpoint_mv": [
+      3805,
+      3802
+    ],
+    "endpoint_pct": [
+      64,
+      62
+    ],
+    "moods": [
+      "WHISPER"
+    ],
+    "watch_styles": [
+      "FUTURE"
+    ],
+    "brightness": [
+      14
+    ],
+    "frames": 4230,
+    "frames_per_s": 5.875,
+    "render_wall_percent": 26.695,
+    "render_mean_us": 45438.1,
+    "flushes": 164970,
+    "max_flush_errors": 0,
+    "block_means": [
+      [
+        0.014583854166666667,
+        3811.875
+      ],
+      [
+        0.04791666666666667,
+        3810.875
+      ],
+      [
+        0.08125052083333333,
+        3808.0
+      ],
+      [
+        0.11458385416666667,
+        3805.75
+      ],
+      [
+        0.14791770833333331,
+        3804.125
+      ],
+      [
+        0.1833337962962963,
+        3800.8888888888887
+      ]
+    ],
+    "uncertainty_note": "Conditional residual scatter assumes independent blocks; ADC calibration, correlated relaxation, SoC, temperature and chronological image order remain unbounded."
+  },
+  "dream": {
+    "samples": 29,
+    "duration_s": 420.0,
+    "drain_mv_h": 40.7,
+    "conditional95_scatter_mv_h": 101.37,
+    "conservative_rounding_mv_h": 25.33,
+    "endpoint_drain_mv_h": -214.29,
+    "endpoint_rounding_mv_h": 17.14,
+    "endpoint_mv": [
+      3759,
+      3784
+    ],
+    "endpoint_pct": [
+      60,
+      59
+    ],
+    "moods": [
+      "DREAM"
+    ],
+    "watch_styles": [
+      "FUTURE"
+    ],
+    "brightness": [
+      5
+    ],
+    "frames": 8,
+    "frames_per_s": 0.019,
+    "render_wall_percent": 0.012,
+    "render_mean_us": 6289.9,
+    "flushes": 312,
+    "max_flush_errors": 0,
+    "block_means": [
+      [
+        0.00625,
+        3784.5
+      ],
+      [
+        0.02291777777777778,
+        3792.5
+      ],
+      [
+        0.03958444444444444,
+        3791.5
+      ],
+      [
+        0.05625,
+        3784.25
+      ],
+      [
+        0.07291666666666667,
+        3787.5
+      ],
+      [
+        0.08958333333333333,
+        3784.75
+      ],
+      [
+        0.10833333333333334,
+        3784.6
+      ]
+    ],
+    "uncertainty_note": "Conditional residual scatter assumes independent blocks; ADC calibration, correlated relaxation, SoC, temperature and chronological image order remain unbounded."
+  },
+  "sleep-cycle": {
+    "duration_s": 1801.532,
+    "endpoint_mv": [
+      3780,
+      3784
+    ],
+    "endpoint_pct": [
+      61,
+      61
+    ],
+    "drain_mv_h": -7.99,
+    "conservative_rounding_mv_h": 4.0,
+    "uncertainty_note": "Two endpoints include shutdown, boot and reconnect. Quantization only; relaxation/SoC/ADC calibration are unbounded."
+  }
+}

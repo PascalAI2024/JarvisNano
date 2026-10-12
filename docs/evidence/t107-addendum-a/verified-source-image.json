@@ -1,0 +1,21 @@
+{
+  "image": "build/jarvisrobot_v5.bin",
+  "sha256": "7f2c42e3b9f3552912ce7188e859ddba2ff9d3725488adf36703ad746686e4b3",
+  "bytes": 1855168,
+  "smallest_app_partition_bytes": 4194304,
+  "free_bytes": 2339136,
+  "free_percent": 55.769,
+  "idf": "5.5.4",
+  "command": "./scripts/build-v5.sh",
+  "exit_code": 0,
+  "source_commit": "7578238fb766f4774f2fe772c6310e93512e5b41",
+  "source_files": {
+    "main/main.c": "4c73619864d5c228d3f0476e418c830d7623a2cf3bc4bb3a13c7bcb07d8836b5",
+    "components/jr_display/src/jr_display.c": "9c67c8fccf24e051d9af1a305b28e6a47e8a85062c33174478ed4a0b13625691",
+    "components/jr_display/src/hud_render.c": "06ad986aae14a5c7e4aaa2f8977bbd5caaead94002eeff3ee36d7e5da0ac9d7f",
+    "components/jr_display/include/jr_display/hud_render.h": "3523cf40a8fd3f47c838c37948a6353f66f352015c00e22a69d941e740413e2d"
+  },
+  "local_project_version": "1",
+  "build_head_at_gate": "6f97afb4b873ba7a014ce277b91c6e533178bd5e",
+  "note": "Built once from the frozen working tree before its explicit-path commit. Image and all changed runtime source hashes are unchanged; normalized contents equal committed blobs. Project version is constant 1; no identity rebuild was needed."
+}

@@ -1,0 +1,22 @@
+{
+  "status": "BLOCKED",
+  "gate": "after-long",
+  "exit_code": 1,
+  "assertion": "timer wake failed",
+  "retained_states": {
+    "idle-rest": 49,
+    "watch": 49,
+    "sleep-start": 1,
+    "sleep-end": 0,
+    "dream": 0
+  },
+  "missing": [
+    "sleep-end",
+    "dream"
+  ],
+  "last_authenticated_state": "ota_0 valid; privacy muted; all four audio paths off; no operator lease; flush_errors=0",
+  "final_health": "authenticated read timed out at 2026-10-12T00:02:41Z",
+  "cleanup": "finally armed=0 request also timed out; no privacy unmute occurred",
+  "next_decision": "Owner wake by hand for authenticated readback and failed timer-wake investigation",
+  "battery_acceptance": "unproven: larger fitted awake voltage drain, different SoC and incomplete sleep/DREAM; no battery saving claim"
+}

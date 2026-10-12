@@ -1,0 +1,6 @@
+PASS current production dispatch accepted
+PASS vertical bypass rejected: production swipe dispatch bypasses tested policy
+PASS dismiss bypass rejected: production DISMISS dispatch bypasses tested policy
+PASS feedback bypass rejected: production swipe feedback bypasses tested policy
+PASS unreachable vertical policy rejected: production swipe dispatch bypasses tested policy
+dispatch fail-closed: 5 checks passed
