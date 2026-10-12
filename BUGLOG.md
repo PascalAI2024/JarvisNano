@@ -75,12 +75,18 @@ N7.21 remains blocked on physical PKEY event resolution. See
 
 Dead excluded tilt code and a duplicate byte-order helper were removed without
 claiming a runtime gain. Battery acceptance is unproven. The after power gate failed timer
-wake; its sleep-end/DREAM proof is missing and the API remains unreachable.
-Owner wake by hand is required for authenticated readback and investigation. Listening-state power is excluded. Voice acceptance is owner-observed
+wake; its sleep-end/DREAM proof is missing. The owner subsequently woke it
+by hand and authenticated readback succeeds. Listening-state power is excluded. Voice acceptance is owner-observed
 (reply `yes`, 2026-10-11); its tested image was not supplied. The last authenticated
-readback verified privacy muted; a fresh final readback is blocked by reachability.
+readback verified privacy muted, as does the later manual recovery readback.
 Follow-up authenticated health/cockpit/sleep retries at 00:10–00:11Z on
 2026-10-12 also timed out despite reported ping replies. Wake/API behavior and
 the larger awake drain fits remain possible regressions versus baseline;
 different SoC/rebound are confounds, not an established explanation.
+Manual recovery readback at 00:15:40Z shows uptime 231,756 ms, wake `touch`,
+RTC sleep count 3, OTA valid and privacy muted/audio off. Wi-Fi comes up in
+5,037 ms on this boot. Reset reason is not exposed; the PSRAM ring covers only
+this boot and RTC holds no timed wake history. Count 3 permits an intervening
+wake/resleep inference but cannot identify when or why. Timer/API acceptance
+and battery regressions remain open; manual recovery cannot close them.
 See [Addendum A](docs/evidence/t107-addendum-a.md).

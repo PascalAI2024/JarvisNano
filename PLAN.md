@@ -34,8 +34,8 @@ pass without snapshot, asset or flush failures. Same-pixel rim work retains
 
 Both longer awake windows completed, but gate `after-long` failed with
 `timer wake failed`; the after sleep endpoint and DREAM window are absent.
-The paired API remains unreachable. Owner wake by hand is needed for health
-readback and wake investigation. Battery improvement is unproven; voltage
+The owner manually woke the device; paired readback now succeeds. Historical
+timer-wake cause is unresolved. Battery improvement is unproven; voltage
 fits are larger after OTA and SoC/rebound remain confounded. Long and short
 live runtime comparisons disagree and are both recorded. Both wake/API behavior
 and awake battery drain remain possible regressions. Three authenticated GET
@@ -44,7 +44,12 @@ cell-state differences do not establish the cause of the larger drain fits.
 
 Voice is accepted on owner observation (reply `yes`, 2026-10-11, tested image
 unspecified). Privacy was verified muted on receipt and at every authenticated
-boundary; final reachability is blocked. Listening-state power is excluded.
+boundary. Fresh readback at 00:15:40Z on 2026-10-12 confirms uptime 231,756 ms,
+`touch` wake, sleep counter 3, `ota_0 state=valid` and muted/audio off. Current
+boot is owner recovery, not timer success. No reset-reason API or retained
+timestamped boot journal exists; current-boot Wi-Fi works but cannot explain
+the previous boot. Original after sleep/DREAM evidence is still missing.
+Listening-state power is excluded.
 See [Addendum A](docs/evidence/t107-addendum-a.md).
 
 Every behavioral row closes on physical 1.75C evidence, not compilation alone.
