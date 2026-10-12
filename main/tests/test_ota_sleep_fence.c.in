@@ -1,0 +1,283 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * Extracted unchanged production helpers. Lock/clock/atomic observation ports
+ * expose publication ordering; no HTTP/flash/sleep implementation is faked.
+ */
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdatomic.h>
+
+typedef int esp_err_t;
+typedef void *SemaphoreHandle_t;
+enum { ESP_OK, ESP_ERR_TIMEOUT, ESP_ERR_INVALID_STATE };
+enum { VOICE_CONTROL_NONE, VOICE_CONTROL_RESUME, VOICE_CONTROL_PAUSE };
+enum { OP_ADMIT, OP_REJECT_ACTIVE, OP_RESTORE, OP_REFUSE };
+enum { HOLDER_NONE, HOLDER_HELPER, HOLDER_SLEEP };
+#define pdTRUE 1
+#define pdMS_TO_TICKS(ms) (ms)
+#define portMAX_DELAY UINT32_MAX
+#define ESP_LOGW(...) do { ++fake.warnings; } while (0)
+
+static SemaphoreHandle_t s_brain_lock;
+static _Atomic bool s_ota_active, s_voice_privacy_paused;
+static _Atomic uint32_t s_operator_lease_until_ms;
+static _Atomic int s_voice_control_request;
+static unsigned checks, failures;
+#define CHECK(expression) do { ++checks; if (!(expression)) { ++failures; \
+    fprintf(stderr, "FAIL %s:%d: %s\n", __func__, __LINE__, #expression); } } while (0)
+
+static struct {
+    int op, holder;
+    bool available, initial_active, initial_privacy;
+    uint32_t initial_lease, final_lease;
+    int initial_request, final_request;
+    uint64_t now_ms;
+    unsigned take_calls, give_calls, clock_calls, writes, warnings;
+    unsigned active_writes, lease_writes, request_writes, privacy_writes;
+    bool became_active_while_waiting;
+} fake;
+
+static void observed_bool_store(_Atomic bool *target, bool value)
+{
+    ++fake.writes;
+    CHECK(fake.holder == HOLDER_HELPER);
+    if (target == &s_ota_active) {
+        ++fake.active_writes;
+        if (!value) {
+            CHECK(fake.op == OP_RESTORE);
+            CHECK(atomic_load(&s_operator_lease_until_ms) == fake.final_lease);
+            CHECK(atomic_load(&s_voice_control_request) == fake.final_request);
+        }
+    } else {
+        CHECK(target == &s_voice_privacy_paused);
+        ++fake.privacy_writes;
+        CHECK(false); /* Helpers may request pause/resume, never mutate privacy. */
+    }
+    atomic_store_explicit(target, value, memory_order_seq_cst);
+}
+
+static void observed_u32_store(_Atomic uint32_t *target, uint32_t value)
+{
+    ++fake.writes; ++fake.lease_writes;
+    CHECK(fake.holder == HOLDER_HELPER);
+    CHECK(target == &s_operator_lease_until_ms);
+    CHECK(atomic_load(&s_ota_active));
+    atomic_store_explicit(target, value, memory_order_seq_cst);
+}
+
+static void observed_int_store(_Atomic int *target, int value)
+{
+    ++fake.writes; ++fake.request_writes;
+    CHECK(fake.holder == HOLDER_HELPER);
+    CHECK(target == &s_voice_control_request);
+    CHECK(atomic_load(&s_ota_active));
+    atomic_store_explicit(target, value, memory_order_seq_cst);
+}
+
+#undef atomic_store
+#define atomic_store(target, value) _Generic((target), \
+    _Atomic bool *: observed_bool_store, _Atomic uint32_t *: observed_u32_store, \
+    _Atomic int *: observed_int_store)((target), (value))
+
+static int xSemaphoreTake(SemaphoreHandle_t lock, uint32_t wait)
+{
+    ++fake.take_calls;
+    CHECK(lock != NULL && lock == s_brain_lock);
+    CHECK(wait == (fake.op == OP_RESTORE ? portMAX_DELAY : 100U));
+    if (fake.op == OP_RESTORE) CHECK(atomic_load(&s_ota_active));
+    if (!lock || !fake.available || fake.holder != HOLDER_NONE) return 0;
+    /* Time and another upload can advance while the caller waits. */
+    fake.now_ms += 7U;
+    if (fake.became_active_while_waiting) {
+        atomic_store_explicit(&s_ota_active, true, memory_order_seq_cst);
+    }
+    fake.holder = HOLDER_HELPER;
+    return pdTRUE;
+}
+
+static void xSemaphoreGive(SemaphoreHandle_t lock)
+{
+    ++fake.give_calls;
+    CHECK(lock != NULL && lock == s_brain_lock);
+    CHECK(fake.holder == HOLDER_HELPER);
+    CHECK(atomic_load(&s_voice_privacy_paused) == fake.initial_privacy);
+    if (fake.op == OP_ADMIT) {
+        CHECK(atomic_load(&s_ota_active));
+        CHECK(atomic_load(&s_operator_lease_until_ms) == (uint32_t)fake.now_ms + 180000U);
+        CHECK(atomic_load(&s_voice_control_request) == VOICE_CONTROL_PAUSE);
+    } else if (fake.op == OP_RESTORE) {
+        CHECK(!atomic_load(&s_ota_active));
+        CHECK(atomic_load(&s_operator_lease_until_ms) == fake.final_lease);
+        CHECK(atomic_load(&s_voice_control_request) == fake.final_request);
+    } else {
+        CHECK(fake.op == OP_REJECT_ACTIVE);
+        CHECK(atomic_load(&s_ota_active));
+        CHECK(atomic_load(&s_operator_lease_until_ms) == fake.initial_lease);
+        CHECK(atomic_load(&s_voice_control_request) == fake.initial_request);
+    }
+    fake.holder = HOLDER_NONE;
+}
+
+static int64_t esp_timer_get_time(void)
+{
+    ++fake.clock_calls;
+    CHECK(fake.holder == HOLDER_HELPER);
+    return (int64_t)(fake.now_ms * 1000U);
+}
+
+__PRODUCTION_HELPERS__
+
+static void reset(int op, bool privacy, bool active, uint32_t lease, uint64_t now)
+{
+    memset(&fake, 0, sizeof fake);
+    fake.op = op; fake.available = true;
+    fake.initial_privacy = privacy; fake.initial_active = active;
+    fake.initial_lease = lease; fake.initial_request = VOICE_CONTROL_RESUME;
+    fake.now_ms = now;
+    s_brain_lock = &fake;
+    atomic_store_explicit(&s_voice_privacy_paused, privacy, memory_order_seq_cst);
+    atomic_store_explicit(&s_ota_active, active, memory_order_seq_cst);
+    atomic_store_explicit(&s_operator_lease_until_ms, lease, memory_order_seq_cst);
+    atomic_store_explicit(&s_voice_control_request, fake.initial_request, memory_order_seq_cst);
+}
+
+static void unchanged(void)
+{
+    CHECK(atomic_load(&s_voice_privacy_paused) == fake.initial_privacy);
+    CHECK(atomic_load(&s_ota_active) == fake.initial_active);
+    CHECK(atomic_load(&s_operator_lease_until_ms) == fake.initial_lease);
+    CHECK(atomic_load(&s_voice_control_request) == fake.initial_request);
+    CHECK(fake.writes == 0U && fake.privacy_writes == 0U);
+}
+
+static void test_sleep_reservation_and_unavailable_admission(void)
+{
+    for (int privacy = 0; privacy < 2; ++privacy) {
+        for (int active = 0; active < 2; ++active) {
+            for (int reason = 0; reason < 3; ++reason) {
+                reset(OP_REFUSE, privacy, active, 234567U, 1000U);
+                if (reason == 0) s_brain_lock = NULL;
+                if (reason == 1) fake.holder = HOLDER_SLEEP;
+                if (reason == 2) fake.available = false;
+                uint32_t started = 0xCAFEU, lease = 0xF00DU;
+                bool was_private = !privacy;
+                CHECK(ota_admit_upload(&started, &lease, &was_private) == ESP_ERR_TIMEOUT);
+                CHECK(started == 0xCAFEU && lease == 0xF00DU && was_private == !privacy);
+                unchanged();
+                CHECK(fake.take_calls == (reason == 0 ? 0U : 1U));
+                CHECK(fake.give_calls == 0U && fake.clock_calls == 0U);
+                CHECK(fake.holder == (reason == 1 ? HOLDER_SLEEP : HOLDER_NONE));
+            }
+        }
+    }
+}
+
+static void test_existing_and_racing_active_upload(void)
+{
+    for (int privacy = 0; privacy < 2; ++privacy) {
+        for (int racing = 0; racing < 2; ++racing) {
+            reset(OP_REJECT_ACTIVE, privacy, !racing, 234567U, 1000U);
+            fake.became_active_while_waiting = racing;
+            uint32_t started = 0xCAFEU, lease = 0xF00DU;
+            bool was_private = !privacy;
+            CHECK(ota_admit_upload(&started, &lease, &was_private) == ESP_ERR_INVALID_STATE);
+            CHECK(started == 0xCAFEU && lease == 0xF00DU && was_private == !privacy);
+            fake.initial_active = true;
+            unchanged();
+            CHECK(fake.take_calls == 1U && fake.give_calls == 1U && fake.clock_calls == 0U);
+            CHECK(fake.holder == HOLDER_NONE);
+        }
+    }
+}
+
+static void test_successful_admission(void)
+{
+    static const uint64_t times[] = {0U, 1000U, UINT32_MAX - 4U,
+        UINT32_MAX - 180000U, UINT32_MAX - 180006U};
+    static const uint32_t leases[] = {0U, 999U, 2000000U};
+    for (int privacy = 0; privacy < 2; ++privacy) {
+        for (unsigned t = 0; t < sizeof times / sizeof times[0]; ++t) {
+            for (unsigned l = 0; l < sizeof leases / sizeof leases[0]; ++l) {
+                reset(OP_ADMIT, privacy, false, leases[l], times[t]);
+                uint32_t started = 0xCAFEU, previous = 0xF00DU;
+                bool was_private = !privacy;
+                CHECK(ota_admit_upload(&started, &previous, &was_private) == ESP_OK);
+                CHECK(started == (uint32_t)(times[t] + 7U));
+                CHECK(previous == leases[l] && was_private == (bool)privacy);
+                CHECK(atomic_load(&s_ota_active));
+                CHECK(atomic_load(&s_operator_lease_until_ms) == started + 180000U);
+                CHECK(atomic_load(&s_voice_control_request) == VOICE_CONTROL_PAUSE);
+                CHECK(atomic_load(&s_voice_privacy_paused) == (bool)privacy);
+                CHECK(fake.active_writes == 1U && fake.lease_writes == 1U && fake.request_writes == 1U);
+                CHECK(fake.writes == 3U && fake.privacy_writes == 0U);
+                CHECK(fake.take_calls == 1U && fake.give_calls == 1U && fake.clock_calls == 1U);
+                CHECK(fake.holder == HOLDER_NONE);
+            }
+        }
+    }
+}
+
+static void test_restoration_lease_and_privacy(void)
+{
+    /* Explicit oracle outcomes: acquisition advances seven ms. Do not copy
+     * the production signed subtraction predicate into the expectation. */
+    static const struct { uint32_t now, previous, restored; } cases[] = {
+        {1000U, 0U, 0U}, {1000U, 999U, 0U}, {1000U, 1007U, 0U},
+        {1000U, 1008U, 1008U}, {1000U, 2000U, 2000U},
+        {UINT32_MAX - 10U, 20U, 20U}, {20U, UINT32_MAX - 10U, 0U},
+        {UINT32_MAX - 10U, UINT32_MAX - 2U, UINT32_MAX - 2U},
+        {50U, UINT32_MAX, 0U}, {UINT32_MAX - 4U, 20U, 20U}
+    };
+    for (int prior = 0; prior < 2; ++prior) {
+        for (int current = 0; current < 2; ++current) {
+            for (int owner_cleared = 0; owner_cleared < 2; ++owner_cleared) {
+                for (unsigned c = 0; c < sizeof cases / sizeof cases[0]; ++c) {
+                    /* Take advances seven ms; expiration is evaluated there. */
+                    reset(OP_RESTORE, current, true, owner_cleared ? 0U : 65535U, cases[c].now);
+                    fake.final_lease = owner_cleared ? 0U : cases[c].restored;
+                    fake.final_request = prior || current ? VOICE_CONTROL_PAUSE : VOICE_CONTROL_RESUME;
+                    ota_restore_control_state(prior, cases[c].previous);
+                    CHECK(!atomic_load(&s_ota_active));
+                    CHECK(atomic_load(&s_operator_lease_until_ms) == fake.final_lease);
+                    CHECK(atomic_load(&s_voice_control_request) == fake.final_request);
+                    CHECK(atomic_load(&s_voice_privacy_paused) == (bool)current);
+                    CHECK(fake.active_writes == 1U && fake.request_writes == 1U);
+                    CHECK(fake.lease_writes == (owner_cleared ? 0U : 1U));
+                    CHECK(fake.privacy_writes == 0U);
+                    CHECK(fake.take_calls == 1U && fake.give_calls == 1U && fake.clock_calls == 1U);
+                    CHECK(fake.holder == HOLDER_NONE);
+                }
+            }
+        }
+    }
+}
+
+static void test_restoration_lock_failure_keeps_veto(void)
+{
+    for (int privacy = 0; privacy < 2; ++privacy) {
+        for (int reason = 0; reason < 3; ++reason) {
+            reset(OP_RESTORE, privacy, true, 234567U, 1000U);
+            if (reason == 0) s_brain_lock = NULL;
+            if (reason == 1) fake.holder = HOLDER_SLEEP;
+            if (reason == 2) fake.available = false;
+            ota_restore_control_state(!privacy, 67890U);
+            unchanged();
+            CHECK(fake.take_calls == (reason == 0 ? 0U : 1U));
+            CHECK(fake.give_calls == 0U && fake.clock_calls == 0U && fake.warnings == 1U);
+            CHECK(fake.holder == (reason == 1 ? HOLDER_SLEEP : HOLDER_NONE));
+        }
+    }
+}
+
+int main(void)
+{
+    test_sleep_reservation_and_unavailable_admission();
+    test_existing_and_racing_active_upload();
+    test_successful_admission();
+    test_restoration_lease_and_privacy();
+    test_restoration_lock_failure_keeps_veto();
+    if (failures) printf("OTA sleep fence FAILED (%u checks; %u failures)\n", checks, failures);
+    else printf("OTA sleep fence passed (%u checks)\n", checks);
+    return checks && !failures ? 0 : 1;
+}

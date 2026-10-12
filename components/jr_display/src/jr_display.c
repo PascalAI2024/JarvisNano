@@ -10,6 +10,7 @@
  * flush wait. Voice/audio tasks therefore never wait on flash, PSRAM, or LCD.
  */
 #include "jr_display/jr_display.h"
+#include "jr_display/companion.h"
 #include <stdatomic.h>
 #include "jr_display/hud_render.h"
 
@@ -88,6 +89,21 @@ typedef struct {
     uint32_t last_frame;
 } jr_display_clip_t;
 
+/* Gfx has two in-flight buffers. A bounded FIFO tags actual submissions,
+ * including callbacks that arrive before draw_bitmap returns. No ISR heap. */
+#define DISPLAY_TRANSFER_TAGS 8U
+#define TRANSFER_RESERVED 16U
+#define TRANSFER_OK 1U
+#define TRANSFER_DONE 2U
+#define TRANSFER_FAILED 4U
+#define TRANSFER_PUBLISHED 8U
+typedef struct {
+    volatile uint32_t flags;
+    uint32_t on_word;
+    bool glance_time;
+    uint32_t done_ms;
+} display_transfer_t;
+
 typedef struct {
     TaskHandle_t task;
     jarvis_board_display_t board;
@@ -134,6 +150,17 @@ typedef struct {
     bool dream_active;             /* presenter-owned stopped emote */
     uint32_t dream_clock_key;
     uint32_t dream_rim_key;
+    jr_display_rest_mode_t rest_mode;
+    jr_companion_view_t rest_view;
+    bool panel_touched;
+    uint8_t panel_restore_brightness;
+    uint32_t panel_prepared_word;
+    bool panel_prepared;
+    bool panel_sleep_attempted;
+    bool panel_last_sleep;
+    int64_t panel_sleep_attempt_us;
+    display_transfer_t transfer_tags[DISPLAY_TRANSFER_TAGS];
+    volatile uint32_t transfer_head, transfer_tail;
 
     volatile uint32_t requested_word;
     volatile uint32_t started;
@@ -168,6 +195,8 @@ typedef struct {
     volatile uint32_t init_finished;
     /* 0 = no callback, 2 = publishing, 1 = timestamp available. */
     volatile uint32_t first_transfer_state;
+    volatile uint32_t first_glance_time_transfer_done_boot_ms;
+    volatile uint32_t first_glance_time_transfer_state;
 } jr_display_ctx_t;
 
 static jr_display_ctx_t s_display = {
@@ -970,6 +999,11 @@ static uint16_t agent_native_color(jr_display_agent_state_t state)
 static volatile uint32_t s_hud_env_word =
     0x000000FFu;   /* battery unknown, level, listening */
 #define JR_DISPLAY_ENV_DREAM (1u << 10)
+#define JR_DISPLAY_ENV_MODE_MASK (3u << 10)
+#define JR_DISPLAY_ENV_NIGHT (1u << 12)
+#define JR_DISPLAY_ENV_USB (1u << 13)
+#define JR_DISPLAY_ENV_REST_MASK (0xfu << 10)
+#define JR_DISPLAY_ENV_VOICE_BUSY (1u << 14)
 #define JR_DISPLAY_ENV_RIM_MASK 0x3ffu
 #define JR_DISPLAY_CLOCK_MINUTE_MASK 0x1ffffu
 static volatile uint32_t s_hud_enabled = 1u;
@@ -1257,6 +1291,14 @@ bool jr_display_caption_pinned(void)
     return atomic_load(&s_caption_pinned);
 }
 
+bool jr_display_caption_foreground(void)
+{
+    const int caption = __atomic_load_n(&s_caption_on, __ATOMIC_ACQUIRE);
+    return atomic_load(&s_caption_pinned) ||
+        ((caption & JR_DISPLAY_CAPTION_ACTIVE) &&
+         !(caption & JR_DISPLAY_CAPTION_AMBIENT));
+}
+
 /* Only these fixed idle hints may yield to the minute clock. Results, errors,
  * consent and arbitrary text remain foreground, even with stale mood intent. */
 static bool caption_is_ambient(const char *text)
@@ -1264,11 +1306,23 @@ static bool caption_is_ambient(const char *text)
     static const char *const quiet[] = {
         "JARVIS", "MUTED - HOLD TO LISTEN", "MUTED - HOLD TO RESUME",
         "MUTED - TAP TO WAKE", "ASLEEP - TAP TO WAKE", "ASLEEP. TAP TO WAKE",
+        "LISTENING", "RESTING - TAP TO WAKE",
+        "POWER CONNECTED", "CHARGE COMPLETE", "ON BATTERY",
     };
     for (size_t i = 0; i < sizeof quiet / sizeof quiet[0]; ++i) {
         if (strcmp(text, quiet[i]) == 0) {
             return true;
         }
+    }
+    /* Fixed power status, not arbitrary text: canonical decimal 0..100%. */
+    if (strncmp(text, "CHARGING ", 9U) == 0) {
+        const char *p = text + 9;
+        if (*p < '0' || *p > '9' || (*p == '0' && p[1] != '%')) { return false; }
+        unsigned percent = 0U, digits = 0U;
+        while (*p >= '0' && *p <= '9' && digits < 3U) {
+            percent = percent * 10U + (unsigned)(*p++ - '0'); digits++;
+        }
+        return percent <= 100U && *p == '%' && p[1] == '\0';
     }
     return false;
 }
@@ -1397,7 +1451,7 @@ void jr_display_clock_set(bool on, int hh, int mm, int ss)
     }
     __atomic_store_n(&s_clock_word, word, __ATOMIC_RELEASE);
     const bool dream = (__atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE) &
-                        JR_DISPLAY_ENV_DREAM) != 0U;
+                        JR_DISPLAY_ENV_MODE_MASK) != 0U;
     if ((prev ^ word) & (dream ? JR_DISPLAY_CLOCK_MINUTE_MASK : UINT32_MAX)) {
         nav_wake();
     }
@@ -1641,6 +1695,10 @@ static volatile uint32_t s_links_word;
 static char s_links_ip[16];
 /* 0 running, 1 panel-off requested, 2 panel is off (render task only). */
 static volatile uint32_t s_panel_off;
+/* Low bits: running=0, off requested=1, off acknowledged=2, recovery=3.
+ * Upper bits are a generation. Old callbacks cannot acknowledge new intent. */
+static volatile uint32_t s_panel_on_ack_word;
+static volatile uint32_t s_panel_on_ack_valid;
 /* OTA status, packed like every other shell word so the updater can publish
  * from its own task with one release-store and the render task can sample it
  * with one load:
@@ -2653,14 +2711,14 @@ void jr_display_set_hud_env(uint8_t batt_pct, bool charging,
                         | ((uint32_t)(uint8_t)oy << 24);
     uint32_t cur = __atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE);
     for (;;) {
-        const uint32_t next = word | (cur & JR_DISPLAY_ENV_DREAM);
+        const uint32_t next = word | (cur & (JR_DISPLAY_ENV_REST_MASK | JR_DISPLAY_ENV_VOICE_BUSY));
         if (next == cur) {
             return;
         }
         if (__atomic_compare_exchange_n(&s_hud_env_word, &cur, next, false,
                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
             /* Tilt stays current for WATCH but does not move the DREAM rim. */
-            if (!(next & JR_DISPLAY_ENV_DREAM) ||
+            if (!(next & JR_DISPLAY_ENV_MODE_MASK) ||
                 ((next ^ cur) & JR_DISPLAY_ENV_RIM_MASK)) {
                 nav_wake();
             }
@@ -2669,12 +2727,16 @@ void jr_display_set_hud_env(uint8_t batt_pct, bool charging,
     }
 }
 
-void jr_display_dream_set(bool enabled)
+void jr_display_rest_set(jr_display_rest_mode_t mode, bool usb_present, bool night)
 {
+    if ((unsigned)mode > JR_DISPLAY_REST_GLANCE) { mode = JR_DISPLAY_REST_NONE; }
+    const uint32_t bits = mode == JR_DISPLAY_REST_NONE ? 0U :
+        ((uint32_t)mode << 10) | (usb_present ? JR_DISPLAY_ENV_USB : 0U) |
+        (night && mode == JR_DISPLAY_REST_NIGHTSTAND && usb_present ?
+            JR_DISPLAY_ENV_NIGHT : 0U);
     uint32_t cur = __atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE);
     for (;;) {
-        const uint32_t next = enabled ? (cur | JR_DISPLAY_ENV_DREAM)
-                                     : (cur & ~JR_DISPLAY_ENV_DREAM);
+        const uint32_t next = (cur & ~JR_DISPLAY_ENV_REST_MASK) | bits;
         if (next == cur) {
             return;
         }
@@ -2684,6 +2746,20 @@ void jr_display_dream_set(bool enabled)
             return;
         }
     }
+}
+
+void jr_display_dream_set(bool enabled)
+{
+    jr_display_rest_set(enabled ? JR_DISPLAY_REST_DREAM : JR_DISPLAY_REST_NONE,
+                        false, false);
+}
+
+void jr_display_rest_voice_busy_set(bool busy)
+{
+    const uint32_t previous = busy ?
+        __atomic_fetch_or(&s_hud_env_word, JR_DISPLAY_ENV_VOICE_BUSY, __ATOMIC_ACQ_REL) :
+        __atomic_fetch_and(&s_hud_env_word, ~JR_DISPLAY_ENV_VOICE_BUSY, __ATOMIC_ACQ_REL);
+    if (((previous & JR_DISPLAY_ENV_VOICE_BUSY) != 0U) != busy) { nav_wake(); }
 }
 
 static uint8_t hud_face_of(jr_face_t f)
@@ -4509,7 +4585,7 @@ static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
     sp_draw_orbit(ctx, y1, y2, pixels, under);
 }
 
-static bool dream_eligible(const jr_display_ctx_t *ctx)
+static jr_display_rest_mode_t rest_eligible(const jr_display_ctx_t *ctx)
 {
     const uint32_t env = __atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE);
     const uint32_t request = __atomic_load_n(&ctx->requested_word, __ATOMIC_ACQUIRE);
@@ -4521,10 +4597,16 @@ static bool dream_eligible(const jr_display_ctx_t *ctx)
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
     const uint32_t ripple = __atomic_load_n(&s_ripple_start_ms, __ATOMIC_ACQUIRE);
     const uint32_t bloom = __atomic_load_n(&s_bloom_start_ms, __ATOMIC_ACQUIRE);
-    return (env & JR_DISPLAY_ENV_DREAM) != 0U && !(env & (1u << 8)) &&
-           !(__atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE) & (1u << 24)) &&
+    const jr_display_rest_mode_t mode = (jr_display_rest_mode_t)
+        ((env & JR_DISPLAY_ENV_MODE_MASK) >> 10);
+    const bool usb = (__atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE) &
+                      (1u << 24)) != 0U;
+    const bool allowed = mode != JR_DISPLAY_REST_NONE && !(env & JR_DISPLAY_ENV_VOICE_BUSY) &&
+           (mode != JR_DISPLAY_REST_DREAM || (!(env & (1u << 8)) && !usb)) &&
+           (mode != JR_DISPLAY_REST_NIGHTSTAND || (usb && (env & JR_DISPLAY_ENV_USB))) &&
            !(request & JR_DISPLAY_CMD_BLANK) &&
-           (face == JR_FACE_IDLE || face == JR_FACE_RESTING || face == JR_FACE_MUTED) &&
+           (face == JR_FACE_IDLE || face == JR_FACE_RESTING || face == JR_FACE_MUTED ||
+            (face == JR_FACE_LISTENING && mode != JR_DISPLAY_REST_DREAM)) &&
            (space == JR_DISPLAY_SPACE_JARVIS || space == JR_DISPLAY_SPACE_WATCH) &&
            !(nav & NAV_OVL_MASK) &&
            !(diag_load(&ctx->shell_word) & (JR_DISPLAY_SHELL_SHADE | JR_DISPLAY_SHELL_AGENT)) &&
@@ -4535,10 +4617,40 @@ static bool dream_eligible(const jr_display_ctx_t *ctx)
            !jr_display_canvas_active() && !jr_display_surface_is_active() &&
            (!caption || (caption & JR_DISPLAY_CAPTION_AMBIENT)) &&
            !atomic_load(&s_caption_pinned) &&
+           (s_space_from == s_space_to || s_space_ease >= 256) &&
+           s_detail_ease == 0 && s_shade_ease == 0 &&
+           s_ask_ease == 0 && s_canvas_ease == 0 &&
            !sp_ota_ringing((jr_display_ota_state_t)
                (__atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE) & 0xfu)) &&
            diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF &&
            jr_display_hud_enabled();
+    return allowed ? mode : JR_DISPLAY_REST_NONE;
+}
+
+static bool dream_eligible(const jr_display_ctx_t *ctx)
+{
+    return rest_eligible(ctx) == JR_DISPLAY_REST_DREAM;
+}
+
+static void companion_view(jr_display_rest_mode_t mode, jr_companion_view_t *view)
+{
+    const uint32_t env = __atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE);
+    const uint32_t clock = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
+    const jr_companion_input_t input = {
+        .requested = mode == JR_DISPLAY_REST_NIGHTSTAND ?
+            JR_COMPANION_NIGHTSTAND : JR_COMPANION_GLANCE,
+        .usb_present = (__atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE) & (1u << 24)) != 0U,
+        .idle = true,
+        .privacy_muted = (env & (1u << 9)) != 0U,
+        .charging = (env & (1u << 8)) != 0U,
+        .time_valid = (clock & (1u << 16)) != 0U,
+        .hour = (uint8_t)(clock >> 8), .minute = (uint8_t)clock,
+        .battery_percent = (uint8_t)env,
+        .next_state = JR_COMPANION_NEXT_UNKNOWN,
+    };
+    (void)jr_companion_build(&input, view);
+    view->night = mode == JR_DISPLAY_REST_NIGHTSTAND && input.time_valid &&
+                  (env & JR_DISPLAY_ENV_NIGHT) != 0U;
 }
 
 static void dream_clock_text(char text[6], uint32_t clock)
@@ -4557,8 +4669,7 @@ static void dream_clock_text(char text[6], uint32_t clock)
     text[5] = '\0';
 }
 
-static void apply_dream_overlay(jr_display_ctx_t *ctx, int y1, int y2,
-                                 uint16_t *pixels)
+static void apply_rest_rims(jr_display_ctx_t *ctx, int y1, int y2, uint16_t *pixels)
 {
     memset(pixels, 0, (size_t)(y2 - y1) * HUD_W * sizeof *pixels);
     const uint32_t word = __atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE);
@@ -4569,6 +4680,12 @@ static void apply_dream_overlay(jr_display_ctx_t *ctx, int y1, int y2,
         .privacy_muted = (word & (1u << 9)) != 0U,
     };
     hud_overlay_frame(pixels, y1, y2 - y1, 0U, ctx->board.swap_color_bytes, &env);
+}
+
+static void apply_dream_overlay(jr_display_ctx_t *ctx, int y1, int y2,
+                                 uint16_t *pixels)
+{
+    apply_rest_rims(ctx, y1, y2, pixels);
     char text[6];
     dream_clock_text(text, __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE));
     const uint16_t ink = panel_order_color(ctx, 0x2104u);
@@ -4576,6 +4693,28 @@ static void apply_dream_overlay(jr_display_ctx_t *ctx, int y1, int y2,
         sp_text_row(pixels + (size_t)(y - y1) * HUD_W, y, text, 5,
                     (HUD_W - 5 * 18) / 2, (HUD_H - 21) / 2, 3, ink);
     }
+}
+
+static bool apply_companion_overlay(jr_display_ctx_t *ctx, int y1, int y2,
+                                    uint16_t *pixels, jr_display_rest_mode_t mode)
+{
+    /* Same authoritative normal-colour rims as DREAM; fixed charge phase. */
+    apply_rest_rims(ctx, y1, y2, pixels);
+    jr_companion_view_t view;
+    companion_view(mode, &view);
+    const uint16_t ink = panel_order_color(ctx, view.ink_rgb565);
+    for (unsigned i = 0; i < JR_COMPANION_LINE_COUNT; ++i) {
+        const jr_companion_line_t *line = &view.lines[i];
+        const int len = (int)strnlen(line->text, sizeof line->text);
+        if (len == 0) { continue; }
+        for (int y = y1; y < y2; ++y) {
+            sp_text_row(pixels + (size_t)(y - y1) * HUD_W, y, line->text, len,
+                        line->x, line->y, line->scale, ink);
+        }
+    }
+    return strcmp(view.lines[0].text, "--:--") != 0 &&
+           y1 < view.lines[0].y + 7 * view.lines[0].scale &&
+           y2 > view.lines[0].y;
 }
 
 static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
@@ -4820,6 +4959,160 @@ static void snapshot_record_flush(jr_display_ctx_t *ctx, int x1, int y1,
     xSemaphoreGive(ctx->snapshot_lock);
 }
 
+static bool IRAM_ATTR panel_request_matches(uint32_t word)
+{
+    return __atomic_load_n(&s_panel_off, __ATOMIC_ACQUIRE) == word;
+}
+
+static bool panel_settle(jr_display_ctx_t *ctx, uint32_t word)
+{
+    while (esp_timer_get_time() - ctx->panel_sleep_attempt_us < 120000) {
+        if (!panel_request_matches(word)) { return false; }
+        vTaskDelay(pdMS_TO_TICKS(5) + 1U);
+    }
+    return panel_request_matches(word);
+}
+
+static esp_err_t panel_sleep_command(jr_display_ctx_t *ctx, uint32_t word, bool sleep)
+{
+    if (ctx->panel_sleep_attempted && ctx->panel_last_sleep != sleep &&
+        !panel_settle(ctx, word)) { return ESP_ERR_INVALID_STATE; }
+    if (!panel_request_matches(word)) { return ESP_ERR_INVALID_STATE; }
+    /* A failed transport may still have reached the controller. Preserve the
+     * opposite-command exclusion even on an uncertain acknowledgement. */
+    ctx->panel_sleep_attempted = true;
+    ctx->panel_last_sleep = sleep;
+    ctx->panel_sleep_attempt_us = esp_timer_get_time();
+    return jarvis_board_display_set_sleep(sleep);
+}
+
+/* Sole command owner: invoked on gfx's render task before a strip. False
+ * means no DMA is submitted; the caller releases that flush exactly once. */
+static bool panel_service(jr_display_ctx_t *ctx)
+{
+    const uint32_t word = __atomic_load_n(&s_panel_off, __ATOMIC_ACQUIRE);
+    const uint32_t state = word & 3U;
+    if (state == 0U) { return true; }
+    if (state == 2U) { return false; }
+    if (ctx->panel_prepared && ctx->panel_prepared_word == word) {
+        return state == 3U;
+    }
+    esp_err_t err;
+    if (state == 1U) {
+        if (!ctx->panel_touched || ctx->panel_prepared) {
+            ctx->panel_restore_brightness = atomic_load(&s_brightness_have);
+            ctx->panel_touched = true;
+            ctx->panel_prepared = false;
+        }
+        err = jarvis_board_set_brightness(0U);
+        if (err == ESP_OK && panel_request_matches(word)) {
+            atomic_store(&s_brightness_have, 0U);
+            err = esp_lcd_panel_disp_on_off(ctx->board.panel, false);
+        }
+        if (err == ESP_OK && panel_request_matches(word)) {
+            err = panel_sleep_command(ctx, word, true);
+        }
+        if (err == ESP_OK && panel_settle(ctx, word)) {
+            uint32_t expected = word;
+            (void)__atomic_compare_exchange_n(&s_panel_off, &expected,
+                (word & ~3U) | 2U, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        }
+    } else {
+        err = panel_sleep_command(ctx, word, false);
+        if (err == ESP_OK && panel_settle(ctx, word)) {
+            err = esp_lcd_panel_disp_on_off(ctx->board.panel, true);
+            if (err == ESP_OK && panel_request_matches(word)) {
+                const uint8_t brightness = ctx->panel_touched ?
+                    ctx->panel_restore_brightness : atomic_load(&s_brightness_have);
+                err = jarvis_board_set_brightness(brightness);
+                if (err == ESP_OK && panel_request_matches(word)) {
+                    atomic_store(&s_brightness_have, brightness);
+                    atomic_store(&s_brightness_shown, brightness);
+                    ctx->panel_prepared_word = word;
+                    ctx->panel_prepared = true;
+                    return true; /* still needs its matching completed strip */
+                }
+            }
+        }
+    }
+    if (err != ESP_OK) {
+        __atomic_store_n(&ctx->last_error, err, __ATOMIC_RELAXED);
+        diag_inc(&ctx->flush_errors);
+    }
+    return false;
+}
+
+static void IRAM_ATTR transfer_publish(jr_display_ctx_t *ctx, display_transfer_t *tag)
+{
+    uint32_t expected = TRANSFER_RESERVED | TRANSFER_OK | TRANSFER_DONE;
+    if (!__atomic_compare_exchange_n(&tag->flags, &expected,
+        expected | TRANSFER_PUBLISHED, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        return;
+    }
+    if (tag->glance_time) {
+        uint32_t empty = 0U;
+        if (__atomic_compare_exchange_n(&ctx->first_glance_time_transfer_state,
+            &empty, 2U, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+            diag_store(&ctx->first_glance_time_transfer_done_boot_ms, tag->done_ms);
+            __atomic_store_n(&ctx->first_glance_time_transfer_state, 1U, __ATOMIC_RELEASE);
+        }
+    }
+    uint32_t word = tag->on_word;
+    if ((word & 3U) == 3U) {
+        if (!__atomic_compare_exchange_n(&s_panel_off, &word, word & ~3U,
+            false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) { return; }
+        word &= ~3U;
+    }
+    if ((word & 3U) == 0U && panel_request_matches(word)) {
+        __atomic_store_n(&s_panel_on_ack_word, word, __ATOMIC_RELAXED);
+        __atomic_store_n(&s_panel_on_ack_valid, 1U, __ATOMIC_RELEASE);
+    }
+}
+
+static void IRAM_ATTR transfer_discard_failed(jr_display_ctx_t *ctx)
+{
+    uint32_t tail = __atomic_load_n(&ctx->transfer_tail, __ATOMIC_ACQUIRE);
+    while (tail != __atomic_load_n(&ctx->transfer_head, __ATOMIC_ACQUIRE)) {
+        display_transfer_t *tag = &ctx->transfer_tags[tail % DISPLAY_TRANSFER_TAGS];
+        if (!(__atomic_load_n(&tag->flags, __ATOMIC_ACQUIRE) & TRANSFER_FAILED)) { break; }
+        (void)__atomic_compare_exchange_n(&ctx->transfer_tail, &tail, tail + 1U,
+            false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        tail = __atomic_load_n(&ctx->transfer_tail, __ATOMIC_ACQUIRE);
+    }
+}
+
+static display_transfer_t *transfer_reserve(jr_display_ctx_t *ctx, bool glance_time)
+{
+    transfer_discard_failed(ctx);
+    const uint32_t head = __atomic_load_n(&ctx->transfer_head, __ATOMIC_RELAXED);
+    if (head - __atomic_load_n(&ctx->transfer_tail, __ATOMIC_ACQUIRE) >= DISPLAY_TRANSFER_TAGS) {
+        return NULL;
+    }
+    display_transfer_t *tag = &ctx->transfer_tags[head % DISPLAY_TRANSFER_TAGS];
+    const uint32_t flags = __atomic_load_n(&tag->flags, __ATOMIC_ACQUIRE);
+    if (flags && !(flags & (TRANSFER_PUBLISHED | TRANSFER_FAILED))) { return NULL; }
+    tag->glance_time = glance_time;
+    tag->on_word = __atomic_load_n(&s_panel_off, __ATOMIC_ACQUIRE);
+    tag->done_ms = 0U;
+    __atomic_store_n(&tag->flags, TRANSFER_RESERVED, __ATOMIC_RELEASE);
+    __atomic_store_n(&ctx->transfer_head, head + 1U, __ATOMIC_RELEASE);
+    return tag;
+}
+
+static void IRAM_ATTR transfer_complete(jr_display_ctx_t *ctx)
+{
+    transfer_discard_failed(ctx);
+    const uint32_t tail = __atomic_load_n(&ctx->transfer_tail, __ATOMIC_ACQUIRE);
+    if (tail == __atomic_load_n(&ctx->transfer_head, __ATOMIC_ACQUIRE)) { return; }
+    display_transfer_t *tag = &ctx->transfer_tags[tail % DISPLAY_TRANSFER_TAGS];
+    tag->done_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    __atomic_fetch_or(&tag->flags, TRANSFER_DONE, __ATOMIC_ACQ_REL);
+    transfer_publish(ctx, tag);
+    uint32_t expected = tail;
+    (void)__atomic_compare_exchange_n(&ctx->transfer_tail, &expected, tail + 1U,
+        false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+}
+
 static bool IRAM_ATTR panel_color_done(esp_lcd_panel_io_handle_t panel_io,
                                        esp_lcd_panel_io_event_data_t *event,
                                        void *user_ctx)
@@ -4840,6 +5133,7 @@ static bool IRAM_ATTR panel_color_done(esp_lcd_panel_io_handle_t panel_io,
             __atomic_store_n(&ctx->first_transfer_state, 1U, __ATOMIC_RELEASE);
         }
         diag_inc(&ctx->flush_completions);
+        transfer_complete(ctx);
         (void)gfx_disp_flush_ready(ctx->disp, true);
     }
     /* gfx_disp_flush_ready() performs the ISR yield itself. */
@@ -4904,21 +5198,12 @@ static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
      * on the render task, and the command's tx_param waits out the previous
      * strip's DMA before it goes on the bus. This is the only place a panel
      * command may be issued. */
-    brightness_pump();
-
-    /* Deep-sleep hand-off, on the same rule: the render task owns the bus, so the
-     * panel takes DISPOFF and SLPIN safely, and no strip is submitted after
-     * them. An unsupported SLPIN is fine — DISPOFF already blanks it. */
-    const uint32_t off = diag_load(&s_panel_off);
-    if (off == 1U) {
-        (void)jarvis_board_set_brightness(0);
-        (void)esp_lcd_panel_disp_on_off(ctx->board.panel, false);
-        (void)esp_lcd_panel_disp_sleep(ctx->board.panel, true);
-        diag_store(&s_panel_off, 2U);
-    }
-    if (off != 0U) {
+    if (!panel_service(ctx)) {
         (void)gfx_disp_flush_ready(disp, true);
         return;
+    }
+    if ((__atomic_load_n(&s_panel_off, __ATOMIC_ACQUIRE) & 3U) == 0U) {
+        brightness_pump();
     }
 
     /* Frame-start latch: fades advance once per frame so all of a frame's
@@ -4933,29 +5218,54 @@ static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
      * that will be handed to the CO5300—not the pre-render intent. */
     uint16_t *outbound = (uint16_t *)pixels;
     const int64_t t0 = esp_timer_get_time();
-    apply_dial(ctx, x1, y1, x2, y2, outbound);
-    apply_canvas(ctx, x1, y1, x2, y2, outbound);
-    apply_test_pattern(ctx, x1, y1, x2, y2, outbound);
-    if (diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF) {
+    const jr_display_rest_mode_t rest = rest_eligible(ctx);
+    const bool rest_strip = rest != JR_DISPLAY_REST_NONE &&
+                            x1 == 0 && x2 == HUD_W && y2 > y1;
+    bool glance_time = false;
+    if (rest_strip) {
+        if (rest == JR_DISPLAY_REST_DREAM) {
+            apply_dream_overlay(ctx, y1, y2, outbound);
+        } else {
+            const bool clock_strip = apply_companion_overlay(ctx, y1, y2, outbound, rest);
+            glance_time = rest == JR_DISPLAY_REST_GLANCE && clock_strip;
+        }
+    } else {
+        apply_dial(ctx, x1, y1, x2, y2, outbound);
+        apply_canvas(ctx, x1, y1, x2, y2, outbound);
+        apply_test_pattern(ctx, x1, y1, x2, y2, outbound);
+        if (diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF) {
         apply_hud_overlay(ctx, x1, y1, x2, y2, outbound);
         apply_shell_overlay(ctx, x1, y1, x2, y2, outbound);
         apply_surface_overlay(ctx, x1, y1, x2, y2, outbound);
+        }
     }
     render_account(ctx, frame_start, (uint32_t)(esp_timer_get_time() - t0),
                    (uint32_t)(t0 / 1000));
+    display_transfer_t *tag = transfer_reserve(ctx, glance_time);
+    if (!tag) {
+        diag_store(&ctx->snapshot_frame_dropped, 1U);
+        __atomic_store_n(&ctx->last_error, ESP_ERR_NO_MEM, __ATOMIC_RELAXED);
+        diag_inc(&ctx->flush_errors);
+        (void)gfx_disp_flush_ready(disp, true);
+        return;
+    }
     diag_inc(&ctx->flush_submissions);
     esp_err_t err = esp_lcd_panel_draw_bitmap(ctx->board.panel, x1, y1, x2, y2,
                                               outbound);
     if (err != ESP_OK) {
+        const uint32_t flags = __atomic_fetch_or(&tag->flags, TRANSFER_FAILED, __ATOMIC_ACQ_REL);
+        transfer_discard_failed(ctx);
         /* This strip never reached the panel, so the in-progress software
          * mirror must not be allowed to publish as physical evidence. */
         diag_store(&ctx->snapshot_frame_dropped, 1U);
         __atomic_store_n(&ctx->last_error, err, __ATOMIC_RELAXED);
         diag_inc(&ctx->flush_errors);
         /* Never strand the gfx renderer on a failed DMA submission. */
-        (void)gfx_disp_flush_ready(disp, true);
+        if (!(flags & TRANSFER_DONE)) { (void)gfx_disp_flush_ready(disp, true); }
         return;
     }
+    __atomic_fetch_or(&tag->flags, TRANSFER_OK, __ATOMIC_ACQ_REL);
+    transfer_publish(ctx, tag);
     snapshot_record_flush(ctx, x1, y1, x2, y2, outbound);
 }
 
@@ -5007,7 +5317,8 @@ static bool presenter_refresh(jr_display_ctx_t *ctx)
 static bool presenter_refresh_pending(jr_display_ctx_t *ctx, bool pattern_changed)
 {
     const bool snapshot = diag_exchange(&ctx->snapshot_refresh_requested, 0U) != 0U;
-    if (pattern_changed || snapshot || diag_load(&s_panel_off) == 1U) {
+    const uint32_t panel_state = diag_load(&s_panel_off) & 3U;
+    if (pattern_changed || snapshot || panel_state == 1U || panel_state == 3U) {
         /* A stopped emote has no dirty frame. Screenshots and SLPIN still
          * require a flush through the sole panel-command owner. */
         if (!presenter_refresh(ctx)) {
@@ -5032,7 +5343,8 @@ static void presenter_pattern_tick(jr_display_ctx_t *ctx, uint32_t *last_pattern
 
 static bool presenter_dream_tick(jr_display_ctx_t *ctx, uint32_t *last_word)
 {
-    if (!dream_eligible(ctx)) {
+    const jr_display_rest_mode_t mode = rest_eligible(ctx);
+    if (mode == JR_DISPLAY_REST_NONE) {
         if (ctx->dream_active) {
             ctx->dream_active = false;
             *last_word = UINT32_MAX; /* restore even the same face/amp */
@@ -5044,6 +5356,8 @@ static bool presenter_dream_tick(jr_display_ctx_t *ctx, uint32_t *last_word)
                            JR_DISPLAY_CLOCK_MINUTE_MASK;
     const uint32_t rim = __atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE) &
                          JR_DISPLAY_ENV_RIM_MASK;
+    jr_companion_view_t view = {0};
+    if (mode != JR_DISPLAY_REST_DREAM) { companion_view(mode, &view); }
     if (!ctx->dream_active) {
         if (apply_blank(ctx) != ESP_OK) {
             return false;
@@ -5051,12 +5365,18 @@ static bool presenter_dream_tick(jr_display_ctx_t *ctx, uint32_t *last_word)
         ctx->dream_active = true;
         ctx->dream_clock_key = clock;
         ctx->dream_rim_key = rim;
+        ctx->rest_mode = mode;
+        ctx->rest_view = view;
         diag_inc(&ctx->state_changes);
-    } else if (ctx->dream_clock_key != clock || ctx->dream_rim_key != rim ||
+    } else if (ctx->rest_mode != mode || ctx->dream_clock_key != clock ||
+               ctx->dream_rim_key != rim ||
+               !jr_companion_view_equal(&ctx->rest_view, &view) ||
                brightness_pending()) {
         if (presenter_refresh(ctx)) {
             ctx->dream_clock_key = clock;
             ctx->dream_rim_key = rim;
+            ctx->rest_mode = mode;
+            ctx->rest_view = view;
         }
     }
     return true;
@@ -5359,6 +5679,15 @@ static esp_err_t display_engine_init(jr_display_ctx_t *ctx)
     ESP_RETURN_ON_ERROR(jarvis_board_display_get(&ctx->board), TAG,
                         "CO5300 board display init failed");
 
+    /* Board bootstrap is dark. Apply the app's pre-start cap from this sole
+     * command owner before gfx can submit its first neutral/content strip.
+     * Unseeded boots retain the default100 target; subsequent changes slew. */
+    const uint8_t initial = __atomic_load_n(&s_brightness_want, __ATOMIC_ACQUIRE);
+    ESP_RETURN_ON_ERROR(jarvis_board_set_brightness(initial), TAG,
+                        "initial panel brightness failed");
+    atomic_store(&s_brightness_have, initial);
+    atomic_store(&s_brightness_shown, initial);
+
     const esp_vfs_spiffs_conf_t fs = {
         .base_path = JR_DISPLAY_MOUNT_POINT,
         .partition_label = JR_DISPLAY_PARTITION,
@@ -5632,6 +5961,12 @@ esp_err_t jr_display_get_diag(jr_display_diag_t *out_diag)
     if (timing->first_transfer_valid) {
         timing->first_transfer_done_boot_ms =
             diag_load(&s_display.first_transfer_done_boot_ms);
+    }
+    timing->first_glance_time_transfer_valid = __atomic_load_n(
+        &s_display.first_glance_time_transfer_state, __ATOMIC_ACQUIRE) == 1U;
+    if (timing->first_glance_time_transfer_valid) {
+        timing->first_glance_time_transfer_done_boot_ms =
+            diag_load(&s_display.first_glance_time_transfer_done_boot_ms);
     }
     return ESP_OK;
 }
@@ -6316,15 +6651,37 @@ void jr_display_ota_set(jr_display_ota_state_t state, uint8_t percent,
 
 void jr_display_panel_off_request(void)
 {
-    if (diag_load(&s_panel_off) == 0U) {
-        diag_store(&s_panel_off, 1U);
-        nav_wake();
+    uint32_t cur = __atomic_load_n(&s_panel_off, __ATOMIC_ACQUIRE);
+    for (;;) {
+        if ((cur & 3U) == 1U || (cur & 3U) == 2U) { return; }
+        const uint32_t next = ((cur & ~3U) + 4U) | 1U;
+        if (__atomic_compare_exchange_n(&s_panel_off, &cur, next, false,
+            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) { nav_wake(); return; }
     }
 }
 
 bool jr_display_panel_is_off(void)
 {
-    return diag_load(&s_panel_off) == 2U;
+    return (__atomic_load_n(&s_panel_off, __ATOMIC_ACQUIRE) & 3U) == 2U;
+}
+
+void jr_display_panel_on_request(void)
+{
+    uint32_t cur = __atomic_load_n(&s_panel_off, __ATOMIC_ACQUIRE);
+    for (;;) {
+        if ((cur & 3U) == 0U || (cur & 3U) == 3U) { return; }
+        const uint32_t next = ((cur & ~3U) + 4U) | 3U;
+        if (__atomic_compare_exchange_n(&s_panel_off, &cur, next, false,
+            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) { nav_wake(); return; }
+    }
+}
+
+bool jr_display_panel_is_on(void)
+{
+    const uint32_t word = __atomic_load_n(&s_panel_off, __ATOMIC_ACQUIRE);
+    return (word & 3U) == 0U &&
+        __atomic_load_n(&s_panel_on_ack_valid, __ATOMIC_ACQUIRE) != 0U &&
+        __atomic_load_n(&s_panel_on_ack_word, __ATOMIC_RELAXED) == word;
 }
 
 void jr_display_links_set(const jr_display_links_t *links)

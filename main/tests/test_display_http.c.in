@@ -1,0 +1,49 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Actual diagnostic serializer; peripheral/HTTP ports only are faked. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "jr_display/jr_display.h"
+typedef struct { int unused; } httpd_req_t;
+#define HTTPD_500_INTERNAL_SERVER_ERROR 500
+static jr_display_diag_t cached;
+static unsigned errors, sent;
+static char response[2048], type[32], cache[32];
+static esp_err_t read_result;
+esp_err_t jr_display_get_diag(jr_display_diag_t *d) { *d=cached; return read_result; }
+const char *esp_err_to_name(esp_err_t e) { return e==ESP_OK ? "ESP_OK" : "ESP_FAIL"; }
+static esp_err_t httpd_resp_send_err(httpd_req_t *r,int e,const char *s)
+{ (void)r;(void)e;(void)s; ++errors; return ESP_FAIL; }
+static esp_err_t httpd_resp_set_type(httpd_req_t *r,const char *s)
+{ (void)r; snprintf(type,sizeof type,"%s",s); return ESP_OK; }
+static esp_err_t httpd_resp_set_hdr(httpd_req_t *r,const char *n,const char *s)
+{ (void)r; if(strcmp(n,"Cache-Control")) abort(); snprintf(cache,sizeof cache,"%s",s); return ESP_OK; }
+static esp_err_t httpd_resp_send(httpd_req_t *r,const char *s,size_t n)
+{ (void)r; if(n>=sizeof response) abort(); memcpy(response,s,n);response[n]=0;++sent;return ESP_OK; }
+__PRODUCTION_HANDLER__
+int main(int argc,char **argv) {
+ if(argc!=2) return 2;
+ unsigned bits=(unsigned)strtoul(argv[1],NULL,10);
+ cached.init_state=JR_DISPLAY_INIT_READY;
+ cached.last_error=ESP_OK;cached.task_running=true;
+ cached.requested_face=JR_FACE_IDLE;cached.applied_face=JR_FACE_IDLE;
+ cached.requested_amplitude=UINT8_MAX;cached.applied_bucket=UINT8_MAX;
+ cached.requests=cached.state_changes=cached.segment_sets=UINT32_MAX;
+ cached.asset_load_failures=cached.flush_submissions=cached.flush_completions=UINT32_MAX;
+ cached.flush_errors=cached.actual_fps=cached.render_us=cached.render_frames=UINT32_MAX;
+ cached.render_frame_us=cached.current_asset_bytes=cached.free_psram_bytes=UINT32_MAX;
+ cached.task_stack_hwm=UINT32_MAX;
+ cached.boot_timing.init_started=true;cached.boot_timing.init_finished=true;
+ cached.boot_timing.init_start_boot_ms=UINT32_MAX-2;
+ cached.boot_timing.init_end_boot_ms=UINT32_MAX-1;
+ cached.boot_timing.first_transfer_valid=(bits&1)!=0;
+ cached.boot_timing.first_transfer_done_boot_ms=(bits&1) ? UINT32_MAX : 0;
+ cached.boot_timing.first_glance_time_transfer_valid=(bits&2)!=0;
+ cached.boot_timing.first_glance_time_transfer_done_boot_ms=(bits&2) ? 987654321 : 0;
+ read_result=(bits&4) ? ESP_FAIL : ESP_OK;
+ if(bits&8) {cached.init_state=JR_DISPLAY_INIT_FAILED;cached.last_error=ESP_FAIL;}
+ httpd_req_t req={0};int result=display_diag_handler(&req);
+ printf("{\"result\":%d,\"errors\":%u,\"sent\":%u,\"type\":\"%s\",\"cache\":\"%s\",\"bytes\":%zu}\n%s\n",
+   result,errors,sent,type,cache,strlen(response),response);
+ return 0;
+}

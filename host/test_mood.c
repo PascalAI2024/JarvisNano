@@ -8,14 +8,30 @@
 #include <string.h>
 
 /* Execute the real sleep coordinator with fake peripherals. Guard ordering
- * matters: probation or failed audio shutdown must precede every RTC write,
- * stopped IMU and darkened panel, not merely precede the final sleep call. */
+ * matters: all fatal guards precede audio/IMU quiescence and every RTC write;
+ * a refused panel/audio hand-off requests recovery instead of sleeping. */
 #define JR_POWER_HOST_TEST 1
 #include "../main/power.c"
 
 _Atomic bool s_voice_privacy_paused;
+_Atomic bool s_ota_active;
+static unsigned power_lock_token;
+SemaphoreHandle_t s_brain_lock = &power_lock_token;
+static bool power_lock_held;
+bool operator_lease_active(uint32_t now_ms) { (void)now_ms; return false; }
+int64_t esp_timer_get_time(void) { return 0; }
+int xSemaphoreTake(SemaphoreHandle_t lock, unsigned ticks)
+{
+    (void)ticks;
+    if (lock != s_brain_lock || power_lock_held) return pdFALSE;
+    power_lock_held = true;
+    return pdTRUE;
+}
+void xSemaphoreGive(SemaphoreHandle_t lock)
+{ (void)lock; power_lock_held = false; }
 enum { POWER_AUDIO = 1, POWER_CAPTION, POWER_IMU_STOP, POWER_IMU_ARM,
-       POWER_PANEL_OFF, POWER_GPIO, POWER_WAKE, POWER_SLEEP };
+       POWER_PANEL_OFF, POWER_GPIO, POWER_WAKE, POWER_SLEEP,
+       POWER_PANEL_ON, POWER_TIMER_CANCEL };
 static struct {
     esp_ota_img_states_t ota_state;
     esp_err_t audio_result;
@@ -47,6 +63,8 @@ esp_err_t jr_audio_prepare_sleep(void)
     power_event(POWER_AUDIO);
     return power_fake.audio_result;
 }
+esp_err_t jr_power_read(jr_power_t *out)
+{ memset(out, 0, sizeof(*out)); out->sample_seq = 1U; return ESP_OK; }
 void jr_display_caption_set(const char *text)
 { (void)text; power_event(POWER_CAPTION); }
 void vTaskDelay(unsigned ticks) { (void)ticks; }
@@ -55,6 +73,8 @@ esp_err_t jr_imu_arm_wake_on_motion(unsigned mg)
 { (void)mg; power_event(POWER_IMU_ARM); return power_fake.imu_result; }
 void jr_display_panel_off_request(void) { power_event(POWER_PANEL_OFF); }
 bool jr_display_panel_is_off(void) { return true; }
+void jr_display_panel_on_request(void) { power_event(POWER_PANEL_ON); }
+bool jr_display_panel_is_on(void) { return true; }
 void rtc_gpio_init(int gpio) { (void)gpio; power_event(POWER_GPIO); }
 void rtc_gpio_set_direction(int gpio, int direction)
 { (void)gpio; (void)direction; }
@@ -71,11 +91,15 @@ esp_err_t esp_sleep_pd_config(int domain, int option)
 { (void)domain; (void)option; return ESP_OK; }
 esp_err_t esp_sleep_enable_timer_wakeup(uint64_t usec)
 { power_fake.timer_us = usec; power_event(POWER_WAKE); return ESP_OK; }
+esp_err_t esp_sleep_disable_wakeup_source(int source)
+{ (void)source; power_event(POWER_TIMER_CANCEL); return ESP_OK; }
 void esp_deep_sleep_start(void) { power_event(POWER_SLEEP); }
 static void power_fake_reset(void)
 {
     memset(&power_fake, 0, sizeof power_fake);
     power_fake.ota_state = ESP_OTA_IMG_VALID;
+    power_lock_held = false;
+    atomic_store(&s_ota_active, false);
     s_rtc_sleep_magic = 0U;
     s_rtc_sleeps = 7U;
     s_rtc_was_listening = 0U;
@@ -95,13 +119,18 @@ static void test_sleep_probation_refuses_before_audio_or_rtc(void)
     TEST_ASSERT_FALSE(atomic_load(&s_sleep_force));
 }
 
-static void test_sleep_failed_audio_leaves_rtc_and_peripherals_untouched(void)
+static void test_sleep_failed_audio_preserves_rtc_and_recovers_panel(void)
 {
     power_fake_reset();
     power_fake.audio_result = ESP_ERR_TIMEOUT;
     enter_deep_sleep("test", 300U);
-    TEST_ASSERT_EQUAL_UINT(1, power_fake.count);
-    TEST_ASSERT_EQUAL_UINT(POWER_AUDIO, power_fake.events[0]);
+    TEST_ASSERT_EQUAL_UINT(6, power_fake.count);
+    TEST_ASSERT_EQUAL_UINT(POWER_WAKE, power_fake.events[0]);
+    TEST_ASSERT_EQUAL_UINT(POWER_CAPTION, power_fake.events[1]);
+    TEST_ASSERT_EQUAL_UINT(POWER_PANEL_OFF, power_fake.events[2]);
+    TEST_ASSERT_EQUAL_UINT(POWER_AUDIO, power_fake.events[3]);
+    TEST_ASSERT_EQUAL_UINT(POWER_TIMER_CANCEL, power_fake.events[4]);
+    TEST_ASSERT_EQUAL_UINT(POWER_PANEL_ON, power_fake.events[5]);
     TEST_ASSERT_TRUE(power_fake.audio_saw_untouched_rtc);
     TEST_ASSERT_EQUAL_UINT32(0, s_rtc_sleep_magic);
     TEST_ASSERT_EQUAL_UINT32(7, s_rtc_sleeps);
@@ -114,11 +143,12 @@ static void test_sleep_quiesces_audio_then_records_and_arms_wake(void)
     power_fake_reset();
     enter_deep_sleep("test", 300U);
     TEST_ASSERT_TRUE(power_fake.audio_saw_untouched_rtc);
-    TEST_ASSERT_EQUAL_UINT(POWER_AUDIO, power_fake.events[0]);
+    TEST_ASSERT_EQUAL_UINT(POWER_WAKE, power_fake.events[0]);
     TEST_ASSERT_EQUAL_UINT(POWER_CAPTION, power_fake.events[1]);
-    TEST_ASSERT_EQUAL_UINT(POWER_IMU_STOP, power_fake.events[2]);
-    TEST_ASSERT_EQUAL_UINT(POWER_IMU_ARM, power_fake.events[3]);
-    TEST_ASSERT_EQUAL_UINT(POWER_PANEL_OFF, power_fake.events[4]);
+    TEST_ASSERT_EQUAL_UINT(POWER_PANEL_OFF, power_fake.events[2]);
+    TEST_ASSERT_EQUAL_UINT(POWER_AUDIO, power_fake.events[3]);
+    TEST_ASSERT_EQUAL_UINT(POWER_IMU_STOP, power_fake.events[4]);
+    TEST_ASSERT_EQUAL_UINT(POWER_IMU_ARM, power_fake.events[5]);
     TEST_ASSERT_EQUAL_UINT(POWER_SLEEP, power_fake.events[power_fake.count - 1U]);
     TEST_ASSERT_EQUAL_UINT32(SLEEP_RTC_MAGIC, s_rtc_sleep_magic);
     TEST_ASSERT_EQUAL_UINT32(8, s_rtc_sleeps);
@@ -372,7 +402,7 @@ static void test_mood_poke_awake_resets_still(void)
 void mood_tests_run(void)
 {
     RUN_TEST(test_sleep_probation_refuses_before_audio_or_rtc);
-    RUN_TEST(test_sleep_failed_audio_leaves_rtc_and_peripherals_untouched);
+    RUN_TEST(test_sleep_failed_audio_preserves_rtc_and_recovers_panel);
     RUN_TEST(test_sleep_quiesces_audio_then_records_and_arms_wake);
     RUN_TEST(test_dream_glass_requires_genuine_idle);
     RUN_TEST(test_weather_first_and_retries_respect_rest_and_network);

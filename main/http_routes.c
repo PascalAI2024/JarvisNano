@@ -2998,7 +2998,9 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         "\"optical\":false,\"includes_rom\":false,"
         "\"init_started\":%s,\"init_finished\":%s,\"first_transfer_valid\":%s,"
         "\"init_start_boot_ms\":%u,\"init_end_boot_ms\":%u,"
-        "\"first_transfer_done_boot_ms\":%u}}",
+        "\"first_transfer_done_boot_ms\":%u,"
+        "\"first_glance_time_transfer_valid\":%s,"
+        "\"first_glance_time_transfer_done_boot_ms\":%u}}",
         init_name, esp_err_to_name(d.last_error),
         d.task_running ? "true" : "false",
         d.blanked ? "true" : "false",
@@ -3017,7 +3019,9 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         d.boot_timing.first_transfer_valid ? "true" : "false",
         (unsigned)d.boot_timing.init_start_boot_ms,
         (unsigned)d.boot_timing.init_end_boot_ms,
-        (unsigned)d.boot_timing.first_transfer_done_boot_ms);
+        (unsigned)d.boot_timing.first_transfer_done_boot_ms,
+        d.boot_timing.first_glance_time_transfer_valid ? "true" : "false",
+        (unsigned)d.boot_timing.first_glance_time_transfer_done_boot_ms);
     if (n < 0 || (size_t)n >= sizeof buf) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "encoding failed");
         return ESP_OK;
@@ -3331,9 +3335,41 @@ static esp_err_t logs_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* Sleep retains this same lock from its final admission through the reboot.
+ * Publishing active before releasing it makes all subsequent OTA work a
+ * sleep veto; no bus, flash or response operation runs inside this section. */
+static esp_err_t ota_admit_upload(uint32_t *started_ms,
+                                  uint32_t *previous_lease_until_ms,
+                                  bool *was_privacy_paused)
+{
+    if (s_brain_lock == NULL ||
+        xSemaphoreTake(s_brain_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    if (atomic_load(&s_ota_active)) {
+        xSemaphoreGive(s_brain_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    *started_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    *previous_lease_until_ms = atomic_load(&s_operator_lease_until_ms);
+    *was_privacy_paused = atomic_load(&s_voice_privacy_paused);
+    atomic_store(&s_ota_active, true);
+    atomic_store(&s_operator_lease_until_ms, *started_ms + 180000U);
+    atomic_store(&s_voice_control_request, VOICE_CONTROL_PAUSE);
+    xSemaphoreGive(s_brain_lock);
+    return ESP_OK;
+}
+
 static void ota_restore_control_state(bool was_privacy_paused,
                                       uint32_t previous_lease_until_ms)
 {
+    /* Active stays true until lease restoration is complete. Sleep therefore
+     * cannot reserve the lock between clearing active and restoring a lease. */
+    if (s_brain_lock == NULL ||
+        xSemaphoreTake(s_brain_lock, portMAX_DELAY) != pdTRUE) {
+        ESP_LOGW(TAG, "ota: control restoration unavailable; update veto retained");
+        return;
+    }
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
     /* Privacy is fail-closed: never arm if voice was private before OTA or a
      * physical gesture made it private while the upload was running. */
@@ -3349,6 +3385,8 @@ static void ota_restore_control_state(bool was_privacy_paused,
                      (int32_t)(previous_lease_until_ms - now) > 0
                          ? previous_lease_until_ms : 0U);
     }
+    atomic_store(&s_ota_active, false);
+    xSemaphoreGive(s_brain_lock);
 }
 
 bool ota_confirm_running_image_if_healthy(void)
@@ -3437,7 +3475,6 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
         return ESP_OK;
     }
     const size_t len = req->content_len;
-    atomic_store(&s_ota_active, false);
     atomic_store(&s_ota_received_bytes, 0U);
     atomic_store(&s_ota_total_bytes, (uint32_t)len);
     if (len < 256U * 1024U || len > 0x400000U) {
@@ -3466,17 +3503,19 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
         return ESP_OK;
     }
     const esp_partition_t *next = preflight.target;
-    const uint32_t upload_started_ms =
-        (uint32_t)(esp_timer_get_time() / 1000);
+    uint32_t upload_started_ms = 0U;
+    uint32_t previous_lease_until_ms = 0U;
+    bool was_privacy_paused = true;
+    const esp_err_t admission = ota_admit_upload(
+        &upload_started_ms, &previous_lease_until_ms, &was_privacy_paused);
+    if (admission != ESP_OK) {
+        httpd_resp_set_status(req, admission == ESP_ERR_TIMEOUT
+            ? "503 Service Unavailable" : "409 Conflict");
+        httpd_resp_sendstr(req, "update admission unavailable");
+        return ESP_OK;
+    }
     const uint32_t upload_deadline_ms = upload_started_ms + 240000U;
-    const uint32_t previous_lease_until_ms =
-        atomic_load(&s_operator_lease_until_ms);
-    const bool was_privacy_paused =
-        atomic_load(&s_voice_privacy_paused);
     atomic_store(&s_ota_last_error, ESP_OK);
-    atomic_store(&s_ota_active, true);
-    atomic_store(&s_operator_lease_until_ms, upload_started_ms + 180000U);
-    atomic_store(&s_voice_control_request, VOICE_CONTROL_PAUSE);
     jr_display_caption_pin("UPDATING - DO NOT UNPLUG");
     ESP_LOGI(TAG, "ota: receiving %u bytes into %s", (unsigned)len,
              next->label);
@@ -3484,7 +3523,6 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     esp_ota_handle_t ota = 0;
     esp_err_t err = esp_ota_begin(next, len, &ota);
     if (err != ESP_OK) {
-        atomic_store(&s_ota_active, false);
         atomic_store(&s_ota_last_error, err);
         jr_display_caption_unpin();
         jr_display_caption_set("UPDATE FAILED - STILL ON OLD");
@@ -3557,7 +3595,6 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
         err = esp_ota_set_boot_partition(next);
     }
     if (err != ESP_OK) {
-        atomic_store(&s_ota_active, false);
         atomic_store(&s_ota_last_error, err);
         jr_display_ota_set(
             JR_DISPLAY_OTA_FAILED,
@@ -3621,16 +3658,20 @@ static esp_err_t ota_assets_handler(httpd_req_t *req)
                             "art image must be between 1 MiB and the partition size");
         return ESP_OK;
     }
-    const uint32_t started_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    uint32_t started_ms = 0U;
+    uint32_t previous_lease_until_ms = 0U;
+    bool was_privacy_paused = true;
+    const esp_err_t admission = ota_admit_upload(
+        &started_ms, &previous_lease_until_ms, &was_privacy_paused);
+    if (admission != ESP_OK) {
+        httpd_resp_set_status(req, admission == ESP_ERR_TIMEOUT
+            ? "503 Service Unavailable" : "409 Conflict");
+        httpd_resp_sendstr(req, "update admission unavailable");
+        return ESP_OK;
+    }
     const uint32_t deadline_ms = started_ms + 420000U;
-    const uint32_t previous_lease_until_ms =
-        atomic_load(&s_operator_lease_until_ms);
-    const bool was_privacy_paused = atomic_load(&s_voice_privacy_paused);
-    atomic_store(&s_ota_active, true);
     atomic_store(&s_ota_received_bytes, 0U);
     atomic_store(&s_ota_total_bytes, (uint32_t)len);
-    atomic_store(&s_operator_lease_until_ms, started_ms + 180000U);
-    atomic_store(&s_voice_control_request, VOICE_CONTROL_PAUSE);
     jr_display_caption_pin("UPDATING ART - DO NOT UNPLUG");
     ESP_LOGI(TAG, "art: receiving %u bytes into %s (%u bytes)", (unsigned)len,
              part->label, (unsigned)part->size);
@@ -3674,7 +3715,6 @@ static esp_err_t ota_assets_handler(httpd_req_t *req)
     if (err == ESP_OK && got != len) {
         err = ESP_FAIL;
     }
-    atomic_store(&s_ota_active, false);
     atomic_store(&s_ota_last_error, err);
     if (err != ESP_OK) {
         jr_display_caption_unpin();

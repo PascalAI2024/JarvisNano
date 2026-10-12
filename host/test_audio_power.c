@@ -319,7 +319,10 @@ static void test_production_main_privacy_and_dream_wiring(void)
     TEST_ASSERT_NOT_NULL(zero);TEST_ASSERT_NOT_NULL(diag);TEST_ASSERT_TRUE(zero<diag);free(s);
     s=source_section("main/main.c","const bool dream_glass =", "const bool realtime_power");
     TEST_ASSERT_NOT_NULL(strstr(s,"atomic_load(&s_ota_active) || image_in_probation()"));
-    TEST_ASSERT_NOT_NULL(strstr(s,"jr_display_dream_set(dream_glass)"));free(s);
+    free(s);
+    s=source_section("main/main.c","static bool companion_update(", "static void companion_boot_seed(");
+    TEST_ASSERT_NOT_NULL(strstr(s,"const bool dream = jr_mood_dream_glass(mood, busy, usb,"));
+    TEST_ASSERT_NOT_NULL(strstr(s,"jr_display_rest_set(dream ? JR_DISPLAY_REST_DREAM : JR_DISPLAY_REST_NONE,"));free(s);
     s=source_section("main/main.c","if (peek || watch_space", "/* v4 barge fix");
     TEST_ASSERT_NOT_NULL(strstr(s,"|| dream_glass"));free(s);
 }

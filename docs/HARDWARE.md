@@ -17,8 +17,8 @@ maps to the C revision.
 | Display | CO5300 466×466 QSPI AMOLED | baked reactive faces plus one procedural overlay compositor |
 | Touch | CST9217 IRQ-driven capacitive panel | tap, 850 ms hold, four-way swipe, choice actions, synthetic-event provenance |
 | Audio | ES7210 dual mic + echo reference; ES8311 DAC | 24 kHz shared full-duplex clock, 16 kHz AEC-clean uplink, native Gemini server VAD |
-| Motion | QMI8658 | ±8 g accelerometer at 125 Hz ODR, sampled every 10 ms for flip/shake/lift/orientation; gyro off. Its Wake-on-Motion engine on **INT1 → GPIO21** wakes the chip from deep sleep |
-| Power | AXP2101 | 0.2 Hz battery/voltage/USB/charge telemetry, PKEY, charging animation. No current reading. The PWR key cannot wake the S3 from deep sleep |
+| Motion | QMI8658 | ±8 g accelerometer at 125 Hz ODR, sampled every 10 ms for flip/shake/lift/orientation; gyro off. Wake-on-Motion is armed on **INT1 → GPIO21** before deep sleep; controlled physical lift acceptance is pending |
+| Power | AXP2101 | 1 Hz battery/voltage/USB/charge cache; fixed charge-register diagnostic every 5 s. No current ammeter. The PWR key cannot wake the S3 from deep sleep |
 | Network | 2.4 GHz Wi-Fi | direct Gemini Live, JarvisMCP, diagnostics, OTA; modem sleep while the device rests (STATUS `RADIO` row); off entirely in deep sleep |
 | USB | native USB-Serial-JTAG | initial provisioning and recovery |
 
@@ -35,8 +35,9 @@ maps to the C revision.
 | Right-edge vertical swipe | Brightness +/− 5 from any screen |
 | Centre vertical swipe | Walk the ring: Jarvis/Watch/Weather/Status/(Desk while live)/Activity (wraps) |
 | Tap on an open sheet | Jarvis speaks what the screen shows |
-| Lift after a rest | Weather glance for eight seconds |
-| Still ten minutes past DREAM, on battery | Deep sleep; lift, touch or a 4 h timer wakes it |
+| Lift after a rest | C companion: local eight-second Glance, time/battery and `NEXT UNAVAILABLE`; physical acceptance pending |
+| Still ten minutes past DREAM, on battery | Source policy requests deep sleep; lift/touch GPIO and default 4 h timer are armed. Natural ladder, controlled lift/touch and 4 h acceptance remain pending |
+| Quiet idle on USB | C companion: near-black Nightstand clock/battery/charge, dimmer at night with valid time; physical USB acceptance pending |
 | Horizontal swipe | Watch peek, 10 s |
 | Top-edge swipe down | Open controls |
 | Centre swipe up | Open detail or close controls |
@@ -60,8 +61,9 @@ microSD slot. Wall time is SNTP-backed. Diagnostics persist only in the bounded
 2. The CO5300 path requires 12-row internal-DMA strips. Do not add LVGL or a
    second renderer beside the existing compositor.
 3. Realtime voice, OTA, provisioning, and operator mode force full Wi-Fi radio
-   availability; rest uses minimum modem sleep; deep sleep follows ten minutes
-   of DREAM on battery. The CPU runs in gears, 240 MHz live and 160 at rest
+   availability; rest uses minimum modem sleep; source policy requests deep
+   sleep after ten minutes of DREAM on battery, with fresh USB, OTA/probation,
+   lease and audio guards. The CPU runs in gears, 240 MHz live and 160 at rest
    on the cell, chosen from measured idle share; light sleep cannot engage
    while the codec captures (`docs/reference/power-modes.md`).
 4. QMI8658 polls at 100 Hz while awake; before deep sleep its Wake-on-Motion
@@ -79,13 +81,25 @@ flowchart LR
     end
     IMU[QMI8658 INT1<br/>Wake-on-Motion, 100 mg] --> EXT0
     TP[CST9217 INT<br/>pull-up kept on] --> EXT1
-    EXT0 --> Boot[Boot → LISTENING if it was]
+    EXT0 --> Boot[Boot → local Glance, then full Jarvis]
     EXT1 --> Boot
     TMR --> Rest[Boot → resume at DREAM]
 ```
 
 Each line is armed only if it reads its resting level at that moment; the
 timer is always armed. The AXP2101 PWR key is not a wake source on this board.
+
+This diagram describes configured capability, not every accepted physical
+wake. `7578238` passed three forced 300-second timer cycles. The earlier
+1,800-second API wake failed and remains unexplained; owner recovery was
+manual. B diagnostic `03864cc` also passed a forced 300-second timer cycle.
+These results do not establish the natural ten-minute DREAM gate, controlled
+lift/touch or four-hour timer. See the bounded [companion report](evidence/t107-companion.md).
+
+The C panel owner uses acknowledged QSPI DISPOFF/SLPIN and SLPOUT/DISPON
+recovery. Nightstand retains normal color: CO5300 IDMON uses eight RGB-MSB
+colors and would erase the dim palette. Software completion is transport
+evidence; optical light and whole-board savings require measurement.
 
 ## Compatibility tracks
 

@@ -62,9 +62,18 @@ esp_err_t esp_lcd_panel_io_register_event_callbacks(
     esp_lcd_panel_io_handle_t io, const esp_lcd_panel_io_callbacks_t *cb, void *ctx)
 { (void)io; s_stub_panel_callbacks = *cb; s_stub_panel_callback_ctx = ctx; return ESP_OK; }
 static esp_err_t s_stub_draw_error;
+static void (*s_stub_draw_hook)(void);
+static unsigned s_stub_draw_calls;
 esp_err_t esp_lcd_panel_draw_bitmap(esp_lcd_panel_handle_t p, int a, int b,
                                     int c, int d, const void *px)
-{ (void)p; (void)a; (void)b; (void)c; (void)d; (void)px; return s_stub_draw_error; }
+{ (void)p; (void)a; (void)b; (void)c; (void)d; (void)px;
+  s_stub_draw_calls++; if (s_stub_draw_hook) { s_stub_draw_hook(); }
+  return s_stub_draw_error; }
+static esp_err_t s_stub_on_error, s_stub_off_error;
+static unsigned s_stub_on_calls, s_stub_off_calls;
+esp_err_t esp_lcd_panel_disp_on_off(esp_lcd_panel_handle_t p, bool on)
+{ (void)p; if (on) { s_stub_on_calls++; return s_stub_on_error; }
+  s_stub_off_calls++; return s_stub_off_error; }
 void taskENTER_CRITICAL(portMUX_TYPE *m) { (void)m; }
 void taskEXIT_CRITICAL(portMUX_TYPE *m) { (void)m; }
 BaseType_t xTaskCreatePinnedToCore(void (*fn)(void *), const char *n, uint32_t s,
@@ -77,7 +86,9 @@ uint32_t ulTaskNotifyTake(BaseType_t c, TickType_t t)
 { (void)c; (void)t; if (s_stub_notify_take_hook) { s_stub_notify_take_hook(); } return 0; }
 TaskHandle_t xTaskGetCurrentTaskHandle(void) { return NULL; }
 TickType_t xTaskGetTickCount(void) { return 0; }
-void vTaskDelay(TickType_t t) { (void)t; }
+static void (*s_stub_delay_hook)(void);
+void vTaskDelay(TickType_t t)
+{ s_fake_us += (int64_t)t * 1000; if (s_stub_delay_hook) { s_stub_delay_hook(); } }
 UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t t) { (void)t; return 0; }
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { return (SemaphoreHandle_t)1; }
 BaseType_t xSemaphoreTake(SemaphoreHandle_t s, TickType_t t) { (void)s; (void)t; return pdTRUE; }
@@ -165,6 +176,18 @@ esp_err_t jarvis_board_display_get(jarvis_board_display_t *o)
     return ESP_OK;
 }
 static uint8_t s_stub_panel_brightness;
-esp_err_t jarvis_board_set_brightness(uint8_t p) { s_stub_panel_brightness = p; return ESP_OK; }
+static esp_err_t s_stub_brightness_error;
+static unsigned s_stub_brightness_calls;
+esp_err_t jarvis_board_set_brightness(uint8_t p)
+{ s_stub_brightness_calls++; if (s_stub_brightness_error != ESP_OK) { return s_stub_brightness_error; }
+  s_stub_panel_brightness = p; return ESP_OK; }
+static esp_err_t s_stub_sleep_in_error, s_stub_sleep_out_error;
+static unsigned s_stub_sleep_in_calls, s_stub_sleep_out_calls;
+static int64_t s_stub_sleep_in_us, s_stub_sleep_out_us;
+esp_err_t jarvis_board_display_set_sleep(bool sleep)
+{
+    if (sleep) { s_stub_sleep_in_calls++; s_stub_sleep_in_us = s_fake_us; return s_stub_sleep_in_error; }
+    s_stub_sleep_out_calls++; s_stub_sleep_out_us = s_fake_us; return s_stub_sleep_out_error;
+}
 
 #endif /* JR_DISPLAY_TEST_IDF_STUBS_INC */

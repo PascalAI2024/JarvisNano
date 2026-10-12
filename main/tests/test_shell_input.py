@@ -92,7 +92,8 @@ def run(root: Path, output: Path, mutation: str | None) -> int:
         raise RuntimeError("no cc/gcc; use scripts/host-tests.sh Docker fallback")
     command = [compiler, "-std=c11", "-Wall", "-Wextra", "-Werror",
                "-Wno-unused-function", "-D_GNU_SOURCE", str(generated),
-               str(root / "components/jr_display/src/hud_render.c")]
+               str(root / "components/jr_display/src/hud_render.c"),
+               str(root / "components/jr_display/src/companion.c")]
     for include in (
         "components/jr_display/include", "components/jr_display/src",
         "components/jr_display/tests", "components/jr_ports/include",

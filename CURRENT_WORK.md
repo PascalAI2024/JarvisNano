@@ -18,7 +18,12 @@ diagnostic image `03864cc` is valid after the A/B. Three charge scans report
 300-second timer cycle passed at 305.937 seconds to API. No companion image
 has been flashed. See [B: CHARGE](docs/evidence/t107-charge-diagnostic.md).
 
-C read waves are complete. Companion device acceptance precedes Deck device
+C's three read/build/prove waves are complete offline: three executors,
+14 host suites pass, 179 compiled runtime faults rejected, target build
+55.483% free. USB Nightstand, local Glance and checked panel/sleep/OTA
+ownership are implemented. Matching baseline DREAM/HOME measurements run
+before companion OTA. See [C1 checkpoint](docs/evidence/t107-companion.md).
+Companion device acceptance precedes Deck device
 acceptance. Owner-reported voice acceptance below does not prove later images;
 privacy stays muted and new-image voice remains an owner check.
 

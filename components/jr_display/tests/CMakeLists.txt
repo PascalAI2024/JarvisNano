@@ -28,6 +28,7 @@ target_compile_options(jr_display_hud_tests PRIVATE -Wall -Wextra -Werror)
 add_executable(jr_display_shell_tests
     test_shell.c
     ../src/hud_render.c
+    ../src/companion.c
 )
 target_include_directories(jr_display_shell_tests PRIVATE
     ../include
@@ -40,5 +41,12 @@ target_compile_options(jr_display_shell_tests PRIVATE
 )
 
 enable_testing()
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME jr_display_board_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_board.py)
+add_executable(jr_display_companion_tests test_companion.c ../src/companion.c)
+target_include_directories(jr_display_companion_tests PRIVATE ../include)
+target_compile_options(jr_display_companion_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME jr_display_companion_tests COMMAND jr_display_companion_tests)
 add_test(NAME jr_display_hud_tests COMMAND jr_display_hud_tests)
 add_test(NAME jr_display_shell_tests COMMAND jr_display_shell_tests)

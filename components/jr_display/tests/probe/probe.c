@@ -12,7 +12,7 @@
  *
  *   cc -std=gnu17 -O2 -Wno-unused-function \
  *      -I../../include -I../../../jr_ports/include -I./stubs -I../../src \
- *      probe.c ../../src/hud_render.c -o probe && ./probe [scene] [muted]
+ *      probe.c ../../src/hud_render.c ../../src/companion.c -o probe && ./probe [scene] [muted]
  *   sips -s format png probe_<scene>.ppm --out probe_<scene>.png   # macOS
  *
  * Scenes: shade (default), detail, status, weather, weather-stale,

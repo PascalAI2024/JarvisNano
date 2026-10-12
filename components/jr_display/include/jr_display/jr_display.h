@@ -95,7 +95,28 @@ typedef struct {
     bool init_started;
     bool init_finished;
     bool first_transfer_valid;
+    /* First completed valid-time Glance clock strip. Same boot-relative,
+     * non-optical time base; not a completed frame or external wake edge. */
+    uint32_t first_glance_time_transfer_done_boot_ms;
+    bool first_glance_time_transfer_valid;
 } jr_display_boot_timing_t;
+
+typedef enum {
+    JR_DISPLAY_REST_NONE = 0,
+    JR_DISPLAY_REST_DREAM,
+    JR_DISPLAY_REST_NIGHTSTAND,
+    JR_DISPLAY_REST_GLANCE,
+} jr_display_rest_mode_t;
+
+/* Main owns idle/lease/update/lifetime and local night policy. Renderer also
+ * refuses foreground work and an unplugged Nightstand. No brightness change. */
+void jr_display_rest_set(jr_display_rest_mode_t mode, bool usb_present, bool night);
+/* Publish at VAD edges and before phase presentation. Busy refuses stale Rest
+ * intent independently; idle LISTENING may accompany Nightstand/Glance. */
+void jr_display_rest_voice_busy_set(bool busy);
+void jr_display_panel_on_request(void);
+/* True only after latest recovery commands and a matching transfer complete. */
+bool jr_display_panel_is_on(void);
 
 typedef struct {
     jr_display_init_state_t init_state;
@@ -244,6 +265,9 @@ void jr_display_caption_set(const char *text);
 void jr_display_caption_pin(const char *text);
 void jr_display_caption_unpin(void);
 bool jr_display_caption_pinned(void);
+/* Current published facts only: a pinned or active nonambient caption owns
+ * the foreground. Cleared captions and the fixed idle hints do not. */
+bool jr_display_caption_foreground(void);
 void jr_display_caption_clear(void);
 
 /* TRANS-05: transient tap ripple — an expanding, fading ring from panel
@@ -347,6 +371,8 @@ bool jr_display_canvas_active(void);
  * device with the frame flush and racing it asserts in spi_device_release_bus.
  * No-op until the presenter is ready. */
 esp_err_t jr_display_set_brightness(uint8_t percent);
+/* Publishing before start also seeds the first submitted frame's brightness;
+ * the display owner applies it before gfx initialization. No caller panel IO. */
 
 /* Render cadence, 2..24 fps. Any task, any rate; unchanged values are free.
  * The engine draws every period regardless of change, so this is the knob

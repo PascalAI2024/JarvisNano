@@ -108,3 +108,18 @@ Display startup previously had no first-transfer timing. The diagnostic
 records init start/end and the first successful color-transfer callback,
 including early callbacks and failed init. It is a boot software proxy;
 physical first-light and a complete Glance remain unmeasured.
+
+## t107 C1 companion — 2026-10-12
+
+Break-it reproduced a late OTA/operator-lease claim during sleep's caption
+or panel wait: the old path accepted the claim and still entered deep sleep.
+Sleep and both app/art OTA admission now share a final Brain reservation.
+144 actual-source sleep scenarios and 132 OTA scenarios cover the repair;
+17/13 compiled faults fail at runtime. Refusal retains privacy/RTC and
+recovers the panel. Final USB cache publication is not an electrical edge;
+physical plug-after-observation remains possible.
+
+Nightstand/Glance and truthful panel sleep/recovery pass 14 combined host
+suites; target build leaves 55.483% app space. Device/physical acceptance
+is pending the matched stage pair and OTA. Ladder timings are retained;
+no energy or projected-life gain is claimed. See [C1 report](docs/evidence/t107-companion.md).

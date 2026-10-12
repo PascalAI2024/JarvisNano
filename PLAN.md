@@ -474,7 +474,7 @@ The QSPI ceiling itself is 40 MHz × 4 lanes = 20 MB/s: 21.7 ms a frame, ~46 fps
 | Item | State | Acceptance |
 |---|---|---|
 | Read-only AXP2101 charge diagnosis | Complete; 03864cc valid/muted | Three complete scans: CC 200mA, CV 4.2V. Net gauge charge 39.27±2.18pp/h; retain 200mA with cell rating unverified. 300s timer passed. No PMIC writes. See B report. |
-| Living companion | Read wave complete; build/device proof pending | USB Nightstand, local Glance, measured ladder and wake/power proof with privacy authoritative. |
+| Living companion | Offline gates pass; target 55.483% free; device proof pending | USB Nightstand, local Glance, truthful panel sleep/recovery and shared OTA/sleep admission. Matched DREAM/HOME pair before OTA. Physical and life acceptance pending. |
 | Deck face | Offline bridge built; firmware/device proof pending | Atomic producer/operator fence, strict compact projection, live-worker and attention captures after companion passes. |
 
 The charged frozen-image A/B finishes before any new firmware flash. The

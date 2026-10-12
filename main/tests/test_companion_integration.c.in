@@ -1,0 +1,372 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * Actual main companion policy composed with actual renderer state/eligibility.
+ * No replacement display policy or caption classifier. External main ports and
+ * retained globals below are the only new fakes; IDF fakes are test_shell.c's.
+ */
+#define main existing_shell_test_main
+#include "test_shell.c"
+#undef main
+#include <stdatomic.h>
+#include "jr_core/mood.h"
+#include "jr_core/session.h"
+#include "jr_power/jr_power.h"
+
+#define SLEEP_RTC_MAGIC 0x534C5031u
+#define GLANCE_MS 8000u
+enum { ESP_SLEEP_WAKEUP_UNDEFINED, ESP_SLEEP_WAKEUP_EXT0,
+       ESP_SLEEP_WAKEUP_EXT1, ESP_SLEEP_WAKEUP_TIMER };
+static _Atomic bool s_voice_privacy_paused, s_ota_active;
+static uint32_t s_companion_activity_ms, s_glance_until_ms, s_rtc_sleep_magic;
+static int s_boot_wake_cause, s_test_wake_cause;
+static uint8_t s_brightness_cap;
+static bool s_test_lease, s_test_probation, s_test_time_valid;
+static int s_test_hour, s_test_minute;
+static jr_power_t s_test_power;
+static esp_err_t s_test_power_error;
+
+static bool operator_lease_active(uint32_t now)
+{ (void)now; return s_test_lease; }
+static bool image_in_probation(void) { return s_test_probation; }
+static int esp_sleep_get_wakeup_cause(void) { return s_test_wake_cause; }
+esp_err_t jr_power_read(jr_power_t *out)
+{ *out = s_test_power; return s_test_power_error; }
+static bool device_wall_time(struct tm *out)
+{
+    memset(out, 0, sizeof *out);
+    out->tm_hour = s_test_hour; out->tm_min = s_test_minute;
+    out->tm_wday = 1; out->tm_mday = 12; out->tm_mon = 9;
+    return s_test_time_valid;
+}
+
+__PRODUCTION_HELPERS__
+
+static void integration_fixture(bool muted, bool usb, int hour)
+{
+    dream_fixture();
+    s_space_from = s_space_to = JR_DISPLAY_SPACE_JARVIS;
+    s_space_ease = 256;
+    s_voice_privacy_paused = muted; s_ota_active = false;
+    s_test_lease = s_test_probation = false;
+    s_companion_activity_ms = 100U; s_glance_until_ms = 0U;
+    s_rtc_sleep_magic = SLEEP_RTC_MAGIC;
+    s_test_wake_cause = ESP_SLEEP_WAKEUP_UNDEFINED;
+    s_test_time_valid = true; s_test_hour = hour; s_test_minute = 34;
+    s_brightness_cap = 65U;
+    s_test_power_error = ESP_OK;
+    s_test_power = (jr_power_t){.present=true, .sample_seq=7U, .age_ms=100U,
+        .percent=62U, .millivolts=3910U, .usb_present=usb};
+    s_fake_us = 30000000;
+    jr_display_caption_clear();
+    jr_display_rest_set(JR_DISPLAY_REST_NONE, false, false);
+    jr_display_rest_voice_busy_set(false);
+    jr_display_set_hud_env(62U, false, muted, 0, 0);
+    jr_display_power_set(62U, 3910U, usb, false);
+    jr_display_clock_set(true, hour, 34, 0);
+    display_present_cb(&s_display, muted ? JR_FACE_MUTED : JR_FACE_IDLE, 0U);
+    jr_display_set_brightness(s_brightness_cap);
+}
+
+static jr_display_rest_mode_t requested_rest(void)
+{
+    return (jr_display_rest_mode_t)((s_hud_env_word & JR_DISPLAY_ENV_MODE_MASK) >> 10);
+}
+
+/* Drive production helpers and the ordinary display mailboxes, without
+ * claiming to execute the application's infinite voice loop or VAD dispatch. */
+static bool policy_tick(uint32_t now, jr_state_t phase, bool speech,
+                        jr_mood_t mood, bool moving, uint8_t *brightness)
+{
+    s_fake_us = (int64_t)now * 1000;
+    jr_display_set_hud_env(s_test_power.percent, s_test_power.charging,
+                          atomic_load(&s_voice_privacy_paused), 0, 0);
+    jr_display_power_set(s_test_power.percent, s_test_power.millivolts,
+                         s_test_power.usb_present, s_test_power.charging);
+    const bool accepted = companion_update(now, mood, moving,
+        companion_phase_busy(phase, speech), &s_test_power, brightness);
+    display_present_cb(&s_display,
+        atomic_load(&s_voice_privacy_paused) ? JR_FACE_MUTED : phase_to_face(phase), 123U);
+    if (brightness) { jr_display_set_brightness(*brightness); }
+    return accepted;
+}
+
+static void test_phase_speech_privacy_brightness(void)
+{
+    for (int muted = 0; muted < 2; ++muted) {
+        for (int night = 0; night < 2; ++night) {
+            for (int phase = -1; phase <= JR_ST__COUNT; ++phase) {
+                for (int speech = 0; speech < 2; ++speech) {
+                    integration_fixture(muted, true, night ? 23 : 12);
+                    jr_display_caption_set(muted ? "MUTED - HOLD TO LISTEN" : "LISTENING");
+                    const bool idle = phase == JR_ST_IDLE ||
+                        (phase == JR_ST_LISTENING && !speech);
+                    uint8_t brightness = s_brightness_cap;
+                    const bool accepted = policy_tick(30000U, (jr_state_t)phase,
+                        speech, JR_MOOD_AWAKE, false, &brightness);
+                    CHECK(accepted == idle, "phase%d speech%d muted%d idle policy", phase, speech, muted);
+                    CHECK((rest_eligible(&s_display) == JR_DISPLAY_REST_NIGHTSTAND) == idle,
+                          "phase%d speech%d muted%d request reaches renderer", phase, speech, muted);
+                    CHECK(!!(s_hud_env_word & JR_DISPLAY_ENV_VOICE_BUSY) == !idle,
+                          "phase%d publishes independent busy14", phase);
+                    CHECK(brightness == (idle ? (night ? 5U : 14U) : 65U),
+                          "phase%d rejects foreground dimming", phase);
+                    CHECK(s_brightness_want == brightness, "real brightness mailbox receives policy result");
+                    for (int frame = 0; frame < 6; ++frame) {
+                        brightness_slew(100U); brightness_pump();
+                    }
+                    CHECK(s_brightness_have == brightness && s_brightness_shown == brightness,
+                          "actual brightness slew/command acknowledges policy target");
+                    CHECK(s_stub_panel_brightness == brightness,
+                          "board command receives accepted/rejected policy brightness");
+                    if (idle) {
+                        uint32_t last = s_display.requested_word;
+                        CHECK(presenter_dream_tick(&s_display, &last) && s_display.dream_active,
+                              "accepted main intent enters actual static presenter");
+                        CHECK(s_display.rest_view.mode == JR_COMPANION_NIGHTSTAND &&
+                              s_display.rest_view.night == (bool)night &&
+                              s_display.rest_view.privacy_muted == (bool)muted,
+                              "actual presenter reconstructs mode/night/authoritative privacy");
+                    }
+                    CHECK(s_voice_privacy_paused == (bool)muted &&
+                          !!(s_hud_env_word & (1u << 9)) == (bool)muted,
+                          "phase%d cannot change authoritative mute/rim", phase);
+                }
+            }
+        }
+    }
+}
+
+static void test_fixed_hints_vs_foreground(void)
+{
+    static const char *const hints[] = {"JARVIS", "MUTED - HOLD TO LISTEN",
+        "MUTED - HOLD TO RESUME", "MUTED - TAP TO WAKE", "ASLEEP - TAP TO WAKE",
+        "ASLEEP. TAP TO WAKE", "LISTENING", "RESTING - TAP TO WAKE",
+        "POWER CONNECTED", "CHARGE COMPLETE", "ON BATTERY"};
+    static const char *const foreground[] = {"LIVE TRANSCRIPT", "NETWORK ERROR",
+        "LISTENING ERROR", "RESTING - TAP TO WAKE ERROR", "POWER CONNECTED ERROR",
+        "CHARGE COMPLETE ERROR", "ON BATTERY ERROR", "CHARGING", "CHARGING %",
+        "CHARGING -1%", "CHARGING +1%", "CHARGING 101%", "CHARGING 999%",
+        "CHARGING 00%", "CHARGING 01%", "CHARGING 1000%", "CHARGING 1.0%",
+        "CHARGING 50% ERROR", "CHARGING 50% ", "CHARGING 50"};
+    for (int muted = 0; muted < 2; ++muted) {
+        for (size_t i = 0; i < sizeof hints / sizeof hints[0]; ++i) {
+            integration_fixture(muted, true, 23);
+            jr_display_caption_set(hints[i]);
+            uint8_t brightness = 65U;
+            CHECK(!jr_display_caption_foreground(), "fixed hint yields: %s", hints[i]);
+            CHECK(policy_tick(30000U, JR_ST_LISTENING, false, JR_MOOD_AWAKE, false, &brightness),
+                  "fixed hint passes actual main: %s", hints[i]);
+            CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NIGHTSTAND && brightness == 5U,
+                  "fixed hint admits actual renderer/night brightness: %s", hints[i]);
+            jr_display_caption_pin(hints[i]); brightness = 65U;
+            CHECK(jr_display_caption_foreground(), "pin dominates ambient hint: %s", hints[i]);
+            CHECK(!policy_tick(30001U, JR_ST_LISTENING, false, JR_MOOD_AWAKE, false, &brightness) &&
+                  rest_eligible(&s_display) == JR_DISPLAY_REST_NONE && brightness == 65U,
+                  "pinned hint preserves foreground brightness: %s", hints[i]);
+        }
+        for (size_t i = 0; i < sizeof foreground / sizeof foreground[0]; ++i) {
+            integration_fixture(muted, true, 23); jr_display_caption_set(foreground[i]);
+            uint8_t brightness = 65U;
+            CHECK(jr_display_caption_foreground(), "strict foreground fact: %s", foreground[i]);
+            CHECK(!policy_tick(30000U, JR_ST_LISTENING, false, JR_MOOD_AWAKE, false, &brightness),
+                  "main refuses foreground: %s", foreground[i]);
+            CHECK(requested_rest() == JR_DISPLAY_REST_NONE && brightness == 65U && s_brightness_want == 65U,
+                  "foreground receives ordinary cap: %s", foreground[i]);
+            /* Independent defense, even if main's old Rest intent is stale. */
+            jr_display_rest_set(JR_DISPLAY_REST_NIGHTSTAND, true, true);
+            CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NONE,
+                  "renderer independently refuses live/error text: %s", foreground[i]);
+        }
+        for (unsigned percent = 0; percent <= 100U; ++percent) {
+            integration_fixture(muted, true, 12);
+            char hint[32]; snprintf(hint, sizeof hint, "CHARGING %u%%", percent);
+            jr_display_caption_set(hint); s_test_power.charging = true;
+            uint8_t brightness = 65U;
+            CHECK(!jr_display_caption_foreground(), "canonical charging%d ambient", percent);
+            CHECK(policy_tick(30000U, JR_ST_LISTENING, false, JR_MOOD_AWAKE, false, &brightness),
+                  "canonical charging%d passes main", percent);
+            CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NIGHTSTAND && brightness == 14U,
+                  "canonical charging%d reaches renderer", percent);
+        }
+    }
+    integration_fixture(true, true, 12); jr_display_caption_set("NETWORK ERROR");
+    uint8_t brightness = 65U;
+    CHECK(!policy_tick(30000U, JR_ST_IDLE, false, JR_MOOD_AWAKE, false, &brightness), "error owns attention");
+    jr_display_caption_clear();
+    CHECK(!policy_tick(34999U, JR_ST_IDLE, false, JR_MOOD_AWAKE, false, &brightness), "clear earns full attention window");
+    CHECK(policy_tick(35000U, JR_ST_IDLE, false, JR_MOOD_AWAKE, false, &brightness) &&
+          rest_eligible(&s_display) == JR_DISPLAY_REST_NIGHTSTAND, "clear returns after existing quiet window");
+}
+
+static void test_usb_freshness_and_midstage_feedback(void)
+{
+    for (int bad = 0; bad < 4; ++bad) {
+        integration_fixture(true, true, 12);
+        if (bad == 0) s_test_power.age_ms = 2001U;
+        if (bad == 1) s_test_power.sample_seq = 0U;
+        if (bad == 2) s_test_power.usb_present = false;
+        if (bad == 3) s_test_power.age_ms = UINT32_MAX;
+        uint8_t brightness = 65U;
+        CHECK(!policy_tick(30000U, JR_ST_IDLE, false, JR_MOOD_WHISPER, false, &brightness),
+              "unknown/stale/absent USB%d cannot request Nightstand", bad);
+        CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NONE && brightness == 65U,
+              "USB%d refuses both rendering and new dimming", bad);
+    }
+    integration_fixture(true, true, 12); s_test_power.age_ms = 2000U;
+    uint8_t brightness = 65U;
+    CHECK(policy_tick(30000U, JR_ST_IDLE, false, JR_MOOD_WHISPER, false, &brightness) &&
+          rest_eligible(&s_display) == JR_DISPLAY_REST_NIGHTSTAND, "freshness boundary inclusive");
+    for (int muted = 0; muted < 2; ++muted) {
+        integration_fixture(muted, false, 23);
+        brightness = 65U;
+        CHECK(!policy_tick(30000U, JR_ST_IDLE, false, JR_MOOD_WHISPER, false, &brightness), "battery WHISPER not Nightstand");
+        s_test_power.usb_present = s_test_power.charging = true;
+        jr_display_caption_set("CHARGING 62%"); jr_display_bloom();
+        CHECK(policy_tick(30000U, JR_ST_IDLE, false, JR_MOOD_WHISPER, false, &brightness), "midstage plug requests Nightstand");
+        CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NONE, "real plug bloom retains feedback");
+        CHECK(policy_tick(30000U + HUD_BLOOM_MS, JR_ST_IDLE, false, JR_MOOD_WHISPER, false, &brightness) &&
+              rest_eligible(&s_display) == JR_DISPLAY_REST_NIGHTSTAND, "persistent charge hint yields after finite bloom");
+        s_test_power.charging = false; jr_display_caption_set("CHARGE COMPLETE"); jr_display_bloom();
+        CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NONE, "charge-complete feedback precedes clock");
+        CHECK(policy_tick(30000U + 2U*HUD_BLOOM_MS, JR_ST_IDLE, false, JR_MOOD_WHISPER, false, &brightness) &&
+              rest_eligible(&s_display) == JR_DISPLAY_REST_NIGHTSTAND, "charge completion cannot strand Nightstand");
+        /* Actual power publication cancels stale request before policy tick. */
+        jr_display_power_set(62U, 3910U, false, false);
+        CHECK(requested_rest() == JR_DISPLAY_REST_NIGHTSTAND && rest_eligible(&s_display) == JR_DISPLAY_REST_NONE,
+              "unplug independently refuses stale Nightstand request");
+        s_test_power.usb_present = false; jr_display_caption_set("ON BATTERY"); brightness = 65U;
+        CHECK(!policy_tick(40000U, JR_ST_IDLE, false, JR_MOOD_WHISPER, false, &brightness) && brightness == 65U,
+              "unplug returns ordinary stage/cap brightness");
+        s_test_power.usb_present = true; jr_display_caption_set("POWER CONNECTED"); jr_display_bloom();
+        CHECK(policy_tick(40000U + HUD_BLOOM_MS, JR_ST_IDLE, false, JR_MOOD_WHISPER, false, &brightness) &&
+              rest_eligible(&s_display) == JR_DISPLAY_REST_NIGHTSTAND, "replug returns without unrelated caption reset");
+        CHECK(s_voice_privacy_paused == (bool)muted, "plug/complete/unplug/replug preserves mute");
+    }
+}
+
+static void test_stale_rest_busy_guard_and_attention(void)
+{
+    for (int muted = 0; muted < 2; ++muted) {
+        for (int mode = JR_DISPLAY_REST_DREAM; mode <= JR_DISPLAY_REST_GLANCE; ++mode) {
+            integration_fixture(muted, mode == JR_DISPLAY_REST_NIGHTSTAND, 12);
+            display_present_cb(&s_display, muted ? JR_FACE_MUTED : JR_FACE_IDLE, 123U);
+            jr_display_caption_set("LISTENING");
+            jr_display_rest_set((jr_display_rest_mode_t)mode, mode == JR_DISPLAY_REST_NIGHTSTAND, false);
+            CHECK(rest_eligible(&s_display) == (jr_display_rest_mode_t)mode, "mode%d baseline eligible", mode);
+            jr_display_rest_voice_busy_set(true);
+            CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NONE, "busy14 independently rejects stale mode%d", mode);
+            jr_display_set_hud_env(62U, false, muted, 10, -8);
+            jr_display_rest_set((jr_display_rest_mode_t)mode, mode == JR_DISPLAY_REST_NIGHTSTAND, false);
+            CHECK((s_hud_env_word & JR_DISPLAY_ENV_VOICE_BUSY) && rest_eligible(&s_display) == JR_DISPLAY_REST_NONE,
+                  "HUD/Rest publication cannot clear accepted speech edge mode%d", mode);
+            s_glance_until_ms = 38000U; companion_attention(30001U);
+            CHECK(requested_rest() == JR_DISPLAY_REST_NONE && s_glance_until_ms == 0U &&
+                  s_companion_activity_ms == 30001U && (s_hud_env_word & JR_DISPLAY_ENV_VOICE_BUSY),
+                  "attention cancels mode%d without erasing speech truth", mode);
+            CHECK(s_voice_privacy_paused == (bool)muted, "attention cannot unmute");
+        }
+        integration_fixture(muted, true, 12); uint8_t brightness = 65U;
+        CHECK(policy_tick(30000U, JR_ST_LISTENING, false, JR_MOOD_AWAKE, false, &brightness), "idle before speech");
+        CHECK(!policy_tick(30001U, JR_ST_LISTENING, true, JR_MOOD_AWAKE, false, &brightness) &&
+              rest_eligible(&s_display) == JR_DISPLAY_REST_NONE, "accepted busy policy stops listening Rest");
+        brightness = 65U;
+        const uint32_t wait = muted ? JR_MOOD_QUIET_MS : JR_MOOD_AMBIENT_MS;
+        CHECK(!policy_tick(30001U + wait - 1U, JR_ST_LISTENING, false, JR_MOOD_AWAKE, false, &brightness),
+              "speech end cannot immediately re-enter Rest");
+        CHECK(policy_tick(30001U + wait, JR_ST_LISTENING, false, JR_MOOD_AWAKE, false, &brightness) &&
+              rest_eligible(&s_display) == JR_DISPLAY_REST_NIGHTSTAND, "speech end earns full existing window");
+    }
+}
+
+static void test_boot_seed_to_actual_renderer_and_start(void)
+{
+    for (int muted = 0; muted < 2; ++muted) {
+        for (int cause = ESP_SLEEP_WAKEUP_UNDEFINED; cause <= ESP_SLEEP_WAKEUP_TIMER; ++cause) {
+            for (int valid = 0; valid < 2; ++valid) {
+                integration_fixture(muted, false, 12); s_fake_us = 100000;
+                s_test_wake_cause = cause; s_test_time_valid = valid;
+                companion_boot_seed();
+                const bool physical = cause == ESP_SLEEP_WAKEUP_EXT0 || cause == ESP_SLEEP_WAKEUP_EXT1;
+                CHECK(s_boot_wake_cause == cause && (requested_rest() == JR_DISPLAY_REST_GLANCE) == physical,
+                      "retained physical cause%d seeds explicit Glance", cause);
+                CHECK((rest_eligible(&s_display) == JR_DISPLAY_REST_GLANCE) == physical,
+                      "cause%d local seed reaches actual renderer before network", cause);
+                CHECK(!!(s_clock_word & (1u << 16)) == (bool)valid, "invalid retained clock%d remains invalid", valid);
+                CHECK(s_voice_privacy_paused == (bool)muted &&
+                      !!(s_hud_env_word & (1u << 9)) == (bool)muted, "early seed respects actual privacy/rim");
+                const uint32_t env = s_hud_env_word, clock = s_clock_word, power = s_power_word;
+                s_display.started = 0U; jr_display_t port;
+                CHECK(jr_display_start(&port) == ESP_OK && env == s_hud_env_word && clock == s_clock_word && power == s_power_word,
+                      "real start preserves local main seed");
+                s_display.started = 0U;
+                CHECK(s_brightness_want == 65U, "real start preserves pre-start capped target");
+                if (physical) {
+                    uint8_t brightness = 65U;
+                    CHECK(policy_tick(8099U, JR_ST_IDLE, false, JR_MOOD_AWAKE, false, &brightness) &&
+                          rest_eligible(&s_display) == JR_DISPLAY_REST_GLANCE, "Glance remains within explicit lifetime");
+                    CHECK(!policy_tick(8100U, JR_ST_IDLE, false, JR_MOOD_AWAKE, false, &brightness) &&
+                          rest_eligible(&s_display) == JR_DISPLAY_REST_NONE, "Glance deadline expires at exact boundary");
+                }
+            }
+        }
+    }
+    integration_fixture(true, false, 12); s_fake_us = 100000;
+    s_test_wake_cause = ESP_SLEEP_WAKEUP_EXT0; s_rtc_sleep_magic = 0;
+    companion_boot_seed();
+    CHECK(requested_rest() == JR_DISPLAY_REST_NONE && rest_eligible(&s_display) == JR_DISPLAY_REST_NONE,
+          "nonretained EXT0 does not invent deep-sleep Glance");
+    integration_fixture(true, false, 12); s_fake_us = 100000;
+    s_test_wake_cause = ESP_SLEEP_WAKEUP_EXT1; s_test_probation = true;
+    companion_boot_seed();
+    CHECK(s_glance_until_ms == 0U && rest_eligible(&s_display) == JR_DISPLAY_REST_NONE,
+          "probation refuses retained physical Glance");
+}
+
+static unsigned s_test_capped_transfers;
+static void check_boot_transfer_cap(void)
+{
+    s_test_capped_transfers++;
+    CHECK(s_brightness_want == 65U && s_brightness_have == 65U &&
+          s_brightness_shown == 65 && s_stub_panel_brightness == 65U,
+          "actual init seeds effective cap before neutral/content submission");
+    CHECK(s_voice_privacy_paused && (s_hud_env_word & (1u << 9)),
+          "boot submission already has authoritative muted privacy");
+}
+
+static void submit_capped_init_strip(gfx_disp_t *disp, const gfx_disp_config_t *cfg)
+{
+    s_stub_disp_user_data = cfg->user_data;
+    uint16_t strip[HUD_W] = {0};
+    cfg->flush_cb(disp, 0, 0, HUD_W, 1, strip);
+    (void)s_stub_panel_callbacks.on_color_trans_done(NULL, NULL, s_stub_panel_callback_ctx);
+}
+
+static void test_prestart_seed_effective_before_submission(void)
+{
+    integration_fixture(true, false, 12);
+    boot_timing_fixture(); s_display.test_pattern = JR_DISPLAY_TEST_OFF;
+    s_test_wake_cause = ESP_SLEEP_WAKEUP_EXT0;
+    jr_display_set_brightness(s_brightness_cap);
+    companion_boot_seed();
+    display_present_cb(&s_display, JR_FACE_MUTED, 0U);
+    s_test_capped_transfers = 0U;
+    s_stub_panel_brightness = 0U; /* board bootstrap is dark */
+    s_stub_disp_add_hook = submit_capped_init_strip;
+    s_stub_draw_hook = check_boot_transfer_cap;
+    run_boot_init(); s_stub_draw_hook = NULL; s_stub_disp_add_hook = NULL;
+    CHECK(s_test_capped_transfers > 0U, "real display initialization submitted positive capped strips");
+    CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_GLANCE,
+          "local main Glance/time/privacy intent survives actual initialization");
+}
+
+int main(void)
+{
+    test_phase_speech_privacy_brightness();
+    test_fixed_hints_vs_foreground();
+    test_usb_freshness_and_midstage_feedback();
+    test_stale_rest_busy_guard_and_attention();
+    test_boot_seed_to_actual_renderer_and_start();
+    test_prestart_seed_effective_before_submission();
+    printf("companion integration tests: %d checks, %d failures\n", g_checks, g_failures);
+    if (g_failures == 0) printf("companion integration passed (%d checks)\n", g_checks);
+    return g_checks > 0 && g_failures == 0 ? 0 : 1;
+}

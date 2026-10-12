@@ -11,11 +11,18 @@
 # runs is worse than no suite, because it looks like coverage. Add new suites
 # HERE, not to a habit.
 #
-# The seven suites, in the order they run:
+# The fourteen suites, in the order they run:
 #   jr_display_hud_tests      components/jr_display/tests   procedural renderer
 #   jr_display_shell_tests    components/jr_display/tests   spatial shell
+#   jr_display_companion_tests components/jr_display/tests  portable Rest policy
+#   jr_display_board_tests    components/jr_display/tests   production panel transport
 #   jr_main_shell_tests       main/tests/                   production input routing
 #   jr_charge_http_tests      main/tests/                   actual paired charge handler
+#   jr_display_http_tests     main/tests/                   actual transfer timing JSON
+#   jr_companion_main_tests   main/tests/                   actual companion orchestration
+#   jr_companion_integration_tests main/tests/              orchestration to actual renderer
+#   jr_power_sleep_tests      main/tests/                   actual sleep entry coordinator
+#   jr_ota_sleep_fence_tests  main/tests/                   actual OTA admission and restoration
 #   jr_host_tests             host/                         jr_core + jr_dsp + jr_transport
 #   jr_tools_template_tests   components/jr_tools/host      the generated JS template
 #   test_jarvis_desk          scripts/                      the desk CLI (Python)
@@ -152,13 +159,30 @@ run_charge_http_suite() {
     finish_c "jr_charge_http_tests" "$rc" "$out"
 }
 
+run_production_python_c_suite() { # suite runner
+    local py out rc
+    if ! py="$(pick_python)"; then
+        fail "$1" "no working python3/python on PATH"; return
+    fi
+    out="$("$py" "$ROOT/$2" 2>&1)"; rc=$?
+    finish_c "$1" "$rc" "$out"
+}
+
 run_c_suites() {
     run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build" \
         jr_display_hud_tests "$ROOT/components/jr_display/tests/build/jr_display_hud_tests"
     run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build" \
         jr_display_shell_tests "$ROOT/components/jr_display/tests/build/jr_display_shell_tests"
+    run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build" \
+        jr_display_companion_tests "$ROOT/components/jr_display/tests/build/jr_display_companion_tests"
+    run_production_python_c_suite jr_display_board_tests components/jr_display/tests/test_board.py
     run_main_shell_suite
     run_charge_http_suite
+    run_production_python_c_suite jr_display_http_tests main/tests/test_display_http.py
+    run_production_python_c_suite jr_companion_main_tests main/tests/test_companion_main.py
+    run_production_python_c_suite jr_companion_integration_tests main/tests/test_companion_integration.py
+    run_production_python_c_suite jr_power_sleep_tests main/tests/test_power_sleep.py
+    run_production_python_c_suite jr_ota_sleep_fence_tests main/tests/test_ota_sleep_fence.py
     run_cmake_suite "$ROOT/host" "$ROOT/host/build" jr_host_tests "$ROOT/host/build/jr_host_tests"
     run_ctest_suite "$ROOT/components/jr_tools/host" "$ROOT/build-tools-host" jr_tools_template_tests
 }

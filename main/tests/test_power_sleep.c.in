@@ -1,0 +1,365 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * Execute the actual sleep coordinator; peripheral fakes expose ordering,
+ * refused-entry recovery, RTC publication and unchanged privacy.
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#define JR_POWER_HOST_TEST 1
+__PRODUCTION_SOURCE__
+
+_Atomic bool s_voice_privacy_paused;
+_Atomic bool s_ota_active;
+static _Atomic uint32_t lease_until_ms;
+static unsigned brain_lock_token;
+SemaphoreHandle_t s_brain_lock = &brain_lock_token;
+enum { CACHE = 1, TIMER, CAPTION, PANEL_OFF, PANEL_ON, AUDIO, IMU_STOP,
+       IMU_ARM, GPIO, EXT0, EXT1, PD, TIMER_CANCEL, SLEEP };
+enum { CLAIM_NONE, CLAIM_CAPTION, CLAIM_PANEL_WAIT, CLAIM_AUDIO, CLAIM_IMU,
+       CLAIM_RECOVERY };
+enum { CLAIM_OTA = 1, CLAIM_LEASE };
+static unsigned checks, scenarios;
+#define CHECK(test) do { ++checks; if (!(test)) { \
+    fprintf(stderr, "FAIL scenario=%u line=%d: %s\n", scenarios, __LINE__, #test); \
+    exit(1); } } while (0)
+static struct {
+    esp_ota_img_states_t ota_state;
+    jr_power_t power[2];
+    esp_err_t cache_err[2], timer_err, disable_err, audio_err, imu_err;
+    esp_err_t ext0_err, ext1_err;
+    unsigned events[128], count, cache_calls, off_ms, on_ms;
+    unsigned timer_calls, disable_calls, off_calls, on_calls, audio_calls;
+    unsigned imu_stops, imu_arms, ext0_calls, ext1_calls, sleeps;
+    int off_after_ms, on_after_ms, panel_request, lift_level, touch_level;
+    bool timer_armed, audio_sleeping, privacy;
+    bool lock_held, lock_busy;
+    unsigned lock_takes, lock_gives, claim_stage, claim_kind;
+    unsigned claim_attempts, claims_accepted;
+    uint32_t now_ms;
+    uint64_t timer_us;
+} fake;
+static const uint32_t prior_magic = 0x10203040U, prior_count = 7U;
+static const uint8_t prior_listening = 1U, prior_armed = 0xABU;
+static void history_unchanged(void)
+{
+    CHECK(s_rtc_sleep_magic == prior_magic);
+    CHECK(s_rtc_sleeps == prior_count);
+    CHECK(s_rtc_was_listening == prior_listening);
+    CHECK(s_rtc_armed == prior_armed);
+    CHECK(atomic_load(&s_voice_privacy_paused) == fake.privacy);
+}
+static void event(unsigned kind)
+{
+    if (kind != SLEEP) history_unchanged();
+    CHECK(fake.count < sizeof fake.events / sizeof fake.events[0]);
+    fake.events[fake.count++] = kind;
+}
+static void reset(bool privacy)
+{
+    ++scenarios;
+    memset(&fake, 0, sizeof fake);
+    fake.ota_state = ESP_OTA_IMG_VALID;
+    fake.power[0].sample_seq = fake.power[1].sample_seq = 1U;
+    fake.power[0].present = fake.power[1].present = true;
+    fake.touch_level = 1;
+    fake.privacy = privacy;
+    fake.now_ms = 10000U;
+    s_brain_lock = &brain_lock_token;
+    atomic_store(&s_ota_active, false);
+    atomic_store(&lease_until_ms, 0U);
+    s_rtc_sleep_magic = prior_magic;
+    s_rtc_sleeps = prior_count;
+    s_rtc_was_listening = prior_listening;
+    s_rtc_armed = prior_armed;
+    atomic_store(&s_voice_privacy_paused, privacy);
+    atomic_store(&s_sleep_force, true);
+}
+bool operator_lease_active(uint32_t now_ms)
+{
+    const uint32_t until = atomic_load(&lease_until_ms);
+    return until != 0U && (int32_t)(now_ms - until) < 0;
+}
+int64_t esp_timer_get_time(void) { return (int64_t)fake.now_ms * 1000; }
+int xSemaphoreTake(SemaphoreHandle_t lock, unsigned ticks)
+{
+    history_unchanged();
+    CHECK(lock == s_brain_lock && lock != NULL && ticks == 100U);
+    ++fake.lock_takes;
+    if (fake.lock_busy || fake.lock_held) return pdFALSE;
+    fake.lock_held = true;
+    return pdTRUE;
+}
+void xSemaphoreGive(SemaphoreHandle_t lock)
+{
+    history_unchanged();
+    CHECK(lock == s_brain_lock && fake.lock_held);
+    ++fake.lock_gives;
+    fake.lock_held = false;
+}
+/* Emulate the parent HTTP contract: claim publication requires this lock.
+ * The real handlers are covered separately by the parent's extraction tests. */
+static void attempt_claim(unsigned stage)
+{
+    if (fake.claim_stage != stage || fake.claim_attempts != 0U) return;
+    ++fake.claim_attempts;
+    if (xSemaphoreTake(s_brain_lock, 100U) != pdTRUE) return;
+    ++fake.claims_accepted;
+    if (fake.claim_kind == CLAIM_OTA) atomic_store(&s_ota_active, true);
+    else atomic_store(&lease_until_ms, fake.now_ms + 180000U);
+    xSemaphoreGive(s_brain_lock);
+}
+esp_err_t esp_pm_configure(const esp_pm_config_t *cfg)
+{ (void)cfg; return ESP_OK; }
+const char *esp_err_to_name(esp_err_t err)
+{ (void)err; return "fake"; }
+const esp_partition_t *esp_ota_get_running_partition(void)
+{ static const esp_partition_t p = {0}; return &p; }
+esp_err_t esp_ota_get_state_partition(const esp_partition_t *p,
+                                     esp_ota_img_states_t *state)
+{ (void)p; *state = fake.ota_state; return ESP_OK; }
+esp_err_t jr_power_read(jr_power_t *out)
+{
+    event(CACHE);
+    unsigned n = fake.cache_calls++;
+    CHECK(n < 2U);
+    if (n == 1U) CHECK(fake.lock_held);
+    *out = fake.power[n];
+    if (fake.cache_err[n] != ESP_OK) memset(out, 0, sizeof(*out));
+    return fake.cache_err[n];
+}
+esp_err_t esp_sleep_enable_timer_wakeup(uint64_t usec)
+{
+    event(TIMER);
+    ++fake.timer_calls;
+    fake.timer_us = usec;
+    if (fake.timer_err == ESP_OK) fake.timer_armed = true;
+    return fake.timer_err;
+}
+esp_err_t esp_sleep_disable_wakeup_source(int source)
+{
+    event(TIMER_CANCEL);
+    CHECK(!fake.lock_held);
+    CHECK(source == ESP_SLEEP_WAKEUP_TIMER);
+    ++fake.disable_calls;
+    if (fake.disable_err == ESP_OK) fake.timer_armed = false;
+    return fake.disable_err;
+}
+void jr_display_caption_set(const char *text)
+{ event(CAPTION); CHECK(strcmp(text, "SLEEPING - LIFT TO WAKE") == 0); }
+void jr_display_panel_off_request(void)
+{ event(PANEL_OFF); ++fake.off_calls; fake.panel_request = PANEL_OFF; }
+bool jr_display_panel_is_off(void)
+{ return fake.panel_request == PANEL_OFF && fake.off_after_ms >= 0 &&
+         fake.off_ms >= (unsigned)fake.off_after_ms; }
+void jr_display_panel_on_request(void)
+{
+    CHECK(!fake.lock_held); /* release must precede asynchronous recovery */
+    attempt_claim(CLAIM_RECOVERY);
+    event(PANEL_ON); ++fake.on_calls; fake.panel_request = PANEL_ON;
+}
+bool jr_display_panel_is_on(void)
+{ return fake.panel_request == PANEL_ON && fake.on_after_ms >= 0 &&
+         fake.on_ms >= (unsigned)fake.on_after_ms; }
+void vTaskDelay(unsigned ticks)
+{
+    history_unchanged();
+    fake.now_ms += ticks;
+    if (ticks == 1200U) attempt_claim(CLAIM_CAPTION);
+    if (ticks == 20U && fake.panel_request == PANEL_OFF)
+        attempt_claim(CLAIM_PANEL_WAIT);
+    if (ticks == 20U && fake.panel_request == PANEL_OFF) fake.off_ms += ticks;
+    else if (ticks == 20U && fake.panel_request == PANEL_ON) fake.on_ms += ticks;
+    else CHECK(ticks == 1200U || ticks == 80U || ticks == 5U);
+}
+esp_err_t jr_audio_prepare_sleep(void)
+{
+    event(AUDIO);
+    ++fake.audio_calls;
+    CHECK(fake.lock_held);
+    attempt_claim(CLAIM_AUDIO);
+    CHECK(fake.cache_calls == 2U);
+    CHECK(jr_display_panel_is_off());
+    fake.audio_sleeping = fake.audio_err == ESP_OK;
+    return fake.audio_err;
+}
+void jr_imu_stop(void)
+{
+    event(IMU_STOP); CHECK(fake.audio_sleeping && fake.lock_held);
+    attempt_claim(CLAIM_IMU);
+    ++fake.imu_stops;
+}
+esp_err_t jr_imu_arm_wake_on_motion(unsigned mg)
+{ event(IMU_ARM); CHECK(mg == 100U); ++fake.imu_arms; return fake.imu_err; }
+void rtc_gpio_init(int gpio)
+{ event(GPIO); CHECK(gpio == GPIO_NUM_21 || gpio == GPIO_NUM_11); }
+void rtc_gpio_set_direction(int gpio, int direction)
+{ (void)gpio; CHECK(direction == RTC_GPIO_MODE_INPUT_ONLY); }
+void rtc_gpio_pullup_dis(int gpio) { CHECK(gpio == GPIO_NUM_21); }
+void rtc_gpio_pulldown_en(int gpio) { CHECK(gpio == GPIO_NUM_21); }
+void rtc_gpio_pulldown_dis(int gpio) { CHECK(gpio == GPIO_NUM_11); }
+void rtc_gpio_pullup_en(int gpio) { CHECK(gpio == GPIO_NUM_11); }
+int rtc_gpio_get_level(int gpio)
+{ CHECK(gpio == GPIO_NUM_21 || gpio == GPIO_NUM_11);
+  return gpio == GPIO_NUM_21 ? fake.lift_level : fake.touch_level; }
+esp_err_t esp_sleep_enable_ext0_wakeup(int gpio, int level)
+{
+    event(EXT0); CHECK(gpio == GPIO_NUM_21 && level == 1);
+    CHECK(fake.lift_level == 0); ++fake.ext0_calls; return fake.ext0_err;
+}
+esp_err_t esp_sleep_enable_ext1_wakeup_io(uint64_t mask, int mode)
+{
+    event(EXT1); CHECK(mask == (1ULL << GPIO_NUM_11));
+    CHECK(mode == ESP_EXT1_WAKEUP_ANY_LOW && fake.touch_level != 0);
+    ++fake.ext1_calls; return fake.ext1_err;
+}
+esp_err_t esp_sleep_pd_config(int domain, int option)
+{ event(PD); CHECK(domain == ESP_PD_DOMAIN_RTC_PERIPH && option == ESP_PD_OPTION_ON);
+  return ESP_OK; }
+void esp_deep_sleep_start(void)
+{
+    event(SLEEP); ++fake.sleeps;
+    CHECK(fake.timer_armed && fake.audio_sleeping);
+    CHECK(fake.lock_held); /* real deep sleep resets the retained mutex */
+    CHECK(!atomic_load(&s_ota_active) && !operator_lease_active(fake.now_ms));
+    CHECK(jr_display_panel_is_off());
+    CHECK(fake.imu_stops == 1U && fake.imu_arms == 1U);
+    CHECK(s_rtc_sleep_magic == SLEEP_RTC_MAGIC);
+    CHECK(s_rtc_sleeps == prior_count + 1U);
+    CHECK(s_rtc_was_listening == !fake.privacy);
+    CHECK(atomic_load(&s_voice_privacy_paused) == fake.privacy);
+}
+static void refused(unsigned cache_calls, unsigned timer_calls,
+                    unsigned off_calls, unsigned on_calls, unsigned audio_calls)
+{
+    enter_deep_sleep("forced", 300U);
+    history_unchanged();
+    CHECK(!atomic_load(&s_sleep_force));
+    CHECK(fake.cache_calls == cache_calls && fake.timer_calls == timer_calls);
+    CHECK(fake.off_calls == off_calls && fake.on_calls == on_calls);
+    CHECK(fake.audio_calls == audio_calls && !fake.audio_sleeping);
+    CHECK(fake.imu_stops == 0U && fake.imu_arms == 0U && fake.sleeps == 0U);
+    CHECK(fake.ext0_calls == 0U && fake.ext1_calls == 0U);
+    CHECK(fake.disable_calls == timer_calls);
+    CHECK(!fake.timer_armed || fake.disable_err != ESP_OK);
+    CHECK(fake.off_ms <= 600U && fake.on_ms <= 600U);
+    CHECK(!fake.lock_held);
+}
+static void succeeded(uint32_t timer_s, uint8_t armed)
+{
+    enter_deep_sleep("forced", timer_s);
+    CHECK(fake.cache_calls == 2U && fake.timer_calls == 1U);
+    CHECK(fake.timer_us == (uint64_t)timer_s * 1000000ULL);
+    CHECK(fake.off_calls == 1U && fake.on_calls == 0U && fake.disable_calls == 0U);
+    CHECK(fake.audio_calls == 1U && fake.sleeps == 1U);
+    CHECK(s_rtc_armed == armed);
+    CHECK(fake.events[0] == CACHE && fake.events[1] == TIMER);
+    CHECK(fake.events[2] == CAPTION && fake.events[3] == PANEL_OFF);
+    CHECK(fake.events[4] == CACHE && fake.events[5] == AUDIO);
+    CHECK(fake.events[6] == IMU_STOP && fake.events[7] == IMU_ARM);
+    CHECK(fake.events[fake.count - 1U] == SLEEP);
+}
+int main(void)
+{
+    for (int privacy = 0; privacy < 2; ++privacy) {
+        reset(privacy); fake.ota_state = ESP_OTA_IMG_PENDING_VERIFY;
+        refused(0, 0, 0, 0, 0); CHECK(fake.count == 0U);
+        for (int forced = 0; forced < 2; ++forced) {
+            reset(privacy); atomic_store(&s_sleep_force, forced);
+            atomic_store(&s_ota_active, true);
+            refused(0, 0, 0, 0, 0);
+            reset(privacy); atomic_store(&s_sleep_force, forced);
+            atomic_store(&lease_until_ms, fake.now_ms + 1U);
+            refused(0, 0, 0, 0, 0);
+            for (unsigned kind = CLAIM_OTA; kind <= CLAIM_LEASE; ++kind)
+            for (unsigned stage = CLAIM_CAPTION; stage <= CLAIM_PANEL_WAIT; ++stage) {
+                reset(privacy); atomic_store(&s_sleep_force, forced);
+                fake.claim_kind = kind; fake.claim_stage = stage;
+                fake.off_after_ms = stage == CLAIM_PANEL_WAIT ? 20 : 0;
+                refused(1, 1, 1, 1, 0);
+                CHECK(fake.claim_attempts == 1U && fake.claims_accepted == 1U);
+                CHECK(fake.lock_gives == 2U);
+            }
+        }
+        reset(privacy); s_brain_lock = NULL;
+        refused(1, 1, 1, 1, 0); CHECK(fake.lock_takes == 0U);
+        reset(privacy); fake.lock_busy = true;
+        refused(1, 1, 1, 1, 0); CHECK(fake.lock_takes == 1U);
+        for (unsigned kind = CLAIM_OTA; kind <= CLAIM_LEASE; ++kind)
+        for (unsigned stage = CLAIM_AUDIO; stage <= CLAIM_IMU; ++stage) {
+            reset(privacy); fake.claim_kind = kind; fake.claim_stage = stage;
+            succeeded(300U, SLEEP_ARMED_TIMER | SLEEP_ARMED_LIFT | SLEEP_ARMED_TOUCH);
+            CHECK(fake.claim_attempts == 1U && fake.claims_accepted == 0U);
+            CHECK(fake.lock_takes == 2U && fake.lock_gives == 0U);
+        }
+        for (int failure = 0; failure < 2; ++failure) {
+            reset(privacy); fake.claim_kind = CLAIM_LEASE;
+            fake.claim_stage = CLAIM_RECOVERY;
+            if (failure == 0) fake.power[1].usb_present = true;
+            else fake.audio_err = ESP_ERR_TIMEOUT;
+            refused(2, 1, 1, 1, failure == 0 ? 0U : 1U);
+            CHECK(fake.claim_attempts == 1U && fake.claims_accepted == 1U);
+            CHECK(fake.lock_gives == 2U);
+        }
+        reset(privacy); atomic_store(&lease_until_ms, fake.now_ms);
+        succeeded(300U, SLEEP_ARMED_TIMER | SLEEP_ARMED_LIFT | SLEEP_ARMED_TOUCH);
+        reset(privacy); fake.power[0].usb_present = true;
+        refused(1, 0, 0, 0, 0);
+        reset(privacy); fake.cache_err[0] = ESP_ERR_TIMEOUT;
+        refused(1, 0, 0, 0, 0);
+        reset(privacy); fake.power[0].sample_seq = 0U;
+        refused(1, 0, 0, 0, 0);
+        reset(privacy); fake.power[0].age_ms = 2001U;
+        refused(1, 0, 0, 0, 0);
+        reset(privacy); fake.power[0].age_ms = UINT32_MAX;
+        refused(1, 0, 0, 0, 0);
+        for (int old_timer = 0; old_timer < 2; ++old_timer) {
+            reset(privacy); fake.timer_err = ESP_ERR_TIMEOUT;
+            fake.timer_armed = old_timer;
+            refused(1, 1, 0, 0, 0);
+        }
+        reset(privacy); fake.off_after_ms = -1;
+        refused(1, 1, 1, 1, 0); CHECK(fake.off_ms == 600U);
+        reset(privacy); fake.off_after_ms = -1; fake.on_after_ms = -1;
+        refused(1, 1, 1, 1, 0); CHECK(fake.on_ms == 600U);
+        reset(privacy); fake.off_after_ms = 620;
+        refused(1, 1, 1, 1, 0); CHECK(fake.off_ms == 600U);
+        reset(privacy); fake.off_after_ms = 600;
+        succeeded(300U, SLEEP_ARMED_TIMER | SLEEP_ARMED_LIFT | SLEEP_ARMED_TOUCH);
+        CHECK(fake.off_ms == 600U);
+        reset(privacy); fake.power[1].usb_present = true;
+        refused(2, 1, 1, 1, 0);
+        reset(privacy); fake.cache_err[1] = ESP_ERR_TIMEOUT;
+        refused(2, 1, 1, 1, 0);
+        reset(privacy); fake.power[1].sample_seq = 0U;
+        refused(2, 1, 1, 1, 0);
+        reset(privacy); fake.power[1].age_ms = 2001U;
+        refused(2, 1, 1, 1, 0);
+        reset(privacy); fake.audio_err = ESP_ERR_TIMEOUT; fake.on_after_ms = 600;
+        refused(2, 1, 1, 1, 1); CHECK(fake.on_ms == 600U);
+        reset(privacy); fake.off_after_ms = -1; fake.disable_err = ESP_ERR_TIMEOUT;
+        refused(1, 1, 1, 1, 0);
+        reset(privacy); fake.power[0].age_ms = fake.power[1].age_ms = 2000U;
+        succeeded(14400U, SLEEP_ARMED_TIMER | SLEEP_ARMED_LIFT | SLEEP_ARMED_TOUCH);
+        for (int imu_error = 0; imu_error < 2; ++imu_error)
+        for (int lift_level = 0; lift_level < 2; ++lift_level)
+        for (int touch_level = 0; touch_level < 2; ++touch_level)
+        for (int ext0_error = 0; ext0_error < 2; ++ext0_error)
+        for (int ext1_error = 0; ext1_error < 2; ++ext1_error) {
+            reset(privacy);
+            fake.imu_err = imu_error ? ESP_ERR_TIMEOUT : ESP_OK;
+            fake.lift_level = lift_level; fake.touch_level = touch_level;
+            fake.ext0_err = ext0_error ? ESP_ERR_TIMEOUT : ESP_OK;
+            fake.ext1_err = ext1_error ? ESP_ERR_TIMEOUT : ESP_OK;
+            uint8_t armed = SLEEP_ARMED_TIMER;
+            if (imu_error) armed |= SLEEP_LIFT_ARM_FAILED;
+            else if (lift_level) armed |= SLEEP_LIFT_LINE_HIGH;
+            else if (!ext0_error) armed |= SLEEP_ARMED_LIFT;
+            if (touch_level && !ext1_error) armed |= SLEEP_ARMED_TOUCH;
+            succeeded(300U, armed);
+            CHECK(fake.ext0_calls == (unsigned)(!imu_error && !lift_level));
+            CHECK(fake.ext1_calls == (unsigned)(touch_level != 0));
+        }
+    }
+    printf("power sleep tests passed (%u checks; %u scenarios)\n", checks, scenarios);
+    return 0;
+}

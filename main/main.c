@@ -24,6 +24,7 @@
  */
 #include "app.h"
 #include "jr_dsp/audio_power.h"
+#include "jr_display/companion.h"
 
 static const char *TAG = "jarvis_v5";
 
@@ -836,6 +837,121 @@ static bool device_wall_time(struct tm *out)
         return true;
     }
     return false;
+}
+
+/* Presentation policy, not a new power ladder. Reuse the existing quiet /
+ * ambient attention windows and WHISPER / DREAM brightness ratios. USB still
+ * keeps an unmuted voice session awake. Only a physical owner can clear mute. */
+static uint32_t s_companion_activity_ms;
+
+static bool companion_phase_busy(jr_state_t phase, bool speech)
+{
+    return (phase != JR_ST_IDLE && phase != JR_ST_LISTENING) ||
+           (phase == JR_ST_LISTENING && speech);
+}
+
+static void companion_attention(uint32_t now)
+{
+    s_glance_until_ms = 0U;
+    s_companion_activity_ms = now;
+    jr_display_rest_set(JR_DISPLAY_REST_NONE, false, false);
+}
+
+static bool companion_update(uint32_t now, jr_mood_t mood, bool moving,
+                             bool busy, const jr_power_t *battery,
+                             uint8_t *brightness)
+{
+    jr_display_rest_voice_busy_set(busy);
+    const bool quiet = atomic_load(&s_voice_privacy_paused);
+    const bool usb = battery != NULL && battery->sample_seq != 0U &&
+                     battery->age_ms <= 2000U && battery->usb_present;
+    if (moving || busy) {
+        s_companion_activity_ms = now;
+    }
+    if (s_glance_until_ms != 0U &&
+        (int32_t)(now - s_glance_until_ms) >= 0) {
+        s_glance_until_ms = 0U;
+    }
+    const bool operator_active = operator_lease_active(now);
+    const bool ota = atomic_load(&s_ota_active);
+    const bool probation = image_in_probation();
+    const bool foreground = jr_display_nav_overlay() != JR_DISPLAY_OVERLAY_NONE ||
+        (jr_display_nav_space() != JR_DISPLAY_SPACE_JARVIS &&
+         jr_display_nav_space() != JR_DISPLAY_SPACE_WATCH) ||
+        jr_display_choices_active() || jr_display_caption_pinned() ||
+        jr_display_caption_foreground() ||
+        jr_display_canvas_active() || jr_display_surface_is_active();
+    if (busy || foreground || operator_active || ota || probation) {
+        s_glance_until_ms = 0U;
+        /* A finished overlay must earn the normal attention window again. */
+        s_companion_activity_ms = now;
+    }
+    jr_companion_input_t input = {
+        .requested = s_glance_until_ms != 0U ? JR_COMPANION_GLANCE :
+            usb && !moving && (uint32_t)(now - s_companion_activity_ms) >=
+                (quiet ? JR_MOOD_QUIET_MS : JR_MOOD_AMBIENT_MS)
+                ? JR_COMPANION_NIGHTSTAND : JR_COMPANION_OFF,
+        .usb_present = usb, .idle = !busy, .foreground = foreground,
+        .operator_active = operator_active, .ota_active = ota,
+        .probation = probation, .privacy_muted = quiet,
+        .charging = battery != NULL && battery->charging,
+        .battery_percent = battery != NULL ? battery->percent : UINT8_MAX,
+        .night_start_hour = 22, .night_end_hour = 7,
+        .next_state = JR_COMPANION_NEXT_UNKNOWN,
+    };
+    struct tm local;
+    if (device_wall_time(&local)) {
+        input.time_valid = true;
+        input.hour = (uint8_t)local.tm_hour;
+        input.minute = (uint8_t)local.tm_min;
+    }
+    jr_companion_view_t view;
+    if (jr_companion_build(&input, &view)) {
+        jr_display_rest_set(view.mode == JR_COMPANION_GLANCE
+                            ? JR_DISPLAY_REST_GLANCE : JR_DISPLAY_REST_NIGHTSTAND,
+                            usb, view.night);
+        if (brightness != NULL && view.mode == JR_COMPANION_NIGHTSTAND) {
+            *brightness = (uint8_t)(((view.night ? 8U : 22U) *
+                                    s_brightness_cap + 50U) / 100U);
+        }
+        return true;
+    }
+    const bool dream = jr_mood_dream_glass(mood, busy, usb,
+                                          operator_active, ota || probation);
+    jr_display_rest_set(dream ? JR_DISPLAY_REST_DREAM : JR_DISPLAY_REST_NONE,
+                        false, false);
+    return dream;
+}
+
+/* Before Wi-Fi/audio: a physical deep-sleep wake earns a local Glance, even
+ * with no weather or next-item feed. Invalid retained time shows --:--. */
+static void companion_boot_seed(void)
+{
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    s_companion_activity_ms = now;
+    s_boot_wake_cause = (int)esp_sleep_get_wakeup_cause();
+    const bool physical_wake = s_rtc_sleep_magic == SLEEP_RTC_MAGIC &&
+        (s_boot_wake_cause == ESP_SLEEP_WAKEUP_EXT0 ||
+         s_boot_wake_cause == ESP_SLEEP_WAKEUP_EXT1);
+    s_glance_until_ms = physical_wake ? now + GLANCE_MS : 0U;
+    jr_power_t battery = {0};
+    const bool have_power = jr_power_read(&battery) == ESP_OK;
+    jr_display_set_hud_env(have_power ? battery.percent : UINT8_MAX,
+                          have_power && battery.charging,
+                          atomic_load(&s_voice_privacy_paused), 0.0f, 0.0f);
+    jr_display_power_set(have_power ? battery.percent : UINT8_MAX,
+                        have_power ? battery.millivolts : 0U,
+                        have_power && battery.usb_present,
+                        have_power && battery.charging);
+    struct tm local;
+    const bool valid = device_wall_time(&local);
+    jr_display_clock_set(valid, valid ? local.tm_hour : 0,
+                         valid ? local.tm_min : 0, valid ? local.tm_sec : 0);
+    if (valid) {
+        jr_display_clock_set_date(local.tm_wday, local.tm_mday, local.tm_mon);
+    }
+    (void)companion_update(now, JR_MOOD_AWAKE, false, false,
+                           have_power ? &battery : NULL, NULL);
 }
 
 /* THE MORNING GLANCE SPEAKS (wave N13). The first lift after a rest, once
@@ -2323,7 +2439,6 @@ static void voice_task(void *arg)
                 mout.mood, user_busy, have_power && bat.usb_present,
                 operator_mode_active((uint32_t)now),
                 atomic_load(&s_ota_active) || image_in_probation());
-            jr_display_dream_set(dream_glass);
             const bool realtime_power =
                 mout.voice_armed || user_busy ||
                 operator_mode_active((uint32_t)now) ||
@@ -2357,13 +2472,11 @@ static void voice_task(void *arg)
                                     prev_mood == (uint8_t)JR_MOOD_DREAM;
                 const bool lifted = mout.changed && mout.mood == JR_MOOD_AWAKE &&
                                     rested && moving;
-                if (lifted && s_weather.valid &&
+                if (lifted &&
                     jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE &&
                     !jr_display_choices_active()) {
-                    jr_display_nav_set(JR_DISPLAY_SPACE_WEATHER);
-                    jr_display_bloom();
                     s_glance_until_ms = (uint32_t)now + GLANCE_MS;
-                    ESP_LOGI(TAG, "glance: lifted after rest, showing weather");
+                    ESP_LOGI(TAG, "glance: lifted after rest, local time and battery");
                 }
                 prev_mood = (uint8_t)mout.mood;
                 /* A deep-sleep wake by lift or touch is the same gesture seen
@@ -2390,8 +2503,8 @@ static void voice_task(void *arg)
              * desk device on its cable is a desk device), never mid-update,
              * never with a companion in, and never in the first three
              * minutes, so a device is always reachable for a while after
-             * any boot. A forced sleep (the debug route) skips the gates:
-             * it exists to prove the wake sources from a desk. */
+             * any boot. Debug skips the ladder, but power.c still refuses
+             * probation, USB or unknown/stale USB telemetry. */
             {
                 const bool forced = atomic_load(&s_sleep_force);
                 const bool in_use =
@@ -2405,15 +2518,11 @@ static void voice_task(void *arg)
                     enter_deep_sleep("not in use", SLEEP_TIMER_WAKE_S);
                 }
             }
-            if (s_glance_until_ms != 0U &&
-                (int32_t)((uint32_t)now - s_glance_until_ms) >= 0) {
-                s_glance_until_ms = 0U;
-                if (jr_display_nav_space() == JR_DISPLAY_SPACE_WEATHER &&
-                    jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE) {
-                    jr_display_nav_home();
-                    jr_display_caption_set("JARVIS");
-                }
-            }
+            const bool companion_clock = companion_update((uint32_t)now,
+                mout.mood, moving,
+                companion_phase_busy(mood_phase, s_listen_speech_active),
+                have_power ? &bat : NULL,
+                &effective_brightness);
             atomic_store(&s_mood_id, (uint8_t)mout.mood);
             atomic_store(&s_mood_brightness, effective_brightness);
             s_bright_tgt = effective_brightness;
@@ -2465,6 +2574,7 @@ static void voice_task(void *arg)
                 uint32_t pkey_s = 0, pkey_l = 0;
                 jr_power_pkey_take(&pkey_s, &pkey_l);
                 if (pkey_s > 0) {
+                    companion_attention((uint32_t)now);
                     s_flip_muted = false;
                     atomic_store(&s_voice_privacy_paused, false);
                     jr_mood_poke_awake(&s_mood, (uint32_t)now);
@@ -2598,7 +2708,7 @@ static void voice_task(void *arg)
                  * watch peek does. */
                 const bool watch_space =
                     jr_display_nav_space() == JR_DISPLAY_SPACE_WATCH;
-                if (peek || watch_space || dream_glass) {
+                if (peek || watch_space || dream_glass || companion_clock) {
                     struct tm tmv;
                     if (device_wall_time(&tmv)) {
                         clock_on = true;
@@ -3002,6 +3112,12 @@ static void voice_task(void *arg)
              * gesture visible and escapable. Privacy moves to the PWR button
              * once that button grows a double-tap (docs/INPUT_MAP.md §3.1) —
              * moving it before its replacement exists would strand it. */
+            if (physical) {
+                companion_attention((uint32_t)now);
+                if (iev.kind == JR_INPUT_PRESS_DOWN) {
+                    jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                }
+            }
             if (iev.kind == JR_INPUT_PRESS_DOWN) {
                 s_hold_start_ms = physical ? (uint32_t)now : 0U;
                 continue;
@@ -3259,6 +3375,9 @@ static void voice_task(void *arg)
                     jr_display_nav_home();
                     s_ui_shade_open = false;
                     jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                    s_glance_until_ms = 0U;
+                    s_companion_activity_ms = (uint32_t)now;
+                    jr_display_rest_set(JR_DISPLAY_REST_NONE, false, false);
                     jr_display_bloom();
                     /* Was "JARVIS - RIGHT WATCH", which instructed a gesture
                      * that no longer navigates — right swipe peeks the watch,
@@ -3787,6 +3906,8 @@ static void voice_task(void *arg)
                     } else {
                         s_app.vad_starts++;
                         s_listen_speech_active = true;
+                        jr_display_rest_voice_busy_set(true);
+                        companion_attention((uint32_t)now);
                         s_utt_start_ms = (uint32_t)now;
                         ESP_LOGI(TAG, "vad: speech start rms=%.1f floor=%.1f",
                                  (double)td.rms, (double)td.noise_floor);
@@ -3908,6 +4029,9 @@ static void voice_task(void *arg)
                     ESP_LOGI(TAG, "wake: \"%s\" heard — waking from rest",
                              jr_wake_model());
                     jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                    s_glance_until_ms = 0U;
+                    s_companion_activity_ms = (uint32_t)now;
+                    jr_display_rest_set(JR_DISPLAY_REST_NONE, false, false);
                     /* Bloom AFTER the poke: it only renders while frames
                      * flush, so the display must be waking first (glass-ux
                      * contract). The VISION's beat: a point of light blooms
@@ -3934,7 +4058,16 @@ capture_complete:
          * presenter, present() is an atomic mailbox store, so feeding it
          * every loop is free; with the logging stub, amp stays 0 and the
          * call still fires only on face change (no log spam). */
-        jr_face_t f = phase_to_face(jr_orch_phase(&s_app.orch));
+        const jr_state_t face_phase = jr_orch_phase(&s_app.orch);
+        const bool companion_busy =
+            companion_phase_busy(face_phase, s_listen_speech_active);
+        jr_display_rest_voice_busy_set(companion_busy);
+        if (companion_busy) {
+            jr_display_rest_set(JR_DISPLAY_REST_NONE, false, false);
+            s_glance_until_ms = 0U;
+            s_companion_activity_ms = (uint32_t)now;
+        }
+        jr_face_t f = phase_to_face(face_phase);
         if (f == JR_FACE_IDLE || f == JR_FACE_LISTENING) {
             /* Idle has three truths the face used to hide: muted is gold and
              * still; resting (WHISPER/DREAM) is a breathing slit; only a
@@ -4215,6 +4348,14 @@ void app_main(void)
     atomic_store(&s_mood_id, (uint8_t)JR_MOOD_AWAKE);
     atomic_store(&s_mood_brightness, 100);
 
+    /* Retained OS time is usable before network connection. Establish local
+     * timezone and the authoritative privacy/battery rims before first draw. */
+    setenv("TZ", "EST5EDT,M3.2.0,M11.1.0", 1);
+    tzset();
+    restore_brightness_cap();
+    (void)jr_display_set_brightness(s_brightness_cap);
+    companion_boot_seed();
+
     /* pull the concrete ports. The real presenter is preferred; its panel +
      * SPIFFS + gfx bring-up runs async in its own task, so this never stalls
      * boot. On resource failure, fall back to the jr_hal logging stub
@@ -4247,8 +4388,6 @@ void app_main(void)
      * tool call). esp_netif_sntp retries internally until Wi-Fi is up, so
      * starting it here is safe even before the first got-ip. TZ is compile-time
      * for now; SVC-04 settings can make it NVS-backed later. */
-    setenv("TZ", "EST5EDT,M3.2.0,M11.1.0", 1);   /* US Eastern w/ DST rules */
-    tzset();
     {
         esp_sntp_config_t sntp_cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
         sntp_cfg.start = true;
@@ -4268,7 +4407,6 @@ void app_main(void)
         ESP_LOGW(TAG, "jr_audio_init degraded — capture may be silent until on-device tune");
     }
     restore_out_vol();   /* gesture-set volume survives reboot */
-    restore_brightness_cap();
     restore_watch_style();
     restore_briefing_day();
     s_app.mic = jr_audio_source();
@@ -4403,11 +4541,6 @@ void app_main(void)
         ESP_LOGW(TAG, "wake word unavailable: %s", esp_err_to_name(wake_err));
     }
 
-    atomic_store(&s_voice_start_gate, true);
-    if (task_ok == pdPASS && VOICE_ALWAYS_READY) {
-        atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
-    }
-
     /* Start the stillness clock HERE, not at jr_mood_reset() above: that runs
      * ~1 s in, while Wi-Fi and the codec still have ~13 s to go, so the device
      * spent most of its rest budget before it could do anything and dimmed a
@@ -4424,11 +4557,18 @@ void app_main(void)
      * check with nobody there: the ladder resumes at DREAM so the glass stays
      * dark and the chip sleeps again in JR_MOOD_SLEEP_MS unless something
      * happens. Everything else is the privacy default. */
-    const esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-    s_boot_wake_cause = (int)cause;
+    const esp_sleep_wakeup_cause_t cause =
+        (esp_sleep_wakeup_cause_t)s_boot_wake_cause;
     const bool from_sleep = s_rtc_sleep_magic == SLEEP_RTC_MAGIC &&
         (cause == ESP_SLEEP_WAKEUP_EXT0 || cause == ESP_SLEEP_WAKEUP_EXT1 ||
          cause == ESP_SLEEP_WAKEUP_TIMER);
+    s_companion_activity_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    if (from_sleep && (cause == ESP_SLEEP_WAKEUP_EXT0 ||
+                       cause == ESP_SLEEP_WAKEUP_EXT1)) {
+        /* The early local face survives network bootstrap; its existing
+         * eight-second attention budget starts when full Jarvis is ready. */
+        s_glance_until_ms = s_companion_activity_ms + GLANCE_MS;
+    }
     if (from_sleep && cause == ESP_SLEEP_WAKEUP_TIMER) {
         s_mood.still_since_ms =
             (uint32_t)(esp_timer_get_time() / 1000) - JR_MOOD_DREAM_MS;
@@ -4446,4 +4586,11 @@ void app_main(void)
         ESP_LOGI(TAG, "boot complete — starting MUTED (privacy default)%s",
                  from_sleep ? ", woke from sleep" : "");
     }
+    /* Publish the voice start gate last: boot seeds and the initial privacy /
+     * rest decision are complete before the single-writer pump can run. */
+    if (task_ok == pdPASS && VOICE_ALWAYS_READY &&
+        atomic_load(&s_voice_control_request) != VOICE_CONTROL_ARM) {
+        atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
+    }
+    atomic_store(&s_voice_start_gate, true);
 }
