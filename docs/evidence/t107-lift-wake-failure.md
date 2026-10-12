@@ -68,5 +68,21 @@ app slot, 55.463% free. Frozen binary SHA-256 is
 `385076dfa5f7e127a3be3dc18922baddf5cf17d41ab4ff66a845f86480919338`;
 the binary app descriptor and built ELF agree on ELF SHA-256
 `cb61289f82e351f93d8ff9c69c73e4fff52614af932eb5b81d573cea59a6d666`.
-OTA, device arming and physical retest results will be appended after proof.
+Source repair `343e51c` was committed before uploading that frozen image.
+Authenticated OTA reached `ota_1 state=valid` at 22:47:30.853753Z, muted,
+78% battery, USB disconnected, no operator lease and all four audio paths off.
+A controlled 30-second timer cycle then returned `wake=timer`, `sleeps=1`,
+`armed.lift=true`, `armed.touch=true`, `lift_fail=none`. With strict completion
+now enforced, this proves the hardware command/ACK completed within the
+deadlines and the lift RTC source was admitted; it does not prove a motion
+interrupt or successful physical lift.
+
+The timing probe exited on a transient boot-time HTTP 404. Recovery readback
+at 22:48:30.114526Z verified that timer/arming result and valid/muted health.
+This is an API-return upper bound (about 53 seconds after the request), not
+first return or optical latency. The failed probe is preserved as a harness
+error, not presented as a timing pass. The owner watcher tolerates boot 404s.
+Its next first capture uses the existing native RGB565 mirror to reduce
+transfer work; decoding was checked against an opened live clock/rim image.
+Physical retest remains pending.
 Lift remains **FAILED, awaiting repair acceptance**. Privacy stays muted.

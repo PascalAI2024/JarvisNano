@@ -475,8 +475,9 @@ C1 lift acceptance **FAILED** on the owner's edge-only lift, 2026-10-12;
 touch wake passed with R6 `wake=touch`, `sleeps=4`. N6.12's interrupt probe
 remains pending. The scoped WoM command repair restores elapsed polling at
 100 Hz and fails closed on missing completion/ACK. Host and mutation gates
-pass; firmware arming and physical lift retest remain required. N10.4's
-historical absent CmdDone is not dismissed. Privacy stays muted.
+pass; repair `343e51c` is OTA-valid/muted with 55.463% headroom. A short timer
+wake proves strict command completion and lift/touch arming on this run;
+physical lift retest remains required. Privacy stays muted.
 See [lift failure and repair](docs/evidence/t107-lift-wake-failure.md).
 
 Owner follow-up: C2 offline sources/tests committed `c4681ad`, excluded from

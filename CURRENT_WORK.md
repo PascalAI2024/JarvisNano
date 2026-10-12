@@ -8,8 +8,10 @@ off, then touch woke it. R6 confirms `wake=touch`, `sleeps=4` at
 22:33:50.591341Z; that is API return time, not optical latency. Lift remains
 FAILED. A scoped IMU command-handshake repair restores real polling delays
 at 100 Hz and rejects unobserved completion/ACK failure. All 16 host suites
-pass and runtime mutations fail. Build/OTA and physical retest are pending;
-the original failure is not explained conclusively. Keep privacy muted.
+pass and runtime mutations fail. Build passed with 55.463% headroom; source
+repair `343e51c` is OTA-valid/muted in `ota_1`. A short timer wake confirms
+strict command completion and lift/touch arming. Physical lift retest remains
+pending; the original failure is not explained conclusively. Keep privacy muted.
 See [lift failure and repair](docs/evidence/t107-lift-wake-failure.md).
 
 Owner follow-up: CHARGE is closed at 200mA with no new PMIC write. The seven-step

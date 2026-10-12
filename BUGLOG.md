@@ -117,9 +117,11 @@ touch woke it. R6 authenticated readback is `wake=touch`, `sleeps=4`, despite
 at 100 Hz and returned success without observed completion/ACK clear.
 The bounded repair uses elapsed deadlines, at least one tick, and propagated
 failures; 34 production-function checks and all 16 host suites pass.
-Physical cause and repair acceptance remain open. The historical N10.4
-missing-CmdDone observation is relevant; a real-device arming gate is required
-before another lift. See [failure evidence](docs/evidence/t107-lift-wake-failure.md).
+Build passes at 55.463% headroom; repair `343e51c` is OTA-valid/muted.
+A short timer wake now confirms strict command completion and lift/touch
+arming, addressing N10.4's historical missing-CmdDone concern on this run.
+Physical cause and lift acceptance remain open until the owner retest.
+See [failure evidence](docs/evidence/t107-lift-wake-failure.md).
 
 Muted HOME/WHISPER rendered 5.879 frames/s because the repeating 8fps MUTED clip
 invalidated every decoded frame while the engine ceiling was 6fps. Quiet HOME
