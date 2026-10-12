@@ -1,0 +1,114 @@
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef int esp_err_t;
+#define ESP_OK 0
+#define ESP_ERR_TIMEOUT 1
+#define ESP_ERR_INVALID_STATE 2
+#define IO_ERROR 3
+#define pdMS_TO_TICKS(ms) ((ms) / 10)
+#define ESP_LOGI(...) ((void)0)
+#define ESP_LOGW(...) ((void)0)
+__PRODUCTION_CONSTANTS__
+
+static int64_t now_us, completion_us, clear_delay_us, ack_us;
+static bool acknowledged, never_done, stuck_done, s_ready;
+static void *s_dev, *s_task;
+static int read_error_phase, fail_write_reg, fail_write_value, enables;
+static int delay_calls, zero_delays, checks, failures;
+static uint8_t writes_reg[32], writes_val[32];
+static int writes;
+static int64_t __attribute__((unused)) esp_timer_get_time(void) { return now_us; }
+static void vTaskDelay(int ticks) {
+    delay_calls++;
+    if (!ticks) zero_delays++;
+    now_us += ticks * 10000LL;
+}
+static esp_err_t imu_write_reg(uint8_t reg, uint8_t val) {
+    now_us += 100;
+    if (writes < 32) { writes_reg[writes] = reg; writes_val[writes] = val; }
+    writes++;
+    if (reg == fail_write_reg && val == fail_write_value) return IO_ERROR;
+    if (reg == QMI8658_REG_CTRL9 && val == QMI8658_CMD_ACK) {
+        acknowledged = true; ack_us = now_us;
+    }
+    if (reg == QMI8658_REG_CTRL7 && val == 1) enables++;
+    return ESP_OK;
+}
+static esp_err_t imu_read_reg(uint8_t reg, uint8_t *value) {
+    (void)reg;
+    now_us += 100;
+    if (read_error_phase == (acknowledged ? 2 : 1)) return IO_ERROR;
+    bool done = !never_done && now_us >= completion_us;
+    if (acknowledged && !stuck_done && now_us >= ack_us + clear_delay_us) done = false;
+    *value = done ? QMI8658_STATUSINT_DONE : 0;
+    return ESP_OK;
+}
+__PRODUCTION_FUNCTIONS__
+
+#define CHECK(expr) do { checks++; if (!(expr)) { failures++; \
+    fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #expr); } } while (0)
+static void reset(void) {
+    now_us = 0; completion_us = 30000; clear_delay_us = 30000; ack_us = 0;
+    acknowledged = never_done = stuck_done = false;
+    s_ready = true; s_dev = (void *)1; s_task = NULL;
+    read_error_phase = 0; fail_write_reg = fail_write_value = -1;
+    writes = enables = delay_calls = zero_delays = 0;
+    memset(writes_reg, 0, sizeof(writes_reg)); memset(writes_val, 0, sizeof(writes_val));
+}
+int main(void) {
+    reset();
+    CHECK(imu_ctrl9(QMI8658_CMD_WRITE_WOM) == ESP_OK);
+    CHECK(ack_us >= completion_us);
+    CHECK(now_us >= ack_us + clear_delay_us);
+    CHECK(delay_calls > 0 && zero_delays == 0);
+    CHECK(now_us < 150000);
+    reset(); never_done = true;
+    CHECK(imu_ctrl9(QMI8658_CMD_WRITE_WOM) == ESP_ERR_TIMEOUT);
+    CHECK(now_us >= 100000 && now_us < 120000);
+    CHECK(!acknowledged);
+    reset(); stuck_done = true;
+    CHECK(imu_ctrl9(QMI8658_CMD_WRITE_WOM) == ESP_ERR_TIMEOUT);
+    CHECK(now_us - ack_us >= 100000 && now_us - ack_us < 120000);
+    reset(); read_error_phase = 1;
+    CHECK(imu_ctrl9(QMI8658_CMD_WRITE_WOM) == IO_ERROR);
+    reset(); read_error_phase = 2;
+    CHECK(imu_ctrl9(QMI8658_CMD_WRITE_WOM) == IO_ERROR);
+    reset(); fail_write_reg = QMI8658_REG_CTRL8; fail_write_value = QMI8658_CTRL8_HS_STATUS;
+    CHECK(imu_ctrl9(QMI8658_CMD_WRITE_WOM) == IO_ERROR);
+    CHECK(writes == 1);
+    reset(); fail_write_reg = QMI8658_REG_CTRL9; fail_write_value = QMI8658_CMD_WRITE_WOM;
+    CHECK(imu_ctrl9(QMI8658_CMD_WRITE_WOM) == IO_ERROR);
+    CHECK(writes == 2);
+    reset(); fail_write_reg = QMI8658_REG_CTRL9; fail_write_value = QMI8658_CMD_ACK;
+    CHECK(imu_ctrl9(QMI8658_CMD_WRITE_WOM) == IO_ERROR);
+    reset();
+    CHECK(jr_imu_arm_wake_on_motion(100) == ESP_OK);
+    CHECK(enables == 1 && now_us >= 60000);
+    CHECK(writes_reg[0] == QMI8658_REG_CTRL7 && writes_val[0] == 0);
+    CHECK(writes_reg[1] == QMI8658_REG_CTRL2 && writes_val[1] == 0x2D);
+    CHECK(writes_reg[2] == QMI8658_REG_CAL1_L && writes_val[2] == 100);
+    CHECK(writes_reg[3] == QMI8658_REG_CAL1_H && writes_val[3] == 0x20);
+    CHECK(writes_reg[writes-1] == QMI8658_REG_CTRL1 && writes_val[writes-1] == 0x48);
+    reset(); never_done = true;
+    CHECK(jr_imu_arm_wake_on_motion(100) == ESP_ERR_TIMEOUT);
+    CHECK(enables == 0);
+    reset(); fail_write_reg = QMI8658_REG_CTRL9; fail_write_value = QMI8658_CMD_ACK;
+    CHECK(jr_imu_arm_wake_on_motion(100) == IO_ERROR);
+    CHECK(enables == 0);
+    reset(); fail_write_reg = QMI8658_REG_CAL1_L; fail_write_value = 100;
+    CHECK(jr_imu_arm_wake_on_motion(100) == IO_ERROR);
+    CHECK(writes == 3 && enables == 0);
+    reset(); s_task = (void *)1;
+    CHECK(jr_imu_arm_wake_on_motion(100) == ESP_ERR_INVALID_STATE);
+    CHECK(writes == 0);
+    reset(); s_ready = false;
+    CHECK(jr_imu_arm_wake_on_motion(100) == ESP_ERR_INVALID_STATE);
+    CHECK(writes == 0);
+    if (failures) printf("%d failure(s) of %d checks\n", failures, checks);
+    else printf("IMU WoM passed (%d checks)\n", checks);
+    return failures != 0;
+}

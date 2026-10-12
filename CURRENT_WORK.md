@@ -2,6 +2,16 @@
 
 **Updated:** 2026-10-12 UTC
 
+C1 owner session: Nightstand returned after dismissal; unplugged touch wake
+and tap-to-HOME were observed. The edge-only lift failed: the screen stayed
+off, then touch woke it. R6 confirms `wake=touch`, `sleeps=4` at
+22:33:50.591341Z; that is API return time, not optical latency. Lift remains
+FAILED. A scoped IMU command-handshake repair restores real polling delays
+at 100 Hz and rejects unobserved completion/ACK failure. All 16 host suites
+pass and runtime mutations fail. Build/OTA and physical retest are pending;
+the original failure is not explained conclusively. Keep privacy muted.
+See [lift failure and repair](docs/evidence/t107-lift-wake-failure.md).
+
 Owner follow-up: CHARGE is closed at 200mA with no new PMIC write. The seven-step
 physical/voice session is prepared in `.evidence/t107/OWNER-CHECKLIST.md` and
 waits for `owner ready`. C2's five offline source/test files are committed at

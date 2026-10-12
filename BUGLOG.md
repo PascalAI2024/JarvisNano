@@ -111,6 +111,16 @@ physical first-light and a complete Glance remain unmeasured.
 
 ## t107 C1 companion — 2026-10-12
 
+**Lift wake failed owner acceptance.** Edge-only lift left the screen off;
+touch woke it. R6 authenticated readback is `wake=touch`, `sleeps=4`, despite
+`armed.lift=true`. The command poll used a 2 ms delay that truncates to zero
+at 100 Hz and returned success without observed completion/ACK clear.
+The bounded repair uses elapsed deadlines, at least one tick, and propagated
+failures; 34 production-function checks and all 16 host suites pass.
+Physical cause and repair acceptance remain open. The historical N10.4
+missing-CmdDone observation is relevant; a real-device arming gate is required
+before another lift. See [failure evidence](docs/evidence/t107-lift-wake-failure.md).
+
 Muted HOME/WHISPER rendered 5.879 frames/s because the repeating 8fps MUTED clip
 invalidated every decoded frame while the engine ceiling was 6fps. Quiet HOME
 now retains a visible one-shot frame; changed clock/rim/caption/brightness facts
