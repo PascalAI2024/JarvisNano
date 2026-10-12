@@ -15,14 +15,21 @@ limits are configuration, not measured net current. First completed display
 transfer is a software proxy, not optical wake-to-first-pixel proof. Frozen
 diagnostic image `03864cc` is valid after the A/B. Three charge scans report
 200mA CC and 4.2V CV; retain 200mA until the cell rating is known. Its
-300-second timer cycle passed at 305.937 seconds to API. No companion image
-has been flashed. See [B: CHARGE](docs/evidence/t107-charge-diagnostic.md).
+300-second timer cycle passed at 305.937 seconds to API. See
+[B: CHARGE](docs/evidence/t107-charge-diagnostic.md).
 
 C's three read/build/prove waves are complete offline: three executors,
 14 host suites pass, 179 compiled runtime faults rejected, target build
 55.483% free. USB Nightstand, local Glance and checked panel/sleep/OTA
-ownership are implemented. Matching baseline DREAM/HOME measurements run
-before companion OTA. See [C1 checkpoint](docs/evidence/t107-companion.md).
+ownership are implemented. Source `0b9645d` is authenticated `ota_0` valid
+and muted at 04:55:31Z. The matched baseline completed before this OTA;
+the new image's identical DREAM/HOME pair completed. DREAM fits were
+59.59±51.22→61.39±65.29mV/h; HOME fits were
+51.29±49.60→96.40±59.87mV/h.
+Conditional uncertainty does not establish a saving or projected life. Its forced300s timer
+passed at306.125s to readback with timer cause and sleep counter0->1.
+Boot first DMA1899->819ms is a measured software reduction, not optical
+wake-to-pixel proof. See [C1 device report](docs/evidence/t107-companion.md).
 Companion device acceptance precedes Deck device
 acceptance. Owner-reported voice acceptance below does not prove later images;
 privacy stays muted and new-image voice remains an owner check.

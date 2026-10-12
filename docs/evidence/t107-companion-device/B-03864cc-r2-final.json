@@ -1,0 +1,228 @@
+{
+  "utc": "2026-10-12T04:53:48.232890+00:00",
+  "health": {
+    "verdict": "privacy-muted",
+    "repairable": false,
+    "privacy": true,
+    "flip_muted": false,
+    "operator": false,
+    "phase": "Idle",
+    "voice_alive": true,
+    "levels": {
+      "volume": 95,
+      "brightness_cap": 65,
+      "brightness_actual": 65
+    },
+    "audio_power": {
+      "mic": false,
+      "adc": false,
+      "dac": false,
+      "pa": false,
+      "reads": 0,
+      "silent": 0,
+      "failures": 0
+    },
+    "memory": {
+      "largest_internal": 28672,
+      "free_psram": 4796616
+    },
+    "transport": {
+      "would_block": 0,
+      "drops": 0,
+      "deaths": 0
+    },
+    "playback": {
+      "underruns": 0,
+      "max_gap_ms": 0,
+      "low_water_ms": -1,
+      "dac_failures": 0,
+      "replies": 0,
+      "prerolls": 0,
+      "preroll_short": 0
+    },
+    "rx": {
+      "frames": 0,
+      "max_gap_ms": 0,
+      "queue_wait_max_ms": 0,
+      "queue_hwm": 0,
+      "drops": 0
+    },
+    "display": {
+      "fps": 5,
+      "flush_errors": 0
+    },
+    "ota": {
+      "active": false,
+      "running": "ota_1",
+      "boot": "ota_1",
+      "state": "valid",
+      "received": 0,
+      "total": 0,
+      "last_error": "ESP_OK",
+      "last_invalid": "none"
+    },
+    "tools": {
+      "status": "ok",
+      "http": 0
+    }
+  },
+  "cockpit": {
+    "uptime_ms": 1398249,
+    "memory": {
+      "free_internal": 40607,
+      "largest_internal_block": 28672,
+      "free_psram": 4792504
+    },
+    "network": {
+      "connected": true,
+      "ip": "[redacted-address]",
+      "rssi": -40
+    },
+    "voice": {
+      "phase": "Idle",
+      "voice_armed": false,
+      "always_ready": true,
+      "privacy_paused": true,
+      "mood": "AWAKE",
+      "brightness": 65,
+      "rtc": false,
+      "capturing": false,
+      "ws_connected": false,
+      "auto_idle_ms": 0,
+      "mic_rms": 0.0,
+      "clean_rms": 0.0,
+      "vad_clean": true,
+      "vad_starts": 0,
+      "audio_diag_running": false
+    },
+    "tools": {
+      "execution": "on_device",
+      "worker_ready": true,
+      "configured": true,
+      "declared": 10,
+      "last_tool": "none",
+      "last_status": "idle",
+      "last_http_status": 0,
+      "last_duration_ms": 0,
+      "calls_received": 0,
+      "submitted": 0,
+      "submit_rejected": 0,
+      "completed": 0,
+      "succeeded": 0,
+      "failed": 0,
+      "cancelled": 0,
+      "stale_dropped": 0,
+      "responses_sent": 0,
+      "response_send_failed": 0,
+      "consent_active": false,
+      "consent_prompted": 0,
+      "consent_approved": 0,
+      "consent_denied": 0,
+      "consent_timed_out": 0,
+      "consent_cancelled": 0
+    },
+    "display": {
+      "init": "ready",
+      "actual_fps": 6,
+      "flush_completions": 196687,
+      "flush_errors": 0,
+      "requested_face": 6,
+      "applied_face": 6,
+      "choices_active": false,
+      "watch_style": "FUTURE",
+      "sun_rise_min": 438,
+      "sun_set_min": 1135
+    },
+    "touch": {
+      "events": 4,
+      "last": {
+        "kind": "tap",
+        "x": 233,
+        "y": 100
+      },
+      "shade_open": false,
+      "panel_touch_challenge": {
+        "pending": false,
+        "active": false,
+        "verified": false,
+        "correct_rounds": 0,
+        "wrong": 0,
+        "expected_sector": 0,
+        "last_latency_ms": 0
+      }
+    },
+    "agent": {
+      "active": false,
+      "revision_hwm": 0,
+      "next_revision": 1
+    },
+    "brain": {
+      "voice_route": "cloud_gemini",
+      "desk_connected": false,
+      "private_android_ready": false,
+      "private_android_reason": "BLE firmware not enabled",
+      "next_inbox_seq": 1,
+      "event_cursor": 0,
+      "surface_active": false,
+      "surface_kind": "none",
+      "surface_title": "",
+      "surface_ttl_ms": 0
+    }
+  },
+  "battery": {
+    "available": true,
+    "present": true,
+    "charging": false,
+    "usb_present": false,
+    "percent": 60,
+    "millivolts": 3778,
+    "sample_seq": 1390,
+    "age_ms": 572
+  },
+  "display": {
+    "init": "ready",
+    "last_error": "ESP_OK",
+    "task_running": true,
+    "blanked": false,
+    "requested_face": 6,
+    "applied_face": 6,
+    "requested_amplitude": 0,
+    "applied_bucket": 0,
+    "requests": 2,
+    "state_changes": 2,
+    "segment_sets": 2,
+    "asset_load_failures": 0,
+    "flush_submissions": 196756,
+    "flush_completions": 196756,
+    "flush_errors": 0,
+    "actual_fps": 6,
+    "render_us": 32119025,
+    "render_frames": 5045,
+    "render_frame_us": 6665,
+    "current_asset_bytes": 236148,
+    "free_psram": 4793312,
+    "stack_hwm": 2092,
+    "boot_timing": {
+      "time_base": "esp_timer_since_boot",
+      "optical": false,
+      "includes_rom": false,
+      "init_started": true,
+      "init_finished": true,
+      "first_transfer_valid": true,
+      "init_start_boot_ms": 230,
+      "init_end_boot_ms": 1853,
+      "first_transfer_done_boot_ms": 1899
+    }
+  },
+  "sleep": {
+    "wake": "timer",
+    "sleeps": 2,
+    "armed": {
+      "lift": true,
+      "touch": true
+    },
+    "lift_fail": "none",
+    "force": false,
+    "after_dream_ms": 600000
+  }
+}

@@ -120,6 +120,9 @@ recovers the panel. Final USB cache publication is not an electrical edge;
 physical plug-after-observation remains possible.
 
 Nightstand/Glance and truthful panel sleep/recovery pass 14 combined host
-suites; target build leaves 55.483% app space. Device/physical acceptance
-is pending the matched stage pair and OTA. Ladder timings are retained;
+suites; target build leaves 55.483% app space. Source `0b9645d` is OTA-valid
+and authenticated muted; its forced300s timer passed with timer cause.
+Matched DREAM/HOME windows completed without a resolved battery saving.
+Physical Nightstand/Glance, optical timing, natural ladder/default4h timer and
+new-image voice acceptance remain pending. Ladder timings are retained;
 no energy or projected-life gain is claimed. See [C1 report](docs/evidence/t107-companion.md).

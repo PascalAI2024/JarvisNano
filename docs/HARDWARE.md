@@ -93,6 +93,9 @@ This diagram describes configured capability, not every accepted physical
 wake. `7578238` passed three forced 300-second timer cycles. The earlier
 1,800-second API wake failed and remains unexplained; owner recovery was
 manual. B diagnostic `03864cc` also passed a forced 300-second timer cycle.
+C companion `0b9645d` passed at306.125 seconds to authenticated timer readback,
+with retained sleep count0->1 and privacy muted. Boot first display DMA
+changed1899->819ms; this excludes the ROM, physical wake edge and optical pixels.
 These results do not establish the natural ten-minute DREAM gate, controlled
 lift/touch or four-hour timer. See the bounded [companion report](evidence/t107-companion.md).
 
