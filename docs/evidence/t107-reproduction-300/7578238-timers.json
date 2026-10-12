@@ -1,0 +1,797 @@
+[
+  {
+    "image": "7578238",
+    "run": 1,
+    "timer_s": 300,
+    "passed": true,
+    "wake_detected_by_api": true,
+    "seconds_to_api_back": 303.422,
+    "seconds_after_nominal_timer": 3.422,
+    "sleep_request_round_trip_s": 0.11,
+    "wake_reason": "timer",
+    "reset_reason": null,
+    "reset_reason_note": "No reset-reason field is exposed by authenticated API; wake reason is ESP sleep wake cause.",
+    "pre": {
+      "utc": "2026-10-12T00:30:25.766703+00:00",
+      "health": {
+        "verdict": "privacy-muted",
+        "repairable": false,
+        "privacy": true,
+        "flip_muted": false,
+        "operator": false,
+        "phase": "Idle",
+        "voice_alive": true,
+        "levels": {
+          "volume": 95,
+          "brightness_cap": 65,
+          "brightness_actual": 65
+        },
+        "audio_power": {
+          "mic": false,
+          "adc": false,
+          "dac": false,
+          "pa": false,
+          "reads": 0,
+          "silent": 0,
+          "failures": 0
+        },
+        "memory": {
+          "largest_internal": 30720,
+          "free_psram": 5649020
+        },
+        "transport": {
+          "would_block": 0,
+          "drops": 0,
+          "deaths": 0
+        },
+        "playback": {
+          "underruns": 0,
+          "max_gap_ms": 0,
+          "low_water_ms": -1,
+          "dac_failures": 0,
+          "replies": 0,
+          "prerolls": 0,
+          "preroll_short": 0
+        },
+        "rx": {
+          "frames": 0,
+          "max_gap_ms": 0,
+          "queue_wait_max_ms": 0,
+          "queue_hwm": 0,
+          "drops": 0
+        },
+        "display": {
+          "fps": 2,
+          "flush_errors": 0
+        },
+        "ota": {
+          "active": false,
+          "running": "ota_0",
+          "boot": "ota_0",
+          "state": "valid",
+          "received": 0,
+          "total": 0,
+          "last_error": "ESP_OK",
+          "last_invalid": "none"
+        },
+        "tools": {
+          "status": "ok",
+          "http": 0
+        }
+      },
+      "uptime_ms": 1116522,
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "AWAKE",
+        "brightness": 65,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      },
+      "sleep": {
+        "wake": "touch",
+        "sleeps": 3,
+        "armed": {
+          "lift": true,
+          "touch": true
+        },
+        "lift_fail": "none",
+        "force": false,
+        "after_dream_ms": 600000
+      },
+      "battery": {
+        "available": true,
+        "present": true,
+        "charging": false,
+        "usb_present": false,
+        "percent": 21,
+        "millivolts": 3607,
+        "sample_seq": 1099,
+        "age_ms": 614
+      }
+    },
+    "post": {
+      "utc": "2026-10-12T00:35:31.822359+00:00",
+      "health": {
+        "verdict": "privacy-muted",
+        "repairable": false,
+        "privacy": true,
+        "flip_muted": false,
+        "operator": false,
+        "phase": "Idle",
+        "voice_alive": true,
+        "levels": {
+          "volume": 95,
+          "brightness_cap": 65,
+          "brightness_actual": 5
+        },
+        "audio_power": {
+          "mic": false,
+          "adc": false,
+          "dac": false,
+          "pa": false,
+          "reads": 0,
+          "silent": 0,
+          "failures": 0
+        },
+        "memory": {
+          "largest_internal": 31744,
+          "free_psram": 5680708
+        },
+        "transport": {
+          "would_block": 0,
+          "drops": 0,
+          "deaths": 0
+        },
+        "playback": {
+          "underruns": 0,
+          "max_gap_ms": 0,
+          "low_water_ms": -1,
+          "dac_failures": 0,
+          "replies": 0,
+          "prerolls": 0,
+          "preroll_short": 0
+        },
+        "rx": {
+          "frames": 0,
+          "max_gap_ms": 0,
+          "queue_wait_max_ms": 0,
+          "queue_hwm": 0,
+          "drops": 0
+        },
+        "display": {
+          "fps": 0,
+          "flush_errors": 0
+        },
+        "ota": {
+          "active": false,
+          "running": "ota_0",
+          "boot": "ota_0",
+          "state": "valid",
+          "received": 0,
+          "total": 0,
+          "last_error": "ESP_OK",
+          "last_invalid": "none"
+        },
+        "tools": {
+          "status": "ok",
+          "http": 0
+        }
+      },
+      "uptime_ms": 7625,
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "DREAM",
+        "brightness": 5,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      },
+      "sleep": {
+        "wake": "timer",
+        "sleeps": 4,
+        "armed": {
+          "lift": true,
+          "touch": true
+        },
+        "lift_fail": "none",
+        "force": false,
+        "after_dream_ms": 600000
+      },
+      "battery": {
+        "available": true,
+        "present": true,
+        "charging": false,
+        "usb_present": false,
+        "percent": 20,
+        "millivolts": 3613,
+        "sample_seq": 8,
+        "age_ms": 773
+      }
+    },
+    "attempts": [
+      {
+        "path": "/api/debug/sleep?now=1&wake_s=300",
+        "method": "POST",
+        "utc": "2026-10-12T00:30:25.940506+00:00",
+        "start_s": 0.0,
+        "end_s": 0.11,
+        "ok": true
+      },
+      {
+        "path": "/api/debug/sleep",
+        "method": "GET",
+        "utc": "2026-10-12T00:35:26.050803+00:00",
+        "start_s": 300.11,
+        "end_s": 303.422,
+        "ok": true
+      },
+      {
+        "path": "/api/device/health",
+        "method": "GET",
+        "utc": "2026-10-12T00:35:29.364494+00:00",
+        "start_s": 303.422,
+        "end_s": 303.954,
+        "ok": true
+      },
+      {
+        "path": "/api/operator/lease",
+        "method": "GET",
+        "utc": "2026-10-12T00:35:29.891594+00:00",
+        "start_s": 303.954,
+        "end_s": 304.391,
+        "ok": true
+      }
+    ],
+    "error": null,
+    "timing_note": "Unchanged harness starts polling 300 seconds after POST response; first successful response is an upper bound on availability."
+  },
+  {
+    "image": "7578238",
+    "run": 2,
+    "timer_s": 300,
+    "passed": true,
+    "wake_detected_by_api": true,
+    "seconds_to_api_back": 303.718,
+    "seconds_after_nominal_timer": 3.718,
+    "sleep_request_round_trip_s": 0.203,
+    "wake_reason": "timer",
+    "reset_reason": null,
+    "reset_reason_note": "No reset-reason field is exposed by authenticated API; wake reason is ESP sleep wake cause.",
+    "pre": {
+      "utc": "2026-10-12T00:35:36.566674+00:00",
+      "health": {
+        "verdict": "privacy-muted",
+        "repairable": false,
+        "privacy": true,
+        "flip_muted": false,
+        "operator": false,
+        "phase": "Idle",
+        "voice_alive": true,
+        "levels": {
+          "volume": 95,
+          "brightness_cap": 65,
+          "brightness_actual": 65
+        },
+        "audio_power": {
+          "mic": false,
+          "adc": false,
+          "dac": false,
+          "pa": false,
+          "reads": 0,
+          "silent": 0,
+          "failures": 0
+        },
+        "memory": {
+          "largest_internal": 31744,
+          "free_psram": 5680672
+        },
+        "transport": {
+          "would_block": 0,
+          "drops": 0,
+          "deaths": 0
+        },
+        "playback": {
+          "underruns": 0,
+          "max_gap_ms": 0,
+          "low_water_ms": -1,
+          "dac_failures": 0,
+          "replies": 0,
+          "prerolls": 0,
+          "preroll_short": 0
+        },
+        "rx": {
+          "frames": 0,
+          "max_gap_ms": 0,
+          "queue_wait_max_ms": 0,
+          "queue_hwm": 0,
+          "drops": 0
+        },
+        "display": {
+          "fps": 11,
+          "flush_errors": 0
+        },
+        "ota": {
+          "active": false,
+          "running": "ota_0",
+          "boot": "ota_0",
+          "state": "valid",
+          "received": 0,
+          "total": 0,
+          "last_error": "ESP_OK",
+          "last_invalid": "none"
+        },
+        "tools": {
+          "status": "ok",
+          "http": 0
+        }
+      },
+      "uptime_ms": 12282,
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "AWAKE",
+        "brightness": 65,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      },
+      "sleep": {
+        "wake": "timer",
+        "sleeps": 4,
+        "armed": {
+          "lift": true,
+          "touch": true
+        },
+        "lift_fail": "none",
+        "force": false,
+        "after_dream_ms": 600000
+      },
+      "battery": {
+        "available": true,
+        "present": true,
+        "charging": false,
+        "usb_present": false,
+        "percent": 20,
+        "millivolts": 3609,
+        "sample_seq": 13,
+        "age_ms": 459
+      }
+    },
+    "post": {
+      "utc": "2026-10-12T00:40:42.412767+00:00",
+      "health": {
+        "verdict": "privacy-muted",
+        "repairable": false,
+        "privacy": true,
+        "flip_muted": false,
+        "operator": false,
+        "phase": "Idle",
+        "voice_alive": true,
+        "levels": {
+          "volume": 95,
+          "brightness_cap": 65,
+          "brightness_actual": 5
+        },
+        "audio_power": {
+          "mic": false,
+          "adc": false,
+          "dac": false,
+          "pa": false,
+          "reads": 0,
+          "silent": 0,
+          "failures": 0
+        },
+        "memory": {
+          "largest_internal": 30720,
+          "free_psram": 5682044
+        },
+        "transport": {
+          "would_block": 0,
+          "drops": 0,
+          "deaths": 0
+        },
+        "playback": {
+          "underruns": 0,
+          "max_gap_ms": 0,
+          "low_water_ms": -1,
+          "dac_failures": 0,
+          "replies": 0,
+          "prerolls": 0,
+          "preroll_short": 0
+        },
+        "rx": {
+          "frames": 0,
+          "max_gap_ms": 0,
+          "queue_wait_max_ms": 0,
+          "queue_hwm": 0,
+          "drops": 0
+        },
+        "display": {
+          "fps": 0,
+          "flush_errors": 0
+        },
+        "ota": {
+          "active": false,
+          "running": "ota_0",
+          "boot": "ota_0",
+          "state": "valid",
+          "received": 0,
+          "total": 0,
+          "last_error": "ESP_OK",
+          "last_invalid": "none"
+        },
+        "tools": {
+          "status": "ok",
+          "http": 0
+        }
+      },
+      "uptime_ms": 7911,
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "DREAM",
+        "brightness": 5,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      },
+      "sleep": {
+        "wake": "timer",
+        "sleeps": 5,
+        "armed": {
+          "lift": true,
+          "touch": true
+        },
+        "lift_fail": "none",
+        "force": false,
+        "after_dream_ms": 600000
+      },
+      "battery": {
+        "available": true,
+        "present": true,
+        "charging": false,
+        "usb_present": false,
+        "percent": 19,
+        "millivolts": 3617,
+        "sample_seq": 9,
+        "age_ms": 10
+      }
+    },
+    "attempts": [
+      {
+        "path": "/api/debug/sleep?now=1&wake_s=300",
+        "method": "POST",
+        "utc": "2026-10-12T00:35:36.850322+00:00",
+        "start_s": 0.0,
+        "end_s": 0.203,
+        "ok": true
+      },
+      {
+        "path": "/api/debug/sleep",
+        "method": "GET",
+        "utc": "2026-10-12T00:40:37.040128+00:00",
+        "start_s": 300.203,
+        "end_s": 303.718,
+        "ok": true
+      },
+      {
+        "path": "/api/device/health",
+        "method": "GET",
+        "utc": "2026-10-12T00:40:40.552020+00:00",
+        "start_s": 303.718,
+        "end_s": 303.937,
+        "ok": true
+      },
+      {
+        "path": "/api/operator/lease",
+        "method": "GET",
+        "utc": "2026-10-12T00:40:40.778113+00:00",
+        "start_s": 303.937,
+        "end_s": 304.343,
+        "ok": true
+      }
+    ],
+    "error": null,
+    "timing_note": "Unchanged harness starts polling 300 seconds after POST response; first successful response is an upper bound on availability."
+  },
+  {
+    "image": "7578238",
+    "run": 3,
+    "timer_s": 300,
+    "passed": true,
+    "wake_detected_by_api": true,
+    "seconds_to_api_back": 303.407,
+    "seconds_after_nominal_timer": 3.407,
+    "sleep_request_round_trip_s": 0.141,
+    "wake_reason": "timer",
+    "reset_reason": null,
+    "reset_reason_note": "No reset-reason field is exposed by authenticated API; wake reason is ESP sleep wake cause.",
+    "pre": {
+      "utc": "2026-10-12T00:40:47.111094+00:00",
+      "health": {
+        "verdict": "privacy-muted",
+        "repairable": false,
+        "privacy": true,
+        "flip_muted": false,
+        "operator": false,
+        "phase": "Idle",
+        "voice_alive": true,
+        "levels": {
+          "volume": 95,
+          "brightness_cap": 65,
+          "brightness_actual": 65
+        },
+        "audio_power": {
+          "mic": false,
+          "adc": false,
+          "dac": false,
+          "pa": false,
+          "reads": 0,
+          "silent": 0,
+          "failures": 0
+        },
+        "memory": {
+          "largest_internal": 30720,
+          "free_psram": 5682024
+        },
+        "transport": {
+          "would_block": 0,
+          "drops": 0,
+          "deaths": 0
+        },
+        "playback": {
+          "underruns": 0,
+          "max_gap_ms": 0,
+          "low_water_ms": -1,
+          "dac_failures": 0,
+          "replies": 0,
+          "prerolls": 0,
+          "preroll_short": 0
+        },
+        "rx": {
+          "frames": 0,
+          "max_gap_ms": 0,
+          "queue_wait_max_ms": 0,
+          "queue_hwm": 0,
+          "drops": 0
+        },
+        "display": {
+          "fps": 11,
+          "flush_errors": 0
+        },
+        "ota": {
+          "active": false,
+          "running": "ota_0",
+          "boot": "ota_0",
+          "state": "valid",
+          "received": 0,
+          "total": 0,
+          "last_error": "ESP_OK",
+          "last_invalid": "none"
+        },
+        "tools": {
+          "status": "ok",
+          "http": 0
+        }
+      },
+      "uptime_ms": 12752,
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "AWAKE",
+        "brightness": 65,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      },
+      "sleep": {
+        "wake": "timer",
+        "sleeps": 5,
+        "armed": {
+          "lift": true,
+          "touch": true
+        },
+        "lift_fail": "none",
+        "force": false,
+        "after_dream_ms": 600000
+      },
+      "battery": {
+        "available": true,
+        "present": true,
+        "charging": false,
+        "usb_present": false,
+        "percent": 19,
+        "millivolts": 3615,
+        "sample_seq": 13,
+        "age_ms": 691
+      }
+    },
+    "post": {
+      "utc": "2026-10-12T00:45:52.874458+00:00",
+      "health": {
+        "verdict": "privacy-muted",
+        "repairable": false,
+        "privacy": true,
+        "flip_muted": false,
+        "operator": false,
+        "phase": "Idle",
+        "voice_alive": true,
+        "levels": {
+          "volume": 95,
+          "brightness_cap": 65,
+          "brightness_actual": 5
+        },
+        "audio_power": {
+          "mic": false,
+          "adc": false,
+          "dac": false,
+          "pa": false,
+          "reads": 0,
+          "silent": 0,
+          "failures": 0
+        },
+        "memory": {
+          "largest_internal": 31744,
+          "free_psram": 5681500
+        },
+        "transport": {
+          "would_block": 0,
+          "drops": 0,
+          "deaths": 0
+        },
+        "playback": {
+          "underruns": 0,
+          "max_gap_ms": 0,
+          "low_water_ms": -1,
+          "dac_failures": 0,
+          "replies": 0,
+          "prerolls": 0,
+          "preroll_short": 0
+        },
+        "rx": {
+          "frames": 0,
+          "max_gap_ms": 0,
+          "queue_wait_max_ms": 0,
+          "queue_hwm": 0,
+          "drops": 0
+        },
+        "display": {
+          "fps": 0,
+          "flush_errors": 0
+        },
+        "ota": {
+          "active": false,
+          "running": "ota_0",
+          "boot": "ota_0",
+          "state": "valid",
+          "received": 0,
+          "total": 0,
+          "last_error": "ESP_OK",
+          "last_invalid": "none"
+        },
+        "tools": {
+          "status": "ok",
+          "http": 0
+        }
+      },
+      "uptime_ms": 7508,
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "DREAM",
+        "brightness": 5,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      },
+      "sleep": {
+        "wake": "timer",
+        "sleeps": 6,
+        "armed": {
+          "lift": true,
+          "touch": true
+        },
+        "lift_fail": "none",
+        "force": false,
+        "after_dream_ms": 600000
+      },
+      "battery": {
+        "available": true,
+        "present": true,
+        "charging": false,
+        "usb_present": false,
+        "percent": 19,
+        "millivolts": 3617,
+        "sample_seq": 8,
+        "age_ms": 675
+      }
+    },
+    "attempts": [
+      {
+        "path": "/api/debug/sleep?now=1&wake_s=300",
+        "method": "POST",
+        "utc": "2026-10-12T00:40:47.435315+00:00",
+        "start_s": 0.0,
+        "end_s": 0.141,
+        "ok": true
+      },
+      {
+        "path": "/api/debug/sleep",
+        "method": "GET",
+        "utc": "2026-10-12T00:45:47.564808+00:00",
+        "start_s": 300.141,
+        "end_s": 303.407,
+        "ok": true
+      },
+      {
+        "path": "/api/device/health",
+        "method": "GET",
+        "utc": "2026-10-12T00:45:50.827107+00:00",
+        "start_s": 303.407,
+        "end_s": 303.875,
+        "ok": true
+      },
+      {
+        "path": "/api/operator/lease",
+        "method": "GET",
+        "utc": "2026-10-12T00:45:51.288601+00:00",
+        "start_s": 303.875,
+        "end_s": 304.25,
+        "ok": true
+      }
+    ],
+    "error": null,
+    "timing_note": "Unchanged harness starts polling 300 seconds after POST response; first successful response is an upper bound on availability."
+  }
+]

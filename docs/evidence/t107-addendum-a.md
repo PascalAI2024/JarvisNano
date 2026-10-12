@@ -300,11 +300,19 @@ Frame mirrors prove composed pixels, not physical panel illumination, finger
 recognition, audible speech or listening latency. Voice acceptance is the
 owner observation above; listening-state power remains excluded.
 
-Report: **BLOCKED: Is there a saved boot or network log covering 00:00:28Z
-to the owner recovery at 00:12Z?** Gate `after-long` failed: `timer wake failed`;
-the historical cause cannot be recovered from this image's exposed telemetry.
-Device: OTA `7578238`, fresh manual readback `ota_0 state=valid`, privacy muted;
-tests: host 11451/2200/109/166/81/38, build 55.769% free; waves: 3 waves,
-3 subagents; ux: detail navigation/captions, finite fades and dial-cache
-headroom; code: 133 production lines removed, 160 added. Source is committed;
-the following evidence commit changes documentation only.
+The orchestrator subsequently ruled that no saved log exists for that window;
+historical log searching stopped. The requested new reproduction is recorded in
+[t107-reproduction-300.md](t107-reproduction-300.md): candidate `7578238` passed
+all three muted 300-second timer gates (API back in 303.422, 303.718 and
+303.407 seconds). This does not resolve the original 1800-second failure.
+The new idle A/B is incomplete: at 19% starting SoC, battery saver changed
+HOME from WHISPER/14 brightness to DREAM/5 after 105 seconds; the device then
+had 18% charge, below the 30% battery-only OTA preflight threshold. No OTA was
+attempted. The previous worse drain remains a possible regression.
+
+Report: **BLOCKED: Can the owner charge the Nano to at least 50%, unplug USB,
+and leave privacy muted for the idle A/B?** Device: OTA `7578238`, authenticated
+readback `ota_0 state=valid`, privacy muted; tests: host 11451/2200/109/166/81/38,
+build 55.769% free; waves: 3 waves, 3 subagents; ux: detail navigation/captions,
+finite fades and dial-cache headroom; code: 133 production lines removed,
+160 added. This follow-up changes evidence and documentation only.
