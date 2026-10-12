@@ -37,7 +37,10 @@ Both longer awake windows completed, but gate `after-long` failed with
 The paired API remains unreachable. Owner wake by hand is needed for health
 readback and wake investigation. Battery improvement is unproven; voltage
 fits are larger after OTA and SoC/rebound remain confounded. Long and short
-live runtime comparisons disagree and are both recorded.
+live runtime comparisons disagree and are both recorded. Both wake/API behavior
+and awake battery drain remain possible regressions. Three authenticated GET
+retries at 00:10–00:11Z on 2026-10-12 timed out despite reported ping replies;
+cell-state differences do not establish the cause of the larger drain fits.
 
 Voice is accepted on owner observation (reply `yes`, 2026-10-11, tested image
 unspecified). Privacy was verified muted on receipt and at every authenticated

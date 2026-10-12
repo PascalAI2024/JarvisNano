@@ -31,6 +31,15 @@ Voltage drain fits were larger after OTA (idle 29.42→100.20, WATCH
 unproven. Long WATCH software rendering was 45.438→43.790 ms/frame; the
 short profile was slower, 37.154→46.078. Both results are retained.
 
+At 00:10:37–00:11:01Z on 2026-10-12, authenticated health, cockpit and sleep
+GET retries all timed out despite orchestrator-reported ping replies. Wake
+timing/reason and current privacy remain unreadable. Compared with the
+successful baseline cycle, this is an acceptance regression and a possible
+firmware wake/API regression. The worse drain fits are a possible battery
+regression; different SoC/rebound are observed confounds, not a proven cause.
+Audio/sleep/network source is unchanged; DREAM presenter refresh retry did
+change. The report records the bounded source audit and failed readback receipt.
+
 See [the Addendum A report](docs/evidence/t107-addendum-a.md) for error bounds,
 receipts, capture links and the three waves with three unique executors.
 

@@ -79,4 +79,8 @@ wake; its sleep-end/DREAM proof is missing and the API remains unreachable.
 Owner wake by hand is required for authenticated readback and investigation. Listening-state power is excluded. Voice acceptance is owner-observed
 (reply `yes`, 2026-10-11); its tested image was not supplied. The last authenticated
 readback verified privacy muted; a fresh final readback is blocked by reachability.
+Follow-up authenticated health/cockpit/sleep retries at 00:10–00:11Z on
+2026-10-12 also timed out despite reported ping replies. Wake/API behavior and
+the larger awake drain fits remain possible regressions versus baseline;
+different SoC/rebound are confounds, not an established explanation.
 See [Addendum A](docs/evidence/t107-addendum-a.md).

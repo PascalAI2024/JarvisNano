@@ -111,7 +111,8 @@ described above. Baseline idle endpoints rose 3784→3815 mV; after idle fell
 3759→3738 mV. WATCH endpoints were 3805→3802 versus 3737→3712 mV.
 SoC was 66→64% versus 57→54% in idle, and 64→62% versus 53→49% in WATCH.
 These larger after voltage-drain fits do **not** demonstrate a saving or
-isolate firmware effects from cell state. Battery acceptance is unproven.
+isolate firmware effects from cell state. They are a **possible battery
+regression**, not explained away by cell state. Battery acceptance is unproven.
 The [plot](t107-addendum-a/battery-windows.png) retains every point and labels
 the absent after observations.
 
@@ -169,6 +170,58 @@ captures are verified. Complete paired sleep/DREAM proof and measured battery
 improvement remain unaccepted. The prior t107 measurements remain in
 [their separate report](t107-power-baseline.md). The reviewed receipts and
 reproduction commands are in [the evidence bundle](t107-addendum-a/README.md).
+
+### Orchestrator-directed readback retry, 2026-10-12 UTC
+
+Following the orchestrator's reported 2/2 ping replies at 00:09Z, the parent
+retried paired, authenticated GETs only. Health at 00:10:37Z, cockpit at
+00:10:45Z and sleep diagnostics at 00:10:53Z each timed out after about eight
+seconds. [The retry receipt](t107-recovery-readback.json) retains the timestamps
+and source comparisons. No device write, unmute, reboot, OTA or USB flash was
+performed. Original power observations and failed-gate receipts are preserved.
+
+No fresh uptime, boot/wake reason, sleep counter, OTA state or privacy value
+can be obtained. The last authenticated values remain valid/muted/audio off.
+Ping alone cannot distinguish a late timer wake, a timely wake with delayed
+Wi-Fi/API availability, or a later reboot/manual wake. None of those causes
+is established by these receipts.
+
+**Regression assessment:** the live acceptance result regressed relative to
+baseline `0b4108f`, which completed the same 1800-second timer cycle in
+1801.532 seconds. A firmware-caused timer or Wi-Fi regression in `7578238`
+is **possible, not proved**. It must remain open until boot/wake diagnostics
+are available; unchanged source does not establish unchanged runtime behavior.
+
+The baseline and candidate have byte-identical `main/power.c`,
+`main/http_routes.c`, `components/jr_audio/src/jr_audio.c`,
+`components/jr_dsp/src/audio_power.c`, `components/jr_net/src/jr_net.c` and
+`sdkconfig.defaults`. Muted audio gating and sleep preparation therefore were
+already exercised by the successful baseline. `enter_deep_sleep` still shuts
+down audio before arming the RTC timer (`main/power.c:107-165`). The Addendum's
+main changes are shell routing/captions; network startup (`main/main.c:4236`)
+and timer-wake/privacy restoration (`main/main.c:4427`) are unchanged.
+
+The quiet DREAM clock text and drawing functions are unchanged. The Addendum
+**does** change DREAM presenter acknowledgement: at
+`components/jr_display/src/jr_display.c:5037`, minute/rim keys advance only
+after successful refresh submission, so failed render locks retry. It retains
+the existing lock and introduces no timer, Wi-Fi or wake-state write. Display
+startup creates its task and returns (`jr_display.c:5526`), rather than waiting
+for DREAM rendering before network startup. This bounded source review finds
+no direct wake/Wi-Fi bring-up defect, but cannot exclude an indirect display,
+scheduling or memory fault without live diagnostics.
+
+**Drain assessment:** the idle fit is 3.41 times baseline and WATCH is 1.92
+times baseline; both are adverse observations and a **possible battery
+regression**. Different SoC is measured (idle 66→64% before versus 57→54%
+after; WATCH 64→62% versus 53→49%). Baseline idle voltage rises 31 mV despite
+falling reported SoC, showing that voltage is not a direct consumption meter
+in this run. This supports relaxation/SoC as plausible confounds, not a proven
+explanation for the worse fits. There is no matched-SoC crossover, temperature
+record, current channel or energy measurement to assign causality. The after
+SoC also falls faster. Conditional scatter and rounding bounds do not remove
+these uncontrolled effects. The disagreeing short/long render profiles do not
+resolve electrical consumption. No battery improvement is accepted.
 
 ## Waves
 
