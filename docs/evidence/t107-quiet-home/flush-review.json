@@ -1,0 +1,53 @@
+{
+  "source_sha256": "5b9d54bd530dd3ac91a59bc038076f8f104ef72ffb2199c599511c9833de4010",
+  "runs": [
+    {
+      "name": "positive",
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--tmpfs",
+        "/tmp:exec",
+        "-v",
+        "<checkout>:/src:ro",
+        "-w",
+        "/src",
+        "jarvisnano-hosttests",
+        "sh",
+        "-c",
+        "gcc -std=gnu11 -Wall -Wextra -Werror -Wno-unused-function -Icomponents/jr_display/src -Icomponents/jr_display/src -Icomponents/jr_display/include -Icomponents/jr_ports/include -Icomponents/jr_display/tests/probe/stubs .evidence/t107d/quiet-flush-failure.generated.c components/jr_display/src/hud_render.c components/jr_display/src/companion.c -lm -o /tmp/quiet-flush-review && /tmp/quiet-flush-review"
+      ],
+      "returncode": 0,
+      "stdout": "Runtime quiet flush proof started.\nQuiet flush failure review passed (10 checks).\n",
+      "stderr": ""
+    },
+    {
+      "name": "retry-removed",
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--tmpfs",
+        "/tmp:exec",
+        "-v",
+        "<checkout>:/src:ro",
+        "-w",
+        "/src",
+        "jarvisnano-hosttests",
+        "sh",
+        "-c",
+        "gcc -std=gnu11 -Wall -Wextra -Werror -Wno-unused-function -I.evidence/t107d/quiet-flush-source-mutant -Icomponents/jr_display/src -Icomponents/jr_display/include -Icomponents/jr_ports/include -Icomponents/jr_display/tests/probe/stubs .evidence/t107d/quiet-flush-failure.generated.c components/jr_display/src/hud_render.c components/jr_display/src/companion.c -lm -o /tmp/quiet-flush-review && /tmp/quiet-flush-review"
+      ],
+      "returncode": 1,
+      "stdout": "Runtime quiet flush proof started.\nFAIL main:21: failed sparse fact must force a retry even with unchanged keys\nFAIL main:22: successful retry request returns to quiet polling\nFAIL main:25: lock refusal must not consume failed-frame retry\nFAIL main:26: retry resumes after lock recovers\n",
+      "stderr": ""
+    }
+  ]
+}

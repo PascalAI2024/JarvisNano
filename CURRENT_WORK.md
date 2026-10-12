@@ -6,10 +6,17 @@ Owner follow-up: CHARGE is closed at 200mA with no new PMIC write. The seven-ste
 physical/voice session is prepared in `.evidence/t107/OWNER-CHECKLIST.md` and
 waits for `owner ready`. C2's five offline source/test files are committed at
 `c4681ad`, still outside the target image. Muted static HOME's repeating clip
-now retains a one-shot with sparse fact refresh. All 15 host suites pass and
-the target build has 55.461% app-partition headroom. Matched 45-minute B/repair
-windows and one natural ladder/default 4h timer run remain the live acceptance
-checks. This does not close C1 physical acceptance.
+now retains a one-shot with sparse fact refresh, committed `ff18294`. All 15
+host suites pass, 53/53 compiled runtime faults are rejected, and the target
+build has 55.461% app-partition headroom. B's 45-minute control passed at
+06:34Z: SoC 45->21%, voltage fit 97.22±8.17mV/h (conditional bound), settled
+redraw 5.882fps. At 06:34:40Z B `03864cc` remains `ota_1` valid/muted/audio off.
+Charge 21% blocks the repaired OTA under the existing unplugged 30% guard.
+After-image live fps/drain and the natural ladder/default 4h timer are pending;
+no new-image saving is claimed. Resume a fresh back-to-back B/repair pair after
+full charge/disconnection and
+`owner ready`. See [quiet HOME follow-up](docs/evidence/t107-quiet-home.md).
+This does not close C1 physical acceptance.
 
 Main is merged at `3b5dbd7`. The charge wait and both 12-minute HOME idle
 windows completed; `7578238` was restored and authenticated valid/muted at

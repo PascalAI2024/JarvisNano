@@ -116,7 +116,14 @@ invalidated every decoded frame while the engine ceiling was 6fps. Quiet HOME
 now retains a visible one-shot frame; changed clock/rim/caption/brightness facts
 refresh explicitly. Foreground, speech, USB/Nightstand and fades keep their
 existing paths. Review also repaired first-frame decode retry and sparse-DMA
-retry. Live 45-minute drain/fps and natural default 4h wake proof remain pending.
+retry. Source `ff18294` passes 15 host suites/53 compiled runtime faults and the
+build (55.461% free). B's 45-minute control passed at 06:34Z, settled 5.882fps and
+97.22±8.17mV/h conditional voltage fit, SoC 45->21%. B remains valid/muted;
+charge 21% blocks the repaired OTA under the existing 30% guard. A fresh
+back-to-back B/repair pair, live repaired fps and natural default 4h wake remain
+pending on recharge. The
+loop is also present on B; it is a shared cost, not a proven cause of the
+earlier after-image drain increase. See [quiet HOME report](docs/evidence/t107-quiet-home.md).
 
 Break-it reproduced a late OTA/operator-lease claim during sleep's caption
 or panel wait: the old path accepted the claim and still entered deep sleep.

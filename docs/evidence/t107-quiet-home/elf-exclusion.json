@@ -1,0 +1,8 @@
+{
+  "source_commit": "ff1829473ddbdae979b9129376b9d1d767222ed1",
+  "elf_sha256": "bea9a80ac33d2f799e08b5805dc5d59926b5a066473115854f9a7d061947e3d1",
+  "nm_output_sha256": "7ade052c0e5583a6e5c2c4a3ab92a1a19e88c3684d915ed8ad190a78cf49f500",
+  "app_main_found": true,
+  "deck_projection_or_bridge_symbols_found": false,
+  "notes": "The complete nm output and ELF are preserved privately; C2 is excluded from target SRCS."
+}

@@ -1,0 +1,10 @@
+{
+  "components/jr_display/src/jr_display.c": "5b9d54bd530dd3ac91a59bc038076f8f104ef72ffb2199c599511c9833de4010",
+  "components/jr_display/tests/probe/stubs/idf_stubs.inc": "5dad7d7de648f6e232e12d112c2eff8be870b1732c4ed801e60a2d24341f97aa",
+  "components/jr_display/tests/test_shell.c": "c8f5e3fc2777691041b45c6b2770991d06462eddce79c412e8825ef7c5ee1738",
+  "components/jr_display/tests/CMakeLists.txt": "5ed5ad959a04bfc3148c640a2faf5688ebd9545c409bba4159a1449fa3f1afe8",
+  "components/jr_display/tests/test_quiet_vendor.py": "077c5305f688fec47db3ea36b30cc4524ebd2403f326f52ad7cc3eba42d0cd09",
+  "components/jr_display/tests/fixtures/gfx_anim_playback_3_0_2.c": "82227e7d8e65bf7f50e0ae23b86e6dc0cf6d322bfb65626cf8e360e6979bbb5c",
+  "components/jr_display/tests/fixtures/LICENSE.esp_emote_gfx": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+  "scripts/patch-v5-managed.py": "9c9e7d9fb55b6e695aff2494c5e7a9041c7ba7f1a0d1fa7330d4085f6fb7a7b4"
+}
