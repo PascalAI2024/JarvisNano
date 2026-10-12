@@ -471,21 +471,23 @@ The QSPI ceiling itself is 40 MHz × 4 lanes = 20 MB/s: 21.7 ms a frame, ~46 fps
 
 ### t107 B/C bounded follow-up
 
-C1 lift acceptance **FAILED** on the owner's edge-only lift, 2026-10-12;
-touch wake passed with R6 `wake=touch`, `sleeps=4`. N6.12's interrupt probe
-remains pending. The scoped WoM command repair restores elapsed polling at
-100 Hz and fails closed on missing completion/ACK. Host and mutation gates
-pass; repair `343e51c` is OTA-valid/muted with 55.463% headroom. A short timer
-wake proves strict command completion and lift/touch arming on this run;
-physical lift retest remains required. Privacy stays muted.
+C1 lift acceptance **PASSED on `343e51c`**, 2026-10-12: owner edges-only lift,
+no tap; R7 `wake=lift`, `sleeps=2`, lift/touch armed, `lift_fail=none`, API back
+23:03:48.687909Z. The earlier failed lift remains recorded with R6 touch wake
+and `sleeps=4`. The scoped WoM repair restores elapsed polling at 100 Hz and
+fails closed on missing completion/ACK; all 16 host suites and mutations pass,
+OTA-valid/muted, 55.463% headroom. N6.12's electrical interrupt probe remains
+pending. Both opened mirrors show WATCH, so Glance/optical timing is unproven.
+Fresh HOME is ready, muted/unplugged at 77%. Next: manual unmute/voice/re-mute,
+fresh >=45-minute B/repair pair, natural ladder/default4h timer, then C2.
 See [lift failure and repair](docs/evidence/t107-lift-wake-failure.md).
 
 Owner follow-up: C2 offline sources/tests committed `c4681ad`, excluded from
-the image. Seven-step physical/voice checklist awaits `owner ready`. Static
+the image. Seven-step physical/voice session awaits manual unmute. Static
 muted HOME repair `ff18294` passed 15 host suites, 53 compiled runtime faults
 and the target build (55.461% free). B's full 45-minute control passed:
 45->21% SoC, 97.22±8.17mV/h conditional fit, settled 5.882 redraws/s. The device
-now runs frozen `ff18294`, authenticated `ota_0` valid/muted on USB at
+ran frozen `ff18294`, authenticated `ota_0` valid/muted on USB at
 09:49:28Z (22% charging), READY FOR OWNER. Nightstand made 3 redraws/117 completed strip flushes
 in 120.250s with zero errors; forced charging HOME still animates at
 7.57–7.78fps, because charging excludes the quiet path. Settled unplugged HOME
@@ -498,7 +500,7 @@ CHARGE is closed: retain 200mA and issue no new PMIC register write.
 | Item | State | Acceptance |
 |---|---|---|
 | Read-only AXP2101 charge diagnosis | Complete; 03864cc valid/muted | Three complete scans: CC 200mA, CV 4.2V. Net gauge charge 39.27±2.18pp/h; owner ruling retains 200mA; CHARGE closed. 300s timer passed. No PMIC writes. See B report. |
-| Living companion | ff18294 OTA-valid/muted on USB; 15 host suites pass; 55.461% free | USB Nightstand snapshot and sparse redraw proved: 3 redraws/120.250s, zero flush errors. Charging HOME remains animated; quiet HOME proof and >=45-minute pair follow owner session. Earlier forced300s timer passed; first boot DMA1899->819ms, optical=false. Physical Glance/Nightstand, natural default4h wake, optical timing, new-image voice and battery-life acceptance pending. |
+| Living companion | 343e51c OTA-valid/muted; 16 host suites pass; 55.463% free | Edges-only lift PASSED owner/API: R7 lift/sleeps2 at23:03:48.687909Z, no tap. Original failed lift retained. Nightstand dismissal and touch wake accepted. Glance window missed in mirrors; optical timing remains unproven. USB Nightstand sparse redraw proved: 3 redraws/120.250s, zero errors. Voice/manual re-mute, unplugged quiet HOME >=45-minute pair, natural default4h wake and battery-life acceptance pending in that order. |
 | Deck face | Offline source/tests committed c4681ad; excluded from target image | Projection 17 tests/34372 parses, bridge 51 tests. Live-worker and attention captures remain after companion acceptance. |
 
 The charged frozen-image A/B finishes before any new firmware flash. The

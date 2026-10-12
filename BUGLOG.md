@@ -111,7 +111,7 @@ physical first-light and a complete Glance remain unmeasured.
 
 ## t107 C1 companion — 2026-10-12
 
-**Lift wake failed owner acceptance.** Edge-only lift left the screen off;
+**Initial lift wake failed owner acceptance; repair passed.** Edge-only lift left the screen off;
 touch woke it. R6 authenticated readback is `wake=touch`, `sleeps=4`, despite
 `armed.lift=true`. The command poll used a 2 ms delay that truncates to zero
 at 100 Hz and returned success without observed completion/ACK clear.
@@ -120,7 +120,13 @@ failures; 34 production-function checks and all 16 host suites pass.
 Build passes at 55.463% headroom; repair `343e51c` is OTA-valid/muted.
 A short timer wake now confirms strict command completion and lift/touch
 arming, addressing N10.4's historical missing-CmdDone concern on this run.
-Physical cause and lift acceptance remain open until the owner retest.
+Repaired image `343e51c` passes the owner's edges-only lift with no tap.
+R7 confirms `wake=lift`, `sleeps=2`, both sources armed, `lift_fail=none`,
+API back 23:03:48.687909Z. The original failed run is retained. The successful
+retest supports the command-arming repair; it does not measure the interrupt
+waveform or optical latency. Both opened mirrors show WATCH; Glance capture
+was missed. Fresh HOME readback is valid/muted, 77%, unplugged, audio off.
+Owner manual unmute/voice/re-mute precedes drain, default4h timer and C2.
 See [failure evidence](docs/evidence/t107-lift-wake-failure.md).
 
 Muted HOME/WHISPER rendered 5.879 frames/s because the repeating 8fps MUTED clip
@@ -153,6 +159,7 @@ Nightstand/Glance and truthful panel sleep/recovery pass 14 combined host
 suites; target build leaves 55.483% app space. Source `0b9645d` is OTA-valid
 and authenticated muted; its forced300s timer passed with timer cause.
 Matched DREAM/HOME windows completed without a resolved battery saving.
-Physical Nightstand/Glance, optical timing, natural ladder/default4h timer and
+Nightstand dismissal and repaired lift/touch wake have owner/API acceptance;
+complete Glance capture, optical timing, natural ladder/default4h timer and
 new-image voice acceptance remain pending. Ladder timings are retained;
 no energy or projected-life gain is claimed. See [C1 report](docs/evidence/t107-companion.md).

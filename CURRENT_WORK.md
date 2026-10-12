@@ -2,21 +2,24 @@
 
 **Updated:** 2026-10-12 UTC
 
-C1 owner session: Nightstand returned after dismissal; unplugged touch wake
-and tap-to-HOME were observed. The edge-only lift failed: the screen stayed
-off, then touch woke it. R6 confirms `wake=touch`, `sleeps=4` at
-22:33:50.591341Z; that is API return time, not optical latency. Lift remains
-FAILED. A scoped IMU command-handshake repair restores real polling delays
-at 100 Hz and rejects unobserved completion/ACK failure. All 16 host suites
-pass and runtime mutations fail. Build passed with 55.463% headroom; source
-repair `343e51c` is OTA-valid/muted in `ota_1`. A short timer wake confirms
-strict command completion and lift/touch arming. Physical lift retest remains
-pending; the original failure is not explained conclusively. Keep privacy muted.
+C1 lift acceptance **PASSED on `343e51c`**: the owner lifted by the edges,
+with no tap, and it woke. R7 confirms `wake=lift`, `sleeps=2`, lift/touch armed,
+`lift_fail=none`; API returned at 23:03:48.687909Z. Both opened mirrors show
+WATCH, so the Glance window and optical latency remain unproven. The initial
+failed lift stays recorded: screen off until touch, R6 `wake=touch`, `sleeps=4`
+at 22:33:50.591341Z. The bounded command repair restores real polling at
+100 Hz and rejects unconfirmed completion/ACK. All 16 host suites pass,
+runtime mutations fail, build has 55.463% headroom, and the image is valid
+in `ota_1`. Fresh HOME capture/readback at 23:06:46Z: 77%, unplugged, muted,
+all four audio paths off, no lease. Nightstand dismissal and touch wake were
+already accepted. Next: owner manual unmute, one spoken turn, manual re-mute;
+then the fresh >=45-minute B/repair drain pair, natural ladder/default 4h
+timer, then C2. Privacy stays muted until the owner clears it by hand.
 See [lift failure and repair](docs/evidence/t107-lift-wake-failure.md).
 
 Owner follow-up: CHARGE is closed at 200mA with no new PMIC write. The seven-step
-physical/voice session is prepared in `.evidence/t107/OWNER-CHECKLIST.md` and
-waits for `owner ready`. C2's five offline source/test files are committed at
+physical/voice session is active from `.evidence/t107/OWNER-CHECKLIST.md` and
+awaits the owner's manual unmute. C2's five offline source/test files are committed at
 `c4681ad`, still outside the target image. Muted static HOME's repeating clip
 now retains a one-shot with sparse fact refresh, committed `ff18294`. All 15
 host suites pass, 53/53 compiled runtime faults are rejected, and the target

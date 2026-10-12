@@ -1,7 +1,7 @@
 # t107 C1 physical lift failure and bounded repair
 
 Owner observation relayed at 2026-10-12T22:34:07Z: lifting by the edges left
-the screen off; a subsequent touch woke the Nano. **Lift acceptance failed.**
+the screen off; a subsequent touch woke the Nano. **Initial lift acceptance failed.**
 Touch wake passed by owner observation and authenticated wake readback.
 
 R6 PID 26476 recorded first API return at 22:33:50.591341Z, `wake=touch`,
@@ -40,9 +40,10 @@ The threshold remains 100 mg at about 21 Hz. CAL1_H `0x20` correctly selects
 INT1 initially low plus 32 startup blanking samples (about 1.52 s), consistent
 with GPIO21 EXT0 high. The wake coordinator keeps RTC peripheral power on and
 uses actual deep sleep; the touch reset and retained count corroborate sleep.
-Gentle-lift sensitivity, actual interrupt delivery and board routing remain
-unproven alternatives. This is a credible arming defect, **not yet a proven
-explanation of the physical failure**. No threshold or GPIO guess is included.
+At the initial failure checkpoint, gentle-lift sensitivity, actual interrupt
+delivery and board routing remained unproven alternatives. The repaired lift
+retest below supports the arming defect as the cause, without an electrical
+interrupt measurement. No threshold or GPIO guess is included.
 
 N10.4 records an earlier board observation that CmdDone did not appear,
 with either handshake type. This makes a post-OTA arming gate necessary:
@@ -84,5 +85,33 @@ first return or optical latency. The failed probe is preserved as a harness
 error, not presented as a timing pass. The owner watcher tolerates boot 404s.
 Its next first capture uses the existing native RGB565 mirror to reduce
 transfer work; decoding was checked against an opened live clock/rim image.
-Physical retest remains pending.
-Lift remains **FAILED, awaiting repair acceptance**. Privacy stays muted.
+
+## Repaired lift acceptance — PASSED on 343e51c
+
+The owner reports: "lift by the edges with the repaired image WORKED (no tap)."
+R7 was authenticated and running before the controlled sleep. It confirms
+first API return at **2026-10-12T23:03:48.687909Z**, `wake=lift`, `sleeps=2`
+(before sleep: 1), `armed.lift=true`, `armed.touch=true`, `lift_fail=none`.
+Its last unsuccessful API request ended at 23:03:48.450531Z. The watcher
+finished normally after capture at 23:03:55.006024Z; stderr is empty.
+Authenticated capture confirms `ota_1 state=valid`, muted privacy, all four
+audio paths off, no lease, USB/charging absent and 77% battery.
+
+**Physical lift wake passes on `343e51c`.** The earlier failure and its raw
+owner/API evidence remain unchanged. The successful retest supports the
+command-arming repair; no electrical interrupt or sensitivity measurement is
+claimed. [The acceptance receipt](t107-lift-wake-acceptance.json) records both
+outcomes and hashes the private r7 and original failure artifacts.
+
+Both opened r7 mirrors show WATCH. They missed the complete Glance window
+and do not prove its contents or optical wake-to-first-pixel latency. Boot
+instrumentation reports first completed display transfer at 829 ms and first
+Glance-time transfer at 841 ms, measured from the application timer; these
+exclude ROM and remain software proxies. No owner video/frame count was
+supplied. API return time also cannot stand in for optical latency.
+
+At 23:06:46Z, fresh HOME capture/readback confirms valid/muted/unplugged,
+77%, all audio paths off and no operator lease. The owner session continues
+with manual unmute, one spoken turn, then manual re-mute. Only after muted
+readback will the coordinator run the fresh >=45-minute B/repair drain pair,
+the untouched natural ladder/default four-hour timer, then C2 after C1 passes.
