@@ -109,6 +109,20 @@ records init start/end and the first successful color-transfer callback,
 including early callbacks and failed init. It is a boot software proxy;
 physical first-light and a complete Glance remain unmeasured.
 
+## t107 privacy recovery — 2026-10-13
+
+The delayed owner voice turn left privacy restoration unconfirmed during
+23:33–04:44Z. The safe-direction mute watcher completed at 04:44:17Z:
+authenticated privacy true, capture false, mic/ADC/DAC/PA off, OTA valid;
+opened panel mirror has the gold ring. First health was already muted before
+the acknowledged software DISARM, so the receipt does not establish when
+privacy changed or continuous listening during the gap. The 3h32m45s API gap
+is compatible with the natural 14400s timer, rather than the earlier forced
+1800s test. No wake cause/sleep-entry record was captured; follow-up GETs
+timed out. This interval alone neither proves a timer regression nor passes
+the natural default4h gate. Voice remains owner pending; no new drain/timer
+run or firmware change. See [privacy handoff](docs/evidence/t107-privacy-restored.md).
+
 ## t107 C1 companion — 2026-10-12
 
 **Initial lift wake failed owner acceptance; repair passed.** Edge-only lift left the screen off;

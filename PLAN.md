@@ -471,6 +471,15 @@ The QSPI ceiling itself is 40 MHz × 4 lanes = 20 MB/s: 21.7 ms a frame, ~46 fps
 
 ### t107 B/C bounded follow-up
 
+2026-10-13 privacy checkpoint: watcher completed `DONE_MUTED_AND_CAPTURED`
+at 04:44:17Z, authenticated muted/capture off/audio four paths off, gold ring
+visible in the opened panel mirror. The 23:33–04:44Z confirmation gap remains
+recorded. First returned health was already muted before software DISARM.
+The 3h32m45s watcher gap fits the natural 4h timer; wake cause and actual sleep
+entry remain unverified, and follow-up GETs timed out. Default4h acceptance
+stays pending. Voice is parked for the owner; drain and natural run have not
+started. See [privacy handoff](docs/evidence/t107-privacy-restored.md).
+
 C1 lift acceptance **PASSED on `343e51c`**, 2026-10-12: owner edges-only lift,
 no tap; R7 `wake=lift`, `sleeps=2`, lift/touch armed, `lift_fail=none`, API back
 23:03:48.687909Z. The earlier failed lift remains recorded with R6 touch wake
@@ -478,12 +487,13 @@ and `sleeps=4`. The scoped WoM repair restores elapsed polling at 100 Hz and
 fails closed on missing completion/ACK; all 16 host suites and mutations pass,
 OTA-valid/muted, 55.463% headroom. N6.12's electrical interrupt probe remains
 pending. Both opened mirrors show WATCH, so Glance/optical timing is unproven.
-Fresh HOME is ready, muted/unplugged at 77%. Next: manual unmute/voice/re-mute,
+The pre-voice HOME readback was muted/unplugged at 77%. Next, when the owner
+returns: manual unmute/voice/re-mute,
 fresh >=45-minute B/repair pair, natural ladder/default4h timer, then C2.
 See [lift failure and repair](docs/evidence/t107-lift-wake-failure.md).
 
 Owner follow-up: C2 offline sources/tests committed `c4681ad`, excluded from
-the image. Seven-step physical/voice session awaits manual unmute. Static
+the image. Seven-step physical/voice session is parked for the owner. Static
 muted HOME repair `ff18294` passed 15 host suites, 53 compiled runtime faults
 and the target build (55.461% free). B's full 45-minute control passed:
 45->21% SoC, 97.22±8.17mV/h conditional fit, settled 5.882 redraws/s. The device

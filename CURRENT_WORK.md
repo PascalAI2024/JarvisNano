@@ -1,6 +1,19 @@
 # Current work — t107 charged A/B, B diagnosis, then companion
 
-**Updated:** 2026-10-12 UTC
+**Updated:** 2026-10-13 UTC
+
+Privacy recovery is recorded: the mute-on-wake watcher completed
+`DONE_MUTED_AND_CAPTURED` at 04:44:17Z. Authenticated health and cockpit
+confirmed privacy muted, capture stopped and mic/ADC/DAC/PA off; the opened
+panel-submission mirror shows the gold ring. Its first health response was
+already muted before the acknowledged software-mute request. The requested
+23:33–04:44Z interval remains a privacy-confirmation gap; continuous listening
+through that interval is not established. Voice acceptance on `343e51c` is
+parked pending the owner. The 3h32m45s watcher gap fits the natural 4h timer,
+but neither a timer wake nor its sleep-entry time was captured. Follow-up
+GETs at 04:59–05:00Z timed out, so the default4h acceptance remains pending.
+No drain or unattended timer run started. See
+[privacy recovery handoff](docs/evidence/t107-privacy-restored.md).
 
 C1 lift acceptance **PASSED on `343e51c`**: the owner lifted by the edges,
 with no tap, and it woke. R7 confirms `wake=lift`, `sleeps=2`, lift/touch armed,
@@ -12,14 +25,15 @@ at 22:33:50.591341Z. The bounded command repair restores real polling at
 runtime mutations fail, build has 55.463% headroom, and the image is valid
 in `ota_1`. Fresh HOME capture/readback at 23:06:46Z: 77%, unplugged, muted,
 all four audio paths off, no lease. Nightstand dismissal and touch wake were
-already accepted. Next: owner manual unmute, one spoken turn, manual re-mute;
+already accepted. When the owner returns: manual unmute, one spoken turn, re-mute;
 then the fresh >=45-minute B/repair drain pair, natural ladder/default 4h
 timer, then C2. Privacy stays muted until the owner clears it by hand.
 See [lift failure and repair](docs/evidence/t107-lift-wake-failure.md).
 
 Owner follow-up: CHARGE is closed at 200mA with no new PMIC write. The seven-step
-physical/voice session is active from `.evidence/t107/OWNER-CHECKLIST.md` and
-awaits the owner's manual unmute. C2's five offline source/test files are committed at
+physical/voice session from `.evidence/t107/OWNER-CHECKLIST.md` is parked after
+manual unmute and subsequent verified software mute; the spoken turn awaits
+the owner. C2's five offline source/test files are committed at
 `c4681ad`, still outside the target image. Muted static HOME's repeating clip
 now retains a one-shot with sparse fact refresh, committed `ff18294`. All 15
 host suites pass, 53/53 compiled runtime faults are rejected, and the target
