@@ -249,7 +249,7 @@ gotchas and the verification recipe are in [`docs/BUILD.md`](docs/BUILD.md).
   mutation-checked both ways; the rest ladder and session core have their own
   pure-C harness.
 
-## Evidence, Not Theatre
+## Evidence
 
 - A screenshot is the exact submitted RGB565 buffer, **not panel readback**.
 - A playback counter proves PCM reached the codec write seam, **not that a
