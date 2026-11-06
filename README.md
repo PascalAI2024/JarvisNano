@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <img src="images/hero.png" alt="JarvisNano enclosure concept artwork" width="900">
-  <br><em>Enclosure concept artwork. Current device display captures appear below.</em>
+  <img src="docs/assets/jarvisnano-display-capture.png" alt="Two 466 by 466 display frames from JarvisNano: the privacy-muted face and the digital watch peek" width="760">
+  <br><em>Display frames from a running unit, 2026-10-02: the privacy-muted face and the watch peek. These are software framebuffer captures over LAN, not photographs of the panel.</em>
 </p>
 
 <p align="center">
@@ -24,6 +24,26 @@
 
 ---
 
+**What it is.** Firmware, a round-display UI and a set of read-only MCP tools that
+turn the Waveshare ESP32-S3-Touch-AMOLED-1.75C into a voice-first desk companion.
+Voice goes to Gemini Live from the device, the display shows live readings, and
+the microphone is switched off by touch or by turning the unit face-down. It
+targets one board, `esp32s3_touch_amoled_1_75c`, on ESP-IDF 5.5.4.
+
+**Build and flash.** `./scripts/build-v5.sh` builds in the pinned
+`espressif/idf:v5.5.4` Docker image, so a host ESP-IDF install is optional.
+`./scripts/flash-v5.sh` writes the 1.75C over USB the first time, and
+`scripts/jarvisctl.py ota` updates it over Wi-Fi after that.
+Requirements and the verification recipe are in [`docs/BUILD.md`](docs/BUILD.md).
+
+**Status.** Release candidate; hardware acceptance is still open. The host test
+suites are the gate that runs without a device (`scripts/host-tests.sh`). On
+hardware, lift-wake off the cell, a full-power soak read of the playback
+counters, authenticated diagnostics, signed OTA and NVS encryption are not
+closed. [`PLAN.md`](PLAN.md) lists each row and its acceptance test, and
+[`CURRENT_WORK.md`](CURRENT_WORK.md) records the last verified run. No
+completed product, shipped volume or battery or latency figure is claimed here.
+
 ## What It Is
 
 JarvisNano turns the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** into a small,
@@ -37,9 +57,6 @@ run ZeroChat's selected brain, and return 24 kHz speech PCM to the Nano speaker.
 
 The original Waveshare 1.75 and the Seeed XIAO tracks are kept as hardware
 references. The **1.75C is the product and the only supported build target**.
-
-Current implementation and physical acceptance status:
-[`CURRENT_WORK.md`](CURRENT_WORK.md).
 
 ## The Experience
 
@@ -65,22 +82,21 @@ Current implementation and physical acceptance status:
 - Left alone on battery it rests, dims, and finally **deep-sleeps**; lift it or
   tap it and it boots back listening.
 
-<p align="center">
-  <img src="docs/evidence/20260901-ring.png" alt="The ring as shipped: JARVIS, WATCH, WEATHER, STATUS, ACTIVITY" width="900">
-  <br><em>The ring, captured from the panel-submission mirror in one walk (<code>scripts/screens.py</code>), off USB.</em>
-</p>
-
-## Current Display Captures
+## Display captures
 
 <p align="center">
-  <img src="docs/evidence/20261002-live/JarvisNano_live_00.png" alt="Current privacy-muted face, captured from the running device" width="320">
-  <img src="docs/evidence/20261002-live/JarvisNano_watch_00.png" alt="Current digital watch peek, captured from the running device" width="320">
-  <br><em>Captured 2026-10-02 via the paired diagnostic client: actual submitted display pixels, with the microphone muted.</em>
+  <img src="docs/evidence/20260901-ring.png" alt="The five ring stops: JARVIS, WATCH, WEATHER, STATUS, ACTIVITY" width="900">
+  <br><em>The ring, captured in one walk with <code>scripts/screens.py</code> on 2026-09-01.</em>
 </p>
 
-[View the timestamped sampled clips and provenance](docs/evidence/20261002-live/README.md).
-These captures are software framebuffer mirrors. The running binary's exact
-revision and a USB connection were not established during this capture session.
+Every capture in this repository is a software mirror of the pixels the firmware
+submitted to the display, fetched over the paired diagnostic client. A mirror
+shows what the renderer drew; it does not prove what the AMOLED lit, and no
+camera footage of the panel is included. The 2026-10-02 frames above come with
+original pixels, request timestamps and hashes in
+[`docs/evidence/20261002-live/`](docs/evidence/20261002-live/README.md). That
+session did not establish a USB connection or the running binary's exact
+revision.
 
 ## Hardware Used
 
@@ -99,6 +115,18 @@ The C revision has **no TCA9554, PCF85063 RTC, or microSD slot**. Time is
 SNTP-backed. See [`docs/HARDWARE.md`](docs/HARDWARE.md) for the pin-accurate
 capability map and [`docs/reference/power-modes.md`](docs/reference/power-modes.md)
 for what sleeps and how it wakes.
+
+## Enclosure concept
+
+<p align="center">
+  <img src="images/hero.png" alt="Concept render of a JarvisNano enclosure with a round AMOLED and waveform" width="800">
+  <br><em>Concept artwork. This is a render of a proposed enclosure, not a capture of the device.</em>
+</p>
+
+Four enclosure studies (Monolith, Cube, Egg, Radio) with dimensions, part
+assumptions and printable parts are in
+[`hardware/enclosure/`](hardware/enclosure/README.md). They are design work: the
+device in the captures above runs on the bare 1.75C board.
 
 ## One Interaction Grammar
 
@@ -182,7 +210,7 @@ the firmware owns the port). Update it over Wi-Fi instead:
 
 ```bash
 export JARVIS_DEVICE_HOST='<device-ip>'
-python3 scripts/jarvisctl.py ota build/jarvisrobot_v5.bin   # ~30 s, back in ~5 s
+python3 scripts/jarvisctl.py ota build/jarvisrobot_v5.bin
 python3 scripts/jarvisctl.py status                         # exits non-zero when deaf or muted
 python3 scripts/screens.py --out ring.png                   # capture the submitted display pixels
 ```
