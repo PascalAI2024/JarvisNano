@@ -11,9 +11,20 @@
 # runs is worse than no suite, because it looks like coverage. Add new suites
 # HERE, not to a habit.
 #
-# The five suites, in the order they run:
+# The sixteen suites, in the order they run:
 #   jr_display_hud_tests      components/jr_display/tests   procedural renderer
 #   jr_display_shell_tests    components/jr_display/tests   spatial shell
+#   jr_display_companion_tests components/jr_display/tests  portable Rest policy
+#   jr_display_board_tests    components/jr_display/tests   production panel transport
+#   jr_display_quiet_vendor_tests components/jr_display/tests pinned playback and frame retry
+#   jr_main_shell_tests       main/tests/                   production input routing
+#   jr_charge_http_tests      main/tests/                   actual paired charge handler
+#   jr_display_http_tests     main/tests/                   actual transfer timing JSON
+#   jr_companion_main_tests   main/tests/                   actual companion orchestration
+#   jr_companion_integration_tests main/tests/              orchestration to actual renderer
+#   jr_power_sleep_tests      main/tests/                   actual sleep entry coordinator
+#   jr_ota_sleep_fence_tests  main/tests/                   actual OTA admission and restoration
+#   jr_imu_wom_tests          components/jr_imu/tests       actual command/arming handshake
 #   jr_host_tests             host/                         jr_core + jr_dsp + jr_transport
 #   jr_tools_template_tests   components/jr_tools/host      the generated JS template
 #   test_jarvis_desk          scripts/                      the desk CLI (Python)
@@ -21,7 +32,7 @@
 # A suite must run a positive number of tests to pass; "0 Tests" is a failure,
 # and a run in which nothing ran at all exits 2.
 #
-# No C compiler on PATH (a Windows desk)? With Docker present the four C suites
+# No C compiler on PATH (a Windows desk)? With Docker present the five C suites
 # re-run inside the jarvisnano-hosttests image (gcc:14 + cmake + ninja +
 # python3, built from scripts/host-tests.Dockerfile on first use); the Python
 # suite runs natively either way. docs/reference/build-toolchain.md has the
@@ -130,11 +141,52 @@ run_ctest_suite() {  # src bdir name
     finish_c "$name" "$rc" "$out"
 }
 
+run_main_shell_suite() {
+    local py out rc
+    if ! py="$(pick_python)"; then
+        fail "jr_main_shell_tests" "no working python3/python on PATH"; return
+    fi
+    [ $QUIET -eq 1 ] || printf "${DIM}build${NC} jr_main_shell_tests\n"
+    out="$("$py" "$ROOT/main/tests/test_shell_input.py" 2>&1)"; rc=$?
+    finish_c "jr_main_shell_tests" "$rc" "$out"
+}
+
+run_charge_http_suite() {
+    local py out rc
+    if ! py="$(pick_python)"; then
+        fail "jr_charge_http_tests" "no working python3/python on PATH"; return
+    fi
+    [ $QUIET -eq 1 ] || printf "${DIM}build${NC} jr_charge_http_tests\n"
+    out="$("$py" "$ROOT/main/tests/test_charge_http.py" 2>&1)"; rc=$?
+    finish_c "jr_charge_http_tests" "$rc" "$out"
+}
+
+run_production_python_c_suite() { # suite runner
+    local py out rc
+    if ! py="$(pick_python)"; then
+        fail "$1" "no working python3/python on PATH"; return
+    fi
+    out="$("$py" "$ROOT/$2" 2>&1)"; rc=$?
+    finish_c "$1" "$rc" "$out"
+}
+
 run_c_suites() {
     run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build" \
         jr_display_hud_tests "$ROOT/components/jr_display/tests/build/jr_display_hud_tests"
     run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build" \
         jr_display_shell_tests "$ROOT/components/jr_display/tests/build/jr_display_shell_tests"
+    run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build" \
+        jr_display_companion_tests "$ROOT/components/jr_display/tests/build/jr_display_companion_tests"
+    run_production_python_c_suite jr_display_board_tests components/jr_display/tests/test_board.py
+    run_production_python_c_suite jr_display_quiet_vendor_tests components/jr_display/tests/test_quiet_vendor.py
+    run_main_shell_suite
+    run_charge_http_suite
+    run_production_python_c_suite jr_display_http_tests main/tests/test_display_http.py
+    run_production_python_c_suite jr_companion_main_tests main/tests/test_companion_main.py
+    run_production_python_c_suite jr_companion_integration_tests main/tests/test_companion_integration.py
+    run_production_python_c_suite jr_power_sleep_tests main/tests/test_power_sleep.py
+    run_production_python_c_suite jr_ota_sleep_fence_tests main/tests/test_ota_sleep_fence.py
+    run_production_python_c_suite jr_imu_wom_tests components/jr_imu/tests/test_wom.py
     run_cmake_suite "$ROOT/host" "$ROOT/host/build" jr_host_tests "$ROOT/host/build/jr_host_tests"
     run_ctest_suite "$ROOT/components/jr_tools/host" "$ROOT/build-tools-host" jr_tools_template_tests
 }

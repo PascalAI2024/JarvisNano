@@ -46,11 +46,12 @@ static const co5300_lcd_init_cmd_t s_lcd_init_cmds[] = {
     {0x3A, (uint8_t[]){0x55}, 1, 0},
     {0x35, (uint8_t[]){0x00}, 1, 0},
     {0x53, (uint8_t[]){0x20}, 1, 0},
-    {0x51, (uint8_t[]){0xFF}, 1, 0},
+    {0x51, (uint8_t[]){0x00}, 1, 0}, /* dark before init's DISPON */
     {0x63, (uint8_t[]){0xFF}, 1, 0},
     {0x2A, (uint8_t[]){0x00, 0x06, 0x01, 0xD7}, 4, 0},
-    {0x2B, (uint8_t[]){0x00, 0x00, 0x01, 0xD1}, 4, 600},
-    {0x11, NULL, 0, 600},
+    {0x2B, (uint8_t[]){0x00, 0x00, 0x01, 0xD1}, 4, 0},
+    /* CO5300 sleep-out booster settling; reset timing remains vendor-owned. */
+    {0x11, NULL, 0, 120},
     {0x29, NULL, 0, 0},
 };
 
@@ -58,6 +59,16 @@ static StaticSemaphore_t s_lock_buf;
 static SemaphoreHandle_t s_lock;
 static bool s_display_ready;
 static jarvis_board_display_t s_display;
+
+esp_err_t jarvis_board_display_set_sleep(bool sleep)
+{
+    if (!s_display_ready || !s_display.io) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const unsigned opcode = sleep ? 0x10u : 0x11u;
+    return esp_lcd_panel_io_tx_param(s_display.io,
+                                    (0x02u << 24) | (opcode << 8), NULL, 0);
+}
 
 static SemaphoreHandle_t jarvis_board_lock(void)
 {
@@ -141,7 +152,9 @@ esp_err_t jarvis_board_display_get(jarvis_board_display_t *out_display)
                           "esp_lcd_panel_init failed");
         ESP_GOTO_ON_ERROR(esp_lcd_panel_disp_on_off(panel, true), fail_display, TAG,
                           "esp_lcd_panel_disp_on failed");
-        ESP_GOTO_ON_ERROR(esp_lcd_panel_co5300_set_brightness(panel, 100), fail_display, TAG,
+        /* The display owner applies its seeded app cap before the first DMA.
+         * Keep retained/undefined bootstrap pixels dark until that handoff. */
+        ESP_GOTO_ON_ERROR(esp_lcd_panel_co5300_set_brightness(panel, 0), fail_display, TAG,
                           "esp_lcd_panel_co5300_set_brightness failed");
 
         jarvis_board_display_t display = {

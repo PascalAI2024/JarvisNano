@@ -35,11 +35,31 @@ extern "C" {
 #endif
 
 /* Acquire the ES7210/ES8311 codec handles (double-cast, spec §codec-bringup),
- * open ADC (24 kHz, 4-ch, mask 0) then DAC (24 kHz, muted), apply per-channel
- * PGA, create the AEC, allocate the playback ring, and start the feeder task.
+ * validate ADC (24 kHz, 4-ch, mask 0) and DAC (24 kHz, muted), apply gains,
+ * close both for boot privacy, create AEC, allocate the ring, and start the
+ * feeder. Physical unmute restores codec rates/gains before any I/O.
  * Returns ESP_OK when the codec path is up. A degraded return still leaves the
  * ports safe to call (they no-op). */
 esp_err_t jr_audio_init(void);
+
+/* Only the composition root publishes the physical privacy/flip gate. False
+ * closes ADC sampling, clears microphone/reference taps, and feeds text turns
+ * paced silence. It does not interrupt DAC playback. */
+void jr_audio_set_microphone_enabled(bool enabled);
+
+/* Bounded paired shutdown before deep sleep; failure leaves sleep aborted. */
+esp_err_t jr_audio_prepare_sleep(void);
+
+typedef struct {
+    bool microphone_enabled;
+    bool adc_open;
+    bool dac_open;
+    bool pa_on;
+    uint32_t hardware_reads;
+    uint32_t silent_frames;
+    uint32_t failures;
+} jr_audio_power_stats_t;
+void jr_audio_power_stats(jr_audio_power_stats_t *out);
 
 /* The two port factories the composition root injects into the core. Valid
  * after jr_audio_init(). */

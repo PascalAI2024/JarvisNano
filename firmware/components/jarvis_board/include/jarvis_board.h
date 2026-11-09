@@ -20,6 +20,8 @@ typedef struct {
 
 esp_err_t jarvis_board_display_get(jarvis_board_display_t *out_display);
 esp_err_t jarvis_board_set_brightness(uint8_t percent);
+/* Gfx-owner only. Transport acknowledgement; caller owns 120 ms settling. */
+esp_err_t jarvis_board_display_set_sleep(bool sleep);
 
 #ifdef __cplusplus
 }

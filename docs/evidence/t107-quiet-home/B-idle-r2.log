@@ -1,0 +1,14 @@
+<checkout>\.evidence\t107d\B-03864cc-r2-home.png
+{"event": "settle", "image": "B-03864cc-r2", "seconds": 300, "utc": "2026-10-12T05:44:03.428122+00:00"}
+{"event": "window-start", "image": "B-03864cc-r2", "seconds": 2700, "soc": 45, "utc": "2026-10-12T05:49:04.334163+00:00"}
+{"event": "sample", "image": "B-03864cc-r2", "elapsed_s": 0.297, "soc": 45, "mv": 3696, "render_frames": 2642, "utc": "2026-10-12T05:49:04.638068+00:00"}
+{"event": "sample", "image": "B-03864cc-r2", "elapsed_s": 300.266, "soc": 43, "mv": 3687, "render_frames": 4407, "utc": "2026-10-12T05:54:04.598380+00:00"}
+{"event": "sample", "image": "B-03864cc-r2", "elapsed_s": 600.297, "soc": 40, "mv": 3677, "render_frames": 6183, "utc": "2026-10-12T05:59:04.617742+00:00"}
+{"event": "sample", "image": "B-03864cc-r2", "elapsed_s": 900.437, "soc": 37, "mv": 3669, "render_frames": 7948, "utc": "2026-10-12T06:04:04.744027+00:00"}
+{"event": "sample", "image": "B-03864cc-r2", "elapsed_s": 1200.297, "soc": 34, "mv": 3657, "render_frames": 9723, "utc": "2026-10-12T06:09:04.595002+00:00"}
+{"event": "sample", "image": "B-03864cc-r2", "elapsed_s": 1500.422, "soc": 31, "mv": 3652, "render_frames": 11488, "utc": "2026-10-12T06:14:04.710740+00:00"}
+{"event": "sample", "image": "B-03864cc-r2", "elapsed_s": 1800.359, "soc": 28, "mv": 3644, "render_frames": 13263, "utc": "2026-10-12T06:19:04.648244+00:00"}
+{"event": "sample", "image": "B-03864cc-r2", "elapsed_s": 2100.406, "soc": 25, "mv": 3639, "render_frames": 15028, "utc": "2026-10-12T06:24:04.684747+00:00"}
+{"event": "sample", "image": "B-03864cc-r2", "elapsed_s": 2400.25, "soc": 23, "mv": 3630, "render_frames": 16803, "utc": "2026-10-12T06:29:04.520720+00:00"}
+{"event": "sample", "image": "B-03864cc-r2", "elapsed_s": 2700.391, "soc": 21, "mv": 3624, "render_frames": 18568, "utc": "2026-10-12T06:34:04.654267+00:00"}
+{"event": "window-complete", "image": "B-03864cc-r2", "samples": 91, "utc": "2026-10-12T06:34:05.465737+00:00"}

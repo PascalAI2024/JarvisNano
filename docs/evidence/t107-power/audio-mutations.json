@@ -1,0 +1,182 @@
+[
+  {
+    "name": "privacy_adc_ignored",
+    "exit": 6,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:55:test_muted_idle_closes_pair:FAIL: Expected 'adp' Was 'p'",
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:63:test_privacy_keeps_playback_until_tail_drains:FAIL: Expected 'a' Was ''",
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:81:test_muted_playback_opens_only_dac:FAIL: Expected 'DP' Was 'ADP'",
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:89:test_fast_kill_latch_reasserted_on_playback:FAIL: Expected 'P' Was 'AP'",
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:101:test_failed_close_is_truthful_and_retried:FAIL: Expected FALSE Was TRUE",
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:111:test_failed_dac_open_never_asserts_pa:FAIL: Expected 'D' Was 'AD'"
+    ]
+  },
+  {
+    "name": "muted_idle_keeps_dac",
+    "exit": 3,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:55:test_muted_idle_closes_pair:FAIL: Expected 'adp' Was 'ap'",
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:66:test_privacy_keeps_playback_until_tail_drains:FAIL: Expected 'adp' Was 'ap'",
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:102:test_failed_close_is_truthful_and_retried:FAIL: Expected FALSE Was TRUE"
+    ]
+  },
+  {
+    "name": "premature_dac_close",
+    "exit": 4,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:63:test_privacy_keeps_playback_until_tail_drains:FAIL: Expected 'a' Was 'adp'",
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:81:test_muted_playback_opens_only_dac:FAIL: Expected 'DP' Was ''",
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:89:test_fast_kill_latch_reasserted_on_playback:FAIL: Expected 'P' Was 'd'",
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:110:test_failed_dac_open_never_asserts_pa:FAIL: Expected FALSE Was TRUE"
+    ]
+  },
+  {
+    "name": "sleep_gate_ignored",
+    "exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:95:test_sleep_forces_pair_closed:FAIL: Expected 'adp' Was 'dp'"
+    ]
+  },
+  {
+    "name": "pa_never_asserts",
+    "exit": 3,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:63:test_privacy_keeps_playback_until_tail_drains:FAIL: Expected 'a' Was 'ap'",
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:81:test_muted_playback_opens_only_dac:FAIL: Expected 'DP' Was 'Dp'",
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:89:test_fast_kill_latch_reasserted_on_playback:FAIL: Expected 'P' Was ''"
+    ]
+  },
+  {
+    "name": "capture_privacy_bypassed",
+    "exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:119:test_muted_capture_paces_512_zeros_without_hardware:FAIL: Expected 0 Was 1"
+    ]
+  },
+  {
+    "name": "silent_frame_unpaced",
+    "exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:120:test_muted_capture_paces_512_zeros_without_hardware:FAIL: Expected 32 Was 0"
+    ]
+  },
+  {
+    "name": "privacy_during_read_ignored",
+    "exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:134:test_privacy_during_read_discards_before_publication:FAIL: Expected 1 Was 2"
+    ]
+  },
+  {
+    "name": "actual_source_gate_bypassed",
+    "exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:157:test_production_source_boundary_and_pa_latch:FAIL: Expected Non-NULL"
+    ]
+  },
+  {
+    "name": "main_privacy_gate_bypassed",
+    "exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:172:test_production_main_privacy_and_dream_wiring:FAIL: Expected Non-NULL"
+    ]
+  },
+  {
+    "name": "main_inflight_zero_removed",
+    "exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:176:test_production_main_privacy_and_dream_wiring:FAIL: Expected Non-NULL"
+    ]
+  },
+  {
+    "name": "probation_dream_guard_removed",
+    "exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:178:test_production_main_privacy_and_dream_wiring:FAIL: Expected Non-NULL"
+    ]
+  },
+  {
+    "name": "dream_time_not_published",
+    "exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:181:test_production_main_privacy_and_dream_wiring:FAIL: Expected Non-NULL"
+    ]
+  },
+  {
+    "name": "mic_wav_privacy_guard_removed",
+    "exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:187:test_production_http_export_and_bounded_health:FAIL: Expected TRUE Was FALSE"
+    ]
+  },
+  {
+    "name": "pa_latch_sync_removed",
+    "exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:161:test_production_source_boundary_and_pa_latch:FAIL: Expected Non-NULL"
+    ]
+  },
+  {
+    "name": "feeder_inflight_claim_removed",
+    "exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:199:test_production_feeder_ownership_and_reopen_settings:FAIL: Expected Non-NULL"
+    ]
+  },
+  {
+    "name": "adc_gain_restore_removed",
+    "exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:204:test_production_feeder_ownership_and_reopen_settings:FAIL: Expected Non-NULL"
+    ]
+  },
+  {
+    "name": "health_bounds_removed",
+    "exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:192:test_production_http_export_and_bounded_health:FAIL: Expected Non-NULL"
+    ]
+  },
+  {
+    "name": "mic_tap_privacy_guard_removed",
+    "exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:212:test_production_privacy_taps_and_real_codec_close:FAIL: Expected Non-NULL"
+    ]
+  },
+  {
+    "name": "actual_adc_close_removed",
+    "exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:216:test_production_privacy_taps_and_real_codec_close:FAIL: Expected Non-NULL"
+    ]
+  },
+  {
+    "name": "sleep_close_call_removed",
+    "exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-mutations-v1/work/host/test_core.c:219:test_production_privacy_taps_and_real_codec_close:FAIL: Expected Non-NULL"
+    ]
+  }
+]

@@ -1,0 +1,120 @@
+Internal ctest changing into directory: /work/.evidence/t107/build-quiet-display
+UpdateCTestConfiguration  from :/work/.evidence/t107/build-quiet-display/DartConfiguration.tcl
+UpdateCTestConfiguration  from :/work/.evidence/t107/build-quiet-display/DartConfiguration.tcl
+Test project /work/.evidence/t107/build-quiet-display
+Constructing a list of tests
+Done constructing a list of tests
+Updating test list for fixtures
+Added 0 tests to meet fixture requirements
+Checking test dependency graph...
+Checking test dependency graph end
+test 1
+    Start 1: jr_display_board_tests
+
+1: Test command: /usr/bin/python3 "/work/components/jr_display/tests/test_board.py"
+1: Working Directory: /work/.evidence/t107/build-quiet-display
+1: Test timeout computed to be: 10000000
+1: board source tests: 72 checks, 0 failures
+1: board source passed (72 checks)
+1/5 Test #1: jr_display_board_tests ...........   Passed    0.21 sec
+test 2
+    Start 2: jr_display_quiet_vendor_tests
+
+2: Test command: /usr/bin/python3 "/work/components/jr_display/tests/test_quiet_vendor.py"
+2: Working Directory: /work/.evidence/t107/build-quiet-display
+2: Test timeout computed to be: 10000000
+2: vendor quiet tests: 5778 checks, 0 failures
+2: vendor quiet passed (5778 checks)
+2: artifact: .evidence/t107/quiet-display/vendor/ab597f41332ff22843b3b9bac6b64dd857de0065969b2d5a620645bcdcb01db3-managed
+2/5 Test #2: jr_display_quiet_vendor_tests ....   Passed    0.26 sec
+test 3
+    Start 3: jr_display_companion_tests
+
+3: Test command: /work/.evidence/t107/build-quiet-display/jr_display_companion_tests
+3: Working Directory: /work/.evidence/t107/build-quiet-display
+3: Test timeout computed to be: 10000000
+3: companion passed (76940 checks)
+3/5 Test #3: jr_display_companion_tests .......   Passed    0.00 sec
+test 4
+    Start 4: jr_display_hud_tests
+
+4: Test command: /work/.evidence/t107/build-quiet-display/jr_display_hud_tests
+4: Working Directory: /work/.evidence/t107/build-quiet-display
+4: Test timeout computed to be: 10000000
+4:       [agree] painted=9445 answering=19140 (2.03x) worst-gap=9 px
+4: hud_render tests passed (11451 checks)
+4/5 Test #4: jr_display_hud_tests .............   Passed    1.64 sec
+test 5
+    Start 5: jr_display_shell_tests
+
+5: Test command: /work/.evidence/t107/build-quiet-display/jr_display_shell_tests
+5: Working Directory: /work/.evidence/t107/build-quiet-display
+5: Test timeout computed to be: 10000000
+5: face=8 dial blit, anim hidden
+5: face=8 dial blit, anim hidden
+5: face=9 dial blit, anim hidden
+5: dial=8 decode failed (err); anim path
+5: choices: presenting 2 arcs + question
+5: choices: dismissed
+5: face=5 asset=32 bytes frames=7 bucket=0
+5: panel test pattern=3
+5: face=11 dial blit, anim hidden
+5: face=11 dial blit, anim hidden
+5: face=8 dial blit, anim hidden
+5: face=8 dial blit, anim hidden
+5: face=9 dial blit, anim hidden
+5: face=9 dial blit, anim hidden
+5: face=10 dial blit, anim hidden
+5: face=10 dial blit, anim hidden
+5: face=11 dial blit, anim hidden
+5: face=11 dial blit, anim hidden
+5: face=8 dial blit, anim hidden
+5: face=8 dial blit, anim hidden
+5: face=9 dial blit, anim hidden
+5: face=9 dial blit, anim hidden
+5: face=10 dial blit, anim hidden
+5: face=10 dial blit, anim hidden
+5: face=11 dial blit, anim hidden
+5: face=11 dial blit, anim hidden
+5: face=8 dial blit, anim hidden
+5: face=8 dial blit, anim hidden
+5: face=9 dial blit, anim hidden
+5: face=9 dial blit, anim hidden
+5: face=10 dial blit, anim hidden
+5: face=10 dial blit, anim hidden
+5: dial=8 decode failed (err); anim path
+5: dial=8 decode failed (err); anim path
+5: face=8 asset=96 bytes frames=7 bucket=0
+5: face=8 dial blit, anim hidden
+5: face=1 asset=128 bytes frames=7 bucket=0
+5: face=8 dial blit, anim hidden
+5: assets mounted: 0/0 bytes
+5: presenter ready: 466x466, 24 fps, 12-row internal DMA strips
+5: presenter disabled (fail-soft): err
+5: presenter disabled (fail-soft): err
+5: assets mounted: 0/0 bytes
+5: presenter disabled (fail-soft): err
+5: assets mounted: 0/0 bytes
+5: presenter ready: 466x466, 24 fps, 12-row internal DMA strips
+5: assets mounted: 0/0 bytes
+5: presenter disabled (fail-soft): err
+5: assets mounted: 0/0 bytes
+5: presenter ready: 466x466, 24 fps, 12-row internal DMA strips
+5: assets mounted: 0/0 bytes
+5: presenter ready: 466x466, 24 fps, 12-row internal DMA strips
+5: assets mounted: 0/0 bytes
+5: presenter ready: 466x466, 24 fps, 12-row internal DMA strips
+5: assets mounted: 0/0 bytes
+5: presenter ready: 466x466, 24 fps, 12-row internal DMA strips
+5: assets mounted: 0/0 bytes
+5: presenter ready: 466x466, 24 fps, 12-row internal DMA strips
+5: presenter disabled (fail-soft): err
+5: assets mounted: 0/0 bytes
+5: presenter ready: 466x466, 24 fps, 12-row internal DMA strips
+5: panel test pattern=0
+5: all shell tests passed (3563 checks)
+5/5 Test #5: jr_display_shell_tests ...........   Passed    1.29 sec
+
+100% tests passed, 0 tests failed out of 5
+
+Total Test time (real) =   3.44 sec

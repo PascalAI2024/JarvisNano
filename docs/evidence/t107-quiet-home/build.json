@@ -1,0 +1,194 @@
+{
+  "idf": "5.5.4",
+  "command": "./scripts/build-v5.sh",
+  "build_exit": 0,
+  "host_suites": 15,
+  "host_failed": 0,
+  "image_sha256": "60d51bdf6227fa52fc9388f16f3f86ac66915b1b1a3265f626f2c4933eb41682",
+  "bytes": 1868096,
+  "smallest_app_partition_bytes": 4194304,
+  "free_bytes": 2326208,
+  "free_percent": 55.461,
+  "build_head": "c4681adfbb0dbdd5645ad751ddceb8800d3085e6",
+  "project_version": "1",
+  "source_files": {
+    "components/jr_core/include/jr_core/mood.h": {
+      "worktree_sha256": "5ed09e374269483d77ad59e2b5c6d7bc0800a2eab56718b5f1c766247cd8b618",
+      "lf_sha256": "d87e4c56d36a19b52527558b4a0d063376cbd28e11a6eca13afc402ee9d44878"
+    },
+    "components/jr_core/src/mood.c": {
+      "worktree_sha256": "a8a0a55d7f4b30ca7bebfa15441084b916807608f90e25fc2afcbeeb4dba5894",
+      "lf_sha256": "ed7fff287fc2371eb2bcb828100a1a21a80f1025cad0567b0673d22111d6a04a"
+    },
+    "components/jr_display/CMakeLists.txt": {
+      "worktree_sha256": "7827e88b64b06e4db00b33c35d7d8199b225cc4e32876e0148dc550fed89d31f",
+      "lf_sha256": "77b78e1bea5f589cb43374f59a0129c291c930638d39ef7234d6777857b8a2c1"
+    },
+    "components/jr_display/include/jr_display/companion.h": {
+      "worktree_sha256": "4db78fdf4da0670c25c6eb14afcc237743e3aba95948dc78b0ebb42f88eef429",
+      "lf_sha256": "4db78fdf4da0670c25c6eb14afcc237743e3aba95948dc78b0ebb42f88eef429"
+    },
+    "components/jr_display/include/jr_display/jr_display.h": {
+      "worktree_sha256": "2b84c018d2b82731d9c1b169479b759c79d883db4eef126ffd446c69a9574901",
+      "lf_sha256": "f1d7de9bc525b88e99b867bdd78ebb835a1269bc650b5494d885b59bb1de031a"
+    },
+    "components/jr_display/src/companion.c": {
+      "worktree_sha256": "83b5c7772d3b8176f711043c589f4bfaccb5b9b277652410654755804ce04260",
+      "lf_sha256": "83b5c7772d3b8176f711043c589f4bfaccb5b9b277652410654755804ce04260"
+    },
+    "components/jr_display/src/jr_display.c": {
+      "worktree_sha256": "5b9d54bd530dd3ac91a59bc038076f8f104ef72ffb2199c599511c9833de4010",
+      "lf_sha256": "5b9d54bd530dd3ac91a59bc038076f8f104ef72ffb2199c599511c9833de4010"
+    },
+    "components/jr_display/tests/CMakeLists.txt": {
+      "worktree_sha256": "5ed5ad959a04bfc3148c640a2faf5688ebd9545c409bba4159a1449fa3f1afe8",
+      "lf_sha256": "493b9366853e107c743cc3bac113b5c291471d4202a1b3725627f18ca53b869e"
+    },
+    "components/jr_display/tests/fixtures/LICENSE.esp_emote_gfx": {
+      "worktree_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "lf_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    "components/jr_display/tests/fixtures/gfx_anim_playback_3_0_2.c": {
+      "worktree_sha256": "82227e7d8e65bf7f50e0ae23b86e6dc0cf6d322bfb65626cf8e360e6979bbb5c",
+      "lf_sha256": "575c7d92253fefcd8e9e2970903f13550b3468d9af9669fe75a06a1d4e419987"
+    },
+    "components/jr_display/tests/probe/probe.c": {
+      "worktree_sha256": "3c4627a283ed7e3995c5deb5ce6b0c9f6b49057d7f6c6967e945e9a274ba088e",
+      "lf_sha256": "92d534c3a95363a3423d596767ba4441abcd061e838404a69dcb00d0088181c7"
+    },
+    "components/jr_display/tests/probe/stubs/esp_lcd_panel_ops.h": {
+      "worktree_sha256": "78fa8f397898efdcdf94ff2c584a09b3904f469ed8ed304739ec7e932d2b565e",
+      "lf_sha256": "4dc4c388ac204f0b4057bbd2c180d6879395f7ac1fb43ac5dadef054f19d1754"
+    },
+    "components/jr_display/tests/probe/stubs/idf_stubs.inc": {
+      "worktree_sha256": "5dad7d7de648f6e232e12d112c2eff8be870b1732c4ed801e60a2d24341f97aa",
+      "lf_sha256": "5dad7d7de648f6e232e12d112c2eff8be870b1732c4ed801e60a2d24341f97aa"
+    },
+    "components/jr_display/tests/probe/stubs/jarvis_board.h": {
+      "worktree_sha256": "fbd90dd2b15cbe2e5d0ce7517400837e00ddbb985c836f9c991c4a5842bbc810",
+      "lf_sha256": "f50eff0b11b534b0225e11bd6fd0212d40d84f82974951003ed57847754bbbe0"
+    },
+    "components/jr_display/tests/test_board.py": {
+      "worktree_sha256": "a4a809ac04a9284c03ff68ceb83f56e58df49c1d10e103f1e04cd277c255394f",
+      "lf_sha256": "a4a809ac04a9284c03ff68ceb83f56e58df49c1d10e103f1e04cd277c255394f"
+    },
+    "components/jr_display/tests/test_companion.c": {
+      "worktree_sha256": "3dcd393e8c1ca029a54259d0bfd0120acfa9779d045bce7df8f31a76e19d57db",
+      "lf_sha256": "3dcd393e8c1ca029a54259d0bfd0120acfa9779d045bce7df8f31a76e19d57db"
+    },
+    "components/jr_display/tests/test_quiet_vendor.py": {
+      "worktree_sha256": "077c5305f688fec47db3ea36b30cc4524ebd2403f326f52ad7cc3eba42d0cd09",
+      "lf_sha256": "077c5305f688fec47db3ea36b30cc4524ebd2403f326f52ad7cc3eba42d0cd09"
+    },
+    "components/jr_display/tests/test_shell.c": {
+      "worktree_sha256": "c8f5e3fc2777691041b45c6b2770991d06462eddce79c412e8825ef7c5ee1738",
+      "lf_sha256": "c8f5e3fc2777691041b45c6b2770991d06462eddce79c412e8825ef7c5ee1738"
+    },
+    "firmware/components/jarvis_board/include/jarvis_board.h": {
+      "worktree_sha256": "a1774579441a6bfdae34c60b15f3de967bb2b6c9e379fffbabd104a5323cf1d8",
+      "lf_sha256": "a5f26e180d19d24bedf9dc4924a67d341958f0ac3f9e12d6c924a821062c1838"
+    },
+    "firmware/components/jarvis_board/src/jarvis_board.c": {
+      "worktree_sha256": "3ff7d25641fe7cddc4607d305d23472b2c6ac1c31ec59a594fcacc21eb95cf34",
+      "lf_sha256": "4eba037deee866171cd8526d62615be7462f7cd7728f58d7aa126174357ecfda"
+    },
+    "host/fakes/power_app.h": {
+      "worktree_sha256": "5da0870c4842e0add3edb1d1c7e7230a18bb3c2525ce7ff287d23e6ea9e6a01c",
+      "lf_sha256": "5da0870c4842e0add3edb1d1c7e7230a18bb3c2525ce7ff287d23e6ea9e6a01c"
+    },
+    "host/test_audio_power.c": {
+      "worktree_sha256": "35252fd47cd66b81e1d2d2c6f89d3961109a3127ef28d3f664cba7afaff9ccb1",
+      "lf_sha256": "c15786a2d728a9a003663a92a051afecdb3aa0f97d0a754e1b35565308291689"
+    },
+    "host/test_mood.c": {
+      "worktree_sha256": "dfb22b06158da624b72e5465b1523084be2edb96604f773c939c075759db57b6",
+      "lf_sha256": "0bf5965ca95896bf41e0ec4363394bc543872a77c4e36fab89c2f85a3f593823"
+    },
+    "main/CMakeLists.txt": {
+      "worktree_sha256": "9d93e9a0efb15534a09581f531a6ba3dfa5c2588d929e9312a50e75ab3d5f3b0",
+      "lf_sha256": "232916ee8cd2d77331b01a5905e92a7d9b9f762f07b31d7dfab2005f694004bd"
+    },
+    "main/app.h": {
+      "worktree_sha256": "c8b559bf6de156e6560582c6ef2e80920293d1bf99add9a94e4876e29671aece",
+      "lf_sha256": "a8ce1d53a0e667bc1d4e8d9a8b0c14997f3266d40c8a74c444ff735841d66deb"
+    },
+    "main/http_routes.c": {
+      "worktree_sha256": "cbc1ca2955fa32bdf79672d40cf0084b1680e56e63f2be00bce3706456be0ffa",
+      "lf_sha256": "ab45b15cedc268a1d346e9048cbefc6f572413551b5636aebb1a7e4f55f5b16b"
+    },
+    "main/main.c": {
+      "worktree_sha256": "748b06e7f1944bd429580901f70331f78f3f1a698d6089e4e4e49362db85a84a",
+      "lf_sha256": "1227ee232f1ea1e232cc9a6d2a098bead71f433d84311ef5ccad8933a1eb1586"
+    },
+    "main/power.c": {
+      "worktree_sha256": "0e5bb6560dd4d07a769d8ab4e9ece94990cd376d25d140edf9a61bccd49757da",
+      "lf_sha256": "e0508490596f4fda9785eb5137757e2655c1bc2ffadef24b7b6637b3902593ab"
+    },
+    "main/tests/test_companion_integration.c.in": {
+      "worktree_sha256": "784d475f4750f2bec2a8c94df4c84309d644573568704abbd8afe5d545c0d40e",
+      "lf_sha256": "784d475f4750f2bec2a8c94df4c84309d644573568704abbd8afe5d545c0d40e"
+    },
+    "main/tests/test_companion_integration.py": {
+      "worktree_sha256": "e251d8ade0d96deb8f8cb122053144f7f8e0d2907a0857b9b1ef4e024a87c84d",
+      "lf_sha256": "e251d8ade0d96deb8f8cb122053144f7f8e0d2907a0857b9b1ef4e024a87c84d"
+    },
+    "main/tests/test_companion_main.c.in": {
+      "worktree_sha256": "53f5d4c9546a70b06eaf19daa9950026b3105ccbc751db720930888855c9d0e7",
+      "lf_sha256": "53f5d4c9546a70b06eaf19daa9950026b3105ccbc751db720930888855c9d0e7"
+    },
+    "main/tests/test_companion_main.py": {
+      "worktree_sha256": "14e891c60171c9f6d7f5cc822294d85803c0d24336d79acce47435f2b0b73235",
+      "lf_sha256": "14e891c60171c9f6d7f5cc822294d85803c0d24336d79acce47435f2b0b73235"
+    },
+    "main/tests/test_display_http.c.in": {
+      "worktree_sha256": "9de6d34a2db75432b3a71940c761e34cb532cef7951d1820b150c5ded13c5cdc",
+      "lf_sha256": "9de6d34a2db75432b3a71940c761e34cb532cef7951d1820b150c5ded13c5cdc"
+    },
+    "main/tests/test_display_http.py": {
+      "worktree_sha256": "bbad380aada3d7e8901473cef47ee4b50a824057b240d65b2f299b7471fce725",
+      "lf_sha256": "bbad380aada3d7e8901473cef47ee4b50a824057b240d65b2f299b7471fce725"
+    },
+    "main/tests/test_ota_sleep_fence.c.in": {
+      "worktree_sha256": "36f1a3f42961b530d57b6dbbbf9ecf2ed4323e44a0f212803931196ca2769f38",
+      "lf_sha256": "36f1a3f42961b530d57b6dbbbf9ecf2ed4323e44a0f212803931196ca2769f38"
+    },
+    "main/tests/test_ota_sleep_fence.py": {
+      "worktree_sha256": "d66d305ef1893270a146d813b0c9f53f2673b4c3dcc3925ced4318ed9e3abe4e",
+      "lf_sha256": "d66d305ef1893270a146d813b0c9f53f2673b4c3dcc3925ced4318ed9e3abe4e"
+    },
+    "main/tests/test_power_sleep.c.in": {
+      "worktree_sha256": "f6fb249c411a75809ddef885c258dd87dcb2b0c152b1357c291f05a7287648e2",
+      "lf_sha256": "f6fb249c411a75809ddef885c258dd87dcb2b0c152b1357c291f05a7287648e2"
+    },
+    "main/tests/test_power_sleep.py": {
+      "worktree_sha256": "c9acc820038ad4899ffb2d0ff2abfdcc618b7dab41584b14d908b20cb835c0f1",
+      "lf_sha256": "c9acc820038ad4899ffb2d0ff2abfdcc618b7dab41584b14d908b20cb835c0f1"
+    },
+    "main/tests/test_shell_input.py": {
+      "worktree_sha256": "58302c7a671fd94a75a65e3188be6fd18da1bd0162b883a23bdf3ea88f932384",
+      "lf_sha256": "58302c7a671fd94a75a65e3188be6fd18da1bd0162b883a23bdf3ea88f932384"
+    },
+    "scripts/host-tests.sh": {
+      "worktree_sha256": "1afe187a6f1a07e9280cca832556443ebb1c1f3631e89f03384c64951a16bece",
+      "lf_sha256": "1afe187a6f1a07e9280cca832556443ebb1c1f3631e89f03384c64951a16bece"
+    },
+    "scripts/patch-v5-managed.py": {
+      "worktree_sha256": "9c9e7d9fb55b6e695aff2494c5e7a9041c7ba7f1a0d1fa7330d4085f6fb7a7b4",
+      "lf_sha256": "f3fcf7028662a5ad8fb2d536c3ceacc56ea4826cc4406ab66cfa56f02a8138e6"
+    }
+  },
+  "source_binding": "Built from frozen working-tree contents before explicit-path source commit. Git worktree path is not mounted as a repository inside the container; project version is not a remote source identity.",
+  "c2": "Offline source committed c4681ad; excluded from target SRCS and no target runtime references.",
+  "source_commit": "ff1829473ddbdae979b9129376b9d1d767222ed1",
+  "c2_exclusion": {
+    "cmake_srcs": [
+      "main.c",
+      "http_routes.c",
+      "power.c",
+      "device_tools.c"
+    ],
+    "elf_symbols_checked": true,
+    "deck_projection_symbols": 0,
+    "deck_nano_symbols": 0
+  }
+}

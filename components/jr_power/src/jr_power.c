@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * See jr_power.h. Register access is verbatim from
- * firmware/components/jarvis_pmic/src/jarvis_pmic.c. No rail configuration;
- * the one write beyond telemetry is jr_power_off(), the PMIC's soft power-off.
+ * firmware/components/jarvis_pmic/src/jarvis_pmic.c. No charge/rail configuration;
+ * existing detection, PKEY IRQ setup/ack and explicit soft power-off writes
+ * remain. The fixed charge diagnostic adds reads only.
  */
 #include "jr_power/jr_power.h"
 
@@ -50,6 +51,10 @@
 #define AXP2101_BAT_DET_ENABLE      (1u << 0)
 
 #define AXP2101_I2C_TIMEOUT_MS  100
+/* At most ONE diagnostic burst after PKEY/battery per pass. Do not add seven
+ * 100 ms timeouts to the power-key polling interval on a broken bus. */
+#define POWER_CHARGE_TIMEOUT_MS 20
+#define POWER_CHARGE_PERIOD_MS  5000
 
 /* USB/charging edges are visible product events; the official C-board example
  * samples at 1 Hz. This remains negligible I2C load while keeping feedback
@@ -73,6 +78,11 @@ static bool s_ext_stack;
 
 static jr_power_t s_snap;
 static int64_t    s_snap_us;
+static jr_power_charge_t s_charge_snap;
+static jr_power_charge_t s_charge_work; /* sampler-owned; no I2C under cache lock */
+static bool s_charge_active, s_charge_pending;
+static size_t s_charge_next_burst;
+static uint64_t s_charge_next_start_ms;
 static SemaphoreHandle_t s_snap_lock;
 static StaticSemaphore_t s_snap_lock_buf;
 
@@ -82,6 +92,8 @@ __attribute__((constructor))
 static void power_lock_ctor(void)
 {
     s_snap_lock = xSemaphoreCreateMutexStatic(&s_snap_lock_buf);
+    jr_power_charge_reset(&s_charge_snap);
+    jr_power_charge_reset(&s_charge_work);
 }
 
 /* Burst read of `len` consecutive registers in ONE transaction; the AXP2101
@@ -221,10 +233,54 @@ static bool power_sample(jr_power_t *s)
     return true;
 }
 
+static bool power_charge_publish(void)
+{
+    if (xSemaphoreTake(s_snap_lock, 0) != pdTRUE) { return false; }
+    s_charge_snap = s_charge_work;
+    xSemaphoreGive(s_snap_lock);
+    s_charge_pending = false;
+    return true;
+}
+
+static void power_charge_step(void)
+{
+    /* Retry a contended publication without reading or waiting on the bus.
+     * The stored completion/read times survive publication delay unchanged. */
+    if (s_charge_pending && !power_charge_publish()) { return; }
+    uint64_t now_ms = (uint64_t)esp_timer_get_time() / 1000u;
+    if (!s_charge_active) {
+        if (now_ms < s_charge_next_start_ms) { return; }
+        jr_power_charge_begin(&s_charge_work, now_ms);
+        s_charge_active = true;
+        s_charge_next_burst = 0;
+        s_charge_next_start_ms = now_ms + POWER_CHARGE_PERIOD_MS;
+    }
+    const jr_power_charge_burst_t *burst =
+        jr_power_charge_burst(s_charge_next_burst);
+    uint8_t values[5] = {0}; /* largest fixed burst; no allocation/request input */
+    const esp_err_t err = i2c_master_transmit_receive(s_dev, &burst->address, 1,
+                         values, burst->count, POWER_CHARGE_TIMEOUT_MS);
+    now_ms = (uint64_t)esp_timer_get_time() / 1000u;
+    for (size_t i = 0; i < burst->count; ++i) {
+        jr_power_charge_record(&s_charge_work, burst->first_index + i,
+                                values[i], err, now_ms);
+    }
+    if (++s_charge_next_burst == JR_POWER_CHARGE_BURST_COUNT) {
+        jr_power_charge_finish(&s_charge_work, now_ms);
+        s_charge_active = false;
+        s_charge_pending = true;
+        (void)power_charge_publish();
+    }
+}
+
 static void power_task(void *arg)
 {
     (void)arg;
     uint32_t seq = 0;
+    /* A stop may interrupt a batch. Start a fresh one on restart; never
+     * publish that partial attempt as a completed register snapshot. */
+    s_charge_active = s_charge_pending = false;
+    s_charge_next_start_ms = 0;
 
     uint32_t pass = 0;
     while (s_run) {
@@ -255,6 +311,7 @@ static void power_task(void *arg)
                 }
             }
         }
+        power_charge_step();
         vTaskDelay(pdMS_TO_TICKS(POWER_PKEY_POLL_MS));
     }
 
@@ -331,6 +388,21 @@ esp_err_t jr_power_read(jr_power_t *out)
         out->age_ms = (uint32_t)(age > 0 ? age / 1000 : 0);
     }
     xSemaphoreGive(s_snap_lock);
+    return have ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+esp_err_t jr_power_charge_read(jr_power_charge_t *out)
+{
+    if (!out) { return ESP_ERR_INVALID_ARG; }
+    jr_power_charge_reset(out);
+    if (!s_snap_lock) { return ESP_ERR_INVALID_STATE; }
+    if (xSemaphoreTake(s_snap_lock, 0) != pdTRUE) { return ESP_ERR_TIMEOUT; }
+    const bool have = s_charge_snap.complete;
+    if (have) { *out = s_charge_snap; }
+    xSemaphoreGive(s_snap_lock);
+    if (have) {
+        jr_power_charge_age(out, (uint64_t)esp_timer_get_time() / 1000u);
+    }
     return have ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 

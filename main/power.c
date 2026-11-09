@@ -8,7 +8,11 @@
  * wake sources, and the probation guard that keeps a sleep from rolling an
  * update back. Split out of main.c on 2026-09-02 with no behavior change.
  */
+#ifdef JR_POWER_HOST_TEST
+#include "power_app.h"
+#else
 #include "app.h"
+#endif
 
 static const char *TAG = "jarvis_v5";
 
@@ -27,6 +31,9 @@ static const char *TAG = "jarvis_v5";
 #define SLEEP_WAKE_TOUCH_GPIO  GPIO_NUM_11
 #define SLEEP_WOM_MG           100U
 #define SLEEP_ARMED_TIMER      4U
+/* Two nominal 1 Hz cache publications. A failed/delayed sampler is not proof
+ * USB is absent. This bounds publication age, not the earlier STATUS1 read. */
+#define SLEEP_POWER_MAX_AGE_MS 2000U
 RTC_DATA_ATTR uint32_t s_rtc_sleep_magic;
 RTC_DATA_ATTR uint32_t s_rtc_sleeps;
 RTC_DATA_ATTR uint8_t  s_rtc_was_listening;
@@ -86,6 +93,53 @@ bool image_in_probation(void)
            st == ESP_OTA_IMG_PENDING_VERIFY;
 }
 
+static bool sleep_usb_absence_known(void)
+{
+    jr_power_t power = {0};
+    const esp_err_t err = jr_power_read(&power); /* cache only; no caller I2C */
+    if (err != ESP_OK || power.sample_seq == 0U ||
+        power.age_ms > SLEEP_POWER_MAX_AGE_MS || power.usb_present) {
+        ESP_LOGW(TAG, "deep sleep refused: USB/power cache err=%s seq=%u age=%u USB=%d",
+                 esp_err_to_name(err), (unsigned)power.sample_seq,
+                 (unsigned)power.age_ms, power.usb_present);
+        return false;
+    }
+    return true;
+}
+
+static bool sleep_owner_active(void)
+{
+    const bool updating = atomic_load(&s_ota_active);
+    const bool leased = operator_lease_active(
+        (uint32_t)(esp_timer_get_time() / 1000));
+    if (updating || leased) {
+        ESP_LOGW(TAG, "deep sleep refused: OTA=%d operator lease=%d",
+                 updating, leased);
+        return true;
+    }
+    return false;
+}
+
+static void sleep_entry_cancel(bool restore_panel)
+{
+    const esp_err_t err = esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "deep sleep timer cleanup: %s", esp_err_to_name(err));
+    }
+    if (restore_panel) {
+        /* Only gfx may touch the panel. This request supersedes a pending or
+         * completed off; timeout keeps us awake, without claiming recovery. */
+        jr_display_panel_on_request();
+        for (int i = 0; i < 30 && !jr_display_panel_is_on(); ++i) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        if (!jr_display_panel_is_on()) {
+            ESP_LOGW(TAG, "deep sleep refused: panel recovery unconfirmed");
+        }
+    }
+    atomic_store(&s_sleep_force, false);
+}
+
 void enter_deep_sleep(const char *why, uint32_t timer_s)
 {
     /* A deep sleep is a reboot to the bootloader, and a freshly flashed image
@@ -98,25 +152,77 @@ void enter_deep_sleep(const char *why, uint32_t timer_s)
         atomic_store(&s_sleep_force, false);
         return;
     }
+    /* Applies to forced entry too, including an OTA's borrowed raw lease. */
+    if (sleep_owner_active()) {
+        atomic_store(&s_sleep_force, false);
+        return;
+    }
+    /* The USB rule applies even to the forced debug path. */
+    if (!sleep_usb_absence_known()) {
+        atomic_store(&s_sleep_force, false);
+        return;
+    }
+    const esp_err_t timer_err =
+        esp_sleep_enable_timer_wakeup((uint64_t)timer_s * 1000000ULL);
+    if (timer_err != ESP_OK) {
+        ESP_LOGW(TAG, "deep sleep refused: timer arm: %s",
+                 esp_err_to_name(timer_err));
+        sleep_entry_cancel(false);
+        return;
+    }
     ESP_LOGI(TAG, "deep sleep: %s (timer %u s)", why, (unsigned)timer_s);
-    s_rtc_sleep_magic = SLEEP_RTC_MAGIC;
-    s_rtc_sleeps++;
-    s_rtc_was_listening = !atomic_load(&s_voice_privacy_paused);
-    s_rtc_armed = SLEEP_ARMED_TIMER;
     jr_display_caption_set("SLEEPING - LIFT TO WAKE");
     vTaskDelay(pdMS_TO_TICKS(1200));
 
+    jr_display_panel_off_request();
+    for (int i = 0; i < 30 && !jr_display_panel_is_off(); ++i) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (!jr_display_panel_is_off()) {
+        ESP_LOGW(TAG, "deep sleep refused: panel off unconfirmed");
+        sleep_entry_cancel(true);
+        return;
+    }
+    /* Claims/renewals publish under this same lock. Retain it through sleep:
+     * an unlocked final check would still race claims during audio/IMU work.
+     * No lock is held across the caption or asynchronous panel hand-off. */
+    if (s_brain_lock == NULL ||
+        xSemaphoreTake(s_brain_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGW(TAG, "deep sleep refused: ownership admission unavailable");
+        sleep_entry_cancel(true);
+        return;
+    }
+    if (sleep_owner_active()) {
+        xSemaphoreGive(s_brain_lock);
+        sleep_entry_cancel(true);
+        return;
+    }
+    /* Final cache observation before irreversible audio/IMU preparation.
+     * A later physical plug can still fall between this observation and
+     * sleep; the cache cannot prove instantaneous hardware absence. */
+    if (!sleep_usb_absence_known()) {
+        xSemaphoreGive(s_brain_lock);
+        sleep_entry_cancel(true);
+        return;
+    }
+    /* Deep sleep stops the S3, not the external codecs or speaker amp.
+     * Successful quiescence latches sleeping: all recoverable refusals must
+     * precede it. Its own failure restores audio state and leaves us awake. */
+    const esp_err_t audio_err = jr_audio_prepare_sleep();
+    if (audio_err != ESP_OK) {
+        ESP_LOGW(TAG, "deep sleep refused: audio shutdown: %s",
+                 esp_err_to_name(audio_err));
+        xSemaphoreGive(s_brain_lock);
+        sleep_entry_cancel(true);
+        return;
+    }
+    uint8_t armed = SLEEP_ARMED_TIMER;
     /* The sampler must leave the bus before the wake engine is written. */
     jr_imu_stop();
     vTaskDelay(pdMS_TO_TICKS(80));
     const bool lift = jr_imu_arm_wake_on_motion(SLEEP_WOM_MG) == ESP_OK;
     if (!lift) {
-        s_rtc_armed |= SLEEP_LIFT_ARM_FAILED;
-    }
-
-    jr_display_panel_off_request();
-    for (int i = 0; i < 30 && !jr_display_panel_is_off(); ++i) {
-        vTaskDelay(pdMS_TO_TICKS(20));
+        armed |= SLEEP_LIFT_ARM_FAILED;
     }
 
     if (lift) {
@@ -127,10 +233,10 @@ void enter_deep_sleep(const char *why, uint32_t timer_s)
         vTaskDelay(pdMS_TO_TICKS(5));
         if (rtc_gpio_get_level(SLEEP_WAKE_IMU_GPIO) == 0) {
             if (esp_sleep_enable_ext0_wakeup(SLEEP_WAKE_IMU_GPIO, 1) == ESP_OK) {
-                s_rtc_armed |= SLEEP_ARMED_LIFT;
+                armed |= SLEEP_ARMED_LIFT;
             }
         } else {
-            s_rtc_armed |= SLEEP_LIFT_LINE_HIGH;
+            armed |= SLEEP_LIFT_LINE_HIGH;
             ESP_LOGW(TAG, "deep sleep: INT1 already high, no lift wake");
         }
     }
@@ -142,15 +248,19 @@ void enter_deep_sleep(const char *why, uint32_t timer_s)
     if (rtc_gpio_get_level(SLEEP_WAKE_TOUCH_GPIO) != 0) {
         if (esp_sleep_enable_ext1_wakeup_io(1ULL << SLEEP_WAKE_TOUCH_GPIO,
                                             ESP_EXT1_WAKEUP_ANY_LOW) == ESP_OK) {
-            s_rtc_armed |= SLEEP_ARMED_TOUCH;
+            armed |= SLEEP_ARMED_TOUCH;
         }
     } else {
         ESP_LOGW(TAG, "deep sleep: touch INT already low, no touch wake");
     }
     (void)esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
-    (void)esp_sleep_enable_timer_wakeup((uint64_t)timer_s * 1000000ULL);
     ESP_LOGI(TAG, "deep sleep: armed lift=%d touch=%d timer=%u s",
-             (s_rtc_armed & SLEEP_ARMED_LIFT) != 0U,
-             (s_rtc_armed & SLEEP_ARMED_TOUCH) != 0U, (unsigned)timer_s);
+             (armed & SLEEP_ARMED_LIFT) != 0U,
+             (armed & SLEEP_ARMED_TOUCH) != 0U, (unsigned)timer_s);
+    /* A refused entry must not overwrite the previous RTC sleep history. */
+    s_rtc_sleep_magic = SLEEP_RTC_MAGIC;
+    s_rtc_sleeps++;
+    s_rtc_was_listening = !atomic_load(&s_voice_privacy_paused);
+    s_rtc_armed = armed;
     esp_deep_sleep_start();
 }

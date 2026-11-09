@@ -1,0 +1,69 @@
+black_clock: build=0 test=1
+FAIL test_dream_glass_is_black_clock_and_intact_rims:3003: only clock pixels differ from the original privacy/battery rims (212260)
+FAIL test_dream_glass_is_black_clock_and_intact_rims:3004: both rims and dim clock are present (3006/0)
+FAIL test_dream_glass_is_black_clock_and_intact_rims:3005: DREAM is more than 90 percent black (0/217156)
+FAIL test_dream_glass_is_black_clock_and_intact_rims:3013: unknown mark replaces prior time pixels
+4 failure(s) of 854 checks
+stop_emote: build=0 test=1
+FAIL test_dream_stops_emote_and_refreshes_only_for_real_changes:3023: emote stops and hides
+FAIL test_dream_stops_emote_and_refreshes_only_for_real_changes:3029: seconds neither refresh nor restop emote
+2 failure(s) of 854 checks
+minute_cadence: build=0 test=1
+FAIL test_dream_intent_preserves_env_and_ignores_unchanged_publish:2897: unchanged publishers/seconds do not wake DREAM (1)
+FAIL test_dream_intent_preserves_env_and_ignores_unchanged_publish:2900: tilt cannot animate the DREAM rim
+FAIL test_dream_intent_preserves_env_and_ignores_unchanged_publish:2902: minute change wakes presenter
+FAIL test_dream_intent_preserves_env_and_ignores_unchanged_publish:2904: battery change wakes presenter
+FAIL test_dream_stops_emote_and_refreshes_only_for_real_changes:3029: seconds neither refresh nor restop emote
+FAIL test_dream_stops_emote_and_refreshes_only_for_real_changes:3032: tilt leaves DREAM static
+FAIL test_dream_stops_emote_and_refreshes_only_for_real_changes:3035: minute creates one fresh frame
+FAIL test_dream_stops_emote_and_refreshes_only_for_real_changes:3038: battery creates one fresh frame
+8 failure(s) of 854 checks
+foreground_caption: build=0 test=1
+FAIL test_dream_never_hides_foreground_or_ota:2926: foreground remains lit: DONE
+FAIL test_dream_never_hides_foreground_or_ota:2926: foreground remains lit: ERROR - RETRY
+FAIL test_dream_never_hides_foreground_or_ota:2926: foreground remains lit: CONSENT REQUIRED
+FAIL test_dream_never_hides_foreground_or_ota:2926: foreground remains lit: MUTED - NETWORK ERROR
+FAIL test_dream_never_hides_foreground_or_ota:2926: foreground remains lit: ASLEEP. OTA FAILED
+FAIL test_dream_stops_emote_and_refreshes_only_for_real_changes:3057: foreground invalidates same-face latch immediately
+FAIL test_dream_stops_emote_and_refreshes_only_for_real_changes:3064: awake presenter respects 5 FPS rather than 33 ms polling
+7 failure(s) of 854 checks
+panel_off_flush: build=0 test=1
+FAIL test_dream_capture_panel_off_and_input_wake:3081: panel-off request creates a flush despite static clock
+1 failure(s) of 854 checks
+same_face_exit: build=0 test=1
+FAIL test_dream_stops_emote_and_refreshes_only_for_real_changes:3057: foreground invalidates same-face latch immediately
+1 failure(s) of 854 checks
+unknown_time: build=0 test=1
+FAIL test_dream_glass_is_black_clock_and_intact_rims:3011: unknown time never retains an invented clock
+1 failure(s) of 854 checks
+env_preserve: build=0 test=1
+FAIL test_dream_intent_preserves_env_and_ignores_unchanged_publish:2884: env publication preserves DREAM intent
+FAIL test_dream_intent_preserves_env_and_ignores_unchanged_publish:2897: unchanged publishers/seconds do not wake DREAM (2)
+FAIL test_dream_intent_preserves_env_and_ignores_unchanged_publish:2900: tilt cannot animate the DREAM rim
+FAIL test_dream_intent_preserves_env_and_ignores_unchanged_publish:2902: minute change wakes presenter
+FAIL test_dream_intent_preserves_env_and_ignores_unchanged_publish:2904: battery change wakes presenter
+FAIL test_dream_stops_emote_and_refreshes_only_for_real_changes:3035: minute creates one fresh frame
+FAIL test_dream_stops_emote_and_refreshes_only_for_real_changes:3038: battery creates one fresh frame
+FAIL test_dream_stops_emote_and_refreshes_only_for_real_changes:3051: static DREAM still applies target brightness
+FAIL test_dream_stops_emote_and_refreshes_only_for_real_changes:3054: brightness burst ends when panel settles
+9 failure(s) of 854 checks
+brightness_flush: build=0 test=1
+FAIL test_dream_stops_emote_and_refreshes_only_for_real_changes:3051: static DREAM still applies target brightness
+FAIL test_dream_stops_emote_and_refreshes_only_for_real_changes:3054: brightness burst ends when panel settles
+2 failure(s) of 854 checks
+privacy_rim: build=0 test=1
+FAIL test_dream_glass_is_black_clock_and_intact_rims:3003: only clock pixels differ from the original privacy/battery rims (2254)
+1 failure(s) of 854 checks
+awake_cadence: build=0 test=1
+FAIL test_dream_stops_emote_and_refreshes_only_for_real_changes:3040: brightness settles at requested FPS
+FAIL test_dream_stops_emote_and_refreshes_only_for_real_changes:3064: awake presenter respects 5 FPS rather than 33 ms polling
+2 failure(s) of 854 checks
+immediate_wake: build=0 test=1
+FAIL test_dream_intent_preserves_env_and_ignores_unchanged_publish:2902: minute change wakes presenter
+FAIL test_dream_intent_preserves_env_and_ignores_unchanged_publish:2904: battery change wakes presenter
+FAIL test_dream_intent_preserves_env_and_ignores_unchanged_publish:2908: awake WATCH seconds wake presenter
+FAIL test_dream_intent_preserves_env_and_ignores_unchanged_publish:2910: changed face wakes immediately
+FAIL test_dream_never_hides_foreground_or_ota:2934: ask wakes and defeats stale DREAM
+FAIL test_dream_capture_panel_off_and_input_wake:3091: navigation clears DREAM and wakes
+6 failure(s) of 854 checks
+invalid_or_surviving=0

@@ -23,6 +23,8 @@
  * device-tool lane. Ownership did not move — only the line numbers did.
  */
 #include "app.h"
+#include "jr_dsp/audio_power.h"
+#include "jr_display/companion.h"
 
 static const char *TAG = "jarvis_v5";
 
@@ -837,6 +839,121 @@ static bool device_wall_time(struct tm *out)
     return false;
 }
 
+/* Presentation policy, not a new power ladder. Reuse the existing quiet /
+ * ambient attention windows and WHISPER / DREAM brightness ratios. USB still
+ * keeps an unmuted voice session awake. Only a physical owner can clear mute. */
+static uint32_t s_companion_activity_ms;
+
+static bool companion_phase_busy(jr_state_t phase, bool speech)
+{
+    return (phase != JR_ST_IDLE && phase != JR_ST_LISTENING) ||
+           (phase == JR_ST_LISTENING && speech);
+}
+
+static void companion_attention(uint32_t now)
+{
+    s_glance_until_ms = 0U;
+    s_companion_activity_ms = now;
+    jr_display_rest_set(JR_DISPLAY_REST_NONE, false, false);
+}
+
+static bool companion_update(uint32_t now, jr_mood_t mood, bool moving,
+                             bool busy, const jr_power_t *battery,
+                             uint8_t *brightness)
+{
+    jr_display_rest_voice_busy_set(busy);
+    const bool quiet = atomic_load(&s_voice_privacy_paused);
+    const bool usb = battery != NULL && battery->sample_seq != 0U &&
+                     battery->age_ms <= 2000U && battery->usb_present;
+    if (moving || busy) {
+        s_companion_activity_ms = now;
+    }
+    if (s_glance_until_ms != 0U &&
+        (int32_t)(now - s_glance_until_ms) >= 0) {
+        s_glance_until_ms = 0U;
+    }
+    const bool operator_active = operator_lease_active(now);
+    const bool ota = atomic_load(&s_ota_active);
+    const bool probation = image_in_probation();
+    const bool foreground = jr_display_nav_overlay() != JR_DISPLAY_OVERLAY_NONE ||
+        (jr_display_nav_space() != JR_DISPLAY_SPACE_JARVIS &&
+         jr_display_nav_space() != JR_DISPLAY_SPACE_WATCH) ||
+        jr_display_choices_active() || jr_display_caption_pinned() ||
+        jr_display_caption_foreground() ||
+        jr_display_canvas_active() || jr_display_surface_is_active();
+    if (busy || foreground || operator_active || ota || probation) {
+        s_glance_until_ms = 0U;
+        /* A finished overlay must earn the normal attention window again. */
+        s_companion_activity_ms = now;
+    }
+    jr_companion_input_t input = {
+        .requested = s_glance_until_ms != 0U ? JR_COMPANION_GLANCE :
+            usb && !moving && (uint32_t)(now - s_companion_activity_ms) >=
+                (quiet ? JR_MOOD_QUIET_MS : JR_MOOD_AMBIENT_MS)
+                ? JR_COMPANION_NIGHTSTAND : JR_COMPANION_OFF,
+        .usb_present = usb, .idle = !busy, .foreground = foreground,
+        .operator_active = operator_active, .ota_active = ota,
+        .probation = probation, .privacy_muted = quiet,
+        .charging = battery != NULL && battery->charging,
+        .battery_percent = battery != NULL ? battery->percent : UINT8_MAX,
+        .night_start_hour = 22, .night_end_hour = 7,
+        .next_state = JR_COMPANION_NEXT_UNKNOWN,
+    };
+    struct tm local;
+    if (device_wall_time(&local)) {
+        input.time_valid = true;
+        input.hour = (uint8_t)local.tm_hour;
+        input.minute = (uint8_t)local.tm_min;
+    }
+    jr_companion_view_t view;
+    if (jr_companion_build(&input, &view)) {
+        jr_display_rest_set(view.mode == JR_COMPANION_GLANCE
+                            ? JR_DISPLAY_REST_GLANCE : JR_DISPLAY_REST_NIGHTSTAND,
+                            usb, view.night);
+        if (brightness != NULL && view.mode == JR_COMPANION_NIGHTSTAND) {
+            *brightness = (uint8_t)(((view.night ? 8U : 22U) *
+                                    s_brightness_cap + 50U) / 100U);
+        }
+        return true;
+    }
+    const bool dream = jr_mood_dream_glass(mood, busy, usb,
+                                          operator_active, ota || probation);
+    jr_display_rest_set(dream ? JR_DISPLAY_REST_DREAM : JR_DISPLAY_REST_NONE,
+                        false, false);
+    return dream;
+}
+
+/* Before Wi-Fi/audio: a physical deep-sleep wake earns a local Glance, even
+ * with no weather or next-item feed. Invalid retained time shows --:--. */
+static void companion_boot_seed(void)
+{
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    s_companion_activity_ms = now;
+    s_boot_wake_cause = (int)esp_sleep_get_wakeup_cause();
+    const bool physical_wake = s_rtc_sleep_magic == SLEEP_RTC_MAGIC &&
+        (s_boot_wake_cause == ESP_SLEEP_WAKEUP_EXT0 ||
+         s_boot_wake_cause == ESP_SLEEP_WAKEUP_EXT1);
+    s_glance_until_ms = physical_wake ? now + GLANCE_MS : 0U;
+    jr_power_t battery = {0};
+    const bool have_power = jr_power_read(&battery) == ESP_OK;
+    jr_display_set_hud_env(have_power ? battery.percent : UINT8_MAX,
+                          have_power && battery.charging,
+                          atomic_load(&s_voice_privacy_paused), 0.0f, 0.0f);
+    jr_display_power_set(have_power ? battery.percent : UINT8_MAX,
+                        have_power ? battery.millivolts : 0U,
+                        have_power && battery.usb_present,
+                        have_power && battery.charging);
+    struct tm local;
+    const bool valid = device_wall_time(&local);
+    jr_display_clock_set(valid, valid ? local.tm_hour : 0,
+                         valid ? local.tm_min : 0, valid ? local.tm_sec : 0);
+    if (valid) {
+        jr_display_clock_set_date(local.tm_wday, local.tm_mday, local.tm_mon);
+    }
+    (void)companion_update(now, JR_MOOD_AWAKE, false, false,
+                           have_power ? &battery : NULL, NULL);
+}
+
 /* THE MORNING GLANCE SPEAKS (wave N13). The first lift after a rest, once
  * per calendar day inside the morning window, earns one briefing made only
  * of what the device already holds: the date, the weather glance, the rain
@@ -1592,6 +1709,52 @@ static jr_display_agent_state_t agent_state_to_display(const char *state)
     return JR_DISPLAY_AGENT_NONE;
 }
 
+static void shell_caption_space(void)
+{
+    /* WATCH identifies itself without a caption beneath its hands. */
+    static const char *const mode_name[JR_DISPLAY_SPACE_COUNT] =
+        { "JARVIS", "", "WEATHER", "STATUS", "DESK", "ACTIVITY" };
+    const jr_display_space_t sp = jr_display_nav_space();
+    jr_display_caption_set(
+        sp < JR_DISPLAY_SPACE_COUNT ? mode_name[sp] : "JARVIS");
+}
+
+static void shell_vertical_navigation(jr_input_direction_t direction)
+{
+    if (direction == JR_INPUT_DIRECTION_DOWN) {
+        /* A detail sheet promises DOWN TO CLOSE. Its underlying panel must
+         * remain selected; the next stroke can resume the mode ring. */
+        if (jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_DETAIL) {
+            jr_display_nav_down();
+        } else {
+            jr_display_nav_next();
+        }
+    } else if (direction == JR_INPUT_DIRECTION_UP) {
+        jr_display_nav_prev();
+    }
+}
+
+static void shell_dismiss(void)
+{
+    const jr_display_overlay_t overlay = jr_display_nav_overlay();
+    /* The nav overlay and /api/ui/shade each have a door into controls. */
+    if (overlay == JR_DISPLAY_OVERLAY_SHADE) {
+        jr_display_nav_up();
+        s_ui_shade_open = false;
+        jr_display_caption_set("CONTROLS CLOSED");
+    } else if (s_ui_shade_open) {
+        s_ui_shade_open = false;
+        jr_display_caption_set("CONTROLS CLOSED");
+    } else {
+        jr_display_nav_down();
+        if (overlay == JR_DISPLAY_OVERLAY_DETAIL) {
+            shell_caption_space();
+        } else {
+            jr_display_caption_set("CONTROLS - UP TO CLOSE");
+        }
+    }
+}
+
 
 ota_preflight_t ota_preflight(void)
 {
@@ -2013,7 +2176,7 @@ static void voice_task(void *arg)
      * would-block dropped a full 128 ms of microphone audio. Two frames stay
      * queueable under backpressure while halving the per-frame send rate. */
     static jr_pcm_t mic_batch[2 * VOICE_FRAME_SAMPLES];
-    static size_t   mic_batch_fill = 0;
+    static jr_audio_uplink_batch_t mic_batch_state;
     static bool codex_tap_pending;
     static jr_input_event_t codex_pending_tap;
     static uint32_t codex_pending_tap_ms;
@@ -2272,6 +2435,10 @@ static void voice_task(void *arg)
                 .quiet = quiet,
             };
             jr_mood_out_t mout = jr_mood_step(&s_mood, &min);
+            const bool dream_glass = jr_mood_dream_glass(
+                mout.mood, user_busy, have_power && bat.usb_present,
+                operator_mode_active((uint32_t)now),
+                atomic_load(&s_ota_active) || image_in_probation());
             const bool realtime_power =
                 mout.voice_armed || user_busy ||
                 operator_mode_active((uint32_t)now) ||
@@ -2305,13 +2472,11 @@ static void voice_task(void *arg)
                                     prev_mood == (uint8_t)JR_MOOD_DREAM;
                 const bool lifted = mout.changed && mout.mood == JR_MOOD_AWAKE &&
                                     rested && moving;
-                if (lifted && s_weather.valid &&
+                if (lifted &&
                     jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE &&
                     !jr_display_choices_active()) {
-                    jr_display_nav_set(JR_DISPLAY_SPACE_WEATHER);
-                    jr_display_bloom();
                     s_glance_until_ms = (uint32_t)now + GLANCE_MS;
-                    ESP_LOGI(TAG, "glance: lifted after rest, showing weather");
+                    ESP_LOGI(TAG, "glance: lifted after rest, local time and battery");
                 }
                 prev_mood = (uint8_t)mout.mood;
                 /* A deep-sleep wake by lift or touch is the same gesture seen
@@ -2338,8 +2503,8 @@ static void voice_task(void *arg)
              * desk device on its cable is a desk device), never mid-update,
              * never with a companion in, and never in the first three
              * minutes, so a device is always reachable for a while after
-             * any boot. A forced sleep (the debug route) skips the gates:
-             * it exists to prove the wake sources from a desk. */
+             * any boot. Debug skips the ladder, but power.c still refuses
+             * probation, USB or unknown/stale USB telemetry. */
             {
                 const bool forced = atomic_load(&s_sleep_force);
                 const bool in_use =
@@ -2353,15 +2518,11 @@ static void voice_task(void *arg)
                     enter_deep_sleep("not in use", SLEEP_TIMER_WAKE_S);
                 }
             }
-            if (s_glance_until_ms != 0U &&
-                (int32_t)((uint32_t)now - s_glance_until_ms) >= 0) {
-                s_glance_until_ms = 0U;
-                if (jr_display_nav_space() == JR_DISPLAY_SPACE_WEATHER &&
-                    jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE) {
-                    jr_display_nav_home();
-                    jr_display_caption_set("JARVIS");
-                }
-            }
+            const bool companion_clock = companion_update((uint32_t)now,
+                mout.mood, moving,
+                companion_phase_busy(mood_phase, s_listen_speech_active),
+                have_power ? &bat : NULL,
+                &effective_brightness);
             atomic_store(&s_mood_id, (uint8_t)mout.mood);
             atomic_store(&s_mood_brightness, effective_brightness);
             s_bright_tgt = effective_brightness;
@@ -2413,6 +2574,7 @@ static void voice_task(void *arg)
                 uint32_t pkey_s = 0, pkey_l = 0;
                 jr_power_pkey_take(&pkey_s, &pkey_l);
                 if (pkey_s > 0) {
+                    companion_attention((uint32_t)now);
                     s_flip_muted = false;
                     atomic_store(&s_voice_privacy_paused, false);
                     jr_mood_poke_awake(&s_mood, (uint32_t)now);
@@ -2546,7 +2708,7 @@ static void voice_task(void *arg)
                  * watch peek does. */
                 const bool watch_space =
                     jr_display_nav_space() == JR_DISPLAY_SPACE_WATCH;
-                if (peek || watch_space) {
+                if (peek || watch_space || dream_glass || companion_clock) {
                     struct tm tmv;
                     if (device_wall_time(&tmv)) {
                         clock_on = true;
@@ -2600,6 +2762,9 @@ static void voice_task(void *arg)
          * half-commit button that leaves the microphone armed forever. */
         voice_control_request_t control = (voice_control_request_t)
             atomic_exchange(&s_voice_control_request, VOICE_CONTROL_NONE);
+        if (control != VOICE_CONTROL_NONE)
+            jr_audio_uplink_batch_reset(&mic_batch_state, mic_batch,
+                                       2U * VOICE_FRAME_SAMPLES);
         jr_state_t controlled_phase = jr_orch_phase(&s_app.orch);
         if (control == VOICE_CONTROL_ARM ||
             control == VOICE_CONTROL_RESUME) {
@@ -2695,6 +2860,11 @@ static void voice_task(void *arg)
         /* A self-test owns the codec only through the existing audio seams. If
          * voice is live, stop it gracefully first; once Idle, reset all four
          * taps, enqueue the chirp, and let this task pace ADC capture. */
+        if (atomic_load(&s_audio_diag_requested) &&
+            (atomic_load(&s_voice_privacy_paused) || s_flip_muted)) {
+            atomic_store(&s_audio_diag_requested, false);
+            atomic_store(&s_audio_diag_until_ms, 0U);
+        }
         if (atomic_load(&s_audio_diag_requested)) {
             jr_state_t p = jr_orch_phase(&s_app.orch);
             if (p == JR_ST_IDLE) {
@@ -2942,6 +3112,12 @@ static void voice_task(void *arg)
              * gesture visible and escapable. Privacy moves to the PWR button
              * once that button grows a double-tap (docs/INPUT_MAP.md §3.1) —
              * moving it before its replacement exists would strand it. */
+            if (physical) {
+                companion_attention((uint32_t)now);
+                if (iev.kind == JR_INPUT_PRESS_DOWN) {
+                    jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                }
+            }
             if (iev.kind == JR_INPUT_PRESS_DOWN) {
                 s_hold_start_ms = physical ? (uint32_t)now : 0U;
                 continue;
@@ -3199,6 +3375,9 @@ static void voice_task(void *arg)
                     jr_display_nav_home();
                     s_ui_shade_open = false;
                     jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                    s_glance_until_ms = 0U;
+                    s_companion_activity_ms = (uint32_t)now;
+                    jr_display_rest_set(JR_DISPLAY_REST_NONE, false, false);
                     jr_display_bloom();
                     /* Was "JARVIS - RIGHT WATCH", which instructed a gesture
                      * that no longer navigates — right swipe peeks the watch,
@@ -3389,20 +3568,8 @@ static void voice_task(void *arg)
                         s_watch_peek_until_ms = (uint32_t)now + 10000U;
                         watch_opened = true;
                     }
-                } else if (iev.direction == JR_INPUT_DIRECTION_DOWN) {
-                    /* THE MODE RING. Sliding down walks forward through the
-                     * screens, endlessly — there is no end to hit and no wall
-                     * to bounce off, which is the whole point: you find what
-                     * the device can do by continuing, not by remembering.
-                     *
-                     * Vertical used to open the shade (down) and the detail
-                     * sheet (up). The shade now lives on the BOOT button,
-                     * which is a better home for it anyway: a control surface
-                     * should be reachable when the glass is confusing, and a
-                     * button cannot be swallowed by whatever is on screen. */
-                    jr_display_nav_next();
-                } else if (iev.direction == JR_INPUT_DIRECTION_UP) {
-                    jr_display_nav_prev();
+                } else {
+                    shell_vertical_navigation(iev.direction);
                 }
                 s_ui_shade_open =
                     jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_SHADE;
@@ -3426,19 +3593,7 @@ static void voice_task(void *arg)
                            JR_DISPLAY_OVERLAY_DETAIL) {
                     jr_display_caption_set("DETAIL - DOWN TO CLOSE");
                 } else {
-                    /* Name the screen you just landed on. On an endless ring
-                     * the caption IS the position indicator — it answers
-                     * "where am I" without a dial mark that has to jump when
-                     * the ring wraps. */
-                    /* WATCH is deliberately blank: a clock face is the one
-                     * screen that needs no caption to identify it, and the
-                     * word sat directly under the hands as pure clutter.
-                     * caption_set("") routes to caption_clear(). */
-                    static const char *const mode_name[JR_DISPLAY_SPACE_COUNT] =
-                        { "JARVIS", "", "WEATHER", "STATUS", "DESK", "ACTIVITY" };
-                    const jr_display_space_t sp = jr_display_nav_space();
-                    jr_display_caption_set(
-                        sp < JR_DISPLAY_SPACE_COUNT ? mode_name[sp] : "JARVIS");
+                    shell_caption_space();
                 }
                 ESP_LOGI(TAG, "ui: nav overlay=%d",
                          (int)jr_display_nav_overlay());
@@ -3535,30 +3690,7 @@ static void voice_task(void *arg)
                         }
                         break;
                     case JR_DISPLAY_ACT_DISMISS:
-                        /* Same invariant as the swipe and button paths: a
-                         * surface that captures input names its own exit.
-                         * Opening the shade here used to set no caption at
-                         * all, which is how a tap could drop you into the one
-                         * surface that told you nothing. */
-                        /* TWO DOORS, ONE SHADE. A finger opens it through the
-                         * nav overlay; /api/ui/shade opens it through the
-                         * shell bit (s_ui_shade_open). The re-derivation
-                         * after this switch used to read only the nav door,
-                         * so ONE tap on an HTTP-opened shade — a volume step —
-                         * re-derived "closed" and shut it. Each door now
-                         * closes its own. */
-                        if (jr_display_nav_overlay() ==
-                            JR_DISPLAY_OVERLAY_SHADE) {
-                            jr_display_nav_up();
-                            s_ui_shade_open = false;
-                            jr_display_caption_set("CONTROLS CLOSED");
-                        } else if (s_ui_shade_open) {
-                            s_ui_shade_open = false;
-                            jr_display_caption_set("CONTROLS CLOSED");
-                        } else {
-                            jr_display_nav_down();
-                            jr_display_caption_set("CONTROLS - UP TO CLOSE");
-                        }
+                        shell_dismiss();
                         break;
                     case JR_DISPLAY_ACT_FOCUS:
                         jr_display_nav_up();
@@ -3647,6 +3779,8 @@ static void voice_task(void *arg)
          * there can synthesize SpeechStarted/activityStart and cancel the
          * model reply before its first audio chunk. Server VAD intentionally
          * keeps streaming through Thinking. This matches the proven v4 lane. */
+        jr_audio_set_microphone_enabled(
+            !atomic_load(&s_voice_privacy_paused) && !s_flip_muted);
         bool read_paced = false;
         jr_state_t capture_phase = jr_orch_phase(&s_app.orch);
         bool phase_allows_capture = capture_phase == JR_ST_LISTENING ||
@@ -3661,6 +3795,8 @@ static void voice_task(void *arg)
                                     capture_phase == JR_ST_ASKING ||
                                     (capture_phase == JR_ST_THINKING &&
                                      s_app.cfg.vad_mode == JR_VAD_SERVER);
+        if (atomic_load(&s_voice_privacy_paused) || s_flip_muted)
+            atomic_store(&s_audio_diag_until_ms, 0U);
         uint32_t audio_diag_until = atomic_load(&s_audio_diag_until_ms);
         bool audio_diag_active =
             (int32_t)(audio_diag_until - (uint32_t)now) > 0;
@@ -3696,33 +3832,29 @@ static void voice_task(void *arg)
             operator_mode_active((uint32_t)now) &&
             atomic_load(&s_operator_mode_owner) == OPERATOR_OWNER_ZEROCHAT &&
             !atomic_load(&s_voice_privacy_paused) && !s_flip_muted;
+        /* A stopped capture, diagnostic/companion lane, closed transport, or
+         * privacy edge cannot leave a live half for a later text turn. */
+        const bool voice_uplink_capture = s_app.io.capturing &&
+            phase_allows_capture && !audio_diag_active && !companion_listen;
+        jr_audio_uplink_batch_guard(&mic_batch_state, mic_batch,
+            2U * VOICE_FRAME_SAMPLES,
+            voice_uplink_capture &&
+                s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN &&
+                (s_app.cfg.vad_mode == JR_VAD_SERVER || s_app.io.activity_open),
+            !atomic_load(&s_voice_privacy_paused) && !s_flip_muted);
         if ((s_app.io.capturing && phase_allows_capture) || audio_diag_active ||
             companion_listen) {
             int n = jr_audio_source_read(&s_app.mic, mic_frame, VOICE_FRAME_SAMPLES);
             if (n > 0) {
-                s_app.mic_level = jr_dsp_rms(mic_frame, (size_t)n);
+                /* The source supplies paced zeros under privacy. Recheck the
+                 * app latch after a blocking read, before diagnostics or levels,
+                 * so a privacy edge in flight cannot publish a live frame. */
+                const bool mic_gated = atomic_load(&s_voice_privacy_paused) || s_flip_muted;
+                if (mic_gated) memset(mic_frame, 0, (size_t)n * sizeof(jr_pcm_t));
+                s_app.mic_level = mic_gated ? 0.0f : jr_dsp_rms(mic_frame, (size_t)n);
                 if (audio_diag_active || companion_listen) {
                     read_paced = true;
                     goto capture_complete;
-                }
-                /* PRIVACY IS THE MICROPHONE, NOT A FLAG ON THE RE-ARM. The
-                 * flag used to gate only the always-ready re-arm, so any
-                 * other road into a live session — a text turn from the desk
-                 * route, a companion, a reconnect — brought the uplink up
-                 * under a gold ring that said MUTED. Seen by the owner: "it's
-                 * on privacy mode but look, it's listening to me". Here the
-                 * frame is read (the codec keeps its pace) and dropped: no
-                 * VAD, no uplink, no level, whatever the session is doing.
-                 * Text turns still work with the mic shut.
-                 *
-                 * The frame is ZEROED rather than dropped: with no frames at
-                 * all the server's turn detection has no silence to conclude a
-                 * text turn on, and a desk turn under privacy took 47 s to
-                 * answer. Zeros are a quiet room, not the room. */
-                const bool mic_gated = atomic_load(&s_voice_privacy_paused);
-                if (mic_gated) {
-                    memset(mic_frame, 0, (size_t)n * sizeof(jr_pcm_t));
-                    s_app.mic_level = 0.0f;
                 }
                 jr_capture_pause_on_capture(
                     &s_app.orch.capture_pause, now);
@@ -3774,6 +3906,8 @@ static void voice_task(void *arg)
                     } else {
                         s_app.vad_starts++;
                         s_listen_speech_active = true;
+                        jr_display_rest_voice_busy_set(true);
+                        companion_attention((uint32_t)now);
                         s_utt_start_ms = (uint32_t)now;
                         ESP_LOGI(TAG, "vad: speech start rms=%.1f floor=%.1f",
                                  (double)td.rms, (double)td.noise_floor);
@@ -3805,31 +3939,47 @@ static void voice_task(void *arg)
                  * frames remain below the 4096-byte queue slot while halving
                  * lock/socket pressure. Flush a partial batch at speech end. */
                 const bool send_uplink =
+                    voice_uplink_capture && s_app.io.capturing &&
                     s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN &&
                     (s_app.cfg.vad_mode == JR_VAD_SERVER ||
                      s_app.io.activity_open);
+                const bool upload_microphone_enabled =
+                    !atomic_load(&s_voice_privacy_paused) && !s_flip_muted;
+                jr_audio_uplink_batch_guard(&mic_batch_state, mic_batch,
+                    2U * VOICE_FRAME_SAMPLES, send_uplink,
+                    upload_microphone_enabled);
                 if (send_uplink) {
                     const size_t cap = 2 * VOICE_FRAME_SAMPLES;
                     size_t take = (size_t)n;
-                    if (mic_batch_fill + take > cap) {
-                        take = cap - mic_batch_fill;
+                    if (mic_batch_state.filled + take > cap) {
+                        take = cap - mic_batch_state.filled;
                     }
-                    memcpy(mic_batch + mic_batch_fill, mic_frame,
-                           take * sizeof(jr_pcm_t));
-                    mic_batch_fill += take;
-                    if (mic_batch_fill >= cap ||
+                    if (upload_microphone_enabled)
+                        memcpy(mic_batch + mic_batch_state.filled, mic_frame,
+                               take * sizeof(jr_pcm_t));
+                    else
+                        memset(mic_batch + mic_batch_state.filled, 0,
+                               take * sizeof(jr_pcm_t));
+                    mic_batch_state.filled += take;
+                    if (mic_batch_state.filled >= cap ||
                         (td.event == JR_TP_EV_SPEECH_ENDED &&
-                         mic_batch_fill > 0U)) {
-                        jr_err_t r = s_app.rvc.send_audio(
-                            s_app.rvc.ctx, mic_batch, mic_batch_fill);
-                        if (r == JR_ERR_CLOSED) {
-                            ESP_LOGW(TAG,
-                                     "mic uplink observed closed transport");
+                         mic_batch_state.filled > 0U)) {
+                        /* Recheck after VAD and buffer work, immediately before
+                         * handing bytes to the transport builder. */
+                        jr_audio_uplink_batch_guard(&mic_batch_state, mic_batch,
+                            cap, s_app.io.capturing &&
+                                s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN,
+                            !atomic_load(&s_voice_privacy_paused) && !s_flip_muted);
+                        if (mic_batch_state.filled > 0U) {
+                            jr_err_t r = s_app.rvc.send_audio(
+                                s_app.rvc.ctx, mic_batch, mic_batch_state.filled);
+                            if (r == JR_ERR_CLOSED) {
+                                ESP_LOGW(TAG,
+                                         "mic uplink observed closed transport");
+                            }
                         }
-                        mic_batch_fill = 0U;
+                        jr_audio_uplink_batch_reset(&mic_batch_state, mic_batch, cap);
                     }
-                } else {
-                    mic_batch_fill = 0U;
                 }
                 if (td.event == JR_TP_EV_SPEECH_ENDED) {
                     s_app.vad_ends++;
@@ -3852,6 +4002,9 @@ static void voice_task(void *arg)
                     }
                 }
                 read_paced = true;
+            } else {
+                jr_audio_uplink_batch_reset(&mic_batch_state, mic_batch,
+                                           2U * VOICE_FRAME_SAMPLES);
             }
         } else if (jr_wake_ready() && !s_flip_muted &&
                    !atomic_load(&s_voice_privacy_paused) &&
@@ -3876,6 +4029,9 @@ static void voice_task(void *arg)
                     ESP_LOGI(TAG, "wake: \"%s\" heard — waking from rest",
                              jr_wake_model());
                     jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                    s_glance_until_ms = 0U;
+                    s_companion_activity_ms = (uint32_t)now;
+                    jr_display_rest_set(JR_DISPLAY_REST_NONE, false, false);
                     /* Bloom AFTER the poke: it only renders while frames
                      * flush, so the display must be waking first (glass-ux
                      * contract). The VISION's beat: a point of light blooms
@@ -3902,7 +4058,16 @@ capture_complete:
          * presenter, present() is an atomic mailbox store, so feeding it
          * every loop is free; with the logging stub, amp stays 0 and the
          * call still fires only on face change (no log spam). */
-        jr_face_t f = phase_to_face(jr_orch_phase(&s_app.orch));
+        const jr_state_t face_phase = jr_orch_phase(&s_app.orch);
+        const bool companion_busy =
+            companion_phase_busy(face_phase, s_listen_speech_active);
+        jr_display_rest_voice_busy_set(companion_busy);
+        if (companion_busy) {
+            jr_display_rest_set(JR_DISPLAY_REST_NONE, false, false);
+            s_glance_until_ms = 0U;
+            s_companion_activity_ms = (uint32_t)now;
+        }
+        jr_face_t f = phase_to_face(face_phase);
         if (f == JR_FACE_IDLE || f == JR_FACE_LISTENING) {
             /* Idle has three truths the face used to hide: muted is gold and
              * still; resting (WHISPER/DREAM) is a breathing slit; only a
@@ -4183,6 +4348,14 @@ void app_main(void)
     atomic_store(&s_mood_id, (uint8_t)JR_MOOD_AWAKE);
     atomic_store(&s_mood_brightness, 100);
 
+    /* Retained OS time is usable before network connection. Establish local
+     * timezone and the authoritative privacy/battery rims before first draw. */
+    setenv("TZ", "EST5EDT,M3.2.0,M11.1.0", 1);
+    tzset();
+    restore_brightness_cap();
+    (void)jr_display_set_brightness(s_brightness_cap);
+    companion_boot_seed();
+
     /* pull the concrete ports. The real presenter is preferred; its panel +
      * SPIFFS + gfx bring-up runs async in its own task, so this never stalls
      * boot. On resource failure, fall back to the jr_hal logging stub
@@ -4215,8 +4388,6 @@ void app_main(void)
      * tool call). esp_netif_sntp retries internally until Wi-Fi is up, so
      * starting it here is safe even before the first got-ip. TZ is compile-time
      * for now; SVC-04 settings can make it NVS-backed later. */
-    setenv("TZ", "EST5EDT,M3.2.0,M11.1.0", 1);   /* US Eastern w/ DST rules */
-    tzset();
     {
         esp_sntp_config_t sntp_cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
         sntp_cfg.start = true;
@@ -4236,7 +4407,6 @@ void app_main(void)
         ESP_LOGW(TAG, "jr_audio_init degraded — capture may be silent until on-device tune");
     }
     restore_out_vol();   /* gesture-set volume survives reboot */
-    restore_brightness_cap();
     restore_watch_style();
     restore_briefing_day();
     s_app.mic = jr_audio_source();
@@ -4371,11 +4541,6 @@ void app_main(void)
         ESP_LOGW(TAG, "wake word unavailable: %s", esp_err_to_name(wake_err));
     }
 
-    atomic_store(&s_voice_start_gate, true);
-    if (task_ok == pdPASS && VOICE_ALWAYS_READY) {
-        atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
-    }
-
     /* Start the stillness clock HERE, not at jr_mood_reset() above: that runs
      * ~1 s in, while Wi-Fi and the codec still have ~13 s to go, so the device
      * spent most of its rest budget before it could do anything and dimmed a
@@ -4392,11 +4557,18 @@ void app_main(void)
      * check with nobody there: the ladder resumes at DREAM so the glass stays
      * dark and the chip sleeps again in JR_MOOD_SLEEP_MS unless something
      * happens. Everything else is the privacy default. */
-    const esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-    s_boot_wake_cause = (int)cause;
+    const esp_sleep_wakeup_cause_t cause =
+        (esp_sleep_wakeup_cause_t)s_boot_wake_cause;
     const bool from_sleep = s_rtc_sleep_magic == SLEEP_RTC_MAGIC &&
         (cause == ESP_SLEEP_WAKEUP_EXT0 || cause == ESP_SLEEP_WAKEUP_EXT1 ||
          cause == ESP_SLEEP_WAKEUP_TIMER);
+    s_companion_activity_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    if (from_sleep && (cause == ESP_SLEEP_WAKEUP_EXT0 ||
+                       cause == ESP_SLEEP_WAKEUP_EXT1)) {
+        /* The early local face survives network bootstrap; its existing
+         * eight-second attention budget starts when full Jarvis is ready. */
+        s_glance_until_ms = s_companion_activity_ms + GLANCE_MS;
+    }
     if (from_sleep && cause == ESP_SLEEP_WAKEUP_TIMER) {
         s_mood.still_since_ms =
             (uint32_t)(esp_timer_get_time() / 1000) - JR_MOOD_DREAM_MS;
@@ -4414,4 +4586,11 @@ void app_main(void)
         ESP_LOGI(TAG, "boot complete — starting MUTED (privacy default)%s",
                  from_sleep ? ", woke from sleep" : "");
     }
+    /* Publish the voice start gate last: boot seeds and the initial privacy /
+     * rest decision are complete before the single-writer pump can run. */
+    if (task_ok == pdPASS && VOICE_ALWAYS_READY &&
+        atomic_load(&s_voice_control_request) != VOICE_CONTROL_ARM) {
+        atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
+    }
+    atomic_store(&s_voice_start_gate, true);
 }

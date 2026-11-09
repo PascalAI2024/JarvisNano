@@ -215,7 +215,7 @@ typedef struct __attribute__((packed)) {
 
 typedef enum {
     VOICE_CONTROL_NONE = 0,
-    VOICE_CONTROL_ARM,       /* explicit physical/API unmute */
+    VOICE_CONTROL_ARM,       /* explicit physical unmute only */
     VOICE_CONTROL_RESUME,    /* resume only when privacy permits */
     VOICE_CONTROL_DISARM,    /* deliberate privacy mute */
     VOICE_CONTROL_PAUSE,     /* operational stop; privacy unchanged */

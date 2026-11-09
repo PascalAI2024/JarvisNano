@@ -23,6 +23,35 @@ plain ESP-IDF v5 from `main/` and `components/jr_*`.
 
 ## Active wave — cleanup, reliability, refinement
 
+### t107 Addendum A — power gate blocked, 2026-10-11
+
+Source `7578238` fixes detail navigation/captions, finite transitions, safe
+baked-source release and refresh retry; dead/duplicate code is removed.
+All six host suites, mutations and firmware build (55.769% free) pass.
+OTA reached `state=valid`; 32 composed captures and three watch-style cycles
+pass without snapshot, asset or flush failures. Same-pixel rim work retains
+28,566 frames and improves 21 paired host runs.
+
+Both longer awake windows completed, but gate `after-long` failed with
+`timer wake failed`; the after sleep endpoint and DREAM window are absent.
+The owner manually woke the device; paired readback now succeeds. Historical
+timer-wake cause is unresolved. Battery improvement is unproven; voltage
+fits are larger after OTA and SoC/rebound remain confounded. Long and short
+live runtime comparisons disagree and are both recorded. Both wake/API behavior
+and awake battery drain remain possible regressions. Three authenticated GET
+retries at 00:10–00:11Z on 2026-10-12 timed out despite reported ping replies;
+cell-state differences do not establish the cause of the larger drain fits.
+
+Voice is accepted on owner observation (reply `yes`, 2026-10-11, tested image
+unspecified). Privacy was verified muted on receipt and at every authenticated
+boundary. Fresh readback at 00:15:40Z on 2026-10-12 confirms uptime 231,756 ms,
+`touch` wake, sleep counter 3, `ota_0 state=valid` and muted/audio off. Current
+boot is owner recovery, not timer success. No reset-reason API or retained
+timestamped boot journal exists; current-boot Wi-Fi works but cannot explain
+the previous boot. Original after sleep/DREAM evidence is still missing.
+Listening-state power is excluded.
+See [Addendum A](docs/evidence/t107-addendum-a.md).
+
 Every behavioral row closes on physical 1.75C evidence, not compilation alone.
 
 | # | Priority | Deliverable | Status | Acceptance gate |
@@ -258,7 +287,7 @@ Deep-sleep**.
 | # | Deliverable | Finding |
 |---|---|---|
 | N8.11 | **Do NOT enable `CONFIG_PM_ENABLE` + tickless light sleep** | I2S is opened once in `jr_audio_init()` and never closed, which holds an APB lock; WakeNet then reads 24 kHz every 32 ms. A core that must wake 31×/second to keep a codec clocked cannot light-sleep. The datasheet's 240 µA is real and unreachable as built |
-| N8.12 | **Make DREAM an actual power mode.** Today WHISPER and DREAM are electrically identical — same radios, same I2S, same 24 fps compositor, same 100 Hz IMU poll. Only brightness differs (22 vs 8), so DREAM is a caption | The AMOLED win is emission: stop the emote, paint near-black, refresh a few dim clock pixels once a minute instead of 24×/second. Must fire only from genuine idle — asks, busy and USB keep the glass lit, per `db3bb607` |
+| N8.12 | **Make DREAM an actual power mode.** | t107 candidate implements a near-black minute clock from genuine idle, retaining privacy/battery rims and immediate foreground restoration. Host regression, scratch mutations and pinned build pass (55.786% app free); paired OTA `0b4108f` is valid and live DREAM fallback/16:57 clock/idle/WATCH captures are reviewed. Muted timer wake passed. **Battery improvement remains unproven; voice accepted on owner observation (2026-10-11, tested image unspecified)**. Existing mood FPS policy already uses 24/12/6/3, so the older universal 24 fps premise is stale. See [t107 report](docs/evidence/t107-power-baseline.md). |
 | N8.13 | **`mood.h` claims WHISPER/DREAM switch the microphone off. The code does not.** Stale comment on a privacy-relevant claim | Correct the comment, then decide whether the behaviour should match it |
 | N8.14 | USB-present is folded into `user_busy`, so a plugged-in device never rests — fine for a desk toy, fatal for a battery soak over USB | Rest under mute is consequently **unverified on battery**; every mood measurement so far was taken on USB |
 | N8.15 | SHELL: an opt-in deep-sleep rung below DREAM (BOOT / touch INT / IMU INT1 are all RTC GPIOs and can wake it) | **A different product, not a deeper DREAM** — it kills the wake word, and there is no RTC on the C board, so the clock dies on reboot. Do not ship it as DREAM |
@@ -324,7 +353,7 @@ defaults to **900**, and `state` must be a known name — "done" is not one.
 | 14 | N8.18 TOOLS is three unlabelled arcs now the redundant tools are gone | Cut or repurposed with a stated reason; not left as decoration |
 | 15 | N8.17 **Weather screen (Fort Lauderdale)** | Seventh ring screen. Settle the data path first: device-pull via the jarvismcp bridge vs host-push via the brain surface. City in code; endpoint and key in NVS, never the repo. Refresh on entering the screen, never a timer that drags Wi-Fi out of min-modem during rest. **Render the data age** — it will be stale after rest |
 | ~~16~~ | N8.13 `mood.h` says WHISPER/DREAM switch the microphone off; the code does not | **Done** `3175d822` (S5): the header now says rest is a power state and privacy a capability state. Decision: behaviour stays — WakeNet keeping the codec sampling is what lets "Jarvis" wake the device from DREAM; the microphone is turned off by privacy, never by rest |
-| 17 | N8.12 **DREAM becomes a real power mode** | Today WHISPER and DREAM are electrically identical — same radios, I2S, 24 fps compositor, 100 Hz IMU poll — differing only in brightness, so DREAM is a caption. Stop the emote, paint near-black, refresh a few clock pixels once a minute. **Only from genuine idle**: asks, busy and USB keep the glass lit, per `db3bb607`. Measure battery percent drop over a fixed soak, before and after |
+| 17 | N8.12 **DREAM becomes a real power mode** | t107 candidate implements guarded near-black minute updates and slower static presenter wakeups. Host/mutation proof and pinned build pass; paired OTA `0b4108f` reached valid, muted audio handles are off and live captures are reviewed. Matched idle/WATCH/sleep windows and timer wake completed. Voltage fits are lower but confounded by rebound and charge level; **battery improvement is unproven**, with voice accepted on owner observation (2026-10-11, tested image unspecified). See [t107 report](docs/evidence/t107-power-baseline.md). |
 | 18 | Companion: mic ring is 2 s, so the leaseholder must poll every ~1.5 s or drop audio | Longer ring or a streaming endpoint; a 30 s utterance survives without gaps |
 | 19 | Companion: a reply path back to the glass during a lease | The leaseholder can speak or caption without borrowing the Gemini session |
 | 20 | Re-run the full sheet and re-read it | `screens.py --extras` after the batch; every screen shares one visual language, and the sheet is captioned correctly |
@@ -415,7 +444,7 @@ Evidence for every row: `docs/evidence/20260905-*`, the numbers in
 | N13.5 | **`jr_pb_feed` had 524 bytes of stack.** The 1536-byte `chunk[]` local is a static internal buffer; stack size unchanged | BUILT | `/api/diag/tasks` `jr_pb_feed stack_free ≥ 1500` after a spoken turn and an earcon; largest internal block unchanged |
 | N13.6 | **The scripts run on Windows.** PIL before `sips`, a host-bound `JARVIS_PAIRING_TOKEN` env fallback where there is no macOS keychain, UTF-8 stdout in `gesture-doctor`, `tempfile` instead of `/tmp`, no `termios` at import, a one-line message instead of a traceback without a host; 37 unittest cases | DONE | `jarvisctl screen`, `gesture-doctor --host`, and the unittest all exit 0 on the Windows desk |
 | N13.7 | **One host-tests entry.** `scripts/host-tests.sh` runs all five suites (hud, shell, core, tool templates, desk CLI) with positive counts, and takes a Docker lane (`jarvisnano-hosttests`, `scripts/host-tests.Dockerfile`) when there is no `cc`; Git Bash's `/project` → `C:/Program Files/Git/project` rewrite is defeated by `MSYS_NO_PATHCONV=1` in `build-v5.sh` (`docs/reference/build-toolchain.md`). Closes N6.6 | DONE | `./scripts/host-tests.sh` → `suites run: 5 failed: 0` on this machine and inside Docker |
-| N13.8 | **The sun and the hours in the glance.** `weather_glance` also asks Open-Meteo for today's sunrise/sunset and 36 hourly rain probabilities in its own `try` (226 bytes, measured); the device keeps them beside the weather; an AWAKE/AMBIENT device refreshes every 30 min from any screen so the FUTURE cell and the rain latch stay honest (WHISPER/DREAM never fetch) | BUILT | `/api/cockpit` shows the sun times; the log shows `weather: fetch submitted (half hour)` while lit and never at rest |
+| N13.8 | **The sun and the hours in the glance.** `weather_glance` also asks Open-Meteo for today's sunrise/sunset and 36 hourly rain probabilities in its own `try` (226 bytes, measured); the device keeps them beside the weather; an AWAKE/AMBIENT device refreshes every 30 min from any screen so the FUTURE cell and the rain latch stay honest | BUILT; t107 guard repair deployed, full acceptance pending | The old first-fetch/retry paths bypassed the rest/network guard. The t107 candidate applies it to all fetch paths, preserving first/retry/refresh intervals; host, scratch mutations and pinned build pass. Paired OTA `0b4108f` reached valid, with battery improvement unproven and voice accepted on owner observation (2026-10-11, tested image unspecified); see [t107 report](docs/evidence/t107-power-baseline.md). |
 | N13.9 | **Rain in the next three hours, once per front.** `jr_rain_warning_step` (pure, `jr_core/glance.c`, six host tests with the real 2026-09-05 hourly answer): warns once when any of the next three hours reaches 60 %, re-arms only when the window drops under 30 %. `RAIN IN 2H` caption when muted, spoken with an open session, always a `RAIN` ACTIVITY row | BUILT | A staged wet window produces one caption and one row, and the next fetch is silent |
 | N13.10 | **The day arc on FUTURE and PILOT.** `jr_display_sun_set` publishes the sun at 1 Hz beside the clock; the two data dials draw daylight as a thin gold band on a 24-hour scale (noon at 12) with a dot for now; the other four dials stay as designed | BUILT | Shell test pins the arc's angles for 07:02/19:35 and "no sun → nothing"; panel capture shows the band on FUTURE |
 | N13.11 | **The morning glance speaks.** The first lift after a rest (or a deep-sleep wake by lift/touch), once per calendar day in 05:00–11:00, earns one briefing composed only of what the device holds — date, weather, rain within 12 h, delegated tasks finished since the last briefing, battery under 30 % off USB — as one text turn through `handle_say`; muted, a `GOOD MORNING 75* DRIZZLE 2 DONE` caption. The once-a-day latch lives in NVS (`brief_yday`) because the morning lift is usually a fresh boot. Pure `jr_briefing_*` in `jr_core/glance.c` with host tests | BUILT | Rest ≥ 5 min, lift in the window → `briefing: spoken` and a reply naming the date and the temperature; a second lift → nothing; muted → the caption |
@@ -439,6 +468,55 @@ The scout of the engine's per-strip pipeline (`managed_components/espressif2022_
 The QSPI ceiling itself is 40 MHz × 4 lanes = 20 MB/s: 21.7 ms a frame, ~46 fps, and it does not scale with the CPU clock. `JR_DISPLAY_RENDER_FPS 24` already notes the measured ~23 fps full-frame ceiling.
 
 ## Execution order
+
+### t107 B/C bounded follow-up
+
+2026-10-13 privacy checkpoint: watcher completed `DONE_MUTED_AND_CAPTURED`
+at 04:44:17Z, authenticated muted/capture off/audio four paths off, gold ring
+visible in the opened panel mirror. The 23:33–04:44Z confirmation gap remains
+recorded. First returned health was already muted before software DISARM.
+The 3h32m45s watcher gap fits the natural 4h timer; wake cause and actual sleep
+entry remain unverified, and follow-up GETs timed out. Default4h acceptance
+stays pending. Voice is parked for the owner; drain and natural run have not
+started. See [privacy handoff](docs/evidence/t107-privacy-restored.md).
+
+C1 lift acceptance **PASSED on `343e51c`**, 2026-10-12: owner edges-only lift,
+no tap; R7 `wake=lift`, `sleeps=2`, lift/touch armed, `lift_fail=none`, API back
+23:03:48.687909Z. The earlier failed lift remains recorded with R6 touch wake
+and `sleeps=4`. The scoped WoM repair restores elapsed polling at 100 Hz and
+fails closed on missing completion/ACK; all 16 host suites and mutations pass,
+OTA-valid/muted, 55.463% headroom. N6.12's electrical interrupt probe remains
+pending. Both opened mirrors show WATCH, so Glance/optical timing is unproven.
+The pre-voice HOME readback was muted/unplugged at 77%. Next, when the owner
+returns: manual unmute/voice/re-mute,
+fresh >=45-minute B/repair pair, natural ladder/default4h timer, then C2.
+See [lift failure and repair](docs/evidence/t107-lift-wake-failure.md).
+
+Owner follow-up: C2 offline sources/tests committed `c4681ad`, excluded from
+the image. Seven-step physical/voice session is parked for the owner. Static
+muted HOME repair `ff18294` passed 15 host suites, 53 compiled runtime faults
+and the target build (55.461% free). B's full 45-minute control passed:
+45->21% SoC, 97.22±8.17mV/h conditional fit, settled 5.882 redraws/s. The device
+ran frozen `ff18294`, authenticated `ota_0` valid/muted on USB at
+09:49:28Z (22% charging), READY FOR OWNER. Nightstand made 3 redraws/117 completed strip flushes
+in 120.250s with zero errors; forced charging HOME still animates at
+7.57–7.78fps, because charging excludes the quiet path. Settled unplugged HOME
+proof, the fresh >=45-minute B/repair pair and natural ladder/default 4h timer
+are deferred until after the owner session. No saving or life projection is
+accepted. See [USB handoff](docs/evidence/t107-quiet-usb.md) and
+[quiet HOME source proof](docs/evidence/t107-quiet-home.md).
+CHARGE is closed: retain 200mA and issue no new PMIC register write.
+
+| Item | State | Acceptance |
+|---|---|---|
+| Read-only AXP2101 charge diagnosis | Complete; 03864cc valid/muted | Three complete scans: CC 200mA, CV 4.2V. Net gauge charge 39.27±2.18pp/h; owner ruling retains 200mA; CHARGE closed. 300s timer passed. No PMIC writes. See B report. |
+| Living companion | 343e51c OTA-valid/muted; 16 host suites pass; 55.463% free | Edges-only lift PASSED owner/API: R7 lift/sleeps2 at23:03:48.687909Z, no tap. Original failed lift retained. Nightstand dismissal and touch wake accepted. Glance window missed in mirrors; optical timing remains unproven. USB Nightstand sparse redraw proved: 3 redraws/120.250s, zero errors. Voice/manual re-mute, unplugged quiet HOME >=45-minute pair, natural default4h wake and battery-life acceptance pending in that order. |
+| Deck face | Offline source/tests committed c4681ad; excluded from target image | Projection 17 tests/34372 parses, bridge 51 tests. Live-worker and attention captures remain after companion acceptance. |
+
+The charged frozen-image A/B finishes before any new firmware flash. The
+historical 1800-second timer failure remains open; three 300-second successes
+do not close it. Software display transfer timing does not replace optical
+wake proof. No battery-life gain is accepted from voltage fits alone.
 
 1. **Correctness:** N6.1–N6.4.
 2. **The glass, content first:** N7.14–N7.16. The ring is live but two of its

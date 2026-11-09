@@ -1,0 +1,61 @@
+{
+  "method": {
+    "duration_s": 720,
+    "cadence_s": 15,
+    "settle_s": 120,
+    "samples": 49,
+    "brightness_cap": 65,
+    "brightness_actual": 14,
+    "volume": 95,
+    "fit": "OLS on six two-minute mean voltages; t(4)=2.776 conditional scatter and conservative 1 mV/block rounding bound",
+    "low_soc_note": "Starting SoC 19% violated the prior greater-than-20% window precondition. This attempt failed when battery saver changed mood/brightness. No complete idle fit exists; voltage/SoC slope is not energy or current."
+  },
+  "timers": {
+    "7578238": [
+      {
+        "run": 1,
+        "timer_s": 300,
+        "passed": true,
+        "wake_detected_by_api": true,
+        "seconds_to_api_back": 303.422,
+        "seconds_after_nominal_timer": 3.422,
+        "wake_reason": "timer",
+        "reset_reason": null,
+        "error": null
+      },
+      {
+        "run": 2,
+        "timer_s": 300,
+        "passed": true,
+        "wake_detected_by_api": true,
+        "seconds_to_api_back": 303.718,
+        "seconds_after_nominal_timer": 3.718,
+        "wake_reason": "timer",
+        "reset_reason": null,
+        "error": null
+      },
+      {
+        "run": 3,
+        "timer_s": 300,
+        "passed": true,
+        "wake_detected_by_api": true,
+        "seconds_to_api_back": 303.407,
+        "seconds_after_nominal_timer": 3.407,
+        "wake_reason": "timer",
+        "reset_reason": null,
+        "error": null
+      }
+    ]
+  },
+  "idle": {
+    "7578238": {
+      "complete": false,
+      "samples": 8
+    }
+  },
+  "status": "BLOCKED",
+  "gate": "idle-pair",
+  "reason": "Candidate idle changed to DREAM at 105.391 seconds; SoC 18%, below battery-only OTA minimum 30%. No OTA attempted.",
+  "final_image": "7578238",
+  "baseline_timer_fallback": "not triggered: candidate passed all three cycles"
+}

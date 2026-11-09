@@ -1,0 +1,34 @@
+{
+  "wall_utc": "2026-10-11T19:16:12Z",
+  "voice": {
+    "phase": "Idle",
+    "voice_armed": false,
+    "always_ready": true,
+    "privacy_paused": true,
+    "mood": "DREAM",
+    "brightness": 5,
+    "rtc": false,
+    "capturing": false,
+    "ws_connected": false,
+    "auto_idle_ms": 0,
+    "mic_rms": 0.0,
+    "clean_rms": 0.0,
+    "vad_clean": true,
+    "vad_starts": 0,
+    "audio_diag_running": false
+  },
+  "display": {
+    "init": "ready",
+    "actual_fps": 5,
+    "flush_completions": 4339,
+    "flush_errors": 0,
+    "requested_face": 6,
+    "applied_face": 6,
+    "choices_active": false,
+    "watch_style": "FUTURE",
+    "watch_design": "PRISM",
+    "sun_rise_min": 437,
+    "sun_set_min": 1136
+  },
+  "note": "Transient synthetic orientation; rendered mirror, not physical emission."
+}

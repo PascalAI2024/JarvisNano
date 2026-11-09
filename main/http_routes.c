@@ -10,6 +10,7 @@
  * handlers use stay static here.
  */
 #include "app.h"
+#include "jr_dsp/audio_power.h"
 
 /* THE FPS FLOOR FOLLOWS THE CADENCE. Health and probation both ask for a
  * live frame rate, but since 2026-09-02 the ladder deliberately renders at
@@ -504,6 +505,8 @@ static esp_err_t device_health_handler(httpd_req_t *req)
 
     jr_audio_playback_stats_t playback = {0};
     jr_audio_playback_stats(&playback);
+    jr_audio_power_stats_t audio_power = {0};
+    jr_audio_power_stats(&audio_power);
     jr_ws_rx_diag_t rx = {0};
     jr_gemini_ws_rx_diag(&rx);
 
@@ -534,13 +537,15 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         verdict = "tool-fault";
     }
 
-    char body[1280];
+    char body[1536];
     int n = snprintf(body, sizeof body,
         "{\"verdict\":\"%s\",\"repairable\":%s,"
         "\"privacy\":%s,\"flip_muted\":%s,\"operator\":%s,"
         "\"phase\":\"%s\",\"voice_alive\":%s,"
         "\"levels\":{\"volume\":%d,\"brightness_cap\":%u,"
         "\"brightness_actual\":%u},"
+        "\"audio_power\":{\"mic\":%s,\"adc\":%s,\"dac\":%s,\"pa\":%s,"
+        "\"reads\":%u,\"silent\":%u,\"failures\":%u},"
         "\"memory\":{\"largest_internal\":%u,\"free_psram\":%u},"
         "\"transport\":{\"would_block\":%u,\"drops\":%u,\"deaths\":%u},"
         "\"playback\":{\"underruns\":%u,\"max_gap_ms\":%u,"
@@ -560,6 +565,12 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         jr_state_name(phase), voice_alive ? "true" : "false",
         s_out_vol, (unsigned)s_brightness_cap,
         (unsigned)atomic_load(&s_mood_brightness),
+        audio_power.microphone_enabled ? "true" : "false",
+        audio_power.adc_open ? "true" : "false",
+        audio_power.dac_open ? "true" : "false",
+        audio_power.pa_on ? "true" : "false",
+        (unsigned)audio_power.hardware_reads, (unsigned)audio_power.silent_frames,
+        (unsigned)audio_power.failures,
         (unsigned)largest, (unsigned)free_psram,
         (unsigned)s_app.client.live.tx_would_block,
         (unsigned)s_app.client.live.tx_drops,
@@ -765,6 +776,14 @@ static esp_err_t audio_tap_wav_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    if (kind != JR_AUDIO_TAP_PLAYBACK &&
+        (atomic_load(&s_voice_privacy_paused) || s_flip_muted)) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"privacy muted\"}");
+        return ESP_OK;
+    }
+
     jr_audio_tap_info_t info;
     esp_err_t err = jr_audio_diag_get_info(kind, &info);
     size_t capacity = err == ESP_OK ? info.capacity_samples : 0U;
@@ -780,6 +799,15 @@ static esp_err_t audio_tap_wav_handler(httpd_req_t *req)
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req,
             "{\"available\":false,\"error\":\"audio tap empty\"}");
+        return ESP_OK;
+    }
+
+    if (kind != JR_AUDIO_TAP_PLAYBACK &&
+        (atomic_load(&s_voice_privacy_paused) || s_flip_muted)) {
+        heap_caps_free(pcm);
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"privacy muted\"}");
         return ESP_OK;
     }
 
@@ -813,6 +841,11 @@ static esp_err_t audio_tap_wav_handler(httpd_req_t *req)
         size_t chunk = data_bytes - sent;
         if (chunk > 4096U) {
             chunk = 4096U;
+        }
+        if (kind != JR_AUDIO_TAP_PLAYBACK &&
+            (atomic_load(&s_voice_privacy_paused) || s_flip_muted)) {
+            err = ESP_ERR_INVALID_STATE;
+            break;
         }
         err = httpd_resp_send_chunk(req, (const char *)bytes + sent, chunk);
         sent += chunk;
@@ -1067,6 +1100,91 @@ static esp_err_t hud_toggle_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, body, n);
     return ESP_OK;
+}
+
+/* The charge route copies only the sampler's fixed cache. Request input never
+ * chooses an address or starts I2C, and settings are limits, not current draw.
+ * Small chunks avoid a multi-kilobyte allocation from the TLS internal heap. */
+static esp_err_t power_charge_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req)) { return ESP_OK; }
+    jr_power_charge_t sample;
+    const esp_err_t read_error = jr_power_charge_read(&sample);
+    jr_power_charge_decoded_t decoded;
+    jr_power_charge_decode(&sample, &decoded);
+    char body[384];
+    int n = snprintf(body, sizeof body,
+        "{\"read_error\":\"%s\",\"complete\":%s,\"sample_seq\":%u,"
+        "\"age_ms\":%u,\"span_ms\":%u,\"started_ms\":%llu,\"completed_ms\":%llu,"
+        "\"atomic_snapshot\":false,\"measured_current\":false,\"registers\":[",
+        esp_err_to_name(read_error), sample.complete ? "true" : "false",
+        (unsigned)sample.sample_seq, (unsigned)sample.age_ms,
+        (unsigned)sample.span_ms, (unsigned long long)sample.started_ms,
+        (unsigned long long)sample.completed_ms);
+    if (n < 0 || (size_t)n >= sizeof body) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "charge encoding failed");
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t err = httpd_resp_send_chunk(req, body, (size_t)n);
+    if (err != ESP_OK) { return err; }
+    for (size_t i = 0; i < JR_POWER_CHARGE_REG_COUNT; ++i) {
+        const jr_power_charge_reg_t *reg = &sample.regs[i];
+        n = snprintf(body, sizeof body,
+            "%s{\"address\":%u,\"raw\":%u,\"attempted\":%s,\"read_ok\":%s,"
+            "\"available\":%s,\"has_success\":%s,\"error\":%ld,"
+            "\"attempt_age_ms\":%u,\"last_success_age_ms\":%u}",
+            i ? "," : "", (unsigned)reg->address, (unsigned)reg->raw,
+            reg->attempted ? "true" : "false", reg->read_ok ? "true" : "false",
+            reg->available ? "true" : "false", reg->has_success ? "true" : "false",
+            (long)reg->error, (unsigned)reg->attempt_age_ms,
+            (unsigned)reg->last_success_age_ms);
+        if (n < 0 || (size_t)n >= sizeof body) { return ESP_FAIL; }
+        err = httpd_resp_send_chunk(req, body, (size_t)n);
+        if (err != ESP_OK) { return err; }
+    }
+    err = httpd_resp_sendstr_chunk(req, "],\"decoded\":{");
+    if (err != ESP_OK) { return err; }
+    const struct {
+        const char *name;
+        jr_power_charge_value_t value;
+    } fields[] = {
+        {"usb_present", decoded.usb_present},
+        {"battery_present", decoded.battery_present},
+        {"thermal_regulation", decoded.thermal_regulation},
+        {"current_limited", decoded.current_limited},
+        {"direction", decoded.direction},
+        {"charge_phase", decoded.charge_phase},
+        {"vindpm_active", decoded.vindpm_active},
+        {"vindpm_millivolts", decoded.vindpm_millivolts},
+        {"input_limit_milliamps", decoded.input_limit_milliamps},
+        {"charge_enabled", decoded.charge_enabled},
+        {"precharge_milliamps", decoded.precharge_milliamps},
+        {"constant_current_milliamps", decoded.constant_current_milliamps},
+        {"termination_enabled", decoded.termination_enabled},
+        {"termination_milliamps", decoded.termination_milliamps},
+        {"cv_millivolts", decoded.cv_millivolts},
+        {"thermal_threshold_c", decoded.thermal_threshold_c},
+        {"precharge_timeout_enabled", decoded.precharge_timeout_enabled},
+        {"precharge_timeout_minutes", decoded.precharge_timeout_minutes},
+        {"charge_timeout_enabled", decoded.charge_timeout_enabled},
+        {"charge_timeout_hours", decoded.charge_timeout_hours},
+        {"timeout_slows_when_limited", decoded.timeout_slows_when_limited},
+    };
+    for (size_t i = 0; i < sizeof fields / sizeof fields[0]; ++i) {
+        char value[16] = "null";
+        if (fields[i].value.available) {
+            (void)snprintf(value, sizeof value, "%u", (unsigned)fields[i].value.value);
+        }
+        n = snprintf(body, sizeof body, "%s\"%s\":%s",
+                     i ? "," : "", fields[i].name, value);
+        if (n < 0 || (size_t)n >= sizeof body) { return ESP_FAIL; }
+        err = httpd_resp_send_chunk(req, body, (size_t)n);
+        if (err != ESP_OK) { return err; }
+    }
+    err = httpd_resp_sendstr_chunk(req, "}}");
+    return err == ESP_OK ? httpd_resp_send_chunk(req, NULL, 0) : err;
 }
 
 static esp_err_t sensors_handler(httpd_req_t *req)
@@ -2866,7 +2984,7 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
     static const char *init_names[] = { "stopped", "starting", "ready", "failed" };
     const char *init_name = d.init_state <= JR_DISPLAY_INIT_FAILED
                                 ? init_names[d.init_state] : "?";
-    char buf[640];
+    char buf[1024];
     int n = snprintf(buf, sizeof buf,
         "{\"init\":\"%s\",\"last_error\":\"%s\",\"task_running\":%s,"
         "\"blanked\":%s,\"requested_face\":%d,\"applied_face\":%d,"
@@ -2875,7 +2993,14 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         "\"asset_load_failures\":%u,\"flush_submissions\":%u,"
         "\"flush_completions\":%u,\"flush_errors\":%u,\"actual_fps\":%u,"
         "\"render_us\":%u,\"render_frames\":%u,\"render_frame_us\":%u,"
-        "\"current_asset_bytes\":%u,\"free_psram\":%u,\"stack_hwm\":%u}",
+        "\"current_asset_bytes\":%u,\"free_psram\":%u,\"stack_hwm\":%u,"
+        "\"boot_timing\":{\"time_base\":\"esp_timer_since_boot\","
+        "\"optical\":false,\"includes_rom\":false,"
+        "\"init_started\":%s,\"init_finished\":%s,\"first_transfer_valid\":%s,"
+        "\"init_start_boot_ms\":%u,\"init_end_boot_ms\":%u,"
+        "\"first_transfer_done_boot_ms\":%u,"
+        "\"first_glance_time_transfer_valid\":%s,"
+        "\"first_glance_time_transfer_done_boot_ms\":%u}}",
         init_name, esp_err_to_name(d.last_error),
         d.task_running ? "true" : "false",
         d.blanked ? "true" : "false",
@@ -2888,15 +3013,22 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         (unsigned)d.render_us, (unsigned)d.render_frames,
         (unsigned)d.render_frame_us,
         (unsigned)d.current_asset_bytes, (unsigned)d.free_psram_bytes,
-        (unsigned)d.task_stack_hwm);
-    if (n < 0) {
+        (unsigned)d.task_stack_hwm,
+        d.boot_timing.init_started ? "true" : "false",
+        d.boot_timing.init_finished ? "true" : "false",
+        d.boot_timing.first_transfer_valid ? "true" : "false",
+        (unsigned)d.boot_timing.init_start_boot_ms,
+        (unsigned)d.boot_timing.init_end_boot_ms,
+        (unsigned)d.boot_timing.first_transfer_done_boot_ms,
+        d.boot_timing.first_glance_time_transfer_valid ? "true" : "false",
+        (unsigned)d.boot_timing.first_glance_time_transfer_done_boot_ms);
+    if (n < 0 || (size_t)n >= sizeof buf) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "encoding failed");
         return ESP_OK;
     }
-    size_t len = (size_t)n < sizeof buf ? (size_t)n : sizeof buf - 1;
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    httpd_resp_send(req, buf, len);
+    httpd_resp_send(req, buf, (size_t)n);
     return ESP_OK;
 }
 
@@ -3203,9 +3335,41 @@ static esp_err_t logs_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* Sleep retains this same lock from its final admission through the reboot.
+ * Publishing active before releasing it makes all subsequent OTA work a
+ * sleep veto; no bus, flash or response operation runs inside this section. */
+static esp_err_t ota_admit_upload(uint32_t *started_ms,
+                                  uint32_t *previous_lease_until_ms,
+                                  bool *was_privacy_paused)
+{
+    if (s_brain_lock == NULL ||
+        xSemaphoreTake(s_brain_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    if (atomic_load(&s_ota_active)) {
+        xSemaphoreGive(s_brain_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    *started_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    *previous_lease_until_ms = atomic_load(&s_operator_lease_until_ms);
+    *was_privacy_paused = atomic_load(&s_voice_privacy_paused);
+    atomic_store(&s_ota_active, true);
+    atomic_store(&s_operator_lease_until_ms, *started_ms + 180000U);
+    atomic_store(&s_voice_control_request, VOICE_CONTROL_PAUSE);
+    xSemaphoreGive(s_brain_lock);
+    return ESP_OK;
+}
+
 static void ota_restore_control_state(bool was_privacy_paused,
                                       uint32_t previous_lease_until_ms)
 {
+    /* Active stays true until lease restoration is complete. Sleep therefore
+     * cannot reserve the lock between clearing active and restoring a lease. */
+    if (s_brain_lock == NULL ||
+        xSemaphoreTake(s_brain_lock, portMAX_DELAY) != pdTRUE) {
+        ESP_LOGW(TAG, "ota: control restoration unavailable; update veto retained");
+        return;
+    }
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
     /* Privacy is fail-closed: never arm if voice was private before OTA or a
      * physical gesture made it private while the upload was running. */
@@ -3221,6 +3385,8 @@ static void ota_restore_control_state(bool was_privacy_paused,
                      (int32_t)(previous_lease_until_ms - now) > 0
                          ? previous_lease_until_ms : 0U);
     }
+    atomic_store(&s_ota_active, false);
+    xSemaphoreGive(s_brain_lock);
 }
 
 bool ota_confirm_running_image_if_healthy(void)
@@ -3309,7 +3475,6 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
         return ESP_OK;
     }
     const size_t len = req->content_len;
-    atomic_store(&s_ota_active, false);
     atomic_store(&s_ota_received_bytes, 0U);
     atomic_store(&s_ota_total_bytes, (uint32_t)len);
     if (len < 256U * 1024U || len > 0x400000U) {
@@ -3338,17 +3503,19 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
         return ESP_OK;
     }
     const esp_partition_t *next = preflight.target;
-    const uint32_t upload_started_ms =
-        (uint32_t)(esp_timer_get_time() / 1000);
+    uint32_t upload_started_ms = 0U;
+    uint32_t previous_lease_until_ms = 0U;
+    bool was_privacy_paused = true;
+    const esp_err_t admission = ota_admit_upload(
+        &upload_started_ms, &previous_lease_until_ms, &was_privacy_paused);
+    if (admission != ESP_OK) {
+        httpd_resp_set_status(req, admission == ESP_ERR_TIMEOUT
+            ? "503 Service Unavailable" : "409 Conflict");
+        httpd_resp_sendstr(req, "update admission unavailable");
+        return ESP_OK;
+    }
     const uint32_t upload_deadline_ms = upload_started_ms + 240000U;
-    const uint32_t previous_lease_until_ms =
-        atomic_load(&s_operator_lease_until_ms);
-    const bool was_privacy_paused =
-        atomic_load(&s_voice_privacy_paused);
     atomic_store(&s_ota_last_error, ESP_OK);
-    atomic_store(&s_ota_active, true);
-    atomic_store(&s_operator_lease_until_ms, upload_started_ms + 180000U);
-    atomic_store(&s_voice_control_request, VOICE_CONTROL_PAUSE);
     jr_display_caption_pin("UPDATING - DO NOT UNPLUG");
     ESP_LOGI(TAG, "ota: receiving %u bytes into %s", (unsigned)len,
              next->label);
@@ -3356,7 +3523,6 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     esp_ota_handle_t ota = 0;
     esp_err_t err = esp_ota_begin(next, len, &ota);
     if (err != ESP_OK) {
-        atomic_store(&s_ota_active, false);
         atomic_store(&s_ota_last_error, err);
         jr_display_caption_unpin();
         jr_display_caption_set("UPDATE FAILED - STILL ON OLD");
@@ -3429,7 +3595,6 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
         err = esp_ota_set_boot_partition(next);
     }
     if (err != ESP_OK) {
-        atomic_store(&s_ota_active, false);
         atomic_store(&s_ota_last_error, err);
         jr_display_ota_set(
             JR_DISPLAY_OTA_FAILED,
@@ -3493,16 +3658,20 @@ static esp_err_t ota_assets_handler(httpd_req_t *req)
                             "art image must be between 1 MiB and the partition size");
         return ESP_OK;
     }
-    const uint32_t started_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    uint32_t started_ms = 0U;
+    uint32_t previous_lease_until_ms = 0U;
+    bool was_privacy_paused = true;
+    const esp_err_t admission = ota_admit_upload(
+        &started_ms, &previous_lease_until_ms, &was_privacy_paused);
+    if (admission != ESP_OK) {
+        httpd_resp_set_status(req, admission == ESP_ERR_TIMEOUT
+            ? "503 Service Unavailable" : "409 Conflict");
+        httpd_resp_sendstr(req, "update admission unavailable");
+        return ESP_OK;
+    }
     const uint32_t deadline_ms = started_ms + 420000U;
-    const uint32_t previous_lease_until_ms =
-        atomic_load(&s_operator_lease_until_ms);
-    const bool was_privacy_paused = atomic_load(&s_voice_privacy_paused);
-    atomic_store(&s_ota_active, true);
     atomic_store(&s_ota_received_bytes, 0U);
     atomic_store(&s_ota_total_bytes, (uint32_t)len);
-    atomic_store(&s_operator_lease_until_ms, started_ms + 180000U);
-    atomic_store(&s_voice_control_request, VOICE_CONTROL_PAUSE);
     jr_display_caption_pin("UPDATING ART - DO NOT UNPLUG");
     ESP_LOGI(TAG, "art: receiving %u bytes into %s (%u bytes)", (unsigned)len,
              part->label, (unsigned)part->size);
@@ -3546,7 +3715,6 @@ static esp_err_t ota_assets_handler(httpd_req_t *req)
     if (err == ESP_OK && got != len) {
         err = ESP_FAIL;
     }
-    atomic_store(&s_ota_active, false);
     atomic_store(&s_ota_last_error, err);
     if (err != ESP_OK) {
         jr_display_caption_unpin();
@@ -3681,6 +3849,22 @@ static void companion_audio_window_headers(
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 }
 
+static bool companion_microphone_privacy_rejected(httpd_req_t *req)
+{
+    jr_audio_power_stats_t power;
+    jr_audio_power_stats(&power);
+    if (jr_audio_microphone_export_allowed(
+            atomic_load(&s_voice_privacy_paused), s_flip_muted,
+            power.microphone_enabled)) {
+        return false;
+    }
+    httpd_resp_set_status(req, "423 Locked");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req,
+        "{\"ok\":false,\"error\":\"physical microphone privacy is active\"}");
+    return true;
+}
+
 /* GET /api/companion/audio/in — bounded cursor reads from the sole clean-mic
  * tap. The absolute cursor makes ring overrun observable instead of silently
  * stitching unrelated audio together. */
@@ -3735,6 +3919,10 @@ static esp_err_t companion_audio_in_handler(httpd_req_t *req)
     esp_err_t err = jr_audio_diag_copy_since(
         JR_AUDIO_TAP_MIC_CLEAN, after, latest, pcm,
         latest ? 0U : max_samples, &window);
+    if (companion_microphone_privacy_rejected(req)) {
+        heap_caps_free(pcm);
+        return ESP_OK;
+    }
     if (err != ESP_OK) {
         heap_caps_free(pcm);
         httpd_resp_set_status(req,
@@ -3764,10 +3952,15 @@ static esp_err_t companion_audio_in_handler(httpd_req_t *req)
     companion_audio_window_headers(req, &window);
     if (window.copied_samples == 0U) {
         heap_caps_free(pcm);
+        if (companion_microphone_privacy_rejected(req)) return ESP_OK;
         httpd_resp_set_status(req, "204 No Content");
         return httpd_resp_send(req, NULL, 0);
     }
     httpd_resp_set_type(req, "application/octet-stream");
+    if (companion_microphone_privacy_rejected(req)) {
+        heap_caps_free(pcm);
+        return ESP_OK;
+    }
     err = httpd_resp_send(req, (const char *)pcm,
                           window.copied_samples * sizeof(int16_t));
     heap_caps_free(pcm);
@@ -4449,6 +4642,7 @@ void start_diag_http(void)
         { .uri = "/api/companion/audio/out", .method = HTTP_POST,
           .handler = companion_audio_out_handler },
         { .uri = "/api/display",     .method = HTTP_GET, .handler = display_diag_handler },
+        { .uri = "/api/power/charge", .method = HTTP_GET, .handler = power_charge_handler },
         { .uri = "/api/diag/vadlog", .method = HTTP_GET, .handler = vadlog_csv_handler },
         { .uri = "/api/device/health", .method = HTTP_GET,
           .handler = device_health_handler },

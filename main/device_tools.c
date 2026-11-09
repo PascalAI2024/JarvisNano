@@ -50,9 +50,6 @@ const char *device_tool_last_name(void)
  * would drag Wi-Fi out of min-modem during rest. */
 #define LOCAL_WEATHER_CALL_ID   0x4C574558u          /* "LWEX" */
 #define LOCAL_WEATHER_CALL_TEXT "local:weather"
-#define WEATHER_REFRESH_MS      600000u
-#define WEATHER_RETRY_MS        120000u   /* after a failure, from any screen */
-#define WEATHER_FIRST_FETCH_MS  20000u
 static uint32_t s_weather_last_fetch_ms;   /* app task only; 0 = never */
 static bool     s_weather_inflight;        /* app task only */
 static bool     s_weather_failed;          /* app task only; the last fetch brought nothing */
@@ -68,7 +65,6 @@ _Static_assert(JR_DISPLAY_RAIN_HOURS == JR_RAIN_HOURS &&
                JR_RAIN_PP_UNKNOWN == 255, "the glass reads the glance's hours as-is");
 static bool           s_wx_rain_valid;     /* app task only */
 static jr_rain_warn_t s_rain_warn = { .armed = true };
-#define WEATHER_IDLE_REFRESH_MS 1800000u   /* awake or ambient, any screen: keep the cell honest */
 jr_display_weather_t s_weather;     /* last good data; app task only */
 
 static jr_display_sky_t weather_sky_from(const char *cond)
@@ -280,32 +276,15 @@ void weather_maybe_fetch(uint32_t now)
     }
     const bool first = s_weather_last_fetch_ms == 0U;
     const bool on_screen = jr_display_nav_space() == JR_DISPLAY_SPACE_WEATHER;
-    const uint32_t since = now - s_weather_last_fetch_ms;
-    /* A good glass refreshes only when looked at. A failed fetch (an upstream
-     * outage took the first one on 2026-09-02 and left NO WEATHER for ten
-     * minutes) is retried from any screen, at the board poll's cadence and
-     * behind its gates: never in DREAM, never without the network. */
-    /* Since the watch shows the weather and the rain latch reads the hours,
-     * an AWAKE or AMBIENT device also refreshes every thirty minutes from
-     * any screen (2026-09-05); WHISPER and DREAM still never fetch, so rest
-     * never drags Wi-Fi out of min-modem. */
-    const uint8_t mood = atomic_load(&s_mood_id);
-    const bool lit = mood == (uint8_t)JR_MOOD_AWAKE || mood == (uint8_t)JR_MOOD_AMBIENT;
-    const bool due = first          ? now >= WEATHER_FIRST_FETCH_MS
-                     : s_weather_failed ? since >= WEATHER_RETRY_MS
-                                        : (on_screen && since >= WEATHER_REFRESH_MS) ||
-                                          (lit && since >= WEATHER_IDLE_REFRESH_MS);
-    if (!due) {
+    /* All roads, including first hydration and retries, share the same rest
+     * and network gates. A stale watch cell is cheaper than a sleeping radio
+     * repeatedly attempting a fetch that cannot reach the network. */
+    jr_net_status_t net = {0};
+    const bool connected = jr_net_get_status(&net) == ESP_OK && net.sta_connected;
+    if (!jr_mood_weather_due((jr_mood_t)atomic_load(&s_mood_id), connected,
+                             now, s_weather_last_fetch_ms,
+                             s_weather_failed, on_screen)) {
         return;
-    }
-    if (!first) {
-        if (mood == (uint8_t)JR_MOOD_DREAM) {
-            return;
-        }
-        jr_net_status_t net = {0};
-        if (jr_net_get_status(&net) != ESP_OK || !net.sta_connected) {
-            return;
-        }
     }
     jr_tool_job_t job = {
         .call_id = LOCAL_WEATHER_CALL_ID,

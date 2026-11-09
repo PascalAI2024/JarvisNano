@@ -1,0 +1,58 @@
+{
+  "7578238-timer-1.json": {
+    "sha256": "cc5d1d41000117816ac90757e0838c516c3b078e7fd5e19155ca91b462a3fedf",
+    "bytes": 6262
+  },
+  "7578238-timer-2.json": {
+    "sha256": "ea2e133c8d6fa1302380d81a60df5503eb908462e75d53fff50aff2cd8d2b754",
+    "bytes": 6261
+  },
+  "7578238-timer-3.json": {
+    "sha256": "9573f955b1581d46d2f383d282465927c7282ebfa055315279e5e7ba3bdd7d14",
+    "bytes": 6261
+  },
+  "7578238-timers.json": {
+    "sha256": "4b5f6f43eb6f428e93a7d2875439d8e0a77fcda332991cb4ff44eb7cbcfee994",
+    "bytes": 20382
+  },
+  "7578238-idle.jsonl": {
+    "sha256": "9530be6d1766784e601c3d32991db420165ec8e0bf5cb744b0f6591b0340b3fc",
+    "bytes": 8969
+  },
+  "7578238-idle.png": {
+    "sha256": "ccb1ba467f4027b6bd7015ceb1bab38661bc473a1d2bb3a90ab861ca86a3a94d",
+    "bytes": 10215
+  },
+  "7578238-idle-start.json": {
+    "sha256": "e149318e6d9b1a459899da2b19d5aaec1c288b0d26a0a78d48242ffc8cdc5d1d",
+    "bytes": 2222
+  },
+  "7578238-final.json": {
+    "sha256": "b6444f95c4e1a0b2d4a679039351b593e351efe3fa648a3deed207d7a990c417",
+    "bytes": 2220
+  },
+  "images.json": {
+    "sha256": "9cbeda97542fbee4dc87e5226dc857a13ee43ade7cbc3aea4a9dcf91b911ce20",
+    "bytes": 1020
+  },
+  "summary.json": {
+    "sha256": "2d9407c52738a6ee80729353e004eb35fb61cfd084dbaaa27be04c2b529023c6",
+    "bytes": 1881
+  },
+  "idle-failure.json": {
+    "sha256": "a1398edc2a9cef58ff742aba1296e10919f09b1d8af05af391c6a56cead5892e",
+    "bytes": 377
+  },
+  "instrumented-harness.py": {
+    "sha256": "fe2d2b900bb7b4eb7789bcea936ace6b91f3dd407f5f3d10a479c815b6447796",
+    "bytes": 8958
+  },
+  "device_lib.py": {
+    "sha256": "40305d8223b40874a32e0779f9fa9f3832fb82930f5ee339c1c39fa1e896bd1a",
+    "bytes": 1158
+  },
+  "analysis.py": {
+    "sha256": "2ee6f4352173baca0ab8dc8a156a56195c8298e06b09942a228837fbd2c82c60",
+    "bytes": 2412
+  }
+}

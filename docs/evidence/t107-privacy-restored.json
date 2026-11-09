@@ -1,0 +1,149 @@
+{
+  "recorded_utc": "2026-10-13T05:02:25.643853+00:00",
+  "branch": "t107/codex",
+  "source_commit": "343e51ce2d43fc70f5ebea4e40ebfb9b86d50cb5",
+  "status": "DONE_MUTED_AND_CAPTURED",
+  "finished_utc": "2026-10-13T04:44:17.167581+00:00",
+  "first_authenticated_health_utc": "2026-10-13T04:44:15.729510+00:00",
+  "first_authenticated_health_already_muted": true,
+  "software_mute_request_utc": "2026-10-13T04:44:15.738705+00:00",
+  "software_mute_acknowledged_utc": "2026-10-13T04:44:15.843564+00:00",
+  "software_mute_acknowledgement": {
+    "ok": true,
+    "queued": true,
+    "armed": false
+  },
+  "only_watcher_device_write": "POST /api/voice/control?armed=0",
+  "muted_verified_utc": "2026-10-13T04:44:16.045146+00:00",
+  "privacy_muted_at_verification": true,
+  "capturing_at_verification": false,
+  "voice_armed_at_verification": false,
+  "audio_power_at_verification": {
+    "mic": false,
+    "adc": false,
+    "dac": false,
+    "pa": false
+  },
+  "ota_at_verification": {
+    "running": "ota_1",
+    "boot": "ota_1",
+    "state": "valid"
+  },
+  "muted_after_screen_capture": true,
+  "screen": {
+    "captured_utc": "2026-10-13T04:44:17.068961+00:00",
+    "metadata": {
+      "available": true,
+      "capture_source": "panel_submission_mirror",
+      "panel_readback": false,
+      "width": 466,
+      "height": 466,
+      "bytes": 434312,
+      "frame_id": 1,
+      "last_flush_ms": 18789,
+      "valid": true,
+      "mirror_fresh": true,
+      "test_pattern": "off"
+    },
+    "file": "t107-privacy-restored.png",
+    "png_sha256": "7b09c1dbdc1ee49414721ef503cf12ae67ca28c2b150b33a9e9e601d6f16ce5b",
+    "native_rgb565_sha256": "372273bc97950fd3226d8d4f923eadf23ea77df9f919e9c058bfbfb2de3d5a48",
+    "opened_and_visually_reviewed": true,
+    "observation": "WATCH face with visible gold privacy ring",
+    "limit": "Panel-submission mirror, not optical glass readback"
+  },
+  "privacy_confirmation_gap": {
+    "requested_start_utc": "2026-10-12T23:33:00Z",
+    "requested_end_utc": "2026-10-13T04:44:17.167581+00:00",
+    "duration_s": 18677.167581,
+    "last_verified_unmuted_utc": "2026-10-12T23:32:09.135603+00:00",
+    "actual_mute_transition_time": null,
+    "continuous_listening_during_gap_established": false,
+    "limit": "API unavailable; earlier safe-mute request had no acknowledgement. First returned health was already muted."
+  },
+  "watcher": {
+    "pid": 64308,
+    "process_exited_verified": true,
+    "started_utc": "2026-10-13T01:11:31.028292+00:00",
+    "poll_interval_s": 15,
+    "maximum_runtime_s": 36000,
+    "probes": 852,
+    "mute_attempts": 1,
+    "gap_to_first_authenticated_health_s": 12764.701218,
+    "preceding_transport_errors": 850,
+    "preceding_http_404": 1,
+    "stderr_empty": true
+  },
+  "timer_gap_assessment": {
+    "natural_timer_s": 14400,
+    "forced_debug_timer_s_in_prior_lift_test": 1800,
+    "forced_timer_changes_natural_default": false,
+    "natural_path_source": [
+      "main/app.h:SLEEP_TIMER_WAKE_S",
+      "main/main.c:jr_mood_sleep_due branch",
+      "main/power.c:enter_deep_sleep timer arming"
+    ],
+    "timer_boot_policy": "Keeps boot privacy default muted; resumes DREAM",
+    "assessment": "3h32m45s of API unavailability fits a natural four-hour sleep interval; hardware wake absence cannot be inferred from unavailable HTTP.",
+    "actual_sleep_entry_utc": null,
+    "wake_cause": null,
+    "reset_reason": null,
+    "sleep_counter": null,
+    "timer_wake_proven": false,
+    "natural_default_4h_acceptance": "PENDING",
+    "regression_established_by_this_gap": false
+  },
+  "follow_up_read_only": {
+    "utc_start": "2026-10-13T04:59:49.668753+00:00",
+    "utc_end": "2026-10-13T05:00:09.763153+00:00",
+    "requests": {
+      "sleep": {
+        "utc": "2026-10-13T04:59:53.699951+00:00",
+        "ok": false,
+        "error_type": "URLError"
+      },
+      "cockpit": {
+        "utc": "2026-10-13T04:59:57.721412+00:00",
+        "ok": false,
+        "error_type": "URLError"
+      },
+      "health": {
+        "utc": "2026-10-13T05:00:01.736458+00:00",
+        "ok": false,
+        "error_type": "URLError"
+      },
+      "device": {
+        "utc": "2026-10-13T05:00:05.752249+00:00",
+        "ok": false,
+        "error_type": "URLError"
+      },
+      "logs": {
+        "utc": "2026-10-13T05:00:09.763153+00:00",
+        "ok": false,
+        "error_type": "URLError"
+      }
+    },
+    "limit": "All requests timed out; 04:44Z verification is historical, not a fresh state readback at handoff."
+  },
+  "voice_acceptance_current_image": "PARKED_OWNER_PENDING",
+  "drain_started": false,
+  "natural_timer_acceptance_run_started": false,
+  "remaining_order": [
+    "Owner manual unmute, one spoken turn and re-mute with API confirmation",
+    "Fresh matched unplugged HOME drain windows >=45 minutes each",
+    "Unattended natural ladder/default four-hour timer",
+    "C2 after C1 acceptance"
+  ],
+  "private_evidence_sha256": {
+    "step6-mute-on-wake-r1-result.json": "697a03eb31cb5b633d01c792080d1844d3058d7523dacb265cdb24d97eed4088",
+    "step6-mute-on-wake-r1-events.jsonl": "057b38665113dde7377f812e37ff6e9f594ae96ffa69b73dc8cb57e9b50690ce",
+    "step6-mute-on-wake-r1-first-api.json": "8e15e3d2c86d130023f92a06ca3a865d4356b8cecfbb39328b87ae4f7285109f",
+    "step6-mute-on-wake-r1-mute-attempt-1.json": "f886bbf7de24a1f71358ba227824a48d34f021d7a4ee983a32cd4c719223fd35",
+    "step6-mute-on-wake-r1-verified-muted.json": "91eab355fa7957664db9d7b542156c5feec97dfe13e11ebed2026c9c7a523c64",
+    "step6-mute-on-wake-r1-muted.png": "7b09c1dbdc1ee49414721ef503cf12ae67ca28c2b150b33a9e9e601d6f16ce5b",
+    "step6-mute-on-wake-r1-muted.rgb565": "372273bc97950fd3226d8d4f923eadf23ea77df9f919e9c058bfbfb2de3d5a48",
+    "step6-mute-on-wake-r1-stdout.log": "edf57f3086d1f42ae5bc1a08a1556dca2c64bf139e373bade12a071480488975",
+    "step6-mute-on-wake-r1-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "step6-mute-on-wake-completion-readback.json": "3f459e1a40aca9f8a483fc30e1ab426bb1963c8c2c3a42decfbf5bdd681962e0"
+  }
+}

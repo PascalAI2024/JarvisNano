@@ -31,9 +31,18 @@
  * 12-row strips (466 = 38*12 + 10, ragged tail), so any y-dependent state that
  * leaks between calls shows up on glass as a seam and nowhere else.
  */
+#include <stdint.h>
+/* Host-only scheduler seam: inject an opposite request exactly before a CAS.
+ * The actual intrinsic still executes, with no firmware hook/state/API. */
+static void (*s_before_cas)(volatile void *address, uintptr_t desired);
+#define __atomic_compare_exchange_n(p,e,d,w,s,f) __extension__ ({ \
+    if (s_before_cas) { s_before_cas((volatile void *)(p), (uintptr_t)(d)); } \
+    __atomic_compare_exchange_n(p,e,d,w,s,f); })
 #include "jr_display.c"
+#undef __atomic_compare_exchange_n
 
 #include <assert.h>
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -591,7 +600,6 @@ static void test_missing_clip_falls_back_to_the_face_it_grew_from(void)
 static void test_dial_decodes_once_and_blits_every_strip(void)
 {
     jr_display_ctx_t *ctx = &s_display;
-    static uint8_t fake_clip[32];
     ctx->board.width = HUD_W;
     ctx->board.height = HUD_H;
     ctx->board.swap_color_bytes = false;
@@ -600,17 +608,19 @@ static void test_dial_decodes_once_and_blits_every_strip(void)
     s_dial_blit = false;
     s_stub_eaf_decodes = 0;
     ctx->missing_faces = 0;
-    ctx->clips[JR_FACE_DIAL_DIVER].data = fake_clip;
-    ctx->clips[JR_FACE_DIAL_DIVER].size = sizeof fake_clip;
-    ctx->clips[JR_FACE_DIAL_DRESS].data = fake_clip;
-    ctx->clips[JR_FACE_DIAL_DRESS].size = sizeof fake_clip;
+    ctx->clips[JR_FACE_DIAL_DIVER] = (jr_display_clip_t){
+        heap_caps_malloc(32U, MALLOC_CAP_SPIRAM), 32U, 8U, 7U };
+    ctx->clips[JR_FACE_DIAL_DRESS] = (jr_display_clip_t){
+        heap_caps_malloc(32U, MALLOC_CAP_SPIRAM), 32U, 8U, 7U };
 
     CHECK(!dial_show(ctx, JR_FACE_IDLE), "a face that is not a dial stays on the anim");
     CHECK(!s_dial_blit && s_stub_eaf_decodes == 0, "and decodes nothing");
 
     CHECK(dial_show(ctx, JR_FACE_DIAL_DIVER), "a resident dial goes to the blit");
     CHECK(s_dial_blit && ctx->shown_face == JR_FACE_DIAL_DIVER &&
-          ctx->active == NULL, "blit on, dial shown, no anim bound");
+          ctx->active == NULL, "blit on, dial shown, no visible anim");
+    CHECK(ctx->clips[JR_FACE_DIAL_DIVER].data == NULL,
+          "successfully decoded unbound dial releases its compressed source");
     CHECK(dial_show(ctx, JR_FACE_DIAL_DIVER), "again");
     CHECK(s_stub_eaf_decodes == 1, "the same dial is decoded once, got %d",
           s_stub_eaf_decodes);
@@ -637,6 +647,8 @@ static void test_dial_decodes_once_and_blits_every_strip(void)
     s_dial_frame_face = JR_FACE_COUNT;
     s_dial_blit = false;
     s_stub_eaf_head.width = 400;
+    ctx->clips[JR_FACE_DIAL_DIVER] = (jr_display_clip_t){
+        heap_caps_malloc(32U, MALLOC_CAP_SPIRAM), 32U, 8U, 7U };
     CHECK(!dial_show(ctx, JR_FACE_DIAL_DIVER) && !s_dial_blit,
           "a dial that is not panel-sized stays on the anim");
     s_stub_eaf_head.width = HUD_W;
@@ -644,9 +656,9 @@ static void test_dial_decodes_once_and_blits_every_strip(void)
     CHECK(!dial_show(ctx, JR_FACE_DIAL_DIVER), "a missing clip keeps its fallback");
 
     ctx->missing_faces = 0;
-    ctx->clips[JR_FACE_DIAL_DIVER].data = NULL;
-    ctx->clips[JR_FACE_DIAL_DRESS].data = NULL;
-    free(s_dial_frame);
+    heap_caps_free(ctx->clips[JR_FACE_DIAL_DIVER].data);
+    memset(&ctx->clips[JR_FACE_DIAL_DIVER], 0, sizeof ctx->clips[0]);
+    heap_caps_free(s_dial_frame);
     s_dial_frame = NULL;
     s_dial_frame_face = JR_FACE_COUNT;
     s_dial_blit = false;
@@ -2824,6 +2836,1453 @@ static void test_every_face_has_a_clip_and_a_hud_face(void)
           (unsigned)face_fps(JR_FACE_MUTED));
 }
 
+/* N8.12 exercises the production intent, presenter and strip seams. No test
+ * reimplementation stands in for the stopped-emote or refresh decisions. */
+static void dream_fixture(void)
+{
+    static uint8_t clip[32];
+    reset_nav();
+    s_display.task = (TaskHandle_t)1;
+    s_display.gfx = (gfx_handle_t)1;
+    s_display.disp = (gfx_disp_t *)1;
+    s_display.anim = (gfx_obj_t *)1;
+    s_display.board.width = HUD_W;
+    s_display.board.height = HUD_H;
+    s_display.board.panel = (esp_lcd_panel_handle_t)1;
+    s_display.board.swap_color_bytes = false;
+    s_display.clips[JR_FACE_RESTING] = (jr_display_clip_t){ clip, sizeof clip, 8U, 7U };
+    s_display.active = &s_display.clips[JR_FACE_RESTING];
+    s_display.loaded_face = s_display.shown_face = JR_FACE_RESTING;
+    s_display.last_end = 7;
+    s_display.blanked = false;
+    s_display.dream_active = false;
+    s_display.quiet_active = false;
+    s_display.panel_touched = s_display.panel_prepared = false;
+    s_display.panel_sleep_attempted = false;
+    memset(s_display.transfer_tags, 0, sizeof s_display.transfer_tags);
+    s_display.transfer_head = s_display.transfer_tail = 0U;
+    s_display.first_glance_time_transfer_state = 0U;
+    s_display.first_glance_time_transfer_done_boot_ms = 0U;
+    s_display.requested_word = (uint32_t)JR_FACE_RESTING << JR_DISPLAY_CMD_FACE_SHIFT;
+    s_display.applied_face = JR_FACE_RESTING;
+    s_display.requested_amplitude = 0U;
+    s_display.test_pattern = JR_DISPLAY_TEST_OFF;
+    s_display.snapshot_refresh_requested = 0U;
+    s_display.apply_retry_gate_ms = 0U;
+    s_hud_env_word = 0xffu;
+    s_hud_enabled = 1U;
+    s_choice_n = 0;
+    s_commit_pct = 0U;
+    s_ripple_start_ms = s_bloom_start_ms = 0U;
+    s_canvas_until_ms = 0U;
+    s_surface_active = false;
+    s_caption_on = 0;
+    atomic_store(&s_caption_pinned, false);
+    s_panel_off = 0U;
+    s_panel_on_ack_valid = 0U;
+    s_panel_on_ack_word = 0U;
+    s_detail_ease = s_shade_ease = s_ask_ease = s_canvas_ease = 0;
+    s_stub_brightness_error = s_stub_on_error = s_stub_off_error = ESP_OK;
+    s_stub_sleep_in_error = s_stub_sleep_out_error = s_stub_draw_error = ESP_OK;
+    s_stub_brightness_calls = s_stub_on_calls = s_stub_off_calls = 0U;
+    s_stub_sleep_in_calls = s_stub_sleep_out_calls = s_stub_draw_calls = 0U;
+    s_stub_draw_hook = s_stub_delay_hook = NULL;
+    s_power_word = 74U;
+    s_ota_word = JR_DISPLAY_OTA_IDLE;
+    s_clock_word = 0U;
+    s_brightness_want = 8U;
+    atomic_store(&s_brightness_have, 8U);
+    atomic_store(&s_brightness_shown, 8);
+    s_render_fps = 2U;
+    s_fake_us = 1000000;
+    jr_display_set_hud_env(74U, false, true, 0, 0);
+    jr_display_dream_set(true);
+    jr_display_caption_set("ASLEEP. TAP TO WAKE");
+    s_stub_notifies = s_stub_refreshes = 0U;
+    s_stub_anim_starts = s_stub_anim_stops = 0U;
+    s_stub_anim_visible = true;
+    s_dial_blit = false;
+}
+
+static void test_dream_intent_preserves_env_and_ignores_unchanged_publish(void)
+{
+    dream_fixture();
+    jr_display_set_hud_env(61U, false, true, 12, -8);
+    CHECK(s_hud_env_word & JR_DISPLAY_ENV_DREAM, "env publication preserves DREAM intent");
+    const uint32_t env = s_hud_env_word & ~JR_DISPLAY_ENV_DREAM;
+    jr_display_dream_set(false);
+    CHECK(s_hud_env_word == env, "DREAM clear preserves battery/privacy/tilt");
+    jr_display_dream_set(true);
+    CHECK((s_hud_env_word & ~JR_DISPLAY_ENV_DREAM) == env, "DREAM set preserves env");
+    jr_display_clock_set(true, 17, 42, 1);
+    s_stub_notifies = 0U;
+    jr_display_dream_set(true);
+    jr_display_set_hud_env(61U, false, true, 12, -8);
+    display_publish(s_display.requested_word);
+    jr_display_caption_set("ASLEEP. TAP TO WAKE");
+    jr_display_clock_set(true, 17, 42, 2);
+    CHECK(s_stub_notifies == 0U, "unchanged publishers/seconds do not wake DREAM (%u)", s_stub_notifies);
+    CHECK(((s_clock_word >> 17) & 0x3fu) == 2U, "seconds still reach WATCH intent");
+    jr_display_set_hud_env(61U, false, true, -12, 8);
+    CHECK(s_stub_notifies == 0U, "tilt cannot animate the DREAM rim");
+    jr_display_clock_set(true, 17, 43, 0);
+    CHECK(s_stub_notifies == 1U, "minute change wakes presenter");
+    jr_display_set_hud_env(60U, false, true, -12, 8);
+    CHECK(s_stub_notifies == 2U, "battery change wakes presenter");
+    jr_display_dream_set(false);
+    s_stub_notifies = 0U;
+    jr_display_clock_set(true, 17, 43, 1);
+    CHECK(s_stub_notifies == 1U, "awake WATCH seconds wake presenter");
+    display_publish((uint32_t)JR_FACE_ERROR << JR_DISPLAY_CMD_FACE_SHIFT);
+    CHECK(s_stub_notifies == 2U, "changed face wakes immediately");
+}
+
+static void test_dream_never_hides_foreground_or_ota(void)
+{
+    dream_fixture();
+    const char *quiet[] = { "JARVIS", "MUTED - HOLD TO LISTEN", "MUTED - HOLD TO RESUME",
+        "MUTED - TAP TO WAKE", "ASLEEP - TAP TO WAKE", "ASLEEP. TAP TO WAKE" };
+    for (size_t i = 0; i < sizeof quiet / sizeof quiet[0]; ++i) {
+        jr_display_caption_set(quiet[i]);
+        CHECK(dream_eligible(&s_display), "quiet hint permits DREAM: %s", quiet[i]);
+    }
+    const char *foreground[] = { "DONE", "ERROR - RETRY", "CONSENT REQUIRED",
+        "MUTED - NETWORK ERROR", "ASLEEP. OTA FAILED" };
+    for (size_t i = 0; i < sizeof foreground / sizeof foreground[0]; ++i) {
+        jr_display_caption_set(foreground[i]);
+        CHECK(!dream_eligible(&s_display), "foreground remains lit: %s", foreground[i]);
+    }
+    jr_display_caption_pin("JARVIS");
+    CHECK(!dream_eligible(&s_display), "even an ambient pinned instruction stays lit");
+    jr_display_caption_unpin();
+    const char *answers[] = { "YES", "NO" };
+    s_stub_notifies = 0U;
+    jr_display_present_choices("Allow?", answers, 2);
+    CHECK(s_stub_notifies > 0U && !dream_eligible(&s_display), "ask wakes and defeats stale DREAM");
+    jr_display_dismiss_choices();
+    CHECK(dream_eligible(&s_display), "dismissed ask releases guard");
+    jr_display_surface_t card = { .kind = JR_DISPLAY_SURFACE_CONSENT };
+    strcpy(card.title, "Allow camera?");
+    CHECK(jr_display_surface_present(&card) == ESP_OK && !dream_eligible(&s_display),
+          "consent card defeats stale DREAM");
+    jr_display_surface_dismiss();
+    s_canvas_until_ms = 2000U;
+    CHECK(!dream_eligible(&s_display), "canvas remains visible");
+    jr_display_canvas_clear();
+    for (int state = JR_DISPLAY_OTA_PREFLIGHT; state <= JR_DISPLAY_OTA_ROLLED_BACK; ++state) {
+        jr_display_ota_set((jr_display_ota_state_t)state, 25U, 0U, 1U, true);
+        CHECK(dream_eligible(&s_display) == (state == JR_DISPLAY_OTA_VALID),
+              "OTA state %d keeps its correct foreground", state);
+    }
+    jr_display_ota_set(JR_DISPLAY_OTA_IDLE, 0U, 0U, 1U, true);
+    s_nav_word = (uint32_t)JR_DISPLAY_OVERLAY_SHADE << NAV_OVL_SHIFT;
+    CHECK(!dream_eligible(&s_display), "shade stays lit");
+    s_nav_word = JR_DISPLAY_SPACE_WEATHER;
+    CHECK(!dream_eligible(&s_display), "weather remains foreground");
+    s_nav_word = JR_DISPLAY_SPACE_WATCH;
+    CHECK(dream_eligible(&s_display), "quiet WATCH permits DREAM");
+    s_display.requested_word = (uint32_t)JR_FACE_SPEAKING << JR_DISPLAY_CMD_FACE_SHIFT;
+    CHECK(!dream_eligible(&s_display), "busy face remains foreground");
+    s_display.requested_word = (uint32_t)JR_FACE_RESTING << JR_DISPLAY_CMD_FACE_SHIFT;
+    jr_display_set_hud_env(74U, true, true, 0, 0);
+    CHECK(!dream_eligible(&s_display), "charging never enters local DREAM");
+    jr_display_set_hud_env(74U, false, true, 0, 0);
+    jr_display_power_set(74U, 3996U, true, false);
+    CHECK(!dream_eligible(&s_display), "USB stays lit even when not charging");
+    jr_display_power_set(74U, 3996U, false, false);
+    s_display.shell_word = JR_DISPLAY_SHELL_AGENT;
+    CHECK(!dream_eligible(&s_display), "operator remains foreground");
+    s_display.shell_word = 0U;
+    s_display.test_pattern = JR_DISPLAY_TEST_WHITE;
+    CHECK(!dream_eligible(&s_display), "panel diagnostic remains foreground");
+}
+
+static void test_dream_glass_is_black_clock_and_intact_rims(void)
+{
+    dream_fixture();
+    const size_t n = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = malloc(n * sizeof *whole);
+    uint16_t *strips = malloc(n * sizeof *strips);
+    uint16_t *rim = calloc(n, sizeof *rim);
+    CHECK(whole && strips && rim, "DREAM pixel fixtures allocate");
+    if (!whole || !strips || !rim) { free(whole); free(strips); free(rim); return; }
+    jr_display_clock_set(true, 17, 42, 59);
+    for (size_t i = 0; i < n; ++i) { whole[i] = strips[i] = POISON; }
+    apply_hud_overlay(&s_display, 0, 0, HUD_W, HUD_H, whole);
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        const int end = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+        apply_hud_overlay(&s_display, 0, y, HUD_W, end, strips + (size_t)y * HUD_W);
+    }
+    CHECK(memcmp(whole, strips, n * sizeof *whole) == 0, "minute clock is strip invariant");
+    const hud_env_t env = { .face = HUD_FACE_IDLE, .batt_pct = 74U, .privacy_muted = true };
+    hud_overlay_frame(rim, 0, HUD_H, 0U, false, &env);
+    size_t unexpected = 0U, rim_pixels = 0U, black = 0U, clock_pixels = 0U;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            const size_t i = (size_t)y * HUD_W + x;
+            const bool clock_box = x >= 188 && x < 278 && y >= 222 && y < 243;
+            if (!clock_box && whole[i] != rim[i]) { unexpected++; }
+            if (rim[i]) { rim_pixels++; }
+            if (!whole[i]) { black++; }
+            if (clock_box && whole[i] == 0x2104U) { clock_pixels++; }
+        }
+    }
+    CHECK(unexpected == 0U, "only clock pixels differ from the original privacy/battery rims (%zu)", unexpected);
+    CHECK(rim_pixels > 100U && clock_pixels > 100U, "both rims and dim clock are present (%zu/%zu)", rim_pixels, clock_pixels);
+    CHECK(black * 100U > n * 90U, "DREAM is more than 90 percent black (%zu/%zu)", black, n);
+    char text[6];
+    dream_clock_text(text, s_clock_word);
+    CHECK(strcmp(text, "17:42") == 0, "known time is honest HH:MM");
+    jr_display_clock_set(false, 0, 0, 0);
+    dream_clock_text(text, s_clock_word);
+    CHECK(strcmp(text, "--:--") == 0, "unknown time never retains an invented clock");
+    apply_hud_overlay(&s_display, 0, 0, HUD_W, HUD_H, strips);
+    CHECK(memcmp(whole, strips, n * sizeof *whole) != 0, "unknown mark replaces prior time pixels");
+    free(whole); free(strips); free(rim);
+}
+
+static void test_dream_stops_emote_and_refreshes_only_for_real_changes(void)
+{
+    dream_fixture();
+    uint32_t last_word = s_display.requested_word;
+    jr_display_clock_set(true, 17, 42, 1);
+    CHECK(presenter_dream_tick(&s_display, &last_word), "DREAM enters production presenter");
+    CHECK(s_stub_anim_stops == 1U && !s_stub_anim_visible && s_display.blanked,
+          "emote stops and hides");
+    const unsigned initial = s_stub_refreshes;
+    CHECK(presenter_wait_ms(&s_display) == 1000U, "settled DREAM sleeps between diagnostics");
+    jr_display_clock_set(true, 17, 42, 2);
+    presenter_dream_tick(&s_display, &last_word);
+    CHECK(s_stub_refreshes == initial && s_stub_anim_stops == 1U, "seconds neither refresh nor restop emote");
+    jr_display_set_hud_env(74U, false, true, 15, -10);
+    presenter_dream_tick(&s_display, &last_word);
+    CHECK(s_stub_refreshes == initial, "tilt leaves DREAM static");
+    jr_display_clock_set(true, 17, 43, 0);
+    presenter_dream_tick(&s_display, &last_word);
+    CHECK(s_stub_refreshes == initial + 1U, "minute creates one fresh frame");
+    jr_display_set_hud_env(73U, false, true, 15, -10);
+    presenter_dream_tick(&s_display, &last_word);
+    CHECK(s_stub_refreshes == initial + 2U, "battery creates one fresh frame");
+    jr_display_set_brightness(50U);
+    CHECK(presenter_wait_ms(&s_display) == 500U, "brightness settles at requested FPS");
+    s_fade_prev_ms = 1000U;
+    for (int i = 0; i < 8; ++i) {
+        s_fake_us += 500000;
+        const unsigned frames = s_stub_refreshes;
+        presenter_dream_tick(&s_display, &last_word);
+        if (s_stub_refreshes != frames) {
+            overlay_fade_tick();
+            brightness_pump();
+        }
+    }
+    CHECK(!brightness_pending() && s_stub_panel_brightness == 50U, "static DREAM still applies target brightness");
+    const unsigned settled = s_stub_refreshes;
+    presenter_dream_tick(&s_display, &last_word);
+    CHECK(s_stub_refreshes == settled && presenter_wait_ms(&s_display) == 1000U,
+          "brightness burst ends when panel settles");
+    jr_display_caption_set("ERROR - RETRY");
+    CHECK(!presenter_dream_tick(&s_display, &last_word) && last_word == UINT32_MAX,
+          "foreground invalidates same-face latch immediately");
+    bool stale = false;
+    CHECK(apply_face(&s_display, JR_FACE_RESTING, JR_FACE_RESTING, 0U, &stale) == ESP_OK &&
+          !stale && s_stub_anim_starts > 0U && s_stub_anim_visible && !s_display.blanked,
+          "same face animation is restored on exit");
+    jr_display_set_render_fps(5U);
+    CHECK(presenter_wait_ms(&s_display) == 200U, "awake presenter respects 5 FPS rather than 33 ms polling");
+}
+
+static void test_dream_capture_panel_off_and_input_wake(void)
+{
+    dream_fixture();
+    uint32_t last_word = s_display.requested_word;
+    presenter_dream_tick(&s_display, &last_word);
+    const unsigned before = s_stub_refreshes;
+    s_display.snapshot_refresh_requested = 1U;
+    presenter_refresh_pending(&s_display, false);
+    CHECK(s_stub_refreshes == before + 1U && s_display.snapshot_refresh_requested == 0U,
+          "snapshot gets a full frame with emote stopped");
+    presenter_refresh_pending(&s_display, false);
+    CHECK(s_stub_refreshes == before + 1U, "snapshot request consumed once");
+    jr_display_panel_off_request();
+    presenter_refresh_pending(&s_display, false);
+    CHECK(s_stub_refreshes == before + 2U, "panel-off request creates a flush despite static clock");
+    s_stub_disp_user_data = &s_display;
+    uint16_t strip[HUD_W] = {0};
+    panel_flush(s_display.disp, 0, 0, HUD_W, 1, strip);
+    CHECK(jr_display_panel_is_off() && s_stub_panel_brightness == 0U,
+          "flush owner applies panel sleep handoff");
+    s_stub_disp_user_data = NULL;
+    s_panel_off = 0U;
+    s_stub_notifies = 0U;
+    jr_display_nav_next();
+    CHECK(s_stub_notifies > 0U && !(s_hud_env_word & JR_DISPLAY_ENV_DREAM), "navigation clears DREAM and wakes");
+    CHECK(!presenter_dream_tick(&s_display, &last_word), "input immediately releases stopped presenter");
+    jr_display_dream_set(true);
+    jr_display_ripple(233, 233);
+    CHECK(!(s_hud_env_word & JR_DISPLAY_ENV_DREAM), "tap feedback clears DREAM");
+    jr_display_dream_set(true);
+    CHECK(!dream_eligible(&s_display), "stale mood cannot erase an active tap ripple");
+    s_fake_us += (int64_t)HUD_RIPPLE_MS * 1000;
+    CHECK(dream_eligible(&s_display), "expired ripple releases local guard");
+    jr_display_dream_set(true);
+    jr_display_bloom();
+    CHECK(!(s_hud_env_word & JR_DISPLAY_ENV_DREAM), "wake bloom clears DREAM");
+    jr_display_dream_set(true);
+    CHECK(!dream_eligible(&s_display), "stale mood cannot erase an active wake bloom");
+    s_display.gfx = NULL;
+    s_display.task = NULL;
+}
+
+static void test_panel_order_color_covers_both_wire_orders(void)
+{
+    for (int swap = 0; swap < 2; ++swap) {
+        s_display.board.swap_color_bytes = swap != 0;
+        unsigned bad = 0U;
+        for (unsigned c = 0U; c <= UINT16_MAX; ++c) {
+            const uint16_t expected = swap ? (uint16_t)((c >> 8) | (c << 8)) : (uint16_t)c;
+            if (panel_order_color(&s_display, (uint16_t)c) != expected) { bad++; }
+        }
+        CHECK(bad == 0U, "retained byte helper covers all65536 colors, swap%d (%u)", swap, bad);
+    }
+    s_display.board.swap_color_bytes = false;
+}
+
+static void snapshot_arrives_while_locking(void)
+{
+    s_display.snapshot_refresh_requested = 1U;
+}
+
+static void test_refresh_failure_retries_keys_snapshot_and_pattern(void)
+{
+    dream_fixture();
+    uint32_t last_word = s_display.requested_word;
+    jr_display_clock_set(true, 17, 42, 1);
+    CHECK(presenter_dream_tick(&s_display, &last_word), "enter DREAM before fault injection");
+    const unsigned before = s_stub_refreshes;
+    const uint32_t old_clock = s_display.dream_clock_key;
+    const uint32_t old_rim = s_display.dream_rim_key;
+    jr_display_clock_set(true, 17, 43, 0);
+    jr_display_set_hud_env(73U, false, true, 0, 0);
+    s_stub_lock_failures = 1U;
+    CHECK(presenter_dream_tick(&s_display, &last_word) && s_stub_refreshes == before,
+          "failed DREAM lock submits nothing");
+    CHECK(s_display.dream_clock_key == old_clock && s_display.dream_rim_key == old_rim,
+          "failed lock preserves both retry keys");
+    presenter_dream_tick(&s_display, &last_word);
+    CHECK(s_stub_refreshes == before + 1U && s_display.dream_clock_key != old_clock &&
+          s_display.dream_rim_key != old_rim, "successful retry commits both changed keys");
+    presenter_dream_tick(&s_display, &last_word);
+    CHECK(s_stub_refreshes == before + 1U, "unchanged successful keys stay sparse");
+
+    s_display.snapshot_refresh_requested = 1U;
+    s_stub_lock_failures = 1U;
+    CHECK(!presenter_refresh_pending(&s_display, false) &&
+          s_display.snapshot_refresh_requested == 1U, "failed snapshot remains pending");
+    CHECK(presenter_refresh_pending(&s_display, false) &&
+          s_display.snapshot_refresh_requested == 0U && s_stub_refreshes == before + 2U,
+          "snapshot retry submits once");
+    s_display.snapshot_refresh_requested = 1U;
+    s_stub_lock_hook = snapshot_arrives_while_locking;
+    s_stub_lock_failures = 1U;
+    CHECK(!presenter_refresh_pending(&s_display, false) &&
+          s_display.snapshot_refresh_requested == 1U, "concurrent snapshot survives failed lock");
+    s_stub_lock_hook = NULL;
+    presenter_refresh_pending(&s_display, false);
+    CHECK(s_display.snapshot_refresh_requested == 0U && s_stub_refreshes == before + 3U,
+          "coalesced concurrent snapshot retries once");
+
+    uint32_t last_pattern = JR_DISPLAY_TEST_OFF;
+    s_display.test_pattern = JR_DISPLAY_TEST_WHITE;
+    s_stub_lock_failures = 1U;
+    presenter_pattern_tick(&s_display, &last_pattern);
+    CHECK(last_pattern == JR_DISPLAY_TEST_OFF && s_stub_refreshes == before + 3U,
+          "failed pattern refresh is not acknowledged");
+    presenter_pattern_tick(&s_display, &last_pattern);
+    CHECK(last_pattern == JR_DISPLAY_TEST_WHITE && s_stub_refreshes == before + 4U,
+          "pattern retries then acknowledges");
+    presenter_pattern_tick(&s_display, &last_pattern);
+    CHECK(s_stub_refreshes == before + 4U, "pattern acknowledgement consumes exactly once");
+    s_display.test_pattern = JR_DISPLAY_TEST_OFF;
+    s_display.gfx = NULL;
+    s_display.task = NULL;
+}
+
+static void test_finite_fades_use_elapsed_time_at_rest(void)
+{
+    const uint32_t periods[] = { 50U, 200U, 500U };
+    for (size_t p = 0; p < sizeof periods / sizeof periods[0]; ++p) {
+        dream_fixture();
+        jr_display_dream_set(false);
+        s_clock_word = (1u << 16) | (12u << 8) | 34U;
+        s_clock_prog = s_canvas_prog = s_caption_prog = s_ask_prog = 0;
+        s_detail_prog = s_shade_prog = 0;
+        s_clock_ease = s_canvas_ease = s_caption_ease = s_ask_ease = 0;
+        s_detail_ease = s_shade_ease = 0;
+        s_canvas_until_ms = 10000U;
+        s_caption_on = 1;
+        s_choice_n = 1;
+        s_nav_word = JR_DISPLAY_SPACE_WEATHER | (1u << NAV_SERIAL_SHIFT) |
+                     ((uint32_t)JR_DISPLAY_OVERLAY_DETAIL << NAV_OVL_SHIFT);
+        s_display.shell_word = JR_DISPLAY_SHELL_SHADE;
+        s_space_serial_seen = 0U;
+        s_fade_prev_ms = 1000U;
+        const uint32_t period = periods[p];
+        uint32_t elapsed = 0U;
+        while (elapsed < JR_DISPLAY_FADE_MS + period) {
+            elapsed += period;
+            s_fake_us = (int64_t)(1000U + elapsed) * 1000;
+            overlay_fade_tick();
+            if (elapsed >= JR_DISPLAY_CAPTION_FADE_MS + period) {
+                CHECK(s_caption_prog == 256 && s_ask_prog == 256 &&
+                      s_detail_prog == 256 && s_shade_prog == 256,
+                      "250ms lanes settle by nominal+one frame at%ums", period);
+            }
+            if (elapsed >= JR_DISPLAY_SPACE_MS + period) {
+                CHECK(s_space_prog == 256, "slide settles by nominal+one frame at%ums", period);
+            }
+        }
+        CHECK(s_clock_prog == 256 && s_canvas_prog == 256,
+              "400ms lanes settle by nominal+one frame at%ums", period);
+        s_clock_word = 0U;
+        s_canvas_until_ms = 0U;
+        s_caption_on = 0;
+        s_choice_n = 0;
+        s_nav_word = JR_DISPLAY_SPACE_JARVIS | (2u << NAV_SERIAL_SHIFT);
+        s_display.shell_word = 0U;
+        const uint32_t start = elapsed;
+        while (elapsed - start < JR_DISPLAY_FADE_MS + period) {
+            elapsed += period;
+            s_fake_us = (int64_t)(1000U + elapsed) * 1000;
+            overlay_fade_tick();
+        }
+        CHECK(s_clock_prog == 0 && s_canvas_prog == 0 && s_caption_prog == 0 &&
+              s_ask_prog == 0 && s_detail_prog == 0 && s_shade_prog == 0,
+              "every finite lane exits at%ums", period);
+    }
+    /* Unsigned elapsed time across a very long stall cannot overflow products
+     * or accelerate the separately capped physical brightness slew. */
+    s_clock_prog = 0;
+    s_clock_word = 1u << 16;
+    s_fade_prev_ms = (uint32_t)(s_fake_us / 1000) - UINT32_MAX + 10U;
+    atomic_store(&s_brightness_shown, 0);
+    s_brightness_want = 100U;
+    overlay_fade_tick();
+    CHECK(s_clock_prog == 256, "long stall completes finite fade without overflow");
+    CHECK(atomic_load(&s_brightness_shown) == 100U * 100U / JR_DISPLAY_BRIGHT_SLEW_MS,
+          "brightness retains100ms slew cap");
+    s_display.gfx = NULL;
+    s_display.task = NULL;
+    s_clock_word = 0U;
+}
+
+static jr_display_clip_t *allocate_test_clip(jr_face_t face, size_t bytes)
+{
+    jr_display_clip_t *clip = &s_display.clips[face];
+    *clip = (jr_display_clip_t){ heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM), bytes, 8U, 7U };
+    CHECK(clip->data != NULL, "tracked clip allocation for face%d", face);
+    return clip;
+}
+
+static void test_dial_sources_release_without_invalidating_vendor_ownership(void)
+{
+    dream_fixture();
+    jr_display_ctx_t *ctx = &s_display;
+    ctx->active = ctx->bound = NULL;
+    s_stub_anim_source = NULL;
+    s_stub_bound_frees = 0U;
+    s_dial_frame_face = JR_FACE_COUNT;
+    s_stub_eaf_head = (eaf_header_t){ 8, HUD_W, HUD_H };
+    const size_t baseline = s_stub_heap_bytes;
+    const size_t frame_bytes = (size_t)HUD_W * HUD_H * sizeof(uint16_t);
+    const jr_face_t dials[] = { JR_FACE_DIAL_FUTURE, JR_FACE_DIAL_DIVER,
+                               JR_FACE_DIAL_DRESS, JR_FACE_DIAL_PILOT };
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        for (size_t i = 0; i < sizeof dials / sizeof dials[0]; ++i) {
+            jr_display_clip_t *clip = allocate_test_clip(dials[i], 64U + i);
+            CHECK(dial_show(ctx, dials[i]), "style%d decodes", dials[i]);
+            CHECK(!clip->data && s_stub_heap_bytes == baseline + frame_bytes,
+                  "style cycling retains one decoded frame without compressed growth");
+            const int decodes = s_stub_eaf_decodes;
+            CHECK(dial_show(ctx, dials[i]) && s_stub_eaf_decodes == decodes,
+                  "same dial reuses decoded frame after source release, no load/decode");
+        }
+    }
+
+    jr_display_clip_t *dial = allocate_test_clip(JR_FACE_DIAL_DIVER, 96U);
+    s_stub_lock_failures = 1;
+    CHECK(!dial_show(ctx, JR_FACE_DIAL_DIVER) && dial->data &&
+          s_dial_frame_face == JR_FACE_DIAL_PILOT,
+          "failed decode lock keeps old frame and retry source");
+    s_stub_eaf_decode_error = ESP_FAIL;
+    CHECK(!dial_show(ctx, JR_FACE_DIAL_DIVER) && dial->data,
+          "decode failure retains compressed fallback source");
+    s_stub_eaf_decode_error = ESP_OK;
+    ctx->requested_word = (uint32_t)JR_FACE_DIAL_DIVER << JR_DISPLAY_CMD_FACE_SHIFT;
+    bool stale = false;
+    CHECK(apply_face(ctx, JR_FACE_DIAL_DIVER, JR_FACE_DIAL_DIVER, 0U, &stale) == ESP_OK,
+          "failed baked decode can fall back to vendor anim");
+    CHECK(ctx->bound == dial && s_stub_anim_source == dial->data,
+          "vendor source is tracked separately from visible anim");
+    const void *bound_data = dial->data;
+    CHECK(dial_decode(ctx, JR_FACE_DIAL_DIVER, dial) == ESP_OK,
+          "fallback dial later decodes successfully");
+    s_stub_lock_failures = 1;
+    CHECK(!dial_show(ctx, JR_FACE_DIAL_DIVER) && ctx->active == dial &&
+          ctx->bound == dial && dial->data == bound_data,
+          "failed hide lock preserves bound source for retry");
+    CHECK(dial_show(ctx, JR_FACE_DIAL_DIVER) && ctx->active == NULL &&
+          ctx->bound == dial && dial->data == bound_data && s_stub_bound_frees == 0U,
+          "successful later decode/hide keeps stopped vendor parser's source alive");
+
+    jr_display_clip_t *voice = allocate_test_clip(JR_FACE_LISTENING, 128U);
+    ctx->requested_word = (uint32_t)JR_FACE_LISTENING << JR_DISPLAY_CMD_FACE_SHIFT;
+    s_stub_lock_failures = 1;
+    CHECK(apply_face(ctx, JR_FACE_LISTENING, JR_FACE_LISTENING, 0U, &stale) != ESP_OK &&
+          ctx->bound == dial && dial->data == bound_data && s_stub_anim_source == bound_data,
+          "failed rebind lock retains hidden old parser and new cached source");
+    s_stub_set_src_error = ESP_FAIL;
+    CHECK(apply_face(ctx, JR_FACE_LISTENING, JR_FACE_LISTENING, 0U, &stale) != ESP_OK &&
+          ctx->bound == dial && dial->data == bound_data && s_stub_anim_source == bound_data,
+          "failed rebind preserves hidden old parser and retry source");
+    s_stub_set_src_error = ESP_OK;
+    CHECK(apply_face(ctx, JR_FACE_LISTENING, JR_FACE_LISTENING, 0U, &stale) == ESP_OK &&
+          ctx->bound == voice && ctx->active == voice && !dial->data &&
+          s_stub_anim_source == voice->data && s_stub_bound_frees == 0U,
+          "successful rebind releases only old unreferenced baked source");
+    CHECK(dial_show(ctx, JR_FACE_DIAL_DIVER) && voice->data && ctx->bound == voice,
+          "showing decoded dial keeps fast voice source resident and vendor-bound");
+    CHECK(s_stub_heap_bytes == baseline + frame_bytes + 128U,
+          "retained heap consists of shared frame and voice source only");
+    ctx->bound = ctx->active = NULL;
+    s_stub_anim_source = NULL;
+    heap_caps_free(voice->data);
+    memset(voice, 0, sizeof *voice);
+    heap_caps_free(s_dial_frame);
+    s_dial_frame = NULL;
+    s_dial_frame_face = JR_FACE_COUNT;
+    s_dial_blit = false;
+    CHECK(s_stub_heap_bytes == baseline && s_stub_bound_frees == 0U,
+          "tracked test allocations balance, never freeing retained vendor source");
+    s_display.gfx = NULL;
+    s_display.task = NULL;
+}
+
+/* A strip must keep a rim stamp whose first row lies just above it. Exercise
+ * every battery value, both panel orders and centre shifts through the real
+ * overlay, including the 100% repeated endpoint and absent-battery sentinel. */
+static void test_battery_rim_is_strip_invariant_at_every_percent(void)
+{
+    const size_t n = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = malloc(n * sizeof *whole);
+    uint16_t *strips = malloc(n * sizeof *strips);
+    CHECK(whole && strips, "battery strip fixtures allocate");
+    if (!whole || !strips) { free(whole); free(strips); return; }
+    static const int offsets[] = {-128, 0, 127};
+    for (int pct = 0; pct <= 102; ++pct) {
+        const uint8_t batt = pct == 102 ? 255U : (uint8_t)pct;
+        for (int swap = 0; swap < 2; ++swap) {
+            for (int charge = 0; charge < 2; ++charge) {
+                for (int shift = 0; shift < 3; ++shift) {
+                    const hud_env_t env = { .face = HUD_FACE_IDLE,
+                        .batt_pct = batt, .charging = charge != 0,
+                        .ox = (int8_t)offsets[shift], .oy = (int8_t)offsets[2 - shift] };
+                    const uint32_t ms = (uint32_t)pct * 37U * 12U;
+                    for (size_t i = 0; i < n; ++i) whole[i] = strips[i] = POISON;
+                    hud_overlay_frame(whole, 0, HUD_H, ms, swap != 0, &env);
+                    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+                        const int rows = y + STRIP_ROWS > HUD_H ? HUD_H - y : STRIP_ROWS;
+                        hud_overlay_frame(strips + (size_t)y * HUD_W, y, rows,
+                                          ms, swap != 0, &env);
+                    }
+                    CHECK(memcmp(whole, strips, n * sizeof *whole) == 0,
+                          "battery %u charge%d order%d offset%d remains strip invariant",
+                          (unsigned)batt, charge, swap, offsets[shift]);
+                    if (shift == 1 && (batt == 0U || batt > 100U)) {
+                        size_t drawn = 0;
+                        for (size_t i = 0; i < n; ++i) drawn += whole[i] != POISON;
+                        CHECK(drawn == (batt == 0U ? 4U : 0U),
+                              "zero battery keeps its initial 2px stamp; absent battery draws nothing (%zu)", drawn);
+                    }
+                }
+            }
+        }
+    }
+    free(whole); free(strips);
+}
+
+static jmp_buf s_boot_init_done;
+static bool s_boot_fail_after_early_transfer;
+
+static void boot_init_reached_presenter_loop(void)
+{
+    longjmp(s_boot_init_done, 1);
+}
+
+/* Run the real display_task initialization, leaving its infinite presenter
+ * loop at the first scheduler wait. This also proves the timed wrapper is
+ * actually wired into production, rather than testing an unused helper. */
+static void run_boot_init(void)
+{
+    s_stub_notify_take_hook = boot_init_reached_presenter_loop;
+    if (setjmp(s_boot_init_done) == 0) {
+        display_task(&s_display);
+    }
+    s_stub_notify_take_hook = NULL;
+}
+
+static void boot_timing_fixture(void)
+{
+    memset(&s_display, 0, sizeof s_display);
+    s_display.test_pattern = JR_DISPLAY_TEST_WHITE;
+    s_stub_board_display = (jarvis_board_display_t){
+        .panel = (esp_lcd_panel_handle_t)1,
+        .io = (esp_lcd_panel_io_handle_t)1,
+        .width = HUD_W, .height = HUD_H,
+    };
+    s_stub_board_get_error = s_stub_spiffs_error = s_stub_draw_error = ESP_OK;
+    s_stub_brightness_error = ESP_OK;
+    s_stub_brightness_calls = 0U;
+    s_stub_draw_hook = NULL;
+    s_stub_board_init_us = 17000;
+    s_stub_engine_ready = true;
+    s_stub_disp_add_hook = NULL;
+    s_boot_fail_after_early_transfer = false;
+    s_stub_disp_user_data = NULL;
+    s_stub_panel_callbacks = (esp_lcd_panel_io_callbacks_t){0};
+    s_stub_panel_callback_ctx = NULL;
+    s_stub_flush_ready_calls = 0;
+    s_stub_lock_failures = 0;
+    s_stub_lock_hook = NULL;
+    s_panel_off = 0U;
+    s_dial_blit = false;
+    s_fake_us = 100123;
+}
+
+static jr_display_boot_timing_t boot_timing_read(void)
+{
+    jr_display_diag_t diag;
+    CHECK(jr_display_get_diag(&diag) == ESP_OK, "boot timing uses public diagnostic readback");
+    return diag.boot_timing;
+}
+
+static void test_boot_timing_waits_for_a_real_completion(void)
+{
+    const jr_display_ctx_t saved = s_display;
+    boot_timing_fixture();
+    jr_display_boot_timing_t timing = boot_timing_read();
+    CHECK(!timing.init_started && !timing.init_finished &&
+          !timing.first_transfer_valid && timing.first_transfer_done_boot_ms == 0U,
+          "no boot timing exists before initialization or a callback");
+    run_boot_init();
+    timing = boot_timing_read();
+    CHECK(s_display.init_state == JR_DISPLAY_INIT_READY && timing.init_started &&
+          timing.init_finished && timing.init_start_boot_ms == 100U &&
+          timing.init_end_boot_ms == 117U,
+          "actual init task records timer-relative start/end, including elapsed board work");
+    CHECK(!timing.first_transfer_valid, "successful init alone is not a completed transfer");
+
+    uint16_t strip[HUD_W] = {0};
+    s_stub_disp_user_data = &s_display;
+    s_stub_draw_error = ESP_FAIL;
+    panel_flush(s_display.disp, 0, 0, HUD_W, 1, strip);
+    timing = boot_timing_read();
+    CHECK(!timing.first_transfer_valid && s_display.flush_errors == 1U &&
+          s_stub_flush_ready_calls == 1U && s_display.snapshot_frame_dropped == 1U,
+          "failed submission does not invent DMA completion and still releases renderer");
+    s_stub_draw_error = ESP_OK;
+    panel_flush(s_display.disp, 0, 0, HUD_W, 1, strip);
+    CHECK(!boot_timing_read().first_transfer_valid,
+          "successful submission and mirror handling are not transfer completion");
+    s_fake_us = 238765;
+    CHECK(s_stub_panel_callbacks.on_color_trans_done && s_stub_panel_callback_ctx == &s_display,
+          "real init registered the production callback with its context");
+    (void)s_stub_panel_callbacks.on_color_trans_done(NULL, NULL, s_stub_panel_callback_ctx);
+    timing = boot_timing_read();
+    CHECK(timing.first_transfer_valid && timing.first_transfer_done_boot_ms == 238U &&
+          s_display.flush_completions == 1U && s_stub_flush_ready_calls == 2U,
+          "callback latches milliseconds and preserves completion/flush-ready semantics");
+    s_fake_us = 999999;
+    (void)s_stub_panel_callbacks.on_color_trans_done(NULL, NULL, s_stub_panel_callback_ctx);
+    CHECK(boot_timing_read().first_transfer_done_boot_ms == 238U &&
+          s_display.flush_completions == 2U && s_stub_flush_ready_calls == 3U,
+          "later callbacks release strips but never replace the first timestamp");
+    s_display = saved;
+    s_stub_disp_user_data = NULL;
+    s_stub_engine_ready = false;
+}
+
+static void boot_init_immediate_transfer(gfx_disp_t *disp, const gfx_disp_config_t *cfg)
+{
+    s_stub_disp_user_data = cfg->user_data;
+    uint16_t strip[HUD_W] = {0};
+    cfg->flush_cb(disp, 0, 0, HUD_W, 1, strip);
+    CHECK(s_display.disp == disp && !boot_timing_read().first_transfer_valid,
+          "first-flush race publishes display handle without inventing completion");
+    s_fake_us += 5333;
+    (void)s_stub_panel_callbacks.on_color_trans_done(NULL, NULL, s_stub_panel_callback_ctx);
+    jr_display_boot_timing_t timing = boot_timing_read();
+    CHECK(timing.init_started && !timing.init_finished && timing.first_transfer_valid &&
+          timing.first_transfer_done_boot_ms == 122U,
+          "actual early callback is valid before init finishes");
+    s_fake_us += 9000;
+    if (s_boot_fail_after_early_transfer) {
+        s_stub_engine_ready = false;
+    }
+}
+
+static void test_boot_timing_records_init_failure_and_early_callback(void)
+{
+    const jr_display_ctx_t saved = s_display;
+    for (int fail_at = 0; fail_at < 3; ++fail_at) {
+        boot_timing_fixture();
+        if (fail_at == 0) s_stub_board_get_error = ESP_FAIL;
+        if (fail_at == 1) s_stub_spiffs_error = ESP_FAIL;
+        if (fail_at == 2) s_stub_engine_ready = false;
+        run_boot_init();
+        jr_display_boot_timing_t timing = boot_timing_read();
+        CHECK(s_display.init_state == JR_DISPLAY_INIT_FAILED && s_display.last_error == ESP_FAIL &&
+              timing.init_started && timing.init_finished && timing.init_start_boot_ms == 100U &&
+              timing.init_end_boot_ms == 117U && !timing.first_transfer_valid,
+              "init failure %d still ends timing without fabricating a transfer", fail_at);
+    }
+    boot_timing_fixture();
+    s_stub_disp_add_hook = boot_init_immediate_transfer;
+    run_boot_init();
+    jr_display_boot_timing_t timing = boot_timing_read();
+    CHECK(s_display.init_state == JR_DISPLAY_INIT_READY && timing.init_finished &&
+          timing.init_end_boot_ms == 131U && timing.first_transfer_valid &&
+          timing.first_transfer_done_boot_ms < timing.init_end_boot_ms,
+          "callback-before-init-end remains coherent after successful init");
+    boot_timing_fixture();
+    s_stub_disp_add_hook = boot_init_immediate_transfer;
+    s_boot_fail_after_early_transfer = true;
+    run_boot_init();
+    timing = boot_timing_read();
+    CHECK(s_display.init_state == JR_DISPLAY_INIT_FAILED &&
+          s_display.last_error == ESP_ERR_NO_MEM && timing.init_finished &&
+          timing.init_end_boot_ms == 131U && timing.first_transfer_valid &&
+          timing.first_transfer_done_boot_ms == 122U,
+          "later init failure cannot erase a genuinely completed early transfer");
+    s_stub_disp_add_hook = NULL;
+    s_stub_disp_user_data = NULL;
+    s_stub_engine_ready = false;
+    s_display = saved;
+}
+
+static void test_boot_timing_ignores_unusable_callbacks_and_unpublished_stamp(void)
+{
+    const jr_display_ctx_t saved = s_display;
+    boot_timing_fixture();
+    (void)panel_color_done(NULL, NULL, NULL);
+    (void)panel_color_done(NULL, NULL, &s_display);
+    CHECK(!boot_timing_read().first_transfer_valid && s_display.flush_completions == 0U &&
+          s_stub_flush_ready_calls == 0U, "missing context/display cannot publish a timing marker");
+    s_display.first_transfer_done_boot_ms = 42U;
+    s_display.first_transfer_state = 2U;
+    CHECK(!boot_timing_read().first_transfer_valid &&
+          boot_timing_read().first_transfer_done_boot_ms == 0U,
+          "in-progress publication is unavailable through the public API");
+    s_display.first_transfer_state = 0U;
+    s_display.disp = (gfx_disp_t *)2;
+    s_fake_us = 999;
+    (void)panel_color_done(NULL, NULL, &s_display);
+    jr_display_boot_timing_t timing = boot_timing_read();
+    CHECK(timing.first_transfer_valid && timing.first_transfer_done_boot_ms == 0U,
+          "a genuine sub-millisecond callback remains valid; zero is not a validity sentinel");
+    s_fake_us = 1000000;
+    (void)panel_color_done(NULL, NULL, &s_display);
+    CHECK(boot_timing_read().first_transfer_valid &&
+          boot_timing_read().first_transfer_done_boot_ms == 0U,
+          "zero first timestamp is still latched exactly once");
+    s_display = saved;
+    s_stub_engine_ready = false;
+}
+
+static void complete_test_transfer(void)
+{
+    (void)panel_color_done(NULL, NULL, &s_display);
+}
+
+static void flush_test_strip(int y);
+
+static void cancel_at_off_ack_cas(volatile void *address, uintptr_t desired)
+{
+    if (address == (volatile void *)&s_panel_off && (desired & 3U) == 2U) {
+        s_before_cas = NULL;
+        jr_display_panel_on_request();
+    }
+}
+
+static void test_panel_opposite_request_at_ack_boundary(void)
+{
+    dream_fixture();
+    jr_display_panel_off_request();
+    s_before_cas = cancel_at_off_ack_cas;
+    flush_test_strip(0);
+    s_before_cas = NULL;
+    CHECK(!jr_display_panel_is_off() && (s_panel_off & 3U) == 3U,
+          "opposite request between final settling check and CAS cannot be overwritten by old off ack");
+    flush_test_strip(0); complete_test_transfer();
+    CHECK(jr_display_panel_is_on(), "latest recovery still completes after off-ack boundary race");
+}
+
+static unsigned s_boot_cap_at_first_draw;
+static void boot_cap_draw_hook(void)
+{
+    s_boot_cap_at_first_draw = s_stub_panel_brightness;
+}
+
+static void test_boot_brightness_seed_precedes_first_transfer(void)
+{
+    const jr_display_ctx_t saved = s_display;
+    const unsigned caps[] = {0U, 8U, 65U, 100U, 255U};
+    for (unsigned i = 0; i < sizeof caps / sizeof caps[0]; ++i) {
+        boot_timing_fixture(); s_stub_panel_brightness = 0U;
+        s_boot_cap_at_first_draw = 999U;
+        jr_display_set_brightness((uint8_t)caps[i]);
+        CHECK(s_stub_brightness_calls == 0U, "pre-start brightness publisher performs no panel IO cap%d", caps[i]);
+        s_stub_draw_hook = boot_cap_draw_hook;
+        s_stub_disp_add_hook = boot_init_immediate_transfer;
+        run_boot_init();
+        const unsigned expected = caps[i] > 100U ? 100U : caps[i];
+        CHECK(s_boot_cap_at_first_draw == expected && s_stub_panel_brightness == expected,
+              "first actual early gfx draw sees seed cap%d", caps[i]);
+        CHECK(atomic_load(&s_brightness_shown) == (int)expected &&
+              atomic_load(&s_brightness_have) == expected, "shown/have begin at cap%d", caps[i]);
+        CHECK(jr_display_is_ready(), "seed cap%d permits normal display init", caps[i]);
+    }
+    boot_timing_fixture(); jr_display_set_brightness(65U);
+    s_stub_brightness_error = ESP_FAIL; s_stub_draw_calls = 0U;
+    s_stub_disp_add_hook = boot_init_immediate_transfer;
+    run_boot_init();
+    CHECK(!jr_display_is_ready() && s_display.init_state == JR_DISPLAY_INIT_FAILED &&
+          s_display.last_error == ESP_FAIL, "failed initial seed truthfully refuses init");
+    CHECK(s_stub_draw_calls == 0U && !boot_timing_read().first_transfer_valid,
+          "failed seed cannot submit content or invent completion");
+    s_stub_draw_hook = NULL; s_stub_disp_add_hook = NULL;
+    s_stub_brightness_error = ESP_OK; s_stub_engine_ready = false;
+    s_display = saved;
+}
+
+static void flush_test_strip(int y)
+{
+    uint16_t strip[HUD_W] = {0};
+    s_stub_disp_user_data = &s_display;
+    panel_flush(s_display.disp, 0, y, HUD_W, y + 1, strip);
+}
+
+static void test_rest_mailboxes_survive_start_and_env_updates(void)
+{
+    dream_fixture();
+    s_display.started = 0U;
+    jr_display_rest_set(JR_DISPLAY_REST_NIGHTSTAND, true, true);
+    jr_display_power_set(61, 3890, true, false);
+    jr_display_clock_set(true, 23, 54, 19);
+    const uint32_t rest = s_hud_env_word & JR_DISPLAY_ENV_REST_MASK;
+    jr_display_set_hud_env(61, false, true, 8, 9);
+    CHECK((s_hud_env_word & JR_DISPLAY_ENV_REST_MASK) == rest, "HUD writer preserves every Rest request bit");
+    const uint32_t env = s_hud_env_word, clock = s_clock_word, power = s_power_word;
+    jr_display_t port;
+    CHECK(jr_display_start(&port) == ESP_OK, "seeded mailbox start succeeds");
+    CHECK(s_hud_env_word == env && s_clock_word == clock && s_power_word == power,
+          "start keeps time/power/privacy/rest seeded before Wi-Fi");
+    CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NIGHTSTAND, "seeded Nightstand survives start");
+    s_stub_notifies = 0U;
+    jr_display_clock_set(true, 23, 54, 20);
+    jr_display_set_hud_env(61, false, true, -7, -3);
+    CHECK(s_stub_notifies == 0U, "Nightstand seconds and tilt do not wake static presenter");
+    jr_display_clock_set(true, 23, 55, 0);
+    CHECK(s_stub_notifies == 1U, "minute wakes static presenter");
+    jr_display_dream_set(false);
+    CHECK(!(s_hud_env_word & JR_DISPLAY_ENV_REST_MASK), "explicit foreground exit clears all companion flags");
+    jr_display_rest_set((jr_display_rest_mode_t)255, true, true);
+    CHECK(!(s_hud_env_word & JR_DISPLAY_ENV_REST_MASK), "invalid Rest mode cleared");
+    jr_display_rest_set(JR_DISPLAY_REST_GLANCE, false, true);
+    CHECK(!(s_hud_env_word & JR_DISPLAY_ENV_NIGHT), "Glance cannot inherit Nightstand night flag");
+    jr_display_rest_set(JR_DISPLAY_REST_GLANCE, true, true);
+    CHECK(!(s_hud_env_word & JR_DISPLAY_ENV_NIGHT), "USB Glance remains distinct from Nightstand night flag");
+    s_display.started = 0U;
+}
+
+static void test_rest_independently_refuses_exiting_foreground(void)
+{
+    for (int mode = JR_DISPLAY_REST_DREAM; mode <= JR_DISPLAY_REST_GLANCE; ++mode) {
+        dream_fixture();
+        s_power_word = 74U | (mode == JR_DISPLAY_REST_NIGHTSTAND ? 1u << 24 : 0U);
+        jr_display_rest_set((jr_display_rest_mode_t)mode, mode == JR_DISPLAY_REST_NIGHTSTAND, true);
+        CHECK(rest_eligible(&s_display) == (jr_display_rest_mode_t)mode, "mode%d eligible at rest", mode);
+        int *eases[] = {&s_detail_ease, &s_shade_ease, &s_ask_ease, &s_canvas_ease};
+        for (unsigned i = 0; i < sizeof eases / sizeof eases[0]; ++i) {
+            *eases[i] = 1;
+            CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NONE, "mode%d refuses exiting foreground%d", mode, i);
+            *eases[i] = 0;
+        }
+        s_space_from = JR_DISPLAY_SPACE_JARVIS; s_space_to = JR_DISPLAY_SPACE_WATCH; s_space_ease = 255;
+        CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NONE, "mode%d refuses unfinished navigation", mode);
+        s_space_ease = 256;
+        CHECK(rest_eligible(&s_display) == (jr_display_rest_mode_t)mode, "mode%d admits completed navigation", mode);
+        s_display.requested_word = (uint32_t)JR_FACE_SPEAKING << JR_DISPLAY_CMD_FACE_SHIFT;
+        CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NONE, "mode%d refuses voice foreground", mode);
+    }
+    dream_fixture();
+    jr_display_rest_set(JR_DISPLAY_REST_NIGHTSTAND, true, true);
+    CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NONE, "current power USB required, stale main request insufficient");
+    s_power_word |= 1u << 24;
+    jr_display_rest_set(JR_DISPLAY_REST_NIGHTSTAND, false, true);
+    CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NONE, "request must also observe USB");
+}
+
+static void test_rest_idle_listening_yields_immediately_to_voice_busy(void)
+{
+    for (int mode = JR_DISPLAY_REST_NIGHTSTAND; mode <= JR_DISPLAY_REST_GLANCE; ++mode) {
+        dream_fixture();
+        s_power_word |= 1u << 24;
+        s_display.requested_word = ((uint32_t)JR_FACE_LISTENING << JR_DISPLAY_CMD_FACE_SHIFT) | 123U;
+        jr_display_caption_set("LISTENING");
+        jr_display_rest_set((jr_display_rest_mode_t)mode, true, false);
+        CHECK(rest_eligible(&s_display) == (jr_display_rest_mode_t)mode,
+              "idle listening mode%d ignores ambient mic amplitude", mode);
+        jr_display_rest_voice_busy_set(true);
+        jr_display_set_hud_env(62, false, false, 12, -4);
+        CHECK((s_hud_env_word & JR_DISPLAY_ENV_VOICE_BUSY) &&
+              rest_eligible(&s_display) == JR_DISPLAY_REST_NONE,
+              "VAD edge busy preserved across HUD publication and refuses stale Rest mode%d", mode);
+        jr_display_rest_set((jr_display_rest_mode_t)mode, true, true);
+        CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NONE, "Rest request cannot clear independently published busy");
+        jr_display_rest_set(JR_DISPLAY_REST_NONE, false, false);
+        CHECK(s_hud_env_word & JR_DISPLAY_ENV_VOICE_BUSY, "foreground request cancellation keeps busy edge");
+        jr_display_rest_voice_busy_set(false);
+        jr_display_rest_set((jr_display_rest_mode_t)mode, true, false);
+        jr_display_caption_set("RESTING - TAP TO WAKE");
+        CHECK(rest_eligible(&s_display) == (jr_display_rest_mode_t)mode, "fixed resting hint yields only with idle voice");
+        jr_display_caption_set("LIVE TRANSCRIPT");
+        CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NONE, "live transcript independently refuses idle-listening Rest");
+        jr_display_caption_set("LISTENING ERROR");
+        CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NONE, "partial idle-hint match cannot suppress error");
+        jr_display_caption_set("LISTENING");
+        const jr_face_t busy_faces[] = {JR_FACE_THINKING, JR_FACE_SPEAKING, JR_FACE_ERROR};
+        for (unsigned i = 0; i < sizeof busy_faces / sizeof busy_faces[0]; ++i) {
+            s_display.requested_word = (uint32_t)busy_faces[i] << JR_DISPLAY_CMD_FACE_SHIFT;
+            CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NONE, "busy phase face%d independently refuses Rest", busy_faces[i]);
+        }
+        s_display.requested_word = (uint32_t)JR_FACE_LISTENING << JR_DISPLAY_CMD_FACE_SHIFT;
+        s_choice_n = 2;
+        CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NONE, "asking phase independently refuses via choices");
+    }
+    dream_fixture();
+    s_display.requested_word = (uint32_t)JR_FACE_LISTENING << JR_DISPLAY_CMD_FACE_SHIFT;
+    CHECK(!dream_eligible(&s_display), "DREAM never admits idle listening");
+    s_display.requested_word = (uint32_t)JR_FACE_MUTED << JR_DISPLAY_CMD_FACE_SHIFT;
+    jr_display_rest_voice_busy_set(true);
+    CHECK(!dream_eligible(&s_display), "busy independently refuses DREAM too");
+    s_display.started = 0;
+    const uint32_t env = s_hud_env_word;
+    jr_display_t port; (void)jr_display_start(&port);
+    CHECK(s_hud_env_word == env && (s_hud_env_word & JR_DISPLAY_ENV_VOICE_BUSY), "start preserves pre-seeded voice guard");
+    s_display.started = 0;
+}
+
+static void test_power_hints_yield_only_after_plug_feedback(void)
+{
+    for (unsigned percent = 0; percent <= 100; ++percent) {
+        char hint[32]; snprintf(hint, sizeof hint, "CHARGING %u%%", percent);
+        CHECK(caption_is_ambient(hint), "canonical charging%d yields", percent);
+        jr_display_caption_unpin(); jr_display_caption_set(hint);
+        CHECK(!jr_display_caption_foreground(), "canonical charge status is not foreground%d", percent);
+    }
+    const char *bad[] = {"CHARGING", "CHARGING %", "CHARGING -1%", "CHARGING 101%", "CHARGING 999%",
+        "CHARGING 00%", "CHARGING 01%", "CHARGING 1000%", "CHARGING 1.0%", "CHARGING 50% ERROR",
+        "CHARGING 50% ", "CHARGING +1%", "CHARGING 50", "POWER CONNECTED ERROR", "ON BATTERY ERROR"};
+    for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
+        CHECK(!caption_is_ambient(bad[i]), "noncanonical/live/error hint remains foreground: %s", bad[i]);
+        jr_display_caption_set(bad[i]);
+        CHECK(jr_display_caption_foreground(), "noncanonical charge caption reports foreground%d", i);
+    }
+    const char *hints[] = {"POWER CONNECTED", "CHARGE COMPLETE", "ON BATTERY", "CHARGING 62%"};
+    for (unsigned i = 0; i < sizeof hints / sizeof hints[0]; ++i) {
+        dream_fixture(); s_power_word |= 1u << 24;
+        jr_display_caption_set(hints[i]);
+        CHECK(!jr_display_caption_foreground(), "fixed power hint%d is ambient", i);
+        jr_display_bloom(); /* real power feedback precedes the idle publisher */
+        jr_display_rest_set(JR_DISPLAY_REST_NIGHTSTAND, true, false);
+        CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NONE, "power hint preserves plug bloom%d", i);
+        s_fake_us += (int64_t)HUD_BLOOM_MS * 1000;
+        CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NIGHTSTAND, "settled power status permits Nightstand%d", i);
+        jr_display_caption_set("POWER ERROR");
+        CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_NONE, "power error remains foreground%d", i);
+        CHECK(jr_display_caption_foreground(), "power error%d reports foreground for main", i);
+    }
+    jr_display_caption_clear();
+    CHECK(!jr_display_caption_foreground(), "clear caption releases foreground immediately despite retained fade text");
+    jr_display_caption_pin("LISTENING");
+    CHECK(jr_display_caption_foreground(), "pinned ambient text still owns foreground");
+    jr_display_caption_unpin();
+    CHECK(!jr_display_caption_foreground(), "unpin fixed idle hint releases foreground");
+}
+
+static void test_companion_sparse_refresh_and_retry(void)
+{
+    dream_fixture();
+    s_power_word |= 1u << 24;
+    jr_display_rest_set(JR_DISPLAY_REST_NIGHTSTAND, true, false);
+    jr_display_clock_set(true, 23, 59, 59);
+    uint32_t last = s_display.requested_word;
+    CHECK(presenter_dream_tick(&s_display, &last), "Nightstand stops emote");
+    CHECK(s_display.rest_view.mode == JR_COMPANION_NIGHTSTAND && !s_display.rest_view.night, "stores visible Nightstand view");
+    unsigned before = s_stub_refreshes;
+    jr_display_clock_set(true, 23, 59, 0);
+    jr_display_set_hud_env(74, false, true, 20, 20);
+    presenter_dream_tick(&s_display, &last);
+    CHECK(s_stub_refreshes == before, "same minute/view does not redraw");
+    jr_display_rest_set(JR_DISPLAY_REST_NIGHTSTAND, true, true);
+    s_stub_lock_failures = 1;
+    presenter_dream_tick(&s_display, &last);
+    CHECK(!s_display.rest_view.night && s_stub_refreshes == before, "failed refresh keeps previous night key");
+    presenter_dream_tick(&s_display, &last);
+    CHECK(s_display.rest_view.night && s_stub_refreshes == before + 1, "night change retries after lock refusal");
+    jr_display_set_hud_env(73, true, false, 0, 0);
+    presenter_dream_tick(&s_display, &last);
+    CHECK(s_stub_refreshes == before + 2 && s_display.rest_view.battery_percent == 73 &&
+          s_display.rest_view.charging && !s_display.rest_view.privacy_muted, "battery/privacy/charge changes invalidate");
+    jr_display_rest_set(JR_DISPLAY_REST_GLANCE, false, false);
+    presenter_dream_tick(&s_display, &last);
+    CHECK(s_stub_refreshes == before + 3 && strcmp(s_display.rest_view.lines[1].text, "NEXT UNAVAILABLE") == 0,
+          "mode change redraws honest Glance item");
+    s_power_word &= ~(1u << 24);
+    jr_display_set_hud_env(73, false, false, 0, 0);
+    presenter_dream_tick(&s_display, &last);
+    CHECK(s_stub_refreshes == before + 4, "Glance USB text change invalidates");
+    jr_display_clock_set(false, 0, 0, 0);
+    presenter_dream_tick(&s_display, &last);
+    CHECK(strcmp(s_display.rest_view.lines[0].text, "--:--") == 0, "invalid local time stays unknown");
+    jr_display_rest_set(JR_DISPLAY_REST_NONE, false, false);
+    CHECK(!presenter_dream_tick(&s_display, &last) && !s_display.dream_active && last == UINT32_MAX,
+          "request exit forces same-face normal rebind");
+}
+
+static void test_companion_actual_flush_preserves_rims_and_strip_order(void)
+{
+    for (int mode = JR_DISPLAY_REST_NIGHTSTAND; mode <= JR_DISPLAY_REST_GLANCE; ++mode) {
+        for (int swap = 0; swap < 2; ++swap) {
+            dream_fixture();
+            s_power_word |= 1u << 24;
+            stage_ring_at_rest(JR_DISPLAY_SPACE_WATCH, JR_DISPLAY_OTA_IDLE, 0);
+            s_display.board.swap_color_bytes = swap != 0;
+            jr_display_rest_set((jr_display_rest_mode_t)mode, true, true);
+            jr_display_clock_set(true, 6, 42, 0);
+            jr_display_set_hud_env(53, true, true, 24, -24);
+            uint16_t *whole = calloc(HUD_W * HUD_H, sizeof *whole);
+            uint16_t *strips = calloc(HUD_W * HUD_H, sizeof *strips);
+            uint16_t *rims = calloc(HUD_W * HUD_H, sizeof *rims);
+            CHECK(whole && strips && rims, "allocate frame comparison");
+            s_stub_disp_user_data = &s_display;
+            panel_flush(s_display.disp, 0, 0, HUD_W, HUD_H, whole); complete_test_transfer();
+            for (int y = 0; y < HUD_H; y += 13) {
+                const int end = y + 13 < HUD_H ? y + 13 : HUD_H;
+                panel_flush(s_display.disp, 0, y, HUD_W, end, strips + y * HUD_W); complete_test_transfer();
+            }
+            apply_rest_rims(&s_display, 0, HUD_H, rims);
+            CHECK(memcmp(whole, strips, HUD_W * HUD_H * sizeof *whole) == 0,
+                  "companion mode%d swap%d preserves full/strip composition", mode, swap);
+            unsigned bad_rim = 0, near_black = 0, clock_ink = 0, item_ink = 0;
+            const uint16_t ink = panel_order_color(&s_display, 0x2104);
+            for (int y = 0; y < HUD_H; ++y) for (int x = 0; x < HUD_W; ++x) {
+                const int dx = x - 232, dy = y - 232;
+                const uint16_t px = whole[y * HUD_W + x];
+                if (dx * dx + dy * dy >= 180 * 180 && px != rims[y * HUD_W + x]) { bad_rim++; }
+                if (dx * dx + dy * dy < 180 * 180 && px != 0 && px != ink) { near_black++; }
+                if (y >= (mode == JR_DISPLAY_REST_GLANCE ? 180 : 222) &&
+                    y < (mode == JR_DISPLAY_REST_GLANCE ? 201 : 243) && px == ink) { clock_ink++; }
+                if (y >= 224 && y < 231 && mode == JR_DISPLAY_REST_GLANCE && px == ink) { item_ink++; }
+            }
+            CHECK(bad_rim == 0 && near_black == 0 && clock_ink > 0,
+                  "actual WATCH flush keeps dim clock, black content and battery/privacy rims mode%d swap%d", mode, swap);
+            if (mode == JR_DISPLAY_REST_GLANCE) { CHECK(item_ink > 0, "Glance next-unavailable glyphs reach actual flush"); }
+            free(whole); free(strips); free(rims);
+        }
+    }
+}
+
+static void test_panel_ack_requires_transport_settle_and_completed_recovery(void)
+{
+    for (unsigned failure = 0; failure < 4; ++failure) {
+        dream_fixture();
+        if (failure == 1) { s_stub_brightness_error = ESP_FAIL; }
+        if (failure == 2) { s_stub_off_error = ESP_FAIL; }
+        if (failure == 3) { s_stub_sleep_in_error = ESP_FAIL; }
+        CHECK(!jr_display_panel_is_on() && !jr_display_panel_is_off(), "initial panel ack unavailable");
+        jr_display_panel_off_request();
+        const uint32_t request = s_panel_off;
+        jr_display_panel_off_request();
+        CHECK(s_panel_off == request, "repeated off request retains generation");
+        const unsigned ready = s_stub_flush_ready_calls;
+        flush_test_strip(0);
+        CHECK(jr_display_panel_is_off() == (failure == 0), "off acknowledges only all successful commands failure%d", failure);
+        CHECK(s_stub_draw_calls == 0 && s_stub_flush_ready_calls == ready + 1, "no DMA; releases failed/off strip once");
+        CHECK(s_stub_sleep_in_calls == (failure < 3 && failure != 0 ? 0U : 1U), "off failure stops later hardware mutation%d", failure);
+        if (failure == 0) { CHECK(s_fake_us - s_stub_sleep_in_us >= 120000, "off includes real settling interval"); }
+        s_stub_brightness_error = s_stub_off_error = s_stub_sleep_in_error = ESP_OK;
+        jr_display_panel_on_request();
+        const uint32_t recover = s_panel_off;
+        jr_display_panel_on_request();
+        CHECK(s_panel_off == recover && recover != request, "opposite intent supersedes generation, repeated on idempotent");
+        flush_test_strip(0);
+        CHECK(!jr_display_panel_is_on() && !jr_display_panel_is_off(), "successful recovery submit alone cannot ack");
+        CHECK(s_stub_sleep_out_calls == 1 && s_stub_on_calls == 1 && s_stub_panel_brightness == 8,
+              "recover conservatively wakes, displays and restores prior effective brightness");
+        CHECK(s_fake_us - s_stub_sleep_out_us >= 120000, "on settles before render");
+        if (failure == 3) { CHECK(s_stub_sleep_out_us - s_stub_sleep_in_us >= 120000, "uncertain failed sleep obeys opposite exclusion"); }
+        complete_test_transfer();
+        CHECK(jr_display_panel_is_on() && !jr_display_panel_is_off(), "only matching completed post-recovery strip acknowledges on");
+        atomic_store(&s_brightness_have, 17); atomic_store(&s_brightness_shown, 17); s_brightness_want = 17;
+        jr_display_panel_off_request(); flush_test_strip(0);
+        jr_display_panel_on_request(); flush_test_strip(0); complete_test_transfer();
+        CHECK(s_stub_panel_brightness == 17 && jr_display_panel_is_on(), "next sleep captures fresh brightness, not first recovery value");
+    }
+}
+
+static void cancel_off_during_settle(void)
+{
+    s_stub_delay_hook = NULL;
+    CHECK(!jr_display_panel_is_off(), "off remains unacknowledged during settling");
+    jr_display_panel_on_request();
+}
+
+static void test_panel_cancellation_failures_and_old_completions(void)
+{
+    dream_fixture();
+    flush_test_strip(0); /* old neutral transfer still in flight */
+    jr_display_panel_off_request(); s_stub_delay_hook = cancel_off_during_settle;
+    flush_test_strip(0);
+    CHECK(!jr_display_panel_is_off() && !jr_display_panel_is_on(), "cancelled old off cannot publish acknowledgement");
+    complete_test_transfer();
+    CHECK(!jr_display_panel_is_on(), "old neutral DMA cannot acknowledge new recovery");
+    flush_test_strip(0);
+    CHECK(s_stub_sleep_out_us - s_stub_sleep_in_us >= 120000, "cancelled sleep still observes opposite exclusion");
+    jr_display_panel_off_request(); /* cancel recovery before its callback */
+    complete_test_transfer();
+    CHECK(!jr_display_panel_is_on() && !jr_display_panel_is_off(), "late old recovery cannot overwrite newer off");
+    flush_test_strip(0);
+    CHECK(jr_display_panel_is_off(), "latest off still completes");
+    for (unsigned failure = 0; failure < 4; ++failure) {
+        jr_display_panel_on_request();
+        s_stub_sleep_out_error = failure == 0 ? ESP_FAIL : ESP_OK;
+        s_stub_on_error = failure == 1 ? ESP_FAIL : ESP_OK;
+        s_stub_brightness_error = failure == 2 ? ESP_FAIL : ESP_OK;
+        s_stub_draw_error = failure == 3 ? ESP_FAIL : ESP_OK;
+        const unsigned draw = s_stub_draw_calls;
+        flush_test_strip(0);
+        CHECK(!jr_display_panel_is_on(), "recovery stage%d error never acknowledges", failure);
+        CHECK(s_stub_draw_calls == draw + (failure == 3), "recovery stage%d stops before unsafe DMA", failure);
+        s_stub_sleep_out_error = s_stub_on_error = s_stub_brightness_error = s_stub_draw_error = ESP_OK;
+        flush_test_strip(0); complete_test_transfer();
+        CHECK(jr_display_panel_is_on(), "recovery stage%d retries without stranding renderer", failure);
+        jr_display_panel_off_request(); flush_test_strip(0);
+    }
+}
+
+static void early_transfer_hook(void)
+{
+    complete_test_transfer();
+    CHECK(s_display.first_glance_time_transfer_state == 0U,
+          "early callback cannot mark valid-time before submission result");
+    s_fake_us += 17000; /* submission returns after the actual completion */
+}
+
+static void test_glance_proxy_tracks_actual_successful_inflight_content(void)
+{
+    dream_fixture();
+    s_display.first_transfer_state = 0;
+    flush_test_strip(180); /* neutral DREAM before valid-time Glance */
+    jr_display_rest_set(JR_DISPLAY_REST_GLANCE, false, false);
+    jr_display_clock_set(true, 5, 10, 0);
+    complete_test_transfer();
+    CHECK(s_display.first_transfer_state == 1U && s_display.first_glance_time_transfer_state == 0U,
+          "neutral first-strip B proxy distinct from later Glance proxy");
+    flush_test_strip(0); complete_test_transfer();
+    CHECK(s_display.first_glance_time_transfer_state == 0U, "non-clock Glance strip is not useful-time proof");
+    jr_display_clock_set(false, 0, 0, 0);
+    flush_test_strip(180); jr_display_clock_set(true, 5, 10, 0); complete_test_transfer();
+    CHECK(s_display.first_glance_time_transfer_state == 0U, "unknown clock tag remains unknown despite later valid mailbox");
+    s_stub_draw_hook = early_transfer_hook; s_stub_draw_error = ESP_FAIL;
+    const unsigned early_ready = s_stub_flush_ready_calls;
+    flush_test_strip(180);
+    CHECK(s_display.first_glance_time_transfer_state == 0U, "even early completion plus failed draw cannot publish Glance proof");
+    CHECK(s_stub_flush_ready_calls == early_ready + 1U, "early failed draw releases gfx exactly once");
+    s_stub_draw_error = ESP_OK; s_fake_us = 2345678;
+    flush_test_strip(180);
+    CHECK(s_display.first_glance_time_transfer_state == 1U &&
+          s_display.first_glance_time_transfer_done_boot_ms == 2345, "actual early completion records its timestamp after successful draw");
+    s_stub_draw_hook = NULL;
+    s_fake_us = 3456000; flush_test_strip(180); complete_test_transfer();
+    CHECK(s_display.first_glance_time_transfer_done_boot_ms == 2345, "Glance first useful transfer timestamp immutable");
+    const jr_display_boot_timing_t timing = boot_timing_read();
+    CHECK(timing.first_glance_time_transfer_valid && timing.first_glance_time_transfer_done_boot_ms == 2345,
+          "public diagnostic exposes separate non-optical completed-time proxy");
+    dream_fixture();
+    s_display.first_glance_time_transfer_state = 0;
+    jr_display_rest_set(JR_DISPLAY_REST_GLANCE, false, false); jr_display_clock_set(true, 0, 0, 0);
+    s_fake_us = 0; flush_test_strip(180); complete_test_transfer();
+    CHECK(s_display.first_glance_time_transfer_state == 1 && s_display.first_glance_time_transfer_done_boot_ms == 0,
+          "zero-time completed Glance is valid independently of timestamp sentinel");
+    const jr_display_boot_timing_t zero_timing = boot_timing_read();
+    CHECK(zero_timing.first_glance_time_transfer_valid &&
+          zero_timing.first_glance_time_transfer_done_boot_ms == 0,
+          "public proxy reports zero-time completion as valid");
+    dream_fixture();
+    for (unsigned i = 0; i < DISPLAY_TRANSFER_TAGS; ++i) { flush_test_strip(0); }
+    CHECK(s_stub_draw_calls == DISPLAY_TRANSFER_TAGS, "every bounded FIFO slot admits one in-flight strip");
+    const unsigned draws = s_stub_draw_calls, ready = s_stub_flush_ready_calls;
+    flush_test_strip(0);
+    CHECK(s_stub_draw_calls == draws && s_stub_flush_ready_calls == ready + 1,
+          "bounded tag overflow refuses DMA and releases renderer");
+    for (unsigned i = 0; i < DISPLAY_TRANSFER_TAGS; ++i) { complete_test_transfer(); }
+    flush_test_strip(0); complete_test_transfer();
+    CHECK(s_stub_draw_calls == draws + 1, "tag FIFO wraps after completed transfers");
+}
+
+/* Quiet HOME keeps its visible baked frame. These checks run the production
+ * presenter decisions; pinned-vendor one-shot playback is tested separately. */
+static void quiet_fixture(void)
+{
+    dream_fixture();
+    jr_display_dream_set(false);
+    jr_display_caption_clear();
+    s_caption_prog = s_caption_ease = 0;
+    s_clock_prog = s_clock_ease = 0;
+    s_space_from = s_space_to = JR_DISPLAY_SPACE_JARVIS;
+    s_space_serial_seen = 0U;
+    s_space_prog = s_space_ease = 256;
+    s_space_on = false;
+    s_detail_prog = s_shade_prog = s_ask_prog = s_canvas_prog = 0;
+    s_render_fps = 6U;
+    s_stub_segments = 0U;
+    s_stub_segment_error = ESP_OK;
+    s_stub_refreshes = s_stub_anim_starts = s_stub_anim_stops = 0U;
+    s_stub_lock_failures = 0U;
+    s_stub_lock_hook = NULL;
+}
+
+static void test_quiet_home_one_frame_and_sparse_facts(void)
+{
+    quiet_fixture();
+    uint32_t word = s_display.requested_word;
+    CHECK(quiet_eligible(&s_display) && presenter_quiet_tick(&s_display, &word),
+          "muted settled HOME selects visible quiet frame");
+    CHECK(s_display.quiet_active && s_stub_segment_start == 0U &&
+          s_stub_segment_end == 1U && !s_stub_segment_repeat &&
+          s_stub_segment_fps == face_fps(s_display.shown_face) &&
+          s_stub_anim_starts == 1U && s_stub_anim_stops == 1U && s_stub_anim_visible,
+          "single frame is decoded once, stays visible, and never loops");
+    CHECK(presenter_wait_ms(&s_display) == 1000U, "settled quiet presenter only checks TTL/diagnostics");
+    for (unsigned i = 0; i < 720U; ++i) {
+        s_fake_us += 1000000;
+        jr_display_set_hud_env(74U, false, true, (float)i, -(float)i);
+        CHECK(presenter_quiet_tick(&s_display, &word), "quiet stays eligible at second%u", i);
+    }
+    CHECK(s_stub_segments == 1U && s_stub_refreshes == 0U,
+          "720 unchanged seconds never replay or dirty the quiet face");
+    jr_display_set_hud_env(73U, false, true, 0, 0);
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 1U,
+          "changed battery redraws its truthful rim");
+    jr_display_set_hud_env(73U, false, true, 1, -1);
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 1U,
+          "disabled parallax and repeated same facts do not dirty quiet HOME");
+    s_hud_env_word ^= 1U << 16;
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 2U,
+          "a genuine packed rim position change remains visible");
+    jr_display_caption_set("MUTED - TAP TO WAKE");
+    s_caption_prog = s_caption_ease = 256;
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 3U,
+          "new ambient caption redraws even with unchanged flag bits");
+    jr_display_caption_set("ON BATTERY");
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 4U,
+          "second ambient caption bytes reach the glass");
+    const uint32_t same_caption_revision = s_caption_revision;
+    jr_display_caption_set("ON BATTERY");
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 4U,
+          "idempotent caption stays still");
+    CHECK(s_caption_revision == same_caption_revision,
+          "identical caption bytes do not advance revision");
+    jr_display_clock_set(true, 12, 34, 0);
+    s_clock_prog = s_clock_ease = 256;
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 5U,
+          "valid clock admission redraws");
+    jr_display_clock_set(true, 12, 34, 1);
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 6U,
+          "clock seconds tick honestly without repeating the face");
+    jr_display_clock_set(true, 12, 35, 0);
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 7U,
+          "minute boundary redraws honestly");
+    CHECK(s_stub_segments == 1U, "fact updates do not restart animation");
+    jr_display_set_brightness(22U);
+    CHECK(presenter_wait_ms(&s_display) == 167U, "brightness slew keeps existing cadence");
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 8U,
+          "brightness pending forces render-owned pump");
+    s_display.snapshot_refresh_requested = 1U;
+    CHECK(presenter_refresh_pending(&s_display, false) && s_stub_refreshes == 9U,
+          "stopped quiet face still services a fresh snapshot");
+    jr_display_panel_off_request();
+    CHECK(presenter_refresh_pending(&s_display, false) && s_stub_refreshes == 10U,
+          "stopped quiet face still services panel off");
+    jr_display_panel_on_request();
+    CHECK(presenter_refresh_pending(&s_display, false) && s_stub_refreshes == 11U,
+          "stopped quiet face still services recovery");
+}
+
+static void test_quiet_refuses_dynamic_owners_and_unfinished_fades(void)
+{
+    for (unsigned guard = 0; guard < 30U; ++guard) {
+        quiet_fixture();
+        uint32_t word = s_display.requested_word;
+        CHECK(presenter_quiet_tick(&s_display, &word), "quiet guard%u starts active", guard);
+        switch (guard) {
+        case 0: s_hud_env_word &= ~(1u << 9); break;
+        case 1: s_hud_env_word |= 1u << 8; break;
+        case 2: jr_display_rest_voice_busy_set(true); break;
+        case 3: s_render_fps = 12U; break;
+        case 4: s_display.requested_word |= JR_DISPLAY_CMD_BLANK; break;
+        case 5: s_display.requested_word = (uint32_t)JR_FACE_LISTENING << 8; break;
+        case 6: s_display.requested_word = (uint32_t)JR_FACE_SPEAKING << 8; break;
+        case 7: s_display.requested_word = (uint32_t)JR_FACE_THINKING << 8; break;
+        case 8: s_display.requested_word = (uint32_t)JR_FACE_ERROR << 8; break;
+        case 9: s_nav_word = JR_DISPLAY_SPACE_WATCH; break;
+        case 10: s_nav_word = JR_DISPLAY_SPACE_WEATHER; break;
+        case 11: s_nav_word = (uint32_t)JR_DISPLAY_OVERLAY_SHADE << NAV_OVL_SHIFT; break;
+        case 12: s_display.shell_word = JR_DISPLAY_SHELL_AGENT; break;
+        case 13: s_choice_n = 1; break;
+        case 14: s_commit_pct = 20U; break;
+        case 15: s_ripple_start_ms = 999U; break;
+        case 16: s_bloom_start_ms = 999U; break;
+        case 17: s_canvas_until_ms = 2000U; break;
+        case 18: s_surface_active = true; break;
+        case 19:
+            jr_display_caption_set("NETWORK ERROR");
+            s_caption_prog = 256; /* settled foreground, independent of fade guard */
+            break;
+        case 20: atomic_store(&s_caption_pinned, true); break;
+        case 21: s_space_prog = 128; break;
+        case 22: s_nav_word = 1U << NAV_SERIAL_SHIFT; break;
+        case 23: s_detail_ease = 1; break;
+        case 24: s_shade_ease = 1; break;
+        case 25: s_ask_ease = 1; break;
+        case 26: s_canvas_ease = 1; break;
+        case 27: s_caption_prog = 1; break;
+        case 28: s_clock_prog = 1; break;
+        case 29: s_ota_word = JR_DISPLAY_OTA_RECEIVING; break;
+        }
+        CHECK(!quiet_eligible(&s_display) && !presenter_quiet_tick(&s_display, &word),
+              "dynamic owner/fade%u exits quiet", guard);
+        CHECK(!s_display.quiet_active && s_display.last_end == -1 && word == UINT32_MAX,
+              "exit%u forces same-face reapplication", guard);
+        if (guard == 1U) {
+            bool stale;
+            CHECK(apply_face(&s_display, JR_FACE_RESTING, JR_FACE_RESTING, 0U, &stale) == ESP_OK &&
+                  s_stub_segment_repeat && s_stub_segment_end == 7U && s_stub_anim_visible,
+                  "charging restores repeating same face and comet");
+        }
+    }
+    quiet_fixture(); s_display.test_pattern = JR_DISPLAY_TEST_WHITE;
+    CHECK(!quiet_eligible(&s_display), "panel diagnostic remains dynamic");
+    quiet_fixture(); s_hud_enabled = 0U;
+    CHECK(!quiet_eligible(&s_display), "HUD-disabled art stays on normal path");
+    quiet_fixture(); jr_display_rest_set(JR_DISPLAY_REST_GLANCE, false, false);
+    CHECK(!quiet_eligible(&s_display), "explicit Rest owns its own presentation");
+}
+
+static void quiet_late_speech(void)
+{
+    s_stub_lock_hook = NULL;
+    jr_display_rest_voice_busy_set(true);
+}
+
+static void test_quiet_failures_retry_and_never_freeze_old_assets(void)
+{
+    quiet_fixture();
+    uint32_t word = s_display.requested_word;
+    s_stub_lock_failures = 1U;
+    CHECK(!presenter_quiet_tick(&s_display, &word) && !s_display.quiet_active,
+          "failed entry lock cannot latch quiet");
+    CHECK(presenter_quiet_tick(&s_display, &word), "entry retries after lock failure");
+    jr_display_set_hud_env(72U, false, true, 0, 0);
+    const uint32_t old_env = s_display.quiet_env_key;
+    s_stub_lock_failures = 1U;
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_display.quiet_env_key == old_env,
+          "failed fact refresh cannot consume the new rim");
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_display.quiet_env_key == s_hud_env_word,
+          "failed fact refresh retries the new rim");
+    quiet_fixture(); CHECK(presenter_quiet_tick(&s_display, &word), "quiet before DMA fault");
+    jr_display_set_hud_env(72U, false, true, 0, 0);
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 1U,
+          "new rim schedules sparse transfer");
+    flush_test_strip(0); /* the real panel callback receives a failed transport */
+    const uint32_t good_errors = s_display.quiet_flush_error_key;
+    s_stub_draw_error = ESP_FAIL;
+    flush_test_strip(12);
+    s_stub_draw_error = ESP_OK;
+    s_stub_lock_failures = 1U;
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 1U &&
+          s_display.quiet_flush_error_key == good_errors,
+          "failed retry lock preserves unacknowledged DMA error");
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 2U &&
+          s_display.quiet_flush_error_key == s_display.flush_errors,
+          "actual failed strip retries the whole stopped frame despite unchanged fact keys");
+    CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 2U,
+          "successful sparse retry returns to zero periodic redraw");
+    quiet_fixture(); s_stub_segment_error = ESP_FAIL;
+    CHECK(!presenter_quiet_tick(&s_display, &word) && !s_display.quiet_active,
+          "failed segment command cannot latch quiet");
+    s_stub_segment_error = ESP_OK;
+    CHECK(presenter_quiet_tick(&s_display, &word), "segment entry retries");
+    quiet_fixture(); s_stub_lock_hook = quiet_late_speech;
+    CHECK(!presenter_quiet_tick(&s_display, &word) && s_stub_segments == 0U,
+          "late speech under render lock refuses one-shot programming");
+    quiet_fixture(); s_display.loaded_face = JR_FACE_ERROR;
+    CHECK(!presenter_quiet_tick(&s_display, &word), "old error asset cannot freeze as a quiet face");
+    quiet_fixture(); s_display.blanked = true;
+    CHECK(!presenter_quiet_tick(&s_display, &word), "hidden blank must rebind before quiet");
+    quiet_fixture(); s_display.active = NULL;
+    CHECK(!presenter_quiet_tick(&s_display, &word), "unloaded asset retains loader/retry path");
+    quiet_fixture();
+    jr_display_clip_t one_frame_clip = *s_display.active;
+    one_frame_clip.last_frame = 0U;
+    s_display.active = &one_frame_clip;
+    CHECK(!presenter_quiet_tick(&s_display, &word),
+          "vendor would clamp a one-frame asset to0 before preparing; keep normal fallback");
+    quiet_fixture(); CHECK(presenter_quiet_tick(&s_display, &word), "quiet before asset change");
+    s_display.requested_word = (uint32_t)JR_FACE_MUTED << 8;
+    CHECK(!presenter_quiet_tick(&s_display, &word) && !s_display.quiet_active,
+          "different quiet asset releases old one-shot latch");
+    s_display.loaded_face = JR_FACE_MUTED;
+    CHECK(presenter_quiet_tick(&s_display, &word), "newly bound quiet asset gets its own one-shot");
+    CHECK(apply_blank(&s_display) == ESP_OK && !s_display.quiet_active,
+          "DREAM/blank entry clears quiet ownership");
+}
+
+static jmp_buf s_quiet_task_done;
+static unsigned s_quiet_task_passes;
+static void quiet_task_step(void)
+{
+    if (++s_quiet_task_passes > 721U) { longjmp(s_quiet_task_done, 1); }
+    s_fake_us += 1000000;
+}
+static void test_actual_presenter_runs_quiet_not_repeat(void)
+{
+    quiet_fixture();
+    s_stub_engine_ready = true;
+    s_stub_board_get_error = s_stub_spiffs_error = ESP_OK;
+    s_stub_board_display = s_display.board;
+    s_stub_board_init_us = 0;
+    s_stub_disp_add_hook = NULL;
+    s_quiet_task_passes = 0U;
+    s_stub_notify_take_hook = quiet_task_step;
+    if (setjmp(s_quiet_task_done) == 0) { display_task(&s_display); }
+    s_stub_notify_take_hook = NULL;
+    CHECK(s_display.quiet_active && s_stub_segments == 1U && !s_stub_segment_repeat &&
+          s_stub_anim_visible && s_stub_refreshes == 1U,
+          "actual task721 passes: one startup pattern refresh, one visible one-shot, zero periodic refresh");
+}
+
 int main(void)
 {
     test_every_face_has_a_clip_and_a_hud_face();
@@ -2881,6 +4340,34 @@ int main(void)
     test_render_clock_counts_frames_and_latches_a_second();
     test_missing_clip_falls_back_to_the_face_it_grew_from();
     test_dial_decodes_once_and_blits_every_strip();
+    test_dream_intent_preserves_env_and_ignores_unchanged_publish();
+    test_dream_never_hides_foreground_or_ota();
+    test_dream_glass_is_black_clock_and_intact_rims();
+    test_dream_stops_emote_and_refreshes_only_for_real_changes();
+    test_dream_capture_panel_off_and_input_wake();
+    test_panel_order_color_covers_both_wire_orders();
+    test_refresh_failure_retries_keys_snapshot_and_pattern();
+    test_finite_fades_use_elapsed_time_at_rest();
+    test_dial_sources_release_without_invalidating_vendor_ownership();
+    test_battery_rim_is_strip_invariant_at_every_percent();
+    test_boot_timing_waits_for_a_real_completion();
+    test_boot_timing_records_init_failure_and_early_callback();
+    test_boot_timing_ignores_unusable_callbacks_and_unpublished_stamp();
+    test_rest_mailboxes_survive_start_and_env_updates();
+    test_boot_brightness_seed_precedes_first_transfer();
+    test_rest_independently_refuses_exiting_foreground();
+    test_rest_idle_listening_yields_immediately_to_voice_busy();
+    test_power_hints_yield_only_after_plug_feedback();
+    test_companion_sparse_refresh_and_retry();
+    test_companion_actual_flush_preserves_rims_and_strip_order();
+    test_panel_ack_requires_transport_settle_and_completed_recovery();
+    test_panel_opposite_request_at_ack_boundary();
+    test_panel_cancellation_failures_and_old_completions();
+    test_glance_proxy_tracks_actual_successful_inflight_content();
+    test_quiet_home_one_frame_and_sparse_facts();
+    test_quiet_refuses_dynamic_owners_and_unfinished_fades();
+    test_quiet_failures_retry_and_never_freeze_old_assets();
+    test_actual_presenter_runs_quiet_not_repeat();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);

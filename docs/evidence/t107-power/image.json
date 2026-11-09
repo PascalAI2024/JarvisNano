@@ -1,0 +1,15 @@
+{
+  "built_utc": "2026-10-11T20:11:57.415171+00:00",
+  "image": "build/jarvisrobot_v5.bin",
+  "sha256": "6292894e5662c47b0276152aa7aa0ac0cd179310d5bfa69049c5a64171633a7b",
+  "bytes": 1854464,
+  "smallest_app_partition_bytes": 4194304,
+  "free_bytes": 2339840,
+  "free_percent": 55.786,
+  "idf": "5.5.4",
+  "command": "RECONFIGURE=1 ./scripts/build-v5.sh",
+  "exit_code": 0,
+  "reconfigure_authority": "explicit orchestrator ruling after owner cleanup",
+  "base_commit": "42060d18bbcba590b843c72e513c15bbc35c662f",
+  "note": "Built tested working-tree source before the explicitly requested pre-OTA commit."
+}

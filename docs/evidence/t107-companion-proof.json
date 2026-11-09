@@ -1,0 +1,198 @@
+{
+  "schema": 1,
+  "created_utc": "2026-10-12T04:31:56.858885+00:00",
+  "base_commit": "28c8e2329719cc411b8e777a62c089ed8c9015a2",
+  "source_hash_note": "Worktree hashes identify gated files; LF hashes allow CRLF checkout verification.",
+  "sources": {
+    "components/jr_display/CMakeLists.txt": {
+      "worktree_sha256": "7827e88b64b06e4db00b33c35d7d8199b225cc4e32876e0148dc550fed89d31f",
+      "lf_sha256": "77b78e1bea5f589cb43374f59a0129c291c930638d39ef7234d6777857b8a2c1"
+    },
+    "components/jr_display/include/jr_display/companion.h": {
+      "worktree_sha256": "4db78fdf4da0670c25c6eb14afcc237743e3aba95948dc78b0ebb42f88eef429",
+      "lf_sha256": "4db78fdf4da0670c25c6eb14afcc237743e3aba95948dc78b0ebb42f88eef429"
+    },
+    "components/jr_display/include/jr_display/jr_display.h": {
+      "worktree_sha256": "2b84c018d2b82731d9c1b169479b759c79d883db4eef126ffd446c69a9574901",
+      "lf_sha256": "f1d7de9bc525b88e99b867bdd78ebb835a1269bc650b5494d885b59bb1de031a"
+    },
+    "components/jr_display/src/companion.c": {
+      "worktree_sha256": "83b5c7772d3b8176f711043c589f4bfaccb5b9b277652410654755804ce04260",
+      "lf_sha256": "83b5c7772d3b8176f711043c589f4bfaccb5b9b277652410654755804ce04260"
+    },
+    "components/jr_display/src/jr_display.c": {
+      "worktree_sha256": "97fc774967bf822752e29c3c1a37229452f22c8c466528b43182433024a7e726",
+      "lf_sha256": "97fc774967bf822752e29c3c1a37229452f22c8c466528b43182433024a7e726"
+    },
+    "components/jr_display/tests/CMakeLists.txt": {
+      "worktree_sha256": "e332873ede7f208dac898cbe06fec6d5c2d73a99f0a5fb6f41f806868501a2d1",
+      "lf_sha256": "253690d7d3e6abba70f7e6e724e1747a0faf2d73e820203a8399da2e37d04738"
+    },
+    "components/jr_display/tests/probe/probe.c": {
+      "worktree_sha256": "3c4627a283ed7e3995c5deb5ce6b0c9f6b49057d7f6c6967e945e9a274ba088e",
+      "lf_sha256": "92d534c3a95363a3423d596767ba4441abcd061e838404a69dcb00d0088181c7"
+    },
+    "components/jr_display/tests/probe/stubs/esp_lcd_panel_ops.h": {
+      "worktree_sha256": "78fa8f397898efdcdf94ff2c584a09b3904f469ed8ed304739ec7e932d2b565e",
+      "lf_sha256": "4dc4c388ac204f0b4057bbd2c180d6879395f7ac1fb43ac5dadef054f19d1754"
+    },
+    "components/jr_display/tests/probe/stubs/idf_stubs.inc": {
+      "worktree_sha256": "5f2676c04de53f268cb2d650421a3ab17dfe7e1faec31c88f9f40aa415c1d28c",
+      "lf_sha256": "5f2676c04de53f268cb2d650421a3ab17dfe7e1faec31c88f9f40aa415c1d28c"
+    },
+    "components/jr_display/tests/probe/stubs/jarvis_board.h": {
+      "worktree_sha256": "fbd90dd2b15cbe2e5d0ce7517400837e00ddbb985c836f9c991c4a5842bbc810",
+      "lf_sha256": "f50eff0b11b534b0225e11bd6fd0212d40d84f82974951003ed57847754bbbe0"
+    },
+    "components/jr_display/tests/test_board.py": {
+      "worktree_sha256": "a4a809ac04a9284c03ff68ceb83f56e58df49c1d10e103f1e04cd277c255394f",
+      "lf_sha256": "a4a809ac04a9284c03ff68ceb83f56e58df49c1d10e103f1e04cd277c255394f"
+    },
+    "components/jr_display/tests/test_companion.c": {
+      "worktree_sha256": "3dcd393e8c1ca029a54259d0bfd0120acfa9779d045bce7df8f31a76e19d57db",
+      "lf_sha256": "3dcd393e8c1ca029a54259d0bfd0120acfa9779d045bce7df8f31a76e19d57db"
+    },
+    "components/jr_display/tests/test_shell.c": {
+      "worktree_sha256": "86852a6eddb3b5167ec29d64b53ad25dc6623c369d95f3e1bbe8b7bd337d3951",
+      "lf_sha256": "86852a6eddb3b5167ec29d64b53ad25dc6623c369d95f3e1bbe8b7bd337d3951"
+    },
+    "firmware/components/jarvis_board/include/jarvis_board.h": {
+      "worktree_sha256": "a1774579441a6bfdae34c60b15f3de967bb2b6c9e379fffbabd104a5323cf1d8",
+      "lf_sha256": "a5f26e180d19d24bedf9dc4924a67d341958f0ac3f9e12d6c924a821062c1838"
+    },
+    "firmware/components/jarvis_board/src/jarvis_board.c": {
+      "worktree_sha256": "3ff7d25641fe7cddc4607d305d23472b2c6ac1c31ec59a594fcacc21eb95cf34",
+      "lf_sha256": "4eba037deee866171cd8526d62615be7462f7cd7728f58d7aa126174357ecfda"
+    },
+    "host/fakes/power_app.h": {
+      "worktree_sha256": "5da0870c4842e0add3edb1d1c7e7230a18bb3c2525ce7ff287d23e6ea9e6a01c",
+      "lf_sha256": "5da0870c4842e0add3edb1d1c7e7230a18bb3c2525ce7ff287d23e6ea9e6a01c"
+    },
+    "host/test_audio_power.c": {
+      "worktree_sha256": "35252fd47cd66b81e1d2d2c6f89d3961109a3127ef28d3f664cba7afaff9ccb1",
+      "lf_sha256": "c15786a2d728a9a003663a92a051afecdb3aa0f97d0a754e1b35565308291689"
+    },
+    "host/test_mood.c": {
+      "worktree_sha256": "dfb22b06158da624b72e5465b1523084be2edb96604f773c939c075759db57b6",
+      "lf_sha256": "0bf5965ca95896bf41e0ec4363394bc543872a77c4e36fab89c2f85a3f593823"
+    },
+    "main/http_routes.c": {
+      "worktree_sha256": "cbc1ca2955fa32bdf79672d40cf0084b1680e56e63f2be00bce3706456be0ffa",
+      "lf_sha256": "ab45b15cedc268a1d346e9048cbefc6f572413551b5636aebb1a7e4f55f5b16b"
+    },
+    "main/main.c": {
+      "worktree_sha256": "748b06e7f1944bd429580901f70331f78f3f1a698d6089e4e4e49362db85a84a",
+      "lf_sha256": "1227ee232f1ea1e232cc9a6d2a098bead71f433d84311ef5ccad8933a1eb1586"
+    },
+    "main/power.c": {
+      "worktree_sha256": "0e5bb6560dd4d07a769d8ab4e9ece94990cd376d25d140edf9a61bccd49757da",
+      "lf_sha256": "e0508490596f4fda9785eb5137757e2655c1bc2ffadef24b7b6637b3902593ab"
+    },
+    "main/tests/test_companion_integration.c.in": {
+      "worktree_sha256": "784d475f4750f2bec2a8c94df4c84309d644573568704abbd8afe5d545c0d40e",
+      "lf_sha256": "784d475f4750f2bec2a8c94df4c84309d644573568704abbd8afe5d545c0d40e"
+    },
+    "main/tests/test_companion_integration.py": {
+      "worktree_sha256": "e251d8ade0d96deb8f8cb122053144f7f8e0d2907a0857b9b1ef4e024a87c84d",
+      "lf_sha256": "e251d8ade0d96deb8f8cb122053144f7f8e0d2907a0857b9b1ef4e024a87c84d"
+    },
+    "main/tests/test_companion_main.c.in": {
+      "worktree_sha256": "53f5d4c9546a70b06eaf19daa9950026b3105ccbc751db720930888855c9d0e7",
+      "lf_sha256": "53f5d4c9546a70b06eaf19daa9950026b3105ccbc751db720930888855c9d0e7"
+    },
+    "main/tests/test_companion_main.py": {
+      "worktree_sha256": "14e891c60171c9f6d7f5cc822294d85803c0d24336d79acce47435f2b0b73235",
+      "lf_sha256": "14e891c60171c9f6d7f5cc822294d85803c0d24336d79acce47435f2b0b73235"
+    },
+    "main/tests/test_display_http.c.in": {
+      "worktree_sha256": "9de6d34a2db75432b3a71940c761e34cb532cef7951d1820b150c5ded13c5cdc",
+      "lf_sha256": "9de6d34a2db75432b3a71940c761e34cb532cef7951d1820b150c5ded13c5cdc"
+    },
+    "main/tests/test_display_http.py": {
+      "worktree_sha256": "bbad380aada3d7e8901473cef47ee4b50a824057b240d65b2f299b7471fce725",
+      "lf_sha256": "bbad380aada3d7e8901473cef47ee4b50a824057b240d65b2f299b7471fce725"
+    },
+    "main/tests/test_ota_sleep_fence.c.in": {
+      "worktree_sha256": "36f1a3f42961b530d57b6dbbbf9ecf2ed4323e44a0f212803931196ca2769f38",
+      "lf_sha256": "36f1a3f42961b530d57b6dbbbf9ecf2ed4323e44a0f212803931196ca2769f38"
+    },
+    "main/tests/test_ota_sleep_fence.py": {
+      "worktree_sha256": "d66d305ef1893270a146d813b0c9f53f2673b4c3dcc3925ced4318ed9e3abe4e",
+      "lf_sha256": "d66d305ef1893270a146d813b0c9f53f2673b4c3dcc3925ced4318ed9e3abe4e"
+    },
+    "main/tests/test_power_sleep.c.in": {
+      "worktree_sha256": "f6fb249c411a75809ddef885c258dd87dcb2b0c152b1357c291f05a7287648e2",
+      "lf_sha256": "f6fb249c411a75809ddef885c258dd87dcb2b0c152b1357c291f05a7287648e2"
+    },
+    "main/tests/test_power_sleep.py": {
+      "worktree_sha256": "c9acc820038ad4899ffb2d0ff2abfdcc618b7dab41584b14d908b20cb835c0f1",
+      "lf_sha256": "c9acc820038ad4899ffb2d0ff2abfdcc618b7dab41584b14d908b20cb835c0f1"
+    },
+    "main/tests/test_shell_input.py": {
+      "worktree_sha256": "58302c7a671fd94a75a65e3188be6fd18da1bd0162b883a23bdf3ea88f932384",
+      "lf_sha256": "58302c7a671fd94a75a65e3188be6fd18da1bd0162b883a23bdf3ea88f932384"
+    },
+    "scripts/host-tests.sh": {
+      "worktree_sha256": "1f656de53a71e90d81cf121cf13922e5fe55c5322dc1ccb882bf20cb2f79c973",
+      "lf_sha256": "1f656de53a71e90d81cf121cf13922e5fe55c5322dc1ccb882bf20cb2f79c973"
+    }
+  },
+  "build": {
+    "bytes": 1867168,
+    "app_partition_bytes": 4194304,
+    "free_percent": 55.483245849609375,
+    "sha256": "c49898975b55b6feabf2778639bd604d9e7f40b41bee46eaf76f6adc4a5a41fa",
+    "idf": "5.5.4"
+  },
+  "host": {
+    "suites": 14,
+    "failed": 0,
+    "counts": {
+      "hud": 11451,
+      "shell": 2708,
+      "portable_companion": 76940,
+      "actual_board": 72,
+      "main_input": 109,
+      "charge_http": 5120,
+      "display_http": 168,
+      "actual_main": 2896,
+      "main_to_renderer": 1920,
+      "sleep": 16938,
+      "ota_fence": 3278,
+      "core": 180,
+      "tools": 81,
+      "desk": 38
+    },
+    "sleep_scenarios": 144,
+    "ota_scenarios": 132,
+    "ota_separate_route_checks": 16
+  },
+  "compiled_runtime_faults": {
+    "display": 62,
+    "board": 11,
+    "companion_helper": 47,
+    "main": 13,
+    "integration": 12,
+    "sleep": 17,
+    "ota": 13,
+    "display_http": 4,
+    "total": 179
+  },
+  "proof_receipt_sha256": {
+    "C-host-tests-final2.log": "59a588fad95f44019a95ccbab2873e333ef45fbd51ce41aeeadfb2900ed0347f",
+    "C-build.log": "192402a0d10c88bbb103e5a222b1ebb4652d647aac136710f65ae499f30d77bb",
+    "C-integration-final/summary.json": "1e725804d7ac79c6e9e01d1239456a5cd831275d2c70f485d0592cf69385cd78",
+    "C-display-http-mutants/results.json": "6f788975114998e8591e2c720edc4c363f47262e67df2090b997f787287ce6f3",
+    "C-OTA-sleep-fence-proof/summary.json": "6cfac8b14f539a48e5ea51c95d10302c8833ace2568371088bada97e29c544d7",
+    "C-main-mutants.log": "8c04b24e243ef7ddc8ab8abb624e8c35a8cb6950bd904d1e7ff0f8497cbcf2c4",
+    "C-power-ownership-fix.md": "1bffc844396efc2cdcda20d6da0d0eb77ed7883bd1480e5a8a4479f2bdd596b6",
+    "C-display-build.md": "8fde5f50a059533ec549099056865c5cbd961d370a33eb1a0a110f50840000b6",
+    "C-display-integration.md": "ce5d7bf5ecfb6cece7680a98f79cb9c434adcb701a05724a28be85f05d664d66"
+  },
+  "limits": [
+    "Compile failures, crashes and equivalent mutants excluded.",
+    "Host proof is not real FreeRTOS contention or optical/electrical proof.",
+    "OTA and matched device stage windows pending at source freeze.",
+    "Controlled USB/lift captures, optical wake timing, projected battery life and C-image voice turn pending."
+  ]
+}

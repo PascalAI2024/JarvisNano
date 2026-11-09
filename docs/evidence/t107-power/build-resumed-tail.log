@@ -1,0 +1,120 @@
+[2215/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/base/ftotval.c.obj
+[2216/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/base/ftbase.c.obj
+[2217/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/base/ftpatent.c.obj
+[2218/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/base/ftpfr.c.obj
+[2219/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/base/ftwinfnt.c.obj
+[2220/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/base/ftsynth.c.obj
+[2221/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/base/fttype1.c.obj
+[2222/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/bzip2/ftbzip2.c.obj
+[2223/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/base/ftstroke.c.obj
+[2224/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/lzw/ftlzw.c.obj
+[2225/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/psnames/psnames.c.obj
+[2226/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/bdf/bdf.c.obj
+[2227/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/raster/raster.c.obj
+[2228/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/pcf/pcf.c.obj
+[2229/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/gzip/ftgzip.c.obj
+[2230/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/cache/ftcache.c.obj
+[2231/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/cid/type1cid.c.obj
+[2232/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/pfr/pfr.c.obj
+[2233/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/pshinter/pshinter.c.obj
+[2234/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/cff/cff.c.obj
+[2235/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/sdf/sdf.c.obj
+[2236/2316] Building C object esp-idf/laride__heatshrink/CMakeFiles/__idf_laride__heatshrink.dir/heatshrink_encoder.c.obj
+[2237/2316] Building C object esp-idf/laride__heatshrink/CMakeFiles/__idf_laride__heatshrink.dir/heatshrink_decoder.c.obj
+[2238/2316] Linking C static library esp-idf/laride__heatshrink/liblaride__heatshrink.a
+[2239/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/base/ftdebug.c.obj
+[2240/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/svg/svg.c.obj
+[2241/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/base/ftsystem.c.obj
+[2242/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/smooth/smooth.c.obj
+[2243/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/winfonts/winfnt.c.obj
+[2244/2316] Building C object esp-idf/lvgl__lvgl/CMakeFiles/__idf_lvgl__lvgl.dir/demos/lv_demos.c.obj
+[2245/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/core/gfx_color.c.obj
+[2246/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/type42/type42.c.obj
+[2247/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/psaux/psaux.c.obj
+[2248/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/core/gfx_blend.c.obj
+[2249/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/type1/type1.c.obj
+[2250/2316] Building C object esp-idf/lvgl__lvgl/CMakeFiles/__idf_lvgl__lvgl.dir/examples/widgets/textarea/lv_example_textarea_password.c.obj
+[2251/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/core/gfx_obj.c.obj
+[2252/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/core/gfx_disp.c.obj
+[2253/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/core/gfx_core.c.obj
+[2254/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/core/gfx_refr.c.obj
+[2255/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/lib/qrcode/qrcode_wrapper.c.obj
+[2256/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/core/gfx_timer.c.obj
+[2257/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/widget/gfx_font_ft.c.obj
+[2258/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/core/gfx_render.c.obj
+[2259/2316] Building C object esp-idf/espressif__esp_lcd_co5300/CMakeFiles/__idf_espressif__esp_lcd_co5300.dir/esp_lcd_co5300_mipi.c.obj
+[2260/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/core/gfx_touch.c.obj
+[2261/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/decoder/gfx_img_dec.c.obj
+[2262/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/lib/eaf/gfx_eaf_dec.c.obj
+[2263/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/lib/qrcode/qrcodegen.c.obj
+[2264/2316] Building C object esp-idf/espressif__esp_lcd_co5300/CMakeFiles/__idf_espressif__esp_lcd_co5300.dir/esp_lcd_co5300.c.obj
+[2265/2316] Building C object esp-idf/lvgl__lvgl/CMakeFiles/__idf_lvgl__lvgl.dir/examples/widgets/textarea/lv_example_textarea_placeholder.c.obj
+[2266/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/truetype/truetype.c.obj
+[2267/2316] Building C object esp-idf/lvgl__lvgl/CMakeFiles/__idf_lvgl__lvgl.dir/examples/widgets/tileview/lv_example_tileview_l_shape.c.obj
+[2268/2316] Building C object esp-idf/espressif__freetype/output/CMakeFiles/freetype.dir/src/sfnt/sfnt.c.obj
+[2269/2316] Building C object esp-idf/espressif__esp_lcd_co5300/CMakeFiles/__idf_espressif__esp_lcd_co5300.dir/esp_lcd_co5300_spi.c.obj
+[2270/2316] Linking C static library esp-idf/espressif__esp_lcd_co5300/libespressif__esp_lcd_co5300.a
+[2271/2316] Building C object esp-idf/lvgl__lvgl/CMakeFiles/__idf_lvgl__lvgl.dir/examples/widgets/win/lv_example_win_toolbar.c.obj
+[2272/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/widget/gfx_img.c.obj
+[2273/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/widget/gfx_draw_label.c.obj
+[2274/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/widget/gfx_anim.c.obj
+[2275/2316] Building C object esp-idf/waveshare__esp_lcd_touch_cst9217/CMakeFiles/__idf_waveshare__esp_lcd_touch_cst9217.dir/esp_lcd_touch_cst9217.c.obj
+[2276/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/widget/gfx_label.c.obj
+[2277/2316] Linking C static library esp-idf/waveshare__esp_lcd_touch_cst9217/libwaveshare__esp_lcd_touch_cst9217.a
+[2278/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/widget/gfx_qrcode.c.obj
+[2279/2316] Building C object esp-idf/jr_display/CMakeFiles/__idf_jr_display.dir/src/hud_render.c.obj
+[2280/2316] Building C object esp-idf/jr_memory/CMakeFiles/__idf_jr_memory.dir/src/jr_memory_guard.c.obj
+[2281/2316] Building C object esp-idf/jr_imu/CMakeFiles/__idf_jr_imu.dir/src/jr_imu.c.obj
+[2282/2316] Building C object esp-idf/jr_power/CMakeFiles/__idf_jr_power.dir/src/jr_power.c.obj
+[2283/2316] Linking C static library esp-idf/jr_imu/libjr_imu.a
+[2284/2316] Building C object esp-idf/jr_wake/CMakeFiles/__idf_jr_wake.dir/src/jr_wake.c.obj
+[2285/2316] Linking C static library esp-idf/jr_power/libjr_power.a
+[2286/2316] Linking C static library esp-idf/jr_wake/libjr_wake.a
+[2287/2316] Building C object esp-idf/jr_memory/CMakeFiles/__idf_jr_memory.dir/src/jr_memory.c.obj
+[2288/2316] Building C object esp-idf/jr_rtc/CMakeFiles/__idf_jr_rtc.dir/src/jr_rtc.c.obj
+[2289/2316] Linking C static library esp-idf/jr_memory/libjr_memory.a
+[2290/2316] Linking C static library esp-idf/jr_rtc/libjr_rtc.a
+[2291/2316] Building C object esp-idf/gen_bmgr_codes/CMakeFiles/__idf_gen_bmgr_codes.dir/gen_board_info.c.obj
+[2292/2316] Building C object esp-idf/jr_display/CMakeFiles/__idf_jr_display.dir/__/__/firmware/components/jarvis_board/src/jarvis_board.c.obj
+[2293/2316] Linking CXX static library esp-idf/espressif__freetype/output/libfreetype.a
+[2294/2316] Building C object esp-idf/gen_bmgr_codes/CMakeFiles/__idf_gen_bmgr_codes.dir/gen_board_periph_handles.c.obj
+[2295/2316] Building C object esp-idf/gen_bmgr_codes/CMakeFiles/__idf_gen_bmgr_codes.dir/gen_board_periph_config.c.obj
+[2296/2316] Building C object esp-idf/gen_bmgr_codes/CMakeFiles/__idf_gen_bmgr_codes.dir/__/__/boards/waveshare/esp32s3_touch_amoled_1_75c/setup_device.c.obj
+[2297/2316] Building C object esp-idf/gen_bmgr_codes/CMakeFiles/__idf_gen_bmgr_codes.dir/gen_board_device_config.c.obj
+[2298/2316] Building C object esp-idf/gen_bmgr_codes/CMakeFiles/__idf_gen_bmgr_codes.dir/gen_board_device_handles.c.obj
+[2299/2316] Linking C static library esp-idf/gen_bmgr_codes/libgen_bmgr_codes.a
+[2300/2316] Building C object esp-idf/espressif2022__esp_emote_gfx/CMakeFiles/__idf_espressif2022__esp_emote_gfx.dir/src/widget/gfx_font_lv.c.obj
+[2301/2316] Linking C static library esp-idf/lvgl__lvgl/liblvgl__lvgl.a
+[2302/2316] Linking C static library esp-idf/espressif2022__esp_emote_gfx/libespressif2022__esp_emote_gfx.a
+[2303/2316] Building C object esp-idf/jr_display/CMakeFiles/__idf_jr_display.dir/src/jr_display.c.obj
+[2304/2316] Linking C static library esp-idf/jr_display/libjr_display.a
+[2305/2316] Generating ../../diagnostics.html.S
+[2306/2316] Building ASM object esp-idf/main/CMakeFiles/__idf_main.dir/__/__/diagnostics.html.S.obj
+[2307/2316] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/power.c.obj
+[2308/2316] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/device_tools.c.obj
+[2309/2316] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/main.c.obj
+[2310/2316] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/http_routes.c.obj
+[2311/2316] Linking C static library esp-idf/main/libmain.a
+[2312/2316] Generating esp-idf/esp_system/ld/sections.ld
+[2313/2316] Building C object CMakeFiles/jarvisrobot_v5.elf.dir/project_elf_src_esp32s3.c.obj
+[2314/2316] Linking CXX executable jarvisrobot_v5.elf
+[2315/2316] Generating binary image from built executable
+esptool.py v4.12.dev1
+Creating esp32s3 image...
+Merged 3 ELF sections
+Successfully created esp32s3 image.
+Generated /project/build/jarvisrobot_v5.bin
+[2316/2316] cd /project/build/esp-idf/esptool_py && /opt/esp/python_env/idf5.5_py3.12_env/bin/python /opt/esp/idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app /project/build/partition_table/partition-table.bin /project/build/jarvisrobot_v5.bin
+jarvisrobot_v5.bin binary size 0x1c4c00 bytes. Smallest app partition is 0x400000 bytes. 0x23b400 bytes (56%) free.
+
+Project build complete. To flash, run:
+ idf.py flash
+or
+ idf.py -p PORT flash
+or
+ python -m esptool --chip esp32s3 -b 460800 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_size 32MB --flash_freq 80m 0x0 build/bootloader/bootloader.bin 0x8000 build/partition_table/partition-table.bin 0x10000 build/ota_data_initial.bin 0x20000 build/jarvisrobot_v5.bin 0x420000 build/emote_assets.bin 0xa00000 build/srmodels/srmodels.bin
+or from the "/project/build" directory
+ python -m esptool --chip esp32s3 -b 460800 --before default_reset --after hard_reset write_flash "@flash_args"
+v5 managed patch: all fixes present
+v5 sdkconfig: board-manager symbols synchronized
+[build-v5] build complete: <worktree>/build/jarvisrobot_v5.bin

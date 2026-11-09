@@ -1,0 +1,879 @@
+{
+  "source_commit": "ff1829473ddbdae979b9129376b9d1d767222ed1",
+  "image_sha256": "60d51bdf6227fa52fc9388f16f3f86ac66915b1b1a3265f626f2c4933eb41682",
+  "bytes": 1868096,
+  "free_percent": 55.461,
+  "expected_slot": "ota_0",
+  "method": "paired Wi-Fi upload of hash-verified frozen binary; source files verified against ff18294",
+  "start": {
+    "utc": "2026-10-12T09:38:26.607314+00:00",
+    "health": {
+      "verdict": "privacy-muted",
+      "repairable": false,
+      "privacy": true,
+      "flip_muted": false,
+      "operator": false,
+      "phase": "Idle",
+      "voice_alive": true,
+      "levels": {
+        "volume": 95,
+        "brightness_cap": 65,
+        "brightness_actual": 14
+      },
+      "audio_power": {
+        "mic": false,
+        "adc": false,
+        "dac": false,
+        "pa": false,
+        "reads": 0,
+        "silent": 0,
+        "failures": 0
+      },
+      "memory": {
+        "largest_internal": 30720,
+        "free_psram": 5238248
+      },
+      "transport": {
+        "would_block": 0,
+        "drops": 0,
+        "deaths": 0
+      },
+      "playback": {
+        "underruns": 0,
+        "max_gap_ms": 0,
+        "low_water_ms": -1,
+        "dac_failures": 0,
+        "replies": 0,
+        "prerolls": 0,
+        "preroll_short": 0
+      },
+      "rx": {
+        "frames": 0,
+        "max_gap_ms": 0,
+        "queue_wait_max_ms": 0,
+        "queue_hwm": 0,
+        "drops": 0
+      },
+      "display": {
+        "fps": 5,
+        "flush_errors": 0
+      },
+      "ota": {
+        "active": false,
+        "running": "ota_1",
+        "boot": "ota_1",
+        "state": "valid",
+        "received": 0,
+        "total": 0,
+        "last_error": "ESP_OK",
+        "last_invalid": "none"
+      },
+      "tools": {
+        "status": "ok",
+        "http": 0
+      }
+    },
+    "battery": {
+      "available": true,
+      "present": true,
+      "charging": true,
+      "usb_present": true,
+      "percent": 17,
+      "millivolts": 3714,
+      "sample_seq": 183,
+      "age_ms": 417
+    },
+    "display": {
+      "init": "ready",
+      "last_error": "ESP_OK",
+      "task_running": true,
+      "blanked": false,
+      "requested_face": 6,
+      "applied_face": 6,
+      "requested_amplitude": 0,
+      "applied_bucket": 0,
+      "requests": 2,
+      "state_changes": 3,
+      "segment_sets": 3,
+      "asset_load_failures": 0,
+      "flush_submissions": 45094,
+      "flush_completions": 45094,
+      "flush_errors": 0,
+      "actual_fps": 5,
+      "render_us": 36448914,
+      "render_frames": 1156,
+      "render_frame_us": 33035,
+      "current_asset_bytes": 236148,
+      "free_psram": 5238400,
+      "stack_hwm": 2092,
+      "boot_timing": {
+        "time_base": "esp_timer_since_boot",
+        "optical": false,
+        "includes_rom": false,
+        "init_started": true,
+        "init_finished": true,
+        "first_transfer_valid": true,
+        "init_start_boot_ms": 230,
+        "init_end_boot_ms": 1853,
+        "first_transfer_done_boot_ms": 1899
+      }
+    },
+    "lease": {
+      "active": false,
+      "mode": "normal",
+      "ttl_ms": 0
+    },
+    "cockpit": {
+      "uptime_ms": 182705,
+      "memory": {
+        "free_internal": 41771,
+        "largest_internal_block": 30720,
+        "free_psram": 5234152
+      },
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "WHISPER",
+        "brightness": 14,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      },
+      "display": {
+        "init": "ready",
+        "actual_fps": 5,
+        "flush_completions": 45043,
+        "flush_errors": 0,
+        "requested_face": 6,
+        "applied_face": 6,
+        "choices_active": false,
+        "watch_style": "FUTURE",
+        "sun_rise_min": -1,
+        "sun_set_min": -1
+      }
+    }
+  },
+  "upload": {
+    "bytes": 1868096,
+    "command": "ota",
+    "ok": true,
+    "response": {
+      "ok": true,
+      "rebooting": true
+    }
+  },
+  "probation": [
+    {
+      "utc": "2026-10-12T09:38:59.968259+00:00",
+      "unavailable": "TimeoutError"
+    },
+    {
+      "utc": "2026-10-12T09:39:05.151536+00:00",
+      "ota": {
+        "active": false,
+        "running": "ota_0",
+        "boot": "ota_0",
+        "state": "pending-verify",
+        "received": 0,
+        "total": 0,
+        "last_error": "ESP_OK",
+        "last_invalid": "none"
+      },
+      "uptime_ms": 13799,
+      "privacy": true,
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "AWAKE",
+        "brightness": 100,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      }
+    },
+    {
+      "utc": "2026-10-12T09:39:10.338463+00:00",
+      "ota": {
+        "active": false,
+        "running": "ota_0",
+        "boot": "ota_0",
+        "state": "pending-verify",
+        "received": 0,
+        "total": 0,
+        "last_error": "ESP_OK",
+        "last_invalid": "none"
+      },
+      "uptime_ms": 18964,
+      "privacy": true,
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "AWAKE",
+        "brightness": 100,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      }
+    },
+    {
+      "utc": "2026-10-12T09:39:15.531524+00:00",
+      "ota": {
+        "active": false,
+        "running": "ota_0",
+        "boot": "ota_0",
+        "state": "pending-verify",
+        "received": 0,
+        "total": 0,
+        "last_error": "ESP_OK",
+        "last_invalid": "none"
+      },
+      "uptime_ms": 24158,
+      "privacy": true,
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "AWAKE",
+        "brightness": 100,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      }
+    },
+    {
+      "utc": "2026-10-12T09:39:20.754000+00:00",
+      "ota": {
+        "active": false,
+        "running": "ota_0",
+        "boot": "ota_0",
+        "state": "pending-verify",
+        "received": 0,
+        "total": 0,
+        "last_error": "ESP_OK",
+        "last_invalid": "none"
+      },
+      "uptime_ms": 29376,
+      "privacy": true,
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "AWAKE",
+        "brightness": 100,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      }
+    },
+    {
+      "utc": "2026-10-12T09:39:26.042786+00:00",
+      "ota": {
+        "active": false,
+        "running": "ota_0",
+        "boot": "ota_0",
+        "state": "pending-verify",
+        "received": 0,
+        "total": 0,
+        "last_error": "ESP_OK",
+        "last_invalid": "none"
+      },
+      "uptime_ms": 34634,
+      "privacy": true,
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "AWAKE",
+        "brightness": 100,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      }
+    },
+    {
+      "utc": "2026-10-12T09:39:31.244188+00:00",
+      "ota": {
+        "active": false,
+        "running": "ota_0",
+        "boot": "ota_0",
+        "state": "pending-verify",
+        "received": 0,
+        "total": 0,
+        "last_error": "ESP_OK",
+        "last_invalid": "none"
+      },
+      "uptime_ms": 39869,
+      "privacy": true,
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "AWAKE",
+        "brightness": 100,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      }
+    },
+    {
+      "utc": "2026-10-12T09:39:36.414894+00:00",
+      "ota": {
+        "active": false,
+        "running": "ota_0",
+        "boot": "ota_0",
+        "state": "pending-verify",
+        "received": 0,
+        "total": 0,
+        "last_error": "ESP_OK",
+        "last_invalid": "none"
+      },
+      "uptime_ms": 45042,
+      "privacy": true,
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "AWAKE",
+        "brightness": 100,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      }
+    },
+    {
+      "utc": "2026-10-12T09:39:41.642264+00:00",
+      "ota": {
+        "active": false,
+        "running": "ota_0",
+        "boot": "ota_0",
+        "state": "pending-verify",
+        "received": 0,
+        "total": 0,
+        "last_error": "ESP_OK",
+        "last_invalid": "none"
+      },
+      "uptime_ms": 50260,
+      "privacy": true,
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "AWAKE",
+        "brightness": 100,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      }
+    },
+    {
+      "utc": "2026-10-12T09:39:46.856167+00:00",
+      "ota": {
+        "active": false,
+        "running": "ota_0",
+        "boot": "ota_0",
+        "state": "pending-verify",
+        "received": 0,
+        "total": 0,
+        "last_error": "ESP_OK",
+        "last_invalid": "none"
+      },
+      "uptime_ms": 55489,
+      "privacy": true,
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "AWAKE",
+        "brightness": 100,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      }
+    },
+    {
+      "utc": "2026-10-12T09:39:52.068405+00:00",
+      "ota": {
+        "active": false,
+        "running": "ota_0",
+        "boot": "ota_0",
+        "state": "pending-verify",
+        "received": 0,
+        "total": 0,
+        "last_error": "ESP_OK",
+        "last_invalid": "none"
+      },
+      "uptime_ms": 60710,
+      "privacy": true,
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "AWAKE",
+        "brightness": 65,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      }
+    },
+    {
+      "utc": "2026-10-12T09:39:57.309272+00:00",
+      "ota": {
+        "active": false,
+        "running": "ota_0",
+        "boot": "ota_0",
+        "state": "pending-verify",
+        "received": 0,
+        "total": 0,
+        "last_error": "ESP_OK",
+        "last_invalid": "none"
+      },
+      "uptime_ms": 65935,
+      "privacy": true,
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "WHISPER",
+        "brightness": 14,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      }
+    },
+    {
+      "utc": "2026-10-12T09:40:02.512172+00:00",
+      "ota": {
+        "active": false,
+        "running": "ota_0",
+        "boot": "ota_0",
+        "state": "valid",
+        "received": 0,
+        "total": 0,
+        "last_error": "ESP_OK",
+        "last_invalid": "none"
+      },
+      "uptime_ms": 71160,
+      "privacy": true,
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "WHISPER",
+        "brightness": 14,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      }
+    }
+  ],
+  "valid": {
+    "utc": "2026-10-12T09:40:03.165147+00:00",
+    "health": {
+      "verdict": "privacy-muted",
+      "repairable": false,
+      "privacy": true,
+      "flip_muted": false,
+      "operator": false,
+      "phase": "Idle",
+      "voice_alive": true,
+      "levels": {
+        "volume": 95,
+        "brightness_cap": 65,
+        "brightness_actual": 14
+      },
+      "audio_power": {
+        "mic": false,
+        "adc": false,
+        "dac": false,
+        "pa": false,
+        "reads": 0,
+        "silent": 0,
+        "failures": 0
+      },
+      "memory": {
+        "largest_internal": 29696,
+        "free_psram": 5680424
+      },
+      "transport": {
+        "would_block": 0,
+        "drops": 0,
+        "deaths": 0
+      },
+      "playback": {
+        "underruns": 0,
+        "max_gap_ms": 0,
+        "low_water_ms": -1,
+        "dac_failures": 0,
+        "replies": 0,
+        "prerolls": 0,
+        "preroll_short": 0
+      },
+      "rx": {
+        "frames": 0,
+        "max_gap_ms": 0,
+        "queue_wait_max_ms": 0,
+        "queue_hwm": 0,
+        "drops": 0
+      },
+      "display": {
+        "fps": 13,
+        "flush_errors": 0
+      },
+      "ota": {
+        "active": false,
+        "running": "ota_0",
+        "boot": "ota_0",
+        "state": "valid",
+        "received": 0,
+        "total": 0,
+        "last_error": "ESP_OK",
+        "last_invalid": "none"
+      },
+      "tools": {
+        "status": "ok",
+        "http": 0
+      }
+    },
+    "battery": {
+      "available": true,
+      "present": true,
+      "charging": true,
+      "usb_present": true,
+      "percent": 17,
+      "millivolts": 3725,
+      "sample_seq": 69,
+      "age_ms": 560
+    },
+    "display": {
+      "init": "ready",
+      "last_error": "ESP_OK",
+      "task_running": true,
+      "blanked": true,
+      "requested_face": 6,
+      "applied_face": 6,
+      "requested_amplitude": 0,
+      "applied_bucket": 0,
+      "requests": 2,
+      "state_changes": 2,
+      "segment_sets": 2,
+      "asset_load_failures": 0,
+      "flush_submissions": 41985,
+      "flush_completions": 41984,
+      "flush_errors": 0,
+      "actual_fps": 13,
+      "render_us": 26211819,
+      "render_frames": 1077,
+      "render_frame_us": 9489,
+      "current_asset_bytes": 236148,
+      "free_psram": 5680576,
+      "stack_hwm": 1936,
+      "boot_timing": {
+        "time_base": "esp_timer_since_boot",
+        "optical": false,
+        "includes_rom": false,
+        "init_started": true,
+        "init_finished": true,
+        "first_transfer_valid": true,
+        "init_start_boot_ms": 233,
+        "init_end_boot_ms": 778,
+        "first_transfer_done_boot_ms": 829,
+        "first_glance_time_transfer_valid": false,
+        "first_glance_time_transfer_done_boot_ms": 0
+      }
+    },
+    "lease": {
+      "active": false,
+      "mode": "normal",
+      "ttl_ms": 0
+    },
+    "cockpit": {
+      "uptime_ms": 71366,
+      "memory": {
+        "free_internal": 41415,
+        "largest_internal_block": 29696,
+        "free_psram": 5676324
+      },
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "WHISPER",
+        "brightness": 14,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      },
+      "display": {
+        "init": "ready",
+        "actual_fps": 13,
+        "flush_completions": 41935,
+        "flush_errors": 0,
+        "requested_face": 6,
+        "applied_face": 6,
+        "choices_active": false,
+        "watch_style": "FUTURE",
+        "sun_rise_min": 438,
+        "sun_set_min": 1135
+      }
+    }
+  },
+  "final": {
+    "utc": "2026-10-12T09:44:32.370646+00:00",
+    "health": {
+      "verdict": "privacy-muted",
+      "repairable": false,
+      "privacy": true,
+      "flip_muted": false,
+      "operator": false,
+      "phase": "Idle",
+      "voice_alive": true,
+      "levels": {
+        "volume": 95,
+        "brightness_cap": 65,
+        "brightness_actual": 5
+      },
+      "audio_power": {
+        "mic": false,
+        "adc": false,
+        "dac": false,
+        "pa": false,
+        "reads": 0,
+        "silent": 0,
+        "failures": 0
+      },
+      "memory": {
+        "largest_internal": 29696,
+        "free_psram": 4795700
+      },
+      "transport": {
+        "would_block": 0,
+        "drops": 0,
+        "deaths": 0
+      },
+      "playback": {
+        "underruns": 0,
+        "max_gap_ms": 0,
+        "low_water_ms": -1,
+        "dac_failures": 0,
+        "replies": 0,
+        "prerolls": 0,
+        "preroll_short": 0
+      },
+      "rx": {
+        "frames": 0,
+        "max_gap_ms": 0,
+        "queue_wait_max_ms": 0,
+        "queue_hwm": 0,
+        "drops": 0
+      },
+      "display": {
+        "fps": 14,
+        "flush_errors": 0
+      },
+      "ota": {
+        "active": false,
+        "running": "ota_0",
+        "boot": "ota_0",
+        "state": "valid",
+        "received": 0,
+        "total": 0,
+        "last_error": "ESP_OK",
+        "last_invalid": "none"
+      },
+      "tools": {
+        "status": "ok",
+        "http": 0
+      }
+    },
+    "battery": {
+      "available": true,
+      "present": true,
+      "charging": true,
+      "usb_present": true,
+      "percent": 19,
+      "millivolts": 3747,
+      "sample_seq": 338,
+      "age_ms": 863
+    },
+    "display": {
+      "init": "ready",
+      "last_error": "ESP_OK",
+      "task_running": true,
+      "blanked": true,
+      "requested_face": 6,
+      "applied_face": 6,
+      "requested_amplitude": 0,
+      "applied_bucket": 0,
+      "requests": 2,
+      "state_changes": 8,
+      "segment_sets": 5,
+      "asset_load_failures": 0,
+      "flush_submissions": 48487,
+      "flush_completions": 48487,
+      "flush_errors": 0,
+      "actual_fps": 14,
+      "render_us": 28178742,
+      "render_frames": 1243,
+      "render_frame_us": 7408,
+      "current_asset_bytes": 236148,
+      "free_psram": 4795848,
+      "stack_hwm": 1936,
+      "boot_timing": {
+        "time_base": "esp_timer_since_boot",
+        "optical": false,
+        "includes_rom": false,
+        "init_started": true,
+        "init_finished": true,
+        "first_transfer_valid": true,
+        "init_start_boot_ms": 233,
+        "init_end_boot_ms": 778,
+        "first_transfer_done_boot_ms": 829,
+        "first_glance_time_transfer_valid": false,
+        "first_glance_time_transfer_done_boot_ms": 0
+      }
+    },
+    "lease": {
+      "active": false,
+      "mode": "normal",
+      "ttl_ms": 0
+    },
+    "cockpit": {
+      "uptime_ms": 340671,
+      "memory": {
+        "free_internal": 41127,
+        "largest_internal_block": 29696,
+        "free_psram": 4791600
+      },
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "WHISPER",
+        "brightness": 5,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      },
+      "display": {
+        "init": "ready",
+        "actual_fps": 14,
+        "flush_completions": 48487,
+        "flush_errors": 0,
+        "requested_face": 6,
+        "applied_face": 6,
+        "choices_active": false,
+        "watch_style": "FUTURE",
+        "sun_rise_min": 438,
+        "sun_set_min": 1135
+      }
+    }
+  }
+}

@@ -35,3 +35,145 @@ Live capture: 5-minute serial log running during owner testing
 (`owner-test-serial.log` in session scratchpad); counters snapshotted before
 and after. Device state is queryable any time: `scripts/jarvisctl.py status`.
 
+## t107 deployed candidate, acceptance pending — 2026-10-11
+
+This is the earlier checkpoint; voice was subsequently accepted on owner
+observation (2026-10-11, tested image unspecified). See Addendum A below.
+
+Independent review found retained half-batch PCM across privacy/transport gaps,
+automatic diagnostic clearing that reset the absolute companion cursor, and
+missing companion privacy revalidation after copying PCM. All three are
+repaired in the local candidate, with executable sequence regressions and
+production wiring checks. Final host suites pass 11,451 / 854 / 166 / 81 / 38.
+
+The candidate also gates muted audio power, adds the guarded N8.12 quiet clock,
+and applies rest/network guards to weather's first and retry fetches. The owner
+removed the interrupted generated build directory, and the explicitly authorized
+ESP-IDF 5.5.4 rebuild passed with 55.786% app-partition headroom. The local
+candidate and proof were committed before OTA (`0b4108f`). After owner wake,
+the parent restored unexpectedly unmuted privacy before the paired upload.
+Candidate `ota_1` passed probation to valid with authenticated health, zero
+flush errors and mic/ADC/DAC/PA reported off. Live idle/WATCH/DREAM captures were
+reviewed; DREAM shows both the no-time fallback and valid 16:57 digits. Matched
+idle/WATCH windows and timer sleep completed with privacy muted; timer wake
+returned after 317.484 seconds. Voltage rebound and differing charge levels
+leave battery-life improvement unproven. Listening-state power is excluded;
+voice remains owner check pending, ready for physical unmute. The fixes are
+not closed solely by software telemetry.
+N7.21 remains blocked on physical PKEY event resolution. See
+[the t107 report](docs/evidence/t107-power-baseline.md).
+
+## t107 Addendum A — 2026-10-11
+
+| Defect | Evidence | Status |
+|---|---|---|
+| DETAIL DOWN advances after closing | Live WATCH sheet followed by DOWN showed WEATHER; production routing called `nav_next` unconditionally. | Fixed in `7578238`; actual routing tests/mutation pass; post-OTA mirror stays on WATCH. Physical gesture proof remains separate. |
+| Detail dismissal shows a controls exit hint | Live WEATHER outside-sheet tap showed `CONTROLS - UP TO CLOSE`. | Fixed in `7578238`; panel caption tests/mutation pass; post-OTA WEATHER mirror has the correct caption. |
+| Rest cadence stretches finite UI transitions | Actual fade tick discarded elapsed time above 100 ms. | Fixed in `7578238`; production 50/200/500 ms fake-clock regression and mutation pass; live endpoints captured. CLI latency prevents physical duration proof. |
+| Dial cycling exhausts snapshot headroom | The muted sweep reached HTTP 503 after loading FUTURE/JARVIS/DIVER; free PSRAM was below one snapshot allocation. | Fixed in `7578238`; ownership/failure regressions pass; 18 live style captures across three cycles succeed without cache reset or asset/flush errors. |
+| Failed presenter locks consume refresh keys | DREAM keys, snapshot and test-pattern acknowledgement advanced without a submitted refresh. | Fixed in `7578238`; retained-key injected-fault tests/mutations and combined gate pass. No live fault injection. |
+
+Dead excluded tilt code and a duplicate byte-order helper were removed without
+claiming a runtime gain. Battery acceptance is unproven. The after power gate failed timer
+wake; its sleep-end/DREAM proof is missing. The owner subsequently woke it
+by hand and authenticated readback succeeds. Listening-state power is excluded. Voice acceptance is owner-observed
+(reply `yes`, 2026-10-11); its tested image was not supplied. The last authenticated
+readback verified privacy muted, as does the later manual recovery readback.
+Follow-up authenticated health/cockpit/sleep retries at 00:10–00:11Z on
+2026-10-12 also timed out despite reported ping replies. Wake/API behavior and
+the larger awake drain fits remain possible regressions versus baseline;
+different SoC/rebound are confounds, not an established explanation.
+Manual recovery readback at 00:15:40Z shows uptime 231,756 ms, wake `touch`,
+RTC sleep count 3, OTA valid and privacy muted/audio off. Wi-Fi comes up in
+5,037 ms on this boot. Reset reason is not exposed; the PSRAM ring covers only
+this boot and RTC holds no timed wake history. Count 3 permits an intervening
+wake/resleep inference but cannot identify when or why. Timer/API acceptance
+and battery regressions remain open; manual recovery cannot close them.
+See [Addendum A](docs/evidence/t107-addendum-a.md).
+
+## t107 B diagnosis — 2026-10-12
+
+The deployed sensor API does not expose charge-limit registers or measured
+net charge current. A fixed sampler-only AXP2101 cache is added for paired
+diagnosis: per-register errors, attempt age and last successful-read age are
+retained; failed or stale values cannot decode as current configuration.
+HTTP reads perform no PMIC transaction. Charge and rail registers are not
+written by this diagnostic. Live image `03864cc` is valid and muted after
+the charged A/B: 200mA constant-charge limit, 4.2V target, three complete
+scans. Its 300-second timer wake passed at a 305.937-second API upper bound.
+Owner ruling: retain 200mA, write no PMIC register; CHARGE is closed.
+See [B: CHARGE](docs/evidence/t107-charge-diagnostic.md).
+
+Display startup previously had no first-transfer timing. The diagnostic
+records init start/end and the first successful color-transfer callback,
+including early callbacks and failed init. It is a boot software proxy;
+physical first-light and a complete Glance remain unmeasured.
+
+## t107 privacy recovery — 2026-10-13
+
+The delayed owner voice turn left privacy restoration unconfirmed during
+23:33–04:44Z. The safe-direction mute watcher completed at 04:44:17Z:
+authenticated privacy true, capture false, mic/ADC/DAC/PA off, OTA valid;
+opened panel mirror has the gold ring. First health was already muted before
+the acknowledged software DISARM, so the receipt does not establish when
+privacy changed or continuous listening during the gap. The 3h32m45s API gap
+is compatible with the natural 14400s timer, rather than the earlier forced
+1800s test. No wake cause/sleep-entry record was captured; follow-up GETs
+timed out. This interval alone neither proves a timer regression nor passes
+the natural default4h gate. Voice remains owner pending; no new drain/timer
+run or firmware change. See [privacy handoff](docs/evidence/t107-privacy-restored.md).
+
+## t107 C1 companion — 2026-10-12
+
+**Initial lift wake failed owner acceptance; repair passed.** Edge-only lift left the screen off;
+touch woke it. R6 authenticated readback is `wake=touch`, `sleeps=4`, despite
+`armed.lift=true`. The command poll used a 2 ms delay that truncates to zero
+at 100 Hz and returned success without observed completion/ACK clear.
+The bounded repair uses elapsed deadlines, at least one tick, and propagated
+failures; 34 production-function checks and all 16 host suites pass.
+Build passes at 55.463% headroom; repair `343e51c` is OTA-valid/muted.
+A short timer wake now confirms strict command completion and lift/touch
+arming, addressing N10.4's historical missing-CmdDone concern on this run.
+Repaired image `343e51c` passes the owner's edges-only lift with no tap.
+R7 confirms `wake=lift`, `sleeps=2`, both sources armed, `lift_fail=none`,
+API back 23:03:48.687909Z. The original failed run is retained. The successful
+retest supports the command-arming repair; it does not measure the interrupt
+waveform or optical latency. Both opened mirrors show WATCH; Glance capture
+was missed. Fresh HOME readback is valid/muted, 77%, unplugged, audio off.
+Owner manual unmute/voice/re-mute precedes drain, default4h timer and C2.
+See [failure evidence](docs/evidence/t107-lift-wake-failure.md).
+
+Muted HOME/WHISPER rendered 5.879 frames/s because the repeating 8fps MUTED clip
+invalidated every decoded frame while the engine ceiling was 6fps. Quiet HOME
+now retains a visible one-shot frame; changed clock/rim/caption/brightness facts
+refresh explicitly. Foreground, speech, USB/Nightstand and fades keep their
+existing paths. Review also repaired first-frame decode retry and sparse-DMA
+retry. Source `ff18294` passes 15 host suites/53 compiled runtime faults and the
+build (55.461% free). B's 45-minute control passed at 06:34Z, settled 5.882fps and
+97.22±8.17mV/h conditional voltage fit, SoC 45->21%. Owner-supplied USB allowed
+frozen `ff18294` OTA without changing the 30% unplugged guard; `ota_0` is
+authenticated valid/muted at 09:44:32Z. Nightstand redraw is 0.02495fps over
+120.250s, 117 completed strip flushes and zero errors. Forced charging HOME
+still animates (7.57–7.78fps); its charging exclusion prevents quiet-path
+proof on USB. Settled unplugged fps, the fresh >=45-minute B/repair pair and
+natural default 4h wake remain pending after the owner session. See
+[USB proof and limitation](docs/evidence/t107-quiet-usb.md). The
+loop is also present on B; it is a shared cost, not a proven cause of the
+earlier after-image drain increase. See [quiet HOME report](docs/evidence/t107-quiet-home.md).
+
+Break-it reproduced a late OTA/operator-lease claim during sleep's caption
+or panel wait: the old path accepted the claim and still entered deep sleep.
+Sleep and both app/art OTA admission now share a final Brain reservation.
+144 actual-source sleep scenarios and 132 OTA scenarios cover the repair;
+17/13 compiled faults fail at runtime. Refusal retains privacy/RTC and
+recovers the panel. Final USB cache publication is not an electrical edge;
+physical plug-after-observation remains possible.
+
+Nightstand/Glance and truthful panel sleep/recovery pass 14 combined host
+suites; target build leaves 55.483% app space. Source `0b9645d` is OTA-valid
+and authenticated muted; its forced300s timer passed with timer cause.
+Matched DREAM/HOME windows completed without a resolved battery saving.
+Nightstand dismissal and repaired lift/touch wake have owner/API acceptance;
+complete Glance capture, optical timing, natural ladder/default4h timer and
+new-image voice acceptance remain pending. Ladder timings are retained;
+no energy or projected-life gain is claimed. See [C1 report](docs/evidence/t107-companion.md).

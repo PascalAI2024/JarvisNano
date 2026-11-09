@@ -495,16 +495,9 @@ void hud_watch_hand(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 void hud_overlay_clock_style(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                              int hh, int mm, int ss, int strength, int style);
 
-/* Map IMU tilt to a HUD parallax offset, clamped to +/-HUD_TILT_MAX px.
- *
- * This is the one place the device beats the browser mockup: a simulated HUD
- * can only ever loop, but this one is anchored to the physical world, so the
- * furniture leans as you tilt the puck and the face reads as sitting behind
- * glass rather than painted on it. Deliberately gentle — this is depth, not a
- * spirit level.
- *
- * roll_deg/pitch_deg come straight from jr_imu. Pass 0,0 to disable. */
 #define HUD_TILT_MAX 10
+/* Parallax is disabled to keep the HUD registered with the baked face.
+ * Writes zero to each non-null output pointer for every input angle. */
 void hud_tilt_offset(float roll_deg, float pitch_deg, int8_t *ox, int8_t *oy);
 
 #ifdef __cplusplus

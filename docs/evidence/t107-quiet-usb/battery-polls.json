@@ -1,0 +1,67 @@
+[
+  {
+    "utc": "2026-10-12T09:41:49.449657+00:00",
+    "battery": {
+      "available": true,
+      "present": true,
+      "charging": true,
+      "usb_present": true,
+      "percent": 18,
+      "millivolts": 3734,
+      "sample_seq": 176,
+      "age_ms": 141
+    }
+  },
+  {
+    "utc": "2026-10-12T09:43:49.963984+00:00",
+    "battery": {
+      "available": true,
+      "present": true,
+      "charging": true,
+      "usb_present": true,
+      "percent": 19,
+      "millivolts": 3743,
+      "sample_seq": 296,
+      "age_ms": 669
+    }
+  },
+  {
+    "utc": "2026-10-12T09:44:32.233604+00:00",
+    "battery": {
+      "available": true,
+      "present": true,
+      "charging": true,
+      "usb_present": true,
+      "percent": 19,
+      "millivolts": 3747,
+      "sample_seq": 338,
+      "age_ms": 863
+    }
+  },
+  {
+    "utc": "2026-10-12T09:46:32.389719+00:00",
+    "battery": {
+      "available": true,
+      "present": true,
+      "charging": true,
+      "usb_present": true,
+      "percent": 20,
+      "millivolts": 3756,
+      "sample_seq": 458,
+      "age_ms": 874
+    }
+  },
+  {
+    "utc": "2026-10-12T09:48:32.558602+00:00",
+    "battery": {
+      "available": true,
+      "present": true,
+      "charging": true,
+      "usb_present": true,
+      "percent": 21,
+      "millivolts": 3766,
+      "sample_seq": 579,
+      "age_ms": 65
+    }
+  }
+]

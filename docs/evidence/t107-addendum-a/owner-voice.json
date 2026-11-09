@@ -1,0 +1,23 @@
+{
+  "observation": "owner-observed",
+  "owner_date": "2026-10-11",
+  "owner_reply": "yes",
+  "owner_report": "Owner unmuted by hand, spoke once, and confirmed an audible answer.",
+  "recorded_utc": "2026-10-11T22:46:42Z",
+  "tested_image": "not supplied by owner; Addendum A image not uploaded at receipt time",
+  "running_slot_at_receipt": "ota_1",
+  "privacy_already_muted": true,
+  "privacy_muted_verified": true,
+  "privacy_paused": true,
+  "capturing": false,
+  "audio_power": {
+    "mic": false,
+    "adc": false,
+    "dac": false,
+    "pa": false,
+    "reads": 0,
+    "silent": 0,
+    "failures": 0
+  },
+  "note": "Privacy readback at 22:46:42Z coincided with the first baseline DREAM sample timestamp. Two health GETs and one cockpit GET were extra boundary traffic; no control write was needed. All samples are retained, and this protocol disturbance is disclosed. No remote unmute or spoken turn was performed."
+}

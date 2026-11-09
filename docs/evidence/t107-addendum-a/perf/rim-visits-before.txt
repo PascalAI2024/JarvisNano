@@ -1,0 +1,12 @@
+FUTURE69 base+comet calls/frame=6903 hash=a06794f899a11fec
+charging0 base+comet calls/frame=39
+charging10 base+comet calls/frame=1365
+charging20 base+comet calls/frame=2574
+charging30 base+comet calls/frame=3549
+charging40 base+comet calls/frame=4407
+charging50 base+comet calls/frame=5577
+charging60 base+comet calls/frame=6552
+charging70 base+comet calls/frame=7137
+charging80 base+comet calls/frame=8541
+charging90 base+comet calls/frame=9555
+charging100 base+comet calls/frame=10569

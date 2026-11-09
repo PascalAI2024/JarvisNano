@@ -1,0 +1,30 @@
+SETTLE DREAM 120
+C:\Users\pasca\dev\projects\JarvisNano\.worktrees\t107-codex\.evidence\t107c\B-03864cc-r2-dream.png
+{"event": "stage-start", "image": "B-03864cc-r2", "state": "dream", "seconds": 420, "utc": "2026-10-12T04:32:40.491093+00:00"}
+{"event": "sample", "state": "dream", "elapsed_s": 0.266, "soc": 63, "mv": 3821}
+{"event": "sample", "state": "dream", "elapsed_s": 60.297, "soc": 63, "mv": 3819}
+{"event": "sample", "state": "dream", "elapsed_s": 120.281, "soc": 63, "mv": 3820}
+{"event": "sample", "state": "dream", "elapsed_s": 180.313, "soc": 63, "mv": 3811}
+{"event": "sample", "state": "dream", "elapsed_s": 240.5, "soc": 63, "mv": 3817}
+{"event": "sample", "state": "dream", "elapsed_s": 300.422, "soc": 62, "mv": 3816}
+{"event": "sample", "state": "dream", "elapsed_s": 360.422, "soc": 62, "mv": 3813}
+{"event": "sample", "state": "dream", "elapsed_s": 420.328, "soc": 62, "mv": 3814}
+{"event": "stage-complete", "image": "B-03864cc-r2", "state": "dream", "fit": {"samples": 29, "duration_s": 420.328, "drain_mv_h": 59.59, "conditional95_scatter_mv_h": 25.89, "conservative_rounding_mv_h": 25.33, "endpoint_drain_mv_h": 59.95, "endpoint_rounding_mv_h": 17.13, "endpoint_mv": [3821, 3814], "endpoint_pct": [63, 62], "moods": ["DREAM"], "watch_styles": ["FUTURE"], "brightness": [5], "frames": 8, "frames_per_s": 0.019, "render_wall_percent": 0.011, "render_mean_us": 5582.1, "flushes": 312, "max_flush_errors": 0, "block_means": [[0.006348819444444444, 3818.75], [0.023019791666666668, 3817.5], [0.03968534722222222, 3816.5], [0.056358541666666664, 3814.25], [0.07302527777777779, 3815.75], [0.08967888888888889, 3814.25], [0.10843755555555555, 3811.8]], "uncertainty_note": "Conditional residual scatter assumes independent blocks; ADC calibration, correlated relaxation, SoC, temperature and chronological image order remain unbounded.", "soc_drain_pp_h": 8.564739917397842, "soc_endpoint_bound_pp_h": 17.129479834795685}}
+SETTLE HOME 120
+C:\Users\pasca\dev\projects\JarvisNano\.worktrees\t107-codex\.evidence\t107c\B-03864cc-r2-idle-rest.png
+{"event": "stage-start", "image": "B-03864cc-r2", "state": "idle-rest", "seconds": 720, "utc": "2026-10-12T04:41:44.956502+00:00"}
+{"event": "sample", "state": "idle-rest", "elapsed_s": 0.375, "soc": 62, "mv": 3773}
+{"event": "sample", "state": "idle-rest", "elapsed_s": 60.281, "soc": 62, "mv": 3803}
+{"event": "sample", "state": "idle-rest", "elapsed_s": 120.391, "soc": 62, "mv": 3809}
+{"event": "sample", "state": "idle-rest", "elapsed_s": 180.531, "soc": 62, "mv": 3806}
+{"event": "sample", "state": "idle-rest", "elapsed_s": 240.422, "soc": 62, "mv": 3801}
+{"event": "sample", "state": "idle-rest", "elapsed_s": 300.312, "soc": 61, "mv": 3795}
+{"event": "sample", "state": "idle-rest", "elapsed_s": 360.453, "soc": 61, "mv": 3797}
+{"event": "sample", "state": "idle-rest", "elapsed_s": 420.5, "soc": 61, "mv": 3798}
+{"event": "sample", "state": "idle-rest", "elapsed_s": 480.484, "soc": 61, "mv": 3801}
+{"event": "sample", "state": "idle-rest", "elapsed_s": 540.469, "soc": 61, "mv": 3800}
+{"event": "sample", "state": "idle-rest", "elapsed_s": 600.328, "soc": 61, "mv": 3789}
+{"event": "sample", "state": "idle-rest", "elapsed_s": 660.375, "soc": 61, "mv": 3796}
+{"event": "sample", "state": "idle-rest", "elapsed_s": 720.375, "soc": 60, "mv": 3796}
+{"event": "stage-complete", "image": "B-03864cc-r2", "state": "idle-rest", "fit": {"samples": 49, "duration_s": 720.375, "drain_mv_h": 51.29, "conditional95_scatter_mv_h": 34.34, "conservative_rounding_mv_h": 15.26, "endpoint_drain_mv_h": -114.94, "endpoint_rounding_mv_h": 9.99, "endpoint_mv": [3773, 3796], "endpoint_pct": [62, 60], "moods": ["WHISPER"], "watch_styles": ["FUTURE"], "brightness": [14], "frames": 4235, "frames_per_s": 5.879, "render_wall_percent": 3.736, "render_mean_us": 6355.1, "flushes": 165160, "max_flush_errors": 0, "block_means": [[0.014682083333333333, 3801.75], [0.04801916666666667, 3804.625], [0.08135520833333335, 3801.75], [0.11468690972222223, 3799.0], [0.1480202777777778, 3796.875], [0.18344373456790122, 3794.8888888888887]], "uncertainty_note": "Conditional residual scatter assumes independent blocks; ADC calibration, correlated relaxation, SoC, temperature and chronological image order remain unbounded.", "soc_drain_pp_h": 9.994794377928162, "soc_endpoint_bound_pp_h": 9.994794377928162}}
+STAGE PAIR COMPLETE

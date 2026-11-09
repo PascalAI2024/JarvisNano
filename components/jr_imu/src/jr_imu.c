@@ -56,6 +56,10 @@
 #define QMI8658_CMD_ACK         0x00
 #define QMI8658_STATUSINT_DONE  0x80
 #define QMI8658_CTRL8_HS_STATUS 0x80   /* CmdDone in STATUSINT, not on INT1 */
+#define IMU_CMD_TIMEOUT_US     100000LL
+/* At CONFIG_FREERTOS_HZ=100 a 2 ms delay truncates to zero. Use a real
+ * tick and a wall-clock deadline, including I2C time, for both handshake phases. */
+#define IMU_CMD_GAP_TICKS      ((pdMS_TO_TICKS(2) > 0) ? pdMS_TO_TICKS(2) : 1)
 
 /* ±8 g full scale -> 4096 LSB/g. */
 #define QMI8658_ACC_LSB_PER_G   4096.0f
@@ -144,15 +148,28 @@ static bool imu_probe_addr(i2c_master_bus_handle_t bus, uint8_t addr)
     return false;
 }
 
-/* CTRL9 command handshake, QMI8658A datasheet §"CTRL9 usage": write the
- * command, wait for STATUSINT.CmdDone, acknowledge, wait for it to clear.
- * A timeout is reported, not fatal — the engine setting has usually taken. */
+static esp_err_t imu_wait_cmd_done(bool expected)
+{
+    const int64_t deadline = esp_timer_get_time() + IMU_CMD_TIMEOUT_US;
+    do {
+        uint8_t st = 0;
+        const esp_err_t err = imu_read_reg(QMI8658_REG_STATUSINT, &st);
+        if (err != ESP_OK) {
+            return err;
+        }
+        if (((st & QMI8658_STATUSINT_DONE) != 0) == expected) {
+            return ESP_OK;
+        }
+        vTaskDelay(IMU_CMD_GAP_TICKS);
+    } while (esp_timer_get_time() < deadline);
+    return ESP_ERR_TIMEOUT;
+}
+
+/* QMI8658A datasheet §5.10.4: completion AND successful ACK/clear are
+ * required before claiming WoM is armed. A register write alone is no proof. */
 static esp_err_t imu_ctrl9(uint8_t cmd)
 {
-    /* The part's default handshake type signals CmdDone by pulsing INT1 and
-     * never sets STATUSINT.bit7 — which is why the first cut timed out on
-     * every command. CTRL8.bit7 selects the register handshake; it also
-     * keeps INT1 quiet for the level wake that follows. */
+    /* Keep command completion off INT1, which is reserved for motion wake. */
     esp_err_t err = imu_write_reg(QMI8658_REG_CTRL8, QMI8658_CTRL8_HS_STATUS);
     if (err == ESP_OK) {
         err = imu_write_reg(QMI8658_REG_CTRL9, cmd);
@@ -160,34 +177,15 @@ static esp_err_t imu_ctrl9(uint8_t cmd)
     if (err != ESP_OK) {
         return err;
     }
-    uint8_t st = 0;
-    int tries = 50;
-    while (tries-- > 0) {
-        if (imu_read_reg(QMI8658_REG_STATUSINT, &st) == ESP_OK &&
-            (st & QMI8658_STATUSINT_DONE) != 0) {
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(2));
+    const esp_err_t completion_err = imu_wait_cmd_done(true);
+    if (completion_err != ESP_OK) {
+        return completion_err;
     }
-    const bool done = (st & QMI8658_STATUSINT_DONE) != 0;
-    (void)imu_write_reg(QMI8658_REG_CTRL9, QMI8658_CMD_ACK);
-    tries = 50;
-    while (tries-- > 0) {
-        if (imu_read_reg(QMI8658_REG_STATUSINT, &st) == ESP_OK &&
-            (st & QMI8658_STATUSINT_DONE) == 0) {
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(2));
+    const esp_err_t ack_err = imu_write_reg(QMI8658_REG_CTRL9, QMI8658_CMD_ACK);
+    if (ack_err != ESP_OK) {
+        return ack_err;
     }
-    /* MEASURED ON THE 1.75C: CmdDone is never observed in STATUSINT, with
-     * either handshake type, for any command — 100 ms of polling, both
-     * boots. The write itself lands (the register readback and the wake
-     * line agree), so a missing handshake is logged, not fatal. Treating
-     * it as fatal left the device sleeping with no lift wake at all. */
-    if (!done) {
-        ESP_LOGW(TAG, "QMI8658 CTRL9 0x%02X: CmdDone not observed", cmd);
-    }
-    return ESP_OK;
+    return imu_wait_cmd_done(false);
 }
 
 /* Clear a Wake-on-Motion left armed by the previous deep sleep with a soft

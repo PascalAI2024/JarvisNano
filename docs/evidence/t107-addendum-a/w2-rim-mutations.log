@@ -1,0 +1,15 @@
+PASS bounded polar work <=400 visits
+all shell tests passed (2200 checks)
+FAIL bounded FUTURE69 work exceeds 400 visits
+all shell tests passed (2200 checks)
+PASS bounded polar work <=400 visits
+985 failure(s) of 2200 checks
+PASS bounded polar work <=400 visits
+397 failure(s) of 2200 checks
+PASS bounded polar work <=400 visits
+all shell tests passed (2200 checks)
+control	0	0
+full-arc-restored	1	0
+ascending-stamp-edge	0	1
+descending-stamp-edge	0	1
+full-endpoint-equivalent	0	0

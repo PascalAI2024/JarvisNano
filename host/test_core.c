@@ -40,6 +40,8 @@ extern void mood_tests_run(void);
 extern void glance_tests_run(void);
 /* The playback feeder's reply / hole / pre-roll walk and its earcon guard. */
 extern void jitter_tests_run(void);
+extern void audio_power_tests_run(void);
+extern void power_charge_tests_run(void);
 
 /* ---- shared fixtures ---- */
 static jr_clock_t g_clk;
@@ -1931,6 +1933,8 @@ int main(void)
 
     /* The playback feeder's reply / hole / pre-roll walk, and its earcon guard. */
     jitter_tests_run();
+    audio_power_tests_run();
+    power_charge_tests_run();
 
     return UNITY_END();
 }

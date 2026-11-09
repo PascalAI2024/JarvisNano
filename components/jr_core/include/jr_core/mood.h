@@ -98,6 +98,18 @@ const char *jr_mood_name(jr_mood_t mood);
  * nothing about power or links, which the composition root adds. */
 bool jr_mood_sleep_due(const jr_mood_state_t *s, uint32_t now_ms);
 
+/* Near-black minute glass belongs only to genuine idle DREAM. Update
+ * probation is supplied with OTA activity: it still needs live render proof. */
+bool jr_mood_dream_glass(jr_mood_t mood, bool busy, bool usb_present,
+                        bool operator_active, bool ota_or_probation);
+
+/* Weather is a lit-glass job. Neither initial hydration nor a failed-fetch
+ * retry may wake the radio during WHISPER/DREAM. Timings match the device's
+ * existing 20 s first fetch, 2 min retry, 10 min screen and 30 min idle refresh. */
+bool jr_mood_weather_due(jr_mood_t mood, bool network_connected,
+                         uint32_t now_ms, uint32_t last_fetch_ms,
+                         bool failed, bool on_screen);
+
 #ifdef __cplusplus
 }
 #endif
