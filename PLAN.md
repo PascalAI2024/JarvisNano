@@ -467,6 +467,42 @@ The scout of the engine's per-strip pipeline (`managed_components/espressif2022_
 
 The QSPI ceiling itself is 40 MHz × 4 lanes = 20 MB/s: 21.7 ms a frame, ~46 fps, and it does not scale with the CPU clock. `JR_DISPLAY_RENDER_FPS 24` already notes the measured ~23 fps full-frame ceiling.
 
+## Wave N15 — the showpiece: glass, dials, the whole board (2026-11-10, built on `feat/glass-2`, mostly not yet flashed)
+
+Owner: *"looks nothing like the demo you showed me … elevate and show me what
+you and this hardware can do"*, and *"we should have documentation for this
+device … so you can understand what it can do and maximize our show piece"*.
+No gateway key by the owner's choice: tools, board and DESK data stay offline,
+and everything in this wave works without one.
+
+The device slept on battery before the merged image could be flashed. Rows
+marked HOST are proven by the 21 host suites and a pinned build only; nothing
+in them has been seen on the panel or heard from the speaker.
+
+| # | Item | Status | Acceptance |
+|---|---|---|---|
+| N15.1 | **Glass primitives**: anti-aliased Barlow type, discs, rings, arcs, glows as row primitives that find runs instead of walking pixels (`glass_draw.c`, `glass_font.c`; reference renderer `tests/glass_ref.c`) | HOST, and a finding: 1.7–8.6× on the isolated bench, **0 ms on the device** (STATUS 73.6 ms before and after). `docs/reference/glass-primitives-perf.md` | Pixel-identical to the reference in `jr_display_glass_tests`; whole-frame device numbers are N15.7's |
+| N15.2 | **The remaining screens on the glass**: CONTROLS (volume arc on the left rim, brightness on the right, mute button), ACTIVITY, DESK, the detail sheet, an icon set (`glass_icon.c`, `scripts/gen-glass-icons.py`, sources in `third_party/icons/`), the glass label | HOST (renders reviewed against the approved prototype) | Panel captures of each screen and the shade from `/api/display/snapshot.ppm`; levels unmoved by the walk; `flush_errors 0`. Known gap: brightness has no touch action on the right rim yet |
+| N15.3 | **Two new dials, eight in all**: SKELETON with a balance wheel swinging ±45° about once a second, CELESTIAL with 32 twinkling stars. `emote_assets` is full, so both are embedded in the app image (`EMBED_FILES`, read in place, never freed). Eight is the 3-bit style field's limit, pinned by a `_Static_assert` | HOST | Both dials decode from flash and draw; the wheel box changes between two captures 0.35 s apart; frame cost recorded per style |
+| N15.4 | **`/api/display` splits compositing time by layer** (`layer_us`: dial, canvas, hud, shell, surface), and the test route's up swipe starts inside the safe radius. From y=400 it began on the rim, where a vertical swipe is a level slide: it raised the brightness cap 85 → 100 and never navigated | Swipe fix PROVEN on the device (parked WEATHER → up → WATCH, levels unmoved); `layer_us` HOST | One GET names the layer that owns each screen's frame |
+| N15.5 | **The board answers for itself**: `GET /api/diag/board` and `scripts/board-probe.py` (`--watch pwr\|touch`, `--gyro`, `--json`) measure the TE pulse on GPIO13, the PWR-key level on GPIO3, gyro and die temperature, a second touch finger, and the AXP2101 telemetry nobody reads. Read-only: no charge, voltage or rail register is written, no panel command leaves `gfx_render`. What the vendor documents and what the firmware uses: `docs/reference/board-capabilities.md` | HOST | The probe's answers recorded in `board-capabilities.md`; `docs/HARDWARE.md` corrected where the board disagrees (it says the PWR key cannot wake the S3) |
+| N15.6 | **Quiet interface sounds** for a physical touch (`jr_core/cue.c`), a tone policy table (`jr_core/dac_mute.c`: only the four new cues are refused under owner mute; the mute acknowledgements, the ask-miss sweep and the board chime keep sounding), a cue no longer leaves the DAC open, and a test pins "no gateway key, no board poll". `docs/reference/interface-cues.md` | HOST (WAV renders in `docs/evidence/audio-cues-2026-11-10/`; a WAV is not the speaker) | Owner hears the cues at the desk; `ui_sounds` reads back on `GET /api/device/levels`. Open: a route or a shade toggle to turn them off, and whether the ask-miss sweep and the chime should sound while muted |
+| N15.7 | **Every screen at or under 20 ms a frame** (what 24 fps needs). Measured under a lease at 240 MHz, flush not included: home 27, ACTIVITY 34, DESK 35, WATCH dress 43–45, WEATHER 42–47, diver/future/pilot 55–64, STATUS 73–74, MINIMAL 78. STATUS writes ~27,000 pixels a frame, which is not 74 ms of work: the cost is in work that never ends in a write | NOT MET — whole-frame profile and byte-identical cuts in progress (`feat/frame-cost`, `docs/reference/frame-cost.md`) | `render_us/frames` ≤ 20 ms on every screen and style on the device; frames byte-identical to the pre-cut reference |
+
+### Queued behind N15.7 and the probe
+
+- The look the prototype promised and the frame budget does not yet allow:
+  full glow, the rim comet, slide-and-scale transitions, partial invalidation,
+  then a cap above 24 fps if the bus allows.
+- Hardware, each gated on a probe answer: TE-synced flush (tearing), gyro
+  parallax and flick, two-finger gestures, PWR-key wake, the panel's
+  high-brightness mode for sunlight.
+- A motion preview tool: the real compositor rendered to an animation on the
+  host, so a transition is judged before it is flashed.
+- Finger-follow drag between screens.
+- Voice tools that need no key (time, a timer, weather from the cache, status)
+  and a TIMER screen.
+
 ## Execution order
 
 ### t107 B/C bounded follow-up
