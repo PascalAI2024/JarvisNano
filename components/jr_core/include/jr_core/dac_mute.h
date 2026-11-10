@@ -42,6 +42,12 @@ typedef struct {
  * was muted, records that the mute is owed back. */
 bool jr_dac_mute_cue_begin(jr_dac_mute_t *m, bool owner_muted);
 
+/* The same, for a tone that may be the acknowledgement of the owner's own mute
+ * gesture (`owner_ack`): it plays even though the owner mute is set, and the
+ * DAC rule is unchanged (a muted DAC is owed back, the owner's state is never
+ * touched). Every other tone passes owner_ack = false. */
+bool jr_dac_mute_tone_begin(jr_dac_mute_t *m, bool owner_muted, bool owner_ack);
+
 /* A real unmute (session start, pushed audio): the mute is no longer owed. */
 void jr_dac_mute_unmute(jr_dac_mute_t *m);
 

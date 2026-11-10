@@ -15,6 +15,11 @@ bool jr_dac_mute_cue_begin(jr_dac_mute_t *m, bool owner_muted)
     return true;
 }
 
+bool jr_dac_mute_tone_begin(jr_dac_mute_t *m, bool owner_muted, bool owner_ack)
+{
+    return jr_dac_mute_cue_begin(m, owner_muted && !owner_ack);
+}
+
 void jr_dac_mute_unmute(jr_dac_mute_t *m)
 {
     m->muted = false;

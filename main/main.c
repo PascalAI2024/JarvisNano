@@ -3751,7 +3751,7 @@ static void voice_task(void *arg)
                     /* The ring closing is the visual half; this is the other.
                      * A completed commit rises — the same shape as the
                      * attention beat — where a refusal falls. */
-                    (void)jr_audio_play_sweep(500U, 1100U, 100U, 7U);
+                    (void)jr_audio_play_sweep_owner_ack(500U, 1100U, 100U, 7U);
                     ESP_LOGI(TAG, "gesture: long-press unmute");
                 } else {
                     atomic_store(&s_voice_privacy_paused, true);
@@ -3765,7 +3765,7 @@ static void voice_task(void *arg)
                      * opposite outcomes of the same gesture and must not sound
                      * alike; with the glass possibly face-down or unread, the
                      * tone may be the only signal that reaches the user. */
-                    (void)jr_audio_play_sweep(1100U, 500U, 100U, 7U);
+                    (void)jr_audio_play_sweep_owner_ack(1100U, 500U, 100U, 7U);
                     ESP_LOGI(TAG, "gesture: long-press mute");
                 }
             } else if (iev.kind == JR_INPUT_TAP) {

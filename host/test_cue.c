@@ -80,8 +80,43 @@ static void test_second_cue_keeps_the_original_mute_owed(void)
     TEST_ASSERT_TRUE(m.muted);
 }
 
+/* The sweep that acknowledges the mute gesture plays although the owner mute
+ * has just been set, and still hands the DAC back muted. */
+static void test_owner_ack_tone_plays_under_mute_and_restores_it(void)
+{
+    jr_dac_mute_t m = { .muted = true, .restore = false };
+    const bool owner_muted = true;   /* never touched by a tone */
+    TEST_ASSERT_TRUE(jr_dac_mute_tone_begin(&m, owner_muted, true));
+    TEST_ASSERT_FALSE(m.muted);
+    TEST_ASSERT_TRUE(jr_dac_mute_cue_settle(&m, false));
+    TEST_ASSERT_TRUE_MESSAGE(m.muted, "the DAC is muted again after the ack");
+    TEST_ASSERT_TRUE(owner_muted);
+}
+
+/* Without the exemption the same situation is refused and nothing moves. */
+static void test_non_ack_tone_is_refused_under_mute(void)
+{
+    jr_dac_mute_t m = { .muted = true, .restore = false };
+    TEST_ASSERT_FALSE(jr_dac_mute_tone_begin(&m, true, false));
+    TEST_ASSERT_TRUE(m.muted);
+    TEST_ASSERT_FALSE(m.restore);
+}
+
+/* The ack of an UNMUTE gesture (owner mute already off, DAC may be muted):
+ * plays and leaves the DAC as it found it. */
+static void test_owner_ack_tone_when_not_muted_leaves_dac_state(void)
+{
+    jr_dac_mute_t m = { .muted = false, .restore = false };
+    TEST_ASSERT_TRUE(jr_dac_mute_tone_begin(&m, false, true));
+    TEST_ASSERT_FALSE(jr_dac_mute_cue_settle(&m, false));
+    TEST_ASSERT_FALSE(m.muted);
+}
+
 void cue_tests_run(void)
 {
+    RUN_TEST(test_owner_ack_tone_plays_under_mute_and_restores_it);
+    RUN_TEST(test_non_ack_tone_is_refused_under_mute);
+    RUN_TEST(test_owner_ack_tone_when_not_muted_leaves_dac_state);
     RUN_TEST(test_cue_on_idle_muted_dac_plays_then_restores_mute);
     RUN_TEST(test_cue_while_owner_muted_is_silent_and_stays_muted);
     RUN_TEST(test_cue_on_unmuted_dac_plays_and_stays_unmuted);

@@ -1591,13 +1591,14 @@ esp_err_t jr_audio_diag_copy_since(jr_audio_tap_kind_t kind,
  * response: rejects while playback is pending, rechecks after claiming the
  * lane to close the race with the normal sink writer, and reserves ring
  * capacity. On ESP_OK the caller owns the lane until earcon_release(). */
-static esp_err_t earcon_claim(size_t total)
+static esp_err_t earcon_claim(size_t total, bool owner_ack)
 {
     if (!s_ready || atomic_load(&s_sleeping) || s_pb == NULL || s_feeder == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-    /* The owner has muted the speaker: a tone does not play. */
-    if (s_owner_mute_probe != NULL && s_owner_mute_probe()) {
+    /* The owner has muted the speaker: a tone does not play, except the
+     * acknowledgement of the mute gesture itself (owner_ack). */
+    if (!owner_ack && s_owner_mute_probe != NULL && s_owner_mute_probe()) {
         return ESP_ERR_INVALID_STATE;
     }
     if (jr_audio_playback_pending()) {
@@ -1662,8 +1663,9 @@ static esp_err_t earcon_commit(const int16_t *pcm, size_t total)
     return ESP_OK;
 }
 
-esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
-                              uint32_t duration_ms, uint8_t level_percent)
+static esp_err_t play_sweep(uint16_t start_hz, uint16_t end_hz,
+                            uint32_t duration_ms, uint8_t level_percent,
+                            bool owner_ack)
 {
     if (duration_ms < 100U) duration_ms = 100U;
     if (duration_ms > EARCON_MAX_MS) duration_ms = EARCON_MAX_MS;
@@ -1675,7 +1677,7 @@ esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
     if (end_hz   > 8000U) end_hz   = 8000U;
 
     const size_t total = (size_t)GL_RX_SAMPLE_RATE * duration_ms / 1000U;
-    esp_err_t err = earcon_claim(total);
+    esp_err_t err = earcon_claim(total, owner_ack);
     if (err != ESP_OK) {
         return err;
     }
@@ -1714,6 +1716,19 @@ esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
     return err;
 }
 
+esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
+                              uint32_t duration_ms, uint8_t level_percent)
+{
+    return play_sweep(start_hz, end_hz, duration_ms, level_percent, false);
+}
+
+esp_err_t jr_audio_play_sweep_owner_ack(uint16_t start_hz, uint16_t end_hz,
+                                        uint32_t duration_ms,
+                                        uint8_t level_percent)
+{
+    return play_sweep(start_hz, end_hz, duration_ms, level_percent, true);
+}
+
 esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
                               uint16_t note_ms, uint8_t volume)
 {
@@ -1728,7 +1743,7 @@ esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
 
     const size_t per_note = (size_t)GL_RX_SAMPLE_RATE * note_ms / 1000U;
     const size_t total = per_note * notes;
-    esp_err_t err = earcon_claim(total);
+    esp_err_t err = earcon_claim(total, false);
     if (err != ESP_OK) {
         return err;
     }
@@ -1780,7 +1795,7 @@ esp_err_t jr_audio_play_cue(jr_cue_kind_t kind, uint16_t amp_permille)
     }
     /* Same lane as the chime: a cue requested while any playback is pending,
      * including another cue, is dropped, never queued behind it. */
-    esp_err_t err = earcon_claim(total);
+    esp_err_t err = earcon_claim(total, false);
     if (err != ESP_OK) {
         return err;
     }
@@ -1804,5 +1819,8 @@ esp_err_t jr_audio_diag_play_chirp(uint32_t duration_ms, uint8_t level_percent)
     /* The original 400 -> 2000 Hz diagnostic sweep, unchanged. Every existing
      * caller (the attention beat, the audio self-test) keeps its exact sound;
      * jr_audio_play_sweep() only exposes the endpoints the body always had. */
-    return jr_audio_play_sweep(400U, 2000U, duration_ms, level_percent);
+    /* Diagnostic and attention beats are deliberate, owner-initiated or
+     * pre-existing behaviour that sounded under mute before the owner-mute
+     * probe existed: they keep doing so. The DAC rule still applies. */
+    return play_sweep(400U, 2000U, duration_ms, level_percent, true);
 }
