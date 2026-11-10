@@ -21,9 +21,11 @@ static const void *s_stub_anim_source;
 static unsigned s_stub_bound_frees;
 static size_t s_stub_heap_bytes;
 static struct { void *ptr; size_t bytes; } s_stub_heap[128];
+static unsigned s_stub_malloc_fail;        /* the next N allocations answer NULL */
 void *heap_caps_malloc(size_t s, unsigned c)
 {
     (void)c;
+    if (s_stub_malloc_fail) { s_stub_malloc_fail--; return NULL; }
     void *ptr = malloc(s);
     if (ptr) {
         for (size_t i = 0; i < sizeof s_stub_heap / sizeof s_stub_heap[0]; ++i) {
@@ -53,7 +55,13 @@ void heap_caps_free(void *p)
     }
     free(p);
 }
-size_t heap_caps_get_free_size(unsigned c) { (void)c; return 0; }
+/* PSRAM free = the budget a test sets minus what the stub heap has handed out. */
+static size_t s_stub_psram_budget = (size_t)16 << 20;
+size_t heap_caps_get_free_size(unsigned c)
+{
+    (void)c;
+    return s_stub_psram_budget > s_stub_heap_bytes ? s_stub_psram_budget - s_stub_heap_bytes : 0;
+}
 static int64_t s_fake_us;
 /* Each read advances the clock by s_fake_us_step (0 = frozen, the default), so a
  * test can tell a timer that was read from one that was skipped. */
@@ -200,9 +208,12 @@ const uint8_t *jr_host_embedded_dial(jr_face_t face, size_t *size)
     return s_host_dial_blob[slot];
 }
 static const uint8_t *s_stub_eaf_init_src;
-static eaf_header_t s_stub_eaf_head = { 8, 466, 466 };
 static int s_stub_eaf_decodes;
+static eaf_header_t s_stub_eaf_head = { 8, 466, 466 };
 static esp_err_t s_stub_eaf_decode_error;
+static uint16_t s_stub_eaf_salt;           /* xored into every decoded pixel */
+static int64_t s_stub_eaf_decode_us;       /* how long a decode takes on the fake clock */
+static void (*s_stub_eaf_decode_hook)(uint16_t *px, size_t n);   /* runs with the frame half written */
 esp_err_t eaf_init(const uint8_t *d, size_t n, eaf_format_handle_t *h)
 { (void)n; s_stub_eaf_init_src = d; *h = (eaf_format_handle_t)1; return ESP_OK; }
 esp_err_t eaf_deinit(eaf_format_handle_t h) { (void)h; return ESP_OK; }
@@ -212,10 +223,17 @@ void eaf_free_header(eaf_header_t *h) { (void)h; }
 esp_err_t eaf_frame_decode(eaf_format_handle_t h, int i, uint8_t *buf, size_t n, bool swap)
 {
     (void)h; (void)i; (void)swap;
-    if (s_stub_eaf_decode_error != ESP_OK) { return s_stub_eaf_decode_error; }
     uint16_t *px = (uint16_t *)buf;
-    for (size_t k = 0; k < n / sizeof(uint16_t); ++k) {
-        px[k] = (uint16_t)(k ^ 0x5a5au);
+    const size_t total = n / sizeof(uint16_t);
+    /* the first half lands, then a test may look at (or fail) the half-made frame */
+    for (size_t k = 0; k < total / 2; ++k) {
+        px[k] = (uint16_t)(k ^ 0x5a5au ^ s_stub_eaf_salt);
+    }
+    if (s_stub_eaf_decode_hook) { s_stub_eaf_decode_hook(px, total); }
+    s_fake_us += s_stub_eaf_decode_us;
+    if (s_stub_eaf_decode_error != ESP_OK) { return s_stub_eaf_decode_error; }
+    for (size_t k = total / 2; k < total; ++k) {
+        px[k] = (uint16_t)(k ^ 0x5a5au ^ s_stub_eaf_salt);
     }
     s_stub_eaf_decodes++;
     return ESP_OK;

@@ -3085,7 +3085,7 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
     static const char *init_names[] = { "stopped", "starting", "ready", "failed" };
     const char *init_name = d.init_state <= JR_DISPLAY_INIT_FAILED
                                 ? init_names[d.init_state] : "?";
-    char buf[1408];   /* the tilt pair made 1280 a tight fit */
+    char buf[1536];   /* the tilt pair made 1280 a tight fit; the dial cache took 128 more */
     int n = snprintf(buf, sizeof buf,
         "{\"init\":\"%s\",\"last_error\":\"%s\",\"task_running\":%s,"
         "\"blanked\":%s,\"requested_face\":%d,\"applied_face\":%d,"
@@ -3100,6 +3100,8 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         "\"shadow_dx_q4\":%d,\"shadow_dy_q4\":%d},"
         "\"tilt\":[%d,%d],"
         "\"dip\":%u,\"dip_writes\":%u,\"dip_hold_ms\":%u,"
+        "\"dial_cache\":{\"n\":%u,\"bytes\":%u,\"hits\":%u,\"misses\":%u,"
+        "\"evictions\":%u,\"warms\":%u,\"decode_ms\":%u},"
         "\"current_asset_bytes\":%u,\"free_psram\":%u,\"stack_hwm\":%u,"
         "\"boot_timing\":{\"time_base\":\"esp_timer_since_boot\","
         "\"optical\":false,\"includes_rom\":false,"
@@ -3130,6 +3132,9 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         (int)d.light_shadow_dx_q4, (int)d.light_shadow_dy_q4,
         (int)d.tilt_x, (int)d.tilt_y,
         (unsigned)d.dip, (unsigned)d.dip_writes, (unsigned)d.dip_hold_ms,
+        (unsigned)d.dial_cached, (unsigned)d.dial_bytes, (unsigned)d.dial_hits,
+        (unsigned)d.dial_misses, (unsigned)d.dial_evictions, (unsigned)d.dial_warms,
+        (unsigned)d.dial_decode_ms,
         (unsigned)d.current_asset_bytes, (unsigned)d.free_psram_bytes,
         (unsigned)d.task_stack_hwm,
         d.boot_timing.init_started ? "true" : "false",
