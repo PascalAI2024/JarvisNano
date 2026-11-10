@@ -103,6 +103,36 @@ runtime table, and `test_every_face_has_a_clip_and_a_hud_face`
 per `jr_face_t` so a face added without a clip fails on the host instead of
 rendering blank on glass.
 
+### Two more dials do not fit (2026-11-10)
+
+`dial_skeleton.eaf` (203,677 B) and `dial_celestial.eaf` (204,787 B) come from
+`gen_watch_dials.py one skeleton|celestial` (a style may name a full-frame
+image, quadrant `None`, or a sheet quadrant). Staged files today sum to
+5,468,446 B of the 6,160,384 B partition; with the pair 5,876,910 B.
+`spiffsgen.py` (page 256, block 4096, name 32, meta 4, magic) accepts at most
+about 145 KB more than the current set, and even one new dial overflows
+(`SpiffsFullError`). So these two dials are never staged: `EMBED_FILES` in the
+component CMake links them into the app image (+410 KB of rodata; the OTA slots
+are 4 MiB), and `embedded_dial()` in `jr_display.c` hands the clip loader a
+pointer and a size (`jr_display_clip_t.embedded`). `eaf_init` and
+`eaf_frame_decode` only read the source (read-only rodata faults on a write;
+the vendor decoder was read for writes through the input pointer and found
+none: the heatshrink sink cast copies out of it and RAW/RLE blocks never use
+it). Host tests get the real file bytes from `jr_host_embedded_dial()` in
+`probe/stubs/idf_stubs.inc`; the vendor decoder itself is stubbed on the host.
+
+### The balance wheel and the stars are not clips (2026-11-10)
+
+Neither ornament is an EAF. `gen_balance_wheel.py` bakes the SKELETON wheel to
+a const RGB565 + alpha sprite in `components/jr_display/src/balance_wheel_data.c`
+(145 x 145, about 60 KB of flash; `--check` fails if the files are stale,
+`--preview` lays it on the dial). `gen_celestial_stars.py` writes the 32-star
+table `celestial_stars_data.h` from `dial_celestial_preview.png`. Both read
+files in `docs/evidence/` and the baked previews; rerun them after re-baking a
+dial. `balance_wheel_data.c` is in the component CMake sources and in the host
+compile lists (`tests/CMakeLists.txt`, `main/tests/test_*.py`); the stars
+table is a header only `hud_render.c` includes.
+
 ---
 
 ## Primary sources

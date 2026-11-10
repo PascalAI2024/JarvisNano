@@ -1765,7 +1765,7 @@ static void test_watch_styles_paint_their_own_regions(void)
     const uint16_t cyan  = (uint16_t)(((0 & 0xF8) << 8) | ((229 & 0xFC) << 3) | (255 >> 3));
     const uint16_t gold  = (uint16_t)(((214 & 0xF8) << 8) | ((178 & 0xFC) << 3) | (62 >> 3));
 
-    for (int style = 1; style <= 5; ++style) {
+    for (int style = 1; style <= 7; ++style) {
         render_style_strips(fb, 6, 30, 15, style);   /* hands away from 12 */
         size_t tri = 0, cream_any = 0, lit = 0, iv = 0, cy = 0, au = 0, far = 0;
         for (int y = 0; y < HUD_H; ++y) {
@@ -1803,6 +1803,12 @@ static void test_watch_styles_paint_their_own_regions(void)
             CHECK(iv > 100000, "MINIMAL: only %zu ivory px (the dial is drawn)", iv);
             CHECK(cream_any == 0, "MINIMAL painted %zu cream px", cream_any);
             break;
+        case 6:
+            CHECK(cream_any > 200, "SKELETON: only %zu lume px", cream_any);
+            break;
+        case 7:
+            CHECK(lit > 1000, "CELESTIAL: lit only %zu px", lit);
+            break;
         default:
             CHECK(cy > 300, "FUTURE: only %zu cyan px", cy);
             break;
@@ -1816,7 +1822,7 @@ static void test_watch_styles_paint_their_own_regions(void)
     /* The per-frame cache follows its inputs: a new time on the same style,
      * rendered in strips right after a whole frame at the old time, equals
      * a whole frame at the new time and differs from the old one. */
-    for (int style = 1; style <= 5; ++style) {
+    for (int style = 1; style <= 7; ++style) {
         hud_overlay_clock_style(whole, 0, HUD_H, false, 6, 30, 15, 255, style);
         render_style_strips(fb, 10, 8, 45, style);
         CHECK(memcmp(whole, fb, px * sizeof *fb) != 0,
@@ -1827,7 +1833,7 @@ static void test_watch_styles_paint_their_own_regions(void)
               "style %d at 10:08:45: strips differ from the whole frame", style);
     }
     /* strength 0 paints nothing in every style */
-    for (int style = 0; style < 6; ++style) {
+    for (int style = 0; style < 8; ++style) {
         memset(fb, 0, px * sizeof *fb);
         hud_overlay_clock_style(fb, 0, HUD_H, false, 6, 30, 15, 0, style);
         size_t any = 0;
@@ -1968,7 +1974,7 @@ static void test_watch_hands_blend_and_spare_the_dial(void)
     uint16_t *fb = malloc(px * sizeof *fb);
     if (!fb) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
     const uint16_t grey = 0x4208;
-    for (int style = 1; style <= 5; ++style) {
+    for (int style = 1; style <= 7; ++style) {
         if (style == 4) continue;                   /* MINIMAL draws its own dial */
         for (size_t k = 0; k < px; ++k) fb[k] = grey;
         const hud_watch_t w = { .hh = 10, .mm = 8, .ss = 30, .ms = 500,
@@ -2199,7 +2205,7 @@ static void test_watch_light_in_the_frame(void)
     hud_light_t rest, tilt;
     hud_light_solve(0, 0, &rest);
     hud_light_solve(707, -707, &tilt);            /* 45 degrees, 6 o'clock side */
-    for (int style = 1; style <= 5; ++style) {
+    for (int style = 1; style <= 7; ++style) {
         render_watch_light(a, style, NULL, true);
         render_watch_light(b, style, &rest, true);
         CHECK(memcmp(a, b, px * sizeof *a) == 0, "style %d: rest light != NULL light", style);
@@ -2241,6 +2247,331 @@ static void test_watch_light_in_the_frame(void)
               style, mask_diff);
     }
     free(a); free(b);
+}
+
+/* ===== THE LIVE ORNAMENTS (2026-11-10): SKELETON balance wheel and
+ * CELESTIAL stars. Their own block, at the end, so a merge with another
+ * builder is a pure append. ========================================== */
+#include <math.h>
+#include "balance_wheel_data.h"
+#include "celestial_stars_data.h"
+
+#define LO_SENTINEL 0xA5A5u
+
+static uint16_t *lo_frame(uint16_t fill)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb);
+    if (!fb) { printf("FAIL lo_frame: alloc\n"); g_failures++; return NULL; }
+    for (size_t k = 0; k < px; ++k) fb[k] = fill;
+    return fb;
+}
+
+static void lo_blit_strips(uint16_t *fb, bool swap, int32_t ang)
+{
+    for (int y = 0; y < HUD_H; y += 12) {
+        const int n = y + 12 > HUD_H ? HUD_H - y : 12;
+        hud_balance_blit(fb + (size_t)y * HUD_W, y, n, swap, ang);
+    }
+}
+
+static int lo_ch_diff(uint16_t a, uint16_t b)
+{
+    int d = abs(((a >> 11) & 31) - ((b >> 11) & 31));
+    int e = abs(((a >> 5) & 63) / 2 - ((b >> 5) & 63) / 2);
+    int f = abs((a & 31) - (b & 31));
+    return d > e ? (d > f ? d : f) : (e > f ? e : f);
+}
+
+/* The swing: bounded, periodic (1 s), zero at the top of the second, peak at
+ * a quarter period, eased (the extremes are flat, the crossings are steep). */
+static void test_balance_swing_is_bounded_periodic_and_eased(void)
+{
+    int lo = 0, hi = 0;
+    for (int t = 0; t < 120000; t += 7) {
+        const int ss = (t / 1000) % 60, ms = t % 1000;
+        const int32_t a = hud_balance_angle_q16(ss, ms);
+        if (a < lo) lo = a;
+        if (a > hi) hi = a;
+        CHECK(a >= -HUD_BALANCE_SWING_Q16 && a <= HUD_BALANCE_SWING_Q16,
+              "swing %d out of +-%d at %d ms", (int)a, HUD_BALANCE_SWING_Q16, t);
+        const int t2 = (t + 1000) % 60000;
+        CHECK(hud_balance_angle_q16(t2 / 1000, t2 % 1000) == a,
+              "swing is not periodic at %d ms", t);
+    }
+    CHECK(hi >= HUD_BALANCE_SWING_Q16 - 40 && lo <= -HUD_BALANCE_SWING_Q16 + 40,
+          "swing never reaches its ends (%d .. %d)", lo, hi);
+    CHECK(hud_balance_angle_q16(7, 0) == 0, "not at rest at the top of a second");
+    const int top = hud_balance_angle_q16(7, 250), up = hud_balance_angle_q16(7, 240);
+    const int zero = hud_balance_angle_q16(7, 10);
+    CHECK(abs(top - up) * 10 < abs(zero), "not eased: %d per 10 ms at the end, %d at the crossing",
+          abs(top - up), abs(zero));
+    CHECK(hud_balance_angle_q16(7, 750) < 0 && hud_balance_angle_q16(7, 250) > 0,
+          "the two half-swings do not go opposite ways");
+    CHECK(hud_balance_angle_q16(-5, -9) == hud_balance_angle_q16(55, 0), "negative clock not folded");
+    CHECK(hud_balance_angle_q16(7, 5000) == hud_balance_angle_q16(7, 999), "ms not clamped");
+}
+
+/* The rotation: the centre maps to the centre, and a rim point of the sprite
+ * lands where an independent floating-point rotation says, at 0, +45 and -45
+ * degrees. The whole footprint is also compared with a nearest-neighbour
+ * reference built with libm. */
+static void test_balance_rotation_maps_centre_and_rim(void)
+{
+    const int cx = JR_BALANCE_DIAL_CX, cy = JR_BALANCE_DIAL_CY;
+    const int32_t angs[3] = { 0, HUD_BALANCE_SWING_Q16, -HUD_BALANCE_SWING_Q16 };
+    uint16_t centre[3] = { 0 };
+    /* the rim point: the opaque sprite pixel farthest from the sprite centre */
+    int bx = 0, by = 0, bd = -1;
+    for (int y = 0; y < JR_BALANCE_SIZE; ++y)
+        for (int x = 0; x < JR_BALANCE_SIZE; ++x)
+            if (jr_balance_alpha[y * JR_BALANCE_SIZE + x] == 255) {
+                const int d = (x - JR_BALANCE_C) * (x - JR_BALANCE_C) + (y - JR_BALANCE_C) * (y - JR_BALANCE_C);
+                if (d > bd) { bd = d; bx = x; by = y; }
+            }
+    CHECK(bd > 60 * 60, "no opaque rim pixel found (r^2 %d)", bd);
+    for (int i = 0; i < 3; ++i) {
+        uint16_t *fb = lo_frame(LO_SENTINEL);
+        if (!fb) return;
+        lo_blit_strips(fb, false, angs[i]);
+        centre[i] = fb[(size_t)cy * HUD_W + cx];
+        CHECK(centre[i] != LO_SENTINEL, "angle %d: the centre was not drawn", (int)angs[i]);
+        /* the rim point */
+        const double th = (double)angs[i] * 2.0 * M_PI / 65536.0;
+        const double rx = bx - JR_BALANCE_C, ry = by - JR_BALANCE_C;
+        const double ex = cx + rx * cos(th) - ry * sin(th);
+        const double ey = cy + rx * sin(th) + ry * cos(th);
+        bool hit = false;
+        for (int dy = -1; dy <= 1 && !hit; ++dy)
+            for (int dx = -1; dx <= 1 && !hit; ++dx) {
+                const int x = (int)floor(ex + 0.5) + dx, y = (int)floor(ey + 0.5) + dy;
+                if (fb[(size_t)y * HUD_W + x] != LO_SENTINEL &&
+                    (x - ex) * (x - ex) + (y - ey) * (y - ey) < 1.6)
+                    hit = true;
+            }
+        CHECK(hit, "angle %d: the rim point is not at (%.1f, %.1f)", (int)angs[i], ex, ey);
+        /* the footprint against a nearest-neighbour reference */
+        size_t agree = 0, total = 0;
+        const double c = cos(-th), s = sin(-th);
+        for (int y = cy - JR_BALANCE_R - 2; y <= cy + JR_BALANCE_R + 2; ++y)
+            for (int x = cx - JR_BALANCE_R - 2; x <= cx + JR_BALANCE_R + 2; ++x) {
+                const double dx = x - cx, dy = y - cy;
+                if (dx * dx + dy * dy > (double)JR_BALANCE_R * JR_BALANCE_R) continue;
+                /* drawn when the bilinear alpha at the source point is not
+                 * negligible (the blit skips under 4 of 255) */
+                const double u = JR_BALANCE_C + dx * c - dy * s, v = JR_BALANCE_C + dx * s + dy * c;
+                const int sx = (int)floor(u), sy = (int)floor(v);
+                const double fx = u - sx, fy = v - sy;
+                const double al = (1 - fx) * (1 - fy) * jr_balance_alpha[sy * JR_BALANCE_SIZE + sx] +
+                                  fx * (1 - fy) * jr_balance_alpha[sy * JR_BALANCE_SIZE + sx + 1] +
+                                  (1 - fx) * fy * jr_balance_alpha[(sy + 1) * JR_BALANCE_SIZE + sx] +
+                                  fx * fy * jr_balance_alpha[(sy + 1) * JR_BALANCE_SIZE + sx + 1];
+                if (al > 1.0 && al < 12.0) continue;      /* the threshold band */
+                const bool want = al >= 12.0;
+                const bool got = fb[(size_t)y * HUD_W + x] != LO_SENTINEL;
+                total++;
+                if (want == got) agree++;
+            }
+        CHECK(agree * 1000 >= total * 990, "angle %d: footprint agrees on %zu of %zu px",
+              (int)angs[i], agree, total);
+        free(fb);
+    }
+    CHECK(lo_ch_diff(centre[0], centre[1]) <= 3 && lo_ch_diff(centre[0], centre[2]) <= 3,
+          "the jewel moves: %04x %04x %04x", centre[0], centre[1], centre[2]);
+}
+
+/* Nothing outside the bounding disc, any angle, either byte order; strips of
+ * 12 rows equal the whole frame; the byte-swapped render is the byte swap of
+ * the plain one; the pixel cost is reported. */
+static void test_balance_stays_in_its_disc_and_strips_agree(void)
+{
+    const int cx = JR_BALANCE_DIAL_CX, cy = JR_BALANCE_DIAL_CY;
+    const size_t px = (size_t)HUD_W * HUD_H;
+    size_t worst = 0;
+    for (int a = -HUD_BALANCE_SWING_Q16; a <= HUD_BALANCE_SWING_Q16; a += 1531) {
+        uint16_t *whole = lo_frame(LO_SENTINEL), *strips = lo_frame(LO_SENTINEL);
+        uint16_t *sw = lo_frame(0xA5A5u);
+        if (!whole || !strips || !sw) return;
+        const int visited = hud_balance_blit(whole, 0, HUD_H, false, a);
+        lo_blit_strips(strips, false, a);
+        CHECK(memcmp(whole, strips, px * sizeof *whole) == 0, "angle %d: strips differ from the whole frame", a);
+        lo_blit_strips(sw, true, a);
+        size_t changed = 0, outside = 0, swap_bad = 0;
+        for (int y = 0; y < HUD_H; ++y)
+            for (int x = 0; x < HUD_W; ++x) {
+                const uint16_t p = whole[(size_t)y * HUD_W + x];
+                if (p != LO_SENTINEL) {
+                    changed++;
+                    const int dx = x - cx, dy = y - cy;
+                    if (dx * dx + dy * dy > (JR_BALANCE_R + 1) * (JR_BALANCE_R + 1)) outside++;
+                }
+                const uint16_t q = sw[(size_t)y * HUD_W + x];
+                if ((uint16_t)((q >> 8) | (q << 8)) != p) swap_bad++;
+            }
+        CHECK(outside == 0, "angle %d: %zu px outside the wheel disc", a, outside);
+        CHECK(swap_bad == 0, "angle %d: %zu px differ between byte orders", a, swap_bad);
+        CHECK(changed > 6000 && changed < 15500, "angle %d: wheel drew %zu px", a, changed);
+        CHECK(visited > 14500 && visited < 16500, "angle %d: visited %d px", a, visited);
+        if ((size_t)visited > worst) worst = (size_t)visited;
+        free(whole); free(strips); free(sw);
+    }
+    /* a strip that does not meet the disc paints and visits nothing */
+    uint16_t row[HUD_W * 12];
+    for (size_t k = 0; k < sizeof row / sizeof *row; ++k) row[k] = LO_SENTINEL;
+    CHECK(hud_balance_blit(row, 0, 12, false, 0) == 0, "a strip above the disc visited pixels");
+    CHECK(hud_balance_blit(NULL, 0, 12, false, 0) == 0 && hud_balance_blit(row, 0, 0, false, 0) == 0,
+          "NULL / empty strip");
+    printf("note: balance wheel visits %zu px per frame at most (box %d x %d)\n",
+           worst, 2 * (JR_BALANCE_R + 1) + 1, 2 * (JR_BALANCE_R + 1) + 1);
+}
+
+/* In the watch: SKELETON on its baked dial swings only when the watch is
+ * alive; at the top of a second (angle 0) alive or not renders identically,
+ * a quarter second later they differ in the wheel; strips equal the whole
+ * frame; the stand-in dial draws no wheel. */
+static void test_balance_in_the_watch_follows_alive_and_strips(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *a = lo_frame(0x4208), *b = lo_frame(0x4208), *c = lo_frame(0x4208);
+    if (!a || !b || !c) return;
+    hud_watch_t w = { .hh = 3, .mm = 0, .ss = 0, .ms = 0, .batt_pct = -1, .dial_baked = true,
+                      .shadow = true, .alive = true };
+    hud_overlay_watch(a, 0, HUD_H, false, &w, 255, 6);
+    w.alive = false;
+    hud_overlay_watch(b, 0, HUD_H, false, &w, 255, 6);
+    CHECK(memcmp(a, b, px * sizeof *a) == 0, "alive changes the wheel at angle 0");
+    for (size_t k = 0; k < px; ++k) { a[k] = b[k] = 0x4208; }
+    w.ms = 250; w.alive = true;
+    hud_overlay_watch(a, 0, HUD_H, false, &w, 255, 6);
+    w.alive = false;
+    hud_overlay_watch(b, 0, HUD_H, false, &w, 255, 6);
+    size_t diff = 0;
+    for (size_t k = 0; k < px; ++k) if (a[k] != b[k]) diff++;
+    CHECK(diff > 1500, "a swinging wheel differs from a resting one in only %zu px", diff);
+    /* strips equal the whole frame while swinging */
+    for (size_t k = 0; k < px; ++k) { a[k] = c[k] = 0x4208; }
+    w.alive = true;
+    hud_overlay_watch(a, 0, HUD_H, false, &w, 255, 6);
+    for (int y = 0; y < HUD_H; y += 12) {
+        const int n = y + 12 > HUD_H ? HUD_H - y : 12;
+        hud_overlay_watch(c + (size_t)y * HUD_W, y, n, false, &w, 255, 6);
+    }
+    CHECK(memcmp(a, c, px * sizeof *a) == 0, "SKELETON strips differ from the whole frame while swinging");
+    /* no baked dial, no recess, no wheel: the stand-in is the same alive or not */
+    w.dial_baked = false;
+    for (size_t k = 0; k < px; ++k) { a[k] = b[k] = 0x4208; }
+    hud_overlay_watch(a, 0, HUD_H, false, &w, 255, 6);
+    w.alive = false;
+    hud_overlay_watch(b, 0, HUD_H, false, &w, 255, 6);
+    CHECK(memcmp(a, b, px * sizeof *a) == 0, "the stand-in dial draws a wheel");
+    free(a); free(b); free(c);
+}
+
+/* The star table: a few dozen, on the dial, away from the hub and the track,
+ * apart from each other, on periods of 2-5 s that divide a minute. */
+static void test_celestial_star_table_is_sane(void)
+{
+    CHECK(HUD_STAR_COUNT >= 24 && HUD_STAR_COUNT <= 40, "%d stars, want 24-40", HUD_STAR_COUNT);
+    for (int i = 0; i < HUD_STAR_COUNT; ++i) {
+        const hud_star_t *s = &s_stars[i];
+        const int dx = s->x - 233, dy = s->y - 233, r2 = dx * dx + dy * dy;
+        CHECK(r2 >= 30 * 30 && r2 <= 186 * 186, "star %d at r^2 %d is in the hub or the track", i, r2);
+        CHECK(s->period_ms >= 2000 && s->period_ms <= 5000 && 60000 % s->period_ms == 0,
+              "star %d period %u", i, (unsigned)s->period_ms);
+        CHECK(s->strength >= 128, "star %d strength %u", i, (unsigned)s->strength);
+        for (int j = i + 1; j < HUD_STAR_COUNT; ++j) {
+            const int ex = s->x - s_stars[j].x, ey = s->y - s_stars[j].y;
+            CHECK(ex * ex + ey * ey >= 16 * 16, "stars %d and %d are %d apart (squared)", i, j, ex * ex + ey * ey);
+        }
+    }
+    /* each star is periodic in its own period, bounded, and they are not in step */
+    int distinct = 0;
+    int seen[HUD_STAR_COUNT];
+    for (int i = 0; i < HUD_STAR_COUNT; ++i) {
+        const int P = s_stars[i].period_ms;
+        for (int t = 0; t < 60000; t += 211) {
+            const int l = hud_celestial_star_level(i, (t / 1000) % 60, t % 1000);
+            CHECK(l >= 0 && l <= 254, "star %d level %d", i, l);
+            const int t2 = (t + P) % 60000;
+            CHECK(hud_celestial_star_level(i, t2 / 1000, t2 % 1000) == l, "star %d not periodic in %d ms", i, P);
+        }
+        seen[i] = hud_celestial_star_level(i, 12, 0);
+        bool dup = false;
+        for (int j = 0; j < i; ++j) if (seen[j] == seen[i]) dup = true;
+        if (!dup) distinct++;
+    }
+    CHECK(distinct >= HUD_STAR_COUNT * 2 / 3, "only %d distinct phases at one instant", distinct);
+    CHECK(hud_celestial_star_level(-1, 0, 0) == 0 && hud_celestial_star_level(HUD_STAR_COUNT, 0, 0) == 0,
+          "out-of-range star has a level");
+}
+
+/* The glint is subtle and local: additive and clamped, a few pixels per
+ * star, nothing beyond r 190, strips equal the whole frame, the byte-swapped
+ * render is the byte swap, and only an alive watch draws any. */
+static void test_celestial_twinkle_is_additive_small_and_strip_invariant(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    const uint16_t navy = 0x0841u;
+    size_t worst_touched = 0;
+    int worst_step = 0;
+    for (int t = 0; t < 12000; t += 437) {
+        const int ss = t / 1000, ms = t % 1000;
+        uint16_t *whole = lo_frame(navy), *strips = lo_frame(navy), *sw = lo_frame(navy);
+        if (!whole || !strips || !sw) return;
+        for (size_t k = 0; k < px; ++k) sw[k] = (uint16_t)((navy >> 8) | (navy << 8));
+        const int touched = hud_celestial_twinkle(whole, 0, HUD_H, false, ss, ms);
+        for (int y = 0; y < HUD_H; y += 12) {
+            const int n = y + 12 > HUD_H ? HUD_H - y : 12;
+            hud_celestial_twinkle(strips + (size_t)y * HUD_W, y, n, false, ss, ms);
+            hud_celestial_twinkle(sw + (size_t)y * HUD_W, y, n, true, ss, ms);
+        }
+        CHECK(memcmp(whole, strips, px * sizeof *whole) == 0, "t=%d: strips differ from the whole frame", t);
+        size_t changed = 0, far = 0, swap_bad = 0;
+        for (int y = 0; y < HUD_H; ++y)
+            for (int x = 0; x < HUD_W; ++x) {
+                const uint16_t p = whole[(size_t)y * HUD_W + x];
+                const uint16_t q = sw[(size_t)y * HUD_W + x];
+                if ((uint16_t)((q >> 8) | (q << 8)) != p) swap_bad++;
+                if (p == navy) continue;
+                changed++;
+                const int dx = x - 233, dy = y - 233;
+                if (dx * dx + dy * dy > 190 * 190) far++;
+                /* additive: no channel went down, and no step is a blink */
+                const int dr = (((p >> 11) & 31) - ((navy >> 11) & 31)) * 8;
+                const int dg = (((p >> 5) & 63) - ((navy >> 5) & 63)) * 4;
+                const int db = ((p & 31) - (navy & 31)) * 8;
+                CHECK(dr >= 0 && dg >= 0 && db >= 0, "t=%d: a glint darkened a pixel", t);
+                const int m = dr > dg ? (dr > db ? dr : db) : (dg > db ? dg : db);
+                if (m > worst_step) worst_step = m;
+            }
+        CHECK(far == 0, "t=%d: %zu glint px beyond r 190", t, far);
+        CHECK(swap_bad == 0, "t=%d: byte orders differ", t);
+        CHECK(changed <= (size_t)touched, "t=%d: changed %zu > touched %d", t, changed, touched);
+        CHECK(touched <= HUD_STAR_COUNT * 13, "t=%d: %d px touched", t, touched);
+        if ((size_t)touched > worst_touched) worst_touched = (size_t)touched;
+        free(whole); free(strips); free(sw);
+    }
+    CHECK(worst_step <= 140, "the strongest glint adds %d to a channel: not subtle", worst_step);
+    CHECK(worst_touched >= 20, "the stars never lit (%zu)", worst_touched);
+    printf("note: celestial twinkle touches %zu px per frame at most (%d stars), strongest glint +%d per channel\n",
+           worst_touched, HUD_STAR_COUNT, worst_step);
+    /* in the watch: alive draws them, a resting watch holds the dial still */
+    uint16_t *a = lo_frame(navy), *b = lo_frame(navy), *d = lo_frame(navy);
+    if (!a || !b || !d) return;
+    hud_watch_t w = { .hh = 1, .mm = 0, .ss = 4, .ms = 100, .batt_pct = -1, .dial_baked = true,
+                      .shadow = true, .alive = true };
+    hud_overlay_watch(a, 0, HUD_H, false, &w, 255, 7);
+    for (int y = 0; y < HUD_H; y += 12) {
+        const int n = y + 12 > HUD_H ? HUD_H - y : 12;
+        hud_overlay_watch(d + (size_t)y * HUD_W, y, n, false, &w, 255, 7);
+    }
+    CHECK(memcmp(a, d, px * sizeof *a) == 0, "CELESTIAL strips differ from the whole frame");
+    w.alive = false;
+    hud_overlay_watch(b, 0, HUD_H, false, &w, 255, 7);
+    size_t diff = 0;
+    for (size_t k = 0; k < px; ++k) if (a[k] != b[k]) diff++;
+    CHECK(diff >= 10, "an alive CELESTIAL differs from a resting one in only %zu px", diff);
+    free(a); free(b); free(d);
 }
 
 int main(void)
@@ -2302,6 +2633,12 @@ int main(void)
     test_outlined_hands_keep_their_rim();
     test_watch_hands_never_comb();
     test_watch_hands_blend_and_spare_the_dial();
+    test_balance_swing_is_bounded_periodic_and_eased();
+    test_balance_rotation_maps_centre_and_rim();
+    test_balance_stays_in_its_disc_and_strips_agree();
+    test_balance_in_the_watch_follows_alive_and_strips();
+    test_celestial_star_table_is_sane();
+    test_celestial_twinkle_is_additive_small_and_strip_invariant();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);

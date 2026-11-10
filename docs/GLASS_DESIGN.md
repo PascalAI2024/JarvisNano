@@ -586,6 +586,64 @@ dial does not grow a gadget. Shell test: the band at noon, night at
 midnight, the ends at 07:02/19:35 (angles 139 and 17), the dot at 13:15
 (angle 205), DRESS blank, no sun blank.
 
+**SKELETON and CELESTIAL (2026-11-10, step 1: dials and hands).** Styles 6
+and 7, appended so no saved style number moves; the style count is 8, the
+limit of the nav word's three style bits (`_Static_assert`). Both are baked
+dials cut by `gen_watch_dials.py` (SKELETON from its own full-frame render
+with the balance recess left empty, CELESTIAL from the top-right quadrant of
+`20261110-dial-concepts-codex-new.png`), 204 KB and 205 KB, black floor 0.
+SKELETON hands: rose gold with a dark hairline outline and a wide cream lume
+fill, an ice-blue hairline seconds as the one cool colour; CELESTIAL: slim
+polished gold with a fine gold seconds. Renders:
+`docs/evidence/watch-dials-2026-11-10-{skeleton,celestial}-hands.png`.
+**They are not in the partition:** the pair does not fit the 0x5E0000
+`emote_assets` partition (see `docs/reference/asset-pipeline.md`), so both
+EAFs are linked into the app image (`EMBED_FILES`, 4 MiB OTA slots) and the
+dial path reads them in place from flash: the clip carries an `embedded`
+flag, no file read, no PSRAM copy of the compressed data, and no release
+path frees or writes it.
+
+**The balance wheel swings, the stars twinkle (2026-11-10).** Two live
+ornaments, drawn on the baked dial and under every hand, both only at the
+awake cadence (`hud_watch_t.alive`, the same test as the hand shadows): a
+resting watch holds them still, like the second hand's shadow.
+
+*SKELETON's balance wheel.* The skeleton dial has an empty circular recess
+(centre 234, 343 on the 466 px frame, radius about 72, measured from the ruby
+jewel and the strongest radial edge by `firmware/mascot/gen_balance_wheel.py`).
+The script cleans the Codex wheel render (threshold the alpha, keep the largest
+component, soft one-pixel edge, circular window, colour bled under the
+transparent pixels), fits it to a 141 px disc inside 2 px of padding (145 x 145)
+and writes `components/jr_display/src/balance_wheel_data.{h,c}`: RGB565 plus an
+8-bit alpha plane, 60 KB of flash. `hud_balance_blit` rotates it about the
+recess centre: each destination pixel is inverse-mapped with a fixed-point
+rotation walked along the row (no multiply per pixel for the mapping), sampled
+bilinearly, blended into the strip; integer only, no heap, no framebuffer, so a
+strip render equals the whole-frame render. Its own 65-entry sine table, because
+the shared 256-entry LUT is a coarse fit whose two half-waves sit one step apart
+(sin and cos at 45 degrees differ by 2 %: the sprite sheared by a pixel at the
+rim). Motion: +-45 degrees, one sine per second read off the clock
+(`hud_balance_angle_q16(ss, ms)`: zero at the top of every second, flat at the
+ends), about 15 frames a cycle at 14-19 fps. A real balance beats at 4 Hz, which
+the panel cannot show. Cost per frame: 15,813 destination pixels visited
+(the 143 x 143 box's disc), about 10,000 of them blended; the windows in the
+wheel cost a table read each. On the device it is an estimate of 3-4 ms, which
+only a run on the panel can confirm.
+
+*CELESTIAL's stars.* `firmware/mascot/gen_celestial_stars.py` reads the baked
+frame, drops everything within 8 px of gold (the constellation lines and their
+joints, the hour studs, the minute track), the hub and the track, ranks the
+rest by the light in a 7 x 7 blob above the local background, and keeps the
+brightest 32 at least 16 px apart (`celestial_stars_data.h`: x, y, period,
+phase, strength). Each has its own period (2.0 to 5.0 s, all dividing 60 s so
+the minute never jumps) and phase; its level is a squared sine, so a star is
+dark most of the time and rises to a short flash. A glint is additive and
+clamped, a cool white: full on the star pixel, 5/8 on its four neighbours and,
+as it peaks, 3/8 on the diagonals and 1/4 on the arm tips. At most 261 pixels
+a frame (32 stars, 13 pixels each at the very most), strongest channel step
++120 on a navy pixel. `docs/evidence/watch-dials-2026-11-10-celestial-twinkle.png`
+shows resting, live and the difference (x3) on three frames.
+
 **The weather cell never cuts a word (2026-09-05).** The 12-glyph
 `condition` cap had already turned "LIGHT DRIZZLE" into `LIGHT DRIZZL`
 before the cell's 15-glyph clip made it `LIGHT DRIZZ` on the glass

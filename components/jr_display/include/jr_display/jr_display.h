@@ -343,6 +343,8 @@ typedef enum {
     JR_WATCH_PILOT,        /* baked matte black; sword hands, three sub-dials */
     JR_WATCH_MINIMAL,      /* drawn warm-white dial; thin blued hands, no seconds */
     JR_WATCH_FUTURE,       /* baked tech dial; slim cyan hands, four data cells */
+    JR_WATCH_SKELETON,     /* baked open movement; rose-gold lume hands */
+    JR_WATCH_CELESTIAL,    /* baked star field; slim gold leaf hands */
     JR_WATCH_STYLE_COUNT
 } jr_watch_style_t;
 

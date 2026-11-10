@@ -587,6 +587,8 @@ static void test_missing_clip_falls_back_to_the_face_it_grew_from(void)
     CHECK(face_fallback(JR_FACE_DIAL_DRESS) == JR_FACE_IDLE, "dial dress -> idle");
     CHECK(face_fallback(JR_FACE_DIAL_PILOT) == JR_FACE_IDLE, "dial pilot -> idle");
     CHECK(face_fallback(JR_FACE_DIAL_FUTURE) == JR_FACE_IDLE, "dial future -> idle");
+    CHECK(face_fallback(JR_FACE_DIAL_SKELETON) == JR_FACE_IDLE, "dial skeleton -> idle");
+    CHECK(face_fallback(JR_FACE_DIAL_CELESTIAL) == JR_FACE_IDLE, "dial celestial -> idle");
     for (int f = 0; f < (int)JR_FACE_COUNT; ++f) {
         const jr_face_t p = face_fallback((jr_face_t)f);
         CHECK(p == (jr_face_t)f || face_fallback(p) == p,
@@ -612,9 +614,9 @@ static void test_dial_decodes_once_and_blits_every_strip(void)
     s_stub_eaf_decodes = 0;
     ctx->missing_faces = 0;
     ctx->clips[JR_FACE_DIAL_DIVER] = (jr_display_clip_t){
-        heap_caps_malloc(32U, MALLOC_CAP_SPIRAM), 32U, 8U, 7U };
+        heap_caps_malloc(32U, MALLOC_CAP_SPIRAM), 32U, 8U, 7U, false };
     ctx->clips[JR_FACE_DIAL_DRESS] = (jr_display_clip_t){
-        heap_caps_malloc(32U, MALLOC_CAP_SPIRAM), 32U, 8U, 7U };
+        heap_caps_malloc(32U, MALLOC_CAP_SPIRAM), 32U, 8U, 7U, false };
 
     CHECK(!dial_show(ctx, JR_FACE_IDLE), "a face that is not a dial stays on the anim");
     CHECK(!s_dial_blit && s_stub_eaf_decodes == 0, "and decodes nothing");
@@ -651,7 +653,7 @@ static void test_dial_decodes_once_and_blits_every_strip(void)
     s_dial_blit = false;
     s_stub_eaf_head.width = 400;
     ctx->clips[JR_FACE_DIAL_DIVER] = (jr_display_clip_t){
-        heap_caps_malloc(32U, MALLOC_CAP_SPIRAM), 32U, 8U, 7U };
+        heap_caps_malloc(32U, MALLOC_CAP_SPIRAM), 32U, 8U, 7U, false };
     CHECK(!dial_show(ctx, JR_FACE_DIAL_DIVER) && !s_dial_blit,
           "a dial that is not panel-sized stays on the anim");
     s_stub_eaf_head.width = HUD_W;
@@ -1769,10 +1771,15 @@ static void test_watch_style_is_three_nav_bits_that_wrap(void)
           "FUTURE is not bit pattern 101 at bit 17");
     CHECK((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 20) == 0u,
           "the style spilled above bit 19");
+    jr_display_watch_style_set(JR_WATCH_CELESTIAL);
+    CHECK(((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 17) & 7u) == 7u,
+          "CELESTIAL is not bit pattern 111 at bit 17");
+    CHECK((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 20) == 0u,
+          "the last style spilled above bit 19");
     jr_display_watch_style_set(JR_WATCH_DIVER);
     static const jr_watch_style_t walk[] = {
         JR_WATCH_DRESS, JR_WATCH_PILOT, JR_WATCH_MINIMAL, JR_WATCH_FUTURE,
-        JR_WATCH_JARVIS, JR_WATCH_DIVER };
+        JR_WATCH_SKELETON, JR_WATCH_CELESTIAL, JR_WATCH_JARVIS, JR_WATCH_DIVER };
     for (size_t i = 0; i < sizeof walk / sizeof *walk; ++i) {
         jr_display_watch_style_step(1);
         CHECK(jr_display_watch_style() == walk[i], "step %zu right landed on %d, wanted %d",
@@ -1781,16 +1788,17 @@ static void test_watch_style_is_three_nav_bits_that_wrap(void)
     jr_display_watch_style_step(-1);
     CHECK(jr_display_watch_style() == JR_WATCH_JARVIS, "left of DIVER is JARVIS");
     jr_display_watch_style_step(-1);
-    CHECK(jr_display_watch_style() == JR_WATCH_FUTURE, "left of JARVIS wraps to FUTURE");
+    CHECK(jr_display_watch_style() == JR_WATCH_CELESTIAL, "left of JARVIS wraps to CELESTIAL");
     jr_display_nav_next();
     jr_display_nav_up();
     jr_display_nav_home();
-    CHECK(jr_display_watch_style() == JR_WATCH_FUTURE,
+    CHECK(jr_display_watch_style() == JR_WATCH_CELESTIAL,
           "the style did not survive next/up/home (now %d)", (int)jr_display_watch_style());
     CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS, "home still goes home");
     jr_display_watch_style_set((jr_watch_style_t)JR_WATCH_STYLE_COUNT);
-    CHECK(jr_display_watch_style() == JR_WATCH_FUTURE, "an out-of-range style is refused");
-    static const char *const names[] = { "JARVIS", "DIVER", "DRESS", "PILOT", "MINIMAL", "FUTURE" };
+    CHECK(jr_display_watch_style() == JR_WATCH_CELESTIAL, "an out-of-range style is refused");
+    static const char *const names[] = { "JARVIS", "DIVER", "DRESS", "PILOT", "MINIMAL", "FUTURE",
+                                         "SKELETON", "CELESTIAL" };
     for (int i = 0; i < (int)JR_WATCH_STYLE_COUNT; ++i) {
         CHECK(strcmp(jr_display_watch_style_name((jr_watch_style_t)i), names[i]) == 0,
               "style %d is named %s", i, jr_display_watch_style_name((jr_watch_style_t)i));
@@ -2133,6 +2141,8 @@ static void test_watch_dial_face_follows_the_style_and_the_screen(void)
         { JR_WATCH_PILOT,   JR_FACE_DIAL_PILOT },
         { JR_WATCH_MINIMAL, JR_FACE_COUNT },
         { JR_WATCH_FUTURE,  JR_FACE_DIAL_FUTURE },
+        { JR_WATCH_SKELETON,  JR_FACE_DIAL_SKELETON },
+        { JR_WATCH_CELESTIAL, JR_FACE_DIAL_CELESTIAL },
     };
     for (size_t i = 0; i < sizeof want / sizeof *want; ++i) {
         jr_display_watch_style_set(want[i].st);
@@ -3419,6 +3429,8 @@ static void test_every_face_has_a_clip_and_a_hud_face(void)
         { JR_FACE_DIAL_DRESS,  "dial_dress.eaf" },
         { JR_FACE_DIAL_PILOT,  "dial_pilot.eaf" },
         { JR_FACE_DIAL_FUTURE, "dial_future.eaf" },
+        { JR_FACE_DIAL_SKELETON,  "dial_skeleton.eaf" },
+        { JR_FACE_DIAL_CELESTIAL, "dial_celestial.eaf" },
     };
     CHECK(sizeof expect / sizeof expect[0] == (size_t)JR_FACE_COUNT,
           "face table has %zu rows for %d faces",
@@ -3462,7 +3474,7 @@ static void dream_fixture(void)
     s_display.board.height = HUD_H;
     s_display.board.panel = (esp_lcd_panel_handle_t)1;
     s_display.board.swap_color_bytes = false;
-    s_display.clips[JR_FACE_RESTING] = (jr_display_clip_t){ clip, sizeof clip, 8U, 7U };
+    s_display.clips[JR_FACE_RESTING] = (jr_display_clip_t){ clip, sizeof clip, 8U, 7U, false };
     s_display.active = &s_display.clips[JR_FACE_RESTING];
     s_display.loaded_face = s_display.shown_face = JR_FACE_RESTING;
     s_display.last_end = 7;
@@ -3890,9 +3902,67 @@ static void test_finite_fades_use_elapsed_time_at_rest(void)
 static jr_display_clip_t *allocate_test_clip(jr_face_t face, size_t bytes)
 {
     jr_display_clip_t *clip = &s_display.clips[face];
-    *clip = (jr_display_clip_t){ heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM), bytes, 8U, 7U };
+    *clip = (jr_display_clip_t){ heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM), bytes, 8U, 7U, false };
     CHECK(clip->data != NULL, "tracked clip allocation for face%d", face);
     return clip;
+}
+
+/* SKELETON and CELESTIAL live in the app image, not on the partition. The
+ * host stub hands back the REAL baked EAF; the device hands back flash
+ * rodata, which faults on a write. So: the clip is flagged embedded, points
+ * at the very bytes (no copy), is never freed or rewritten by any release
+ * path, and the bytes are unchanged after decodes. The vendor decoder is not
+ * linked on the host (idf_stubs.inc stubs eaf_init / eaf_frame_decode); the
+ * real EAF container itself is checked with the shell's own frame counter. */
+static void test_embedded_dials_are_read_only_and_never_freed(void)
+{
+    dream_fixture();
+    jr_display_ctx_t *ctx = &s_display;
+    ctx->active = ctx->bound = NULL;
+    s_stub_anim_source = NULL;
+    s_dial_frame_face = JR_FACE_COUNT;
+    s_stub_eaf_head = (eaf_header_t){ 8, HUD_W, HUD_H };
+    const jr_face_t dials[] = { JR_FACE_DIAL_SKELETON, JR_FACE_DIAL_CELESTIAL };
+    for (size_t i = 0; i < 2; ++i) {
+        const jr_face_t face = dials[i];
+        memset(&ctx->clips[face], 0, sizeof ctx->clips[face]);
+        size_t n = 0;
+        const uint8_t *real = jr_host_embedded_dial(face, &n);
+        CHECK(real != NULL && n > 150000U && n < 260000U,
+              "dial %d: the real EAF did not load (%zu bytes)", (int)face, n);
+        if (real == NULL) { continue; }
+        CHECK(eaf_frame_count(real, n) == 2U, "dial %d is one frame plus the sentinel", (int)face);
+        uint8_t *copy = malloc(n);
+        memcpy(copy, real, n);
+        s_stub_free_watch = real;
+        s_stub_free_watch_hits = 0U;
+        const size_t heap_before = s_stub_heap_bytes;
+        const int decodes = s_stub_eaf_decodes;
+        CHECK(dial_show(ctx, face), "dial %d shows from the embedded bytes", (int)face);
+        jr_display_clip_t *clip = &ctx->clips[face];
+        CHECK(clip->embedded && clip->data == real && clip->size == n,
+              "dial %d clip is not the embedded bytes in place", (int)face);
+        CHECK(s_stub_eaf_init_src == real, "the decoder was handed a copy, not the embedded bytes");
+        CHECK(s_stub_eaf_decodes == decodes + 1, "one decode, got %d", s_stub_eaf_decodes - decodes);
+        CHECK(s_stub_heap_bytes <= heap_before + (size_t)HUD_W * HUD_H * sizeof(uint16_t),
+              "dial %d grew the heap by more than the decoded frame", (int)face);
+        clip_release_unbound_dial(ctx, clip);
+        CHECK(clip->data == real && clip->embedded && s_stub_free_watch_hits == 0U,
+              "the release path let go of an embedded clip");
+        /* away and back: decoded again from the same bytes, no reload */
+        s_dial_frame_face = JR_FACE_COUNT;
+        CHECK(dial_show(ctx, face) && s_stub_eaf_decodes == decodes + 2 &&
+              ctx->clips[face].data == real, "second show re-decodes from the embedded bytes");
+        CHECK(memcmp(real, copy, n) == 0, "dial %d: the source bytes changed", (int)face);
+        CHECK(s_stub_free_watch_hits == 0U, "dial %d: an embedded clip was freed", (int)face);
+        free(copy);
+        s_stub_free_watch = NULL;
+    }
+    /* a heap clip is still released after its decode: the flag is the only difference */
+    jr_display_clip_t *heap = allocate_test_clip(JR_FACE_DIAL_PILOT, 64U);
+    s_dial_frame_face = JR_FACE_COUNT;
+    CHECK(dial_show(ctx, JR_FACE_DIAL_PILOT) && heap->data == NULL,
+          "a heap dial clip is no longer released");
 }
 
 static void test_dial_sources_release_without_invalidating_vendor_ownership(void)
@@ -5168,7 +5238,7 @@ static void test_a_face_requested_while_parked_is_the_face_that_comes_back(void)
     pk_reset();
     static uint8_t blob[JR_FACE_COUNT][16];
     for (int f = 0; f < (int)JR_FACE_COUNT; ++f) {
-        ctx->clips[f] = (jr_display_clip_t){ blob[f], 16U, 8U, 7U };
+        ctx->clips[f] = (jr_display_clip_t){ blob[f], 16U, 8U, 7U, false };
     }
     ctx->missing_faces = 0;
     ctx->loaded_face = JR_FACE_COUNT;
@@ -5309,6 +5379,7 @@ int main(void)
     test_refresh_failure_retries_keys_snapshot_and_pattern();
     test_finite_fades_use_elapsed_time_at_rest();
     test_dial_sources_release_without_invalidating_vendor_ownership();
+    test_embedded_dials_are_read_only_and_never_freed();
     test_battery_rim_is_strip_invariant_at_every_percent();
     test_boot_timing_waits_for_a_real_completion();
     test_boot_timing_records_init_failure_and_early_callback();

@@ -89,6 +89,7 @@ typedef struct {
     size_t size;
     uint32_t total_frames;
     uint32_t last_frame;
+    bool embedded;      /* data points into the app image: read-only, never freed */
 } jr_display_clip_t;
 
 /* Gfx has two in-flight buffers. A bounded FIFO tags actual submissions,
@@ -291,6 +292,8 @@ static const char *face_asset(jr_face_t face)
     case JR_FACE_DIAL_DRESS:  return JR_DISPLAY_MOUNT_POINT "/dial_dress.eaf";
     case JR_FACE_DIAL_PILOT:  return JR_DISPLAY_MOUNT_POINT "/dial_pilot.eaf";
     case JR_FACE_DIAL_FUTURE: return JR_DISPLAY_MOUNT_POINT "/dial_future.eaf";
+    case JR_FACE_DIAL_SKELETON:  return JR_DISPLAY_MOUNT_POINT "/dial_skeleton.eaf";
+    case JR_FACE_DIAL_CELESTIAL: return JR_DISPLAY_MOUNT_POINT "/dial_celestial.eaf";
     default:                return NULL;
     }
 }
@@ -310,7 +313,9 @@ static jr_face_t face_fallback(jr_face_t face)
     case JR_FACE_DIAL_DIVER:
     case JR_FACE_DIAL_DRESS:
     case JR_FACE_DIAL_PILOT:
-    case JR_FACE_DIAL_FUTURE: return JR_FACE_IDLE;
+    case JR_FACE_DIAL_FUTURE:
+    case JR_FACE_DIAL_SKELETON:
+    case JR_FACE_DIAL_CELESTIAL: return JR_FACE_IDLE;
     default:               return face;
     }
 }
@@ -334,7 +339,9 @@ static uint32_t face_fps(jr_face_t face)
     case JR_FACE_DIAL_DIVER:
     case JR_FACE_DIAL_DRESS:
     case JR_FACE_DIAL_PILOT:
-    case JR_FACE_DIAL_FUTURE: return 24;
+    case JR_FACE_DIAL_FUTURE:
+    case JR_FACE_DIAL_SKELETON:
+    case JR_FACE_DIAL_CELESTIAL: return 24;
     default:              return 24;   /* engine + panel ceiling (P2.7) */
     }
 }
@@ -358,8 +365,63 @@ static uint32_t eaf_frame_count(const uint8_t *data, size_t size)
     return total;
 }
 
+/* SKELETON and CELESTIAL ride in the app image, not in emote_assets (the
+ * partition cannot take them: docs/reference/asset-pipeline.md). CMake
+ * EMBED_FILES puts the two EAFs in flash rodata; the dial path only needs a
+ * pointer and a size (eaf_init + one eaf_frame_decode read the source, never
+ * write it), so no file read and no PSRAM copy. On the host the stubs hand
+ * back the real file bytes (probe/stubs/idf_stubs.inc). */
+#ifdef ESP_PLATFORM
+extern const uint8_t s_embedded_skeleton_start[] asm("_binary_dial_skeleton_eaf_start");
+extern const uint8_t s_embedded_skeleton_end[]   asm("_binary_dial_skeleton_eaf_end");
+extern const uint8_t s_embedded_celestial_start[] asm("_binary_dial_celestial_eaf_start");
+extern const uint8_t s_embedded_celestial_end[]   asm("_binary_dial_celestial_eaf_end");
+static const uint8_t *embedded_dial(jr_face_t face, size_t *size)
+{
+    switch (face) {
+    case JR_FACE_DIAL_SKELETON:
+        *size = (size_t)(s_embedded_skeleton_end - s_embedded_skeleton_start);
+        return s_embedded_skeleton_start;
+    case JR_FACE_DIAL_CELESTIAL:
+        *size = (size_t)(s_embedded_celestial_end - s_embedded_celestial_start);
+        return s_embedded_celestial_start;
+    default:
+        return NULL;
+    }
+}
+#else
+const uint8_t *jr_host_embedded_dial(jr_face_t face, size_t *size);
+#define embedded_dial jr_host_embedded_dial
+#endif
+
+static esp_err_t clip_load_embedded(const uint8_t *blob, size_t size,
+                                    jr_display_clip_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (blob == NULL || size == 0U || size > JR_DISPLAY_ASSET_MAX) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    const uint32_t frames = eaf_frame_count(blob, size);
+    if (frames < 2) {
+        return ESP_ERR_INVALID_CRC;
+    }
+    /* The one cast away from const: the field is shared with heap clips and
+     * is only ever written for those (embedded is the guard). */
+    out->data = (uint8_t *)(uintptr_t)blob;
+    out->size = size;
+    out->total_frames = frames;
+    out->last_frame = frames - 1U;
+    out->embedded = true;
+    return ESP_OK;
+}
+
 static esp_err_t clip_load(jr_face_t face, jr_display_clip_t *out)
 {
+    size_t embedded_size = 0;
+    const uint8_t *embedded = out ? embedded_dial(face, &embedded_size) : NULL;
+    if (embedded != NULL) {
+        return clip_load_embedded(embedded, embedded_size, out);
+    }
     const char *path = face_asset(face);
     if (!path || !out) {
         return ESP_ERR_INVALID_ARG;
@@ -2964,7 +3026,9 @@ static uint8_t hud_face_of(jr_face_t f)
     case JR_FACE_DIAL_DIVER:
     case JR_FACE_DIAL_DRESS:
     case JR_FACE_DIAL_PILOT:
-    case JR_FACE_DIAL_FUTURE: return HUD_FACE_IDLE;
+    case JR_FACE_DIAL_FUTURE:
+    case JR_FACE_DIAL_SKELETON:
+    case JR_FACE_DIAL_CELESTIAL: return HUD_FACE_IDLE;
     default:                return HUD_FACE_IDLE;
     }
 }
@@ -3214,6 +3278,8 @@ static jr_face_t watch_dial_face(void)
     case JR_WATCH_DRESS:  return JR_FACE_DIAL_DRESS;
     case JR_WATCH_PILOT:  return JR_FACE_DIAL_PILOT;
     case JR_WATCH_FUTURE: return JR_FACE_DIAL_FUTURE;
+    case JR_WATCH_SKELETON:  return JR_FACE_DIAL_SKELETON;
+    case JR_WATCH_CELESTIAL: return JR_FACE_DIAL_CELESTIAL;
     default:              return JR_FACE_COUNT;
     }
 }
@@ -3534,6 +3600,7 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     const uint32_t pw = __atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE);
     const jr_display_weather_t *wx =
         &s_weather[__atomic_load_n(&s_weather_slot, __ATOMIC_ACQUIRE) & 1u];
+    const bool awake = jr_display_render_fps() >= JR_DISPLAY_RENDER_FPS;
     const hud_watch_t hw = {
         .hh = (int)((w >> 8) & 0xFFu),
         .mm = (int)(w & 0xFFu),
@@ -3546,7 +3613,8 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
         /* shadows at the awake cadence only: the ladder's slower frames are
          * a resting watch nobody is studying, and the shadow is the widest
          * blend a hand carries */
-        .shadow = jr_display_render_fps() >= JR_DISPLAY_RENDER_FPS,
+        .shadow = awake,
+        .alive = awake,         /* SKELETON's wheel and CELESTIAL's stars rest with the shadows */
         .light = &s_light,
     };
     watch_sun_arc(ctx, y1, y2, pixels, style, strength, hw.hh, hw.mm);
@@ -6263,10 +6331,12 @@ static void clip_release_unbound_dial(jr_display_ctx_t *ctx,
                                       const jr_display_clip_t *clip)
 {
     const jr_face_t dials[] = { JR_FACE_DIAL_DIVER, JR_FACE_DIAL_DRESS,
-                               JR_FACE_DIAL_PILOT, JR_FACE_DIAL_FUTURE };
+                               JR_FACE_DIAL_PILOT, JR_FACE_DIAL_FUTURE,
+                               JR_FACE_DIAL_SKELETON, JR_FACE_DIAL_CELESTIAL };
     for (size_t i = 0; i < sizeof dials / sizeof dials[0]; ++i) {
         jr_display_clip_t *candidate = &ctx->clips[dials[i]];
-        if (clip == candidate && clip != ctx->bound && candidate->data != NULL) {
+        if (clip == candidate && clip != ctx->bound && candidate->data != NULL &&
+            !candidate->embedded) {
             heap_caps_free(candidate->data);
             memset(candidate, 0, sizeof *candidate);
             return;
@@ -6284,7 +6354,9 @@ static bool dial_show(jr_display_ctx_t *ctx, jr_face_t dial)
     case JR_FACE_DIAL_DIVER:
     case JR_FACE_DIAL_DRESS:
     case JR_FACE_DIAL_PILOT:
-    case JR_FACE_DIAL_FUTURE: break;
+    case JR_FACE_DIAL_FUTURE:
+    case JR_FACE_DIAL_SKELETON:
+    case JR_FACE_DIAL_CELESTIAL: break;
     default:                  return false;
     }
     if ((ctx->missing_faces & (1U << dial)) != 0U) {
@@ -7139,7 +7211,8 @@ jr_watch_style_t jr_display_watch_style(void)
 const char *jr_display_watch_style_name(jr_watch_style_t style)
 {
     static const char *const names[JR_WATCH_STYLE_COUNT] = {
-        "JARVIS", "DIVER", "DRESS", "PILOT", "MINIMAL", "FUTURE" };
+        "JARVIS", "DIVER", "DRESS", "PILOT", "MINIMAL", "FUTURE",
+        "SKELETON", "CELESTIAL" };
     return ((int)style >= 0 && style < JR_WATCH_STYLE_COUNT) ? names[style]
                                                              : names[0];
 }

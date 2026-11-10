@@ -38,6 +38,8 @@ typedef enum {
     JR_FACE_DIAL_DRESS,
     JR_FACE_DIAL_PILOT,
     JR_FACE_DIAL_FUTURE,
+    JR_FACE_DIAL_SKELETON,  /* 2026-11-10: appended, so no number moves */
+    JR_FACE_DIAL_CELESTIAL,
     JR_FACE_COUNT       /* bound, not a face: clip caches and clamps use it */
 } jr_face_t;
 

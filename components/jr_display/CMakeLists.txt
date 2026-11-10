@@ -16,7 +16,11 @@ idf_component_register(
         "src/glass_font_data.c"
         "src/glass_icon.c"
         "src/glass_icon_data.c"
+        "src/balance_wheel_data.c"
         "${JARVIS_BOARD_ROOT}/src/jarvis_board.c"
+    EMBED_FILES
+        "${CMAKE_CURRENT_LIST_DIR}/../../firmware/mascot/reactive/dial_skeleton.eaf"
+        "${CMAKE_CURRENT_LIST_DIR}/../../firmware/mascot/reactive/dial_celestial.eaf"
     INCLUDE_DIRS
         "include"
         "${JARVIS_BOARD_ROOT}/include"
@@ -79,5 +83,10 @@ foreach(dial diver dress pilot future)
         "${CMAKE_CURRENT_LIST_DIR}/../../firmware/mascot/reactive/dial_${dial}.eaf"
         "${JR_DISPLAY_ASSET_STAGE}/dial_${dial}.eaf" COPYONLY)
 endforeach()
+# 2026-11-10: SKELETON (204 KB) and CELESTIAL (205 KB) are NOT staged here:
+# the pair overflows this partition (spiffsgen takes about 145 KB more, and
+# one of them alone is already too big). They are linked into the app image
+# through EMBED_FILES above (OTA slots are 4 MiB) and read in place from
+# flash; see embedded_dial() in jr_display.c.
 
 spiffs_create_partition_image(emote_assets "${JR_DISPLAY_ASSET_STAGE}" FLASH_IN_PROJECT)
