@@ -1249,8 +1249,32 @@ static void watch_compose(void);               /* defined with the watch below *
 static volatile uint32_t s_split_deadline_ms;
 static bool s_split_on;
 
+/* Frames composed since boot, counted once a frame by overlay_fade_tick. The
+ * recorded shapes (fring_prepare, shade_rec_fill) wait for a value to hold for
+ * a second frame before they record it, so a number being dragged never pays
+ * for a record it will throw away. */
+static uint32_t s_frame_no;
+
+typedef struct {
+    int32_t k0, k1;
+    uint32_t first;     /* the frame this key was first asked for */
+} sp_settle_t;
+
+/* True once (k0, k1) has been asked for on an earlier frame as well. */
+static bool sp_settled(sp_settle_t *g, int32_t k0, int32_t k1)
+{
+    if (g->k0 != k0 || g->k1 != k1) {
+        g->k0 = k0;
+        g->k1 = k1;
+        g->first = s_frame_no;
+        return false;
+    }
+    return g->first != s_frame_no;
+}
+
 static void overlay_fade_tick(void)
 {
+    s_frame_no++;
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
     s_split_on = (int32_t)(__atomic_load_n(&s_split_deadline_ms, __ATOMIC_RELAXED) - now) > 0;
     uint32_t dt = now - s_fade_prev_ms;
@@ -3930,16 +3954,39 @@ static int sp_isqrt(int v)
     return root;
 }
 
+/* sp_isqrt(SP_R_SHELL^2 - dy^2) for dy = 0..SP_R_SHELL-1: every row of every
+ * shell screen asks for it, and the shift-and-subtract root cost 250
+ * instructions a row (0.1 M a frame). The frame-identity suite pins the table
+ * against the root. */
+#define SP_CLIP_ROWS 214
+static const uint8_t k_clip_half[SP_CLIP_ROWS] = {
+    214, 213, 213, 213, 213, 213, 213, 213, 213, 213, 213, 213, 213, 213, 213, 213,
+    213, 213, 213, 213, 213, 212, 212, 212, 212, 212, 212, 212, 212, 212, 211, 211,
+    211, 211, 211, 211, 210, 210, 210, 210, 210, 210, 209, 209, 209, 209, 208, 208,
+    208, 208, 208, 207, 207, 207, 207, 206, 206, 206, 205, 205, 205, 205, 204, 204,
+    204, 203, 203, 203, 202, 202, 202, 201, 201, 201, 200, 200, 200, 199, 199, 198,
+    198, 198, 197, 197, 196, 196, 195, 195, 195, 194, 194, 193, 193, 192, 192, 191,
+    191, 190, 190, 189, 189, 188, 188, 187, 187, 186, 185, 185, 184, 184, 183, 182,
+    182, 181, 181, 180, 179, 179, 178, 177, 177, 176, 175, 175, 174, 173, 172, 172,
+    171, 170, 169, 169, 168, 167, 166, 166, 165, 164, 163, 162, 161, 160, 160, 159,
+    158, 157, 156, 155, 154, 153, 152, 151, 150, 149, 148, 147, 146, 145, 144, 143,
+    142, 140, 139, 138, 137, 136, 135, 133, 132, 131, 129, 128, 127, 125, 124, 123,
+    121, 120, 118, 117, 115, 114, 112, 110, 109, 107, 105, 104, 102, 100, 98, 96,
+    94, 92, 90, 88, 85, 83, 81, 78, 76, 73, 70, 67, 64, 61, 57, 54,
+    50, 45, 41, 35, 29, 20,
+};
+_Static_assert(SP_R_SHELL == SP_CLIP_ROWS, "k_clip_half is built for this shell radius");
+
 /* THE round safe-area guard. Folds [*xlo, *xhi] into both the panel and the
  * shell circle for this row; false means the row has nothing to draw. */
 static bool sp_clip(int y, int *xlo, int *xhi)
 {
     const int dy = y - SP_CY;
-    const int d2 = SP_R_SHELL * SP_R_SHELL - dy * dy;
-    if (d2 <= 0) {
+    const int ady = dy < 0 ? -dy : dy;
+    if (ady >= SP_CLIP_ROWS) {
         return false;
     }
-    const int half = sp_isqrt(d2);
+    const int half = k_clip_half[ady];
     if (*xlo < SP_CX - half) {
         *xlo = SP_CX - half;
     }
@@ -4167,6 +4214,33 @@ static uint16_t sp_tint(const jr_display_ctx_t *ctx, uint16_t native, int st)
     return panel_order_color(ctx, native);
 }
 
+/* hud_dim565 over x = lo..hi, two pixels to a 32-bit word. The fold is a mask
+ * and a shift per pixel and sends black to black, so no pixel needs a test (the
+ * test cost more than the fold on the busy face); the shift moves bits across
+ * the pair's boundary only into bits the mask clears, so each half is exactly
+ * hud_dim565 of its pixel. Rows start on a 4-byte boundary (HUD_W is even and
+ * strips are carved from an aligned buffer), so an even x is a word. Pinned
+ * against hud_dim565 over random rows of every parity in the frame suite. */
+static inline __attribute__((always_inline)) void veil_dim_row(uint16_t *row, int lo, int hi, bool swap)
+{
+    int x = lo;
+    if ((x & 1) != 0 && x <= hi) {
+        row[x] = hud_dim565(row[x], swap);
+        ++x;
+    }
+    for (; x + 1 <= hi; x += 2) {
+        uint32_t w;
+        void *p = __builtin_assume_aligned(row + x, 4);
+        memcpy(&w, p, sizeof w);
+        w = swap ? (((w & 0x00030003u) << 14) | ((w >> 2) & 0x27392739u))
+                 : ((w >> 2) & 0x39E739E7u);
+        memcpy(p, &w, sizeof w);
+    }
+    if (x <= hi) {
+        row[x] = hud_dim565(row[x], swap);
+    }
+}
+
 /* Round-clipped backdrop. Identical fold to dim_strip/fade_strip, but bounded
  * by the shell circle so the veil never darkens the battery rim or the
  * privacy ring. */
@@ -4186,17 +4260,9 @@ static void sp_veil(const jr_display_ctx_t *ctx, int y1, int y2,
          * shift-and-mask on the pixels that need nothing. */
         if (k >= 32) {
             if (swap) {
-                for (int x = lo; x <= hi; ++x) {
-                    if (row[x] != 0U) {
-                        row[x] = hud_dim565(row[x], true);
-                    }
-                }
+                veil_dim_row(row, lo, hi, true);
             } else {
-                for (int x = lo; x <= hi; ++x) {
-                    if (row[x] != 0U) {
-                        row[x] = hud_dim565(row[x], false);
-                    }
-                }
+                veil_dim_row(row, lo, hi, false);
             }
         } else {
             for (int x = lo; x <= hi; ++x) {
@@ -4494,6 +4560,15 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
                 updating ? 0 : sg_ent_alpha(st, ent, t_age));
 
     const int ring_y0 = cyr - 130, ring_y1 = cyr + 130;
+    /* the rows each mark can reach: the other rows' calls change nothing */
+    int sg_y0[SP_WX_HOURS], sg_y1[SP_WX_HOURS];
+    for (int i = 0; i < nseg; ++i) {
+        if (!glass_arc_rows(cx16, cy16, sg_ri[i], sg_ro[i], sg_start[i], sg_sweep[i], true,
+                            &sg_y0[i], &sg_y1[i])) {
+            sg_y0[i] = 1;
+            sg_y1[i] = 0;
+        }
+    }
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         int lo = 0, hi = HUD_W - 1;
@@ -4506,8 +4581,10 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
                                GLASS_TURN_Q16, SP_C_TRACK, (uint8_t)st, swap);
             }
             for (int i = 0; i < nseg; ++i) {
-                glass_arc_row(row, y, lo, hi, cx16, cy16, sg_ri[i], sg_ro[i], sg_start[i],
-                              sg_sweep[i], rain, sg_a[i], swap);
+                if (y >= sg_y0[i] && y <= sg_y1[i]) {
+                    glass_arc_row(row, y, lo, hi, cx16, cy16, sg_ri[i], sg_ro[i], sg_start[i],
+                                  sg_sweep[i], rain, sg_a[i], swap);
+                }
             }
         }
         sg_ico_row(row, y, lo, hi, swap, &t_ico);
@@ -4518,6 +4595,116 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
         sg_txt_row(row, y, lo, hi, swap, &t_sun_t);
         sg_txt_row(row, y, lo, hi, swap, &t_age_t);
     }
+}
+
+/* The battery / desk ring at rest. Its three layers (the track, the glow, the
+ * filled arc) are the same shapes every frame until the number moves, and each
+ * cost 0.4 to 1 M instructions a frame in geometry that never changes. Once the
+ * entry has finished and the screen sits still (oy == 0) they are recorded
+ * (glass_shape_record / glass_glow_record) and replayed: the same fills and
+ * blends, so the same pixels, for any fade, colour and clip. A change of the
+ * sweep records again, once it has held for a second frame; while the entry
+ * runs, or the screen is being dragged, the ring is drawn the long way, as
+ * before. The records are three blocks of
+ * SG_FRING_CAP bytes in PSRAM, allocated once at start (the largest the ring
+ * needs, at 99 %, is 10 KB); if one is absent or did not fit, that layer is
+ * drawn the long way. Internal RAM: a pointer and 8 bytes of key. */
+#define SG_FRING_CAP   12288
+#define JR_FRING_REC   1        /* tells the host fixtures the recorded ring exists */
+enum { SG_FR_TRACK = 1, SG_FR_GLOW = 2, SG_FR_ARC = 4 };
+static uint8_t *s_fring_rec;    /* track | glow | arc, SG_FRING_CAP bytes each */
+static struct {
+    int32_t sweep;              /* the sweep the records were made for */
+    uint8_t have;               /* SG_FR_* parts recorded for it; bit 7: tried */
+} s_fring;
+
+static void fring_rec_alloc(void)
+{
+    if (s_fring_rec == NULL) {
+        s_fring_rec = heap_caps_malloc(3u * SG_FRING_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    s_fring.have = 0;
+}
+
+/* Records the ring for `sweep` if the block is there and it is not already. */
+static uint8_t fring_prepare(int32_t sweep)
+{
+    if (s_fring_rec == NULL) {
+        return 0;
+    }
+    if (s_fring.have != 0 && s_fring.sweep == sweep) {
+        return s_fring.have;
+    }
+    static sp_settle_t gate;
+    if (!sp_settled(&gate, sweep, 0)) {
+        return 0;                 /* a new value: draw it the long way for a frame first */
+    }
+    const int32_t cx16 = SP_CX * 16, cy16 = (SP_CY + SG_RING_DY) * 16;
+    uint8_t have = 0;
+    if (sweep < GLASS_TURN_Q16 &&
+        glass_shape_record(s_fring_rec, SG_FRING_CAP, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                           GLASS_Q16_12_OCLOCK + sweep, GLASS_TURN_Q16 - sweep, false) != 0u) {
+        have |= SG_FR_TRACK;
+    }
+    if (sweep > 0) {
+        if (glass_glow_record(s_fring_rec + SG_FRING_CAP, SG_FRING_CAP, cx16, cy16, SG_RING_R_IN16,
+                              SG_RING_R_OUT16, GLASS_Q16_12_OCLOCK, sweep, true, SG_GLOW16) != 0u) {
+            have |= SG_FR_GLOW;
+        }
+        if (glass_shape_record(s_fring_rec + 2u * SG_FRING_CAP, SG_FRING_CAP, cx16, cy16,
+                               SG_RING_R_IN16, SG_RING_R_OUT16, GLASS_Q16_12_OCLOCK, sweep, true) != 0u) {
+            have |= SG_FR_ARC;
+        }
+    }
+    s_fring.sweep = sweep;
+    s_fring.have = have | 0x80u;          /* tried, so a failure is not retried every strip */
+    return s_fring.have;
+}
+
+/* One row of the ring: the track where the fill is not, then (arc_on) the glow
+ * and the fill. `have` is fring_prepare()'s answer, 0 to draw the long way. */
+static inline void fring_row(uint16_t *row, int y, int lo, int hi, bool swap, int32_t cy16,
+                             int32_t sweep, bool arc_on, uint16_t fill, int st, uint8_t have)
+{
+    const int32_t cx16 = SP_CX * 16;
+    const uint8_t a_trk = (uint8_t)((st * 44) / 255);
+    if (have & SG_FR_TRACK) {
+        glass_ring_replay_row(row, y, lo, hi, s_fring_rec, fill, a_trk, swap);
+    } else {
+        glass_ring_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                       GLASS_Q16_12_OCLOCK + sweep, GLASS_TURN_Q16 - sweep, fill, a_trk, swap);
+    }
+    if (!arc_on) {
+        return;
+    }
+    if (have & SG_FR_GLOW) {
+        glass_glow_replay_row(row, y, lo, hi, s_fring_rec + SG_FRING_CAP, SG_GLOW16, 140, fill,
+                              (uint8_t)st, swap);
+    } else {
+        glass_glow_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                       GLASS_Q16_12_OCLOCK, sweep, true, SG_GLOW16, 140, fill, (uint8_t)st, swap);
+    }
+    if (have & SG_FR_ARC) {
+        glass_ring_replay_row(row, y, lo, hi, s_fring_rec + 2u * SG_FRING_CAP, fill, (uint8_t)st, swap);
+    } else {
+        glass_arc_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                      GLASS_Q16_12_OCLOCK, sweep, fill, (uint8_t)st, swap);
+    }
+}
+
+/* The MINIMAL dial's disc, recorded by hud_render.c (hud_dial_cache_set). 12 KB
+ * of PSRAM allocated once at start; one disc's edge takes 9.2 KB (4,596 words)
+ * when every row is in. Internal RAM: a pointer. */
+#define SG_DIAL_REC_WORDS 6144
+#define JR_DIAL_REC       1     /* tells the host fixtures the recorded dial disc exists */
+static uint16_t *s_dial_rec;
+
+static void dial_rec_alloc(void)
+{
+    if (s_dial_rec == NULL) {
+        s_dial_rec = heap_caps_malloc(SG_DIAL_REC_WORDS * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    hud_dial_cache_set(s_dial_rec, s_dial_rec != NULL ? SG_DIAL_REC_WORDS : 0u);
 }
 
 /* ACTIVITY: up to three blocks, newest first. Line one is the kind and the age
@@ -4592,7 +4779,6 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
     const jr_display_agent_state_t state = (jr_display_agent_state_t)((w >> 8) & 0xFu);
     const uint16_t fill = state == JR_DISPLAY_AGENT_NONE ? SP_C_CYAN : agent_native_color(state);
     const bool swap = ctx->board.swap_color_bytes;
-    const int cx16 = SP_CX * 16;
     const int cyr = SP_CY + oy + SG_RING_DY;
     const int cy16 = cyr * 16;
 
@@ -4626,6 +4812,8 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
                 1, SP_C_GREY, sg_ent_alpha(st, ent, t_word));
 
     const int ring_y0 = cyr - 130, ring_y1 = cyr + 130;
+    /* at rest: the ring's three layers replayed from their records */
+    const uint8_t rec = (oy == 0 && f_ring >= GLASS_ONE_Q16) ? (uint8_t)(fring_prepare(sweep) & 0x7Fu) : 0u;
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         int lo = 0, hi = HUD_W - 1;
@@ -4633,16 +4821,7 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
             continue;
         }
         if (y >= ring_y0 && y <= ring_y1) {
-            glass_ring_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
-                           GLASS_Q16_12_OCLOCK + sweep, GLASS_TURN_Q16 - sweep, fill,
-                           (uint8_t)((st * 44) / 255), swap);
-            if (sweep > 0) {
-                glass_glow_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
-                               GLASS_Q16_12_OCLOCK, sweep, true, SG_GLOW16, 140, fill,
-                               (uint8_t)st, swap);
-                glass_arc_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
-                              GLASS_Q16_12_OCLOCK, sweep, fill, (uint8_t)st, swap);
-            }
+            fring_row(row, y, lo, hi, swap, cy16, sweep, sweep > 0, fill, st, rec);
         }
         sg_txt_row(row, y, lo, hi, swap, &t_label);
         sg_txt_row(row, y, lo, hi, swap, &t_hero);
@@ -4711,7 +4890,6 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
     const uint16_t accent = muted ? SP_C_GOLD : SP_C_CYAN;
     const uint16_t fill = low ? SP_C_RED : accent;
     const bool swap = ctx->board.swap_color_bytes;
-    const int cx16 = SP_CX * 16;
     const int cyr = SP_CY + oy + SG_RING_DY;
     const int cy16 = cyr * 16;
 
@@ -4791,6 +4969,8 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
     }
 
     const int ring_y0 = cyr - 130, ring_y1 = cyr + 130;
+    /* at rest: the ring's three layers replayed from their records */
+    const uint8_t rec = (oy == 0 && f_ring >= GLASS_ONE_Q16) ? (uint8_t)(fring_prepare(sweep) & 0x7Fu) : 0u;
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         int lo = 0, hi = HUD_W - 1;
@@ -4799,16 +4979,7 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
         }
         if (y >= ring_y0 && y <= ring_y1) {
             /* the track only where the fill is not: no pixel is written twice */
-            glass_ring_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
-                           GLASS_Q16_12_OCLOCK + sweep, GLASS_TURN_Q16 - sweep, fill,
-                           (uint8_t)((st * 44) / 255), swap);
-            if (have_gauge && sweep > 0) {
-                glass_glow_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
-                               GLASS_Q16_12_OCLOCK, sweep, true, SG_GLOW16, 140, fill,
-                               (uint8_t)st, swap);
-                glass_arc_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
-                              GLASS_Q16_12_OCLOCK, sweep, fill, (uint8_t)st, swap);
-            }
+            fring_row(row, y, lo, hi, swap, cy16, sweep, have_gauge && sweep > 0, fill, st, rec);
         }
         sg_txt_row(row, y, lo, hi, swap, &t_label);
         sg_txt_row(row, y, lo, hi, swap, &t_hero);
@@ -5108,6 +5279,70 @@ static void sg_breath(uint32_t ms, int32_t *grow16, int *alpha)
     *alpha = 130 - ((100 * b) >> 8);
 }
 
+/* The control shade's four arcs (the volume and brightness tracks and their
+ * fills) at rest. The tracks never change, so they are recorded once at start;
+ * a fill is recorded when its value has held for a frame after its entry, and
+ * again when it moves (see fring_prepare). Four blocks of SG_SH_REC_CAP bytes in
+ * PSRAM (the largest arc here is 6 KB); a block that is absent or did not fit
+ * is drawn the long way. Internal RAM: a pointer and 84 bytes of keys. */
+#define SG_SH_REC_CAP  8192
+#define SG_SH_RECS     4          /* left track, right track, left fill, right fill */
+#define JR_SHADE_REC   1          /* tells the host fixtures the recorded arcs exist */
+static uint8_t *s_shade_rec;
+static struct {
+    int32_t start, sweep;
+    bool ok;                      /* the block holds a record for (start, sweep) */
+    sp_settle_t gate;
+} s_shade_k[SG_SH_RECS];
+
+static bool shade_rec_make(int i, int32_t start, int32_t sweep)
+{
+    s_shade_k[i].start = start;
+    s_shade_k[i].sweep = sweep;
+    s_shade_k[i].ok = glass_shape_record(s_shade_rec + (size_t)i * SG_SH_REC_CAP, SG_SH_REC_CAP,
+                                         SP_CX * 16, SP_CY * 16, SG_SH_R_IN16, SG_SH_R_OUT16, start,
+                                         sweep, true) != 0u;
+    return s_shade_k[i].ok;
+}
+
+static void shade_rec_alloc(void)
+{
+    if (s_shade_rec == NULL) {
+        s_shade_rec = heap_caps_malloc((size_t)SG_SH_RECS * SG_SH_REC_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    memset(s_shade_k, 0, sizeof s_shade_k);
+    if (s_shade_rec != NULL) {
+        shade_rec_make(0, (GLASS_TURN_Q16 / 2 - SG_SH_HALF_Q16) & 0xFFFF, 2 * SG_SH_HALF_Q16);
+        shade_rec_make(1, (GLASS_TURN_Q16 - SG_SH_HALF_Q16) & 0xFFFF, 2 * SG_SH_HALF_Q16);
+    }
+}
+
+/* The record of block i for (start, sweep), or NULL to draw the arc itself. The
+ * tracks' blocks are fixed; a fill's is made once the value has held. */
+static const uint8_t *shade_rec_get(int i, int32_t start, int32_t sweep, bool fill)
+{
+    if (s_shade_rec == NULL) {
+        return NULL;
+    }
+    if (!(s_shade_k[i].ok && s_shade_k[i].start == start && s_shade_k[i].sweep == sweep)) {
+        if (!fill || !sp_settled(&s_shade_k[i].gate, start, sweep) || !shade_rec_make(i, start, sweep)) {
+            return NULL;
+        }
+    }
+    return s_shade_rec + (size_t)i * SG_SH_REC_CAP;
+}
+
+static inline void shade_arc_row(uint16_t *row, int y, int lo, int hi, bool swap, const uint8_t *rec,
+                                 int32_t start, int32_t sweep, uint16_t color, uint8_t alpha)
+{
+    if (rec != NULL) {
+        glass_ring_replay_row(row, y, lo, hi, rec, color, alpha, swap);
+    } else {
+        glass_arc_row(row, y, lo, hi, SP_CX * 16, SP_CY * 16, SG_SH_R_IN16, SG_SH_R_OUT16, start,
+                      sweep, color, alpha, swap);
+    }
+}
+
 static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
                           uint16_t *pixels, int st, uint32_t ent, uint32_t breath_ms)
 {
@@ -5123,7 +5358,7 @@ static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
     const bool swap = ctx->board.swap_color_bytes;
     const bool muted = sp_privacy_muted();
     const uint16_t priv = muted ? SP_C_GOLD : SP_C_CYAN;
-    const int cx16 = SP_CX * 16, cy16 = SP_CY * 16;
+    const int cx16 = SP_CX * 16;
 
     /* the arcs, swept to their values */
     const uint32_t f_vol = glass_stagger_q16(ent, 0, 600);
@@ -5179,6 +5414,11 @@ static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
     const int32_t bcy16 = SP_BTN_CY * 16;
     const int btn_y0 = SP_BTN_CY - SP_BTN_R - 14, btn_y1 = SP_BTN_CY + SP_BTN_R + 14;   /* the breath reaches R+12 */
 
+    /* at rest: the arcs replayed from their records */
+    const uint8_t *rec_tl = shade_rec_get(0, l_start, span, false);
+    const uint8_t *rec_tr = shade_rec_get(1, r_track, span, false);
+    const uint8_t *rec_vf = (f_vol >= GLASS_ONE_Q16 && vsweep > 0) ? shade_rec_get(2, l_start, vsweep, true) : NULL;
+    const uint8_t *rec_lf = (f_lgt >= GLASS_ONE_Q16 && lsweep > 0) ? shade_rec_get(3, r_start, lsweep, true) : NULL;
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         int lo = 0, hi = HUD_W - 1;
@@ -5186,17 +5426,13 @@ static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
             continue;
         }
         if (y >= SG_SH_Y0 && y <= SG_SH_Y1) {
-            glass_arc_row(row, y, lo, hi, cx16, cy16, SG_SH_R_IN16, SG_SH_R_OUT16, l_start, span,
-                          SP_C_CYAN, a_track, swap);
-            glass_arc_row(row, y, lo, hi, cx16, cy16, SG_SH_R_IN16, SG_SH_R_OUT16, r_track, span,
-                          SP_C_AMBER, a_track, swap);
+            shade_arc_row(row, y, lo, hi, swap, rec_tl, l_start, span, SP_C_CYAN, a_track);
+            shade_arc_row(row, y, lo, hi, swap, rec_tr, r_track, span, SP_C_AMBER, a_track);
             if (vsweep > 0) {
-                glass_arc_row(row, y, lo, hi, cx16, cy16, SG_SH_R_IN16, SG_SH_R_OUT16, l_start,
-                              vsweep, SP_C_CYAN, (uint8_t)st, swap);
+                shade_arc_row(row, y, lo, hi, swap, rec_vf, l_start, vsweep, SP_C_CYAN, (uint8_t)st);
             }
             if (lsweep > 0) {
-                glass_arc_row(row, y, lo, hi, cx16, cy16, SG_SH_R_IN16, SG_SH_R_OUT16, r_start,
-                              lsweep, SP_C_AMBER, (uint8_t)st, swap);
+                shade_arc_row(row, y, lo, hi, swap, rec_lf, r_start, lsweep, SP_C_AMBER, (uint8_t)st);
             }
         }
         if (y >= btn_y0 && y <= btn_y1) {
@@ -7027,6 +7263,9 @@ esp_err_t jr_display_start(jr_display_t *out_port)
     }
     (void)act_rtc_restore();   /* the receipt from before the sleep */
     orbit_rec_build();         /* before the render task exists to read it */
+    fring_rec_alloc();         /* likewise */
+    dial_rec_alloc();          /* likewise */
+    shade_rec_alloc();         /* likewise */
 
     BaseType_t created = xTaskCreatePinnedToCore(
         display_task, "jr_present", JR_DISPLAY_TASK_STACK, &s_display,

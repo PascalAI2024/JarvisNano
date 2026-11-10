@@ -1662,6 +1662,24 @@ static inline void cov_span(uint16_t *cov, int32_t xl, int32_t xr, int *lo, int 
     cov[p1] = (uint16_t)(cov[p1] + (xr - (p1 << 4)));
 }
 
+/* n copies of v, two to a word once p is word aligned (the test is on the
+ * pointer, so any buffer is safe). A store loop of 16-bit writes costs a
+ * write, a compare and a branch per pixel; this costs them per pair. */
+static inline void fill16(uint16_t *p, int n, uint16_t v)
+{
+    if (n > 0 && (((uintptr_t)p) & 2u) != 0u) {
+        *p++ = v;
+        n--;
+    }
+    const uint32_t w = (uint32_t)v | ((uint32_t)v << 16);
+    for (; n >= 2; n -= 2, p += 2) {
+        memcpy(__builtin_assume_aligned(p, 4), &w, sizeof w);
+    }
+    if (n > 0) {
+        *p = v;
+    }
+}
+
 static inline void HOT cov_blend(uint16_t *row, const uint16_t *cov, int lo, int hi,
                                  wrgb_t c, int alpha, bool swap, int full)
 {
@@ -1775,6 +1793,105 @@ static void HOT aa_fill(const strip_t *s, const wpoly_t *p, wrgb_t c, int alpha,
     }
 }
 
+/* THE DIAL DISC, RECORDED. The MINIMAL dial is one disc of the same centre and
+ * radius every frame, and finding its edge (eight square roots and the coverage
+ * of the sixteen sample chords a row) cost more than writing it. Each row's
+ * answer, which does not depend on the colour, the alpha or the byte order, is
+ * kept the first time the row is drawn: the interior span, then the edge
+ * pixels' coverage. A replay is the same fills and blends. The arena is the
+ * caller's (PSRAM on the device, NULL until hud_dial_cache_set()), so this file
+ * still owns no memory: HUD_H row offsets, then per row six words (interior
+ * from, to; edge run lo, count; right run from, count) and the coverage words. */
+#define DISC_REC_NONE 0xFFFFu
+static uint16_t *s_disc_rec;
+static size_t s_disc_cap, s_disc_used;
+
+void hud_dial_cache_set(uint16_t *buf, size_t cap_words)
+{
+    s_disc_rec = NULL;
+    s_disc_cap = 0;
+    s_disc_used = 0;
+    if (buf != NULL && cap_words > (size_t)HUD_H + 8u && cap_words < 0xFFFFu) {
+        for (int y = 0; y < HUD_H; ++y) {
+            buf[y] = DISC_REC_NONE;
+        }
+        s_disc_used = HUD_H;
+        s_disc_cap = cap_words;
+        s_disc_rec = buf;
+    }
+}
+
+size_t hud_dial_cache_used(void)
+{
+    return s_disc_used;
+}
+
+/* Keep row y: its interior [in0, in1] (empty when in1 < in0) and the coverage
+ * of the edge pixels around it, which are in `cov`. */
+static void disc_rec_row(int y, int in0, int in1, int lo, int hi, const uint16_t *cov)
+{
+    int nl = 0, ra = 0, nr = 0;
+    if (hi >= lo && in1 >= in0) {
+        if (lo < in0) {
+            nl = in0 - lo;
+        }
+        ra = in1 + 1 > lo ? in1 + 1 : lo;
+        if (hi >= ra) {
+            nr = hi - ra + 1;
+        }
+    } else if (hi >= lo) {
+        nl = hi - lo + 1;
+    }
+    if (s_disc_used + 6u + (size_t)nl + (size_t)nr > s_disc_cap) {
+        return;                       /* full: this row stays computed */
+    }
+    uint16_t *r = s_disc_rec + s_disc_used;
+    r[0] = (uint16_t)in0;
+    r[1] = (uint16_t)in1;
+    r[2] = (uint16_t)lo;
+    r[3] = (uint16_t)nl;
+    r[4] = (uint16_t)ra;
+    r[5] = (uint16_t)nr;
+    for (int i = 0; i < nl; ++i) {
+        r[6 + i] = cov[lo + i];
+    }
+    for (int i = 0; i < nr; ++i) {
+        r[6 + nl + i] = cov[ra + i];
+    }
+    s_disc_rec[y] = (uint16_t)s_disc_used;
+    s_disc_used += 6u + (size_t)nl + (size_t)nr;
+}
+
+static void disc_blend_run(uint16_t *row, const uint16_t *cv, int x0, int n, wrgb_t c, int alpha,
+                           bool swap, uint16_t solid)
+{
+    for (int i = 0; i < n; ++i) {
+        const int v = cv[i];
+        if (v >= AA_FULL && alpha >= 256) {
+            row[x0 + i] = solid;
+        } else if (v != 0) {
+            row[x0 + i] = w_blend(row[x0 + i], c, (v >= AA_FULL ? alpha : (v * alpha) / AA_FULL), swap);
+        }
+    }
+}
+
+static void disc_replay_row(uint16_t *row, const uint16_t *r, wrgb_t c, int alpha, bool swap,
+                            uint16_t solid)
+{
+    const int in0 = (int16_t)r[0], in1 = (int16_t)r[1];
+    if (in1 >= in0) {
+        if (alpha >= 256) {
+            fill16(row + in0, in1 - in0 + 1, solid);
+        } else {
+            for (int x = in0; x <= in1; ++x) {
+                row[x] = w_blend(row[x], c, alpha, swap);
+            }
+        }
+    }
+    disc_blend_run(row, r + 6, (int16_t)r[2], r[3], c, alpha, swap, solid);
+    disc_blend_run(row, r + 6 + r[3], (int16_t)r[4], r[5], c, alpha, swap, solid);
+}
+
 /* Anti-aliased disc; centre and radius in Q4. The interior — every pixel
  * inside the narrowest of the sixteen sample chords — is written straight;
  * only the two edge runs go through coverage, so the MINIMAL dial (a 214 px
@@ -1794,7 +1911,14 @@ static void HOT aa_disc(const strip_t *s, int32_t cx, int32_t cy, int32_t rad,
     uint16_t *const cov = s_cov;
     const int32_t r2 = rad * rad;                 /* <= 3424^2, fits */
     const uint16_t solid = pack565(c.r, c.g, c.b, swap);
+    const bool rec_on = s_disc_rec != NULL && cx == WATCH_CX16 && cy == WATCH_CY16 &&
+                        rad == WATCH_R_MAX * 16;
     for (int y = y_lo; y <= y_hi; ++y) {
+        if (rec_on && y >= 0 && y < HUD_H && s_disc_rec[y] != DISC_REC_NONE) {
+            disc_replay_row(s->base + (size_t)(y - s->y0) * HUD_W, s_disc_rec + s_disc_rec[y], c,
+                            alpha, swap, solid);
+            continue;
+        }
         int32_t hmin = INT32_MAX, hmax = -1;
         int32_t halves[AA_SUB];
         for (int sub = 0; sub < AA_SUB; ++sub) {
@@ -1808,6 +1932,9 @@ static void HOT aa_disc(const strip_t *s, int32_t cx, int32_t cy, int32_t rad,
             }
         }
         if (hmax < 0) {
+            if (rec_on && y >= 0 && y < HUD_H) {
+                disc_rec_row(y, 1, 0, HUD_W, -1, cov);   /* nothing on this row */
+            }
             continue;
         }
         uint16_t *row = s->base + (size_t)(y - s->y0) * HUD_W;
@@ -1820,9 +1947,7 @@ static void HOT aa_disc(const strip_t *s, int32_t cx, int32_t cy, int32_t rad,
         if (in1 > HUD_W - 1) in1 = HUD_W - 1;
         if (in1 >= in0) {
             if (alpha >= 256) {
-                for (int x = in0; x <= in1; ++x) {
-                    row[x] = solid;
-                }
+                fill16(row + in0, in1 - in0 + 1, solid);
             } else {
                 for (int x = in0; x <= in1; ++x) {
                     row[x] = w_blend(row[x], c, alpha, swap);
@@ -1843,6 +1968,9 @@ static void HOT aa_disc(const strip_t *s, int32_t cx, int32_t cy, int32_t rad,
             } else {
                 cov_span(cov, xl, xr, &lo, &hi);
             }
+        }
+        if (rec_on && y >= 0 && y < HUD_H) {
+            disc_rec_row(y, in0, in1, lo, hi, cov);
         }
         if (hi >= lo && in1 >= in0) {
             /* [lo, hi] spans the whole chord, but the interior [in0, in1] holds

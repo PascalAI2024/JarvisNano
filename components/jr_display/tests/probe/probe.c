@@ -168,6 +168,7 @@ int main(int argc, char **argv)
         const char *ppm_arg = flag_val(argc, argv, "ppm=");
         const long long clk_ms = clk_arg ? atoll(clk_arg) : 100000;
         fc_setup(sc);
+        fc_extra_warm = true;     /* the steady state, not the frame that records */
         uint16_t *ffb = malloc(466u * 466u * sizeof(uint16_t));
         fc_run(sc, clk_ms, ffb);
 #ifndef FC_NOCOUNT

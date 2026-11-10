@@ -56,6 +56,11 @@ static const fc_scene_t FC_SCENES[] = {
     { "activity",      JR_DISPLAY_SPACE_ACTIVITY,JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0, 0 },
     { "shade",         JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_SHADE,  0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0, 0 },
     { "detail",        JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_DETAIL, 0,                74, true,  false, FC_SETTLED, FC_SETTLED, true,  0, 0, 0, 0 },
+    /* the recorded shapes' edges: the ring at a sliver and at nearly full, the desk ring and the shade part-way through their entry */
+    { "status-1",      JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_NONE,   0,                1,  false, false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0, 0 },
+    { "status-99",     JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_NONE,   0,                99, false, false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0, 0 },
+    { "desk-ent",      JR_DISPLAY_SPACE_DESK,    JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, 400,        FC_SETTLED, false, 0, 0, 0, 0 },
+    { "shade-ent",     JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_SHADE,  0,                74, true,  false, FC_SETTLED, 300,        false, 0, 0, 0, 0 },
     /* the agent rim (apply_shell_overlay): full, and part-way (4 of 8 sectors), over home and a ring screen */
     { "home-agent-100",   JR_DISPLAY_SPACE_JARVIS,  JR_DISPLAY_OVERLAY_NONE, 0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 100, 0, 0 },
     { "home-agent-40",    JR_DISPLAY_SPACE_JARVIS,  JR_DISPLAY_OVERLAY_NONE, 0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 40, 0, 0 },
@@ -124,8 +129,44 @@ static jr_face_t fc_dial_of_style(int style)
 static bool fc_orbit_rec_on = true;
 #endif
 
+#ifdef JR_FRING_REC
+/* Whether the recorded battery / desk ring is in use (production: yes). */
+static bool fc_fring_rec_on = true;
+#endif
+#ifdef JR_DIAL_REC
+/* Whether the recorded MINIMAL dial disc is in use (production: yes). */
+static bool fc_dial_rec_on = true;
+#endif
+#ifdef JR_SHADE_REC
+/* Whether the recorded control-shade arcs are in use (production: yes). */
+static bool fc_shade_rec_on = true;
+#endif
+
 static void fc_setup(const fc_scene_t *sc)
 {
+#ifdef JR_DIAL_REC
+    if (fc_dial_rec_on) {
+        dial_rec_alloc();
+    } else {
+        hud_dial_cache_set(NULL, 0);
+    }
+#endif
+#ifdef JR_SHADE_REC
+    if (fc_shade_rec_on) {
+        shade_rec_alloc();
+    } else if (s_shade_rec != NULL) {
+        heap_caps_free(s_shade_rec);
+        s_shade_rec = NULL;
+    }
+#endif
+#ifdef JR_FRING_REC
+    if (fc_fring_rec_on) {
+        fring_rec_alloc();
+    } else if (s_fring_rec != NULL) {
+        heap_caps_free(s_fring_rec);
+        s_fring_rec = NULL;
+    }
+#endif
 #ifdef JR_ORBIT_REC
     if (fc_orbit_rec_on) {
         orbit_rec_build();
@@ -276,10 +317,22 @@ __attribute__((noinline)) static void fc_frame_warm(const fc_scene_t *sc, int64_
     fc_frame_body(sc, ms, fb);
 }
 
-/* Warm frame one period earlier (the steady state the device runs in: caches
+/* Set by the profiler, not by the hash suite: one more warm frame, because a
+ * recorded shape (fring_prepare, shade_rec_get) waits for a value to hold for
+ * a second frame and the measured frame should be the steady state, not the
+ * one that records. The hash suite keeps one, which also checks that the frame
+ * that records is the same pixels. (A second warm frame would move the hashes
+ * of scenes caught mid-ease, which are pinned at one.) */
+static bool fc_extra_warm;
+
+/* Warm frames one period (and, for the profiler, two) earlier (the steady state the device runs in: caches
  * filled, eases settled), then the frame under test. */
 static void fc_run(const fc_scene_t *sc, int64_t ms, uint16_t *fb)
 {
+    if (fc_extra_warm) {
+        fc_fill_face(fb);
+        fc_frame_warm(sc, ms - 84, fb);
+    }
     fc_fill_face(fb);
     fc_frame_warm(sc, ms - 42, fb);
     fc_fill_face(fb);
