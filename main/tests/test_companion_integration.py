@@ -134,7 +134,7 @@ def run(root, output, mutation, raw, hashes):
         "components/jr_display/include", "components/jr_display/src",
         "components/jr_display/tests", "components/jr_ports/include",
         "components/jr_display/tests/probe/stubs", "components/jr_core/include",
-        "components/jr_power/include",
+        "components/jr_power/include", "components/jr_probe/include",
     ):
         command += ["-I", str(root / include)]
     command += ["-o", str(binary)]

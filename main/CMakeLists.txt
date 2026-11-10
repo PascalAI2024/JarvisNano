@@ -21,6 +21,7 @@ idf_component_register(
         jr_display
         jr_imu
         jr_power
+        jr_probe
         jr_rtc
         jr_wake
         nvs_flash

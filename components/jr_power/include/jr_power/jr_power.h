@@ -37,6 +37,7 @@
 
 #include "esp_err.h"
 #include "jr_power/charge.h"
+#include "jr_probe/board_probe.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -99,6 +100,18 @@ esp_err_t jr_power_charge_read(jr_power_charge_t *out);
  * Callers say goodbye on the glass and settle storage before calling.
  */
 esp_err_t jr_power_off(void);
+
+/**
+ * @brief One-shot telemetry for GET /api/diag/board: die temperature, VBUS,
+ *        VSYS, VBAT, the TS pin, the charge-current register (0x62, read
+ *        only) and ADC_CH_CTRL (0x30) before, during and after.
+ *
+ * Writes exactly one register: 0x30, to switch on the TS, VBUS, VSYS and
+ * die-temperature channels for about 100 ms; it is written back to the value
+ * found before returning. No charge, voltage or rail register is written.
+ * Failures are reported inside *out, never as an error.
+ */
+void jr_power_probe(jr_probe_pmic_t *out);
 
 #ifdef __cplusplus
 }

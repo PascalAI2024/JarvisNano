@@ -189,6 +189,42 @@ Both the pin table and the net alias show it. The CO5300 init sequence (`jarvis_
 
 ---
 
+## How to probe
+
+`GET /api/diag/board` (code: `components/jr_probe`, handler `board_diag_handler` in `main/http_routes.c`) answers the open questions above on a live unit. It sits behind the same pairing gate as the other `GET` diagnostics. Run it through `scripts/board-probe.py`, which reuses `jarvisctl.py` for host and token and never prints either.
+
+```bash
+export JARVIS_DEVICE_HOST=<ip>
+scripts/board-probe.py                  # about 1 s: TE, GPIO3 level, IMU registers + temperature, PMIC
+scripts/board-probe.py --gyro           # adds a gyro pass, on for about 300 ms
+scripts/board-probe.py --watch pwr      # holds 3 s: press and release the PWR key meanwhile
+scripts/board-probe.py --watch touch    # holds 4 s: put two fingers on the glass meanwhile
+scripts/board-probe.py --json           # the raw object
+```
+
+Every probe is bounded and reports `ok:false` plus a reason rather than failing the response. Only one watch window runs per request, so the worst case is just under 5 s. Nothing sends a panel command, drives GPIO3 or GPIO13, or writes a charge, voltage or rail register.
+
+| Key | What a reading settles |
+|---|---|
+| `te` | `hz` near 60 with `period_us_min`/`max` near 16 600: GPIO13 carries the panel's TE and the TE-synchronised flush is real; the spread says how steady it is. `edges: 0`: the panel was off at that moment (re-run with the screen lit), TE is not reaching the pin, or `0x35` did not take. A different steady rate tells us the panel's actual refresh. |
+| `pwr_key` | With `--watch pwr`, `changed:true` and `high_ms` roughly the press length means GPIO3 follows the key. `level_max:1` after a press with `level` 0 at rest confirms the polarity (high when pressed) and clears the wake-source idea in item 4 of the ranking. `changed:false` through a real press means the mirror does not reach the pin as drawn. A press shorter than the 10 ms poll can be missed: hold for half a second. |
+| `imu` | `who_am_i` 5 and `revision`: the revision byte tells A from C (see Unverified). `ctrl1/2/3/7` as found; `ctrl3` 0 and `ctrl7` 1 is the shipped accel-only state. `temp_c` is the die temperature (expect a few degrees above ambient). With `--gyro`: `mean_dps` near 0 on a still desk and the spread in `min`/`max` give the zero-rate offset and noise; `restored:true` shows CTRL3/CTRL7 were put back. `gyro.why` explains a refusal (Wake-on-Motion armed, or sampler stopped). Gyro Z is flipped on the C like accel Z. |
+| `touch` | With `--watch touch`: `max_fingers` 2 with `seen:true` and `ack` 171 (0xAB) proves the CST9217 reports a second finger on this panel with the SensorLib layout; the `raw` hex is the 15-byte report at that moment (bytes 0-4 finger 0, byte 5 low seven bits the count, byte 6 the 0xAB ack, bytes 7-11 finger 1). `max_fingers` stuck at 1 with two fingers down means the chip or its firmware reports one point and the pinch idea is dead. `reads: 0` means nobody touched the glass during the window. |
+| `pmic` | `die_c`, `vbus_mv`, `vsys_mv`, `vbat_mv`, `ts_mv` are the telemetry the ranking item 7 wants. `ts_mv` near 0 or pinned at a rail suggests no pack thermistor. `charge_cc_ma` is the factory fast-charge setpoint (register 0x62, read only). `adc_before`/`adc_during`/`adc_after`: the ADC enable register as found, with the extra channels on, and after the write-back (`adc_restored:true`). |
+| `spi` | The panel's QSPI clock as the firmware sets it: a constant, 40 MHz from the library macro (doubt 3). It measures nothing. |
+
+Choices and guesses worth knowing:
+
+- **ADC channels are switched back off.** The probe enables the TS, VBUS, VSYS and die-temperature channels for about 100 ms and writes `0x30` back to what it found, so the probe leaves the PMIC as it was. If the extra channels turn out to be worth keeping, that is a separate change.
+- **TE count** is an interrupt counter on rising edges over 500 ms, not a PCNT unit: smaller and nothing to free afterwards. The pin is left an input with its interrupt off and no pull set.
+- **GPIO3** is read with the input buffer enabled and nothing else, so its strapping pull is untouched.
+- **Touch** is read by the touch worker itself, right after its own read, with the driver's own register sequence but 15 bytes instead of 10. The driver never writes the 0xAB ack back (SensorLib does), so whether the chip re-serves a report on a second read is a guess; if `reads` is high and `seen` is false, that is the first suspect.
+- **Die temperature** uses the XPowersLib formula, 22 + (7274 - raw) / 20 degrees C (not fetch-verified against the AXP2101 datasheet). VBUS, VSYS and TS counts follow the same 14-bit layout as VBAT, TS at 0.5 mV per count.
+- **IMU gyro range** is set to +-512 dps (64 LSB per dps) at 112 Hz for the probe only.
+- The probe reads the IMU and PMIC from the httpd task, relying on the shared I2C master to serialise against the sampler tasks.
+
+---
+
 ## See also
 
 - [board-175c.md](./board-175c.md): the revision delta this page extends.

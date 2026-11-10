@@ -11,5 +11,7 @@ idf_component_register(
         jr_ports
         esp_board_manager
         esp_lcd_touch
+        esp_lcd
+        jr_probe
         esp_timer
 )

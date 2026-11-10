@@ -13,6 +13,7 @@
 
 #include <inttypes.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "esp_board_manager.h"
 #include "esp_board_manager_defs.h"
@@ -277,6 +278,84 @@ static bool touch_read_point(esp_lcd_touch_handle_t touch,
     return true;
 }
 
+/* ---- board probe: raw report capture (GET /api/diag/board?watch=touch) --
+ *
+ * Armed from another task, executed only here, so the extra read can never
+ * collide with the driver's own read of the same bus. The sequence repeats
+ * esp_lcd_touch_cst9217.c cst9217_read_reg(): select 0xD000, wait, read.
+ * 15 bytes = 5 header + 2 fingers x 5 (the driver reads 10 and keeps one). */
+#define TOUCH_PROBE_REG_HI       0xD0
+#define TOUCH_PROBE_REG_LO       0x00
+#define TOUCH_PROBE_ACK          0xAB
+#define TOUCH_PROBE_WATCH_MAX_MS 4000U
+
+static portMUX_TYPE s_probe_lock = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool s_probe_armed;
+static jr_probe_touch_t s_probe_res;
+
+static void touch_probe_step(esp_lcd_touch_handle_t touch)
+{
+    if (!s_probe_armed) {
+        return;
+    }
+    uint8_t reg_lo = TOUCH_PROBE_REG_LO;
+    uint8_t raw[JR_PROBE_TOUCH_RAW_LEN] = {0};
+    if (esp_lcd_panel_io_tx_param(touch->io, TOUCH_PROBE_REG_HI, &reg_lo, 1) != ESP_OK) {
+        return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(2));
+    if (esp_lcd_panel_io_rx_param(touch->io, -1, raw, sizeof raw) != ESP_OK) {
+        return;
+    }
+    const uint8_t count = raw[5] & 0x7F;
+    portENTER_CRITICAL(&s_probe_lock);
+    s_probe_res.reads++;
+    if (raw[6] == TOUCH_PROBE_ACK && count > s_probe_res.max_fingers) {
+        s_probe_res.max_fingers = count;
+        s_probe_res.seen = true;
+        memcpy(s_probe_res.raw, raw, sizeof raw);
+        s_probe_res.ack = raw[6];
+    }
+    portEXIT_CRITICAL(&s_probe_lock);
+}
+
+void jr_hal_touch_probe(uint32_t watch_ms, jr_probe_touch_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (watch_ms == 0) {
+        out->ok = true;
+        return;
+    }
+    if (s_input.start_state != INPUT_RUNNING) {
+        out->why = "touch worker not running";
+        return;
+    }
+    if (watch_ms > TOUCH_PROBE_WATCH_MAX_MS) {
+        watch_ms = TOUCH_PROBE_WATCH_MAX_MS;
+    }
+    bool busy = false;
+    portENTER_CRITICAL(&s_probe_lock);
+    if (s_probe_armed) {
+        busy = true;
+    } else {
+        memset(&s_probe_res, 0, sizeof s_probe_res);
+        s_probe_armed = true;
+    }
+    portEXIT_CRITICAL(&s_probe_lock);
+    if (busy) {
+        out->why = "another touch probe is running";
+        return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(watch_ms));
+    portENTER_CRITICAL(&s_probe_lock);
+    s_probe_armed = false;
+    *out = s_probe_res;
+    portEXIT_CRITICAL(&s_probe_lock);
+    out->ok = true;
+    out->watched = true;
+    out->watch_ms = watch_ms;
+}
+
 static void touch_worker(void *arg)
 {
     touch_input_ctx_t *ctx = (touch_input_ctx_t *)arg;
@@ -331,6 +410,7 @@ static void touch_worker(void *arg)
         uint16_t x = last_x;
         uint16_t y = last_y;
         bool touching = touch_read_point(touch, &x, &y);
+        touch_probe_step(touch);
 
         if (touching) {
             TickType_t touch_tick = xTaskGetTickCount();

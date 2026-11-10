@@ -414,3 +414,77 @@ void jr_power_pkey_take(uint32_t *out_short, uint32_t *out_long)
     if (out_short) { *out_short = sp; }
     if (out_long)  { *out_long  = lp; }
 }
+
+/* ---- board probe (GET /api/diag/board) ---------------------------------- */
+
+#define AXP2101_REG_CC_SETTING    0x62  /* read only here */
+#define AXP2101_ADC_CH_PROBE_MASK 0x1F  /* VBAT, TS, VBUS, VSYS, die temp */
+#define AXP2101_ADC_DATA_FIRST    0x34  /* VBAT H5L8, TS H6L8, VBUS, VSYS, Tdie */
+#define PROBE_ADC_SETTLE_MS       100
+
+static uint32_t adc14(const uint8_t *p)
+{
+    return ((uint32_t)(p[0] & 0x3Fu) << 8) | p[1];
+}
+
+void jr_power_probe(jr_probe_pmic_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!s_ready || s_dev == NULL) {
+        out->why = "pmic not present";
+        return;
+    }
+    uint8_t adc = 0, cc = 0;
+    if (pmic_read_reg(AXP2101_REG_ADC_CH_CTRL, &adc) != ESP_OK) {
+        out->why = "i2c read failed";
+        return;
+    }
+    out->adc_before = adc;
+    if (pmic_read_reg(AXP2101_REG_CC_SETTING, &cc) == ESP_OK) {
+        out->chg_cc_raw = cc;
+        const uint8_t code = cc & 31u;   /* same decode as charge.c */
+        if (code <= 21) {
+            out->chg_cc_known = true;
+            out->chg_cc_ma = code <= 8 ? 25u * code : 200u + 100u * (code - 8u);
+        }
+    }
+
+    const uint8_t want = (uint8_t)(adc | AXP2101_ADC_CH_PROBE_MASK);
+    bool wrote = false;
+    if (want != adc) {
+        if (pmic_write_reg(AXP2101_REG_ADC_CH_CTRL, want) != ESP_OK) {
+            out->why = "adc enable write failed";
+            return;
+        }
+        wrote = true;
+        vTaskDelay(pdMS_TO_TICKS(PROBE_ADC_SETTLE_MS));
+    }
+    (void)pmic_read_reg(AXP2101_REG_ADC_CH_CTRL, &out->adc_during);
+
+    uint8_t d[10] = {0};   /* 0x34..0x3D */
+    const esp_err_t rerr = pmic_read_regs(AXP2101_ADC_DATA_FIRST, d, sizeof(d));
+
+    if (wrote) {
+        (void)pmic_write_reg(AXP2101_REG_ADC_CH_CTRL, adc);
+    }
+    (void)pmic_read_reg(AXP2101_REG_ADC_CH_CTRL, &out->adc_after);
+    out->adc_restored = out->adc_after == adc;
+
+    if (rerr != ESP_OK) {
+        out->why = "adc data read failed";
+        return;
+    }
+    out->ok = true;
+    const uint8_t on = out->adc_during;
+    out->vbat_ok = (on & 0x01u) != 0;
+    out->vbat_mv = ((uint32_t)(d[0] & 0x1Fu) << 8) | d[1];   /* H5L8 */
+    out->ts_ok   = (on & 0x02u) != 0;
+    out->ts_raw  = adc14(&d[2]);
+    out->vbus_ok = (on & 0x04u) != 0;
+    out->vbus_mv = adc14(&d[4]);
+    out->vsys_ok = (on & 0x08u) != 0;
+    out->vsys_mv = adc14(&d[6]);
+    out->die_ok  = (on & 0x10u) != 0;
+    /* XPowersLib: 22 + (7274 - raw) / 20 degrees C. */
+    out->die_tenths = 220 + (7274 - (int)adc14(&d[8])) / 2;
+}
