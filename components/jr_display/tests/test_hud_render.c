@@ -365,15 +365,16 @@ static void test_privacy_ring_is_persistent_and_bounded(void)
                 continue;
             }
             painted++;
-            const long dx = x - 232, dy = y - 232;
+            /* from the TRUE centre (the rim is anti-aliased about 233.0): doubled coordinates */
+            const long dx = 2L * x - 465, dy = 2L * y - 465;
             const long r2 = dx * dx + dy * dy;
-            if (r2 < 220L * 220L || r2 > 223L * 223L) {
+            if (r2 < 424L * 424L || r2 > 448L * 448L) {
                 out_of_band++;
             }
         }
     }
     CHECK(painted > 500, "privacy ring painted only %zu px", painted);
-    CHECK(out_of_band == 0, "privacy ring left r220-223 (%zu px)",
+    CHECK(out_of_band == 0, "privacy ring left r212-224 (%zu px)",
           out_of_band);
 
     memset(clear, 0, px * sizeof *clear);
@@ -383,15 +384,210 @@ static void test_privacy_ring_is_persistent_and_bounded(void)
     hud_overlay_frame(clear, 0, HUD_H, 1000, false, &env);
     env.privacy_muted = true;
     hud_overlay_frame(muted, 0, HUD_H, 1000, false, &env);
-    size_t battery_overwritten = 0;
+    /* one ring: muting recolours it in place and adds no pixel of its own */
+    size_t moved = 0, recoloured = 0;
     for (size_t i = 0; i < px; ++i) {
+        if ((clear[i] != 0) != (muted[i] != 0)) {
+            moved++;
+        }
         if (clear[i] != 0 && clear[i] != muted[i]) {
-            battery_overwritten++;
+            recoloured++;
         }
     }
-    CHECK(battery_overwritten == 0,
-          "privacy ring overwrote %zu battery pixels", battery_overwritten);
+    CHECK(moved == 0, "muting drew or erased %zu px beyond the one ring", moved);
+    CHECK(recoloured > 500, "muting did not recolour the ring (%zu px)", recoloured);
     free(clear); free(muted);
+}
+
+/* A dial with the microphone live and nothing happening shows ONE privacy dot: cyan, about 3 px
+ * radius, at 12 o'clock on the ring's radius, on a slightly larger black disc, and it never moves.
+ * Muted and idle shows nothing. Both draw no ring, whatever the battery says. */
+static void test_privacy_dot_is_one_still_dot(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *a = malloc(px * sizeof *a), *b = malloc(px * sizeof *b), *s = malloc(px * sizeof *s);
+    if (!a || !b || !s) { printf("FAIL %s: alloc\n", __func__); g_failures++; free(a); free(b); free(s); return; }
+    for (size_t i = 0; i < px; ++i) a[i] = b[i] = s[i] = 0xFFFF;          /* a white dial under it */
+    hud_env_t env = { .face = HUD_FACE_IDLE, .amp = 0, .batt_pct = 74, .charging = true,
+                      .privacy_muted = false, .rim = HUD_RIM_DOT };
+    hud_overlay_frame(a, 0, HUD_H, 100U, false, &env);
+    hud_overlay_frame(b, 0, HUD_H, 7777U, false, &env);
+    CHECK(memcmp(a, b, px * sizeof *a) == 0, "the privacy dot never moves (charging or not, any instant)");
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        const int n = y + STRIP_ROWS <= HUD_H ? STRIP_ROWS : HUD_H - y;
+        hud_overlay_frame(s + (size_t)y * HUD_W, y, n, 100U, false, &env);
+    }
+    CHECK(memcmp(a, s, px * sizeof *a) == 0, "the privacy dot is strip invariant");
+
+    size_t changed = 0, outside = 0, cyan = 0, black = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            const uint16_t v = a[(size_t)y * HUD_W + x];
+            if (v == 0xFFFF) continue;
+            changed++;
+            const long dx2 = 2L * x + 1 - 466, dy2 = 2L * y + 1 - 2 * 15;       /* from (233, 15), doubled */
+            if (dx2 * dx2 + dy2 * dy2 > 11L * 11L) outside++;                   /* 5.5 px */
+            if (v == 0x0000) black++;
+            if (((v >> 11) & 31) < 6 && ((v >> 5) & 63) > 40 && (v & 31) > 24) cyan++;
+        }
+    }
+    CHECK(outside == 0, "the dot paints %zu px outside 5.5 px of 12 o'clock on r218", outside);
+    CHECK(cyan >= 20 && cyan <= 50, "a cyan dot of about 3 px radius (%zu cyan px)", cyan);
+    CHECK(black >= 20 && changed > cyan + black / 2 && changed <= 110,
+          "on a slightly larger black disc (%zu black px, %zu changed)", black, changed);
+    /* anti-aliased: the dot's edge runs through levels, it is not a hard stamp */
+    uint16_t lv[24]; size_t nlv = 0;
+    for (int y = 8; y <= 22; ++y) for (int x = 226; x <= 240; ++x) {
+        const uint16_t v = a[(size_t)y * HUD_W + x];
+        size_t k = 0;
+        while (k < nlv && lv[k] != v) k++;
+        if (k == nlv && nlv < 24) lv[nlv++] = v;
+    }
+    CHECK(nlv >= 5, "the dot is anti-aliased (%zu levels)", nlv);
+
+    env.rim = HUD_RIM_NONE;
+    for (size_t i = 0; i < px; ++i) a[i] = 0xFFFF;
+    hud_overlay_frame(a, 0, HUD_H, 100U, false, &env);
+    size_t any = 0;
+    for (size_t i = 0; i < px; ++i) any += a[i] != 0xFFFF;
+    CHECK(any == 0, "muted and idle shows nothing at the rim (%zu px)", any);
+
+    env.rim = HUD_RIM_RING;                    /* a session: the whole ring, the dot is not it */
+    for (size_t i = 0; i < px; ++i) a[i] = 0xFFFF;
+    hud_overlay_frame(a, 0, HUD_H, 100U, false, &env);
+    any = 0;
+    for (size_t i = 0; i < px; ++i) any += a[i] != 0xFFFF;
+    CHECK(any > 3000, "the ring is the ring (%zu px)", any);
+    free(a); free(b); free(s);
+}
+
+/* One ring: gold muted, cyan live, red when low and not charging; the battery fraction is the
+ * full-strength part clockwise from 12 and the rest is about a fifth; the head is white. */
+static void test_rim_is_one_ring_with_the_gauge_as_its_lit_part(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *a = calloc(px, sizeof *a);
+    if (!a) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
+    hud_env_t env = { .face = HUD_FACE_IDLE, .batt_pct = 50, .charging = false, .privacy_muted = false };
+    hud_overlay_frame(a, 0, HUD_H, 0U, false, &env);
+    /* 3 o'clock (the quarter) is lit; 9 o'clock is the dim remainder, same hue */
+    const uint16_t lit = a[(size_t)232 * HUD_W + 233 + 217], dim = a[(size_t)232 * HUD_W + 233 - 218];
+    const unsigned lg = (lit >> 5) & 63, dg = (dim >> 5) & 63;
+    CHECK(lg > dg * 3 && dg > 0, "the lit part is full strength and the rest about a fifth (%u vs %u)", lg, dg);
+    CHECK(((lit >> 11) & 31) < 4, "a live microphone is cyan (%04x)", lit);
+    memset(a, 0, px * sizeof *a);
+    env.privacy_muted = true;
+    hud_overlay_frame(a, 0, HUD_H, 0U, false, &env);
+    const uint16_t gold = a[(size_t)232 * HUD_W + 233 + 217];
+    CHECK(((gold >> 11) & 31) > 20 && (gold & 31) < 10, "a muted microphone is gold (%04x)", gold);
+    memset(a, 0, px * sizeof *a);
+    env.privacy_muted = false;
+    env.batt_pct = 10;
+    hud_overlay_frame(a, 0, HUD_H, 0U, false, &env);
+    const uint16_t red = a[(size_t)(232 - 214) * HUD_W + 233 + 40];
+    CHECK(((red >> 11) & 31) > 20 && ((red >> 5) & 63) < 30, "a low battery is red (%04x)", red);
+    /* one ring, one radius: every inked pixel is within 3.5 px of r218 */
+    memset(a, 0, px * sizeof *a);
+    env.batt_pct = 74; env.charging = true;
+    hud_overlay_frame(a, 0, HUD_H, 4321U, false, &env);
+    size_t stray = 0, ink = 0;
+    for (int y = 0; y < HUD_H; ++y) for (int x = 0; x < HUD_W; ++x) {
+        if (a[(size_t)y * HUD_W + x] == 0) continue;
+        ink++;
+        const long dx2 = 2L * x + 1 - 466, dy2 = 2L * y + 1 - 466, r2 = dx2 * dx2 + dy2 * dy2;
+        if (r2 < 429L * 429L || r2 > 443L * 443L) stray++;
+    }
+    CHECK(ink > 3000 && stray == 0, "one ring at one radius (%zu px, %zu strays)", ink, stray);
+    free(a);
+}
+
+/* THE RIM'S TABLE AGAINST THE FORMULA. The ring's columns and coverage are printed once
+ * (scripts/gen-rim-table.py) for one radius and one width. This works every pixel out from the
+ * formula, as the loop the table replaced did, and demands the same pixel: a full lit ring on
+ * black, every pixel of the band. A changed radius or width, or a table that is stale, fails here. */
+static void test_rim_table_matches_the_formula(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *a = calloc(px, sizeof *a);
+    if (!a) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
+    const hud_env_t env = { .face = HUD_FACE_IDLE, .batt_pct = 100, .charging = false, .privacy_muted = false };
+    hud_overlay_frame(a, 0, HUD_H, 0U, false, &env);
+    const int R = 218, hw = 256, a_lit = 46 + (((230 - 46) * 255) >> 8), inv = (32 << 16) / R;   /* the lit weight of a full turn */
+    const uint32_t cyan = 0x073Fu;
+    size_t bad = 0, ink = 0;
+    for (int y = 0; y < HUD_H; ++y) for (int x = 0; x < HUD_W; ++x) {
+        const int dx2 = 2 * x + 1 - 466, dy2 = 2 * y + 1 - 466;
+        const int r2 = dx2 * dx2 + dy2 * dy2;
+        uint16_t want = 0;
+        if (r2 > (2 * R - 3) * (2 * R - 3) && r2 < (2 * R + 3) * (2 * R + 3)) {
+            const int dist = ((dx2 * dx2 + dy2 * dy2 - 4 * R * R) * inv) >> 16;
+            int cov = hw + 128 - (dist < 0 ? -dist : dist);
+            cov = cov < 0 ? 0 : cov > 256 ? 256 : cov;
+            if (cov > 0) {
+                const uint32_t al = (uint32_t)((a_lit * cov) >> 8), wo = (al + 2) >> 2, wu = 64u - wo;
+                const uint32_t rb = ((0u * wu) + (cyan & 0xF81Fu) * wo + 0x10020u) >> 6;
+                const uint32_t g = ((0u * wu) + (cyan & 0x07E0u) * wo + (32u << 5)) >> 6;
+                want = (uint16_t)((rb & 0xF81Fu) | (g & 0x07E0u));
+            }
+        }
+        if (a[(size_t)y * HUD_W + x] != want) bad++;
+        if (want) ink++;
+    }
+    CHECK(ink > 3500 && bad == 0, "the rim is the formula's pixels (%zu inked, %zu differ)", ink, bad);
+    free(a);
+}
+
+/* `rim_a` is the strength of the whole rim: 0 is full, and a rest face passes the strength of its
+ * digits. Half strength paints the same pixels at about half the level, on the ring and on the dot. */
+static void test_rim_strength_scales_the_whole_rim(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *a = calloc(px, sizeof *a), *b = calloc(px, sizeof *b);
+    if (!a || !b) { printf("FAIL %s: alloc\n", __func__); g_failures++; free(a); free(b); return; }
+    for (int rim = HUD_RIM_RING; rim <= HUD_RIM_DOT; ++rim) {
+        hud_env_t env = { .face = HUD_FACE_IDLE, .batt_pct = 100, .rim = (uint8_t)rim };
+        memset(a, 0, px * sizeof *a); memset(b, 0, px * sizeof *b);
+        hud_overlay_frame(a, 0, HUD_H, 0U, false, &env);
+        env.rim_a = 0;
+        hud_overlay_frame(b, 0, HUD_H, 0U, false, &env);
+        CHECK(memcmp(a, b, px * sizeof *a) == 0, "rim_a 0 is full strength (rim %d)", rim);
+        env.rim_a = 128;
+        memset(b, 0, px * sizeof *b);
+        hud_overlay_frame(b, 0, HUD_H, 0U, false, &env);
+        unsigned full = 0, half = 0;
+        for (size_t i = 0; i < px; ++i) {
+            if (((a[i] >> 5) & 63) > full) full = (a[i] >> 5) & 63;
+            if (((b[i] >> 5) & 63) > half) half = (b[i] >> 5) & 63;
+        }
+        CHECK(full > 40 && half * 2 >= full - 8 && half * 2 <= full + 8,
+              "rim_a 128 draws about half the level (rim %d: %u against %u)", rim, half, full);
+    }
+    free(a); free(b);
+}
+
+/* The JARVIS hands taper: the hour hand is thicker at the hub than at its tip. With the hand at
+ * 3 o'clock the thickness is the cyan ink in one column, in whole pixels of coverage, read where
+ * no ring crosses it (r30 and r100). */
+static double hour_hand_thickness(const uint16_t *fb, int x)
+{
+    double sum = 0.0;
+    for (int y = 200; y <= 266; ++y) {
+        const uint16_t v = fb[(size_t)y * HUD_W + x];
+        if (((v >> 11) & 31) < 8 && (v & 31) >= 8) sum += (double)((v >> 5) & 63) / 57.0;   /* cyan: 0, 229, 255 */
+    }
+    return sum;
+}
+
+static void test_jarvis_hour_hand_tapers(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = calloc(px, sizeof *fb);
+    if (!fb) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
+    const hud_jarvis_t j = { .hh = 3, .mm = 0, .ss = 0, .seconds = false, .sun_now_q16 = -1 };
+    hud_overlay_jarvis_dial(fb, 0, HUD_H, false, 255, &j);
+    const double base = hour_hand_thickness(fb, 233 + 30), tip = hour_hand_thickness(fb, 233 + 100);
+    CHECK(tip > 0.8 && base > tip * 1.3, "the hour hand tapers (%.2f px at the hub, %.2f px at the tip)", base, tip);
+    free(fb);
 }
 
 /* A USB-powered puck with no cell must show NO gauge — a full-looking or
@@ -451,9 +647,9 @@ static void test_charging_rim_animates_inside_battery_band(void)
             const size_t i = (size_t)y * HUD_W + x;
             if (a[i] == b[i]) continue;
             changed++;
-            const int dx = x - 232, dy = y - 232;
+            const int dx = 2 * x - 465, dy = 2 * y - 465;      /* the true centre, doubled */
             const int r2 = dx * dx + dy * dy;
-            if (r2 < 215 * 215 || r2 > 221 * 221) escaped++;
+            if (r2 < 424 * 424 || r2 > 448 * 448) escaped++;
         }
     }
     CHECK(changed > 0, "charging rim did not animate");
@@ -2866,6 +3062,11 @@ int main(void)
     test_charging_rim_animates_inside_battery_band();
     test_listen_ring_band_and_exclusivity();
     test_privacy_ring_is_persistent_and_bounded();
+    test_privacy_dot_is_one_still_dot();
+    test_rim_is_one_ring_with_the_gauge_as_its_lit_part();
+    test_rim_table_matches_the_formula();
+    test_rim_strength_scales_the_whole_rim();
+    test_jarvis_hour_hand_tapers();
     test_tilt_offset_is_disabled();
     test_choices_strip_invariance();
     test_choices_strength_gate();

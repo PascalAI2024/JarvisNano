@@ -41,6 +41,11 @@
  *   open shade | close shade     the BOOT-button door into the shade and the way out
  *   home                  double tap: nav_home
  *   set battery N | set charging on|off | set mute on|off | set agent N | set caption TEXT
+ *   set usb on|off        the charger (the rest face needs it for a nightstand)
+ *   set rest nightstand|glance|dream|off   the rest face (main.c's companion_update), composed as panel_flush does
+ *   set time HH MM | set night on|off   the clock shown, and the night flag of the rest face
+ *   set face idle|listening|thinking|speaking|error   a voice session's face (the presenter's present port)
+ *   set condition TEXT    the weather's condition word ("MAINLY CLEAR")
  */
 #include <stdint.h>
 #include "jr_display.c"
@@ -159,7 +164,11 @@ static int pv_parse(const char *path, pv_step_t **out)
 
 /* ---- state the script owns ---- */
 static int s_batt = 74;
-static bool s_chg = true, s_mute;
+static bool s_chg = true, s_mute, s_usb = true;
+static jr_display_rest_mode_t s_pv_rest = JR_DISPLAY_REST_NONE;
+static bool s_pv_peek;                  /* `set peek on`: the clock peek of a non-WATCH screen */
+static int s_pv_hh = 10, s_pv_mm = 8;   /* the clock the script shows; `set time HH MM` */
+static bool s_pv_night;                 /* `set night on|off`: the rest face's night flag */
 static int64_t s_frame;     /* frames played since the first scene, recorded or not */
 static FILE *s_outf;
 static long s_recorded;
@@ -167,8 +176,8 @@ static long s_recorded;
 static void pv_env(void)
 {
     jr_display_set_hud_env((uint8_t)s_batt, s_chg, s_mute, 0.0f, 0.0f);
-    if (s_batt == 255) jr_display_power_set(255U, 0U, true, false);
-    else jr_display_power_set((uint8_t)s_batt, s_batt < 20 ? 3500U : 4020U, true, s_chg);
+    if (s_batt == 255) jr_display_power_set(255U, 0U, s_usb, false);
+    else jr_display_power_set((uint8_t)s_batt, s_batt < 20 ? 3500U : 4020U, s_usb, s_chg);
 }
 
 /* main.c's shell_caption_space: the screen's name, as a label (it times itself out). */
@@ -277,8 +286,10 @@ static void pv_frame(int64_t t_us, bool record, uint16_t *fb)
     const int64_t ms = t_us / 1000;
     s_fake_us = t_us;
 
+    jr_display_sun_set(6 * 60 + 30, 18 * 60 + 40);       /* a November day */
+    jr_display_clock_set_date(2, 10, 10);                 /* TUE 10 */
     const bool watch = jr_display_nav_space() == JR_DISPLAY_SPACE_WATCH;
-    if (watch) jr_display_clock_set(true, 10, 8, (int)((ms / 1000) % 60));
+    if (watch || s_pv_peek || s_pv_rest != JR_DISPLAY_REST_NONE) jr_display_clock_set(true, s_pv_hh, s_pv_mm, (int)((ms / 1000) % 60));
     else jr_display_clock_set(false, 0, 0, 0);
 #ifdef PV_COST
     if (record) CALLGRIND_ZERO_STATS;
@@ -311,6 +322,7 @@ static void pv_frame(int64_t t_us, bool record, uint16_t *fb)
         ? s_pv_black
         : s_pv_face + (size_t)(((ms * 24) / 1000) % s_pv_nface) * 466u * 466u;
     if (!s_pv_face) s_pv_note_face = true;
+    s_watch_still = watch_rest_day(ctx);       /* panel_flush latches it once a frame */
     for (int y = 0; y < 466; y += 12) {
         const int y2 = y + 12 > 466 ? 466 : y + 12;
         uint16_t *p = fb + (size_t)y * 466;
@@ -319,11 +331,18 @@ static void pv_frame(int64_t t_us, bool record, uint16_t *fb)
             light_n++;
         }
         memcpy(p, face + (size_t)y * 466, (size_t)(y2 - y) * 466u * sizeof(uint16_t));
-        (void)rest_eligible(ctx);
-        apply_dial(ctx, 0, y, 466, y2, p);
-        apply_hud_overlay(ctx, 0, y, 466, y2, p);
-        apply_shell_overlay(ctx, 0, y, 466, y2, p);
-        apply_surface_overlay(ctx, 0, y, 466, y2, p);
+        /* panel_flush: a rest face replaces the strip, anything else composes the layers */
+        const jr_display_rest_mode_t rest = rest_eligible(ctx);
+        if (rest == JR_DISPLAY_REST_DREAM) {
+            apply_dream_overlay(ctx, y, y2, p);
+        } else if (rest != JR_DISPLAY_REST_NONE) {
+            (void)apply_companion_overlay(ctx, y, y2, p, rest);
+        } else {
+            apply_dial(ctx, 0, y, 466, y2, p);
+            apply_hud_overlay(ctx, 0, y, 466, y2, p);
+            apply_shell_overlay(ctx, 0, y, 466, y2, p);
+            apply_surface_overlay(ctx, 0, y, 466, y2, p);
+        }
     }
     if (s_pv_dip) {
         dip_frame_done();                /* panel_flush: the last strip of the frame is submitted */
@@ -370,6 +389,10 @@ static void pv_scene(const char *name)
     s_batt = sc->batt;
     s_chg = sc->charging;
     s_mute = sc->muted;
+    s_pv_rest = JR_DISPLAY_REST_NONE;
+    s_pv_peek = false;
+    s_usb = true;
+    jr_display_rest_set(JR_DISPLAY_REST_NONE, true, false);
     pv_env();
     s_pv_dip = s_dip_on;
     if (s_pv_dip) {                      /* the mood at full light, the panel at rest */
@@ -459,6 +482,33 @@ int main(int argc, char **argv)
             if (!strcmp(k, "battery")) { s_batt = atoi(v); pv_env(); }
             else if (!strcmp(k, "charging")) { s_chg = !strcmp(v, "on"); pv_env(); }
             else if (!strcmp(k, "mute")) { s_mute = !strcmp(v, "on"); pv_env(); }
+            else if (!strcmp(k, "usb")) { s_usb = !strcmp(v, "on"); pv_env(); }
+            else if (!strcmp(k, "rest")) {
+                s_pv_rest = !strcmp(v, "nightstand") ? JR_DISPLAY_REST_NIGHTSTAND
+                          : !strcmp(v, "glance") ? JR_DISPLAY_REST_GLANCE
+                          : !strcmp(v, "dream") ? JR_DISPLAY_REST_DREAM : JR_DISPLAY_REST_NONE;
+                jr_display_rest_set(s_pv_rest, s_usb, s_pv_night);
+            }
+            else if (!strcmp(k, "peek")) { s_pv_peek = !strcmp(v, "on"); }
+            else if (!strcmp(k, "night")) {
+                s_pv_night = !strcmp(v, "on");
+                jr_display_rest_set(s_pv_rest, s_usb, s_pv_night);
+            }
+            else if (!strcmp(k, "time")) {
+                sscanf(v, "%d %d", &s_pv_hh, &s_pv_mm);
+            }
+            else if (!strcmp(k, "face")) {
+                const jr_face_t f = !strcmp(v, "listening") ? JR_FACE_LISTENING
+                                  : !strcmp(v, "thinking") ? JR_FACE_THINKING
+                                  : !strcmp(v, "speaking") ? JR_FACE_SPEAKING
+                                  : !strcmp(v, "error") ? JR_FACE_ERROR : JR_FACE_IDLE;
+                display_present_cb(NULL, f, 0);
+            }
+            else if (!strcmp(k, "condition")) {
+                jr_display_weather_t w = s_weather[__atomic_load_n(&s_weather_slot, __ATOMIC_ACQUIRE) & 1u];
+                snprintf(w.condition, sizeof w.condition, "%s", v);
+                jr_display_weather_set(&w);
+            }
             else if (!strcmp(k, "agent")) {
                 const int a = atoi(v);
                 s_display.shell_word = a > 0

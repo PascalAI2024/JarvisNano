@@ -1994,29 +1994,34 @@ static bool future_wx_line_reads(const uint16_t *fb, const char *want,
     return wrong == 0 && ink > 0;
 }
 
-/* F3: the FUTURE weather cell shortens, never cuts a word. The panel showed
- * "75* LIGHT DRIZZ" (2026-09-05): a 17-glyph line hard-clipped to 15 — and
- * the 12-glyph condition cap had already made it "LIGHT DRIZZL" on the way
- * in. Now the cap holds the whole phrase, the qualifier goes first
- * ("75* DRIZZLE"), and what still does not fit is cut at a word or, for one
- * long word, mid-word with the "." mark spent on the last glyph, so a cut is
- * always declared. The WEATHER headline fits by the same rule. 10:10:00
- * keeps every hand out of the cell below centre; the cyan the hands are
- * drawn in is the cell's own cyan. */
+/* F3: the FUTURE weather cell says one whole short word. The panel showed
+ * "75* LIGHT DRIZZ" (2026-09-05), then, after the cut was declared with a mark,
+ * "82* MAINLY." on the watch (2026-11-10): a condition cut mid-phrase with a
+ * full stop, on a dial. The cell now folds the condition the display holds to
+ * a small fixed vocabulary (CLEAR, CLOUDY, RAIN, SNOW, FOG, STORM), so it never
+ * holds a cut word and never ends in a stop; a condition with no word here
+ * leaves the temperature alone. The WEATHER screen's headline still fits by the
+ * old rule (a word, or a marked cut). 10:10:00 keeps every hand out of the cell
+ * below centre; the cyan the hands are drawn in is the cell's own cyan. */
 static void test_future_weather_cell_shortens_instead_of_cutting(void)
 {
     const size_t px = (size_t)HUD_W * HUD_H;
     uint16_t *fb = malloc(px * sizeof *fb);
     if (!fb) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; return; }
     static const struct { const char *cond; int temp; const char *want; } cases[] = {
-        { "LIGHT DRIZZLE",          75, "75* DRIZZLE" },      /* qualifier dropped   */
-        { "MODERATE RAIN SHOWERS",  75, "75* RAIN." },        /* dropped, then a word */
-        { "THUNDERSTORM",           75, "75* THUNDERSTO." },  /* one word: cut+mark  */
-        { "FREEZING FOG",           75, "75* FREEZING." },    /* at the space + mark */
-        { "HEAVY RAIN",             75, "75* HEAVY RAIN" },   /* fits: nothing lost  */
-        { "HEAVY SLEET",           100, "100* SLEET" },       /* three digits: less room */
-        { "OVERCAST",              100, "100* OVERCAST" },
-        { "OVERCAST",              -12, "-12* OVERCAST" },
+        { "LIGHT DRIZZLE",          75, "75* RAIN" },
+        { "MODERATE RAIN SHOWERS",  75, "75* RAIN" },
+        { "THUNDERSTORM",           75, "75* STORM" },
+        { "FREEZING FOG",           75, "75* FOG" },
+        { "HEAVY RAIN",             75, "75* RAIN" },
+        { "HEAVY SLEET",           100, "100* SNOW" },
+        { "SNOW SHOWERS",           75, "75* SNOW" },         /* snow before showers */
+        { "OVERCAST",              100, "100* CLOUDY" },
+        { "OVERCAST",              -12, "-12* CLOUDY" },
+        { "PARTLY CLOUDY",          75, "75* CLOUDY" },
+        { "MAINLY CLEAR",           82, "82* CLEAR" },        /* the capture's cut word */
+        { "CLEAR",                  75, "75* CLEAR" },
+        { "UNKNOWN",                75, "75*" },              /* no word: the temperature alone */
     };
     for (size_t i = 0; i < sizeof cases / sizeof *cases; ++i) {
         char line[24];
@@ -2026,6 +2031,31 @@ static void test_future_weather_cell_shortens_instead_of_cutting(void)
               cases[i].cond, cases[i].temp, line, n, cases[i].want);
         CHECK(n <= WATCH_WX_GLYPHS, "'%s' is %d glyphs in a %d-glyph cell",
               line, n, WATCH_WX_GLYPHS);
+        /* never a stop, never a cut word: the part after the temperature is a whole
+         * word of the vocabulary or nothing */
+        const char *word = strchr(line, ' ');
+        CHECK(line[n - 1] != '.', "'%s' ends in a stop", line);
+        CHECK(word == NULL || strcmp(word + 1, "CLEAR") == 0 || strcmp(word + 1, "CLOUDY") == 0 ||
+              strcmp(word + 1, "RAIN") == 0 || strcmp(word + 1, "SNOW") == 0 ||
+              strcmp(word + 1, "FOG") == 0 || strcmp(word + 1, "STORM") == 0,
+              "'%s' holds a word outside the vocabulary", line);
+    }
+    /* every condition jr_weather_condition can answer, through the real function's
+     * vocabulary: a whole word or the temperature alone, and no stop */
+    static const char *const all_conditions[] = {
+        "CLEAR", "MAINLY CLEAR", "PARTLY CLOUDY", "OVERCAST", "FOG", "RIME FOG", "LIGHT DRIZZLE",
+        "DRIZZLE", "HEAVY DRIZZLE", "FREEZING DRIZZLE", "LIGHT RAIN", "RAIN", "HEAVY RAIN",
+        "FREEZING RAIN", "LIGHT SNOW", "SNOW", "HEAVY SNOW", "SNOW GRAINS", "LIGHT SHOWERS",
+        "SHOWERS", "HEAVY SHOWERS", "SNOW SHOWERS", "THUNDERSTORM", "UNKNOWN", "",
+    };
+    for (size_t i = 0; i < sizeof all_conditions / sizeof *all_conditions; ++i) {
+        char line[24];
+        const int n = watch_wx_line(line, sizeof line, 75, all_conditions[i]);
+        CHECK(n > 0 && line[n - 1] != '.' && strncmp(line, "75*", 3) == 0,
+              "%s composes '%s'", all_conditions[i], line);
+        if (strcmp(all_conditions[i], "UNKNOWN") != 0 && all_conditions[i][0] != '\0') {
+            CHECK(strchr(line, ' ') != NULL, "%s lost its word: '%s'", all_conditions[i], line);
+        }
     }
     /* The setter keeps the whole phrase: a 21-glyph condition survives it. */
     set_weather(true, 75, 82, 68, JR_DISPLAY_SKY_RAIN, "MODERATE RAIN SHOWERS",
@@ -2052,8 +2082,8 @@ static void test_future_weather_cell_shortens_instead_of_cutting(void)
     /* On the glass, not just in the buffer: stage the weather and read the
      * cell back. Both the dropped qualifier and the marked cut must render. */
     static const struct { const char *cond; const char *want; } glass[] = {
-        { "LIGHT DRIZZLE", "75* DRIZZLE" },
-        { "THUNDERSTORM",  "75* THUNDERSTO." },
+        { "LIGHT DRIZZLE", "75* RAIN" },
+        { "THUNDERSTORM",  "75* STORM" },
     };
     for (size_t i = 0; i < sizeof glass / sizeof *glass; ++i) {
         set_weather(true, 75, 82, 68, JR_DISPLAY_SKY_RAIN, glass[i].cond,
@@ -2086,7 +2116,7 @@ static void test_watch_words_are_composed_once_and_strip_invariant(void)
     apply_clock_overlay(&s_display, 0, HUD_H, whole);
     CHECK(memcmp(whole, fb, px * sizeof *fb) == 0, "FUTURE strips differ from the whole frame");
     size_t ink = 0;
-    CHECK(future_wx_line_reads(fb, "75* OVERCAST", &ink) && ink > 200,
+    CHECK(future_wx_line_reads(fb, "75* CLOUDY", &ink) && ink > 200,
           "the cell does not read the composed line (%zu ink px)", ink);
     /* new weather, no recompose: the strips still say OVERCAST */
     set_weather(true, 75, 82, 68, JR_DISPLAY_SKY_CLEAR, "CLEAR", (uint32_t)(s_fake_us / 1000));
@@ -2157,35 +2187,38 @@ static void test_watch_shadows_only_at_the_awake_cadence(void)
     reset_nav();
 }
 
-/* THE DAY ARC. FUTURE and PILOT draw the daylight on the tick scale from the
- * published sunrise round the top to sunset, and a dot for now; the other
- * dials draw nothing, and no dial draws anything without a sun. Sampled by
- * angle on the band's centre line (r206), away from where the hands point
- * (13:15:45 — hour near 1, minute at 3, seconds at 9 — so noon and midnight
- * are clear), on the flat grey stand-in art. */
+/* THE DAY ARC. The JARVIS dial draws the daylight on its outer band, from the
+ * published sunrise round the top to sunset, and a dot for now. No other dial
+ * does: on a baked dial the band ran across PILOT's tick track and FUTURE's
+ * rings (2026-11-10), and MINIMAL's own minute ticks sit on it. No dial draws
+ * anything without a sun. Sampled by angle on the band's centre line (r206),
+ * away from where the hands point (13:15:45 - hour near 1, minute at 3, seconds
+ * at 9 - so noon and midnight are clear). JARVIS paints its own black disc; the
+ * baked styles are drawn over the flat grey stand-in art, which must be left
+ * exactly as it was. */
 static uint16_t sun_px(const uint16_t *fb, int angle_256)
 {
-    /* 1/256 turn, clockwise from 3 o'clock — the shell's own sine, so the
+    /* 1/256 turn, clockwise from 3 o'clock - the shell's own sine, so the
      * sample lands where the renderer put the pixel */
     const int x = SP_CX + ((sp_cos(angle_256) * 206) >> 15);
     const int y = SP_CY + ((sp_sin(angle_256) * 206) >> 15);
     return fb[(size_t)y * HUD_W + x];
 }
 
-static size_t sun_band_ink(const uint16_t *fb)
+static size_t sun_band_ink(const uint16_t *fb, uint16_t base)
 {
     size_t n = 0;
     for (int y = 0; y < HUD_H; ++y) {
         for (int x = 0; x < HUD_W; ++x) {
             const int dx = x - 232, dy = y - 232, r2 = dx * dx + dy * dy;
             if (r2 < 203 * 203 || r2 > 209 * 209) continue;
-            if (fb[(size_t)y * HUD_W + x] != 0x4208) n++;
+            if (fb[(size_t)y * HUD_W + x] != base) n++;
         }
     }
     return n;
 }
 
-static void test_watch_day_arc_is_the_sun_on_the_data_dials(void)
+static void test_watch_day_arc_is_the_sun_on_the_jarvis_dial_only(void)
 {
     const size_t px = (size_t)HUD_W * HUD_H;
     uint16_t *fb = malloc(px * sizeof *fb);
@@ -2193,39 +2226,66 @@ static void test_watch_day_arc_is_the_sun_on_the_data_dials(void)
 
     /* 07:02 -> 19:35, the real Fort Lauderdale day of 2026-09-05 */
     jr_display_sun_set(422, 1175);
-    render_watch_frame_at(fb, JR_WATCH_FUTURE, JR_FACE_DIAL_FUTURE, 13, 15, 45);
-    const size_t with = sun_band_ink(fb);
-    CHECK(with > 1500, "FUTURE with a sun inks %zu px on the band (want > 1500)", with);
-    CHECK(sun_px(fb, 192) != 0x4208, "noon (12 o'clock) is inside the daylight");
-    CHECK(sun_px(fb, 64) == 0x4208, "midnight (6 o'clock) is night: untouched art");
+    render_watch_frame_at(fb, JR_WATCH_JARVIS, JR_FACE_IDLE, 13, 15, 45);
+    const size_t with = sun_band_ink(fb, 0x0000);
+    CHECK(with > 1500, "JARVIS with a sun inks %zu px on the band (want > 1500)", with);
+    CHECK(sun_px(fb, 192) != 0x0000, "noon (12 o'clock) is inside the daylight");
+    CHECK(sun_px(fb, 64) == 0x0000, "midnight (6 o'clock) is night: nothing on the band");
     /* 07:02 is angle 139, 19:35 is 17: just inside each end is day, just
      * outside is night */
-    CHECK(sun_px(fb, 143) != 0x4208, "just after sunrise is day");
-    CHECK(sun_px(fb, 133) == 0x4208, "before sunrise is night");
-    CHECK(sun_px(fb, 13) != 0x4208, "just before sunset is day");
-    CHECK(sun_px(fb, 23) == 0x4208, "after sunset is night");
+    CHECK(sun_px(fb, 143) != 0x0000, "just after sunrise is day");
+    CHECK(sun_px(fb, 133) == 0x0000, "before sunrise is night");
+    CHECK(sun_px(fb, 13) != 0x0000, "just before sunset is day");
+    CHECK(sun_px(fb, 23) == 0x0000, "after sunset is night");
     /* the dot for 13:15 (75 min past noon) sits on the band at angle
      * 192 + 75*256/1440 = 205, brighter than the band */
     const uint16_t band = sun_px(fb, 215), dot = sun_px(fb, 205);
-    CHECK(dot != band && dot != 0x4208, "now is a dot on the band (band %04x, dot %04x)", band, dot);
+    CHECK(dot != band && dot != 0x0000, "now is a dot on the band (band %04x, dot %04x)", band, dot);
+    /* the dial's own ticks end inside the band: the day arc paints over none of them */
+    size_t tick_px_in_band = 0;
+    jr_display_sun_set(-1, -1);
+    render_watch_frame_at(fb, JR_WATCH_JARVIS, JR_FACE_IDLE, 13, 15, 45);
+    tick_px_in_band = sun_band_ink(fb, 0x0000);
+    CHECK(tick_px_in_band < 200, "JARVIS without a sun inks %zu px on the band (want < 200)", tick_px_in_band);
+    jr_display_sun_set(422, 1175);
 
-    render_watch_frame_at(fb, JR_WATCH_PILOT, JR_FACE_DIAL_PILOT, 13, 15, 45);
-    CHECK(sun_px(fb, 192) != 0x4208 && sun_px(fb, 64) == 0x4208, "PILOT carries the same arc");
-
-    render_watch_frame_at(fb, JR_WATCH_DRESS, JR_FACE_DIAL_DRESS, 13, 15, 45);
-    CHECK(sun_px(fb, 192) == 0x4208 && sun_band_ink(fb) < 200,
-          "DRESS draws no arc (%zu px on the band)", sun_band_ink(fb));
+    /* every other dial, with the sun published: the band is not touched */
+    static const struct { jr_watch_style_t style; jr_face_t face; const char *name; } others[] = {
+        { JR_WATCH_DIVER, JR_FACE_DIAL_DIVER, "DIVER" },
+        { JR_WATCH_DRESS, JR_FACE_DIAL_DRESS, "DRESS" },
+        { JR_WATCH_PILOT, JR_FACE_DIAL_PILOT, "PILOT" },
+        { JR_WATCH_FUTURE, JR_FACE_DIAL_FUTURE, "FUTURE" },
+        { JR_WATCH_SKELETON, JR_FACE_DIAL_SKELETON, "SKELETON" },
+        { JR_WATCH_CELESTIAL, JR_FACE_DIAL_CELESTIAL, "CELESTIAL" },
+    };
+    for (size_t i = 0; i < sizeof others / sizeof *others; ++i) {
+        render_watch_frame_at(fb, others[i].style, others[i].face, 13, 15, 45);
+        CHECK(sun_px(fb, 192) == 0x4208 && sun_band_ink(fb, 0x4208) < 200,
+              "%s draws no day arc over its art (%zu px on the band)", others[i].name,
+              sun_band_ink(fb, 0x4208));
+    }
+    render_watch_frame_at(fb, JR_WATCH_MINIMAL, JR_FACE_IDLE, 13, 15, 45);
+    {
+        /* MINIMAL paints its own dial, ticks at r196-208 included: with the sun and
+         * without, the band is the same frame */
+        uint16_t *ref = malloc(px * sizeof *ref);
+        if (ref) {
+            memcpy(ref, fb, px * sizeof *ref);
+            jr_display_sun_set(-1, -1);
+            render_watch_frame_at(fb, JR_WATCH_MINIMAL, JR_FACE_IDLE, 13, 15, 45);
+            CHECK(memcmp(ref, fb, px * sizeof *ref) == 0, "MINIMAL draws a day arc over its minute ticks");
+            free(ref);
+        }
+    }
 
     /* no sun published: nothing on the band beyond the hands' own reach */
     jr_display_sun_set(-1, -1);
-    render_watch_frame_at(fb, JR_WATCH_FUTURE, JR_FACE_DIAL_FUTURE, 13, 15, 45);
-    const size_t without = sun_band_ink(fb);
-    CHECK(without < 200 && sun_px(fb, 192) == 0x4208,
-          "FUTURE without a sun inks %zu px on the band (want < 200)", without);
+    render_watch_frame_at(fb, JR_WATCH_JARVIS, JR_FACE_IDLE, 13, 15, 45);
+    CHECK(sun_px(fb, 192) == 0x0000, "JARVIS without a sun has no arc");
     /* a sunset before sunrise is refused, not drawn backwards */
     jr_display_sun_set(1175, 422);
-    render_watch_frame_at(fb, JR_WATCH_FUTURE, JR_FACE_DIAL_FUTURE, 13, 15, 45);
-    CHECK(sun_px(fb, 192) == 0x4208, "an inverted sun is not a night arc");
+    render_watch_frame_at(fb, JR_WATCH_JARVIS, JR_FACE_IDLE, 13, 15, 45);
+    CHECK(sun_px(fb, 192) == 0x0000, "an inverted sun is not a night arc");
 
     s_display.shown_face = JR_FACE_IDLE;
     free(fb);
@@ -3808,17 +3868,18 @@ static void test_dream_glass_is_black_clock_and_intact_rims(void)
         apply_hud_overlay(&s_display, 0, y, HUD_W, end, strips + (size_t)y * HUD_W);
     }
     CHECK(memcmp(whole, strips, n * sizeof *whole) == 0, "minute clock is strip invariant");
-    const hud_env_t env = { .face = HUD_FACE_IDLE, .batt_pct = 74U, .privacy_muted = true };
+    const hud_env_t env = { .face = HUD_FACE_IDLE, .batt_pct = 74U, .privacy_muted = true,
+                          .rim_a = REST_ALPHA_NIGHT };      /* DREAM: the ring at the digits' strength */
     hud_overlay_frame(rim, 0, HUD_H, 0U, false, &env);
     size_t unexpected = 0U, rim_pixels = 0U, black = 0U, clock_pixels = 0U;
     for (int y = 0; y < HUD_H; ++y) {
         for (int x = 0; x < HUD_W; ++x) {
             const size_t i = (size_t)y * HUD_W + x;
-            const bool clock_box = x >= 188 && x < 278 && y >= 222 && y < 243;
+            const bool clock_box = x >= 120 && x < 346 && y >= 195 && y < 270;     /* the HERO time, centred */
             if (!clock_box && whole[i] != rim[i]) { unexpected++; }
             if (rim[i]) { rim_pixels++; }
             if (!whole[i]) { black++; }
-            if (clock_box && whole[i] == 0x2104U) { clock_pixels++; }
+            if (clock_box && whole[i] != 0U) { clock_pixels++; }       /* warm amber, a quarter strength */
         }
     }
     CHECK(unexpected == 0U, "only clock pixels differ from the original privacy/battery rims (%zu)", unexpected);
@@ -4673,6 +4734,16 @@ static void test_dial_sources_release_without_invalidating_vendor_ownership(void
 /* A strip must keep a rim stamp whose first row lies just above it. Exercise
  * every battery value, both panel orders and centre shifts through the real
  * overlay, including the 100% repeated endpoint and absent-battery sentinel. */
+/* distance of a pixel from another, summed over its channels (both in panel order) */
+static unsigned rim_dist(uint16_t a, uint16_t b, bool swap)
+{
+    if (swap) { a = (uint16_t)((a >> 8) | (a << 8)); b = (uint16_t)((b >> 8) | (b << 8)); }
+    const int dr = (int)((a >> 11) & 31) - (int)((b >> 11) & 31);
+    const int dg = (int)((a >> 5) & 63) - (int)((b >> 5) & 63);
+    const int db = (int)(a & 31) - (int)(b & 31);
+    return (unsigned)((dr < 0 ? -dr : dr) + (dg < 0 ? -dg : dg) + (db < 0 ? -db : db));
+}
+
 static void test_battery_rim_is_strip_invariant_at_every_percent(void)
 {
     const size_t n = (size_t)HUD_W * HUD_H;
@@ -4703,8 +4774,17 @@ static void test_battery_rim_is_strip_invariant_at_every_percent(void)
                     if (shift == 1 && (batt == 0U || batt > 100U)) {
                         size_t drawn = 0;
                         for (size_t i = 0; i < n; ++i) drawn += whole[i] != POISON;
-                        CHECK(drawn == (batt == 0U ? 4U : 0U),
-                              "zero battery keeps its initial 2px stamp; absent battery draws nothing (%zu)", drawn);
+                        /* one ring: an empty gauge is the dim ring all round with a lit stamp at
+                         * 12 o'clock (brighter than 6 o'clock); an absent battery draws nothing */
+                        if (batt == 0U) {
+                            const uint16_t top = whole[(size_t)(232 - 218) * HUD_W + 233];
+                            const uint16_t bot = whole[(size_t)(232 + 218) * HUD_W + 233];
+                            const unsigned gt = rim_dist(top, POISON, swap != 0), gb = rim_dist(bot, POISON, swap != 0);
+                            CHECK(drawn > 3000U && gt > gb,
+                                  "zero battery: the dim ring all round, a lit stamp at 12 o'clock (%zu px, %u vs %u)", drawn, gt, gb);
+                        } else {
+                            CHECK(drawn == 0U, "absent battery draws nothing (%zu)", drawn);
+                        }
                     }
                 }
             }
@@ -5163,8 +5243,629 @@ static void test_companion_sparse_refresh_and_retry(void)
           "request exit forces same-face normal rebind");
 }
 
+/* ---- A DIAL OWNS THE GLASS (2026-11-10) ------------------------------------------------ */
+
+/* The rim's ink: every pixel at r >= 213 that the HUD layer paints differently from the
+ * same screen with no battery gauge, no charging and no mute (the env word 255). A dial
+ * that paints its own pixels out there (MINIMAL's disc) is the same in both. */
+static size_t rim_ink_away_count;      /* rim ink more than 8 px from the 12 o'clock dot (set by rim_ink_count) */
+
+static size_t rim_ink_count(uint16_t *fb, uint16_t *levels, size_t nlevels, size_t *distinct)
+{
+    static uint16_t ref[HUD_W * HUD_H];
+    const size_t px = (size_t)HUD_W * HUD_H;
+    const uint32_t word = __atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE);
+    memset(fb, 0, px * sizeof *fb);
+    apply_hud_overlay(&s_display, 0, 0, HUD_W, HUD_H, fb);
+    /* the reference is "nothing to show": no gauge, and on WATCH muted so that no dot is drawn */
+    const bool on_watch = (__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) & NAV_SPACE_MASK) ==
+                          (uint32_t)JR_DISPLAY_SPACE_WATCH;
+    __atomic_store_n(&s_hud_env_word, 255U, __ATOMIC_RELEASE);
+    memset(ref, 0, sizeof ref);
+    apply_hud_overlay(&s_display, 0, 0, HUD_W, HUD_H, ref);
+    bool ref_ink = false;
+    for (int y = 0; y < HUD_H && on_watch && !ref_ink; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            const int dx = x - 232, dy = y - 232;
+            if (dx * dx + dy * dy >= 213 * 213 && x >= 233 - 8 && x <= 233 + 8 && y <= 15 + 8 &&
+                ref[(size_t)y * HUD_W + x] != 0) { ref_ink = true; break; }
+        }
+    }
+    if (ref_ink) {                       /* a quiet WATCH with the microphone live shows its dot: mute it */
+        __atomic_store_n(&s_hud_env_word, 255U | (1U << 9), __ATOMIC_RELEASE);
+        memset(ref, 0, sizeof ref);
+        apply_hud_overlay(&s_display, 0, 0, HUD_W, HUD_H, ref);
+    }
+    __atomic_store_n(&s_hud_env_word, word, __ATOMIC_RELEASE);
+    size_t n = 0, d = 0;
+    rim_ink_away_count = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            const int dx = x - 232, dy = y - 232;
+            const uint16_t v = fb[(size_t)y * HUD_W + x];
+            if (dx * dx + dy * dy < 213 * 213 || v == ref[(size_t)y * HUD_W + x]) continue;
+            n++;
+            if (x < 233 - 8 || x > 233 + 8 || y > 15 + 8) rim_ink_away_count++;
+            if (levels != NULL) {
+                size_t k = 0;
+                while (k < d && levels[k] != v) k++;
+                if (k == d && d < nlevels) levels[d++] = v;
+            }
+        }
+    }
+    if (distinct != NULL) *distinct = d;
+    return n;
+}
+
+/* The staged screen: `space` at rest, microphone muted or live, charging, 74 %. */
+static void stage_rim(int space, bool muted)
+{
+    stage_ring_at_rest(space, JR_DISPLAY_OTA_IDLE, 0);
+    __atomic_store_n(&s_hud_env_word, 74U | (1U << 8) | (muted ? (1U << 9) : 0U), __ATOMIC_RELEASE);
+    s_hud_enabled = 1;
+    s_display.applied_face = JR_FACE_IDLE;       /* a dial face maps to IDLE in hud_face_of */
+    s_display.requested_word = (uint32_t)JR_FACE_IDLE << JR_DISPLAY_CMD_FACE_SHIFT;
+    s_style_shown = (uint8_t)JR_WATCH_JARVIS;
+}
+
+static void test_watch_dial_owns_the_glass_no_idle_rim(void)
+{
+    uint16_t *fb = malloc((size_t)HUD_W * HUD_H * sizeof *fb);
+    if (!fb) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; return; }
+
+    /* muted at rest on WATCH: nothing at all on any of the eight styles */
+    for (int st = 0; st < (int)JR_WATCH_STYLE_COUNT; ++st) {
+        stage_rim(JR_DISPLAY_SPACE_WATCH, true);
+        s_style_shown = (uint8_t)st;
+        const size_t n = rim_ink_count(fb, NULL, 0, NULL);
+        CHECK(n == 0, "WATCH style %s muted at rest draws no rim (%zu px)",
+              jr_display_watch_style_name((jr_watch_style_t)st), n);
+    }
+    /* microphone live and idle on a dial: ONE dot at 12 o'clock, about 3 px radius, and nothing else */
+    for (int st = 0; st < (int)JR_WATCH_STYLE_COUNT; ++st) {
+        stage_rim(JR_DISPLAY_SPACE_WATCH, false);
+        s_style_shown = (uint8_t)st;
+        const size_t n = rim_ink_count(fb, NULL, 0, NULL);
+        CHECK(n >= 20 && n <= 130, "WATCH style %s live and idle: a privacy dot (%zu px)",
+              jr_display_watch_style_name((jr_watch_style_t)st), n);
+        CHECK(rim_ink_away_count == 0, "WATCH style %s live and idle: nothing but the dot (%zu px away)",
+              jr_display_watch_style_name((jr_watch_style_t)st), rim_ink_away_count);
+    }
+    /* every other screen keeps its ring, muted (gold) and live (cyan, the gauge and the comet) */
+    static const int others[] = { JR_DISPLAY_SPACE_JARVIS, JR_DISPLAY_SPACE_STATUS, JR_DISPLAY_SPACE_WEATHER };
+    for (size_t i = 0; i < sizeof others / sizeof *others; ++i) {
+        for (int muted = 0; muted < 2; ++muted) {
+            stage_rim(others[i], muted != 0);
+            const size_t n = rim_ink_count(fb, NULL, 0, NULL);
+            CHECK(n > 3000, "space %d keeps its ring (muted %d): %zu px", others[i], muted, n);
+        }
+    }
+
+    /* a session, an error, or anything else in the foreground brings the whole ring back at once,
+     * muted or live */
+    static const char *const why[] = {
+        "an agent is working", "a question is up", "a commit ring is up", "a firmware update is running",
+        "an operator lease caption is up", "the voice is capturing", "the voice is thinking",
+        "the voice is speaking", "the voice failed", "the voice is busy",
+    };
+    for (int muted = 0; muted < 2; ++muted) {
+        for (size_t k = 0; k < sizeof why / sizeof why[0]; ++k) {
+            stage_rim(JR_DISPLAY_SPACE_WATCH, muted != 0);
+            switch (k) {
+            case 0: s_display.shell_word = JR_DISPLAY_SHELL_AGENT; break;
+            case 1: s_choice_n = 1; break;
+            case 2: s_commit_pct = 50U; break;
+            case 3: jr_display_ota_set(JR_DISPLAY_OTA_RECEIVING, 42U, 0U, 1U, true); break;
+            case 4: s_caption_on = 1; s_caption_lease = true; break;
+            case 5: s_display.requested_word = (uint32_t)JR_FACE_LISTENING << JR_DISPLAY_CMD_FACE_SHIFT; break;
+            case 6: s_display.requested_word = (uint32_t)JR_FACE_THINKING << JR_DISPLAY_CMD_FACE_SHIFT; break;
+            case 7: s_display.requested_word = (uint32_t)JR_FACE_SPEAKING << JR_DISPLAY_CMD_FACE_SHIFT; break;
+            case 8: s_display.requested_word = (uint32_t)JR_FACE_ERROR << JR_DISPLAY_CMD_FACE_SHIFT; break;
+            default: __atomic_fetch_or(&s_hud_env_word, JR_DISPLAY_ENV_VOICE_BUSY, __ATOMIC_RELEASE); break;
+            }
+            const size_t n = rim_ink_count(fb, NULL, 0, NULL);
+            /* (the commit and error rings draw over the same radius, so the difference can be smaller than a whole ring; the dot is at most 130) */
+            CHECK(n > 500, "WATCH (muted %d), but %s: the whole ring is back (%zu px)", muted, why[k], n);
+            s_display.shell_word = 0U;
+            s_choice_n = 0;
+            s_commit_pct = 0U;
+            s_caption_on = 0;
+            s_caption_lease = false;
+            jr_display_ota_set(JR_DISPLAY_OTA_IDLE, 0U, 0U, 1U, true);
+        }
+    }
+
+    /* the ring is anti-aliased: along the battery arc's edge the pixels run through many levels */
+    stage_rim(JR_DISPLAY_SPACE_JARVIS, false);
+    uint16_t levels[64];
+    size_t distinct = 0;
+    (void)rim_ink_count(fb, levels, 64, &distinct);
+    CHECK(distinct > 8, "the rim runs through %zu distinct levels (want more than 8)", distinct);
+
+    /* ONE RING, ONE RADIUS: nothing the shell draws comes within 6 px of it. The ring sits at r218;
+     * render the HUD layer alone and the HUD layer plus the shell on the home screen and require the
+     * shell to leave every pixel r215..221 as it was. */
+    {
+        stage_rim(JR_DISPLAY_SPACE_JARVIS, false);
+        static uint16_t a[HUD_W * HUD_H], b[HUD_W * HUD_H];
+        memset(a, 0, sizeof a);
+        apply_hud_overlay(&s_display, 0, 0, HUD_W, HUD_H, a);
+        memcpy(b, a, sizeof b);
+        apply_shell_overlay(&s_display, 0, 0, HUD_W, HUD_H, b);
+        size_t touched = 0;
+        for (int y = 0; y < HUD_H; ++y) for (int x = 0; x < HUD_W; ++x) {
+            const int dx2 = 2 * x - 465, dy2 = 2 * y - 465, r2 = dx2 * dx2 + dy2 * dy2;
+            if (r2 >= 430 * 430 && r2 <= 442 * 442 && a[(size_t)y * HUD_W + x] != b[(size_t)y * HUD_W + x]) touched++;
+        }
+        CHECK(touched == 0, "the shell drew %zu px within 6 px of the rim radius", touched);
+    }
+
+    stage_rim(JR_DISPLAY_SPACE_JARVIS, false);
+    reset_nav();
+    free(fb);
+}
+
+/* The watch clears a disc to black under its dial, then draws: ink is anything that is neither
+ * that black nor the stand-in art. */
+static bool dial_ink(uint16_t v) { return v != 0x0000 && v != 0x4208; }
+
+/* JARVIS gets a face: ticks, beads and rings are drawn on the settled watch, awake (the
+ * microphone live, the rim up) or muted, with or without a sun. */
+static void test_watch_jarvis_style_has_a_dial(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb);
+    if (!fb) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; return; }
+    for (int sun = 0; sun < 2; ++sun) {
+        for (int muted = 0; muted < 2; ++muted) {
+            if (sun) jr_display_sun_set(422, 1175); else jr_display_sun_set(-1, -1);
+            __atomic_store_n(&s_hud_env_word, 74U | (muted ? (1U << 9) : 0U), __ATOMIC_RELEASE);
+            render_watch_frame_at(fb, JR_WATCH_JARVIS, JR_FACE_IDLE, 10, 8, 0);
+            /* the 6 o'clock hour tick is r186..201 on the vertical through the centre (the
+             * hands, at 10:08:00, are all in the upper half) */
+            size_t tick = 0, ring = 0;
+            for (int y = 232 + 186; y <= 232 + 201; ++y) {
+                if (dial_ink(fb[(size_t)y * HUD_W + 232]) || dial_ink(fb[(size_t)y * HUD_W + 233]) || dial_ink(fb[(size_t)y * HUD_W + 231])) tick++;
+            }
+            /* the ring at r184: pixels on a quarter of its circle are not the art */
+            for (int ox = 0; ox < 130; ++ox) {
+                int oy = 184;
+                while (oy * oy + ox * ox > 184 * 184) oy--;
+                if (dial_ink(fb[(size_t)(232 + oy) * HUD_W + 232 + ox])) ring++;
+            }
+            CHECK(tick >= 8, "JARVIS (sun %d, muted %d): the 6 o'clock tick is drawn (%zu px)", sun, muted, tick);
+            CHECK(ring >= 30, "JARVIS (sun %d, muted %d): the ring is drawn (%zu of 130)", sun, muted, ring);
+        }
+    }
+    jr_display_sun_set(422, 1175);
+    s_display.shown_face = JR_FACE_IDLE;
+    reset_nav();
+    free(fb);
+}
+
+/* The shade's mute button is an opaque disc: what the face is does not show through it. */
+static void test_shade_button_disc_hides_the_face(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *a = malloc(px * sizeof *a), *b = malloc(px * sizeof *b);
+    if (!a || !b) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; free(a); free(b); return; }
+    for (int muted = 0; muted < 2; ++muted) {
+        stage_shade(muted != 0, 40, 60, SP_SHADE_ENTRY_MS, 0U);
+        for (size_t i = 0; i < px; ++i) { a[i] = 0x0000; b[i] = 0xFFFF; }
+        for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+            const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+            apply_space_overlay(&s_display, y, y2, a + (size_t)y * HUD_W);
+            apply_space_overlay(&s_display, y, y2, b + (size_t)y * HUD_W);
+        }
+        size_t seen = 0, inside = 0;
+        for (int y = 0; y < HUD_H; ++y) {
+            for (int x = 0; x < HUD_W; ++x) {
+                const int dx = x - SP_CX, dy = y - SP_BTN_CY;
+                if (dx * dx + dy * dy > 36 * 36) continue;
+                inside++;
+                if (a[(size_t)y * HUD_W + x] != b[(size_t)y * HUD_W + x]) seen++;
+            }
+        }
+        CHECK(inside > 4000 && seen == 0, "muted %d: %zu of %zu px under the button disc show the face", muted, seen, inside);
+    }
+    reset_nav();
+    free(a);
+    free(b);
+}
+
+/* The rest face is one face: the same pixels whichever screen and style the device was
+ * on when it went to rest. */
+static void test_rest_face_is_one_face(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *ref = malloc(px * sizeof *ref), *got = malloc(px * sizeof *got);
+    if (!ref || !got) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; free(ref); free(got); return; }
+    for (int mode = JR_DISPLAY_REST_NIGHTSTAND; mode <= JR_DISPLAY_REST_GLANCE; ++mode) {
+        static const struct { int space; int style; } via[] = {
+            { JR_DISPLAY_SPACE_WATCH, JR_WATCH_JARVIS }, { JR_DISPLAY_SPACE_WATCH, JR_WATCH_DIVER },
+            { JR_DISPLAY_SPACE_WATCH, JR_WATCH_MINIMAL }, { JR_DISPLAY_SPACE_JARVIS, JR_WATCH_PILOT },
+        };
+        for (size_t v = 0; v < sizeof via / sizeof via[0]; ++v) {
+            dream_fixture();
+            s_power_word |= 1u << 24;
+            stage_ring_at_rest(via[v].space, JR_DISPLAY_OTA_IDLE, 0);
+            s_style_shown = (uint8_t)via[v].style;
+            jr_display_rest_set((jr_display_rest_mode_t)mode, true, true);
+            jr_display_clock_set(true, 6, 42, 0);
+            uint16_t *dst = v == 0 ? ref : got;
+            memset(dst, 0, px * sizeof *dst);
+            for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+                const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+                (void)apply_companion_overlay(&s_display, y, y2, dst + (size_t)y * HUD_W, (jr_display_rest_mode_t)mode);
+            }
+            if (v > 0) {
+                /* the face itself (inside the rim band) is one face; the rim differs by the rule of the screen */
+                size_t differ = 0;
+                for (int y = 0; y < HUD_H; ++y) for (int x = 0; x < HUD_W; ++x) {
+                    const int dx = x - 232, dy = y - 232;
+                    if (dx * dx + dy * dy < 205 * 205 && ref[(size_t)y * HUD_W + x] != got[(size_t)y * HUD_W + x]) differ++;
+                }
+                CHECK(differ == 0,
+                      "rest mode %d: the face reached via space %d style %d is not the one reached via WATCH JARVIS (%zu px)",
+                      mode, via[v].space, via[v].style, differ);
+            }
+        }
+    }
+    reset_nav();
+    free(ref);
+    free(got);
+}
+
+/* ---- THE PEEK IS HANDS ONLY, AND THE RING AT REST IS AS DIM AS ITS TIME (2026-11-10, round 3) ---- */
+
+static int ink_peak(uint16_t v, bool swap)
+{
+    if (swap) v = (uint16_t)((v >> 8) | (v << 8));
+    const int r = ((v >> 11) & 31) << 3, g = ((v >> 5) & 63) << 2, b = (v & 31) << 3;
+    return r > g ? (r > b ? r : b) : (g > b ? g : b);
+}
+
+/* Any screen but WATCH that shows the time for a few seconds shows the three hands and the hub and
+ * nothing else: the ticks, rings, the day's arc and the date are the JARVIS watch style's, on WATCH.
+ * The peek is hud_overlay_clock pixel for pixel; on WATCH the same style draws a dial. */
+static void test_home_peek_is_hands_only(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb), *ref = malloc(px * sizeof *ref);
+    if (!fb || !ref) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; free(fb); free(ref); return; }
+    size_t furniture_on_watch = 0;
+    for (int on_watch = 0; on_watch < 2; ++on_watch) {
+        stage_ring_at_rest(on_watch ? JR_DISPLAY_SPACE_WATCH : JR_DISPLAY_SPACE_JARVIS, JR_DISPLAY_OTA_IDLE, 0);
+        s_style_shown = s_style_seen = s_style_from = (uint8_t)JR_WATCH_JARVIS;
+        s_style_prog = 256;
+        s_space_prog = s_space_ease = 256;
+        s_dial_blit = false;
+        jr_display_clock_set(true, 10, 8, 30);
+        s_clock_shown_word = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
+        s_clock_ease = 256;
+        s_watch_s = 256;
+        sp_compose();
+        memset(fb, 0, px * sizeof *fb);
+        memset(ref, 0, px * sizeof *ref);
+        for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+            const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+            apply_clock_overlay(&s_display, y, y2, fb + (size_t)y * HUD_W);
+        }
+        hud_overlay_clock(ref, 0, HUD_H, s_display.board.swap_color_bytes, 10, 8, 30, 255);
+        size_t differ = 0;
+        for (size_t i = 0; i < px; ++i) if (fb[i] != ref[i]) differ++;
+        if (!on_watch) {
+            CHECK(differ == 0, "the home peek is the hands and the hub and nothing else (%zu px differ)", differ);
+        } else {
+            furniture_on_watch = differ;
+        }
+    }
+    CHECK(furniture_on_watch > 2000, "the same style on WATCH draws its dial (%zu px beyond the hands)", furniture_on_watch);
+    reset_nav();
+    free(fb);
+    free(ref);
+}
+
+/* A rest face is dim; the ring round it is drawn at the strength of its digits, so it is never
+ * the brightest thing on a bedside face. Day and night, on home, in a glance and in DREAM. */
+static void test_rest_ring_is_as_dim_as_its_time(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb);
+    if (!fb) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; return; }
+    const bool swap = s_display.board.swap_color_bytes;
+    for (int night = 0; night < 2; ++night) {
+        for (int dream = 0; dream < 2; ++dream) {
+            dream_fixture();
+            s_power_word |= 1u << 24;
+            stage_ring_at_rest(JR_DISPLAY_SPACE_JARVIS, JR_DISPLAY_OTA_IDLE, 0);
+            jr_display_rest_set(dream ? JR_DISPLAY_REST_DREAM : JR_DISPLAY_REST_NIGHTSTAND, true, night != 0);
+            jr_display_clock_set(true, 6, 42, 0);
+            jr_display_set_hud_env(74, false, false, 0, 0);       /* live microphone: a cyan ring */
+            if (dream) s_power_word &= ~(1u << 24);
+            memset(fb, 0, px * sizeof *fb);
+            for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+                const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+                if (dream) apply_dream_overlay(&s_display, y, y2, fb + (size_t)y * HUD_W);
+                else (void)apply_companion_overlay(&s_display, y, y2, fb + (size_t)y * HUD_W,
+                                                   JR_DISPLAY_REST_NIGHTSTAND);
+            }
+            int ring = 0, digits = 0, line = 0;
+            size_t ring_px = 0;
+            for (int y = 0; y < HUD_H; ++y) for (int x = 0; x < HUD_W; ++x) {
+                const int dx = x - 232, dy = y - 232;
+                const int p = ink_peak(fb[(size_t)y * HUD_W + x], swap);
+                if (dx * dx + dy * dy >= 213 * 213) { if (p > ring) ring = p; if (p > 0) ring_px++; }
+                else if (dx * dx + dy * dy < 150 * 150) {
+                    if (y >= 187 && y < 247 && p > digits) digits = p;
+                    if (y >= 288 && y < 304 && p > line) line = p;
+                }
+            }
+            /* the ink: warm amber at half strength by day, a quarter at night and in DREAM, the
+             * quiet line at two thirds of the digits */
+            const bool dim = night != 0 || dream != 0;
+            CHECK(dim ? (digits >= 58 && digits <= 70) : (digits >= 120 && digits <= 136),
+                  "rest (night %d dream %d): the time's strength is %d", night, dream, digits);
+            if (line > 0) {
+                CHECK(line * 100 >= digits * 55 && line * 100 <= digits * 70,
+                      "rest (night %d dream %d): the line (%d) is two thirds of the time (%d)", night, dream, line, digits);
+            }
+            CHECK(ring_px > 1000, "rest (night %d dream %d): the ring is drawn (%zu px)", night, dream, ring_px);
+            CHECK(digits > 0 && ring <= digits, "rest (night %d dream %d): the ring (%d) is no brighter than the time (%d)",
+                  night, dream, ring, digits);
+        }
+    }
+    reset_nav();
+    free(fb);
+}
+
+/* ---- A WATCH AT REST BY DAY KEEPS ITS DIAL (2026-11-10, round 2) --------------------------- */
+
+static void stage_rest_on_watch(int space, jr_display_rest_mode_t mode, bool night, bool time_valid)
+{
+    warm_fixture();                       /* DIVER decoded and on the glass */
+    stage_ring_at_rest(space, JR_DISPLAY_OTA_IDLE, 0);
+    s_power_word |= 1u << 24;
+    jr_display_rest_set(mode, true, night);
+    jr_display_clock_set(time_valid, 6, 42, 0);
+    jr_display_set_hud_env(53, false, true, 0, 0);
+    s_display.dream_active = s_display.quiet_active = false;
+}
+
+/* Which rest is a dial and which is the glass-font face: by day (a glance, or the nightstand
+ * while it is not night, with a time to show) the chosen dial stays; at night, in DREAM, without a
+ * time, and on every screen but WATCH the rest face is unchanged. */
+static void test_rest_by_day_on_watch_keeps_the_dial(void)
+{
+    static const struct {
+        int space; jr_display_rest_mode_t mode; bool night, time; bool keeps; const char *what;
+    } k[] = {
+        { JR_DISPLAY_SPACE_WATCH,  JR_DISPLAY_REST_NIGHTSTAND, false, true,  true,  "WATCH nightstand by day" },
+        { JR_DISPLAY_SPACE_WATCH,  JR_DISPLAY_REST_GLANCE,     false, true,  true,  "WATCH glance by day" },
+        { JR_DISPLAY_SPACE_WATCH,  JR_DISPLAY_REST_GLANCE,     true,  true,  true,  "WATCH glance (the night flag is the nightstand's)" },
+        { JR_DISPLAY_SPACE_WATCH,  JR_DISPLAY_REST_NIGHTSTAND, true,  true,  false, "WATCH nightstand at night" },
+        { JR_DISPLAY_SPACE_WATCH,  JR_DISPLAY_REST_NIGHTSTAND, false, false, false, "WATCH nightstand with no time" },
+        { JR_DISPLAY_SPACE_JARVIS, JR_DISPLAY_REST_NIGHTSTAND, false, true,  false, "home nightstand by day" },
+        { JR_DISPLAY_SPACE_JARVIS, JR_DISPLAY_REST_GLANCE,     false, true,  false, "home glance" },
+    };
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; ++i) {
+        stage_rest_on_watch(k[i].space, k[i].mode, k[i].night, k[i].time);
+        const jr_display_rest_mode_t raw = rest_eligible_raw(&s_display);
+        CHECK(raw == k[i].mode, "%s: the raw rest mode is %d (got %d)", k[i].what, (int)k[i].mode, (int)raw);
+        CHECK(watch_rest_day(&s_display) == k[i].keeps, "%s: keeps the dial is %d", k[i].what, (int)k[i].keeps);
+        CHECK(rest_eligible(&s_display) == (k[i].keeps ? JR_DISPLAY_REST_NONE : k[i].mode),
+              "%s: the rest face is %s", k[i].what, k[i].keeps ? "not drawn" : "drawn");
+    }
+    /* DREAM (off USB, not charging) on WATCH is the dark time face, never the dial */
+    stage_rest_on_watch(JR_DISPLAY_SPACE_WATCH, JR_DISPLAY_REST_DREAM, false, true);
+    s_power_word &= ~(1u << 24);
+    jr_display_set_hud_env(53, false, true, 0, 0);
+    CHECK(rest_eligible(&s_display) == JR_DISPLAY_REST_DREAM && !watch_rest_day(&s_display),
+          "WATCH in DREAM keeps the glass-font rest face");
+    reset_nav();
+}
+
+/* A resting dial is redrawn only when the minute (or what the rim shows) changes: frames asked
+ * of the glass across 120 s of rest by day, against the awake cadence, and what else stands down. */
+static void test_resting_dial_is_redrawn_only_when_the_minute_changes(void)
+{
+    jr_display_ctx_t *ctx = &s_display;
+    stage_rest_on_watch(JR_DISPLAY_SPACE_WATCH, JR_DISPLAY_REST_NIGHTSTAND, false, true);
+    CHECK(s_dial_blit, "a dial is on the glass");
+
+    /* awake: every pass of the presenter asks for a frame */
+    s_rest_day = false;
+    s_still_key = UINT32_MAX;
+    unsigned awake = 0;
+    for (int t = 0; t < 120; ++t) awake += presenter_ticks_the_glass() ? 1U : 0U;
+    CHECK(awake == 120U, "awake, every pass asks for a frame (%u of 120)", awake);
+
+    /* at rest: 120 s in 100 ms passes, the seconds running and the minute turning twice */
+    unsigned frames = 0, first_frame_at = 9999;
+    s_still_frames = 0;
+    for (int t = 0; t < 1200; ++t) {
+        jr_display_clock_set(true, 6, 42 + (t / 10 + 30) / 60, (t / 10 + 30) % 60);
+        s_rest_day = watch_rest_day(ctx);
+        if (presenter_ticks_the_glass()) {
+            if (frames == 0) first_frame_at = (unsigned)t;
+            frames++;
+        }
+    }
+    CHECK(frames == 3U && first_frame_at == 0U,
+          "120 s of rest by day asked for %u frames (want 3: entering rest, then two minute turns)", frames);
+    printf("note: 120 s of rest by day asks the glass for %u frames (awake: one per presenter pass, 120 per 12 s)\n", frames);
+
+    /* a change of what the rim shows redraws once (the microphone goes live) */
+    jr_display_set_hud_env(53, false, false, 0, 0);
+    CHECK(presenter_ticks_the_glass() && !presenter_ticks_the_glass(), "the microphone going live redraws once");
+    /* and so does a brightness change still to settle */
+    s_still_key = UINT32_MAX;
+    CHECK(presenter_ticks_the_glass(), "leaving rest and coming back draws once");
+
+    /* nothing else runs while it rests: no neighbour decode, the on-glass frame is kept */
+    s_dial_glass_ms = 0;
+    s_stub_eaf_decodes = 0;
+    s_rest_day = true;
+    dial_warm_tick(ctx, 5000U, JR_FACE_IDLE, true);
+    CHECK(s_stub_eaf_decodes == 0, "no warm-up decode while the dial rests (%d)", (int)s_stub_eaf_decodes);
+    s_rest_day = false;
+    dial_warm_tick(ctx, 5000U, JR_FACE_IDLE, true);
+    CHECK(s_stub_eaf_decodes == 1, "the warm-up runs again once awake (%d)", (int)s_stub_eaf_decodes);
+    s_rest_day = true;
+    dial_cache_release();
+    CHECK(s_dial_blit && s_dial_frame != NULL && s_dial_frame_face == JR_FACE_DIAL_DIVER &&
+          dial_strip_mismatch(ctx, 0x11) == 0, "releasing the cache at rest keeps the dial on the glass");
+    s_rest_day = false;
+    reset_nav();
+}
+
+/* The pixels of a resting dial do not move with the seconds, on a dial drawn by us (JARVIS) and
+ * on baked art with a seconds hand of ours (DIVER); an awake one does. */
+static void test_resting_dial_has_no_seconds_hand(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *a = malloc(px * sizeof *a), *b = malloc(px * sizeof *b);
+    if (!a || !b) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; free(a); free(b); return; }
+    static const struct { int style; jr_face_t face; } dials[] = {
+        { JR_WATCH_JARVIS, JR_FACE_IDLE }, { JR_WATCH_DIVER, JR_FACE_DIAL_DIVER },
+        { JR_WATCH_DRESS, JR_FACE_DIAL_DRESS }, { JR_WATCH_PILOT, JR_FACE_DIAL_PILOT },
+        { JR_WATCH_MINIMAL, JR_FACE_IDLE }, { JR_WATCH_FUTURE, JR_FACE_DIAL_FUTURE },
+    };
+    for (size_t i = 0; i < sizeof dials / sizeof dials[0]; ++i) {
+        s_watch_still = true;
+        render_watch_frame_at(a, dials[i].style, dials[i].face, 10, 8, 3);
+        render_watch_frame_at(b, dials[i].style, dials[i].face, 10, 8, 41);
+        size_t moved = 0;
+        for (size_t k = 0; k < px; ++k) moved += a[k] != b[k];
+        CHECK(moved == 0, "%s at rest: the pixels move with the seconds (%zu px)",
+              jr_display_watch_style_name((jr_watch_style_t)dials[i].style), moved);
+        s_watch_still = false;
+        render_watch_frame_at(a, dials[i].style, dials[i].face, 10, 8, 3);
+        render_watch_frame_at(b, dials[i].style, dials[i].face, 10, 8, 41);
+        moved = 0;
+        for (size_t k = 0; k < px; ++k) moved += a[k] != b[k];
+        CHECK(moved > 30, "%s awake: the seconds hand moves (%zu px)",
+              jr_display_watch_style_name((jr_watch_style_t)dials[i].style), moved);
+        /* a resting dial shows no seconds hand at all, not one parked at 12: it differs from the
+         * same minute awake at :00, where the hand points up */
+        s_watch_still = true;
+        render_watch_frame_at(a, dials[i].style, dials[i].face, 10, 8, 3);
+        s_watch_still = false;
+        render_watch_frame_at(b, dials[i].style, dials[i].face, 10, 8, 0);
+        moved = 0;
+        for (size_t k = 0; k < px; ++k) moved += a[k] != b[k];
+        /* (DRESS's and MINIMAL's hand lies under their own markings at :00: no ink to tell apart) */
+        if (dials[i].style != JR_WATCH_DRESS && dials[i].style != JR_WATCH_MINIMAL) {
+            CHECK(moved > 30, "%s at rest draws no seconds hand (%zu px differ from awake at :00)",
+                  jr_display_watch_style_name((jr_watch_style_t)dials[i].style), moved);
+        }
+    }
+    s_watch_still = false;
+    s_display.shown_face = JR_FACE_IDLE;
+    reset_nav();
+    free(a);
+    free(b);
+}
+
+/* ---- THE FINISHED JARVIS DIAL ---------------------------------------------------------------- */
+
+static unsigned nat565(const uint16_t v) { return s_display.board.swap_color_bytes ? (unsigned)((v >> 8) | (v << 8)) & 0xFFFFu : v; }
+
+/* the sun bead is bright gold: the amber ticks have less green and no blue, the white hand has all of it */
+static bool is_bead(unsigned v) { return ((v >> 11) & 31) >= 29 && ((v >> 5) & 63) >= 52 && (v & 31) >= 12 && (v & 31) <= 26; }
+
+static void test_jarvis_dial_hands_arc_bead_and_date(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb);
+    if (!fb) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; return; }
+    s_display.board.swap_color_bytes = false;
+    jr_display_clock_set_date(2, 10, 10);                       /* TUE 10 NOV */
+    jr_display_sun_set(422, 1175);
+
+    /* the minute hand at 3:00 is the long one straight up: tapered (wider at the hub than at the
+     * tip) and anti-aliased (more than the two levels of a hard edge across its width) */
+    render_watch_frame_at(fb, JR_WATCH_JARVIS, JR_FACE_IDLE, 3, 0, 0);
+    int w_near = 0, w_far = 0;
+    unsigned levels_seen = 0;
+    uint16_t seen[16] = { 0 };
+    for (int x = 215; x <= 250; ++x) {
+        const uint16_t near_px = fb[(size_t)(232 - 40) * HUD_W + x], far_px = fb[(size_t)(232 - 150) * HUD_W + x];
+        if (nat565(near_px) != 0) w_near++;
+        if (nat565(far_px) != 0) w_far++;
+        const uint16_t v = near_px;
+        unsigned k = 0;
+        while (k < levels_seen && seen[k] != v) k++;
+        if (k == levels_seen && levels_seen < 16) seen[levels_seen++] = v;
+    }
+    CHECK(w_near > w_far && w_far >= 1, "the minute hand tapers (%d px at r40, %d px at r150)", w_near, w_far);
+    CHECK(levels_seen >= 4, "the minute hand is anti-aliased (%u levels across it)", levels_seen);
+
+    /* the day's arc: a thin 2 px line of dim amber at r205 (between ticks, which end at r201) */
+    /* radial profile along the ray 20 deg clockwise of 12 o'clock, between ticks */
+    {
+        int ink = 0, bright = 0;
+        for (int i = 0; i < 40; ++i) {
+            const double r = 199.0 + i * 0.25;
+            const int x = 233 + (int)(r * 0.3420201 + 0.5), y = 233 - (int)(r * 0.9396926 + 0.5);
+            const unsigned v = nat565(fb[(size_t)y * HUD_W + x]);
+            if (v != 0) ink++;
+            if (((v >> 11) & 31) > 20) bright++;
+        }
+        CHECK(ink >= 6 && ink <= 22, "the day arc is a thin line (%d of 40 samples inked)", ink);
+        CHECK(bright == 0, "the day arc is dim amber, not the bead (%d bright samples)", bright);
+    }
+
+    /* the bead at the sun: bright gold at 13:15 (75 min past noon), nothing bright at night */
+    render_watch_frame_at(fb, JR_WATCH_JARVIS, JR_FACE_IDLE, 13, 15, 0);
+    unsigned bead_day = 0, bead_px_at = 0;
+    for (int y = 0; y < HUD_H; ++y) for (int x = 0; x < HUD_W; ++x) {
+        const int dx = x - 232, dy = y - 232, r2 = dx * dx + dy * dy;
+        if (r2 < 199 * 199 || r2 > 212 * 212) continue;
+        const unsigned v = nat565(fb[(size_t)y * HUD_W + x]);
+        if (is_bead(v)) bead_day++;
+    }
+    {
+        /* its place: 75 min past noon = 75/1440 of a turn clockwise from 12, at r205 */
+        /* sin and cos of 18.75 degrees (the test links without libm) */
+        const int bx = 233 + (int)(205 * 0.321439 + 0.5), by = 233 - (int)(205 * 0.946930 + 0.5);
+        const unsigned v = nat565(fb[(size_t)by * HUD_W + bx]);
+        bead_px_at = is_bead(v);
+    }
+    CHECK(bead_day >= 20 && bead_px_at, "the sun is a bright bead on the arc (%u bright px, at the sun %u)", bead_day, bead_px_at);
+    render_watch_frame_at(fb, JR_WATCH_JARVIS, JR_FACE_IDLE, 22, 15, 0);
+    unsigned bead_night = 0;
+    for (int y = 0; y < HUD_H; ++y) for (int x = 0; x < HUD_W; ++x) {
+        const int dx = x - 232, dy = y - 232, r2 = dx * dx + dy * dy;
+        if (r2 < 199 * 199 || r2 > 212 * 212) continue;
+        const unsigned v = nat565(fb[(size_t)y * HUD_W + x]);
+        if (is_bead(v)) bead_night++;
+    }
+    CHECK(bead_night == 0, "no bead at night (%u bright px)", bead_night);
+
+    /* the date under the centre, in the glass LABEL type, dim amber; none without a date */
+    render_watch_frame_at(fb, JR_WATCH_JARVIS, JR_FACE_IDLE, 3, 0, 0);
+    unsigned date_ink = 0;
+    const glass_metrics_t ml = glass_font_metrics(GLASS_FONT_LABEL);
+    for (int y = JARVIS_DATE_Y + ml.ink_top; y <= JARVIS_DATE_Y + ml.ink_bottom; ++y)
+        for (int x = 233 - 60; x <= 233 + 60; ++x) date_ink += nat565(fb[(size_t)y * HUD_W + x]) != 0;
+    CHECK(date_ink >= 40, "the date is drawn under the centre (%u px)", date_ink);
+    CHECK(strcmp(s_watch_words.jdate, "TUE 10") == 0, "the date reads TUE 10 (got '%s')", s_watch_words.jdate);
+    jr_display_clock_set_date(0, 0, 0);
+    render_watch_frame_at(fb, JR_WATCH_JARVIS, JR_FACE_IDLE, 3, 0, 0);
+    unsigned none = 0;
+    for (int y = JARVIS_DATE_Y + ml.ink_top; y <= JARVIS_DATE_Y + ml.ink_bottom; ++y)
+        for (int x = 233 - 60; x <= 233 + 60; ++x) none += nat565(fb[(size_t)y * HUD_W + x]) != 0;
+    CHECK(date_ink >= none + 40, "no date, no date text (%u px with, %u without)", date_ink, none);
+    jr_display_clock_set_date(3, 23, 8);
+    s_display.shown_face = JR_FACE_IDLE;
+    reset_nav();
+    free(fb);
+}
+
 static void test_companion_actual_flush_preserves_rims_and_strip_order(void)
 {
+  for (int muted = 0; muted < 2; ++muted) {
     for (int mode = JR_DISPLAY_REST_NIGHTSTAND; mode <= JR_DISPLAY_REST_GLANCE; ++mode) {
         for (int swap = 0; swap < 2; ++swap) {
             dream_fixture();
@@ -5173,37 +5874,57 @@ static void test_companion_actual_flush_preserves_rims_and_strip_order(void)
             s_display.board.swap_color_bytes = swap != 0;
             jr_display_rest_set((jr_display_rest_mode_t)mode, true, true);
             jr_display_clock_set(true, 6, 42, 0);
-            jr_display_set_hud_env(53, true, true, 24, -24);
+            jr_display_set_hud_env(53, true, muted != 0, 24, -24);
             uint16_t *whole = calloc(HUD_W * HUD_H, sizeof *whole);
             uint16_t *strips = calloc(HUD_W * HUD_H, sizeof *strips);
             uint16_t *rims = calloc(HUD_W * HUD_H, sizeof *rims);
-            CHECK(whole && strips && rims, "allocate frame comparison");
+            uint16_t *later = calloc(HUD_W * HUD_H, sizeof *later);
+            CHECK(whole && strips && rims && later, "allocate frame comparison");
             s_stub_disp_user_data = &s_display;
             panel_flush(s_display.disp, 0, 0, HUD_W, HUD_H, whole); complete_test_transfer();
             for (int y = 0; y < HUD_H; y += 13) {
                 const int end = y + 13 < HUD_H ? y + 13 : HUD_H;
                 panel_flush(s_display.disp, 0, y, HUD_W, end, strips + y * HUD_W); complete_test_transfer();
             }
-            apply_rest_rims(&s_display, 0, HUD_H, rims);
+            apply_rest_rims(&s_display, 0, HUD_H, rims, REST_ALPHA_NIGHT);   /* the flush at night: a ring as dim as its time */
             CHECK(memcmp(whole, strips, HUD_W * HUD_H * sizeof *whole) == 0,
                   "companion mode%d swap%d preserves full/strip composition", mode, swap);
-            unsigned bad_rim = 0, near_black = 0, clock_ink = 0, item_ink = 0;
-            const uint16_t ink = panel_order_color(&s_display, 0x2104);
+            unsigned bad_rim = 0, near_black = 0, clock_ink = 0, item_ink = 0, rim_ink = 0, dial_ink_px = 0;
             for (int y = 0; y < HUD_H; ++y) for (int x = 0; x < HUD_W; ++x) {
                 const int dx = x - 232, dy = y - 232;
                 const uint16_t px = whole[y * HUD_W + x];
                 if (dx * dx + dy * dy >= 180 * 180 && px != rims[y * HUD_W + x]) { bad_rim++; }
-                if (dx * dx + dy * dy < 180 * 180 && px != 0 && px != ink) { near_black++; }
-                if (y >= (mode == JR_DISPLAY_REST_GLANCE ? 180 : 222) &&
-                    y < (mode == JR_DISPLAY_REST_GLANCE ? 201 : 243) && px == ink) { clock_ink++; }
-                if (y >= 224 && y < 231 && mode == JR_DISPLAY_REST_GLANCE && px == ink) { item_ink++; }
+                if (dx * dx + dy * dy >= 205 * 205 && px != 0) { rim_ink++; }
+                if (dx * dx + dy * dy < 205 * 205 && px != 0) { dial_ink_px++; }
+                /* the glass type is anti-aliased warm amber: inside the face every pixel is black or
+                 * a blend of black and amber (no blue to speak of) */
+                const uint16_t nat = s_display.board.swap_color_bytes ? (uint16_t)((px >> 8) | (px << 8)) : px;
+                if (dx * dx + dy * dy < 180 * 180 && (nat & 31) > 4) { near_black++; }
+                if (y >= 187 && y < 247 && ((nat >> 11) & 31) > 3) { clock_ink++; }
+                if (y >= 288 && y < 304 && px != 0) { item_ink++; }     /* the one quiet line */
             }
-            CHECK(bad_rim == 0 && near_black == 0 && clock_ink > 0,
-                  "actual WATCH flush keeps dim clock, black content and battery/privacy rims mode%d swap%d", mode, swap);
-            if (mode == JR_DISPLAY_REST_GLANCE) { CHECK(item_ink > 0, "Glance next-unavailable glyphs reach actual flush"); }
-            free(whole); free(strips); free(rims);
+            if (mode == JR_DISPLAY_REST_NIGHTSTAND) {
+                CHECK(bad_rim == 0 && near_black == 0 && clock_ink > 0 && item_ink > 0,
+                      "actual WATCH flush at night keeps the amber glass clock, its one line and black content mode%d swap%d muted%d (rim %u, black %u, clock %u, line %u)",
+                      mode, swap, muted, bad_rim, near_black, clock_ink, item_ink);
+            } else {
+                /* BY DAY the chosen dial stays, drawn as a still: it has ink, and the seconds do not move it */
+                CHECK(s_watch_still && dial_ink_px > 500,
+                      "a glance on WATCH keeps the dial (still %d, %u px) swap%d muted%d", (int)s_watch_still, dial_ink_px, swap, muted);
+                jr_display_clock_set(true, 6, 42, 37);
+                panel_flush(s_display.disp, 0, 0, HUD_W, HUD_H, later); complete_test_transfer();
+                CHECK(memcmp(whole, later, HUD_W * HUD_H * sizeof *whole) == 0,
+                      "a resting dial draws the same pixels at second 0 and second 37 swap%d muted%d", swap, muted);
+            }
+            /* ONE RULE ON WATCH, dial or rest face: muted and idle shows nothing at the rim; live and idle a single
+             * privacy dot */
+            CHECK(muted ? rim_ink == 0 : (rim_ink >= 20 && rim_ink <= 130),
+                  "WATCH at rest: the rim is %s mode%d swap%d (%u px)", muted ? "absent when muted" : "one dot when live",
+                  mode, swap, rim_ink);
+            free(whole); free(strips); free(rims); free(later);
         }
     }
+  }
 }
 
 static void test_panel_ack_requires_transport_settle_and_completed_recovery(void)
@@ -5404,11 +6125,13 @@ static void early_transfer_hook(void)
     s_fake_us += 17000; /* submission returns after the actual completion */
 }
 
+/* a row inside the rest face's time (cap top 187 with a quiet line under it, 59 px tall) */
+#define REST_TIME_ROW 200
 static void test_glance_proxy_tracks_actual_successful_inflight_content(void)
 {
     dream_fixture();
     s_display.first_transfer_state = 0;
-    flush_test_strip(180); /* neutral DREAM before valid-time Glance */
+    flush_test_strip(REST_TIME_ROW); /* neutral DREAM before valid-time Glance */
     jr_display_rest_set(JR_DISPLAY_REST_GLANCE, false, false);
     jr_display_clock_set(true, 5, 10, 0);
     complete_test_transfer();
@@ -5417,19 +6140,19 @@ static void test_glance_proxy_tracks_actual_successful_inflight_content(void)
     flush_test_strip(0); complete_test_transfer();
     CHECK(s_display.first_glance_time_transfer_state == 0U, "non-clock Glance strip is not useful-time proof");
     jr_display_clock_set(false, 0, 0, 0);
-    flush_test_strip(180); jr_display_clock_set(true, 5, 10, 0); complete_test_transfer();
+    flush_test_strip(REST_TIME_ROW); jr_display_clock_set(true, 5, 10, 0); complete_test_transfer();
     CHECK(s_display.first_glance_time_transfer_state == 0U, "unknown clock tag remains unknown despite later valid mailbox");
     s_stub_draw_hook = early_transfer_hook; s_stub_draw_error = ESP_FAIL;
     const unsigned early_ready = s_stub_flush_ready_calls;
-    flush_test_strip(180);
+    flush_test_strip(REST_TIME_ROW);
     CHECK(s_display.first_glance_time_transfer_state == 0U, "even early completion plus failed draw cannot publish Glance proof");
     CHECK(s_stub_flush_ready_calls == early_ready + 1U, "early failed draw releases gfx exactly once");
     s_stub_draw_error = ESP_OK; s_fake_us = 2345678;
-    flush_test_strip(180);
+    flush_test_strip(REST_TIME_ROW);
     CHECK(s_display.first_glance_time_transfer_state == 1U &&
           s_display.first_glance_time_transfer_done_boot_ms == 2345, "actual early completion records its timestamp after successful draw");
     s_stub_draw_hook = NULL;
-    s_fake_us = 3456000; flush_test_strip(180); complete_test_transfer();
+    s_fake_us = 3456000; flush_test_strip(REST_TIME_ROW); complete_test_transfer();
     CHECK(s_display.first_glance_time_transfer_done_boot_ms == 2345, "Glance first useful transfer timestamp immutable");
     const jr_display_boot_timing_t timing = boot_timing_read();
     CHECK(timing.first_glance_time_transfer_valid && timing.first_glance_time_transfer_done_boot_ms == 2345,
@@ -5437,7 +6160,7 @@ static void test_glance_proxy_tracks_actual_successful_inflight_content(void)
     dream_fixture();
     s_display.first_glance_time_transfer_state = 0;
     jr_display_rest_set(JR_DISPLAY_REST_GLANCE, false, false); jr_display_clock_set(true, 0, 0, 0);
-    s_fake_us = 0; flush_test_strip(180); complete_test_transfer();
+    s_fake_us = 0; flush_test_strip(REST_TIME_ROW); complete_test_transfer();
     CHECK(s_display.first_glance_time_transfer_state == 1 && s_display.first_glance_time_transfer_done_boot_ms == 0,
           "zero-time completed Glance is valid independently of timestamp sentinel");
     const jr_display_boot_timing_t zero_timing = boot_timing_read();
@@ -6498,7 +7221,17 @@ int main(void)
     test_future_weather_cell_shortens_instead_of_cutting();
     test_watch_words_are_composed_once_and_strip_invariant();
     test_watch_shadows_only_at_the_awake_cadence();
-    test_watch_day_arc_is_the_sun_on_the_data_dials();
+    test_watch_day_arc_is_the_sun_on_the_jarvis_dial_only();
+    test_watch_dial_owns_the_glass_no_idle_rim();
+    test_watch_jarvis_style_has_a_dial();
+    test_shade_button_disc_hides_the_face();
+    test_rest_face_is_one_face();
+    test_home_peek_is_hands_only();
+    test_rest_ring_is_as_dim_as_its_time();
+    test_rest_by_day_on_watch_keeps_the_dial();
+    test_resting_dial_is_redrawn_only_when_the_minute_changes();
+    test_resting_dial_has_no_seconds_hand();
+    test_jarvis_dial_hands_arc_bead_and_date();
 
     test_desk_is_on_the_ring_only_while_live();
     test_desk_going_dark_moves_the_owner_on();
