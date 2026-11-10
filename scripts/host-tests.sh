@@ -11,10 +11,11 @@
 # runs is worse than no suite, because it looks like coverage. Add new suites
 # HERE, not to a habit.
 #
-# The sixteen suites, in the order they run:
+# The seventeen suites, in the order they run:
 #   jr_display_hud_tests      components/jr_display/tests   procedural renderer
 #   jr_display_shell_tests    components/jr_display/tests   spatial shell
 #   jr_display_companion_tests components/jr_display/tests  portable Rest policy
+#   jr_display_glass_tests    components/jr_display/tests   AA type, discs, rings, arcs, glows
 #   jr_display_board_tests    components/jr_display/tests   production panel transport
 #   jr_display_quiet_vendor_tests components/jr_display/tests pinned playback and frame retry
 #   jr_main_shell_tests       main/tests/                   production input routing
@@ -32,7 +33,7 @@
 # A suite must run a positive number of tests to pass; "0 Tests" is a failure,
 # and a run in which nothing ran at all exits 2.
 #
-# No C compiler on PATH (a Windows desk)? With Docker present the five C suites
+# No C compiler on PATH (a Windows desk)? With Docker present the six C suites
 # re-run inside the jarvisnano-hosttests image (gcc:14 + cmake + ninja +
 # python3, built from scripts/host-tests.Dockerfile on first use); the Python
 # suite runs natively either way. docs/reference/build-toolchain.md has the
@@ -177,6 +178,7 @@ run_c_suites() {
         jr_display_shell_tests "$ROOT/components/jr_display/tests/build/jr_display_shell_tests"
     run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build" \
         jr_display_companion_tests "$ROOT/components/jr_display/tests/build/jr_display_companion_tests"
+    run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build"         jr_display_glass_tests "$ROOT/components/jr_display/tests/build/jr_display_glass_tests"
     run_production_python_c_suite jr_display_board_tests components/jr_display/tests/test_board.py
     run_production_python_c_suite jr_display_quiet_vendor_tests components/jr_display/tests/test_quiet_vendor.py
     run_main_shell_suite

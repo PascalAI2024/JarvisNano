@@ -11,6 +11,9 @@ idf_component_register(
         "src/jr_display.c"
         "src/hud_render.c"
         "src/companion.c"
+        "src/glass_font.c"
+        "src/glass_draw.c"
+        "src/glass_font_data.c"
         "${JARVIS_BOARD_ROOT}/src/jarvis_board.c"
     INCLUDE_DIRS
         "include"
