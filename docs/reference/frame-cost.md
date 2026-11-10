@@ -368,6 +368,37 @@ Verdicts. All three win where they apply and none loses elsewhere, so each is th
 
 The settled frame hashes did not change. `perf_knob.h` keeps the word with no bit defined (`JR_KNOB_KNOWN_MASK` is 0); the in-motion tolerance harness in `test_frame_identity.c` stays for the next candidate and has nothing to compare until then. The PSRAM cost of bit 0 (+49,152 B) is now permanent.
 
+## The panel dip, 2026-11-10
+
+Branch `feat/glass-dip`, cut from `feat/glass-2` at 3725992, behind perf-knob bit 0 (`JR_KNOB_PANEL_DIP`). No device was available: everything below is host-measured, and every statement about the panel is an assumption listed at the end.
+
+**The mechanism.** Under the bit, three transitions (a change of ring screen, entering or leaving WATCH, and a watch style change) draw the old screen and then the new one, each at full strength, with no veil, no part-strength primitive and no `s_space_black` or `s_style_black` fade, and a time-clocked `s_dip` (0 to 256) multiplies the brightness sent to the panel instead. The value written is `mood * dip^2 / 256` (`DIP_GAMMA` is the one exponent), the mood being the slewed `s_brightness_shown`, so the dip composes with the slew and the 85 % cap. The dip falls over tr_out's share of the transition (175 ms for a slide, 127 ms for a style change), holds dark until one whole frame of the new content has been flushed (`dip_frame_done`, called from `panel_flush` after the last strip, capped at `DIP_HOLD_CAP_MS` = 300 ms) and rises over tr_in's share (225 ms, 213 ms). The pump runs in `panel_flush` before each strip and writes at most once per 16 ms (`DIP_WRITE_MS`), so a 40 ms frame carries two or three brightness steps. A transition cut in on by another restarts the fall from the level it has, a panel-off request or the knob going off drops the dip (`dip_abort`) and the wake restores the shown brightness rather than a dimmed value, and only the render task issues the command. The shade, the detail sheet, captions, the ask overlay and the canvas keep their pixel fades, and `GET /api/display` reports `dip`, `dip_writes` and `dip_hold_ms`.
+
+The driver's per-write INFO line was already silenced: `main.c` sets the `co5300_spi` tag to WARN at the log-ring install (N13.2), so the dip's writes add nothing to the log ring.
+
+**Knob 0 is unchanged.** The nine preview scripts give the same frame-hash digests at 3725992 and on this branch with `--knob 0`, and the identity suite's settled hashes are unchanged. The suite's in-motion tolerance loop now skips bit 0, with a comment, because the dip's frames are meant to differ from the fades; `dip_checks.inc` pins bit 0 instead: every frame of a slide, an entry into a drawn watch, a leave from a baked dial and two style changes is exactly the old screen or exactly the new one, and a dark frame is the only exception. It also pins the 16 ms spacing, the gamma law on every written value, the ramp times, the hold ending with the first whole new frame (and at the cap when the dial never binds), the cut-in cases in each phase, and 100 ms frames.
+
+**Host numbers.** Callgrind instructions per recorded frame over the preview scripts, `-O2`, no vectorising, 24 fps, `jarvisnano-fc` (method in glass-preview.md). A heavy frame is one above 1.25 times the script's lower quartile; the two knobs do not line up frame for frame, because the dip holds the old screen a different number of frames.
+
+| script | worst, knob 0 | worst, knob 1 | heavy frames, knob 0 | heavy frames, knob 1 | whole script, 0 / 1 |
+|---|---|---|---|---|---|
+| slide | 3.92 M | 3.92 M | 56, sum 148.3 M | 52, sum 137.9 M | 304.0 M / 300.3 M |
+| watch-enter | 6.32 M | 3.35 M | 138, sum 336.1 M | 128, sum 275.7 M | 372.2 M / 320.5 M |
+| style | 5.88 M | 4.34 M | 144, sum 525.7 M | 141, sum 480.9 M | 707.2 M / 678.5 M |
+| settled (home, 1 s) | 0.49 M | 0.49 M | | | |
+
+The settled frame costs the same with the knob on, because the pump returns before reading the clock when no dip runs. The slide's worst frame is the same frame at both knobs, one frame apart: the first frame of the new screen's ring entry, not the fade. The dip removes the per-pixel blends of the baked-dial and MINIMAL fades, which is where watch-enter drops from 6.32 M to 3.35 M. Instruction counts have predicted this chip wrongly three times, so these are a bound on the compositor's work, not a frame time.
+
+The brightness steps inside a slide at 24 fps, from `glass-preview.py --script slide --knob 1`: ten writes down (dip 255, 244, 224, 197, 163, 128, 91, 60, 34, 14; sent 99 down to 0 with the mood at 100), 108 ms with no write while the panel sits at 0, then thirteen up (dip 35 to 256, sent 1 to 100), 23 writes in all, 16 ms apart. The dark hold reported as `dip_hold_ms` is 75 ms for a slide, 75 to 117 ms entering or leaving WATCH and 123 ms for a style change, which is one or two whole frames at this cadence.
+
+**What the device still has to say.**
+
+- What 0x51 = 0 looks like on this CO5300: black, or a faint glow. The dark is only dark if it is black, and the dip sends 0 for about one write interval.
+- Whether a brightness write in the middle of a scan is safe: the pump issues one between strips, up to three a frame, while the next strip's DMA is queued, and the host cannot show tearing, a stall of the strip pipeline or a flicker.
+- Whether dip^2 is the right law for this panel. The light curve of the panel decides whether the ramps read as even; the exponent is one constant.
+- How long the hold is at real transition frame times, which the replay round's device table puts at 50 to 70 ms a frame with worst intervals near 100 ms. The hold waits for one whole new frame, so it can be that long, and the cap is 300 ms.
+- Whether the blends the dip removes show up in `render_us` and the worst interval, and whether a dimmed screen change reads as a transition or as a blink.
+
 ---
 
 ## See also

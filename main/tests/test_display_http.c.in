@@ -48,6 +48,7 @@ int main(int argc,char **argv) {
  cached.task_stack_hwm=UINT32_MAX;
  cached.light_gx_mg=cached.light_gy_mg=INT32_MIN;
  cached.light_shadow_dx_q4=cached.light_shadow_dy_q4=INT32_MIN;
+ cached.dip=256;cached.dip_writes=cached.dip_hold_ms=UINT32_MAX;
  cached.boot_timing.init_started=true;cached.boot_timing.init_finished=true;
  cached.boot_timing.init_start_boot_ms=UINT32_MAX-2;
  cached.boot_timing.init_end_boot_ms=UINT32_MAX-1;

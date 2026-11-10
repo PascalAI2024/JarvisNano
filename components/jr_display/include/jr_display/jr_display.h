@@ -194,6 +194,9 @@ typedef struct {
      * axes) and the shadow offset it solved to (Q4 px; rest is 32, 48). */
     int32_t light_gx_mg, light_gy_mg;
     int32_t light_shadow_dx_q4, light_shadow_dy_q4;
+    /* The panel dip (perf knob bit 0): the level now (0..256, 256 = none), the
+     * brightness writes it has caused, and the length of the last dark hold. */
+    uint32_t dip, dip_writes, dip_hold_ms;
     jr_display_boot_timing_t boot_timing;
 } jr_display_diag_t;
 

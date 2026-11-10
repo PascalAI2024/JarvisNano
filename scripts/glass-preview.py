@@ -9,6 +9,9 @@ Docker image, runs a script (components/jr_display/tests/probe/preview/NAME.scri
 a path), and assembles the frames at true speed with the round panel masked to a
 circle on a dark surround.
 
+With --knob 1 (the panel dip, perf_knob.h) the frames are dimmed the way the panel would be
+and the report lists every brightness write the dip made: frame, ms, dip and the value sent.
+
 Outputs next to --out: NAME.gif always (256 colours, so the glows band: it is the
 fallback), NAME.png as an APNG (24-bit, no banding, the file to judge from; it is
 the default for --format), NAME.webp when Pillow has WebP (lossless). A contact
@@ -92,18 +95,22 @@ def run_script(work, script, fps, tag, knob=0):
                       "bg=/work/bg", f"fps={fps}", f"knob={knob}"])
     if r.returncode != 0:
         sys.exit(f"glass_preview failed ({r.returncode}):\n{r.stdout[-2000:]}{r.stderr[-2000:]}")
-    frames, marks, notes = [], [], []
+    frames, marks, notes, dips, holds = [], [], [], [], []
     for line in r.stdout.splitlines():
         p = line.split()
         if line.startswith("F "):
             frames.append((int(p[1]), int(p[2]), p[3]))
+        elif line.startswith("DIP "):
+            dips.append((int(p[1]), int(p[2]), int(p[3]), int(p[4])))
+        elif line.startswith("HOLD "):
+            holds.append((int(p[1]), int(p[2])))
         elif line.startswith("MARK "):
             marks.append((int(p[1]), int(p[2])))
         elif line.startswith("NOTE ") or line.startswith("DONE"):
             notes.append(line)
     if r.stderr.strip():
         notes += ["STDERR " + x for x in r.stderr.strip().splitlines()]
-    return raw, frames, marks, notes
+    return raw, frames, marks, notes, dips + [(fr, -1, -1, ms) for fr, ms in holds]
 
 
 def circle_mask(size, scale):
@@ -228,9 +235,9 @@ def main():
 
     prepare_backgrounds(work)
     build(work)
-    raw, frames, marks, notes = run_script(work, script, a.fps, name, a.knob)
+    raw, frames, marks, notes, dips = run_script(work, script, a.fps, name, a.knob)
     if a.check:
-        _, frames2, _, _ = run_script(work, script, a.fps, name + "_b", a.knob)
+        _, frames2, _, _, _ = run_script(work, script, a.fps, name + "_b", a.knob)
         if [h for _, _, h in frames] != [h for _, _, h in frames2]:
             sys.exit("NOT DETERMINISTIC: frame hashes differ between two runs")
         print(f"deterministic: {len(frames)} frames, identical hashes twice")
@@ -262,6 +269,17 @@ def main():
     print(f"  main ({a.format}): {written.get(a.format)}")
     for line in notes:
         print(" ", line)
+    if dips:
+        # the brightness steps of the panel dip: the frame they fell in, the clock inside it, the dip
+        # (0..256) and the 0x51 value the driver was sent (the mood is 100)
+        print(f"  panel dip: {len([d for d in dips if d[1] >= 0])} brightness writes (frame, ms, dip, sent)")
+        rows = [d for d in dips if d[1] >= 0]
+        for fr, ms, dip, sent in rows[:80]:
+            print(f"    {fr:4d} {ms:6d} {dip:4d} {sent:4d}")
+        if len(rows) > 80:
+            print(f"    ... {len(rows) - 80} more")
+        for fr, _, _, hold in [d for d in dips if d[1] < 0]:
+            print(f"  dark hold ended in frame {fr}: dip_hold_ms {hold}")
     h = hashlib.sha256("".join(h for _, _, h in frames).encode()).hexdigest()[:16]
     print(f"  frame-hash digest {h}")
 

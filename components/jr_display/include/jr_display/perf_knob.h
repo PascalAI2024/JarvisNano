@@ -60,5 +60,15 @@
  * The gains are 10 to 20 % of a transition frame, not the stutter solved.
  * docs/reference/frame-cost.md, "The replay round on the device, 2026-11-10". */
 
-/* No bit is defined: the mechanism stays for the next candidate. */
-#define JR_KNOB_KNOWN_MASK      0u
+/* 2026-11-10, the dip round. Unlike the bits above this one is NOT pixel-identical
+ * in motion by design: it changes what is drawn, not only what it costs.
+ *   bit 0 PANEL_DIP  a change of ring screen, entering or leaving WATCH and a watch
+ *         style change draw the old and then the new screen at full strength; the
+ *         "through the dark" is done by the panel's brightness register, ramped by
+ *         the display's millisecond clock (dip_* in jr_display.c, GET /api/display
+ *         "dip", "dip_writes", "dip_hold_ms"). Settled scenes are identical; knob 0
+ *         is the shipped path, byte for byte.
+ * docs/reference/frame-cost.md, "The panel dip, 2026-11-10". */
+#define JR_KNOB_PANEL_DIP       0x1u
+
+#define JR_KNOB_KNOWN_MASK      JR_KNOB_PANEL_DIP
