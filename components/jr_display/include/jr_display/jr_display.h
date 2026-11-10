@@ -147,6 +147,7 @@ typedef struct {
     uint32_t render_us;
     uint32_t render_frames;
     uint32_t render_frame_us;
+    uint32_t layer_us[5];   /* dial, canvas, hud, shell, surface */
     /* The filtered in-plane light the watch hands are lit with (milli-g, screen
      * axes) and the shadow offset it solved to (Q4 px; rest is 32, 48). */
     int32_t light_gx_mg, light_gy_mg;

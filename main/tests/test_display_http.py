@@ -39,12 +39,12 @@ def run(root, out, mutation):
         equal(meta['sent'],0 if bits&4 else 1)
         if bits&4: continue
         equal(meta['type'],'application/json');equal(meta['cache'],'no-store')
-        equal(meta['bytes']<1024,True)
+        equal(meta['bytes']<1152,True)  # the handler's buffer is 1280
         doc=json.loads(body);timing=doc['boot_timing']
         equal(doc['init'],'failed' if bits&8 else 'ready')
         equal(doc['last_error'],'ESP_FAIL' if bits&8 else 'ESP_OK')
         equal(doc['requests'],4294967295)
-        equal(doc['space'],3);equal(doc['overlay'],2)
+        equal(doc['space'],3);equal(doc['overlay'],2);equal(len(doc['layer_us']),5)
         equal(timing['time_base'],'esp_timer_since_boot')
         equal(timing['optical'],False);equal(timing['includes_rom'],False)
         equal(timing['first_transfer_valid'],bool(bits&1))

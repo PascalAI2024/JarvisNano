@@ -2993,6 +2993,7 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         "\"asset_load_failures\":%u,\"flush_submissions\":%u,"
         "\"flush_completions\":%u,\"flush_errors\":%u,\"actual_fps\":%u,"
         "\"render_us\":%u,\"render_frames\":%u,\"render_frame_us\":%u,"
+        "\"layer_us\":[%u,%u,%u,%u,%u],"
         "\"space\":%u,\"overlay\":%u,"
         "\"light\":{\"gx_mg\":%d,\"gy_mg\":%d,"
         "\"shadow_dx_q4\":%d,\"shadow_dy_q4\":%d},"
@@ -3015,6 +3016,9 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         (unsigned)d.flush_errors, (unsigned)d.actual_fps,
         (unsigned)d.render_us, (unsigned)d.render_frames,
         (unsigned)d.render_frame_us,
+        (unsigned)d.layer_us[0], (unsigned)d.layer_us[1],
+        (unsigned)d.layer_us[2], (unsigned)d.layer_us[3],
+        (unsigned)d.layer_us[4],
         /* Which screen is up: a script driving the ring by swipes cannot
          * otherwise tell where it landed (DESK joins the ring under a lease). */
         (unsigned)jr_display_nav_space(), (unsigned)jr_display_nav_overlay(),
@@ -3258,7 +3262,10 @@ static esp_err_t debug_input_handler(httpd_req_t *req)
             ev.start_x = 60; ev.end_x = 400; ev.delta_x = 340;
         } else if (strcmp(dirs, "up") == 0) {
             ev.direction = JR_INPUT_DIRECTION_UP;
-            ev.start_y = 400; ev.end_y = 60; ev.delta_y = -340;
+            /* Starts inside the safe radius (168 px from centre): from y=400
+             * this stroke began on the rim, where a vertical swipe is a level
+             * slide, so "up" raised the brightness cap and never navigated. */
+            ev.start_y = 380; ev.end_y = 60; ev.delta_y = -320;
         } else if (strcmp(dirs, "down") == 0) {
             ev.direction = JR_INPUT_DIRECTION_DOWN;
             ev.start_y = 90; ev.end_y = 400; ev.delta_y = 310;

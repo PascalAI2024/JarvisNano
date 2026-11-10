@@ -192,6 +192,9 @@ typedef struct {
     volatile uint32_t render_us;
     volatile uint32_t render_frames;
     volatile uint32_t render_frame_us;
+    /* Where a frame's compositing goes, by layer (wrapping microseconds):
+     * dial, canvas, hud, shell, surface. Deltas over render_frames. */
+    volatile uint32_t layer_us[5];
     volatile uint32_t init_start_boot_ms;
     volatile uint32_t init_end_boot_ms;
     volatile uint32_t first_transfer_done_boot_ms;
@@ -5509,6 +5512,15 @@ static void render_account(jr_display_ctx_t *ctx, bool frame_start,
     s_render_win_us += us;
 }
 
+/* Charge the time since *mark to one compositing layer and move the mark. */
+static inline void layer_mark(jr_display_ctx_t *ctx, int layer, int64_t *mark)
+{
+    const int64_t now = esp_timer_get_time();
+    __atomic_add_fetch(&ctx->layer_us[layer], (uint32_t)(now - *mark),
+                       __ATOMIC_RELAXED);
+    *mark = now;
+}
+
 static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
                         const void *pixels)
 {
@@ -5566,13 +5578,19 @@ static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
             glance_time = rest == JR_DISPLAY_REST_GLANCE && clock_strip;
         }
     } else {
+        int64_t mark = t0;
         apply_dial(ctx, x1, y1, x2, y2, outbound);
+        layer_mark(ctx, 0, &mark);
         apply_canvas(ctx, x1, y1, x2, y2, outbound);
         apply_test_pattern(ctx, x1, y1, x2, y2, outbound);
+        layer_mark(ctx, 1, &mark);
         if (diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF) {
         apply_hud_overlay(ctx, x1, y1, x2, y2, outbound);
+        layer_mark(ctx, 2, &mark);
         apply_shell_overlay(ctx, x1, y1, x2, y2, outbound);
+        layer_mark(ctx, 3, &mark);
         apply_surface_overlay(ctx, x1, y1, x2, y2, outbound);
+        layer_mark(ctx, 4, &mark);
         }
     }
     render_account(ctx, frame_start, (uint32_t)(esp_timer_get_time() - t0),
@@ -6403,6 +6421,9 @@ esp_err_t jr_display_get_diag(jr_display_diag_t *out_diag)
     out_diag->render_us = diag_load(&s_display.render_us);
     out_diag->render_frames = diag_load(&s_display.render_frames);
     out_diag->render_frame_us = diag_load(&s_display.render_frame_us);
+    for (int i = 0; i < 5; i++) {
+        out_diag->layer_us[i] = diag_load(&s_display.layer_us[i]);
+    }
     out_diag->light_gx_mg = s_light_gx_mg;
     out_diag->light_gy_mg = s_light_gy_mg;
     out_diag->light_shadow_dx_q4 = s_light.shadow_dx;
