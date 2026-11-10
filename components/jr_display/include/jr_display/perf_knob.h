@@ -43,6 +43,14 @@
  * STATUS > DESK 59 / 55 (65, 45), DESK > ACTIVITY 38 / 41, WATCH > WEATHER
  * 52 / 59. Blending at partial strength is not what makes a transition frame cost
  * two to three times a settled one. The bit numbers are free again.
- *
- * JR_KNOB_KNOWN_MASK is 0 until a candidate adds a bit. */
-#define JR_KNOB_KNOWN_MASK      0u
+ */
+/* 2026-11-10, the replay round (docs/reference/frame-cost.md): a transition frame
+ * is slow because a record is bypassed or a flat colour is blended one pixel at a
+ * time. Each bit keeps the output of the shipped path (settled scenes identical, a
+ * frame in motion inside the identity suite's tolerance) and does less work.
+ *   bit 2 DISC_MEMO   aa_disc at part strength remembers the last pixel it blended
+ *                     (a flat disc over a flat base is one blend per run).
+ * Bits 0, 1 and 3 are reserved for the other candidates of the round. */
+#define JR_KNOB_DISC_MEMO       (1u << 2)
+
+#define JR_KNOB_KNOWN_MASK      (JR_KNOB_DISC_MEMO)
