@@ -1257,6 +1257,60 @@ static void test_update_ring_outlives_the_watch_clear(void)
     free(fb);
 }
 
+/* The screen-name label is glass type, and its dark band belongs to the face:
+ * over a face it still dims y360-430, on a black data screen it touches none of
+ * the screen's own rows (STATUS keeps its stats at y352-382, which the old band
+ * dimmed from y360). */
+static void test_caption_band_gives_way_to_a_black_backdrop(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb);
+    CHECK(fb != NULL, "frame allocated");
+    if (!fb) {
+        return;
+    }
+    jr_display_caption_set("STATUS");
+    s_caption_prog = s_caption_ease = 256;
+    for (int black = 0; black <= 256; black += 256) {
+        s_space_black = black;
+        s_shade_ease = 0;
+        for (int y = 0; y < HUD_H; ++y) {
+            for (int x = 0; x < HUD_W; ++x) {
+                /* stats rows lit; the label's own rows start black */
+                fb[(size_t)y * HUD_W + x] = (y >= 352 && y <= 382) ? 0x07FFu : 0u;
+            }
+        }
+        for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+            const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+            apply_caption_overlay(&s_display, y, y2, fb + (size_t)y * HUD_W);
+        }
+        int dimmed = 0, stats = 0, ink = 0;
+        for (int y = 352; y <= 382; ++y) {
+            for (int x = 150; x <= 316; ++x) {
+                ++stats;
+                dimmed += fb[(size_t)y * HUD_W + x] != 0x07FFu;
+            }
+        }
+        for (int y = 390; y <= 415; ++y) {
+            for (int x = 150; x <= 316; ++x) {
+                ink += fb[(size_t)y * HUD_W + x] != 0u;
+            }
+        }
+        CHECK(stats == 31 * 167, "scanned %d stats pixels", stats);
+        CHECK(ink > 100, "the label draws its glyphs (black=%d, %d pixels)", black, ink);
+        if (black == 0) {
+            CHECK(dimmed > 0, "over a face the band still dims the rows from y360");
+        } else {
+            CHECK(dimmed == 0, "on a black screen no stats pixel is dimmed (%d were)", dimmed);
+        }
+        CHECK(fb[(size_t)200 * HUD_W + 233] == 0u, "nothing above the band is touched");
+    }
+    s_space_black = 0;
+    s_caption_prog = s_caption_ease = 0;
+    jr_display_caption_clear();
+    free(fb);
+}
+
 /* --------------------------------------------------------------- hit test -- */
 
 static void test_shade_hits_resolve_to_controls(void)
@@ -4818,6 +4872,7 @@ int main(void)
     test_update_ring_outlives_the_watch_clear();
 
     test_shade_hits_resolve_to_controls();
+    test_caption_band_gives_way_to_a_black_backdrop();
 
     test_every_space_composes_its_own_sheet();
     test_clock_clear_spares_open_shell_surfaces();

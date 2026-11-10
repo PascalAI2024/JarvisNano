@@ -1067,8 +1067,12 @@ static int              s_choice_label_len[HUD_CHOICE_MAX];
  * caller's buffer only has to survive the call itself. */
 static char             s_caption_text[97];
 static char             s_caption_line[2][39];     /* wrapped at 19 for scale 2 */
-static int              s_caption_x[2];
-static int              s_caption_y[2];
+static int              s_caption_y[2];            /* cap-height tops of the lines  */
+static bool             s_caption_grey;            /* a quiet hint, not a message   */
+#define JR_CAPTION_ONE_Y  396                       /* one line: its cap top         */
+#define JR_CAPTION_TWO_Y0 380                       /* two lines: first, second      */
+#define JR_CAPTION_TWO_Y1 400
+#define JR_CAPTION_TRACK  3                         /* tracked label, like the glass */
 static volatile int     s_caption_on;
 #define JR_DISPLAY_CAPTION_ACTIVE 1
 #define JR_DISPLAY_CAPTION_AMBIENT 2
@@ -1404,6 +1408,23 @@ static bool caption_is_ambient(const char *text)
     return false;
 }
 
+/* A caption is grey when it is furniture: the idle hints and the names the
+ * shell prints after a swipe. Results, errors and consent text keep the ink
+ * colour so they stay the louder thing on the glass. */
+static bool caption_is_quiet(const char *text)
+{
+    static const char *const names[] = {
+        "WEATHER", "STATUS", "DESK", "ACTIVITY", "CONTROLS CLOSED",
+        "CONTROLS - UP TO CLOSE", "DETAIL - DOWN TO CLOSE",
+    };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; ++i) {
+        if (strcmp(text, names[i]) == 0) {
+            return true;
+        }
+    }
+    return caption_is_ambient(text);
+}
+
 void jr_display_caption_set(const char *text)
 {
     if (atomic_load(&s_caption_pinned)) {
@@ -1428,12 +1449,10 @@ void jr_display_caption_set(const char *text)
     memcpy(s_caption_text, text, len);
     s_caption_text[len] = '\0';
     hud_wrap2(s_caption_text, 19, s_caption_line[0], s_caption_line[1]);
-    const int c1 = (int)strnlen(s_caption_line[0], 19U);
     const int c2 = (int)strnlen(s_caption_line[1], 19U);
-    s_caption_x[0] = (HUD_W - 12 * c1) / 2;
-    s_caption_x[1] = (HUD_W - 12 * c2) / 2;
-    s_caption_y[0] = (c2 > 0) ? 374 : 394;
-    s_caption_y[1] = 402;
+    s_caption_y[0] = (c2 > 0) ? JR_CAPTION_TWO_Y0 : JR_CAPTION_ONE_Y;
+    s_caption_y[1] = JR_CAPTION_TWO_Y1;
+    s_caption_grey = caption_is_quiet(s_caption_text);
     __atomic_store_n(&s_caption_on, JR_DISPLAY_CAPTION_ACTIVE |
                      (caption_is_ambient(s_caption_text)
                          ? JR_DISPLAY_CAPTION_AMBIENT : 0), __ATOMIC_RELEASE);
@@ -3002,10 +3021,24 @@ static void apply_ask_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     }
 }
 
-/* STATE-04: the caption chip — a round-safe lower band with scale-2 text.
- * Scale 1 was technically legible in screenshots but unreadable on the
- * physical 1.75-inch panel. Nineteen characters per line fit the glass chord
- * at this radius; the band eases with the existing caption transition. */
+/* The two text colours the caption and the shell share. */
+#define SP_C_INK       0xF79E   /* cool white: never pure, never clinical */
+#define SP_C_GREY      0x8C71
+
+/* STATE-04: the caption chip, now drawn in the glass type. The label is
+ * GLASS_FONT_LABEL tracked +3, grey for furniture (the idle hints and the
+ * screen names a swipe prints) and ink for a message, fading in and out on
+ * s_caption_ease as it always did.
+ *
+ * THE BAND. The old chip dimmed a round-safe band (y360-430) behind its text.
+ * Over a face or a watch dial that is still what keeps the letters readable, so
+ * it stays there. On a data screen, or under the shade, the backdrop is
+ * already black or veiled and the band only dimmed the screen's own content (on
+ * STATUS the stats row ends at y382). Its weight therefore follows how little
+ * of the face is left: it is the old weight times (256 - max(black, shade)) / 256,
+ * so it fades out with the slide that blackens the backdrop and is gone, with
+ * no pixel touched, once the screen is black. Nineteen characters per line
+ * (hud_wrap2) is about 230 px of label, inside the glass chord at these rows. */
 #define JR_CAPTION_Y0 360
 #define JR_CAPTION_Y1 430          /* inclusive */
 
@@ -3017,19 +3050,25 @@ static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     if (ys > ye) {
         return;                    /* strip misses the band: one compare */
     }
-    /* Caption entrance/exit rides s_caption_ease: the band's dim deepens and
-     * the text brightens together, so the chip surfaces out of the face
-     * instead of stamping onto it. Settled (e==256) takes the exact
-     * pre-fade path — hud_dim565 fold, pure white text. */
     const int e = s_caption_ease;
-    const int k = (e * 32) >> 8;
-    if (k <= 0) {
+    if (((e * 32) >> 8) <= 0) {
         return;
     }
+    int face_left = 256 - (s_space_black > s_shade_ease ? s_space_black : s_shade_ease);
+    if (face_left < 0) {
+        face_left = 0;
+    }
+    const int k = (((e * 32) >> 8) * face_left) >> 8;
     const bool swap = ctx->board.swap_color_bytes;
     const int c = e > 255 ? 255 : e;
-    const uint16_t px_text = panel_order_color(
-        ctx, (uint16_t)(((c & 0xF8) << 8) | ((c & 0xFC) << 3) | (c >> 3)));
+    const uint16_t color = s_caption_grey ? SP_C_GREY : SP_C_INK;
+    const glass_metrics_t m = glass_font_metrics(GLASS_FONT_LABEL);
+    int tx[2], len[2];
+    for (int l = 0; l < 2; ++l) {
+        len[l] = (int)strnlen(s_caption_line[l], 19U);
+        tx[l] = (HUD_W - glass_text_width(GLASS_FONT_LABEL, s_caption_line[l],
+                                          (size_t)len[l], JR_CAPTION_TRACK)) / 2;
+    }
     for (int y = ys; y <= ye; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         const int half = hud_glass_chord(y);
@@ -3047,23 +3086,19 @@ static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
                     row[x] = hud_dim565(row[x], false);
                 }
             }
-        } else {
+        } else if (k > 0) {
             for (int x = xlo; x <= xhi; ++x) {
                 row[x] = hud_fade565(row[x], swap, k);
             }
         }
         for (int l = 0; l < 2; ++l) {
-            const char *text = s_caption_line[l];
             const int ty = s_caption_y[l];
-            if (text[0] == '\0' || y < ty || y >= ty + 14) {
+            if (len[l] <= 0 || y < ty + m.ink_top || y > ty + m.ink_bottom) {
                 continue;
             }
-            const int tx = s_caption_x[l];
-            for (int x = tx; x < HUD_W - tx; ++x) {
-                if (surface_text_pixel(text, 19U, x, y, tx, ty, 2)) {
-                    row[x] = px_text;
-                }
-            }
+            glass_text_row(row, y, xlo, xhi, GLASS_FONT_LABEL, s_caption_line[l],
+                           (size_t)len[l], tx[l], ty, JR_CAPTION_TRACK, color,
+                           (uint8_t)c, swap);
         }
     }
 }
@@ -3524,8 +3559,6 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
 
 #define SP_C_CYAN      0x07FF
 #define SP_C_CYAN_DIM  0x0330
-#define SP_C_INK       0xF79E   /* cool white: never pure, never clinical */
-#define SP_C_GREY      0x8C71
 #define SP_C_AMBER     0xFD20
 #define SP_C_RED       0xF800   /* low battery: the rim's red, not amber */
 #define SP_C_GOLD      0xFEA0

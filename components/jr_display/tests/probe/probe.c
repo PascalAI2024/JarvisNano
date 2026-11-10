@@ -129,6 +129,7 @@ int main(int argc, char **argv)
     const bool parked = has_flag(argc, argv, "parked");
     const char *ent_arg = flag_val(argc, argv, "ent=");
     const char *dir = flag_val(argc, argv, "dir=");
+    const char *caption = flag_val(argc, argv, "caption=");
     s_display.board.width = 466;
     s_display.board.height = 466;
     s_display.board.swap_color_bytes = false;
@@ -167,12 +168,15 @@ int main(int argc, char **argv)
     } else if (strncmp(scene, "activity", 8) == 0) {
         space = JR_DISPLAY_SPACE_ACTIVITY;
         overlay = JR_DISPLAY_OVERLAY_NONE;
+    } else if (strcmp(scene, "jarvis") == 0) {
+        space = JR_DISPLAY_SPACE_JARVIS;
+        overlay = JR_DISPLAY_OVERLAY_NONE;
     } else if (strcmp(scene, "shade") != 0) {
         fprintf(stderr, "unknown scene %s\n", scene);
         return 2;
     }
 
-    s_space_on = true;
+    s_space_on = space != JR_DISPLAY_SPACE_JARVIS;
     s_space_from = (uint8_t)space;
     s_space_to = (uint8_t)space;
     s_space_prog = 256;
@@ -247,6 +251,14 @@ int main(int argc, char **argv)
         jr_display_activity_push("SAID", "VOLUME IS NOW FORTY");
     }
     sp_compose();
+    if (caption) {
+        /* "caption=A_B" prints "A B": the transient label, fully faded in */
+        char text[64];
+        snprintf(text, sizeof text, "%s", caption);
+        for (char *c = text; *c; c++) if (*c == '_') *c = ' ';
+        jr_display_caption_set(text);
+        s_caption_ease = s_caption_prog = 256;
+    }
     if (parked) {
         /* A data screen settled on true black: the face is not decoded, the
          * engine's background is black, and the veil fold is skipped. */
@@ -299,11 +311,12 @@ int main(int argc, char **argv)
         apply_space_overlay(&s_display, y, y2,
                             fb + (size_t)y * 466);
         apply_ota_ring(&s_display, y, y2, fb + (size_t)y * 466);
+        if (caption) apply_caption_overlay(&s_display, y, y2, fb + (size_t)y * 466);
     }
 
     char name[64];
-    snprintf(name, sizeof name, "%s%sprobe_%s%s%s%s%s%s%s.ppm", dir ? dir : "", dir ? "/" : "", scene,
-             parked ? "_parked" : "", muted ? "_muted" : "", low ? "_low" : "", nogauge ? "_nogauge" : "",
+    snprintf(name, sizeof name, "%s%sprobe_%s%s%s%s%s%s%s%s.ppm", dir ? dir : "", dir ? "/" : "", scene,
+             caption ? "_cap" : "", parked ? "_parked" : "", muted ? "_muted" : "", low ? "_low" : "", nogauge ? "_nogauge" : "",
              ent_arg ? "_ent" : "", ent_arg ? ent_arg : "");
     FILE *f = fopen(name, "wb");
     fprintf(f, "P6 466 466 255\n");
