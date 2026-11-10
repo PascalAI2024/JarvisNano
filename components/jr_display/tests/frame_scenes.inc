@@ -26,40 +26,45 @@ typedef struct {
     bool ota;
     int watch_in;     /* WATCH only: clock fade-in progress 1..255 at the frame start, 0 = settled */
     int agent;        /* agent rim progress percent, 0 = no agent rim (the shell word's AGENT bit) */
+    int lease;        /* an operator lease caption (CODEX MODE - DOUBLE TAP TO EXIT) is up, settled */
 } fc_scene_t;
 
 #define FC_SETTLED (-1)
 
 static const fc_scene_t FC_SCENES[] = {
-    { "home",          JR_DISPLAY_SPACE_JARVIS,  JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0 },
-    { "watch-jarvis",  JR_DISPLAY_SPACE_WATCH,   JR_DISPLAY_OVERLAY_NONE,   JR_WATCH_JARVIS,  74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0 },
-    { "watch-diver",   JR_DISPLAY_SPACE_WATCH,   JR_DISPLAY_OVERLAY_NONE,   JR_WATCH_DIVER,   74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0 },
-    { "watch-dress",   JR_DISPLAY_SPACE_WATCH,   JR_DISPLAY_OVERLAY_NONE,   JR_WATCH_DRESS,   74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0 },
-    { "watch-pilot",   JR_DISPLAY_SPACE_WATCH,   JR_DISPLAY_OVERLAY_NONE,   JR_WATCH_PILOT,   74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0 },
-    { "watch-minimal", JR_DISPLAY_SPACE_WATCH,   JR_DISPLAY_OVERLAY_NONE,   JR_WATCH_MINIMAL, 74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0 },
-    { "watch-future",  JR_DISPLAY_SPACE_WATCH,   JR_DISPLAY_OVERLAY_NONE,   JR_WATCH_FUTURE,  74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0 },
-    { "watch-skeleton",JR_DISPLAY_SPACE_WATCH,   JR_DISPLAY_OVERLAY_NONE,   JR_WATCH_SKELETON,74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0 },
-    { "watch-celestial",JR_DISPLAY_SPACE_WATCH,  JR_DISPLAY_OVERLAY_NONE,   JR_WATCH_CELESTIAL,74,true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0 },
-    { "watch-jarvis-in",  JR_DISPLAY_SPACE_WATCH, JR_DISPLAY_OVERLAY_NONE,  JR_WATCH_JARVIS,  74, true,  false, FC_SETTLED, FC_SETTLED, false, 60, 0 },
-    { "watch-minimal-in", JR_DISPLAY_SPACE_WATCH, JR_DISPLAY_OVERLAY_NONE,  JR_WATCH_MINIMAL, 74, true,  false, FC_SETTLED, FC_SETTLED, false, 140, 0 },
-    { "watch-dress-in",   JR_DISPLAY_SPACE_WATCH, JR_DISPLAY_OVERLAY_NONE,  JR_WATCH_DRESS,   74, true,  false, FC_SETTLED, FC_SETTLED, false, 100, 0 },
-    { "weather",       JR_DISPLAY_SPACE_WEATHER, JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0 },
-    { "weather-ent",   JR_DISPLAY_SPACE_WEATHER, JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, 180,        FC_SETTLED, false, 0, 0 },
-    { "status-5",      JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_NONE,   0,                5,  false, false, FC_SETTLED, FC_SETTLED, false, 0, 0 },
-    { "status-74",     JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0 },
-    { "status-100",    JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_NONE,   0,                100,false, false, FC_SETTLED, FC_SETTLED, false, 0, 0 },
-    { "status-chg",    JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  true,  FC_SETTLED, FC_SETTLED, false, 0, 0 },
-    { "status-ent",    JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, 180,        FC_SETTLED, false, 0, 0 },
-    { "desk",          JR_DISPLAY_SPACE_DESK,    JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0 },
-    { "activity",      JR_DISPLAY_SPACE_ACTIVITY,JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0 },
-    { "shade",         JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_SHADE,  0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0 },
-    { "detail",        JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_DETAIL, 0,                74, true,  false, FC_SETTLED, FC_SETTLED, true,  0, 0 },
+    { "home",          JR_DISPLAY_SPACE_JARVIS,  JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0 },
+    { "watch-jarvis",  JR_DISPLAY_SPACE_WATCH,   JR_DISPLAY_OVERLAY_NONE,   JR_WATCH_JARVIS,  74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0 },
+    { "watch-diver",   JR_DISPLAY_SPACE_WATCH,   JR_DISPLAY_OVERLAY_NONE,   JR_WATCH_DIVER,   74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0 },
+    { "watch-dress",   JR_DISPLAY_SPACE_WATCH,   JR_DISPLAY_OVERLAY_NONE,   JR_WATCH_DRESS,   74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0 },
+    { "watch-pilot",   JR_DISPLAY_SPACE_WATCH,   JR_DISPLAY_OVERLAY_NONE,   JR_WATCH_PILOT,   74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0 },
+    { "watch-minimal", JR_DISPLAY_SPACE_WATCH,   JR_DISPLAY_OVERLAY_NONE,   JR_WATCH_MINIMAL, 74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0 },
+    { "watch-future",  JR_DISPLAY_SPACE_WATCH,   JR_DISPLAY_OVERLAY_NONE,   JR_WATCH_FUTURE,  74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0 },
+    { "watch-skeleton",JR_DISPLAY_SPACE_WATCH,   JR_DISPLAY_OVERLAY_NONE,   JR_WATCH_SKELETON,74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0 },
+    { "watch-celestial",JR_DISPLAY_SPACE_WATCH,  JR_DISPLAY_OVERLAY_NONE,   JR_WATCH_CELESTIAL,74,true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0 },
+    { "watch-jarvis-in",  JR_DISPLAY_SPACE_WATCH, JR_DISPLAY_OVERLAY_NONE,  JR_WATCH_JARVIS,  74, true,  false, FC_SETTLED, FC_SETTLED, false, 60, 0, 0 },
+    { "watch-minimal-in", JR_DISPLAY_SPACE_WATCH, JR_DISPLAY_OVERLAY_NONE,  JR_WATCH_MINIMAL, 74, true,  false, FC_SETTLED, FC_SETTLED, false, 140, 0, 0 },
+    { "watch-dress-in",   JR_DISPLAY_SPACE_WATCH, JR_DISPLAY_OVERLAY_NONE,  JR_WATCH_DRESS,   74, true,  false, FC_SETTLED, FC_SETTLED, false, 100, 0, 0 },
+    { "weather",       JR_DISPLAY_SPACE_WEATHER, JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0 },
+    { "weather-ent",   JR_DISPLAY_SPACE_WEATHER, JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, 180,        FC_SETTLED, false, 0, 0, 0 },
+    { "status-5",      JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_NONE,   0,                5,  false, false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0 },
+    { "status-74",     JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0 },
+    { "status-100",    JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_NONE,   0,                100,false, false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0 },
+    { "status-chg",    JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  true,  FC_SETTLED, FC_SETTLED, false, 0, 0, 0 },
+    { "status-ent",    JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, 180,        FC_SETTLED, false, 0, 0, 0 },
+    { "desk",          JR_DISPLAY_SPACE_DESK,    JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0 },
+    { "activity",      JR_DISPLAY_SPACE_ACTIVITY,JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0 },
+    { "shade",         JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_SHADE,  0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0 },
+    { "detail",        JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_DETAIL, 0,                74, true,  false, FC_SETTLED, FC_SETTLED, true,  0, 0, 0 },
     /* the agent rim (apply_shell_overlay): full, and part-way (4 of 8 sectors), over home and a ring screen */
-    { "home-agent-100",   JR_DISPLAY_SPACE_JARVIS,  JR_DISPLAY_OVERLAY_NONE, 0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 100 },
-    { "home-agent-40",    JR_DISPLAY_SPACE_JARVIS,  JR_DISPLAY_OVERLAY_NONE, 0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 40 },
-    { "status-agent-100", JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_NONE, 0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 100 },
-    { "status-agent-60",  JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_NONE, 0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 60 },
-    { "desk-agent-13",    JR_DISPLAY_SPACE_DESK,    JR_DISPLAY_OVERLAY_NONE, 0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 13 },
+    { "home-agent-100",   JR_DISPLAY_SPACE_JARVIS,  JR_DISPLAY_OVERLAY_NONE, 0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 100, 0 },
+    { "home-agent-40",    JR_DISPLAY_SPACE_JARVIS,  JR_DISPLAY_OVERLAY_NONE, 0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 40, 0 },
+    { "status-agent-100", JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_NONE, 0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 100, 0 },
+    { "status-agent-60",  JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_NONE, 0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 60, 0 },
+    { "desk-agent-13",    JR_DISPLAY_SPACE_DESK,    JR_DISPLAY_OVERLAY_NONE, 0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 13, 0 },
+    /* the lease caption over the home face, over the control shade and over the detail sheet */
+    { "home-lease",   JR_DISPLAY_SPACE_JARVIS,  JR_DISPLAY_OVERLAY_NONE,   0, 74, true, false, FC_SETTLED, FC_SETTLED, false, 0, 0, 1 },
+    { "shade-lease",  JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_SHADE,  0, 74, true, false, FC_SETTLED, FC_SETTLED, false, 0, 0, 1 },
+    { "detail-lease", JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_DETAIL, 0, 74, true, false, FC_SETTLED, FC_SETTLED, true,  0, 0, 1 },
 };
 #define FC_NSCENES ((int)(sizeof FC_SCENES / sizeof FC_SCENES[0]))
 
@@ -156,6 +161,7 @@ static void fc_setup(const fc_scene_t *sc)
     s_clock_ease = 0;
     s_clock_prog = 0;
     s_caption_ease = s_caption_prog = 0;
+    jr_display_caption_clear();         /* a lease scene before this one must not leak its caption */
     s_ask_ease = 0;
     s_canvas_ease = 0;
     s_display.shown_face = space == JR_DISPLAY_SPACE_WATCH
@@ -215,6 +221,10 @@ static void fc_setup(const fc_scene_t *sc)
            ((uint32_t)JR_DISPLAY_AGENT_WORKING << JR_DISPLAY_SHELL_STATE_SHIFT) |
            (uint32_t)sc->agent)
         : 0U;
+    if (sc->lease) {
+        jr_display_caption_set("CODEX MODE - DOUBLE TAP TO EXIT");
+        s_caption_prog = s_caption_ease = 256;      /* settled, as a held lease is */
+    }
     sp_compose();
 }
 
