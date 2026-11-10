@@ -178,7 +178,68 @@ What is left on the watch: the dial copy from PSRAM is 8.4-8.9 ms on every
 baked dial, and the hands are 8.5 (DRESS) to 29.6 ms (SKELETON, of which the
 balance wheel is most).
 
-`n15c-fixes.png`, read back from this image under a lease: the lease caption
+## Fifth flash the same day: the transition grammar and the knob round
+
+Image 5af9fc4 (2,440,560 bytes, valid after 60 s, largest internal block
+20,480 bytes, `flush_errors 0`). It carries the transitions that pass through
+the dark, the drawn dials at the full frame cadence, and seven cost candidates
+behind `POST /api/debug/display?knob=N`, each pixel-identical to knob 0 on the
+host. Lease held, 3 s per sample.
+
+**The drawn dials' cadence carried.** The JARVIS watch style went from 8.3 to
+23 fps (10.8 ms a frame). MINIMAL went from 8.7 to 12.3 fps, held there by its
+cost, not by a cap.
+
+**The knob round.** "face" is the `clock_face` part, "dial" the dial layer.
+The first and last sample of each dial were both knob 0; they differed by 1.5
+to 2.5 ms, which is the spread to read the rest against.
+
+| Where | knob 0 | candidate | verdict |
+|---|---|---|---|
+| MINIMAL face | 38.5 / 38.4 | old store loop in `hud_render.c`: 26.5 | kept, -12 ms |
+| MINIMAL face | 38.5 | `aa_disc` as before 91b44ec: 25.8 | kept, -12.7 ms |
+| MINIMAL face | 38.5 | both: 25.0; both and the disc record: 25.1 | the record is deleted |
+| MINIMAL face | 38.5 | the disc record alone: 33.5 | helps only the slow path |
+| Shade over home, total | 45.3 / 45.5 | old store loop in `glass_draw.c`: 43.7 | kept (simpler, not slower) |
+| STATUS, total | 36.5 / 37.6 | the same: 36.4 | neutral |
+| SKELETON face | 31.3 / 33.5 | balance-wheel class map: 32.8 | deleted |
+| Dial layer, six baked dials | 8.3-9.1 | copy only inside the glass: 7.5-7.8 | kept, about -1.1 ms |
+| PILOT face | 20.4 / 22.0 | hands written once per row: 21.1 | deleted |
+| FUTURE face | 13.4 / 15.9 | the same: 16.6 | deleted |
+| DIVER face | 13.8 / 15.9 | the same: 17.0 | deleted |
+
+So the MINIMAL regression was the word fill (`fill16`, two pixels to one
+32-bit store): fewer instructions on the host, 12 ms slower on the ESP32-S3.
+With the old paths back MINIMAL is about 40 ms a frame (54.6 with them off).
+
+**Transitions on the device cost two to three times a settled frame.** Polling
+the render counters for 1.5 s after each trigger (so "worst" is the worst
+average over one poll interval of 1 to 5 frames, and the polling itself loads
+the device):
+
+| Transition | frames in the window | mean ms | worst ms | where the worst frame went |
+|---|---|---|---|---|
+| Shade open over home | 13 | 57.8 | 96.9-108 | `space_shade` 37, `space_veil` 25, orbit 17 |
+| Shade close over home | 11 | 33.8 | 54-71 | `space_shade` 32 |
+| Home > WATCH | 24 | 28.5 | 30-57 | dial 15, hud 37 |
+| Style DRESS > PILOT | 17 | 53.2 | 76-83 | `clock_face` 23, dial 19 |
+| Style PILOT > MINIMAL | 17 | 65.8 | 84-127 | `clock_face` 53 |
+| Style MINIMAL > FUTURE | 14 | 59.6 | 92-113 | `clock_face` 47 |
+| Shade open over WATCH | 17 | 77.9 | 157-180 | `space_shade` 72, `clock_face` 32, `clock_cells` 27 |
+| Shade close over WATCH | 25 | 44.5 | 115-150 | `space_shade` 31, dial 22 |
+| WATCH > WEATHER | 25 | 45.1 | 60-89 | `clock_cells` 17, `clock_face` 17 |
+| WEATHER > STATUS | 21 | 59.2 | 90-108 | `space_screen` 63 |
+| STATUS > DESK | 21 | 56.2 | 81-97 | `space_screen` 43 |
+| DESK > ACTIVITY | 31 | 31.5 | 47-83 | `space_screen` 20, orbit 11 |
+| ACTIVITY > home | 16 | 22.2 | 49-70 | `space_veil` 11 |
+
+A screen that costs 20 ms settled (`space_screen` on STATUS) costs 63 ms while
+it fades, and PILOT's hands go from 20 to 53: a fading screen blends every
+primitive it draws. The grammar is right in the preview and reaches the panel
+as three to five steps, not nine. The fix is to draw the screen at full
+strength and dim the finished strip once.
+
+`n15c-fixes.png`, read back from the fourth image under a lease: the lease caption
 no longer overprints the shade's hint line, and the shade shows 95 %, the
 owner's setting. The ACTIVITY rows still read `FORGIVE ME, SIR. I.` and
 `I'M NOT QUITE.`: they were stored already cut four hours earlier, and the
