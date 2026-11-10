@@ -1083,6 +1083,61 @@ static volatile uint32_t s_sun_word;          /* rise | set<<11 | valid<<22 (min
 static volatile uint32_t s_clock_set_ms;
 static int s_clock_phase_ms;                  /* render task only, 0..999 */
 
+/* THE LIGHT ON THE WATCH HANDS. The composition root pushes the in-plane UP
+ * vector (milli-g, screen axes: x right, y down) into ONE packed word: gx in
+ * bits 0-11 and gy in bits 12-23, both signed 12-bit, valid in bit 24. The
+ * render task eases a filtered copy toward it once a frame
+ * (overlay_fade_tick) and solves the hud_light_t from the filtered values;
+ * every strip of the frame reads that one solution. No data, or invalid:
+ * the rest light the watch always had. */
+#define JR_LIGHT_VALID    (1u << 24)
+#define JR_LIGHT_CLAMP_MG 1200
+static volatile uint32_t s_light_word;
+static int s_light_fx_q8, s_light_fy_q8;      /* filtered, mg * 256; render task only */
+static uint32_t s_light_prev_ms;              /* render task only */
+static hud_light_t s_light;                   /* render task writes; HTTP diag reads, torn reads are cosmetic */
+static volatile int s_light_gx_mg, s_light_gy_mg;   /* the filtered values, for the diag */
+
+static inline int light_field(uint32_t w, unsigned shift)
+{
+    const int v = (int)((w >> shift) & 0xFFFu);
+    return v >= 0x800 ? v - 0x1000 : v;
+}
+
+static uint32_t light_word_pack(int gx_mg, int gy_mg, bool valid)
+{
+    gx_mg = gx_mg < -JR_LIGHT_CLAMP_MG ? -JR_LIGHT_CLAMP_MG
+          : gx_mg > JR_LIGHT_CLAMP_MG ? JR_LIGHT_CLAMP_MG : gx_mg;
+    gy_mg = gy_mg < -JR_LIGHT_CLAMP_MG ? -JR_LIGHT_CLAMP_MG
+          : gy_mg > JR_LIGHT_CLAMP_MG ? JR_LIGHT_CLAMP_MG : gy_mg;
+    return ((uint32_t)gx_mg & 0xFFFu) | (((uint32_t)gy_mg & 0xFFFu) << 12) |
+           (valid ? JR_LIGHT_VALID : 0u);
+}
+
+void jr_display_set_light(int gx_mg, int gy_mg, bool valid)
+{
+    __atomic_store_n(&s_light_word, light_word_pack(gx_mg, gy_mg, valid),
+                     __ATOMIC_RELEASE);
+}
+
+/* Once a frame, render task, from the watch branch of overlay_fade_tick. */
+static void light_tick(uint32_t now_ms)
+{
+    const uint32_t w = __atomic_load_n(&s_light_word, __ATOMIC_ACQUIRE);
+    const int tx = (w & JR_LIGHT_VALID) ? light_field(w, 0) : 0;
+    const int ty = (w & JR_LIGHT_VALID) ? light_field(w, 12) : 0;
+    uint32_t dt = now_ms - s_light_prev_ms;
+    s_light_prev_ms = now_ms;
+    if (dt > 1000u) {
+        dt = 1000u;
+    }
+    s_light_fx_q8 = hud_light_ease(s_light_fx_q8, tx, (int)dt);
+    s_light_fy_q8 = hud_light_ease(s_light_fy_q8, ty, (int)dt);
+    s_light_gx_mg = s_light_fx_q8 / 256;
+    s_light_gy_mg = s_light_fy_q8 / 256;
+    hud_light_solve(s_light_gx_mg, s_light_gy_mg, &s_light);
+}
+
 /* UI-01 clock state: (on << 16) | (hh << 8) | mm in ONE word, published with
  * a single release-store, so the flush can never read a torn time (an on flag
  * from one set with minutes from another). SINGLE-WRITER: the app task calls
@@ -1124,6 +1179,7 @@ static void overlay_fade_tick(void)
             now - __atomic_load_n(&s_clock_set_ms, __ATOMIC_RELAXED);
         s_clock_phase_ms = since > 999u ? 999 : (int)since;
         watch_compose();             /* the words on the watch, once a frame */
+        light_tick(now);             /* the room's light, solved once a frame */
         s_clock_prog += step;
         if (s_clock_prog > 256) {
             s_clock_prog = 256;
@@ -3349,6 +3405,7 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
          * a resting watch nobody is studying, and the shadow is the widest
          * blend a hand carries */
         .shadow = jr_display_render_fps() >= JR_DISPLAY_RENDER_FPS,
+        .light = &s_light,
     };
     watch_sun_arc(ctx, y1, y2, pixels, style, strength, hw.hh, hw.mm);
     hud_overlay_watch(pixels, y1, y2 - y1, ctx->board.swap_color_bytes, &hw,
@@ -6056,6 +6113,10 @@ esp_err_t jr_display_get_diag(jr_display_diag_t *out_diag)
     out_diag->render_us = diag_load(&s_display.render_us);
     out_diag->render_frames = diag_load(&s_display.render_frames);
     out_diag->render_frame_us = diag_load(&s_display.render_frame_us);
+    out_diag->light_gx_mg = s_light_gx_mg;
+    out_diag->light_gy_mg = s_light_gy_mg;
+    out_diag->light_shadow_dx_q4 = s_light.shadow_dx;
+    out_diag->light_shadow_dy_q4 = s_light.shadow_dy;
     jr_display_boot_timing_t *timing = &out_diag->boot_timing;
     /* Read end first: observing its release also includes the start publish. */
     timing->init_finished =

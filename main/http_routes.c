@@ -2984,7 +2984,7 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
     static const char *init_names[] = { "stopped", "starting", "ready", "failed" };
     const char *init_name = d.init_state <= JR_DISPLAY_INIT_FAILED
                                 ? init_names[d.init_state] : "?";
-    char buf[1024];
+    char buf[1280];
     int n = snprintf(buf, sizeof buf,
         "{\"init\":\"%s\",\"last_error\":\"%s\",\"task_running\":%s,"
         "\"blanked\":%s,\"requested_face\":%d,\"applied_face\":%d,"
@@ -2993,6 +2993,8 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         "\"asset_load_failures\":%u,\"flush_submissions\":%u,"
         "\"flush_completions\":%u,\"flush_errors\":%u,\"actual_fps\":%u,"
         "\"render_us\":%u,\"render_frames\":%u,\"render_frame_us\":%u,"
+        "\"light\":{\"gx_mg\":%d,\"gy_mg\":%d,"
+        "\"shadow_dx_q4\":%d,\"shadow_dy_q4\":%d},"
         "\"current_asset_bytes\":%u,\"free_psram\":%u,\"stack_hwm\":%u,"
         "\"boot_timing\":{\"time_base\":\"esp_timer_since_boot\","
         "\"optical\":false,\"includes_rom\":false,"
@@ -3012,6 +3014,8 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         (unsigned)d.flush_errors, (unsigned)d.actual_fps,
         (unsigned)d.render_us, (unsigned)d.render_frames,
         (unsigned)d.render_frame_us,
+        (int)d.light_gx_mg, (int)d.light_gy_mg,
+        (int)d.light_shadow_dx_q4, (int)d.light_shadow_dy_q4,
         (unsigned)d.current_asset_bytes, (unsigned)d.free_psram_bytes,
         (unsigned)d.task_stack_hwm,
         d.boot_timing.init_started ? "true" : "false",

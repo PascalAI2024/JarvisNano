@@ -1902,13 +1902,103 @@ static const wrgb_t W_CYAN   = {   0, 229, 255 };
 static const wrgb_t W_GOLD   = { 255, 180,  40 };
 static const wrgb_t W_IVORY  = { 245, 242, 232 };
 
+/* ---- the light -------------------------------------------------------
+ * The rest light is the one the watch shipped with: shadow (+2, +3) px, a
+ * bevel light at (-0.6, -0.8), the hub glint at (-rad/3, -rad/3). Tilting
+ * the device swings it: the shadow falls downhill (opposite the in-plane UP
+ * vector), the bevel light and the glint go to the uphill side. */
+#define LIGHT_REST_LEN_Q4   58      /* |(32, 48)| rounded                    */
+#define LIGHT_MAX_LEN_Q4    96      /* 6 px                                   */
+#define LIGHT_RAMP_MG       320     /* deadband edge -> full tilt light       */
+#define LIGHT_GLINT_Q4      23      /* glint reach, ~ |(-16, -16)|            */
+#define LIGHT_IN_CLAMP_MG   1200
+
+static const hud_light_t s_light_rest = {
+    .shadow_dx = 32, .shadow_dy = 48,
+    .bevel_lx = -19661, .bevel_ly = -26214,
+    .glint_x = -16, .glint_y = -16,
+};
+
+void hud_light_solve(int gx_mg, int gy_mg, hud_light_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    *out = s_light_rest;
+    gx_mg = gx_mg < -LIGHT_IN_CLAMP_MG ? -LIGHT_IN_CLAMP_MG
+          : gx_mg > LIGHT_IN_CLAMP_MG ? LIGHT_IN_CLAMP_MG : gx_mg;
+    gy_mg = gy_mg < -LIGHT_IN_CLAMP_MG ? -LIGHT_IN_CLAMP_MG
+          : gy_mg > LIGHT_IN_CLAMP_MG ? LIGHT_IN_CLAMP_MG : gy_mg;
+    const uint32_t m2 = (uint32_t)(gx_mg * gx_mg + gy_mg * gy_mg);
+    if (m2 < (uint32_t)(HUD_LIGHT_DEADBAND_MG * HUD_LIGHT_DEADBAND_MG)) {
+        return;                                    /* flat: today, exactly */
+    }
+    const int mag = (int)isqrt32(m2);              /* >= 80 */
+    int w = ((mag - HUD_LIGHT_DEADBAND_MG) * 256) / LIGHT_RAMP_MG;
+    if (w <= 0) {
+        return;
+    }
+    if (w > 256) {
+        w = 256;
+    }
+    const int mc = mag > 1000 ? 1000 : mag;
+    const int len = LIGHT_REST_LEN_Q4 + ((LIGHT_MAX_LEN_Q4 - LIGHT_REST_LEN_Q4) * mc) / 1000;
+    /* Every divide below is C's truncating one, so a point-reflected input
+     * gives the point-reflected output exactly. */
+    const int tdx = -(gx_mg * len) / mag, tdy = -(gy_mg * len) / mag;
+    out->shadow_dx = s_light_rest.shadow_dx + ((tdx - s_light_rest.shadow_dx) * w) / 256;
+    out->shadow_dy = s_light_rest.shadow_dy + ((tdy - s_light_rest.shadow_dy) * w) / 256;
+
+    /* the light is on the uphill side; lerp the unit vectors, then restore
+     * the length unless the two are nearly opposed (the vector then passes
+     * through zero and the bevel flattens instead of snapping) */
+    const int tlx = (gx_mg * 32768) / mag, tly = (gy_mg * 32768) / mag;
+    int lx = (s_light_rest.bevel_lx * (256 - w) + tlx * w) / 256;
+    int ly = (s_light_rest.bevel_ly * (256 - w) + tly * w) / 256;
+    const int n = (int)isqrt32((uint32_t)(lx * lx) + (uint32_t)(ly * ly));
+    if (n >= 16384) {
+        lx = (lx * 32768) / n;
+        ly = (ly * 32768) / n;
+    } else {
+        lx *= 2;
+        ly *= 2;
+    }
+    out->bevel_lx = lx;
+    out->bevel_ly = ly;
+
+    const int gtx = (gx_mg * LIGHT_GLINT_Q4) / mag, gty = (gy_mg * LIGHT_GLINT_Q4) / mag;
+    out->glint_x = s_light_rest.glint_x + ((gtx - s_light_rest.glint_x) * w) / 256;
+    out->glint_y = s_light_rest.glint_y + ((gty - s_light_rest.glint_y) * w) / 256;
+}
+
+int hud_light_ease(int cur_q8, int target_mg, int dt_ms)
+{
+    if (dt_ms <= 0) {
+        return cur_q8;
+    }
+    if (dt_ms > 1000) {
+        dt_ms = 1000;
+    }
+    const int tgt = target_mg * 256;
+    const int diff = tgt - cur_q8;
+    if (diff > -256 && diff < 256) {
+        return tgt;                                /* within 1 mg: arrived */
+    }
+    const int a = (dt_ms * 256) / (HUD_LIGHT_TAU_MS + dt_ms);   /* < 256 */
+    return cur_q8 + (diff * a) / 256;
+}
+
 static void draw_hand(const strip_t *s, int32_t cx, int32_t cy, uint32_t a16,
-                      const hand_spec_t *h, int strength, bool swap)
+                      const hand_spec_t *h, int strength, bool swap,
+                      const hud_light_t *lt)
 {
     wpoly_t p;
     const int32_t c = cos_q16(a16), sn = sin_q16(a16);
-    /* light L = (-0.6, -0.8): flank -v has normal (sn, -c)/32767 */
-    const int dot = (sn * -19661 + c * 26214) >> 15;   /* |.| < 2^31 */
+    if (lt == NULL) {
+        lt = &s_light_rest;
+    }
+    /* light L = (-0.6, -0.8) at rest: flank -v has normal (sn, -c)/32767 */
+    const int dot = (sn * lt->bevel_lx - c * lt->bevel_ly) >> 15;   /* |.| < 2^31 */
     const int light_side = dot >= 0 ? -1 : 1;
     const int k = (h->bevel * (dot < 0 ? -dot : dot)) >> 15;   /* 0..bevel */
     const wrgb_t light = w_scale(h->body, 128 + k, 128);
@@ -1916,7 +2006,7 @@ static void draw_hand(const strip_t *s, int32_t cx, int32_t cy, uint32_t a16,
     const int A = strength >= 255 ? 256 : strength + 1;
 
     if (h->shadow) {
-        hand_poly(&p, cx + 32, cy + 48, a16, h->u0, h->u1, h->w0 + 8, h->w1 + 8, 0);
+        hand_poly(&p, cx + lt->shadow_dx, cy + lt->shadow_dy, a16, h->u0, h->u1, h->w0 + 8, h->w1 + 8, 0);
         aa_fill(s, &p, W_DARK, (WATCH_SHADOW_A * A) >> 8, swap, poly_sub(h->w0 + 8, h->w1 + 8));
     }
     if (h->core) {
@@ -1950,11 +2040,17 @@ static inline void w_polar(int32_t r16, uint32_t a16, int32_t *x, int32_t *y)
     *y = WATCH_CY16 + ((r16 * sin_q16(a16)) >> 15);
 }
 
-static void w_hub(const strip_t *s, int32_t rad16, wrgb_t body, int A, bool swap)
+static void w_hub(const strip_t *s, int32_t rad16, wrgb_t body, int A, bool swap,
+                  const hud_light_t *lt)
 {
+    if (lt == NULL) {
+        lt = &s_light_rest;
+    }
     aa_disc(s, WATCH_CX16, WATCH_CY16, rad16 + 16, W_DARK, (200 * A) >> 8, swap);
     aa_disc(s, WATCH_CX16, WATCH_CY16, rad16, body, A, swap);
-    aa_disc(s, WATCH_CX16 - rad16 / 3, WATCH_CY16 - rad16 / 3, rad16 / 3 + 8,
+    /* rest: (-rad/3, -rad/3), exactly; the glint slides toward the light */
+    aa_disc(s, WATCH_CX16 + (rad16 * lt->glint_x) / 48,
+            WATCH_CY16 + (rad16 * lt->glint_y) / 48, rad16 / 3 + 8,
             W_WHITE, (150 * A) >> 8, swap);
 }
 
@@ -2123,7 +2219,7 @@ void hud_watch_hand(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     luts_build();
     h.shadow = h.shadow && shadow;
     const strip_t s = { dst, y0, y0 + nrows };
-    draw_hand(&s, WATCH_CX16, WATCH_CY16, angle_q16, &h, 255, swap_bytes);
+    draw_hand(&s, WATCH_CX16, WATCH_CY16, angle_q16, &h, 255, swap_bytes, NULL);
 }
 
 /* What a frame of the watch derives from its inputs, kept across the
@@ -2144,7 +2240,8 @@ static watch_frame_t s_wf;
 /* A needle in a PILOT sub-dial: (cx, cy) Q4, value 0..1000 across a 270
  * degree throw from 7:30 to 4:30, or a full turn for `full`. */
 static void sub_needle(const strip_t *s, int32_t cx, int32_t cy, int rad,
-                       int permille, bool full, bool shadow, int A, bool swap)
+                       int permille, bool full, bool shadow, int A, bool swap,
+                       const hud_light_t *lt)
 {
     uint32_t a;
     if (full) {
@@ -2156,7 +2253,7 @@ static void sub_needle(const strip_t *s, int32_t cx, int32_t cy, int rad,
         .u0 = -(rad * 16) / 5, .u1 = (rad - 7) * 16, .w0 = 28, .w1 = 8,
         .body = W_WHITE, .bevel = 20, .outline = false, .shadow = shadow,
     };
-    draw_hand(s, cx, cy, a, &h, (A * 255) >> 8, swap);
+    draw_hand(s, cx, cy, a, &h, (A * 255) >> 8, swap, lt);
     aa_disc(s, cx, cy, 3 * 16, W_WHITE, A, swap);
 }
 
@@ -2211,6 +2308,7 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
         f->valid = true;
     }
     const uint32_t a_h = f->a_h, a_m = f->a_m, a_s = f->a_s;
+    const hud_light_t *lt = w->light;      /* NULL = the rest light */
 
     if (!w->dial_baked) {
         fallback_dial(&s, style, A, swap_bytes);
@@ -2219,24 +2317,24 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     if (style == 3) {
         /* PILOT complications: 6 = seconds, 9 = battery, 3 = temperature */
         sub_needle(&s, s_subdial[1].cx, s_subdial[1].cy, s_subdial[1].r,
-                   f->sec_permille, true, w->shadow, A, swap_bytes);
+                   f->sec_permille, true, w->shadow, A, swap_bytes, lt);
         if (w->batt_pct >= 0) {
             sub_needle(&s, s_subdial[2].cx, s_subdial[2].cy, s_subdial[2].r,
                        (w->batt_pct > 100 ? 100 : w->batt_pct) * 10, false,
-                       w->shadow, A, swap_bytes);
+                       w->shadow, A, swap_bytes, lt);
         }
         if (w->wx_valid) {
             int t = w->temp_f < 40 ? 40 : w->temp_f > 100 ? 100 : w->temp_f;
             sub_needle(&s, s_subdial[0].cx, s_subdial[0].cy, s_subdial[0].r,
-                       (t - 40) * 1000 / 60, false, w->shadow, A, swap_bytes);
+                       (t - 40) * 1000 / 60, false, w->shadow, A, swap_bytes, lt);
         } else {
             sub_needle(&s, s_subdial[0].cx, s_subdial[0].cy, s_subdial[0].r,
-                       0, false, w->shadow, (A * 90) >> 8, swap_bytes);
+                       0, false, w->shadow, (A * 90) >> 8, swap_bytes, lt);
         }
     }
 
     if (f->has[0]) {
-        draw_hand(&s, WATCH_CX16, WATCH_CY16, a_h, &f->h[0], strength, swap_bytes);
+        draw_hand(&s, WATCH_CX16, WATCH_CY16, a_h, &f->h[0], strength, swap_bytes, lt);
     }
     if (style == 1) {
         /* the Mercedes: a lume disc in the hour hand near its tip */
@@ -2247,10 +2345,10 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
         aa_disc(&s, x, y, 3 * 16, (wrgb_t){ 205, 210, 215 }, A, swap_bytes);
     }
     if (f->has[1]) {
-        draw_hand(&s, WATCH_CX16, WATCH_CY16, a_m, &f->h[1], strength, swap_bytes);
+        draw_hand(&s, WATCH_CX16, WATCH_CY16, a_m, &f->h[1], strength, swap_bytes, lt);
     }
     if (f->has[2]) {
-        draw_hand(&s, WATCH_CX16, WATCH_CY16, a_s, &f->h[2], strength, swap_bytes);
+        draw_hand(&s, WATCH_CX16, WATCH_CY16, a_s, &f->h[2], strength, swap_bytes, lt);
         int32_t x, y;
         if (style == 1) {
             w_polar(150 * 16, a_s, &x, &y);
@@ -2267,10 +2365,10 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     switch (style) {
     /* Hubs on a baked dial are >= 12 px: the concept art the dials come from
      * has a centre hole of about 10 px that must never show. */
-    case 1: w_hub(&s, 12 * 16, (wrgb_t){ 205, 210, 215 }, A, swap_bytes); break;
-    case 2: w_hub(&s, 12 * 16, (wrgb_t){ 214, 178, 62 }, A, swap_bytes); break;
-    case 3: w_hub(&s, 12 * 16, W_WHITE, A, swap_bytes); break;
-    case 4: w_hub(&s, 4 * 16, (wrgb_t){ 70, 105, 175 }, A, swap_bytes); break;
+    case 1: w_hub(&s, 12 * 16, (wrgb_t){ 205, 210, 215 }, A, swap_bytes, lt); break;
+    case 2: w_hub(&s, 12 * 16, (wrgb_t){ 214, 178, 62 }, A, swap_bytes, lt); break;
+    case 3: w_hub(&s, 12 * 16, W_WHITE, A, swap_bytes, lt); break;
+    case 4: w_hub(&s, 4 * 16, (wrgb_t){ 70, 105, 175 }, A, swap_bytes, lt); break;
     default:
         aa_disc(&s, WATCH_CX16, WATCH_CY16, 20 * 16, W_CYAN, (40 * A) >> 8, swap_bytes);
         aa_disc(&s, WATCH_CX16, WATCH_CY16, 15 * 16, W_CYAN, (90 * A) >> 8, swap_bytes);
