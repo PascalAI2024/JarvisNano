@@ -79,6 +79,64 @@ MINIMAL: `aa_disc` 38 % self (the dial is a 214 px disc drawn procedurally every
 **[2026-11-10] No 64-bit divide inside a loop**
 `esp_timer_get_time() / 1000` appears in `overlay_fade_tick`, `rest_eligible`, `apply_hud_overlay`, `panel_flush` and `display_task`: one per strip at worst (39 a frame, `rest_eligible` runs per strip), 39 divides of about 100 instructions. Not in `hud_overlay_watch`, `sub_needle`, `sp_draw_shade` or any per-row path. Not a cause.
 
+**[2026-11-10] After: the same 23 frames, byte-identical, fewer instructions**
+Same probe and flags, last commit of the branch. `jr_display_frame_tests` pins 138 scene x clock hashes; all of them held through every cut. Ir is for the whole frame.
+
+| Scene | Ir before | Ir after | Change |
+|---|---|---|---|
+| home | 304,843 | 307,529 | +0.9 % (the split timers) |
+| WATCH jarvis style | 2,658,625 | 311,978 | -88 % |
+| WATCH diver | 1,913,096 | 1,912,986 | 0 |
+| WATCH dress | 973,673 | 973,489 | 0 |
+| WATCH pilot | 2,811,418 | 2,812,697 | 0 |
+| WATCH minimal | 6,372,451 | 2,900,371 | -54 % |
+| WATCH future | 2,389,546 | 2,380,598 | 0 |
+| WATCH skeleton | 3,718,782 | 3,717,530 | 0 |
+| WATCH celestial | 1,532,344 | 1,532,160 | 0 |
+| WATCH jarvis, fading in | 2,658,623 | 311,976 | -88 % |
+| WATCH minimal, fading in | 12,693,531 | 9,078,668 | -28 % |
+| WATCH dress, fading in | 1,047,590 | 1,046,972 | 0 |
+| WEATHER | 3,048,820 | 2,886,792 | -5.3 % |
+| WEATHER, mid-entry | 2,360,423 | 2,209,157 | -6.4 % |
+| STATUS 5 % | 3,396,737 | 3,031,005 | -10.8 % |
+| STATUS 74 % | 4,456,588 | 4,075,588 | -8.5 % |
+| STATUS 100 % | 3,987,370 | 3,636,414 | -8.8 % |
+| STATUS 74 % charging | 4,573,944 | 4,192,501 | -8.3 % |
+| STATUS mid-entry | 4,128,271 | 3,772,013 | -8.6 % |
+| DESK | 4,053,129 | 3,872,341 | -4.5 % |
+| ACTIVITY | 3,225,731 | 2,332,168 | -27.7 % |
+| control shade | 4,064,920 | 3,700,800 | -9.0 % |
+| detail sheet | 3,431,384 | 2,884,818 | -15.9 % |
+
+The baked watches, home and the six hand-driven frames do not move: nothing they spend was cut. Home and the baked watches pay a few thousand instructions for the timers.
+
+**[2026-11-10] The cuts, and how far each carries to the device**
+Instruction counts are host x86; device milliseconds below use 1 M Ir ~ 4 ms (one instruction a cycle at 240 MHz), which is generous to the cuts because it ignores stalls, so read them as an upper bound on what instruction removal alone buys.
+
+| Cut | What | RAM | Expected device saving | Confidence it carries over |
+|---|---|---|---|---|
+| WATCH paints no shell it will clear (`watch_clear_follows`) | skips the veil, screen and orbit when the clock will clear the disc | none | JARVIS style about 1.3-2.3 M Ir, MINIMAL about 2.35 M Ir: of the order of 5-9 ms of a 78 ms MINIMAL frame | Moderate-high: it removes whole calls and their memory traffic, and the saving does not depend on the cache. The device frame time is dominated by something else (see the floor), so the fraction visible in fps is smaller than the fraction of Ir. |
+| Text centred when a row first draws it (`sg_txt_t.pending`) | `glass_text_width` ran on every strip for every line; now once per line | 8 bytes per text slot, on the render task's stack | about 0.1-0.2 M Ir on text-heavy screens | Low: small and spread over screens whose time is not instruction-bound. |
+| Glyph table (`s_glyph_lut`) | printable ASCII resolved by a table, not a walk then a binary search | 384 bytes `.bss` (4 fonts x 96) | about 0.2-0.4 M Ir on STATUS, ACTIVITY, DETAIL | Low-moderate: the table is data in internal RAM, so it also lowers instruction-cache pressure; it adds 384 bytes of data-cache footprint. Helps text, which ACTIVITY and the detail sheet are made of. |
+| `aa_disc` writes only the two edge runs of each chord | the MINIMAL dial stored 143 k interior pixels one at a time, now only the runs that need a blend | none | MINIMAL only: of the order of 1 M Ir | Moderate: fewer stores to internal SRAM. MINIMAL is the one style that draws a disc procedurally. |
+| Split timers | `?split=1` | 60 bytes `.bss` for 15 counters, 60 bytes rodata for the names | negative: 6 to 8 `esp_timer_get_time` reads per strip, 39 strips a frame, a few hundred microseconds a frame at most | High that it costs this much; it is the price of knowing. |
+
+The per-cut instruction figures are approximate: the before and after tables above are the measured totals, and the split between the text cuts is my reading of the cut-by-cut runs, not a table. The MINIMAL saving of about 3.5 M Ir is the two WATCH cuts together.
+
+No cut allocates more than 384 bytes of internal RAM, so none touches the contiguous-block budget.
+
+**[2026-11-10] Tried and dropped: the `geo_get` hint order**
+`geo_get` probes sixteen slots; moving the hinted slot first halved the cost of an empty call in an isolated bench (331 to 163 instructions) and moved the whole frame by under 1 %, and made WEATHER slightly worse. It was reverted and is not in the history. This is the same lesson as the primitive rewrite: a bench of one call is not a frame.
+
+**[2026-11-10] Found and not cut**
+- The orbit rail, 1.25 M Ir on every shell screen. A cached coverage row would remove most of it for about 1.3 KB of `.bss`. The pixels would stay identical, but the cache has to be keyed on the rail's parameters and invalidated with them; I did not take that on without a device number showing the rail matters.
+- WEATHER's empty arc calls (3,355 of 3,559 draw nothing). A cheap reject before the call would not change pixels; it needs a per-arc bounding row range the primitive does not expose today.
+- The hand fills on the PILOT, DIVER, FUTURE and SKELETON watches, which are the hands.
+- Anything for the floor, until the split timers say where it is.
+
+**[2026-11-10] Reading the timers on the device**
+`GET /api/display?split=1` returns `render_frames`, `render_frame_us` and `split_us`, each a sum in microseconds since boot over every strip of every frame; divide by `render_frames` for a per-frame figure, or take two reads and subtract. Names: `hud_frame`, `hud_space`, `hud_clock`, `hud_ota`, `hud_caption`, `hud_ask`, `hud_bloom` partition the hud layer; `space_veil`, `space_screen`, `space_sheet`, `space_shade`, `space_orbit` are inside `hud_space`; `clock_clear`, `clock_face`, `clock_cells` are inside `hud_clock` (`clock_cells` includes the sun arc). The existing `layer_us` gives the dial blit (index 0) against the hud (index 2). If `render_us` per frame is much larger than the sum of the five `layer_us`, the render task is being pre-empted or waiting inside `panel_flush`, not computing.
+
 ---
 
 ## Primary sources
