@@ -697,10 +697,69 @@ static void stroke_solid(const geo_t *g, int32_t dy, int32_t ady, spanset_t *sol
     }
 }
 
-static void ring_like_row(uint16_t *row, int y, int clip_lo, int clip_hi,
-                          const geo_t *g, uint16_t color565, uint8_t alpha, bool swap_bytes)
+/* A recorder for glass_ring_record(): the same row walk as the painter, but
+ * each fill and each edge pixel is written to a byte stream instead of the
+ * row. Per row the stream is a list of records:
+ *   0, x0 lo, x0 hi, x1 lo, x1 hi         a solid run x0..x1 (fill_run)
+ *   n, x0 lo, x0 hi, cov * n              n edge pixels from x0 (put)
+ * and the buffer starts with GLASS_PANEL_PX + 1 uint16 row offsets. */
+typedef struct {
+    uint8_t *buf;     /* NULL: only count */
+    size_t cap, pos;
+    size_t span;      /* pos of the open edge span's count byte, 0 = none */
+    unsigned span_n;  /* pixels in the open span */
+    int span_next;    /* x the open span would take next */
+} rec_t;
+
+static void rec_byte(rec_t *r, unsigned v)
 {
-    if (row == NULL || alpha == 0u || !row_clip(y, &clip_lo, &clip_hi)) {
+    if (r->buf != NULL && r->pos < r->cap) {
+        r->buf[r->pos] = (uint8_t)v;
+    }
+    r->pos++;
+}
+
+static void rec_u16(rec_t *r, int v)
+{
+    rec_byte(r, (unsigned)v & 0xFFu);
+    rec_byte(r, ((unsigned)v >> 8) & 0xFFu);
+}
+
+static void rec_flush(rec_t *r) { r->span = 0; }
+
+static void rec_run(rec_t *r, int xa, int xb)
+{
+    rec_flush(r);
+    rec_byte(r, 0u);
+    rec_u16(r, xa);
+    rec_u16(r, xb);
+}
+
+static void rec_edge(rec_t *r, int x, unsigned cov)
+{
+    if (r->span == 0u || r->span_next != x || r->span_n == 255u) {
+        rec_flush(r);
+        r->span = r->pos;
+        r->span_n = 0u;
+        rec_byte(r, 0u);          /* the count, patched below */
+        rec_u16(r, x);
+    }
+    rec_byte(r, cov);
+    r->span_n++;
+    r->span_next = x + 1;
+    if (r->buf != NULL && r->span < r->cap) {
+        r->buf[r->span] = (uint8_t)r->span_n;
+    }
+}
+
+static inline __attribute__((always_inline)) void
+ring_like_row_t(uint16_t *row, int y, int clip_lo, int clip_hi, const geo_t *g,
+                uint16_t color565, uint8_t alpha, bool swap_bytes, rec_t *rec)
+{
+    if (rec == NULL && (row == NULL || alpha == 0u)) {
+        return;
+    }
+    if (!row_clip(y, &clip_lo, &clip_hi)) {
         return;
     }
     const int32_t y16 = y * 16 + 8;
@@ -744,7 +803,11 @@ static void ring_like_row(uint16_t *row, int y, int clip_lo, int clip_hi,
         }
         if (ss_find(&solid, x, &e)) {
             e = (int)imin32(e, xb);
-            fill_run(row, x, e, &c);
+            if (rec != NULL) {
+                rec_run(rec, x, e);
+            } else {
+                fill_run(row, x, e, &c);
+            }
             x = e + 1;
             continue;
         }
@@ -766,7 +829,79 @@ static void ring_like_row(uint16_t *row, int y, int clip_lo, int clip_hi,
             }
         }
         for (; x <= lim; x++) {
-            put(&row[x], &c, (unsigned)shape_cov(g, x * 16 + 8, y16));
+            if (rec != NULL) {
+                rec_edge(rec, x, (unsigned)shape_cov(g, x * 16 + 8, y16));
+            } else {
+                put(&row[x], &c, (unsigned)shape_cov(g, x * 16 + 8, y16));
+            }
+        }
+    }
+}
+
+static void ring_like_row(uint16_t *row, int y, int clip_lo, int clip_hi,
+                          const geo_t *g, uint16_t color565, uint8_t alpha, bool swap_bytes)
+{
+    ring_like_row_t(row, y, clip_lo, clip_hi, g, color565, alpha, swap_bytes, NULL);
+}
+
+size_t glass_ring_record(uint8_t *buf, size_t cap, int32_t cx16, int32_t cy16,
+                         int32_t r_in16, int32_t r_out16)
+{
+    const geo_t *g = geo_get(cx16, cy16, r_in16, r_out16, 0, GLASS_TURN_Q16, false);
+    const size_t head = (size_t)(GLASS_PANEL_PX + 1) * 2u;
+    if (g == NULL || (buf != NULL && cap < head)) {
+        return 0u;
+    }
+    rec_t r = {.buf = buf, .cap = cap, .pos = head};
+    uint16_t scratch = 0u;        /* the recorder never touches the row */
+    for (int y = 0; y < GLASS_PANEL_PX; y++) {
+        if (buf != NULL) {
+            ((uint16_t *)(void *)buf)[y] = (uint16_t)r.pos;
+        }
+        rec_flush(&r);
+        ring_like_row_t(&scratch, y, 0, GLASS_PANEL_PX - 1, g, 0u, 255u, false, &r);
+    }
+    if (buf != NULL) {
+        ((uint16_t *)(void *)buf)[GLASS_PANEL_PX] = (uint16_t)r.pos;
+    }
+    if (r.pos > 0xFFFFu || (buf != NULL && r.pos > cap)) {
+        return 0u;
+    }
+    return r.pos;
+}
+
+void glass_ring_replay_row(uint16_t *row, int y, int clip_lo, int clip_hi,
+                           const uint8_t *rec, uint16_t color565, uint8_t alpha,
+                           bool swap_bytes)
+{
+    if (row == NULL || rec == NULL || alpha == 0u || !row_clip(y, &clip_lo, &clip_hi)) {
+        return;
+    }
+    const uint16_t *tab = (const uint16_t *)(const void *)rec;
+    size_t p = tab[y];
+    const size_t end = tab[y + 1];
+    paint_t c;
+    paint_init(&c, color565, alpha, swap_bytes);
+    while (p < end) {
+        const unsigned n = rec[p];
+        const int x0 = (int)rec[p + 1] | ((int)rec[p + 2] << 8);
+        if (n == 0u) {
+            const int x1 = (int)rec[p + 3] | ((int)rec[p + 4] << 8);
+            p += 5u;
+            const int a = x0 > clip_lo ? x0 : clip_lo;
+            const int b = x1 < clip_hi ? x1 : clip_hi;
+            if (a <= b) {
+                fill_run(row, a, b, &c);
+            }
+        } else {
+            p += 3u;
+            for (unsigned i = 0; i < n; i++) {
+                const int x = x0 + (int)i;
+                if (x >= clip_lo && x <= clip_hi) {
+                    put(&row[x], &c, rec[p + i]);
+                }
+            }
+            p += n;
         }
     }
 }

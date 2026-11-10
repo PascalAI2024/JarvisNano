@@ -110,8 +110,22 @@ static jr_face_t fc_dial_of_style(int style)
 
 /* Put the render side into the scene's settled state. The clock-dependent
  * parts (seconds hand, entry animation, light) are set per frame by fc_frame. */
+#ifdef JR_ORBIT_REC
+/* Whether the recorded orbit rail is in use (production: yes). The identity
+ * suite runs every scene with it and a second time without. */
+static bool fc_orbit_rec_on = true;
+#endif
+
 static void fc_setup(const fc_scene_t *sc)
 {
+#ifdef JR_ORBIT_REC
+    if (fc_orbit_rec_on) {
+        orbit_rec_build();
+    } else if (s_orbit_rec != NULL) {
+        heap_caps_free(s_orbit_rec);
+        s_orbit_rec = NULL;
+    }
+#endif
     s_display.board.width = 466;
     s_display.board.height = 466;
     s_display.board.swap_color_bytes = false;

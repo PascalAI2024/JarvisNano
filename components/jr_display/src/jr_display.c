@@ -5134,6 +5134,67 @@ static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
  * however many screens exist, and the active mark takes the SHORT way round —
  * so a wrap advances one step forward like every other move, instead of
  * rewinding past everything. Position on a ring should be drawn as a ring. */
+/* The rail's track never moves, so what glass_ring_row would do for it is
+ * recorded once (about 10 KB, in PSRAM, at start) and replayed: the identical
+ * fills and blends without the per-row geometry. NULL (no PSRAM, or the record
+ * did not fit) falls back to drawing the ring the long way. Internal RAM: this
+ * pointer, 4 bytes. */
+static uint8_t *s_orbit_rec;
+#define JR_ORBIT_REC 1      /* tells the host fixtures the recorded rail exists */
+
+static void orbit_rec_build(void)
+{
+    if (s_orbit_rec != NULL) {
+        return;
+    }
+    const size_t need = glass_ring_record(NULL, 0, SP_CX * 16, SP_CY * 16,
+                                          SP_ORB_TRACK_IN * 16, SP_ORB_TRACK_OUT * 16);
+    if (need == 0u) {
+        return;
+    }
+    uint8_t *buf = heap_caps_malloc(need, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        return;
+    }
+    if (glass_ring_record(buf, need, SP_CX * 16, SP_CY * 16,
+                          SP_ORB_TRACK_IN * 16, SP_ORB_TRACK_OUT * 16) != need) {
+        heap_caps_free(buf);
+        return;
+    }
+    s_orbit_rec = buf;
+}
+
+/* The rows the lit mark (a 10/256-turn arc at the track's radius, round caps)
+ * can touch, so the other ~390 rows do not ask the glass layer to find that out
+ * (a geometry lookup each). a_act is the mark's centre in 1/256 turns, 0 at
+ * 3 o'clock, clockwise. The bound is the ends' and any cardinal crossing's
+ * height, plus 6 px for the cap radius and the anti-aliasing ramp. */
+static void orbit_mark_rows(int a_act, int *y_lo, int *y_hi)
+{
+    const int a0 = a_act - 5, a1 = a_act + 5;
+    int s_min = sp_sin(a0), s_max = s_min;
+    const int s1 = sp_sin(a1);
+    if (s1 < s_min) {
+        s_min = s1;
+    }
+    if (s1 > s_max) {
+        s_max = s1;
+    }
+    const int n0 = a0 & 255;
+    if (((SP_A_TOP - n0) & 255) <= 10) {
+        s_min = -32768;               /* the top of the circle is inside the mark */
+    }
+    if (((64 - n0) & 255) <= 10) {
+        s_max = 32768;                /* ... or the bottom */
+    }
+    /* the lowest point is at the inner radius where the mark is above the
+     * centre line, the outer where it is below, so take both radii */
+    const int lo_in = (s_min * SP_ORB_MARK_IN) >> 15, lo_out = (s_min * SP_ORB_MARK_OUT) >> 15;
+    const int hi_in = (s_max * SP_ORB_MARK_IN) >> 15, hi_out = (s_max * SP_ORB_MARK_OUT) >> 15;
+    *y_lo = SP_CY + (lo_in < lo_out ? lo_in : lo_out) - 6;
+    *y_hi = SP_CY + (hi_in > hi_out ? hi_in : hi_out) + 6;
+}
+
 static void sp_draw_orbit(const jr_display_ctx_t *ctx, int y1, int y2,
                           uint16_t *pixels, int st)
 {
@@ -5150,6 +5211,8 @@ static void sp_draw_orbit(const jr_display_ctx_t *ctx, int y1, int y2,
     const int n = sp_ring_n(sp_desk_live());
     const int a_act = (s_orbit_a16 + 8) >> 4;
     const int32_t mark_start = (int32_t)(((a_act - 5) * 256) & 0xFFFF);
+    int mark_y_lo, mark_y_hi;
+    orbit_mark_rows(a_act, &mark_y_lo, &mark_y_hi);
     int dx16[16], dy16[16];
     const int nd = n < 16 ? n : 16;
     for (int i = 0; i < nd; ++i) {
@@ -5165,15 +5228,21 @@ static void sp_draw_orbit(const jr_display_ctx_t *ctx, int y1, int y2,
             continue;
         }
         /* The whole ring; the glass ring takes the rows it touches and no more. */
-        glass_ring_row(row, y, lo, hi, SP_CX * 16, SP_CY * 16, SP_ORB_TRACK_IN * 16,
-                       SP_ORB_TRACK_OUT * 16, 0, GLASS_TURN_Q16, SP_C_PLATE, (uint8_t)st, swap);
+        if (s_orbit_rec != NULL) {
+            glass_ring_replay_row(row, y, lo, hi, s_orbit_rec, SP_C_PLATE, (uint8_t)st, swap);
+        } else {
+            glass_ring_row(row, y, lo, hi, SP_CX * 16, SP_CY * 16, SP_ORB_TRACK_IN * 16,
+                           SP_ORB_TRACK_OUT * 16, 0, GLASS_TURN_Q16, SP_C_PLATE, (uint8_t)st, swap);
+        }
         for (int i = 0; i < nd; ++i) {
             if (y >= dy16[i] / 16 - 4 && y <= dy16[i] / 16 + 4) {
                 glass_disc_row(row, y, lo, hi, dx16[i], dy16[i], 40, cool, (uint8_t)st, swap);
             }
         }
-        glass_arc_row(row, y, lo, hi, SP_CX * 16, SP_CY * 16, SP_ORB_MARK_IN * 16,
-                      SP_ORB_MARK_OUT * 16, mark_start, 10 * 256, hot, (uint8_t)st, swap);
+        if (y >= mark_y_lo && y <= mark_y_hi) {
+            glass_arc_row(row, y, lo, hi, SP_CX * 16, SP_CY * 16, SP_ORB_MARK_IN * 16,
+                          SP_ORB_MARK_OUT * 16, mark_start, 10 * 256, hot, (uint8_t)st, swap);
+        }
     }
 }
 
@@ -6855,6 +6924,7 @@ esp_err_t jr_display_start(jr_display_t *out_port)
         return ESP_OK;
     }
     (void)act_rtc_restore();   /* the receipt from before the sleep */
+    orbit_rec_build();         /* before the render task exists to read it */
 
     BaseType_t created = xTaskCreatePinnedToCore(
         display_task, "jr_present", JR_DISPLAY_TASK_STACK, &s_display,
