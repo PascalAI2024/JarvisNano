@@ -550,21 +550,21 @@ void activity_note_said(const char *text)
 
 void activity_note_turn_end(void)
 {
-    /* Skip leading spaces the transcript chunks carry, then cut to 24 glyphs
-     * at a word boundary with the mark title_shorten() uses. */
+    /* Skip leading spaces the transcript chunks carry, then fit the row:
+     * a whole sentence if one fits, else a word boundary and "...". */
     const char *src = s_turn_head;
     while (*src == ' ') {
         src++;
     }
     if (*src != '\0') {
         /* One 24-glyph row holds "KIND summary": the summary gets what the
-         * tag and its space leave, cut at a word with the mark. */
+         * tag and its space leave. */
         char summary[25];
         size_t cap = 24U - strlen(s_turn_kind) - 1U;
         if (cap < 8U) {
             cap = 8U;
         }
-        title_shorten(summary, cap + 1U, src);
+        (void)jr_display_activity_fit(summary, cap + 1U, src);
         jr_display_activity_push(s_turn_kind, summary);
     }
     s_turn_head[0] = '\0';

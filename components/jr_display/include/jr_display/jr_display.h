@@ -805,6 +805,11 @@ void jr_display_links_set(const jr_display_links_t *links);
  * they are /api/cockpit's, not the glass's. */
 void jr_display_set_status(uint8_t volume, uint8_t brightness_cap);
 
+/* Fit a spoken line into an ACTIVITY row of cap-1 glyphs: whole if it fits,
+ * else its last complete sentence, else its last whole word and "...". Pure.
+ * Returns the length written. */
+size_t jr_display_activity_fit(char *dst, size_t cap, const char *src);
+
 #ifdef __cplusplus
 }
 #endif

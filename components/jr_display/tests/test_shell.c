@@ -3138,10 +3138,8 @@ static void test_activity_is_honest_when_empty_and_newest_first(void)
     /* A long summary is cut at the row and marked, never silently. */
     jr_display_activity_push("WEATHER", "83 OVERCAST FORT LAUDERDALE");
     sp_compose();
-    CHECK(strlen(s_act_row[0]) == SP_ACT_ROW_GLYPHS,
-          "row fills its width exactly, got %zu", strlen(s_act_row[0]));
-    CHECK(s_act_row[0][SP_ACT_ROW_GLYPHS - 1] == '.',
-          "the cut is marked, got '%s'", s_act_row[0]);
+    CHECK(strcmp(s_act_row[0], "83 OVERCAST FORT...") == 0,
+          "the cut is a whole word and three dots, got '%s'", s_act_row[0]);
     CHECK(strcmp(s_act_kind[0], "WEATHER") == 0, "the kind is kept whole, got '%s'", s_act_kind[0]);
     reset_activity();
 }
@@ -3278,6 +3276,44 @@ static void test_desk_sheet_heads_with_the_marked_task(void)
     sp_compose_detail(JR_DISPLAY_SPACE_DESK);
     CHECK(strcmp(s_detail_head, "TASK") == 0,
           "no task should head TASK, got '%s'", s_detail_head);
+}
+
+/* Two ACTIVITY rows read "FORGIVE ME, SIR. I." and "I'M NOT QUITE.": the cut
+ * took a word boundary and spent the last glyph on a full stop, so a
+ * fragment looked like an ending. A sentence that fits ends the row; a cut
+ * mid-sentence is "..." on a whole word, never ".". The strings are the
+ * cut points of those two lines (19 glyphs, what a SAID row has left). */
+static void test_activity_fit_ends_on_a_sentence_or_an_ellipsis(void)
+{
+    char out[32];
+    jr_display_activity_fit(out, 20, "FORGIVE ME, SIR. I'M AFRAID I DID NOT CATCH THAT");
+    CHECK(strcmp(out, "FORGIVE ME, SIR.") == 0, "a whole sentence ends the row, no orphan: '%s'", out);
+    jr_display_activity_fit(out, 20, "I'M NOT QUITE SURE WHAT YOU MEAN");
+    CHECK(strcmp(out, "I'M NOT QUITE...") == 0, "a mid-sentence cut is a word and three dots: '%s'", out);
+    jr_display_activity_fit(out, 20, "  ONE SENTENCE. TWO SENTENCES HERE");
+    CHECK(strcmp(out, "ONE SENTENCE.") == 0, "leading spaces go and the first sentence stands: '%s'", out);
+    jr_display_activity_fit(out, 20, "VOLUME IS NOW FORTY");
+    CHECK(strcmp(out, "VOLUME IS NOW FORTY") == 0, "a line that fits is left alone: '%s'", out);
+    jr_display_activity_fit(out, 20, "ANTIDISESTABLISHMENTARIANISM IS LONG");
+    CHECK(strlen(out) == 19 && strcmp(out + 16, "...") == 0,
+          "one long word is cut hard and marked: '%s'", out);
+    for (int cap = 5; cap < 30; cap++) {
+        jr_display_activity_fit(out, (size_t)cap, "I'M NOT QUITE SURE WHAT YOU MEAN, SIR");
+        CHECK(strlen(out) < (size_t)cap, "fits in cap %d: '%s'", cap, out);
+        CHECK(strlen(out) < 3 || strcmp(out + strlen(out) - 1, ".") != 0 ||
+                  strcmp(out + strlen(out) - 3, "...") == 0,
+              "never a lone full stop at cap %d: '%s'", cap, out);
+    }
+    /* and the sheet's own cut, for a store longer than the row */
+    __atomic_store_n(&s_act_count, 0U, __ATOMIC_RELEASE);
+    jr_display_activity_push("SAID", "FORGIVE ME, SIR. I'M AFRAID");
+    sp_compose_activity();
+    CHECK(strcmp(s_act_row[0], "FORGIVE ME, SIR.") == 0, "the row ends the sentence: '%s'", s_act_row[0]);
+    jr_display_activity_push("SAID", "I'M NOT QUITE SURE WHAT YOU MEAN");
+    sp_compose_activity();
+    CHECK(strcmp(s_act_row[0], "I'M NOT QUITE SURE WHAT...") != 0 &&
+              strcmp(s_act_row[0] + strlen(s_act_row[0]) - 3, "...") == 0,
+          "the row ends on three dots: '%s'", s_act_row[0]);
 }
 
 /* The orbit rail spanned r184-196 against a measured free band of r185-194,
@@ -5369,6 +5405,7 @@ int main(void)
     test_shade_hits_resolve_to_controls();
     test_shade_button_arcs_and_breath();
     test_shade_light_is_the_owner_setting();
+    test_activity_fit_ends_on_a_sentence_or_an_ellipsis();
     test_shade_clocks_run_only_while_they_must();
     test_caption_band_gives_way_to_a_black_backdrop();
 

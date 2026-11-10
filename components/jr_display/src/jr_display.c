@@ -2692,9 +2692,63 @@ static void sp_compose_weather(void)
     }
 }
 
+/* Fit a spoken line into an ACTIVITY row. Whole, when it fits. Otherwise the
+ * last complete sentence that fits, ending on its own stop with nothing after
+ * it: a cut that appends "." to a fragment leaves "FORGIVE ME, SIR. I." and
+ * reads like an ending. Failing that, the last whole word with "..." (no font
+ * here has U+2026), never a bare ".". `cap` counts the terminator. */
+size_t jr_display_activity_fit(char *dst, size_t cap, const char *src)
+{
+    if (cap == 0U) {
+        return 0U;
+    }
+    const size_t max = cap - 1U;
+    while (*src == ' ') {
+        src++;
+    }
+    const size_t n = strlen(src);
+    if (n <= max) {
+        memcpy(dst, src, n);
+        dst[n] = '\0';
+        return n;
+    }
+    if (max < 4U) {
+        memcpy(dst, src, max);
+        dst[max] = '\0';
+        return max;
+    }
+    size_t end = 0U;
+    for (size_t i = 0U; i < max; i++) {
+        if ((src[i] == '.' || src[i] == '!' || src[i] == '?') &&
+            (src[i + 1U] == ' ' || src[i + 1U] == '\0')) {
+            end = i + 1U;
+        }
+    }
+    if (end >= 4U) {
+        memcpy(dst, src, end);
+        dst[end] = '\0';
+        return end;
+    }
+    size_t keep = max - 3U;
+    size_t cut = keep;
+    while (cut > 0U && src[cut] != ' ') {
+        cut--;
+    }
+    if (cut >= max / 2U) {
+        keep = cut;
+    }
+    while (keep > 0U && (src[keep - 1U] == ' ' || src[keep - 1U] == ',' ||
+                         src[keep - 1U] == ';' || src[keep - 1U] == ':' ||
+                         src[keep - 1U] == '-')) {
+        keep--;
+    }
+    memcpy(dst, src, keep);
+    memcpy(dst + keep, "...", 4);
+    return keep + 3U;
+}
+
 /* ACTIVITY rows for this frame. s_act_row[i] is the summary alone, cut to the
- * row's 24 glyphs with its last glyph spent on a "." when it does not fit (the
- * same mark title_shorten() leaves on a DESK title). s_act_age[i] is the age
+ * row's 24 glyphs by jr_display_activity_fit() when it does not fit. s_act_age[i] is the age
  * under the sheet's own truth rule: a live row ages by esp_timer, a carried one
  * by the wall clock, anything else says EARLIER rather than invent a number. */
 static void sp_compose_activity(void)
@@ -2711,12 +2765,7 @@ static void sp_compose_activity(void)
         if (slen < SP_ACT_ROW_GLYPHS) {   /* a full store may have been cut by the push: mark it */
             (void)sp_str(row, 0, SP_ACT_ROW_CAP, s_act_sum[i]);
         } else {
-            int len = 0;
-            for (int k = 0; k + 1 < SP_ACT_ROW_GLYPHS; ++k) {
-                row[len++] = s_act_sum[i][k];
-            }
-            row[len++] = '.';
-            row[len] = '\0';
+            (void)jr_display_activity_fit(row, SP_ACT_ROW_GLYPHS, s_act_sum[i]);
         }
         uint32_t age_min = 0u;
         if (!act_age_min(i, &age_min)) {
