@@ -6594,6 +6594,29 @@ static void apply_shell_overlay(jr_display_ctx_t *ctx, int x1, int y1,
     }
 }
 
+/* The dial copy takes only the columns inside the round glass, so a strip's
+ * corners hold whatever the buffer held before. The panel shows black there:
+ * make the mirror say so. A pixel is inside when its centre is within the
+ * radius (doubled coordinates, so every term is an integer). Only the mirror
+ * copy runs this, never the render path. */
+static void snapshot_mask_corners(uint16_t *dst, int x1, int width, int y,
+                                  int panel_w, int panel_h)
+{
+    const int dy = 2 * y + 1 - panel_h;
+    const int a = sp_isqrt(panel_w * panel_w - dy * dy);   /* |2x+1-w| <= a */
+    int lo = (panel_w - 1 - a + 1) / 2;                    /* ceil((w-1-a)/2) */
+    int hi = (panel_w - 1 + a) / 2;
+    if (a <= 0) {
+        lo = panel_w;
+        hi = -1;
+    }
+    for (int x = x1; x < x1 + width; ++x) {
+        if (x < lo || x > hi) {
+            dst[x - x1] = 0;
+        }
+    }
+}
+
 static void snapshot_record_flush(jr_display_ctx_t *ctx, int x1, int y1,
                                   int x2, int y2, const uint16_t *pixels)
 {
@@ -6631,6 +6654,8 @@ static void snapshot_record_flush(jr_display_ctx_t *ctx, int x1, int y1,
             (size_t)(y1 + row) * (size_t)ctx->board.width + (size_t)x1;
         const uint16_t *src = pixels + (size_t)row * (size_t)width;
         memcpy(dst, src, (size_t)width * sizeof(uint16_t));
+        snapshot_mask_corners(dst, x1, width, y1 + row, (int)ctx->board.width,
+                              (int)ctx->board.height);
     }
     ctx->snapshot_last_flush_ms = now_ms;
     if (coherent) {
