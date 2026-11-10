@@ -26,10 +26,6 @@
  * Units: positions and radii 1/16 px, root distances 1/64 px, angles Q16 turns.
  */
 #include "jr_display/glass.h"
-#include "jr_display/perf_knob.h"
-
-#include <stdint.h>
-#include <string.h>
 
 /* ---- trig ----------------------------------------------------------------- */
 
@@ -152,10 +148,10 @@ static inline void put(uint16_t *p, const paint_t *c, unsigned cov)
     *p = (a >= 255u) ? c->panel : glass_blend565(*p, c->color, a, c->swap);
 }
 
-/* glass_blend565 with the weights already worked out: the same arithmetic,
- * for a run of pixels that all use the same alpha. */
 uint32_t glass_perf_knob;
 
+/* glass_blend565 with the weights already worked out: the same arithmetic,
+ * for a run of pixels that all use the same alpha. */
 static inline uint16_t blend_w(uint16_t under, uint16_t over, unsigned wo, unsigned wu, bool swap)
 {
     const uint32_t u = swap ? glass_bswap(under) : under;
@@ -165,37 +161,15 @@ static inline uint16_t blend_w(uint16_t under, uint16_t over, unsigned wo, unsig
     return swap ? glass_bswap(out) : out;
 }
 
-/* n copies of v, two to a word once p is word aligned (the test is on the
- * pointer, so any buffer is safe). A store loop of 16-bit writes costs a
- * write, a compare and a branch per pixel; this costs them per pair. */
-static inline void fill16(uint16_t *p, int n, uint16_t v)
-{
-    if ((glass_perf_knob & JR_KNOB_GLASS_FILL_OLD) != 0u) {   /* the loop before 91b44ec */
-        for (int i = 0; i < n; i++) {
-            p[i] = v;
-        }
-        return;
-    }
-    if (n > 0 && (((uintptr_t)p) & 2u) != 0u) {
-        *p++ = v;
-        n--;
-    }
-    const uint32_t w = (uint32_t)v | ((uint32_t)v << 16);
-    for (; n >= 2; n -= 2, p += 2) {
-        memcpy(__builtin_assume_aligned(p, 4), &w, sizeof w);
-    }
-    if (n > 0) {
-        *p = v;
-    }
-}
-
 static void fill_run(uint16_t *row, int xa, int xb, const paint_t *c)
 {
     if (c->alpha == 0u) {
         return;
     }
     if (c->alpha >= 255u) {
-        fill16(row + xa, xb - xa + 1, c->panel);
+        for (int x = xa; x <= xb; x++) {
+            row[x] = c->panel;
+        }
     } else {
         for (int x = xa; x <= xb; x++) {
             row[x] = blend_w(row[x], c->color, c->wo, c->wu, c->swap);

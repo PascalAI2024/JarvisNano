@@ -12,39 +12,26 @@
  * The render task reads the word once a frame (knob_apply in jr_display.c) and
  * copies it to the two words the drawing files read, hud_perf_knob and
  * glass_perf_knob. Knob 0 is the shipped path. The losing paths are deleted
- * after the device has spoken, not before. */
+ * after the device has spoken, not before.
+ *
+ * There are no candidates at present: JR_KNOB_KNOWN_MASK is 0, so the setter
+ * keeps no bit and the identity suite's per-bit loop has nothing to run. A new
+ * candidate takes bit 0, is ORed into the mask, and is read from the two words.
+ *
+ * 2026-11-10, the seven candidates of the first round, measured on the device
+ * (240 MHz, lease held) and settled:
+ *   bit 0 record the MINIMAL dial disc: helped only the slow path; deleted.
+ *   bit 1 hud_render.c fill16, one 16-bit store a pixel in place of two to a
+ *         word: -12 ms on MINIMAL; the per-pixel loop is the only path.
+ *   bit 2 glass_draw.c fill16, the same: neutral; the per-pixel loop is the
+ *         only path.
+ *   bit 3 aa_disc before 91b44ec: -12.7 ms on MINIMAL; it is the only aa_disc.
+ *   bit 4 SKELETON balance wheel cell classes: no gain; deleted.
+ *   bit 5 dial copy of the columns inside the round glass: about -1.1 ms on
+ *         every baked dial; the only path (the corners hold stale strip data).
+ *   bit 6 aa_fill interior written once: neutral on PILOT, worse on FUTURE and
+ *         DIVER; deleted.
+ * docs/reference/frame-cost.md, "The knob round, 2026-11-10", has the numbers. */
 #pragma once
 
-/* The MINIMAL dial's disc, recorded the first time it is drawn and replayed
- * (hud_dial_cache_set). Off on the device since 2026-11-10; the 12 KB of PSRAM
- * is taken only when this bit is first set. */
-#define JR_KNOB_DIAL_REC        (1u << 0)
-/* hud_render.c fill16 as the store loop it was before 91b44ec (one 16-bit
- * store per pixel) in place of two pixels to a word. */
-#define JR_KNOB_HUD_FILL_OLD    (1u << 1)
-/* glass_draw.c fill16, the same. */
-#define JR_KNOB_GLASS_FILL_OLD  (1u << 2)
-/* aa_disc as it was before 91b44ec, verbatim (aa_disc_v0): no record branches,
- * the interior stored by a plain loop. */
-#define JR_KNOB_DISC_ROW_OLD    (1u << 3)
-
-/* SKELETON's balance wheel reads a 2-bit class per sprite cell (clear / solid /
- * partial) from a 5.3 KB PSRAM map instead of four alpha bytes a pixel, and
- * skips the alpha sums where the cell is solid. Measure on SKELETON. */
-#define JR_KNOB_BAL_CLASS       (1u << 4)
-
-/* The dial copy (apply_dial) takes only the columns inside the round glass of
- * each row instead of all 466. The corners hold stale strip data instead of the
- * dial; they are not on the glass. Measure on any baked dial: the "dial" layer. */
-#define JR_KNOB_DIAL_SPAN       (1u << 5)
-
-/* hud_render.c aa_fill (every hand, the polygons): pixels all sample lines of a
- * row cover whole are written once instead of once per line, so a wide row
- * writes the coverage row once, not sixteen times. Measure on PILOT, DIVER,
- * FUTURE (the hands inside clock_face). */
-#define JR_KNOB_AA_INTERIOR     (1u << 6)
-
-#define JR_KNOB_KNOWN_MASK      (JR_KNOB_DIAL_REC | JR_KNOB_HUD_FILL_OLD | \
-                                 JR_KNOB_GLASS_FILL_OLD | JR_KNOB_DISC_ROW_OLD | \
-                                 JR_KNOB_BAL_CLASS | JR_KNOB_DIAL_SPAN | \
-                                 JR_KNOB_AA_INTERIOR)
+#define JR_KNOB_KNOWN_MASK      0u

@@ -533,21 +533,8 @@ int     hud_celestial_twinkle(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                        const hud_watch_t *w, int strength, int style);
 
-/* Memory for the MINIMAL dial's disc to be recorded in (the disc is the same
- * every frame, and finding its edge cost more than writing it). The caller owns
- * it; PSRAM is fine, it is read a few hundred bytes a strip. cap_words is the
- * size in uint16; 4,600 are used. NULL, or never called, draws the disc
- * the long way, to the same pixels. */
 /* The perf knob as the render task last read it (perf_knob.h); 0 = shipped. */
 extern uint32_t hud_perf_knob;
-
-/* Memory for the balance wheel's cell classes (JR_KNOB_BAL_CLASS), 5,257 bytes;
- * the caller owns it. NULL, or the bit off, draws the wheel from the alpha
- * table alone, to the same pixels. */
-void hud_balance_cache_set(uint8_t *buf, size_t cap_bytes);
-
-void hud_dial_cache_set(uint16_t *buf, size_t cap_words);
-size_t hud_dial_cache_used(void);     /* words filled so far (the tests report it) */
 
 /* One hand alone (0 hour, 1 minute, 2 seconds) at a Q16-turn angle
  * (65536 per revolution, 12 o'clock at 192 << 8, clockwise), with or

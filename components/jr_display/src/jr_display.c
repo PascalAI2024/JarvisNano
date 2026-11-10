@@ -813,7 +813,7 @@ static bool s_parked;
 static int  s_park_want;
 static int  s_space_black;   /* 0..256: how far the backdrop has gone to black */
 
-/* JR_KNOB_DIAL_SPAN. The panel is round: the four corners of the 466 x 466
+/* The dial copy takes the span of each row. The panel is round: the four corners of the 466 x 466
  * frame are never seen. Per row, the columns inside a circle of radius 234
  * (one pixel wider than the 233.0 the glass shows); s_dial_span[d] is the
  * largest k with the row's pixel 233 + k inside, d the row's distance from the
@@ -842,8 +842,7 @@ static void apply_dial(const jr_display_ctx_t *ctx, int x1, int y1,
         return;
     }
     const int width = x2 - x1;
-    if ((hud_perf_knob & JR_KNOB_DIAL_SPAN) != 0u && ctx->board.width == 2 * DIAL_SPAN_N &&
-        y2 <= 2 * DIAL_SPAN_N) {
+    if (ctx->board.width == 2 * DIAL_SPAN_N && y2 <= 2 * DIAL_SPAN_N) {
         if (!s_dial_span_built) {
             dial_span_build();
         }
@@ -1359,7 +1358,7 @@ static bool s_split_on;
  * copies it once a frame into hud_perf_knob and glass_perf_knob (knob_apply,
  * from overlay_fade_tick), so a frame never sees it change half way. */
 static volatile uint32_t s_perf_knob_word;
-static void knob_apply(void);                  /* defined with the dial record below */
+static void knob_apply(void);
 
 void jr_display_set_perf_knob(uint32_t knob)
 {
@@ -5155,53 +5154,14 @@ static inline void fring_row(uint16_t *row, int y, int lo, int hi, bool swap, in
     }
 }
 
-/* The MINIMAL dial's disc, recorded by hud_render.c (hud_dial_cache_set). 12 KB
- * of PSRAM allocated once at start; one disc's edge takes 9.2 KB (4,596 words)
- * when every row is in. Internal RAM: a pointer. */
-#define SG_DIAL_REC_WORDS 6144
-#define JR_DIAL_REC       1     /* tells the host fixtures the recorded dial disc exists */
-static uint16_t *s_dial_rec;
-static uint8_t *s_bal_cls_mem;          /* JR_KNOB_BAL_CLASS: 5,257 B of PSRAM, taken when the bit is first set */
-
-static void dial_rec_alloc(void)
-{
-    /* Off unless the knob asks (JR_KNOB_DIAL_REC). Measured 2026-11-10: with the
-     * record, MINIMAL's face cost 35.1 ms a frame; drawn the long way on the
-     * image before, 25.6 ms. The host counted 30 % fewer instructions, so the
-     * loss is memory traffic the host does not see. The record and its host
-     * checks stay until the device has measured this half apart from the word
-     * fill in glass_draw.c that landed in the same commit. The 12 KB is taken
-     * from PSRAM the first time the bit is set, never at start. */
-    if ((hud_perf_knob & JR_KNOB_DIAL_REC) == 0u) {
-        hud_dial_cache_set(NULL, 0u);
-        return;
-    }
-    if (s_dial_rec == NULL) {
-        s_dial_rec = heap_caps_malloc(SG_DIAL_REC_WORDS * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    }
-    hud_dial_cache_set(s_dial_rec, s_dial_rec != NULL ? SG_DIAL_REC_WORDS : 0u);
-}
-
 /* Once a frame, before anything draws: the word httpd set becomes the one the
- * drawing code reads. A changed record bit restarts (or drops) the dial record. */
+ * drawing code reads. Bits that need memory or a restart would be handled here
+ * on the frame their value changes; there are none at present. */
 static void knob_apply(void)
 {
     const uint32_t k = __atomic_load_n(&s_perf_knob_word, __ATOMIC_RELAXED);
-    const uint32_t was = hud_perf_knob;
-    if (k == was) {
-        return;
-    }
     hud_perf_knob = k;
     glass_perf_knob = k;
-    if (((k ^ was) & JR_KNOB_DIAL_REC) != 0u) {
-        dial_rec_alloc();
-    }
-    if (((k ^ was) & JR_KNOB_BAL_CLASS) != 0u && (k & JR_KNOB_BAL_CLASS) != 0u) {
-        if (s_bal_cls_mem == NULL) {
-            s_bal_cls_mem = heap_caps_malloc(5257u, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        }
-        hud_balance_cache_set(s_bal_cls_mem, s_bal_cls_mem != NULL ? 5257u : 0u);
-    }
 }
 
 /* ACTIVITY: up to three blocks, newest first. Line one is the kind and the age
@@ -7782,7 +7742,6 @@ esp_err_t jr_display_start(jr_display_t *out_port)
     (void)act_rtc_restore();   /* the receipt from before the sleep */
     orbit_rec_build();         /* before the render task exists to read it */
     fring_rec_alloc();         /* likewise */
-    dial_rec_alloc();          /* likewise */
     shade_rec_alloc();         /* likewise */
 
     BaseType_t created = xTaskCreatePinnedToCore(

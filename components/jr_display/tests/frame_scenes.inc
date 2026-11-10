@@ -133,29 +133,20 @@ static bool fc_orbit_rec_on = true;
 /* Whether the recorded battery / desk ring is in use (production: yes). */
 static bool fc_fring_rec_on = true;
 #endif
-#ifdef JR_DIAL_REC
-/* Whether the recorded MINIMAL dial disc is in use (production: yes). */
-static bool fc_dial_rec_on = true;
-#endif
 #ifdef JR_SHADE_REC
 /* Whether the recorded control-shade arcs are in use (production: yes). */
 static bool fc_shade_rec_on = true;
 #endif
 
-/* Perf-knob bits (perf_knob.h) a run turns on besides the dial record. A knob
+/* Perf-knob bits (perf_knob.h) a run turns on. A knob
  * changes what a frame costs, never its pixels, so the identity suite renders
  * the whole table once per bit and holds it to the same hashes. */
 static uint32_t fc_knob_extra;
 
 static void fc_setup(const fc_scene_t *sc)
 {
-    jr_display_set_perf_knob(fc_knob_extra | (fc_dial_rec_on ? JR_KNOB_DIAL_REC : 0u));
+    jr_display_set_perf_knob(fc_knob_extra);
     knob_apply();                    /* the render task does this once a frame */
-#ifdef JR_DIAL_REC
-    if (!fc_dial_rec_on) {
-        hud_dial_cache_set(NULL, 0);
-    }
-#endif
 #ifdef JR_SHADE_REC
     if (fc_shade_rec_on) {
         shade_rec_alloc();
