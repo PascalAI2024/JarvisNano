@@ -33,6 +33,11 @@
  * skips the alpha sums where the cell is solid. Measure on SKELETON. */
 #define JR_KNOB_BAL_CLASS       (1u << 4)
 
+/* The dial copy (apply_dial) takes only the columns inside the round glass of
+ * each row instead of all 466. The corners hold stale strip data instead of the
+ * dial; they are not on the glass. Measure on any baked dial: the "dial" layer. */
+#define JR_KNOB_DIAL_SPAN       (1u << 5)
+
 #define JR_KNOB_KNOWN_MASK      (JR_KNOB_DIAL_REC | JR_KNOB_HUD_FILL_OLD | \
                                  JR_KNOB_GLASS_FILL_OLD | JR_KNOB_DISC_ROW_OLD | \
-                                 JR_KNOB_BAL_CLASS)
+                                 JR_KNOB_BAL_CLASS | JR_KNOB_DIAL_SPAN)

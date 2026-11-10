@@ -813,6 +813,28 @@ static bool s_parked;
 static int  s_park_want;
 static int  s_space_black;   /* 0..256: how far the backdrop has gone to black */
 
+/* JR_KNOB_DIAL_SPAN. The panel is round: the four corners of the 466 x 466
+ * frame are never seen. Per row, the columns inside a circle of radius 234
+ * (one pixel wider than the 233.0 the glass shows); s_dial_span[d] is the
+ * largest k with the row's pixel 233 + k inside, d the row's distance from the
+ * centre line (0 = rows 232 and 233). 233 bytes, built on first use. */
+#define DIAL_SPAN_N 233
+static uint8_t s_dial_span[DIAL_SPAN_N];
+static bool    s_dial_span_built;
+
+static void dial_span_build(void)
+{
+    for (int d = 0; d < DIAL_SPAN_N; ++d) {
+        const int32_t rest = 4 * 234 * 234 - (2 * d + 1) * (2 * d + 1);   /* (2k+1)^2 <= rest */
+        int k = 0;
+        while (k + 1 < DIAL_SPAN_N && (2 * (k + 1) + 1) * (2 * (k + 1) + 1) <= rest) {
+            ++k;
+        }
+        s_dial_span[d] = (uint8_t)k;
+    }
+    s_dial_span_built = true;
+}
+
 static void apply_dial(const jr_display_ctx_t *ctx, int x1, int y1,
                        int x2, int y2, uint16_t *pixels)
 {
@@ -820,6 +842,25 @@ static void apply_dial(const jr_display_ctx_t *ctx, int x1, int y1,
         return;
     }
     const int width = x2 - x1;
+    if ((hud_perf_knob & JR_KNOB_DIAL_SPAN) != 0u && ctx->board.width == 2 * DIAL_SPAN_N &&
+        y2 <= 2 * DIAL_SPAN_N) {
+        if (!s_dial_span_built) {
+            dial_span_build();
+        }
+        for (int row = y1; row < y2; ++row) {
+            const int d = row < DIAL_SPAN_N ? DIAL_SPAN_N - 1 - row : row - DIAL_SPAN_N;
+            int a = DIAL_SPAN_N - 1 - s_dial_span[d];          /* first column of the glass */
+            int b = DIAL_SPAN_N + s_dial_span[d] + 1;          /* one past the last */
+            if (a < x1) a = x1;
+            if (b > x2) b = x2;
+            if (a < b) {
+                memcpy(pixels + (size_t)(row - y1) * (size_t)width + (size_t)(a - x1),
+                       s_dial_frame + (size_t)row * ctx->board.width + (size_t)a,
+                       (size_t)(b - a) * sizeof(uint16_t));
+            }
+        }
+        return;
+    }
     for (int row = y1; row < y2; ++row) {
         memcpy(pixels + (size_t)(row - y1) * (size_t)width,
                s_dial_frame + (size_t)row * ctx->board.width + (size_t)x1,
