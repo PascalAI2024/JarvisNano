@@ -1249,8 +1249,32 @@ static void watch_compose(void);               /* defined with the watch below *
 static volatile uint32_t s_split_deadline_ms;
 static bool s_split_on;
 
+/* Frames composed since boot, counted once a frame by overlay_fade_tick. The
+ * recorded shapes (fring_prepare, shade_rec_fill) wait for a value to hold for
+ * a second frame before they record it, so a number being dragged never pays
+ * for a record it will throw away. */
+static uint32_t s_frame_no;
+
+typedef struct {
+    int32_t k0, k1;
+    uint32_t first;     /* the frame this key was first asked for */
+} sp_settle_t;
+
+/* True once (k0, k1) has been asked for on an earlier frame as well. */
+static bool sp_settled(sp_settle_t *g, int32_t k0, int32_t k1)
+{
+    if (g->k0 != k0 || g->k1 != k1) {
+        g->k0 = k0;
+        g->k1 = k1;
+        g->first = s_frame_no;
+        return false;
+    }
+    return g->first != s_frame_no;
+}
+
 static void overlay_fade_tick(void)
 {
+    s_frame_no++;
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
     s_split_on = (int32_t)(__atomic_load_n(&s_split_deadline_ms, __ATOMIC_RELAXED) - now) > 0;
     uint32_t dt = now - s_fade_prev_ms;
@@ -4560,8 +4584,9 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
  * entry has finished and the screen sits still (oy == 0) they are recorded
  * (glass_shape_record / glass_glow_record) and replayed: the same fills and
  * blends, so the same pixels, for any fade, colour and clip. A change of the
- * sweep records again; while the entry runs, or the screen is being dragged,
- * the ring is drawn the long way, as before. The records are three blocks of
+ * sweep records again, once it has held for a second frame; while the entry
+ * runs, or the screen is being dragged, the ring is drawn the long way, as
+ * before. The records are three blocks of
  * SG_FRING_CAP bytes in PSRAM, allocated once at start (the largest the ring
  * needs, at 99 %, is 10 KB); if one is absent or did not fit, that layer is
  * drawn the long way. Internal RAM: a pointer and 8 bytes of key. */
@@ -4590,6 +4615,10 @@ static uint8_t fring_prepare(int32_t sweep)
     }
     if (s_fring.have != 0 && s_fring.sweep == sweep) {
         return s_fring.have;
+    }
+    static sp_settle_t gate;
+    if (!sp_settled(&gate, sweep, 0)) {
+        return 0;                 /* a new value: draw it the long way for a frame first */
     }
     const int32_t cx16 = SP_CX * 16, cy16 = (SP_CY + SG_RING_DY) * 16;
     uint8_t have = 0;
@@ -5216,6 +5245,70 @@ static void sg_breath(uint32_t ms, int32_t *grow16, int *alpha)
     *alpha = 130 - ((100 * b) >> 8);
 }
 
+/* The control shade's four arcs (the volume and brightness tracks and their
+ * fills) at rest. The tracks never change, so they are recorded once at start;
+ * a fill is recorded when its value has held for a frame after its entry, and
+ * again when it moves (see fring_prepare). Four blocks of SG_SH_REC_CAP bytes in
+ * PSRAM (the largest arc here is 6 KB); a block that is absent or did not fit
+ * is drawn the long way. Internal RAM: a pointer and 84 bytes of keys. */
+#define SG_SH_REC_CAP  8192
+#define SG_SH_RECS     4          /* left track, right track, left fill, right fill */
+#define JR_SHADE_REC   1          /* tells the host fixtures the recorded arcs exist */
+static uint8_t *s_shade_rec;
+static struct {
+    int32_t start, sweep;
+    bool ok;                      /* the block holds a record for (start, sweep) */
+    sp_settle_t gate;
+} s_shade_k[SG_SH_RECS];
+
+static bool shade_rec_make(int i, int32_t start, int32_t sweep)
+{
+    s_shade_k[i].start = start;
+    s_shade_k[i].sweep = sweep;
+    s_shade_k[i].ok = glass_shape_record(s_shade_rec + (size_t)i * SG_SH_REC_CAP, SG_SH_REC_CAP,
+                                         SP_CX * 16, SP_CY * 16, SG_SH_R_IN16, SG_SH_R_OUT16, start,
+                                         sweep, true) != 0u;
+    return s_shade_k[i].ok;
+}
+
+static void shade_rec_alloc(void)
+{
+    if (s_shade_rec == NULL) {
+        s_shade_rec = heap_caps_malloc((size_t)SG_SH_RECS * SG_SH_REC_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    memset(s_shade_k, 0, sizeof s_shade_k);
+    if (s_shade_rec != NULL) {
+        shade_rec_make(0, (GLASS_TURN_Q16 / 2 - SG_SH_HALF_Q16) & 0xFFFF, 2 * SG_SH_HALF_Q16);
+        shade_rec_make(1, (GLASS_TURN_Q16 - SG_SH_HALF_Q16) & 0xFFFF, 2 * SG_SH_HALF_Q16);
+    }
+}
+
+/* The record of block i for (start, sweep), or NULL to draw the arc itself. The
+ * tracks' blocks are fixed; a fill's is made once the value has held. */
+static const uint8_t *shade_rec_get(int i, int32_t start, int32_t sweep, bool fill)
+{
+    if (s_shade_rec == NULL) {
+        return NULL;
+    }
+    if (!(s_shade_k[i].ok && s_shade_k[i].start == start && s_shade_k[i].sweep == sweep)) {
+        if (!fill || !sp_settled(&s_shade_k[i].gate, start, sweep) || !shade_rec_make(i, start, sweep)) {
+            return NULL;
+        }
+    }
+    return s_shade_rec + (size_t)i * SG_SH_REC_CAP;
+}
+
+static inline void shade_arc_row(uint16_t *row, int y, int lo, int hi, bool swap, const uint8_t *rec,
+                                 int32_t start, int32_t sweep, uint16_t color, uint8_t alpha)
+{
+    if (rec != NULL) {
+        glass_ring_replay_row(row, y, lo, hi, rec, color, alpha, swap);
+    } else {
+        glass_arc_row(row, y, lo, hi, SP_CX * 16, SP_CY * 16, SG_SH_R_IN16, SG_SH_R_OUT16, start,
+                      sweep, color, alpha, swap);
+    }
+}
+
 static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
                           uint16_t *pixels, int st, uint32_t ent, uint32_t breath_ms)
 {
@@ -5231,7 +5324,7 @@ static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
     const bool swap = ctx->board.swap_color_bytes;
     const bool muted = sp_privacy_muted();
     const uint16_t priv = muted ? SP_C_GOLD : SP_C_CYAN;
-    const int cx16 = SP_CX * 16, cy16 = SP_CY * 16;
+    const int cx16 = SP_CX * 16;
 
     /* the arcs, swept to their values */
     const uint32_t f_vol = glass_stagger_q16(ent, 0, 600);
@@ -5287,6 +5380,11 @@ static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
     const int32_t bcy16 = SP_BTN_CY * 16;
     const int btn_y0 = SP_BTN_CY - SP_BTN_R - 14, btn_y1 = SP_BTN_CY + SP_BTN_R + 14;   /* the breath reaches R+12 */
 
+    /* at rest: the arcs replayed from their records */
+    const uint8_t *rec_tl = shade_rec_get(0, l_start, span, false);
+    const uint8_t *rec_tr = shade_rec_get(1, r_track, span, false);
+    const uint8_t *rec_vf = (f_vol >= GLASS_ONE_Q16 && vsweep > 0) ? shade_rec_get(2, l_start, vsweep, true) : NULL;
+    const uint8_t *rec_lf = (f_lgt >= GLASS_ONE_Q16 && lsweep > 0) ? shade_rec_get(3, r_start, lsweep, true) : NULL;
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         int lo = 0, hi = HUD_W - 1;
@@ -5294,17 +5392,13 @@ static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
             continue;
         }
         if (y >= SG_SH_Y0 && y <= SG_SH_Y1) {
-            glass_arc_row(row, y, lo, hi, cx16, cy16, SG_SH_R_IN16, SG_SH_R_OUT16, l_start, span,
-                          SP_C_CYAN, a_track, swap);
-            glass_arc_row(row, y, lo, hi, cx16, cy16, SG_SH_R_IN16, SG_SH_R_OUT16, r_track, span,
-                          SP_C_AMBER, a_track, swap);
+            shade_arc_row(row, y, lo, hi, swap, rec_tl, l_start, span, SP_C_CYAN, a_track);
+            shade_arc_row(row, y, lo, hi, swap, rec_tr, r_track, span, SP_C_AMBER, a_track);
             if (vsweep > 0) {
-                glass_arc_row(row, y, lo, hi, cx16, cy16, SG_SH_R_IN16, SG_SH_R_OUT16, l_start,
-                              vsweep, SP_C_CYAN, (uint8_t)st, swap);
+                shade_arc_row(row, y, lo, hi, swap, rec_vf, l_start, vsweep, SP_C_CYAN, (uint8_t)st);
             }
             if (lsweep > 0) {
-                glass_arc_row(row, y, lo, hi, cx16, cy16, SG_SH_R_IN16, SG_SH_R_OUT16, r_start,
-                              lsweep, SP_C_AMBER, (uint8_t)st, swap);
+                shade_arc_row(row, y, lo, hi, swap, rec_lf, r_start, lsweep, SP_C_AMBER, (uint8_t)st);
             }
         }
         if (y >= btn_y0 && y <= btn_y1) {
@@ -7136,6 +7230,7 @@ esp_err_t jr_display_start(jr_display_t *out_port)
     (void)act_rtc_restore();   /* the receipt from before the sleep */
     orbit_rec_build();         /* before the render task exists to read it */
     fring_rec_alloc();         /* likewise */
+    shade_rec_alloc();         /* likewise */
 
     BaseType_t created = xTaskCreatePinnedToCore(
         display_task, "jr_present", JR_DISPLAY_TASK_STACK, &s_display,

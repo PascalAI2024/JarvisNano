@@ -57,11 +57,12 @@ int main(void)
     int failures = 0, checks = 0;
     /* Two passes over the whole table: the recorded orbit rail in use (as on
      * the device), then without it (the fallback when PSRAM is short), then with
-     * the rail but without the recorded battery / desk ring. All three must give
-     * the pixels the pre-cut code gave. */
-    for (int pass = 0; pass < 3; pass++) {
+     * the rail but without the recorded battery / desk ring, then without the
+     * recorded shade arcs. All four must give the pixels the pre-cut code gave. */
+    for (int pass = 0; pass < 4; pass++) {
         fc_orbit_rec_on = pass != 1;
         fc_fring_rec_on = pass != 2;
+        fc_shade_rec_on = pass != 3;
         for (int i = 0; i < NREFS; i++) {
             const fc_scene_t *sc = find_scene(REFS[i].scene);
             if (sc == NULL) {
@@ -80,9 +81,9 @@ int main(void)
             const uint64_t h = fc_hash(fb);
             checks++;
             if (h != REFS[i].hash) {
-                printf("FAIL %s clk=%lld (orbit record %s, ring record %s): frame hash %016llx, expected %016llx\n",
+                printf("FAIL %s clk=%lld (orbit record %s, ring record %s, shade record %s): frame hash %016llx, expected %016llx\n",
                        REFS[i].scene, (long long)REFS[i].clk_ms, fc_orbit_rec_on ? "on" : "off",
-                       fc_fring_rec_on ? "on" : "off",
+                       fc_fring_rec_on ? "on" : "off", fc_shade_rec_on ? "on" : "off",
                        (unsigned long long)h, (unsigned long long)REFS[i].hash);
                 failures++;
             }
@@ -90,6 +91,7 @@ int main(void)
     }
     fc_orbit_rec_on = true;
     fc_fring_rec_on = true;
+    fc_shade_rec_on = true;
     /* every scene must be pinned at least once: a scene added to the fixture
      * and not to the table would otherwise be unguarded */
     for (int s = 0; s < FC_NSCENES; s++) {
@@ -242,6 +244,54 @@ int main(void)
             }
         }
         (void)bad;
+    }
+    /* The recorded shade arcs against glass_arc_row, at the fills a drag
+     * produces (volume 0 to 100 %), every row, both byte orders. */
+    {
+        static uint8_t rec[SG_SH_REC_CAP];
+        static uint16_t a[466], b[466];
+        static const int pcts[] = { 1, 17, 50, 83, 100 };
+        long touched = 0, bytes_max = 0;
+        for (unsigned pi = 0; pi < sizeof pcts / sizeof pcts[0]; pi++) {
+            const int32_t sw = (int32_t)((int64_t)2 * SG_SH_HALF_Q16 * pcts[pi] / 100);
+            const int32_t starts[2] = { (GLASS_TURN_Q16 / 2 - SG_SH_HALF_Q16) & 0xFFFF,
+                                        (SG_SH_HALF_Q16 - sw) & 0xFFFF };
+            for (int si = 0; si < 2; si++) {
+                const size_t n = glass_shape_record(rec, sizeof rec, SP_CX * 16, SP_CY * 16,
+                                                    SG_SH_R_IN16, SG_SH_R_OUT16, starts[si], sw, true);
+                checks++;
+                if (n == 0u) {
+                    printf("FAIL shade arc record for %d %% is empty\n", pcts[pi]);
+                    failures++;
+                    continue;
+                }
+                if ((long)n > bytes_max) bytes_max = (long)n;
+                for (int swp = 0; swp < 2; swp++) {
+                    int bad = 0;
+                    for (int y = 0; y < 466 && !bad; y++) {
+                        for (int x = 0; x < 466; x++) a[x] = b[x] = (uint16_t)(x * 2654435761u + y * 40503u + 99u);
+                        glass_arc_row(a, y, 0, 465, SP_CX * 16, SP_CY * 16, SG_SH_R_IN16, SG_SH_R_OUT16,
+                                      starts[si], sw, SP_C_AMBER, 173u, swp != 0);
+                        glass_ring_replay_row(b, y, 0, 465, rec, SP_C_AMBER, 173u, swp != 0);
+                        for (int x = 0; x < 466; x++) {
+                            if (a[x] != b[x]) bad = 1;
+                            if (a[x] != (uint16_t)(x * 2654435761u + y * 40503u + 99u)) touched++;
+                        }
+                        if (bad) {
+                            printf("FAIL shade arc replay differs: %d %% start %d swap %d row %d\n", pcts[pi], si, swp, y);
+                            failures++;
+                        }
+                    }
+                    checks++;
+                }
+            }
+        }
+        checks++;
+        if (touched < 20000) {
+            printf("FAIL shade arc comparison drew only %ld pixels\n", touched);
+            failures++;
+        }
+        printf("control shade arc records: largest %ld bytes of %d (PSRAM, four blocks)\n", bytes_max, SG_SH_REC_CAP);
     }
     /* glass_arc_rows(): a row outside it must be a row glass_arc_row leaves
      * untouched, for arcs of every sweep and start, thick and thin, with and

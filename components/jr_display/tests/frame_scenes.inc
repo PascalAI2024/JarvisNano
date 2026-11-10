@@ -128,9 +128,21 @@ static bool fc_orbit_rec_on = true;
 /* Whether the recorded battery / desk ring is in use (production: yes). */
 static bool fc_fring_rec_on = true;
 #endif
+#ifdef JR_SHADE_REC
+/* Whether the recorded control-shade arcs are in use (production: yes). */
+static bool fc_shade_rec_on = true;
+#endif
 
 static void fc_setup(const fc_scene_t *sc)
 {
+#ifdef JR_SHADE_REC
+    if (fc_shade_rec_on) {
+        shade_rec_alloc();
+    } else if (s_shade_rec != NULL) {
+        heap_caps_free(s_shade_rec);
+        s_shade_rec = NULL;
+    }
+#endif
 #ifdef JR_FRING_REC
     if (fc_fring_rec_on) {
         fring_rec_alloc();
@@ -289,10 +301,22 @@ __attribute__((noinline)) static void fc_frame_warm(const fc_scene_t *sc, int64_
     fc_frame_body(sc, ms, fb);
 }
 
-/* Warm frame one period earlier (the steady state the device runs in: caches
+/* Set by the profiler, not by the hash suite: one more warm frame, because a
+ * recorded shape (fring_prepare, shade_rec_get) waits for a value to hold for
+ * a second frame and the measured frame should be the steady state, not the
+ * one that records. The hash suite keeps one, which also checks that the frame
+ * that records is the same pixels. (A second warm frame would move the hashes
+ * of scenes caught mid-ease, which are pinned at one.) */
+static bool fc_extra_warm;
+
+/* Warm frames one period (and, for the profiler, two) earlier (the steady state the device runs in: caches
  * filled, eases settled), then the frame under test. */
 static void fc_run(const fc_scene_t *sc, int64_t ms, uint16_t *fb)
 {
+    if (fc_extra_warm) {
+        fc_fill_face(fb);
+        fc_frame_warm(sc, ms - 84, fb);
+    }
     fc_fill_face(fb);
     fc_frame_warm(sc, ms - 42, fb);
     fc_fill_face(fb);
