@@ -298,7 +298,9 @@ The knob mechanism stays with no bits defined (`JR_KNOB_KNOWN_MASK` is 0): the w
 
 The lesson is about the word fill. `fill16` stored two pixels to a 32-bit word. On the host it counted fewer instructions (MINIMAL 2.90 M to 2.02 M with the disc record), and on the ESP32-S3 it ran 12 ms slower than the 16-bit store loop it replaced. Host instruction counts have now predicted the device wrong in both directions on this chip, so a change that is justified only by a callgrind figure ships behind the knob and waits for a device sample. The disc record, also justified by instructions, bought nothing once the plain loops were back.
 
-## 2026-11-10 - where a moving frame's time goes, and three bits that move it (host figures only)
+## 2026-11-10 - where a moving frame's time goes, and three bits that moved it (host figures only)
+
+The three bits below were measured on the device afterwards and are now the only paths; their knob-0 paths are deleted ("The replay round on the device", at the end of this page). The tables are the host figures that justified building them.
 
 Source: callgrind per frame (`CALLGRIND_DUMP_STATS_AT`, `--cache-sim=yes` for Dw) over `glass-preview.py` scripts, at a53d3e0 (the fade path deleted), knob 0. Scripts added in this round: `desk.script`, `shade-watch.script`, `style-drawn.script` (in `components/jr_display/tests/probe/preview/`). Every figure below is a host instruction count; this chip has disagreed with the host three times, so no bit here is proven on the device.
 
@@ -345,6 +347,26 @@ A record is taken on the first frame of an entry, or when a different sweep is a
 ### What was not measured
 
 Nothing here ran on the device. The veil and face figures depend on the stand-in face the preview uses.
+
+## The replay round on the device, 2026-11-10
+
+Image b0e490d, 240 MHz, lease held. Mean ms per frame in the 0.9 s after each trigger, knob 0 against the bit, two alternating rounds (one for the style walk).
+
+| Bit | Transition | knob 0 | bit | part, knob 0 > bit | worst interval, knob 0 > bit |
+|---|---|---|---|---|---|
+| 0 `REPLAY_RING` | WEATHER > STATUS | 59.4 / 57.7 | 52.1 / 60.7 | `space_screen` 36.3 / 33.2 > 29.6 / 34.4 | 99 / 100 > 67 / 74 |
+| 0 | STATUS > DESK | 59.0 / 69.4 | 49.8 / 53.2 | 34.8 / 44.5 > 27.2 / 29.0 | 91 / 93 > 57 / 72 |
+| 0 | DESK > ACTIVITY | 34.4 / 37.1 | 37.6 / 36.7 | 14.5 / 15.4 > 13.5 / 13.8 | 42 / 41 > 45 / 44 |
+| 3 `VEIL_MEMO` | shade open over home | 44.8 / 50.3 | 41.9 / 49.5 | `space_veil` 8.1 / 9.3 > 5.8 / 6.7 | 67 / 83 > 56 / 71 |
+| 3 | shade open over MINIMAL | 112.6 / 111.1 | 94.8 / 100.2 | 12.8 / 11.7 > 6.2 / 6.3 | 173 / 176 > 160 / 188 |
+| 3 | shade close over WATCH | 65.8 / 67.2 | 72.7 / 63.5 | 4.1 / 4.2 > 2.2 / 2.4 | 130 / 141 > 112 / 134 |
+| 2 `DISC_MEMO` | style PILOT > MINIMAL | 68.1 | 55.1 | `clock_face` 37.2 > 30.6 | 162 > 70 |
+| 2 | style MINIMAL > FUTURE | 61.3 | 47.6 | 27.9 > 27.2 | 64 > 50 |
+| 2 | the six other style changes | 28-69 | 28-64 | within the run-to-run spread | |
+
+Verdicts. All three win where they apply and none loses elsewhere, so each is the only path and the knob-0 code it replaced is deleted. The gains are small: 10 to 20 % of a transition frame, and the worst ring-entry interval is down about 30 %. The transitions are shorter, not smooth; the stutter is not solved. The shade close over WATCH is the one row where the mean did not improve (65.8 / 67.2 against 72.7 / 63.5, inside the spread); its veil part still halved.
+
+The settled frame hashes did not change. `perf_knob.h` keeps the word with no bit defined (`JR_KNOB_KNOWN_MASK` is 0); the in-motion tolerance harness in `test_frame_identity.c` stays for the next candidate and has nothing to compare until then. The PSRAM cost of bit 0 (+49,152 B) is now permanent.
 
 ---
 

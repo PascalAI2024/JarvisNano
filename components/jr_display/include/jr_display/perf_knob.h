@@ -44,22 +44,21 @@
  * 52 / 59. Blending at partial strength is not what makes a transition frame cost
  * two to three times a settled one. The bit numbers are free again.
  */
-/* 2026-11-10, the replay round (docs/reference/frame-cost.md): a transition frame
- * is slow because a record is bypassed or a flat colour is blended one pixel at a
- * time. Each bit keeps the output of the shipped path (settled scenes identical, a
- * frame in motion inside the identity suite's tolerance) and does less work.
- *   bit 0 REPLAY_RING the battery and desk ring while it slides in or out and while
- *                     its arc sweeps: the records of the final value are replayed
- *                     on every row away from the moving front, the rows near it are
- *                     drawn as before.
- *   bit 2 DISC_MEMO   aa_disc at part strength remembers the last pixel it blended
- *                     (a flat disc over a flat base is one blend per run).
- *   bit 3 VEIL_MEMO   the part-strength veil and black fold (the shade opening over a
- *                     watch, a dial dipping on a style change) remember the last pixel
- *                     they folded.
- * Bit 1 is reserved for the other candidates of the round. */
-#define JR_KNOB_REPLAY_RING     (1u << 0)
-#define JR_KNOB_DISC_MEMO       (1u << 2)
-#define JR_KNOB_VEIL_MEMO       (1u << 3)
+/* 2026-11-10, the replay round, measured on the device (240 MHz, lease held) and
+ * settled: all three won where they apply and lost nowhere; the bits are deleted
+ * and each is the only path. Mean ms per frame in the 0.9 s after the trigger,
+ * knob 0 against the bit:
+ *   bit 0 REPLAY_RING the battery and desk ring replays its records while it slides in
+ *         or out and while its arc sweeps: WEATHER > STATUS 59 / 58 > 52 / 61,
+ *         STATUS > DESK 59 / 69 > 50 / 53, DESK > ACTIVITY 34 / 37 > 38 / 37; the
+ *         worst interval of a ring entry 99 > 67 and 91 > 57 ms.
+ *   bit 2 DISC_MEMO   aa_disc at part strength remembers the last pixel it blended:
+ *         style PILOT > MINIMAL 68 > 55, MINIMAL > FUTURE 61 > 48.
+ *   bit 3 VEIL_MEMO   the part-strength veil and black fold remember the last pixel:
+ *         shade open over home 45 / 50 > 42 / 50, over MINIMAL 113 / 111 > 95 / 100,
+ *         shade close over WATCH within the spread.
+ * The gains are 10 to 20 % of a transition frame, not the stutter solved.
+ * docs/reference/frame-cost.md, "The replay round on the device, 2026-11-10". */
 
-#define JR_KNOB_KNOWN_MASK      (JR_KNOB_REPLAY_RING | JR_KNOB_DISC_MEMO | JR_KNOB_VEIL_MEMO)
+/* No bit is defined: the mechanism stays for the next candidate. */
+#define JR_KNOB_KNOWN_MASK      0u

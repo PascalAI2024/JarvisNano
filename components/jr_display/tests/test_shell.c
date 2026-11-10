@@ -5310,6 +5310,58 @@ static void test_black_is_pixels_and_a_parked_backdrop_skips_the_fold(void)
     pk_reset();
 }
 
+/* The part-strength veil and black fold remember the last pixel they folded. Pinned
+ * against a per-pixel fold written here: runs of one colour, zeros between them, and
+ * neighbours that differ by one bit, for both byte orders and several strengths. */
+static void test_the_veil_memo_folds_like_a_per_pixel_fold(void)
+{
+    pk_reset();
+    static uint16_t src[HUD_W * STRIP_ROWS], got[HUD_W * STRIP_ROWS];
+    const int y1 = 227 - STRIP_ROWS / 2;
+    for (size_t i = 0; i < sizeof src / sizeof *src; ++i) {
+        const uint32_t x = (uint32_t)(i % HUD_W), r = (uint32_t)(i / HUD_W);
+        const uint32_t seg = (x / 7u + r) % 6u;
+        static const uint16_t pal[6] = {0xFFFFu, 0x0000u, 0xF81Fu, 0xF81Eu, 0x07E0u, 0x1234u};
+        src[i] = pal[seg];
+    }
+    int checked = 0;
+    for (int sw = 0; sw < 2; ++sw) {
+        s_display.board.swap_color_bytes = sw != 0;
+        for (int k = 1; k < 32; k += 5) {
+            for (int which = 0; which < 2; ++which) {
+                memcpy(got, src, sizeof got);
+                if (which == 0) {
+                    sp_veil(&s_display, y1, y1 + STRIP_ROWS, got, k);
+                } else {
+                    sp_veil_black(&s_display, y1, y1 + STRIP_ROWS, got, k);
+                }
+                for (int y = y1; y < y1 + STRIP_ROWS; ++y) {
+                    int lo = 0, hi = HUD_W - 1;
+                    const bool in = sp_clip(y, &lo, &hi);
+                    for (int x = 0; x < HUD_W; ++x) {
+                        const size_t i = (size_t)(y - y1) * HUD_W + (size_t)x;
+                        uint16_t want = src[i];
+                        if (in && x >= lo && x <= hi && want != 0U) {
+                            want = which == 0 ? hud_fade565(want, sw != 0, k)
+                                              : sp_fade_to_black565(want, sw != 0, k);
+                        }
+                        if (got[i] != want) {
+                            CHECK(false, "veil %d swap %d k %d (%d,%d): 0x%04x, want 0x%04x",
+                                  which, sw, k, x, y, got[i], want);
+                            pk_reset();
+                            return;
+                        }
+                        ++checked;
+                    }
+                }
+            }
+        }
+    }
+    CHECK(checked > 100000, "checked %d pixels", checked);
+    s_display.board.swap_color_bytes = false;
+    pk_reset();
+}
+
 static void test_the_face_parks_only_when_settled_on_a_data_screen(void)
 {
     pk_reset();
@@ -5828,6 +5880,7 @@ int main(void)
 
     test_veil_reaches_black_on_the_way_in_and_back_on_the_way_out();
     test_black_is_pixels_and_a_parked_backdrop_skips_the_fold();
+    test_the_veil_memo_folds_like_a_per_pixel_fold();
     test_the_face_parks_only_when_settled_on_a_data_screen();
     test_a_baked_dial_watch_never_parks();
     test_the_shade_opens_in_about_eleven_frames_and_closes_in_about_seven();
