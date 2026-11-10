@@ -1242,6 +1242,8 @@ static bool             s_capd_label;
 static uint32_t         s_cap_rev_seen;
 static int              s_cap_p = 256;             /* the label's own phase, 0..256 */
 static bool             s_cap_dip;                 /* old name on glass: out, swap, in */
+static bool             s_cap_was_on;              /* the caption flag as of the last tick: a name that has
+                                                    * expired and is fading is not "on the glass" for a new one */
 static bool             s_cap_pend;                /* the swap to the staged words is due at the cut */
 static uint32_t         s_cap_age_ms;              /* settled time a label has been up */
 static uint32_t         s_cap_hold_ms;             /* 0: this caption never times out */
@@ -2149,6 +2151,8 @@ static bool     s_space_on;
  *                  engine is asked to rebind only after our own compositor has
  *                  dimmed the old picture to black, never before. */
 #define SP_STYLE_MS 340                    /* 3 frames out, 5 in at 24 fps */
+#define SP_STYLE_HOLD_MS 300               /* longest the cut waits for the new layer to bind */
+static uint16_t s_style_hold_ms;           /* how long it has waited this change */
 static uint8_t  s_style_shown;
 static uint8_t  s_style_seen;
 static uint8_t  s_style_from;
@@ -3061,7 +3065,11 @@ static void caption_tick(uint32_t dt_ms)
                 s_cap_hold_ms = 0U;
             } else {
                 const int f_now = caption_phase_factor();
-                const bool up = s_caption_prog > 0 && f_now > 0;
+                /* Only a name that is still held eases out. One that has timed
+                 * out and is on its 250 ms fade is already leaving: dipping it
+                 * again would bring the old words back for the length of the
+                 * dip (a style name read "WATCH - DRESS" over MINIMAL's dip). */
+                const bool up = s_cap_was_on && s_caption_prog > 0 && f_now > 0;
                 if (up) {
                     /* a name is on the glass: it eases out where it stands, the
                      * new one swaps in at the cut. Entering the dip at the point
@@ -3112,6 +3120,7 @@ static void caption_tick(uint32_t dt_ms)
             jr_display_caption_clear();
         }
     }
+    s_cap_was_on = on != 0;
     s_cap_alpha = (s_caption_ease * caption_phase_factor()) >> 8;
 }
 
@@ -3153,6 +3162,14 @@ static bool watch_layer_ready(void)
         return !s_dial_blit;
     }
     return s_dial_blit && s_dial_frame_face == want;
+}
+
+/* True once the presenter has bound the layer a style draws on: its dial, or,
+ * for a style with no art, nothing (the dial released). */
+static bool watch_style_bound(uint8_t style)
+{
+    const jr_face_t f = watch_dial_of_style(style);
+    return f == JR_FACE_COUNT ? !s_dial_blit : (s_dial_blit && s_dial_frame_face == f);
 }
 
 /* Once a frame, render task, after the slide and the style dip have stepped:
@@ -3265,6 +3282,7 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
             if (on_watch && s_style_shown != style_nav) {
                 s_style_from = s_style_shown;
                 s_style_prog = 0;
+                s_style_hold_ms = 0;
             } else if (s_style_prog >= 256) {
                 s_style_shown = style_nav;
                 s_style_from = style_nav;
@@ -3278,6 +3296,17 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
             s_style_prog += ystep;
             if (s_style_prog >= TR_CUT_STYLE) {
                 s_style_shown = s_style_seen;
+            }
+            /* The new style's layer is bound by the presenter a frame or two
+             * after the cut, and the ease-in is drawn only once it is. Left to
+             * run, those frames were taken out of the ease (the dial came up
+             * 0, 55 %, 95 %). Hold at the cut until it is bound, then ease in
+             * over the full five frames; a layer that never binds is waited
+             * for SP_STYLE_HOLD_MS and no longer. */
+            if (s_style_prog > TR_CUT_STYLE && s_style_hold_ms < SP_STYLE_HOLD_MS &&
+                !watch_style_bound(s_style_shown)) {
+                s_style_prog = TR_CUT_STYLE;
+                s_style_hold_ms = (uint16_t)(s_style_hold_ms + (dt_ms < SP_STYLE_HOLD_MS ? dt_ms : SP_STYLE_HOLD_MS));
             }
             if (s_style_prog >= 256) {
                 s_style_prog = 256;

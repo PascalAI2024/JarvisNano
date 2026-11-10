@@ -5453,8 +5453,11 @@ static void test_a_new_label_swaps_in_at_the_cut_and_not_before(void)
     s_fade_prev_ms = (uint32_t)(s_fake_us / 1000);
     mt_settle();
     jr_display_caption_label("WEATHER", JR_DISPLAY_LABEL_SCREEN);
-    mt_settle();
-    CHECK(strcmp(s_capd_line[0], "WEATHER") == 0, "the old name is on the glass");
+    /* up and still held (600 ms after it settles): not the 80 frames the test
+     * once waited, after which the name had timed out and been gone for ages */
+    for (int i = 0; i < 12; ++i) { mt_frame(); }
+    CHECK(strcmp(s_capd_line[0], "WEATHER") == 0 && s_cap_alpha > 200 && s_cap_hold_ms != 0U,
+          "the old name is on the glass and held (alpha %d)", s_cap_alpha);
     jr_display_caption_label("STATUS", JR_DISPLAY_LABEL_SCREEN);
     int swap_at = -1, cut_at = -1;
     for (int i = 0; i < 40 && swap_at < 0; ++i) {
@@ -5466,6 +5469,113 @@ static void test_a_new_label_swaps_in_at_the_cut_and_not_before(void)
     CHECK(swap_at == cut_at, "the swap happens on the frame that crosses the cut (%d vs %d)",
           swap_at, cut_at);
     pk_reset();
+}
+
+/* ---- a style change on a settled WATCH ---- */
+
+/* The presenter as the preview models it: the dial it binds is the one the
+ * compositor asked for on its previous frame. */
+static jr_face_t s_sd_prev_want = JR_FACE_COUNT;
+static void sd_frame(void)
+{
+    mt_frame();
+    const jr_face_t was = s_sd_prev_want;
+    if (was != JR_FACE_COUNT) {
+        s_dial_blit = true;
+        s_dial_frame_face = was;
+    } else {
+        s_dial_blit = false;
+    }
+    s_sd_prev_want = watch_dial_face();
+}
+
+static void sd_settled_watch(int style, bool with_caption)
+{
+    pk_reset();
+    s_fade_prev_ms = (uint32_t)(s_fake_us / 1000);
+    jr_display_caption_clear();
+    for (int i = 0; i < 40; ++i) { mt_frame(); }          /* no earlier test's name is up */
+    jr_display_clock_set(true, 6, 30, 15);
+    jr_display_watch_style_set((jr_watch_style_t)style);
+    jr_display_nav_set(JR_DISPLAY_SPACE_WATCH);
+    s_sd_prev_want = JR_FACE_COUNT;
+    for (int i = 0; i < 100; ++i) { sd_frame(); }
+    if (with_caption) {
+        jr_display_caption_label("WATCH - DRESS", JR_DISPLAY_LABEL_WATCH_STYLE);
+        sd_frame();                                   /* the render task takes the staged words */
+        for (int i = 0; i < 200 && s_cap_hold_ms != 0U; ++i) { sd_frame(); }
+        for (int i = 0; i < 30; ++i) { sd_frame(); }
+    } else {
+        jr_display_caption_clear();
+        for (int i = 0; i < 30; ++i) { sd_frame(); }
+    }
+}
+
+/* A style change on a settled WATCH, with the presenter modelled as the preview
+ * does. The new dial eases in over the full five frames (the cut waits for the
+ * layer to bind instead of the bind eating the ease), and a name that has
+ * already timed out does not come back for the dip. */
+static void test_a_style_change_eases_the_new_dial_in_over_five_frames(void)
+{
+    static const int pairs[][2] = { { JR_WATCH_DIVER, JR_WATCH_DRESS }, { JR_WATCH_DRESS, JR_WATCH_PILOT },
+                                    { JR_WATCH_MINIMAL, JR_WATCH_FUTURE } };
+    for (int k = 0; k < 3; ++k) {
+        sd_settled_watch(pairs[k][0], false);
+        jr_display_watch_style_step(1);
+        CHECK(jr_display_watch_style() == (jr_watch_style_t)pairs[k][1], "step lands on style %d", pairs[k][1]);
+        int layer_steps = 0, first = -1, prev = 0, hands_steps = 0, frames = 0;
+        bool monotone = true;
+        sd_frame();                                    /* the render task sees the new style */
+        for (int i = 0; i < 40 && s_style_prog < 256; ++i, ++frames) {
+            sd_frame();
+            const int layer = 256 - s_style_black;
+            if (s_style_prog > TR_CUT_STYLE && layer > 0 && layer < 250) {
+                if (first < 0) first = layer;
+                if (layer < prev) monotone = false;
+                prev = layer;
+                layer_steps++;
+            }
+            if (s_style_prog > TR_CUT_STYLE && s_watch_s > 0 && s_watch_s < 250) hands_steps++;
+        }
+        CHECK(s_style_prog == 256, "pair %d: the change finished", k);
+        CHECK(hands_steps >= 3, "pair %d: the hands ease in over %d partial frames, wanted 3 or more", k, hands_steps);
+        if (watch_dial_of_style((uint8_t)pairs[k][1]) != JR_FACE_COUNT) {
+            CHECK(layer_steps >= 3, "pair %d: the new dial shows %d partial frames, wanted 3 or more", k, layer_steps);
+            CHECK(first >= 0 && first < 160, "pair %d: the dial's first visible frame is %d of 256", k, first);
+            CHECK(monotone, "pair %d: the dial's ease went backwards", k);
+        }
+        CHECK(frames <= 16, "pair %d: the change took %d frames", k, frames);
+    }
+    pk_reset();
+    jr_display_caption_clear();
+    for (int i = 0; i < 40; ++i) { mt_frame(); }
+}
+
+static void test_a_name_that_has_timed_out_does_not_return_for_the_dip(void)
+{
+    sd_settled_watch(JR_WATCH_PILOT, true);            /* DRESS up, expired, faded away */
+    CHECK(s_cap_alpha == 0 && s_caption_prog == 0, "the old name is gone before the change (alpha %d)", s_cap_alpha);
+    jr_display_watch_style_step(1);
+    jr_display_caption_label("WATCH - MINIMAL", JR_DISPLAY_LABEL_WATCH_STYLE);
+    int seen_old = 0, seen_new = 0;
+    for (int i = 0; i < 20; ++i) {
+        sd_frame();
+        if (s_cap_alpha > 0 && strstr(s_capd_line[0], "DRESS") != NULL) seen_old++;
+        if (s_cap_alpha > 0 && strstr(s_capd_line[0], "MINIMAL") != NULL) seen_new++;
+    }
+    CHECK(seen_old == 0, "the expired name was drawn again for %d frames", seen_old);
+    CHECK(seen_new >= 6, "the new name shows for %d frames", seen_new);
+    /* a name that is still held does ease out where it stands */
+    sd_settled_watch(JR_WATCH_PILOT, false);
+    jr_display_caption_label("WATCH - PILOT", JR_DISPLAY_LABEL_WATCH_STYLE);
+    for (int i = 0; i < 12; ++i) sd_frame();
+    jr_display_watch_style_step(1);
+    jr_display_caption_label("WATCH - MINIMAL", JR_DISPLAY_LABEL_WATCH_STYLE);
+    sd_frame();
+    CHECK(strstr(s_capd_line[0], "PILOT") != NULL && s_cap_alpha > 0, "a held name eases out first (alpha %d)", s_cap_alpha);
+    pk_reset();
+    jr_display_caption_clear();
+    for (int i = 0; i < 40; ++i) { mt_frame(); }
 }
 
 static void test_a_baked_dial_watch_never_parks(void)
@@ -5682,6 +5792,8 @@ int main(void)
     test_the_shade_opens_in_about_eleven_frames_and_closes_in_about_seven();
     test_a_label_is_up_for_its_hold_after_settle_and_then_fades();
     test_watch_without_a_dial_asks_for_frames();
+    test_a_style_change_eases_the_new_dial_in_over_five_frames();
+    test_a_name_that_has_timed_out_does_not_return_for_the_dip();
     test_no_caption_is_drawn_while_a_sheet_is_open();
     test_a_new_label_swaps_in_at_the_cut_and_not_before();
     test_other_owners_of_the_backdrop_withdraw_the_park();
