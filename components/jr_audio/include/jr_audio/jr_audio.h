@@ -27,6 +27,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "jr_core/cue.h"
 #include "jr_ports/audio_source.h"
 #include "jr_ports/audio_sink.h"
 
@@ -107,6 +108,13 @@ void jr_audio_dac_unmute(void);
 /* True while the fast-kill mute is asserted (feeder discards everything).
  * Diagnostic visibility: a stuck mute is "no sound with green counters". */
 bool jr_audio_dac_muted(void);
+
+/* Register the owner's speaker-mute query (privacy pause or flip latch, which
+ * live in main.c). While it returns true, the tones the policy table in
+ * jr_core/dac_mute.c marks silent (today only the interface cues) refuse with
+ * ESP_ERR_INVALID_STATE; every older tone sounds as it always did. A tone that does play opens a muted DAC only for its
+ * own length and mutes it again after: it never changes the mute state. */
+void jr_audio_set_owner_mute_probe(bool (*probe)(void));
 
 /* Flush the playback ring without muting (maps JR_CMD_FLUSH_PLAYBACK_RING). */
 void jr_audio_flush_playback(void);
@@ -227,6 +235,12 @@ esp_err_t jr_audio_diag_play_chirp(uint32_t duration_ms,
 esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
                               uint32_t duration_ms, uint8_t level_percent);
 
+/* The same sweep, named for the acknowledgement of the owner's own mute gesture
+ * (long press). Its own row in the owner-mute policy table. */
+esp_err_t jr_audio_play_sweep_owner_ack(uint16_t start_hz, uint16_t end_hz,
+                                        uint32_t duration_ms,
+                                        uint8_t level_percent);
+
 /* A short melody: `notes` sine notes at hz[] (80..8000), note_ms each
  * (20..500), back to back, each under a raised-cosine attack and release so
  * the boundaries do not click. volume clamps to 1..30 percent like the
@@ -235,6 +249,12 @@ esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
  * exactly as the sweeps do, so it can never talk over a reply. */
 esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
                               uint16_t note_ms, uint8_t volume);
+
+/* One generated interface cue (jr_core/cue.h) at `amp_permille` of full scale.
+ * The caller owns the policy (jr_cue_allow); this owns the lane: it drops the
+ * cue, returning ESP_ERR_INVALID_STATE, while the owner has muted the speaker
+ * or any playback, including another cue, is pending. Never blocks. */
+esp_err_t jr_audio_play_cue(jr_cue_kind_t kind, uint16_t amp_permille);
 
 #ifdef __cplusplus
 }

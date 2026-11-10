@@ -9,6 +9,7 @@
  * (the board is not attached here); this compiles and links the real path.
  */
 #include "jr_audio/jr_audio.h"
+#include "jr_core/dac_mute.h"
 
 #include <math.h>
 #include <string.h>
@@ -172,6 +173,12 @@ static _Atomic bool           s_capture_speaking;
 
 /* fast-kill mute flag (set from capture task; read by feeder) */
 static _Atomic bool           s_muted;
+/* A tone unmuted the DAC and owes the mute back (jr_core/dac_mute.h). Set by
+ * earcon_commit when s_muted was true; cleared by any real mute or unmute;
+ * paid by the feeder once the tone has fully played out. */
+static _Atomic bool           s_cue_restore;
+/* The owner's speaker mute lives in main.c; tones ask through this probe. */
+static bool                 (*s_owner_mute_probe)(void);
 
 /* playback ring (int16 mono @ 24 kHz) */
 static int16_t               *s_pb;
@@ -861,6 +868,7 @@ static int sink_write(void *ctx, const jr_pcm_t *frame, size_t samples)
 static void sink_mute_now(void *ctx)
 {
     (void)ctx;
+    atomic_store(&s_cue_restore, false);   /* a real mute: nothing is owed */
     atomic_store(&s_muted, true);
     power_set_pa(NULL, false); /* immediate electrical kill during a write */
     if (s_dac_guard != NULL && xSemaphoreTake(s_dac_guard, 0) == pdTRUE) {
@@ -873,6 +881,8 @@ static void sink_mute_now(void *ctx)
     atomic_store(&s_playback_tail_until_ms, 0);
     if (s_feeder != NULL) xTaskNotifyGive(s_feeder);
 }
+
+static void cue_settle_mute(void);
 
 /* The feeder's one write chunk. Static, not on the task stack: 1536 B on a
  * 4096 B internal-RAM stack left 524 B of headroom once ESP_LOGW's vprintf
@@ -980,6 +990,7 @@ static void feeder_task(void *arg)
                 s_pb_prime_start_ms = 0u;
                 s_pb_prime_target = atomic_load(&s_pb_preroll_ms) * 24u;
             }
+            cue_settle_mute();
             /* CONFIG_FREERTOS_HZ=100: pdMS_TO_TICKS(5) truncates to zero and
              * merely yields to equal-priority tasks, starving IDLE0 forever. */
             vTaskDelay(1);
@@ -1245,7 +1256,9 @@ bool jr_audio_playback_pending(void)
     return buffered || atomic_load(&s_feeder_writing) || tail_active;
 }
 
-void jr_audio_dac_unmute(void)
+/* Open the DAC. Shared by the real unmute and by a tone, which differ only in
+ * whether the mute is owed back afterwards. */
+static void dac_open_for_playback(void)
 {
     if (atomic_load(&s_sleeping)) return;
     atomic_store(&s_muted, false);
@@ -1255,6 +1268,35 @@ void jr_audio_dac_unmute(void)
         xSemaphoreGive(s_dac_guard);
     }
     if (s_feeder != NULL) xTaskNotifyGive(s_feeder);
+}
+
+void jr_audio_dac_unmute(void)
+{
+    atomic_store(&s_cue_restore, false);   /* a real unmute: nothing is owed */
+    dac_open_for_playback();
+}
+
+/* The feeder found the ring empty. If a tone owed the mute back and nothing is
+ * left sounding, pay it: the device ends exactly as muted as it began. */
+static void cue_settle_mute(void)
+{
+    if (!atomic_load(&s_cue_restore) || jr_audio_playback_pending()) {
+        return;
+    }
+    if (!atomic_exchange(&s_cue_restore, false)) {
+        return;
+    }
+    atomic_store(&s_muted, true);
+    if (s_dac_guard != NULL &&
+        xSemaphoreTake(s_dac_guard, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (atomic_load(&s_dac_open)) esp_codec_dev_set_out_mute(s_dac, true);
+        xSemaphoreGive(s_dac_guard);
+    }
+}
+
+void jr_audio_set_owner_mute_probe(bool (*probe)(void))
+{
+    s_owner_mute_probe = probe;
 }
 
 bool jr_audio_dac_muted(void)
@@ -1550,9 +1592,15 @@ esp_err_t jr_audio_diag_copy_since(jr_audio_tap_kind_t kind,
  * response: rejects while playback is pending, rechecks after claiming the
  * lane to close the race with the normal sink writer, and reserves ring
  * capacity. On ESP_OK the caller owns the lane until earcon_release(). */
-static esp_err_t earcon_claim(size_t total)
+static esp_err_t earcon_claim(size_t total, jr_tone_kind_t kind)
 {
     if (!s_ready || atomic_load(&s_sleeping) || s_pb == NULL || s_feeder == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* The owner has muted the speaker: whether this tone still plays is the
+     * one table in jr_core/dac_mute.c (jr_dac_mute_sounds_under_owner_mute). */
+    if (s_owner_mute_probe != NULL && s_owner_mute_probe() &&
+        !jr_dac_mute_sounds_under_owner_mute(kind)) {
         return ESP_ERR_INVALID_STATE;
     }
     if (jr_audio_playback_pending()) {
@@ -1606,13 +1654,20 @@ static esp_err_t earcon_commit(const int16_t *pcm, size_t total)
         earcon_release();
         return ESP_FAIL;
     }
-    jr_audio_dac_unmute();
+    /* Open the DAC for the tone, but never change the mute state: when it was
+     * muted the feeder mutes it again once the tone has played out. The owed
+     * flag goes up first so a real unmute landing in between clears it. */
+    if (atomic_load(&s_muted)) {
+        atomic_store(&s_cue_restore, true);
+    }
+    dac_open_for_playback();
     earcon_release();
     return ESP_OK;
 }
 
-esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
-                              uint32_t duration_ms, uint8_t level_percent)
+static esp_err_t play_sweep(uint16_t start_hz, uint16_t end_hz,
+                            uint32_t duration_ms, uint8_t level_percent,
+                            jr_tone_kind_t kind)
 {
     if (duration_ms < 100U) duration_ms = 100U;
     if (duration_ms > EARCON_MAX_MS) duration_ms = EARCON_MAX_MS;
@@ -1624,7 +1679,7 @@ esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
     if (end_hz   > 8000U) end_hz   = 8000U;
 
     const size_t total = (size_t)GL_RX_SAMPLE_RATE * duration_ms / 1000U;
-    esp_err_t err = earcon_claim(total);
+    esp_err_t err = earcon_claim(total, kind);
     if (err != ESP_OK) {
         return err;
     }
@@ -1663,6 +1718,19 @@ esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
     return err;
 }
 
+esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
+                              uint32_t duration_ms, uint8_t level_percent)
+{
+    return play_sweep(start_hz, end_hz, duration_ms, level_percent, JR_TONE_SWEEP);
+}
+
+esp_err_t jr_audio_play_sweep_owner_ack(uint16_t start_hz, uint16_t end_hz,
+                                        uint32_t duration_ms,
+                                        uint8_t level_percent)
+{
+    return play_sweep(start_hz, end_hz, duration_ms, level_percent, JR_TONE_OWNER_ACK);
+}
+
 esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
                               uint16_t note_ms, uint8_t volume)
 {
@@ -1677,7 +1745,7 @@ esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
 
     const size_t per_note = (size_t)GL_RX_SAMPLE_RATE * note_ms / 1000U;
     const size_t total = per_note * notes;
-    esp_err_t err = earcon_claim(total);
+    esp_err_t err = earcon_claim(total, JR_TONE_CHIME);
     if (err != ESP_OK) {
         return err;
     }
@@ -1721,10 +1789,37 @@ esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
     return err;
 }
 
+esp_err_t jr_audio_play_cue(jr_cue_kind_t kind, uint16_t amp_permille)
+{
+    const size_t total = jr_cue_samples(kind);
+    if (total == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* Same lane as the chime: a cue requested while any playback is pending,
+     * including another cue, is dropped, never queued behind it. */
+    esp_err_t err = earcon_claim(total, JR_TONE_UI_CUE);
+    if (err != ESP_OK) {
+        return err;
+    }
+    int16_t *pcm = earcon_scratch(total);
+    if (pcm == NULL) {
+        earcon_release();
+        return ESP_ERR_NO_MEM;
+    }
+    if (jr_cue_render(kind, amp_permille, pcm, total) != total) {
+        heap_caps_free(pcm);
+        earcon_release();
+        return ESP_ERR_INVALID_SIZE;
+    }
+    err = earcon_commit(pcm, total);
+    heap_caps_free(pcm);
+    return err;
+}
+
 esp_err_t jr_audio_diag_play_chirp(uint32_t duration_ms, uint8_t level_percent)
 {
     /* The original 400 -> 2000 Hz diagnostic sweep, unchanged. Every existing
      * caller (the attention beat, the audio self-test) keeps its exact sound;
      * jr_audio_play_sweep() only exposes the endpoints the body always had. */
-    return jr_audio_play_sweep(400U, 2000U, duration_ms, level_percent);
+    return play_sweep(400U, 2000U, duration_ms, level_percent, JR_TONE_DIAG_CHIRP);
 }

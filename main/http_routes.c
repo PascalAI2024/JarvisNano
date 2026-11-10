@@ -414,8 +414,9 @@ static esp_err_t device_levels_get_handler(httpd_req_t *req)
     }
     char body[96];
     int n = snprintf(body, sizeof body,
-                     "{\"volume\":%d,\"brightness\":%u}",
-                     s_out_vol, (unsigned)s_brightness_cap);
+                     "{\"volume\":%d,\"brightness\":%u,\"ui_sounds\":%s}",
+                     s_out_vol, (unsigned)s_brightness_cap,
+                     atomic_load(&s_ui_sounds) ? "true" : "false");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_send(req, body, n);

@@ -14,6 +14,8 @@ idf_component_register(
         "src/orchestrator.c"
         "src/mood.c"
         "src/glance.c"
+        "src/dac_mute.c"
+        "src/cue.c"
     INCLUDE_DIRS "include"
     REQUIRES jr_ports jr_dsp
 )

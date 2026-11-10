@@ -345,6 +345,74 @@ static void boot_button_tick(uint32_t now_ms)
 #endif
 }
 
+/* The owner's speaker mute: privacy pause (hold, shade, disarm) or the flip
+ * latch. jr_audio refuses every tone while this is true. */
+static bool owner_speaker_muted(void)
+{
+    return atomic_load(&s_voice_privacy_paused) || s_flip_muted;
+}
+
+/* ui_sounds: the owner's switch for the interface cues (jr_core/cue.h).
+ * On by default; kept in NVS next to the volume. */
+_Atomic bool s_ui_sounds = true;
+static jr_cue_gate_t s_cue_gate;
+
+static void persist_ui_sounds(bool on)
+{
+    nvs_handle_t h;
+    if (nvs_open("app", NVS_READWRITE, &h) == ESP_OK) {
+        (void)nvs_set_u8(h, "ui_sounds", on ? 1U : 0U);
+        (void)nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static void restore_ui_sounds(void)
+{
+    nvs_handle_t h;
+    uint8_t on = 1;
+    if (nvs_open("app", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_u8(h, "ui_sounds", &on) == ESP_OK) {
+            atomic_store(&s_ui_sounds, on != 0U);
+        }
+        nvs_close(h);
+    }
+}
+
+void ui_sounds_set(bool on)
+{
+    atomic_store(&s_ui_sounds, on);
+    persist_ui_sounds(on);
+}
+
+/* One interface cue. `physical` is false for input injected over HTTP, which
+ * never makes a sound. The gate and the lane both drop what must not play. */
+static void ui_cue(jr_cue_kind_t kind, bool physical)
+{
+    const jr_cue_ctx_t ctx = {
+        .ui_sounds = atomic_load(&s_ui_sounds),
+        .owner_muted = owner_speaker_muted(),
+        .phase = jr_orch_phase(&s_app.orch),
+        .mood = s_mood.mood,
+        .ota_active = atomic_load(&s_ota_active),
+        .now_ms = (uint32_t)(esp_timer_get_time() / 1000),
+    };
+    if (jr_cue_allow(&s_cue_gate, &ctx, kind,
+                     physical ? JR_CUE_SOURCE_PHYSICAL
+                              : JR_CUE_SOURCE_SYNTHETIC)) {
+        (void)jr_audio_play_cue(kind,
+                                jr_cue_amplitude_permille(kind, s_out_vol));
+    }
+}
+
+/* A level that a step pushed into its end stop says so. */
+static void ui_level_cue(int level, int delta, bool physical)
+{
+    if ((delta > 0 && level >= 100) || (delta < 0 && level <= 10)) {
+        ui_cue(JR_CUE_LIMIT, physical);
+    }
+}
+
 /* Speaker volume (app task only) — gesture-adjustable, NVS-persistent. */
 int s_out_vol = 100;
 uint8_t s_brightness_cap = 100;
@@ -3473,6 +3541,8 @@ static void voice_task(void *arg)
             if (iev.kind == JR_INPUT_SWIPE) {
                 const jr_display_overlay_t overlay =
                     jr_display_nav_overlay();
+                const jr_display_space_t cue_space = jr_display_nav_space();
+                bool cue_handled = false;   /* a level moved: its own feedback */
                 bool watch_opened = false;
                 bool style_changed = false;
                 /* PLACE IS SCOPE: the rim carries the device's own knobs, the
@@ -3505,6 +3575,9 @@ static void voice_task(void *arg)
                     char caption[24];
                     snprintf(caption, sizeof caption, "VOLUME %d", level);
                     jr_display_caption_set(caption);
+                    ui_level_cue(level,
+                                 iev.direction == JR_INPUT_DIRECTION_UP ? 1 : -1,
+                                 physical);
                     continue;
                 }
                 if (edge_vertical && iev.start_x > 232U) {
@@ -3520,6 +3593,9 @@ static void voice_task(void *arg)
                     char caption[24];
                     snprintf(caption, sizeof caption, "BRIGHTNESS %d", level);
                     jr_display_caption_set(caption);
+                    ui_level_cue(level,
+                                 iev.direction == JR_INPUT_DIRECTION_UP ? 1 : -1,
+                                 physical);
                     continue;
                 }
                 if (overlay == JR_DISPLAY_OVERLAY_SHADE) {
@@ -3529,6 +3605,10 @@ static void voice_task(void *arg)
                             &s_level_volume_request, s_out_vol,
                             iev.direction == JR_INPUT_DIRECTION_RIGHT ? 10 : -10);
                         ESP_LOGI(TAG, "ui: shade swipe volume=%d", level);
+                        cue_handled = true;
+                        ui_level_cue(level,
+                                     iev.direction == JR_INPUT_DIRECTION_RIGHT
+                                         ? 1 : -1, physical);
                     } else {
                         /* EITHER vertical direction leaves. Only UP used to,
                          * and DOWN fell through to nothing at all — so a shade
@@ -3612,6 +3692,22 @@ static void voice_task(void *arg)
                 }
                 ESP_LOGI(TAG, "ui: nav overlay=%d",
                          (int)jr_display_nav_overlay());
+                {
+                    const jr_display_overlay_t landed = jr_display_nav_overlay();
+                    const bool moved = landed != overlay ||
+                                       jr_display_nav_space() != cue_space ||
+                                       style_changed || watch_opened;
+                    if (cue_handled) {
+                        /* the level cue above already spoke */
+                    } else if (overlay != JR_DISPLAY_OVERLAY_NONE &&
+                               landed == JR_DISPLAY_OVERLAY_NONE) {
+                        ui_cue(JR_CUE_DISMISS, physical);
+                    } else if (moved) {
+                        ui_cue(JR_CUE_TICK, physical);
+                    } else {
+                        ui_cue(JR_CUE_LIMIT, physical);   /* nowhere to go */
+                    }
+                }
             } else if (iev.kind == JR_INPUT_LONG_PRESS) {
                 if (!physical) {
                     ESP_LOGW(TAG, "synthetic hold cannot change privacy");
@@ -3655,7 +3751,7 @@ static void voice_task(void *arg)
                     /* The ring closing is the visual half; this is the other.
                      * A completed commit rises — the same shape as the
                      * attention beat — where a refusal falls. */
-                    (void)jr_audio_play_sweep(500U, 1100U, 100U, 7U);
+                    (void)jr_audio_play_sweep_owner_ack(500U, 1100U, 100U, 7U);
                     ESP_LOGI(TAG, "gesture: long-press unmute");
                 } else {
                     atomic_store(&s_voice_privacy_paused, true);
@@ -3669,13 +3765,16 @@ static void voice_task(void *arg)
                      * opposite outcomes of the same gesture and must not sound
                      * alike; with the glass possibly face-down or unread, the
                      * tone may be the only signal that reaches the user. */
-                    (void)jr_audio_play_sweep(1100U, 500U, 100U, 7U);
+                    (void)jr_audio_play_sweep_owner_ack(1100U, 500U, 100U, 7U);
                     ESP_LOGI(TAG, "gesture: long-press mute");
                 }
             } else if (iev.kind == JR_INPUT_TAP) {
                 const jr_display_action_t shell_action =
                     jr_display_hit(iev.x, iev.y);
                 if (shell_action != JR_DISPLAY_ACT_NONE) {
+                    if (shell_action == JR_DISPLAY_ACT_DISMISS) {
+                        ui_cue(JR_CUE_DISMISS, physical);
+                    }
                     switch (shell_action) {
                     case JR_DISPLAY_ACT_VOLUME_UP:
                     case JR_DISPLAY_ACT_VOLUME_DOWN: {
@@ -3683,6 +3782,9 @@ static void voice_task(void *arg)
                             &s_level_volume_request, s_out_vol,
                             shell_action == JR_DISPLAY_ACT_VOLUME_UP ? 10 : -10);
                         ESP_LOGI(TAG, "ui: shade tap volume=%d", volume);
+                        ui_level_cue(volume,
+                                     shell_action == JR_DISPLAY_ACT_VOLUME_UP ? 1 : -1,
+                                     physical);
                         break;
                     }
                     case JR_DISPLAY_ACT_PRIVACY_TOGGLE:
@@ -3695,6 +3797,7 @@ static void voice_task(void *arg)
                             atomic_store(&s_voice_control_request,
                                          VOICE_CONTROL_ARM);
                             jr_display_caption_set("LISTENING");
+                            ui_cue(JR_CUE_CONFIRM, physical);   /* mute off */
                         } else {
                             atomic_store(&s_voice_privacy_paused, true);
                             if (p != JR_ST_IDLE && p != JR_ST_DRAINING) {
@@ -3709,6 +3812,7 @@ static void voice_task(void *arg)
                         break;
                     case JR_DISPLAY_ACT_FOCUS:
                         jr_display_nav_up();
+                        ui_cue(JR_CUE_TICK, physical);
                         jr_display_caption_set("DETAIL - DOWN TO CLOSE");
                         break;
                     default:
@@ -4422,6 +4526,8 @@ void app_main(void)
         ESP_LOGW(TAG, "jr_audio_init degraded — capture may be silent until on-device tune");
     }
     restore_out_vol();   /* gesture-set volume survives reboot */
+    restore_ui_sounds();
+    jr_audio_set_owner_mute_probe(owner_speaker_muted);
     restore_watch_style();
     restore_briefing_day();
     s_app.mic = jr_audio_source();
