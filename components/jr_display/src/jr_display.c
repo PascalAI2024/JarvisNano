@@ -13,6 +13,7 @@
 #include "jr_display/companion.h"
 #include <stdatomic.h>
 #include "jr_display/hud_render.h"
+#include "jr_display/glass.h"
 
 #include <stdio.h>
 #include <stddef.h>
@@ -1795,11 +1796,6 @@ static char s_shade_light[SP_COL_MAX];
 /* WEATHER, composed once per frame from the live slot: every string the
  * focal object prints and every angle its arcs sweep. The renderer reads
  * these, never the struct, so eleven strips agree on one age and one mark. */
-#define SP_WX_A0     96    /* the gauge opens at 7:30 ...                     */
-#define SP_WX_SWEEP  192   /* ... and closes 270 degrees later at 4:30, so the
-                            * bottom stays empty above the headline           */
-#define SP_WX_LO_F   40    /* the fixed range the arc IS: a Fort Lauderdale   */
-#define SP_WX_HI_F   100   /* year lives inside 40..100 F                     */
 #define SP_WX_STALE_MIN 30 /* beyond this the accent loses its colour         */
 #define SP_WX_AGE_MIN   2  /* below this the age is not worth a line          */
 static char s_wx_head[SP_LABEL_CAP];  /* "OVERCAST 83" / "NO WEATHER"         */
@@ -1809,12 +1805,8 @@ static char s_wx_hilo[10];            /* "H86 L76" / ""                       */
 static bool s_wx_valid;
 static bool s_wx_stale;
 static jr_display_sky_t s_wx_sky;
-static int  s_wx_mark_a;              /* 1/256 turn, the current temperature  */
-static int  s_wx_band_a0;             /* lo..hi as an arc on the same scale   */
-static int  s_wx_band_sweep;
-static int  s_wx_rain_sweep;          /* 0..256, from 12 o'clock               */
-/* THE NEXT TWELVE HOURS, one slot each on the gauge's own 270 degrees (so
- * the open bottom stays clear for the headline), now at the cold end. */
+/* THE NEXT TWELVE HOURS, one 30 degree slot each round the ring, clockwise
+ * from 12 o'clock, slot 0 being now. */
 #define SP_WX_HOURS      12
 #define SP_WX_HOUR_NONE  255          /* not in the answer: the slot is dark   */
 static uint8_t s_wx_hour_pct[SP_WX_HOURS];
@@ -1842,6 +1834,16 @@ static bool     watch_art_is_content(void);   /* a baked dial on WATCH is the sc
 static bool     s_space_on;
 static uint8_t  s_detail_space;
 static uint32_t s_space_hold_ms;
+
+/* The entry clock of the screen that is becoming current: ms since its slide
+ * began, set to 0 by sp_fade_tick when STATUS or WEATHER arrives and counted
+ * up by the frame's dt until SP_ENTRY_TOTAL_MS, where it parks. At rest it is
+ * parked, so a staged screen draws settled. The glass data screens read it;
+ * the screen sliding OUT always draws settled. While it is running the shell
+ * is asking for frames (see rest_eligible and quiet_eligible); after, none. */
+#define SP_ENTRY_RING_MS   900U
+#define SP_ENTRY_TOTAL_MS  900U
+static uint32_t s_entry_ms = SP_ENTRY_TOTAL_MS;
 
 /* The orbit mark's angle, in 1/4096 turn (Q4 on the 256-unit circle), plus
  * the residue of the last re-spacing. When DESK appears or disappears every
@@ -2405,21 +2407,6 @@ static void sp_compose_detail(int space)
     }
 }
 
-/* The temperature's place on the gauge. The arc IS the day: a fixed 40..100 F
- * range opening at 7:30 and closing at 4:30, so lo, hi and now read as
- * positions before anyone reads a numeral. Out-of-range weather pins to the
- * end it exceeds rather than leaving the dial. */
-static int sp_wx_angle(int f)
-{
-    if (f < SP_WX_LO_F) {
-        f = SP_WX_LO_F;
-    }
-    if (f > SP_WX_HI_F) {
-        f = SP_WX_HI_F;
-    }
-    return SP_WX_A0 + ((f - SP_WX_LO_F) * SP_WX_SWEEP) / (SP_WX_HI_F - SP_WX_LO_F);
-}
-
 /* WEATHER for this frame. Everything numeric is gated on valid: an unfetched
  * or failed weather prints NO number anywhere — not a zero, not a dash pair
  * shaped like one — and the headline says why. */
@@ -2454,14 +2441,6 @@ static int sp_rain_hours(uint8_t out[SP_WX_HOURS], const uint8_t *pp, int n,
     return known;
 }
 
-/* Slot k's span in 1/256 turn: a twelfth of the gauge less one unit each
- * side, so the hours read as twelve pieces rather than one band. */
-static void sp_rain_hour_span(int k, int *a0, int *sweep)
-{
-    *a0 = SP_WX_A0 + k * (SP_WX_SWEEP / SP_WX_HOURS) + 1;
-    *sweep = SP_WX_SWEEP / SP_WX_HOURS - 2;
-}
-
 /* Minutes past midnight as H:MM, 24-hour. */
 static int sp_hhmm(char *dst, int len, int cap, int minute)
 {
@@ -2480,10 +2459,6 @@ static void sp_compose_weather(void)
     s_wx_temp[0] = '\0';
     s_wx_hilo[0] = '\0';
     s_wx_stale = false;
-    s_wx_mark_a = -1;
-    s_wx_band_a0 = 0;
-    s_wx_band_sweep = 0;
-    s_wx_rain_sweep = 0;
     s_wx_hours = 0;
     s_wx_sun[0] = '\0';
     if (!w->valid) {
@@ -2516,17 +2491,6 @@ static void sp_compose_weather(void)
         len = sp_age(s_wx_age, 0, (int)sizeof s_wx_age, age_min);
         (void)sp_str(s_wx_age, len, (int)sizeof s_wx_age, " AGO");
     }
-
-    int lo = w->lo_f, hi = w->hi_f;
-    if (lo > hi) {
-        const int t = lo;
-        lo = hi;
-        hi = t;
-    }
-    s_wx_band_a0 = sp_wx_angle(lo);
-    s_wx_band_sweep = sp_wx_angle(hi) - s_wx_band_a0;
-    s_wx_mark_a = sp_wx_angle(w->temp_f);
-    s_wx_rain_sweep = ((int)(w->rain_pct > 100u ? 100u : w->rain_pct) * 256) / 100;
 
     /* The hours only while fresh: a stale answer's "now" is a guess. */
     if (!s_wx_stale) {
@@ -2625,9 +2589,20 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
         s_space_dir = (nav & NAV_FORWARD_BIT) != 0U ? 1 : -1;
         s_space_prog = 0;
         s_space_hold_ms = now_ms + (uint32_t)JR_DISPLAY_SPACE_HOLD_MS;
-    } else if (s_space_to != space) {
-        s_space_to = space;          /* serial wrap: snap rather than lie */
-        s_space_from = space;
+        s_entry_ms = (space == (uint8_t)JR_DISPLAY_SPACE_STATUS ||
+                      space == (uint8_t)JR_DISPLAY_SPACE_WEATHER)
+                         ? 0U : SP_ENTRY_TOTAL_MS;
+    } else {
+        if (s_entry_ms < SP_ENTRY_TOTAL_MS) {
+            s_entry_ms += dt_ms;
+            if (s_entry_ms > SP_ENTRY_TOTAL_MS) {
+                s_entry_ms = SP_ENTRY_TOTAL_MS;
+            }
+        }
+        if (s_space_to != space) {
+            s_space_to = space;      /* serial wrap: snap rather than lie */
+            s_space_from = space;
+        }
     }
 
     int sstep = (int)((dt_ms * 256u) / (uint32_t)JR_DISPLAY_SPACE_MS);
@@ -3506,29 +3481,11 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
  * muted everywhere on this glass and a sunny day must not read as a closed
  * microphone. */
 #define SP_C_FOG       0x03EF   /* cyan at half: the sky is there, softened */
-#define SP_C_RAIN      0x049F   /* blue-cyan: also the rain-chance ring     */
+#define SP_C_RAIN      0x049F   /* blue-cyan: the rain hours                */
 #define SP_C_SNOW      SP_C_INK
 
-/* WEATHER geometry. The gauge rides the standard focal ring; the current
- * temperature is a mark that stands proud of it on both sides, the way the
- * lit petal did, so it reads at arm's length. The rain ring is a thin inner
- * band, and the disc inside it holds three lines of text whose worst-case
- * corners (nine glyphs at scale 2, "STALE 45M" / "H104 L-12") reach r65.5. */
-#define SP_WX_MARK_IN   72
-#define SP_WX_MARK_OUT  100
-#define SP_WX_MARK_HALF 3      /* +-3/256 turn, about four degrees each way */
-#define SP_WX_RAIN_IN   66
-#define SP_WX_RAIN_OUT  70
-#define SP_WX_AGE_Y     196    /* scale 2, rows 196..209                     */
-#define SP_WX_HILO_Y    250    /* scale 2, rows 250..263                     */
-/* The hour ring sits just outside the mark (r100), on the gauge's sweep
- * only. The sun line lives in the gauge's open bottom, above the headline
- * (y330): ten glyphs at scale 2 put its corners at r98-109 and 38 degrees
- * off the vertical, inside the 45-degree gap and outside the rain ring. */
-#define SP_WX_HOUR_IN   104
-#define SP_WX_HOUR_OUT  110
+/* WEATHER: an hour under SP_WX_HOUR_DRY percent is a faint tick, not a stroke. */
 #define SP_WX_HOUR_DRY  10     /* under this an hour is bare track           */
-#define SP_WX_SUN_Y     310    /* scale 2, rows 310..323                     */
 
 /* ACTIVITY geometry: three rows at a 36 px pitch about the centre, each 24
  * glyphs at scale 2 centred on the axis (x 89..374). The worst corner is
@@ -3913,10 +3870,145 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
     }
 }
 
+static const char *sp_headline(int space);
+
+/* ---- THE GLASS DATA SCREENS: STATUS and WEATHER ----------------------------
+ *
+ * Both screens are one ring at r118 (10 px stroke, round caps, starting at 12
+ * o'clock) with the numbers inside it, drawn with the anti-aliased glass_*
+ * primitives instead of 5x7 bitmaps and opaque annuli. Every primitive takes
+ * the shell's slide fade `st` as its alpha, so the vertical slide and the
+ * cross-dissolve work as before. Colour rules are the shell's: cyan live, gold
+ * muted, red for a low cell, grey labels, ink values.
+ *
+ * ENTRY. When a screen becomes current the shell starts an entry clock
+ * (s_entry_ms, advanced in sp_fade_tick). STATUS: the ring sweeps to its value
+ * in 900 ms (ease-out-cubic) while the number counts up with it; the label,
+ * power word and the three stats then fade in and rise 8 px, staggered.
+ * WEATHER: the twelve rain slots build clockwise 45 ms apart. When the clock
+ * passes SP_ENTRY_TOTAL_MS the screen is still and asks for nothing. The
+ * frame rate on these screens is about 14 fps, so the steps are few and big:
+ * every element gets at least three frames of fade.
+ *
+ * Nothing here owns a buffer: strings are formatted once per strip, and every
+ * element early-outs on the rows it cannot touch. */
+#define SG_RING_R_IN16  (113 * 16)
+#define SG_RING_R_OUT16 (123 * 16)
+#define SG_RING_DY      (-10)   /* the ring sits a little high: the stats need the room below */
+#define SG_STAT_LABEL_Y 352     /* inside the orbit rail (r186), under the ring (y346) */
+#define SG_STAT_VALUE_Y 367
+#define SG_STAT_DX      56
+#define SG_AGE_Y        362     /* WEATHER: how old it is, where STATUS has its stats */
+#define SG_RISE_PX      8
+#define SG_FADE_MS      300
+#define SG_GLOW16       40       /* 2.5 px each side; the dearest part of the frame */
+#define SG_RAIN_SWEEP   3641    /* 20 degrees of a 30 degree slot */
+#define SG_TICK_SWEEP   546     /* a dry hour: 3 degrees */
+#define SG_RAIN_STAGGER_MS 45
+#define SG_RAIN_BUILD_MS   250
+
+/* One piece of text, measured once per strip. */
+typedef struct {
+    const char *s;
+    int len, x0, y_top, y_lo, y_hi, tracking;
+    glass_font_id_t font;
+    uint16_t color;
+    uint8_t alpha;
+} sg_txt_t;
+
+static void sg_txt_make(sg_txt_t *t, glass_font_id_t font, const char *s, int len, int cx,
+                        int y_top, int tracking, uint16_t native, int alpha)
+{
+    const glass_metrics_t m = glass_font_metrics(font);
+    t->s = s;
+    t->len = alpha > 0 ? len : 0;
+    t->font = font;
+    t->tracking = tracking;
+    t->x0 = cx - glass_text_width(font, s, (size_t)(len > 0 ? len : 0), tracking) / 2;
+    t->y_top = y_top;
+    t->y_lo = y_top + m.ink_top;
+    t->y_hi = y_top + m.ink_bottom;
+    t->color = native;
+    t->alpha = (uint8_t)(alpha > 255 ? 255 : (alpha < 0 ? 0 : alpha));
+}
+
+static inline void sg_txt_row(uint16_t *row, int y, int lo, int hi, bool swap, const sg_txt_t *t)
+{
+    if (t->len > 0 && y >= t->y_lo && y <= t->y_hi) {
+        glass_text_row(row, y, lo, hi, t->font, t->s, (size_t)t->len, t->x0, t->y_top,
+                       t->tracking, t->color, t->alpha, swap);
+    }
+}
+
+/* Same text, left edge given (the % and degree sign ride beside the number). */
+static void sg_txt_at(sg_txt_t *t, glass_font_id_t font, const char *s, int len, int x0,
+                      int y_top, uint16_t native, int alpha)
+{
+    sg_txt_make(t, font, s, len, 0, y_top, 0, native, alpha);
+    t->x0 = x0;
+}
+
+/* The staggered element's fade and rise at entry time `ent`. */
+static inline int sg_ent_alpha(int st, uint32_t ent, uint32_t start_ms)
+{
+    return (int)glass_frac_alpha((uint8_t)st, glass_stagger_q16(ent, start_ms, SG_FADE_MS));
+}
+
+static inline int sg_ent_rise(uint32_t ent, uint32_t start_ms)
+{
+    return glass_rise_px(SG_RISE_PX, glass_stagger_q16(ent, start_ms, SG_FADE_MS));
+}
+
+/* Centre of rain slot k: twelve 30 degree slots from 12 o'clock, clockwise. */
+static int32_t sg_slot_centre_q16(int k)
+{
+    return (int32_t)((GLASS_Q16_12_OCLOCK + ((2 * k + 1) * GLASS_TURN_Q16) / 24) & 0xFFFF);
+}
+
+/* An hour's mark from its chance of rain: a dry hour is a faint 2 px tick,
+ * a wet one a 20 degree stroke whose width (3..10 px) and alpha grow with the
+ * chance; `f` is the entry build (Q16) that grows it from nothing. */
+static void sg_rain_mark(int pct, uint32_t f, int32_t *w16, int32_t *sweep, int *alpha)
+{
+    int w, a, sw;
+    if (pct < SP_WX_HOUR_DRY) {
+        w = 2 * 16;
+        a = 90;
+        sw = SG_TICK_SWEEP;
+    } else {
+        w = (3 * 16) + (7 * 16 * pct) / 100;
+        a = 100 + (155 * pct) / 100;
+        sw = SG_RAIN_SWEEP;
+    }
+    *w16 = (int32_t)(((int64_t)w * f) >> 16);
+    *sweep = sw;
+    *alpha = (int)glass_frac_alpha((uint8_t)a, f);
+}
+
+/* "H86 L76" -> "H 86  L 76": the composed line, opened up to read as two
+ * figures. */
+static int sg_hilo_open(char *dst, int cap, const char *src)
+{
+    int n = 0;
+    for (; *src != '\0' && n + 3 < cap; ++src) {
+        if (*src == ' ') {
+            dst[n++] = ' ';
+            dst[n++] = ' ';
+        } else {
+            dst[n++] = *src;
+            if (*src == 'H' || *src == 'L') {
+                dst[n++] = ' ';
+            }
+        }
+    }
+    dst[n] = '\0';
+    return n;
+}
+
 /* The sky picks the accent. Cyan is the glass's own colour, so an ordinary
  * sky is the ordinary glass; the others are the hues already given meaning
  * elsewhere (amber: look, violet: on-trial) borrowed for a day that is worth
- * a glance. Gold is never returned here — see the palette. */
+ * a glance. Gold is never returned here â€” see the palette. */
 static uint16_t sp_sky_native(jr_display_sky_t sky)
 {
     switch (sky) {
@@ -3931,107 +4023,114 @@ static uint16_t sp_sky_native(jr_display_sky_t sky)
     }
 }
 
-/* WEATHER: the arc is the day. A 270-degree track stands for 40..100 F; the
- * span from today's low to its high fills in the sky's accent, dimmed, and
- * the temperature right now is a bright mark standing proud of the ring on
- * both sides — so "cool morning, hot afternoon, and it is nearly there" reads
- * as a shape before it reads as numbers. Inside: a thin ring for the chance
- * of rain, and the numbers themselves — the temperature large, the high and
- * low under it, and above it how old all of this is once it is old enough to
- * matter. Outside the gauge the next twelve hours ride the same sweep, now
- * at the cold end, each lit by its chance of rain; under the disc, the sun
- * as "7:02 19:35". The headline is the condition word alone.
+/* WEATHER: the ring is the next twelve hours. Slot k is hour now+k, a 30
+ * degree slot clockwise from 12 o'clock, drawn as a round-capped stroke whose
+ * width and alpha follow that hour's chance of rain; a dry hour is a faint
+ * tick, an hour the answer lacks draws nothing. Inside: the condition word as
+ * the tracked label in the sky's accent, the temperature large with its degree
+ * sign, high and low, and the sun line. How old all of this is, once it is old
+ * enough to matter, sits under the ring (and gives way to an update, which
+ * crosses that row).
  *
  * Honesty rules, in order: muted turns every accent gold like every other
- * screen; stale (> 30 min) turns them grey, because a number from an hour ago
- * is still a number but no longer a colour; and !valid draws the two bare
- * tracks and not one digit. */
+ * screen; stale (> 30 min) turns them grey and draws no hours (a stale
+ * answer's "now" is a guess), and with no hours the ring is a bare faint
+ * track; !valid draws that track, "NO WEATHER" and not one digit. */
 static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
-                             uint16_t *pixels, int oy, int st)
+                             uint16_t *pixels, int oy, int st, uint32_t ent)
 {
+    const bool swap = ctx->board.swap_color_bytes;
     const bool muted = sp_privacy_muted();
-    const uint16_t accent_native =
+    const uint16_t accent =
         muted ? SP_C_GOLD : (s_wx_stale ? SP_C_GREY : sp_sky_native(s_wx_sky));
-    const uint16_t rain_native =
-        muted ? SP_C_GOLD_DIM : (s_wx_stale ? SP_C_GREY : SP_C_RAIN);
-    const uint16_t track = sp_tint(ctx, SP_C_TRACK, st);
-    const uint16_t band = sp_tint(ctx, accent_native, (st * 104) / 255);
-    const uint16_t mark = sp_tint(ctx, accent_native, st);
-    const uint16_t rain = sp_tint(ctx, rain_native, st);
-    const uint16_t ink = sp_tint(ctx, SP_C_INK, st);
-    const uint16_t grey = sp_tint(ctx, SP_C_GREY, st);
-    const int cx = SP_CX;
-    const int cy = SP_CY + oy;
+    const uint16_t rain = muted ? SP_C_GOLD : SP_C_RAIN;
+    const int cx16 = SP_CX * 16;
+    const int cyr = SP_CY + oy + SG_RING_DY;
+    const int cy16 = cyr * 16;
 
-    sp_span_t trk[SP_ARC_SEG_MAX], bnd[SP_ARC_SEG_MAX], rn[SP_ARC_SEG_MAX];
-    sp_span_t mk = {0, 0, 0, 0};
-    const int ntrk = sp_arc_segments(trk, SP_ARC_SEG_MAX, SP_WX_A0, SP_WX_SWEEP);
-    const int nbnd = s_wx_valid
-        ? sp_arc_segments(bnd, SP_ARC_SEG_MAX, s_wx_band_a0, s_wx_band_sweep)
-        : 0;
-    const int nrn = s_wx_valid
-        ? sp_arc_segments(rn, SP_ARC_SEG_MAX, SP_A_TOP, s_wx_rain_sweep)
-        : 0;
-    if (s_wx_valid) {
-        sp_span_set(&mk, s_wx_mark_a - SP_WX_MARK_HALF,
-                    s_wx_mark_a + SP_WX_MARK_HALF);
-    }
-    /* The hours: one short span per known slot, bare track while dry, the
-     * rain hue brightening with the chance (a quarter-lit floor at 10 %,
-     * full at 100 %). An unknown hour gets no span at all. */
-    sp_span_t hr[SP_WX_HOURS];
-    uint16_t hr_px[SP_WX_HOURS];
-    int nhr = 0;
-    const uint16_t hour_native = muted ? SP_C_GOLD : SP_C_RAIN;
-    for (int k = 0; k < SP_WX_HOURS && s_wx_hours > 0; ++k) {
+    /* the twelve slots */
+    int32_t sg_start[SP_WX_HOURS], sg_sweep[SP_WX_HOURS], sg_ri[SP_WX_HOURS], sg_ro[SP_WX_HOURS];
+    uint8_t sg_a[SP_WX_HOURS];
+    int nseg = 0;
+    for (int k = 0; k < SP_WX_HOURS && s_wx_valid && s_wx_hours > 0; ++k) {
         const int pct = s_wx_hour_pct[k];
         if (pct == SP_WX_HOUR_NONE) {
             continue;
         }
-        int a0 = 0, sweep = 0;
-        sp_rain_hour_span(k, &a0, &sweep);
-        sp_span_set(&hr[nhr], a0, a0 + sweep);
-        hr_px[nhr++] = pct < SP_WX_HOUR_DRY
-            ? track
-            : sp_tint(ctx, hour_native, (st * (64 + (191 * pct) / 100)) / 255);
+        const uint32_t f = glass_stagger_q16(ent, (uint32_t)k * SG_RAIN_STAGGER_MS, SG_RAIN_BUILD_MS);
+        int32_t w16, sweep;
+        int a;
+        sg_rain_mark(pct, f, &w16, &sweep, &a);
+        if (w16 < 8 || a <= 0) {
+            continue;                 /* not yet begun */
+        }
+        const int32_t rc = (113 * 16 + 123 * 16) / 2;
+        sg_ri[nseg] = rc - w16 / 2;
+        sg_ro[nseg] = rc + (w16 + 1) / 2;
+        sg_start[nseg] = (sg_slot_centre_q16(k) - sweep / 2) & 0xFFFF;
+        sg_sweep[nseg] = sweep;
+        sg_a[nseg] = (uint8_t)((a * st + 127) / 255);
+        ++nseg;
     }
-    const int alen = sp_len(s_wx_age, (int)sizeof s_wx_age - 1);
-    const int tlen = sp_len(s_wx_temp, (int)sizeof s_wx_temp - 1);
-    const int hlen = sp_len(s_wx_hilo, (int)sizeof s_wx_hilo - 1);
-    const int slen = sp_len(s_wx_sun, (int)sizeof s_wx_sun - 1);
-    const int ax = sp_text_cx(alen, 2, 0);
-    const int tx = cx - (18 * tlen) / 2;
-    const int hx = sp_text_cx(hlen, 2, 0);
-    const int sx = sp_text_cx(slen, 2, 0);
+    const bool bare = !(s_wx_valid && s_wx_hours > 0);
 
+    /* text */
+    char hilo[16];
+    const int hlen = sg_hilo_open(hilo, (int)sizeof hilo, s_wx_hilo);
+    const char *head = sp_headline(JR_DISPLAY_SPACE_WEATHER);
+    const int llen = sp_len(head, SP_LABEL_CAP - 1);
+    const bool updating = sp_ota_ringing((jr_display_ota_state_t)
+        (__atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE) & 0xFu));
+    const int tlen = sp_len(s_wx_temp, (int)sizeof s_wx_temp - 1);
+    const int slen = sp_len(s_wx_sun, (int)sizeof s_wx_sun - 1);
+    const int alen = sp_len(s_wx_age, (int)sizeof s_wx_age - 1);
+    const glass_metrics_t hero = glass_font_metrics(GLASS_FONT_HERO);
+    const int hero_top = cyr - hero.cap_h / 2 - 2;
+    const int base = hero_top + hero.cap_h;
+    const uint32_t t_lbl = 0, t_hero = 150, t_hl = 250, t_sun = 330, t_age = 410;
+
+    sg_txt_t t_label, t_temp, t_deg, t_hilo, t_sun_t, t_age_t;
+    sg_txt_make(&t_label, GLASS_FONT_LABEL, head, llen, SP_CX,
+                hero_top - 26 + sg_ent_rise(ent, t_lbl), 3, s_wx_valid ? accent : SP_C_GREY,
+                sg_ent_alpha(st, ent, t_lbl));
+    const int hw = glass_text_width(GLASS_FONT_HERO, s_wx_temp, (size_t)tlen, 0);
+    const int dw = glass_text_width(GLASS_FONT_VALUE, "*", 1, 0);
+    const int x0 = SP_CX - (hw + 4 + dw) / 2;
+    const int hero_y = hero_top + sg_ent_rise(ent, t_hero);
+    const int hero_a = sg_ent_alpha(st, ent, t_hero);
+    sg_txt_at(&t_temp, GLASS_FONT_HERO, s_wx_temp, tlen, x0, hero_y, SP_C_INK, hero_a);
+    sg_txt_at(&t_deg, GLASS_FONT_VALUE, "*", tlen > 0 ? 1 : 0, x0 + hw + 4, hero_y, accent, hero_a);
+    sg_txt_make(&t_hilo, GLASS_FONT_TEXT, hilo, hlen, SP_CX, base + 16 + sg_ent_rise(ent, t_hl), 1,
+                SP_C_INK, sg_ent_alpha(st, ent, t_hl));
+    sg_txt_make(&t_sun_t, GLASS_FONT_TEXT, s_wx_sun, slen, SP_CX, base + 40 + sg_ent_rise(ent, t_sun),
+                1, SP_C_GREY, sg_ent_alpha(st, ent, t_sun));
+    sg_txt_make(&t_age_t, GLASS_FONT_LABEL, s_wx_age, alen, SP_CX,
+                SG_AGE_Y + oy + sg_ent_rise(ent, t_age), 2, SP_C_GREY,
+                updating ? 0 : sg_ent_alpha(st, ent, t_age));
+
+    const int ring_y0 = cyr - 130, ring_y1 = cyr + 130;
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        for (int i = 0; i < ntrk; ++i) {
-            sp_annulus_row(row, y, cx, cy, SP_FOCAL_IN, SP_FOCAL_OUT, &trk[i],
-                           track);
+        int lo = 0, hi = HUD_W - 1;
+        if (!sp_clip(y, &lo, &hi)) {
+            continue;
         }
-        for (int i = 0; i < nbnd; ++i) {
-            sp_annulus_row(row, y, cx, cy, SP_FOCAL_IN, SP_FOCAL_OUT, &bnd[i],
-                           band);
+        if (y >= ring_y0 && y <= ring_y1) {
+            if (bare) {
+                glass_ring_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16, 0,
+                               GLASS_TURN_Q16, SP_C_TRACK, (uint8_t)st, swap);
+            }
+            for (int i = 0; i < nseg; ++i) {
+                glass_arc_row(row, y, lo, hi, cx16, cy16, sg_ri[i], sg_ro[i], sg_start[i],
+                              sg_sweep[i], rain, sg_a[i], swap);
+            }
         }
-        sp_annulus_row(row, y, cx, cy, SP_WX_RAIN_IN, SP_WX_RAIN_OUT, NULL,
-                       track);
-        for (int i = 0; i < nrn; ++i) {
-            sp_annulus_row(row, y, cx, cy, SP_WX_RAIN_IN, SP_WX_RAIN_OUT,
-                           &rn[i], rain);
-        }
-        if (s_wx_valid) {
-            sp_annulus_row(row, y, cx, cy, SP_WX_MARK_IN, SP_WX_MARK_OUT, &mk,
-                           mark);
-        }
-        for (int i = 0; i < nhr; ++i) {
-            sp_annulus_row(row, y, cx, cy, SP_WX_HOUR_IN, SP_WX_HOUR_OUT, &hr[i],
-                           hr_px[i]);
-        }
-        sp_text_row(row, y, s_wx_age, alen, ax, SP_WX_AGE_Y + oy, 2, grey);
-        sp_text_row(row, y, s_wx_temp, tlen, tx, SP_FOCAL_TEXT_Y + oy, 3, ink);
-        sp_text_row(row, y, s_wx_hilo, hlen, hx, SP_WX_HILO_Y + oy, 2, ink);
-        sp_text_row(row, y, s_wx_sun, slen, sx, SP_WX_SUN_Y + oy, 2, grey);
+        sg_txt_row(row, y, lo, hi, swap, &t_label);
+        sg_txt_row(row, y, lo, hi, swap, &t_temp);
+        sg_txt_row(row, y, lo, hi, swap, &t_deg);
+        sg_txt_row(row, y, lo, hi, swap, &t_hilo);
+        sg_txt_row(row, y, lo, hi, swap, &t_sun_t);
+        sg_txt_row(row, y, lo, hi, swap, &t_age_t);
     }
 }
 
@@ -4098,38 +4197,32 @@ static void sp_focal_activity(const jr_display_ctx_t *ctx, int y1, int y2,
 
 /* POWER: charge as a filled arc from 12 o'clock, plus a solid core while the
  * charger is in. Reads s_power_word, which jr_power already publishes. */
-/* STATUS at a glance, the geometry:
+/* STATUS at a glance, the geometry (y is from the top of the 466 px panel):
  *
- *   y 116..129  LINK  TOOLS      two lamps, lit ink when up, dim when not;
- *                                 10 glyphs, corners r131.5 — under the
- *                                 update ring at r140 and above the focal
- *                                 ring's top at y137
- *   r 76..96    the battery arc  from the top, clockwise, by percent
- *   y 196..209  CHARGING         the power word, grey
- *   y 219..239  74%              scale 3, ink — the number the owner wants
- *   y 250..263  ▂▄▆█ -34         Wi-Fi bars and dBm, lit by the same tiers
- *                                 phones use
- *   y 330       UP 6H 10M        the headline (sp_headline)
+ *   headline    the in-ring label: BATTERY while all is well, else the worst
+ *               thing wrong (LOW BATTERY, NO WIFI, UPDATE 42% ...). The uptime
+ *               the healthy headline used to say is on the detail sheet.
+ *   r 113..123  the battery ring, centred 8 px above the panel centre; track
+ *               at low alpha, the fill from 12 o'clock clockwise by percent,
+ *               round-capped, with a narrow glow on the filled part only
+ *   inside      BATTERY (label) / 74 with a small % / the power word (grey)
+ *   y 352..382  three stats, label over value: WIFI (dBm or DOWN), LINK,
+ *               TOOLS; an off stat is dim. They stay inside the orbit rail
+ *               (r186) and so cross the update ring's band (r140-154): while
+ *               an update rings they are not drawn, so nothing of the screen
+ *               is ever overdrawn by it.
  *
- * Everything inside the ring stays within the r76 chord for its row; the
- * lamps are the only text outside it, and they sit below the update ring's
- * inner edge so a flash in progress never overdraws them. */
-#define SP_ST_LAMP_Y   116
-#define SP_ST_WORD_Y   SP_WX_AGE_Y
-#define SP_ST_WIFI_Y   SP_WX_HILO_Y
-#define SP_ST_BAR_W    4
-#define SP_ST_BAR_STEP 6            /* bar width plus a 2 px gap */
-#define SP_ST_BARS_W   (3 * SP_ST_BAR_STEP + SP_ST_BAR_W)
-#define SP_ST_BARS_GAP 6            /* between the bars and the number */
-
+ * Every state the old screen told is told here: no gauge is a bare track and
+ * "--" (never a full ring under "NO BATTERY"), low is red, charging says so
+ * in the power word, muted turns the accent gold. */
 static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
-                            uint16_t *pixels, int oy, int st)
+                            uint16_t *pixels, int oy, int st, uint32_t ent)
 {
     const uint32_t w = __atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE);
     const uint32_t lk = __atomic_load_n(&s_links_word, __ATOMIC_ACQUIRE);
     const int raw_pct = (int)(w & 0xFFu);
     /* 0xFF means the fuel gauge did not answer. Clamping that to 100 drew a
-     * FULL ring directly beneath the headline "NO BATTERY" — the most
+     * FULL ring directly beneath the headline "NO BATTERY" â€” the most
      * confident possible rendering of a number we do not have. Draw the bare
      * track instead: an empty track reads as "no reading", which is true. */
     const bool have_gauge = raw_pct <= 100;
@@ -4137,31 +4230,25 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
     const bool charging = (w & (1u << 25)) != 0u;
     const bool muted = sp_privacy_muted();
     /* Red below HUD_BATT_LOW_PCT is the one place colour carries meaning on
-     * the arc — the SAME red, on the SAME rule, as the battery rim at r215.
-     * Gold means muted everywhere on this glass, so the arc and the bars
-     * wear it too. */
+     * the ring â€” the SAME red, on the SAME rule, as the battery rim at r215.
+     * Gold means muted everywhere on this glass, so the ring wears it too. */
     const bool low = have_gauge && pct < HUD_BATT_LOW_PCT && !charging;
-    const uint16_t lamp = sp_tint(ctx, muted ? SP_C_GOLD : SP_C_CYAN, st);
-    const uint16_t fill = low ? sp_tint(ctx, SP_C_RED, st) : lamp;
-    const uint16_t cool = sp_tint(ctx, muted ? SP_C_GOLD_DIM : SP_C_CYAN_DIM,
-                                  st);
-    const uint16_t track = sp_tint(ctx, SP_C_TRACK, st);
-    const uint16_t ink = sp_tint(ctx, SP_C_INK, st);
-    const uint16_t grey = sp_tint(ctx, SP_C_GREY, st);
-    const uint16_t dim = sp_tint(ctx, SP_C_GREY, (st * 96) / 255);
-    const int cx = SP_CX;
-    const int cy = SP_CY + oy;
+    const uint16_t accent = muted ? SP_C_GOLD : SP_C_CYAN;
+    const uint16_t fill = low ? SP_C_RED : accent;
+    const bool swap = ctx->board.swap_color_bytes;
+    const int cx16 = SP_CX * 16;
+    const int cyr = SP_CY + oy + SG_RING_DY;
+    const int cy16 = cyr * 16;
 
-    sp_span_t arc[SP_ARC_SEG_MAX];
-    const int narc = have_gauge
-        ? sp_arc_segments(arc, SP_ARC_SEG_MAX, SP_A_TOP, (pct * 256) / 100)
-        : 0;
+    /* The entry: ring and number share one eased fraction. */
+    const uint32_t f_ring = glass_ease_out_cubic_q16(ent, SP_ENTRY_RING_MS);
+    const int shown = have_gauge ? (int)glass_count_up(pct, f_ring) : 0;
+    const int32_t full = (int32_t)(((int64_t)pct * GLASS_TURN_Q16) / 100);
+    const int32_t sweep = (int32_t)(((int64_t)full * f_ring) >> 16);
 
-    /* The words, formatted once per strip from the two words the frame
-     * already has: a few digits, no snprintf on this stack. */
+    /* The words, formatted once per strip: a few digits, no snprintf. */
     char pctbuf[6];
-    const int plen = have_gauge ? sp_pct(pctbuf, 0, (int)sizeof pctbuf,
-                                         (uint32_t)pct)
+    const int plen = have_gauge ? sp_num(pctbuf, 0, (int)sizeof pctbuf, (uint32_t)shown)
                                 : sp_str(pctbuf, 0, (int)sizeof pctbuf, "--");
     const char *word = sp_power_word(w);
     const int wlen = sp_len(word, SP_LABEL_CAP - 1);
@@ -4170,44 +4257,82 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
     const int dlen = bars > 0
         ? sp_int(dbm, 0, (int)sizeof dbm, -(int)((lk >> 8) & 0xFFu))
         : sp_str(dbm, 0, (int)sizeof dbm, "DOWN");
-    const int bx = cx - (SP_ST_BARS_W + SP_ST_BARS_GAP + 12 * dlen) / 2;
-    const int lx = sp_text_cx(10, 2, 0);
     const bool link_on = (lk & (1u << 1)) != 0u;
     const bool tools_on = ((lk >> 2) & 3u) == 2u;
+    const bool updating = sp_ota_ringing((jr_display_ota_state_t)
+        (__atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE) & 0xFu));
+    const char *head = sp_headline(JR_DISPLAY_SPACE_STATUS);
+    const int hlen = sp_len(head, SP_LABEL_CAP - 1);
+    /* The headline's job is the worst thing wrong. Healthy, it is the uptime
+     * and the in-ring label stays BATTERY; otherwise the headline IS the
+     * label ("LOW BATTERY", "NO WIFI", "UPDATE 42%"), where it clears the
+     * update ring. */
+    const bool quiet_head = hlen == 0 || (hlen > 3 && head[0] == 'U' && head[1] == 'P' && head[2] == ' ');
+    const char *label = quiet_head ? "BATTERY" : head;
+    const int label_len = quiet_head ? 7 : hlen;
 
+    const glass_metrics_t hero = glass_font_metrics(GLASS_FONT_HERO);
+    const glass_metrics_t val = glass_font_metrics(GLASS_FONT_VALUE);
+    const int hero_top = cyr - hero.cap_h / 2 - 2;
+    const int base = hero_top + hero.cap_h;
+    const int hw = glass_text_width(GLASS_FONT_HERO, pctbuf, (size_t)plen, 0);
+    const int pw = have_gauge ? glass_text_width(GLASS_FONT_VALUE, "%", 1, 0) : 0;
+    const int x0 = SP_CX - (hw + (have_gauge ? 5 : 0) + pw) / 2;
+    const uint32_t t_lbl = 0, t_word = 150, t_wifi = 250, t_link = 330, t_tools = 410;
+    const int dim_a = (st * 96) / 255;
+
+    sg_txt_t t_label, t_hero, t_pc, t_word_t;
+    sg_txt_t t_sl[3], t_sv[3];
+    sg_txt_make(&t_label, GLASS_FONT_LABEL, label, label_len, SP_CX,
+                hero_top - 26 + sg_ent_rise(ent, t_lbl), 3, SP_C_GREY, sg_ent_alpha(st, ent, t_lbl));
+    sg_txt_at(&t_hero, GLASS_FONT_HERO, pctbuf, plen, x0, hero_top, SP_C_INK, st);
+    sg_txt_at(&t_pc, GLASS_FONT_VALUE, "%", have_gauge ? 1 : 0, x0 + hw + 5, base - val.cap_h, fill, st);
+    sg_txt_make(&t_word_t, GLASS_FONT_TEXT, word, wlen, SP_CX,
+                base + 16 + sg_ent_rise(ent, t_word), 1, SP_C_GREY, sg_ent_alpha(st, ent, t_word));
+    static const char *const k_names[3] = {"WIFI", "LINK", "TOOLS"};
+    const char *vals[3] = {dbm, link_on ? "ON" : "OFF", tools_on ? "ON" : "OFF"};
+    const int vlen[3] = {dlen, link_on ? 2 : 3, tools_on ? 2 : 3};
+    const bool on[3] = {bars > 0, link_on, tools_on};
+    const uint32_t starts[3] = {t_wifi, t_link, t_tools};
+    for (int i = 0; i < 3; ++i) {
+        const int cxi = SP_CX + (i - 1) * SG_STAT_DX;
+        const int rise = sg_ent_rise(ent, starts[i]);
+        const int ea = updating ? 0 : sg_ent_alpha(st, ent, starts[i]);
+        sg_txt_make(&t_sl[i], GLASS_FONT_LABEL, k_names[i], (int)strlen(k_names[i]), cxi,
+                    SG_STAT_LABEL_Y + oy + rise, 2, SP_C_GREY, ea);
+        sg_txt_make(&t_sv[i], GLASS_FONT_TEXT, vals[i], vlen[i], cxi,
+                    SG_STAT_VALUE_Y + oy + rise, 0, on[i] ? SP_C_INK : SP_C_GREY,
+                    on[i] ? ea : (ea * dim_a) / (st > 0 ? st : 1));
+    }
+
+    const int ring_y0 = cyr - 130, ring_y1 = cyr + 130;
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        sp_annulus_row(row, y, cx, cy, SP_FOCAL_IN, SP_FOCAL_OUT, NULL, cool);
-        for (int i = 0; i < narc; ++i) {
-            sp_annulus_row(row, y, cx, cy, SP_FOCAL_IN, SP_FOCAL_OUT, &arc[i],
-                           fill);
+        int lo = 0, hi = HUD_W - 1;
+        if (!sp_clip(y, &lo, &hi)) {
+            continue;
         }
-        sp_text_row(row, y, "LINK", 4, lx, SP_ST_LAMP_Y + oy, 2,
-                    link_on ? ink : dim);
-        sp_text_row(row, y, "TOOLS", 5, lx + 60, SP_ST_LAMP_Y + oy, 2,
-                    tools_on ? ink : dim);
-        sp_text_row(row, y, word, wlen, sp_text_cx(wlen, 2, 0),
-                    SP_ST_WORD_Y + oy, 2, grey);
-        sp_text_row(row, y, pctbuf, plen, cx - (18 * plen) / 2,
-                    SP_FOCAL_TEXT_Y + oy, 3, ink);
-        /* Four bars, 4/7/10/13 px tall, bottom-aligned with the number's
-         * baseline; unlit bars keep the track colour so the glyph reads as
-         * a gauge and not as a hole. */
-        const int by0 = SP_ST_WIFI_Y + oy;
-        if (y >= by0 && y < by0 + 14) {
-            for (int i = 0; i < 4; ++i) {
-                const int h = 4 + 3 * i;
-                if (y >= by0 + 14 - h) {
-                    const uint16_t px = i < bars ? lamp : track;
-                    const int x0 = bx + i * SP_ST_BAR_STEP;
-                    for (int x = x0; x < x0 + SP_ST_BAR_W; ++x) {
-                        row[x] = px;
-                    }
-                }
+        if (y >= ring_y0 && y <= ring_y1) {
+            /* the track only where the fill is not: no pixel is written twice */
+            glass_ring_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                           GLASS_Q16_12_OCLOCK + sweep, GLASS_TURN_Q16 - sweep, fill,
+                           (uint8_t)((st * 44) / 255), swap);
+            if (have_gauge && sweep > 0) {
+                glass_glow_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                               GLASS_Q16_12_OCLOCK, sweep, true, SG_GLOW16, 140, fill,
+                               (uint8_t)st, swap);
+                glass_arc_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                              GLASS_Q16_12_OCLOCK, sweep, fill, (uint8_t)st, swap);
             }
         }
-        sp_text_row(row, y, dbm, dlen, bx + SP_ST_BARS_W + SP_ST_BARS_GAP,
-                    SP_ST_WIFI_Y + oy, 2, grey);
+        sg_txt_row(row, y, lo, hi, swap, &t_label);
+        sg_txt_row(row, y, lo, hi, swap, &t_hero);
+        sg_txt_row(row, y, lo, hi, swap, &t_pc);
+        sg_txt_row(row, y, lo, hi, swap, &t_word_t);
+        for (int i = 0; i < 3; ++i) {
+            sg_txt_row(row, y, lo, hi, swap, &t_sl[i]);
+            sg_txt_row(row, y, lo, hi, swap, &t_sv[i]);
+        }
     }
 }
 
@@ -4356,7 +4481,7 @@ static const char *sp_headline(int space)
 }
 
 static void sp_draw_space(const jr_display_ctx_t *ctx, int y1, int y2,
-                          uint16_t *pixels, int space, int oy, int st)
+                          uint16_t *pixels, int space, int oy, int st, uint32_t ent)
 {
     /* JARVIS is the face itself: the shell contributes nothing, which is what
      * keeps every existing scene bit-identical at rest. */
@@ -4370,19 +4495,22 @@ static void sp_draw_space(const jr_display_ctx_t *ctx, int y1, int y2,
          * clock underneath the good one. */
         break;
     case JR_DISPLAY_SPACE_STATUS:
-        sp_focal_status(ctx, y1, y2, pixels, oy, st);
+        sp_focal_status(ctx, y1, y2, pixels, oy, st, ent);
         break;
     case JR_DISPLAY_SPACE_DESK:
         sp_focal_desk(ctx, y1, y2, pixels, oy, st);
         break;
     case JR_DISPLAY_SPACE_WEATHER:
-        sp_focal_weather(ctx, y1, y2, pixels, oy, st);
+        sp_focal_weather(ctx, y1, y2, pixels, oy, st, ent);
         break;
     case JR_DISPLAY_SPACE_ACTIVITY:
         sp_focal_activity(ctx, y1, y2, pixels, oy, st);
         break;
     default:
         break;                /* a space with no focal object draws none */
+    }
+    if (space == JR_DISPLAY_SPACE_STATUS || space == JR_DISPLAY_SPACE_WEATHER) {
+        return;                   /* the glass screens set their own headline */
     }
     const char *label = sp_headline(space);
     const int len = sp_len(label, SP_LABEL_CAP - 1);
@@ -4631,11 +4759,11 @@ static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
             if (e < 256) {
                 sp_draw_space(ctx, y1, y2, pixels, s_space_from,
                               -s_space_dir * slide,
-                              (focal * (256 - e)) / 256);
+                              (focal * (256 - e)) / 256, SP_ENTRY_TOTAL_MS);
             }
             sp_draw_space(ctx, y1, y2, pixels, s_space_to,
                           s_space_dir * (SP_SLIDE_PX - slide),
-                          (focal * e) / 256);
+                          (focal * e) / 256, s_entry_ms);
         }
         if (s_detail_ease > 0) {
             sp_draw_detail(ctx, y1, y2, pixels,
@@ -4683,6 +4811,7 @@ static jr_display_rest_mode_t rest_eligible(const jr_display_ctx_t *ctx)
            (s_space_from == s_space_to || s_space_ease >= 256) &&
            s_detail_ease == 0 && s_shade_ease == 0 &&
            s_ask_ease == 0 && s_canvas_ease == 0 &&
+           !glass_entry_animating(s_entry_ms, SP_ENTRY_TOTAL_MS) &&
            !sp_ota_ringing((jr_display_ota_state_t)
                (__atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE) & 0xfu)) &&
            diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF &&
@@ -4728,6 +4857,7 @@ static bool quiet_eligible(const jr_display_ctx_t *ctx)
            s_space_serial_seen == (uint8_t)(nav >> NAV_SERIAL_SHIFT) &&
            s_detail_ease == 0 && s_shade_ease == 0 &&
            s_ask_ease == 0 && s_canvas_ease == 0 &&
+           !glass_entry_animating(s_entry_ms, SP_ENTRY_TOTAL_MS) &&
            s_caption_prog == (caption ? 256 : 0) &&
            s_clock_prog == ((clock & (1u << 16)) ? 256 : 0) &&
            !sp_ota_ringing((jr_display_ota_state_t)

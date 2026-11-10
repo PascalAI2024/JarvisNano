@@ -735,14 +735,38 @@ static void test_render_clock_counts_frames_and_latches_a_second(void)
     s_render_win_frames = 0U;
 }
 
+/* The three stats under the ring: label over value, a value in ink when it is
+ * up and dim (grey at about a third) when it is not. Ink is sampled at full
+ * coverage, so "on" is exact and "dim" is the absence of exact ink. While an
+ * update rings the stats are not drawn at all: they cross its band. */
+static int stat_cx(int i)
+{
+    return SP_CX + (i - 1) * SG_STAT_DX;
+}
+
+static size_t stat_value_ink(const uint16_t *fb, int i, uint16_t color)
+{
+    return count_in(fb, color, stat_cx(i) - 32, stat_cx(i) + 32, SG_STAT_VALUE_Y,
+                    SG_STAT_VALUE_Y + 16);
+}
+
+static size_t stat_value_drawn(const uint16_t *fb, int i)
+{
+    size_t n = 0;
+    for (int y = SG_STAT_VALUE_Y; y < SG_STAT_VALUE_Y + 16; ++y) {
+        for (int x = stat_cx(i) - 32; x < stat_cx(i) + 32; ++x) {
+            n += fb[(size_t)y * HUD_W + x] != POISON;
+        }
+    }
+    return n;
+}
+
 static void test_status_face_follows_the_links(void)
 {
     stage_space(JR_DISPLAY_SPACE_STATUS);
     jr_display_power_set(74U, 4020U, true, true);
-    const int lx0 = SP_CX - 60, lx1 = SP_CX + 60;
-    const int ly0 = SP_ST_LAMP_Y, ly1 = SP_ST_LAMP_Y + 14;
-    const int bx0 = SP_CX - 68, bx1 = SP_CX + 68;   /* inside the r76 chord */
-    const int by0 = SP_ST_WIFI_Y, by1 = SP_ST_WIFI_Y + 14;
+    const int cyr = SP_CY + SG_RING_DY;
+    const int hero_y0 = cyr - 31;
 
     links(true, -34, "198.51.100.7", true, 2U, false, false);
     uint16_t *fb = render_frame();
@@ -751,58 +775,62 @@ static void test_status_face_follows_the_links(void)
         g_failures++;
         return;
     }
-    const size_t lamps_on = count_in(fb, SP_C_INK, lx0, lx1, ly0, ly1);
-    const size_t bars4 = count_in(fb, SP_C_CYAN, bx0, bx1, by0, by1);
-    const size_t big = count_in(fb, SP_C_INK, SP_CX - 40, SP_CX + 40,
-                                SP_FOCAL_TEXT_Y, SP_FOCAL_TEXT_Y + 21);
+    const size_t wifi_on = stat_value_ink(fb, 0, SP_C_INK);
+    const size_t link_on = stat_value_ink(fb, 1, SP_C_INK);
+    const size_t tools_on = stat_value_ink(fb, 2, SP_C_INK);
+    const size_t big = count_in(fb, SP_C_INK, SP_CX - 60, SP_CX + 60, hero_y0, hero_y0 + 59);
     free(fb);
-    CHECK(lamps_on > 40, "both lamps lit draw ink, got %zu", lamps_on);
-    CHECK(bars4 >= 4 * 4 + 7 * 4 + 10 * 4 + 13 * 4,
-          "four bars of accent, got %zu", bars4);
-    CHECK(big > 100, "the percentage is the big ink, got %zu", big);
+    CHECK(wifi_on > 15, "WIFI up is ink, got %zu", wifi_on);
+    CHECK(link_on > 15, "LINK on is ink, got %zu", link_on);
+    CHECK(tools_on > 15, "TOOLS on is ink, got %zu", tools_on);
+    CHECK(big > 200, "the percentage is the big ink, got %zu", big);
 
     links(true, -80, "198.51.100.7", false, 0U, false, false);
     fb = render_frame();
     if (!fb) {
         return;
     }
-    const size_t lamps_off = count_in(fb, SP_C_INK, lx0, lx1, ly0, ly1);
-    const size_t bars1 = count_in(fb, SP_C_CYAN, bx0, bx1, by0, by1);
+    const size_t wifi_weak = stat_value_ink(fb, 0, SP_C_INK);
+    const size_t link_off = stat_value_ink(fb, 1, SP_C_INK);
+    const size_t tools_off = stat_value_ink(fb, 2, SP_C_INK);
+    const size_t link_off_drawn = stat_value_drawn(fb, 1);
     free(fb);
-    CHECK(lamps_off == 0, "dim lamps draw no ink, got %zu", lamps_off);
-    CHECK(bars1 > 0 && bars1 < bars4, "one bar is fewer than four: %zu vs %zu",
-          bars1, bars4);
+    CHECK(wifi_weak > 15, "a weak link is still up, in ink: %zu", wifi_weak);
+    CHECK(link_off == 0 && tools_off == 0, "off stats draw no ink: %zu %zu", link_off, tools_off);
+    CHECK(link_off_drawn > 15, "an off stat is dim, not blank: %zu", link_off_drawn);
 
     links(false, -34, "", false, 2U, false, false);
     fb = render_frame();
     if (!fb) {
         return;
     }
-    const size_t bars0 = count_in(fb, SP_C_CYAN, bx0, bx1, by0, by1);
-    const size_t down = count_in(fb, SP_C_GREY, bx0, bx1, by0, by1);
+    const size_t down_ink = stat_value_ink(fb, 0, SP_C_INK);
+    const size_t down = stat_value_drawn(fb, 0);
     free(fb);
-    CHECK(bars0 == 0, "no wifi lights no bar, got %zu", bars0);
-    CHECK(down > 20, "DOWN is written in grey, got %zu", down);
+    CHECK(down_ink == 0, "no wifi is dim: %zu ink pixels", down_ink);
+    CHECK(down > 30, "DOWN is written, dim: %zu pixels", down);
 
-    /* Nothing of the face reaches the update ring's band: the lamps sit
-     * under r140 by design, so a flash in progress never overdraws them. */
+    /* An update rings across the stats' rows, so they are not drawn: every
+     * pixel in the stat boxes is either the update ring's or untouched. */
     links(true, -34, "198.51.100.7", true, 2U, false, false);
+    stage_ring_at_rest(JR_DISPLAY_SPACE_STATUS, JR_DISPLAY_OTA_RECEIVING, 42U);
+    s_space_veil = 0;         /* the veil would dim the poison too */
     fb = render_frame();
     if (!fb) {
         return;
     }
     size_t leaked = 0;
-    for (int y = ly0; y < ly1; ++y) {
-        for (int x = lx0; x < lx1; ++x) {
+    for (int y = SG_STAT_LABEL_Y - 2; y < SG_STAT_VALUE_Y + 18; ++y) {
+        for (int x = SP_CX - 100; x < SP_CX + 100; ++x) {
             const int dx = x - SP_CX, dy = y - SP_CY;
-            if (fb[(size_t)y * HUD_W + x] == SP_C_INK &&
-                sp_isqrt(dx * dx + dy * dy) >= SP_OTA_IN) {
-                leaked++;
+            const int r = sp_isqrt(dx * dx + dy * dy);
+            if (r < SP_OTA_IN - 1 || r > SP_OTA_OUT + 1) {
+                leaked += fb[(size_t)y * HUD_W + x] != POISON && r < SP_ORB_TRACK_IN - 1;
             }
         }
     }
     free(fb);
-    CHECK(leaked == 0, "%zu lamp pixels reach the update ring", leaked);
+    CHECK(leaked == 0, "%zu stat pixels drawn while the update ring is up", leaked);
 }
 
 /* The shade's two readouts are where volume and light are read now that the
@@ -969,6 +997,15 @@ static void test_ota_ring_band(void)
                 continue;
             }
             const int r = radius_of((int)i);
+            /* STATUS's stats and WEATHER's age line cross the ring's band, so
+             * they give way while it rings: that is a change, by design,
+             * everywhere in their rows but the band itself. */
+            const int y = (int)(i / HUD_W);
+            if ((space == JR_DISPLAY_SPACE_STATUS || space == JR_DISPLAY_SPACE_WEATHER) &&
+                y >= SG_STAT_LABEL_Y - 2 && y < SG_STAT_VALUE_Y + 18 &&
+                (r < SP_OTA_IN - 1 || r > SP_OTA_OUT + 1)) {
+                continue;
+            }
             if (r < lo) {
                 lo = r;
             }
@@ -2047,6 +2084,48 @@ static size_t count_color_within(const uint16_t *fb, uint16_t c, int rmin,
     return n;
 }
 
+/* The weather ring's centre (the ring sits a little above the panel centre)
+ * and a pixel on its centre line at slot k's middle. */
+#define WX_CY (SP_CY + SG_RING_DY)
+
+static uint16_t hour_px(const uint16_t *fb, int k)
+{
+    const uint32_t a = (uint32_t)sg_slot_centre_q16(k);
+    const int x = SP_CX + (int)((glass_cos_q15(a) * 118) >> 15);
+    const int y = WX_CY + (int)((glass_sin_q15(a) * 118) >> 15);
+    return fb[(size_t)y * HUD_W + x];
+}
+
+/* Radius from the weather ring's centre. */
+static int wx_radius(int i)
+{
+    const int dx = (i % HUD_W) - SP_CX;
+    const int dy = (i / HUD_W) - WX_CY;
+    return sp_isqrt(dx * dx + dy * dy);
+}
+
+/* Pixels on the stroke's core (r116..120) that are neither untouched nor the
+ * bare track: the rain hours, and nothing else. */
+static size_t hour_ring_ink(const uint16_t *fb)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
+        const int r = wx_radius((int)i);
+        if (r >= 116 && r <= 120 && fb[i] != POISON && fb[i] != SP_C_TRACK) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+/* Exact-colour pixels in the label's box (the condition word and, beside the
+ * temperature, the degree sign: both wear the accent). */
+static size_t wx_accent_ink(const uint16_t *fb, uint16_t c)
+{
+    const int hero_top = WX_CY - 31;
+    return count_in(fb, c, SP_CX - 60, SP_CX + 60, hero_top - 28, hero_top + 24);
+}
+
 /* No weather means NO NUMBER: the headline says why, the disc is empty, and
  * the focal object is two bare tracks — not a zero, not "--", nothing shaped
  * like a reading. The sheet is one honest row. */
@@ -2073,16 +2152,16 @@ static void test_weather_without_data_prints_no_number(void)
         return;
     }
     size_t interior = 0, nontrack = 0, track = 0;
+    const int hero_top = WX_CY - 31;
     for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
-        if (fb[i] == POISON || (int)(i / HUD_W) >= SP_LABEL_Y) {
-            continue;                 /* the headline rows are text, by design */
+        const int y = (int)(i / HUD_W);
+        const int r = wx_radius((int)i);
+        if (fb[i] == POISON) {
+            continue;
         }
-        const int r = radius_of((int)i);
-        /* The rain track's inner edge floors one unit under SP_WX_RAIN_IN,
-         * as every annulus does; the disc proper starts inside that. */
-        if (r < SP_WX_RAIN_IN - 1) {
-            ++interior;
-        } else if (r <= SP_WX_MARK_OUT) {
+        if (r < 100 && y >= hero_top - 4) {
+            ++interior;               /* below the label: where the numbers go */
+        } else if (r >= 116 && r <= 120) {
             if (fb[i] == SP_C_TRACK) {
                 ++track;
             } else {
@@ -2090,68 +2169,10 @@ static void test_weather_without_data_prints_no_number(void)
             }
         }
     }
-    CHECK(interior == 0, "%zu pixels inside the disc with no weather", interior);
-    CHECK(nontrack == 0, "%zu coloured pixels on the gauge with no weather",
-          nontrack);
-    CHECK(track > 1000, "the bare tracks drew (%zu track pixels)", track);
+    CHECK(interior == 0, "%zu pixels inside the ring with no weather", interior);
+    CHECK(nontrack == 0, "%zu coloured pixels on the ring with no weather", nontrack);
+    CHECK(track > 1000, "the bare track drew (%zu track pixels)", track);
     free(fb);
-}
-
-/* The mark is the temperature. 70 F is the middle of a 40..100 gauge that
- * opens at 7:30 and sweeps 270 degrees, so it sits at 12 o'clock exactly;
- * the ends pin to the ends. Measure the CENTROID of the mark-coloured pixels
- * rather than trust the angle arithmetic. */
-static void test_weather_mark_sits_at_the_temperature(void)
-{
-    static const struct { int temp; int angle; } cases[] = {
-        { 70, SP_A_TOP }, { 85, 240 }, { 40, SP_WX_A0 },
-        { 100, SP_WX_A0 + SP_WX_SWEEP }, { -20, SP_WX_A0 },
-    };
-    for (size_t c = 0; c < sizeof cases / sizeof *cases; ++c) {
-        stage_space(JR_DISPLAY_SPACE_WEATHER);
-        set_weather(true, cases[c].temp, 100, 40, JR_DISPLAY_SKY_CLOUDS,
-                    "OVERCAST", 0U);
-        sp_compose();
-        CHECK(s_wx_mark_a == cases[c].angle, "%d F composed at %d, wanted %d",
-              cases[c].temp, s_wx_mark_a, cases[c].angle);
-
-        uint16_t *fb = render_frame();
-        if (!fb) {
-            printf("FAIL %s: allocation failed\n", __func__);
-            g_failures++;
-            return;
-        }
-        long sx = 0, sy = 0, n = 0;
-        for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
-            if (fb[i] != SP_C_CYAN || radius_of((int)i) > SP_WX_MARK_OUT) {
-                continue;             /* the orbit's mark is cyan too, at r187+ */
-            }
-            sx += (long)(i % HUD_W);
-            sy += (long)(i / HUD_W);
-            ++n;
-        }
-        CHECK(n > 40, "%d F: the mark drew only %ld pixels", cases[c].temp, n);
-        if (n > 0) {
-            const int a = cases[c].angle;
-            const int R = (SP_WX_MARK_IN + SP_WX_MARK_OUT) / 2;
-            const int ex = SP_CX + ((sp_cos(a) * R) >> 15);
-            const int ey = SP_CY + ((sp_sin(a) * R) >> 15);
-            const int cx = (int)(sx / n), cy = (int)(sy / n);
-            CHECK(cx >= ex - 4 && cx <= ex + 4 && cy >= ey - 4 && cy <= ey + 4,
-                  "%d F: mark centroid (%d,%d), expected (%d,%d)",
-                  cases[c].temp, cx, cy, ex, ey);
-        }
-        free(fb);
-    }
-    /* The band is lo..hi on the same scale, and lo/hi order is not trusted. */
-    set_weather(true, 80, 76, 86, JR_DISPLAY_SKY_CLOUDS, "OVERCAST", 0U);
-    sp_compose();
-    CHECK(s_wx_band_a0 == sp_wx_angle(76) &&
-              s_wx_band_sweep == sp_wx_angle(86) - sp_wx_angle(76),
-          "band from lo to hi regardless of order: a0 %d sweep %d",
-          s_wx_band_a0, s_wx_band_sweep);
-    CHECK(strcmp(s_wx_hilo, "H76 L86") == 0, "hi/lo line, got '%s'", s_wx_hilo);
-    CHECK(strcmp(s_wx_head, "OVERCAST") == 0, "headline, got '%s'", s_wx_head);
 }
 
 /* Age is honest in three steps: under two minutes it is not worth a line;
@@ -2168,9 +2189,8 @@ static void test_stale_weather_loses_its_colour(void)
     CHECK(s_wx_age[0] == '\0', "fresh: no age line, got '%s'", s_wx_age);
     uint16_t *fb = render_frame();
     if (fb) {
-        CHECK(count_color_within(fb, SP_C_AMBER, SP_WX_MARK_IN, SP_WX_MARK_OUT,
-                                 HUD_H) > 40,
-              "a fresh CLEAR day draws its mark in amber");
+        CHECK(wx_accent_ink(fb, SP_C_AMBER) > 40,
+              "a fresh CLEAR day wears amber");
         free(fb);
     }
 
@@ -2189,9 +2209,7 @@ static void test_stale_weather_loses_its_colour(void)
         CHECK(count_color_within(fb, SP_C_AMBER, 0, JR_DISPLAY_SHELL_R_MAX,
                                  HUD_H) == 0,
               "stale weather still drew amber");
-        CHECK(count_color_within(fb, SP_C_GREY, SP_WX_MARK_IN, SP_WX_MARK_OUT,
-                                 HUD_H) > 40,
-              "the stale mark is grey");
+        CHECK(wx_accent_ink(fb, SP_C_GREY) > 40, "the stale accent is grey");
         free(fb);
     }
     sp_compose_detail(JR_DISPLAY_SPACE_WEATHER);
@@ -2218,8 +2236,7 @@ static void test_stale_weather_loses_its_colour(void)
     if (fb) {
         CHECK(count_color_within(fb, SP_C_AMBER, 0, JR_DISPLAY_SHELL_R_MAX,
                                  HUD_H) == 0, "muted still drew amber");
-        CHECK(count_color_within(fb, SP_C_GOLD, SP_WX_MARK_IN, SP_WX_MARK_OUT,
-                                 HUD_H) > 40, "muted draws the mark in gold");
+        CHECK(wx_accent_ink(fb, SP_C_GOLD) > 40, "muted wears gold");
         free(fb);
     }
     __atomic_store_n(&s_hud_env_word, 74U, __ATOMIC_RELEASE);
@@ -2233,30 +2250,6 @@ static void test_stale_weather_loses_its_colour(void)
  * starting the selection at midnight (now_idx 0) turns slot 0 into a 0 %
  * track; dropping the +24 for yesterday's anchor reads the wrong hours;
  * dropping the stale gate leaves a ring on a 45-minute-old frame. */
-static uint16_t hour_px(const uint16_t *fb, int k)
-{
-    const int a = SP_WX_A0 + k * (SP_WX_SWEEP / SP_WX_HOURS) + SP_WX_SWEEP / SP_WX_HOURS / 2;
-    const int r = (SP_WX_HOUR_IN + SP_WX_HOUR_OUT) / 2;
-    const int x = SP_CX + ((sp_cos(a) * r) >> 15);
-    const int y = SP_CY + ((sp_sin(a) * r) >> 15);
-    return fb[(size_t)y * HUD_W + x];
-}
-
-static size_t hour_ring_ink(const uint16_t *fb)
-{
-    size_t n = 0;
-    for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
-        const int r = radius_of((int)i);
-        if ((int)(i / HUD_W) >= SP_LABEL_Y) {
-            continue;                 /* the headline crosses r104-110 at 6 */
-        }
-        if (r >= SP_WX_HOUR_IN - 1 && r <= SP_WX_HOUR_OUT && fb[i] != POISON) {
-            ++n;
-        }
-    }
-    return n;
-}
-
 static void set_weather_hours(const uint8_t *pp, int mday, uint32_t fetched_ms)
 {
     jr_display_weather_t w;
@@ -2307,13 +2300,28 @@ static void test_weather_hours_ring_starts_now(void)
           "past the answer's 36th hour nothing is invented");
     CHECK(sp_rain_hours(out, pp, JR_DISPLAY_RAIN_HOURS, -1) == 0 &&
               out[0] == SP_WX_HOUR_NONE, "no now, no hours");
-    int a0 = 0, sw = 0;
-    sp_rain_hour_span(0, &a0, &sw);
-    CHECK(a0 > SP_WX_A0 && a0 + sw < SP_WX_A0 + SP_WX_SWEEP / SP_WX_HOURS,
-          "slot 0 sits inside the gauge's first twelfth: %d+%d", a0, sw);
-    sp_rain_hour_span(SP_WX_HOURS - 1, &a0, &sw);
-    CHECK(a0 + sw < SP_WX_A0 + SP_WX_SWEEP && sw > 8,
-          "slot 11 ends before the gauge does: %d+%d", a0, sw);
+    /* the slots: twelve 30 degree slots clockwise from 12 o'clock, a mark
+     * that grows with the chance and starts from nothing */
+    CHECK(sg_slot_centre_q16(0) == GLASS_Q16_12_OCLOCK + GLASS_TURN_Q16 / 24,
+          "slot 0 is the first half-slot after 12: %d", (int)sg_slot_centre_q16(0));
+    for (int k = 1; k < SP_WX_HOURS; ++k) {
+        const int step = (int)((sg_slot_centre_q16(k) - sg_slot_centre_q16(k - 1) + GLASS_TURN_Q16) &
+                               0xFFFF);
+        CHECK(step >= GLASS_TURN_Q16 / 12 - 2 && step <= GLASS_TURN_Q16 / 12 + 2,
+              "slot %d is a twelfth round from the one before: %d", k, step);
+    }
+    int32_t w_dry, w_half, w_full, w_none, sw_dry, sw_wet;
+    int a_dry, a_half, a_full, a_none;
+    sg_rain_mark(0, GLASS_ONE_Q16, &w_dry, &sw_dry, &a_dry);
+    sg_rain_mark(50, GLASS_ONE_Q16, &w_half, &sw_wet, &a_half);
+    sg_rain_mark(100, GLASS_ONE_Q16, &w_full, &sw_wet, &a_full);
+    sg_rain_mark(100, 0, &w_none, &sw_wet, &a_none);
+    CHECK(w_dry < w_half && w_half < w_full, "stroke grows with the chance: %d %d %d",
+          (int)w_dry, (int)w_half, (int)w_full);
+    CHECK(a_dry < a_half && a_half < a_full && a_full == 255, "alpha grows with the chance: %d %d %d",
+          a_dry, a_half, a_full);
+    CHECK(sw_dry < sw_wet && sw_wet < GLASS_TURN_Q16 / 12, "a tick is short, a stroke fits its slot");
+    CHECK(w_none == 0 && a_none == 0, "an hour not yet built draws nothing");
 
     /* on the glass: 14:05, now is 100 %, the next hour dry, the one after
      * unknown, six hours out 50 %, and midnight..13:00 all dry */
@@ -2329,13 +2337,14 @@ static void test_weather_hours_ring_starts_now(void)
     uint16_t *fb = render_frame();
     if (!fb) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; return; }
     CHECK(hour_px(fb, 0) == SP_C_RAIN, "now at 100 %% is full rain, got %04x", hour_px(fb, 0));
-    CHECK(hour_px(fb, 1) == SP_C_TRACK, "a dry hour is bare track, got %04x", hour_px(fb, 1));
+    CHECK(hour_px(fb, 1) != POISON && hour_px(fb, 1) != SP_C_RAIN,
+          "a dry hour is a faint tick, got %04x", hour_px(fb, 1));
     CHECK(hour_px(fb, 2) == POISON, "an unknown hour draws nothing, got %04x", hour_px(fb, 2));
     const uint16_t half = hour_px(fb, 6);
     CHECK(half != SP_C_RAIN && half != SP_C_TRACK && half != POISON &&
               (half & 0x1F) < (SP_C_RAIN & 0x1F),
           "50 %% is rain, dimmer than 100 %%: %04x", half);
-    CHECK(hour_ring_ink(fb) > 800, "the ring drew (%zu px)", hour_ring_ink(fb));
+    CHECK(hour_ring_ink(fb) > 400, "the ring drew (%zu px)", hour_ring_ink(fb));
     free(fb);
 
     /* just after midnight the 23:40 fetch is still fresh: 00:10 is its hour 24 */
@@ -2392,12 +2401,13 @@ static void test_weather_hours_ring_starts_now(void)
     fb = render_frame();
     if (fb) {
         size_t grey = 0;
-        for (int y = SP_WX_SUN_Y; y < SP_WX_SUN_Y + TEXT_H; ++y) {
+        const int sun_y = WX_CY - 31 + 59 + 40;
+        for (int y = sun_y; y < sun_y + 16; ++y) {
             for (int x = 0; x < HUD_W; ++x) {
                 grey += fb[(size_t)y * HUD_W + x] == SP_C_GREY;
             }
         }
-        CHECK(grey > 100, "the sun line drew %zu grey px", grey);
+        CHECK(grey > 60, "the sun line drew %zu grey px", grey);
         free(fb);
     }
     jr_display_sun_set(-1, -1);
@@ -2411,6 +2421,160 @@ static void test_weather_hours_ring_starts_now(void)
     jr_display_sun_set(-1, -1);
     jr_display_clock_set_date(0, 0, 0);
     reset_nav();
+}
+
+/* THE ENTRY. A screen becoming current starts a clock; STATUS and WEATHER
+ * draw from it; everything else parks it. It runs for SP_ENTRY_TOTAL_MS and
+ * then the screen is still, at the same frame it would have drawn without any
+ * clock, and the outgoing screen of a slide never replays it. */
+static size_t drawn_px(const uint16_t *fb)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
+        n += fb[i] != POISON;
+    }
+    return n;
+}
+
+static void test_entry_clock_runs_then_stops(void)
+{
+    reset_nav();
+    jr_display_nav_set(JR_DISPLAY_SPACE_ACTIVITY);
+    uint32_t now = 1000;
+    sp_fade_tick(now, 16, 8);
+    CHECK(!glass_entry_animating(s_entry_ms, SP_ENTRY_TOTAL_MS), "ACTIVITY has no entry");
+
+    jr_display_nav_set(JR_DISPLAY_SPACE_STATUS);
+    sp_fade_tick(now, 16, 8);
+    CHECK(s_entry_ms == 0 && glass_entry_animating(s_entry_ms, SP_ENTRY_TOTAL_MS),
+          "STATUS arriving starts the clock at 0, got %u", (unsigned)s_entry_ms);
+    uint32_t last = 0;
+    int frames = 0;
+    while (glass_entry_animating(s_entry_ms, SP_ENTRY_TOTAL_MS) && frames < 200) {
+        now += 70;                      /* the live cadence is about 14 fps */
+        sp_fade_tick(now, 70, 8);
+        CHECK(s_entry_ms >= last, "the clock never runs backwards");
+        last = s_entry_ms;
+        ++frames;
+    }
+    CHECK(s_entry_ms == SP_ENTRY_TOTAL_MS, "it parks at the total, got %u", (unsigned)s_entry_ms);
+    CHECK(frames >= 12 && frames <= 14, "about 13 frames at 14 fps, got %d", frames);
+    for (int i = 0; i < 5; ++i) {
+        now += 70;
+        sp_fade_tick(now, 70, 8);
+    }
+    CHECK(s_entry_ms == SP_ENTRY_TOTAL_MS, "and stays parked");
+
+    /* WEATHER restarts it, and so does leaving and coming back */
+    jr_display_nav_set(JR_DISPLAY_SPACE_WEATHER);
+    sp_fade_tick(now, 16, 8);
+    CHECK(s_entry_ms == 0, "WEATHER arriving restarts it");
+    jr_display_nav_set(JR_DISPLAY_SPACE_JARVIS);
+    sp_fade_tick(now, 16, 8);
+    CHECK(!glass_entry_animating(s_entry_ms, SP_ENTRY_TOTAL_MS), "going home parks it");
+    s_entry_ms = SP_ENTRY_TOTAL_MS;
+    reset_nav();
+}
+
+static void test_entry_builds_the_screens(void)
+{
+    /* STATUS: nothing at 0, more and more of the ring, then the settled frame,
+     * which is bit-for-bit what a screen with no clock draws. */
+    stage_space(JR_DISPLAY_SPACE_STATUS);
+    jr_display_power_set(74U, 4020U, false, false);
+    links(true, -34, "198.51.100.7", true, 2U, false, false);
+    static const uint32_t at[] = {0, 100, 250, 450, 700, SP_ENTRY_TOTAL_MS};
+    size_t prev_ring = 0;
+    for (size_t k = 0; k < sizeof at / sizeof *at; ++k) {
+        s_entry_ms = at[k];
+        uint16_t *fb = render_frame();
+        if (!fb) {
+            printf("FAIL %s: allocation failed\n", __func__);
+            g_failures++;
+            return;
+        }
+        size_t fill = 0;
+        for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
+            const int dx = (int)(i % HUD_W) - SP_CX, dy = (int)(i / HUD_W) - (SP_CY + SG_RING_DY);
+            const int r = sp_isqrt(dx * dx + dy * dy);
+            fill += fb[i] == SP_C_CYAN && r >= 116 && r <= 120;
+        }
+        const size_t all = drawn_px(fb);
+        if (k == 0) {
+            CHECK(fill == 0, "no fill at entry 0: %zu", fill);
+        }
+        CHECK(fill >= prev_ring, "the ring only grows: %zu then %zu at %u ms", prev_ring, fill,
+              (unsigned)at[k]);
+        CHECK(all > 5000, "something is drawn at every step: %zu", all);
+        prev_ring = fill;
+        free(fb);
+    }
+    CHECK(prev_ring > 1500, "the settled ring is 74 %% of a circle: %zu px", prev_ring);
+
+    s_entry_ms = SP_ENTRY_TOTAL_MS;
+    uint16_t *a = render_frame();
+    s_entry_ms = SP_ENTRY_TOTAL_MS + 5000U;
+    uint16_t *b = render_frame();
+    if (a && b) {
+        CHECK(memcmp(a, b, (size_t)HUD_W * HUD_H * sizeof *a) == 0, "settled is one frame");
+    }
+    free(a);
+    free(b);
+
+    /* WEATHER: the hours build clockwise, 45 ms apart */
+    uint8_t pp[JR_DISPLAY_RAIN_HOURS];
+    memset(pp, 80, sizeof pp);
+    jr_display_clock_set(true, 14, 5, 0);
+    jr_display_clock_set_date(3, 23, 8);
+    s_fake_us = 0;
+    stage_space(JR_DISPLAY_SPACE_WEATHER);
+    set_weather_hours(pp, 23, 0U);
+    sp_compose();
+    static const uint32_t wat[] = {0, 100, 300, 500, 800};
+    size_t prev = 0;
+    for (size_t k = 0; k < sizeof wat / sizeof *wat; ++k) {
+        s_entry_ms = wat[k];
+        uint16_t *fb = render_frame();
+        if (!fb) {
+            return;
+        }
+        const size_t ink = hour_ring_ink(fb);
+        if (k == 0) {
+            CHECK(ink == 0, "no hour is drawn at entry 0: %zu", ink);
+        }
+        CHECK(ink >= prev, "hours only build: %zu then %zu", prev, ink);
+        if (k == 1) {
+            CHECK(hour_px(fb, 0) != POISON && hour_px(fb, 11) == POISON,
+                  "hour 0 has begun and hour 11 has not at 100 ms");
+        }
+        prev = ink;
+        free(fb);
+    }
+    CHECK(prev > 400, "all twelve are in by 800 ms: %zu", prev);
+    s_entry_ms = SP_ENTRY_TOTAL_MS;
+    jr_display_clock_set_date(0, 0, 0);
+}
+
+static void test_outgoing_screen_does_not_replay_the_entry(void)
+{
+    stage_space(JR_DISPLAY_SPACE_WEATHER);
+    set_weather(true, 83, 86, 76, JR_DISPLAY_SKY_CLEAR, "CLEAR", 0U);
+    sp_compose();
+    s_entry_ms = 0;
+    uint16_t *only = render_frame();
+    /* mid-slide from STATUS to WEATHER, the new screen still at entry 0 */
+    s_space_from = JR_DISPLAY_SPACE_STATUS;
+    s_space_ease = 128;
+    s_space_dir = 1;
+    uint16_t *slide = render_frame();
+    if (only && slide) {
+        CHECK(drawn_px(slide) > drawn_px(only) + 3000,
+              "the outgoing STATUS is drawn whole: %zu vs %zu", drawn_px(slide), drawn_px(only));
+    }
+    free(only);
+    free(slide);
+    s_space_ease = 256;
+    s_entry_ms = SP_ENTRY_TOTAL_MS;
 }
 
 /* --------------------------------------------------------------- ACTIVITY -- */
@@ -2708,7 +2872,7 @@ static void test_low_battery_uses_the_rim_palette(void)
  * `y - SP_CY` fails this. */
 static void check_focal_follows_the_slide(int space, int rmax)
 {
-    const int oy = 60;
+    const int oy = 64;      /* a multiple of the glow dither's period */
     stage_space(space);
     jr_display_power_set(37U, 3800U, false, false);
     set_weather(true, 83, 86, 76, JR_DISPLAY_SKY_RAIN, "RAIN", 0U);
@@ -2730,9 +2894,9 @@ static void check_focal_follows_the_slide(int space, int rmax)
     for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
         const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
         sp_draw_space(&s_display, y, y2, rest + (size_t)y * HUD_W, space, 0,
-                      255);
+                      255, SP_ENTRY_TOTAL_MS);
         sp_draw_space(&s_display, y, y2, slid + (size_t)y * HUD_W, space, oy,
-                      255);
+                      255, SP_ENTRY_TOTAL_MS);
     }
     size_t compared = 0, mismatched = 0, drawn = 0;
     for (int y = 0; y < HUD_H - oy; ++y) {
@@ -2762,11 +2926,11 @@ static void check_focal_follows_the_slide(int space, int rmax)
 
 static void test_focal_wedge_follows_the_slide(void)
 {
-    check_focal_follows_the_slide(JR_DISPLAY_SPACE_STATUS, SP_FOCAL_OUT);
+    check_focal_follows_the_slide(JR_DISPLAY_SPACE_STATUS, 140);
     /* WEATHER has three arcs, a mark and three lines of text, all placed
      * about SP_CY + oy; one of them measured about the panel centre would
      * shear exactly as the POWER wedge once did. */
-    check_focal_follows_the_slide(JR_DISPLAY_SPACE_WEATHER, SP_WX_MARK_OUT);
+    check_focal_follows_the_slide(JR_DISPLAY_SPACE_WEATHER, 140);
 }
 
 /* The OTA warning is pinned: nothing else may replace it until the upload
@@ -4396,9 +4560,11 @@ int main(void)
     test_desk_going_dark_moves_the_owner_on();
     test_orbit_mark_eases_when_desk_appears();
     test_weather_without_data_prints_no_number();
-    test_weather_mark_sits_at_the_temperature();
     test_stale_weather_loses_its_colour();
     test_weather_hours_ring_starts_now();
+    test_entry_clock_runs_then_stops();
+    test_entry_builds_the_screens();
+    test_outgoing_screen_does_not_replay_the_entry();
     test_activity_is_honest_when_empty_and_newest_first();
     test_activity_survives_the_sleep();
     test_desk_sheet_heads_with_the_marked_task();

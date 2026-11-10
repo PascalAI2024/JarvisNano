@@ -1338,3 +1338,54 @@ awake to stay ready, to a thing that is ready because you picked it up.
   says the choice annulus is r217-236 when the constants are 223-231;
   `hud_render.h:120-121` describes a thinking track ring at r=150 that
   `hud_render.c:611-617` deliberately does not draw (the comet is at r142/145).
+
+## The data screens on the glass primitives (2026-11-09)
+
+STATUS and WEATHER are drawn with the anti-aliased `glass_*` row primitives and
+the Barlow Semi Condensed atlases (`glass.h`), no longer with the 5x7 font and
+opaque annuli. Code: `sp_focal_status`, `sp_focal_weather` and the `sg_*`
+helpers in `jr_display.c`. The slide fade `st` is the primitives' alpha, so the
+vertical slide and cross-dissolve are unchanged. Colour rules are the shell's:
+cyan live, gold muted, red low battery, grey labels, ink values.
+
+**Type.** Tracked label `GLASS_FONT_LABEL`; the number `GLASS_FONT_HERO` with a
+smaller `%` (STATUS, in the ring's colour) or degree sign (WEATHER, in the
+sky's accent) beside it; body lines `GLASS_FONT_TEXT`.
+
+**Ring.** One ring, r113..123 (10 px, round caps), centred 10 px above the panel
+centre so the stats fit under it, from 12 o'clock clockwise. STATUS: the
+battery percentage over a low-alpha track (drawn only where the fill is not),
+a 2.5 px glow on the filled part only. WEATHER: twelve 30 degree slots from 12
+o'clock, slot 0 being now; each hour a round-capped stroke whose width (3..10
+px) and alpha grow with its chance of rain, a dry hour a faint tick, an unknown
+hour nothing; stale or hourless weather is a bare track. The old temperature
+gauge, its high/low band and the chance-of-rain ring are gone.
+
+**Headline.** The old line below the ring would cross the bigger ring, so the
+in-ring label carries it. STATUS shows BATTERY while the headline is the
+healthy uptime, and the headline itself when something is wrong (LOW BATTERY,
+NO WIFI, UPDATE 42%...); the uptime stays on the detail sheet. WEATHER's label
+is the condition word, or NO WEATHER.
+
+**Under the ring.** STATUS: WIFI / LINK / TOOLS, label over value, an off stat
+dim. WEATHER: the age line (`12M AGO`, `STALE 45M`). Both rows sit inside the
+orbit rail (r186) and so cross the update ring's band (r140-154); they are not
+drawn while an update rings.
+
+**Entry.** `s_entry_ms` starts at 0 when STATUS or WEATHER becomes current
+(`sp_fade_tick`), counts the frame's dt and parks at `SP_ENTRY_TOTAL_MS`
+(900 ms); the outgoing screen of a slide is always drawn settled. STATUS: the
+ring sweeps and the number counts up on one ease-out-cubic over 900 ms; label,
+power word and the three stats then fade in and rise 8 px, started 0 / 150 /
+250 / 330 / 410 ms apart, 300 ms each. WEATHER: the label, number, high/low,
+sun line and age line use the same staggers; the twelve hours build clockwise
+45 ms apart, 250 ms each. The maths (`glass_ease_out_cubic_q16`,
+`glass_stagger_q16`, `glass_count_up`, `glass_rise_px`, `glass_frac_alpha`,
+`glass_entry_animating`) is pure and integer-only in `glass_draw.c`. Settled,
+the screen draws one fixed frame and asks for nothing; `rest_eligible` and
+`quiet_eligible` also refuse to rest while an entry runs.
+
+**Cost.** `tests/probe/probe.c` prints the pixels a screen's own primitives
+write in one settled frame (veil and orbit rail excluded). Old (5x7) against
+glass: STATUS 21294 -> 19684 (muted 20631), WEATHER 17275 -> 6787, no weather
+10948 -> 8567, stale 14791 -> 12257.

@@ -12,17 +12,24 @@
  *
  *   cc -std=gnu17 -O2 -Wno-unused-function \
  *      -I../../include -I../../../jr_ports/include -I./stubs -I../../src \
- *      probe.c ../../src/hud_render.c ../../src/companion.c -o probe && ./probe [scene] [muted]
- *   sips -s format png probe_<scene>.ppm --out probe_<scene>.png   # macOS
+ *      probe.c ../../src/hud_render.c ../../src/companion.c ../../src/glass_font.c \
+ *      ../../src/glass_draw.c ../../src/glass_font_data.c -o probe \
+ *      && ./probe [scene] [muted] [low] [nogauge] [ent=MS] [dir=DIR]
  *
  * Scenes: shade (default), detail, status, weather, weather-stale,
- * weather-none, activity, activity-empty. A second argument "muted" turns
- * the privacy ring on, which is what turns every accent gold.
+ * weather-none, activity, activity-empty. "muted" turns the privacy ring on,
+ * which is what turns every accent gold; "low" and "nogauge" set the battery;
+ * "ent=MS" sets the entry clock of the data screens (omitted: settled);
+ * "dir=DIR" is where the ppm goes. Every run prints the pixels the screen
+ * itself writes in one frame (the veil excluded).
  *
  * NOT part of any automated suite: the output is a picture, and the assert is
  * a human (or agent) looking at it. The exhaustive pins live in
  * ../test_shell.c and ../test_hud_render.c; this exists because
  * jr_display.c's composition has no other executable host path. */
+#ifndef NO_ENTRY
+long g_wr;   /* pixels the shell's own primitives wrote: see the --wrap wrappers below */
+#endif
 #include "jr_display.c"
 #include <assert.h>
 
@@ -31,6 +38,49 @@
 
 /* ---- stub implementations for every extern jr_display.c references ---- */
 #include "idf_stubs.inc"
+
+#ifndef NO_ENTRY
+/* The glass primitives are the only code that draws the data screens, and they
+ * live in another translation unit: the linker wraps them (-Wl,--wrap=...), and
+ * each wrapper counts the pixels its call changed. (The old 5x7 path counts at
+ * its own write sites in the copy of jr_display.c the comparison builds.) */
+#define WRAP_ROW(call_real, ...)                                                   \
+    do {                                                                           \
+        uint16_t before_[466];                                                     \
+        memcpy(before_, row, sizeof before_);                                      \
+        call_real(__VA_ARGS__);                                                    \
+        for (int i_ = 0; i_ < 466; i_++) g_wr += row[i_] != before_[i_];           \
+    } while (0)
+void __real_glass_ring_row(uint16_t *, int, int, int, int32_t, int32_t, int32_t, int32_t, int32_t,
+                           int32_t, uint16_t, uint8_t, bool);
+void __wrap_glass_ring_row(uint16_t *row, int y, int lo, int hi, int32_t cx, int32_t cy, int32_t ri,
+                           int32_t ro, int32_t st, int32_t sw, uint16_t c, uint8_t a, bool sb)
+{
+    WRAP_ROW(__real_glass_ring_row, row, y, lo, hi, cx, cy, ri, ro, st, sw, c, a, sb);
+}
+void __real_glass_arc_row(uint16_t *, int, int, int, int32_t, int32_t, int32_t, int32_t, int32_t,
+                          int32_t, uint16_t, uint8_t, bool);
+void __wrap_glass_arc_row(uint16_t *row, int y, int lo, int hi, int32_t cx, int32_t cy, int32_t ri,
+                          int32_t ro, int32_t st, int32_t sw, uint16_t c, uint8_t a, bool sb)
+{
+    WRAP_ROW(__real_glass_arc_row, row, y, lo, hi, cx, cy, ri, ro, st, sw, c, a, sb);
+}
+void __real_glass_glow_row(uint16_t *, int, int, int, int32_t, int32_t, int32_t, int32_t, int32_t,
+                           int32_t, bool, int32_t, uint8_t, uint16_t, uint8_t, bool);
+void __wrap_glass_glow_row(uint16_t *row, int y, int lo, int hi, int32_t cx, int32_t cy, int32_t ri,
+                           int32_t ro, int32_t st, int32_t sw, bool rc, int32_t w, uint8_t pk,
+                           uint16_t c, uint8_t a, bool sb)
+{
+    WRAP_ROW(__real_glass_glow_row, row, y, lo, hi, cx, cy, ri, ro, st, sw, rc, w, pk, c, a, sb);
+}
+void __real_glass_text_row(uint16_t *, int, int, int, glass_font_id_t, const char *, size_t, int,
+                           int, int, uint16_t, uint8_t, bool);
+void __wrap_glass_text_row(uint16_t *row, int y, int lo, int hi, glass_font_id_t f, const char *t,
+                           size_t n, int x0, int yt, int tr, uint16_t c, uint8_t a, bool sb)
+{
+    WRAP_ROW(__real_glass_text_row, row, y, lo, hi, f, t, n, x0, yt, tr, c, a, sb);
+}
+#endif
 
 /* ---- fake face: concentric cyan rings on black, like the baked art ---- */
 static int probe_isqrt(int v)
@@ -52,10 +102,31 @@ static uint16_t face_px(int x, int y)
     return (uint16_t)(((0) << 11) | (((lum * 63) / 255) << 5) | ((lum * 31) / 255));
 }
 
+static bool has_flag(int argc, char **argv, const char *f)
+{
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], f) == 0) return true;
+    }
+    return false;
+}
+
+static const char *flag_val(int argc, char **argv, const char *key)
+{
+    const size_t n = strlen(key);
+    for (int i = 2; i < argc; i++) {
+        if (strncmp(argv[i], key, n) == 0) return argv[i] + n;
+    }
+    return NULL;
+}
+
 int main(int argc, char **argv)
 {
     const char *scene = argc > 1 ? argv[1] : "shade";
-    const bool muted = argc > 2 && strcmp(argv[2], "muted") == 0;
+    const bool muted = has_flag(argc, argv, "muted");
+    const bool low = has_flag(argc, argv, "low");
+    const bool nogauge = has_flag(argc, argv, "nogauge");
+    const char *ent_arg = flag_val(argc, argv, "ent=");
+    const char *dir = flag_val(argc, argv, "dir=");
     s_display.board.width = 466;
     s_display.board.height = 466;
     s_display.board.swap_color_bytes = false;
@@ -113,7 +184,33 @@ int main(int argc, char **argv)
     s_orbit_a16 = sp_orbit_angle(space, false) * 16;
     jr_display_set_brightness(60U);
     jr_display_set_status(90U);
-    jr_display_power_set(74U, 4020U, true, true);
+    if (nogauge) {
+        jr_display_power_set(255U, 0U, true, false);
+    } else if (low) {
+        jr_display_power_set(12U, 3500U, false, false);
+    } else {
+        jr_display_power_set(74U, 4020U, true, true);
+    }
+    {
+        jr_display_links_t l;
+        memset(&l, 0, sizeof l);
+        l.wifi_up = true;
+        l.rssi_dbm = -52;
+        l.link_open = true;
+        l.tools = 2U;
+        l.chip_c = 52;
+        l.chip_c_valid = true;
+        l.cpu_mhz = 240;
+        jr_display_links_set(&l);
+    }
+    jr_display_clock_set(true, 14, 5, 0);
+    jr_display_clock_set_date(3, 23, 8);
+    jr_display_sun_set(7 * 60 + 2, 19 * 60 + 35);
+#ifndef NO_ENTRY
+    s_entry_ms = ent_arg ? (uint32_t)atoi(ent_arg) : SP_ENTRY_TOTAL_MS;
+#else
+    (void)ent_arg;
+#endif
     jr_display_jarvis_set_session(true, 12U, 3725U);
     /* Mid-update, staged app0 -> ota_1: the state that exercises the most
      * at once (the shell-wide ring, both STATUS rows). */
@@ -134,6 +231,9 @@ int main(int argc, char **argv)
         w.sky = JR_DISPLAY_SKY_CLEAR;
         strcpy(w.condition, "CLEAR");
         w.fetched_ms = 0;
+        static const uint8_t rain[12] = {100, 70, 40, 15, 0, 0, 5, 0, 30, 60, 85, 20};
+        memcpy(&w.rain_hours[14], rain, sizeof rain);
+        w.rain_hours_mday = 23;
         jr_display_weather_set(&w);
     }
     if (strcmp(scene, "weather-stale") == 0) {
@@ -147,9 +247,43 @@ int main(int argc, char **argv)
     sp_compose();
 
     uint16_t *fb = malloc(466u * 466u * sizeof(uint16_t));
+    uint16_t *ref = malloc(466u * 466u * sizeof(uint16_t));
     for (int y = 0; y < 466; y++)
         for (int x = 0; x < 466; x++)
-            fb[y * 466 + x] = face_px(x, y);
+            fb[y * 466 + x] = ref[y * 466 + x] = face_px(x, y);
+
+    /* The screen's own cost: one frame with the veil off, counted against the
+     * bare face. Pixels written, the proxy for per-frame work on the S3. */
+    {
+        const int veil = s_space_veil;
+        s_space_veil = 0;
+        uint16_t *cnt = malloc(466u * 466u * sizeof(uint16_t));
+        memcpy(cnt, ref, 466u * 466u * sizeof(uint16_t));
+        for (int y = 0; y < 466; y += 12) {
+            int y2 = y + 12 > 466 ? 466 : y + 12;
+            apply_space_overlay(&s_display, y, y2, cnt + (size_t)y * 466);
+        }
+        long changed = 0;
+        for (int i = 0; i < 466 * 466; i++) changed += cnt[i] != ref[i];
+        /* writes, overdraw included, minus the orbit rail every shell screen
+         * pays for alone */
+        memcpy(cnt, ref, 466u * 466u * sizeof(uint16_t));
+        g_wr = 0;
+        for (int y = 0; y < 466; y += 12) {
+            int y2 = y + 12 > 466 ? 466 : y + 12;
+            apply_space_overlay(&s_display, y, y2, cnt + (size_t)y * 466);
+        }
+        const long all = g_wr;
+        g_wr = 0;
+        for (int y = 0; y < 466; y += 12) {
+            int y2 = y + 12 > 466 ? 466 : y + 12;
+            sp_draw_orbit(&s_display, y, y2, cnt + (size_t)y * 466, 255);
+        }
+        printf("pixels changed: %ld, writes: %ld (orbit rail alone: %ld, screen: %ld)\n", changed,
+               all, g_wr, all - g_wr);
+        free(cnt);
+        s_space_veil = veil;
+    }
 
     /* Compose in 12-row strips exactly like the flush does. */
     for (int y = 0; y < 466; y += 12) {
@@ -160,7 +294,9 @@ int main(int argc, char **argv)
     }
 
     char name[64];
-    snprintf(name, sizeof name, "probe_%s%s.ppm", scene, muted ? "_muted" : "");
+    snprintf(name, sizeof name, "%s%sprobe_%s%s%s%s%s%s.ppm", dir ? dir : "", dir ? "/" : "", scene,
+             muted ? "_muted" : "", low ? "_low" : "", nogauge ? "_nogauge" : "",
+             ent_arg ? "_ent" : "", ent_arg ? ent_arg : "");
     FILE *f = fopen(name, "wb");
     fprintf(f, "P6 466 466 255\n");
     for (int i = 0; i < 466 * 466; i++) {

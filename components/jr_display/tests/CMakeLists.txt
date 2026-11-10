@@ -29,6 +29,9 @@ add_executable(jr_display_shell_tests
     test_shell.c
     ../src/hud_render.c
     ../src/companion.c
+    ../src/glass_font.c
+    ../src/glass_draw.c
+    ../src/glass_font_data.c
 )
 target_include_directories(jr_display_shell_tests PRIVATE
     ../include
