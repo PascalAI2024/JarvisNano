@@ -11,7 +11,7 @@
 # runs is worse than no suite, because it looks like coverage. Add new suites
 # HERE, not to a habit.
 #
-# The eighteen suites, in the order they run:
+# The nineteen suites, in the order they run:
 #   jr_display_hud_tests      components/jr_display/tests   procedural renderer
 #   jr_display_shell_tests    components/jr_display/tests   spatial shell
 #   jr_display_companion_tests components/jr_display/tests  portable Rest policy
@@ -26,6 +26,7 @@
 #   jr_power_sleep_tests      main/tests/                   actual sleep entry coordinator
 #   jr_ota_sleep_fence_tests  main/tests/                   actual OTA admission and restoration
 #   jr_ui_cue_tests           main/tests/                   production cue wiring, real gate
+#   jr_board_gate_tests       main/tests/                   no gateway key, no board poll
 #   jr_imu_wom_tests          components/jr_imu/tests       actual command/arming handshake
 #   jr_host_tests             host/                         jr_core + jr_dsp + jr_transport
 #   jr_tools_template_tests   components/jr_tools/host      the generated JS template
@@ -190,6 +191,7 @@ run_c_suites() {
     run_production_python_c_suite jr_power_sleep_tests main/tests/test_power_sleep.py
     run_production_python_c_suite jr_ota_sleep_fence_tests main/tests/test_ota_sleep_fence.py
     run_production_python_c_suite jr_ui_cue_tests main/tests/test_ui_cue.py
+    run_production_python_c_suite jr_board_gate_tests main/tests/test_board_gate.py
     run_production_python_c_suite jr_imu_wom_tests components/jr_imu/tests/test_wom.py
     run_cmake_suite "$ROOT/host" "$ROOT/host/build" jr_host_tests "$ROOT/host/build/jr_host_tests"
     run_ctest_suite "$ROOT/components/jr_tools/host" "$ROOT/build-tools-host" jr_tools_template_tests
