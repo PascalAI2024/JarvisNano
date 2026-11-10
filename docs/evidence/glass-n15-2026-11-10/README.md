@@ -438,3 +438,29 @@ draws as few frames in the same 0.9 s window (7-14 on the baked dials, on
 either knob), which fits the same stall; it has no clock of its own and the
 gap had been read as "a costly fade". 5.1 MB of PSRAM is free and a decoded dial is
 434 KB. N16.5.
+
+## The owner's eye: the layers are off (image 74b3ecf)
+
+The owner compared the panel dip with the pixel fade and saw no difference.
+What he saw instead was layers that do not sit right. Every capture in this
+file up to here was taken under an operator lease, which forces the awake mood
+and a violet rim; he sees the device with no lease, at rest, on its charger.
+Fifteen captures taken that way (knob 0, no lease) are summarised in
+`audit-before/`: `sheet0.png` home, the shade and the ring screens;
+`sheet1.png` WATCH on arrival; `sheet2.png` and `sheet3.png` the eight styles;
+`zoom0.png` the rim over a dial. They are the capture mirror: pixels, not
+brightness.
+
+| # | Where | What is off |
+|---|---|---|
+| 1 | DIVER, DRESS, PILOT, SKELETON | The shell's rim, a one-pixel aliased circle near r 221, runs across the dial art |
+| 2 | every dial, and home | The charging mark, square cyan dots from 12 to 3 o'clock, sits on the dial art and is blocky everywhere |
+| 3 | PILOT, FUTURE | The sun arc sweeps over the tick track and the rings |
+| 4 | JARVIS style | Three hands and a hub on plain black: no face |
+| 5 | WATCH on arrival, at rest | A small bitmap-font clock (`BAT 25%`, `CHARGING`) instead of the dial; the dial appears only after a style change |
+| 6 | the shade over home | The face's bright core shows through the mute button |
+| 7 | FUTURE | The weather word is cut: `82° MAINLY.` |
+| 8 | DIVER | The date is in the bitmap font inside photographic art |
+
+The panel dip is not kept (N16.1). The fixes are N16.6; the same captures will
+be taken again, without a lease, after its flash.
