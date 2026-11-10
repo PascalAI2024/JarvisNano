@@ -164,6 +164,25 @@ void glass_ring_replay_row(uint16_t *row, int y, int clip_lo, int clip_hi,
                            const uint8_t *rec, uint16_t color565, uint8_t alpha,
                            bool swap_bytes);
 
+/* The same for any ring, sector or arc that holds still for a while (a ring
+ * screen's track and its filled arc). glass_shape_record() keeps what
+ * glass_ring_row (round_caps false) or glass_arc_row (round_caps true) would do
+ * for these parameters; glass_ring_replay_row() then stands in for either call
+ * with any colour, alpha and clip. glass_glow_record() keeps the halo of
+ * glass_glow_row the same way, as the distance of each lit pixel; the replay
+ * takes the glow's width, peak, colour and alpha. All three return the bytes
+ * used (0 if cap is too small, the shape is empty or, for the glow, the width
+ * is past the lookup table), and with buf == NULL only measure. */
+size_t glass_shape_record(uint8_t *buf, size_t cap, int32_t cx16, int32_t cy16,
+                          int32_t r_in16, int32_t r_out16, int32_t start_q16, int32_t sweep_q16,
+                          bool round_caps);
+size_t glass_glow_record(uint8_t *buf, size_t cap, int32_t cx16, int32_t cy16,
+                         int32_t r_in16, int32_t r_out16, int32_t start_q16, int32_t sweep_q16,
+                         bool round_caps, int32_t width16);
+void glass_glow_replay_row(uint16_t *row, int y, int clip_lo, int clip_hi, const uint8_t *rec,
+                           int32_t width16, uint8_t peak, uint16_t color565, uint8_t alpha,
+                           bool swap_bytes);
+
 /* The same span with round caps (cap radius = half the stroke). A sweep of a
  * full turn or more has no ends and equals the ring. */
 void glass_arc_row(uint16_t *row, int y, int clip_lo, int clip_hi,

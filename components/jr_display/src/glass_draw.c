@@ -844,10 +844,11 @@ static void ring_like_row(uint16_t *row, int y, int clip_lo, int clip_hi,
     ring_like_row_t(row, y, clip_lo, clip_hi, g, color565, alpha, swap_bytes, NULL);
 }
 
-size_t glass_ring_record(uint8_t *buf, size_t cap, int32_t cx16, int32_t cy16,
-                         int32_t r_in16, int32_t r_out16)
+size_t glass_shape_record(uint8_t *buf, size_t cap, int32_t cx16, int32_t cy16,
+                          int32_t r_in16, int32_t r_out16, int32_t start_q16, int32_t sweep_q16,
+                          bool round_caps)
 {
-    const geo_t *g = geo_get(cx16, cy16, r_in16, r_out16, 0, GLASS_TURN_Q16, false);
+    const geo_t *g = geo_get(cx16, cy16, r_in16, r_out16, start_q16, sweep_q16, round_caps);
     const size_t head = (size_t)(GLASS_PANEL_PX + 1) * 2u;
     if (g == NULL || (buf != NULL && cap < head)) {
         return 0u;
@@ -868,6 +869,12 @@ size_t glass_ring_record(uint8_t *buf, size_t cap, int32_t cx16, int32_t cy16,
         return 0u;
     }
     return r.pos;
+}
+
+size_t glass_ring_record(uint8_t *buf, size_t cap, int32_t cx16, int32_t cy16,
+                         int32_t r_in16, int32_t r_out16)
+{
+    return glass_shape_record(buf, cap, cx16, cy16, r_in16, r_out16, 0, GLASS_TURN_Q16, false);
 }
 
 void glass_ring_replay_row(uint16_t *row, int y, int clip_lo, int clip_hi,
@@ -1149,13 +1156,18 @@ static void add_run(uint16_t *row, int x0, int x1, int y, const glow_add_t *t, b
     }
 }
 
-void glass_glow_row(uint16_t *row, int y, int clip_lo, int clip_hi,
-                    int32_t cx16, int32_t cy16, int32_t r_in16, int32_t r_out16,
-                    int32_t start_q16, int32_t sweep_q16, bool round_caps,
-                    int32_t width16, uint8_t peak,
-                    uint16_t color565, uint8_t alpha, bool swap_bytes)
+/* The glow's row walk, once. With rec == NULL it lights the row; with a
+ * recorder it writes the same walk to the byte stream instead (see rec_t): each
+ * peak run as a run, each lit edge pixel as its t64, which is independent of
+ * colour, peak and alpha, so one record serves a halo whatever it fades to. */
+static inline __attribute__((always_inline)) void
+glow_row_t(uint16_t *row, int y, int clip_lo, int clip_hi,
+           int32_t cx16, int32_t cy16, int32_t r_in16, int32_t r_out16,
+           int32_t start_q16, int32_t sweep_q16, bool round_caps,
+           int32_t width16, uint8_t peak,
+           uint16_t color565, uint8_t alpha, bool swap_bytes, rec_t *rec)
 {
-    if (row == NULL || width16 <= 0 || peak == 0u || alpha == 0u ||
+    if (width16 <= 0 || (rec == NULL && (row == NULL || peak == 0u || alpha == 0u)) ||
         !row_clip(y, &clip_lo, &clip_hi)) {
         return;
     }
@@ -1183,7 +1195,7 @@ void glass_glow_row(uint16_t *row, int y, int clip_lo, int clip_hi,
     }
     const int32_t w64 = width16 * 4;
     const uint32_t inv = (256u << 16) / (uint32_t)w64;
-    const glow_lut_t *lut = glow_lut_get(width16, peak, color565, alpha, inv);
+    const glow_lut_t *lut = rec != NULL ? NULL : glow_lut_get(width16, peak, color565, alpha, inv);
 
     /* The span at full strength: inside the shape's half planes and between
      * the radii. `maybe` is everything that can be lit at all: the inside of
@@ -1231,7 +1243,9 @@ void glass_glow_row(uint16_t *row, int y, int clip_lo, int clip_hi,
         }
         if (ss_find(&peaks, x, &e)) {
             e = (int)imin32(e, xb);
-            if (a_peak != 0u) {
+            if (rec != NULL) {
+                rec_run(rec, x, e);
+            } else if (a_peak != 0u) {
                 add_run(row, x, e, y, &add_peak, swap_bytes);
             }
             x = e + 1;
@@ -1257,12 +1271,100 @@ void glass_glow_row(uint16_t *row, int y, int clip_lo, int clip_hi,
             if (t64 >= w64) {
                 continue;
             }
+            if (rec != NULL) {
+                rec_edge(rec, x, (unsigned)(t64 > 0 ? t64 : 0));
+                continue;
+            }
             const uint32_t pk = lut != NULL ? lut->e[t64 > 0 ? t64 : 0]
                                             : glow_pack(color565, peak, alpha, inv, w64, t64);
             if (pk != 0u) {
                 const glow_add_t t = {(pk >> 20) & 1023u, (pk >> 10) & 1023u, pk & 1023u};
                 row[x] = add565(row[x], &t, x, y, swap_bytes);
             }
+        }
+    }
+}
+
+void glass_glow_row(uint16_t *row, int y, int clip_lo, int clip_hi,
+                    int32_t cx16, int32_t cy16, int32_t r_in16, int32_t r_out16,
+                    int32_t start_q16, int32_t sweep_q16, bool round_caps,
+                    int32_t width16, uint8_t peak,
+                    uint16_t color565, uint8_t alpha, bool swap_bytes)
+{
+    glow_row_t(row, y, clip_lo, clip_hi, cx16, cy16, r_in16, r_out16, start_q16, sweep_q16,
+               round_caps, width16, peak, color565, alpha, swap_bytes, NULL);
+}
+
+size_t glass_glow_record(uint8_t *buf, size_t cap, int32_t cx16, int32_t cy16,
+                         int32_t r_in16, int32_t r_out16, int32_t start_q16, int32_t sweep_q16,
+                         bool round_caps, int32_t width16)
+{
+    const size_t head = (size_t)(GLASS_PANEL_PX + 1) * 2u;
+    if (width16 <= 0 || width16 * 4 > GLOW_LUT_MAX || (buf != NULL && cap < head) ||
+        geo_get(cx16, cy16, r_in16, r_out16, start_q16, sweep_q16, round_caps) == NULL) {
+        return 0u;
+    }
+    rec_t r = {.buf = buf, .cap = cap, .pos = head};
+    uint16_t scratch = 0u;        /* the recorder never touches the row */
+    for (int y = 0; y < GLASS_PANEL_PX; y++) {
+        if (buf != NULL) {
+            ((uint16_t *)(void *)buf)[y] = (uint16_t)r.pos;
+        }
+        rec_flush(&r);
+        glow_row_t(&scratch, y, 0, GLASS_PANEL_PX - 1, cx16, cy16, r_in16, r_out16, start_q16,
+                   sweep_q16, round_caps, width16, 1u, 0u, 255u, false, &r);
+    }
+    if (buf != NULL) {
+        ((uint16_t *)(void *)buf)[GLASS_PANEL_PX] = (uint16_t)r.pos;
+    }
+    if (r.pos > 0xFFFFu || (buf != NULL && r.pos > cap)) {
+        return 0u;
+    }
+    return r.pos;
+}
+
+void glass_glow_replay_row(uint16_t *row, int y, int clip_lo, int clip_hi, const uint8_t *rec,
+                           int32_t width16, uint8_t peak, uint16_t color565, uint8_t alpha,
+                           bool swap_bytes)
+{
+    if (row == NULL || rec == NULL || width16 <= 0 || peak == 0u || alpha == 0u ||
+        !row_clip(y, &clip_lo, &clip_hi)) {
+        return;
+    }
+    const int32_t w64 = width16 * 4;
+    const glow_lut_t *lut = glow_lut_get(width16, peak, color565, alpha, (256u << 16) / (uint32_t)w64);
+    if (lut == NULL) {
+        return;                       /* glass_glow_record() refuses such a width */
+    }
+    const unsigned a_peak = (((unsigned)peak) * ((unsigned)alpha + 1u)) >> 8;
+    const glow_add_t add_peak = glow_add_for(color565, a_peak);
+    const uint16_t *tab = (const uint16_t *)(const void *)rec;
+    size_t p = tab[y];
+    const size_t end = tab[y + 1];
+    while (p < end) {
+        const unsigned n = rec[p];
+        const int x0 = (int)rec[p + 1] | ((int)rec[p + 2] << 8);
+        if (n == 0u) {
+            const int x1 = (int)rec[p + 3] | ((int)rec[p + 4] << 8);
+            p += 5u;
+            const int a = x0 > clip_lo ? x0 : clip_lo;
+            const int b = x1 < clip_hi ? x1 : clip_hi;
+            if (a_peak != 0u && a <= b) {
+                add_run(row, a, b, y, &add_peak, swap_bytes);
+            }
+        } else {
+            p += 3u;
+            for (unsigned i = 0; i < n; i++) {
+                const int x = x0 + (int)i;
+                if (x >= clip_lo && x <= clip_hi) {
+                    const uint32_t pk = lut->e[rec[p + i]];
+                    if (pk != 0u) {
+                        const glow_add_t t = {(pk >> 20) & 1023u, (pk >> 10) & 1023u, pk & 1023u};
+                        row[x] = add565(row[x], &t, x, y, swap_bytes);
+                    }
+                }
+            }
+            p += n;
         }
     }
 }

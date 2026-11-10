@@ -56,10 +56,12 @@ int main(void)
     static uint16_t fb[466 * 466];
     int failures = 0, checks = 0;
     /* Two passes over the whole table: the recorded orbit rail in use (as on
-     * the device), then without it (the fallback when PSRAM is short). Both must
-     * give the pixels the pre-cut code gave. */
-    for (int pass = 0; pass < 2; pass++) {
-        fc_orbit_rec_on = pass == 0;
+     * the device), then without it (the fallback when PSRAM is short), then with
+     * the rail but without the recorded battery / desk ring. All three must give
+     * the pixels the pre-cut code gave. */
+    for (int pass = 0; pass < 3; pass++) {
+        fc_orbit_rec_on = pass != 1;
+        fc_fring_rec_on = pass != 2;
         for (int i = 0; i < NREFS; i++) {
             const fc_scene_t *sc = find_scene(REFS[i].scene);
             if (sc == NULL) {
@@ -78,14 +80,16 @@ int main(void)
             const uint64_t h = fc_hash(fb);
             checks++;
             if (h != REFS[i].hash) {
-                printf("FAIL %s clk=%lld (orbit record %s): frame hash %016llx, expected %016llx\n",
+                printf("FAIL %s clk=%lld (orbit record %s, ring record %s): frame hash %016llx, expected %016llx\n",
                        REFS[i].scene, (long long)REFS[i].clk_ms, fc_orbit_rec_on ? "on" : "off",
+                       fc_fring_rec_on ? "on" : "off",
                        (unsigned long long)h, (unsigned long long)REFS[i].hash);
                 failures++;
             }
         }
     }
     fc_orbit_rec_on = true;
+    fc_fring_rec_on = true;
     /* every scene must be pinned at least once: a scene added to the fixture
      * and not to the table would otherwise be unguarded */
     for (int s = 0; s < FC_NSCENES; s++) {
@@ -142,6 +146,82 @@ int main(void)
             printf("FAIL orbit replay comparison drew only %ld pixels\n", touched);
             failures++;
         }
+    }
+    /* The recorded battery / desk ring against the three glass calls it stands in
+     * for, over a busy background: every row, at sweeps from a sliver to full,
+     * with the alphas the fades produce, both byte orders and clips that cut the
+     * ring. The scenes only reach it at one alpha and two or three sweeps. */
+    {
+        static uint8_t rt[SG_FRING_CAP], rg[SG_FRING_CAP], ra[SG_FRING_CAP];
+        static uint16_t a[466], b[466];
+        static const int32_t sweeps[] = { 1, 40, 655, 3277, 16384, 32768, 48500, 64000, 65535, 65536 };
+        static const int alphas[] = { 1, 90, 255 };
+        static const int clips[][2] = { { 0, 465 }, { 120, 310 }, { 228, 240 } };
+        const int32_t cx16 = SP_CX * 16, cy16 = (SP_CY + SG_RING_DY) * 16;
+        long touched = 0, bytes_max = 0;
+        for (unsigned si = 0; si < sizeof sweeps / sizeof sweeps[0]; si++) {
+            const int32_t sw = sweeps[si];
+            const size_t nt = sw < GLASS_TURN_Q16 ? glass_shape_record(rt, sizeof rt, cx16, cy16,
+                SG_RING_R_IN16, SG_RING_R_OUT16, GLASS_Q16_12_OCLOCK + sw, GLASS_TURN_Q16 - sw, false) : 0u;
+            const size_t ng = glass_glow_record(rg, sizeof rg, cx16, cy16, SG_RING_R_IN16,
+                SG_RING_R_OUT16, GLASS_Q16_12_OCLOCK, sw, true, SG_GLOW16);
+            const size_t na = glass_shape_record(ra, sizeof ra, cx16, cy16, SG_RING_R_IN16,
+                SG_RING_R_OUT16, GLASS_Q16_12_OCLOCK, sw, true);
+            checks++;
+            if (ng == 0u || na == 0u || (sw < GLASS_TURN_Q16 && nt == 0u)) {
+                printf("FAIL ring record for sweep %d is empty (track %zu glow %zu arc %zu)\n",
+                       (int)sw, nt, ng, na);
+                failures++;
+                continue;
+            }
+            if ((long)nt > bytes_max) bytes_max = (long)nt;
+            if ((long)ng > bytes_max) bytes_max = (long)ng;
+            if ((long)na > bytes_max) bytes_max = (long)na;
+            for (unsigned ai = 0; ai < sizeof alphas / sizeof alphas[0]; ai++) {
+                for (int swp = 0; swp < 2; swp++) {
+                    for (unsigned ci = 0; ci < sizeof clips / sizeof clips[0]; ci++) {
+                        int bad = 0;
+                        for (int y = 0; y < 466 && !bad; y++) {
+                            for (int x = 0; x < 466; x++) {
+                                a[x] = b[x] = (uint16_t)(x * 2654435761u + y * 40503u + 777u);
+                            }
+                            const int lo = clips[ci][0], hi = clips[ci][1];
+                            const uint8_t at = (uint8_t)((alphas[ai] * 44) / 255);
+                            if (sw < GLASS_TURN_Q16) {
+                                glass_ring_row(a, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                                               GLASS_Q16_12_OCLOCK + sw, GLASS_TURN_Q16 - sw, SP_C_CYAN, at, swp != 0);
+                                glass_ring_replay_row(b, y, lo, hi, rt, SP_C_CYAN, at, swp != 0);
+                            }
+                            glass_glow_row(a, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                                           GLASS_Q16_12_OCLOCK, sw, true, SG_GLOW16, 140, SP_C_CYAN,
+                                           (uint8_t)alphas[ai], swp != 0);
+                            glass_glow_replay_row(b, y, lo, hi, rg, SG_GLOW16, 140, SP_C_CYAN,
+                                                  (uint8_t)alphas[ai], swp != 0);
+                            glass_arc_row(a, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                                          GLASS_Q16_12_OCLOCK, sw, SP_C_CYAN, (uint8_t)alphas[ai], swp != 0);
+                            glass_ring_replay_row(b, y, lo, hi, ra, SP_C_CYAN, (uint8_t)alphas[ai], swp != 0);
+                            for (int x = 0; x < 466; x++) {
+                                if (a[x] != b[x]) bad = 1;
+                                if (a[x] != (uint16_t)(x * 2654435761u + y * 40503u + 777u)) touched++;
+                            }
+                            if (bad) {
+                                printf("FAIL ring replay differs: sweep %d alpha %d swap %d clip %d..%d row %d\n",
+                                       (int)sw, alphas[ai], swp, lo, hi, y);
+                                failures++;
+                            }
+                        }
+                        checks++;
+                    }
+                }
+            }
+        }
+        checks++;
+        if (touched < 100000) {
+            printf("FAIL ring replay comparison drew only %ld pixels\n", touched);
+            failures++;
+        }
+        printf("battery / desk ring records: largest %ld bytes of %d (PSRAM, three blocks)\n",
+               bytes_max, SG_FRING_CAP);
     }
     /* The orbit's lit mark is only asked about on the rows orbit_mark_rows()
      * allows: at every one of its 256 positions, every row outside the bound

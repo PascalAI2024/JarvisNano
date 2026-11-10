@@ -4520,6 +4520,96 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
     }
 }
 
+/* The battery / desk ring at rest. Its three layers (the track, the glow, the
+ * filled arc) are the same shapes every frame until the number moves, and each
+ * cost 0.4 to 1 M instructions a frame in geometry that never changes. Once the
+ * entry has finished and the screen sits still (oy == 0) they are recorded
+ * (glass_shape_record / glass_glow_record) and replayed: the same fills and
+ * blends, so the same pixels, for any fade, colour and clip. A change of the
+ * sweep records again; while the entry runs, or the screen is being dragged,
+ * the ring is drawn the long way, as before. The records are three blocks of
+ * SG_FRING_CAP bytes in PSRAM, allocated once at start (the largest the ring
+ * needs, at 99 %, is 10 KB); if one is absent or did not fit, that layer is
+ * drawn the long way. Internal RAM: a pointer and 8 bytes of key. */
+#define SG_FRING_CAP   12288
+#define JR_FRING_REC   1        /* tells the host fixtures the recorded ring exists */
+enum { SG_FR_TRACK = 1, SG_FR_GLOW = 2, SG_FR_ARC = 4 };
+static uint8_t *s_fring_rec;    /* track | glow | arc, SG_FRING_CAP bytes each */
+static struct {
+    int32_t sweep;              /* the sweep the records were made for */
+    uint8_t have;               /* SG_FR_* parts recorded for it; bit 7: tried */
+} s_fring;
+
+static void fring_rec_alloc(void)
+{
+    if (s_fring_rec == NULL) {
+        s_fring_rec = heap_caps_malloc(3u * SG_FRING_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    s_fring.have = 0;
+}
+
+/* Records the ring for `sweep` if the block is there and it is not already. */
+static uint8_t fring_prepare(int32_t sweep)
+{
+    if (s_fring_rec == NULL) {
+        return 0;
+    }
+    if (s_fring.have != 0 && s_fring.sweep == sweep) {
+        return s_fring.have;
+    }
+    const int32_t cx16 = SP_CX * 16, cy16 = (SP_CY + SG_RING_DY) * 16;
+    uint8_t have = 0;
+    if (sweep < GLASS_TURN_Q16 &&
+        glass_shape_record(s_fring_rec, SG_FRING_CAP, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                           GLASS_Q16_12_OCLOCK + sweep, GLASS_TURN_Q16 - sweep, false) != 0u) {
+        have |= SG_FR_TRACK;
+    }
+    if (sweep > 0) {
+        if (glass_glow_record(s_fring_rec + SG_FRING_CAP, SG_FRING_CAP, cx16, cy16, SG_RING_R_IN16,
+                              SG_RING_R_OUT16, GLASS_Q16_12_OCLOCK, sweep, true, SG_GLOW16) != 0u) {
+            have |= SG_FR_GLOW;
+        }
+        if (glass_shape_record(s_fring_rec + 2u * SG_FRING_CAP, SG_FRING_CAP, cx16, cy16,
+                               SG_RING_R_IN16, SG_RING_R_OUT16, GLASS_Q16_12_OCLOCK, sweep, true) != 0u) {
+            have |= SG_FR_ARC;
+        }
+    }
+    s_fring.sweep = sweep;
+    s_fring.have = have | 0x80u;          /* tried, so a failure is not retried every strip */
+    return s_fring.have;
+}
+
+/* One row of the ring: the track where the fill is not, then (arc_on) the glow
+ * and the fill. `have` is fring_prepare()'s answer, 0 to draw the long way. */
+static inline void fring_row(uint16_t *row, int y, int lo, int hi, bool swap, int32_t cy16,
+                             int32_t sweep, bool arc_on, uint16_t fill, int st, uint8_t have)
+{
+    const int32_t cx16 = SP_CX * 16;
+    const uint8_t a_trk = (uint8_t)((st * 44) / 255);
+    if (have & SG_FR_TRACK) {
+        glass_ring_replay_row(row, y, lo, hi, s_fring_rec, fill, a_trk, swap);
+    } else {
+        glass_ring_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                       GLASS_Q16_12_OCLOCK + sweep, GLASS_TURN_Q16 - sweep, fill, a_trk, swap);
+    }
+    if (!arc_on) {
+        return;
+    }
+    if (have & SG_FR_GLOW) {
+        glass_glow_replay_row(row, y, lo, hi, s_fring_rec + SG_FRING_CAP, SG_GLOW16, 140, fill,
+                              (uint8_t)st, swap);
+    } else {
+        glass_glow_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                       GLASS_Q16_12_OCLOCK, sweep, true, SG_GLOW16, 140, fill, (uint8_t)st, swap);
+    }
+    if (have & SG_FR_ARC) {
+        glass_ring_replay_row(row, y, lo, hi, s_fring_rec + 2u * SG_FRING_CAP, fill, (uint8_t)st, swap);
+    } else {
+        glass_arc_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                      GLASS_Q16_12_OCLOCK, sweep, fill, (uint8_t)st, swap);
+    }
+}
+
 /* ACTIVITY: up to three blocks, newest first. Line one is the kind and the age
  * in the label face, line two the summary in the text face; each older block
  * is a step quieter, so the eye lands on what just happened. On entry the
@@ -4592,7 +4682,6 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
     const jr_display_agent_state_t state = (jr_display_agent_state_t)((w >> 8) & 0xFu);
     const uint16_t fill = state == JR_DISPLAY_AGENT_NONE ? SP_C_CYAN : agent_native_color(state);
     const bool swap = ctx->board.swap_color_bytes;
-    const int cx16 = SP_CX * 16;
     const int cyr = SP_CY + oy + SG_RING_DY;
     const int cy16 = cyr * 16;
 
@@ -4626,6 +4715,8 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
                 1, SP_C_GREY, sg_ent_alpha(st, ent, t_word));
 
     const int ring_y0 = cyr - 130, ring_y1 = cyr + 130;
+    /* at rest: the ring's three layers replayed from their records */
+    const uint8_t rec = (oy == 0 && f_ring >= GLASS_ONE_Q16) ? (uint8_t)(fring_prepare(sweep) & 0x7Fu) : 0u;
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         int lo = 0, hi = HUD_W - 1;
@@ -4633,16 +4724,7 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
             continue;
         }
         if (y >= ring_y0 && y <= ring_y1) {
-            glass_ring_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
-                           GLASS_Q16_12_OCLOCK + sweep, GLASS_TURN_Q16 - sweep, fill,
-                           (uint8_t)((st * 44) / 255), swap);
-            if (sweep > 0) {
-                glass_glow_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
-                               GLASS_Q16_12_OCLOCK, sweep, true, SG_GLOW16, 140, fill,
-                               (uint8_t)st, swap);
-                glass_arc_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
-                              GLASS_Q16_12_OCLOCK, sweep, fill, (uint8_t)st, swap);
-            }
+            fring_row(row, y, lo, hi, swap, cy16, sweep, sweep > 0, fill, st, rec);
         }
         sg_txt_row(row, y, lo, hi, swap, &t_label);
         sg_txt_row(row, y, lo, hi, swap, &t_hero);
@@ -4711,7 +4793,6 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
     const uint16_t accent = muted ? SP_C_GOLD : SP_C_CYAN;
     const uint16_t fill = low ? SP_C_RED : accent;
     const bool swap = ctx->board.swap_color_bytes;
-    const int cx16 = SP_CX * 16;
     const int cyr = SP_CY + oy + SG_RING_DY;
     const int cy16 = cyr * 16;
 
@@ -4791,6 +4872,8 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
     }
 
     const int ring_y0 = cyr - 130, ring_y1 = cyr + 130;
+    /* at rest: the ring's three layers replayed from their records */
+    const uint8_t rec = (oy == 0 && f_ring >= GLASS_ONE_Q16) ? (uint8_t)(fring_prepare(sweep) & 0x7Fu) : 0u;
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         int lo = 0, hi = HUD_W - 1;
@@ -4799,16 +4882,7 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
         }
         if (y >= ring_y0 && y <= ring_y1) {
             /* the track only where the fill is not: no pixel is written twice */
-            glass_ring_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
-                           GLASS_Q16_12_OCLOCK + sweep, GLASS_TURN_Q16 - sweep, fill,
-                           (uint8_t)((st * 44) / 255), swap);
-            if (have_gauge && sweep > 0) {
-                glass_glow_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
-                               GLASS_Q16_12_OCLOCK, sweep, true, SG_GLOW16, 140, fill,
-                               (uint8_t)st, swap);
-                glass_arc_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
-                              GLASS_Q16_12_OCLOCK, sweep, fill, (uint8_t)st, swap);
-            }
+            fring_row(row, y, lo, hi, swap, cy16, sweep, have_gauge && sweep > 0, fill, st, rec);
         }
         sg_txt_row(row, y, lo, hi, swap, &t_label);
         sg_txt_row(row, y, lo, hi, swap, &t_hero);
@@ -7027,6 +7101,7 @@ esp_err_t jr_display_start(jr_display_t *out_port)
     }
     (void)act_rtc_restore();   /* the receipt from before the sleep */
     orbit_rec_build();         /* before the render task exists to read it */
+    fring_rec_alloc();         /* likewise */
 
     BaseType_t created = xTaskCreatePinnedToCore(
         display_task, "jr_present", JR_DISPLAY_TASK_STACK, &s_display,

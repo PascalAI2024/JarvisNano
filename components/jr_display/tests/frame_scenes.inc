@@ -124,8 +124,21 @@ static jr_face_t fc_dial_of_style(int style)
 static bool fc_orbit_rec_on = true;
 #endif
 
+#ifdef JR_FRING_REC
+/* Whether the recorded battery / desk ring is in use (production: yes). */
+static bool fc_fring_rec_on = true;
+#endif
+
 static void fc_setup(const fc_scene_t *sc)
 {
+#ifdef JR_FRING_REC
+    if (fc_fring_rec_on) {
+        fring_rec_alloc();
+    } else if (s_fring_rec != NULL) {
+        heap_caps_free(s_fring_rec);
+        s_fring_rec = NULL;
+    }
+#endif
 #ifdef JR_ORBIT_REC
     if (fc_orbit_rec_on) {
         orbit_rec_build();
