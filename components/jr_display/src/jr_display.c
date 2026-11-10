@@ -4460,13 +4460,6 @@ _Static_assert(SP_R_SHELL == SP_CLIP_ROWS, "k_clip_half is built for this shell 
 
 /* THE round safe-area guard. Folds [*xlo, *xhi] into both the panel and the
  * shell circle for this row; false means the row has nothing to draw. */
-/* The radius the one-pass dim reaches (sp_dim_disc) and, while s_clip_tight is
- * set, the radius content is drawn to: two short of the shell clip, because the
- * battery rim's inner anti-aliased pixels sit at r214 and a dim that reached
- * them would darken the rim. */
-#define SP_DIM_R 212
-static bool s_clip_tight;
-
 static bool sp_clip(int y, int *xlo, int *xhi)
 {
     const int dy = y - SP_CY;
@@ -4474,16 +4467,7 @@ static bool sp_clip(int y, int *xlo, int *xhi)
     if (ady >= SP_CLIP_ROWS) {
         return false;
     }
-    int half = k_clip_half[ady];
-    if (__builtin_expect(s_clip_tight, 0)) {
-        if (ady >= SP_DIM_R) {
-            return false;
-        }
-        const int tight = sp_isqrt(SP_DIM_R * SP_DIM_R - dy * dy);
-        if (tight < half) {
-            half = tight;
-        }
-    }
+    const int half = k_clip_half[ady];
     if (*xlo < SP_CX - half) {
         *xlo = SP_CX - half;
     }
@@ -5087,13 +5071,6 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
  * SG_FRING_CAP bytes in PSRAM, allocated once at start (the largest the ring
  * needs, at 99 %, is 10 KB); if one is absent or did not fit, that layer is
  * drawn the long way. Internal RAM: a pointer and 8 bytes of key. */
-/* Which half of a ring screen a call draws (FADE_SCREEN, sp_draw_space_faded):
- * 0 all of it, 1 everything but the ring, 2 only the ring. The ring is three
- * layers over each other, so it is blended at the fade's strength as ever; the
- * rest is drawn at full strength and dimmed once, the ring then goes on top. */
-enum { SG_PASS_ALL = 0, SG_PASS_NO_RING = 1, SG_PASS_RING = 2 };
-static uint8_t s_ring_pass;
-
 #define SG_FRING_CAP   12288
 #define JR_FRING_REC   1        /* tells the host fixtures the recorded ring exists */
 enum { SG_FR_TRACK = 1, SG_FR_GLOW = 2, SG_FR_ARC = 4 };
@@ -5300,11 +5277,8 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
         if (!sp_clip(y, &lo, &hi)) {
             continue;
         }
-        if (y >= ring_y0 && y <= ring_y1 && s_ring_pass != SG_PASS_NO_RING) {
+        if (y >= ring_y0 && y <= ring_y1) {
             fring_row(row, y, lo, hi, swap, cy16, sweep, sweep > 0, fill, st, rec);
-        }
-        if (s_ring_pass == SG_PASS_RING) {
-            continue;
         }
         sg_txt_row(row, y, lo, hi, swap, &t_label);
         sg_txt_row(row, y, lo, hi, swap, &t_hero);
@@ -5460,12 +5434,9 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
         if (!sp_clip(y, &lo, &hi)) {
             continue;
         }
-        if (y >= ring_y0 && y <= ring_y1 && s_ring_pass != SG_PASS_NO_RING) {
+        if (y >= ring_y0 && y <= ring_y1) {
             /* the track only where the fill is not: no pixel is written twice */
             fring_row(row, y, lo, hi, swap, cy16, sweep, have_gauge && sweep > 0, fill, st, rec);
-        }
-        if (s_ring_pass == SG_PASS_RING) {
-            continue;
         }
         sg_txt_row(row, y, lo, hi, swap, &t_label);
         sg_txt_row(row, y, lo, hi, swap, &t_hero);
@@ -6120,91 +6091,6 @@ static void sp_veil_black(const jr_display_ctx_t *ctx, int y1, int y2,
     }
 }
 
-/* THE ONE DIM. A screen at partial strength used to blend every primitive it
- * drew (a read, a multiply and a write a pixel per primitive, overdraw
- * multiplied). Over a black base the same picture is the content drawn at full
- * strength and the finished rows dimmed once, which touches each lit pixel one
- * time and skips the black ones. Weight m is 0..64 (64 = untouched), a finer step
- * than the 32 of sp_fade_to_black565. Black stays black, so the corners and the
- * unlit disc cost a compare. The knob bits that use it are in perf_knob.h. */
-static inline uint16_t sp_dim64(uint16_t v, uint32_t m)
-{
-    uint16_t out = (uint16_t)((((v & 0xF81Fu) * m) >> 6) & 0xF81Fu);
-    out |= (uint16_t)((((v & 0x07E0u) * m) >> 6) & 0x07E0u);
-    return out;
-}
-
-static void sp_dim_disc(const jr_display_ctx_t *ctx, int y1, int y2,
-                        uint16_t *pixels, int st)
-{
-    if (st >= 255) {
-        return;
-    }
-    const uint32_t m = st <= 0 ? 0U : (uint32_t)((st * 64 + 127) / 255);
-    const bool swap = ctx->board.swap_color_bytes;
-    for (int y = y1; y < y2; ++y) {
-        const int d2 = SP_DIM_R * SP_DIM_R - (y - SP_CY) * (y - SP_CY);
-        if (d2 <= 0) {
-            continue;
-        }
-        const int half = sp_isqrt(d2);
-        int lo = SP_CX - half, hi = SP_CX + half;
-        if (lo < 0) {
-            lo = 0;
-        }
-        if (hi > HUD_W - 1) {
-            hi = HUD_W - 1;
-        }
-        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        if (m == 0U) {
-            memset(row + lo, 0, (size_t)(hi - lo + 1) * sizeof(uint16_t));
-        } else if (swap) {
-            for (int x = lo; x <= hi; ++x) {
-                const uint16_t v = row[x];
-                if (v != 0U) {
-                    const uint16_t n = sp_dim64((uint16_t)((v >> 8) | (v << 8)), m);
-                    row[x] = (uint16_t)((n >> 8) | (n << 8));
-                }
-            }
-        } else {
-            for (int x = lo; x <= hi; ++x) {
-                if (row[x] != 0U) {
-                    row[x] = sp_dim64(row[x], m);
-                }
-            }
-        }
-    }
-}
-
-/* A ring data screen at strength st. With FADE_SCREEN set and the screen part
- * way up or down, it is drawn whole and dimmed once; the base under it is black
- * (the face is dipped to black by the cut and a data screen draws on black).
- * STATUS and DESK keep their ring out of that dim and blend it on top at st: its
- * track, glow and fill overlap, and an overlap shows through at partial strength
- * (1 - st of the layer below), which a dim of the finished ring would lose. */
-static void sp_draw_space_faded(const jr_display_ctx_t *ctx, int y1, int y2,
-                                uint16_t *pixels, int space, int oy, int st,
-                                uint32_t ent)
-{
-    if ((hud_perf_knob & JR_KNOB_FADE_SCREEN) != 0U && st > 0 && st < 255 &&
-        (space == JR_DISPLAY_SPACE_STATUS || space == JR_DISPLAY_SPACE_WEATHER ||
-         space == JR_DISPLAY_SPACE_DESK || space == JR_DISPLAY_SPACE_ACTIVITY)) {
-        const bool ringed = space == JR_DISPLAY_SPACE_STATUS || space == JR_DISPLAY_SPACE_DESK;
-        s_ring_pass = ringed ? SG_PASS_NO_RING : SG_PASS_ALL;
-        s_clip_tight = true;                  /* what is drawn is what the dim reaches */
-        sp_draw_space(ctx, y1, y2, pixels, space, oy, 255, ent);
-        s_clip_tight = false;
-        sp_dim_disc(ctx, y1, y2, pixels, st);
-        if (ringed) {
-            s_ring_pass = SG_PASS_RING;
-            sp_draw_space(ctx, y1, y2, pixels, space, oy, st, ent);
-        }
-        s_ring_pass = SG_PASS_ALL;
-        return;
-    }
-    sp_draw_space(ctx, y1, y2, pixels, space, oy, st, ent);
-}
-
 static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
                                 uint16_t *pixels)
 {
@@ -6243,14 +6129,14 @@ static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
             const int po = tr_out(s_space_prog, TR_CUT_SLIDE);
             const int pi = tr_in(s_space_prog, TR_CUT_SLIDE);
             if (po > 0) {
-                sp_draw_space_faded(ctx, y1, y2, pixels, s_space_from,
-                                    -s_space_dir * ((SP_LEAVE_PX * (256 - po)) / 256),
-                                    (focal * po) / 256, SP_ENTRY_TOTAL_MS);
+                sp_draw_space(ctx, y1, y2, pixels, s_space_from,
+                              -s_space_dir * ((SP_LEAVE_PX * (256 - po)) / 256),
+                              (focal * po) / 256, SP_ENTRY_TOTAL_MS);
             }
             if (pi > 0) {
-                sp_draw_space_faded(ctx, y1, y2, pixels, s_space_to,
-                                    s_space_dir * ((SP_SLIDE_PX * (256 - pi)) / 256),
-                                    (focal * pi) / 256, s_entry_ms);
+                sp_draw_space(ctx, y1, y2, pixels, s_space_to,
+                              s_space_dir * ((SP_SLIDE_PX * (256 - pi)) / 256),
+                              (focal * pi) / 256, s_entry_ms);
             }
         }
         split_mark(JR_DISPLAY_SPLIT_SPACE_SCREEN, &sm);
