@@ -536,9 +536,10 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 /* Memory for the MINIMAL dial's disc to be recorded in (the disc is the same
  * every frame, and finding its edge cost more than writing it). The caller owns
  * it; PSRAM is fine, it is read a few hundred bytes a strip. cap_words is the
- * size in uint16; about 6000 are used. NULL, or never called, draws the disc
+ * size in uint16; 4,600 are used. NULL, or never called, draws the disc
  * the long way, to the same pixels. */
 void hud_dial_cache_set(uint16_t *buf, size_t cap_words);
+size_t hud_dial_cache_used(void);     /* words filled so far (the tests report it) */
 
 /* One hand alone (0 hour, 1 minute, 2 seconds) at a Q16-turn angle
  * (65536 per revolution, 12 o'clock at 192 << 8, clockwise), with or

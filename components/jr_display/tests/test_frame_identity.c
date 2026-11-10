@@ -95,6 +95,10 @@ int main(void)
     fc_fring_rec_on = true;
     fc_shade_rec_on = true;
     fc_dial_rec_on = true;
+    fc_setup(find_scene("watch-minimal"));      /* the dial record starts empty and fills as rows draw */
+    fc_run(find_scene("watch-minimal"), 100000, fb);
+    printf("MINIMAL dial disc record: %u of %d words used (PSRAM)\n",
+           (unsigned)hud_dial_cache_used(), SG_DIAL_REC_WORDS);
     /* every scene must be pinned at least once: a scene added to the fixture
      * and not to the table would otherwise be unguarded */
     for (int s = 0; s < FC_NSCENES; s++) {

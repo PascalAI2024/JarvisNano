@@ -175,6 +175,64 @@ Not cut:
 
 Pixel-changing fixes in the same round, each with before and after images from the probe and regenerated hashes: the lease caption no longer prints over the shade or the detail sheet (`shade-lease`, `detail-lease` changed); the shade's brightness arc and number show the owner's cap (`shade-dimmed` changed; the cap travels in bits 8 to 15 of `s_status_word`, 0 meaning unknown); an ACTIVITY row ends on a whole sentence or on a word and three dots (`activity` changed; no font here has U+2026).
 
+**[2026-11-10] Third round: the ring screens, the shade, the veil, the MINIMAL dial (branch `feat/glass-speed-2`, cut from `feat/glass-2` at 91dc040)**
+No device was available. Everything in the Ir columns is measured (callgrind on the host probe, one steady-state frame at `clk=100000`, instructions per whole frame; the probe now runs two warm frames, see below). Every millisecond figure is inferred. The device column is the second-round table's `space_screen` / `space_shade` / `space_veil` / `clock_face` split numbers from image 519b252, in ms per frame.
+
+| Scene | Ir before | Ir after | Change | Device ms before (measured, 519b252) |
+|-------|-----------|----------|--------|--------------------------------------|
+| STATUS 74 % | 3,376,035 | 1,861,501 | -44.9 % | `space_screen` 42.6 |
+| STATUS 74 %, charging, muted | 3,492,948 | 1,978,857 | -43.3 % | |
+| STATUS 5 % | 2,338,744 | 1,462,816 | -37.5 % | |
+| STATUS 100 % | 2,946,056 | 1,940,848 | -34.1 % | |
+| STATUS, agent rim 100 % | 3,573,398 | 2,057,911 | -42.4 % | |
+| STATUS mid-entry (the ring still sweeps) | 3,075,481 | 3,065,632 | -0.3 % | |
+| DESK | 3,175,287 | 1,650,634 | -48.0 % | `space_screen` 26.6 |
+| WEATHER | 2,159,575 | 1,620,320 | -25.0 % | `space_screen` 16.6 |
+| WEATHER mid-entry | 1,472,704 | 1,178,736 | -20.0 % | |
+| ACTIVITY | 1,511,558 | 1,424,884 | -5.7 % | `space_screen` 7.7 |
+| control shade | 3,599,979 | 1,911,832 | -46.9 % | `space_shade` 37.6, `space_veil` 7.7 |
+| control shade, panel mood-dimmed | 3,694,463 | 1,925,177 | -47.9 % | |
+| detail sheet | 2,142,912 | 2,074,596 | -3.2 % | |
+| WATCH MINIMAL | 2,898,829 | 2,022,848 | -30.2 % | `clock_face` 25.6 |
+| WATCH MINIMAL, clock fading in | 9,077,126 | 8,405,649 | -7.4 % | |
+| WATCH PILOT | 2,810,568 | 2,655,292 | -5.5 % | `clock_face` 21.4 |
+| WATCH FUTURE | 2,378,469 | 2,204,105 | -7.3 % | `clock_face` 12.8 |
+| WATCH SKELETON, DIVER, DRESS, CELESTIAL, JARVIS, home | | | none (+-0.3 %) | |
+
+The mid-entry rows barely move on purpose: while the ring sweeps or the shade opens, the value changes every frame and a record would be thrown away, so the long way is kept. The frame hashes agree on every row above except `home` and `home-agent-100`, and those two differ only because the profiler now runs two warm frames and these scenes are mid-ease at the clock it uses; the hash suite (one warm frame) pins both and passes.
+
+What was cut, in the order it was done. Instructions are host figures; expected device time is inferred and uses no more than the 1 M Ir ~ 4 ms upper bound of the second round.
+
+| Cut | How | Ir | Expected on the device (inferred) | How sure |
+|-----|-----|----|-----------------------------------|----------|
+| Battery / desk ring (STATUS, DESK) | the ring's track, glow and fill are each recorded once the entry has finished, the screen is still (`oy == 0`) and the sweep has held for a frame, then replayed: `glass_shape_record` / `glass_glow_record` keep what `glass_ring_row` / `glass_arc_row` / `glass_glow_row` would do (solid runs, edge coverage, the glow's distance per pixel); colour, alpha, clip and byte order stay free | STATUS 74 %: -1.42 M, DESK: -1.43 M | `space_screen` on STATUS 42.6 ms: perhaps 8 to 14 ms off by instruction count alone, more if the flash cache is the cost, because the replay touches a few hundred bytes of code where the ring primitives touched several kilobytes; DESK 26.6 ms: 8 to 12 ms off | moderate on the direction and on at least half the instruction figure, low on the ms |
+| WEATHER's rain marks | `glass_arc_rows` gives the rows a mark can touch (the primitive's own early-out, computed once a strip); the other rows' calls are not made | WEATHER: -0.45 M | 1 to 2 ms of 16.6 | moderate |
+| The shell's row clip | a 214-entry table of half widths replaces a shift-and-subtract square root per row | about -0.09 M on every shell screen | under 0.5 ms a screen | high that it is not zero, low on how much |
+| Control shade | the two tracks recorded at start, the two fills once their value has held a frame; `glass_ring_replay_row` stands in for `glass_arc_row` | shade: -1.7 M with the clip table | `space_shade` 37.6 ms: 10 to 15 ms off | moderate |
+| The veil | `hud_dim565` two pixels to a 32-bit word and no per-pixel test | none on the host (the stand-in face is mostly black, so the old per-pixel test rarely fired and the new loop does the same work) | `space_veil` 7.7 ms: the old loop cost a compare, a branch and the fold per lit pixel; the new one is about three instructions per pair. A guess of 2 to 4 ms off, by instruction count; the real face has far more lit pixels than the stand-in, so this is the one cut whose host figure says nothing | low |
+| MINIMAL dial | the disc's rows are kept the first time they are drawn (interior span plus the edge coverage, 9.2 KB) and replayed; opaque runs in `aa_disc` and `fill_run` store two pixels to a word | MINIMAL: -0.88 M | `clock_face` 25.6 ms: 3 to 4 ms off | moderate on direction; the other 20 ms is not in this code |
+
+RAM, per record. Everything large is PSRAM, allocated once in `jr_display_start` next to the orbit rail's, and never freed (the screens that use them can come back at any time; 86 KB of 5 MB free). Internal RAM added: about 150 bytes in total (against the 1 KB allowance).
+
+| Record | PSRAM | Built | Internal |
+|--------|-------|-------|----------|
+| Battery / desk ring: track, glow, fill | 3 x 12,288 B = 36,864 B (largest in use 10,043 B at 99 %; 3.1 + 7.7 + 7.1 KB at 74 %) | lazily, in the render task, the second frame a sweep holds; again on a change (one frame of the old long way first, then one frame that pays for the record, about the cost of the ring's own drawing once) | pointer 4 B, key 8 B, settle gate 12 B |
+| Control shade: two tracks, two fills | 4 x 8,192 B = 32,768 B (largest 4,708 B) | tracks at start; a fill the second frame its value holds | pointer 4 B, 4 x 24 B keys |
+| MINIMAL dial disc | 6,144 words = 12,288 B (4,596 words used) | per row, the first time the row is drawn; no hitch | 12 B in `hud_render.c` |
+| Frame counter and the 214-byte clip table | none | | 4 B `.bss`, 214 B rodata |
+
+The hitch is the thing to watch on the device: a record costs about one frame's worth of the ring it replaces, once, when a value stops moving (a battery percentage ticking over, the volume slider released). At worst that is one 40 ms frame on STATUS. If it shows, the lever is to record rows as they are drawn, as the dial does.
+
+Not cut, and why:
+- SKELETON's balance wheel (`hud_balance_blit`, 1.73 M Ir, 46 % of its frame). It visits every pixel of a 143 px box and reads four alpha texels for each; the rotation makes any row bound a per-pixel test again, and the flat-texel shortcut the last lane tried raised the count. A bound that does not is a per-radius occupancy table of the sprite (rotation does not change a pixel's distance from the centre), which turns the visited disc into the rim and spokes. Not attempted in this lane; it is the one cut here with new geometry in it, and the existing SKELETON scenes would pin it.
+- PILOT's sub-dials: the three rings are the day arc (`sp_annulus_row`, 0.43 M) and the three needles (`sub_needle`, 0.5 M). The rings are static and could be recorded the way the ring is; the needles are the hands. PILOT (-5.5 %) and FUTURE (-7.3 %) moved only by the clip table, which their ring and cell rows call.
+- MINIMAL's sixty ticks and twelve dots (about 0.3 M of `aa_fill`), static and recordable the same way as the disc; the hands are the other 0.7 M.
+- The shade's button disc (0.47 M) and ring: `glass_disc_row` has no recorder.
+- WEATHER's twelve rain marks drawn on their own rows still cost 0.45 M together; they animate during the entry and are static after, a record each would be twelve 934-byte offset tables.
+- The 25 ms floor is not touched by any of this; see the open questions.
+
+Method notes. The probe is built as the page's first round describes, with `-DFC_NOCOUNT` and the six `--wrap` flags. `probe frame` now runs two warm frames (`fc_extra_warm`) so the measured frame is the steady state, not the one that records; the hash suite keeps one, which also proves the frame that records draws the same pixels as the frame that replays. Four scenes were added and hashed on the code before any cut of this branch: `status-1`, `status-99`, `desk-ent` and `shade-ent`. `jr_display_frame_tests` runs the whole hash table five times (everything on; no orbit record; no ring record; no shade record; no dial record) and compares every record's replay with the primitive it replaces over sweeps, alphas, clips and both byte orders. One deliberate mutation per cut was seen failing: the glow replay's lookup index, `glass_arc_rows`' last row, the clip table's first entry, the shade replay's alpha, the veil's mask, the word fill's tail, the dial replay's right run.
+
 ---
 
 ## Primary sources
@@ -191,7 +249,7 @@ Pixel-changing fixes in the same round, each with before and after images from t
 
 ## Open questions
 
-- What the roughly 25 ms floor is. The split timers and `render_us` against their sum answer it on the first flash.
+- What the roughly 25 ms floor is. The split timers and `render_us` against their sum answer it on the first flash. The third round cut instructions on every screen except the baked watches and home, so a flash that still shows 25 ms on DRESS and 27 ms on home settles it.
 - Whether STATUS and WEATHER are bound by instruction-cache misses on flash. If they are, the lever is code footprint and locality, or placing the hot primitives in IRAM, which costs internal RAM and needs an owner decision.
 
 ---

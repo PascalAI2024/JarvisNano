@@ -1821,6 +1821,11 @@ void hud_dial_cache_set(uint16_t *buf, size_t cap_words)
     }
 }
 
+size_t hud_dial_cache_used(void)
+{
+    return s_disc_used;
+}
+
 /* Keep row y: its interior [in0, in1] (empty when in1 < in0) and the coverage
  * of the edge pixels around it, which are in `cov`. */
 static void disc_rec_row(int y, int in0, int in1, int lo, int hi, const uint16_t *cov)

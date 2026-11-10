@@ -4692,10 +4692,10 @@ static inline void fring_row(uint16_t *row, int y, int lo, int hi, bool swap, in
     }
 }
 
-/* The MINIMAL dial's disc, recorded by hud_render.c (hud_dial_cache_set). 16 KB
- * of PSRAM allocated once at start; it holds one disc's edge, about 12 KB when
- * every row is in. Internal RAM: a pointer. */
-#define SG_DIAL_REC_WORDS 8192
+/* The MINIMAL dial's disc, recorded by hud_render.c (hud_dial_cache_set). 12 KB
+ * of PSRAM allocated once at start; one disc's edge takes 9.2 KB (4,596 words)
+ * when every row is in. Internal RAM: a pointer. */
+#define SG_DIAL_REC_WORDS 6144
 #define JR_DIAL_REC       1     /* tells the host fixtures the recorded dial disc exists */
 static uint16_t *s_dial_rec;
 
