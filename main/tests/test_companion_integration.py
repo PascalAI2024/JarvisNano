@@ -108,7 +108,7 @@ def run(root, output, mutation, raw, hashes):
             helpers = text
         else:
             renderer = text
-    template = raw["main/tests/test_companion_integration.c.in"].decode("utf-8")
+    template = raw["main/tests/test_companion_integration.c.in"].decode("utf-8").replace("\r\n", "\n")
     if template.count("\n__PRODUCTION_HELPERS__\n") != 1:
         raise AssertionError("one production insertion required")
     output.mkdir(parents=True, exist_ok=True)
