@@ -37,16 +37,30 @@ typedef struct {
     bool restore;   /* a tone unmuted it and owes the mute back */
 } jr_dac_mute_t;
 
+/* Every kind of tone the firmware plays. The owner-mute policy is the table in
+ * jr_dac_mute_sounds_under_owner_mute(): the one place to change whether a
+ * given tone may sound while the owner has muted the speaker. */
+typedef enum {
+    JR_TONE_OWNER_ACK = 0,  /* jr_audio_play_sweep_owner_ack: mute / unmute ack */
+    JR_TONE_DIAG_CHIRP,     /* jr_audio_diag_play_chirp: attention beat, self-test */
+    JR_TONE_SWEEP,          /* jr_audio_play_sweep: the ask-miss reject */
+    JR_TONE_CHIME,          /* jr_audio_play_chime: board-done chime */
+    JR_TONE_UI_CUE,         /* jr_audio_play_cue: tick, confirm, dismiss, limit */
+} jr_tone_kind_t;
+
+/* May this kind of tone sound while the owner has muted the speaker? */
+bool jr_dac_mute_sounds_under_owner_mute(jr_tone_kind_t kind);
+
 /* A tone is about to play. Returns false, changing nothing, when the owner
  * has muted the speaker. Otherwise unmutes the DAC for the tone and, when it
  * was muted, records that the mute is owed back. */
 bool jr_dac_mute_cue_begin(jr_dac_mute_t *m, bool owner_muted);
 
-/* The same, for a tone that may be the acknowledgement of the owner's own mute
- * gesture (`owner_ack`): it plays even though the owner mute is set, and the
- * DAC rule is unchanged (a muted DAC is owed back, the owner's state is never
- * touched). Every other tone passes owner_ack = false. */
-bool jr_dac_mute_tone_begin(jr_dac_mute_t *m, bool owner_muted, bool owner_ack);
+/* The same, by tone kind: refused only when the owner mute is set AND the
+ * policy table says this kind stays silent under it. The DAC rule is the same
+ * for every kind (a muted DAC is owed back, the owner mute is never touched). */
+bool jr_dac_mute_tone_begin(jr_dac_mute_t *m, bool owner_muted,
+                            jr_tone_kind_t kind);
 
 /* A real unmute (session start, pushed audio): the mute is no longer owed. */
 void jr_dac_mute_unmute(jr_dac_mute_t *m);

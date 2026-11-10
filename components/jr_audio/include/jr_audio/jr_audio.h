@@ -110,10 +110,9 @@ void jr_audio_dac_unmute(void);
 bool jr_audio_dac_muted(void);
 
 /* Register the owner's speaker-mute query (privacy pause or flip latch, which
- * live in main.c). While it returns true, jr_audio_play_sweep(),
- * jr_audio_play_chime() and the interface cues refuse with
- * ESP_ERR_INVALID_STATE. The owner-ack sweep and the diagnostic chirp are
- * exempt. A tone that does play opens a muted DAC only for its
+ * live in main.c). While it returns true, the tones the policy table in
+ * jr_core/dac_mute.c marks silent (today only the interface cues) refuse with
+ * ESP_ERR_INVALID_STATE; every older tone sounds as it always did. A tone that does play opens a muted DAC only for its
  * own length and mutes it again after: it never changes the mute state. */
 void jr_audio_set_owner_mute_probe(bool (*probe)(void));
 
@@ -236,11 +235,8 @@ esp_err_t jr_audio_diag_play_chirp(uint32_t duration_ms,
 esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
                               uint32_t duration_ms, uint8_t level_percent);
 
-/* The same sweep, for the acknowledgement of the owner's own mute gesture
- * (long press or shade toggle). It plays although the owner mute is set, which
- * is the one thing the plain sweep, the chime and the cues refuse. The DAC rule
- * still holds: a muted DAC is muted again after the tone and the owner's mute
- * state is untouched. Use it for nothing else. */
+/* The same sweep, named for the acknowledgement of the owner's own mute gesture
+ * (long press). Its own row in the owner-mute policy table. */
 esp_err_t jr_audio_play_sweep_owner_ack(uint16_t start_hz, uint16_t end_hz,
                                         uint32_t duration_ms,
                                         uint8_t level_percent);
