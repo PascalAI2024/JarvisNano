@@ -12,6 +12,8 @@ MUTANTS = {
     'split-name-stuck': ('i ? "," : "", jr_display_split_name(i),', 'i ? "," : "", jr_display_split_name(0),'),
     'split-value-stuck': ('(unsigned)d.split_us[i]);', '(unsigned)d.split_us[0]);'),
     'rom-forged': ('\\\"includes_rom\\\":false', '\\\"includes_rom\\\":true'),
+    'dial-hits-stuck': ('(unsigned)d.dial_hits,', '(unsigned)d.dial_misses,'),
+    'dial-cache-dropped': ('"\\"dial_cache\\":{\\"n\\":%u,', '"\\"dial_cachx\\":{\\"n\\":%u,'),
     'split-unarmed': ('jr_display_split_arm();   /* the timers run only while somebody asks */', ''),
 }
 
@@ -53,7 +55,7 @@ def run(root, out, mutation):
             equal(doc['render_frames'],4294967295)
             equal(meta['bytes']<640,True)
             continue
-        equal(meta['bytes']<1152,True)  # the handler's buffer is 1280
+        equal(meta['bytes']<1408,True)  # the handler's buffer is 1536 (was 1408, 1152 here: the dial cache added ~130 B)
         doc=json.loads(body);timing=doc['boot_timing']
         equal(doc['init'],'failed' if bits&8 else 'ready')
         equal(doc['last_error'],'ESP_FAIL' if bits&8 else 'ESP_OK')
@@ -61,6 +63,8 @@ def run(root, out, mutation):
         equal(doc['space'],3);equal(doc['overlay'],2);equal(len(doc['layer_us']),5)
         equal(doc['knob'],4294967295)
         equal(doc['dip'],256);equal(doc['dip_writes'],4294967295);equal(doc['dip_hold_ms'],4294967295)
+        equal(doc['dial_cache'],{'n':4294967289,'bytes':4294967290,'hits':4294967291,'misses':4294967292,
+                                 'evictions':4294967293,'warms':4294967294,'decode_ms':4294967295})
         equal(timing['time_base'],'esp_timer_since_boot')
         equal(timing['optical'],False);equal(timing['includes_rom'],False)
         equal(timing['first_transfer_valid'],bool(bits&1))

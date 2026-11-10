@@ -199,6 +199,11 @@ typedef struct {
     /* The panel dip (perf knob bit 0): the level now (0..256, 256 = none), the
      * brightness writes it has caused, and the length of the last dark hold. */
     uint32_t dip, dip_writes, dip_hold_ms;
+    /* The decoded-dial cache: frames decoded, bytes of PSRAM held, style
+     * changes served from it (hits) or decoded for (misses), frames dropped for
+     * room, background warm-ups done, and the last decode's milliseconds. */
+    uint32_t dial_cached, dial_bytes, dial_hits, dial_misses, dial_evictions;
+    uint32_t dial_warms, dial_decode_ms;
     jr_display_boot_timing_t boot_timing;
 } jr_display_diag_t;
 
