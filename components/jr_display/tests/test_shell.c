@@ -1891,6 +1891,59 @@ static void render_watch_frame_at(uint16_t *fb, int style, jr_face_t shown,
     }
 }
 
+/* WATCH on a style with no baked dial (JARVIS, MINIMAL) asks the presenter for
+ * a frame every pass, as a blitted dial does, instead of riding the face clip's
+ * own ~8 fps tick; a baked dial does not need to (its blit refreshes), and
+ * neither does a glass that is not showing the watch. */
+static void test_watch_without_a_dial_asks_for_frames(void)
+{
+    static const struct { int style; int clock; bool expect; const char *what; } k[] = {
+        { JR_WATCH_JARVIS,  1, true,  "JARVIS settled" },
+        { JR_WATCH_MINIMAL, 1, true,  "MINIMAL settled" },
+        { JR_WATCH_DRESS,   1, false, "DRESS (its blit refreshes)" },
+        { JR_WATCH_SKELETON, 1, false, "SKELETON (its blit refreshes)" },
+        { JR_WATCH_MINIMAL, 0, false, "MINIMAL with the clock gated off" },
+    };
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; ++i) {
+        s_space_from = s_space_to = (uint8_t)JR_DISPLAY_SPACE_WATCH;
+        __atomic_store_n(&s_nav_word, (uint32_t)JR_DISPLAY_SPACE_WATCH, __ATOMIC_RELEASE);
+        jr_display_watch_style_set((jr_watch_style_t)k[i].style);
+        s_space_prog = s_space_ease = 256;
+        s_style_prog = 256;
+        s_style_shown = s_style_seen = s_style_from = (uint8_t)k[i].style;
+        jr_display_clock_set(k[i].clock != 0, 6, 30, 15);
+        s_clock_ease = k[i].clock ? 256 : 0;
+        watch_publish();
+        CHECK((__atomic_load_n(&s_watch_tick, __ATOMIC_RELAXED) != 0u) == k[i].expect,
+              "%s: tick flag %u, wanted %d", k[i].what,
+              (unsigned)s_watch_tick, (int)k[i].expect);
+        s_dial_blit = false;
+        s_parked = false;
+        CHECK(presenter_ticks_the_glass() == k[i].expect,
+              "%s: the presenter would %s the glass every pass", k[i].what,
+              presenter_ticks_the_glass() ? "invalidate" : "leave");
+    }
+    /* away from WATCH, the clock off: nothing to ask for */
+    s_space_from = s_space_to = (uint8_t)JR_DISPLAY_SPACE_JARVIS;
+    __atomic_store_n(&s_nav_word, (uint32_t)JR_DISPLAY_SPACE_JARVIS, __ATOMIC_RELEASE);
+    jr_display_clock_set(false, 0, 0, 0);
+    s_clock_ease = 0;
+    s_clock_prog = 0;
+    watch_publish();
+    CHECK(__atomic_load_n(&s_watch_tick, __ATOMIC_RELAXED) == 0u, "away from WATCH the flag is %u",
+          (unsigned)s_watch_tick);
+    CHECK(!presenter_ticks_the_glass(), "away from WATCH the presenter ticks the glass");
+    s_dial_blit = true;
+    CHECK(presenter_ticks_the_glass(), "a blitted dial no longer ticks the glass");
+    s_dial_blit = false;
+    s_parked = true;
+    CHECK(presenter_ticks_the_glass(), "a parked backdrop no longer ticks the glass");
+    s_parked = false;
+    reset_nav();
+    jr_display_clock_set(false, 0, 0, 0);
+    watch_publish();
+}
+
 static void render_watch_frame(uint16_t *fb, int style, jr_face_t shown)
 {
     render_watch_frame_at(fb, style, shown, 6, 30, 15);
@@ -5628,6 +5681,7 @@ int main(void)
     test_a_baked_dial_watch_never_parks();
     test_the_shade_opens_in_about_eleven_frames_and_closes_in_about_seven();
     test_a_label_is_up_for_its_hold_after_settle_and_then_fades();
+    test_watch_without_a_dial_asks_for_frames();
     test_no_caption_is_drawn_while_a_sheet_is_open();
     test_a_new_label_swaps_in_at_the_cut_and_not_before();
     test_other_owners_of_the_backdrop_withdraw_the_park();

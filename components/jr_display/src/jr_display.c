@@ -2156,6 +2156,10 @@ static int      s_style_prog = 256;
 static int      s_watch_s;
 static int      s_style_black;       /* 0..256: how dark the layer under the dip is */
 static volatile uint32_t s_dial_want = (uint32_t)JR_FACE_COUNT;
+/* 1 while the watch is on the glass with nothing baked under it (JARVIS, MINIMAL):
+ * the presenter then invalidates the glass every pass, as it does for a blitted
+ * dial, instead of leaving the hands to the face clip's own ~8 fps tick. */
+static volatile uint32_t s_watch_tick;
 static uint8_t  s_detail_space;
 static uint32_t s_space_hold_ms;
 
@@ -3200,6 +3204,8 @@ static void watch_publish(void)
         }
     }
     s_watch_s = strength;
+    __atomic_store_n(&s_watch_tick, (strength > 0 && want == JR_FACE_COUNT) ? 1u : 0u,
+                     __ATOMIC_RELAXED);
     if (__atomic_exchange_n(&s_dial_want, (uint32_t)want, __ATOMIC_ACQ_REL) != (uint32_t)want) {
         TaskHandle_t presenter = __atomic_load_n(&s_display.task, __ATOMIC_ACQUIRE);
         if (presenter != NULL) {
@@ -7008,6 +7014,14 @@ static bool brightness_pending(void)
            atomic_load(&s_brightness_have) != want;
 }
 
+/* True when no engine animation is driving the glass and the presenter's own
+ * pass has to be the frame clock: a blitted dial, a parked backdrop, or a watch
+ * with no baked dial under it. */
+static bool presenter_ticks_the_glass(void)
+{
+    return s_dial_blit || s_parked || __atomic_load_n(&s_watch_tick, __ATOMIC_RELAXED) != 0u;
+}
+
 static uint32_t presenter_wait_ms(const jr_display_ctx_t *ctx)
 {
     if ((ctx->dream_active || ctx->quiet_active) && !brightness_pending()) {
@@ -7701,8 +7715,10 @@ static void display_task(void *arg)
              * thing invalidating the glass; with it hidden, this pass is the
              * cadence. Every pass, unconditionally, or the hands freeze
              * silently. The engine's fps (the ladder) still paces frames.
-             * A parked backdrop is the same case: the anim is hidden too. */
-            if ((s_dial_blit || s_parked) && gfx_emote_lock(ctx->gfx) == ESP_OK) {
+             * A parked backdrop is the same case: the anim is hidden too. So is
+             * a watch with no baked dial (JARVIS, MINIMAL): its hands followed
+             * the face clip's own tick, about 8 fps (s_watch_tick). */
+            if (presenter_ticks_the_glass() && gfx_emote_lock(ctx->gfx) == ESP_OK) {
                 gfx_disp_refresh_all(ctx->disp);
                 (void)gfx_emote_unlock(ctx->gfx);
             }
