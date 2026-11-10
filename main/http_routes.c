@@ -3095,7 +3095,7 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         "\"flush_completions\":%u,\"flush_errors\":%u,\"actual_fps\":%u,"
         "\"render_us\":%u,\"render_frames\":%u,\"render_frame_us\":%u,"
         "\"layer_us\":[%u,%u,%u,%u,%u],"
-        "\"space\":%u,\"overlay\":%u,"
+        "\"space\":%u,\"overlay\":%u,\"knob\":%u,"
         "\"light\":{\"gx_mg\":%d,\"gy_mg\":%d,"
         "\"shadow_dx_q4\":%d,\"shadow_dy_q4\":%d},"
         "\"current_asset_bytes\":%u,\"free_psram\":%u,\"stack_hwm\":%u,"
@@ -3123,6 +3123,7 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         /* Which screen is up: a script driving the ring by swipes cannot
          * otherwise tell where it landed (DESK joins the ring under a lease). */
         (unsigned)jr_display_nav_space(), (unsigned)jr_display_nav_overlay(),
+        (unsigned)jr_display_perf_knob(),
         (int)d.light_gx_mg, (int)d.light_gy_mg,
         (int)d.light_shadow_dx_q4, (int)d.light_shadow_dy_q4,
         (unsigned)d.current_asset_bytes, (unsigned)d.free_psram_bytes,
@@ -3241,6 +3242,25 @@ static esp_err_t display_canvas_handler(httpd_req_t *req)
              (unsigned)(ttl_ms ? ttl_ms : 30000U));
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+/* POST /api/debug/display?knob=<n> — the dev-only perf knob (jr_display.h,
+ * JR_KNOB_*): which of the pixel-identical cost candidates the render task
+ * runs. 0 is the shipped path. Answers the value now in force. */
+static esp_err_t debug_display_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    int knob = 0;
+    if (query_int(req, "knob", &knob) && knob >= 0) {
+        jr_display_set_perf_knob((uint32_t)knob);
+    }
+    char b[40];
+    int n = snprintf(b, sizeof b, "{\"ok\":true,\"knob\":%u}", (unsigned)jr_display_perf_knob());
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, b, (size_t)n);
     return ESP_OK;
 }
 
@@ -4786,6 +4806,8 @@ void start_diag_http(void)
           .handler = logs_handler },
         { .uri = "/api/debug/input", .method = HTTP_POST,
           .handler = debug_input_handler },
+        { .uri = "/api/debug/display", .method = HTTP_POST,
+          .handler = debug_display_handler },
         { .uri = "/api/debug/audio-stats", .method = HTTP_POST,
           .handler = audio_stats_handler },
         { .uri = "/api/debug/sleep", .method = HTTP_GET,

@@ -14,6 +14,7 @@
 #include <stdatomic.h>
 #include "jr_display/hud_render.h"
 #include "jr_display/glass.h"
+#include "jr_display/perf_knob.h"
 #include "jr_display/glass_icon.h"
 
 #include <stdio.h>
@@ -812,6 +813,28 @@ static bool s_parked;
 static int  s_park_want;
 static int  s_space_black;   /* 0..256: how far the backdrop has gone to black */
 
+/* JR_KNOB_DIAL_SPAN. The panel is round: the four corners of the 466 x 466
+ * frame are never seen. Per row, the columns inside a circle of radius 234
+ * (one pixel wider than the 233.0 the glass shows); s_dial_span[d] is the
+ * largest k with the row's pixel 233 + k inside, d the row's distance from the
+ * centre line (0 = rows 232 and 233). 233 bytes, built on first use. */
+#define DIAL_SPAN_N 233
+static uint8_t s_dial_span[DIAL_SPAN_N];
+static bool    s_dial_span_built;
+
+static void dial_span_build(void)
+{
+    for (int d = 0; d < DIAL_SPAN_N; ++d) {
+        const int32_t rest = 4 * 234 * 234 - (2 * d + 1) * (2 * d + 1);   /* (2k+1)^2 <= rest */
+        int k = 0;
+        while (k + 1 < DIAL_SPAN_N && (2 * (k + 1) + 1) * (2 * (k + 1) + 1) <= rest) {
+            ++k;
+        }
+        s_dial_span[d] = (uint8_t)k;
+    }
+    s_dial_span_built = true;
+}
+
 static void apply_dial(const jr_display_ctx_t *ctx, int x1, int y1,
                        int x2, int y2, uint16_t *pixels)
 {
@@ -819,6 +842,25 @@ static void apply_dial(const jr_display_ctx_t *ctx, int x1, int y1,
         return;
     }
     const int width = x2 - x1;
+    if ((hud_perf_knob & JR_KNOB_DIAL_SPAN) != 0u && ctx->board.width == 2 * DIAL_SPAN_N &&
+        y2 <= 2 * DIAL_SPAN_N) {
+        if (!s_dial_span_built) {
+            dial_span_build();
+        }
+        for (int row = y1; row < y2; ++row) {
+            const int d = row < DIAL_SPAN_N ? DIAL_SPAN_N - 1 - row : row - DIAL_SPAN_N;
+            int a = DIAL_SPAN_N - 1 - s_dial_span[d];          /* first column of the glass */
+            int b = DIAL_SPAN_N + s_dial_span[d] + 1;          /* one past the last */
+            if (a < x1) a = x1;
+            if (b > x2) b = x2;
+            if (a < b) {
+                memcpy(pixels + (size_t)(row - y1) * (size_t)width + (size_t)(a - x1),
+                       s_dial_frame + (size_t)row * ctx->board.width + (size_t)a,
+                       (size_t)(b - a) * sizeof(uint16_t));
+            }
+        }
+        return;
+    }
     for (int row = y1; row < y2; ++row) {
         memcpy(pixels + (size_t)(row - y1) * (size_t)width,
                s_dial_frame + (size_t)row * ctx->board.width + (size_t)x1,
@@ -1200,6 +1242,8 @@ static bool             s_capd_label;
 static uint32_t         s_cap_rev_seen;
 static int              s_cap_p = 256;             /* the label's own phase, 0..256 */
 static bool             s_cap_dip;                 /* old name on glass: out, swap, in */
+static bool             s_cap_was_on;              /* the caption flag as of the last tick: a name that has
+                                                    * expired and is fading is not "on the glass" for a new one */
 static bool             s_cap_pend;                /* the swap to the staged words is due at the cut */
 static uint32_t         s_cap_age_ms;              /* settled time a label has been up */
 static uint32_t         s_cap_hold_ms;             /* 0: this caption never times out */
@@ -1311,6 +1355,22 @@ static void watch_compose(void);               /* defined with the watch below *
 static volatile uint32_t s_split_deadline_ms;
 static bool s_split_on;
 
+/* The dev-only perf knob (perf_knob.h). httpd writes the word; the render task
+ * copies it once a frame into hud_perf_knob and glass_perf_knob (knob_apply,
+ * from overlay_fade_tick), so a frame never sees it change half way. */
+static volatile uint32_t s_perf_knob_word;
+static void knob_apply(void);                  /* defined with the dial record below */
+
+void jr_display_set_perf_knob(uint32_t knob)
+{
+    __atomic_store_n(&s_perf_knob_word, knob & JR_KNOB_KNOWN_MASK, __ATOMIC_RELAXED);
+}
+
+uint32_t jr_display_perf_knob(void)
+{
+    return __atomic_load_n(&s_perf_knob_word, __ATOMIC_RELAXED);
+}
+
 /* Frames composed since boot, counted once a frame by overlay_fade_tick. The
  * recorded shapes (fring_prepare, shade_rec_fill) wait for a value to hold for
  * a second frame before they record it, so a number being dragged never pays
@@ -1339,6 +1399,7 @@ static void caption_tick(uint32_t dt_ms);      /* defined with the shell state b
 static void overlay_fade_tick(void)
 {
     s_frame_no++;
+    knob_apply();
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
     s_split_on = (int32_t)(__atomic_load_n(&s_split_deadline_ms, __ATOMIC_RELAXED) - now) > 0;
     uint32_t dt = now - s_fade_prev_ms;
@@ -2090,6 +2151,8 @@ static bool     s_space_on;
  *                  engine is asked to rebind only after our own compositor has
  *                  dimmed the old picture to black, never before. */
 #define SP_STYLE_MS 340                    /* 3 frames out, 5 in at 24 fps */
+#define SP_STYLE_HOLD_MS 300               /* longest the cut waits for the new layer to bind */
+static uint16_t s_style_hold_ms;           /* how long it has waited this change */
 static uint8_t  s_style_shown;
 static uint8_t  s_style_seen;
 static uint8_t  s_style_from;
@@ -2097,6 +2160,10 @@ static int      s_style_prog = 256;
 static int      s_watch_s;
 static int      s_style_black;       /* 0..256: how dark the layer under the dip is */
 static volatile uint32_t s_dial_want = (uint32_t)JR_FACE_COUNT;
+/* 1 while the watch is on the glass with nothing baked under it (JARVIS, MINIMAL):
+ * the presenter then invalidates the glass every pass, as it does for a blitted
+ * dial, instead of leaving the hands to the face clip's own ~8 fps tick. */
+static volatile uint32_t s_watch_tick;
 static uint8_t  s_detail_space;
 static uint32_t s_space_hold_ms;
 
@@ -2998,7 +3065,11 @@ static void caption_tick(uint32_t dt_ms)
                 s_cap_hold_ms = 0U;
             } else {
                 const int f_now = caption_phase_factor();
-                const bool up = s_caption_prog > 0 && f_now > 0;
+                /* Only a name that is still held eases out. One that has timed
+                 * out and is on its 250 ms fade is already leaving: dipping it
+                 * again would bring the old words back for the length of the
+                 * dip (a style name read "WATCH - DRESS" over MINIMAL's dip). */
+                const bool up = s_cap_was_on && s_caption_prog > 0 && f_now > 0;
                 if (up) {
                     /* a name is on the glass: it eases out where it stands, the
                      * new one swaps in at the cut. Entering the dip at the point
@@ -3049,6 +3120,7 @@ static void caption_tick(uint32_t dt_ms)
             jr_display_caption_clear();
         }
     }
+    s_cap_was_on = on != 0;
     s_cap_alpha = (s_caption_ease * caption_phase_factor()) >> 8;
 }
 
@@ -3090,6 +3162,14 @@ static bool watch_layer_ready(void)
         return !s_dial_blit;
     }
     return s_dial_blit && s_dial_frame_face == want;
+}
+
+/* True once the presenter has bound the layer a style draws on: its dial, or,
+ * for a style with no art, nothing (the dial released). */
+static bool watch_style_bound(uint8_t style)
+{
+    const jr_face_t f = watch_dial_of_style(style);
+    return f == JR_FACE_COUNT ? !s_dial_blit : (s_dial_blit && s_dial_frame_face == f);
 }
 
 /* Once a frame, render task, after the slide and the style dip have stepped:
@@ -3141,6 +3221,8 @@ static void watch_publish(void)
         }
     }
     s_watch_s = strength;
+    __atomic_store_n(&s_watch_tick, (strength > 0 && want == JR_FACE_COUNT) ? 1u : 0u,
+                     __ATOMIC_RELAXED);
     if (__atomic_exchange_n(&s_dial_want, (uint32_t)want, __ATOMIC_ACQ_REL) != (uint32_t)want) {
         TaskHandle_t presenter = __atomic_load_n(&s_display.task, __ATOMIC_ACQUIRE);
         if (presenter != NULL) {
@@ -3200,6 +3282,7 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
             if (on_watch && s_style_shown != style_nav) {
                 s_style_from = s_style_shown;
                 s_style_prog = 0;
+                s_style_hold_ms = 0;
             } else if (s_style_prog >= 256) {
                 s_style_shown = style_nav;
                 s_style_from = style_nav;
@@ -3213,6 +3296,17 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
             s_style_prog += ystep;
             if (s_style_prog >= TR_CUT_STYLE) {
                 s_style_shown = s_style_seen;
+            }
+            /* The new style's layer is bound by the presenter a frame or two
+             * after the cut, and the ease-in is drawn only once it is. Left to
+             * run, those frames were taken out of the ease (the dial came up
+             * 0, 55 %, 95 %). Hold at the cut until it is bound, then ease in
+             * over the full five frames; a layer that never binds is waited
+             * for SP_STYLE_HOLD_MS and no longer. */
+            if (s_style_prog > TR_CUT_STYLE && s_style_hold_ms < SP_STYLE_HOLD_MS &&
+                !watch_style_bound(s_style_shown)) {
+                s_style_prog = TR_CUT_STYLE;
+                s_style_hold_ms = (uint16_t)(s_style_hold_ms + (dt_ms < SP_STYLE_HOLD_MS ? dt_ms : SP_STYLE_HOLD_MS));
             }
             if (s_style_prog >= 256) {
                 s_style_prog = 256;
@@ -5067,23 +5161,47 @@ static inline void fring_row(uint16_t *row, int y, int lo, int hi, bool swap, in
 #define SG_DIAL_REC_WORDS 6144
 #define JR_DIAL_REC       1     /* tells the host fixtures the recorded dial disc exists */
 static uint16_t *s_dial_rec;
+static uint8_t *s_bal_cls_mem;          /* JR_KNOB_BAL_CLASS: 5,257 B of PSRAM, taken when the bit is first set */
 
 static void dial_rec_alloc(void)
 {
-#ifdef ESP_PLATFORM
-    /* Off on the device. Measured 2026-11-10: with the record, MINIMAL's face
-     * cost 35.1 ms a frame; drawn the long way on the image before, 25.6 ms.
-     * The host counted 30 % fewer instructions, so the loss is memory traffic
-     * the host does not see. The record and its host checks stay until the
-     * device has measured this half apart from the word fill in glass_draw.c
-     * that landed in the same commit. */
-    hud_dial_cache_set(NULL, 0u);
-    return;
-#endif
+    /* Off unless the knob asks (JR_KNOB_DIAL_REC). Measured 2026-11-10: with the
+     * record, MINIMAL's face cost 35.1 ms a frame; drawn the long way on the
+     * image before, 25.6 ms. The host counted 30 % fewer instructions, so the
+     * loss is memory traffic the host does not see. The record and its host
+     * checks stay until the device has measured this half apart from the word
+     * fill in glass_draw.c that landed in the same commit. The 12 KB is taken
+     * from PSRAM the first time the bit is set, never at start. */
+    if ((hud_perf_knob & JR_KNOB_DIAL_REC) == 0u) {
+        hud_dial_cache_set(NULL, 0u);
+        return;
+    }
     if (s_dial_rec == NULL) {
         s_dial_rec = heap_caps_malloc(SG_DIAL_REC_WORDS * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     }
     hud_dial_cache_set(s_dial_rec, s_dial_rec != NULL ? SG_DIAL_REC_WORDS : 0u);
+}
+
+/* Once a frame, before anything draws: the word httpd set becomes the one the
+ * drawing code reads. A changed record bit restarts (or drops) the dial record. */
+static void knob_apply(void)
+{
+    const uint32_t k = __atomic_load_n(&s_perf_knob_word, __ATOMIC_RELAXED);
+    const uint32_t was = hud_perf_knob;
+    if (k == was) {
+        return;
+    }
+    hud_perf_knob = k;
+    glass_perf_knob = k;
+    if (((k ^ was) & JR_KNOB_DIAL_REC) != 0u) {
+        dial_rec_alloc();
+    }
+    if (((k ^ was) & JR_KNOB_BAL_CLASS) != 0u && (k & JR_KNOB_BAL_CLASS) != 0u) {
+        if (s_bal_cls_mem == NULL) {
+            s_bal_cls_mem = heap_caps_malloc(5257u, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        }
+        hud_balance_cache_set(s_bal_cls_mem, s_bal_cls_mem != NULL ? 5257u : 0u);
+    }
 }
 
 /* ACTIVITY: up to three blocks, newest first. Line one is the kind and the age
@@ -6925,6 +7043,14 @@ static bool brightness_pending(void)
            atomic_load(&s_brightness_have) != want;
 }
 
+/* True when no engine animation is driving the glass and the presenter's own
+ * pass has to be the frame clock: a blitted dial, a parked backdrop, or a watch
+ * with no baked dial under it. */
+static bool presenter_ticks_the_glass(void)
+{
+    return s_dial_blit || s_parked || __atomic_load_n(&s_watch_tick, __ATOMIC_RELAXED) != 0u;
+}
+
 static uint32_t presenter_wait_ms(const jr_display_ctx_t *ctx)
 {
     if ((ctx->dream_active || ctx->quiet_active) && !brightness_pending()) {
@@ -7618,8 +7744,10 @@ static void display_task(void *arg)
              * thing invalidating the glass; with it hidden, this pass is the
              * cadence. Every pass, unconditionally, or the hands freeze
              * silently. The engine's fps (the ladder) still paces frames.
-             * A parked backdrop is the same case: the anim is hidden too. */
-            if ((s_dial_blit || s_parked) && gfx_emote_lock(ctx->gfx) == ESP_OK) {
+             * A parked backdrop is the same case: the anim is hidden too. So is
+             * a watch with no baked dial (JARVIS, MINIMAL): its hands followed
+             * the face clip's own tick, about 8 fps (s_watch_tick). */
+            if (presenter_ticks_the_glass() && gfx_emote_lock(ctx->gfx) == ESP_OK) {
                 gfx_disp_refresh_all(ctx->disp);
                 (void)gfx_emote_unlock(ctx->gfx);
             }

@@ -18,6 +18,7 @@
  * blend policy (later == on top), which keeps the hot path branch-free.
  */
 #include "jr_display/hud_render.h"
+#include "jr_display/perf_knob.h"
 #include "balance_wheel_data.h"      /* SKELETON: the wheel sprite    */
 #include "celestial_stars_data.h"    /* CELESTIAL: the twinkling stars */
 
@@ -1667,6 +1668,12 @@ static inline void cov_span(uint16_t *cov, int32_t xl, int32_t xr, int *lo, int 
  * write, a compare and a branch per pixel; this costs them per pair. */
 static inline void fill16(uint16_t *p, int n, uint16_t v)
 {
+    if ((hud_perf_knob & JR_KNOB_HUD_FILL_OLD) != 0u) {    /* the loop before 91b44ec */
+        for (int i = 0; i < n; i++) {
+            p[i] = v;
+        }
+        return;
+    }
     if (n > 0 && (((uintptr_t)p) & 2u) != 0u) {
         *p++ = v;
         n--;
@@ -1769,20 +1776,68 @@ static void HOT aa_fill(const strip_t *s, const wpoly_t *p, wrgb_t c, int alpha,
     }
     int ia = 0, ib = 0;
     uint16_t *const cov = s_cov;
+    const bool interior = (hud_perf_knob & JR_KNOB_AA_INTERIOR) != 0u;
     for (int y = y_lo; y <= y_hi; ++y) {
         int lo = HUD_W, hi = -1;
         const int32_t yr = (int32_t)y << 4;
-        for (int k = 0; k < sub; ++k) {
-            const int32_t ys = yr + k * step + step / 2;
-            if (ys < ymin || ys >= ymax) {
-                continue;
+        if (interior) {
+            /* JR_KNOB_AA_INTERIOR. A wide row added 16 to every interior pixel
+             * once per sample line (16 passes over the coverage row). The
+             * pixels every sample line covers whole are written once, as the
+             * count of lines times 16; each line then adds only what is left
+             * of its span either side. The sums per pixel are the same. */
+            int32_t sl[16], sr[16];
+            int ns = 0;
+            int32_t max_l = 0, min_r = INT32_MAX;
+            for (int k = 0; k < sub; ++k) {
+                const int32_t ys = yr + k * step + step / 2;
+                if (ys < ymin || ys >= ymax) {
+                    continue;
+                }
+                const int32_t xa = aa_chain_x(ca, na, &ia, ys);
+                const int32_t xb = aa_chain_x(cb, nb, &ib, ys);
+                int32_t l = xa < xb ? xa : xb, r = xa < xb ? xb : xa;
+                if (l < 0) l = 0;                         /* cov_span's own clamps */
+                if (r > (HUD_W << 4)) r = HUD_W << 4;
+                if (r <= l) {
+                    continue;
+                }
+                sl[ns] = l;
+                sr[ns] = r;
+                ns++;
+                if (l > max_l) max_l = l;
+                if (r < min_r) min_r = r;
             }
-            const int32_t xa = aa_chain_x(ca, na, &ia, ys);
-            const int32_t xb = aa_chain_x(cb, nb, &ib, ys);
-            if (xa < xb) {
-                cov_span(cov, xa, xb, &lo, &hi);
-            } else if (xb < xa) {
-                cov_span(cov, xb, xa, &lo, &hi);
+            const int i0 = (int)((max_l + 15) >> 4), i1 = (int)(min_r >> 4);
+            if (ns > 0 && i1 > i0) {
+                for (int k = 0; k < ns; ++k) {
+                    cov_span(cov, sl[k], (int32_t)i0 << 4, &lo, &hi);
+                    cov_span(cov, (int32_t)i1 << 4, sr[k], &lo, &hi);
+                }
+                const uint16_t whole = (uint16_t)(ns * 16);
+                for (int x = i0; x < i1; ++x) {
+                    cov[x] = whole;
+                }
+                if (i0 < lo) lo = i0;
+                if (i1 - 1 > hi) hi = i1 - 1;
+            } else {
+                for (int k = 0; k < ns; ++k) {
+                    cov_span(cov, sl[k], sr[k], &lo, &hi);
+                }
+            }
+        } else {
+            for (int k = 0; k < sub; ++k) {
+                const int32_t ys = yr + k * step + step / 2;
+                if (ys < ymin || ys >= ymax) {
+                    continue;
+                }
+                const int32_t xa = aa_chain_x(ca, na, &ia, ys);
+                const int32_t xb = aa_chain_x(cb, nb, &ib, ys);
+                if (xa < xb) {
+                    cov_span(cov, xa, xb, &lo, &hi);
+                } else if (xb < xa) {
+                    cov_span(cov, xb, xa, &lo, &hi);
+                }
             }
         }
         if (hi >= lo) {
@@ -1803,6 +1858,7 @@ static void HOT aa_fill(const strip_t *s, const wpoly_t *p, wrgb_t c, int alpha,
  * still owns no memory: HUD_H row offsets, then per row six words (interior
  * from, to; edge run lo, count; right run from, count) and the coverage words. */
 #define DISC_REC_NONE 0xFFFFu
+uint32_t hud_perf_knob;
 static uint16_t *s_disc_rec;
 static size_t s_disc_cap, s_disc_used;
 
@@ -1892,6 +1948,97 @@ static void disc_replay_row(uint16_t *row, const uint16_t *r, wrgb_t c, int alph
     disc_blend_run(row, r + 6 + r[3], (int16_t)r[4], r[5], c, alpha, swap, solid);
 }
 
+/* aa_disc as it was before 91b44ec, verbatim (git show 91b44ec^:components/
+ * jr_display/src/hud_render.c): no record branches, the interior stored by a
+ * plain loop. JR_KNOB_DISC_ROW_OLD sends every disc here; the device decides
+ * whether the record branches or the word fill in aa_disc cost MINIMAL its
+ * 10 ms. */
+static void HOT aa_disc_v0(const strip_t *s, int32_t cx, int32_t cy, int32_t rad,
+                        wrgb_t c, int alpha, bool swap)
+{
+    if (rad <= 0 || alpha <= 0) {
+        return;
+    }
+    int y_lo = (int)((cy - rad) >> 4), y_hi = (int)((cy + rad + 15) >> 4);
+    if (y_lo < s->y0) y_lo = s->y0;
+    if (y_hi > s->y1 - 1) y_hi = s->y1 - 1;
+    if (y_lo > y_hi) {
+        return;
+    }
+    uint16_t *const cov = s_cov;
+    const int32_t r2 = rad * rad;                 /* <= 3424^2, fits */
+    const uint16_t solid = pack565(c.r, c.g, c.b, swap);
+    for (int y = y_lo; y <= y_hi; ++y) {
+        int32_t hmin = INT32_MAX, hmax = -1;
+        int32_t halves[AA_SUB];
+        for (int sub = 0; sub < AA_SUB; ++sub) {
+            const int32_t dy = ((int32_t)y << 4) + sub * AA_STEP + AA_STEP / 2 - cy;
+            const int32_t d2 = r2 - dy * dy;
+            const int32_t half = d2 > 0 ? (int32_t)isqrt32((uint32_t)d2) : -1;
+            halves[sub] = half;
+            if (half >= 0) {
+                if (half < hmin) hmin = half;
+                if (half > hmax) hmax = half;
+            }
+        }
+        if (hmax < 0) {
+            continue;
+        }
+        uint16_t *row = s->base + (size_t)(y - s->y0) * HUD_W;
+        /* pixels wholly inside every chord: [cx - hmin, cx + hmin) in Q4 */
+        int in0 = (int)((cx - hmin + 15) >> 4), in1 = (int)((cx + hmin) >> 4) - 1;
+        if (hmin == INT32_MAX || in1 < in0) {
+            in0 = 1; in1 = 0;                       /* empty */
+        }
+        if (in0 < 0) in0 = 0;
+        if (in1 > HUD_W - 1) in1 = HUD_W - 1;
+        if (in1 >= in0) {
+            if (alpha >= 256) {
+                for (int x = in0; x <= in1; ++x) {
+                    row[x] = solid;
+                }
+            } else {
+                for (int x = in0; x <= in1; ++x) {
+                    row[x] = w_blend(row[x], c, alpha, swap);
+                }
+            }
+        }
+        /* the edges: coverage over the two runs outside the solid span */
+        int lo = HUD_W, hi = -1;
+        for (int sub = 0; sub < AA_SUB; ++sub) {
+            const int32_t half = halves[sub];
+            if (half < 0) {
+                continue;
+            }
+            const int32_t xl = cx - half, xr = cx + half;
+            if (in1 >= in0) {
+                cov_span(cov, xl, (int32_t)in0 << 4, &lo, &hi);
+                cov_span(cov, (int32_t)(in1 + 1) << 4, xr, &lo, &hi);
+            } else {
+                cov_span(cov, xl, xr, &lo, &hi);
+            }
+        }
+        if (hi >= lo && in1 >= in0) {
+            /* [lo, hi] spans the whole chord, but the interior [in0, in1] holds
+             * no coverage (only the two edge runs were accumulated): walking it
+             * cost 430 pixels a row on the MINIMAL dial to find zeros. Blend and
+             * clear the two edge runs alone. */
+            if (lo < in0) {
+                cov_blend(row, cov, lo, in0 - 1, c, alpha, swap, AA_FULL);
+                memset(cov + lo, 0, (size_t)(in0 - lo) * sizeof cov[0]);
+            }
+            const int ra = in1 + 1 > lo ? in1 + 1 : lo;
+            if (hi >= ra) {
+                cov_blend(row, cov, ra, hi, c, alpha, swap, AA_FULL);
+                memset(cov + ra, 0, (size_t)(hi - ra + 1) * sizeof cov[0]);
+            }
+        } else if (hi >= lo) {
+            cov_blend(row, cov, lo, hi, c, alpha, swap, AA_FULL);
+            memset(cov + lo, 0, (size_t)(hi - lo + 1) * sizeof cov[0]);
+        }
+    }
+}
+
 /* Anti-aliased disc; centre and radius in Q4. The interior — every pixel
  * inside the narrowest of the sixteen sample chords — is written straight;
  * only the two edge runs go through coverage, so the MINIMAL dial (a 214 px
@@ -1899,6 +2046,10 @@ static void disc_replay_row(uint16_t *row, const uint16_t *r, wrgb_t c, int alph
 static void HOT aa_disc(const strip_t *s, int32_t cx, int32_t cy, int32_t rad,
                         wrgb_t c, int alpha, bool swap)
 {
+    if ((hud_perf_knob & JR_KNOB_DISC_ROW_OLD) != 0u) {
+        aa_disc_v0(s, cx, cy, rad, c, alpha, swap);
+        return;
+    }
     if (rad <= 0 || alpha <= 0) {
         return;
     }
@@ -2452,11 +2603,130 @@ static inline uint16_t bal_blend(uint16_t d, uint16_t sp, uint32_t a5)
     return (uint16_t)(r | (r >> 16));
 }
 
+/* JR_KNOB_BAL_CLASS. The sprite's two byte tables are 63 KB, read through the
+ * cache four taps a pixel at whatever angle the wheel has, so the cost on the
+ * device may be the reads, not the sums. This keeps, per source cell, what its
+ * 2x2 alpha taps are: all clear (skip), all 255 (alpha is 255, no alpha reads
+ * or sums), or anything else (the long way). Two bits a cell, 5.3 KB, owned by
+ * the caller like the dial record (hud_balance_cache_set); built on first use.
+ * The pixels are the same: four 255 taps weigh to 255 whatever the fraction. */
+#define BAL_CLS_CLEAR   0u
+#define BAL_CLS_SOLID   1u
+#define BAL_CLS_PART    2u
+#define BAL_CLS_BYTES   ((JR_BALANCE_SIZE * JR_BALANCE_SIZE + 3) / 4)
+static uint8_t *s_bal_cls;
+static bool s_bal_cls_built;
+
+void hud_balance_cache_set(uint8_t *buf, size_t cap_bytes)
+{
+    s_bal_cls = (buf != NULL && cap_bytes >= (size_t)BAL_CLS_BYTES) ? buf : NULL;
+    s_bal_cls_built = false;
+}
+
+static void bal_cls_build(void)
+{
+    memset(s_bal_cls, 0, BAL_CLS_BYTES);
+    for (int iy = 0; iy < JR_BALANCE_SIZE; ++iy) {
+        for (int ix = 0; ix < JR_BALANCE_SIZE; ++ix) {
+            const size_t k = (size_t)iy * JR_BALANCE_SIZE + (size_t)ix;
+            uint32_t cls = BAL_CLS_PART;        /* the last row and column are never a cell's origin */
+            if (ix + 1 < JR_BALANCE_SIZE && iy + 1 < JR_BALANCE_SIZE) {
+                const uint32_t a00 = jr_balance_alpha[k], a10 = jr_balance_alpha[k + 1];
+                const uint32_t a01 = jr_balance_alpha[k + JR_BALANCE_SIZE];
+                const uint32_t a11 = jr_balance_alpha[k + JR_BALANCE_SIZE + 1];
+                if ((a00 | a10 | a01 | a11) == 0u) {
+                    cls = BAL_CLS_CLEAR;
+                } else if ((a00 & a10 & a01 & a11) == 255u) {
+                    cls = BAL_CLS_SOLID;
+                }
+            }
+            s_bal_cls[k >> 2] = (uint8_t)(s_bal_cls[k >> 2] | (cls << ((k & 3u) * 2u)));
+        }
+    }
+    s_bal_cls_built = true;
+}
+
+static int balance_blit_cls(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                            int32_t angle_q16)
+{
+    const uint8_t *const cm = s_bal_cls;
+    const int cx = JR_BALANCE_DIAL_CX, cy = JR_BALANCE_DIAL_CY;
+    const int ya = y0 > cy - BAL_R_DEST ? y0 : cy - BAL_R_DEST;
+    const int yb = (y0 + nrows - 1) < cy + BAL_R_DEST ? (y0 + nrows - 1) : cy + BAL_R_DEST;
+    if (ya > yb) {
+        return 0;
+    }
+    const uint32_t a16 = (uint32_t)angle_q16 & 0xFFFFu;
+    const int32_t c = bal_cos(a16), sn = bal_sin(a16);          /* Q15 */
+    const int32_t base = (int32_t)JR_BALANCE_C << 15;
+    int visited = 0;
+    for (int y = ya; y <= yb; ++y) {
+        const int dy = y - cy;
+        const int rem = BAL_R_DEST * BAL_R_DEST - dy * dy;
+        int hx = 0;
+        while ((hx + 1) * (hx + 1) <= rem) {
+            ++hx;
+        }
+        const int x0 = cx - hx, x1 = cx + hx;
+        int32_t u = base + (x0 - cx) * c + dy * sn;
+        int32_t v = base - (x0 - cx) * sn + dy * c;
+        uint16_t *px = dst + (size_t)(y - y0) * HUD_W + x0;
+        for (int x = x0; x <= x1; ++x, ++px, u += c, v -= sn) {
+            ++visited;
+            const int ix = u >> 15, iy = v >> 15;
+            const size_t k = (size_t)iy * JR_BALANCE_SIZE + (size_t)ix;
+            const uint32_t cls = (cm[k >> 2] >> ((k & 3u) * 2u)) & 3u;
+            if (cls == BAL_CLS_CLEAR) {
+                continue;                       /* a window in the wheel */
+            }
+            const uint32_t fx = (uint32_t)(u >> 7) & 255u, fy = (uint32_t)(v >> 7) & 255u;
+            const uint32_t w00 = (256u - fx) * (256u - fy), w10 = fx * (256u - fy);
+            const uint32_t w01 = (256u - fx) * fy, w11 = fx * fy;      /* sum 65536 */
+            uint32_t a = 255u;                  /* four 255s weigh to 255 */
+            if (cls != BAL_CLS_SOLID) {
+                const uint32_t a00 = jr_balance_alpha[k], a10 = jr_balance_alpha[k + 1];
+                const uint32_t a01 = jr_balance_alpha[k + JR_BALANCE_SIZE];
+                const uint32_t a11 = jr_balance_alpha[k + JR_BALANCE_SIZE + 1];
+                a = (a00 * w00 + a10 * w10 + a01 * w01 + a11 * w11 + 32768u) >> 16;
+                if (a < 4u) {
+                    continue;
+                }
+            }
+            const uint16_t p00 = jr_balance_rgb[k], p10 = jr_balance_rgb[k + 1];
+            const uint16_t p01 = jr_balance_rgb[k + JR_BALANCE_SIZE];
+            const uint16_t p11 = jr_balance_rgb[k + JR_BALANCE_SIZE + 1];
+            const uint32_t r5 = (((p00 >> 11) & 31u) * w00 + ((p10 >> 11) & 31u) * w10 +
+                                 ((p01 >> 11) & 31u) * w01 + ((p11 >> 11) & 31u) * w11 + 32768u) >> 16;
+            const uint32_t g6 = (((p00 >> 5) & 63u) * w00 + ((p10 >> 5) & 63u) * w10 +
+                                 ((p01 >> 5) & 63u) * w01 + ((p11 >> 5) & 63u) * w11 + 32768u) >> 16;
+            const uint32_t b5 = ((p00 & 31u) * w00 + (p10 & 31u) * w10 +
+                                 (p01 & 31u) * w01 + (p11 & 31u) * w11 + 32768u) >> 16;
+            const uint16_t sp = (uint16_t)((r5 << 11) | (g6 << 5) | b5);
+            const uint32_t a5 = (a + 4u) >> 3;                          /* 0..32 */
+            if (a5 >= 32u) {
+                *px = swap_bytes ? (uint16_t)((sp >> 8) | (sp << 8)) : sp;
+                continue;
+            }
+            const uint16_t d = swap_bytes ? (uint16_t)((*px >> 8) | (*px << 8)) : *px;
+            const uint16_t o = bal_blend(d, sp, a5);
+            *px = swap_bytes ? (uint16_t)((o >> 8) | (o << 8)) : o;
+        }
+    }
+    return visited;
+}
+
+/* The wheel as it was: four alpha taps a pixel. */
 int hud_balance_blit(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                      int32_t angle_q16)
 {
     if (dst == NULL || nrows <= 0) {
         return 0;
+    }
+    if ((hud_perf_knob & JR_KNOB_BAL_CLASS) != 0u && s_bal_cls != NULL) {
+        if (!s_bal_cls_built) {
+            bal_cls_build();
+        }
+        return balance_blit_cls(dst, y0, nrows, swap_bytes, angle_q16);
     }
     const int cx = JR_BALANCE_DIAL_CX, cy = JR_BALANCE_DIAL_CY;
     const int ya = y0 > cy - BAL_R_DEST ? y0 : cy - BAL_R_DEST;

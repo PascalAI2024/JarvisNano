@@ -14,6 +14,7 @@
  * the ragged tail — shows up on glass as a seam and nowhere else.
  */
 #include "jr_display/hud_render.h"
+#include "jr_display/perf_knob.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -2383,6 +2384,46 @@ static void test_balance_rotation_maps_centre_and_rim(void)
 /* Nothing outside the bounding disc, any angle, either byte order; strips of
  * 12 rows equal the whole frame; the byte-swapped render is the byte swap of
  * the plain one; the pixel cost is reported. */
+/* JR_KNOB_BAL_CLASS draws the same wheel: every pixel and the visited count,
+ * both byte orders, strips and whole frame, from a dirty backdrop so a blend
+ * that read the wrong destination or alpha shows. */
+static void test_balance_class_map_changes_no_pixel(void)
+{
+    static uint8_t cls[5257];
+    const size_t px = (size_t)HUD_W * HUD_H;
+    for (int swap = 0; swap < 2; ++swap) {
+        for (int a = -HUD_BALANCE_SWING_Q16; a <= HUD_BALANCE_SWING_Q16; a += 1531) {
+            uint16_t *plain = lo_frame(0x4208), *mapped = lo_frame(0x4208);
+            if (!plain || !mapped) return;
+            for (size_t i = 0; i < px; ++i) {
+                plain[i] = mapped[i] = (uint16_t)(0x4208u + (i * 2654435761u >> 17));
+            }
+            hud_perf_knob = 0;
+            hud_balance_cache_set(NULL, 0);
+            const int v0 = hud_balance_blit(plain, 0, HUD_H, swap != 0, a);
+            hud_balance_cache_set(cls, sizeof cls);
+            hud_perf_knob = JR_KNOB_BAL_CLASS;
+            const int v1 = hud_balance_blit(mapped, 0, HUD_H, swap != 0, a);
+            hud_perf_knob = 0;
+            hud_balance_cache_set(NULL, 0);
+            CHECK(v0 == v1, "angle %d swap %d: visited %d vs %d", a, swap, v0, v1);
+            CHECK(memcmp(plain, mapped, px * sizeof *plain) == 0,
+                  "angle %d swap %d: the class map changed a pixel", a, swap);
+            free(plain); free(mapped);
+        }
+    }
+    /* a buffer too small is ignored, not overrun */
+    hud_balance_cache_set(cls, 100);
+    hud_perf_knob = JR_KNOB_BAL_CLASS;
+    uint16_t *f = lo_frame(0x4208);
+    if (f) {
+        CHECK(hud_balance_blit(f, 0, HUD_H, false, 0) > 14500, "undersized map: wheel not drawn");
+        free(f);
+    }
+    hud_perf_knob = 0;
+    hud_balance_cache_set(NULL, 0);
+}
+
 static void test_balance_stays_in_its_disc_and_strips_agree(void)
 {
     const int cx = JR_BALANCE_DIAL_CX, cy = JR_BALANCE_DIAL_CY;
@@ -2636,6 +2677,7 @@ int main(void)
     test_balance_swing_is_bounded_periodic_and_eased();
     test_balance_rotation_maps_centre_and_rim();
     test_balance_stays_in_its_disc_and_strips_agree();
+    test_balance_class_map_changes_no_pixel();
     test_balance_in_the_watch_follows_alive_and_strips();
     test_celestial_star_table_is_sane();
     test_celestial_twinkle_is_additive_small_and_strip_invariant();

@@ -167,6 +167,12 @@ int main(int argc, char **argv)
         const char *clk_arg = flag_val(argc, argv, "clk=");
         const char *ppm_arg = flag_val(argc, argv, "ppm=");
         const long long clk_ms = clk_arg ? atoll(clk_arg) : 100000;
+        const char *knob_arg = flag_val(argc, argv, "knob=");   /* the whole perf knob word; absent = record on, as production host */
+        if (knob_arg) {
+            const unsigned long kn = strtoul(knob_arg, NULL, 0);
+            fc_dial_rec_on = (kn & JR_KNOB_DIAL_REC) != 0u;
+            fc_knob_extra = (uint32_t)kn & ~JR_KNOB_DIAL_REC;
+        }
         fc_setup(sc);
         fc_extra_warm = true;     /* the steady state, not the frame that records */
         uint16_t *ffb = malloc(466u * 466u * sizeof(uint16_t));
