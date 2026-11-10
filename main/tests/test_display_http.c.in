@@ -13,6 +13,7 @@ static esp_err_t read_result;
 esp_err_t jr_display_get_diag(jr_display_diag_t *d) { *d=cached; return read_result; }
 jr_display_space_t jr_display_nav_space(void) { return JR_DISPLAY_SPACE_STATUS; }
 jr_display_overlay_t jr_display_nav_overlay(void) { return JR_DISPLAY_OVERLAY_SHADE; }
+uint32_t jr_display_perf_knob(void) { return 4294967295u; }   /* worst-case width */
 const char *esp_err_to_name(esp_err_t e) { return e==ESP_OK ? "ESP_OK" : "ESP_FAIL"; }
 static const char *query;
 static esp_err_t httpd_req_get_url_query_str(httpd_req_t *r,char *b,size_t n)

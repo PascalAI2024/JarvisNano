@@ -153,6 +153,8 @@ static inline void put(uint16_t *p, const paint_t *c, unsigned cov)
 
 /* glass_blend565 with the weights already worked out: the same arithmetic,
  * for a run of pixels that all use the same alpha. */
+uint32_t glass_perf_knob;
+
 static inline uint16_t blend_w(uint16_t under, uint16_t over, unsigned wo, unsigned wu, bool swap)
 {
     const uint32_t u = swap ? glass_bswap(under) : under;

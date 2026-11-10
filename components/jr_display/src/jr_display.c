@@ -14,6 +14,7 @@
 #include <stdatomic.h>
 #include "jr_display/hud_render.h"
 #include "jr_display/glass.h"
+#include "jr_display/perf_knob.h"
 #include "jr_display/glass_icon.h"
 
 #include <stdio.h>
@@ -1311,6 +1312,22 @@ static void watch_compose(void);               /* defined with the watch below *
 static volatile uint32_t s_split_deadline_ms;
 static bool s_split_on;
 
+/* The dev-only perf knob (perf_knob.h). httpd writes the word; the render task
+ * copies it once a frame into hud_perf_knob and glass_perf_knob (knob_apply,
+ * from overlay_fade_tick), so a frame never sees it change half way. */
+static volatile uint32_t s_perf_knob_word;
+static void knob_apply(void);                  /* defined with the dial record below */
+
+void jr_display_set_perf_knob(uint32_t knob)
+{
+    __atomic_store_n(&s_perf_knob_word, knob & JR_KNOB_KNOWN_MASK, __ATOMIC_RELAXED);
+}
+
+uint32_t jr_display_perf_knob(void)
+{
+    return __atomic_load_n(&s_perf_knob_word, __ATOMIC_RELAXED);
+}
+
 /* Frames composed since boot, counted once a frame by overlay_fade_tick. The
  * recorded shapes (fring_prepare, shade_rec_fill) wait for a value to hold for
  * a second frame before they record it, so a number being dragged never pays
@@ -1339,6 +1356,7 @@ static void caption_tick(uint32_t dt_ms);      /* defined with the shell state b
 static void overlay_fade_tick(void)
 {
     s_frame_no++;
+    knob_apply();
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
     s_split_on = (int32_t)(__atomic_load_n(&s_split_deadline_ms, __ATOMIC_RELAXED) - now) > 0;
     uint32_t dt = now - s_fade_prev_ms;
@@ -5070,20 +5088,37 @@ static uint16_t *s_dial_rec;
 
 static void dial_rec_alloc(void)
 {
-#ifdef ESP_PLATFORM
-    /* Off on the device. Measured 2026-11-10: with the record, MINIMAL's face
-     * cost 35.1 ms a frame; drawn the long way on the image before, 25.6 ms.
-     * The host counted 30 % fewer instructions, so the loss is memory traffic
-     * the host does not see. The record and its host checks stay until the
-     * device has measured this half apart from the word fill in glass_draw.c
-     * that landed in the same commit. */
-    hud_dial_cache_set(NULL, 0u);
-    return;
-#endif
+    /* Off unless the knob asks (JR_KNOB_DIAL_REC). Measured 2026-11-10: with the
+     * record, MINIMAL's face cost 35.1 ms a frame; drawn the long way on the
+     * image before, 25.6 ms. The host counted 30 % fewer instructions, so the
+     * loss is memory traffic the host does not see. The record and its host
+     * checks stay until the device has measured this half apart from the word
+     * fill in glass_draw.c that landed in the same commit. The 12 KB is taken
+     * from PSRAM the first time the bit is set, never at start. */
+    if ((hud_perf_knob & JR_KNOB_DIAL_REC) == 0u) {
+        hud_dial_cache_set(NULL, 0u);
+        return;
+    }
     if (s_dial_rec == NULL) {
         s_dial_rec = heap_caps_malloc(SG_DIAL_REC_WORDS * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     }
     hud_dial_cache_set(s_dial_rec, s_dial_rec != NULL ? SG_DIAL_REC_WORDS : 0u);
+}
+
+/* Once a frame, before anything draws: the word httpd set becomes the one the
+ * drawing code reads. A changed record bit restarts (or drops) the dial record. */
+static void knob_apply(void)
+{
+    const uint32_t k = __atomic_load_n(&s_perf_knob_word, __ATOMIC_RELAXED);
+    const uint32_t was = hud_perf_knob;
+    if (k == was) {
+        return;
+    }
+    hud_perf_knob = k;
+    glass_perf_knob = k;
+    if (((k ^ was) & JR_KNOB_DIAL_REC) != 0u) {
+        dial_rec_alloc();
+    }
 }
 
 /* ACTIVITY: up to three blocks, newest first. Line one is the kind and the age

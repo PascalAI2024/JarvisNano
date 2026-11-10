@@ -538,6 +538,9 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
  * it; PSRAM is fine, it is read a few hundred bytes a strip. cap_words is the
  * size in uint16; 4,600 are used. NULL, or never called, draws the disc
  * the long way, to the same pixels. */
+/* The perf knob as the render task last read it (perf_knob.h); 0 = shipped. */
+extern uint32_t hud_perf_knob;
+
 void hud_dial_cache_set(uint16_t *buf, size_t cap_words);
 size_t hud_dial_cache_used(void);     /* words filled so far (the tests report it) */
 

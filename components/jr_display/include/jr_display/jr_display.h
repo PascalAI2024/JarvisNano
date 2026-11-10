@@ -149,6 +149,12 @@ const char *jr_display_split_name(unsigned index);
  * request counted and the next one, seconds later, the window to subtract. */
 void jr_display_split_arm(void);
 
+/* The dev-only perf knob (perf_knob.h): a word of pixel-identical cost
+ * candidates, 0 the shipped path. Set from httpd, read once a frame by the
+ * render task. */
+void jr_display_set_perf_knob(uint32_t knob);
+uint32_t jr_display_perf_knob(void);
+
 typedef struct {
     jr_display_init_state_t init_state;
     esp_err_t last_error;

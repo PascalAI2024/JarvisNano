@@ -42,6 +42,9 @@ extern "C" {
 
 /* ---- blending (header-inline so callers and tests share one definition) -- */
 
+/* The perf knob as the render task last read it (perf_knob.h); 0 = shipped. */
+extern uint32_t glass_perf_knob;
+
 static inline uint16_t glass_bswap(uint16_t v)
 {
     return (uint16_t)((v >> 8) | (v << 8));

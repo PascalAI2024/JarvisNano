@@ -1803,6 +1803,7 @@ static void HOT aa_fill(const strip_t *s, const wpoly_t *p, wrgb_t c, int alpha,
  * still owns no memory: HUD_H row offsets, then per row six words (interior
  * from, to; edge run lo, count; right run from, count) and the coverage words. */
 #define DISC_REC_NONE 0xFFFFu
+uint32_t hud_perf_knob;
 static uint16_t *s_disc_rec;
 static size_t s_disc_cap, s_disc_used;
 

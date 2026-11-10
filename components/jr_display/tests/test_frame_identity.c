@@ -91,9 +91,37 @@ int main(void)
             }
         }
     }
+    /* One more pass per perf-knob bit: the table again with only that bit on
+     * (and the dial record off, so the bit is what differs from the shipped path). */
     fc_orbit_rec_on = true;
     fc_fring_rec_on = true;
     fc_shade_rec_on = true;
+    fc_dial_rec_on = false;
+    for (unsigned b = 1; b < 32; b++) {
+        const uint32_t bit = 1u << b;
+        if ((JR_KNOB_KNOWN_MASK & bit) == 0u) {
+            continue;
+        }
+        fc_knob_extra = bit;
+        for (int i = 0; i < NREFS; i++) {
+            const fc_scene_t *sc = find_scene(REFS[i].scene);
+            if (sc == NULL) continue;
+            fc_setup(sc);
+            checks++;
+            if ((hud_perf_knob & bit) == 0u || (glass_perf_knob & bit) == 0u) {
+                printf("FAIL %s: knob bit %u did not reach the drawing code\n", REFS[i].scene, b);
+                failures++;
+            }
+            fc_run(sc, REFS[i].clk_ms, fb);
+            checks++;
+            if (fc_hash(fb) != REFS[i].hash) {
+                printf("FAIL %s clk=%lld: knob bit %u changed the pixels\n", REFS[i].scene,
+                       (long long)REFS[i].clk_ms, b);
+                failures++;
+            }
+        }
+    }
+    fc_knob_extra = 0;
     fc_dial_rec_on = true;
     fc_setup(find_scene("watch-minimal"));      /* the dial record starts empty and fills as rows draw */
     fc_run(find_scene("watch-minimal"), 100000, fb);
