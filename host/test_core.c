@@ -37,6 +37,7 @@ extern void transport_tests_run(void);
 extern void soak_tests_run(void);
 extern void mood_tests_run(void);
 extern void cue_tests_run(void);
+extern void cue_ui_tests_run(void);
 /* The rain warning and the morning briefing (wave N13), pure. */
 extern void glance_tests_run(void);
 /* The playback feeder's reply / hole / pre-roll walk and its earcon guard. */
@@ -1939,6 +1940,7 @@ int main(void)
 
     /* What a tone may do to the speaker's mute state, and the interface cues. */
     cue_tests_run();
+    cue_ui_tests_run();
 
     return UNITY_END();
 }

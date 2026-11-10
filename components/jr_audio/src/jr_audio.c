@@ -1772,6 +1772,33 @@ esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
     return err;
 }
 
+esp_err_t jr_audio_play_cue(jr_cue_kind_t kind, uint16_t amp_permille)
+{
+    const size_t total = jr_cue_samples(kind);
+    if (total == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* Same lane as the chime: a cue requested while any playback is pending,
+     * including another cue, is dropped, never queued behind it. */
+    esp_err_t err = earcon_claim(total);
+    if (err != ESP_OK) {
+        return err;
+    }
+    int16_t *pcm = earcon_scratch(total);
+    if (pcm == NULL) {
+        earcon_release();
+        return ESP_ERR_NO_MEM;
+    }
+    if (jr_cue_render(kind, amp_permille, pcm, total) != total) {
+        heap_caps_free(pcm);
+        earcon_release();
+        return ESP_ERR_INVALID_SIZE;
+    }
+    err = earcon_commit(pcm, total);
+    heap_caps_free(pcm);
+    return err;
+}
+
 esp_err_t jr_audio_diag_play_chirp(uint32_t duration_ms, uint8_t level_percent)
 {
     /* The original 400 -> 2000 Hz diagnostic sweep, unchanged. Every existing

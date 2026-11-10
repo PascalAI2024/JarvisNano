@@ -30,6 +30,7 @@ set(CORE_SRCS
     ${REPO_ROOT}/components/jr_core/src/mood.c
     ${REPO_ROOT}/components/jr_core/src/glance.c
     ${REPO_ROOT}/components/jr_core/src/dac_mute.c
+    ${REPO_ROOT}/components/jr_core/src/cue.c
     ${REPO_ROOT}/components/jr_dsp/src/dsp.c
     ${REPO_ROOT}/components/jr_dsp/src/audio_power.c
 )
@@ -62,6 +63,7 @@ add_executable(jr_host_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/unity/unity.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_glance.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_cue.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_cue_ui.c
     ${CORE_SRCS}
     ${TRANSPORT_SRCS}
     ${POWER_DIAGNOSTIC_SRCS}
@@ -86,6 +88,16 @@ target_link_libraries(jr_host_tests PRIVATE m)
 # own style, so build with warnings on but never as errors.
 target_compile_options(jr_host_tests PRIVATE -Wall -Wextra)
 target_compile_definitions(jr_host_tests PRIVATE JR_TEST_REPO_ROOT="${REPO_ROOT}")
+
+# Renders the interface cues to WAV files with the firmware's own generator.
+# Not part of the test run: cmake --build host/build --target jr_render_cues
+add_executable(jr_render_cues EXCLUDE_FROM_ALL
+    ${CMAKE_CURRENT_SOURCE_DIR}/render_cues.c
+    ${REPO_ROOT}/components/jr_core/src/cue.c)
+target_include_directories(jr_render_cues PRIVATE
+    ${REPO_ROOT}/components/jr_core/include
+    ${REPO_ROOT}/components/jr_ports/include)
+target_link_libraries(jr_render_cues PRIVATE m)
 
 enable_testing()
 add_test(NAME jr_host_tests COMMAND jr_host_tests)

@@ -1,0 +1,7 @@
+owner volume 100
+cue            ms  samples peak dBFS  first   last  max step
+tick         20.0      480    -36.23      0      0       256
+confirm      90.0     2160    -27.96      0      0       401
+dismiss      70.0     1680    -30.31      0      0       222
+limit        50.0     1200    -31.59      0      0        83
+reference: chime 8% of full scale = -21.94 dBFS

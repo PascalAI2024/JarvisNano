@@ -27,6 +27,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "jr_core/cue.h"
 #include "jr_ports/audio_source.h"
 #include "jr_ports/audio_sink.h"
 
@@ -242,6 +243,12 @@ esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
  * exactly as the sweeps do, so it can never talk over a reply. */
 esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
                               uint16_t note_ms, uint8_t volume);
+
+/* One generated interface cue (jr_core/cue.h) at `amp_permille` of full scale.
+ * The caller owns the policy (jr_cue_allow); this owns the lane: it drops the
+ * cue, returning ESP_ERR_INVALID_STATE, while the owner has muted the speaker
+ * or any playback, including another cue, is pending. Never blocks. */
+esp_err_t jr_audio_play_cue(jr_cue_kind_t kind, uint16_t amp_permille);
 
 #ifdef __cplusplus
 }

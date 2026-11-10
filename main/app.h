@@ -327,6 +327,10 @@ extern _Atomic uint32_t s_pairing_claim_until_ms;
 extern _Atomic uint32_t s_pairing_claim_code;
 extern _Atomic uint32_t s_pairing_claim_attempts;
 extern int s_out_vol;
+/* Interface cues (jr_core/cue.h): the owner's switch, on by default. Set it
+ * through ui_sounds_set() so it persists. */
+extern _Atomic bool s_ui_sounds;
+void ui_sounds_set(bool on);
 extern uint8_t s_brightness_cap;
 extern _Atomic int s_level_volume_request;
 extern _Atomic int s_level_brightness_request;
