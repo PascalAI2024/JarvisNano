@@ -737,6 +737,148 @@ static inline int tr_layer(int p, int cut, bool vis_from, bool vis_to)
                    : (vis_to ? tr_in(p, cut) : 0);
 }
 
+/* ===== THE PANEL DIP (perf knob bit 0, JR_KNOB_PANEL_DIP) ===================
+ *
+ * A change of ring screen, entering or leaving WATCH and a watch style change
+ * pass "through the dark". On knob 0 the framebuffer does it, per pixel, and a
+ * transition frame costs two to three times a settled one. With the bit the
+ * compositor draws the old screen and then the new one at full strength, and the
+ * panel's brightness register does the dimming: s_dip (0..256, 256 = no dip)
+ * scales the brightness brightness_pump sends, `sent = shown * light(dip)`.
+ *
+ * The dip is clocked by the display's millisecond clock, not by frames, so a slow
+ * frame carries several brightness steps and the ramp stays smooth:
+ *   OUT   falls over tr_out's time (the transition's total times cut/256),
+ *   HOLD  dark, until the new content has been composed AND flushed once, with
+ *         DIP_HOLD_CAP_MS as the longest it may wait,
+ *   IN    rises over tr_in's time.
+ * Phases advance in the pump (brightness_pump, any strip). The compositor never
+ * reads the phase mid-frame: sp_fade_tick latches "the new content is on" once a
+ * frame (s_dip_swapped), so a frame composes at one state. A new transition during
+ * a dip restarts OUT from the level the dip had, and the glass keeps showing the
+ * screen it was showing, so no half-swapped content is ever lit.
+ * Render task only (the three diag reads are plain words). */
+static uint32_t s_frame_no;               /* defined with overlay_fade_tick below */
+#define DIP_GAMMA        2        /* the light of a pixel at half value is a quarter: dip^2 */
+#define DIP_HOLD_CAP_MS  300      /* the longest the dark waits for the new screen (SP_STYLE_HOLD_MS's idea) */
+#define DIP_WRITE_MS     16       /* the panel refreshes at 60 Hz: one brightness write per refresh at most */
+
+typedef enum { DIP_IDLE, DIP_OUT, DIP_HOLD, DIP_IN } dip_phase_t;
+typedef enum { DIP_MODE_NONE, DIP_MODE_SPACE, DIP_MODE_STYLE } dip_mode_t;
+
+static bool        s_dip_on;               /* the knob bit, latched once a frame by knob_apply */
+static dip_phase_t s_dip_phase = DIP_IDLE;
+static dip_mode_t  s_dip_mode;             /* which transition the compositor draws the dip way */
+static volatile int s_dip = 256;
+static int         s_dip_cut, s_dip_l0;
+static uint32_t    s_dip_t0, s_dip_out_ms, s_dip_in_ms;
+static uint32_t    s_dip_entry_next = UINT32_MAX; /* the entry clock the new screen starts with, at the swap */
+static bool        s_dip_swapped;          /* the compositor draws the NEW content (latched per frame) */
+static bool        s_dip_ready;            /* ... and the layer under it is bound: this frame is "the new screen" */
+static bool        s_dip_flushed;          /* the first ready frame has been flushed whole */
+static bool        s_dip_tail;             /* the dip is over but the panel still has to be told */
+static uint32_t    s_dip_ready_frame;
+static volatile uint32_t s_dip_hold_ms;    /* the last dark hold */
+static volatile uint32_t s_dip_writes;     /* brightness writes the dip caused */
+static uint32_t    s_dip_write_ms;
+static bool        s_dip_wrote;
+
+/* The light the panel gives at dip/256 of the brightness: dip^DIP_GAMMA, 0..256. */
+static int dip_light(int dip)
+{
+    int f = 256;
+    for (int i = 0; i < DIP_GAMMA; ++i) {
+        f = (f * dip) >> 8;
+    }
+    return f;
+}
+
+static inline uint32_t dip_now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+/* Move the phases to `now`. Called from the pump on every strip while a dip runs. */
+static void dip_advance(uint32_t now)
+{
+    if (s_dip_phase == DIP_OUT) {
+        const uint32_t el = now - s_dip_t0;
+        if (el >= s_dip_out_ms) {
+            s_dip = 0;
+            s_dip_phase = DIP_HOLD;
+            s_dip_t0 = s_dip_t0 + s_dip_out_ms;     /* the hold counts from the dark, not from this call */
+        } else {
+            s_dip = (s_dip_l0 * tr_out((int)((el * (uint32_t)s_dip_cut) / s_dip_out_ms), s_dip_cut)) / 256;
+        }
+    }
+    if (s_dip_phase == DIP_HOLD) {
+        s_dip = 0;
+        const uint32_t held = now - s_dip_t0;
+        const bool done = s_dip_ready && s_dip_flushed;
+        if (done || held >= DIP_HOLD_CAP_MS) {      /* the cap: never stay dark, whatever is on the glass */
+            s_dip_hold_ms = held;
+            s_dip_phase = DIP_IN;
+            s_dip_t0 = now;
+        }
+    }
+    if (s_dip_phase == DIP_IN) {
+        const uint32_t el = now - s_dip_t0;
+        if (el >= s_dip_in_ms) {
+            s_dip = 256;
+            s_dip_phase = DIP_IDLE;
+            s_dip_tail = true;
+        } else {
+            s_dip = tr_in(s_dip_cut + (int)((el * (uint32_t)(256 - s_dip_cut)) / s_dip_in_ms), s_dip_cut);
+        }
+    }
+}
+
+/* A transition starts (render task, sp_fade_tick). `total_ms` is the whole of the
+ * grammar's time (JR_DISPLAY_SPACE_MS, SP_STYLE_MS). From a dip already under way
+ * it dims on from the level it has, over a proportional share of tr_out's time. */
+static void dip_begin(dip_mode_t mode, int cut, uint32_t total_ms, uint32_t now)
+{
+    dip_advance(now);
+    const int l0 = s_dip_phase == DIP_IDLE ? 256 : s_dip;
+    const uint32_t out_full = (total_ms * (uint32_t)cut) / 256U;
+    s_dip_mode = mode;
+    s_dip_cut = cut;
+    s_dip_l0 = l0;
+    s_dip_out_ms = (out_full * (uint32_t)l0) / 256U;
+    s_dip_in_ms = total_ms - out_full;
+    s_dip_phase = DIP_OUT;
+    s_dip_t0 = now;
+    s_dip_swapped = false;
+    s_dip_ready = false;
+    s_dip_flushed = false;
+    if (s_dip_out_ms == 0U) {
+        dip_advance(now);                           /* already dark: straight to the hold */
+    }
+}
+
+/* Drop the dip: the knob went off, or the panel is going to sleep. The pump
+ * restores the brightness the dip had taken (s_dip_tail). */
+static void dip_abort(void)
+{
+    if (s_dip_phase != DIP_IDLE || s_dip < 256) {
+        s_dip_tail = true;
+    }
+    s_dip_phase = DIP_IDLE;
+    s_dip_mode = DIP_MODE_NONE;
+    s_dip_swapped = false;
+    s_dip = 256;
+}
+
+/* The whole of a frame has been flushed (panel_flush, last strip; the preview and
+ * the tests call it at the end of a frame): the first frame of the new content
+ * is on the glass, the dark may end. */
+static void dip_frame_done(void)
+{
+    if (s_dip_phase != DIP_IDLE && s_dip_ready && !s_dip_flushed && s_frame_no >= s_dip_ready_frame) {
+        s_dip_flushed = true;
+    }
+}
+
 esp_err_t jr_display_canvas_show(const uint16_t *rgb565, size_t width,
                                  size_t height, uint32_t ttl_ms)
 {
@@ -1923,11 +2065,35 @@ static void brightness_slew(uint32_t dt_ms)
 static void brightness_pump(void)
 {
     uint8_t want = (uint8_t)s_brightness_shown;   /* slewed, render task */
+    /* The panel dip (knob bit 0) multiplies what the mood slew asks for; its
+     * writes are held to one per DIP_WRITE_MS. With no dip running (and none to
+     * undo) none of this is read: the clock is not even touched. */
+    const bool dipping = s_dip_phase != DIP_IDLE || s_dip_tail;
+    uint32_t now = 0U;
+    if (dipping) {
+        now = dip_now_ms();
+        dip_advance(now);
+        want = (uint8_t)((want * dip_light(s_dip)) >> 8);
+    }
     if (want == s_brightness_have) {
+        if (dipping && s_dip_phase == DIP_IDLE) {
+            s_dip_tail = false;   /* told, and back at the shown value */
+        }
         return;   /* also kills the 8.9 writes/sec of identical values */
+    }
+    if (dipping && s_dip_wrote && (uint32_t)(now - s_dip_write_ms) < DIP_WRITE_MS) {
+        return;   /* the panel refreshed this a moment ago: the next strip tries again */
     }
     if (jarvis_board_set_brightness(want) == ESP_OK) {
         s_brightness_have = want;
+        if (dipping) {
+            s_dip_writes++;
+            s_dip_write_ms = now;
+            s_dip_wrote = true;
+            if (s_dip_phase == DIP_IDLE) {
+                s_dip_tail = false;
+            }
+        }
     }
 }
 
@@ -3192,16 +3358,20 @@ static void watch_publish(void)
     jr_face_t want = JR_FACE_COUNT;
     int w = 256;
     int strength;
+    /* With the panel dip the hands are never part strength: they are all there or
+     * not there, and the cut is the dark (s_dip_swapped), not the progress. */
+    const bool dip_sp = s_dip_mode == DIP_MODE_SPACE;
+    const bool past_cut = dip_sp ? s_dip_swapped : p >= TR_CUT_SLIDE;
     if (to_watch) {
         if (!from_watch && p < 256) {                       /* entering */
-            w = tr_in(p, TR_CUT_SLIDE);
-            if (p >= TR_CUT_SLIDE && clock_on) {
+            w = dip_sp ? (s_dip_swapped ? 256 : 0) : tr_in(p, TR_CUT_SLIDE);
+            if (past_cut && clock_on) {
                 want = watch_dial_of_style(s_style_shown);
             }
         } else if (clock_on) {
             want = watch_dial_of_style(s_style_shown);
         }
-        if (s_style_prog < 256) {                           /* a style change */
+        if (s_style_prog < 256 && s_dip_mode != DIP_MODE_STYLE) {   /* a style change */
             const int ws = s_style_prog < TR_CUT_STYLE ? tr_out(s_style_prog, TR_CUT_STYLE)
                                                        : tr_in(s_style_prog, TR_CUT_STYLE);
             w = w < ws ? w : ws;
@@ -3209,8 +3379,8 @@ static void watch_publish(void)
         const int gate = clock_on ? 256 : s_clock_ease;
         strength = w < gate ? w : gate;
     } else if (from_watch && p < 256) {                     /* leaving */
-        w = tr_out(p, TR_CUT_SLIDE);
-        if (p < TR_CUT_SLIDE) {
+        w = dip_sp ? (s_dip_swapped ? 0 : 256) : tr_out(p, TR_CUT_SLIDE);
+        if (!past_cut) {
             want = watch_dial_of_style(s_style_shown);
         }
         strength = w;
@@ -3233,6 +3403,19 @@ static void watch_publish(void)
     }
 }
 
+/* The panel dip may light the new content only when the layer under it is what the
+ * presenter has really bound (the dial, the face coming back from a parked
+ * backdrop): a late rebind shows as a longer dark, never as the old picture. */
+static bool sp_dip_layer_ready(void)
+{
+    if (s_dip_mode == DIP_MODE_STYLE) {
+        return watch_style_bound(s_style_shown);
+    }
+    const bool vis_to = !sp_space_is_black(s_space_to) &&
+                        !(s_space_to == (uint8_t)JR_DISPLAY_SPACE_WATCH && !watch_style_has_dial(s_style_shown));
+    return !vis_to || (watch_layer_ready() && !s_parked);
+}
+
 /* Advance every shell ease. Called once per frame from overlay_fade_tick, on
  * the render task, with the same cstep the rest of the presenter fades on so
  * the shell and the existing overlays stay visually in step. */
@@ -3243,23 +3426,58 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
     const uint8_t space = (uint8_t)(nav & NAV_SPACE_MASK);
     const uint8_t overlay = (uint8_t)((nav & NAV_OVL_MASK) >> NAV_OVL_SHIFT);
 
+    /* The panel dip: the frame in which the glass has gone dark is the first one
+     * drawn with the new content, and the style (if one is waiting) flips with
+     * it. Latched once a frame so a frame composes at one state. */
+    if (s_dip_mode != DIP_MODE_NONE && !s_dip_swapped && s_dip_phase != DIP_OUT) {
+        s_dip_swapped = true;
+        s_style_shown = s_style_seen;
+    }
+    if (s_dip_entry_next != UINT32_MAX && (s_dip_mode != DIP_MODE_SPACE || s_dip_swapped)) {
+        s_entry_ms = s_dip_entry_next;
+        s_dip_entry_next = UINT32_MAX;
+    }
+
     if (serial != s_space_serial_seen) {
         s_space_serial_seen = serial;
-        s_space_from = (uint8_t)((nav >> NAV_PREV_SHIFT) & NAV_SPACE_MASK);
+        /* The panel dip: a change of screen while the glass is still showing the
+         * one it left (OUT, not yet swapped) keeps showing that one, so no screen
+         * that was never lit pops in at part brightness. */
+        const bool glass_holds_old = s_dip_on && s_dip_mode == DIP_MODE_SPACE && !s_dip_swapped &&
+                                     s_dip_phase != DIP_IDLE;
+        if (!glass_holds_old) {
+            s_space_from = (uint8_t)((nav >> NAV_PREV_SHIFT) & NAV_SPACE_MASK);
+        }
         s_space_to = space;
+        if (s_dip_on) {
+            if (s_dip_mode == DIP_MODE_STYLE) {
+                s_style_prog = 256;      /* the style dip is folded into this one: its flip happens at the swap below */
+            }
+            dip_begin(DIP_MODE_SPACE, TR_CUT_SLIDE, (uint32_t)JR_DISPLAY_SPACE_MS, now_ms);
+        }
         s_space_dir = (nav & NAV_FORWARD_BIT) != 0U ? 1 : -1;
         s_space_prog = 0;
         s_space_hold_ms = now_ms + (uint32_t)JR_DISPLAY_SPACE_HOLD_MS;
-        s_entry_ms = (space == (uint8_t)JR_DISPLAY_SPACE_STATUS ||
-                      space == (uint8_t)JR_DISPLAY_SPACE_WEATHER ||
-                      space == (uint8_t)JR_DISPLAY_SPACE_DESK ||
-                      space == (uint8_t)JR_DISPLAY_SPACE_ACTIVITY)
-                         ? 0U : SP_ENTRY_TOTAL_MS;
+        const uint32_t entry_start = (space == (uint8_t)JR_DISPLAY_SPACE_STATUS ||
+                                      space == (uint8_t)JR_DISPLAY_SPACE_WEATHER ||
+                                      space == (uint8_t)JR_DISPLAY_SPACE_DESK ||
+                                      space == (uint8_t)JR_DISPLAY_SPACE_ACTIVITY)
+                                         ? 0U : SP_ENTRY_TOTAL_MS;
+        if (s_dip_on) {
+            s_dip_entry_next = entry_start;   /* (the screen on the glass keeps its own clock until the swap) */
+        } else {
+            s_entry_ms = entry_start;
+        }
     } else {
         /* The entry clock starts when the incoming screen does, at the cut:
          * running it from the swipe would sweep the ring while it is still
          * invisible and show the screen already half drawn. */
-        if (s_entry_ms < SP_ENTRY_TOTAL_MS && s_space_prog >= TR_CUT_SLIDE) {
+        /* (With the panel dip the cut is the dark's end: the clock runs once the
+         * new screen is being lit, not while it is flushed behind the dark.) */
+        const bool cut_passed = s_dip_mode == DIP_MODE_SPACE
+                                    ? (s_dip_swapped ? s_dip_phase != DIP_HOLD : s_dip_entry_next != UINT32_MAX)
+                                    : s_space_prog >= TR_CUT_SLIDE;
+        if (s_entry_ms < SP_ENTRY_TOTAL_MS && cut_passed) {
             s_entry_ms += dt_ms;
             if (s_entry_ms > SP_ENTRY_TOTAL_MS) {
                 s_entry_ms = SP_ENTRY_TOTAL_MS;
@@ -3285,12 +3503,28 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
                 s_style_from = s_style_shown;
                 s_style_prog = 0;
                 s_style_hold_ms = 0;
-            } else if (s_style_prog >= 256) {
-                s_style_shown = style_nav;
+                if (s_dip_on) {
+                    dip_begin(DIP_MODE_STYLE, TR_CUT_STYLE, (uint32_t)SP_STYLE_MS, now_ms);
+                }
+            } else if (s_style_prog >= 256 && !(s_dip_mode == DIP_MODE_SPACE && !s_dip_swapped)) {
+                s_style_shown = style_nav;      /* (a screen change in its dark waits to flip it at the swap) */
                 s_style_from = style_nav;
             }
         }
-        if (s_style_prog < 256) {
+        if (s_dip_mode == DIP_MODE_STYLE) {
+            /* The panel dips and the style flips in the dark (the latch above);
+             * s_style_prog only says "a style change is under way" until the dip
+             * is over, and nothing is drawn at part strength. */
+            s_style_prog += (int)((dt_ms * 256u) / (uint32_t)SP_STYLE_MS);
+            if (s_style_prog > 255) {
+                s_style_prog = 255;
+            }
+            if (s_dip_phase == DIP_IDLE) {
+                s_style_prog = 256;
+                s_style_from = s_style_shown;
+                s_dip_mode = DIP_MODE_NONE;
+            }
+        } else if (s_style_prog < 256) {
             int ystep = (int)((dt_ms * 256u) / (uint32_t)SP_STYLE_MS);
             if (ystep < 1) {
                 ystep = 1;
@@ -3325,6 +3559,15 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
     if (s_space_prog > 256) {
         s_space_prog = 256;
     }
+    if (s_dip_mode == DIP_MODE_SPACE) {
+        /* the screen change is not over until the panel is lit again */
+        if (s_dip_phase != DIP_IDLE && s_space_prog > 255) {
+            s_space_prog = 255;
+        }
+        if (s_dip_phase == DIP_IDLE && s_space_prog >= 256) {
+            s_dip_mode = DIP_MODE_NONE;
+        }
+    }
     s_space_ease = fade_smoothstep(s_space_prog);
 
     /* The orbit mark: where the slide puts it this frame, on the ring as it
@@ -3338,7 +3581,10 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
         /* Signed shortest way round: a wrap is one step forward, not n-1
          * steps back. */
         const int d = (((a_to - a_from) + 2048) & 4095) - 2048;
-        const int target = a_from + (d * s_space_ease) / 256;
+        /* (With the panel dip the mark, like the screens, is at the old place until
+         * the glass is dark and at the new one after it.) */
+        const int mark_ease = s_dip_mode == DIP_MODE_SPACE ? (s_dip_swapped ? 256 : 0) : s_space_ease;
+        const int target = a_from + (d * mark_ease) / 256;
         if (n != s_orbit_n_seen) {
             if (s_orbit_n_seen != 0) {
                 s_orbit_off16 += (((target - s_orbit_a16) + 2048) & 4095) - 2048;
@@ -3415,6 +3661,10 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
     s_shade_ease = fade_smoothstep(s_shade_prog);
 
     watch_publish();
+    if (s_dip_mode != DIP_MODE_NONE && s_dip_swapped && !s_dip_ready && sp_dip_layer_ready()) {
+        s_dip_ready = true;                  /* this frame is the new screen, whole: its flush ends the dark */
+        s_dip_ready_frame = s_frame_no;
+    }
 
     /* WHAT IS UNDER THE SHELL, through a slide. The face (or a baked dial) is
      * the layer; a data screen, and a watch that draws on black, are not.
@@ -3424,10 +3674,15 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
      * from slides (the layer is dark by the cut, which is darker still); only
      * the sheet and the shade veil now. */
     int veil = 0;
+    const bool dip_sp = s_dip_mode == DIP_MODE_SPACE;
     const bool to_black = sp_space_is_black(s_space_to);
     const bool from_black = sp_space_is_black(s_space_from);
     int black = 0;
-    if (s_space_prog >= 256) {
+    if (dip_sp) {
+        /* the panel dip: what is under the shell is the settled one of whichever
+         * screen is on the glass; the dimming is the panel's */
+        black = (s_dip_swapped ? to_black : from_black) ? 256 : 0;
+    } else if (s_space_prog >= 256) {
         black = to_black ? 256 : 0;
     } else {
         const bool vis_from = !from_black &&
@@ -3448,7 +3703,8 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
      * out, the new one (or black, for a style with no art) comes up. It is not
      * a slide, so it asks nothing of the orbit rail and has its own number. */
     s_style_black = 0;
-    if (s_style_prog < 256 && s_space_to == (uint8_t)JR_DISPLAY_SPACE_WATCH) {
+    if (s_style_prog < 256 && s_dip_mode != DIP_MODE_STYLE &&
+        s_space_to == (uint8_t)JR_DISPLAY_SPACE_WATCH) {
         const bool vf = watch_style_has_dial(s_style_from);
         const bool vt = watch_style_has_dial(s_style_shown);
         int layer = tr_layer(s_style_prog, TR_CUT_STYLE, vf, vt);
@@ -4183,9 +4439,12 @@ static void tilt_tick(uint32_t now_ms)
  * one, and only then is the dial dimmed by the shell instead of cleared. */
 static bool watch_in_motion(void)
 {
+    /* (With the panel dip the watch is never drawn dimmed by the shell: each side
+     * of the dark is the settled watch.) */
     return ((s_space_from == (uint8_t)JR_DISPLAY_SPACE_WATCH ||
-             s_space_to == (uint8_t)JR_DISPLAY_SPACE_WATCH) && s_space_prog < 256) ||
-           s_style_prog < 256;
+             s_space_to == (uint8_t)JR_DISPLAY_SPACE_WATCH) && s_space_prog < 256 &&
+            s_dip_mode != DIP_MODE_SPACE) ||
+           (s_style_prog < 256 && s_dip_mode != DIP_MODE_STYLE);
 }
 
 static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
@@ -5455,6 +5714,11 @@ static void knob_apply(void)
     const uint32_t k = __atomic_load_n(&s_perf_knob_word, __ATOMIC_RELAXED);
     hud_perf_knob = k;
     glass_perf_knob = k;
+    const bool dip = (k & JR_KNOB_PANEL_DIP) != 0u;
+    if (!dip && (s_dip_on || s_dip_phase != DIP_IDLE || s_dip_mode != DIP_MODE_NONE)) {
+        dip_abort();           /* the bit went off mid-dip: the panel is brought back, the shell goes on as on knob 0 */
+    }
+    s_dip_on = dip;
 }
 
 /* ACTIVITY: up to three blocks, newest first. Line one is the kind and the age
@@ -6439,12 +6703,17 @@ static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
              * way and is gone at the cut; the incoming one starts its full
              * travel from the cut and settles ease-out. They are never both
              * above zero, so the two screens cannot sit on each other. */
-            const int po = tr_out(s_space_prog, TR_CUT_SLIDE);
-            const int pi = tr_in(s_space_prog, TR_CUT_SLIDE);
+            /* The panel dip draws one screen at a time at full strength and in its
+             * settled place: the old one until the glass is dark, then the new one
+             * with its own entry clock; the dimming is the panel's. */
+            const bool dip_sp = s_dip_mode == DIP_MODE_SPACE;
+            const int po = dip_sp ? (s_dip_swapped ? 0 : 256) : tr_out(s_space_prog, TR_CUT_SLIDE);
+            const int pi = dip_sp ? (s_dip_swapped ? 256 : 0) : tr_in(s_space_prog, TR_CUT_SLIDE);
             if (po > 0) {
                 sp_draw_space(ctx, y1, y2, pixels, s_space_from,
                               -s_space_dir * ((SP_LEAVE_PX * (256 - po)) / 256),
-                              (focal * po) / 256, SP_ENTRY_TOTAL_MS);
+                              (focal * po) / 256,
+                              dip_sp ? s_entry_ms : SP_ENTRY_TOTAL_MS);   /* (a screen cut in on while it was still entering stays as it was) */
             }
             if (pi > 0) {
                 sp_draw_space(ctx, y1, y2, pixels, s_space_to,
@@ -7029,7 +7298,12 @@ static bool panel_service(jr_display_ctx_t *ctx)
     esp_err_t err;
     if (state == 1U) {
         if (!ctx->panel_touched || ctx->panel_prepared) {
-            ctx->panel_restore_brightness = atomic_load(&s_brightness_have);
+            /* a dip in flight is dropped here: waking must not restore a dimmed value */
+            const bool dipped = s_dip_phase != DIP_IDLE || s_dip_tail;
+            dip_abort();
+            s_dip_tail = false;
+            ctx->panel_restore_brightness = dipped ? (uint8_t)atomic_load(&s_brightness_shown)
+                                                   : atomic_load(&s_brightness_have);
             ctx->panel_touched = true;
             ctx->panel_prepared = false;
         }
@@ -7311,6 +7585,9 @@ static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
     __atomic_fetch_or(&tag->flags, TRANSFER_OK, __ATOMIC_ACQ_REL);
     transfer_publish(ctx, tag);
     snapshot_record_flush(ctx, x1, y1, x2, y2, outbound);
+    if (x2 == HUD_W && y2 >= HUD_H) {
+        dip_frame_done();      /* the last strip of a frame is submitted: the panel dip may end its dark */
+    }
 }
 
 static esp_err_t apply_blank(jr_display_ctx_t *ctx)
@@ -7338,7 +7615,8 @@ static bool brightness_pending(void)
 {
     const uint8_t want = __atomic_load_n(&s_brightness_want, __ATOMIC_ACQUIRE);
     return atomic_load(&s_brightness_shown) != want ||
-           atomic_load(&s_brightness_have) != want;
+           atomic_load(&s_brightness_have) != want ||
+           s_dip_phase != DIP_IDLE || s_dip_tail;   /* a dip is a brightness still to settle */
 }
 
 /* True when no engine animation is driving the glass and the presenter's own
@@ -8143,6 +8421,9 @@ esp_err_t jr_display_get_diag(jr_display_diag_t *out_diag)
         out_diag->tilt_x = jr_tilt_unpack_x(tw);
         out_diag->tilt_y = jr_tilt_unpack_y(tw);
     }
+    out_diag->dip = (uint32_t)s_dip;
+    out_diag->dip_writes = s_dip_writes;
+    out_diag->dip_hold_ms = s_dip_hold_ms;
     jr_display_boot_timing_t *timing = &out_diag->boot_timing;
     /* Read end first: observing its release also includes the start publish. */
     timing->init_finished =

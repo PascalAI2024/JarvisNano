@@ -4780,6 +4780,118 @@ static void test_panel_ack_requires_transport_settle_and_completed_recovery(void
     }
 }
 
+/* The panel dip never outlives the panel: a panel-off request in the middle of a dip ends the
+ * dip, no brightness is written while the panel is off, and the recovery restores the shown
+ * brightness rather than the dimmed value the dip had last written. */
+static void test_panel_dip_dies_with_the_panel(void)
+{
+    dream_fixture();
+    jr_display_set_perf_knob(JR_KNOB_PANEL_DIP);
+    knob_apply();
+    dip_abort();
+    s_dip_tail = false;
+    s_brightness_want = 100U;
+    atomic_store(&s_brightness_have, 100U);
+    atomic_store(&s_brightness_shown, 100);
+    s_stub_panel_brightness = 100U;
+    s_stub_brightness_calls = 0U;
+    const uint32_t now_ms = (uint32_t)(s_fake_us / 1000);
+    dip_begin(DIP_MODE_SPACE, TR_CUT_SLIDE, (uint32_t)JR_DISPLAY_SPACE_MS, now_ms);
+    s_fake_us += 60000;
+    brightness_pump();
+    CHECK(s_dip < 256 && s_stub_panel_brightness < 100U && s_stub_brightness_calls > 0U,
+          "the dip dims the panel (dip %d, panel %u)", s_dip, (unsigned)s_stub_panel_brightness);
+    jr_display_panel_off_request();
+    flush_test_strip(0);
+    CHECK(jr_display_panel_is_off() && s_stub_panel_brightness == 0U, "the panel went off in the middle of the dip");
+    CHECK(s_dip_phase == DIP_IDLE && s_dip == 256 && s_dip_mode == DIP_MODE_NONE && !s_dip_tail,
+          "a panel-off request ends the dip (phase %d dip %d)", (int)s_dip_phase, s_dip);
+    const unsigned calls = s_stub_brightness_calls;
+    s_fake_us += 100000;
+    flush_test_strip(0);
+    CHECK(s_stub_brightness_calls == calls && s_stub_panel_brightness == 0U,
+          "no brightness write while the panel is off (%u more)", s_stub_brightness_calls - calls);
+    jr_display_panel_on_request();
+    flush_test_strip(0);
+    CHECK(s_stub_panel_brightness == 100U, "recovery restores the shown brightness, not the dimmed one (%u)",
+          (unsigned)s_stub_panel_brightness);
+    complete_test_transfer();
+    CHECK(jr_display_panel_is_on() && s_dip == 256 && s_dip_phase == DIP_IDLE, "recovered, undimmed");
+    jr_display_set_perf_knob(0U);
+    knob_apply();
+}
+
+/* The dip multiplies the brightness the mood slew has reached (s_brightness_shown), not the one it
+ * is heading for: a dip in the middle of a slew never sends more than the slew has given. */
+static void test_panel_dip_composes_with_the_mood_slew(void)
+{
+    dream_fixture();
+    jr_display_set_perf_knob(JR_KNOB_PANEL_DIP);
+    knob_apply();
+    dip_abort();
+    s_dip_tail = false;
+    s_dip_wrote = false;
+    s_brightness_want = 100U;
+    atomic_store(&s_brightness_have, 30U);
+    atomic_store(&s_brightness_shown, 30);
+    s_stub_panel_brightness = 30U;
+    s_stub_brightness_calls = 0U;
+    dip_begin(DIP_MODE_SPACE, TR_CUT_SLIDE, (uint32_t)JR_DISPLAY_SPACE_MS, (uint32_t)(s_fake_us / 1000));
+    s_fake_us += 80000;
+    brightness_pump();
+    const int law = (30 * dip_light(s_dip)) >> 8;
+    CHECK(s_dip < 256 && s_stub_brightness_calls == 1U && (int)s_stub_panel_brightness == law,
+          "the dip composes with the shown brightness (dip %d: sent %u, wanted %d)", s_dip,
+          (unsigned)s_stub_panel_brightness, law);
+    dip_abort();
+    s_dip_tail = false;
+    jr_display_set_perf_knob(0U);
+    knob_apply();
+}
+
+/* The restoring write after the rise is a dip write like the others: rate-limited, counted, and
+ * not made by the plain path a moment after the dip's last step. */
+static void test_panel_dip_tail_is_rate_limited(void)
+{
+    dream_fixture();
+    jr_display_set_perf_knob(JR_KNOB_PANEL_DIP);
+    knob_apply();
+    dip_abort();
+    s_brightness_want = 100U;
+    atomic_store(&s_brightness_shown, 100);
+    atomic_store(&s_brightness_have, 99U);        /* the last step of the rise sent 99 */
+    s_stub_panel_brightness = 99U;
+    s_stub_brightness_calls = 0U;
+    s_dip_writes = 0U;
+    const uint32_t now = (uint32_t)(s_fake_us / 1000) + 1000U;
+    s_fake_us = (int64_t)now * 1000;
+    s_dip_mode = DIP_MODE_SPACE;
+    s_dip_cut = TR_CUT_SLIDE;
+    s_dip_in_ms = 100U;
+    s_dip_t0 = now - 100U;                         /* the rise ends on this pump */
+    s_dip_phase = DIP_IN;
+    s_dip_wrote = true;
+    s_dip_write_ms = now - 5U;                     /* ... 5 ms after the write that sent 99 */
+    brightness_pump();
+    CHECK(s_stub_brightness_calls == 0U && s_dip_phase == DIP_IDLE && s_dip_tail,
+          "the rise ends inside the write interval: the restoring write waits (calls %u)", s_stub_brightness_calls);
+    s_fake_us += 1000;
+    brightness_pump();
+    CHECK(s_stub_brightness_calls == 0U, "6 ms after the last write it still waits (the tail keeps the limit)");
+    s_fake_us += 9000;
+    brightness_pump();
+    CHECK(s_stub_brightness_calls == 0U, "15 ms after the last write it still waits");
+    s_fake_us += 1000;
+    brightness_pump();
+    CHECK(s_stub_brightness_calls == 1U && s_stub_panel_brightness == 100U && !s_dip_tail && s_dip_writes == 1U,
+          "after the interval the restoring write is made and counted (calls %u, panel %u)", s_stub_brightness_calls,
+          (unsigned)s_stub_panel_brightness);
+    dip_abort();
+    s_dip_tail = false;
+    jr_display_set_perf_knob(0U);
+    knob_apply();
+}
+
 static void cancel_off_during_settle(void)
 {
     s_stub_delay_hook = NULL;
@@ -5962,6 +6074,9 @@ int main(void)
     test_boot_timing_ignores_unusable_callbacks_and_unpublished_stamp();
     test_rest_mailboxes_survive_start_and_env_updates();
     test_boot_brightness_seed_precedes_first_transfer();
+    test_panel_dip_dies_with_the_panel();
+    test_panel_dip_composes_with_the_mood_slew();
+    test_panel_dip_tail_is_rate_limited();
     test_rest_independently_refuses_exiting_foreground();
     test_rest_idle_listening_yields_immediately_to_voice_busy();
     test_power_hints_yield_only_after_plug_feedback();

@@ -14,11 +14,21 @@ python scripts/glass-preview.py --script shade --slow 4 --scale 2
 python scripts/glass-preview.py --script watch --check      # runs twice, requires identical frame hashes
 ```
 
-Options: `--script NAME|PATH`, `--out PATH`, `--scale 1|2`, `--slow N` (play at 1/N speed), `--fps 2..24` (render cadence, see below), `--format apng|gif|webp` (which file is reported as main), `--contact-sheet [K]` (every K-th frame, labelled with time and the script step that fired), `--check`, `--work DIR`. Needs Docker, Python 3 with Pillow and numpy.
+Options: `--script NAME|PATH`, `--out PATH`, `--scale 1|2`, `--slow N` (play at 1/N speed), `--knob WORD` (the perf knob word; 0 is the shipped path, see below), `--fps 2..24` (render cadence, see below), `--format apng|gif|webp` (which file is reported as main), `--contact-sheet [K]` (every K-th frame, labelled with time and the script step that fired), `--check`, `--work DIR`. Needs Docker, Python 3 with Pillow and numpy.
 
 Outputs beside `--out`: `.gif` (always; 256 colours, so the glows band, and GIF stores 10 ms units so durations carry the rounding to keep the clip length exact), `.png` (APNG, 24-bit, the default main file because it does not band), `.webp` (lossless, when Pillow has WebP), `_sheet.png`.
 
 Cadence: `JR_DISPLAY_RENDER_FPS` is 24 (`jr_display.c:60`, the measured panel ceiling). `main/app.h:85-88` lowers it by mood: AWAKE 24, AMBIENT 12, WHISPER 6, DREAM 3. The default is 24; `--fps 12` previews the ambient cadence.
+
+### The panel dip: `--knob 1`
+
+`--knob 1` sets `JR_KNOB_PANEL_DIP` (`perf_knob.h`). The probe then pumps the brightness chain as `panel_flush` does, once at the start of a frame and once before each of the other 38 strips, calls `dip_frame_done()` after the last strip, and dims the frame it writes by the light the glass had over that scan, the mean of `f(dip)` (dip squared over 256) at those 39 pumps. The report gains a table of every brightness write made inside a recorded frame (frame, ms, dip, the 0x51 value sent, with the mood at 100) and a line for each dark hold with the `dip_hold_ms` it reported. The frame hashes printed by the probe are those of the undimmed framebuffer, so they compare directly with knob 0; the dimming exists only in the written animation. Knob 0 pumps nothing and the animation is byte for byte what it was.
+
+```bash
+python scripts/glass-preview.py --script slide --knob 1 --out /tmp/slide.gif --contact-sheet 1
+```
+
+What the dimming does not model: the CO5300's own response to a 0x51 write, in particular what it does with a write in the middle of a scan, and what 0x51 = 0 looks like on the panel (black, or a faint glow). The probe treats the glass as lit by the average of the writes inside a frame.
 
 ## Script format
 
@@ -54,6 +64,9 @@ Stand-ins, printed at the end of every run:
 Three scripts cover the transition grammar: `watch-enter` (home to WATCH and back, a baked dial to home and on to WEATHER), `slide` (a ring-screen slide each way and the wrap home) and `style` (dial to dial, a baked dial to MINIMAL, MINIMAL to a baked dial, the wrap). Read them as contact sheets: `--contact-sheet 1` over the frames after a step, 24 fps. In the preview the presenter binds the dial the compositor asked for on its previous frame (`watch_dial_face()`), so the cover that hides a late rebind is exercised, but the device's real decode latency is not.
 
 `glass_preview.c` also builds with `-DPV_COST` for callgrind: every recorded frame is zeroed before it and dumped after it (`CALLGRIND_DUMP_STATS_AT`), so the worst frame of a transition is a number. By hand, in the `jarvisnano-fc` image: `cc -O2 -g -fno-tree-vectorize -fno-tree-slp-vectorize -fno-unroll-loops -DPV_COST` over the `glass_preview` sources listed in `tests/CMakeLists.txt`, then `valgrind --tool=callgrind --callgrind-out-file=DIR/cg.out --dump-instr=no ./gp SCRIPT out=... bg=... fps=24`; the `summary:` line of each `cg.out.N` is that frame's instructions. The count includes the preview's own dial blit (a memcpy), so compare a build with the same preview against another, not against the frame-identity probe.
+
+**[2026-11-10] Instructions per frame for the dip**
+`settled.script` (a home face for one second) is the steady-state frame the transition scripts are read against. Per-frame callgrind of `slide`, `watch-enter`, `style` and `settled` at knob 0 and knob 1 is in `frame-cost.md` ("The panel dip, 2026-11-10"). The two knobs do not line up frame for frame, because the dip holds the old screen for a different number of frames, so read the worst frame and the sum over the heavy frames, not a frame-by-frame difference.
 
 **[2026-11-10] The tool cannot see the panel**
 A framebuffer is not the glass: the CO5300 AMOLED black, gamma and the QSPI tearing are not here, and frame times are the stub clock's, not the device's. A preview that looks smooth says the eases are right, not that the device holds 24 fps (`frame-cost.md`).

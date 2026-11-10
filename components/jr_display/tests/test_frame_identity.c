@@ -166,17 +166,53 @@ static void mp_build_dial(void)
     }
 }
 
+/* The panel dip needs the pump between strips as panel_flush runs it. With
+ * mp_frame_ms > 0 a frame takes that many ms of the display's clock, the pump runs
+ * before every strip (and the frame boundary is reported at its end), and every
+ * brightness write and pump sample is logged. mp_frame_ms == 0 is the plain
+ * frame the motion tolerance uses. */
+static int mp_frame_ms;
+static int64_t mp_entry_override = -1;   /* >= 0: the entry clock the frame is composed with */
+static bool mp_unbound;                  /* the presenter never binds the dial the compositor asks for */
+typedef struct { int64_t us; int value; int dip; } mp_write_t;
+typedef struct { int64_t us; int dip; int phase; } mp_sample_t;
+#define MP_MAX_LOG 4096
+static mp_write_t mp_writes[MP_MAX_LOG];
+static mp_sample_t mp_samples[MP_MAX_LOG];
+static int mp_nwrites, mp_nsamples;
+static uint32_t mp_last_entry;
+static bool mp_last_swapped, mp_last_ready;
+
+static void mp_pump(int64_t us, int64_t restore_us)
+{
+    s_fake_us = us;
+    const unsigned calls = s_stub_brightness_calls;
+    brightness_pump();
+    if (s_stub_brightness_calls != calls && mp_nwrites < MP_MAX_LOG) {
+        mp_writes[mp_nwrites++] = (mp_write_t){ us, (int)s_stub_panel_brightness, s_dip };
+    }
+    if (mp_nsamples < MP_MAX_LOG) {
+        mp_samples[mp_nsamples++] = (mp_sample_t){ us, s_dip, (int)s_dip_phase };
+    }
+    s_fake_us = restore_us;
+}
+
 static void mp_frame(int64_t t_us, uint16_t *fb)
 {
     jr_display_ctx_t *ctx = &s_display;
     const int64_t ms = t_us / 1000;
     s_fake_us = t_us;
-    if (jr_display_nav_space() == JR_DISPLAY_SPACE_WATCH) {
+    /* (main keeps the clock up while the watch is still on the glass: with the panel dip
+     * that is until the dark swaps it out) */
+    if (jr_display_nav_space() == JR_DISPLAY_SPACE_WATCH ||
+        (s_dip_mode == DIP_MODE_SPACE && !s_dip_swapped && s_space_from == (uint8_t)JR_DISPLAY_SPACE_WATCH) ||
+        (s_dip_on && (uint8_t)(s_nav_word >> NAV_SERIAL_SHIFT) != s_space_serial_seen &&
+         (uint8_t)((s_nav_word >> NAV_PREV_SHIFT) & NAV_SPACE_MASK) == (uint8_t)JR_DISPLAY_SPACE_WATCH)) {
         jr_display_clock_set(true, 10, 8, (int)((ms / 1000) % 60));
     } else {
         jr_display_clock_set(false, 0, 0, 0);
     }
-    const jr_face_t dial = watch_dial_face();
+    const jr_face_t dial = mp_unbound ? JR_FACE_COUNT : watch_dial_face();
     if (dial != JR_FACE_COUNT) {
         s_dial_frame = mp_dial;
         s_dial_frame_face = dial;
@@ -187,13 +223,25 @@ static void mp_frame(int64_t t_us, uint16_t *fb)
         ctx->shown_face = JR_FACE_IDLE;
     }
     s_parked = !s_dial_blit && __atomic_load_n(&s_park_want, __ATOMIC_ACQUIRE) != 0;
+    if (mp_frame_ms > 0) {
+        mp_pump(t_us, t_us);             /* panel_flush: the pump, then the frame-start latch */
+    }
     overlay_fade_tick();
+    if (mp_entry_override >= 0) {
+        s_entry_ms = (uint32_t)mp_entry_override;
+    }
+    mp_last_entry = s_entry_ms;
+    mp_last_swapped = s_dip_mode != DIP_MODE_NONE && s_dip_swapped;
+    mp_last_ready = s_dip_mode != DIP_MODE_NONE && s_dip_ready;
     if (!s_parked) {
         fc_fill_face(fb);
     }
     for (int y = 0; y < 466; y += 12) {
         const int y2 = y + 12 > 466 ? 466 : y + 12;
         uint16_t *p = fb + (size_t)y * 466;
+        if (mp_frame_ms > 0 && y > 0) {
+            mp_pump(t_us + (int64_t)mp_frame_ms * 1000 * (y / 12) / 39, t_us);
+        }
         if (s_parked) {
             memcpy(p, mp_black + (size_t)y * 466, (size_t)(y2 - y) * 466u * sizeof(uint16_t));
         }
@@ -202,6 +250,9 @@ static void mp_frame(int64_t t_us, uint16_t *fb)
         apply_hud_overlay(ctx, 0, y, 466, y2, p);
         apply_shell_overlay(ctx, 0, y, 466, y2, p);
         apply_surface_overlay(ctx, 0, y, 466, y2, p);
+    }
+    if (mp_frame_ms > 0) {
+        dip_frame_done();                /* panel_flush: the last strip of the frame is submitted */
     }
     mp_frame_no++;
 }
@@ -309,6 +360,10 @@ static int fade_motion_check(int *checks)
         for (unsigned b = 0; b < 32; b++) {
             const uint32_t bit = 1u << b;
             if ((JR_KNOB_KNOWN_MASK & bit) == 0u) continue;
+            /* The panel dip (bit 0) is NOT pixel-identical in motion by design: it draws
+             * each side of the dark at full strength instead of the fade. The tolerance
+             * does not apply to it; dip_checks.inc pins it with its own tests. */
+            if (bit == JR_KNOB_PANEL_DIP) continue;
             const int n2 = mp_play(sc, bit, cand);
             (*checks)++;
             if (n2 != n0) { printf("FAIL motion %s bit %u: %d frames, knob 0 had %d\n", sc->name, b, n2, n0); bad++; continue; }
@@ -330,6 +385,8 @@ static int fade_motion_check(int *checks)
     for (int i = 0; i < MP_MAX_FRAMES; i++) { free(base[i]); free(cand[i]); }
     return bad;
 }
+
+#include "dip_checks.inc"
 
 int main(void)
 {
@@ -416,6 +473,7 @@ int main(void)
     failures += dial_span_check(&checks);
     fc_knob_extra = 0;
     failures += fade_motion_check(&checks);
+    failures += dp_check(&checks);
     /* every scene must be pinned at least once: a scene added to the fixture
      * and not to the table would otherwise be unguarded */
     for (int s = 0; s < FC_NSCENES; s++) {

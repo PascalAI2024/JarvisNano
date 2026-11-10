@@ -196,6 +196,9 @@ typedef struct {
     int32_t light_shadow_dx_q4, light_shadow_dy_q4;
     /* The lean the dial last drew with (tilt.h, -256..256); 0,0 off CELESTIAL. */
     int32_t tilt_x, tilt_y;
+    /* The panel dip (perf knob bit 0): the level now (0..256, 256 = none), the
+     * brightness writes it has caused, and the length of the last dark hold. */
+    uint32_t dip, dip_writes, dip_hold_ms;
     jr_display_boot_timing_t boot_timing;
 } jr_display_diag_t;
 

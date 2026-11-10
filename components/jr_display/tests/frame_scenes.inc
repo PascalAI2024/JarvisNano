@@ -147,6 +147,11 @@ static void fc_setup(const fc_scene_t *sc)
 {
     jr_display_set_perf_knob(fc_knob_extra);
     knob_apply();                    /* the render task does this once a frame */
+    dip_abort(); s_dip_entry_next = UINT32_MAX;                     /* a scene starts with no panel dip under way, and a fresh count */
+    s_dip_tail = false;
+    s_dip_wrote = false;
+    s_dip_writes = 0U;
+    s_dip_hold_ms = 0U;
 #ifdef JR_SHADE_REC
     if (fc_shade_rec_on) {
         shade_rec_alloc();

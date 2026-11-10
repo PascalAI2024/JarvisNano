@@ -3099,6 +3099,7 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         "\"light\":{\"gx_mg\":%d,\"gy_mg\":%d,"
         "\"shadow_dx_q4\":%d,\"shadow_dy_q4\":%d},"
         "\"tilt\":[%d,%d],"
+        "\"dip\":%u,\"dip_writes\":%u,\"dip_hold_ms\":%u,"
         "\"current_asset_bytes\":%u,\"free_psram\":%u,\"stack_hwm\":%u,"
         "\"boot_timing\":{\"time_base\":\"esp_timer_since_boot\","
         "\"optical\":false,\"includes_rom\":false,"
@@ -3128,6 +3129,7 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         (int)d.light_gx_mg, (int)d.light_gy_mg,
         (int)d.light_shadow_dx_q4, (int)d.light_shadow_dy_q4,
         (int)d.tilt_x, (int)d.tilt_y,
+        (unsigned)d.dip, (unsigned)d.dip_writes, (unsigned)d.dip_hold_ms,
         (unsigned)d.current_asset_bytes, (unsigned)d.free_psram_bytes,
         (unsigned)d.task_stack_hwm,
         d.boot_timing.init_started ? "true" : "false",

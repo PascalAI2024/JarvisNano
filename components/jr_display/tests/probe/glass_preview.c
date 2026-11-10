@@ -25,7 +25,11 @@
  *     glass-preview.md for the mapping and what it leaves out.
  *
  * Usage: glass_preview SCRIPT out=FILE [bg=DIR] [fps=N] [knob=WORD]
- *   knob=WORD  the perf knob word (perf_knob.h) the whole run uses; absent = 0, the shipped path
+ *   knob=WORD  the perf knob word (perf_knob.h) the whole run uses; absent = 0, the shipped path.
+ *              With JR_KNOB_PANEL_DIP (1) the panel dip runs: the brightness chain is pumped in 39
+ *              sub-steps of every frame, as panel_flush does (one per strip), the frame is dimmed by
+ *              the light the glass had over its scan (the mean of f(dip) at those sub-steps), and
+ *              "DIP <frame> <ms> <dip> <sent>" lists every brightness write made inside a frame.
  *   stdout: "F <index> <ms> <hash>" per recorded frame, "NOTE ..." lines,
  *           "MARK <frame> <line>" for every script step. exit 2 on a bad script.
  *
@@ -60,6 +64,9 @@ static bool s_pv_dial_tried[6];
 static int s_pv_fps = 24;
 static bool s_pv_note_face, s_pv_note_dial;
 static uint16_t *s_pv_black;
+static bool s_pv_dip;                /* JR_KNOB_PANEL_DIP: the frames are dimmed by the panel */
+static int s_pv_light = 256;         /* the light of the frame being recorded, 0..256 */
+static long s_pv_dip_rows;
 
 static int pv_dial_slot(jr_face_t f)
 {
@@ -247,6 +254,23 @@ static uint16_t *s_pv_fb;
 #include <valgrind/callgrind.h>
 #endif
 
+/* panel_flush's pump at `us` of the frame: the brightness chain, and the line of the table when
+ * it wrote. Returns the light the glass has after it. */
+static int pv_pump(int64_t us, bool record)
+{
+    const unsigned calls = s_stub_brightness_calls;
+    const int64_t keep = s_fake_us;
+    s_fake_us = us;
+    brightness_pump();
+    if (record && s_stub_brightness_calls != calls) {
+        printf("DIP %ld %lld %d %u\n", s_recorded, (long long)(us / 1000), s_dip,
+               (unsigned)s_stub_panel_brightness);
+        s_pv_dip_rows++;
+    }
+    s_fake_us = keep;
+    return dip_light(s_dip);
+}
+
 static void pv_frame(int64_t t_us, bool record, uint16_t *fb)
 {
     jr_display_ctx_t *ctx = &s_display;
@@ -276,6 +300,11 @@ static void pv_frame(int64_t t_us, bool record, uint16_t *fb)
     }
     s_parked = !s_dial_blit && __atomic_load_n(&s_park_want, __ATOMIC_ACQUIRE) != 0;
 
+    int light_sum = 0, light_n = 0;
+    if (s_pv_dip) {
+        light_sum += pv_pump(t_us, record);        /* panel_flush: the pump, then the frame-start latch */
+        light_n++;
+    }
     overlay_fade_tick();
 
     const uint16_t *face = s_parked || !s_pv_face
@@ -285,12 +314,25 @@ static void pv_frame(int64_t t_us, bool record, uint16_t *fb)
     for (int y = 0; y < 466; y += 12) {
         const int y2 = y + 12 > 466 ? 466 : y + 12;
         uint16_t *p = fb + (size_t)y * 466;
+        if (s_pv_dip && y > 0) {
+            light_sum += pv_pump(t_us + (int64_t)(1000000LL / s_pv_fps) * (y / 12) / 39, record);
+            light_n++;
+        }
         memcpy(p, face + (size_t)y * 466, (size_t)(y2 - y) * 466u * sizeof(uint16_t));
         (void)rest_eligible(ctx);
         apply_dial(ctx, 0, y, 466, y2, p);
         apply_hud_overlay(ctx, 0, y, 466, y2, p);
         apply_shell_overlay(ctx, 0, y, 466, y2, p);
         apply_surface_overlay(ctx, 0, y, 466, y2, p);
+    }
+    if (s_pv_dip) {
+        dip_frame_done();                /* panel_flush: the last strip of the frame is submitted */
+        s_pv_light = light_n > 0 ? light_sum / light_n : 256;
+        static uint32_t last_hold;
+        if (record && s_dip_hold_ms != last_hold) {
+            printf("HOLD %ld %u\n", s_recorded, (unsigned)s_dip_hold_ms);   /* the dark's length, as dip_hold_ms reports it */
+            last_hold = s_dip_hold_ms;
+        }
     }
     s_frame++;
     if (!record) return;
@@ -305,12 +347,12 @@ static void pv_frame(int64_t t_us, bool record, uint16_t *fb)
     if (!rgb) rgb = malloc(466u * 466u * 3u);
     for (int i = 0; i < 466 * 466; i++) {
         const uint16_t v = fb[i];
-        rgb[i * 3 + 0] = (unsigned char)(((v >> 11) & 31) * 255 / 31);
-        rgb[i * 3 + 1] = (unsigned char)(((v >> 5) & 63) * 255 / 63);
-        rgb[i * 3 + 2] = (unsigned char)((v & 31) * 255 / 31);
+        rgb[i * 3 + 0] = (unsigned char)((((v >> 11) & 31) * 255 / 31) * s_pv_light / 256);
+        rgb[i * 3 + 1] = (unsigned char)((((v >> 5) & 63) * 255 / 63) * s_pv_light / 256);
+        rgb[i * 3 + 2] = (unsigned char)(((v & 31) * 255 / 31) * s_pv_light / 256);
     }
     fwrite(rgb, 1, 466u * 466u * 3u, s_outf);
-    printf("F %ld %lld %016llx\n", s_recorded, (long long)ms, (unsigned long long)fc_hash(fb));
+    printf("F %ld %lld %016llx %d\n", s_recorded, (long long)ms, (unsigned long long)fc_hash(fb), s_pv_light);
     s_recorded++;
 }
 
@@ -329,6 +371,14 @@ static void pv_scene(const char *name)
     s_chg = sc->charging;
     s_mute = sc->muted;
     pv_env();
+    s_pv_dip = s_dip_on;
+    if (s_pv_dip) {                      /* the mood at full light, the panel at rest */
+        jr_display_set_brightness(100U);
+        atomic_store(&s_brightness_shown, 100);
+        atomic_store(&s_brightness_have, 100U);
+        s_stub_panel_brightness = 100U;
+    }
+    s_pv_light = 256;
     for (int i = 0; i < PV_PRE_FRAMES; i++) pv_frame(pv_t_of(s_frame), false, s_pv_fb);
 }
 
@@ -427,6 +477,8 @@ int main(int argc, char **argv)
         printf("NOTE face: stand-in, %d frames cut from the rwave_idle contact sheet, not the decoded EAF\n", s_pv_nface);
     if (s_pv_note_dial)
         printf("NOTE dials: stand-in, the dial_*_preview.png art, not the decoded EAF, hands drawn by the real compositor\n");
+    if (s_pv_dip)
+        printf("NOTE panel dip: %ld brightness writes inside recorded frames; frames are dimmed by the mean light over their scan, not by what the CO5300 does with a 0x51 write in mid-scan\n", s_pv_dip_rows);
     printf("DONE frames=%ld fps=%d\n", s_recorded, s_pv_fps);
     return 0;
 }
