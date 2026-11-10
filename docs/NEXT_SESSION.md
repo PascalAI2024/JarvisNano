@@ -84,15 +84,22 @@ device tables from four flashes.
 - **Host instruction counts do not predict device milliseconds.** Two cuts
   that counted fewer instructions ran slower because they wrote more memory.
   Measure every cut on the device before keeping it.
-- **Open on the watch:** the commit that recorded MINIMAL's disc (91b44ec) left
-  that dial 10–14 ms slower with the record on or off; the record is switched
-  off on the device in `dial_rec_alloc`. SKELETON's balance wheel is about
-  30 ms. The dial copy from PSRAM is 9 ms on six dials. MINIMAL and the JARVIS
-  style refresh at the home clip's 8 fps whatever they cost.
-- **Motion is judged on the host first.** `scripts/glass-preview.py --script
-  ring|shade|watch|slide|style|watch-enter` plays the real compositor at
-  24 fps. The transition grammar (everything passes through the dark) is in
-  97b0b92 and has not been seen on the panel yet.
+- **A cost candidate ships behind the perf knob and the device picks.**
+  `POST /api/debug/display?knob=N` selects among pixel-identical candidates
+  (`components/jr_display/include/jr_display/perf_knob.h`; no bits are defined
+  at present). The first round found MINIMAL's regression in one flash: the
+  two-pixels-to-a-word fill was 12 ms slower than the loop it replaced. It and
+  the disc record are deleted; MINIMAL is about 40 ms.
+- **Open on the watch:** SKELETON's balance wheel is about 30 ms and a class
+  map did not help. The dial copy from PSRAM is 7.5–7.8 ms on six dials. The
+  drawn dials (JARVIS style, MINIMAL) now run at the full cadence.
+- **Motion is judged on the host first, then timed on the device.**
+  `scripts/glass-preview.py --script ring|shade|watch|slide|style|watch-enter`
+  plays the real compositor at 24 fps. The transition grammar (everything
+  passes through the dark) is on the device and stutters: a fading screen
+  blends every primitive, so a transition frame costs two to three times a
+  settled one. PLAN N15.9 is the fix (draw at full strength, dim the strip
+  once).
 - **Board probe** (`scripts/board-probe.py`): TE is 60 Hz on GPIO13, the gyro
   answers, the touch chip reports two fingers while the driver reads one, QSPI
   runs at 40 MHz. The PWR key and a two-finger touch still need the owner's
