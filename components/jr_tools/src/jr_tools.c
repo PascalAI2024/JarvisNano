@@ -567,14 +567,27 @@ static jr_tool_status_t fetch_weather(jr_tool_result_t *result)
         } else {
             for (;;) {
                 /* One byte past the cap is read to tell "exactly full" from
-                 * "too big"; a body that does not fit is rejected. */
-                const int got = esp_http_client_read(
-                    client, raw + have, (int)(JR_WEATHER_BODY_CAP + 1U - have));
+                 * "too big"; a body that does not fit is rejected. Never ask
+                 * for more than the server announced: on a keep-alive
+                 * connection a read past the body waits out the whole 35 s
+                 * timeout (measured on the device: a 2 KB answer took 36.8 s). */
+                size_t want = JR_WEATHER_BODY_CAP + 1U - have;
+                if (announced > 0 && (size_t)announced - have < want) {
+                    want = (size_t)announced - have;
+                }
+                const int got = want == 0U ? 0 : esp_http_client_read(
+                    client, raw + have, (int)want);
                 if (got < 0) {
                     outcome = JR_TOOL_STATUS_NETWORK_ERROR;
                     break;
                 }
-                if (got == 0) {
+                have += (size_t)got;
+                if (have > JR_WEATHER_BODY_CAP) {
+                    outcome = JR_TOOL_STATUS_BAD_RESPONSE;
+                    break;
+                }
+                if (got == 0 || (announced > 0 && have >= (size_t)announced) ||
+                    esp_http_client_is_complete_data_received(client)) {
                     const jr_weather_status_t ws = jr_weather_project(
                         raw, have, result->response_json,
                         sizeof(result->response_json));
@@ -584,11 +597,6 @@ static jr_tool_status_t fetch_weather(jr_tool_result_t *result)
                     }
                     outcome = ws == JR_WEATHER_OK ? JR_TOOL_STATUS_OK
                                                   : JR_TOOL_STATUS_BAD_RESPONSE;
-                    break;
-                }
-                have += (size_t)got;
-                if (have > JR_WEATHER_BODY_CAP) {
-                    outcome = JR_TOOL_STATUS_BAD_RESPONSE;
                     break;
                 }
             }
