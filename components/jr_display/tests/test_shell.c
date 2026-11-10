@@ -2480,6 +2480,86 @@ static void test_weather_hours_ring_starts_now(void)
     reset_nav();
 }
 
+/* THE ICONS. WEATHER shows the sky as an icon (day or night from the sun times
+ * and the clock), STATUS a bolt beside the power word while charging. Every sky
+ * the tools side names is mapped; the one it cannot name draws no icon. */
+static void test_icons_follow_the_sky_and_the_charger(void)
+{
+    static const struct { jr_display_sky_t sky; int day, night; } map[] = {
+        { JR_DISPLAY_SKY_CLEAR,  GLASS_ICON_SUN,     GLASS_ICON_MOON  },
+        { JR_DISPLAY_SKY_PARTLY, GLASS_ICON_PARTLY,  GLASS_ICON_CLOUD },
+        { JR_DISPLAY_SKY_CLOUDS, GLASS_ICON_CLOUD,   GLASS_ICON_CLOUD },
+        { JR_DISPLAY_SKY_FOG,    GLASS_ICON_FOG,     GLASS_ICON_FOG   },
+        { JR_DISPLAY_SKY_RAIN,   GLASS_ICON_RAIN,    GLASS_ICON_RAIN  },
+        { JR_DISPLAY_SKY_STORM,  GLASS_ICON_THUNDER, GLASS_ICON_THUNDER },
+        { JR_DISPLAY_SKY_SNOW,   GLASS_ICON_SNOW,    GLASS_ICON_SNOW  },
+        { JR_DISPLAY_SKY_UNKNOWN, -1,                -1               },
+    };
+    for (size_t i = 0; i < sizeof map / sizeof *map; ++i) {
+        CHECK(sp_wx_icon_for(map[i].sky, false) == map[i].day, "sky %d by day", (int)map[i].sky);
+        CHECK(sp_wx_icon_for(map[i].sky, true) == map[i].night, "sky %d by night", (int)map[i].sky);
+    }
+
+    jr_display_sun_set(422, 1175);                       /* 7:02 .. 19:35 */
+    jr_display_clock_set(true, 14, 5, 0);
+    CHECK(!sp_wx_is_night(), "14:05 is day");
+    jr_display_clock_set(true, 23, 5, 0);
+    CHECK(sp_wx_is_night(), "23:05 is night");
+    jr_display_clock_set(true, 3, 0, 0);
+    CHECK(sp_wx_is_night(), "03:00 is night");
+    jr_display_clock_set(true, 7, 2, 0);
+    CHECK(!sp_wx_is_night(), "sunrise minute is day");
+    jr_display_clock_set(true, 19, 35, 0);
+    CHECK(sp_wx_is_night(), "sunset minute is night");
+    jr_display_clock_set(false, 0, 0, 0);
+    CHECK(!sp_wx_is_night(), "no clock: day");
+    jr_display_clock_set(true, 23, 5, 0);
+    jr_display_sun_set(-1, -1);
+    CHECK(!sp_wx_is_night(), "no sun times: day");
+
+    jr_display_sun_set(422, 1175);
+    set_weather(true, 83, 86, 76, JR_DISPLAY_SKY_CLEAR, "CLEAR", 0U);
+    sp_compose();
+    CHECK(s_wx_icon == GLASS_ICON_MOON, "clear at 23:05 composes the moon, got %d", s_wx_icon);
+    set_weather(false, 0, 0, 0, JR_DISPLAY_SKY_RAIN, "RAIN", 0U);
+    sp_compose();
+    CHECK(s_wx_icon == -1, "no weather, no icon");
+
+    /* the bolt: ink left of the power word while charging, none otherwise */
+    jr_display_clock_set(true, 14, 5, 0);
+    for (int charging = 0; charging <= 1; ++charging) {
+        stage_space(JR_DISPLAY_SPACE_STATUS);
+        s_space_ease = 256;
+        s_entry_ms = SP_ENTRY_TOTAL_MS;
+        jr_display_power_set(74U, 4020U, charging != 0, charging != 0);
+        sp_compose();
+        uint16_t *fb = render_frame();
+        CHECK(fb != NULL, "frame allocated");
+        if (!fb) {
+            return;
+        }
+        int bolt = 0, fx = -1, fy = -1;
+        for (int y = 255; y <= 290; ++y) {
+            for (int x = 170; x <= 190; ++x) {
+                if (fb[(size_t)y * HUD_W + x] != POISON && bolt++ == 0) {
+                    fx = x;
+                    fy = y;
+                }
+            }
+        }
+        if (charging) {
+            CHECK(bolt > 40, "the charging bolt draws (%d px)", bolt);
+        } else {
+            CHECK(bolt == 0, "no bolt off the charger (%d px, first at %d,%d)", bolt, fx, fy);
+        }
+        free(fb);
+    }
+    jr_display_sun_set(-1, -1);
+    jr_display_weather_set(NULL);
+    jr_display_clock_set(false, 0, 0, 0);
+    reset_nav();
+}
+
 /* THE ENTRY. A screen becoming current starts a clock; STATUS and WEATHER
  * draw from it; everything else parks it. It runs for SP_ENTRY_TOTAL_MS and
  * then the screen is still, at the same frame it would have drawn without any
@@ -4891,6 +4971,7 @@ int main(void)
     test_weather_without_data_prints_no_number();
     test_stale_weather_loses_its_colour();
     test_weather_hours_ring_starts_now();
+    test_icons_follow_the_sky_and_the_charger();
     test_entry_clock_runs_then_stops();
     test_entry_builds_the_screens();
     test_outgoing_screen_does_not_replay_the_entry();

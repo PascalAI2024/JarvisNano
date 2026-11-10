@@ -14,6 +14,7 @@
 #include <stdatomic.h>
 #include "jr_display/hud_render.h"
 #include "jr_display/glass.h"
+#include "jr_display/glass_icon.h"
 
 #include <stdio.h>
 #include <stddef.h>
@@ -1840,6 +1841,7 @@ static char s_wx_hilo[10];            /* "H86 L76" / ""                       */
 static bool s_wx_valid;
 static bool s_wx_stale;
 static jr_display_sky_t s_wx_sky;
+static int s_wx_icon = -1;       /* glass_icon_id_t of the sky, or -1: none */
 /* THE NEXT TWELVE HOURS, one 30 degree slot each round the ring, clockwise
  * from 12 o'clock, slot 0 being now. */
 #define SP_WX_HOURS      12
@@ -2484,12 +2486,45 @@ static int sp_hhmm(char *dst, int len, int cap, int minute)
     return sp_num(dst, len, cap, (uint32_t)(minute % 60));
 }
 
+/* After sunset or before sunrise, from the two words the shell already holds.
+ * Without a sun or a clock it is day: the sun is the icon that is true of every
+ * unknown. */
+static bool sp_wx_is_night(void)
+{
+    const uint32_t sw = __atomic_load_n(&s_sun_word, __ATOMIC_ACQUIRE);
+    const uint32_t cw = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
+    if ((sw & (1u << 22)) == 0u || (cw & (1u << 16)) == 0u) {
+        return false;
+    }
+    const int now = (int)((cw >> 8) & 0xFFu) * 60 + (int)(cw & 0xFFu);
+    return now < (int)(sw & 0x7FFu) || now >= (int)((sw >> 11) & 0x7FFu);
+}
+
+/* The sky as an icon. Every sky the tools side can name is mapped; a sky it
+ * could not name (UNKNOWN: windy, dust, a word it has no rule for) gets no icon
+ * rather than a cloud that says something the answer did not. A partly cloudy
+ * night is a plain cloud: the sun behind it would be wrong. */
+static int sp_wx_icon_for(jr_display_sky_t sky, bool night)
+{
+    switch (sky) {
+    case JR_DISPLAY_SKY_CLEAR:  return night ? GLASS_ICON_MOON : GLASS_ICON_SUN;
+    case JR_DISPLAY_SKY_PARTLY: return night ? GLASS_ICON_CLOUD : GLASS_ICON_PARTLY;
+    case JR_DISPLAY_SKY_CLOUDS: return GLASS_ICON_CLOUD;
+    case JR_DISPLAY_SKY_FOG:    return GLASS_ICON_FOG;
+    case JR_DISPLAY_SKY_RAIN:   return GLASS_ICON_RAIN;
+    case JR_DISPLAY_SKY_STORM:  return GLASS_ICON_THUNDER;
+    case JR_DISPLAY_SKY_SNOW:   return GLASS_ICON_SNOW;
+    default:                    return -1;
+    }
+}
+
 static void sp_compose_weather(void)
 {
     const jr_display_weather_t *w =
         &s_weather[__atomic_load_n(&s_weather_slot, __ATOMIC_ACQUIRE) & 1u];
     s_wx_valid = w->valid;
     s_wx_sky = w->sky;
+    s_wx_icon = w->valid ? sp_wx_icon_for(w->sky, sp_wx_is_night()) : -1;
     s_wx_age[0] = '\0';
     s_wx_temp[0] = '\0';
     s_wx_hilo[0] = '\0';
@@ -3990,6 +4025,10 @@ static const char *sp_headline(int space);
 #define SG_STAT_DX      56
 #define SG_AGE_Y        362     /* WEATHER: how old it is, where STATUS has its stats */
 #define SG_RISE_PX      8
+#define SG_WX_ICON_SIZE GLASS_ICON_SM   /* the sky, above its word inside the ring */
+#define SG_WX_ICON_GAP  10
+#define SG_BOLT_INK_W   14   /* the small bolt's ink is this wide inside its 28 px box */
+#define SG_BOLT_GAP     6
 #define SG_FADE_MS      300
 #define SG_GLOW16       40       /* 2.5 px each side; the dearest part of the frame */
 #define SG_RAIN_SWEEP   3641    /* 20 degrees of a 30 degree slot */
@@ -4027,6 +4066,34 @@ static inline void sg_txt_row(uint16_t *row, int y, int lo, int hi, bool swap, c
     if (t->len > 0 && y >= t->y_lo && y <= t->y_hi) {
         glass_text_row(row, y, lo, hi, t->font, t->s, (size_t)t->len, t->x0, t->y_top,
                        t->tracking, t->color, t->alpha, swap);
+    }
+}
+
+/* One icon, centred on cx, its box top at y_top. An id below zero is no icon. */
+typedef struct {
+    int id, size, x0, y_top, y_hi;
+    uint16_t color;
+    uint8_t alpha;
+} sg_ico_t;
+
+static void sg_ico_make(sg_ico_t *t, int id, glass_icon_size_t size, int cx, int y_top,
+                        uint16_t native, int alpha)
+{
+    const int px = glass_icon_px(size);
+    t->id = id;
+    t->size = (int)size;
+    t->x0 = cx - px / 2;
+    t->y_top = y_top;
+    t->y_hi = y_top + px;
+    t->color = native;
+    t->alpha = (uint8_t)(id < 0 || alpha <= 0 ? 0 : (alpha > 255 ? 255 : alpha));
+}
+
+static inline void sg_ico_row(uint16_t *row, int y, int lo, int hi, bool swap, const sg_ico_t *t)
+{
+    if (t->alpha > 0u && y >= t->y_top && y < t->y_hi) {
+        glass_icon_row(row, y, lo, hi, (glass_icon_id_t)t->id, (glass_icon_size_t)t->size, t->x0,
+                       t->y_top, t->color, t->alpha, swap);
     }
 }
 
@@ -4183,6 +4250,10 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
     sg_txt_make(&t_label, GLASS_FONT_LABEL, head, llen, SP_CX,
                 hero_top - 26 + sg_ent_rise(ent, t_lbl), 3, s_wx_valid ? accent : SP_C_GREY,
                 sg_ent_alpha(st, ent, t_lbl));
+    sg_ico_t t_ico;
+    sg_ico_make(&t_ico, s_wx_icon, SG_WX_ICON_SIZE, SP_CX,
+                hero_top - 26 - SG_WX_ICON_GAP - glass_icon_px(SG_WX_ICON_SIZE) + sg_ent_rise(ent, t_lbl),
+                accent, sg_ent_alpha(st, ent, t_lbl));
     const int hw = glass_text_width(GLASS_FONT_HERO, s_wx_temp, (size_t)tlen, 0);
     const int dw = glass_text_width(GLASS_FONT_VALUE, "*", 1, 0);
     const int x0 = SP_CX - (hw + 4 + dw) / 2;
@@ -4215,6 +4286,7 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
                               sg_sweep[i], rain, sg_a[i], swap);
             }
         }
+        sg_ico_row(row, y, lo, hi, swap, &t_ico);
         sg_txt_row(row, y, lo, hi, swap, &t_label);
         sg_txt_row(row, y, lo, hi, swap, &t_temp);
         sg_txt_row(row, y, lo, hi, swap, &t_deg);
@@ -4377,8 +4449,18 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
                 hero_top - 26 + sg_ent_rise(ent, t_lbl), 3, SP_C_GREY, sg_ent_alpha(st, ent, t_lbl));
     sg_txt_at(&t_hero, GLASS_FONT_HERO, pctbuf, plen, x0, hero_top, SP_C_INK, st);
     sg_txt_at(&t_pc, GLASS_FONT_VALUE, "%", have_gauge ? 1 : 0, x0 + hw + 5, base - val.cap_h, fill, st);
-    sg_txt_make(&t_word_t, GLASS_FONT_TEXT, word, wlen, SP_CX,
+    /* Charging: the bolt stands beside the word and the pair is centred as one,
+     * so the word keeps its place in the middle of the ring when it is alone. */
+    const int ww = glass_text_width(GLASS_FONT_TEXT, word, (size_t)wlen, 1);
+    const int word_cx = charging ? SP_CX + (SG_BOLT_INK_W + SG_BOLT_GAP) / 2 : SP_CX;
+    sg_txt_make(&t_word_t, GLASS_FONT_TEXT, word, wlen, word_cx,
                 base + 16 + sg_ent_rise(ent, t_word), 1, SP_C_GREY, sg_ent_alpha(st, ent, t_word));
+    sg_ico_t t_bolt;
+    sg_ico_make(&t_bolt, charging ? GLASS_ICON_BOLT : -1, GLASS_ICON_SM,
+                word_cx - ww / 2 - SG_BOLT_GAP - SG_BOLT_INK_W / 2,
+                base + 16 + glass_font_metrics(GLASS_FONT_TEXT).cap_h / 2 - glass_icon_px(GLASS_ICON_SM) / 2 +
+                    sg_ent_rise(ent, t_word),
+                fill, sg_ent_alpha(st, ent, t_word));
     static const char *const k_names[3] = {"WIFI", "LINK", "TOOLS"};
     const char *vals[3] = {dbm, link_on ? "ON" : "OFF", tools_on ? "ON" : "OFF"};
     const int vlen[3] = {dlen, link_on ? 2 : 3, tools_on ? 2 : 3};
@@ -4419,6 +4501,7 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
         sg_txt_row(row, y, lo, hi, swap, &t_hero);
         sg_txt_row(row, y, lo, hi, swap, &t_pc);
         sg_txt_row(row, y, lo, hi, swap, &t_word_t);
+        sg_ico_row(row, y, lo, hi, swap, &t_bolt);
         for (int i = 0; i < 3; ++i) {
             sg_txt_row(row, y, lo, hi, swap, &t_sl[i]);
             sg_txt_row(row, y, lo, hi, swap, &t_sv[i]);
