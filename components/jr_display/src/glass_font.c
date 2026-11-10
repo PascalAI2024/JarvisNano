@@ -61,6 +61,34 @@ glass_metrics_t glass_font_metrics(glass_font_id_t font)
     return m;
 }
 
+/* Printable ASCII goes through a table built from the atlases on first use: the
+ * atlases have gaps, so the "index = cp - first" guess below overshoots by more
+ * than its six-step walk and most lookups ended in the binary search (about
+ * 60 instructions a glyph, and this runs for every glyph of every text line on
+ * every row). Entry = glyph index + 1; 0 = no such glyph (the atlas is sorted
+ * and unique, so a code point absent from it is absent); 255 = index too large
+ * for a byte, search. GLASS_FONT_COUNT * 96 bytes of .bss. Built by whichever
+ * task asks first: two builders write the same values, and the ready flag is
+ * published last, so a reader either sees a finished table or searches. */
+#define GLYPH_LUT_FIRST 32u
+#define GLYPH_LUT_N 96u
+static uint8_t s_glyph_lut[GLASS_FONT_COUNT][GLYPH_LUT_N];
+static uint8_t s_glyph_lut_ready;
+
+static void glyph_lut_build(void)
+{
+    for (int fi = 0; fi < (int)GLASS_FONT_COUNT; fi++) {
+        const glass_font_t *f = &glass_fonts[fi];
+        for (unsigned i = 0; i < f->n_glyphs; i++) {
+            const unsigned cp = f->glyphs[i].cp;
+            if (cp >= GLYPH_LUT_FIRST && cp < GLYPH_LUT_FIRST + GLYPH_LUT_N) {
+                s_glyph_lut[fi][cp - GLYPH_LUT_FIRST] = i < 254u ? (uint8_t)(i + 1u) : 255u;
+            }
+        }
+    }
+    __atomic_store_n(&s_glyph_lut_ready, 1u, __ATOMIC_RELEASE);
+}
+
 const glass_glyph_t *glass_font_glyph(glass_font_id_t font, uint32_t cp)
 {
     if (!font_ok(font)) {
@@ -71,6 +99,18 @@ const glass_glyph_t *glass_font_glyph(glass_font_id_t font, uint32_t cp)
         cp -= 'a' - 'A';
     } else if (cp == '*') {
         cp = GLASS_DEGREE_CP;
+    }
+    if (cp - GLYPH_LUT_FIRST < GLYPH_LUT_N) {
+        if (!__atomic_load_n(&s_glyph_lut_ready, __ATOMIC_ACQUIRE)) {
+            glyph_lut_build();
+        }
+        const unsigned v = s_glyph_lut[font][cp - GLYPH_LUT_FIRST];
+        if (v == 0u) {
+            return NULL;
+        }
+        if (v != 255u) {
+            return &f->glyphs[v - 1u];
+        }
     }
     if (f->n_glyphs == 0u || cp < f->glyphs[0].cp) {
         return NULL;
