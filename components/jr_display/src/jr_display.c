@@ -5417,6 +5417,29 @@ static bool apply_companion_overlay(jr_display_ctx_t *ctx, int y1, int y2,
            y2 > view.lines[0].y;
 }
 
+/* True when apply_clock_overlay is about to clear the whole shell disc on this
+ * strip, which makes everything the shell drew into that disc a dead write:
+ * the clear is a memset of the disc sp_clip bounds every shell primitive to
+ * (the same r214 chord per row), so the veil, the black fold, the outgoing and
+ * incoming screens and the orbit rail were all painted for nothing. Measured
+ * on the host as 36 % of a MINIMAL frame and 47 % of a JARVIS-style one. The
+ * conditions are the clear's own, copied from apply_clock_overlay: the clock
+ * is up, neither the detail sheet nor the shade holds the glass, and the dial
+ * is not baked art (a baked dial is not cleared, so the shell stays under it).
+ * Must be called on the same side of the `choice` branch as the clock. */
+static bool watch_clear_follows(const jr_display_ctx_t *ctx)
+{
+    if ((jr_display_space_t)(__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) &
+                             NAV_SPACE_MASK) != JR_DISPLAY_SPACE_WATCH) {
+        return false;
+    }
+    if (s_clock_ease <= 0 || s_detail_ease > 0 || s_shade_ease > 0) {
+        return false;
+    }
+    const jr_face_t dial = watch_dial_face();
+    return !(dial != JR_FACE_COUNT && ctx->shown_face == dial);
+}
+
 static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                               int x2, int y2, uint16_t *pixels)
 {
@@ -5479,7 +5502,9 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
          * the four spaces, the context sheet, and the control shade. It is
          * skipped entirely while an ask is up (the ask owns the glass) and
          * draws nothing at all in JARVIS at rest. */
-        apply_space_overlay(ctx, y1, y2, pixels);
+        if (!watch_clear_follows(ctx)) {
+            apply_space_overlay(ctx, y1, y2, pixels);
+        }
 
         /* UI-01 clock under the STATE-04 caption. The watch is JARVIS's
          * ambient face, so it yields whenever the shell is presenting ANOTHER
