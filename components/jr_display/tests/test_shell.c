@@ -73,6 +73,8 @@ static void reset_nav(void)
 {
     __atomic_store_n(&s_nav_word, 0U, __ATOMIC_RELEASE);
     __atomic_store_n(&s_display.shell_word, 0U, __ATOMIC_RELEASE);
+    s_space_black = 0;   /* the scaffolds below stand in for sp_fade_tick's verdicts */
+    s_parked = false;
 }
 
 /* Publish one weather sample through the public setter, exactly as main.c
@@ -338,6 +340,7 @@ static void stage_power(jr_display_ota_state_t st, uint8_t pct, int overlay)
     s_space_prog = 256;
     s_space_ease = 256;
     s_space_veil = 256;
+    s_space_black = 0;
     s_detail_space = JR_DISPLAY_SPACE_STATUS;
     s_detail_ease = overlay == JR_DISPLAY_OVERLAY_DETAIL ? 256 : 0;
     s_shade_ease = overlay == JR_DISPLAY_OVERLAY_SHADE ? 256 : 0;
@@ -4515,6 +4518,277 @@ static void test_light_tick_eases_and_falls_back(void)
     CHECK(light_eq_rest(&s_light, &rest), "flat is not the rest light");
 }
 
+/* ------------------------------------------- data screens on true black -- */
+
+static uint32_t s_pk_now = 100000U;
+
+static void pk_tick(void)
+{
+    s_pk_now += 70U;
+    sp_fade_tick(s_pk_now, 70U, 8);
+    presenter_backdrop_tick(&s_display);
+}
+
+static void pk_settle(void)
+{
+    for (int i = 0; i == 0 || (i < 80 && s_space_prog < 256); ++i) {
+        pk_tick();
+    }
+    pk_tick();
+}
+
+static void pk_reset(void)
+{
+    jr_display_ctx_t *ctx = &s_display;
+    reset_nav();
+    s_parked = false;
+    __atomic_store_n(&s_park_want, 0, __ATOMIC_RELEASE);
+    s_space_black = 0;
+    s_ask_ease = 0;
+    s_canvas_ease = 0;
+    s_dial_blit = false;
+    ctx->dream_active = false;
+    ctx->quiet_active = false;
+    __atomic_store_n(&ctx->blanked, false, __ATOMIC_RELAXED);
+    __atomic_store_n(&ctx->requested_word, 0U, __ATOMIC_RELEASE);
+    s_stub_lock_failures = 0;
+    s_stub_anim_visible = false;
+    s_space_from = s_space_to = (uint8_t)JR_DISPLAY_SPACE_JARVIS;
+    s_space_serial_seen = 0;
+    s_space_prog = s_space_ease = 256;
+    s_detail_prog = s_detail_ease = 0;
+    s_shade_prog = s_shade_ease = 0;
+    pk_tick();
+}
+
+static void pk_request(jr_face_t face)
+{
+    __atomic_store_n(&s_display.requested_word,
+                     (uint32_t)face << JR_DISPLAY_CMD_FACE_SHIFT, __ATOMIC_RELEASE);
+    bool stale = false;
+    CHECK(apply_face(&s_display, face, face, 0U, &stale) == ESP_OK && !stale,
+          "face %d applies", (int)face);
+}
+
+static void test_veil_reaches_black_on_the_way_in_and_back_on_the_way_out(void)
+{
+    pk_reset();
+    CHECK(s_space_black == 0, "JARVIS at rest asks for no black");
+    jr_display_nav_set(JR_DISPLAY_SPACE_STATUS);
+    int prev = -1, mid = 0;
+    for (int i = 0; i == 0 || (i < 80 && s_space_prog < 256); ++i) {
+        pk_tick();
+        CHECK(s_space_black >= prev, "black only deepens on the way in");
+        prev = s_space_black;
+        if (s_space_black > 0 && s_space_black < 256) { mid++; }
+    }
+    CHECK(mid > 0, "the way in is a fade, not a cut");
+    CHECK(s_space_black == 256, "the slide ends at full black, got %d", s_space_black);
+
+    jr_display_nav_set(JR_DISPLAY_SPACE_JARVIS);
+    pk_tick();
+    CHECK(s_space_black < 256, "the first frame home already gives the face back");
+    prev = s_space_black;
+    for (int i = 0; i == 0 || (i < 80 && s_space_prog < 256); ++i) {
+        pk_tick();
+        CHECK(s_space_black <= prev, "black only lifts on the way home");
+        prev = s_space_black;
+    }
+    CHECK(s_space_black == 0, "the face is back in full, got %d", s_space_black);
+    pk_reset();
+}
+
+static void test_black_is_pixels_and_a_parked_backdrop_skips_the_fold(void)
+{
+    pk_reset();
+    s_display.board.swap_color_bytes = false;
+    static uint16_t full[HUD_W * STRIP_ROWS], half[HUD_W * STRIP_ROWS];
+    const int y1 = 227 - STRIP_ROWS / 2;
+    for (size_t i = 0; i < sizeof full / sizeof *full; ++i) {
+        full[i] = half[i] = 0xFFFFu;
+    }
+    sp_veil_black(&s_display, y1, y1 + STRIP_ROWS, full, 32);
+    sp_veil_black(&s_display, y1, y1 + STRIP_ROWS, half, 16);
+    CHECK(full[(STRIP_ROWS / 2) * HUD_W + 233] == 0U, "full black clears the disc");
+    CHECK(full[(STRIP_ROWS / 2) * HUD_W + 2] == 0xFFFFu, "and spares the rim outside it");
+    const uint16_t h = half[(STRIP_ROWS / 2) * HUD_W + 233];
+    CHECK(h != 0U && h != 0xFFFFu, "half way is dimmer, not gone (0x%04x)", h);
+    CHECK(sp_fade_to_black565(0xFFFFu, false, 0) == 0xFFFFu, "k=0 is the identity");
+    CHECK(sp_fade_to_black565(0xFFFFu, true, 32) == 0U, "k=32 is black");
+
+    /* apply_space_overlay: black not yet parked folds the face to zero; parked
+     * leaves the (already black) strip alone, so the same screen draws the same
+     * with or without the black term. */
+    stage_space(JR_DISPLAY_SPACE_STATUS);
+    s_space_veil = 0;
+    static uint16_t a[HUD_W * STRIP_ROWS], b[HUD_W * STRIP_ROWS], c[HUD_W * STRIP_ROWS];
+    for (size_t i = 0; i < sizeof a / sizeof *a; ++i) { a[i] = b[i] = c[i] = 0xFFFFu; }
+    s_space_black = 0;
+    s_parked = false;
+    apply_space_overlay(&s_display, y1, y1 + STRIP_ROWS, a);
+    s_space_black = 256;
+    apply_space_overlay(&s_display, y1, y1 + STRIP_ROWS, b);
+    s_parked = true;
+    apply_space_overlay(&s_display, y1, y1 + STRIP_ROWS, c);
+    CHECK(memcmp(a, c, sizeof a) == 0, "parked: no fold touches the strip");
+    CHECK(memcmp(a, b, sizeof a) != 0, "unparked at full black the face is cleared");
+    pk_reset();
+}
+
+static void test_the_face_parks_only_when_settled_on_a_data_screen(void)
+{
+    pk_reset();
+    CHECK(!s_parked && s_park_want == 0, "JARVIS does not park");
+
+    jr_display_nav_set(JR_DISPLAY_SPACE_STATUS);
+    bool parked_mid_slide = false;
+    for (int i = 0; i == 0 || (i < 80 && s_space_prog < 256); ++i) {
+        pk_tick();
+        parked_mid_slide |= s_parked && s_space_prog < 256;
+    }
+    CHECK(!parked_mid_slide, "a slide in progress does not park");
+    pk_tick();
+    CHECK(s_parked && !s_stub_anim_visible, "settled at full black: parked, anim hidden");
+
+    /* each data screen, reached from a data screen, stays parked */
+    const unsigned stops = s_stub_anim_stops;
+    static const jr_display_space_t data[] = {
+        JR_DISPLAY_SPACE_WEATHER, JR_DISPLAY_SPACE_ACTIVITY, JR_DISPLAY_SPACE_STATUS };
+    for (size_t k = 0; k < sizeof data / sizeof *data; ++k) {
+        jr_display_nav_set(data[k]);
+        for (int i = 0; i == 0 || (i < 80 && s_space_prog < 256); ++i) {
+            pk_tick();
+            CHECK(s_parked && s_space_black == 256 && !s_stub_anim_visible,
+                  "between data screens the backdrop stays black and parked");
+        }
+    }
+    CHECK(s_stub_anim_stops == stops, "and the engine is not stopped again");
+
+    jr_display_nav_set(JR_DISPLAY_SPACE_JARVIS);
+    pk_settle();
+    CHECK(!s_parked && s_park_want == 0, "home unparks");
+
+    /* a sheet or the shade over JARVIS keeps today's veil and the face */
+    jr_display_nav_up();
+    pk_settle();
+    CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS && s_detail_ease > 0 &&
+          !s_parked && s_space_black == 0, "a sheet over JARVIS does not park");
+    jr_display_nav_home();
+    pk_settle();
+    jr_display_nav_down();
+    pk_settle();
+    CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS && !s_parked &&
+          s_space_black == 0, "the shade over JARVIS does not park");
+    pk_reset();
+}
+
+static void test_a_baked_dial_watch_never_parks(void)
+{
+    pk_reset();
+    jr_display_clock_set(true, 6, 30, 15);
+    jr_display_watch_style_set(JR_WATCH_DIVER);
+    jr_display_nav_set(JR_DISPLAY_SPACE_WATCH);
+    pk_settle();
+    CHECK(watch_dial_face() == JR_FACE_DIAL_DIVER && !s_parked && s_park_want == 0 &&
+          s_space_black == 0, "a dial on WATCH is the screen, not a black backdrop");
+    jr_display_watch_style_set(JR_WATCH_MINIMAL);
+    pk_settle();
+    CHECK(!s_parked && s_space_black == 0, "WATCH keeps today's veil in every style");
+    jr_display_clock_set(false, 0, 0, 0);
+    pk_reset();
+}
+
+static void test_other_owners_of_the_backdrop_withdraw_the_park(void)
+{
+    pk_reset();
+    jr_display_nav_set(JR_DISPLAY_SPACE_WEATHER);
+    pk_settle();
+    CHECK(s_parked, "parked on WEATHER");
+    s_ask_ease = 40;
+    pk_tick();
+    CHECK(!s_parked, "an ask over the backdrop brings the face back");
+    s_ask_ease = 0;
+    pk_tick();
+    CHECK(s_parked, "and it parks again once the ask is gone");
+    s_canvas_ease = 12;
+    pk_tick();
+    CHECK(!s_parked, "a canvas fade does too");
+    s_canvas_ease = 0;
+    pk_reset();
+}
+
+static void test_a_face_requested_while_parked_is_the_face_that_comes_back(void)
+{
+    jr_display_ctx_t *ctx = &s_display;
+    pk_reset();
+    static uint8_t blob[JR_FACE_COUNT][16];
+    for (int f = 0; f < (int)JR_FACE_COUNT; ++f) {
+        ctx->clips[f] = (jr_display_clip_t){ blob[f], 16U, 8U, 7U };
+    }
+    ctx->missing_faces = 0;
+    ctx->loaded_face = JR_FACE_COUNT;
+    ctx->active = NULL;
+    pk_request(JR_FACE_IDLE);
+    CHECK(s_stub_anim_visible, "unparked: applying a face shows the anim");
+
+    jr_display_nav_set(JR_DISPLAY_SPACE_STATUS);
+    pk_settle();
+    CHECK(s_parked && !s_stub_anim_visible, "parked and hidden on STATUS");
+
+    const unsigned starts = s_stub_anim_starts;
+    pk_request(JR_FACE_LISTENING);
+    CHECK(ctx->shown_face == JR_FACE_LISTENING && s_stub_anim_source == blob[JR_FACE_LISTENING],
+          "a face requested while parked is bound at once");
+    pk_request(JR_FACE_SPEAKING);
+    CHECK(ctx->shown_face == JR_FACE_SPEAKING && s_stub_anim_source == blob[JR_FACE_SPEAKING],
+          "and the latest request wins");
+    CHECK(!s_stub_anim_visible && s_stub_anim_starts == starts,
+          "but binding it does not start or show the anim");
+
+    jr_display_nav_set(JR_DISPLAY_SPACE_JARVIS);
+    s_pk_now += 70U;
+    sp_fade_tick(s_pk_now, 70U, 8);
+    CHECK(s_park_want == 0, "the first frame home withdraws the park");
+    presenter_backdrop_tick(ctx);
+    CHECK(!s_parked && s_stub_anim_visible && s_stub_anim_starts == starts + 1U,
+          "the anim runs again before the slide has moved");
+    CHECK(ctx->shown_face == JR_FACE_SPEAKING &&
+          s_stub_anim_source == blob[JR_FACE_SPEAKING],
+          "and the face is the one requested now, not the one at entry");
+    pk_reset();
+}
+
+static void test_park_yields_to_blank_to_a_failed_lock_and_to_a_dial(void)
+{
+    jr_display_ctx_t *ctx = &s_display;
+    pk_reset();
+    s_stub_lock_failures = 1;               /* the first lock the park takes fails */
+    jr_display_nav_set(JR_DISPLAY_SPACE_STATUS);
+    for (int i = 0; i == 0 || (i < 80 && s_space_prog < 256); ++i) { pk_tick(); }
+    CHECK(!s_parked && s_stub_lock_failures == 0 && s_park_want == 1,
+          "the park is wanted and the lock was refused");
+    pk_tick();
+    CHECK(s_parked, "a failed lock is retried on the next pass");
+
+    __atomic_store_n(&ctx->blanked, true, __ATOMIC_RELAXED);
+    s_stub_anim_visible = false;
+    presenter_backdrop_tick(ctx);
+    CHECK(!s_parked && !s_stub_anim_visible, "a blanked panel unparks without showing the face");
+    __atomic_store_n(&ctx->blanked, false, __ATOMIC_RELAXED);
+    presenter_backdrop_tick(ctx);
+    CHECK(s_parked, "and the screen parks again after the resume");
+
+    /* parked STATUS -> WATCH with a dial: no flash of the anim on the way */
+    jr_display_clock_set(true, 6, 30, 15);
+    jr_display_watch_style_set(JR_WATCH_DIVER);
+    jr_display_nav_set(JR_DISPLAY_SPACE_WATCH);
+    pk_settle();
+    CHECK(!s_parked && !s_stub_anim_visible,
+          "unparking toward a baked dial leaves the anim hidden for the blit");
+    jr_display_clock_set(false, 0, 0, 0);
+    pk_reset();
+}
+
 int main(void)
 {
     test_light_word_round_trips();
@@ -4604,6 +4878,14 @@ int main(void)
     test_quiet_refuses_dynamic_owners_and_unfinished_fades();
     test_quiet_failures_retry_and_never_freeze_old_assets();
     test_actual_presenter_runs_quiet_not_repeat();
+
+    test_veil_reaches_black_on_the_way_in_and_back_on_the_way_out();
+    test_black_is_pixels_and_a_parked_backdrop_skips_the_fold();
+    test_the_face_parks_only_when_settled_on_a_data_screen();
+    test_a_baked_dial_watch_never_parks();
+    test_other_owners_of_the_backdrop_withdraw_the_park();
+    test_a_face_requested_while_parked_is_the_face_that_comes_back();
+    test_park_yields_to_blank_to_a_failed_lock_and_to_a_dial();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);

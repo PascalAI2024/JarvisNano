@@ -1389,3 +1389,35 @@ the screen draws one fixed frame and asks for nothing; `rest_eligible` and
 write in one settled frame (veil and orbit rail excluded). Old (5x7) against
 glass: STATUS 21294 -> 19684 (muted 20631), WEATHER 17275 -> 6787, no weather
 10948 -> 8567, stale 14791 -> 12257.
+
+### The backdrop under a data screen: true black, face parked (2026-11-10)
+
+The veil used to stop at a quarter of the face's brightness, so under STATUS,
+WEATHER, DESK and ACTIVITY the engine still decoded the animated face every
+frame and `sp_veil` folded 217k pixels of it before the text went on. Now the
+destination of a slide decides:
+
+- **Black.** For a slide onto STATUS / WEATHER / DESK / ACTIVITY the face goes
+  all the way to black as the slide completes (`s_space_black`, 0..256,
+  `sp_veil_black`) and comes back with the slide going home. Between two data
+  screens it stays black the whole way. A sheet or the shade over JARVIS, and
+  everything on WATCH, keep the old quarter veil.
+- **Park.** Once black is complete, the slide has settled and nothing else
+  (ask dim, canvas, surface, test pattern) is drawing over the backdrop,
+  `sp_fade_tick` publishes `s_park_want`. The presenter
+  (`presenter_backdrop_tick`) stops and hides the anim, as `dial_show` does,
+  sets `s_parked`, and `sp_veil` is skipped. A parked strip is the engine's
+  black background plus the shell.
+- **Unpark.** When the destination stops being a data screen the verdict is
+  withdrawn on the first frame of the slide and the presenter notifies itself,
+  so the anim runs again under the outgoing screen.
+- **Face truth.** `apply_face` and `program_segment` keep binding and
+  programming the requested face while parked; `anim_run` is the one place
+  that starts and shows the anim and does nothing while `s_parked`. Unparking
+  runs whatever was programmed last. A baked dial is not shown by the unpark:
+  the face chain swaps it to the blit in the same pass.
+- **Cadence.** A hidden anim invalidates nothing, so `display_task` refreshes
+  the glass every pass while `s_parked`, exactly as for `s_dial_blit`. A missed
+  refresh freezes the screen silently.
+- Outside the shell circle (r214) the parked backdrop is black where the face
+  used to show through. Only the face art's own pixels beyond r214 change.

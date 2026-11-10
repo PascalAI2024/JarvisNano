@@ -20,6 +20,7 @@
  * weather-none, activity, activity-empty. "muted" turns the privacy ring on,
  * which is what turns every accent gold; "low" and "nogauge" set the battery;
  * "ent=MS" sets the entry clock of the data screens (omitted: settled);
+ * "parked" renders the data screen on true black with the face parked;
  * "dir=DIR" is where the ppm goes. Every run prints the pixels the screen
  * itself writes in one frame (the veil excluded).
  *
@@ -125,6 +126,7 @@ int main(int argc, char **argv)
     const bool muted = has_flag(argc, argv, "muted");
     const bool low = has_flag(argc, argv, "low");
     const bool nogauge = has_flag(argc, argv, "nogauge");
+    const bool parked = has_flag(argc, argv, "parked");
     const char *ent_arg = flag_val(argc, argv, "ent=");
     const char *dir = flag_val(argc, argv, "dir=");
     s_display.board.width = 466;
@@ -245,12 +247,18 @@ int main(int argc, char **argv)
         jr_display_activity_push("SAID", "VOLUME IS NOW FORTY");
     }
     sp_compose();
+    if (parked) {
+        /* A data screen settled on true black: the face is not decoded, the
+         * engine's background is black, and the veil fold is skipped. */
+        s_space_black = 256;
+        s_parked = true;
+    }
 
     uint16_t *fb = malloc(466u * 466u * sizeof(uint16_t));
     uint16_t *ref = malloc(466u * 466u * sizeof(uint16_t));
     for (int y = 0; y < 466; y++)
         for (int x = 0; x < 466; x++)
-            fb[y * 466 + x] = ref[y * 466 + x] = face_px(x, y);
+            fb[y * 466 + x] = ref[y * 466 + x] = parked ? 0U : face_px(x, y);
 
     /* The screen's own cost: one frame with the veil off, counted against the
      * bare face. Pixels written, the proxy for per-frame work on the S3. */
@@ -294,8 +302,8 @@ int main(int argc, char **argv)
     }
 
     char name[64];
-    snprintf(name, sizeof name, "%s%sprobe_%s%s%s%s%s%s.ppm", dir ? dir : "", dir ? "/" : "", scene,
-             muted ? "_muted" : "", low ? "_low" : "", nogauge ? "_nogauge" : "",
+    snprintf(name, sizeof name, "%s%sprobe_%s%s%s%s%s%s%s.ppm", dir ? dir : "", dir ? "/" : "", scene,
+             parked ? "_parked" : "", muted ? "_muted" : "", low ? "_low" : "", nogauge ? "_nogauge" : "",
              ent_arg ? "_ent" : "", ent_arg ? ent_arg : "");
     FILE *f = fopen(name, "wb");
     fprintf(f, "P6 466 466 255\n");

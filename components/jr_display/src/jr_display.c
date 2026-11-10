@@ -688,6 +688,22 @@ static uint16_t *s_dial_frame;                       /* width*height, PSRAM */
 static jr_face_t s_dial_frame_face = JR_FACE_COUNT;  /* the art it holds */
 static bool      s_dial_blit;
 
+/* THE PARKED BACKDROP. A data screen (STATUS, WEATHER, DESK, ACTIVITY) sits on
+ * true black, so once the slide has settled the face is not decoded at all:
+ * the presenter stops the anim and hides it, the strip is the engine's black
+ * background plus the shell, and sp_veil is skipped. s_park_want is the render
+ * task's verdict (atomic, no lock); s_parked is the presenter's fact, changed
+ * only under the render lock like s_dial_blit, so a strip never sees it flip
+ * mid-frame. A hidden anim invalidates nothing, so while parked the presenter
+ * refreshes the glass every pass (see display_task) or the screen freezes.
+ * The face state machine keeps running underneath: apply_face and
+ * program_segment still bind and program the requested face, and anim_run is
+ * the one place that starts and shows it, so unparking brings up the face
+ * requested now, not the one that was up when the screen was entered. */
+static bool s_parked;
+static int  s_park_want;
+static int  s_space_black;   /* 0..256: how far the backdrop has gone to black */
+
 static void apply_dial(const jr_display_ctx_t *ctx, int x1, int y1,
                        int x2, int y2, uint16_t *pixels)
 {
@@ -2572,6 +2588,15 @@ static void sp_compose(void)
     }
 }
 
+/* Which screens sit on true black with the face parked. JARVIS is the face.
+ * WATCH stays out: its baked dials ARE the backdrop, its other styles share
+ * the DREAM / nightstand rest path with JARVIS, and both keep today's veil. */
+static bool sp_space_is_black(uint8_t space)
+{
+    return space != (uint8_t)JR_DISPLAY_SPACE_JARVIS &&
+           space != (uint8_t)JR_DISPLAY_SPACE_WATCH;
+}
+
 /* Advance every shell ease. Called once per frame from overlay_fade_tick, on
  * the render task, with the same cstep the rest of the presenter fades on so
  * the shell and the existing overlays stay visually in step. */
@@ -2680,13 +2705,27 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
      * home fades the veil away with the slide instead of cutting it a frame
      * early. */
     int veil = 0;
-    if (s_space_to != (uint8_t)JR_DISPLAY_SPACE_JARVIS && !watch_art_is_content()) {
+    const bool to_black = sp_space_is_black(s_space_to);
+    const bool from_black = sp_space_is_black(s_space_from);
+    if (s_space_to != (uint8_t)JR_DISPLAY_SPACE_JARVIS && !to_black &&
+        !watch_art_is_content()) {
         veil = s_space_ease;     /* WATCH with its dial: the art is the screen */
     }
-    if (s_space_from != (uint8_t)JR_DISPLAY_SPACE_JARVIS &&
+    if (s_space_from != (uint8_t)JR_DISPLAY_SPACE_JARVIS && !from_black &&
         256 - s_space_ease > veil) {
         veil = 256 - s_space_ease;
     }
+    /* A data screen takes the backdrop all the way to black rather than to a
+     * quarter. Between two data screens it stays black for the whole slide
+     * (the larger of the two eases would dip to half at the midpoint and let
+     * the face flash through); going home it fades back in with the slide. */
+    int black = 0;
+    if (to_black) {
+        black = from_black ? 256 : s_space_ease;
+    } else if (from_black) {
+        black = 256 - s_space_ease;
+    }
+    s_space_black = black;
     if (s_detail_ease > veil) {
         veil = s_detail_ease;
     }
@@ -2698,8 +2737,26 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
     /* The orbital indicator outlives the slide by a short hold, so a swipe
      * leaves a readable trace of where you landed and then goes away and
      * JARVIS is a clean face again. */
-    s_space_on = veil > 0 || s_space_prog < 256 ||
+    s_space_on = veil > 0 || black > 0 || s_space_prog < 256 ||
                  (int32_t)(now_ms - s_space_hold_ms) < 0;
+
+    /* Park the face only when the black is complete on a data screen, the
+     * slide has settled, and nothing else is drawing over the backdrop (a
+     * canvas, a surface, the ask dim, a test pattern). Any of those coming up
+     * withdraws the verdict and the presenter brings the face back. */
+    const bool park = to_black && black >= 256 &&
+                      (from_black || s_space_prog >= 256) &&
+                      s_canvas_ease == 0 && s_ask_ease == 0 &&
+                      !jr_display_canvas_active() &&
+                      !jr_display_surface_is_active() &&
+                      diag_load(&s_display.test_pattern) == JR_DISPLAY_TEST_OFF;
+    if (__atomic_exchange_n(&s_park_want, park ? 1 : 0, __ATOMIC_ACQ_REL) !=
+            (park ? 1 : 0)) {
+        TaskHandle_t presenter = __atomic_load_n(&s_display.task, __ATOMIC_ACQUIRE);
+        if (presenter != NULL) {
+            xTaskNotifyGive(presenter);   /* the face must not wait a period */
+        }
+    }
     if (s_space_on) {
         sp_compose();
     }
@@ -4729,6 +4786,46 @@ static bool watch_art_is_content(void)
            s_detail_ease == 0 && s_shade_ease == 0;
 }
 
+/* The veil that does not stop at a quarter: weight k 0..32 takes each channel
+ * from untouched to zero. A parked backdrop is already black, so the caller
+ * skips it; a frame between "black is complete" and "the presenter parked"
+ * still has face pixels and clears them here. */
+static inline uint16_t sp_fade_to_black565(uint16_t v, bool swap, int k)
+{
+    if (swap) {
+        v = (uint16_t)((v >> 8) | (v << 8));
+    }
+    const uint32_t m = (uint32_t)(32 - k);
+    uint16_t out = (uint16_t)((((v & 0xF81Fu) * m) >> 5) & 0xF81Fu);
+    out |= (uint16_t)((((v & 0x07E0u) * m) >> 5) & 0x07E0u);
+    if (swap) {
+        out = (uint16_t)((out >> 8) | (out << 8));
+    }
+    return out;
+}
+
+static void sp_veil_black(const jr_display_ctx_t *ctx, int y1, int y2,
+                          uint16_t *pixels, int k)
+{
+    const bool swap = ctx->board.swap_color_bytes;
+    for (int y = y1; y < y2; ++y) {
+        int lo = 0, hi = HUD_W - 1;
+        if (!sp_clip(y, &lo, &hi)) {
+            continue;
+        }
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        if (k >= 32) {
+            memset(row + lo, 0, (size_t)(hi - lo + 1) * sizeof(uint16_t));
+            continue;
+        }
+        for (int x = lo; x <= hi; ++x) {
+            if (row[x] != 0U) {
+                row[x] = sp_fade_to_black565(row[x], swap, k);
+            }
+        }
+    }
+}
+
 static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
                                 uint16_t *pixels)
 {
@@ -4736,10 +4833,15 @@ static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
         return;            /* JARVIS at rest: the layer costs one compare */
     }
     const bool settled = s_space_from == s_space_to || s_space_ease >= 256;
-    const int veil = (settled && watch_art_is_content())
+    /* A complete black makes any other veil moot, and a parked backdrop has
+     * no face pixels to fold at all. */
+    const int veil = ((settled && watch_art_is_content()) || s_space_black >= 256)
                          ? 0 : (s_space_veil * 32) >> 8;
     if (veil > 0) {
         sp_veil(ctx, y1, y2, pixels, veil);
+    }
+    if (s_space_black > 0 && !s_parked) {
+        sp_veil_black(ctx, y1, y2, pixels, (s_space_black * 32) >> 8);
     }
     const int shade = (s_shade_ease * 255) / 256;
     const int under = 255 - shade;
@@ -5636,6 +5738,23 @@ static uint32_t segment_end(const jr_display_clip_t *clip, jr_face_t face,
     return end > clip->last_frame ? clip->last_frame : end;
 }
 
+/* THE ONE PLACE THE ANIM COMES UP. Render lock held, a face bound and its
+ * segment set: start it and show it, unless the backdrop is parked, in which
+ * case it stays stopped and hidden and the unpark does this later. Visibility
+ * is therefore "a face is bound and the backdrop is not parked" and nothing
+ * else decides it (the dial, blank and park paths hide; this shows). */
+static esp_err_t anim_run(jr_display_ctx_t *ctx)
+{
+    if (s_parked) {
+        return ESP_OK;
+    }
+    esp_err_t err = gfx_anim_start(ctx->anim);
+    if (err == ESP_OK) {
+        err = gfx_obj_set_visible(ctx->anim, true);
+    }
+    return err;
+}
+
 static esp_err_t program_segment(jr_display_ctx_t *ctx, jr_face_t face,
                                  uint8_t bucket, bool force)
 {
@@ -5663,10 +5782,7 @@ static esp_err_t program_segment(jr_display_ctx_t *ctx, jr_face_t face,
     ESP_RETURN_ON_ERROR(gfx_emote_lock(ctx->gfx), TAG, "gfx lock failed");
     esp_err_t err = gfx_anim_set_segment(ctx->anim, 0, end, face_fps(face), true);
     if (err == ESP_OK) {
-        err = gfx_anim_start(ctx->anim);
-    }
-    if (err == ESP_OK) {
-        err = gfx_obj_set_visible(ctx->anim, true);
+        err = anim_run(ctx);
     }
     (void)gfx_emote_unlock(ctx->gfx);
     if (err == ESP_OK) {
@@ -5683,7 +5799,7 @@ static bool presenter_quiet_tick(jr_display_ctx_t *ctx, uint32_t *last_word)
     const jr_face_t face = (jr_face_t)((request & JR_DISPLAY_CMD_FACE_MASK) >>
                                       JR_DISPLAY_CMD_FACE_SHIFT);
     if (!quiet_eligible(ctx) || !ctx->active || ctx->active->last_frame < 1U ||
-        ctx->loaded_face != face || ctx->blanked) {
+        ctx->loaded_face != face || ctx->blanked || s_parked) {
         if (ctx->quiet_active) {
             ctx->quiet_active = false;
             ctx->last_end = -1;
@@ -5712,6 +5828,8 @@ static bool presenter_quiet_tick(jr_display_ctx_t *ctx, uint32_t *last_word)
         if (err == ESP_OK) {
             err = gfx_anim_set_segment(ctx->anim, 0U, 1U, face_fps(ctx->shown_face), false);
         }
+        /* Not anim_run: test_quiet_vendor.py compiles exactly this sequence,
+         * and the entry guard above already refuses it while parked. */
         if (err == ESP_OK) { err = gfx_anim_start(ctx->anim); }
         if (err == ESP_OK) { err = gfx_obj_set_visible(ctx->anim, true); }
         (void)gfx_emote_unlock(ctx->gfx);
@@ -5737,6 +5855,46 @@ static bool presenter_quiet_tick(jr_display_ctx_t *ctx, uint32_t *last_word)
     }
     *last_word = request;
     return true;
+}
+
+/* Park or unpark the face under a data screen (presenter, once per pass,
+ * BEFORE the face chain so quiet and dream see the settled state). The render
+ * task only says what it wants (s_park_want); this is where the engine is
+ * touched. Parking stops and hides the anim, the same calls dial_show makes.
+ * Unparking runs the anim again if a face is bound, and the face it runs is
+ * whatever apply_face last programmed, which kept following the requests all
+ * the while parked. A baked dial does not take the anim back here: the face
+ * chain right after this pass swaps it to the blit, and showing the anim for
+ * that one pass would flash the face. */
+static void presenter_backdrop_tick(jr_display_ctx_t *ctx)
+{
+    const uint32_t request = __atomic_load_n(&ctx->requested_word, __ATOMIC_ACQUIRE);
+    const bool want = __atomic_load_n(&s_park_want, __ATOMIC_ACQUIRE) != 0 &&
+                      !(request & JR_DISPLAY_CMD_BLANK) &&
+                      !__atomic_load_n(&ctx->blanked, __ATOMIC_RELAXED) &&
+                      !s_dial_blit && !ctx->dream_active && !ctx->quiet_active;
+    if (want == s_parked) {
+        return;
+    }
+    if (gfx_emote_lock(ctx->gfx) != ESP_OK) {
+        return;                         /* retried on the next pass */
+    }
+    if (want) {
+        (void)gfx_anim_stop(ctx->anim);
+        (void)gfx_obj_set_visible(ctx->anim, false);
+        s_parked = true;
+    } else {
+        s_parked = false;
+        if (ctx->active != NULL && !s_dial_blit &&
+                !__atomic_load_n(&ctx->blanked, __ATOMIC_RELAXED) &&
+                watch_dial_face() == JR_FACE_COUNT) {
+            if (anim_run(ctx) != ESP_OK) {
+                ctx->last_end = -1;     /* the next change re-programs it */
+            }
+        }
+    }
+    gfx_disp_refresh_all(ctx->disp);
+    (void)gfx_emote_unlock(ctx->gfx);
 }
 
 /* Decode frame 0 of a resident dial clip into the shared frame. Runs on the
@@ -5947,8 +6105,7 @@ static esp_err_t apply_face(jr_display_ctx_t *ctx, jr_face_t face,
          * nothing was freed — so just restart it. */
         if (ctx->active != NULL) {
             (void)gfx_emote_lock(ctx->gfx);
-            (void)gfx_anim_start(ctx->anim);
-            (void)gfx_obj_set_visible(ctx->anim, true);
+            (void)anim_run(ctx);
             (void)gfx_emote_unlock(ctx->gfx);
         }
         return err;
@@ -6114,6 +6271,8 @@ static void display_task(void *arg)
                 }
             }
 
+            presenter_backdrop_tick(ctx);
+
             if (presenter_dream_tick(ctx, &last_word)) {
                 /* The stopped emote yields to the minute clock. */
             } else if (presenter_quiet_tick(ctx, &last_word)) {
@@ -6162,8 +6321,9 @@ static void display_task(void *arg)
             /* THE BLITTED DIAL HAS NO TIMER. The anim's tick was the only
              * thing invalidating the glass; with it hidden, this pass is the
              * cadence. Every pass, unconditionally, or the hands freeze
-             * silently. The engine's fps (the ladder) still paces frames. */
-            if (s_dial_blit && gfx_emote_lock(ctx->gfx) == ESP_OK) {
+             * silently. The engine's fps (the ladder) still paces frames.
+             * A parked backdrop is the same case: the anim is hidden too. */
+            if ((s_dial_blit || s_parked) && gfx_emote_lock(ctx->gfx) == ESP_OK) {
                 gfx_disp_refresh_all(ctx->disp);
                 (void)gfx_emote_unlock(ctx->gfx);
             }
