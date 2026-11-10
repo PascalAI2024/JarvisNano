@@ -169,6 +169,34 @@ void glass_glow_row(uint16_t *row, int y, int clip_lo, int clip_hi,
                     int32_t width16, uint8_t peak,
                     uint16_t color565, uint8_t alpha, bool swap_bytes);
 
+/* ---- motion: pure timeline maths for the entry animation ----------------- */
+
+/* Fractions are Q16: 0 is not started, GLASS_ONE_Q16 is finished. All of these
+ * are integer-only and stateless, so a host test pins the whole timeline. */
+#define GLASS_ONE_Q16 65536u
+
+/* Ease-out-cubic of t over dur: fast first, settling last. t >= dur (or a zero
+ * dur) is exactly GLASS_ONE_Q16, t = 0 is 0, and it never decreases. */
+uint32_t glass_ease_out_cubic_q16(uint32_t t_ms, uint32_t dur_ms);
+
+/* The same ease for an element that starts `start_ms` into the entry: 0 until
+ * then. Staggering is just different start_ms for different elements. */
+uint32_t glass_stagger_q16(uint32_t t_ms, uint32_t start_ms, uint32_t dur_ms);
+
+/* target * frac, rounded; the count-up value of a number at that fraction.
+ * Exactly `target` once frac reaches one (and for negatives too). */
+int32_t glass_count_up(int32_t target, uint32_t frac_q16);
+
+/* Pixels an element still has to rise: rise_px at frac 0, 0 at frac one. */
+int glass_rise_px(int rise_px, uint32_t frac_q16);
+
+/* alpha * frac, rounded. */
+uint8_t glass_frac_alpha(uint8_t alpha, uint32_t frac_q16);
+
+/* True while the entry clock is inside its total length: the screen asks for
+ * frames exactly this long and then stays still. */
+bool glass_entry_animating(uint32_t t_ms, uint32_t total_ms);
+
 #ifdef __cplusplus
 }
 #endif

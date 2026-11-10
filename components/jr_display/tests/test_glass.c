@@ -848,6 +848,54 @@ static void test_text_alpha_and_color(void)
     CHECK(differs > 100, "alpha 128 changed only %d pixels", differs);
 }
 
+/* The entry timeline: start, end, monotone, stagger order, animating window. */
+static void test_motion(void)
+{
+    CHECK(glass_ease_out_cubic_q16(0, 900) == 0, "ease starts at 0");
+    CHECK(glass_ease_out_cubic_q16(900, 900) == GLASS_ONE_Q16, "ease ends at one");
+    CHECK(glass_ease_out_cubic_q16(5000, 900) == GLASS_ONE_Q16, "ease stays at one");
+    CHECK(glass_ease_out_cubic_q16(10, 0) == GLASS_ONE_Q16, "zero duration is done");
+    uint32_t prev = 0;
+    for (uint32_t t = 0; t <= 900; t += 7) {
+        const uint32_t v = glass_ease_out_cubic_q16(t, 900);
+        CHECK(v >= prev && v <= GLASS_ONE_Q16, "ease monotone at %u", (unsigned)t);
+        prev = v;
+    }
+    /* out-cubic: more than half done by a third of the time (1 - (2/3)^3 = 0.70) */
+    const uint32_t third = glass_ease_out_cubic_q16(300, 900);
+    CHECK(third > 44000u && third < 47500u, "out-cubic at a third is %u", (unsigned)third);
+
+    /* stagger: nothing before the start, later starts are never ahead */
+    static const uint32_t starts[] = {0, 150, 250, 330, 410};
+    for (uint32_t t = 0; t <= 800; t += 10) {
+        uint32_t last = GLASS_ONE_Q16;
+        for (int i = 0; i < 5; i++) {
+            const uint32_t v = glass_stagger_q16(t, starts[i], 300);
+            CHECK(t > starts[i] || v == 0u, "element %d moved before its start", i);
+            CHECK(v <= last, "element %d is ahead of an earlier one at %u", i, (unsigned)t);
+            last = v;
+        }
+    }
+    CHECK(glass_stagger_q16(710, 410, 300) == GLASS_ONE_Q16, "last element lands at 710");
+
+    CHECK(glass_count_up(100, 0) == 0 && glass_count_up(100, GLASS_ONE_Q16) == 100, "count-up ends");
+    CHECK(glass_count_up(-12, GLASS_ONE_Q16) == -12 && glass_count_up(-12, 0) == 0, "negative ends");
+    CHECK(glass_count_up(74, GLASS_ONE_Q16 / 2) == 37, "count-up halfway");
+    int32_t p = -1;
+    for (uint32_t f = 0; f <= GLASS_ONE_Q16; f += 997) {
+        const int32_t v = glass_count_up(83, f);
+        CHECK(v >= p && v <= 83, "count-up monotone at %u", (unsigned)f);
+        p = v;
+    }
+    CHECK(glass_rise_px(8, 0) == 8 && glass_rise_px(8, GLASS_ONE_Q16) == 0, "rise ends");
+    CHECK(glass_rise_px(8, GLASS_ONE_Q16 / 2) == 4, "rise halfway");
+    CHECK(glass_frac_alpha(255, 0) == 0 && glass_frac_alpha(255, GLASS_ONE_Q16) == 255, "alpha ends");
+    CHECK(glass_frac_alpha(200, GLASS_ONE_Q16 / 2) == 100, "alpha halfway");
+
+    CHECK(glass_entry_animating(0, 900) && glass_entry_animating(899, 900), "animating during");
+    CHECK(!glass_entry_animating(900, 900) && !glass_entry_animating(9000, 900), "still after");
+}
+
 int main(void)
 {
     test_trig();
@@ -869,6 +917,7 @@ int main(void)
     test_star_is_degree();
     test_every_glyph_in_its_box();
     test_text_alpha_and_color();
+    test_motion();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);

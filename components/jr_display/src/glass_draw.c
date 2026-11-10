@@ -499,3 +499,52 @@ void glass_glow_row(uint16_t *row, int y, int clip_lo, int clip_hi,
         }
     }
 }
+
+/* ---- motion: pure timeline maths ------------------------------------------ */
+
+uint32_t glass_ease_out_cubic_q16(uint32_t t_ms, uint32_t dur_ms)
+{
+    if (dur_ms == 0u || t_ms >= dur_ms) {
+        return GLASS_ONE_Q16;
+    }
+    const uint32_t x = (uint32_t)(((uint64_t)t_ms << 16) / dur_ms);
+    const uint32_t u = GLASS_ONE_Q16 - x;
+    const uint32_t u2 = (uint32_t)(((uint64_t)u * u) >> 16);
+    const uint32_t u3 = (uint32_t)(((uint64_t)u2 * u) >> 16);
+    return GLASS_ONE_Q16 - u3;
+}
+
+uint32_t glass_stagger_q16(uint32_t t_ms, uint32_t start_ms, uint32_t dur_ms)
+{
+    return t_ms <= start_ms ? 0u : glass_ease_out_cubic_q16(t_ms - start_ms, dur_ms);
+}
+
+int32_t glass_count_up(int32_t target, uint32_t frac_q16)
+{
+    if (frac_q16 >= GLASS_ONE_Q16) {
+        return target;
+    }
+    const int64_t v = (int64_t)target * (int64_t)frac_q16;
+    return (int32_t)((v + (v < 0 ? -32768 : 32768)) / GLASS_ONE_Q16);
+}
+
+int glass_rise_px(int rise_px, uint32_t frac_q16)
+{
+    if (frac_q16 >= GLASS_ONE_Q16) {
+        return 0;
+    }
+    return (int)(((int64_t)rise_px * (int64_t)(GLASS_ONE_Q16 - frac_q16) + 32768) >> 16);
+}
+
+uint8_t glass_frac_alpha(uint8_t alpha, uint32_t frac_q16)
+{
+    if (frac_q16 >= GLASS_ONE_Q16) {
+        return alpha;
+    }
+    return (uint8_t)(((uint32_t)alpha * frac_q16 + 32768u) >> 16);
+}
+
+bool glass_entry_animating(uint32_t t_ms, uint32_t total_ms)
+{
+    return t_ms < total_ms;
+}
