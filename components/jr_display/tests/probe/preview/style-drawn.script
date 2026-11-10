@@ -1,0 +1,7 @@
+# a style change onto a drawn dial: DRESS -> PILOT, then PILOT -> MINIMAL
+scene watch-dress
+wait 800
+swipe right       # DRESS -> PILOT
+wait 2000
+swipe right       # PILOT -> MINIMAL
+wait 2000

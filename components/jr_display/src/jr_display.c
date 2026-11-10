@@ -4460,13 +4460,6 @@ _Static_assert(SP_R_SHELL == SP_CLIP_ROWS, "k_clip_half is built for this shell 
 
 /* THE round safe-area guard. Folds [*xlo, *xhi] into both the panel and the
  * shell circle for this row; false means the row has nothing to draw. */
-/* The radius the one-pass dim reaches (sp_dim_disc) and, while s_clip_tight is
- * set, the radius content is drawn to: two short of the shell clip, because the
- * battery rim's inner anti-aliased pixels sit at r214 and a dim that reached
- * them would darken the rim. */
-#define SP_DIM_R 212
-static bool s_clip_tight;
-
 static bool sp_clip(int y, int *xlo, int *xhi)
 {
     const int dy = y - SP_CY;
@@ -4474,16 +4467,7 @@ static bool sp_clip(int y, int *xlo, int *xhi)
     if (ady >= SP_CLIP_ROWS) {
         return false;
     }
-    int half = k_clip_half[ady];
-    if (__builtin_expect(s_clip_tight, 0)) {
-        if (ady >= SP_DIM_R) {
-            return false;
-        }
-        const int tight = sp_isqrt(SP_DIM_R * SP_DIM_R - dy * dy);
-        if (tight < half) {
-            half = tight;
-        }
-    }
+    const int half = k_clip_half[ady];
     if (*xlo < SP_CX - half) {
         *xlo = SP_CX - half;
     }
@@ -4740,6 +4724,20 @@ static void sp_veil(const jr_display_ctx_t *ctx, int y1, int y2,
                     if (row[x] != 0U) {
                         row[x] = hud_dim565(row[x], false);
                     }
+                }
+            }
+        } else if ((hud_perf_knob & JR_KNOB_VEIL_MEMO) != 0U) {
+            /* a flat dial under a part-strength veil folds the same pixel again
+             * and again: remember the last one (same output) */
+            uint16_t last_in = 0U, last_out = 0U;
+            for (int x = lo; x <= hi; ++x) {
+                const uint16_t v = row[x];
+                if (v != 0U) {
+                    if (v != last_in) {
+                        last_in = v;
+                        last_out = hud_fade565(v, swap, k);
+                    }
+                    row[x] = last_out;
                 }
             }
         } else {
@@ -5075,6 +5073,113 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
     }
 }
 
+/* ---- the ring while it moves (perf knob bit 0, JR_KNOB_REPLAY_RING) -----------
+ *
+ * The three records above are used only once the screen sits still (oy == 0) and
+ * the sweep has finished, so for the whole entry (about 22 frames) the ring is
+ * drawn the long way: 1.9 M instructions of 4.1 M a frame on the host. Two
+ * things keep the records usable while it moves.
+ *
+ *  - A sliding screen is the same pixels at another height: the record's row
+ *    y - oy goes on panel row y (glass_*_replay_row_off). Exact.
+ *  - A sweeping arc is the arc of its final value with the swept part left out.
+ *    The records are made for the FINAL sweep S (the value the entry is heading
+ *    for; it is the same record the settled path replays at the end, so there is
+ *    no second hitch), plus one full-turn track. A row whose pixels all lie away
+ *    from the moving front (the angle `sweep` plus a margin for the round cap and
+ *    the glow) is replayed from them; a row that can touch the front, or the part
+ *    between the front and S, is drawn the long way; a row the arc cannot reach is
+ *    skipped. Only the rows near the front pay for geometry, about a tenth of them.
+ *
+ * Which rows can touch which angles comes from a table built once at start: per
+ * row, up to two angular intervals (Q16 turns, glass convention) that bound the
+ * pixels of the ring's band in that row, a little fat. No float and no libm: the
+ * angles come from the glass sine table. 8 bytes a row, 2.1 KB of PSRAM. */
+#define SG_RX_HALF     134          /* rows either side of the centre the table has */
+#define SG_RX_EXT16    (5 * 16)     /* the band grows by the glow's reach and a pixel of edge */
+#define SG_RX_MARGIN   1300         /* Q16 turns kept clear of the front: 14 px at the ring */
+#define SG_FR_TRKFULL  8            /* `have` bit: the full-turn track record (block 3) */
+
+typedef struct {
+    uint16_t a0[2];                 /* the interval's start, Q16 turn */
+    uint16_t len[2];                /* its length; 0 = no such interval */
+} sg_rx_t;
+
+static sg_rx_t *s_rx_ring;
+static bool s_fring_trkfull;        /* block 3 holds the full-turn track */
+
+/* The Q16 turn of the direction (dx, dy): 0 at 3 o'clock, clockwise with y down. */
+static uint16_t sg_arg_q16(int dx, int dy)
+{
+    if (dx == 0 && dy == 0) {
+        return 0;
+    }
+    int q = 0, x = dx, y = dy;
+    if (dx < 0 && dy >= 0) {
+        q = 1; x = dy; y = -dx;
+    } else if (dx < 0) {
+        q = 2; x = -dx; y = -dy;
+    } else if (dy < 0) {
+        q = 3; x = -dy; y = dx;
+    }
+    uint32_t lo = 0, hi = 16384;
+    while (lo < hi) {               /* the largest angle in the quarter whose tangent is <= y / x */
+        const uint32_t mid = (lo + hi + 1u) >> 1;
+        if ((int64_t)glass_sin_q15(mid) * x <= (int64_t)glass_cos_q15(mid) * y) {
+            lo = mid;
+        } else {
+            hi = mid - 1u;
+        }
+    }
+    return (uint16_t)(lo + (uint32_t)q * 16384u);
+}
+
+static void sg_rx_build(sg_rx_t *t, int32_t r_in16, int32_t r_out16)
+{
+    const int ro = (r_out16 + SG_RX_EXT16 + 15) / 16;
+    const int ri = (r_in16 - SG_RX_EXT16) / 16;
+    for (int i = 0; i < 2 * SG_RX_HALF; ++i) {
+        const int ry = i - SG_RX_HALF;               /* the row spans dy in [ry, ry + 1] */
+        const int a0 = ry < 0 ? -ry : ry, a1 = ry + 1 < 0 ? -(ry + 1) : ry + 1;
+        const int near = (ry < 0 && ry + 1 > 0) ? 0 : (a0 < a1 ? a0 : a1);
+        const int far = a0 > a1 ? a0 : a1;
+        sg_rx_t *r = &t[i];
+        memset(r, 0, sizeof *r);
+        if (near >= ro) {
+            continue;
+        }
+        const int xo = sp_isqrt(ro * ro - near * near) + 1;
+        int xi = 0;
+        if (ri > far) {
+            xi = sp_isqrt(ri * ri - far * far) - 1;
+            if (xi < 0) {
+                xi = 0;
+            }
+        }
+        int mn = 32767, mx = -32768;                 /* the right side: |angle| <= a quarter turn */
+        for (int c = 0; c < 4; ++c) {
+            const int a = (int16_t)sg_arg_q16((c & 1) ? xo : xi, ry + (c >> 1));
+            mn = a < mn ? a : mn;
+            mx = a > mx ? a : mx;
+        }
+        r->a0[0] = (uint16_t)(mn - 1);
+        r->len[0] = (uint16_t)(mx - mn + 2);
+        r->a0[1] = (uint16_t)(32768 - mx - 1);       /* the left side mirrors it */
+        r->len[1] = r->len[0];
+    }
+}
+
+/* Whether a pixel of the row's side k (0 the right half, 1 the left) can lie in
+ * the window [w0, w0 + wlen] (a turn is 65536; a window that long is everything). */
+static inline bool sg_rx_hits(const sg_rx_t *r, int k, uint16_t w0, uint32_t wlen)
+{
+    if (r->len[k] == 0u) {
+        return false;
+    }
+    return wlen >= 65535u || (uint16_t)(w0 - r->a0[k]) <= r->len[k] ||
+           (uint16_t)(r->a0[k] - w0) <= wlen;
+}
+
 /* The battery / desk ring at rest. Its three layers (the track, the glow, the
  * filled arc) are the same shapes every frame until the number moves, and each
  * cost 0.4 to 1 M instructions a frame in geometry that never changes. Once the
@@ -5084,16 +5189,9 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
  * sweep records again, once it has held for a second frame; while the entry
  * runs, or the screen is being dragged, the ring is drawn the long way, as
  * before. The records are three blocks of
- * SG_FRING_CAP bytes in PSRAM, allocated once at start (the largest the ring
+ * SG_FRING_CAP bytes in PSRAM (and a fourth, the full-turn track, for the moving ring), allocated once at start (the largest the ring
  * needs, at 99 %, is 10 KB); if one is absent or did not fit, that layer is
  * drawn the long way. Internal RAM: a pointer and 8 bytes of key. */
-/* Which half of a ring screen a call draws (FADE_SCREEN, sp_draw_space_faded):
- * 0 all of it, 1 everything but the ring, 2 only the ring. The ring is three
- * layers over each other, so it is blended at the fade's strength as ever; the
- * rest is drawn at full strength and dimmed once, the ring then goes on top. */
-enum { SG_PASS_ALL = 0, SG_PASS_NO_RING = 1, SG_PASS_RING = 2 };
-static uint8_t s_ring_pass;
-
 #define SG_FRING_CAP   12288
 #define JR_FRING_REC   1        /* tells the host fixtures the recorded ring exists */
 enum { SG_FR_TRACK = 1, SG_FR_GLOW = 2, SG_FR_ARC = 4 };
@@ -5102,13 +5200,58 @@ static struct {
     int32_t sweep;              /* the sweep the records were made for */
     uint8_t have;               /* SG_FR_* parts recorded for it; bit 7: tried */
 } s_fring;
+/* The moving ring (perf knob bit 0) keeps a second set of the three records, blocks
+ * 4 to 6, so two ring screens that share a slide (STATUS leaving, DESK entering)
+ * each have theirs; block 3 is the full-turn track both use. */
+static struct {
+    int32_t sweep;
+    uint8_t have;
+    uint32_t used;              /* the frame it was last asked for */
+} s_fring1;
+static uint32_t s_fring0_used;  /* the same for the first set */
 
 static void fring_rec_alloc(void)
 {
     if (s_fring_rec == NULL) {
-        s_fring_rec = heap_caps_malloc(3u * SG_FRING_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        s_fring_rec = heap_caps_malloc(7u * SG_FRING_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     }
+    if (s_rx_ring == NULL) {
+        s_rx_ring = heap_caps_malloc(2u * SG_RX_HALF * sizeof(sg_rx_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (s_rx_ring != NULL) {
+        sg_rx_build(s_rx_ring, SG_RING_R_IN16, SG_RING_R_OUT16);
+    }
+    /* block 3: the full-turn track the moving ring replays (perf knob bit 0) */
+    s_fring_trkfull = s_fring_rec != NULL &&
+                      glass_ring_record(s_fring_rec + 3u * SG_FRING_CAP, SG_FRING_CAP, SP_CX * 16,
+                                        (SP_CY + SG_RING_DY) * 16, SG_RING_R_IN16, SG_RING_R_OUT16) != 0u;
     s_fring.have = 0;
+    memset(&s_fring1, 0, sizeof s_fring1);
+    s_fring0_used = 0;
+}
+
+/* The three records of the ring for `sweep`, into the blocks at `base`; the
+ * SG_FR_* bits of the ones that fitted. */
+static uint8_t fring_record(uint8_t *base, int32_t sweep)
+{
+    const int32_t cx16 = SP_CX * 16, cy16 = (SP_CY + SG_RING_DY) * 16;
+    uint8_t have = 0;
+    if (sweep < GLASS_TURN_Q16 &&
+        glass_shape_record(base, SG_FRING_CAP, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                           GLASS_Q16_12_OCLOCK + sweep, GLASS_TURN_Q16 - sweep, false) != 0u) {
+        have |= SG_FR_TRACK;
+    }
+    if (sweep > 0) {
+        if (glass_glow_record(base + SG_FRING_CAP, SG_FRING_CAP, cx16, cy16, SG_RING_R_IN16,
+                              SG_RING_R_OUT16, GLASS_Q16_12_OCLOCK, sweep, true, SG_GLOW16) != 0u) {
+            have |= SG_FR_GLOW;
+        }
+        if (glass_shape_record(base + 2u * SG_FRING_CAP, SG_FRING_CAP, cx16, cy16,
+                               SG_RING_R_IN16, SG_RING_R_OUT16, GLASS_Q16_12_OCLOCK, sweep, true) != 0u) {
+            have |= SG_FR_ARC;
+        }
+    }
+    return have;
 }
 
 /* Records the ring for `sweep` if the block is there and it is not already. */
@@ -5124,25 +5267,8 @@ static uint8_t fring_prepare(int32_t sweep)
     if (!sp_settled(&gate, sweep, 0)) {
         return 0;                 /* a new value: draw it the long way for a frame first */
     }
-    const int32_t cx16 = SP_CX * 16, cy16 = (SP_CY + SG_RING_DY) * 16;
-    uint8_t have = 0;
-    if (sweep < GLASS_TURN_Q16 &&
-        glass_shape_record(s_fring_rec, SG_FRING_CAP, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
-                           GLASS_Q16_12_OCLOCK + sweep, GLASS_TURN_Q16 - sweep, false) != 0u) {
-        have |= SG_FR_TRACK;
-    }
-    if (sweep > 0) {
-        if (glass_glow_record(s_fring_rec + SG_FRING_CAP, SG_FRING_CAP, cx16, cy16, SG_RING_R_IN16,
-                              SG_RING_R_OUT16, GLASS_Q16_12_OCLOCK, sweep, true, SG_GLOW16) != 0u) {
-            have |= SG_FR_GLOW;
-        }
-        if (glass_shape_record(s_fring_rec + 2u * SG_FRING_CAP, SG_FRING_CAP, cx16, cy16,
-                               SG_RING_R_IN16, SG_RING_R_OUT16, GLASS_Q16_12_OCLOCK, sweep, true) != 0u) {
-            have |= SG_FR_ARC;
-        }
-    }
     s_fring.sweep = sweep;
-    s_fring.have = have | 0x80u;          /* tried, so a failure is not retried every strip */
+    s_fring.have = fring_record(s_fring_rec, sweep) | 0x80u;   /* tried, so a failure is not retried every strip */
     return s_fring.have;
 }
 
@@ -5175,6 +5301,117 @@ static inline void fring_row(uint16_t *row, int y, int lo, int hi, bool swap, in
         glass_arc_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
                       GLASS_Q16_12_OCLOCK, sweep, fill, (uint8_t)st, swap);
     }
+}
+
+/* The records the moving ring can use for the final sweep `full`: fring_prepare's
+ * three (for the sweep the entry is heading for) and the full-turn track. 0 means
+ * draw it the way knob 0 does. */
+static uint8_t fring_prepare_moving(int32_t full, const uint8_t **base)
+{
+    *base = s_fring_rec;
+    if (s_fring_rec == NULL || s_rx_ring == NULL || !s_fring_trkfull) {
+        return 0;
+    }
+    if (full <= 0) {
+        return SG_FR_TRKFULL;       /* no arc: the whole ring is the track */
+    }
+    uint8_t have;
+    if ((s_fring.have & 0x7Fu) != 0u && s_fring.sweep == full) {
+        have = s_fring.have & 0x7Fu;
+        s_fring0_used = s_frame_no;
+    } else if ((s_fring1.have & 0x7Fu) != 0u && s_fring1.sweep == full) {
+        have = s_fring1.have & 0x7Fu;
+        s_fring1.used = s_frame_no;
+        *base = s_fring_rec + 4u * SG_FRING_CAP;
+    } else if (s_fring0_used <= s_fring1.used) {
+        /* the entry knows its final value from the first frame: record it now,
+         * over the set that was asked for longest ago */
+        s_fring.sweep = full;
+        s_fring.have = fring_record(s_fring_rec, full) | 0x80u;
+        s_fring0_used = s_frame_no;
+        have = s_fring.have & 0x7Fu;
+    } else {
+        uint8_t *set1 = s_fring_rec + 4u * SG_FRING_CAP;
+        *base = set1;
+        s_fring1.sweep = full;
+        s_fring1.have = fring_record(set1, full) | 0x80u;
+        s_fring1.used = s_frame_no;
+        have = s_fring1.have & 0x7Fu;
+    }
+    return have != 0u ? (uint8_t)(have | SG_FR_TRKFULL) : 0u;
+}
+
+/* One side of one row of the ring at height offset oy, the arc swept to `sweep`
+ * of its final `full`: the same fills, in the same order, as fring_row. A row's
+ * two halves are separate here because they are usually far apart in angle (the
+ * right half behind the front, the left half ahead of it). */
+static inline void fring_side_moving(uint16_t *row, int y, int lo, int hi, bool swap, int oy,
+                                     int32_t sweep, int32_t full, bool arc_on, uint16_t fill,
+                                     int st, uint8_t have, const uint8_t *base, const sg_rx_t *rx, int k)
+{
+    if (lo > hi || rx->len[k] == 0u) {
+        return;
+    }
+    const int ry = y - oy;
+    const int32_t cx16 = SP_CX * 16, cy16 = (SP_CY + oy + SG_RING_DY) * 16;
+    const uint8_t a_trk = (uint8_t)((st * 44) / 255);
+    const uint16_t A = (uint16_t)GLASS_Q16_12_OCLOCK;
+    const uint32_t M = SG_RX_MARGIN;
+    const bool exact = sweep >= full;
+
+    /* the track: the ring from the front round to 12 o'clock */
+    if (!arc_on) {
+        glass_ring_replay_row_off(row, y, ry, lo, hi, s_fring_rec + 3u * SG_FRING_CAP, fill, a_trk, swap);
+    } else if (exact) {
+        if (have & SG_FR_TRACK) {
+            glass_ring_replay_row_off(row, y, ry, lo, hi, base, fill, a_trk, swap);
+        } else {
+            glass_ring_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                           GLASS_Q16_12_OCLOCK + sweep, GLASS_TURN_Q16 - sweep, fill, a_trk, swap);
+        }
+    } else if (sg_rx_hits(rx, k, (uint16_t)(A + sweep - M), (uint32_t)(GLASS_TURN_Q16 - sweep) + 2u * M)) {
+        /* it can touch the track; it can touch the swept part too: the long way */
+        if (sg_rx_hits(rx, k, (uint16_t)(A - M), (uint32_t)sweep + 2u * M)) {
+            glass_ring_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                           GLASS_Q16_12_OCLOCK + sweep, GLASS_TURN_Q16 - sweep, fill, a_trk, swap);
+        } else {
+            glass_ring_replay_row_off(row, y, ry, lo, hi, s_fring_rec + 3u * SG_FRING_CAP, fill, a_trk, swap);
+        }
+    }
+    if (!arc_on || !sg_rx_hits(rx, k, (uint16_t)(A - M), (uint32_t)sweep + 2u * M)) {
+        return;                     /* the front has not reached this side of the row */
+    }
+    /* the glow and the arc: replayed unless the side can touch the front or the part
+     * between it and the final sweep, which the records have and the frame has not */
+    const bool replay = exact || !sg_rx_hits(rx, k, (uint16_t)(A + sweep - M), (uint32_t)(full - sweep) + 2u * M);
+    if (replay && (have & SG_FR_GLOW)) {
+        glass_glow_replay_row_off(row, y, ry, lo, hi, base + SG_FRING_CAP, SG_GLOW16, 140, fill,
+                                  (uint8_t)st, swap);
+    } else {
+        glass_glow_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                       GLASS_Q16_12_OCLOCK, sweep, true, SG_GLOW16, 140, fill, (uint8_t)st, swap);
+    }
+    if (replay && (have & SG_FR_ARC)) {
+        glass_ring_replay_row_off(row, y, ry, lo, hi, base + 2u * SG_FRING_CAP, fill, (uint8_t)st, swap);
+    } else {
+        glass_arc_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                      GLASS_Q16_12_OCLOCK, sweep, fill, (uint8_t)st, swap);
+    }
+}
+
+static inline void fring_row_moving(uint16_t *row, int y, int lo, int hi, bool swap, int oy,
+                                    int32_t sweep, int32_t full, bool arc_on, uint16_t fill,
+                                    int st, uint8_t have, const uint8_t *base)
+{
+    const int i = y - (SP_CY + oy + SG_RING_DY) + SG_RX_HALF;
+    if (i < 0 || i >= 2 * SG_RX_HALF) {
+        return;
+    }
+    const sg_rx_t *rx = &s_rx_ring[i];
+    fring_side_moving(row, y, lo > SP_CX ? lo : SP_CX, hi, swap, oy, sweep, full, arc_on, fill, st,
+                      have, base, rx, 0);
+    fring_side_moving(row, y, lo, hi < SP_CX - 1 ? hi : SP_CX - 1, swap, oy, sweep, full, arc_on,
+                      fill, st, have, base, rx, 1);
 }
 
 /* Once a frame, before anything draws: the word httpd set becomes the one the
@@ -5294,17 +5531,21 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
     const int ring_y0 = cyr - 130, ring_y1 = cyr + 130;
     /* at rest: the ring's three layers replayed from their records */
     const uint8_t rec = (oy == 0 && f_ring >= GLASS_ONE_Q16) ? (uint8_t)(fring_prepare(sweep) & 0x7Fu) : 0u;
+    const uint8_t *mbase = s_fring_rec;
+    const uint8_t mov = (rec == 0u && (hud_perf_knob & JR_KNOB_REPLAY_RING) != 0u)
+        ? fring_prepare_moving(full, &mbase) : 0u;
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         int lo = 0, hi = HUD_W - 1;
         if (!sp_clip(y, &lo, &hi)) {
             continue;
         }
-        if (y >= ring_y0 && y <= ring_y1 && s_ring_pass != SG_PASS_NO_RING) {
-            fring_row(row, y, lo, hi, swap, cy16, sweep, sweep > 0, fill, st, rec);
-        }
-        if (s_ring_pass == SG_PASS_RING) {
-            continue;
+        if (y >= ring_y0 && y <= ring_y1) {
+            if (mov != 0u) {
+                fring_row_moving(row, y, lo, hi, swap, oy, sweep, full, sweep > 0, fill, st, mov, mbase);
+            } else {
+                fring_row(row, y, lo, hi, swap, cy16, sweep, sweep > 0, fill, st, rec);
+            }
         }
         sg_txt_row(row, y, lo, hi, swap, &t_label);
         sg_txt_row(row, y, lo, hi, swap, &t_hero);
@@ -5454,18 +5695,24 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
     const int ring_y0 = cyr - 130, ring_y1 = cyr + 130;
     /* at rest: the ring's three layers replayed from their records */
     const uint8_t rec = (oy == 0 && f_ring >= GLASS_ONE_Q16) ? (uint8_t)(fring_prepare(sweep) & 0x7Fu) : 0u;
+    /* while it slides or sweeps: the records of the final value (perf knob bit 0) */
+    const uint8_t *mbase = s_fring_rec;
+    const uint8_t mov = (rec == 0u && (hud_perf_knob & JR_KNOB_REPLAY_RING) != 0u)
+        ? fring_prepare_moving(have_gauge ? full : 0, &mbase) : 0u;
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         int lo = 0, hi = HUD_W - 1;
         if (!sp_clip(y, &lo, &hi)) {
             continue;
         }
-        if (y >= ring_y0 && y <= ring_y1 && s_ring_pass != SG_PASS_NO_RING) {
+        if (y >= ring_y0 && y <= ring_y1) {
             /* the track only where the fill is not: no pixel is written twice */
-            fring_row(row, y, lo, hi, swap, cy16, sweep, have_gauge && sweep > 0, fill, st, rec);
-        }
-        if (s_ring_pass == SG_PASS_RING) {
-            continue;
+            if (mov != 0u) {
+                fring_row_moving(row, y, lo, hi, swap, oy, sweep, have_gauge ? full : 0,
+                                 have_gauge && sweep > 0, fill, st, mov, mbase);
+            } else {
+                fring_row(row, y, lo, hi, swap, cy16, sweep, have_gauge && sweep > 0, fill, st, rec);
+            }
         }
         sg_txt_row(row, y, lo, hi, swap, &t_label);
         sg_txt_row(row, y, lo, hi, swap, &t_hero);
@@ -6112,97 +6359,26 @@ static void sp_veil_black(const jr_display_ctx_t *ctx, int y1, int y2,
             memset(row + lo, 0, (size_t)(hi - lo + 1) * sizeof(uint16_t));
             continue;
         }
+        if ((hud_perf_knob & JR_KNOB_VEIL_MEMO) != 0U) {
+            uint16_t last_in = 0U, last_out = 0U;       /* as in sp_veil */
+            for (int x = lo; x <= hi; ++x) {
+                const uint16_t v = row[x];
+                if (v != 0U) {
+                    if (v != last_in) {
+                        last_in = v;
+                        last_out = sp_fade_to_black565(v, swap, k);
+                    }
+                    row[x] = last_out;
+                }
+            }
+            continue;
+        }
         for (int x = lo; x <= hi; ++x) {
             if (row[x] != 0U) {
                 row[x] = sp_fade_to_black565(row[x], swap, k);
             }
         }
     }
-}
-
-/* THE ONE DIM. A screen at partial strength used to blend every primitive it
- * drew (a read, a multiply and a write a pixel per primitive, overdraw
- * multiplied). Over a black base the same picture is the content drawn at full
- * strength and the finished rows dimmed once, which touches each lit pixel one
- * time and skips the black ones. Weight m is 0..64 (64 = untouched), a finer step
- * than the 32 of sp_fade_to_black565. Black stays black, so the corners and the
- * unlit disc cost a compare. The knob bits that use it are in perf_knob.h. */
-static inline uint16_t sp_dim64(uint16_t v, uint32_t m)
-{
-    uint16_t out = (uint16_t)((((v & 0xF81Fu) * m) >> 6) & 0xF81Fu);
-    out |= (uint16_t)((((v & 0x07E0u) * m) >> 6) & 0x07E0u);
-    return out;
-}
-
-static void sp_dim_disc(const jr_display_ctx_t *ctx, int y1, int y2,
-                        uint16_t *pixels, int st)
-{
-    if (st >= 255) {
-        return;
-    }
-    const uint32_t m = st <= 0 ? 0U : (uint32_t)((st * 64 + 127) / 255);
-    const bool swap = ctx->board.swap_color_bytes;
-    for (int y = y1; y < y2; ++y) {
-        const int d2 = SP_DIM_R * SP_DIM_R - (y - SP_CY) * (y - SP_CY);
-        if (d2 <= 0) {
-            continue;
-        }
-        const int half = sp_isqrt(d2);
-        int lo = SP_CX - half, hi = SP_CX + half;
-        if (lo < 0) {
-            lo = 0;
-        }
-        if (hi > HUD_W - 1) {
-            hi = HUD_W - 1;
-        }
-        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        if (m == 0U) {
-            memset(row + lo, 0, (size_t)(hi - lo + 1) * sizeof(uint16_t));
-        } else if (swap) {
-            for (int x = lo; x <= hi; ++x) {
-                const uint16_t v = row[x];
-                if (v != 0U) {
-                    const uint16_t n = sp_dim64((uint16_t)((v >> 8) | (v << 8)), m);
-                    row[x] = (uint16_t)((n >> 8) | (n << 8));
-                }
-            }
-        } else {
-            for (int x = lo; x <= hi; ++x) {
-                if (row[x] != 0U) {
-                    row[x] = sp_dim64(row[x], m);
-                }
-            }
-        }
-    }
-}
-
-/* A ring data screen at strength st. With FADE_SCREEN set and the screen part
- * way up or down, it is drawn whole and dimmed once; the base under it is black
- * (the face is dipped to black by the cut and a data screen draws on black).
- * STATUS and DESK keep their ring out of that dim and blend it on top at st: its
- * track, glow and fill overlap, and an overlap shows through at partial strength
- * (1 - st of the layer below), which a dim of the finished ring would lose. */
-static void sp_draw_space_faded(const jr_display_ctx_t *ctx, int y1, int y2,
-                                uint16_t *pixels, int space, int oy, int st,
-                                uint32_t ent)
-{
-    if ((hud_perf_knob & JR_KNOB_FADE_SCREEN) != 0U && st > 0 && st < 255 &&
-        (space == JR_DISPLAY_SPACE_STATUS || space == JR_DISPLAY_SPACE_WEATHER ||
-         space == JR_DISPLAY_SPACE_DESK || space == JR_DISPLAY_SPACE_ACTIVITY)) {
-        const bool ringed = space == JR_DISPLAY_SPACE_STATUS || space == JR_DISPLAY_SPACE_DESK;
-        s_ring_pass = ringed ? SG_PASS_NO_RING : SG_PASS_ALL;
-        s_clip_tight = true;                  /* what is drawn is what the dim reaches */
-        sp_draw_space(ctx, y1, y2, pixels, space, oy, 255, ent);
-        s_clip_tight = false;
-        sp_dim_disc(ctx, y1, y2, pixels, st);
-        if (ringed) {
-            s_ring_pass = SG_PASS_RING;
-            sp_draw_space(ctx, y1, y2, pixels, space, oy, st, ent);
-        }
-        s_ring_pass = SG_PASS_ALL;
-        return;
-    }
-    sp_draw_space(ctx, y1, y2, pixels, space, oy, st, ent);
 }
 
 static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
@@ -6243,14 +6419,14 @@ static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
             const int po = tr_out(s_space_prog, TR_CUT_SLIDE);
             const int pi = tr_in(s_space_prog, TR_CUT_SLIDE);
             if (po > 0) {
-                sp_draw_space_faded(ctx, y1, y2, pixels, s_space_from,
-                                    -s_space_dir * ((SP_LEAVE_PX * (256 - po)) / 256),
-                                    (focal * po) / 256, SP_ENTRY_TOTAL_MS);
+                sp_draw_space(ctx, y1, y2, pixels, s_space_from,
+                              -s_space_dir * ((SP_LEAVE_PX * (256 - po)) / 256),
+                              (focal * po) / 256, SP_ENTRY_TOTAL_MS);
             }
             if (pi > 0) {
-                sp_draw_space_faded(ctx, y1, y2, pixels, s_space_to,
-                                    s_space_dir * ((SP_SLIDE_PX * (256 - pi)) / 256),
-                                    (focal * pi) / 256, s_entry_ms);
+                sp_draw_space(ctx, y1, y2, pixels, s_space_to,
+                              s_space_dir * ((SP_SLIDE_PX * (256 - pi)) / 256),
+                              (focal * pi) / 256, s_entry_ms);
             }
         }
         split_mark(JR_DISPLAY_SPLIT_SPACE_SCREEN, &sm);

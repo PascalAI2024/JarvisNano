@@ -1,0 +1,10 @@
+# STATUS to DESK (an agent link up), on to ACTIVITY, and back to DESK
+scene status-74
+set agent 40
+wait 800
+swipe down        # STATUS -> DESK
+wait 1500
+swipe down        # DESK -> ACTIVITY
+wait 1500
+swipe up          # ACTIVITY -> DESK
+wait 1500

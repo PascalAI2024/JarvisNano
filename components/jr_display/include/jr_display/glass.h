@@ -186,6 +186,16 @@ void glass_glow_replay_row(uint16_t *row, int y, int clip_lo, int clip_hi, const
                            int32_t width16, uint8_t peak, uint16_t color565, uint8_t alpha,
                            bool swap_bytes);
 
+/* The same two replays for a record taken at another height: the record's row
+ * ry is drawn on panel row y (a screen that is sliding keeps its ring's pixels
+ * and moves them, the glow's dither still goes by the row it lands on). */
+void glass_ring_replay_row_off(uint16_t *row, int y, int ry, int clip_lo, int clip_hi,
+                               const uint8_t *rec, uint16_t color565, uint8_t alpha,
+                               bool swap_bytes);
+void glass_glow_replay_row_off(uint16_t *row, int y, int ry, int clip_lo, int clip_hi,
+                               const uint8_t *rec, int32_t width16, uint8_t peak,
+                               uint16_t color565, uint8_t alpha, bool swap_bytes);
+
 /* The same span with round caps (cap radius = half the stroke). A sweep of a
  * full turn or more has no ends and equals the ring. */
 void glass_arc_row(uint16_t *row, int y, int clip_lo, int clip_hi,

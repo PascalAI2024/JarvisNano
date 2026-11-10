@@ -298,6 +298,54 @@ The knob mechanism stays with no bits defined (`JR_KNOB_KNOWN_MASK` is 0): the w
 
 The lesson is about the word fill. `fill16` stored two pixels to a 32-bit word. On the host it counted fewer instructions (MINIMAL 2.90 M to 2.02 M with the disc record), and on the ESP32-S3 it ran 12 ms slower than the 16-bit store loop it replaced. Host instruction counts have now predicted the device wrong in both directions on this chip, so a change that is justified only by a callgrind figure ships behind the knob and waits for a device sample. The disc record, also justified by instructions, bought nothing once the plain loops were back.
 
+## 2026-11-10 - where a moving frame's time goes, and three bits that move it (host figures only)
+
+Source: callgrind per frame (`CALLGRIND_DUMP_STATS_AT`, `--cache-sim=yes` for Dw) over `glass-preview.py` scripts, at a53d3e0 (the fade path deleted), knob 0. Scripts added in this round: `desk.script`, `shade-watch.script`, `style-drawn.script` (in `components/jr_display/tests/probe/preview/`). Every figure below is a host instruction count; this chip has disagreed with the host three times, so no bit here is proven on the device.
+
+### Step 1: worst frame against the settled frame
+
+All frames carry a 0.43 M `memcpy` (the strip copy) and about 0.15 M of text and overlay; the table lists what changes.
+
+| Transition | Worst frame | What it spends | Settled frame | Record bypassed? |
+|---|---|---|---|---|
+| WEATHER > STATUS (slide) | 4.5 M (f47) | `glass_glow_row` 0.67 M, `ring_like_row` 0.36 M, `shape_cov` 0.40 M, `glow_t64` 0.27 M, `geo_get` 0.17 M | f50: 1.94 M; the glow and ring replays are 0.44 M and 0.28 M | Yes. `jr_display.c:5273` (`sp_focal_status`) and `:5430` (`sp_focal_desk`) take a record only when `oy == 0 && f_ring >= GLASS_ONE_Q16`; while the screen slides (`oy != 0`) or the entry sweep runs, all three ring primitives run live. |
+| STATUS > DESK | 4.2 M (f58) | the same four functions, 0.63 M glow row first | f50: 2.4 M | Same two lines. |
+| Shade over home | 5.4 M (f30) | `pv_frame` 1.2 M plus 0.76 M inlined `hud_render.h`, `fill_run` 0.59 M, `ring_like_row` 0.42 M | f45: 3.3 M | Partly. The shade's own arc is recorded behind `sp_settled` (`:5785`) and is replayed in f45; the cost that stays is the veil over the dial (`pv_frame`, `fill_run`), which is no record at all. |
+| Shade over WATCH | 9.5 M (f130) | `aa_disc` 1.56 M, `aa_fill` 1.0 M, `pv_frame` 1.4 M, `fill_run` 0.54 M; at f25 `aa_fill` 2.1 M | f150: 6.5 M | No record is involved. The watch face is drawn in code with the shade over it; the stand-in face makes this figure host-specific. |
+| Home > WATCH | 6.2 M (f98) | `sp_veil_black` 3.0 M, `aa_fill` 1.6 M | f21 (veil only): 2.7 M | Not a record: the dial fade is a per-pixel fold (`sp_veil_black`, `jr_display.c:6072`). |
+| Style change onto PILOT | 10.2 M (f73) | `aa_disc`, `aa_fill`, the face fold | | A face fold at part strength, not a record. |
+| Style change onto MINIMAL | 10.2 M (f93 in the MINIMAL script) | `aa_disc` 7.7 M (76 %), `aa_fill` 1.0 M | f100: 4.0 M | Not a record. `aa_disc` blends each interior pixel when alpha is below 256, one blend per pixel, with the same value again and again on a flat dial. |
+
+So the hypothesis that the records are bypassed holds for the two ring screens only. The shade is dominated by the veil, home > WATCH and PILOT by a face fold, MINIMAL by the interior blend of `aa_disc`.
+
+### Step 2: the bits
+
+| Bit | Name | What it does | Worst frame Ir, knob 0 > bit | Worst frame Dw, knob 0 > bit |
+|---|---|---|---|---|
+| 0 | `JR_KNOB_REPLAY_RING` | While a ring screen enters or slides, each row is split into a right and a left side. A side that cannot touch the moving front replays the full-turn track, and the glow and arc replay the final-sweep records; only the front stays live. | slide 4.52 M > 3.92 M; STATUS > DESK on and on 4.56 M > 4.58 M (the first frame records, see below); the entering frames themselves 4.0 to 4.3 M > 2.6 to 3.0 M | slide 734 k > 700 k; desk 715 k > 721 k |
+| 2 | `JR_KNOB_DISC_MEMO` | `aa_disc` at part strength remembers the last interior pixel it blended. | style change onto MINIMAL 10.2 M > 4.5 M | 785 k > 786 k |
+| 3 | `JR_KNOB_VEIL_MEMO` | `sp_veil` and `sp_veil_black` at part strength fold a repeated pixel once. | shade over WATCH 9.49 M > 7.86 M; style onto PILOT 10.23 M > 10.23 M (no change); home > WATCH 6.18 M > 6.34 M (no change; the worst frame is not the veil) | shade over WATCH 1028 k > 1033 k |
+
+Dw does not move more than about 5 % in either direction for any bit; the saving is instructions, not stores. A bit that wins on instructions here may still lose on the device.
+
+Bit 1 (the shade's own fills) was not built: step 1 shows the shade's arc already replays once settled, and what is left of the shade is the veil, which bit 3 takes.
+
+Bit 0 is pixel-exact against knob 0 in every motion script (0 frames differ). Bit 3 differs from knob 0 by nothing visible; the identity suite holds it to the 0.5 % over 2 steps tolerance, and an injected high-bit error in the memo fails three shade scripts. Bit 2 passes the same suite.
+
+### Costs of bit 0
+
+| Item | Size |
+|---|---|
+| PSRAM, ring records | 7 blocks of `SG_FRING_CAP` (12,288 B) = 86,016 B, up from 3 (36,864 B): +49,152 B. Two slots of three blocks (track, glow, arc for two sweeps) plus one block for the full-turn track. |
+| PSRAM, row table | 268 rows of `sg_rx_t` (8 B) = 2,144 B |
+| Internal RAM | about 40 B of statics |
+
+A record is taken on the first frame of an entry, or when a different sweep is asked for; that frame costs the record plus the live draw and is the hitch bit 0 does not remove. None is freed once taken.
+
+### What was not measured
+
+Nothing here ran on the device. The veil and face figures depend on the stand-in face the preview uses.
+
 ---
 
 ## See also

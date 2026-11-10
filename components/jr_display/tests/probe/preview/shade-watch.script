@@ -1,0 +1,14 @@
+# the control shade over a DRAWN dial (PILOT), where the face and its cells cost most:
+# open, hold, close
+scene watch-pilot
+wait 800
+open shade
+wait 2000
+close shade
+wait 1500
+scene watch-minimal
+wait 800
+open shade
+wait 2000
+close shade
+wait 1500

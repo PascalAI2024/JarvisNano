@@ -18,6 +18,7 @@
  * blend policy (later == on top), which keeps the hot path branch-free.
  */
 #include "jr_display/hud_render.h"
+#include "jr_display/perf_knob.h"
 #include "balance_wheel_data.h"      /* SKELETON: the wheel sprite    */
 #include "celestial_stars_data.h"    /* CELESTIAL: the twinkling stars */
 
@@ -1824,6 +1825,19 @@ static void HOT aa_disc(const strip_t *s, int32_t cx, int32_t cy, int32_t rad,
             if (alpha >= 256) {
                 for (int x = in0; x <= in1; ++x) {
                     row[x] = solid;
+                }
+            } else if ((hud_perf_knob & JR_KNOB_DISC_MEMO) != 0u) {
+                /* a flat disc over a flat base blends the same pixel again and
+                 * again: remember the last one (same output, one blend a run) */
+                uint16_t last_in = row[in0];
+                uint16_t last_out = w_blend(last_in, c, alpha, swap);
+                for (int x = in0; x <= in1; ++x) {
+                    const uint16_t v = row[x];
+                    if (v != last_in) {
+                        last_in = v;
+                        last_out = w_blend(v, c, alpha, swap);
+                    }
+                    row[x] = last_out;
                 }
             } else {
                 for (int x = in0; x <= in1; ++x) {
