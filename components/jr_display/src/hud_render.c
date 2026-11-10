@@ -1844,7 +1844,21 @@ static void HOT aa_disc(const strip_t *s, int32_t cx, int32_t cy, int32_t rad,
                 cov_span(cov, xl, xr, &lo, &hi);
             }
         }
-        if (hi >= lo) {
+        if (hi >= lo && in1 >= in0) {
+            /* [lo, hi] spans the whole chord, but the interior [in0, in1] holds
+             * no coverage (only the two edge runs were accumulated): walking it
+             * cost 430 pixels a row on the MINIMAL dial to find zeros. Blend and
+             * clear the two edge runs alone. */
+            if (lo < in0) {
+                cov_blend(row, cov, lo, in0 - 1, c, alpha, swap, AA_FULL);
+                memset(cov + lo, 0, (size_t)(in0 - lo) * sizeof cov[0]);
+            }
+            const int ra = in1 + 1 > lo ? in1 + 1 : lo;
+            if (hi >= ra) {
+                cov_blend(row, cov, ra, hi, c, alpha, swap, AA_FULL);
+                memset(cov + ra, 0, (size_t)(hi - ra + 1) * sizeof cov[0]);
+            }
+        } else if (hi >= lo) {
             cov_blend(row, cov, lo, hi, c, alpha, swap, AA_FULL);
             memset(cov + lo, 0, (size_t)(hi - lo + 1) * sizeof cov[0]);
         }

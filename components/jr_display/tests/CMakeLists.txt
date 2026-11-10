@@ -52,6 +52,32 @@ target_compile_definitions(jr_display_shell_tests PRIVATE
     JR_HOST_DIAL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../firmware/mascot/reactive"
 )
 
+# The whole frame, byte for byte, over the same production path: the proof that a
+# performance change moved no pixel. See test_frame_identity.c.
+add_executable(jr_display_frame_tests
+    test_frame_identity.c
+    ../src/hud_render.c
+    ../src/balance_wheel_data.c
+    ../src/companion.c
+    ../src/glass_font.c
+    ../src/glass_draw.c
+    ../src/glass_font_data.c
+    ../src/glass_icon.c
+    ../src/glass_icon_data.c
+)
+target_include_directories(jr_display_frame_tests PRIVATE
+    ../include
+    ../src
+    ../../jr_ports/include
+    probe/stubs
+)
+target_compile_options(jr_display_frame_tests PRIVATE
+    -Wall -Wextra -Werror -Wno-unused-function
+)
+target_compile_definitions(jr_display_frame_tests PRIVATE
+    JR_HOST_DIAL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../firmware/mascot/reactive"
+)
+
 enable_testing()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME jr_display_board_tests COMMAND ${Python3_EXECUTABLE}
@@ -89,3 +115,4 @@ target_include_directories(glass_bench PRIVATE ../include)
 target_compile_options(glass_bench PRIVATE -O2 -Wall -Wextra -Werror)
 add_test(NAME jr_display_hud_tests COMMAND jr_display_hud_tests)
 add_test(NAME jr_display_shell_tests COMMAND jr_display_shell_tests)
+add_test(NAME jr_display_frame_tests COMMAND jr_display_frame_tests)

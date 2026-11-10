@@ -39,19 +39,35 @@ long g_wr;   /* pixels the shell's own primitives wrote: see the --wrap wrappers
 
 /* ---- stub implementations for every extern jr_display.c references ---- */
 #include "idf_stubs.inc"
+#ifndef NO_ENTRY
+#include "../frame_scenes.inc"
+#endif
 
 #ifndef NO_ENTRY
 /* The glass primitives are the only code that draws the data screens, and they
  * live in another translation unit: the linker wraps them (-Wl,--wrap=...), and
  * each wrapper counts the pixels its call changed. (The old 5x7 path counts at
  * its own write sites in the copy of jr_display.c the comparison builds.) */
+#ifdef FC_NOCOUNT   /* the cost profile must not pay for the pixel counter */
+#define WRAP_ROW(call_real, ...) call_real(__VA_ARGS__)
+#else
+/* per primitive: calls, and calls that changed no pixel (the "frame_cost" probe) */
+enum { WRAP_ID___real_glass_ring_row, WRAP_ID___real_glass_arc_row, WRAP_ID___real_glass_glow_row,
+       WRAP_ID___real_glass_text_row, WRAP_ID___real_glass_disc_row, WRAP_ID___real_glass_icon_row,
+       WRAP_N };
+long g_calls[WRAP_N], g_empty[WRAP_N];
 #define WRAP_ROW(call_real, ...)                                                   \
     do {                                                                           \
         uint16_t before_[466];                                                     \
         memcpy(before_, row, sizeof before_);                                      \
         call_real(__VA_ARGS__);                                                    \
-        for (int i_ = 0; i_ < 466; i_++) g_wr += row[i_] != before_[i_];           \
+        long ch_ = 0;                                                              \
+        for (int i_ = 0; i_ < 466; i_++) ch_ += row[i_] != before_[i_];            \
+        g_wr += ch_;                                                               \
+        g_calls[WRAP_ID_##call_real]++;                                            \
+        g_empty[WRAP_ID_##call_real] += ch_ == 0;                                  \
     } while (0)
+#endif
 void __real_glass_ring_row(uint16_t *, int, int, int, int32_t, int32_t, int32_t, int32_t, int32_t,
                            int32_t, uint16_t, uint8_t, bool);
 void __wrap_glass_ring_row(uint16_t *row, int y, int lo, int hi, int32_t cx, int32_t cy, int32_t ri,
@@ -135,6 +151,48 @@ static const char *flag_val(int argc, char **argv, const char *key)
 
 int main(int argc, char **argv)
 {
+#ifndef NO_ENTRY
+    /* "frame SCENE clk=MS [ppm=PATH]": one whole warm frame (frame_scenes.inc)
+     * and its FNV hash on stdout. This is what callgrind measures. */
+    if (argc > 2 && strcmp(argv[1], "frame") == 0) {
+        const fc_scene_t *sc = NULL;
+        if (strcmp(argv[2], "list") == 0) {
+            for (int i = 0; i < FC_NSCENES; i++) printf("%s\n", FC_SCENES[i].name);
+            return 0;
+        }
+        for (int i = 0; i < FC_NSCENES; i++) {
+            if (strcmp(FC_SCENES[i].name, argv[2]) == 0) sc = &FC_SCENES[i];
+        }
+        if (!sc) { fprintf(stderr, "unknown frame scene %s\n", argv[2]); return 2; }
+        const char *clk_arg = flag_val(argc, argv, "clk=");
+        const char *ppm_arg = flag_val(argc, argv, "ppm=");
+        const long long clk_ms = clk_arg ? atoll(clk_arg) : 100000;
+        fc_setup(sc);
+        uint16_t *ffb = malloc(466u * 466u * sizeof(uint16_t));
+        fc_run(sc, clk_ms, ffb);
+#ifndef FC_NOCOUNT
+        if (flag_val(argc, argv, "calls")) {
+            /* the warm frame is counted too: halve nothing, report per both */
+            static const char *const nm[] = { "ring", "arc", "glow", "text", "disc", "icon" };
+            for (int i = 0; i < WRAP_N; i++)
+                printf("%s %s calls=%ld empty=%ld\n", sc->name, nm[i], g_calls[i], g_empty[i]);
+        }
+#endif
+        printf("%s clk=%lld hash=%016llx\n", sc->name, clk_ms, (unsigned long long)fc_hash(ffb));
+        if (ppm_arg) {
+            FILE *pf = fopen(ppm_arg, "wb");
+            fprintf(pf, "P6 466 466 255\n");
+            for (int i = 0; i < 466 * 466; i++) {
+                const uint16_t v = ffb[i];
+                const unsigned char rgb[3] = { (unsigned char)(((v >> 11) & 31) * 255 / 31),
+                    (unsigned char)(((v >> 5) & 63) * 255 / 63), (unsigned char)((v & 31) * 255 / 31) };
+                fwrite(rgb, 1, 3, pf);
+            }
+            fclose(pf);
+        }
+        return 0;
+    }
+#endif
     const char *scene = argc > 1 ? argv[1] : "shade";
     const bool muted = has_flag(argc, argv, "muted");
     const bool low = has_flag(argc, argv, "low");

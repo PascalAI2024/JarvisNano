@@ -11,9 +11,10 @@
 # runs is worse than no suite, because it looks like coverage. Add new suites
 # HERE, not to a habit.
 #
-# The twenty-one suites, in the order they run:
+# The twenty-two suites, in the order they run:
 #   jr_display_hud_tests      components/jr_display/tests   procedural renderer
 #   jr_display_shell_tests    components/jr_display/tests   spatial shell
+#   jr_display_frame_tests    components/jr_display/tests   whole-frame hashes: no pixel moved
 #   jr_display_companion_tests components/jr_display/tests  portable Rest policy
 #   jr_display_glass_tests    components/jr_display/tests   AA type, discs, rings, arcs, glows
 #   jr_display_icon_tests     components/jr_display/tests   the icon set: ink, box, clip, alpha
@@ -180,6 +181,8 @@ run_c_suites() {
         jr_display_hud_tests "$ROOT/components/jr_display/tests/build/jr_display_hud_tests"
     run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build" \
         jr_display_shell_tests "$ROOT/components/jr_display/tests/build/jr_display_shell_tests"
+    run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build" \
+        jr_display_frame_tests "$ROOT/components/jr_display/tests/build/jr_display_frame_tests"
     run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build" \
         jr_display_companion_tests "$ROOT/components/jr_display/tests/build/jr_display_companion_tests"
     run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build"         jr_display_glass_tests "$ROOT/components/jr_display/tests/build/jr_display_glass_tests"

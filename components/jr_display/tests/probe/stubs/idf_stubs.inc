@@ -55,7 +55,10 @@ void heap_caps_free(void *p)
 }
 size_t heap_caps_get_free_size(unsigned c) { (void)c; return 0; }
 static int64_t s_fake_us;
-int64_t esp_timer_get_time(void) { return s_fake_us; }
+/* Each read advances the clock by s_fake_us_step (0 = frozen, the default), so a
+ * test can tell a timer that was read from one that was skipped. */
+static int64_t s_fake_us_step;
+int64_t esp_timer_get_time(void) { const int64_t t = s_fake_us; s_fake_us += s_fake_us_step; return t; }
 static esp_err_t s_stub_spiffs_error;
 esp_err_t esp_vfs_spiffs_register(const esp_vfs_spiffs_conf_t *c) { (void)c; return s_stub_spiffs_error; }
 esp_err_t esp_spiffs_info(const char *l, size_t *t, size_t *u) { (void)l; *t = *u = 0; return ESP_OK; }

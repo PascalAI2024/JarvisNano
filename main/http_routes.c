@@ -3051,6 +3051,36 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "diag failed");
         return ESP_OK;
     }
+    {
+        /* ?split=1: where the hud layer's time goes, summed over the frames
+         * since boot (divide by render_frames). Its own response, because the
+         * full document's size is pinned and this adds ~15 keys. */
+        char q[24], v[4];
+        if (httpd_req_get_url_query_str(req, q, sizeof q) == ESP_OK &&
+            httpd_query_key_value(q, "split", v, sizeof v) == ESP_OK &&
+            v[0] == '1') {
+            char sb[640];
+            int m = snprintf(sb, sizeof sb, "{\"render_frames\":%u,\"render_frame_us\":%u,\"split_us\":{",
+                             (unsigned)d.render_frames, (unsigned)d.render_frame_us);
+            for (unsigned i = 0; m > 0 && (size_t)m < sizeof sb &&
+                                 i < (unsigned)JR_DISPLAY_SPLIT_COUNT; i++) {
+                m += snprintf(sb + m, sizeof sb - (size_t)m, "%s\"%s\":%u",
+                              i ? "," : "", jr_display_split_name(i),
+                              (unsigned)d.split_us[i]);
+            }
+            if (m > 0 && (size_t)m < sizeof sb - 3) {
+                m += snprintf(sb + m, sizeof sb - (size_t)m, "}}");
+            }
+            if (m < 0 || (size_t)m >= sizeof sb) {
+                httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "encoding failed");
+                return ESP_OK;
+            }
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+            httpd_resp_send(req, sb, (size_t)m);
+            return ESP_OK;
+        }
+    }
     static const char *init_names[] = { "stopped", "starting", "ready", "failed" };
     const char *init_name = d.init_state <= JR_DISPLAY_INIT_FAILED
                                 ? init_names[d.init_state] : "?";

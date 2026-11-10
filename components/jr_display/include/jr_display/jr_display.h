@@ -118,6 +118,31 @@ void jr_display_panel_on_request(void);
 /* True only after latest recovery commands and a matching transfer complete. */
 bool jr_display_panel_is_on(void);
 
+/* Where the hud layer's compositing time goes. One timer read per strip per
+ * part (never per row); `jr_display_split_name()` gives each its JSON key, so
+ * /api/display?split=1 prints them with no lookup table on the reader's side. */
+typedef enum {
+    JR_DISPLAY_SPLIT_HUD_FRAME = 0,   /* the home HUD pieces: rim, privacy ring, comet, ripple */
+    JR_DISPLAY_SPLIT_HUD_SPACE,       /* apply_space_overlay: the shell's backdrop, screens, orbit */
+    JR_DISPLAY_SPLIT_HUD_CLOCK,       /* apply_clock_overlay: the watch */
+    JR_DISPLAY_SPLIT_HUD_OTA,         /* update ring and commit ring */
+    JR_DISPLAY_SPLIT_HUD_CAPTION,
+    JR_DISPLAY_SPLIT_HUD_ASK,         /* the ask presentation and its choices */
+    JR_DISPLAY_SPLIT_HUD_BLOOM,
+    JR_DISPLAY_SPLIT_SPACE_VEIL,      /* inside hud_space: face veil and fold to black */
+    JR_DISPLAY_SPLIT_SPACE_SCREEN,    /* the focal screens, their rings and their text */
+    JR_DISPLAY_SPLIT_SPACE_SHEET,     /* the detail sheet */
+    JR_DISPLAY_SPLIT_SPACE_SHADE,     /* the control shade */
+    JR_DISPLAY_SPLIT_SPACE_ORBIT,     /* the orbit rail, dots and mark */
+    JR_DISPLAY_SPLIT_CLOCK_CLEAR,     /* inside hud_clock: the dial disc clear */
+    JR_DISPLAY_SPLIT_CLOCK_FACE,      /* the hands, dial, markers */
+    JR_DISPLAY_SPLIT_CLOCK_CELLS,     /* the sun arc and the dial's text cells */
+    JR_DISPLAY_SPLIT_COUNT
+} jr_display_split_t;
+
+/* The JSON key of a split timer, or NULL out of range. */
+const char *jr_display_split_name(unsigned index);
+
 typedef struct {
     jr_display_init_state_t init_state;
     esp_err_t last_error;
@@ -148,6 +173,11 @@ typedef struct {
     uint32_t render_frames;
     uint32_t render_frame_us;
     uint32_t layer_us[5];   /* dial, canvas, hud, shell, surface */
+    /* The split inside the hud layer (the clock, the shell's backdrop and
+     * screens, the home HUD pieces), wrapping microseconds in the order of
+     * jr_display_split_t. The "space_" parts are inside "hud_space" and the
+     * "clock_" parts inside "hud_clock": they overlap their parent by design. */
+    uint32_t split_us[JR_DISPLAY_SPLIT_COUNT];
     /* The filtered in-plane light the watch hands are lit with (milli-g, screen
      * axes) and the shadow offset it solved to (Q4 px; rest is 32, 48). */
     int32_t light_gx_mg, light_gy_mg;

@@ -3501,6 +3501,33 @@ static void watch_cells(const jr_display_ctx_t *ctx, int y1, int y2,
     }
 }
 
+/* Split timers: where the hud layer's time goes, microseconds summed over a
+ * frame's strips like layer_us. Written by the render task only, read by httpd
+ * (relaxed; a torn pair across two counters is harmless for a gauge). The
+ * space_* and clock_* entries are inside hud_space and hud_clock, not beside
+ * them. One timer read per part per strip, never per row. */
+static volatile uint32_t s_split_us[JR_DISPLAY_SPLIT_COUNT];
+
+static const char *const k_split_names[JR_DISPLAY_SPLIT_COUNT] = {
+    "hud_frame", "hud_space", "hud_clock", "hud_ota", "hud_caption", "hud_ask",
+    "hud_bloom", "space_veil", "space_screen", "space_sheet", "space_shade",
+    "space_orbit", "clock_clear", "clock_face", "clock_cells",
+};
+
+const char *jr_display_split_name(unsigned index)
+{
+    return index < (unsigned)JR_DISPLAY_SPLIT_COUNT ? k_split_names[index] : NULL;
+}
+
+/* Charge the time since *mark to one split and move the mark. */
+static inline void split_mark(jr_display_split_t which, int64_t *mark)
+{
+    const int64_t now = esp_timer_get_time();
+    __atomic_add_fetch(&s_split_us[which], (uint32_t)(now - *mark),
+                       __ATOMIC_RELAXED);
+    *mark = now;
+}
+
 static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
                                 uint16_t *pixels)
 {
@@ -3508,6 +3535,7 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     if (e <= 0) {
         return;
     }
+    int64_t sm = esp_timer_get_time();
     /* THE SHEET OUTRANKS THE FACE.
      *
      * Tapping the focal object opens that space's detail sheet, but on WATCH
@@ -3589,12 +3617,14 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
         }
     }
 
+    split_mark(JR_DISPLAY_SPLIT_CLOCK_CLEAR, &sm);
     const uint32_t w = s_clock_shown_word;
     const int strength = e > 255 ? 255 : e;
     if (style == (int)JR_WATCH_JARVIS) {
         hud_overlay_clock(pixels, y1, y2 - y1, ctx->board.swap_color_bytes,
                           (int)((w >> 8) & 0xFFu), (int)(w & 0xFFu),
                           (int)((w >> 17) & 0x3Fu), strength);
+        split_mark(JR_DISPLAY_SPLIT_CLOCK_FACE, &sm);
         return;
     }
     const uint32_t pw = __atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE);
@@ -3618,9 +3648,12 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
         .light = &s_light,
     };
     watch_sun_arc(ctx, y1, y2, pixels, style, strength, hw.hh, hw.mm);
+    split_mark(JR_DISPLAY_SPLIT_CLOCK_CELLS, &sm);
     hud_overlay_watch(pixels, y1, y2 - y1, ctx->board.swap_color_bytes, &hw,
                       strength, style);
+    split_mark(JR_DISPLAY_SPLIT_CLOCK_FACE, &sm);
     watch_cells(ctx, y1, y2, pixels, style, strength, baked);
+    split_mark(JR_DISPLAY_SPLIT_CLOCK_CELLS, &sm);
 }
 
 /* ===== SPATIAL SHELL: geometry and drawing ===============================
@@ -4111,9 +4144,13 @@ static const char *sp_headline(int space);
 #define SG_RAIN_STAGGER_MS 45
 #define SG_RAIN_BUILD_MS   250
 
-/* One piece of text, measured once per strip. */
+/* One piece of text, measured when a row of the strip first draws it (a strip
+ * that misses the line never pays for the glyph walk: ACTIVITY spent a quarter
+ * of its frame measuring lines on strips that did not touch them). */
 typedef struct {
     const char *s;
+    int cx;                 /* centre to measure from while `pending` */
+    bool pending;           /* x0 is not worked out yet */
     int len, x0, y_top, y_lo, y_hi, tracking;
     glass_font_id_t font;
     uint16_t color;
@@ -4128,7 +4165,9 @@ static void sg_txt_make(sg_txt_t *t, glass_font_id_t font, const char *s, int le
     t->len = alpha > 0 ? len : 0;
     t->font = font;
     t->tracking = tracking;
-    t->x0 = cx - glass_text_width(font, s, (size_t)(len > 0 ? len : 0), tracking) / 2;
+    t->cx = cx;
+    t->pending = true;
+    t->x0 = cx;
     t->y_top = y_top;
     t->y_lo = y_top + m.ink_top;
     t->y_hi = y_top + m.ink_bottom;
@@ -4136,9 +4175,13 @@ static void sg_txt_make(sg_txt_t *t, glass_font_id_t font, const char *s, int le
     t->alpha = (uint8_t)(alpha > 255 ? 255 : (alpha < 0 ? 0 : alpha));
 }
 
-static inline void sg_txt_row(uint16_t *row, int y, int lo, int hi, bool swap, const sg_txt_t *t)
+static inline void sg_txt_row(uint16_t *row, int y, int lo, int hi, bool swap, sg_txt_t *t)
 {
     if (t->len > 0 && y >= t->y_lo && y <= t->y_hi) {
+        if (t->pending) {
+            t->x0 = t->cx - glass_text_width(t->font, t->s, (size_t)t->len, t->tracking) / 2;
+            t->pending = false;
+        }
         glass_text_row(row, y, lo, hi, t->font, t->s, (size_t)t->len, t->x0, t->y_top,
                        t->tracking, t->color, t->alpha, swap);
     }
@@ -4178,6 +4221,7 @@ static void sg_txt_at(sg_txt_t *t, glass_font_id_t font, const char *s, int len,
 {
     sg_txt_make(t, font, s, len, 0, y_top, 0, native, alpha);
     t->x0 = x0;
+    t->pending = false;
 }
 
 /* The staggered element's fade and rise at entry time `ent`. */
@@ -4896,6 +4940,7 @@ static void sp_draw_detail(const jr_display_ctx_t *ctx, int y1, int y2,
         sg_txt_make(&t_val[i], GLASS_FONT_TEXT, s_detail_value[i], vlen, 0, ry, 0, SP_C_INK, st);
         t_val[i].x0 = SP_SHEET_RIGHT - glass_text_width(GLASS_FONT_TEXT, s_detail_value[i],
                                                         (size_t)vlen, 0);
+        t_val[i].pending = false;
     }
 
     for (int y = ys; y <= ye; ++y) {
@@ -5201,12 +5246,14 @@ static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
      * no face pixels to fold at all. */
     const int veil = ((settled && watch_art_is_content()) || s_space_black >= 256)
                          ? 0 : (s_space_veil * 32) >> 8;
+    int64_t sm = esp_timer_get_time();
     if (veil > 0) {
         sp_veil(ctx, y1, y2, pixels, veil);
     }
     if (s_space_black > 0 && !s_parked) {
         sp_veil_black(ctx, y1, y2, pixels, (s_space_black * 32) >> 8);
     }
+    split_mark(JR_DISPLAY_SPLIT_SPACE_VEIL, &sm);
     const int shade = (s_shade_ease * 255) / 256;
     const int under = 255 - shade;
     if (under > 0) {
@@ -5231,15 +5278,19 @@ static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
                           s_space_dir * (SP_SLIDE_PX - slide),
                           (focal * e) / 256, s_entry_ms);
         }
+        split_mark(JR_DISPLAY_SPLIT_SPACE_SCREEN, &sm);
         if (s_detail_ease > 0) {
             sp_draw_detail(ctx, y1, y2, pixels,
                            (under * s_detail_ease) / 256);
+            split_mark(JR_DISPLAY_SPLIT_SPACE_SHEET, &sm);
         }
     }
     if (shade > 0) {
         sp_draw_shade(ctx, y1, y2, pixels, shade, s_shade_ms, s_breath_ms);
+        split_mark(JR_DISPLAY_SPLIT_SPACE_SHADE, &sm);
     }
     sp_draw_orbit(ctx, y1, y2, pixels, under);
+    split_mark(JR_DISPLAY_SPLIT_SPACE_ORBIT, &sm);
 }
 
 static jr_display_rest_mode_t rest_eligible(const jr_display_ctx_t *ctx)
@@ -5417,6 +5468,29 @@ static bool apply_companion_overlay(jr_display_ctx_t *ctx, int y1, int y2,
            y2 > view.lines[0].y;
 }
 
+/* True when apply_clock_overlay is about to clear the whole shell disc on this
+ * strip, which makes everything the shell drew into that disc a dead write:
+ * the clear is a memset of the disc sp_clip bounds every shell primitive to
+ * (the same r214 chord per row), so the veil, the black fold, the outgoing and
+ * incoming screens and the orbit rail were all painted for nothing. Measured
+ * on the host as 36 % of a MINIMAL frame and 47 % of a JARVIS-style one. The
+ * conditions are the clear's own, copied from apply_clock_overlay: the clock
+ * is up, neither the detail sheet nor the shade holds the glass, and the dial
+ * is not baked art (a baked dial is not cleared, so the shell stays under it).
+ * Must be called on the same side of the `choice` branch as the clock. */
+static bool watch_clear_follows(const jr_display_ctx_t *ctx)
+{
+    if ((jr_display_space_t)(__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) &
+                             NAV_SPACE_MASK) != JR_DISPLAY_SPACE_WATCH) {
+        return false;
+    }
+    if (s_clock_ease <= 0 || s_detail_ease > 0 || s_shade_ease > 0) {
+        return false;
+    }
+    const jr_face_t dial = watch_dial_face();
+    return !(dial != JR_FACE_COUNT && ctx->shown_face == dial);
+}
+
 static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                               int x2, int y2, uint16_t *pixels)
 {
@@ -5444,7 +5518,8 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
         .ox       = (int8_t)((w >> 16) & 0xFFu),
         .oy       = (int8_t)((w >> 24) & 0xFFu),
     };
-    const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    int64_t sm = esp_timer_get_time();
+    const uint32_t now_ms = (uint32_t)(sm / 1000);
     hud_overlay_frame(pixels, y1, nrows, now_ms,
                       ctx->board.swap_color_bytes, &env);
 
@@ -5458,6 +5533,7 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                            s_ripple_x, s_ripple_y, now_ms - rip_start,
                            (hud_ripple_kind_t)s_ripple_kind);
     }
+    split_mark(JR_DISPLAY_SPLIT_HUD_FRAME, &sm);
 
     /* Modal ask (STATE-05/06/07): dim everything drawn so far, lay the
      * question + labels over the dimmed face, then the arcs LAST — they are
@@ -5474,12 +5550,16 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
         apply_ask_overlay(ctx, y1, y2, pixels, cn, ae);
         hud_overlay_choices(pixels, y1, nrows, ctx->board.swap_color_bytes,
                             s_choices, cn, s_choice_selected, as);
+        split_mark(JR_DISPLAY_SPLIT_HUD_ASK, &sm);
     } else {
         /* The spatial shell owns the glass between the face and the caption:
          * the four spaces, the context sheet, and the control shade. It is
          * skipped entirely while an ask is up (the ask owns the glass) and
          * draws nothing at all in JARVIS at rest. */
-        apply_space_overlay(ctx, y1, y2, pixels);
+        if (!watch_clear_follows(ctx)) {
+            apply_space_overlay(ctx, y1, y2, pixels);
+        }
+        split_mark(JR_DISPLAY_SPLIT_HUD_SPACE, &sm);
 
         /* UI-01 clock under the STATE-04 caption. The watch is JARVIS's
          * ambient face, so it yields whenever the shell is presenting ANOTHER
@@ -5496,6 +5576,7 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                                  & NAV_SPACE_MASK) == JR_DISPLAY_SPACE_WATCH) {
             apply_clock_overlay(ctx, y1, y2, pixels);  /* gates itself */
         }
+        split_mark(JR_DISPLAY_SPLIT_HUD_CLOCK, &sm);
         /* The firmware update ring sits ABOVE the watch: the clock keeps its
          * dial clean by clearing the disc, and the one job that can brick the
          * device must not be the thing that clear erases. Gated on the OTA
@@ -5510,12 +5591,15 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                                    ctx->board.swap_color_bytes, cpct, 255);
             }
         }
+        split_mark(JR_DISPLAY_SPLIT_HUD_OTA, &sm);
         apply_caption_overlay(ctx, y1, y2, pixels);    /* gates on its ease */
+        split_mark(JR_DISPLAY_SPLIT_HUD_CAPTION, &sm);
         if (ae > 0 && s_ask_shown_n > 0) {
             apply_ask_overlay(ctx, y1, y2, pixels, s_ask_shown_n, ae);
             hud_overlay_choices(pixels, y1, nrows,
                                 ctx->board.swap_color_bytes, s_choices,
                                 s_ask_shown_n, s_choice_selected, as);
+            split_mark(JR_DISPLAY_SPLIT_HUD_ASK, &sm);
         }
     }
 
@@ -5528,6 +5612,7 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
     if (bloom_start != 0u && now_ms - bloom_start < HUD_BLOOM_MS) {
         hud_overlay_bloom(pixels, y1, nrows, ctx->board.swap_color_bytes,
                           now_ms - bloom_start);
+        split_mark(JR_DISPLAY_SPLIT_HUD_BLOOM, &sm);
     }
 }
 
@@ -6788,6 +6873,9 @@ esp_err_t jr_display_get_diag(jr_display_diag_t *out_diag)
     out_diag->render_frame_us = diag_load(&s_display.render_frame_us);
     for (int i = 0; i < 5; i++) {
         out_diag->layer_us[i] = diag_load(&s_display.layer_us[i]);
+    }
+    for (int i = 0; i < (int)JR_DISPLAY_SPLIT_COUNT; i++) {
+        out_diag->split_us[i] = diag_load(&s_split_us[i]);
     }
     out_diag->light_gx_mg = s_light_gx_mg;
     out_diag->light_gy_mg = s_light_gy_mg;
