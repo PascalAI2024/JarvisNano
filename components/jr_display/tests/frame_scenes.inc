@@ -56,6 +56,11 @@ static const fc_scene_t FC_SCENES[] = {
     { "activity",      JR_DISPLAY_SPACE_ACTIVITY,JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0, 0 },
     { "shade",         JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_SHADE,  0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0, 0 },
     { "detail",        JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_DETAIL, 0,                74, true,  false, FC_SETTLED, FC_SETTLED, true,  0, 0, 0, 0 },
+    /* the recorded shapes' edges: the ring at a sliver and at nearly full, the desk ring and the shade part-way through their entry */
+    { "status-1",      JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_NONE,   0,                1,  false, false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0, 0 },
+    { "status-99",     JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_NONE,   0,                99, false, false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0, 0 },
+    { "desk-ent",      JR_DISPLAY_SPACE_DESK,    JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, 400,        FC_SETTLED, false, 0, 0, 0, 0 },
+    { "shade-ent",     JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_SHADE,  0,                74, true,  false, FC_SETTLED, 300,        false, 0, 0, 0, 0 },
     /* the agent rim (apply_shell_overlay): full, and part-way (4 of 8 sectors), over home and a ring screen */
     { "home-agent-100",   JR_DISPLAY_SPACE_JARVIS,  JR_DISPLAY_OVERLAY_NONE, 0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 100, 0, 0 },
     { "home-agent-40",    JR_DISPLAY_SPACE_JARVIS,  JR_DISPLAY_OVERLAY_NONE, 0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 40, 0, 0 },
