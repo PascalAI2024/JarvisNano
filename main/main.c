@@ -4483,6 +4483,9 @@ void app_main(void)
      * boot. On resource failure, fall back to the jr_hal logging stub
      * (headless, exactly the pre-Phase-3 behavior). */
     s_app.clock   = jr_hal_clock();
+    /* Boot shares a core with the render task: see RENDER_FPS_BOOT. The voice
+     * loop's cadence tick lifts this as soon as it runs. */
+    (void)jr_display_set_render_fps(RENDER_FPS_BOOT);
     if (jr_display_start(&s_app.display) == ESP_OK) {
         ESP_LOGI(TAG, "display: presenter injected (CO5300 async bring-up)");
     } else {

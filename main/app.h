@@ -86,6 +86,13 @@
 #define RENDER_FPS_AMBIENT  12U
 #define RENDER_FPS_WHISPER   6U
 #define RENDER_FPS_DREAM     3U
+/* Until the voice loop's first cadence tick. app_main runs at priority 1 on
+ * the render task's core, and a frame that overruns its period no longer
+ * sleeps (N14.4), so a watch dial on the glass during boot (the glance after
+ * a lift) left boot a few percent of the core: 69 s to "boot complete" and a
+ * dead touch for all of it (2026-11-10; the render task measured 96.5 % of
+ * core 0 on a dial). At 6 the costliest dial leaves boot more than half. */
+#define RENDER_FPS_BOOT      6U
 #define LOCAL_TOOL_RESULT_CAP 4U
 #define LOCAL_TOOL_ERROR_CAP  160U
 #define TOOL_CONSENT_TIMEOUT_MS 15000U
