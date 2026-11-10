@@ -1499,6 +1499,20 @@ static bool caption_is_quiet(const char *text)
     return caption_is_ambient(text);
 }
 
+/* The operator lease's own caption ("CODEX MODE - DOUBLE TAP TO EXIT", and the
+ * ZEROCHAT twin). It tells the owner how to take the glass back, so it is for
+ * the glass itself: the control shade and the detail sheet carry their own
+ * hint lines in the same band and the lease caption draws over them. While
+ * either is open apply_caption_overlay leaves this caption out. */
+static bool s_caption_lease;      /* the current caption is the lease's; render reads it */
+
+static bool caption_is_lease(const char *text)
+{
+    static const char tail[] = " - DOUBLE TAP TO EXIT";
+    const size_t n = strlen(text), t = sizeof tail - 1U;
+    return n > t && strcmp(text + n - t, tail) == 0;
+}
+
 void jr_display_caption_set(const char *text)
 {
     if (atomic_load(&s_caption_pinned)) {
@@ -1527,6 +1541,7 @@ void jr_display_caption_set(const char *text)
     s_caption_y[0] = (c2 > 0) ? JR_CAPTION_TWO_Y0 : JR_CAPTION_ONE_Y;
     s_caption_y[1] = JR_CAPTION_TWO_Y1;
     s_caption_grey = caption_is_quiet(s_caption_text);
+    s_caption_lease = caption_is_lease(s_caption_text);
     __atomic_store_n(&s_caption_on, JR_DISPLAY_CAPTION_ACTIVE |
                      (caption_is_ambient(s_caption_text)
                          ? JR_DISPLAY_CAPTION_AMBIENT : 0), __ATOMIC_RELEASE);
@@ -3200,6 +3215,9 @@ static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     const int e = s_caption_ease;
     if (((e * 32) >> 8) <= 0) {
         return;
+    }
+    if (s_caption_lease && (s_shade_ease > 0 || s_detail_ease > 0)) {
+        return;                    /* the sheet's own hint owns this band */
     }
     int face_left = 256 - (s_space_black > s_shade_ease ? s_space_black : s_shade_ease);
     if (face_left < 0) {
