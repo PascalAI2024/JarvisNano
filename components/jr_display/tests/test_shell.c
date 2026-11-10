@@ -348,7 +348,7 @@ static void stage_power(jr_display_ota_state_t st, uint8_t pct, int overlay)
                      (uint32_t)JR_DISPLAY_SPACE_STATUS |
                          ((uint32_t)overlay << NAV_OVL_SHIFT),
                      __ATOMIC_RELEASE);
-    jr_display_set_status(90U);
+    jr_display_set_status(90U, 0U);
     jr_display_power_set(74U, 4020U, true, true);
     jr_display_ota_set(st, pct, 0U, 1U, true);
     sp_compose();
@@ -1357,6 +1357,40 @@ static void stage_shade(bool muted, int vol, int light, uint32_t ent, uint32_t b
     s_shade_ms = ent;
     s_breath_ms = breath;
     sp_compose();
+}
+
+/* The light arc and its number are the owner's setting, not the level the mood
+ * ladder has dimmed the panel to. The cap rides in bits 8..15 of the status
+ * word; 0 there means unknown and the panel's own target stands in. */
+static void test_shade_light_is_the_owner_setting(void)
+{
+    /* dimmed to 30 by the ladder, owner set 80 */
+    stage_shade(false, 50, 30, SP_SHADE_ENTRY_MS, 0U);
+    s_status_word = 50U | (80U << 8);
+    sp_compose();
+    CHECK(strcmp(s_shade_light, "80%") == 0, "the number is the owner's 80, not the dimmed 30: \"%s\"", s_shade_light);
+    CHECK(strcmp(s_shade_vol, "50%") == 0, "the volume number is untouched by the cap: \"%s\"", s_shade_vol);
+    uint16_t *fb = render_frame();
+    CHECK(fb != NULL, "frame allocated");
+    if (!fb) {
+        return;
+    }
+    const int dimmed = exact_in_annulus(fb, SP_C_AMBER, SP_CX, SP_CY, 180, 188, 1);
+    free(fb);
+
+    stage_shade(false, 50, 80, SP_SHADE_ENTRY_MS, 0U);      /* the same 80, no cap word */
+    fb = render_frame();
+    CHECK(fb != NULL, "frame allocated");
+    if (!fb) {
+        return;
+    }
+    const int at80 = exact_in_annulus(fb, SP_C_AMBER, SP_CX, SP_CY, 180, 188, 1);
+    free(fb);
+    CHECK(dimmed > 100 && dimmed == at80, "the arc sweeps to 80 whatever the panel is at: %d vs %d", dimmed, at80);
+
+    /* no cap yet: the panel's own target is all there is */
+    stage_shade(false, 50, 30, SP_SHADE_ENTRY_MS, 0U);
+    CHECK(strcmp(s_shade_light, "30%") == 0, "without a cap the number falls back to the panel: \"%s\"", s_shade_light);
 }
 
 static void test_shade_button_arcs_and_breath(void)
@@ -5334,6 +5368,7 @@ int main(void)
 
     test_shade_hits_resolve_to_controls();
     test_shade_button_arcs_and_breath();
+    test_shade_light_is_the_owner_setting();
     test_shade_clocks_run_only_while_they_must();
     test_caption_band_gives_way_to_a_black_backdrop();
 

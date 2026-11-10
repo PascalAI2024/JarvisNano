@@ -171,7 +171,7 @@ static void fc_setup(const fc_scene_t *sc)
                                ? fc_dial_of_style(sc->style) : JR_FACE_RESTING;
     if (s_display.shown_face == JR_FACE_COUNT) s_display.shown_face = JR_FACE_RESTING;
     jr_display_set_brightness(sc->dim ? (uint8_t)sc->dim : 60U);
-    jr_display_set_status(90U);
+    jr_display_set_status(90U, sc->dim ? 80U : 0U);   /* the dimmed scene's owner setting is 80 */
     if (sc->batt == 255) {
         jr_display_power_set(255U, 0U, true, false);
     } else {

@@ -273,7 +273,7 @@ int main(int argc, char **argv)
     s_hud_env_word = 74U | (muted ? (1U << 9) : 0U);
     s_orbit_a16 = sp_orbit_angle(space, false) * 16;
     jr_display_set_brightness(light_arg ? (uint8_t)atoi(light_arg) : 60U);
-    jr_display_set_status(vol_arg ? (uint8_t)atoi(vol_arg) : 90U);
+    jr_display_set_status(vol_arg ? (uint8_t)atoi(vol_arg) : 90U, 0U);
     if (nogauge) {
         jr_display_power_set(255U, 0U, true, false);
     } else if (low) {

@@ -797,12 +797,13 @@ typedef struct {
 
 void jr_display_links_set(const jr_display_links_t *links);
 
-/* The control shade's volume readout: the real number, not a mood. Brightness
- * is not passed — the display already owns it and reads back its own target,
- * so the shade can never disagree with the panel. Link quality and free
+/* The control shade's readouts: the real volume, and the owner's brightness
+ * setting (the cap, 10..100). The panel's live level is the mood ladder's and
+ * dips on its own; the shade shows what the owner chose. 0 = not known, and
+ * the shade falls back to the panel's own target. Link quality and free
  * memory used to ride along for the SETTINGS gauges; with that screen gone
  * they are /api/cockpit's, not the glass's. */
-void jr_display_set_status(uint8_t volume);
+void jr_display_set_status(uint8_t volume, uint8_t brightness_cap);
 
 #ifdef __cplusplus
 }

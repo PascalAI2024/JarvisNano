@@ -1830,7 +1830,20 @@ static char s_desk_task[SP_LABEL_CAP];
 static volatile uint32_t s_jarvis_word;      /* turns | linked<<16          */
 static volatile uint32_t s_jarvis_secs;
 static volatile uint32_t s_desk_word;        /* progress | state<<8         */
-static volatile uint32_t s_status_word;      /* vol                         */
+static volatile uint32_t s_status_word;      /* vol | brightness cap<<8     */
+
+/* The shade's light arc and number show the OWNER's setting (the cap that
+ * /api/device/levels reports), not the level the mood ladder has dimmed the
+ * panel to: dragging the arc to 80 and reading 30 back is a lie. 0 in the cap
+ * byte means nobody has said yet, and the panel's own target stands in. */
+static int shade_light(uint32_t status_word)
+{
+    int cap = (int)((status_word >> 8) & 0xFFu);
+    if (cap == 0) {
+        cap = (int)__atomic_load_n(&s_brightness_want, __ATOMIC_ACQUIRE);
+    }
+    return cap > 100 ? 100 : cap;
+}
 
 /* WEATHER is a whole struct, not a word, so it is double-buffered: the setter
  * fills the slot the render task is NOT reading and then publishes the slot
@@ -2735,10 +2748,7 @@ static void sp_compose(void)
     }
     const uint32_t w = __atomic_load_n(&s_status_word, __ATOMIC_ACQUIRE);
     const uint32_t vol = (w & 0xFFu) > 100u ? 100u : (w & 0xFFu);
-    uint32_t brt = (uint32_t)__atomic_load_n(&s_brightness_want, __ATOMIC_ACQUIRE);
-    if (brt > 100u) {
-        brt = 100u;
-    }
+    const uint32_t brt = (uint32_t)shade_light(w);
 
     /* BOTH NUMBERS MUST SURVIVE AT 100: the store holds 10 glyphs and "100%"
      * is 4. The icons beside the arcs say which is which. */
@@ -5060,10 +5070,7 @@ static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
     if (vol > 100) {
         vol = 100;
     }
-    int brt = (int)__atomic_load_n(&s_brightness_want, __ATOMIC_ACQUIRE);
-    if (brt > 100) {
-        brt = 100;
-    }
+    const int brt = shade_light(w);
     const bool swap = ctx->board.swap_color_bytes;
     const bool muted = sp_privacy_muted();
     const uint16_t priv = muted ? SP_C_GOLD : SP_C_CYAN;
@@ -7797,10 +7804,14 @@ void jr_display_links_set(const jr_display_links_t *links)
     nav_wake();
 }
 
-void jr_display_set_status(uint8_t volume)
+void jr_display_set_status(uint8_t volume, uint8_t brightness_cap)
 {
     if (volume > 100U) {
         volume = 100U;
     }
-    __atomic_store_n(&s_status_word, (uint32_t)volume, __ATOMIC_RELEASE);
+    if (brightness_cap > 100U) {
+        brightness_cap = 100U;
+    }
+    __atomic_store_n(&s_status_word,
+                     (uint32_t)volume | ((uint32_t)brightness_cap << 8), __ATOMIC_RELEASE);
 }
