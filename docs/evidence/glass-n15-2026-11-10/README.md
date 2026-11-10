@@ -294,3 +294,65 @@ owner's setting. The ACTIVITY rows still read `FORGIVE ME, SIR. I.` and
 `I'M NOT QUITE.`: they were stored already cut four hours earlier, and the
 new rule applies when a row is recorded, so that fix is unproven on the
 device until something new is said.
+
+## The boot that froze the touch, and its fix
+
+The owner lifted the device from deep sleep and found it frozen. It was
+booting, slowly. The glance after a lift puts a watch dial on the glass from
+the first second. `gfx_render` runs at priority 4 on core 0 and `app_main` at
+priority 1 on the same core, and since N14.4 (341735d) a frame that overruns
+its period yields instead of sleeping a tick. A dial frame overruns every
+period, so the render task never slept and boot got what was left.
+
+| Measured on the device | Value |
+|---|---|
+| `gfx_render` share of core 0, WATCH dial settled | 96.5 % (27.8 % at home) |
+| `IDLE0` on the dial | about 0 (66 % at home) |
+| `jr_imu` on the dial | 0.7 % (3.4 % at home) |
+| WakeNet start-up in that boot | 48.9 s (50 ms on a boot that lands on home) |
+| "boot complete" in that boot | 69.25 s |
+| Touches during it | queued, then `input queue overflow; dropped=16`, the rest replayed at the end |
+
+Fix, 71d66ad: the render cadence is 6 fps (`RENDER_FPS_BOOT`) from before the
+display starts until the voice loop's first cadence tick, which sets the mood's
+rate as it does on every pass. Proof on the device, a forced deep sleep
+(`POST /api/debug/sleep?now=1&wake_s=N`) and the owner's lift, the dial on the
+glass: boot complete at 6.06 s, a tap handled at 6.4 s, no overflow line. The
+owner confirmed the touch by hand.
+
+Not fixed by this, and open as N15.11: in normal use a dial still takes all of
+core 0, so everything else on that core at a lower priority (the IMU task
+among them) runs in the gaps. Whether the freeze predates N14.4 was not tested
+on an older image.
+
+## Seventh flash the same day: three replay switches, all small wins
+
+Image b0e490d (2,437,184 bytes, boot complete at 5.5 s, valid). The profile
+behind it corrected the sixth flash's hypothesis: a record bypassed in motion
+explains STATUS and DESK only; the watch and the shade pay for per-pixel fades.
+Three candidates rode behind the knob. Mean ms per frame over the 0.9 s after
+each trigger, knob 0 against the bit, alternating rounds:
+
+| Bit | Transition | knob 0 | bit | part, knob 0 > bit | worst interval, knob 0 > bit |
+|---|---|---|---|---|---|
+| 0 ring replay | WEATHER > STATUS | 59.4 / 57.7 | 52.1 / 60.7 | `space_screen` 36.3 / 33.2 > 29.6 / 34.4 | 99 / 100 > 67 / 74 |
+| 0 | STATUS > DESK | 59.0 / 69.4 | 49.8 / 53.2 | 34.8 / 44.5 > 27.2 / 29.0 | 91 / 93 > 57 / 72 |
+| 0 | DESK > ACTIVITY | 34.4 / 37.1 | 37.6 / 36.7 | 14.5 / 15.4 > 13.5 / 13.8 | 42 / 41 > 45 / 44 |
+| 3 veil memo | shade open over home | 44.8 / 50.3 | 41.9 / 49.5 | `space_veil` 8.1 / 9.3 > 5.8 / 6.7 | 67 / 83 > 56 / 71 |
+| 3 | shade open over MINIMAL | 112.6 / 111.1 | 94.8 / 100.2 | 12.8 / 11.7 > 6.2 / 6.3 | 173 / 176 > 160 / 188 |
+| 3 | shade close over WATCH | 65.8 / 67.2 | 72.7 / 63.5 | 4.1 / 4.2 > 2.2 / 2.4 | 130 / 141 > 112 / 134 |
+| 2 disc memo | style PILOT > MINIMAL | 68.1 | 55.1 | `clock_face` 37.2 > 30.6 | 162 > 70 |
+| 2 | style MINIMAL > FUTURE | 61.3 | 47.6 | 27.9 > 27.2 | 64 > 50 |
+| 2 | the six other style changes | 28-69 | 28-64 | inside the run-to-run spread | |
+
+Bits 2 and 3 together, one round, the shade over MINIMAL: open 91.6 > 89.7
+(veil 10.0 > 5.1), close 71.5 > 65.6 (worst 125 > 84).
+
+All three win where they apply and none loses elsewhere, so all three are
+kept. They are worth 10 to 20 % of a transition frame, and the ring replay
+takes about 30 % off the worst interval of a ring entry. The ring replay costs
+49,152 bytes of PSRAM for the second sweep's records. The stutter is not
+solved: the shade opening over a dial is still 90-100 ms a frame (the dial
+alone, settled, is 40), and a style change onto a baked dial is still 50-65.
+
+After the walks: knob 0, largest internal block 22,528 bytes, `flush_errors 0`.

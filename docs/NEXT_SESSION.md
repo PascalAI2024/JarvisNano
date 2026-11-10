@@ -71,16 +71,17 @@ is the classified edge-origin swipe.
 
 All of it is on `feat/glass-2`, not on `main` and not pushed. `PLAN.md` wave
 N15 has the rows; `docs/evidence/glass-n15-2026-11-10/README.md` has the
-device tables from four flashes.
+device tables from seven flashes.
 
 - **The ring is six screens, the watch eight dials.** JARVIS, WATCH, WEATHER,
   STATUS, DESK (only under a lease or claim), ACTIVITY. Dials: JARVIS, DIVER,
   DRESS, PILOT, MINIMAL, FUTURE, SKELETON, CELESTIAL.
 - **Frame cost roughly halved, the 20 ms target not met.** Lease held, flush
-  not counted: home 8 ms, ACTIVITY 25, DRESS 27–29, DESK 34, WEATHER 35,
-  CELESTIAL 35, DIVER 37, STATUS 41, FUTURE 44, PILOT 45, SKELETON 52, the
-  shade over home 53, MINIMAL 53. `GET /api/display` gives the five layers,
-  `?split=1` the parts of the hud layer for the next 8 s.
+  not counted: home 7 ms, the JARVIS style 11, ACTIVITY 24, DRESS 26, DESK 31,
+  CELESTIAL 31, WEATHER 35, DIVER 38, STATUS 38, MINIMAL 40, PILOT 42,
+  FUTURE 45, SKELETON 47, the shade over home 48. `GET /api/display` gives the
+  five layers, `?split=1` the parts of the hud layer for the next 8 s
+  (`?split=1` does not return `render_us`; poll both).
 - **Host instruction counts do not predict device milliseconds.** Two cuts
   that counted fewer instructions ran slower because they wrote more memory.
   Measure every cut on the device before keeping it.
@@ -96,10 +97,22 @@ device tables from four flashes.
 - **Motion is judged on the host first, then timed on the device.**
   `scripts/glass-preview.py --script ring|shade|watch|slide|style|watch-enter`
   plays the real compositor at 24 fps. The transition grammar (everything
-  passes through the dark) is on the device and stutters: a fading screen
-  blends every primitive, so a transition frame costs two to three times a
-  settled one. PLAN N15.9 is the fix (draw at full strength, dim the strip
-  once).
+  passes through the dark) is on the device and stutters: a transition frame
+  costs two to three times a settled one. Two knob rounds went at it (PLAN
+  N15.9). Dimming the finished strip once was slower and is deleted. Replaying
+  the ring records while a ring enters, and remembering the last blended pixel
+  in the veil and in a part-strength disc, are kept: 10 to 20 % of a
+  transition frame, about 30 % off a ring entry's worst interval. The shade
+  opening over a dial is still 90–100 ms a frame, a style change onto a baked
+  dial 50–65.
+- **A dial takes all of core 0.** A watch frame overruns its period, and an
+  overrun frame yields instead of sleeping (N14.4), so `gfx_render` measured
+  96.5 % of the core on a dial. Boot shares that core at priority 1: a lift
+  wake onto a dial took 69 s to boot with the touch dead. Boot now renders at
+  6 fps until the voice loop's first cadence tick (71d66ad; 6.06 s, proven by
+  a forced sleep and a lift). The saturation in normal use is open as N15.11.
+  `jarvisctl.py reboot` is serial-only; over Wi-Fi, force a sleep with
+  `POST /api/debug/sleep?now=1&wake_s=N` and have the device lifted.
 - **Board probe** (`scripts/board-probe.py`): TE is 60 Hz on GPIO13, the gyro
   answers, the touch chip reports two fingers while the driver reads one, QSPI
   runs at 40 MHz. The PWR key and a two-finger touch still need the owner's
