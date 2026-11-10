@@ -420,7 +420,9 @@ void jr_power_pkey_take(uint32_t *out_short, uint32_t *out_long)
 #define AXP2101_REG_CC_SETTING    0x62  /* read only here */
 #define AXP2101_ADC_CH_PROBE_MASK 0x1F  /* VBAT, TS, VBUS, VSYS, die temp */
 #define AXP2101_ADC_DATA_FIRST    0x34  /* VBAT H5L8, TS H6L8, VBUS, VSYS, Tdie */
-#define PROBE_ADC_SETTLE_MS       100
+/* 100 ms was not enough: on 2026-11-10 VSYS and Tdie read raw 0 that soon
+ * after their channels were enabled (reported as 0 mV and 385.7 C). */
+#define PROBE_ADC_SETTLE_MS       500
 
 static uint32_t adc14(const uint8_t *p)
 {
@@ -482,9 +484,12 @@ void jr_power_probe(jr_probe_pmic_t *out)
     out->ts_raw  = adc14(&d[2]);
     out->vbus_ok = (on & 0x04u) != 0;
     out->vbus_mv = adc14(&d[4]);
-    out->vsys_ok = (on & 0x08u) != 0;
+    /* A raw 0 on VSYS or Tdie is a channel that has not converted yet, not a
+     * rail at 0 mV or a die at 385 C: the board is running, so neither can be. */
     out->vsys_mv = adc14(&d[6]);
-    out->die_ok  = (on & 0x10u) != 0;
+    out->vsys_ok = (on & 0x08u) != 0 && out->vsys_mv != 0;
+    const uint32_t die_raw = adc14(&d[8]);
+    out->die_ok  = (on & 0x10u) != 0 && die_raw != 0;
     /* XPowersLib: 22 + (7274 - raw) / 20 degrees C. */
-    out->die_tenths = 220 + (7274 - (int)adc14(&d[8])) / 2;
+    out->die_tenths = 220 + (7274 - (int)die_raw) / 2;
 }
