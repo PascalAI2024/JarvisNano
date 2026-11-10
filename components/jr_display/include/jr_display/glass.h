@@ -10,8 +10,9 @@
  * round safe area in), further limited to [0, GLASS_PANEL_PX - 1]. Blending
  * reads the row back.
  *
- * Pure C11, integer-only: no float, no libm, no heap, no static state, no
- * ESP-IDF. Compiles on the host with a plain compiler.
+ * Pure C11, integer-only: no float, no libm, no heap, no ESP-IDF. Compiles on
+ * the host with a plain compiler. The only static state is a small cache of
+ * prepared ring/arc geometry in glass_draw.c, which assumes one drawing task.
  *
  * Conventions
  *   - Geometry is in 1/16 px. Pixel x covers [16x, 16x + 16); its centre is

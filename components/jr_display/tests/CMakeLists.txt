@@ -57,7 +57,7 @@ add_test(NAME jr_display_companion_tests COMMAND jr_display_companion_tests)
 # so like hud_render.c they stand alone; the test links libm for its analytic
 # references only - the code under test uses none.
 set(GLASS_SRCS ../src/glass_font.c ../src/glass_draw.c ../src/glass_font_data.c)
-add_executable(jr_display_glass_tests test_glass.c ${GLASS_SRCS})
+add_executable(jr_display_glass_tests test_glass.c glass_ref.c ${GLASS_SRCS})
 target_include_directories(jr_display_glass_tests PRIVATE ../include)
 target_compile_options(jr_display_glass_tests PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(jr_display_glass_tests PRIVATE m)
@@ -68,5 +68,10 @@ add_executable(glass_specimen EXCLUDE_FROM_ALL probe/glass_specimen.c ${GLASS_SR
 target_include_directories(glass_specimen PRIVATE ../include)
 target_compile_options(glass_specimen PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(glass_specimen PRIVATE m)
+# Cost bench for the same primitives next to the slow reference. Host numbers
+# only (x86, -O2); not a suite. Build with --target glass_bench.
+add_executable(glass_bench EXCLUDE_FROM_ALL probe/glass_bench.c glass_ref.c ${GLASS_SRCS})
+target_include_directories(glass_bench PRIVATE ../include)
+target_compile_options(glass_bench PRIVATE -O2 -Wall -Wextra -Werror)
 add_test(NAME jr_display_hud_tests COMMAND jr_display_hud_tests)
 add_test(NAME jr_display_shell_tests COMMAND jr_display_shell_tests)

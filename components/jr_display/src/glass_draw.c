@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * glass shapes: anti-aliased discs, rings, arcs with round caps, and glows,
- * one row at a time. Integer-only and stateless; see glass.h for the contract.
+ * one row at a time. Integer-only; see glass.h for the contract.
  *
  * Coverage comes from distance: an edge at radius R gives
  * 128 + (R - d) * 256 (clamped to 0..255) for a pixel whose centre is d away,
@@ -10,6 +10,18 @@
  * with an integer square root, but only for pixels inside an edge band: a
  * band is entered by comparing squared distances, so a ring's solid body, its
  * hole and everything outside cost two multiplies and a compare.
+ *
+ * Cost model (the shell draws 466 rows a frame, each through several of
+ * these): a row is never walked pixel by pixel when it can be described. The
+ * solid interior of a ring or arc, the span a glow is at full strength, and
+ * the pixels that can be touched at all are each an interval in x on one row
+ * (a circle and a half plane both cut a row in an interval), found in closed
+ * form. Runs are filled; only the few edge pixels pay for a coverage
+ * computation, and that computation is the same one the original per-pixel
+ * walk used (tests/glass_ref.c keeps that walk as the reference), so the
+ * pixels are the same ones. Geometry that does not change between rows (the
+ * trig, the cap centres, the vertical extent) is prepared once and kept in a
+ * small cache; see geo_get.
  *
  * Units: positions and radii 1/16 px, root distances 1/64 px, angles Q16 turns.
  */
@@ -58,13 +70,14 @@ static inline int32_t iabs32(int32_t v) { return v < 0 ? -v : v; }
 static inline int32_t imin32(int32_t a, int32_t b) { return a < b ? a : b; }
 static inline int32_t imax32(int32_t a, int32_t b) { return a > b ? a : b; }
 
-/* floor(sqrt(n)), digit by digit. */
+/* floor(sqrt(n)), digit by digit, starting at the leading digit rather than
+ * walking down to it. */
 static uint32_t isqrt_u32(uint32_t n)
 {
-    uint32_t res = 0, bit = 1u << 30;
-    while (bit > n) {
-        bit >>= 2;
+    if (n == 0u) {
+        return 0u;
     }
+    uint32_t res = 0, bit = 1u << ((31u - (uint32_t)__builtin_clz(n)) & ~1u);
     while (bit != 0u) {
         if (n >= res + bit) {
             n -= res + bit;
@@ -101,6 +114,7 @@ typedef struct {
     uint16_t color;  /* native */
     uint16_t panel;  /* as stored in the row */
     unsigned alpha;
+    unsigned wo, wu; /* glass_blend565 weights for `alpha` (valid when 0 < alpha < 255) */
     bool swap;
 } paint_t;
 
@@ -109,6 +123,8 @@ static void paint_init(paint_t *p, uint16_t color, uint8_t alpha, bool swap)
     p->color = color;
     p->panel = swap ? glass_bswap(color) : color;
     p->alpha = alpha;
+    p->wo = alpha < 255u ? ((unsigned)alpha * 64u + 127u) / 255u : 64u;
+    p->wu = 64u - p->wo;
     p->swap = swap;
 }
 
@@ -132,6 +148,17 @@ static inline void put(uint16_t *p, const paint_t *c, unsigned cov)
     *p = (a >= 255u) ? c->panel : glass_blend565(*p, c->color, a, c->swap);
 }
 
+/* glass_blend565 with the weights already worked out: the same arithmetic,
+ * for a run of pixels that all use the same alpha. */
+static inline uint16_t blend_w(uint16_t under, uint16_t over, unsigned wo, unsigned wu, bool swap)
+{
+    const uint32_t u = swap ? glass_bswap(under) : under;
+    const uint32_t rb = ((u & 0xF81Fu) * wu + (uint32_t)(over & 0xF81Fu) * wo + 0x10020u) >> 6;
+    const uint32_t g = ((u & 0x07E0u) * wu + (uint32_t)(over & 0x07E0u) * wo + (32u << 5)) >> 6;
+    const uint16_t out = (uint16_t)((rb & 0xF81Fu) | (g & 0x07E0u));
+    return swap ? glass_bswap(out) : out;
+}
+
 static void fill_run(uint16_t *row, int xa, int xb, const paint_t *c)
 {
     if (c->alpha == 0u) {
@@ -143,7 +170,7 @@ static void fill_run(uint16_t *row, int xa, int xb, const paint_t *c)
         }
     } else {
         for (int x = xa; x <= xb; x++) {
-            row[x] = glass_blend565(row[x], c->color, c->alpha, c->swap);
+            row[x] = blend_w(row[x], c->color, c->wo, c->wu, c->swap);
         }
     }
 }
@@ -199,6 +226,137 @@ void glass_disc_row(uint16_t *row, int y, int clip_lo, int clip_hi,
     }
 }
 
+/* ---- row intervals ---------------------------------------------------------
+ *
+ * On one row a disc, an annulus' chord and a half plane each select an
+ * interval of pixels. A span is such an interval, inclusive; a set holds the
+ * handful (at most six) one row ever needs. */
+
+typedef struct {
+    int lo, hi;
+} span_t;
+
+#define SPAN_INF 1000000
+
+static const span_t k_span_all = {-SPAN_INF, SPAN_INF};
+static const span_t k_span_none = {1, 0};
+
+typedef struct {
+    span_t s[6];
+    int n;
+} spanset_t;
+
+static inline span_t span_isect(span_t a, span_t b)
+{
+    span_t r = {a.lo > b.lo ? a.lo : b.lo, a.hi < b.hi ? a.hi : b.hi};
+    return r;
+}
+
+static inline void ss_add(spanset_t *r, span_t s)
+{
+    if (s.lo <= s.hi && r->n < 6) {
+        r->s[r->n++] = s;
+    }
+}
+
+/* Is x in the set? If so *end is the last pixel of a span holding it. */
+static inline bool ss_find(const spanset_t *r, int x, int *end)
+{
+    bool in = false;
+    int e = x;
+    for (int i = 0; i < r->n; i++) {
+        if (r->s[i].lo <= x && x <= r->s[i].hi) {
+            in = true;
+            if (r->s[i].hi > e) {
+                e = r->s[i].hi;
+            }
+        }
+    }
+    *end = e;
+    return in;
+}
+
+/* First pixel after x that starts a span, or SPAN_INF. */
+static inline int ss_next(const spanset_t *r, int x)
+{
+    int best = SPAN_INF;
+    for (int i = 0; i < r->n; i++) {
+        if (r->s[i].lo > x && r->s[i].lo < best) {
+            best = r->s[i].lo;
+        }
+    }
+    return best;
+}
+
+static void ss_isect(spanset_t *out, const spanset_t *a, const spanset_t *b)
+{
+    for (int i = 0; i < a->n; i++) {
+        for (int j = 0; j < b->n; j++) {
+            ss_add(out, span_isect(a->s[i], b->s[j]));
+        }
+    }
+}
+
+/* Pixels x with a * (16x + 8 - cx) + b >= thr, a half plane cut by the row.
+ * Everything stays in 32 bits: the same products the per-pixel code formed
+ * (a is a Q15 direction, b a Q15 direction times a row offset). */
+static span_t halfplane(int32_t a, int32_t b, int32_t thr, int32_t cx)
+{
+    const int32_t r = thr - b - a * (8 - cx); /* a * 16 * x >= r */
+    if (a == 0) {
+        return r <= 0 ? k_span_all : k_span_none;
+    }
+    const int32_t d = a * 16;
+    int32_t q = r / d;
+    const int32_t m = r % d;
+    span_t s;
+    if (a > 0) {                       /* x >= ceil(r / d) */
+        if (m != 0 && r > 0) {
+            q++;
+        }
+        s.lo = q;
+        s.hi = SPAN_INF;
+    } else {                           /* x <= floor(r / d) */
+        if (m != 0 && r > 0) {
+            q--;
+        }
+        s.lo = -SPAN_INF;
+        s.hi = q;
+    }
+    return s;
+}
+
+/* Pixels whose centre lies within reach (1/16 px, exclusive) of (cdx, cdy) on
+ * the row at y16: the bounding interval of a disc's nonzero pixels. */
+static span_t disc_span(int32_t cdx, int32_t cdy, int32_t reach, int32_t y16)
+{
+    const int32_t dy = y16 - cdy;
+    if (reach <= 0 || iabs32(dy) >= reach) {
+        return k_span_none;
+    }
+    const int32_t h = (int32_t)isqrt_u32((uint32_t)(reach * reach - dy * dy));
+    span_t s = {x_lo(cdx, h), x_hi(cdx, h)};
+    return s;
+}
+
+/* The radial pieces of a row: pixels with so >= |dx| > si (si < 0: no hole;
+ * so < 0: none), as at most two spans. */
+static void radial_pieces(spanset_t *out, int32_t cx, int32_t so, int32_t si)
+{
+    if (so < 0) {
+        return;
+    }
+    if (si < 0) {
+        span_t s = {x_lo(cx, so), x_hi(cx, so)};
+        ss_add(out, s);
+        return;
+    }
+    span_t l = {x_lo(cx, so), x_lo(cx, si) - 1};
+    span_t r = {x_hi(cx, si) + 1, x_hi(cx, so)};
+    ss_add(out, l);
+    ss_add(out, r);
+}
+
 /* ---- ring / arc geometry -------------------------------------------------- */
 
 typedef struct {
@@ -211,7 +369,63 @@ typedef struct {
     bool caps;
     int32_t capr;                   /* cap radius                               */
     int32_t ax, ay, bx, by;         /* cap centres (absolute)                   */
+    int32_t ymin, ymax;             /* rows (1/16 px) the shape can touch, before any AA margin */
+    /* Edge windows, in the units of n = 16 * d2 (the square of d64): below lo
+     * the edge is at full coverage, from hi up it is at none, and only n in
+     * [lo, hi) needs the root. inv is 2^20 / (2 * 4r), the slope that turns
+     * n - (4r)^2 into a first guess at the root (see near_sqrt). One window per
+     * edge: outer, inner, and the round caps. */
+    uint32_t lo_o, hi_o, lo_i, hi_i, lo_c, hi_c;
+    int32_t inv_o, inv_i, inv_c;
+    /* The same for the glow of one width, filled by glow_prep. */
+    int32_t gw16;
+    bool g_fast_o, g_fast_i;
+    uint32_t g_hi_o, g_lo_i, g_lo_c;
+    int32_t g_a_o, g_inv_o, g_a_i, g_inv_i, g_a_c, g_inv_c;
 } geo_t;
+
+/* floor(sqrt(n)) for an n known to lie near a^2: the tangent gives a guess
+ * within a step or two (inv = 2^20 / 2a, a in 1/64 px) and two compares settle
+ * it, so the digit loop is not run for the few edge pixels of a row. Exact for
+ * any guess; a bad one only costs more steps. The caller keeps |n - a^2| small
+ * enough that delta * inv fits 31 bits. */
+static inline uint32_t near_sqrt(uint32_t n, uint32_t a, int32_t inv)
+{
+    const int32_t delta = (int32_t)(n - a * a);
+    int32_t k = (int32_t)a + (delta * inv >> 20);
+    if (k < 0) {
+        k = 0;
+    }
+    uint32_t r = (uint32_t)k;
+    while (r * r > n) {
+        r--;
+    }
+    while ((r + 1u) * (r + 1u) <= n) {
+        r++;
+    }
+    return r;
+}
+
+/* n = 16 * d2 as dist64 forms it. */
+static inline uint32_t n16(int32_t d2)
+{
+    uint32_t d = (uint32_t)d2;
+    if (d > 0x0FFFFFFFu) {
+        d = 0x0FFFFFFFu;
+    }
+    return d << 4;
+}
+
+/* The window of an edge of radius r16. A pixel covers 128 + 4 * (4r - d64)
+ * clamped to 0..255, so it is full once d64 <= 4r - 32 (n < (4r - 31)^2) and
+ * empty once d64 >= 4r + 32 (n >= (4r + 32)^2). */
+static void edge_window(int32_t r16, uint32_t *lo, uint32_t *hi, int32_t *inv)
+{
+    const int32_t r4 = r16 * 4;
+    *lo = r4 > 31 ? (uint32_t)((r4 - 31) * (r4 - 31)) : 0u;
+    *hi = (uint32_t)((r4 + 32) * (r4 + 32));
+    *inv = r4 > 0 ? (int32_t)((1 << 20) / (2 * r4)) : 0;
+}
 
 static bool geo_build(geo_t *g, int32_t cx, int32_t cy, int32_t ri, int32_t ro,
                       int32_t start, int32_t sweep, bool caps)
@@ -237,6 +451,13 @@ static bool geo_build(geo_t *g, int32_t cx, int32_t cy, int32_t ri, int32_t ro,
     g->capr = 0;
     g->sx = g->sy = g->ex = g->ey = 0;
     g->ax = g->ay = g->bx = g->by = 0;
+    g->ymin = cy - ro;
+    g->ymax = cy + ro;
+    g->gw16 = 0;
+    edge_window(ro, &g->lo_o, &g->hi_o, &g->inv_o);
+    edge_window(ri, &g->lo_i, &g->hi_i, &g->inv_i);
+    g->lo_c = g->hi_c = 0u;
+    g->inv_c = 0;
     if (sweep < GLASS_TURN_Q16) {
         const uint32_t s = (uint32_t)start & 0xFFFFu;
         const uint32_t e = (s + (uint32_t)sweep) & 0xFFFFu;
@@ -245,18 +466,107 @@ static bool geo_build(geo_t *g, int32_t cx, int32_t cy, int32_t ri, int32_t ro,
         g->ex = glass_cos_q15(e);
         g->ey = glass_sin_q15(e);
         g->wedge = sweep <= GLASS_TURN_Q16 / 2 ? 1 : 2;
+        /* The sector's rows: its four corners, and the extreme of the outer
+         * circle if the span crosses 6 or 12 o'clock. */
+        const int32_t ys[4] = {(g->sy * ri) >> 15, (g->sy * ro) >> 15,
+                               (g->ey * ri) >> 15, (g->ey * ro) >> 15};
+        int32_t lo = cy + ys[0], hi = lo;
+        for (int i = 1; i < 4; i++) {
+            lo = imin32(lo, cy + ys[i]);
+            hi = imax32(hi, cy + ys[i]);
+        }
+        if ((((uint32_t)0x4000u - s) & 0xFFFFu) <= (uint32_t)sweep) {
+            hi = cy + ro;
+        }
+        if ((((uint32_t)0xC000u - s) & 0xFFFFu) <= (uint32_t)sweep) {
+            lo = cy - ro;
+        }
+        g->ymin = lo;
+        g->ymax = hi;
         if (caps) {
             const int32_t rc2 = ri + ro; /* twice the centre-line radius */
             g->caps = true;
             g->capr = (ro - ri) / 2;
+            edge_window(g->capr, &g->lo_c, &g->hi_c, &g->inv_c);
             g->ax = cx + ((g->sx * rc2 + 32768) >> 16);
             g->ay = cy + ((g->sy * rc2 + 32768) >> 16);
             g->bx = cx + ((g->ex * rc2 + 32768) >> 16);
             g->by = cy + ((g->ey * rc2 + 32768) >> 16);
+            g->ymin = imin32(g->ymin, imin32(g->ay, g->by) - g->capr);
+            g->ymax = imax32(g->ymax, imax32(g->ay, g->by) + g->capr);
         }
     }
     return true;
 }
+
+/* ---- prepared geometry cache -----------------------------------------------
+ *
+ * A strip is 12 rows and every primitive is called once per row, so the same
+ * trig, cap centres and vertical extent would be worked out 466 times a frame
+ * per primitive. They are kept here, keyed by the call's parameters, and a hit
+ * costs a few compares. Sixteen slots hold a whole screen (WEATHER draws
+ * twelve arcs); past that the slots are reused round-robin and the only
+ * penalty is the rebuild the cache saves.
+ *
+ * ONE RENDER TASK DRAWS (gfx_render, the only task that composes strips), so
+ * the cache is plain static state with no lock. It is never trusted for
+ * safety: an entry holds numbers only, no pointers, and every use is clamped
+ * to the row and the clip. Concurrent callers would at worst draw one wrong
+ * frame, not fault. Host tests are single threaded. */
+
+#define GEO_SLOTS 16
+
+typedef struct {
+    int32_t cx, cy, ri, ro, start, sweep;
+    bool caps, valid;
+    geo_t g;
+} geo_slot_t;
+
+static geo_slot_t s_geo[GEO_SLOTS];
+static unsigned s_geo_hint;   /* where the last lookup hit: calls repeat in order */
+static unsigned s_geo_victim; /* next slot to overwrite */
+
+static geo_t *geo_get(int32_t cx, int32_t cy, int32_t ri, int32_t ro,
+                            int32_t start, int32_t sweep, bool caps)
+{
+    if (sweep <= 0 || ro <= 0 || ro <= ri) {
+        return NULL;
+    }
+    for (unsigned i = 0; i < GEO_SLOTS; i++) {
+        const unsigned k = (s_geo_hint + 1u + i) % GEO_SLOTS;
+        geo_slot_t *e = &s_geo[k];
+        if (e->valid && e->start == start && e->sweep == sweep && e->ro == ro && e->ri == ri &&
+            e->cx == cx && e->cy == cy && e->caps == caps) {
+            s_geo_hint = k;
+            return &e->g;
+        }
+    }
+    geo_slot_t *e = &s_geo[s_geo_victim];
+    s_geo_hint = s_geo_victim;
+    s_geo_victim = (s_geo_victim + 1u) % GEO_SLOTS;
+    e->valid = false;
+    if (!geo_build(&e->g, cx, cy, ri, ro, start, sweep, caps)) {
+        return NULL;
+    }
+    e->cx = cx;
+    e->cy = cy;
+    e->ri = ri;
+    e->ro = ro;
+    e->start = start;
+    e->sweep = sweep;
+    e->caps = caps;
+    e->valid = true;
+    return &e->g;
+}
+
+/* Can row y (centre 16y + 8) hold any pixel of the shape widened by `margin`
+ * (1/16 px)? The margin covers the one-pixel anti-aliasing ramps. */
+static inline bool row_in_extent(const geo_t *g, int32_t y16, int32_t margin)
+{
+    return y16 >= g->ymin - margin && y16 <= g->ymax + margin;
+}
+
+#define EDGE_MARGIN 48 /* 3 px: a coverage ramp is half a pixel to each side */
 
 static inline int radial_cov(const geo_t *g, int32_t d2)
 {
@@ -266,10 +576,48 @@ static inline int radial_cov(const geo_t *g, int32_t d2)
     if (d2 <= g->ro_m2 && d2 >= g->ri_p2) {
         return 255;
     }
-    const uint32_t d64 = dist64((uint32_t)d2);
-    const int co = edge_cov(g->ro, d64);
-    const int ci = g->ri > 0 ? edge_cov(g->ri, d64) : 0;
+    /* In an edge band. The root is only needed inside the half-pixel ramp of
+     * an edge: outside it the edge's coverage is already 0 or 255. */
+    const uint32_t n = n16(d2);
+    uint32_t d64 = 0;
+    bool have = false;
+    int co, ci = 0;
+    if (n >= g->hi_o) {
+        co = 0;
+    } else if (n < g->lo_o) {
+        co = 255;
+    } else {
+        d64 = near_sqrt(n, (uint32_t)g->ro * 4u, g->inv_o);
+        have = true;
+        co = edge_cov(g->ro, d64);
+    }
+    if (g->ri > 0 && n < g->hi_i) {
+        if (n < g->lo_i) {
+            ci = 255;
+        } else {
+            if (!have) {
+                d64 = near_sqrt(n, (uint32_t)g->ri * 4u, g->inv_i);
+            }
+            ci = edge_cov(g->ri, d64);
+        }
+    }
     return co > ci ? co - ci : 0;
+}
+
+/* disc_cov() for the round caps, with the edge window worked out once. */
+static inline int cap_cov(const geo_t *g, int32_t dx, int32_t dy)
+{
+    if (g->capr <= 0) {
+        return 0;
+    }
+    const uint32_t n = n16(dx * dx + dy * dy);
+    if (n < g->lo_c) {
+        return 255;
+    }
+    if (n >= g->hi_c) {
+        return 0;
+    }
+    return edge_cov(g->capr, near_sqrt(n, (uint32_t)g->capr * 4u, g->inv_c));
 }
 
 /* Anti-aliased membership of the angular span for a pixel offset (dx, dy). */
@@ -299,10 +647,54 @@ static int shape_cov(const geo_t *g, int32_t px, int32_t py)
          * and there is nothing to double, and along the shared tangent edge
          * max keeps the single-edge coverage a probabilistic union would
          * darken. */
-        cov = (int)imax32(cov, disc_cov(px - g->ax, py - g->ay, g->capr));
-        cov = (int)imax32(cov, disc_cov(px - g->bx, py - g->by, g->capr));
+        cov = (int)imax32(cov, cap_cov(g, px - g->ax, py - g->ay));
+        cov = (int)imax32(cov, cap_cov(g, px - g->bx, py - g->by));
     }
     return cov;
+}
+
+/* wedge_cov() thresholds in the units of the half-plane products: the line
+ * distance in 1/256 px is 128 + (t >> 11), so 255 (full) needs t >= 127 * 2048
+ * and anything above 0 needs t >= -127 * 2048. */
+#define WEDGE_FULL_T (127 * 2048)
+#define WEDGE_ANY_T (-127 * 2048)
+
+/* The pixels of the row inside the start line's and end line's half planes
+ * (wedge_cov's two products reaching `thr`): both for a span up to a half turn,
+ * either for more. */
+static void wedge_spans(const geo_t *g, int32_t dy, int32_t thr, spanset_t *out)
+{
+    const span_t ss = halfplane(-g->sy, g->sx * dy, thr, g->cx);
+    const span_t se = halfplane(g->ey, -dy * g->ex, thr, g->cx);
+    if (g->wedge == 1) {
+        ss_add(out, span_isect(ss, se));
+    } else {
+        ss_add(out, ss);
+        ss_add(out, se);
+    }
+}
+
+/* The pixels of the row the stroke (ring, arc or its caps) covers at exactly
+ * 255: the radial body (si, so] from the centre where the wedge is also at
+ * full. Either half plane at full is enough for a span over a half turn. */
+static void stroke_solid(const geo_t *g, int32_t dy, int32_t ady, spanset_t *solid)
+{
+    int32_t so = -1, si = -1;
+    if (g->ro - 16 > ady) {
+        so = (int32_t)isqrt_u32((uint32_t)(g->ro_m2 - dy * dy));
+        if (g->ri > 0 && g->ri + 16 > ady) {
+            si = (int32_t)isqrt_u32((uint32_t)(g->ri_p2 - dy * dy));
+        }
+    }
+    spanset_t body = {.n = 0};
+    radial_pieces(&body, g->cx, so, si);
+    if (g->wedge == 0) {
+        *solid = body;
+    } else {
+        spanset_t full = {.n = 0};
+        wedge_spans(g, dy, WEDGE_FULL_T, &full);
+        ss_isect(solid, &body, &full);
+    }
 }
 
 static void ring_like_row(uint16_t *row, int y, int clip_lo, int clip_hi,
@@ -311,9 +703,13 @@ static void ring_like_row(uint16_t *row, int y, int clip_lo, int clip_hi,
     if (row == NULL || alpha == 0u || !row_clip(y, &clip_lo, &clip_hi)) {
         return;
     }
+    const int32_t y16 = y * 16 + 8;
+    if (!row_in_extent(g, y16, EDGE_MARGIN)) {
+        return;
+    }
     paint_t c;
     paint_init(&c, color565, alpha, swap_bytes);
-    const int32_t dy = y * 16 + 8 - g->cy, ady = iabs32(dy);
+    const int32_t dy = y16 - g->cy, ady = iabs32(dy);
     if (g->ro + 16 <= ady) {
         return;
     }
@@ -325,33 +721,53 @@ static void ring_like_row(uint16_t *row, int y, int clip_lo, int clip_hi,
     if (g->ri - 16 > ady) {
         he = (int32_t)isqrt_u32((uint32_t)(g->ri_m2 - dy * dy));
     }
-    /* The solid body (full rings only): (si, so] from the centre. */
-    const bool fast = g->wedge == 0 && !g->caps;
-    int32_t so = -1, si = -1;
-    if (fast && g->ro - 16 > ady) {
-        so = (int32_t)isqrt_u32((uint32_t)(g->ro_m2 - dy * dy));
-        if (g->ri > 0 && g->ri + 16 > ady) {
-            si = (int32_t)isqrt_u32((uint32_t)(g->ri_p2 - dy * dy));
+    /* Solid: the pixels the stroke covers at 255. Maybe: the pixels that
+     * can be above zero at all. */
+    spanset_t solid = {.n = 0}, maybe = {.n = 0};
+    stroke_solid(g, dy, ady, &solid);
+    if (g->wedge == 0) {
+        ss_add(&maybe, k_span_all);
+    } else {
+        /* Wherever the wedge is above zero, plus the cap discs' own reach. */
+        wedge_spans(g, dy, WEDGE_ANY_T, &maybe);
+        if (g->caps && g->capr > 0) {
+            ss_add(&maybe, disc_span(g->ax, g->ay, g->capr + 16, y16));
+            ss_add(&maybe, disc_span(g->bx, g->by, g->capr + 16, y16));
         }
     }
-    for (int x = xa; x <= xb; x++) {
+    int x = xa, e;
+    while (x <= xb) {
         const int32_t pdx = x * 16 + 8 - g->cx;
-        const int32_t adx = iabs32(pdx);
-        if (he >= 0 && adx <= he) {
-            x = x_hi(g->cx, he); /* the loop increment steps past it */
+        if (he >= 0 && iabs32(pdx) <= he) {
+            x = x_hi(g->cx, he) + 1;
             continue;
         }
-        if (so >= 0 && adx <= so && adx > si) {
-            int e = x_hi(g->cx, so);
-            if (pdx < 0 && si >= 0) {
-                e = (int)imin32(e, x_lo(g->cx, si) - 1);
-            }
+        if (ss_find(&solid, x, &e)) {
             e = (int)imin32(e, xb);
             fill_run(row, x, e, &c);
-            x = e;
+            x = e + 1;
             continue;
         }
-        put(&row[x], &c, (unsigned)shape_cov(g, x * 16 + 8, y * 16 + 8));
+        if (!ss_find(&maybe, x, &e)) {
+            x = ss_next(&maybe, x);
+            continue;
+        }
+        /* A run of edge pixels: up to the end of the maybe span, the next solid
+         * run or the hole, so the sets are not searched for each of them. */
+        int lim = (int)imin32(e, xb);
+        const int ns = ss_next(&solid, x);
+        if (ns <= lim) {
+            lim = ns - 1;
+        }
+        if (he >= 0) {
+            const int hl = x_lo(g->cx, he);
+            if (hl > x && hl <= lim) {
+                lim = hl - 1;
+            }
+        }
+        for (; x <= lim; x++) {
+            put(&row[x], &c, (unsigned)shape_cov(g, x * 16 + 8, y16));
+        }
     }
 }
 
@@ -360,9 +776,9 @@ void glass_ring_row(uint16_t *row, int y, int clip_lo, int clip_hi,
                     int32_t start_q16, int32_t sweep_q16,
                     uint16_t color565, uint8_t alpha, bool swap_bytes)
 {
-    geo_t g;
-    if (geo_build(&g, cx16, cy16, r_in16, r_out16, start_q16, sweep_q16, false)) {
-        ring_like_row(row, y, clip_lo, clip_hi, &g, color565, alpha, swap_bytes);
+    const geo_t *g = geo_get(cx16, cy16, r_in16, r_out16, start_q16, sweep_q16, false);
+    if (g != NULL) {
+        ring_like_row(row, y, clip_lo, clip_hi, g, color565, alpha, swap_bytes);
     }
 }
 
@@ -371,9 +787,9 @@ void glass_arc_row(uint16_t *row, int y, int clip_lo, int clip_hi,
                    int32_t start_q16, int32_t sweep_q16,
                    uint16_t color565, uint8_t alpha, bool swap_bytes)
 {
-    geo_t g;
-    if (geo_build(&g, cx16, cy16, r_in16, r_out16, start_q16, sweep_q16, true)) {
-        ring_like_row(row, y, clip_lo, clip_hi, &g, color565, alpha, swap_bytes);
+    const geo_t *g = geo_get(cx16, cy16, r_in16, r_out16, start_q16, sweep_q16, true);
+    if (g != NULL) {
+        ring_like_row(row, y, clip_lo, clip_hi, g, color565, alpha, swap_bytes);
     }
 }
 
@@ -390,8 +806,36 @@ static int32_t seg_d2(const geo_t *g, int32_t dx, int32_t dy, int32_t ux, int32_
     return ex * ex + ey * ey;
 }
 
-/* Glow coverage 0..255 for a pixel centre. */
-static int glow_cov(const geo_t *g, int32_t w16, uint32_t inv, int peak, int32_t px, int32_t py)
+/* What the glow of one width needs beyond the shape: the same windows as the
+ * edges, over the falloff band (t64 in (0, w64)) either side of the stroke. */
+static void glow_prep(geo_t *g, int32_t w16)
+{
+    if (g->gw16 == w16) {
+        return;
+    }
+    const int32_t w64 = w16 * 4;
+    g->gw16 = w16;
+    /* Outer side: d64 in [4ro, 4ro + w64); empty once d64 >= 4ro + w64. */
+    g->g_fast_o = w64 <= 1024;
+    g->g_hi_o = (uint32_t)((g->ro * 4 + w64) * (g->ro * 4 + w64));
+    g->g_a_o = g->ro * 4 + w64 / 2;
+    g->g_inv_o = (1 << 20) / (2 * g->g_a_o);
+    /* Inner side: d64 in (4ri - w64, 4ri]; empty once d64 <= 4ri - w64. */
+    g->g_a_i = g->ri * 4 - w64 / 2;
+    g->g_fast_i = g->g_a_i > 0 && w64 <= 1024;
+    g->g_lo_i = g->ri * 4 - w64 + 1 > 0
+                    ? (uint32_t)((g->ri * 4 - w64 + 1) * (g->ri * 4 - w64 + 1)) : 0u;
+    g->g_inv_i = g->g_fast_i ? (1 << 20) / (2 * g->g_a_i) : 0;
+    /* Cap side: d64 in (4capr, 4capr + w64); at or under 4capr is full. */
+    g->g_lo_c = (uint32_t)((g->capr * 4 + 1) * (g->capr * 4 + 1));
+    g->g_a_c = g->capr * 4 + w64 / 2;
+    g->g_inv_c = (1 << 20) / (2 * g->g_a_c);
+}
+
+/* How far outside the shape a pixel centre is, in 1/64 px, for the glow's
+ * falloff: <= 0 is full strength (peak), >= w16 * 4 is dark. glow_prep(g, w16)
+ * has run. */
+static int32_t glow_t64(const geo_t *g, int32_t w16, int32_t px, int32_t py)
 {
     const int32_t dx = px - g->cx, dy = py - g->cy;
     const int32_t d2 = dx * dx + dy * dy;
@@ -405,60 +849,169 @@ static int glow_cov(const geo_t *g, int32_t w16, uint32_t inv, int peak, int32_t
     }
     if (in) {
         if (d2 <= g->ro2 && d2 >= g->ri2) {
-            return peak;
+            return 0;
         }
-        const int32_t d64 = (int32_t)dist64((uint32_t)d2);
-        t64 = d64 > g->ro * 4 ? d64 - g->ro * 4 : g->ri * 4 - d64;
+        const uint32_t n = n16(d2);
+        if (d2 > g->ro2) {
+            if (n >= g->g_hi_o) {
+                return w64;
+            }
+            const uint32_t d64 = g->g_fast_o ? near_sqrt(n, (uint32_t)g->g_a_o, g->g_inv_o)
+                                             : isqrt_u32(n);
+            t64 = (int32_t)d64 - g->ro * 4;
+        } else {
+            if (n < g->g_lo_i) {
+                return w64;
+            }
+            const uint32_t d64 = g->g_fast_i ? near_sqrt(n, (uint32_t)g->g_a_i, g->g_inv_i)
+                                             : isqrt_u32(n);
+            t64 = g->ri * 4 - (int32_t)d64;
+        }
     } else if (g->caps) {
         const int32_t da = (px - g->ax) * (px - g->ax) + (py - g->ay) * (py - g->ay);
         const int32_t db = (px - g->bx) * (px - g->bx) + (py - g->by) * (py - g->by);
         const int32_t m = imin32(da, db);
         const int32_t reach = g->capr + w16;
         if (m >= reach * reach) {
+            return w64;
+        }
+        const uint32_t n = n16(m);
+        if (n < g->g_lo_c) {
             return 0;
         }
-        t64 = (int32_t)dist64((uint32_t)m) - g->capr * 4;
+        const uint32_t d64 = w64 <= 1024 ? near_sqrt(n, (uint32_t)g->g_a_c, g->g_inv_c)
+                                         : isqrt_u32(n);
+        t64 = (int32_t)d64 - g->capr * 4;
     } else {
         const int32_t m = imin32(seg_d2(g, dx, dy, g->sx, g->sy), seg_d2(g, dx, dy, g->ex, g->ey));
         if (m >= w16 * w16) {
-            return 0;
+            return w64;
         }
         t64 = (int32_t)dist64((uint32_t)m);
     }
-    if (t64 <= 0) {
-        return peak;
-    }
-    if (t64 >= w64) {
-        return 0;
-    }
-    const uint32_t u = (((uint32_t)(w64 - t64)) * inv) >> 16; /* 0..256 */
-    return (int)(((uint32_t)peak * u * u) >> 16);
+    return t64;
 }
 
 /* 4x4 Bayer thresholds, 0..15. */
 static const uint8_t k_bayer[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
 
-/* Add colour * a/255 to a panel-order pixel, saturating per channel. The sum
- * is kept at 8 bits per channel and quantised with an ordered dither, so a
- * soft ramp that spans only a few 5-bit levels does not band. a=0 returns the
- * pixel untouched. */
-static uint16_t add565(uint16_t under, uint16_t col, unsigned a, int x, int y, bool swap)
+/* What a light of weight `a` adds to each channel, at 8 bits. */
+typedef struct {
+    uint32_t r, g, b;
+} glow_add_t;
+
+static inline glow_add_t glow_add_for(uint16_t col, unsigned a)
 {
-    if (a == 0u) {
-        return under;
-    }
-    const uint32_t u = swap ? glass_bswap(under) : under;
-    const uint32_t d = k_bayer[((unsigned)y & 3u) * 4u + ((unsigned)x & 3u)];
     const uint32_t cr = col >> 11, cg = (col >> 5) & 63u, cb = col & 31u;
     const uint32_t r8 = (cr << 3) | (cr >> 2), g8 = (cg << 2) | (cg >> 4), b8 = (cb << 3) | (cb >> 2);
-    uint32_t r = (((u >> 11) << 3) + (r8 * a + 127u) / 255u + (d >> 1)) >> 3;
-    uint32_t g = ((((u >> 5) & 63u) << 2) + (g8 * a + 127u) / 255u + (d >> 2)) >> 2;
-    uint32_t b = (((u & 31u) << 3) + (b8 * a + 127u) / 255u + (d >> 1)) >> 3;
+    glow_add_t t = {(r8 * a + 127u) / 255u, (g8 * a + 127u) / 255u, (b8 * a + 127u) / 255u};
+    return t;
+}
+
+/* The glow's addend for a pixel t64 (1/64 px) outside the stroke: falloff,
+ * alpha, then the colour's share, packed 10 bits a channel. 0 is no light. */
+static uint32_t glow_pack(uint16_t color, uint8_t peak, unsigned alpha, uint32_t inv, int32_t w64,
+                          int32_t t64)
+{
+    unsigned cov = peak;
+    if (t64 > 0) {
+        const uint32_t u = (((uint32_t)(w64 - t64)) * inv) >> 16; /* 0..256 */
+        cov = (unsigned)(((uint32_t)peak * u * u) >> 16);
+    }
+    const unsigned a = (cov * (alpha + 1u)) >> 8;
+    if (a == 0u) {
+        return 0u;
+    }
+    const glow_add_t t = glow_add_for(color, a);
+    return (t.r << 20) | (t.g << 10) | t.b;
+}
+
+/* Every pixel of a halo has the same colour and alpha, so what it adds is a
+ * function of t64 alone: tabulated once per (width, peak, colour, alpha) and
+ * looked up per pixel. One table, one render task (see geo_get). */
+#define GLOW_LUT_MAX 256
+
+typedef struct {
+    bool valid;
+    int32_t w16;
+    uint8_t peak, alpha;
+    uint16_t color;
+    uint32_t e[GLOW_LUT_MAX];
+} glow_lut_t;
+
+static glow_lut_t s_glow_lut;
+
+static const glow_lut_t *glow_lut_get(int32_t w16, uint8_t peak, uint16_t color, uint8_t alpha,
+                                      uint32_t inv)
+{
+    const int32_t w64 = w16 * 4;
+    if (w64 > GLOW_LUT_MAX) {
+        return NULL;
+    }
+    glow_lut_t *l = &s_glow_lut;
+    if (!l->valid || l->w16 != w16 || l->peak != peak || l->color != color || l->alpha != alpha) {
+        for (int32_t t = 0; t < w64; t++) {
+            l->e[t] = glow_pack(color, peak, alpha, inv, w64, t);
+        }
+        l->w16 = w16;
+        l->peak = peak;
+        l->color = color;
+        l->alpha = alpha;
+        l->valid = true;
+    }
+    return l;
+}
+
+/* Add colour * a/255 to a panel-order pixel, saturating per channel. The sum
+ * is kept at 8 bits per channel and quantised with an ordered dither, so a
+ * soft ramp that spans only a few 5-bit levels does not band. */
+static inline uint16_t add565(uint16_t under, const glow_add_t *t, int x, int y, bool swap)
+{
+    const uint32_t u = swap ? glass_bswap(under) : under;
+    const uint32_t d = k_bayer[((unsigned)y & 3u) * 4u + ((unsigned)x & 3u)];
+    uint32_t r = (((u >> 11) << 3) + t->r + (d >> 1)) >> 3;
+    uint32_t g = ((((u >> 5) & 63u) << 2) + t->g + (d >> 2)) >> 2;
+    uint32_t b = (((u & 31u) << 3) + t->b + (d >> 1)) >> 3;
     r = r > 31u ? 31u : r;
     g = g > 63u ? 63u : g;
     b = b > 31u ? 31u : b;
     const uint16_t out = (uint16_t)((r << 11) | (g << 5) | b);
     return swap ? glass_bswap(out) : out;
+}
+
+/* add565 over x0..x1 of one row for a constant addend: the four dither
+ * columns' sums are worked out once and the byte order is a compile-time
+ * constant in each loop. */
+static inline void add_run_n(uint16_t *row, int x0, int x1, int y, const glow_add_t *t, bool swap)
+{
+    uint32_t ar[4], ag[4], ab[4];
+    for (unsigned i = 0; i < 4u; i++) {
+        const uint32_t d = k_bayer[((unsigned)y & 3u) * 4u + i];
+        ar[i] = t->r + (d >> 1);
+        ag[i] = t->g + (d >> 2);
+        ab[i] = t->b + (d >> 1);
+    }
+    for (int x = x0; x <= x1; x++) {
+        const unsigned c = (unsigned)x & 3u;
+        const uint32_t u = swap ? glass_bswap(row[x]) : row[x];
+        uint32_t r = (((u >> 11) << 3) + ar[c]) >> 3;
+        uint32_t g = ((((u >> 5) & 63u) << 2) + ag[c]) >> 2;
+        uint32_t b = (((u & 31u) << 3) + ab[c]) >> 3;
+        r = r > 31u ? 31u : r;
+        g = g > 63u ? 63u : g;
+        b = b > 31u ? 31u : b;
+        const uint16_t out = (uint16_t)((r << 11) | (g << 5) | b);
+        row[x] = swap ? glass_bswap(out) : out;
+    }
+}
+
+static void add_run(uint16_t *row, int x0, int x1, int y, const glow_add_t *t, bool swap)
+{
+    if (swap) {
+        add_run_n(row, x0, x1, y, t, true);
+    } else {
+        add_run_n(row, x0, x1, y, t, false);
+    }
 }
 
 void glass_glow_row(uint16_t *row, int y, int clip_lo, int clip_hi,
@@ -467,35 +1020,114 @@ void glass_glow_row(uint16_t *row, int y, int clip_lo, int clip_hi,
                     int32_t width16, uint8_t peak,
                     uint16_t color565, uint8_t alpha, bool swap_bytes)
 {
-    geo_t g;
     if (row == NULL || width16 <= 0 || peak == 0u || alpha == 0u ||
-        !row_clip(y, &clip_lo, &clip_hi) ||
-        !geo_build(&g, cx16, cy16, r_in16, r_out16, start_q16, sweep_q16, round_caps)) {
+        !row_clip(y, &clip_lo, &clip_hi)) {
         return;
     }
-    const int32_t dy = y * 16 + 8 - g.cy, ady = iabs32(dy);
-    const int32_t reach = g.ro + width16;
+    geo_t *g = geo_get(cx16, cy16, r_in16, r_out16, start_q16, sweep_q16, round_caps);
+    if (g == NULL) {
+        return;
+    }
+    glow_prep(g, width16);
+    const int32_t y16 = y * 16 + 8;
+    if (!row_in_extent(g, y16, EDGE_MARGIN + width16)) {
+        return;
+    }
+    const int32_t dy = y16 - g->cy, ady = iabs32(dy);
+    const int32_t reach = g->ro + width16;
     if (reach <= ady) {
         return;
     }
     const int32_t ho = (int32_t)isqrt_u32((uint32_t)(reach * reach - dy * dy));
-    const int xa = (int)imax32(clip_lo, x_lo(g.cx, ho));
-    const int xb = (int)imin32(clip_hi, x_hi(g.cx, ho));
+    const int xa = (int)imax32(clip_lo, x_lo(g->cx, ho));
+    const int xb = (int)imin32(clip_hi, x_hi(g->cx, ho));
     int32_t he = -1; /* nothing within he of the centre is lit */
-    const int32_t rr = g.ri - width16;
+    const int32_t rr = g->ri - width16;
     if (rr > ady) {
         he = (int32_t)isqrt_u32((uint32_t)(rr * rr - dy * dy));
     }
-    const uint32_t inv = (256u << 16) / (uint32_t)(width16 * 4);
-    for (int x = xa; x <= xb; x++) {
-        if (he >= 0 && iabs32(x * 16 + 8 - g.cx) <= he) {
-            x = x_hi(g.cx, he);
+    const int32_t w64 = width16 * 4;
+    const uint32_t inv = (256u << 16) / (uint32_t)w64;
+    const glow_lut_t *lut = glow_lut_get(width16, peak, color565, alpha, inv);
+
+    /* The span at full strength: inside the shape's half planes and between
+     * the radii. `maybe` is everything that can be lit at all: the inside of
+     * the half planes, and what lies within reach of an end. */
+    int32_t so = -1, si = -1;
+    if (g->ro2 - dy * dy >= 0) {
+        so = (int32_t)isqrt_u32((uint32_t)(g->ro2 - dy * dy));
+    }
+    if (g->ri2 - dy * dy > 0) {
+        si = (int32_t)isqrt_u32((uint32_t)(g->ri2 - dy * dy));
+    }
+    spanset_t body = {.n = 0}, inside = {.n = 0}, peaks = {.n = 0}, maybe = {.n = 0};
+    radial_pieces(&body, g->cx, so, si);
+    if (g->wedge == 0) {
+        peaks = body;
+        ss_add(&maybe, k_span_all);
+    } else {
+        wedge_spans(g, dy, 0, &inside);
+        ss_isect(&peaks, &body, &inside);
+        maybe = inside;
+        if (g->caps) {
+            ss_add(&maybe, disc_span(g->ax, g->ay, g->capr + width16, y16));
+            ss_add(&maybe, disc_span(g->bx, g->by, g->capr + width16, y16));
+        } else {
+            /* Outside the half planes the glow follows the two radial edges:
+             * lit within width16 of an edge segment, so within width16 of its
+             * line. t is that distance times the direction's length (about
+             * 32768); the pad is for the table's rounding. */
+            const int32_t band = (width16 + 4) * 33000;
+            const span_t s_lo = halfplane(-g->sy, g->sx * dy, -band, g->cx);
+            const span_t s_hi = halfplane(g->sy, -g->sx * dy, -band, g->cx);
+            const span_t e_lo = halfplane(g->ey, -dy * g->ex, -band, g->cx);
+            const span_t e_hi = halfplane(-g->ey, dy * g->ex, -band, g->cx);
+            ss_add(&maybe, span_isect(s_lo, s_hi));
+            ss_add(&maybe, span_isect(e_lo, e_hi));
+        }
+    }
+    const unsigned a_peak = (((unsigned)peak) * ((unsigned)alpha + 1u)) >> 8;
+    const glow_add_t add_peak = glow_add_for(color565, a_peak);
+    int x = xa, e;
+    while (x <= xb) {
+        if (he >= 0 && iabs32(x * 16 + 8 - g->cx) <= he) {
+            x = x_hi(g->cx, he) + 1;
             continue;
         }
-        const int cov = glow_cov(&g, width16, inv, peak, x * 16 + 8, y * 16 + 8);
-        const unsigned a = ((unsigned)cov * ((unsigned)alpha + 1u)) >> 8;
-        if (a != 0u) {
-            row[x] = add565(row[x], color565, a, x, y, swap_bytes);
+        if (ss_find(&peaks, x, &e)) {
+            e = (int)imin32(e, xb);
+            if (a_peak != 0u) {
+                add_run(row, x, e, y, &add_peak, swap_bytes);
+            }
+            x = e + 1;
+            continue;
+        }
+        if (!ss_find(&maybe, x, &e)) {
+            x = ss_next(&maybe, x);
+            continue;
+        }
+        int lim = (int)imin32(e, xb);
+        const int np = ss_next(&peaks, x);
+        if (np <= lim) {
+            lim = np - 1;
+        }
+        if (he >= 0) {
+            const int hl = x_lo(g->cx, he);
+            if (hl > x && hl <= lim) {
+                lim = hl - 1;
+            }
+        }
+        for (; x <= lim; x++) {
+            const int32_t t64 = glow_t64(g, width16, x * 16 + 8, y16);
+            if (t64 >= w64) {
+                continue;
+            }
+            const uint32_t pk = lut != NULL ? lut->e[t64 > 0 ? t64 : 0]
+                                            : glow_pack(color565, peak, alpha, inv, w64, t64);
+            if (pk != 0u) {
+                const glow_add_t t = {(pk >> 20) & 1023u, (pk >> 10) & 1023u, pk & 1023u};
+                row[x] = add565(row[x], &t, x, y, swap_bytes);
+            }
         }
     }
 }
