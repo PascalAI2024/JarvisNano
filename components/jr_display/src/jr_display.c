@@ -2634,8 +2634,17 @@ static void sp_compose_activity(void)
  * screens, and the detail sheet if it is showing. */
 static void sp_compose(void)
 {
-    sp_compose_weather();
-    sp_compose_activity();
+    /* The weather and activity strings are read only while their screen is on
+     * the glass (or sliding to or from it), so every other screen skips them:
+     * a settled STATUS used to format both every frame for nothing. */
+    if (s_space_from == (uint8_t)JR_DISPLAY_SPACE_WEATHER ||
+        s_space_to == (uint8_t)JR_DISPLAY_SPACE_WEATHER) {
+        sp_compose_weather();
+    }
+    if (s_space_from == (uint8_t)JR_DISPLAY_SPACE_ACTIVITY ||
+        s_space_to == (uint8_t)JR_DISPLAY_SPACE_ACTIVITY) {
+        sp_compose_activity();
+    }
     const uint32_t w = __atomic_load_n(&s_status_word, __ATOMIC_ACQUIRE);
     const uint32_t vol = (w & 0xFFu) > 100u ? 100u : (w & 0xFFu);
     uint32_t brt = (uint32_t)__atomic_load_n(&s_brightness_want, __ATOMIC_ACQUIRE);
@@ -3568,8 +3577,12 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
  * rail used to span 184-196 and overwrote both edges every frame. The inner
  * radius of sp_annulus_row is inclusive of pixels whose true radius floors to
  * one less (185 painted r184), so the inner edges sit one unit inside. */
-#define SP_ORB_TRACK_IN  186
-#define SP_ORB_TRACK_OUT 194
+/* The rail is a 4 px glass track down the middle of the band (it was 8 px of
+ * opaque annulus): the sheet of pixels it writes every strip of every frame
+ * is the biggest single cost of a settled screen, and the mark and the dots
+ * stand proud of it. Anti-aliasing adds one faint pixel each side. */
+#define SP_ORB_TRACK_IN  188
+#define SP_ORB_TRACK_OUT 192
 #define SP_ORB_R         190
 #define SP_ORB_MARK_IN   187
 #define SP_ORB_MARK_OUT  194
@@ -5009,31 +5022,42 @@ static void sp_draw_orbit(const jr_display_ctx_t *ctx, int y1, int y2,
                           uint16_t *pixels, int st)
 {
     const bool muted = sp_privacy_muted();
-    const uint16_t rail = sp_tint(ctx, SP_C_PLATE, st);
-    const uint16_t cool = sp_tint(ctx, muted ? SP_C_GOLD_DIM : SP_C_CYAN_DIM, st);
-    const uint16_t hot = sp_tint(ctx, muted ? SP_C_GOLD : SP_C_CYAN, st);
+    const bool swap = ctx->board.swap_color_bytes;
+    const uint16_t cool = muted ? SP_C_GOLD_DIM : SP_C_CYAN_DIM;
+    const uint16_t hot = muted ? SP_C_GOLD : SP_C_CYAN;
 
-    /* One mark per screen the ring shows RIGHT NOW — DESK only while live —
-     * and the active mark at the angle sp_fade_tick eased for this frame,
-     * which already carries the slide and the re-spacing residue. */
+    /* One mark per screen the ring shows RIGHT NOW (DESK only while live) and
+     * the active mark at the angle sp_fade_tick eased for this frame, which
+     * already carries the slide and the re-spacing residue. Rail, dots and mark
+     * are glass primitives like the screens inside them; the dot centres are
+     * worked out once, not once per row. */
     const int n = sp_ring_n(sp_desk_live());
     const int a_act = (s_orbit_a16 + 8) >> 4;
-
-    sp_span_t act;
-    sp_span_set(&act, a_act - 5, a_act + 5);
+    const int32_t mark_start = (int32_t)(((a_act - 5) * 256) & 0xFFFF);
+    int dx16[16], dy16[16];
+    const int nd = n < 16 ? n : 16;
+    for (int i = 0; i < nd; ++i) {
+        const int a = SP_A_TOP + (i * 256) / n;
+        dx16[i] = (SP_CX + ((sp_cos(a) * SP_ORB_R) >> 15)) * 16;
+        dy16[i] = (SP_CY + ((sp_sin(a) * SP_ORB_R) >> 15)) * 16;
+    }
 
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        /* The rail is now the whole ring — NULL span means all the way round. */
-        sp_annulus_row(row, y, SP_CX, SP_CY, SP_ORB_TRACK_IN, SP_ORB_TRACK_OUT,
-                       NULL, rail);
-        for (int i = 0; i < n; ++i) {
-            const int a = SP_A_TOP + (i * 256) / n;
-            sp_dot_row(row, y, SP_CX + ((sp_cos(a) * SP_ORB_R) >> 15),
-                       SP_CY + ((sp_sin(a) * SP_ORB_R) >> 15), 5, cool);
+        int lo = 0, hi = HUD_W - 1;
+        if (!sp_clip(y, &lo, &hi)) {
+            continue;
         }
-        sp_annulus_row(row, y, SP_CX, SP_CY, SP_ORB_MARK_IN, SP_ORB_MARK_OUT,
-                       &act, hot);
+        /* The whole ring; the glass ring takes the rows it touches and no more. */
+        glass_ring_row(row, y, lo, hi, SP_CX * 16, SP_CY * 16, SP_ORB_TRACK_IN * 16,
+                       SP_ORB_TRACK_OUT * 16, 0, GLASS_TURN_Q16, SP_C_PLATE, (uint8_t)st, swap);
+        for (int i = 0; i < nd; ++i) {
+            if (y >= dy16[i] / 16 - 4 && y <= dy16[i] / 16 + 4) {
+                glass_disc_row(row, y, lo, hi, dx16[i], dy16[i], 40, cool, (uint8_t)st, swap);
+            }
+        }
+        glass_arc_row(row, y, lo, hi, SP_CX * 16, SP_CY * 16, SP_ORB_MARK_IN * 16,
+                      SP_ORB_MARK_OUT * 16, mark_start, 10 * 256, hot, (uint8_t)st, swap);
     }
 }
 

@@ -2833,6 +2833,48 @@ static size_t lit_between(const uint16_t *fb, int y0, int y1)
     return n;
 }
 
+/* DESK on the glass: the ring is the STATUS ring (r113-123 plus its soft
+ * edge), the progress number is in its middle, and nothing else of DESK
+ * reaches the band between the ring and the orbit rail. */
+static void test_desk_is_a_glass_ring_with_its_number(void)
+{
+    stage_space(JR_DISPLAY_SPACE_DESK);
+    jr_display_desk_set_task("FIX BUG", 50U, JR_DISPLAY_AGENT_WORKING);
+    sp_compose();
+    s_entry_ms = SP_ENTRY_TOTAL_MS;
+    uint16_t *fb = render_frame();
+    if (!fb) {
+        printf("FAIL %s: allocation failed\n", __func__);
+        g_failures++;
+        return;
+    }
+    size_t ring = 0, between = 0, middle = 0;
+    int rmin = 999, rmax = 0, bmin = 999, bmax = 0;
+    for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
+        if (fb[i] == POISON) {
+            continue;
+        }
+        const int r = radius_of((int)i);
+        if (r >= 110 && r <= 126) {
+            ring++;
+            if (r < rmin) rmin = r;
+            if (r > rmax) rmax = r;
+        } else if (r > 136 && r < 183) {   /* past the ring glow */
+            between++;
+            if (r < bmin) bmin = r;
+            if (r > bmax) bmax = r;
+        } else if (r < 100) {
+            middle++;
+        }
+    }
+    CHECK(ring > 2500, "the ring is drawn (%zu pixels)", ring);
+    CHECK(rmin >= 110 && rmax <= 126, "ring r%d..r%d", rmin, rmax);
+    CHECK(middle > 800, "the task, the number and the state are drawn (%zu)", middle);
+    CHECK(between == 0, "%zu DESK pixels between the ring and the orbit rail (r%d..%d)", between, bmin, bmax);
+    free(fb);
+    s_entry_ms = SP_ENTRY_TOTAL_MS;
+}
+
 static void test_entry_clock_runs_then_stops(void)
 {
     reset_nav();
@@ -3216,7 +3258,7 @@ static void test_orbit_stays_in_free_band(void)
         if (r <= JR_DISPLAY_SAFE_R) {
             continue;
         }
-        if (r >= 185 && r <= 194) {
+        if (r >= 184 && r <= 195) {   /* r186-194 plus one anti-aliased pixel each side */
             inside++;
         } else {
             outside++;
@@ -3224,8 +3266,8 @@ static void test_orbit_stays_in_free_band(void)
             if (outside == 1 || r > omax) omax = r;
         }
     }
-    CHECK(inside > 0, "the orbit drew nothing in r185-194");
-    CHECK(outside == 0, "%zu orbit pixels outside r185-194 (r%d..%d)", outside, omin, omax);
+    CHECK(inside > 0, "the orbit drew nothing in r184-195");
+    CHECK(outside == 0, "%zu orbit pixels outside r184-195 (r%d..%d)", outside, omin, omax);
     free(fb);
 }
 
@@ -5246,6 +5288,7 @@ int main(void)
     test_entry_clock_runs_then_stops();
     test_entry_builds_the_screens();
     test_outgoing_screen_does_not_replay_the_entry();
+    test_desk_is_a_glass_ring_with_its_number();
     test_activity_is_honest_when_empty_and_newest_first();
     test_activity_survives_the_sleep();
     test_desk_sheet_heads_with_the_marked_task();

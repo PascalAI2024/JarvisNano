@@ -325,6 +325,7 @@ int main(int argc, char **argv)
             apply_space_overlay(&s_display, y, y2, cnt + (size_t)y * 466);
         }
         const long all = g_wr;
+        memcpy(cnt, ref, 466u * 466u * sizeof(uint16_t));
         g_wr = 0;
         for (int y = 0; y < 466; y += 12) {
             int y2 = y + 12 > 466 ? 466 : y + 12;
