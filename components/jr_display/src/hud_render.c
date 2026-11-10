@@ -1826,9 +1826,9 @@ static void HOT aa_disc(const strip_t *s, int32_t cx, int32_t cy, int32_t rad,
                 for (int x = in0; x <= in1; ++x) {
                     row[x] = solid;
                 }
-            } else if ((hud_perf_knob & JR_KNOB_DISC_MEMO) != 0u) {
+            } else {
                 /* a flat disc over a flat base blends the same pixel again and
-                 * again: remember the last one (same output, one blend a run) */
+                 * again: remember the last one (one blend a run) */
                 uint16_t last_in = row[in0];
                 uint16_t last_out = w_blend(last_in, c, alpha, swap);
                 for (int x = in0; x <= in1; ++x) {
@@ -1838,10 +1838,6 @@ static void HOT aa_disc(const strip_t *s, int32_t cx, int32_t cy, int32_t rad,
                         last_out = w_blend(v, c, alpha, swap);
                     }
                     row[x] = last_out;
-                }
-            } else {
-                for (int x = in0; x <= in1; ++x) {
-                    row[x] = w_blend(row[x], c, alpha, swap);
                 }
             }
         }

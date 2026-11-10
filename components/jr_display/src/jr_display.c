@@ -4726,9 +4726,9 @@ static void sp_veil(const jr_display_ctx_t *ctx, int y1, int y2,
                     }
                 }
             }
-        } else if ((hud_perf_knob & JR_KNOB_VEIL_MEMO) != 0U) {
+        } else {
             /* a flat dial under a part-strength veil folds the same pixel again
-             * and again: remember the last one (same output) */
+             * and again: remember the last one */
             uint16_t last_in = 0U, last_out = 0U;
             for (int x = lo; x <= hi; ++x) {
                 const uint16_t v = row[x];
@@ -4738,12 +4738,6 @@ static void sp_veil(const jr_display_ctx_t *ctx, int y1, int y2,
                         last_out = hud_fade565(v, swap, k);
                     }
                     row[x] = last_out;
-                }
-            }
-        } else {
-            for (int x = lo; x <= hi; ++x) {
-                if (row[x] != 0U) {
-                    row[x] = hud_fade565(row[x], swap, k);
                 }
             }
         }
@@ -5073,7 +5067,7 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
     }
 }
 
-/* ---- the ring while it moves (perf knob bit 0, JR_KNOB_REPLAY_RING) -----------
+/* ---- the ring while it moves ---------------------------------------------------
  *
  * The three records above are used only once the screen sits still (oy == 0) and
  * the sweep has finished, so for the whole entry (about 22 frames) the ring is
@@ -5200,7 +5194,7 @@ static struct {
     int32_t sweep;              /* the sweep the records were made for */
     uint8_t have;               /* SG_FR_* parts recorded for it; bit 7: tried */
 } s_fring;
-/* The moving ring (perf knob bit 0) keeps a second set of the three records, blocks
+/* The moving ring keeps a second set of the three records, blocks
  * 4 to 6, so two ring screens that share a slide (STATUS leaving, DESK entering)
  * each have theirs; block 3 is the full-turn track both use. */
 static struct {
@@ -5221,7 +5215,7 @@ static void fring_rec_alloc(void)
     if (s_rx_ring != NULL) {
         sg_rx_build(s_rx_ring, SG_RING_R_IN16, SG_RING_R_OUT16);
     }
-    /* block 3: the full-turn track the moving ring replays (perf knob bit 0) */
+    /* block 3: the full-turn track the moving ring replays */
     s_fring_trkfull = s_fring_rec != NULL &&
                       glass_ring_record(s_fring_rec + 3u * SG_FRING_CAP, SG_FRING_CAP, SP_CX * 16,
                                         (SP_CY + SG_RING_DY) * 16, SG_RING_R_IN16, SG_RING_R_OUT16) != 0u;
@@ -5305,7 +5299,7 @@ static inline void fring_row(uint16_t *row, int y, int lo, int hi, bool swap, in
 
 /* The records the moving ring can use for the final sweep `full`: fring_prepare's
  * three (for the sweep the entry is heading for) and the full-turn track. 0 means
- * draw it the way knob 0 does. */
+ * the memory is absent: draw it the long way. */
 static uint8_t fring_prepare_moving(int32_t full, const uint8_t **base)
 {
     *base = s_fring_rec;
@@ -5532,8 +5526,7 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
     /* at rest: the ring's three layers replayed from their records */
     const uint8_t rec = (oy == 0 && f_ring >= GLASS_ONE_Q16) ? (uint8_t)(fring_prepare(sweep) & 0x7Fu) : 0u;
     const uint8_t *mbase = s_fring_rec;
-    const uint8_t mov = (rec == 0u && (hud_perf_knob & JR_KNOB_REPLAY_RING) != 0u)
-        ? fring_prepare_moving(full, &mbase) : 0u;
+    const uint8_t mov = rec == 0u ? fring_prepare_moving(full, &mbase) : 0u;
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         int lo = 0, hi = HUD_W - 1;
@@ -5695,10 +5688,9 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
     const int ring_y0 = cyr - 130, ring_y1 = cyr + 130;
     /* at rest: the ring's three layers replayed from their records */
     const uint8_t rec = (oy == 0 && f_ring >= GLASS_ONE_Q16) ? (uint8_t)(fring_prepare(sweep) & 0x7Fu) : 0u;
-    /* while it slides or sweeps: the records of the final value (perf knob bit 0) */
+    /* while it slides or sweeps: the records of the final value */
     const uint8_t *mbase = s_fring_rec;
-    const uint8_t mov = (rec == 0u && (hud_perf_knob & JR_KNOB_REPLAY_RING) != 0u)
-        ? fring_prepare_moving(have_gauge ? full : 0, &mbase) : 0u;
+    const uint8_t mov = rec == 0u ? fring_prepare_moving(have_gauge ? full : 0, &mbase) : 0u;
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         int lo = 0, hi = HUD_W - 1;
@@ -6359,23 +6351,15 @@ static void sp_veil_black(const jr_display_ctx_t *ctx, int y1, int y2,
             memset(row + lo, 0, (size_t)(hi - lo + 1) * sizeof(uint16_t));
             continue;
         }
-        if ((hud_perf_knob & JR_KNOB_VEIL_MEMO) != 0U) {
-            uint16_t last_in = 0U, last_out = 0U;       /* as in sp_veil */
-            for (int x = lo; x <= hi; ++x) {
-                const uint16_t v = row[x];
-                if (v != 0U) {
-                    if (v != last_in) {
-                        last_in = v;
-                        last_out = sp_fade_to_black565(v, swap, k);
-                    }
-                    row[x] = last_out;
-                }
-            }
-            continue;
-        }
+        uint16_t last_in = 0U, last_out = 0U;           /* as in sp_veil */
         for (int x = lo; x <= hi; ++x) {
-            if (row[x] != 0U) {
-                row[x] = sp_fade_to_black565(row[x], swap, k);
+            const uint16_t v = row[x];
+            if (v != 0U) {
+                if (v != last_in) {
+                    last_in = v;
+                    last_out = sp_fade_to_black565(v, swap, k);
+                }
+                row[x] = last_out;
             }
         }
     }
