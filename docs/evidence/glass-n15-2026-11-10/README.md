@@ -239,6 +239,55 @@ primitive it draws. The grammar is right in the preview and reaches the panel
 as three to five steps, not nine. The fix is to draw the screen at full
 strength and dim the finished strip once.
 
+## Sixth flash the same day: the subtraction confirmed, the one-pass fade lost
+
+Image cecd2f7 (2,435,008 bytes, valid after 60 s, largest internal block
+22,528 bytes, `flush_errors 0`). The knob round's winners are the only paths
+and its losers are deleted; one new candidate rides behind the knob.
+
+Settled, knob 0, lease held, 3 s per screen:
+
+| Screen | ms | fps | note |
+|---|---|---|---|
+| Home | 6.8 | 8.7 | the face clip's own rate |
+| Shade over home | 48.1 | 8.7 | `space_shade` 25.9, `space_veil` 7.5 |
+| WATCH JARVIS style | 10.7 | 32 | was 8.3 fps |
+| WATCH DRESS | 26.1 | 25 | dial 7.8 |
+| WATCH CELESTIAL | 31.4 | 23 | |
+| WATCH DIVER | 37.8 | 20 | |
+| WATCH MINIMAL | 40.2 | 15 | `clock_face` 26.4; was 53-55 ms at 8.7 fps |
+| WATCH PILOT | 41.7 | 19 | |
+| WATCH FUTURE | 44.8-46.2 | 17 | |
+| WATCH SKELETON | 47.4 | 17 | `clock_face` 30.9 |
+| WEATHER | 35.3 | 20 | |
+| STATUS | 38.2 | 26 | |
+| DESK | 31.0 | 23 | |
+| ACTIVITY | 23.5 | 23 | |
+
+The dial layer is 7.4-8.0 ms on the six baked dials (8.3-9.1 before the copy
+was limited to the glass).
+
+**Fading a ring screen by one dim pass is slower, not faster.** Knob bit 0
+draws the screen at full strength and dims the finished rows once. Mean ms per
+frame over the 0.9 s after each trigger, two runs each, alternating:
+
+| Transition | knob 0 | bit 0 | `space_screen` knob 0 | bit 0 |
+|---|---|---|---|---|
+| WEATHER > STATUS | 61.6 / 64.8 | 71.8 / 72.3 | 35.5 / 36.2 | 41.5 / 40.6 |
+| STATUS > DESK | 56.8 / 60.7 | 65.3 / 44.9 | 34.0 / 34.8 | 43.0 / 15.6 |
+| DESK > ACTIVITY | 35.7 / 40.3 | 41.5 / 40.8 | 14.0 / 19.0 | 17.8 / 18.6 |
+| WATCH > WEATHER | 49.3 / 54.5 | 57.7 / 59.9 | | |
+| Home > WATCH | 56.6 / 56.4 | 59.3 / 59.6 | (bit 0 does not touch it) | |
+
+The host had counted it 10-20 % more instructions and was right this time. So
+blending at partial strength is not what makes a transition frame expensive,
+and the fifth flash's reading of its own table was wrong. What the numbers fit
+instead: STATUS's `space_screen` was 42.6 ms before its ring was recorded and
+is 21 settled now; mid-entry it is 35-63, the unrecorded cost, because a
+record is replayed only when its content is settled and an entering ring
+sweeps. The shade is the same (26 settled, 37-72 opening). Not yet proven by a
+profile.
+
 `n15c-fixes.png`, read back from the fourth image under a lease: the lease caption
 no longer overprints the shade's hint line, and the shade shows 95 %, the
 owner's setting. The ACTIVITY rows still read `FORGIVE ME, SIR. I.` and
