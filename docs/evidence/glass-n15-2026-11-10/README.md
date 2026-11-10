@@ -490,3 +490,34 @@ The decode no longer shows. The 150 ms gate is not met: MINIMAL never decoded
 anything and sits at 187 ms, so the remainder is the new dial's first frames
 at 50-70 ms each. Not looked at: the second hand during a warm-up, and a
 change made within 1.5 s of the last.
+
+## Twelfth flash: a dial owns the glass (image f7e151b, 2,456,400 bytes)
+
+The same walk as `audit-before/`, with no lease, knob 0, the microphone muted,
+on the charger, plus rest captures after 12 s of stillness. Sheets in
+`audit-after/`: `sheetA.png` home, the shade, WATCH on arrival, the JARVIS
+style; `sheetB.png` DIVER, DRESS, PILOT, FUTURE; `sheetC.png` CELESTIAL awake
+and at rest, home awake and at rest; `sheetD.png` MINIMAL, SKELETON, CELESTIAL,
+the shade over a dial. The capture mirror: pixels, not brightness.
+
+| # | Defect in `audit-before/` | On the device now |
+|---|---|---|
+| 1 | The rim across the dial art | No rim on any dial while muted |
+| 2 | The blocky charging mark on dials and home | Gone from dials; home has one anti-aliased ring, the battery its lit part |
+| 3 | The sun arc over PILOT and FUTURE | Gone from baked dials |
+| 4 | The JARVIS style without a face | Tick ring, beads, hairline rings, tapered hands, the date |
+| 5 | A bitmap clock instead of the dial at rest | WATCH arrives on the dial and keeps it at rest by day; home at rest shows `18:16`, `100% USB` in the glass font |
+| 6 | The face through the shade's button | Opaque |
+| 7 | FUTURE's cut weather word | Not seen: no weather held (`NO WEATHER`); the host render reads `83° CLEAR` |
+| 8 | DIVER's date in the bitmap font | Glass digits |
+
+A resting DIVER drew 1 frame in 30 s (CELESTIAL about 6 a second: it keeps
+animating at rest). Boot complete came at 12.8 s on this flash against 5.5 s:
+the log shows a Wi-Fi disconnect (reason 205) and a retry, not the firmware.
+After the capture run the dial cache had held four dials and evicted three:
+the capture mirror takes PSRAM that an unobserved device keeps for the cache
+(4.66 MB free with no dial held). Largest internal block 21,504 bytes,
+`flush_errors 0`.
+
+Not exercised on the device: the privacy dot and the session ring (the
+microphone stayed muted), the night face, frame times under this image.
