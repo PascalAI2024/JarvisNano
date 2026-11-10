@@ -754,21 +754,11 @@ void hud_tilt_offset(float roll_deg, float pitch_deg, int8_t *ox, int8_t *oy)
 #define RIM_DOT_R16    48           /* the privacy dot: 3 px */
 #define RIM_DOT_PAD16  32           /* on a black disc of 5 px */
 
-/* The columns (as half-pixel offsets from the centre column) a ring of radius
- * R (px) and half-width hw (px, including its ramp and a pixel of margin) can
- * touch on the row whose doubled offset from the centre is dy2 (odd). Returns
- * false when the row misses the ring. */
-static bool ring_cols(int dy2, int r_out_h, int r_in_h, int *k_lo, int *k_hi)
-{
-    if (dy2 >= r_out_h) {
-        return false;
-    }
-    const int xo = (int)isqrt32((uint32_t)(r_out_h * r_out_h - dy2 * dy2));
-    const int xi = dy2 >= r_in_h ? 0 : (int)isqrt32((uint32_t)(r_in_h * r_in_h - dy2 * dy2));
-    *k_hi = (xo - 1) >> 1;
-    *k_lo = xi > 1 ? (xi - 1) >> 1 : 0;
-    return *k_hi >= *k_lo;
-}
+/* The ring's fixed geometry, printed once by scripts/gen-rim-table.py: the columns a row
+ * crosses and the coverage of each, so painting the ring is a load and a blend. */
+#include "hud_rim_table.inc"
+_Static_assert(RIM_TABLE_R == RIM_R && RIM_TABLE_HW_Q8 == RIM_HW_Q8,
+               "hud_rim_table.inc is stale: run scripts/gen-rim-table.py");
 
 static inline int clampi(int v, int lo, int hi)
 {
@@ -793,6 +783,76 @@ static inline uint16_t rim_mix(uint16_t under, uint16_t over, int a, bool swap)
 static inline int ring_dist_q8(int dx2, int dy2, int r4, int inv)
 {
     return (int)(((int64_t)(dx2 * dx2 + dy2 * dy2 - r4) * inv) >> 16);
+}
+
+/* What the pixels of one side of one row of the ring need to know. */
+typedef struct {
+    uint16_t col;
+    bool swap, comet;
+    int sc, a_span, cxp, ey, c0, dy2, hx, hy;
+} rim_row_t;
+
+/* The columns ka..kb of one side of a row (cv is the row's coverage, whose first column is k_lo).
+ * With the comet absent from them (`clear`) and the lit weight one value across them the run is a
+ * load and a blend per pixel; the lit weight is linear in the column, so a run whose two ends
+ * agree has it constant. Anywhere else each pixel works its weight (and the comet) out. */
+static void rim_run(const rim_row_t *r, uint16_t *row, int side, const uint8_t *cv, int k_lo,
+                    int ka, int kb, int lit, int a, bool clear)
+{
+    if (kb < ka) {
+        return;
+    }
+    const int sgn = side ? 1 : -1;
+    if (lit < 0 && clear) {
+        const int l0 = clampi(128 - ((r->c0 - r->ey * sgn * (2 * ka + 1)) >> 8), 0, 255);
+        const int l1 = clampi(128 - ((r->c0 - r->ey * sgn * (2 * kb + 1)) >> 8), 0, 255);
+        if (l0 == l1) {
+            lit = l0;
+            a = RIM_DIM_A + ((r->a_span * lit) >> 8);
+        }
+    }
+    if (lit >= 0 && clear) {
+        const int a_s = (a * r->sc) >> 8;
+        if (side) {
+            uint16_t *p = row + r->cxp + ka;
+            for (int k = ka; k <= kb; ++k, ++p) {
+                *p = rim_mix(*p, r->col, (a_s * (cv[k - k_lo] + 1)) >> 8, r->swap);
+            }
+        } else {
+            uint16_t *p = row + r->cxp - 1 - ka;
+            for (int k = ka; k <= kb; ++k, --p) {
+                *p = rim_mix(*p, r->col, (a_s * (cv[k - k_lo] + 1)) >> 8, r->swap);
+            }
+        }
+        return;
+    }
+    for (int k = ka; k <= kb; ++k) {
+        const int cov = cv[k - k_lo] + 1;                        /* 1..256 */
+        const int sdx2 = sgn * (2 * k + 1);
+        int lt = lit;
+        int al = a;
+        if (lt < 0) {
+            lt = clampi(128 - ((r->c0 - r->ey * sdx2) >> 8), 0, 255);   /* the end of the lit part, 1 px ramp */
+            al = RIM_DIM_A + ((r->a_span * lt) >> 8);
+        }
+        uint16_t c = r->col;
+        if (r->comet && lt > 0) {
+            const int dot = r->hx * sdx2 + r->hy * r->dy2;
+            if (dot > 0) {
+                const int back = -((r->hx * r->dy2 - r->hy * sdx2) >> 8);       /* Q8 px behind the head */
+                if (back >= -256 && back < RIM_COMET_PX * 256) {
+                    const int ca = back <= 0 ? 255 : 255 - ((back * 870) >> 16);
+                    const int ca2 = (ca * lt) >> 8;
+                    c = rim_mix(r->col, RIM_HEAD565, (ca2 * 200) >> 8, false);
+                    if (ca2 + 40 > al) {
+                        al = ca2 + 40 > 255 ? 255 : ca2 + 40;
+                    }
+                }
+            }
+        }
+        uint16_t *p = row + r->cxp + (side ? k : -1 - k);
+        *p = rim_mix(*p, c, ((((al * r->sc) >> 8) * cov) >> 8), r->swap);
+    }
 }
 
 static void ov_rim_ring(uint16_t *dst, int y0, int nrows, bool swap, uint32_t now_ms,
@@ -832,12 +892,10 @@ static void ov_rim_ring(uint16_t *dst, int y0, int nrows, bool swap, uint32_t no
         head_y16 = cyp * 16 + (int32_t)(((int64_t)hy * RIM_R * 16) >> 15);
     }
 
-    const int r_out_h = 2 * RIM_R + 3, r_in_h = 2 * RIM_R - 3;     /* nothing is inked beyond 1.5 px of the line */
-    const int r4 = 4 * RIM_R * RIM_R;
-    const int inv = (32 << 16) / RIM_R;                 /* Q8 px per (half-px)^2 / R */
+    const int sc = env->rim_a == 0 ? 256 : env->rim_a + 1;         /* the strength of the whole rim */
     const int a_span = RIM_LIT_A - RIM_DIM_A;
-    /* Left and right of a row have the same distance from the line, so each column is worked out
-     * once and drawn twice. Left of the vertical a lit part of up to half a turn is nothing, and a
+    /* Left and right of a row have the same distance from the line, so each column's coverage is
+     * read once and drawn twice. Left of the vertical a lit part of up to half a turn is nothing, and a
      * lit part of more than half a turn is everything right of it, so only one side of each row
      * needs the cross product (-1 = work it out). */
     const int lit_right = full ? 255 : (over_half ? 255 : -1);
@@ -851,51 +909,43 @@ static void ov_rim_ring(uint16_t *dst, int y0, int nrows, bool swap, uint32_t no
         }
         const int dy2 = 2 * (y - cyp) + 1;
         const int ady = dy2 < 0 ? -dy2 : dy2;
-        int k_lo, k_hi;
-        if (!ring_cols(ady, r_out_h, r_in_h, &k_lo, &k_hi)) {
-            continue;
+        const int j = (ady - 1) >> 1;
+        if (j >= RIM_TABLE_ROWS || k_rim_rows[j].n == 0) {
+            continue;                                                /* the row misses the ring */
         }
+        const uint8_t *cv = k_rim_cov + k_rim_rows[j].off;
+        const int k_lo = k_rim_rows[j].k0, k_hi = k_lo + k_rim_rows[j].n - 1;
         uint16_t *row = dst + (size_t)(y - y0) * HUD_W;
-        const int dy_sq = dy2 * dy2 - r4;
-        const int c0 = ex * dy2;
-        for (int k = k_lo; k <= k_hi; ++k) {
-            const int dx2 = 2 * k + 1;
-            const int dist = ((dx2 * dx2 + dy_sq) * inv) >> 16;          /* Q8 px, signed; 32 bits are enough this close to the ring */
-            int cov = RIM_HW_Q8 + 128 - (dist < 0 ? -dist : dist);       /* 0..384 */
-            if (cov <= 0) {
+        const rim_row_t rr = { .col = col, .swap = swap, .comet = comet, .sc = sc, .a_span = a_span,
+                               .cxp = cxp, .ey = ey, .c0 = ex * dy2, .dy2 = dy2, .hx = hx, .hy = hy };
+        /* The comet's tail is within RIM_COMET_PX of its head along the ring, so a pixel more than this far
+         * from the head in either axis has no comet in it. */
+        const bool near_row = comet && y >= (head_y16 >> 4) - RIM_COMET_PX - 6 &&
+                              y <= (head_y16 >> 4) + RIM_COMET_PX + 6;
+        for (int side = 0; side < 2; ++side) {
+            const int kmax = side ? kmax_r : kmax_l;
+            const int kh = k_hi < kmax ? k_hi : kmax;
+            if (kh < k_lo) {
                 continue;
             }
-            if (cov > 256) {
-                cov = 256;
+            const int lit = side ? lit_right : lit_left;
+            const int a = side ? a_right : a_left;
+            if (!near_row) {
+                rim_run(&rr, row, side, cv, k_lo, k_lo, kh, lit, a, true);
+                continue;
             }
-            for (int side = 0; side < 2; ++side) {
-                if (k > (side ? kmax_r : kmax_l)) {
-                    continue;
-                }
-                const int sdx2 = side ? dx2 : -dx2;
-                int lit = side ? lit_right : lit_left;
-                int a = side ? a_right : a_left;
-                if (lit < 0) {
-                    lit = clampi(128 - ((c0 - ey * sdx2) >> 8), 0, 255);   /* the end of the lit part, 1 px ramp */
-                    a = RIM_DIM_A + ((a_span * lit) >> 8);
-                }
-                uint16_t c = col;
-                if (comet && lit > 0) {
-                    const int dot = hx * sdx2 + hy * dy2;
-                    if (dot > 0) {
-                        const int back = -((hx * dy2 - hy * sdx2) >> 8);       /* Q8 px behind the head */
-                        if (back >= -256 && back < RIM_COMET_PX * 256) {
-                            const int ca = back <= 0 ? 255 : 255 - ((back * 870) >> 16);
-                            const int ca2 = (ca * lit) >> 8;
-                            c = rim_mix(col, RIM_HEAD565, (ca2 * 200) >> 8, false);
-                            if (ca2 + 40 > a) {
-                                a = ca2 + 40 > 255 ? 255 : ca2 + 40;
-                            }
-                        }
-                    }
-                }
-                uint16_t *p = row + cxp + (side ? k : -1 - k);
-                *p = rim_mix(*p, c, (a * cov) >> 8, swap);
+            /* the columns the tail can be in, as this side's k */
+            const int hxp = head_x16 >> 4, reach = RIM_COMET_PX + 6;
+            int s0 = side ? hxp - reach - cxp : cxp - 1 - (hxp + reach);
+            int s1 = side ? hxp + reach - cxp : cxp - 1 - (hxp - reach);
+            s0 = s0 < k_lo ? k_lo : s0;
+            s1 = s1 > kh ? kh : s1;
+            if (s1 < s0) {
+                rim_run(&rr, row, side, cv, k_lo, k_lo, kh, lit, a, true);
+            } else {
+                rim_run(&rr, row, side, cv, k_lo, k_lo, s0 - 1, lit, a, true);
+                rim_run(&rr, row, side, cv, k_lo, s0, s1, lit, a, false);
+                rim_run(&rr, row, side, cv, k_lo, s1 + 1, kh, lit, a, true);
             }
         }
     }
@@ -903,7 +953,7 @@ static void ov_rim_ring(uint16_t *dst, int y0, int nrows, bool swap, uint32_t no
         for (int y = y0; y < y0 + nrows; ++y) {
             if (y >= (head_y16 >> 4) - 4 && y <= (head_y16 >> 4) + 4 && y >= 0 && y < HUD_H) {
                 glass_disc_row(dst + (size_t)(y - y0) * HUD_W, y, 0, HUD_W - 1, head_x16, head_y16, 29,
-                               RIM_HEAD565, 255, swap);
+                               RIM_HEAD565, (255 * sc) >> 8, swap);
             }
         }
     }
@@ -925,7 +975,8 @@ static void ov_rim_dot(uint16_t *dst, int y0, int nrows, bool swap, const hud_en
         }
         uint16_t *row = dst + (size_t)(y - y0) * HUD_W;
         glass_disc_row(row, y, 0, HUD_W - 1, cx16, cy16, RIM_DOT_R16 + RIM_DOT_PAD16, 0x0000, 255, swap);
-        glass_disc_row(row, y, 0, HUD_W - 1, cx16, cy16, RIM_DOT_R16, RIM_CYAN565, 255, swap);
+        glass_disc_row(row, y, 0, HUD_W - 1, cx16, cy16, RIM_DOT_R16, RIM_CYAN565,
+                       env->rim_a == 0 ? 255 : env->rim_a, swap);
     }
 }
 
@@ -2972,6 +3023,10 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
  *     type). */
 #define JD_AMBER565   0xFD43u        /* (255, 170, 30) */
 #define JD_SUN_R      206
+_Static_assert(JD206_TABLE_R == JD_SUN_R && JD206_TABLE_HW_Q8 == 256 && JD184_TABLE_R == 184 &&
+               JD131_TABLE_R == 131 && JD61_TABLE_R == 61 &&
+               JD184_TABLE_HW_Q8 == 192 && JD131_TABLE_HW_Q8 == 160 && JD61_TABLE_HW_Q8 == 160,
+               "hud_rim_table.inc is stale: run scripts/gen-rim-table.py");
 
 typedef struct {
     int cxp, cyp;                    /* the true centre, px (233, 233) */
@@ -2985,43 +3040,39 @@ typedef struct {
  * more than half a turn. */
 typedef struct { int s0, c0, ex, ey; bool over_half; } wedge_t;
 
-static void ring_row_const(uint16_t *row, int y, int cxp, int cyp, int R, int hw_q8,
-                           uint16_t col, int alpha, bool swap, const wedge_t *wd)
+static void ring_row_tab(uint16_t *row, int y, const ring_tab_t *t,
+                         uint16_t col, int alpha, bool swap, const wedge_t *wd)
 {
-    const int dy2 = 2 * (y - cyp) + 1;
+    const int dy2 = 2 * (y - 233) + 1;
     const int ady = dy2 < 0 ? -dy2 : dy2;
-    const int m = (hw_q8 + 128 + 255) >> 8;             /* whole pixels the ring can reach */
-    int k_lo, k_hi;
-    if (!ring_cols(ady, 2 * (R + m), 2 * (R - m), &k_lo, &k_hi)) {
+    const int j = (ady - 1) >> 1;
+    if (j >= t->rows || t->ent[j].n == 0) {
+        return;                                          /* the row misses the ring */
+    }
+    const uint8_t *cv = t->cov + t->ent[j].off;
+    const int k0 = t->ent[j].k0, n = t->ent[j].n;        /* every column is on the glass: R <= 222 */
+    if (wd == NULL) {
+        uint16_t *pr = row + 233 + k0, *pl = row + 232 - k0;
+        for (int i = 0; i < n; ++i, ++pr, --pl) {
+            const int a0 = (alpha * (cv[i] + 1)) >> 8;
+            *pr = rim_mix(*pr, col, a0, swap);
+            *pl = rim_mix(*pl, col, a0, swap);
+        }
         return;
     }
-    const int r4 = 4 * R * R;
-    const int inv = (32 << 16) / R;
-    for (int k = k_lo; k <= k_hi; ++k) {
-        const int dx2 = 2 * k + 1;
-        const int d = ((dx2 * dx2 + dy2 * dy2 - r4) * inv) >> 16;   /* |n| < 2^13 inside the margin */
-        const int cov = clampi(hw_q8 + 128 - (d < 0 ? -d : d), 0, 256);
-        if (cov == 0) {
-            continue;
-        }
-        const int a0 = (alpha * cov) >> 8;
+    for (int i = 0; i < n; ++i) {
+        const int dx2 = 2 * (k0 + i) + 1;
+        const int a0 = (alpha * (cv[i] + 1)) >> 8;
         for (int side = 0; side < 2; ++side) {
-            const int x = cxp + (side ? k : -1 - k);
-            if (x < 0 || x >= HUD_W) {
-                continue;
-            }
-            int a = a0;
-            if (wd != NULL) {
-                const int sdx2 = side ? dx2 : -dx2;
-                const int px = (int)(((int64_t)sdx2 * wd->c0 + (int64_t)dy2 * wd->s0) >> 15);
-                const int py = (int)((-(int64_t)sdx2 * wd->s0 + (int64_t)dy2 * wd->c0) >> 15);
-                const int cr = (int)(((int64_t)wd->ex * py - (int64_t)wd->ey * px) >> 8);
-                const int lb = clampi(128 - cr, 0, 255);
-                const int la = clampi(128 + px * 128, 0, 255);
-                const int lit = wd->over_half ? (la > lb ? la : lb) : (la < lb ? la : lb);
-                a = (a * lit) >> 8;
-            }
-            row[x] = rim_mix(row[x], col, a, swap);
+            const int x = side ? 233 + k0 + i : 232 - k0 - i;
+            const int sdx2 = side ? dx2 : -dx2;
+            const int px = (int)(((int64_t)sdx2 * wd->c0 + (int64_t)dy2 * wd->s0) >> 15);
+            const int py = (int)((-(int64_t)sdx2 * wd->s0 + (int64_t)dy2 * wd->c0) >> 15);
+            const int cr = (int)(((int64_t)wd->ex * py - (int64_t)wd->ey * px) >> 8);
+            const int lb = clampi(128 - cr, 0, 255);
+            const int la = clampi(128 + px * 128, 0, 255);
+            const int lit = wd->over_half ? (la > lb ? la : lb) : (la < lb ? la : lb);
+            row[x] = rim_mix(row[x], col, (a0 * lit) >> 8, swap);
         }
     }
 }
@@ -3092,8 +3143,8 @@ void hud_overlay_jarvis_dial(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     }
 
     /* the three rings, and the day */
-    static const struct { int r; int hw_q8; uint8_t a; } ring[3] = {
-        { 184, 192, 120 }, { 131, 160, 80 }, { 61, 160, 60 },
+    static const struct { const ring_tab_t *t; uint8_t a; } ring[3] = {
+        { &k_jd184_tab, 120 }, { &k_jd131_tab, 80 }, { &k_jd61_tab, 60 },
     };
     wedge_t wd;
     const bool sun = j->sun && j->sun_sweep_q16 > 0;
@@ -3111,11 +3162,10 @@ void hud_overlay_jarvis_dial(uint16_t *dst, int y0, int nrows, bool swap_bytes,
         }
         uint16_t *row = dst + (size_t)(y - y0) * HUD_W;
         for (int i = 0; i < 3; ++i) {
-            ring_row_const(row, y, 233, 233, ring[i].r, ring[i].hw_q8, JD_AMBER565,
-                           (ring[i].a * A) >> 8, swap_bytes, NULL);
+            ring_row_tab(row, y, ring[i].t, JD_AMBER565, (ring[i].a * A) >> 8, swap_bytes, NULL);
         }
         if (sun) {
-            ring_row_const(row, y, 233, 233, JD_SUN_R, 256, JD_AMBER565, (110 * A) >> 8, swap_bytes, &wd);
+            ring_row_tab(row, y, &k_jd206_tab, JD_AMBER565, (110 * A) >> 8, swap_bytes, &wd);
         }
     }
     if (sun && j->sun_now_q16 >= 0) {

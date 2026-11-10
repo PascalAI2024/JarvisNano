@@ -166,6 +166,7 @@ static int pv_parse(const char *path, pv_step_t **out)
 static int s_batt = 74;
 static bool s_chg = true, s_mute, s_usb = true;
 static jr_display_rest_mode_t s_pv_rest = JR_DISPLAY_REST_NONE;
+static bool s_pv_peek;                  /* `set peek on`: the clock peek of a non-WATCH screen */
 static int s_pv_hh = 10, s_pv_mm = 8;   /* the clock the script shows; `set time HH MM` */
 static bool s_pv_night;                 /* `set night on|off`: the rest face's night flag */
 static int64_t s_frame;     /* frames played since the first scene, recorded or not */
@@ -288,7 +289,7 @@ static void pv_frame(int64_t t_us, bool record, uint16_t *fb)
     jr_display_sun_set(6 * 60 + 30, 18 * 60 + 40);       /* a November day */
     jr_display_clock_set_date(2, 10, 10);                 /* TUE 10 */
     const bool watch = jr_display_nav_space() == JR_DISPLAY_SPACE_WATCH;
-    if (watch || s_pv_rest != JR_DISPLAY_REST_NONE) jr_display_clock_set(true, s_pv_hh, s_pv_mm, (int)((ms / 1000) % 60));
+    if (watch || s_pv_peek || s_pv_rest != JR_DISPLAY_REST_NONE) jr_display_clock_set(true, s_pv_hh, s_pv_mm, (int)((ms / 1000) % 60));
     else jr_display_clock_set(false, 0, 0, 0);
 #ifdef PV_COST
     if (record) CALLGRIND_ZERO_STATS;
@@ -389,6 +390,7 @@ static void pv_scene(const char *name)
     s_chg = sc->charging;
     s_mute = sc->muted;
     s_pv_rest = JR_DISPLAY_REST_NONE;
+    s_pv_peek = false;
     s_usb = true;
     jr_display_rest_set(JR_DISPLAY_REST_NONE, true, false);
     pv_env();
@@ -487,6 +489,7 @@ int main(int argc, char **argv)
                           : !strcmp(v, "dream") ? JR_DISPLAY_REST_DREAM : JR_DISPLAY_REST_NONE;
                 jr_display_rest_set(s_pv_rest, s_usb, s_pv_night);
             }
+            else if (!strcmp(k, "peek")) { s_pv_peek = !strcmp(v, "on"); }
             else if (!strcmp(k, "night")) {
                 s_pv_night = !strcmp(v, "on");
                 jr_display_rest_set(s_pv_rest, s_usb, s_pv_night);

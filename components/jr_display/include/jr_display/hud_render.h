@@ -152,6 +152,10 @@ typedef struct {
 #define HUD_RIM_DOT  1
 #define HUD_RIM_NONE 2
     uint8_t rim;
+    /* How strongly the rim is drawn, 0..255; 0 (the zero-initialised default) is
+     * full strength. A rest face is dim, and the ring round it is as dim as its
+     * digits: the caller passes the digits' strength here. */
+    uint8_t rim_a;
 } hud_env_t;
 
 /* The whole HUD for one strip: battery rim + privacy state + the face element,

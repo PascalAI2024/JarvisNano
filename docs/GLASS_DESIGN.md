@@ -1564,74 +1564,98 @@ for the device to say.
 
 ## A dial owns the glass, 2026-11-10
 
-On WATCH the dial is the screen. Eight defects came from the shell's furniture
-behaving as if it owned the glass the dial was drawn on, and they are fixed by
-one rule, one face and one dial.
+On WATCH the dial is the screen. The shell's furniture used to behave as if it
+owned the glass the dial was drawn on, and three rounds of work fixed that with
+one ring, one dot, one rest face and one dial.
 
-**The shell-furniture rule on WATCH.** The rim (battery arc, charging comet,
-gold mute ring) is not drawn on WATCH when nothing is happening
-(`watch_rim_hidden`). "Nothing is happening" is exactly: the microphone is
-muted, no shade or detail sheet is up, no question or commit ring, no agent or
-operator-lease rim, and no firmware update. A live microphone keeps the rim (it
-is the privacy tell); every one of the other conditions brings it back at once,
-and every other screen keeps its rim always. So a muted device on its charger
-shows the dial and nothing else, and the gold ring is not the one thing seen on
-it. The same function gates the rest face. `test_watch_dial_owns_the_glass_no_idle_rim`
-pins each case, with a mutation per condition.
+**One ring.** The rim is a single hairline ring at r218 about the true centre of
+the panel, anti-aliased: 2 px of line and a 1 px ramp either side. It used to be
+a battery arc, a charging comet and a separate privacy ring a few pixels apart,
+which over a dial's art read as a layer that had slipped. The ring's colour is the
+privacy colour (gold while the microphone is muted, cyan while it is live, red
+under 20 % and not charging). The battery is its lit part, clockwise from 12
+o'clock at full strength; the rest of the ring stays at about a fifth, so the
+level reads as the lit part of one line. While charging a bright tail travels
+through the lit part and ends in a white head, on the same radius. The choice
+arcs keep r223 and outward.
 
-The rim is drawn with the glass primitives now: the battery arc is a round-capped
-`glass_arc_row` (r215.5-217.5, alpha 200), the comet seven tapering ring
-segments and a head disc, the privacy ring a 1.25 px hairline at r219.5, the
-ERROR ring a glass ring. Every edge is anti-aliased (the old 2 px stamps were
-hard dots). The privacy ring and the choice arcs keep their lanes: the rim's
-spill stops short of r221.3, where the arcs begin.
+**What the rim shows on WATCH** (`watch_rim_mode`). Muted and quiet: nothing.
+Live and quiet: one cyan dot, 3 px in radius, on the ring's radius at 12 o'clock
+on a slightly larger black disc, and nothing else. Quiet means no voice session
+(capture, think, speak), no error, no sheet or shade, no question or commit
+ring, no agent or operator-lease rim and no firmware update. Any one of those
+brings the whole ring back at once, and every other screen keeps the ring always.
+`test_watch_dial_owns_the_glass_no_idle_rim` pins each case, with a mutation per
+condition.
 
-**The sun arc** (r204-208) is the JARVIS dial's only. It ran across PILOT's tick
-track, FUTURE's rings and MINIMAL's minute ticks; the JARVIS dial leaves that
-band free on purpose.
+**A dial at rest by day** keeps its dial: a glance, or the nightstand while it is
+not night, with a time to show. It is drawn without its seconds hand and redrawn
+on the minute, and it is not warmed or cached for the seconds. At night, in DREAM,
+with no time, and on every screen but WATCH the glass-font rest face is shown.
 
-**The JARVIS dial.** The JARVIS style had hands over black. It now has an
-instrument in the home screen's language, drawn by `hud_overlay_jarvis_dial`
-before the sun band and the hands: sixty amber ticks (hour ticks r186-201,
-fives, minutes shorter and dimmer, anti-aliased polygons), four cyan beads at
-r182 on the quarters, and three hairline rings at r184, r131 and r61. It is
-there awake and at rest, with and without a sun.
+**The rest face.** One face for every rest mode and for whichever of JARVIS or
+WATCH was shown, in the glass type: the time in the HERO digits in warm amber,
+about half strength by day and a quarter at night and in DREAM, and under it at
+most one quiet line (`74%  CHARGING`, or the next item, or nothing) at two
+thirds of that. It is a pure function of the clock word, the companion view and
+the strip, so the pixels are the same however the device got there
+(`test_rest_face_is_one_face`). The ring round a rest face is drawn at the same
+strength as its digits (`hud_env_t.rim_a`), so it is never the brightest thing on
+a bedside face; the privacy dot is dimmed the same way. A style change made at
+rest shows the new dial only once the device is awake again.
 
-**The rest face.** One face for every rest mode (nightstand, glance, dream) and
-for whichever of JARVIS or WATCH was shown, in the glass type: the time in the
-HERO digits, centred, and under it at most one quiet line in the label face
-(`74%  CHARGING`, or the next item, or nothing). It was the 5x7 bitmap, with
-`BAT n%` and `CHARGING` on lines of their own. The rule: the rest face is a pure
-function of the clock word, the companion view and the strip, so the pixels are
-the same however the device got there (`test_rest_face_is_one_face` compares
-four routes). The ink stays the dim grey; the mood ladder dims the panel itself.
-At rest the dial is not shown at all, so a style change made at rest shows the
-new dial only once the device is awake again: a swipe is an input, and an input
-clears rest.
+**The JARVIS dial** (`hud_overlay_jarvis_dial`) is an instrument in the home
+screen's language: sixty amber ticks (hour ticks r186-201, fives, minutes
+shorter and dimmer), four cyan beads at r182 on the quarters, hairline rings at
+r184, r131 and r61, a thin amber arc at r206 from sunrise to sunset with one
+bright bead where the sun is now (none at night), tapered anti-aliased hands (cyan
+hour, white minute, a gold seconds hand only when awake), a hub, and the date
+under the centre in the glass type. It is the JARVIS watch style on the WATCH
+screen and nothing else.
 
-**Smaller fixes.** The shade's mute button is an opaque black disc under its
-tint, so the face no longer shows through the button. FUTURE's weather line is
-one whole short word from a fixed vocabulary (CLEAR, CLOUDY, RAIN, SNOW, FOG,
-STORM) or the temperature alone, never cut and never ending in a stop
-(`watch_wx_word`; the WEATHER screen keeps `wx_cond_fit`). DIVER's date is set
-in the glass digits, centred in its window.
+**The home peek stays hands only.** Any other screen that shows the time for a
+few seconds shows the three hands and the hub over the face, as it always did;
+none of the dial furniture is drawn there (`test_home_peek_is_hands_only` demands
+the peek equal `hud_overlay_clock` pixel for pixel).
+
+**Smaller fixes.** The sun arc is the JARVIS dial's only: it ran across PILOT's
+tick track, FUTURE's rings and MINIMAL's minute ticks. The shade's mute button is
+an opaque black disc under its tint, so the face no longer shows through it.
+FUTURE's weather line is one whole short word from a fixed vocabulary (CLEAR,
+CLOUDY, RAIN, SNOW, FOG, STORM) or the temperature alone (`watch_wx_word`; the
+WEATHER screen keeps `wx_cond_fit`). DIVER's date is set in the glass digits,
+centred in its window.
+
+**The ring and the dial's rings are tables.** A ring of one radius and one width
+needs no coverage worked out per frame. `scripts/gen-rim-table.py` prints, for
+the rim and for the JARVIS rings (r184, r131, r61 and the day's arc at r206), the
+columns each row crosses and the coverage of each, into
+`components/jr_display/src/hud_rim_table.inc` (about 6.5 KB of flash). Painting a
+ring is a load and a blend per pixel; the lit part and the dim remainder are the
+same coverage at two strengths, and the comet's tail is worked out only within
+reach of its head. Change a radius or a width in `hud_render.c` and run the
+script; a static assert and `test_rim_table_matches_the_formula` fail if the table
+is stale. The output is pixel for pixel what the per-pixel loop drew, so no frame
+hash moved for it.
 
 **Cost.** Whole-frame callgrind instructions, the probe's `frame` scenes at
-clk=100000, `-O2`, no vectorising, counted without the row wrappers, with the
-stand-in face fill (162.6 M in every row) taken out. The rim and the JARVIS dial
-cost more than the code they replaced, and that is the price of anti-aliased
-edges; nothing was cut to hide it.
+clk=100000, `-O2`, no vectorising. The 162.6 M stand-in face fill is in every
+row, so only the differences mean anything. Millions of instructions; they are
+host instructions, and whether a frame still holds 24 fps on the S3 is for the
+device to say.
 
-| scene          | before | after | change |
-| -------------- | ------ | ----- | ------ |
-| home           |   9.4  | 20.2  | +10.8  |
-| watch-jarvis   |   9.4  | 21.2  | +11.8  |
-| watch-diver    |  14.2  | 18.7  |  +4.5  |
-| watch-pilot    |  16.4  | 19.9  |  +3.5  |
-| watch-future   |  15.0  | 18.5  |  +3.5  |
-| watch-skeleton |  19.9  | 24.3  |  +4.4  |
-| weather        |  13.4  | 19.0  |  +5.6  |
-| shade          |  15.8  | 20.9  |  +5.1  |
+| scene          | bd16ee2 | round 2 | round 3 | change vs bd16ee2 |
+| -------------- | ------- | ------- | ------- | ----------------- |
+| home           | 172.06  | 178.84  | 172.95  | +0.89             |
+| status-74      | 178.71  | 180.04  | 179.60  | +0.89             |
+| weather        | 176.01  | 177.34  | 176.90  | +0.89             |
+| shade          | 178.44  | 180.45  | 180.01  | +1.57             |
+| watch-jarvis   | 172.07  | 177.67  | 175.94  | +3.87             |
+| watch-diver    | 176.83  | 176.78  | 176.78  | -0.05             |
+| watch-pilot    | 179.06  | 178.04  | 178.05  | -1.01             |
+| watch-future   | 177.64  | 176.62  | 176.62  | -1.02             |
+| watch-skeleton | 182.52  | 182.46  | 182.47  | -0.05             |
 
-Millions of instructions per frame. They are host instructions: whether a frame
-still holds 24 fps on the S3 is for the device to say.
+The rim still costs about 0.9 M more than the old two-pixel dots, almost all of it
+the blend of its roughly four thousand painted pixels; the shade's other 0.7 M is
+its opaque mute-button disc. Nothing was cut to hide it.

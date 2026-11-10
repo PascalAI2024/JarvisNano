@@ -4598,6 +4598,21 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     split_mark(JR_DISPLAY_SPLIT_CLOCK_CLEAR, &sm);
     const uint32_t w = s_clock_shown_word;
     const int strength = e > 255 ? 255 : e;
+    /* THE PEEK IS HANDS ONLY. The dial furniture (ticks, rings, the day's arc,
+     * the date) belongs to the JARVIS watch style on the WATCH screen; any other
+     * screen that shows the time for a few seconds shows the three hands and the
+     * hub, as it always did. */
+    const bool on_watch =
+        (jr_display_space_t)(__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) & NAV_SPACE_MASK) ==
+            JR_DISPLAY_SPACE_WATCH ||
+        (s_space_from == (uint8_t)JR_DISPLAY_SPACE_WATCH && s_space_prog < 256);
+    if (style == (int)JR_WATCH_JARVIS && !on_watch) {
+        hud_overlay_clock(pixels, y1, y2 - y1, ctx->board.swap_color_bytes,
+                          (int)((w >> 8) & 0xFFu), (int)(w & 0xFFu),
+                          (int)((w >> 17) & 0x3Fu), strength);
+        split_mark(JR_DISPLAY_SPLIT_CLOCK_FACE, &sm);
+        return;
+    }
     if (style == (int)JR_WATCH_JARVIS) {
         /* its own instrument: ticks, rings, the day's arc and the hands (one
          * call: the hands are part of the dial), then the date under the centre */
@@ -6996,7 +7011,9 @@ static uint8_t watch_rim_mode(const jr_display_ctx_t *ctx, uint32_t env_word)
     return (env_word & (1u << 9)) != 0U ? HUD_RIM_NONE : HUD_RIM_DOT;
 }
 
-static void apply_rest_rims(jr_display_ctx_t *ctx, int y1, int y2, uint16_t *pixels)
+/* `alpha` is the strength of the rest face's digits: the ring round a rest face is drawn at the
+ * same strength, never brighter than the time it frames. */
+static void apply_rest_rims(jr_display_ctx_t *ctx, int y1, int y2, uint16_t *pixels, int alpha)
 {
     memset(pixels, 0, (size_t)(y2 - y1) * HUD_W * sizeof *pixels);
     const uint32_t word = __atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE);
@@ -7006,6 +7023,7 @@ static void apply_rest_rims(jr_display_ctx_t *ctx, int y1, int y2, uint16_t *pix
         .charging = (word & (1u << 8)) != 0U,
         .privacy_muted = (word & (1u << 9)) != 0U,
         .rim = watch_rim_mode(ctx, word),
+        .rim_a = (uint8_t)alpha,
     };
     hud_overlay_frame(pixels, y1, y2 - y1, 0U, ctx->board.swap_color_bytes, &env);
 }
@@ -7060,7 +7078,7 @@ static bool rest_face_rows(const jr_display_ctx_t *ctx, int y1, int y2, uint16_t
 static void apply_dream_overlay(jr_display_ctx_t *ctx, int y1, int y2,
                                  uint16_t *pixels)
 {
-    apply_rest_rims(ctx, y1, y2, pixels);
+    apply_rest_rims(ctx, y1, y2, pixels, REST_ALPHA_NIGHT);
     char text[6];
     dream_clock_text(text, __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE));
     (void)rest_face_rows(ctx, y1, y2, pixels, text, "", REST_ALPHA_NIGHT);
@@ -7070,9 +7088,9 @@ static bool apply_companion_overlay(jr_display_ctx_t *ctx, int y1, int y2,
                                     uint16_t *pixels, jr_display_rest_mode_t mode)
 {
     /* Same authoritative normal-colour rims as DREAM; fixed charge phase. */
-    apply_rest_rims(ctx, y1, y2, pixels);
     jr_companion_view_t view;
     companion_view(mode, &view);
+    apply_rest_rims(ctx, y1, y2, pixels, view.night ? REST_ALPHA_NIGHT : REST_ALPHA_DAY);
     /* The one quiet line: the next item when a glance has one, else the
      * battery and what the charger is doing. */
     char line[JR_COMPANION_ITEM_CHARS + 16];

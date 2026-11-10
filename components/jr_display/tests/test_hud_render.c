@@ -501,6 +501,95 @@ static void test_rim_is_one_ring_with_the_gauge_as_its_lit_part(void)
     free(a);
 }
 
+/* THE RIM'S TABLE AGAINST THE FORMULA. The ring's columns and coverage are printed once
+ * (scripts/gen-rim-table.py) for one radius and one width. This works every pixel out from the
+ * formula, as the loop the table replaced did, and demands the same pixel: a full lit ring on
+ * black, every pixel of the band. A changed radius or width, or a table that is stale, fails here. */
+static void test_rim_table_matches_the_formula(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *a = calloc(px, sizeof *a);
+    if (!a) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
+    const hud_env_t env = { .face = HUD_FACE_IDLE, .batt_pct = 100, .charging = false, .privacy_muted = false };
+    hud_overlay_frame(a, 0, HUD_H, 0U, false, &env);
+    const int R = 218, hw = 256, a_lit = 46 + (((230 - 46) * 255) >> 8), inv = (32 << 16) / R;   /* the lit weight of a full turn */
+    const uint32_t cyan = 0x073Fu;
+    size_t bad = 0, ink = 0;
+    for (int y = 0; y < HUD_H; ++y) for (int x = 0; x < HUD_W; ++x) {
+        const int dx2 = 2 * x + 1 - 466, dy2 = 2 * y + 1 - 466;
+        const int r2 = dx2 * dx2 + dy2 * dy2;
+        uint16_t want = 0;
+        if (r2 > (2 * R - 3) * (2 * R - 3) && r2 < (2 * R + 3) * (2 * R + 3)) {
+            const int dist = ((dx2 * dx2 + dy2 * dy2 - 4 * R * R) * inv) >> 16;
+            int cov = hw + 128 - (dist < 0 ? -dist : dist);
+            cov = cov < 0 ? 0 : cov > 256 ? 256 : cov;
+            if (cov > 0) {
+                const uint32_t al = (uint32_t)((a_lit * cov) >> 8), wo = (al + 2) >> 2, wu = 64u - wo;
+                const uint32_t rb = ((0u * wu) + (cyan & 0xF81Fu) * wo + 0x10020u) >> 6;
+                const uint32_t g = ((0u * wu) + (cyan & 0x07E0u) * wo + (32u << 5)) >> 6;
+                want = (uint16_t)((rb & 0xF81Fu) | (g & 0x07E0u));
+            }
+        }
+        if (a[(size_t)y * HUD_W + x] != want) bad++;
+        if (want) ink++;
+    }
+    CHECK(ink > 3500 && bad == 0, "the rim is the formula's pixels (%zu inked, %zu differ)", ink, bad);
+    free(a);
+}
+
+/* `rim_a` is the strength of the whole rim: 0 is full, and a rest face passes the strength of its
+ * digits. Half strength paints the same pixels at about half the level, on the ring and on the dot. */
+static void test_rim_strength_scales_the_whole_rim(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *a = calloc(px, sizeof *a), *b = calloc(px, sizeof *b);
+    if (!a || !b) { printf("FAIL %s: alloc\n", __func__); g_failures++; free(a); free(b); return; }
+    for (int rim = HUD_RIM_RING; rim <= HUD_RIM_DOT; ++rim) {
+        hud_env_t env = { .face = HUD_FACE_IDLE, .batt_pct = 100, .rim = (uint8_t)rim };
+        memset(a, 0, px * sizeof *a); memset(b, 0, px * sizeof *b);
+        hud_overlay_frame(a, 0, HUD_H, 0U, false, &env);
+        env.rim_a = 0;
+        hud_overlay_frame(b, 0, HUD_H, 0U, false, &env);
+        CHECK(memcmp(a, b, px * sizeof *a) == 0, "rim_a 0 is full strength (rim %d)", rim);
+        env.rim_a = 128;
+        memset(b, 0, px * sizeof *b);
+        hud_overlay_frame(b, 0, HUD_H, 0U, false, &env);
+        unsigned full = 0, half = 0;
+        for (size_t i = 0; i < px; ++i) {
+            if (((a[i] >> 5) & 63) > full) full = (a[i] >> 5) & 63;
+            if (((b[i] >> 5) & 63) > half) half = (b[i] >> 5) & 63;
+        }
+        CHECK(full > 40 && half * 2 >= full - 8 && half * 2 <= full + 8,
+              "rim_a 128 draws about half the level (rim %d: %u against %u)", rim, half, full);
+    }
+    free(a); free(b);
+}
+
+/* The JARVIS hands taper: the hour hand is thicker at the hub than at its tip. With the hand at
+ * 3 o'clock the thickness is the cyan ink in one column, in whole pixels of coverage, read where
+ * no ring crosses it (r30 and r100). */
+static double hour_hand_thickness(const uint16_t *fb, int x)
+{
+    double sum = 0.0;
+    for (int y = 200; y <= 266; ++y) {
+        const uint16_t v = fb[(size_t)y * HUD_W + x];
+        if (((v >> 11) & 31) < 8 && (v & 31) >= 8) sum += (double)((v >> 5) & 63) / 57.0;   /* cyan: 0, 229, 255 */
+    }
+    return sum;
+}
+
+static void test_jarvis_hour_hand_tapers(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = calloc(px, sizeof *fb);
+    if (!fb) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
+    const hud_jarvis_t j = { .hh = 3, .mm = 0, .ss = 0, .seconds = false, .sun_now_q16 = -1 };
+    hud_overlay_jarvis_dial(fb, 0, HUD_H, false, 255, &j);
+    const double base = hour_hand_thickness(fb, 233 + 30), tip = hour_hand_thickness(fb, 233 + 100);
+    CHECK(tip > 0.8 && base > tip * 1.3, "the hour hand tapers (%.2f px at the hub, %.2f px at the tip)", base, tip);
+    free(fb);
+}
+
 /* A USB-powered puck with no cell must show NO gauge — a full-looking or
  * empty-looking battery arc would both be lies. */
 static void test_overlay_hides_absent_battery(void)
@@ -2975,6 +3064,9 @@ int main(void)
     test_privacy_ring_is_persistent_and_bounded();
     test_privacy_dot_is_one_still_dot();
     test_rim_is_one_ring_with_the_gauge_as_its_lit_part();
+    test_rim_table_matches_the_formula();
+    test_rim_strength_scales_the_whole_rim();
+    test_jarvis_hour_hand_tapers();
     test_tilt_offset_is_disabled();
     test_choices_strip_invariance();
     test_choices_strength_gate();

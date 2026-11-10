@@ -3868,7 +3868,8 @@ static void test_dream_glass_is_black_clock_and_intact_rims(void)
         apply_hud_overlay(&s_display, 0, y, HUD_W, end, strips + (size_t)y * HUD_W);
     }
     CHECK(memcmp(whole, strips, n * sizeof *whole) == 0, "minute clock is strip invariant");
-    const hud_env_t env = { .face = HUD_FACE_IDLE, .batt_pct = 74U, .privacy_muted = true };
+    const hud_env_t env = { .face = HUD_FACE_IDLE, .batt_pct = 74U, .privacy_muted = true,
+                          .rim_a = REST_ALPHA_NIGHT };      /* DREAM: the ring at the digits' strength */
     hud_overlay_frame(rim, 0, HUD_H, 0U, false, &env);
     size_t unexpected = 0U, rim_pixels = 0U, black = 0U, clock_pixels = 0U;
     for (int y = 0; y < HUD_H; ++y) {
@@ -5515,6 +5516,109 @@ static void test_rest_face_is_one_face(void)
     free(got);
 }
 
+/* ---- THE PEEK IS HANDS ONLY, AND THE RING AT REST IS AS DIM AS ITS TIME (2026-11-10, round 3) ---- */
+
+static int ink_peak(uint16_t v, bool swap)
+{
+    if (swap) v = (uint16_t)((v >> 8) | (v << 8));
+    const int r = ((v >> 11) & 31) << 3, g = ((v >> 5) & 63) << 2, b = (v & 31) << 3;
+    return r > g ? (r > b ? r : b) : (g > b ? g : b);
+}
+
+/* Any screen but WATCH that shows the time for a few seconds shows the three hands and the hub and
+ * nothing else: the ticks, rings, the day's arc and the date are the JARVIS watch style's, on WATCH.
+ * The peek is hud_overlay_clock pixel for pixel; on WATCH the same style draws a dial. */
+static void test_home_peek_is_hands_only(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb), *ref = malloc(px * sizeof *ref);
+    if (!fb || !ref) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; free(fb); free(ref); return; }
+    size_t furniture_on_watch = 0;
+    for (int on_watch = 0; on_watch < 2; ++on_watch) {
+        stage_ring_at_rest(on_watch ? JR_DISPLAY_SPACE_WATCH : JR_DISPLAY_SPACE_JARVIS, JR_DISPLAY_OTA_IDLE, 0);
+        s_style_shown = s_style_seen = s_style_from = (uint8_t)JR_WATCH_JARVIS;
+        s_style_prog = 256;
+        s_space_prog = s_space_ease = 256;
+        s_dial_blit = false;
+        jr_display_clock_set(true, 10, 8, 30);
+        s_clock_shown_word = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
+        s_clock_ease = 256;
+        s_watch_s = 256;
+        sp_compose();
+        memset(fb, 0, px * sizeof *fb);
+        memset(ref, 0, px * sizeof *ref);
+        for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+            const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+            apply_clock_overlay(&s_display, y, y2, fb + (size_t)y * HUD_W);
+        }
+        hud_overlay_clock(ref, 0, HUD_H, s_display.board.swap_color_bytes, 10, 8, 30, 255);
+        size_t differ = 0;
+        for (size_t i = 0; i < px; ++i) if (fb[i] != ref[i]) differ++;
+        if (!on_watch) {
+            CHECK(differ == 0, "the home peek is the hands and the hub and nothing else (%zu px differ)", differ);
+        } else {
+            furniture_on_watch = differ;
+        }
+    }
+    CHECK(furniture_on_watch > 2000, "the same style on WATCH draws its dial (%zu px beyond the hands)", furniture_on_watch);
+    reset_nav();
+    free(fb);
+    free(ref);
+}
+
+/* A rest face is dim; the ring round it is drawn at the strength of its digits, so it is never
+ * the brightest thing on a bedside face. Day and night, on home, in a glance and in DREAM. */
+static void test_rest_ring_is_as_dim_as_its_time(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb);
+    if (!fb) { printf("FAIL %s: allocation failed\n", __func__); g_failures++; return; }
+    const bool swap = s_display.board.swap_color_bytes;
+    for (int night = 0; night < 2; ++night) {
+        for (int dream = 0; dream < 2; ++dream) {
+            dream_fixture();
+            s_power_word |= 1u << 24;
+            stage_ring_at_rest(JR_DISPLAY_SPACE_JARVIS, JR_DISPLAY_OTA_IDLE, 0);
+            jr_display_rest_set(dream ? JR_DISPLAY_REST_DREAM : JR_DISPLAY_REST_NIGHTSTAND, true, night != 0);
+            jr_display_clock_set(true, 6, 42, 0);
+            jr_display_set_hud_env(74, false, false, 0, 0);       /* live microphone: a cyan ring */
+            if (dream) s_power_word &= ~(1u << 24);
+            memset(fb, 0, px * sizeof *fb);
+            for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+                const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+                if (dream) apply_dream_overlay(&s_display, y, y2, fb + (size_t)y * HUD_W);
+                else (void)apply_companion_overlay(&s_display, y, y2, fb + (size_t)y * HUD_W,
+                                                   JR_DISPLAY_REST_NIGHTSTAND);
+            }
+            int ring = 0, digits = 0, line = 0;
+            size_t ring_px = 0;
+            for (int y = 0; y < HUD_H; ++y) for (int x = 0; x < HUD_W; ++x) {
+                const int dx = x - 232, dy = y - 232;
+                const int p = ink_peak(fb[(size_t)y * HUD_W + x], swap);
+                if (dx * dx + dy * dy >= 213 * 213) { if (p > ring) ring = p; if (p > 0) ring_px++; }
+                else if (dx * dx + dy * dy < 150 * 150) {
+                    if (y >= 187 && y < 247 && p > digits) digits = p;
+                    if (y >= 288 && y < 304 && p > line) line = p;
+                }
+            }
+            /* the ink: warm amber at half strength by day, a quarter at night and in DREAM, the
+             * quiet line at two thirds of the digits */
+            const bool dim = night != 0 || dream != 0;
+            CHECK(dim ? (digits >= 58 && digits <= 70) : (digits >= 120 && digits <= 136),
+                  "rest (night %d dream %d): the time's strength is %d", night, dream, digits);
+            if (line > 0) {
+                CHECK(line * 100 >= digits * 55 && line * 100 <= digits * 70,
+                      "rest (night %d dream %d): the line (%d) is two thirds of the time (%d)", night, dream, line, digits);
+            }
+            CHECK(ring_px > 1000, "rest (night %d dream %d): the ring is drawn (%zu px)", night, dream, ring_px);
+            CHECK(digits > 0 && ring <= digits, "rest (night %d dream %d): the ring (%d) is no brighter than the time (%d)",
+                  night, dream, ring, digits);
+        }
+    }
+    reset_nav();
+    free(fb);
+}
+
 /* ---- A WATCH AT REST BY DAY KEEPS ITS DIAL (2026-11-10, round 2) --------------------------- */
 
 static void stage_rest_on_watch(int space, jr_display_rest_mode_t mode, bool night, bool time_valid)
@@ -5642,6 +5746,19 @@ static void test_resting_dial_has_no_seconds_hand(void)
         for (size_t k = 0; k < px; ++k) moved += a[k] != b[k];
         CHECK(moved > 30, "%s awake: the seconds hand moves (%zu px)",
               jr_display_watch_style_name((jr_watch_style_t)dials[i].style), moved);
+        /* a resting dial shows no seconds hand at all, not one parked at 12: it differs from the
+         * same minute awake at :00, where the hand points up */
+        s_watch_still = true;
+        render_watch_frame_at(a, dials[i].style, dials[i].face, 10, 8, 3);
+        s_watch_still = false;
+        render_watch_frame_at(b, dials[i].style, dials[i].face, 10, 8, 0);
+        moved = 0;
+        for (size_t k = 0; k < px; ++k) moved += a[k] != b[k];
+        /* (DRESS's and MINIMAL's hand lies under their own markings at :00: no ink to tell apart) */
+        if (dials[i].style != JR_WATCH_DRESS && dials[i].style != JR_WATCH_MINIMAL) {
+            CHECK(moved > 30, "%s at rest draws no seconds hand (%zu px differ from awake at :00)",
+                  jr_display_watch_style_name((jr_watch_style_t)dials[i].style), moved);
+        }
     }
     s_watch_still = false;
     s_display.shown_face = JR_FACE_IDLE;
@@ -5769,7 +5886,7 @@ static void test_companion_actual_flush_preserves_rims_and_strip_order(void)
                 const int end = y + 13 < HUD_H ? y + 13 : HUD_H;
                 panel_flush(s_display.disp, 0, y, HUD_W, end, strips + y * HUD_W); complete_test_transfer();
             }
-            apply_rest_rims(&s_display, 0, HUD_H, rims);
+            apply_rest_rims(&s_display, 0, HUD_H, rims, REST_ALPHA_NIGHT);   /* the flush at night: a ring as dim as its time */
             CHECK(memcmp(whole, strips, HUD_W * HUD_H * sizeof *whole) == 0,
                   "companion mode%d swap%d preserves full/strip composition", mode, swap);
             unsigned bad_rim = 0, near_black = 0, clock_ink = 0, item_ink = 0, rim_ink = 0, dial_ink_px = 0;
@@ -7109,6 +7226,8 @@ int main(void)
     test_watch_jarvis_style_has_a_dial();
     test_shade_button_disc_hides_the_face();
     test_rest_face_is_one_face();
+    test_home_peek_is_hands_only();
+    test_rest_ring_is_as_dim_as_its_time();
     test_rest_by_day_on_watch_keeps_the_dial();
     test_resting_dial_is_redrawn_only_when_the_minute_changes();
     test_resting_dial_has_no_seconds_hand();
