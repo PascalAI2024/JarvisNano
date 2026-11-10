@@ -6,9 +6,9 @@ scene watch-celestial
 wait 1500
 tilt 0 0
 wait 500
-tilt orbit 4000 200   # one slow circle, 200 mg across
+tilt orbit 4000 300   # one slow circle, 300 mg across
 wait 4200
-tilt 260 0           # lean right and hold: the dial re-centres
+tilt 380 0           # full lean right and hold: the dial re-centres
 wait 5000
-tilt -260 120
+tilt -380 160
 wait 4000

@@ -2686,129 +2686,163 @@ static void test_tilt_gap_reseeds_and_word_packs(void)
     CHECK(jr_tilt_pack(-1, 1) == 0x0001FFFFu, "tilt word layout drifted: 0x%08x", jr_tilt_pack(-1, 1));
 }
 
-/* Depths come from the index alone; each depth slides by its own pixels. */
-static void test_star_depths_and_shift(void)
+/* The foreground stars: three depths, each sliding by its own travel, drawn
+ * anti-aliased at a 1/16 px position. */
+static void test_fg_depths_travel_and_guards(void)
 {
     int count[3] = { 0, 0, 0 };
-    for (int i = 0; i < HUD_STAR_COUNT; ++i) {
-        const int d = hud_celestial_star_depth(i);
-        CHECK(d >= 0 && d <= 2, "star %d depth %d", i, d);
+    for (int i = 0; i < HUD_FG_COUNT; ++i) {
+        const int d = hud_celestial_fg_depth(i);
+        CHECK(d >= 0 && d <= 2, "fg %d depth %d", i, d);
         if (d < 0 || d > 2) return;
         count[d]++;
-        int dx, dy;
-        hud_celestial_star_shift(i, 0, 0, &dx, &dy);
-        CHECK(dx == 0 && dy == 0, "star %d moves with no lean", i);
+        int x, y;
+        hud_celestial_fg_pos(i, 0, 0, &x, &y);
+        CHECK(x % 16 == 0 && y % 16 == 0, "fg %d rests off a whole pixel", i);
+        const int rx = x / 16 - 233, ry = y / 16 - 233;
+        CHECK(rx * rx + ry * ry > 40 * 40, "fg %d is on the hub", i);
     }
-    CHECK(count[0] >= 8 && count[1] >= 8 && count[2] >= 8, "depths %d/%d/%d are lopsided", count[0], count[1], count[2]);
-    const int px[3] = { 6, 3, 1 };
-    int seen[3] = { 0, 0, 0 };
-    for (int i = 0; i < HUD_STAR_COUNT; ++i) {
-        const int d = hud_celestial_star_depth(i);
-        int dx, dy;
-        hud_celestial_star_shift(i, 256, 0, &dx, &dy);
-        if (dx == 0 && dy == 0) continue;               /* held by the glass or the hub */
-        CHECK(dx == px[d] && dy == 0, "star %d (depth %d) slid %d,%d at full lean, wanted %d,0", i, d, dx, dy, px[d]);
-        seen[d]++;
-        hud_celestial_star_shift(i, -256, 256, &dx, &dy);
-        if (dx != 0 || dy != 0) CHECK(dx == -px[d] && dy == px[d], "star %d (depth %d) at (-,+): %d,%d", i, d, dx, dy);
+    CHECK(count[0] == 4 && count[1] == 5 && count[2] == 5, "depths %d/%d/%d, wanted 4/5/5", count[0], count[1], count[2]);
+    const int travel[3] = { 14, 8, 4 };
+    for (int i = 0; i < HUD_FG_COUNT; ++i) {
+        const int t = travel[hud_celestial_fg_depth(i)];
+        int x0, y0, x1, y1, x2, y2;
+        hud_celestial_fg_pos(i, 0, 0, &x0, &y0);
+        hud_celestial_fg_pos(i, 256, 0, &x1, &y1);
+        CHECK(x1 - x0 == t * 16 && y1 == y0, "fg %d slid %d,%d (1/16 px) at full lean, wanted %d,0", i, x1 - x0, y1 - y0, t * 16);
+        hud_celestial_fg_pos(i, -256, 256, &x2, &y2);
+        CHECK(x2 - x0 == -t * 16 && y2 - y0 == t * 16, "fg %d at (-,+): %d,%d", i, x2 - x0, y2 - y0);
+        hud_celestial_fg_pos(i, 128, 0, &x1, &y1);
+        CHECK(x1 - x0 == t * 8, "fg %d half lean slid %d, wanted %d", i, x1 - x0, t * 8);
     }
-    CHECK(seen[0] >= 6 && seen[1] >= 6 && seen[2] >= 6, "too few stars slide: %d/%d/%d", seen[0], seen[1], seen[2]);
-    /* never outside the glass, never onto the hub, at any lean */
+    /* the guards: at any lean the star stays inside the glass and off the hub */
     int held = 0;
-    for (int i = 0; i < HUD_STAR_COUNT; ++i)
+    for (int i = 0; i < HUD_FG_COUNT; ++i)
         for (int tx = -256; tx <= 256; tx += 32)
             for (int ty = -256; ty <= 256; ty += 32) {
-                int dx, dy;
-                hud_celestial_star_shift(i, tx, ty, &dx, &dy);
-                const int nx = s_stars[i].x + dx - 233, ny = s_stars[i].y + dy - 233;
-                const int r2 = nx * nx + ny * ny;
-                if (dx == 0 && dy == 0) { held++; continue; }
-                CHECK(r2 <= HUD_STAR_GLASS_R * HUD_STAR_GLASS_R && r2 >= HUD_STAR_HUB_R * HUD_STAR_HUB_R,
-                      "star %d left its ring at lean %d,%d", i, tx, ty);
+                int x, y, x0, y0;
+                hud_celestial_fg_pos(i, tx, ty, &x, &y);
+                hud_celestial_fg_pos(i, 0, 0, &x0, &y0);
+                if (x == x0 && y == y0 && (tx || ty)) held++;
+                const double rx = x / 16.0 - 233, ry = y / 16.0 - 233;
+                const double r = rx * rx + ry * ry;
+                CHECK(r <= (double)HUD_FG_GLASS_R * HUD_FG_GLASS_R && r >= (double)HUD_FG_HUB_R * HUD_FG_HUB_R,
+                      "fg %d left its ring at lean %d,%d", i, tx, ty);
             }
-    printf("note: the glass/hub guard holds %d of %d star-lean pairs on this table\n", held, HUD_STAR_COUNT * 17 * 17);
+    printf("note: the foreground guard holds %d of %d star-lean pairs on this table\n", held, HUD_FG_COUNT * 17 * 17);
 }
 
-/* The frame: lean (+max, 0) against 0. The glint at each star moved by its
- * own depth and nothing else in the frame changed. */
-static void test_celestial_tilt_moves_only_the_glints(void)
+/* The luminance (green channel) centroid of a window of a flat-navy frame, in 1/16 px. */
+static void fg_centroid(const uint16_t *f, int cx, int cy, int half, int *x16, int *y16, long *sum)
+{
+    const int base = (0x0841u >> 5) & 63;
+    long sw = 0, sx = 0, sy = 0;
+    for (int y = cy - half; y <= cy + half; ++y)
+        for (int x = cx - half; x <= cx + half; ++x) {
+            const int v = ((f[(size_t)y * HUD_W + x] >> 5) & 63) - base;
+            if (v <= 0) continue;
+            sw += v; sx += (long)v * x; sy += (long)v * y;
+        }
+    *sum = sw;
+    *x16 = sw ? (int)((sx * 16) / sw) : 0;
+    *y16 = sw ? (int)((sy * 16) / sw) : 0;
+}
+
+static void test_fg_is_antialiased_at_sixteenth_pixels(void)
+{
+    const uint16_t navy = 0x0841u;
+    uint16_t *f0 = lo_frame(navy), *f1 = lo_frame(navy), *f2 = lo_frame(navy), *f3 = lo_frame(navy);
+    if (!f0 || !f1 || !f2 || !f3) return;
+    /* near star 0 and a far one; a lean of 10 is 8/16 px for the near star (travel 14 * 10 / 16) */
+    hud_celestial_foreground(f0, 0, HUD_H, false, 0, 0, false, 0, 0);
+    hud_celestial_foreground(f1, 0, HUD_H, false, 0, 0, false, 10, 0);
+    hud_celestial_foreground(f2, 0, HUD_H, false, 0, 0, false, 20, 0);
+    hud_celestial_foreground(f3, 0, HUD_H, false, 0, 0, false, 256, 0);
+    const int nx = 205, ny = 140;                          /* near star 0, rest position */
+    int c0, c0y, c1, c1y, c2, c2y, c3, c3y;
+    long s0, s1, s2, s3;
+    fg_centroid(f0, nx, ny, 10, &c0, &c0y, &s0);
+    fg_centroid(f1, nx, ny, 10, &c1, &c1y, &s1);
+    fg_centroid(f2, nx, ny, 10, &c2, &c2y, &s2);
+    fg_centroid(f3, nx + 14, ny, 10, &c3, &c3y, &s3);
+    CHECK(s0 > 200, "the near star is faint: %ld", s0);
+    CHECK(abs(c0 - nx * 16) <= 3 && abs(c0y - ny * 16) <= 3, "the rest centroid is off the star: %d,%d", c0 - nx * 16, c0y - ny * 16);
+    CHECK(abs((c1 - c0) - 8) <= 4, "a half-pixel lean moved the glow %d/16 px, wanted about 8", c1 - c0);
+    CHECK(abs((c2 - c0) - 17) <= 5, "a one-pixel lean moved the glow %d/16 px, wanted about 17", c2 - c0);
+    CHECK(abs((c3 - c0) - 14 * 16) <= 5, "full lean moved the glow %d/16 px, wanted 224", c3 - c0);
+    CHECK(labs(s1 - s0) * 20 < s0 && labs(s2 - s0) * 20 < s0, "sub-pixel slides changed the star's energy (%ld, %ld, %ld)", s0, s1, s2);
+    /* a half-pixel step is a glide, not a jump: no pixel moves by more than a few steps */
+    int worst = 0, diff = 0;
+    for (size_t k = 0; k < (size_t)HUD_W * HUD_H; ++k) {
+        const int a = (f0[k] >> 5) & 63, b = (f1[k] >> 5) & 63;
+        if (a != b) diff++;
+        if (abs(a - b) > worst) worst = abs(a - b);
+    }
+    CHECK(diff > 40, "a half-pixel lean changed only %d px", diff);
+    CHECK(worst <= 36, "a half-pixel lean moved one pixel by %d of 63", worst);
+    free(f0); free(f1); free(f2); free(f3);
+}
+
+/* Nothing outside the layer's own pixels changes; strips equal the frame; the
+ * layer is in the watch at rest and leans only while alive; other dials ignore it. */
+static void test_fg_changes_only_its_pixels_and_gates(void)
 {
     const size_t px = (size_t)HUD_W * HUD_H;
     const uint16_t navy = 0x0841u;
-    int best_t = 0, best_n = -1;
-    for (int t = 0; t < 5000; t += 100) {               /* a moment with many stars lit */
-        int n = 0;
-        for (int i = 0; i < HUD_STAR_COUNT; ++i) if (hud_celestial_star_level(i, t / 1000, t % 1000) >= 12) n++;
-        if (n > best_n) { best_n = n; best_t = t; }
-    }
-    CHECK(best_n >= 6, "no moment with six lit stars (best %d)", best_n);
-    const int ss = best_t / 1000, ms = best_t % 1000;
-    uint16_t *base = lo_frame(navy), *lean = lo_frame(navy), *want = lo_frame(navy), *zero = lo_frame(navy);
-    if (!base || !lean || !want || !zero) return;
-    hud_celestial_twinkle(base, 0, HUD_H, false, ss, ms);
-    hud_celestial_twinkle_tilt(zero, 0, HUD_H, false, ss, ms, 0, 0);
-    CHECK(memcmp(base, zero, px * sizeof *base) == 0, "tilt (0,0) is not the plain twinkle");
-    CHECK(hud_celestial_twinkle_tilt(lean, 0, HUD_H, false, ss, ms, 256, 0) > 0, "nothing drawn under lean");
-    int moved[3] = { 0, 0, 0 };
-    int sh[HUD_STAR_COUNT], lit[HUD_STAR_COUNT];
-    for (int i = 0; i < HUD_STAR_COUNT; ++i) {
-        lit[i] = hud_celestial_star_level(i, ss, ms) >= 12;
-        int dx, dy;
-        hud_celestial_star_shift(i, 256, 0, &dx, &dy);
-        sh[i] = dx;
-        if (lit[i] && dx) moved[hud_celestial_star_depth(i)]++;
-    }
-    /* expected: each lit star's 5x5 window of the plain frame, moved by its own
-     * shift. Windows must not touch for this to mean anything. */
-    for (int i = 0; i < HUD_STAR_COUNT; ++i) {
-        if (!lit[i]) continue;
-        const int ix = s_stars[i].x, iy = s_stars[i].y;
-        for (int j = i + 1; j < HUD_STAR_COUNT; ++j) {
-            if (!lit[j]) continue;
-            const int jx = s_stars[j].x, jy = s_stars[j].y;
-            CHECK(abs(ix - jx) > 4 || abs(iy - jy) > 4, "plain windows of %d and %d collide", i, j);
-            CHECK(abs(ix + sh[i] - jx - sh[j]) > 4 || abs(iy - jy) > 4, "moved windows of %d and %d collide", i, j);
+    uint16_t *z = lo_frame(navy), *l = lo_frame(navy), *s = lo_frame(navy);
+    if (!z || !l || !s) return;
+    CHECK(hud_celestial_foreground(z, 0, HUD_H, false, 3, 250, true, 0, 0) > 300, "the layer drew almost nothing at rest");
+    const int touched_lean = hud_celestial_foreground(l, 0, HUD_H, false, 3, 250, true, 256, -128);
+    CHECK(touched_lean > 300, "the layer drew almost nothing under lean");
+    int outside = 0;
+    for (int y = 0; y < HUD_H; ++y)
+        for (int x = 0; x < HUD_W; ++x) {
+            if (z[(size_t)y * HUD_W + x] == l[(size_t)y * HUD_W + x] && z[(size_t)y * HUD_W + x] == navy) continue;
+            int near_star = 0;
+            for (int i = 0; i < HUD_FG_COUNT && !near_star; ++i) {
+                int x0, y0, x1, y1;
+                hud_celestial_fg_pos(i, 0, 0, &x0, &y0);
+                hud_celestial_fg_pos(i, 256, -128, &x1, &y1);
+                const int reach = (hud_celestial_fg_depth(i) == 0 ? 128 : hud_celestial_fg_depth(i) == 1 ? 80 : 48) / 16 + 3;
+                if ((abs(x - x0 / 16) <= reach && abs(y - y0 / 16) <= reach) ||
+                    (abs(x - x1 / 16) <= reach && abs(y - y1 / 16) <= reach)) near_star = 1;
+            }
+            if (!near_star) outside++;
         }
-        for (int dy = -2; dy <= 2; ++dy)
-            for (int dx = -2; dx <= 2; ++dx)
-                want[(size_t)(iy + dy) * HUD_W + ix + sh[i] + dx] = base[(size_t)(iy + dy) * HUD_W + ix + dx];
+    CHECK(outside == 0, "%d changed px lie outside every foreground star's reach", outside);
+    for (int y = 0; y < HUD_H; y += 12) {
+        const int n = y + 12 > HUD_H ? HUD_H - y : 12;
+        hud_celestial_foreground(s + (size_t)y * HUD_W, y, n, false, 3, 250, true, 256, -128);
     }
-    size_t bad = 0;
-    for (size_t k = 0; k < px; ++k) if (want[k] != lean[k]) bad++;
-    CHECK(bad == 0, "%zu px differ from the glints moved by their own depth", bad);
-    CHECK(moved[0] >= 1 && moved[1] >= 1 && moved[2] >= 1,
-          "this moment lit near %d / middle %d / far %d moved stars", moved[0], moved[1], moved[2]);
-    uint16_t *strips = lo_frame(navy);
-    if (strips) {
-        for (int y = 0; y < HUD_H; y += 12) {
-            const int n = y + 12 > HUD_H ? HUD_H - y : 12;
-            hud_celestial_twinkle_tilt(strips + (size_t)y * HUD_W, y, n, false, ss, ms, 256, 0);
-        }
-        CHECK(memcmp(strips, lean, px * sizeof *strips) == 0, "strips differ from the whole frame under lean");
-        free(strips);
-    }
-    /* in the watch: a lean moves CELESTIAL, a resting watch and any other dial ignore it */
-    uint16_t *a = lo_frame(navy), *b = lo_frame(navy), *c = lo_frame(navy), *d = lo_frame(navy);
-    if (a && b && c && d) {
-        hud_watch_t w = { .hh = 1, .mm = 0, .ss = ss, .ms = ms, .batt_pct = -1, .dial_baked = true,
+    CHECK(memcmp(s, l, px * sizeof *s) == 0, "strips differ from the whole frame under lean");
+    free(z); free(l); free(s);
+
+    uint16_t *a = lo_frame(navy), *b = lo_frame(navy), *c = lo_frame(navy), *d = lo_frame(navy), *e = lo_frame(navy);
+    if (a && b && c && d && e) {
+        hud_watch_t w = { .hh = 1, .mm = 0, .ss = 3, .ms = 250, .batt_pct = -1, .dial_baked = true,
                           .shadow = true, .alive = true };
         hud_overlay_watch(a, 0, HUD_H, false, &w, 255, 7);
         w.tilt_x = 256;
         hud_overlay_watch(b, 0, HUD_H, false, &w, 255, 7);
         CHECK(memcmp(a, b, px * sizeof *a) != 0, "a lean did not move CELESTIAL");
-        w.alive = false;
+        w.alive = false; w.tilt_x = 256;
         hud_overlay_watch(c, 0, HUD_H, false, &w, 255, 7);
         w.tilt_x = 0;
         hud_overlay_watch(d, 0, HUD_H, false, &w, 255, 7);
         CHECK(memcmp(c, d, px * sizeof *c) == 0, "a resting CELESTIAL leaned");
-        w.alive = true; w.tilt_x = 256;
-        hud_overlay_watch(c, 0, HUD_H, false, &w, 255, 6);
-        w.tilt_x = 0;
-        hud_overlay_watch(d, 0, HUD_H, false, &w, 255, 6);
-        CHECK(memcmp(c, d, px * sizeof *c) == 0, "a lean moved a dial that is not CELESTIAL");
+        CHECK(((d[(size_t)140 * HUD_W + 205] >> 11) & 31) > ((navy >> 11) & 31) + 8,
+              "CELESTIAL at rest shows no foreground star at its table position");
+        uint16_t *o1 = lo_frame(navy), *o2 = lo_frame(navy);
+        if (o1 && o2) {
+            w.alive = true; w.tilt_x = 256;
+            hud_overlay_watch(o1, 0, HUD_H, false, &w, 255, 6);
+            w.tilt_x = 0;
+            hud_overlay_watch(o2, 0, HUD_H, false, &w, 255, 6);
+            CHECK(memcmp(o1, o2, px * sizeof *o1) == 0, "a lean moved a dial that is not CELESTIAL");
+        }
+        free(o1); free(o2);
     }
-    free(a); free(b); free(c); free(d);
-    free(base); free(lean); free(want); free(zero);
+    free(a); free(b); free(c); free(d); free(e);
 }
 
 int main(void)
@@ -2881,8 +2915,9 @@ int main(void)
     test_tilt_clamp_holds();
     test_tilt_no_drift_in_ten_minutes();
     test_tilt_gap_reseeds_and_word_packs();
-    test_star_depths_and_shift();
-    test_celestial_tilt_moves_only_the_glints();
+    test_fg_depths_travel_and_guards();
+    test_fg_is_antialiased_at_sixteenth_pixels();
+    test_fg_changes_only_its_pixels_and_gates();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);
