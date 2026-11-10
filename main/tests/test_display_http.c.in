@@ -11,6 +11,8 @@ static unsigned errors, sent;
 static char response[2048], type[32], cache[32];
 static esp_err_t read_result;
 esp_err_t jr_display_get_diag(jr_display_diag_t *d) { *d=cached; return read_result; }
+jr_display_space_t jr_display_nav_space(void) { return JR_DISPLAY_SPACE_STATUS; }
+jr_display_overlay_t jr_display_nav_overlay(void) { return JR_DISPLAY_OVERLAY_SHADE; }
 const char *esp_err_to_name(esp_err_t e) { return e==ESP_OK ? "ESP_OK" : "ESP_FAIL"; }
 static esp_err_t httpd_resp_send_err(httpd_req_t *r,int e,const char *s)
 { (void)r;(void)e;(void)s; ++errors; return ESP_FAIL; }

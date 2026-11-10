@@ -44,6 +44,7 @@ def run(root, out, mutation):
         equal(doc['init'],'failed' if bits&8 else 'ready')
         equal(doc['last_error'],'ESP_FAIL' if bits&8 else 'ESP_OK')
         equal(doc['requests'],4294967295)
+        equal(doc['space'],3);equal(doc['overlay'],2)
         equal(timing['time_base'],'esp_timer_since_boot')
         equal(timing['optical'],False);equal(timing['includes_rom'],False)
         equal(timing['first_transfer_valid'],bool(bits&1))

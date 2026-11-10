@@ -2993,6 +2993,7 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         "\"asset_load_failures\":%u,\"flush_submissions\":%u,"
         "\"flush_completions\":%u,\"flush_errors\":%u,\"actual_fps\":%u,"
         "\"render_us\":%u,\"render_frames\":%u,\"render_frame_us\":%u,"
+        "\"space\":%u,\"overlay\":%u,"
         "\"light\":{\"gx_mg\":%d,\"gy_mg\":%d,"
         "\"shadow_dx_q4\":%d,\"shadow_dy_q4\":%d},"
         "\"current_asset_bytes\":%u,\"free_psram\":%u,\"stack_hwm\":%u,"
@@ -3014,6 +3015,9 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         (unsigned)d.flush_errors, (unsigned)d.actual_fps,
         (unsigned)d.render_us, (unsigned)d.render_frames,
         (unsigned)d.render_frame_us,
+        /* Which screen is up: a script driving the ring by swipes cannot
+         * otherwise tell where it landed (DESK joins the ring under a lease). */
+        (unsigned)jr_display_nav_space(), (unsigned)jr_display_nav_overlay(),
         (int)d.light_gx_mg, (int)d.light_gy_mg,
         (int)d.light_shadow_dx_q4, (int)d.light_shadow_dy_q4,
         (unsigned)d.current_asset_bytes, (unsigned)d.free_psram_bytes,
