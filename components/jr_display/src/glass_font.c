@@ -72,7 +72,28 @@ const glass_glyph_t *glass_font_glyph(glass_font_id_t font, uint32_t cp)
     } else if (cp == '*') {
         cp = GLASS_DEGREE_CP;
     }
-    size_t lo = 0, hi = f->n_glyphs;
+    if (f->n_glyphs == 0u || cp < f->glyphs[0].cp) {
+        return NULL;
+    }
+    /* The atlas is sorted and unique, so glyph i has code point >= first + i:
+     * cp can only sit at or below index cp - first. For text that is nearly
+     * contiguous (ASCII) it is at that index, or a few gaps below it; try a
+     * short walk down before the binary search. This runs for every glyph of
+     * every text line on every row. */
+    size_t i = (size_t)(cp - f->glyphs[0].cp);
+    if (i >= f->n_glyphs) {
+        i = (size_t)f->n_glyphs - 1u;
+    }
+    for (int steps = 0; steps < 6; steps++) {
+        if (f->glyphs[i].cp <= cp) {
+            return f->glyphs[i].cp == cp ? &f->glyphs[i] : NULL;
+        }
+        if (i == 0u) {
+            return NULL;
+        }
+        i--;
+    }
+    size_t lo = 0, hi = i + 1u;
     while (lo < hi) {
         const size_t mid = (lo + hi) / 2;
         if (f->glyphs[mid].cp < cp) {
@@ -131,9 +152,17 @@ void glass_text_row(uint16_t *row, int y, int clip_lo, int clip_hi,
             int c0 = 0, c1 = g->w;
             if (gx0 + c0 < clip_lo) c0 = clip_lo - gx0;
             if (gx0 + c1 > clip_hi + 1) c1 = clip_hi + 1 - gx0;
-            for (int c = c0; c < c1; c++) {
-                const unsigned idx = (unsigned)gy * g->w + (unsigned)c;
-                const unsigned nib = (idx & 1u) ? (bits[idx >> 1] & 0x0Fu) : (bits[idx >> 1] >> 4);
+            /* Two pixels to a byte, high nibble first; a zero byte (most of a
+             * thin glyph's row) is skipped whole. */
+            unsigned idx = (unsigned)gy * g->w + (unsigned)c0;
+            for (int c = c0; c < c1; c++, idx++) {
+                const unsigned byte = bits[idx >> 1];
+                if (byte == 0u && (idx & 1u) == 0u) {
+                    c++;
+                    idx++;
+                    continue;
+                }
+                const unsigned nib = (idx & 1u) ? (byte & 0x0Fu) : (byte >> 4);
                 if (nib == 0u) {
                     continue;
                 }

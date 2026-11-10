@@ -3,12 +3,13 @@
  *
  * Property tests for the glass primitives (glass.h). No pixel hashes: every
  * assertion is a geometric or invariance property - areas against pi*r^2,
- * monotone edges, containment, byte-order symmetry, metric identities.
+ * monotone edges, containment, byte-order symmetry, metric identities - or a
+ * comparison with the slow reference implementation (glass_ref.c).
  *
  *     cd components/jr_display/tests && cmake -B build && cmake --build build \
  *       --target jr_display_glass_tests && ./build/jr_display_glass_tests
  */
-#include "jr_display/glass.h"
+#include "glass_ref.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -896,6 +897,244 @@ static void test_motion(void)
     CHECK(!glass_entry_animating(900, 900) && !glass_entry_animating(9000, 900), "still after");
 }
 
+/* ---- against the reference -------------------------------------------------
+ *
+ * glass_ref.c is the shape code as it stood before the performance pass: a
+ * per-pixel coverage walk with the geometry rebuilt on every row. The shipped
+ * primitives find solid runs and edge windows in closed form and keep their
+ * geometry in a cache; this proves they still draw the reference's pixels. The
+ * budget the pass was held to is 1/255 of coverage on an edge pixel; it
+ * measured zero, and the test holds it to zero so a regression is loud. */
+
+static uint32_t g_rng = 0x9E3779B9u;
+static uint32_t rnd(void)
+{
+    g_rng = g_rng * 1664525u + 1013904223u;
+    return g_rng >> 8;
+}
+static int32_t rnd_range(int32_t lo, int32_t hi) { return lo + (int32_t)(rnd() % (uint32_t)(hi - lo + 1)); }
+
+static void ref_draw_row(uint16_t *row, int y, int lo, int hi, const shape_t *s, uint16_t color,
+                         uint8_t alpha, bool swap)
+{
+    switch (s->kind) {
+    case K_DISC:
+        glassref_disc_row(row, y, lo, hi, s->cx, s->cy, s->r0, color, alpha, swap);
+        break;
+    case K_RING:
+        glassref_ring_row(row, y, lo, hi, s->cx, s->cy, s->r0, s->r1, s->start, s->sweep, color,
+                          alpha, swap);
+        break;
+    case K_ARC:
+        glassref_arc_row(row, y, lo, hi, s->cx, s->cy, s->r0, s->r1, s->start, s->sweep, color,
+                         alpha, swap);
+        break;
+    default:
+        glassref_glow_row(row, y, lo, hi, s->cx, s->cy, s->r0, s->r1, s->start, s->sweep, s->caps,
+                          s->glow_w, s->peak, color, alpha, swap);
+        break;
+    }
+}
+
+static uint16_t bg_px(int x, int y)
+{
+    return (uint16_t)((((x * 3 + y) & 31) << 11) | (((x + y * 5) & 63) << 5) | ((x ^ y) & 31));
+}
+
+/* Largest per-channel step between two panel-order pixels. */
+static int px_step(uint16_t a, uint16_t b, bool swap)
+{
+    const uint16_t p = swap ? glass_bswap(a) : a, q = swap ? glass_bswap(b) : b;
+    int d = abs((p >> 11) - (q >> 11));
+    const int dg = abs(((p >> 5) & 63) - ((q >> 5) & 63));
+    const int db = abs((p & 31) - (q & 31));
+    return d > dg ? (d > db ? d : db) : (dg > db ? dg : db);
+}
+
+static long g_ref_pixels, g_ref_differ;
+static int g_ref_max_step;
+
+static void note_row(const uint16_t *a, const uint16_t *b, bool swap)
+{
+    g_ref_pixels += W;
+    for (int x = 0; x < W; x++) {
+        if (a[x] != b[x]) {
+            g_ref_differ++;
+            const int st = px_step(a[x], b[x], swap);
+            if (st > g_ref_max_step) {
+                g_ref_max_step = st;
+            }
+        }
+    }
+}
+
+/* Draw `s` row by row with both implementations over the same background and
+ * compare every pixel of every row. */
+static void compare_shape(const shape_t *s, int lo, int hi, uint16_t color, uint8_t alpha, bool swap)
+{
+    uint16_t a[W], b[W];
+    for (int y = 0; y < W; y++) {
+        for (int x = 0; x < W; x++) {
+            a[x] = b[x] = swap ? glass_bswap(bg_px(x, y)) : bg_px(x, y);
+        }
+        draw_row(a, y, lo, hi, s, color, alpha, swap);
+        ref_draw_row(b, y, lo, hi, s, color, alpha, swap);
+        note_row(a, b, swap);
+    }
+}
+
+static void report_ref(const char *what)
+{
+    CHECK(g_ref_differ == 0, "%s: %ld of %ld pixels differ from the reference (largest step %d)", what,
+          g_ref_differ, g_ref_pixels, g_ref_max_step);
+    g_ref_pixels = g_ref_differ = 0;
+    g_ref_max_step = 0;
+}
+
+static void test_matches_reference_random(void)
+{
+    static const int32_t sweeps[] = {1, 90, 546, 3641, 8192, 16384, 32767, 32768, 32769, 40000,
+                                     49152, 60000, 65000, 65535, 65536, 70000};
+    static const uint8_t alphas[] = {255, 255, 200, 128, 44, 7};
+    for (int n = 0; n < 220; n++) {
+        shape_t s;
+        memset(&s, 0, sizeof s);
+        s.kind = (int)(rnd() % 4u);
+        s.cx = rnd_range(PX(150), PX(320)) + rnd_range(-8, 8);
+        s.cy = rnd_range(PX(150), PX(320)) + rnd_range(-8, 8);
+        const int32_t r_in = rnd() % 3u == 0u ? 0 : rnd_range(PX(2), PX(140)) + rnd_range(-8, 8);
+        const int32_t width = (rnd() % 3u == 0u) ? rnd_range(PX(1), PX(4)) : rnd_range(PX(5), PX(30));
+        s.r0 = r_in;
+        s.r1 = r_in + width + rnd_range(0, 15);
+        if (s.kind == K_DISC) {
+            s.r0 = rnd_range(PX(1), PX(110)) + rnd_range(-8, 8);
+        }
+        s.start = rnd_range(0, 65535);
+        s.sweep = sweeps[rnd() % (sizeof sweeps / sizeof sweeps[0])];
+        s.caps = rnd() % 2u == 0u;
+        s.glow_w = rnd_range(8, 90);
+        s.peak = (uint8_t)(rnd() % 4u == 0u ? 255 : rnd_range(20, 250));
+        int lo = 0, hi = W - 1;
+        if (rnd() % 4u == 0u) {
+            lo = rnd_range(0, 200);
+            hi = rnd_range(250, W - 1);
+        }
+        const uint16_t color = (uint16_t)rnd();
+        const uint8_t alpha = alphas[rnd() % (sizeof alphas / sizeof alphas[0])];
+        compare_shape(&s, lo, hi, color, alpha, rnd() % 2u == 0u);
+    }
+    report_ref("random disc/ring/arc/glow shapes");
+}
+
+/* The screens' compositions: the real ring (r113..123 at 1/16 px), the arc with
+ * a glow beneath, the track as the complement, and WEATHER's twelve arcs drawn
+ * together so the geometry cache is shared between them. */
+static void test_matches_reference_screens(void)
+{
+    static const int sweeps_pct[] = {0, 1, 5, 26, 50, 74, 99, 100};
+    for (size_t i = 0; i < sizeof sweeps_pct / sizeof sweeps_pct[0]; i++) {
+        const int32_t sweep = (int32_t)(((int64_t)sweeps_pct[i] * GLASS_TURN_Q16) / 100);
+        shape_t track = {.kind = K_RING, .cx = 233 * 16, .cy = 223 * 16, .r0 = 113 * 16, .r1 = 123 * 16,
+                         .start = GLASS_Q16_12_OCLOCK + sweep, .sweep = GLASS_TURN_Q16 - sweep};
+        shape_t glow = {.kind = K_GLOW, .cx = 233 * 16, .cy = 223 * 16, .r0 = 113 * 16, .r1 = 123 * 16,
+                        .start = GLASS_Q16_12_OCLOCK, .sweep = sweep, .caps = true, .glow_w = 40,
+                        .peak = 140};
+        shape_t arc = {.kind = K_ARC, .cx = 233 * 16, .cy = 223 * 16, .r0 = 113 * 16, .r1 = 123 * 16,
+                       .start = GLASS_Q16_12_OCLOCK, .sweep = sweep};
+        for (int swap = 0; swap < 2; swap++) {
+            compare_shape(&track, 0, W - 1, 0x07FF, 44, swap);
+            compare_shape(&glow, 0, W - 1, 0x07FF, 255, swap);
+            compare_shape(&arc, 0, W - 1, 0x07FF, 255, swap);
+            compare_shape(&arc, 0, W - 1, 0x07FF, 120, swap); /* mid-fade */
+        }
+    }
+    report_ref("STATUS ring at 0..100 percent");
+
+    /* WEATHER: twelve arcs of mixed width, called in turn on every row. */
+    static const int pcts[12] = {0, 10, 40, 80, 100, 5, 60, 20, 0, 30, 90, 50};
+    shape_t arcs[12];
+    for (int k = 0; k < 12; k++) {
+        const int w = pcts[k] < 10 ? 32 : 48 + (112 * pcts[k]) / 100;
+        const int32_t rc = 118 * 16;
+        const int sw = pcts[k] < 10 ? 546 : 3641;
+        const int32_t centre = (GLASS_Q16_12_OCLOCK + ((2 * k + 1) * GLASS_TURN_Q16) / 24) & 0xFFFF;
+        arcs[k] = (shape_t){.kind = K_ARC, .cx = 233 * 16, .cy = 223 * 16, .r0 = rc - w / 2,
+                            .r1 = rc + (w + 1) / 2, .start = (centre - sw / 2) & 0xFFFF, .sweep = sw};
+    }
+    uint16_t a[W], b[W];
+    for (int y = 0; y < W; y++) {
+        for (int x = 0; x < W; x++) {
+            a[x] = b[x] = glass_bswap(bg_px(x, y));
+        }
+        for (int k = 0; k < 12; k++) {
+            const uint8_t al = (uint8_t)(100 + 155 * pcts[k] / 100);
+            draw_row(a, y, 0, W - 1, &arcs[k], 0x049F, al, true);
+            ref_draw_row(b, y, 0, W - 1, &arcs[k], 0x049F, al, true);
+        }
+        note_row(a, b, true);
+    }
+    report_ref("WEATHER twelve arcs, interleaved per row");
+}
+
+/* More distinct shapes than the geometry cache has slots, interleaved row by
+ * row and then again in the opposite order: a thrashing cache must still draw
+ * the reference's pixels. */
+static void test_geometry_cache_thrash(void)
+{
+    enum { N_ARCS = 40 };
+    shape_t arcs[N_ARCS];
+    for (int k = 0; k < N_ARCS; k++) {
+        arcs[k] = (shape_t){.kind = (k % 5 == 0) ? K_GLOW : ((k % 2) ? K_ARC : K_RING),
+                            .cx = 233 * 16, .cy = 233 * 16, .r0 = (60 + k * 2) * 16,
+                            .r1 = (66 + k * 2) * 16, .start = (k * 4099) & 0xFFFF,
+                            .sweep = 3000 + k * 1500, .caps = (k % 3) == 0, .glow_w = 40, .peak = 150};
+    }
+    uint16_t a[W], b[W];
+    for (int pass = 0; pass < 2; pass++) {
+        for (int y = 0; y < W; y++) {
+            for (int x = 0; x < W; x++) {
+                a[x] = b[x] = bg_px(x, y);
+            }
+            for (int i = 0; i < N_ARCS; i++) {
+                const int k = pass ? N_ARCS - 1 - i : i;
+                draw_row(a, y, 0, W - 1, &arcs[k], 0xFD20, 200, false);
+                ref_draw_row(b, y, 0, W - 1, &arcs[k], 0xFD20, 200, false);
+            }
+            note_row(a, b, false);
+        }
+    }
+    report_ref("40 interleaved shapes through a 16-slot geometry cache");
+}
+
+/* The glyph lookup walks down from an index guess before it binary searches;
+ * it must agree with a plain scan for every code point in every atlas. */
+static void test_glyph_lookup_matches_scan(void)
+{
+    long compared = 0, bad = 0;
+    for (int f = 0; f < GLASS_FONT_COUNT; f++) {
+        const glass_font_t *ft = &glass_fonts[f];
+        for (uint32_t cp = 0; cp < 0x2200u; cp++) {
+            uint32_t want_cp = cp;
+            if (cp >= 'a' && cp <= 'z') {
+                want_cp -= 'a' - 'A';
+            } else if (cp == '*') {
+                want_cp = 0xB0u;
+            }
+            const glass_glyph_t *want = NULL;
+            for (size_t i = 0; i < ft->n_glyphs; i++) {
+                if (ft->glyphs[i].cp == want_cp) {
+                    want = &ft->glyphs[i];
+                    break;
+                }
+            }
+            compared++;
+            bad += glass_font_glyph((glass_font_id_t)f, cp) != want;
+        }
+    }
+    CHECK(compared > 30000 && bad == 0, "glyph lookup: %ld of %ld code points disagree with a scan", bad,
+          compared);
+}
+
 int main(void)
 {
     test_trig();
@@ -918,6 +1157,10 @@ int main(void)
     test_every_glyph_in_its_box();
     test_text_alpha_and_color();
     test_motion();
+    test_matches_reference_random();
+    test_matches_reference_screens();
+    test_geometry_cache_thrash();
+    test_glyph_lookup_matches_scan();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);
