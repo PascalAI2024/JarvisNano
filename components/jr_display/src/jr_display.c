@@ -4111,9 +4111,13 @@ static const char *sp_headline(int space);
 #define SG_RAIN_STAGGER_MS 45
 #define SG_RAIN_BUILD_MS   250
 
-/* One piece of text, measured once per strip. */
+/* One piece of text, measured when a row of the strip first draws it (a strip
+ * that misses the line never pays for the glyph walk: ACTIVITY spent a quarter
+ * of its frame measuring lines on strips that did not touch them). */
 typedef struct {
     const char *s;
+    int cx;                 /* centre to measure from while `pending` */
+    bool pending;           /* x0 is not worked out yet */
     int len, x0, y_top, y_lo, y_hi, tracking;
     glass_font_id_t font;
     uint16_t color;
@@ -4128,7 +4132,9 @@ static void sg_txt_make(sg_txt_t *t, glass_font_id_t font, const char *s, int le
     t->len = alpha > 0 ? len : 0;
     t->font = font;
     t->tracking = tracking;
-    t->x0 = cx - glass_text_width(font, s, (size_t)(len > 0 ? len : 0), tracking) / 2;
+    t->cx = cx;
+    t->pending = true;
+    t->x0 = cx;
     t->y_top = y_top;
     t->y_lo = y_top + m.ink_top;
     t->y_hi = y_top + m.ink_bottom;
@@ -4136,9 +4142,13 @@ static void sg_txt_make(sg_txt_t *t, glass_font_id_t font, const char *s, int le
     t->alpha = (uint8_t)(alpha > 255 ? 255 : (alpha < 0 ? 0 : alpha));
 }
 
-static inline void sg_txt_row(uint16_t *row, int y, int lo, int hi, bool swap, const sg_txt_t *t)
+static inline void sg_txt_row(uint16_t *row, int y, int lo, int hi, bool swap, sg_txt_t *t)
 {
     if (t->len > 0 && y >= t->y_lo && y <= t->y_hi) {
+        if (t->pending) {
+            t->x0 = t->cx - glass_text_width(t->font, t->s, (size_t)t->len, t->tracking) / 2;
+            t->pending = false;
+        }
         glass_text_row(row, y, lo, hi, t->font, t->s, (size_t)t->len, t->x0, t->y_top,
                        t->tracking, t->color, t->alpha, swap);
     }
@@ -4178,6 +4188,7 @@ static void sg_txt_at(sg_txt_t *t, glass_font_id_t font, const char *s, int len,
 {
     sg_txt_make(t, font, s, len, 0, y_top, 0, native, alpha);
     t->x0 = x0;
+    t->pending = false;
 }
 
 /* The staggered element's fade and rise at entry time `ent`. */
@@ -4896,6 +4907,7 @@ static void sp_draw_detail(const jr_display_ctx_t *ctx, int y1, int y2,
         sg_txt_make(&t_val[i], GLASS_FONT_TEXT, s_detail_value[i], vlen, 0, ry, 0, SP_C_INK, st);
         t_val[i].x0 = SP_SHEET_RIGHT - glass_text_width(GLASS_FONT_TEXT, s_detail_value[i],
                                                         (size_t)vlen, 0);
+        t_val[i].pending = false;
     }
 
     for (int y = ys; y <= ye; ++y) {
