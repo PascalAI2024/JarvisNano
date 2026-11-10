@@ -137,6 +137,44 @@ No cut allocates more than 384 bytes of internal RAM, so none touches the contig
 **[2026-11-10] Reading the timers on the device**
 `GET /api/display?split=1` returns `render_frames`, `render_frame_us` and `split_us`, each a sum in microseconds since boot over every strip of every frame; divide by `render_frames` for a per-frame figure, or take two reads and subtract. Names: `hud_frame`, `hud_space`, `hud_clock`, `hud_ota`, `hud_caption`, `hud_ask`, `hud_bloom` partition the hud layer; `space_veil`, `space_screen`, `space_sheet`, `space_shade`, `space_orbit` are inside `hud_space`; `clock_clear`, `clock_face`, `clock_cells` are inside `hud_clock` (`clock_cells` includes the sun arc). The existing `layer_us` gives the dial blit (index 0) against the hud (index 2). If `render_us` per frame is much larger than the sum of the five `layer_us`, the render task is being pre-empted or waiting inside `panel_flush`, not computing.
 
+**[2026-11-10] Second round: the shell, the rail, the timers, image 519b252, lease held**
+Branch `feat/glass-speed`, cut from `feat/glass-2` at 519b252. No device was available, so everything in the Ir columns is measured (callgrind on the host probe, one warm frame at `clk=100000`, millions of instructions) and every ms figure is inferred. The device column is the owner's table from that image with the CODEX lease held, in ms per frame.
+
+| Scene | Device total / hud / shell ms (measured, before) | Ir before | Ir after | Change |
+|-------|----------------------------------------------|-----------|----------|--------|
+| home (JARVIS) | 26.9 / 5.2 / 21.0 | 0.31 | 0.31 | none |
+| home, agent rim 100 % | | 3.25 | 0.53 | -2.72 |
+| home, agent rim 40 % | | 3.24 | 0.66 | -2.59 |
+| WEATHER | 58.3 | 2.89 | 2.16 | -0.73 |
+| STATUS | 84.6 | 3.03 to 4.19 | 2.34 to 3.49 | -0.70 |
+| STATUS, agent rim 100 % | | 7.00 | 3.57 | -3.42 |
+| STATUS, agent rim 60 % | | 6.99 | 3.70 | -3.29 |
+| DESK | 67.3 | 3.87 | 3.18 | -0.70 |
+| DESK, agent rim 13 % | | 6.82 | 3.54 | -3.28 |
+| ACTIVITY | 50.8 | 2.33 | 1.59 | -0.74 |
+| control shade | 75.2 | 3.70 | 3.60 | -0.10 |
+| detail sheet | | 2.88 | 2.14 | -0.74 |
+| WATCH styles | 30.3 to 66.8 | | unchanged | none (see below) |
+
+What was cut, in the order it was done:
+
+| Cut | How | Pixels | Ir | Expected on the device (inferred) | How sure |
+|-----|-----|--------|----|----------------------------------|----------|
+| Agent rim | the rim tests two short runs a row (the band at the row's radius and its hole), not every pixel; the sector test is skipped once the rim is complete | identical, pinned by 25 frame hashes at 100, 40, 60 and 13 % | about -2.7 to -3.4 M per ring screen | the 21 ms shell cost is mostly this loop: the rim was about 2.9 M of the 3.25 M a rim frame cost against 0.31 M without it, so expect most of it to go, order of 15 ms or more | moderate: Ir to ms is not linear on this part (the primitive rewrite taught that), but this loop is pure ALU on a hot cache |
+| Orbit rail | the invariant track ring is recorded once into PSRAM at `jr_display_start` and replayed as runs; the lit mark arc is asked about only on the rows it can reach | identical, pinned by the replay-equivalence test over 256 angles and by the hash table in both modes | about -0.7 M on every ring screen | 3 to 5 ms of the 12 to 14 ms | moderate |
+| Split timers | `split_mark` is one branch unless `?split=1` armed the timers; the first `?split=1` request arms them for a few seconds, so read twice and subtract | n/a | not in the scenes | a few hundred microseconds a frame | high that it is not zero, low on how much |
+
+RAM, per cut: the rail record is 14,066 bytes in PSRAM, allocated once; internal `.bss` is 4 bytes for its pointer. The split arming adds 5 bytes. The lease flag is 1 byte, the brightness cap rides in the existing `s_status_word`. Total new internal static: about 10 bytes against the 1.5 KB allowance.
+
+The 4 KB loss in the largest internal block (26.6 KB to 22.5 KB) after the last lane: the statics that lane added are a 385-byte glyph lookup table (4 fonts x 96 + a ready flag) and 60 bytes of split counters, about 0.45 KB, and its other changes (the PMIC read, the `?split=1` JSON, new tests) allocate nothing that stays. Statics do not explain 4 KB. The most likely cause is a different heap state at the moment of the two readings (a TLS session, a socket or an OTA buffer held at one and not the other), which is how the block changes between boots with no code change. This is inferred; only `/api/diag/tasks` and the heap figures on a freshly booted device at the same uptime, on both images, can settle it.
+
+Not cut:
+- `space_screen` on STATUS, DESK and WEATHER (about 2 to 2.6 M Ir each now). A per-row record and replay of the focal ring track, glow and arc would repeat the orbit's method; it needs a cache keyed on the ring's parameters and I did not take it on without a device number for what remains after the rim and rail cuts.
+- The control shade (`space_shade`, `space_veil`) and `clock_face`: no cut made. The WATCH styles are unchanged in this round.
+- Tried and dropped: a flat-texel shortcut for the balance wheel raised the instruction count and was reverted.
+
+Pixel-changing fixes in the same round, each with before and after images from the probe and regenerated hashes: the lease caption no longer prints over the shade or the detail sheet (`shade-lease`, `detail-lease` changed); the shade's brightness arc and number show the owner's cap (`shade-dimmed` changed; the cap travels in bits 8 to 15 of `s_status_word`, 0 meaning unknown); an ACTIVITY row ends on a whole sentence or on a word and three dots (`activity` changed; no font here has U+2026).
+
 ---
 
 ## Primary sources

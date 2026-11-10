@@ -55,24 +55,37 @@ int main(void)
 {
     static uint16_t fb[466 * 466];
     int failures = 0, checks = 0;
-    for (int i = 0; i < NREFS; i++) {
-        const fc_scene_t *sc = find_scene(REFS[i].scene);
-        if (sc == NULL) {
-            printf("FAIL: scene %s is in the table but not in frame_scenes.inc\n", REFS[i].scene);
-            failures++;
-            continue;
-        }
-        fc_setup(sc);
-        fc_run(sc, REFS[i].clk_ms, fb);
-        const uint64_t h = fc_hash(fb);
-        checks++;
-        if (h != REFS[i].hash) {
-            printf("FAIL %s clk=%lld: frame hash %016llx, expected %016llx\n", REFS[i].scene,
-                   (long long)REFS[i].clk_ms, (unsigned long long)h,
-                   (unsigned long long)REFS[i].hash);
-            failures++;
+    /* Two passes over the whole table: the recorded orbit rail in use (as on
+     * the device), then without it (the fallback when PSRAM is short). Both must
+     * give the pixels the pre-cut code gave. */
+    for (int pass = 0; pass < 2; pass++) {
+        fc_orbit_rec_on = pass == 0;
+        for (int i = 0; i < NREFS; i++) {
+            const fc_scene_t *sc = find_scene(REFS[i].scene);
+            if (sc == NULL) {
+                printf("FAIL: scene %s is in the table but not in frame_scenes.inc\n", REFS[i].scene);
+                failures++;
+                continue;
+            }
+            fc_setup(sc);
+            checks++;
+            if ((s_orbit_rec != NULL) != fc_orbit_rec_on) {
+                printf("FAIL %s: orbit record %s but pass wanted it %s\n", REFS[i].scene,
+                       s_orbit_rec != NULL ? "built" : "absent", fc_orbit_rec_on ? "on" : "off");
+                failures++;
+            }
+            fc_run(sc, REFS[i].clk_ms, fb);
+            const uint64_t h = fc_hash(fb);
+            checks++;
+            if (h != REFS[i].hash) {
+                printf("FAIL %s clk=%lld (orbit record %s): frame hash %016llx, expected %016llx\n",
+                       REFS[i].scene, (long long)REFS[i].clk_ms, fc_orbit_rec_on ? "on" : "off",
+                       (unsigned long long)h, (unsigned long long)REFS[i].hash);
+                failures++;
+            }
         }
     }
+    fc_orbit_rec_on = true;
     /* every scene must be pinned at least once: a scene added to the fixture
      * and not to the table would otherwise be unguarded */
     for (int s = 0; s < FC_NSCENES; s++) {
@@ -81,6 +94,86 @@ int main(void)
         checks++;
         if (!pinned) {
             printf("FAIL: scene %s has no frame hash\n", FC_SCENES[s].name);
+            failures++;
+        }
+    }
+    /* The recorded rail against the glass ring it stands in for, over a busy
+     * background, every row, with the alphas the fades produce, both byte orders
+     * and clips that cut the ring (the scenes only draw it at one alpha, in
+     * panel order, unclipped). */
+    {
+        orbit_rec_build();
+        printf("orbit rail record: %u bytes (PSRAM)\n",
+               (unsigned)glass_ring_record(NULL, 0, SP_CX * 16, SP_CY * 16,
+                                           SP_ORB_TRACK_IN * 16, SP_ORB_TRACK_OUT * 16));
+        static uint16_t a[466], b[466];
+        static const int alphas[] = { 1, 37, 128, 200, 254, 255 };
+        static const int clips[][2] = { { 0, 465 }, { 100, 300 }, { 0, 5 }, { 230, 236 }, { 440, 465 } };
+        long touched = 0;
+        for (unsigned ai = 0; ai < sizeof alphas / sizeof alphas[0]; ai++) {
+            for (int sw = 0; sw < 2; sw++) {
+                for (unsigned ci = 0; ci < sizeof clips / sizeof clips[0]; ci++) {
+                    int bad = 0;
+                    for (int y = 0; y < 466 && !bad; y++) {
+                        for (int x = 0; x < 466; x++) {
+                            a[x] = b[x] = (uint16_t)(x * 2654435761u + y * 40503u + 12345u);
+                        }
+                        glass_ring_row(a, y, clips[ci][0], clips[ci][1], SP_CX * 16, SP_CY * 16,
+                                       SP_ORB_TRACK_IN * 16, SP_ORB_TRACK_OUT * 16, 0,
+                                       GLASS_TURN_Q16, SP_C_PLATE, (uint8_t)alphas[ai], sw != 0);
+                        glass_ring_replay_row(b, y, clips[ci][0], clips[ci][1], s_orbit_rec,
+                                              SP_C_PLATE, (uint8_t)alphas[ai], sw != 0);
+                        for (int x = 0; x < 466; x++) {
+                            if (a[x] != b[x]) bad = 1;
+                            if (a[x] != (uint16_t)(x * 2654435761u + y * 40503u + 12345u)) touched++;
+                        }
+                        if (bad) {
+                            printf("FAIL orbit replay differs: alpha %d swap %d clip %d..%d row %d\n",
+                                   alphas[ai], sw, clips[ci][0], clips[ci][1], y);
+                            failures++;
+                        }
+                    }
+                    checks++;
+                }
+            }
+        }
+        checks++;
+        if (touched < 50000) {
+            printf("FAIL orbit replay comparison drew only %ld pixels\n", touched);
+            failures++;
+        }
+    }
+    /* The orbit's lit mark is only asked about on the rows orbit_mark_rows()
+     * allows: at every one of its 256 positions, every row outside the bound
+     * must be a row the real arc leaves untouched, and the rows inside must not
+     * be all of them (a bound that never excludes would pass the first check). */
+    {
+        static uint16_t row[466];
+        int outside_total = 0;
+        for (int a = 0; a < 256; a++) {
+            int lo, hi;
+            orbit_mark_rows(a, &lo, &hi);
+            const int32_t start = (int32_t)((((a - 5) * 256)) & 0xFFFF);
+            for (int y = 0; y < 466; y++) {
+                memset(row, 0, sizeof row);
+                glass_arc_row(row, y, 0, 465, SP_CX * 16, SP_CY * 16, SP_ORB_MARK_IN * 16,
+                              SP_ORB_MARK_OUT * 16, start, 10 * 256, 0xFFFFu, 255u, false);
+                bool drew = false;
+                for (int x = 0; x < 466 && !drew; x++) drew = row[x] != 0u;
+                if (y < lo || y > hi) {
+                    outside_total++;
+                    if (drew) {
+                        printf("FAIL orbit mark at %d draws on row %d outside [%d, %d]\n", a, y, lo, hi);
+                        failures++;
+                        break;
+                    }
+                }
+            }
+            checks++;
+        }
+        checks++;
+        if (outside_total < 256 * 300) {
+            printf("FAIL orbit mark bound excludes only %d rows over 256 positions\n", outside_total);
             failures++;
         }
     }
@@ -123,7 +216,22 @@ int main(void)
         fc_setup(sc);
         s_fake_us_step = 3;
         for (int i = 0; i < JR_DISPLAY_SPLIT_COUNT; i++) s_split_us[i] = 0;
+        /* unarmed (the default): nothing is timed, whatever ran */
+        s_split_deadline_ms = 0u;
         fc_run(sc, SPLITS[r].clk_ms, fb);
+        {
+            unsigned total = 0;
+            for (int i = 0; i < JR_DISPLAY_SPLIT_COUNT; i++) total += s_split_us[i];
+            checks++;
+            if (total != 0u) {
+                printf("FAIL %s: split timers charged %u us with nobody asking\n", sc->name, total);
+                failures++;
+            }
+        }
+        /* armed, as ?split=1 leaves them for a few seconds */
+        s_split_deadline_ms = (uint32_t)SPLITS[r].clk_ms + 4000u;
+        fc_run(sc, SPLITS[r].clk_ms, fb);
+        s_split_deadline_ms = 0u;
         s_fake_us_step = 0;
         for (int i = 0; i < 6; i++) {
             checks++;

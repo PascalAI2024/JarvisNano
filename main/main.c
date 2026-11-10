@@ -1996,7 +1996,7 @@ static void publish_shell_state(uint32_t now_ms)
         s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN,
         (uint16_t)(snapshot->transitions / 2U), now_ms / 1000U);
     if ((int32_t)(now_ms - next_status_ms) >= 0) {
-        jr_display_set_status((uint8_t)s_out_vol);
+        jr_display_set_status((uint8_t)s_out_vol, s_brightness_cap);
 
         const ota_preflight_t preflight = ota_preflight();
         const esp_partition_t *running = preflight.running;

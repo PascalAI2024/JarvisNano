@@ -143,6 +143,12 @@ typedef enum {
 /* The JSON key of a split timer, or NULL out of range. */
 const char *jr_display_split_name(unsigned index);
 
+/* Time the next few seconds of frames into the split timers. They are off
+ * otherwise (a timer read per part per strip is not free); GET
+ * /api/display?split=1 arms them, so its first answer carries what the last
+ * request counted and the next one, seconds later, the window to subtract. */
+void jr_display_split_arm(void);
+
 typedef struct {
     jr_display_init_state_t init_state;
     esp_err_t last_error;
@@ -791,12 +797,18 @@ typedef struct {
 
 void jr_display_links_set(const jr_display_links_t *links);
 
-/* The control shade's volume readout: the real number, not a mood. Brightness
- * is not passed — the display already owns it and reads back its own target,
- * so the shade can never disagree with the panel. Link quality and free
+/* The control shade's readouts: the real volume, and the owner's brightness
+ * setting (the cap, 10..100). The panel's live level is the mood ladder's and
+ * dips on its own; the shade shows what the owner chose. 0 = not known, and
+ * the shade falls back to the panel's own target. Link quality and free
  * memory used to ride along for the SETTINGS gauges; with that screen gone
  * they are /api/cockpit's, not the glass's. */
-void jr_display_set_status(uint8_t volume);
+void jr_display_set_status(uint8_t volume, uint8_t brightness_cap);
+
+/* Fit a spoken line into an ACTIVITY row of cap-1 glyphs: whole if it fits,
+ * else its last complete sentence, else its last whole word and "...". Pure.
+ * Returns the length written. */
+size_t jr_display_activity_fit(char *dst, size_t cap, const char *src);
 
 #ifdef __cplusplus
 }

@@ -1242,9 +1242,17 @@ static void brightness_slew(uint32_t dt_ms);   /* defined with the pump below */
 static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep);
 static void watch_compose(void);               /* defined with the watch below */
 
+/* The split timers (below) cost a timer read per part per strip, so they run
+ * only while GET /api/display?split=1 has asked for them (jr_display_split_arm,
+ * a few seconds a request). s_split_on is the render task's own copy, decided
+ * once a frame in overlay_fade_tick; split_mark and split_now read it. */
+static volatile uint32_t s_split_deadline_ms;
+static bool s_split_on;
+
 static void overlay_fade_tick(void)
 {
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    s_split_on = (int32_t)(__atomic_load_n(&s_split_deadline_ms, __ATOMIC_RELAXED) - now) > 0;
     uint32_t dt = now - s_fade_prev_ms;
     s_fade_prev_ms = now;
     /* Physical brightness keeps its slew cap; finite UI transitions consume
@@ -1491,6 +1499,20 @@ static bool caption_is_quiet(const char *text)
     return caption_is_ambient(text);
 }
 
+/* The operator lease's own caption ("CODEX MODE - DOUBLE TAP TO EXIT", and the
+ * ZEROCHAT twin). It tells the owner how to take the glass back, so it is for
+ * the glass itself: the control shade and the detail sheet carry their own
+ * hint lines in the same band and the lease caption draws over them. While
+ * either is open apply_caption_overlay leaves this caption out. */
+static bool s_caption_lease;      /* the current caption is the lease's; render reads it */
+
+static bool caption_is_lease(const char *text)
+{
+    static const char tail[] = " - DOUBLE TAP TO EXIT";
+    const size_t n = strlen(text), t = sizeof tail - 1U;
+    return n > t && strcmp(text + n - t, tail) == 0;
+}
+
 void jr_display_caption_set(const char *text)
 {
     if (atomic_load(&s_caption_pinned)) {
@@ -1519,6 +1541,7 @@ void jr_display_caption_set(const char *text)
     s_caption_y[0] = (c2 > 0) ? JR_CAPTION_TWO_Y0 : JR_CAPTION_ONE_Y;
     s_caption_y[1] = JR_CAPTION_TWO_Y1;
     s_caption_grey = caption_is_quiet(s_caption_text);
+    s_caption_lease = caption_is_lease(s_caption_text);
     __atomic_store_n(&s_caption_on, JR_DISPLAY_CAPTION_ACTIVE |
                      (caption_is_ambient(s_caption_text)
                          ? JR_DISPLAY_CAPTION_AMBIENT : 0), __ATOMIC_RELEASE);
@@ -1807,7 +1830,20 @@ static char s_desk_task[SP_LABEL_CAP];
 static volatile uint32_t s_jarvis_word;      /* turns | linked<<16          */
 static volatile uint32_t s_jarvis_secs;
 static volatile uint32_t s_desk_word;        /* progress | state<<8         */
-static volatile uint32_t s_status_word;      /* vol                         */
+static volatile uint32_t s_status_word;      /* vol | brightness cap<<8     */
+
+/* The shade's light arc and number show the OWNER's setting (the cap that
+ * /api/device/levels reports), not the level the mood ladder has dimmed the
+ * panel to: dragging the arc to 80 and reading 30 back is a lie. 0 in the cap
+ * byte means nobody has said yet, and the panel's own target stands in. */
+static int shade_light(uint32_t status_word)
+{
+    int cap = (int)((status_word >> 8) & 0xFFu);
+    if (cap == 0) {
+        cap = (int)__atomic_load_n(&s_brightness_want, __ATOMIC_ACQUIRE);
+    }
+    return cap > 100 ? 100 : cap;
+}
 
 /* WEATHER is a whole struct, not a word, so it is double-buffered: the setter
  * fills the slot the render task is NOT reading and then publishes the slot
@@ -2656,9 +2692,63 @@ static void sp_compose_weather(void)
     }
 }
 
+/* Fit a spoken line into an ACTIVITY row. Whole, when it fits. Otherwise the
+ * last complete sentence that fits, ending on its own stop with nothing after
+ * it: a cut that appends "." to a fragment leaves "FORGIVE ME, SIR. I." and
+ * reads like an ending. Failing that, the last whole word with "..." (no font
+ * here has U+2026), never a bare ".". `cap` counts the terminator. */
+size_t jr_display_activity_fit(char *dst, size_t cap, const char *src)
+{
+    if (cap == 0U) {
+        return 0U;
+    }
+    const size_t max = cap - 1U;
+    while (*src == ' ') {
+        src++;
+    }
+    const size_t n = strlen(src);
+    if (n <= max) {
+        memcpy(dst, src, n);
+        dst[n] = '\0';
+        return n;
+    }
+    if (max < 4U) {
+        memcpy(dst, src, max);
+        dst[max] = '\0';
+        return max;
+    }
+    size_t end = 0U;
+    for (size_t i = 0U; i < max; i++) {
+        if ((src[i] == '.' || src[i] == '!' || src[i] == '?') &&
+            (src[i + 1U] == ' ' || src[i + 1U] == '\0')) {
+            end = i + 1U;
+        }
+    }
+    if (end >= 4U) {
+        memcpy(dst, src, end);
+        dst[end] = '\0';
+        return end;
+    }
+    size_t keep = max - 3U;
+    size_t cut = keep;
+    while (cut > 0U && src[cut] != ' ') {
+        cut--;
+    }
+    if (cut >= max / 2U) {
+        keep = cut;
+    }
+    while (keep > 0U && (src[keep - 1U] == ' ' || src[keep - 1U] == ',' ||
+                         src[keep - 1U] == ';' || src[keep - 1U] == ':' ||
+                         src[keep - 1U] == '-')) {
+        keep--;
+    }
+    memcpy(dst, src, keep);
+    memcpy(dst + keep, "...", 4);
+    return keep + 3U;
+}
+
 /* ACTIVITY rows for this frame. s_act_row[i] is the summary alone, cut to the
- * row's 24 glyphs with its last glyph spent on a "." when it does not fit (the
- * same mark title_shorten() leaves on a DESK title). s_act_age[i] is the age
+ * row's 24 glyphs by jr_display_activity_fit() when it does not fit. s_act_age[i] is the age
  * under the sheet's own truth rule: a live row ages by esp_timer, a carried one
  * by the wall clock, anything else says EARLIER rather than invent a number. */
 static void sp_compose_activity(void)
@@ -2675,12 +2765,7 @@ static void sp_compose_activity(void)
         if (slen < SP_ACT_ROW_GLYPHS) {   /* a full store may have been cut by the push: mark it */
             (void)sp_str(row, 0, SP_ACT_ROW_CAP, s_act_sum[i]);
         } else {
-            int len = 0;
-            for (int k = 0; k + 1 < SP_ACT_ROW_GLYPHS; ++k) {
-                row[len++] = s_act_sum[i][k];
-            }
-            row[len++] = '.';
-            row[len] = '\0';
+            (void)jr_display_activity_fit(row, SP_ACT_ROW_GLYPHS, s_act_sum[i]);
         }
         uint32_t age_min = 0u;
         if (!act_age_min(i, &age_min)) {
@@ -2712,10 +2797,7 @@ static void sp_compose(void)
     }
     const uint32_t w = __atomic_load_n(&s_status_word, __ATOMIC_ACQUIRE);
     const uint32_t vol = (w & 0xFFu) > 100u ? 100u : (w & 0xFFu);
-    uint32_t brt = (uint32_t)__atomic_load_n(&s_brightness_want, __ATOMIC_ACQUIRE);
-    if (brt > 100u) {
-        brt = 100u;
-    }
+    const uint32_t brt = (uint32_t)shade_light(w);
 
     /* BOTH NUMBERS MUST SURVIVE AT 100: the store holds 10 glyphs and "100%"
      * is 4. The icons beside the arcs say which is which. */
@@ -3193,6 +3275,9 @@ static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     if (((e * 32) >> 8) <= 0) {
         return;
     }
+    if (s_caption_lease && (s_shade_ease > 0 || s_detail_ease > 0)) {
+        return;                    /* the sheet's own hint owns this band */
+    }
     int face_left = 256 - (s_space_black > s_shade_ease ? s_space_black : s_shade_ease);
     if (face_left < 0) {
         face_left = 0;
@@ -3519,9 +3604,29 @@ const char *jr_display_split_name(unsigned index)
     return index < (unsigned)JR_DISPLAY_SPLIT_COUNT ? k_split_names[index] : NULL;
 }
 
-/* Charge the time since *mark to one split and move the mark. */
+#define JR_SPLIT_ARM_MS 8000u
+
+/* httpd: the next few seconds of frames are timed. */
+void jr_display_split_arm(void)
+{
+    __atomic_store_n(&s_split_deadline_ms,
+                     (uint32_t)(esp_timer_get_time() / 1000) + JR_SPLIT_ARM_MS,
+                     __ATOMIC_RELAXED);
+}
+
+/* The mark a part starts from: the clock while timing, else nothing read. */
+static inline int64_t split_now(void)
+{
+    return s_split_on ? esp_timer_get_time() : 0;
+}
+
+/* Charge the time since *mark to one split and move the mark. Unarmed it is one
+ * predictable branch. */
 static inline void split_mark(jr_display_split_t which, int64_t *mark)
 {
+    if (!s_split_on) {
+        return;
+    }
     const int64_t now = esp_timer_get_time();
     __atomic_add_fetch(&s_split_us[which], (uint32_t)(now - *mark),
                        __ATOMIC_RELAXED);
@@ -3535,7 +3640,7 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     if (e <= 0) {
         return;
     }
-    int64_t sm = esp_timer_get_time();
+    int64_t sm = split_now();
     /* THE SHEET OUTRANKS THE FACE.
      *
      * Tapping the focal object opens that space's detail sheet, but on WATCH
@@ -5014,10 +5119,7 @@ static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
     if (vol > 100) {
         vol = 100;
     }
-    int brt = (int)__atomic_load_n(&s_brightness_want, __ATOMIC_ACQUIRE);
-    if (brt > 100) {
-        brt = 100;
-    }
+    const int brt = shade_light(w);
     const bool swap = ctx->board.swap_color_bytes;
     const bool muted = sp_privacy_muted();
     const uint16_t priv = muted ? SP_C_GOLD : SP_C_CYAN;
@@ -5134,6 +5236,67 @@ static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
  * however many screens exist, and the active mark takes the SHORT way round —
  * so a wrap advances one step forward like every other move, instead of
  * rewinding past everything. Position on a ring should be drawn as a ring. */
+/* The rail's track never moves, so what glass_ring_row would do for it is
+ * recorded once (about 10 KB, in PSRAM, at start) and replayed: the identical
+ * fills and blends without the per-row geometry. NULL (no PSRAM, or the record
+ * did not fit) falls back to drawing the ring the long way. Internal RAM: this
+ * pointer, 4 bytes. */
+static uint8_t *s_orbit_rec;
+#define JR_ORBIT_REC 1      /* tells the host fixtures the recorded rail exists */
+
+static void orbit_rec_build(void)
+{
+    if (s_orbit_rec != NULL) {
+        return;
+    }
+    const size_t need = glass_ring_record(NULL, 0, SP_CX * 16, SP_CY * 16,
+                                          SP_ORB_TRACK_IN * 16, SP_ORB_TRACK_OUT * 16);
+    if (need == 0u) {
+        return;
+    }
+    uint8_t *buf = heap_caps_malloc(need, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        return;
+    }
+    if (glass_ring_record(buf, need, SP_CX * 16, SP_CY * 16,
+                          SP_ORB_TRACK_IN * 16, SP_ORB_TRACK_OUT * 16) != need) {
+        heap_caps_free(buf);
+        return;
+    }
+    s_orbit_rec = buf;
+}
+
+/* The rows the lit mark (a 10/256-turn arc at the track's radius, round caps)
+ * can touch, so the other ~390 rows do not ask the glass layer to find that out
+ * (a geometry lookup each). a_act is the mark's centre in 1/256 turns, 0 at
+ * 3 o'clock, clockwise. The bound is the ends' and any cardinal crossing's
+ * height, plus 6 px for the cap radius and the anti-aliasing ramp. */
+static void orbit_mark_rows(int a_act, int *y_lo, int *y_hi)
+{
+    const int a0 = a_act - 5, a1 = a_act + 5;
+    int s_min = sp_sin(a0), s_max = s_min;
+    const int s1 = sp_sin(a1);
+    if (s1 < s_min) {
+        s_min = s1;
+    }
+    if (s1 > s_max) {
+        s_max = s1;
+    }
+    const int n0 = a0 & 255;
+    if (((SP_A_TOP - n0) & 255) <= 10) {
+        s_min = -32768;               /* the top of the circle is inside the mark */
+    }
+    if (((64 - n0) & 255) <= 10) {
+        s_max = 32768;                /* ... or the bottom */
+    }
+    /* the lowest point is at the inner radius where the mark is above the
+     * centre line, the outer where it is below, so take both radii */
+    const int lo_in = (s_min * SP_ORB_MARK_IN) >> 15, lo_out = (s_min * SP_ORB_MARK_OUT) >> 15;
+    const int hi_in = (s_max * SP_ORB_MARK_IN) >> 15, hi_out = (s_max * SP_ORB_MARK_OUT) >> 15;
+    *y_lo = SP_CY + (lo_in < lo_out ? lo_in : lo_out) - 6;
+    *y_hi = SP_CY + (hi_in > hi_out ? hi_in : hi_out) + 6;
+}
+
 static void sp_draw_orbit(const jr_display_ctx_t *ctx, int y1, int y2,
                           uint16_t *pixels, int st)
 {
@@ -5150,6 +5313,8 @@ static void sp_draw_orbit(const jr_display_ctx_t *ctx, int y1, int y2,
     const int n = sp_ring_n(sp_desk_live());
     const int a_act = (s_orbit_a16 + 8) >> 4;
     const int32_t mark_start = (int32_t)(((a_act - 5) * 256) & 0xFFFF);
+    int mark_y_lo, mark_y_hi;
+    orbit_mark_rows(a_act, &mark_y_lo, &mark_y_hi);
     int dx16[16], dy16[16];
     const int nd = n < 16 ? n : 16;
     for (int i = 0; i < nd; ++i) {
@@ -5165,15 +5330,21 @@ static void sp_draw_orbit(const jr_display_ctx_t *ctx, int y1, int y2,
             continue;
         }
         /* The whole ring; the glass ring takes the rows it touches and no more. */
-        glass_ring_row(row, y, lo, hi, SP_CX * 16, SP_CY * 16, SP_ORB_TRACK_IN * 16,
-                       SP_ORB_TRACK_OUT * 16, 0, GLASS_TURN_Q16, SP_C_PLATE, (uint8_t)st, swap);
+        if (s_orbit_rec != NULL) {
+            glass_ring_replay_row(row, y, lo, hi, s_orbit_rec, SP_C_PLATE, (uint8_t)st, swap);
+        } else {
+            glass_ring_row(row, y, lo, hi, SP_CX * 16, SP_CY * 16, SP_ORB_TRACK_IN * 16,
+                           SP_ORB_TRACK_OUT * 16, 0, GLASS_TURN_Q16, SP_C_PLATE, (uint8_t)st, swap);
+        }
         for (int i = 0; i < nd; ++i) {
             if (y >= dy16[i] / 16 - 4 && y <= dy16[i] / 16 + 4) {
                 glass_disc_row(row, y, lo, hi, dx16[i], dy16[i], 40, cool, (uint8_t)st, swap);
             }
         }
-        glass_arc_row(row, y, lo, hi, SP_CX * 16, SP_CY * 16, SP_ORB_MARK_IN * 16,
-                      SP_ORB_MARK_OUT * 16, mark_start, 10 * 256, hot, (uint8_t)st, swap);
+        if (y >= mark_y_lo && y <= mark_y_hi) {
+            glass_arc_row(row, y, lo, hi, SP_CX * 16, SP_CY * 16, SP_ORB_MARK_IN * 16,
+                          SP_ORB_MARK_OUT * 16, mark_start, 10 * 256, hot, (uint8_t)st, swap);
+        }
     }
 }
 
@@ -5246,7 +5417,7 @@ static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
      * no face pixels to fold at all. */
     const int veil = ((settled && watch_art_is_content()) || s_space_black >= 256)
                          ? 0 : (s_space_veil * 32) >> 8;
-    int64_t sm = esp_timer_get_time();
+    int64_t sm = split_now();
     if (veil > 0) {
         sp_veil(ctx, y1, y2, pixels, veil);
     }
@@ -5668,21 +5839,52 @@ static void apply_shell_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                                               agent_native_color(agent_state));
     const int width = x2 - x1;
     const int rim_out = 2 * 230, rim_in = 2 * 224;
+    const int cx2 = (int)ctx->board.width - 1;      /* dx = 2x - cx2 */
 
     for (int y = y1; y < y2; ++y) {
         const int dy = 2 * y - ((int)ctx->board.height - 1);
         if (dy * dy > rim_out * rim_out) {
             continue;                  /* strip row misses the rim entirely */
         }
-        uint16_t *row = pixels + (size_t)(y - y1) * (size_t)width;
-        for (int col = 0; col < width; ++col) {
-            const int dx = 2 * (x1 + col) - ((int)ctx->board.width - 1);
-            const int r2 = dx * dx + dy * dy;
-            if (r2 < rim_in * rim_in || r2 > rim_out * rim_out) {
-                continue;
+        /* The band is at most two short runs a row, so bound them with integer
+         * square roots and test only inside them (the old loop tested every
+         * pixel of the row: 217,000 multiplies a frame to light 8,000). The
+         * outer bound is widened by a pixel and the inner hole narrowed by
+         * one, so the exact r2 test below still decides every pixel and the
+         * output cannot differ. */
+        const int a = sp_isqrt(rim_out * rim_out - dy * dy);
+        int lo = cx2 - a - 2;
+        lo = lo < 0 ? 0 : lo >> 1;
+        int hi = (cx2 + a + 2) >> 1;
+        int hole_lo = 1, hole_hi = 0;            /* empty: hole_lo > hole_hi */
+        const int i2 = rim_in * rim_in - dy * dy;
+        if (i2 > 0) {
+            const int h = sp_isqrt(i2) - 3;      /* |dx| <= h is surely inside r_in */
+            if (h >= 0 && h <= cx2) {
+                hole_lo = (cx2 - h + 1) >> 1;
+                hole_hi = (cx2 + h) >> 1;
             }
-            if (challenge_sector_from_vector(dx, dy) < completed) {
-                row[col] = accent;
+        }
+        if (lo < x1) {
+            lo = x1;
+        }
+        if (hi > x2 - 1) {
+            hi = x2 - 1;
+        }
+        uint16_t *row = pixels + (size_t)(y - y1) * (size_t)width;
+        for (int run = 0; run < 2; ++run) {
+            const int rlo = run == 0 ? lo : (hole_lo > hole_hi ? hi + 1 : (hole_hi + 1 > lo ? hole_hi + 1 : lo));
+            const int rhi = run == 0 ? (hole_lo > hole_hi ? hi : (hole_lo - 1 < hi ? hole_lo - 1 : hi)) : hi;
+            for (int x = rlo; x <= rhi; ++x) {
+                const int dx = 2 * x - cx2;
+                const int r2 = dx * dx + dy * dy;
+                if (r2 < rim_in * rim_in || r2 > rim_out * rim_out) {
+                    continue;
+                }
+                /* every sector lit (a finished job): nothing left to ask */
+                if (completed >= 8 || challenge_sector_from_vector(dx, dy) < completed) {
+                    row[x - x1] = accent;
+                }
             }
         }
     }
@@ -6824,6 +7026,7 @@ esp_err_t jr_display_start(jr_display_t *out_port)
         return ESP_OK;
     }
     (void)act_rtc_restore();   /* the receipt from before the sleep */
+    orbit_rec_build();         /* before the render task exists to read it */
 
     BaseType_t created = xTaskCreatePinnedToCore(
         display_task, "jr_present", JR_DISPLAY_TASK_STACK, &s_display,
@@ -7650,10 +7853,14 @@ void jr_display_links_set(const jr_display_links_t *links)
     nav_wake();
 }
 
-void jr_display_set_status(uint8_t volume)
+void jr_display_set_status(uint8_t volume, uint8_t brightness_cap)
 {
     if (volume > 100U) {
         volume = 100U;
     }
-    __atomic_store_n(&s_status_word, (uint32_t)volume, __ATOMIC_RELEASE);
+    if (brightness_cap > 100U) {
+        brightness_cap = 100U;
+    }
+    __atomic_store_n(&s_status_word,
+                     (uint32_t)volume | ((uint32_t)brightness_cap << 8), __ATOMIC_RELEASE);
 }

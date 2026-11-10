@@ -151,6 +151,19 @@ void glass_ring_row(uint16_t *row, int y, int clip_lo, int clip_hi,
                     int32_t start_q16, int32_t sweep_q16,
                     uint16_t color565, uint8_t alpha, bool swap_bytes);
 
+/* A full-turn ring that never changes (the orbit rail), recorded once and
+ * replayed. glass_ring_record() runs the real glass_ring_row over every panel
+ * row and keeps what it would do: the solid runs it fills and the edge pixels
+ * with their coverage. glass_ring_replay_row() does exactly those fills and
+ * blends, so the pixels are the same as glass_ring_row's for any colour, alpha
+ * and clip. With buf == NULL it only measures. Returns the bytes used (the
+ * caller allocates that many, 2-byte aligned) or 0 if cap is too small. */
+size_t glass_ring_record(uint8_t *buf, size_t cap, int32_t cx16, int32_t cy16,
+                         int32_t r_in16, int32_t r_out16);
+void glass_ring_replay_row(uint16_t *row, int y, int clip_lo, int clip_hi,
+                           const uint8_t *rec, uint16_t color565, uint8_t alpha,
+                           bool swap_bytes);
+
 /* The same span with round caps (cap radius = half the stroke). A sweep of a
  * full turn or more has no ends and equals the ring. */
 void glass_arc_row(uint16_t *row, int y, int clip_lo, int clip_hi,
