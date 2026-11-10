@@ -507,8 +507,28 @@ typedef struct {
     int  temp_f;
     bool dial_baked;         /* the baked dial is under the hands          */
     bool shadow;             /* the hands cast shadows: the awake cadence  */
+    bool alive;              /* the dial's own motion (SKELETON's balance
+                              * wheel, CELESTIAL's stars) runs: the awake
+                              * cadence; false holds it still               */
     const hud_light_t *light; /* where the room's light is; NULL = at rest  */
 } hud_watch_t;
+
+/* THE LIVE ORNAMENTS (2026-11-10). SKELETON's balance wheel: a baked sprite
+ * rotated about the dial's recess and alpha-blended under the hands.
+ * hud_balance_angle_q16 is the swing, +-HUD_BALANCE_SWING_Q16 (45 degrees,
+ * positive clockwise), one sine per BAL_PERIOD (1 s) read off the clock, so it
+ * is the same on every strip and zero at the top of every second.
+ * hud_balance_blit draws the wheel at an angle into rows [y0, y0 + nrows) and
+ * returns how many dial pixels it visited. CELESTIAL's stars: hud_celestial_
+ * star_level is star i's glint 0..254 at that clock; twinkle adds the glints
+ * and returns the pixels it touched. Same strip contract as every overlay. */
+#define HUD_BALANCE_SWING_Q16 8192
+int32_t hud_balance_angle_q16(int ss, int ms);
+int     hud_balance_blit(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                         int32_t angle_q16);
+int     hud_celestial_star_level(int i, int ss, int ms);
+int     hud_celestial_twinkle(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                              int ss, int ms);
 
 void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                        const hud_watch_t *w, int strength, int style);

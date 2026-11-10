@@ -17,8 +17,10 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 add_executable(jr_display_hud_tests
     test_hud_render.c
     ../src/hud_render.c
+    ../src/balance_wheel_data.c
 )
-target_include_directories(jr_display_hud_tests PRIVATE ../include)
+target_include_directories(jr_display_hud_tests PRIVATE ../include ../src)
+target_link_libraries(jr_display_hud_tests PRIVATE m)
 target_compile_options(jr_display_hud_tests PRIVATE -Wall -Wextra -Werror)
 
 # The spatial shell lives in jr_display.c, which does touch IDF. It is pulled
@@ -28,6 +30,7 @@ target_compile_options(jr_display_hud_tests PRIVATE -Wall -Wextra -Werror)
 add_executable(jr_display_shell_tests
     test_shell.c
     ../src/hud_render.c
+    ../src/balance_wheel_data.c
     ../src/companion.c
     ../src/glass_font.c
     ../src/glass_draw.c

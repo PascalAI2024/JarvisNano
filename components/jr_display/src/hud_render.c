@@ -18,6 +18,8 @@
  * blend policy (later == on top), which keeps the hot path branch-free.
  */
 #include "jr_display/hud_render.h"
+#include "balance_wheel_data.h"      /* SKELETON: the wheel sprite    */
+#include "celestial_stars_data.h"    /* CELESTIAL: the twinkling stars */
 
 #include <string.h>
 
@@ -2215,8 +2217,8 @@ static bool watch_hand_spec(int style, int hand, hand_spec_t *h)
              * wide cream lume fill keep the hands readable, an ice-blue
              * hairline seconds is the one cool colour on the dial */
         h->body = (wrgb_t){ 232, 160, 128 }; h->bevel = 70; h->outline = true; h->shadow = true;
-        if (hand == 0) { h->u0 = -14 * 16; h->u1 = 108 * 16; h->w0 = 7 * 16; h->w1 = 4 * 16; h->lume_u0 = 22 * 16; h->lume_u1 = 94 * 16; h->lume_w = 4 * 16; }
-        else if (hand == 1) { h->u0 = -14 * 16; h->u1 = 168 * 16; h->w0 = 6 * 16; h->w1 = 3 * 16; h->lume_u0 = 26 * 16; h->lume_u1 = 152 * 16; h->lume_w = 3 * 16 + 8; }
+        if (hand == 0) { h->u0 = -14 * 16; h->u1 = 108 * 16; h->w0 = 8 * 16 + 8; h->w1 = 4 * 16 + 12; h->lume_u0 = 22 * 16; h->lume_u1 = 94 * 16; h->lume_w = 5 * 16; }
+        else if (hand == 1) { h->u0 = -14 * 16; h->u1 = 168 * 16; h->w0 = 7 * 16 + 4; h->w1 = 3 * 16 + 10; h->lume_u0 = 26 * 16; h->lume_u1 = 152 * 16; h->lume_w = 4 * 16 + 4; }
         else { h->body = (wrgb_t){ 170, 225, 255 }; h->u0 = -34 * 16; h->u1 = 186 * 16; h->w0 = 36; h->w1 = 18; h->outline = false; h->shadow = false; }
         return true;
     case 7: /* CELESTIAL: slim polished gold leaves, a fine gold seconds */
@@ -2242,6 +2244,217 @@ void hud_watch_hand(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     h.shadow = h.shadow && shadow;
     const strip_t s = { dst, y0, y0 + nrows };
     draw_hand(&s, WATCH_CX16, WATCH_CY16, angle_q16, &h, 255, swap_bytes, NULL);
+}
+
+/* THE BALANCE WHEEL (SKELETON). A baked sprite (balance_wheel_data.c, cut by
+ * firmware/mascot/gen_balance_wheel.py) rotated about the recess centre and
+ * alpha-blended over the baked dial, under the hands. Integer only, no heap,
+ * no framebuffer: each destination pixel is inverse-mapped into the sprite
+ * with a fixed-point rotation walked along the row (no multiply per pixel for
+ * the mapping), sampled bilinearly, and blended straight into the strip, so
+ * a strip render equals the whole-frame render by construction. */
+#define BAL_R_DEST      (JR_BALANCE_R + 1)         /* rows/cols visited       */
+#define BAL_PERIOD_MS   1000                        /* one swing per second    */
+
+/* The wheel needs a true rotation: the shared sine LUT above is a coarse
+ * Bhaskara fit (good for a hand, but its two quarter-wave halves are one step
+ * apart, so sin and cos at 45 degrees are not equal and the sprite would
+ * shear by a pixel at the rim). This is sin(pi * i / 128) for i = 0..64,
+ * rounded, mirrored into the other quadrants, linearly interpolated: error
+ * under 1e-4 of full scale. */
+static const int16_t k_bal_sin[65] = {
+    0, 804, 1608, 2410, 3212, 4011, 4808, 5602,
+    6393, 7179, 7962, 8739, 9512, 10278, 11039, 11793,
+    12539, 13279, 14010, 14732, 15446, 16151, 16846, 17530,
+    18204, 18868, 19519, 20159, 20787, 21403, 22005, 22594,
+    23170, 23731, 24279, 24811, 25329, 25832, 26319, 26790,
+    27245, 27683, 28105, 28510, 28898, 29268, 29621, 29956,
+    30273, 30571, 30852, 31113, 31356, 31580, 31785, 31971,
+    32137, 32285, 32412, 32521, 32609, 32678, 32728, 32757,
+    32767,
+};
+
+static int32_t bal_sin(uint32_t a16)
+{
+    const uint32_t q = (a16 >> 14) & 3u;
+    const uint32_t w = a16 & 0x3FFFu;
+    const uint32_t pos = (q & 1u) ? 0x4000u - w : w;           /* 0..16384 */
+    const uint32_t i = pos >> 8, f = pos & 255u;
+    const int32_t s0 = k_bal_sin[i];
+    const int32_t s1 = k_bal_sin[i < 64u ? i + 1u : 64u];
+    const int32_t v = s0 + (((s1 - s0) * (int32_t)f) >> 8);
+    return (q & 2u) ? -v : v;
+}
+
+static inline int32_t bal_cos(uint32_t a16)
+{
+    return bal_sin(a16 + 0x4000u);
+}
+
+int32_t hud_balance_angle_q16(int ss, int ms)
+{
+    ss = ((ss % 60) + 60) % 60;
+    ms = ms < 0 ? 0 : ms > 999 ? 999 : ms;
+    const int t = (ss * 1000 + ms) % BAL_PERIOD_MS;
+    const uint32_t phase = (uint32_t)(((int64_t)t * 65536) / BAL_PERIOD_MS);
+    return (int32_t)(((int64_t)HUD_BALANCE_SWING_Q16 * bal_sin(phase)) >> 15);
+}
+
+static inline uint16_t bal_blend(uint16_t d, uint16_t sp, uint32_t a5)
+{
+    /* both in host order; a5 0..32. The 0x07E0F81F idiom blends the three
+     * fields with one multiply. */
+    const uint32_t dd = ((uint32_t)d | ((uint32_t)d << 16)) & 0x07E0F81Fu;
+    const uint32_t ss = ((uint32_t)sp | ((uint32_t)sp << 16)) & 0x07E0F81Fu;
+    const uint32_t r = (((ss - dd) * a5 >> 5) + dd) & 0x07E0F81Fu;
+    return (uint16_t)(r | (r >> 16));
+}
+
+int hud_balance_blit(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                     int32_t angle_q16)
+{
+    if (dst == NULL || nrows <= 0) {
+        return 0;
+    }
+    const int cx = JR_BALANCE_DIAL_CX, cy = JR_BALANCE_DIAL_CY;
+    const int ya = y0 > cy - BAL_R_DEST ? y0 : cy - BAL_R_DEST;
+    const int yb = (y0 + nrows - 1) < cy + BAL_R_DEST ? (y0 + nrows - 1) : cy + BAL_R_DEST;
+    if (ya > yb) {
+        return 0;
+    }
+    const uint32_t a16 = (uint32_t)angle_q16 & 0xFFFFu;
+    const int32_t c = bal_cos(a16), sn = bal_sin(a16);          /* Q15 */
+    const int32_t base = (int32_t)JR_BALANCE_C << 15;
+    int visited = 0;
+    for (int y = ya; y <= yb; ++y) {
+        const int dy = y - cy;
+        const int rem = BAL_R_DEST * BAL_R_DEST - dy * dy;
+        int hx = 0;
+        while ((hx + 1) * (hx + 1) <= rem) {
+            ++hx;
+        }
+        const int x0 = cx - hx, x1 = cx + hx;
+        int32_t u = base + (x0 - cx) * c + dy * sn;
+        int32_t v = base - (x0 - cx) * sn + dy * c;
+        uint16_t *px = dst + (size_t)(y - y0) * HUD_W + x0;
+        for (int x = x0; x <= x1; ++x, ++px, u += c, v -= sn) {
+            ++visited;
+            const int ix = u >> 15, iy = v >> 15;
+            const size_t k = (size_t)iy * JR_BALANCE_SIZE + (size_t)ix;
+            const uint32_t a00 = jr_balance_alpha[k], a10 = jr_balance_alpha[k + 1];
+            const uint32_t a01 = jr_balance_alpha[k + JR_BALANCE_SIZE];
+            const uint32_t a11 = jr_balance_alpha[k + JR_BALANCE_SIZE + 1];
+            if ((a00 | a10 | a01 | a11) == 0u) {
+                continue;                       /* a window in the wheel */
+            }
+            const uint32_t fx = (uint32_t)(u >> 7) & 255u, fy = (uint32_t)(v >> 7) & 255u;
+            const uint32_t w00 = (256u - fx) * (256u - fy), w10 = fx * (256u - fy);
+            const uint32_t w01 = (256u - fx) * fy, w11 = fx * fy;      /* sum 65536 */
+            const uint32_t a = (a00 * w00 + a10 * w10 + a01 * w01 + a11 * w11 + 32768u) >> 16;
+            if (a < 4u) {
+                continue;
+            }
+            const uint16_t p00 = jr_balance_rgb[k], p10 = jr_balance_rgb[k + 1];
+            const uint16_t p01 = jr_balance_rgb[k + JR_BALANCE_SIZE];
+            const uint16_t p11 = jr_balance_rgb[k + JR_BALANCE_SIZE + 1];
+            const uint32_t r5 = (((p00 >> 11) & 31u) * w00 + ((p10 >> 11) & 31u) * w10 +
+                                 ((p01 >> 11) & 31u) * w01 + ((p11 >> 11) & 31u) * w11 + 32768u) >> 16;
+            const uint32_t g6 = (((p00 >> 5) & 63u) * w00 + ((p10 >> 5) & 63u) * w10 +
+                                 ((p01 >> 5) & 63u) * w01 + ((p11 >> 5) & 63u) * w11 + 32768u) >> 16;
+            const uint32_t b5 = ((p00 & 31u) * w00 + (p10 & 31u) * w10 +
+                                 (p01 & 31u) * w01 + (p11 & 31u) * w11 + 32768u) >> 16;
+            const uint16_t sp = (uint16_t)((r5 << 11) | (g6 << 5) | b5);
+            const uint32_t a5 = (a + 4u) >> 3;                          /* 0..32 */
+            if (a5 >= 32u) {
+                *px = swap_bytes ? (uint16_t)((sp >> 8) | (sp << 8)) : sp;
+                continue;
+            }
+            const uint16_t d = swap_bytes ? (uint16_t)((*px >> 8) | (*px << 8)) : *px;
+            const uint16_t o = bal_blend(d, sp, a5);
+            *px = swap_bytes ? (uint16_t)((o >> 8) | (o << 8)) : o;
+        }
+    }
+    return visited;
+}
+
+/* THE STARS (CELESTIAL). A few of the dial's brightest baked stars get a slow
+ * glint: additive, a cool white, full on the star pixel, 5/8 on its four
+ * neighbours, then (as the glint peaks) 3/8 on the diagonals and 1/4 on the
+ * arm tips: a soft five-pixel cross at most, each star
+ * on its own period (2 to 5 s) and phase. The level is a squared sine, so a
+ * star spends most of its time dark and rises to a short soft flash: the
+ * dial reads as alive without anything blinking. The table is picked at bake
+ * time from the baked frame (gen_celestial_stars.py). Pure functions of the
+ * clock, no state, per-star row culling: a strip render equals the whole
+ * frame. */
+int hud_celestial_star_level(int i, int ss, int ms)
+{
+    if (i < 0 || i >= HUD_STAR_COUNT) {
+        return 0;
+    }
+    luts_build();
+    ss = ((ss % 60) + 60) % 60;
+    ms = ms < 0 ? 0 : ms > 999 ? 999 : ms;
+    const hud_star_t *st = &s_stars[i];
+    const int t = (ss * 1000 + ms) % (int)st->period_ms;
+    const uint32_t ph = (((uint32_t)t * 65536u) / st->period_ms + st->phase_q16) & 0xFFFFu;
+    const int l = (sin_q16(ph) + 32768) >> 8;                  /* 0..255 */
+    return ((l * l >> 8) * st->strength) >> 8;                 /* 0..254 */
+}
+
+static inline void star_add(uint16_t *px, int add_r, int add_g, int add_b, bool swap)
+{
+    const uint16_t p = swap ? (uint16_t)((*px >> 8) | (*px << 8)) : *px;
+    int r = ((p >> 11) & 31) << 3, g = ((p >> 5) & 63) << 2, b = (p & 31) << 3;
+    r += add_r; g += add_g; b += add_b;
+    r = r > 255 ? 255 : r; g = g > 255 ? 255 : g; b = b > 255 ? 255 : b;
+    const uint16_t o = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+    *px = swap ? (uint16_t)((o >> 8) | (o << 8)) : o;
+}
+
+int hud_celestial_twinkle(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                          int ss, int ms)
+{
+    if (dst == NULL || nrows <= 0) {
+        return 0;
+    }
+    int touched = 0;
+    for (int i = 0; i < HUD_STAR_COUNT; ++i) {
+        const int sy = s_stars[i].y, sx = s_stars[i].x;
+        if (sy + 2 < y0 || sy - 2 >= y0 + nrows) {
+            continue;                                   /* not in this strip */
+        }
+        const int a = hud_celestial_star_level(i, ss, ms);
+        if (a < 12) {
+            continue;
+        }
+        for (int dy = -2; dy <= 2; ++dy) {
+            const int y = sy + dy;
+            if (y < y0 || y >= y0 + nrows) {
+                continue;
+            }
+            for (int dx = -2; dx <= 2; ++dx) {
+                const int d = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);   /* 0..4 */
+                int k;                                  /* 0..256 of the glint */
+                if (d == 0) {
+                    k = 256;
+                } else if (d == 1) {
+                    k = 160;
+                } else if (d == 2 && dx != 0 && dy != 0 && a > 100) {
+                    k = 96;                             /* the diagonals */
+                } else if (d == 2 && a > 140) {
+                    k = 64;                             /* the arm tips, brightest only */
+                } else {
+                    continue;
+                }
+                const int amp = (a * k) >> 8;
+                star_add(dst + (size_t)(y - y0) * HUD_W + (sx + dx),
+                         (amp * 190) >> 9, (amp * 210) >> 9, (amp * 255) >> 9, swap_bytes);
+                ++touched;
+            }
+        }
+    }
+    return touched;
 }
 
 /* What a frame of the watch derives from its inputs, kept across the
@@ -2334,6 +2547,16 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 
     if (!w->dial_baked) {
         fallback_dial(&s, style, A, swap_bytes);
+    }
+
+    /* The two live ornaments sit on the baked dial and under every hand. They
+     * move only at the awake cadence (w->alive); a resting watch holds them
+     * still, like the shadows. */
+    if (style == 6 && w->dial_baked) {
+        (void)hud_balance_blit(dst, y0, nrows, swap_bytes,
+                               w->alive ? hud_balance_angle_q16(w->ss, w->ms) : 0);
+    } else if (style == 7 && w->dial_baked && w->alive) {
+        (void)hud_celestial_twinkle(dst, y0, nrows, swap_bytes, w->ss, w->ms);
     }
 
     if (style == 3) {

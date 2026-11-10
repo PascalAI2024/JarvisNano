@@ -3490,6 +3490,7 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     const uint32_t pw = __atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE);
     const jr_display_weather_t *wx =
         &s_weather[__atomic_load_n(&s_weather_slot, __ATOMIC_ACQUIRE) & 1u];
+    const bool awake = jr_display_render_fps() >= JR_DISPLAY_RENDER_FPS;
     const hud_watch_t hw = {
         .hh = (int)((w >> 8) & 0xFFu),
         .mm = (int)(w & 0xFFu),
@@ -3502,7 +3503,8 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
         /* shadows at the awake cadence only: the ladder's slower frames are
          * a resting watch nobody is studying, and the shadow is the widest
          * blend a hand carries */
-        .shadow = jr_display_render_fps() >= JR_DISPLAY_RENDER_FPS,
+        .shadow = awake,
+        .alive = awake,         /* SKELETON's wheel and CELESTIAL's stars rest with the shadows */
         .light = &s_light,
     };
     watch_sun_arc(ctx, y1, y2, pixels, style, strength, hw.hh, hw.mm);

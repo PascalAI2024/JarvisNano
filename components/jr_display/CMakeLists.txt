@@ -14,6 +14,7 @@ idf_component_register(
         "src/glass_font.c"
         "src/glass_draw.c"
         "src/glass_font_data.c"
+        "src/balance_wheel_data.c"
         "${JARVIS_BOARD_ROOT}/src/jarvis_board.c"
     EMBED_FILES
         "${CMAKE_CURRENT_LIST_DIR}/../../firmware/mascot/reactive/dial_skeleton.eaf"

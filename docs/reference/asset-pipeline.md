@@ -121,6 +121,18 @@ none: the heatshrink sink cast copies out of it and RAW/RLE blocks never use
 it). Host tests get the real file bytes from `jr_host_embedded_dial()` in
 `probe/stubs/idf_stubs.inc`; the vendor decoder itself is stubbed on the host.
 
+### The balance wheel and the stars are not clips (2026-11-10)
+
+Neither ornament is an EAF. `gen_balance_wheel.py` bakes the SKELETON wheel to
+a const RGB565 + alpha sprite in `components/jr_display/src/balance_wheel_data.c`
+(145 x 145, about 60 KB of flash; `--check` fails if the files are stale,
+`--preview` lays it on the dial). `gen_celestial_stars.py` writes the 32-star
+table `celestial_stars_data.h` from `dial_celestial_preview.png`. Both read
+files in `docs/evidence/` and the baked previews; rerun them after re-baking a
+dial. `balance_wheel_data.c` is in the component CMake sources and in the host
+compile lists (`tests/CMakeLists.txt`, `main/tests/test_*.py`); the stars
+table is a header only `hud_render.c` includes.
+
 ---
 
 ## Primary sources
