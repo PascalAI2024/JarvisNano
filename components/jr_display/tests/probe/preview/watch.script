@@ -1,0 +1,19 @@
+# watch styles: WATCH, then swipe right through all eight styles
+scene watch-jarvis
+wait 1500
+swipe right
+wait 1200
+swipe right
+wait 1200
+swipe right
+wait 1200
+swipe right
+wait 1200
+swipe right
+wait 1200
+swipe right
+wait 1200
+swipe right
+wait 1200
+swipe right
+wait 1200

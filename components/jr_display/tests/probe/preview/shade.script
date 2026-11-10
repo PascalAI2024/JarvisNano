@@ -1,0 +1,13 @@
+# the control shade: open, hold, close; then the same over WATCH
+scene home
+wait 1000
+open shade
+wait 2000
+close shade
+wait 1500
+swipe down        # home -> WATCH
+wait 1500
+open shade
+wait 2000
+close shade
+wait 1500
