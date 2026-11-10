@@ -71,11 +71,11 @@ def run(root: Path, output: Path, mutation: str | None) -> int:
         after = "jr_display_nav_next();\n        } else {\n            jr_display_nav_next();"
         assert helpers.count(before) == 1
         helpers = helpers.replace(before, after)
-    elif mutation == "detail-dismiss-controls-caption":
-        before = "if (overlay == JR_DISPLAY_OVERLAY_DETAIL) {\n            shell_caption_space();"
-        after = ('if (overlay == JR_DISPLAY_OVERLAY_DETAIL) {\n'
-                 '            jr_display_caption_set("CONTROLS - UP TO CLOSE");')
-        assert helpers.count(before) == 1
+    elif mutation == "dismiss-names-a-caption":
+        before = "} else {\n        jr_display_nav_down();\n    }"
+        after = ("} else {\n        jr_display_caption_set(" + chr(34) + "CONTROLS CLOSED" + chr(34) + ");\n"
+                 "        jr_display_nav_down();\n    }")
+        assert helpers.count(before) == 1, "shell_dismiss shape changed"
         helpers = helpers.replace(before, after)
     template = (root / "main/tests/test_shell_input.c.in").read_text(
         encoding="utf-8")
@@ -120,7 +120,7 @@ def run(root: Path, output: Path, mutation: str | None) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mutation", choices=(
-        "detail-down-advances", "detail-dismiss-controls-caption"))
+        "detail-down-advances", "dismiss-names-a-caption"))
     parser.add_argument("--output-dir", type=Path,
                         help="retain generated source/binary/result as evidence")
     args = parser.parse_args()

@@ -24,7 +24,7 @@ typedef struct {
     int entry_ms;     /* -1 = settled, else the data screen's entry clock */
     int shade_ms;     /* -1 = settled */
     bool ota;
-    int watch_in;     /* WATCH only: clock fade-in progress 1..255 at the frame start, 0 = settled */
+    int watch_in;     /* WATCH only: how far the slide in from home has run at the frame start, 1..255, 0 = settled */
     int agent;        /* agent rim progress percent, 0 = no agent rim (the shell word's AGENT bit) */
     int lease;        /* an operator lease caption (CODEX MODE - DOUBLE TAP TO EXIT) is up, settled */
     int dim;          /* the brightness the mood ladder has dimmed the panel to, percent; 0 = 60 */
@@ -42,9 +42,9 @@ static const fc_scene_t FC_SCENES[] = {
     { "watch-future",  JR_DISPLAY_SPACE_WATCH,   JR_DISPLAY_OVERLAY_NONE,   JR_WATCH_FUTURE,  74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0, 0 },
     { "watch-skeleton",JR_DISPLAY_SPACE_WATCH,   JR_DISPLAY_OVERLAY_NONE,   JR_WATCH_SKELETON,74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0, 0 },
     { "watch-celestial",JR_DISPLAY_SPACE_WATCH,  JR_DISPLAY_OVERLAY_NONE,   JR_WATCH_CELESTIAL,74,true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0, 0 },
-    { "watch-jarvis-in",  JR_DISPLAY_SPACE_WATCH, JR_DISPLAY_OVERLAY_NONE,  JR_WATCH_JARVIS,  74, true,  false, FC_SETTLED, FC_SETTLED, false, 60, 0, 0, 0 },
-    { "watch-minimal-in", JR_DISPLAY_SPACE_WATCH, JR_DISPLAY_OVERLAY_NONE,  JR_WATCH_MINIMAL, 74, true,  false, FC_SETTLED, FC_SETTLED, false, 140, 0, 0, 0 },
-    { "watch-dress-in",   JR_DISPLAY_SPACE_WATCH, JR_DISPLAY_OVERLAY_NONE,  JR_WATCH_DRESS,   74, true,  false, FC_SETTLED, FC_SETTLED, false, 100, 0, 0, 0 },
+    { "watch-jarvis-in",  JR_DISPLAY_SPACE_WATCH, JR_DISPLAY_OVERLAY_NONE,  JR_WATCH_JARVIS, 150, true,  false, FC_SETTLED, FC_SETTLED, false, 60, 0, 0, 0 },
+    { "watch-minimal-in", JR_DISPLAY_SPACE_WATCH, JR_DISPLAY_OVERLAY_NONE,  JR_WATCH_MINIMAL, 150, true,  false, FC_SETTLED, FC_SETTLED, false, 140, 0, 0, 0 },
+    { "watch-dress-in",   JR_DISPLAY_SPACE_WATCH, JR_DISPLAY_OVERLAY_NONE,  JR_WATCH_DRESS, 150, true,  false, FC_SETTLED, FC_SETTLED, false, 100, 0, 0, 0 },
     { "weather",       JR_DISPLAY_SPACE_WEATHER, JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0, 0 },
     { "weather-ent",   JR_DISPLAY_SPACE_WEATHER, JR_DISPLAY_OVERLAY_NONE,   0,                74, true,  false, 180,        FC_SETTLED, false, 0, 0, 0, 0 },
     { "status-5",      JR_DISPLAY_SPACE_STATUS,  JR_DISPLAY_OVERLAY_NONE,   0,                5,  false, false, FC_SETTLED, FC_SETTLED, false, 0, 0, 0, 0 },
@@ -204,7 +204,16 @@ static void fc_setup(const fc_scene_t *sc)
     s_orbit_a16 = sp_orbit_angle(space, false) * 16;
     s_clock_ease = 0;
     s_clock_prog = 0;
+    s_style_shown = s_style_seen = s_style_from = (uint8_t)sc->style;
+    s_style_prog = 256;
+    s_style_black = 0;
+    s_watch_s = 0;
+    s_dial_want = (uint32_t)JR_FACE_COUNT;
     s_caption_ease = s_caption_prog = 0;
+    s_cap_p = 256;
+    s_cap_dip = s_cap_pend = false;
+    s_cap_hold_ms = 0U;
+    s_cap_alpha = 0;
     jr_display_caption_clear();         /* a lease scene before this one must not leak its caption */
     s_ask_ease = 0;
     s_canvas_ease = 0;
@@ -283,7 +292,13 @@ static inline __attribute__((always_inline)) void fc_frame_body(const fc_scene_t
     jr_display_clock_set(true, 10, 8, (int)((ms / 1000) % 60));
     s_clock_set_ms = (uint32_t)((ms / 1000) * 1000);
     if (sc->space == JR_DISPLAY_SPACE_WATCH) {
-        s_clock_prog = sc->watch_in > 0 ? sc->watch_in : 256;
+        s_clock_prog = 256;
+        if (sc->watch_in > 0) {
+            /* a slide from home into WATCH, watch_in of 256 along when the frame starts */
+            s_space_from = (uint8_t)JR_DISPLAY_SPACE_JARVIS;
+            s_space_prog = sc->watch_in;
+            s_space_dir = 1;
+        }
     }
     s_entry_ms = sc->entry_ms < 0 ? SP_ENTRY_TOTAL_MS : (uint32_t)sc->entry_ms;
     s_shade_ms = sc->shade_ms < 0 ? SP_SHADE_ENTRY_MS : (uint32_t)sc->shade_ms;

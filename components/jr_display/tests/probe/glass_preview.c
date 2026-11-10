@@ -161,11 +161,12 @@ static void pv_env(void)
     else jr_display_power_set((uint8_t)s_batt, s_batt < 20 ? 3500U : 4020U, true, s_chg);
 }
 
+/* main.c's shell_caption_space: the screen's name, as a label (it times itself out). */
 static void pv_caption_space(void)
 {
     static const char *const nm[JR_DISPLAY_SPACE_COUNT] = { "JARVIS", "", "WEATHER", "STATUS", "DESK", "ACTIVITY" };
     const jr_display_space_t sp = jr_display_nav_space();
-    jr_display_caption_set(sp < JR_DISPLAY_SPACE_COUNT ? nm[sp] : "JARVIS");
+    jr_display_caption_label(sp < JR_DISPLAY_SPACE_COUNT ? nm[sp] : "JARVIS", JR_DISPLAY_LABEL_SCREEN);
 }
 
 /* main.c's swipe handler for a centre swipe, in its order (overlay branch, then
@@ -175,6 +176,7 @@ static void pv_swipe(const char *dir)
     const bool up = !strcmp(dir, "up"), down = !strcmp(dir, "down");
     const bool horiz = !up && !down;
     const jr_display_overlay_t overlay = jr_display_nav_overlay();
+    const jr_display_space_t space_before = jr_display_nav_space();
     bool style_changed = false;
     if (overlay == JR_DISPLAY_OVERLAY_SHADE) {
         if (!horiz) jr_display_nav_up();           /* either vertical leaves the shade */
@@ -182,7 +184,6 @@ static void pv_swipe(const char *dir)
     } else if (horiz) {
         if (overlay == JR_DISPLAY_OVERLAY_NONE && jr_display_nav_space() == JR_DISPLAY_SPACE_WATCH) {
             jr_display_watch_style_step(!strcmp(dir, "right") ? 1 : -1);
-            jr_display_bloom();
             style_changed = true;
         }
         /* a peek of any other screen arms a 10 s clock in production: not modelled */
@@ -195,11 +196,10 @@ static void pv_swipe(const char *dir)
     if (style_changed) {
         char cap[24];
         snprintf(cap, sizeof cap, "WATCH - %s", jr_display_watch_style_name(jr_display_watch_style()));
-        jr_display_caption_set(cap);
-    } else if (jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_SHADE) {
-        jr_display_caption_set("SHADE - UP TO CLOSE");
-    } else if (jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_DETAIL) {
-        jr_display_caption_set("DETAIL - DOWN TO CLOSE");
+        jr_display_caption_label(cap, JR_DISPLAY_LABEL_WATCH_STYLE);
+    } else if (jr_display_nav_space() == space_before && jr_display_nav_overlay() != overlay) {
+        /* a sheet or the shade opened or closed over the same screen: each carries
+         * its own hint line, and none lingers (main.c: the same condition) */
     } else if (!horiz) {
         pv_caption_space();
     }
@@ -207,6 +207,13 @@ static void pv_swipe(const char *dir)
 
 /* ---- one frame ---- */
 static uint16_t *s_pv_fb;
+
+#ifdef PV_COST
+/* Built by hand with -DPV_COST under callgrind (docs/reference/glass-preview.md):
+ * every recorded frame's instruction count is dumped on its own, so the worst
+ * frame of a transition is read off, not guessed. */
+#include <valgrind/callgrind.h>
+#endif
 
 static void pv_frame(int64_t t_us, bool record, uint16_t *fb)
 {
@@ -217,8 +224,13 @@ static void pv_frame(int64_t t_us, bool record, uint16_t *fb)
     const bool watch = jr_display_nav_space() == JR_DISPLAY_SPACE_WATCH;
     if (watch) jr_display_clock_set(true, 10, 8, (int)((ms / 1000) % 60));
     else jr_display_clock_set(false, 0, 0, 0);
+#ifdef PV_COST
+    if (record) CALLGRIND_ZERO_STATS;
+#endif
 
-    const jr_face_t dial = watch ? fc_dial_of_style((int)jr_display_watch_style()) : JR_FACE_COUNT;
+    /* the presenter binds the dial the compositor asked for on its last frame
+     * (watch_publish, via watch_dial_face): one frame of latency, no more */
+    const jr_face_t dial = watch_dial_face();
     uint16_t *dbuf = dial != JR_FACE_COUNT ? pv_dial(dial) : NULL;
     if (dbuf) {
         s_dial_frame = dbuf;
@@ -250,6 +262,13 @@ static void pv_frame(int64_t t_us, bool record, uint16_t *fb)
     }
     s_frame++;
     if (!record) return;
+#ifdef PV_COST
+    {
+        char nm[32];
+        snprintf(nm, sizeof nm, "f%ld", s_recorded);
+        CALLGRIND_DUMP_STATS_AT(nm);
+    }
+#endif
     static unsigned char *rgb;
     if (!rgb) rgb = malloc(466u * 466u * 3u);
     for (int i = 0; i < 466 * 466; i++) {
@@ -332,11 +351,9 @@ int main(int argc, char **argv)
             if (a == JR_DISPLAY_ACT_PRIVACY_TOGGLE) { s_mute = !s_mute; pv_env(); }
             printf("NOTE tap %d %d -> action %d\n", s->x, s->y, (int)a);
         } else if (!strcmp(s->verb, "open")) {
-            jr_display_nav_down();
-            jr_display_caption_set("CONTROLS - UP TO CLOSE");
+            jr_display_nav_down();     /* the shade names its own way out: no caption */
         } else if (!strcmp(s->verb, "close")) {
-            jr_display_nav_up();
-            jr_display_caption_set("CONTROLS CLOSED");
+            jr_display_nav_up();       /* and its leaving is the message */
         } else if (!strcmp(s->verb, "home")) {
             jr_display_nav_home();
             pv_caption_space();
