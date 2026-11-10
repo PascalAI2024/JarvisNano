@@ -38,6 +38,13 @@
  * dial; they are not on the glass. Measure on any baked dial: the "dial" layer. */
 #define JR_KNOB_DIAL_SPAN       (1u << 5)
 
+/* hud_render.c aa_fill (every hand, the polygons): pixels all sample lines of a
+ * row cover whole are written once instead of once per line, so a wide row
+ * writes the coverage row once, not sixteen times. Measure on PILOT, DIVER,
+ * FUTURE (the hands inside clock_face). */
+#define JR_KNOB_AA_INTERIOR     (1u << 6)
+
 #define JR_KNOB_KNOWN_MASK      (JR_KNOB_DIAL_REC | JR_KNOB_HUD_FILL_OLD | \
                                  JR_KNOB_GLASS_FILL_OLD | JR_KNOB_DISC_ROW_OLD | \
-                                 JR_KNOB_BAL_CLASS | JR_KNOB_DIAL_SPAN)
+                                 JR_KNOB_BAL_CLASS | JR_KNOB_DIAL_SPAN | \
+                                 JR_KNOB_AA_INTERIOR)

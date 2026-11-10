@@ -1776,20 +1776,68 @@ static void HOT aa_fill(const strip_t *s, const wpoly_t *p, wrgb_t c, int alpha,
     }
     int ia = 0, ib = 0;
     uint16_t *const cov = s_cov;
+    const bool interior = (hud_perf_knob & JR_KNOB_AA_INTERIOR) != 0u;
     for (int y = y_lo; y <= y_hi; ++y) {
         int lo = HUD_W, hi = -1;
         const int32_t yr = (int32_t)y << 4;
-        for (int k = 0; k < sub; ++k) {
-            const int32_t ys = yr + k * step + step / 2;
-            if (ys < ymin || ys >= ymax) {
-                continue;
+        if (interior) {
+            /* JR_KNOB_AA_INTERIOR. A wide row added 16 to every interior pixel
+             * once per sample line (16 passes over the coverage row). The
+             * pixels every sample line covers whole are written once, as the
+             * count of lines times 16; each line then adds only what is left
+             * of its span either side. The sums per pixel are the same. */
+            int32_t sl[16], sr[16];
+            int ns = 0;
+            int32_t max_l = 0, min_r = INT32_MAX;
+            for (int k = 0; k < sub; ++k) {
+                const int32_t ys = yr + k * step + step / 2;
+                if (ys < ymin || ys >= ymax) {
+                    continue;
+                }
+                const int32_t xa = aa_chain_x(ca, na, &ia, ys);
+                const int32_t xb = aa_chain_x(cb, nb, &ib, ys);
+                int32_t l = xa < xb ? xa : xb, r = xa < xb ? xb : xa;
+                if (l < 0) l = 0;                         /* cov_span's own clamps */
+                if (r > (HUD_W << 4)) r = HUD_W << 4;
+                if (r <= l) {
+                    continue;
+                }
+                sl[ns] = l;
+                sr[ns] = r;
+                ns++;
+                if (l > max_l) max_l = l;
+                if (r < min_r) min_r = r;
             }
-            const int32_t xa = aa_chain_x(ca, na, &ia, ys);
-            const int32_t xb = aa_chain_x(cb, nb, &ib, ys);
-            if (xa < xb) {
-                cov_span(cov, xa, xb, &lo, &hi);
-            } else if (xb < xa) {
-                cov_span(cov, xb, xa, &lo, &hi);
+            const int i0 = (int)((max_l + 15) >> 4), i1 = (int)(min_r >> 4);
+            if (ns > 0 && i1 > i0) {
+                for (int k = 0; k < ns; ++k) {
+                    cov_span(cov, sl[k], (int32_t)i0 << 4, &lo, &hi);
+                    cov_span(cov, (int32_t)i1 << 4, sr[k], &lo, &hi);
+                }
+                const uint16_t whole = (uint16_t)(ns * 16);
+                for (int x = i0; x < i1; ++x) {
+                    cov[x] = whole;
+                }
+                if (i0 < lo) lo = i0;
+                if (i1 - 1 > hi) hi = i1 - 1;
+            } else {
+                for (int k = 0; k < ns; ++k) {
+                    cov_span(cov, sl[k], sr[k], &lo, &hi);
+                }
+            }
+        } else {
+            for (int k = 0; k < sub; ++k) {
+                const int32_t ys = yr + k * step + step / 2;
+                if (ys < ymin || ys >= ymax) {
+                    continue;
+                }
+                const int32_t xa = aa_chain_x(ca, na, &ia, ys);
+                const int32_t xb = aa_chain_x(cb, nb, &ib, ys);
+                if (xa < xb) {
+                    cov_span(cov, xa, xb, &lo, &hi);
+                } else if (xb < xa) {
+                    cov_span(cov, xb, xa, &lo, &hi);
+                }
             }
         }
         if (hi >= lo) {
