@@ -51,48 +51,46 @@ static const fc_scene_t *find_scene(const char *name)
     return NULL;
 }
 
-/* JR_KNOB_DIAL_SPAN leaves the corners alone and copies everything the round
- * glass shows. apply_dial is not in the hashed frame (it is a PSRAM copy), so
- * it is held here: every pixel inside radius 233 equals the dial's, the
- * knob-0 copy fills the whole strip, and the knob really skips the far corners. */
+/* apply_dial copies only the columns inside the round glass of each row and
+ * leaves the corners as the strip held them. It is not in the hashed frame (it
+ * is a PSRAM copy), so it is held here against a full-row reference built in
+ * this function: every pixel inside radius 233 equals the dial's, the far
+ * corners (beyond 236) are untouched, and there are enough of them that the
+ * span really skips something. */
 static int dial_span_check(int *checks)
 {
-    static uint16_t frame[466 * 466], strip[466 * 12];
+    static uint16_t frame[466 * 466], strip[466 * 12], ref[466 * 12];
     int bad = 0;
     for (int i = 0; i < 466 * 466; i++) frame[i] = (uint16_t)(1u + ((unsigned)i * 2654435761u >> 16) % 65000u);
     s_dial_frame = frame;
     s_dial_blit = true;
     s_display.board.width = 466;
-    for (int span = 0; span < 2; span++) {
-        jr_display_set_perf_knob(span ? JR_KNOB_DIAL_SPAN : 0u);
-        knob_apply();
-        long far_skipped = 0;
-        for (int y1 = 0; y1 < 466; y1 += 12) {
-            const int y2 = y1 + 12 < 466 ? y1 + 12 : 466;
-            for (int i = 0; i < 466 * 12; i++) strip[i] = 0;
-            apply_dial(&s_display, 0, y1, 466, y2, strip);
-            for (int y = y1; y < y2; y++) {
-                for (int x = 0; x < 466; x++) {
-                    const int dx2 = (2 * x - 465), dy2 = (2 * y - 465);          /* twice the offset from the centre */
-                    const long r2 = (long)dx2 * dx2 + (long)dy2 * dy2;           /* 4 r^2 */
-                    const uint16_t got = strip[(y - y1) * 466 + x], want = frame[y * 466 + x];
-                    (*checks)++;
-                    if (r2 <= 4L * 233 * 233 && got != want) bad++;
-                    if (!span && got != want) bad++;
-                    if (span && r2 > 4L * 236 * 236) {
-                        if (got != 0) bad++;
-                        far_skipped++;
-                    }
+    long far_skipped = 0;
+    for (int y1 = 0; y1 < 466; y1 += 12) {
+        const int y2 = y1 + 12 < 466 ? y1 + 12 : 466;
+        for (int i = 0; i < 466 * 12; i++) strip[i] = 0;
+        for (int y = y1; y < y2; y++) {                    /* the full-row copy, the reference */
+            memcpy(ref + (y - y1) * 466, frame + y * 466, 466 * sizeof(uint16_t));
+        }
+        apply_dial(&s_display, 0, y1, 466, y2, strip);
+        for (int y = y1; y < y2; y++) {
+            for (int x = 0; x < 466; x++) {
+                const int dx2 = (2 * x - 465), dy2 = (2 * y - 465);          /* twice the offset from the centre */
+                const long r2 = (long)dx2 * dx2 + (long)dy2 * dy2;           /* 4 r^2 */
+                const uint16_t got = strip[(y - y1) * 466 + x], want = ref[(y - y1) * 466 + x];
+                (*checks)++;
+                if (r2 <= 4L * 233 * 233 && got != want) bad++;
+                if (r2 > 4L * 236 * 236) {
+                    if (got != 0) bad++;
+                    far_skipped++;
                 }
             }
         }
-        if (span && far_skipped < 20000) {
-            printf("FAIL: the span knob skipped only %ld corner pixels\n", far_skipped);
-            bad++;
-        }
     }
-    jr_display_set_perf_knob(0u);
-    knob_apply();
+    if (far_skipped < 20000) {
+        printf("FAIL: the span copy skipped only %ld corner pixels\n", far_skipped);
+        bad++;
+    }
     s_dial_blit = false;
     s_dial_frame = NULL;
     if (bad) printf("FAIL: dial span: %d pixels wrong\n", bad);
@@ -103,16 +101,14 @@ int main(void)
 {
     static uint16_t fb[466 * 466];
     int failures = 0, checks = 0;
-    /* Two passes over the whole table: the recorded orbit rail in use (as on
+    /* Passes over the whole table: the recorded orbit rail in use (as on
      * the device), then without it (the fallback when PSRAM is short), then with
      * the rail but without the recorded battery / desk ring, then without the
-     * recorded shade arcs, then without the recorded dial disc. All five must give
-     * the pixels the pre-cut code gave. */
-    for (int pass = 0; pass < 5; pass++) {
+     * recorded shade arcs. All four must give the pixels the pre-cut code gave. */
+    for (int pass = 0; pass < 4; pass++) {
         fc_orbit_rec_on = pass != 1;
         fc_fring_rec_on = pass != 2;
         fc_shade_rec_on = pass != 3;
-        fc_dial_rec_on = pass != 4;
         for (int i = 0; i < NREFS; i++) {
             const fc_scene_t *sc = find_scene(REFS[i].scene);
             if (sc == NULL) {
@@ -131,21 +127,21 @@ int main(void)
             const uint64_t h = fc_hash(fb);
             checks++;
             if (h != REFS[i].hash) {
-                printf("FAIL %s clk=%lld (orbit record %s, ring record %s, shade record %s, dial record %s): frame hash %016llx, expected %016llx\n",
+                printf("FAIL %s clk=%lld (orbit record %s, ring record %s, shade record %s): frame hash %016llx, expected %016llx\n",
                        REFS[i].scene, (long long)REFS[i].clk_ms, fc_orbit_rec_on ? "on" : "off",
-                       fc_fring_rec_on ? "on" : "off", fc_shade_rec_on ? "on" : "off", fc_dial_rec_on ? "on" : "off",
+                       fc_fring_rec_on ? "on" : "off", fc_shade_rec_on ? "on" : "off",
                        (unsigned long long)h, (unsigned long long)REFS[i].hash);
                 failures++;
             }
         }
     }
-    /* One more pass per perf-knob bit: the table again with only that bit on
-     * (and the dial record off, so the bit is what differs from the shipped path). */
+    /* One more pass per perf-knob bit: the table again with only that bit on,
+     * so the bit is what differs from the shipped path. No bits are defined at
+     * present (JR_KNOB_KNOWN_MASK is 0), so the loop has nothing to run. */
     fc_orbit_rec_on = true;
     fc_fring_rec_on = true;
     fc_shade_rec_on = true;
-    fc_dial_rec_on = false;
-    for (unsigned b = 1; b < 32; b++) {
+    for (unsigned b = 0; b < 32; b++) {
         const uint32_t bit = 1u << b;
         if ((JR_KNOB_KNOWN_MASK & bit) == 0u) {
             continue;
@@ -171,11 +167,6 @@ int main(void)
     }
     failures += dial_span_check(&checks);
     fc_knob_extra = 0;
-    fc_dial_rec_on = true;
-    fc_setup(find_scene("watch-minimal"));      /* the dial record starts empty and fills as rows draw */
-    fc_run(find_scene("watch-minimal"), 100000, fb);
-    printf("MINIMAL dial disc record: %u of %d words used (PSRAM)\n",
-           (unsigned)hud_dial_cache_used(), SG_DIAL_REC_WORDS);
     /* every scene must be pinned at least once: a scene added to the fixture
      * and not to the table would otherwise be unguarded */
     for (int s = 0; s < FC_NSCENES; s++) {

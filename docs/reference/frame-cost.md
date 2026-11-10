@@ -199,6 +199,8 @@ No device was available. Everything in the Ir columns is measured (callgrind on 
 | WATCH FUTURE | 2,378,469 | 2,204,105 | -7.3 % | `clock_face` 12.8 |
 | WATCH SKELETON, DIVER, DRESS, CELESTIAL, JARVIS, home | | | none (+-0.3 %) | |
 
+The two WATCH MINIMAL rows measure the disc record and the word fill, which the knob round (below) removed after the device ran them 12 ms slower; the PILOT, FUTURE and every other row are unaffected.
+
 The mid-entry rows barely move on purpose: while the ring sweeps or the shade opens, the value changes every frame and a record would be thrown away, so the long way is kept. The frame hashes agree on every row above except `home` and `home-agent-100`, and those two differ only because the profiler now runs two warm frames and these scenes are mid-ease at the clock it uses; the hash suite (one warm frame) pins both and passes.
 
 What was cut, in the order it was done. Instructions are host figures; expected device time is inferred and uses no more than the 1 M Ir ~ 4 ms upper bound of the second round.
@@ -210,7 +212,7 @@ What was cut, in the order it was done. Instructions are host figures; expected 
 | The shell's row clip | a 214-entry table of half widths replaces a shift-and-subtract square root per row | about -0.09 M on every shell screen | under 0.5 ms a screen | high that it is not zero, low on how much |
 | Control shade | the two tracks recorded at start, the two fills once their value has held a frame; `glass_ring_replay_row` stands in for `glass_arc_row` | shade: -1.7 M with the clip table | `space_shade` 37.6 ms: 10 to 15 ms off | moderate |
 | The veil | `hud_dim565` two pixels to a 32-bit word and no per-pixel test | none on the host (the stand-in face is mostly black, so the old per-pixel test rarely fired and the new loop does the same work) | `space_veil` 7.7 ms: the old loop cost a compare, a branch and the fold per lit pixel; the new one is about three instructions per pair. A guess of 2 to 4 ms off, by instruction count; the real face has far more lit pixels than the stand-in, so this is the one cut whose host figure says nothing | low |
-| MINIMAL dial | the disc's rows are kept the first time they are drawn (interior span plus the edge coverage, 9.2 KB) and replayed; opaque runs in `aa_disc` and `fill_run` store two pixels to a word | MINIMAL: -0.88 M | `clock_face` 25.6 ms: 3 to 4 ms off | moderate on direction; the other 20 ms is not in this code |
+| MINIMAL dial (reverted) | the disc's rows were kept the first time they were drawn (interior span plus the edge coverage, 9.2 KB) and replayed; opaque runs in `aa_disc` and `fill_run` stored two pixels to a word | MINIMAL: -0.88 M | predicted `clock_face` 25.6 ms: 3 to 4 ms off | measured the other way: 12 ms slower on the device. Both halves are gone; see "The knob round, 2026-11-10" |
 
 RAM, per record. Everything large is PSRAM, allocated once in `jr_display_start` next to the orbit rail's, and never freed (the screens that use them can come back at any time; 86 KB of 5 MB free). Internal RAM added: about 150 bytes in total (against the 1 KB allowance).
 
@@ -218,10 +220,9 @@ RAM, per record. Everything large is PSRAM, allocated once in `jr_display_start`
 |--------|-------|-------|----------|
 | Battery / desk ring: track, glow, fill | 3 x 12,288 B = 36,864 B (largest in use 10,043 B at 99 %; 3.1 + 7.7 + 7.1 KB at 74 %) | lazily, in the render task, the second frame a sweep holds; again on a change (one frame of the old long way first, then one frame that pays for the record, about the cost of the ring's own drawing once) | pointer 4 B, key 8 B, settle gate 12 B |
 | Control shade: two tracks, two fills | 4 x 8,192 B = 32,768 B (largest 4,708 B) | tracks at start; a fill the second frame its value holds | pointer 4 B, 4 x 24 B keys |
-| MINIMAL dial disc | 6,144 words = 12,288 B (4,596 words used) | per row, the first time the row is drawn; no hitch | 12 B in `hud_render.c` |
 | Frame counter and the 214-byte clip table | none | | 4 B `.bss`, 214 B rodata |
 
-The hitch is the thing to watch on the device: a record costs about one frame's worth of the ring it replaces, once, when a value stops moving (a battery percentage ticking over, the volume slider released). At worst that is one 40 ms frame on STATUS. If it shows, the lever is to record rows as they are drawn, as the dial does.
+The hitch is the thing to watch on the device: a record costs about one frame's worth of the ring it replaces, once, when a value stops moving (a battery percentage ticking over, the volume slider released). At worst that is one 40 ms frame on STATUS. If it shows, the lever is to record rows as they are drawn.
 
 Not cut, and why:
 - SKELETON's balance wheel (`hud_balance_blit`, 1.73 M Ir, 46 % of its frame). It visits every pixel of a 143 px box and reads four alpha texels for each; the rotation makes any row bound a per-pixel test again, and the flat-texel shortcut the last lane tried raised the count. A bound that does not is a per-radius occupancy table of the sprite (rotation does not change a pixel's distance from the centre), which turns the visited disc into the rim and spokes. Not attempted in this lane; it is the one cut here with new geometry in it, and the existing SKELETON scenes would pin it.
@@ -231,7 +232,7 @@ Not cut, and why:
 - WEATHER's twelve rain marks drawn on their own rows still cost 0.45 M together; they animate during the entry and are static after, a record each would be twelve 934-byte offset tables.
 - The 25 ms floor is not touched by any of this; see the open questions.
 
-Method notes. The probe is built as the page's first round describes, with `-DFC_NOCOUNT` and the six `--wrap` flags. `probe frame` now runs two warm frames (`fc_extra_warm`) so the measured frame is the steady state, not the one that records; the hash suite keeps one, which also proves the frame that records draws the same pixels as the frame that replays. Four scenes were added and hashed on the code before any cut of this branch: `status-1`, `status-99`, `desk-ent` and `shade-ent`. `jr_display_frame_tests` runs the whole hash table five times (everything on; no orbit record; no ring record; no shade record; no dial record) and compares every record's replay with the primitive it replaces over sweeps, alphas, clips and both byte orders. One deliberate mutation per cut was seen failing: the glow replay's lookup index, `glass_arc_rows`' last row, the clip table's first entry, the shade replay's alpha, the veil's mask, the word fill's tail, the dial replay's right run.
+Method notes. The probe is built as the page's first round describes, with `-DFC_NOCOUNT` and the six `--wrap` flags. `probe frame` now runs two warm frames (`fc_extra_warm`) so the measured frame is the steady state, not the one that records; the hash suite keeps one, which also proves the frame that records draws the same pixels as the frame that replays. Four scenes were added and hashed on the code before any cut of this branch: `status-1`, `status-99`, `desk-ent` and `shade-ent`. `jr_display_frame_tests` runs the whole hash table four times (everything on; no orbit record; no ring record; no shade record) and compares every record's replay with the primitive it replaces over sweeps, alphas, clips and both byte orders. One deliberate mutation per cut was seen failing: the glow replay's lookup index, `glass_arc_rows`' last row, the clip table's first entry, the shade replay's alpha, the veil's mask, the word fill's tail.
 
 ---
 
@@ -263,6 +264,39 @@ Worst frame of each preview script, callgrind instructions per frame, same previ
 | style (dial to dial, to MINIMAL, back) | 252 | 3.75 M | 9.61 M | frames 91 to 94, MINIMAL fading in |
 
 The style dip into MINIMAL is the one over budget: MINIMAL has no art, so its dial is drawn by the compositor, and at a strength below full it is blended per pixel (about 6 M instructions more than the opaque settled path) for the four frames it takes to come up. A dial record for MINIMAL was measured slower on the device and is off, so there is no cheap path to hand it; the options are a shorter dip in for the art-less styles or a record that carries the strength. Not measured on the device.
+
+**[2026-11-10] The knob round (feat/glass-keep)**
+Seven cost candidates sat behind the dev perf knob (`perf_knob.h`), each pixel-identical to knob 0. The device measured them on image 5af9fc4 (240 MHz, lease held, 3 s a sample, ms per frame; "face" is the `clock_face` split part, "dial" is the dial layer). Run-to-run spread on one knob was 1.5 to 2.5 ms.
+
+| Dial | knob 0 | candidate | result |
+|---|---|---|---|
+| MINIMAL face | 38.5 / 38.4 | bit 0, record the disc: 33.5 | helps only the slow path |
+| MINIMAL face | 38.5 | bit 1, old hud fill: 26.5 | wins, -12 ms |
+| MINIMAL face | 38.5 | bit 3, old `aa_disc`: 25.8 | wins, -12.7 ms |
+| MINIMAL face | 38.5 | bits 1+3: 25.0; bits 0+1+3: 25.1 | the record adds nothing once the old paths are back |
+| SHADE total | 45.3 / 45.5 | bit 2, old glass fill: 43.7 | neutral to slightly better |
+| STATUS total | 36.5 / 37.6 | bit 2: 36.4 | neutral |
+| SKELETON face | 31.3 / 33.5 | bit 4, wheel class map: 32.8 | no gain |
+| dial layer, six baked dials | 8.3 to 9.1 | bit 5, span copy: 7.5 to 7.8 | wins, about -1.1 ms on every dial |
+| PILOT face | 20.4 / 22.0 | bit 6, `aa_fill` once per row: 21.1 | neutral |
+| FUTURE face | 13.4 / 15.9 | bit 6: 16.6 | worse |
+| DIVER face | 13.8 / 15.9 | bit 6: 17.0 | worse |
+
+What was kept and what was deleted:
+
+| Bit | Decision |
+|---|---|
+| 0 disc record | Deleted: `hud_dial_cache_set` / `hud_dial_cache_used`, the record branches in the disc code, the PSRAM arena (`dial_rec_alloc`, `SG_DIAL_REC_WORDS`), and the identity suite's "no dial record" pass. |
+| 1 hud fill | The per-pixel store loop is the only path in `hud_render.c`; `fill16` is gone. |
+| 2 glass fill | The same in `glass_draw.c`. |
+| 3 disc rows | The `aa_disc` from before 91b44ec is the only one. |
+| 4 wheel classes | Deleted with its 5.3 KB PSRAM map and its test; `hud_balance_blit` is as it was. |
+| 5 dial span | The only path in `apply_dial`. The 233-byte span table stays, and `dial_span_check` in the identity suite compares the copy with a full-row reference built inside the test. |
+| 6 `aa_fill` interior | Deleted; `aa_fill` is as it was. |
+
+The knob mechanism stays with no bits defined (`JR_KNOB_KNOWN_MASK` is 0): the word, `POST /api/debug/display?knob=N`, the `"knob"` field of `GET /api/display`, the probe's `knob=N` and the identity suite's per-bit loop.
+
+The lesson is about the word fill. `fill16` stored two pixels to a 32-bit word. On the host it counted fewer instructions (MINIMAL 2.90 M to 2.02 M with the disc record), and on the ESP32-S3 it ran 12 ms slower than the 16-bit store loop it replaced. Host instruction counts have now predicted the device wrong in both directions on this chip, so a change that is justified only by a callgrind figure ships behind the knob and waits for a device sample. The disc record, also justified by instructions, bought nothing once the plain loops were back.
 
 ---
 
