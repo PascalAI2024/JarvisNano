@@ -111,7 +111,15 @@ image, quadrant `None`, or a sheet quadrant). Staged files today sum to
 5,468,446 B of the 6,160,384 B partition; with the pair 5,876,910 B.
 `spiffsgen.py` (page 256, block 4096, name 32, meta 4, magic) accepts at most
 about 145 KB more than the current set, and even one new dial overflows
-(`SpiffsFullError`). `JR_STAGE_NEW_DIALS` in the component CMake stays OFF.
+(`SpiffsFullError`). So these two dials are never staged: `EMBED_FILES` in the
+component CMake links them into the app image (+410 KB of rodata; the OTA slots
+are 4 MiB), and `embedded_dial()` in `jr_display.c` hands the clip loader a
+pointer and a size (`jr_display_clip_t.embedded`). `eaf_init` and
+`eaf_frame_decode` only read the source (read-only rodata faults on a write;
+the vendor decoder was read for writes through the input pointer and found
+none: the heatshrink sink cast copies out of it and RAW/RLE blocks never use
+it). Host tests get the real file bytes from `jr_host_embedded_dial()` in
+`probe/stubs/idf_stubs.inc`; the vendor decoder itself is stubbed on the host.
 
 ---
 

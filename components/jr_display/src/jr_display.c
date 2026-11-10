@@ -88,6 +88,7 @@ typedef struct {
     size_t size;
     uint32_t total_frames;
     uint32_t last_frame;
+    bool embedded;      /* data points into the app image: read-only, never freed */
 } jr_display_clip_t;
 
 /* Gfx has two in-flight buffers. A bounded FIFO tags actual submissions,
@@ -360,8 +361,63 @@ static uint32_t eaf_frame_count(const uint8_t *data, size_t size)
     return total;
 }
 
+/* SKELETON and CELESTIAL ride in the app image, not in emote_assets (the
+ * partition cannot take them: docs/reference/asset-pipeline.md). CMake
+ * EMBED_FILES puts the two EAFs in flash rodata; the dial path only needs a
+ * pointer and a size (eaf_init + one eaf_frame_decode read the source, never
+ * write it), so no file read and no PSRAM copy. On the host the stubs hand
+ * back the real file bytes (probe/stubs/idf_stubs.inc). */
+#ifdef ESP_PLATFORM
+extern const uint8_t s_embedded_skeleton_start[] asm("_binary_dial_skeleton_eaf_start");
+extern const uint8_t s_embedded_skeleton_end[]   asm("_binary_dial_skeleton_eaf_end");
+extern const uint8_t s_embedded_celestial_start[] asm("_binary_dial_celestial_eaf_start");
+extern const uint8_t s_embedded_celestial_end[]   asm("_binary_dial_celestial_eaf_end");
+static const uint8_t *embedded_dial(jr_face_t face, size_t *size)
+{
+    switch (face) {
+    case JR_FACE_DIAL_SKELETON:
+        *size = (size_t)(s_embedded_skeleton_end - s_embedded_skeleton_start);
+        return s_embedded_skeleton_start;
+    case JR_FACE_DIAL_CELESTIAL:
+        *size = (size_t)(s_embedded_celestial_end - s_embedded_celestial_start);
+        return s_embedded_celestial_start;
+    default:
+        return NULL;
+    }
+}
+#else
+const uint8_t *jr_host_embedded_dial(jr_face_t face, size_t *size);
+#define embedded_dial jr_host_embedded_dial
+#endif
+
+static esp_err_t clip_load_embedded(const uint8_t *blob, size_t size,
+                                    jr_display_clip_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (blob == NULL || size == 0U || size > JR_DISPLAY_ASSET_MAX) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    const uint32_t frames = eaf_frame_count(blob, size);
+    if (frames < 2) {
+        return ESP_ERR_INVALID_CRC;
+    }
+    /* The one cast away from const: the field is shared with heap clips and
+     * is only ever written for those (embedded is the guard). */
+    out->data = (uint8_t *)(uintptr_t)blob;
+    out->size = size;
+    out->total_frames = frames;
+    out->last_frame = frames - 1U;
+    out->embedded = true;
+    return ESP_OK;
+}
+
 static esp_err_t clip_load(jr_face_t face, jr_display_clip_t *out)
 {
+    size_t embedded_size = 0;
+    const uint8_t *embedded = out ? embedded_dial(face, &embedded_size) : NULL;
+    if (embedded != NULL) {
+        return clip_load_embedded(embedded, embedded_size, out);
+    }
     const char *path = face_asset(face);
     if (!path || !out) {
         return ESP_ERR_INVALID_ARG;
@@ -5966,7 +6022,8 @@ static void clip_release_unbound_dial(jr_display_ctx_t *ctx,
                                JR_FACE_DIAL_SKELETON, JR_FACE_DIAL_CELESTIAL };
     for (size_t i = 0; i < sizeof dials / sizeof dials[0]; ++i) {
         jr_display_clip_t *candidate = &ctx->clips[dials[i]];
-        if (clip == candidate && clip != ctx->bound && candidate->data != NULL) {
+        if (clip == candidate && clip != ctx->bound && candidate->data != NULL &&
+            !candidate->embedded) {
             heap_caps_free(candidate->data);
             memset(candidate, 0, sizeof *candidate);
             return;

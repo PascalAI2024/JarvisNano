@@ -596,9 +596,12 @@ SKELETON hands: rose gold with a dark hairline outline and a wide cream lume
 fill, an ice-blue hairline seconds as the one cool colour; CELESTIAL: slim
 polished gold with a fine gold seconds. Renders:
 `docs/evidence/watch-dials-2026-11-10-{skeleton,celestial}-hands.png`.
-**They are not staged yet:** the pair does not fit the 0x5E0000 partition
-(see `docs/reference/asset-pipeline.md`), so `JR_STAGE_NEW_DIALS` is off and
-the two styles show the procedural stand-in until space is freed.
+**They are not in the partition:** the pair does not fit the 0x5E0000
+`emote_assets` partition (see `docs/reference/asset-pipeline.md`), so both
+EAFs are linked into the app image (`EMBED_FILES`, 4 MiB OTA slots) and the
+dial path reads them in place from flash: the clip carries an `embedded`
+flag, no file read, no PSRAM copy of the compressed data, and no release
+path frees or writes it.
 
 **The weather cell never cuts a word (2026-09-05).** The 12-glyph
 `condition` cap had already turned "LIGHT DRIZZLE" into `LIGHT DRIZZL`

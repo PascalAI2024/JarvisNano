@@ -42,6 +42,10 @@ target_include_directories(jr_display_shell_tests PRIVATE
 target_compile_options(jr_display_shell_tests PRIVATE
     -Wall -Wextra -Werror -Wno-unused-function
 )
+# The two embedded dials: the stub reads the real baked EAFs from here.
+target_compile_definitions(jr_display_shell_tests PRIVATE
+    JR_HOST_DIAL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../firmware/mascot/reactive"
+)
 
 enable_testing()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)

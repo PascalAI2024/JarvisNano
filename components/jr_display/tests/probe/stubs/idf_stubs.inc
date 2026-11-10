@@ -38,8 +38,11 @@ void *heap_caps_malloc(size_t s, unsigned c)
     return ptr;
 }
 void *heap_caps_calloc(size_t n, size_t s, unsigned c) { (void)c; return calloc(n, s); }
+static const void *s_stub_free_watch;      /* a pointer nobody may free */
+static unsigned s_stub_free_watch_hits;
 void heap_caps_free(void *p)
 {
+    if (p && p == s_stub_free_watch) { s_stub_free_watch_hits++; return; }
     if (p && p == s_stub_anim_source) { s_stub_bound_frees++; }
     for (size_t i = 0; i < sizeof s_stub_heap / sizeof s_stub_heap[0]; ++i) {
         if (p && s_stub_heap[i].ptr == p) {
@@ -150,11 +153,55 @@ esp_err_t gfx_anim_stop(gfx_obj_t *o) { (void)o; s_stub_anim_stops++; return ESP
 uint32_t gfx_timer_get_actual_fps(gfx_handle_t h) { (void)h; return 0; }
 /* The dial decode: the header a test sets, and a frame whose pixel i is
  * (uint16_t)(i ^ 0x5a5a) so a blit can be checked row by row. */
+/* THE EMBEDDED DIALS. On the device SKELETON and CELESTIAL are linked into
+ * the app image (EMBED_FILES); here the stand-in is the real file read once
+ * into a heap block that nothing in jr_display.c may free or write (the
+ * block is read back byte for byte by test_embedded_dials_*). The directory
+ * comes from -DJR_HOST_DIAL_DIR=..., else it is found from this file. */
+#ifndef JR_HOST_DIAL_DIR
+#define JR_HOST_DIAL_DIR "../../../../firmware/mascot/reactive"
+#endif
+static uint8_t *s_host_dial_blob[2];
+static size_t s_host_dial_size[2];
+static unsigned s_host_dial_loads;
+const uint8_t *jr_host_embedded_dial(jr_face_t face, size_t *size)
+{
+    const char *name = face == JR_FACE_DIAL_SKELETON ? "dial_skeleton.eaf"
+                     : face == JR_FACE_DIAL_CELESTIAL ? "dial_celestial.eaf" : NULL;
+    if (name == NULL) { return NULL; }
+    const int slot = face == JR_FACE_DIAL_CELESTIAL;
+    if (s_host_dial_blob[slot] == NULL) {
+        static const char *const roots[] = { JR_HOST_DIAL_DIR, "firmware/mascot/reactive",
+            "../firmware/mascot/reactive", "../../firmware/mascot/reactive",
+            "../../../../firmware/mascot/reactive", "../../../../../firmware/mascot/reactive" };
+        for (size_t r = 0; r < sizeof roots / sizeof roots[0] && !s_host_dial_blob[slot]; ++r) {
+            char path[512];
+            snprintf(path, sizeof path, "%s/%s", roots[r], name);
+            FILE *f = fopen(path, "rb");
+            if (!f) { continue; }
+            fseek(f, 0, SEEK_END);
+            const long n = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            uint8_t *b = n > 0 ? malloc((size_t)n) : NULL;
+            if (b && fread(b, 1, (size_t)n, f) == (size_t)n) {
+                s_host_dial_blob[slot] = b;
+                s_host_dial_size[slot] = (size_t)n;
+                s_host_dial_loads++;
+            } else {
+                free(b);
+            }
+            fclose(f);
+        }
+    }
+    *size = s_host_dial_size[slot];
+    return s_host_dial_blob[slot];
+}
+static const uint8_t *s_stub_eaf_init_src;
 static eaf_header_t s_stub_eaf_head = { 8, 466, 466 };
 static int s_stub_eaf_decodes;
 static esp_err_t s_stub_eaf_decode_error;
 esp_err_t eaf_init(const uint8_t *d, size_t n, eaf_format_handle_t *h)
-{ (void)d; (void)n; *h = (eaf_format_handle_t)1; return ESP_OK; }
+{ (void)n; s_stub_eaf_init_src = d; *h = (eaf_format_handle_t)1; return ESP_OK; }
 esp_err_t eaf_deinit(eaf_format_handle_t h) { (void)h; return ESP_OK; }
 eaf_format_type_t eaf_get_frame_info(eaf_format_handle_t h, int i, eaf_header_t *o)
 { (void)h; (void)i; *o = s_stub_eaf_head; return EAF_FORMAT_VALID; }
