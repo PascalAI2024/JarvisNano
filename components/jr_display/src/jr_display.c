@@ -1242,9 +1242,17 @@ static void brightness_slew(uint32_t dt_ms);   /* defined with the pump below */
 static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep);
 static void watch_compose(void);               /* defined with the watch below */
 
+/* The split timers (below) cost a timer read per part per strip, so they run
+ * only while GET /api/display?split=1 has asked for them (jr_display_split_arm,
+ * a few seconds a request). s_split_on is the render task's own copy, decided
+ * once a frame in overlay_fade_tick; split_mark and split_now read it. */
+static volatile uint32_t s_split_deadline_ms;
+static bool s_split_on;
+
 static void overlay_fade_tick(void)
 {
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    s_split_on = (int32_t)(__atomic_load_n(&s_split_deadline_ms, __ATOMIC_RELAXED) - now) > 0;
     uint32_t dt = now - s_fade_prev_ms;
     s_fade_prev_ms = now;
     /* Physical brightness keeps its slew cap; finite UI transitions consume
@@ -3519,9 +3527,29 @@ const char *jr_display_split_name(unsigned index)
     return index < (unsigned)JR_DISPLAY_SPLIT_COUNT ? k_split_names[index] : NULL;
 }
 
-/* Charge the time since *mark to one split and move the mark. */
+#define JR_SPLIT_ARM_MS 8000u
+
+/* httpd: the next few seconds of frames are timed. */
+void jr_display_split_arm(void)
+{
+    __atomic_store_n(&s_split_deadline_ms,
+                     (uint32_t)(esp_timer_get_time() / 1000) + JR_SPLIT_ARM_MS,
+                     __ATOMIC_RELAXED);
+}
+
+/* The mark a part starts from: the clock while timing, else nothing read. */
+static inline int64_t split_now(void)
+{
+    return s_split_on ? esp_timer_get_time() : 0;
+}
+
+/* Charge the time since *mark to one split and move the mark. Unarmed it is one
+ * predictable branch. */
 static inline void split_mark(jr_display_split_t which, int64_t *mark)
 {
+    if (!s_split_on) {
+        return;
+    }
     const int64_t now = esp_timer_get_time();
     __atomic_add_fetch(&s_split_us[which], (uint32_t)(now - *mark),
                        __ATOMIC_RELAXED);
@@ -3535,7 +3563,7 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     if (e <= 0) {
         return;
     }
-    int64_t sm = esp_timer_get_time();
+    int64_t sm = split_now();
     /* THE SHEET OUTRANKS THE FACE.
      *
      * Tapping the focal object opens that space's detail sheet, but on WATCH
@@ -5315,7 +5343,7 @@ static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
      * no face pixels to fold at all. */
     const int veil = ((settled && watch_art_is_content()) || s_space_black >= 256)
                          ? 0 : (s_space_veil * 32) >> 8;
-    int64_t sm = esp_timer_get_time();
+    int64_t sm = split_now();
     if (veil > 0) {
         sp_veil(ctx, y1, y2, pixels, veil);
     }

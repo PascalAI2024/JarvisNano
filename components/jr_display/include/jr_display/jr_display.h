@@ -143,6 +143,12 @@ typedef enum {
 /* The JSON key of a split timer, or NULL out of range. */
 const char *jr_display_split_name(unsigned index);
 
+/* Time the next few seconds of frames into the split timers. They are off
+ * otherwise (a timer read per part per strip is not free); GET
+ * /api/display?split=1 arms them, so its first answer carries what the last
+ * request counted and the next one, seconds later, the window to subtract. */
+void jr_display_split_arm(void);
+
 typedef struct {
     jr_display_init_state_t init_state;
     esp_err_t last_error;

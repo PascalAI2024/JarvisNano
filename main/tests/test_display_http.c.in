@@ -19,6 +19,8 @@ static esp_err_t httpd_req_get_url_query_str(httpd_req_t *r,char *b,size_t n)
 { (void)r; if(!query) return ESP_FAIL; snprintf(b,n,"%s",query); return ESP_OK; }
 static esp_err_t httpd_query_key_value(const char *q,const char *k,char *v,size_t n)
 { size_t kl=strlen(k); if(strncmp(q,k,kl)||q[kl]!='=') return ESP_FAIL; snprintf(v,n,"%s",q+kl+1); return ESP_OK; }
+static unsigned arms;
+void jr_display_split_arm(void) { ++arms; }
 const char *jr_display_split_name(unsigned i)
 { static const char *const names[JR_DISPLAY_SPLIT_COUNT]={"hud_frame","hud_space","hud_clock","hud_ota","hud_caption","hud_ask","hud_bloom","space_veil","space_screen","space_sheet","space_shade","space_orbit","clock_clear","clock_face","clock_cells"};
   return i<JR_DISPLAY_SPLIT_COUNT ? names[i] : NULL; }
@@ -57,7 +59,7 @@ int main(int argc,char **argv) {
  read_result=(bits&4) ? ESP_FAIL : ESP_OK;
  if(bits&8) {cached.init_state=JR_DISPLAY_INIT_FAILED;cached.last_error=ESP_FAIL;}
  httpd_req_t req={0};int result=display_diag_handler(&req);
- printf("{\"result\":%d,\"errors\":%u,\"sent\":%u,\"type\":\"%s\",\"cache\":\"%s\",\"bytes\":%zu}\n%s\n",
-   result,errors,sent,type,cache,strlen(response),response);
+ printf("{\"result\":%d,\"errors\":%u,\"sent\":%u,\"type\":\"%s\",\"cache\":\"%s\",\"bytes\":%zu,\"arms\":%u}\n%s\n",
+   result,errors,sent,type,cache,strlen(response),arms,response);
  return 0;
 }

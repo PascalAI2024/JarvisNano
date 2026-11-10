@@ -12,6 +12,7 @@ MUTANTS = {
     'split-name-stuck': ('i ? "," : "", jr_display_split_name(i),', 'i ? "," : "", jr_display_split_name(0),'),
     'split-value-stuck': ('(unsigned)d.split_us[i]);', '(unsigned)d.split_us[0]);'),
     'rom-forged': ('\\\"includes_rom\\\":false', '\\\"includes_rom\\\":true'),
+    'split-unarmed': ('jr_display_split_arm();   /* the timers run only while somebody asks */', ''),
 }
 
 def run(root, out, mutation):
@@ -40,6 +41,7 @@ def run(root, out, mutation):
         (out/(str(bits)+'.txt')).write_text(p.stdout)
         meta,body=p.stdout.split('\n',1);meta=json.loads(meta)
         equal(meta['result'],0)
+        equal(meta['arms'],1 if bits&16 and not bits&4 else 0)   # only ?split=1 starts the timers
         equal(meta['errors'],1 if bits&4 else 0)
         equal(meta['sent'],0 if bits&4 else 1)
         if bits&4: continue

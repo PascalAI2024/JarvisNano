@@ -216,7 +216,22 @@ int main(void)
         fc_setup(sc);
         s_fake_us_step = 3;
         for (int i = 0; i < JR_DISPLAY_SPLIT_COUNT; i++) s_split_us[i] = 0;
+        /* unarmed (the default): nothing is timed, whatever ran */
+        s_split_deadline_ms = 0u;
         fc_run(sc, SPLITS[r].clk_ms, fb);
+        {
+            unsigned total = 0;
+            for (int i = 0; i < JR_DISPLAY_SPLIT_COUNT; i++) total += s_split_us[i];
+            checks++;
+            if (total != 0u) {
+                printf("FAIL %s: split timers charged %u us with nobody asking\n", sc->name, total);
+                failures++;
+            }
+        }
+        /* armed, as ?split=1 leaves them for a few seconds */
+        s_split_deadline_ms = (uint32_t)SPLITS[r].clk_ms + 4000u;
+        fc_run(sc, SPLITS[r].clk_ms, fb);
+        s_split_deadline_ms = 0u;
         s_fake_us_step = 0;
         for (int i = 0; i < 6; i++) {
             checks++;

@@ -3059,6 +3059,7 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         if (httpd_req_get_url_query_str(req, q, sizeof q) == ESP_OK &&
             httpd_query_key_value(q, "split", v, sizeof v) == ESP_OK &&
             v[0] == '1') {
+            jr_display_split_arm();   /* the timers run only while somebody asks */
             char sb[640];
             int m = snprintf(sb, sizeof sb, "{\"render_frames\":%u,\"render_frame_us\":%u,\"split_us\":{",
                              (unsigned)d.render_frames, (unsigned)d.render_frame_us);
