@@ -106,6 +106,17 @@ static int64_t  s_snap_us;
 static SemaphoreHandle_t s_snap_lock;
 static StaticSemaphore_t s_snap_lock_buf;
 
+/* The tilt: the accelerometer's gravity direction, low-passed, as two signed
+ * 16-bit milli-g values (x low half, y high half) in ONE word the sampler
+ * stores and any task loads, no mutex. Sensor axes (the same ones gx/gy carry,
+ * Z already flipped at the read seam); the composition root maps them to the
+ * glass. Gain 1/8 per 10 ms sample (about an 80 ms time constant) takes the
+ * hand's tremor out and none of its lean out. The motion window above is not
+ * touched. */
+#define TILT_LP_DIV  8
+static volatile uint32_t s_tilt_word;
+static volatile bool     s_tilt_valid;
+
 /* Created from a C constructor: ESP-IDF runs these single-threaded during
  * startup, before app_main() and before any task that could call in exists, so
  * there is no mutex-creation race to bootstrap around. Static: no heap. */
@@ -349,6 +360,8 @@ static void imu_task(void *arg)
     int      head = 0;
     uint32_t seq = 0;
     TickType_t last_wake = xTaskGetTickCount();
+    int32_t  lp_x_q4 = 0, lp_y_q4 = 0;   /* tilt low-pass, milli-g * 16 */
+    bool     lp_seeded = false;
 
     while (s_run) {
         int16_t ax = 0, ay = 0, az = 0;
@@ -399,6 +412,23 @@ static void imu_task(void *arg)
         s.shake  = s.motion_mg > MOTION_SHAKE_MG;
         s.sample_seq = ++seq;
 
+        {
+            const int32_t rx_q4 = ((int32_t)ax * 125 / 512) * 16;   /* LSB -> mg -> q4 */
+            const int32_t ry_q4 = ((int32_t)ay * 125 / 512) * 16;
+            if (!lp_seeded) {
+                lp_x_q4 = rx_q4;
+                lp_y_q4 = ry_q4;
+                lp_seeded = true;
+            } else {
+                lp_x_q4 += (rx_q4 - lp_x_q4) / TILT_LP_DIV;
+                lp_y_q4 += (ry_q4 - lp_y_q4) / TILT_LP_DIV;
+            }
+            const uint32_t w = (uint32_t)(uint16_t)(int16_t)(lp_x_q4 / 16) |
+                               ((uint32_t)(uint16_t)(int16_t)(lp_y_q4 / 16) << 16);
+            __atomic_store_n(&s_tilt_word, w, __ATOMIC_RELEASE);
+            __atomic_store_n(&s_tilt_valid, true, __ATOMIC_RELEASE);
+        }
+
         if (xSemaphoreTake(s_snap_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
             s_snap = s;
             s_snap_us = esp_timer_get_time();
@@ -408,6 +438,7 @@ static void imu_task(void *arg)
         vTaskDelayUntil(&last_wake, IMU_SAMPLE_GAP_TICKS);
     }
 
+    __atomic_store_n(&s_tilt_valid, false, __ATOMIC_RELEASE);   /* a stopped sampler has no tilt */
     const bool ext = s_ext_stack;
     s_task = NULL;
     s_ext_stack = false;
@@ -485,6 +516,17 @@ esp_err_t jr_imu_read(jr_imu_t *out)
     }
     xSemaphoreGive(s_snap_lock);
     return have ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+bool jr_imu_tilt_read(int *gx_mg, int *gy_mg)
+{
+    if (!__atomic_load_n(&s_tilt_valid, __ATOMIC_ACQUIRE)) {
+        return false;
+    }
+    const uint32_t w = __atomic_load_n(&s_tilt_word, __ATOMIC_ACQUIRE);
+    *gx_mg = (int)(int16_t)(uint16_t)(w & 0xFFFFu);
+    *gy_mg = (int)(int16_t)(uint16_t)(w >> 16);
+    return true;
 }
 
 bool jr_imu_present(void)

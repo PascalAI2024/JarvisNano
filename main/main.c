@@ -45,6 +45,28 @@ static const char *TAG = "jarvis_v5";
 #define JR_LIGHT_IMU_X_SIGN  (+1)
 #define JR_LIGHT_IMU_Y_SIGN  (-1)
 
+/* TILT PARALLAX leans CELESTIAL's stars by the change of the same UP vector, so
+ * it maps axes exactly like the light does; they are separate so a hand test
+ * can flip the stars without moving the shadows. Which way the stars should
+ * slide for a given lean is a taste the glass has not judged yet: flip both
+ * signs to reverse it (docs/reference/tilt-parallax.md). */
+#define JR_TILT_IMU_X_SIGN   (+1)
+#define JR_TILT_IMU_Y_SIGN   (-1)
+
+/* The display calls this once a frame, only while CELESTIAL is on a lit panel
+ * (jr_display_set_tilt_source). jr_imu knows no display and the display no
+ * sensor; this is the only place the two meet. Lock-free, no bus. */
+static bool tilt_source(int *x_mg, int *y_mg)
+{
+    int gx = 0, gy = 0;
+    if (!jr_imu_tilt_read(&gx, &gy)) {
+        return false;
+    }
+    *x_mg = JR_TILT_IMU_X_SIGN * gx;
+    *y_mg = JR_TILT_IMU_Y_SIGN * gy;
+    return true;
+}
+
 #define VOICE_FRAME_SAMPLES  512  /* 32 ms @ 16 kHz — one AEC chunk / uplink frame */
 #define INBOX_CAP            16
 /* Brief guard against the model's own acoustic tail right after it stops
@@ -4492,6 +4514,7 @@ void app_main(void)
         s_app.display = jr_hal_display();
         ESP_LOGW(TAG, "display: presenter start failed — falling back to log stub");
     }
+    jr_display_set_tilt_source(tilt_source);
     s_app.input   = jr_hal_input();
 
     /* idle face immediately (Phase-0 acceptance target) */

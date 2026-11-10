@@ -511,6 +511,8 @@ typedef struct {
                               * wheel, CELESTIAL's stars) runs: the awake
                               * cadence; false holds it still               */
     const hud_light_t *light; /* where the room's light is; NULL = at rest  */
+    int  tilt_x, tilt_y;     /* the dial's lean, -256..256 (tilt.h); 0 = none.
+                              * CELESTIAL's foreground stars read it while `alive` */
 } hud_watch_t;
 
 /* THE LIVE ORNAMENTS (2026-11-10). SKELETON's balance wheel: a baked sprite
@@ -529,6 +531,24 @@ int     hud_balance_blit(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 int     hud_celestial_star_level(int i, int ss, int ms);
 int     hud_celestial_twinkle(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                               int ss, int ms);
+
+/* THE FOREGROUND STARS (2026-11-10, tilt parallax). HUD_FG_COUNT four-point
+ * sparkles drawn over CELESTIAL's baked dial, none of them in the art: the baked
+ * field is the far sky, these are the near ones, in three depths (0 near, 4
+ * stars; 1 middle, 5; 2 far, 5) with their own size and travel (14, 8, 4 px at
+ * full lean). hud_celestial_foreground draws them, anti-aliased at a 1/16 px
+ * position; the lean (tilt_x/tilt_y, -256..256, tilt.h) slides each by its
+ * depth's travel, and `alive` lets the near ones breathe. Drawn at rest too.
+ * hud_celestial_fg_pos is star i's centre in 1/16 px at a lean, with the
+ * guards: a slide that would put the arms outside radius HUD_FG_GLASS_R or
+ * inside HUD_FG_HUB_R (of the glass centre) is held at the rest position. */
+#define HUD_FG_COUNT     14
+#define HUD_FG_GLASS_R   210
+#define HUD_FG_HUB_R     32
+int     hud_celestial_fg_depth(int i);
+void    hud_celestial_fg_pos(int i, int tilt_x, int tilt_y, int *x_q4, int *y_q4);
+int     hud_celestial_foreground(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                                 int ss, int ms, bool alive, int tilt_x, int tilt_y);
 
 void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                        const hud_watch_t *w, int strength, int style);

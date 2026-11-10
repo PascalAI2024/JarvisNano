@@ -5191,6 +5191,102 @@ static void test_light_tick_eases_and_falls_back(void)
     CHECK(light_eq_rest(&s_light, &rest), "flat is not the rest light");
 }
 
+/* ---- TILT PARALLAX in the render task -------------------------------------
+ * The diag word's layout, and the one rule that matters for power and for the
+ * sensor: the source is asked only while CELESTIAL is the watch on a lit panel
+ * at the awake cadence. */
+static int s_tilt_calls;
+static int s_tilt_raw_x, s_tilt_raw_y;
+static bool s_tilt_have = true;
+
+static bool tilt_test_source(int *x, int *y)
+{
+    s_tilt_calls++;
+    *x = s_tilt_raw_x;
+    *y = s_tilt_raw_y;
+    return s_tilt_have;
+}
+
+static void test_tilt_word_layout_is_pinned(void)
+{
+    __atomic_store_n(&s_tilt_word, jr_tilt_pack(-1, 1), __ATOMIC_RELAXED);
+    CHECK(__atomic_load_n(&s_tilt_word, __ATOMIC_RELAXED) == 0x0001FFFFu,
+          "tilt word layout drifted: 0x%08x", __atomic_load_n(&s_tilt_word, __ATOMIC_RELAXED));
+    jr_tilt_t t;
+    jr_tilt_reset(&t);
+    t.x = -256; t.y = 255;
+    __atomic_store_n(&s_tilt_word, jr_tilt_pack(t.x, t.y), __ATOMIC_RELAXED);
+    jr_display_diag_t d;
+    memset(&d, 0, sizeof d);
+    jr_display_get_diag(&d);
+    CHECK(d.tilt_x == -256 && d.tilt_y == 255, "diag carries %d,%d", (int)d.tilt_x, (int)d.tilt_y);
+    __atomic_store_n(&s_tilt_word, 0u, __ATOMIC_RELAXED);
+}
+
+static void test_tilt_is_read_only_on_a_lit_awake_celestial(void)
+{
+    const uint8_t style_was = s_style_shown;
+    const uint32_t panel_was = __atomic_load_n(&s_panel_off, __ATOMIC_ACQUIRE);
+    const uint8_t fps_was = jr_display_render_fps();
+    jr_display_set_tilt_source(tilt_test_source);
+    __atomic_store_n(&s_panel_off, 0u, __ATOMIC_RELEASE);
+    jr_display_set_render_fps(JR_DISPLAY_RENDER_FPS);
+    s_tilt_calls = 0;
+    s_tilt_have = true;
+    s_tilt_raw_x = 0; s_tilt_raw_y = 0;
+    s_tilt_prev_ms = 5000;
+
+    /* another dial: never asked, never leans */
+    s_style_shown = (uint8_t)JR_WATCH_JARVIS;
+    uint32_t t = 5000;
+    for (int i = 0; i < 5; ++i) { t += 42; tilt_tick(t); }
+    CHECK(s_tilt_calls == 0, "the sensor was read %d times off CELESTIAL", s_tilt_calls);
+
+    /* CELESTIAL, lit, awake: asked once a frame, leans, then comes back */
+    s_style_shown = (uint8_t)JR_WATCH_CELESTIAL;
+    t += 42; tilt_tick(t);
+    CHECK(s_tilt_calls == 1 && s_tilt.x == 0, "first frame: %d calls, lean %d", s_tilt_calls, s_tilt.x);
+    s_tilt_raw_x = 200;
+    t += 42; tilt_tick(t);
+    CHECK(s_tilt_calls == 2 && s_tilt.x > 40, "a lean did not register: %d calls, lean %d", s_tilt_calls, s_tilt.x);
+    CHECK(jr_tilt_unpack_x(__atomic_load_n(&s_tilt_word, __ATOMIC_RELAXED)) == s_tilt.x, "diag word is not the lean");
+    for (int i = 0; i < 400; ++i) { t += 42; tilt_tick(t); }
+    CHECK(s_tilt.x == 0, "a held pose did not re-centre: %d", s_tilt.x);
+
+    /* a lean in flight, then each gate closes in turn: no read, lean gone */
+    s_tilt_raw_x = -300;
+    t += 42; tilt_tick(t);
+    CHECK(s_tilt.x < 0, "no lean to drop");
+    int calls = s_tilt_calls;
+    jr_display_set_render_fps(6);                          /* resting cadence */
+    t += 42; tilt_tick(t);
+    CHECK(s_tilt_calls == calls && s_tilt.x == 0 && s_tilt.y == 0, "a resting watch read the sensor or kept a lean");
+    jr_display_set_render_fps(JR_DISPLAY_RENDER_FPS);
+    t += 42; tilt_tick(t);
+    t += 42; tilt_tick(t);
+    CHECK(s_tilt_calls == calls + 2 && s_tilt.x == 0, "reopening the gate did not reseed at rest: %d calls, lean %d",
+          s_tilt_calls - calls, s_tilt.x);
+    calls = s_tilt_calls;
+    __atomic_store_n(&s_panel_off, 2u, __ATOMIC_RELEASE);  /* panel off */
+    t += 42; tilt_tick(t);
+    CHECK(s_tilt_calls == calls && s_tilt.x == 0, "a dark panel read the sensor or kept a lean");
+    __atomic_store_n(&s_panel_off, 0u, __ATOMIC_RELEASE);
+    s_tilt_have = false;                                   /* sensor has no answer */
+    t += 42; tilt_tick(t);
+    CHECK(s_tilt.x == 0 && s_tilt.y == 0, "no data still leaned");
+    jr_display_set_tilt_source(NULL);
+    s_tilt_have = true;
+    calls = s_tilt_calls;
+    t += 42; tilt_tick(t);
+    CHECK(s_tilt_calls == calls && s_tilt.x == 0, "a removed source was called");
+
+    s_style_shown = style_was;
+    __atomic_store_n(&s_panel_off, panel_was, __ATOMIC_RELEASE);
+    jr_display_set_render_fps(fps_was);
+    jr_tilt_reset(&s_tilt);
+    __atomic_store_n(&s_tilt_word, 0u, __ATOMIC_RELAXED);
+}
+
 /* ------------------------------------------- data screens on true black -- */
 
 static uint32_t s_pk_now = 100000U;
@@ -5783,6 +5879,8 @@ static void test_snapshot_mirror_blacks_out_the_corners(void)
 int main(void)
 {
     test_light_word_round_trips();
+    test_tilt_word_layout_is_pinned();
+    test_tilt_is_read_only_on_a_lit_awake_celestial();
     test_light_tick_eases_and_falls_back();
     test_every_face_has_a_clip_and_a_hud_face();
     test_space_ring_wraps_both_ways();

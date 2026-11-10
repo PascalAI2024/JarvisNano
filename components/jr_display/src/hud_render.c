@@ -2484,6 +2484,150 @@ int hud_celestial_twinkle(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     return touched;
 }
 
+/* THE FOREGROUND STARS (CELESTIAL, tilt parallax). Fourteen four-point
+ * sparkles that are NOT in the dial art: the baked field is the far sky and
+ * these are the near ones. Three depths with their own size and travel. A lean
+ * (tilt_x/tilt_y, -256..256, tilt.h) slides each by its depth's travel at full
+ * lean, in 1/16 px, and the sparkle is anti-aliased at that sub-pixel position,
+ * so a slow tilt glides. They are drawn at rest too (lean 0), so nothing pops
+ * in when the hand moves. Additive over the dial like the glints; pure
+ * functions of the inputs and per-star row culling, so a strip render equals
+ * the whole frame. Positions are a fixed table picked by eye from the dial
+ * art: off the hub, the hour beads and the bars at 12, and clear of the
+ * constellations and of the baked stars that glint. */
+typedef struct {
+    uint16_t core_q4;       /* glow radius, 1/16 px                        */
+    uint16_t arm_q4;        /* arm length, 1/16 px                         */
+    uint8_t  travel_px;     /* slide at full lean                          */
+    uint8_t  r, g, b;       /* colour at full brightness                   */
+    uint8_t  bright;        /* 0..255 base brightness                      */
+} hud_fg_depth_t;
+
+static const hud_fg_depth_t s_fg_depth[3] = {
+    /* near: warm white, big */   { 48, 160, 14, 255, 240, 205, 255 },
+    /* middle                 */  { 36, 104,  8, 245, 244, 240, 230 },
+    /* far: pale, a little blue */{ 28,  64,  4, 200, 218, 255, 190 },
+};
+
+typedef struct { uint16_t x, y; uint8_t depth; } hud_fg_t;
+
+static const hud_fg_t s_fg[HUD_FG_COUNT] = {
+    { 205, 140, 0 }, { 365, 285, 0 }, { 120, 240, 0 }, { 250, 300, 0 },
+    { 230, 100, 1 }, { 310, 215, 1 }, { 180, 260, 1 }, { 390, 230, 1 }, { 190, 395, 1 },
+    { 190,  70, 2 }, { 390, 180, 2 }, { 350, 350, 2 }, {  60, 190, 2 }, { 270, 160, 2 },
+};
+
+int hud_celestial_fg_depth(int i)
+{
+    return i < 0 || i >= HUD_FG_COUNT ? 2 : s_fg[i].depth;
+}
+
+/* Star i's centre in 1/16 px at a lean, after the guards. A slide that would
+ * put the star's arms outside the glass (radius HUD_FG_GLASS_R) or on the
+ * hands' hub (HUD_FG_HUB_R) is held at the star's rest position. */
+void hud_celestial_fg_pos(int i, int tilt_x, int tilt_y, int *x_q4, int *y_q4)
+{
+    const int bx = s_fg[i].x * 16, by = s_fg[i].y * 16;
+    *x_q4 = bx;
+    *y_q4 = by;
+    if (tilt_x == 0 && tilt_y == 0) {
+        return;
+    }
+    tilt_x = tilt_x < -256 ? -256 : tilt_x > 256 ? 256 : tilt_x;
+    tilt_y = tilt_y < -256 ? -256 : tilt_y > 256 ? 256 : tilt_y;
+    const hud_fg_depth_t *d = &s_fg_depth[s_fg[i].depth];
+    const int nx = bx + (tilt_x * d->travel_px) / 16;        /* 256 -> travel px, in 1/16 */
+    const int ny = by + (tilt_y * d->travel_px) / 16;
+    const int dx = nx - 233 * 16, dy = ny - 233 * 16;
+    const int64_t r2 = (int64_t)dx * dx + (int64_t)dy * dy;
+    const int64_t hi = (int64_t)(HUD_FG_GLASS_R * 16 - d->arm_q4) * (HUD_FG_GLASS_R * 16 - d->arm_q4);
+    const int64_t lo = (int64_t)(HUD_FG_HUB_R * 16 + d->arm_q4) * (HUD_FG_HUB_R * 16 + d->arm_q4);
+    if (r2 > hi || r2 < lo) {
+        return;
+    }
+    *x_q4 = nx;
+    *y_q4 = ny;
+}
+
+int hud_celestial_foreground(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                             int ss, int ms, bool alive, int tilt_x, int tilt_y)
+{
+    if (dst == NULL || nrows <= 0) {
+        return 0;
+    }
+    luts_build();
+    ss = ((ss % 60) + 60) % 60;
+    ms = ms < 0 ? 0 : ms > 999 ? 999 : ms;
+    int touched = 0;
+    for (int i = 0; i < HUD_FG_COUNT; ++i) {
+        const hud_fg_depth_t *dp = &s_fg_depth[s_fg[i].depth];
+        const int reach = ((int)dp->arm_q4 + 16) / 16 + 1 + dp->travel_px;   /* arms plus the deepest slide */
+        const int sy0 = s_fg[i].y;
+        if (sy0 + reach < y0 || sy0 - reach >= y0 + nrows) {
+            continue;                                       /* not in this strip */
+        }
+        int cx, cy;
+        hud_celestial_fg_pos(i, tilt_x, tilt_y, &cx, &cy);
+        const int L = dp->arm_q4;
+        const int row_lo = (cy - L - 16) / 16 - 1, row_hi = (cy + L + 16) / 16 + 1;
+        const int col_lo = (cx - L - 16) / 16 - 1, col_hi = (cx + L + 16) / 16 + 1;
+        if (row_hi < y0 || row_lo >= y0 + nrows) {
+            continue;
+        }
+        /* the near stars breathe, slowly and out of phase; the rest are steady */
+        int bright = dp->bright;
+        if (alive && s_fg[i].depth == 0) {
+            const uint32_t P = 4000u + (uint32_t)i * 500u;
+            const uint32_t ph = ((((uint32_t)(ss * 1000 + ms)) % P) * 65536u) / P + (uint32_t)i * 0x5555u;
+            bright = 168 + (((sin_q16(ph & 0xFFFFu) + 32768) * 87) >> 16);   /* 168..255 */
+        }
+        const int R = dp->core_q4;
+        const int R2 = R * R;
+        const int inv_r2 = (int)((256u << 16) / (uint32_t)R2);
+        const int T = 16;                                   /* arm half-thickness, 1 px: a tent, so a sub-pixel slide keeps the energy */
+        const int inv_l = 65536 / L;
+        for (int y = row_lo < y0 ? y0 : row_lo; y < y0 + nrows && y <= row_hi; ++y) {
+            const int dy = y * 16 - cy;
+            const int ady = dy < 0 ? -dy : dy;
+            const int dy2 = dy * dy;
+            uint16_t *row = dst + (size_t)(y - y0) * HUD_W;
+            for (int x = col_lo < 0 ? 0 : col_lo; x < HUD_W && x <= col_hi; ++x) {
+                const int dx = x * 16 - cx;
+                const int adx = dx < 0 ? -dx : dx;
+                int a = 0;
+                const int d2 = dx * dx + dy2;
+                if (d2 < R2) {                              /* the core: a soft disc */
+                    const int g = (int)(((int64_t)(R2 - d2) * inv_r2) >> 16);   /* 0..256 */
+                    a = (g * g) >> 8;                       /* a tight, bright centre */
+                }
+                if (ady < T && adx < L) {                   /* the horizontal arm */
+                    const int wv = (T - ady) * 16;
+                    const int wl = ((L - adx) * inv_l) >> 8;    /* 0..256, a straight fall to the tip */
+                    const int arm = (wv * wl) >> 8;
+                    if (arm > a) {
+                        a = arm;
+                    }
+                }
+                if (adx < T && ady < L) {                   /* the vertical arm */
+                    const int wv = (T - adx) * 16;
+                    const int wl = ((L - ady) * inv_l) >> 8;
+                    const int arm = (wv * wl) >> 8;
+                    if (arm > a) {
+                        a = arm;
+                    }
+                }
+                if (a <= 1) {
+                    continue;
+                }
+                const int amp = (a * bright) >> 8;          /* 0..255 */
+                star_add(row + x, (amp * dp->r) >> 8, (amp * dp->g) >> 8, (amp * dp->b) >> 8, swap_bytes);
+                ++touched;
+            }
+        }
+    }
+    return touched;
+}
+
 /* What a frame of the watch derives from its inputs, kept across the
  * strips of that frame (hud_overlay_watch). Single writer, the render
  * task; the host probes are single-threaded. */
@@ -2582,8 +2726,13 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     if (style == 6 && w->dial_baked) {
         (void)hud_balance_blit(dst, y0, nrows, swap_bytes,
                                w->alive ? hud_balance_angle_q16(w->ss, w->ms) : 0);
-    } else if (style == 7 && w->dial_baked && w->alive) {
-        (void)hud_celestial_twinkle(dst, y0, nrows, swap_bytes, w->ss, w->ms);
+    } else if (style == 7 && w->dial_baked) {
+        if (w->alive) {
+            (void)hud_celestial_twinkle(dst, y0, nrows, swap_bytes, w->ss, w->ms);
+        }
+        /* the near stars: drawn at rest too, leaning only while alive */
+        (void)hud_celestial_foreground(dst, y0, nrows, swap_bytes, w->ss, w->ms, w->alive,
+                                       w->alive ? w->tilt_x : 0, w->alive ? w->tilt_y : 0);
     }
 
     if (style == 3) {

@@ -41,6 +41,7 @@
 #include <stdint.h>
 #include "jr_display.c"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -139,6 +140,7 @@ static int pv_parse(const char *path, pv_step_t **out)
         else if (!strcmp(v, "tap")) ok = sscanf(rest, "%d %d", &s->x, &s->y) == 2;
         else if (!strcmp(v, "open") || !strcmp(v, "close")) ok = !strcmp(rest, "shade");
         else if (!strcmp(v, "home")) ok = true;
+        else if (!strcmp(v, "tilt")) ok = !strncmp(rest, "orbit ", 6) || sscanf(rest, "%d %d", &s->x, &s->y) == 2;
         else if (!strcmp(v, "set")) ok = strlen(rest) > 2;
         if (!ok) { fprintf(stderr, "%s:%d: bad step '%s'\n", path, ln, p); free(st); fclose(f); return -1; }
         if (++n >= 2048) break;
@@ -204,6 +206,35 @@ static void pv_swipe(const char *dir)
     } else if (!horiz) {
         pv_caption_space();
     }
+}
+
+/* ---- the scripted tilt (tilt parallax) ----
+ * `tilt X Y` holds the sensor at (X, Y) milli-g, the in-plane UP vector in
+ * screen axes. `tilt orbit PERIOD_MS AMP_MG` walks ONE circle of radius AMP
+ * that starts and ends at the pose it was in (the origin), then holds there.
+ * The render task asks for it once a frame, exactly as main.c's source does,
+ * and shapes it with the real tilt.h. */
+static int     s_pv_tx, s_pv_ty;
+static bool    s_pv_orbit;
+static int64_t s_pv_orbit_t0_us;
+static int     s_pv_orbit_ms, s_pv_orbit_amp;
+
+static bool pv_tilt_source(int *x, int *y)
+{
+    if (s_pv_orbit) {
+        const int64_t el = (s_fake_us - s_pv_orbit_t0_us) / 1000;
+        if (el >= s_pv_orbit_ms) {
+            s_pv_orbit = false;
+            s_pv_tx = s_pv_ty = 0;
+        } else {
+            const double th = 6.283185307179586 * (double)el / (double)s_pv_orbit_ms;
+            s_pv_tx = (int)(s_pv_orbit_amp * (cos(th) - 1.0));
+            s_pv_ty = (int)(s_pv_orbit_amp * sin(th));
+        }
+    }
+    *x = s_pv_tx;
+    *y = s_pv_ty;
+    return true;
 }
 
 /* ---- one frame ---- */
@@ -320,6 +351,7 @@ int main(int argc, char **argv)
     if (n < 0) return 2;
     if (n == 0 || strcmp(st[0].verb, "scene") != 0) { fprintf(stderr, "a script starts with 'scene NAME'\n"); return 2; }
 
+    jr_display_set_tilt_source(pv_tilt_source);
     s_pv_black = calloc(466u * 466u, sizeof(uint16_t));
     s_pv_fb = malloc(466u * 466u * sizeof(uint16_t));
     if (s_pv_bg) {
@@ -359,6 +391,18 @@ int main(int argc, char **argv)
         } else if (!strcmp(s->verb, "home")) {
             jr_display_nav_home();
             pv_caption_space();
+        } else if (!strcmp(s->verb, "tilt")) {
+            if (!strncmp(s->a, "orbit ", 6)) {
+                sscanf(s->a + 6, "%d %d", &s_pv_orbit_ms, &s_pv_orbit_amp);
+                s_pv_orbit_t0_us = s_fake_us;
+                s_pv_orbit = s_pv_orbit_ms > 0;
+                s_pv_tx = s_pv_ty = 0;
+            } else {
+                s_pv_orbit = false;
+                s_pv_tx = s->x;
+                s_pv_ty = s->y;
+            }
+            printf("NOTE tilt %s\n", s->a);
         } else if (!strcmp(s->verb, "set")) {
             char k[24] = "", v[96] = "";
             sscanf(s->a, "%23s %95[^\n]", k, v);
