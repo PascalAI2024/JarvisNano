@@ -5687,6 +5687,47 @@ static void test_park_yields_to_blank_to_a_failed_lock_and_to_a_dial(void)
     pk_reset();
 }
 
+static void test_snapshot_mirror_blacks_out_the_corners(void)
+{
+    enum { W = 466, H = 466, STRIP = 12 };
+    const jr_display_ctx_t saved = s_display;
+    uint16_t *mirror = malloc((size_t)W * H * sizeof(uint16_t));
+    uint16_t *other = malloc((size_t)W * H * sizeof(uint16_t));
+    uint16_t *strip = malloc((size_t)W * STRIP * sizeof(uint16_t));
+    CHECK(mirror && other && strip, "mirror test buffers");
+    for (size_t i = 0; i < (size_t)W * H; ++i) { mirror[i] = 0x1234; other[i] = 0x1234; }
+    for (size_t i = 0; i < (size_t)W * STRIP; ++i) { strip[i] = 0xAAAA; }
+    s_display.board.width = W;
+    s_display.board.height = H;
+    s_display.snapshot_capture_rgb565 = mirror;
+    s_display.snapshot_rgb565 = other;
+    s_display.snapshot_initialized = 1U;
+    s_display.snapshot_consumer_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    s_display.snapshot_frame_dropped = 0U;
+    s_display.snapshot_next_y = 0U;
+    for (int y = 0; y < H; y += STRIP) {
+        const int y2 = y + STRIP < H ? y + STRIP : H;
+        snapshot_record_flush(&s_display, 0, y, W, y2, strip);
+    }
+    CHECK(s_display.snapshot_valid && s_display.snapshot_rgb565 == mirror,
+          "the full frame was published");
+    int wrong = 0, lit = 0;
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            const long dx = 2L * x + 1 - W, dy = 2L * y + 1 - H;
+            const bool inside = dx * dx + dy * dy <= (long)W * W;
+            const uint16_t want = inside ? 0xAAAA : 0;
+            lit += inside;
+            wrong += mirror[(size_t)y * W + x] != want;
+        }
+    }
+    CHECK(wrong == 0 && lit > 0, "outside the glass radius the mirror is black, inside it is the strip");
+    CHECK(mirror[0] == 0 && mirror[W - 1] == 0 && mirror[(size_t)(H - 1) * W] == 0 &&
+          mirror[(size_t)H * W - 1] == 0, "the four corner pixels are black");
+    free(mirror); free(other); free(strip);
+    s_display = saved;
+}
+
 int main(void)
 {
     test_light_word_round_trips();
@@ -5799,6 +5840,7 @@ int main(void)
     test_other_owners_of_the_backdrop_withdraw_the_park();
     test_a_face_requested_while_parked_is_the_face_that_comes_back();
     test_park_yields_to_blank_to_a_failed_lock_and_to_a_dial();
+    test_snapshot_mirror_blacks_out_the_corners();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);
