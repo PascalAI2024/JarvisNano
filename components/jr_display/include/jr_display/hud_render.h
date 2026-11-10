@@ -472,6 +472,33 @@ void hud_overlay_clock(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 #define HUD_WATCH_CELL_LINK_CX ((HUD_WATCH_CELL_LINK_X0 + HUD_WATCH_CELL_LINK_X1) / 2)
 #define HUD_WATCH_CELL_LINK_CY ((HUD_WATCH_CELL_LINK_Y0 + HUD_WATCH_CELL_LINK_Y1) / 2)
 
+/* THE LIGHT ON THE HANDS. Geometry never moves; only the light does, so the
+ * hands stay registered with the baked dial. Solved once per frame from the
+ * in-plane gravity (hud_light_solve) and read by every strip. At rest (flat,
+ * or no data) it is exactly the fixed light the watch shipped with. */
+typedef struct {
+    int shadow_dx, shadow_dy;   /* Q4 px: rest (32, 48); length <= 96 (6 px)  */
+    int bevel_lx, bevel_ly;     /* Q15 unit vector toward the light; rest
+                                 * (-19661, -26214) = (-0.6, -0.8)            */
+    int glint_x, glint_y;       /* hub glint, 1/16 of (hub radius / 3);
+                                 * rest (-16, -16) = -rad/3 each way          */
+} hud_light_t;
+
+/* (gx_mg, gy_mg): the UP vector projected into the screen plane, milli-g,
+ * x to the right, y downward on the glass (the caller applies the IMU axis
+ * signs). Inside an 80 mg dead band the result is exactly the rest light;
+ * beyond it the light swings, the shadow falls downhill and lengthens to 6 px
+ * at 1 g. Integer only, no libm. */
+#define HUD_LIGHT_DEADBAND_MG 80
+void hud_light_solve(int gx_mg, int gy_mg, hud_light_t *out);
+
+/* One step of the render task's one-pole filter on one axis. `cur_q8` is the
+ * filtered value in milli-g * 256, `target_mg` the latest reading, dt_ms the
+ * time since the last step. Time constant HUD_LIGHT_TAU_MS; the step is
+ * dt / (tau + dt), always < 1, so it converges and never overshoots. */
+#define HUD_LIGHT_TAU_MS 250
+int hud_light_ease(int cur_q8, int target_mg, int dt_ms);
+
 typedef struct {
     int  hh, mm, ss, ms;     /* ms 0..999: the phase inside the second     */
     int  batt_pct;           /* 0..100, or -1 when the gauge has no answer */
@@ -479,6 +506,7 @@ typedef struct {
     int  temp_f;
     bool dial_baked;         /* the baked dial is under the hands          */
     bool shadow;             /* the hands cast shadows: the awake cadence  */
+    const hud_light_t *light; /* where the room's light is; NULL = at rest  */
 } hud_watch_t;
 
 void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,

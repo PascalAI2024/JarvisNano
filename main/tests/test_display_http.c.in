@@ -33,6 +33,8 @@ int main(int argc,char **argv) {
  cached.flush_errors=cached.actual_fps=cached.render_us=cached.render_frames=UINT32_MAX;
  cached.render_frame_us=cached.current_asset_bytes=cached.free_psram_bytes=UINT32_MAX;
  cached.task_stack_hwm=UINT32_MAX;
+ cached.light_gx_mg=cached.light_gy_mg=INT32_MIN;
+ cached.light_shadow_dx_q4=cached.light_shadow_dy_q4=INT32_MIN;
  cached.boot_timing.init_started=true;cached.boot_timing.init_finished=true;
  cached.boot_timing.init_start_boot_ms=UINT32_MAX-2;
  cached.boot_timing.init_end_boot_ms=UINT32_MAX-1;

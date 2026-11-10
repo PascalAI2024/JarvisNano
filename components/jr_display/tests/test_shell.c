@@ -4283,8 +4283,78 @@ static void test_actual_presenter_runs_quiet_not_repeat(void)
           "actual task721 passes: one startup pattern refresh, one visible one-shot, zero periodic refresh");
 }
 
+/* ------------------------------------------------------------------ light -- */
+
+static bool light_eq_rest(const hud_light_t *a, const hud_light_t *b)
+{
+    return a->shadow_dx == b->shadow_dx && a->shadow_dy == b->shadow_dy &&
+           a->bevel_lx == b->bevel_lx && a->bevel_ly == b->bevel_ly &&
+           a->glint_x == b->glint_x && a->glint_y == b->glint_y;
+}
+
+/* The in-plane light travels as ONE packed word: gx bits 0-11, gy bits 12-23
+ * (signed 12-bit), valid bit 24. Pin the layout and the round trip. */
+static void test_light_word_round_trips(void)
+{
+    static const int vals[] = { 0, 1, -1, 80, -80, 1000, -1000, 1200, -1200, 2047, -2048, 5000, -5000 };
+    for (size_t i = 0; i < sizeof vals / sizeof *vals; ++i) {
+        for (size_t j = 0; j < sizeof vals / sizeof *vals; ++j) {
+            for (int valid = 0; valid < 2; ++valid) {
+                jr_display_set_light(vals[i], vals[j], valid != 0);
+                const uint32_t w = __atomic_load_n(&s_light_word, __ATOMIC_ACQUIRE);
+                const int ex = vals[i] > 1200 ? 1200 : vals[i] < -1200 ? -1200 : vals[i];
+                const int ey = vals[j] > 1200 ? 1200 : vals[j] < -1200 ? -1200 : vals[j];
+                CHECK(light_field(w, 0) == ex, "gx %d came back %d", vals[i], light_field(w, 0));
+                CHECK(light_field(w, 12) == ey, "gy %d came back %d", vals[j], light_field(w, 12));
+                CHECK(((w & JR_LIGHT_VALID) != 0u) == (valid != 0), "valid bit lost");
+                CHECK((w >> 25) == 0u, "bits above the valid bit are set (0x%08x)", w);
+            }
+        }
+    }
+    jr_display_set_light(-1, 1, true);
+    CHECK(__atomic_load_n(&s_light_word, __ATOMIC_ACQUIRE) == (0xFFFu | (1u << 12) | JR_LIGHT_VALID),
+          "layout drifted: 0x%08x", __atomic_load_n(&s_light_word, __ATOMIC_ACQUIRE));
+}
+
+/* The frame hook eases toward the word, solves once, and falls back to the
+ * rest light when the data goes invalid. */
+static void test_light_tick_eases_and_falls_back(void)
+{
+    hud_light_t rest;
+    hud_light_solve(0, 0, &rest);
+    s_light_fx_q8 = s_light_fy_q8 = 0;
+    s_light_prev_ms = 1000;
+    jr_display_set_light(0, -1000, true);
+    uint32_t t = 1000;
+    int last_dy = s_light.shadow_dy;
+    for (int i = 0; i < 80; ++i) {
+        t += 42;
+        light_tick(t);
+        CHECK(s_light.shadow_dy >= last_dy - 1, "shadow reversed while easing in (%d -> %d)",
+              last_dy, s_light.shadow_dy);
+        last_dy = s_light.shadow_dy;
+        CHECK(s_light.shadow_dy <= 96, "shadow beyond 6 px: %d", s_light.shadow_dy);
+    }
+    CHECK(s_light_gy_mg == -1000 && s_light.shadow_dy == 96 && s_light.shadow_dx == 0,
+          "settled at gy %d shadow %d,%d", s_light_gy_mg, s_light.shadow_dx, s_light.shadow_dy);
+
+    jr_display_set_light(0, -1000, false);        /* IMU gone */
+    for (int i = 0; i < 80; ++i) {
+        t += 42;
+        light_tick(t);
+    }
+    CHECK(light_eq_rest(&s_light, &rest), "invalid data did not return the rest light");
+
+    jr_display_set_light(0, 0, true);
+    t += 42;
+    light_tick(t);
+    CHECK(light_eq_rest(&s_light, &rest), "flat is not the rest light");
+}
+
 int main(void)
 {
+    test_light_word_round_trips();
+    test_light_tick_eases_and_falls_back();
     test_every_face_has_a_clip_and_a_hud_face();
     test_space_ring_wraps_both_ways();
     test_overlay_axis_is_unambiguous();

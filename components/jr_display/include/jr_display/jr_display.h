@@ -147,6 +147,10 @@ typedef struct {
     uint32_t render_us;
     uint32_t render_frames;
     uint32_t render_frame_us;
+    /* The filtered in-plane light the watch hands are lit with (milli-g, screen
+     * axes) and the shadow offset it solved to (Q4 px; rest is 32, 48). */
+    int32_t light_gx_mg, light_gy_mg;
+    int32_t light_shadow_dx_q4, light_shadow_dy_q4;
     jr_display_boot_timing_t boot_timing;
 } jr_display_diag_t;
 
@@ -214,6 +218,12 @@ int jr_display_surface_hit_test(uint16_t x, uint16_t y);
 void jr_display_set_hud_env(uint8_t batt_pct, bool charging,
                             bool privacy_muted,
                             float roll_deg, float pitch_deg);
+
+/* The room's light on the watch hands: the UP vector projected into the glass
+ * plane, milli-g, SCREEN axes (x right, y down), clamped to +-1200. Any task,
+ * any cadence (one packed word); the render task filters and solves it once a
+ * frame. valid=false (no IMU) leaves the rest light. */
+void jr_display_set_light(int gx_mg, int gy_mg, bool valid);
 
 /* Genuine idle DREAM intent. Local foreground/OTA guards still win. This
  * publishes a packed bit; panel work remains on the presenter/render tasks.

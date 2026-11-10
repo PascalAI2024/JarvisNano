@@ -2000,8 +2000,257 @@ static void test_watch_hands_blend_and_spare_the_dial(void)
     free(fb);
 }
 
+/* ===== THE LIGHT ON THE HANDS (2026-11-09) =================================
+ * Geometry never moves; only the light does. The rest light must be exactly
+ * the one the watch shipped with, and a tilt must swing it smoothly. */
+static bool light_eq(const hud_light_t *a, const hud_light_t *b)
+{
+    return a->shadow_dx == b->shadow_dx && a->shadow_dy == b->shadow_dy &&
+           a->bevel_lx == b->bevel_lx && a->bevel_ly == b->bevel_ly &&
+           a->glint_x == b->glint_x && a->glint_y == b->glint_y;
+}
+
+static int light_abs(int v) { return v < 0 ? -v : v; }
+
+static void test_light_deadband_is_today(void)
+{
+    hud_light_t rest, l;
+    hud_light_solve(0, 0, &rest);
+    CHECK(rest.shadow_dx == 32 && rest.shadow_dy == 48 &&
+          rest.bevel_lx == -19661 && rest.bevel_ly == -26214 &&
+          rest.glint_x == -16 && rest.glint_y == -16,
+          "rest light is not today's constants: %d,%d %d,%d %d,%d",
+          rest.shadow_dx, rest.shadow_dy, rest.bevel_lx, rest.bevel_ly,
+          rest.glint_x, rest.glint_y);
+    int inside = 0;
+    for (int x = -HUD_LIGHT_DEADBAND_MG; x <= HUD_LIGHT_DEADBAND_MG; ++x) {
+        for (int y = -HUD_LIGHT_DEADBAND_MG; y <= HUD_LIGHT_DEADBAND_MG; ++y) {
+            if (x * x + y * y >= HUD_LIGHT_DEADBAND_MG * HUD_LIGHT_DEADBAND_MG) continue;
+            hud_light_solve(x, y, &l);
+            inside++;
+            CHECK(light_eq(&l, &rest), "(%d,%d) inside the dead band is not rest", x, y);
+        }
+    }
+    CHECK(inside > 20000, "only %d dead-band points checked", inside);
+}
+
+/* Continuity: nothing steps at the dead-band edge, and nothing jumps
+ * anywhere on the way up. Shadow in Q4 px, bevel in Q15, glint in 1/16. */
+static void test_light_is_continuous(void)
+{
+    hud_light_t rest, a, b;
+    hud_light_solve(0, 0, &rest);
+    for (int m = 79; m <= 81; ++m) {            /* the edge: still rest */
+        hud_light_solve(m, 0, &a);
+        CHECK(light_eq(&a, &rest), "edge mag %d moved off rest", m);
+    }
+    int worst_sh = 0, worst_bv = 0, worst_gl = 0, pairs = 0;
+    for (int dir = 0; dir < 8; ++dir) {
+        static const int ux[8] = { 1, 1, 0, -1, -1, -1, 0, 1 };
+        static const int uy[8] = { 0, 1, 1, 1, 0, -1, -1, -1 };
+        int px = 0, py = 0;
+        for (int m = 60; m <= 1200; ++m) {
+            const int x = ux[dir] * m * (ux[dir] && uy[dir] ? 707 : 1000) / 1000;
+            const int y = uy[dir] * m * (ux[dir] && uy[dir] ? 707 : 1000) / 1000;
+            hud_light_solve(x, y, &b);
+            if (m > 60) {
+                hud_light_solve(px, py, &a);
+                int d = light_abs(a.shadow_dx - b.shadow_dx);
+                if (light_abs(a.shadow_dy - b.shadow_dy) > d) d = light_abs(a.shadow_dy - b.shadow_dy);
+                if (d > worst_sh) worst_sh = d;
+                d = light_abs(a.bevel_lx - b.bevel_lx);
+                if (light_abs(a.bevel_ly - b.bevel_ly) > d) d = light_abs(a.bevel_ly - b.bevel_ly);
+                if (d > worst_bv) worst_bv = d;
+                d = light_abs(a.glint_x - b.glint_x);
+                if (light_abs(a.glint_y - b.glint_y) > d) d = light_abs(a.glint_y - b.glint_y);
+                if (d > worst_gl) worst_gl = d;
+                pairs++;
+            }
+            px = x; py = y;
+        }
+    }
+    CHECK(pairs > 9000, "only %d adjacent pairs", pairs);
+    CHECK(worst_sh <= 2, "shadow jumped %d Q4 between 1 mg steps", worst_sh);
+    CHECK(worst_gl <= 1, "glint jumped %d between 1 mg steps", worst_gl);
+    CHECK(worst_bv <= 800, "bevel vector jumped %d (Q15) between 1 mg steps", worst_bv);
+}
+
+static void test_light_shadow_falls_downhill_and_clamps(void)
+{
+    hud_light_t l;
+    /* UP vector toward 12 o'clock (y is down on the glass): the device
+     * stands on edge, the shadow falls to 6 o'clock, 6 px long */
+    hud_light_solve(0, -1000, &l);
+    CHECK(l.shadow_dx == 0 && l.shadow_dy == 96, "12 up: shadow %d,%d", l.shadow_dx, l.shadow_dy);
+    hud_light_solve(0, 1000, &l);
+    CHECK(l.shadow_dx == 0 && l.shadow_dy == -96, "6 up: shadow %d,%d", l.shadow_dx, l.shadow_dy);
+    hud_light_solve(1000, 0, &l);
+    CHECK(l.shadow_dx == -96 && l.shadow_dy == 0, "3 up: shadow %d,%d", l.shadow_dx, l.shadow_dy);
+    hud_light_solve(-1000, 0, &l);
+    CHECK(l.shadow_dx == 96 && l.shadow_dy == 0, "9 up: shadow %d,%d", l.shadow_dx, l.shadow_dy);
+
+    /* length grows with tilt once past the ramp, and never beyond 6 px */
+    static const int ux[8] = { 1, 1, 0, -1, -1, -1, 0, 1 };
+    static const int uy[8] = { 0, 1, 1, 1, 0, -1, -1, -1 };
+    for (int dir = 0; dir < 8; ++dir) {
+        long prev = -1;
+        for (int m = 400; m <= 1200; m += 8) {
+            const int s = (ux[dir] && uy[dir]) ? 707 : 1000;
+            hud_light_solve(ux[dir] * m * s / 1000, uy[dir] * m * s / 1000, &l);
+            const long len2 = (long)l.shadow_dx * l.shadow_dx + (long)l.shadow_dy * l.shadow_dy;
+            CHECK(len2 <= 97L * 97L, "dir %d m %d shadow %ld > 6 px", dir, m, len2);
+            if (m <= 1000 && dir % 2 == 0) {
+                CHECK(len2 >= prev, "dir %d: shadow shrank at %d mg", dir, m);
+                prev = len2;
+            }
+        }
+    }
+    /* the whole input square, corners included */
+    for (int x = -1500; x <= 1500; x += 25) {
+        for (int y = -1500; y <= 1500; y += 25) {
+            hud_light_solve(x, y, &l);
+            CHECK(light_abs(l.shadow_dx) <= 97 && light_abs(l.shadow_dy) <= 97,
+                  "(%d,%d) shadow %d,%d beyond 6 px", x, y, l.shadow_dx, l.shadow_dy);
+            CHECK(light_abs(l.glint_x) <= 24 && light_abs(l.glint_y) <= 24,
+                  "(%d,%d) glint %d,%d leaves the hub", x, y, l.glint_x, l.glint_y);
+        }
+    }
+}
+
+static void test_light_bevel_stays_normalised_and_mirrors(void)
+{
+    hud_light_t l, m;
+    int tilted = 0;
+    for (int x = -1200; x <= 1200; x += 20) {
+        for (int y = -1200; y <= 1200; y += 20) {
+            hud_light_solve(x, y, &l);
+            const long n2 = (long)l.bevel_lx * l.bevel_lx + (long)l.bevel_ly * l.bevel_ly;
+            const long one = 32768L * 32768L;
+            CHECK(n2 <= one + one / 50, "(%d,%d) bevel vector too long (%ld)", x, y, n2);
+            if (x * x + y * y >= 400 * 400) {
+                tilted++;
+                CHECK(n2 >= one - one / 50, "(%d,%d) bevel vector not unit (%ld)", x, y, n2);
+                hud_light_solve(-x, -y, &m);        /* point reflection */
+                CHECK(m.shadow_dx == -l.shadow_dx && m.shadow_dy == -l.shadow_dy &&
+                      m.bevel_lx == -l.bevel_lx && m.bevel_ly == -l.bevel_ly &&
+                      m.glint_x == -l.glint_x && m.glint_y == -l.glint_y,
+                      "(%d,%d) is not mirrored by (%d,%d)", x, y, -x, -y);
+            }
+        }
+    }
+    CHECK(tilted > 8000, "only %d tilted points checked", tilted);
+    /* the light goes where the shadow does not: standing on edge, 12 up,
+     * the bevel light comes from the top (negative y on the glass) */
+    hud_light_solve(0, -1000, &l);
+    CHECK(l.bevel_lx == 0 && l.bevel_ly == -32768, "12 up: bevel %d,%d", l.bevel_lx, l.bevel_ly);
+    CHECK(l.glint_x == 0 && l.glint_y < -16, "12 up: glint %d,%d", l.glint_x, l.glint_y);
+}
+
+static void test_light_filter_converges_without_overshoot(void)
+{
+    static const int targets[] = { 1000, -1200, 80, 0, -1 };
+    for (size_t t = 0; t < sizeof targets / sizeof *targets; ++t) {
+        for (int dt = 10; dt <= 100; dt += 30) {
+            for (int from = -1; from <= 1; from += 2) {
+                int cur = from * 700 * 256;
+                int prev_gap = light_abs(targets[t] * 256 - cur);
+                int steps = 0;
+                while (cur != targets[t] * 256 && steps < 4000) {
+                    const int next = hud_light_ease(cur, targets[t], dt);
+                    const int before = targets[t] * 256 - cur;
+                    const int after = targets[t] * 256 - next;
+                    CHECK(light_abs(after) <= prev_gap, "target %d dt %d: gap grew", targets[t], dt);
+                    CHECK((before >= 0 && after >= 0) || (before <= 0 && after <= 0),
+                          "target %d dt %d: overshot (%d -> %d)", targets[t], dt, cur, next);
+                    prev_gap = light_abs(after);
+                    cur = next;
+                    steps++;
+                }
+                CHECK(cur == targets[t] * 256, "target %d dt %d did not arrive in %d steps",
+                      targets[t], dt, steps);
+            }
+        }
+    }
+    /* about one time constant to cover 63 %, on the 42 ms awake cadence */
+    int cur = 0;
+    for (int i = 0; i < 6; ++i) cur = hud_light_ease(cur, 1000, 42);   /* 252 ms */
+    CHECK(cur / 256 > 540 && cur / 256 < 720,
+          "after ~250 ms the filter is at %d mg, expected ~630", cur / 256);
+}
+
+static void render_watch_light(uint16_t *fb, int style, const hud_light_t *lt, bool shadow)
+{
+    /* a mid grey dial: a shadow over black is invisible, over grey it is not */
+    for (size_t k = 0; k < (size_t)HUD_W * HUD_H; ++k) fb[k] = 0x4208;
+    const hud_watch_t w = { .hh = 10, .mm = 10, .ss = 30, .ms = 0,
+                            .batt_pct = 83, .wx_valid = true, .temp_f = 77,
+                            .dial_baked = false, .shadow = shadow, .light = lt };
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        const int n = y + STRIP_ROWS > HUD_H ? HUD_H - y : STRIP_ROWS;
+        hud_overlay_watch(fb + (size_t)y * HUD_W, y, n, false, &w, 255, style);
+    }
+}
+
+static void test_watch_light_in_the_frame(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *a = calloc(px, sizeof *a), *b = calloc(px, sizeof *b);
+    if (!a || !b) { printf("FAIL %s: alloc\n", __func__); g_failures++; free(a); free(b); return; }
+    hud_light_t rest, tilt;
+    hud_light_solve(0, 0, &rest);
+    hud_light_solve(707, -707, &tilt);            /* 45 degrees, 6 o'clock side */
+    for (int style = 1; style <= 5; ++style) {
+        render_watch_light(a, style, NULL, true);
+        render_watch_light(b, style, &rest, true);
+        CHECK(memcmp(a, b, px * sizeof *a) == 0, "style %d: rest light != NULL light", style);
+        render_watch_light(b, style, &tilt, true);
+        const bool differs = memcmp(a, b, px * sizeof *a) != 0;
+        size_t mask_diff = 0;                    /* touched-vs-dial changed */
+        size_t px_diff_on = 0;                   /* pixels that differ at all */
+        for (size_t k = 0; k < px; ++k) {
+            if ((a[k] != 0x4208) != (b[k] != 0x4208)) mask_diff++;
+            if (a[k] != b[k]) px_diff_on++;
+        }
+        if (style == 5) {
+            /* FUTURE casts no shadow, but its bevel tone follows the light:
+             * the footprint is the same up to edge pixels whose tone rounds
+             * onto the dial, only the flank tones move */
+            CHECK(mask_diff <= 60, "FUTURE footprint moved by %zu px under tilt", mask_diff);
+            printf("note: FUTURE frame %s under tilt (bevel tone only, footprint moved %zu px)\n",
+                   differs ? "differs" : "is identical", mask_diff);
+        } else {
+            CHECK(differs, "style %d: a strong tilt left the frame unchanged", style);
+        }
+        /* with shadows off (the resting cadence) only tones follow the light */
+        render_watch_light(a, style, NULL, false);
+        render_watch_light(b, style, &tilt, false);
+        mask_diff = 0;
+        size_t px_diff_off = 0;
+        for (size_t k = 0; k < px; ++k) {
+            if ((a[k] != 0x4208) != (b[k] != 0x4208)) mask_diff++;
+            if (a[k] != b[k]) px_diff_off++;
+        }
+        if (style != 5) {
+            /* the shadow itself is what moved: far more pixels change with
+             * shadows on than the tone shift alone changes with them off */
+            CHECK(px_diff_on > px_diff_off + 150,
+                  "style %d: shadow moved only %zu px beyond tone (%zu on, %zu off)",
+                  style, px_diff_on - px_diff_off, px_diff_on, px_diff_off);
+        }
+        CHECK(mask_diff <= 100, "style %d: light moved the footprint with shadows off (%zu px)",
+              style, mask_diff);
+    }
+    free(a); free(b);
+}
+
 int main(void)
 {
+    test_light_deadband_is_today();
+    test_light_is_continuous();
+    test_light_shadow_falls_downhill_and_clamps();
+    test_light_bevel_stays_normalised_and_mirrors();
+    test_light_filter_converges_without_overshoot();
+    test_watch_light_in_the_frame();
     test_strip_invariance();
     test_render_respects_bounds();
     test_boot_bloom_gates_face();

@@ -34,7 +34,18 @@ static const char *TAG = "jarvis_v5";
     "wss://generativelanguage.googleapis.com/ws/" \
     "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 
-#define VOICE_FRAME_SAMPLES  512   /* 32 ms @ 16 kHz — one AEC chunk / uplink frame */
+/* THE LIGHT ON THE WATCH HANDS follows gravity. The IMU reading points UP in
+ * the device frame; the glass wants that vector with x to the right and y
+ * DOWN. These two signs are the whole mapping, so a hand test flips one:
+ *   Y: IMU +y is taken to point at 12 o'clock (orientation_from_g calls
+ *      gy > 0 "portrait_up"), which is -y on the glass -> -1.
+ *   X: IMU +x is ASSUMED to point at 3 o'clock -> +1. NOT VERIFIED on the
+ *      device: stand it on edge and tilt toward 3 o'clock; if the shadow
+ *      swings toward 3 instead of 9, flip this sign. */
+#define JR_LIGHT_IMU_X_SIGN  (+1)
+#define JR_LIGHT_IMU_Y_SIGN  (-1)
+
+#define VOICE_FRAME_SAMPLES  512  /* 32 ms @ 16 kHz — one AEC chunk / uplink frame */
 #define INBOX_CAP            16
 /* Brief guard against the model's own acoustic tail right after it stops
  * speaking. Keep this SHORT: it gates the user's reply onset (SPEECH_STARTED),
@@ -2247,6 +2258,10 @@ static void voice_task(void *arg)
                 atomic_load(&s_voice_privacy_paused),
                 have_imu ? imu.roll_deg : 0.0f,
                 have_imu ? imu.pitch_deg : 0.0f);
+            jr_display_set_light(
+                (int)(JR_LIGHT_IMU_X_SIGN * imu.gx * 1000.0f),
+                (int)(JR_LIGHT_IMU_Y_SIGN * imu.gy * 1000.0f),
+                have_imu);
             jr_display_power_set(
                 have_power ? bat.percent : 0xFFU,
                 have_power ? bat.millivolts : 0U,
