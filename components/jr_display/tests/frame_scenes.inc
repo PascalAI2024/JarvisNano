@@ -128,6 +128,10 @@ static bool fc_orbit_rec_on = true;
 /* Whether the recorded battery / desk ring is in use (production: yes). */
 static bool fc_fring_rec_on = true;
 #endif
+#ifdef JR_DIAL_REC
+/* Whether the recorded MINIMAL dial disc is in use (production: yes). */
+static bool fc_dial_rec_on = true;
+#endif
 #ifdef JR_SHADE_REC
 /* Whether the recorded control-shade arcs are in use (production: yes). */
 static bool fc_shade_rec_on = true;
@@ -135,6 +139,13 @@ static bool fc_shade_rec_on = true;
 
 static void fc_setup(const fc_scene_t *sc)
 {
+#ifdef JR_DIAL_REC
+    if (fc_dial_rec_on) {
+        dial_rec_alloc();
+    } else {
+        hud_dial_cache_set(NULL, 0);
+    }
+#endif
 #ifdef JR_SHADE_REC
     if (fc_shade_rec_on) {
         shade_rec_alloc();

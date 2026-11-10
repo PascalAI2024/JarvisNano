@@ -27,6 +27,9 @@
  */
 #include "jr_display/glass.h"
 
+#include <stdint.h>
+#include <string.h>
+
 /* ---- trig ----------------------------------------------------------------- */
 
 /* The spatial shell's Q15 quarter sine (jr_display.c s_sp_sin), copied: this
@@ -159,15 +162,31 @@ static inline uint16_t blend_w(uint16_t under, uint16_t over, unsigned wo, unsig
     return swap ? glass_bswap(out) : out;
 }
 
+/* n copies of v, two to a word once p is word aligned (the test is on the
+ * pointer, so any buffer is safe). A store loop of 16-bit writes costs a
+ * write, a compare and a branch per pixel; this costs them per pair. */
+static inline void fill16(uint16_t *p, int n, uint16_t v)
+{
+    if (n > 0 && (((uintptr_t)p) & 2u) != 0u) {
+        *p++ = v;
+        n--;
+    }
+    const uint32_t w = (uint32_t)v | ((uint32_t)v << 16);
+    for (; n >= 2; n -= 2, p += 2) {
+        memcpy(__builtin_assume_aligned(p, 4), &w, sizeof w);
+    }
+    if (n > 0) {
+        *p = v;
+    }
+}
+
 static void fill_run(uint16_t *row, int xa, int xb, const paint_t *c)
 {
     if (c->alpha == 0u) {
         return;
     }
     if (c->alpha >= 255u) {
-        for (int x = xa; x <= xb; x++) {
-            row[x] = c->panel;
-        }
+        fill16(row + xa, xb - xa + 1, c->panel);
     } else {
         for (int x = xa; x <= xb; x++) {
             row[x] = blend_w(row[x], c->color, c->wo, c->wu, c->swap);

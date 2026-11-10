@@ -4692,6 +4692,21 @@ static inline void fring_row(uint16_t *row, int y, int lo, int hi, bool swap, in
     }
 }
 
+/* The MINIMAL dial's disc, recorded by hud_render.c (hud_dial_cache_set). 16 KB
+ * of PSRAM allocated once at start; it holds one disc's edge, about 12 KB when
+ * every row is in. Internal RAM: a pointer. */
+#define SG_DIAL_REC_WORDS 8192
+#define JR_DIAL_REC       1     /* tells the host fixtures the recorded dial disc exists */
+static uint16_t *s_dial_rec;
+
+static void dial_rec_alloc(void)
+{
+    if (s_dial_rec == NULL) {
+        s_dial_rec = heap_caps_malloc(SG_DIAL_REC_WORDS * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    hud_dial_cache_set(s_dial_rec, s_dial_rec != NULL ? SG_DIAL_REC_WORDS : 0u);
+}
+
 /* ACTIVITY: up to three blocks, newest first. Line one is the kind and the age
  * in the label face, line two the summary in the text face; each older block
  * is a step quieter, so the eye lands on what just happened. On entry the
@@ -7249,6 +7264,7 @@ esp_err_t jr_display_start(jr_display_t *out_port)
     (void)act_rtc_restore();   /* the receipt from before the sleep */
     orbit_rec_build();         /* before the render task exists to read it */
     fring_rec_alloc();         /* likewise */
+    dial_rec_alloc();          /* likewise */
     shade_rec_alloc();         /* likewise */
 
     BaseType_t created = xTaskCreatePinnedToCore(

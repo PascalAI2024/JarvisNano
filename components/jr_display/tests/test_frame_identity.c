@@ -58,11 +58,13 @@ int main(void)
     /* Two passes over the whole table: the recorded orbit rail in use (as on
      * the device), then without it (the fallback when PSRAM is short), then with
      * the rail but without the recorded battery / desk ring, then without the
-     * recorded shade arcs. All four must give the pixels the pre-cut code gave. */
-    for (int pass = 0; pass < 4; pass++) {
+     * recorded shade arcs, then without the recorded dial disc. All five must give
+     * the pixels the pre-cut code gave. */
+    for (int pass = 0; pass < 5; pass++) {
         fc_orbit_rec_on = pass != 1;
         fc_fring_rec_on = pass != 2;
         fc_shade_rec_on = pass != 3;
+        fc_dial_rec_on = pass != 4;
         for (int i = 0; i < NREFS; i++) {
             const fc_scene_t *sc = find_scene(REFS[i].scene);
             if (sc == NULL) {
@@ -81,9 +83,9 @@ int main(void)
             const uint64_t h = fc_hash(fb);
             checks++;
             if (h != REFS[i].hash) {
-                printf("FAIL %s clk=%lld (orbit record %s, ring record %s, shade record %s): frame hash %016llx, expected %016llx\n",
+                printf("FAIL %s clk=%lld (orbit record %s, ring record %s, shade record %s, dial record %s): frame hash %016llx, expected %016llx\n",
                        REFS[i].scene, (long long)REFS[i].clk_ms, fc_orbit_rec_on ? "on" : "off",
-                       fc_fring_rec_on ? "on" : "off", fc_shade_rec_on ? "on" : "off",
+                       fc_fring_rec_on ? "on" : "off", fc_shade_rec_on ? "on" : "off", fc_dial_rec_on ? "on" : "off",
                        (unsigned long long)h, (unsigned long long)REFS[i].hash);
                 failures++;
             }
@@ -92,6 +94,7 @@ int main(void)
     fc_orbit_rec_on = true;
     fc_fring_rec_on = true;
     fc_shade_rec_on = true;
+    fc_dial_rec_on = true;
     /* every scene must be pinned at least once: a scene added to the fixture
      * and not to the table would otherwise be unguarded */
     for (int s = 0; s < FC_NSCENES; s++) {
