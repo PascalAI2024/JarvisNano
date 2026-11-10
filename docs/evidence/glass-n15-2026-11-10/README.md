@@ -356,3 +356,30 @@ solved: the shade opening over a dial is still 90-100 ms a frame (the dial
 alone, settled, is 40), and a style change onto a baked dial is still 50-65.
 
 After the walks: knob 0, largest internal block 22,528 bytes, `flush_errors 0`.
+
+## Eighth flash the same day: the three winners as the only paths
+
+Image ced022c (2,436,912 bytes, boot complete at 5.5 s, valid after 56 s). The
+knob has no bits again; the paths the three replaced are deleted (d6bc14e) and
+no frame hash changed, settled or in motion. The veil's fold had no test once
+its knob-0 reference was gone, so one was added that compares it with a
+per-pixel fold built inside the test. Knob 0, lease held, two passes:
+
+| Transition | mean ms | part | worst interval | b0e490d knob 0, worst |
+|---|---|---|---|---|
+| WATCH > WEATHER | 48.2 / 43.1 | `space_screen` 11.9 / 9.5 | 62 / 56 | |
+| WEATHER > STATUS | 48.1 / 46.7 | 23.8 / 23.5 | 61 / 68 | 99 / 100 |
+| STATUS > DESK | 47.1 / 47.9 | 24.4 / 25.3 | 55 / 59 | 91 / 93 |
+| DESK > ACTIVITY | 34.0 / 32.2 | 11.5 / 12.1 | 39 / 39 | 42 / 41 |
+| Shade open over home | 53.2 / 54.2 | `space_veil` 5.7 / 6.8 | 66 / 76 | 67 / 83 |
+| Shade open over PILOT | 92.5 / 92.2 | 5.8 / 5.7 | 97 / 121 | (MINIMAL: 173 / 176) |
+| Shade close over WATCH | 62.6 / 65.8 | 2.8 / 2.8 | 111 / 145 | 130 / 141 |
+| Style PILOT > MINIMAL | 51.3 / 50.5 | `clock_face` 27.0 / 29.7 | 57 / 64 | 162 |
+| Style MINIMAL > FUTURE | 50.7 / 39.5 | 29.5 / 17.6 | 53 / 44 | 64 |
+| Style FUTURE > SKELETON | 60.1 / 72.1 | 26.7 / 29.6 | 75 / 72 | |
+
+The ring entries came out better than the bit measured on b0e490d (mean 47-48
+against 50-60). The likely reason, not proven: switching the bit on there
+made the first entry also pay for allocating and filling its records, and here
+they exist before the walk starts. After the walks: largest
+internal block 22,528 bytes, `flush_errors 0`.
