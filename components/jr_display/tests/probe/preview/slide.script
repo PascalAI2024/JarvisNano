@@ -1,0 +1,11 @@
+# a slide between two ring screens, in each direction, then the wrap home
+scene weather
+wait 800
+swipe down        # WEATHER -> STATUS
+wait 1500
+swipe up          # STATUS -> WEATHER
+wait 1500
+scene activity
+wait 800
+swipe down        # ACTIVITY -> home (the wrap)
+wait 1500

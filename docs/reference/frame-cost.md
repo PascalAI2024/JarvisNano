@@ -252,6 +252,18 @@ Method notes. The probe is built as the page's first round describes, with `-DFC
 - What the roughly 25 ms floor is. The split timers and `render_us` against their sum answer it on the first flash. The third round cut instructions on every screen except the baked watches and home, so a flash that still shows 25 ms on DRESS and 27 ms on home settles it.
 - Whether STATUS and WEATHER are bound by instruction-cache misses on flash. If they are, the lever is code footprint and locality, or placing the hot primitives in IRAM, which costs internal RAM and needs an owner decision.
 
+**[2026-11-10] Transition frames (feat/glass-motion)**
+Worst frame of each preview script, callgrind instructions per frame, same preview harness before (feat/glass-2 at 175d912) and after, `-O2`, no vectorising, 24 fps scripts (method in glass-preview.md):
+
+| script | frames | worst before | worst after | where after |
+|---|---|---|---|---|
+| watch-enter (WATCH in and out, dial to home, dial to WEATHER) | 192 | 5.82 M | 6.51 M | frame 99, a baked dial dimming out to home |
+| slide (WEATHER, STATUS, home) | 148 | 4.95 M | 4.52 M | frame 47 |
+| shade (open and close over home and over WATCH) | 228 | 5.31 M | 5.41 M | frame 30 |
+| style (dial to dial, to MINIMAL, back) | 252 | 3.75 M | 9.61 M | frames 91 to 94, MINIMAL fading in |
+
+The style dip into MINIMAL is the one over budget: MINIMAL has no art, so its dial is drawn by the compositor, and at a strength below full it is blended per pixel (about 6 M instructions more than the opaque settled path) for the four frames it takes to come up. A dial record for MINIMAL was measured slower on the device and is off, so there is no cheap path to hand it; the options are a shorter dip in for the art-less styles or a record that carries the strength. Not measured on the device.
+
 ---
 
 ## See also
