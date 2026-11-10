@@ -3930,16 +3930,39 @@ static int sp_isqrt(int v)
     return root;
 }
 
+/* sp_isqrt(SP_R_SHELL^2 - dy^2) for dy = 0..SP_R_SHELL-1: every row of every
+ * shell screen asks for it, and the shift-and-subtract root cost 250
+ * instructions a row (0.1 M a frame). The frame-identity suite pins the table
+ * against the root. */
+#define SP_CLIP_ROWS 214
+static const uint8_t k_clip_half[SP_CLIP_ROWS] = {
+    214, 213, 213, 213, 213, 213, 213, 213, 213, 213, 213, 213, 213, 213, 213, 213,
+    213, 213, 213, 213, 213, 212, 212, 212, 212, 212, 212, 212, 212, 212, 211, 211,
+    211, 211, 211, 211, 210, 210, 210, 210, 210, 210, 209, 209, 209, 209, 208, 208,
+    208, 208, 208, 207, 207, 207, 207, 206, 206, 206, 205, 205, 205, 205, 204, 204,
+    204, 203, 203, 203, 202, 202, 202, 201, 201, 201, 200, 200, 200, 199, 199, 198,
+    198, 198, 197, 197, 196, 196, 195, 195, 195, 194, 194, 193, 193, 192, 192, 191,
+    191, 190, 190, 189, 189, 188, 188, 187, 187, 186, 185, 185, 184, 184, 183, 182,
+    182, 181, 181, 180, 179, 179, 178, 177, 177, 176, 175, 175, 174, 173, 172, 172,
+    171, 170, 169, 169, 168, 167, 166, 166, 165, 164, 163, 162, 161, 160, 160, 159,
+    158, 157, 156, 155, 154, 153, 152, 151, 150, 149, 148, 147, 146, 145, 144, 143,
+    142, 140, 139, 138, 137, 136, 135, 133, 132, 131, 129, 128, 127, 125, 124, 123,
+    121, 120, 118, 117, 115, 114, 112, 110, 109, 107, 105, 104, 102, 100, 98, 96,
+    94, 92, 90, 88, 85, 83, 81, 78, 76, 73, 70, 67, 64, 61, 57, 54,
+    50, 45, 41, 35, 29, 20,
+};
+_Static_assert(SP_R_SHELL == SP_CLIP_ROWS, "k_clip_half is built for this shell radius");
+
 /* THE round safe-area guard. Folds [*xlo, *xhi] into both the panel and the
  * shell circle for this row; false means the row has nothing to draw. */
 static bool sp_clip(int y, int *xlo, int *xhi)
 {
     const int dy = y - SP_CY;
-    const int d2 = SP_R_SHELL * SP_R_SHELL - dy * dy;
-    if (d2 <= 0) {
+    const int ady = dy < 0 ? -dy : dy;
+    if (ady >= SP_CLIP_ROWS) {
         return false;
     }
-    const int half = sp_isqrt(d2);
+    const int half = k_clip_half[ady];
     if (*xlo < SP_CX - half) {
         *xlo = SP_CX - half;
     }

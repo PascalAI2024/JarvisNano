@@ -223,6 +223,26 @@ int main(void)
         printf("battery / desk ring records: largest %ld bytes of %d (PSRAM, three blocks)\n",
                bytes_max, SG_FRING_CAP);
     }
+    /* sp_clip() reads a table where it used to take a root: the same half width
+     * on every row of the panel, and the same verdict for rows past the shell. */
+    {
+        int bad = 0;
+        for (int y = 0; y < 466; y++) {
+            const int dy = y - SP_CY, d2 = SP_R_SHELL * SP_R_SHELL - dy * dy;
+            int lo = 0, hi = 465;
+            const bool got = sp_clip(y, &lo, &hi);
+            const int half = d2 > 0 ? sp_isqrt(d2) : 0;
+            int wlo = SP_CX - half < 0 ? 0 : SP_CX - half, whi = SP_CX + half > 465 ? 465 : SP_CX + half;
+            const bool want = d2 > 0 && wlo <= whi;
+            checks++;
+            if (got != want || (got && (lo != wlo || hi != whi))) {
+                printf("FAIL sp_clip row %d: got %d [%d,%d], want %d [%d,%d]\n", y, got, lo, hi, want, wlo, whi);
+                failures++;
+                bad++;
+            }
+        }
+        (void)bad;
+    }
     /* glass_arc_rows(): a row outside it must be a row glass_arc_row leaves
      * untouched, for arcs of every sweep and start, thick and thin, with and
      * without round caps (WEATHER's marks are drawn only on the rows inside); and
