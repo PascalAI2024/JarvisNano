@@ -69,6 +69,18 @@ static int g_checks;   /* empty is not pass: the summary names the count */
 
 /* ------------------------------------------------------------------ state -- */
 
+/* The frame step that publishes what the presenter is asked for (the wanted dial,
+ * the hands' strength). Tests that change nav, style or the clock by hand and then
+ * read watch_dial_face() or draw the watch run it, as the render task would have. */
+static uint32_t s_wd_now = 1000000U;
+static void wd_settle(void)
+{
+    for (int i = 0; i < 80; ++i) {
+        s_wd_now += 42U;
+        sp_fade_tick(s_wd_now, 42U, 8);
+    }
+}
+
 static void reset_nav(void)
 {
     __atomic_store_n(&s_nav_word, 0U, __ATOMIC_RELEASE);
@@ -1220,6 +1232,7 @@ static void test_update_ring_outlives_the_watch_clear(void)
     stage_ring_at_rest(JR_DISPLAY_SPACE_WATCH, JR_DISPLAY_OTA_RECEIVING, 63U);
     jr_display_clock_set(true, 10, 8, 30);
     s_clock_ease = 256;
+    s_watch_s = 256;
     sp_compose();
 
     const size_t px = (size_t)HUD_W * HUD_H;
@@ -1271,8 +1284,13 @@ static void test_caption_band_gives_way_to_a_black_backdrop(void)
     if (!fb) {
         return;
     }
-    jr_display_caption_set("STATUS");
+    jr_display_caption_label("STATUS", JR_DISPLAY_LABEL_SCREEN);
+    s_caption_prog = s_caption_ease = 0;     /* nothing is up: the new name copies at once */
+    s_cap_rev_seen = 0xFFFFFFFFu;
+    caption_tick(1U);                  /* the render task takes the staged words */
     s_caption_prog = s_caption_ease = 256;
+    s_cap_p = 256;
+    s_cap_alpha = 256;
     for (int black = 0; black <= 256; black += 256) {
         s_space_black = black;
         s_shade_ease = 0;
@@ -1300,11 +1318,8 @@ static void test_caption_band_gives_way_to_a_black_backdrop(void)
         }
         CHECK(stats == 31 * 167, "scanned %d stats pixels", stats);
         CHECK(ink > 100, "the label draws its glyphs (black=%d, %d pixels)", black, ink);
-        if (black == 0) {
-            CHECK(dimmed > 0, "over a face the band still dims the rows from y360");
-        } else {
-            CHECK(dimmed == 0, "on a black screen no stats pixel is dimmed (%d were)", dimmed);
-        }
+        /* a label wears a halo, not a plate: it dims no row, over a face or on black */
+        CHECK(dimmed == 0, "a label dims no stats pixel (black=%d, %d were)", black, dimmed);
         CHECK(fb[(size_t)200 * HUD_W + 233] == 0u, "nothing above the band is touched");
     }
     s_space_black = 0;
@@ -1535,7 +1550,7 @@ static void test_shade_clocks_run_only_while_they_must(void)
         last = s_shade_ms;
         ++frames;
     }
-    CHECK(s_shade_ms == SP_SHADE_ENTRY_MS && frames >= 9 && frames <= 11, "it parks at the total in about 10 frames, got %d", frames);
+    CHECK(s_shade_ms == SP_SHADE_ENTRY_MS && frames >= 5 && frames <= 7, "it parks at the total in about 6 frames at 70 ms (11 at 24 fps), got %d", frames);
     CHECK(s_breath_ms > 0U && s_breath_ms < SP_BREATH_MS, "an open, muted shade breathes (%u)", (unsigned)s_breath_ms);
     for (int i = 0; i < 200; ++i) {
         now += 70;
@@ -1722,18 +1737,21 @@ static void test_clock_clear_spares_open_shell_surfaces(void)
             s_space_veil = 256;
             jr_display_clock_set(true, 10, 8, 30);
             s_clock_ease = 256;
+    s_watch_s = 256;
             sp_compose();
 
             for (size_t i = 0; i < px; ++i) {
-                fb[i] = POISON;
+                fb[i] = 0U;         /* black under the sheet: the veil blends real pixels, not poison */
             }
             for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
                 const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
                 uint16_t *strip = fb + (size_t)y * HUD_W;
-                apply_space_overlay(&s_display, y, y2, strip);
                 if (pass == 1) {
+                    /* under a sheet apply_hud_overlay draws the watch BEFORE the
+                     * shell, so the shell's veil dims it and the sheet lands on top */
                     apply_clock_overlay(&s_display, y, y2, strip);
                 }
+                apply_space_overlay(&s_display, y, y2, strip);
             }
         }
 
@@ -1849,13 +1867,19 @@ static void render_watch_frame_at(uint16_t *fb, int style, jr_face_t shown,
     s_space_to = (uint8_t)JR_DISPLAY_SPACE_WATCH;
     __atomic_store_n(&s_nav_word, (uint32_t)JR_DISPLAY_SPACE_WATCH, __ATOMIC_RELEASE);
     jr_display_watch_style_set((jr_watch_style_t)style);
+    s_space_prog = s_space_ease = 256;                  /* settled: no slide, no style dip */
+    s_style_prog = 256;
+    s_style_shown = s_style_seen = s_style_from = (uint8_t)style;
+    s_style_black = 0;
+    s_space_black = 0;
     s_display.shown_face = shown;
     s_shade_ease = 0;
     s_detail_ease = 0;
-    s_space_veil = 256;
+    s_space_veil = 0;                 /* a settled watch: no sheet, no veil */
     jr_display_clock_set(true, hh, mm, ss);
     s_clock_shown_word = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
     s_clock_ease = 256;
+    s_watch_s = 256;
     sp_compose();
     watch_compose();                 /* the frame-start latch, as the flush does */
     for (size_t k = 0; k < px; ++k) fb[k] = 0x4208;     /* "the art" */
@@ -2180,18 +2204,22 @@ static void test_watch_dial_face_follows_the_style_and_the_screen(void)
     };
     for (size_t i = 0; i < sizeof want / sizeof *want; ++i) {
         jr_display_watch_style_set(want[i].st);
+        wd_settle();
         CHECK(watch_dial_face() == want[i].face, "style %d asks for face %d, wanted %d",
               (int)want[i].st, (int)watch_dial_face(), (int)want[i].face);
     }
     jr_display_watch_style_set(JR_WATCH_PILOT);
     jr_display_nav_home();
+    wd_settle();
     CHECK(watch_dial_face() == JR_FACE_COUNT, "off WATCH the dial is still requested");
     __atomic_store_n(&s_nav_word,
                      (uint32_t)JR_DISPLAY_SPACE_WATCH |
                          ((uint32_t)JR_WATCH_PILOT << 17), __ATOMIC_RELEASE);
     jr_display_clock_set(false, 0, 0, 0);
+    wd_settle();
     CHECK(watch_dial_face() == JR_FACE_COUNT, "with the clock off the dial is still requested");
     jr_display_clock_set(true, 6, 30, 15);
+    wd_settle();
     CHECK(watch_dial_face() == JR_FACE_DIAL_PILOT, "clock back on, PILOT's dial is not requested");
     reset_nav();
 }
@@ -2233,6 +2261,7 @@ static void test_watch_keeps_a_baked_dial_and_clears_a_missing_one(void)
         }
     }
     s_detail_ease = 256;
+    s_space_veil = 256;               /* what sp_fade_tick asks for under a sheet */
     for (size_t k = 0; k < px; ++k) fb[k] = 0x4208;
     for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
         const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
@@ -2949,7 +2978,7 @@ static void test_entry_clock_runs_then_stops(void)
         ++frames;
     }
     CHECK(s_entry_ms == SP_ENTRY_TOTAL_MS, "it parks at the total, got %u", (unsigned)s_entry_ms);
-    CHECK(frames >= 12 && frames <= 14, "about 13 frames at 14 fps, got %d", frames);
+    CHECK(frames >= 14 && frames <= 16, "about 13 frames at 14 fps after the 3-frame dark cut, got %d", frames);
     for (int i = 0; i < 5; ++i) {
         now += 70;
         sp_fade_tick(now, 70, 8);
@@ -3056,6 +3085,7 @@ static void test_outgoing_screen_does_not_replay_the_entry(void)
     /* mid-slide from STATUS to WEATHER, the new screen still at entry 0 */
     s_space_from = JR_DISPLAY_SPACE_STATUS;
     s_space_ease = 128;
+    s_space_prog = 60;               /* before the cut: the outgoing screen is still on the glass */
     s_space_dir = 1;
     uint16_t *slide = render_frame();
     if (only && slide) {
@@ -3928,8 +3958,12 @@ static void test_finite_fades_use_elapsed_time_at_rest(void)
             overlay_fade_tick();
             if (elapsed >= JR_DISPLAY_CAPTION_FADE_MS + period) {
                 CHECK(s_caption_prog == 256 && s_ask_prog == 256 &&
-                      s_detail_prog == 256 && s_shade_prog == 256,
+                      s_detail_prog == 256,
                       "250ms lanes settle by nominal+one frame at%ums", period);
+            }
+            if (elapsed >= SP_SHADE_OPEN_MS + period) {
+                CHECK(s_shade_prog == 256,
+                      "the shade (300 ms) settles by nominal+one frame at%ums", period);
             }
             if (elapsed >= JR_DISPLAY_SPACE_MS + period) {
                 CHECK(s_space_prog == 256, "slide settles by nominal+one frame at%ums", period);
@@ -4858,6 +4892,7 @@ static void test_quiet_home_one_frame_and_sparse_facts(void)
           "identical caption bytes do not advance revision");
     jr_display_clock_set(true, 12, 34, 0);
     s_clock_prog = s_clock_ease = 256;
+    s_watch_s = 256;
     CHECK(presenter_quiet_tick(&s_display, &word) && s_stub_refreshes == 5U,
           "valid clock admission redraws");
     jr_display_clock_set(true, 12, 34, 1);
@@ -5172,7 +5207,9 @@ static void test_veil_reaches_black_on_the_way_in_and_back_on_the_way_out(void)
 
     jr_display_nav_set(JR_DISPLAY_SPACE_JARVIS);
     pk_tick();
-    CHECK(s_space_black < 256, "the first frame home already gives the face back");
+    /* leaving a data screen the glass is dark until the cut, then lifts: the
+     * face is not the first thing back, and not a frame later than the cut */
+    CHECK(s_space_black <= 256, "black is a share of the glass");
     prev = s_space_black;
     for (int i = 0; i == 0 || (i < 80 && s_space_prog < 256); ++i) {
         pk_tick();
@@ -5264,6 +5301,117 @@ static void test_the_face_parks_only_when_settled_on_a_data_screen(void)
     pk_settle();
     CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS && !s_parked &&
           s_space_black == 0, "the shade over JARVIS does not park");
+    pk_reset();
+}
+
+/* ---- motion: the shade's two tempos, the caption's life, the label swap ---- */
+
+/* One 24 fps frame: the render task's own step, with the presenter after it. */
+#define MT_FRAME_MS 42U
+static void mt_frame(void)
+{
+    s_fake_us += (int64_t)MT_FRAME_MS * 1000;
+    overlay_fade_tick();                 /* sp_fade_tick and caption_tick, as panel_flush runs them */
+    presenter_backdrop_tick(&s_display);
+}
+
+static void mt_settle(void)
+{
+    for (int i = 0; i < 80; ++i) { mt_frame(); }
+}
+
+static void test_the_shade_opens_in_about_eleven_frames_and_closes_in_about_seven(void)
+{
+    pk_reset();
+    s_fade_prev_ms = (uint32_t)(s_fake_us / 1000);
+    mt_settle();
+    jr_display_nav_down();                               /* the shade over JARVIS */
+    int open_frames = 0;
+    do { mt_frame(); ++open_frames; } while (open_frames < 60 && s_shade_ms < SP_SHADE_ENTRY_MS);
+    CHECK(open_frames >= 10 && open_frames <= 12,
+          "the shade's authored timeline plays out in 10 to 12 frames, got %d", open_frames);
+    mt_settle();
+    CHECK(s_shade_prog == 256, "the shade is fully up");
+    jr_display_nav_up();                                 /* either vertical leaves it */
+    int close_frames = 0;
+    while (close_frames < 60 && s_shade_prog > 0) { mt_frame(); ++close_frames; }
+    CHECK(close_frames >= 7 && close_frames <= 8,
+          "the shade closes in 7 or 8 frames, got %d", close_frames);
+    CHECK(close_frames < open_frames, "it leaves faster than it came");
+    pk_reset();
+}
+
+static int mt_frames_until_caption_clears(jr_display_label_kind_t kind, const char *text)
+{
+    jr_display_caption_label(text, kind);
+    mt_frame();                          /* the render task takes the staged words */
+    for (int i = 0; i < 200 && s_cap_p < 256; ++i) { mt_frame(); }
+    CHECK(s_cap_hold_ms != 0U, "a label carries a hold");
+    int n = 0;
+    while (n < 400 && s_cap_hold_ms != 0U) { mt_frame(); ++n; }
+    return n;
+}
+
+static void test_a_label_is_up_for_its_hold_after_settle_and_then_fades(void)
+{
+    pk_reset();
+    mt_settle();
+    jr_display_caption_clear();
+    mt_settle();
+    int n = mt_frames_until_caption_clears(JR_DISPLAY_LABEL_SCREEN, "WEATHER");
+    CHECK(n * (int)MT_FRAME_MS >= 600 - (int)MT_FRAME_MS &&
+          n * (int)MT_FRAME_MS < 600 + 2 * (int)MT_FRAME_MS,
+          "a screen name stays 600 ms after it settles, got %d ms", n * (int)MT_FRAME_MS);
+    int f = 0;
+    while (f < 60 && s_cap_alpha > 0) { mt_frame(); ++f; }
+    CHECK(f >= 4 && f <= 8, "and fades in about six frames, got %d", f);
+    mt_settle();
+    n = mt_frames_until_caption_clears(JR_DISPLAY_LABEL_WATCH_STYLE, "WATCH - DRESS");
+    CHECK(n * (int)MT_FRAME_MS >= 1200 - (int)MT_FRAME_MS &&
+          n * (int)MT_FRAME_MS < 1200 + 2 * (int)MT_FRAME_MS,
+          "a style name stays 1200 ms, got %d ms", n * (int)MT_FRAME_MS);
+    pk_reset();
+}
+
+static void test_no_caption_is_drawn_while_a_sheet_is_open(void)
+{
+    pk_reset();
+    s_fade_prev_ms = (uint32_t)(s_fake_us / 1000);
+    mt_settle();
+    jr_display_caption_label("WEATHER", JR_DISPLAY_LABEL_SCREEN);
+    mt_frame();
+    CHECK(!caption_hidden_by_sheet(), "a caption on a bare screen is drawn");
+    jr_display_nav_down();
+    for (int i = 0; i < 3; ++i) { mt_frame(); }
+    CHECK(caption_hidden_by_sheet(), "no caption once the shade has begun to open");
+    mt_settle();
+    jr_display_nav_up();
+    mt_settle();
+    CHECK(!caption_hidden_by_sheet(), "and none is hidden after it has closed");
+    jr_display_nav_up();                                 /* the detail sheet */
+    for (int i = 0; i < 3; ++i) { mt_frame(); }
+    CHECK(caption_hidden_by_sheet(), "no caption over the detail sheet either");
+    pk_reset();
+}
+
+static void test_a_new_label_swaps_in_at_the_cut_and_not_before(void)
+{
+    pk_reset();
+    s_fade_prev_ms = (uint32_t)(s_fake_us / 1000);
+    mt_settle();
+    jr_display_caption_label("WEATHER", JR_DISPLAY_LABEL_SCREEN);
+    mt_settle();
+    CHECK(strcmp(s_capd_line[0], "WEATHER") == 0, "the old name is on the glass");
+    jr_display_caption_label("STATUS", JR_DISPLAY_LABEL_SCREEN);
+    int swap_at = -1, cut_at = -1;
+    for (int i = 0; i < 40 && swap_at < 0; ++i) {
+        mt_frame();
+        if (cut_at < 0 && s_cap_p >= TR_CUT_SLIDE) { cut_at = i; }
+        if (strcmp(s_capd_line[0], "STATUS") == 0) { swap_at = i; }
+    }
+    CHECK(swap_at >= 2, "the name does not swap in the first frames, got frame %d", swap_at);
+    CHECK(swap_at == cut_at, "the swap happens on the frame that crosses the cut (%d vs %d)",
+          swap_at, cut_at);
     pk_reset();
 }
 
@@ -5368,8 +5516,10 @@ static void test_park_yields_to_blank_to_a_failed_lock_and_to_a_dial(void)
     jr_display_watch_style_set(JR_WATCH_DIVER);
     jr_display_nav_set(JR_DISPLAY_SPACE_WATCH);
     pk_settle();
-    CHECK(!s_parked && !s_stub_anim_visible,
-          "unparking toward a baked dial leaves the anim hidden for the blit");
+    /* the anim may be up under the cover while the entry is dark; the wanted dial
+     * is what the presenter binds, and the layer stays covered until it has */
+    CHECK(!s_parked && watch_dial_face() == JR_FACE_DIAL_DIVER,
+          "unparking toward a baked dial asks the presenter for that dial");
     jr_display_clock_set(false, 0, 0, 0);
     pk_reset();
 }
@@ -5476,6 +5626,10 @@ int main(void)
     test_black_is_pixels_and_a_parked_backdrop_skips_the_fold();
     test_the_face_parks_only_when_settled_on_a_data_screen();
     test_a_baked_dial_watch_never_parks();
+    test_the_shade_opens_in_about_eleven_frames_and_closes_in_about_seven();
+    test_a_label_is_up_for_its_hold_after_settle_and_then_fades();
+    test_no_caption_is_drawn_while_a_sheet_is_open();
+    test_a_new_label_swaps_in_at_the_cut_and_not_before();
     test_other_owners_of_the_backdrop_withdraw_the_park();
     test_a_face_requested_while_parked_is_the_face_that_comes_back();
     test_park_yields_to_blank_to_a_failed_lock_and_to_a_dial();

@@ -307,6 +307,22 @@ bool jr_display_hud_enabled(void);
  * edges ease over ~250 ms render-side (band and text together); text swaps
  * while visible stay immediate — a live transcript must not lag its voice. */
 void jr_display_caption_set(const char *text);
+/* A caption that names where you are, not something being said: the name of a
+ * screen the swipe landed on, or the watch style just chosen. It is a LABEL:
+ * text with a soft halo and no plate behind it; when it replaces a label already
+ * up it crossfades at the midpoint of the slide (the old name eases out with its
+ * screen, the new one in with its own); it stays up for a short time after the
+ * transition has settled and then fades over ~250 ms by itself (nobody has to
+ * clear it); and like every caption it is not drawn while the control shade or
+ * the detail sheet holds the glass. SCREEN labels sit in the footer band; STYLE
+ * labels sit higher, clear of the six o'clock marks of every dial. */
+typedef enum {
+    JR_DISPLAY_LABEL_SCREEN = 0,
+    JR_DISPLAY_LABEL_WATCH_STYLE,
+} jr_display_label_kind_t;
+#define JR_DISPLAY_LABEL_SCREEN_HOLD_MS 600u    /* after the slide settles */
+#define JR_DISPLAY_LABEL_STYLE_HOLD_MS  1200u   /* after the style has changed */
+void jr_display_caption_label(const char *text, jr_display_label_kind_t kind);
 /* Pin a caption so no other writer can replace it until unpinned (the OTA
  * "DO NOT UNPLUG" instruction). set/clear are ignored while pinned. */
 void jr_display_caption_pin(const char *text);
@@ -548,7 +564,7 @@ bool jr_display_panel_is_off(void);
 
 #define JR_DISPLAY_SAFE_R        168   /* readable content stays inside     */
 #define JR_DISPLAY_SHELL_R_MAX   214   /* hard clip; privacy ring is beyond */
-#define JR_DISPLAY_SPACE_MS      260   /* space-to-space slide, ease-in-out */
+#define JR_DISPLAY_SPACE_MS      400   /* a change of screen: 4 frames out, 6 in at 24 fps */
 #define JR_DISPLAY_SPACE_HOLD_MS 900   /* page indicator lingers this long  */
 
 typedef enum {

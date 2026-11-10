@@ -1,0 +1,16 @@
+# entering and leaving WATCH: from home and back (style JARVIS), from home and
+# back with a baked dial (DIVER), and on to WEATHER from a baked dial
+scene home
+wait 800
+swipe down        # home -> WATCH (JARVIS style, no baked dial)
+wait 1200
+swipe up          # WATCH -> home
+wait 1200
+scene watch-diver
+wait 800
+swipe up          # baked dial -> home
+wait 1200
+swipe down        # home -> baked dial
+wait 1200
+swipe down        # baked dial -> WEATHER
+wait 1500

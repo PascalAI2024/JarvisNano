@@ -294,17 +294,12 @@ static void boot_button_tick(uint32_t now_ms)
         const uint32_t held_ms = now_ms - pressed_ms;
         was_down = false;
         if (held_ms >= 200U && held_ms < 1500U) {
+            /* The shade names its own way out (PWR LISTEN, BOOT CLOSE, in its
+             * own hint line), so no caption opens or closes it. */
             if (jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_SHADE) {
                 jr_display_nav_up();
-                jr_display_caption_set("CONTROLS CLOSED");
             } else {
                 jr_display_nav_down();
-                /* Was caption_clear(). Opening a capturing surface and then
-                 * wiping the one line that could say how to leave it is the
-                 * same defect the swipe path shed in 80636399 — it just
-                 * survived on the button path. Any surface that captures input
-                 * captions its own exit, for as long as it is up. */
-                jr_display_caption_set("CONTROLS - UP TO CLOSE");
             }
             ESP_LOGI(TAG, "boot button: controls toggle (%lu ms)",
                      (unsigned long)held_ms);
@@ -1794,8 +1789,11 @@ static void shell_caption_space(void)
     static const char *const mode_name[JR_DISPLAY_SPACE_COUNT] =
         { "JARVIS", "", "WEATHER", "STATUS", "DESK", "ACTIVITY" };
     const jr_display_space_t sp = jr_display_nav_space();
-    jr_display_caption_set(
-        sp < JR_DISPLAY_SPACE_COUNT ? mode_name[sp] : "JARVIS");
+    /* A label: it crossfades with the slide, stands for a moment once the
+     * screen has settled, then fades by itself (nothing clears it). */
+    jr_display_caption_label(
+        sp < JR_DISPLAY_SPACE_COUNT ? mode_name[sp] : "JARVIS",
+        JR_DISPLAY_LABEL_SCREEN);
 }
 
 static void shell_vertical_navigation(jr_input_direction_t direction)
@@ -1817,20 +1815,17 @@ static void shell_dismiss(void)
 {
     const jr_display_overlay_t overlay = jr_display_nav_overlay();
     /* The nav overlay and /api/ui/shade each have a door into controls. */
+    /* No caption on any of these. The shade and the detail sheet each carry
+     * their own hint line in the caption band, so a caption there wrapped
+     * across it; and the shade leaving is the message, "CONTROLS CLOSED" only
+     * lingered after it. */
     if (overlay == JR_DISPLAY_OVERLAY_SHADE) {
         jr_display_nav_up();
         s_ui_shade_open = false;
-        jr_display_caption_set("CONTROLS CLOSED");
     } else if (s_ui_shade_open) {
         s_ui_shade_open = false;
-        jr_display_caption_set("CONTROLS CLOSED");
     } else {
         jr_display_nav_down();
-        if (overlay == JR_DISPLAY_OVERLAY_DETAIL) {
-            shell_caption_space();
-        } else {
-            jr_display_caption_set("CONTROLS - UP TO CLOSE");
-        }
     }
 }
 
@@ -2769,7 +2764,18 @@ static void voice_task(void *arg)
              * the entire frame and dropping the glass from 16 to 13 fps. */
             static uint32_t s_clock_next_ms;
             static int s_clock_last_min = -1;
-            if ((int32_t)((uint32_t)now - s_clock_next_ms) >= 0) {
+            /* The hands and the dial follow the clock word, which this block
+             * publishes once a second. A walk onto or off WATCH must not wait
+             * for the next second: the glass would show the old screen, or
+             * nothing, for up to a second after the swipe, and the dial the
+             * presenter binds on the strength of it would arrive just as
+             * late. So a change of screen publishes the clock at once. */
+            static jr_display_space_t s_clock_space_seen = JR_DISPLAY_SPACE_JARVIS;
+            const jr_display_space_t clock_space_now = jr_display_nav_space();
+            const bool clock_space_moved = clock_space_now != s_clock_space_seen;
+            s_clock_space_seen = clock_space_now;
+            if (clock_space_moved ||
+                (int32_t)((uint32_t)now - s_clock_next_ms) >= 0) {
                 s_clock_next_ms = (uint32_t)now + 1000U;
                 bool clock_on = false;
                 bool peek = s_watch_peek_until_ms != 0U &&
@@ -3466,7 +3472,7 @@ static void voice_task(void *arg)
                      * that no longer navigates — right swipe peeks the watch,
                      * it does not walk to it. Home says where you are; the
                      * ring teaches itself by being slid. */
-                    jr_display_caption_set("JARVIS");
+                    jr_display_caption_label("JARVIS", JR_DISPLAY_LABEL_SCREEN);
                     ESP_LOGI(TAG, "gesture: double-tap home");
                     continue;
                 }
@@ -3654,7 +3660,6 @@ static void voice_task(void *arg)
                         jr_display_watch_style_step(
                             iev.direction == JR_INPUT_DIRECTION_RIGHT ? 1 : -1);
                         persist_watch_style((uint8_t)jr_display_watch_style());
-                        jr_display_bloom();
                         style_changed = true;
                         ESP_LOGI(TAG, "ui: watch style %s",
                                  jr_display_watch_style_name(
@@ -3675,18 +3680,16 @@ static void voice_task(void *arg)
                     snprintf(cap, sizeof cap, "WATCH - %s",
                              jr_display_watch_style_name(
                                  jr_display_watch_style()));
-                    jr_display_caption_set(cap);
+                    jr_display_caption_label(cap,
+                                             JR_DISPLAY_LABEL_WATCH_STYLE);
                 } else if (watch_opened) {
                     jr_display_caption_set("WATCH - 10 SECONDS");
-                } else if (jr_display_nav_overlay() ==
-                           JR_DISPLAY_OVERLAY_SHADE) {
-                    /* The shade used to CLEAR the caption, so the one surface
-                     * you can get stuck in was also the only one that told you
-                     * nothing. Name the way out, on the glass, always. */
-                    jr_display_caption_set("SHADE - UP TO CLOSE");
-                } else if (jr_display_nav_overlay() ==
-                           JR_DISPLAY_OVERLAY_DETAIL) {
-                    jr_display_caption_set("DETAIL - DOWN TO CLOSE");
+                } else if (jr_display_nav_space() == cue_space &&
+                           jr_display_nav_overlay() != overlay) {
+                    /* The shade or the detail sheet opened or closed over the
+                     * same screen. Each carries its own hint line in the
+                     * caption band, and the shade leaving is the message: no
+                     * caption names a sheet, and none lingers after it. */
                 } else {
                     shell_caption_space();
                 }

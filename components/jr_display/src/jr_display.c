@@ -693,6 +693,48 @@ static inline int fade_smoothstep(int p)     /* 0..256 -> 0..256, 3p^2-2p^3 */
     return (p * p * (768 - 2 * p)) >> 16;
 }
 
+/* THE ONE TRANSITION GRAMMAR. Every change of what the glass shows (a slide to
+ * another screen, a new watch style, a caption swapping its words) runs the
+ * same two phases on one linear progress p, 0..256: the outgoing content
+ * eases out over [0, cut) and is GONE at cut; the incoming eases in over
+ * [cut, 256]. At no p are both above zero, so two screens' focal content never
+ * sit on each other, and a dip through dark is the whole of the cross-fade.
+ * `cut` is 112 for a slide (4 of ~10 frames out, 6 in) and 96 for a style
+ * change (3 of 8). tr_out falls on a smoothstep (it accelerates away), tr_in
+ * rises ease-out cubic (it arrives fast and settles). Both return 0..256. */
+#define TR_CUT_SLIDE 112
+#define TR_CUT_STYLE 96
+
+static inline int tr_out(int p, int cut)
+{
+    if (p >= cut) {
+        return 0;
+    }
+    return 256 - fade_smoothstep((p * 256) / cut);
+}
+
+static inline int tr_in(int p, int cut)
+{
+    if (p <= cut) {
+        return 0;
+    }
+    if (p >= 256) {
+        return 256;
+    }
+    const int r = 256 - ((p - cut) * 256) / (256 - cut);    /* 256..0 */
+    return 256 - ((r * r * r) >> 16);
+}
+
+/* Brightness of the layer under the shell (the face, or a baked dial) through a
+ * transition: the outgoing layer dims out, the incoming one comes up after the
+ * cut, and a layer that is not part of the picture (a data screen, or a watch
+ * with no art, which draws on black) stays at zero. */
+static inline int tr_layer(int p, int cut, bool vis_from, bool vis_to)
+{
+    return p < cut ? (vis_from ? tr_out(p, cut) : 0)
+                   : (vis_to ? tr_in(p, cut) : 0);
+}
+
 esp_err_t jr_display_canvas_show(const uint16_t *rgb565, size_t width,
                                  size_t height, uint32_t ttl_ms)
 {
@@ -1142,6 +1184,26 @@ static bool             s_caption_grey;            /* a quiet hint, not a messag
 static volatile int     s_caption_on;
 #define JR_DISPLAY_CAPTION_ACTIVE 1
 #define JR_DISPLAY_CAPTION_AMBIENT 2
+static uint8_t          s_caption_label;           /* 0: speech; else jr_display_label_kind_t + 1 */
+#define JR_CAPTION_STYLE_Y 338                      /* a style label: clear of every dial's six o'clock marks */
+
+/* WHAT IS ON THE GLASS (render task only, 56 bytes). The app task rewrites the
+ * staged lines above whenever it likes; the glass draws these copies, which
+ * caption_tick refreshes. A caption that speaks refreshes them at once (a live
+ * transcript must not lag its voice). A label replacing a label waits for the
+ * cut of the slide, so the old name can ease out first. */
+static char             s_capd_line[2][20];
+static int16_t          s_capd_y[2];
+static bool             s_capd_grey;
+static bool             s_capd_lease;
+static bool             s_capd_label;
+static uint32_t         s_cap_rev_seen;
+static int              s_cap_p = 256;             /* the label's own phase, 0..256 */
+static bool             s_cap_dip;                 /* old name on glass: out, swap, in */
+static bool             s_cap_pend;                /* the swap to the staged words is due at the cut */
+static uint32_t         s_cap_age_ms;              /* settled time a label has been up */
+static uint32_t         s_cap_hold_ms;             /* 0: this caption never times out */
+static int              s_cap_alpha;               /* s_caption_ease through the phase, 0..256 */
 
 /* TRANS-05 ripple slot: ONLY the app task writes (a new tap replaces the old
  * — single slot, no queue); the flush only reads and age-gates, so expiry
@@ -1272,6 +1334,8 @@ static bool sp_settled(sp_settle_t *g, int32_t k0, int32_t k1)
     return g->first != s_frame_no;
 }
 
+static void caption_tick(uint32_t dt_ms);      /* defined with the shell state below */
+
 static void overlay_fade_tick(void)
 {
     s_frame_no++;
@@ -1357,6 +1421,7 @@ static void overlay_fade_tick(void)
     s_ask_ease = fade_smoothstep(s_ask_prog);
 
     sp_fade_tick(now, dt, cstep);
+    caption_tick(dt);
 }
 
 void jr_display_present_choices(const char *question,
@@ -1537,7 +1602,7 @@ static bool caption_is_lease(const char *text)
     return n > t && strcmp(text + n - t, tail) == 0;
 }
 
-void jr_display_caption_set(const char *text)
+static void caption_store(const char *text, uint8_t label)
 {
     if (atomic_load(&s_caption_pinned)) {
         return;
@@ -1555,6 +1620,7 @@ void jr_display_caption_set(const char *text)
      * ends at HUD_W - x0. */
     const size_t len = strnlen(text, 96U);
     if (__atomic_load_n(&s_caption_on, __ATOMIC_ACQUIRE) != 0 &&
+        s_caption_label == label &&
         strlen(s_caption_text) == len && memcmp(s_caption_text, text, len) == 0) {
         return;
     }
@@ -1562,15 +1628,28 @@ void jr_display_caption_set(const char *text)
     s_caption_text[len] = '\0';
     hud_wrap2(s_caption_text, 19, s_caption_line[0], s_caption_line[1]);
     const int c2 = (int)strnlen(s_caption_line[1], 19U);
-    s_caption_y[0] = (c2 > 0) ? JR_CAPTION_TWO_Y0 : JR_CAPTION_ONE_Y;
+    s_caption_y[0] = (c2 > 0) ? JR_CAPTION_TWO_Y0
+                   : (label == (uint8_t)JR_DISPLAY_LABEL_WATCH_STYLE + 1U) ? JR_CAPTION_STYLE_Y
+                   : JR_CAPTION_ONE_Y;
     s_caption_y[1] = JR_CAPTION_TWO_Y1;
     s_caption_grey = caption_is_quiet(s_caption_text);
     s_caption_lease = caption_is_lease(s_caption_text);
+    s_caption_label = label;
     __atomic_store_n(&s_caption_on, JR_DISPLAY_CAPTION_ACTIVE |
                      (caption_is_ambient(s_caption_text)
                          ? JR_DISPLAY_CAPTION_AMBIENT : 0), __ATOMIC_RELEASE);
     __atomic_add_fetch(&s_caption_revision, 1U, __ATOMIC_RELEASE);
     nav_wake();
+}
+
+void jr_display_caption_set(const char *text)
+{
+    caption_store(text, 0U);
+}
+
+void jr_display_caption_label(const char *text, jr_display_label_kind_t kind)
+{
+    caption_store(text, (uint8_t)kind + 1U);
 }
 
 void jr_display_caption_clear(void)
@@ -1993,8 +2072,31 @@ static int      s_space_ease = 256;
 static int      s_detail_prog;
 static int      s_detail_ease;
 static int      s_space_veil;
-static bool     watch_art_is_content(void);   /* a baked dial on WATCH is the screen */
 static bool     s_space_on;
+
+/* WATCH THROUGH A TRANSITION (render task only; 12 bytes of internal RAM).
+ *
+ *   s_style_shown  the style the glass is drawing. It follows the nav word's
+ *                  style at once everywhere except on a settled WATCH, where a
+ *                  change runs the dip: the old style eases out, this flips at
+ *                  the cut, the new one eases in (s_style_prog 0..256).
+ *   s_style_seen   the nav word's style as of the last frame.
+ *   s_style_from   the style being dipped out of.
+ *   s_watch_s      strength of the hands (and the drawn dials) this frame,
+ *                  0..256: the slide's in/out weight, the style dip, and the
+ *                  clock's own gate, whichever is least.
+ *   s_dial_want    the baked dial the presenter should have bound, JR_FACE_COUNT
+ *                  for none. The presenter reads it (watch_dial_face), so the
+ *                  engine is asked to rebind only after our own compositor has
+ *                  dimmed the old picture to black, never before. */
+#define SP_STYLE_MS 340                    /* 3 frames out, 5 in at 24 fps */
+static uint8_t  s_style_shown;
+static uint8_t  s_style_seen;
+static uint8_t  s_style_from;
+static int      s_style_prog = 256;
+static int      s_watch_s;
+static int      s_style_black;       /* 0..256: how dark the layer under the dip is */
+static volatile uint32_t s_dial_want = (uint32_t)JR_FACE_COUNT;
 static uint8_t  s_detail_space;
 static uint32_t s_space_hold_ms;
 
@@ -2014,6 +2116,10 @@ static uint32_t s_entry_ms = SP_ENTRY_TOTAL_MS;
  * while the shade is open and the microphone is muted, so a closed shade runs
  * no animation and the face is free to rest. */
 #define SP_SHADE_ENTRY_MS 700U
+#define SP_SHADE_PACE_NUM 7U       /* the entry clock runs at 7/4: 700 ms of authoring in 400 */
+#define SP_SHADE_PACE_DEN 4U
+#define SP_SHADE_OPEN_MS  300      /* the veil and the shade's own alpha, in (7 frames)   */
+#define SP_SHADE_CLOSE_MS 310      /* and out (7.4 frames): leaving is quicker than arriving */
 #define SP_BREATH_MS      3600U
 static uint32_t s_shade_ms = SP_SHADE_ENTRY_MS;
 static uint32_t s_breath_ms;
@@ -2842,6 +2948,207 @@ static bool sp_space_is_black(uint8_t space)
            space != (uint8_t)JR_DISPLAY_SPACE_WATCH;
 }
 
+/* The caption, once a frame, render task, after the slide has stepped.
+ *
+ * Refreshes what is on the glass from the staged words, runs a label's phase
+ * (out, swap at the cut, in), and times a label out: the clock starts only when
+ * the transition that named it has settled, runs 600 ms (a screen) or 1200 ms
+ * (a style), and then the flag clears and the ordinary 250 ms fade takes it off.
+ * Anything on the glass under a sheet is not drawn (apply_caption_overlay), so a
+ * label up when a sheet opens is expired at once rather than left to reappear. */
+static void caption_copy_staged(void)
+{
+    memcpy(s_capd_line[0], s_caption_line[0], sizeof s_capd_line[0] - 1U);
+    memcpy(s_capd_line[1], s_caption_line[1], sizeof s_capd_line[1] - 1U);
+    s_capd_line[0][sizeof s_capd_line[0] - 1U] = '\0';
+    s_capd_line[1][sizeof s_capd_line[1] - 1U] = '\0';
+    s_capd_y[0] = (int16_t)s_caption_y[0];
+    s_capd_y[1] = (int16_t)s_caption_y[1];
+    s_capd_grey = s_caption_grey;
+    s_capd_lease = s_caption_lease;
+    s_capd_label = s_caption_label != 0U;
+}
+
+static int caption_phase_factor(void)
+{
+    if (s_cap_p >= 256) {
+        return 256;
+    }
+    if (s_cap_dip) {
+        return s_cap_p < TR_CUT_SLIDE ? tr_out(s_cap_p, TR_CUT_SLIDE)
+                                      : tr_in(s_cap_p, TR_CUT_SLIDE);
+    }
+    return tr_in(s_cap_p, TR_CUT_SLIDE);       /* nothing was up: it arrives with its screen */
+}
+
+static void caption_tick(uint32_t dt_ms)
+{
+    const uint32_t rev = __atomic_load_n(&s_caption_revision, __ATOMIC_ACQUIRE);
+    const int on = __atomic_load_n(&s_caption_on, __ATOMIC_ACQUIRE);
+    const bool sheet = s_shade_ease > 0 || s_detail_ease > 0;
+    if (rev != s_cap_rev_seen) {
+        s_cap_rev_seen = rev;
+        if (on != 0) {
+            const bool label = s_caption_label != 0U;
+            if (!label) {
+                caption_copy_staged();             /* speech: no dip, no lag */
+                s_cap_p = 256;
+                s_cap_dip = false;
+                s_cap_pend = false;
+                s_cap_hold_ms = 0U;
+            } else {
+                const int f_now = caption_phase_factor();
+                const bool up = s_caption_prog > 0 && f_now > 0;
+                if (up) {
+                    /* a name is on the glass: it eases out where it stands, the
+                     * new one swaps in at the cut. Entering the dip at the point
+                     * that matches how far the old one has got keeps a quick
+                     * second swipe from jumping its brightness. */
+                    s_cap_dip = true;
+                    s_cap_pend = true;
+                    s_cap_p = (TR_CUT_SLIDE * (256 - f_now)) / 256;
+                } else {
+                    caption_copy_staged();         /* nothing to ease out */
+                    s_cap_dip = false;
+                    s_cap_pend = false;
+                    s_cap_p = 0;
+                }
+                s_cap_hold_ms = s_caption_label == (uint8_t)JR_DISPLAY_LABEL_WATCH_STYLE + 1U
+                                    ? JR_DISPLAY_LABEL_STYLE_HOLD_MS
+                                    : JR_DISPLAY_LABEL_SCREEN_HOLD_MS;
+            }
+            s_cap_age_ms = 0U;
+        } else {
+            s_cap_hold_ms = 0U;
+        }
+    }
+    if (s_cap_p < 256) {
+        int step = (int)((dt_ms * 256u) / (uint32_t)JR_DISPLAY_SPACE_MS);
+        if (step < 1) {
+            step = 1;
+        }
+        s_cap_p += step;
+        if (s_cap_pend && s_cap_p >= TR_CUT_SLIDE) {
+            caption_copy_staged();
+            s_cap_pend = false;
+        }
+        if (s_cap_p >= 256) {
+            s_cap_p = 256;
+            s_cap_dip = false;
+        }
+    }
+    if (s_cap_hold_ms != 0U && on != 0) {
+        const bool settled = s_space_prog >= 256 && s_style_prog >= 256 && s_cap_p >= 256;
+        if (sheet) {
+            s_cap_age_ms = s_cap_hold_ms;
+        } else if (settled) {
+            s_cap_age_ms += dt_ms;
+        }
+        if (s_cap_age_ms >= s_cap_hold_ms) {
+            s_cap_hold_ms = 0U;
+            jr_display_caption_clear();
+        }
+    }
+    s_cap_alpha = (s_caption_ease * caption_phase_factor()) >> 8;
+}
+
+/* No caption of any kind is drawn while the control shade or the detail sheet is up
+ * (they carry their own hint line in the band); only the pinned one outranks. */
+static bool caption_hidden_by_sheet(void)
+{
+    return (s_shade_ease > 0 || s_detail_ease > 0) && !atomic_load(&s_caption_pinned);
+}
+
+/* The baked dial a style shows, JR_FACE_COUNT for the styles drawn in code
+ * (JARVIS, MINIMAL). */
+static jr_face_t watch_dial_of_style(uint8_t style)
+{
+    switch (style) {
+    case JR_WATCH_DIVER:     return JR_FACE_DIAL_DIVER;
+    case JR_WATCH_DRESS:     return JR_FACE_DIAL_DRESS;
+    case JR_WATCH_PILOT:     return JR_FACE_DIAL_PILOT;
+    case JR_WATCH_FUTURE:    return JR_FACE_DIAL_FUTURE;
+    case JR_WATCH_SKELETON:  return JR_FACE_DIAL_SKELETON;
+    case JR_WATCH_CELESTIAL: return JR_FACE_DIAL_CELESTIAL;
+    default:                 return JR_FACE_COUNT;
+    }
+}
+
+static inline bool watch_style_has_dial(uint8_t style)
+{
+    return watch_dial_of_style(style) != JR_FACE_COUNT;
+}
+
+/* True once the presenter has really switched to what watch_publish asked for:
+ * the wanted dial is the one being blitted, or no dial is wanted and none is. A
+ * layer that is coming up waits for this, covered, so the engine's latency (a
+ * decode, a rebind) shows as a moment of black and never as the old picture. */
+static bool watch_layer_ready(void)
+{
+    const jr_face_t want = (jr_face_t)__atomic_load_n(&s_dial_want, __ATOMIC_RELAXED);
+    if (want == JR_FACE_COUNT) {
+        return !s_dial_blit;
+    }
+    return s_dial_blit && s_dial_frame_face == want;
+}
+
+/* Once a frame, render task, after the slide and the style dip have stepped:
+ * decide the dial the presenter should bind and the strength of the hands.
+ *
+ * Entering WATCH the old screen eases out first and the dial is asked for only
+ * at the cut, when the glass is dark; leaving, the dial is held until the cut so
+ * it can dim out with the hands, and released after. A style change asks for the
+ * new dial at its own cut (s_style_shown flips there). The hands take the least
+ * of the slide's weight, the dip's weight and the clock's gate; away from WATCH
+ * (the peek) the clock's own fade is all there is. */
+static void watch_publish(void)
+{
+    const bool clock_on = (__atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE) & (1u << 16)) != 0u;
+    const int p = s_space_prog;
+    const bool to_watch = s_space_to == (uint8_t)JR_DISPLAY_SPACE_WATCH;
+    const bool from_watch = s_space_from == (uint8_t)JR_DISPLAY_SPACE_WATCH;
+    jr_face_t want = JR_FACE_COUNT;
+    int w = 256;
+    int strength;
+    if (to_watch) {
+        if (!from_watch && p < 256) {                       /* entering */
+            w = tr_in(p, TR_CUT_SLIDE);
+            if (p >= TR_CUT_SLIDE && clock_on) {
+                want = watch_dial_of_style(s_style_shown);
+            }
+        } else if (clock_on) {
+            want = watch_dial_of_style(s_style_shown);
+        }
+        if (s_style_prog < 256) {                           /* a style change */
+            const int ws = s_style_prog < TR_CUT_STYLE ? tr_out(s_style_prog, TR_CUT_STYLE)
+                                                       : tr_in(s_style_prog, TR_CUT_STYLE);
+            w = w < ws ? w : ws;
+        }
+        const int gate = clock_on ? 256 : s_clock_ease;
+        strength = w < gate ? w : gate;
+    } else if (from_watch && p < 256) {                     /* leaving */
+        w = tr_out(p, TR_CUT_SLIDE);
+        if (p < TR_CUT_SLIDE) {
+            want = watch_dial_of_style(s_style_shown);
+        }
+        strength = w;
+    } else {
+        strength = s_clock_ease;
+        if (from_watch && !clock_on) {                      /* the slide away is done */
+            s_clock_prog = 0;
+            s_clock_ease = 0;
+            strength = 0;
+        }
+    }
+    s_watch_s = strength;
+    if (__atomic_exchange_n(&s_dial_want, (uint32_t)want, __ATOMIC_ACQ_REL) != (uint32_t)want) {
+        TaskHandle_t presenter = __atomic_load_n(&s_display.task, __ATOMIC_ACQUIRE);
+        if (presenter != NULL) {
+            xTaskNotifyGive(presenter);   /* the dial must not wait a period */
+        }
+    }
+}
+
 /* Advance every shell ease. Called once per frame from overlay_fade_tick, on
  * the render task, with the same cstep the rest of the presenter fades on so
  * the shell and the existing overlays stay visually in step. */
@@ -2865,7 +3172,10 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
                       space == (uint8_t)JR_DISPLAY_SPACE_ACTIVITY)
                          ? 0U : SP_ENTRY_TOTAL_MS;
     } else {
-        if (s_entry_ms < SP_ENTRY_TOTAL_MS) {
+        /* The entry clock starts when the incoming screen does, at the cut:
+         * running it from the swipe would sweep the ring while it is still
+         * invisible and show the screen already half drawn. */
+        if (s_entry_ms < SP_ENTRY_TOTAL_MS && s_space_prog >= TR_CUT_SLIDE) {
             s_entry_ms += dt_ms;
             if (s_entry_ms > SP_ENTRY_TOTAL_MS) {
                 s_entry_ms = SP_ENTRY_TOTAL_MS;
@@ -2874,6 +3184,40 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
         if (s_space_to != space) {
             s_space_to = space;      /* serial wrap: snap rather than lie */
             s_space_from = space;
+        }
+    }
+
+    /* The watch's style, through the dip. On a settled WATCH a new style does
+     * not appear in the frame the nav word changes: the old dial and hands ease
+     * out, the style flips at the cut, the new ones ease in. Anywhere else the
+     * glass is not showing the watch, so the style follows at once. */
+    {
+        const uint8_t style_nav = (uint8_t)((nav & NAV_STYLE_MASK) >> NAV_STYLE_SHIFT);
+        if (style_nav != s_style_seen) {
+            const bool on_watch = space == (uint8_t)JR_DISPLAY_SPACE_WATCH &&
+                                  s_space_to == space && s_space_prog >= 256;
+            s_style_seen = style_nav;
+            if (on_watch && s_style_shown != style_nav) {
+                s_style_from = s_style_shown;
+                s_style_prog = 0;
+            } else if (s_style_prog >= 256) {
+                s_style_shown = style_nav;
+                s_style_from = style_nav;
+            }
+        }
+        if (s_style_prog < 256) {
+            int ystep = (int)((dt_ms * 256u) / (uint32_t)SP_STYLE_MS);
+            if (ystep < 1) {
+                ystep = 1;
+            }
+            s_style_prog += ystep;
+            if (s_style_prog >= TR_CUT_STYLE) {
+                s_style_shown = s_style_seen;
+            }
+            if (s_style_prog >= 256) {
+                s_style_prog = 256;
+                s_style_from = s_style_shown;
+            }
         }
     }
 
@@ -2934,8 +3278,16 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
     }
     s_detail_ease = fade_smoothstep(s_detail_prog);
 
+    /* The shade is lopsided on purpose now: it answers the swipe that opens it
+     * in about 11 frames (the veil in 7, the arcs and the button on the
+     * authored 700 ms timeline run at 7/4 speed) and leaves faster than it
+     * came, in about 7.5. */
     if (sp_shade_open()) {
-        s_shade_prog += cstep;
+        int ostep = (int)((dt_ms * 256u) / (uint32_t)SP_SHADE_OPEN_MS);
+        if (ostep < 1) {
+            ostep = 1;
+        }
+        s_shade_prog += ostep;
         if (s_shade_prog > 256) {
             s_shade_prog = 256;
         }
@@ -2944,7 +3296,7 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
             s_shade_ms = 0U;
             s_breath_ms = 0U;
         } else if (s_shade_ms < SP_SHADE_ENTRY_MS) {
-            s_shade_ms += dt_ms;
+            s_shade_ms += (dt_ms * SP_SHADE_PACE_NUM) / SP_SHADE_PACE_DEN;
             if (s_shade_ms > SP_SHADE_ENTRY_MS) {
                 s_shade_ms = SP_SHADE_ENTRY_MS;
             }
@@ -2953,7 +3305,11 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
             s_breath_ms = (s_breath_ms + dt_ms) % SP_BREATH_MS;
         }
     } else {
-        s_shade_prog -= cstep;
+        int clstep = (int)((dt_ms * 256u) / (uint32_t)SP_SHADE_CLOSE_MS);
+        if (clstep < 1) {
+            clstep = 1;
+        }
+        s_shade_prog -= clstep;
         if (s_shade_prog < 0) {
             s_shade_prog = 0;
         }
@@ -2962,32 +3318,49 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
     }
     s_shade_ease = fade_smoothstep(s_shade_prog);
 
-    /* The backdrop veil is the deepest any live element asks for. Because a
-     * slide out of JARVIS still carries the outgoing space's weight, going
-     * home fades the veil away with the slide instead of cutting it a frame
-     * early. */
+    watch_publish();
+
+    /* WHAT IS UNDER THE SHELL, through a slide. The face (or a baked dial) is
+     * the layer; a data screen, and a watch that draws on black, are not.
+     * tr_layer gives its brightness: the outgoing layer dims out, the incoming
+     * one comes up after the cut. A settled screen is just yes or no. The
+     * backdrop veil that used to hold a ring screen's face at a quarter is gone
+     * from slides (the layer is dark by the cut, which is darker still); only
+     * the sheet and the shade veil now. */
     int veil = 0;
     const bool to_black = sp_space_is_black(s_space_to);
     const bool from_black = sp_space_is_black(s_space_from);
-    if (s_space_to != (uint8_t)JR_DISPLAY_SPACE_JARVIS && !to_black &&
-        !watch_art_is_content()) {
-        veil = s_space_ease;     /* WATCH with its dial: the art is the screen */
-    }
-    if (s_space_from != (uint8_t)JR_DISPLAY_SPACE_JARVIS && !from_black &&
-        256 - s_space_ease > veil) {
-        veil = 256 - s_space_ease;
-    }
-    /* A data screen takes the backdrop all the way to black rather than to a
-     * quarter. Between two data screens it stays black for the whole slide
-     * (the larger of the two eases would dip to half at the midpoint and let
-     * the face flash through); going home it fades back in with the slide. */
     int black = 0;
-    if (to_black) {
-        black = from_black ? 256 : s_space_ease;
-    } else if (from_black) {
-        black = 256 - s_space_ease;
+    if (s_space_prog >= 256) {
+        black = to_black ? 256 : 0;
+    } else {
+        const bool vis_from = !from_black &&
+            !(s_space_from == (uint8_t)JR_DISPLAY_SPACE_WATCH && !watch_style_has_dial(s_style_from));
+        const bool vis_to = !to_black &&
+            !(s_space_to == (uint8_t)JR_DISPLAY_SPACE_WATCH && !watch_style_has_dial(s_style_shown));
+        int layer = tr_layer(s_space_prog, TR_CUT_SLIDE, vis_from, vis_to);
+        /* the incoming layer is not there until the presenter has bound it:
+         * the dial (or the face coming back from one) stays covered until the
+         * engine has really switched, so a late rebind never shows */
+        if (s_space_prog >= TR_CUT_SLIDE && vis_to && !watch_layer_ready()) {
+            layer = 0;
+        }
+        black = 256 - layer;
     }
     s_space_black = black;
+    /* A style change on a settled WATCH dips the same layer: the old dial dims
+     * out, the new one (or black, for a style with no art) comes up. It is not
+     * a slide, so it asks nothing of the orbit rail and has its own number. */
+    s_style_black = 0;
+    if (s_style_prog < 256 && s_space_to == (uint8_t)JR_DISPLAY_SPACE_WATCH) {
+        const bool vf = watch_style_has_dial(s_style_from);
+        const bool vt = watch_style_has_dial(s_style_shown);
+        int layer = tr_layer(s_style_prog, TR_CUT_STYLE, vf, vt);
+        if (s_style_prog >= TR_CUT_STYLE && vt && !watch_layer_ready()) {
+            layer = 0;
+        }
+        s_style_black = 256 - layer;
+    }
     if (s_detail_ease > veil) {
         veil = s_detail_ease;
     }
@@ -3286,35 +3659,51 @@ static void apply_ask_overlay(jr_display_ctx_t *ctx, int y1, int y2,
  * (hud_wrap2) is about 230 px of label, inside the glass chord at these rows. */
 #define JR_CAPTION_Y0 360
 #define JR_CAPTION_Y1 430          /* inclusive */
+#define JR_CAPTION_HALO 3          /* a label's halo reaches this far past its glyphs */
 
 static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
                                   uint16_t *pixels)
 {
-    int ys = y1 > JR_CAPTION_Y0 ? y1 : JR_CAPTION_Y0;
-    int ye = (y2 - 1) < JR_CAPTION_Y1 ? (y2 - 1) : JR_CAPTION_Y1;
+    const bool label = s_capd_label;
+    const glass_metrics_t m = glass_font_metrics(GLASS_FONT_LABEL);
+    /* A label has no plate, so its band is only as tall as its glyphs and their
+     * halo; a message keeps the round-safe band the plate fills. */
+    int band_lo = JR_CAPTION_Y0, band_hi = JR_CAPTION_Y1;
+    if (label) {
+        const int two = s_capd_line[1][0] != '\0';
+        band_lo = s_capd_y[0] + m.ink_top - JR_CAPTION_HALO;
+        band_hi = (two ? s_capd_y[1] : s_capd_y[0]) + m.ink_bottom + JR_CAPTION_HALO;
+    }
+    int ys = y1 > band_lo ? y1 : band_lo;
+    int ye = (y2 - 1) < band_hi ? (y2 - 1) : band_hi;
     if (ys > ye) {
         return;                    /* strip misses the band: one compare */
     }
-    const int e = s_caption_ease;
+    const int e = s_cap_alpha;
     if (((e * 32) >> 8) <= 0) {
         return;
     }
-    if (s_caption_lease && (s_shade_ease > 0 || s_detail_ease > 0)) {
-        return;                    /* the sheet's own hint owns this band */
+    /* No caption, of any kind, is drawn over the control shade or the detail
+     * sheet: both carry their own hint line in this band, and a caption over
+     * them wrapped across it. (Only the pinned one, the OTA warning, outranks.) */
+    if (caption_hidden_by_sheet()) {
+        return;
     }
     int face_left = 256 - (s_space_black > s_shade_ease ? s_space_black : s_shade_ease);
-    if (face_left < 0) {
-        face_left = 0;
+    if (face_left < 0 || label) {
+        face_left = 0;             /* a label wears a halo, not a plate */
     }
     const int k = (((e * 32) >> 8) * face_left) >> 8;
     const bool swap = ctx->board.swap_color_bytes;
     const int c = e > 255 ? 255 : e;
-    const uint16_t color = s_caption_grey ? SP_C_GREY : SP_C_INK;
-    const glass_metrics_t m = glass_font_metrics(GLASS_FONT_LABEL);
+    const uint16_t color = s_capd_grey ? SP_C_GREY : SP_C_INK;
+    const uint16_t halo = panel_order_color(ctx, 0x0000u);
+    static const int8_t halo_dx[8] = { -2, 2, 0, 0, -1, 1, -1, 1 };
+    static const int8_t halo_dy[8] = { 0, 0, -2, 2, -1, -1, 1, 1 };
     int tx[2], len[2];
     for (int l = 0; l < 2; ++l) {
-        len[l] = (int)strnlen(s_caption_line[l], 19U);
-        tx[l] = (HUD_W - glass_text_width(GLASS_FONT_LABEL, s_caption_line[l],
+        len[l] = (int)strnlen(s_capd_line[l], 19U);
+        tx[l] = (HUD_W - glass_text_width(GLASS_FONT_LABEL, s_capd_line[l],
                                           (size_t)len[l], JR_CAPTION_TRACK)) / 2;
     }
     for (int y = ys; y <= ye; ++y) {
@@ -3340,11 +3729,24 @@ static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
             }
         }
         for (int l = 0; l < 2; ++l) {
-            const int ty = s_caption_y[l];
-            if (len[l] <= 0 || y < ty + m.ink_top || y > ty + m.ink_bottom) {
+            const int ty = s_capd_y[l];
+            if (len[l] <= 0) {
                 continue;
             }
-            glass_text_row(row, y, xlo, xhi, GLASS_FONT_LABEL, s_caption_line[l],
+            if (label) {
+                if (y < ty + m.ink_top - JR_CAPTION_HALO || y > ty + m.ink_bottom + JR_CAPTION_HALO) {
+                    continue;
+                }
+                const uint8_t ha = (uint8_t)((c * 230) >> 8);
+                for (int h = 0; h < 8; ++h) {
+                    glass_text_row(row, y, xlo, xhi, GLASS_FONT_LABEL, s_capd_line[l],
+                                   (size_t)len[l], tx[l] + halo_dx[h], ty + halo_dy[h],
+                                   JR_CAPTION_TRACK, halo, ha, swap);
+                }
+            } else if (y < ty + m.ink_top || y > ty + m.ink_bottom) {
+                continue;
+            }
+            glass_text_row(row, y, xlo, xhi, GLASS_FONT_LABEL, s_capd_line[l],
                            (size_t)len[l], tx[l], ty, JR_CAPTION_TRACK, color,
                            (uint8_t)c, swap);
         }
@@ -3375,22 +3777,11 @@ static void watch_sun_arc(const jr_display_ctx_t *ctx, int y1, int y2,
  * black disc and MINIMAL draws its own dial, so both answer JR_FACE_COUNT. */
 static jr_face_t watch_dial_face(void)
 {
-    const uint32_t nav = __atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE);
-    if ((nav & NAV_SPACE_MASK) != (uint32_t)JR_DISPLAY_SPACE_WATCH) {
-        return JR_FACE_COUNT;
-    }
-    if ((__atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE) & (1u << 16)) == 0u) {
-        return JR_FACE_COUNT;
-    }
-    switch ((nav & NAV_STYLE_MASK) >> NAV_STYLE_SHIFT) {
-    case JR_WATCH_DIVER:  return JR_FACE_DIAL_DIVER;
-    case JR_WATCH_DRESS:  return JR_FACE_DIAL_DRESS;
-    case JR_WATCH_PILOT:  return JR_FACE_DIAL_PILOT;
-    case JR_WATCH_FUTURE: return JR_FACE_DIAL_FUTURE;
-    case JR_WATCH_SKELETON:  return JR_FACE_DIAL_SKELETON;
-    case JR_WATCH_CELESTIAL: return JR_FACE_DIAL_CELESTIAL;
-    default:              return JR_FACE_COUNT;
-    }
+    /* The render task decides (watch_publish) and the presenter obeys: the dial
+     * is not bound at the instant the nav word changes but when our own
+     * compositor has covered the old picture, and it is released only after the
+     * dial has dimmed out. */
+    return (jr_face_t)__atomic_load_n(&s_dial_want, __ATOMIC_RELAXED);
 }
 
 /* THE WORDS ON THE WATCH. DIVER's date window and FUTURE's four cells are
@@ -3657,40 +4048,32 @@ static inline void split_mark(jr_display_split_t which, int64_t *mark)
     *mark = now;
 }
 
+/* True while the glass is changing what the watch is: a slide to or from WATCH,
+ * or a style dip. Only then does the hands' strength differ from the settled
+ * one, and only then is the dial dimmed by the shell instead of cleared. */
+static bool watch_in_motion(void)
+{
+    return ((s_space_from == (uint8_t)JR_DISPLAY_SPACE_WATCH ||
+             s_space_to == (uint8_t)JR_DISPLAY_SPACE_WATCH) && s_space_prog < 256) ||
+           s_style_prog < 256;
+}
+
 static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
                                 uint16_t *pixels)
 {
-    const int e = s_clock_ease;
+    const int e = s_watch_s;
     if (e <= 0) {
         return;
     }
     int64_t sm = split_now();
-    /* THE SHEET OUTRANKS THE FACE.
-     *
-     * Tapping the focal object opens that space's detail sheet, but on WATCH
-     * the clear below then painted over it, so the sheet opened INVISIBLY:
-     * the tap was accepted, the overlay state changed, the caption said
-     * "DETAIL - DOWN TO CLOSE", and the glass still showed only the hands.
-     * Measured as 966 -> 944 lit pixels across the tap, against 10741 -> 2312
-     * for the same tap on POWER.
-     *
-     * The clock keeps its clean dial by clearing, so it cannot also be the
-     * bottom layer of a stack. It steps aside for the one surface the owner
-     * explicitly asked for, exactly as the agent rim steps aside for an ask.
-     *
-     * BOTH shell surfaces, not just the sheet. The first version of this guard
-     * tested only s_detail_ease, which left the CONTROL SHADE in the same
-     * hole — and the shade is the worse place to lose: every one of its
-     * primitives is folded through sp_clip into the same r<=214 disc this
-     * function clears, so on WATCH the owner got a black dial, the caption
-     * "CONTROLS - UP TO CLOSE", and an invisible-but-LIVE volume arc and
-     * privacy button. jr_display_hit still routed taps to them, so a blind
-     * tap in the lower disc could flip the microphone with nothing on screen
-     * to warn of it. A control you cannot see but can still hit is worse than
-     * one that is merely missing. */
-    if (s_detail_ease > 0 || s_shade_ease > 0) {
-        return;
-    }
+    /* THE SHEET OUTRANKS THE FACE, so on WATCH it is the watch that goes
+     * underneath: with the detail sheet or the control shade up, apply_hud_overlay
+     * draws this BEFORE the shell, and the shell's own veil then dims the dial
+     * and the hands together and the sheet lands on top. (This used to return
+     * here instead, and the clear below, drawn after the shell, painted over the
+     * sheet: 966 -> 944 lit pixels across the tap on WATCH, against 10741 -> 2312
+     * on POWER, the sheet opened invisibly. Returning fixed that and made the
+     * hands pop back at full strength the frame the shade finished closing.) */
     /* THE WATCH REPLACES THE FACE — they are never on the glass together.
      * The hands used to be drawn straight over the baked arc-reactor art, so
      * two unrelated HUDs shared the same pixels and read as one cluttered
@@ -3721,10 +4104,14 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
      * pipeline fell back to RESTING, ctx->shown_face says so, and the watch
      * clears the disc and draws its black stand-in dial as before. JARVIS
      * and MINIMAL never have art; MINIMAL paints its own warm-white dial. */
-    const int style = (int)jr_display_watch_style();
-    const jr_face_t dial = watch_dial_face();
+    const int style = (int)s_style_shown;
+    const jr_face_t dial = watch_dial_of_style(s_style_shown);
     const bool baked = dial != JR_FACE_COUNT && ctx->shown_face == dial;
-    if (!baked) {
+    const bool moving = watch_in_motion();
+    if (moving && dial != JR_FACE_COUNT && !baked) {
+        return;      /* the dial is not bound yet: the shell holds the glass dark until it is */
+    }
+    if (!baked && !moving) {
         for (int y = y1; y < y2; ++y) {
             const int dy = y - HUD_H / 2;
             const int d2 = JR_DISPLAY_SHELL_R_MAX * JR_DISPLAY_SHELL_R_MAX
@@ -3802,6 +4189,7 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
 #define SP_CY          (HUD_H / 2)
 #define SP_R_SHELL     JR_DISPLAY_SHELL_R_MAX
 #define SP_SLIDE_PX    150            /* how far a space travels on a swipe */
+#define SP_LEAVE_PX    60             /* how far the one leaving gets before it is gone */
 
 /* SP_A_TOP (12 o'clock) is defined with the compose-side state above: the
  * orbit slot arithmetic needs it before the drawing section begins. */
@@ -5578,20 +5966,12 @@ static void sp_draw_orbit(const jr_display_ctx_t *ctx, int y1, int y2,
 /* The whole shell for one strip, in z-order: veil, the outgoing and incoming
  * spaces cross-dissolving as they slide, context sheet, shade, then an orbital
  * position marker that fades out with the side surfaces under the shade. */
-/* THE DIAL IS THE SCREEN, NOT ITS BACKDROP. The veil exists to push the
- * reactor back behind a ring screen's content. On WATCH with a baked dial
- * the art IS the content, and a half-brightness Submariner is a broken one
- * (measured 2026-09-02 on the panel: the 12 o'clock lume at 62 against 130
- * in the art, every dial "not black" but dim). A sheet or the shade over the
- * watch still veils it, as anywhere else; a slide into WATCH keeps the
- * outgoing screen's veil and fades it with the slide. */
-static bool watch_art_is_content(void)
-{
-    const jr_face_t dial = watch_dial_face();
-    return s_space_to == (uint8_t)JR_DISPLAY_SPACE_WATCH &&
-           dial != JR_FACE_COUNT && s_display.shown_face == dial &&
-           s_detail_ease == 0 && s_shade_ease == 0;
-}
+/* THE DIAL IS THE SCREEN, NOT ITS BACKDROP. A ring screen's veil pushes the
+ * reactor back behind its content; a baked dial is the content, and a
+ * half-brightness Submariner is a broken one (measured 2026-09-02 on the panel:
+ * the 12 o'clock lume at 62 against 130 in the art). So a slide no longer veils
+ * the layer at all: it dips it to black and back (tr_layer), and only a sheet or
+ * the shade over the watch veils it. */
 
 /* The veil that does not stop at a quarter: weight k 0..32 takes each channel
  * from untouched to zero. A parked backdrop is already black, so the caller
@@ -5639,11 +6019,9 @@ static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
     if (!s_space_on) {
         return;            /* JARVIS at rest: the layer costs one compare */
     }
-    const bool settled = s_space_from == s_space_to || s_space_ease >= 256;
     /* A complete black makes any other veil moot, and a parked backdrop has
      * no face pixels to fold at all. */
-    const int veil = ((settled && watch_art_is_content()) || s_space_black >= 256)
-                         ? 0 : (s_space_veil * 32) >> 8;
+    const int veil = s_space_black >= 256 ? 0 : (s_space_veil * 32) >> 8;
     int64_t sm = split_now();
     if (veil > 0) {
         sp_veil(ctx, y1, y2, pixels, veil);
@@ -5655,7 +6033,6 @@ static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
     const int shade = (s_shade_ease * 255) / 256;
     const int under = 255 - shade;
     if (under > 0) {
-        const int e = s_space_ease;
         const int focal = (under * (256 - s_detail_ease)) / 256;
         if (focal > 0) {
             /* VERTICAL slide, matching the gesture that drives it. The ring
@@ -5665,16 +6042,24 @@ static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
              *
              * Sign: going FORWARD (swipe down) the outgoing screen leaves
              * upward and the incoming one arrives from below, so the stack
-             * appears to move with the finger rather than against it. */
-            const int slide = (SP_SLIDE_PX * e) / 256;
-            if (e < 256) {
+             * appears to move with the finger rather than against it.
+             *
+             * One grammar (tr_out / tr_in): the outgoing screen travels a short
+             * way and is gone at the cut; the incoming one starts its full
+             * travel from the cut and settles ease-out. They are never both
+             * above zero, so the two screens cannot sit on each other. */
+            const int po = tr_out(s_space_prog, TR_CUT_SLIDE);
+            const int pi = tr_in(s_space_prog, TR_CUT_SLIDE);
+            if (po > 0) {
                 sp_draw_space(ctx, y1, y2, pixels, s_space_from,
-                              -s_space_dir * slide,
-                              (focal * (256 - e)) / 256, SP_ENTRY_TOTAL_MS);
+                              -s_space_dir * ((SP_LEAVE_PX * (256 - po)) / 256),
+                              (focal * po) / 256, SP_ENTRY_TOTAL_MS);
             }
-            sp_draw_space(ctx, y1, y2, pixels, s_space_to,
-                          s_space_dir * (SP_SLIDE_PX - slide),
-                          (focal * e) / 256, s_entry_ms);
+            if (pi > 0) {
+                sp_draw_space(ctx, y1, y2, pixels, s_space_to,
+                              s_space_dir * ((SP_SLIDE_PX * (256 - pi)) / 256),
+                              (focal * pi) / 256, s_entry_ms);
+            }
         }
         split_mark(JR_DISPLAY_SPLIT_SPACE_SCREEN, &sm);
         if (s_detail_ease > 0) {
@@ -5882,10 +6267,10 @@ static bool watch_clear_follows(const jr_display_ctx_t *ctx)
                              NAV_SPACE_MASK) != JR_DISPLAY_SPACE_WATCH) {
         return false;
     }
-    if (s_clock_ease <= 0 || s_detail_ease > 0 || s_shade_ease > 0) {
-        return false;
+    if (s_watch_s <= 0 || s_detail_ease > 0 || s_shade_ease > 0 || watch_in_motion()) {
+        return false;     /* in motion nothing is dead: the shell is drawing the screen that is leaving or arriving */
     }
-    const jr_face_t dial = watch_dial_face();
+    const jr_face_t dial = watch_dial_of_style(s_style_shown);
     return !(dial != JR_FACE_COUNT && ctx->shown_face == dial);
 }
 
@@ -5954,6 +6339,22 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
          * the four spaces, the context sheet, and the control shade. It is
          * skipped entirely while an ask is up (the ask owns the glass) and
          * draws nothing at all in JARVIS at rest. */
+        /* A style change dips the layer under the dial in the same way a slide
+         * does; it is not a slide, so it has no space overlay to carry it. */
+        if (s_style_black > 0 && !s_parked) {
+            sp_veil_black(ctx, y1, y2, pixels, (s_style_black * 32) >> 8);
+        }
+        /* WATCH UNDER A SHEET. With the shade or the detail sheet up, the watch
+         * is drawn first, so the shell's veil dims the dial and the hands as one
+         * and the sheet lands over them; the clock overlay below stands down. */
+        const bool under_sheet = s_detail_ease > 0 || s_shade_ease > 0;
+        const bool watch_on_glass =
+            (jr_display_space_t)(__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) &
+                                 NAV_SPACE_MASK) == JR_DISPLAY_SPACE_WATCH ||
+            (s_space_from == (uint8_t)JR_DISPLAY_SPACE_WATCH && s_space_prog < 256);
+        if (under_sheet && watch_on_glass) {
+            apply_clock_overlay(ctx, y1, y2, pixels);
+        }
         if (!watch_clear_follows(ctx)) {
             apply_space_overlay(ctx, y1, y2, pixels);
         }
@@ -5969,9 +6370,7 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
          * suppressed the clock on precisely the one space that wanted it, so
          * the screen rendered the bare baked face with the time reduced to a
          * caption. */
-        if (!s_space_on ||
-            (jr_display_space_t)(__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE)
-                                 & NAV_SPACE_MASK) == JR_DISPLAY_SPACE_WATCH) {
+        if (!under_sheet && (!s_space_on || watch_on_glass)) {
             apply_clock_overlay(ctx, y1, y2, pixels);  /* gates itself */
         }
         split_mark(JR_DISPLAY_SPLIT_HUD_CLOCK, &sm);
