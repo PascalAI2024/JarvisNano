@@ -4959,7 +4959,7 @@ static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
         breath_a = (breath_a * a_btn) / 255;
     }
     const int32_t bcy16 = SP_BTN_CY * 16;
-    const int btn_y0 = SP_BTN_CY - SP_BTN_R - 8, btn_y1 = SP_BTN_CY + SP_BTN_R + 8;
+    const int btn_y0 = SP_BTN_CY - SP_BTN_R - 14, btn_y1 = SP_BTN_CY + SP_BTN_R + 14;   /* the breath reaches R+12 */
 
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
