@@ -47,7 +47,8 @@ const char *device_tool_last_name(void)
  * never reaches the orchestrator, and never produces a toolResponse. Fetched
  * once after the worker is ready and then only when the WEATHER screen is
  * entered and the data is over ten minutes old — never on a timer, which
- * would drag Wi-Fi out of min-modem during rest. */
+ * would drag Wi-Fi out of min-modem during rest. The job is served by a
+ * direct Open-Meteo GET in jr_tools (no gateway, no key). */
 #define LOCAL_WEATHER_CALL_ID   0x4C574558u          /* "LWEX" */
 #define LOCAL_WEATHER_CALL_TEXT "local:weather"
 static uint32_t s_weather_last_fetch_ms;   /* app task only; 0 = never */
@@ -270,8 +271,8 @@ uint32_t s_glance_until_ms;        /* voice task only; 0 = none */
 
 void weather_maybe_fetch(uint32_t now)
 {
-    if (s_weather_inflight || !atomic_load(&s_tool_diag.worker_ready) ||
-        !jr_tools_is_configured()) {
+    /* No gateway needed: the worker serves this job straight from Open-Meteo. */
+    if (s_weather_inflight || !atomic_load(&s_tool_diag.worker_ready)) {
         return;
     }
     const bool first = s_weather_last_fetch_ms == 0U;

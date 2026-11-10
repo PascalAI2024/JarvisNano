@@ -15,6 +15,9 @@
 
 static int g_checks;
 
+/* test_weather.c: the Open-Meteo projection, against a real response. */
+int weather_tests(int *checks);
+
 #define CHECK(cond, what)                                                     \
     do {                                                                      \
         g_checks++;                                                           \
@@ -268,7 +271,7 @@ int main(void)
 
     if (test_fixed_templates() || test_execute_tool_policy() || test_invalid_arguments() ||
         test_delegate_task_is_one_work_item() || test_delegated_tasks_and_poll_are_projected() ||
-        test_board_project_is_a_literal_not_a_program()) {
+        test_board_project_is_a_literal_not_a_program() || weather_tests(&g_checks)) {
         return 1;
     }
     printf("jr_tools template tests passed (%d checks)\n", g_checks);

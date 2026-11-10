@@ -7,13 +7,18 @@ set(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../..")
 
 add_executable(jr_tools_template_tests
     test_templates.c
+    test_weather.c
     ../src/jr_tools_templates.c
+    ../src/jr_weather.c
     ${REPO_ROOT}/components/jr_transport/vendor/cJSON/cJSON.c
 )
 target_include_directories(jr_tools_template_tests PRIVATE
     ../include
     ${REPO_ROOT}/components/jr_transport/vendor/cJSON
     stubs
+)
+target_compile_definitions(jr_tools_template_tests PRIVATE
+    FIXTURE_DIR="${CMAKE_CURRENT_LIST_DIR}/fixtures"
 )
 target_compile_options(jr_tools_template_tests PRIVATE -Wall -Wextra -Werror)
 enable_testing()

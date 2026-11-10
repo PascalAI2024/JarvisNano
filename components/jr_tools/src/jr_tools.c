@@ -22,6 +22,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "jr_net/jr_net.h"
+#include "jr_tools/jr_weather.h"
 
 static const char *TAG = "jr_tools";
 
@@ -525,6 +526,98 @@ static jr_tool_status_t post_tool(const char *tool_name, const char *args_json,
     return outcome;
 }
 
+/* The weather glance does not go through the gateway: Open-Meteo is public and
+ * keyless, so one direct HTTPS GET serves it, with no Authorization header and
+ * no gateway configuration. The body (bounded, measured ~2 KB) is projected to
+ * the compact JSON weather_apply_result reads. Same TLS bundle, same timeout,
+ * same single worker as post_tool. */
+static jr_tool_status_t fetch_weather(jr_tool_result_t *result)
+{
+    esp_http_client_config_t config = {
+        .url = JR_WEATHER_URL,
+        .method = HTTP_METHOD_GET,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = JR_TOOLS_HTTP_TIMEOUT_MS,
+        .disable_auto_redirect = true,
+        .buffer_size = 1024,
+        .buffer_size_tx = 1024,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) {
+        return JR_TOOL_STATUS_INTERNAL_ERROR;
+    }
+    /* Off the task stack, and off internal RAM when PSRAM exists: the TLS
+     * session is what needs the contiguous internal block. */
+    char *raw = (char *)heap_caps_malloc(JR_WEATHER_BODY_CAP + 1U,
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (raw == NULL) {
+        raw = (char *)malloc(JR_WEATHER_BODY_CAP + 1U);
+    }
+    jr_tool_status_t outcome = JR_TOOL_STATUS_NETWORK_ERROR;
+    size_t have = 0U;
+    if (raw == NULL) {
+        outcome = JR_TOOL_STATUS_INTERNAL_ERROR;
+    } else if (esp_http_client_open(client, 0) == ESP_OK) {
+        const int64_t announced = esp_http_client_fetch_headers(client);
+        result->http_status = esp_http_client_get_status_code(client);
+        if (result->http_status < 200 || result->http_status >= 300) {
+            outcome = JR_TOOL_STATUS_HTTP_ERROR;
+        } else if (announced > (int64_t)JR_WEATHER_BODY_CAP) {
+            outcome = JR_TOOL_STATUS_BAD_RESPONSE;
+        } else {
+            for (;;) {
+                /* One byte past the cap is read to tell "exactly full" from
+                 * "too big"; a body that does not fit is rejected. */
+                const int got = esp_http_client_read(
+                    client, raw + have, (int)(JR_WEATHER_BODY_CAP + 1U - have));
+                if (got < 0) {
+                    outcome = JR_TOOL_STATUS_NETWORK_ERROR;
+                    break;
+                }
+                if (got == 0) {
+                    const jr_weather_status_t ws = jr_weather_project(
+                        raw, have, result->response_json,
+                        sizeof(result->response_json));
+                    if (ws != JR_WEATHER_OK) {
+                        ESP_LOGE(TAG, "weather: projection failed (%d) bytes=%u",
+                                 (int)ws, (unsigned)have);
+                    }
+                    outcome = ws == JR_WEATHER_OK ? JR_TOOL_STATUS_OK
+                                                  : JR_TOOL_STATUS_BAD_RESPONSE;
+                    break;
+                }
+                have += (size_t)got;
+                if (have > JR_WEATHER_BODY_CAP) {
+                    outcome = JR_TOOL_STATUS_BAD_RESPONSE;
+                    break;
+                }
+            }
+        }
+    }
+    esp_http_client_cleanup(client);
+    free(raw);
+    ESP_LOGI(TAG, "weather: open-meteo http=%d bytes=%u stack_free=%u",
+             result->http_status, (unsigned)have,
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    return outcome;
+}
+
+/* Cancellation and generation changes win races with a completed request;
+ * otherwise the outcome stands. */
+static void settle_job(const owned_job_t *job, jr_tool_result_t *result,
+                       jr_tool_status_t status)
+{
+    if (job_stale(job)) {
+        set_error_json(result, JR_TOOL_STATUS_STALE);
+    } else if (job_cancelled(job, true)) {
+        set_error_json(result, JR_TOOL_STATUS_CANCELLED);
+    } else if (status != JR_TOOL_STATUS_OK) {
+        set_error_json(result, status);
+    } else {
+        result->status = JR_TOOL_STATUS_OK;
+    }
+}
+
 static void execute_job(const owned_job_t *job, jr_tool_result_t *result)
 {
     if (job_stale(job)) {
@@ -533,6 +626,10 @@ static void execute_job(const owned_job_t *job, jr_tool_result_t *result)
     }
     if (job_cancelled(job, true)) {
         set_error_json(result, JR_TOOL_STATUS_CANCELLED);
+        return;
+    }
+    if (strcmp(job->name, JR_WEATHER_JOB_NAME) == 0) {
+        settle_job(job, result, fetch_weather(result));
         return;
     }
 
@@ -566,17 +663,8 @@ static void execute_job(const owned_job_t *job, jr_tool_result_t *result)
     secure_zero(code, sizeof(code));
     secure_zero(request_id, sizeof(request_id));
 
-    /* Cancellation and generation changes win races with a completed HTTPS
-     * request. The old payload must never be sent into a new model session. */
-    if (job_stale(job)) {
-        set_error_json(result, JR_TOOL_STATUS_STALE);
-    } else if (job_cancelled(job, true)) {
-        set_error_json(result, JR_TOOL_STATUS_CANCELLED);
-    } else if (status != JR_TOOL_STATUS_OK) {
-        set_error_json(result, status);
-    } else {
-        result->status = JR_TOOL_STATUS_OK;
-    }
+    /* The old payload must never be sent into a new model session. */
+    settle_job(job, result, status);
 }
 
 static void tools_task(void *arg)

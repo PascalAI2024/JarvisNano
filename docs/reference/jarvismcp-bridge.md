@@ -50,7 +50,11 @@ by `components/jr_tools/host/test_templates.c`), as of 2026-09-02:
 - `delegate_task` — one work item on the paired board; returns `{id, title,
   status}`
 - `delegated_tasks` — six items, newest first, 60 of title, 120 of result
-- device-owned, never declared to the model: `weather_glance`, `board_poll`
+- device-owned, never declared to the model: `weather_glance`, `board_poll`.
+  Since 2026-11-09 `weather_glance` bypasses the gateway: the worker GETs
+  Open-Meteo directly (`jr_weather.h`, no key) and projects the body on the
+  device; its gateway template in `jr_tools_templates.c` is now unused by the
+  firmware and only pinned by the host tests.
 
 `remember` needs no tap since 2026-09-01 (`REMEMBER_NEEDS_TAP 0`): the
 owner's asking is the approval. `physical_confirmed` is still an internal job
