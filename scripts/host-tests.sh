@@ -29,6 +29,7 @@
 #   jr_ui_cue_tests           main/tests/                   production cue wiring, real gate
 #   jr_board_gate_tests       main/tests/                   no gateway key, no board poll
 #   jr_imu_wom_tests          components/jr_imu/tests       actual command/arming handshake
+#   jr_probe_board_json_tests components/jr_probe/tests     the board probe's JSON, real encoder
 #   jr_host_tests             host/                         jr_core + jr_dsp + jr_transport
 #   jr_tools_template_tests   components/jr_tools/host      the generated JS template
 #   test_jarvis_desk          scripts/                      the desk CLI (Python)
