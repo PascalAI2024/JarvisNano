@@ -383,3 +383,58 @@ against 50-60). The likely reason, not proven: switching the bit on there
 made the first entry also pay for allocating and filling its records, and here
 they exist before the walk starts. After the walks: largest
 internal block 22,528 bytes, `flush_errors 0`.
+
+## Wave N16, ninth and tenth flash: the tilt stars and the panel dip
+
+**Tilt (9403dc3, 2,438,704 bytes, valid after 60 s).** CELESTIAL with its 14
+foreground stars: 32.4-33.4 ms a frame at 20-21 fps, hud layer 21-22 ms
+(31.4 ms before the stars); DRESS 25.0-25.2 ms as before. `"tilt"` reads
+`[0,0]` with the device still on its charger and `[0,0]` off CELESTIAL. Not
+yet shown by a hand: that the stars follow a tilt, and which way.
+
+An update was refused twice first (`503`): the battery was at 22 % with no
+USB, and the preflight wants USB or 30 %. The owner plugged it in.
+
+**The dip (74b3ecf, 2,440,960 bytes, boot complete at 5.5 s, valid after
+60 s).** Knob 0 against knob 1 (`JR_KNOB_PANEL_DIP`), lease held, mean ms per
+frame over the 0.9 s after each trigger, two alternating rounds:
+
+| Transition | knob 0 mean | knob 1 mean | brightness writes | dark hold, ms |
+|---|---|---|---|---|
+| WATCH > WEATHER | 44.0 / 42.3 | 41.7 / 44.6 | 15 / 18 | 138 / 130 |
+| WEATHER > STATUS | 49.5 / 47.1 | 50.4 / 49.5 | 18 / 18 | 113 / 90 |
+| STATUS > DESK | 47.4 / 47.5 | 51.2 / 50.7 | 18 / 18 | 134 / 116 |
+| DESK > ACTIVITY | 36.5 / 33.8 | 35.3 / 37.0 | 17 / 19 | 83 / 101 |
+| ACTIVITY > home | 25.5 / 25.1 | 26.4 / 23.9 | 15 / 15 | 110 / 154 |
+
+The dip does not make a transition frame cheaper on the device: what is left
+in a transition frame is the new screen's own entry motion, as the host count
+had already said (2-14 % of the script). What it changes is the number of
+steps: 15 to 19 brightness writes across a change of screen, against the 7 or
+8 frames the pixel fade gets in the same time. The dark lasts 83-154 ms.
+`flush_errors 0` with up to three writes inside a frame. Whether it looks
+better is the owner's eye; the capture sees pixels only.
+
+**A style change stalls in the dark, on either path.** The dip's hold clock
+measured it (one round, name = the style being left):
+
+| Leaving | onto | dark, ms |
+|---|---|---|
+| DRESS | PILOT | 506 |
+| PILOT | MINIMAL | 185 |
+| MINIMAL | FUTURE | 664 |
+| FUTURE | SKELETON | 269 |
+| SKELETON | CELESTIAL | 264 |
+| CELESTIAL | JARVIS | 124 |
+| JARVIS | DIVER | 565 |
+| DIVER | DRESS | 600 |
+
+The hold is capped at 300 ms, yet reads 500-660: the render task was not
+running. `dial_decode` (`jr_display.c`) decodes the new dial into the one
+shared frame while holding the render lock, after `clip_load` has read the
+clip from flash. The four dials in the asset partition take about 0.5-0.66 s,
+the two embedded in the app about 0.27 s, the drawn ones 0.12-0.19 s. Knob 0
+draws as few frames in the same 0.9 s window (7-14 on the baked dials, on
+either knob), which fits the same stall; it has no clock of its own and the
+gap had been read as "a costly fade". 5.1 MB of PSRAM is free and a decoded dial is
+434 KB. N16.5.
