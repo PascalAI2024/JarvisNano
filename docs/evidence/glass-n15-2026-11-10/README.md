@@ -464,3 +464,29 @@ brightness.
 
 The panel dip is not kept (N16.1). The fixes are N16.6; the same captures will
 be taken again, without a lease, after its flash.
+
+## Eleventh flash: a decoded frame per dial (image d5ffa17, 2,443,472 bytes)
+
+Same walk as the table above (perf knob bit 0 on, so the dip's hold clock
+times the dark; two rounds, the second with every dial cached; under a lease).
+
+| Onto | Dark before, ms | Dark now, ms | Frames in 0.9 s, before | now |
+|---|---|---|---|---|
+| DIVER | 565 | 233 | 7-14 | 17 |
+| DRESS | 600 | 130 | 7-14 | 19 |
+| PILOT | 506 | 190 | 7-14 | 17 |
+| MINIMAL (drawn) | 185 | 187 | | 13 |
+| FUTURE | 664 | 241 | 7-14 | 16 |
+| SKELETON | 269 | 189 | | 13 |
+| CELESTIAL | 264 | 186 | | 13 |
+| JARVIS (drawn) | 124 | 127 | | 19 |
+
+`dial_cache`: 6 dials, 2,605,872 bytes, 22 hits, 3 misses, 3 warm-ups, no
+evictions, last decode 69 ms. Free PSRAM 2.89 MB (4.22 MB before the first
+dial on this boot), largest internal block 19,456 bytes at boot and after the
+walk, `flush_errors 0`, worst frame 80 ms.
+
+The decode no longer shows. The 150 ms gate is not met: MINIMAL never decoded
+anything and sits at 187 ms, so the remainder is the new dial's first frames
+at 50-70 ms each. Not looked at: the second hand during a warm-up, and a
+change made within 1.5 s of the last.
