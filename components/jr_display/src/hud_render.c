@@ -17,6 +17,7 @@
  * Plotted layers draw after bands and overwrite them — draw order is the
  * blend policy (later == on top), which keeps the hot path branch-free.
  */
+#include "jr_display/glass.h"
 #include "jr_display/hud_render.h"
 #include "jr_display/perf_knob.h"
 #include "balance_wheel_data.h"      /* SKELETON: the wheel sprite    */
@@ -716,74 +717,112 @@ void hud_tilt_offset(float roll_deg, float pitch_deg, int8_t *ox, int8_t *oy)
     (void)roll_deg; (void)pitch_deg;
 }
 
-/* Battery rim: a thin arc at the outer bezel sweeping clockwise from 12
- * o'clock, proportional to charge. Red under 20%, cyan when discharging, and
- * gold while charging. Charging adds a short bright comet that repeatedly
- * travels only through the FILLED portion of the gauge: unmistakable motion
- * without ever claiming charge the battery does not have.
+/* THE RIM, on the glass primitives.
  *
- * It rides the INNER half of the outer free band (OV_R_BATT, see the split in
- * the RADII note) precisely so it can coexist with the choice arcs, which own
- * the outer half. */
-/* First arc index whose y reaches target, on one monotone half. */
-static int ov_battery_bound(int cy, int begin, int end, int target,
-                            bool descending)
-{
-    while (begin < end) {
-        const int mid = begin + (end - begin) / 2;
-        const int y = cy + ((lsin((mid - 64) & 255) * OV_R_BATT) >> 15);
-        if (descending ? y > target : y < target) {
-            begin = mid + 1;
-        } else {
-            end = mid;
-        }
-    }
-    return begin;
-}
+ * It used to be square dots: a run of 2x2 pixel dots for the battery arc, a 3x3
+ * comet for the charging mark, and an integer annulus at the privacy ring, all
+ * written opaque. Every one was aliased, and over a dial's art the comet read
+ * as a string of blocks. Now the battery is a round-capped arc, the charging
+ * mark is a tapering arc with a bright head, and the privacy ring is a clean
+ * hairline of even weight, all anti-aliased about the TRUE centre of the panel
+ * (233.0, 233.0 in edge coordinates; the old integer centre sat half a pixel
+ * up and left). Meaning and colours are unchanged: cyan while discharging, red
+ * under 20 %, and a short bright comet that travels only through the filled part
+ * of the gauge. Gold in this band means MUTED, and nothing else.
+ *
+ * It rides the INNER half of the outer free band (r215-218) precisely so it can
+ * coexist with the choice arcs, which own the outer half (r223+), and the
+ * privacy ring at r219.5-220.75. The choice arcs' inner pixels reach r221.3 from the
+ * true centre, so the ring and its anti-aliasing stop short of that. */
+#define RIM_CENTRE16   (233 * 16)
+#define RIM_CYAN565    0x073Fu      /* (0, 229, 255)   */
+#define RIM_GOLD565    0xFDA5u      /* (255, 180, 40)  */
+#define RIM_RED565     0xFA06u      /* (255, 64, 48)   */
+#define RIM_HEAD565    0xBFFFu      /* the comet's white-cyan head */
+#define RIM_ARC_IN16   (215 * 16 + 8)       /* 215.5 .. 217.5: the old 2 px dots */
+#define RIM_ARC_OUT16  (217 * 16 + 8)
+#define RIM_ARC_MID16  (216 * 16 + 8)
+#define RIM_COMET_SEGS 7            /* two Q8 steps each: the old 14-step tail */
+#define RIM_PRIV_IN16  (219 * 16 + 8)       /* 219.5 .. 220.75: a hairline of 1.25 px */
+#define RIM_PRIV_OUT16 (220 * 16 + 12)
 
-static void ov_battery(const strip_t *s, int cx, int cy, uint32_t now_ms,
-                       const hud_env_t *env)
+static void ov_rim(uint16_t *dst, int y0, int nrows, bool swap, uint32_t now_ms,
+                   const hud_env_t *env)
 {
-    if (env->batt_pct > 100) {
-        return;
+    const int32_t cx16 = RIM_CENTRE16 + env->ox * 16;
+    const int32_t cy16 = RIM_CENTRE16 + env->oy * 16;
+    const bool gauge = env->batt_pct <= 100;
+    const int steps = gauge ? (256 * env->batt_pct) / 100 : 0;
+    /* an empty gauge keeps a one-step stamp at 12 o'clock, as it always did */
+    int32_t sweep = gauge ? (int32_t)(((int64_t)GLASS_TURN_Q16 * env->batt_pct) / 100) : 0;
+    if (gauge && sweep < 256) {
+        sweep = 256;
     }
-    /* GOLD IN THIS BAND MEANS MUTED, AND NOTHING ELSE.
-     *
-     * The battery rim sits at r215-220 and the privacy ring at r221-222 — one
-     * pixel apart. Painting the rim gold while charging put a second gold
-     * tenant against the only ring whose whole job is to say the microphone
-     * is off, so a charging device read as a muted one at a glance.
-     *
-     * Nothing is lost by dropping the hue: the comet below is the charging
-     * tell, and this function's own contract is that MOTION carries that
-     * meaning. Red under 20% stays, because that is a different claim. */
-    const uint16_t *ramp =
-        (env->batt_pct < HUD_BATT_LOW_PCT && !env->charging) ? s_ov_red
-                                                             : s_ov_cyan;
-    const int steps = (256 * env->batt_pct) / 100;
-    const uint16_t rim = shade(ramp, 200);
-    /* Each half of the clockwise arc is monotone in y. Restrict the
-     * original ascending writes to dots whose two rows reach this strip;
-     * the repeated twelve-o'clock endpoint at i=256 remains intentional. */
-    const int middle = steps < 128 ? steps + 1 : 129;
-    int begin = ov_battery_bound(cy, 0, middle, s->y0 - 1, false);
-    int end = ov_battery_bound(cy, begin, middle, s->y1, false);
-    for (int i = begin; i < end; ++i) {
-        ov_polar(s, cx, cy, (i - 64) & 255, OV_R_BATT, rim, 2);
-    }
-    if (steps >= 129) {
-        begin = ov_battery_bound(cy, 129, steps + 1, s->y1 - 1, true);
-        end = ov_battery_bound(cy, begin, steps + 1, s->y0 - 2, true);
-        for (int i = begin; i < end; ++i) {
-            ov_polar(s, cx, cy, (i - 64) & 255, OV_R_BATT, rim, 2);
-        }
-    }
+    const uint16_t gcol = (env->batt_pct < HUD_BATT_LOW_PCT && !env->charging)
+                          ? RIM_RED565 : RIM_CYAN565;
+
+    /* The comet: RIM_COMET_SEGS arcs, each two Q8 steps long, brightest and
+     * widest at the head and tapering to nothing behind it. Planned once per
+     * strip call from the head's position; a segment that would start before
+     * 12 o'clock is cut there, as the old tail was. */
+    struct { int32_t start, sweep, r_in, r_out; uint8_t alpha; int y_lo, y_hi; bool on; } seg[RIM_COMET_SEGS];
+    int32_t head_x16 = 0, head_y16 = 0;
+    bool head_on = false;
+    int head_y_lo = 0, head_y_hi = -1;
     if (env->charging && steps > 0) {
         const int head = (int)((now_ms / 12U) % (uint32_t)(steps + 1));
-        for (int tail = 0; tail < 14 && head - tail >= 0; ++tail) {
-            const int a = (head - tail - 64) & 255;
-            ov_polar(s, cx, cy, a, OV_R_BATT,
-                     shade(s_ov_cyan, 255 - tail * 7), 3);
+        for (int j = 0; j < RIM_COMET_SEGS; ++j) {
+            int a0 = head - 2 * (j + 1);
+            const int a1 = head - 2 * j;
+            if (a1 <= 0) {
+                seg[j].on = false;
+                continue;
+            }
+            if (a0 < 0) {
+                a0 = 0;
+            }
+            const int hw16 = 26 - (j * 14) / (RIM_COMET_SEGS - 1);   /* half stroke, 1.6 px down to 0.7 px */
+            seg[j].start = (int32_t)((GLASS_Q16_12_OCLOCK + a0 * 256) & 0xFFFF);
+            seg[j].sweep = (a1 - a0) * 256;
+            seg[j].r_in = RIM_ARC_MID16 - hw16;
+            seg[j].r_out = RIM_ARC_MID16 + hw16;
+            seg[j].alpha = (uint8_t)(255 - j * 36);
+            seg[j].on = glass_arc_rows(cx16, cy16, seg[j].r_in, seg[j].r_out, seg[j].start,
+                                       seg[j].sweep, false, &seg[j].y_lo, &seg[j].y_hi);
+        }
+        const uint32_t ah = (uint32_t)((GLASS_Q16_12_OCLOCK + head * 256) & 0xFFFF);
+        head_x16 = cx16 + (int32_t)(((int64_t)glass_cos_q15(ah) * RIM_ARC_MID16) >> 15);
+        head_y16 = cy16 + (int32_t)(((int64_t)glass_sin_q15(ah) * RIM_ARC_MID16) >> 15);
+        head_on = true;
+        head_y_lo = (head_y16 >> 4) - 4;
+        head_y_hi = (head_y16 >> 4) + 4;
+    } else {
+        for (int j = 0; j < RIM_COMET_SEGS; ++j) {
+            seg[j].on = false;
+        }
+    }
+
+    for (int y = y0; y < y0 + nrows; ++y) {
+        if (y < 0 || y >= HUD_H) {
+            continue;
+        }
+        uint16_t *row = dst + (size_t)(y - y0) * HUD_W;
+        if (gauge && sweep > 0) {
+            glass_arc_row(row, y, 0, HUD_W - 1, cx16, cy16, RIM_ARC_IN16, RIM_ARC_OUT16,
+                          GLASS_Q16_12_OCLOCK, sweep, gcol, 200, swap);
+        }
+        for (int j = RIM_COMET_SEGS - 1; j >= 0; --j) {          /* tail first, head on top */
+            if (seg[j].on && y >= seg[j].y_lo && y <= seg[j].y_hi) {
+                glass_ring_row(row, y, 0, HUD_W - 1, cx16, cy16, seg[j].r_in, seg[j].r_out,
+                               seg[j].start, seg[j].sweep, RIM_CYAN565, seg[j].alpha, swap);
+            }
+        }
+        if (head_on && y >= head_y_lo && y <= head_y_hi) {
+            glass_disc_row(row, y, 0, HUD_W - 1, head_x16, head_y16, 29, RIM_HEAD565, 255, swap);
+        }
+        if (env->privacy_muted) {
+            glass_ring_row(row, y, 0, HUD_W - 1, cx16, cy16, RIM_PRIV_IN16, RIM_PRIV_OUT16,
+                           0, GLASS_TURN_Q16, RIM_GOLD565, 230, swap);
         }
     }
 }
@@ -813,16 +852,7 @@ void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
     const int cx = 232 + env->ox;
     const int cy = 232 + env->oy;
 
-    ov_battery(&s, cx, cy, now_ms, env);
-    if (env->privacy_muted) {
-        for (int y = s.y0; y < s.y1; ++y) {
-            if (y >= 0 && y < HUD_H) {
-                ov_ring_row(dst + (size_t)(y - s.y0) * HUD_W, y, cx, cy,
-                            OV_R_PRIVACY_IN, OV_R_PRIVACY_OUT,
-                            s_ov_gold, 230);
-            }
-        }
-    }
+    ov_rim(dst, y0, nrows, swap_bytes, now_ms, env);
 
     switch ((hud_face_t)env->face) {
     case HUD_FACE_IDLE:
@@ -861,8 +891,10 @@ void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
     case HUD_FACE_ERROR:
         for (int y = s.y0; y < s.y1; ++y) {
             if (y >= 0 && y < HUD_H) {
-                ov_ring_row(dst + (size_t)(y - s.y0) * HUD_W, y, cx, cy,
-                            OV_R_BATT - 2, OV_R_BATT + 2, s_ov_red, 150);
+                glass_ring_row(dst + (size_t)(y - s.y0) * HUD_W, y, 0, HUD_W - 1,
+                               RIM_CENTRE16 + env->ox * 16, RIM_CENTRE16 + env->oy * 16,
+                               (OV_R_BATT - 4) * 16, (OV_R_BATT + 0) * 16, 0, GLASS_TURN_Q16,
+                               RIM_RED565, 150, swap_bytes);
             }
         }
         break;
@@ -2798,6 +2830,80 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
         aa_disc(&s, WATCH_CX16, WATCH_CY16, 12 * 16, W_CYAN, A, swap_bytes);
         aa_disc(&s, WATCH_CX16, WATCH_CY16, 4 * 16, W_WHITE, A, swap_bytes);
         break;
+    }
+}
+
+/* THE JARVIS DIAL. The style with no baked art used to be three hands on bare
+ * black: no face, no ticks. This is its instrument, in the language of the home
+ * face (amber rings and a tick ring on black, a cyan core), drawn with the glass
+ * primitives and the watch's own anti-aliased polygons, so the hands sit on a
+ * dial in every mood.
+ *
+ * What is on it, all inside r 201 so the hands (to r 190) and the sun band
+ * (r 204-208, drawn by the shell only for this style) clear it:
+ *   - a 60-tick minute track at r 192-200, longer at each hour and longest at
+ *     12, 3, 6 and 9;
+ *   - a thin amber rail inside it (r 184), and two fainter amber rings at r 131
+ *     and r 61, the home face's own rings;
+ *   - four cyan beads on the cardinal ticks, the only cool colour besides the
+ *     hour hand. */
+#define JD_AMBER565   0xFD43u        /* (255, 170, 30) */
+
+void hud_overlay_jarvis_dial(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                             int strength)
+{
+    if (dst == NULL || nrows <= 0 || strength <= 0) {
+        return;
+    }
+    if (strength > 255) {
+        strength = 255;
+    }
+    if (y0 > 232 + 202 || y0 + nrows <= 232 - 202) {
+        return;
+    }
+    const strip_t s = { dst, y0, y0 + nrows };
+    const int A = strength >= 255 ? 256 : strength + 1;
+    static const wrgb_t amber = { 255, 170, 30 };
+    wpoly_t p;
+    for (int t = 0; t < 60; ++t) {
+        const uint32_t ta = WATCH_A12 + (uint32_t)t * (65536u / 60u);
+        const bool hour = t % 5 == 0, quarter = t % 15 == 0;
+        const int32_t r0 = (quarter ? 186 : hour ? 190 : 194) * 16;
+        if (!tick_in_strip(&s, ta, r0, 201 * 16)) {
+            continue;
+        }
+        const int w = quarter ? 16 : hour ? 13 : 8;
+        const int a = quarter ? 255 : hour ? 225 : 140;
+        hand_poly(&p, WATCH_CX16, WATCH_CY16, ta, r0, 201 * 16, w, w, 0);
+        aa_fill(&s, &p, amber, (a * A) >> 8, swap_bytes, AA_SUB);
+    }
+    for (int q = 0; q < 4; ++q) {
+        int32_t x, y;
+        w_polar(182 * 16, WATCH_A12 + (uint32_t)q * 16384u, &x, &y);
+        aa_disc(&s, x, y, 3 * 16, W_CYAN, (230 * A) >> 8, swap_bytes);
+    }
+    static const struct { int32_t in16, out16; uint8_t a; } ring[3] = {
+        { 183 * 16 + 4, 184 * 16 + 12, 120 },
+        { 130 * 16 + 4, 131 * 16 + 8, 80 },
+        { 60 * 16 + 4, 61 * 16 + 4, 60 },
+    };
+    for (int y = y0; y < y0 + nrows; ++y) {
+        if (y < 0 || y >= HUD_H) {
+            continue;
+        }
+        uint16_t *row = dst + (size_t)(y - y0) * HUD_W;
+        for (int i = 0; i < 3; ++i) {
+            if (y < 233 - 186 || y > 233 + 186) {
+                continue;
+            }
+            const int r = (ring[i].out16 + 15) / 16;
+            if (y < 233 - r || y > 233 + r) {
+                continue;
+            }
+            glass_ring_row(row, y, 0, HUD_W - 1, WATCH_CX16 + 8, WATCH_CY16 + 8, ring[i].in16,
+                           ring[i].out16, 0, GLASS_TURN_Q16, JD_AMBER565,
+                           (uint8_t)((ring[i].a * A) >> 8), swap_bytes);
+        }
     }
 }
 

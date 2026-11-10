@@ -419,6 +419,13 @@ void hud_overlay_bloom(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 void hud_overlay_clock(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                        int hh, int mm, int ss, int strength);
 
+/* The JARVIS style's dial: the instrument the hands sit on (a 60-tick amber
+ * minute track, a thin rail, two faint amber rings as on the home face, four
+ * cyan beads), drawn anti-aliased inside r 201. Drawn under hud_overlay_clock
+ * and faded with the same strength; <= 0 paints nothing. */
+void hud_overlay_jarvis_dial(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                             int strength);
+
 /* THE WATCHES, SECOND CUT (2026-09-02). Eight styles (jr_watch_style_t in
  * jr_display.h: 0 JARVIS, 1 DIVER, 2 DRESS, 3 PILOT, 4 MINIMAL, 5 FUTURE,
  * 6 SKELETON, 7 CELESTIAL).

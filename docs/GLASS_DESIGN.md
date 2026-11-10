@@ -1561,3 +1561,77 @@ commit 6df36e5, with the 5x7 write sites counted in a patched copy):
 The shade's old count has no breathing ring, icons or key line; its new one has
 all of them. These are pixel counts, a proxy: frames per second on the S3 are
 for the device to say.
+
+## A dial owns the glass, 2026-11-10
+
+On WATCH the dial is the screen. Eight defects came from the shell's furniture
+behaving as if it owned the glass the dial was drawn on, and they are fixed by
+one rule, one face and one dial.
+
+**The shell-furniture rule on WATCH.** The rim (battery arc, charging comet,
+gold mute ring) is not drawn on WATCH when nothing is happening
+(`watch_rim_hidden`). "Nothing is happening" is exactly: the microphone is
+muted, no shade or detail sheet is up, no question or commit ring, no agent or
+operator-lease rim, and no firmware update. A live microphone keeps the rim (it
+is the privacy tell); every one of the other conditions brings it back at once,
+and every other screen keeps its rim always. So a muted device on its charger
+shows the dial and nothing else, and the gold ring is not the one thing seen on
+it. The same function gates the rest face. `test_watch_dial_owns_the_glass_no_idle_rim`
+pins each case, with a mutation per condition.
+
+The rim is drawn with the glass primitives now: the battery arc is a round-capped
+`glass_arc_row` (r215.5-217.5, alpha 200), the comet seven tapering ring
+segments and a head disc, the privacy ring a 1.25 px hairline at r219.5, the
+ERROR ring a glass ring. Every edge is anti-aliased (the old 2 px stamps were
+hard dots). The privacy ring and the choice arcs keep their lanes: the rim's
+spill stops short of r221.3, where the arcs begin.
+
+**The sun arc** (r204-208) is the JARVIS dial's only. It ran across PILOT's tick
+track, FUTURE's rings and MINIMAL's minute ticks; the JARVIS dial leaves that
+band free on purpose.
+
+**The JARVIS dial.** The JARVIS style had hands over black. It now has an
+instrument in the home screen's language, drawn by `hud_overlay_jarvis_dial`
+before the sun band and the hands: sixty amber ticks (hour ticks r186-201,
+fives, minutes shorter and dimmer, anti-aliased polygons), four cyan beads at
+r182 on the quarters, and three hairline rings at r184, r131 and r61. It is
+there awake and at rest, with and without a sun.
+
+**The rest face.** One face for every rest mode (nightstand, glance, dream) and
+for whichever of JARVIS or WATCH was shown, in the glass type: the time in the
+HERO digits, centred, and under it at most one quiet line in the label face
+(`74%  CHARGING`, or the next item, or nothing). It was the 5x7 bitmap, with
+`BAT n%` and `CHARGING` on lines of their own. The rule: the rest face is a pure
+function of the clock word, the companion view and the strip, so the pixels are
+the same however the device got there (`test_rest_face_is_one_face` compares
+four routes). The ink stays the dim grey; the mood ladder dims the panel itself.
+At rest the dial is not shown at all, so a style change made at rest shows the
+new dial only once the device is awake again: a swipe is an input, and an input
+clears rest.
+
+**Smaller fixes.** The shade's mute button is an opaque black disc under its
+tint, so the face no longer shows through the button. FUTURE's weather line is
+one whole short word from a fixed vocabulary (CLEAR, CLOUDY, RAIN, SNOW, FOG,
+STORM) or the temperature alone, never cut and never ending in a stop
+(`watch_wx_word`; the WEATHER screen keeps `wx_cond_fit`). DIVER's date is set
+in the glass digits, centred in its window.
+
+**Cost.** Whole-frame callgrind instructions, the probe's `frame` scenes at
+clk=100000, `-O2`, no vectorising, counted without the row wrappers, with the
+stand-in face fill (162.6 M in every row) taken out. The rim and the JARVIS dial
+cost more than the code they replaced, and that is the price of anti-aliased
+edges; nothing was cut to hide it.
+
+| scene          | before | after | change |
+| -------------- | ------ | ----- | ------ |
+| home           |   9.4  | 20.2  | +10.8  |
+| watch-jarvis   |   9.4  | 21.2  | +11.8  |
+| watch-diver    |  14.2  | 18.7  |  +4.5  |
+| watch-pilot    |  16.4  | 19.9  |  +3.5  |
+| watch-future   |  15.0  | 18.5  |  +3.5  |
+| watch-skeleton |  19.9  | 24.3  |  +4.4  |
+| weather        |  13.4  | 19.0  |  +5.6  |
+| shade          |  15.8  | 20.9  |  +5.1  |
+
+Millions of instructions per frame. They are host instructions: whether a frame
+still holds 24 fps on the S3 is for the device to say.

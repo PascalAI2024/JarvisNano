@@ -18,6 +18,7 @@ add_executable(jr_display_hud_tests
     test_hud_render.c
     ../src/hud_render.c
     ../src/balance_wheel_data.c
+    ../src/glass_draw.c
 )
 target_include_directories(jr_display_hud_tests PRIVATE ../include ../src)
 target_link_libraries(jr_display_hud_tests PRIVATE m)

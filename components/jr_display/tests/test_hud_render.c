@@ -365,15 +365,16 @@ static void test_privacy_ring_is_persistent_and_bounded(void)
                 continue;
             }
             painted++;
-            const long dx = x - 232, dy = y - 232;
+            /* from the TRUE centre (the rim is anti-aliased about 233.0): doubled coordinates */
+            const long dx = 2L * x - 465, dy = 2L * y - 465;
             const long r2 = dx * dx + dy * dy;
-            if (r2 < 220L * 220L || r2 > 223L * 223L) {
+            if (r2 < 438L * 438L || r2 > 446L * 446L) {
                 out_of_band++;
             }
         }
     }
     CHECK(painted > 500, "privacy ring painted only %zu px", painted);
-    CHECK(out_of_band == 0, "privacy ring left r220-223 (%zu px)",
+    CHECK(out_of_band == 0, "privacy ring left r219-223 (%zu px)",
           out_of_band);
 
     memset(clear, 0, px * sizeof *clear);
@@ -451,9 +452,9 @@ static void test_charging_rim_animates_inside_battery_band(void)
             const size_t i = (size_t)y * HUD_W + x;
             if (a[i] == b[i]) continue;
             changed++;
-            const int dx = x - 232, dy = y - 232;
+            const int dx = 2 * x - 465, dy = 2 * y - 465;      /* the true centre, doubled */
             const int r2 = dx * dx + dy * dy;
-            if (r2 < 215 * 215 || r2 > 221 * 221) escaped++;
+            if (r2 < 426 * 426 || r2 > 442 * 442) escaped++;
         }
     }
     CHECK(changed > 0, "charging rim did not animate");
