@@ -82,3 +82,39 @@ layer: the data screens' own content and the procedural MINIMAL dial.
 - ACTIVITY rows cut a sentence to `FORGIVE ME, SIR. I.` and `I'M NOT QUITE.`
 - The new DESK and ACTIVITY screens cost more than the ones they replaced
   (35 > 65 ms and 34 > 50 ms under the same lease).
+
+## Second flash the same day: the frame-cost cuts, measured
+
+Image 519b252 (2,422,592 bytes, valid after 60 s). Same method, lease held,
+with `GET /api/display?split=1` naming the parts of the hud layer.
+
+| Screen | total | hud before | hud after | the hud's largest parts |
+|---|---|---|---|---|
+| Home | 26.9 | 4.6 | 5.2 | caption 2.2 |
+| Control shade | 75.2 | 56.0 | 53.8 | space_shade 37.6, space_veil 7.7 |
+| WATCH DRESS | 43.2 | 12.1 | 13.0 | clock_face 7.2 |
+| WATCH CELESTIAL | 50.1 | 18.5 | 19.9 | clock_face 13.3 |
+| WATCH DIVER | 51.8 | 19.7 | 21.6 | clock_face 14.4 |
+| WATCH FUTURE | 59.9 | 25.5 | 28.7 | clock_face 12.8, clock_cells 9.5 |
+| WATCH PILOT | 63.6 | 28.1 | 32.7 | clock_face 21.4 |
+| WATCH SKELETON | 66.8 | 34.1 | 36.8 | clock_face 30.2 |
+| WATCH MINIMAL | 58.3 | 66.7 | **36.3** | clock_face 25.6 |
+| WATCH JARVIS | 30.3 | 32.4 | **9.1** | clock_face 2.6 |
+| WEATHER | 58.3 | 31.9 | 35.5 | space_screen 16.6, space_orbit 12.6 |
+| STATUS | 84.6 | 58.0 | 62.3 | space_screen 42.6, space_orbit 12.1 |
+| DESK | 67.3 | 42.6 | 45.4 | space_screen 26.6, space_orbit 11.7 |
+| ACTIVITY | 50.8 | 28.5 | 28.2 | space_screen 7.7, space_orbit 13.7 |
+
+Two cuts carried to the device (MINIMAL -30 ms, the JARVIS watch style
+-23 ms). The rest did not, and most screens read 3 to 4 ms slower than on the
+first image; the split timers are the only thing that image added on those
+paths, which makes them the suspect, not the proven cause. The shell layer is
+still 20 to 21 ms on every screen (the lease rim), the dial blit 9 ms on the
+six baked dials, and the orbit rail 12 to 14 ms on every ring screen.
+
+Internal RAM after this flash: 33 KB free, largest block 22,528 bytes, against
+26,624 on the first image at the same uptime. Not yet explained.
+
+The PMIC fix did what it could: VSYS and the die temperature still do not
+convert within 500 ms of enabling their channels on battery, and are now
+reported as absent (`die -`, `vsys -`) instead of as 0 mV and 385.7 C.
