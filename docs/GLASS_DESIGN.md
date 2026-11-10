@@ -586,6 +586,20 @@ dial does not grow a gadget. Shell test: the band at noon, night at
 midnight, the ends at 07:02/19:35 (angles 139 and 17), the dot at 13:15
 (angle 205), DRESS blank, no sun blank.
 
+**SKELETON and CELESTIAL (2026-11-10, step 1: dials and hands).** Styles 6
+and 7, appended so no saved style number moves; the style count is 8, the
+limit of the nav word's three style bits (`_Static_assert`). Both are baked
+dials cut by `gen_watch_dials.py` (SKELETON from its own full-frame render
+with the balance recess left empty, CELESTIAL from the top-right quadrant of
+`20261110-dial-concepts-codex-new.png`), 204 KB and 205 KB, black floor 0.
+SKELETON hands: rose gold with a dark hairline outline and a wide cream lume
+fill, an ice-blue hairline seconds as the one cool colour; CELESTIAL: slim
+polished gold with a fine gold seconds. Renders:
+`docs/evidence/watch-dials-2026-11-10-{skeleton,celestial}-hands.png`.
+**They are not staged yet:** the pair does not fit the 0x5E0000 partition
+(see `docs/reference/asset-pipeline.md`), so `JR_STAGE_NEW_DIALS` is off and
+the two styles show the procedural stand-in until space is freed.
+
 **The weather cell never cuts a word (2026-09-05).** The 12-glyph
 `condition` cap had already turned "LIGHT DRIZZLE" into `LIGHT DRIZZL`
 before the cell's 15-glyph clip made it `LIGHT DRIZZ` on the glass

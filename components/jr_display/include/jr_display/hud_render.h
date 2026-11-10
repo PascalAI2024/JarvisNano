@@ -419,10 +419,11 @@ void hud_overlay_bloom(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 void hud_overlay_clock(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                        int hh, int mm, int ss, int strength);
 
-/* THE WATCHES, SECOND CUT (2026-09-02). Six styles (jr_watch_style_t in
- * jr_display.h: 0 JARVIS, 1 DIVER, 2 DRESS, 3 PILOT, 4 MINIMAL, 5 FUTURE).
+/* THE WATCHES, SECOND CUT (2026-09-02). Eight styles (jr_watch_style_t in
+ * jr_display.h: 0 JARVIS, 1 DIVER, 2 DRESS, 3 PILOT, 4 MINIMAL, 5 FUTURE,
+ * 6 SKELETON, 7 CELESTIAL).
  * Style 0 is hud_overlay_clock, pixel for pixel; an unknown style draws
- * style 0. Styles 1-5 draw anti-aliased bevelled hands (a tapered polygon
+ * style 0. Styles 1-7 draw anti-aliased bevelled hands (a tapered polygon
  * per flank, a hairline outline, a soft shadow, lume where the style has it)
  * over whatever the strip already holds — the baked dial when `dial_baked`,
  * otherwise a black stand-in dial drawn first. The seconds hand sweeps from

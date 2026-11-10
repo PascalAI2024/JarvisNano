@@ -103,6 +103,16 @@ runtime table, and `test_every_face_has_a_clip_and_a_hud_face`
 per `jr_face_t` so a face added without a clip fails on the host instead of
 rendering blank on glass.
 
+### Two more dials do not fit (2026-11-10)
+
+`dial_skeleton.eaf` (203,677 B) and `dial_celestial.eaf` (204,787 B) come from
+`gen_watch_dials.py one skeleton|celestial` (a style may name a full-frame
+image, quadrant `None`, or a sheet quadrant). Staged files today sum to
+5,468,446 B of the 6,160,384 B partition; with the pair 5,876,910 B.
+`spiffsgen.py` (page 256, block 4096, name 32, meta 4, magic) accepts at most
+about 145 KB more than the current set, and even one new dial overflows
+(`SpiffsFullError`). `JR_STAGE_NEW_DIALS` in the component CMake stays OFF.
+
 ---
 
 ## Primary sources

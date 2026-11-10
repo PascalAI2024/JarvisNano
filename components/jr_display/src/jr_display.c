@@ -287,6 +287,8 @@ static const char *face_asset(jr_face_t face)
     case JR_FACE_DIAL_DRESS:  return JR_DISPLAY_MOUNT_POINT "/dial_dress.eaf";
     case JR_FACE_DIAL_PILOT:  return JR_DISPLAY_MOUNT_POINT "/dial_pilot.eaf";
     case JR_FACE_DIAL_FUTURE: return JR_DISPLAY_MOUNT_POINT "/dial_future.eaf";
+    case JR_FACE_DIAL_SKELETON:  return JR_DISPLAY_MOUNT_POINT "/dial_skeleton.eaf";
+    case JR_FACE_DIAL_CELESTIAL: return JR_DISPLAY_MOUNT_POINT "/dial_celestial.eaf";
     default:                return NULL;
     }
 }
@@ -306,7 +308,9 @@ static jr_face_t face_fallback(jr_face_t face)
     case JR_FACE_DIAL_DIVER:
     case JR_FACE_DIAL_DRESS:
     case JR_FACE_DIAL_PILOT:
-    case JR_FACE_DIAL_FUTURE: return JR_FACE_IDLE;
+    case JR_FACE_DIAL_FUTURE:
+    case JR_FACE_DIAL_SKELETON:
+    case JR_FACE_DIAL_CELESTIAL: return JR_FACE_IDLE;
     default:               return face;
     }
 }
@@ -330,7 +334,9 @@ static uint32_t face_fps(jr_face_t face)
     case JR_FACE_DIAL_DIVER:
     case JR_FACE_DIAL_DRESS:
     case JR_FACE_DIAL_PILOT:
-    case JR_FACE_DIAL_FUTURE: return 24;
+    case JR_FACE_DIAL_FUTURE:
+    case JR_FACE_DIAL_SKELETON:
+    case JR_FACE_DIAL_CELESTIAL: return 24;
     default:              return 24;   /* engine + panel ceiling (P2.7) */
     }
 }
@@ -2870,7 +2876,9 @@ static uint8_t hud_face_of(jr_face_t f)
     case JR_FACE_DIAL_DIVER:
     case JR_FACE_DIAL_DRESS:
     case JR_FACE_DIAL_PILOT:
-    case JR_FACE_DIAL_FUTURE: return HUD_FACE_IDLE;
+    case JR_FACE_DIAL_FUTURE:
+    case JR_FACE_DIAL_SKELETON:
+    case JR_FACE_DIAL_CELESTIAL: return HUD_FACE_IDLE;
     default:                return HUD_FACE_IDLE;
     }
 }
@@ -3104,6 +3112,8 @@ static jr_face_t watch_dial_face(void)
     case JR_WATCH_DRESS:  return JR_FACE_DIAL_DRESS;
     case JR_WATCH_PILOT:  return JR_FACE_DIAL_PILOT;
     case JR_WATCH_FUTURE: return JR_FACE_DIAL_FUTURE;
+    case JR_WATCH_SKELETON:  return JR_FACE_DIAL_SKELETON;
+    case JR_WATCH_CELESTIAL: return JR_FACE_DIAL_CELESTIAL;
     default:              return JR_FACE_COUNT;
     }
 }
@@ -5952,7 +5962,8 @@ static void clip_release_unbound_dial(jr_display_ctx_t *ctx,
                                       const jr_display_clip_t *clip)
 {
     const jr_face_t dials[] = { JR_FACE_DIAL_DIVER, JR_FACE_DIAL_DRESS,
-                               JR_FACE_DIAL_PILOT, JR_FACE_DIAL_FUTURE };
+                               JR_FACE_DIAL_PILOT, JR_FACE_DIAL_FUTURE,
+                               JR_FACE_DIAL_SKELETON, JR_FACE_DIAL_CELESTIAL };
     for (size_t i = 0; i < sizeof dials / sizeof dials[0]; ++i) {
         jr_display_clip_t *candidate = &ctx->clips[dials[i]];
         if (clip == candidate && clip != ctx->bound && candidate->data != NULL) {
@@ -5973,7 +5984,9 @@ static bool dial_show(jr_display_ctx_t *ctx, jr_face_t dial)
     case JR_FACE_DIAL_DIVER:
     case JR_FACE_DIAL_DRESS:
     case JR_FACE_DIAL_PILOT:
-    case JR_FACE_DIAL_FUTURE: break;
+    case JR_FACE_DIAL_FUTURE:
+    case JR_FACE_DIAL_SKELETON:
+    case JR_FACE_DIAL_CELESTIAL: break;
     default:                  return false;
     }
     if ((ctx->missing_faces & (1U << dial)) != 0U) {
@@ -6825,7 +6838,8 @@ jr_watch_style_t jr_display_watch_style(void)
 const char *jr_display_watch_style_name(jr_watch_style_t style)
 {
     static const char *const names[JR_WATCH_STYLE_COUNT] = {
-        "JARVIS", "DIVER", "DRESS", "PILOT", "MINIMAL", "FUTURE" };
+        "JARVIS", "DIVER", "DRESS", "PILOT", "MINIMAL", "FUTURE",
+        "SKELETON", "CELESTIAL" };
     return ((int)style >= 0 && style < JR_WATCH_STYLE_COUNT) ? names[style]
                                                              : names[0];
 }

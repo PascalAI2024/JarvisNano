@@ -1765,7 +1765,7 @@ static void test_watch_styles_paint_their_own_regions(void)
     const uint16_t cyan  = (uint16_t)(((0 & 0xF8) << 8) | ((229 & 0xFC) << 3) | (255 >> 3));
     const uint16_t gold  = (uint16_t)(((214 & 0xF8) << 8) | ((178 & 0xFC) << 3) | (62 >> 3));
 
-    for (int style = 1; style <= 5; ++style) {
+    for (int style = 1; style <= 7; ++style) {
         render_style_strips(fb, 6, 30, 15, style);   /* hands away from 12 */
         size_t tri = 0, cream_any = 0, lit = 0, iv = 0, cy = 0, au = 0, far = 0;
         for (int y = 0; y < HUD_H; ++y) {
@@ -1803,6 +1803,12 @@ static void test_watch_styles_paint_their_own_regions(void)
             CHECK(iv > 100000, "MINIMAL: only %zu ivory px (the dial is drawn)", iv);
             CHECK(cream_any == 0, "MINIMAL painted %zu cream px", cream_any);
             break;
+        case 6:
+            CHECK(cream_any > 200, "SKELETON: only %zu lume px", cream_any);
+            break;
+        case 7:
+            CHECK(lit > 1000, "CELESTIAL: lit only %zu px", lit);
+            break;
         default:
             CHECK(cy > 300, "FUTURE: only %zu cyan px", cy);
             break;
@@ -1816,7 +1822,7 @@ static void test_watch_styles_paint_their_own_regions(void)
     /* The per-frame cache follows its inputs: a new time on the same style,
      * rendered in strips right after a whole frame at the old time, equals
      * a whole frame at the new time and differs from the old one. */
-    for (int style = 1; style <= 5; ++style) {
+    for (int style = 1; style <= 7; ++style) {
         hud_overlay_clock_style(whole, 0, HUD_H, false, 6, 30, 15, 255, style);
         render_style_strips(fb, 10, 8, 45, style);
         CHECK(memcmp(whole, fb, px * sizeof *fb) != 0,
@@ -1827,7 +1833,7 @@ static void test_watch_styles_paint_their_own_regions(void)
               "style %d at 10:08:45: strips differ from the whole frame", style);
     }
     /* strength 0 paints nothing in every style */
-    for (int style = 0; style < 6; ++style) {
+    for (int style = 0; style < 8; ++style) {
         memset(fb, 0, px * sizeof *fb);
         hud_overlay_clock_style(fb, 0, HUD_H, false, 6, 30, 15, 0, style);
         size_t any = 0;
@@ -1968,7 +1974,7 @@ static void test_watch_hands_blend_and_spare_the_dial(void)
     uint16_t *fb = malloc(px * sizeof *fb);
     if (!fb) { printf("FAIL %s: alloc\n", __func__); g_failures++; return; }
     const uint16_t grey = 0x4208;
-    for (int style = 1; style <= 5; ++style) {
+    for (int style = 1; style <= 7; ++style) {
         if (style == 4) continue;                   /* MINIMAL draws its own dial */
         for (size_t k = 0; k < px; ++k) fb[k] = grey;
         const hud_watch_t w = { .hh = 10, .mm = 8, .ss = 30, .ms = 500,
@@ -2199,7 +2205,7 @@ static void test_watch_light_in_the_frame(void)
     hud_light_t rest, tilt;
     hud_light_solve(0, 0, &rest);
     hud_light_solve(707, -707, &tilt);            /* 45 degrees, 6 o'clock side */
-    for (int style = 1; style <= 5; ++style) {
+    for (int style = 1; style <= 7; ++style) {
         render_watch_light(a, style, NULL, true);
         render_watch_light(b, style, &rest, true);
         CHECK(memcmp(a, b, px * sizeof *a) == 0, "style %d: rest light != NULL light", style);

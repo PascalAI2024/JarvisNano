@@ -92,6 +92,8 @@ BLACK_FLOOR = {
     "dress":  0,
     "pilot":  28,
     "future": 28,
+    "skeleton": 0,
+    "celestial": 0,
 }
 BLOCK_H = 32
 
@@ -128,12 +130,16 @@ def emit_eaf_mixed(rows, palette_bgra, path: Path):
     Path(path).write_bytes(out)
     return len(out), n_raw, n_rle
 
-# style -> (sheet stem, quadrant)   quadrants: 0 TL, 1 TR, 2 BL, 3 BR
+# style -> (image, quadrant)   quadrants: 0 TL, 1 TR, 2 BL, 3 BR; None means
+# the image is already one full-frame dial (2026-11-10: skeleton ships from
+# its own no-wheel render so the recess for the live balance wheel is empty).
 DIALS = {
     "diver":  ("20260902-dial-concepts-codex-diver.png",  0),
     "dress":  ("20260902-dial-concepts-codex-dress.png",  0),
     "pilot":  ("20260902-dial-concepts-codex-pilot.png",  0),
     "future": ("20260902-dial-concepts-codex-future.png", 1),
+    "skeleton":  ("20261110-dial-skeleton-codex-nowheel.png", None),
+    "celestial": ("20261110-dial-concepts-codex-new.png", 1),
 }
 
 
@@ -333,7 +339,7 @@ def preview(rows, palette_bgra, path: Path):
 def bake(style: str, sheets: Path, write: bool = True) -> dict:
     stem, q = DIALS[style]
     sheet = Image.open(sheets / stem)
-    disc = fit_disc(quadrant(sheet, q))
+    disc = fit_disc(sheet if q is None else quadrant(sheet, q))
     rgb = np.asarray(disc).copy()
     rgb, hole = fill_centre_hole(rgb)
     geom = {"hole_r": hole}

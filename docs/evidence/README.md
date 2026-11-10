@@ -46,6 +46,10 @@ include UTC timestamps, original pixels, and explicit firmware/USB limits.
 | `20260902-dial-concepts-codex-diver.png` | Codex image-gen concept sheet (2×2, dial only, no hands) for the diver family; the owner chose the top-left (black sunburst, gold-rimmed lume dots, gold-framed date window). 1024 px copy of the 1244 px original; the generator reads this file. |
 | `20260902-dial-concepts-codex-dress.png` | Codex concept sheet for the dress family; chosen: top-left (brushed champagne, applied gold batons). |
 | `20260902-dial-concepts-codex-pilot.png` | Codex concept sheet for the pilot family; chosen: top-left (matte black, white Arabic numerals, three empty recessed sub-dial rings — no printed scales, so live needles read cleanly). |
+| `20261110-dial-concepts-codex-new.png` | In-house Codex image-gen concept sheet (2x2): skeleton, celestial, meteorite, reactor. Celestial (top-right) is baked as `dial_celestial.eaf`. |
+| `20261110-dial-skeleton-codex-nowheel.png` | In-house Codex image-gen: the skeleton dial alone with an empty recess for the balance wheel; baked as `dial_skeleton.eaf`. |
+| `20261110-dial-skeleton-codex-balance-wheel.png` | In-house Codex image-gen: the balance wheel alone on transparent; the swinging sprite is baked from it. |
+| `watch-dials-2026-11-10-skeleton-hands.png`, `watch-dials-2026-11-10-celestial-hands.png` | Host renders of the new dials under the live hands at 10:10:30, 3:45:12 and 7:20:48 (tilted light). |
 | `20260902-dial-concepts-codex-future.png` | Codex concept sheet for the futuristic HUD family; chosen: top-right (cyan rings, gold accents, arc-reactor centre, four empty data cells). |
 | `20260902-dial-diver.png` | The baked DIVER dial exactly as the palette EAF stores it (466 px, 255 colours, RAW/RLE per block): centre hole filled along the radius, the date window's paper blanked at x 376–416 / y 231–256 for the live day. A preview of the clip bytes, not a panel photograph. |
 | `20260902-dial-dress.png` | The baked DRESS dial (255 colours, RAW/RLE per block). |

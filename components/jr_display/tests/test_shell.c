@@ -587,6 +587,8 @@ static void test_missing_clip_falls_back_to_the_face_it_grew_from(void)
     CHECK(face_fallback(JR_FACE_DIAL_DRESS) == JR_FACE_IDLE, "dial dress -> idle");
     CHECK(face_fallback(JR_FACE_DIAL_PILOT) == JR_FACE_IDLE, "dial pilot -> idle");
     CHECK(face_fallback(JR_FACE_DIAL_FUTURE) == JR_FACE_IDLE, "dial future -> idle");
+    CHECK(face_fallback(JR_FACE_DIAL_SKELETON) == JR_FACE_IDLE, "dial skeleton -> idle");
+    CHECK(face_fallback(JR_FACE_DIAL_CELESTIAL) == JR_FACE_IDLE, "dial celestial -> idle");
     for (int f = 0; f < (int)JR_FACE_COUNT; ++f) {
         const jr_face_t p = face_fallback((jr_face_t)f);
         CHECK(p == (jr_face_t)f || face_fallback(p) == p,
@@ -1469,10 +1471,15 @@ static void test_watch_style_is_three_nav_bits_that_wrap(void)
           "FUTURE is not bit pattern 101 at bit 17");
     CHECK((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 20) == 0u,
           "the style spilled above bit 19");
+    jr_display_watch_style_set(JR_WATCH_CELESTIAL);
+    CHECK(((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 17) & 7u) == 7u,
+          "CELESTIAL is not bit pattern 111 at bit 17");
+    CHECK((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 20) == 0u,
+          "the last style spilled above bit 19");
     jr_display_watch_style_set(JR_WATCH_DIVER);
     static const jr_watch_style_t walk[] = {
         JR_WATCH_DRESS, JR_WATCH_PILOT, JR_WATCH_MINIMAL, JR_WATCH_FUTURE,
-        JR_WATCH_JARVIS, JR_WATCH_DIVER };
+        JR_WATCH_SKELETON, JR_WATCH_CELESTIAL, JR_WATCH_JARVIS, JR_WATCH_DIVER };
     for (size_t i = 0; i < sizeof walk / sizeof *walk; ++i) {
         jr_display_watch_style_step(1);
         CHECK(jr_display_watch_style() == walk[i], "step %zu right landed on %d, wanted %d",
@@ -1481,16 +1488,17 @@ static void test_watch_style_is_three_nav_bits_that_wrap(void)
     jr_display_watch_style_step(-1);
     CHECK(jr_display_watch_style() == JR_WATCH_JARVIS, "left of DIVER is JARVIS");
     jr_display_watch_style_step(-1);
-    CHECK(jr_display_watch_style() == JR_WATCH_FUTURE, "left of JARVIS wraps to FUTURE");
+    CHECK(jr_display_watch_style() == JR_WATCH_CELESTIAL, "left of JARVIS wraps to CELESTIAL");
     jr_display_nav_next();
     jr_display_nav_up();
     jr_display_nav_home();
-    CHECK(jr_display_watch_style() == JR_WATCH_FUTURE,
+    CHECK(jr_display_watch_style() == JR_WATCH_CELESTIAL,
           "the style did not survive next/up/home (now %d)", (int)jr_display_watch_style());
     CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS, "home still goes home");
     jr_display_watch_style_set((jr_watch_style_t)JR_WATCH_STYLE_COUNT);
-    CHECK(jr_display_watch_style() == JR_WATCH_FUTURE, "an out-of-range style is refused");
-    static const char *const names[] = { "JARVIS", "DIVER", "DRESS", "PILOT", "MINIMAL", "FUTURE" };
+    CHECK(jr_display_watch_style() == JR_WATCH_CELESTIAL, "an out-of-range style is refused");
+    static const char *const names[] = { "JARVIS", "DIVER", "DRESS", "PILOT", "MINIMAL", "FUTURE",
+                                         "SKELETON", "CELESTIAL" };
     for (int i = 0; i < (int)JR_WATCH_STYLE_COUNT; ++i) {
         CHECK(strcmp(jr_display_watch_style_name((jr_watch_style_t)i), names[i]) == 0,
               "style %d is named %s", i, jr_display_watch_style_name((jr_watch_style_t)i));
@@ -1833,6 +1841,8 @@ static void test_watch_dial_face_follows_the_style_and_the_screen(void)
         { JR_WATCH_PILOT,   JR_FACE_DIAL_PILOT },
         { JR_WATCH_MINIMAL, JR_FACE_COUNT },
         { JR_WATCH_FUTURE,  JR_FACE_DIAL_FUTURE },
+        { JR_WATCH_SKELETON,  JR_FACE_DIAL_SKELETON },
+        { JR_WATCH_CELESTIAL, JR_FACE_DIAL_CELESTIAL },
     };
     for (size_t i = 0; i < sizeof want / sizeof *want; ++i) {
         jr_display_watch_style_set(want[i].st);
@@ -2974,6 +2984,8 @@ static void test_every_face_has_a_clip_and_a_hud_face(void)
         { JR_FACE_DIAL_DRESS,  "dial_dress.eaf" },
         { JR_FACE_DIAL_PILOT,  "dial_pilot.eaf" },
         { JR_FACE_DIAL_FUTURE, "dial_future.eaf" },
+        { JR_FACE_DIAL_SKELETON,  "dial_skeleton.eaf" },
+        { JR_FACE_DIAL_CELESTIAL, "dial_celestial.eaf" },
     };
     CHECK(sizeof expect / sizeof expect[0] == (size_t)JR_FACE_COUNT,
           "face table has %zu rows for %d faces",
@@ -3462,7 +3474,8 @@ static void test_dial_sources_release_without_invalidating_vendor_ownership(void
     const size_t baseline = s_stub_heap_bytes;
     const size_t frame_bytes = (size_t)HUD_W * HUD_H * sizeof(uint16_t);
     const jr_face_t dials[] = { JR_FACE_DIAL_FUTURE, JR_FACE_DIAL_DIVER,
-                               JR_FACE_DIAL_DRESS, JR_FACE_DIAL_PILOT };
+                               JR_FACE_DIAL_DRESS, JR_FACE_DIAL_PILOT,
+                               JR_FACE_DIAL_SKELETON, JR_FACE_DIAL_CELESTIAL };
     for (int cycle = 0; cycle < 3; ++cycle) {
         for (size_t i = 0; i < sizeof dials / sizeof dials[0]; ++i) {
             jr_display_clip_t *clip = allocate_test_clip(dials[i], 64U + i);
@@ -3478,7 +3491,7 @@ static void test_dial_sources_release_without_invalidating_vendor_ownership(void
     jr_display_clip_t *dial = allocate_test_clip(JR_FACE_DIAL_DIVER, 96U);
     s_stub_lock_failures = 1;
     CHECK(!dial_show(ctx, JR_FACE_DIAL_DIVER) && dial->data &&
-          s_dial_frame_face == JR_FACE_DIAL_PILOT,
+          s_dial_frame_face == JR_FACE_DIAL_CELESTIAL,
           "failed decode lock keeps old frame and retry source");
     s_stub_eaf_decode_error = ESP_FAIL;
     CHECK(!dial_show(ctx, JR_FACE_DIAL_DIVER) && dial->data,

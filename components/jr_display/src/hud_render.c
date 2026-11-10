@@ -2123,6 +2123,14 @@ static void fallback_dial(const strip_t *s, int style, int A, bool swap)
             w_polar(176 * 16, a, &x, &y);
             aa_disc(s, x, y, 2 * 16 + 8, W_DARK, A, swap);
             break;
+        case 6: /* SKELETON: rose-gold batons */
+            hand_poly(&p, WATCH_CX16, WATCH_CY16, a, 150 * 16, 178 * 16, 40, 40, 0);
+            aa_fill(s, &p, (wrgb_t){ 226, 150, 118 }, A, swap, AA_SUB);
+            break;
+        case 7: /* CELESTIAL: gold studs */
+            w_polar(176 * 16, a, &x, &y);
+            aa_disc(s, x, y, i == 0 ? 5 * 16 : 4 * 16, (wrgb_t){ 226, 184, 92 }, A, swap);
+            break;
         default: /* FUTURE: a 60-tick scale, cell frames below */
             break;
         }
@@ -2203,6 +2211,20 @@ static bool watch_hand_spec(int style, int hand, hand_spec_t *h)
         else if (hand == 1) { h->u0 = -10 * 16; h->u1 = 166 * 16; h->w0 = 3 * 16; h->w1 = 24; }
         else { h->body = W_GOLD; h->core = false; h->u0 = -22 * 16; h->u1 = 192 * 16; h->w0 = 16; h->w1 = 10; }
         return true;
+    case 6: /* SKELETON: rose gold over a busy movement; a dark outline and a
+             * wide cream lume fill keep the hands readable, an ice-blue
+             * hairline seconds is the one cool colour on the dial */
+        h->body = (wrgb_t){ 232, 160, 128 }; h->bevel = 70; h->outline = true; h->shadow = true;
+        if (hand == 0) { h->u0 = -14 * 16; h->u1 = 108 * 16; h->w0 = 7 * 16; h->w1 = 4 * 16; h->lume_u0 = 22 * 16; h->lume_u1 = 94 * 16; h->lume_w = 4 * 16; }
+        else if (hand == 1) { h->u0 = -14 * 16; h->u1 = 168 * 16; h->w0 = 6 * 16; h->w1 = 3 * 16; h->lume_u0 = 26 * 16; h->lume_u1 = 152 * 16; h->lume_w = 3 * 16 + 8; }
+        else { h->body = (wrgb_t){ 170, 225, 255 }; h->u0 = -34 * 16; h->u1 = 186 * 16; h->w0 = 36; h->w1 = 18; h->outline = false; h->shadow = false; }
+        return true;
+    case 7: /* CELESTIAL: slim polished gold leaves, a fine gold seconds */
+        h->body = (wrgb_t){ 238, 196, 96 }; h->bevel = 110; h->outline = true; h->shadow = true;
+        if (hand == 0) { h->u0 = -12 * 16; h->u1 = 104 * 16; h->w0 = 5 * 16; h->w1 = 8; }
+        else if (hand == 1) { h->u0 = -12 * 16; h->u1 = 168 * 16; h->w0 = 4 * 16; h->w1 = 8; }
+        else { h->body = (wrgb_t){ 255, 222, 130 }; h->u0 = -26 * 16; h->u1 = 190 * 16; h->w0 = 16; h->w1 = 8; h->outline = false; h->shadow = false; }
+        return true;
     default:
         return false;
     }
@@ -2263,7 +2285,7 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     if (dst == NULL || nrows <= 0 || strength <= 0 || w == NULL) {
         return;
     }
-    if (style <= 0 || style > 5) {
+    if (style <= 0 || style > 7) {
         hud_overlay_clock(dst, y0, nrows, swap_bytes, w->hh, w->mm, w->ss, strength);
         return;
     }
@@ -2369,6 +2391,8 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     case 2: w_hub(&s, 12 * 16, (wrgb_t){ 214, 178, 62 }, A, swap_bytes, lt); break;
     case 3: w_hub(&s, 12 * 16, W_WHITE, A, swap_bytes, lt); break;
     case 4: w_hub(&s, 4 * 16, (wrgb_t){ 70, 105, 175 }, A, swap_bytes, lt); break;
+    case 6: w_hub(&s, 13 * 16, (wrgb_t){ 232, 160, 128 }, A, swap_bytes, lt); break;
+    case 7: w_hub(&s, 12 * 16, (wrgb_t){ 238, 196, 96 }, A, swap_bytes, lt); break;
     default:
         aa_disc(&s, WATCH_CX16, WATCH_CY16, 20 * 16, W_CYAN, (40 * A) >> 8, swap_bytes);
         aa_disc(&s, WATCH_CX16, WATCH_CY16, 15 * 16, W_CYAN, (90 * A) >> 8, swap_bytes);
@@ -2381,7 +2405,7 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 void hud_overlay_clock_style(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                              int hh, int mm, int ss, int strength, int style)
 {
-    if (style <= 0 || style > 5) {
+    if (style <= 0 || style > 7) {
         hud_overlay_clock(dst, y0, nrows, swap_bytes, hh, mm, ss, strength);
         return;
     }
