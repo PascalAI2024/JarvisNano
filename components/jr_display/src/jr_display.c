@@ -4682,6 +4682,16 @@ static uint16_t *s_dial_rec;
 
 static void dial_rec_alloc(void)
 {
+#ifdef ESP_PLATFORM
+    /* Off on the device. Measured 2026-11-10: with the record, MINIMAL's face
+     * cost 35.1 ms a frame; drawn the long way on the image before, 25.6 ms.
+     * The host counted 30 % fewer instructions, so the loss is memory traffic
+     * the host does not see. The record and its host checks stay until the
+     * device has measured this half apart from the word fill in glass_draw.c
+     * that landed in the same commit. */
+    hud_dial_cache_set(NULL, 0u);
+    return;
+#endif
     if (s_dial_rec == NULL) {
         s_dial_rec = heap_caps_malloc(SG_DIAL_REC_WORDS * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     }
