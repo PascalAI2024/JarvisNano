@@ -5668,21 +5668,52 @@ static void apply_shell_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                                               agent_native_color(agent_state));
     const int width = x2 - x1;
     const int rim_out = 2 * 230, rim_in = 2 * 224;
+    const int cx2 = (int)ctx->board.width - 1;      /* dx = 2x - cx2 */
 
     for (int y = y1; y < y2; ++y) {
         const int dy = 2 * y - ((int)ctx->board.height - 1);
         if (dy * dy > rim_out * rim_out) {
             continue;                  /* strip row misses the rim entirely */
         }
-        uint16_t *row = pixels + (size_t)(y - y1) * (size_t)width;
-        for (int col = 0; col < width; ++col) {
-            const int dx = 2 * (x1 + col) - ((int)ctx->board.width - 1);
-            const int r2 = dx * dx + dy * dy;
-            if (r2 < rim_in * rim_in || r2 > rim_out * rim_out) {
-                continue;
+        /* The band is at most two short runs a row, so bound them with integer
+         * square roots and test only inside them (the old loop tested every
+         * pixel of the row: 217,000 multiplies a frame to light 8,000). The
+         * outer bound is widened by a pixel and the inner hole narrowed by
+         * one, so the exact r2 test below still decides every pixel and the
+         * output cannot differ. */
+        const int a = sp_isqrt(rim_out * rim_out - dy * dy);
+        int lo = cx2 - a - 2;
+        lo = lo < 0 ? 0 : lo >> 1;
+        int hi = (cx2 + a + 2) >> 1;
+        int hole_lo = 1, hole_hi = 0;            /* empty: hole_lo > hole_hi */
+        const int i2 = rim_in * rim_in - dy * dy;
+        if (i2 > 0) {
+            const int h = sp_isqrt(i2) - 3;      /* |dx| <= h is surely inside r_in */
+            if (h >= 0 && h <= cx2) {
+                hole_lo = (cx2 - h + 1) >> 1;
+                hole_hi = (cx2 + h) >> 1;
             }
-            if (challenge_sector_from_vector(dx, dy) < completed) {
-                row[col] = accent;
+        }
+        if (lo < x1) {
+            lo = x1;
+        }
+        if (hi > x2 - 1) {
+            hi = x2 - 1;
+        }
+        uint16_t *row = pixels + (size_t)(y - y1) * (size_t)width;
+        for (int run = 0; run < 2; ++run) {
+            const int rlo = run == 0 ? lo : (hole_lo > hole_hi ? hi + 1 : (hole_hi + 1 > lo ? hole_hi + 1 : lo));
+            const int rhi = run == 0 ? (hole_lo > hole_hi ? hi : (hole_lo - 1 < hi ? hole_lo - 1 : hi)) : hi;
+            for (int x = rlo; x <= rhi; ++x) {
+                const int dx = 2 * x - cx2;
+                const int r2 = dx * dx + dy * dy;
+                if (r2 < rim_in * rim_in || r2 > rim_out * rim_out) {
+                    continue;
+                }
+                /* every sector lit (a finished job): nothing left to ask */
+                if (completed >= 8 || challenge_sector_from_vector(dx, dy) < completed) {
+                    row[x - x1] = accent;
+                }
             }
         }
     }
