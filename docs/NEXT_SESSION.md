@@ -1,6 +1,7 @@
 # Next Session Handoff
 
-Last reconciled: **2026-09-05**.
+Last reconciled: **2026-11-10** (wave N15; the sections below it are older and
+still describe the grammar and the safety rules correctly).
 
 The live target is the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** with 32 MB
 flash. The active image is plain ESP-IDF v5 rooted at `main/` and
@@ -65,6 +66,43 @@ is the classified edge-origin swipe.
   before marking a new image valid.
 - JarvisMCP server policy is live; byte-budgeted device catalog projection and
   cursor semantics remain incomplete.
+
+## What changed on 2026-11-10 (wave N15)
+
+All of it is on `feat/glass-2`, not on `main` and not pushed. `PLAN.md` wave
+N15 has the rows; `docs/evidence/glass-n15-2026-11-10/README.md` has the
+device tables from four flashes.
+
+- **The ring is six screens, the watch eight dials.** JARVIS, WATCH, WEATHER,
+  STATUS, DESK (only under a lease or claim), ACTIVITY. Dials: JARVIS, DIVER,
+  DRESS, PILOT, MINIMAL, FUTURE, SKELETON, CELESTIAL.
+- **Frame cost roughly halved, the 20 ms target not met.** Lease held, flush
+  not counted: home 8 ms, ACTIVITY 25, DRESS 27–29, DESK 34, WEATHER 35,
+  CELESTIAL 35, DIVER 37, STATUS 41, FUTURE 44, PILOT 45, SKELETON 52, the
+  shade over home 53, MINIMAL 53. `GET /api/display` gives the five layers,
+  `?split=1` the parts of the hud layer for the next 8 s.
+- **Host instruction counts do not predict device milliseconds.** Two cuts
+  that counted fewer instructions ran slower because they wrote more memory.
+  Measure every cut on the device before keeping it.
+- **Open on the watch:** the commit that recorded MINIMAL's disc (91b44ec) left
+  that dial 10–14 ms slower with the record on or off; the record is switched
+  off on the device in `dial_rec_alloc`. SKELETON's balance wheel is about
+  30 ms. The dial copy from PSRAM is 9 ms on six dials. MINIMAL and the JARVIS
+  style refresh at the home clip's 8 fps whatever they cost.
+- **Motion is judged on the host first.** `scripts/glass-preview.py --script
+  ring|shade|watch|slide|style|watch-enter` plays the real compositor at
+  24 fps. The transition grammar (everything passes through the dark) is in
+  97b0b92 and has not been seen on the panel yet.
+- **Board probe** (`scripts/board-probe.py`): TE is 60 Hz on GPIO13, the gyro
+  answers, the touch chip reports two fingers while the driver reads one, QSPI
+  runs at 40 MHz. The PWR key and a two-finger touch still need the owner's
+  hand (`--watch pwr`, `--watch touch`); `docs/HARDWARE.md` is not corrected
+  until then. PMIC VSYS and die temperature never convert on battery.
+- **QA traps:** levels are at `/api/device/levels`; a lease changes the ring
+  and the rim; read `space` back instead of counting swipes; the device sleeps
+  when still and unleased on battery.
+- **No gateway key is provisioned, by the owner's choice.** Tools, the board
+  and the briefing stay offline until that changes.
 
 ## What changed on 2026-09-05 (wave N13)
 
