@@ -206,6 +206,74 @@ Source: `esp_emote_gfx/scripts/` (local managed component copy).
   real — 0.18 cost +76 KB of RLE and left 25 KB partition headroom; 0.12 leaves ~54 KB.
   Anything visual added to ramp frames multiplies across all 22 of them.
 
+## The baked-dial cache (2026-11-10, N17, feat/glass-dials)
+
+Problem: a style change on WATCH read the clip from flash and decoded it into one
+shared 434 KB frame while holding the render lock, every time, so the glass was
+dark and the render task stopped for 0.27 to 0.66 s (the asset-partition dials
+0.5 to 0.66 s, the two embedded in the app 0.27 s; image 74b3ecf, see the last
+section of `docs/evidence/glass-n15-2026-11-10/README.md`). The picture is the
+same now; only where it is kept and when it is made changed.
+
+What is kept. Each of the six baked dials has its own decoded frame, 466 x 466 x
+2 = 434,312 bytes, in PSRAM (`s_dial_slot[]`, `jr_display.c:962`; slot order
+DIVER, DRESS, PILOT, FUTURE, SKELETON, CELESTIAL, `dial_slot_of`, `:7928`). A
+frame is allocated the first time its dial is wanted and kept. `valid` is set
+only after the whole decode returned OK and is cleared before one starts, so a
+decode that fails frees its frame and leaves nothing marked valid
+(`dial_fill`, `:8073`). All six frames are 2.6 MB. `s_dial_frame` is still the
+one pointer the strips read (`apply_dial`, `:1013`); it names the frame of the dial
+on the glass. The readers of that pointer are `apply_dial` only; `watch_layer_ready`
+and `watch_style_bound` read `s_dial_frame_face` and `s_dial_blit`, which are
+now set when the frame is switched in, so the panel dip's dark hold and the pixel
+fade's hold at `TR_CUT_STYLE` end as soon as a cached dial is switched in, with
+no change to the dip's code.
+
+Locking. The decode takes no render lock: it writes the dial's own frame, which is
+on no one's glass, and the old dial (or the anim) keeps drawing meanwhile. What
+`eaf_frame_decode` shares with the running engine is the decoder table that
+`eaf_init` fills once with fixed values (`g_eaf_decoders`,
+`managed_components/espressif2022__esp_emote_gfx/src/lib/eaf/gfx_eaf_dec.c:22`,
+`:705`); the working buffers (`compressed_buffer`, `offsets`, the Huffman and
+heatshrink state) are allocated per call. The render lock is held once per change,
+in `dial_show` (`:8171`), for a stop, a hide, three stores (`s_dial_frame`,
+`s_dial_frame_face`, `s_dial_blit`) and a refresh request: microseconds. The one
+path that still holds it for a whole decode is the shared fallback frame below,
+because that frame may be on the glass.
+
+Budget. A frame is allocated only if free PSRAM stays above 2 MB afterwards
+(`DIAL_PSRAM_FLOOR`, `dial_slot_alloc`, `:7972`). Short of that, the dial used
+longest ago is freed and the allocation tried again; never the frame on the glass,
+the one being decoded into, or the dial being asked for. With nothing to evict,
+a demand decode falls back to today's one shared frame (`s_dial_shared`,
+allocated without the floor and decoded under the render lock); if that cannot be
+allocated either, `dial_show` answers false and the face stays on the anim path.
+Nothing is ever allocated from internal RAM (`MALLOC_CAP_SPIRAM`). On the device
+5.1 MB was free with one dial decoded: the other five frames take 2.2 MB and leave
+about 2.9 MB, so all six fit above the floor. Frames are released as a set
+(`dial_cache_release`, `:8013`) when the dream begins (`:7729`, after
+`apply_blank`, so the blit is off) and from the 1 Hz diagnostic tick when free PSRAM
+is under 1 MB (`:8650`); a release with the blit on keeps the shown frame. No path
+freed the old shared frame before, so these two are new.
+
+Warm-up. After a dial has been on the glass for 1.5 s (`DIAL_WARM_SETTLE_MS`), the
+presenter decodes the dials of the next and the previous style, one per pass
+(`dial_warm_tick`, `:8274`, called at `:8630`). It runs only when the face request
+is settled, no slide, style change or dip is under way, no voice session
+(LISTENING, THINKING, SPEAKING, LINKING), no OTA (PREFLIGHT, RECEIVING, PROBATION),
+and no dream, quiet frame, blank or parked backdrop (`dial_warm_allowed`, `:8247`).
+A warm-up never evicts and never uses the shared frame; a failure is remembered
+until the cache is released, so it is not retried. The decode itself cannot be
+cut short from outside (one blocking `eaf_frame_decode` on the presenter), so a
+style change that arrives during one waits for it, at most the 0.27 to 0.66 s
+the stall used to be, but with the old dial still drawing.
+
+Observable. `GET /api/display` gains `"dial_cache":{"n","bytes","hits","misses",
+"evictions","warms","decode_ms"}` (decoded frames, bytes held, style changes served
+from the cache, decoded on demand, frames freed for room, warm-ups done, the last
+decode in ms). The handler's buffer grew from 1408 to 1536 bytes and the byte limit
+in `main/tests/test_display_http.py` from 1152 to 1408.
+
 ## Open questions
 
 - Can `gfx_motion` / `gfx_motion_scene` transform params be updated each frame from an audio RMS value? If yes, this is the cleaner reactive path than per-state AAF segment selection.

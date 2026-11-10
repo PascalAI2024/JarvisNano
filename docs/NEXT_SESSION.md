@@ -71,7 +71,10 @@ is the classified edge-origin swipe.
 
 All of it is on `feat/glass-2`, not on `main` and not pushed. `PLAN.md` wave
 N15 has the rows; `docs/evidence/glass-n15-2026-11-10/README.md` has the
-device tables from eight flashes; the device runs ced022c.
+device tables from eleven flashes; the device runs d5ffa17 (wave N16: the tilt
+stars, the dormant panel dip, the decoded-dial cache). Capture QA **without a lease and at rest**:
+a lease forces the awake mood and a violet rim, and hid the layer defects of
+N16.6 for a whole wave.
 
 - **The ring is six screens, the watch eight dials.** JARVIS, WATCH, WEATHER,
   STATUS, DESK (only under a lease or claim), ACTIVITY. Dials: JARVIS, DIVER,

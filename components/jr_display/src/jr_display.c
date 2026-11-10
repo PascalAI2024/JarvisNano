@@ -931,14 +931,46 @@ bool jr_display_canvas_active(void)
 /* THE DIAL OFF THE ENGINE (N14.2). A baked dial is one still frame, yet as
  * an anim the engine decoded it again every frame: 224 KB of blocks and a
  * 434 KB palette expand, most of the ~37 ms engine share on DIVER. It is
- * decoded once, in panel byte order, into one shared PSRAM frame
- * (dial_show); on WATCH the anim is hidden and each strip copies the frame's
- * rows here, in the anim's place under every overlay. s_dial_blit and the
- * frame change only under the render lock, which the render task holds for
- * the whole frame, so a strip never sees a half-decoded dial. */
+ * decoded once, in panel byte order, into a PSRAM frame (dial_show); on
+ * WATCH the anim is hidden and each strip copies the frame's rows here, in the
+ * anim's place under every overlay.
+ *
+ * THE DIAL CACHE (N17). Each baked dial keeps its own decoded frame in
+ * s_dial_slot[], allocated on first use, so a style change to a dial shown
+ * before costs no flash read and no decode, and a first decode goes into the
+ * dial's own frame while the render task keeps drawing the old one. What the
+ * strips read is s_dial_frame, the frame of the dial on the glass. s_dial_blit,
+ * s_dial_frame and s_dial_frame_face change only under the render lock, which
+ * the render task holds for the whole frame, so a strip never sees a switch
+ * halfway. A frame is marked valid only after the whole decode succeeded. */
 static uint16_t *s_dial_frame;                       /* width*height, PSRAM */
 static jr_face_t s_dial_frame_face = JR_FACE_COUNT;  /* the art it holds */
 static bool      s_dial_blit;
+
+#define DIAL_SLOTS          6
+#define DIAL_PSRAM_FLOOR    (2U * 1024U * 1024U)   /* free PSRAM a new frame must leave */
+#define DIAL_PSRAM_LOW      (1U * 1024U * 1024U)   /* below this the idle frames go */
+#define DIAL_WARM_SETTLE_MS 1500U                  /* on the glass this long before a warm-up */
+
+typedef struct {
+    uint16_t *px;       /* width*height, PSRAM; NULL until the dial is first wanted */
+    bool      valid;    /* px holds one whole decode (set last, cleared first) */
+    uint32_t  used;     /* s_dial_clock at the last show; the smallest is evicted first */
+} dial_slot_t;
+
+/* Presenter task only, except the counters, which the HTTP task reads. */
+static dial_slot_t s_dial_slot[DIAL_SLOTS];
+static uint16_t   *s_dial_shared;                    /* today's one frame, the fallback */
+static jr_face_t   s_dial_shared_face = JR_FACE_COUNT;
+static uint32_t    s_dial_clock;
+static int         s_dial_filling = -1;              /* slot being decoded into, or -1 */
+static uint64_t    s_dial_glass_ms;                  /* when the dial on the glass arrived */
+static uint8_t     s_dial_warm_skip;                 /* slot bits whose warm-up failed */
+static size_t      s_dial_frame_bytes;
+static uint32_t    s_dial_held_n, s_dial_held_bytes; /* decoded frames, bytes held */
+static uint32_t    s_dial_hits, s_dial_misses, s_dial_evictions, s_dial_warms;
+static uint32_t    s_dial_decode_ms;                 /* the last decode, whoever asked */
+static void dial_cache_release(void);
 
 /* THE PARKED BACKDROP. A data screen (STATUS, WEATHER, DESK, ACTIVITY) sits on
  * true black, so once the slide has settled the face is not decoded at all:
@@ -7811,6 +7843,7 @@ static bool presenter_dream_tick(jr_display_ctx_t *ctx, uint32_t *last_word)
             return false;
         }
         ctx->dream_active = true;
+        dial_cache_release();       /* the glass shows no dial now: give the PSRAM back */
         ctx->dream_clock_key = clock;
         ctx->dream_rim_key = rim;
         ctx->rest_mode = mode;
@@ -8008,21 +8041,119 @@ static void presenter_backdrop_tick(jr_display_ctx_t *ctx)
     (void)gfx_emote_unlock(ctx->gfx);
 }
 
-/* Decode frame 0 of a resident dial clip into the shared frame. Runs on the
- * presenter; the decode itself holds the render lock (one stalled frame per
- * style change) because the frame may be on the glass. Any mismatch — size,
- * depth, a bad clip — answers an error and the caller keeps the anim. */
-static esp_err_t dial_decode(jr_display_ctx_t *ctx, jr_face_t dial,
-                             const jr_display_clip_t *clip)
+/* The slot a baked dial's decoded frame lives in, -1 for anything else. */
+static int dial_slot_of(jr_face_t dial)
 {
-    const size_t bytes =
-        (size_t)ctx->board.width * ctx->board.height * sizeof(uint16_t);
-    if (s_dial_frame == NULL) {
-        s_dial_frame = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (s_dial_frame == NULL) {
-            return ESP_ERR_NO_MEM;
-        }
+    switch (dial) {
+    case JR_FACE_DIAL_DIVER:     return 0;
+    case JR_FACE_DIAL_DRESS:     return 1;
+    case JR_FACE_DIAL_PILOT:     return 2;
+    case JR_FACE_DIAL_FUTURE:    return 3;
+    case JR_FACE_DIAL_SKELETON:  return 4;
+    case JR_FACE_DIAL_CELESTIAL: return 5;
+    default:                     return -1;
     }
+}
+
+/* Publish what is held (frames decoded, bytes allocated) for GET /api/display. */
+static void dial_cache_publish(void)
+{
+    uint32_t n = 0, held = 0;
+    for (int i = 0; i < DIAL_SLOTS; ++i) {
+        n += s_dial_slot[i].valid ? 1U : 0U;
+        held += s_dial_slot[i].px != NULL ? 1U : 0U;
+    }
+    n += (s_dial_shared != NULL && s_dial_shared_face != JR_FACE_COUNT) ? 1U : 0U;
+    held += s_dial_shared != NULL ? 1U : 0U;
+    __atomic_store_n(&s_dial_held_n, n, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_dial_held_bytes, (uint32_t)(held * s_dial_frame_bytes),
+                     __ATOMIC_RELAXED);
+}
+
+static void dial_slot_free(dial_slot_t *slot)
+{
+    if (slot->px != NULL) {
+        if (slot->px == s_dial_frame) {         /* the blit is off: nothing reads it */
+            s_dial_frame = NULL;
+            s_dial_frame_face = JR_FACE_COUNT;
+        }
+        heap_caps_free(slot->px);
+    }
+    *slot = (dial_slot_t){ 0 };
+}
+
+/* A frame for slot `keep`: the one it has, or a new one if PSRAM stays above
+ * the floor afterwards. With allow_evict a short PSRAM frees the dial used
+ * longest ago first, never the one on the glass, the one being decoded into
+ * or `keep`, and tries again. NULL means no frame can be had. */
+static uint16_t *dial_slot_alloc(size_t bytes, int keep, bool allow_evict)
+{
+    dial_slot_t *slot = &s_dial_slot[keep];
+    if (slot->px != NULL) {
+        return slot->px;
+    }
+    for (;;) {
+        if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) >= bytes + DIAL_PSRAM_FLOOR) {
+            uint16_t *px = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (px != NULL) {
+                slot->px = px;
+                slot->valid = false;
+                dial_cache_publish();
+                return px;
+            }
+        }
+        if (!allow_evict) {
+            return NULL;
+        }
+        int victim = -1;
+        for (int i = 0; i < DIAL_SLOTS; ++i) {
+            const dial_slot_t *s = &s_dial_slot[i];
+            if (i == keep || i == s_dial_filling || s->px == NULL ||
+                (s_dial_blit && s->px == s_dial_frame)) {
+                continue;
+            }
+            if (victim < 0 || s->used < s_dial_slot[victim].used) {
+                victim = i;
+            }
+        }
+        if (victim < 0) {
+            return NULL;
+        }
+        dial_slot_free(&s_dial_slot[victim]);
+        __atomic_fetch_add(&s_dial_evictions, 1U, __ATOMIC_RELAXED);
+        dial_cache_publish();
+    }
+}
+
+/* Let go of every decoded frame that is not on the glass (all of them once the
+ * blit is off). Presenter only. */
+static void dial_cache_release(void)
+{
+    for (int i = 0; i < DIAL_SLOTS; ++i) {
+        dial_slot_t *s = &s_dial_slot[i];
+        if (s->px == NULL || i == s_dial_filling || (s_dial_blit && s->px == s_dial_frame)) {
+            continue;
+        }
+        dial_slot_free(s);
+    }
+    if (s_dial_shared != NULL && !(s_dial_blit && s_dial_shared == s_dial_frame)) {
+        if (s_dial_shared == s_dial_frame) {
+            s_dial_frame = NULL;
+            s_dial_frame_face = JR_FACE_COUNT;
+        }
+        heap_caps_free(s_dial_shared);
+        s_dial_shared = NULL;
+        s_dial_shared_face = JR_FACE_COUNT;
+    }
+    s_dial_warm_skip = 0;
+    dial_cache_publish();
+}
+
+/* Open a clip and check frame 0 is a panel-sized 8-bit image; eaf_frame_decode
+ * trusts the header, not the buffer size. Any mismatch answers an error. */
+static esp_err_t dial_open(const jr_display_ctx_t *ctx, const jr_display_clip_t *clip,
+                           eaf_format_handle_t *out)
+{
     eaf_format_handle_t eaf = NULL;
     esp_err_t err = eaf_init(clip->data, clip->size, &eaf);
     if (err != ESP_OK) {
@@ -8033,7 +8164,6 @@ static esp_err_t dial_decode(jr_display_ctx_t *ctx, jr_face_t dial,
         (void)eaf_deinit(eaf);
         return ESP_ERR_INVALID_CRC;
     }
-    /* eaf_frame_decode trusts the header, not the buffer size */
     const bool fits = head.width == ctx->board.width &&
                       head.height == ctx->board.height && head.bit_depth == 8;
     eaf_free_header(&head);
@@ -8041,19 +8171,94 @@ static esp_err_t dial_decode(jr_display_ctx_t *ctx, jr_face_t dial,
         (void)eaf_deinit(eaf);
         return ESP_ERR_INVALID_SIZE;
     }
-    err = gfx_emote_lock(ctx->gfx);
-    if (err == ESP_OK) {
-        memset(s_dial_frame, 0, bytes);     /* a failed block stays black */
-        err = eaf_frame_decode(eaf, 0, (uint8_t *)s_dial_frame, bytes,
-                               ctx->board.swap_color_bytes);
-        s_dial_frame_face = err == ESP_OK ? dial : JR_FACE_COUNT;
-        if (err != ESP_OK) {
-            s_dial_blit = false;
-        }
-        (void)gfx_emote_unlock(ctx->gfx);
+    *out = eaf;
+    return ESP_OK;
+}
+
+/* Decode frame 0 of a resident dial clip into that dial's own cache frame.
+ * Runs on the presenter and does NOT take the render lock: the target frame is
+ * on no one's glass, so the render task keeps drawing the old dial meanwhile.
+ * What the decoder shares with the running engine is only the decoder table
+ * eaf_init fills once with the same values; eaf_frame_decode allocates its
+ * working buffers per call (managed_components/espressif2022__esp_emote_gfx/
+ * src/lib/eaf/gfx_eaf_dec.c). The frame is marked valid only after the whole
+ * decode succeeded; a failed one gives its memory back. With no frame to be had
+ * (PSRAM floor, nothing to evict) a demand decode falls back to the one shared
+ * frame, decoded under the render lock because that frame may be on the glass;
+ * a warm-up never does. The glass is not touched either way: dial_show switches
+ * it. */
+static esp_err_t dial_fill(jr_display_ctx_t *ctx, jr_face_t dial,
+                           const jr_display_clip_t *clip, bool warm)
+{
+    const int idx = dial_slot_of(dial);
+    if (idx < 0) {
+        return ESP_ERR_INVALID_ARG;
     }
-    (void)eaf_deinit(eaf);
+    const size_t bytes =
+        (size_t)ctx->board.width * ctx->board.height * sizeof(uint16_t);
+    s_dial_frame_bytes = bytes;
+    dial_slot_t *slot = &s_dial_slot[idx];
+    uint16_t *dst = dial_slot_alloc(bytes, idx, !warm);
+    const int64_t t0 = esp_timer_get_time();
+    esp_err_t err;
+    if (dst != NULL) {
+        slot->valid = false;
+        eaf_format_handle_t eaf = NULL;
+        err = dial_open(ctx, clip, &eaf);
+        if (err == ESP_OK) {
+            s_dial_filling = idx;
+            memset(dst, 0, bytes);          /* a failed block stays black */
+            err = eaf_frame_decode(eaf, 0, (uint8_t *)dst, bytes,
+                                   ctx->board.swap_color_bytes);
+            (void)eaf_deinit(eaf);
+            s_dial_filling = -1;
+        }
+        if (err == ESP_OK) {
+            slot->valid = true;
+        } else {
+            dial_slot_free(slot);
+        }
+    } else if (warm) {
+        return ESP_ERR_NO_MEM;
+    } else {
+        if (s_dial_shared == NULL) {
+            s_dial_shared = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (s_dial_shared == NULL) {
+                return ESP_ERR_NO_MEM;
+            }
+        }
+        eaf_format_handle_t eaf = NULL;
+        err = dial_open(ctx, clip, &eaf);
+        if (err == ESP_OK) {
+            err = gfx_emote_lock(ctx->gfx);
+            if (err == ESP_OK) {
+                memset(s_dial_shared, 0, bytes);
+                err = eaf_frame_decode(eaf, 0, (uint8_t *)s_dial_shared, bytes,
+                                       ctx->board.swap_color_bytes);
+                s_dial_shared_face = err == ESP_OK ? dial : JR_FACE_COUNT;
+                if (s_dial_frame == s_dial_shared) {      /* the glass just changed under us */
+                    s_dial_frame_face = s_dial_shared_face;
+                    if (err != ESP_OK) {
+                        s_dial_blit = false;
+                    }
+                }
+                (void)gfx_emote_unlock(ctx->gfx);
+            }
+            (void)eaf_deinit(eaf);
+        }
+    }
+    if (err == ESP_OK) {
+        __atomic_store_n(&s_dial_decode_ms,
+                         (uint32_t)((esp_timer_get_time() - t0) / 1000), __ATOMIC_RELAXED);
+    }
+    dial_cache_publish();
     return err;
+}
+
+static esp_err_t dial_decode(jr_display_ctx_t *ctx, jr_face_t dial,
+                             const jr_display_clip_t *clip)
+{
+    return dial_fill(ctx, dial, clip, false);
 }
 
 /* Release a baked dial after a successful decode or replacement binding.
@@ -8095,7 +8300,16 @@ static bool dial_show(jr_display_ctx_t *ctx, jr_face_t dial)
         return false;
     }
     jr_display_clip_t *clip = &ctx->clips[dial];
-    if (s_dial_frame_face != dial) {
+    const int idx = dial_slot_of(dial);
+    dial_slot_t *slot = &s_dial_slot[idx];
+    uint16_t *frame = slot->valid ? slot->px
+                    : (s_dial_shared_face == dial ? s_dial_shared : NULL);
+    if (frame != NULL) {
+        if (!(s_dial_blit && s_dial_frame == frame)) {
+            __atomic_fetch_add(&s_dial_hits, 1U, __ATOMIC_RELAXED);
+        }
+    } else {
+        __atomic_fetch_add(&s_dial_misses, 1U, __ATOMIC_RELAXED);
         if (clip->data == NULL && clip_load(dial, clip) != ESP_OK) {
             return false;
         }
@@ -8105,16 +8319,27 @@ static bool dial_show(jr_display_ctx_t *ctx, jr_face_t dial)
                      (int)dial, esp_err_to_name(err));
             return false;
         }
+        frame = slot->valid ? slot->px : s_dial_shared;
     }
+    /* The only lock this takes: switch which frame the strips read. The old
+     * dial (or the anim) drew all through the decode above. */
     if (gfx_emote_lock(ctx->gfx) != ESP_OK) {
-        return false;
+        return false;                   /* the decoded frame is kept for the retry */
     }
     (void)gfx_anim_stop(ctx->anim);
     (void)gfx_obj_set_visible(ctx->anim, false);
+    if (!(s_dial_blit && s_dial_frame == frame)) {
+        s_dial_glass_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    }
+    s_dial_frame = frame;
+    s_dial_frame_face = dial;
     s_dial_blit = true;
     gfx_disp_refresh_all(ctx->disp);
     clip_release_unbound_dial(ctx, clip);
     (void)gfx_emote_unlock(ctx->gfx);
+    if (slot->valid) {
+        slot->used = ++s_dial_clock;
+    }
 
     ctx->active = NULL;
     ctx->loaded_face = dial;
@@ -8126,6 +8351,92 @@ static bool dial_show(jr_display_ctx_t *ctx, jr_face_t dial)
                (uint32_t)((size_t)ctx->board.width * ctx->board.height * sizeof(uint16_t)));
     ESP_LOGI(TAG, "face=%d dial blit, anim hidden", (int)dial);
     return true;
+}
+
+/* WARM THE NEIGHBOURS. Once a dial has been on the glass for a moment, decode
+ * the dials of the next and the previous style (the two a swipe reaches) so the
+ * swipe finds them decoded. One decode per call, presenter task, off the render
+ * lock, and only while nothing else wants the CPU or the flash: no pending
+ * change, no slide, style change or dip under way, no voice session, no OTA, no
+ * sleep or blank. It never evicts and never takes the shared fallback frame: a
+ * warm-up that cannot get a frame above the PSRAM floor does nothing. A decode
+ * that fails frees its frame and is not retried until the cache is released. */
+static bool dial_warm_allowed(const jr_display_ctx_t *ctx, uint64_t now_ms,
+                              jr_face_t requested_face, bool settled)
+{
+    if (!settled || !s_dial_blit || dial_slot_of(s_dial_frame_face) < 0 ||
+        now_ms - s_dial_glass_ms < DIAL_WARM_SETTLE_MS) {
+        return false;
+    }
+    if (ctx->dream_active || ctx->quiet_active || s_parked ||
+        __atomic_load_n(&ctx->blanked, __ATOMIC_RELAXED) ||
+        (__atomic_load_n(&ctx->requested_word, __ATOMIC_ACQUIRE) & JR_DISPLAY_CMD_BLANK) != 0U) {
+        return false;
+    }
+    switch (requested_face) {
+    case JR_FACE_LISTENING: case JR_FACE_THINKING:
+    case JR_FACE_SPEAKING:  case JR_FACE_LINKING: return false;   /* a voice session */
+    default: break;
+    }
+    const uint32_t ota = __atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE) & 0xFu;
+    if (ota == (uint32_t)JR_DISPLAY_OTA_PREFLIGHT || ota == (uint32_t)JR_DISPLAY_OTA_RECEIVING ||
+        ota == (uint32_t)JR_DISPLAY_OTA_PROBATION) {
+        return false;
+    }
+    return __atomic_load_n(&s_style_prog, __ATOMIC_RELAXED) >= 256 &&
+           __atomic_load_n(&s_space_prog, __ATOMIC_RELAXED) >= 256 &&
+           s_dip_mode == DIP_MODE_NONE;
+}
+
+static void dial_warm_tick(jr_display_ctx_t *ctx, uint64_t now_ms,
+                           jr_face_t requested_face, bool settled)
+{
+    if (!dial_warm_allowed(ctx, now_ms, requested_face, settled)) {
+        return;
+    }
+    int style = -1;
+    for (int st = 0; st < (int)JR_WATCH_STYLE_COUNT; ++st) {
+        if (watch_dial_of_style((uint8_t)st) == s_dial_frame_face) {
+            style = st;
+            break;
+        }
+    }
+    if (style < 0) {
+        return;
+    }
+    const size_t bytes =
+        (size_t)ctx->board.width * ctx->board.height * sizeof(uint16_t);
+    const int n = (int)JR_WATCH_STYLE_COUNT;
+    for (int step = 0; step < 2; ++step) {
+        const jr_face_t dial = watch_dial_of_style(
+            (uint8_t)((style + n + (step == 0 ? 1 : -1)) % n));
+        const int idx = dial_slot_of(dial);
+        if (idx < 0 || s_dial_slot[idx].valid || (s_dial_warm_skip & (1U << idx)) != 0U ||
+            (ctx->missing_faces & (1U << dial)) != 0U) {
+            continue;
+        }
+        s_dial_frame_bytes = bytes;
+        if (dial_slot_alloc(bytes, idx, false) == NULL) {
+            return;                         /* under the floor: not now */
+        }
+        jr_display_clip_t *clip = &ctx->clips[dial];
+        esp_err_t err = ESP_OK;
+        if (clip->data == NULL) {
+            err = clip_load(dial, clip);
+        }
+        if (err == ESP_OK) {
+            err = dial_fill(ctx, dial, clip, true);
+        }
+        if (err == ESP_OK) {
+            __atomic_fetch_add(&s_dial_warms, 1U, __ATOMIC_RELAXED);
+            clip_release_unbound_dial(ctx, clip);
+        } else {
+            s_dial_warm_skip |= (uint8_t)(1U << idx);
+            dial_slot_free(&s_dial_slot[idx]);
+            dial_cache_publish();
+        }
+        return;                             /* one per pass */
+    }
 }
 
 static esp_err_t apply_face(jr_display_ctx_t *ctx, jr_face_t face,
@@ -8433,6 +8744,8 @@ static void display_task(void *arg)
                     }
                 }
             }
+            dial_warm_tick(ctx, now_ms, requested_face, word == last_word);
+
             /* THE BLITTED DIAL HAS NO TIMER. The anim's tick was the only
              * thing invalidating the glass; with it hidden, this pass is the
              * cadence. Every pass, unconditionally, or the hands freeze
@@ -8449,8 +8762,11 @@ static void display_task(void *arg)
         if (now_ms - last_diag_ms >= 1000U) {
             last_diag_ms = now_ms;
             diag_store(&ctx->task_stack_hwm, uxTaskGetStackHighWaterMark(NULL));
-            diag_store(&ctx->free_psram_bytes,
-                       heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+            const size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+            diag_store(&ctx->free_psram_bytes, free_psram);
+            if (free_psram < DIAL_PSRAM_LOW) {
+                dial_cache_release();       /* low memory: the idle dials go first */
+            }
             if (ctx->gfx) {
                 diag_store(&ctx->actual_fps, gfx_timer_get_actual_fps(ctx->gfx));
             }
@@ -8541,6 +8857,13 @@ esp_err_t jr_display_get_diag(jr_display_diag_t *out_diag)
     out_diag->dip = (uint32_t)s_dip;
     out_diag->dip_writes = s_dip_writes;
     out_diag->dip_hold_ms = s_dip_hold_ms;
+    out_diag->dial_cached = __atomic_load_n(&s_dial_held_n, __ATOMIC_RELAXED);
+    out_diag->dial_bytes = __atomic_load_n(&s_dial_held_bytes, __ATOMIC_RELAXED);
+    out_diag->dial_hits = __atomic_load_n(&s_dial_hits, __ATOMIC_RELAXED);
+    out_diag->dial_misses = __atomic_load_n(&s_dial_misses, __ATOMIC_RELAXED);
+    out_diag->dial_evictions = __atomic_load_n(&s_dial_evictions, __ATOMIC_RELAXED);
+    out_diag->dial_warms = __atomic_load_n(&s_dial_warms, __ATOMIC_RELAXED);
+    out_diag->dial_decode_ms = __atomic_load_n(&s_dial_decode_ms, __ATOMIC_RELAXED);
     jr_display_boot_timing_t *timing = &out_diag->boot_timing;
     /* Read end first: observing its release also includes the start publish. */
     timing->init_finished =

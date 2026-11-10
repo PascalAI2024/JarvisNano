@@ -438,3 +438,55 @@ draws as few frames in the same 0.9 s window (7-14 on the baked dials, on
 either knob), which fits the same stall; it has no clock of its own and the
 gap had been read as "a costly fade". 5.1 MB of PSRAM is free and a decoded dial is
 434 KB. N16.5.
+
+## The owner's eye: the layers are off (image 74b3ecf)
+
+The owner compared the panel dip with the pixel fade and saw no difference.
+What he saw instead was layers that do not sit right. Every capture in this
+file up to here was taken under an operator lease, which forces the awake mood
+and a violet rim; he sees the device with no lease, at rest, on its charger.
+Fifteen captures taken that way (knob 0, no lease) are summarised in
+`audit-before/`: `sheet0.png` home, the shade and the ring screens;
+`sheet1.png` WATCH on arrival; `sheet2.png` and `sheet3.png` the eight styles;
+`zoom0.png` the rim over a dial. They are the capture mirror: pixels, not
+brightness.
+
+| # | Where | What is off |
+|---|---|---|
+| 1 | DIVER, DRESS, PILOT, SKELETON | The shell's rim, a one-pixel aliased circle near r 221, runs across the dial art |
+| 2 | every dial, and home | The charging mark, square cyan dots from 12 to 3 o'clock, sits on the dial art and is blocky everywhere |
+| 3 | PILOT, FUTURE | The sun arc sweeps over the tick track and the rings |
+| 4 | JARVIS style | Three hands and a hub on plain black: no face |
+| 5 | WATCH on arrival, at rest | A small bitmap-font clock (`BAT 25%`, `CHARGING`) instead of the dial; the dial appears only after a style change |
+| 6 | the shade over home | The face's bright core shows through the mute button |
+| 7 | FUTURE | The weather word is cut: `82° MAINLY.` |
+| 8 | DIVER | The date is in the bitmap font inside photographic art |
+
+The panel dip is not kept (N16.1). The fixes are N16.6; the same captures will
+be taken again, without a lease, after its flash.
+
+## Eleventh flash: a decoded frame per dial (image d5ffa17, 2,443,472 bytes)
+
+Same walk as the table above (perf knob bit 0 on, so the dip's hold clock
+times the dark; two rounds, the second with every dial cached; under a lease).
+
+| Onto | Dark before, ms | Dark now, ms | Frames in 0.9 s, before | now |
+|---|---|---|---|---|
+| DIVER | 565 | 233 | 7-14 | 17 |
+| DRESS | 600 | 130 | 7-14 | 19 |
+| PILOT | 506 | 190 | 7-14 | 17 |
+| MINIMAL (drawn) | 185 | 187 | | 13 |
+| FUTURE | 664 | 241 | 7-14 | 16 |
+| SKELETON | 269 | 189 | | 13 |
+| CELESTIAL | 264 | 186 | | 13 |
+| JARVIS (drawn) | 124 | 127 | | 19 |
+
+`dial_cache`: 6 dials, 2,605,872 bytes, 22 hits, 3 misses, 3 warm-ups, no
+evictions, last decode 69 ms. Free PSRAM 2.89 MB (4.22 MB before the first
+dial on this boot), largest internal block 19,456 bytes at boot and after the
+walk, `flush_errors 0`, worst frame 80 ms.
+
+The decode no longer shows. The 150 ms gate is not met: MINIMAL never decoded
+anything and sits at 187 ms, so the remainder is the new dial's first frames
+at 50-70 ms each. Not looked at: the second hand during a warm-up, and a
+change made within 1.5 s of the last.
