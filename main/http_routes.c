@@ -4569,6 +4569,10 @@ static esp_err_t display_snapshot_rgb565_handler(httpd_req_t *req)
     return err;
 }
 
+/* Handler slots the server allocates (4 B each, internal RAM). The table
+ * below is checked against it at compile time. */
+#define JR_HTTP_ROUTE_SLOTS 56
+
 void start_diag_http(void)
 {
     httpd_handle_t server = NULL;
@@ -4577,7 +4581,7 @@ void start_diag_http(void)
     /* Live watermark: 3,880 B free at 7,168 after doctor/snapshots/tools.
      * 6,400 retains ~3.1 KB measured margin and returns another 768 B. */
     cfg.stack_size = 6400;
-    cfg.max_uri_handlers = 48;
+    cfg.max_uri_handlers = JR_HTTP_ROUTE_SLOTS;
     cfg.max_resp_headers = 16;
     cfg.lru_purge_enable = true;
     if (httpd_start(&server, &cfg) != ESP_OK) {
@@ -4675,6 +4679,11 @@ void start_diag_http(void)
         { .uri = "/api/ota/assets", .method = HTTP_POST,
           .handler = ota_assets_handler },
     };
+    /* A 49th route into 48 slots registered nothing and logged one line at
+     * boot: /api/ota/assets was gone from the running image. Now the build
+     * fails instead. */
+    _Static_assert(sizeof routes / sizeof routes[0] <= JR_HTTP_ROUTE_SLOTS,
+                   "route table outgrew JR_HTTP_ROUTE_SLOTS");
     for (size_t i = 0; i < sizeof routes / sizeof routes[0]; ++i) {
         esp_err_t err = httpd_register_uri_handler(server, &routes[i]);
         if (err != ESP_OK) {
