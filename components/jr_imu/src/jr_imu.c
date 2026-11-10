@@ -27,6 +27,7 @@
 #define QMI8658_REG_WHOAMI      0x00   /* -> 0x05 */
 #define QMI8658_REG_CTRL1       0x02
 #define QMI8658_REG_CTRL2       0x03
+#define QMI8658_REG_CTRL3       0x04   /* gyro: gFS bits 6:4, gODR bits 3:0 */
 #define QMI8658_REG_CTRL7       0x08
 #define QMI8658_REG_CTRL8       0x09   /* bit7: CTRL9 handshake on STATUSINT */
 #define QMI8658_REG_CTRL9       0x0A   /* command register                 */
@@ -37,6 +38,8 @@
 #define QMI8658_REG_RESET       0x60   /* 0xB0 = soft reset                */
 #define QMI8658_RESET_CMD       0xB0
 #define QMI8658_REG_AX_L        0x35   /* AX_L..AZ_H = 0x35..0x3A */
+#define QMI8658_REG_TEMP_L      0x33   /* TEMP_L, TEMP_H: H + L/256 deg C */
+#define QMI8658_REG_GX_L        0x3B   /* GX_L..GZ_H = 0x3B..0x40 */
 
 #define QMI8658_WHOAMI_VALUE    0x05
 
@@ -487,4 +490,117 @@ esp_err_t jr_imu_read(jr_imu_t *out)
 bool jr_imu_present(void)
 {
     return s_ready;
+}
+
+/* ---- board probe (GET /api/diag/board) ---------------------------------- */
+
+/* Probe gyro setting: gFS = 101 (+-512 dps -> 64 LSB/dps), gODR = 0110
+ * (112 Hz). 20 samples 10 ms apart; the gyro needs ~100 ms to settle. */
+#define PROBE_CTRL3_GYRO     0x56
+#define PROBE_CTRL7_GYRO_EN  0x02
+#define PROBE_GYRO_LSB_PER_DPS 64.0f
+#define PROBE_GYRO_SAMPLES   20
+#define PROBE_GYRO_SETTLE_MS 100
+
+static void probe_gyro(jr_probe_imu_t *out)
+{
+    const uint8_t ctrl3_orig = out->ctrl3;
+    const uint8_t ctrl7_orig = out->ctrl7;
+    float sum[3] = {0};
+    uint8_t n = 0;
+
+    esp_err_t err = imu_write_reg(QMI8658_REG_CTRL3, PROBE_CTRL3_GYRO);
+    if (err == ESP_OK) {
+        err = imu_write_reg(QMI8658_REG_CTRL7,
+                            (uint8_t)(ctrl7_orig | PROBE_CTRL7_GYRO_EN));
+    }
+    if (err == ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(PROBE_GYRO_SETTLE_MS));
+        for (int i = 0; i < PROBE_GYRO_SAMPLES; ++i) {
+            uint8_t reg = QMI8658_REG_GX_L;
+            uint8_t raw[6] = {0};
+            if (i2c_master_transmit_receive(s_dev, &reg, 1, raw, sizeof(raw),
+                                            QMI8658_I2C_TIMEOUT_MS) == ESP_OK) {
+                int16_t v[3];
+                for (int a = 0; a < 3; ++a) {
+                    v[a] = (int16_t)(((uint16_t)raw[2 * a + 1] << 8) | raw[2 * a]);
+                }
+                if (!(v[0] == INT16_MIN && v[1] == INT16_MIN && v[2] == INT16_MIN)) {
+#if defined(CONFIG_ESP_BOARD_ESP32S3_TOUCH_AMOLED_1_75C)
+                    v[2] = (int16_t)-v[2];   /* same Z flip as imu_read_axes() */
+#endif
+                    for (int a = 0; a < 3; ++a) {
+                        const float dps = (float)v[a] / PROBE_GYRO_LSB_PER_DPS;
+                        if (n == 0 || dps < out->gmin[a]) { out->gmin[a] = dps; }
+                        if (n == 0 || dps > out->gmax[a]) { out->gmax[a] = dps; }
+                        sum[a] += dps;
+                    }
+                    n++;
+                }
+            }
+            vTaskDelay(IMU_SAMPLE_GAP_TICKS);
+        }
+    }
+
+    /* Always put it back: gyro off first, then its config. */
+    (void)imu_write_reg(QMI8658_REG_CTRL7, ctrl7_orig);
+    (void)imu_write_reg(QMI8658_REG_CTRL3, ctrl3_orig);
+    (void)imu_read_reg(QMI8658_REG_CTRL3, &out->ctrl3_after);
+    (void)imu_read_reg(QMI8658_REG_CTRL7, &out->ctrl7_after);
+    out->restored = out->ctrl3_after == ctrl3_orig && out->ctrl7_after == ctrl7_orig;
+
+    if (err != ESP_OK) {
+        out->gyro_why = "gyro enable write failed";
+        return;
+    }
+    if (n == 0) {
+        out->gyro_why = "no valid gyro sample";
+        return;
+    }
+    out->gyro_ran = true;
+    out->gyro_n = n;
+    for (int a = 0; a < 3; ++a) { out->gmean[a] = sum[a] / (float)n; }
+}
+
+void jr_imu_probe(bool gyro, jr_probe_imu_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->gyro_asked = gyro;
+    if (!s_ready || s_dev == NULL) {
+        out->why = "imu not present";
+        return;
+    }
+    if (imu_read_reg(QMI8658_REG_WHOAMI, &out->who) != ESP_OK ||
+        imu_read_reg(QMI8658_REG_REVISION, &out->rev) != ESP_OK ||
+        imu_read_reg(QMI8658_REG_CTRL1, &out->ctrl1) != ESP_OK ||
+        imu_read_reg(QMI8658_REG_CTRL2, &out->ctrl2) != ESP_OK ||
+        imu_read_reg(QMI8658_REG_CTRL3, &out->ctrl3) != ESP_OK ||
+        imu_read_reg(QMI8658_REG_CTRL7, &out->ctrl7) != ESP_OK) {
+        out->why = "i2c read failed";
+        return;
+    }
+    out->ok = true;
+
+    uint8_t reg = QMI8658_REG_TEMP_L;
+    uint8_t t[2] = {0};
+    if (i2c_master_transmit_receive(s_dev, &reg, 1, t, sizeof(t),
+                                    QMI8658_I2C_TIMEOUT_MS) == ESP_OK) {
+        const int16_t raw = (int16_t)(((uint16_t)t[1] << 8) | t[0]);
+        out->temp_ok = true;
+        out->temp_tenths = ((int)raw * 10) / 256;   /* 1/256 degree per LSB */
+    }
+
+    /* Wake-on-Motion leaves the sampler stopped and INT1 enabled in CTRL1
+     * (QMI8658_CTRL1_WOM); the data configuration never sets that bit. */
+    out->wom = (out->ctrl1 & 0x08u) != 0;
+    if (!gyro) {
+        return;
+    }
+    if (out->wom) {
+        out->gyro_why = "refused: wake-on-motion armed";
+    } else if (s_task == NULL) {
+        out->gyro_why = "refused: sampler stopped";
+    } else {
+        probe_gyro(out);
+    }
 }

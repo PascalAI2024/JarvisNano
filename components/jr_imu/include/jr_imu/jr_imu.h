@@ -41,6 +41,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "jr_probe/board_probe.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -103,6 +104,19 @@ esp_err_t jr_imu_read(jr_imu_t *out);
 
 /** @brief True once a QMI8658 has answered WHO_AM_I. */
 bool jr_imu_present(void);
+
+/**
+ * @brief One-shot board probe for GET /api/diag/board. Reads WHO_AM_I,
+ *        REVISION, CTRL1/2/3/7 and the temperature register; with gyro=true
+ *        also enables the gyroscope for about 300 ms, takes 20 samples and
+ *        restores CTRL7 and CTRL3 to the values found.
+ *
+ * Safe beside the sampler (the I2C master serialises transactions). The gyro
+ * pass is refused while the sampler is stopped or Wake-on-Motion is armed.
+ * Takes about 350 ms with gyro, a few ms without. Never returns an error for
+ * a refused or failed sub-probe: that is reported inside *out.
+ */
+void jr_imu_probe(bool gyro, jr_probe_imu_t *out);
 
 #ifdef __cplusplus
 }

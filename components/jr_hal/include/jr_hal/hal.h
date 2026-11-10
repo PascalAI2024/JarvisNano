@@ -17,6 +17,7 @@
 #define JR_HAL_HAL_H
 
 #include "esp_err.h"
+#include "jr_probe/board_probe.h"
 #include "jr_ports/clock.h"
 #include "jr_ports/display.h"
 #include "jr_ports/input.h"
@@ -41,6 +42,14 @@ esp_err_t jr_hal_input_inject(const jr_input_event_t *event);
 jr_clock_t   jr_hal_clock(void);
 jr_display_t jr_hal_display(void);
 jr_input_t   jr_hal_input(void);
+
+/* Board probe for GET /api/diag/board. With watch_ms == 0 it only reports what
+ * is known statically. Otherwise it arms the touch worker for watch_ms
+ * (<= 4000): the worker, which owns the CST9217 bus traffic, reads the raw
+ * 15-byte report after each of its own reads and keeps the largest finger
+ * count with that report. Blocks the caller for watch_ms; read-only. Fingers
+ * only appear while someone touches the glass during the window. */
+void jr_hal_touch_probe(uint32_t watch_ms, jr_probe_touch_t *out);
 
 #ifdef __cplusplus
 }

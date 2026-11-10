@@ -191,6 +191,7 @@ run_c_suites() {
     run_production_python_c_suite jr_power_sleep_tests main/tests/test_power_sleep.py
     run_production_python_c_suite jr_ota_sleep_fence_tests main/tests/test_ota_sleep_fence.py
     run_production_python_c_suite jr_imu_wom_tests components/jr_imu/tests/test_wom.py
+    run_production_python_c_suite jr_probe_board_json_tests components/jr_probe/tests/test_board_json.py
     run_cmake_suite "$ROOT/host" "$ROOT/host/build" jr_host_tests "$ROOT/host/build/jr_host_tests"
     run_ctest_suite "$ROOT/components/jr_tools/host" "$ROOT/build-tools-host" jr_tools_template_tests
 }

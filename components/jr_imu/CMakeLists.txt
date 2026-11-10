@@ -9,6 +9,7 @@ idf_component_register(
     REQUIRES
         # Public deps used in the header / by callers.
         esp_common          # esp_err_t
+        jr_probe            # jr_probe_imu_t in the header
     PRIV_REQUIRES
         log                 # ESP_LOGx
         freertos            # task, static mutex, pdMS_TO_TICKS

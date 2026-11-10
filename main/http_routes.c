@@ -11,6 +11,7 @@
  */
 #include "app.h"
 #include "jr_dsp/audio_power.h"
+#include "jr_probe/gpio_probe.h"
 
 /* THE FPS FLOOR FOLLOWS THE CADENCE. Health and probation both ask for a
  * live frame rate, but since 2026-09-02 the ladder deliberately renders at
@@ -951,6 +952,74 @@ static esp_err_t tasks_diag_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_send(req, body, off);
+    free(body);
+    return ESP_OK;
+}
+
+/* GET /api/diag/board[?watch=pwr|touch][&gyro=1] — measures the hardware the
+ * firmware leaves idle (docs/reference/board-capabilities.md, "How to probe").
+ *
+ * Read-only apart from two bounded exceptions, both undone before returning:
+ * the QMI8658 gyro is on for about 300 ms (only with gyro=1) and the AXP2101
+ * TS/VBUS/VSYS/die-temperature ADC channels are on for about 100 ms. Each
+ * probe reports ok:false and a reason instead of failing the response. Only
+ * one watch window runs per request (3 s power key or 4 s touch), so the worst
+ * case is just under 5 s. Probes that need another task's bus go through that
+ * task (touch) or the shared I2C master's own serialisation (IMU, PMIC);
+ * nothing here sends a panel command. */
+#define BOARD_PROBE_JSON_CAP   2048
+#define BOARD_PROBE_TE_MS      500
+#define BOARD_PROBE_PWR_MS     3000
+#define BOARD_PROBE_TOUCH_MS   4000
+#define BOARD_PROBE_SPI_HZ     40000000u   /* CO5300_PANEL_IO_QSPI_CONFIG macro */
+
+static esp_err_t board_diag_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
+    char q[64] = "";
+    char watch[8] = "";
+    char gyro[4] = "";
+    if (httpd_req_get_url_query_str(req, q, sizeof q) == ESP_OK) {
+        (void)httpd_query_key_value(q, "watch", watch, sizeof watch);
+        (void)httpd_query_key_value(q, "gyro", gyro, sizeof gyro);
+    }
+    const bool watch_pwr = strcmp(watch, "pwr") == 0;
+    const bool watch_touch = strcmp(watch, "touch") == 0;
+    if (watch[0] != '\0' && !watch_pwr && !watch_touch) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "watch must be pwr or touch");
+        return ESP_OK;
+    }
+    const bool want_gyro = strcmp(gyro, "1") == 0;
+
+    char *body = malloc(BOARD_PROBE_JSON_CAP);
+    jr_probe_report_t *rep = calloc(1, sizeof *rep);
+    if (body == NULL || rep == NULL) {
+        free(body);
+        free(rep);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_OK;
+    }
+
+    jr_probe_te(BOARD_PROBE_TE_MS, &rep->te);
+    jr_probe_pwr_key(watch_pwr ? BOARD_PROBE_PWR_MS : 0, &rep->pwr_key);
+    jr_imu_probe(want_gyro, &rep->imu);
+    jr_hal_touch_probe(watch_touch ? BOARD_PROBE_TOUCH_MS : 0, &rep->touch);
+    jr_power_probe(&rep->pmic);
+    rep->spi_hz = BOARD_PROBE_SPI_HZ;
+    rep->spi_source = "library macro default, not overridden";
+
+    const int n = jr_probe_report_json(rep, body, BOARD_PROBE_JSON_CAP);
+    free(rep);
+    if (n < 0) {
+        free(body);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "board report overflow");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, body, n);
     free(body);
     return ESP_OK;
 }
@@ -4624,6 +4693,8 @@ void start_diag_http(void)
           .handler = sensors_handler },
         { .uri = "/api/diag/tasks", .method = HTTP_GET,
           .handler = tasks_diag_handler },
+        { .uri = "/api/diag/board", .method = HTTP_GET,
+          .handler = board_diag_handler },
         { .uri = "/api/display/hud", .method = HTTP_POST,
           .handler = hud_toggle_handler },
         { .uri = "/api/display/choices", .method = HTTP_POST,
