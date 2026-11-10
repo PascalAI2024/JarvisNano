@@ -48,9 +48,18 @@
  * is slow because a record is bypassed or a flat colour is blended one pixel at a
  * time. Each bit keeps the output of the shipped path (settled scenes identical, a
  * frame in motion inside the identity suite's tolerance) and does less work.
+ *   bit 0 REPLAY_RING the battery and desk ring while it slides in or out and while
+ *                     its arc sweeps: the records of the final value are replayed
+ *                     on every row away from the moving front, the rows near it are
+ *                     drawn as before.
  *   bit 2 DISC_MEMO   aa_disc at part strength remembers the last pixel it blended
  *                     (a flat disc over a flat base is one blend per run).
- * Bits 0, 1 and 3 are reserved for the other candidates of the round. */
+ *   bit 3 VEIL_MEMO   the part-strength veil and black fold (the shade opening over a
+ *                     watch, a dial dipping on a style change) remember the last pixel
+ *                     they folded.
+ * Bit 1 is reserved for the other candidates of the round. */
+#define JR_KNOB_REPLAY_RING     (1u << 0)
 #define JR_KNOB_DISC_MEMO       (1u << 2)
+#define JR_KNOB_VEIL_MEMO       (1u << 3)
 
-#define JR_KNOB_KNOWN_MASK      (JR_KNOB_DISC_MEMO)
+#define JR_KNOB_KNOWN_MASK      (JR_KNOB_REPLAY_RING | JR_KNOB_DISC_MEMO | JR_KNOB_VEIL_MEMO)

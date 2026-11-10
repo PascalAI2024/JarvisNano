@@ -879,16 +879,17 @@ size_t glass_ring_record(uint8_t *buf, size_t cap, int32_t cx16, int32_t cy16,
     return glass_shape_record(buf, cap, cx16, cy16, r_in16, r_out16, 0, GLASS_TURN_Q16, false);
 }
 
-void glass_ring_replay_row(uint16_t *row, int y, int clip_lo, int clip_hi,
-                           const uint8_t *rec, uint16_t color565, uint8_t alpha,
-                           bool swap_bytes)
+void glass_ring_replay_row_off(uint16_t *row, int y, int ry, int clip_lo, int clip_hi,
+                               const uint8_t *rec, uint16_t color565, uint8_t alpha,
+                               bool swap_bytes)
 {
-    if (row == NULL || rec == NULL || alpha == 0u || !row_clip(y, &clip_lo, &clip_hi)) {
+    if (row == NULL || rec == NULL || alpha == 0u || ry < 0 || ry >= GLASS_PANEL_PX ||
+        !row_clip(y, &clip_lo, &clip_hi)) {
         return;
     }
     const uint16_t *tab = (const uint16_t *)(const void *)rec;
-    size_t p = tab[y];
-    const size_t end = tab[y + 1];
+    size_t p = tab[ry];
+    const size_t end = tab[ry + 1];
     paint_t c;
     paint_init(&c, color565, alpha, swap_bytes);
     while (p < end) {
@@ -913,6 +914,13 @@ void glass_ring_replay_row(uint16_t *row, int y, int clip_lo, int clip_hi,
             p += n;
         }
     }
+}
+
+void glass_ring_replay_row(uint16_t *row, int y, int clip_lo, int clip_hi,
+                           const uint8_t *rec, uint16_t color565, uint8_t alpha,
+                           bool swap_bytes)
+{
+    glass_ring_replay_row_off(row, y, y, clip_lo, clip_hi, rec, color565, alpha, swap_bytes);
 }
 
 void glass_ring_row(uint16_t *row, int y, int clip_lo, int clip_hi,
@@ -1339,12 +1347,12 @@ size_t glass_glow_record(uint8_t *buf, size_t cap, int32_t cx16, int32_t cy16,
     return r.pos;
 }
 
-void glass_glow_replay_row(uint16_t *row, int y, int clip_lo, int clip_hi, const uint8_t *rec,
-                           int32_t width16, uint8_t peak, uint16_t color565, uint8_t alpha,
-                           bool swap_bytes)
+void glass_glow_replay_row_off(uint16_t *row, int y, int ry, int clip_lo, int clip_hi,
+                               const uint8_t *rec, int32_t width16, uint8_t peak,
+                               uint16_t color565, uint8_t alpha, bool swap_bytes)
 {
-    if (row == NULL || rec == NULL || width16 <= 0 || peak == 0u || alpha == 0u ||
-        !row_clip(y, &clip_lo, &clip_hi)) {
+    if (row == NULL || rec == NULL || width16 <= 0 || peak == 0u || alpha == 0u || ry < 0 ||
+        ry >= GLASS_PANEL_PX || !row_clip(y, &clip_lo, &clip_hi)) {
         return;
     }
     const int32_t w64 = width16 * 4;
@@ -1355,8 +1363,8 @@ void glass_glow_replay_row(uint16_t *row, int y, int clip_lo, int clip_hi, const
     const unsigned a_peak = (((unsigned)peak) * ((unsigned)alpha + 1u)) >> 8;
     const glow_add_t add_peak = glow_add_for(color565, a_peak);
     const uint16_t *tab = (const uint16_t *)(const void *)rec;
-    size_t p = tab[y];
-    const size_t end = tab[y + 1];
+    size_t p = tab[ry];
+    const size_t end = tab[ry + 1];
     while (p < end) {
         const unsigned n = rec[p];
         const int x0 = (int)rec[p + 1] | ((int)rec[p + 2] << 8);
@@ -1383,6 +1391,14 @@ void glass_glow_replay_row(uint16_t *row, int y, int clip_lo, int clip_hi, const
             p += n;
         }
     }
+}
+
+void glass_glow_replay_row(uint16_t *row, int y, int clip_lo, int clip_hi, const uint8_t *rec,
+                           int32_t width16, uint8_t peak, uint16_t color565, uint8_t alpha,
+                           bool swap_bytes)
+{
+    glass_glow_replay_row_off(row, y, y, clip_lo, clip_hi, rec, width16, peak, color565, alpha,
+                              swap_bytes);
 }
 
 /* ---- motion: pure timeline maths ------------------------------------------ */
