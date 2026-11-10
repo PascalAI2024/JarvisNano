@@ -541,6 +541,11 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 /* The perf knob as the render task last read it (perf_knob.h); 0 = shipped. */
 extern uint32_t hud_perf_knob;
 
+/* Memory for the balance wheel's cell classes (JR_KNOB_BAL_CLASS), 5,257 bytes;
+ * the caller owns it. NULL, or the bit off, draws the wheel from the alpha
+ * table alone, to the same pixels. */
+void hud_balance_cache_set(uint8_t *buf, size_t cap_bytes);
+
 void hud_dial_cache_set(uint16_t *buf, size_t cap_words);
 size_t hud_dial_cache_used(void);     /* words filled so far (the tests report it) */
 

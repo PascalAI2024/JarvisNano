@@ -5085,6 +5085,7 @@ static inline void fring_row(uint16_t *row, int y, int lo, int hi, bool swap, in
 #define SG_DIAL_REC_WORDS 6144
 #define JR_DIAL_REC       1     /* tells the host fixtures the recorded dial disc exists */
 static uint16_t *s_dial_rec;
+static uint8_t *s_bal_cls_mem;          /* JR_KNOB_BAL_CLASS: 5,257 B of PSRAM, taken when the bit is first set */
 
 static void dial_rec_alloc(void)
 {
@@ -5118,6 +5119,12 @@ static void knob_apply(void)
     glass_perf_knob = k;
     if (((k ^ was) & JR_KNOB_DIAL_REC) != 0u) {
         dial_rec_alloc();
+    }
+    if (((k ^ was) & JR_KNOB_BAL_CLASS) != 0u && (k & JR_KNOB_BAL_CLASS) != 0u) {
+        if (s_bal_cls_mem == NULL) {
+            s_bal_cls_mem = heap_caps_malloc(5257u, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        }
+        hud_balance_cache_set(s_bal_cls_mem, s_bal_cls_mem != NULL ? 5257u : 0u);
     }
 }
 

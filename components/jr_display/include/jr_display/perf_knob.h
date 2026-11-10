@@ -28,5 +28,11 @@
  * the interior stored by a plain loop. */
 #define JR_KNOB_DISC_ROW_OLD    (1u << 3)
 
+/* SKELETON's balance wheel reads a 2-bit class per sprite cell (clear / solid /
+ * partial) from a 5.3 KB PSRAM map instead of four alpha bytes a pixel, and
+ * skips the alpha sums where the cell is solid. Measure on SKELETON. */
+#define JR_KNOB_BAL_CLASS       (1u << 4)
+
 #define JR_KNOB_KNOWN_MASK      (JR_KNOB_DIAL_REC | JR_KNOB_HUD_FILL_OLD | \
-                                 JR_KNOB_GLASS_FILL_OLD | JR_KNOB_DISC_ROW_OLD)
+                                 JR_KNOB_GLASS_FILL_OLD | JR_KNOB_DISC_ROW_OLD | \
+                                 JR_KNOB_BAL_CLASS)
