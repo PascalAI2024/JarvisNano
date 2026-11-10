@@ -102,6 +102,21 @@ esp_err_t jr_imu_arm_wake_on_motion(uint8_t threshold_mg);
  */
 esp_err_t jr_imu_read(jr_imu_t *out);
 
+/**
+ * @brief The low-passed gravity direction, for tilt as a display input.
+ *        LOCK-FREE and non-blocking: one packed word the sampler stores,
+ *        no snapshot mutex, safe from any task.
+ *
+ * gx/gy are the accelerometer's in-plane X and Y in milli-g (an up vector:
+ * +1000 means the axis points straight up), SENSOR axes, the same ones
+ * jr_imu_t.gx/gy carry. One pole, gain 1/8 per 10 ms sample, about 80 ms.
+ * The caller turns it into a change of tilt (neutral is wherever it is held)
+ * and maps axes to the glass; jr_imu knows neither.
+ *
+ * @return false until the first sample, and again once the sampler stops.
+ */
+bool jr_imu_tilt_read(int *gx_mg, int *gy_mg);
+
 /** @brief True once a QMI8658 has answered WHO_AM_I. */
 bool jr_imu_present(void);
 

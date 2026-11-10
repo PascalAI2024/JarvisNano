@@ -14,6 +14,7 @@
  * the ragged tail — shows up on glass as a seam and nowhere else.
  */
 #include "jr_display/hud_render.h"
+#include "jr_display/tilt.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -2574,6 +2575,242 @@ static void test_celestial_twinkle_is_additive_small_and_strip_invariant(void)
     free(a); free(b); free(d);
 }
 
+/* ---- TILT PARALLAX (2026-11-10) -------------------------------------------
+ * The shaper (tilt.h) is pure; the stars read its output through the watch. */
+
+/* A step of tilt gives an offset that then decays to zero. */
+static void test_tilt_step_decays_to_zero(void)
+{
+    jr_tilt_t t;
+    jr_tilt_reset(&t);
+    jr_tilt_step(&t, 0, 0, 42);                       /* seeds at rest */
+    CHECK(t.x == 0 && t.y == 0, "the seed is not rest: %d,%d", t.x, t.y);
+    int prev = 0, peak = 0, zero_at = -1;
+    for (int ms = 42; ms <= 20000; ms += 42) {
+        jr_tilt_step(&t, 150, -80, 42);               /* lean and hold */
+        if (ms == 42) {
+            CHECK(t.x > 50 && t.x < JR_TILT_FULL, "the first frame of a step reads %d", t.x);
+            CHECK(t.y < -20, "y leans the other way: %d", t.y);
+            peak = t.x;
+        }
+        CHECK(t.x <= prev || ms == 42, "x rose while decaying at %d ms (%d > %d)", ms, t.x, prev);
+        prev = t.x;
+        if (t.x == 0 && t.y == 0 && zero_at < 0) zero_at = ms;
+    }
+    CHECK(peak > 0 && zero_at > 0, "the step never came back to zero (peak %d)", peak);
+    CHECK(zero_at < 12000, "re-centring took %d ms", zero_at);
+    CHECK(t.x == 0 && t.y == 0, "still leaning after 20 s: %d,%d", t.x, t.y);
+    /* and the way back is a lean the other way, then rest */
+    jr_tilt_step(&t, 0, 0, 42);
+    CHECK(t.x < 0, "returning to the old pose does not lean back: %d", t.x);
+}
+
+/* Noise inside the dead zone gives exactly zero. */
+static void test_tilt_dead_zone_is_exactly_zero(void)
+{
+    jr_tilt_t t;
+    jr_tilt_reset(&t);
+    jr_tilt_step(&t, 300, -200, 42);
+    enum { NOISE = 8 };                               /* inside the dead zone, with room for the centre */
+    unsigned s = 12345u;
+    int bad = 0;
+    for (int i = 0; i < 5000; ++i) {
+        s = s * 1664525u + 1013904223u;
+        const int nx = (int)((s >> 16) % (2 * NOISE + 1)) - NOISE;
+        s = s * 1664525u + 1013904223u;
+        const int ny = (int)((s >> 16) % (2 * NOISE + 1)) - NOISE;
+        jr_tilt_step(&t, 300 + nx, -200 + ny, 42);
+        if (t.x != 0 || t.y != 0) bad++;
+    }
+    CHECK(bad == 0, "%d frames of +-%d mg noise moved the dial", bad, (int)NOISE);
+    jr_tilt_step(&t, 300 + JR_TILT_DEAD_MG + 40, -200, 42);
+    CHECK(t.x > 0, "a lean past the dead zone reads nothing");
+}
+
+/* The clamp holds, in both directions, however far the hand goes. */
+static void test_tilt_clamp_holds(void)
+{
+    jr_tilt_t t;
+    jr_tilt_reset(&t);
+    jr_tilt_step(&t, 0, 0, 42);
+    jr_tilt_step(&t, 4000, -4000, 42);
+    CHECK(t.x == JR_TILT_FULL && t.y == -JR_TILT_FULL, "no clamp: %d,%d", t.x, t.y);
+    jr_tilt_step(&t, -4000, 4000, 42);
+    CHECK(t.x == -JR_TILT_FULL && t.y == JR_TILT_FULL, "no clamp the other way: %d,%d", t.x, t.y);
+    jr_tilt_reset(&t);
+    jr_tilt_step(&t, 0, 0, 1);
+    jr_tilt_step(&t, JR_TILT_DEAD_MG + JR_TILT_CLAMP_MG / 2, 0, 1);
+    CHECK(t.x > JR_TILT_FULL / 2 - 8 && t.x < JR_TILT_FULL / 2 + 8, "half a clamp reads %d", t.x);
+}
+
+/* Ten minutes of zero input: no drift, in any pose, at any frame cadence. */
+static void test_tilt_no_drift_in_ten_minutes(void)
+{
+    static const int poses[][2] = { {0, 0}, {-1000, 37}, {512, -733}, {1199, 1199}, {-3, 4} };
+    static const int dts[] = { 42, 83, 200, 500 };
+    for (size_t p = 0; p < sizeof poses / sizeof poses[0]; ++p)
+        for (size_t d = 0; d < sizeof dts / sizeof dts[0]; ++d) {
+            jr_tilt_t t;
+            jr_tilt_reset(&t);
+            int nonzero = 0;
+            jr_tilt_step(&t, poses[p][0], poses[p][1], dts[d]);
+            for (int ms = 0; ms < 600000; ms += dts[d]) {
+                jr_tilt_step(&t, poses[p][0], poses[p][1], dts[d]);
+                if (t.x != 0 || t.y != 0) nonzero++;
+            }
+            CHECK(nonzero == 0, "pose %zu dt %d drifted on %d frames", p, dts[d], nonzero);
+            CHECK(abs(t.cx_q8 - poses[p][0] * 256) < JR_TILT_DEAD_MG * 256,
+                  "the centre wandered from the pose: %d vs %d", t.cx_q8, poses[p][0] * 256);
+        }
+}
+
+/* A long gap (the dial was not on the glass) reseeds; the diag word round-trips. */
+static void test_tilt_gap_reseeds_and_word_packs(void)
+{
+    jr_tilt_t t;
+    jr_tilt_reset(&t);
+    jr_tilt_step(&t, 0, 0, 42);
+    jr_tilt_step(&t, 300, 0, 42);
+    CHECK(t.x != 0, "no lean to forget");
+    jr_tilt_step(&t, 300, 0, JR_TILT_GAP_MS + 1);
+    CHECK(t.x == 0 && t.y == 0, "a long gap kept the old lean: %d,%d", t.x, t.y);
+    jr_tilt_step(&t, 300, 0, 42);
+    CHECK(t.x == 0, "the reseeded centre is not the pose it came back in");
+    const int vals[] = { -256, -1, 0, 1, 255, 256 };
+    for (size_t i = 0; i < 6; ++i)
+        for (size_t j = 0; j < 6; ++j) {
+            const uint32_t w = jr_tilt_pack(vals[i], vals[j]);
+            CHECK(jr_tilt_unpack_x(w) == vals[i] && jr_tilt_unpack_y(w) == vals[j],
+                  "tilt word lost %d,%d", vals[i], vals[j]);
+        }
+    CHECK(jr_tilt_pack(-1, 1) == 0x0001FFFFu, "tilt word layout drifted: 0x%08x", jr_tilt_pack(-1, 1));
+}
+
+/* Depths come from the index alone; each depth slides by its own pixels. */
+static void test_star_depths_and_shift(void)
+{
+    int count[3] = { 0, 0, 0 };
+    for (int i = 0; i < HUD_STAR_COUNT; ++i) {
+        const int d = hud_celestial_star_depth(i);
+        CHECK(d >= 0 && d <= 2, "star %d depth %d", i, d);
+        if (d < 0 || d > 2) return;
+        count[d]++;
+        int dx, dy;
+        hud_celestial_star_shift(i, 0, 0, &dx, &dy);
+        CHECK(dx == 0 && dy == 0, "star %d moves with no lean", i);
+    }
+    CHECK(count[0] >= 8 && count[1] >= 8 && count[2] >= 8, "depths %d/%d/%d are lopsided", count[0], count[1], count[2]);
+    const int px[3] = { 6, 3, 1 };
+    int seen[3] = { 0, 0, 0 };
+    for (int i = 0; i < HUD_STAR_COUNT; ++i) {
+        const int d = hud_celestial_star_depth(i);
+        int dx, dy;
+        hud_celestial_star_shift(i, 256, 0, &dx, &dy);
+        if (dx == 0 && dy == 0) continue;               /* held by the glass or the hub */
+        CHECK(dx == px[d] && dy == 0, "star %d (depth %d) slid %d,%d at full lean, wanted %d,0", i, d, dx, dy, px[d]);
+        seen[d]++;
+        hud_celestial_star_shift(i, -256, 256, &dx, &dy);
+        if (dx != 0 || dy != 0) CHECK(dx == -px[d] && dy == px[d], "star %d (depth %d) at (-,+): %d,%d", i, d, dx, dy);
+    }
+    CHECK(seen[0] >= 6 && seen[1] >= 6 && seen[2] >= 6, "too few stars slide: %d/%d/%d", seen[0], seen[1], seen[2]);
+    /* never outside the glass, never onto the hub, at any lean */
+    int held = 0;
+    for (int i = 0; i < HUD_STAR_COUNT; ++i)
+        for (int tx = -256; tx <= 256; tx += 32)
+            for (int ty = -256; ty <= 256; ty += 32) {
+                int dx, dy;
+                hud_celestial_star_shift(i, tx, ty, &dx, &dy);
+                const int nx = s_stars[i].x + dx - 233, ny = s_stars[i].y + dy - 233;
+                const int r2 = nx * nx + ny * ny;
+                if (dx == 0 && dy == 0) { held++; continue; }
+                CHECK(r2 <= HUD_STAR_GLASS_R * HUD_STAR_GLASS_R && r2 >= HUD_STAR_HUB_R * HUD_STAR_HUB_R,
+                      "star %d left its ring at lean %d,%d", i, tx, ty);
+            }
+    printf("note: the glass/hub guard holds %d of %d star-lean pairs on this table\n", held, HUD_STAR_COUNT * 17 * 17);
+}
+
+/* The frame: lean (+max, 0) against 0. The glint at each star moved by its
+ * own depth and nothing else in the frame changed. */
+static void test_celestial_tilt_moves_only_the_glints(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    const uint16_t navy = 0x0841u;
+    int best_t = 0, best_n = -1;
+    for (int t = 0; t < 5000; t += 100) {               /* a moment with many stars lit */
+        int n = 0;
+        for (int i = 0; i < HUD_STAR_COUNT; ++i) if (hud_celestial_star_level(i, t / 1000, t % 1000) >= 12) n++;
+        if (n > best_n) { best_n = n; best_t = t; }
+    }
+    CHECK(best_n >= 6, "no moment with six lit stars (best %d)", best_n);
+    const int ss = best_t / 1000, ms = best_t % 1000;
+    uint16_t *base = lo_frame(navy), *lean = lo_frame(navy), *want = lo_frame(navy), *zero = lo_frame(navy);
+    if (!base || !lean || !want || !zero) return;
+    hud_celestial_twinkle(base, 0, HUD_H, false, ss, ms);
+    hud_celestial_twinkle_tilt(zero, 0, HUD_H, false, ss, ms, 0, 0);
+    CHECK(memcmp(base, zero, px * sizeof *base) == 0, "tilt (0,0) is not the plain twinkle");
+    CHECK(hud_celestial_twinkle_tilt(lean, 0, HUD_H, false, ss, ms, 256, 0) > 0, "nothing drawn under lean");
+    int moved[3] = { 0, 0, 0 };
+    int sh[HUD_STAR_COUNT], lit[HUD_STAR_COUNT];
+    for (int i = 0; i < HUD_STAR_COUNT; ++i) {
+        lit[i] = hud_celestial_star_level(i, ss, ms) >= 12;
+        int dx, dy;
+        hud_celestial_star_shift(i, 256, 0, &dx, &dy);
+        sh[i] = dx;
+        if (lit[i] && dx) moved[hud_celestial_star_depth(i)]++;
+    }
+    /* expected: each lit star's 5x5 window of the plain frame, moved by its own
+     * shift. Windows must not touch for this to mean anything. */
+    for (int i = 0; i < HUD_STAR_COUNT; ++i) {
+        if (!lit[i]) continue;
+        const int ix = s_stars[i].x, iy = s_stars[i].y;
+        for (int j = i + 1; j < HUD_STAR_COUNT; ++j) {
+            if (!lit[j]) continue;
+            const int jx = s_stars[j].x, jy = s_stars[j].y;
+            CHECK(abs(ix - jx) > 4 || abs(iy - jy) > 4, "plain windows of %d and %d collide", i, j);
+            CHECK(abs(ix + sh[i] - jx - sh[j]) > 4 || abs(iy - jy) > 4, "moved windows of %d and %d collide", i, j);
+        }
+        for (int dy = -2; dy <= 2; ++dy)
+            for (int dx = -2; dx <= 2; ++dx)
+                want[(size_t)(iy + dy) * HUD_W + ix + sh[i] + dx] = base[(size_t)(iy + dy) * HUD_W + ix + dx];
+    }
+    size_t bad = 0;
+    for (size_t k = 0; k < px; ++k) if (want[k] != lean[k]) bad++;
+    CHECK(bad == 0, "%zu px differ from the glints moved by their own depth", bad);
+    CHECK(moved[0] >= 1 && moved[1] >= 1 && moved[2] >= 1,
+          "this moment lit near %d / middle %d / far %d moved stars", moved[0], moved[1], moved[2]);
+    uint16_t *strips = lo_frame(navy);
+    if (strips) {
+        for (int y = 0; y < HUD_H; y += 12) {
+            const int n = y + 12 > HUD_H ? HUD_H - y : 12;
+            hud_celestial_twinkle_tilt(strips + (size_t)y * HUD_W, y, n, false, ss, ms, 256, 0);
+        }
+        CHECK(memcmp(strips, lean, px * sizeof *strips) == 0, "strips differ from the whole frame under lean");
+        free(strips);
+    }
+    /* in the watch: a lean moves CELESTIAL, a resting watch and any other dial ignore it */
+    uint16_t *a = lo_frame(navy), *b = lo_frame(navy), *c = lo_frame(navy), *d = lo_frame(navy);
+    if (a && b && c && d) {
+        hud_watch_t w = { .hh = 1, .mm = 0, .ss = ss, .ms = ms, .batt_pct = -1, .dial_baked = true,
+                          .shadow = true, .alive = true };
+        hud_overlay_watch(a, 0, HUD_H, false, &w, 255, 7);
+        w.tilt_x = 256;
+        hud_overlay_watch(b, 0, HUD_H, false, &w, 255, 7);
+        CHECK(memcmp(a, b, px * sizeof *a) != 0, "a lean did not move CELESTIAL");
+        w.alive = false;
+        hud_overlay_watch(c, 0, HUD_H, false, &w, 255, 7);
+        w.tilt_x = 0;
+        hud_overlay_watch(d, 0, HUD_H, false, &w, 255, 7);
+        CHECK(memcmp(c, d, px * sizeof *c) == 0, "a resting CELESTIAL leaned");
+        w.alive = true; w.tilt_x = 256;
+        hud_overlay_watch(c, 0, HUD_H, false, &w, 255, 6);
+        w.tilt_x = 0;
+        hud_overlay_watch(d, 0, HUD_H, false, &w, 255, 6);
+        CHECK(memcmp(c, d, px * sizeof *c) == 0, "a lean moved a dial that is not CELESTIAL");
+    }
+    free(a); free(b); free(c); free(d);
+    free(base); free(lean); free(want); free(zero);
+}
+
 int main(void)
 {
     test_light_deadband_is_today();
@@ -2639,6 +2876,13 @@ int main(void)
     test_balance_in_the_watch_follows_alive_and_strips();
     test_celestial_star_table_is_sane();
     test_celestial_twinkle_is_additive_small_and_strip_invariant();
+    test_tilt_step_decays_to_zero();
+    test_tilt_dead_zone_is_exactly_zero();
+    test_tilt_clamp_holds();
+    test_tilt_no_drift_in_ten_minutes();
+    test_tilt_gap_reseeds_and_word_packs();
+    test_star_depths_and_shift();
+    test_celestial_tilt_moves_only_the_glints();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);

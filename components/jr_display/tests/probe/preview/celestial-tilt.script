@@ -1,0 +1,14 @@
+# CELESTIAL leans with the hand: a slow circle of tilt, then a hold in one pose.
+# The stars slide by depth (near 6 px, middle 3, far 1 at full lean) and drift
+# back to rest as the dial re-centres (about 3 s). Tilt is the in-plane UP
+# vector in milli-g, screen axes; see docs/reference/tilt-parallax.md.
+scene watch-celestial
+wait 1500
+tilt 0 0
+wait 500
+tilt orbit 4000 200   # one slow circle, 200 mg across
+wait 4200
+tilt 260 0           # lean right and hold: the dial re-centres
+wait 5000
+tilt -260 120
+wait 4000

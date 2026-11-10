@@ -2439,17 +2439,62 @@ static inline void star_add(uint16_t *px, int add_r, int add_g, int add_b, bool 
     *px = swap ? (uint16_t)((o >> 8) | (o << 8)) : o;
 }
 
+/* Pixels of slide at full lean, per depth: near, middle, far. */
+static const int8_t HUD_STAR_PARALLAX_PX[3] = { 6, 3, 1 };
+
+int hud_celestial_star_depth(int i)
+{
+    return i < 0 ? 2 : i % 3;
+}
+
+void hud_celestial_star_shift(int i, int tilt_x, int tilt_y, int *dx, int *dy)
+{
+    *dx = *dy = 0;
+    if (i < 0 || i >= HUD_STAR_COUNT || (tilt_x == 0 && tilt_y == 0)) {
+        return;
+    }
+    tilt_x = tilt_x < -256 ? -256 : tilt_x > 256 ? 256 : tilt_x;
+    tilt_y = tilt_y < -256 ? -256 : tilt_y > 256 ? 256 : tilt_y;
+    const int px = HUD_STAR_PARALLAX_PX[hud_celestial_star_depth(i)];
+    const int sx = (tilt_x * px + (tilt_x < 0 ? -128 : 128)) / 256;
+    const int sy = (tilt_y * px + (tilt_y < 0 ? -128 : 128)) / 256;
+    const int nx = s_stars[i].x + sx - 233, ny = s_stars[i].y + sy - 233;
+    const int r2 = nx * nx + ny * ny;
+    if (r2 > HUD_STAR_GLASS_R * HUD_STAR_GLASS_R || r2 < HUD_STAR_HUB_R * HUD_STAR_HUB_R) {
+        return;                                         /* held where it is */
+    }
+    *dx = sx;
+    *dy = sy;
+}
+
 int hud_celestial_twinkle(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                           int ss, int ms)
+{
+    return hud_celestial_twinkle_tilt(dst, y0, nrows, swap_bytes, ss, ms, 0, 0);
+}
+
+int hud_celestial_twinkle_tilt(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                               int ss, int ms, int tilt_x, int tilt_y)
 {
     if (dst == NULL || nrows <= 0) {
         return 0;
     }
+    const bool leaning = tilt_x != 0 || tilt_y != 0;
+    const int reach = leaning ? 2 + 6 : 2;              /* the glint plus the deepest slide */
     int touched = 0;
     for (int i = 0; i < HUD_STAR_COUNT; ++i) {
-        const int sy = s_stars[i].y, sx = s_stars[i].x;
-        if (sy + 2 < y0 || sy - 2 >= y0 + nrows) {
+        int sy = s_stars[i].y, sx = s_stars[i].x;
+        if (sy + reach < y0 || sy - reach >= y0 + nrows) {
             continue;                                   /* not in this strip */
+        }
+        if (leaning) {
+            int dx, dy;
+            hud_celestial_star_shift(i, tilt_x, tilt_y, &dx, &dy);
+            sx += dx;
+            sy += dy;
+            if (sy + 2 < y0 || sy - 2 >= y0 + nrows) {
+                continue;
+            }
         }
         const int a = hud_celestial_star_level(i, ss, ms);
         if (a < 12) {
@@ -2583,7 +2628,8 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
         (void)hud_balance_blit(dst, y0, nrows, swap_bytes,
                                w->alive ? hud_balance_angle_q16(w->ss, w->ms) : 0);
     } else if (style == 7 && w->dial_baked && w->alive) {
-        (void)hud_celestial_twinkle(dst, y0, nrows, swap_bytes, w->ss, w->ms);
+        (void)hud_celestial_twinkle_tilt(dst, y0, nrows, swap_bytes, w->ss, w->ms,
+                                         w->tilt_x, w->tilt_y);
     }
 
     if (style == 3) {

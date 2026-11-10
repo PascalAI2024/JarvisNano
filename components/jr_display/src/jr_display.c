@@ -13,6 +13,7 @@
 #include "jr_display/companion.h"
 #include <stdatomic.h>
 #include "jr_display/hud_render.h"
+#include "jr_display/tilt.h"
 #include "jr_display/glass.h"
 #include "jr_display/perf_knob.h"
 #include "jr_display/glass_icon.h"
@@ -1346,6 +1347,7 @@ static volatile uint32_t s_caption_revision; /* changed caption bytes, not ticks
 static void brightness_slew(uint32_t dt_ms);   /* defined with the pump below */
 static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep);
 static void watch_compose(void);               /* defined with the watch below */
+static void tilt_tick(uint32_t now_ms);          /* defined with the watch below */
 
 /* The split timers (below) cost a timer read per part per strip, so they run
  * only while GET /api/display?split=1 has asked for them (jr_display_split_arm,
@@ -1423,6 +1425,7 @@ static void overlay_fade_tick(void)
         s_clock_phase_ms = since > 999u ? 999 : (int)since;
         watch_compose();             /* the words on the watch, once a frame */
         light_tick(now);             /* the room's light, solved once a frame */
+        tilt_tick(now);              /* CELESTIAL's lean, read once a frame */
         s_clock_prog += step;
         if (s_clock_prog > 256) {
             s_clock_prog = 256;
@@ -4141,6 +4144,40 @@ static inline void split_mark(jr_display_split_t which, int64_t *mark)
     *mark = now;
 }
 
+/* TILT PARALLAX. The composition root registers a source (milli-g, screen
+ * axes); the render task asks it ONCE A FRAME, and only while CELESTIAL is the
+ * watch on a lit panel at the awake cadence. Anywhere else the shaper is reset
+ * and the source is never called, so the sensor is not a display input on any
+ * other screen. The shaped lean (tilt.h) goes to the dial in hud_watch_t and
+ * to one packed word for GET /api/display. */
+static jr_display_tilt_fn_t volatile s_tilt_src;
+static jr_tilt_t s_tilt;                      /* render task only */
+static uint32_t s_tilt_prev_ms;               /* render task only */
+static volatile uint32_t s_tilt_word;         /* jr_tilt_pack(x, y); httpd reads */
+
+void jr_display_set_tilt_source(jr_display_tilt_fn_t fn)
+{
+    __atomic_store_n(&s_tilt_src, fn, __ATOMIC_RELEASE);
+}
+
+static void tilt_tick(uint32_t now_ms)
+{
+    const jr_display_tilt_fn_t src = __atomic_load_n(&s_tilt_src, __ATOMIC_ACQUIRE);
+    int x_mg = 0, y_mg = 0;
+    const bool live = src != NULL &&
+        s_style_shown == (uint8_t)JR_WATCH_CELESTIAL &&
+        (__atomic_load_n(&s_panel_off, __ATOMIC_ACQUIRE) & 3U) == 0U &&
+        jr_display_render_fps() >= JR_DISPLAY_RENDER_FPS &&
+        src(&x_mg, &y_mg);
+    if (live) {
+        jr_tilt_step(&s_tilt, x_mg, y_mg, (int)(now_ms - s_tilt_prev_ms));
+    } else {
+        jr_tilt_reset(&s_tilt);
+    }
+    s_tilt_prev_ms = now_ms;
+    __atomic_store_n(&s_tilt_word, jr_tilt_pack(s_tilt.x, s_tilt.y), __ATOMIC_RELAXED);
+}
+
 /* True while the glass is changing what the watch is: a slide to or from WATCH,
  * or a style dip. Only then does the hands' strength differ from the settled
  * one, and only then is the dial dimmed by the shell instead of cleared. */
@@ -4255,6 +4292,8 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
         .shadow = awake,
         .alive = awake,         /* SKELETON's wheel and CELESTIAL's stars rest with the shadows */
         .light = &s_light,
+        .tilt_x = s_tilt.x,
+        .tilt_y = s_tilt.y,
     };
     watch_sun_arc(ctx, y1, y2, pixels, style, strength, hw.hh, hw.mm);
     split_mark(JR_DISPLAY_SPLIT_CLOCK_CELLS, &sm);
@@ -8099,6 +8138,11 @@ esp_err_t jr_display_get_diag(jr_display_diag_t *out_diag)
     out_diag->light_gy_mg = s_light_gy_mg;
     out_diag->light_shadow_dx_q4 = s_light.shadow_dx;
     out_diag->light_shadow_dy_q4 = s_light.shadow_dy;
+    {
+        const uint32_t tw = __atomic_load_n(&s_tilt_word, __ATOMIC_RELAXED);
+        out_diag->tilt_x = jr_tilt_unpack_x(tw);
+        out_diag->tilt_y = jr_tilt_unpack_y(tw);
+    }
     jr_display_boot_timing_t *timing = &out_diag->boot_timing;
     /* Read end first: observing its release also includes the start publish. */
     timing->init_finished =

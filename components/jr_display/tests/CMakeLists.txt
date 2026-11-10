@@ -138,6 +138,7 @@ target_include_directories(glass_preview PRIVATE
     .
 )
 target_compile_options(glass_preview PRIVATE -O2 -Wall -Wextra -Werror -Wno-unused-function)
+target_link_libraries(glass_preview PRIVATE m)
 target_compile_definitions(glass_preview PRIVATE
     JR_HOST_DIAL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../firmware/mascot/reactive"
 )

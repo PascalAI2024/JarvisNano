@@ -194,6 +194,8 @@ typedef struct {
      * axes) and the shadow offset it solved to (Q4 px; rest is 32, 48). */
     int32_t light_gx_mg, light_gy_mg;
     int32_t light_shadow_dx_q4, light_shadow_dy_q4;
+    /* The lean the dial last drew with (tilt.h, -256..256); 0,0 off CELESTIAL. */
+    int32_t tilt_x, tilt_y;
     jr_display_boot_timing_t boot_timing;
 } jr_display_diag_t;
 
@@ -267,6 +269,15 @@ void jr_display_set_hud_env(uint8_t batt_pct, bool charging,
  * any cadence (one packed word); the render task filters and solves it once a
  * frame. valid=false (no IMU) leaves the rest light. */
 void jr_display_set_light(int gx_mg, int gy_mg, bool valid);
+
+/* The tilt the dial leans by (tilt parallax, docs/reference/tilt-parallax.md).
+ * The composition root registers a source once; the render task calls it once
+ * a frame, and ONLY while CELESTIAL is the watch on a lit panel at the awake
+ * cadence, so no other screen ever reads it. The source returns the low-passed
+ * in-plane UP vector in milli-g, SCREEN axes (x right, y down), or false when
+ * the sensor has no answer; it must not block or touch a bus. NULL removes it. */
+typedef bool (*jr_display_tilt_fn_t)(int *x_mg, int *y_mg);
+void jr_display_set_tilt_source(jr_display_tilt_fn_t fn);
 
 /* Genuine idle DREAM intent. Local foreground/OTA guards still win. This
  * publishes a packed bit; panel work remains on the presenter/render tasks.

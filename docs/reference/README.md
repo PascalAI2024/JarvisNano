@@ -25,6 +25,7 @@ Organized reference pages for JarvisNano’s primary 1.75C firmware and labeled 
 | [sdmmc-storage.md](./sdmmc-storage.md) | Original-1.75 SDMMC compatibility reference; not 1.75C hardware |
 | [imu-interrupt-routing.md](./imu-interrupt-routing.md) | QMI8658 INT1 → GPIO21 on the 1.75C (INT2 goes nowhere), resolved from the schematic; the Wake-on-Motion register recipe in use since 2026-09-01 |
 | [playback-jitter.md](./playback-jitter.md) | The playback ring, the feeder and the adaptive pre-roll; the 2026-09-05 finding that earcons were booked as replies and inflated every reply by 300 ms |
+| [tilt-parallax.md](./tilt-parallax.md) | The accelerometer as a display input: the lock-free tilt word, the re-centring shaper, CELESTIAL's three star depths. |
 | [power-modes.md](./power-modes.md) | The S3's four power modes and which the firmware drives: modem sleep from the mood ladder, deep sleep ten minutes into DREAM with lift/touch/timer wake; the probation-rollback and CmdDone gotchas |
 
 ---

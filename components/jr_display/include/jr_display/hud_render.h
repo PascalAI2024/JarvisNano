@@ -511,6 +511,8 @@ typedef struct {
                               * wheel, CELESTIAL's stars) runs: the awake
                               * cadence; false holds it still               */
     const hud_light_t *light; /* where the room's light is; NULL = at rest  */
+    int  tilt_x, tilt_y;     /* the dial's lean, -256..256 (tilt.h); 0 = none.
+                              * CELESTIAL's stars read it while `alive`      */
 } hud_watch_t;
 
 /* THE LIVE ORNAMENTS (2026-11-10). SKELETON's balance wheel: a baked sprite
@@ -529,6 +531,20 @@ int     hud_balance_blit(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 int     hud_celestial_star_level(int i, int ss, int ms);
 int     hud_celestial_twinkle(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                               int ss, int ms);
+
+/* TILT PARALLAX (2026-11-10). Star i sits at one of three depths, from its
+ * index alone: 0 near, 1 middle, 2 far (i % 3). A lean of tilt_x/tilt_y
+ * (-256..256, 256 = the clamp, tilt.h) slides the star's glint by
+ * HUD_STAR_PARALLAX_PX[depth] pixels at full lean, rounded to a whole pixel.
+ * A star whose moved glint would leave the glass (past HUD_STAR_GLASS_R) or
+ * reach the hands' hub (inside HUD_STAR_HUB_R) is held where it is. Lean 0
+ * moves nothing: hud_celestial_twinkle is exactly this call with (0, 0). */
+#define HUD_STAR_GLASS_R  210
+#define HUD_STAR_HUB_R    24
+int     hud_celestial_star_depth(int i);
+void    hud_celestial_star_shift(int i, int tilt_x, int tilt_y, int *dx, int *dy);
+int     hud_celestial_twinkle_tilt(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                                   int ss, int ms, int tilt_x, int tilt_y);
 
 void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                        const hud_watch_t *w, int strength, int style);
