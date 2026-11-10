@@ -164,6 +164,16 @@ instructions, both for the same reason (they write more memory):
   the device pending a measurement that separates it from the word fill that
   landed in the same commit.
 
+Fourth flash (175d912, 2,431,280 bytes), veil reverted and the disc record
+off: the shade over home is 52.9 ms (`space_veil` 12.3, `space_shade` 26.6),
+down from 75.1. MINIMAL did **not** recover: `clock_face` 39.5 ms with the
+record off, 35.1 with it on, 25.6 before the commit that added it. Run-to-run
+spread on the watch was about 3 ms across these walks, so the record itself is
+not shown to matter either way; what that commit changed in the dial's
+ordinary drawing path is what costs the 10 to 14 ms, and it is still in. The
+other screens repeated within that spread (STATUS 40.7, DESK 33.5, WEATHER
+35.2, ACTIVITY 24.7, DRESS 26.9-28.9).
+
 What is left on the watch: the dial copy from PSRAM is 8.4-8.9 ms on every
 baked dial, and the hands are 8.5 (DRESS) to 29.6 ms (SKELETON, of which the
 balance wheel is most).
