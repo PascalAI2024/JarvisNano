@@ -84,6 +84,79 @@ int main(void)
             failures++;
         }
     }
+    /* The split timers (GET /api/display?split=1). With the fake clock moving
+     * on every read, a part that ran must have charged time and a part that
+     * did not must not: "empty is not pass", so each row names the buckets
+     * that must be positive and the ones that must stay zero. */
+    static const struct {
+        const char *scene;
+        int64_t clk_ms;
+        jr_display_split_t positive[6];
+        jr_display_split_t zero[3];
+    } SPLITS[] = {
+        { "status-74", 20000,
+          { JR_DISPLAY_SPLIT_HUD_FRAME, JR_DISPLAY_SPLIT_HUD_SPACE, JR_DISPLAY_SPLIT_SPACE_VEIL,
+            JR_DISPLAY_SPLIT_SPACE_SCREEN, JR_DISPLAY_SPLIT_SPACE_ORBIT, JR_DISPLAY_SPLIT_HUD_OTA },
+          { JR_DISPLAY_SPLIT_CLOCK_FACE, JR_DISPLAY_SPLIT_CLOCK_CELLS, JR_DISPLAY_SPLIT_SPACE_SHADE } },
+        { "watch-dress", 20000,
+          { JR_DISPLAY_SPLIT_HUD_CLOCK, JR_DISPLAY_SPLIT_CLOCK_CLEAR, JR_DISPLAY_SPLIT_CLOCK_FACE,
+            JR_DISPLAY_SPLIT_CLOCK_CELLS, JR_DISPLAY_SPLIT_HUD_OTA, JR_DISPLAY_SPLIT_HUD_FRAME },
+          /* the watch clears the dial itself, so the shell backdrop is skipped:
+           * none of the space_* parts run (the paint-then-erase cut) */
+          { JR_DISPLAY_SPLIT_SPACE_ORBIT, JR_DISPLAY_SPLIT_SPACE_SCREEN, JR_DISPLAY_SPLIT_HUD_ASK } },
+        { "shade", 20000,
+          { JR_DISPLAY_SPLIT_SPACE_SHADE, JR_DISPLAY_SPLIT_HUD_SPACE, JR_DISPLAY_SPLIT_HUD_FRAME,
+            JR_DISPLAY_SPLIT_SPACE_ORBIT, JR_DISPLAY_SPLIT_HUD_OTA, JR_DISPLAY_SPLIT_HUD_OTA },
+          { JR_DISPLAY_SPLIT_SPACE_SHEET, JR_DISPLAY_SPLIT_CLOCK_FACE, JR_DISPLAY_SPLIT_HUD_ASK } },
+        { "detail", 20000,
+          { JR_DISPLAY_SPLIT_SPACE_SHEET, JR_DISPLAY_SPLIT_HUD_SPACE, JR_DISPLAY_SPLIT_HUD_FRAME,
+            JR_DISPLAY_SPLIT_SPACE_ORBIT, JR_DISPLAY_SPLIT_HUD_OTA, JR_DISPLAY_SPLIT_HUD_OTA },
+          { JR_DISPLAY_SPLIT_SPACE_SHADE, JR_DISPLAY_SPLIT_CLOCK_FACE, JR_DISPLAY_SPLIT_HUD_ASK } },
+    };
+    for (unsigned r = 0; r < sizeof SPLITS / sizeof SPLITS[0]; r++) {
+        const fc_scene_t *sc = find_scene(SPLITS[r].scene);
+        if (sc == NULL) {
+            printf("FAIL: split scene %s missing\n", SPLITS[r].scene);
+            failures++;
+            continue;
+        }
+        fc_setup(sc);
+        s_fake_us_step = 3;
+        for (int i = 0; i < JR_DISPLAY_SPLIT_COUNT; i++) s_split_us[i] = 0;
+        fc_run(sc, SPLITS[r].clk_ms, fb);
+        s_fake_us_step = 0;
+        for (int i = 0; i < 6; i++) {
+            checks++;
+            if (s_split_us[SPLITS[r].positive[i]] == 0u) {
+                printf("FAIL %s: split %s charged nothing\n", sc->name,
+                       jr_display_split_name((unsigned)SPLITS[r].positive[i]));
+                failures++;
+            }
+        }
+        for (int i = 0; i < 3; i++) {
+            checks++;
+            if (s_split_us[SPLITS[r].zero[i]] != 0u) {
+                printf("FAIL %s: split %s charged %u but did not run\n", sc->name,
+                       jr_display_split_name((unsigned)SPLITS[r].zero[i]),
+                       (unsigned)s_split_us[SPLITS[r].zero[i]]);
+                failures++;
+            }
+        }
+        /* nested parts are inside their parent, never beside it */
+        checks++;
+        if (s_split_us[JR_DISPLAY_SPLIT_HUD_SPACE] <
+            s_split_us[JR_DISPLAY_SPLIT_SPACE_VEIL] + s_split_us[JR_DISPLAY_SPLIT_SPACE_SCREEN] +
+            s_split_us[JR_DISPLAY_SPLIT_SPACE_SHEET] + s_split_us[JR_DISPLAY_SPLIT_SPACE_SHADE] +
+            s_split_us[JR_DISPLAY_SPLIT_SPACE_ORBIT]) {
+            printf("FAIL %s: space_* exceeds hud_space\n", sc->name);
+            failures++;
+        }
+    }
+    checks++;
+    if (jr_display_split_name(0) == NULL || jr_display_split_name(JR_DISPLAY_SPLIT_COUNT) != NULL) {
+        printf("FAIL: split name table range\n");
+        failures++;
+    }
     if (failures) {
         printf("%d failure(s) of %d checks\n", failures, checks);
         return 1;

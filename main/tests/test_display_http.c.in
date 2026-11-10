@@ -14,6 +14,14 @@ esp_err_t jr_display_get_diag(jr_display_diag_t *d) { *d=cached; return read_res
 jr_display_space_t jr_display_nav_space(void) { return JR_DISPLAY_SPACE_STATUS; }
 jr_display_overlay_t jr_display_nav_overlay(void) { return JR_DISPLAY_OVERLAY_SHADE; }
 const char *esp_err_to_name(esp_err_t e) { return e==ESP_OK ? "ESP_OK" : "ESP_FAIL"; }
+static const char *query;
+static esp_err_t httpd_req_get_url_query_str(httpd_req_t *r,char *b,size_t n)
+{ (void)r; if(!query) return ESP_FAIL; snprintf(b,n,"%s",query); return ESP_OK; }
+static esp_err_t httpd_query_key_value(const char *q,const char *k,char *v,size_t n)
+{ size_t kl=strlen(k); if(strncmp(q,k,kl)||q[kl]!='=') return ESP_FAIL; snprintf(v,n,"%s",q+kl+1); return ESP_OK; }
+const char *jr_display_split_name(unsigned i)
+{ static const char *const names[JR_DISPLAY_SPLIT_COUNT]={"hud_frame","hud_space","hud_clock","hud_ota","hud_caption","hud_ask","hud_bloom","space_veil","space_screen","space_sheet","space_shade","space_orbit","clock_clear","clock_face","clock_cells"};
+  return i<JR_DISPLAY_SPLIT_COUNT ? names[i] : NULL; }
 static esp_err_t httpd_resp_send_err(httpd_req_t *r,int e,const char *s)
 { (void)r;(void)e;(void)s; ++errors; return ESP_FAIL; }
 static esp_err_t httpd_resp_set_type(httpd_req_t *r,const char *s)
@@ -44,6 +52,8 @@ int main(int argc,char **argv) {
  cached.boot_timing.first_transfer_done_boot_ms=(bits&1) ? UINT32_MAX : 0;
  cached.boot_timing.first_glance_time_transfer_valid=(bits&2)!=0;
  cached.boot_timing.first_glance_time_transfer_done_boot_ms=(bits&2) ? 987654321 : 0;
+ if(bits&16) query="split=1";
+ for(unsigned i=0;i<JR_DISPLAY_SPLIT_COUNT;i++) cached.split_us[i]=UINT32_MAX-i;
  read_result=(bits&4) ? ESP_FAIL : ESP_OK;
  if(bits&8) {cached.init_state=JR_DISPLAY_INIT_FAILED;cached.last_error=ESP_FAIL;}
  httpd_req_t req={0};int result=display_diag_handler(&req);

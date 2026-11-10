@@ -9,6 +9,8 @@ MUTANTS = {
     'optical-forged': ('\\"optical\\":false', '\\"optical\\":true'),
     'glance-valid-forged': ('d.boot_timing.first_glance_time_transfer_valid ? "true" : "false"', '"true"'),
     'glance-time-swapped': ('(unsigned)d.boot_timing.first_glance_time_transfer_done_boot_ms', '(unsigned)d.boot_timing.first_transfer_done_boot_ms'),
+    'split-name-stuck': ('i ? "," : "", jr_display_split_name(i),', 'i ? "," : "", jr_display_split_name(0),'),
+    'split-value-stuck': ('(unsigned)d.split_us[i]);', '(unsigned)d.split_us[0]);'),
     'rom-forged': ('\\\"includes_rom\\\":false', '\\\"includes_rom\\\":true'),
 }
 
@@ -30,7 +32,10 @@ def run(root, out, mutation):
         nonlocal checks
         checks+=1
         assert type(actual) is type(expected) and actual==expected,(actual,expected)
-    for bits in range(16):
+    names=['hud_frame','hud_space','hud_clock','hud_ota','hud_caption','hud_ask','hud_bloom',
+           'space_veil','space_screen','space_sheet','space_shade','space_orbit',
+           'clock_clear','clock_face','clock_cells']
+    for bits in range(32):
         p=subprocess.run([str(binary),str(bits)],check=True,capture_output=True,text=True)
         (out/(str(bits)+'.txt')).write_text(p.stdout)
         meta,body=p.stdout.split('\n',1);meta=json.loads(meta)
@@ -39,6 +44,13 @@ def run(root, out, mutation):
         equal(meta['sent'],0 if bits&4 else 1)
         if bits&4: continue
         equal(meta['type'],'application/json');equal(meta['cache'],'no-store')
+        if bits&16:  # ?split=1: its own response, every timer present, worst-case width
+            doc=json.loads(body)
+            equal(list(doc['split_us']),names)
+            equal(list(doc['split_us'].values()),[4294967295-i for i in range(len(names))])
+            equal(doc['render_frames'],4294967295)
+            equal(meta['bytes']<640,True)
+            continue
         equal(meta['bytes']<1152,True)  # the handler's buffer is 1280
         doc=json.loads(body);timing=doc['boot_timing']
         equal(doc['init'],'failed' if bits&8 else 'ready')
