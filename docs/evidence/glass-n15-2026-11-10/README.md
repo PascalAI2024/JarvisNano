@@ -118,3 +118,59 @@ Internal RAM after this flash: 33 KB free, largest block 22,528 bytes, against
 The PMIC fix did what it could: VSYS and the die temperature still do not
 convert within 500 ms of enabling their channels on battery, and are now
 reported as absent (`die -`, `vsys -`) instead of as 0 mV and 385.7 C.
+
+A later fresh wake of the same image read a largest block of 20,480 bytes, so
+the figure moves by a few KB with heap state and the "drop" above is not
+evidence against the code.
+
+## Third flash the same day: two more rounds of cuts, measured
+
+Image 7350dc1 (2,431,536 bytes, valid after 68 s). Same method, lease held.
+"Before" is the second flash (519b252).
+
+| Screen | ms before | ms after | fps before | fps after |
+|---|---|---|---|---|
+| Home | 26.9 | **7.5** | 8.7 | 8.7 (the face clip's own rate) |
+| WATCH DRESS | 43.2 | **24.8-26.8** | 19.0 | 23.3-25.0 |
+| WATCH CELESTIAL | 50.1 | 32.5 | 16.7 | 22.0 |
+| WATCH DIVER | 51.8 | 37.2 | 16.0 | 20.3 |
+| WATCH FUTURE | 59.9 | 40.3 | 14.0 | 19.3 |
+| WATCH PILOT | 63.6 | 46.3 | 13.3 | 17.3 |
+| WATCH SKELETON | 66.8 | 48.1 | 13.0 | 16.7 |
+| WATCH JARVIS | 30.3 | 11.1 | 8.7 | 8.7 |
+| WATCH MINIMAL | 58.3 | 49.6 | 8.7 | 8.3 |
+| WEATHER | 58.3 | 36.3 | 14.0 | 20.3 |
+| STATUS | 84.6 | **39.8** | 10.3 | 18.7 |
+| DESK | 67.3 | 33.5 | 12.7 | 21.7 |
+| ACTIVITY | 50.8 | **23.7** | 16.0 | 21.3 |
+| Control shade over ACTIVITY | - | 39.0 | - | 19.3 |
+| Control shade over home | 75.2 | 75.1 | 9.0 | 8.7 |
+
+What carried, by part:
+
+- The agent rim (shell layer): 21 ms to 2.0-3.4 ms on every screen.
+- The orbit rail: 12-14 ms to 5.9-7.1 ms.
+- `space_screen`: STATUS 42.6 to 21.0, DESK 26.6 to 15.1. WEATHER did not
+  move (16.6 to 17.4), ACTIVITY 7.7 to 6.7.
+- `space_shade`: 37.6 to 25.3.
+
+Two cuts made the device slower although the host counted fewer or equal
+instructions, both for the same reason (they write more memory):
+
+- **The veil by the word**: `space_veil` 7.7 to 33.0 ms over the home face. It
+  dims every pixel of the strip; the loop it replaced skipped black ones.
+  Reverted (2be6e21).
+- **The MINIMAL disc record**: `clock_face` 25.6 to 35.1 ms. Switched off on
+  the device pending a measurement that separates it from the word fill that
+  landed in the same commit.
+
+What is left on the watch: the dial copy from PSRAM is 8.4-8.9 ms on every
+baked dial, and the hands are 8.5 (DRESS) to 29.6 ms (SKELETON, of which the
+balance wheel is most).
+
+`n15c-fixes.png`, read back from this image under a lease: the lease caption
+no longer overprints the shade's hint line, and the shade shows 95 %, the
+owner's setting. The ACTIVITY rows still read `FORGIVE ME, SIR. I.` and
+`I'M NOT QUITE.`: they were stored already cut four hours earlier, and the
+new rule applies when a row is recorded, so that fix is unproven on the
+device until something new is said.
