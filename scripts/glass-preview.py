@@ -84,12 +84,12 @@ def build(work):
         sys.exit("build failed:\n" + r.stdout + r.stderr)
 
 
-def run_script(work, script, fps, tag):
+def run_script(work, script, fps, tag, knob=0):
     shutil_copy = work / f"{tag}.script"
     shutil_copy.write_text(Path(script).read_text())
     raw = work / f"{tag}.rgb"
     r = docker(work, ["/work/build/glass_preview", f"/work/{tag}.script", f"out=/work/{tag}.rgb",
-                      "bg=/work/bg", f"fps={fps}"])
+                      "bg=/work/bg", f"fps={fps}", f"knob={knob}"])
     if r.returncode != 0:
         sys.exit(f"glass_preview failed ({r.returncode}):\n{r.stdout[-2000:]}{r.stderr[-2000:]}")
     frames, marks, notes = [], [], []
@@ -166,10 +166,9 @@ def save_webp(frames, path, durs):
                    lossless=True, format="WEBP")
 
 
-def contact_sheet(raw, frames_meta, marks, script_lines, k, path, scale):
+def contact_sheet(raw, frames_meta, marks, script_lines, k, path, scale, cols=6):
     ids = list(range(0, len(frames_meta), k))
     tw = 233 if scale == 1 else 466
-    cols = 6
     rows = (len(ids) + cols - 1) // cols
     lab = 34
     sheet = Image.new("RGB", (cols * tw, rows * (tw + lab)), (10, 10, 10))
@@ -204,11 +203,14 @@ def main():
     ap.add_argument("--out", help="output path; the extension is replaced per format (default: temp dir)")
     ap.add_argument("--scale", type=int, choices=(1, 2), default=1)
     ap.add_argument("--slow", type=int, default=1, help="play at 1/N speed")
+    ap.add_argument("--knob", type=lambda v: int(v, 0), default=0,
+                    help="the perf knob word (perf_knob.h) to render with; 0 is the shipped path")
     ap.add_argument("--fps", type=int, default=24, help="render cadence 2..24 (the mood ladder: 24, 12, 6, 3)")
     ap.add_argument("--format", choices=("apng", "gif", "webp"), default="apng",
                     help="the format reported as the main file (all available ones are written)")
     ap.add_argument("--contact-sheet", type=int, nargs="?", const=6, metavar="K",
                     help="also write NAME_sheet.png with every K-th frame (default 6)")
+    ap.add_argument("--sheet-cols", type=int, default=6, help="columns of the contact sheet (default 6)")
     ap.add_argument("--check", action="store_true", help="run twice and require identical frame hashes")
     ap.add_argument("--work", help="work dir for the build and raw frames (default: temp)")
     a = ap.parse_args()
@@ -226,9 +228,9 @@ def main():
 
     prepare_backgrounds(work)
     build(work)
-    raw, frames, marks, notes = run_script(work, script, a.fps, name)
+    raw, frames, marks, notes = run_script(work, script, a.fps, name, a.knob)
     if a.check:
-        _, frames2, _, _ = run_script(work, script, a.fps, name + "_b")
+        _, frames2, _, _ = run_script(work, script, a.fps, name + "_b", a.knob)
         if [h for _, _, h in frames] != [h for _, _, h in frames2]:
             sys.exit("NOT DETERMINISTIC: frame hashes differ between two runs")
         print(f"deterministic: {len(frames)} frames, identical hashes twice")
@@ -252,7 +254,7 @@ def main():
         for i, ln in enumerate(script.read_text().splitlines(), 1):
             lines[i] = ln.split("#")[0].strip()
         sp = Path(str(stem) + "_sheet.png")
-        contact_sheet(raw, frames, marks, lines, a.contact_sheet, sp, a.scale)
+        contact_sheet(raw, frames, marks, lines, a.contact_sheet, sp, a.scale, a.sheet_cols)
         written["sheet"] = sp
     print(f"{name}: {n} frames at {a.fps} fps = {n / a.fps:.2f} s of device time, played x1/{a.slow}")
     for kind, p in written.items():

@@ -24,7 +24,8 @@
  *     main.c calls, in the order main.c calls them; see docs/reference/
  *     glass-preview.md for the mapping and what it leaves out.
  *
- * Usage: glass_preview SCRIPT out=FILE [bg=DIR] [fps=N]
+ * Usage: glass_preview SCRIPT out=FILE [bg=DIR] [fps=N] [knob=WORD]
+ *   knob=WORD  the perf knob word (perf_knob.h) the whole run uses; absent = 0, the shipped path
  *   stdout: "F <index> <ms> <hash>" per recorded frame, "NOTE ..." lines,
  *           "MARK <frame> <line>" for every script step. exit 2 on a bad script.
  *
@@ -308,9 +309,10 @@ int main(int argc, char **argv)
         if (!strncmp(argv[i], "out=", 4)) outp = argv[i] + 4;
         else if (!strncmp(argv[i], "bg=", 3)) s_pv_bg = argv[i] + 3;
         else if (!strncmp(argv[i], "fps=", 4)) s_pv_fps = atoi(argv[i] + 4);
+        else if (!strncmp(argv[i], "knob=", 5)) fc_knob_extra = (uint32_t)strtoul(argv[i] + 5, NULL, 0);
     }
     if (!script || !outp || s_pv_fps < 2 || s_pv_fps > 24) {
-        fprintf(stderr, "usage: glass_preview SCRIPT out=FILE [bg=DIR] [fps=2..24]\n");
+        fprintf(stderr, "usage: glass_preview SCRIPT out=FILE [bg=DIR] [fps=2..24] [knob=WORD]\n");
         return 2;
     }
     pv_step_t *st;

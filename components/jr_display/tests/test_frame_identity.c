@@ -97,6 +97,237 @@ static int dial_span_check(int *checks)
     return bad;
 }
 
+/* ---- THE FADE BITS: a frame in motion may differ, a settled one may not -------
+ *
+ * The fade bits (perf_knob.h) draw a part-strength screen at full strength and
+ * dim the finished rows once, so a frame in motion differs from knob 0 by the
+ * rounding of one multiply instead of the several of a blend per primitive. The
+ * tolerance is the lane's contract: per pixel and channel in 5/6/5 steps, at most
+ * 0.5 % of the glass pixels may differ by more than 2 steps in any channel and no
+ * pixel by more than 6. Each transition is played through the production state
+ * machine at the render cadence, once on knob 0 and once with the bit, and every
+ * frame is compared. */
+#define MP_FPS 24
+#define MP_PRE 36
+#define MP_MAX_FRAMES 120
+
+typedef enum { MP_WAIT, MP_NEXT, MP_PREV, MP_OPEN, MP_CLOSE, MP_STYLE, MP_HOME } mp_op_t;
+typedef struct { mp_op_t op; int arg; } mp_step_t;
+typedef struct { const char *name; const char *scene; mp_step_t step[10]; } mp_script_t;
+
+static const mp_script_t MP_SCRIPTS[] = {
+    { "slide ring screens", "status-74",
+      { { MP_NEXT, 0 }, { MP_WAIT, 700 }, { MP_NEXT, 0 }, { MP_WAIT, 700 }, { MP_PREV, 0 },
+        { MP_WAIT, 700 }, { MP_HOME, 0 }, { MP_WAIT, 700 }, { MP_WAIT, 0 } } },
+    { "weather to status and back", "weather",
+      { { MP_NEXT, 0 }, { MP_WAIT, 900 }, { MP_PREV, 0 }, { MP_WAIT, 900 }, { MP_WAIT, 0 } } },
+    { "activity to home, the wrap", "activity",
+      { { MP_NEXT, 0 }, { MP_WAIT, 900 }, { MP_WAIT, 0 } } },
+    { "home to watch to weather", "home",
+      { { MP_NEXT, 0 }, { MP_WAIT, 900 }, { MP_NEXT, 0 }, { MP_WAIT, 900 }, { MP_WAIT, 0 } } },
+    { "style from dial to dial", "watch-diver",
+      { { MP_STYLE, 1 }, { MP_WAIT, 700 }, { MP_STYLE, 1 }, { MP_WAIT, 700 }, { MP_STYLE, -1 },
+        { MP_WAIT, 700 }, { MP_WAIT, 0 } } },
+    { "style onto minimal", "watch-pilot",
+      { { MP_STYLE, 1 }, { MP_WAIT, 700 }, { MP_STYLE, -1 }, { MP_WAIT, 700 }, { MP_WAIT, 0 } } },
+    { "shade over home", "home",
+      { { MP_OPEN, 0 }, { MP_WAIT, 800 }, { MP_CLOSE, 0 }, { MP_WAIT, 800 }, { MP_WAIT, 0 } } },
+    { "shade over a ring screen", "status-74",
+      { { MP_OPEN, 0 }, { MP_WAIT, 800 }, { MP_CLOSE, 0 }, { MP_WAIT, 800 }, { MP_WAIT, 0 } } },
+    { "shade over a baked dial", "watch-diver",
+      { { MP_OPEN, 0 }, { MP_WAIT, 800 }, { MP_CLOSE, 0 }, { MP_WAIT, 800 }, { MP_WAIT, 0 } } },
+    { "shade over minimal", "watch-minimal",
+      { { MP_OPEN, 0 }, { MP_WAIT, 800 }, { MP_CLOSE, 0 }, { MP_WAIT, 800 }, { MP_WAIT, 0 } } },
+};
+#define MP_NSCRIPTS ((int)(sizeof MP_SCRIPTS / sizeof MP_SCRIPTS[0]))
+
+static uint16_t mp_dial[466 * 466];
+static uint16_t mp_black[466 * 466];
+static int64_t mp_frame_no;
+
+/* A dial stand-in that is lit over half the glass in 6 px blocks, so the hands
+ * and the dim pass meet colour, not black. */
+static void mp_build_dial(void)
+{
+    for (int y = 0; y < 466; y++) {
+        for (int x = 0; x < 466; x++) {
+            const int dx = x - 232, dy = y - 232;
+            const int r2 = dx * dx + dy * dy;
+            uint16_t v = 0;
+            if (r2 <= 214 * 214 && (((x / 6) + (y / 6)) & 1) == 0) {
+                v = (uint16_t)((((x * 3 + y) & 31) << 11) | (((x + y * 5) & 63) << 5) | ((x ^ y) & 31));
+                if (v == 0) v = 0x0821;
+            }
+            mp_dial[y * 466 + x] = v;
+        }
+    }
+}
+
+static void mp_frame(int64_t t_us, uint16_t *fb)
+{
+    jr_display_ctx_t *ctx = &s_display;
+    const int64_t ms = t_us / 1000;
+    s_fake_us = t_us;
+    if (jr_display_nav_space() == JR_DISPLAY_SPACE_WATCH) {
+        jr_display_clock_set(true, 10, 8, (int)((ms / 1000) % 60));
+    } else {
+        jr_display_clock_set(false, 0, 0, 0);
+    }
+    const jr_face_t dial = watch_dial_face();
+    if (dial != JR_FACE_COUNT) {
+        s_dial_frame = mp_dial;
+        s_dial_frame_face = dial;
+        s_dial_blit = true;
+        ctx->shown_face = dial;
+    } else {
+        s_dial_blit = false;
+        ctx->shown_face = JR_FACE_IDLE;
+    }
+    s_parked = !s_dial_blit && __atomic_load_n(&s_park_want, __ATOMIC_ACQUIRE) != 0;
+    overlay_fade_tick();
+    if (!s_parked) {
+        fc_fill_face(fb);
+    }
+    for (int y = 0; y < 466; y += 12) {
+        const int y2 = y + 12 > 466 ? 466 : y + 12;
+        uint16_t *p = fb + (size_t)y * 466;
+        if (s_parked) {
+            memcpy(p, mp_black + (size_t)y * 466, (size_t)(y2 - y) * 466u * sizeof(uint16_t));
+        }
+        (void)rest_eligible(ctx);
+        apply_dial(ctx, 0, y, 466, y2, p);
+        apply_hud_overlay(ctx, 0, y, 466, y2, p);
+        apply_shell_overlay(ctx, 0, y, 466, y2, p);
+        apply_surface_overlay(ctx, 0, y, 466, y2, p);
+    }
+    mp_frame_no++;
+}
+
+static int64_t mp_t(void) { return mp_frame_no * 1000000LL / MP_FPS; }
+
+/* Play one script with the given knob word; frames[] gets the recorded ones. */
+static int mp_play(const mp_script_t *sc, uint32_t knob, uint16_t **frames)
+{
+    const fc_scene_t *scene = find_scene(sc->scene);
+    if (scene == NULL) return -1;
+    fc_knob_extra = knob;
+    mp_frame_no = 0;
+    fc_setup(scene);
+    s_fake_us = 0;
+    s_fade_prev_ms = 0;
+    static uint16_t fb[466 * 466];
+    for (int i = 0; i < MP_PRE; i++) mp_frame(mp_t(), fb);
+    int n = 0;
+    for (int k = 0; sc->step[k].op != MP_WAIT || sc->step[k].arg != 0; k++) {
+        const mp_step_t *st = &sc->step[k];
+        switch (st->op) {
+        case MP_NEXT:  jr_display_nav_next(); break;
+        case MP_PREV:  jr_display_nav_prev(); break;
+        case MP_OPEN:  jr_display_nav_down(); break;
+        case MP_CLOSE: jr_display_nav_up(); break;
+        case MP_HOME:  jr_display_nav_home(); break;
+        case MP_STYLE:
+            for (int i = 0; i < (st->arg < 0 ? -st->arg : st->arg); i++) {
+                jr_display_watch_style_step(st->arg < 0 ? -1 : 1);
+            }
+            break;
+        case MP_WAIT: {
+            const int64_t t0 = mp_t();
+            while (mp_t() < t0 + (int64_t)st->arg * 1000 && n < MP_MAX_FRAMES) {
+                mp_frame(mp_t(), fb);
+                memcpy(frames[n++], fb, sizeof fb);
+            }
+            break;
+        }
+        }
+    }
+    fc_knob_extra = 0;
+    return n;
+}
+
+typedef struct { long glass; long over2; int max_step; int worst_frame; double worst_frac; int max_frame; } mp_stat_t;
+
+/* a vs b over one frame: pixels inside the glass that differ by more than 2 steps
+ * in any 5/6/5 channel, and the largest step anywhere */
+static void mp_diff(const uint16_t *a, const uint16_t *b, int frame, mp_stat_t *st)
+{
+    long glass = 0, over = 0;
+    int mx = 0;
+    for (int y = 0; y < 466; y++) {
+        for (int x = 0; x < 466; x++) {
+            const uint16_t va = a[y * 466 + x], vb = b[y * 466 + x];
+            const long dx = 2L * x + 1 - 466, dy = 2L * y + 1 - 466;
+            const bool inside = dx * dx + dy * dy <= 466L * 466L;
+            glass += inside;
+            if (va == vb) continue;
+            int dr = (va >> 11) - (vb >> 11), dg = ((va >> 5) & 63) - ((vb >> 5) & 63), db = (va & 31) - (vb & 31);
+            if (dr < 0) dr = -dr;
+            if (dg < 0) dg = -dg;
+            if (db < 0) db = -db;
+            int d = dr > dg ? dr : dg;
+            if (db > d) d = db;
+            if (d > mx) mx = d;
+            if (inside && d > 2) {
+                over++;
+            }
+        }
+    }
+    st->glass = glass;
+    st->over2 += over;
+    const double frac = glass ? (double)over / (double)glass : 0.0;
+    if (frac > st->worst_frac) { st->worst_frac = frac; st->worst_frame = frame; }
+    if (mx > st->max_step) { st->max_step = mx; st->max_frame = frame; }
+}
+
+static int fade_motion_check(int *checks)
+{
+    int bad = 0;
+    mp_build_dial();
+    uint16_t *base[MP_MAX_FRAMES], *cand[MP_MAX_FRAMES];
+    for (int i = 0; i < MP_MAX_FRAMES; i++) {
+        base[i] = malloc(466 * 466 * sizeof(uint16_t));
+        cand[i] = malloc(466 * 466 * sizeof(uint16_t));
+        if (base[i] == NULL || cand[i] == NULL) { printf("FAIL: motion buffers\n"); return 1; }
+    }
+    for (int sidx = 0; sidx < MP_NSCRIPTS; sidx++) {
+        const mp_script_t *sc = &MP_SCRIPTS[sidx];
+        const int n0 = mp_play(sc, 0u, base);
+        const int n1 = mp_play(sc, 0u, cand);
+        (*checks)++;
+        if (n0 <= 0 || n0 != n1) { printf("FAIL motion %s: %d vs %d frames\n", sc->name, n0, n1); bad++; continue; }
+        long same = 0;
+        for (int f = 0; f < n0; f++) same += memcmp(base[f], cand[f], 466 * 466 * sizeof(uint16_t)) == 0;
+        (*checks)++;
+        if (same != n0) {
+            printf("FAIL motion %s: knob 0 is not repeatable (%ld of %d frames equal)\n", sc->name, same, n0);
+            bad++;
+            continue;
+        }
+        for (unsigned b = 0; b < 32; b++) {
+            const uint32_t bit = 1u << b;
+            if ((JR_KNOB_KNOWN_MASK & bit) == 0u) continue;
+            const int n2 = mp_play(sc, bit, cand);
+            (*checks)++;
+            if (n2 != n0) { printf("FAIL motion %s bit %u: %d frames, knob 0 had %d\n", sc->name, b, n2, n0); bad++; continue; }
+            mp_stat_t st = {0};
+            long moved = 0;
+            for (int f = 0; f < n0; f++) {
+                moved += memcmp(base[f], cand[f], 466 * 466 * sizeof(uint16_t)) != 0;
+                mp_diff(base[f], cand[f], f, &st);
+            }
+            (*checks)++;
+            printf("motion %-42s bit %u: %3d frames, %3ld differ, worst frame %3d has %.3f %% over 2 steps, largest step %d (frame %d)\n",
+                   sc->name, b, n0, moved, st.worst_frame, st.worst_frac * 100.0, st.max_step, st.max_frame);
+            if (st.worst_frac > 0.005 || st.max_step > 6) {
+                printf("FAIL motion %s bit %u: outside the tolerance (0.5 %% over 2 steps, none over 6)\n", sc->name, b);
+                bad++;
+            }
+        }
+    }
+    for (int i = 0; i < MP_MAX_FRAMES; i++) { free(base[i]); free(cand[i]); }
+    return bad;
+}
+
 int main(void)
 {
     static uint16_t fb[466 * 466];
@@ -158,7 +389,21 @@ int main(void)
             }
             fc_run(sc, REFS[i].clk_ms, fb);
             checks++;
-            if (fc_hash(fb) != REFS[i].hash) {
+            if (sc->watch_in > 0) {
+                /* a frame in the middle of a slide: held to the tolerance, not the hash */
+                static uint16_t ref0[466 * 466];
+                fc_knob_extra = 0;
+                fc_setup(sc);
+                fc_run(sc, REFS[i].clk_ms, ref0);
+                fc_knob_extra = bit;
+                mp_stat_t st = {0};
+                mp_diff(ref0, fb, 0, &st);
+                if (st.worst_frac > 0.005 || st.max_step > 6) {
+                    printf("FAIL %s clk=%lld: knob bit %u moved a frame in motion past the tolerance (%.3f %%, step %d)\n",
+                           REFS[i].scene, (long long)REFS[i].clk_ms, b, st.worst_frac * 100.0, st.max_step);
+                    failures++;
+                }
+            } else if (fc_hash(fb) != REFS[i].hash) {
                 printf("FAIL %s clk=%lld: knob bit %u changed the pixels\n", REFS[i].scene,
                        (long long)REFS[i].clk_ms, b);
                 failures++;
@@ -167,6 +412,7 @@ int main(void)
     }
     failures += dial_span_check(&checks);
     fc_knob_extra = 0;
+    failures += fade_motion_check(&checks);
     /* every scene must be pinned at least once: a scene added to the fixture
      * and not to the table would otherwise be unguarded */
     for (int s = 0; s < FC_NSCENES; s++) {
