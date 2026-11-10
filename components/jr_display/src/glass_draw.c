@@ -924,6 +924,20 @@ void glass_ring_row(uint16_t *row, int y, int clip_lo, int clip_hi,
     }
 }
 
+bool glass_arc_rows(int32_t cx16, int32_t cy16, int32_t r_in16, int32_t r_out16,
+                    int32_t start_q16, int32_t sweep_q16, bool round_caps, int *y_lo, int *y_hi)
+{
+    const geo_t *g = geo_get(cx16, cy16, r_in16, r_out16, start_q16, sweep_q16, round_caps);
+    if (g == NULL) {
+        return false;
+    }
+    /* row_in_extent(): 16y + 8 within [ymin - margin, ymax + margin] */
+    const int32_t lo16 = g->ymin - EDGE_MARGIN - 8, hi16 = g->ymax + EDGE_MARGIN - 8;
+    *y_lo = (int)((lo16 + 15) >> 4);
+    *y_hi = (int)(hi16 >> 4);
+    return *y_lo <= *y_hi;
+}
+
 void glass_arc_row(uint16_t *row, int y, int clip_lo, int clip_hi,
                    int32_t cx16, int32_t cy16, int32_t r_in16, int32_t r_out16,
                    int32_t start_q16, int32_t sweep_q16,

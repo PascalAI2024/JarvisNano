@@ -4494,6 +4494,15 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
                 updating ? 0 : sg_ent_alpha(st, ent, t_age));
 
     const int ring_y0 = cyr - 130, ring_y1 = cyr + 130;
+    /* the rows each mark can reach: the other rows' calls change nothing */
+    int sg_y0[SP_WX_HOURS], sg_y1[SP_WX_HOURS];
+    for (int i = 0; i < nseg; ++i) {
+        if (!glass_arc_rows(cx16, cy16, sg_ri[i], sg_ro[i], sg_start[i], sg_sweep[i], true,
+                            &sg_y0[i], &sg_y1[i])) {
+            sg_y0[i] = 1;
+            sg_y1[i] = 0;
+        }
+    }
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         int lo = 0, hi = HUD_W - 1;
@@ -4506,8 +4515,10 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
                                GLASS_TURN_Q16, SP_C_TRACK, (uint8_t)st, swap);
             }
             for (int i = 0; i < nseg; ++i) {
-                glass_arc_row(row, y, lo, hi, cx16, cy16, sg_ri[i], sg_ro[i], sg_start[i],
-                              sg_sweep[i], rain, sg_a[i], swap);
+                if (y >= sg_y0[i] && y <= sg_y1[i]) {
+                    glass_arc_row(row, y, lo, hi, cx16, cy16, sg_ri[i], sg_ro[i], sg_start[i],
+                                  sg_sweep[i], rain, sg_a[i], swap);
+                }
             }
         }
         sg_ico_row(row, y, lo, hi, swap, &t_ico);

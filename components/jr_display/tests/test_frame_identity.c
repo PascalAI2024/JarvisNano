@@ -223,6 +223,58 @@ int main(void)
         printf("battery / desk ring records: largest %ld bytes of %d (PSRAM, three blocks)\n",
                bytes_max, SG_FRING_CAP);
     }
+    /* glass_arc_rows(): a row outside it must be a row glass_arc_row leaves
+     * untouched, for arcs of every sweep and start, thick and thin, with and
+     * without round caps (WEATHER's marks are drawn only on the rows inside); and
+     * the rows inside must not be all of them, or the bound would prove nothing. */
+    {
+        static uint16_t row[466];
+        static const int32_t sweeps[] = { 546, 3641, 9000, 16384, 32768, 40000, 65000 };
+        static const int32_t widths[] = { 16, 32, 80, 160 };
+        long outside = 0, inside = 0;
+        for (unsigned wi = 0; wi < sizeof widths / sizeof widths[0]; wi++) {
+            for (unsigned si = 0; si < sizeof sweeps / sizeof sweeps[0]; si++) {
+                for (int32_t start = 0; start < 65536; start += 2731) {
+                    for (int caps = 0; caps < 2; caps++) {
+                        const int32_t rc = 118 * 16, ri = rc - widths[wi] / 2, ro = rc + (widths[wi] + 1) / 2;
+                        int lo, hi;
+                        const bool any = glass_arc_rows(SP_CX * 16, SP_CY * 16, ri, ro, start, sweeps[si],
+                                                        caps != 0, &lo, &hi);
+                        checks++;
+                        if (!any) { lo = 1; hi = 0; }
+                        for (int y = 0; y < 466; y++) {
+                            memset(row, 0, sizeof row);
+                            if (caps) {
+                                glass_arc_row(row, y, 0, 465, SP_CX * 16, SP_CY * 16, ri, ro, start,
+                                              sweeps[si], 0xFFFFu, 255u, false);
+                            } else {
+                                glass_ring_row(row, y, 0, 465, SP_CX * 16, SP_CY * 16, ri, ro, start,
+                                               sweeps[si], 0xFFFFu, 255u, false);
+                            }
+                            bool drew = false;
+                            for (int x = 0; x < 466 && !drew; x++) drew = row[x] != 0u;
+                            if (y < lo || y > hi) {
+                                outside++;
+                                if (drew) {
+                                    printf("FAIL arc rows %d..%d: row %d is drawn (start %d sweep %d width %d caps %d)\n",
+                                           lo, hi, y, (int)start, (int)sweeps[si], (int)widths[wi], caps);
+                                    failures++;
+                                    break;
+                                }
+                            } else {
+                                inside++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        checks++;
+        if (outside < 100000 || inside < 10000) {
+            printf("FAIL arc rows comparison is degenerate (outside %ld, inside %ld)\n", outside, inside);
+            failures++;
+        }
+    }
     /* The orbit's lit mark is only asked about on the rows orbit_mark_rows()
      * allows: at every one of its 256 positions, every row outside the bound
      * must be a row the real arc leaves untouched, and the rows inside must not

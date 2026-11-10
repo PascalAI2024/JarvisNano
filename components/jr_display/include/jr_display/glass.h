@@ -190,6 +190,14 @@ void glass_arc_row(uint16_t *row, int y, int clip_lo, int clip_hi,
                    int32_t start_q16, int32_t sweep_q16,
                    uint16_t color565, uint8_t alpha, bool swap_bytes);
 
+/* The rows glass_ring_row / glass_arc_row can draw anything on for these
+ * parameters (y_lo..y_hi, inclusive, before the panel clip): every other row
+ * is a call that returns having changed nothing, so a caller with many arcs
+ * can skip it. Exact, not a bound looser than the primitive's own early-out.
+ * False when the shape is empty. */
+bool glass_arc_rows(int32_t cx16, int32_t cy16, int32_t r_in16, int32_t r_out16,
+                    int32_t start_q16, int32_t sweep_q16, bool round_caps, int *y_lo, int *y_hi);
+
 /* Soft halo around a ring or arc: coverage `peak` (0..255) at the stroke edge
  * (and over the stroke), falling quadratically to 0 at `width16` away, on
  * both sides. `round_caps` shapes the span ends like glass_arc_row, otherwise
