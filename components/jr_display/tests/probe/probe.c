@@ -145,6 +145,8 @@ int main(int argc, char **argv)
     const char *caption = flag_val(argc, argv, "caption=");
     const char *sky_arg = flag_val(argc, argv, "sky=");     /* JR_DISPLAY_SKY_* as a number */
     const char *hour_arg = flag_val(argc, argv, "hour=");   /* the clock's hour: 23 is night */
+    const char *shent_arg = flag_val(argc, argv, "shent=");   /* the shade's entry clock, ms */
+    const char *breath_arg = flag_val(argc, argv, "breath="); /* the muted button's breath phase, ms */
     const char *vol_arg = flag_val(argc, argv, "vol=");
     const char *light_arg = flag_val(argc, argv, "light=");
     s_display.board.width = 466;
@@ -166,7 +168,11 @@ int main(int argc, char **argv)
     assert(jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE);
     jr_display_nav_down();
     assert(jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_SHADE);
+#ifndef NO_ENTRY
+    assert(jr_display_hit(233, SP_BTN_CY) == JR_DISPLAY_ACT_PRIVACY_TOGGLE);
+#else
     assert(jr_display_hit(233, 292) == JR_DISPLAY_ACT_PRIVACY_TOGGLE);
+#endif
     jr_display_nav_home();
     assert(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS);
     assert(jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE);
@@ -231,8 +237,12 @@ int main(int argc, char **argv)
     jr_display_sun_set(7 * 60 + 2, 19 * 60 + 35);
 #ifndef NO_ENTRY
     s_entry_ms = ent_arg ? (uint32_t)atoi(ent_arg) : SP_ENTRY_TOTAL_MS;
+    s_shade_ms = shent_arg ? (uint32_t)atoi(shent_arg) : SP_SHADE_ENTRY_MS;
+    s_breath_ms = breath_arg ? (uint32_t)atoi(breath_arg) : 0U;
 #else
     (void)ent_arg;
+    (void)shent_arg;
+    (void)breath_arg;
 #endif
     jr_display_jarvis_set_session(true, 12U, 3725U);
     /* Mid-update, staged app0 -> ota_1: the state that exercises the most

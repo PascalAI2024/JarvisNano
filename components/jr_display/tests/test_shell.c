@@ -847,9 +847,9 @@ static void test_shade_readouts_survive_at_100(void)
     s_status_word = 100U;                     /* volume 100 */
     __atomic_store_n(&s_brightness_want, 100U, __ATOMIC_RELEASE);
     sp_compose();
-    CHECK(strcmp(s_shade_vol, "L VOL 100%") == 0,
+    CHECK(strcmp(s_shade_vol, "100%") == 0,
           "shade volume complete, got '%s'", s_shade_vol);
-    CHECK(strcmp(s_shade_light, "R LGT 100%") == 0,
+    CHECK(strcmp(s_shade_light, "100%") == 0,
           "shade light complete, got '%s'", s_shade_light);
     CHECK(strlen(s_shade_light) < (size_t)SP_COL_MAX,
           "shade light fits its store, got %zu of %d",
@@ -1311,6 +1311,235 @@ static void test_caption_band_gives_way_to_a_black_backdrop(void)
     free(fb);
 }
 
+/* THE SHADE ON THE GLASS. Volume and brightness are rim arcs that fill with
+ * their value, the mute button is cyan live and gold muted, and the breathing
+ * ring exists only while the shade is open AND the microphone is muted. */
+static int exact_in_annulus(const uint16_t *fb, uint16_t color, int cx, int cy, int r0, int r1,
+                            int side /* -1 left of cx, 1 right, 0 both */)
+{
+    int n = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            const int dx = x - cx, dy = y - cy;
+            const int r = sp_isqrt(dx * dx + dy * dy);
+            if (r < r0 || r > r1 || (side < 0 && dx >= 0) || (side > 0 && dx <= 0)) {
+                continue;
+            }
+            n += fb[(size_t)y * HUD_W + x] == color;
+        }
+    }
+    return n;
+}
+
+static int drawn_in_annulus(const uint16_t *fb, int cx, int cy, int r0, int r1)
+{
+    int n = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            const int dx = x - cx, dy = y - cy;
+            const int r = sp_isqrt(dx * dx + dy * dy);
+            n += r >= r0 && r <= r1 && fb[(size_t)y * HUD_W + x] != POISON;
+        }
+    }
+    return n;
+}
+
+static void stage_shade(bool muted, int vol, int light, uint32_t ent, uint32_t breath)
+{
+    stage_power(JR_DISPLAY_OTA_IDLE, 0U, JR_DISPLAY_OVERLAY_SHADE);
+    s_space_veil = 0;
+    s_space_black = 0;
+    s_status_word = (uint32_t)vol;
+    __atomic_store_n(&s_brightness_want, (uint8_t)light, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_hud_env_word, 74U | (muted ? (1U << 9) : 0U), __ATOMIC_RELEASE);
+    s_shade_ms = ent;
+    s_breath_ms = breath;
+    sp_compose();
+}
+
+static void test_shade_button_arcs_and_breath(void)
+{
+    /* the arcs fill with their value */
+    stage_shade(false, 25, 25, SP_SHADE_ENTRY_MS, 0U);
+    uint16_t *fb = render_frame();
+    CHECK(fb != NULL, "frame allocated");
+    if (!fb) {
+        return;
+    }
+    const int v25 = exact_in_annulus(fb, SP_C_CYAN, SP_CX, SP_CY, 180, 188, -1);
+    const int l25 = exact_in_annulus(fb, SP_C_AMBER, SP_CX, SP_CY, 180, 188, 1);
+    free(fb);
+    stage_shade(false, 75, 75, SP_SHADE_ENTRY_MS, 0U);
+    fb = render_frame();
+    CHECK(fb != NULL, "frame allocated");
+    if (!fb) {
+        return;
+    }
+    const int v75 = exact_in_annulus(fb, SP_C_CYAN, SP_CX, SP_CY, 180, 188, -1);
+    const int l75 = exact_in_annulus(fb, SP_C_AMBER, SP_CX, SP_CY, 180, 188, 1);
+    CHECK(v25 > 100 && l25 > 100, "a quarter fill is drawn: %d %d", v25, l25);
+    CHECK(v75 > 2 * v25 && l75 > 2 * l25, "three quarters is about three times a quarter: vol %d/%d light %d/%d",
+          v75, v25, l75, l25);
+    /* the volume arc is on the left rim and brightness on the right, never the other way */
+    CHECK(exact_in_annulus(fb, SP_C_CYAN, SP_CX, SP_CY, 180, 188, 1) == 0, "no cyan arc on the right rim");
+    CHECK(exact_in_annulus(fb, SP_C_AMBER, SP_CX, SP_CY, 180, 188, -1) == 0, "no amber arc on the left rim");
+    /* and the fill is the low end: lower left for volume, lower right for light */
+    int upper = 0, lower = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < SP_CX; ++x) {
+            const int dx = x - SP_CX, dy = y - SP_CY;
+            const int r = sp_isqrt(dx * dx + dy * dy);
+            if (r >= 180 && r <= 188 && fb[(size_t)y * HUD_W + x] == SP_C_CYAN) {
+                if (dy < 0) { ++upper; } else { ++lower; }
+            }
+        }
+    }
+    CHECK(upper > 0 && lower > upper && upper * 100 > lower * 35 && upper * 100 < lower * 65,
+          "75%% fills past the middle, from the bottom: %d above, %d below", upper, lower);
+    free(fb);
+
+    /* the entry: nothing at 0, growing, then settled */
+    int prev = -1;
+    static const uint32_t at[] = {0, 150, 300, 450, 700};
+    for (size_t k = 0; k < sizeof at / sizeof *at; ++k) {
+        stage_shade(false, 80, 80, at[k], 0U);
+        fb = render_frame();
+        if (!fb) {
+            CHECK(false, "frame allocated");
+            return;
+        }
+        const int n = exact_in_annulus(fb, SP_C_CYAN, SP_CX, SP_CY, 180, 188, -1);
+        if (k == 0) {
+            CHECK(n == 0, "no volume fill at entry 0: %d", n);
+        }
+        CHECK(n >= prev, "the volume arc only grows: %d then %d at %u ms", prev, n, (unsigned)at[k]);
+        prev = n;
+        free(fb);
+    }
+
+    /* the button: gold muted, cyan live, no cross-over */
+    for (int muted = 0; muted <= 1; ++muted) {
+        stage_shade(muted != 0, 50, 50, SP_SHADE_ENTRY_MS, 0U);
+        fb = render_frame();
+        if (!fb) {
+            CHECK(false, "frame allocated");
+            return;
+        }
+        const int gold = exact_in_annulus(fb, SP_C_GOLD, SP_BTN_PRIV_CX, SP_BTN_CY, 0, 64, 0);
+        const int cyan = exact_in_annulus(fb, SP_C_CYAN, SP_BTN_PRIV_CX, SP_BTN_CY, 0, 64, 0);
+        const int halo = drawn_in_annulus(fb, SP_BTN_PRIV_CX, SP_BTN_CY, 66, 74);
+        if (muted) {
+            CHECK(gold > 200 && cyan == 0, "muted button is gold only: gold %d cyan %d", gold, cyan);
+            CHECK(halo > 100, "muted draws the breathing ring: %d px", halo);
+        } else {
+            CHECK(cyan > 200 && gold == 0, "live button is cyan only: cyan %d gold %d", cyan, gold);
+            CHECK(halo == 0, "live draws no breathing ring: %d px", halo);
+        }
+        free(fb);
+    }
+
+    /* the breath is a bounded, periodic raised cosine that rests at the edge */
+    int32_t g0 = 0, g_mid = 0, g_end = 0, g_lo = 1 << 20, g_hi = -1;
+    int a0 = 0, a_mid = 0, a_end = 0, a_lo = 1 << 20, a_hi = -1;
+    sg_breath(0, &g0, &a0);
+    sg_breath(SP_BREATH_MS / 2, &g_mid, &a_mid);
+    sg_breath(SP_BREATH_MS, &g_end, &a_end);
+    CHECK(g0 == 0 && g_end == 0 && a0 == a_end, "the breath is periodic and starts at rest");
+    CHECK(g_mid >= 62 && a_mid < a0, "it swells 4 px and fades at the top: %d px/16, alpha %d vs %d", g_mid,
+          a_mid, a0);
+    for (uint32_t ms = 0; ms < SP_BREATH_MS; ms += 50) {
+        int32_t g;
+        int a;
+        sg_breath(ms, &g, &a);
+        g_lo = g < g_lo ? g : g_lo;
+        g_hi = g > g_hi ? g : g_hi;
+        a_lo = a < a_lo ? a : a_lo;
+        a_hi = a > a_hi ? a : a_hi;
+    }
+    CHECK(g_lo >= 0 && g_hi <= 64 && a_lo >= 25 && a_hi <= 130, "the breath stays in bounds: grow %d..%d alpha %d..%d",
+          g_lo, g_hi, a_lo, a_hi);
+
+    reset_nav();
+    s_shade_ms = SP_SHADE_ENTRY_MS;
+    s_breath_ms = 0U;
+    __atomic_store_n(&s_hud_env_word, 74U, __ATOMIC_RELEASE);
+}
+
+/* The shade's clocks: entry starts when it opens and parks when it closes, and
+ * the breath advances only with the shade open and the microphone muted, so a
+ * closed shade runs nothing and the device can rest. */
+static void test_shade_clocks_run_only_while_they_must(void)
+{
+    uint32_t now = 1000;
+    reset_nav();
+    __atomic_store_n(&s_hud_env_word, 74U | (1U << 9), __ATOMIC_RELEASE);   /* muted */
+    s_shade_ms = SP_SHADE_ENTRY_MS;
+    s_breath_ms = 0U;
+    s_shade_was_open = false;
+    for (int i = 0; i < 20; ++i) {
+        now += 70;
+        sp_fade_tick(now, 70, 8);
+    }
+    CHECK(s_breath_ms == 0U, "a closed shade does not breathe, even muted (%u)", (unsigned)s_breath_ms);
+    CHECK(s_shade_ms == SP_SHADE_ENTRY_MS && !glass_entry_animating(s_shade_ms, SP_SHADE_ENTRY_MS),
+          "a closed shade has no entry running");
+
+    jr_display_nav_down();
+    CHECK(jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_SHADE, "the shade opens");
+    now += 70;
+    sp_fade_tick(now, 70, 8);
+    CHECK(s_shade_ms == 0U && glass_entry_animating(s_shade_ms, SP_SHADE_ENTRY_MS),
+          "opening starts the entry at 0, got %u", (unsigned)s_shade_ms);
+    uint32_t last = 0;
+    int frames = 0;
+    while (glass_entry_animating(s_shade_ms, SP_SHADE_ENTRY_MS) && frames < 100) {
+        now += 70;
+        sp_fade_tick(now, 70, 8);
+        CHECK(s_shade_ms >= last, "the entry never runs backwards");
+        last = s_shade_ms;
+        ++frames;
+    }
+    CHECK(s_shade_ms == SP_SHADE_ENTRY_MS && frames >= 9 && frames <= 11, "it parks at the total in about 10 frames, got %d", frames);
+    CHECK(s_breath_ms > 0U && s_breath_ms < SP_BREATH_MS, "an open, muted shade breathes (%u)", (unsigned)s_breath_ms);
+    for (int i = 0; i < 200; ++i) {
+        now += 70;
+        sp_fade_tick(now, 70, 8);
+        CHECK(s_breath_ms < SP_BREATH_MS, "the phase wraps");
+    }
+
+    /* live: the phase holds */
+    __atomic_store_n(&s_hud_env_word, 74U, __ATOMIC_RELEASE);
+    const uint32_t held = s_breath_ms;
+    for (int i = 0; i < 10; ++i) {
+        now += 70;
+        sp_fade_tick(now, 70, 8);
+    }
+    CHECK(s_breath_ms == held, "an open, live shade does not breathe");
+
+    /* closing parks the entry; reopening replays it from 0 */
+    __atomic_store_n(&s_hud_env_word, 74U | (1U << 9), __ATOMIC_RELEASE);
+    jr_display_nav_up();
+    now += 70;
+    sp_fade_tick(now, 70, 8);
+    CHECK(s_shade_ms == SP_SHADE_ENTRY_MS, "closing parks the entry");
+    const uint32_t closed = s_breath_ms;
+    for (int i = 0; i < 10; ++i) {
+        now += 70;
+        sp_fade_tick(now, 70, 8);
+    }
+    CHECK(s_breath_ms == closed, "and the breath stops with it");
+    jr_display_nav_down();
+    now += 70;
+    sp_fade_tick(now, 70, 8);
+    CHECK(s_shade_ms == 0U, "reopening replays the entry from 0");
+
+    reset_nav();
+    s_shade_ms = SP_SHADE_ENTRY_MS;
+    s_breath_ms = 0U;
+    s_shade_was_open = false;
+    __atomic_store_n(&s_hud_env_word, 74U, __ATOMIC_RELEASE);
+}
+
 /* --------------------------------------------------------------- hit test -- */
 
 static void test_shade_hits_resolve_to_controls(void)
@@ -1318,15 +1547,32 @@ static void test_shade_hits_resolve_to_controls(void)
     reset_nav();
     jr_display_nav_down();
 
-    /* Left half decrements, right half increments, exactly as the drawn -/+
-     * end caps promise. */
-    CHECK(jr_display_hit(SP_CX + 140, SP_CY) == JR_DISPLAY_ACT_VOLUME_UP,
-          "volume up");
-    CHECK(jr_display_hit(SP_CX - 140, SP_CY) == JR_DISPLAY_ACT_VOLUME_DOWN,
-          "volume down");
+    /* The volume arc is the left rim and fills upward: above the middle is
+     * louder, below it quieter. The right rim is the brightness arc, which has
+     * no touch action, so a tap there closes the shade like any other. */
+    CHECK(jr_display_hit(SP_CX - 190, SP_CY - 60) == JR_DISPLAY_ACT_VOLUME_UP,
+          "volume up: upper left rim");
+    CHECK(jr_display_hit(SP_CX - 190, SP_CY + 60) == JR_DISPLAY_ACT_VOLUME_DOWN,
+          "volume down: lower left rim");
+    CHECK(jr_display_hit(SP_CX - 170, SP_CY - 100) == JR_DISPLAY_ACT_VOLUME_UP,
+          "volume up near the arc's upper end");
+    CHECK(jr_display_hit(SP_CX + 190, SP_CY - 60) == JR_DISPLAY_ACT_DISMISS,
+          "the right rim is brightness: not volume");
+    CHECK(jr_display_hit(SP_CX + 190, SP_CY + 60) == JR_DISPLAY_ACT_DISMISS,
+          "the right rim is brightness: not volume (lower)");
+    CHECK(jr_display_hit(SP_CX - 150, SP_CY - SP_VOL_HIT_DY - 20) == JR_DISPLAY_ACT_DISMISS,
+          "above the arc is not volume");
+    CHECK(jr_display_hit(SP_CX - 100, SP_CY - 60) == JR_DISPLAY_ACT_DISMISS,
+          "the icon and number cluster inside the arc is not volume");
     CHECK(jr_display_hit(SP_BTN_PRIV_CX, SP_BTN_CY) ==
               JR_DISPLAY_ACT_PRIVACY_TOGGLE,
-          "privacy");
+          "privacy at its disc's centre");
+    CHECK(jr_display_hit(SP_BTN_PRIV_CX + SP_BTN_R - 2, SP_BTN_CY) ==
+              JR_DISPLAY_ACT_PRIVACY_TOGGLE,
+          "privacy up to its drawn edge");
+    CHECK(jr_display_hit(SP_BTN_PRIV_CX + SP_BTN_R + 6, SP_BTN_CY) ==
+              JR_DISPLAY_ACT_DISMISS,
+          "privacy no further than its drawn edge");
     /* Anywhere else inside an open shade closes it rather than doing nothing. */
     CHECK(jr_display_hit(SP_CX, SP_CY + 180) == JR_DISPLAY_ACT_DISMISS,
           "outside the controls dismisses");
@@ -4952,6 +5198,8 @@ int main(void)
     test_update_ring_outlives_the_watch_clear();
 
     test_shade_hits_resolve_to_controls();
+    test_shade_button_arcs_and_breath();
+    test_shade_clocks_run_only_while_they_must();
     test_caption_band_gives_way_to_a_black_backdrop();
 
     test_every_space_composes_its_own_sheet();

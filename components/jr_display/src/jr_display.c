@@ -1882,6 +1882,17 @@ static uint32_t s_space_hold_ms;
 #define SP_ENTRY_TOTAL_MS  900U
 static uint32_t s_entry_ms = SP_ENTRY_TOTAL_MS;
 
+/* The shade's own clocks. s_shade_ms is its entry (arcs sweep, the button
+ * rises), started when the shade opens and parked at the total the moment it
+ * closes. s_breath_ms is the muted button's slow breathing: it advances ONLY
+ * while the shade is open and the microphone is muted, so a closed shade runs
+ * no animation and the face is free to rest. */
+#define SP_SHADE_ENTRY_MS 700U
+#define SP_BREATH_MS      3600U
+static uint32_t s_shade_ms = SP_SHADE_ENTRY_MS;
+static uint32_t s_breath_ms;
+static bool s_shade_was_open;
+
 /* The orbit mark's angle, in 1/4096 turn (Q4 on the 256-unit circle), plus
  * the residue of the last re-spacing. When DESK appears or disappears every
  * slot moves, and the mark for the screen you are standing on would jump with
@@ -2627,15 +2638,10 @@ static void sp_compose(void)
         brt = 100u;
     }
 
-    /* BOTH NUMBERS MUST SURVIVE AT 100. The detail column stores 10 glyphs:
-     * "L VOL 100%" is exactly 10 and survived; "R LIGHT 100%" is 12 and read
-     * "R LIGHT 10" — one of the two levels the shade exists to show, silently
-     * wrong rather than absent. LGT keeps both columns at exactly 10 in the
-     * worst case; a host assertion pins that case. */
-    int len = sp_str(s_shade_vol, 0, SP_COL_MAX, "L VOL ");
-    (void)sp_pct(s_shade_vol, len, SP_COL_MAX, vol);
-    len = sp_str(s_shade_light, 0, SP_COL_MAX, "R LGT ");
-    (void)sp_pct(s_shade_light, len, SP_COL_MAX, brt);
+    /* BOTH NUMBERS MUST SURVIVE AT 100: the store holds 10 glyphs and "100%"
+     * is 4. The icons beside the arcs say which is which. */
+    (void)sp_pct(s_shade_vol, 0, SP_COL_MAX, vol);
+    (void)sp_pct(s_shade_light, 0, SP_COL_MAX, brt);
 
     if (s_detail_ease > 0) {
         sp_compose_detail(s_detail_space);
@@ -2746,11 +2752,26 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
         if (s_shade_prog > 256) {
             s_shade_prog = 256;
         }
+        if (!s_shade_was_open) {
+            s_shade_was_open = true;
+            s_shade_ms = 0U;
+            s_breath_ms = 0U;
+        } else if (s_shade_ms < SP_SHADE_ENTRY_MS) {
+            s_shade_ms += dt_ms;
+            if (s_shade_ms > SP_SHADE_ENTRY_MS) {
+                s_shade_ms = SP_SHADE_ENTRY_MS;
+            }
+        }
+        if (sp_privacy_muted()) {
+            s_breath_ms = (s_breath_ms + dt_ms) % SP_BREATH_MS;
+        }
     } else {
         s_shade_prog -= cstep;
         if (s_shade_prog < 0) {
             s_shade_prog = 0;
         }
+        s_shade_was_open = false;
+        s_shade_ms = SP_SHADE_ENTRY_MS;
     }
     s_shade_ease = fade_smoothstep(s_shade_prog);
 
@@ -3573,24 +3594,26 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
 #define SP_SHEET_LEFT  128
 #define SP_SHEET_RIGHT 338
 
-/* The minimal voice shade: one volume arc above one privacy action. Display
- * brightness stays in Settings; Home stays on the global double-tap. */
-#define SP_VOL_IN      130
-#define SP_VOL_OUT     144
-#define SP_ARC_A0      136
-#define SP_ARC_A1      248
-#define SP_ARC_SPAN    112
-#define SP_VOL_CAP_R   158
-#define SP_VOL_TEXT_Y  176
-#define SP_LIGHT_TEXT_Y 196
-#define SP_HINT_Y      214
-#define SP_BTN_CY      292
+/* THE CONTROL SHADE. Volume is an arc on the left rim and brightness one on the
+ * right, each +-40 degrees about 9 and 3 o'clock, with the speaker or the sun
+ * and the percentage inside it; the centre is the mute button. Drawn by
+ * sp_draw_shade with the glass primitives. Brightness stays display-only: it
+ * has no touch action, as before.
+ *
+ * TOUCH. The mute button's target is its drawn disc (SP_BTN_R at SP_BTN_CY).
+ * The volume target is the left rim, SP_VOL_HIT_IN out to the shell clip: the
+ * upper half is volume UP and the lower half DOWN, the way the arc fills (from
+ * the bottom end up). The old target was the top half of a ring at r124-160,
+ * left half down, right half up, matching a -/+ pair that no longer exists;
+ * the right rim is the brightness arc now and a tap there closes the shade like
+ * any other tap outside a control. Both moved together with
+ * test_shade_hits_resolve_to_controls. */
+#define SP_BTN_CY      206
 #define SP_BTN_R       62
 #define SP_BTN_PRIV_CX SP_CX
 
-#define SP_ARC_HIT_DY  10
-#define SP_VOL_HIT_IN  124
-#define SP_VOL_HIT_OUT 160
+#define SP_VOL_HIT_IN  156
+#define SP_VOL_HIT_DY  130
 
 #define SP_C_CYAN      0x07FF
 #define SP_C_CYAN_DIM  0x0330
@@ -4753,9 +4776,45 @@ static void sp_draw_detail(const jr_display_ctx_t *ctx, int y1, int y2,
 }
 
 
-/* The minimal voice shade: volume plus an explicit MUTE/LISTEN action. */
+/* THE SHADE, on the glass primitives (geometry and touch: see SP_BTN_CY).
+ *
+ *   left rim   volume, cyan, the speaker and the number inside the arc
+ *   right rim  brightness, amber, the sun and the number inside the arc
+ *   centre     the mute button: a disc, the microphone, cyan live and gold
+ *              muted; muted adds a slash on the microphone and a slow
+ *              breathing ring (s_breath_ms runs only then, only with the
+ *              shade open). Under it the state and one line of hint.
+ *   bottom     the two key hints, one quiet line
+ *
+ * ENTRY (s_shade_ms, 700 ms): the arcs sweep to their values (ease-out-cubic,
+ * brightness 90 ms behind) while the numbers count up; the button's disc grows
+ * from 71% to full as it fades in; the icons, the state, the hint and the keys
+ * follow, staggered. Every alpha is multiplied by the shade fade `st`. */
+#define SG_SH_R_IN16   (180 * 16)
+#define SG_SH_R_OUT16  (188 * 16)
+#define SG_SH_HALF_Q16 7282            /* each arc: +-40 degrees about 9 and 3 o'clock */
+#define SG_SH_Y0       104             /* rows the arcs can touch */
+#define SG_SH_Y1       362
+#define SG_SH_CLUSTER_DX 128           /* the icon and number sit this far from the centre line */
+#define SG_SH_ICON_Y   (SP_CY - 25)     /* icon + gap + number: 51 px, centred on the arcs */
+#define SG_SH_NUM_Y    (SP_CY + 11)
+#define SG_SH_STATE_Y  (SP_BTN_CY + SP_BTN_R + 20)
+#define SG_SH_HINT_Y   (SP_BTN_CY + SP_BTN_R + 44)
+#define SG_SH_KEYS_Y   372
+
+/* The breathing ring's two numbers at phase `ms`: how far out it has grown
+ * (0..4 px, in 1/16 px) and its alpha. A raised cosine, so it rests at the
+ * button's edge, swells, and settles; the same function every strip. */
+static void sg_breath(uint32_t ms, int32_t *grow16, int *alpha)
+{
+    const uint32_t phase = (uint32_t)(((uint64_t)(ms % SP_BREATH_MS) * GLASS_TURN_Q16) / SP_BREATH_MS);
+    const int b = (int)((32768 - glass_cos_q15(phase)) >> 8);   /* 0..256 */
+    *grow16 = (4 * 16 * b) >> 8;
+    *alpha = 130 - ((100 * b) >> 8);
+}
+
 static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
-                          uint16_t *pixels, int st)
+                          uint16_t *pixels, int st, uint32_t ent, uint32_t breath_ms)
 {
     if (st <= 0) {
         return;
@@ -4765,75 +4824,108 @@ static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
     if (vol > 100) {
         vol = 100;
     }
-    const bool muted = sp_privacy_muted();
-    const uint16_t track = sp_tint(ctx, SP_C_TRACK, st);
-    const uint16_t cyan = sp_tint(ctx, SP_C_CYAN, st);
-    const uint16_t gold = sp_tint(ctx, SP_C_GOLD, st);
-    const uint16_t amber = sp_tint(ctx, SP_C_AMBER, st);
-    const uint16_t grey = sp_tint(ctx, SP_C_GREY, st);
-    const uint16_t plate = sp_tint(ctx, SP_C_PLATE, st);
-    const uint16_t priv = muted ? gold : cyan;
-
-    const int vspan = (vol * SP_ARC_SPAN) / 100;
-    sp_span_t track_span, vfill;
-    sp_span_set(&track_span, SP_ARC_A0, SP_ARC_A1);
-    if (vspan > 0) {
-        sp_span_set(&vfill, SP_ARC_A0, SP_ARC_A0 + vspan);
+    int brt = (int)__atomic_load_n(&s_brightness_want, __ATOMIC_ACQUIRE);
+    if (brt > 100) {
+        brt = 100;
     }
+    const bool swap = ctx->board.swap_color_bytes;
+    const bool muted = sp_privacy_muted();
+    const uint16_t priv = muted ? SP_C_GOLD : SP_C_CYAN;
+    const int cx16 = SP_CX * 16, cy16 = SP_CY * 16;
 
-    const int vcap_y = SP_CY + ((sp_sin(SP_ARC_A0) * SP_VOL_CAP_R) >> 15) - 7;
-    const int vcap_lx = SP_CX + ((sp_cos(SP_ARC_A0) * SP_VOL_CAP_R) >> 15) - 6;
-    const int vcap_rx = SP_CX + ((sp_cos(SP_ARC_A1) * SP_VOL_CAP_R) >> 15) - 6;
+    /* the arcs, swept to their values */
+    const uint32_t f_vol = glass_stagger_q16(ent, 0, 600);
+    const uint32_t f_lgt = glass_stagger_q16(ent, 90, 600);
+    const int32_t span = 2 * SG_SH_HALF_Q16;
+    const int32_t vsweep = (int32_t)(((int64_t)((int64_t)span * vol / 100) * f_vol) >> 16);
+    const int32_t lsweep = (int32_t)(((int64_t)((int64_t)span * brt / 100) * f_lgt) >> 16);
+    const int32_t l_start = (GLASS_TURN_Q16 / 2 - SG_SH_HALF_Q16) & 0xFFFF;      /* lower left, up to upper left */
+    const int32_t r_track = (GLASS_TURN_Q16 - SG_SH_HALF_Q16) & 0xFFFF;          /* upper right, down to lower right */
+    const int32_t r_start = (SG_SH_HALF_Q16 - lsweep) & 0xFFFF;                  /* lower right, up */
+    const uint8_t a_track = (uint8_t)((st * 44) / 255);
 
-    static const char k_hint[] = "PWR LISTEN  BOOT CLOSE";
-    const int hintlen = (int)(sizeof k_hint - 1U);
-    const char *plabel = muted ? "LISTEN" : "MUTE";
-    const int plen = muted ? 6 : 4;
-    const int vlen = sp_len(s_shade_vol, SP_COL_MAX - 1);
-    const int llen = sp_len(s_shade_light, SP_COL_MAX - 1);
+    /* the numbers count up with their arcs */
+    char vbuf[SP_COL_MAX], lbuf[SP_COL_MAX];
+    const int vlen = sp_pct(vbuf, 0, (int)sizeof vbuf, (uint32_t)glass_count_up(vol, f_vol));
+    const int llen = sp_pct(lbuf, 0, (int)sizeof lbuf, (uint32_t)glass_count_up(brt, f_lgt));
 
+    const uint32_t t_ic = 150, t_state = 250, t_hint = 320, t_keys = 400;
+    const int a_ic = sg_ent_alpha(st, ent, t_ic);
+    sg_ico_t i_spk, i_sun;
+    sg_ico_make(&i_spk, GLASS_ICON_SPEAKER, GLASS_ICON_SM, SP_CX - SG_SH_CLUSTER_DX,
+                SG_SH_ICON_Y + sg_ent_rise(ent, t_ic), SP_C_CYAN, a_ic);
+    sg_ico_make(&i_sun, GLASS_ICON_SUN, GLASS_ICON_SM, SP_CX + SG_SH_CLUSTER_DX,
+                SG_SH_ICON_Y + sg_ent_rise(ent, t_ic), SP_C_AMBER, a_ic);
+    sg_txt_t t_vol, t_lgt, t_state_t, t_hint_t, t_keys_t;
+    sg_txt_make(&t_vol, GLASS_FONT_TEXT, vbuf, vlen, SP_CX - SG_SH_CLUSTER_DX,
+                SG_SH_NUM_Y + sg_ent_rise(ent, t_ic), 1, SP_C_INK, a_ic);
+    sg_txt_make(&t_lgt, GLASS_FONT_TEXT, lbuf, llen, SP_CX + SG_SH_CLUSTER_DX,
+                SG_SH_NUM_Y + sg_ent_rise(ent, t_ic), 1, SP_C_INK, a_ic);
+    sg_txt_make(&t_state_t, GLASS_FONT_TEXT, muted ? "MUTED" : "LISTENING", muted ? 5 : 9, SP_CX,
+                SG_SH_STATE_Y + sg_ent_rise(ent, t_state), 2, priv, sg_ent_alpha(st, ent, t_state));
+    sg_txt_make(&t_hint_t, GLASS_FONT_LABEL, muted ? "TAP TO LISTEN" : "TAP TO MUTE",
+                muted ? 13 : 11, SP_CX, SG_SH_HINT_Y + sg_ent_rise(ent, t_hint), 3, SP_C_GREY,
+                sg_ent_alpha(st, ent, t_hint));
+    sg_txt_make(&t_keys_t, GLASS_FONT_LABEL, "PWR LISTEN   BOOT CLOSE", 23, SP_CX,
+                SG_SH_KEYS_Y + sg_ent_rise(ent, t_keys), 2, SP_C_GREY,
+                (sg_ent_alpha(st, ent, t_keys) * 150) / 255);
+
+    /* the button: grows from 71% as it fades in */
+    const uint32_t f_btn = glass_stagger_q16(ent, 0, 420);
+    const int a_btn = (int)glass_frac_alpha((uint8_t)st, f_btn);
+    const int32_t br16 = (int32_t)(((int64_t)SP_BTN_R * 16 * (182 + (int)((74u * f_btn) >> 16))) >> 8);
+    sg_ico_t i_mic;
+    sg_ico_make(&i_mic, muted ? GLASS_ICON_MIC_MUTED : GLASS_ICON_MIC, GLASS_ICON_LG, SP_CX,
+                SP_BTN_CY - glass_icon_px(GLASS_ICON_LG) / 2, priv,
+                (int)glass_frac_alpha((uint8_t)st, glass_stagger_q16(ent, 120, 300)));
+    int32_t grow16 = 0;
+    int breath_a = 0;
+    if (muted) {
+        sg_breath(breath_ms, &grow16, &breath_a);
+        breath_a = (breath_a * a_btn) / 255;
+    }
+    const int32_t bcy16 = SP_BTN_CY * 16;
+    const int btn_y0 = SP_BTN_CY - SP_BTN_R - 8, btn_y1 = SP_BTN_CY + SP_BTN_R + 8;
 
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        sp_annulus_row(row, y, SP_CX, SP_CY, SP_VOL_IN, SP_VOL_OUT,
-                       &track_span, track);
-        if (vspan > 0) {
-            sp_annulus_row(row, y, SP_CX, SP_CY, SP_VOL_IN, SP_VOL_OUT,
-                           &vfill, cyan);
+        int lo = 0, hi = HUD_W - 1;
+        if (!sp_clip(y, &lo, &hi)) {
+            continue;
         }
-
-
-        sp_text_row(row, y, "-", 1, vcap_lx, vcap_y, 2, cyan);
-        sp_text_row(row, y, "+", 1, vcap_rx, vcap_y, 2, cyan);
-
-        sp_text_row(row, y, s_shade_vol, vlen, sp_text_cx(vlen, 2, 0),
-                    SP_VOL_TEXT_Y, 2, cyan);
-        sp_text_row(row, y, s_shade_light, llen, sp_text_cx(llen, 2, 0),
-                    SP_LIGHT_TEXT_Y, 2, amber);
-        sp_text_row(row, y, k_hint, hintlen, sp_text_cx(hintlen, 2, 0),
-                    SP_HINT_Y, 2, grey);
-
-        sp_annulus_row(row, y, SP_BTN_PRIV_CX, SP_BTN_CY, 0, SP_BTN_R - 4,
-                       NULL, plate);
-        sp_annulus_row(row, y, SP_BTN_PRIV_CX, SP_BTN_CY, SP_BTN_R - 3,
-                       SP_BTN_R, NULL, priv);
-        if (muted) {
-            const int dy = y - SP_BTN_CY;
-            int lo = SP_BTN_PRIV_CX - SP_BTN_R, hi = SP_BTN_PRIV_CX + SP_BTN_R;
-            if (sp_clip(y, &lo, &hi)) {
-                for (int x = lo; x <= hi; ++x) {
-                    const int dx = x - SP_BTN_PRIV_CX;
-                    const int d = dx - dy;
-                    if (dx * dx + dy * dy <= (SP_BTN_R - 6) * (SP_BTN_R - 6) &&
-                        d <= 2 && d >= -2) {
-                        row[x] = gold;
-                    }
-                }
+        if (y >= SG_SH_Y0 && y <= SG_SH_Y1) {
+            glass_arc_row(row, y, lo, hi, cx16, cy16, SG_SH_R_IN16, SG_SH_R_OUT16, l_start, span,
+                          SP_C_CYAN, a_track, swap);
+            glass_arc_row(row, y, lo, hi, cx16, cy16, SG_SH_R_IN16, SG_SH_R_OUT16, r_track, span,
+                          SP_C_AMBER, a_track, swap);
+            if (vsweep > 0) {
+                glass_arc_row(row, y, lo, hi, cx16, cy16, SG_SH_R_IN16, SG_SH_R_OUT16, l_start,
+                              vsweep, SP_C_CYAN, (uint8_t)st, swap);
+            }
+            if (lsweep > 0) {
+                glass_arc_row(row, y, lo, hi, cx16, cy16, SG_SH_R_IN16, SG_SH_R_OUT16, r_start,
+                              lsweep, SP_C_AMBER, (uint8_t)st, swap);
             }
         }
-        sp_text_row(row, y, plabel, plen,
-                    sp_text_cx(plen, 2, SP_BTN_PRIV_CX - SP_CX),
-                    SP_BTN_CY - 7, 2, priv);
+        if (y >= btn_y0 && y <= btn_y1) {
+            if (breath_a > 0) {
+                glass_ring_row(row, y, lo, hi, cx16, bcy16, SP_BTN_R * 16 + 80 + grow16,
+                               SP_BTN_R * 16 + 128 + grow16, 0, GLASS_TURN_Q16, priv,
+                               (uint8_t)breath_a, swap);
+            }
+            glass_disc_row(row, y, lo, hi, cx16, bcy16, br16, priv,
+                           (uint8_t)((a_btn * 34) / 255), swap);
+            glass_ring_row(row, y, lo, hi, cx16, bcy16, br16 - 48, br16, 0, GLASS_TURN_Q16, priv,
+                           (uint8_t)a_btn, swap);
+        }
+        sg_ico_row(row, y, lo, hi, swap, &i_mic);
+        sg_ico_row(row, y, lo, hi, swap, &i_spk);
+        sg_ico_row(row, y, lo, hi, swap, &i_sun);
+        sg_txt_row(row, y, lo, hi, swap, &t_vol);
+        sg_txt_row(row, y, lo, hi, swap, &t_lgt);
+        sg_txt_row(row, y, lo, hi, swap, &t_state_t);
+        sg_txt_row(row, y, lo, hi, swap, &t_hint_t);
+        sg_txt_row(row, y, lo, hi, swap, &t_keys_t);
     }
 }
 
@@ -4989,7 +5081,7 @@ static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
         }
     }
     if (shade > 0) {
-        sp_draw_shade(ctx, y1, y2, pixels, shade);
+        sp_draw_shade(ctx, y1, y2, pixels, shade, s_shade_ms, s_breath_ms);
     }
     sp_draw_orbit(ctx, y1, y2, pixels, under);
 }
@@ -6976,20 +7068,17 @@ jr_display_action_t jr_display_hit(int x, int y)
     }
 
     if (sp_shade_open()) {
-        /* One large action target below the volume arc. */
+        /* The mute button: its drawn disc, nothing larger. */
         const int bdx = x - SP_BTN_PRIV_CX;
         const int bdy = y - SP_BTN_CY;
         if (bdx * bdx + bdy * bdy <= SP_BTN_R * SP_BTN_R) {
             return JR_DISPLAY_ACT_PRIVACY_TOGGLE;
         }
-        /* The arcs live above the centre line; left half decrements, right
-         * half increments, exactly as the -/+ end caps show. */
-        if (dy <= SP_ARC_HIT_DY) {
-            if (r2 >= SP_VOL_HIT_IN * SP_VOL_HIT_IN &&
-                r2 <= SP_VOL_HIT_OUT * SP_VOL_HIT_OUT) {
-                return dx < 0 ? JR_DISPLAY_ACT_VOLUME_DOWN
-                              : JR_DISPLAY_ACT_VOLUME_UP;
-            }
+        /* The volume arc is the left rim: above the middle is louder, below it
+         * is quieter, as the arc fills upward. */
+        if (dx < 0 && dy >= -SP_VOL_HIT_DY && dy <= SP_VOL_HIT_DY &&
+            r2 >= SP_VOL_HIT_IN * SP_VOL_HIT_IN) {
+            return dy < 0 ? JR_DISPLAY_ACT_VOLUME_UP : JR_DISPLAY_ACT_VOLUME_DOWN;
         }
         return JR_DISPLAY_ACT_DISMISS;
     }
