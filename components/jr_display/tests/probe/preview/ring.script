@@ -1,0 +1,14 @@
+# the ring: home, then swipe down through every screen and back to home
+# (DESK is stepped over while it is dark: home, watch, weather, status, activity, home)
+scene home
+wait 1000
+swipe down
+wait 1000
+swipe down
+wait 1000
+swipe down
+wait 1000
+swipe down
+wait 1000
+swipe down
+wait 1000

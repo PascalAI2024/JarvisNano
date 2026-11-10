@@ -116,3 +116,28 @@ target_compile_options(glass_bench PRIVATE -O2 -Wall -Wextra -Werror)
 add_test(NAME jr_display_hud_tests COMMAND jr_display_hud_tests)
 add_test(NAME jr_display_shell_tests COMMAND jr_display_shell_tests)
 add_test(NAME jr_display_frame_tests COMMAND jr_display_frame_tests)
+# The production compositor played through time (scripts/glass-preview.py builds
+# and runs this in Docker). Not a suite: its output is an animation. See
+# docs/reference/glass-preview.md.
+add_executable(glass_preview EXCLUDE_FROM_ALL
+    probe/glass_preview.c
+    ../src/hud_render.c
+    ../src/balance_wheel_data.c
+    ../src/companion.c
+    ../src/glass_font.c
+    ../src/glass_draw.c
+    ../src/glass_font_data.c
+    ../src/glass_icon.c
+    ../src/glass_icon_data.c
+)
+target_include_directories(glass_preview PRIVATE
+    ../include
+    ../src
+    ../../jr_ports/include
+    probe/stubs
+    .
+)
+target_compile_options(glass_preview PRIVATE -O2 -Wall -Wextra -Werror -Wno-unused-function)
+target_compile_definitions(glass_preview PRIVATE
+    JR_HOST_DIAL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../firmware/mascot/reactive"
+)
