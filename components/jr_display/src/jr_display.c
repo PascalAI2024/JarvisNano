@@ -14,6 +14,7 @@
 #include <stdatomic.h>
 #include "jr_display/hud_render.h"
 #include "jr_display/glass.h"
+#include "jr_display/glass_icon.h"
 
 #include <stdio.h>
 #include <stddef.h>
@@ -1070,8 +1071,12 @@ static int              s_choice_label_len[HUD_CHOICE_MAX];
  * caller's buffer only has to survive the call itself. */
 static char             s_caption_text[97];
 static char             s_caption_line[2][39];     /* wrapped at 19 for scale 2 */
-static int              s_caption_x[2];
-static int              s_caption_y[2];
+static int              s_caption_y[2];            /* cap-height tops of the lines  */
+static bool             s_caption_grey;            /* a quiet hint, not a message   */
+#define JR_CAPTION_ONE_Y  396                       /* one line: its cap top         */
+#define JR_CAPTION_TWO_Y0 380                       /* two lines: first, second      */
+#define JR_CAPTION_TWO_Y1 400
+#define JR_CAPTION_TRACK  3                         /* tracked label, like the glass */
 static volatile int     s_caption_on;
 #define JR_DISPLAY_CAPTION_ACTIVE 1
 #define JR_DISPLAY_CAPTION_AMBIENT 2
@@ -1407,6 +1412,23 @@ static bool caption_is_ambient(const char *text)
     return false;
 }
 
+/* A caption is grey when it is furniture: the idle hints and the names the
+ * shell prints after a swipe. Results, errors and consent text keep the ink
+ * colour so they stay the louder thing on the glass. */
+static bool caption_is_quiet(const char *text)
+{
+    static const char *const names[] = {
+        "WEATHER", "STATUS", "DESK", "ACTIVITY", "CONTROLS CLOSED",
+        "CONTROLS - UP TO CLOSE", "DETAIL - DOWN TO CLOSE",
+    };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; ++i) {
+        if (strcmp(text, names[i]) == 0) {
+            return true;
+        }
+    }
+    return caption_is_ambient(text);
+}
+
 void jr_display_caption_set(const char *text)
 {
     if (atomic_load(&s_caption_pinned)) {
@@ -1431,12 +1453,10 @@ void jr_display_caption_set(const char *text)
     memcpy(s_caption_text, text, len);
     s_caption_text[len] = '\0';
     hud_wrap2(s_caption_text, 19, s_caption_line[0], s_caption_line[1]);
-    const int c1 = (int)strnlen(s_caption_line[0], 19U);
     const int c2 = (int)strnlen(s_caption_line[1], 19U);
-    s_caption_x[0] = (HUD_W - 12 * c1) / 2;
-    s_caption_x[1] = (HUD_W - 12 * c2) / 2;
-    s_caption_y[0] = (c2 > 0) ? 374 : 394;
-    s_caption_y[1] = 402;
+    s_caption_y[0] = (c2 > 0) ? JR_CAPTION_TWO_Y0 : JR_CAPTION_ONE_Y;
+    s_caption_y[1] = JR_CAPTION_TWO_Y1;
+    s_caption_grey = caption_is_quiet(s_caption_text);
     __atomic_store_n(&s_caption_on, JR_DISPLAY_CAPTION_ACTIVE |
                      (caption_is_ambient(s_caption_text)
                          ? JR_DISPLAY_CAPTION_AMBIENT : 0), __ATOMIC_RELEASE);
@@ -1824,6 +1844,7 @@ static char s_wx_hilo[10];            /* "H86 L76" / ""                       */
 static bool s_wx_valid;
 static bool s_wx_stale;
 static jr_display_sky_t s_wx_sky;
+static int s_wx_icon = -1;       /* glass_icon_id_t of the sky, or -1: none */
 /* THE NEXT TWELVE HOURS, one 30 degree slot each round the ring, clockwise
  * from 12 o'clock, slot 0 being now. */
 #define SP_WX_HOURS      12
@@ -1837,7 +1858,8 @@ static char    s_wx_sun[12];          /* "7:02 19:35" / ""                     *
 #define SP_ACT_ROW_GLYPHS 24
 #define SP_ACT_ROW_CAP    (SP_ACT_ROW_GLYPHS + 1)
 static char    s_act_row[ACT_MAX][SP_ACT_ROW_CAP];
-static uint8_t s_act_row_klen[ACT_MAX];   /* where the kind ends, for colour */
+#define SP_ACT_AGE_CAP 12
+static char    s_act_age[ACT_MAX][SP_ACT_AGE_CAP];   /* "JUST NOW", "7M AGO", "EARLIER" */
 static int     s_act_rows;
 
 static uint8_t  s_space_serial_seen;
@@ -1863,6 +1885,17 @@ static uint32_t s_space_hold_ms;
 #define SP_ENTRY_RING_MS   900U
 #define SP_ENTRY_TOTAL_MS  900U
 static uint32_t s_entry_ms = SP_ENTRY_TOTAL_MS;
+
+/* The shade's own clocks. s_shade_ms is its entry (arcs sweep, the button
+ * rises), started when the shade opens and parked at the total the moment it
+ * closes. s_breath_ms is the muted button's slow breathing: it advances ONLY
+ * while the shade is open and the microphone is muted, so a closed shade runs
+ * no animation and the face is free to rest. */
+#define SP_SHADE_ENTRY_MS 700U
+#define SP_BREATH_MS      3600U
+static uint32_t s_shade_ms = SP_SHADE_ENTRY_MS;
+static uint32_t s_breath_ms;
+static bool s_shade_was_open;
 
 /* The orbit mark's angle, in 1/4096 turn (Q4 on the 256-unit circle), plus
  * the residue of the last re-spacing. When DESK appears or disappears every
@@ -2468,12 +2501,45 @@ static int sp_hhmm(char *dst, int len, int cap, int minute)
     return sp_num(dst, len, cap, (uint32_t)(minute % 60));
 }
 
+/* After sunset or before sunrise, from the two words the shell already holds.
+ * Without a sun or a clock it is day: the sun is the icon that is true of every
+ * unknown. */
+static bool sp_wx_is_night(void)
+{
+    const uint32_t sw = __atomic_load_n(&s_sun_word, __ATOMIC_ACQUIRE);
+    const uint32_t cw = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
+    if ((sw & (1u << 22)) == 0u || (cw & (1u << 16)) == 0u) {
+        return false;
+    }
+    const int now = (int)((cw >> 8) & 0xFFu) * 60 + (int)(cw & 0xFFu);
+    return now < (int)(sw & 0x7FFu) || now >= (int)((sw >> 11) & 0x7FFu);
+}
+
+/* The sky as an icon. Every sky the tools side can name is mapped; a sky it
+ * could not name (UNKNOWN: windy, dust, a word it has no rule for) gets no icon
+ * rather than a cloud that says something the answer did not. A partly cloudy
+ * night is a plain cloud: the sun behind it would be wrong. */
+static int sp_wx_icon_for(jr_display_sky_t sky, bool night)
+{
+    switch (sky) {
+    case JR_DISPLAY_SKY_CLEAR:  return night ? GLASS_ICON_MOON : GLASS_ICON_SUN;
+    case JR_DISPLAY_SKY_PARTLY: return night ? GLASS_ICON_CLOUD : GLASS_ICON_PARTLY;
+    case JR_DISPLAY_SKY_CLOUDS: return GLASS_ICON_CLOUD;
+    case JR_DISPLAY_SKY_FOG:    return GLASS_ICON_FOG;
+    case JR_DISPLAY_SKY_RAIN:   return GLASS_ICON_RAIN;
+    case JR_DISPLAY_SKY_STORM:  return GLASS_ICON_THUNDER;
+    case JR_DISPLAY_SKY_SNOW:   return GLASS_ICON_SNOW;
+    default:                    return -1;
+    }
+}
+
 static void sp_compose_weather(void)
 {
     const jr_display_weather_t *w =
         &s_weather[__atomic_load_n(&s_weather_slot, __ATOMIC_ACQUIRE) & 1u];
     s_wx_valid = w->valid;
     s_wx_sky = w->sky;
+    s_wx_icon = w->valid ? sp_wx_icon_for(w->sky, sp_wx_is_night()) : -1;
     s_wx_age[0] = '\0';
     s_wx_temp[0] = '\0';
     s_wx_hilo[0] = '\0';
@@ -2528,10 +2594,11 @@ static void sp_compose_weather(void)
     }
 }
 
-/* ACTIVITY rows for this frame: "KIND SUMMARY" in the row's 24 glyphs. A
- * summary that does not fit is cut and its last glyph spent on a "." — the
- * same mark title_shorten() leaves on a DESK title, so a reader knows the
- * sentence went on. */
+/* ACTIVITY rows for this frame. s_act_row[i] is the summary alone, cut to the
+ * row's 24 glyphs with its last glyph spent on a "." when it does not fit (the
+ * same mark title_shorten() leaves on a DESK title). s_act_age[i] is the age
+ * under the sheet's own truth rule: a live row ages by esp_timer, a carried one
+ * by the wall clock, anything else says EARLIER rather than invent a number. */
 static void sp_compose_activity(void)
 {
     uint32_t n = __atomic_load_n(&s_act_count, __ATOMIC_ACQUIRE);
@@ -2541,24 +2608,27 @@ static void sp_compose_activity(void)
     s_act_rows = (int)n;
     for (uint32_t i = 0; i < n; ++i) {
         char *row = s_act_row[i];
-        int len = sp_str(row, 0, SP_ACT_ROW_CAP, s_act_kind[i]);
-        s_act_row_klen[i] = (uint8_t)len;
+        row[0] = '\0';
         const int slen = sp_len(s_act_sum[i], ACT_SUM_CAP - 1);
-        if (slen == 0) {
-            continue;
-        }
-        if (len > 0) {
-            len = sp_str(row, len, SP_ACT_ROW_CAP, " ");
-        }
-        const int room = SP_ACT_ROW_GLYPHS - len;
-        if (slen <= room) {
-            (void)sp_str(row, len, SP_ACT_ROW_CAP, s_act_sum[i]);
+        if (slen < SP_ACT_ROW_GLYPHS) {   /* a full store may have been cut by the push: mark it */
+            (void)sp_str(row, 0, SP_ACT_ROW_CAP, s_act_sum[i]);
         } else {
-            for (int k = 0; k + 1 < room; ++k) {
+            int len = 0;
+            for (int k = 0; k + 1 < SP_ACT_ROW_GLYPHS; ++k) {
                 row[len++] = s_act_sum[i][k];
             }
             row[len++] = '.';
             row[len] = '\0';
+        }
+        uint32_t age_min = 0u;
+        if (!act_age_min(i, &age_min)) {
+            (void)sp_str(s_act_age[i], 0, SP_ACT_AGE_CAP, "EARLIER");
+        } else if (age_min == 0u) {
+            (void)sp_str(s_act_age[i], 0, SP_ACT_AGE_CAP, "JUST NOW");
+        } else {
+            (void)sp_str(s_act_age[i],
+                         sp_age(s_act_age[i], 0, SP_ACT_AGE_CAP, age_min),
+                         SP_ACT_AGE_CAP, " AGO");
         }
     }
 }
@@ -2567,8 +2637,17 @@ static void sp_compose_activity(void)
  * screens, and the detail sheet if it is showing. */
 static void sp_compose(void)
 {
-    sp_compose_weather();
-    sp_compose_activity();
+    /* The weather and activity strings are read only while their screen is on
+     * the glass (or sliding to or from it), so every other screen skips them:
+     * a settled STATUS used to format both every frame for nothing. */
+    if (s_space_from == (uint8_t)JR_DISPLAY_SPACE_WEATHER ||
+        s_space_to == (uint8_t)JR_DISPLAY_SPACE_WEATHER) {
+        sp_compose_weather();
+    }
+    if (s_space_from == (uint8_t)JR_DISPLAY_SPACE_ACTIVITY ||
+        s_space_to == (uint8_t)JR_DISPLAY_SPACE_ACTIVITY) {
+        sp_compose_activity();
+    }
     const uint32_t w = __atomic_load_n(&s_status_word, __ATOMIC_ACQUIRE);
     const uint32_t vol = (w & 0xFFu) > 100u ? 100u : (w & 0xFFu);
     uint32_t brt = (uint32_t)__atomic_load_n(&s_brightness_want, __ATOMIC_ACQUIRE);
@@ -2576,15 +2655,10 @@ static void sp_compose(void)
         brt = 100u;
     }
 
-    /* BOTH NUMBERS MUST SURVIVE AT 100. The detail column stores 10 glyphs:
-     * "L VOL 100%" is exactly 10 and survived; "R LIGHT 100%" is 12 and read
-     * "R LIGHT 10" — one of the two levels the shade exists to show, silently
-     * wrong rather than absent. LGT keeps both columns at exactly 10 in the
-     * worst case; a host assertion pins that case. */
-    int len = sp_str(s_shade_vol, 0, SP_COL_MAX, "L VOL ");
-    (void)sp_pct(s_shade_vol, len, SP_COL_MAX, vol);
-    len = sp_str(s_shade_light, 0, SP_COL_MAX, "R LGT ");
-    (void)sp_pct(s_shade_light, len, SP_COL_MAX, brt);
+    /* BOTH NUMBERS MUST SURVIVE AT 100: the store holds 10 glyphs and "100%"
+     * is 4. The icons beside the arcs say which is which. */
+    (void)sp_pct(s_shade_vol, 0, SP_COL_MAX, vol);
+    (void)sp_pct(s_shade_light, 0, SP_COL_MAX, brt);
 
     if (s_detail_ease > 0) {
         sp_compose_detail(s_detail_space);
@@ -2618,7 +2692,9 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
         s_space_prog = 0;
         s_space_hold_ms = now_ms + (uint32_t)JR_DISPLAY_SPACE_HOLD_MS;
         s_entry_ms = (space == (uint8_t)JR_DISPLAY_SPACE_STATUS ||
-                      space == (uint8_t)JR_DISPLAY_SPACE_WEATHER)
+                      space == (uint8_t)JR_DISPLAY_SPACE_WEATHER ||
+                      space == (uint8_t)JR_DISPLAY_SPACE_DESK ||
+                      space == (uint8_t)JR_DISPLAY_SPACE_ACTIVITY)
                          ? 0U : SP_ENTRY_TOTAL_MS;
     } else {
         if (s_entry_ms < SP_ENTRY_TOTAL_MS) {
@@ -2695,11 +2771,26 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
         if (s_shade_prog > 256) {
             s_shade_prog = 256;
         }
+        if (!s_shade_was_open) {
+            s_shade_was_open = true;
+            s_shade_ms = 0U;
+            s_breath_ms = 0U;
+        } else if (s_shade_ms < SP_SHADE_ENTRY_MS) {
+            s_shade_ms += dt_ms;
+            if (s_shade_ms > SP_SHADE_ENTRY_MS) {
+                s_shade_ms = SP_SHADE_ENTRY_MS;
+            }
+        }
+        if (sp_privacy_muted()) {
+            s_breath_ms = (s_breath_ms + dt_ms) % SP_BREATH_MS;
+        }
     } else {
         s_shade_prog -= cstep;
         if (s_shade_prog < 0) {
             s_shade_prog = 0;
         }
+        s_shade_was_open = false;
+        s_shade_ms = SP_SHADE_ENTRY_MS;
     }
     s_shade_ease = fade_smoothstep(s_shade_prog);
 
@@ -3005,10 +3096,24 @@ static void apply_ask_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     }
 }
 
-/* STATE-04: the caption chip — a round-safe lower band with scale-2 text.
- * Scale 1 was technically legible in screenshots but unreadable on the
- * physical 1.75-inch panel. Nineteen characters per line fit the glass chord
- * at this radius; the band eases with the existing caption transition. */
+/* The two text colours the caption and the shell share. */
+#define SP_C_INK       0xF79E   /* cool white: never pure, never clinical */
+#define SP_C_GREY      0x8C71
+
+/* STATE-04: the caption chip, now drawn in the glass type. The label is
+ * GLASS_FONT_LABEL tracked +3, grey for furniture (the idle hints and the
+ * screen names a swipe prints) and ink for a message, fading in and out on
+ * s_caption_ease as it always did.
+ *
+ * THE BAND. The old chip dimmed a round-safe band (y360-430) behind its text.
+ * Over a face or a watch dial that is still what keeps the letters readable, so
+ * it stays there. On a data screen, or under the shade, the backdrop is
+ * already black or veiled and the band only dimmed the screen's own content (on
+ * STATUS the stats row ends at y382). Its weight therefore follows how little
+ * of the face is left: it is the old weight times (256 - max(black, shade)) / 256,
+ * so it fades out with the slide that blackens the backdrop and is gone, with
+ * no pixel touched, once the screen is black. Nineteen characters per line
+ * (hud_wrap2) is about 230 px of label, inside the glass chord at these rows. */
 #define JR_CAPTION_Y0 360
 #define JR_CAPTION_Y1 430          /* inclusive */
 
@@ -3020,19 +3125,25 @@ static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     if (ys > ye) {
         return;                    /* strip misses the band: one compare */
     }
-    /* Caption entrance/exit rides s_caption_ease: the band's dim deepens and
-     * the text brightens together, so the chip surfaces out of the face
-     * instead of stamping onto it. Settled (e==256) takes the exact
-     * pre-fade path — hud_dim565 fold, pure white text. */
     const int e = s_caption_ease;
-    const int k = (e * 32) >> 8;
-    if (k <= 0) {
+    if (((e * 32) >> 8) <= 0) {
         return;
     }
+    int face_left = 256 - (s_space_black > s_shade_ease ? s_space_black : s_shade_ease);
+    if (face_left < 0) {
+        face_left = 0;
+    }
+    const int k = (((e * 32) >> 8) * face_left) >> 8;
     const bool swap = ctx->board.swap_color_bytes;
     const int c = e > 255 ? 255 : e;
-    const uint16_t px_text = panel_order_color(
-        ctx, (uint16_t)(((c & 0xF8) << 8) | ((c & 0xFC) << 3) | (c >> 3)));
+    const uint16_t color = s_caption_grey ? SP_C_GREY : SP_C_INK;
+    const glass_metrics_t m = glass_font_metrics(GLASS_FONT_LABEL);
+    int tx[2], len[2];
+    for (int l = 0; l < 2; ++l) {
+        len[l] = (int)strnlen(s_caption_line[l], 19U);
+        tx[l] = (HUD_W - glass_text_width(GLASS_FONT_LABEL, s_caption_line[l],
+                                          (size_t)len[l], JR_CAPTION_TRACK)) / 2;
+    }
     for (int y = ys; y <= ye; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         const int half = hud_glass_chord(y);
@@ -3050,23 +3161,19 @@ static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
                     row[x] = hud_dim565(row[x], false);
                 }
             }
-        } else {
+        } else if (k > 0) {
             for (int x = xlo; x <= xhi; ++x) {
                 row[x] = hud_fade565(row[x], swap, k);
             }
         }
         for (int l = 0; l < 2; ++l) {
-            const char *text = s_caption_line[l];
             const int ty = s_caption_y[l];
-            if (text[0] == '\0' || y < ty || y >= ty + 14) {
+            if (len[l] <= 0 || y < ty + m.ink_top || y > ty + m.ink_bottom) {
                 continue;
             }
-            const int tx = s_caption_x[l];
-            for (int x = tx; x < HUD_W - tx; ++x) {
-                if (surface_text_pixel(text, 19U, x, y, tx, ty, 2)) {
-                    row[x] = px_text;
-                }
-            }
+            glass_text_row(row, y, xlo, xhi, GLASS_FONT_LABEL, s_caption_line[l],
+                           (size_t)len[l], tx[l], ty, JR_CAPTION_TRACK, color,
+                           (uint8_t)c, swap);
         }
     }
 }
@@ -3473,8 +3580,12 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
  * rail used to span 184-196 and overwrote both edges every frame. The inner
  * radius of sp_annulus_row is inclusive of pixels whose true radius floors to
  * one less (185 painted r184), so the inner edges sit one unit inside. */
-#define SP_ORB_TRACK_IN  186
-#define SP_ORB_TRACK_OUT 194
+/* The rail is a 4 px glass track down the middle of the band (it was 8 px of
+ * opaque annulus): the sheet of pixels it writes every strip of every frame
+ * is the biggest single cost of a settled screen, and the mark and the dots
+ * stand proud of it. Anti-aliasing adds one faint pixel each side. */
+#define SP_ORB_TRACK_IN  188
+#define SP_ORB_TRACK_OUT 192
 #define SP_ORB_R         190
 #define SP_ORB_MARK_IN   187
 #define SP_ORB_MARK_OUT  194
@@ -3506,29 +3617,29 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
 #define SP_SHEET_LEFT  128
 #define SP_SHEET_RIGHT 338
 
-/* The minimal voice shade: one volume arc above one privacy action. Display
- * brightness stays in Settings; Home stays on the global double-tap. */
-#define SP_VOL_IN      130
-#define SP_VOL_OUT     144
-#define SP_ARC_A0      136
-#define SP_ARC_A1      248
-#define SP_ARC_SPAN    112
-#define SP_VOL_CAP_R   158
-#define SP_VOL_TEXT_Y  176
-#define SP_LIGHT_TEXT_Y 196
-#define SP_HINT_Y      214
-#define SP_BTN_CY      292
+/* THE CONTROL SHADE. Volume is an arc on the left rim and brightness one on the
+ * right, each +-40 degrees about 9 and 3 o'clock, with the speaker or the sun
+ * and the percentage inside it; the centre is the mute button. Drawn by
+ * sp_draw_shade with the glass primitives. Brightness stays display-only: it
+ * has no touch action, as before.
+ *
+ * TOUCH. The mute button's target is its drawn disc (SP_BTN_R at SP_BTN_CY).
+ * The volume target is the left rim, SP_VOL_HIT_IN out to the shell clip: the
+ * upper half is volume UP and the lower half DOWN, the way the arc fills (from
+ * the bottom end up). The old target was the top half of a ring at r124-160,
+ * left half down, right half up, matching a -/+ pair that no longer exists;
+ * the right rim is the brightness arc now and a tap there closes the shade like
+ * any other tap outside a control. Both moved together with
+ * test_shade_hits_resolve_to_controls. */
+#define SP_BTN_CY      206
 #define SP_BTN_R       62
 #define SP_BTN_PRIV_CX SP_CX
 
-#define SP_ARC_HIT_DY  10
-#define SP_VOL_HIT_IN  124
-#define SP_VOL_HIT_OUT 160
+#define SP_VOL_HIT_IN  156
+#define SP_VOL_HIT_DY  130
 
 #define SP_C_CYAN      0x07FF
 #define SP_C_CYAN_DIM  0x0330
-#define SP_C_INK       0xF79E   /* cool white: never pure, never clinical */
-#define SP_C_GREY      0x8C71
 #define SP_C_AMBER     0xFD20
 #define SP_C_RED       0xF800   /* low battery: the rim's red, not amber */
 #define SP_C_GOLD      0xFEA0
@@ -3547,13 +3658,14 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
 /* WEATHER: an hour under SP_WX_HOUR_DRY percent is a faint tick, not a stroke. */
 #define SP_WX_HOUR_DRY  10     /* under this an hour is bare track           */
 
-/* ACTIVITY geometry: three rows at a 36 px pitch about the centre, each 24
- * glyphs at scale 2 centred on the axis (x 89..374). The worst corner is
- * r150 — inside JR_DISPLAY_SAFE_R, outside every focal ring, and crossed by
- * the update ring only while an update is actually in flight. */
-#define SP_ACT_X0      (SP_CX - (6 * 2 * SP_ACT_ROW_GLYPHS) / 2)
-#define SP_ACT_PITCH   36
-#define SP_ACT_Y0      (SP_CY - SP_ACT_PITCH - 7)
+/* ACTIVITY geometry: up to three two-line blocks (kind and age in the label
+ * face, the summary in the text face), 62 px apart, centred about the axis.
+ * The worst corner is a 24-glyph summary at the outer block, inside the shell
+ * clip and clear of the update ring at r140-154 only while no update runs. */
+#define SP_ACT_PITCH   62
+#define SP_ACT_Y0      (SP_CY - SP_ACT_PITCH - 17)   /* top of the first block's label line */
+#define SP_ACT_SUM_DY  20                             /* summary line below the label line */
+#define SP_ACT_GAP     12                             /* kind to age */
 
 /* Q15 sine, quarter wave, mirrored. 130 bytes of rodata buys every arc in
  * this layer with no float, no libm, and no atan anywhere. */
@@ -3890,46 +4002,6 @@ static void sp_veil(const jr_display_ctx_t *ctx, int y1, int y2,
     }
 }
 
-/* DESK: a progress ring around the number, broken into <=96-unit segments
- * because a span is a wedge intersection and a wedge cannot exceed a half
- * turn. Segmenting also gives the ring visible joints, which reads as
- * mechanical travel rather than a plain pie. */
-static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
-                          uint16_t *pixels, int oy, int st)
-{
-    const uint32_t w = __atomic_load_n(&s_desk_word, __ATOMIC_ACQUIRE);
-    int prog = (int)(w & 0xFFu);
-    if (prog > 100) {
-        prog = 100;
-    }
-    const jr_display_agent_state_t state =
-        (jr_display_agent_state_t)((w >> 8) & 0xFu);
-    const uint16_t track = sp_tint(ctx, SP_C_TRACK, st);
-    const uint16_t fill = sp_tint(ctx, state == JR_DISPLAY_AGENT_NONE
-                                           ? SP_C_CYAN
-                                           : agent_native_color(state), st);
-    const uint16_t ink = sp_tint(ctx, SP_C_INK, st);
-    const int cx = SP_CX;
-
-    char num[6];
-    const int len = sp_pct(num, 0, (int)sizeof num, (uint32_t)prog);
-    const int tx = cx - (18 * len) / 2;
-
-    sp_span_t seg[SP_ARC_SEG_MAX];
-    const int nseg = sp_arc_segments(seg, SP_ARC_SEG_MAX, SP_A_TOP,
-                                     (prog * 256) / 100);
-
-    for (int y = y1; y < y2; ++y) {
-        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        sp_annulus_row(row, y, cx, SP_CY + oy, SP_FOCAL_IN, SP_FOCAL_OUT, NULL, track);
-        for (int i = 0; i < nseg; ++i) {
-            sp_annulus_row(row, y, cx, SP_CY + oy, SP_FOCAL_IN, SP_FOCAL_OUT,
-                           &seg[i], fill);
-        }
-        sp_text_row(row, y, num, len, tx, SP_FOCAL_TEXT_Y, 3, ink);
-    }
-}
-
 static const char *sp_headline(int space);
 
 /* ---- THE GLASS DATA SCREENS: STATUS and WEATHER ----------------------------
@@ -3960,6 +4032,10 @@ static const char *sp_headline(int space);
 #define SG_STAT_DX      56
 #define SG_AGE_Y        362     /* WEATHER: how old it is, where STATUS has its stats */
 #define SG_RISE_PX      8
+#define SG_WX_ICON_SIZE GLASS_ICON_SM   /* the sky, above its word inside the ring */
+#define SG_WX_ICON_GAP  10
+#define SG_BOLT_INK_W   14   /* the small bolt's ink is this wide inside its 28 px box */
+#define SG_BOLT_GAP     6
 #define SG_FADE_MS      300
 #define SG_GLOW16       40       /* 2.5 px each side; the dearest part of the frame */
 #define SG_RAIN_SWEEP   3641    /* 20 degrees of a 30 degree slot */
@@ -3997,6 +4073,34 @@ static inline void sg_txt_row(uint16_t *row, int y, int lo, int hi, bool swap, c
     if (t->len > 0 && y >= t->y_lo && y <= t->y_hi) {
         glass_text_row(row, y, lo, hi, t->font, t->s, (size_t)t->len, t->x0, t->y_top,
                        t->tracking, t->color, t->alpha, swap);
+    }
+}
+
+/* One icon, centred on cx, its box top at y_top. An id below zero is no icon. */
+typedef struct {
+    int id, size, x0, y_top, y_hi;
+    uint16_t color;
+    uint8_t alpha;
+} sg_ico_t;
+
+static void sg_ico_make(sg_ico_t *t, int id, glass_icon_size_t size, int cx, int y_top,
+                        uint16_t native, int alpha)
+{
+    const int px = glass_icon_px(size);
+    t->id = id;
+    t->size = (int)size;
+    t->x0 = cx - px / 2;
+    t->y_top = y_top;
+    t->y_hi = y_top + px;
+    t->color = native;
+    t->alpha = (uint8_t)(id < 0 || alpha <= 0 ? 0 : (alpha > 255 ? 255 : alpha));
+}
+
+static inline void sg_ico_row(uint16_t *row, int y, int lo, int hi, bool swap, const sg_ico_t *t)
+{
+    if (t->alpha > 0u && y >= t->y_top && y < t->y_hi) {
+        glass_icon_row(row, y, lo, hi, (glass_icon_id_t)t->id, (glass_icon_size_t)t->size, t->x0,
+                       t->y_top, t->color, t->alpha, swap);
     }
 }
 
@@ -4153,6 +4257,10 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
     sg_txt_make(&t_label, GLASS_FONT_LABEL, head, llen, SP_CX,
                 hero_top - 26 + sg_ent_rise(ent, t_lbl), 3, s_wx_valid ? accent : SP_C_GREY,
                 sg_ent_alpha(st, ent, t_lbl));
+    sg_ico_t t_ico;
+    sg_ico_make(&t_ico, s_wx_icon, SG_WX_ICON_SIZE, SP_CX,
+                hero_top - 26 - SG_WX_ICON_GAP - glass_icon_px(SG_WX_ICON_SIZE) + sg_ent_rise(ent, t_lbl),
+                accent, sg_ent_alpha(st, ent, t_lbl));
     const int hw = glass_text_width(GLASS_FONT_HERO, s_wx_temp, (size_t)tlen, 0);
     const int dw = glass_text_width(GLASS_FONT_VALUE, "*", 1, 0);
     const int x0 = SP_CX - (hw + 4 + dw) / 2;
@@ -4185,6 +4293,7 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
                               sg_sweep[i], rain, sg_a[i], swap);
             }
         }
+        sg_ico_row(row, y, lo, hi, swap, &t_ico);
         sg_txt_row(row, y, lo, hi, swap, &t_label);
         sg_txt_row(row, y, lo, hi, swap, &t_temp);
         sg_txt_row(row, y, lo, hi, swap, &t_deg);
@@ -4194,45 +4303,134 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
     }
 }
 
-/* ACTIVITY: three rows, newest first, on a quiet disc. The disc is the safe
- * area dimmed a second time — the same treatment the detail sheet gives its
- * own band — so twenty-four glyphs of ink sit on a hush rather than on the
- * arc reactor. No ring, no petals: this screen is the receipt, and a receipt
- * is text. The kind is grey and the summary is ink, one scale, one line, so
- * the eye lands on what happened and only then on what did it. With nothing
- * pushed the one honest line is centred where the first row would be. */
+/* ACTIVITY: up to three blocks, newest first. Line one is the kind and the age
+ * in the label face, line two the summary in the text face; each older block
+ * is a step quieter, so the eye lands on what just happened. On entry the
+ * blocks fade in and rise, 90 ms apart. With nothing pushed the one honest
+ * line is centred where the first block would be. No second dim over the disc:
+ * the shell veil already quiets the face and a per-pixel fold over r<=168 once
+ * cost ~88k pixels a frame. */
+#define SG_ACT_STAGGER_MS 90
 static void sp_focal_activity(const jr_display_ctx_t *ctx, int y1, int y2,
-                              uint16_t *pixels, int oy, int st)
+                              uint16_t *pixels, int oy, int st, uint32_t ent)
 {
-    /* No second dim over the disc: the shell veil already quiets the face,
-     * and a per-pixel fold over r<=168 cost ~88k pixels a frame — measured
-     * 10 fps on this screen against 16-18 elsewhere. Text on the veil. */
-    const uint16_t ink = sp_tint(ctx, SP_C_INK, st);
-    const uint16_t grey = sp_tint(ctx, SP_C_GREY, st);
+    const bool swap = ctx->board.swap_color_bytes;
+    static const uint8_t k_fade[ACT_MAX] = {255, 200, 150};
+    sg_txt_t t_kind[ACT_MAX], t_age[ACT_MAX], t_sum[ACT_MAX], t_empty;
+    const glass_metrics_t tm = glass_font_metrics(GLASS_FONT_TEXT);
+
+    sg_txt_make(&t_empty, GLASS_FONT_TEXT, "NOTHING YET", s_act_rows == 0 ? 11 : 0, SP_CX,
+                SP_CY - tm.cap_h / 2 - tm.ink_top + oy + sg_ent_rise(ent, 0), 1, SP_C_GREY,
+                sg_ent_alpha(st, ent, 0));
+    for (int i = 0; i < ACT_MAX; ++i) {
+        const bool have = i < s_act_rows;
+        const uint32_t start = (uint32_t)i * SG_ACT_STAGGER_MS;
+        const int a = (sg_ent_alpha(st, ent, start) * k_fade[i]) / 255;
+        const int top = SP_ACT_Y0 + i * SP_ACT_PITCH + oy + sg_ent_rise(ent, start);
+        const char *kind = have ? s_act_kind[i] : "";
+        const char *age = have ? s_act_age[i] : "";
+        const int klen = have ? sp_len(kind, ACT_KIND_CAP - 1) : 0;
+        const int alen = have ? sp_len(age, SP_ACT_AGE_CAP - 1) : 0;
+        const int kw = glass_text_width(GLASS_FONT_LABEL, kind, (size_t)klen, 2);
+        const int aw = glass_text_width(GLASS_FONT_LABEL, age, (size_t)alen, 2);
+        const int total = kw + (klen > 0 && alen > 0 ? SP_ACT_GAP : 0) + aw;
+        const int x0 = SP_CX - total / 2;
+        sg_txt_at(&t_kind[i], GLASS_FONT_LABEL, kind, klen, x0, top, SP_C_GREY, a);
+        t_kind[i].tracking = 2;
+        sg_txt_at(&t_age[i], GLASS_FONT_LABEL, age, alen,
+                  x0 + kw + (klen > 0 ? SP_ACT_GAP : 0), top, SP_C_GREY, (a * 2) / 3);
+        t_age[i].tracking = 2;
+        const int slen = have ? sp_len(s_act_row[i], SP_ACT_ROW_CAP - 1) : 0;
+        sg_txt_make(&t_sum[i], GLASS_FONT_TEXT, s_act_row[i], slen, SP_CX, top + SP_ACT_SUM_DY, 0,
+                    SP_C_INK, a);
+    }
 
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        if (s_act_rows == 0) {
-            static const char k_empty[] = "NOTHING YET";
-            const int elen = (int)(sizeof k_empty - 1U);
-            sp_text_row(row, y, k_empty, elen, sp_text_cx(elen, 2, 0),
-                        SP_CY - 7 + oy, 2, grey);
+        int lo = 0, hi = HUD_W - 1;
+        if (!sp_clip(y, &lo, &hi)) {
             continue;
         }
+        sg_txt_row(row, y, lo, hi, swap, &t_empty);
         for (int i = 0; i < s_act_rows; ++i) {
-            const int ry = SP_ACT_Y0 + i * SP_ACT_PITCH + oy;
-            if (y < ry || y >= ry + 14) {
-                continue;
-            }
-            const int klen = (int)s_act_row_klen[i];
-            const int len = sp_len(s_act_row[i], SP_ACT_ROW_CAP - 1);
-            const int sx = klen > 0 ? klen + 1 : 0;   /* past "KIND " */
-            sp_text_row(row, y, s_act_row[i], klen, SP_ACT_X0, ry, 2, grey);
-            if (len > sx) {
-                sp_text_row(row, y, s_act_row[i] + sx, len - sx,
-                            SP_ACT_X0 + 12 * sx, ry, 2, ink);
+            sg_txt_row(row, y, lo, hi, swap, &t_kind[i]);
+            sg_txt_row(row, y, lo, hi, swap, &t_age[i]);
+            sg_txt_row(row, y, lo, hi, swap, &t_sum[i]);
+        }
+    }
+}
+
+/* DESK: the STATUS ring around the job's progress. The ring is r113-123 on the
+ * agent's state colour (cyan with none); the number counts up with the sweep on
+ * entry; the task, shortened by main.c, is the tracked label above it and the
+ * agent's state is the word below. */
+static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
+                          uint16_t *pixels, int oy, int st, uint32_t ent)
+{
+    const uint32_t w = __atomic_load_n(&s_desk_word, __ATOMIC_ACQUIRE);
+    int prog = (int)(w & 0xFFu);
+    if (prog > 100) {
+        prog = 100;
+    }
+    const jr_display_agent_state_t state = (jr_display_agent_state_t)((w >> 8) & 0xFu);
+    const uint16_t fill = state == JR_DISPLAY_AGENT_NONE ? SP_C_CYAN : agent_native_color(state);
+    const bool swap = ctx->board.swap_color_bytes;
+    const int cx16 = SP_CX * 16;
+    const int cyr = SP_CY + oy + SG_RING_DY;
+    const int cy16 = cyr * 16;
+
+    const uint32_t f_ring = glass_ease_out_cubic_q16(ent, SP_ENTRY_RING_MS);
+    const int shown = (int)glass_count_up(prog, f_ring);
+    const int32_t full = (int32_t)(((int64_t)prog * GLASS_TURN_Q16) / 100);
+    const int32_t sweep = (int32_t)(((int64_t)full * f_ring) >> 16);
+
+    char num[6];
+    const int nlen = sp_num(num, 0, (int)sizeof num, (uint32_t)shown);
+    const char *task = sp_headline(JR_DISPLAY_SPACE_DESK);
+    const int tlen = sp_len(task, SP_LABEL_CAP - 1);
+    const char *sname = sp_agent_name(state);
+    const int snlen = sp_len(sname, SP_COL_MAX - 1);
+
+    const glass_metrics_t hero = glass_font_metrics(GLASS_FONT_HERO);
+    const glass_metrics_t val = glass_font_metrics(GLASS_FONT_VALUE);
+    const int hero_top = cyr - hero.cap_h / 2 - 2;
+    const int base = hero_top + hero.cap_h;
+    const int hw = glass_text_width(GLASS_FONT_HERO, num, (size_t)nlen, 0);
+    const int pw = glass_text_width(GLASS_FONT_VALUE, "%", 1, 0);
+    const int x0 = SP_CX - (hw + 5 + pw) / 2;
+    const uint32_t t_lbl = 0, t_word = 150;
+
+    sg_txt_t t_label, t_hero, t_pc, t_state;
+    sg_txt_make(&t_label, GLASS_FONT_LABEL, task, tlen, SP_CX,
+                hero_top - 26 + sg_ent_rise(ent, t_lbl), 3, SP_C_GREY, sg_ent_alpha(st, ent, t_lbl));
+    sg_txt_at(&t_hero, GLASS_FONT_HERO, num, nlen, x0, hero_top, SP_C_INK, st);
+    sg_txt_at(&t_pc, GLASS_FONT_VALUE, "%", 1, x0 + hw + 5, base - val.cap_h, fill, st);
+    sg_txt_make(&t_state, GLASS_FONT_TEXT, sname, snlen, SP_CX, base + 16 + sg_ent_rise(ent, t_word),
+                1, SP_C_GREY, sg_ent_alpha(st, ent, t_word));
+
+    const int ring_y0 = cyr - 130, ring_y1 = cyr + 130;
+    for (int y = y1; y < y2; ++y) {
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        int lo = 0, hi = HUD_W - 1;
+        if (!sp_clip(y, &lo, &hi)) {
+            continue;
+        }
+        if (y >= ring_y0 && y <= ring_y1) {
+            glass_ring_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                           GLASS_Q16_12_OCLOCK + sweep, GLASS_TURN_Q16 - sweep, fill,
+                           (uint8_t)((st * 44) / 255), swap);
+            if (sweep > 0) {
+                glass_glow_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                               GLASS_Q16_12_OCLOCK, sweep, true, SG_GLOW16, 140, fill,
+                               (uint8_t)st, swap);
+                glass_arc_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                              GLASS_Q16_12_OCLOCK, sweep, fill, (uint8_t)st, swap);
             }
         }
+        sg_txt_row(row, y, lo, hi, swap, &t_label);
+        sg_txt_row(row, y, lo, hi, swap, &t_hero);
+        sg_txt_row(row, y, lo, hi, swap, &t_pc);
+        sg_txt_row(row, y, lo, hi, swap, &t_state);
     }
 }
 
@@ -4347,8 +4545,18 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
                 hero_top - 26 + sg_ent_rise(ent, t_lbl), 3, SP_C_GREY, sg_ent_alpha(st, ent, t_lbl));
     sg_txt_at(&t_hero, GLASS_FONT_HERO, pctbuf, plen, x0, hero_top, SP_C_INK, st);
     sg_txt_at(&t_pc, GLASS_FONT_VALUE, "%", have_gauge ? 1 : 0, x0 + hw + 5, base - val.cap_h, fill, st);
-    sg_txt_make(&t_word_t, GLASS_FONT_TEXT, word, wlen, SP_CX,
+    /* Charging: the bolt stands beside the word and the pair is centred as one,
+     * so the word keeps its place in the middle of the ring when it is alone. */
+    const int ww = glass_text_width(GLASS_FONT_TEXT, word, (size_t)wlen, 1);
+    const int word_cx = charging ? SP_CX + (SG_BOLT_INK_W + SG_BOLT_GAP) / 2 : SP_CX;
+    sg_txt_make(&t_word_t, GLASS_FONT_TEXT, word, wlen, word_cx,
                 base + 16 + sg_ent_rise(ent, t_word), 1, SP_C_GREY, sg_ent_alpha(st, ent, t_word));
+    sg_ico_t t_bolt;
+    sg_ico_make(&t_bolt, charging ? GLASS_ICON_BOLT : -1, GLASS_ICON_SM,
+                word_cx - ww / 2 - SG_BOLT_GAP - SG_BOLT_INK_W / 2,
+                base + 16 + glass_font_metrics(GLASS_FONT_TEXT).cap_h / 2 - glass_icon_px(GLASS_ICON_SM) / 2 +
+                    sg_ent_rise(ent, t_word),
+                fill, sg_ent_alpha(st, ent, t_word));
     static const char *const k_names[3] = {"WIFI", "LINK", "TOOLS"};
     const char *vals[3] = {dbm, link_on ? "ON" : "OFF", tools_on ? "ON" : "OFF"};
     const int vlen[3] = {dlen, link_on ? 2 : 3, tools_on ? 2 : 3};
@@ -4389,6 +4597,7 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
         sg_txt_row(row, y, lo, hi, swap, &t_hero);
         sg_txt_row(row, y, lo, hi, swap, &t_pc);
         sg_txt_row(row, y, lo, hi, swap, &t_word_t);
+        sg_ico_row(row, y, lo, hi, swap, &t_bolt);
         for (int i = 0; i < 3; ++i) {
             sg_txt_row(row, y, lo, hi, swap, &t_sl[i]);
             sg_txt_row(row, y, lo, hi, swap, &t_sv[i]);
@@ -4558,18 +4767,19 @@ static void sp_draw_space(const jr_display_ctx_t *ctx, int y1, int y2,
         sp_focal_status(ctx, y1, y2, pixels, oy, st, ent);
         break;
     case JR_DISPLAY_SPACE_DESK:
-        sp_focal_desk(ctx, y1, y2, pixels, oy, st);
+        sp_focal_desk(ctx, y1, y2, pixels, oy, st, ent);
         break;
     case JR_DISPLAY_SPACE_WEATHER:
         sp_focal_weather(ctx, y1, y2, pixels, oy, st, ent);
         break;
     case JR_DISPLAY_SPACE_ACTIVITY:
-        sp_focal_activity(ctx, y1, y2, pixels, oy, st);
+        sp_focal_activity(ctx, y1, y2, pixels, oy, st, ent);
         break;
     default:
         break;                /* a space with no focal object draws none */
     }
-    if (space == JR_DISPLAY_SPACE_STATUS || space == JR_DISPLAY_SPACE_WEATHER) {
+    if (space == JR_DISPLAY_SPACE_STATUS || space == JR_DISPLAY_SPACE_WEATHER ||
+        space == JR_DISPLAY_SPACE_DESK) {
         return;                   /* the glass screens set their own headline */
     }
     const char *label = sp_headline(space);
@@ -4603,10 +4813,22 @@ static void sp_draw_detail(const jr_display_ctx_t *ctx, int y1, int y2,
     }
     const bool swap = ctx->board.swap_color_bytes;
     const int k = (st * 32) / 255;
-    const uint16_t head = sp_tint(ctx, SP_C_CYAN, st);
-    const uint16_t key = sp_tint(ctx, SP_C_GREY, st);
-    const uint16_t val = sp_tint(ctx, SP_C_INK, st);
     const int hlen = sp_len(s_detail_head, SP_LABEL_CAP - 1);
+    sg_txt_t t_head, t_key[SP_ROWS_MAX], t_val[SP_ROWS_MAX];
+    sg_txt_make(&t_head, GLASS_FONT_LABEL, s_detail_head, hlen, SP_CX, SP_SHEET_HEAD_Y - 2, 3,
+                SP_C_CYAN, st);
+    for (int i = 0; i < SP_ROWS_MAX; ++i) {
+        const bool have = i < s_detail_rows;
+        const int klen = have ? sp_len(s_detail_label[i], SP_COL_MAX - 1) : 0;
+        const int vlen = have ? sp_len(s_detail_value[i], SP_VAL_MAX - 1) : 0;
+        const int ry = SP_SHEET_ROW_Y + i * SP_SHEET_ROW_DY - 2;
+        sg_txt_at(&t_key[i], GLASS_FONT_LABEL, s_detail_label[i], klen, SP_SHEET_LEFT, ry + 2,
+                  SP_C_GREY, st);
+        t_key[i].tracking = 2;
+        sg_txt_make(&t_val[i], GLASS_FONT_TEXT, s_detail_value[i], vlen, 0, ry, 0, SP_C_INK, st);
+        t_val[i].x0 = SP_SHEET_RIGHT - glass_text_width(GLASS_FONT_TEXT, s_detail_value[i],
+                                                        (size_t)vlen, 0);
+    }
 
     for (int y = ys; y <= ye; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
@@ -4622,27 +4844,54 @@ static void sp_draw_detail(const jr_display_ctx_t *ctx, int y1, int y2,
                 }
             }
         }
-        sp_text_row(row, y, s_detail_head, hlen, sp_text_cx(hlen, 2, 0),
-                    SP_SHEET_HEAD_Y, 2, head);
+        sg_txt_row(row, y, lo, hi, swap, &t_head);
         for (int i = 0; i < s_detail_rows; ++i) {
-            const int ry = SP_SHEET_ROW_Y + i * SP_SHEET_ROW_DY;
-            if (y < ry || y >= ry + 14) {
-                continue;
-            }
-            const int klen = sp_len(s_detail_label[i], SP_COL_MAX - 1);
-            const int vlen = sp_len(s_detail_value[i], SP_VAL_MAX - 1);
-            sp_text_row(row, y, s_detail_label[i], klen, SP_SHEET_LEFT, ry, 2,
-                        key);
-            sp_text_row(row, y, s_detail_value[i], vlen,
-                        SP_SHEET_RIGHT - 12 * vlen, ry, 2, val);
+            sg_txt_row(row, y, lo, hi, swap, &t_key[i]);
+            sg_txt_row(row, y, lo, hi, swap, &t_val[i]);
         }
     }
 }
 
 
-/* The minimal voice shade: volume plus an explicit MUTE/LISTEN action. */
+/* THE SHADE, on the glass primitives (geometry and touch: see SP_BTN_CY).
+ *
+ *   left rim   volume, cyan, the speaker and the number inside the arc
+ *   right rim  brightness, amber, the sun and the number inside the arc
+ *   centre     the mute button: a disc, the microphone, cyan live and gold
+ *              muted; muted adds a slash on the microphone and a slow
+ *              breathing ring (s_breath_ms runs only then, only with the
+ *              shade open). Under it the state and one line of hint.
+ *   bottom     the two key hints, one quiet line
+ *
+ * ENTRY (s_shade_ms, 700 ms): the arcs sweep to their values (ease-out-cubic,
+ * brightness 90 ms behind) while the numbers count up; the button's disc grows
+ * from 71% to full as it fades in; the icons, the state, the hint and the keys
+ * follow, staggered. Every alpha is multiplied by the shade fade `st`. */
+#define SG_SH_R_IN16   (180 * 16)
+#define SG_SH_R_OUT16  (188 * 16)
+#define SG_SH_HALF_Q16 7282            /* each arc: +-40 degrees about 9 and 3 o'clock */
+#define SG_SH_Y0       104             /* rows the arcs can touch */
+#define SG_SH_Y1       362
+#define SG_SH_CLUSTER_DX 128           /* the icon and number sit this far from the centre line */
+#define SG_SH_ICON_Y   (SP_CY - 25)     /* icon + gap + number: 51 px, centred on the arcs */
+#define SG_SH_NUM_Y    (SP_CY + 11)
+#define SG_SH_STATE_Y  (SP_BTN_CY + SP_BTN_R + 20)
+#define SG_SH_HINT_Y   (SP_BTN_CY + SP_BTN_R + 44)
+#define SG_SH_KEYS_Y   372
+
+/* The breathing ring's two numbers at phase `ms`: how far out it has grown
+ * (0..4 px, in 1/16 px) and its alpha. A raised cosine, so it rests at the
+ * button's edge, swells, and settles; the same function every strip. */
+static void sg_breath(uint32_t ms, int32_t *grow16, int *alpha)
+{
+    const uint32_t phase = (uint32_t)(((uint64_t)(ms % SP_BREATH_MS) * GLASS_TURN_Q16) / SP_BREATH_MS);
+    const int b = (int)((32768 - glass_cos_q15(phase)) >> 8);   /* 0..256 */
+    *grow16 = (4 * 16 * b) >> 8;
+    *alpha = 130 - ((100 * b) >> 8);
+}
+
 static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
-                          uint16_t *pixels, int st)
+                          uint16_t *pixels, int st, uint32_t ent, uint32_t breath_ms)
 {
     if (st <= 0) {
         return;
@@ -4652,75 +4901,108 @@ static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
     if (vol > 100) {
         vol = 100;
     }
-    const bool muted = sp_privacy_muted();
-    const uint16_t track = sp_tint(ctx, SP_C_TRACK, st);
-    const uint16_t cyan = sp_tint(ctx, SP_C_CYAN, st);
-    const uint16_t gold = sp_tint(ctx, SP_C_GOLD, st);
-    const uint16_t amber = sp_tint(ctx, SP_C_AMBER, st);
-    const uint16_t grey = sp_tint(ctx, SP_C_GREY, st);
-    const uint16_t plate = sp_tint(ctx, SP_C_PLATE, st);
-    const uint16_t priv = muted ? gold : cyan;
-
-    const int vspan = (vol * SP_ARC_SPAN) / 100;
-    sp_span_t track_span, vfill;
-    sp_span_set(&track_span, SP_ARC_A0, SP_ARC_A1);
-    if (vspan > 0) {
-        sp_span_set(&vfill, SP_ARC_A0, SP_ARC_A0 + vspan);
+    int brt = (int)__atomic_load_n(&s_brightness_want, __ATOMIC_ACQUIRE);
+    if (brt > 100) {
+        brt = 100;
     }
+    const bool swap = ctx->board.swap_color_bytes;
+    const bool muted = sp_privacy_muted();
+    const uint16_t priv = muted ? SP_C_GOLD : SP_C_CYAN;
+    const int cx16 = SP_CX * 16, cy16 = SP_CY * 16;
 
-    const int vcap_y = SP_CY + ((sp_sin(SP_ARC_A0) * SP_VOL_CAP_R) >> 15) - 7;
-    const int vcap_lx = SP_CX + ((sp_cos(SP_ARC_A0) * SP_VOL_CAP_R) >> 15) - 6;
-    const int vcap_rx = SP_CX + ((sp_cos(SP_ARC_A1) * SP_VOL_CAP_R) >> 15) - 6;
+    /* the arcs, swept to their values */
+    const uint32_t f_vol = glass_stagger_q16(ent, 0, 600);
+    const uint32_t f_lgt = glass_stagger_q16(ent, 90, 600);
+    const int32_t span = 2 * SG_SH_HALF_Q16;
+    const int32_t vsweep = (int32_t)(((int64_t)((int64_t)span * vol / 100) * f_vol) >> 16);
+    const int32_t lsweep = (int32_t)(((int64_t)((int64_t)span * brt / 100) * f_lgt) >> 16);
+    const int32_t l_start = (GLASS_TURN_Q16 / 2 - SG_SH_HALF_Q16) & 0xFFFF;      /* lower left, up to upper left */
+    const int32_t r_track = (GLASS_TURN_Q16 - SG_SH_HALF_Q16) & 0xFFFF;          /* upper right, down to lower right */
+    const int32_t r_start = (SG_SH_HALF_Q16 - lsweep) & 0xFFFF;                  /* lower right, up */
+    const uint8_t a_track = (uint8_t)((st * 44) / 255);
 
-    static const char k_hint[] = "PWR LISTEN  BOOT CLOSE";
-    const int hintlen = (int)(sizeof k_hint - 1U);
-    const char *plabel = muted ? "LISTEN" : "MUTE";
-    const int plen = muted ? 6 : 4;
-    const int vlen = sp_len(s_shade_vol, SP_COL_MAX - 1);
-    const int llen = sp_len(s_shade_light, SP_COL_MAX - 1);
+    /* the numbers count up with their arcs */
+    char vbuf[SP_COL_MAX], lbuf[SP_COL_MAX];
+    const int vlen = sp_pct(vbuf, 0, (int)sizeof vbuf, (uint32_t)glass_count_up(vol, f_vol));
+    const int llen = sp_pct(lbuf, 0, (int)sizeof lbuf, (uint32_t)glass_count_up(brt, f_lgt));
 
+    const uint32_t t_ic = 150, t_state = 250, t_hint = 320, t_keys = 400;
+    const int a_ic = sg_ent_alpha(st, ent, t_ic);
+    sg_ico_t i_spk, i_sun;
+    sg_ico_make(&i_spk, GLASS_ICON_SPEAKER, GLASS_ICON_SM, SP_CX - SG_SH_CLUSTER_DX,
+                SG_SH_ICON_Y + sg_ent_rise(ent, t_ic), SP_C_CYAN, a_ic);
+    sg_ico_make(&i_sun, GLASS_ICON_SUN, GLASS_ICON_SM, SP_CX + SG_SH_CLUSTER_DX,
+                SG_SH_ICON_Y + sg_ent_rise(ent, t_ic), SP_C_AMBER, a_ic);
+    sg_txt_t t_vol, t_lgt, t_state_t, t_hint_t, t_keys_t;
+    sg_txt_make(&t_vol, GLASS_FONT_TEXT, vbuf, vlen, SP_CX - SG_SH_CLUSTER_DX,
+                SG_SH_NUM_Y + sg_ent_rise(ent, t_ic), 1, SP_C_INK, a_ic);
+    sg_txt_make(&t_lgt, GLASS_FONT_TEXT, lbuf, llen, SP_CX + SG_SH_CLUSTER_DX,
+                SG_SH_NUM_Y + sg_ent_rise(ent, t_ic), 1, SP_C_INK, a_ic);
+    sg_txt_make(&t_state_t, GLASS_FONT_TEXT, muted ? "MUTED" : "LISTENING", muted ? 5 : 9, SP_CX,
+                SG_SH_STATE_Y + sg_ent_rise(ent, t_state), 2, priv, sg_ent_alpha(st, ent, t_state));
+    sg_txt_make(&t_hint_t, GLASS_FONT_LABEL, muted ? "TAP TO LISTEN" : "TAP TO MUTE",
+                muted ? 13 : 11, SP_CX, SG_SH_HINT_Y + sg_ent_rise(ent, t_hint), 3, SP_C_GREY,
+                sg_ent_alpha(st, ent, t_hint));
+    sg_txt_make(&t_keys_t, GLASS_FONT_LABEL, "PWR LISTEN   BOOT CLOSE", 23, SP_CX,
+                SG_SH_KEYS_Y + sg_ent_rise(ent, t_keys), 2, SP_C_GREY,
+                (sg_ent_alpha(st, ent, t_keys) * 150) / 255);
+
+    /* the button: grows from 71% as it fades in */
+    const uint32_t f_btn = glass_stagger_q16(ent, 0, 420);
+    const int a_btn = (int)glass_frac_alpha((uint8_t)st, f_btn);
+    const int32_t br16 = (int32_t)(((int64_t)SP_BTN_R * 16 * (182 + (int)((74u * f_btn) >> 16))) >> 8);
+    sg_ico_t i_mic;
+    sg_ico_make(&i_mic, muted ? GLASS_ICON_MIC_MUTED : GLASS_ICON_MIC, GLASS_ICON_LG, SP_CX,
+                SP_BTN_CY - glass_icon_px(GLASS_ICON_LG) / 2, priv,
+                (int)glass_frac_alpha((uint8_t)st, glass_stagger_q16(ent, 120, 300)));
+    int32_t grow16 = 0;
+    int breath_a = 0;
+    if (muted) {
+        sg_breath(breath_ms, &grow16, &breath_a);
+        breath_a = (breath_a * a_btn) / 255;
+    }
+    const int32_t bcy16 = SP_BTN_CY * 16;
+    const int btn_y0 = SP_BTN_CY - SP_BTN_R - 14, btn_y1 = SP_BTN_CY + SP_BTN_R + 14;   /* the breath reaches R+12 */
 
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        sp_annulus_row(row, y, SP_CX, SP_CY, SP_VOL_IN, SP_VOL_OUT,
-                       &track_span, track);
-        if (vspan > 0) {
-            sp_annulus_row(row, y, SP_CX, SP_CY, SP_VOL_IN, SP_VOL_OUT,
-                           &vfill, cyan);
+        int lo = 0, hi = HUD_W - 1;
+        if (!sp_clip(y, &lo, &hi)) {
+            continue;
         }
-
-
-        sp_text_row(row, y, "-", 1, vcap_lx, vcap_y, 2, cyan);
-        sp_text_row(row, y, "+", 1, vcap_rx, vcap_y, 2, cyan);
-
-        sp_text_row(row, y, s_shade_vol, vlen, sp_text_cx(vlen, 2, 0),
-                    SP_VOL_TEXT_Y, 2, cyan);
-        sp_text_row(row, y, s_shade_light, llen, sp_text_cx(llen, 2, 0),
-                    SP_LIGHT_TEXT_Y, 2, amber);
-        sp_text_row(row, y, k_hint, hintlen, sp_text_cx(hintlen, 2, 0),
-                    SP_HINT_Y, 2, grey);
-
-        sp_annulus_row(row, y, SP_BTN_PRIV_CX, SP_BTN_CY, 0, SP_BTN_R - 4,
-                       NULL, plate);
-        sp_annulus_row(row, y, SP_BTN_PRIV_CX, SP_BTN_CY, SP_BTN_R - 3,
-                       SP_BTN_R, NULL, priv);
-        if (muted) {
-            const int dy = y - SP_BTN_CY;
-            int lo = SP_BTN_PRIV_CX - SP_BTN_R, hi = SP_BTN_PRIV_CX + SP_BTN_R;
-            if (sp_clip(y, &lo, &hi)) {
-                for (int x = lo; x <= hi; ++x) {
-                    const int dx = x - SP_BTN_PRIV_CX;
-                    const int d = dx - dy;
-                    if (dx * dx + dy * dy <= (SP_BTN_R - 6) * (SP_BTN_R - 6) &&
-                        d <= 2 && d >= -2) {
-                        row[x] = gold;
-                    }
-                }
+        if (y >= SG_SH_Y0 && y <= SG_SH_Y1) {
+            glass_arc_row(row, y, lo, hi, cx16, cy16, SG_SH_R_IN16, SG_SH_R_OUT16, l_start, span,
+                          SP_C_CYAN, a_track, swap);
+            glass_arc_row(row, y, lo, hi, cx16, cy16, SG_SH_R_IN16, SG_SH_R_OUT16, r_track, span,
+                          SP_C_AMBER, a_track, swap);
+            if (vsweep > 0) {
+                glass_arc_row(row, y, lo, hi, cx16, cy16, SG_SH_R_IN16, SG_SH_R_OUT16, l_start,
+                              vsweep, SP_C_CYAN, (uint8_t)st, swap);
+            }
+            if (lsweep > 0) {
+                glass_arc_row(row, y, lo, hi, cx16, cy16, SG_SH_R_IN16, SG_SH_R_OUT16, r_start,
+                              lsweep, SP_C_AMBER, (uint8_t)st, swap);
             }
         }
-        sp_text_row(row, y, plabel, plen,
-                    sp_text_cx(plen, 2, SP_BTN_PRIV_CX - SP_CX),
-                    SP_BTN_CY - 7, 2, priv);
+        if (y >= btn_y0 && y <= btn_y1) {
+            if (breath_a > 0) {
+                glass_ring_row(row, y, lo, hi, cx16, bcy16, SP_BTN_R * 16 + 80 + grow16,
+                               SP_BTN_R * 16 + 128 + grow16, 0, GLASS_TURN_Q16, priv,
+                               (uint8_t)breath_a, swap);
+            }
+            glass_disc_row(row, y, lo, hi, cx16, bcy16, br16, priv,
+                           (uint8_t)((a_btn * 34) / 255), swap);
+            glass_ring_row(row, y, lo, hi, cx16, bcy16, br16 - 48, br16, 0, GLASS_TURN_Q16, priv,
+                           (uint8_t)a_btn, swap);
+        }
+        sg_ico_row(row, y, lo, hi, swap, &i_mic);
+        sg_ico_row(row, y, lo, hi, swap, &i_spk);
+        sg_ico_row(row, y, lo, hi, swap, &i_sun);
+        sg_txt_row(row, y, lo, hi, swap, &t_vol);
+        sg_txt_row(row, y, lo, hi, swap, &t_lgt);
+        sg_txt_row(row, y, lo, hi, swap, &t_state_t);
+        sg_txt_row(row, y, lo, hi, swap, &t_hint_t);
+        sg_txt_row(row, y, lo, hi, swap, &t_keys_t);
     }
 }
 
@@ -4743,31 +5025,42 @@ static void sp_draw_orbit(const jr_display_ctx_t *ctx, int y1, int y2,
                           uint16_t *pixels, int st)
 {
     const bool muted = sp_privacy_muted();
-    const uint16_t rail = sp_tint(ctx, SP_C_PLATE, st);
-    const uint16_t cool = sp_tint(ctx, muted ? SP_C_GOLD_DIM : SP_C_CYAN_DIM, st);
-    const uint16_t hot = sp_tint(ctx, muted ? SP_C_GOLD : SP_C_CYAN, st);
+    const bool swap = ctx->board.swap_color_bytes;
+    const uint16_t cool = muted ? SP_C_GOLD_DIM : SP_C_CYAN_DIM;
+    const uint16_t hot = muted ? SP_C_GOLD : SP_C_CYAN;
 
-    /* One mark per screen the ring shows RIGHT NOW — DESK only while live —
-     * and the active mark at the angle sp_fade_tick eased for this frame,
-     * which already carries the slide and the re-spacing residue. */
+    /* One mark per screen the ring shows RIGHT NOW (DESK only while live) and
+     * the active mark at the angle sp_fade_tick eased for this frame, which
+     * already carries the slide and the re-spacing residue. Rail, dots and mark
+     * are glass primitives like the screens inside them; the dot centres are
+     * worked out once, not once per row. */
     const int n = sp_ring_n(sp_desk_live());
     const int a_act = (s_orbit_a16 + 8) >> 4;
-
-    sp_span_t act;
-    sp_span_set(&act, a_act - 5, a_act + 5);
+    const int32_t mark_start = (int32_t)(((a_act - 5) * 256) & 0xFFFF);
+    int dx16[16], dy16[16];
+    const int nd = n < 16 ? n : 16;
+    for (int i = 0; i < nd; ++i) {
+        const int a = SP_A_TOP + (i * 256) / n;
+        dx16[i] = (SP_CX + ((sp_cos(a) * SP_ORB_R) >> 15)) * 16;
+        dy16[i] = (SP_CY + ((sp_sin(a) * SP_ORB_R) >> 15)) * 16;
+    }
 
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        /* The rail is now the whole ring — NULL span means all the way round. */
-        sp_annulus_row(row, y, SP_CX, SP_CY, SP_ORB_TRACK_IN, SP_ORB_TRACK_OUT,
-                       NULL, rail);
-        for (int i = 0; i < n; ++i) {
-            const int a = SP_A_TOP + (i * 256) / n;
-            sp_dot_row(row, y, SP_CX + ((sp_cos(a) * SP_ORB_R) >> 15),
-                       SP_CY + ((sp_sin(a) * SP_ORB_R) >> 15), 5, cool);
+        int lo = 0, hi = HUD_W - 1;
+        if (!sp_clip(y, &lo, &hi)) {
+            continue;
         }
-        sp_annulus_row(row, y, SP_CX, SP_CY, SP_ORB_MARK_IN, SP_ORB_MARK_OUT,
-                       &act, hot);
+        /* The whole ring; the glass ring takes the rows it touches and no more. */
+        glass_ring_row(row, y, lo, hi, SP_CX * 16, SP_CY * 16, SP_ORB_TRACK_IN * 16,
+                       SP_ORB_TRACK_OUT * 16, 0, GLASS_TURN_Q16, SP_C_PLATE, (uint8_t)st, swap);
+        for (int i = 0; i < nd; ++i) {
+            if (y >= dy16[i] / 16 - 4 && y <= dy16[i] / 16 + 4) {
+                glass_disc_row(row, y, lo, hi, dx16[i], dy16[i], 40, cool, (uint8_t)st, swap);
+            }
+        }
+        glass_arc_row(row, y, lo, hi, SP_CX * 16, SP_CY * 16, SP_ORB_MARK_IN * 16,
+                      SP_ORB_MARK_OUT * 16, mark_start, 10 * 256, hot, (uint8_t)st, swap);
     }
 }
 
@@ -4876,7 +5169,7 @@ static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
         }
     }
     if (shade > 0) {
-        sp_draw_shade(ctx, y1, y2, pixels, shade);
+        sp_draw_shade(ctx, y1, y2, pixels, shade, s_shade_ms, s_breath_ms);
     }
     sp_draw_orbit(ctx, y1, y2, pixels, under);
 }
@@ -6881,20 +7174,17 @@ jr_display_action_t jr_display_hit(int x, int y)
     }
 
     if (sp_shade_open()) {
-        /* One large action target below the volume arc. */
+        /* The mute button: its drawn disc, nothing larger. */
         const int bdx = x - SP_BTN_PRIV_CX;
         const int bdy = y - SP_BTN_CY;
         if (bdx * bdx + bdy * bdy <= SP_BTN_R * SP_BTN_R) {
             return JR_DISPLAY_ACT_PRIVACY_TOGGLE;
         }
-        /* The arcs live above the centre line; left half decrements, right
-         * half increments, exactly as the -/+ end caps show. */
-        if (dy <= SP_ARC_HIT_DY) {
-            if (r2 >= SP_VOL_HIT_IN * SP_VOL_HIT_IN &&
-                r2 <= SP_VOL_HIT_OUT * SP_VOL_HIT_OUT) {
-                return dx < 0 ? JR_DISPLAY_ACT_VOLUME_DOWN
-                              : JR_DISPLAY_ACT_VOLUME_UP;
-            }
+        /* The volume arc is the left rim: above the middle is louder, below it
+         * is quieter, as the arc fills upward. */
+        if (dx < 0 && dy >= -SP_VOL_HIT_DY && dy <= SP_VOL_HIT_DY &&
+            r2 >= SP_VOL_HIT_IN * SP_VOL_HIT_IN) {
+            return dy < 0 ? JR_DISPLAY_ACT_VOLUME_UP : JR_DISPLAY_ACT_VOLUME_DOWN;
         }
         return JR_DISPLAY_ACT_DISMISS;
     }

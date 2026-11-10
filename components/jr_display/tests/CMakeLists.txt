@@ -32,6 +32,8 @@ add_executable(jr_display_shell_tests
     ../src/glass_font.c
     ../src/glass_draw.c
     ../src/glass_font_data.c
+    ../src/glass_icon.c
+    ../src/glass_icon_data.c
 )
 target_include_directories(jr_display_shell_tests PRIVATE
     ../include
@@ -56,12 +58,17 @@ add_test(NAME jr_display_companion_tests COMMAND jr_display_companion_tests)
 # The glass primitives (anti-aliased type, discs, rings, arcs, glows). Pure C,
 # so like hud_render.c they stand alone; the test links libm for its analytic
 # references only - the code under test uses none.
-set(GLASS_SRCS ../src/glass_font.c ../src/glass_draw.c ../src/glass_font_data.c)
+set(GLASS_SRCS ../src/glass_font.c ../src/glass_draw.c ../src/glass_font_data.c
+    ../src/glass_icon.c ../src/glass_icon_data.c)
 add_executable(jr_display_glass_tests test_glass.c glass_ref.c ${GLASS_SRCS})
 target_include_directories(jr_display_glass_tests PRIVATE ../include)
 target_compile_options(jr_display_glass_tests PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(jr_display_glass_tests PRIVATE m)
 add_test(NAME jr_display_glass_tests COMMAND jr_display_glass_tests)
+add_executable(jr_display_icon_tests test_glass_icon.c ../src/glass_icon.c ../src/glass_icon_data.c ../src/glass_draw.c ../src/glass_font.c ../src/glass_font_data.c)
+target_include_directories(jr_display_icon_tests PRIVATE ../include)
+target_compile_options(jr_display_icon_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME jr_display_icon_tests COMMAND jr_display_icon_tests)
 # Eyes-on-the-glass specimen: renders two scenes through the row API to PPMs.
 # Not a suite; build it with `cmake --build build --target glass_specimen`.
 add_executable(glass_specimen EXCLUDE_FROM_ALL probe/glass_specimen.c ${GLASS_SRCS})

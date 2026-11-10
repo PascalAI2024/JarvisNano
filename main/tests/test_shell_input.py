@@ -96,6 +96,8 @@ def run(root: Path, output: Path, mutation: str | None) -> int:
                str(root / "components/jr_display/src/glass_font.c"),
                str(root / "components/jr_display/src/glass_draw.c"),
                str(root / "components/jr_display/src/glass_font_data.c"),
+               str(root / "components/jr_display/src/glass_icon.c"),
+               str(root / "components/jr_display/src/glass_icon_data.c"),
                str(root / "components/jr_display/src/companion.c")]
     for include in (
         "components/jr_display/include", "components/jr_display/src",

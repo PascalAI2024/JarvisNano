@@ -128,6 +128,8 @@ def run(root, output, mutation, raw, hashes):
                str(root / "components/jr_display/src/glass_font.c"),
                str(root / "components/jr_display/src/glass_draw.c"),
                str(root / "components/jr_display/src/glass_font_data.c"),
+               str(root / "components/jr_display/src/glass_icon.c"),
+               str(root / "components/jr_display/src/glass_icon_data.c"),
                str(root / "components/jr_display/src/companion.c"),
                str(root / "components/jr_core/src/mood.c"), "-I", str(output)]
     for include in (

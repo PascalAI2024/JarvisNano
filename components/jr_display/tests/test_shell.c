@@ -847,9 +847,9 @@ static void test_shade_readouts_survive_at_100(void)
     s_status_word = 100U;                     /* volume 100 */
     __atomic_store_n(&s_brightness_want, 100U, __ATOMIC_RELEASE);
     sp_compose();
-    CHECK(strcmp(s_shade_vol, "L VOL 100%") == 0,
+    CHECK(strcmp(s_shade_vol, "100%") == 0,
           "shade volume complete, got '%s'", s_shade_vol);
-    CHECK(strcmp(s_shade_light, "R LGT 100%") == 0,
+    CHECK(strcmp(s_shade_light, "100%") == 0,
           "shade light complete, got '%s'", s_shade_light);
     CHECK(strlen(s_shade_light) < (size_t)SP_COL_MAX,
           "shade light fits its store, got %zu of %d",
@@ -1257,6 +1257,289 @@ static void test_update_ring_outlives_the_watch_clear(void)
     free(fb);
 }
 
+/* The screen-name label is glass type, and its dark band belongs to the face:
+ * over a face it still dims y360-430, on a black data screen it touches none of
+ * the screen's own rows (STATUS keeps its stats at y352-382, which the old band
+ * dimmed from y360). */
+static void test_caption_band_gives_way_to_a_black_backdrop(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *fb = malloc(px * sizeof *fb);
+    CHECK(fb != NULL, "frame allocated");
+    if (!fb) {
+        return;
+    }
+    jr_display_caption_set("STATUS");
+    s_caption_prog = s_caption_ease = 256;
+    for (int black = 0; black <= 256; black += 256) {
+        s_space_black = black;
+        s_shade_ease = 0;
+        for (int y = 0; y < HUD_H; ++y) {
+            for (int x = 0; x < HUD_W; ++x) {
+                /* stats rows lit; the label's own rows start black */
+                fb[(size_t)y * HUD_W + x] = (y >= 352 && y <= 382) ? 0x07FFu : 0u;
+            }
+        }
+        for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+            const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+            apply_caption_overlay(&s_display, y, y2, fb + (size_t)y * HUD_W);
+        }
+        int dimmed = 0, stats = 0, ink = 0;
+        for (int y = 352; y <= 382; ++y) {
+            for (int x = 150; x <= 316; ++x) {
+                ++stats;
+                dimmed += fb[(size_t)y * HUD_W + x] != 0x07FFu;
+            }
+        }
+        for (int y = 390; y <= 415; ++y) {
+            for (int x = 150; x <= 316; ++x) {
+                ink += fb[(size_t)y * HUD_W + x] != 0u;
+            }
+        }
+        CHECK(stats == 31 * 167, "scanned %d stats pixels", stats);
+        CHECK(ink > 100, "the label draws its glyphs (black=%d, %d pixels)", black, ink);
+        if (black == 0) {
+            CHECK(dimmed > 0, "over a face the band still dims the rows from y360");
+        } else {
+            CHECK(dimmed == 0, "on a black screen no stats pixel is dimmed (%d were)", dimmed);
+        }
+        CHECK(fb[(size_t)200 * HUD_W + 233] == 0u, "nothing above the band is touched");
+    }
+    s_space_black = 0;
+    s_caption_prog = s_caption_ease = 0;
+    jr_display_caption_clear();
+    free(fb);
+}
+
+/* THE SHADE ON THE GLASS. Volume and brightness are rim arcs that fill with
+ * their value, the mute button is cyan live and gold muted, and the breathing
+ * ring exists only while the shade is open AND the microphone is muted. */
+static int exact_in_annulus(const uint16_t *fb, uint16_t color, int cx, int cy, int r0, int r1,
+                            int side /* -1 left of cx, 1 right, 0 both */)
+{
+    int n = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            const int dx = x - cx, dy = y - cy;
+            const int r = sp_isqrt(dx * dx + dy * dy);
+            if (r < r0 || r > r1 || (side < 0 && dx >= 0) || (side > 0 && dx <= 0)) {
+                continue;
+            }
+            n += fb[(size_t)y * HUD_W + x] == color;
+        }
+    }
+    return n;
+}
+
+static int drawn_in_annulus(const uint16_t *fb, int cx, int cy, int r0, int r1)
+{
+    int n = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            const int dx = x - cx, dy = y - cy;
+            const int r = sp_isqrt(dx * dx + dy * dy);
+            n += r >= r0 && r <= r1 && fb[(size_t)y * HUD_W + x] != POISON;
+        }
+    }
+    return n;
+}
+
+static void stage_shade(bool muted, int vol, int light, uint32_t ent, uint32_t breath)
+{
+    stage_power(JR_DISPLAY_OTA_IDLE, 0U, JR_DISPLAY_OVERLAY_SHADE);
+    s_space_veil = 0;
+    s_space_black = 0;
+    s_status_word = (uint32_t)vol;
+    __atomic_store_n(&s_brightness_want, (uint8_t)light, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_hud_env_word, 74U | (muted ? (1U << 9) : 0U), __ATOMIC_RELEASE);
+    s_shade_ms = ent;
+    s_breath_ms = breath;
+    sp_compose();
+}
+
+static void test_shade_button_arcs_and_breath(void)
+{
+    /* the arcs fill with their value */
+    stage_shade(false, 25, 25, SP_SHADE_ENTRY_MS, 0U);
+    uint16_t *fb = render_frame();
+    CHECK(fb != NULL, "frame allocated");
+    if (!fb) {
+        return;
+    }
+    const int v25 = exact_in_annulus(fb, SP_C_CYAN, SP_CX, SP_CY, 180, 188, -1);
+    const int l25 = exact_in_annulus(fb, SP_C_AMBER, SP_CX, SP_CY, 180, 188, 1);
+    free(fb);
+    stage_shade(false, 75, 75, SP_SHADE_ENTRY_MS, 0U);
+    fb = render_frame();
+    CHECK(fb != NULL, "frame allocated");
+    if (!fb) {
+        return;
+    }
+    const int v75 = exact_in_annulus(fb, SP_C_CYAN, SP_CX, SP_CY, 180, 188, -1);
+    const int l75 = exact_in_annulus(fb, SP_C_AMBER, SP_CX, SP_CY, 180, 188, 1);
+    CHECK(v25 > 100 && l25 > 100, "a quarter fill is drawn: %d %d", v25, l25);
+    CHECK(v75 > 2 * v25 && l75 > 2 * l25, "three quarters is about three times a quarter: vol %d/%d light %d/%d",
+          v75, v25, l75, l25);
+    /* the volume arc is on the left rim and brightness on the right, never the other way */
+    CHECK(exact_in_annulus(fb, SP_C_CYAN, SP_CX, SP_CY, 180, 188, 1) == 0, "no cyan arc on the right rim");
+    CHECK(exact_in_annulus(fb, SP_C_AMBER, SP_CX, SP_CY, 180, 188, -1) == 0, "no amber arc on the left rim");
+    /* and the fill is the low end: lower left for volume, lower right for light */
+    int upper = 0, lower = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < SP_CX; ++x) {
+            const int dx = x - SP_CX, dy = y - SP_CY;
+            const int r = sp_isqrt(dx * dx + dy * dy);
+            if (r >= 180 && r <= 188 && fb[(size_t)y * HUD_W + x] == SP_C_CYAN) {
+                if (dy < 0) { ++upper; } else { ++lower; }
+            }
+        }
+    }
+    CHECK(upper > 0 && lower > upper && upper * 100 > lower * 35 && upper * 100 < lower * 65,
+          "75%% fills past the middle, from the bottom: %d above, %d below", upper, lower);
+    free(fb);
+
+    /* the entry: nothing at 0, growing, then settled */
+    int prev = -1;
+    static const uint32_t at[] = {0, 150, 300, 450, 700};
+    for (size_t k = 0; k < sizeof at / sizeof *at; ++k) {
+        stage_shade(false, 80, 80, at[k], 0U);
+        fb = render_frame();
+        if (!fb) {
+            CHECK(false, "frame allocated");
+            return;
+        }
+        const int n = exact_in_annulus(fb, SP_C_CYAN, SP_CX, SP_CY, 180, 188, -1);
+        if (k == 0) {
+            CHECK(n == 0, "no volume fill at entry 0: %d", n);
+        }
+        CHECK(n >= prev, "the volume arc only grows: %d then %d at %u ms", prev, n, (unsigned)at[k]);
+        prev = n;
+        free(fb);
+    }
+
+    /* the button: gold muted, cyan live, no cross-over */
+    for (int muted = 0; muted <= 1; ++muted) {
+        stage_shade(muted != 0, 50, 50, SP_SHADE_ENTRY_MS, 0U);
+        fb = render_frame();
+        if (!fb) {
+            CHECK(false, "frame allocated");
+            return;
+        }
+        const int gold = exact_in_annulus(fb, SP_C_GOLD, SP_BTN_PRIV_CX, SP_BTN_CY, 0, 64, 0);
+        const int cyan = exact_in_annulus(fb, SP_C_CYAN, SP_BTN_PRIV_CX, SP_BTN_CY, 0, 64, 0);
+        const int halo = drawn_in_annulus(fb, SP_BTN_PRIV_CX, SP_BTN_CY, 66, 74);
+        if (muted) {
+            CHECK(gold > 200 && cyan == 0, "muted button is gold only: gold %d cyan %d", gold, cyan);
+            CHECK(halo > 100, "muted draws the breathing ring: %d px", halo);
+        } else {
+            CHECK(cyan > 200 && gold == 0, "live button is cyan only: cyan %d gold %d", cyan, gold);
+            CHECK(halo == 0, "live draws no breathing ring: %d px", halo);
+        }
+        free(fb);
+    }
+
+    /* the breath is a bounded, periodic raised cosine that rests at the edge */
+    int32_t g0 = 0, g_mid = 0, g_end = 0, g_lo = 1 << 20, g_hi = -1;
+    int a0 = 0, a_mid = 0, a_end = 0, a_lo = 1 << 20, a_hi = -1;
+    sg_breath(0, &g0, &a0);
+    sg_breath(SP_BREATH_MS / 2, &g_mid, &a_mid);
+    sg_breath(SP_BREATH_MS, &g_end, &a_end);
+    CHECK(g0 == 0 && g_end == 0 && a0 == a_end, "the breath is periodic and starts at rest");
+    CHECK(g_mid >= 62 && a_mid < a0, "it swells 4 px and fades at the top: %d px/16, alpha %d vs %d", g_mid,
+          a_mid, a0);
+    for (uint32_t ms = 0; ms < SP_BREATH_MS; ms += 50) {
+        int32_t g;
+        int a;
+        sg_breath(ms, &g, &a);
+        g_lo = g < g_lo ? g : g_lo;
+        g_hi = g > g_hi ? g : g_hi;
+        a_lo = a < a_lo ? a : a_lo;
+        a_hi = a > a_hi ? a : a_hi;
+    }
+    CHECK(g_lo >= 0 && g_hi <= 64 && a_lo >= 25 && a_hi <= 130, "the breath stays in bounds: grow %d..%d alpha %d..%d",
+          g_lo, g_hi, a_lo, a_hi);
+
+    reset_nav();
+    s_shade_ms = SP_SHADE_ENTRY_MS;
+    s_breath_ms = 0U;
+    __atomic_store_n(&s_hud_env_word, 74U, __ATOMIC_RELEASE);
+}
+
+/* The shade's clocks: entry starts when it opens and parks when it closes, and
+ * the breath advances only with the shade open and the microphone muted, so a
+ * closed shade runs nothing and the device can rest. */
+static void test_shade_clocks_run_only_while_they_must(void)
+{
+    uint32_t now = 1000;
+    reset_nav();
+    __atomic_store_n(&s_hud_env_word, 74U | (1U << 9), __ATOMIC_RELEASE);   /* muted */
+    s_shade_ms = SP_SHADE_ENTRY_MS;
+    s_breath_ms = 0U;
+    s_shade_was_open = false;
+    for (int i = 0; i < 20; ++i) {
+        now += 70;
+        sp_fade_tick(now, 70, 8);
+    }
+    CHECK(s_breath_ms == 0U, "a closed shade does not breathe, even muted (%u)", (unsigned)s_breath_ms);
+    CHECK(s_shade_ms == SP_SHADE_ENTRY_MS && !glass_entry_animating(s_shade_ms, SP_SHADE_ENTRY_MS),
+          "a closed shade has no entry running");
+
+    jr_display_nav_down();
+    CHECK(jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_SHADE, "the shade opens");
+    now += 70;
+    sp_fade_tick(now, 70, 8);
+    CHECK(s_shade_ms == 0U && glass_entry_animating(s_shade_ms, SP_SHADE_ENTRY_MS),
+          "opening starts the entry at 0, got %u", (unsigned)s_shade_ms);
+    uint32_t last = 0;
+    int frames = 0;
+    while (glass_entry_animating(s_shade_ms, SP_SHADE_ENTRY_MS) && frames < 100) {
+        now += 70;
+        sp_fade_tick(now, 70, 8);
+        CHECK(s_shade_ms >= last, "the entry never runs backwards");
+        last = s_shade_ms;
+        ++frames;
+    }
+    CHECK(s_shade_ms == SP_SHADE_ENTRY_MS && frames >= 9 && frames <= 11, "it parks at the total in about 10 frames, got %d", frames);
+    CHECK(s_breath_ms > 0U && s_breath_ms < SP_BREATH_MS, "an open, muted shade breathes (%u)", (unsigned)s_breath_ms);
+    for (int i = 0; i < 200; ++i) {
+        now += 70;
+        sp_fade_tick(now, 70, 8);
+        CHECK(s_breath_ms < SP_BREATH_MS, "the phase wraps");
+    }
+
+    /* live: the phase holds */
+    __atomic_store_n(&s_hud_env_word, 74U, __ATOMIC_RELEASE);
+    const uint32_t held = s_breath_ms;
+    for (int i = 0; i < 10; ++i) {
+        now += 70;
+        sp_fade_tick(now, 70, 8);
+    }
+    CHECK(s_breath_ms == held, "an open, live shade does not breathe");
+
+    /* closing parks the entry; reopening replays it from 0 */
+    __atomic_store_n(&s_hud_env_word, 74U | (1U << 9), __ATOMIC_RELEASE);
+    jr_display_nav_up();
+    now += 70;
+    sp_fade_tick(now, 70, 8);
+    CHECK(s_shade_ms == SP_SHADE_ENTRY_MS, "closing parks the entry");
+    const uint32_t closed = s_breath_ms;
+    for (int i = 0; i < 10; ++i) {
+        now += 70;
+        sp_fade_tick(now, 70, 8);
+    }
+    CHECK(s_breath_ms == closed, "and the breath stops with it");
+    jr_display_nav_down();
+    now += 70;
+    sp_fade_tick(now, 70, 8);
+    CHECK(s_shade_ms == 0U, "reopening replays the entry from 0");
+
+    reset_nav();
+    s_shade_ms = SP_SHADE_ENTRY_MS;
+    s_breath_ms = 0U;
+    s_shade_was_open = false;
+    __atomic_store_n(&s_hud_env_word, 74U, __ATOMIC_RELEASE);
+}
+
 /* --------------------------------------------------------------- hit test -- */
 
 static void test_shade_hits_resolve_to_controls(void)
@@ -1264,15 +1547,32 @@ static void test_shade_hits_resolve_to_controls(void)
     reset_nav();
     jr_display_nav_down();
 
-    /* Left half decrements, right half increments, exactly as the drawn -/+
-     * end caps promise. */
-    CHECK(jr_display_hit(SP_CX + 140, SP_CY) == JR_DISPLAY_ACT_VOLUME_UP,
-          "volume up");
-    CHECK(jr_display_hit(SP_CX - 140, SP_CY) == JR_DISPLAY_ACT_VOLUME_DOWN,
-          "volume down");
+    /* The volume arc is the left rim and fills upward: above the middle is
+     * louder, below it quieter. The right rim is the brightness arc, which has
+     * no touch action, so a tap there closes the shade like any other. */
+    CHECK(jr_display_hit(SP_CX - 190, SP_CY - 60) == JR_DISPLAY_ACT_VOLUME_UP,
+          "volume up: upper left rim");
+    CHECK(jr_display_hit(SP_CX - 190, SP_CY + 60) == JR_DISPLAY_ACT_VOLUME_DOWN,
+          "volume down: lower left rim");
+    CHECK(jr_display_hit(SP_CX - 170, SP_CY - 100) == JR_DISPLAY_ACT_VOLUME_UP,
+          "volume up near the arc's upper end");
+    CHECK(jr_display_hit(SP_CX + 190, SP_CY - 60) == JR_DISPLAY_ACT_DISMISS,
+          "the right rim is brightness: not volume");
+    CHECK(jr_display_hit(SP_CX + 190, SP_CY + 60) == JR_DISPLAY_ACT_DISMISS,
+          "the right rim is brightness: not volume (lower)");
+    CHECK(jr_display_hit(SP_CX - 150, SP_CY - SP_VOL_HIT_DY - 20) == JR_DISPLAY_ACT_DISMISS,
+          "above the arc is not volume");
+    CHECK(jr_display_hit(SP_CX - 100, SP_CY - 60) == JR_DISPLAY_ACT_DISMISS,
+          "the icon and number cluster inside the arc is not volume");
     CHECK(jr_display_hit(SP_BTN_PRIV_CX, SP_BTN_CY) ==
               JR_DISPLAY_ACT_PRIVACY_TOGGLE,
-          "privacy");
+          "privacy at its disc's centre");
+    CHECK(jr_display_hit(SP_BTN_PRIV_CX + SP_BTN_R - 2, SP_BTN_CY) ==
+              JR_DISPLAY_ACT_PRIVACY_TOGGLE,
+          "privacy up to its drawn edge");
+    CHECK(jr_display_hit(SP_BTN_PRIV_CX + SP_BTN_R + 6, SP_BTN_CY) ==
+              JR_DISPLAY_ACT_DISMISS,
+          "privacy no further than its drawn edge");
     /* Anywhere else inside an open shade closes it rather than doing nothing. */
     CHECK(jr_display_hit(SP_CX, SP_CY + 180) == JR_DISPLAY_ACT_DISMISS,
           "outside the controls dismisses");
@@ -2426,6 +2726,86 @@ static void test_weather_hours_ring_starts_now(void)
     reset_nav();
 }
 
+/* THE ICONS. WEATHER shows the sky as an icon (day or night from the sun times
+ * and the clock), STATUS a bolt beside the power word while charging. Every sky
+ * the tools side names is mapped; the one it cannot name draws no icon. */
+static void test_icons_follow_the_sky_and_the_charger(void)
+{
+    static const struct { jr_display_sky_t sky; int day, night; } map[] = {
+        { JR_DISPLAY_SKY_CLEAR,  GLASS_ICON_SUN,     GLASS_ICON_MOON  },
+        { JR_DISPLAY_SKY_PARTLY, GLASS_ICON_PARTLY,  GLASS_ICON_CLOUD },
+        { JR_DISPLAY_SKY_CLOUDS, GLASS_ICON_CLOUD,   GLASS_ICON_CLOUD },
+        { JR_DISPLAY_SKY_FOG,    GLASS_ICON_FOG,     GLASS_ICON_FOG   },
+        { JR_DISPLAY_SKY_RAIN,   GLASS_ICON_RAIN,    GLASS_ICON_RAIN  },
+        { JR_DISPLAY_SKY_STORM,  GLASS_ICON_THUNDER, GLASS_ICON_THUNDER },
+        { JR_DISPLAY_SKY_SNOW,   GLASS_ICON_SNOW,    GLASS_ICON_SNOW  },
+        { JR_DISPLAY_SKY_UNKNOWN, -1,                -1               },
+    };
+    for (size_t i = 0; i < sizeof map / sizeof *map; ++i) {
+        CHECK(sp_wx_icon_for(map[i].sky, false) == map[i].day, "sky %d by day", (int)map[i].sky);
+        CHECK(sp_wx_icon_for(map[i].sky, true) == map[i].night, "sky %d by night", (int)map[i].sky);
+    }
+
+    jr_display_sun_set(422, 1175);                       /* 7:02 .. 19:35 */
+    jr_display_clock_set(true, 14, 5, 0);
+    CHECK(!sp_wx_is_night(), "14:05 is day");
+    jr_display_clock_set(true, 23, 5, 0);
+    CHECK(sp_wx_is_night(), "23:05 is night");
+    jr_display_clock_set(true, 3, 0, 0);
+    CHECK(sp_wx_is_night(), "03:00 is night");
+    jr_display_clock_set(true, 7, 2, 0);
+    CHECK(!sp_wx_is_night(), "sunrise minute is day");
+    jr_display_clock_set(true, 19, 35, 0);
+    CHECK(sp_wx_is_night(), "sunset minute is night");
+    jr_display_clock_set(false, 0, 0, 0);
+    CHECK(!sp_wx_is_night(), "no clock: day");
+    jr_display_clock_set(true, 23, 5, 0);
+    jr_display_sun_set(-1, -1);
+    CHECK(!sp_wx_is_night(), "no sun times: day");
+
+    jr_display_sun_set(422, 1175);
+    set_weather(true, 83, 86, 76, JR_DISPLAY_SKY_CLEAR, "CLEAR", 0U);
+    sp_compose();
+    CHECK(s_wx_icon == GLASS_ICON_MOON, "clear at 23:05 composes the moon, got %d", s_wx_icon);
+    set_weather(false, 0, 0, 0, JR_DISPLAY_SKY_RAIN, "RAIN", 0U);
+    sp_compose();
+    CHECK(s_wx_icon == -1, "no weather, no icon");
+
+    /* the bolt: ink left of the power word while charging, none otherwise */
+    jr_display_clock_set(true, 14, 5, 0);
+    for (int charging = 0; charging <= 1; ++charging) {
+        stage_space(JR_DISPLAY_SPACE_STATUS);
+        s_space_ease = 256;
+        s_entry_ms = SP_ENTRY_TOTAL_MS;
+        jr_display_power_set(74U, 4020U, charging != 0, charging != 0);
+        sp_compose();
+        uint16_t *fb = render_frame();
+        CHECK(fb != NULL, "frame allocated");
+        if (!fb) {
+            return;
+        }
+        int bolt = 0, fx = -1, fy = -1;
+        for (int y = 255; y <= 290; ++y) {
+            for (int x = 170; x <= 190; ++x) {
+                if (fb[(size_t)y * HUD_W + x] != POISON && bolt++ == 0) {
+                    fx = x;
+                    fy = y;
+                }
+            }
+        }
+        if (charging) {
+            CHECK(bolt > 40, "the charging bolt draws (%d px)", bolt);
+        } else {
+            CHECK(bolt == 0, "no bolt off the charger (%d px, first at %d,%d)", bolt, fx, fy);
+        }
+        free(fb);
+    }
+    jr_display_sun_set(-1, -1);
+    jr_display_weather_set(NULL);
+    jr_display_clock_set(false, 0, 0, 0);
+    reset_nav();
+}
+
 /* THE ENTRY. A screen becoming current starts a clock; STATUS and WEATHER
  * draw from it; everything else parks it. It runs for SP_ENTRY_TOTAL_MS and
  * then the screen is still, at the same frame it would have drawn without any
@@ -2439,13 +2819,77 @@ static size_t drawn_px(const uint16_t *fb)
     return n;
 }
 
+/* Pixels lit (non-black) on the rows [y0, y1). The data screens sit on true
+ * black, so this counts exactly what the glass drew whatever its colour or
+ * alpha. */
+static size_t lit_between(const uint16_t *fb, int y0, int y1)
+{
+    size_t n = 0;
+    for (int y = y0; y < y1; ++y) {
+        for (int x = SP_CX - 140; x <= SP_CX + 140; ++x) {
+            n += fb[(size_t)y * HUD_W + x] != POISON;
+        }
+    }
+    return n;
+}
+
+/* DESK on the glass: the ring is the STATUS ring (r113-123 plus its soft
+ * edge), the progress number is in its middle, and nothing else of DESK
+ * reaches the band between the ring and the orbit rail. */
+static void test_desk_is_a_glass_ring_with_its_number(void)
+{
+    stage_space(JR_DISPLAY_SPACE_DESK);
+    jr_display_desk_set_task("FIX BUG", 50U, JR_DISPLAY_AGENT_WORKING);
+    sp_compose();
+    s_entry_ms = SP_ENTRY_TOTAL_MS;
+    uint16_t *fb = render_frame();
+    if (!fb) {
+        printf("FAIL %s: allocation failed\n", __func__);
+        g_failures++;
+        return;
+    }
+    size_t ring = 0, between = 0, middle = 0;
+    int rmin = 999, rmax = 0, bmin = 999, bmax = 0;
+    for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
+        if (fb[i] == POISON) {
+            continue;
+        }
+        const int r = radius_of((int)i);
+        if (r >= 110 && r <= 126) {
+            ring++;
+            if (r < rmin) rmin = r;
+            if (r > rmax) rmax = r;
+        } else if (r > 136 && r < 183) {   /* past the ring glow */
+            between++;
+            if (r < bmin) bmin = r;
+            if (r > bmax) bmax = r;
+        } else if (r < 100) {
+            middle++;
+        }
+    }
+    CHECK(ring > 2500, "the ring is drawn (%zu pixels)", ring);
+    CHECK(rmin >= 110 && rmax <= 126, "ring r%d..r%d", rmin, rmax);
+    CHECK(middle > 800, "the task, the number and the state are drawn (%zu)", middle);
+    CHECK(between == 0, "%zu DESK pixels between the ring and the orbit rail (r%d..%d)", between, bmin, bmax);
+    free(fb);
+    s_entry_ms = SP_ENTRY_TOTAL_MS;
+}
+
 static void test_entry_clock_runs_then_stops(void)
 {
     reset_nav();
-    jr_display_nav_set(JR_DISPLAY_SPACE_ACTIVITY);
+    jr_display_nav_set(JR_DISPLAY_SPACE_WATCH);
     uint32_t now = 1000;
     sp_fade_tick(now, 16, 8);
-    CHECK(!glass_entry_animating(s_entry_ms, SP_ENTRY_TOTAL_MS), "ACTIVITY has no entry");
+    CHECK(!glass_entry_animating(s_entry_ms, SP_ENTRY_TOTAL_MS), "WATCH has no entry");
+    jr_display_nav_set(JR_DISPLAY_SPACE_ACTIVITY);
+    sp_fade_tick(now, 16, 8);
+    CHECK(s_entry_ms == 0 && glass_entry_animating(s_entry_ms, SP_ENTRY_TOTAL_MS),
+          "ACTIVITY arriving starts the clock");
+    jr_display_nav_set(JR_DISPLAY_SPACE_DESK);
+    sp_fade_tick(now, 16, 8);
+    CHECK(s_entry_ms == 0 && glass_entry_animating(s_entry_ms, SP_ENTRY_TOTAL_MS),
+          "DESK arriving starts the clock");
 
     jr_display_nav_set(JR_DISPLAY_SPACE_STATUS);
     sp_fade_tick(now, 16, 8);
@@ -2594,10 +3038,8 @@ static void test_activity_is_honest_when_empty_and_newest_first(void)
     CHECK(s_act_rows == 0, "empty composes no rows, got %d", s_act_rows);
     uint16_t *fb = render_frame();
     if (fb) {
-        const size_t centre = count_color_within(fb, SP_C_GREY, 0, 168, SP_CY + 7)
-                            - count_color_within(fb, SP_C_GREY, 0, 168, SP_CY - 7);
-        const size_t top = count_color_within(fb, SP_C_GREY, 0, 168, SP_ACT_Y0 + 14)
-                         + count_color_within(fb, SP_C_INK, 0, 168, SP_ACT_Y0 + 14);
+        const size_t centre = lit_between(fb, SP_CY - 14, SP_CY + 14);
+        const size_t top = lit_between(fb, SP_ACT_Y0 - 4, SP_ACT_Y0 + SP_ACT_SUM_DY + 20);
         CHECK(centre > 100, "NOTHING YET is drawn on the centre row (%zu)", centre);
         CHECK(top == 0, "an empty feed drew a top row (%zu pixels)", top);
         free(fb);
@@ -2613,22 +3055,22 @@ static void test_activity_is_honest_when_empty_and_newest_first(void)
     jr_display_activity_push("SAID", "VOLUME IS NOW FORTY");
     sp_compose();
     CHECK(s_act_rows == 3, "three rows kept, got %d", s_act_rows);
-    CHECK(strncmp(s_act_row[0], "SAID ", 5) == 0, "newest first, got '%s'",
-          s_act_row[0]);
-    CHECK(strncmp(s_act_row[1], "ASK ", 4) == 0, "then, got '%s'", s_act_row[1]);
-    CHECK(strncmp(s_act_row[2], "TIME ", 5) == 0, "then, got '%s'", s_act_row[2]);
-    CHECK(strcmp(s_act_row[0], "SAID VOLUME IS NOW FORTY") == 0,
-          "kind and summary on one line, got '%s'", s_act_row[0]);
+    CHECK(strcmp(s_act_kind[0], "SAID") == 0, "newest first, got '%s'", s_act_kind[0]);
+    CHECK(strcmp(s_act_kind[1], "ASK") == 0, "then, got '%s'", s_act_kind[1]);
+    CHECK(strcmp(s_act_kind[2], "TIME") == 0, "then, got '%s'", s_act_kind[2]);
+    CHECK(strcmp(s_act_row[0], "VOLUME IS NOW FORTY") == 0,
+          "the summary alone is the row, got '%s'", s_act_row[0]);
+    CHECK(strcmp(s_act_age[0], "JUST NOW") == 0, "age beside the kind, got '%s'", s_act_age[0]);
     for (int i = 0; i < 3; ++i) {
-        CHECK(strstr(s_act_row[i], "WEB") == NULL, "the fourth-oldest survived");
+        CHECK(strstr(s_act_row[i], "FOUND") == NULL, "the fourth-oldest survived");
     }
     fb = render_frame();
     if (fb) {
         for (int i = 0; i < 3; ++i) {
             const int y0 = SP_ACT_Y0 + i * SP_ACT_PITCH;
-            const size_t ink = count_color_within(fb, SP_C_INK, 0, 168, y0 + 14)
-                             - count_color_within(fb, SP_C_INK, 0, 168, y0);
-            CHECK(ink > 100, "row %d drew no summary ink (%zu)", i, ink);
+            const size_t lit = lit_between(fb, y0 + SP_ACT_SUM_DY - 2, y0 + SP_ACT_SUM_DY + 22);
+            CHECK(lit > 100, "row %d drew no summary (%zu)", i, lit);
+            CHECK(lit_between(fb, y0 - 3, y0 + 12) > 40, "row %d drew no kind and age", i);
         }
         /* Rows are readable content: inside the safe radius, every pixel. */
         CHECK(count_color_within(fb, SP_C_INK, JR_DISPLAY_SAFE_R + 1, 999, HUD_H)
@@ -2645,6 +3087,8 @@ static void test_activity_is_honest_when_empty_and_newest_first(void)
     sp_compose_detail(JR_DISPLAY_SPACE_ACTIVITY);
     CHECK(strcmp(s_detail_value[2], "7M AGO") == 0, "aged: '%s'",
           s_detail_value[2]);
+    sp_compose();
+    CHECK(strcmp(s_act_age[2], "7M AGO") == 0, "the screen ages the same way: '%s'", s_act_age[2]);
     s_fake_us = 0;
 
     /* A long summary is cut at the row and marked, never silently. */
@@ -2654,7 +3098,7 @@ static void test_activity_is_honest_when_empty_and_newest_first(void)
           "row fills its width exactly, got %zu", strlen(s_act_row[0]));
     CHECK(s_act_row[0][SP_ACT_ROW_GLYPHS - 1] == '.',
           "the cut is marked, got '%s'", s_act_row[0]);
-    CHECK(s_act_row_klen[0] == 7, "kind length recorded for the colour split");
+    CHECK(strcmp(s_act_kind[0], "WEATHER") == 0, "the kind is kept whole, got '%s'", s_act_kind[0]);
     reset_activity();
 }
 
@@ -2703,8 +3147,9 @@ static void test_activity_survives_the_sleep(void)
     stage_space(JR_DISPLAY_SPACE_ACTIVITY);
     sp_compose();
     CHECK(s_act_rows == 2, "rows after the sleep: %d", s_act_rows);
-    CHECK(strcmp(s_act_row[0], "RAIN IN 2H 70% LIKELY") == 0 &&
-              strcmp(s_act_row[1], "WEB FOUND THREE RESULTS") == 0,
+    CHECK(strcmp(s_act_row[0], "IN 2H 70% LIKELY") == 0 &&
+              strcmp(s_act_row[1], "FOUND THREE RESULTS") == 0 &&
+              strcmp(s_act_age[0], "10M AGO") == 0 && strcmp(s_act_age[1], "EARLIER") == 0,
           "same rows, same order: '%s' / '%s'", s_act_row[0], s_act_row[1]);
     sp_compose_detail(JR_DISPLAY_SPACE_ACTIVITY);
     CHECK(strcmp(s_detail_value[0], "10M AGO") == 0,
@@ -2718,8 +3163,8 @@ static void test_activity_survives_the_sleep(void)
     s_fake_us = 4LL * 60 * 1000 * 1000;
     sp_compose();
     sp_compose_detail(JR_DISPLAY_SPACE_ACTIVITY);
-    CHECK(s_act_rows == 3 && strncmp(s_act_row[0], "SAID ", 5) == 0 &&
-              strncmp(s_act_row[1], "RAIN ", 5) == 0,
+    CHECK(s_act_rows == 3 && strcmp(s_act_kind[0], "SAID") == 0 &&
+              strcmp(s_act_kind[1], "RAIN") == 0,
           "new row on top: '%s' / '%s'", s_act_row[0], s_act_row[1]);
     CHECK(strcmp(s_detail_value[0], "1M AGO") == 0 &&
               strcmp(s_detail_value[1], "10M AGO") == 0 &&
@@ -2813,7 +3258,7 @@ static void test_orbit_stays_in_free_band(void)
         if (r <= JR_DISPLAY_SAFE_R) {
             continue;
         }
-        if (r >= 185 && r <= 194) {
+        if (r >= 184 && r <= 195) {   /* r186-194 plus one anti-aliased pixel each side */
             inside++;
         } else {
             outside++;
@@ -2821,8 +3266,8 @@ static void test_orbit_stays_in_free_band(void)
             if (outside == 1 || r > omax) omax = r;
         }
     }
-    CHECK(inside > 0, "the orbit drew nothing in r185-194");
-    CHECK(outside == 0, "%zu orbit pixels outside r185-194 (r%d..%d)", outside, omin, omax);
+    CHECK(inside > 0, "the orbit drew nothing in r184-195");
+    CHECK(outside == 0, "%zu orbit pixels outside r184-195 (r%d..%d)", outside, omin, omax);
     free(fb);
 }
 
@@ -4818,6 +5263,9 @@ int main(void)
     test_update_ring_outlives_the_watch_clear();
 
     test_shade_hits_resolve_to_controls();
+    test_shade_button_arcs_and_breath();
+    test_shade_clocks_run_only_while_they_must();
+    test_caption_band_gives_way_to_a_black_backdrop();
 
     test_every_space_composes_its_own_sheet();
     test_clock_clear_spares_open_shell_surfaces();
@@ -4836,9 +5284,11 @@ int main(void)
     test_weather_without_data_prints_no_number();
     test_stale_weather_loses_its_colour();
     test_weather_hours_ring_starts_now();
+    test_icons_follow_the_sky_and_the_charger();
     test_entry_clock_runs_then_stops();
     test_entry_builds_the_screens();
     test_outgoing_screen_does_not_replay_the_entry();
+    test_desk_is_a_glass_ring_with_its_number();
     test_activity_is_honest_when_empty_and_newest_first();
     test_activity_survives_the_sleep();
     test_desk_sheet_heads_with_the_marked_task();

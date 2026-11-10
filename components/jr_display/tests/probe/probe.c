@@ -81,6 +81,19 @@ void __wrap_glass_text_row(uint16_t *row, int y, int lo, int hi, glass_font_id_t
 {
     WRAP_ROW(__real_glass_text_row, row, y, lo, hi, f, t, n, x0, yt, tr, c, a, sb);
 }
+void __real_glass_disc_row(uint16_t *, int, int, int, int32_t, int32_t, int32_t, uint16_t, uint8_t, bool);
+void __wrap_glass_disc_row(uint16_t *row, int y, int lo, int hi, int32_t cx, int32_t cy, int32_t r,
+                           uint16_t c, uint8_t a, bool sb)
+{
+    WRAP_ROW(__real_glass_disc_row, row, y, lo, hi, cx, cy, r, c, a, sb);
+}
+void __real_glass_icon_row(uint16_t *, int, int, int, glass_icon_id_t, glass_icon_size_t, int, int,
+                           uint16_t, uint8_t, bool);
+void __wrap_glass_icon_row(uint16_t *row, int y, int lo, int hi, glass_icon_id_t id, glass_icon_size_t sz,
+                           int x0, int yt, uint16_t c, uint8_t a, bool sb)
+{
+    WRAP_ROW(__real_glass_icon_row, row, y, lo, hi, id, sz, x0, yt, c, a, sb);
+}
 #endif
 
 /* ---- fake face: concentric cyan rings on black, like the baked art ---- */
@@ -129,6 +142,13 @@ int main(int argc, char **argv)
     const bool parked = has_flag(argc, argv, "parked");
     const char *ent_arg = flag_val(argc, argv, "ent=");
     const char *dir = flag_val(argc, argv, "dir=");
+    const char *caption = flag_val(argc, argv, "caption=");
+    const char *sky_arg = flag_val(argc, argv, "sky=");     /* JR_DISPLAY_SKY_* as a number */
+    const char *hour_arg = flag_val(argc, argv, "hour=");   /* the clock's hour: 23 is night */
+    const char *shent_arg = flag_val(argc, argv, "shent=");   /* the shade's entry clock, ms */
+    const char *breath_arg = flag_val(argc, argv, "breath="); /* the muted button's breath phase, ms */
+    const char *vol_arg = flag_val(argc, argv, "vol=");
+    const char *light_arg = flag_val(argc, argv, "light=");
     s_display.board.width = 466;
     s_display.board.height = 466;
     s_display.board.swap_color_bytes = false;
@@ -148,7 +168,11 @@ int main(int argc, char **argv)
     assert(jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE);
     jr_display_nav_down();
     assert(jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_SHADE);
+#ifndef NO_ENTRY
+    assert(jr_display_hit(233, SP_BTN_CY) == JR_DISPLAY_ACT_PRIVACY_TOGGLE);
+#else
     assert(jr_display_hit(233, 292) == JR_DISPLAY_ACT_PRIVACY_TOGGLE);
+#endif
     jr_display_nav_home();
     assert(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS);
     assert(jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE);
@@ -167,12 +191,18 @@ int main(int argc, char **argv)
     } else if (strncmp(scene, "activity", 8) == 0) {
         space = JR_DISPLAY_SPACE_ACTIVITY;
         overlay = JR_DISPLAY_OVERLAY_NONE;
+    } else if (strcmp(scene, "desk") == 0) {
+        space = JR_DISPLAY_SPACE_DESK;
+        overlay = JR_DISPLAY_OVERLAY_NONE;
+    } else if (strcmp(scene, "jarvis") == 0) {
+        space = JR_DISPLAY_SPACE_JARVIS;
+        overlay = JR_DISPLAY_OVERLAY_NONE;
     } else if (strcmp(scene, "shade") != 0) {
         fprintf(stderr, "unknown scene %s\n", scene);
         return 2;
     }
 
-    s_space_on = true;
+    s_space_on = space != JR_DISPLAY_SPACE_JARVIS;
     s_space_from = (uint8_t)space;
     s_space_to = (uint8_t)space;
     s_space_prog = 256;
@@ -184,8 +214,8 @@ int main(int argc, char **argv)
     s_nav_word = (uint32_t)space | ((uint32_t)overlay << NAV_OVL_SHIFT);
     s_hud_env_word = 74U | (muted ? (1U << 9) : 0U);
     s_orbit_a16 = sp_orbit_angle(space, false) * 16;
-    jr_display_set_brightness(60U);
-    jr_display_set_status(90U);
+    jr_display_set_brightness(light_arg ? (uint8_t)atoi(light_arg) : 60U);
+    jr_display_set_status(vol_arg ? (uint8_t)atoi(vol_arg) : 90U);
     if (nogauge) {
         jr_display_power_set(255U, 0U, true, false);
     } else if (low) {
@@ -205,13 +235,17 @@ int main(int argc, char **argv)
         l.cpu_mhz = 240;
         jr_display_links_set(&l);
     }
-    jr_display_clock_set(true, 14, 5, 0);
+    jr_display_clock_set(true, hour_arg ? atoi(hour_arg) : 14, 5, 0);
     jr_display_clock_set_date(3, 23, 8);
     jr_display_sun_set(7 * 60 + 2, 19 * 60 + 35);
 #ifndef NO_ENTRY
     s_entry_ms = ent_arg ? (uint32_t)atoi(ent_arg) : SP_ENTRY_TOTAL_MS;
+    s_shade_ms = shent_arg ? (uint32_t)atoi(shent_arg) : SP_SHADE_ENTRY_MS;
+    s_breath_ms = breath_arg ? (uint32_t)atoi(breath_arg) : 0U;
 #else
     (void)ent_arg;
+    (void)shent_arg;
+    (void)breath_arg;
 #endif
     jr_display_jarvis_set_session(true, 12U, 3725U);
     /* Mid-update, staged app0 -> ota_1: the state that exercises the most
@@ -230,8 +264,8 @@ int main(int argc, char **argv)
         w.rain_pct = 40;
         w.humidity_pct = 72;
         w.wind_mph = 12;
-        w.sky = JR_DISPLAY_SKY_CLEAR;
-        strcpy(w.condition, "CLEAR");
+        w.sky = sky_arg ? (jr_display_sky_t)atoi(sky_arg) : JR_DISPLAY_SKY_CLEAR;
+        strcpy(w.condition, w.sky == JR_DISPLAY_SKY_PARTLY ? "PARTLY CLOUDY" : w.sky == JR_DISPLAY_SKY_RAIN ? "RAIN" : w.sky == JR_DISPLAY_SKY_STORM ? "THUNDER" : w.sky == JR_DISPLAY_SKY_SNOW ? "SNOW" : w.sky == JR_DISPLAY_SKY_FOG ? "FOG" : w.sky == JR_DISPLAY_SKY_CLOUDS ? "OVERCAST" : w.sky == JR_DISPLAY_SKY_UNKNOWN ? "WINDY" : (hour_arg && atoi(hour_arg) >= 20 ? "CLEAR NIGHT" : "CLEAR"));
         w.fetched_ms = 0;
         static const uint8_t rain[12] = {100, 70, 40, 15, 0, 0, 5, 0, 30, 60, 85, 20};
         memcpy(&w.rain_hours[14], rain, sizeof rain);
@@ -246,7 +280,16 @@ int main(int argc, char **argv)
         jr_display_activity_push("WEB", "FOUND THREE RESULTS");
         jr_display_activity_push("SAID", "VOLUME IS NOW FORTY");
     }
+    jr_display_desk_set_task("FIX LOGIN BUG", 68U, JR_DISPLAY_AGENT_WORKING);
     sp_compose();
+    if (caption) {
+        /* "caption=A_B" prints "A B": the transient label, fully faded in */
+        char text[64];
+        snprintf(text, sizeof text, "%s", caption);
+        for (char *c = text; *c; c++) if (*c == '_') *c = ' ';
+        jr_display_caption_set(text);
+        s_caption_ease = s_caption_prog = 256;
+    }
     if (parked) {
         /* A data screen settled on true black: the face is not decoded, the
          * engine's background is black, and the veil fold is skipped. */
@@ -282,6 +325,7 @@ int main(int argc, char **argv)
             apply_space_overlay(&s_display, y, y2, cnt + (size_t)y * 466);
         }
         const long all = g_wr;
+        memcpy(cnt, ref, 466u * 466u * sizeof(uint16_t));
         g_wr = 0;
         for (int y = 0; y < 466; y += 12) {
             int y2 = y + 12 > 466 ? 466 : y + 12;
@@ -299,12 +343,14 @@ int main(int argc, char **argv)
         apply_space_overlay(&s_display, y, y2,
                             fb + (size_t)y * 466);
         apply_ota_ring(&s_display, y, y2, fb + (size_t)y * 466);
+        if (caption) apply_caption_overlay(&s_display, y, y2, fb + (size_t)y * 466);
     }
 
-    char name[64];
-    snprintf(name, sizeof name, "%s%sprobe_%s%s%s%s%s%s%s.ppm", dir ? dir : "", dir ? "/" : "", scene,
-             parked ? "_parked" : "", muted ? "_muted" : "", low ? "_low" : "", nogauge ? "_nogauge" : "",
-             ent_arg ? "_ent" : "", ent_arg ? ent_arg : "");
+    char name[96];
+    const char *tag = flag_val(argc, argv, "tag=");
+    snprintf(name, sizeof name, "%s%sprobe_%s%s%s%s%s%s%s%s%s%s.ppm", dir ? dir : "", dir ? "/" : "", scene,
+             caption ? "_cap" : "", parked ? "_parked" : "", muted ? "_muted" : "", low ? "_low" : "", nogauge ? "_nogauge" : "",
+             ent_arg ? "_ent" : "", ent_arg ? ent_arg : "", tag ? "_" : "", tag ? tag : "");
     FILE *f = fopen(name, "wb");
     fprintf(f, "P6 466 466 255\n");
     for (int i = 0; i < 466 * 466; i++) {

@@ -1421,3 +1421,85 @@ destination of a slide decides:
   refresh freezes the screen silently.
 - Outside the shell circle (r214) the parked backdrop is black where the face
   used to show through. Only the face art's own pixels beyond r214 change.
+
+## The remaining screens on the glass (2026-11-10)
+
+The CONTROLS shade, ACTIVITY, DESK, the detail sheet, the screen-name label and
+a small icon set follow STATUS and WEATHER onto the glass primitives. Evidence
+frames: `docs/evidence/glass-screens2-2026-11-10-*.png` (host probe renders, not
+the panel).
+
+**Screen-name label.** The caption chip is `GLASS_FONT_LABEL`, tracked +3, grey
+for the screen names and the quiet captions, ink for a message, fading with the
+chip's ease. Its dark band is weighted by `(256 - max(s_space_black,
+s_shade_ease)) / 256`: gone on the black data screens and under the shade, kept
+over the face and over a watch dial, where the grey needs something to stand on.
+
+**Icons.** `glass_icon.h/.c` draw two baked sizes (SM 28, LG 44 px, 4-bit alpha)
+from `glass_icon_data.c`, which `scripts/gen-glass-icons.py` generates from
+`third_party/icons/glass-icons-sheet.png` (`--check` fails when the file is
+stale). Twelve icons come straight off the sheet; MIC_MUTED is the microphone
+with a slash the generator draws. Uses: WEATHER's sky above its word (sun or
+moon by the sun times, an unknown sky draws nothing), STATUS's bolt beside the
+power word while charging, the shade's microphone, loudspeaker and sun.
+
+**The shade.** Volume is the left rim, brightness the right, each a 80 degree
+arc at r180-188 (cyan, amber) that fills upward from the bottom with the
+speaker or sun icon and the number inside. The mute button is a disc (r62, centred at y206, a little above the middle) with the microphone, cyan live, gold
+muted with a slash; muted adds a 3.6 s breathing ring, drawn only while the
+shade is open and the mic is muted (`s_breath_ms` stops otherwise). Under it:
+the state line, one line of hint, and one quiet line of key hints. Entry
+(`s_shade_ms`, 700 ms): arcs sweep with the numbers counting up, brightness 90
+ms behind, the button grows from 71% as it fades in, the rest follows staggered.
+
+*Touch.* What a touch does is unchanged; where it lands moved with the picture.
+The mute button's target is its drawn disc (it was a pill at y292). The volume
+target is the left rim: the upper half (above the middle) is louder, the lower
+half quieter, from r156 outward, within 130 px of the middle. The right rim is
+brightness and has no touch action, so a tap there closes the shade like any
+other empty spot. `test_shade_hits_resolve_to_controls` was re-expressed with
+the new geometry.
+
+**ACTIVITY.** Up to three two-line blocks, newest first, 62 px apart: the kind
+and the age in `GLASS_FONT_LABEL` (the age under the sheet's own truth rule:
+`JUST NOW`, `7M AGO`, or `EARLIER` when only a stamp-less carried row is left),
+the summary in `GLASS_FONT_TEXT` below, each older block a step quieter. Empty
+is one grey line, NOTHING YET. Entry: blocks fade and rise 90 ms apart. A
+summary the store already holds at its full 24 glyphs is drawn with its last
+glyph as a `.`: the push cuts silently at 24, so a full store may have been cut.
+
+**DESK.** The STATUS ring (r113-123, round caps, glow) in the agent's state
+colour (cyan with none), the progress as the hero number with a small `%`
+counting up with the sweep, the task as the tracked label above and the agent
+state as the word below. It uses `s_entry_ms` like STATUS (now also reset on
+arrival at DESK and ACTIVITY).
+
+**Detail sheet.** Header in `GLASS_FONT_LABEL` cyan tracked +3, keys in the
+label face grey, values right-aligned in the text face, on the same dimmed band
+and rows. Nine rows still fit (`test_detail_sheet_rows_stay_inside`).
+
+**Settled cost.** `sp_draw_orbit` painted an 8 px opaque rail (about 10.8k
+pixels) on every strip of every frame. It is now a 4 px glass track (r188-192,
+about 6.2k) with glass dots and a round-capped active mark, so it matches the
+rings it surrounds; the dot centres are computed once, not once per row.
+`sp_compose` formats the weather and activity strings only while that screen is
+shown or sliding to or from it (a settled STATUS used to format both every
+frame).
+
+Pixels written in one settled frame, rail included (probe `writes`; old is
+commit 6df36e5, with the 5x7 write sites counted in a patched copy):
+
+| screen            | old   | new   |
+| ----------------- | ----- | ----- |
+| ACTIVITY (3 rows) | 14475 | 13319 |
+| ACTIVITY (empty)  | 11403 |  7146 |
+| DESK              | 30444 | 25653 |
+| detail sheet      | 16412 | 13209 |
+| STATUS (charging) | 31485 | 27100 |
+| WEATHER           | 17618 | 13279 |
+| shade, live       | 35262 | 25896 |
+| shade, muted      | 35346 | 27544 |
+
+The shade's old count has no breathing ring, icons or key line; its new one has
+all of them. These are pixel counts, a proxy: frames per second on the S3 are
+for the device to say.
