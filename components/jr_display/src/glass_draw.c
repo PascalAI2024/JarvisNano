@@ -26,6 +26,7 @@
  * Units: positions and radii 1/16 px, root distances 1/64 px, angles Q16 turns.
  */
 #include "jr_display/glass.h"
+#include "jr_display/perf_knob.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -169,6 +170,12 @@ static inline uint16_t blend_w(uint16_t under, uint16_t over, unsigned wo, unsig
  * write, a compare and a branch per pixel; this costs them per pair. */
 static inline void fill16(uint16_t *p, int n, uint16_t v)
 {
+    if ((glass_perf_knob & JR_KNOB_GLASS_FILL_OLD) != 0u) {   /* the loop before 91b44ec */
+        for (int i = 0; i < n; i++) {
+            p[i] = v;
+        }
+        return;
+    }
     if (n > 0 && (((uintptr_t)p) & 2u) != 0u) {
         *p++ = v;
         n--;

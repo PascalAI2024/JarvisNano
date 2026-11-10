@@ -19,5 +19,14 @@
  * (hud_dial_cache_set). Off on the device since 2026-11-10; the 12 KB of PSRAM
  * is taken only when this bit is first set. */
 #define JR_KNOB_DIAL_REC        (1u << 0)
+/* hud_render.c fill16 as the store loop it was before 91b44ec (one 16-bit
+ * store per pixel) in place of two pixels to a word. */
+#define JR_KNOB_HUD_FILL_OLD    (1u << 1)
+/* glass_draw.c fill16, the same. */
+#define JR_KNOB_GLASS_FILL_OLD  (1u << 2)
+/* aa_disc as it was before 91b44ec, verbatim (aa_disc_v0): no record branches,
+ * the interior stored by a plain loop. */
+#define JR_KNOB_DISC_ROW_OLD    (1u << 3)
 
-#define JR_KNOB_KNOWN_MASK      (JR_KNOB_DIAL_REC)
+#define JR_KNOB_KNOWN_MASK      (JR_KNOB_DIAL_REC | JR_KNOB_HUD_FILL_OLD | \
+                                 JR_KNOB_GLASS_FILL_OLD | JR_KNOB_DISC_ROW_OLD)

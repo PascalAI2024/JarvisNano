@@ -18,6 +18,7 @@
  * blend policy (later == on top), which keeps the hot path branch-free.
  */
 #include "jr_display/hud_render.h"
+#include "jr_display/perf_knob.h"
 #include "balance_wheel_data.h"      /* SKELETON: the wheel sprite    */
 #include "celestial_stars_data.h"    /* CELESTIAL: the twinkling stars */
 
@@ -1667,6 +1668,12 @@ static inline void cov_span(uint16_t *cov, int32_t xl, int32_t xr, int *lo, int 
  * write, a compare and a branch per pixel; this costs them per pair. */
 static inline void fill16(uint16_t *p, int n, uint16_t v)
 {
+    if ((hud_perf_knob & JR_KNOB_HUD_FILL_OLD) != 0u) {    /* the loop before 91b44ec */
+        for (int i = 0; i < n; i++) {
+            p[i] = v;
+        }
+        return;
+    }
     if (n > 0 && (((uintptr_t)p) & 2u) != 0u) {
         *p++ = v;
         n--;
@@ -1893,6 +1900,97 @@ static void disc_replay_row(uint16_t *row, const uint16_t *r, wrgb_t c, int alph
     disc_blend_run(row, r + 6 + r[3], (int16_t)r[4], r[5], c, alpha, swap, solid);
 }
 
+/* aa_disc as it was before 91b44ec, verbatim (git show 91b44ec^:components/
+ * jr_display/src/hud_render.c): no record branches, the interior stored by a
+ * plain loop. JR_KNOB_DISC_ROW_OLD sends every disc here; the device decides
+ * whether the record branches or the word fill in aa_disc cost MINIMAL its
+ * 10 ms. */
+static void HOT aa_disc_v0(const strip_t *s, int32_t cx, int32_t cy, int32_t rad,
+                        wrgb_t c, int alpha, bool swap)
+{
+    if (rad <= 0 || alpha <= 0) {
+        return;
+    }
+    int y_lo = (int)((cy - rad) >> 4), y_hi = (int)((cy + rad + 15) >> 4);
+    if (y_lo < s->y0) y_lo = s->y0;
+    if (y_hi > s->y1 - 1) y_hi = s->y1 - 1;
+    if (y_lo > y_hi) {
+        return;
+    }
+    uint16_t *const cov = s_cov;
+    const int32_t r2 = rad * rad;                 /* <= 3424^2, fits */
+    const uint16_t solid = pack565(c.r, c.g, c.b, swap);
+    for (int y = y_lo; y <= y_hi; ++y) {
+        int32_t hmin = INT32_MAX, hmax = -1;
+        int32_t halves[AA_SUB];
+        for (int sub = 0; sub < AA_SUB; ++sub) {
+            const int32_t dy = ((int32_t)y << 4) + sub * AA_STEP + AA_STEP / 2 - cy;
+            const int32_t d2 = r2 - dy * dy;
+            const int32_t half = d2 > 0 ? (int32_t)isqrt32((uint32_t)d2) : -1;
+            halves[sub] = half;
+            if (half >= 0) {
+                if (half < hmin) hmin = half;
+                if (half > hmax) hmax = half;
+            }
+        }
+        if (hmax < 0) {
+            continue;
+        }
+        uint16_t *row = s->base + (size_t)(y - s->y0) * HUD_W;
+        /* pixels wholly inside every chord: [cx - hmin, cx + hmin) in Q4 */
+        int in0 = (int)((cx - hmin + 15) >> 4), in1 = (int)((cx + hmin) >> 4) - 1;
+        if (hmin == INT32_MAX || in1 < in0) {
+            in0 = 1; in1 = 0;                       /* empty */
+        }
+        if (in0 < 0) in0 = 0;
+        if (in1 > HUD_W - 1) in1 = HUD_W - 1;
+        if (in1 >= in0) {
+            if (alpha >= 256) {
+                for (int x = in0; x <= in1; ++x) {
+                    row[x] = solid;
+                }
+            } else {
+                for (int x = in0; x <= in1; ++x) {
+                    row[x] = w_blend(row[x], c, alpha, swap);
+                }
+            }
+        }
+        /* the edges: coverage over the two runs outside the solid span */
+        int lo = HUD_W, hi = -1;
+        for (int sub = 0; sub < AA_SUB; ++sub) {
+            const int32_t half = halves[sub];
+            if (half < 0) {
+                continue;
+            }
+            const int32_t xl = cx - half, xr = cx + half;
+            if (in1 >= in0) {
+                cov_span(cov, xl, (int32_t)in0 << 4, &lo, &hi);
+                cov_span(cov, (int32_t)(in1 + 1) << 4, xr, &lo, &hi);
+            } else {
+                cov_span(cov, xl, xr, &lo, &hi);
+            }
+        }
+        if (hi >= lo && in1 >= in0) {
+            /* [lo, hi] spans the whole chord, but the interior [in0, in1] holds
+             * no coverage (only the two edge runs were accumulated): walking it
+             * cost 430 pixels a row on the MINIMAL dial to find zeros. Blend and
+             * clear the two edge runs alone. */
+            if (lo < in0) {
+                cov_blend(row, cov, lo, in0 - 1, c, alpha, swap, AA_FULL);
+                memset(cov + lo, 0, (size_t)(in0 - lo) * sizeof cov[0]);
+            }
+            const int ra = in1 + 1 > lo ? in1 + 1 : lo;
+            if (hi >= ra) {
+                cov_blend(row, cov, ra, hi, c, alpha, swap, AA_FULL);
+                memset(cov + ra, 0, (size_t)(hi - ra + 1) * sizeof cov[0]);
+            }
+        } else if (hi >= lo) {
+            cov_blend(row, cov, lo, hi, c, alpha, swap, AA_FULL);
+            memset(cov + lo, 0, (size_t)(hi - lo + 1) * sizeof cov[0]);
+        }
+    }
+}
+
 /* Anti-aliased disc; centre and radius in Q4. The interior — every pixel
  * inside the narrowest of the sixteen sample chords — is written straight;
  * only the two edge runs go through coverage, so the MINIMAL dial (a 214 px
@@ -1900,6 +1998,10 @@ static void disc_replay_row(uint16_t *row, const uint16_t *r, wrgb_t c, int alph
 static void HOT aa_disc(const strip_t *s, int32_t cx, int32_t cy, int32_t rad,
                         wrgb_t c, int alpha, bool swap)
 {
+    if ((hud_perf_knob & JR_KNOB_DISC_ROW_OLD) != 0u) {
+        aa_disc_v0(s, cx, cy, rad, c, alpha, swap);
+        return;
+    }
     if (rad <= 0 || alpha <= 0) {
         return;
     }
