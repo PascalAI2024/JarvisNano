@@ -142,8 +142,16 @@ typedef struct {
      * cell — two alarm hues for one state. */
 #define HUD_BATT_LOW_PCT 20
     bool    charging;
-    bool    privacy_muted; /* persistent outer gold ring when voice is off  */
+    bool    privacy_muted; /* the ring is gold while voice is off            */
     int8_t  ox, oy;      /* parallax offset in px; see hud_tilt_offset()    */
+    /* What the rim shows. One ring, one radius (r218), is the default; a dial
+     * that owns the glass shows less: a single privacy dot at 12 o'clock while
+     * the microphone is live and nothing is happening, nothing while it is
+     * muted and nothing is happening. */
+#define HUD_RIM_RING 0
+#define HUD_RIM_DOT  1
+#define HUD_RIM_NONE 2
+    uint8_t rim;
 } hud_env_t;
 
 /* The whole HUD for one strip: battery rim + privacy state + the face element,
@@ -421,10 +429,22 @@ void hud_overlay_clock(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 
 /* The JARVIS style's dial: the instrument the hands sit on (a 60-tick amber
  * minute track, a thin rail, two faint amber rings as on the home face, four
- * cyan beads), drawn anti-aliased inside r 201. Drawn under hud_overlay_clock
- * and faded with the same strength; <= 0 paints nothing. */
+ * cyan beads), drawn anti-aliased inside r 201, with the day's arc at r 206.
+ * Faded with the hands by one strength; <= 0 paints nothing. */
+typedef struct {
+    int  hh, mm, ss;
+    bool seconds;            /* the gold seconds hand (false at rest) */
+    bool sun;                /* a day to draw: sunrise and sunset are known */
+    int  sun_rise_q16;       /* sunrise, a Q16 turn clockwise from 12 o'clock */
+    int  sun_sweep_q16;      /* sunrise to sunset, Q16 turns */
+    int  sun_now_q16;        /* where the sun is now, or -1 (night, or no time) */
+} hud_jarvis_t;
+
+/* Anti-aliased tapered hands, a hub, and (when `j->sun`) the day's arc with a
+ * bead at the sun; the hands are part of the dial so the call replaces
+ * hud_overlay_clock for this style. */
 void hud_overlay_jarvis_dial(uint16_t *dst, int y0, int nrows, bool swap_bytes,
-                             int strength);
+                             int strength, const hud_jarvis_t *j);
 
 /* THE WATCHES, SECOND CUT (2026-09-02). Eight styles (jr_watch_style_t in
  * jr_display.h: 0 JARVIS, 1 DIVER, 2 DRESS, 3 PILOT, 4 MINIMAL, 5 FUTURE,
@@ -514,6 +534,8 @@ typedef struct {
     int  temp_f;
     bool dial_baked;         /* the baked dial is under the hands          */
     bool shadow;             /* the hands cast shadows: the awake cadence  */
+    bool still;              /* a resting dial: no seconds hand (and the caller
+                              * holds ss and ms at 0), nothing else moves     */
     bool alive;              /* the dial's own motion (SKELETON's balance
                               * wheel, CELESTIAL's stars) runs: the awake
                               * cadence; false holds it still               */
