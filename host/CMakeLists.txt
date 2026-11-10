@@ -29,6 +29,7 @@ set(CORE_SRCS
     ${REPO_ROOT}/components/jr_core/src/orchestrator.c
     ${REPO_ROOT}/components/jr_core/src/mood.c
     ${REPO_ROOT}/components/jr_core/src/glance.c
+    ${REPO_ROOT}/components/jr_core/src/dac_mute.c
     ${REPO_ROOT}/components/jr_dsp/src/dsp.c
     ${REPO_ROOT}/components/jr_dsp/src/audio_power.c
 )
@@ -60,6 +61,7 @@ add_executable(jr_host_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/fakes/fake_ws_transport.c
     ${CMAKE_CURRENT_SOURCE_DIR}/unity/unity.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_glance.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_cue.c
     ${CORE_SRCS}
     ${TRANSPORT_SRCS}
     ${POWER_DIAGNOSTIC_SRCS}

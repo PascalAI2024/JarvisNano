@@ -108,6 +108,13 @@ void jr_audio_dac_unmute(void);
  * Diagnostic visibility: a stuck mute is "no sound with green counters". */
 bool jr_audio_dac_muted(void);
 
+/* Register the owner's speaker-mute query (privacy pause or flip latch, which
+ * live in main.c). While it returns true, jr_audio_play_sweep(),
+ * jr_audio_play_chime() and the interface cues refuse with
+ * ESP_ERR_INVALID_STATE. A tone that does play opens a muted DAC only for its
+ * own length and mutes it again after: it never changes the mute state. */
+void jr_audio_set_owner_mute_probe(bool (*probe)(void));
+
 /* Flush the playback ring without muting (maps JR_CMD_FLUSH_PLAYBACK_RING). */
 void jr_audio_flush_playback(void);
 

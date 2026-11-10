@@ -172,6 +172,12 @@ static _Atomic bool           s_capture_speaking;
 
 /* fast-kill mute flag (set from capture task; read by feeder) */
 static _Atomic bool           s_muted;
+/* A tone unmuted the DAC and owes the mute back (jr_core/dac_mute.h). Set by
+ * earcon_commit when s_muted was true; cleared by any real mute or unmute;
+ * paid by the feeder once the tone has fully played out. */
+static _Atomic bool           s_cue_restore;
+/* The owner's speaker mute lives in main.c; tones ask through this probe. */
+static bool                 (*s_owner_mute_probe)(void);
 
 /* playback ring (int16 mono @ 24 kHz) */
 static int16_t               *s_pb;
@@ -861,6 +867,7 @@ static int sink_write(void *ctx, const jr_pcm_t *frame, size_t samples)
 static void sink_mute_now(void *ctx)
 {
     (void)ctx;
+    atomic_store(&s_cue_restore, false);   /* a real mute: nothing is owed */
     atomic_store(&s_muted, true);
     power_set_pa(NULL, false); /* immediate electrical kill during a write */
     if (s_dac_guard != NULL && xSemaphoreTake(s_dac_guard, 0) == pdTRUE) {
@@ -873,6 +880,8 @@ static void sink_mute_now(void *ctx)
     atomic_store(&s_playback_tail_until_ms, 0);
     if (s_feeder != NULL) xTaskNotifyGive(s_feeder);
 }
+
+static void cue_settle_mute(void);
 
 /* The feeder's one write chunk. Static, not on the task stack: 1536 B on a
  * 4096 B internal-RAM stack left 524 B of headroom once ESP_LOGW's vprintf
@@ -980,6 +989,7 @@ static void feeder_task(void *arg)
                 s_pb_prime_start_ms = 0u;
                 s_pb_prime_target = atomic_load(&s_pb_preroll_ms) * 24u;
             }
+            cue_settle_mute();
             /* CONFIG_FREERTOS_HZ=100: pdMS_TO_TICKS(5) truncates to zero and
              * merely yields to equal-priority tasks, starving IDLE0 forever. */
             vTaskDelay(1);
@@ -1245,7 +1255,9 @@ bool jr_audio_playback_pending(void)
     return buffered || atomic_load(&s_feeder_writing) || tail_active;
 }
 
-void jr_audio_dac_unmute(void)
+/* Open the DAC. Shared by the real unmute and by a tone, which differ only in
+ * whether the mute is owed back afterwards. */
+static void dac_open_for_playback(void)
 {
     if (atomic_load(&s_sleeping)) return;
     atomic_store(&s_muted, false);
@@ -1255,6 +1267,35 @@ void jr_audio_dac_unmute(void)
         xSemaphoreGive(s_dac_guard);
     }
     if (s_feeder != NULL) xTaskNotifyGive(s_feeder);
+}
+
+void jr_audio_dac_unmute(void)
+{
+    atomic_store(&s_cue_restore, false);   /* a real unmute: nothing is owed */
+    dac_open_for_playback();
+}
+
+/* The feeder found the ring empty. If a tone owed the mute back and nothing is
+ * left sounding, pay it: the device ends exactly as muted as it began. */
+static void cue_settle_mute(void)
+{
+    if (!atomic_load(&s_cue_restore) || jr_audio_playback_pending()) {
+        return;
+    }
+    if (!atomic_exchange(&s_cue_restore, false)) {
+        return;
+    }
+    atomic_store(&s_muted, true);
+    if (s_dac_guard != NULL &&
+        xSemaphoreTake(s_dac_guard, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (atomic_load(&s_dac_open)) esp_codec_dev_set_out_mute(s_dac, true);
+        xSemaphoreGive(s_dac_guard);
+    }
+}
+
+void jr_audio_set_owner_mute_probe(bool (*probe)(void))
+{
+    s_owner_mute_probe = probe;
 }
 
 bool jr_audio_dac_muted(void)
@@ -1555,6 +1596,10 @@ static esp_err_t earcon_claim(size_t total)
     if (!s_ready || atomic_load(&s_sleeping) || s_pb == NULL || s_feeder == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
+    /* The owner has muted the speaker: a tone does not play. */
+    if (s_owner_mute_probe != NULL && s_owner_mute_probe()) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (jr_audio_playback_pending()) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -1606,7 +1651,13 @@ static esp_err_t earcon_commit(const int16_t *pcm, size_t total)
         earcon_release();
         return ESP_FAIL;
     }
-    jr_audio_dac_unmute();
+    /* Open the DAC for the tone, but never change the mute state: when it was
+     * muted the feeder mutes it again once the tone has played out. The owed
+     * flag goes up first so a real unmute landing in between clears it. */
+    if (atomic_load(&s_muted)) {
+        atomic_store(&s_cue_restore, true);
+    }
+    dac_open_for_playback();
     earcon_release();
     return ESP_OK;
 }

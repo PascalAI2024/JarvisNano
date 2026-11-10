@@ -345,6 +345,13 @@ static void boot_button_tick(uint32_t now_ms)
 #endif
 }
 
+/* The owner's speaker mute: privacy pause (hold, shade, disarm) or the flip
+ * latch. jr_audio refuses every tone while this is true. */
+static bool owner_speaker_muted(void)
+{
+    return atomic_load(&s_voice_privacy_paused) || s_flip_muted;
+}
+
 /* Speaker volume (app task only) — gesture-adjustable, NVS-persistent. */
 int s_out_vol = 100;
 uint8_t s_brightness_cap = 100;
@@ -4422,6 +4429,7 @@ void app_main(void)
         ESP_LOGW(TAG, "jr_audio_init degraded — capture may be silent until on-device tune");
     }
     restore_out_vol();   /* gesture-set volume survives reboot */
+    jr_audio_set_owner_mute_probe(owner_speaker_muted);
     restore_watch_style();
     restore_briefing_day();
     s_app.mic = jr_audio_source();

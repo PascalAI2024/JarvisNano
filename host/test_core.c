@@ -36,6 +36,7 @@ extern void transport_tests_run(void);
  * defined in host/test_soak.c; registered inside this file's UNITY_BEGIN/END. */
 extern void soak_tests_run(void);
 extern void mood_tests_run(void);
+extern void cue_tests_run(void);
 /* The rain warning and the morning briefing (wave N13), pure. */
 extern void glance_tests_run(void);
 /* The playback feeder's reply / hole / pre-roll walk and its earcon guard. */
@@ -1935,6 +1936,9 @@ int main(void)
     jitter_tests_run();
     audio_power_tests_run();
     power_charge_tests_run();
+
+    /* What a tone may do to the speaker's mute state, and the interface cues. */
+    cue_tests_run();
 
     return UNITY_END();
 }
