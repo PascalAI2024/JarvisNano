@@ -300,32 +300,6 @@ int main(void)
         }
         printf("control shade arc records: largest %ld bytes of %d (PSRAM, four blocks)\n", bytes_max, SG_SH_REC_CAP);
     }
-    /* The veil's word-at-a-time dim against hud_dim565 pixel by pixel: random
-     * rows (black runs among them), every start and end parity, both byte
-     * orders. The row is aligned as the strips are. */
-    {
-        static uint16_t a[468] __attribute__((aligned(4))), b[468] __attribute__((aligned(4)));
-        uint32_t seed = 12345u;
-        int bad = 0;
-        for (int round = 0; round < 400 && !bad; round++) {
-            for (int x = 0; x < 468; x++) {
-                seed = seed * 1664525u + 1013904223u;
-                a[x] = b[x] = (seed >> 24) < 60u ? 0u : (uint16_t)(seed >> 8);
-            }
-            const int lo = round % 5, hi = 465 - (round / 5) % 7;
-            const bool swap = (round & 1) != 0;
-            if (swap) veil_dim_row(a, lo, hi, true); else veil_dim_row(a, lo, hi, false);
-            for (int x = 0; x < 468; x++) {
-                const uint16_t want = (x >= lo && x <= hi) ? hud_dim565(b[x], swap) : b[x];
-                if (a[x] != want) bad = 1;
-            }
-            checks++;
-        }
-        if (bad) {
-            printf("FAIL veil_dim_row differs from hud_dim565\n");
-            failures++;
-        }
-    }
     /* glass_arc_rows(): a row outside it must be a row glass_arc_row leaves
      * untouched, for arcs of every sweep and start, thick and thin, with and
      * without round caps (WEATHER's marks are drawn only on the rows inside); and

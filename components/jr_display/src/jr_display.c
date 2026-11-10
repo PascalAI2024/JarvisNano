@@ -4214,33 +4214,6 @@ static uint16_t sp_tint(const jr_display_ctx_t *ctx, uint16_t native, int st)
     return panel_order_color(ctx, native);
 }
 
-/* hud_dim565 over x = lo..hi, two pixels to a 32-bit word. The fold is a mask
- * and a shift per pixel and sends black to black, so no pixel needs a test (the
- * test cost more than the fold on the busy face); the shift moves bits across
- * the pair's boundary only into bits the mask clears, so each half is exactly
- * hud_dim565 of its pixel. Rows start on a 4-byte boundary (HUD_W is even and
- * strips are carved from an aligned buffer), so an even x is a word. Pinned
- * against hud_dim565 over random rows of every parity in the frame suite. */
-static inline __attribute__((always_inline)) void veil_dim_row(uint16_t *row, int lo, int hi, bool swap)
-{
-    int x = lo;
-    if ((x & 1) != 0 && x <= hi) {
-        row[x] = hud_dim565(row[x], swap);
-        ++x;
-    }
-    for (; x + 1 <= hi; x += 2) {
-        uint32_t w;
-        void *p = __builtin_assume_aligned(row + x, 4);
-        memcpy(&w, p, sizeof w);
-        w = swap ? (((w & 0x00030003u) << 14) | ((w >> 2) & 0x27392739u))
-                 : ((w >> 2) & 0x39E739E7u);
-        memcpy(p, &w, sizeof w);
-    }
-    if (x <= hi) {
-        row[x] = hud_dim565(row[x], swap);
-    }
-}
-
 /* Round-clipped backdrop. Identical fold to dim_strip/fade_strip, but bounded
  * by the shell circle so the veil never darkens the battery rim or the
  * privacy ring. */
@@ -4260,9 +4233,17 @@ static void sp_veil(const jr_display_ctx_t *ctx, int y1, int y2,
          * shift-and-mask on the pixels that need nothing. */
         if (k >= 32) {
             if (swap) {
-                veil_dim_row(row, lo, hi, true);
+                for (int x = lo; x <= hi; ++x) {
+                    if (row[x] != 0U) {
+                        row[x] = hud_dim565(row[x], true);
+                    }
+                }
             } else {
-                veil_dim_row(row, lo, hi, false);
+                for (int x = lo; x <= hi; ++x) {
+                    if (row[x] != 0U) {
+                        row[x] = hud_dim565(row[x], false);
+                    }
+                }
             }
         } else {
             for (int x = lo; x <= hi; ++x) {
