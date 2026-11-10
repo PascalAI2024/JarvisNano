@@ -191,6 +191,9 @@ int main(int argc, char **argv)
     } else if (strncmp(scene, "activity", 8) == 0) {
         space = JR_DISPLAY_SPACE_ACTIVITY;
         overlay = JR_DISPLAY_OVERLAY_NONE;
+    } else if (strcmp(scene, "desk") == 0) {
+        space = JR_DISPLAY_SPACE_DESK;
+        overlay = JR_DISPLAY_OVERLAY_NONE;
     } else if (strcmp(scene, "jarvis") == 0) {
         space = JR_DISPLAY_SPACE_JARVIS;
         overlay = JR_DISPLAY_OVERLAY_NONE;
@@ -277,6 +280,7 @@ int main(int argc, char **argv)
         jr_display_activity_push("WEB", "FOUND THREE RESULTS");
         jr_display_activity_push("SAID", "VOLUME IS NOW FORTY");
     }
+    jr_display_desk_set_task("FIX LOGIN BUG", 68U, JR_DISPLAY_AGENT_WORKING);
     sp_compose();
     if (caption) {
         /* "caption=A_B" prints "A B": the transient label, fully faded in */

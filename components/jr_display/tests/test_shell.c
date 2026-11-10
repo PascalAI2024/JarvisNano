@@ -2819,13 +2819,35 @@ static size_t drawn_px(const uint16_t *fb)
     return n;
 }
 
+/* Pixels lit (non-black) on the rows [y0, y1). The data screens sit on true
+ * black, so this counts exactly what the glass drew whatever its colour or
+ * alpha. */
+static size_t lit_between(const uint16_t *fb, int y0, int y1)
+{
+    size_t n = 0;
+    for (int y = y0; y < y1; ++y) {
+        for (int x = SP_CX - 140; x <= SP_CX + 140; ++x) {
+            n += fb[(size_t)y * HUD_W + x] != POISON;
+        }
+    }
+    return n;
+}
+
 static void test_entry_clock_runs_then_stops(void)
 {
     reset_nav();
-    jr_display_nav_set(JR_DISPLAY_SPACE_ACTIVITY);
+    jr_display_nav_set(JR_DISPLAY_SPACE_WATCH);
     uint32_t now = 1000;
     sp_fade_tick(now, 16, 8);
-    CHECK(!glass_entry_animating(s_entry_ms, SP_ENTRY_TOTAL_MS), "ACTIVITY has no entry");
+    CHECK(!glass_entry_animating(s_entry_ms, SP_ENTRY_TOTAL_MS), "WATCH has no entry");
+    jr_display_nav_set(JR_DISPLAY_SPACE_ACTIVITY);
+    sp_fade_tick(now, 16, 8);
+    CHECK(s_entry_ms == 0 && glass_entry_animating(s_entry_ms, SP_ENTRY_TOTAL_MS),
+          "ACTIVITY arriving starts the clock");
+    jr_display_nav_set(JR_DISPLAY_SPACE_DESK);
+    sp_fade_tick(now, 16, 8);
+    CHECK(s_entry_ms == 0 && glass_entry_animating(s_entry_ms, SP_ENTRY_TOTAL_MS),
+          "DESK arriving starts the clock");
 
     jr_display_nav_set(JR_DISPLAY_SPACE_STATUS);
     sp_fade_tick(now, 16, 8);
@@ -2974,10 +2996,8 @@ static void test_activity_is_honest_when_empty_and_newest_first(void)
     CHECK(s_act_rows == 0, "empty composes no rows, got %d", s_act_rows);
     uint16_t *fb = render_frame();
     if (fb) {
-        const size_t centre = count_color_within(fb, SP_C_GREY, 0, 168, SP_CY + 7)
-                            - count_color_within(fb, SP_C_GREY, 0, 168, SP_CY - 7);
-        const size_t top = count_color_within(fb, SP_C_GREY, 0, 168, SP_ACT_Y0 + 14)
-                         + count_color_within(fb, SP_C_INK, 0, 168, SP_ACT_Y0 + 14);
+        const size_t centre = lit_between(fb, SP_CY - 14, SP_CY + 14);
+        const size_t top = lit_between(fb, SP_ACT_Y0 - 4, SP_ACT_Y0 + SP_ACT_SUM_DY + 20);
         CHECK(centre > 100, "NOTHING YET is drawn on the centre row (%zu)", centre);
         CHECK(top == 0, "an empty feed drew a top row (%zu pixels)", top);
         free(fb);
@@ -2993,22 +3013,22 @@ static void test_activity_is_honest_when_empty_and_newest_first(void)
     jr_display_activity_push("SAID", "VOLUME IS NOW FORTY");
     sp_compose();
     CHECK(s_act_rows == 3, "three rows kept, got %d", s_act_rows);
-    CHECK(strncmp(s_act_row[0], "SAID ", 5) == 0, "newest first, got '%s'",
-          s_act_row[0]);
-    CHECK(strncmp(s_act_row[1], "ASK ", 4) == 0, "then, got '%s'", s_act_row[1]);
-    CHECK(strncmp(s_act_row[2], "TIME ", 5) == 0, "then, got '%s'", s_act_row[2]);
-    CHECK(strcmp(s_act_row[0], "SAID VOLUME IS NOW FORTY") == 0,
-          "kind and summary on one line, got '%s'", s_act_row[0]);
+    CHECK(strcmp(s_act_kind[0], "SAID") == 0, "newest first, got '%s'", s_act_kind[0]);
+    CHECK(strcmp(s_act_kind[1], "ASK") == 0, "then, got '%s'", s_act_kind[1]);
+    CHECK(strcmp(s_act_kind[2], "TIME") == 0, "then, got '%s'", s_act_kind[2]);
+    CHECK(strcmp(s_act_row[0], "VOLUME IS NOW FORTY") == 0,
+          "the summary alone is the row, got '%s'", s_act_row[0]);
+    CHECK(strcmp(s_act_age[0], "JUST NOW") == 0, "age beside the kind, got '%s'", s_act_age[0]);
     for (int i = 0; i < 3; ++i) {
-        CHECK(strstr(s_act_row[i], "WEB") == NULL, "the fourth-oldest survived");
+        CHECK(strstr(s_act_row[i], "FOUND") == NULL, "the fourth-oldest survived");
     }
     fb = render_frame();
     if (fb) {
         for (int i = 0; i < 3; ++i) {
             const int y0 = SP_ACT_Y0 + i * SP_ACT_PITCH;
-            const size_t ink = count_color_within(fb, SP_C_INK, 0, 168, y0 + 14)
-                             - count_color_within(fb, SP_C_INK, 0, 168, y0);
-            CHECK(ink > 100, "row %d drew no summary ink (%zu)", i, ink);
+            const size_t lit = lit_between(fb, y0 + SP_ACT_SUM_DY - 2, y0 + SP_ACT_SUM_DY + 22);
+            CHECK(lit > 100, "row %d drew no summary (%zu)", i, lit);
+            CHECK(lit_between(fb, y0 - 3, y0 + 12) > 40, "row %d drew no kind and age", i);
         }
         /* Rows are readable content: inside the safe radius, every pixel. */
         CHECK(count_color_within(fb, SP_C_INK, JR_DISPLAY_SAFE_R + 1, 999, HUD_H)
@@ -3025,6 +3045,8 @@ static void test_activity_is_honest_when_empty_and_newest_first(void)
     sp_compose_detail(JR_DISPLAY_SPACE_ACTIVITY);
     CHECK(strcmp(s_detail_value[2], "7M AGO") == 0, "aged: '%s'",
           s_detail_value[2]);
+    sp_compose();
+    CHECK(strcmp(s_act_age[2], "7M AGO") == 0, "the screen ages the same way: '%s'", s_act_age[2]);
     s_fake_us = 0;
 
     /* A long summary is cut at the row and marked, never silently. */
@@ -3034,7 +3056,7 @@ static void test_activity_is_honest_when_empty_and_newest_first(void)
           "row fills its width exactly, got %zu", strlen(s_act_row[0]));
     CHECK(s_act_row[0][SP_ACT_ROW_GLYPHS - 1] == '.',
           "the cut is marked, got '%s'", s_act_row[0]);
-    CHECK(s_act_row_klen[0] == 7, "kind length recorded for the colour split");
+    CHECK(strcmp(s_act_kind[0], "WEATHER") == 0, "the kind is kept whole, got '%s'", s_act_kind[0]);
     reset_activity();
 }
 
@@ -3083,8 +3105,9 @@ static void test_activity_survives_the_sleep(void)
     stage_space(JR_DISPLAY_SPACE_ACTIVITY);
     sp_compose();
     CHECK(s_act_rows == 2, "rows after the sleep: %d", s_act_rows);
-    CHECK(strcmp(s_act_row[0], "RAIN IN 2H 70% LIKELY") == 0 &&
-              strcmp(s_act_row[1], "WEB FOUND THREE RESULTS") == 0,
+    CHECK(strcmp(s_act_row[0], "IN 2H 70% LIKELY") == 0 &&
+              strcmp(s_act_row[1], "FOUND THREE RESULTS") == 0 &&
+              strcmp(s_act_age[0], "10M AGO") == 0 && strcmp(s_act_age[1], "EARLIER") == 0,
           "same rows, same order: '%s' / '%s'", s_act_row[0], s_act_row[1]);
     sp_compose_detail(JR_DISPLAY_SPACE_ACTIVITY);
     CHECK(strcmp(s_detail_value[0], "10M AGO") == 0,
@@ -3098,8 +3121,8 @@ static void test_activity_survives_the_sleep(void)
     s_fake_us = 4LL * 60 * 1000 * 1000;
     sp_compose();
     sp_compose_detail(JR_DISPLAY_SPACE_ACTIVITY);
-    CHECK(s_act_rows == 3 && strncmp(s_act_row[0], "SAID ", 5) == 0 &&
-              strncmp(s_act_row[1], "RAIN ", 5) == 0,
+    CHECK(s_act_rows == 3 && strcmp(s_act_kind[0], "SAID") == 0 &&
+              strcmp(s_act_kind[1], "RAIN") == 0,
           "new row on top: '%s' / '%s'", s_act_row[0], s_act_row[1]);
     CHECK(strcmp(s_detail_value[0], "1M AGO") == 0 &&
               strcmp(s_detail_value[1], "10M AGO") == 0 &&

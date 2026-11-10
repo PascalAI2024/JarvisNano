@@ -1855,7 +1855,8 @@ static char    s_wx_sun[12];          /* "7:02 19:35" / ""                     *
 #define SP_ACT_ROW_GLYPHS 24
 #define SP_ACT_ROW_CAP    (SP_ACT_ROW_GLYPHS + 1)
 static char    s_act_row[ACT_MAX][SP_ACT_ROW_CAP];
-static uint8_t s_act_row_klen[ACT_MAX];   /* where the kind ends, for colour */
+#define SP_ACT_AGE_CAP 12
+static char    s_act_age[ACT_MAX][SP_ACT_AGE_CAP];   /* "JUST NOW", "7M AGO", "EARLIER" */
 static int     s_act_rows;
 
 static uint8_t  s_space_serial_seen;
@@ -2590,10 +2591,11 @@ static void sp_compose_weather(void)
     }
 }
 
-/* ACTIVITY rows for this frame: "KIND SUMMARY" in the row's 24 glyphs. A
- * summary that does not fit is cut and its last glyph spent on a "." — the
- * same mark title_shorten() leaves on a DESK title, so a reader knows the
- * sentence went on. */
+/* ACTIVITY rows for this frame. s_act_row[i] is the summary alone, cut to the
+ * row's 24 glyphs with its last glyph spent on a "." when it does not fit (the
+ * same mark title_shorten() leaves on a DESK title). s_act_age[i] is the age
+ * under the sheet's own truth rule: a live row ages by esp_timer, a carried one
+ * by the wall clock, anything else says EARLIER rather than invent a number. */
 static void sp_compose_activity(void)
 {
     uint32_t n = __atomic_load_n(&s_act_count, __ATOMIC_ACQUIRE);
@@ -2603,24 +2605,27 @@ static void sp_compose_activity(void)
     s_act_rows = (int)n;
     for (uint32_t i = 0; i < n; ++i) {
         char *row = s_act_row[i];
-        int len = sp_str(row, 0, SP_ACT_ROW_CAP, s_act_kind[i]);
-        s_act_row_klen[i] = (uint8_t)len;
+        row[0] = '\0';
         const int slen = sp_len(s_act_sum[i], ACT_SUM_CAP - 1);
-        if (slen == 0) {
-            continue;
-        }
-        if (len > 0) {
-            len = sp_str(row, len, SP_ACT_ROW_CAP, " ");
-        }
-        const int room = SP_ACT_ROW_GLYPHS - len;
-        if (slen <= room) {
-            (void)sp_str(row, len, SP_ACT_ROW_CAP, s_act_sum[i]);
+        if (slen < SP_ACT_ROW_GLYPHS) {   /* a full store may have been cut by the push: mark it */
+            (void)sp_str(row, 0, SP_ACT_ROW_CAP, s_act_sum[i]);
         } else {
-            for (int k = 0; k + 1 < room; ++k) {
+            int len = 0;
+            for (int k = 0; k + 1 < SP_ACT_ROW_GLYPHS; ++k) {
                 row[len++] = s_act_sum[i][k];
             }
             row[len++] = '.';
             row[len] = '\0';
+        }
+        uint32_t age_min = 0u;
+        if (!act_age_min(i, &age_min)) {
+            (void)sp_str(s_act_age[i], 0, SP_ACT_AGE_CAP, "EARLIER");
+        } else if (age_min == 0u) {
+            (void)sp_str(s_act_age[i], 0, SP_ACT_AGE_CAP, "JUST NOW");
+        } else {
+            (void)sp_str(s_act_age[i],
+                         sp_age(s_act_age[i], 0, SP_ACT_AGE_CAP, age_min),
+                         SP_ACT_AGE_CAP, " AGO");
         }
     }
 }
@@ -2675,7 +2680,9 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
         s_space_prog = 0;
         s_space_hold_ms = now_ms + (uint32_t)JR_DISPLAY_SPACE_HOLD_MS;
         s_entry_ms = (space == (uint8_t)JR_DISPLAY_SPACE_STATUS ||
-                      space == (uint8_t)JR_DISPLAY_SPACE_WEATHER)
+                      space == (uint8_t)JR_DISPLAY_SPACE_WEATHER ||
+                      space == (uint8_t)JR_DISPLAY_SPACE_DESK ||
+                      space == (uint8_t)JR_DISPLAY_SPACE_ACTIVITY)
                          ? 0U : SP_ENTRY_TOTAL_MS;
     } else {
         if (s_entry_ms < SP_ENTRY_TOTAL_MS) {
@@ -3635,13 +3642,14 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
 /* WEATHER: an hour under SP_WX_HOUR_DRY percent is a faint tick, not a stroke. */
 #define SP_WX_HOUR_DRY  10     /* under this an hour is bare track           */
 
-/* ACTIVITY geometry: three rows at a 36 px pitch about the centre, each 24
- * glyphs at scale 2 centred on the axis (x 89..374). The worst corner is
- * r150 — inside JR_DISPLAY_SAFE_R, outside every focal ring, and crossed by
- * the update ring only while an update is actually in flight. */
-#define SP_ACT_X0      (SP_CX - (6 * 2 * SP_ACT_ROW_GLYPHS) / 2)
-#define SP_ACT_PITCH   36
-#define SP_ACT_Y0      (SP_CY - SP_ACT_PITCH - 7)
+/* ACTIVITY geometry: up to three two-line blocks (kind and age in the label
+ * face, the summary in the text face), 62 px apart, centred about the axis.
+ * The worst corner is a 24-glyph summary at the outer block, inside the shell
+ * clip and clear of the update ring at r140-154 only while no update runs. */
+#define SP_ACT_PITCH   62
+#define SP_ACT_Y0      (SP_CY - SP_ACT_PITCH - 17)   /* top of the first block's label line */
+#define SP_ACT_SUM_DY  20                             /* summary line below the label line */
+#define SP_ACT_GAP     12                             /* kind to age */
 
 /* Q15 sine, quarter wave, mirrored. 130 bytes of rodata buys every arc in
  * this layer with no float, no libm, and no atan anywhere. */
@@ -3978,46 +3986,6 @@ static void sp_veil(const jr_display_ctx_t *ctx, int y1, int y2,
     }
 }
 
-/* DESK: a progress ring around the number, broken into <=96-unit segments
- * because a span is a wedge intersection and a wedge cannot exceed a half
- * turn. Segmenting also gives the ring visible joints, which reads as
- * mechanical travel rather than a plain pie. */
-static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
-                          uint16_t *pixels, int oy, int st)
-{
-    const uint32_t w = __atomic_load_n(&s_desk_word, __ATOMIC_ACQUIRE);
-    int prog = (int)(w & 0xFFu);
-    if (prog > 100) {
-        prog = 100;
-    }
-    const jr_display_agent_state_t state =
-        (jr_display_agent_state_t)((w >> 8) & 0xFu);
-    const uint16_t track = sp_tint(ctx, SP_C_TRACK, st);
-    const uint16_t fill = sp_tint(ctx, state == JR_DISPLAY_AGENT_NONE
-                                           ? SP_C_CYAN
-                                           : agent_native_color(state), st);
-    const uint16_t ink = sp_tint(ctx, SP_C_INK, st);
-    const int cx = SP_CX;
-
-    char num[6];
-    const int len = sp_pct(num, 0, (int)sizeof num, (uint32_t)prog);
-    const int tx = cx - (18 * len) / 2;
-
-    sp_span_t seg[SP_ARC_SEG_MAX];
-    const int nseg = sp_arc_segments(seg, SP_ARC_SEG_MAX, SP_A_TOP,
-                                     (prog * 256) / 100);
-
-    for (int y = y1; y < y2; ++y) {
-        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        sp_annulus_row(row, y, cx, SP_CY + oy, SP_FOCAL_IN, SP_FOCAL_OUT, NULL, track);
-        for (int i = 0; i < nseg; ++i) {
-            sp_annulus_row(row, y, cx, SP_CY + oy, SP_FOCAL_IN, SP_FOCAL_OUT,
-                           &seg[i], fill);
-        }
-        sp_text_row(row, y, num, len, tx, SP_FOCAL_TEXT_Y, 3, ink);
-    }
-}
-
 static const char *sp_headline(int space);
 
 /* ---- THE GLASS DATA SCREENS: STATUS and WEATHER ----------------------------
@@ -4319,45 +4287,134 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
     }
 }
 
-/* ACTIVITY: three rows, newest first, on a quiet disc. The disc is the safe
- * area dimmed a second time — the same treatment the detail sheet gives its
- * own band — so twenty-four glyphs of ink sit on a hush rather than on the
- * arc reactor. No ring, no petals: this screen is the receipt, and a receipt
- * is text. The kind is grey and the summary is ink, one scale, one line, so
- * the eye lands on what happened and only then on what did it. With nothing
- * pushed the one honest line is centred where the first row would be. */
+/* ACTIVITY: up to three blocks, newest first. Line one is the kind and the age
+ * in the label face, line two the summary in the text face; each older block
+ * is a step quieter, so the eye lands on what just happened. On entry the
+ * blocks fade in and rise, 90 ms apart. With nothing pushed the one honest
+ * line is centred where the first block would be. No second dim over the disc:
+ * the shell veil already quiets the face and a per-pixel fold over r<=168 once
+ * cost ~88k pixels a frame. */
+#define SG_ACT_STAGGER_MS 90
 static void sp_focal_activity(const jr_display_ctx_t *ctx, int y1, int y2,
-                              uint16_t *pixels, int oy, int st)
+                              uint16_t *pixels, int oy, int st, uint32_t ent)
 {
-    /* No second dim over the disc: the shell veil already quiets the face,
-     * and a per-pixel fold over r<=168 cost ~88k pixels a frame — measured
-     * 10 fps on this screen against 16-18 elsewhere. Text on the veil. */
-    const uint16_t ink = sp_tint(ctx, SP_C_INK, st);
-    const uint16_t grey = sp_tint(ctx, SP_C_GREY, st);
+    const bool swap = ctx->board.swap_color_bytes;
+    static const uint8_t k_fade[ACT_MAX] = {255, 200, 150};
+    sg_txt_t t_kind[ACT_MAX], t_age[ACT_MAX], t_sum[ACT_MAX], t_empty;
+    const glass_metrics_t tm = glass_font_metrics(GLASS_FONT_TEXT);
+
+    sg_txt_make(&t_empty, GLASS_FONT_TEXT, "NOTHING YET", s_act_rows == 0 ? 11 : 0, SP_CX,
+                SP_CY - tm.cap_h / 2 - tm.ink_top + oy + sg_ent_rise(ent, 0), 1, SP_C_GREY,
+                sg_ent_alpha(st, ent, 0));
+    for (int i = 0; i < ACT_MAX; ++i) {
+        const bool have = i < s_act_rows;
+        const uint32_t start = (uint32_t)i * SG_ACT_STAGGER_MS;
+        const int a = (sg_ent_alpha(st, ent, start) * k_fade[i]) / 255;
+        const int top = SP_ACT_Y0 + i * SP_ACT_PITCH + oy + sg_ent_rise(ent, start);
+        const char *kind = have ? s_act_kind[i] : "";
+        const char *age = have ? s_act_age[i] : "";
+        const int klen = have ? sp_len(kind, ACT_KIND_CAP - 1) : 0;
+        const int alen = have ? sp_len(age, SP_ACT_AGE_CAP - 1) : 0;
+        const int kw = glass_text_width(GLASS_FONT_LABEL, kind, (size_t)klen, 2);
+        const int aw = glass_text_width(GLASS_FONT_LABEL, age, (size_t)alen, 2);
+        const int total = kw + (klen > 0 && alen > 0 ? SP_ACT_GAP : 0) + aw;
+        const int x0 = SP_CX - total / 2;
+        sg_txt_at(&t_kind[i], GLASS_FONT_LABEL, kind, klen, x0, top, SP_C_GREY, a);
+        t_kind[i].tracking = 2;
+        sg_txt_at(&t_age[i], GLASS_FONT_LABEL, age, alen,
+                  x0 + kw + (klen > 0 ? SP_ACT_GAP : 0), top, SP_C_GREY, (a * 2) / 3);
+        t_age[i].tracking = 2;
+        const int slen = have ? sp_len(s_act_row[i], SP_ACT_ROW_CAP - 1) : 0;
+        sg_txt_make(&t_sum[i], GLASS_FONT_TEXT, s_act_row[i], slen, SP_CX, top + SP_ACT_SUM_DY, 0,
+                    SP_C_INK, a);
+    }
 
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        if (s_act_rows == 0) {
-            static const char k_empty[] = "NOTHING YET";
-            const int elen = (int)(sizeof k_empty - 1U);
-            sp_text_row(row, y, k_empty, elen, sp_text_cx(elen, 2, 0),
-                        SP_CY - 7 + oy, 2, grey);
+        int lo = 0, hi = HUD_W - 1;
+        if (!sp_clip(y, &lo, &hi)) {
             continue;
         }
+        sg_txt_row(row, y, lo, hi, swap, &t_empty);
         for (int i = 0; i < s_act_rows; ++i) {
-            const int ry = SP_ACT_Y0 + i * SP_ACT_PITCH + oy;
-            if (y < ry || y >= ry + 14) {
-                continue;
-            }
-            const int klen = (int)s_act_row_klen[i];
-            const int len = sp_len(s_act_row[i], SP_ACT_ROW_CAP - 1);
-            const int sx = klen > 0 ? klen + 1 : 0;   /* past "KIND " */
-            sp_text_row(row, y, s_act_row[i], klen, SP_ACT_X0, ry, 2, grey);
-            if (len > sx) {
-                sp_text_row(row, y, s_act_row[i] + sx, len - sx,
-                            SP_ACT_X0 + 12 * sx, ry, 2, ink);
+            sg_txt_row(row, y, lo, hi, swap, &t_kind[i]);
+            sg_txt_row(row, y, lo, hi, swap, &t_age[i]);
+            sg_txt_row(row, y, lo, hi, swap, &t_sum[i]);
+        }
+    }
+}
+
+/* DESK: the STATUS ring around the job's progress. The ring is r113-123 on the
+ * agent's state colour (cyan with none); the number counts up with the sweep on
+ * entry; the task, shortened by main.c, is the tracked label above it and the
+ * agent's state is the word below. */
+static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
+                          uint16_t *pixels, int oy, int st, uint32_t ent)
+{
+    const uint32_t w = __atomic_load_n(&s_desk_word, __ATOMIC_ACQUIRE);
+    int prog = (int)(w & 0xFFu);
+    if (prog > 100) {
+        prog = 100;
+    }
+    const jr_display_agent_state_t state = (jr_display_agent_state_t)((w >> 8) & 0xFu);
+    const uint16_t fill = state == JR_DISPLAY_AGENT_NONE ? SP_C_CYAN : agent_native_color(state);
+    const bool swap = ctx->board.swap_color_bytes;
+    const int cx16 = SP_CX * 16;
+    const int cyr = SP_CY + oy + SG_RING_DY;
+    const int cy16 = cyr * 16;
+
+    const uint32_t f_ring = glass_ease_out_cubic_q16(ent, SP_ENTRY_RING_MS);
+    const int shown = (int)glass_count_up(prog, f_ring);
+    const int32_t full = (int32_t)(((int64_t)prog * GLASS_TURN_Q16) / 100);
+    const int32_t sweep = (int32_t)(((int64_t)full * f_ring) >> 16);
+
+    char num[6];
+    const int nlen = sp_num(num, 0, (int)sizeof num, (uint32_t)shown);
+    const char *task = sp_headline(JR_DISPLAY_SPACE_DESK);
+    const int tlen = sp_len(task, SP_LABEL_CAP - 1);
+    const char *sname = sp_agent_name(state);
+    const int snlen = sp_len(sname, SP_COL_MAX - 1);
+
+    const glass_metrics_t hero = glass_font_metrics(GLASS_FONT_HERO);
+    const glass_metrics_t val = glass_font_metrics(GLASS_FONT_VALUE);
+    const int hero_top = cyr - hero.cap_h / 2 - 2;
+    const int base = hero_top + hero.cap_h;
+    const int hw = glass_text_width(GLASS_FONT_HERO, num, (size_t)nlen, 0);
+    const int pw = glass_text_width(GLASS_FONT_VALUE, "%", 1, 0);
+    const int x0 = SP_CX - (hw + 5 + pw) / 2;
+    const uint32_t t_lbl = 0, t_word = 150;
+
+    sg_txt_t t_label, t_hero, t_pc, t_state;
+    sg_txt_make(&t_label, GLASS_FONT_LABEL, task, tlen, SP_CX,
+                hero_top - 26 + sg_ent_rise(ent, t_lbl), 3, SP_C_GREY, sg_ent_alpha(st, ent, t_lbl));
+    sg_txt_at(&t_hero, GLASS_FONT_HERO, num, nlen, x0, hero_top, SP_C_INK, st);
+    sg_txt_at(&t_pc, GLASS_FONT_VALUE, "%", 1, x0 + hw + 5, base - val.cap_h, fill, st);
+    sg_txt_make(&t_state, GLASS_FONT_TEXT, sname, snlen, SP_CX, base + 16 + sg_ent_rise(ent, t_word),
+                1, SP_C_GREY, sg_ent_alpha(st, ent, t_word));
+
+    const int ring_y0 = cyr - 130, ring_y1 = cyr + 130;
+    for (int y = y1; y < y2; ++y) {
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        int lo = 0, hi = HUD_W - 1;
+        if (!sp_clip(y, &lo, &hi)) {
+            continue;
+        }
+        if (y >= ring_y0 && y <= ring_y1) {
+            glass_ring_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                           GLASS_Q16_12_OCLOCK + sweep, GLASS_TURN_Q16 - sweep, fill,
+                           (uint8_t)((st * 44) / 255), swap);
+            if (sweep > 0) {
+                glass_glow_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                               GLASS_Q16_12_OCLOCK, sweep, true, SG_GLOW16, 140, fill,
+                               (uint8_t)st, swap);
+                glass_arc_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                              GLASS_Q16_12_OCLOCK, sweep, fill, (uint8_t)st, swap);
             }
         }
+        sg_txt_row(row, y, lo, hi, swap, &t_label);
+        sg_txt_row(row, y, lo, hi, swap, &t_hero);
+        sg_txt_row(row, y, lo, hi, swap, &t_pc);
+        sg_txt_row(row, y, lo, hi, swap, &t_state);
     }
 }
 
@@ -4694,18 +4751,19 @@ static void sp_draw_space(const jr_display_ctx_t *ctx, int y1, int y2,
         sp_focal_status(ctx, y1, y2, pixels, oy, st, ent);
         break;
     case JR_DISPLAY_SPACE_DESK:
-        sp_focal_desk(ctx, y1, y2, pixels, oy, st);
+        sp_focal_desk(ctx, y1, y2, pixels, oy, st, ent);
         break;
     case JR_DISPLAY_SPACE_WEATHER:
         sp_focal_weather(ctx, y1, y2, pixels, oy, st, ent);
         break;
     case JR_DISPLAY_SPACE_ACTIVITY:
-        sp_focal_activity(ctx, y1, y2, pixels, oy, st);
+        sp_focal_activity(ctx, y1, y2, pixels, oy, st, ent);
         break;
     default:
         break;                /* a space with no focal object draws none */
     }
-    if (space == JR_DISPLAY_SPACE_STATUS || space == JR_DISPLAY_SPACE_WEATHER) {
+    if (space == JR_DISPLAY_SPACE_STATUS || space == JR_DISPLAY_SPACE_WEATHER ||
+        space == JR_DISPLAY_SPACE_DESK) {
         return;                   /* the glass screens set their own headline */
     }
     const char *label = sp_headline(space);
@@ -4739,10 +4797,22 @@ static void sp_draw_detail(const jr_display_ctx_t *ctx, int y1, int y2,
     }
     const bool swap = ctx->board.swap_color_bytes;
     const int k = (st * 32) / 255;
-    const uint16_t head = sp_tint(ctx, SP_C_CYAN, st);
-    const uint16_t key = sp_tint(ctx, SP_C_GREY, st);
-    const uint16_t val = sp_tint(ctx, SP_C_INK, st);
     const int hlen = sp_len(s_detail_head, SP_LABEL_CAP - 1);
+    sg_txt_t t_head, t_key[SP_ROWS_MAX], t_val[SP_ROWS_MAX];
+    sg_txt_make(&t_head, GLASS_FONT_LABEL, s_detail_head, hlen, SP_CX, SP_SHEET_HEAD_Y - 2, 3,
+                SP_C_CYAN, st);
+    for (int i = 0; i < SP_ROWS_MAX; ++i) {
+        const bool have = i < s_detail_rows;
+        const int klen = have ? sp_len(s_detail_label[i], SP_COL_MAX - 1) : 0;
+        const int vlen = have ? sp_len(s_detail_value[i], SP_VAL_MAX - 1) : 0;
+        const int ry = SP_SHEET_ROW_Y + i * SP_SHEET_ROW_DY - 2;
+        sg_txt_at(&t_key[i], GLASS_FONT_LABEL, s_detail_label[i], klen, SP_SHEET_LEFT, ry + 2,
+                  SP_C_GREY, st);
+        t_key[i].tracking = 2;
+        sg_txt_make(&t_val[i], GLASS_FONT_TEXT, s_detail_value[i], vlen, 0, ry, 0, SP_C_INK, st);
+        t_val[i].x0 = SP_SHEET_RIGHT - glass_text_width(GLASS_FONT_TEXT, s_detail_value[i],
+                                                        (size_t)vlen, 0);
+    }
 
     for (int y = ys; y <= ye; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
@@ -4758,19 +4828,10 @@ static void sp_draw_detail(const jr_display_ctx_t *ctx, int y1, int y2,
                 }
             }
         }
-        sp_text_row(row, y, s_detail_head, hlen, sp_text_cx(hlen, 2, 0),
-                    SP_SHEET_HEAD_Y, 2, head);
+        sg_txt_row(row, y, lo, hi, swap, &t_head);
         for (int i = 0; i < s_detail_rows; ++i) {
-            const int ry = SP_SHEET_ROW_Y + i * SP_SHEET_ROW_DY;
-            if (y < ry || y >= ry + 14) {
-                continue;
-            }
-            const int klen = sp_len(s_detail_label[i], SP_COL_MAX - 1);
-            const int vlen = sp_len(s_detail_value[i], SP_VAL_MAX - 1);
-            sp_text_row(row, y, s_detail_label[i], klen, SP_SHEET_LEFT, ry, 2,
-                        key);
-            sp_text_row(row, y, s_detail_value[i], vlen,
-                        SP_SHEET_RIGHT - 12 * vlen, ry, 2, val);
+            sg_txt_row(row, y, lo, hi, swap, &t_key[i]);
+            sg_txt_row(row, y, lo, hi, swap, &t_val[i]);
         }
     }
 }
