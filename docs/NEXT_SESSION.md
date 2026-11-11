@@ -7,6 +7,29 @@ The live target is the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** with 32 MB
 flash. The active image is plain ESP-IDF v5 rooted at `main/` and
 `components/jr_*`.
 
+## Owed first: voice interruption (owner, 2026-11-10)
+
+The image on the device (16e9ec6) sends silence up the socket while the
+speaker is audible and for 150 ms after (`jr_core/echo_gate.c`). It stops
+the device cutting its own replies at volume 100, and it also stops the
+owner interrupting by voice; a tap on the glass stops a reply instead. The
+owner on reading that: "this is built in gemini feature that is
+necessary". The gate is a stopgap. Do not present it as the fix and do
+not build on it.
+
+The fix is echo cancellation that works: while the device speaks the
+cleaned microphone signal reads 1000 to 6000 against 75 to 290 for the
+owner, and it goes up amplified six times. PLAN N16.9 has the calibration
+run and the gates; `docs/reference/voice-loop-2026-11-10.md` has the
+mechanism with `file:line`. The run needs the microphone open, which only
+the owner can do (long-press unmute); he asked for it to be done later.
+Ask once when he is at the device, then run it end to end: the device
+talks to itself for about three minutes.
+
+Not yet heard on 16e9ec6: a board question answered through
+`delegated_tasks`, weather answered without asking where, a tap stopping
+a reply.
+
 ## Start here
 
 ```bash
