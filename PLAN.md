@@ -473,7 +473,10 @@ Owner: *"looks nothing like the demo you showed me … elevate and show me what
 you and this hardware can do"*, and *"we should have documentation for this
 device … so you can understand what it can do and maximize our show piece"*.
 No gateway key by the owner's choice: tools, board and DESK data stay offline,
-and everything in this wave works without one.
+and everything in this wave works without one. (Changed 2026-11-10: the owner
+asked for the gateway back; the device holds the current address and a
+development key on the legacy route and its board poll answers 200. A
+dedicated device key on the typed route is a before-release item.)
 
 Flashed 2026-11-10 (74b506f, valid after probation) and walked over Wi-Fi:
 `docs/evidence/glass-n15-2026-11-10/` has the captures, the per-layer frame

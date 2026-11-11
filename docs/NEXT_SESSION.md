@@ -125,8 +125,16 @@ N16.6 for a whole wave.
 - **QA traps:** levels are at `/api/device/levels`; a lease changes the ring
   and the rim; read `space` back instead of counting swipes; the device sleeps
   when still and unleased on battery.
-- **No gateway key is provisioned, by the owner's choice.** Tools, the board
-  and the briefing stay offline until that changes.
+- **The tool gateway is connected again (2026-11-10, owner: "fix jarvis
+  mcp").** The stored address pointed at a retired host, so every board poll
+  died on DNS. The device now holds the current address and an existing
+  development key on the legacy `/act` route; after a restart the log read
+  `tool=board_poll status=ok duration_ms=2004 http_status=200`. Not yet
+  exercised: a tool called by the model in a voice session. The typed
+  `/device/v1/invoke` route has no device credential on the gateway and no
+  board tools; a dedicated, revocable device key (`SECURITY.md`) is a
+  before-release item. The board poll does not run in DREAM, and nothing
+  remote wakes a muted, sleeping device: restart it to see a first poll.
 
 ## What changed on 2026-09-05 (wave N13)
 
