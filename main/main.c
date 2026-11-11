@@ -107,6 +107,16 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
         .arg_desc = NULL,
     },
     {
+        .name = "weather_here",
+        .description =
+            "The weather this device holds for its own place: temperature, "
+            "feels-like, condition, today's high and low, humidity, wind. No "
+            "arguments, answers at once. Use it for any question about the "
+            "weather here or at Sir's place, and never ask Sir where he is.",
+        .arg_name = NULL,
+        .arg_desc = NULL,
+    },
+    {
         .name = "search_tools",
         .description =
             "Find a Jarvis capability by describing it: web search, weather, "
@@ -226,6 +236,7 @@ static const char s_device_tool_labels[][13] = {
     "RECALL",       /* recall_memory  */
     "REMEMBER",     /* remember       */
     "TIME",         /* current_time   */
+    "WEATHER",      /* weather_here   */
     "SEARCH",       /* search_tools   */
     "EXECUTE",      /* execute_tool   */
     "VOLUME",       /* set_volume     */
@@ -819,18 +830,27 @@ _Atomic bool s_voice_privacy_paused = true;
  * runs, no frame comes back, and the owner talks to a wall. Seen on the
  * glass 2026-09-01: three questions in 40 s, no reply, then it answered
  * again as if nothing happened. So every utterance of some length that ends
- * in Listening starts a clock; ANY server frame or a phase change stops it;
- * two unanswered in a row are a deaf session and the core is told
- * StaleDeadline, which is exactly what it does for a keepalive miss —
- * reconnect with the resume handle. Ambient chatter Gemini rightly ignores
- * can trip this too; the cost is one reconnect. */
-#define UTT_MIN_MS          800U
-#define UTT_REPLY_WAIT_MS   7000U
-#define UTT_DEAF_COUNT      2U
+ * in Listening starts a clock (jr_core/utt_watch.h owns the policy); ANY
+ * server frame stops it, an answering one also clears the run of misses; two
+ * unanswered IN A ROW are a deaf session and the core is told StaleDeadline,
+ * which is exactly what it does for a keepalive miss: a fresh session. The
+ * old session's conversation is NOT carried over: the setup message never
+ * asks for session resumption (see docs/reference/voice-loop-2026-11-10.md).
+ * Ambient chatter Gemini rightly ignores can trip this too; the cost is one
+ * short "Pardon, Sir?". */
 static uint32_t         s_utt_start_ms;
-static _Atomic uint32_t s_reply_deadline_ms;
-static uint8_t          s_unanswered;
-static _Atomic uint32_t s_unanswered_total;
+jr_utt_watch_t          s_utt;                  /* voice task writes; cockpit reads totals */
+/* The ws task's side of the watch: it counts frames, the voice task reads the
+ * counts. Alive = any frame; answer = a frame that replies to the owner. */
+static _Atomic uint32_t s_srv_alive_seq;
+static _Atomic uint32_t s_srv_answer_seq;
+/* What the uplink carried for the utterance now in flight (the log line at
+ * speech end), and server interruptions the local VAD never heard. */
+static uint32_t         s_utt_ul_frames;
+static uint32_t         s_utt_ul_drops0;
+_Atomic uint32_t        s_srv_interrupts;
+_Atomic uint32_t        s_srv_phantom_interrupts;
+static _Atomic uint32_t s_local_speech_start_ms;  /* last accepted VAD start */
 static temperature_sensor_handle_t s_tsens;
 jr_mood_state_t s_mood;
 _Atomic uint8_t s_mood_id;
@@ -1272,7 +1292,13 @@ static void rich_cb(void *u, const jr_gemini_event_t *ge)
         ESP_LOGI(TAG, "rx: server event kind=%d", (int)ge->kind);
     }
     if (ge->kind != JR_GEV_RESUMPTION_UPDATE && ge->kind != JR_GEV_UNKNOWN) {
-        atomic_store(&s_reply_deadline_ms, 0U);   /* the server is there */
+        atomic_fetch_add(&s_srv_alive_seq, 1U);    /* the server is there */
+        if (ge->kind == JR_GEV_AUDIO_CHUNK || ge->kind == JR_GEV_TEXT ||
+            ge->kind == JR_GEV_TOOL_CALL || ge->kind == JR_GEV_INTERRUPTED ||
+            ge->kind == JR_GEV_TURN_COMPLETE ||
+            ge->kind == JR_GEV_GENERATION_COMPLETE) {
+            atomic_fetch_add(&s_srv_answer_seq, 1U);   /* and it is replying */
+        }
     }
     jr_event_t e = jr_event(JR_EV_HEARTBEAT);
     switch (ge->kind) {
@@ -1309,11 +1335,27 @@ static void rich_cb(void *u, const jr_gemini_event_t *ge)
         e.pcm_len = ge->pcm_len;
         e.sample_rate = ge->sample_rate;
         break;
-    case JR_GEV_INTERRUPTED:
+    case JR_GEV_INTERRUPTED: {
+        /* Server VAD decided someone spoke over the reply. If the local VAD
+         * heard no speech start in the last 1.5 s, what the server heard was
+         * most likely the speaker (2026-11-10: "interrupted" at the end of a
+         * reply, volume 100, then "I didn't quite catch that"). Counted and
+         * logged so a capture can tell echo from an owner the local VAD
+         * missed; nothing is changed by it. */
+        const uint32_t since = (uint32_t)jr_clock_now_ms(&a->clock) -
+                               atomic_load(&s_local_speech_start_ms);
+        atomic_fetch_add(&s_srv_interrupts, 1U);
+        if (since > 1500U) {
+            atomic_fetch_add(&s_srv_phantom_interrupts, 1U);
+            ESP_LOGW(TAG, "server interrupted with no local speech start in "
+                     "%u ms (volume=%d): echo or a missed onset",
+                     (unsigned)since, s_out_vol);
+        }
         a->terminal_pending = false;
         caption_reset();   /* barged: those words were cut off mid-air */
         e = jr_event(JR_EV_SERVER_INTERRUPTED);
         break;
+    }
     case JR_GEV_TURN_COMPLETE:
         a->rx_turn_complete++;
         activity_note_turn_end();
@@ -1542,7 +1584,13 @@ static void voice_exec(void *ctx, const jr_command_t *cmd)
         }
         break;
     case JR_CMD_SEND_SETUP: {
-        ESP_LOGI(TAG, "exec: SEND_SETUP");
+        /* Each session is told what the device can really do right now: with
+         * no usable gateway the gateway-backed tools are not declared and the
+         * system text says so (jr_core/tool_policy.h). */
+        a->cfg.no_gateway = !device_gateway_usable();
+        ESP_LOGI(TAG, "exec: SEND_SETUP tools=%u gateway=%s",
+                 (unsigned)jr_gemini_declared_fn_count(&a->cfg),
+                 a->cfg.no_gateway ? device_gateway_why() : "ok");
         compose_system_instruction();   /* each session knows what time it is */
         char *setup = jr_gemini_build_setup(&a->cfg);
         if (setup) {
@@ -1616,6 +1664,12 @@ static void voice_exec(void *ctx, const jr_command_t *cmd)
     }
     case JR_CMD_DISPATCH_TOOL_CALL: {
         atomic_fetch_add(&s_tool_diag.calls_received, 1U);
+        /* weather_here (and current_time with no gateway) are answered from
+         * the device itself: no worker, no network, no gateway. */
+        if (device_try_local_tool(cmd)) {
+            activity_note_tool(cmd->tool_name, "{}");
+            break;
+        }
         /* A SPOKEN "REMEMBER" IS THE APPROVAL. The consent arc that used to
          * intercept this tool asked the owner to tap the glass to confirm a
          * note they had just dictated; from across the room the tap never
@@ -2081,7 +2135,7 @@ static void publish_shell_state(uint32_t now_ms)
             .wifi_up = net.sta_connected,
             .rssi_dbm = net.rssi,
             .link_open = s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN,
-            .tools = !jr_tools_is_configured() ? 0U
+            .tools = !device_gateway_usable() ? 0U
                      : atomic_load(&s_tool_diag.worker_ready) ? 2U : 1U,
             .desk_live = desk_live,
             .radio_saving = jr_net_power_save_active(),
@@ -3105,36 +3159,45 @@ static void voice_task(void *arg)
                 s_pending_text_inflight = false;
             }
             {
-                const uint32_t deadline = atomic_load(&s_reply_deadline_ms);
-                if (deadline != 0U && ph != JR_ST_LISTENING) {
-                    atomic_store(&s_reply_deadline_ms, 0U);
-                    s_unanswered = 0U;
-                } else if (deadline != 0U &&
-                           (int32_t)((uint32_t)now - deadline) >= 0) {
-                    atomic_store(&s_reply_deadline_ms, 0U);
-                    s_unanswered++;
-                    atomic_fetch_add(&s_unanswered_total, 1U);
-                    ESP_LOGW(TAG, "voice: utterance unanswered (%u in a row)",
-                             (unsigned)s_unanswered);
-                    if (s_unanswered < UTT_DEAF_COUNT) {
-                        /* THE FIRST MISS GETS A NUDGE, NOT SILENCE. The model
-                         * still holds the audio it did not answer; a short
-                         * text turn asks it to answer what it heard or ask
-                         * for a repeat. Seen on the glass: a clear 3 s
-                         * question straight after connecting, ignored, and
-                         * the owner waiting at a device that looked fine. */
-                        handle_say("Sir just spoke and you did not answer. "
-                                   "If you heard a question, answer it now; "
-                                   "if it was unclear, ask one short question.");
-                    }
-                    if (s_unanswered >= UTT_DEAF_COUNT) {
-                        s_unanswered = 0U;
-                        ESP_LOGW(TAG, "voice: session is deaf — fresh session");
-                        jr_display_caption_set("RECONNECTING");
-                        jr_orch_inject(&s_app.orch,
-                                       jr_event(JR_EV_STALE_DEADLINE), now);
-                        ph = jr_orch_phase(&s_app.orch);
-                    }
+                /* The ws task counts frames; the watch is the voice task's. */
+                static uint32_t s_seen_alive, s_seen_answer;
+                const uint32_t alive = atomic_load(&s_srv_alive_seq);
+                const uint32_t answer = atomic_load(&s_srv_answer_seq);
+                if (answer != s_seen_answer) {
+                    s_seen_answer = answer;
+                    s_seen_alive = alive;
+                    jr_utt_answered(&s_utt);
+                } else if (alive != s_seen_alive) {
+                    s_seen_alive = alive;
+                    jr_utt_server_alive(&s_utt);
+                }
+                if (ph != JR_ST_LISTENING && s_utt.armed) {
+                    s_utt.armed = false;     /* the phase moved on: not a miss */
+                    s_utt.misses = 0U;
+                }
+                const jr_utt_action_t utt = jr_utt_poll(&s_utt, (uint32_t)now);
+                if (utt != JR_UTT_NONE) {
+                    ESP_LOGW(TAG, "voice: utterance unanswered (%u in a row, "
+                             "%u answered since boot)",
+                             (unsigned)(utt == JR_UTT_RECONNECT
+                                            ? JR_UTT_DEAF_MISSES : s_utt.misses),
+                             (unsigned)s_utt.answered_total);
+                }
+                if (utt == JR_UTT_PARDON) {
+                    /* THE FIRST MISS GETS A WORD, NOT SILENCE, AND NOT A
+                     * SPEECH. The model still holds the audio it did not
+                     * answer. The old nudge ("answer it now, or ask one
+                     * question") made it announce that it had heard nothing
+                     * and ask for the request, at length (2026-11-10). Now it
+                     * is told the three words to say. */
+                    handle_say("Sir just spoke and it did not reach you. Say "
+                               "only: Pardon, Sir?");
+                } else if (utt == JR_UTT_RECONNECT) {
+                    ESP_LOGW(TAG, "voice: session is deaf — fresh session");
+                    jr_display_caption_set("RECONNECTING");
+                    jr_orch_inject(&s_app.orch,
+                                   jr_event(JR_EV_STALE_DEADLINE), now);
+                    ph = jr_orch_phase(&s_app.orch);
                 }
             }
             if (ph == JR_ST_LISTENING && s_pending_text_set) {
@@ -4053,6 +4116,10 @@ static void voice_task(void *arg)
                         jr_display_rest_voice_busy_set(true);
                         companion_attention((uint32_t)now);
                         s_utt_start_ms = (uint32_t)now;
+                        jr_utt_speech_start(&s_utt, (uint32_t)now);
+                        atomic_store(&s_local_speech_start_ms, (uint32_t)now);
+                        s_utt_ul_frames = 0U;
+                        s_utt_ul_drops0 = s_app.client.live.tx_drops;
                         ESP_LOGI(TAG, "vad: speech start rms=%.1f floor=%.1f",
                                  (double)td.rms, (double)td.noise_floor);
                         /* Server VAD: Gemini owns turn detection + barge; the
@@ -4117,6 +4184,9 @@ static void voice_task(void *arg)
                         if (mic_batch_state.filled > 0U) {
                             jr_err_t r = s_app.rvc.send_audio(
                                 s_app.rvc.ctx, mic_batch, mic_batch_state.filled);
+                            if (r == JR_OK) {
+                                s_utt_ul_frames++;
+                            }
                             if (r == JR_ERR_CLOSED) {
                                 ESP_LOGW(TAG,
                                          "mic uplink observed closed transport");
@@ -4128,14 +4198,19 @@ static void voice_task(void *arg)
                 if (td.event == JR_TP_EV_SPEECH_ENDED) {
                     s_app.vad_ends++;
                     s_listen_speech_active = false;
-                    ESP_LOGI(TAG, "vad: speech end rms=%.1f floor=%.1f",
-                             (double)td.rms, (double)td.noise_floor);
-                    if (jr_orch_phase(&s_app.orch) == JR_ST_LISTENING &&
-                        !s_pending_text_set &&
-                        (uint32_t)now - s_utt_start_ms >= UTT_MIN_MS) {
-                        atomic_store(&s_reply_deadline_ms,
-                                     (uint32_t)now + UTT_REPLY_WAIT_MS);
-                    }
+                    /* What the server was sent for this utterance: if frames
+                     * or drops disagree with its length, the uplink and not
+                     * the server's ear is what lost it. */
+                    ESP_LOGI(TAG, "vad: speech end rms=%.1f floor=%.1f "
+                             "len=%u ms uplink=%u frames drops=%u",
+                             (double)td.rms, (double)td.noise_floor,
+                             (unsigned)((uint32_t)now - s_utt_start_ms),
+                             (unsigned)s_utt_ul_frames,
+                             (unsigned)(s_app.client.live.tx_drops -
+                                        s_utt_ul_drops0));
+                    jr_utt_speech_end(&s_utt, (uint32_t)now,
+                                      jr_orch_phase(&s_app.orch) == JR_ST_LISTENING,
+                                      s_pending_text_set);
                     /* Server VAD: Gemini decides end-of-turn (it sends the
                      * response audio, which drives Listening->Speaking). A local
                      * SPEECH_ENDED here would fire audioStreamEnd and commit the
@@ -4287,7 +4362,7 @@ static void compose_system_instruction(void)
             return;
         }
     }
-    static const char kBase[] =
+    static const char kPersona[] =
         "RESPOND ONLY IN ENGLISH (UNITED STATES). YOU MUST RESPOND UNMISTAKABLY "
         "IN ENGLISH, EVEN IF THE INPUT AUDIO OR AMBIENT SPEECH IS IN ANOTHER "
         "LANGUAGE. Never switch languages, mix tongues, or use foreign phrases "
@@ -4318,24 +4393,7 @@ static void compose_system_instruction(void)
         "television, music, other people talking to each other. When in "
         "doubt, answer briefly.\n"
         "- Never narrate that you are listening or thinking.\n\n"
-        "You exist to help with Sir's life and work, and the Jarvis tools are "
-        "how you act: remember what he tells you, recall it later, read and "
-        "add to his calendar, keep his work board, search the world. Use them "
-        "without being asked twice; never claim a tool succeeded unless its "
-        "response says so.\n\n"
-        "You also have hands elsewhere. delegate_task queues a job for Sir's "
-        "agents, who work on their own machines and report back to this "
-        "device; delegated_tasks lists what is queued, running, done or "
-        "blocked. Anything one tool call answers is answered now: a fact, the "
-        "weather, a price, a note. Anything that needs a browser, a "
-        "repository, a document, or several steps is delegated in one call, "
-        "with Sir told it is queued and that the result will be announced "
-        "here when it lands. Nothing that can be answered now is delegated.\n\n"
-        "Capabilities, for when Sir asks what you can do: live web search and "
-        "news, weather, Wikipedia, crypto and stock prices, exchange rates, "
-        "time zones, translation, research papers, remembering and recalling "
-        "Sir's notes, his calendar, his work board, jobs for his agents, and "
-        "this device's volume and brightness.";
+        "";
     char when[160] = "";
     time_t tt = time(NULL);
     struct tm tmv;
@@ -4346,7 +4404,16 @@ static void compose_system_instruction(void)
                  "greeting or courtesy match it; at unsociable hours a dry "
                  "aside is welcome.", &tmv);
     }
-    int n = snprintf(s_sys_instr, SYS_INSTR_CAP, "%s%s", kBase, when);
+    /* What the model is told it has depends on whether the gateway can be
+     * used right now (jr_core/tool_policy.h): with none it is told, plainly,
+     * what the device itself offers and not to offer the rest. */
+    char tools[1600];
+    if (jr_tool_instruction(device_gateway_usable(), JR_WEATHER_PLACE,
+                            tools, sizeof tools) == 0U) {
+        ESP_LOGE(TAG, "tool instruction did not fit");
+    }
+    int n = snprintf(s_sys_instr, SYS_INSTR_CAP, "%s%s%s", kPersona, tools,
+                     when);
     if (n < 0 || (size_t)n >= SYS_INSTR_CAP) {
         /* A cut persona is a changed persona: say so where it can be read. */
         ESP_LOGE(TAG, "sys_instr truncated: %d >= %u", n, (unsigned)SYS_INSTR_CAP);

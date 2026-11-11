@@ -334,7 +334,7 @@ static void test_production_http_export_and_bounded_health(void)
     TEST_ASSERT_NOT_NULL(strstr(guard,"atomic_load(&s_voice_privacy_paused) || s_flip_muted"));
     TEST_ASSERT_NOT_NULL(strstr(copy,"403 Forbidden"));free(s);
     s=source_section("main/http_routes.c","jr_audio_power_stats_t audio_power", "static esp_err_t voice_control_handler");
-    TEST_ASSERT_NOT_NULL(strstr(s,"char body[1536]"));
+    TEST_ASSERT_NOT_NULL(strstr(s,"char body[2048]"));
     TEST_ASSERT_NOT_NULL(strstr(s,"n < 0 || (size_t)n >= sizeof body"));
     TEST_ASSERT_NOT_NULL(strstr(s,"audio_power.hardware_reads"));free(s);
 }

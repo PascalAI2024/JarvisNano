@@ -39,7 +39,13 @@ def run(root: Path, output: Path, mutation: str | None) -> int:
         before = "!atomic_load(&s_tool_diag.worker_ready) ||\n        !jr_tools_is_configured()"
         assert helper.count(before) == 1, "the gate moved; update the mutation"
         helper = helper.replace(before, "!atomic_load(&s_tool_diag.worker_ready)")
+    elif mutation == "fixed-cadence":
+        before = "now - s_board_last_poll_ms < device_gateway_poll_ms()"
+        assert helper.count(before) == 1, "the cadence moved; update the mutation"
+        helper = helper.replace(before, "now - s_board_last_poll_ms < BOARD_POLL_MS")
     else:
+        assert "device_gateway_poll_ms()" in helper, \
+            "board_maybe_poll no longer asks the gateway's health for its cadence"
         assert "!jr_tools_is_configured()" in helper, \
             "board_maybe_poll no longer checks for a gateway key"
     template = (root / "main/tests/test_board_gate.c.in").read_text(encoding="utf-8")
@@ -70,7 +76,7 @@ def run(root: Path, output: Path, mutation: str | None) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mutation", choices=("drop-gate",))
+    parser.add_argument("--mutation", choices=("drop-gate", "fixed-cadence"))
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]

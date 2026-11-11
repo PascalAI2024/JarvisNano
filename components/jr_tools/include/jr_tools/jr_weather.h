@@ -22,6 +22,9 @@ extern "C" {
 /* The device-owned job that is served by this fetch instead of the gateway. */
 #define JR_WEATHER_JOB_NAME "weather_glance"
 
+/* The place the URL below is for, as the model is told it. */
+#define JR_WEATHER_PLACE "Fort Lauderdale"
+
 /* Fort Lauderdale, America/New_York. The gateway template of the same job in
  * jr_tools_templates.c carries the same coordinates as JavaScript text; change
  * both together. */

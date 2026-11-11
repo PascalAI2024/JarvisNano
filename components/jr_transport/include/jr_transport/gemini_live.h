@@ -209,7 +209,15 @@ typedef struct {
                                      * phantom self-triggered turns.             */
     const jr_gemini_fn_decl_t *fns; /* functionDeclarations (may be NULL)      */
     size_t fn_count;
+    /* The company gateway cannot be used from this device right now (no key,
+     * or it does not answer): declare only the tools that run on the device,
+     * as classified by jr_tool_needs_gateway(). false (the default) declares
+     * every entry of fns. */
+    bool no_gateway;
 } jr_gemini_config_t;
+
+/* How many of cfg->fns the setup message will declare. */
+size_t jr_gemini_declared_fn_count(const jr_gemini_config_t *cfg);
 
 /* Build the setup message. Returns a malloc'd NUL-terminated JSON string the
  * caller frees, or NULL on OOM. thinkingLevel is nested under
