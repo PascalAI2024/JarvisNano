@@ -26,6 +26,9 @@ idf_component_register(
         jr_wake
         nvs_flash
         app_update
+        espcoredump
+        esp_system
+        esp_partition
         esp_timer
         esp_http_server
         json

@@ -15,7 +15,8 @@ device over LAN. Host comes from --host or $JARVIS_DEVICE_HOST.
     jarvisctl tune preroll=600 refill=1000  # jitter buffer, ms (live)
     jarvisctl taps [outdir]              # WAV taps + metrics
     jarvisctl vadlog [out.csv]           # barge/VAD decision log
-    jarvisctl logs [tail_bytes]          # device log ring — read AFTER, no monitor
+    jarvisctl crash [dump [out.bin]|clear]  # reset reason + stored coredump summary
+    jarvisctl logs [tail_bytes]         # device log ring — read AFTER, no monitor
     jarvisctl gestures [lines]           # recent physical inputs + resolved actions
     jarvisctl input tap|double|long|swipe [left|right|up|down] [edge]
     jarvisctl takeover [ttl_s]           # Codex owns glass; double-tap exits
@@ -269,6 +270,26 @@ def cmd_vadlog(out: str = "vadlog.csv") -> int:
     print(out)
     return 0
 
+def cmd_crash(argv: list[str]) -> int:
+    """Reset reason + stored coredump summary; `dump [out.bin]` saves the raw
+    image, `clear` erases it (the only way the dump is ever erased)."""
+    sub = argv[0] if argv else ""
+    if sub == "dump":
+        out = argv[1] if len(argv) > 1 else "coredump.bin"
+        with open(out, "wb") as f:
+            f.write(api("/api/diag/coredump.bin", timeout=30))
+        print(out)
+        return 0
+    if sub == "clear":
+        print(api("/api/diag/crash?clear=1", method="POST", body=b"").decode())
+        return 0
+    if sub:
+        print(__doc__)
+        return 2
+    print(json.dumps(get_json("/api/diag/crash"), indent=2))
+    return 0
+
+
 def cmd_gestures(limit_arg: str = "40") -> int:
     try:
         limit = max(1, min(200, int(limit_arg)))
@@ -374,6 +395,8 @@ def main() -> int:
         return cmd_taps(*rest[:1])
     if cmd == "vadlog":
         return cmd_vadlog(*rest[:1])
+    if cmd == "crash":
+        return cmd_crash(rest)
     if cmd == "logs":
         tail = rest[0] if rest else "16384"
         sys.stdout.write(api(f"/api/logs?tail={tail}", timeout=20).decode(
