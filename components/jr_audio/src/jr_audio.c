@@ -731,22 +731,33 @@ static void downsample_24to16_4lane(const int16_t *in, int16_t *out)
     }
 }
 
-/* One canceller handle for (mode, filter): internal RAM first, PSRAM as the
- * fallback, and refused unless its chunk is exactly one uplink frame. */
+/* One canceller handle for (mode, filter), refused unless its chunk is exactly
+ * one uplink frame.
+ *
+ * Only the boot default is tried in internal RAM, with PSRAM as its fallback.
+ * Every other pair goes straight to PSRAM: esp-sr does not survive a failed
+ * internal allocation. ?aecmode=6 on 2026-11-11 panicked twice in
+ * esp_aec3_dlfft_init (StoreProhibited at address 0, core dump decoded) with
+ * 21 KB as the largest internal block, instead of returning NULL. A knob must
+ * not be able to do that, and a bench variant has no claim on internal RAM
+ * anyway. */
 static aec_handle_t *aec_build(int mode, int filter)
 {
+    const bool boot_default = mode == GL_AEC_MODE &&
+                              filter == GL_AEC_FILTER_LENGTH;
     aec_config_t cfg = {
         .mic_num       = 1,
         .ref_num       = 1,
         .out_num       = 1,
         .filter_length = filter,
         .sample_rate   = GL_TX_SAMPLE_RATE,    /* MUST be 16000 per header */
-        .caps          = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT,
+        .caps          = boot_default ? (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+                                      : MALLOC_CAP_SPIRAM,
         .mode          = (aec_mode_t)mode,
         .nlp_level     = AEC_NLP_LEVEL_AGGR,
     };
     aec_handle_t *h = aec_create_from_config(&cfg);
-    if (h == NULL) {
+    if (h == NULL && boot_default) {
         cfg.caps = MALLOC_CAP_SPIRAM;
         h = aec_create_from_config(&cfg);
     }
