@@ -94,6 +94,16 @@ typedef struct {
     uint32_t replies_ended;   /* ring-empty episodes followed by silence */
     uint32_t prerolls;        /* replies that started with a full pre-roll */
     uint32_t preroll_timeouts;/* replies that started short (max wait hit) */
+    /* Telling a server pause from a local starve (2026-11-10). A hole is the
+     * ring running dry; these say who left it dry. If max_gap_ms (above) is
+     * large while feeder_stall_max_ms stays near the 32 ms chunk, the feeder
+     * kept pace and nothing arrived: the server or the socket. If the stall is
+     * large, the feeder itself was kept off the CPU with audio waiting. */
+    uint32_t holes_ignored;   /* dry under the DAC tail, back before it mattered */
+    uint32_t feeder_stall_max_ms; /* longest gap between feeder passes that had audio waiting */
+    uint32_t refill_holds;    /* times a hole made the feeder hold for a bigger lead */
+    uint32_t refill_hold_max_ms;  /* longest such hold: silence the hold itself added */
+    uint32_t refill_hold_total_ms;
 } jr_audio_playback_stats_t;
 
 void jr_audio_playback_stats(jr_audio_playback_stats_t *out);
