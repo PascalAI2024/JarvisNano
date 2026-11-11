@@ -464,6 +464,9 @@ extern jr_utt_watch_t s_utt;               /* owned by main.c's voice task */
 extern jr_echo_gate_t s_echo_gate;         /* voice task writes; cockpit reads totals */
 extern jr_reply_cut_t s_reply_cut;
 extern _Atomic bool s_echo_gate_enabled;   /* /api/debug/gain?echogate=, not persisted */
+extern _Atomic int s_echo_gate_volume_min; /* ?echovol=: gate applies above this volume */
+extern _Atomic bool s_wake_barge_enabled;  /* ?wakebarge=: "Jarvis" cuts a reply */
+extern _Atomic uint32_t s_wake_cuts;       /* replies cut by the wake word, cockpit */
 extern _Atomic uint32_t s_srv_interrupts;
 extern _Atomic uint32_t s_srv_phantom_interrupts;
 extern jr_display_weather_t s_weather;

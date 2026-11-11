@@ -147,8 +147,57 @@ static void test_mic_watch_the_clock_wraps(void)
                                   DEAD_RMS, true, true));
 }
 
+/* Meant-open as the capture caller computes it. */
+static int feed_state(jr_mic_watch_t *w, uint32_t *now, uint32_t ms, float rms,
+                      bool sleeping, bool speaking)
+{
+    return feed(w, now, ms, rms, true,
+                jr_mic_watch_meant_open(true, sleeping, speaking));
+}
+
+static void test_mic_watch_meant_open_truth_table(void)
+{
+    TEST_ASSERT_TRUE(jr_mic_watch_meant_open(true, false, false));
+    TEST_ASSERT_FALSE(jr_mic_watch_meant_open(false, false, false));   /* muted */
+    TEST_ASSERT_FALSE(jr_mic_watch_meant_open(true, true, false));     /* asleep */
+    TEST_ASSERT_FALSE(jr_mic_watch_meant_open(true, false, true));     /* speaking */
+}
+
+/* At the 6 dB speaking gain a pause inside a reply reads under 3.0 on a
+ * healthy lane (rms 2.0): that must never request a reopen. */
+static void test_mic_watch_a_quiet_pause_inside_a_reply_is_not_judged(void)
+{
+    jr_mic_watch_t w;
+    uint32_t now = 0u;
+    jr_mic_watch_init(&w);
+    TEST_ASSERT_EQUAL_INT(0, feed_state(&w, &now, 3u * JR_MIC_DEAD_MS, 2.0f,
+                                        false, true));
+    TEST_ASSERT_FALSE(w.dead);
+    TEST_ASSERT_EQUAL_UINT32(0u, w.recoveries);
+}
+
+/* Speaking does not blind it for good: the window starts when the reply ends,
+ * and a lane that is still dead after the reply is still found. */
+static void test_mic_watch_a_dead_lane_is_found_once_the_reply_ends(void)
+{
+    jr_mic_watch_t w;
+    uint32_t now = 0u;
+    jr_mic_watch_init(&w);
+    TEST_ASSERT_EQUAL_INT(0, feed_state(&w, &now, 2u * JR_MIC_DEAD_MS, DEAD_RMS,
+                                        false, true));
+    /* The reply ended: the speaking time does not count towards the window. */
+    TEST_ASSERT_EQUAL_INT(0, feed_state(&w, &now, JR_MIC_DEAD_MS - 2u * FRAME_MS,
+                                        DEAD_RMS, false, false));
+    TEST_ASSERT_EQUAL_INT(1, feed_state(&w, &now, 4u * FRAME_MS, DEAD_RMS,
+                                        false, false));
+    TEST_ASSERT_TRUE(w.dead);
+}
+
 void mic_watch_tests_run(void)
 {
+    RUN_TEST(test_mic_watch_meant_open_truth_table);
+    RUN_TEST(test_mic_watch_a_quiet_pause_inside_a_reply_is_not_judged);
+    RUN_TEST(test_mic_watch_a_dead_lane_is_found_once_the_reply_ends);
     RUN_TEST(test_mic_watch_dead_lane_fires_once_after_the_window);
     RUN_TEST(test_mic_watch_a_live_room_never_fires);
     RUN_TEST(test_mic_watch_a_live_frame_restarts_the_window);

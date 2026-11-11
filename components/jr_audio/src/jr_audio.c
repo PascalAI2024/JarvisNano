@@ -10,6 +10,7 @@
  */
 #include "jr_audio/jr_audio.h"
 #include "jr_core/dac_mute.h"
+#include "jr_core/echo_gate.h"
 #include "jr_core/mic_watch.h"
 
 #include <math.h>
@@ -76,12 +77,14 @@ static void speaker_pa_set(bool enabled)
  * suppression -> echo residual ~180 instead of a railed ~9000). Restored to 24
  * dB on LISTENING so the user's own voice is loud for the local VAD. */
 #if defined(CONFIG_ESP_BOARD_ESP32S3_TOUCH_AMOLED_1_75C)
-/* 21, not 9: at 9 dB the owner's talk-over read ~20 rms on the C — inaudible
- * to both the local barge gate and Gemini's server VAD, so barge-in was dead.
- * At 21 dB (vadlog 2026-08-27) the AEC still held the echo residual to a
- * median of ~20 rms, so the hotter capture costs nothing. Runtime knob:
- * /api/debug/gain?speakmic=. */
-#define GL_MIC_PGA_SPEAK_DB      21
+/* 6, not 21 (echo-fix, docs/reference/echo-canceller-2026-11-11.md): at 21 dB
+ * the microphone rails on the device's own voice at volume 100 (raw rms
+ * 6900-12100, up to 2000 clipped samples per window) and the canceller has
+ * nothing to cancel; with raw peaks under about 16000 it reaches 40 dB and
+ * more. The owner's level is given back as digital make-up AFTER the
+ * canceller (jr_uplink_makeup_q8), where it costs no headroom. Runtime knobs:
+ * /api/debug/gain?speakmic= and ?speakgain=. */
+#define GL_MIC_PGA_SPEAK_DB      6
 #else
 #define GL_MIC_PGA_SPEAK_DB      9
 #endif
@@ -159,6 +162,16 @@ static jr_audio_power_t       s_power;
 static portMUX_TYPE           s_pa_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static aec_handle_t          *s_aec;
+/* Active canceller configuration (capture caller only) and a pending request
+ * (httpd stores, the capture caller applies between frames). -1 = none. */
+static int                    s_aec_mode_active   = GL_AEC_MODE;
+static int                    s_aec_filter_active = GL_AEC_FILTER_LENGTH;
+static _Atomic int            s_aec_mode_pub      = GL_AEC_MODE;
+static _Atomic int            s_aec_filter_pub    = GL_AEC_FILTER_LENGTH;
+static _Atomic int            s_aec_mode_req      = -1;
+static _Atomic int            s_aec_filter_req    = -1;
+static _Atomic uint32_t       s_aec_reconfigs;
+static _Atomic uint32_t       s_aec_reconfig_fails;
 static int16_t               *s_aec_mic;     /* 16-byte aligned, 512 int16 */
 static int16_t               *s_aec_ref;
 static int16_t               *s_aec_clean;
@@ -173,6 +186,13 @@ static int16_t               *s_raw16;       /* 512*4 int16 (16k demuxed)  */
 static _Atomic int            s_mic_db       = GL_MIC_PGA_DB;
 static _Atomic int            s_mic_speak_db = GL_MIC_PGA_SPEAK_DB;
 static _Atomic int            s_ref_db       = GL_REF_PGA_DB;
+/* The microphone PGA the codec was last told, set only after a write that
+ * succeeded (apply_in_gains). The uplink make-up follows THIS, not the
+ * s_capture_speaking flag, so the compensation switches on the frame after the
+ * PGA really changed and a failed write cannot leave the owner 18 dB hot. */
+static _Atomic int            s_applied_mic_db = GL_MIC_PGA_DB;
+/* Percent of the computed make-up compensation (?speakgain=): 100 = full. */
+static _Atomic int            s_speak_gain_pct = 100;
 static _Atomic int            s_out_vol      = GL_OUT_VOL_DEFAULT;
 /* True while the model is speaking — selects the low SPEAKING mic gain so the
  * echo stays unclipped for the AEC. Set by the app on phase transitions. */
@@ -452,18 +472,19 @@ static void acquire_handles(void)
 
 #define IN_GAIN_ATTEMPTS 3
 
-static void set_in_gain_checked(uint16_t channel_mask, float db)
+static bool set_in_gain_checked(uint16_t channel_mask, float db)
 {
     for (int attempt = 0; attempt < IN_GAIN_ATTEMPTS; ++attempt) {
         if (esp_codec_dev_set_in_channel_gain(s_adc, channel_mask, db) ==
             ESP_CODEC_DEV_OK) {
-            return;
+            return true;
         }
         vTaskDelay(1);
     }
     atomic_fetch_add(&s_gain_failures, 1u);
     ESP_LOGW(TAG, "adc gain set failed after %d tries (mask 0x%x)",
              IN_GAIN_ATTEMPTS, (unsigned)channel_mask);
+    return false;
 }
 
 static void apply_in_gains(void)
@@ -480,8 +501,10 @@ static void apply_in_gains(void)
      * A failed set is retried: the managed driver no longer writes after a
      * failed read (patch-v5-managed.py), so a failure leaves the old gain, not
      * a silent channel, and trying again is safe. */
-    set_in_gain_checked(ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) |
-                        ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1), mic);
+    if (set_in_gain_checked(ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) |
+                            ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1), mic)) {
+        atomic_store(&s_applied_mic_db, (int)mic);
+    }
     set_in_gain_checked(ESP_CODEC_DEV_MAKE_CHANNEL_MASK(GL_REF_CHIP_MASK_BIT), ref);
 }
 
@@ -707,11 +730,88 @@ static void downsample_24to16_4lane(const int16_t *in, int16_t *out)
     }
 }
 
+/* One canceller handle for (mode, filter): internal RAM first, PSRAM as the
+ * fallback, and refused unless its chunk is exactly one uplink frame. */
+static aec_handle_t *aec_build(int mode, int filter)
+{
+    aec_config_t cfg = {
+        .mic_num       = 1,
+        .ref_num       = 1,
+        .out_num       = 1,
+        .filter_length = filter,
+        .sample_rate   = GL_TX_SAMPLE_RATE,    /* MUST be 16000 per header */
+        .caps          = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT,
+        .mode          = (aec_mode_t)mode,
+        .nlp_level     = AEC_NLP_LEVEL_AGGR,
+    };
+    aec_handle_t *h = aec_create_from_config(&cfg);
+    if (h == NULL) {
+        cfg.caps = MALLOC_CAP_SPIRAM;
+        h = aec_create_from_config(&cfg);
+    }
+    if (h != NULL) {
+        int cs = aec_get_chunksize(h);
+        if (cs != GL_TX_SAMPLES_PER_CHUNK) {
+            ESP_LOGW(TAG, "aec chunksize %d != %d — disabling AEC (pass-through)",
+                     cs, GL_TX_SAMPLES_PER_CHUNK);
+            aec_destroy(h);
+            h = NULL;
+        }
+    }
+    return h;
+}
+
+/* Apply a pending ?aecmode= / ?aecfilter= request. Called by the capture
+ * caller (src_read) with the ADC guard held, between frames, so nothing is
+ * inside aec_process; httpd only stores the request. Destroys the handle and
+ * builds the new one; if that fails the previous configuration is rebuilt, and
+ * if that fails too the capture runs un-cancelled (s_aec NULL = pass-through).
+ * The filter restarts from zero, so the first second after a change is not a
+ * measurement. Internal RAM's largest block is logged before and after. */
+static void aec_apply_pending(void)
+{
+    int mode = atomic_exchange(&s_aec_mode_req, -1);
+    int filt = atomic_exchange(&s_aec_filter_req, -1);
+    if (mode < 0 && filt < 0) return;
+    if (mode < 0) mode = s_aec_mode_active;
+    if (filt < 0) filt = s_aec_filter_active;
+    if (mode == s_aec_mode_active && filt == s_aec_filter_active &&
+        s_aec != NULL) {
+        return;
+    }
+    const size_t before = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    const int64_t t0 = esp_timer_get_time();
+    if (s_aec != NULL) {
+        aec_handle_t *old = s_aec;
+        s_aec = NULL;                      /* nothing runs it while we rebuild */
+        aec_destroy(old);
+    }
+    s_aec = aec_build(mode, filt);
+    if (s_aec != NULL) {
+        s_aec_mode_active = mode;
+        s_aec_filter_active = filt;
+        atomic_fetch_add(&s_aec_reconfigs, 1u);
+    } else {
+        atomic_fetch_add(&s_aec_reconfig_fails, 1u);
+        ESP_LOGW(TAG, "aec rebuild mode=%d filter=%d failed — restoring %d/%d",
+                 mode, filt, s_aec_mode_active, s_aec_filter_active);
+        s_aec = aec_build(s_aec_mode_active, s_aec_filter_active);
+    }
+    atomic_store(&s_aec_mode_pub, s_aec_mode_active);
+    atomic_store(&s_aec_filter_pub, s_aec_filter_active);
+    ESP_LOGI(TAG, "aec now mode=%d filter=%d %s (%lld ms); largest internal "
+             "block %u -> %u", s_aec_mode_active, s_aec_filter_active,
+             s_aec ? "on" : "OFF", (long long)((esp_timer_get_time() - t0) / 1000),
+             (unsigned)before,
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+}
+
 /* Uplink digital make-up with a soft knee to keep the AEC-clean signal audible
  * without harsh clipping. */
-static inline int16_t soft_gain(int32_t x)
+static inline int16_t soft_gain(int32_t x, int32_t gain_q8)
 {
-    int32_t g = (x * GL_OUT_GAIN_Q8) >> 8;
+    /* |x| <= 32768 and gain_q8 <= JR_UPLINK_MAKEUP_MAX_Q8 (2^14): fits int32. */
+    int32_t g = (x * gain_q8) >> 8;
     /* soft knee above ~85% FS */
     const int32_t knee = 28000;
     if (g > knee) {
@@ -734,6 +834,7 @@ static int src_read(void *ctx, jr_pcm_t *frame, size_t max_samples)
     size_t n = (max_samples < (size_t)GL_TX_SAMPLES_PER_CHUNK)
                    ? max_samples : (size_t)GL_TX_SAMPLES_PER_CHUNK;
     if (xSemaphoreTake(s_adc_guard, pdMS_TO_TICKS(100)) != pdTRUE) return 0;
+    aec_apply_pending();
     jr_audio_capture_result_t capture = jr_audio_power_capture(
         atomic_load(&s_microphone_enabled), atomic_load(&s_adc_open),
         frame, n, &s_capture_ops);
@@ -765,7 +866,9 @@ static int src_read(void *ctx, jr_pcm_t *frame, size_t max_samples)
         &s_mic_watch, (uint32_t)(esp_timer_get_time() / 1000),
         jr_dsp_rms(s_aec_mic, GL_TX_SAMPLES_PER_CHUNK),
         atomic_load(&s_adc_open),
-        atomic_load(&s_microphone_enabled) && !atomic_load(&s_sleeping));
+        jr_mic_watch_meant_open(atomic_load(&s_microphone_enabled),
+                                atomic_load(&s_sleeping),
+                                atomic_load(&s_capture_speaking)));
     atomic_store(&s_mic_dead, s_mic_watch.dead);
     atomic_store(&s_mic_recoveries, s_mic_watch.recoveries);
     tap_write(JR_AUDIO_TAP_REFERENCE, s_aec_ref,
@@ -796,8 +899,17 @@ static int src_read(void *ctx, jr_pcm_t *frame, size_t max_samples)
     float clean_rms = jr_dsp_rms(clean, n);
     atomic_store(&s_clean_rms_q8, (uint32_t)(clean_rms * 256.0f));
 
+    /* Make-up for the PGA that is really applied: while speaking the PGA is
+     * turned down for the canceller and the owner's level is given back here,
+     * after it. Computed per frame from the codec bookkeeping, so the switch
+     * lands on the first frame after the PGA write took effect (the exact
+     * conversion frame inside the ES7210 is not knowable); clean_rms above
+     * stays pre-gain. */
+    const int32_t makeup_q8 = (int32_t)jr_uplink_makeup_q8(
+        (uint32_t)GL_OUT_GAIN_Q8, atomic_load(&s_mic_db),
+        atomic_load(&s_applied_mic_db), atomic_load(&s_speak_gain_pct));
     for (size_t i = 0; i < n; ++i) {
-        frame[i] = soft_gain((int32_t)clean[i]);
+        frame[i] = soft_gain((int32_t)clean[i], makeup_q8);
     }
     tap_write(JR_AUDIO_TAP_MIC_CLEAN, frame, n);
     if (!atomic_load(&s_microphone_enabled)) {
@@ -1202,31 +1314,10 @@ esp_err_t jr_audio_init(void)
     codecs_ok = jr_audio_power_reconcile(&s_power, false, false, false,
                                          &s_power_ops) && codecs_ok;
 
-    /* create the AEC: FD_LOW_COST, filter 4, 16 kHz, 1 mic + 1 ref. */
-    aec_config_t aec_cfg = {
-        .mic_num       = 1,
-        .ref_num       = 1,
-        .out_num       = 1,
-        .filter_length = GL_AEC_FILTER_LENGTH,
-        .sample_rate   = GL_TX_SAMPLE_RATE,    /* MUST be 16000 per header */
-        .caps          = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT,
-        .mode          = GL_AEC_MODE,
-        .nlp_level     = AEC_NLP_LEVEL_AGGR,
-    };
-    s_aec = aec_create_from_config(&aec_cfg);
+    /* create the AEC: FD_LOW_COST, filter 4, 16 kHz, 1 mic + 1 ref (the
+     * defaults; ?aecmode= / ?aecfilter= change them at run time). */
+    s_aec = aec_build(GL_AEC_MODE, GL_AEC_FILTER_LENGTH);
     if (s_aec == NULL) {
-        aec_cfg.caps = MALLOC_CAP_SPIRAM;
-        s_aec = aec_create_from_config(&aec_cfg);
-    }
-    if (s_aec != NULL) {
-        int cs = aec_get_chunksize(s_aec);
-        if (cs != GL_TX_SAMPLES_PER_CHUNK) {
-            ESP_LOGW(TAG, "aec chunksize %d != %d — disabling AEC (pass-through)",
-                     cs, GL_TX_SAMPLES_PER_CHUNK);
-            aec_destroy(s_aec);
-            s_aec = NULL;
-        }
-    } else {
         ESP_LOGW(TAG, "aec create failed — capture runs un-cancelled");
     }
 
@@ -1466,6 +1557,27 @@ int jr_audio_mic_db(void)       { return atomic_load(&s_mic_db); }
 int jr_audio_ref_db(void)       { return atomic_load(&s_ref_db); }
 int jr_audio_out_vol(void)      { return atomic_load(&s_out_vol); }
 int jr_audio_speak_mic_db(void) { return atomic_load(&s_mic_speak_db); }
+
+void jr_audio_set_speak_gain_percent(int percent)
+{
+    if (percent >= 0 && percent <= 400) atomic_store(&s_speak_gain_pct, percent);
+}
+int jr_audio_speak_gain_percent(void) { return atomic_load(&s_speak_gain_pct); }
+
+void jr_audio_request_aec(int mode, int filter)
+{
+    /* The modes esp_aec.h defines for one microphone. Stored only: the capture
+     * caller applies it between frames (aec_apply_pending). */
+    if (mode == 0 || mode == 1 || mode == 3 || mode == 4 || mode == 5 ||
+        mode == 6) {
+        atomic_store(&s_aec_mode_req, mode);
+    }
+    if (filter >= 1 && filter <= 8) atomic_store(&s_aec_filter_req, filter);
+}
+int jr_audio_aec_mode(void)   { return atomic_load(&s_aec_mode_pub); }
+int jr_audio_aec_filter(void) { return atomic_load(&s_aec_filter_pub); }
+uint32_t jr_audio_aec_reconfigs(void)      { return atomic_load(&s_aec_reconfigs); }
+uint32_t jr_audio_aec_reconfig_fails(void) { return atomic_load(&s_aec_reconfig_fails); }
 
 void jr_audio_set_speak_mic_db(int speak_db)
 {

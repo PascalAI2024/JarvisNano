@@ -399,6 +399,29 @@ static void test_production_echo_gate_sits_inside_the_privacy_branch_and_keeps_c
     TEST_ASSERT_NOT_NULL(phys); TEST_ASSERT_NOT_NULL(cut); TEST_ASSERT_TRUE(phys < cut);
     free(s);
 }
+static void test_production_wake_barge_is_fed_only_from_a_live_unmuted_frame(void)
+{
+    char *s = source_section("main/main.c", "const bool voice_uplink_capture =",
+                            "/* Wake watch (Phase 5)");
+    /* The wake word is fed after the privacy zero-fill, only while Speaking,
+     * only when the frame is not privacy-gated, and the pass window that opens
+     * the ECHO gate is opened from that hit alone. */
+    char *gated = strstr(s, "const bool mic_gated =");
+    char *feed = strstr(s, "jr_wake_feed(mic_frame");
+    char *cond = strstr(s, "ph == JR_ST_SPEAKING && !mic_gated &&");
+    char *pass = strstr(s, "jr_echo_gate_pass_for(");
+    char *cut = strstr(s, "jr_reply_cut_begin(");
+    char *gate = strstr(s, "jr_echo_gate_silence(");
+    TEST_ASSERT_NOT_NULL(gated); TEST_ASSERT_NOT_NULL(feed);
+    TEST_ASSERT_NOT_NULL(cond); TEST_ASSERT_NOT_NULL(pass);
+    TEST_ASSERT_NOT_NULL(cut); TEST_ASSERT_NOT_NULL(gate);
+    TEST_ASSERT_TRUE(gated < cond);
+    TEST_ASSERT_TRUE(cond < feed);
+    TEST_ASSERT_TRUE(feed < pass);
+    TEST_ASSERT_TRUE(pass < gate);      /* the hit's own frame already passes */
+    TEST_ASSERT_TRUE(feed < cut);
+    free(s);
+}
 static void test_production_batch_cursor_and_companion_privacy_wiring(void)
 {
     char *s = source_section("main/main.c", "const bool voice_uplink_capture =",
@@ -467,5 +490,6 @@ void audio_power_tests_run(void)
     RUN_TEST(test_production_feeder_ownership_and_reopen_settings);
     RUN_TEST(test_production_privacy_taps_and_real_codec_close);
     RUN_TEST(test_production_echo_gate_sits_inside_the_privacy_branch_and_keeps_cadence);
+    RUN_TEST(test_production_wake_barge_is_fed_only_from_a_live_unmuted_frame);
     RUN_TEST(test_production_batch_cursor_and_companion_privacy_wiring);
 }

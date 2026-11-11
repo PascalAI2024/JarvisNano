@@ -44,14 +44,50 @@ extern "C" {
  * of the onset of a sentence begun the instant the reply ends. */
 #define JR_ECHO_TAIL_MS  150u
 
+/* How long the microphone is let through after the owner said the wake word
+ * over a reply (jr_echo_gate_pass_for): long enough for the sentence that
+ * follows "Jarvis" to reach the server whole. */
+#define JR_ECHO_PASS_MS  4000u
+
 typedef struct {
     bool     seen;             /* an audible frame has been seen */
     uint32_t last_audible_ms;
+    bool     pass;             /* a pass window is open ... */
+    uint32_t pass_until_ms;    /* ... until this time */
     uint32_t gated_frames;     /* frames replaced by silence (cockpit) */
     uint32_t passed_frames;    /* frames that went up as the microphone */
 } jr_echo_gate_t;
 
 void jr_echo_gate_init(jr_echo_gate_t *g);
+
+/* Does the gate apply at this speaker volume? `enabled` is the run-time switch
+ * (?echogate=), `volume` the codec output volume 0..100 and `threshold` the
+ * knob ?echovol=: the gate applies only ABOVE the threshold, because the
+ * canceller measured 40 dB and more at the lower volumes and the owner's
+ * voice must be able to interrupt there. Pass the result as `enabled` to
+ * jr_echo_gate_silence. The privacy gate does not consult this. */
+bool jr_echo_gate_applies(bool enabled, int volume, int threshold);
+
+/* The owner said the wake word over a reply: let the microphone through for
+ * `ms` from now_ms, whatever is audible. Opens the gate, never the privacy
+ * gate: a frame the caller already zeroed for privacy stays zero. */
+void jr_echo_gate_pass_for(jr_echo_gate_t *g, uint32_t now_ms, uint32_t ms);
+
+/* ---- uplink make-up while the microphone PGA is turned down --------------- */
+
+/* Ceiling for the total uplink make-up (Q8): 64x. At 6 dB speaking against
+ * 24 dB listening the full compensation is 6x * 7.94x = 47.6x. */
+#define JR_UPLINK_MAKEUP_MAX_Q8  (64u * 256u)
+
+/* The digital make-up (Q8) that gives the owner the level he has while
+ * listening, when the PGA actually applied is `applied_db` instead of the
+ * `listen_db` it is at while listening. base_q8 is the normal make-up.
+ * compensation = linear(listen_db - applied_db), blended in by `percent`
+ * (0 = none, 100 = full, above 100 = more); never below base_q8 and never
+ * above JR_UPLINK_MAKEUP_MAX_Q8. Pure; the caller reads the applied gain from
+ * the codec driver's own bookkeeping so the switch tracks the real PGA. */
+uint32_t jr_uplink_makeup_q8(uint32_t base_q8, int listen_db, int applied_db,
+                             int percent);
 
 /* One captured frame. `audible`: the playback path is emitting (or has just
  * been written). `enabled`: the run-time switch (/api/debug/gain?echogate=).

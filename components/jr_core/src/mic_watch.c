@@ -13,6 +13,11 @@ void jr_mic_watch_init(jr_mic_watch_t *w)
     w->backoff_ms = JR_MIC_BACKOFF_MIN_MS;
 }
 
+bool jr_mic_watch_meant_open(bool mic_enabled, bool sleeping, bool speaking)
+{
+    return mic_enabled && !sleeping && !speaking;
+}
+
 bool jr_mic_watch_frame(jr_mic_watch_t *w, uint32_t now_ms, float raw_rms,
                         bool adc_open, bool meant_open)
 {
