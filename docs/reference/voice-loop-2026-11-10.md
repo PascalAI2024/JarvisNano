@@ -58,6 +58,26 @@ Readings: the reference lane is healthy and never clips (peak 11 % of full scale
 
 What follows from it: (1) lower the speak gain until 100 does not clip and give the owner's level back as digital gain after the canceller, where it does not cost headroom; (2) measure `AEC_MODE_*_HIGH_PERF` and a longer filter against the 20 dB of `FD_LOW_COST`; (3) if the residual still matches speech at 100, cap the volume where it does not. The second calibration needs N16.10 first: a gain change is what silenced the microphone.
 
+**[2026-11-11] Second calibration (PLAN N16.9), gate off, 31 counted replies.** Residual is the canceller output before the 6x make-up (`mic-clean / 6`), one value per two-second window. The owner reads 75 to 143 rms at the 24 dB listening gain; at 9 dB that is 13 to 25, at 6 dB 9 to 18.
+
+| volume | speaking gain | reference gain | raw mic rms | raw mic peak | residual rms | cancellation |
+| --- | --- | --- | --- | --- | --- | --- |
+| 100 | 21 dB | 12 | 6874 to 12091 | 32768, clipped | saturated | none |
+| 100 | 9 | 12 | 3007 to 3665 | 30000 to 32767 | 335, 8, 525+ | 18 to 21 dB, one window 54 |
+| 100 | 3 | 12 | 1166 to 2301 | 13000 to 15000 | 91, 2, 66, 2.5 | 22 to 58 dB |
+| 100 | 6 | 24 | 846 to 2155 | 10500 to 20300 | 14, 3.5, 102, 18 | 40 to 49 dB, one window 26 |
+| 100 | 9 | 24 | 2426 to 4124 | 23600 to 28400 | 155 to 183 | 24 to 26 dB |
+| 80 | 21 | 12 | 2825 to 4129 | 30409 to 32768 | 112, saturated | 11 to 28 dB |
+| 80 | 9 | 12 | 386 to 1380 | 4600 to 15400 | 48, 90, 67, 21 | 13 to 25 dB |
+| 80 | 9 | 24 | 606 to 1049 | 6000 to 10800 | 6.5, 22, 28, 37 | 25 to 45 dB |
+| 70 | 21 | 12 | 817 to 899 | 11000 | 54 to 67 | 21 to 23 dB |
+| 70 | 9 | 12 | 550 to 970 | 5500 to 6300 | 7, 4, 25, 6 | 29 to 44 dB |
+| 60 | 9 | 12 | 99 to 290 | 1500 to 2900 | 2 to 7 | not computed (quiet windows) |
+
+Readings. Headroom decides: with raw peaks under about 16000 the existing canceller (`AEC_MODE_FD_LOW_COST`, filter 4, aggressive NLP) reaches 40 dB and more; near the rail it gives 20 dB or nothing, and 21 dB of speaking gain (`jr_audio.c:83`) puts volume 80 and 100 at the rail. The speaker is far louder than a person at this microphone: about 45 dB at volume 100, 34 at 80, 20 at 60, so even 45 dB of cancellation leaves a residual the size of the owner's voice at full volume, with bursts above it. A louder reference lane (24 dB) looks better at 80 and 100 but each point is one reply. Phantom server interrupts with the gate off: one each at 100/21, 80/21 and 70/21, none at the lower gains. Volume is steep: 100 to 80 is about 10 dB at the microphone, 80 to 60 another 12. Windows vary because counting has pauses and the taps are two seconds long; captures are not in the repo.
+
+What follows: speaking gain 6 dB with the difference made up after the canceller; the echo gate only above a volume threshold to be set on the device from the phantom count; the wake word fed during replies so the owner can cut a reply by saying it at any volume; `FD_HIGH_PERF` measured against today's mode. All four are in `feat/echo-fix` behind `/api/debug/gain` knobs.
+
 **[2026-11-10] An honest tool list (item 5, fixed).**
 The setup declared all ten tools whether or not the gateway could be used, and the system text called them the model's hands; the model offered to "delegate a task to an agent" and every call returned an error. The gateway's reachability was also never tracked: a stored host that does not resolve failed the board poll every 90 s all boot. Now `components/jr_core/src/tool_policy.c` decides:
 - `jr_tool_needs_gateway(name)`: memory, search, execute, delegate and the board are gateway-only; `current_time`, `weather_here`, `set_volume`, `set_brightness`, `ask_user` run on the device. An unclassified name counts as gateway-only.

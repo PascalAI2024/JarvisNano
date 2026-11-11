@@ -41,6 +41,16 @@ failed I2C read during a gain change leaves the microphone silent until
 the codec is reopened (PLAN N16.10); that is fixed first, because every
 reply changes the gain twice and the second calibration changes it more.
 
+### 2026-11-11: guard proven, echo measured, one unexplained restart
+
+The microphone guard held with the microphone open (50 gain changes,
+about 40 replies, no failure). The echo table is complete: the
+canceller works when the microphone has headroom, so the speaking gain
+goes from 21 to 6 dB (PLAN N16.9, lane `feat/echo-fix`). During the last
+measurement the device restarted by itself and nothing recorded why
+(PLAN N16.11, lane `feat/crash-forensics`); the ELF of the image that
+crashed (8ca3258) is kept outside the repo for reading the dump.
+
 ## Start here
 
 ```bash
