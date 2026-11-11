@@ -62,3 +62,16 @@ The raw `coredump.bin` decodes with `esp-coredump info_corefile --core coredump.
 ## See also
 
 - [build-toolchain.md](./build-toolchain.md) — the Docker build that produces the ELF.
+
+## The PMIC's own record (added 2026-11-11)
+
+`/api/diag/crash` also carries `pmic_ok`, `pmic_on` and `pmic_off`: AXP2101
+registers 0x20 (power-on source) and 0x21 (power-off source), raw, read by
+`jr_power_boot_status` (`components/jr_power/src/jr_power.c`). A restart the
+PMIC did not cause leaves them as they were, so `reset` and these two together
+separate a PMIC shutdown (`reset` = `poweron`, `pmic_off` says why) from a
+brownout or watchdog inside the ESP32 (`reset` names it, the PMIC record is
+old). Bit names per XPowersLib (not fetch-verified): on, bit 0 power key,
+bit 2 VBUS inserted; off, bit 0 key held, bit 1 software, bit 3 system
+under-voltage, bit 7 over-temperature. First reading on the device: on 0x01,
+off 0x02, no dump stored.

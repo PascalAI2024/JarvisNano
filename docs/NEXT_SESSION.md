@@ -115,7 +115,7 @@ is the classified edge-origin swipe.
 
 All of it is on `feat/glass-2`, not on `main` and not pushed. `PLAN.md` wave
 N15 has the rows; `docs/evidence/glass-n15-2026-11-10/README.md` has the
-device tables from twelve flashes; the device runs 8ca3258 (the microphone guard of PLAN N16.10 on top of 16e9ec6, which is the voice loop, the echo gate and the tool budget of PLAN N16.7 and N16.8 on top of wave N16: the tilt
+device tables from twelve flashes; the device runs a5df6cf (crash reporting of PLAN N16.11 on top of 8ca3258, the microphone guard of PLAN N16.10 on top of 16e9ec6, which is the voice loop, the echo gate and the tool budget of PLAN N16.7 and N16.8 on top of wave N16: the tilt
 stars, the dormant panel dip, the decoded-dial cache, and N16.6 "a dial owns
 the glass"). Capture QA **without a lease and at rest**:
 a lease forces the awake mood and a violet rim, and hid the layer defects of
