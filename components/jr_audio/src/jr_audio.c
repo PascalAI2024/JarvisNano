@@ -941,6 +941,14 @@ int jr_audio_aec_bench(int frames, uint32_t *max_us)
     /* The same guard src_read holds around aec_process, so a bench can never
      * run the canceller concurrently with a capture or a rebuild. */
     if (xSemaphoreTake(s_adc_guard, pdMS_TO_TICKS(100)) != pdTRUE) return -1;
+    /* A muted idle device never reads, so a pending ?aecmode= / ?aecfilter=
+     * would wait for the next live frame. Apply it here, under the same guard
+     * and from the same task as src_read, so modes can be compared muted. */
+    aec_apply_pending();
+    if (s_aec == NULL) {
+        xSemaphoreGive(s_adc_guard);
+        return -1;
+    }
     uint32_t seed = 0x9E3779B9u;
     uint64_t sum = 0;
     uint32_t worst = 0;
