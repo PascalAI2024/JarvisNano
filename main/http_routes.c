@@ -12,6 +12,9 @@
 #include "app.h"
 #include "jr_dsp/audio_power.h"
 #include "jr_probe/gpio_probe.h"
+#include "esp_core_dump.h"
+#include "esp_partition.h"
+#include "esp_system.h"
 
 /* THE FPS FLOOR FOLLOWS THE CADENCE. Health and probation both ask for a
  * live frame rate, but since 2026-09-02 the ladder deliberately renders at
@@ -478,6 +481,178 @@ static const char *ota_image_state_name(esp_ota_img_states_t state)
     }
 }
 
+/* Why this boot happened. Read once at the top of app_main; the log ring is
+ * PSRAM and does not survive the reset it would need to explain. */
+static esp_reset_reason_t s_reset_reason = ESP_RST_UNKNOWN;
+
+static const char *reset_reason_name(esp_reset_reason_t r)
+{
+    switch (r) {
+    case ESP_RST_POWERON:   return "poweron";
+    case ESP_RST_EXT:       return "ext";
+    case ESP_RST_SW:        return "sw";
+    case ESP_RST_PANIC:     return "panic";
+    case ESP_RST_INT_WDT:   return "int_wdt";
+    case ESP_RST_TASK_WDT:  return "task_wdt";
+    case ESP_RST_WDT:       return "wdt";
+    case ESP_RST_DEEPSLEEP: return "deepsleep";
+    case ESP_RST_BROWNOUT:  return "brownout";
+    case ESP_RST_SDIO:      return "sdio";
+    case ESP_RST_USB:       return "usb";
+    case ESP_RST_JTAG:      return "jtag";
+    default:                return "unknown";
+    }
+}
+
+void crash_note_boot(void)
+{
+    s_reset_reason = esp_reset_reason();
+    ESP_LOGW(TAG, "boot: reset reason=%s", reset_reason_name(s_reset_reason));
+}
+
+/* GET /api/diag/crash — reset reason plus the stored coredump summary.
+ * The summary struct (~300 B) and the JSON both live on the heap: httpd has
+ * about 1500 B of stack free. Read-only; nothing here erases the dump. */
+#define CRASH_JSON_CAP 1536U
+#define CRASH_BT_MAX   16U
+
+static esp_err_t crash_get_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
+    char *out = heap_caps_malloc(CRASH_JSON_CAP,
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    esp_core_dump_summary_t *sum = heap_caps_calloc(1, sizeof *sum,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (out == NULL || sum == NULL) {
+        heap_caps_free(out);
+        heap_caps_free(sum);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_OK;
+    }
+    size_t addr = 0, size = 0;
+    const bool present = esp_core_dump_image_get(&addr, &size) == ESP_OK;
+    const bool valid = present && esp_core_dump_image_check() == ESP_OK;
+    const bool have_sum = valid && esp_core_dump_get_summary(sum) == ESP_OK;
+
+    int n = snprintf(out, CRASH_JSON_CAP,
+        "{\"reset\":\"%s\",\"dump_present\":%s,\"dump_valid\":%s,"
+        "\"dump_bytes\":%u,\"summary\":",
+        reset_reason_name(s_reset_reason), present ? "true" : "false",
+        valid ? "true" : "false", (unsigned)size);
+    if (!have_sum) {
+        n += snprintf(out + n, CRASH_JSON_CAP - (size_t)n, "null}");
+    } else {
+        char task[sizeof sum->exc_task + 1];
+        memcpy(task, sum->exc_task, sizeof sum->exc_task);
+        task[sizeof sum->exc_task] = '\0';
+        for (char *c = task; *c != '\0'; c++) {   /* keep the JSON valid */
+            if (*c == '"' || *c == '\\' || (unsigned char)*c < 0x20) {
+                *c = '?';
+            }
+        }
+        char sha[sizeof sum->app_elf_sha256 + 1];
+        memcpy(sha, sum->app_elf_sha256, sizeof sum->app_elf_sha256);
+        sha[sizeof sum->app_elf_sha256] = '\0';
+        for (char *c = sha; *c != '\0'; c++) {
+            if (!((*c >= '0' && *c <= '9') || (*c >= 'a' && *c <= 'f'))) {
+                *c = '?';
+            }
+        }
+        n += snprintf(out + n, CRASH_JSON_CAP - (size_t)n,
+            "{\"task\":\"%s\",\"exc_pc\":\"0x%08x\",\"exc_cause\":%u,"
+            "\"exc_vaddr\":\"0x%08x\",\"elf_sha\":\"%s\",\"version\":%u,"
+            "\"bt_corrupted\":%s,\"bt_depth\":%u,\"bt\":[",
+            task, (unsigned)sum->exc_pc,
+            (unsigned)sum->ex_info.exc_cause, (unsigned)sum->ex_info.exc_vaddr,
+            sha, (unsigned)sum->core_dump_version,
+            sum->exc_bt_info.corrupted ? "true" : "false",
+            (unsigned)sum->exc_bt_info.depth);
+        uint32_t depth = sum->exc_bt_info.depth;
+        if (depth > CRASH_BT_MAX) {
+            depth = CRASH_BT_MAX;
+        }
+        for (uint32_t i = 0; i < depth && n > 0 &&
+                             (size_t)n < CRASH_JSON_CAP - 24U; i++) {
+            n += snprintf(out + n, CRASH_JSON_CAP - (size_t)n, "%s\"0x%08x\"",
+                          i ? "," : "", (unsigned)sum->exc_bt_info.bt[i]);
+        }
+        if (n > 0 && (size_t)n < CRASH_JSON_CAP - 8U) {
+            n += snprintf(out + n, CRASH_JSON_CAP - (size_t)n, "]}}");
+        }
+    }
+    if (n < 0 || (size_t)n >= CRASH_JSON_CAP) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "crash response too large");
+    } else {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+        httpd_resp_send(req, out, n);
+    }
+    heap_caps_free(out);
+    heap_caps_free(sum);
+    return ESP_OK;
+}
+
+/* POST /api/diag/crash?clear=1 — the only thing that erases the dump. */
+static esp_err_t crash_clear_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    char q[24], v[4];
+    if (httpd_req_get_url_query_str(req, q, sizeof q) != ESP_OK ||
+        httpd_query_key_value(q, "clear", v, sizeof v) != ESP_OK ||
+        v[0] != '1') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "clear=1 required");
+        return ESP_OK;
+    }
+    const esp_err_t err = esp_core_dump_image_erase();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_status(req, err == ESP_OK ? "200 OK" : "500 Internal Server Error");
+    httpd_resp_sendstr(req, err == ESP_OK ? "{\"ok\":true}" : "{\"ok\":false}");
+    return ESP_OK;
+}
+
+/* GET /api/diag/coredump.bin — the raw stored image, 4 KB at a time. */
+static esp_err_t coredump_bin_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
+    size_t addr = 0, size = 0;
+    if (esp_core_dump_image_get(&addr, &size) != ESP_OK || size == 0) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no coredump");
+        return ESP_OK;
+    }
+    const esp_partition_t *part = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, NULL);
+    uint8_t *buf = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (part == NULL || buf == NULL || addr < part->address ||
+        addr - part->address + size > part->size) {
+        heap_caps_free(buf);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "coredump unreadable");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    const size_t base = addr - part->address;
+    for (size_t off = 0; off < size; off += 4096U) {
+        const size_t len = size - off < 4096U ? size - off : 4096U;
+        if (esp_partition_read(part, base + off, buf, len) != ESP_OK ||
+            httpd_resp_send_chunk(req, (const char *)buf, (ssize_t)len) != ESP_OK) {
+            heap_caps_free(buf);
+            httpd_resp_send_chunk(req, NULL, 0);   /* short body: client sees it */
+            return ESP_FAIL;
+        }
+    }
+    heap_caps_free(buf);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
 static esp_err_t device_health_handler(httpd_req_t *req)
 {
     if (!agent_require_auth(req)) {
@@ -549,7 +724,7 @@ static esp_err_t device_health_handler(httpd_req_t *req)
 
     char body[2048];
     int n = snprintf(body, sizeof body,
-        "{\"verdict\":\"%s\",\"repairable\":%s,"
+        "{\"verdict\":\"%s\",\"repairable\":%s,\"reset\":\"%s\","
         "\"privacy\":%s,\"flip_muted\":%s,\"operator\":%s,"
         "\"phase\":\"%s\",\"voice_alive\":%s,"
         "\"levels\":{\"volume\":%d,\"brightness_cap\":%u,"
@@ -571,7 +746,7 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         "\"state\":\"%s\",\"received\":%u,\"total\":%u,"
         "\"last_error\":\"%s\",\"last_invalid\":\"%s\"},"
         "\"tools\":{\"status\":\"%s\",\"http\":%d}}",
-        verdict, repairable ? "true" : "false",
+        verdict, repairable ? "true" : "false", reset_reason_name(s_reset_reason),
         privacy ? "true" : "false",
         s_flip_muted ? "true" : "false",
         operator_active ? "true" : "false",
@@ -4836,6 +5011,12 @@ void start_diag_http(void)
         { .uri = "/api/display",     .method = HTTP_GET, .handler = display_diag_handler },
         { .uri = "/api/power/charge", .method = HTTP_GET, .handler = power_charge_handler },
         { .uri = "/api/diag/vadlog", .method = HTTP_GET, .handler = vadlog_csv_handler },
+        { .uri = "/api/diag/crash", .method = HTTP_GET,
+          .handler = crash_get_handler },
+        { .uri = "/api/diag/crash", .method = HTTP_POST,
+          .handler = crash_clear_handler },
+        { .uri = "/api/diag/coredump.bin", .method = HTTP_GET,
+          .handler = coredump_bin_handler },
         { .uri = "/api/device/health", .method = HTTP_GET,
           .handler = device_health_handler },
         { .uri = "/api/display/snapshot.json", .method = HTTP_GET,

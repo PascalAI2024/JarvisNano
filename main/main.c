@@ -4477,6 +4477,7 @@ void app_main(void)
     ESP_LOGI(TAG, " JarvisRobot v5  |  hexagonal core  |  voice boot     ");
     ESP_LOGI(TAG, "=====================================================");
 
+    crash_note_boot();
     init_nvs();
 
     /* Inbound event slots go to PSRAM FIRST — 36 KB of tool-call buffers in

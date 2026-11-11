@@ -438,6 +438,7 @@ bool operator_mode_release(uint32_t now, const char *reason,
                            uint32_t expected_lease_id);
 bool ota_confirm_running_image_if_healthy(void);
 void start_diag_http(void);
+void crash_note_boot(void);   /* first line of app_main: reset reason, once */
 
 /* ---- owned by power.c — CPU gears, deep sleep, wake state ---- */
 
