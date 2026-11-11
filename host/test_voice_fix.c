@@ -217,7 +217,14 @@ static void test_instruction_with_a_gateway_is_the_old_one_plus_weather(void)
     TEST_ASSERT_NOT_NULL(strstr(buf, "delegate_task"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "hands elsewhere"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "weather_here"));
+    /* The board is delegated_tasks; execute_tool is for a method search_tools
+     * found. The model once reached for execute_tool to read the board. */
+    TEST_ASSERT_NOT_NULL(strstr(buf, "alone answers anything about the board"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "execute_tool is for a method search_tools found, never for the board"));
     TEST_ASSERT_NULL(strstr(buf, "not connected"));
+    /* main.c keeps this text in a 1600-byte buffer: it must still fit. */
+    char device[1600];
+    TEST_ASSERT_GREATER_THAN_UINT(100u, (unsigned)jr_tool_instruction(true, "X", device, sizeof device));
     /* The place name is a no-gateway detail; the keyed text does not need it. */
     TEST_ASSERT_NULL(strstr(buf, "Testville"));
 }

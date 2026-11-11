@@ -139,8 +139,8 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
             "remember anything he tells you (say what you remembered); "
             "memory.search {\"query\"} to recall it; butlercrm.calendar.upcoming "
             "{} and butlercrm.calendar.create {\"title\",\"starts_at\"} for his "
-            "calendar; coordination.portfolio {} and coordination.createWorkItem "
-            "{\"projectId\",\"title\"} for the work board. Otherwise use the "
+            "calendar. Never for the work board, the tasks, or what is queued "
+            "or done: that is delegated_tasks. Otherwise use the "
             "tool and params search_tools returned, keys in that order.",
         .params = {
             {
@@ -201,9 +201,11 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
     {
         .name = "delegated_tasks",
         .description =
-            "List the jobs queued for Sir's agents, newest first, with their "
-            "status and result. The only tool for anything about the board, "
-            "the tasks, or a delegated job; never execute_tool for that.",
+            "Sir's work board: the jobs queued for his agents, newest first, "
+            "with their status and result. Use it for \"what is on the "
+            "board\", \"the tasks\", \"what is queued, running or done\". The "
+            "only tool for anything about the board, the tasks, or a "
+            "delegated job; never search_tools or execute_tool for that.",
         .arg_name = NULL,
         .arg_desc = NULL,
     },

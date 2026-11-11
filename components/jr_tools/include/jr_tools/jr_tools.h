@@ -139,6 +139,27 @@ jr_tool_template_status_t jr_tools_build_code(const char *name,
 bool jr_tools_set_board_project(const char *project_id);
 const char *jr_tools_board_project(void);
 
+/* A gateway body larger than the device can hold. The HTTP half lives in
+ * jr_tools.c; these are the pure parts, host-tested. jr_tools_target_name
+ * yields the method name only (for execute_tool its `tool` member), never an
+ * argument, or "?" and false when the name is missing or outside
+ * [A-Za-z0-9._-]. jr_tools_describe_oversize formats the one log line.
+ * jr_tools_oversize_result writes the bounded answer the model gets instead
+ * of bad_response: {"result":{"truncated":true,"too_large":true,...}}. */
+bool jr_tools_target_name(const char *tool, const char *args_json,
+                          char *out, size_t out_cap);
+int jr_tools_describe_oversize(char *out, size_t out_cap, const char *tool,
+                               const char *target, int64_t announced,
+                               size_t bytes_read, size_t cap);
+bool jr_tools_oversize_result(char *out, size_t out_cap, int64_t announced,
+                              size_t bytes_read);
+
+/* Counted by the worker, read by the cockpit: bodies that outgrew the device,
+ * and the name of the last method a job addressed (see jr_tools_target_name).
+ * `out` always ends up NUL-terminated; it reads "" before the first job. */
+uint32_t jr_tools_oversize_count(void);
+void jr_tools_last_target(char *out, size_t out_cap);
+
 /* Stable idempotency key for physically confirmed mutations. The boot/session
  * namespace prevents provider-local ids (for example, "call_1") from
  * colliding across sessions while retries of the same job remain identical.
