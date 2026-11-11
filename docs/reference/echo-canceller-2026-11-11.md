@@ -101,7 +101,7 @@ not proven to come from this.
 Stopgap on the running device: `wakebarge=0` (run-time, lost on reboot). The
 echo gate is on by default, so replies behave as before the fix.
 
-### The fix (merged 4a6e98b, built, NOT yet on the device)
+### The fix (4a6e98b, on the device since 2026-11-11, benched muted)
 
 - `components/jr_wake`: a `jr_wake` task (core 0, priority 5, 12 KB stack in
   PSRAM, 8 KB ring in PSRAM) owns the model and is the only caller of `detect`.
@@ -129,11 +129,29 @@ echo gate is on by default, so replies behave as before the fix.
   and holds the ADC guard for about 0.8 s: not during a measurement.
 - Gates: 23 host suites, `jr_host_tests` 257 tests; image 2,478,768 bytes.
 
-Not proven: any of it on the device. The flash did not happen because the
-device stopped answering on the network (asleep, most likely). First checks
-after flashing: `voiceperf bench` (detect and canceller cost, worker stack
-headroom), then with the microphone open `fps` while speaking, which should be
-near 31, and the sweep again.
+Bench on the device, muted, 64 noise chunks or frames each
+(`POST /api/diag/voiceperf?bench=1`):
+
+| | 160 MHz | 240 MHz |
+|---|---|---|
+| wake `detect`, per 512-sample chunk, on its own task | 5.6 ms mean, 12.6 max | 4.9 ms mean, 14.1 max |
+| canceller FD_LOW_COST filter 4, per frame, voice task | 12.9 ms mean, 19.5 max | 10.1 ms mean, 18.9 max |
+
+The wake worker used about 1 KB of its 12 KB stack (11,272 bytes free).
+Largest internal block 21,504 bytes, as before. The image booted from deep
+sleep state and passed probation.
+
+`detect` alone is 5 ms, yet on the voice task it cost about 17 ms a frame:
+each time the iteration crossed a tick boundary the tick sleep added up to
+10 ms on top.
+
+The bench cannot compare canceller modes while muted: `aecmode=` is applied by
+the capture caller on its next read, and a muted idle device does not read.
+Read `aec_us` from `/api/debug/gain` during a reply instead.
+
+Not proven: the frame rate while speaking (`voiceperf` fps, should be near 31),
+the residual with every frame delivered, a wake hit over a reply, and the
+owner interrupting by voice. All need the microphone open.
 
 How to read a capture: `p90` of the `rms` column over the speaking rows
 (phase code 5) of a per-point vadlog. Two-second WAV windows are too noisy a
