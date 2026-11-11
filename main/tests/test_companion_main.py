@@ -49,7 +49,7 @@ def dispatch(source):
                   source.index("prev_mood = (uint8_t)mout.mood")]
     assert "s_weather.valid" not in lift and "GLANCE_MS" in lift
     assert "jr_display_nav_set" not in lift
-    wake = source[source.index("if (jr_wake_feed("):source.index("capture_complete:")]
+    wake = source[source.index("(void)jr_wake_push(mic_frame, (size_t)n);\n                if (jr_wake_take_hit("):source.index("capture_complete:")]
     assert "s_glance_until_ms = 0U;" in wake and "JR_DISPLAY_REST_NONE" in wake
     tap = source[source.index("if (iev.kind == JR_INPUT_PRESS_DOWN)") - 150:
                  source.index("/* ANY physical contact is activity")]

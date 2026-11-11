@@ -407,19 +407,42 @@ static void test_production_wake_barge_is_fed_only_from_a_live_unmuted_frame(voi
      * only when the frame is not privacy-gated, and the pass window that opens
      * the ECHO gate is opened from that hit alone. */
     char *gated = strstr(s, "const bool mic_gated =");
-    char *feed = strstr(s, "jr_wake_feed(mic_frame");
+    char *feed = strstr(s, "jr_wake_push(mic_frame");
+    char *hit = strstr(s, "jr_wake_take_hit(");
     char *cond = strstr(s, "ph == JR_ST_SPEAKING && !mic_gated &&");
     char *pass = strstr(s, "jr_echo_gate_pass_for(");
     char *cut = strstr(s, "jr_reply_cut_begin(");
     char *gate = strstr(s, "jr_echo_gate_silence(");
     TEST_ASSERT_NOT_NULL(gated); TEST_ASSERT_NOT_NULL(feed);
+    TEST_ASSERT_NOT_NULL(hit);
     TEST_ASSERT_NOT_NULL(cond); TEST_ASSERT_NOT_NULL(pass);
     TEST_ASSERT_NOT_NULL(cut); TEST_ASSERT_NOT_NULL(gate);
     TEST_ASSERT_TRUE(gated < cond);
     TEST_ASSERT_TRUE(cond < feed);
-    TEST_ASSERT_TRUE(feed < pass);
+    TEST_ASSERT_TRUE(feed < hit);
+    TEST_ASSERT_TRUE(hit < pass);
     TEST_ASSERT_TRUE(pass < gate);      /* the hit's own frame already passes */
     TEST_ASSERT_TRUE(feed < cut);
+    free(s);
+}
+static void test_production_wake_ring_is_flushed_while_the_microphone_is_gated(void)
+{
+    /* Every privacy edge is stored by the voice task before this point, so the
+     * flush that empties the wake ring and voids an in-flight hit sits between
+     * the microphone switch and the first possible push. */
+    char *s = source_section("main/main.c", "jr_audio_set_microphone_enabled(",
+                            "const bool voice_uplink_capture =");
+    char *gate = strstr(s, "atomic_load(&s_voice_privacy_paused) || s_flip_muted");
+    char *flush = strstr(s, "jr_wake_flush();");
+    TEST_ASSERT_NOT_NULL(gate); TEST_ASSERT_NOT_NULL(flush);
+    TEST_ASSERT_TRUE(gate < flush);
+    free(s);
+    /* And the voice loop never runs the detector itself again. */
+    s = source_section("main/main.c", "static void voice_task(void *arg)",
+                       "static void init_nvs(void)");
+    TEST_ASSERT_NULL(strstr(s, "jr_wake_feed("));
+    TEST_ASSERT_NOT_NULL(strstr(s, "jr_pace_skip_sleep("));
+    TEST_ASSERT_NOT_NULL(strstr(s, "vTaskDelay(pdMS_TO_TICKS(20));"));
     free(s);
 }
 static void test_production_batch_cursor_and_companion_privacy_wiring(void)
@@ -491,5 +514,6 @@ void audio_power_tests_run(void)
     RUN_TEST(test_production_privacy_taps_and_real_codec_close);
     RUN_TEST(test_production_echo_gate_sits_inside_the_privacy_branch_and_keeps_cadence);
     RUN_TEST(test_production_wake_barge_is_fed_only_from_a_live_unmuted_frame);
+    RUN_TEST(test_production_wake_ring_is_flushed_while_the_microphone_is_gated);
     RUN_TEST(test_production_batch_cursor_and_companion_privacy_wiring);
 }

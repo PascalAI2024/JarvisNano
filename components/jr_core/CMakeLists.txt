@@ -19,6 +19,7 @@ idf_component_register(
         "src/utt_watch.c"
         "src/echo_gate.c"
         "src/mic_watch.c"
+        "src/pace.c"
         "src/tool_policy.c"
     INCLUDE_DIRS "include"
     REQUIRES jr_ports jr_dsp

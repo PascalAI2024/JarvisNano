@@ -85,6 +85,15 @@ uint32_t jr_audio_last_aec_us(void);
  * the room's noise bed up with it. This is the unamplified view. */
 float jr_audio_clean_rms(void);
 
+/* Bench: run `frames` frames of pseudo-random noise through the live canceller
+ * under the ADC guard and return the mean aec_process time in microseconds
+ * (worst frame in *max_us when given), or -1 when there is no canceller or the
+ * guard is busy. Opens nothing and reads no microphone. The noise adapts the
+ * filter, so the first second of the next real reply is not a measurement.
+ * Call from the capture caller's task only (the voice task); it holds the
+ * guard for the whole run, so keep frames small (64 is about 0.8 s). */
+int jr_audio_aec_bench(int frames, uint32_t *max_us);
+
 /* True while decoded PCM is queued, a codec write is in flight, or the final
  * DMA/physical-output tail is still expected to be audible. The composition
  * root uses this to defer Gemini's terminal marker until playback is really

@@ -633,6 +633,85 @@ static esp_err_t crash_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* GET /api/diag/voiceperf — how well the voice loop keeps up with the
+ * microphone, per frame class, plus the wake worker's own timing.
+ * POST /api/diag/voiceperf?bench=1 queues the no-microphone bench: the wake
+ * worker times 64 noise chunks through detect(), the voice task (when it is
+ * not carrying live frames) times 64 noise frames through the canceller. Read
+ * the results with a GET a couple of seconds later. Static buffer: httpd has
+ * about 1.3 KB of stack left. */
+static esp_err_t voiceperf_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
+    if (req->method == HTTP_POST) {
+        if (!control_intent_required(req)) {
+            return ESP_OK;
+        }
+        int bench = 0;
+        (void)query_int(req, "bench", &bench);
+        if (bench == 1) {
+            atomic_store(&s_aec_bench_have, false);
+            atomic_store(&s_aec_bench_req, true);
+            jr_wake_bench_request();
+        }
+    }
+    static char buf[1152];
+    int n = 0;
+    n += snprintf(buf + n, sizeof buf - (size_t)n, "{\"ok\":true,\"classes\":[");
+    for (int i = 0; i < 2; ++i) {
+        const voiceperf_class_t *c = &s_vperf[i];
+        const uint32_t f = atomic_load(&c->frames);
+        const uint32_t d = f != 0U ? f : 1U;
+        n += snprintf(buf + n, sizeof buf - (size_t)n,
+            "%s{\"class\":\"%s\",\"frames\":%u,\"fps\":%u.%02u,"
+            "\"iter_mean_ms\":%u.%u,\"iter_max_ms\":%u.%u,\"read_mean_us\":%u}",
+            i ? "," : "", i == 0 ? "speaking" : "other",
+            (unsigned)f,
+            (unsigned)(atomic_load(&c->fps_x100) / 100U),
+            (unsigned)(atomic_load(&c->fps_x100) % 100U),
+            (unsigned)(atomic_load(&c->iter_sum_us) / d / 1000U),
+            (unsigned)(atomic_load(&c->iter_sum_us) / d / 100U % 10U),
+            (unsigned)(atomic_load(&c->iter_max_us) / 1000U),
+            (unsigned)(atomic_load(&c->iter_max_us) / 100U % 10U),
+            (unsigned)(atomic_load(&c->read_sum_us) / d));
+    }
+    uint32_t wmean = 0, wmax = 0;
+    const bool wbench = jr_wake_bench_result(&wmean, &wmax);
+    n += snprintf(buf + n, sizeof buf - (size_t)n,
+        "],\"tick_skips\":%u,\"tick_sleeps\":%u,"
+        "\"cpu_mhz\":%d,"
+        "\"wake\":{\"ready\":%s,\"chunks\":%u,\"detect_last_us\":%u,"
+        "\"detect_max_us\":%u,\"dropped\":%u,\"stale_hits\":%u,"
+        "\"hits\":%u,\"stack_free\":%u},"
+        "\"bench\":{\"pending\":%s,\"cpu_mhz\":%d,"
+        "\"wake_chunk_mean_us\":%d,\"wake_chunk_max_us\":%d,"
+        "\"aec_frame_mean_us\":%d,\"aec_frame_max_us\":%u}}",
+        (unsigned)atomic_load(&s_vperf_tick_skips),
+        (unsigned)atomic_load(&s_vperf_tick_sleeps),
+        atomic_load(&s_cpu_mhz),
+        jr_wake_ready() ? "true" : "false",
+        (unsigned)jr_wake_chunks(), (unsigned)jr_wake_detect_last_us(),
+        (unsigned)jr_wake_detect_max_us(), (unsigned)jr_wake_dropped(),
+        (unsigned)jr_wake_stale_hits(), (unsigned)jr_wake_detections(),
+        (unsigned)jr_wake_stack_free(),
+        (atomic_load(&s_aec_bench_req) || jr_wake_bench_pending()) ? "true" : "false",
+        atomic_load(&s_aec_bench_cpu_mhz),
+        wbench ? (int)wmean : -1, wbench ? (int)wmax : -1,
+        atomic_load(&s_aec_bench_have) ? atomic_load(&s_aec_bench_mean_us) : -1,
+        atomic_load(&s_aec_bench_have) ? (unsigned)atomic_load(&s_aec_bench_max_us) : 0U);
+    if (n < 0 || (size_t)n >= sizeof buf) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"reply too long\"}");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, buf, n);
+    return ESP_OK;
+}
+
 /* POST /api/diag/crash?clear=1 — the only thing that erases the dump. */
 static esp_err_t crash_clear_handler(httpd_req_t *req)
 {
@@ -4971,7 +5050,7 @@ static esp_err_t display_snapshot_rgb565_handler(httpd_req_t *req)
 
 /* Handler slots the server allocates (4 B each, internal RAM). The table
  * below is checked against it at compile time. */
-#define JR_HTTP_ROUTE_SLOTS 56
+#define JR_HTTP_ROUTE_SLOTS 58
 
 void start_diag_http(void)
 {
@@ -5050,6 +5129,10 @@ void start_diag_http(void)
         { .uri = "/api/display",     .method = HTTP_GET, .handler = display_diag_handler },
         { .uri = "/api/power/charge", .method = HTTP_GET, .handler = power_charge_handler },
         { .uri = "/api/diag/vadlog", .method = HTTP_GET, .handler = vadlog_csv_handler },
+        { .uri = "/api/diag/voiceperf", .method = HTTP_GET,
+          .handler = voiceperf_handler },
+        { .uri = "/api/diag/voiceperf", .method = HTTP_POST,
+          .handler = voiceperf_handler },
         { .uri = "/api/diag/crash", .method = HTTP_GET,
           .handler = crash_get_handler },
         { .uri = "/api/diag/crash", .method = HTTP_POST,
