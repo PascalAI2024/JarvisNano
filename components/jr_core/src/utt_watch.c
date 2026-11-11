@@ -16,6 +16,7 @@ void jr_utt_speech_start(jr_utt_watch_t *w, uint32_t now_ms)
 {
     w->start_ms = now_ms;
     w->pardon_turn = false;     /* the owner is speaking again: that turn is over */
+    w->turn_counted = false;    /* and the next answer is a new turn */
 }
 
 void jr_utt_speech_end(jr_utt_watch_t *w, uint32_t now_ms, bool listening,
@@ -41,7 +42,10 @@ void jr_utt_answered(jr_utt_watch_t *w)
                      * whether it hears the owner's voice */
     }
     w->misses = 0u;
-    w->answered_total++;
+    if (!w->turn_counted) {
+        w->turn_counted = true;
+        w->answered_total++;
+    }
 }
 
 jr_utt_action_t jr_utt_poll(jr_utt_watch_t *w, uint32_t now_ms)

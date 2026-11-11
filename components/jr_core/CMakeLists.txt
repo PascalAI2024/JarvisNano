@@ -17,6 +17,7 @@ idf_component_register(
         "src/dac_mute.c"
         "src/cue.c"
         "src/utt_watch.c"
+        "src/echo_gate.c"
         "src/tool_policy.c"
     INCLUDE_DIRS "include"
     REQUIRES jr_ports jr_dsp

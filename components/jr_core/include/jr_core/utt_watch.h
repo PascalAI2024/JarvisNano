@@ -46,7 +46,8 @@ typedef struct {
     bool     pardon_turn;   /* a PARDON text turn is in flight: its reply is not an answer */
     uint8_t  misses;        /* consecutive, since the server last answered */
     uint32_t misses_total;  /* lifetime, for the cockpit */
-    uint32_t answered_total;
+    uint32_t answered_total;  /* TURNS answered, not server events (see jr_utt_answered) */
+    bool     turn_counted;    /* this utterance's turn is already in answered_total */
 } jr_utt_watch_t;
 
 void jr_utt_init(jr_utt_watch_t *w);
@@ -69,7 +70,12 @@ void jr_utt_server_alive(jr_utt_watch_t *w);
  * boundary): the owner was answered. Clears the clock and the run of misses,
  * unless the reply is to the PARDON text turn the watch itself sent: that
  * proves the server hears text, not that it hears the owner, so only the
- * clock is cleared and the next utterance is judged on its own. */
+ * clock is cleared and the next utterance is judged on its own.
+ *
+ * Called once per reply-bearing FRAME (a reply is dozens of audio frames), so
+ * the clearing is repeated and harmless, but `answered_total` counts TURNS: it
+ * moves once per utterance, at the first answering frame after the local VAD
+ * heard the owner begin (2026-11-10: "answered":62 after four utterances). */
 void jr_utt_answered(jr_utt_watch_t *w);
 
 /* Call every loop. Returns the action once per miss. */
