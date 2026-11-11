@@ -101,7 +101,7 @@ not proven to come from this.
 Stopgap on the running device: `wakebarge=0` (run-time, lost on reboot). The
 echo gate is on by default, so replies behave as before the fix.
 
-### The fix (4a6e98b, on the device since 2026-11-11, benched muted)
+### The fix (4a6e98b; the device runs 7e54a98 since 2026-11-11, benched muted)
 
 - `components/jr_wake`: a `jr_wake` task (core 0, priority 5, 12 KB stack in
   PSRAM, 8 KB ring in PSRAM) owns the model and is the only caller of `detect`.
@@ -145,9 +145,58 @@ sleep state and passed probation.
 each time the iteration crossed a tick boundary the tick sleep added up to
 10 ms on top.
 
-The bench cannot compare canceller modes while muted: `aecmode=` is applied by
-the capture caller on its next read, and a muted idle device does not read.
-Read `aec_us` from `/api/debug/gain` during a reply instead.
+Canceller modes, same bench, 240 MHz, image 7e54a98 (05ff788 made the bench
+apply a pending `aecmode=` / `aecfilter=`):
+
+| mode | filter | memory | per frame, mean | max |
+|---|---|---|---|---|
+| 5 FD_LOW_COST (default) | 4 | internal | 11.8 ms | 17.3 |
+| 6 FD_HIGH_PERF | 4 | PSRAM | 15.3 ms | 23.5 |
+| 6 FD_HIGH_PERF | 6 | PSRAM | 16.0 ms | 24.7 |
+| 5 FD_LOW_COST | 6 | PSRAM | 19.6 ms | 25.5 |
+| 5 FD_LOW_COST | 8 | PSRAM | 29.7 ms | 40.5 |
+| 1 SR_HIGH_PERF | 4 | PSRAM | 10.0 ms | 15.1 |
+| 4 VOIP_HIGH_PERF | 4 | PSRAM | build refused, previous mode restored | |
+
+Filter 8 does not fit a 32 ms frame. Mode 6 costs about 3.5 ms more than the
+default; whether it cancels better is a question for the microphone.
+
+**`aecmode=6` panicked the device, twice (05ff788).** Core dump, decoded with
+`esp-coredump info_corefile` against the image's ELF:
+
+```
+exccause 0x1d (StoreProhibitedCause), excvaddr 0x0, task jr_voice
+#0 esp_aec3_dlfft_init (frame_length=512, filter_length=6)  esp_aec3_dlfft_fp32.c:93
+#1 aec_create_from_config                                   esp_aec.c:218
+#2 aec_build (mode=6, filter=6)                             jr_audio.c
+#3 aec_apply_pending
+#4 jr_audio_aec_bench
+```
+
+`aec_build` tried internal RAM first. With 21 KB as the largest internal block
+esp-sr does not return NULL for this mode; it stores through a null pointer.
+7e54a98: only the boot default is tried in internal RAM, every other pair is
+built in PSRAM. All rows above ran on it without a restart. A sweep with
+`aecmode=6` would have crashed in front of the owner; the muted bench found it
+first.
+
+Gotchas from this bench:
+
+- `aecmode=` / `aecfilter=` are applied by the capture caller on its next read
+  or by the bench. On a muted idle device a "restore" request just sits there
+  and `/api/debug/gain` keeps reporting the old pair. Run the bench or reboot.
+- Going back to the default after a PSRAM variant rebuilds it in internal RAM
+  and can leave the largest internal block at 12 KB instead of 21.5 KB. Reboot
+  after a mode session.
+- `jarvisctl.py reboot` needs esptool and a cable. Over Wi-Fi:
+  `POST /api/debug/sleep?now=1&wake_s=5` (not during OTA probation).
+- `voiceperf` reports `pending:false` as soon as the voice task picks the
+  bench up, before the canceller result is stored. Poll until
+  `aec_frame_mean_us` is not -1. Open, small.
+- The first real core dump was written and decoded (45,540 bytes), but
+  `/api/diag/crash` showed an empty `summary` for it (task "", pc 0). The dump
+  is good; the on-device summary is not. Open, PLAN N16.11.
+- `httpd` stack: 1,308 to 1,548 bytes free on this image.
 
 Not proven: the frame rate while speaking (`voiceperf` fps, should be near 31),
 the residual with every frame delivered, a wake hit over a reply, and the
