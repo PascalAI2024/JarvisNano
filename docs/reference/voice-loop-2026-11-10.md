@@ -92,6 +92,64 @@ The only weather the model could reach was `execute_tool` with `weather {latitud
 
 ---
 
+## Codec I2C failures and the silent microphone (N16.10)
+
+**Mechanism, verified in source.** `es7210_update_reg_bit`
+(`managed_components/espressif__esp_codec_dev/device/es7210/es7210.c:124-130`)
+ignored the result of `es7210_read_reg`, which zeroes its output first (`:118-122`).
+A failed read made `regv` 0, so the write cleared every bit outside the update mask,
+including the PGA-enable bit 0x10 that `es7210_mic_select` sets (`:201`, `:208`, `:215`).
+`_es7210_set_channel_gain` (`:347`) uses it for every gain change, and
+`apply_in_gains` (`components/jr_audio/src/jr_audio.c`) calls it twice on every SPEAKING
+edge, on `/api/debug/gain` and on ADC open. A second gain set cannot repair it: the update
+touches 0x0f only. Same pattern in `es8311_set_mute` (`es8311.c`, `DAC_REG31`).
+
+**What is built.** `scripts/patch-v5-managed.py` (checked by `--check` in the build): the
+ES7210 update retries the read three times and returns the error without writing; the
+ES8311 mute does the same for unmute, and still writes the mute bits on a failed read
+(silence is the safe direction); the I2C transaction timeout goes 100 to 250 ms; the
+failure log now carries the `esp_err_t` name. `apply_in_gains` retries each set three
+times and counts a final failure. `jr_core/mic_watch` is the net under it: raw
+microphone lane under rms 3.0 for 4 s while the microphone is enabled, awake and the ADC
+open means dead; the capture caller then runs the ADC through
+`jr_audio_power_reconcile` closed and open (backoff 10 s, doubling to 60 s, reset by a
+live frame). It is never judged while muted, asleep or closed, and the second reconcile
+re-reads the request, so a mute landing between the two leaves the ADC closed.
+`/api/cockpit` `voice.mic_dead`, `voice.mic_recoveries`; `/api/device/health`
+`audio_power.gain_failures`.
+
+**Who is on the bus (verified in source).** One I2C master bus, port 0, 400 kHz
+(`boards/waveshare/esp32s3_touch_amoled_1_75c/board_peripherals.yaml`,
+`board_devices.yaml`), shared by: ES8311 and ES7210 (esp_codec_dev), the CST9217 touch
+panel (board manager), the QMI8658 IMU (`jr_imu`, task prio 3, own 100 ms timeout) and
+the AXP2101 PMIC (`jr_power`, task prio 2, 100 ms timeout, 1 s sampler plus a 500 ms
+key poll). Codec callers: `httpd` (`/api/debug/gain`, `/api/device/levels`) through
+`jr_audio_set_gains`, the voice task on SPEAKING edges (`jr_audio_set_speaking`), the
+capture caller on open and reopen, and the feeder (mute and unmute, `:885`, `:1316`,
+`:1341`). Gain calls hold `s_adc_guard`, volume and mute `s_dac_guard`; those two guards
+do not exclude each other, only the IDF bus lock does.
+
+**The timeout (verified in the IDF 5.5.4 source, `esp_driver_i2c/i2c_master.c`).**
+`DEFAULT_I2C_TRANS_TIMEOUT` was 100 ms (`audio_codec_ctrl_i2c.c:16`). The driver uses the
+caller's timeout twice: to wait for the bus lock (`s_i2c_synchronous_transaction`) and
+for the transaction. The lock is `xSemaphoreCreateBinaryWithCaps`
+(no priority inheritance). A transaction takes well under 1 ms at 400 kHz, so a 100 ms
+failure means the lock holder (the IMU or PMIC task at priority 2 to 3) was not
+scheduled for 100 ms (the feeder runs at 19, Wi-Fi at 23), or the bus was stuck, or a
+NACK (reported as `ESP_ERR_INVALID_STATE`).
+
+**Proved and not proved.** Proved: the read-ignored write is real and is the only path to
+the silent lane; the bus has five devices and at least five task contexts; the lock
+wait shares the 100 ms budget. Not proved: which of lock starvation, a stuck bus or a
+NACK produced the logged failures; the old log line printed no code. Raising the timeout
+is a mitigation against the first, chosen because it is the only one the source shows is
+possible without a hardware fault. Ruled out by reading: two codec calls racing on the
+same device (the ADC calls all hold `s_adc_guard`, the DAC calls `s_dac_guard`). The next
+failure now prints `Fail to read from dev 80: ESP_ERR_TIMEOUT` (lock or transaction
+timeout) or `ESP_ERR_INVALID_STATE` (NACK or stuck FSM).
+
+---
+
 ## Open questions
 
 - Does the server answer a 0.9 s utterance if `prefixPaddingMs`/`silenceDurationMs`/`startOfSpeechSensitivity` are set? One at a time, on the device.

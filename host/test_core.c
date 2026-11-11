@@ -43,6 +43,7 @@ extern void glance_tests_run(void);
 /* The playback feeder's reply / hole / pre-roll walk and its earcon guard. */
 extern void jitter_tests_run(void);
 extern void voice_fix_tests_run(void);
+extern void mic_watch_tests_run(void);
 extern void audio_power_tests_run(void);
 extern void power_charge_tests_run(void);
 
@@ -1946,6 +1947,7 @@ int main(void)
     /* The unanswered-utterance watch, the gateway/tool policy and the setup it
      * shapes (the 2026-11-10 voice session). */
     voice_fix_tests_run();
+    mic_watch_tests_run();
 
     return UNITY_END();
 }

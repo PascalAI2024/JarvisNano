@@ -555,7 +555,7 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         "\"levels\":{\"volume\":%d,\"brightness_cap\":%u,"
         "\"brightness_actual\":%u},"
         "\"audio_power\":{\"mic\":%s,\"adc\":%s,\"dac\":%s,\"pa\":%s,"
-        "\"reads\":%u,\"silent\":%u,\"failures\":%u},"
+        "\"reads\":%u,\"silent\":%u,\"failures\":%u,\"gain_failures\":%u},"
         "\"memory\":{\"largest_internal\":%u,\"free_psram\":%u},"
         "\"transport\":{\"would_block\":%u,\"drops\":%u,\"deaths\":%u},"
         "\"playback\":{\"underruns\":%u,\"max_gap_ms\":%u,"
@@ -583,7 +583,7 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         audio_power.dac_open ? "true" : "false",
         audio_power.pa_on ? "true" : "false",
         (unsigned)audio_power.hardware_reads, (unsigned)audio_power.silent_frames,
-        (unsigned)audio_power.failures,
+        (unsigned)audio_power.failures, (unsigned)audio_power.gain_failures,
         (unsigned)largest, (unsigned)free_psram,
         (unsigned)s_app.client.live.tx_would_block,
         (unsigned)s_app.client.live.tx_drops,
@@ -2870,6 +2870,7 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         "\"echo_gate\":%s,\"echo_gated_frames\":%u,"
         "\"echo_passed_frames\":%u,\"reply_cuts\":%u,"
         "\"reply_cut_dropped_chunks\":%u,"
+        "\"mic_dead\":%s,\"mic_recoveries\":%u,"
         "\"audio_diag_running\":%s},\"tools\":{"
         "\"execution\":\"on_device\",\"worker_ready\":%s,"
         "\"configured\":%s,\"why\":\"%s\",\"declared\":%u,\"last_tool\":\"%s\","
@@ -2918,6 +2919,8 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         (unsigned)s_echo_gate.gated_frames,
         (unsigned)s_echo_gate.passed_frames,
         (unsigned)s_reply_cut.cuts, (unsigned)s_reply_cut.dropped_chunks,
+        jr_audio_mic_dead() ? "true" : "false",
+        (unsigned)jr_audio_mic_recoveries(),
         (int32_t)(atomic_load(&s_audio_diag_until_ms) - now) > 0
             ? "true" : "false",
         tools_ready ? "true" : "false",
