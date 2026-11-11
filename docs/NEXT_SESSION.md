@@ -512,3 +512,5 @@ The actionable order and acceptance criteria are in [`../PLAN.md`](../PLAN.md).
 - Do not use raw tool result count as a byte-budget guarantee.
 - Do not turn a normal tap or PWR press into an accidental privacy toggle.
 - Do not claim physical proof from an HTTP response alone.
+
+**Echo fix, first device run (2026-11-11).** With the gate off, 4c33ab4 cancels worse than the knob-only runs because the voice loop reads only 18.4 of 31.25 frames a second while speaking (wake feed on the canceller's task, plus a 10 ms tick sleep per frame). `wakebarge=0` is set on the device as a stopgap (lost on reboot). Lane `feat/wake-worker` fixes the loop and adds `/api/diag/voiceperf`; repeat the sweep after it. The owner has not yet interrupted a reply by voice. Details: `docs/reference/echo-canceller-2026-11-11.md`.

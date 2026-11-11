@@ -59,6 +59,58 @@ Reply JSON adds `speakgain`, `echovol`, `wakebarge`, `aecmode`, `aecfilter`, `ae
 
 ---
 
+## First device run of 4c33ab4: the voice loop falls behind (2026-11-11)
+
+The sweep with the gate off looked worse than the knob-only runs at the same
+gains. The raw microphone and reference levels match the earlier runs, so the
+gain staging does what it should. The canceller gets fewer frames.
+
+`/api/diag/vadlog` writes one row per frame the voice task reads. A frame is
+512 samples at 16 kHz: 32 ms, 31.25 a second.
+
+| image | listening | speaking | gaps over 48 ms while speaking |
+|---|---|---|---|
+| 8ca3258 (before the echo fix) | 31.3 fps | 26.5 fps | 16 % |
+| 4c33ab4 (echo fix) | 29.1 fps | 18.4 fps | 50 %, 6.7 % over 96 ms |
+
+Residual echo over a whole reply (canceller output before make-up, p90 of the
+speaking rows), volume 100:
+
+| speaking gain | knob-only on the old image | 4c33ab4 |
+|---|---|---|
+| 3 dB | 31, 48 | 262 |
+| 6 dB | 31, 22 | 275 (reference 12 dB), 109 (reference 24 dB) |
+| 9 dB | 178, 183 | 575 |
+
+Within a reply the old image sits at a median of 1 per second; 4c33ab4 swings
+between 1 and 170. A canceller that loses every third frame never settles.
+
+Causes, both in `voice_task` (`main/main.c`):
+
+- The only new work while speaking is `jr_wake_feed()` (WakeNet9), on the same
+  task that already spends 12.5 to 15.3 ms of each 32 ms frame in `aec_process`
+  (`aec_us` from `/api/debug/gain`).
+- The loop ends with a one-tick sleep on the paced path. `CONFIG_FREERTOS_HZ`
+  is 100, so that is up to 10 ms after every frame, also when the next frame is
+  already waiting. This is why the old image already lost 15 % while speaking.
+
+The same run logged playback holes of 219 to 798 ms mid-reply and one lost
+websocket (no PONG for 20 s). Holes were logged on older images too, so they are
+not proven to come from this.
+
+Stopgap on the running device: `wakebarge=0` (run-time, lost on reboot). The
+echo gate is on by default, so replies behave as before the fix.
+
+Fix in work, lane `feat/wake-worker`: wake detection on its own task on core 0,
+no tick sleep when a frame is overdue (bounded, so IDLE1 still feeds the
+watchdog), and `/api/diag/voiceperf` with frame-rate and timing counters plus a
+bench that needs no microphone. The tuning sweep is repeated after that; the
+numbers above say nothing about which gains to ship.
+
+How to read a capture: `p90` of the `rms` column over the speaking rows
+(phase code 5) of a per-point vadlog. Two-second WAV windows are too noisy a
+statistic for this; they were what misled the first reading.
+
 ## Primary sources
 
 | Source | Notes |
