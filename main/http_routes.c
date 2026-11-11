@@ -2775,6 +2775,10 @@ static esp_err_t brain_outbox_handler(httpd_req_t *req)
     return err;
 }
 
+/* The cockpit snapshot buffer. Grew from 4096 when the tools block gained
+ * the oversize counter and the last target name. */
+#define COCKPIT_BODY_CAP 4608U
+
 static esp_err_t cockpit_handler(httpd_req_t *req)
 {
     if (!agent_require_auth(req)) {
@@ -2822,7 +2826,7 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         xSemaphoreGive(s_brain_lock);
     }
 
-    char *body = heap_caps_malloc(4096U, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    char *body = heap_caps_malloc(COCKPIT_BODY_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (body == NULL) {
         httpd_resp_set_status(req, "503 Service Unavailable");
         httpd_resp_sendstr(req, "cockpit snapshot unavailable");
@@ -2839,8 +2843,10 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
     /* "configured" means USABLE: a key stored and a gateway that answers. The
      * reason it is not is the next field. */
     bool tools_configured = tools_ready && device_gateway_usable();
+    char last_target[JR_TOOLS_NAME_CAP];
+    jr_tools_last_target(last_target, sizeof last_target);
     size_t used = 0U;
-    int n = snprintf(body, 4096U,
+    int n = snprintf(body, COCKPIT_BODY_CAP,
         "{\"uptime_ms\":%u,\"memory\":{\"free_internal\":%u,"
         "\"largest_internal_block\":%u,\"free_psram\":%u},"
         "\"network\":{\"connected\":%s,"
@@ -2857,7 +2863,7 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         "\"execution\":\"on_device\",\"worker_ready\":%s,"
         "\"configured\":%s,\"why\":\"%s\",\"declared\":%u,\"last_tool\":\"%s\","
         "\"last_status\":\"%s\",\"last_http_status\":%d,"
-        "\"last_duration_ms\":%u,"
+        "\"last_duration_ms\":%u,\"oversize\":%u,\"last_target\":\"%s\","
         "\"calls_received\":%u,\"submitted\":%u,\"submit_rejected\":%u,"
         "\"completed\":%u,"
         "\"succeeded\":%u,\"failed\":%u,\"cancelled\":%u,"
@@ -2907,6 +2913,7 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         device_tool_last_status(),
         atomic_load(&s_tool_diag.last_http_status),
         (unsigned)atomic_load(&s_tool_diag.last_duration_ms),
+        (unsigned)jr_tools_oversize_count(), last_target,
         (unsigned)atomic_load(&s_tool_diag.calls_received),
         (unsigned)atomic_load(&s_tool_diag.submitted),
         (unsigned)atomic_load(&s_tool_diag.submit_rejected),
@@ -2947,7 +2954,7 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         (unsigned)atomic_load(&s_touch_challenge_last_latency_ms),
         agent.active ? "true" : "false",
         (unsigned)agent_revision_hwm, (unsigned)agent_next_revision);
-    if (n < 0 || (size_t)n >= 4096U) {
+    if (n < 0 || (size_t)n >= COCKPIT_BODY_CAP) {
         heap_caps_free(body);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             "cockpit encoding failed");
@@ -2957,39 +2964,39 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
     if (agent.active) {
         uint32_t ttl_ms = (int32_t)(agent.expires_ms - now) > 0
             ? agent.expires_ms - now : 0U;
-        n = snprintf(body + used, 4096U - used,
+        n = snprintf(body + used, COCKPIT_BODY_CAP - used,
             ",\"task_id\":\"%s\",\"revision\":%u,\"state\":\"%s\","
             "\"progress\":%u,\"title\":\"%s\",\"summary\":\"%s\","
             "\"ttl_ms\":%u,\"evidence\":[",
             agent.task_id, (unsigned)agent.revision, agent.state,
             (unsigned)agent.progress, agent.title, agent.summary,
             (unsigned)ttl_ms);
-        if (n < 0 || (size_t)n >= 4096U - used) {
-            used = 4096U;
+        if (n < 0 || (size_t)n >= COCKPIT_BODY_CAP - used) {
+            used = COCKPIT_BODY_CAP;
         } else {
             used += (size_t)n;
             for (uint8_t i = 0; i < agent.evidence_count; ++i) {
-                n = snprintf(body + used, 4096U - used,
+                n = snprintf(body + used, COCKPIT_BODY_CAP - used,
                     "%s{\"label\":\"%s\",\"state\":\"%s\"}",
                     i == 0 ? "" : ",", agent.evidence[i].label,
                     agent.evidence[i].state);
-                if (n < 0 || (size_t)n >= 4096U - used) {
-                    used = 4096U;
+                if (n < 0 || (size_t)n >= COCKPIT_BODY_CAP - used) {
+                    used = COCKPIT_BODY_CAP;
                     break;
                 }
                 used += (size_t)n;
             }
-            if (used < 4096U) {
-                n = snprintf(body + used, 4096U - used, "]");
-                used += n > 0 ? (size_t)n : 4096U;
+            if (used < COCKPIT_BODY_CAP) {
+                n = snprintf(body + used, COCKPIT_BODY_CAP - used, "]");
+                used += n > 0 ? (size_t)n : COCKPIT_BODY_CAP;
             }
         }
     }
-    if (used < 4096U) {
+    if (used < COCKPIT_BODY_CAP) {
         uint32_t surface_ttl_ms = brain_surface.active &&
             (int32_t)(brain_surface.expires_ms - now) > 0
             ? brain_surface.expires_ms - now : 0U;
-        n = snprintf(body + used, 4096U - used,
+        n = snprintf(body + used, COCKPIT_BODY_CAP - used,
             "},\"brain\":{\"voice_route\":\"%s\","
             "\"desk_connected\":%s,\"private_android_ready\":false,"
             "\"private_android_reason\":\"BLE firmware not enabled\","
@@ -3003,13 +3010,13 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
                 ? brain_surface_kind_name(brain_surface.view.kind) : "none",
             brain_surface.active ? brain_surface.view.title : "",
             (unsigned)surface_ttl_ms);
-        if (n > 0 && (size_t)n < 4096U - used) {
+        if (n > 0 && (size_t)n < COCKPIT_BODY_CAP - used) {
             used += (size_t)n;
         } else {
-            used = 4096U;
+            used = COCKPIT_BODY_CAP;
         }
     }
-    if (used >= 4096U) {
+    if (used >= COCKPIT_BODY_CAP) {
         heap_caps_free(body);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             "cockpit encoding overflow");

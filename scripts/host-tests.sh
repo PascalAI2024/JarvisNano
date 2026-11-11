@@ -11,7 +11,7 @@
 # runs is worse than no suite, because it looks like coverage. Add new suites
 # HERE, not to a habit.
 #
-# The twenty-two suites, in the order they run:
+# The twenty-three suites, in the order they run:
 #   jr_display_hud_tests      components/jr_display/tests   procedural renderer
 #   jr_display_shell_tests    components/jr_display/tests   spatial shell
 #   jr_display_frame_tests    components/jr_display/tests   whole-frame hashes: no pixel moved
@@ -34,6 +34,7 @@
 #   jr_host_tests             host/                         jr_core + jr_dsp + jr_transport
 #   jr_tools_template_tests   components/jr_tools/host      the generated JS template
 #   test_jarvis_desk          scripts/                      the desk CLI (Python)
+#   test_tools_budget         scripts/                      exec JS generator, probe, tool wording (Python)
 #
 # A suite must run a positive number of tests to pass; "0 Tests" is a failure,
 # and a run in which nothing ran at all exits 2.
@@ -204,20 +205,20 @@ run_c_suites() {
     run_ctest_suite "$ROOT/components/jr_tools/host" "$ROOT/build-tools-host" jr_tools_template_tests
 }
 
-run_python_suite() {
-    local py out rc count
+run_python_suite() {  # name file
+    local name="$1" file="$2" py out rc count
     if ! py="$(pick_python)"; then
-        fail "test_jarvis_desk" "no working python3/python on PATH"; return
+        fail "$name" "no working python3/python on PATH"; return
     fi
-    [ $QUIET -eq 1 ] || printf "${DIM}run${NC}   test_jarvis_desk (%s)\n" "$py"
-    out="$(cd "$ROOT" && "$py" -m unittest scripts/test_jarvis_desk.py 2>&1)"; rc=$?
+    [ $QUIET -eq 1 ] || printf "${DIM}run${NC}   %s (%s)\n" "$name" "$py"
+    out="$(cd "$ROOT" && "$py" -m unittest "$file" 2>&1)"; rc=$?
     count="$(printf '%s\n' "$out" | sed -n 's/^Ran \([0-9][0-9]*\) tests\{0,1\} .*/\1/p' | tail -1)"
     if [ "$rc" -eq 0 ] && [ "${count:-0}" -gt 0 ] 2>/dev/null; then
-        pass "test_jarvis_desk" "Ran $count tests OK"
+        pass "$name" "Ran $count tests OK"
     elif [ "$rc" -eq 0 ]; then
-        fail "test_jarvis_desk" "exited 0 but ran no tests"
+        fail "$name" "exited 0 but ran no tests"
     else
-        fail "test_jarvis_desk" "Ran ${count:-0} tests, rc=$rc"
+        fail "$name" "Ran ${count:-0} tests, rc=$rc"
         printf '%s\n' "$out" | grep -E '^(FAIL|ERROR):' | head -20 | sed 's/^/    /'
     fi
 }
@@ -267,7 +268,8 @@ elif command -v docker >/dev/null 2>&1; then
 else
     fail "c-suites" "no cc/gcc and no docker on PATH"
 fi
-run_python_suite
+run_python_suite test_jarvis_desk scripts/test_jarvis_desk.py
+run_python_suite test_tools_budget scripts/test_tools_budget.py
 
 echo
 # Assert what RAN, not just what failed: a suite that never executed reports no

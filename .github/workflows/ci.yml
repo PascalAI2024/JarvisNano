@@ -42,3 +42,5 @@ jobs:
           node-version: "22"
       - name: Lint inline <script> blocks in dashboard HTML
         run: node scripts/check-dashboard-js.mjs dashboard/*.html
+      - name: execute_tool byte budget (the generated program, run against mock services)
+        run: node components/jr_tools/host/test_exec_budget.mjs

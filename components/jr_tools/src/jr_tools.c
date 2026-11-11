@@ -98,6 +98,8 @@ static struct {
     uint32_t boot_nonce;
     uint32_t session_gen;
     uint8_t cancel_cursor;
+    uint32_t oversize;                 /* bodies past JR_TOOLS_HTTP_BODY_CAP */
+    char last_target[JR_TOOLS_NAME_CAP]; /* method the last job addressed */
     cancel_entry_t cancelled[JR_TOOLS_CANCEL_SLOTS];
     char mcp_url[JR_CFG_MCP_URL_CAP];
     char mcp_key[JR_CFG_MCP_KEY_CAP];
@@ -234,6 +236,57 @@ static bool snapshot_config(char *url, size_t url_cap, char *key, size_t key_cap
            key[0] != '\0';
 }
 
+/* A gateway body larger than JR_TOOLS_HTTP_BODY_CAP. It used to end as a
+ * silent bad_response on an HTTP 200; now one log line names the method (never
+ * its arguments) and the sizes, the counter moves, and the model gets a
+ * bounded answer that says the result was too large and to narrow the
+ * request. */
+static void note_oversize(const char *tool, const char *args_json,
+                          int64_t announced, size_t bytes_read,
+                          jr_tool_result_t *result)
+{
+    char target[JR_TOOLS_NAME_CAP];
+    char line[160];
+    (void)jr_tools_target_name(tool, args_json, target, sizeof target);
+    (void)jr_tools_describe_oversize(line, sizeof line, tool, target, announced,
+                                     bytes_read, JR_TOOLS_HTTP_BODY_CAP);
+    ESP_LOGW(TAG, "%s", line);
+    (void)jr_tools_oversize_result(result->response_json,
+                                   sizeof(result->response_json), announced,
+                                   bytes_read);
+    taskENTER_CRITICAL(&s_tools.lock);
+    s_tools.oversize++;
+    taskEXIT_CRITICAL(&s_tools.lock);
+}
+
+static void record_target(const char *tool, const char *args_json)
+{
+    char target[JR_TOOLS_NAME_CAP];
+    (void)jr_tools_target_name(tool, args_json, target, sizeof target);
+    taskENTER_CRITICAL(&s_tools.lock);
+    memcpy(s_tools.last_target, target, sizeof s_tools.last_target);
+    taskEXIT_CRITICAL(&s_tools.lock);
+}
+
+uint32_t jr_tools_oversize_count(void)
+{
+    taskENTER_CRITICAL(&s_tools.lock);
+    const uint32_t count = s_tools.oversize;
+    taskEXIT_CRITICAL(&s_tools.lock);
+    return count;
+}
+
+void jr_tools_last_target(char *out, size_t out_cap)
+{
+    if (out == NULL || out_cap == 0U) {
+        return;
+    }
+    taskENTER_CRITICAL(&s_tools.lock);
+    strncpy(out, s_tools.last_target, out_cap - 1U);
+    taskEXIT_CRITICAL(&s_tools.lock);
+    out[out_cap - 1U] = '\0';
+}
+
 static bool response_from_mcp(const char *raw, jr_tool_result_t *result)
 {
     /* Diagnostic, added because every tool call was returning bad_response on
@@ -264,6 +317,8 @@ static bool response_from_mcp(const char *raw, jr_tool_result_t *result)
     cJSON *response = cJSON_CreateObject();
     cJSON *copy = cJSON_Duplicate(upstream, true);
     if (response == NULL || copy == NULL) {
+        ESP_LOGE(TAG, "mcp result copy failed: out of memory raw=%u",
+                 (unsigned)raw_len);
         cJSON_Delete(copy);
         cJSON_Delete(response);
         cJSON_Delete(root);
@@ -323,6 +378,11 @@ static bool response_from_mcp(const char *raw, jr_tool_result_t *result)
         }
         if (measured != NULL) {
             cJSON_free(measured);
+        }
+        if (!ok) {
+            ESP_LOGE(TAG, "mcp result over budget and could not be truncated: "
+                     "need=%u cap=%u raw=%u", need,
+                     (unsigned)sizeof(result->response_json), (unsigned)raw_len);
         }
     }
     cJSON_Delete(response);
@@ -469,7 +529,8 @@ static jr_tool_status_t post_tool(const char *tool_name, const char *args_json,
             if (result->http_status < 200 || result->http_status >= 300) {
                 outcome = JR_TOOL_STATUS_HTTP_ERROR;
             } else if (announced > (int64_t)JR_TOOLS_HTTP_BODY_CAP) {
-                outcome = JR_TOOL_STATUS_BAD_RESPONSE;
+                note_oversize(tool_name, args_json, announced, 0U, result);
+                outcome = JR_TOOL_STATUS_OK;
             } else {
                 char *raw = (char *)malloc(JR_TOOLS_HTTP_BODY_CAP + 1U);
                 if (raw == NULL) {
@@ -509,7 +570,9 @@ static jr_tool_status_t post_tool(const char *tool_name, const char *args_json,
                         have += (size_t)got;
                     }
                     if (overflow) {
-                        outcome = JR_TOOL_STATUS_BAD_RESPONSE;
+                        note_oversize(tool_name, args_json, announced,
+                                      JR_TOOLS_HTTP_BODY_CAP + 1U, result);
+                        outcome = JR_TOOL_STATUS_OK;
                     }
                     secure_zero(raw, JR_TOOLS_HTTP_BODY_CAP + 1U);
                     free(raw);
@@ -522,7 +585,6 @@ static jr_tool_status_t post_tool(const char *tool_name, const char *args_json,
     secure_zero(auth, sizeof(auth));
     secure_zero(body, body_len);
     free(body);
-    (void)tool_name; /* retained for the deliberately metadata-only caller log */
     return outcome;
 }
 
@@ -563,6 +625,8 @@ static jr_tool_status_t fetch_weather(jr_tool_result_t *result)
         if (result->http_status < 200 || result->http_status >= 300) {
             outcome = JR_TOOL_STATUS_HTTP_ERROR;
         } else if (announced > (int64_t)JR_WEATHER_BODY_CAP) {
+            ESP_LOGE(TAG, "weather: body too large announced=%lld cap=%u",
+                     (long long)announced, (unsigned)JR_WEATHER_BODY_CAP);
             outcome = JR_TOOL_STATUS_BAD_RESPONSE;
         } else {
             for (;;) {
@@ -583,6 +647,8 @@ static jr_tool_status_t fetch_weather(jr_tool_result_t *result)
                 }
                 have += (size_t)got;
                 if (have > JR_WEATHER_BODY_CAP) {
+                    ESP_LOGE(TAG, "weather: body too large read=%u cap=%u",
+                             (unsigned)have, (unsigned)JR_WEATHER_BODY_CAP);
                     outcome = JR_TOOL_STATUS_BAD_RESPONSE;
                     break;
                 }
@@ -686,6 +752,7 @@ static void tools_task(void *arg)
         jr_tool_result_t result;
         init_result(&job, &result);
         int64_t started_us = esp_timer_get_time();
+        record_target(job.name, job.args_json);
         execute_job(&job, &result);
         int64_t elapsed_us = esp_timer_get_time() - started_us;
         result.duration_ms = elapsed_us > 0 ? (uint32_t)(elapsed_us / 1000) : 0U;
