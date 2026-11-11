@@ -118,6 +118,22 @@ static esp_err_t pmic_write_reg(uint8_t reg, uint8_t val)
     return i2c_master_transmit(s_dev, buf, sizeof(buf), AXP2101_I2C_TIMEOUT_MS);
 }
 
+esp_err_t jr_power_boot_status(uint8_t *on_src, uint8_t *off_src)
+{
+    if (s_dev == NULL || on_src == NULL || off_src == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* AXP2101 0x20 = power-on source, 0x21 = power-off source: what the PMIC
+     * itself recorded for the last time the rails came up and went down. */
+    uint8_t v[2] = {0};
+    esp_err_t err = pmic_read_regs(0x20, v, sizeof v);
+    if (err == ESP_OK) {
+        *on_src = v[0];
+        *off_src = v[1];
+    }
+    return err;
+}
+
 esp_err_t jr_power_off(void)
 {
     if (s_dev == NULL) {

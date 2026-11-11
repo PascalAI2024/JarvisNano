@@ -101,6 +101,11 @@ esp_err_t jr_power_charge_read(jr_power_charge_t *out);
  */
 esp_err_t jr_power_off(void);
 
+/* The PMIC's own record of the last power-on and power-off (AXP2101 0x20 and
+ * 0x21, raw bits). A restart the chip did not cause leaves them unchanged, so
+ * together with the reset reason they tell a PMIC shutdown from a brownout. */
+esp_err_t jr_power_boot_status(uint8_t *on_src, uint8_t *off_src);
+
 /**
  * @brief One-shot telemetry for GET /api/diag/board: die temperature, VBUS,
  *        VSYS, VBAT, the TS pin, the charge-current register (0x62, read

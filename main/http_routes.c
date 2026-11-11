@@ -536,10 +536,15 @@ static esp_err_t crash_get_handler(httpd_req_t *req)
     const bool valid = present && esp_core_dump_image_check() == ESP_OK;
     const bool have_sum = valid && esp_core_dump_get_summary(sum) == ESP_OK;
 
+    uint8_t pmic_on = 0, pmic_off = 0;
+    const bool pmic_ok = jr_power_boot_status(&pmic_on, &pmic_off) == ESP_OK;
+
     int n = snprintf(out, CRASH_JSON_CAP,
-        "{\"reset\":\"%s\",\"dump_present\":%s,\"dump_valid\":%s,"
+        "{\"reset\":\"%s\",\"pmic_ok\":%s,\"pmic_on\":%u,\"pmic_off\":%u,"
+        "\"dump_present\":%s,\"dump_valid\":%s,"
         "\"dump_bytes\":%u,\"summary\":",
-        reset_reason_name(s_reset_reason), present ? "true" : "false",
+        reset_reason_name(s_reset_reason), pmic_ok ? "true" : "false",
+        (unsigned)pmic_on, (unsigned)pmic_off, present ? "true" : "false",
         valid ? "true" : "false", (unsigned)size);
     if (!have_sum) {
         n += snprintf(out + n, CRASH_JSON_CAP - (size_t)n, "null}");
