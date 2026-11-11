@@ -30,6 +30,17 @@ Not yet heard on 16e9ec6: a board question answered through
 `delegated_tasks`, weather answered without asking where, a tap stopping
 a reply.
 
+### Calibration result (2026-11-10, later the same day)
+
+The owner unmuted it and the run happened. At volume 100 the microphone
+rails on the device's own voice (speak gain 21 dB), so nothing can be
+cancelled; at 80 the canceller manages about 20 dB and the residual is
+still as loud as the owner. The table is in
+`docs/reference/voice-loop-2026-11-10.md`. The run also found that a
+failed I2C read during a gain change leaves the microphone silent until
+the codec is reopened (PLAN N16.10); that is fixed first, because every
+reply changes the gain twice and the second calibration changes it more.
+
 ## Start here
 
 ```bash

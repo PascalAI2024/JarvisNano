@@ -46,6 +46,18 @@ What the uplink carries while the model speaks: the AEC output (`jr_audio.c:708`
 
 **[2026-11-10] The echo gate is a stopgap, by the owner's ruling.** Told that the gate ends interrupting by voice, the owner answered: "this is built in gemini feature that is necessary". Interruption is the server's own activity detection listening while the model speaks; a client that sends silence during playback has switched it off. The gate stays in the image only so the device does not cut its own replies in the meantime. The work that replaces it is the canceller: PLAN N16.9, the capture described under the second-pass echo notes above, with `echogate=0`. When cancellation holds at the owner's volume the gate defaults to off.
 
+**[2026-11-10] First canceller calibration (PLAN N16.9), gate off, owner present.** Device speaking a counted list; `mic-raw`, `reference` and `mic-clean` pulled together from the two-second taps; `mic-clean` is after the 6x make-up, so the canceller output is `mic-clean / 6`.
+
+| volume | speak gain | reference peak | raw mic rms | raw mic peak | clipped in 2 s | canceller output rms | verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 100 | 21 dB | 3644 to 3779 | 6874 to 12091 | 32768 | 132 to 2008 | saturated (6x output at 32768) | the microphone rails; a linear filter has nothing to work with |
+| 80 | 21 dB | 1115 | 1411 | 18957 | 0 | 138 | about 20 dB down, and still the size of the owner's voice (75 to 143) |
+| 60 | 21 dB | 335 | not measured | | | | the microphone had failed by then (N16.10) |
+
+Readings: the reference lane is healthy and never clips (peak 11 % of full scale at 100), so the reference is not the fault. At 100 the fault is the capture: `GL_MIC_PGA_SPEAK_DB` is 21 on this board (`jr_audio.c:85`), chosen so a talk-over stays audible, and at 21 dB the speaker rails the microphone. At 80 the canceller works to about 20 dB and that is not enough: the residual equals the owner's speech level, so the server cannot tell them apart by level. Not measured: speak gain 9 and 15 at volume 100, and anything at 60. One server interrupt with no local speech start was logged at volume 100 with the gate off. Captures are not in the repo.
+
+What follows from it: (1) lower the speak gain until 100 does not clip and give the owner's level back as digital gain after the canceller, where it does not cost headroom; (2) measure `AEC_MODE_*_HIGH_PERF` and a longer filter against the 20 dB of `FD_LOW_COST`; (3) if the residual still matches speech at 100, cap the volume where it does not. The second calibration needs N16.10 first: a gain change is what silenced the microphone.
+
 **[2026-11-10] An honest tool list (item 5, fixed).**
 The setup declared all ten tools whether or not the gateway could be used, and the system text called them the model's hands; the model offered to "delegate a task to an agent" and every call returned an error. The gateway's reachability was also never tracked: a stored host that does not resolve failed the board poll every 90 s all boot. Now `components/jr_core/src/tool_policy.c` decides:
 - `jr_tool_needs_gateway(name)`: memory, search, execute, delegate and the board are gateway-only; `current_time`, `weather_here`, `set_volume`, `set_brightness`, `ask_user` run on the device. An unclassified name counts as gateway-only.
