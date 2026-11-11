@@ -88,7 +88,7 @@ static esp_err_t diag_get_handler(httpd_req_t *req)
     unsigned stack_hwm = s_voice_task ?
         (unsigned)uxTaskGetStackHighWaterMark(s_voice_task) : 0;
     bool tools_ready = atomic_load(&s_tool_diag.worker_ready);
-    bool tools_configured = tools_ready && jr_tools_is_configured();
+    bool tools_configured = tools_ready && device_gateway_usable();
     /* Transcript tail, defanged for direct embedding: quotes, backslashes and
      * control bytes become spaces. Lossy on purpose — this is a diag peek, not
      * a transcript API. */
@@ -179,7 +179,7 @@ static esp_err_t diag_get_handler(httpd_req_t *req)
         said_safe,
         tools_ready ? "true" : "false",
         tools_configured ? "true" : "false",
-        (unsigned)DEVICE_TOOL_DECL_COUNT,
+        (unsigned)device_declared_tools(),
         device_tool_last_name(),
         device_tool_last_status(),
         atomic_load(&s_tool_diag.last_http_status),
@@ -539,7 +539,7 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         verdict = "tool-fault";
     }
 
-    char body[1536];
+    char body[2048];
     int n = snprintf(body, sizeof body,
         "{\"verdict\":\"%s\",\"repairable\":%s,"
         "\"privacy\":%s,\"flip_muted\":%s,\"operator\":%s,"
@@ -552,7 +552,10 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         "\"transport\":{\"would_block\":%u,\"drops\":%u,\"deaths\":%u},"
         "\"playback\":{\"underruns\":%u,\"max_gap_ms\":%u,"
         "\"low_water_ms\":%d,\"dac_failures\":%u,\"replies\":%u,"
-        "\"prerolls\":%u,\"preroll_short\":%u},"
+        "\"prerolls\":%u,\"preroll_short\":%u,\"preroll_ms\":%d,"
+        "\"holes_ignored\":%u,\"feeder_stall_max_ms\":%u,"
+        "\"refill_holds\":%u,\"refill_hold_max_ms\":%u,"
+        "\"refill_hold_total_ms\":%u},"
         "\"rx\":{\"frames\":%u,\"max_gap_ms\":%u,\"queue_wait_max_ms\":%u,"
         "\"queue_hwm\":%u,\"drops\":%u},"
         "\"display\":{\"fps\":%u,\"flush_errors\":%u},"
@@ -581,6 +584,11 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         playback.low_water_valid ? (int)playback.low_water_ms : -1,
         (unsigned)playback.dac_failures, (unsigned)playback.replies_ended,
         (unsigned)playback.prerolls, (unsigned)playback.preroll_timeouts,
+        jr_audio_preroll_ms(),
+        (unsigned)playback.holes_ignored,
+        (unsigned)playback.feeder_stall_max_ms,
+        (unsigned)playback.refill_holds, (unsigned)playback.refill_hold_max_ms,
+        (unsigned)playback.refill_hold_total_ms,
         (unsigned)rx.frames, (unsigned)rx.max_gap_ms,
         (unsigned)rx.queue_wait_max_ms, (unsigned)rx.queue_hwm,
         (unsigned)rx.drops,
@@ -2828,7 +2836,9 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
     bool challenge_active = atomic_load(&s_touch_challenge_active);
     bool challenge_verified = atomic_load(&s_touch_challenge_verified);
     bool tools_ready = atomic_load(&s_tool_diag.worker_ready);
-    bool tools_configured = tools_ready && jr_tools_is_configured();
+    /* "configured" means USABLE: a key stored and a gateway that answers. The
+     * reason it is not is the next field. */
+    bool tools_configured = tools_ready && device_gateway_usable();
     size_t used = 0U;
     int n = snprintf(body, 4096U,
         "{\"uptime_ms\":%u,\"memory\":{\"free_internal\":%u,"
@@ -2841,9 +2851,11 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         "\"auto_idle_ms\":%u,\"mic_rms\":%.1f,\"clean_rms\":%.1f,"
         "\"vad_clean\":%s,"
         "\"vad_starts\":%u,"
+        "\"unanswered\":%u,\"answered\":%u,\"srv_interrupts\":%u,"
+        "\"phantom_interrupts\":%u,"
         "\"audio_diag_running\":%s},\"tools\":{"
         "\"execution\":\"on_device\",\"worker_ready\":%s,"
-        "\"configured\":%s,\"declared\":%u,\"last_tool\":\"%s\","
+        "\"configured\":%s,\"why\":\"%s\",\"declared\":%u,\"last_tool\":\"%s\","
         "\"last_status\":\"%s\",\"last_http_status\":%d,"
         "\"last_duration_ms\":%u,"
         "\"calls_received\":%u,\"submitted\":%u,\"submit_rejected\":%u,"
@@ -2882,11 +2894,15 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         (double)jr_audio_clean_rms(),
         atomic_load(&s_vad_use_clean) ? "true" : "false",
         (unsigned)s_app.vad_starts,
+        (unsigned)s_utt.misses_total, (unsigned)s_utt.answered_total,
+        (unsigned)atomic_load(&s_srv_interrupts),
+        (unsigned)atomic_load(&s_srv_phantom_interrupts),
         (int32_t)(atomic_load(&s_audio_diag_until_ms) - now) > 0
             ? "true" : "false",
         tools_ready ? "true" : "false",
         tools_configured ? "true" : "false",
-        (unsigned)DEVICE_TOOL_DECL_COUNT,
+        device_gateway_why(),
+        (unsigned)device_declared_tools(),
         device_tool_last_name(),
         device_tool_last_status(),
         atomic_load(&s_tool_diag.last_http_status),

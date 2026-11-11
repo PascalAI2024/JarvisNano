@@ -8,6 +8,8 @@
 
 ## Findings & gotchas
 
+**[2026-11-10] A hole the DAC tail covers is no longer booked.** A return inside the 80 ms tail leaves no audible gap, yet it stepped the pre-roll (18 ms and 107 ms holes did in the logged session). `JR_JITTER_HOLE_MIN_MS` (130 ms) now separates them; shorter ones count as `holes_ignored`. New health counters: `holes_ignored`, `feeder_stall_max_ms`, `refill_holds`, `refill_hold_max_ms`, `refill_hold_total_ms`. The refill hold after a hole is unchanged and is probably the larger audible cost. See [voice-loop-2026-11-10.md](./voice-loop-2026-11-10.md).
+
 **[2026-09-05] The mute earcon was booked as a reply and cost every real reply 300 ms.**
 A glass long-press plays the falling mute sweep through the same ring and feeder as Gemini audio. The sweep was generated in 256-sample chunks (10.7 ms at 24 kHz) and enqueued with `diagnostic=true`, which only skipped the pre-roll hold — so the prio-19 feeder drained each chunk before the app task (prio 7) produced the next, the ring went dry inside the 80 ms DAC-tail window, and the feeder logged four `playback underrun: 9 ms hole mid-reply`. 2.5 s of silence then "ended the reply" and `pb_adapt_preroll()` stepped 600 → 900 ms. Health showed `replies:1, underruns:4` with no Gemini reply ever played. Evidence: `docs/evidence/20260905-earcon-preroll.log`. The 2026-09-01 record that the pre-roll "stepped 600→900 on its own after a hole" (PLAN N10.11) was almost certainly this, not a network stall.
 

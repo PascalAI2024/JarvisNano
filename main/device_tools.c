@@ -303,6 +303,64 @@ void weather_maybe_fetch(uint32_t now)
     }
 }
 
+/* ---- THE GATEWAY: is it usable, or only configured? -----------------------
+ *
+ * `configured` only says an address and a key are stored. The device also
+ * keeps the outcome of its calls: three in a row that never reached a server
+ * (DNS, connect, TLS) make the gateway unusable until one does. The policy is
+ * jr_core/tool_policy.h; this is its one instance. Written on the voice task
+ * (results are drained there), read by the voice task at SEND_SETUP and by
+ * httpd for the cockpit, where a one-byte stale read is harmless. */
+static jr_gateway_t s_gateway;
+
+bool device_gateway_usable(void)
+{
+    return jr_gateway_usable(&s_gateway, jr_tools_is_configured());
+}
+
+uint32_t device_gateway_poll_ms(void)
+{
+    return jr_gateway_poll_ms(&s_gateway);
+}
+
+unsigned device_declared_tools(void)
+{
+    const bool gateway = device_gateway_usable();
+    unsigned n = 0U;
+    for (uint32_t i = 0U; i < DEVICE_TOOL_DECL_COUNT; ++i) {
+        if (gateway || !jr_tool_needs_gateway(s_device_tool_fns[i].name)) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+const char *device_gateway_why(void)
+{
+    return jr_gateway_why(&s_gateway, jr_tools_is_configured(),
+                          atomic_load(&s_tool_diag.worker_ready));
+}
+
+/* A finished gateway job tells us whether the gateway answered. Only the two
+ * outcomes that say so count; cancellations, stale results and bad arguments
+ * say nothing about the network. The glass's own weather never goes through
+ * the gateway and is not passed here. */
+static void device_gateway_note_result(jr_tool_status_t status)
+{
+    switch (status) {
+    case JR_TOOL_STATUS_NETWORK_ERROR:
+        jr_gateway_note(&s_gateway, false);
+        break;
+    case JR_TOOL_STATUS_OK:
+    case JR_TOOL_STATUS_HTTP_ERROR:
+    case JR_TOOL_STATUS_BAD_RESPONSE:
+        jr_gateway_note(&s_gateway, true);
+        break;
+    default:
+        break;
+    }
+}
+
 /* ---- THE BOARD: announcing what the hands elsewhere finished -------------
  *
  * Another device-owned job. Every BOARD_POLL_MS while the device is up, on
@@ -465,8 +523,11 @@ void board_maybe_poll(uint32_t now)
         return;
     }
     const bool first = s_board_last_poll_ms == 0U;
+    /* A gateway that has not answered the last few calls is probed once per
+     * quarter hour instead of every 90 s (a host that does not resolve failed
+     * the poll all boot long, 2026-11-10). */
     if (first ? now < BOARD_FIRST_POLL_MS
-              : now - s_board_last_poll_ms < BOARD_POLL_MS) {
+              : now - s_board_last_poll_ms < device_gateway_poll_ms()) {
         return;
     }
     if (atomic_load(&s_mood_id) == (uint8_t)JR_MOOD_DREAM) {
@@ -529,6 +590,7 @@ void activity_note_tool(const char *tool_name, const char *args_json)
     } else if (tool_name != NULL) {
         if (strcmp(tool_name, "recall_memory") == 0 || strcmp(tool_name, "remember") == 0) kind = "MEMORY";
         else if (strcmp(tool_name, "current_time") == 0) kind = "TIME";
+        else if (strcmp(tool_name, "weather_here") == 0) kind = "WEATHER";
         else if (strcmp(tool_name, "ask_user") == 0) kind = "ASK";
         else if (strcmp(tool_name, "search_tools") == 0) kind = "SEARCH";
         else if (strcmp(tool_name, "delegate_task") == 0) kind = "DELEGATE";
@@ -598,15 +660,19 @@ void device_tool_drop_local_results(void)
     }
 }
 
-static void device_tool_queue_error(uint32_t call_id, const char *call_id_text,
-                                    const char *name, uint32_t session_gen,
-                                    jr_tool_status_t status, const char *code,
-                                    const char *message)
+/* Queue a finished tool result for the voice task to hand to the model. The
+ * JSON is built by the caller into the returned slot's buffer (cap
+ * LOCAL_TOOL_ERROR_CAP); NULL when the queue is full. */
+static local_tool_result_t *device_tool_queue_slot(uint32_t call_id,
+                                                   const char *call_id_text,
+                                                   const char *name,
+                                                   uint32_t session_gen,
+                                                   jr_tool_status_t status)
 {
     if (s_local_tool_count >= LOCAL_TOOL_RESULT_CAP) {
         atomic_fetch_add(&s_tool_diag.failed, 1U);
         atomic_fetch_add(&s_tool_diag.response_send_failed, 1U);
-        return;
+        return NULL;
     }
 
     local_tool_result_t *slot = &s_local_tool_results[
@@ -619,10 +685,85 @@ static void device_tool_queue_error(uint32_t call_id, const char *call_id_text,
             sizeof(slot->call_id_text));
     strlcpy(slot->name, name ? name : "unknown",
             sizeof(slot->name));
-    (void)snprintf(slot->response_json, sizeof(slot->response_json),
-                   "{\"error\":{\"code\":\"%s\",\"message\":\"%s\"}}",
-                   code, message);
     s_local_tool_count++;
+    return slot;
+}
+
+static void device_tool_queue_error(uint32_t call_id, const char *call_id_text,
+                                    const char *name, uint32_t session_gen,
+                                    jr_tool_status_t status, const char *code,
+                                    const char *message)
+{
+    local_tool_result_t *slot = device_tool_queue_slot(call_id, call_id_text,
+                                                       name, session_gen, status);
+    if (slot != NULL) {
+        (void)snprintf(slot->response_json, sizeof(slot->response_json),
+                       "{\"error\":{\"code\":\"%s\",\"message\":\"%s\"}}",
+                       code, message);
+    }
+}
+
+/* ---- tools the device answers itself --------------------------------------
+ *
+ * weather_here: the weather the glass already holds for its own place, so "what
+ * is the weather" is answered at once and the model never has to ask Sir where
+ * he is (2026-11-10: it asked, with the answer on the display). current_time:
+ * the device's clock, used only when the gateway cannot be (with one, the
+ * gateway's version is what it always was). Both run on the voice task, the
+ * only writer of s_weather. */
+bool device_try_local_tool(const jr_command_t *cmd)
+{
+    if (cmd == NULL || cmd->tool_name == NULL) {
+        return false;
+    }
+    const bool weather = strcmp(cmd->tool_name, "weather_here") == 0;
+    const bool clock_tool = strcmp(cmd->tool_name, "current_time") == 0 &&
+                            !device_gateway_usable();
+    if (!weather && !clock_tool) {
+        return false;
+    }
+    local_tool_result_t *slot = device_tool_queue_slot(
+        cmd->call_id, cmd->call_id_text, cmd->tool_name, cmd->session_gen,
+        JR_TOOL_STATUS_OK);
+    if (slot == NULL) {
+        return true;                      /* counted as a failure; handled */
+    }
+    char *out = slot->response_json;
+    const size_t cap = sizeof(slot->response_json);
+    if (weather) {
+        if (!s_weather.valid) {
+            slot->status = JR_TOOL_STATUS_NETWORK_ERROR;
+            (void)snprintf(out, cap,
+                "{\"error\":{\"code\":\"weather_unavailable\",\"message\":"
+                "\"The device has no weather yet; it fetches on a timer.\"}}");
+        } else {
+            const uint32_t age_ms = (uint32_t)jr_clock_now_ms(&s_app.clock) -
+                                    s_weather.fetched_ms;
+            (void)snprintf(out, cap,
+                "{\"place\":\"%s\",\"temp_f\":%d,\"feels_f\":%d,"
+                "\"condition\":\"%s\",\"high_f\":%d,\"low_f\":%d,"
+                "\"humidity_pct\":%u,\"wind_mph\":%u,\"age_min\":%u}",
+                JR_WEATHER_PLACE, (int)s_weather.temp_f, (int)s_weather.feels_f,
+                s_weather.condition, (int)s_weather.hi_f, (int)s_weather.lo_f,
+                (unsigned)s_weather.humidity_pct, (unsigned)s_weather.wind_mph,
+                (unsigned)(age_ms / 60000U));
+        }
+    } else {
+        time_t tt = time(NULL);
+        struct tm tmv;
+        localtime_r(&tt, &tmv);
+        if (tmv.tm_year < 2020 - 1900) {
+            slot->status = JR_TOOL_STATUS_INTERNAL_ERROR;
+            (void)snprintf(out, cap,
+                "{\"error\":{\"code\":\"clock_unset\",\"message\":"
+                "\"The device clock has not been set yet.\"}}");
+        } else {
+            char when[64];
+            strftime(when, sizeof when, "%A %B %d, %I:%M %p", &tmv);
+            (void)snprintf(out, cap, "{\"local_time\":\"%s\"}", when);
+        }
+    }
+    return true;
 }
 
 void device_tool_queue_local_error(const jr_command_t *cmd,
@@ -685,12 +826,14 @@ void device_tool_drain_results(jr_app_t *a, uint64_t now)
             continue;
         }
         if (result->call_id == LOCAL_BOARD_CALL_ID) {
+            device_gateway_note_result(result->status);
             board_apply_result(result);
             memset(result, 0, sizeof(*result));
             continue;
         }
         device_tool_record_result(result->name, result->status, result->duration_ms,
                                   result->http_status);
+        device_gateway_note_result(result->status);
         if (result->status == JR_TOOL_STATUS_CANCELLED) {
             atomic_fetch_add(&s_tool_diag.cancelled, 1U);
             memset(result, 0, sizeof(*result));

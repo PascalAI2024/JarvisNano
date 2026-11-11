@@ -47,6 +47,11 @@ esp_err_t jr_tools_submit(const jr_tool_job_t *job)
 
 static uint32_t s_board_last_poll_ms;
 static bool     s_board_inflight;
+/* The gateway's health picks the cadence: 90 s normally, much longer once it
+ * has stopped answering. The test says which; the policy is host-tested. */
+#define DEGRADED_POLL_MS 900000u
+static uint32_t g_poll_ms = BOARD_POLL_MS;
+uint32_t device_gateway_poll_ms(void) { return g_poll_ms; }
 __PRODUCTION_HELPERS__
 
 static int g_checks, g_failures;
@@ -56,6 +61,7 @@ static int g_checks, g_failures;
 static void reset(void)
 {
     g_configured = false;
+    g_poll_ms = BOARD_POLL_MS;
     g_wifi = true;
     g_submits = 0;
     g_last_name = NULL;
@@ -104,8 +110,27 @@ static void test_key_removed_later_stops_the_dialling(void)
     CHECK(g_submits == 1, "a cleared key stops the next poll, got %d", g_submits);
 }
 
+/* A gateway that does not resolve was polled every 90 s all boot long. */
+static void test_unreachable_gateway_is_probed_slowly(void)
+{
+    reset();
+    g_configured = true;
+    board_maybe_poll(BOARD_FIRST_POLL_MS);
+    CHECK(g_submits == 1, "the first poll still goes, got %d", g_submits);
+    s_board_inflight = false;
+    g_poll_ms = DEGRADED_POLL_MS;
+    board_maybe_poll(BOARD_FIRST_POLL_MS + BOARD_POLL_MS);
+    CHECK(g_submits == 1, "no poll at the normal interval once it is "
+          "unreachable, got %d", g_submits);
+    board_maybe_poll(BOARD_FIRST_POLL_MS + DEGRADED_POLL_MS - 1u);
+    CHECK(g_submits == 1, "none just before the probe interval");
+    board_maybe_poll(BOARD_FIRST_POLL_MS + DEGRADED_POLL_MS);
+    CHECK(g_submits == 2, "one probe at the long interval, got %d", g_submits);
+}
+
 int main(void)
 {
+    test_unreachable_gateway_is_probed_slowly();
     test_no_key_never_dials();
     test_with_key_still_polls_on_schedule();
     test_key_removed_later_stops_the_dialling();

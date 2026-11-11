@@ -69,6 +69,14 @@ float jr_dsp_rms(const int16_t *samples, size_t n);
 #define JR_JITTER_CLEAN_TO_STEP        3u
 #define JR_JITTER_REPLY_GAP_MS      2500u   /* silence that ends a reply */
 #define JR_JITTER_TAIL_MS             80u   /* audible DAC tail after a write */
+/* A hole is booked only when the speaker went quiet long enough to hear: the
+ * ring ran dry while the last write still sounded for JR_JITTER_TAIL_MS, so a
+ * gap shorter than the tail was covered by it, and a few tens of milliseconds
+ * more is a click, not a stutter. Policy, not a measurement: 2026-11-10 a log
+ * with holes of 607, 208, 107 and 18 ms stepped the lead 600 -> 900 -> 1200 ->
+ * 1500 in four replies, two of those steps for gaps the speaker covered or
+ * nearly covered. */
+#define JR_JITTER_HOLE_MIN_MS        130u
 
 typedef struct {
     uint32_t preroll_ms;
@@ -88,7 +96,9 @@ typedef struct {
     bool     quiet;           /* an earcon owns the ring: nothing was judged */
     bool     gap_opened;      /* dry under the tail: rebuild the REFILL lead */
     bool     hole_booked;     /* data back inside the reply window           */
-    uint32_t hole_ms;         /* its length, to arrival                      */
+    bool     hole_ignored;    /* back inside the window but too short to hear:
+                               * not booked, the walk does not see it        */
+    uint32_t hole_ms;         /* its length, to arrival (booked or ignored)  */
     bool     gap_ended;       /* silence outlasted the window (a reply ended)*/
     bool     reply_ended;     /* the walk ran — once per reply               */
     bool     idle;            /* dry long enough: re-arm the PREROLL lead    */

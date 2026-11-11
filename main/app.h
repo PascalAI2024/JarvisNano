@@ -53,6 +53,9 @@
 #include "jr_core/orchestrator.h"
 #include "jr_core/snapshot.h"
 #include "jr_core/turn_policy.h"
+#include "jr_core/utt_watch.h"
+#include "jr_core/tool_policy.h"
+#include "jr_tools/jr_weather.h"
 #include "jr_dsp/dsp.h"
 #include "jr_hal/hal.h"
 #include "jr_net/jr_net.h"
@@ -76,7 +79,7 @@
 /* The catalog lives in main.c; this literal is what the other files see.
  * main.c static-asserts it against the real array, so adding a tool
  * without bumping this is a compile error, not a blank petal. */
-#define DEVICE_TOOL_DECL_COUNT 10U
+#define DEVICE_TOOL_DECL_COUNT 11U
 
 /* Render cadence per rung of the rest ladder (frames per second). 24 is the
  * measured CO5300 ceiling; 12 keeps AMBIENT's dimmed ring fluid under a
@@ -94,7 +97,7 @@
  * core 0 on a dial). At 6 the costliest dial leaves boot more than half. */
 #define RENDER_FPS_BOOT      6U
 #define LOCAL_TOOL_RESULT_CAP 4U
-#define LOCAL_TOOL_ERROR_CAP  160U
+#define LOCAL_TOOL_ERROR_CAP  256U
 #define TOOL_CONSENT_TIMEOUT_MS 15000U
 
 typedef struct {
@@ -455,6 +458,9 @@ void enter_deep_sleep(const char *why, uint32_t timer_s);
 
 /* ---- owned by device_tools.c — device-tool queue, consent, weather, activity ---- */
 
+extern jr_utt_watch_t s_utt;               /* owned by main.c's voice task */
+extern _Atomic uint32_t s_srv_interrupts;
+extern _Atomic uint32_t s_srv_phantom_interrupts;
 extern jr_display_weather_t s_weather;
 extern uint32_t s_glance_until_ms;
 extern int16_t s_wx_sun_rise_min;          /* minutes past local midnight; -1 unknown */
@@ -473,6 +479,15 @@ void activity_note_turn_end(void);
 void device_tool_record_result(const char *name, jr_tool_status_t status,
                                       uint32_t duration_ms, int http_status);
 void device_tool_drop_local_results(void);
+/* Answers weather_here (always) and current_time (when the gateway is not
+ * usable) from the device itself; true when it took the call. */
+bool device_try_local_tool(const jr_command_t *cmd);
+/* Is the company gateway usable: configured AND answering. */
+bool device_gateway_usable(void);
+uint32_t device_gateway_poll_ms(void);
+const char *device_gateway_why(void);
+/* Tools the next setup would declare (all of them with a usable gateway). */
+unsigned device_declared_tools(void);
 void device_tool_queue_local_error(const jr_command_t *cmd,
                                           esp_err_t submit_error);
 void device_tool_drain_results(jr_app_t *a, uint64_t now);

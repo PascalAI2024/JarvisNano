@@ -31,6 +31,8 @@ set(CORE_SRCS
     ${REPO_ROOT}/components/jr_core/src/glance.c
     ${REPO_ROOT}/components/jr_core/src/dac_mute.c
     ${REPO_ROOT}/components/jr_core/src/cue.c
+    ${REPO_ROOT}/components/jr_core/src/utt_watch.c
+    ${REPO_ROOT}/components/jr_core/src/tool_policy.c
     ${REPO_ROOT}/components/jr_dsp/src/dsp.c
     ${REPO_ROOT}/components/jr_dsp/src/audio_power.c
 )
@@ -64,6 +66,7 @@ add_executable(jr_host_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_glance.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_cue.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_cue_ui.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_voice_fix.c
     ${CORE_SRCS}
     ${TRANSPORT_SRCS}
     ${POWER_DIAGNOSTIC_SRCS}
