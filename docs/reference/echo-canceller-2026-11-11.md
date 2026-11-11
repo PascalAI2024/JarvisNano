@@ -101,11 +101,39 @@ not proven to come from this.
 Stopgap on the running device: `wakebarge=0` (run-time, lost on reboot). The
 echo gate is on by default, so replies behave as before the fix.
 
-Fix in work, lane `feat/wake-worker`: wake detection on its own task on core 0,
-no tick sleep when a frame is overdue (bounded, so IDLE1 still feeds the
-watchdog), and `/api/diag/voiceperf` with frame-rate and timing counters plus a
-bench that needs no microphone. The tuning sweep is repeated after that; the
-numbers above say nothing about which gains to ship.
+### The fix (merged 4a6e98b, built, NOT yet on the device)
+
+- `components/jr_wake`: a `jr_wake` task (core 0, priority 5, 12 KB stack in
+  PSRAM, 8 KB ring in PSRAM) owns the model and is the only caller of `detect`.
+  The voice task calls `jr_wake_push()` (copy, never blocks, drops and counts
+  when full) and `jr_wake_take_hit(now, 500)`; a hit older than 500 ms is
+  discarded. `jr_wake_feed()` is gone.
+- Privacy: `jr_wake_flush()` runs at the top of every voice-loop pass while the
+  microphone is gated. It empties the ring and voids a hit whose chunk was
+  already inside the detector, so audio from before a mute is never analysed
+  after it. A hit never touches privacy state.
+- `components/jr_core/src/pace.c` (`jr_pace_skip_sleep`, host-tested): the loop
+  skips its tick sleep when the codec read did not block (under 2 ms) or the
+  iteration's own work took a frame, at most three times in a row, so IDLE1
+  still gets a tick every fourth frame.
+- The pacing uses the time the read was BLOCKED (`jr_audio_last_read_wait_us`),
+  not the read's duration. The canceller runs inside the read and takes 12 to
+  15 ms while speaking; judged on duration, the sleep would have stayed exactly
+  in the speaking path.
+- `GET /api/diag/voiceperf` (`jarvisctl.py voiceperf`): frames, fps, iteration
+  mean and max, read mean for speaking and for the other capturing phases; tick
+  skips and sleeps; the wake worker's detect time, drops, stale hits and stack
+  headroom. `POST ?bench=1` (`voiceperf bench`) times 64 noise chunks through
+  `detect` and 64 noise frames through the live canceller with no microphone,
+  codec or session; it also runs muted. It feeds noise to the live canceller
+  and holds the ADC guard for about 0.8 s: not during a measurement.
+- Gates: 23 host suites, `jr_host_tests` 257 tests; image 2,478,768 bytes.
+
+Not proven: any of it on the device. The flash did not happen because the
+device stopped answering on the network (asleep, most likely). First checks
+after flashing: `voiceperf bench` (detect and canceller cost, worker stack
+headroom), then with the microphone open `fps` while speaking, which should be
+near 31, and the sweep again.
 
 How to read a capture: `p90` of the `rms` column over the speaking rows
 (phase code 5) of a per-point vadlog. Two-second WAV windows are too noisy a
