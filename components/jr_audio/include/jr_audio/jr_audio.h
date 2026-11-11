@@ -162,6 +162,20 @@ int jr_audio_ref_db(void);
 int jr_audio_out_vol(void);
 int jr_audio_speak_mic_db(void);
 
+/* Percent of the computed uplink make-up compensation while the PGA is turned
+ * down for the canceller (0 = none, 100 = full, max 400). */
+void jr_audio_set_speak_gain_percent(int percent);
+int jr_audio_speak_gain_percent(void);
+
+/* Ask for a canceller mode (esp_aec.h aec_mode_t: 0,1,3,4,5,6) and/or filter
+ * length (1..8); -1 leaves one unchanged. Safe from any task: it only stores
+ * the request, the capture caller applies it between frames. */
+void jr_audio_request_aec(int mode, int filter);
+int jr_audio_aec_mode(void);               /* active, as last applied */
+int jr_audio_aec_filter(void);
+uint32_t jr_audio_aec_reconfigs(void);     /* successful rebuilds, lifetime */
+uint32_t jr_audio_aec_reconfig_fails(void);
+
 /* Playback digital make-up gain as a percent of unity (100 == 1.0x). Applied
  * before the soft-knee limiter at the sink-write seam. Board default: 400 on
  * the original 1.75, 200 on the hotter 1.75C chain. Clamped to 25..800; out

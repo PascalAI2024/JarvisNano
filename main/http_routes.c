@@ -358,6 +358,7 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
     }
     int mic = -1, ref = -1, vol = -1, barge = -1, vadclean = -1, pbgain = -1;
     int speakmic = -1, echogate = -1;
+    int speakgain = -1, aecmode = -1, aecfilter = -1, echovol = -1, wakebarge = -1;
     query_int(req, "mic", &mic);
     query_int(req, "ref", &ref);
     query_int(req, "vol", &vol);
@@ -375,9 +376,25 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
     }
     query_int(req, "speakmic", &speakmic);
     query_int(req, "echogate", &echogate);
+    query_int(req, "speakgain", &speakgain);
+    query_int(req, "aecmode", &aecmode);
+    query_int(req, "aecfilter", &aecfilter);
+    query_int(req, "echovol", &echovol);
+    query_int(req, "wakebarge", &wakebarge);
     jr_audio_set_gains(mic, ref, vol);
     if (speakmic >= 0) {
-        jr_audio_set_speak_mic_db(speakmic);
+        jr_audio_set_speak_mic_db(speakmic > 36 ? 36 : speakmic);
+    }
+    if (speakgain >= 0) {
+        jr_audio_set_speak_gain_percent(speakgain);       /* 0..400, 100 = full */
+    }
+    /* Stored only: the capture caller rebuilds the canceller between frames. */
+    jr_audio_request_aec(aecmode, aecfilter);
+    if (echovol >= 0) {
+        atomic_store(&s_echo_gate_volume_min, echovol > 100 ? 100 : echovol);
+    }
+    if (wakebarge >= 0) {
+        atomic_store(&s_wake_barge_enabled, wakebarge != 0);
     }
     if (barge >= 0) {
         s_local_barge_enabled = barge != 0;
@@ -397,19 +414,35 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
     /* Report DEVICE state, never the request: a read with no arguments used
      * to answer mic/ref/vol = -1, and a partial write echoed the requested
      * value even when nothing was applied. */
-    char buf[256];
+    /* Static, not on the stack: httpd has about 1500 bytes free, and this
+     * handler runs on that one task. */
+    static char buf[640];
     int n = snprintf(buf, sizeof buf,
                      "{\"ok\":true,\"mic\":%d,\"ref\":%d,\"vol\":%d,"
-                     "\"speakmic\":%d,"
+                     "\"speakmic\":%d,\"speakgain\":%d,"
                      "\"barge\":%s,\"vadclean\":%s,\"pbgain\":%d,"
-                     "\"preroll\":%d,\"refill\":%d,\"echogate\":%s}",
+                     "\"preroll\":%d,\"refill\":%d,\"echogate\":%s,"
+                     "\"echovol\":%d,\"wakebarge\":%s,"
+                     "\"aecmode\":%d,\"aecfilter\":%d,\"aec_us\":%u,"
+                     "\"aec_rebuilds\":%u,\"aec_rebuild_failures\":%u}",
                      jr_audio_mic_db(), jr_audio_ref_db(), jr_audio_out_vol(),
-                     jr_audio_speak_mic_db(),
+                     jr_audio_speak_mic_db(), jr_audio_speak_gain_percent(),
                      s_local_barge_enabled ? "true" : "false",
                      atomic_load(&s_vad_use_clean) ? "true" : "false",
                      jr_audio_playback_gain_percent(),
                      jr_audio_preroll_ms(), jr_audio_refill_ms(),
-                     atomic_load(&s_echo_gate_enabled) ? "true" : "false");
+                     atomic_load(&s_echo_gate_enabled) ? "true" : "false",
+                     atomic_load(&s_echo_gate_volume_min),
+                     atomic_load(&s_wake_barge_enabled) ? "true" : "false",
+                     jr_audio_aec_mode(), jr_audio_aec_filter(),
+                     (unsigned)jr_audio_last_aec_us(),
+                     (unsigned)jr_audio_aec_reconfigs(),
+                     (unsigned)jr_audio_aec_reconfig_fails());
+    if (n < 0 || (size_t)n >= sizeof buf) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"reply too long\"}");
+        return ESP_OK;
+    }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, n);
     return ESP_OK;
@@ -2785,7 +2818,7 @@ static esp_err_t brain_outbox_handler(httpd_req_t *req)
 
 /* The cockpit snapshot buffer. Grew from 4096 when the tools block gained
  * the oversize counter and the last target name. */
-#define COCKPIT_BODY_CAP 4608U
+#define COCKPIT_BODY_CAP 5120U   /* 4608 + wake_cuts and headroom (PSRAM) */
 
 static esp_err_t cockpit_handler(httpd_req_t *req)
 {
@@ -2869,7 +2902,7 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         "\"phantom_interrupts\":%u,"
         "\"echo_gate\":%s,\"echo_gated_frames\":%u,"
         "\"echo_passed_frames\":%u,\"reply_cuts\":%u,"
-        "\"reply_cut_dropped_chunks\":%u,"
+        "\"reply_cut_dropped_chunks\":%u,\"wake_cuts\":%u,"
         "\"mic_dead\":%s,\"mic_recoveries\":%u,"
         "\"audio_diag_running\":%s},\"tools\":{"
         "\"execution\":\"on_device\",\"worker_ready\":%s,"
@@ -2919,6 +2952,7 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         (unsigned)s_echo_gate.gated_frames,
         (unsigned)s_echo_gate.passed_frames,
         (unsigned)s_reply_cut.cuts, (unsigned)s_reply_cut.dropped_chunks,
+        (unsigned)atomic_load(&s_wake_cuts),
         jr_audio_mic_dead() ? "true" : "false",
         (unsigned)jr_audio_mic_recoveries(),
         (int32_t)(atomic_load(&s_audio_diag_until_ms) - now) > 0

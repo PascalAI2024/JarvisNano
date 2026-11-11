@@ -52,6 +52,13 @@ typedef struct {
 
 void jr_mic_watch_init(jr_mic_watch_t *w);
 
+/* Is the microphone "meant to be open" for the watch? Enabled, awake, and NOT
+ * while the speaker is the source: with the PGA turned down to 6 dB for the
+ * canceller (docs/reference/echo-canceller-2026-11-11.md) a quiet moment in a
+ * reply reads under JR_MIC_DEAD_RMS on a healthy lane, so a lane is judged
+ * only while the device is listening. */
+bool jr_mic_watch_meant_open(bool mic_enabled, bool sleeping, bool speaking);
+
 /* One captured frame. `adc_open`: the ADC is open. `meant_open`: the
  * microphone is enabled and the device is not sleeping. Returns true when the
  * caller should close and reopen the ADC now. */

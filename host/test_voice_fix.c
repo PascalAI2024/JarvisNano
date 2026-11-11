@@ -474,8 +474,101 @@ static void test_reply_cut_stays_while_chunks_keep_coming(void)
 }
 
 /* ---- registration (called from test_core.c main, inside UNITY_BEGIN/END) ---- */
+/* ---- volume threshold, wake pass window, make-up gain (echo-fix) ---------- */
+
+static void test_echo_gate_applies_only_above_the_volume_threshold(void)
+{
+    /* Default threshold 0: today's behaviour at any audible volume. */
+    TEST_ASSERT_TRUE(jr_echo_gate_applies(true, 100, 0));
+    TEST_ASSERT_TRUE(jr_echo_gate_applies(true, 1, 0));
+    /* Threshold 70: applies strictly above it. */
+    TEST_ASSERT_TRUE(jr_echo_gate_applies(true, 71, 70));
+    TEST_ASSERT_FALSE(jr_echo_gate_applies(true, 70, 70));
+    TEST_ASSERT_FALSE(jr_echo_gate_applies(true, 40, 70));
+    /* echogate=0 disables it whatever the volume. */
+    TEST_ASSERT_FALSE(jr_echo_gate_applies(false, 100, 0));
+    TEST_ASSERT_FALSE(jr_echo_gate_applies(false, 100, 70));
+}
+
+static void test_echo_gate_below_the_threshold_the_microphone_goes_up(void)
+{
+    jr_echo_gate_t g;
+    jr_echo_gate_init(&g);
+    for (uint32_t t = 0u; t < 640u; t += FRAME_MS) {
+        TEST_ASSERT_FALSE(jr_echo_gate_silence(&g, t, true,
+                              jr_echo_gate_applies(true, 60, 70)));
+    }
+    TEST_ASSERT_EQUAL_UINT32(0u, g.gated_frames);
+    /* Above it the same audible frames are silenced, tail included. */
+    TEST_ASSERT_TRUE(jr_echo_gate_silence(&g, 1000u, true,
+                         jr_echo_gate_applies(true, 100, 70)));
+    TEST_ASSERT_TRUE(jr_echo_gate_silence(&g, 1000u + JR_ECHO_TAIL_MS - 1u, false,
+                         jr_echo_gate_applies(true, 100, 70)));
+}
+
+static void test_echo_gate_a_wake_pass_opens_it_for_a_bounded_time(void)
+{
+    jr_echo_gate_t g;
+    jr_echo_gate_init(&g);
+    TEST_ASSERT_TRUE(jr_echo_gate_silence(&g, 1000u, true, true));
+    jr_echo_gate_pass_for(&g, 1032u, JR_ECHO_PASS_MS);
+    /* Whatever is audible, the microphone goes up inside the window ... */
+    TEST_ASSERT_FALSE(jr_echo_gate_silence(&g, 1064u, true, true));
+    TEST_ASSERT_FALSE(jr_echo_gate_silence(&g, 1032u + JR_ECHO_PASS_MS - 1u, true, true));
+    /* ... and the gate is back the moment it closes. */
+    TEST_ASSERT_TRUE(jr_echo_gate_silence(&g, 1032u + JR_ECHO_PASS_MS, true, true));
+    TEST_ASSERT_TRUE(jr_echo_gate_silence(&g, 1032u + JR_ECHO_PASS_MS + FRAME_MS, true, true));
+}
+
+static void test_echo_gate_a_wake_pass_survives_the_clock_wrap(void)
+{
+    jr_echo_gate_t g;
+    jr_echo_gate_init(&g);
+    uint32_t t = 0xFFFFFFF0u;
+    jr_echo_gate_pass_for(&g, t, 100u);
+    TEST_ASSERT_FALSE(jr_echo_gate_silence(&g, t + 64u, true, true));    /* wrapped */
+    TEST_ASSERT_TRUE(jr_echo_gate_silence(&g, t + 120u, true, true));
+}
+
+static void test_uplink_makeup_full_compensation_gives_back_the_listening_level(void)
+{
+    const uint32_t base = 6u * 256u;
+    /* 24 dB listening, 6 dB speaking: 18 dB = 7.943x on top of 6x = 47.66x. */
+    uint32_t q8 = jr_uplink_makeup_q8(base, 24, 6, 100);
+    TEST_ASSERT_UINT32_WITHIN(20u, (uint32_t)(47.66 * 256.0), q8);
+    /* No gain change, or the PGA above listening: the plain make-up. */
+    TEST_ASSERT_EQUAL_UINT32(base, jr_uplink_makeup_q8(base, 24, 24, 100));
+    TEST_ASSERT_EQUAL_UINT32(base, jr_uplink_makeup_q8(base, 24, 30, 100));
+    /* speakgain 0 = none. */
+    TEST_ASSERT_EQUAL_UINT32(base, jr_uplink_makeup_q8(base, 24, 6, 0));
+    /* 50 percent is half way in linear terms: 6 * (1 + 6.943/2) = 26.83x. */
+    TEST_ASSERT_UINT32_WITHIN(20u, (uint32_t)(26.83 * 256.0),
+                              jr_uplink_makeup_q8(base, 24, 6, 50));
+}
+
+static void test_uplink_makeup_is_clamped_and_monotonic(void)
+{
+    const uint32_t base = 6u * 256u;
+    TEST_ASSERT_EQUAL_UINT32(JR_UPLINK_MAKEUP_MAX_Q8,
+                             jr_uplink_makeup_q8(base, 36, 0, 100));
+    TEST_ASSERT_EQUAL_UINT32(JR_UPLINK_MAKEUP_MAX_Q8,
+                             jr_uplink_makeup_q8(base, 24, 6, 400));
+    uint32_t prev = 0u;
+    for (int applied = 24; applied >= 0; --applied) {
+        uint32_t q8 = jr_uplink_makeup_q8(base, 24, applied, 100);
+        TEST_ASSERT_TRUE(q8 >= prev);
+        prev = q8;
+    }
+}
+
 void voice_fix_tests_run(void)
 {
+    RUN_TEST(test_echo_gate_applies_only_above_the_volume_threshold);
+    RUN_TEST(test_echo_gate_below_the_threshold_the_microphone_goes_up);
+    RUN_TEST(test_echo_gate_a_wake_pass_opens_it_for_a_bounded_time);
+    RUN_TEST(test_echo_gate_a_wake_pass_survives_the_clock_wrap);
+    RUN_TEST(test_uplink_makeup_full_compensation_gives_back_the_listening_level);
+    RUN_TEST(test_uplink_makeup_is_clamped_and_monotonic);
     RUN_TEST(test_utt_short_utterance_does_not_arm);
     RUN_TEST(test_utt_silence_after_a_real_utterance_is_a_pardon);
     RUN_TEST(test_utt_two_misses_in_a_row_end_the_session);

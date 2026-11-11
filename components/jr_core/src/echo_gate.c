@@ -5,6 +5,7 @@
  */
 #include "jr_core/echo_gate.h"
 
+#include <math.h>
 #include <string.h>
 
 void jr_echo_gate_init(jr_echo_gate_t *g)
@@ -26,12 +27,50 @@ bool jr_echo_gate_silence(jr_echo_gate_t *g, uint32_t now_ms, bool audible,
         silence = audible ||
                   (g->seen && (uint32_t)(now_ms - g->last_audible_ms) < JR_ECHO_TAIL_MS);
     }
+    if (g->pass) {
+        if ((int32_t)(g->pass_until_ms - now_ms) > 0) {
+            silence = false;        /* the owner called: his words go up */
+        } else {
+            g->pass = false;
+        }
+    }
     if (silence) {
         g->gated_frames++;
     } else {
         g->passed_frames++;
     }
     return silence;
+}
+
+bool jr_echo_gate_applies(bool enabled, int volume, int threshold)
+{
+    return enabled && volume > threshold;
+}
+
+void jr_echo_gate_pass_for(jr_echo_gate_t *g, uint32_t now_ms, uint32_t ms)
+{
+    g->pass = true;
+    g->pass_until_ms = now_ms + ms;
+}
+
+uint32_t jr_uplink_makeup_q8(uint32_t base_q8, int listen_db, int applied_db,
+                             int percent)
+{
+    int diff = listen_db - applied_db;
+    if (diff <= 0 || percent <= 0) {
+        return base_q8 < JR_UPLINK_MAKEUP_MAX_Q8 ? base_q8
+                                                 : JR_UPLINK_MAKEUP_MAX_Q8;
+    }
+    if (diff > 48) {
+        diff = 48;
+    }
+    float ratio = powf(10.0f, (float)diff / 20.0f);
+    float comp = 1.0f + (ratio - 1.0f) * ((float)percent / 100.0f);
+    float total = (float)base_q8 * comp;
+    if (total >= (float)JR_UPLINK_MAKEUP_MAX_Q8) {
+        return JR_UPLINK_MAKEUP_MAX_Q8;
+    }
+    return (uint32_t)(total + 0.5f);
 }
 
 void jr_reply_cut_init(jr_reply_cut_t *c)

@@ -850,6 +850,13 @@ jr_utt_watch_t          s_utt;                  /* voice task writes; cockpit re
 jr_echo_gate_t          s_echo_gate;
 jr_reply_cut_t          s_reply_cut;            /* ws task drops, voice task begins */
 _Atomic bool            s_echo_gate_enabled = true;
+/* The gate applies only when the speaker volume is above this (0..100,
+ * /api/debug/gain?echovol=). 0 = at every audible volume, as before. */
+_Atomic int             s_echo_gate_volume_min = 0;
+/* Feed the wake word while the device speaks and cut the reply on a hit
+ * (/api/debug/gain?wakebarge=). Voice task only reads the hits. */
+_Atomic bool            s_wake_barge_enabled = true;
+_Atomic uint32_t        s_wake_cuts;
 /* The ws task's side of the watch: it counts frames, the voice task reads the
  * counts. Alive = any frame; answer = a frame that replies to the owner. */
 static _Atomic uint32_t s_srv_alive_seq;
@@ -2337,6 +2344,16 @@ static bool input_next(jr_input_t *in, jr_input_event_t *iev)
         return true;
     }
     return jr_input_poll(in, iev);
+}
+
+/* Stop the speaker and tell the orchestrator the owner barged in. The part of
+ * a cut that a tap on the glass and the wake word "Jarvis" share; the caller
+ * decides whether to also discard the rest of the server's reply
+ * (jr_reply_cut_begin), which only a physical tap or the wake word may do. */
+static void speaking_stop_playback(uint64_t now)
+{
+    jr_audio_sink_mute_now(&s_app.spk);
+    jr_orch_inject(&s_app.orch, jr_event(JR_EV_BARGE_DETECTED), now);
 }
 
 static void voice_task(void *arg)
@@ -3961,9 +3978,7 @@ static void voice_task(void *arg)
                 } else if (p == JR_ST_SPEAKING) {
                     /* Tap while it talks = stop playback but stay armed.
                      * Deliberate privacy lives on hold, flip, and shade. */
-                    jr_audio_sink_mute_now(&s_app.spk);
-                    jr_orch_inject(&s_app.orch, jr_event(JR_EV_BARGE_DETECTED),
-                                   now);
+                    speaking_stop_playback(now);
                     if (physical) {
                         /* With the echo gate the owner cannot barge in by
                          * voice, so this is how a reply is stopped. The
@@ -4178,6 +4193,27 @@ static void voice_task(void *arg)
                                  (double)td.rms);
                     }
                 }
+                /* SAY "JARVIS" TO INTERRUPT. While the device speaks, the same
+                 * frame the uplink would carry (canceller output after
+                 * make-up) also goes to WakeNet, from this one caller. A hit
+                 * cuts the reply exactly as a tap on the glass does, and the
+                 * microphone is let through the echo gate for the sentence
+                 * that follows, at any volume. Fed only from a live frame:
+                 * under privacy mic_gated has already zeroed it, so a muted
+                 * device neither hears the word nor opens anything, and the
+                 * pass window below only ever un-zeroes the ECHO gate. */
+                if (ph == JR_ST_SPEAKING && !mic_gated &&
+                    atomic_load(&s_wake_barge_enabled) && jr_wake_ready() &&
+                    jr_wake_feed(mic_frame, (size_t)n)) {
+                    speaking_stop_playback(now);
+                    jr_reply_cut_begin(&s_reply_cut, (uint32_t)now);
+                    jr_echo_gate_pass_for(&s_echo_gate, (uint32_t)now,
+                                          JR_ECHO_PASS_MS);
+                    atomic_fetch_add(&s_wake_cuts, 1U);
+                    jr_display_caption_set("LISTENING");
+                    ESP_LOGI(TAG, "wake: \"%s\" heard over a reply — cut it",
+                             jr_wake_model());
+                }
                 /* Both VAD modes batch two 32 ms frames. The manual path used
                  * to send every frame and exhausted the bounded TX queue in a
                  * real conversation (1620 would-blocks / 449 drops). Two
@@ -4213,7 +4249,11 @@ static void voice_task(void *arg)
                              now >= s_app.last_playback_chunk_ms &&
                              now - s_app.last_playback_chunk_ms < 250);
                         if (jr_echo_gate_silence(&s_echo_gate, (uint32_t)now,
-                                audible, atomic_load(&s_echo_gate_enabled)))
+                                audible,
+                                jr_echo_gate_applies(
+                                    atomic_load(&s_echo_gate_enabled),
+                                    jr_audio_out_vol(),
+                                    atomic_load(&s_echo_gate_volume_min))))
                             memset(mic_batch + mic_batch_state.filled, 0,
                                    take * sizeof(jr_pcm_t));
                         else
