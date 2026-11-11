@@ -178,6 +178,7 @@ static int16_t               *s_aec_clean;
 static _Atomic uint32_t       s_last_aec_us;
 /* AEC-clean mic RMS in Q8, measured before the uplink make-up gain. */
 static _Atomic uint32_t       s_clean_rms_q8;
+static _Atomic uint32_t       s_last_wait_us;   /* last src_read: time blocked */
 
 static int16_t               *s_raw_cap;     /* 768*4 int16 (24k read)     */
 static int16_t               *s_raw16;       /* 512*4 int16 (16k demuxed)  */
@@ -833,11 +834,16 @@ static int src_read(void *ctx, jr_pcm_t *frame, size_t max_samples)
     }
     size_t n = (max_samples < (size_t)GL_TX_SAMPLES_PER_CHUNK)
                    ? max_samples : (size_t)GL_TX_SAMPLES_PER_CHUNK;
+    /* How long this read was blocked (guard + codec), not how long it took:
+     * the canceller below is work, and the voice loop's pacing must be able to
+     * tell a read that waited for its frame from one that only computed. */
+    const int64_t wait_t0 = esp_timer_get_time();
     if (xSemaphoreTake(s_adc_guard, pdMS_TO_TICKS(100)) != pdTRUE) return 0;
     aec_apply_pending();
     jr_audio_capture_result_t capture = jr_audio_power_capture(
         atomic_load(&s_microphone_enabled), atomic_load(&s_adc_open),
         frame, n, &s_capture_ops);
+    atomic_store(&s_last_wait_us, (uint32_t)(esp_timer_get_time() - wait_t0));
     if (capture != JR_AUDIO_CAPTURE_LIVE || !atomic_load(&s_microphone_enabled)) {
         if (capture == JR_AUDIO_CAPTURE_SILENT ||
             (capture == JR_AUDIO_CAPTURE_LIVE && !atomic_load(&s_microphone_enabled))) {
@@ -919,6 +925,11 @@ static int src_read(void *ctx, jr_pcm_t *frame, size_t max_samples)
     xSemaphoreGive(s_adc_guard);
     if (reopen_mic) mic_reopen_cycle();
     return (int)n;
+}
+
+uint32_t jr_audio_last_read_wait_us(void)
+{
+    return atomic_load(&s_last_wait_us);
 }
 
 int jr_audio_aec_bench(int frames, uint32_t *max_us)

@@ -2437,6 +2437,10 @@ static void voice_task(void *arg)
          * (-1: none) and how long the codec read took. */
         int vperf_class = -1;
         uint32_t read_us = JR_PACE_READ_UNKNOWN;
+        /* How long that read was blocked. The canceller runs inside the read
+         * (12 to 15 ms while speaking), so read_us alone cannot say whether
+         * the frame was already waiting; the pacing below needs this one. */
+        uint32_t wait_us = JR_PACE_READ_UNKNOWN;
         uint64_t now = jr_clock_now_ms(&s_app.clock);
         s_voice_task_heartbeat_ms = (uint32_t)now;
 
@@ -4186,6 +4190,7 @@ static void voice_task(void *arg)
             int n = jr_audio_source_read(&s_app.mic, mic_frame, VOICE_FRAME_SAMPLES);
             if (n > 0) {
                 read_us = (uint32_t)(esp_timer_get_time() - read_t0);
+                wait_us = jr_audio_last_read_wait_us();
                 vperf_class = capture_phase == JR_ST_SPEAKING ? 0 : 1;
                 /* The source supplies paced zeros under privacy. Recheck the
                  * app latch after a blocking read, before diagnostics or levels,
@@ -4429,6 +4434,7 @@ static void voice_task(void *arg)
             if (n > 0) {
                 read_paced = true;
                 read_us = (uint32_t)(esp_timer_get_time() - read_t0);
+                wait_us = jr_audio_last_read_wait_us();
                 vperf_class = 1;
                 (void)jr_wake_push(mic_frame, (size_t)n);
                 if (jr_wake_take_hit((uint32_t)(esp_timer_get_time() / 1000),
@@ -4518,16 +4524,18 @@ capture_complete:
                         read_us == JR_PACE_READ_UNKNOWN ? 0U : read_us,
                         (uint32_t)(esp_timer_get_time() / 1000));
         }
-        /* When the loop is behind (the codec read did not wait, or the rest of
-         * the iteration alone took a frame) the next frame is already queued
+        /* When the loop is behind (the codec read did not block, or this
+         * iteration's own work took a frame) the next frame is already queued
          * and a 10 ms tick would only make the backlog worse. Skip the sleep
          * then, at most JR_PACE_MAX_SKIPS times in a row, so IDLE1 still gets
-         * a tick every fourth frame. The unpaced path keeps its 20 ms. */
+         * a tick every fourth frame. Work is everything that was not waiting,
+         * the canceller inside the read included. The unpaced path keeps its
+         * 20 ms. */
         if (read_paced) {
             const uint32_t work_us =
-                (read_us == JR_PACE_READ_UNKNOWN || iter_us <= read_us)
-                    ? 0U : iter_us - read_us;
-            if (jr_pace_skip_sleep(read_us, work_us, tick_skips_in_row)) {
+                (wait_us == JR_PACE_READ_UNKNOWN || iter_us <= wait_us)
+                    ? 0U : iter_us - wait_us;
+            if (jr_pace_skip_sleep(wait_us, work_us, tick_skips_in_row)) {
                 ++tick_skips_in_row;
                 atomic_fetch_add_explicit(&s_vperf_tick_skips, 1U,
                                           memory_order_relaxed);

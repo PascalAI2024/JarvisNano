@@ -35,12 +35,14 @@ extern "C" {
 
 #define JR_PACE_READ_UNKNOWN  UINT32_MAX
 
-/* read_us:  how long the codec read took, or JR_PACE_READ_UNKNOWN.
- * work_us:  the rest of this iteration (iteration time minus the read).
+/* wait_us:  how long the codec read was BLOCKED, or JR_PACE_READ_UNKNOWN.
+ *           Not the read's duration: the canceller runs inside the read and
+ *           takes 12 to 15 ms while speaking, which is work, not waiting.
+ * work_us:  the rest of this iteration (iteration time minus the wait).
  * skips_in_row: consecutive skips so far, as the caller counts them.
  * Returns true to skip the sleep. The caller sets
  *   skips_in_row = skip ? skips_in_row + 1 : 0. */
-bool jr_pace_skip_sleep(uint32_t read_us, uint32_t work_us,
+bool jr_pace_skip_sleep(uint32_t wait_us, uint32_t work_us,
                         uint32_t skips_in_row);
 
 #ifdef __cplusplus

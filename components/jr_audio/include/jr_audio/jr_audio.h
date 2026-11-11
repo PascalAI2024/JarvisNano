@@ -85,6 +85,11 @@ uint32_t jr_audio_last_aec_us(void);
  * the room's noise bed up with it. This is the unamplified view. */
 float jr_audio_clean_rms(void);
 
+/* How long the last source read was blocked waiting (guard + codec), in
+ * microseconds. The canceller runs inside the read, so the read's duration
+ * alone cannot say whether the frame was already waiting. */
+uint32_t jr_audio_last_read_wait_us(void);
+
 /* Bench: run `frames` frames of pseudo-random noise through the live canceller
  * under the ADC guard and return the mean aec_process time in microseconds
  * (worst frame in *max_us when given), or -1 when there is no canceller or the

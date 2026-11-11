@@ -36,7 +36,7 @@ static const char *TAG = "jr_wake";
 /* PSRAM stack: internal RAM's largest block is the scarce resource. detect()
  * keeps its tensors on the model's own heap, so the stack only carries the
  * call chain; voiceperf reports the high-water mark to confirm. */
-#define JR_WAKE_TASK_STACK     8192
+#define JR_WAKE_TASK_STACK     12288  /* PSRAM is not scarce; detect()'s depth is unmeasured */
 #define JR_WAKE_BENCH_CHUNKS   64
 
 static const esp_wn_iface_t *s_iface;
