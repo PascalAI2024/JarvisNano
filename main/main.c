@@ -840,6 +840,14 @@ _Atomic bool s_voice_privacy_paused = true;
  * short "Pardon, Sir?". */
 static uint32_t         s_utt_start_ms;
 jr_utt_watch_t          s_utt;                  /* voice task writes; cockpit reads totals */
+/* The echo gate (jr_core/echo_gate.h): while the speaker is audible and for a
+ * short tail after, the uplink carries silence frames instead of the
+ * microphone. NOT the privacy gate, which is decided earlier and untouched.
+ * On by default; /api/debug/gain?echogate=0 turns it off for calibration, not
+ * persisted. The gate state is the voice task's; the cockpit reads totals. */
+jr_echo_gate_t          s_echo_gate;
+jr_reply_cut_t          s_reply_cut;            /* ws task drops, voice task begins */
+_Atomic bool            s_echo_gate_enabled = true;
 /* The ws task's side of the watch: it counts frames, the voice task reads the
  * counts. Alive = any frame; answer = a frame that replies to the owner. */
 static _Atomic uint32_t s_srv_alive_seq;
@@ -1310,8 +1318,17 @@ static void rich_cb(void *u, const jr_gemini_event_t *ge)
         }
         e = jr_event(JR_EV_SETUP_COMPLETE);
         e.resumption_token = io->last_resumable_token;
+        jr_reply_cut_boundary(&s_reply_cut);    /* a new session: no old reply to cut */
         break;
     case JR_GEV_AUDIO_CHUNK:
+        if (jr_reply_cut_drop_audio(&s_reply_cut,
+                                    (uint32_t)jr_clock_now_ms(&a->clock))) {
+            /* A tap stopped this reply and the server is still sending it.
+             * The rest is not staged and the core is not told the model is
+             * speaking (that would unmute the DAC and play it). */
+            e = jr_event(JR_EV_HEARTBEAT);
+            break;
+        }
         a->rx_audio_chunks++;
         a->rx_audio_samples += (uint32_t)ge->pcm_len;
         if (ge->pcm != NULL && ge->pcm_len > 0) {
@@ -1352,11 +1369,13 @@ static void rich_cb(void *u, const jr_gemini_event_t *ge)
                      (unsigned)since, s_out_vol);
         }
         a->terminal_pending = false;
+        jr_reply_cut_boundary(&s_reply_cut);
         caption_reset();   /* barged: those words were cut off mid-air */
         e = jr_event(JR_EV_SERVER_INTERRUPTED);
         break;
     }
     case JR_GEV_TURN_COMPLETE:
+        jr_reply_cut_boundary(&s_reply_cut);
         a->rx_turn_complete++;
         activity_note_turn_end();
         s_caption_acc[0] = '\0';   /* next turn starts a fresh caption; the
@@ -1370,6 +1389,7 @@ static void rich_cb(void *u, const jr_gemini_event_t *ge)
         }
         break;
     case JR_GEV_GENERATION_COMPLETE:
+        jr_reply_cut_boundary(&s_reply_cut);
         a->rx_generation_complete++;
         s_caption_acc[0] = '\0';
         if (jr_audio_playback_pending()) {
@@ -3942,8 +3962,20 @@ static void voice_task(void *arg)
                     jr_audio_sink_mute_now(&s_app.spk);
                     jr_orch_inject(&s_app.orch, jr_event(JR_EV_BARGE_DETECTED),
                                    now);
+                    if (physical) {
+                        /* With the echo gate the owner cannot barge in by
+                         * voice, so this is how a reply is stopped. The
+                         * server is not told (no transport message ends a
+                         * turn without starting another) and keeps sending:
+                         * discard the rest of that reply until its boundary,
+                         * or it would unmute the DAC and play on. Synthetic
+                         * input stops the local audio as before but cannot
+                         * cut the reply: it acts on the session. */
+                        jr_reply_cut_begin(&s_reply_cut, (uint32_t)now);
+                    }
                     jr_display_caption_set("LISTENING");
-                    ESP_LOGI(TAG, "gesture: tap stopped playback");
+                    ESP_LOGI(TAG, "gesture: tap stopped playback%s",
+                             physical ? " and cut the reply" : "");
                 } else if (p != JR_ST_DRAINING) {
                     /* Tap in any other live phase: harmless attention. */
                     jr_display_caption_set("YES, SIR?");
@@ -4165,10 +4197,27 @@ static void voice_task(void *arg)
                     if (mic_batch_state.filled + take > cap) {
                         take = cap - mic_batch_state.filled;
                     }
-                    if (upload_microphone_enabled)
-                        memcpy(mic_batch + mic_batch_state.filled, mic_frame,
-                               take * sizeof(jr_pcm_t));
-                    else
+                    if (upload_microphone_enabled) {
+                        /* ECHO GATE. Not the privacy gate (that is the else
+                         * branch below and the guards above, and it is
+                         * decided first): this only turns a live frame into a
+                         * frame of zeros, same length, same cadence, while the
+                         * speaker is audible and for JR_ECHO_TAIL_MS after.
+                         * Server VAD judges whatever goes up, and its own
+                         * voice at volume 100 was cutting its replies. */
+                        const bool audible =
+                            jr_audio_playback_pending() ||
+                            (s_app.last_playback_chunk_ms != 0 &&
+                             now >= s_app.last_playback_chunk_ms &&
+                             now - s_app.last_playback_chunk_ms < 250);
+                        if (jr_echo_gate_silence(&s_echo_gate, (uint32_t)now,
+                                audible, atomic_load(&s_echo_gate_enabled)))
+                            memset(mic_batch + mic_batch_state.filled, 0,
+                                   take * sizeof(jr_pcm_t));
+                        else
+                            memcpy(mic_batch + mic_batch_state.filled, mic_frame,
+                                   take * sizeof(jr_pcm_t));
+                    } else
                         memset(mic_batch + mic_batch_state.filled, 0,
                                take * sizeof(jr_pcm_t));
                     mic_batch_state.filled += take;

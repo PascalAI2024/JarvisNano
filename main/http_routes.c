@@ -357,7 +357,7 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
         return ESP_OK;
     }
     int mic = -1, ref = -1, vol = -1, barge = -1, vadclean = -1, pbgain = -1;
-    int speakmic = -1;
+    int speakmic = -1, echogate = -1;
     query_int(req, "mic", &mic);
     query_int(req, "ref", &ref);
     query_int(req, "vol", &vol);
@@ -374,6 +374,7 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
         atomic_store(&s_cpu_force, cpu);   /* bench: force a gear, 0 = auto */
     }
     query_int(req, "speakmic", &speakmic);
+    query_int(req, "echogate", &echogate);
     jr_audio_set_gains(mic, ref, vol);
     if (speakmic >= 0) {
         jr_audio_set_speak_mic_db(speakmic);
@@ -383,6 +384,12 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
     }
     if (vadclean >= 0) {
         atomic_store(&s_vad_use_clean, vadclean != 0);
+    }
+    if (echogate >= 0) {
+        /* Run-time only, never persisted: 0 lets the microphone reach the
+         * server while the speaker is audible, so a session can measure the
+         * canceller with real barge-in. Privacy is not behind this switch. */
+        atomic_store(&s_echo_gate_enabled, echogate != 0);
     }
     if (pbgain >= 0) {
         jr_audio_set_playback_gain_percent(pbgain);
@@ -395,13 +402,14 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
                      "{\"ok\":true,\"mic\":%d,\"ref\":%d,\"vol\":%d,"
                      "\"speakmic\":%d,"
                      "\"barge\":%s,\"vadclean\":%s,\"pbgain\":%d,"
-                     "\"preroll\":%d,\"refill\":%d}",
+                     "\"preroll\":%d,\"refill\":%d,\"echogate\":%s}",
                      jr_audio_mic_db(), jr_audio_ref_db(), jr_audio_out_vol(),
                      jr_audio_speak_mic_db(),
                      s_local_barge_enabled ? "true" : "false",
                      atomic_load(&s_vad_use_clean) ? "true" : "false",
                      jr_audio_playback_gain_percent(),
-                     jr_audio_preroll_ms(), jr_audio_refill_ms());
+                     jr_audio_preroll_ms(), jr_audio_refill_ms(),
+                     atomic_load(&s_echo_gate_enabled) ? "true" : "false");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, n);
     return ESP_OK;
@@ -2853,6 +2861,9 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         "\"vad_starts\":%u,"
         "\"unanswered\":%u,\"answered\":%u,\"srv_interrupts\":%u,"
         "\"phantom_interrupts\":%u,"
+        "\"echo_gate\":%s,\"echo_gated_frames\":%u,"
+        "\"echo_passed_frames\":%u,\"reply_cuts\":%u,"
+        "\"reply_cut_dropped_chunks\":%u,"
         "\"audio_diag_running\":%s},\"tools\":{"
         "\"execution\":\"on_device\",\"worker_ready\":%s,"
         "\"configured\":%s,\"why\":\"%s\",\"declared\":%u,\"last_tool\":\"%s\","
@@ -2897,6 +2908,10 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         (unsigned)s_utt.misses_total, (unsigned)s_utt.answered_total,
         (unsigned)atomic_load(&s_srv_interrupts),
         (unsigned)atomic_load(&s_srv_phantom_interrupts),
+        atomic_load(&s_echo_gate_enabled) ? "true" : "false",
+        (unsigned)s_echo_gate.gated_frames,
+        (unsigned)s_echo_gate.passed_frames,
+        (unsigned)s_reply_cut.cuts, (unsigned)s_reply_cut.dropped_chunks,
         (int32_t)(atomic_load(&s_audio_diag_until_ms) - now) > 0
             ? "true" : "false",
         tools_ready ? "true" : "false",

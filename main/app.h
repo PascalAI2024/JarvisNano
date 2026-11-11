@@ -54,6 +54,7 @@
 #include "jr_core/snapshot.h"
 #include "jr_core/turn_policy.h"
 #include "jr_core/utt_watch.h"
+#include "jr_core/echo_gate.h"
 #include "jr_core/tool_policy.h"
 #include "jr_tools/jr_weather.h"
 #include "jr_dsp/dsp.h"
@@ -459,6 +460,9 @@ void enter_deep_sleep(const char *why, uint32_t timer_s);
 /* ---- owned by device_tools.c — device-tool queue, consent, weather, activity ---- */
 
 extern jr_utt_watch_t s_utt;               /* owned by main.c's voice task */
+extern jr_echo_gate_t s_echo_gate;         /* voice task writes; cockpit reads totals */
+extern jr_reply_cut_t s_reply_cut;
+extern _Atomic bool s_echo_gate_enabled;   /* /api/debug/gain?echogate=, not persisted */
 extern _Atomic uint32_t s_srv_interrupts;
 extern _Atomic uint32_t s_srv_phantom_interrupts;
 extern jr_display_weather_t s_weather;

@@ -365,6 +365,40 @@ static void test_production_privacy_taps_and_real_codec_close(void)
     TEST_ASSERT_NOT_NULL(strstr(s,"audio_reconcile(pdMS_TO_TICKS(200))"));
     TEST_ASSERT_NOT_NULL(strstr(s,"if (!was_muted) jr_audio_dac_unmute()"));free(s);
 }
+static void test_production_echo_gate_sits_inside_the_privacy_branch_and_keeps_cadence(void)
+{
+    char *s = source_section("main/main.c", "const bool voice_uplink_capture =",
+                            "/* Wake watch (Phase 5)");
+    /* The echo gate is evaluated only on the branch where the microphone is
+     * already permitted; the privacy branch (else) still zero-fills and never
+     * consults it. */
+    char *live = strstr(s, "if (upload_microphone_enabled) {");
+    char *gate = strstr(s, "jr_echo_gate_silence(");
+    char *priv = strstr(s, "} else\r\n");
+    if (priv == NULL) priv = strstr(s, "} else\n");
+    TEST_ASSERT_NOT_NULL(live); TEST_ASSERT_NOT_NULL(gate); TEST_ASSERT_NOT_NULL(priv);
+    TEST_ASSERT_TRUE(live < gate);
+    TEST_ASSERT_TRUE(gate < priv);
+    /* Silence is a memset of the same length, in place of the copy: the frame
+     * count and cadence of the uplink do not change. */
+    char *zero = strstr(gate, "memset(mic_batch + mic_batch_state.filled, 0");
+    char *copy = strstr(gate, "memcpy(mic_batch + mic_batch_state.filled, mic_frame");
+    TEST_ASSERT_NOT_NULL(zero); TEST_ASSERT_NOT_NULL(copy);
+    TEST_ASSERT_TRUE(zero < copy); TEST_ASSERT_TRUE(copy < priv);
+    /* After the gate the else branch still holds the privacy zero-fill. */
+    TEST_ASSERT_NOT_NULL(strstr(priv, "memset(mic_batch + mic_batch_state.filled, 0"));
+    /* The gate never feeds the send decision. */
+    char *send_uplink = strstr(s, "const bool send_uplink =");
+    TEST_ASSERT_NOT_NULL(send_uplink); TEST_ASSERT_TRUE(send_uplink < gate);
+    free(s);
+    /* The reply cut starts only from a physical tap. */
+    s = source_section("main/main.c", "} else if (p == JR_ST_SPEAKING) {",
+                       "} else if (p != JR_ST_DRAINING) {");
+    char *phys = strstr(s, "if (physical) {");
+    char *cut = strstr(s, "jr_reply_cut_begin(");
+    TEST_ASSERT_NOT_NULL(phys); TEST_ASSERT_NOT_NULL(cut); TEST_ASSERT_TRUE(phys < cut);
+    free(s);
+}
 static void test_production_batch_cursor_and_companion_privacy_wiring(void)
 {
     char *s = source_section("main/main.c", "const bool voice_uplink_capture =",
@@ -432,5 +466,6 @@ void audio_power_tests_run(void)
     RUN_TEST(test_production_http_export_and_bounded_health);
     RUN_TEST(test_production_feeder_ownership_and_reopen_settings);
     RUN_TEST(test_production_privacy_taps_and_real_codec_close);
+    RUN_TEST(test_production_echo_gate_sits_inside_the_privacy_branch_and_keeps_cadence);
     RUN_TEST(test_production_batch_cursor_and_companion_privacy_wiring);
 }

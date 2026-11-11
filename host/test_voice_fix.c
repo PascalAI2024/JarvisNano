@@ -7,6 +7,7 @@
  */
 #include "unity.h"
 #include "jr_core/utt_watch.h"
+#include "jr_core/echo_gate.h"
 #include "jr_core/tool_policy.h"
 #include "jr_transport/gemini_live.h"
 #include "cJSON.h"
@@ -132,6 +133,40 @@ static void test_utt_not_armed_in_other_phases_or_with_a_text_turn_queued(void)
     TEST_ASSERT_FALSE(w.armed);
     jr_utt_speech_end(&w, 3000u, true, false);
     TEST_ASSERT_TRUE(w.armed);
+}
+
+
+/* THE LOGGED DEFECT (2026-11-10): "answered":62 after four utterances. A reply
+ * is dozens of reply-bearing frames; the count is turns. */
+static void test_utt_answered_counts_turns_not_frames(void)
+{
+    jr_utt_watch_t w;
+    jr_utt_init(&w);
+    for (int turn = 0; turn < 4; ++turn) {
+        speak(&w, 10000u + (uint32_t)turn * 20000u, 2000u);
+        for (int frame = 0; frame < 15; ++frame) {
+            jr_utt_answered(&w);             /* audio chunks, text, turnComplete */
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(4u, w.answered_total);
+    TEST_ASSERT_EQUAL_UINT8(0u, w.misses);
+}
+
+/* Counting turns must not change when a miss is cleared: every answering frame
+ * still clears the run, not only the first. */
+static void test_utt_every_answering_frame_still_clears_the_run(void)
+{
+    jr_utt_watch_t w;
+    jr_utt_init(&w);
+    speak(&w, 10000u, 900u);
+    TEST_ASSERT_EQUAL_INT(JR_UTT_PARDON, jr_utt_poll(&w, 20000u));
+    TEST_ASSERT_EQUAL_UINT8(1u, w.misses);
+    speak(&w, 30000u, 2000u);
+    jr_utt_answered(&w);                     /* the turn is counted here */
+    w.misses = 1u;                           /* a later frame of the same turn... */
+    jr_utt_answered(&w);                     /* ...still clears the run */
+    TEST_ASSERT_EQUAL_UINT8(0u, w.misses);
+    TEST_ASSERT_EQUAL_UINT32(1u, w.answered_total);
 }
 
 /* ------------------------------ tool_policy ------------------------------ */
@@ -322,6 +357,115 @@ static void test_setup_with_no_local_tools_left_has_no_declarations(void)
     free(setup);
 }
 
+
+/* ------------------------------ echo_gate -------------------------------- */
+
+/* Frame cadence of the uplink loop: one 32 ms capture frame per step. */
+#define FRAME_MS 32u
+
+static void test_echo_gate_silences_while_audible_and_for_the_tail(void)
+{
+    jr_echo_gate_t g;
+    jr_echo_gate_init(&g);
+    uint32_t t = 1000u;
+    /* Quiet room: the microphone goes up. */
+    TEST_ASSERT_FALSE(jr_echo_gate_silence(&g, t, false, true));
+    /* The model speaks for 10 frames. */
+    for (int i = 0; i < 10; ++i) {
+        t += FRAME_MS;
+        TEST_ASSERT_TRUE(jr_echo_gate_silence(&g, t, true, true));
+    }
+    const uint32_t last_audible = t;
+    /* After it stops: silence for exactly JR_ECHO_TAIL_MS, then the microphone. */
+    t = last_audible + JR_ECHO_TAIL_MS - 1u;
+    TEST_ASSERT_TRUE(jr_echo_gate_silence(&g, t, false, true));
+    t = last_audible + JR_ECHO_TAIL_MS;
+    TEST_ASSERT_FALSE(jr_echo_gate_silence(&g, t, false, true));
+    TEST_ASSERT_EQUAL_UINT32(11u, g.gated_frames);
+    TEST_ASSERT_EQUAL_UINT32(2u, g.passed_frames);
+}
+
+/* The first words after a reply: the tail is bounded, so a sentence that starts
+ * 200 ms after the last audible sample is heard whole. */
+static void test_echo_gate_owner_speaking_200ms_after_the_reply_is_not_lost(void)
+{
+    jr_echo_gate_t g;
+    jr_echo_gate_init(&g);
+    TEST_ASSERT_TRUE(jr_echo_gate_silence(&g, 5000u, true, true));
+    for (uint32_t t = 5000u + FRAME_MS; t < 5000u + 200u; t += FRAME_MS) {
+        (void)jr_echo_gate_silence(&g, t, false, true);
+    }
+    uint32_t passed_before = g.passed_frames;
+    for (uint32_t t = 5000u + 200u; t < 5000u + 400u; t += FRAME_MS) {
+        TEST_ASSERT_FALSE(jr_echo_gate_silence(&g, t, false, true));
+    }
+    TEST_ASSERT_TRUE(g.passed_frames > passed_before);
+}
+
+static void test_echo_gate_off_switch_passes_everything_and_counts_nothing_gated(void)
+{
+    jr_echo_gate_t g;
+    jr_echo_gate_init(&g);
+    for (uint32_t t = 0u; t < 1000u; t += FRAME_MS) {
+        TEST_ASSERT_FALSE(jr_echo_gate_silence(&g, t, true, false));
+    }
+    TEST_ASSERT_EQUAL_UINT32(0u, g.gated_frames);
+    /* Switched on mid-reply: gated at once, and the tail honoured after. */
+    TEST_ASSERT_TRUE(jr_echo_gate_silence(&g, 1000u, true, true));
+    TEST_ASSERT_TRUE(jr_echo_gate_silence(&g, 1000u + JR_ECHO_TAIL_MS - 1u, false, true));
+    TEST_ASSERT_FALSE(jr_echo_gate_silence(&g, 1000u + JR_ECHO_TAIL_MS, false, true));
+}
+
+static void test_echo_gate_a_quiet_room_is_never_gated_and_the_clock_wraps(void)
+{
+    jr_echo_gate_t g;
+    jr_echo_gate_init(&g);
+    for (uint32_t t = 0u; t < 2000u; t += FRAME_MS) {
+        TEST_ASSERT_FALSE(jr_echo_gate_silence(&g, t, false, true));
+    }
+    /* uint32 wrap: audible just before the wrap, tail straddles it. */
+    TEST_ASSERT_TRUE(jr_echo_gate_silence(&g, 0xFFFFFFF0u, true, true));
+    TEST_ASSERT_TRUE(jr_echo_gate_silence(&g, 0x00000020u, false, true));
+    TEST_ASSERT_FALSE(jr_echo_gate_silence(&g, 0x00000100u, false, true));
+}
+
+static void test_reply_cut_drops_until_the_server_boundary(void)
+{
+    jr_reply_cut_t c;
+    jr_reply_cut_init(&c);
+    TEST_ASSERT_FALSE(jr_reply_cut_drop_audio(&c, 100u));      /* no cut: plays */
+    jr_reply_cut_begin(&c, 1000u);
+    TEST_ASSERT_TRUE(jr_reply_cut_drop_audio(&c, 1100u));
+    TEST_ASSERT_TRUE(jr_reply_cut_drop_audio(&c, 1600u));
+    jr_reply_cut_boundary(&c);                                  /* turnComplete */
+    TEST_ASSERT_FALSE(jr_reply_cut_drop_audio(&c, 1700u));      /* next reply plays */
+    TEST_ASSERT_EQUAL_UINT32(2u, c.dropped_chunks);
+    TEST_ASSERT_EQUAL_UINT32(1u, c.cuts);
+}
+
+/* A lost boundary must not swallow the next reply for ever. */
+static void test_reply_cut_expires_when_no_chunk_arrives_for_a_while(void)
+{
+    jr_reply_cut_t c;
+    jr_reply_cut_init(&c);
+    jr_reply_cut_begin(&c, 1000u);
+    TEST_ASSERT_TRUE(jr_reply_cut_drop_audio(&c, 1500u));
+    TEST_ASSERT_FALSE(jr_reply_cut_drop_audio(&c, 1500u + JR_REPLY_CUT_GAP_MS + 1u));
+    TEST_ASSERT_FALSE(c.cutting);
+    TEST_ASSERT_FALSE(jr_reply_cut_drop_audio(&c, 1500u + JR_REPLY_CUT_GAP_MS + 100u));
+}
+
+/* Chunks arriving steadily keep the cut alive however long the reply runs. */
+static void test_reply_cut_stays_while_chunks_keep_coming(void)
+{
+    jr_reply_cut_t c;
+    jr_reply_cut_init(&c);
+    jr_reply_cut_begin(&c, 0u);
+    for (uint32_t t = 500u; t < 30000u; t += 500u) {
+        TEST_ASSERT_TRUE(jr_reply_cut_drop_audio(&c, t));
+    }
+}
+
 /* ---- registration (called from test_core.c main, inside UNITY_BEGIN/END) ---- */
 void voice_fix_tests_run(void)
 {
@@ -333,6 +477,15 @@ void voice_fix_tests_run(void)
     RUN_TEST(test_utt_the_owner_answered_after_a_pardon_clears_the_run);
     RUN_TEST(test_utt_a_bare_frame_cancels_the_clock_but_is_not_an_answer);
     RUN_TEST(test_utt_not_armed_in_other_phases_or_with_a_text_turn_queued);
+    RUN_TEST(test_utt_answered_counts_turns_not_frames);
+    RUN_TEST(test_utt_every_answering_frame_still_clears_the_run);
+    RUN_TEST(test_echo_gate_silences_while_audible_and_for_the_tail);
+    RUN_TEST(test_echo_gate_owner_speaking_200ms_after_the_reply_is_not_lost);
+    RUN_TEST(test_echo_gate_off_switch_passes_everything_and_counts_nothing_gated);
+    RUN_TEST(test_echo_gate_a_quiet_room_is_never_gated_and_the_clock_wraps);
+    RUN_TEST(test_reply_cut_drops_until_the_server_boundary);
+    RUN_TEST(test_reply_cut_expires_when_no_chunk_arrives_for_a_while);
+    RUN_TEST(test_reply_cut_stays_while_chunks_keep_coming);
     RUN_TEST(test_tools_gateway_classification);
     RUN_TEST(test_gateway_is_unreachable_after_three_dead_calls);
     RUN_TEST(test_gateway_says_why_not);

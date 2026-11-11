@@ -32,6 +32,7 @@ set(CORE_SRCS
     ${REPO_ROOT}/components/jr_core/src/dac_mute.c
     ${REPO_ROOT}/components/jr_core/src/cue.c
     ${REPO_ROOT}/components/jr_core/src/utt_watch.c
+    ${REPO_ROOT}/components/jr_core/src/echo_gate.c
     ${REPO_ROOT}/components/jr_core/src/tool_policy.c
     ${REPO_ROOT}/components/jr_dsp/src/dsp.c
     ${REPO_ROOT}/components/jr_dsp/src/audio_power.c
