@@ -857,6 +857,56 @@ _Atomic int             s_echo_gate_volume_min = 0;
  * (/api/debug/gain?wakebarge=). Voice task only reads the hits. */
 _Atomic bool            s_wake_barge_enabled = true;
 _Atomic uint32_t        s_wake_cuts;
+voiceperf_class_t       s_vperf[2];
+_Atomic uint32_t        s_vperf_tick_skips;
+_Atomic uint32_t        s_vperf_tick_sleeps;
+_Atomic bool            s_aec_bench_req;
+_Atomic bool            s_aec_bench_have;
+_Atomic int             s_aec_bench_mean_us = -1;
+_Atomic uint32_t        s_aec_bench_max_us;
+_Atomic int             s_aec_bench_cpu_mhz;
+
+/* A hit older than this when the voice task gets to it is discarded: the
+ * worker runs about one chunk (32 ms) behind the push, so anything over half a
+ * second means the voice task was away and the word is no longer "now". */
+#define WAKE_HIT_MAX_AGE_MS 500U
+
+/* One frame read by the voice loop, for /api/diag/voiceperf. */
+static void vperf_frame(int cls, uint32_t iter_us, uint32_t read_us,
+                        uint32_t now_ms)
+{
+    voiceperf_class_t *c = &s_vperf[cls];
+    static uint32_t win_start[2];
+    static uint32_t win_frames[2];
+    static uint32_t last_ms[2];
+    uint32_t frames = atomic_load_explicit(&c->frames, memory_order_relaxed) + 1U;
+    uint32_t isum = atomic_load_explicit(&c->iter_sum_us, memory_order_relaxed) + iter_us;
+    uint32_t rsum = atomic_load_explicit(&c->read_sum_us, memory_order_relaxed) + read_us;
+    if (frames >= (1U << 14)) {   /* keeps the 32-bit sums from wrapping */
+        frames >>= 1; isum >>= 1; rsum >>= 1;
+    }
+    atomic_store_explicit(&c->frames, frames, memory_order_relaxed);
+    atomic_store_explicit(&c->iter_sum_us, isum, memory_order_relaxed);
+    atomic_store_explicit(&c->read_sum_us, rsum, memory_order_relaxed);
+    if (iter_us > atomic_load_explicit(&c->iter_max_us, memory_order_relaxed)) {
+        atomic_store_explicit(&c->iter_max_us, iter_us, memory_order_relaxed);
+    }
+    /* A gap (the other class had the loop, or the mic was off) starts a fresh
+     * window instead of diluting the rate. */
+    if (win_frames[cls] == 0U || now_ms - last_ms[cls] > 500U) {
+        win_start[cls] = now_ms;
+        win_frames[cls] = 0U;
+    }
+    last_ms[cls] = now_ms;
+    ++win_frames[cls];
+    const uint32_t span = now_ms - win_start[cls];
+    if (span >= 4000U) {
+        atomic_store_explicit(&c->fps_x100,
+            (uint32_t)(((uint64_t)win_frames[cls] * 100000U) / span),
+            memory_order_relaxed);
+        win_frames[cls] = 0U;
+    }
+}
 /* The ws task's side of the watch: it counts frames, the voice task reads the
  * counts. Alive = any frame; answer = a frame that replies to the owner. */
 static _Atomic uint32_t s_srv_alive_seq;
@@ -2380,7 +2430,17 @@ static void voice_task(void *arg)
     }
     s_voice_task_running = true;
 
+    uint32_t tick_skips_in_row = 0U;
     for (;;) {
+        const int64_t iter_t0 = esp_timer_get_time();
+        /* Pacing numbers for this iteration: which class of frame it read
+         * (-1: none) and how long the codec read took. */
+        int vperf_class = -1;
+        uint32_t read_us = JR_PACE_READ_UNKNOWN;
+        /* How long that read was blocked. The canceller runs inside the read
+         * (12 to 15 ms while speaking), so read_us alone cannot say whether
+         * the frame was already waiting; the pacing below needs this one. */
+        uint32_t wait_us = JR_PACE_READ_UNKNOWN;
         uint64_t now = jr_clock_now_ms(&s_app.clock);
         s_voice_task_heartbeat_ms = (uint32_t)now;
 
@@ -4037,6 +4097,16 @@ static void voice_task(void *arg)
          * keeps streaming through Thinking. This matches the proven v4 lane. */
         jr_audio_set_microphone_enabled(
             !atomic_load(&s_voice_privacy_paused) && !s_flip_muted);
+        /* PRIVACY EDGE FOR THE WAKE WORKER. Every mute (tap, long press, API,
+         * flip, shade) is stored by this task above, so one look here sees it
+         * before any frame of this iteration is pushed. While the microphone
+         * is gated the ring is emptied on every pass, which also voids a hit
+         * whose chunk was already inside the detector: audio captured before
+         * a mute is never analysed after it, and no hit can arrive while
+         * muted. Cheap: two atomic stores. */
+        if (atomic_load(&s_voice_privacy_paused) || s_flip_muted) {
+            jr_wake_flush();
+        }
         bool read_paced = false;
         jr_state_t capture_phase = jr_orch_phase(&s_app.orch);
         bool phase_allows_capture = capture_phase == JR_ST_LISTENING ||
@@ -4098,10 +4168,30 @@ static void voice_task(void *arg)
                 s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN &&
                 (s_app.cfg.vad_mode == JR_VAD_SERVER || s_app.io.activity_open),
             !atomic_load(&s_voice_privacy_paused) && !s_flip_muted);
+        /* Canceller bench (/api/diag/voiceperf?bench=1). It reads no
+         * microphone and opens nothing, so a muted device may run it; it
+         * waits for a loop that has no frame to carry (not capturing, or the
+         * frames are privacy zeros) and for the speaker to be quiet. */
+        if (atomic_load(&s_aec_bench_req) && !audio_diag_active &&
+            !companion_listen && !jr_audio_playback_pending() &&
+            (!(s_app.io.capturing && phase_allows_capture) ||
+             atomic_load(&s_voice_privacy_paused) || s_flip_muted)) {
+            atomic_store(&s_aec_bench_req, false);
+            uint32_t worst_us = 0U;
+            atomic_store(&s_aec_bench_mean_us,
+                         jr_audio_aec_bench(64, &worst_us));
+            atomic_store(&s_aec_bench_max_us, worst_us);
+            atomic_store(&s_aec_bench_cpu_mhz, atomic_load(&s_cpu_mhz));
+            atomic_store(&s_aec_bench_have, true);
+        }
         if ((s_app.io.capturing && phase_allows_capture) || audio_diag_active ||
             companion_listen) {
+            const int64_t read_t0 = esp_timer_get_time();
             int n = jr_audio_source_read(&s_app.mic, mic_frame, VOICE_FRAME_SAMPLES);
             if (n > 0) {
+                read_us = (uint32_t)(esp_timer_get_time() - read_t0);
+                wait_us = jr_audio_last_read_wait_us();
+                vperf_class = capture_phase == JR_ST_SPEAKING ? 0 : 1;
                 /* The source supplies paced zeros under privacy. Recheck the
                  * app latch after a blocking read, before diagnostics or levels,
                  * so a privacy edge in flight cannot publish a live frame. */
@@ -4195,24 +4285,31 @@ static void voice_task(void *arg)
                 }
                 /* SAY "JARVIS" TO INTERRUPT. While the device speaks, the same
                  * frame the uplink would carry (canceller output after
-                 * make-up) also goes to WakeNet, from this one caller. A hit
-                 * cuts the reply exactly as a tap on the glass does, and the
-                 * microphone is let through the echo gate for the sentence
-                 * that follows, at any volume. Fed only from a live frame:
-                 * under privacy mic_gated has already zeroed it, so a muted
-                 * device neither hears the word nor opens anything, and the
-                 * pass window below only ever un-zeroes the ECHO gate. */
+                 * make-up) also goes to WakeNet, from this one caller. The
+                 * detector runs on its own task (jr_wake_push only copies the
+                 * frame); a hit that has arrived by now cuts the reply
+                 * exactly as a tap on the glass does, and the microphone is
+                 * let through the echo gate for the sentence that follows, at
+                 * any volume. Pushed only from a live frame: under privacy
+                 * mic_gated has already zeroed it and the loop top flushed
+                 * the ring, so a muted device neither hears the word nor
+                 * opens anything, and the pass window below only ever
+                 * un-zeroes the ECHO gate. */
                 if (ph == JR_ST_SPEAKING && !mic_gated &&
-                    atomic_load(&s_wake_barge_enabled) && jr_wake_ready() &&
-                    jr_wake_feed(mic_frame, (size_t)n)) {
-                    speaking_stop_playback(now);
-                    jr_reply_cut_begin(&s_reply_cut, (uint32_t)now);
-                    jr_echo_gate_pass_for(&s_echo_gate, (uint32_t)now,
-                                          JR_ECHO_PASS_MS);
-                    atomic_fetch_add(&s_wake_cuts, 1U);
-                    jr_display_caption_set("LISTENING");
-                    ESP_LOGI(TAG, "wake: \"%s\" heard over a reply — cut it",
-                             jr_wake_model());
+                    atomic_load(&s_wake_barge_enabled) && jr_wake_ready()) {
+                    (void)jr_wake_push(mic_frame, (size_t)n);
+                    if (jr_wake_take_hit(
+                            (uint32_t)(esp_timer_get_time() / 1000),
+                            WAKE_HIT_MAX_AGE_MS)) {
+                        speaking_stop_playback(now);
+                        jr_reply_cut_begin(&s_reply_cut, (uint32_t)now);
+                        jr_echo_gate_pass_for(&s_echo_gate, (uint32_t)now,
+                                              JR_ECHO_PASS_MS);
+                        atomic_fetch_add(&s_wake_cuts, 1U);
+                        jr_display_caption_set("LISTENING");
+                        ESP_LOGI(TAG, "wake: \"%s\" heard over a reply — cut it",
+                                 jr_wake_model());
+                    }
                 }
                 /* Both VAD modes batch two 32 ms frames. The manual path used
                  * to send every frame and exhausted the bounded TX queue in a
@@ -4331,11 +4428,17 @@ static void voice_task(void *arg)
              * flip (s_flip_muted) and tap/long-press/API (privacy_paused)
              * both gate this branch off. The codec read paces this branch at
              * the frame cadence, same as the uplink path. */
+            const int64_t read_t0 = esp_timer_get_time();
             int n = jr_audio_source_read(&s_app.mic, mic_frame,
                                          VOICE_FRAME_SAMPLES);
             if (n > 0) {
                 read_paced = true;
-                if (jr_wake_feed(mic_frame, (size_t)n)) {
+                read_us = (uint32_t)(esp_timer_get_time() - read_t0);
+                wait_us = jr_audio_last_read_wait_us();
+                vperf_class = 1;
+                (void)jr_wake_push(mic_frame, (size_t)n);
+                if (jr_wake_take_hit((uint32_t)(esp_timer_get_time() / 1000),
+                                     WAKE_HIT_MAX_AGE_MS)) {
                     ESP_LOGI(TAG, "wake: \"%s\" heard — waking from rest",
                              jr_wake_model());
                     jr_mood_poke_awake(&s_mood, (uint32_t)now);
@@ -4415,7 +4518,37 @@ capture_complete:
          * Always block for at least one tick so IDLE1 services the task WDT. */
         /* CONFIG_FREERTOS_HZ=100: a millisecond conversion is zero ticks.
          * Use one literal tick on the paced path so IDLE1 actually runs. */
-        vTaskDelay(read_paced ? 1 : pdMS_TO_TICKS(20));
+        const uint32_t iter_us = (uint32_t)(esp_timer_get_time() - iter_t0);
+        if (vperf_class >= 0) {
+            vperf_frame(vperf_class, iter_us,
+                        read_us == JR_PACE_READ_UNKNOWN ? 0U : read_us,
+                        (uint32_t)(esp_timer_get_time() / 1000));
+        }
+        /* When the loop is behind (the codec read did not block, or this
+         * iteration's own work took a frame) the next frame is already queued
+         * and a 10 ms tick would only make the backlog worse. Skip the sleep
+         * then, at most JR_PACE_MAX_SKIPS times in a row, so IDLE1 still gets
+         * a tick every fourth frame. Work is everything that was not waiting,
+         * the canceller inside the read included. The unpaced path keeps its
+         * 20 ms. */
+        if (read_paced) {
+            const uint32_t work_us =
+                (wait_us == JR_PACE_READ_UNKNOWN || iter_us <= wait_us)
+                    ? 0U : iter_us - wait_us;
+            if (jr_pace_skip_sleep(wait_us, work_us, tick_skips_in_row)) {
+                ++tick_skips_in_row;
+                atomic_fetch_add_explicit(&s_vperf_tick_skips, 1U,
+                                          memory_order_relaxed);
+                continue;
+            }
+            tick_skips_in_row = 0U;
+            atomic_fetch_add_explicit(&s_vperf_tick_sleeps, 1U,
+                                      memory_order_relaxed);
+            vTaskDelay(1);
+        } else {
+            tick_skips_in_row = 0U;
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
     }
 }
 

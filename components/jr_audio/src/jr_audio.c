@@ -178,6 +178,7 @@ static int16_t               *s_aec_clean;
 static _Atomic uint32_t       s_last_aec_us;
 /* AEC-clean mic RMS in Q8, measured before the uplink make-up gain. */
 static _Atomic uint32_t       s_clean_rms_q8;
+static _Atomic uint32_t       s_last_wait_us;   /* last src_read: time blocked */
 
 static int16_t               *s_raw_cap;     /* 768*4 int16 (24k read)     */
 static int16_t               *s_raw16;       /* 512*4 int16 (16k demuxed)  */
@@ -833,11 +834,16 @@ static int src_read(void *ctx, jr_pcm_t *frame, size_t max_samples)
     }
     size_t n = (max_samples < (size_t)GL_TX_SAMPLES_PER_CHUNK)
                    ? max_samples : (size_t)GL_TX_SAMPLES_PER_CHUNK;
+    /* How long this read was blocked (guard + codec), not how long it took:
+     * the canceller below is work, and the voice loop's pacing must be able to
+     * tell a read that waited for its frame from one that only computed. */
+    const int64_t wait_t0 = esp_timer_get_time();
     if (xSemaphoreTake(s_adc_guard, pdMS_TO_TICKS(100)) != pdTRUE) return 0;
     aec_apply_pending();
     jr_audio_capture_result_t capture = jr_audio_power_capture(
         atomic_load(&s_microphone_enabled), atomic_load(&s_adc_open),
         frame, n, &s_capture_ops);
+    atomic_store(&s_last_wait_us, (uint32_t)(esp_timer_get_time() - wait_t0));
     if (capture != JR_AUDIO_CAPTURE_LIVE || !atomic_load(&s_microphone_enabled)) {
         if (capture == JR_AUDIO_CAPTURE_SILENT ||
             (capture == JR_AUDIO_CAPTURE_LIVE && !atomic_load(&s_microphone_enabled))) {
@@ -919,6 +925,44 @@ static int src_read(void *ctx, jr_pcm_t *frame, size_t max_samples)
     xSemaphoreGive(s_adc_guard);
     if (reopen_mic) mic_reopen_cycle();
     return (int)n;
+}
+
+uint32_t jr_audio_last_read_wait_us(void)
+{
+    return atomic_load(&s_last_wait_us);
+}
+
+int jr_audio_aec_bench(int frames, uint32_t *max_us)
+{
+    if (frames <= 0 || !s_ready || s_aec == NULL || s_aec_mic == NULL ||
+        s_aec_ref == NULL || s_aec_clean == NULL) {
+        return -1;
+    }
+    /* The same guard src_read holds around aec_process, so a bench can never
+     * run the canceller concurrently with a capture or a rebuild. */
+    if (xSemaphoreTake(s_adc_guard, pdMS_TO_TICKS(100)) != pdTRUE) return -1;
+    uint32_t seed = 0x9E3779B9u;
+    uint64_t sum = 0;
+    uint32_t worst = 0;
+    for (int f = 0; f < frames; ++f) {
+        for (int i = 0; i < GL_TX_SAMPLES_PER_CHUNK; ++i) {
+            seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+            s_aec_ref[i] = (int16_t)((int32_t)(seed & 0x1FFFu) - 0x1000);
+            seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+            s_aec_mic[i] = (int16_t)((int32_t)(seed & 0x1FFFu) - 0x1000);
+        }
+        const int64_t t0 = esp_timer_get_time();
+        aec_process(s_aec, s_aec_mic, s_aec_ref, s_aec_clean);
+        const uint32_t us = (uint32_t)(esp_timer_get_time() - t0);
+        sum += us;
+        if (us > worst) worst = us;
+        if ((f & 7) == 7) {
+            vTaskDelay(1);   /* IDLE1 and the display get a tick, as in capture */
+        }
+    }
+    xSemaphoreGive(s_adc_guard);
+    if (max_us != NULL) *max_us = worst;
+    return (int)(sum / (uint64_t)frames);
 }
 
 float jr_audio_clean_rms(void)

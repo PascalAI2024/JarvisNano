@@ -56,6 +56,7 @@
 #include "jr_core/utt_watch.h"
 #include "jr_core/echo_gate.h"
 #include "jr_core/tool_policy.h"
+#include "jr_core/pace.h"
 #include "jr_tools/jr_weather.h"
 #include "jr_dsp/dsp.h"
 #include "jr_hal/hal.h"
@@ -467,6 +468,30 @@ extern _Atomic bool s_echo_gate_enabled;   /* /api/debug/gain?echogate=, not per
 extern _Atomic int s_echo_gate_volume_min; /* ?echovol=: gate applies above this volume */
 extern _Atomic bool s_wake_barge_enabled;  /* ?wakebarge=: "Jarvis" cuts a reply */
 extern _Atomic uint32_t s_wake_cuts;       /* replies cut by the wake word, cockpit */
+
+/* Voice-loop pacing counters for /api/diag/voiceperf. The voice task is the
+ * only writer; httpd reads them racily, which is fine for diagnostics. Class 0
+ * is the loop while Speaking, class 1 every other frame it reads (listening,
+ * asking, thinking, and the wake watch). Times are microseconds; the sums are
+ * halved together with the frame count so the mean survives a long run. */
+typedef struct {
+    _Atomic uint32_t frames;
+    _Atomic uint32_t iter_sum_us;   /* whole iteration, codec read included */
+    _Atomic uint32_t iter_max_us;
+    _Atomic uint32_t read_sum_us;   /* the codec read alone */
+    _Atomic uint32_t fps_x100;      /* frames/s over the last full window */
+} voiceperf_class_t;
+extern voiceperf_class_t s_vperf[2];
+extern _Atomic uint32_t s_vperf_tick_skips;   /* iterations that skipped the tick sleep */
+extern _Atomic uint32_t s_vperf_tick_sleeps;  /* paced iterations that slept it */
+
+/* /api/diag/voiceperf?bench=1: httpd sets the request, the voice task runs it
+ * when it is not reading the microphone, the wake worker runs its own half. */
+extern _Atomic bool s_aec_bench_req;
+extern _Atomic bool s_aec_bench_have;
+extern _Atomic int s_aec_bench_mean_us;      /* -1: no canceller or guard busy */
+extern _Atomic uint32_t s_aec_bench_max_us;
+extern _Atomic int s_aec_bench_cpu_mhz;
 extern _Atomic uint32_t s_srv_interrupts;
 extern _Atomic uint32_t s_srv_phantom_interrupts;
 extern jr_display_weather_t s_weather;

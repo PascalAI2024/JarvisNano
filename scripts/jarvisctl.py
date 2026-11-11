@@ -15,6 +15,7 @@ device over LAN. Host comes from --host or $JARVIS_DEVICE_HOST.
     jarvisctl tune preroll=600 refill=1000  # jitter buffer, ms (live)
     jarvisctl taps [outdir]              # WAV taps + metrics
     jarvisctl vadlog [out.csv]           # barge/VAD decision log
+    jarvisctl voiceperf [bench]          # voice-loop fps/timing; bench = no-mic canceller + wake timing
     jarvisctl crash [dump [out.bin]|clear]  # reset reason + stored coredump summary
     jarvisctl logs [tail_bytes]         # device log ring — read AFTER, no monitor
     jarvisctl gestures [lines]           # recent physical inputs + resolved actions
@@ -40,6 +41,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -270,6 +272,16 @@ def cmd_vadlog(out: str = "vadlog.csv") -> int:
     print(out)
     return 0
 
+def cmd_voiceperf(argv: list[str]) -> int:
+    """Voice-loop pacing counters. `bench` first queues the no-microphone bench
+    (wake detect and canceller timed on noise), waits for it, then prints."""
+    if argv and argv[0] == "bench":
+        api("/api/diag/voiceperf?bench=1", "POST", b"")
+        time.sleep(4)
+    print(json.dumps(get_json("/api/diag/voiceperf"), indent=2))
+    return 0
+
+
 def cmd_crash(argv: list[str]) -> int:
     """Reset reason + stored coredump summary; `dump [out.bin]` saves the raw
     image, `clear` erases it (the only way the dump is ever erased)."""
@@ -395,6 +407,8 @@ def main() -> int:
         return cmd_taps(*rest[:1])
     if cmd == "vadlog":
         return cmd_vadlog(*rest[:1])
+    if cmd == "voiceperf":
+        return cmd_voiceperf(rest)
     if cmd == "crash":
         return cmd_crash(rest)
     if cmd == "logs":
