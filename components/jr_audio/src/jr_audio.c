@@ -10,6 +10,7 @@
  */
 #include "jr_audio/jr_audio.h"
 #include "jr_core/dac_mute.h"
+#include "jr_core/mic_watch.h"
 
 #include <math.h>
 #include <string.h>
@@ -146,6 +147,12 @@ static _Atomic bool           s_clear_capture_taps;
 static _Atomic uint32_t       s_hardware_reads;
 static _Atomic uint32_t       s_silent_frames;
 static _Atomic uint32_t       s_power_failures;
+static _Atomic uint32_t       s_gain_failures;
+/* Dead-microphone watch: touched only by src_read (the one capture caller);
+ * the two atomics are its published copy. */
+static jr_mic_watch_t         s_mic_watch;
+static _Atomic bool           s_mic_dead;
+static _Atomic uint32_t       s_mic_recoveries;
 static SemaphoreHandle_t      s_adc_guard;
 static SemaphoreHandle_t      s_dac_guard;
 static jr_audio_power_t       s_power;
@@ -443,6 +450,22 @@ static void acquire_handles(void)
     ESP_LOGI(TAG, "codec handles: dac=%p adc=%p", (void *)s_dac, (void *)s_adc);
 }
 
+#define IN_GAIN_ATTEMPTS 3
+
+static void set_in_gain_checked(uint16_t channel_mask, float db)
+{
+    for (int attempt = 0; attempt < IN_GAIN_ATTEMPTS; ++attempt) {
+        if (esp_codec_dev_set_in_channel_gain(s_adc, channel_mask, db) ==
+            ESP_CODEC_DEV_OK) {
+            return;
+        }
+        vTaskDelay(1);
+    }
+    atomic_fetch_add(&s_gain_failures, 1u);
+    ESP_LOGW(TAG, "adc gain set failed after %d tries (mask 0x%x)",
+             IN_GAIN_ATTEMPTS, (unsigned)channel_mask);
+}
+
 static void apply_in_gains(void)
 {
     if (s_adc == NULL || !atomic_load(&s_adc_open)) {
@@ -453,11 +476,13 @@ static void apply_in_gains(void)
     float mic = (float)atomic_load(atomic_load(&s_capture_speaking)
                                    ? &s_mic_speak_db : &s_mic_db);
     float ref = (float)atomic_load(&s_ref_db);
-    /* MEMS MIC1|MIC2 = chip mask bits 0|1; echo-ref MIC3 = chip mask bit 2. */
-    esp_codec_dev_set_in_channel_gain(s_adc,
-        ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) | ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1), mic);
-    esp_codec_dev_set_in_channel_gain(s_adc,
-        ESP_CODEC_DEV_MAKE_CHANNEL_MASK(GL_REF_CHIP_MASK_BIT), ref);
+    /* MEMS MIC1|MIC2 = chip mask bits 0|1; echo-ref MIC3 = chip mask bit 2.
+     * A failed set is retried: the managed driver no longer writes after a
+     * failed read (patch-v5-managed.py), so a failure leaves the old gain, not
+     * a silent channel, and trying again is safe. */
+    set_in_gain_checked(ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) |
+                        ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1), mic);
+    set_in_gain_checked(ESP_CODEC_DEV_MAKE_CHANNEL_MASK(GL_REF_CHIP_MASK_BIT), ref);
 }
 
 static esp_err_t open_adc(void)
@@ -588,6 +613,40 @@ static bool audio_reconcile(TickType_t budget)
     return ok;
 }
 
+/* Recover a dead microphone lane: close the ADC and open it again through the
+ * same reconcile the privacy and sleep paths use, which re-runs the codec's
+ * mic select. Only ever called for a microphone that is already meant to be
+ * open, and the second reconcile re-reads the request, so a mute or sleep that
+ * lands between the two leaves the ADC closed rather than reopening it. Called
+ * by the capture caller with no guard held; takes both guards in the order
+ * audio_reconcile does. */
+static void mic_reopen_cycle(void)
+{
+    if (s_adc_guard == NULL || s_dac_guard == NULL) return;
+    if (xSemaphoreTake(s_adc_guard, pdMS_TO_TICKS(200)) != pdTRUE) return;
+    if (xSemaphoreTake(s_dac_guard, pdMS_TO_TICKS(200)) != pdTRUE) {
+        xSemaphoreGive(s_adc_guard);
+        return;
+    }
+    bool ok = false;
+    if (atomic_load(&s_microphone_enabled) && !atomic_load(&s_sleeping)) {
+        bool pending = !atomic_load(&s_muted) && jr_audio_playback_pending();
+        s_power.pa_on = atomic_load(&s_pa_on);
+        ok = jr_audio_power_reconcile(&s_power, false, pending, false, &s_power_ops);
+        bool mic = atomic_load(&s_microphone_enabled);
+        bool sleeping = atomic_load(&s_sleeping);
+        pending = !atomic_load(&s_muted) && jr_audio_playback_pending();
+        s_power.pa_on = atomic_load(&s_pa_on);
+        ok = jr_audio_power_reconcile(&s_power, mic, pending, sleeping,
+                                      &s_power_ops) && ok;
+    }
+    xSemaphoreGive(s_dac_guard);
+    xSemaphoreGive(s_adc_guard);
+    if (!ok) atomic_fetch_add(&s_power_failures, 1u);
+    ESP_LOGW(TAG, "mic dead: ADC reopened (recovery %u, ok=%d)",
+             (unsigned)atomic_load(&s_mic_recoveries), (int)ok);
+}
+
 static bool capture_read_hardware(void *ctx)
 {
     (void)ctx;
@@ -700,6 +759,15 @@ static int src_read(void *ctx, jr_pcm_t *frame, size_t max_samples)
     }
     tap_write(JR_AUDIO_TAP_MIC_RAW, s_aec_mic,
               GL_TX_SAMPLES_PER_CHUNK);
+    /* Is the lane alive? Judged on the raw microphone lane, before AEC and
+     * make-up gain, and only while the microphone is meant to be open. */
+    bool reopen_mic = jr_mic_watch_frame(
+        &s_mic_watch, (uint32_t)(esp_timer_get_time() / 1000),
+        jr_dsp_rms(s_aec_mic, GL_TX_SAMPLES_PER_CHUNK),
+        atomic_load(&s_adc_open),
+        atomic_load(&s_microphone_enabled) && !atomic_load(&s_sleeping));
+    atomic_store(&s_mic_dead, s_mic_watch.dead);
+    atomic_store(&s_mic_recoveries, s_mic_watch.recoveries);
     tap_write(JR_AUDIO_TAP_REFERENCE, s_aec_ref,
               GL_TX_SAMPLES_PER_CHUNK);
 
@@ -737,6 +805,7 @@ static int src_read(void *ctx, jr_pcm_t *frame, size_t max_samples)
         atomic_store(&s_clean_rms_q8, 0u);
     }
     xSemaphoreGive(s_adc_guard);
+    if (reopen_mic) mic_reopen_cycle();
     return (int)n;
 }
 
@@ -1089,6 +1158,7 @@ esp_err_t jr_audio_init(void)
     }
 
     acquire_handles();
+    jr_mic_watch_init(&s_mic_watch);
     s_adc_guard = xSemaphoreCreateMutex();
     s_dac_guard = xSemaphoreCreateMutex();
     if (s_adc_guard == NULL || s_dac_guard == NULL) return ESP_ERR_NO_MEM;
@@ -1228,8 +1298,12 @@ void jr_audio_power_stats(jr_audio_power_stats_t *out)
         .pa_on = atomic_load(&s_pa_on), .hardware_reads = atomic_load(&s_hardware_reads),
         .silent_frames = atomic_load(&s_silent_frames),
         .failures = atomic_load(&s_power_failures),
+        .gain_failures = atomic_load(&s_gain_failures),
     };
 }
+
+bool jr_audio_mic_dead(void)          { return atomic_load(&s_mic_dead); }
+uint32_t jr_audio_mic_recoveries(void) { return atomic_load(&s_mic_recoveries); }
 
 jr_audio_source_t jr_audio_source(void)
 {

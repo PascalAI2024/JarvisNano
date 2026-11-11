@@ -59,8 +59,16 @@ typedef struct {
     uint32_t hardware_reads;
     uint32_t silent_frames;
     uint32_t failures;
+    uint32_t gain_failures;   /* codec gain writes that still failed after retries */
 } jr_audio_power_stats_t;
 void jr_audio_power_stats(jr_audio_power_stats_t *out);
+
+/* Dead-microphone watch (jr_core/mic_watch.h): the ADC is open and meant to be
+ * open but the raw microphone lane is electrically silent / how many times the
+ * ADC was reopened to recover it. Scalar getters so an HTTP handler needs no
+ * stats struct on its small stack. */
+bool     jr_audio_mic_dead(void);
+uint32_t jr_audio_mic_recoveries(void);
 
 /* The two port factories the composition root injects into the core. Valid
  * after jr_audio_init(). */
