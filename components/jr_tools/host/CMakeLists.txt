@@ -8,7 +8,9 @@ set(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../..")
 add_executable(jr_tools_template_tests
     test_templates.c
     test_weather.c
+    test_project.c
     ../src/jr_tools_templates.c
+    ../src/jr_tools_project.c
     ../src/jr_weather.c
     ${REPO_ROOT}/components/jr_transport/vendor/cJSON/cJSON.c
 )

@@ -22,16 +22,18 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "jr_net/jr_net.h"
+#include "jr_tools/jr_tools_project.h"
 #include "jr_tools/jr_weather.h"
 
 static const char *TAG = "jr_tools";
 
-#define JR_TOOLS_JOB_QUEUE_DEPTH     4U
-#define JR_TOOLS_RESULT_QUEUE_DEPTH  4U
-#define JR_TOOLS_CANCEL_SLOTS        12U
-#define JR_TOOLS_CODE_CAP            4096U  /* the program + args; board_poll is ~3 KB */
-#define JR_TOOLS_HTTP_BODY_CAP       8192U
-#define JR_TOOLS_HTTP_TIMEOUT_MS     35000
+#define JR_TOOLS_JOB_QUEUE_DEPTH        4U
+#define JR_TOOLS_RESULT_QUEUE_DEPTH     4U
+#define JR_TOOLS_CANCEL_SLOTS           12U
+#define JR_TOOLS_CODE_CAP               4096U  /* the program + args; board_poll is ~3 KB */
+#define JR_TOOLS_HTTP_BODY_CAP          32768U /* PSRAM-backed HTTP receive cap */
+#define JR_TOOLS_HTTP_BODY_CAP_FALLBACK 8192U  /* fallback if PSRAM alloc fails */
+#define JR_TOOLS_HTTP_TIMEOUT_MS        35000
 #define JR_TOOLS_KEEPALIVE_IDLE_US   (45LL * 1000LL * 1000LL)
 #define JR_TOOLS_IDLE_POLL_MS        5000U
 #define JR_TOOLS_TASK_STACK          16384U
@@ -259,14 +261,14 @@ static uint32_t current_config_gen(void)
  * bounded answer that says the result was too large and to narrow the
  * request. */
 static void note_oversize(const char *tool, const char *args_json,
-                          int64_t announced, size_t bytes_read,
+                          int64_t announced, size_t bytes_read, size_t cap,
                           jr_tool_result_t *result)
 {
     char target[JR_TOOLS_NAME_CAP];
     char line[160];
     (void)jr_tools_target_name(tool, args_json, target, sizeof target);
     (void)jr_tools_describe_oversize(line, sizeof line, tool, target, announced,
-                                     bytes_read, JR_TOOLS_HTTP_BODY_CAP);
+                                     bytes_read, cap);
     ESP_LOGW(TAG, "%s", line);
     (void)jr_tools_oversize_result(result->response_json,
                                    sizeof(result->response_json), announced,
@@ -331,78 +333,19 @@ static bool response_from_mcp(const char *raw, jr_tool_result_t *result)
         upstream = root;
     }
 
-    cJSON *response = cJSON_CreateObject();
-    cJSON *copy = cJSON_Duplicate(upstream, true);
-    if (response == NULL || copy == NULL) {
-        ESP_LOGE(TAG, "mcp result copy failed: out of memory raw=%u",
-                 (unsigned)raw_len);
-        cJSON_Delete(copy);
-        cJSON_Delete(response);
-        cJSON_Delete(root);
-        return false;
+    jr_tools_project_info_t info = {0};
+    bool ok = jr_tools_project_json(upstream, result->response_json,
+                                    sizeof(result->response_json), &info);
+    if (ok && info.truncated) {
+        ESP_LOGW(TAG,
+                 "mcp result projected on device: raw=%u out=%u cap=%u tier=%d fallback=%d",
+                 (unsigned)raw_len, (unsigned)strlen(result->response_json),
+                 (unsigned)sizeof(result->response_json), info.tier_index,
+                 info.used_fallback ? 1 : 0);
+    } else if (!ok) {
+        ESP_LOGE(TAG, "mcp result projection failed: raw=%u cap=%u",
+                 (unsigned)raw_len, (unsigned)sizeof(result->response_json));
     }
-    cJSON_AddItemToObject(response, "result", copy);
-    bool ok = cJSON_PrintPreallocated(response, result->response_json,
-                                     sizeof(result->response_json), false);
-    if (!ok) {
-        /* OVER BUDGET IS NOT A FAILURE. It used to be: a result one byte past
-         * the cap became bad_response, Gemini got nothing, and the owner's
-         * experience was "I can't get any help" — intermittently, because
-         * whether a search fits depends on the query. Measured on the device:
-         * need=3728 against cap=3072, over by 656 bytes.
-         *
-         * A truncated answer beats no answer. Emit a bounded object that says
-         * plainly it was cut, carries the byte counts, and includes as much of
-         * the real payload as fits — Gemini can use a partial catalogue, and
-         * the `truncated` flag lets it say so rather than inventing the rest.
-         *
-         * The proper fix is server-side projection with a cursor (PLAN N6.3);
-         * this is the floor that stops a size overrun from being total data
-         * loss while that lands. */
-        char *measured = cJSON_PrintUnformatted(response);
-        const unsigned need = (unsigned)(measured ? strlen(measured) : 0U);
-        ESP_LOGW(TAG, "mcp result over budget: need=%u cap=%u raw=%u — truncating",
-                 need, (unsigned)sizeof(result->response_json), (unsigned)raw_len);
-
-        /* Reserve room for the envelope, then fill the remainder with payload. */
-        static const char *const head =
-            "{\"result\":{\"truncated\":true,\"note\":"
-            "\"payload exceeded the device budget; content is cut\",\"text\":\"";
-        static const char *const tail = "\"}}";
-        const size_t cap = sizeof(result->response_json);
-        const size_t hlen = strlen(head), tlen = strlen(tail);
-        if (measured != NULL && cap > hlen + tlen + 16U) {
-            size_t room = cap - hlen - tlen - 1U;
-            memcpy(result->response_json, head, hlen);
-            size_t w = hlen;
-            /* Copy payload, JSON-escaping the few characters that would break
-             * the string, and stop on a whole escape rather than mid-sequence. */
-            for (size_t i = 0; measured[i] != '\0' && w + 8U < hlen + room; ++i) {
-                unsigned char ch = (unsigned char)measured[i];
-                if (ch == '"' || ch == '\\') {
-                    result->response_json[w++] = '\\';
-                    result->response_json[w++] = (char)ch;
-                } else if (ch < 0x20) {
-                    w += (size_t)snprintf(result->response_json + w,
-                                          cap - w, "\\u%04x", ch);
-                } else {
-                    result->response_json[w++] = (char)ch;
-                }
-            }
-            memcpy(result->response_json + w, tail, tlen);
-            result->response_json[w + tlen] = '\0';
-            ok = true;
-        }
-        if (measured != NULL) {
-            cJSON_free(measured);
-        }
-        if (!ok) {
-            ESP_LOGE(TAG, "mcp result over budget and could not be truncated: "
-                     "need=%u cap=%u raw=%u", need,
-                     (unsigned)sizeof(result->response_json), (unsigned)raw_len);
-        }
-    }
-    cJSON_Delete(response);
     cJSON_Delete(root);
     return ok;
 }
@@ -622,18 +565,30 @@ static jr_tool_status_t post_tool(const char *tool_name, const char *args_json,
             if (result->http_status < 200 || result->http_status >= 300) {
                 outcome = JR_TOOL_STATUS_HTTP_ERROR;
             } else if (announced > (int64_t)JR_TOOLS_HTTP_BODY_CAP) {
-                note_oversize(tool_name, args_json, announced, 0U, result);
+                note_oversize(tool_name, args_json, announced, 0U,
+                              JR_TOOLS_HTTP_BODY_CAP, result);
                 outcome = JR_TOOL_STATUS_OK;
             } else {
-                /* Off internal SRAM: TLS session needs the contiguous internal
-                 * block, matching fetch_weather(). */
+                /* Prefer 32 KB strictly in PSRAM (0 B internal SRAM). If PSRAM
+                 * allocation fails, fall back cleanly to the 8 KB cap. */
+                size_t body_cap = JR_TOOLS_HTTP_BODY_CAP;
                 char *raw = (char *)heap_caps_malloc(
-                    JR_TOOLS_HTTP_BODY_CAP + 1U,
+                    body_cap + 1U,
                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                bool fallback_oversize = false;
                 if (raw == NULL) {
-                    raw = (char *)malloc(JR_TOOLS_HTTP_BODY_CAP + 1U);
+                    body_cap = JR_TOOLS_HTTP_BODY_CAP_FALLBACK;
+                    if (announced > (int64_t)body_cap) {
+                        fallback_oversize = true;
+                    } else {
+                        raw = (char *)malloc(body_cap + 1U);
+                    }
                 }
-                if (raw == NULL) {
+                if (fallback_oversize) {
+                    note_oversize(tool_name, args_json, announced, 0U,
+                                  body_cap, result);
+                    outcome = JR_TOOL_STATUS_OK;
+                } else if (raw == NULL) {
                     outcome = JR_TOOL_STATUS_INTERNAL_ERROR;
                 } else {
                     size_t have = 0U;
@@ -649,7 +604,7 @@ static jr_tool_status_t post_tool(const char *tool_name, const char *args_json,
                                           : JR_TOOL_STATUS_BAD_RESPONSE;
                             break;
                         }
-                        size_t room = JR_TOOLS_HTTP_BODY_CAP - have;
+                        size_t room = body_cap - have;
                         if (announced > 0 && (size_t)announced - have < room) {
                             room = (size_t)announced - have;
                         }
@@ -691,13 +646,13 @@ static jr_tool_status_t post_tool(const char *tool_name, const char *args_json,
                     }
                     if (overflow) {
                         note_oversize(tool_name, args_json, announced,
-                                      JR_TOOLS_HTTP_BODY_CAP + 1U, result);
+                                      body_cap + 1U, body_cap, result);
                         outcome = JR_TOOL_STATUS_OK;
                     } else if (outcome == JR_TOOL_STATUS_OK &&
                                esp_http_client_is_complete_data_received(client)) {
                         keep_conn = true;
                     }
-                    secure_zero(raw, JR_TOOLS_HTTP_BODY_CAP + 1U);
+                    secure_zero(raw, have < body_cap ? have + 1U : body_cap + 1U);
                     free(raw);
                 }
             }

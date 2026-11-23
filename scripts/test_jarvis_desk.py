@@ -30,6 +30,13 @@ ctl = importlib.util.module_from_spec(CTL_SPEC)
 sys.modules[CTL_SPEC.name] = ctl
 CTL_SPEC.loader.exec_module(ctl)
 
+CANVAS_PATH = Path(__file__).with_name("send-canvas.py")
+CANVAS_SPEC = importlib.util.spec_from_file_location("send_canvas", CANVAS_PATH)
+assert CANVAS_SPEC is not None and CANVAS_SPEC.loader is not None
+send_canvas = importlib.util.module_from_spec(CANVAS_SPEC)
+sys.modules[CANVAS_SPEC.name] = send_canvas
+CANVAS_SPEC.loader.exec_module(send_canvas)
+
 
 class FakeKeychain:
     def __init__(self, value: str | None = "keychain-token") -> None:
@@ -729,6 +736,124 @@ class JarvisCtlPortabilityTests(unittest.TestCase):
                 (posix / "python").write_bytes(b"")
                 self.assertEqual(Path(ctl.esptool_python()).resolve(),
                                  (posix / "python").resolve())
+
+
+class SendCanvasTests(unittest.TestCase):
+    def test_clear_attaches_paired_token_and_never_leaks_it(self) -> None:
+        secret = "s" * 32
+        captured: list[tuple[Any, int]] = []
+
+        def open_request(request: Any, timeout: int = 30) -> FakeUrlResponse:
+            captured.append((request, timeout))
+            return FakeUrlResponse()
+
+        env = {"JARVIS_PAIRING_TOKEN": secret, "JARVIS_DEVICE_HOST": "device.local"}
+        out = io.StringIO()
+        err = io.StringIO()
+        with patch.object(ctl.subprocess, "run", side_effect=FileNotFoundError("security")), \
+             patch.dict(ctl.os.environ, env, clear=True), \
+             patch.object(send_canvas.urllib.request, "urlopen", side_effect=open_request), \
+             patch.object(sys, "stdout", out), \
+             patch.object(sys, "stderr", err):
+            rc = send_canvas.main(["--host", "device.local", "--clear"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(captured), 1)
+        req = captured[0][0]
+        self.assertEqual(req.full_url, "http://device.local/api/display/canvas?clear=1")
+        self.assertEqual(req.get_header("X-jarvisnano-control"), "1")
+        self.assertEqual(req.get_header("X-jarvisnano-token"), secret)
+        self.assertNotIn(secret, out.getvalue())
+        self.assertNotIn(secret, err.getvalue())
+
+    def test_env_token_never_rides_to_different_host(self) -> None:
+        secret = "s" * 32
+        captured: list[Any] = []
+
+        def open_request(request: Any, timeout: int = 30) -> FakeUrlResponse:
+            captured.append(request)
+            return FakeUrlResponse()
+
+        env = {"JARVIS_PAIRING_TOKEN": secret, "JARVIS_DEVICE_HOST": "other.local"}
+        with patch.object(ctl.subprocess, "run", side_effect=FileNotFoundError("security")), \
+             patch.dict(ctl.os.environ, env, clear=True), \
+             patch.object(send_canvas.urllib.request, "urlopen", side_effect=open_request), \
+             patch.object(sys, "stdout", io.StringIO()):
+            rc = send_canvas.main(["--host", "device.local", "--clear"])
+        self.assertEqual(rc, 0)
+        self.assertIsNone(captured[0].get_header("X-jarvisnano-token"))
+
+    def test_takeover_claims_codex_lease_before_banner_push(self) -> None:
+        secret = "t" * 32
+        frame = b"\x00\x00" * (send_canvas.SIZE * send_canvas.SIZE)
+        captured: list[Any] = []
+
+        def open_request(request: Any, timeout: int = 30) -> FakeUrlResponse:
+            captured.append(request)
+            return FakeUrlResponse()
+
+        out = io.StringIO()
+        with patch.object(send_canvas, "load_pairing_token", return_value=secret), \
+             patch.object(send_canvas, "banner_to_rgb565", return_value=frame) as mk, \
+             patch.object(send_canvas.urllib.request, "urlopen", side_effect=open_request), \
+             patch.object(sys, "stdout", out):
+            rc = send_canvas.main([
+                "--host", "https://device.local/",
+                "--banner", "DEEP FOCUS",
+                "--sub", "Back at 3:00 PM",
+                "--accent", "violet",
+                "--ttl", "45",
+                "--takeover",
+            ])
+        self.assertEqual(rc, 0)
+        mk.assert_called_once_with("DEEP FOCUS", sub="Back at 3:00 PM", accent="violet")
+        self.assertEqual(len(captured), 2)
+        lease_req, canvas_req = captured
+        self.assertEqual(
+            lease_req.full_url,
+            "https://device.local/api/operator/lease?ttl=45&mode=codex",
+        )
+        self.assertEqual(lease_req.get_header("X-jarvisnano-token"), secret)
+        self.assertEqual(lease_req.get_header("X-jarvisnano-control"), "1")
+        self.assertEqual(
+            canvas_req.full_url,
+            "https://device.local/api/display/canvas?ttl=45000",
+        )
+        self.assertEqual(canvas_req.get_header("X-jarvisnano-token"), secret)
+        self.assertEqual(canvas_req.get_header("X-jarvisnano-control"), "1")
+        self.assertEqual(canvas_req.get_header("Content-type"), "application/octet-stream")
+        self.assertEqual(len(canvas_req.data), send_canvas.SIZE * send_canvas.SIZE * 2)
+        self.assertNotIn(secret, out.getvalue())
+
+    def test_401_exits_cleanly_without_leaking_token(self) -> None:
+        secret = "u" * 32
+        err_stream = io.StringIO()
+        http_401 = send_canvas.urllib.error.HTTPError(
+            "http://device.local/api/display/canvas?clear=1",
+            401,
+            "Unauthorized",
+            hdrs=None,  # type: ignore[arg-type]
+            fp=None,
+        )
+        with patch.object(send_canvas, "load_pairing_token", return_value=secret), \
+             patch.object(send_canvas.urllib.request, "urlopen", side_effect=http_401), \
+             patch.object(sys, "stderr", err_stream):
+            rc = send_canvas.main(["--host", "device.local", "--clear"])
+        self.assertEqual(rc, 3)
+        self.assertIn("401", err_stream.getvalue())
+        self.assertNotIn(secret, err_stream.getvalue())
+
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "Pillow not installed")
+    def test_banner_renders_valid_466_rgb565_for_all_accents(self) -> None:
+        expected_len = send_canvas.SIZE * send_canvas.SIZE * 2
+        for accent in ("cyan", "violet", "amber", "mint"):
+            raw = send_canvas.banner_to_rgb565(
+                "IN A MEETING", sub="Available at 2:30 PM", accent=accent
+            )
+            self.assertEqual(len(raw), expected_len)
+            # Corner pixel (0, 0) outside the circular OLED mask must be pure black
+            self.assertEqual(raw[0:2], b"\x00\x00")
+            # Frame must contain visible luminous pixels
+            self.assertTrue(any(b != 0 for b in raw))
 
 
 if __name__ == "__main__":

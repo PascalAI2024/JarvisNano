@@ -769,18 +769,18 @@ static void test_render_clock_counts_frames_and_latches_a_second(void)
     s_render_win_frames = 0U;
 }
 
-/* The three stats under the ring: label over value, a value in ink when it is
- * up and dim (grey at about a third) when it is not. Ink is sampled at full
- * coverage, so "on" is exact and "dim" is the absence of exact ink. While an
- * update rings the stats are not drawn at all: they cross its band. */
+/* The four stats under the ring: WIFI, LINK, TOOLS, CHIP. Label over value,
+ * a value in ink when it is up and dim (grey at about a third) when it is not.
+ * While an update rings the stats are not drawn at all: they cross its band. */
 static int stat_cx(int i)
 {
-    return SP_CX + (i - 1) * SG_STAT_DX;
+    static const int k_dx[4] = { -78, -26, 26, 78 };
+    return SP_CX + k_dx[i & 3];
 }
 
 static size_t stat_value_ink(const uint16_t *fb, int i, uint16_t color)
 {
-    return count_in(fb, color, stat_cx(i) - 32, stat_cx(i) + 32, SG_STAT_VALUE_Y,
+    return count_in(fb, color, stat_cx(i) - 24, stat_cx(i) + 24, SG_STAT_VALUE_Y,
                     SG_STAT_VALUE_Y + 16);
 }
 
@@ -788,7 +788,7 @@ static size_t stat_value_drawn(const uint16_t *fb, int i)
 {
     size_t n = 0;
     for (int y = SG_STAT_VALUE_Y; y < SG_STAT_VALUE_Y + 16; ++y) {
-        for (int x = stat_cx(i) - 32; x < stat_cx(i) + 32; ++x) {
+        for (int x = stat_cx(i) - 24; x < stat_cx(i) + 24; ++x) {
             n += fb[(size_t)y * HUD_W + x] != POISON;
         }
     }
@@ -2590,15 +2590,15 @@ static size_t count_color_within(const uint16_t *fb, uint16_t c, int rmin,
     return n;
 }
 
-/* The weather ring's centre (the ring sits a little above the panel centre)
+/* The weather rain ring's centre (outer 12-hour rain ring at r134..142, centre r138)
  * and a pixel on its centre line at slot k's middle. */
 #define WX_CY (SP_CY + SG_RING_DY)
 
 static uint16_t hour_px(const uint16_t *fb, int k)
 {
     const uint32_t a = (uint32_t)sg_slot_centre_q16(k);
-    const int x = SP_CX + (int)((glass_cos_q15(a) * 118) >> 15);
-    const int y = WX_CY + (int)((glass_sin_q15(a) * 118) >> 15);
+    const int x = SP_CX + (int)((glass_cos_q15(a) * 138) >> 15);
+    const int y = WX_CY + (int)((glass_sin_q15(a) * 138) >> 15);
     return fb[(size_t)y * HUD_W + x];
 }
 
@@ -2610,14 +2610,14 @@ static int wx_radius(int i)
     return sp_isqrt(dx * dx + dy * dy);
 }
 
-/* Pixels on the stroke's core (r116..120) that are neither untouched nor the
- * bare track: the rain hours, and nothing else. */
+/* Pixels on the outer 12-hour rain ring's core (r136..140) that are neither
+ * untouched nor the bare track: the rain hours, and nothing else. */
 static size_t hour_ring_ink(const uint16_t *fb)
 {
     size_t n = 0;
     for (size_t i = 0; i < (size_t)HUD_W * HUD_H; ++i) {
         const int r = wx_radius((int)i);
-        if (r >= 116 && r <= 120 && fb[i] != POISON && fb[i] != SP_C_TRACK) {
+        if (r >= 136 && r <= 140 && fb[i] != POISON && fb[i] != SP_C_TRACK) {
             ++n;
         }
     }
@@ -2847,11 +2847,22 @@ static void test_weather_hours_ring_starts_now(void)
           "a dry hour is a faint tick, got %04x", hour_px(fb, 1));
     CHECK(hour_px(fb, 2) == POISON, "an unknown hour draws nothing, got %04x", hour_px(fb, 2));
     const uint16_t half = hour_px(fb, 6);
-    CHECK(half != SP_C_RAIN && half != SP_C_TRACK && half != POISON &&
-              (half & 0x1F) < (SP_C_RAIN & 0x1F),
-          "50 %% is rain, dimmer than 100 %%: %04x", half);
+    CHECK(half != SP_C_RAIN && half != SP_C_TRACK && half != POISON,
+          "50 %% is translucent rain, distinct from 100 %%: %04x", half);
     CHECK(hour_ring_ink(fb) > 400, "the ring drew (%zu px)", hour_ring_ink(fb));
     free(fb);
+    /* Verify 50% rain is strictly dimmer than 100% rain on true-black OLED */
+    {
+        uint16_t *blk = calloc((size_t)HUD_W * HUD_H, sizeof *blk);
+        if (blk) {
+            sp_focal_weather(&s_display, 0, HUD_H, blk, 0, 255, SP_ENTRY_TOTAL_MS);
+            const uint16_t b0 = hour_px(blk, 0);
+            const uint16_t b6 = hour_px(blk, 6);
+            CHECK((b6 & 0x1F) < (b0 & 0x1F) || ((b6 >> 5) & 0x3F) < ((b0 >> 5) & 0x3F),
+                  "50 %% rain on black (%04x) must be dimmer than 100 %% (%04x)", b6, b0);
+            free(blk);
+        }
+    }
 
     /* just after midnight the 23:40 fetch is still fresh: 00:10 is its hour 24 */
     memset(pp, 0, sizeof pp);
@@ -2990,14 +3001,16 @@ static void test_icons_follow_the_sky_and_the_charger(void)
         int bolt = 0, fx = -1, fy = -1;
         for (int y = 255; y <= 290; ++y) {
             for (int x = 170; x <= 190; ++x) {
-                if (fb[(size_t)y * HUD_W + x] != POISON && bolt++ == 0) {
+                /* Count exact accent-colored bolt ink (distinct from the inner
+                 * emerald-mint reactor bloom underneath). */
+                if (fb[(size_t)y * HUD_W + x] == SP_C_CYAN && bolt++ == 0) {
                     fx = x;
                     fy = y;
                 }
             }
         }
         if (charging) {
-            CHECK(bolt > 40, "the charging bolt draws (%d px)", bolt);
+            CHECK(bolt > 25, "the charging bolt draws (%d px)", bolt);
         } else {
             CHECK(bolt == 0, "no bolt off the charger (%d px, first at %d,%d)", bolt, fx, fy);
         }
@@ -3057,12 +3070,13 @@ static void test_desk_is_a_glass_ring_with_its_number(void)
         if (fb[i] == POISON) {
             continue;
         }
-        const int r = radius_of((int)i);
-        if (r >= 110 && r <= 126) {
+        const int r = wx_radius((int)i);
+        const int rp = radius_of((int)i);
+        if (r >= 107 && r <= 126) {
             ring++;
             if (r < rmin) rmin = r;
             if (r > rmax) rmax = r;
-        } else if (r > 136 && r < 183) {   /* past the ring glow */
+        } else if (r > 136 && rp < 183) {   /* past the ring & r127..133 scanner ticks */
             between++;
             if (r < bmin) bmin = r;
             if (r > bmax) bmax = r;
@@ -3071,7 +3085,7 @@ static void test_desk_is_a_glass_ring_with_its_number(void)
         }
     }
     CHECK(ring > 2500, "the ring is drawn (%zu pixels)", ring);
-    CHECK(rmin >= 110 && rmax <= 126, "ring r%d..r%d", rmin, rmax);
+    CHECK(rmin >= 107 && rmax <= 126, "ring r%d..r%d", rmin, rmax);
     CHECK(middle > 800, "the task, the number and the state are drawn (%zu)", middle);
     CHECK(between == 0, "%zu DESK pixels between the ring and the orbit rail (r%d..%d)", between, bmin, bmax);
     free(fb);
@@ -3242,10 +3256,14 @@ static void test_activity_is_honest_when_empty_and_newest_first(void)
     CHECK(s_act_rows == 0, "empty composes no rows, got %d", s_act_rows);
     uint16_t *fb = render_frame();
     if (fb) {
-        const size_t centre = lit_between(fb, SP_CY - 14, SP_CY + 14);
-        const size_t top = lit_between(fb, SP_ACT_Y0 - 4, SP_ACT_Y0 + SP_ACT_SUM_DY + 20);
-        CHECK(centre > 100, "NOTHING YET is drawn on the centre row (%zu)", centre);
-        CHECK(top == 0, "an empty feed drew a top row (%zu pixels)", top);
+        /* Empty ACTIVITY renders the luminous standby radar + ALL CLEAR / NOTHING YET,
+         * and zero event-summary ink pixels (SP_C_INK). */
+        const size_t radar = lit_between(fb, SP_CY - 82, SP_CY + 24);
+        const size_t label = lit_between(fb, SP_CY + 26, SP_CY + 68);
+        const size_t row_ink = count_color_within(fb, SP_C_INK, 0, JR_DISPLAY_SAFE_R, HUD_H);
+        CHECK(radar > 200, "standby concentric radar ring is drawn (%zu)", radar);
+        CHECK(label > 150, "ALL CLEAR / NOTHING YET is drawn (%zu)", label);
+        CHECK(row_ink == 0, "empty feed must draw zero event-row ink (%zu)", row_ink);
         free(fb);
     }
     sp_compose_detail(JR_DISPLAY_SPACE_ACTIVITY);
@@ -7770,6 +7788,139 @@ static void test_celestial_quiet_rest_hbm_and_te_stats(void)
     atomic_store_explicit(&s_te_timeouts, 0u, memory_order_relaxed);
 }
 
+/* Wave 3: Luminous OLED Visual Overhaul — 12-row strip vs whole-frame bit-identity
+ * across every upgraded procedural screen (WEATHER clear/rain/overcast, STATUS
+ * normal/low/muted, ACTIVITY populated & empty, DESK) plus key visual invariants. */
+static void test_wave3_oled_luminous_screens_strip_invariance(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = calloc(px, sizeof *whole);
+    uint16_t *strips = calloc(px, sizeof *strips);
+    uint16_t *alt = calloc(px, sizeof *alt);
+    if (!whole || !strips || !alt) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(whole); free(strips); free(alt); return;
+    }
+
+    jr_display_ctx_t ctx;
+    memset(&ctx, 0, sizeof ctx);
+    ctx.board.width = HUD_W;
+    ctx.board.height = HUD_H;
+    ctx.board.swap_color_bytes = false;
+
+    /* 1. WEATHER: Clear vs Rain vs Overcast bloom differences + strip invariance */
+    jr_display_clock_set(true, 13, 0, 0);
+    jr_display_clock_set_date(3, 23, 8);
+    jr_display_sun_set(420, 1140);
+    s_fake_us = 0;
+    s_breath_ms = 1100u;
+    const jr_display_sky_t skies[3] = {
+        JR_DISPLAY_SKY_CLEAR, JR_DISPLAY_SKY_RAIN, JR_DISPLAY_SKY_CLOUDS
+    };
+    for (int si = 0; si < 3; ++si) {
+        set_weather(true, 73, 79, 65, skies[si], si == 0 ? "CLEAR" : si == 1 ? "RAIN" : "OVERCAST", 0U);
+        jr_display_weather_t w = s_weather[s_weather_slot & 1u];
+        w.rain_hours_mday = 23;
+        for (int k = 0; k < JR_DISPLAY_RAIN_HOURS; ++k) {
+            w.rain_hours[k] = (uint8_t)(si == 2 ? 0 : ((k * 23) % 101));
+        }
+        jr_display_weather_set(&w);
+        sp_compose_weather();
+        memset(whole, 0, px * sizeof *whole);
+        memset(strips, 0, px * sizeof *strips);
+        sp_focal_weather(&ctx, 0, HUD_H, whole, 0, 255, SP_ENTRY_TOTAL_MS);
+        for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+            const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+            sp_focal_weather(&ctx, y, y2, strips + (size_t)y * HUD_W, 0, 255, SP_ENTRY_TOTAL_MS);
+        }
+        CHECK(memcmp(whole, strips, px * sizeof *whole) == 0,
+              "WEATHER sky %d strip/whole mismatch", si);
+        if (si == 0) {
+            memcpy(alt, whole, px * sizeof *whole);
+        } else {
+            CHECK(memcmp(alt, whole, px * sizeof *whole) != 0,
+                  "WEATHER sky %d rendered identically to CLEAR", si);
+        }
+    }
+
+    /* 2. STATUS: 74% charging (shimmer), 12% low (crimson), muted (emerald inner + gold outer) */
+    links(true, -52, "192.0.2.20", true, 2U, false, false);
+    for (int mode = 0; mode < 3; ++mode) {
+        jr_display_power_set(mode == 1 ? 12U : 74U, 4020U, mode != 1, mode != 1);
+        __atomic_store_n(&s_hud_env_word, (mode == 1 ? 12U : 74U) | (mode == 2 ? (1U << 9) : 0U),
+                         __ATOMIC_RELEASE);
+        sp_compose();
+        memset(whole, 0, px * sizeof *whole);
+        memset(strips, 0, px * sizeof *strips);
+        sp_focal_status(&ctx, 0, HUD_H, whole, 0, 255, SP_ENTRY_TOTAL_MS);
+        for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+            const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+            sp_focal_status(&ctx, y, y2, strips + (size_t)y * HUD_W, 0, 255, SP_ENTRY_TOTAL_MS);
+        }
+        CHECK(memcmp(whole, strips, px * sizeof *whole) == 0,
+              "STATUS mode %d strip/whole mismatch", mode);
+        if (mode == 2) {
+            /* Muted 74% keeps emerald-mint glow inside the ring (G > R) while ring is gold */
+            size_t emerald = 0;
+            const int cyr = SP_CY + SG_RING_DY;
+            for (int y = cyr - 85; y <= cyr + 85; ++y) {
+                for (int x = SP_CX - 85; x <= SP_CX + 85; ++x) {
+                    const uint16_t v = whole[(size_t)y * HUD_W + x];
+                    const int r8 = ((v >> 11) & 31) * 255 / 31;
+                    const int g8 = ((v >> 5) & 63) * 255 / 63;
+                    if (g8 > r8 + 18) emerald++;
+                }
+            }
+            CHECK(emerald > 500, "muted STATUS 74%% missing emerald inner bloom (%zu px)", emerald);
+        }
+    }
+    __atomic_store_n(&s_hud_env_word, 74U, __ATOMIC_RELEASE);
+
+    /* 3. ACTIVITY: populated timeline + empty standby radar strip invariance */
+    reset_activity();
+    sp_compose();
+    memset(whole, 0, px * sizeof *whole);
+    memset(strips, 0, px * sizeof *strips);
+    sp_focal_activity(&ctx, 0, HUD_H, whole, 0, 255, SP_ENTRY_TOTAL_MS);
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+        sp_focal_activity(&ctx, y, y2, strips + (size_t)y * HUD_W, 0, 255, SP_ENTRY_TOTAL_MS);
+    }
+    CHECK(memcmp(whole, strips, px * sizeof *whole) == 0, "ACTIVITY empty strip/whole mismatch");
+
+    jr_display_activity_push("TIMER", "5M PASTA DONE");
+    jr_display_activity_push("TASK", "BUILD PASSED");
+    jr_display_activity_push("RAIN", "60% IN 2H");
+    sp_compose();
+    memset(whole, 0, px * sizeof *whole);
+    memset(strips, 0, px * sizeof *strips);
+    sp_focal_activity(&ctx, 0, HUD_H, whole, 0, 255, SP_ENTRY_TOTAL_MS);
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+        sp_focal_activity(&ctx, y, y2, strips + (size_t)y * HUD_W, 0, 255, SP_ENTRY_TOTAL_MS);
+    }
+    CHECK(memcmp(whole, strips, px * sizeof *whole) == 0, "ACTIVITY populated strip/whole mismatch");
+
+    /* 4. DESK: holographic violet core + leading tip + scanner ticks strip invariance */
+    jr_display_desk_set_task("DEPLOY", 68U, JR_DISPLAY_AGENT_WORKING);
+    sp_compose();
+    memset(whole, 0, px * sizeof *whole);
+    memset(strips, 0, px * sizeof *strips);
+    sp_focal_desk(&ctx, 0, HUD_H, whole, 0, 255, SP_ENTRY_TOTAL_MS);
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+        sp_focal_desk(&ctx, y, y2, strips + (size_t)y * HUD_W, 0, 255, SP_ENTRY_TOTAL_MS);
+    }
+    CHECK(memcmp(whole, strips, px * sizeof *whole) == 0, "DESK strip/whole mismatch");
+
+    reset_activity();
+    jr_display_sun_set(-1, -1);
+    jr_display_clock_set(false, 0, 0, 0);
+    jr_display_clock_set_date(0, 0, 0);
+    reset_nav();
+    free(whole); free(strips); free(alt);
+}
+
 int main(void)
 {
     test_light_word_round_trips();
@@ -7912,6 +8063,7 @@ int main(void)
     test_glass2_ask_overlay_and_strip_invariance();
     test_weather_atmosphere_sun_dot_and_outlook();
     test_celestial_quiet_rest_hbm_and_te_stats();
+    test_wave3_oled_luminous_screens_strip_invariance();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);

@@ -1035,23 +1035,26 @@ void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
         break;
     case HUD_FACE_LISTEN: {
         /* Reactive 32-point listening halo in the free r185-194 band: breathes
-         * softly in cyan when quiet and scales luminance (cyan -> luminous
-         * ice-white) plus a subtle radial swell strictly inside r185-194 with
-         * live microphone amplitude. Pure function of (now_ms, env->amp) ->
-         * 12-row strip invariant, never gold. */
+         * in lush turquoise-cyan when quiet and scales luminance (turquoise ->
+         * luminous ice-white) plus a subtle radial swell strictly inside
+         * r185-194 with live microphone amplitude. Pure function of
+         * (now_ms, env->amp) -> 12-row strip invariant, never gold. */
         const int a = (int)(((uint64_t)now_ms * 256u) / 1500u);
         const int breath = (128 + (lsin(a) >> 8)); /* 0..256 */
         const int amp = (int)env->amp;
-        int lv = 100 + ((70 * breath) >> 8) + ((amp * 155) >> 8);
+        int lv = 108 + ((74 * breath) >> 8) + ((amp * 155) >> 8);
         if (lv > 255) {
             lv = 255;
         }
         uint16_t px;
         if (lv <= 195 || amp < 64) {
-            px = shade(s_ov_cyan, lv);
+            /* Rich breathing turquoise-cyan (R=0, high G & B -> never gold) */
+            const int g8 = (lv * 240) >> 8;
+            const int b8 = (lv * 255) >> 8;
+            px = pack565(0, g8, b8, swap_bytes);
         } else {
-            const int k = lv - 195; /* 1..60 -> crisp ice-white-cyan boost */
-            px = pack565((k * 175) / 60, 229 + (k * 20) / 60, 255, swap_bytes);
+            const int k = lv - 195; /* 1..60 -> crisp ice-white-turquoise boost */
+            px = pack565((k * 185) / 60, 236 + (k * 19) / 60, 255, swap_bytes);
         }
         /* Subtle radial swell strictly inside r185-194: exact r190 when quiet
          * (zero rounding drift into r<185), swelling outward to r191 with live
@@ -1115,21 +1118,48 @@ void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
             }
             uint16_t px;
             if (val <= 180) {
-                px = shade(s_ov_cyan, 70 + ((val * 185) >> 8));
+                px = shade(s_ov_cyan, 76 + ((val * 179) >> 8));
             } else {
-                const int k = val - 180; /* 1..75 -> crisp ice-white/cyan */
-                px = pack565((k * 190) / 75, 229 + (k * 17) / 75, 255, swap_bytes);
+                const int k = val - 180; /* 1..75 -> vibrant ice-white/cyan burst */
+                px = pack565((k * 205) / 75, 232 + (k * 22) / 75, 255, swap_bytes);
             }
-            const int sz = val >= 160 ? 3 : 2;
+            const int sz = val >= 155 ? 3 : 2;
             ov_dot(&s, cx + s_ov_halo_dx[i], y, px, sz);
         }
         break;
     }
     case HUD_FACE_THINK: {
-        /* Living THINKING orbital comet in the free r185-194 band: smooth
-         * 10-dot fading cyan comet using s_ov_halo_dx/dy[32] (~1.28 s/rev,
-         * sub-step interpolated, ice-white-cyan head, never gold, 12-row
-         * strip invariant). */
+        /* Peak Living THINKING Presence: dual counter-orbiting luminous comets
+         * strictly inside the free r185-194 band using s_ov_halo_dx/dy[32]:
+         *   - Secondary (CCW): 6-dot vibrant violet-indigo accent comet (~1.76 s/rev)
+         *   - Primary   (CW): 10-dot electric-cyan comet with white-hot head (~1.28 s/rev)
+         * Drawn secondary-first so primary glides cleanly over crossings.
+         * Zero gold pixels, pure function of now_ms -> 12-row strip invariant. */
+        const uint32_t step2_ms = 55u;
+        const int head2 = (32 - (int)((now_ms / step2_ms) & 31u)) & 31;
+        const int frac2 = (int)(((now_ms % step2_ms) * 256u) / step2_ms); /* 0..255 */
+        for (int k = 0; k < 6; ++k) {
+            const int idx = (head2 + (5 - k)) & 31;
+            const int y = cy + s_ov_halo_dy[idx];
+            if (y + 3 <= s.y0 || y >= s.y1) {
+                continue;
+            }
+            const int pos = k * 256 + frac2; /* 0..1535 */
+            int lv = 64 + (pos * 191) / 1536;
+            if (lv > 255) {
+                lv = 255;
+            }
+            uint16_t px;
+            if (k == 5) {
+                /* Luminous lavender-indigo head (B == 255 > R -> never gold). */
+                px = pack565(180, 165, 255, swap_bytes);
+            } else {
+                px = pack565((lv * 165) >> 8, (lv * 80) >> 8, lv, swap_bytes);
+            }
+            const int sz = k >= 3 ? 3 : 2;
+            ov_dot(&s, cx + s_ov_halo_dx[idx], y, px, sz);
+        }
+
         const uint32_t step_ms = 40u;
         const int head = (int)((now_ms / step_ms) & 31u);
         const int frac = (int)(((now_ms % step_ms) * 256u) / step_ms); /* 0..255 */
@@ -1140,16 +1170,16 @@ void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
                 continue;
             }
             const int pos = k * 256 + frac; /* 0..2559 */
-            int lv = 28 + (pos * 227) / 2560;
+            int lv = 32 + (pos * 223) / 2560;
             if (lv > 255) {
                 lv = 255;
             }
             uint16_t px;
             if (k == 9) {
                 /* White-hot cyan head (never gold: R < G <= B). */
-                px = pack565(175, 245, 255, swap_bytes);
+                px = pack565(185, 248, 255, swap_bytes);
             } else if (k == 8) {
-                px = pack565(90, 238, 255, swap_bytes);
+                px = pack565(100, 242, 255, swap_bytes);
             } else {
                 px = shade(s_ov_cyan, lv);
             }

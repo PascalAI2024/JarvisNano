@@ -2,6 +2,7 @@
 idf_component_register(
     SRCS
         "src/jr_tools.c"
+        "src/jr_tools_project.c"
         "src/jr_tools_templates.c"
         "src/jr_weather.c"
     INCLUDE_DIRS "include"

@@ -3186,7 +3186,7 @@ static void test_thinking_orbital_comet_band_and_strip_invariance(void)
     CHECK(memcmp(whole, strips, px * sizeof *whole) == 0,
           "THINK orbital comet strip/whole mismatch");
 
-    size_t painted = 0, out_of_band = 0, gold_px = 0;
+    size_t painted = 0, out_of_band = 0, gold_px = 0, cyan_px = 0, violet_px = 0;
     for (int y = 0; y < HUD_H; ++y) {
         for (int x = 0; x < HUD_W; ++x) {
             const uint16_t v = whole[(size_t)y * HUD_W + x];
@@ -3198,11 +3198,16 @@ static void test_thinking_orbital_comet_band_and_strip_invariance(void)
             const int r8 = ((v >> 11) & 31) * 255 / 31;
             const int g8 = ((v >> 5) & 63) * 255 / 63;
             const int b8 = (v & 31) * 255 / 31;
-            if (r8 > g8 || b8 < g8 - 10) gold_px++;
+            /* Gold (privacy-only) has high red and low blue; cyan & violet both have B >= R. */
+            if (r8 > b8 + 20) gold_px++;
+            if (g8 > r8 + 30 && b8 >= g8) cyan_px++;
+            if (r8 > g8 + 10 && b8 > r8) violet_px++;
         }
     }
-    CHECK(painted >= 50 && painted <= 150,
-          "THINK 10-dot comet expected ~70-90 px, got %zu", painted);
+    CHECK(painted >= 70 && painted <= 180,
+          "THINK dual counter-orbiting comets expected ~90-140 px, got %zu", painted);
+    CHECK(cyan_px >= 40, "THINK primary cyan comet missing (%zu px)", cyan_px);
+    CHECK(violet_px >= 12, "THINK secondary violet-indigo comet missing (%zu px)", violet_px);
     CHECK(out_of_band == 0,
           "THINK comet escaped r184-195 band (%zu px)", out_of_band);
     CHECK(gold_px == 0,

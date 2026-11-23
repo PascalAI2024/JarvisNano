@@ -1,227 +1,92 @@
-# The Input Map — every control on JarvisNano, and why it means what it means
+# Input Map
 
-**Companion to `docs/GLASS_DESIGN.md`.** That doc decides *what surfaces exist*.
-This one decides *what every physical input does*, across every context, and —
-more importantly — **why a user can guess it.**
-
-Status: **largely shipped** — see §6 for what is on the device and what is
-blocked. Rows marked ✅ ship today; ⚠️ needs work; 🆕 is new. Every "today" claim
-carries a `file:line`; verify before trusting.
+**Companion to [`docs/GLASS_DESIGN.md`](GLASS_DESIGN.md).**
+Last reconciled with live firmware (`main/main.c`, `components/jr_hal/src/input_touch.c`, `components/jr_power/src/jr_power.c`, `components/jr_imu/src/jr_imu.c`): **2026-11-23**.
 
 ---
 
-## 1. The governing principle
+## 1. Governing principles
 
-A map with thirty bindings is only usable if the bindings are not arbitrary.
-One rule does the heavy lifting:
+> **Buttons address the DEVICE. Glass addresses the CONVERSATION. Body addresses the SITUATION.**
 
-> ### Buttons address the DEVICE. Glass addresses the CONVERSATION. Body addresses the SITUATION.
-
-| Channel | Addresses | Property that makes it the right channel |
+| Channel | Scope | Why it belongs there |
 |---|---|---|
-| **Buttons** (PWR, BOOT) | the device itself | **Context-free and always available.** They work when the glass is confusing, dark, asleep, or showing a modal. They are the escape hatches, so they must never depend on what is on screen. |
-| **Glass** (touch) | what is currently on screen | **Contextual by nature.** You are pointing at a thing. If nothing is there, it should say so rather than act. |
-| **Body** (IMU) | physical reality | **Unambiguous and self-explaining.** Face-down *is* privacy. Picking it up *is* waking it. These need no teaching because the gesture is the meaning. |
+| **Buttons** (`PWR`, `BOOT`) | Device-level escape hatches | Context-free and always available — even when the glass is dark, sleeping, or showing a modal. |
+| **Glass** (CST9217 touch) | Contextual UI & levels | **Place is scope:** inner disc (`r < 168`) owns the conversation & privacy commit; outer rim (`r ≥ 168`) owns sliding device knobs. |
+| **Body** (QMI8658C IMU) | Physical reality | Self-explaining physical states (face-down = quiet, shake = dismiss/cancel, lift = wake). |
 
-Three sub-rules keep each channel internally predictable:
-
-- **Buttons:** *tap = the common thing · double-tap = its opposite/escape · hold = the rare or consequential thing.* Escalating commitment, same on both buttons.
-- **Glass:** *place = scope* — **centre is the conversation, the rim is the device's knobs.** The rim rolls under a finger (measured: 44 swipes to 12 intended taps, `232fe985`), so it carries *sliding* meanings, never pressing ones.
-- **Body:** physical states only. Never a "gesture you perform" — only a fact about where the device is.
-
-### The rule that makes a big map safe
-
-> **Coverage invariant: no capability is reachable ONLY by a memorised input.**
-> Every binding below is a **shortcut** for something also reachable by *asking*
-> or by one of the five core moves. A binding with no non-gesture equivalent is
-> a bug.
-
-This is why we can afford thirty bindings where Xiaozhi ships two. Undiscoverable
-**accelerators** harm nobody. Undiscoverable **gates** are the defect — and this
-rule makes them impossible by construction. It is already half-true: `set_volume`
-and `set_brightness` are registered Gemini tools executed on-device
-(`main.c:175-198`), and PWR-long already speaks the battery (`main.c:6058-6066`).
-
-**Enforce it or it rots:** one host-test table listing every binding and its
-non-gesture equivalent; a binding with no equivalent fails the build.
-
-### The five moves a user must actually know
-
-1. **Talk to it.** 2. **Tap what you see.** 3. **Hold to commit — let go to cancel.**
-4. **Slide the rim to change a level.** 5. **Turn it face-down to go quiet.**
-
-Everything else in this document is an accelerator on top of those five.
+**Coverage invariant:** Every daily action is reachable by voice or by the five core moves (*talk · tap what you see · hold inner glass to mute · slide the rim for levels · flip face-down for quiet*). The only deliberately physical-only actions are **BOOT hold pairing** (proof of presence) and **physical privacy unmute** (remote APIs can never unmute).
 
 ---
 
-## 2. What the hardware can actually produce
+## 2. Live physical bindings
 
-Planning against imagined inputs is how you get a map you cannot build.
+### 2.1 Buttons (`PWR` and `BOOT`)
 
-### Buttons — two, both programmable
+The 1.75C has two programmable buttons and **no hardware reset button**.
 
-Waveshare, 1.75C: *"Onboard PWR and BOOT programmable buttons for easy custom
-function development."* **There is no reset button.**
+| Input | Hardware path | Live firmware action | Voice equivalent |
+|---|---|---|---|
+| **PWR short press** | AXP2101 `INTSTS2` (500 ms I²C poll) | Dismiss a ringing timer; otherwise wake/re-arm `LISTENING` (never mutes) | Say `"Jarvis"` / `"cancel timer"` |
+| **PWR long press** | AXP2101 `INTSTS2` | Power off completely via `jr_power_off()` (drops all rails; hold PWR 1 s to start; refused during OTA probation) | — |
+| **BOOT short** (`200–1500 ms`) | `GPIO0` (~10 Hz poll) | Open or close the control shade | `"set volume / brightness"` |
+| **BOOT hold** (`1.5–5.0 s`) | `GPIO0` | Display random 6-digit pairing code and open 60 s claim window | *Physical-only (security)* |
+| **BOOT hold** (`≥ 5.0 s`) | `GPIO0` | Panic-home: clear all modals/overlays and return to Home | Double-tap glass |
+| **BOOT held during reset** | `GPIO0` strapping | ESP32-S3 ROM downloader (hardware boot mode, not app input) | — |
 
-| Input | Source | Today |
+> **Note on PWR double-tap:** Not supported — AXP2101 `INTSTS2` is polled at 500 ms over I²C, so a ~400 ms double-tap cannot be resolved. Physical privacy mute therefore lives on the inner-disc glass hold and face-down flip.
+
+### 2.2 Glass (CST9217 single-point touch, software-classified)
+
+Touch thresholds (`components/jr_hal/src/input_touch.c`): tap/hold drift slop = **42 px**, swipe travel = **42 px**, long press = **850 ms**, double-tap window = **400 ms**, inner-disc vs rim annulus = **`r = 168 px`** from centre `(232, 232)`.
+
+| Gesture | Inner disc (`r < 168`) | Outer rim (`r ≥ 168`) |
 |---|---|---|
-| PWR short / long | AXP2101 `INTSTS2` over I²C, latched at 2 Hz (`jr_power.c:214`) | ✅ two levels, hardware-provided |
-| BOOT press duration | GPIO0, **hand-rolled polled tick** at ~10 Hz, `GPIO_INTR_DISABLE` (`main.c:310-344`, `7287-7299`) | ✅ two bands: 200–1500 ms, 1500–5000 ms |
-| BOOT ≥5000 ms | GPIO0 | ✅ **panic-home** (`77824301`) — was unbound, fell off the end of the chain |
-| Button double-tap | — | ⛔ **PWR: not detectable.** The PKEY latch polls every 500 ms (`jr_power.c:33`), so a ~400 ms window cannot be resolved. BOOT could have one (GPIO, ~10 Hz tick) but does not yet. |
+| **Tap** | Dismiss a ringing timer → act on rim choice arc or shade control → speak an open detail sheet aloud | Same hit-test for choice arcs (`r223–231`) when an ask or Desk card is active |
+| **Double-tap** | **Home** — dismiss overlays and immediately release any Codex/ZeroChat operator lease (never outranks a live ask) | — *(rim rolls under a thumb)* |
+| **Hold (850 ms)** | **Physical privacy mute / unmute** — commit ring fills to 850 ms; lifting early cancels in silence. Rising chime on unmute, descending chime on mute. | **Ignored** — neutral ripple + legend `RIM - SLIDE FOR VOLUME OR LIGHT` so a slow level slide can never accidentally mute |
+| **Vertical slide (↑ / ↓)** | Walk the 5-screen spatial ring (`JARVIS ↔ WATCH ↔ WEATHER ↔ STATUS ↔ (DESK) ↔ ACTIVITY`, wrapping); open/close the current screen's detail sheet | **Left rim (`x ≤ 232`):** Volume ±5 with live rim arc<br>**Right rim (`x > 232`):** Brightness ±5 with live rim arc<br>*(UP increases on both halves; top-edge pull excluded)* |
+| **Horizontal swipe (← / →)** | **10 s WATCH peek** from any ring screen; on **`WATCH`**, cycles all **8 luxury watch styles** (`JARVIS · DIVER · DRESS · PILOT · MINIMAL · FUTURE · SKELETON · CELESTIAL`, persisted to NVS); on open shade, adjusts volume ±10 | Same horizontal gesture |
 
-> ⚠️ **`iot_button` is NOT linked in this tree** (zero hits). It would give
-> single/double/multiple-click and multi-threshold holds for free, and it is
-> what Xiaozhi uses on this exact board. **Adopting it is the cheapest way to
-> get every button row below** — otherwise each is hand-rolled.
+### 2.3 Body (QMI8658C accelerometer)
 
-### Glass — one contact, no hardware gestures
-
-The CST9217 reports **no gesture IDs** and we read a single point, so every
-gesture is our own classification (`input_touch.c`).
-
-| Kind | Emitted by | Today |
-|---|---|---|
-| `JR_INPUT_TAP` | drift ≤42 px | ✅ |
-| `JR_INPUT_LONG_PRESS` | ≥850 ms, drift ≤42 px | ✅ fires **once, mid-hold**; release is then suppressed. **Inner disc only; a hold that starts on the rim is ignored** (`main.c`, the long-press consumer). The hold slop was 48 while swipe was 42, so a 43–48 px slide on the volume rail aged into a hold and muted the device (2026-09-05); the three slops now agree and `gesture-doctor.py` fails on any gap |
-| `JR_INPUT_SWIPE` + direction | travel ≥42 px, larger axis wins | ✅ |
-| `JR_INPUT_FLAG_TOP_EDGE` | `start_y<72` ∧ `Δy≥70` ∧ 135 % vertical | ✅ emitted, ⚠️ **only ever tested negatively** (`main.c:6695`) |
-| Double-tap | app-level 400 ms window (`main.c:6618`) | ✅ |
-| `JR_INPUT_PRESS_DOWN` / `PRESS_UP` | contact confirmed / released | ✅ **added** (`1d07f621`). Excluded from the gesture counters so the doctor's tap:swipe ratio keeps its meaning. |
-| Rim-vs-centre | r ≥ 168 from centre | ✅ **a true annulus** (`3cbab992`). Was two vertical slabs reaching r≈93 — *over the reactor core*. |
-
-### Body — QMI8658
-
-| Gesture | Today |
+| Physical motion | Live firmware action |
 |---|---|
-| Flip face-down (6 sustained polls ≈600 ms) | ✅ privacy mute |
-| Shake (2 polls, 1.5 s cooldown) | ✅ cancels an active turn |
-| Tilt (pitch/roll) | ✅ sampled, ⚠️ used only for HUD env; `hud_tilt_offset` is **disabled** |
-| Lift / any-motion | ✅ **INT1** Wake-on-Motion wakes the chip from deep sleep (2026-09-01); armed only for the sleep, so flip and shake keep the sampler while awake — `docs/reference/imu-interrupt-routing.md`, `docs/reference/power-modes.md` |
-| Knock (case tap) | 🆕 QMI8658 tap engine, unconfigured |
+| **Flip face-down** (~600 ms sustained) | Enter flip privacy mute (gold ring, closed slit). Turning face-up clears **only** a flip-origin mute — never a glass-hold mute. |
+| **Shake** (2 polls, 1.5 s cooldown) | Dismiss a ringing timer; otherwise cancel the active voice turn. |
+| **Lift after rest** | Weather glance (8 s) while awake/resting; wakes the ESP32-S3 from deep sleep via QMI8658 Wake-on-Motion (`INT1 → GPIO21`). |
+| **Tilt** | Smooth specular bevel/hand lighting on watch dials and 14-star foreground parallax on `CELESTIAL`. **Never** triggers a control action. |
 
 ---
 
-## 3. The map
+## 3. Precedence rules
 
-### 3.1 Buttons — global, context-free, identical everywhere
+When multiple surfaces are active, inputs resolve strictly in this order (highest first):
 
-They mean the same thing on every surface. That is the entire point of a button.
-
-| Input | Meaning | Today | Voice equivalent (coverage) |
-|---|---|---|---|
-| **PWR tap** | **Wake / listen.** Never mutes. | ✅ `main.c:6044-6057` | say "Jarvis" |
-| **PWR double-tap** | ~~Privacy toggle~~ | ⛔ **undetectable** at the 500 ms PKEY poll — privacy stays on the glass hold, which now shows a ring | "mute" / "unmute" |
-| **PWR hold ~1 s** | **Speak status** — battery, link, state. Out loud, not on glass. | ✅ battery only (`main.c:6058-6066`); extend | "how's your battery" |
-| **PWR hold ~5 s** | **Power off / deepest rest.** | 🆕 | "go to sleep" |
-| **BOOT tap** | **Summon the Dial** (levels), showing the target before changing anything. | ⚠️ today toggles the shade *and clears the caption* (`main.c:327`) | "volume 40" |
-| **BOOT double-tap** | **Say that again** — repeat the last reply. | 🆕 | "what did you say" |
-| **BOOT hold 1.5–5 s** | **Pairing window, 60 s.** | ✅ `main.c:332-339` | — *(deliberately physical-only: security)* |
-| **BOOT hold ≥5 s** | **Panic-home.** Clear every modal, dismiss surfaces, return to the face. | ✅ `77824301` | double-tap the glass |
-
-**Why this split.** PWR is the *system* button — presence, privacy, power, status. BOOT is the *content* button — levels, repetition, escape. Both follow *tap → common, double → opposite, hold → consequential*. Neither depends on what is on screen, so both survive a confused glass.
-
-**Pairing is the one deliberate exception to coverage** — a physical-presence proof must not be sayable. That is the point of it.
-
-### 3.2 Glass — contextual, and place is scope
-
-| Input | Centre (the conversation) | Rim (the device's knobs) |
+| Priority | Owner | Behavior |
 |---|---|---|
-| **Tap** | act on what is under the finger — an arc, a card action, a control | **summon the Dial**, showing what it will change, changing nothing yet |
-| **Double-tap** | **home / clear everything** ⚠️ must never outrank a live ask — fixed in `20a921c5` | — *(the rim rolls; a reliable double-tap there is not available)* |
-| **Hold 850 ms** | ✅ **commit ring** (`1a081e7e`) — fills to 850 ms, lifting early abandons in silence. Still toggles privacy on completion until PWR can take it. | **ignored** — a hold that *starts* on the rim (r ≥ 168) is not a privacy toggle; it gets the neutral ack and the caption names what the rim accepts (a slow slide on the volume rail muted the device, 2026-09-05) |
-| **Slide** | — | **the level dial**, live readout under the thumb, clamped not wrapped |
-| **Swipe ↑** | **expand** — more detail on what was just said | — |
-| **Swipe ↓** | **dismiss / stop** | — |
-| **Swipe ← →** | **through the conversation** — previous / next reply | — |
+| **1** | **Buttons (`PWR`, `BOOT`)** | Always active regardless of screen/modal state. |
+| **2** | **Body (Flip / Shake)** | Physical reality outranks glass state; face-down silences the mic immediately. |
+| **3** | **Commit ring** | An 850 ms inner-disc hold in progress cannot be stolen mid-hold. |
+| **4** | **Active Ask / Consent / Codex card** | Owns taps and choice arcs (`r223–231`); double-tap exits Codex lease but never steals a live local ask. |
+| **5** | **Ringing Timer** | Physical tap, shake, or PWR short dismisses the ringing alarm cleanly before normal screen actions run. |
+| **6** | **Rim level arcs (`r ≥ 168`)** | Transient left-volume / right-brightness vertical slides from any screen. |
+| **7** | **Ring & Shade navigation** | Spatial ring swipes, detail sheets, watch style stepping, and shade controls. |
 
-**Vertical is the device's own axis; horizontal is time and content.** That is
-already the codebase's stated convention (`jr_display.h:294-302`) — this keeps it
-and drops the four destinations that made it meaningless.
+---
 
-Note what horizontal swipe becomes: **not navigation between pages, but movement
-through the conversation.** Same gesture, and now it addresses the thing the
-device is actually for.
+## 4. Feedback classes & synthetic provenance
 
-⚠️ **Do not make the top crescent load-bearing.** `start_y<72` is 9.8 % of a
-round glass. It is *already* not required to open the shade (`TOP_EDGE` is only
-tested negatively), and a centre-down swipe is a far larger, more comfortable
-target. Keep the generous target; use the flag only to *exclude* a top pull from
-the rim dial.
+Every input answers with a distinct visual and audio class (toggleable via `set_ui_sounds` or Command Deck, except privacy/alarm safety tones):
 
-### 3.3 Body — physical truth, no teaching required
-
-| Input | Meaning | Today |
+| Feedback class | Visual on glass | Audio cue |
 |---|---|---|
-| **Flip face-down** | Privacy mute. The best gesture on the device: physical, unambiguous, self-explaining. | ✅ |
-| **Shake** | Cancel the current turn. | ✅ |
-| **Lift** | **Wake.** The gesture nobody has to be taught — the affordance is picking the thing up. | 🆕 gated on INT2 |
-| **Knock ×2 on the case** | Push-to-talk / attention. Works with the device in a pocket or face-down. | 🆕 gated on the tap engine |
-| **Tilt** | **Not a control.** Auto-upright only — a control that fires while you carry the device is a bug. | 🆕 |
+| **Accept / Nav** | Expanding cyan ripple | Subtle tick (`JR_CUE_TICK`) |
+| **Dismiss** | Surface closes | Soft dismiss (`JR_CUE_DISMISS`) |
+| **Adjust (rim levels)** | Live rim arc + readout (no per-step ripple) | Endpoint tick at limits (`10` / `100`) |
+| **Commit (privacy)** | Filling commit ring closes | Rising sweep (`500→1100 Hz`) on unmute; falling (`1100→500 Hz`) on mute |
+| **Abandon hold** | Commit ring drains | Silence (never punish exploration) |
+| **Unbound (e.g. rim hold)** | Neutral ripple + hint caption | Silence |
+| **Refuse / Limit** | Dim feedback | Falling refusal / limit cue |
 
----
-
-## 4. Precedence — the rule that stops the map fighting itself
-
-Thirty bindings need a declared priority or they collide. Highest first:
-
-| # | Owner | Claims | Rationale |
-|---|---|---|---|
-| 1 | **Buttons** | always | An escape hatch that a modal can swallow is not an escape hatch. |
-| 2 | **Body** (flip / shake) | always | Physical facts outrank screen state. Face-down means quiet, whatever is up. |
-| 3 | **Commit ring** | the held contact | A consent gesture in flight must not be pre-empted. |
-| 4 | **Ask** | every glass contact | A question owns the glass. **Fixed in `20a921c5`** — double-tap used to steal the retry. |
-| 5 | **Dial** | rim contacts | Transient and self-dismissing. |
-| 6 | **Base** | everything else | |
-
-**Invariant:** any surface that captures input **captions its own exit**, for as
-long as it is up. Established by `80636399`; two violations remain
-(`main.c:327`, `main.c:6841-6859`).
-
----
-
-## 5. Feedback — every input answers, and the answers differ
-
-The current failure is **not silence**: every tap *and* every classified swipe
-already ripples (`main.c:6459`, `6474`). The failure is **uniformity** — a swipe
-that did nothing looks identical to one that did.
-
-| Class | Visual | Audio |
-|---|---|---|
-| **Accept** | expanding cyan ripple | — |
-| **Refuse** (the device said no) | contracting dim ring | falling 700→300 Hz ✅ |
-| **Abandon** (you changed your mind) | ring drains | **silence** — punishing a cancelled hold teaches people not to explore |
-| **Adjust** (a level moving) | the value itself moves | tick at the ends of travel only — **never ripple per step** |
-| **Unbound here** | distinct neutral ack | none — nothing was refused; **caption what this surface does accept** |
-| **Commit fires** | ring closes | rising note |
-
-That last row is the engine of discoverability: **an unbound gesture answers with
-the legend**, at the exact moment of curiosity, with no navigation. It replaces
-the gesture-card idea entirely — a card is something you must already know how to
-find, on the surface you visit least, in a 10-character uppercase font.
-
----
-
-## 6. What has to be built, in order
-
-| Stage | Work | Status |
-|---|---|---|
-| **1** | Feedback classes + the two exit-caption fixes | ✅ **shipped** `956d194a` — ADJUST no longer ripples; every capturing surface names its exit |
-| **2** | Delete the side pages and the fake feeds | ✅ **shipped** `6de40bd2`, `1a7485dd` — destinations gone, hardcoded TOOLS list deleted, unbound swipe now teaches |
-| **4** | HAL contact lifecycle + the commit ring | ✅ **shipped** `1d07f621`, `1a081e7e` — `PRESS_DOWN`/`PRESS_UP`; the 850 ms hold now fills a ring and can be abandoned |
-| **5** | Rim as a true annulus (r ≥ 168), replacing the x-slabs | ✅ **shipped** `3cbab992` — the knobs no longer reach over the reactor core |
-| **3a** | BOOT ≥5 s → panic-home | ✅ **shipped** `77824301` — filled a binding that fell off the end of the chain |
-| **3b** | `iot_button` adoption; **PWR double-tap** | ⛔ **blocked, by measurement.** PWR is an I²C latch polled at **500 ms** (`jr_power.c:33`), so a ~400 ms double-tap window is undetectable — two presses inside one poll are indistinguishable from one. `iot_button` cannot help: it drives GPIO/ADC, not an I²C latch. Needs a faster PKEY poll (more traffic on a shared bus) or an AXP multi-press feature. **Privacy therefore stays on the glass hold** — moving it would strand it. |
-| **6** | QMI8658 wake engines on **INT1** + sleep | ✅ **done 2026-09-01** `37bf45db`: deep sleep ten minutes into DREAM on battery, WoM on INT1 armed only for the sleep, touch INT and a timer as the other wake sources. `POST /api/debug/sleep?now=1&wake_s=45` proves the lines from a desk. The lift itself still wants a hand. |
-
-**Sequencing note:** delete (2) before refactoring the dispatch chain. Refactoring
-first means carefully re-homing layers that stage 2 then deletes.
-
----
-
-## 7. Open decisions — yours
-
-1. ~~Privacy on PWR-double-tap, or on the glass hold?~~ **Settled by measurement, not preference:** PWR double-tap is undetectable at the 500 ms PKEY poll, so privacy stays on the glass hold — which now at least *shows* itself, via the commit ring. Revisit if the poll rate is raised.
-1b. **Privacy on PWR-double-tap, or on the glass hold?** The map puts it on PWR and frees the 850 ms hold for commit. Evidence for moving it: the owner's long-press counter read **0** — nobody discovered it. It works either way; it cannot be both.
-2. **Adopt `iot_button`, or keep hand-rolling?** Adopting gives §3.1 nearly free and matches the board's most-deployed firmware; it adds a managed dependency.
-3. **Does horizontal swipe move through the conversation, or stay unbound?** It is the largest new capability here and the least proven.
+**Physical authority boundary:** HTTP endpoints (`/api/debug/input`, `/api/input/tap`) inject events tagged `synthetic`. Synthetic inputs may walk the ring and open sheets for diagnostics, but firmware refuses to let synthetic events clear physical privacy, approve consent, dismiss physical safety prompts, or override a companion lease.

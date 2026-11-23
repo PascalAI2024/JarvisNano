@@ -2465,6 +2465,9 @@ static char s_wx_head[SP_LABEL_CAP];  /* "OVERCAST 83" / "NO WEATHER"         */
 static char s_wx_age[10];             /* "12M AGO" / "STALE 45M" / ""         */
 static char s_wx_temp[6];             /* "83" / "-12" / ""                    */
 static char s_wx_hilo[10];            /* "H86 L76" / ""                       */
+static int16_t s_wx_temp_f;           /* numeric current temp for thermal arc */
+static int16_t s_wx_hi_f;
+static int16_t s_wx_lo_f;
 static bool s_wx_valid;
 static bool s_wx_stale;
 static jr_display_sky_t s_wx_sky;
@@ -3250,6 +3253,9 @@ static void sp_compose_weather(void)
     (void)wx_cond_fit(cond, sizeof cond, w->condition, SP_LABEL_CAP - 1);
     (void)sp_str(s_wx_head, 0, SP_LABEL_CAP, cond);
 
+    s_wx_temp_f = w->temp_f;
+    s_wx_hi_f = w->hi_f;
+    s_wx_lo_f = w->lo_f;
     (void)sp_int(s_wx_temp, 0, (int)sizeof s_wx_temp, w->temp_f);
     int len = sp_str(s_wx_hilo, 0, (int)sizeof s_wx_hilo, "H");
     len = sp_int(s_wx_hilo, len, (int)sizeof s_wx_hilo, w->hi_f);
@@ -5440,22 +5446,22 @@ static const char *sp_headline(int space);
  *
  * Nothing here owns a buffer: strings are formatted once per strip, and every
  * element early-outs on the rows it cannot touch. */
-#define SG_RING_R_IN16  (113 * 16)
-#define SG_RING_R_OUT16 (123 * 16)
+#define SG_RING_R_IN16  (108 * 16)
+#define SG_RING_R_OUT16 (122 * 16)
 #define SG_RING_DY      (-10)   /* the ring sits a little high: the stats need the room below */
-#define SG_STAT_LABEL_Y 352     /* inside the orbit rail (r186), under the ring (y346) */
-#define SG_STAT_VALUE_Y 367
-#define SG_STAT_DX      56
-#define SG_AGE_Y        362     /* WEATHER: how old it is, where STATUS has its stats */
+#define SG_STAT_LABEL_Y 358     /* inside the orbit rail (r186), cleanly below r128..132 tick ring */
+#define SG_STAT_VALUE_Y 372
+#define SG_STAT_DX      54
+#define SG_AGE_Y        372     /* WEATHER: peak-rain pill / age cleanly below outer rain ring */
 #define SG_RISE_PX      8
 #define SG_WX_ICON_SIZE GLASS_ICON_SM   /* the sky, above its word inside the ring */
 #define SG_WX_ICON_GAP  10
 #define SG_BOLT_INK_W   14   /* the small bolt's ink is this wide inside its 28 px box */
 #define SG_BOLT_GAP     6
 #define SG_FADE_MS      300
-#define SG_GLOW16       40       /* 2.5 px each side; the dearest part of the frame */
-#define SG_RAIN_SWEEP   3641    /* 20 degrees of a 30 degree slot */
-#define SG_TICK_SWEEP   546     /* a dry hour: 3 degrees */
+#define SG_GLOW16       48       /* 3.0 px luminous halo around focal rings */
+#define SG_RAIN_SWEEP   3823    /* 21 degrees of a 30 degree slot */
+#define SG_TICK_SWEEP   2184    /* a dry hour: 12 degree subtle dark-sapphire track segment */
 #define SG_RAIN_STAGGER_MS 45
 #define SG_RAIN_BUILD_MS   250
 
@@ -5556,24 +5562,400 @@ static int32_t sg_slot_centre_q16(int k)
     return (int32_t)((GLASS_Q16_12_OCLOCK + ((2 * k + 1) * GLASS_TURN_Q16) / 24) & 0xFFFF);
 }
 
-/* An hour's mark from its chance of rain: a dry hour is a faint 2 px tick,
- * a wet one a 20 degree stroke whose width (3..10 px) and alpha grow with the
- * chance; `f` is the entry build (Q16) that grows it from nothing. */
+/* An hour's mark from its chance of rain: a dry hour is a subtle 2.5 px dark-sapphire
+ * track segment, a wet one a luminous 21 degree stroke whose width (4..8 px) and alpha
+ * grow with the chance; `f` is the entry build (Q16) that grows it from nothing. */
 static void sg_rain_mark(int pct, uint32_t f, int32_t *w16, int32_t *sweep, int *alpha)
 {
     int w, a, sw;
     if (pct < SP_WX_HOUR_DRY) {
-        w = 2 * 16;
-        a = 90;
+        w = 2 * 16 + 8;
+        a = 120;
         sw = SG_TICK_SWEEP;
     } else {
-        w = (3 * 16) + (7 * 16 * pct) / 100;
-        a = 100 + (155 * pct) / 100;
+        w = (4 * 16) + (4 * 16 * pct) / 100;
+        a = 135 + (120 * pct) / 100;
         sw = SG_RAIN_SWEEP;
     }
     *w16 = (int32_t)(((int64_t)w * f) >> 16);
     *sweep = sw;
     *alpha = (int)glass_frac_alpha((uint8_t)a, f);
+}
+
+/* ---- Luminous OLED instrument helpers (rodata LUTs, zero float, strip-invariant) --- */
+
+static const uint8_t k_sp_bayer[16] = {
+    0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5
+};
+
+/* 24 evenly spaced unit directions (15 deg step, starting at 12 o'clock clockwise) in Q15. */
+static const int16_t k_sp_dir24[24][2] = {
+    {      0, -32767 }, {   8481, -31651 }, {  16384, -28378 }, {  23170, -23170 },
+    {  28378, -16384 }, {  31651,  -8481 }, {  32767,      0 }, {  31651,   8481 },
+    {  28378,  16384 }, {  23170,  23170 }, {  16384,  28378 }, {   8481,  31651 },
+    {      0,  32767 }, {  -8481,  31651 }, { -16384,  28378 }, { -23170,  23170 },
+    { -28378,  16384 }, { -31651,   8481 }, { -32767,      0 }, { -31651,  -8481 },
+    { -28378, -16384 }, { -23170, -23170 }, { -16384, -28378 }, {  -8481, -31651 },
+};
+
+static inline uint16_t sp_add565_dither(uint16_t under, uint32_t add_r8, uint32_t add_g8,
+                                        uint32_t add_b8, uint32_t d, bool swap)
+{
+    const uint32_t u = swap ? glass_bswap(under) : under;
+    uint32_t r = (((u >> 11) << 3) + add_r8 + (d >> 1)) >> 3;
+    uint32_t g = ((((u >> 5) & 63u) << 2) + add_g8 + (d >> 2)) >> 2;
+    uint32_t b = (((u & 31u) << 3) + add_b8 + (d >> 1)) >> 3;
+    if (r > 31u) r = 31u;
+    if (g > 63u) g = 63u;
+    if (b > 31u) b = 31u;
+    const uint16_t out = (uint16_t)((r << 11) | (g << 5) | b);
+    return swap ? glass_bswap(out) : out;
+}
+
+/* Linear RGB565 mix: t in 0..256 (0 -> c0, 256 -> c1). */
+static uint16_t sp_lerp565(uint16_t c0, uint16_t c1, int t)
+{
+    if (t <= 0) return c0;
+    if (t >= 256) return c1;
+    const int r0 = (c0 >> 11) & 31, g0 = (c0 >> 5) & 63, b0 = c0 & 31;
+    const int r1 = (c1 >> 11) & 31, g1 = (c1 >> 5) & 63, b1 = c1 & 31;
+    const int r = r0 + (((r1 - r0) * t + 128) >> 8);
+    const int g = g0 + (((g1 - g0) * t + 128) >> 8);
+    const int b = b0 + (((b1 - b0) * t + 128) >> 8);
+    return (uint16_t)(((r & 31) << 11) | ((g & 63) << 5) | (b & 31));
+}
+
+/* Volumetric two-zone radial OLED bloom: pure integer, zero per-pixel sqrt,
+ * 4x4 Bayer dithered so pure black -> vivid glow has zero RGB565 banding.
+ * mode 0: bright core fading quartically to 0 at r_max.
+ * mode 1: crystal backlight peaking smoothly around ~0.62*r_max (55% in center
+ *         so hero numerals stay crisp) and fading smoothly to 0 at r_max. */
+typedef struct {
+    int cx, cy, r_max, r2_max;
+    uint32_t inv_r2;
+    uint32_t lut[65];
+    bool active;
+} sp_bloom_t;
+
+static void sp_bloom_init(sp_bloom_t *b, int cx, int cy, int r_max,
+                          uint16_t col_inner, uint16_t col_outer,
+                          uint8_t peak, int alpha, int mode)
+{
+    b->active = false;
+    if (r_max <= 0 || peak == 0u || alpha <= 0) {
+        return;
+    }
+    b->cx = cx;
+    b->cy = cy;
+    b->r_max = r_max;
+    b->r2_max = r_max * r_max;
+    b->inv_r2 = (64u << 16) / (uint32_t)b->r2_max;
+    const uint32_t a_eff = ((uint32_t)peak * (uint32_t)(alpha > 255 ? 255 : alpha)) >> 8;
+    if (a_eff == 0u) {
+        return;
+    }
+    const uint32_t r0 = (((col_inner >> 11) & 31u) << 3) | (((col_inner >> 11) & 31u) >> 2);
+    const uint32_t g0 = (((col_inner >> 5) & 63u) << 2) | (((col_inner >> 5) & 63u) >> 4);
+    const uint32_t b0 = ((col_inner & 31u) << 3) | ((col_inner & 31u) >> 2);
+    const uint32_t r1 = (((col_outer >> 11) & 31u) << 3) | (((col_outer >> 11) & 31u) >> 2);
+    const uint32_t g1 = (((col_outer >> 5) & 63u) << 2) | (((col_outer >> 5) & 63u) >> 4);
+    const uint32_t b1 = ((col_outer & 31u) << 3) | ((col_outer & 31u) >> 2);
+
+    for (unsigned i = 0; i <= 64u; ++i) {
+        const uint32_t inv = 64u - i; /* 64 at center -> 0 at edge */
+        uint32_t w;
+        if (mode == 1) {
+            /* Smooth radial crystal profile: 58% at center, 100% around r^2/R^2=0.38, 0 at edge. */
+            const uint32_t fall = (inv * inv) >> 4; /* 0..256 */
+            const uint32_t bowl = i <= 24u ? (148u + (108u * i) / 24u) : 256u;
+            w = (fall * bowl) >> 8;
+        } else {
+            w = (inv * inv) >> 4; /* 0..256 quartic-like (1 - r^2/R^2)^2 */
+        }
+        const uint32_t sc = (a_eff * w) >> 8;
+        if (sc == 0u) {
+            b->lut[i] = 0u;
+            continue;
+        }
+        const uint32_t cr = (r0 * inv + r1 * i) >> 6;
+        const uint32_t cg = (g0 * inv + g1 * i) >> 6;
+        const uint32_t cb = (b0 * inv + b1 * i) >> 6;
+        const uint32_t ar = (cr * sc + 127u) / 255u;
+        const uint32_t ag = (cg * sc + 127u) / 255u;
+        const uint32_t ab = (cb * sc + 127u) / 255u;
+        b->lut[i] = (ar << 20) | (ag << 10) | ab;
+    }
+    b->active = true;
+}
+
+static void sp_bloom_row(uint16_t *row, int y, int lo, int hi,
+                         const sp_bloom_t *b, bool swap)
+{
+    if (!b->active) {
+        return;
+    }
+    const int dy = y - b->cy;
+    const int dy2 = dy * dy;
+    if (dy2 >= b->r2_max) {
+        return;
+    }
+    const int half = sp_isqrt(b->r2_max - dy2);
+    int xa = b->cx - half;
+    int xb = b->cx + half;
+    if (xa < lo) xa = lo;
+    if (xb > hi) xb = hi;
+    if (xa > xb) {
+        return;
+    }
+    const uint8_t *by = &k_sp_bayer[((unsigned)y & 3u) * 4u];
+    int dx = xa - b->cx;
+    for (int x = xa; x <= xb; ++x, ++dx) {
+        const uint32_t r2 = (uint32_t)(dx * dx + dy2);
+        if (r2 >= (uint32_t)b->r2_max) {
+            continue;
+        }
+        const uint32_t idx = (r2 * b->inv_r2) >> 16;
+        const uint32_t pk = b->lut[idx < 64u ? idx : 64u];
+        if (pk == 0u) {
+            continue;
+        }
+        row[x] = sp_add565_dither(row[x], (pk >> 20) & 1023u, (pk >> 10) & 1023u,
+                                  pk & 1023u, by[(unsigned)x & 3u], swap);
+    }
+}
+
+/* Luminous multi-layer glowing orb: soft Bayer-dithered additive radial halo +
+ * crisp colored body + bright specular core. Fast and 12-row strip invariant. */
+static void sp_orb_row(uint16_t *row, int y, int lo, int hi,
+                       int32_t cx16, int32_t cy16, int32_t r_core16, int32_t r_halo16,
+                       uint16_t col, uint16_t core_col, uint8_t alpha, bool swap)
+{
+    if (alpha == 0u || r_halo16 <= 0) {
+        return;
+    }
+    const int32_t y16 = y * 16 + 8;
+    const int32_t dy16 = y16 - cy16;
+    const int32_t ady = dy16 < 0 ? -dy16 : dy16;
+    if (ady >= r_halo16 + 16) {
+        return;
+    }
+    if (r_halo16 > r_core16) {
+        const int32_t r2h = r_halo16 * r_halo16;
+        if (dy16 * dy16 < r2h) {
+            const int32_t half16 = sp_isqrt(r2h - dy16 * dy16);
+            int xa = (int)((cx16 - half16 - 8 + 15) >> 4);
+            int xb = (int)((cx16 + half16 - 8) >> 4);
+            if (xa < lo) xa = lo;
+            if (xb > hi) xb = hi;
+            const uint32_t cr = (((col >> 11) & 31u) << 3) | (((col >> 11) & 31u) >> 2);
+            const uint32_t cg = (((col >> 5) & 63u) << 2) | (((col >> 5) & 63u) >> 4);
+            const uint32_t cb = ((col & 31u) << 3) | ((col & 31u) >> 2);
+            const uint8_t *by = &k_sp_bayer[((unsigned)y & 3u) * 4u];
+            const uint32_t peak_a = ((uint32_t)alpha * 170u) >> 8;
+            for (int x = xa; x <= xb; ++x) {
+                const int32_t dx16 = x * 16 + 8 - cx16;
+                const int32_t d2 = dx16 * dx16 + dy16 * dy16;
+                if (d2 >= r2h) continue;
+                const uint32_t u = (uint32_t)((r2h - d2) * 256 / r2h);
+                const uint32_t w = (u * u) >> 8; /* 0..256 */
+                const uint32_t sc = (peak_a * w) >> 8;
+                if (sc == 0u) continue;
+                row[x] = sp_add565_dither(row[x], (cr * sc) >> 8, (cg * sc) >> 8,
+                                          (cb * sc) >> 8, by[(unsigned)x & 3u], swap);
+            }
+        }
+    }
+    if (r_core16 > 0 && ady < r_core16 + 16) {
+        glass_disc_row(row, y, lo, hi, cx16, cy16, r_core16, col, alpha, swap);
+        const int32_t r_spec = (r_core16 * 5) / 9;
+        if (r_spec >= 12) {
+            glass_disc_row(row, y, lo, hi, cx16, cy16, r_spec, core_col, alpha, swap);
+        }
+    }
+}
+
+/* Crisp anti-aliased radial tick mark along unit direction (ux, uy) Q15 from
+ * radius r0_16 to r1_16 (in 1/16 px) with half-width hw16 (in 1/16 px). */
+static void sp_radial_tick_row(uint16_t *row, int y, int lo, int hi,
+                               int32_t cx16, int32_t cy16, int32_t ux, int32_t uy,
+                               int32_t r0_16, int32_t r1_16, int32_t hw16,
+                               uint16_t col, uint8_t alpha, bool swap)
+{
+    if (alpha == 0u) {
+        return;
+    }
+    const int32_t y0 = cy16 + ((uy * r0_16) >> 15);
+    const int32_t y1 = cy16 + ((uy * r1_16) >> 15);
+    const int32_t ymin = (y0 < y1 ? y0 : y1) - hw16 - 16;
+    const int32_t ymax = (y0 > y1 ? y0 : y1) + hw16 + 16;
+    const int32_t y16 = y * 16 + 8;
+    if (y16 < ymin || y16 > ymax) {
+        return;
+    }
+    const int32_t x0 = cx16 + ((ux * r0_16) >> 15);
+    const int32_t x1 = cx16 + ((ux * r1_16) >> 15);
+    int xa = (int)(((x0 < x1 ? x0 : x1) - hw16 - 24) >> 4);
+    int xb = (int)(((x0 > x1 ? x0 : x1) + hw16 + 24) >> 4);
+    if (xa < lo) xa = lo;
+    if (xb > hi) xb = hi;
+    const int32_t dy16 = y16 - cy16;
+    for (int x = xa; x <= xb; ++x) {
+        const int32_t dx16 = x * 16 + 8 - cx16;
+        const int32_t proj = (dx16 * ux + dy16 * uy) >> 15;
+        if (proj < r0_16 - 16 || proj > r1_16 + 16) continue;
+        int32_t perp = (dx16 * uy - dy16 * ux) >> 15;
+        if (perp < 0) perp = -perp;
+        if (perp >= hw16 + 16) continue;
+        int cr = 255;
+        if (proj < r0_16) {
+            cr = 128 + (proj - r0_16) * 8;
+        } else if (proj > r1_16) {
+            cr = 128 + (r1_16 - proj) * 8;
+        }
+        int cp = 128 + (hw16 - perp) * 8;
+        if (cr <= 0 || cp <= 0) continue;
+        if (cr > 255) cr = 255;
+        if (cp > 255) cp = 255;
+        const unsigned cov = (unsigned)((cr * cp) >> 8);
+        const unsigned a = (cov * ((unsigned)alpha + 1u)) >> 8;
+        if (a > 0u) {
+            row[x] = glass_blend565(row[x], col, a, swap);
+        }
+    }
+}
+
+/* Sleek translucent rounded pill backdrop with continuous 1-px luminous rim. */
+static void sp_pill_row(uint16_t *row, int y, int lo, int hi,
+                        int cx, int cy, int hw, int hh,
+                        uint16_t fill_col, uint8_t fill_a,
+                        uint16_t rim_col, uint8_t rim_a, bool swap)
+{
+    if ((fill_a == 0u && rim_a == 0u) || hh <= 1 || hw <= hh) {
+        return;
+    }
+    const int dy = y - cy;
+    const int ady = dy < 0 ? -dy : dy;
+    if (ady > hh) {
+        return;
+    }
+    const int cap = sp_isqrt(hh * hh - dy * dy);
+    const int inner_cap = ady < hh ? sp_isqrt((hh - 1) * (hh - 1) - dy * dy) : -1;
+    const int span = (hw - hh) + cap;
+    const int inner_span = inner_cap >= 0 ? (hw - hh) + inner_cap : -1;
+    int xa = cx - span;
+    int xb = cx + span;
+    const int ixa = cx - inner_span;
+    const int ixb = cx + inner_span;
+    if (xa < lo) xa = lo;
+    if (xb > hi) xb = hi;
+    if (xa > xb) {
+        return;
+    }
+    const bool is_edge_row = ady >= hh;
+    for (int x = xa; x <= xb; ++x) {
+        const bool is_rim = is_edge_row || inner_span < 0 || x < ixa || x > ixb;
+        if (is_rim && rim_a > 0u) {
+            row[x] = glass_blend565(row[x], rim_col, rim_a, swap);
+        } else if (fill_a > 0u) {
+            row[x] = glass_blend565(row[x], fill_col, fill_a, swap);
+        }
+    }
+}
+
+/* 4-bar ascending Wi-Fi signal icon: 14 px wide, heights 4/7/10/13 px aligned
+ * to y_bot, lit bars glowing in `lit_col`, unlit bars in dim slate. */
+static void sp_wifi_bars_row(uint16_t *row, int y, int lo, int hi,
+                             int x0, int y_bot, int bars,
+                             uint16_t lit_col, uint8_t alpha, bool swap)
+{
+    static const uint8_t k_h[4] = { 4, 7, 10, 13 };
+    if (alpha == 0u || y < y_bot - 14 || y > y_bot + 1) {
+        return;
+    }
+    const uint16_t dim_col = 0x2965u; /* subtle cool slate */
+    const uint8_t dim_a = (uint8_t)(((unsigned)alpha * 145u) >> 8);
+    const uint8_t glow_a = (uint8_t)(((unsigned)alpha * 55u) >> 8);
+    for (int i = 0; i < 4; ++i) {
+        const int bx = x0 + i * 4;
+        const int y_top = y_bot - (int)k_h[i] + 1;
+        const bool lit = i < bars;
+        if (y >= y_top && y <= y_bot) {
+            const uint16_t c = lit ? lit_col : dim_col;
+            const uint8_t a = lit ? alpha : dim_a;
+            for (int dx = 0; dx < 2; ++dx) {
+                const int px = bx + dx;
+                if (px >= lo && px <= hi) {
+                    row[px] = glass_blend565(row[px], c, a, swap);
+                }
+            }
+            if (lit && glow_a > 0u) {
+                if (bx - 1 >= lo && bx - 1 <= hi) {
+                    row[bx - 1] = glass_blend565(row[bx - 1], lit_col, glow_a, swap);
+                }
+                if (bx + 2 >= lo && bx + 2 <= hi) {
+                    row[bx + 2] = glass_blend565(row[bx + 2], lit_col, glow_a, swap);
+                }
+            }
+        } else if (lit && glow_a > 0u && y == y_top - 1) {
+            for (int dx = 0; dx < 2; ++dx) {
+                const int px = bx + dx;
+                if (px >= lo && px <= hi) {
+                    row[px] = glass_blend565(row[px], lit_col, glow_a, swap);
+                }
+            }
+        }
+    }
+}
+
+/* Vivid OLED thermal color map for WEATHER's temperature instrument ring.
+ * Never returns SP_C_GOLD (0xFEA0) or SP_C_AMBER (0xFD20). */
+static uint16_t sp_thermal_color(int temp_f)
+{
+    static const int16_t k_t[6] = { 32, 50, 65, 75, 85, 95 };
+    static const uint16_t k_c[6] = {
+        0x24FFu, /* icy electric blue   */
+        0x06DFu, /* vivid sky cyan      */
+        0x1F56u, /* luminous mint-teal  */
+        0xFE04u, /* warm solar amber    */
+        0xFB60u, /* vivid solar orange  */
+        0xF924u, /* fiery coral-red     */
+    };
+    if (temp_f <= k_t[0]) return k_c[0];
+    if (temp_f >= k_t[5]) return k_c[5];
+    for (int i = 0; i < 5; ++i) {
+        if (temp_f <= k_t[i + 1]) {
+            const int span = k_t[i + 1] - k_t[i];
+            const int frac = ((temp_f - k_t[i]) * 256) / span;
+            return sp_lerp565(k_c[i], k_c[i + 1], frac);
+        }
+    }
+    return k_c[5];
+}
+
+/* Chromatic event orb color for ACTIVITY timeline feed. */
+static uint16_t sp_act_kind_color(const char *kind, bool muted)
+{
+    if (muted) {
+        return SP_C_GOLD;
+    }
+    if (kind == NULL || kind[0] == '\0') {
+        return SP_C_INK;
+    }
+    if (strncmp(kind, "TIM", 3) == 0 || strncmp(kind, "ALA", 3) == 0) {
+        return SP_C_AMBER;   /* TIMER / TIME / ALARM -> warm amber */
+    }
+    if (strncmp(kind, "RAI", 3) == 0 || strncmp(kind, "WEA", 3) == 0) {
+        return 0x3E7Fu;      /* RAIN / WEATHER -> electric sky-blue */
+    }
+    if (strncmp(kind, "TAS", 3) == 0 || strncmp(kind, "DES", 3) == 0 ||
+        strncmp(kind, "COD", 3) == 0 || strncmp(kind, "AGE", 3) == 0) {
+        return SP_C_VIOLET;  /* TASK / DESK / CODEX -> vibrant violet */
+    }
+    if (strncmp(kind, "WEB", 3) == 0 || strncmp(kind, "PRI", 3) == 0 ||
+        strncmp(kind, "SEA", 3) == 0) {
+        return SP_C_CYAN;    /* WEB / PRICE / SEARCH -> neon cyan */
+    }
+    return 0xDFDFu;          /* SAID / ASK / default -> ice-white */
 }
 
 /* "H86 L76" -> "H 86  L 76": the composed line, opened up to read as two
@@ -5632,7 +6014,14 @@ static uint16_t sp_sky_native(jr_display_sky_t sky)
  * rebuilt only when the 12-hour rain percentages change. Each segment replays
  * bit-identically to glass_arc_row(); any segment that does not fit falls back
  * to glass_arc_row(). */
-#define SG_WX_REC_CAP  2048u
+#define SG_WX_REC_CAP   2048u
+#define SG_WX_TH_SEGS   8
+#define SG_WX_TH_IN16   (114 * 16)
+#define SG_WX_TH_OUT16  (126 * 16)
+#define SG_WX_RAIN_RC16 (138 * 16)
+#define SG_WX_DIAL_START 24576  /* 7:30 o'clock (135 deg CW from 3 o'clock) */
+#define SG_WX_DIAL_SWEEP 49152  /* 270 deg CW -> 4:30 o'clock, 90 deg cradle at 6 */
+
 static uint8_t *s_wx_rec;
 static uint8_t  s_wx_rec_pct[SP_WX_HOURS];
 static uint16_t s_wx_rec_have;
@@ -5654,16 +6043,31 @@ typedef struct {
     int      oy, st;
     uint32_t ent;
     bool     wx_valid;
+    bool     wx_stale;
+    bool     muted;
+    jr_display_sky_t sky;
     int      wx_hours;
+    int16_t  temp_f, hi_f, lo_f;
     char     temp[sizeof s_wx_temp];
     char     hilo_src[sizeof s_wx_hilo];
     uint8_t  hour_pct[SP_WX_HOURS];
     int      nseg;
     uint8_t  sg_k[SP_WX_HOURS];
+    uint8_t  sg_pct[SP_WX_HOURS];
     int32_t  sg_start[SP_WX_HOURS], sg_sweep[SP_WX_HOURS];
     int32_t  sg_ri[SP_WX_HOURS], sg_ro[SP_WX_HOURS];
     uint8_t  sg_a[SP_WX_HOURS];
     int      sg_y0[SP_WX_HOURS], sg_y1[SP_WX_HOURS];
+    /* Thermal gradient arc segments (lo_f -> hi_f) */
+    int      th_n;
+    int32_t  th_arc_start, th_arc_sweep;
+    int32_t  th_start[SG_WX_TH_SEGS], th_sweep[SG_WX_TH_SEGS];
+    uint16_t th_col[SG_WX_TH_SEGS];
+    int      th_y0[SG_WX_TH_SEGS], th_y1[SG_WX_TH_SEGS];
+    int32_t  pip_x16, pip_y16;
+    uint16_t pip_col;
+    bool     have_pip;
+    int      out_w;
     char     hilo[16];
     int      hlen;
     int      tlen, hw, dw;
@@ -5677,18 +6081,21 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
     const bool muted = sp_privacy_muted();
     const uint16_t accent =
         muted ? SP_C_GOLD : (s_wx_stale ? SP_C_GREY : sp_sky_native(s_wx_sky));
-    const uint16_t rain = muted ? SP_C_GOLD : SP_C_RAIN;
+    const uint16_t rain =
+        muted ? SP_C_GOLD : (s_wx_sky == JR_DISPLAY_SKY_STORM ? 0x54FFu : SP_C_RAIN);
+    const uint16_t dry_track = muted ? SP_C_GOLD_DIM : 0x0A31u; /* subtle dark sapphire */
     const int cx16 = SP_CX * 16;
     const int cyr = SP_CY + oy + SG_RING_DY;
     const int cy16 = cyr * 16;
 
-    /* Hoist the 12 rain segment calculations, glass_arc_rows(), hilo opening,
-     * and hero/degree text widths out of the 39-strip loop: computed once per
-     * frame (or whenever inputs change) and reused across all strips. */
+    /* Hoist the 12 rain segment calculations, thermal gradient arc segments,
+     * glass_arc_rows(), hilo opening, and text widths out of the 39-strip loop. */
     sp_wx_frame_cache_t *fc = &s_wx_fc;
     const bool need_fc =
         !fc->valid || fc->rev != s_wx_compose_rev || fc->oy != oy || fc->st != st ||
-        fc->ent != ent || fc->wx_valid != s_wx_valid || fc->wx_hours != s_wx_hours ||
+        fc->ent != ent || fc->wx_valid != s_wx_valid || fc->wx_stale != s_wx_stale ||
+        fc->muted != muted || fc->sky != s_wx_sky || fc->wx_hours != s_wx_hours ||
+        fc->temp_f != s_wx_temp_f || fc->hi_f != s_wx_hi_f || fc->lo_f != s_wx_lo_f ||
         memcmp(fc->temp, s_wx_temp, sizeof s_wx_temp) != 0 ||
         memcmp(fc->hilo_src, s_wx_hilo, sizeof s_wx_hilo) != 0 ||
         (s_wx_valid && s_wx_hours > 0 &&
@@ -5699,12 +6106,20 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
         fc->st = st;
         fc->ent = ent;
         fc->wx_valid = s_wx_valid;
+        fc->wx_stale = s_wx_stale;
+        fc->muted = muted;
+        fc->sky = s_wx_sky;
         fc->wx_hours = s_wx_hours;
+        fc->temp_f = s_wx_temp_f;
+        fc->hi_f = s_wx_hi_f;
+        fc->lo_f = s_wx_lo_f;
         memcpy(fc->temp, s_wx_temp, sizeof s_wx_temp);
         memcpy(fc->hilo_src, s_wx_hilo, sizeof s_wx_hilo);
         memcpy(fc->hour_pct, s_wx_hour_pct, SP_WX_HOURS);
+
+        /* Outer 12-hour rain ring at r134..142 (centre r138) */
         int nseg = 0;
-        for (int k = 0; k < SP_WX_HOURS && s_wx_valid && s_wx_hours > 0; ++k) {
+        for (int k = 0; k < SP_WX_HOURS && s_wx_valid && !s_wx_stale && s_wx_hours > 0; ++k) {
             const int pct = s_wx_hour_pct[k];
             if (pct == SP_WX_HOUR_NONE) {
                 continue;
@@ -5714,12 +6129,12 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
             int a;
             sg_rain_mark(pct, f, &w16, &sweep, &a);
             if (w16 < 8 || a <= 0) {
-                continue;                 /* not yet begun */
+                continue;
             }
-            const int32_t rc = (113 * 16 + 123 * 16) / 2;
             fc->sg_k[nseg] = (uint8_t)k;
-            fc->sg_ri[nseg] = rc - w16 / 2;
-            fc->sg_ro[nseg] = rc + (w16 + 1) / 2;
+            fc->sg_pct[nseg] = (uint8_t)pct;
+            fc->sg_ri[nseg] = SG_WX_RAIN_RC16 - w16 / 2;
+            fc->sg_ro[nseg] = SG_WX_RAIN_RC16 + (w16 + 1) / 2;
             fc->sg_start[nseg] = (sg_slot_centre_q16(k) - sweep / 2) & 0xFFFF;
             fc->sg_sweep[nseg] = sweep;
             fc->sg_a[nseg] = (uint8_t)((a * st + 127) / 255);
@@ -5732,17 +6147,74 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
             ++nseg;
         }
         fc->nseg = nseg;
+
+        /* Main focal Precision Temperature Instrument Ring (r114..126):
+         * thermal gradient arc spanning today's lo_f -> hi_f with glowing temp pip. */
+        fc->th_n = 0;
+        fc->have_pip = false;
+        fc->th_arc_start = 0;
+        fc->th_arc_sweep = 0;
+        if (s_wx_valid && !s_wx_stale) {
+            const uint32_t f_th = glass_ease_out_cubic_q16(ent, SP_ENTRY_RING_MS);
+            const int lo_t = s_wx_lo_f <= s_wx_hi_f ? s_wx_lo_f : s_wx_hi_f;
+            const int hi_t = s_wx_hi_f >= s_wx_lo_f ? s_wx_hi_f : s_wx_lo_f;
+            const int mid_t = (lo_t + hi_t) / 2;
+            int shift = (mid_t - 60) * 140;
+            if (shift < -6000) shift = -6000;
+            if (shift > 6000) shift = 6000;
+            const int32_t full_span = 32768; /* 180 deg rich thermal arc inside 270 deg dial */
+            const int32_t base_start = (SG_WX_DIAL_START + (SG_WX_DIAL_SWEEP - full_span) / 2 + shift) & 0xFFFF;
+            const int32_t sweep_now = (int32_t)(((int64_t)full_span * f_th) >> 16);
+            fc->th_arc_start = base_start;
+            fc->th_arc_sweep = sweep_now;
+            if (sweep_now >= 256) {
+                const int segs = SG_WX_TH_SEGS;
+                const int32_t step = sweep_now / segs;
+                for (int i = 0; i < segs; ++i) {
+                    const int32_t s0 = (base_start + i * step) & 0xFFFF;
+                    int32_t sw = (i == segs - 1) ? (sweep_now - i * step) : (step + 180);
+                    if (sw < 64) sw = 64;
+                    const int seg_t = lo_t + ((hi_t - lo_t) * (2 * i + 1)) / (2 * segs);
+                    fc->th_start[i] = s0;
+                    fc->th_sweep[i] = sw;
+                    fc->th_col[i] = muted ? SP_C_GOLD : sp_thermal_color(seg_t);
+                    if (!glass_arc_rows(cx16, cy16, SG_WX_TH_IN16 + 16, SG_WX_TH_OUT16 - 16,
+                                        s0, sw, true, &fc->th_y0[i], &fc->th_y1[i])) {
+                        fc->th_y0[i] = 1;
+                        fc->th_y1[i] = 0;
+                    }
+                }
+                fc->th_n = segs;
+            }
+            if (f_th >= GLASS_ONE_Q16 / 2u) {
+                int frac = 500;
+                if (hi_t > lo_t) {
+                    frac = ((s_wx_temp_f - lo_t) * 1000) / (hi_t - lo_t);
+                    if (frac < 0) frac = 0;
+                    if (frac > 1000) frac = 1000;
+                }
+                const uint32_t a_pip = (uint32_t)(base_start + ((int64_t)sweep_now * frac) / 1000) & 0xFFFFu;
+                const int32_t r_mid16 = (SG_WX_TH_IN16 + SG_WX_TH_OUT16) / 2;
+                fc->pip_x16 = cx16 + ((glass_cos_q15(a_pip) * r_mid16) >> 15);
+                fc->pip_y16 = cy16 + ((glass_sin_q15(a_pip) * r_mid16) >> 15);
+                fc->pip_col = muted ? SP_C_GOLD : sp_thermal_color(s_wx_temp_f);
+                fc->have_pip = true;
+            }
+        }
+
         fc->hlen = sg_hilo_open(fc->hilo, (int)sizeof fc->hilo, s_wx_hilo);
         fc->tlen = sp_len(s_wx_temp, (int)sizeof s_wx_temp - 1);
         fc->hw = glass_text_width(GLASS_FONT_HERO, s_wx_temp, (size_t)fc->tlen, 0);
         if (fc->dw == 0) {
             fc->dw = glass_text_width(GLASS_FONT_VALUE, "*", 1, 0);
         }
+        const int olen_m = sp_len(s_wx_outlook, (int)sizeof s_wx_outlook - 1);
+        fc->out_w = olen_m > 0 ? glass_text_width(GLASS_FONT_LABEL, s_wx_outlook, (size_t)olen_m, 2) : 0;
         fc->valid = true;
     }
 
     const int nseg = fc->nseg;
-    const bool bare = !(s_wx_valid && s_wx_hours > 0);
+    const bool bare = !(s_wx_valid && !s_wx_stale && s_wx_hours > 0);
     bool use_wx_rec = false;
     if (!bare && oy == 0 && ent >= SP_ENTRY_TOTAL_MS && nseg > 0 && s_wx_rec != NULL) {
         if (!s_wx_rec_valid || memcmp(s_wx_rec_pct, s_wx_hour_pct, SP_WX_HOURS) != 0) {
@@ -5793,37 +6265,53 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
     const int sun_a = sg_ent_alpha(st, ent, t_sun);
     sg_txt_make(&t_sun_t, GLASS_FONT_TEXT, s_wx_sun, slen, SP_CX, base + 40 + sg_ent_rise(ent, t_sun),
                 1, SP_C_GREY, sun_a);
-    const uint16_t out_col = muted ? SP_C_GOLD : (s_wx_outlook_rain ? SP_C_RAIN : SP_C_GREY);
-    sg_txt_make(&t_out_t, GLASS_FONT_LABEL, s_wx_outlook, olen, SP_CX,
-                SG_AGE_Y - 8 + oy + sg_ent_rise(ent, t_age), 2, out_col,
-                updating ? 0 : sg_ent_alpha(st, ent, t_age));
+    const int age_rise = sg_ent_rise(ent, t_age);
+    const int age_a = updating ? 0 : sg_ent_alpha(st, ent, t_age);
+    const uint16_t out_col = muted ? SP_C_GOLD : (s_wx_outlook_rain ? 0x3E7Fu : 0x6EF7u);
+    const int out_y = SG_AGE_Y + oy + age_rise;
+    sg_txt_make(&t_out_t, GLASS_FONT_LABEL, s_wx_outlook, olen, SP_CX, out_y, 2, out_col, age_a);
     sg_txt_make(&t_age_t, GLASS_FONT_LABEL, s_wx_age, alen, SP_CX,
-                (olen > 0 ? SG_AGE_Y + 10 : SG_AGE_Y) + oy + sg_ent_rise(ent, t_age), 2, SP_C_GREY,
-                updating ? 0 : sg_ent_alpha(st, ent, t_age));
+                (olen > 0 ? out_y + 18 : out_y), 2, SP_C_GREY, age_a);
 
-    /* Living WEATHER Atmosphere: subtle sky-tinted ambient glow behind the
-     * focal weather disc (r74..110, strictly inside the r113..123 rain-hour
-     * ring so unknown/un-entered rain hours stay pure black, and eased in with
-     * the entry clock). Stale weather drops all color; muted uses privacy gold. */
+    /* Saturated multi-zone radial sky bloom tuned by actual weather condition.
+     * Drops all color on stale/invalid weather; muted shifts to privacy gold. */
     const int atmo_a = sg_ent_alpha(st, ent, t_lbl);
     const bool draw_atmo = s_wx_valid && !s_wx_stale && atmo_a > 0;
-    uint16_t atmo_col = 0x5D7Fu; /* soft ice-blue for cloudy/fog/snow */
-    if (muted) {
-        atmo_col = SP_C_GOLD;
-    } else if (s_wx_sky == JR_DISPLAY_SKY_CLEAR || s_wx_sky == JR_DISPLAY_SKY_PARTLY) {
-        atmo_col = SP_C_AMBER;   /* warm amber-gold (never privacy gold) */
-    } else if (s_wx_sky == JR_DISPLAY_SKY_RAIN || s_wx_sky == JR_DISPLAY_SKY_STORM) {
-        atmo_col = SP_C_RAIN;    /* cool cyan-blue for rain/storm */
+    const int bloom_r = 128;
+    const int glow_y0 = cyr - bloom_r, glow_y1 = cyr + bloom_r;
+    sp_bloom_t sky_bloom;
+    sky_bloom.active = false;
+    if (draw_atmo && y1 <= glow_y1 && y2 > glow_y0) {
+        uint16_t b_in = 0x165Au, b_out = 0x1914u; /* rich cool indigo-teal mist */
+        uint8_t b_pk = 104u;
+        if (muted) {
+            b_in = SP_C_GOLD;
+            b_out = SP_C_GOLD_DIM;
+            b_pk = 78u;
+        } else if (s_wx_sky == JR_DISPLAY_SKY_CLEAR || s_wx_sky == JR_DISPLAY_SKY_PARTLY) {
+            b_in = 0xFE44u;  /* lush warm solar amber-gold core (not SP_C_GOLD) */
+            b_out = 0xC280u; /* deep warm solar amber outer aura */
+            b_pk = 112u;
+        } else if (s_wx_sky == JR_DISPLAY_SKY_RAIN) {
+            b_in = 0x05FFu;  /* electric sapphire-cyan volumetric core */
+            b_out = 0x0217u; /* deep midnight sapphire outer aura */
+            b_pk = 114u;
+        } else if (s_wx_sky == JR_DISPLAY_SKY_STORM) {
+            b_in = 0x34FFu;  /* electric cyan-indigo storm core */
+            b_out = 0x4898u; /* deep storm violet-sapphire aura */
+            b_pk = 118u;
+        }
+        sp_bloom_init(&sky_bloom, SP_CX, cyr, bloom_r, b_in, b_out, b_pk, atmo_a, 1);
     }
 
-    /* Daylight progress arc & dot under the sunrise/sunset times when valid
-     * sun times exist (fresh valid weather only). Left = sunrise, right = sunset. */
+    /* Glowing golden sunrise -> sunset progress arc + bright sun orb at 6 o'clock */
     const uint32_t sw = __atomic_load_n(&s_sun_word, __ATOMIC_ACQUIRE);
     const bool have_sun_arc = draw_atmo && slen > 0 && (sw & (1u << 22)) != 0u && sun_a > 0;
     int32_t sun_dot_x16 = 0, sun_dot_y16 = 0;
+    int32_t sun_lit_start = 0, sun_lit_sweep = 0;
     bool sun_is_day = false;
     const int32_t sun_r_in16 = 102 * 16;
-    const int32_t sun_r_out16 = 104 * 16;
+    const int32_t sun_r_out16 = 105 * 16;
     const int32_t sun_a_right = 11833; /* 6 o'clock - 25 deg (sunset, right) */
     const int32_t sun_sweep = 9102;    /* 50 deg total sweep across bottom */
     if (have_sun_arc) {
@@ -5831,7 +6319,7 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
         const int set = (int)((sw >> 11) & 0x7FFu);
         const int span = (set - rise + 1440) % 1440;
         const uint32_t cw = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
-        int prog = 500; /* 0..1000 fallback midpoint if clock unsynced */
+        int prog = 500;
         if ((cw & (1u << 16)) != 0u && span > 0) {
             const int hh = (int)((cw >> 8) & 0xFFu);
             const int mm = (int)(cw & 0xFFu);
@@ -5841,57 +6329,122 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
                 prog = (since * 1000) / span;
                 sun_is_day = true;
             } else {
-                /* Night: park at sunrise before dawn, sunset after dusk. */
                 prog = (since > span + (1440 - span) / 2) ? 0 : 1000;
             }
         }
         const uint32_t a_dot = (uint32_t)((sun_a_right + sun_sweep) - (prog * sun_sweep) / 1000) & 0xFFFFu;
-        const int32_t r_mid16 = 103 * 16;
+        const int32_t r_mid16 = (sun_r_in16 + sun_r_out16) / 2;
         sun_dot_x16 = cx16 + ((glass_cos_q15(a_dot) * r_mid16) >> 15);
         sun_dot_y16 = cy16 + ((glass_sin_q15(a_dot) * r_mid16) >> 15);
+        sun_lit_start = (int32_t)a_dot;
+        sun_lit_sweep = (prog * sun_sweep) / 1000;
     }
 
-    const int glow_y0 = cyr - 111, glow_y1 = cyr + 111;
-    const int ring_y0 = cyr - 130, ring_y1 = cyr + 130;
-    const int sun_y0 = cyr + 88, sun_y1 = cyr + 112;
+    const int ring_y0 = cyr - 148, ring_y1 = cyr + 148;
+    const int sun_y0 = cyr + 88, sun_y1 = cyr + 116;
+    const bool draw_pill = olen > 0 && age_a > 0 && fc->out_w > 0;
+    const int pill_cy = out_y + 5;
+    const int pill_hw = fc->out_w / 2 + 10;
+    const uint16_t pill_fill = muted ? 0x2100u : (s_wx_outlook_rain ? 0x0148u : 0x0985u);
+    const uint16_t sun_gold = muted ? SP_C_GOLD : 0xFDE4u; /* luminous solar gold */
+    const uint16_t sun_track = muted ? SP_C_GOLD_DIM : 0x5240u;
+
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         int lo = 0, hi = HUD_W - 1;
         if (!sp_clip(y, &lo, &hi)) {
             continue;
         }
-        if (draw_atmo && y >= glow_y0 && y <= glow_y1) {
-            glass_glow_row(row, y, lo, hi, cx16, cy16, 90 * 16, 94 * 16,
-                           0, GLASS_TURN_Q16, false, 16 * 16, 46u, atmo_col,
-                           (uint8_t)atmo_a, swap);
+        if (sky_bloom.active && y >= glow_y0 && y <= glow_y1) {
+            sp_bloom_row(row, y, lo, hi, &sky_bloom, swap);
         }
         if (y >= ring_y0 && y <= ring_y1) {
-            if (bare) {
-                glass_ring_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16, 0,
+            if (!s_wx_valid || s_wx_stale) {
+                /* Honest bare track when weather is absent or stale */
+                glass_ring_row(row, y, lo, hi, cx16, cy16, SG_WX_TH_IN16, SG_WX_TH_OUT16, 0,
                                GLASS_TURN_Q16, SP_C_TRACK, (uint8_t)st, swap);
-            }
-            for (int i = 0; i < nseg; ++i) {
-                if (y >= fc->sg_y0[i] && y <= fc->sg_y1[i]) {
-                    const uint8_t k = fc->sg_k[i];
-                    if (use_wx_rec && (s_wx_rec_have & (1u << k)) != 0u) {
-                        glass_ring_replay_row(row, y, lo, hi,
-                                              s_wx_rec + (size_t)k * SG_WX_REC_CAP,
-                                              rain, fc->sg_a[i], swap);
-                    } else {
-                        glass_arc_row(row, y, lo, hi, cx16, cy16, fc->sg_ri[i], fc->sg_ro[i],
-                                      fc->sg_start[i], fc->sg_sweep[i], rain, fc->sg_a[i], swap);
+            } else {
+                /* Recessed 270 deg precision temperature dial track */
+                glass_arc_row(row, y, lo, hi, cx16, cy16, SG_WX_TH_IN16, SG_WX_TH_OUT16,
+                              SG_WX_DIAL_START, SG_WX_DIAL_SWEEP, SP_C_TRACK,
+                              (uint8_t)((st * 150) / 255), swap);
+                /* 19 fine precision dial ticks around the 270 deg thermal gauge */
+                for (int ti = 0; ti < 24; ++ti) {
+                    if (ti >= 10 && ti <= 14) {
+                        continue; /* 90 deg cradle at 6 o'clock for sunrise->sunset */
+                    }
+                    const bool major = (ti == 0 || ti == 6 || ti == 9 || ti == 15 || ti == 18);
+                    const int32_t r0 = major ? (107 * 16) : (109 * 16);
+                    const int32_t r1 = 112 * 16;
+                    const uint8_t ta = (uint8_t)(((major ? 190 : 105) * atmo_a) / 255);
+                    sp_radial_tick_row(row, y, lo, hi, cx16, cy16,
+                                       k_sp_dir24[ti][0], k_sp_dir24[ti][1],
+                                       r0, r1, major ? 12 : 8,
+                                       major ? accent : SP_C_GREY, ta, swap);
+                }
+                /* Luminous halo behind thermal gradient arc */
+                if (fc->th_arc_sweep >= 256) {
+                    glass_glow_row(row, y, lo, hi, cx16, cy16, SG_WX_TH_IN16 + 16, SG_WX_TH_OUT16 - 16,
+                                   fc->th_arc_start, fc->th_arc_sweep, true, 4 * 16, 120u,
+                                   fc->pip_col, (uint8_t)st, swap);
+                }
+                /* Thermal gradient arc segments (lo_f -> hi_f) */
+                for (int i = 0; i < fc->th_n; ++i) {
+                    if (y >= fc->th_y0[i] && y <= fc->th_y1[i]) {
+                        glass_arc_row(row, y, lo, hi, cx16, cy16, SG_WX_TH_IN16 + 16,
+                                      SG_WX_TH_OUT16 - 16, fc->th_start[i], fc->th_sweep[i],
+                                      fc->th_col[i], (uint8_t)st, swap);
+                    }
+                }
+                /* Glowing temperature pip/orb marking current temp_f */
+                if (fc->have_pip) {
+                    sp_orb_row(row, y, lo, hi, fc->pip_x16, fc->pip_y16,
+                               6 * 16 + 4, 13 * 16, fc->pip_col, 0xFFFFu, (uint8_t)st, swap);
+                }
+                /* Outer 12-hour luminous rain ring (r134..142) */
+                for (int i = 0; i < nseg; ++i) {
+                    const uint8_t pct = fc->sg_pct[i];
+                    const bool wet = pct >= SP_WX_HOUR_DRY;
+                    if (wet && pct >= 25 && y >= fc->sg_y0[i] - 4 && y <= fc->sg_y1[i] + 4) {
+                        const uint8_t gpk = (uint8_t)(55u + pct);
+                        glass_glow_row(row, y, lo, hi, cx16, cy16, fc->sg_ri[i], fc->sg_ro[i],
+                                       fc->sg_start[i], fc->sg_sweep[i], true, 3 * 16, gpk,
+                                       rain, fc->sg_a[i], swap);
+                    }
+                    if (y >= fc->sg_y0[i] && y <= fc->sg_y1[i]) {
+                        const uint8_t k = fc->sg_k[i];
+                        const uint16_t seg_col = wet ? rain : dry_track;
+                        if (use_wx_rec && (s_wx_rec_have & (1u << k)) != 0u) {
+                            glass_ring_replay_row(row, y, lo, hi,
+                                                  s_wx_rec + (size_t)k * SG_WX_REC_CAP,
+                                                  seg_col, fc->sg_a[i], swap);
+                        } else {
+                            glass_arc_row(row, y, lo, hi, cx16, cy16, fc->sg_ri[i], fc->sg_ro[i],
+                                          fc->sg_start[i], fc->sg_sweep[i], seg_col, fc->sg_a[i], swap);
+                        }
                     }
                 }
             }
         }
         if (have_sun_arc && y >= sun_y0 && y <= sun_y1) {
             glass_arc_row(row, y, lo, hi, cx16, cy16, sun_r_in16, sun_r_out16,
-                          sun_a_right, sun_sweep, SP_C_TRACK,
-                          (uint8_t)((120 * sun_a) / 255), swap);
-            const uint16_t dot_col = muted ? SP_C_GOLD
-                                           : (sun_is_day ? SP_C_AMBER : SP_C_GREY);
-            glass_disc_row(row, y, lo, hi, sun_dot_x16, sun_dot_y16, 3 * 16 + 4,
-                           dot_col, (uint8_t)sun_a, swap);
+                          sun_a_right, sun_sweep, sun_track,
+                          (uint8_t)((175 * sun_a) / 255), swap);
+            if (sun_is_day && sun_lit_sweep > 64) {
+                glass_glow_row(row, y, lo, hi, cx16, cy16, sun_r_in16, sun_r_out16,
+                               sun_lit_start, sun_lit_sweep, true, 3 * 16, 110u,
+                               sun_gold, (uint8_t)sun_a, swap);
+                glass_arc_row(row, y, lo, hi, cx16, cy16, sun_r_in16, sun_r_out16,
+                              sun_lit_start, sun_lit_sweep, sun_gold, (uint8_t)sun_a, swap);
+            }
+            const uint16_t dot_col = sun_is_day ? sun_gold : (muted ? SP_C_GOLD : 0x9D3Fu);
+            sp_orb_row(row, y, lo, hi, sun_dot_x16, sun_dot_y16,
+                       4 * 16, 9 * 16, dot_col, 0xFFFFu, (uint8_t)sun_a, swap);
+        }
+        if (draw_pill && y >= pill_cy - 9 && y <= pill_cy + 9) {
+            sp_pill_row(row, y, lo, hi, SP_CX, pill_cy, pill_hw, 9,
+                        pill_fill, (uint8_t)((175 * age_a) / 255),
+                        out_col, (uint8_t)((155 * age_a) / 255), swap);
         }
         sg_ico_row(row, y, lo, hi, swap, &t_ico);
         sg_txt_row(row, y, lo, hi, swap, &t_label);
@@ -6120,11 +6673,11 @@ static inline void fring_row(uint16_t *row, int y, int lo, int hi, bool swap, in
         return;
     }
     if (have & SG_FR_GLOW) {
-        glass_glow_replay_row(row, y, lo, hi, s_fring_rec + SG_FRING_CAP, SG_GLOW16, 140, fill,
+        glass_glow_replay_row(row, y, lo, hi, s_fring_rec + SG_FRING_CAP, SG_GLOW16, 170, fill,
                               (uint8_t)st, swap);
     } else {
         glass_glow_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
-                       GLASS_Q16_12_OCLOCK, sweep, true, SG_GLOW16, 140, fill, (uint8_t)st, swap);
+                       GLASS_Q16_12_OCLOCK, sweep, true, SG_GLOW16, 170, fill, (uint8_t)st, swap);
     }
     if (have & SG_FR_ARC) {
         glass_ring_replay_row(row, y, lo, hi, s_fring_rec + 2u * SG_FRING_CAP, fill, (uint8_t)st, swap);
@@ -6216,11 +6769,11 @@ static inline void fring_side_moving(uint16_t *row, int y, int lo, int hi, bool 
      * between it and the final sweep, which the records have and the frame has not */
     const bool replay = exact || !sg_rx_hits(rx, k, (uint16_t)(A + sweep - M), (uint32_t)(full - sweep) + 2u * M);
     if (replay && (have & SG_FR_GLOW)) {
-        glass_glow_replay_row_off(row, y, ry, lo, hi, base + SG_FRING_CAP, SG_GLOW16, 140, fill,
+        glass_glow_replay_row_off(row, y, ry, lo, hi, base + SG_FRING_CAP, SG_GLOW16, 170, fill,
                                   (uint8_t)st, swap);
     } else {
         glass_glow_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
-                       GLASS_Q16_12_OCLOCK, sweep, true, SG_GLOW16, 140, fill, (uint8_t)st, swap);
+                       GLASS_Q16_12_OCLOCK, sweep, true, SG_GLOW16, 170, fill, (uint8_t)st, swap);
     }
     if (replay && (have & SG_FR_ARC)) {
         glass_ring_replay_row_off(row, y, ry, lo, hi, base + 2u * SG_FRING_CAP, fill, (uint8_t)st, swap);
@@ -6268,17 +6821,31 @@ static void knob_apply(void)
  * the shell veil already quiets the face and a per-pixel fold over r<=168 once
  * cost ~88k pixels a frame. */
 #define SG_ACT_STAGGER_MS 90
+#define SP_ACT_SPINE_X    114
+#define SP_ACT_TEXT_X     132
+
 static void sp_focal_activity(const jr_display_ctx_t *ctx, int y1, int y2,
                               uint16_t *pixels, int oy, int st, uint32_t ent)
 {
     const bool swap = ctx->board.swap_color_bytes;
-    static const uint8_t k_fade[ACT_MAX] = {255, 200, 150};
-    sg_txt_t t_kind[ACT_MAX], t_age[ACT_MAX], t_sum[ACT_MAX], t_empty;
-    const glass_metrics_t tm = glass_font_metrics(GLASS_FONT_TEXT);
+    const bool muted = sp_privacy_muted();
+    static const uint8_t k_fade[ACT_MAX] = {255, 220, 180};
+    sg_txt_t t_kind[ACT_MAX], t_age[ACT_MAX], t_sum[ACT_MAX], t_clear, t_empty;
+    int orb_y[ACT_MAX] = {0};
+    int row_a[ACT_MAX] = {0};
+    uint16_t ev_col[ACT_MAX] = {0};
+    const int cy = SP_CY + oy;
 
+    const int empty_a = sg_ent_alpha(st, ent, 0);
+    const int empty_rise = sg_ent_rise(ent, 0);
+    const int radar_cy = cy - 28 + empty_rise;
+    const uint16_t radar_col = muted ? SP_C_GOLD : SP_C_CYAN;
+
+    sg_txt_make(&t_clear, GLASS_FONT_LABEL, "ALL CLEAR", s_act_rows == 0 ? 9 : 0, SP_CX,
+                cy + 30 + empty_rise, 3, radar_col, empty_a);
     sg_txt_make(&t_empty, GLASS_FONT_TEXT, "NOTHING YET", s_act_rows == 0 ? 11 : 0, SP_CX,
-                SP_CY - tm.cap_h / 2 - tm.ink_top + oy + sg_ent_rise(ent, 0), 1, SP_C_GREY,
-                sg_ent_alpha(st, ent, 0));
+                cy + 48 + empty_rise, 1, SP_C_GREY, empty_a);
+
     for (int i = 0; i < ACT_MAX; ++i) {
         const bool have = i < s_act_rows;
         const uint32_t start = (uint32_t)i * SG_ACT_STAGGER_MS;
@@ -6289,18 +6856,48 @@ static void sp_focal_activity(const jr_display_ctx_t *ctx, int y1, int y2,
         const int klen = have ? (s_act_compose_rev != 0u ? s_act_klen[i] : sp_len(kind, ACT_KIND_CAP - 1)) : 0;
         const int alen = have ? (s_act_compose_rev != 0u ? s_act_alen[i] : sp_len(age, SP_ACT_AGE_CAP - 1)) : 0;
         const int kw = have ? (s_act_compose_rev != 0u ? s_act_kw[i] : glass_text_width(GLASS_FONT_LABEL, kind, (size_t)klen, 2)) : 0;
-        const int aw = have ? (s_act_compose_rev != 0u ? s_act_aw[i] : glass_text_width(GLASS_FONT_LABEL, age, (size_t)alen, 2)) : 0;
-        const int total = kw + (klen > 0 && alen > 0 ? SP_ACT_GAP : 0) + aw;
-        const int x0 = SP_CX - total / 2;
-        sg_txt_at(&t_kind[i], GLASS_FONT_LABEL, kind, klen, x0, top, SP_C_GREY, a);
+        ev_col[i] = sp_act_kind_color(kind, muted);
+        orb_y[i] = top + 16;
+        row_a[i] = have ? a : 0;
+
+        sg_txt_at(&t_kind[i], GLASS_FONT_LABEL, kind, klen, SP_ACT_TEXT_X, top, ev_col[i], a);
         t_kind[i].tracking = 2;
         sg_txt_at(&t_age[i], GLASS_FONT_LABEL, age, alen,
-                  x0 + kw + (klen > 0 ? SP_ACT_GAP : 0), top, SP_C_GREY, (a * 2) / 3);
+                  SP_ACT_TEXT_X + kw + (klen > 0 ? SP_ACT_GAP : 0), top, SP_C_GREY, (a * 2) / 3);
         t_age[i].tracking = 2;
         const int slen = have ? sp_len(s_act_row[i], SP_ACT_ROW_CAP - 1) : 0;
-        sg_txt_make(&t_sum[i], GLASS_FONT_TEXT, s_act_row[i], slen, SP_CX, top + SP_ACT_SUM_DY, 0,
-                    SP_C_INK, a);
+        sg_txt_at(&t_sum[i], GLASS_FONT_TEXT, s_act_row[i], slen, SP_ACT_TEXT_X, top + SP_ACT_SUM_DY,
+                  SP_C_INK, a);
     }
+
+    /* Soft deep-cyan/indigo radial ambient backdrop glow so ACTIVITY feels alive on OLED */
+    sp_bloom_t bg_bloom;
+    bg_bloom.active = false;
+    const int bg_r = 152;
+    if (st > 0 && y1 <= cy + bg_r && y2 > cy - bg_r) {
+        const uint16_t b_in = muted ? SP_C_GOLD : 0x051Au;   /* luminous deep cyan-indigo */
+        const uint16_t b_out = muted ? SP_C_GOLD_DIM : 0x0892u; /* midnight indigo */
+        sp_bloom_init(&bg_bloom, SP_CX, cy, bg_r, b_in, b_out, muted ? 40u : 64u, st, 0);
+    }
+
+    /* Empty state: luminous standby concentric radar + breathing cyan/indigo core bloom */
+    sp_bloom_t radar_bloom;
+    radar_bloom.active = false;
+    const int radar_r = 62;
+    if (s_act_rows == 0 && empty_a > 0 && y1 <= radar_cy + radar_r && y2 > radar_cy - radar_r) {
+        const uint32_t ph = (s_breath_ms * 65536u) / 3000u;
+        const int breath = 128 + (int)(glass_sin_q15(ph) >> 8); /* 0..256 */
+        const uint8_t pk = (uint8_t)(72 + ((30 * breath) >> 8));
+        const uint16_t r_in = muted ? SP_C_GOLD : 0x06DFu;
+        const uint16_t r_out = muted ? SP_C_GOLD_DIM : 0x10B6u;
+        sp_bloom_init(&radar_bloom, SP_CX, radar_cy, radar_r, r_in, r_out, pk, empty_a, 0);
+    }
+
+    const int spine_y0 = s_act_rows > 0 ? orb_y[0] - 12 : 1;
+    const int spine_y1 = s_act_rows > 0 ? orb_y[s_act_rows - 1] + 12 : 0;
+    const uint16_t spine_col = muted ? SP_C_GOLD : 0x1D5Bu;
+    const int32_t cx16 = SP_CX * 16;
+    const int32_t rcy16 = radar_cy * 16;
 
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
@@ -6308,19 +6905,88 @@ static void sp_focal_activity(const jr_display_ctx_t *ctx, int y1, int y2,
         if (!sp_clip(y, &lo, &hi)) {
             continue;
         }
-        sg_txt_row(row, y, lo, hi, swap, &t_empty);
-        for (int i = 0; i < s_act_rows; ++i) {
-            sg_txt_row(row, y, lo, hi, swap, &t_kind[i]);
-            sg_txt_row(row, y, lo, hi, swap, &t_age[i]);
-            sg_txt_row(row, y, lo, hi, swap, &t_sum[i]);
+        if (bg_bloom.active) {
+            sp_bloom_row(row, y, lo, hi, &bg_bloom, swap);
+        }
+        if (s_act_rows == 0 && empty_a > 0) {
+            if (radar_bloom.active) {
+                sp_bloom_row(row, y, lo, hi, &radar_bloom, swap);
+            }
+            if (y >= radar_cy - 56 && y <= radar_cy + 56) {
+                glass_glow_row(row, y, lo, hi, cx16, rcy16, 44 * 16, 46 * 16,
+                               0, GLASS_TURN_Q16, false, 3 * 16, 85u,
+                               radar_col, (uint8_t)empty_a, swap);
+                glass_ring_row(row, y, lo, hi, cx16, rcy16, 44 * 16, 46 * 16,
+                               0, GLASS_TURN_Q16, radar_col,
+                               (uint8_t)((empty_a * 165) / 255), swap);
+                glass_ring_row(row, y, lo, hi, cx16, rcy16, 25 * 16, 27 * 16,
+                               0, GLASS_TURN_Q16, spine_col,
+                               (uint8_t)((empty_a * 125) / 255), swap);
+                /* 4 crisp cardinal radar reticle ticks */
+                for (int ti = 0; ti < 24; ti += 6) {
+                    sp_radial_tick_row(row, y, lo, hi, cx16, rcy16,
+                                       k_sp_dir24[ti][0], k_sp_dir24[ti][1],
+                                       47 * 16, 53 * 16, 10, radar_col,
+                                       (uint8_t)((empty_a * 180) / 255), swap);
+                }
+                sp_orb_row(row, y, lo, hi, cx16, rcy16, 4 * 16, 11 * 16,
+                           radar_col, 0xFFFFu, (uint8_t)empty_a, swap);
+            }
+            sg_txt_row(row, y, lo, hi, swap, &t_clear);
+            sg_txt_row(row, y, lo, hi, swap, &t_empty);
+        } else if (s_act_rows > 0) {
+            /* Vertical luminous hairline timeline spine */
+            if (y >= spine_y0 && y <= spine_y1 && st > 0) {
+                int fade = 255;
+                if (y - spine_y0 < 12) {
+                    fade = ((y - spine_y0 + 1) * 255) / 12;
+                } else if (spine_y1 - y < 12) {
+                    fade = ((spine_y1 - y + 1) * 255) / 12;
+                }
+                const uint8_t sa = (uint8_t)((fade * 145 * st) / (255 * 255));
+                const uint8_t ha = (uint8_t)((fade * 52 * st) / (255 * 255));
+                if (SP_ACT_SPINE_X - 2 >= lo && SP_ACT_SPINE_X - 2 <= hi && ha > 0u) {
+                    row[SP_ACT_SPINE_X - 2] = glass_blend565(row[SP_ACT_SPINE_X - 2], spine_col, ha, swap);
+                }
+                if (SP_ACT_SPINE_X - 1 >= lo && SP_ACT_SPINE_X - 1 <= hi && sa > 0u) {
+                    row[SP_ACT_SPINE_X - 1] = glass_blend565(row[SP_ACT_SPINE_X - 1], spine_col, sa, swap);
+                }
+                if (SP_ACT_SPINE_X >= lo && SP_ACT_SPINE_X <= hi && sa > 0u) {
+                    row[SP_ACT_SPINE_X] = glass_blend565(row[SP_ACT_SPINE_X], spine_col, sa, swap);
+                }
+                if (SP_ACT_SPINE_X + 1 >= lo && SP_ACT_SPINE_X + 1 <= hi && ha > 0u) {
+                    row[SP_ACT_SPINE_X + 1] = glass_blend565(row[SP_ACT_SPINE_X + 1], spine_col, ha, swap);
+                }
+            }
+            for (int i = 0; i < s_act_rows; ++i) {
+                /* Glowing color-coded event orb on the timeline spine */
+                if (row_a[i] > 0) {
+                    sp_orb_row(row, y, lo, hi, SP_ACT_SPINE_X * 16, orb_y[i] * 16,
+                               4 * 16, 10 * 16, ev_col[i], 0xFFFFu, (uint8_t)row_a[i], swap);
+                }
+                /* Subtle horizontal hairline divider between timeline entries */
+                if (i + 1 < s_act_rows && row_a[i] > 0) {
+                    const int sep_y = (orb_y[i] + orb_y[i + 1]) / 2 + 4;
+                    if (y == sep_y) {
+                        const int xa = SP_ACT_TEXT_X > lo ? SP_ACT_TEXT_X : lo;
+                        const int xb = 342 < hi ? 342 : hi;
+                        const uint8_t da = (uint8_t)((row_a[i] * 56) / 255);
+                        for (int x = xa; x <= xb; ++x) {
+                            row[x] = glass_blend565(row[x], spine_col, da, swap);
+                        }
+                    }
+                }
+                sg_txt_row(row, y, lo, hi, swap, &t_kind[i]);
+                sg_txt_row(row, y, lo, hi, swap, &t_age[i]);
+                sg_txt_row(row, y, lo, hi, swap, &t_sum[i]);
+            }
         }
     }
 }
 
-/* DESK: the STATUS ring around the job's progress. The ring is r113-123 on the
- * agent's state colour (cyan with none); the number counts up with the sweep on
- * entry; the task, shortened by main.c, is the tracked label above it and the
- * agent's state is the word below. */
+/* DESK: Holographic Violet Companion Core. Deep electric violet-magenta radial
+ * bloom behind the r108..122 progress ring, subtle orbital scanner ticks at
+ * r127..132, and a bright violet-white leading tip on the progress arc. */
 static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
                           uint16_t *pixels, int oy, int st, uint32_t ent)
 {
@@ -6330,10 +6996,13 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
         prog = 100;
     }
     const jr_display_agent_state_t state = (jr_display_agent_state_t)((w >> 8) & 0xFu);
-    const uint16_t fill = state == JR_DISPLAY_AGENT_NONE ? SP_C_CYAN : agent_native_color(state);
+    const bool muted = sp_privacy_muted();
+    const uint16_t fill = muted ? SP_C_GOLD
+                                : (state == JR_DISPLAY_AGENT_NONE ? SP_C_VIOLET : agent_native_color(state));
     const bool swap = ctx->board.swap_color_bytes;
     const int cyr = SP_CY + oy + SG_RING_DY;
     const int cy16 = cyr * 16;
+    const int cx16 = SP_CX * 16;
 
     const uint32_t f_ring = glass_ease_out_cubic_q16(ent, SP_ENTRY_RING_MS);
     const int shown = (int)glass_count_up(prog, f_ring);
@@ -6351,7 +7020,6 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
     const glass_metrics_t val = glass_font_metrics(GLASS_FONT_VALUE);
     const int hero_top = cyr - hero.cap_h / 2 - 2;
     const int base = hero_top + hero.cap_h;
-    /* Hoist hero/percent width measurement out of strips that miss the figure. */
     static int s_desk_pw;
     static int s_desk_shown = -1, s_desk_hw;
     if (s_desk_pw == 0) {
@@ -6368,28 +7036,84 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
 
     sg_txt_t t_label, t_hero, t_pc, t_state;
     sg_txt_make(&t_label, GLASS_FONT_LABEL, task, tlen, SP_CX,
-                hero_top - 26 + sg_ent_rise(ent, t_lbl), 3, SP_C_GREY, sg_ent_alpha(st, ent, t_lbl));
+                hero_top - 26 + sg_ent_rise(ent, t_lbl), 3, fill, sg_ent_alpha(st, ent, t_lbl));
     sg_txt_at(&t_hero, GLASS_FONT_HERO, num, nlen, x0, hero_top, SP_C_INK, st);
     sg_txt_at(&t_pc, GLASS_FONT_VALUE, "%", 1, x0 + hw + 5, base - val.cap_h, fill, st);
     sg_txt_make(&t_state, GLASS_FONT_TEXT, sname, snlen, SP_CX, base + 16 + sg_ent_rise(ent, t_word),
                 1, SP_C_GREY, sg_ent_alpha(st, ent, t_word));
 
-    const int ring_y0 = cyr - 130, ring_y1 = cyr + 130;
-    /* at rest: the ring's three layers replayed from their records */
+    /* Deep electric violet-magenta holographic radial bloom */
+    const int bloom_r = 122;
+    sp_bloom_t desk_bloom;
+    desk_bloom.active = false;
+    if (st > 0 && y1 <= cyr + bloom_r && y2 > cyr - bloom_r) {
+        uint16_t b_in = 0xD0DFu, b_out = 0x4814u; /* electric violet-magenta -> deep cosmic purple */
+        uint8_t b_pk = 116u;
+        if (muted) {
+            b_in = SP_C_GOLD;
+            b_out = SP_C_GOLD_DIM;
+            b_pk = 78u;
+        } else if (state == JR_DISPLAY_AGENT_WAITING) {
+            b_in = 0xFD20u; b_out = 0x7140u; b_pk = 106u;
+        } else if (state == JR_DISPLAY_AGENT_SUCCEEDED) {
+            b_in = 0x2F74u; b_out = 0x0368u; b_pk = 106u;
+        } else if (state == JR_DISPLAY_AGENT_FAILED) {
+            b_in = 0xF863u; b_out = 0x6000u; b_pk = 106u;
+        } else if (state == JR_DISPLAY_AGENT_VERIFYING) {
+            b_in = 0x68DFu; b_out = 0x2834u; b_pk = 110u;
+        }
+        sp_bloom_init(&desk_bloom, SP_CX, cyr, bloom_r, b_in, b_out, b_pk, st, 1);
+    }
+
+    /* Leading tip orb coordinates along progress arc */
+    const bool have_tip = sweep > 256 && sweep < GLASS_TURN_Q16 && st > 0;
+    int32_t tip_x16 = 0, tip_y16 = 0;
+    const uint16_t tip_col = muted ? SP_C_GOLD : (state == JR_DISPLAY_AGENT_WORKING || state == JR_DISPLAY_AGENT_NONE ? 0xE3FFu : fill);
+    if (have_tip) {
+        const uint32_t a_tip = (uint32_t)(GLASS_Q16_12_OCLOCK + sweep) & 0xFFFFu;
+        const int32_t r_mid16 = (SG_RING_R_IN16 + SG_RING_R_OUT16) / 2;
+        tip_x16 = cx16 + ((glass_cos_q15(a_tip) * r_mid16) >> 15);
+        tip_y16 = cy16 + ((glass_sin_q15(a_tip) * r_mid16) >> 15);
+    }
+
+    const int ring_y0 = cyr - 136, ring_y1 = cyr + 136;
     const uint8_t rec = (oy == 0 && f_ring >= GLASS_ONE_Q16) ? (uint8_t)(fring_prepare(sweep) & 0x7Fu) : 0u;
     const uint8_t *mbase = s_fring_rec;
     const uint8_t mov = rec == 0u ? fring_prepare_moving(full, &mbase) : 0u;
+    const uint16_t tick_dim = muted ? SP_C_GOLD_DIM : 0x3890u;
+
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         int lo = 0, hi = HUD_W - 1;
         if (!sp_clip(y, &lo, &hi)) {
             continue;
         }
+        if (desk_bloom.active) {
+            sp_bloom_row(row, y, lo, hi, &desk_bloom, swap);
+        }
         if (y >= ring_y0 && y <= ring_y1) {
+            /* Subtle concentric orbital scanner hairline & 24 precision scanner ticks (r127..132) */
+            glass_ring_row(row, y, lo, hi, cx16, cy16, 129 * 16, 130 * 16 + 8,
+                           0, GLASS_TURN_Q16, fill, (uint8_t)((st * 68) / 255), swap);
+            for (int ti = 0; ti < 24; ++ti) {
+                const bool lit = ((int32_t)ti * GLASS_TURN_Q16) / 24 <= sweep && sweep > 0;
+                const bool major = (ti % 6 == 0);
+                const int32_t r0 = major ? (126 * 16) : (127 * 16 + 8);
+                const int32_t r1 = major ? (133 * 16) : (131 * 16 + 8);
+                const uint8_t ta = (uint8_t)(((lit ? (major ? 225 : 175) : (major ? 115 : 75)) * st) / 255);
+                sp_radial_tick_row(row, y, lo, hi, cx16, cy16,
+                                   k_sp_dir24[ti][0], k_sp_dir24[ti][1],
+                                   r0, r1, major ? 12 : 8,
+                                   lit ? tip_col : tick_dim, ta, swap);
+            }
             if (mov != 0u) {
                 fring_row_moving(row, y, lo, hi, swap, oy, sweep, full, sweep > 0, fill, st, mov, mbase);
             } else {
                 fring_row(row, y, lo, hi, swap, cy16, sweep, sweep > 0, fill, st, rec);
+            }
+            if (have_tip) {
+                sp_orb_row(row, y, lo, hi, tip_x16, tip_y16,
+                           6 * 16 + 4, 14 * 16, tip_col, 0xFFFFu, (uint8_t)st, swap);
             }
         }
         sg_txt_row(row, y, lo, hi, swap, &t_label);
@@ -6481,23 +7205,30 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
         : sp_str(dbm, 0, (int)sizeof dbm, "DOWN");
     const bool link_on = (lk & (1u << 1)) != 0u;
     const bool tools_on = ((lk >> 2) & 3u) == 2u;
+    const uint32_t chip_raw = (lk >> 16) & 0xFFu;
+    const bool chip_ok = chip_raw != 0u;
+    const int chip_c = chip_ok ? (int)chip_raw - 40 : 0;
+    char chipbuf[8];
+    int clen = 0;
+    if (chip_ok) {
+        clen = sp_int(chipbuf, 0, (int)sizeof chipbuf, chip_c);
+        clen = sp_str(chipbuf, clen, (int)sizeof chipbuf, "*");
+    } else {
+        clen = sp_str(chipbuf, 0, (int)sizeof chipbuf, "--");
+    }
     const bool updating = sp_ota_ringing((jr_display_ota_state_t)
         (__atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE) & 0xFu));
     const char *head = sp_headline(JR_DISPLAY_SPACE_STATUS);
     const int hlen = sp_len(head, SP_LABEL_CAP - 1);
-    /* The headline's job is the worst thing wrong. Healthy, it is the uptime
-     * and the in-ring label stays BATTERY; otherwise the headline IS the
-     * label ("LOW BATTERY", "NO WIFI", "UPDATE 42%"), where it clears the
-     * update ring. */
     const bool quiet_head = hlen == 0 || (hlen > 3 && head[0] == 'U' && head[1] == 'P' && head[2] == ' ');
     const char *label = quiet_head ? "BATTERY" : head;
     const int label_len = quiet_head ? 7 : hlen;
 
     const glass_metrics_t hero = glass_font_metrics(GLASS_FONT_HERO);
     const glass_metrics_t val = glass_font_metrics(GLASS_FONT_VALUE);
+    const glass_metrics_t tm = glass_font_metrics(GLASS_FONT_TEXT);
     const int hero_top = cyr - hero.cap_h / 2 - 2;
     const int base = hero_top + hero.cap_h;
-    /* Hoist hero/percent/power-word width measurements out of the 39-strip loop. */
     static int s_st_pw;
     static int s_st_key = -2, s_st_hw;
     const int st_key = have_gauge ? shown : -1;
@@ -6511,25 +7242,25 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
     const int hw = s_st_hw;
     const int pw = have_gauge ? s_st_pw : 0;
     const int x0 = SP_CX - (hw + (have_gauge ? 5 : 0) + pw) / 2;
-    const uint32_t t_lbl = 0, t_word = 150, t_wifi = 250, t_link = 330, t_tools = 410;
+    const uint32_t t_lbl = 0, t_word = 150, t_wifi = 250, t_link = 310, t_tools = 370, t_chip = 430;
     const int dim_a = (st * 96) / 255;
+    const int cx16 = SP_CX * 16;
 
     sg_txt_t t_label, t_hero, t_pc, t_word_t;
-    sg_txt_t t_sl[3], t_sv[3];
+    sg_txt_t t_sl[4], t_sv[4];
     sg_txt_make(&t_label, GLASS_FONT_LABEL, label, label_len, SP_CX,
-                hero_top - 26 + sg_ent_rise(ent, t_lbl), 3, SP_C_GREY, sg_ent_alpha(st, ent, t_lbl));
+                hero_top - 26 + sg_ent_rise(ent, t_lbl), 3,
+                low ? SP_C_RED : (muted ? SP_C_GOLD : 0x7EFBu),
+                sg_ent_alpha(st, ent, t_lbl));
     sg_txt_at(&t_hero, GLASS_FONT_HERO, pctbuf, plen, x0, hero_top, SP_C_INK, st);
     sg_txt_at(&t_pc, GLASS_FONT_VALUE, "%", have_gauge ? 1 : 0, x0 + hw + 5, base - val.cap_h, fill, st);
-    /* Charging: the bolt stands beside the word and the pair is centred as one,
-     * so the word keeps its place in the middle of the ring when it is alone. */
     const int word_cx = charging ? SP_CX + (SG_BOLT_INK_W + SG_BOLT_GAP) / 2 : SP_CX;
     const int word_y = base + 16 + sg_ent_rise(ent, t_word);
     sg_txt_make(&t_word_t, GLASS_FONT_TEXT, word, wlen, word_cx,
                 word_y, 1, SP_C_GREY, sg_ent_alpha(st, ent, t_word));
     sg_ico_t t_bolt;
     if (charging) {
-        const int bolt_y = word_y + glass_font_metrics(GLASS_FONT_TEXT).cap_h / 2 -
-                           glass_icon_px(GLASS_ICON_SM) / 2;
+        const int bolt_y = word_y + tm.cap_h / 2 - glass_icon_px(GLASS_ICON_SM) / 2;
         static const char *s_st_word_ptr;
         static int s_st_ww;
         if (s_st_word_ptr != word) {
@@ -6542,62 +7273,145 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
     } else {
         sg_ico_make(&t_bolt, -1, GLASS_ICON_SM, 0, 0, fill, 0);
     }
-    static const char *const k_names[3] = {"WIFI", "LINK", "TOOLS"};
-    const char *vals[3] = {dbm, link_on ? "ON" : "OFF", tools_on ? "ON" : "OFF"};
-    const int vlen[3] = {dlen, link_on ? 2 : 3, tools_on ? 2 : 3};
-    const bool on[3] = {bars > 0, link_on, tools_on};
-    const uint32_t starts[3] = {t_wifi, t_link, t_tools};
-    for (int i = 0; i < 3; ++i) {
-        const int cxi = SP_CX + (i - 1) * SG_STAT_DX;
+
+    /* 4-column bottom telemetry cluster: WIFI · LINK · TOOLS · CHIP */
+    static const char *const k_names[4] = {"WIFI", "LINK", "TOOLS", "CHIP"};
+    static const int k_col_dx[4] = { -78, -26, 26, 78 };
+    const char *vals[4] = {dbm, link_on ? "ON" : "OFF", tools_on ? "ON" : "OFF", chipbuf};
+    const int vlen[4] = {dlen, link_on ? 2 : 3, tools_on ? 2 : 3, clen};
+    const bool on[4] = {bars > 0, link_on, tools_on, chip_ok};
+    const uint32_t starts[4] = {t_wifi, t_link, t_tools, t_chip};
+    int stat_ea[4] = {0};
+    int stat_vy[4] = {0};
+    int wifi_icon_x = 0;
+    int led_x[2] = {0, 0}; /* LINK, TOOLS glowing LED centers */
+    for (int i = 0; i < 4; ++i) {
+        const int cxi = SP_CX + k_col_dx[i];
         const int rise = sg_ent_rise(ent, starts[i]);
         const int ea = updating ? 0 : sg_ent_alpha(st, ent, starts[i]);
+        stat_ea[i] = ea;
+        stat_vy[i] = SG_STAT_VALUE_Y + oy + rise;
         sg_txt_make(&t_sl[i], GLASS_FONT_LABEL, k_names[i], (int)strlen(k_names[i]), cxi,
                     SG_STAT_LABEL_Y + oy + rise, 2, SP_C_GREY, ea);
-        sg_txt_make(&t_sv[i], GLASS_FONT_TEXT, vals[i], vlen[i], cxi,
-                    SG_STAT_VALUE_Y + oy + rise, 0, on[i] ? SP_C_INK : SP_C_GREY,
-                    on[i] ? ea : (ea * dim_a) / (st > 0 ? st : 1));
+        const int va = on[i] ? ea : (ea * dim_a) / (st > 0 ? st : 1);
+        uint16_t vcol = on[i] ? SP_C_INK : SP_C_GREY;
+        if (i == 3 && chip_ok) {
+            vcol = chip_c >= SP_CHIP_HOT_C ? SP_C_RED : (chip_c >= 62 ? 0xFDE4u : SP_C_INK);
+        }
+        if (i == 0 && bars > 0) {
+            /* 4-bar Wi-Fi icon (14 px) + 3 px gap + dBm numeral centred as a pair */
+            const int tw = glass_text_width(GLASS_FONT_TEXT, vals[0], (size_t)vlen[0], 0);
+            const int tot = 14 + 3 + tw;
+            wifi_icon_x = cxi - tot / 2;
+            sg_txt_at(&t_sv[0], GLASS_FONT_TEXT, vals[0], vlen[0],
+                      wifi_icon_x + 17, stat_vy[0], vcol, va);
+        } else if (i == 1 || i == 2) {
+            /* Glowing radial-halo LED dot (6 px dia) + 5 px gap + ON/OFF */
+            const int tw = glass_text_width(GLASS_FONT_TEXT, vals[i], (size_t)vlen[i], 0);
+            const int tot = 6 + 5 + tw;
+            const int lx = cxi - tot / 2;
+            led_x[i - 1] = lx + 3;
+            sg_txt_at(&t_sv[i], GLASS_FONT_TEXT, vals[i], vlen[i],
+                      lx + 11, stat_vy[i], vcol, va);
+        } else {
+            sg_txt_make(&t_sv[i], GLASS_FONT_TEXT, vals[i], vlen[i], cxi,
+                        stat_vy[i], 0, vcol, va);
+        }
     }
 
-    const int ring_y0 = cyr - 130, ring_y1 = cyr + 130;
+    /* Dynamic state-colored radial OLED bloom inside the battery ring.
+     * Even when privacy-muted, keep the jewel-toned state glow inside the ring
+     * while the outer privacy ring and battery accent remain gold. */
+    const int bloom_r = 109;
+    sp_bloom_t core_bloom;
+    core_bloom.active = false;
+    uint16_t jewel_col = SP_C_CYAN;
+    if (low) {
+        jewel_col = SP_C_RED;
+    } else if (have_gauge && pct >= 60) {
+        jewel_col = SP_C_MINT;
+    } else if (have_gauge && pct >= 30) {
+        jewel_col = SP_C_CYAN;
+    } else if (have_gauge && pct >= 20) {
+        jewel_col = 0xFDA2u; /* warm jewel amber */
+    }
+    if (st > 0 && y1 <= cyr + bloom_r && y2 > cyr - bloom_r) {
+        uint16_t b_in = 0x055Au, b_out = 0x01CDu;
+        uint8_t b_pk = 64u;
+        if (low) {
+            /* Pulsing crimson reactor core below 20% */
+            const uint32_t ph = (s_breath_ms * 65536u) / 1600u;
+            const int pulse = 128 + (int)(glass_sin_q15(ph) >> 8); /* 0..256 */
+            b_in = 0xF862u;
+            b_out = 0x6000u;
+            b_pk = (uint8_t)(88 + ((44 * pulse) >> 8));
+        } else if (have_gauge && pct >= 60) {
+            b_in = 0x2F96u;  /* lush emerald-mint */
+            b_out = 0x03A9u; /* deep forest-teal */
+            b_pk = 114u;
+        } else if (have_gauge && pct >= 30) {
+            b_in = 0x07FFu;  /* electric cyan */
+            b_out = 0x02B4u; /* deep sapphire-cyan */
+            b_pk = 114u;
+        } else if (have_gauge && pct >= 20) {
+            b_in = 0xFDA2u;  /* warm jewel amber */
+            b_out = 0x79C0u; /* deep burnt amber */
+            b_pk = 112u;
+        } else if (have_gauge && charging) {
+            b_in = 0x07B8u;  /* charging cyan-mint */
+            b_out = 0x02D0u;
+            b_pk = 108u;
+        }
+        sp_bloom_init(&core_bloom, SP_CX, cyr, bloom_r, b_in, b_out, b_pk, st, 1);
+    }
+
+    const int ring_y0 = cyr - 136, ring_y1 = cyr + 136;
     const bool hit_ring = y1 <= ring_y1 && y2 > ring_y0;
-    /* at rest: the ring's three layers replayed from their records */
     const uint8_t rec = (hit_ring && oy == 0 && f_ring >= GLASS_ONE_Q16)
                             ? (uint8_t)(fring_prepare(sweep) & 0x7Fu) : 0u;
-    /* while it slides or sweeps: the records of the final value */
     const uint8_t *mbase = s_fring_rec;
     const uint8_t mov = (hit_ring && rec == 0u)
                             ? fring_prepare_moving(have_gauge ? full : 0, &mbase) : 0u;
 
-    /* Charging shimmer: when charging & AWAKE and settled past entry, animate
-     * a subtle bright pulse travelling clockwise along the filled battery arc.
-     * Phase comes from s_breath_ms (latched once/frame -> 12-row strip invariant). */
+    /* Bright travelling plasma shimmer comet along the battery arc while charging */
     const bool shimmer_on = hit_ring && charging && have_gauge && sweep >= 4096 && st > 0 &&
                             ent >= SP_ENTRY_RING_MS &&
                             jr_display_render_fps() >= JR_DISPLAY_RENDER_FPS;
     int32_t sh_start = 0, sh_sweep = 0;
+    int32_t sh_hx16 = 0, sh_hy16 = 0;
     int sh_y0 = 1, sh_y1 = 0;
     uint8_t sh_alpha = 0u;
     const uint16_t sh_col = muted ? 0xFF70u : 0xBFFFu;
     if (shimmer_on) {
         const uint32_t cyc = s_breath_ms % 2200u;
-        const int32_t plen = sweep / 7 > 5400 ? 5400 : (sweep / 7 < 2200 ? 2200 : sweep / 7);
+        const int32_t plen = sweep / 6 > 6400 ? 6400 : (sweep / 6 < 2400 ? 2400 : sweep / 6);
         const int32_t travel = sweep - plen;
         if (travel > 0) {
             const int32_t off = (int32_t)(((int64_t)travel * cyc) / 2200u);
             sh_start = (GLASS_Q16_12_OCLOCK + off) & 0xFFFF;
             sh_sweep = plen;
-            /* Smooth fade-in and fade-out at arc ends via half-sine envelope. */
             const uint32_t env_a = (cyc * 32768u) / 2200u;
             const int env = (int)(glass_sin_q15(env_a) >> 7); /* 0..255 */
-            sh_alpha = (uint8_t)(((env > 0 ? env : 0) * 115 * st) / (255 * 255));
-            if (sh_alpha > 0u &&
-                !glass_arc_rows(SP_CX * 16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
-                                sh_start, sh_sweep, true, &sh_y0, &sh_y1)) {
-                sh_y0 = 1;
-                sh_y1 = 0;
+            sh_alpha = (uint8_t)(((env > 0 ? env : 0) * 165 * st) / (255 * 255));
+            if (sh_alpha > 0u) {
+                const uint32_t a_head = (uint32_t)(sh_start + sh_sweep) & 0xFFFFu;
+                const int32_t r_mid16 = (SG_RING_R_IN16 + SG_RING_R_OUT16) / 2;
+                sh_hx16 = cx16 + ((glass_cos_q15(a_head) * r_mid16) >> 15);
+                sh_hy16 = cy16 + ((glass_sin_q15(a_head) * r_mid16) >> 15);
+                if (!glass_arc_rows(cx16, cy16, SG_RING_R_IN16, SG_RING_R_OUT16,
+                                    sh_start, sh_sweep, true, &sh_y0, &sh_y1)) {
+                    sh_y0 = 1;
+                    sh_y1 = 0;
+                }
             }
         }
     }
+
+    const uint16_t outer_col = muted ? SP_C_GOLD : jewel_col;
+    const uint16_t tick_dim = muted ? SP_C_GOLD_DIM : 0x2946u;
+    const uint16_t wifi_col = muted ? SP_C_GOLD : SP_C_CYAN;
+    const uint16_t link_led_col = muted ? SP_C_GOLD : (link_on ? 0x07F8u : 0x6167u);
+    const uint16_t tools_led_col = muted ? SP_C_GOLD : (tools_on ? SP_C_MINT : 0x4228u);
 
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
@@ -6605,18 +7419,39 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
         if (!sp_clip(y, &lo, &hi)) {
             continue;
         }
+        if (core_bloom.active) {
+            sp_bloom_row(row, y, lo, hi, &core_bloom, swap);
+        }
         if (y >= ring_y0 && y <= ring_y1) {
-            /* the track only where the fill is not: no pixel is written twice */
+            /* Fine concentric outer halo/tick ring (r128..132) */
+            glass_ring_row(row, y, lo, hi, cx16, cy16, 129 * 16, 131 * 16,
+                           0, GLASS_TURN_Q16, outer_col, (uint8_t)((st * 66) / 255), swap);
+            for (int ti = 0; ti < 24; ++ti) {
+                const bool lit = have_gauge && sweep > 0 &&
+                                 ((int32_t)ti * GLASS_TURN_Q16) / 24 <= sweep;
+                const bool major = (ti % 6 == 0);
+                const int32_t r0 = major ? (127 * 16) : (128 * 16);
+                const int32_t r1 = major ? (132 * 16) : (131 * 16 + 8);
+                const uint8_t ta = (uint8_t)(((lit ? (major ? 225 : 175) : (major ? 105 : 68)) * st) / 255);
+                sp_radial_tick_row(row, y, lo, hi, cx16, cy16,
+                                   k_sp_dir24[ti][0], k_sp_dir24[ti][1],
+                                   r0, r1, major ? 12 : 8,
+                                   lit ? outer_col : tick_dim, ta, swap);
+            }
             if (mov != 0u) {
                 fring_row_moving(row, y, lo, hi, swap, oy, sweep, have_gauge ? full : 0,
                                  have_gauge && sweep > 0, fill, st, mov, mbase);
             } else {
                 fring_row(row, y, lo, hi, swap, cy16, sweep, have_gauge && sweep > 0, fill, st, rec);
             }
-            if (sh_alpha > 0u && y >= sh_y0 && y <= sh_y1) {
-                glass_arc_row(row, y, lo, hi, SP_CX * 16, cy16, SG_RING_R_IN16,
-                              SG_RING_R_OUT16, sh_start, sh_sweep, sh_col,
-                              sh_alpha, swap);
+            if (sh_alpha > 0u) {
+                if (y >= sh_y0 && y <= sh_y1) {
+                    glass_arc_row(row, y, lo, hi, cx16, cy16, SG_RING_R_IN16 + 16,
+                                  SG_RING_R_OUT16 - 16, sh_start, sh_sweep, sh_col,
+                                  sh_alpha, swap);
+                }
+                sp_orb_row(row, y, lo, hi, sh_hx16, sh_hy16,
+                           5 * 16 + 4, 12 * 16, sh_col, 0xFFFFu, sh_alpha, swap);
             }
         }
         sg_txt_row(row, y, lo, hi, swap, &t_label);
@@ -6624,7 +7459,25 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
         sg_txt_row(row, y, lo, hi, swap, &t_pc);
         sg_txt_row(row, y, lo, hi, swap, &t_word_t);
         sg_ico_row(row, y, lo, hi, swap, &t_bolt);
-        for (int i = 0; i < 3; ++i) {
+        if (bars > 0 && stat_ea[0] > 0) {
+            sp_wifi_bars_row(row, y, lo, hi, wifi_icon_x, stat_vy[0] + tm.cap_h - 1,
+                             bars, wifi_col, (uint8_t)stat_ea[0], swap);
+        }
+        if (stat_ea[1] > 0) {
+            const int ly = stat_vy[1] + tm.cap_h / 2;
+            const uint8_t la = (uint8_t)(link_on ? stat_ea[1] : (stat_ea[1] * 130) / 255);
+            sp_orb_row(row, y, lo, hi, led_x[0] * 16, ly * 16,
+                       3 * 16, link_on ? (7 * 16) : (4 * 16),
+                       link_led_col, link_on ? 0xFFFFu : link_led_col, la, swap);
+        }
+        if (stat_ea[2] > 0) {
+            const int ly = stat_vy[2] + tm.cap_h / 2;
+            const uint8_t la = (uint8_t)(tools_on ? stat_ea[2] : (stat_ea[2] * 130) / 255);
+            sp_orb_row(row, y, lo, hi, led_x[1] * 16, ly * 16,
+                       3 * 16, tools_on ? (7 * 16) : (4 * 16),
+                       tools_led_col, tools_on ? 0xFFFFu : tools_led_col, la, swap);
+        }
+        for (int i = 0; i < 4; ++i) {
             sg_txt_row(row, y, lo, hi, swap, &t_sl[i]);
             sg_txt_row(row, y, lo, hi, swap, &t_sv[i]);
         }
