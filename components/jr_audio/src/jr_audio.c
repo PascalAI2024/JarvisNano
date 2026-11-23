@@ -33,6 +33,7 @@
 #include "esp_codec_dev_types.h"
 #include "jr_dsp/dsp.h"
 #include "jr_dsp/audio_power.h"
+#include "jr_dsp/spectrum.h"
 
 #include "esp_aec.h"                  /* esp-sr direct low-level AEC             */
 
@@ -221,6 +222,38 @@ static _Atomic bool           s_feeder_writing;
 static _Atomic uint32_t       s_playback_tail_until_ms;
 static _Atomic uint32_t       s_pb_live_rms;
 static _Atomic bool           s_diag_chirp_enqueuing;
+static jr_spectrum_t          s_pb_spec;       /* feeder task only          */
+static jr_spectrum_t          s_mic_spec;      /* capture caller (adc_guard)*/
+static _Atomic uint64_t       s_spec_lo;       /* lock-free bands[0..7]     */
+static _Atomic uint64_t       s_spec_hi;       /* lock-free bands[8..15]    */
+static _Atomic bool           s_pb_spec_active;
+static _Atomic bool           s_pb_spec_reset_req;
+
+static void spec_publish(const uint8_t bands[JR_SPECTRUM_BANDS])
+{
+    uint64_t lo = 0u;
+    uint64_t hi = 0u;
+    memcpy(&lo, &bands[0], sizeof(lo));
+    memcpy(&hi, &bands[8], sizeof(hi));
+    atomic_store_explicit(&s_spec_lo, lo, memory_order_relaxed);
+    atomic_store_explicit(&s_spec_hi, hi, memory_order_relaxed);
+}
+
+static void spec_clear(void)
+{
+    atomic_store_explicit(&s_spec_lo, 0u, memory_order_relaxed);
+    atomic_store_explicit(&s_spec_hi, 0u, memory_order_relaxed);
+}
+
+static void pb_spec_clear_if_active(void)
+{
+    const bool was_active = atomic_exchange(&s_pb_spec_active, false);
+    const bool reset_req = atomic_exchange(&s_pb_spec_reset_req, false);
+    if (was_active || reset_req) {
+        jr_spectrum_reset(&s_pb_spec);
+        spec_clear();
+    }
+}
 
 /* PLAYBACK TELEMETRY (N6.2). A 60 s reply that stutters once leaves no trace
  * in the transport counters — the socket delivered every byte — so "choppy"
@@ -861,6 +894,10 @@ static int src_read(void *ctx, jr_pcm_t *frame, size_t max_samples)
         frame, n, &s_capture_ops);
     atomic_store(&s_last_wait_us, (uint32_t)(esp_timer_get_time() - wait_t0));
     if (capture != JR_AUDIO_CAPTURE_LIVE || !atomic_load(&s_microphone_enabled)) {
+        jr_spectrum_reset(&s_mic_spec);
+        if (!atomic_load(&s_pb_spec_active)) {
+            spec_clear();
+        }
         if (capture == JR_AUDIO_CAPTURE_SILENT ||
             (capture == JR_AUDIO_CAPTURE_LIVE && !atomic_load(&s_microphone_enabled))) {
             memset(frame, 0, n * sizeof(*frame));
@@ -921,6 +958,23 @@ static int src_read(void *ctx, jr_pcm_t *frame, size_t max_samples)
     float clean_rms = jr_dsp_rms(clean, n);
     atomic_store(&s_clean_rms_q8, (uint32_t)(clean_rms * 256.0f));
 
+    /* Feed live capture spectrum only when unmuted (not privacy-paused) and
+     * speaker playback is not active, so visuals dance to room/voice audio
+     * while listening and to Jarvis's speech while replying. */
+    if (atomic_load(&s_microphone_enabled) && !atomic_load(&s_sleeping) &&
+        !jr_audio_playback_pending() && !atomic_load(&s_pb_spec_active)) {
+        jr_spectrum_feed(&s_mic_spec, clean, n);
+        if (atomic_load(&s_microphone_enabled) && !atomic_load(&s_sleeping) &&
+            !jr_audio_playback_pending() && !atomic_load(&s_pb_spec_active)) {
+            spec_publish(s_mic_spec.bands);
+        } else if (!atomic_load(&s_pb_spec_active)) {
+            jr_spectrum_reset(&s_mic_spec);
+            spec_clear();
+        }
+    } else {
+        jr_spectrum_reset(&s_mic_spec);
+    }
+
     /* Make-up for the PGA that is really applied: while speaking the PGA is
      * turned down for the canceller and the owner's level is given back here,
      * after it. Computed per frame from the codec bookkeeping, so the switch
@@ -937,6 +991,10 @@ static int src_read(void *ctx, jr_pcm_t *frame, size_t max_samples)
     if (!atomic_load(&s_microphone_enabled)) {
         memset(frame, 0, n * sizeof(*frame));
         atomic_store(&s_clean_rms_q8, 0u);
+        jr_spectrum_reset(&s_mic_spec);
+        if (!atomic_load(&s_pb_spec_active)) {
+            spec_clear();
+        }
     }
     xSemaphoreGive(s_adc_guard);
     if (reopen_mic) mic_reopen_cycle();
@@ -998,6 +1056,17 @@ uint16_t jr_audio_playback_live_rms(void)
 {
     const uint32_t rms = atomic_load(&s_pb_live_rms);
     return (uint16_t)(rms > 32767u ? 32767u : rms);
+}
+
+void jr_audio_get_spectrum(uint8_t out_bands[16])
+{
+    if (out_bands == NULL) {
+        return;
+    }
+    const uint64_t lo = atomic_load_explicit(&s_spec_lo, memory_order_relaxed);
+    const uint64_t hi = atomic_load_explicit(&s_spec_hi, memory_order_relaxed);
+    memcpy(&out_bands[0], &lo, sizeof(lo));
+    memcpy(&out_bands[8], &hi, sizeof(hi));
 }
 
 /* ======================================================================== *
@@ -1145,6 +1214,9 @@ static void sink_mute_now(void *ctx)
     portEXIT_CRITICAL(&s_pb_lock);
     atomic_store(&s_playback_tail_until_ms, 0);
     atomic_store(&s_pb_live_rms, 0u);
+    atomic_store(&s_pb_spec_active, false);
+    atomic_store(&s_pb_spec_reset_req, true);
+    spec_clear();
     if (s_feeder != NULL) xTaskNotifyGive(s_feeder);
 }
 
@@ -1160,6 +1232,7 @@ static void feeder_task(void *arg)
     (void)arg;
     int16_t *const chunk = s_feed_chunk;
     jr_jitter_init(&s_jitter, atomic_load(&s_pb_preroll_ms));
+    jr_spectrum_init(&s_pb_spec);
     s_pb_prime_target = atomic_load(&s_pb_preroll_ms) * 24u;
     for (;;) {
         (void)audio_reconcile(pdMS_TO_TICKS(100));
@@ -1167,6 +1240,7 @@ static void feeder_task(void *arg)
             atomic_load(&s_sleeping)) {
             s_pb_prev_wrote = false;
             atomic_store(&s_pb_live_rms, 0u);
+            pb_spec_clear_if_active();
             ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
             continue;
         }
@@ -1266,6 +1340,7 @@ static void feeder_task(void *arg)
         }
         if (hold) {
             atomic_store(&s_pb_live_rms, 0u);
+            pb_spec_clear_if_active();
             /* Event-driven pre-roll wait: pb_enqueue wakes us immediately as
              * chunks arrive; bounded timeout guarantees PB_PRIME_MAX_WAIT_MS
              * fires on time even for a short reply. */
@@ -1284,6 +1359,7 @@ static void feeder_task(void *arg)
         }
         if (got == 0) {
             atomic_store(&s_pb_live_rms, 0u);
+            pb_spec_clear_if_active();
             if (jo.gap_opened) {
                 /* The ring ran dry while the tail of the last write was still
                  * audible: a hole. Whatever arrives next must rebuild a
@@ -1335,13 +1411,21 @@ static void feeder_task(void *arg)
                     rms = 32767u;
                 }
                 atomic_store(&s_pb_live_rms, rms);
+                if (atomic_exchange(&s_pb_spec_reset_req, false)) {
+                    jr_spectrum_reset(&s_pb_spec);
+                }
+                jr_spectrum_feed(&s_pb_spec, chunk, got);
+                atomic_store(&s_pb_spec_active, true);
+                spec_publish(s_pb_spec.bands);
             } else {
                 atomic_store(&s_pb_live_rms, 0u);
+                pb_spec_clear_if_active();
             }
             wr = esp_codec_dev_write(s_dac, chunk,
                                     (int)(got * sizeof(int16_t)));
         } else {
             atomic_store(&s_pb_live_rms, 0u);
+            pb_spec_clear_if_active();
         }
         /* Publish the tail BEFORE dropping in-flight ownership. */
         atomic_store(&s_playback_tail_until_ms,
@@ -1391,6 +1475,8 @@ esp_err_t jr_audio_init(void)
 
     acquire_handles();
     jr_mic_watch_init(&s_mic_watch);
+    jr_spectrum_init(&s_mic_spec);
+    spec_clear();
     s_adc_guard = xSemaphoreCreateMutex();
     s_dac_guard = xSemaphoreCreateMutex();
     if (s_adc_guard == NULL || s_dac_guard == NULL) return ESP_ERR_NO_MEM;
@@ -1646,6 +1732,9 @@ void jr_audio_flush_playback(void)
     portEXIT_CRITICAL(&s_pb_lock);
     atomic_store(&s_playback_tail_until_ms, 0);
     atomic_store(&s_pb_live_rms, 0u);
+    atomic_store(&s_pb_spec_active, false);
+    atomic_store(&s_pb_spec_reset_req, true);
+    spec_clear();
     if (s_feeder != NULL) xTaskNotifyGive(s_feeder);
 }
 
@@ -1789,8 +1878,14 @@ void jr_audio_set_microphone_enabled(bool enabled)
             }
         }
         atomic_store(&s_clean_rms_q8, 0u);
+        jr_spectrum_reset(&s_mic_spec);
+        if (!atomic_load(&s_pb_spec_active)) {
+            spec_clear();
+        }
         atomic_store(&s_clear_capture_taps, false);
         xSemaphoreGive(s_adc_guard);
+    } else if (!enabled && !atomic_load(&s_pb_spec_active)) {
+        spec_clear();
     }
     if (was != enabled && s_feeder != NULL) xTaskNotifyGive(s_feeder);
 }

@@ -15,6 +15,7 @@
  */
 #include "jr_display/hud_render.h"
 #include "jr_display/tilt.h"
+#include "showpiece_gfx.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -3275,6 +3276,211 @@ static void test_listening_halo_reactive_to_mic_amp(void)
     free(quiet); free(loud); free(strips);
 }
 
+static void test_wave4_orrery_ephemeris_and_rendering(void)
+{
+    jr_orrery_eph_t e1, e_fb, e_half;
+    jr_orrery_ephemeris(2026u, 11u, 23u, 12, 0, 0, &e1);
+    jr_orrery_ephemeris(0u, 0u, 0u, 12, 0, 0, &e_fb);
+    CHECK(memcmp(&e1, &e_fb, sizeof e1) == 0, "year==0 falls back to 2026-11-23");
+    CHECK(e1.moon_phase_q16 < 65536u, "moon phase bounded in [0, 65535]");
+    for (int i = 0; i < JR_ORRERY_PLANETS; ++i) {
+        for (int j = i + 1; j < JR_ORRERY_PLANETS; ++j) {
+            CHECK(e1.planet_q16[i] != e1.planet_q16[j],
+                  "planets %d and %d have distinct longitudes (%u vs %u)",
+                  i, j, (unsigned)e1.planet_q16[i], (unsigned)e1.planet_q16[j]);
+        }
+    }
+    /* Advance 15 days (~half synodic month): moon phase moves by ~half turn */
+    jr_orrery_ephemeris(2026u, 12u, 8u, 12, 0, 0, &e_half);
+    const uint32_t dphase = (e_half.moon_phase_q16 - e1.moon_phase_q16) & 0xFFFFu;
+    CHECK(dphase > 26000u && dphase < 40000u,
+          "15 days advances moon phase by ~half cycle (%u Q16)", (unsigned)dphase);
+
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = calloc(px, sizeof *whole);
+    uint16_t *strips = calloc(px, sizeof *strips);
+    uint16_t *tilted = calloc(px, sizeof *tilted);
+    if (!whole || !strips || !tilted) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(whole); free(strips); free(tilted); return;
+    }
+
+    for (int swap = 0; swap < 2; ++swap) {
+        memset(whole, 0, px * sizeof *whole);
+        memset(strips, 0, px * sizeof *strips);
+        jr_showpiece_orrery_rows(whole, 0, HUD_H, swap != 0, 4200u,
+                                 2026u, 11u, 23u, 10, 10, 30, 0, 0, NULL, true, 255);
+        for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+            const int n = y + STRIP_ROWS > HUD_H ? HUD_H - y : STRIP_ROWS;
+            jr_showpiece_orrery_rows(strips + (size_t)y * HUD_W, y, n, swap != 0, 4200u,
+                                     2026u, 11u, 23u, 10, 10, 30, 0, 0, NULL, true, 255);
+        }
+        CHECK(memcmp(whole, strips, px * sizeof *whole) == 0,
+              "ORRERY strip invariance failed (swap=%d)", swap);
+    }
+
+    /* Verify non-zero pixels rendered on ALL 6 measured orbital tracks */
+    static const int orbit_r[JR_ORRERY_PLANETS] = { 53, 79, 104, 130, 154, 183 };
+    for (int p = 0; p < JR_ORRERY_PLANETS; ++p) {
+        size_t lit = 0;
+        const int r_lo = orbit_r[p] - 5;
+        const int r_hi = orbit_r[p] + 5;
+        for (int y = 0; y < HUD_H; ++y) {
+            const int dy2 = 2 * y - 465;
+            for (int x = 0; x < HUD_W; ++x) {
+                const int dx2 = 2 * x - 465;
+                const int d2 = dx2 * dx2 + dy2 * dy2;
+                if (d2 >= 4 * r_lo * r_lo && d2 <= 4 * r_hi * r_hi &&
+                    whole[(size_t)y * HUD_W + x] != 0u) {
+                    lit++;
+                }
+            }
+        }
+        CHECK(lit >= 40u, "ORRERY orbit %d (r=%d) has only %zu lit px", p, orbit_r[p], lit);
+    }
+    /* Verify 6 o'clock Moon Phase Disc at (233, 398) is rendered */
+    size_t moon_lit = 0;
+    for (int y = 384; y <= 412; ++y) {
+        for (int x = 219; x <= 247; ++x) {
+            if (whole[(size_t)y * HUD_W + x] != 0u) { moon_lit++; }
+        }
+    }
+    CHECK(moon_lit >= 350u, "ORRERY moon phase disc lit %zu px", moon_lit);
+
+    /* Verify IMU tilt parallax moves planet pixels */
+    memset(tilted, 0, px * sizeof *tilted);
+    jr_showpiece_orrery_rows(tilted, 0, HUD_H, true, 4200u,
+                             2026u, 11u, 23u, 10, 10, 30, 200, -180, NULL, true, 255);
+    CHECK(memcmp(whole, tilted, px * sizeof *whole) != 0,
+          "ORRERY IMU parallax did not shift planets");
+
+    free(whole); free(strips); free(tilted);
+}
+
+static void test_wave4_reactor_spectrum_bounds_and_strips(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *idle_fb = calloc(px, sizeof *idle_fb);
+    uint16_t *live_fb = calloc(px, sizeof *live_fb);
+    uint16_t *strips = calloc(px, sizeof *strips);
+    if (!idle_fb || !live_fb || !strips) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(idle_fb); free(live_fb); free(strips); return;
+    }
+
+    const uint8_t zero[16] = { 0 };
+    uint8_t loud[16];
+    for (int i = 0; i < 16; ++i) { loud[i] = 230u; }
+
+    jr_showpiece_reactor_rows(idle_fb, 0, HUD_H, false, 1500u, 14, 35, 20, 500,
+                              false, true, 0, 0, zero, 0u, 255);
+    jr_showpiece_reactor_rows(live_fb, 0, HUD_H, false, 1500u, 14, 35, 20, 500,
+                              false, true, 0, 0, loud, 220u, 255);
+
+    /* Count spectrum band pixels (r=95..119) for idle vs loud, and check zero leak outside r<=122 */
+    size_t idle_bar_px = 0, live_bar_px = 0, outside_px = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        const int dy2 = 2 * y - 465;
+        for (int x = 0; x < HUD_W; ++x) {
+            const int dx2 = 2 * x - 465;
+            const int d2 = dx2 * dx2 + dy2 * dy2;
+            const uint16_t ip = idle_fb[(size_t)y * HUD_W + x];
+            const uint16_t lp = live_fb[(size_t)y * HUD_W + x];
+            if (d2 > 4 * 122 * 122) {
+                if (ip != 0u || lp != 0u) { outside_px++; }
+            } else if (d2 >= 4 * 96 * 96 && d2 <= 4 * 119 * 119) {
+                if (ip != 0u) { idle_bar_px++; }
+                if (lp != 0u) { live_bar_px++; }
+            }
+        }
+    }
+    CHECK(outside_px == 0u, "REACTOR leaked %zu px outside r<=122", outside_px);
+    CHECK(live_bar_px > idle_bar_px + 200u,
+          "REACTOR loud spectrum (%zu px) should exceed idle bars (%zu px)",
+          live_bar_px, idle_bar_px);
+
+    /* Strip invariance on both byte orders */
+    for (int swap = 0; swap < 2; ++swap) {
+        memset(live_fb, 0, px * sizeof *live_fb);
+        memset(strips, 0, px * sizeof *strips);
+        jr_showpiece_reactor_rows(live_fb, 0, HUD_H, swap != 0, 3200u, 14, 35, 20, 500,
+                                  false, true, 90, -70, loud, 200u, 255);
+        for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+            const int n = y + STRIP_ROWS > HUD_H ? HUD_H - y : STRIP_ROWS;
+            jr_showpiece_reactor_rows(strips + (size_t)y * HUD_W, y, n, swap != 0,
+                                      3200u, 14, 35, 20, 500,
+                                      false, true, 90, -70, loud, 200u, 255);
+        }
+        CHECK(memcmp(live_fb, strips, px * sizeof *live_fb) == 0,
+              "REACTOR strip invariance failed (swap=%d)", swap);
+    }
+
+    free(idle_fb); free(live_fb); free(strips);
+}
+
+static void test_wave4_holo_3d_core_modes_and_strips(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = calloc(px, sizeof *whole);
+    uint16_t *strips = calloc(px, sizeof *strips);
+    uint16_t *muted = calloc(px, sizeof *muted);
+    if (!whole || !strips || !muted) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(whole); free(strips); free(muted); return;
+    }
+
+    uint8_t spec[16];
+    for (int i = 0; i < 16; ++i) { spec[i] = (uint8_t)(80 + i * 10); }
+
+    /* Strip invariance + strict r<=92 bound on JARVIS Home */
+    for (int swap = 0; swap < 2; ++swap) {
+        memset(whole, 0, px * sizeof *whole);
+        memset(strips, 0, px * sizeof *strips);
+        jr_showpiece_holo_rows(whole, 0, HUD_H, swap != 0, 5000u, 92, JR_HOLO_SPEAK,
+                               120, -80, spec, 180u, 255);
+        for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+            const int n = y + STRIP_ROWS > HUD_H ? HUD_H - y : STRIP_ROWS;
+            jr_showpiece_holo_rows(strips + (size_t)y * HUD_W, y, n, swap != 0,
+                                   5000u, 92, JR_HOLO_SPEAK, 120, -80, spec, 180u, 255);
+        }
+        CHECK(memcmp(whole, strips, px * sizeof *whole) == 0,
+              "HOLO strip invariance failed (swap=%d)", swap);
+    }
+
+    size_t inside = 0, outside = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        const int dy2 = 2 * y - 465;
+        for (int x = 0; x < HUD_W; ++x) {
+            const int dx2 = 2 * x - 465;
+            if (whole[(size_t)y * HUD_W + x] != 0u) {
+                if (dx2 * dx2 + dy2 * dy2 <= 4 * 92 * 92) { inside++; }
+                else { outside++; }
+            }
+        }
+    }
+    CHECK(inside > 1200u, "HOLO drew too few pixels (%zu)", inside);
+    CHECK(outside == 0u, "HOLO leaked %zu px outside r<=92", outside);
+
+    /* MUTED mode renders warm champagne-gold (R > B on average) */
+    memset(muted, 0, px * sizeof *muted);
+    jr_showpiece_holo_rows(muted, 0, HUD_H, false, 5000u, 92, JR_HOLO_MUTED,
+                           0, 0, NULL, 0u, 255);
+    uint64_t rsum = 0, bsum = 0;
+    size_t mlit = 0;
+    for (size_t i = 0; i < px; ++i) {
+        if (muted[i] != 0u) {
+            mlit++;
+            rsum += (muted[i] >> 11) & 31u;
+            bsum += muted[i] & 31u;
+        }
+    }
+    CHECK(mlit > 1000u && rsum > bsum * 2u,
+          "HOLO MUTED should be warm gold (lit=%zu, R=%llu, B=%llu)",
+          mlit, (unsigned long long)rsum, (unsigned long long)bsum);
+
+    free(whole); free(strips); free(muted);
+}
+
 int main(void)
 {
     test_light_deadband_is_today();
@@ -3357,6 +3563,9 @@ int main(void)
     test_minimal_dial_bake_matches_unbaked();
     test_thinking_orbital_comet_band_and_strip_invariance();
     test_listening_halo_reactive_to_mic_amp();
+    test_wave4_orrery_ephemeris_and_rendering();
+    test_wave4_reactor_spectrum_bounds_and_strips();
+    test_wave4_holo_3d_core_modes_and_strips();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);

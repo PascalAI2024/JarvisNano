@@ -48,6 +48,7 @@ extern void pace_tests_run(void);
 extern void timer_tests_run(void);
 extern void notes_tests_run(void);
 extern void audio_power_tests_run(void);
+extern void spectrum_tests_run(void);
 extern void power_charge_tests_run(void);
 
 /* ---- shared fixtures ---- */
@@ -1954,6 +1955,7 @@ int main(void)
     pace_tests_run();
     timer_tests_run();
     notes_tests_run();
+    spectrum_tests_run();
 
     return UNITY_END();
 }

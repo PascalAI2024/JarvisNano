@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>A voice-first J.A.R.V.I.S. desk companion on a round 466×466 AMOLED ESP32-S3.</strong><br>
-  Native Gemini Live duplex voice, 24 built-in voice tools (18 instant 0 ms offline), 8 luxury watch dials, embedded Wi-Fi Command Deck, physical privacy, and deep sleep.
+  Native Gemini Live duplex voice, 24 built-in voice tools (18 instant 0 ms offline), 10 luxury watch dials (incl. live astronomical Orrery &amp; real-time FFT Reactor), 3D holographic voice core, embedded Wi-Fi Command Deck, physical privacy, and deep sleep.
 </p>
 
 <p align="center">
@@ -30,15 +30,29 @@
 </p>
 
 <p align="center">
-  <img src="docs/evidence/20261123-live/watches.png" alt="All 8 luxury watch dials: JARVIS, DIVER, DRESS, PILOT, MINIMAL, FUTURE, SKELETON, CELESTIAL" width="900">
-  <br><em>All <strong>8 luxury watch dials</strong>: JARVIS · DIVER · DRESS · PILOT · MINIMAL · FUTURE · SKELETON · CELESTIAL — with IMU tilt lighting/parallax and PSRAM dial caching.</em>
+  <img src="docs/evidence/20261123-live/watches.png" alt="All 10 luxury watch dials: JARVIS, DIVER, DRESS, PILOT, MINIMAL, FUTURE, SKELETON, CELESTIAL, ORRERY, REACTOR" width="900">
+  <br><em>All <strong>10 luxury watch dials</strong>: JARVIS · DIVER · DRESS · PILOT · MINIMAL · FUTURE · SKELETON · CELESTIAL · ORRERY · REACTOR — with IMU tilt lighting/parallax, real-time planetary ephemeris, live audio FFT, and PSRAM dial caching.</em>
 </p>
 
 <table>
   <tr>
     <td align="center" width="33%">
+      <img src="docs/evidence/20261123-live/orrery.png" alt="Real-time astronomical ORRERY planetarium and Moon phase watch" width="260"><br>
+      <sub><strong>Astronomical Orrery</strong><br>Live Mercury–Saturn ephemeris, Saturn rings &amp; Moon phase</sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/evidence/20261123-live/reactor.png" alt="Machined titanium/copper REACTOR with 32-bar live FFT and 3D Holo Core" width="260"><br>
+      <sub><strong>Reactor FFT &amp; 3D Core</strong><br>32-bar fixed-point audio FFT + rotating 3D geodesic core</sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/evidence/20261123-live/holo-home.png" alt="JARVIS home screen with real-time 3D geodesic holographic core" width="260"><br>
+      <sub><strong>3D Holographic Voice Core</strong><br>IMU-tilted 3D lattice reactive to live speech spectrum</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
       <img src="docs/evidence/20261123-live/weather.png" alt="Living atmospheric WEATHER instrument" width="260"><br>
-      <sub><strong>Atmospheric Weather</strong><br>On-device fetch, sun arc &amp; rain outlook</sub>
+      <sub><strong>Atmospheric Weather</strong><br>On-device fetch, thermal arc, sun orb &amp; rain ring</sub>
     </td>
     <td align="center" width="33%">
       <img src="docs/evidence/20261123-live/stopwatch.png" alt="Live chronograph stopwatch and timer overlay on glass" width="260"><br>
@@ -63,8 +77,8 @@ JarvisNano turns the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** into a standalone
 |---|---|
 | **Voice-First Gemini Live** | Dedicated `jr_wake` WakeNet9 `"Jarvis"` task (cuts replies on wake word), 24 kHz shared full-duplex I²S clock, 16 kHz AEC-clean uplink, 24 kHz adaptive jitter-buffered speaker playback, DAC-synced speech cadence halo, and warm 2nd-harmonic chimes. |
 | **24 Built-in Voice Tools** | **18 instant 0 ms offline tools** + **6 JarvisMCP gateway tools** (full breakdown below) — zero network round-trips for timers, Pomodoro focus, 4-lap stopwatch, NVS desk notes, briefings, and device self-control. |
-| **Glass-2 Luminous OLED** | Single-compositor 466×466 engine: 5-screen spatial ring (`JARVIS · WATCH · WEATHER · STATUS · ACTIVITY` + summoned `DESK`), **8 luxury watch dials** with IMU tilt lighting/parallax & PSRAM dial cache, 60 Hz TE-synchronized flush (`GPIO13`), and CO5300 HBM sunlight boost (`0x66`). |
-| **Wi-Fi Command Deck & Codex** | Zero-dependency embedded dashboard at `http://<device-ip>/`: live 466×466 AMOLED mirror, 8-watch switcher, Pomodoro/Stopwatch studio, NVS Notes, drag-and-drop OLED Canvas pusher, rim-arc decision cards, live logs, board probe, and crash forensics — plus paired **ZeroChat** private-Wi-Fi phone mode. |
+| **Glass-2 Luminous OLED** | Single-compositor 466×466 engine: 5-screen spatial ring (`JARVIS · WATCH · WEATHER · STATUS · ACTIVITY` + summoned `DESK`), **10 luxury watch dials** (incl. real-time 6-planet `ORRERY` + 32-bar FFT `REACTOR`), real-time **3D Geodesic Holo Core**, IMU tilt lighting/parallax, 60 Hz TE sync (`GPIO13`), and CO5300 HBM sunlight boost (`0x66`). |
+| **Wi-Fi Command Deck & Codex** | Zero-dependency embedded dashboard at `http://<device-ip>/`: live 466×466 AMOLED mirror, 10-watch switcher, 3D Holo toggle, live 16-band spectrum meter, Pomodoro/Stopwatch studio, NVS Notes, drag-and-drop OLED Canvas pusher, rim-arc decision cards, live logs, board probe, and crash forensics — plus paired **ZeroChat** private-Wi-Fi phone mode. |
 | **Adaptive Power & Physical Privacy** | Adaptive CPU gears (`240 / 160 MHz`), 21 Hz low-power rest IMU, Wi-Fi minimum modem sleep, deep sleep with RTC-persisted timers & ACTIVITY, QMI8658 WoM lift-wake + CST9217 touch-wake, and **inviolate physical privacy** (inner-disc hold or face-down flip; remote APIs can never unmute). |
 
 ### 24 Built-in Voice Tools (18 Offline · 6 Gateway)
@@ -74,8 +88,8 @@ JarvisNano turns the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** into a standalone
 | **Timers & Focus** | 0 ms offline | `set_timer` (5 s–12 h, deep-sleep surviving), `cancel_timer`, `list_timers`, `start_focus` (Pomodoro, defaults 25 min), `stopwatch` (start/stop/4-lap/reset/status) |
 | **Desk Notes & Briefings** | 0 ms offline | `add_note` (up to 6 NVS-persisted notes), `list_notes`, `clear_notes`, `daily_briefing` (date, weather, 12 h rain, notes, timers, tasks, battery) |
 | **Time, Weather & Choices** | 0 ms offline | `current_time`, `weather_here` (on-device cached forecast), `ask_user` (interactive rim-arc choice card on glass) |
-| **Device Self-Control** | 0 ms offline | `set_glass` (ring screen & 8 watch styles), `set_volume`, `set_brightness`, `set_sunlight` (CO5300 HBM with thermal/battery guard), `set_ui_sounds`, `device_status` |
-| **JarvisMCP Gateway** | HTTPS keep-alive | `search_tools`, `execute_tool` (web search, news, weather, crypto, stocks, Wikipedia, calendar — fail-closed allowlist), `recall_memory`, `remember`, `delegate_task`, `delegated_tasks` |
+| **Device Self-Control** | 0 ms offline | `set_glass` (ring screen & 10 watch styles), `set_volume`, `set_brightness`, `set_sunlight` (CO5300 HBM with thermal/battery guard), `set_ui_sounds`, `device_status` |
+| **JarvisMCP Gateway** | HTTPS keep-alive (32 KB PSRAM + JSON projector) | `search_tools`, `execute_tool` (web search, news, weather, crypto, stocks, Wikipedia, calendar — fail-closed allowlist), `recall_memory`, `remember`, `delegate_task`, `delegated_tasks` |
 
 ---
 
@@ -93,7 +107,7 @@ flowchart LR
         Wake["jr_wake (WakeNet9 'Jarvis' Task)"]
         Transport["jr_transport (Gemini Live WSS)"]
         Tools["jr_tools (18 Offline + Keep-Alive MCP)"]
-        Glass["jr_display (Glass-2 · 8 Dials · 60 Hz TE · HBM)"]
+        Glass["jr_display (Glass-2 · 10 Dials · 3D Holo · 60 Hz TE · HBM)"]
         HTTP["HTTP Control Plane + Embedded Command Deck"]
     end
 

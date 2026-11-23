@@ -461,8 +461,16 @@ void jr_display_set_hbm(bool enabled);
 bool jr_display_get_hbm(void);
 void jr_display_get_te_stats(bool *enabled, uint32_t *waits, uint32_t *timeouts);
 
+/* Cross-component Wave 4 audio/display contracts (exact signatures). */
+void jr_audio_get_spectrum(uint8_t out_bands[16]);
+void jr_display_spectrum_set(const uint8_t bands[16]);
+void jr_display_date_set_ymd(uint16_t year, uint8_t month, uint8_t day);
+void jr_display_holo_set(bool enabled);
+bool jr_display_holo_get(void);
+
 void timer_publish_now(uint32_t now_ms);
 void persist_watch_style(uint8_t style);
+void persist_holo_enabled(bool enabled);
 void device_confirm_cue(void);
 bool device_chip_temp_c(float *out_c);
 void persist_ota_attempt(int slot);

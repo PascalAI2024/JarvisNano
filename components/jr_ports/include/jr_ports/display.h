@@ -40,6 +40,8 @@ typedef enum {
     JR_FACE_DIAL_FUTURE,
     JR_FACE_DIAL_SKELETON,  /* 2026-11-10: appended, so no number moves */
     JR_FACE_DIAL_CELESTIAL,
+    JR_FACE_DIAL_ORRERY,    /* 2026-11-23: Wave 4 showpiece dials */
+    JR_FACE_DIAL_REACTOR,
     JR_FACE_COUNT       /* bound, not a face: clip caches and clamps use it */
 } jr_face_t;
 

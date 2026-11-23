@@ -94,6 +94,8 @@ BLACK_FLOOR = {
     "future": 28,
     "skeleton": 0,
     "celestial": 0,
+    "orrery": 0,
+    "reactor": 24,
 }
 BLOCK_H = 32
 
@@ -140,6 +142,8 @@ DIALS = {
     "future": ("20260902-dial-concepts-codex-future.png", 1),
     "skeleton":  ("20261110-dial-skeleton-codex-nowheel.png", None),
     "celestial": ("20261110-dial-concepts-codex-new.png", 1),
+    "orrery":    ("20261123-dial-orrery-source.png", None),
+    "reactor":   ("20261123-dial-reactor-source.png", None),
 }
 
 
@@ -341,7 +345,10 @@ def bake(style: str, sheets: Path, write: bool = True) -> dict:
     sheet = Image.open(sheets / stem)
     disc = fit_disc(sheet if q is None else quadrant(sheet, q))
     rgb = np.asarray(disc).copy()
-    rgb, hole = fill_centre_hole(rgb)
+    if style in ("orrery", "reactor"):
+        hole = 0
+    else:
+        rgb, hole = fill_centre_hole(rgb)
     geom = {"hole_r": hole}
     if style == "diver":
         rgb, geom["date_box"] = blank_date_window(rgb)

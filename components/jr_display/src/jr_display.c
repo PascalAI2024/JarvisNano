@@ -17,6 +17,7 @@
 #include "jr_display/glass.h"
 #include "jr_display/perf_knob.h"
 #include "jr_display/glass_icon.h"
+#include "showpiece_gfx.h"
 
 #include <stdio.h>
 #include <stddef.h>
@@ -295,6 +296,8 @@ static const char *face_asset(jr_face_t face)
     case JR_FACE_DIAL_FUTURE: return JR_DISPLAY_MOUNT_POINT "/dial_future.eaf";
     case JR_FACE_DIAL_SKELETON:  return JR_DISPLAY_MOUNT_POINT "/dial_skeleton.eaf";
     case JR_FACE_DIAL_CELESTIAL: return JR_DISPLAY_MOUNT_POINT "/dial_celestial.eaf";
+    case JR_FACE_DIAL_ORRERY:    return JR_DISPLAY_MOUNT_POINT "/dial_orrery.eaf";
+    case JR_FACE_DIAL_REACTOR:   return JR_DISPLAY_MOUNT_POINT "/dial_reactor.eaf";
     default:                return NULL;
     }
 }
@@ -316,7 +319,9 @@ static jr_face_t face_fallback(jr_face_t face)
     case JR_FACE_DIAL_PILOT:
     case JR_FACE_DIAL_FUTURE:
     case JR_FACE_DIAL_SKELETON:
-    case JR_FACE_DIAL_CELESTIAL: return JR_FACE_IDLE;
+    case JR_FACE_DIAL_CELESTIAL:
+    case JR_FACE_DIAL_ORRERY:
+    case JR_FACE_DIAL_REACTOR: return JR_FACE_IDLE;
     default:               return face;
     }
 }
@@ -342,7 +347,9 @@ static uint32_t face_fps(jr_face_t face)
     case JR_FACE_DIAL_PILOT:
     case JR_FACE_DIAL_FUTURE:
     case JR_FACE_DIAL_SKELETON:
-    case JR_FACE_DIAL_CELESTIAL: return 24;
+    case JR_FACE_DIAL_CELESTIAL:
+    case JR_FACE_DIAL_ORRERY:
+    case JR_FACE_DIAL_REACTOR: return 24;
     default:              return 24;   /* engine + panel ceiling (P2.7) */
     }
 }
@@ -377,6 +384,10 @@ extern const uint8_t s_embedded_skeleton_start[] asm("_binary_dial_skeleton_eaf_
 extern const uint8_t s_embedded_skeleton_end[]   asm("_binary_dial_skeleton_eaf_end");
 extern const uint8_t s_embedded_celestial_start[] asm("_binary_dial_celestial_eaf_start");
 extern const uint8_t s_embedded_celestial_end[]   asm("_binary_dial_celestial_eaf_end");
+extern const uint8_t s_embedded_orrery_start[]    asm("_binary_dial_orrery_eaf_start");
+extern const uint8_t s_embedded_orrery_end[]      asm("_binary_dial_orrery_eaf_end");
+extern const uint8_t s_embedded_reactor_start[]   asm("_binary_dial_reactor_eaf_start");
+extern const uint8_t s_embedded_reactor_end[]     asm("_binary_dial_reactor_eaf_end");
 static const uint8_t *embedded_dial(jr_face_t face, size_t *size)
 {
     switch (face) {
@@ -386,6 +397,12 @@ static const uint8_t *embedded_dial(jr_face_t face, size_t *size)
     case JR_FACE_DIAL_CELESTIAL:
         *size = (size_t)(s_embedded_celestial_end - s_embedded_celestial_start);
         return s_embedded_celestial_start;
+    case JR_FACE_DIAL_ORRERY:
+        *size = (size_t)(s_embedded_orrery_end - s_embedded_orrery_start);
+        return s_embedded_orrery_start;
+    case JR_FACE_DIAL_REACTOR:
+        *size = (size_t)(s_embedded_reactor_end - s_embedded_reactor_start);
+        return s_embedded_reactor_start;
     default:
         return NULL;
     }
@@ -946,7 +963,7 @@ static uint16_t *s_dial_frame;                       /* width*height, PSRAM */
 static jr_face_t s_dial_frame_face = JR_FACE_COUNT;  /* the art it holds */
 static bool      s_dial_blit;
 
-#define DIAL_SLOTS          6
+#define DIAL_SLOTS          8
 #define DIAL_PSRAM_FLOOR    (2U * 1024U * 1024U)   /* free PSRAM a new frame must leave */
 #define DIAL_PSRAM_LOW      (1U * 1024U * 1024U)   /* below this the idle frames go */
 #define DIAL_WARM_SETTLE_MS 1500U                  /* on the glass this long before a warm-up */
@@ -2246,12 +2263,60 @@ static void brightness_pump(void)
 #define NAV_OVL_MASK      0xC0u
 #define NAV_FORWARD_BIT   0x100u
 #define NAV_SERIAL_SHIFT  9
-/* WATCH STYLE: three bits above the 8-bit serial, preserved by every nav step,
- * changed only by NAV_OP_STYLE. Pinned by the shell suite. */
+/* WATCH STYLE: four bits (17..20) above the 8-bit serial, preserved by every
+ * nav step, changed only by NAV_OP_STYLE. Pinned by the shell suite. */
 #define NAV_STYLE_SHIFT   17
-#define NAV_STYLE_MASK    (0x7u << NAV_STYLE_SHIFT)
-_Static_assert((uint32_t)JR_WATCH_STYLE_COUNT <= 8u,
+#define NAV_STYLE_MASK    (0xFu << NAV_STYLE_SHIFT)
+_Static_assert((uint32_t)JR_WATCH_STYLE_COUNT <= 16u,
                "JR_WATCH_STYLE_COUNT exceeds the nav word's style field");
+
+/* Wave 4: Lock-free audio spectrum (16 bands), astronomical YMD date, and 3D
+ * Geodesic Hologram toggle. Zero internal SRAM bloat (24 B total). */
+static _Atomic uint64_t s_spec_lo;
+static _Atomic uint64_t s_spec_hi;
+static volatile uint32_t s_ymd_word;
+static volatile uint32_t s_holo_on;
+static volatile uint32_t s_holo_explicit;
+
+static void spectrum_load(uint8_t out[16])
+{
+    const uint64_t lo = atomic_load_explicit(&s_spec_lo, memory_order_relaxed);
+    const uint64_t hi = atomic_load_explicit(&s_spec_hi, memory_order_relaxed);
+    for (int i = 0; i < 8; ++i) {
+        out[i]     = (uint8_t)((lo >> (i * 8)) & 0xFFu);
+        out[i + 8] = (uint8_t)((hi >> (i * 8)) & 0xFFu);
+    }
+}
+
+void jr_display_spectrum_set(const uint8_t bands[16])
+{
+    uint64_t lo = 0u, hi = 0u;
+    if (bands != NULL) {
+        for (int i = 0; i < 8; ++i) {
+            lo |= ((uint64_t)bands[i]) << (i * 8);
+            hi |= ((uint64_t)bands[i + 8]) << (i * 8);
+        }
+    }
+    atomic_store_explicit(&s_spec_lo, lo, memory_order_relaxed);
+    atomic_store_explicit(&s_spec_hi, hi, memory_order_relaxed);
+}
+
+void jr_display_date_set_ymd(uint16_t year, uint8_t month, uint8_t day)
+{
+    const uint32_t w = ((uint32_t)year << 16) | ((uint32_t)month << 8) | (uint32_t)day;
+    __atomic_store_n(&s_ymd_word, w, __ATOMIC_RELEASE);
+}
+
+void jr_display_holo_set(bool enabled)
+{
+    __atomic_store_n(&s_holo_explicit, 1u, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_holo_on, enabled ? 1u : 0u, __ATOMIC_RELEASE);
+}
+
+bool jr_display_holo_get(void)
+{
+    return __atomic_load_n(&s_holo_on, __ATOMIC_ACQUIRE) != 0u;
+}
 
 _Static_assert((uint32_t)JR_DISPLAY_SPACE_COUNT <= NAV_SPACE_MASK + 1u,
                "JR_DISPLAY_SPACE_COUNT exceeds the nav word's space field — "
@@ -3584,9 +3649,11 @@ static jr_face_t watch_dial_of_style(uint8_t style)
     case JR_WATCH_DRESS:     return JR_FACE_DIAL_DRESS;
     case JR_WATCH_PILOT:     return JR_FACE_DIAL_PILOT;
     case JR_WATCH_FUTURE:    return JR_FACE_DIAL_FUTURE;
-    case JR_WATCH_SKELETON:  return JR_FACE_DIAL_SKELETON;
-    case JR_WATCH_CELESTIAL: return JR_FACE_DIAL_CELESTIAL;
-    default:                 return JR_FACE_COUNT;
+    case JR_WATCH_SKELETON:      return JR_FACE_DIAL_SKELETON;
+    case JR_WATCH_CELESTIAL:     return JR_FACE_DIAL_CELESTIAL;
+    case JR_WATCH_STYLE_ORRERY:  return JR_FACE_DIAL_ORRERY;
+    case JR_WATCH_STYLE_REACTOR: return JR_FACE_DIAL_REACTOR;
+    default:                     return JR_FACE_COUNT;
     }
 }
 
@@ -4806,8 +4873,16 @@ static void tilt_tick(uint32_t now_ms)
 {
     const jr_display_tilt_fn_t src = __atomic_load_n(&s_tilt_src, __ATOMIC_ACQUIRE);
     int x_mg = 0, y_mg = 0;
+    const bool dial_tilt =
+        s_style_shown == (uint8_t)JR_WATCH_CELESTIAL ||
+        s_style_shown == (uint8_t)JR_WATCH_STYLE_ORRERY ||
+        s_style_shown == (uint8_t)JR_WATCH_STYLE_REACTOR;
+    const bool holo_tilt =
+        (__atomic_load_n(&s_holo_on, __ATOMIC_ACQUIRE) != 0u) &&
+        ((jr_display_space_t)(__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) & NAV_SPACE_MASK) ==
+            JR_DISPLAY_SPACE_JARVIS);
     const bool live = src != NULL &&
-        s_style_shown == (uint8_t)JR_WATCH_CELESTIAL &&
+        (dial_tilt || holo_tilt) &&
         (__atomic_load_n(&s_panel_off, __ATOMIC_ACQUIRE) & 3U) == 0U &&
         jr_display_render_fps() >= JR_DISPLAY_RENDER_FPS &&
         src(&x_mg, &y_mg);
@@ -5031,8 +5106,37 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
         .tilt_y = s_tilt.y,
     };
     split_mark(JR_DISPLAY_SPLIT_CLOCK_CELLS, &sm);
-    hud_overlay_watch(pixels, y1, y2 - y1, ctx->board.swap_color_bytes, &hw,
-                      strength, style);
+    if (style == (int)JR_WATCH_STYLE_ORRERY) {
+        const uint32_t frame_ms = s_fade_prev_ms != 0u ? s_fade_prev_ms
+                                                       : (uint32_t)(esp_timer_get_time() / 1000);
+        const uint32_t ymd = __atomic_load_n(&s_ymd_word, __ATOMIC_ACQUIRE);
+        const uint16_t year = (uint16_t)(ymd >> 16);
+        const uint8_t month = (uint8_t)((ymd >> 8) & 0xFFu);
+        const uint8_t day   = (uint8_t)(ymd & 0xFFu);
+        jr_showpiece_orrery_rows(pixels, y1, y2 - y1, ctx->board.swap_color_bytes,
+                                 frame_ms, year, month, day,
+                                 hw.hh, hw.mm, hw.ss,
+                                 hw.tilt_x, hw.tilt_y, hw.light, hw.alive, strength);
+        hud_overlay_watch(pixels, y1, y2 - y1, ctx->board.swap_color_bytes, &hw,
+                          strength, style);
+    } else if (style == (int)JR_WATCH_STYLE_REACTOR) {
+        const uint32_t frame_ms = s_fade_prev_ms != 0u ? s_fade_prev_ms
+                                                       : (uint32_t)(esp_timer_get_time() / 1000);
+        uint8_t spec[16];
+        spectrum_load(spec);
+        const uint8_t amp = (uint8_t)diag_load(&ctx->requested_amplitude);
+        if (!baked) {
+            hud_overlay_watch(pixels, y1, y2 - y1, ctx->board.swap_color_bytes, &hw,
+                              strength, style);
+        }
+        jr_showpiece_reactor_rows(pixels, y1, y2 - y1, ctx->board.swap_color_bytes,
+                                  frame_ms, hw.hh, hw.mm, hw.ss, hw.ms,
+                                  hw.still, hw.alive, hw.tilt_x, hw.tilt_y,
+                                  spec, amp, strength);
+    } else {
+        hud_overlay_watch(pixels, y1, y2 - y1, ctx->board.swap_color_bytes, &hw,
+                          strength, style);
+    }
     split_mark(JR_DISPLAY_SPLIT_CLOCK_FACE, &sm);
     watch_cells(ctx, y1, y2, pixels, style, strength, baked);
     split_mark(JR_DISPLAY_SPLIT_CLOCK_CELLS, &sm);
@@ -8996,6 +9100,38 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
     hud_overlay_frame(pixels, y1, nrows, now_ms,
                       ctx->board.swap_color_bytes, &env);
 
+    /* Wave 4: Real-Time 3D Geodesic Hologram Core on JARVIS Home (r <= 92)
+     * when enabled via jr_display_holo_set(true). Drawn under sheets, asks,
+     * captions, and ripples so modal/chrome layers always read cleanly on top. */
+    if (__atomic_load_n(&s_holo_on, __ATOMIC_ACQUIRE) != 0u &&
+        s_space_to == (uint8_t)JR_DISPLAY_SPACE_JARVIS &&
+        s_watch_s == 0 && s_detail_ease == 0 && s_shade_ease == 0 &&
+        __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE) == 0 && s_ask_ease == 0) {
+        const uint32_t nav_h = __atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE);
+        if ((jr_display_space_t)(nav_h & NAV_SPACE_MASK) == JR_DISPLAY_SPACE_JARVIS) {
+            const jr_face_t af = (jr_face_t)diag_load(&ctx->applied_face);
+            jr_holo_mode_t hmode = JR_HOLO_IDLE;
+            if (env.privacy_muted || af == JR_FACE_MUTED) {
+                hmode = JR_HOLO_MUTED;
+            } else if (af == JR_FACE_SPEAKING) {
+                hmode = JR_HOLO_SPEAK;
+            } else if (af == JR_FACE_LISTENING) {
+                hmode = JR_HOLO_LISTEN;
+            } else if (af == JR_FACE_THINKING || af == JR_FACE_LINKING) {
+                hmode = JR_HOLO_THINK;
+            }
+            const int holo_s = 256 - s_space_black;
+            if (holo_s > 0) {
+                const uint32_t frame_ms = s_fade_prev_ms != 0u ? s_fade_prev_ms : now_ms;
+                uint8_t spec[16];
+                spectrum_load(spec);
+                jr_showpiece_holo_rows(pixels, y1, nrows, ctx->board.swap_color_bytes,
+                                       frame_ms, 92, hmode, s_tilt.x, s_tilt.y,
+                                       spec, env.amp, holo_s > 255 ? 255 : holo_s);
+            }
+        }
+    }
+
     /* TRANS-05 tap ripple: the EARLIEST overlay — it is feedback, not
      * chrome, so the ask presentation and the caption both draw over it.
      * Expiry is the age gate alone; only the app task writes the slot. */
@@ -10022,6 +10158,8 @@ static int dial_slot_of(jr_face_t dial)
     case JR_FACE_DIAL_FUTURE:    return 3;
     case JR_FACE_DIAL_SKELETON:  return 4;
     case JR_FACE_DIAL_CELESTIAL: return 5;
+    case JR_FACE_DIAL_ORRERY:    return 6;
+    case JR_FACE_DIAL_REACTOR:   return 7;
     default:                     return -1;
     }
 }
@@ -10255,7 +10393,8 @@ static void clip_release_unbound_dial(jr_display_ctx_t *ctx,
 {
     const jr_face_t dials[] = { JR_FACE_DIAL_DIVER, JR_FACE_DIAL_DRESS,
                                JR_FACE_DIAL_PILOT, JR_FACE_DIAL_FUTURE,
-                               JR_FACE_DIAL_SKELETON, JR_FACE_DIAL_CELESTIAL };
+                               JR_FACE_DIAL_SKELETON, JR_FACE_DIAL_CELESTIAL,
+                               JR_FACE_DIAL_ORRERY, JR_FACE_DIAL_REACTOR };
     for (size_t i = 0; i < sizeof dials / sizeof dials[0]; ++i) {
         jr_display_clip_t *candidate = &ctx->clips[dials[i]];
         if (clip == candidate && clip != ctx->bound && candidate->data != NULL &&
@@ -10279,7 +10418,9 @@ static bool dial_show(jr_display_ctx_t *ctx, jr_face_t dial)
     case JR_FACE_DIAL_PILOT:
     case JR_FACE_DIAL_FUTURE:
     case JR_FACE_DIAL_SKELETON:
-    case JR_FACE_DIAL_CELESTIAL: break;
+    case JR_FACE_DIAL_CELESTIAL:
+    case JR_FACE_DIAL_ORRERY:
+    case JR_FACE_DIAL_REACTOR: break;
     default:                  return false;
     }
     if ((ctx->missing_faces & (1U << dial)) != 0U) {
@@ -10890,6 +11031,11 @@ esp_err_t jr_display_start(jr_display_t *out_port)
         return ESP_OK;
     }
     (void)act_rtc_restore();   /* the receipt from before the sleep */
+#ifdef ESP_PLATFORM
+    if (__atomic_load_n(&s_holo_explicit, __ATOMIC_RELAXED) == 0u) {
+        __atomic_store_n(&s_holo_on, 1u, __ATOMIC_RELEASE);
+    }
+#endif
     orbit_rec_build();         /* before the render task exists to read it */
     fring_rec_alloc();         /* likewise */
     shade_rec_alloc();         /* likewise */
@@ -11311,7 +11457,7 @@ static void nav_step(nav_op_t op, uint32_t arg)
             fwd = 0u;
             break;
         case NAV_OP_STYLE:
-            style = (arg & 0x7u) << NAV_STYLE_SHIFT;
+            style = (arg & 0xFu) << NAV_STYLE_SHIFT;
             break;
         case NAV_OP_SET:
         default:
@@ -11385,7 +11531,7 @@ const char *jr_display_watch_style_name(jr_watch_style_t style)
 {
     static const char *const names[JR_WATCH_STYLE_COUNT] = {
         "JARVIS", "DIVER", "DRESS", "PILOT", "MINIMAL", "FUTURE",
-        "SKELETON", "CELESTIAL" };
+        "SKELETON", "CELESTIAL", "ORRERY", "REACTOR" };
     return ((int)style >= 0 && style < JR_WATCH_STYLE_COUNT) ? names[style]
                                                              : names[0];
 }

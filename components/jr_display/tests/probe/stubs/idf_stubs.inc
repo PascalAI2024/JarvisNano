@@ -172,15 +172,20 @@ uint32_t gfx_timer_get_actual_fps(gfx_handle_t h) { (void)h; return 0; }
 #ifndef JR_HOST_DIAL_DIR
 #define JR_HOST_DIAL_DIR "../../../../firmware/mascot/reactive"
 #endif
-static uint8_t *s_host_dial_blob[2];
-static size_t s_host_dial_size[2];
+static uint8_t *s_host_dial_blob[4];
+static size_t s_host_dial_size[4];
 static unsigned s_host_dial_loads;
 const uint8_t *jr_host_embedded_dial(jr_face_t face, size_t *size)
 {
-    const char *name = face == JR_FACE_DIAL_SKELETON ? "dial_skeleton.eaf"
-                     : face == JR_FACE_DIAL_CELESTIAL ? "dial_celestial.eaf" : NULL;
-    if (name == NULL) { return NULL; }
-    const int slot = face == JR_FACE_DIAL_CELESTIAL;
+    const char *name = NULL;
+    int slot = -1;
+    switch (face) {
+    case JR_FACE_DIAL_SKELETON:  name = "dial_skeleton.eaf";  slot = 0; break;
+    case JR_FACE_DIAL_CELESTIAL: name = "dial_celestial.eaf"; slot = 1; break;
+    case JR_FACE_DIAL_ORRERY:    name = "dial_orrery.eaf";    slot = 2; break;
+    case JR_FACE_DIAL_REACTOR:   name = "dial_reactor.eaf";   slot = 3; break;
+    default: return NULL;
+    }
     if (s_host_dial_blob[slot] == NULL) {
         static const char *const roots[] = { JR_HOST_DIAL_DIR, "firmware/mascot/reactive",
             "../firmware/mascot/reactive", "../../firmware/mascot/reactive",

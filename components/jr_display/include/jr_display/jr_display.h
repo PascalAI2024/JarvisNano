@@ -422,7 +422,9 @@ typedef enum {
     JR_WATCH_FUTURE,       /* baked tech dial; slim cyan hands, four data cells */
     JR_WATCH_SKELETON,     /* baked open movement; rose-gold lume hands */
     JR_WATCH_CELESTIAL,    /* baked star field; slim gold leaf hands */
-    JR_WATCH_STYLE_COUNT
+    JR_WATCH_STYLE_ORRERY = 8,  /* baked midnight planetarium; real ephemeris & moon phase */
+    JR_WATCH_STYLE_REACTOR = 9, /* baked titanium/copper core; 32-bar spectrum & 3D holo */
+    JR_WATCH_STYLE_COUNT = 10
 } jr_watch_style_t;
 
 /* The day for the dials that show one (DIVER's window, FUTURE's date cell).
@@ -876,6 +878,14 @@ bool jr_display_get_hbm(void);
 
 /* Wave 2: 60 Hz LCD_TE (GPIO13) tear-free flush statistics (lock-free). */
 void jr_display_get_te_stats(bool *enabled, uint32_t *waits, uint32_t *timeouts);
+
+/* Wave 4: Showpiece graphics engine — live 16-band audio spectrum, astronomical
+ * calendar date (YYYY-MM-DD) for WATCH:ORRERY, and 3D Geodesic Hologram toggle.
+ * All four functions are lock-free and safe to call from any task. */
+void jr_display_spectrum_set(const uint8_t bands[16]);
+void jr_display_date_set_ymd(uint16_t year, uint8_t month, uint8_t day);
+void jr_display_holo_set(bool enabled);
+bool jr_display_holo_get(void);
 
 #ifdef __cplusplus
 }

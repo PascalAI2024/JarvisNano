@@ -478,8 +478,8 @@ static esp_err_t debug_stopwatch_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-/* POST /api/glass — Command Deck glass switcher & HBM/UI-sounds toggle.
- * Optional query params: screen, style, hbm=0|1, ui_sounds=0|1.
+/* POST /api/glass — Command Deck glass switcher & HBM/UI-sounds/Holo toggle.
+ * Optional query params: screen, style, hbm=0|1, ui_sounds=0|1, holo=0|1.
  * STRICT INVARIANT: never touches privacy/mute or operator lease state. */
 static esp_err_t glass_post_handler(httpd_req_t *req)
 {
@@ -489,7 +489,7 @@ static esp_err_t glass_post_handler(httpd_req_t *req)
     char q[160] = {0};
     if (httpd_req_get_url_query_str(req, q, sizeof q) != ESP_OK || q[0] == '\0') {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                            "need screen, style, hbm, or ui_sounds");
+                            "need screen, style, hbm, ui_sounds, or holo");
         return ESP_OK;
     }
     char scr_raw[24] = {0};
@@ -500,18 +500,21 @@ static esp_err_t glass_post_handler(httpd_req_t *req)
                           sty_raw[0] != '\0';
     int hbm_v = -1;
     int ui_v = -1;
+    int holo_v = -1;
     const bool have_hbm = query_int(req, "hbm", &hbm_v);
     const bool have_ui = query_int(req, "ui_sounds", &ui_v);
+    const bool have_holo = query_int(req, "holo", &holo_v);
 
     jr_display_space_t sp = jr_display_nav_space();
     jr_watch_style_t ws = jr_display_watch_style();
-    if ((!have_scr && !have_sty && !have_hbm && !have_ui) ||
+    if ((!have_scr && !have_sty && !have_hbm && !have_ui && !have_holo) ||
         (have_scr && !device_parse_glass_screen(scr_raw, &sp)) ||
         (have_sty && !device_parse_watch_style(sty_raw, &ws)) ||
         (have_hbm && hbm_v != 0 && hbm_v != 1) ||
-        (have_ui && ui_v != 0 && ui_v != 1)) {
+        (have_ui && ui_v != 0 && ui_v != 1) ||
+        (have_holo && holo_v != 0 && holo_v != 1)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                            "invalid screen/style/hbm/ui_sounds parameter");
+                            "invalid screen/style/hbm/ui_sounds/holo parameter");
         return ESP_OK;
     }
 
@@ -524,6 +527,10 @@ static esp_err_t glass_post_handler(httpd_req_t *req)
     }
     if (have_ui) {
         ui_sounds_set(ui_v != 0);
+    }
+    if (have_holo) {
+        jr_display_holo_set(holo_v != 0);
+        persist_holo_enabled(holo_v != 0);
     }
     bool ok = true;
     const char *reason = NULL;
@@ -538,26 +545,28 @@ static esp_err_t glass_post_handler(httpd_req_t *req)
     }
     atomic_store(&s_glass_poke_req, true);
 
-    char body[192];
+    char body[256];
     int n = 0;
     if (ok) {
         n = snprintf(body, sizeof body,
             "{\"ok\":true,\"screen\":\"%s\",\"watch_style\":\"%s\","
-            "\"hbm\":%s,\"ui_sounds\":%s}",
+            "\"hbm\":%s,\"ui_sounds\":%s,\"holo\":%s}",
             device_glass_space_name(jr_display_nav_space()),
             jr_display_watch_style_name(jr_display_watch_style()),
             jr_display_get_hbm() ? "true" : "false",
-            atomic_load(&s_ui_sounds) ? "true" : "false");
+            atomic_load(&s_ui_sounds) ? "true" : "false",
+            jr_display_holo_get() ? "true" : "false");
     } else {
         httpd_resp_set_status(req, "409 Conflict");
         n = snprintf(body, sizeof body,
             "{\"ok\":false,\"reason\":\"%s\",\"screen\":\"%s\","
-            "\"watch_style\":\"%s\",\"hbm\":%s,\"ui_sounds\":%s}",
+            "\"watch_style\":\"%s\",\"hbm\":%s,\"ui_sounds\":%s,\"holo\":%s}",
             reason ? reason : "refused",
             device_glass_space_name(jr_display_nav_space()),
             jr_display_watch_style_name(jr_display_watch_style()),
             jr_display_get_hbm() ? "true" : "false",
-            atomic_load(&s_ui_sounds) ? "true" : "false");
+            atomic_load(&s_ui_sounds) ? "true" : "false",
+            jr_display_holo_get() ? "true" : "false");
     }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -3808,7 +3817,7 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         "\"flush_completions\":%u,\"flush_errors\":%u,"
         "\"requested_face\":%d,\"applied_face\":%d,"
         "\"choices_active\":%s,\"space\":\"%s\",\"watch_style\":\"%s\","
-        "\"hbm\":%s,\"te_sync\":%s,\"te_waits\":%u,\"te_timeouts\":%u,"
+        "\"hbm\":%s,\"holo\":%s,\"te_sync\":%s,\"te_waits\":%u,\"te_timeouts\":%u,"
         "\"sun_rise_min\":%d,\"sun_set_min\":%d},\"touch\":{"
         "\"events\":%u,\"last\":{\"kind\":\"%s\",\"x\":%u,\"y\":%u},"
         "\"shade_open\":%s,\"panel_touch_challenge\":{\"pending\":%s,"
@@ -3884,6 +3893,7 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         device_glass_space_name(jr_display_nav_space()),
         jr_display_watch_style_name(jr_display_watch_style()),
         jr_display_get_hbm() ? "true" : "false",
+        jr_display_holo_get() ? "true" : "false",
         te_sync ? "true" : "false",
         (unsigned)te_waits, (unsigned)te_timeouts,
         (int)s_wx_sun_rise_min, (int)s_wx_sun_set_min,
@@ -4016,6 +4026,8 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
             free(nb);
         }
         if (used < COCKPIT_BODY_CAP) {
+            uint8_t spec[16] = {0};
+            jr_audio_get_spectrum(spec);
             n = snprintf(body + used, COCKPIT_BODY_CAP - used,
                 "]},\"weather\":{\"ok\":%s,\"temp_f\":%d,\"hi_f\":%d,"
                 "\"lo_f\":%d,\"cond\":\"%s\",\"rain_pct\":%u,\"age_s\":%u,"
@@ -4027,7 +4039,8 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
                 "\"private_android_reason\":\"BLE firmware not enabled\","
                 "\"next_inbox_seq\":%u,\"event_cursor\":%u,"
                 "\"surface_active\":%s,\"surface_kind\":\"%s\","
-                "\"surface_title\":\"%s\",\"surface_ttl_ms\":%u}}",
+                "\"surface_title\":\"%s\",\"surface_ttl_ms\":%u},"
+                "\"spectrum\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]}",
                 s_weather.valid ? "true" : "false",
                 s_weather.valid ? (int)s_weather.temp_f : 0,
                 s_weather.valid ? (int)s_weather.hi_f : 0,
@@ -4048,7 +4061,11 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
                 brain_surface.active
                     ? brain_surface_kind_name(brain_surface.view.kind) : "none",
                 brain_surface.active ? brain_surface.view.title : "",
-                (unsigned)surface_ttl_ms);
+                (unsigned)surface_ttl_ms,
+                (unsigned)spec[0], (unsigned)spec[1], (unsigned)spec[2], (unsigned)spec[3],
+                (unsigned)spec[4], (unsigned)spec[5], (unsigned)spec[6], (unsigned)spec[7],
+                (unsigned)spec[8], (unsigned)spec[9], (unsigned)spec[10], (unsigned)spec[11],
+                (unsigned)spec[12], (unsigned)spec[13], (unsigned)spec[14], (unsigned)spec[15]);
             if (n > 0 && (size_t)n < COCKPIT_BODY_CAP - used) {
                 used += (size_t)n;
             } else {

@@ -10,6 +10,7 @@ idf_component_register(
     SRCS
         "src/jr_display.c"
         "src/hud_render.c"
+        "src/showpiece_gfx.c"
         "src/companion.c"
         "src/glass_font.c"
         "src/glass_draw.c"
@@ -21,6 +22,8 @@ idf_component_register(
     EMBED_FILES
         "${CMAKE_CURRENT_LIST_DIR}/../../firmware/mascot/reactive/dial_skeleton.eaf"
         "${CMAKE_CURRENT_LIST_DIR}/../../firmware/mascot/reactive/dial_celestial.eaf"
+        "${CMAKE_CURRENT_LIST_DIR}/../../firmware/mascot/reactive/dial_orrery.eaf"
+        "${CMAKE_CURRENT_LIST_DIR}/../../firmware/mascot/reactive/dial_reactor.eaf"
     INCLUDE_DIRS
         "include"
         "${JARVIS_BOARD_ROOT}/include"

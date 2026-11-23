@@ -262,8 +262,8 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
         .name = "set_glass",
         .description =
             "Switch the device's ring screen (jarvis, watch, weather, status, "
-            "activity) and/or persist one of the 8 watch styles (jarvis, diver, "
-            "dress, pilot, minimal, future, skeleton, celestial).",
+            "activity) and/or persist one of the 10 watch styles (jarvis, diver, "
+            "dress, pilot, minimal, future, skeleton, celestial, orrery, reactor).",
         .params = {
             {
                 .name = "screen",
@@ -277,7 +277,7 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
                 .type = JR_GEMINI_PT_STRING,
                 .description =
                     "Watch style: jarvis, diver, dress, pilot, minimal, future, "
-                    "skeleton, or celestial.",
+                    "skeleton, celestial, orrery, or reactor.",
                 .required = false,
             },
         },
@@ -783,6 +783,30 @@ static void restore_watch_style(void)
         }
         nvs_close(h);
     }
+}
+
+void persist_holo_enabled(bool enabled)
+{
+    nvs_handle_t h;
+    if (nvs_open("app", NVS_READWRITE, &h) == ESP_OK) {
+        (void)nvs_set_u8(h, "holo", enabled ? 1U : 0U);
+        (void)nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static void restore_holo_enabled(void)
+{
+    bool enabled = true;
+    nvs_handle_t h;
+    uint8_t v = 1U;
+    if (nvs_open("app", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_u8(h, "holo", &v) == ESP_OK) {
+            enabled = (v != 0U);
+        }
+        nvs_close(h);
+    }
+    jr_display_holo_set(enabled);
 }
 
 void persist_ota_attempt(int slot)
@@ -2503,6 +2527,14 @@ static void publish_shell_state(uint32_t now_ms)
         jr_display_links_set(&links);
         /* The day arc: the sun from the last glance, or nothing at all. */
         jr_display_sun_set((int)s_wx_sun_rise_min, (int)s_wx_sun_set_min);
+        /* Publish real-world SNTP calendar Y/M/D at 1 Hz for WATCH:ORRERY
+         * planetary ephemeris and lunar phase. */
+        struct tm tmv;
+        if (device_wall_time(&tmv)) {
+            jr_display_date_set_ymd((uint16_t)(tmv.tm_year + 1900),
+                                    (uint8_t)(tmv.tm_mon + 1),
+                                    (uint8_t)tmv.tm_mday);
+        }
         next_status_ms = now_ms + 1000U;
     }
 }
@@ -3275,6 +3307,9 @@ static void voice_task(void *arg)
                         clock_on = true;
                         jr_display_clock_set(true, tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
                         jr_display_clock_set_date(tmv.tm_wday, tmv.tm_mday, tmv.tm_mon);
+                        jr_display_date_set_ymd((uint16_t)(tmv.tm_year + 1900),
+                                                (uint8_t)(tmv.tm_mon + 1),
+                                                (uint8_t)tmv.tm_mday);
                         device_rtc_capture_os_time();
                         /* Only the PEEK narrates the time. On the WATCH
                          * screen the hands ARE the readout, so adding a
@@ -4895,6 +4930,9 @@ capture_complete:
         }
         uint8_t amp = 0;
         if (jr_display_is_ready()) {
+            uint8_t spec[16];
+            jr_audio_get_spectrum(spec);
+            jr_display_spectrum_set(spec);
             if (f == JR_FACE_SPEAKING) {
                 const uint16_t live_rms = jr_audio_playback_live_rms();
                 amp = live_rms > 0U ? rms_to_amp((float)live_rms, 3.2f) : 0;
@@ -5237,6 +5275,7 @@ void app_main(void)
         s_app.display = jr_hal_display();
         ESP_LOGW(TAG, "display: presenter start failed — falling back to log stub");
     }
+    restore_holo_enabled();
     jr_display_set_tilt_source(tilt_source);
     s_app.input   = jr_hal_input();
 
@@ -5267,6 +5306,9 @@ void app_main(void)
         }
         struct tm seeded;
         if (device_wall_time(&seeded)) {
+            jr_display_date_set_ymd((uint16_t)(seeded.tm_year + 1900),
+                                    (uint8_t)(seeded.tm_mon + 1),
+                                    (uint8_t)seeded.tm_mday);
             ESP_LOGI(TAG, "wall clock %04d-%02d-%02d %02d:%02d (rtc_seed=%d)",
                      seeded.tm_year + 1900, seeded.tm_mon + 1, seeded.tm_mday,
                      seeded.tm_hour, seeded.tm_min, (int)s_rtc_seeded_os);

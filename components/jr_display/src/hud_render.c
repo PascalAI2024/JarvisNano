@@ -2491,6 +2491,14 @@ static void fallback_dial(const strip_t *s, int style, int A, bool swap)
             w_polar(176 * 16, a, &x, &y);
             aa_disc(s, x, y, i == 0 ? 5 * 16 : 4 * 16, (wrgb_t){ 226, 184, 92 }, A, swap);
             break;
+        case 8: /* ORRERY: delicate rose-gold orbital markers */
+            w_polar(198 * 16, a, &x, &y);
+            aa_disc(s, x, y, i % 3 == 0 ? 4 * 16 : 2 * 16 + 8, (wrgb_t){ 234, 172, 134 }, A, swap);
+            break;
+        case 9: /* REACTOR: machined titanium bezel ticks outside r=122 */
+            hand_poly(&p, WATCH_CX16, WATCH_CY16, a, 148 * 16, 174 * 16, 28, 28, 0);
+            aa_fill(s, &p, (wrgb_t){ 140, 190, 210 }, (160 * A) >> 8, swap, AA_SUB);
+            break;
         default: /* FUTURE: a 60-tick scale, cell frames below */
             break;
         }
@@ -2585,6 +2593,16 @@ static bool watch_hand_spec(int style, int hand, hand_spec_t *h)
         else if (hand == 1) { h->u0 = -12 * 16; h->u1 = 168 * 16; h->w0 = 4 * 16; h->w1 = 8; }
         else { h->body = (wrgb_t){ 255, 222, 130 }; h->u0 = -26 * 16; h->u1 = 190 * 16; h->w0 = 16; h->w1 = 8; h->outline = false; h->shadow = false; }
         return true;
+    case 8: /* ORRERY: refined brushed rose-gold skeletonized hands over the
+             * midnight planetarium — crisp dark outline, slender cream lume
+             * core slit so orbits & planets breathe beneath, champagne seconds */
+        h->body = (wrgb_t){ 238, 174, 138 }; h->bevel = 95; h->outline = true; h->shadow = true;
+        if (hand == 0) { h->u0 = -12 * 16; h->u1 = 106 * 16; h->w0 = 6 * 16 + 8; h->w1 = 3 * 16; h->lume_u0 = 28 * 16; h->lume_u1 = 92 * 16; h->lume_w = 2 * 16 + 8; }
+        else if (hand == 1) { h->u0 = -12 * 16; h->u1 = 166 * 16; h->w0 = 5 * 16 + 8; h->w1 = 2 * 16 + 4; h->lume_u0 = 30 * 16; h->lume_u1 = 150 * 16; h->lume_w = 2 * 16; }
+        else { h->body = (wrgb_t){ 252, 224, 152 }; h->u0 = -24 * 16; h->u1 = 192 * 16; h->w0 = 16; h->w1 = 8; h->outline = false; h->shadow = false; }
+        return true;
+    case 9: /* REACTOR: digital HH:MM + sweeping r=120 pip (no mechanical hands) */
+        return false;
     default:
         return false;
     }
@@ -3081,7 +3099,7 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     if (dst == NULL || nrows <= 0 || strength <= 0 || w == NULL) {
         return;
     }
-    if (style <= 0 || style > 7) {
+    if (style <= 0 || style > 9) {
         hud_overlay_clock(dst, y0, nrows, swap_bytes, w->hh, w->mm, w->ss, strength);
         return;
     }
@@ -3206,6 +3224,8 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
     case 4: w_hub(&s, 4 * 16, (wrgb_t){ 70, 105, 175 }, A, swap_bytes, lt); break;
     case 6: w_hub(&s, 13 * 16, (wrgb_t){ 232, 160, 128 }, A, swap_bytes, lt); break;
     case 7: w_hub(&s, 12 * 16, (wrgb_t){ 238, 196, 96 }, A, swap_bytes, lt); break;
+    case 8: w_hub(&s, 11 * 16, (wrgb_t){ 238, 174, 138 }, A, swap_bytes, lt); break;
+    case 9: break; /* REACTOR has central 3D holo + digital HH:MM, no mechanical hub */
     default:
         aa_disc(&s, WATCH_CX16, WATCH_CY16, 20 * 16, W_CYAN, (40 * A) >> 8, swap_bytes);
         aa_disc(&s, WATCH_CX16, WATCH_CY16, 15 * 16, W_CYAN, (90 * A) >> 8, swap_bytes);

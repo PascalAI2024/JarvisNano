@@ -17,8 +17,11 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 add_executable(jr_display_hud_tests
     test_hud_render.c
     ../src/hud_render.c
+    ../src/showpiece_gfx.c
     ../src/balance_wheel_data.c
     ../src/glass_draw.c
+    ../src/glass_font.c
+    ../src/glass_font_data.c
 )
 target_include_directories(jr_display_hud_tests PRIVATE ../include ../src)
 target_link_libraries(jr_display_hud_tests PRIVATE m)
@@ -31,6 +34,7 @@ target_compile_options(jr_display_hud_tests PRIVATE -Wall -Wextra -Werror)
 add_executable(jr_display_shell_tests
     test_shell.c
     ../src/hud_render.c
+    ../src/showpiece_gfx.c
     ../src/balance_wheel_data.c
     ../src/companion.c
     ../src/glass_font.c
@@ -58,6 +62,7 @@ target_compile_definitions(jr_display_shell_tests PRIVATE
 add_executable(jr_display_frame_tests
     test_frame_identity.c
     ../src/hud_render.c
+    ../src/showpiece_gfx.c
     ../src/balance_wheel_data.c
     ../src/companion.c
     ../src/glass_font.c
@@ -123,6 +128,7 @@ add_test(NAME jr_display_frame_tests COMMAND jr_display_frame_tests)
 add_executable(glass_preview EXCLUDE_FROM_ALL
     probe/glass_preview.c
     ../src/hud_render.c
+    ../src/showpiece_gfx.c
     ../src/balance_wheel_data.c
     ../src/companion.c
     ../src/glass_font.c

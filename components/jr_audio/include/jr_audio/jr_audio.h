@@ -90,6 +90,11 @@ float jr_audio_clean_rms(void);
  * Lock-free and DAC-synced for speech-reactive glass visuals. */
 uint16_t jr_audio_playback_live_rms(void);
 
+/* Live 16-band log-spaced audio spectrum (0..255 per band), lock-free.
+ * Tracks speaker speech output during playback, or unmuted mic capture when
+ * playback is idle (never feeds mic audio while privacy-paused). */
+void jr_audio_get_spectrum(uint8_t out_bands[16]);
+
 /* How long the last source read was blocked waiting (guard + codec), in
  * microseconds. The canceller runs inside the read, so the read's duration
  * alone cannot say whether the frame was already waiting. */

@@ -760,14 +760,16 @@ bool device_parse_glass_screen(const char *s, jr_display_space_t *out)
 bool device_parse_watch_style(const char *s, jr_watch_style_t *out)
 {
     if (s == NULL || s[0] == '\0') return false;
-    if (strcasecmp(s, "jarvis") == 0)    { *out = JR_WATCH_JARVIS;    return true; }
-    if (strcasecmp(s, "diver") == 0)     { *out = JR_WATCH_DIVER;     return true; }
-    if (strcasecmp(s, "dress") == 0)     { *out = JR_WATCH_DRESS;     return true; }
-    if (strcasecmp(s, "pilot") == 0)     { *out = JR_WATCH_PILOT;     return true; }
-    if (strcasecmp(s, "minimal") == 0)   { *out = JR_WATCH_MINIMAL;   return true; }
-    if (strcasecmp(s, "future") == 0)    { *out = JR_WATCH_FUTURE;    return true; }
-    if (strcasecmp(s, "skeleton") == 0)  { *out = JR_WATCH_SKELETON;  return true; }
-    if (strcasecmp(s, "celestial") == 0) { *out = JR_WATCH_CELESTIAL; return true; }
+    if (strcasecmp(s, "jarvis") == 0)    { *out = JR_WATCH_JARVIS;        return true; }
+    if (strcasecmp(s, "diver") == 0)     { *out = JR_WATCH_DIVER;         return true; }
+    if (strcasecmp(s, "dress") == 0)     { *out = JR_WATCH_DRESS;         return true; }
+    if (strcasecmp(s, "pilot") == 0)     { *out = JR_WATCH_PILOT;         return true; }
+    if (strcasecmp(s, "minimal") == 0)   { *out = JR_WATCH_MINIMAL;       return true; }
+    if (strcasecmp(s, "future") == 0)    { *out = JR_WATCH_FUTURE;        return true; }
+    if (strcasecmp(s, "skeleton") == 0)  { *out = JR_WATCH_SKELETON;      return true; }
+    if (strcasecmp(s, "celestial") == 0) { *out = JR_WATCH_CELESTIAL;     return true; }
+    if (strcasecmp(s, "orrery") == 0)    { *out = JR_WATCH_STYLE_ORRERY;  return true; }
+    if (strcasecmp(s, "reactor") == 0)   { *out = JR_WATCH_STYLE_REACTOR; return true; }
     return false;
 }
 
@@ -1311,7 +1313,7 @@ bool device_try_local_tool(const jr_command_t *cmd)
             (void)snprintf(out, cap,
                 "{\"error\":{\"code\":\"invalid_glass\",\"message\":"
                 "\"Provide screen (jarvis|watch|weather|status|activity) "
-                "and/or watch_style (jarvis|diver|dress|pilot|minimal|future|skeleton|celestial).\"}}");
+                "and/or watch_style (jarvis|diver|dress|pilot|minimal|future|skeleton|celestial|orrery|reactor).\"}}");
         } else {
             if (has_ws) {
                 jr_display_watch_style_set(ws);
@@ -1360,7 +1362,7 @@ bool device_try_local_tool(const jr_command_t *cmd)
             "{\"battery_pct\":%d,\"charging\":%s,\"usb\":%s,"
             "\"wifi_rssi\":%d,\"chip_temp_c\":%d,\"volume\":%d,"
             "\"brightness\":%u,\"watch_style\":\"%s\",\"screen\":\"%s\","
-            "\"muted\":%s,\"hbm\":%s,\"ui_sounds\":%s,"
+            "\"muted\":%s,\"hbm\":%s,\"holo\":%s,\"ui_sounds\":%s,"
             "\"uptime_s\":%u,\"active_timers\":%u}",
             batt_pct,
             (have_bat && bat.charging) ? "true" : "false",
@@ -1373,6 +1375,7 @@ bool device_try_local_tool(const jr_command_t *cmd)
             device_glass_space_name(jr_display_nav_space()),
             muted ? "true" : "false",
             jr_display_get_hbm() ? "true" : "false",
+            jr_display_holo_get() ? "true" : "false",
             atomic_load(&s_ui_sounds) ? "true" : "false",
             (unsigned)(now_ms / 1000U),
             (unsigned)jr_timer_active_count(&s_timers));

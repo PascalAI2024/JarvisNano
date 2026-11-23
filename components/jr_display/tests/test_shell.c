@@ -601,6 +601,8 @@ static void test_missing_clip_falls_back_to_the_face_it_grew_from(void)
     CHECK(face_fallback(JR_FACE_DIAL_FUTURE) == JR_FACE_IDLE, "dial future -> idle");
     CHECK(face_fallback(JR_FACE_DIAL_SKELETON) == JR_FACE_IDLE, "dial skeleton -> idle");
     CHECK(face_fallback(JR_FACE_DIAL_CELESTIAL) == JR_FACE_IDLE, "dial celestial -> idle");
+    CHECK(face_fallback(JR_FACE_DIAL_ORRERY) == JR_FACE_IDLE, "dial orrery -> idle");
+    CHECK(face_fallback(JR_FACE_DIAL_REACTOR) == JR_FACE_IDLE, "dial reactor -> idle");
     for (int f = 0; f < (int)JR_FACE_COUNT; ++f) {
         const jr_face_t p = face_fallback((jr_face_t)f);
         CHECK(p == (jr_face_t)f || face_fallback(p) == p,
@@ -1832,23 +1834,24 @@ static void test_watch_style_is_three_nav_bits_that_wrap(void)
     reset_nav();
     CHECK(jr_display_watch_style() == JR_WATCH_JARVIS, "cold start is JARVIS");
     jr_display_watch_style_set(JR_WATCH_DIVER);
-    CHECK(((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 17) & 7u) == 1u,
-          "DIVER is not bit pattern 001 at bit 17 (word 0x%08x)",
+    CHECK(((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 17) & 0xFu) == 1u,
+          "DIVER is not bit pattern 0001 at bit 17 (word 0x%08x)",
           (unsigned)__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE));
     jr_display_watch_style_set(JR_WATCH_FUTURE);
-    CHECK(((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 17) & 7u) == 5u,
-          "FUTURE is not bit pattern 101 at bit 17");
-    CHECK((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 20) == 0u,
-          "the style spilled above bit 19");
-    jr_display_watch_style_set(JR_WATCH_CELESTIAL);
-    CHECK(((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 17) & 7u) == 7u,
-          "CELESTIAL is not bit pattern 111 at bit 17");
-    CHECK((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 20) == 0u,
-          "the last style spilled above bit 19");
+    CHECK(((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 17) & 0xFu) == 5u,
+          "FUTURE is not bit pattern 0101 at bit 17");
+    CHECK((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 21) == 0u,
+          "the style spilled above bit 20");
+    jr_display_watch_style_set(JR_WATCH_STYLE_REACTOR);
+    CHECK(((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 17) & 0xFu) == 9u,
+          "REACTOR is not bit pattern 1001 at bit 17");
+    CHECK((__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) >> 21) == 0u,
+          "the last style spilled above bit 20");
     jr_display_watch_style_set(JR_WATCH_DIVER);
     static const jr_watch_style_t walk[] = {
         JR_WATCH_DRESS, JR_WATCH_PILOT, JR_WATCH_MINIMAL, JR_WATCH_FUTURE,
-        JR_WATCH_SKELETON, JR_WATCH_CELESTIAL, JR_WATCH_JARVIS, JR_WATCH_DIVER };
+        JR_WATCH_SKELETON, JR_WATCH_CELESTIAL, JR_WATCH_STYLE_ORRERY,
+        JR_WATCH_STYLE_REACTOR, JR_WATCH_JARVIS, JR_WATCH_DIVER };
     for (size_t i = 0; i < sizeof walk / sizeof *walk; ++i) {
         jr_display_watch_style_step(1);
         CHECK(jr_display_watch_style() == walk[i], "step %zu right landed on %d, wanted %d",
@@ -1857,17 +1860,17 @@ static void test_watch_style_is_three_nav_bits_that_wrap(void)
     jr_display_watch_style_step(-1);
     CHECK(jr_display_watch_style() == JR_WATCH_JARVIS, "left of DIVER is JARVIS");
     jr_display_watch_style_step(-1);
-    CHECK(jr_display_watch_style() == JR_WATCH_CELESTIAL, "left of JARVIS wraps to CELESTIAL");
+    CHECK(jr_display_watch_style() == JR_WATCH_STYLE_REACTOR, "left of JARVIS wraps to REACTOR");
     jr_display_nav_next();
     jr_display_nav_up();
     jr_display_nav_home();
-    CHECK(jr_display_watch_style() == JR_WATCH_CELESTIAL,
+    CHECK(jr_display_watch_style() == JR_WATCH_STYLE_REACTOR,
           "the style did not survive next/up/home (now %d)", (int)jr_display_watch_style());
     CHECK(jr_display_nav_space() == JR_DISPLAY_SPACE_JARVIS, "home still goes home");
     jr_display_watch_style_set((jr_watch_style_t)JR_WATCH_STYLE_COUNT);
-    CHECK(jr_display_watch_style() == JR_WATCH_CELESTIAL, "an out-of-range style is refused");
+    CHECK(jr_display_watch_style() == JR_WATCH_STYLE_REACTOR, "an out-of-range style is refused");
     static const char *const names[] = { "JARVIS", "DIVER", "DRESS", "PILOT", "MINIMAL", "FUTURE",
-                                         "SKELETON", "CELESTIAL" };
+                                         "SKELETON", "CELESTIAL", "ORRERY", "REACTOR" };
     for (int i = 0; i < (int)JR_WATCH_STYLE_COUNT; ++i) {
         CHECK(strcmp(jr_display_watch_style_name((jr_watch_style_t)i), names[i]) == 0,
               "style %d is named %s", i, jr_display_watch_style_name((jr_watch_style_t)i));
@@ -2329,8 +2332,10 @@ static void test_watch_dial_face_follows_the_style_and_the_screen(void)
         { JR_WATCH_PILOT,   JR_FACE_DIAL_PILOT },
         { JR_WATCH_MINIMAL, JR_FACE_COUNT },
         { JR_WATCH_FUTURE,  JR_FACE_DIAL_FUTURE },
-        { JR_WATCH_SKELETON,  JR_FACE_DIAL_SKELETON },
-        { JR_WATCH_CELESTIAL, JR_FACE_DIAL_CELESTIAL },
+        { JR_WATCH_SKELETON,      JR_FACE_DIAL_SKELETON },
+        { JR_WATCH_CELESTIAL,     JR_FACE_DIAL_CELESTIAL },
+        { JR_WATCH_STYLE_ORRERY,  JR_FACE_DIAL_ORRERY },
+        { JR_WATCH_STYLE_REACTOR, JR_FACE_DIAL_REACTOR },
     };
     for (size_t i = 0; i < sizeof want / sizeof *want; ++i) {
         jr_display_watch_style_set(want[i].st);
@@ -3679,6 +3684,8 @@ static void test_every_face_has_a_clip_and_a_hud_face(void)
         { JR_FACE_DIAL_FUTURE, "dial_future.eaf" },
         { JR_FACE_DIAL_SKELETON,  "dial_skeleton.eaf" },
         { JR_FACE_DIAL_CELESTIAL, "dial_celestial.eaf" },
+        { JR_FACE_DIAL_ORRERY,    "dial_orrery.eaf" },
+        { JR_FACE_DIAL_REACTOR,   "dial_reactor.eaf" },
     };
     CHECK(sizeof expect / sizeof expect[0] == (size_t)JR_FACE_COUNT,
           "face table has %zu rows for %d faces",
@@ -4175,8 +4182,9 @@ static void test_embedded_dials_are_read_only_and_never_freed(void)
     s_stub_anim_source = NULL;
     dial_cache_reset();
     s_stub_eaf_head = (eaf_header_t){ 8, HUD_W, HUD_H };
-    const jr_face_t dials[] = { JR_FACE_DIAL_SKELETON, JR_FACE_DIAL_CELESTIAL };
-    for (size_t i = 0; i < 2; ++i) {
+    const jr_face_t dials[] = { JR_FACE_DIAL_SKELETON, JR_FACE_DIAL_CELESTIAL,
+                                JR_FACE_DIAL_ORRERY, JR_FACE_DIAL_REACTOR };
+    for (size_t i = 0; i < sizeof dials / sizeof dials[0]; ++i) {
         const jr_face_t face = dials[i];
         memset(&ctx->clips[face], 0, sizeof ctx->clips[face]);
         size_t n = 0;
@@ -4247,7 +4255,8 @@ static int dial_strip_mismatch(const jr_display_ctx_t *ctx, uint16_t salt)
 
 static const jr_face_t s_dial_of_slot[DIAL_SLOTS] = {
     JR_FACE_DIAL_DIVER, JR_FACE_DIAL_DRESS, JR_FACE_DIAL_PILOT,
-    JR_FACE_DIAL_FUTURE, JR_FACE_DIAL_SKELETON, JR_FACE_DIAL_CELESTIAL };
+    JR_FACE_DIAL_FUTURE, JR_FACE_DIAL_SKELETON, JR_FACE_DIAL_CELESTIAL,
+    JR_FACE_DIAL_ORRERY, JR_FACE_DIAL_REACTOR };
 
 static void dial_clips_drop(void)
 {
@@ -7921,6 +7930,108 @@ static void test_wave3_oled_luminous_screens_strip_invariance(void)
     free(whole); free(strips); free(alt);
 }
 
+static void test_wave4_showpiece_shell_integration(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = calloc(px, sizeof *whole);
+    uint16_t *strips = calloc(px, sizeof *strips);
+    if (!whole || !strips) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(whole); free(strips); return;
+    }
+
+    /* 1. Lock-free public APIs: holo toggle, date_set_ymd, spectrum_set */
+    CHECK(!jr_display_holo_get(), "host default holo is false so baseline hashes stay intact");
+    jr_display_holo_set(true);
+    CHECK(jr_display_holo_get(), "holo toggle enabled");
+    jr_display_date_set_ymd(2026u, 11u, 23u);
+    uint8_t loud[16];
+    for (int i = 0; i < 16; ++i) { loud[i] = 220u; }
+    jr_display_spectrum_set(loud);
+
+    /* 2. JARVIS Home + 3D Geodesic Holo Core: draws crisp nodes/edges inside r<=92,
+     *    respects warm champagne-gold when privacy_muted, and is strip-invariant! */
+    stage_space(JR_DISPLAY_SPACE_JARVIS);
+    s_watch_s = 0;
+    s_clock_ease = 0;
+    s_ask_ease = 0;
+    s_space_on = false;
+    s_display.applied_face = JR_FACE_SPEAKING;
+    s_display.requested_amplitude = 200u;
+    s_fake_us = 6500000LL;
+    s_fade_prev_ms = 6500u;
+    jr_display_set_hud_env(80, false, false, 0.f, 0.f);
+    memset(whole, 0, px * sizeof *whole);
+    memset(strips, 0, px * sizeof *strips);
+    apply_hud_overlay(&s_display, 0, 0, HUD_W, HUD_H, whole);
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+        apply_hud_overlay(&s_display, 0, y, HUD_W, y2, strips + (size_t)y * HUD_W);
+    }
+    CHECK(memcmp(whole, strips, px * sizeof *whole) == 0,
+          "JARVIS Home + 3D Holo Core strip invariance failed");
+    size_t core_lit = 0;
+    for (int y = 232 - 92; y <= 233 + 92; ++y) {
+        const int dy2 = 2 * y - 465;
+        for (int x = 232 - 92; x <= 233 + 92; ++x) {
+            const int dx2 = 2 * x - 465;
+            if (dx2 * dx2 + dy2 * dy2 <= 4 * 92 * 92 && whole[(size_t)y * HUD_W + x] != 0u) {
+                core_lit++;
+            }
+        }
+    }
+    CHECK(core_lit > 1200u, "JARVIS Home 3D Holo drew only %zu px inside r<=92", core_lit);
+
+    /* Muted JARVIS Home renders warm gold inside r<=92 */
+    jr_display_set_hud_env(80, false, true, 0.f, 0.f);
+    s_display.applied_face = JR_FACE_MUTED;
+    memset(whole, 0, px * sizeof *whole);
+    apply_hud_overlay(&s_display, 0, 0, HUD_W, HUD_H, whole);
+    uint64_t rsum = 0, bsum = 0;
+    for (int y = 232 - 92; y <= 233 + 92; ++y) {
+        const int dy2 = 2 * y - 465;
+        for (int x = 232 - 92; x <= 233 + 92; ++x) {
+            const int dx2 = 2 * x - 465;
+            const uint16_t p = whole[(size_t)y * HUD_W + x];
+            if (dx2 * dx2 + dy2 * dy2 <= 4 * 92 * 92 && p != 0u) {
+                rsum += (p >> 11) & 31u;
+                bsum += p & 31u;
+            }
+        }
+    }
+    CHECK(rsum > bsum * 2u, "JARVIS Home muted 3D Holo should be gold (R=%llu, B=%llu)",
+          (unsigned long long)rsum, (unsigned long long)bsum);
+
+    /* 3. WATCH:ORRERY + WATCH:REACTOR through full apply_hud_overlay path */
+    jr_display_holo_set(false);
+    CHECK(!jr_display_holo_get(), "holo toggled back off");
+    static const struct { jr_watch_style_t st; jr_face_t dial; const char *name; } sp[] = {
+        { JR_WATCH_STYLE_ORRERY,  JR_FACE_DIAL_ORRERY,  "ORRERY" },
+        { JR_WATCH_STYLE_REACTOR, JR_FACE_DIAL_REACTOR, "REACTOR" },
+    };
+    for (size_t i = 0; i < 2; ++i) {
+        render_watch_frame_at(whole, sp[i].st, sp[i].dial, 10, 10, 30);
+        memset(strips, 0, px * sizeof *strips);
+        for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+            const int y2 = y + STRIP_ROWS > HUD_H ? HUD_H : y + STRIP_ROWS;
+            apply_hud_overlay(&s_display, 0, y, HUD_W, y2, strips + (size_t)y * HUD_W);
+        }
+        memset(whole, 0, px * sizeof *whole);
+        apply_hud_overlay(&s_display, 0, 0, HUD_W, HUD_H, whole);
+        CHECK(memcmp(whole, strips, px * sizeof *whole) == 0,
+              "WATCH:%s apply_hud_overlay strip invariance failed", sp[i].name);
+        size_t lit = 0;
+        for (size_t k = 0; k < px; ++k) { if (whole[k] != 0u) { lit++; } }
+        CHECK(lit > 3000u, "WATCH:%s drew too few pixels (%zu)", sp[i].name, lit);
+    }
+
+    jr_display_spectrum_set(NULL);
+    s_fade_prev_ms = 0u;
+    reset_nav();
+    free(whole);
+    free(strips);
+}
+
 int main(void)
 {
     test_light_word_round_trips();
@@ -8064,6 +8175,7 @@ int main(void)
     test_weather_atmosphere_sun_dot_and_outlook();
     test_celestial_quiet_rest_hbm_and_te_stats();
     test_wave3_oled_luminous_screens_strip_invariance();
+    test_wave4_showpiece_shell_integration();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);
