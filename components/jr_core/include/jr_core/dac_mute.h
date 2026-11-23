@@ -46,6 +46,7 @@ typedef enum {
     JR_TONE_SWEEP,          /* jr_audio_play_sweep: the ask-miss reject */
     JR_TONE_CHIME,          /* jr_audio_play_chime: board-done chime */
     JR_TONE_UI_CUE,         /* jr_audio_play_cue: tick, confirm, dismiss, limit */
+    JR_TONE_ALARM,          /* jr_audio_play_timer_chime: timer alarm (always audible) */
 } jr_tone_kind_t;
 
 /* May this kind of tone sound while the owner has muted the speaker? */

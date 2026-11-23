@@ -57,6 +57,7 @@
 #include "jr_core/echo_gate.h"
 #include "jr_core/tool_policy.h"
 #include "jr_core/pace.h"
+#include "jr_core/timer.h"
 #include "jr_tools/jr_weather.h"
 #include "jr_dsp/dsp.h"
 #include "jr_hal/hal.h"
@@ -81,7 +82,7 @@
 /* The catalog lives in main.c; this literal is what the other files see.
  * main.c static-asserts it against the real array, so adding a tool
  * without bumping this is a compile error, not a blank petal. */
-#define DEVICE_TOOL_DECL_COUNT 11U
+#define DEVICE_TOOL_DECL_COUNT 16U
 
 /* Render cadence per rung of the rest ladder (frames per second). 24 is the
  * measured CO5300 ceiling; 12 keeps AMBIENT's dimmed ring fluid under a
@@ -99,7 +100,7 @@
  * core 0 on a dial). At 6 the costliest dial leaves boot more than half. */
 #define RENDER_FPS_BOOT      6U
 #define LOCAL_TOOL_RESULT_CAP 4U
-#define LOCAL_TOOL_ERROR_CAP  256U
+#define LOCAL_TOOL_ERROR_CAP  384U
 #define TOOL_CONSENT_TIMEOUT_MS 15000U
 
 typedef struct {
@@ -414,6 +415,38 @@ extern uint32_t s_brain_inbox_seq_hwm;
 extern uint32_t s_brain_event_seq;
 extern uint32_t s_brain_last_seen_ms;
 
+typedef enum {
+    TIMER_REQ_NONE = 0,
+    TIMER_REQ_SET,
+    TIMER_REQ_CANCEL,
+    TIMER_REQ_DISMISS,
+} timer_req_kind_t;
+
+typedef struct {
+    bool active;
+    bool ringing;
+    uint16_t rem_s;
+    uint8_t pct_left;
+    uint8_t count;
+    char label[JR_TIMER_LABEL_CAP];
+} timer_snap_t;
+
+typedef struct {
+    timer_req_kind_t kind;
+    uint32_t seconds;
+    char label[JR_TIMER_LABEL_CAP];
+} timer_debug_req_t;
+
+extern jr_timer_bank_t s_timers;
+extern portMUX_TYPE s_timer_mux;
+extern timer_snap_t s_timer_snap;
+extern timer_debug_req_t s_debug_timer_req_data;
+extern _Atomic uint32_t s_debug_timer_req;
+
+void timer_publish_now(uint32_t now_ms);
+void persist_watch_style(uint8_t style);
+void device_confirm_cue(void);
+bool device_chip_temp_c(float *out_c);
 void persist_ota_attempt(int slot);
 void handle_say(const char *text);
 void morning_briefing_force(void);          /* POST /api/debug/briefing */

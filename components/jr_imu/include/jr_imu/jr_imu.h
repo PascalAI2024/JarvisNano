@@ -78,6 +78,16 @@ esp_err_t jr_imu_start(void);
 void jr_imu_stop(void);
 
 /**
+ * @brief Hint whether the device is resting (WHISPER/DREAM).
+ *
+ * Lock-free and safe from any task. In AWAKE/AMBIENT the sampler runs at
+ * 100 Hz (QMI8658 125 Hz Normal) so shake-to-cancel and tilt stay crisp; in
+ * WHISPER/DREAM it drops to 20 Hz (QMI8658 21 Hz low-power CTRL2 = 0x2D) and
+ * restores 125 Hz immediately on exit from rest.
+ */
+void jr_imu_set_rest(bool resting);
+
+/**
  * @brief Arm the QMI8658 Wake-on-Motion engine on INT1 for deep sleep.
  *
  * Call AFTER jr_imu_stop() has let the sampler leave the bus. Writes the

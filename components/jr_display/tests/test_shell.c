@@ -7175,6 +7175,339 @@ static void test_snapshot_mirror_blacks_out_the_corners(void)
     s_display = saved;
 }
 
+/* N9.11: OTA probation uses emerald-mint SP_C_MINT — distinct from violet
+ * companion rim and never gold (privacy-only) — and renders cleanly in the
+ * anti-aliased OTA ring band with 12-row strip invariance. */
+static void test_ota_probation_is_mint_not_violet_or_gold(void)
+{
+    const uint16_t prob = sp_ota_native(JR_DISPLAY_OTA_PROBATION);
+    CHECK(prob == SP_C_MINT, "probation hue is SP_C_MINT (got 0x%04x)", prob);
+    CHECK(prob != SP_C_VIOLET, "probation hue must not collide with SP_C_VIOLET");
+    CHECK(prob != SP_C_GOLD, "probation hue must not be SP_C_GOLD");
+
+    stage_ring_at_rest(JR_DISPLAY_SPACE_JARVIS, JR_DISPLAY_OTA_PROBATION, 0U);
+    jr_display_ctx_t ctx = {0};
+    ctx.board.width = HUD_W;
+    ctx.board.height = HUD_H;
+    ctx.board.swap_color_bytes = false;
+
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = calloc(px, sizeof *whole);
+    uint16_t *strips = calloc(px, sizeof *strips);
+    if (!whole || !strips) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(whole); free(strips); return;
+    }
+    apply_ota_ring(&ctx, 0, HUD_H, whole);
+    for (int y = 0; y < HUD_H; y += 12) {
+        int y2 = y + 12 > HUD_H ? HUD_H : y + 12;
+        apply_ota_ring(&ctx, y, y2, strips + (size_t)y * HUD_W);
+    }
+    CHECK(memcmp(whole, strips, px * sizeof *whole) == 0,
+          "AA OTA probation ring strips differ from whole frame");
+
+    size_t mint_px = 0, violet_px = 0, gold_px = 0, out_band = 0;
+    for (size_t i = 0; i < px; ++i) {
+        const uint16_t v = whole[i];
+        if (v == 0u) continue;
+        const int r = radius_of((int)i);
+        if (r < SP_OTA_IN - 1 || r > SP_OTA_OUT + 1) out_band++;
+        if (v == SP_C_MINT) mint_px++;
+        if (v == SP_C_VIOLET) violet_px++;
+        if (v == SP_C_GOLD) gold_px++;
+    }
+    CHECK(mint_px > 500, "probation ring painted %zu core mint pixels", mint_px);
+    CHECK(violet_px == 0, "probation ring painted %zu violet pixels", violet_px);
+    CHECK(gold_px == 0, "probation ring painted %zu gold pixels", gold_px);
+    CHECK(out_band == 0, "probation ring painted %zu px outside OTA band", out_band);
+
+    jr_display_ota_set(JR_DISPLAY_OTA_IDLE, 0U, 0U, 0xFFU, true);
+    free(whole);
+    free(strips);
+}
+
+/* N16.4 Timer Overlay: idle=0px, running cyan arc in r201..208 + haloed MM:SS
+ * inside SAFE_R, <60s amber (never gold), ringing pulse + awake guard, OTA
+ * outranks on non-WATCH, detail sheet TIMER row, 1 Hz resting watch tick,
+ * and 12-row strip invariance. */
+static void test_timer_overlay(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = calloc(px, sizeof *whole);
+    uint16_t *strips = calloc(px, sizeof *strips);
+    if (!whole || !strips) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(whole); free(strips); return;
+    }
+    jr_display_ctx_t ctx = {0};
+    ctx.board.width = HUD_W;
+    ctx.board.height = HUD_H;
+    ctx.board.swap_color_bytes = false;
+
+    stage_ring_at_rest(JR_DISPLAY_SPACE_JARVIS, JR_DISPLAY_OTA_IDLE, 0U);
+    s_choice_n = 0; s_ask_ease = 0; s_shade_ease = 0; s_detail_ease = 0;
+
+    /* 1. Idle draws 0 px */
+    jr_display_timer_set(false, false, 0, 0, NULL);
+    CHECK(!jr_display_timer_active(), "idle timer is not active");
+    apply_timer_overlay(&ctx, 0, HUD_H, whole, 1000u, false);
+    size_t painted = 0;
+    for (size_t i = 0; i < px; ++i) if (whole[i] != 0u) painted++;
+    CHECK(painted == 0, "idle timer painted %zu px", painted);
+
+    /* 2. Running > 60 s: cyan arc in r201..208 + MM:SS inside SAFE_R, strip invariant */
+    jr_display_timer_set(true, false, 185, 75, "PASTA");
+    CHECK(jr_display_timer_active(), "running timer is active");
+    memset(whole, 0, px * sizeof *whole);
+    memset(strips, 0, px * sizeof *strips);
+    apply_timer_overlay(&ctx, 0, HUD_H, whole, 1000u, false);
+    for (int y = 0; y < HUD_H; y += 12) {
+        int y2 = y + 12 > HUD_H ? HUD_H : y + 12;
+        apply_timer_overlay(&ctx, y, y2, strips + (size_t)y * HUD_W, 1000u, false);
+    }
+    CHECK(memcmp(whole, strips, px * sizeof *whole) == 0,
+          "running timer strips differ from whole frame");
+
+    size_t arc_px = 0, text_px = 0, bad_px = 0, gold_px = 0;
+    for (size_t i = 0; i < px; ++i) {
+        const uint16_t v = whole[i];
+        if (v == 0u) continue;
+        if (v == SP_C_GOLD) gold_px++;
+        const int r = radius_of((int)i);
+        if (r >= 200 && r <= 208) {
+            arc_px++;
+        } else if (r <= JR_DISPLAY_SAFE_R) {
+            text_px++;
+        } else {
+            bad_px++;
+        }
+    }
+    CHECK(arc_px > 500, "running timer arc painted %zu px", arc_px);
+    CHECK(text_px > 50, "running timer MM:SS painted %zu px", text_px);
+    CHECK(bad_px == 0, "running timer painted %zu px outside arc/SAFE_R", bad_px);
+    CHECK(gold_px == 0, "running timer painted %zu gold pixels", gold_px);
+
+    /* 3. Detail sheet TIMER row on JARVIS and WATCH */
+    sp_compose_detail(JR_DISPLAY_SPACE_JARVIS);
+    CHECK(s_detail_rows == 5 && strcmp(s_detail_label[4], "TIMER") == 0 &&
+          strcmp(s_detail_value[4], "3:05") == 0,
+          "JARVIS detail TIMER row (rows=%d, %s=%s)",
+          s_detail_rows, s_detail_label[4], s_detail_value[4]);
+    sp_compose_detail(JR_DISPLAY_SPACE_WATCH);
+    CHECK(s_detail_rows == 4 && strcmp(s_detail_label[3], "TIMER") == 0 &&
+          strcmp(s_detail_value[3], "3:05") == 0,
+          "WATCH detail TIMER row (rows=%d, %s=%s)",
+          s_detail_rows, s_detail_label[3], s_detail_value[3]);
+
+    /* 4. OTA outranks timer on non-WATCH, WATCH keeps timer */
+    jr_display_ota_set(JR_DISPLAY_OTA_RECEIVING, 50U, 0U, 1U, true);
+    memset(whole, 0, px * sizeof *whole);
+    apply_timer_overlay(&ctx, 0, HUD_H, whole, 1000u, false);
+    painted = 0;
+    for (size_t i = 0; i < px; ++i) if (whole[i] != 0u) painted++;
+    CHECK(painted == 0, "OTA must outrank timer on non-WATCH (painted %zu px)", painted);
+    apply_timer_overlay(&ctx, 0, HUD_H, whole, 1000u, true);
+    painted = 0;
+    for (size_t i = 0; i < px; ++i) if (whole[i] != 0u) painted++;
+    CHECK(painted > 500, "WATCH keeps timer visible under OTA (painted %zu px)", painted);
+    jr_display_ota_set(JR_DISPLAY_OTA_IDLE, 0U, 0U, 0xFFU, true);
+
+    /* 5. Ringing: pulses over time, strip invariant, keeps rest/quiet awake */
+    jr_display_timer_set(true, true, 0, 0, "TEA");
+    memset(whole, 0, px * sizeof *whole);
+    memset(strips, 0, px * sizeof *strips);
+    apply_timer_overlay(&ctx, 0, HUD_H, whole, 1000u, false);
+    for (int y = 0; y < HUD_H; y += 12) {
+        int y2 = y + 12 > HUD_H ? HUD_H : y + 12;
+        apply_timer_overlay(&ctx, y, y2, strips + (size_t)y * HUD_W, 1000u, false);
+    }
+    CHECK(memcmp(whole, strips, px * sizeof *whole) == 0,
+          "ringing timer strips differ from whole frame");
+    memset(strips, 0, px * sizeof *strips);
+    apply_timer_overlay(&ctx, 0, HUD_H, strips, 1500u, false);
+    CHECK(memcmp(whole, strips, px * sizeof *whole) != 0,
+          "ringing timer pulse did not animate between 1000ms and 1500ms");
+    sp_compose_detail(JR_DISPLAY_SPACE_WATCH);
+    CHECK(s_detail_rows == 4 && strcmp(s_detail_value[3], "RINGING") == 0,
+          "ringing detail row says RINGING (got '%s')", s_detail_value[3]);
+
+    /* 6. Ringing blocks rest/quiet; 1 Hz tick on resting watch while running */
+    dream_fixture();
+    jr_display_timer_set(true, true, 0, 0, "TEA");
+    CHECK(rest_eligible_raw(&s_display) == JR_DISPLAY_REST_NONE,
+          "ringing timer must prevent rest/dream blanking");
+    CHECK(!quiet_eligible(&s_display), "ringing timer must prevent quiet stop");
+
+    const bool saved_rest = s_rest_day;
+    const bool saved_blit = s_dial_blit;
+    s_rest_day = true;
+    s_dial_blit = true;
+    s_still_key = UINT32_MAX;
+    jr_display_timer_set(true, false, 10, 50, "EGG");
+    CHECK(presenter_ticks_the_glass(), "resting watch draws first timer second");
+    CHECK(!presenter_ticks_the_glass(), "resting watch does not redraw same timer second");
+    jr_display_timer_set(true, false, 9, 45, "EGG");
+    CHECK(presenter_ticks_the_glass(), "resting watch ticks at 1 Hz on next timer second");
+    s_rest_day = saved_rest;
+    s_dial_blit = saved_blit;
+
+    jr_display_timer_set(false, false, 0, 0, NULL);
+    free(whole);
+    free(strips);
+}
+
+/* Glass-2 Transient Rim Level Arc: left cyan (volume) / right amber
+ * (brightness), strictly inside r223..231 with r221..222 privacy ring
+ * untouched, fades 1000..1200 ms, self-clears at 1200 ms, yields to
+ * shade/ask/commit, and satisfies 12-row strip invariance. */
+static void test_rim_level_arc(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = calloc(px, sizeof *whole);
+    uint16_t *strips = calloc(px, sizeof *strips);
+    if (!whole || !strips) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(whole); free(strips); return;
+    }
+    jr_display_ctx_t ctx = {0};
+    ctx.board.width = HUD_W;
+    ctx.board.height = HUD_H;
+    ctx.board.swap_color_bytes = false;
+
+    s_choice_n = 0; s_ask_ease = 0; s_commit_pct = 0; s_shade_ease = 0;
+
+    /* Volume: left rim cyan */
+    s_fake_us = 10000000LL; /* 10,000 ms */
+    jr_display_rim_level_show(false, 70U);
+    apply_rim_level_overlay(&ctx, 0, HUD_H, whole, 10100u);
+    for (int y = 0; y < HUD_H; y += 12) {
+        int y2 = y + 12 > HUD_H ? HUD_H : y + 12;
+        apply_rim_level_overlay(&ctx, y, y2, strips + (size_t)y * HUD_W, 10100u);
+    }
+    CHECK(memcmp(whole, strips, px * sizeof *whole) == 0,
+          "rim level volume strips differ from whole frame");
+
+    size_t left_px = 0, right_px = 0, priv_hit = 0, out_band = 0, cyan_px = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            const uint16_t v = whole[(size_t)y * HUD_W + x];
+            if (v == 0u) continue;
+            const int r = radius_of(y * HUD_W + x);
+            if (r <= 222) priv_hit++;
+            if (r < 223 || r > 231) out_band++;
+            if (x < SP_CX) left_px++; else right_px++;
+            if (v == SP_C_CYAN) cyan_px++;
+        }
+    }
+    CHECK(left_px > 400 && cyan_px > 200, "volume rim painted left=%zu cyan=%zu", left_px, cyan_px);
+    CHECK(right_px == 0, "volume rim painted %zu right-side pixels", right_px);
+    CHECK(priv_hit == 0, "volume rim touched r<=222 privacy band (%zu px)", priv_hit);
+    CHECK(out_band == 0, "volume rim painted %zu px outside r223..231", out_band);
+
+    /* Fade at 1100 ms (< full), self-cleared at 1200 ms (0 px) */
+    memset(strips, 0, px * sizeof *strips);
+    apply_rim_level_overlay(&ctx, 0, HUD_H, strips, 11100u);
+    CHECK(memcmp(whole, strips, px * sizeof *whole) != 0,
+          "rim level did not fade at 1100 ms");
+    memset(strips, 0, px * sizeof *strips);
+    apply_rim_level_overlay(&ctx, 0, HUD_H, strips, 11200u);
+    size_t expired_px = 0;
+    for (size_t i = 0; i < px; ++i) if (strips[i] != 0u) expired_px++;
+    CHECK(expired_px == 0, "rim level painted %zu px after 1200 ms TTL", expired_px);
+
+    /* Brightness: right rim amber */
+    s_fake_us = 20000000LL;
+    jr_display_rim_level_show(true, 80U);
+    memset(whole, 0, px * sizeof *whole);
+    apply_rim_level_overlay(&ctx, 0, HUD_H, whole, 20100u);
+    left_px = right_px = priv_hit = out_band = 0;
+    size_t amber_px = 0, gold_px = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            const uint16_t v = whole[(size_t)y * HUD_W + x];
+            if (v == 0u) continue;
+            const int r = radius_of(y * HUD_W + x);
+            if (r <= 222) priv_hit++;
+            if (r < 223 || r > 231) out_band++;
+            if (x < SP_CX) left_px++; else right_px++;
+            if (v == SP_C_AMBER) amber_px++;
+            if (v == SP_C_GOLD) gold_px++;
+        }
+    }
+    CHECK(right_px > 400 && amber_px > 200, "brightness rim painted right=%zu amber=%zu", right_px, amber_px);
+    CHECK(left_px == 0, "brightness rim painted %zu left-side pixels", left_px);
+    CHECK(priv_hit == 0, "brightness rim touched r<=222 privacy band (%zu px)", priv_hit);
+    CHECK(out_band == 0, "brightness rim painted %zu px outside r223..231", out_band);
+    CHECK(gold_px == 0, "brightness rim painted %zu gold pixels", gold_px);
+
+    /* Yields to shade */
+    s_shade_ease = 128;
+    memset(strips, 0, px * sizeof *strips);
+    apply_rim_level_overlay(&ctx, 0, HUD_H, strips, 20100u);
+    size_t yield_px = 0;
+    for (size_t i = 0; i < px; ++i) if (strips[i] != 0u) yield_px++;
+    CHECK(yield_px == 0, "rim level must yield to control shade (%zu px)", yield_px);
+    s_shade_ease = 0;
+
+    /* Expire cleanly so later tests see clean state */
+    atomic_store_explicit(&s_rim_level_word, 0u, memory_order_release);
+    free(whole);
+    free(strips);
+}
+
+/* Settled WEATHER 12-hour rain ring record/replay must be 100% bit-identical
+ * to unrecorded glass_arc_row(). */
+static void test_weather_rain_record_matches_unrecorded(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *unrec = calloc(px, sizeof *unrec);
+    uint16_t *rec = calloc(px, sizeof *rec);
+    if (!unrec || !rec) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(unrec); free(rec); return;
+    }
+    jr_display_ctx_t ctx = {0};
+    ctx.board.width = HUD_W;
+    ctx.board.height = HUD_H;
+    ctx.board.swap_color_bytes = false;
+
+    set_weather(true, 74, 81, 66, JR_DISPLAY_SKY_RAIN, "RAIN", 0U);
+    jr_display_clock_set(true, 12, 0, 0);
+    jr_display_clock_set_date(1, 23, 11);
+    jr_display_weather_t w = s_weather[s_weather_slot & 1u];
+    w.rain_hours_mday = 23;
+    for (int i = 0; i < JR_DISPLAY_RAIN_HOURS; ++i) {
+        w.rain_hours[i] = (uint8_t)((i * 17) % 101);
+    }
+    jr_display_weather_set(&w);
+    sp_compose_weather();
+
+    uint8_t *saved_rec = s_wx_rec;
+    s_wx_rec = NULL;
+    for (int y = 0; y < HUD_H; y += 12) {
+        int y2 = y + 12 > HUD_H ? HUD_H : y + 12;
+        sp_focal_weather(&ctx, y, y2, unrec + (size_t)y * HUD_W, 0, 255, SP_ENTRY_TOTAL_MS);
+    }
+    uint8_t *buf = malloc((size_t)SP_WX_HOURS * SG_WX_REC_CAP);
+    CHECK(buf != NULL, "weather record buffer alloc");
+    if (buf != NULL) {
+        s_wx_rec = buf;
+        s_wx_rec_valid = false;
+        for (int y = 0; y < HUD_H; y += 12) {
+            int y2 = y + 12 > HUD_H ? HUD_H : y + 12;
+            sp_focal_weather(&ctx, y, y2, rec + (size_t)y * HUD_W, 0, 255, SP_ENTRY_TOTAL_MS);
+        }
+        CHECK(s_wx_rec_have != 0u, "weather rain ring segments recorded");
+        CHECK(memcmp(unrec, rec, px * sizeof *unrec) == 0,
+              "recorded weather rain ring differs from unrecorded");
+        free(buf);
+    }
+    s_wx_rec = saved_rec;
+    s_wx_rec_valid = false;
+    free(unrec);
+    free(rec);
+}
+
 int main(void)
 {
     test_light_word_round_trips();
@@ -7309,6 +7642,10 @@ int main(void)
     test_a_face_requested_while_parked_is_the_face_that_comes_back();
     test_park_yields_to_blank_to_a_failed_lock_and_to_a_dial();
     test_snapshot_mirror_blacks_out_the_corners();
+    test_ota_probation_is_mint_not_violet_or_gold();
+    test_timer_overlay();
+    test_rim_level_arc();
+    test_weather_rain_record_matches_unrecorded();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);

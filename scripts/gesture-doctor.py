@@ -37,25 +37,68 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOUCH_SRC = os.path.join(REPO, "components", "jr_hal", "src", "input_touch.c")
 HUD_SRC = os.path.join(REPO, "components", "jr_display", "src", "hud_render.c")
+KEYCHAIN_SERVICE = "com.ingeniousdigital.jarvisnano.desk"
+
+FACES = [
+    "IDLE", "LISTENING", "THINKING", "SPEAKING", "ERROR",
+    "RESTING", "MUTED", "LINKING",
+    "DIAL_DIVER", "DIAL_DRESS", "DIAL_PILOT", "DIAL_FUTURE",
+    "DIAL_SKELETON", "DIAL_CELESTIAL",
+]
 
 OK, WARN, BAD = "ok  ", "WARN", "FAIL"
 
 
-def get(base: str, path: str, timeout: float = 8.0, retries: int = 3):
+def _pairing_token(base: str) -> str | None:
+    """Best-effort paired token lookup so /api/cockpit mood check works when paired."""
+    account = "jarvis-desk@" + urllib.parse.urlsplit(base).netloc
+    try:
+        res = subprocess.run(
+            ["security", "find-generic-password", "-a", account,
+             "-s", KEYCHAIN_SERVICE, "-w"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, check=False,
+        )
+    except (FileNotFoundError, OSError):
+        res = None
+    if res is not None and res.returncode == 0:
+        tok = res.stdout.rstrip("\r\n")
+        if 32 <= len(tok.encode("utf-8")) <= 64:
+            return tok
+    if sys.platform == "win32":
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\JarvisNano\Desk") as key:
+                tok, kind = winreg.QueryValueEx(key, account)
+            if kind == winreg.REG_SZ and 32 <= len(tok.encode("utf-8")) <= 64:
+                return tok
+        except OSError:
+            pass
+    tok = (os.environ.get("JARVIS_PAIRING_TOKEN")
+           or os.environ.get("JARVIS_DESK_TOKEN") or "")
+    return tok or None
+
+
+def get(base: str, path: str, timeout: float = 8.0, retries: int = 3,
+        headers: dict[str, str] | None = None):
     """GET with retries — ESP32 wifi power-save drops single requests routinely.
     One failed curl means nothing on this device; three in a row means something."""
     last = None
     for attempt in range(retries):
         try:
-            with urllib.request.urlopen(base + path, timeout=timeout) as r:
+            req = urllib.request.Request(base + path, headers=headers or {})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 return json.loads(r.read().decode("utf-8"))
         except (urllib.error.URLError, urllib.error.HTTPError, OSError,
                 json.JSONDecodeError) as exc:
@@ -276,17 +319,37 @@ def check_touch(base: str) -> list[str]:
     return lines
 
 
+def _read_mood(base: str) -> str | None:
+    """Read current power mood from /api/cockpit when accessible (optional)."""
+    tok = _pairing_token(base)
+    hdrs = {"X-JarvisNano-Token": tok} if tok else None
+    c = get(base, "/api/cockpit", timeout=6.0, retries=1, headers=hdrs)
+    if "__error" in c or not isinstance(c, dict):
+        return None
+    voice = c.get("voice")
+    mood = voice.get("mood") if isinstance(voice, dict) else None
+    return mood.upper() if isinstance(mood, str) and mood else None
+
+
 def check_display(base: str) -> list[str]:
     d = get(base, "/api/display")
     if "__error" in d:
         return [f"{BAD} /api/display unreachable: {d['__error']}"]
-    faces = ["IDLE", "LISTENING", "THINKING", "SPEAKING", "ERROR"]
     face = d.get("applied_face")
-    name = faces[face] if isinstance(face, int) and 0 <= face < len(faces) else face
+    name = FACES[face] if isinstance(face, int) and 0 <= face < len(FACES) else face
     fps = d.get("actual_fps")
-    lines = [f"{OK} display {d.get('init')} face={name} fps={fps} "
+    mood = _read_mood(base)
+    mood_str = f" mood={mood}" if mood else ""
+    lines = [f"{OK} display {d.get('init')} face={name}{mood_str} fps={fps} "
              f"flush_errors={d.get('flush_errors')}"]
-    if isinstance(fps, int) and fps < 8:
+    blanked = bool(d.get("blanked"))
+    if mood == "DREAM" or blanked:
+        pass  # panel intentionally dark/resting in DREAM
+    elif mood == "WHISPER" or name == "RESTING":
+        # WHISPER intentionally renders at a 6 fps cadence (measured 5-6 fps).
+        if isinstance(fps, int) and fps < 4:
+            lines.append(f"{WARN} fps {fps} is low for WHISPER resting cadence")
+    elif isinstance(fps, int) and fps < 8:
         lines.append(f"{WARN} fps {fps} is low — the render task may be starved")
     if d.get("flush_errors"):
         lines.append(f"{BAD} panel flush errors present")

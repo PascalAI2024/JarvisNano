@@ -26,6 +26,7 @@ bool jr_dac_mute_sounds_under_owner_mute(jr_tone_kind_t kind)
     case JR_TONE_SWEEP:      return true;
     case JR_TONE_CHIME:      return true;
     case JR_TONE_UI_CUE:     return false;
+    case JR_TONE_ALARM:      return true;
     }
     return false;
 }

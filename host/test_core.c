@@ -45,6 +45,7 @@ extern void jitter_tests_run(void);
 extern void voice_fix_tests_run(void);
 extern void mic_watch_tests_run(void);
 extern void pace_tests_run(void);
+extern void timer_tests_run(void);
 extern void audio_power_tests_run(void);
 extern void power_charge_tests_run(void);
 
@@ -1950,6 +1951,7 @@ int main(void)
     voice_fix_tests_run();
     mic_watch_tests_run();
     pace_tests_run();
+    timer_tests_run();
 
     return UNITY_END();
 }

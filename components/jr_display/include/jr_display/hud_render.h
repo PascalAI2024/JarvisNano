@@ -586,6 +586,12 @@ int     hud_celestial_foreground(uint16_t *dst, int y0, int nrows, bool swap_byt
 void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                        const hud_watch_t *w, int strength, int style);
 
+/* Rasterize MINIMAL's static dial (ivory disc + 60 ticks + 12 hour dots) onto
+ * black for rows [y0, y0 + nrows). Used on ESP_PLATFORM to bake the static
+ * dial once into a PSRAM slot so MINIMAL frames draw only hands + hub. */
+void hud_minimal_dial_bake_rows(uint16_t *dst, int y0, int nrows,
+                                bool swap_bytes);
+
 /* The perf knob as the render task last read it (perf_knob.h); 0 = shipped. */
 extern uint32_t hud_perf_knob;
 

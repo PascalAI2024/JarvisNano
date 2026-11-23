@@ -354,6 +354,71 @@ static esp_err_t say_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* POST /api/debug/timer — bench control for the on-device timer bank.
+ * Supports ?sec=N[&label=...] | ?cancel=1[&label=...] | ?dismiss=1.
+ * Marshals onto voice_task via s_timer_mux + s_debug_timer_req; never touches
+ * privacy or operator lease. */
+static esp_err_t debug_timer_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    int sec = -1;
+    int cancel = 0;
+    int dismiss = 0;
+    const bool have_sec = query_int(req, "sec", &sec);
+    const bool have_cancel = query_int(req, "cancel", &cancel) && cancel != 0;
+    const bool have_dismiss = query_int(req, "dismiss", &dismiss) && dismiss != 0;
+
+    char label[JR_TIMER_LABEL_CAP] = {0};
+    char q[128] = {0};
+    if (httpd_req_get_url_query_str(req, q, sizeof q) == ESP_OK) {
+        char raw[48] = {0};
+        if (httpd_query_key_value(q, "label", raw, sizeof raw) == ESP_OK &&
+            url_decode_in_place(raw)) {
+            strlcpy(label, raw, sizeof label);
+        }
+    }
+
+    timer_debug_req_t dreq = {0};
+    const char *action = NULL;
+    if (have_dismiss) {
+        dreq.kind = TIMER_REQ_DISMISS;
+        action = "dismiss";
+    } else if (have_cancel) {
+        dreq.kind = TIMER_REQ_CANCEL;
+        strlcpy(dreq.label, label[0] != '\0' ? label : "all", sizeof dreq.label);
+        action = "cancel";
+    } else if (have_sec || label[0] != '\0') {
+        if (have_sec && (sec < 0 || sec > (int)JR_TIMER_MAX_S)) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "sec must be 0..43200");
+            return ESP_OK;
+        }
+        dreq.kind = TIMER_REQ_SET;
+        dreq.seconds = have_sec ? (uint32_t)sec : 0U;
+        strlcpy(dreq.label, label, sizeof dreq.label);
+        action = "set";
+    } else {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "need sec=N, cancel=1, or dismiss=1");
+        return ESP_OK;
+    }
+
+    portENTER_CRITICAL(&s_timer_mux);
+    s_debug_timer_req_data = dreq;
+    portEXIT_CRITICAL(&s_timer_mux);
+    atomic_store(&s_debug_timer_req, (uint32_t)dreq.kind);
+
+    char body[112];
+    int n = snprintf(body, sizeof body,
+                     "{\"ok\":true,\"queued\":\"%s\",\"sec\":%u}",
+                     action, (unsigned)dreq.seconds);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
 static esp_err_t gain_get_handler(httpd_req_t *req)
 {
     if (!agent_require_auth(req) || !control_intent_required(req)) {
@@ -417,10 +482,17 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
     /* Report DEVICE state, never the request: a read with no arguments used
      * to answer mic/ref/vol = -1, and a partial write echoed the requested
      * value even when nothing was applied. */
-    /* Static, not on the stack: httpd has about 1500 bytes free, and this
-     * handler runs on that one task. */
-    static char buf[640];
-    int n = snprintf(buf, sizeof buf,
+    /* PSRAM buffer (not internal .bss or httpd stack): reclaims 640 B SRAM. */
+    const size_t buf_cap = 640U;
+    char *buf = heap_caps_malloc(buf_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        buf = malloc(buf_cap);
+    }
+    if (buf == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_OK;
+    }
+    int n = snprintf(buf, buf_cap,
                      "{\"ok\":true,\"mic\":%d,\"ref\":%d,\"vol\":%d,"
                      "\"speakmic\":%d,\"speakgain\":%d,"
                      "\"barge\":%s,\"vadclean\":%s,\"pbgain\":%d,"
@@ -441,13 +513,15 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
                      (unsigned)jr_audio_last_aec_us(),
                      (unsigned)jr_audio_aec_reconfigs(),
                      (unsigned)jr_audio_aec_reconfig_fails());
-    if (n < 0 || (size_t)n >= sizeof buf) {
+    if (n < 0 || (size_t)n >= buf_cap) {
+        free(buf);
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"reply too long\"}");
         return ESP_OK;
     }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, n);
+    free(buf);
     return ESP_OK;
 }
 
@@ -657,14 +731,22 @@ static esp_err_t voiceperf_handler(httpd_req_t *req)
             jr_wake_bench_request();
         }
     }
-    static char buf[1152];
+    const size_t buf_cap = 1152U;
+    char *buf = heap_caps_malloc(buf_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        buf = malloc(buf_cap);
+    }
+    if (buf == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_OK;
+    }
     int n = 0;
-    n += snprintf(buf + n, sizeof buf - (size_t)n, "{\"ok\":true,\"classes\":[");
+    n += snprintf(buf + n, buf_cap - (size_t)n, "{\"ok\":true,\"classes\":[");
     for (int i = 0; i < 2; ++i) {
         const voiceperf_class_t *c = &s_vperf[i];
         const uint32_t f = atomic_load(&c->frames);
         const uint32_t d = f != 0U ? f : 1U;
-        n += snprintf(buf + n, sizeof buf - (size_t)n,
+        n += snprintf(buf + n, buf_cap - (size_t)n,
             "%s{\"class\":\"%s\",\"frames\":%u,\"fps\":%u.%02u,"
             "\"iter_mean_ms\":%u.%u,\"iter_max_ms\":%u.%u,\"read_mean_us\":%u}",
             i ? "," : "", i == 0 ? "speaking" : "other",
@@ -679,7 +761,7 @@ static esp_err_t voiceperf_handler(httpd_req_t *req)
     }
     uint32_t wmean = 0, wmax = 0;
     const bool wbench = jr_wake_bench_result(&wmean, &wmax);
-    n += snprintf(buf + n, sizeof buf - (size_t)n,
+    n += snprintf(buf + n, buf_cap - (size_t)n,
         "],\"tick_skips\":%u,\"tick_sleeps\":%u,"
         "\"cpu_mhz\":%d,"
         "\"wake\":{\"ready\":%s,\"chunks\":%u,\"detect_last_us\":%u,"
@@ -701,7 +783,8 @@ static esp_err_t voiceperf_handler(httpd_req_t *req)
         wbench ? (int)wmean : -1, wbench ? (int)wmax : -1,
         atomic_load(&s_aec_bench_have) ? atomic_load(&s_aec_bench_mean_us) : -1,
         atomic_load(&s_aec_bench_have) ? (unsigned)atomic_load(&s_aec_bench_max_us) : 0U);
-    if (n < 0 || (size_t)n >= sizeof buf) {
+    if (n < 0 || (size_t)n >= buf_cap) {
+        free(buf);
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"reply too long\"}");
         return ESP_OK;
@@ -709,6 +792,7 @@ static esp_err_t voiceperf_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_send(req, buf, n);
+    free(buf);
     return ESP_OK;
 }
 
@@ -3304,16 +3388,28 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         }
     }
     if (used < COCKPIT_BODY_CAP) {
+        timer_snap_t tsnap = {0};
+        portENTER_CRITICAL(&s_timer_mux);
+        tsnap = s_timer_snap;
+        portEXIT_CRITICAL(&s_timer_mux);
         uint32_t surface_ttl_ms = brain_surface.active &&
             (int32_t)(brain_surface.expires_ms - now) > 0
             ? brain_surface.expires_ms - now : 0U;
         n = snprintf(body + used, COCKPIT_BODY_CAP - used,
-            "},\"brain\":{\"voice_route\":\"%s\","
+            "},\"timer\":{\"active\":%s,\"ringing\":%s,\"rem_s\":%u,"
+            "\"pct_left\":%u,\"label\":\"%s\",\"count\":%u},"
+            "\"brain\":{\"voice_route\":\"%s\","
             "\"desk_connected\":%s,\"private_android_ready\":false,"
             "\"private_android_reason\":\"BLE firmware not enabled\","
             "\"next_inbox_seq\":%u,\"event_cursor\":%u,"
             "\"surface_active\":%s,\"surface_kind\":\"%s\","
             "\"surface_title\":\"%s\",\"surface_ttl_ms\":%u}}",
+            tsnap.active ? "true" : "false",
+            tsnap.ringing ? "true" : "false",
+            (unsigned)tsnap.rem_s,
+            (unsigned)tsnap.pct_left,
+            tsnap.label,
+            (unsigned)tsnap.count,
             voice_route, desk_connected ? "true" : "false",
             (unsigned)brain_inbox_next, (unsigned)brain_event_cursor,
             brain_surface.active ? "true" : "false",
@@ -5050,7 +5146,7 @@ static esp_err_t display_snapshot_rgb565_handler(httpd_req_t *req)
 
 /* Handler slots the server allocates (4 B each, internal RAM). The table
  * below is checked against it at compile time. */
-#define JR_HTTP_ROUTE_SLOTS 58
+#define JR_HTTP_ROUTE_SLOTS 59
 
 void start_diag_http(void)
 {
@@ -5073,6 +5169,7 @@ void start_diag_http(void)
         { .uri = "/api/gemini/live", .method = HTTP_GET, .handler = diag_get_handler },
         { .uri = "/api/debug/say",   .method = HTTP_POST, .handler = say_get_handler  },
         { .uri = "/api/debug/briefing", .method = HTTP_POST, .handler = briefing_post_handler },
+        { .uri = "/api/debug/timer", .method = HTTP_POST, .handler = debug_timer_handler },
         { .uri = "/api/debug/gain",  .method = HTTP_POST, .handler = gain_get_handler },
         { .uri = "/api/voice/control", .method = HTTP_POST,
           .handler = voice_control_handler },

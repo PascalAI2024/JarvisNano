@@ -26,6 +26,9 @@
  * Units: positions and radii 1/16 px, root distances 1/64 px, angles Q16 turns.
  */
 #include "jr_display/glass.h"
+#ifdef ESP_PLATFORM
+#include "esp_heap_caps.h"
+#endif
 
 /* ---- trig ----------------------------------------------------------------- */
 
@@ -524,7 +527,12 @@ typedef struct {
     geo_t g;
 } geo_slot_t;
 
-static geo_slot_t s_geo[GEO_SLOTS];
+#ifdef ESP_PLATFORM
+static geo_slot_t *s_geo;
+#else
+static geo_slot_t s_geo_buf[GEO_SLOTS];
+static geo_slot_t *s_geo = s_geo_buf;
+#endif
 static unsigned s_geo_hint;   /* where the last lookup hit: calls repeat in order */
 static unsigned s_geo_victim; /* next slot to overwrite */
 
@@ -534,6 +542,15 @@ static geo_t *geo_get(int32_t cx, int32_t cy, int32_t ri, int32_t ro,
     if (sweep <= 0 || ro <= 0 || ro <= ri) {
         return NULL;
     }
+#ifdef ESP_PLATFORM
+    if (s_geo == NULL) {
+        s_geo = heap_caps_calloc(GEO_SLOTS, sizeof(geo_slot_t),
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_geo == NULL) {
+            return NULL;
+        }
+    }
+#endif
     for (unsigned i = 0; i < GEO_SLOTS; i++) {
         const unsigned k = (s_geo_hint + 1u + i) % GEO_SLOTS;
         geo_slot_t *e = &s_geo[k];
@@ -1105,7 +1122,12 @@ typedef struct {
     uint32_t e[GLOW_LUT_MAX];
 } glow_lut_t;
 
-static glow_lut_t s_glow_lut;
+#ifdef ESP_PLATFORM
+static glow_lut_t *s_glow_lut;
+#else
+static glow_lut_t s_glow_lut_buf;
+static glow_lut_t *s_glow_lut = &s_glow_lut_buf;
+#endif
 
 static const glow_lut_t *glow_lut_get(int32_t w16, uint8_t peak, uint16_t color, uint8_t alpha,
                                       uint32_t inv)
@@ -1114,7 +1136,16 @@ static const glow_lut_t *glow_lut_get(int32_t w16, uint8_t peak, uint16_t color,
     if (w64 > GLOW_LUT_MAX) {
         return NULL;
     }
-    glow_lut_t *l = &s_glow_lut;
+#ifdef ESP_PLATFORM
+    if (s_glow_lut == NULL) {
+        s_glow_lut = heap_caps_calloc(1, sizeof(glow_lut_t),
+                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_glow_lut == NULL) {
+            return NULL;
+        }
+    }
+#endif
+    glow_lut_t *l = s_glow_lut;
     if (!l->valid || l->w16 != w16 || l->peak != peak || l->color != color || l->alpha != alpha) {
         for (int32_t t = 0; t < w64; t++) {
             l->e[t] = glow_pack(color, peak, alpha, inv, w64, t);

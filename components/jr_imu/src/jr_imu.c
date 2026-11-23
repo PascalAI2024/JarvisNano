@@ -73,8 +73,12 @@
 /* Sampler cadence. CONFIG_FREERTOS_HZ=100 makes one tick 10 ms, so
  * pdMS_TO_TICKS(10) == 1 tick; clamp to >= 1 so a config change can never make
  * this a delay that never sleeps. 10 ms also clears the 125 Hz accel ODR period
- * (8 ms): every sample is a fresh conversion, exactly as the original burst. */
+ * (8 ms): every sample is a fresh conversion, exactly as the original burst.
+ * In rest moods (WHISPER/DREAM) drop to 20 Hz (50 ms) with QMI8658 low-power
+ * 21 Hz ODR (CTRL2 = 0x2D, same ±8 g full scale). */
 #define IMU_SAMPLE_GAP_TICKS  ((pdMS_TO_TICKS(10) > 0) ? pdMS_TO_TICKS(10) : 1)
+#define IMU_REST_GAP_TICKS    ((pdMS_TO_TICKS(50) > 0) ? pdMS_TO_TICKS(50) : 1)
+#define QMI8658_CTRL2_REST    QMI8658_CTRL2_WOM
 
 /* Sentinel (0x8000) retries after enable — see the read path. */
 #define IMU_SENTINEL_RETRIES  3
@@ -95,6 +99,7 @@ static uint8_t s_addr;
 static bool    s_ready;
 static TaskHandle_t s_task;
 static volatile bool s_run;
+static volatile bool s_rest_req;
 /* True when the task stack came from PSRAM via xTaskCreateWithCaps — such a
  * task MUST be torn down with vTaskDeleteWithCaps or its stack leaks. */
 static bool s_ext_stack;
@@ -362,18 +367,48 @@ static void imu_task(void *arg)
     TickType_t last_wake = xTaskGetTickCount();
     int32_t  lp_x_q4 = 0, lp_y_q4 = 0;   /* tilt low-pass, milli-g * 16 */
     bool     lp_seeded = false;
+    uint8_t  ctrl2_applied = QMI8658_CTRL2_CFG;
+    bool     in_rest = false;
 
     while (s_run) {
+        /* Reconcile QMI8658 ODR with the lock-free rest hint. In AWAKE/AMBIENT
+         * keep 125 Hz Normal (0x26) / 100 Hz polling; in WHISPER/DREAM switch
+         * to 21 Hz low-power (0x2D) / 20 Hz polling. Leaving rest restores
+         * 125 Hz immediately before reading so shake/tilt stay crisp. */
+        const bool want_rest = __atomic_load_n(&s_rest_req, __ATOMIC_ACQUIRE);
+        const uint8_t want_ctrl2 = want_rest ? QMI8658_CTRL2_REST : QMI8658_CTRL2_CFG;
+        if (want_ctrl2 != ctrl2_applied) {
+            if (imu_write_reg(QMI8658_REG_CTRL2, want_ctrl2) == ESP_OK) {
+                ctrl2_applied = want_ctrl2;
+                in_rest = want_rest;
+                filled = 0;
+                head = 0;
+                last_wake = xTaskGetTickCount();
+            }
+        } else {
+            in_rest = want_rest;
+        }
+
         int16_t ax = 0, ay = 0, az = 0;
         if (imu_read_axes(&ax, &ay, &az) != ESP_OK) {
-            vTaskDelayUntil(&last_wake, IMU_SAMPLE_GAP_TICKS);
+            if (in_rest) {
+                (void)ulTaskNotifyTake(pdTRUE, IMU_REST_GAP_TICKS);
+                last_wake = xTaskGetTickCount();
+            } else {
+                vTaskDelayUntil(&last_wake, IMU_SAMPLE_GAP_TICKS);
+            }
             continue;
         }
 
         /* The QMI8658 emits 0x8000 on every axis until the first conversion
          * after enable is ready. Skip the sentinel rather than publish it. */
         if (ax == INT16_MIN && ay == INT16_MIN && az == INT16_MIN) {
-            vTaskDelayUntil(&last_wake, IMU_SAMPLE_GAP_TICKS);
+            if (in_rest) {
+                (void)ulTaskNotifyTake(pdTRUE, IMU_REST_GAP_TICKS);
+                last_wake = xTaskGetTickCount();
+            } else {
+                vTaskDelayUntil(&last_wake, IMU_SAMPLE_GAP_TICKS);
+            }
             continue;
         }
 
@@ -385,8 +420,8 @@ static void imu_task(void *arg)
         s.gx = (float)ax / QMI8658_ACC_LSB_PER_G;
         s.gy = (float)ay / QMI8658_ACC_LSB_PER_G;
         s.gz = (float)az / QMI8658_ACC_LSB_PER_G;
-        s.pitch_deg = atan2f(s.gx, sqrtf(s.gy * s.gy + s.gz * s.gz)) * RAD_TO_DEG;
-        s.roll_deg  = atan2f(s.gy, s.gz) * RAD_TO_DEG;
+        /* pitch_deg / roll_deg are computed lazily in jr_imu_read() so the
+         * sampler does not run atan2f/sqrtf at 100 Hz. */
         s.orientation = orientation_from_g(s.gx, s.gy, s.gz);
 
         mag[head] = sqrtf(s.gx * s.gx + s.gy * s.gy + s.gz * s.gz);
@@ -435,12 +470,23 @@ static void imu_task(void *arg)
             xSemaphoreGive(s_snap_lock);
         }
 
-        vTaskDelayUntil(&last_wake, IMU_SAMPLE_GAP_TICKS);
+        if (in_rest) {
+            (void)ulTaskNotifyTake(pdTRUE, IMU_REST_GAP_TICKS);
+            last_wake = xTaskGetTickCount();
+        } else {
+            vTaskDelayUntil(&last_wake, IMU_SAMPLE_GAP_TICKS);
+        }
+    }
+
+    /* Restore normal 125 Hz CTRL2 if we stopped while resting, unless the
+     * caller immediately arms WoM (which writes CTRL2 itself). */
+    if (ctrl2_applied != QMI8658_CTRL2_CFG) {
+        (void)imu_write_reg(QMI8658_REG_CTRL2, QMI8658_CTRL2_CFG);
     }
 
     __atomic_store_n(&s_tilt_valid, false, __ATOMIC_RELEASE);   /* a stopped sampler has no tilt */
     const bool ext = s_ext_stack;
-    s_task = NULL;
+    __atomic_store_n(&s_task, (TaskHandle_t)NULL, __ATOMIC_RELEASE);
     s_ext_stack = false;
     if (ext) {
         vTaskDeleteWithCaps(NULL);   /* frees the PSRAM stack too */
@@ -494,6 +540,21 @@ esp_err_t jr_imu_start(void)
 void jr_imu_stop(void)
 {
     s_run = false;   /* the task removes itself on its next wake */
+    TaskHandle_t t = __atomic_load_n(&s_task, __ATOMIC_ACQUIRE);
+    if (t != NULL) {
+        xTaskNotifyGive(t);
+    }
+}
+
+void jr_imu_set_rest(bool resting)
+{
+    const bool prev = __atomic_exchange_n(&s_rest_req, resting, __ATOMIC_ACQ_REL);
+    if (prev && !resting) {
+        TaskHandle_t t = __atomic_load_n(&s_task, __ATOMIC_ACQUIRE);
+        if (t != NULL) {
+            xTaskNotifyGive(t);
+        }
+    }
 }
 
 esp_err_t jr_imu_read(jr_imu_t *out)
@@ -515,6 +576,10 @@ esp_err_t jr_imu_read(jr_imu_t *out)
         out->age_ms = (uint32_t)(age > 0 ? age / 1000 : 0);
     }
     xSemaphoreGive(s_snap_lock);
+    if (have) {
+        out->pitch_deg = atan2f(out->gx, sqrtf(out->gy * out->gy + out->gz * out->gz)) * RAD_TO_DEG;
+        out->roll_deg  = atan2f(out->gy, out->gz) * RAD_TO_DEG;
+    }
     return have ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 

@@ -179,7 +179,8 @@ static void test_tools_gateway_classification(void)
     };
     static const char *const kLocal[] = {
         "current_time", "weather_here", "set_volume", "set_brightness",
-        "ask_user",
+        "ask_user", "set_timer", "cancel_timer", "list_timers",
+        "set_glass", "device_status",
     };
     for (size_t i = 0; i < sizeof kGateway / sizeof kGateway[0]; ++i) {
         TEST_ASSERT_TRUE_MESSAGE(jr_tool_needs_gateway(kGateway[i]), kGateway[i]);
@@ -235,6 +236,11 @@ static void test_instruction_without_a_gateway_names_what_it_has(void)
     TEST_ASSERT_NOT_NULL(strstr(buf, "Testville"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "never ask Sir where he is"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "set_volume"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "set_timer"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "cancel_timer"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "list_timers"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "set_glass"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "device_status"));
     /* No gateway tool may be named as one it has. */
     TEST_ASSERT_NULL(strstr(buf, "delegate_task"));
     TEST_ASSERT_NULL(strstr(buf, "delegated_tasks"));
@@ -252,6 +258,9 @@ static void test_instruction_with_a_gateway_is_the_old_one_plus_weather(void)
     TEST_ASSERT_NOT_NULL(strstr(buf, "delegate_task"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "hands elsewhere"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "weather_here"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "set_timer"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "set_glass"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "device_status"));
     /* The board is delegated_tasks; execute_tool is for a method search_tools
      * found. The model once reached for execute_tool to read the board. */
     TEST_ASSERT_NOT_NULL(strstr(buf, "alone answers anything about the board"));
@@ -274,7 +283,7 @@ static void test_instruction_that_does_not_fit_returns_zero(void)
 
 /* ---------------------- setup built with and without a key --------------- */
 
-/* The device's eleven tools, by name, in catalog order (main/main.c). */
+/* The device's sixteen tools, by name, in catalog order (main/main.c). */
 static const jr_gemini_fn_decl_t kCatalog[] = {
     { .name = "recall_memory", .description = "d", .arg_name = "query", .arg_desc = "q" },
     { .name = "remember", .description = "d", .arg_name = "note", .arg_desc = "n" },
@@ -287,6 +296,11 @@ static const jr_gemini_fn_decl_t kCatalog[] = {
     { .name = "delegate_task", .description = "d", .arg_name = "goal", .arg_desc = "g" },
     { .name = "delegated_tasks", .description = "d" },
     { .name = "ask_user", .description = "d" },
+    { .name = "set_timer", .description = "d" },
+    { .name = "cancel_timer", .description = "d" },
+    { .name = "list_timers", .description = "d" },
+    { .name = "set_glass", .description = "d" },
+    { .name = "device_status", .description = "d" },
 };
 #define CATALOG_N (sizeof kCatalog / sizeof kCatalog[0])
 
@@ -327,7 +341,8 @@ static void test_setup_with_a_usable_gateway_declares_every_tool(void)
     TEST_ASSERT_EQUAL_STRING(
         "recall_memory,remember,current_time,weather_here,search_tools,"
         "execute_tool,set_volume,set_brightness,delegate_task,"
-        "delegated_tasks,ask_user", names);
+        "delegated_tasks,ask_user,set_timer,cancel_timer,list_timers,"
+        "set_glass,device_status", names);
 }
 
 static void test_setup_without_a_gateway_declares_only_what_runs_here(void)
@@ -337,14 +352,15 @@ static void test_setup_without_a_gateway_declares_only_what_runs_here(void)
     cfg.fns = kCatalog;
     cfg.fn_count = CATALOG_N;
     cfg.no_gateway = true;
-    TEST_ASSERT_EQUAL_UINT(5u, jr_gemini_declared_fn_count(&cfg));
+    TEST_ASSERT_EQUAL_UINT(10u, jr_gemini_declared_fn_count(&cfg));
     char *setup = jr_gemini_build_setup(&cfg);
     TEST_ASSERT_NOT_NULL(setup);
     char names[512];
     declared_names(setup, names, sizeof names);
     free(setup);
     TEST_ASSERT_EQUAL_STRING(
-        "current_time,weather_here,set_volume,set_brightness,ask_user", names);
+        "current_time,weather_here,set_volume,set_brightness,ask_user,"
+        "set_timer,cancel_timer,list_timers,set_glass,device_status", names);
 }
 
 static void test_setup_with_no_local_tools_left_has_no_declarations(void)

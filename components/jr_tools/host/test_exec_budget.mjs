@@ -137,6 +137,33 @@ const call = (value) => run(["test", "get"], {}, svc(value));
   check(out.total === 400 && out.items.length === 6 && bytes(out) <= MAX, "the work-item list keeps six items and the total");
 }
 
+// --- coordination.portfolio projects up to 8 compact projects before TIERS.
+{
+  const projects = Array.from({ length: 12 }, (_, i) => ({
+    id: "proj-" + i + "-" + "a".repeat(30),
+    name: "Project " + i + " " + "n".repeat(60),
+    description: "d".repeat(600),
+    counts: { open: i + 1, inProgress: i % 3, blocked: i % 2, completed: i * 4 },
+    extra: Array.from({ length: 10 }, () => "x".repeat(50)),
+  }));
+  const out = await run(["coordination", "portfolio"], {}, { coordination: { portfolio: async () => ({ projects }) } });
+  check(bytes(out) <= MAX, "portfolio projection fits budget: " + bytes(out));
+  check(out.total === 12 && Array.isArray(out.projects) && out.projects.length === 8, "portfolio keeps up to 8 projects and total");
+  check(out.truncated === undefined, "compact portfolio is not truncated");
+  const p0 = out.projects[0];
+  check(p0.id.length === 24 && p0.name.length === 40 && p0.open === 1 && p0.inProgress === 0 && p0.blocked === 0 && p0.completed === 0,
+        "portfolio project keeps compact id, name, and status counts");
+  const p3 = out.projects[3];
+  check(p3.open === 4 && p3.inProgress === 0 && p3.blocked === 1 && p3.completed === 12,
+        "portfolio maps counts accurately");
+  const flat = await run(["coordination", "portfolio"], {}, {
+    coordination: { portfolio: async () => ([{ projectId: "jarvisnano-desk", title: "Desk", open: 2, in_progress: 1, blocked: 0, done: 5 }]) }
+  });
+  check(flat.total === 1 && flat.projects.length === 1 && flat.projects[0].id === "jarvisnano-desk" &&
+        flat.projects[0].name === "Desk" && flat.projects[0].inProgress === 1 && flat.projects[0].completed === 5,
+        "portfolio handles flat project shape and alias keys");
+}
+
 // --- Errors are bounded too, and policy lines are untouched.
 {
   const out = await call(() => { throw new Error("e".repeat(1000)); });

@@ -107,10 +107,23 @@ static void test_ui_cue_is_refused_under_owner_mute(void)
     TEST_ASSERT_FALSE(m.restore);
 }
 
+/* Timer alarm sounds even under owner privacy mute, then restores the DAC. */
+static void test_alarm_tone_sounds_under_owner_mute_and_restores_dac(void)
+{
+    jr_dac_mute_t m = { .muted = true, .restore = false };
+    TEST_ASSERT_TRUE(jr_dac_mute_sounds_under_owner_mute(JR_TONE_ALARM));
+    TEST_ASSERT_TRUE(jr_dac_mute_tone_begin(&m, true, JR_TONE_ALARM));
+    TEST_ASSERT_FALSE(m.muted);
+    TEST_ASSERT_TRUE(m.restore);
+    TEST_ASSERT_TRUE(jr_dac_mute_cue_settle(&m, false));
+    TEST_ASSERT_TRUE(m.muted);
+    TEST_ASSERT_FALSE(m.restore);
+}
+
 /* With the owner not muted every kind plays, and a live DAC stays live. */
 static void test_every_tone_plays_when_owner_not_muted(void)
 {
-    for (int k = JR_TONE_OWNER_ACK; k <= JR_TONE_UI_CUE; ++k) {
+    for (int k = JR_TONE_OWNER_ACK; k <= JR_TONE_ALARM; ++k) {
         jr_dac_mute_t m = { .muted = false, .restore = false };
         TEST_ASSERT_TRUE(jr_dac_mute_tone_begin(&m, false, (jr_tone_kind_t)k));
         TEST_ASSERT_FALSE(jr_dac_mute_cue_settle(&m, false));
@@ -122,6 +135,7 @@ void cue_tests_run(void)
 {
     RUN_TEST(test_every_old_tone_plays_under_owner_mute_and_restores_the_dac);
     RUN_TEST(test_ui_cue_is_refused_under_owner_mute);
+    RUN_TEST(test_alarm_tone_sounds_under_owner_mute_and_restores_dac);
     RUN_TEST(test_every_tone_plays_when_owner_not_muted);
     RUN_TEST(test_cue_on_idle_muted_dac_plays_then_restores_mute);
     RUN_TEST(test_cue_while_owner_muted_is_silent_and_stays_muted);

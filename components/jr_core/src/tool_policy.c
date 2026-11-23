@@ -15,7 +15,8 @@ bool jr_tool_needs_gateway(const char *name)
     }
     static const char *const kLocal[] = {
         "current_time", "weather_here", "set_volume", "set_brightness",
-        "ask_user",
+        "ask_user", "set_timer", "cancel_timer", "list_timers",
+        "set_glass", "device_status",
     };
     for (size_t i = 0; i < sizeof kLocal / sizeof kLocal[0]; ++i) {
         if (strcmp(name, kLocal[i]) == 0) {
@@ -88,12 +89,14 @@ static const char kWithGateway[] =
     "with Sir told it is queued and that the result will be announced "
     "here when it lands. Nothing that can be answered now is delegated.\n\n"
     "For the weather at Sir's own place, weather_here answers at once with "
-    "no arguments: use it, and never ask Sir where he is.\n\n"
+    "no arguments: use it, and never ask Sir where he is. Instant local "
+    "tools: set_timer, cancel_timer, list_timers, set_glass (screen/watch "
+    "style), and device_status.\n\n"
     "Capabilities, for when Sir asks what you can do: live web search and "
     "news, weather, Wikipedia, crypto and stock prices, exchange rates, "
     "time zones, translation, research papers, remembering and recalling "
-    "Sir's notes, his calendar, his work board, jobs for his agents, and "
-    "this device's volume and brightness.";
+    "Sir's notes, his calendar, his work board, jobs for his agents, timers, "
+    "and this device's glass, status, volume, and brightness.";
 
 /* Without one: what the device has, and what it must not offer. */
 static const char kNoGateway[] =
@@ -105,7 +108,10 @@ static const char kNoGateway[] =
     "What you do have: current_time, the time now; weather_here, the "
     "weather this device holds for its own place, %s, which answers at "
     "once with no arguments (a question about the weather is answered from "
-    "it, and you never ask Sir where he is); set_volume and set_brightness "
+    "it, and you never ask Sir where he is); set_timer, cancel_timer, and "
+    "list_timers for countdown or focus/break timers; set_glass to switch "
+    "the screen or watch style; device_status for live battery, Wi-Fi, "
+    "temperature, levels, and active timers; set_volume and set_brightness "
     "for this device; and ask_user to offer Sir a choice on the glass.\n\n"
     "When Sir asks what you can do, say that, in a sentence. Anything else "
     "you cannot do from here: say so in one short sentence, and answer from "

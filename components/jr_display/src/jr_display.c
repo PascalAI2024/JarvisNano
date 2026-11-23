@@ -48,12 +48,11 @@ static const char *TAG = "jr_display";
 #define JR_DISPLAY_TASK_STACK        4608
 #define JR_DISPLAY_TASK_PRIORITY     3
 #define JR_DISPLAY_TASK_CORE         0
-/* Right-sized 2026-07-19 from measured high-water: peak use 1,784 B under a
- * full exercise (voice turns + transitions + snapshot), leaving 3,336 B margin
- * — 187% headroom. Was 12288. Internal RAM is the binding resource on this
- * board; see docs/JARVISNANO_OS_PLAN.md "Internal RAM budget". Re-measure via
- * /api/diag/tasks after any render change before trusting this number. */
-#define JR_DISPLAY_RENDER_STACK      5120
+/* Right-sized from measured high-water: peak use 1,784 B (2,748 B free at
+ * 5,120 B on live device), so 4,096 B reclaims 1,024 B of internal SRAM while
+ * keeping >1.7 KB measured headroom. Re-measure via /api/diag/tasks after any
+ * render change before trusting this number. */
+#define JR_DISPLAY_RENDER_STACK      4096
 #define JR_DISPLAY_RENDER_PRIORITY   4
 #define JR_DISPLAY_RENDER_CORE       0
 /* 24, not 30: the measured CO5300 QSPI ceiling is ~23 fps full-frame — v4
@@ -970,6 +969,14 @@ static size_t      s_dial_frame_bytes;
 static uint32_t    s_dial_held_n, s_dial_held_bytes; /* decoded frames, bytes held */
 static uint32_t    s_dial_hits, s_dial_misses, s_dial_evictions, s_dial_warms;
 static uint32_t    s_dial_decode_ms;                 /* the last decode, whoever asked */
+#ifdef ESP_PLATFORM
+/* MINIMAL static dial baked once into PSRAM on demand (reuses dial_cache
+ * ownership/eviction rules; cuts MINIMAL L2 from ~40 ms to ~4 ms). */
+static dial_slot_t      s_minimal_slot;
+static bool             s_minimal_swap;
+static bool             s_dial_minimal;
+static volatile uint32_t s_minimal_want;
+#endif
 static void dial_cache_release(void);
 
 /* THE PARKED BACKDROP. A data screen (STATUS, WEATHER, DESK, ACTIVITY) sits on
@@ -992,23 +999,25 @@ static int  s_space_black;   /* 0..256: how far the backdrop has gone to black *
  * frame are never seen. Per row, the columns inside a circle of radius 234
  * (one pixel wider than the 233.0 the glass shows); s_dial_span[d] is the
  * largest k with the row's pixel 233 + k inside, d the row's distance from the
- * centre line (0 = rows 232 and 233). 233 bytes, built on first use. */
+ * centre line (0 = rows 232 and 233). 233 bytes in flash .rodata (zero BSS). */
 #define DIAL_SPAN_N 233
-static uint8_t s_dial_span[DIAL_SPAN_N];
-static bool    s_dial_span_built;
-
-static void dial_span_build(void)
-{
-    for (int d = 0; d < DIAL_SPAN_N; ++d) {
-        const int32_t rest = 4 * 234 * 234 - (2 * d + 1) * (2 * d + 1);   /* (2k+1)^2 <= rest */
-        int k = 0;
-        while (k + 1 < DIAL_SPAN_N && (2 * (k + 1) + 1) * (2 * (k + 1) + 1) <= rest) {
-            ++k;
-        }
-        s_dial_span[d] = (uint8_t)k;
-    }
-    s_dial_span_built = true;
-}
+static const uint8_t s_dial_span[DIAL_SPAN_N] = {
+    232, 232, 232, 232, 232, 232, 232, 232, 232, 232, 232, 232, 232, 232, 232, 232,
+    232, 232, 232, 232, 232, 232, 232, 232, 232, 232, 231, 231, 231, 231, 231, 231,
+    231, 231, 230, 230, 230, 230, 230, 230, 229, 229, 229, 229, 229, 229, 228, 228,
+    228, 228, 227, 227, 227, 227, 227, 226, 226, 226, 226, 225, 225, 225, 224, 224,
+    224, 224, 223, 223, 223, 222, 222, 222, 221, 221, 221, 220, 220, 220, 219, 219,
+    219, 218, 218, 218, 217, 217, 216, 216, 216, 215, 215, 214, 214, 214, 213, 213,
+    212, 212, 211, 211, 210, 210, 209, 209, 208, 208, 207, 207, 206, 206, 205, 205,
+    204, 204, 203, 203, 202, 201, 201, 200, 200, 199, 198, 198, 197, 196, 196, 195,
+    195, 194, 193, 193, 192, 191, 190, 190, 189, 188, 188, 187, 186, 185, 185, 184,
+    183, 182, 181, 181, 180, 179, 178, 177, 176, 176, 175, 174, 173, 172, 171, 170,
+    169, 168, 167, 166, 165, 164, 163, 162, 161, 160, 159, 158, 157, 156, 155, 154,
+    153, 151, 150, 149, 148, 147, 145, 144, 143, 142, 140, 139, 138, 136, 135, 133,
+    132, 131, 129, 128, 126, 124, 123, 121, 120, 118, 116, 115, 113, 111, 109, 107,
+    105, 103, 101,  99,  97,  95,  93,  90,  88,  85,  83,  80,  77,  74,  71,  68,
+     65,  61,  58,  54,  49,  45,  39,  33,  25,
+};
 
 static void apply_dial(const jr_display_ctx_t *ctx, int x1, int y1,
                        int x2, int y2, uint16_t *pixels)
@@ -1018,9 +1027,6 @@ static void apply_dial(const jr_display_ctx_t *ctx, int x1, int y1,
     }
     const int width = x2 - x1;
     if (ctx->board.width == 2 * DIAL_SPAN_N && y2 <= 2 * DIAL_SPAN_N) {
-        if (!s_dial_span_built) {
-            dial_span_build();
-        }
         for (int row = y1; row < y2; ++row) {
             const int d = row < DIAL_SPAN_N ? DIAL_SPAN_N - 1 - row : row - DIAL_SPAN_N;
             int a = DIAL_SPAN_N - 1 - s_dial_span[d];          /* first column of the glass */
@@ -2280,6 +2286,67 @@ static volatile uint32_t s_panel_on_ack_valid;
 static volatile uint32_t s_ota_word = ((uint32_t)OTA_SLOT_NONE << 16) |
                                       ((uint32_t)OTA_SLOT_NONE << 20);
 
+/* N16.4 Timer overlay: lock-free packed word + fixed label buffer.
+ *   bits 15:0   rem_s    (0..65535 seconds remaining)
+ *   bits 22:16  pct_left (0..100 percent remaining)
+ *   bit  23     ringing  (1 = expired and ringing)
+ *   bit  24     active   (1 = timer active/visible)
+ */
+#define TIMER_REM_MASK    0x0000FFFFu
+#define TIMER_PCT_SHIFT   16u
+#define TIMER_PCT_MASK    (0x7Fu << TIMER_PCT_SHIFT)
+#define TIMER_RINGING_BIT (1u << 23)
+#define TIMER_ACTIVE_BIT  (1u << 24)
+#define TIMER_LABEL_CAP   16u
+static _Atomic uint32_t s_timer_word;
+static char             s_timer_label[TIMER_LABEL_CAP];
+
+static inline bool sp_timer_ringing(void)
+{
+    return (atomic_load_explicit(&s_timer_word, memory_order_acquire) &
+            (TIMER_ACTIVE_BIT | TIMER_RINGING_BIT)) ==
+           (TIMER_ACTIVE_BIT | TIMER_RINGING_BIT);
+}
+
+/* Glass-2 transient rim level arc (left rim cyan for volume, right rim amber
+ * for brightness). Self-expires in 1200 ms with a smooth 200 ms fade-out.
+ *   bits 7:0   pct (0..100)
+ *   bit  8     is_brightness (0 = volume left, 1 = brightness right)
+ *   bit  9     armed (distinguishes valid timestamp 0 from cold init)
+ */
+#define RIM_LEVEL_TTL_MS   1200U
+#define RIM_LEVEL_FADE_MS   200U
+#define RIM_LEVEL_PCT_MASK 0x00FFu
+#define RIM_LEVEL_BRT_BIT  (1u << 8)
+#define RIM_LEVEL_ARM_BIT  (1u << 9)
+static _Atomic uint32_t s_rim_level_word;
+static _Atomic uint32_t s_rim_level_start_ms;
+
+static inline bool rim_level_sample(uint32_t now_ms, uint32_t *out_word, uint32_t *out_age)
+{
+    const uint32_t t0 = atomic_load_explicit(&s_rim_level_start_ms, memory_order_acquire);
+    const uint32_t w = atomic_load_explicit(&s_rim_level_word, memory_order_acquire);
+    if ((w & RIM_LEVEL_ARM_BIT) == 0u) {
+        return false;
+    }
+    const uint32_t age = now_ms - t0;
+    if (age >= RIM_LEVEL_TTL_MS) {
+        return false;
+    }
+    if (out_word != NULL) {
+        *out_word = w;
+    }
+    if (out_age != NULL) {
+        *out_age = age;
+    }
+    return true;
+}
+
+static inline bool rim_level_active(uint32_t now_ms)
+{
+    return rim_level_sample(now_ms, NULL, NULL);
+}
+
 /* Composed once per presented frame, then read by every strip in that frame.
  * Composing per strip would redo the same integer formatting eleven times. */
 static char s_detail_head[SP_LABEL_CAP];
@@ -2314,6 +2381,7 @@ static int s_wx_icon = -1;       /* glass_icon_id_t of the sky, or -1: none */
 static uint8_t s_wx_hour_pct[SP_WX_HOURS];
 static int     s_wx_hours;            /* known slots; 0 draws no ring          */
 static char    s_wx_sun[12];          /* "7:02 19:35" / ""                     */
+static uint32_t s_wx_compose_rev;     /* bumped on each sp_compose_weather     */
 
 /* ACTIVITY, composed once per frame: one row per entry, "KIND SUMMARY", cut
  * to the row's width with the tree's own shortening mark. */
@@ -2323,6 +2391,11 @@ static char    s_act_row[ACT_MAX][SP_ACT_ROW_CAP];
 #define SP_ACT_AGE_CAP 12
 static char    s_act_age[ACT_MAX][SP_ACT_AGE_CAP];   /* "JUST NOW", "7M AGO", "EARLIER" */
 static int     s_act_rows;
+static int     s_act_klen[ACT_MAX];
+static int     s_act_alen[ACT_MAX];
+static int     s_act_kw[ACT_MAX];
+static int     s_act_aw[ACT_MAX];
+static uint32_t s_act_compose_rev;
 
 static uint8_t  s_space_serial_seen;
 static uint8_t  s_space_from;
@@ -2706,6 +2779,18 @@ static void sp_compose_detail(int space)
         sp_str(s_detail_value[3], 0, SP_COL_MAX,
                sp_privacy_muted() ? "MUTED" : "LIVE");
         s_detail_rows = 4;
+        {
+            const uint32_t tw = atomic_load_explicit(&s_timer_word, memory_order_acquire);
+            if ((tw & TIMER_ACTIVE_BIT) != 0u) {
+                sp_str(s_detail_label[4], 0, SP_COL_MAX, "TIMER");
+                if ((tw & TIMER_RINGING_BIT) != 0u) {
+                    sp_str(s_detail_value[4], 0, SP_COL_MAX, "RINGING");
+                } else {
+                    sp_clock_str(s_detail_value[4], SP_COL_MAX, tw & TIMER_REM_MASK);
+                }
+                s_detail_rows = 5;
+            }
+        }
         break;
     }
     case JR_DISPLAY_SPACE_DESK: {
@@ -2831,6 +2916,18 @@ static void sp_compose_detail(int space)
         sp_str(s_detail_value[2], 0, SP_COL_MAX,
                sp_privacy_muted() ? "MUTED" : "LIVE");
         s_detail_rows = 3;
+        {
+            const uint32_t tw = atomic_load_explicit(&s_timer_word, memory_order_acquire);
+            if ((tw & TIMER_ACTIVE_BIT) != 0u) {
+                sp_str(s_detail_label[3], 0, SP_COL_MAX, "TIMER");
+                if ((tw & TIMER_RINGING_BIT) != 0u) {
+                    sp_str(s_detail_value[3], 0, SP_COL_MAX, "RINGING");
+                } else {
+                    sp_clock_str(s_detail_value[3], SP_COL_MAX, tw & TIMER_REM_MASK);
+                }
+                s_detail_rows = 4;
+            }
+        }
         break;
     }
     case JR_DISPLAY_SPACE_STATUS: {
@@ -3043,6 +3140,7 @@ static void sp_compose_weather(void)
     s_wx_sun[0] = '\0';
     if (!w->valid) {
         sp_str(s_wx_head, 0, SP_LABEL_CAP, "NO WEATHER");
+        ++s_wx_compose_rev;
         return;
     }
 
@@ -3087,6 +3185,7 @@ static void sp_compose_weather(void)
         len = sp_str(s_wx_sun, len, (int)sizeof s_wx_sun, " ");
         (void)sp_hhmm(s_wx_sun, len, (int)sizeof s_wx_sun, (int)((sw >> 11) & 0x7FFu));
     }
+    ++s_wx_compose_rev;
 }
 
 /* Fit a spoken line into an ACTIVITY row. Whole, when it fits. Otherwise the
@@ -3174,7 +3273,19 @@ static void sp_compose_activity(void)
                          sp_age(s_act_age[i], 0, SP_ACT_AGE_CAP, age_min),
                          SP_ACT_AGE_CAP, " AGO");
         }
+        /* Hoist label width measurements out of the 39-strip loop. */
+        s_act_klen[i] = sp_len(s_act_kind[i], ACT_KIND_CAP - 1);
+        s_act_alen[i] = sp_len(s_act_age[i], SP_ACT_AGE_CAP - 1);
+        s_act_kw[i] = glass_text_width(GLASS_FONT_LABEL, s_act_kind[i], (size_t)s_act_klen[i], 2);
+        s_act_aw[i] = glass_text_width(GLASS_FONT_LABEL, s_act_age[i], (size_t)s_act_alen[i], 2);
     }
+    for (uint32_t i = n; i < (uint32_t)ACT_MAX; ++i) {
+        s_act_klen[i] = 0;
+        s_act_alen[i] = 0;
+        s_act_kw[i] = 0;
+        s_act_aw[i] = 0;
+    }
+    ++s_act_compose_rev;
 }
 
 /* One composition pass per frame: the shade readouts, the two live-data
@@ -3359,6 +3470,11 @@ static bool watch_layer_ready(void)
 {
     const jr_face_t want = (jr_face_t)__atomic_load_n(&s_dial_want, __ATOMIC_RELAXED);
     if (want == JR_FACE_COUNT) {
+#ifdef ESP_PLATFORM
+        if (__atomic_load_n(&s_minimal_want, __ATOMIC_RELAXED) != 0u) {
+            return !s_dial_blit || s_dial_minimal;
+        }
+#endif
         return !s_dial_blit;
     }
     return s_dial_blit && s_dial_frame_face == want;
@@ -3369,6 +3485,11 @@ static bool watch_layer_ready(void)
 static bool watch_style_bound(uint8_t style)
 {
     const jr_face_t f = watch_dial_of_style(style);
+#ifdef ESP_PLATFORM
+    if (style == (uint8_t)JR_WATCH_MINIMAL) {
+        return !s_dial_blit || s_dial_minimal;
+    }
+#endif
     return f == JR_FACE_COUNT ? !s_dial_blit : (s_dial_blit && s_dial_frame_face == f);
 }
 
@@ -3427,7 +3548,19 @@ static void watch_publish(void)
     s_watch_s = strength;
     __atomic_store_n(&s_watch_tick, (strength > 0 && want == JR_FACE_COUNT) ? 1u : 0u,
                      __ATOMIC_RELAXED);
-    if (__atomic_exchange_n(&s_dial_want, (uint32_t)want, __ATOMIC_ACQ_REL) != (uint32_t)want) {
+    bool dial_changed =
+        __atomic_exchange_n(&s_dial_want, (uint32_t)want, __ATOMIC_ACQ_REL) != (uint32_t)want;
+#ifdef ESP_PLATFORM
+    const bool want_min =
+        want == JR_FACE_COUNT && s_style_shown == (uint8_t)JR_WATCH_MINIMAL &&
+        ((to_watch && clock_on && (from_watch || p >= 256 || past_cut)) ||
+         (!to_watch && from_watch && p < 256 && !past_cut));
+    const uint32_t min_u = want_min ? 1u : 0u;
+    if (__atomic_exchange_n(&s_minimal_want, min_u, __ATOMIC_ACQ_REL) != min_u) {
+        dial_changed = true;
+    }
+#endif
+    if (dial_changed) {
         TaskHandle_t presenter = __atomic_load_n(&s_display.task, __ATOMIC_ACQUIRE);
         if (presenter != NULL) {
             xTaskNotifyGive(presenter);   /* the dial must not wait a period */
@@ -4568,7 +4701,12 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
      * and MINIMAL never have art; MINIMAL paints its own warm-white dial. */
     const int style = (int)s_style_shown;
     const jr_face_t dial = watch_dial_of_style(s_style_shown);
+#ifdef ESP_PLATFORM
+    const bool baked = (dial != JR_FACE_COUNT && ctx->shown_face == dial) ||
+                       (style == (int)JR_WATCH_MINIMAL && s_dial_blit && s_dial_minimal);
+#else
     const bool baked = dial != JR_FACE_COUNT && ctx->shown_face == dial;
+#endif
     const bool moving = watch_in_motion();
     if (moving && dial != JR_FACE_COUNT && !baked) {
         return;      /* the dial is not bound yet: the shell holds the glass dark until it is */
@@ -4775,6 +4913,7 @@ static void apply_clock_overlay(jr_display_ctx_t *ctx, int y1, int y2,
 #define SP_C_TRACK     0x2124
 #define SP_C_PLATE     0x1082
 #define SP_C_VIOLET    0xA81F
+#define SP_C_MINT      0x2F74   /* N9.11 OTA probation: cool emerald-mint, distinct from violet/cyan/gold */
 /* WEATHER's sky accents. Every one is a hue the glass already speaks or a
  * dimming of one — and none is gold: CLEAR is amber, because gold means
  * muted everywhere on this glass and a sunny day must not read as a closed
@@ -5075,27 +5214,84 @@ static void sp_veil(const jr_display_ctx_t *ctx, int y1, int y2,
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         /* Black stays black: most of the face outside the reactor is 0x0000,
          * and folding it was the single largest per-frame cost of the shell
-         * (217k pixels a frame, every shell screen). A compare beats the
-         * shift-and-mask on the pixels that need nothing. */
+         * (217k pixels a frame, every shell screen). A 32-bit aligned word-pair
+         * zero-skip skips two black pixels in one load/compare while keeping
+         * the exact per-pixel blend identical for every non-black pixel. */
         if (k >= 32) {
+            int x = lo;
+            if (x <= hi && (((uintptr_t)&row[x]) & 3U) != 0U) {
+                if (row[x] != 0U) {
+                    row[x] = hud_dim565(row[x], swap);
+                }
+                ++x;
+            }
             if (swap) {
-                for (int x = lo; x <= hi; ++x) {
+                for (; x + 1 <= hi; x += 2) {
+                    uint32_t pair;
+                    memcpy(&pair, &row[x], sizeof pair);
+                    if (pair == 0U) {
+                        continue;
+                    }
                     if (row[x] != 0U) {
                         row[x] = hud_dim565(row[x], true);
                     }
+                    if (row[x + 1] != 0U) {
+                        row[x + 1] = hud_dim565(row[x + 1], true);
+                    }
+                }
+                if (x <= hi && row[x] != 0U) {
+                    row[x] = hud_dim565(row[x], true);
                 }
             } else {
-                for (int x = lo; x <= hi; ++x) {
+                for (; x + 1 <= hi; x += 2) {
+                    uint32_t pair;
+                    memcpy(&pair, &row[x], sizeof pair);
+                    if (pair == 0U) {
+                        continue;
+                    }
                     if (row[x] != 0U) {
                         row[x] = hud_dim565(row[x], false);
                     }
+                    if (row[x + 1] != 0U) {
+                        row[x + 1] = hud_dim565(row[x + 1], false);
+                    }
+                }
+                if (x <= hi && row[x] != 0U) {
+                    row[x] = hud_dim565(row[x], false);
                 }
             }
         } else {
             /* a flat dial under a part-strength veil folds the same pixel again
              * and again: remember the last one */
             uint16_t last_in = 0U, last_out = 0U;
-            for (int x = lo; x <= hi; ++x) {
+            int x = lo;
+            if (x <= hi && (((uintptr_t)&row[x]) & 3U) != 0U) {
+                const uint16_t v = row[x];
+                if (v != 0U) {
+                    last_in = v;
+                    last_out = hud_fade565(v, swap, k);
+                    row[x] = last_out;
+                }
+                ++x;
+            }
+            for (; x + 1 <= hi; x += 2) {
+                uint32_t pair;
+                memcpy(&pair, &row[x], sizeof pair);
+                if (pair == 0U) {
+                    continue;
+                }
+                for (int j = 0; j < 2; ++j) {
+                    const uint16_t v = row[x + j];
+                    if (v != 0U) {
+                        if (v != last_in) {
+                            last_in = v;
+                            last_out = hud_fade565(v, swap, k);
+                        }
+                        row[x + j] = last_out;
+                    }
+                }
+            }
+            if (x <= hi) {
                 const uint16_t v = row[x];
                 if (v != 0U) {
                     if (v != last_in) {
@@ -5318,6 +5514,49 @@ static uint16_t sp_sky_native(jr_display_sky_t sky)
  * screen; stale (> 30 min) turns them grey and draws no hours (a stale
  * answer's "now" is a guess), and with no hours the ring is a bare faint
  * track; !valid draws that track, "NO WEATHER" and not one digit. */
+/* Settled 12-hour rain ring segment records in PSRAM (12 x 2048 B = 24 KB).
+ * Allocated once in jr_display_start() alongside orbit/fring/shade records and
+ * rebuilt only when the 12-hour rain percentages change. Each segment replays
+ * bit-identically to glass_arc_row(); any segment that does not fit falls back
+ * to glass_arc_row(). */
+#define SG_WX_REC_CAP  2048u
+static uint8_t *s_wx_rec;
+static uint8_t  s_wx_rec_pct[SP_WX_HOURS];
+static uint16_t s_wx_rec_have;
+static bool     s_wx_rec_valid;
+
+static void wx_rec_alloc(void)
+{
+    if (s_wx_rec == NULL) {
+        s_wx_rec = heap_caps_malloc((size_t)SP_WX_HOURS * SG_WX_REC_CAP,
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    s_wx_rec_have = 0u;
+    s_wx_rec_valid = false;
+}
+
+typedef struct {
+    bool     valid;
+    uint32_t rev;
+    int      oy, st;
+    uint32_t ent;
+    bool     wx_valid;
+    int      wx_hours;
+    char     temp[sizeof s_wx_temp];
+    char     hilo_src[sizeof s_wx_hilo];
+    uint8_t  hour_pct[SP_WX_HOURS];
+    int      nseg;
+    uint8_t  sg_k[SP_WX_HOURS];
+    int32_t  sg_start[SP_WX_HOURS], sg_sweep[SP_WX_HOURS];
+    int32_t  sg_ri[SP_WX_HOURS], sg_ro[SP_WX_HOURS];
+    uint8_t  sg_a[SP_WX_HOURS];
+    int      sg_y0[SP_WX_HOURS], sg_y1[SP_WX_HOURS];
+    char     hilo[16];
+    int      hlen;
+    int      tlen, hw, dw;
+} sp_wx_frame_cache_t;
+static sp_wx_frame_cache_t s_wx_fc;
+
 static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
                              uint16_t *pixels, int oy, int st, uint32_t ent)
 {
@@ -5330,40 +5569,91 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
     const int cyr = SP_CY + oy + SG_RING_DY;
     const int cy16 = cyr * 16;
 
-    /* the twelve slots */
-    int32_t sg_start[SP_WX_HOURS], sg_sweep[SP_WX_HOURS], sg_ri[SP_WX_HOURS], sg_ro[SP_WX_HOURS];
-    uint8_t sg_a[SP_WX_HOURS];
-    int nseg = 0;
-    for (int k = 0; k < SP_WX_HOURS && s_wx_valid && s_wx_hours > 0; ++k) {
-        const int pct = s_wx_hour_pct[k];
-        if (pct == SP_WX_HOUR_NONE) {
-            continue;
+    /* Hoist the 12 rain segment calculations, glass_arc_rows(), hilo opening,
+     * and hero/degree text widths out of the 39-strip loop: computed once per
+     * frame (or whenever inputs change) and reused across all strips. */
+    sp_wx_frame_cache_t *fc = &s_wx_fc;
+    const bool need_fc =
+        !fc->valid || fc->rev != s_wx_compose_rev || fc->oy != oy || fc->st != st ||
+        fc->ent != ent || fc->wx_valid != s_wx_valid || fc->wx_hours != s_wx_hours ||
+        memcmp(fc->temp, s_wx_temp, sizeof s_wx_temp) != 0 ||
+        memcmp(fc->hilo_src, s_wx_hilo, sizeof s_wx_hilo) != 0 ||
+        (s_wx_valid && s_wx_hours > 0 &&
+         memcmp(fc->hour_pct, s_wx_hour_pct, SP_WX_HOURS) != 0);
+    if (need_fc) {
+        fc->rev = s_wx_compose_rev;
+        fc->oy = oy;
+        fc->st = st;
+        fc->ent = ent;
+        fc->wx_valid = s_wx_valid;
+        fc->wx_hours = s_wx_hours;
+        memcpy(fc->temp, s_wx_temp, sizeof s_wx_temp);
+        memcpy(fc->hilo_src, s_wx_hilo, sizeof s_wx_hilo);
+        memcpy(fc->hour_pct, s_wx_hour_pct, SP_WX_HOURS);
+        int nseg = 0;
+        for (int k = 0; k < SP_WX_HOURS && s_wx_valid && s_wx_hours > 0; ++k) {
+            const int pct = s_wx_hour_pct[k];
+            if (pct == SP_WX_HOUR_NONE) {
+                continue;
+            }
+            const uint32_t f = glass_stagger_q16(ent, (uint32_t)k * SG_RAIN_STAGGER_MS, SG_RAIN_BUILD_MS);
+            int32_t w16, sweep;
+            int a;
+            sg_rain_mark(pct, f, &w16, &sweep, &a);
+            if (w16 < 8 || a <= 0) {
+                continue;                 /* not yet begun */
+            }
+            const int32_t rc = (113 * 16 + 123 * 16) / 2;
+            fc->sg_k[nseg] = (uint8_t)k;
+            fc->sg_ri[nseg] = rc - w16 / 2;
+            fc->sg_ro[nseg] = rc + (w16 + 1) / 2;
+            fc->sg_start[nseg] = (sg_slot_centre_q16(k) - sweep / 2) & 0xFFFF;
+            fc->sg_sweep[nseg] = sweep;
+            fc->sg_a[nseg] = (uint8_t)((a * st + 127) / 255);
+            if (!glass_arc_rows(cx16, cy16, fc->sg_ri[nseg], fc->sg_ro[nseg],
+                                fc->sg_start[nseg], fc->sg_sweep[nseg], true,
+                                &fc->sg_y0[nseg], &fc->sg_y1[nseg])) {
+                fc->sg_y0[nseg] = 1;
+                fc->sg_y1[nseg] = 0;
+            }
+            ++nseg;
         }
-        const uint32_t f = glass_stagger_q16(ent, (uint32_t)k * SG_RAIN_STAGGER_MS, SG_RAIN_BUILD_MS);
-        int32_t w16, sweep;
-        int a;
-        sg_rain_mark(pct, f, &w16, &sweep, &a);
-        if (w16 < 8 || a <= 0) {
-            continue;                 /* not yet begun */
+        fc->nseg = nseg;
+        fc->hlen = sg_hilo_open(fc->hilo, (int)sizeof fc->hilo, s_wx_hilo);
+        fc->tlen = sp_len(s_wx_temp, (int)sizeof s_wx_temp - 1);
+        fc->hw = glass_text_width(GLASS_FONT_HERO, s_wx_temp, (size_t)fc->tlen, 0);
+        if (fc->dw == 0) {
+            fc->dw = glass_text_width(GLASS_FONT_VALUE, "*", 1, 0);
         }
-        const int32_t rc = (113 * 16 + 123 * 16) / 2;
-        sg_ri[nseg] = rc - w16 / 2;
-        sg_ro[nseg] = rc + (w16 + 1) / 2;
-        sg_start[nseg] = (sg_slot_centre_q16(k) - sweep / 2) & 0xFFFF;
-        sg_sweep[nseg] = sweep;
-        sg_a[nseg] = (uint8_t)((a * st + 127) / 255);
-        ++nseg;
+        fc->valid = true;
     }
+
+    const int nseg = fc->nseg;
     const bool bare = !(s_wx_valid && s_wx_hours > 0);
+    bool use_wx_rec = false;
+    if (!bare && oy == 0 && ent >= SP_ENTRY_TOTAL_MS && nseg > 0 && s_wx_rec != NULL) {
+        if (!s_wx_rec_valid || memcmp(s_wx_rec_pct, s_wx_hour_pct, SP_WX_HOURS) != 0) {
+            memcpy(s_wx_rec_pct, s_wx_hour_pct, SP_WX_HOURS);
+            s_wx_rec_have = 0u;
+            for (int i = 0; i < nseg; ++i) {
+                const uint8_t k = fc->sg_k[i];
+                if (glass_shape_record(s_wx_rec + (size_t)k * SG_WX_REC_CAP, SG_WX_REC_CAP,
+                                       cx16, cy16, fc->sg_ri[i], fc->sg_ro[i],
+                                       fc->sg_start[i], fc->sg_sweep[i], true) != 0u) {
+                    s_wx_rec_have |= (uint16_t)(1u << k);
+                }
+            }
+            s_wx_rec_valid = true;
+        }
+        use_wx_rec = s_wx_rec_have != 0u;
+    }
 
     /* text */
-    char hilo[16];
-    const int hlen = sg_hilo_open(hilo, (int)sizeof hilo, s_wx_hilo);
     const char *head = sp_headline(JR_DISPLAY_SPACE_WEATHER);
     const int llen = sp_len(head, SP_LABEL_CAP - 1);
     const bool updating = sp_ota_ringing((jr_display_ota_state_t)
         (__atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE) & 0xFu));
-    const int tlen = sp_len(s_wx_temp, (int)sizeof s_wx_temp - 1);
+    const int tlen = fc->tlen;
     const int slen = sp_len(s_wx_sun, (int)sizeof s_wx_sun - 1);
     const int alen = sp_len(s_wx_age, (int)sizeof s_wx_age - 1);
     const glass_metrics_t hero = glass_font_metrics(GLASS_FONT_HERO);
@@ -5379,14 +5669,12 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
     sg_ico_make(&t_ico, s_wx_icon, SG_WX_ICON_SIZE, SP_CX,
                 hero_top - 26 - SG_WX_ICON_GAP - glass_icon_px(SG_WX_ICON_SIZE) + sg_ent_rise(ent, t_lbl),
                 accent, sg_ent_alpha(st, ent, t_lbl));
-    const int hw = glass_text_width(GLASS_FONT_HERO, s_wx_temp, (size_t)tlen, 0);
-    const int dw = glass_text_width(GLASS_FONT_VALUE, "*", 1, 0);
-    const int x0 = SP_CX - (hw + 4 + dw) / 2;
+    const int x0 = SP_CX - (fc->hw + 4 + fc->dw) / 2;
     const int hero_y = hero_top + sg_ent_rise(ent, t_hero);
     const int hero_a = sg_ent_alpha(st, ent, t_hero);
     sg_txt_at(&t_temp, GLASS_FONT_HERO, s_wx_temp, tlen, x0, hero_y, SP_C_INK, hero_a);
-    sg_txt_at(&t_deg, GLASS_FONT_VALUE, "*", tlen > 0 ? 1 : 0, x0 + hw + 4, hero_y, accent, hero_a);
-    sg_txt_make(&t_hilo, GLASS_FONT_TEXT, hilo, hlen, SP_CX, base + 16 + sg_ent_rise(ent, t_hl), 1,
+    sg_txt_at(&t_deg, GLASS_FONT_VALUE, "*", tlen > 0 ? 1 : 0, x0 + fc->hw + 4, hero_y, accent, hero_a);
+    sg_txt_make(&t_hilo, GLASS_FONT_TEXT, fc->hilo, fc->hlen, SP_CX, base + 16 + sg_ent_rise(ent, t_hl), 1,
                 SP_C_INK, sg_ent_alpha(st, ent, t_hl));
     sg_txt_make(&t_sun_t, GLASS_FONT_TEXT, s_wx_sun, slen, SP_CX, base + 40 + sg_ent_rise(ent, t_sun),
                 1, SP_C_GREY, sg_ent_alpha(st, ent, t_sun));
@@ -5395,15 +5683,6 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
                 updating ? 0 : sg_ent_alpha(st, ent, t_age));
 
     const int ring_y0 = cyr - 130, ring_y1 = cyr + 130;
-    /* the rows each mark can reach: the other rows' calls change nothing */
-    int sg_y0[SP_WX_HOURS], sg_y1[SP_WX_HOURS];
-    for (int i = 0; i < nseg; ++i) {
-        if (!glass_arc_rows(cx16, cy16, sg_ri[i], sg_ro[i], sg_start[i], sg_sweep[i], true,
-                            &sg_y0[i], &sg_y1[i])) {
-            sg_y0[i] = 1;
-            sg_y1[i] = 0;
-        }
-    }
     for (int y = y1; y < y2; ++y) {
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
         int lo = 0, hi = HUD_W - 1;
@@ -5416,9 +5695,16 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
                                GLASS_TURN_Q16, SP_C_TRACK, (uint8_t)st, swap);
             }
             for (int i = 0; i < nseg; ++i) {
-                if (y >= sg_y0[i] && y <= sg_y1[i]) {
-                    glass_arc_row(row, y, lo, hi, cx16, cy16, sg_ri[i], sg_ro[i], sg_start[i],
-                                  sg_sweep[i], rain, sg_a[i], swap);
+                if (y >= fc->sg_y0[i] && y <= fc->sg_y1[i]) {
+                    const uint8_t k = fc->sg_k[i];
+                    if (use_wx_rec && (s_wx_rec_have & (1u << k)) != 0u) {
+                        glass_ring_replay_row(row, y, lo, hi,
+                                              s_wx_rec + (size_t)k * SG_WX_REC_CAP,
+                                              rain, fc->sg_a[i], swap);
+                    } else {
+                        glass_arc_row(row, y, lo, hi, cx16, cy16, fc->sg_ri[i], fc->sg_ro[i],
+                                      fc->sg_start[i], fc->sg_sweep[i], rain, fc->sg_a[i], swap);
+                    }
                 }
             }
         }
@@ -5814,10 +6100,10 @@ static void sp_focal_activity(const jr_display_ctx_t *ctx, int y1, int y2,
         const int top = SP_ACT_Y0 + i * SP_ACT_PITCH + oy + sg_ent_rise(ent, start);
         const char *kind = have ? s_act_kind[i] : "";
         const char *age = have ? s_act_age[i] : "";
-        const int klen = have ? sp_len(kind, ACT_KIND_CAP - 1) : 0;
-        const int alen = have ? sp_len(age, SP_ACT_AGE_CAP - 1) : 0;
-        const int kw = glass_text_width(GLASS_FONT_LABEL, kind, (size_t)klen, 2);
-        const int aw = glass_text_width(GLASS_FONT_LABEL, age, (size_t)alen, 2);
+        const int klen = have ? (s_act_compose_rev != 0u ? s_act_klen[i] : sp_len(kind, ACT_KIND_CAP - 1)) : 0;
+        const int alen = have ? (s_act_compose_rev != 0u ? s_act_alen[i] : sp_len(age, SP_ACT_AGE_CAP - 1)) : 0;
+        const int kw = have ? (s_act_compose_rev != 0u ? s_act_kw[i] : glass_text_width(GLASS_FONT_LABEL, kind, (size_t)klen, 2)) : 0;
+        const int aw = have ? (s_act_compose_rev != 0u ? s_act_aw[i] : glass_text_width(GLASS_FONT_LABEL, age, (size_t)alen, 2)) : 0;
         const int total = kw + (klen > 0 && alen > 0 ? SP_ACT_GAP : 0) + aw;
         const int x0 = SP_CX - total / 2;
         sg_txt_at(&t_kind[i], GLASS_FONT_LABEL, kind, klen, x0, top, SP_C_GREY, a);
@@ -5879,8 +6165,18 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
     const glass_metrics_t val = glass_font_metrics(GLASS_FONT_VALUE);
     const int hero_top = cyr - hero.cap_h / 2 - 2;
     const int base = hero_top + hero.cap_h;
-    const int hw = glass_text_width(GLASS_FONT_HERO, num, (size_t)nlen, 0);
-    const int pw = glass_text_width(GLASS_FONT_VALUE, "%", 1, 0);
+    /* Hoist hero/percent width measurement out of strips that miss the figure. */
+    static int s_desk_pw;
+    static int s_desk_shown = -1, s_desk_hw;
+    if (s_desk_pw == 0) {
+        s_desk_pw = glass_text_width(GLASS_FONT_VALUE, "%", 1, 0);
+    }
+    if (s_desk_shown != shown) {
+        s_desk_hw = glass_text_width(GLASS_FONT_HERO, num, (size_t)nlen, 0);
+        s_desk_shown = shown;
+    }
+    const int hw = s_desk_hw;
+    const int pw = s_desk_pw;
     const int x0 = SP_CX - (hw + 5 + pw) / 2;
     const uint32_t t_lbl = 0, t_word = 150;
 
@@ -6015,8 +6311,19 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
     const glass_metrics_t val = glass_font_metrics(GLASS_FONT_VALUE);
     const int hero_top = cyr - hero.cap_h / 2 - 2;
     const int base = hero_top + hero.cap_h;
-    const int hw = glass_text_width(GLASS_FONT_HERO, pctbuf, (size_t)plen, 0);
-    const int pw = have_gauge ? glass_text_width(GLASS_FONT_VALUE, "%", 1, 0) : 0;
+    /* Hoist hero/percent/power-word width measurements out of the 39-strip loop. */
+    static int s_st_pw;
+    static int s_st_key = -2, s_st_hw;
+    const int st_key = have_gauge ? shown : -1;
+    if (s_st_pw == 0) {
+        s_st_pw = glass_text_width(GLASS_FONT_VALUE, "%", 1, 0);
+    }
+    if (s_st_key != st_key) {
+        s_st_hw = glass_text_width(GLASS_FONT_HERO, pctbuf, (size_t)plen, 0);
+        s_st_key = st_key;
+    }
+    const int hw = s_st_hw;
+    const int pw = have_gauge ? s_st_pw : 0;
     const int x0 = SP_CX - (hw + (have_gauge ? 5 : 0) + pw) / 2;
     const uint32_t t_lbl = 0, t_word = 150, t_wifi = 250, t_link = 330, t_tools = 410;
     const int dim_a = (st * 96) / 255;
@@ -6029,16 +6336,26 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
     sg_txt_at(&t_pc, GLASS_FONT_VALUE, "%", have_gauge ? 1 : 0, x0 + hw + 5, base - val.cap_h, fill, st);
     /* Charging: the bolt stands beside the word and the pair is centred as one,
      * so the word keeps its place in the middle of the ring when it is alone. */
-    const int ww = glass_text_width(GLASS_FONT_TEXT, word, (size_t)wlen, 1);
     const int word_cx = charging ? SP_CX + (SG_BOLT_INK_W + SG_BOLT_GAP) / 2 : SP_CX;
+    const int word_y = base + 16 + sg_ent_rise(ent, t_word);
     sg_txt_make(&t_word_t, GLASS_FONT_TEXT, word, wlen, word_cx,
-                base + 16 + sg_ent_rise(ent, t_word), 1, SP_C_GREY, sg_ent_alpha(st, ent, t_word));
+                word_y, 1, SP_C_GREY, sg_ent_alpha(st, ent, t_word));
     sg_ico_t t_bolt;
-    sg_ico_make(&t_bolt, charging ? GLASS_ICON_BOLT : -1, GLASS_ICON_SM,
-                word_cx - ww / 2 - SG_BOLT_GAP - SG_BOLT_INK_W / 2,
-                base + 16 + glass_font_metrics(GLASS_FONT_TEXT).cap_h / 2 - glass_icon_px(GLASS_ICON_SM) / 2 +
-                    sg_ent_rise(ent, t_word),
-                fill, sg_ent_alpha(st, ent, t_word));
+    if (charging) {
+        const int bolt_y = word_y + glass_font_metrics(GLASS_FONT_TEXT).cap_h / 2 -
+                           glass_icon_px(GLASS_ICON_SM) / 2;
+        static const char *s_st_word_ptr;
+        static int s_st_ww;
+        if (s_st_word_ptr != word) {
+            s_st_ww = glass_text_width(GLASS_FONT_TEXT, word, (size_t)wlen, 1);
+            s_st_word_ptr = word;
+        }
+        sg_ico_make(&t_bolt, GLASS_ICON_BOLT, GLASS_ICON_SM,
+                    word_cx - s_st_ww / 2 - SG_BOLT_GAP - SG_BOLT_INK_W / 2,
+                    bolt_y, fill, sg_ent_alpha(st, ent, t_word));
+    } else {
+        sg_ico_make(&t_bolt, -1, GLASS_ICON_SM, 0, 0, fill, 0);
+    }
     static const char *const k_names[3] = {"WIFI", "LINK", "TOOLS"};
     const char *vals[3] = {dbm, link_on ? "ON" : "OFF", tools_on ? "ON" : "OFF"};
     const int vlen[3] = {dlen, link_on ? 2 : 3, tools_on ? 2 : 3};
@@ -6089,14 +6406,15 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
 }
 
 /* The update ring's colour IS its meaning, so the palette is the contract:
- * cyan is progress, violet is on-trial, amber is "look at this", red is
- * broken. Nothing here is gold — gold is privacy's alone. */
+ * cyan is progress, emerald-mint is on-trial (N9.11: distinct from violet
+ * companion rim), amber is "look at this", red is broken. Nothing here is
+ * gold — gold is privacy's alone. */
 static uint16_t sp_ota_native(jr_display_ota_state_t state)
 {
     switch (state) {
     case JR_DISPLAY_OTA_PREFLIGHT:  return SP_C_CYAN_DIM;
     case JR_DISPLAY_OTA_RECEIVING:  return SP_C_CYAN;
-    case JR_DISPLAY_OTA_PROBATION:  return SP_C_VIOLET;
+    case JR_DISPLAY_OTA_PROBATION:  return SP_C_MINT;
     case JR_DISPLAY_OTA_FAILED:     return 0xF800;   /* red */
     case JR_DISPLAY_OTA_BLOCKED:
     case JR_DISPLAY_OTA_ROLLED_BACK:
@@ -6108,21 +6426,9 @@ static uint16_t sp_ota_native(jr_display_ota_state_t state)
  * at r140-154: outside the focal band (r<=104) and the headline's worst-case
  * glyph corner (r131.5), well inside JR_DISPLAY_SAFE_R.
  *
- * It used to be drawn by the SETTINGS focal renderer, so the updater had to
- * navigate the glass to SETTINGS before an upload was visible — and a screen
- * whose only production visitor was the OTA path was a diagnostics page
- * wearing a face. The ring now belongs to no space. It is drawn on whatever
- * is up, AFTER the watch (whose disc clear would otherwise wipe it), and at
- * the focal layer's own weight, so it yields to an open sheet or shade exactly
- * as a focal object does and never meets the sheet's last row.
- *
- * On JARVIS at rest this is the ONE thing the shell may draw. The gate is the
- * OTA word itself, not s_space_on, so the face need not wake the veil, the
- * orbit or a headline to show an update; IDLE and VALID draw nothing at all,
- * which is what keeps every pre-shell scene bit-identical.
- *
- * Segmented because a span is a wedge intersection and a wedge cannot exceed
- * a half turn; the joints also read as mechanical travel rather than a pie. */
+ * Anti-aliased via glass_ring_row/glass_arc_row with half-pixel inset radii
+ * (SP_OTA_IN + 0.5 .. SP_OTA_OUT - 0.5) so AA edge ramps stay strictly inside
+ * [SP_OTA_IN - 1, SP_OTA_OUT + 1] while keeping crisp round caps. */
 static void apply_ota_ring(const jr_display_ctx_t *ctx, int y1, int y2,
                            uint16_t *pixels)
 {
@@ -6131,25 +6437,272 @@ static void apply_ota_ring(const jr_display_ctx_t *ctx, int y1, int y2,
     if (!sp_ota_ringing(state)) {
         return;
     }
+    if (y1 > SP_CY + SP_OTA_OUT + 2 || y2 <= SP_CY - SP_OTA_OUT - 2) {
+        return;
+    }
     const int under = 255 - (s_shade_ease * 255) / 256;
     const int st = (under * (256 - s_detail_ease)) / 256;
     if (st <= 0) {
         return;
     }
-    const uint16_t track = sp_tint(ctx, SP_C_TRACK, st);
-    const uint16_t ink = sp_tint(ctx, sp_ota_native(state), st);
-    sp_span_t seg[SP_ARC_SEG_MAX];
-    const int nseg = sp_arc_segments(
-        seg, SP_ARC_SEG_MAX, SP_A_TOP,
-        (sp_ota_fill(state, (int)((ota >> 8) & 0xFFu)) * 256) / 100);
+    const bool swap = ctx->board.swap_color_bytes;
+    const uint16_t ink = sp_ota_native(state);
+    const int fill = sp_ota_fill(state, (int)((ota >> 8) & 0xFFu));
+    const int32_t cx16 = SP_CX * 16;
+    const int32_t cy16 = SP_CY * 16;
+    const int32_t r_in16 = SP_OTA_IN * 16 + 8;
+    const int32_t r_out16 = SP_OTA_OUT * 16 - 8;
+    const int32_t sweep = (int32_t)(((int64_t)fill * GLASS_TURN_Q16) / 100);
 
     for (int y = y1; y < y2; ++y) {
+        int lo = 0, hi = HUD_W - 1;
+        if (!sp_clip(y, &lo, &hi)) {
+            continue;
+        }
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-        sp_annulus_row(row, y, SP_CX, SP_CY, SP_OTA_IN, SP_OTA_OUT, NULL,
-                       track);
-        for (int i = 0; i < nseg; ++i) {
-            sp_annulus_row(row, y, SP_CX, SP_CY, SP_OTA_IN, SP_OTA_OUT,
-                           &seg[i], ink);
+        if (fill <= 0) {
+            glass_ring_row(row, y, lo, hi, cx16, cy16, r_in16, r_out16,
+                           0, GLASS_TURN_Q16, SP_C_TRACK, (uint8_t)st, swap);
+        } else if (fill >= 100) {
+            glass_ring_row(row, y, lo, hi, cx16, cy16, r_in16, r_out16,
+                           0, GLASS_TURN_Q16, ink, (uint8_t)st, swap);
+        } else {
+            glass_ring_row(row, y, lo, hi, cx16, cy16, r_in16, r_out16,
+                           (GLASS_Q16_12_OCLOCK + sweep) & 0xFFFF,
+                           GLASS_TURN_Q16 - sweep, SP_C_TRACK, (uint8_t)st, swap);
+            glass_arc_row(row, y, lo, hi, cx16, cy16, r_in16, r_out16,
+                          GLASS_Q16_12_OCLOCK, sweep, ink, (uint8_t)st, swap);
+        }
+    }
+}
+
+/* Format timer remaining seconds as "MM:SS" (or "H:MM:SS" for >= 1 hour). */
+static int sp_timer_fmt(char *dst, int cap, uint32_t rem_s)
+{
+    int len = 0;
+    if (rem_s >= 3600u) {
+        const uint32_t h = rem_s / 3600u;
+        const uint32_t m = (rem_s % 3600u) / 60u;
+        const uint32_t s = rem_s % 60u;
+        len = sp_num(dst, len, cap, h);
+        len = sp_str(dst, len, cap, m < 10u ? ":0" : ":");
+        len = sp_num(dst, len, cap, m);
+        len = sp_str(dst, len, cap, s < 10u ? ":0" : ":");
+        return sp_num(dst, len, cap, s);
+    }
+    const uint32_t m = rem_s / 60u;
+    const uint32_t s = rem_s % 60u;
+    if (m < 10u) {
+        len = sp_str(dst, len, cap, "0");
+    }
+    len = sp_num(dst, len, cap, m);
+    len = sp_str(dst, len, cap, s < 10u ? ":0" : ":");
+    return sp_num(dst, len, cap, s);
+}
+
+/* N16.4 Timer Overlay: sits at r202-206 (inside JR_DISPLAY_SHELL_R_MAX=214,
+ * clear of battery/privacy rims r215-222 and watch hands r<=190) with a sleek
+ * haloed bottom MM:SS readout inside JR_DISPLAY_SAFE_R. Drawn right after
+ * apply_ota_ring() so WATCH disc-clear never wipes it. Pure function of
+ * (s_timer_word, s_timer_label, now_ms, y) -> 12-row strip invariant. */
+#define SP_TIMER_R_IN16   (202 * 16)
+#define SP_TIMER_R_OUT16  (206 * 16)
+#define SP_TIMER_TIME_Y   378
+#define SP_TIMER_LBL_Y    358
+#define SP_TIMER_TRACK    2
+
+static void sp_timer_halo_row(uint16_t *row, int y, int lo, int hi,
+                              int bx0, int bx1, bool swap)
+{
+    int x0 = bx0 < lo ? lo : bx0;
+    int x1 = bx1 > hi ? hi : bx1;
+    (void)y;
+    for (int x = x0; x <= x1; ++x) {
+        if (row[x] != 0u) {
+            row[x] = hud_dim565(row[x], swap);
+        }
+    }
+}
+
+static void apply_timer_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
+                                uint16_t *pixels, uint32_t now_ms,
+                                bool watch_on_glass)
+{
+    const uint32_t tw = atomic_load_explicit(&s_timer_word, memory_order_acquire);
+    if ((tw & TIMER_ACTIVE_BIT) == 0u) {
+        return;
+    }
+    if (s_choice_n > 0 || s_ask_ease > 0 || s_shade_ease > 0 || s_detail_ease > 0) {
+        return;
+    }
+    const jr_display_ota_state_t ota_state =
+        (jr_display_ota_state_t)(__atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE) & 0xFu);
+    if (sp_ota_ringing(ota_state) && !watch_on_glass) {
+        return;  /* OTA outranks timer on non-WATCH screens */
+    }
+    if (y1 > SP_CY + 208 || y2 <= SP_CY - 208) {
+        return;
+    }
+
+    const bool swap = ctx->board.swap_color_bytes;
+    const bool ringing = (tw & TIMER_RINGING_BIT) != 0u;
+    const uint32_t rem_s = tw & TIMER_REM_MASK;
+    uint32_t pct = (tw & TIMER_PCT_MASK) >> TIMER_PCT_SHIFT;
+    if (pct > 100u) {
+        pct = 100u;
+    }
+    const int32_t cx16 = SP_CX * 16;
+    const int32_t cy16 = SP_CY * 16;
+
+    /* Smooth pulse: 2 Hz alternating amber/cyan when ringing, 1 Hz amber pulse
+     * when under 60 s. NEVER gold (gold is privacy-only). */
+    const uint32_t phase_1hz = (uint32_t)(((uint64_t)(now_ms % 1000u) * GLASS_TURN_Q16) / 1000u);
+    const uint32_t phase_2hz = (uint32_t)(((uint64_t)(now_ms % 500u) * GLASS_TURN_Q16) / 500u);
+    const int p1 = (int)((32768 - glass_cos_q15(phase_1hz)) >> 8); /* 0..256 */
+    const int p2 = (int)((32768 - glass_cos_q15(phase_2hz)) >> 8); /* 0..256 */
+
+    uint16_t arc_col;
+    uint8_t arc_alpha;
+    if (ringing) {
+        arc_col = ((now_ms / 500u) & 1u) == 0u ? SP_C_AMBER : SP_C_CYAN;
+        arc_alpha = (uint8_t)(160 + ((95 * p2) >> 8));
+    } else if (rem_s < 60u) {
+        arc_col = SP_C_AMBER;
+        arc_alpha = (uint8_t)(175 + ((80 * p1) >> 8));
+    } else {
+        arc_col = SP_C_CYAN;
+        arc_alpha = 235u;
+    }
+
+    const int32_t sweep = (int32_t)(((int64_t)pct * GLASS_TURN_Q16) / 100);
+
+    /* Bottom MM:SS readout + optional ringing label, both haloed inside SAFE_R. */
+    const glass_metrics_t ml = glass_font_metrics(GLASS_FONT_LABEL);
+    char tbuf[12];
+    const int tlen = ringing ? sp_str(tbuf, 0, (int)sizeof tbuf, "00:00")
+                             : sp_timer_fmt(tbuf, (int)sizeof tbuf, rem_s);
+    const int ty_lo = SP_TIMER_TIME_Y + ml.ink_top;
+    const int ty_hi = SP_TIMER_TIME_Y + ml.ink_bottom;
+    const bool hit_time = y1 <= ty_hi + 3 && y2 > ty_lo - 3;
+    int tx = 0, tw_px = 0;
+    if (hit_time) {
+        tw_px = glass_text_width(GLASS_FONT_LABEL, tbuf, (size_t)tlen, SP_TIMER_TRACK);
+        tx = SP_CX - tw_px / 2;
+    }
+
+    char lbuf[TIMER_LABEL_CAP];
+    int llen = 0;
+    const int ly_lo = SP_TIMER_LBL_Y + ml.ink_top;
+    const int ly_hi = SP_TIMER_LBL_Y + ml.ink_bottom;
+    const bool hit_lbl = ringing && y1 <= ly_hi + 3 && y2 > ly_lo - 3;
+    int lx = 0, lw_px = 0;
+    if (hit_lbl) {
+        memcpy(lbuf, s_timer_label, sizeof lbuf);
+        lbuf[sizeof lbuf - 1] = '\0';
+        llen = sp_len(lbuf, (int)sizeof lbuf - 1);
+        if (llen > 0) {
+            lw_px = glass_text_width(GLASS_FONT_LABEL, lbuf, (size_t)llen, SP_TIMER_TRACK);
+            lx = SP_CX - lw_px / 2;
+        }
+    }
+
+    const uint16_t txt_col = ringing ? arc_col : (rem_s < 60u ? SP_C_AMBER : SP_C_INK);
+
+    for (int y = y1; y < y2; ++y) {
+        int lo = 0, hi = HUD_W - 1;
+        if (!sp_clip(y, &lo, &hi)) {
+            continue;
+        }
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        if (ringing) {
+            glass_ring_row(row, y, lo, hi, cx16, cy16, SP_TIMER_R_IN16, SP_TIMER_R_OUT16,
+                           0, GLASS_TURN_Q16, arc_col, arc_alpha, swap);
+        } else {
+            glass_ring_row(row, y, lo, hi, cx16, cy16, SP_TIMER_R_IN16, SP_TIMER_R_OUT16,
+                           0, GLASS_TURN_Q16, SP_C_TRACK, 64u, swap);
+            if (sweep > 0) {
+                glass_arc_row(row, y, lo, hi, cx16, cy16, SP_TIMER_R_IN16, SP_TIMER_R_OUT16,
+                              GLASS_Q16_12_OCLOCK, sweep, arc_col, arc_alpha, swap);
+            }
+        }
+        if (hit_lbl && llen > 0 && y >= ly_lo - 3 && y <= ly_hi + 3) {
+            sp_timer_halo_row(row, y, lo, hi, lx - 6, lx + lw_px + 6, swap);
+            if (y >= ly_lo && y <= ly_hi) {
+                glass_text_row(row, y, lo, hi, GLASS_FONT_LABEL, lbuf, (size_t)llen,
+                               lx, SP_TIMER_LBL_Y, SP_TIMER_TRACK, SP_C_INK, arc_alpha, swap);
+            }
+        }
+        if (hit_time && y >= ty_lo - 3 && y <= ty_hi + 3) {
+            sp_timer_halo_row(row, y, lo, hi, tx - 6, tx + tw_px + 6, swap);
+            if (y >= ty_lo && y <= ty_hi) {
+                glass_text_row(row, y, lo, hi, GLASS_FONT_LABEL, tbuf, (size_t)tlen,
+                               tx, SP_TIMER_TIME_Y, SP_TIMER_TRACK, txt_col, 245u, swap);
+            }
+        }
+    }
+}
+
+/* Glass-2 Transient Rim Level Arc: left rim cyan for volume, right rim amber
+ * for brightness (matching sp_draw_shade), strictly in r223-231 so the
+ * r221-222 privacy ring is never touched. Self-expires in 1200 ms with a
+ * smooth 200 ms fade-out. */
+#define RIM_LEVEL_R_IN16   (224 * 16 + 8)
+#define RIM_LEVEL_R_OUT16  (230 * 16 - 8)
+#define RIM_LEVEL_Y_HALF   160
+
+static void apply_rim_level_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
+                                    uint16_t *pixels, uint32_t now_ms)
+{
+    if (s_choice_n > 0 || s_ask_ease > 0 ||
+        __atomic_load_n(&s_commit_pct, __ATOMIC_ACQUIRE) > 0U ||
+        s_shade_ease > 0) {
+        return;
+    }
+    uint32_t w = 0u, age = 0u;
+    if (!rim_level_sample(now_ms, &w, &age)) {
+        return;
+    }
+    if (y1 > SP_CY + RIM_LEVEL_Y_HALF || y2 <= SP_CY - RIM_LEVEL_Y_HALF) {
+        return;
+    }
+    int alpha = 255;
+    if (age >= RIM_LEVEL_TTL_MS - RIM_LEVEL_FADE_MS) {
+        alpha = (int)(((RIM_LEVEL_TTL_MS - age) * 255u) / RIM_LEVEL_FADE_MS);
+    }
+    if (alpha <= 0) {
+        return;
+    }
+    const bool is_brt = (w & RIM_LEVEL_BRT_BIT) != 0u;
+    int pct = (int)(w & RIM_LEVEL_PCT_MASK);
+    if (pct > 100) {
+        pct = 100;
+    }
+    const bool swap = ctx->board.swap_color_bytes;
+    const int32_t cx16 = SP_CX * 16;
+    const int32_t cy16 = SP_CY * 16;
+    const int32_t span = 2 * 7282; /* +-40 deg about 9 / 3 o'clock (SG_SH_HALF_Q16) */
+    const int32_t sweep = (int32_t)(((int64_t)span * pct) / 100);
+    const uint16_t col = is_brt ? SP_C_AMBER : SP_C_CYAN;
+    const uint8_t a_trk = (uint8_t)((alpha * 60) / 255);
+    const int32_t track_start = is_brt
+        ? ((GLASS_TURN_Q16 - 7282) & 0xFFFF)
+        : ((GLASS_TURN_Q16 / 2 - 7282) & 0xFFFF);
+    const int32_t fill_start = is_brt
+        ? ((7282 - sweep) & 0xFFFF)
+        : track_start;
+
+    for (int y = y1; y < y2; ++y) {
+        if (y < SP_CY - RIM_LEVEL_Y_HALF || y > SP_CY + RIM_LEVEL_Y_HALF) {
+            continue;
+        }
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        glass_arc_row(row, y, 0, HUD_W - 1, cx16, cy16,
+                      RIM_LEVEL_R_IN16, RIM_LEVEL_R_OUT16,
+                      track_start, span, SP_C_TRACK, a_trk, swap);
+        if (sweep > 0) {
+            glass_arc_row(row, y, 0, HUD_W - 1, cx16, cy16,
+                          RIM_LEVEL_R_IN16, RIM_LEVEL_R_OUT16,
+                          fill_start, sweep, col, (uint8_t)alpha, swap);
         }
     }
 }
@@ -6844,6 +7397,8 @@ static jr_display_rest_mode_t rest_eligible_raw(const jr_display_ctx_t *ctx)
            !glass_entry_animating(s_entry_ms, SP_ENTRY_TOTAL_MS) &&
            !sp_ota_ringing((jr_display_ota_state_t)
                (__atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE) & 0xfu)) &&
+           !sp_timer_ringing() &&
+           !rim_level_active(now) &&
            diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF &&
            jr_display_hud_enabled();
     return allowed ? mode : JR_DISPLAY_REST_NONE;
@@ -6928,6 +7483,8 @@ static bool quiet_eligible(const jr_display_ctx_t *ctx)
            s_clock_prog == ((clock & (1u << 16)) ? 256 : 0) &&
            !sp_ota_ringing((jr_display_ota_state_t)
                (__atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE) & 0xfu)) &&
+           !sp_timer_ringing() &&
+           !rim_level_active(now) &&
            diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF &&
            jr_display_hud_enabled();
 }
@@ -7127,6 +7684,11 @@ static bool watch_clear_follows(const jr_display_ctx_t *ctx)
         return false;     /* in motion nothing is dead: the shell is drawing the screen that is leaving or arriving */
     }
     const jr_face_t dial = watch_dial_of_style(s_style_shown);
+#ifdef ESP_PLATFORM
+    if (s_style_shown == (uint8_t)JR_WATCH_MINIMAL && s_dial_blit && s_dial_minimal) {
+        return false;
+    }
+#endif
     return !(dial != JR_FACE_COUNT && ctx->shown_face == dial);
 }
 
@@ -7243,6 +7805,7 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
          * device must not be the thing that clear erases. Gated on the OTA
          * word alone, so it shows on JARVIS at rest without waking the shell. */
         apply_ota_ring(ctx, y1, y2, pixels);
+        apply_timer_overlay(ctx, y1, y2, pixels, now_ms, watch_on_glass);
         {
             /* The commit ring shares the choice band and is drawn only on the
              * no-ask path, which is what makes the two mutually exclusive. */
@@ -7252,6 +7815,7 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                                    ctx->board.swap_color_bytes, cpct, 255);
             }
         }
+        apply_rim_level_overlay(ctx, y1, y2, pixels, now_ms);
         split_mark(JR_DISPLAY_SPLIT_HUD_OTA, &sm);
         apply_caption_overlay(ctx, y1, y2, pixels);    /* gates on its ease */
         split_mark(JR_DISPLAY_SPLIT_HUD_CAPTION, &sm);
@@ -7311,7 +7875,8 @@ static void apply_shell_overlay(jr_display_ctx_t *ctx, int x1, int y1,
      * Ask state wins because it is the only one of the two the owner can act
      * on. The agent rim resumes the moment the ask, its fade, and any commit
      * preview are done; the agent's progress is still on DESK meanwhile. */
-    if (s_choice_n > 0 || s_ask_ease > 0 || s_commit_pct > 0U) {
+    if (s_choice_n > 0 || s_ask_ease > 0 || s_commit_pct > 0U ||
+        rim_level_active((uint32_t)(esp_timer_get_time() / 1000))) {
         return;
     }
     const uint8_t progress = shell & JR_DISPLAY_SHELL_PROGRESS;
@@ -7804,6 +8369,9 @@ static esp_err_t apply_blank(jr_display_ctx_t *ctx)
     (void)gfx_anim_stop(ctx->anim);
     (void)gfx_obj_set_visible(ctx->anim, false);
     s_dial_blit = false;
+#ifdef ESP_PLATFORM
+    s_dial_minimal = false;
+#endif
     gfx_disp_refresh_all(ctx->disp);
     (void)gfx_emote_unlock(ctx->gfx);
     /* Reset the segment latch: a later present() of the SAME face must not
@@ -7845,9 +8413,11 @@ static bool presenter_ticks_the_glass(void)
         s_still_key = UINT32_MAX;
         return true;
     }
+    const uint32_t timer_w = atomic_load_explicit(&s_timer_word, memory_order_acquire);
     const uint32_t key =
         (__atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE) & JR_DISPLAY_CLOCK_MINUTE_MASK) ^
-        (__atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE) & JR_DISPLAY_ENV_RIM_MASK) * 2654435761u;
+        (__atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE) & JR_DISPLAY_ENV_RIM_MASK) * 2654435761u ^
+        (timer_w * 1140071481u);
     if (key == s_still_key && !brightness_pending()) {
         return false;
     }
@@ -8059,7 +8629,8 @@ static bool presenter_quiet_tick(jr_display_ctx_t *ctx, uint32_t *last_word)
     /* Bind/load through apply_face first, retaining missing-art fallback and
      * its retries. Never freeze an old foreground asset or a hidden blank. */
     const uint32_t clock = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
-    const uint32_t env = __atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE);
+    const uint32_t env = __atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE) ^
+                         (atomic_load_explicit(&s_timer_word, memory_order_acquire) * 1140071481u);
     const uint32_t caption = __atomic_load_n(&s_caption_revision, __ATOMIC_ACQUIRE);
     const uint32_t flush_errors = diag_load(&ctx->flush_errors);
     if (!ctx->quiet_active) {
@@ -8169,6 +8740,10 @@ static void dial_cache_publish(void)
     }
     n += (s_dial_shared != NULL && s_dial_shared_face != JR_FACE_COUNT) ? 1U : 0U;
     held += s_dial_shared != NULL ? 1U : 0U;
+#ifdef ESP_PLATFORM
+    n += s_minimal_slot.valid ? 1U : 0U;
+    held += s_minimal_slot.px != NULL ? 1U : 0U;
+#endif
     __atomic_store_n(&s_dial_held_n, n, __ATOMIC_RELAXED);
     __atomic_store_n(&s_dial_held_bytes, (uint32_t)(held * s_dial_frame_bytes),
                      __ATOMIC_RELAXED);
@@ -8249,6 +8824,17 @@ static void dial_cache_release(void)
         s_dial_shared = NULL;
         s_dial_shared_face = JR_FACE_COUNT;
     }
+#ifdef ESP_PLATFORM
+    if (s_minimal_slot.px != NULL && !(s_dial_blit && s_dial_minimal)) {
+        if (s_minimal_slot.px == s_dial_frame) {
+            s_dial_frame = NULL;
+            s_dial_frame_face = JR_FACE_COUNT;
+        }
+        heap_caps_free(s_minimal_slot.px);
+        s_minimal_slot = (dial_slot_t){ 0 };
+        s_dial_minimal = false;
+    }
+#endif
     s_dial_warm_skip = 0;
     dial_cache_publish();
 }
@@ -8438,6 +9024,9 @@ static bool dial_show(jr_display_ctx_t *ctx, jr_face_t dial)
     s_dial_frame = frame;
     s_dial_frame_face = dial;
     s_dial_blit = true;
+#ifdef ESP_PLATFORM
+    s_dial_minimal = false;
+#endif
     gfx_disp_refresh_all(ctx->disp);
     clip_release_unbound_dial(ctx, clip);
     (void)gfx_emote_unlock(ctx->gfx);
@@ -8456,6 +9045,96 @@ static bool dial_show(jr_display_ctx_t *ctx, jr_face_t dial)
     ESP_LOGI(TAG, "face=%d dial blit, anim hidden", (int)dial);
     return true;
 }
+
+#ifdef ESP_PLATFORM
+/* Rasterize MINIMAL's static ivory disc + 60 ticks + 12 hour dots once into a
+ * PSRAM dial_cache slot (off the render lock), then blit it like a baked dial.
+ * Respects DIAL_PSRAM_FLOOR and LRU eviction from s_dial_slot[]; returns false
+ * if PSRAM cannot spare a frame, falling back to procedural drawing cleanly. */
+static bool dial_show_minimal(jr_display_ctx_t *ctx)
+{
+    if (ctx == NULL || ctx->board.width != HUD_W || ctx->board.height != HUD_H) {
+        return false;
+    }
+    const bool swap = ctx->board.swap_color_bytes;
+    const size_t bytes = (size_t)HUD_W * HUD_H * sizeof(uint16_t);
+    s_dial_frame_bytes = bytes;
+
+    if (s_minimal_slot.valid && s_minimal_slot.px != NULL && s_minimal_swap == swap) {
+        if (!(s_dial_blit && s_dial_minimal)) {
+            __atomic_fetch_add(&s_dial_hits, 1U, __ATOMIC_RELAXED);
+        }
+    } else {
+        __atomic_fetch_add(&s_dial_misses, 1U, __ATOMIC_RELAXED);
+        if (s_minimal_slot.px == NULL) {
+            for (;;) {
+                if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) >= bytes + DIAL_PSRAM_FLOOR) {
+                    uint16_t *px = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                    if (px != NULL) {
+                        s_minimal_slot.px = px;
+                        s_minimal_slot.valid = false;
+                        dial_cache_publish();
+                        break;
+                    }
+                }
+                int victim = -1;
+                for (int i = 0; i < DIAL_SLOTS; ++i) {
+                    const dial_slot_t *s = &s_dial_slot[i];
+                    if (i == s_dial_filling || s->px == NULL ||
+                        (s_dial_blit && s->px == s_dial_frame)) {
+                        continue;
+                    }
+                    if (victim < 0 || s->used < s_dial_slot[victim].used) {
+                        victim = i;
+                    }
+                }
+                if (victim < 0) {
+                    return false;
+                }
+                dial_slot_free(&s_dial_slot[victim]);
+                __atomic_fetch_add(&s_dial_evictions, 1U, __ATOMIC_RELAXED);
+                dial_cache_publish();
+            }
+        }
+        const int64_t t0 = esp_timer_get_time();
+        s_minimal_slot.valid = false;
+        memset(s_minimal_slot.px, 0, bytes);
+        for (int y = 0; y < HUD_H; y += JR_DISPLAY_STRIP_ROWS) {
+            const int nrows = y + JR_DISPLAY_STRIP_ROWS > HUD_H ? HUD_H - y : JR_DISPLAY_STRIP_ROWS;
+            hud_minimal_dial_bake_rows(s_minimal_slot.px + (size_t)y * HUD_W, y, nrows, swap);
+        }
+        s_minimal_swap = swap;
+        s_minimal_slot.valid = true;
+        __atomic_store_n(&s_dial_decode_ms,
+                         (uint32_t)((esp_timer_get_time() - t0) / 1000), __ATOMIC_RELAXED);
+        dial_cache_publish();
+    }
+
+    if (gfx_emote_lock(ctx->gfx) != ESP_OK) {
+        return false;
+    }
+    (void)gfx_anim_stop(ctx->anim);
+    (void)gfx_obj_set_visible(ctx->anim, false);
+    if (!(s_dial_blit && s_dial_minimal)) {
+        s_dial_glass_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    }
+    s_dial_frame = s_minimal_slot.px;
+    s_dial_frame_face = JR_FACE_COUNT;
+    s_dial_blit = true;
+    s_dial_minimal = true;
+    gfx_disp_refresh_all(ctx->disp);
+    (void)gfx_emote_unlock(ctx->gfx);
+    s_minimal_slot.used = ++s_dial_clock;
+
+    ctx->active = NULL;
+    ctx->last_end = -1;
+    __atomic_store_n(&ctx->applied_bucket, -1, __ATOMIC_RELAXED);
+    __atomic_store_n(&ctx->blanked, false, __ATOMIC_RELAXED);
+    diag_store(&ctx->current_asset_bytes, (uint32_t)bytes);
+    ESP_LOGI(TAG, "MINIMAL dial baked into PSRAM blit, anim hidden");
+    return true;
+}
+#endif
 
 /* WARM THE NEIGHBOURS. Once a dial has been on the glass for a moment, decode
  * the dials of the next and the previous style (the two a swipe reaches) so the
@@ -8627,6 +9306,9 @@ static esp_err_t apply_face(jr_display_ctx_t *ctx, jr_face_t face,
         ctx->active = clip;
         clip_release_unbound_dial(ctx, previous);
         s_dial_blit = false;            /* the anim is the face again */
+#ifdef ESP_PLATFORM
+        s_dial_minimal = false;
+#endif
     }
     (void)gfx_emote_unlock(ctx->gfx);
     if (err != ESP_OK) {
@@ -8818,6 +9500,14 @@ static void display_task(void *arg)
                 last_word = word;
             } else {
                 bool changed = word != last_word;
+#ifdef ESP_PLATFORM
+                const bool want_minimal =
+                    watch_dial_face() == JR_FACE_COUNT &&
+                    __atomic_load_n(&s_minimal_want, __ATOMIC_ACQUIRE) != 0u;
+                if (want_minimal != (s_dial_blit && s_dial_minimal)) {
+                    changed = true;
+                }
+#endif
                 bool decay_due =
                     (face == JR_FACE_LISTENING || face == JR_FACE_SPEAKING) &&
                     now_ms - ctx->decay_gate_ms >= JR_DISPLAY_DECAY_HOLD_MS;
@@ -8825,9 +9515,17 @@ static void display_task(void *arg)
                     jr_face_t before = (jr_face_t)diag_load(&ctx->applied_face);
                     bool was_blanked = __atomic_load_n(&ctx->blanked, __ATOMIC_RELAXED);
                     bool stale = false;
+#ifdef ESP_PLATFORM
+                    err = (want_minimal && dial_show_minimal(ctx))
+                        ? ESP_OK
+                        : (dial_show(ctx, face)
+                               ? ESP_OK
+                               : apply_face(ctx, face, requested_face, amplitude, &stale));
+#else
                     err = dial_show(ctx, face)
                         ? ESP_OK
                         : apply_face(ctx, face, requested_face, amplitude, &stale);
+#endif
                     if (stale) {
                         ctx->apply_retry_gate_ms = 0;
                     } else if (err == ESP_OK) {
@@ -8899,6 +9597,7 @@ esp_err_t jr_display_start(jr_display_t *out_port)
     orbit_rec_build();         /* before the render task exists to read it */
     fring_rec_alloc();         /* likewise */
     shade_rec_alloc();         /* likewise */
+    wx_rec_alloc();            /* likewise */
 
     BaseType_t created = xTaskCreatePinnedToCore(
         display_task, "jr_present", JR_DISPLAY_TASK_STACK, &s_display,
@@ -9750,4 +10449,66 @@ void jr_display_set_status(uint8_t volume, uint8_t brightness_cap)
     }
     __atomic_store_n(&s_status_word,
                      (uint32_t)volume | ((uint32_t)brightness_cap << 8), __ATOMIC_RELEASE);
+}
+
+void jr_display_timer_set(bool active, bool ringing, uint16_t rem_s,
+                          uint8_t pct_left, const char *label)
+{
+    if (!active) {
+        s_timer_label[0] = '\0';
+        const uint32_t prev = atomic_exchange_explicit(&s_timer_word, 0u, memory_order_acq_rel);
+        if (prev != 0u) {
+            nav_wake();
+        }
+        return;
+    }
+    if (pct_left > 100U) {
+        pct_left = 100U;
+    }
+    /* Publish sanitized label BEFORE release-storing the timer word (same
+     * lock-free contract as s_links_ip and s_caption_text). */
+    char clean[TIMER_LABEL_CAP];
+    size_t n = 0u;
+    if (label != NULL) {
+        for (; label[n] != '\0' && n + 1u < TIMER_LABEL_CAP; ++n) {
+            unsigned char c = (unsigned char)label[n];
+            if (c >= 'a' && c <= 'z') {
+                c = (unsigned char)(c - 'a' + 'A');
+            }
+            clean[n] = (c >= 0x20u && c <= 0x7Eu) ? (char)c : ' ';
+        }
+    }
+    clean[n] = '\0';
+    const bool lbl_changed = strncmp(s_timer_label, clean, TIMER_LABEL_CAP) != 0;
+    memcpy(s_timer_label, clean, TIMER_LABEL_CAP);
+
+    const uint32_t word =
+        ((uint32_t)rem_s & TIMER_REM_MASK) |
+        (((uint32_t)pct_left << TIMER_PCT_SHIFT) & TIMER_PCT_MASK) |
+        (ringing ? TIMER_RINGING_BIT : 0u) |
+        TIMER_ACTIVE_BIT;
+    const uint32_t prev = atomic_exchange_explicit(&s_timer_word, word, memory_order_acq_rel);
+    if (prev != word || lbl_changed) {
+        nav_wake();
+    }
+}
+
+bool jr_display_timer_active(void)
+{
+    return (atomic_load_explicit(&s_timer_word, memory_order_acquire) & TIMER_ACTIVE_BIT) != 0u;
+}
+
+void jr_display_rim_level_show(bool is_brightness, uint8_t pct)
+{
+    if (pct > 100U) {
+        pct = 100U;
+    }
+    const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    const uint32_t word =
+        ((uint32_t)pct & RIM_LEVEL_PCT_MASK) |
+        (is_brightness ? RIM_LEVEL_BRT_BIT : 0u) |
+        RIM_LEVEL_ARM_BIT;
+    atomic_store_explicit(&s_rim_level_word, word, memory_order_release);
+    atomic_store_explicit(&s_rim_level_start_ms, now_ms, memory_order_release);
+    nav_wake();
 }

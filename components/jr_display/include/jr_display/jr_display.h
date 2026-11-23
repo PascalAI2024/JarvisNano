@@ -779,7 +779,7 @@ void jr_display_desk_set_task(const char *task, uint8_t progress,
  *      PREFLIGHT    dim cyan, empty track   checks running
  *      BLOCKED      amber, full             refused; nothing was written
  *      RECEIVING    cyan, percent           writing the target slot
- *      PROBATION    violet, full            new image up, not yet confirmed
+ *      PROBATION    mint, full              new image up, not yet confirmed
  *      VALID        (no ring)               confirmed good
  *      ROLLED_BACK  amber, full             reverted to the previous slot
  *      FAILED       red, full
@@ -850,6 +850,19 @@ void jr_display_set_status(uint8_t volume, uint8_t brightness_cap);
  * else its last complete sentence, else its last whole word and "...". Pure.
  * Returns the length written. */
 size_t jr_display_activity_fit(char *dst, size_t cap, const char *src);
+
+/* N16.4: Countdown timer overlay. Lock-free, any-task safe. Draws an
+ * anti-aliased sweep arc at r202-206 (cyan while running, pulsing amber under
+ * 60 s, pulsing amber/cyan when ringing — never gold) plus a haloed MM:SS
+ * readout. active=false clears immediately. */
+void jr_display_timer_set(bool active, bool ringing, uint16_t rem_s,
+                          uint8_t pct_left, const char *label);
+bool jr_display_timer_active(void);
+
+/* Glass-2: Transient rim level arc at r223-231 (left rim cyan for volume,
+ * right rim amber for brightness). Self-expires in 1200 ms with a smooth
+ * 200 ms fade. Never overwrites the r221-222 privacy ring. Lock-free. */
+void jr_display_rim_level_show(bool is_brightness, uint8_t pct);
 
 #ifdef __cplusplus
 }

@@ -3041,6 +3041,125 @@ static void test_fg_changes_only_its_pixels_and_gates(void)
     free(a); free(b); free(c); free(d); free(e);
 }
 
+/* Glass-2: DAC-synced speech-cadence ring (HUD_FACE_SPEAK).
+ * Must draw 0 px when amp == 0, draw a symmetric ice-white/cyan cadence halo
+ * strictly inside r185..194 (never gold!) when amp == 200, and satisfy 12-row
+ * strip invariance at a fixed timestamp. */
+static void test_speak_cadence_ring(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = calloc(px, sizeof *whole);
+    uint16_t *strips = calloc(px, sizeof *strips);
+    if (!whole || !strips) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(whole); free(strips); return;
+    }
+
+    hud_env_t env = {
+        .face = HUD_FACE_SPEAK,
+        .amp = 0,
+        .batt_pct = 0xFF,
+        .charging = false,
+        .privacy_muted = false,
+        .rim = HUD_RIM_NONE,
+    };
+    /* Flush history with amp=0 so ring buffer is quiet */
+    for (uint32_t t = 1000u; t < 2600u; t += 40u) {
+        memset(whole, 0, px * sizeof *whole);
+        hud_overlay_frame(whole, 0, HUD_H, t, false, &env);
+    }
+    size_t zero_px = 0;
+    for (size_t i = 0; i < px; ++i) {
+        if (whole[i] != 0u) zero_px++;
+    }
+    CHECK(zero_px == 0, "HUD_FACE_SPEAK with amp=0 painted %zu px", zero_px);
+
+    /* Now speak at amp=200 for a few frames so the syllable cadence propagates */
+    env.amp = 200;
+    for (uint32_t t = 2640u; t <= 2840u; t += 40u) {
+        memset(whole, 0, px * sizeof *whole);
+        hud_overlay_frame(whole, 0, HUD_H, t, false, &env);
+    }
+    /* Strip invariance at the exact same timestamp t=2840 */
+    memset(strips, 0, px * sizeof *strips);
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        int n = y + STRIP_ROWS <= HUD_H ? STRIP_ROWS : HUD_H - y;
+        hud_overlay_frame(strips + (size_t)y * HUD_W, y, n, 2840u, false, &env);
+    }
+    CHECK(memcmp(whole, strips, px * sizeof *whole) == 0,
+          "HUD_FACE_SPEAK strips differ from whole frame");
+
+    size_t painted = 0, out_of_band = 0, gold_px = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            const uint16_t v = whole[(size_t)y * HUD_W + x];
+            if (v == 0u) continue;
+            painted++;
+            const int dx = x - 232, dy = y - 232;
+            const int r2 = dx * dx + dy * dy;
+            if (r2 < 184 * 184 || r2 > 195 * 195) {
+                out_of_band++;
+            }
+            /* Gold (privacy-only) has high red and low blue; ice/cyan has blue >= red */
+            const unsigned r5 = (v >> 11) & 31u;
+            const unsigned b5 = v & 31u;
+            if (r5 > 16u && b5 < 12u) {
+                gold_px++;
+            }
+        }
+    }
+    CHECK(painted > 100, "HUD_FACE_SPEAK with amp=200 painted only %zu px", painted);
+    CHECK(out_of_band == 0, "HUD_FACE_SPEAK painted %zu px outside r184..195", out_of_band);
+    CHECK(gold_px == 0, "HUD_FACE_SPEAK painted %zu gold pixels (privacy-only)", gold_px);
+
+    free(whole);
+    free(strips);
+}
+
+/* Glass-2: MINIMAL static dial baked into PSRAM must be 100% bit-identical to
+ * the unbaked procedural MINIMAL dial in both byte orders. */
+static void test_minimal_dial_bake_matches_unbaked(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *baked_fb = calloc(px, sizeof *baked_fb);
+    uint16_t *unbaked_fb = calloc(px, sizeof *unbaked_fb);
+    if (!baked_fb || !unbaked_fb) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(baked_fb); free(unbaked_fb); return;
+    }
+
+    for (int sw = 0; sw < 2; ++sw) {
+        const bool swap = sw != 0;
+        memset(baked_fb, 0, px * sizeof *baked_fb);
+        memset(unbaked_fb, 0, px * sizeof *unbaked_fb);
+
+        for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+            int n = y + STRIP_ROWS <= HUD_H ? STRIP_ROWS : HUD_H - y;
+            hud_minimal_dial_bake_rows(baked_fb + (size_t)y * HUD_W, y, n, swap);
+        }
+
+        hud_watch_t w = {
+            .hh = 10, .mm = 10, .ss = 30, .ms = 0,
+            .batt_pct = 80, .wx_valid = false, .temp_f = 0,
+            .dial_baked = true, .shadow = true, .alive = true,
+        };
+        for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+            int n = y + STRIP_ROWS <= HUD_H ? STRIP_ROWS : HUD_H - y;
+            hud_overlay_watch(baked_fb + (size_t)y * HUD_W, y, n, swap, &w, 255, 4);
+        }
+        w.dial_baked = false;
+        for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+            int n = y + STRIP_ROWS <= HUD_H ? STRIP_ROWS : HUD_H - y;
+            hud_overlay_watch(unbaked_fb + (size_t)y * HUD_W, y, n, swap, &w, 255, 4);
+        }
+        CHECK(memcmp(baked_fb, unbaked_fb, px * sizeof *baked_fb) == 0,
+              "MINIMAL baked dial differs from unbaked (swap=%d)", sw);
+    }
+
+    free(baked_fb);
+    free(unbaked_fb);
+}
+
 int main(void)
 {
     test_light_deadband_is_today();
@@ -3119,6 +3238,8 @@ int main(void)
     test_fg_depths_travel_and_guards();
     test_fg_is_antialiased_at_sixteenth_pixels();
     test_fg_changes_only_its_pixels_and_gates();
+    test_speak_cadence_ring();
+    test_minimal_dial_bake_matches_unbaked();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);

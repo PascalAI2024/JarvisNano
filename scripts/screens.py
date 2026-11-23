@@ -22,10 +22,12 @@ from __future__ import annotations
 import argparse
 import io
 import os
+import subprocess
 import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 try:
@@ -34,6 +36,8 @@ except ImportError:
     sys.exit("needs Pillow:  pip install pillow")
 
 TILE = 466
+KEYCHAIN_SERVICE = "com.ingeniousdigital.jarvisnano.desk"
+_TOKEN_CACHE: dict[str, str | None] = {}
 
 # The ring, in slide-down order, PARSED FROM THE FIRMWARE ENUM rather than
 # copied. A hand-kept copy drifted: it still listed a "MOTION" screen that the
@@ -65,16 +69,73 @@ def ring_from_header(root: str) -> list[str]:
     return ring
 
 
+def normalize_host(value: str) -> str:
+    value = value.strip().rstrip("/")
+    return value if value.startswith(("http://", "https://")) else "http://" + value
+
+
+def valid_pairing_token(token: str) -> bool:
+    encoded = token.encode("utf-8")
+    return (32 <= len(encoded) <= 64) and not any(
+        byte <= 0x20 or byte == 0x7F for byte in encoded)
+
+
+def pairing_token(host: str) -> str | None:
+    """Resolve the paired device token from keychain, Windows registry, or env."""
+    base = normalize_host(host)
+    if base in _TOKEN_CACHE:
+        return _TOKEN_CACHE[base]
+    account = "jarvis-desk@" + urllib.parse.urlsplit(base).netloc
+    token: str | None = None
+
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-a", account,
+             "-s", KEYCHAIN_SERVICE, "-w"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        result = None
+    if result is not None and result.returncode == 0:
+        cand = result.stdout.rstrip("\r\n")
+        if valid_pairing_token(cand):
+            token = cand
+
+    if token is None and sys.platform == "win32":
+        # jarvis-desk.py pair stores Windows tokens here, keyed by account.
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\JarvisNano\Desk") as key:
+                cand, kind = winreg.QueryValueEx(key, account)
+            if kind == winreg.REG_SZ and valid_pairing_token(cand):
+                token = cand
+        except OSError:
+            pass
+
+    if token is None:
+        env_tok = (os.environ.get("JARVIS_PAIRING_TOKEN")
+                   or os.environ.get("JARVIS_DESK_TOKEN") or "")
+        if env_tok:
+            env_host = os.environ.get("JARVIS_DEVICE_HOST", "").strip()
+            if not env_host or normalize_host(env_host) == base:
+                token = env_tok
+
+    _TOKEN_CACHE[base] = token
+    return token
+
+
 def _req(host: str, path: str, method: str = "GET", timeout: float = 25.0):
+    base = normalize_host(host)
     headers = {"X-JarvisNano-Control": "1"}
-    # The docstring promised a paired token and nothing sent one: with
-    # JR_DEV_OPEN_DIAGNOSTICS 0 every call answered 401.
-    token = (os.environ.get("JARVIS_PAIRING_TOKEN")
-             or os.environ.get("JARVIS_DESK_TOKEN"))
+    token = pairing_token(base)
     if token:
         headers["X-JarvisNano-Token"] = token
     r = urllib.request.Request(
-        f"http://{host}{path}", method=method, headers=headers,
+        f"{base}{path}", method=method, headers=headers,
         data=b"" if method == "POST" else None)
     return urllib.request.urlopen(r, timeout=timeout).read()
 

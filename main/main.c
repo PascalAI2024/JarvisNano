@@ -212,6 +212,86 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
     /* ask_user never reaches the HTTPS tool worker: rich_cb intercepts it and
      * it becomes the Asking substate (choice arcs on glass, STATE-05/06). */
     JR_GEMINI_ASK_USER_DECL,
+    /* Offline-ready local tools: answered instantly in device_try_local_tool()
+     * with zero network round-trips, with or without the JarvisMCP gateway. */
+    {
+        .name = "set_timer",
+        .description =
+            "Set a local countdown timer (5 to 43200 seconds) or a Pomodoro "
+            "timer (label 'focus' defaults to 25 minutes, 'break' to 5 minutes).",
+        .params = {
+            {
+                .name = "seconds",
+                .type = JR_GEMINI_PT_INTEGER,
+                .description =
+                    "Duration in seconds (5..43200). Optional when label is "
+                    "'focus' (1500 s) or 'break' (300 s).",
+                .required = false,
+            },
+            {
+                .name = "label",
+                .type = JR_GEMINI_PT_STRING,
+                .description =
+                    "Short timer label (up to 16 chars), e.g. tea, focus, break.",
+                .required = false,
+            },
+        },
+        .param_count = JR_GEMINI_PARAM_COUNT(2),
+    },
+    {
+        .name = "cancel_timer",
+        .description =
+            "Cancel an active or ringing timer by label, 'all' to cancel every "
+            "timer, or omit label to cancel the nearest timer.",
+        .params = {{
+            .name = "label",
+            .type = JR_GEMINI_PT_STRING,
+            .description = "Timer label, 'all', or omit for nearest timer.",
+            .required = false,
+        }},
+        .param_count = JR_GEMINI_PARAM_COUNT(1),
+    },
+    {
+        .name = "list_timers",
+        .description =
+            "List all active and ringing local timers with remaining seconds.",
+        .arg_name = NULL,
+        .arg_desc = NULL,
+    },
+    {
+        .name = "set_glass",
+        .description =
+            "Switch the device's ring screen (jarvis, watch, weather, status, "
+            "activity) and/or persist one of the 8 watch styles (jarvis, diver, "
+            "dress, pilot, minimal, future, skeleton, celestial).",
+        .params = {
+            {
+                .name = "screen",
+                .type = JR_GEMINI_PT_STRING,
+                .description =
+                    "Target ring screen: jarvis, watch, weather, status, or activity.",
+                .required = false,
+            },
+            {
+                .name = "watch_style",
+                .type = JR_GEMINI_PT_STRING,
+                .description =
+                    "Watch style: jarvis, diver, dress, pilot, minimal, future, "
+                    "skeleton, or celestial.",
+                .required = false,
+            },
+        },
+        .param_count = JR_GEMINI_PARAM_COUNT(2),
+    },
+    {
+        .name = "device_status",
+        .description =
+            "Read live local device status in 0 ms: battery, charging, USB, "
+            "Wi-Fi RSSI, chip temperature, volume, brightness, watch style, "
+            "screen, muted state, uptime, and active timers.",
+        .arg_name = NULL,
+        .arg_desc = NULL,
+    },
 };
 
 _Static_assert(sizeof(s_device_tool_fns) / sizeof(s_device_tool_fns[0]) ==
@@ -246,6 +326,11 @@ static const char s_device_tool_labels[][13] = {
     "DELEGATE",     /* delegate_task  */
     "TASKS",        /* delegated_tasks */
     "ASK",          /* ask_user       */
+    "SET TIMER",    /* set_timer      */
+    "END TIMER",    /* cancel_timer   */
+    "TIMERS",       /* list_timers    */
+    "GLASS",        /* set_glass      */
+    "STATUS",       /* device_status  */
 };
 
 _Static_assert(sizeof(s_device_tool_labels) / sizeof(s_device_tool_labels[0]) ==
@@ -285,6 +370,29 @@ _Atomic uint32_t s_sim_touch;
  * dismiss, n == 0, encodes as 1). The httpd handler only posts here; the app
  * task drains it — jr_display's choice statics keep exactly ONE writer. */
 _Atomic uint32_t s_debug_choices_req;
+jr_timer_bank_t s_timers;
+portMUX_TYPE s_timer_mux = portMUX_INITIALIZER_UNLOCKED;
+timer_snap_t s_timer_snap;
+timer_debug_req_t s_debug_timer_req_data;
+_Atomic uint32_t s_debug_timer_req;
+
+void timer_publish_now(uint32_t now_ms)
+{
+    jr_timer_view_t v;
+    (void)jr_timer_nearest(&s_timers, now_ms, &v);
+    timer_snap_t snap = {
+        .active = v.active,
+        .ringing = v.ringing,
+        .rem_s = v.rem_s,
+        .pct_left = v.pct_left,
+        .count = (uint8_t)jr_timer_active_count(&s_timers),
+    };
+    strlcpy(snap.label, v.label, sizeof snap.label);
+    portENTER_CRITICAL(&s_timer_mux);
+    s_timer_snap = snap;
+    portEXIT_CRITICAL(&s_timer_mux);
+    jr_display_timer_set(v.active, v.ringing, v.rem_s, v.pct_left, v.label);
+}
 
 /* App-task only: taps are swallowed until this deadline right after an arc was
  * tapped, so the trailing contact of a double-tap cannot reach the mute
@@ -443,6 +551,11 @@ static void ui_level_cue(int level, int delta, bool physical)
     }
 }
 
+void device_confirm_cue(void)
+{
+    ui_cue(JR_CUE_CONFIRM, true);
+}
+
 /* Speaker volume (app task only) — gesture-adjustable, NVS-persistent. */
 int s_out_vol = 100;
 uint8_t s_brightness_cap = 100;
@@ -514,7 +627,7 @@ static void restore_brightness_cap(void)
 }
 
 /* The watch style is the owner's choice, kept the way the brightness cap is. */
-static void persist_watch_style(uint8_t style)
+void persist_watch_style(uint8_t style)
 {
     nvs_handle_t h;
     if (nvs_open("app", NVS_READWRITE, &h) == ESP_OK) {
@@ -919,6 +1032,14 @@ _Atomic uint32_t        s_srv_interrupts;
 _Atomic uint32_t        s_srv_phantom_interrupts;
 static _Atomic uint32_t s_local_speech_start_ms;  /* last accepted VAD start */
 static temperature_sensor_handle_t s_tsens;
+
+bool device_chip_temp_c(float *out_c)
+{
+    if (out_c == NULL || s_tsens == NULL) {
+        return false;
+    }
+    return temperature_sensor_get_celsius(s_tsens, out_c) == ESP_OK;
+}
 jr_mood_state_t s_mood;
 _Atomic uint8_t s_mood_id;
 _Atomic uint8_t s_mood_brightness;
@@ -2559,7 +2680,12 @@ static void voice_task(void *arg)
                 s_shake_polls = 0;
                 s_shake_cool_ms = (uint32_t)now + 1500U;
                 jr_state_t sp = jr_orch_phase(&s_app.orch);
-                if (sp == JR_ST_SPEAKING || sp == JR_ST_THINKING ||
+                if (jr_timer_any_ringing(&s_timers)) {
+                    (void)jr_timer_dismiss_ringing(&s_timers);
+                    timer_publish_now((uint32_t)now);
+                    jr_display_caption_set("TIMER DISMISSED");
+                    ESP_LOGI(TAG, "gesture: shake dismissed timer");
+                } else if (sp == JR_ST_SPEAKING || sp == JR_ST_THINKING ||
                     sp == JR_ST_ASKING) {
                     jr_audio_flush_playback();
                     jr_audio_sink_mute_now(&s_app.spk);
@@ -2615,7 +2741,8 @@ static void voice_task(void *arg)
                 mood_phase == JR_ST_SPEAKING ||
                 mood_phase == JR_ST_THINKING ||
                 mood_phase == JR_ST_ASKING ||
-                (mood_phase == JR_ST_LISTENING && s_listen_speech_active);
+                (mood_phase == JR_ST_LISTENING && s_listen_speech_active) ||
+                jr_timer_any_ringing(&s_timers);
             static uint8_t s_move_polls, s_mood_fd_polls, s_mood_fu_polls;
             static bool s_mood_face_down;
             if (have_imu && imu.moving && imu.age_ms < 500U) {
@@ -2704,6 +2831,7 @@ static void voice_task(void *arg)
                 const int forced = atomic_load(&s_cpu_force);
                 cpu_gear_set(forced != 0 ? forced
                              : ((!on_cell && !quiet) || realtime_power ||
+                                mout.mood == JR_MOOD_AWAKE ||
                                 atomic_load(&s_audio_diag_until_ms) != 0U)
                                    ? CPU_MHZ_LIVE : CPU_MHZ_REST);
             }
@@ -2763,7 +2891,8 @@ static void voice_task(void *arg)
                 const bool in_use =
                     (have_power && bat.usb_present) ||
                     atomic_load(&s_ota_active) ||
-                    operator_mode_active((uint32_t)now);
+                    operator_mode_active((uint32_t)now) ||
+                    jr_timer_any_active(&s_timers);
                 if (forced) {
                     enter_deep_sleep("forced", atomic_load(&s_sleep_timer_s));
                 } else if (jr_mood_sleep_due(&s_mood, (uint32_t)now) &&
@@ -2788,6 +2917,8 @@ static void voice_task(void *arg)
             }
             (void)jr_display_set_brightness(s_bright_now);
             if (mout.changed) {
+                jr_imu_set_rest(mout.mood == JR_MOOD_WHISPER ||
+                                mout.mood == JR_MOOD_DREAM);
                 ESP_LOGI(TAG, "mood -> %s brightness=%u cap=%u voice=%d",
                          jr_mood_name(mout.mood),
                          (unsigned)effective_brightness,
@@ -2828,12 +2959,19 @@ static void voice_task(void *arg)
                 jr_power_pkey_take(&pkey_s, &pkey_l);
                 if (pkey_s > 0) {
                     companion_attention((uint32_t)now);
-                    s_flip_muted = false;
-                    atomic_store(&s_voice_privacy_paused, false);
                     jr_mood_poke_awake(&s_mood, (uint32_t)now);
-                    atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
-                    jr_display_caption_set("LISTENING");
-                    ESP_LOGI(TAG, "pkey: listen");
+                    if (jr_timer_any_ringing(&s_timers)) {
+                        (void)jr_timer_dismiss_ringing(&s_timers);
+                        timer_publish_now((uint32_t)now);
+                        jr_display_caption_set("TIMER DISMISSED");
+                        ESP_LOGI(TAG, "pkey: dismissed timer");
+                    } else {
+                        s_flip_muted = false;
+                        atomic_store(&s_voice_privacy_paused, false);
+                        atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+                        jr_display_caption_set("LISTENING");
+                        ESP_LOGI(TAG, "pkey: listen");
+                    }
                 }
                 if (pkey_l > 0) {
                     /* HOLD PWR: OFF. The owner: "the big button hold should
@@ -3074,11 +3212,13 @@ static void voice_task(void *arg)
             s_out_vol = requested_volume;
             jr_audio_set_gains(-1, -1, requested_volume);
             persist_out_vol((uint8_t)requested_volume);
+            jr_display_rim_level_show(false, (uint8_t)requested_volume);
             ESP_LOGI(TAG, "levels: volume=%d", requested_volume);
         }
         if (requested_brightness >= 10 && requested_brightness <= 100) {
             s_brightness_cap = (uint8_t)requested_brightness;
             persist_brightness_cap((uint8_t)requested_brightness);
+            jr_display_rim_level_show(true, (uint8_t)requested_brightness);
             ESP_LOGI(TAG, "levels: brightness cap=%d", requested_brightness);
         }
         if (requested_volume >= 0 || requested_brightness >= 0) {
@@ -3344,6 +3484,73 @@ static void voice_task(void *arg)
                     jr_display_present_choices("Run diagnostics now?",
                                                kDbgLabels, dn);
                 }
+            }
+        }
+
+        /* 2b) timer bank drain + step + 1 Hz display publish */
+        {
+            static uint32_t s_timer_next_pub_ms;
+            static bool s_timer_was_active;
+            bool force_pub = false;
+
+            const uint32_t treq = atomic_exchange(&s_debug_timer_req, 0U);
+            if (treq != 0U) {
+                timer_debug_req_t dreq = {0};
+                portENTER_CRITICAL(&s_timer_mux);
+                dreq = s_debug_timer_req_data;
+                portEXIT_CRITICAL(&s_timer_mux);
+                if (dreq.kind == TIMER_REQ_SET) {
+                    char norm[JR_TIMER_LABEL_CAP] = {0};
+                    uint32_t eff_s = 0U;
+                    if (jr_timer_set(&s_timers, (uint32_t)now, dreq.seconds,
+                                     dreq.label, norm, sizeof norm, &eff_s)) {
+                        jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                        ESP_LOGI(TAG, "debug timer set: %s %us",
+                                 norm, (unsigned)eff_s);
+                        force_pub = true;
+                    }
+                } else if (dreq.kind == TIMER_REQ_CANCEL) {
+                    const unsigned n = jr_timer_cancel(&s_timers, (uint32_t)now,
+                                                       dreq.label);
+                    ESP_LOGI(TAG, "debug timer cancel: %u", n);
+                    force_pub = true;
+                } else if (dreq.kind == TIMER_REQ_DISMISS) {
+                    const unsigned n = jr_timer_dismiss_ringing(&s_timers);
+                    ESP_LOGI(TAG, "debug timer dismiss: %u", n);
+                    force_pub = true;
+                }
+            }
+
+            jr_timer_events_t tev;
+            jr_timer_step(&s_timers, (uint32_t)now, &tev);
+            if (tev.expired) {
+                jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                companion_attention((uint32_t)now);
+                jr_display_rest_set(JR_DISPLAY_REST_NONE, false, false);
+                jr_display_bloom();
+                char row[25];
+                snprintf(row, sizeof row, "%.16s DONE", tev.expired_label);
+                jr_display_activity_push("TIMER", row);
+                char cap[32];
+                snprintf(cap, sizeof cap, "%.16s DONE - TAP", tev.expired_label);
+                jr_display_caption_set(cap);
+                ESP_LOGI(TAG, "timer: %s expired", tev.expired_label);
+                force_pub = true;
+            }
+            if (tev.chime) {
+                jr_audio_play_timer_chime();
+            }
+            if (tev.auto_stopped) {
+                ESP_LOGI(TAG, "timer: auto-stopped after 60 s");
+                force_pub = true;
+            }
+            const bool active_now = jr_timer_any_active(&s_timers);
+            if (force_pub || active_now != s_timer_was_active ||
+                (active_now &&
+                 (int32_t)((uint32_t)now - s_timer_next_pub_ms) >= 0)) {
+                timer_publish_now((uint32_t)now);
+                s_timer_was_active = active_now;
+                s_timer_next_pub_ms = (uint32_t)now + 1000U;
             }
         }
 
@@ -3762,6 +3969,7 @@ static void voice_task(void *arg)
                     const int level = request_level_step(
                         &s_level_volume_request, s_out_vol,
                         iev.direction == JR_INPUT_DIRECTION_UP ? 5 : -5);
+                    jr_display_rim_level_show(false, (uint8_t)level);
                     char caption[24];
                     snprintf(caption, sizeof caption, "VOLUME %d", level);
                     jr_display_caption_set(caption);
@@ -3780,6 +3988,7 @@ static void voice_task(void *arg)
                          * defect, not a preference: nothing about the device can
                          * teach you which half you are on. */
                         iev.direction == JR_INPUT_DIRECTION_UP ? 5 : -5);
+                    jr_display_rim_level_show(true, (uint8_t)level);
                     char caption[24];
                     snprintf(caption, sizeof caption, "BRIGHTNESS %d", level);
                     jr_display_caption_set(caption);
@@ -3956,6 +4165,16 @@ static void voice_task(void *arg)
                     ESP_LOGI(TAG, "gesture: long-press mute");
                 }
             } else if (iev.kind == JR_INPUT_TAP) {
+                /* Dismiss a ringing timer on physical tap — safely below
+                 * codex_mode, double-tap-home, brain surface, and ask arcs. */
+                if (physical && jr_timer_any_ringing(&s_timers)) {
+                    (void)jr_timer_dismiss_ringing(&s_timers);
+                    timer_publish_now((uint32_t)now);
+                    jr_display_caption_set("TIMER DISMISSED");
+                    ui_cue(JR_CUE_DISMISS, physical);
+                    ESP_LOGI(TAG, "timer: dismissed by tap");
+                    continue;
+                }
                 const jr_display_action_t shell_action =
                     jr_display_hit(iev.x, iev.y);
                 if (shell_action != JR_DISPLAY_ACT_NONE) {
@@ -4450,9 +4669,9 @@ static void voice_task(void *arg)
                      * contract). The VISION's beat: a point of light blooms
                      * into the ring. */
                     jr_display_bloom();
-                    /* the sound half of the attention moment — a short soft
-                     * rise; refuses on its own if a reply is playing */
-                    (void)jr_audio_diag_play_chirp(160U, 8U);
+                    /* the sound half of the attention moment — a warm two-note
+                     * wake cue; refuses on its own if a reply is playing */
+                    jr_audio_play_wake_cue();
                     s_mood_rest_disarmed = false;
                     atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
                     jr_display_caption_set("YES?");
@@ -4500,9 +4719,8 @@ capture_complete:
         uint8_t amp = 0;
         if (jr_display_is_ready()) {
             if (f == JR_FACE_SPEAKING) {
-                bool fresh = now >= s_app.last_playback_chunk_ms &&
-                             now - s_app.last_playback_chunk_ms < 250;
-                amp = fresh ? rms_to_amp(s_app.playback_level, 3.2f) : 0;
+                const uint16_t live_rms = jr_audio_playback_live_rms();
+                amp = live_rms > 0U ? rms_to_amp((float)live_rms, 3.2f) : 0;
             } else if (f == JR_FACE_LISTENING) {
                 amp = rms_to_amp(s_app.mic_level, 8.0f);
             }
@@ -4547,7 +4765,21 @@ capture_complete:
             vTaskDelay(1);
         } else {
             tick_skips_in_row = 0U;
-            vTaskDelay(pdMS_TO_TICKS(20));
+            const uint8_t idle_mood = atomic_load(&s_mood_id);
+            const bool deep_idle =
+                atomic_load(&s_voice_privacy_paused) &&
+                face_phase == JR_ST_IDLE &&
+                !jr_timer_any_ringing(&s_timers) &&
+                s_hold_start_ms == 0U &&
+                s_watch_peek_until_ms == 0U &&
+                s_demo_start_ms == 0U &&
+                atomic_load(&s_sim_touch) == 0U &&
+                atomic_load(&s_debug_timer_req) == 0U &&
+                atomic_load(&s_level_volume_request) < 0 &&
+                atomic_load(&s_level_brightness_request) < 0 &&
+                (idle_mood == (uint8_t)JR_MOOD_WHISPER ||
+                 idle_mood == (uint8_t)JR_MOOD_DREAM);
+            vTaskDelay(pdMS_TO_TICKS(deep_idle ? 100 : 20));
         }
     }
 }
@@ -4644,11 +4876,26 @@ static void compose_system_instruction(void)
     }
 }
 
+static void *cjson_psram_malloc(size_t sz)
+{
+    void *p = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return p != NULL ? p : malloc(sz);
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "=====================================================");
     ESP_LOGI(TAG, " JarvisRobot v5  |  hexagonal core  |  voice boot     ");
     ESP_LOGI(TAG, "=====================================================");
+
+    /* Route cJSON parse/print trees to PSRAM first (internal fallback) to
+     * keep internal SRAM fragmentation low for Wi-Fi/TLS handshakes. */
+    cJSON_Hooks cjson_hooks = {
+        .malloc_fn = cjson_psram_malloc,
+        .free_fn = free,
+    };
+    cJSON_InitHooks(&cjson_hooks);
+    jr_timer_init(&s_timers);
 
     crash_note_boot();
     init_nvs();

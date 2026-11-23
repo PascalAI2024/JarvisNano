@@ -128,12 +128,28 @@ static void test_unreachable_gateway_is_probed_slowly(void)
     CHECK(g_submits == 2, "one probe at the long interval, got %d", g_submits);
 }
 
+static void test_whisper_and_dream_suppress_board_poll(void)
+{
+    reset();
+    g_configured = true;
+    atomic_store(&s_mood_id, (uint8_t)JR_MOOD_WHISPER);
+    board_maybe_poll(BOARD_FIRST_POLL_MS);
+    CHECK(g_submits == 0, "WHISPER must suppress board poll, got %d", g_submits);
+    atomic_store(&s_mood_id, (uint8_t)JR_MOOD_DREAM);
+    board_maybe_poll(BOARD_FIRST_POLL_MS + BOARD_POLL_MS);
+    CHECK(g_submits == 0, "DREAM must suppress board poll, got %d", g_submits);
+    atomic_store(&s_mood_id, (uint8_t)JR_MOOD_AWAKE);
+    board_maybe_poll(BOARD_FIRST_POLL_MS + BOARD_POLL_MS);
+    CHECK(g_submits == 1, "AWAKE resumes board poll, got %d", g_submits);
+}
+
 int main(void)
 {
     test_unreachable_gateway_is_probed_slowly();
     test_no_key_never_dials();
     test_with_key_still_polls_on_schedule();
     test_key_removed_later_stops_the_dialling();
+    test_whisper_and_dream_suppress_board_poll();
     if (g_failures != 0 || g_checks == 0) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);
         return 1;

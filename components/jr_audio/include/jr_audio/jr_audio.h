@@ -85,6 +85,11 @@ uint32_t jr_audio_last_aec_us(void);
  * the room's noise bed up with it. This is the unamplified view. */
 float jr_audio_clean_rms(void);
 
+/* Live linear PCM RMS (0..32767) of the speech chunk currently being written
+ * to the DAC by the playback feeder (0 when muted, idle, or playing earcons).
+ * Lock-free and DAC-synced for speech-reactive glass visuals. */
+uint16_t jr_audio_playback_live_rms(void);
+
 /* How long the last source read was blocked waiting (guard + codec), in
  * microseconds. The canceller runs inside the read, so the read's duration
  * alone cannot say whether the frame was already waiting. */
@@ -287,7 +292,7 @@ esp_err_t jr_audio_play_sweep_owner_ack(uint16_t start_hz, uint16_t end_hz,
                                         uint32_t duration_ms,
                                         uint8_t level_percent);
 
-/* A short melody: `notes` sine notes at hz[] (80..8000), note_ms each
+/* A short melody: `notes` harmonic notes at hz[] (80..8000), note_ms each
  * (20..500), back to back, each under a raised-cosine attack and release so
  * the boundaries do not click. volume clamps to 1..30 percent like the
  * sweeps. Rendered whole and queued in one enqueue as UI feedback: it never
@@ -295,6 +300,15 @@ esp_err_t jr_audio_play_sweep_owner_ack(uint16_t start_hz, uint16_t end_hz,
  * exactly as the sweeps do, so it can never talk over a reply. */
 esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
                               uint16_t note_ms, uint8_t volume);
+
+/* Crisp warm 2-note fifth (G5 -> D6) wake acknowledgement. Respects the
+ * owner-mute tone policy and never collides with active playback. */
+void jr_audio_play_wake_cue(void);
+
+/* Bright harmonic glass-bell arpeggio (E5 -> B5 -> E6) for countdown timer
+ * alarms. Uses JR_TONE_ALARM so it breaks through owner mute, preserves
+ * earcon accounting (playback.replies stays 0), and never talks over a reply. */
+void jr_audio_play_timer_chime(void);
 
 /* One generated interface cue (jr_core/cue.h) at `amp_permille` of full scale.
  * The caller owns the policy (jr_cue_allow); this owns the lane: it drops the

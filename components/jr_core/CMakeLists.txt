@@ -21,6 +21,7 @@ idf_component_register(
         "src/mic_watch.c"
         "src/pace.c"
         "src/tool_policy.c"
+        "src/timer.c"
     INCLUDE_DIRS "include"
     REQUIRES jr_ports jr_dsp
 )

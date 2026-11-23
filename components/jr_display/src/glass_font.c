@@ -6,6 +6,9 @@
  * them one row at a time. See glass.h for the contract.
  */
 #include "jr_display/glass.h"
+#ifdef ESP_PLATFORM
+#include "esp_heap_caps.h"
+#endif
 
 #define GLASS_DEGREE_CP 0x00B0u
 
@@ -72,6 +75,37 @@ glass_metrics_t glass_font_metrics(glass_font_id_t font)
  * published last, so a reader either sees a finished table or searches. */
 #define GLYPH_LUT_FIRST 32u
 #define GLYPH_LUT_N 96u
+#ifdef ESP_PLATFORM
+static uint8_t (*s_glyph_lut)[GLYPH_LUT_N];
+static uint8_t s_glyph_lut_tried;
+
+static const uint8_t (*glyph_lut_get(void))[GLYPH_LUT_N]
+{
+    uint8_t (*lut)[GLYPH_LUT_N] = __atomic_load_n(&s_glyph_lut, __ATOMIC_ACQUIRE);
+    if (lut != NULL) {
+        return (const uint8_t (*)[GLYPH_LUT_N])lut;
+    }
+    if (__atomic_exchange_n(&s_glyph_lut_tried, 1u, __ATOMIC_ACQ_REL) != 0u) {
+        return NULL;
+    }
+    lut = heap_caps_calloc(GLASS_FONT_COUNT, GLYPH_LUT_N,
+                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (lut == NULL) {
+        return NULL;
+    }
+    for (int fi = 0; fi < (int)GLASS_FONT_COUNT; fi++) {
+        const glass_font_t *f = &glass_fonts[fi];
+        for (unsigned i = 0; i < f->n_glyphs; i++) {
+            const unsigned cp = f->glyphs[i].cp;
+            if (cp >= GLYPH_LUT_FIRST && cp < GLYPH_LUT_FIRST + GLYPH_LUT_N) {
+                lut[fi][cp - GLYPH_LUT_FIRST] = i < 254u ? (uint8_t)(i + 1u) : 255u;
+            }
+        }
+    }
+    __atomic_store_n(&s_glyph_lut, lut, __ATOMIC_RELEASE);
+    return (const uint8_t (*)[GLYPH_LUT_N])lut;
+}
+#else
 static uint8_t s_glyph_lut[GLASS_FONT_COUNT][GLYPH_LUT_N];
 static uint8_t s_glyph_lut_ready;
 
@@ -88,6 +122,7 @@ static void glyph_lut_build(void)
     }
     __atomic_store_n(&s_glyph_lut_ready, 1u, __ATOMIC_RELEASE);
 }
+#endif
 
 const glass_glyph_t *glass_font_glyph(glass_font_id_t font, uint32_t cp)
 {
@@ -101,6 +136,18 @@ const glass_glyph_t *glass_font_glyph(glass_font_id_t font, uint32_t cp)
         cp = GLASS_DEGREE_CP;
     }
     if (cp - GLYPH_LUT_FIRST < GLYPH_LUT_N) {
+#ifdef ESP_PLATFORM
+        const uint8_t (*lut)[GLYPH_LUT_N] = glyph_lut_get();
+        if (lut != NULL) {
+            const unsigned v = lut[font][cp - GLYPH_LUT_FIRST];
+            if (v == 0u) {
+                return NULL;
+            }
+            if (v != 255u) {
+                return &f->glyphs[v - 1u];
+            }
+        }
+#else
         if (!__atomic_load_n(&s_glyph_lut_ready, __ATOMIC_ACQUIRE)) {
             glyph_lut_build();
         }
@@ -111,6 +158,7 @@ const glass_glyph_t *glass_font_glyph(glass_font_id_t font, uint32_t cp)
         if (v != 255u) {
             return &f->glyphs[v - 1u];
         }
+#endif
     }
     if (f->n_glyphs == 0u || cp < f->glyphs[0].cp) {
         return NULL;

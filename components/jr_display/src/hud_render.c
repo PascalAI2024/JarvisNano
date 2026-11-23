@@ -530,6 +530,12 @@ static bool     s_ov_ready;
 static bool     s_ov_swap;
 static int16_t  s_ov_halo_dx[32];
 static int16_t  s_ov_halo_dy[32];
+/* Glass-2 speech-cadence ring: 16-byte sliding amp history latched once per
+ * frame (at y0 == 0 when now_ms advances) so strip renders stay identical. */
+static uint8_t  s_speak_ring[16];
+static uint8_t  s_speak_head;
+static uint32_t s_speak_last_ms;
+static bool     s_speak_has_ms;
 
 static void overlay_palette(bool swap)
 {
@@ -1048,11 +1054,56 @@ void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
         }
         break;
     }
-    case HUD_FACE_SPEAK:
-        /* Nothing: the baked reactive-wave face already carries speaking —
-         * and the audio itself is the tell. The listen ring above stays
-         * LISTEN-only so its presence keeps one meaning. */
+    case HUD_FACE_SPEAK: {
+        /* DAC-synced living speech-cadence halo in the free r185-194 band:
+         * symmetric 32-point ring pulsing outward from 12 -> 6 o'clock on
+         * spoken syllables. Ice-white/cyan palette only (never gold!), zero
+         * pixels when amp == 0. Latched once per frame at y0 == 0 on clock
+         * advance so 12-row strip renders match whole-frame renders exactly. */
+        if (y0 == 0 && (!s_speak_has_ms || now_ms != s_speak_last_ms)) {
+            if (env->amp == 0u) {
+                memset(s_speak_ring, 0, sizeof s_speak_ring);
+            } else {
+                s_speak_head = (uint8_t)((s_speak_head + 1u) & 15u);
+                s_speak_ring[s_speak_head] = env->amp;
+            }
+            s_speak_last_ms = now_ms;
+            s_speak_has_ms = true;
+        }
+        if (env->amp == 0u) {
+            break;
+        }
+        for (int i = 0; i < 32; ++i) {
+            const int y = cy + s_ov_halo_dy[i];
+            if (y + 3 <= s.y0 || y >= s.y1) {
+                continue;
+            }
+            /* Symmetric distance from 12 o'clock (i == 24) down to 6 (i == 8): 0..16. */
+            int d = (i - 24) & 31;
+            if (d > 16) {
+                d = 32 - d;
+            }
+            const int hist = (int)s_speak_ring[(s_speak_head - (d < 16 ? d : 15)) & 15u];
+            const int env_a = ((int)env->amp * (18 - d)) / 18;
+            int val = hist > env_a ? hist : (hist * 2 + env_a) / 3;
+            if (val < 12) {
+                continue;
+            }
+            if (val > 255) {
+                val = 255;
+            }
+            uint16_t px;
+            if (val <= 180) {
+                px = shade(s_ov_cyan, 70 + ((val * 185) >> 8));
+            } else {
+                const int k = val - 180; /* 1..75 -> crisp ice-white/cyan */
+                px = pack565((k * 190) / 75, 229 + (k * 17) / 75, 255, swap_bytes);
+            }
+            const int sz = val >= 160 ? 3 : 2;
+            ov_dot(&s, cx + s_ov_halo_dx[i], y, px, sz);
+        }
         break;
+    }
     case HUD_FACE_THINK:
         hud_overlay_thinking(dst, y0, nrows, now_ms, swap_bytes);
         break;
@@ -2550,9 +2601,68 @@ int hud_balance_blit(uint16_t *dst, int y0, int nrows, bool swap_bytes,
         return 0;
     }
     const uint32_t a16 = (uint32_t)angle_q16 & 0xFFFFu;
+    int visited = 0;
+    if (a16 == 0u) {
+        /* 1-tap fast path at angle 0 (resting dial and zero-crossings):
+         * bal_cos(0) == 32767 gives fx/fy in {0, 255}, so:
+         *  - RGB565 channels (max diff 63 < 32768/511) are ALWAYS exact 1-tap *rp;
+         *  - ap == 0 always produces a <= 2 < 4 (skip);
+         *  - ap == 255 always produces a >= 253 -> a5 == 32 (opaque direct write);
+         *  - only partial-alpha edge pixels with dx > 0 or dy > 0 adjust a by 1-2.
+         * Bit-identical to the 4-tap path while skipping bilinear on >95% of px. */
+        for (int y = ya; y <= yb; ++y) {
+            const int dy = y - cy;
+            const int rem = BAL_R_DEST * BAL_R_DEST - dy * dy;
+            int hx = 0;
+            while ((hx + 1) * (hx + 1) <= rem) {
+                ++hx;
+            }
+            const int x0 = cx - hx, x1 = cx + hx;
+            const size_t row_off = (size_t)(JR_BALANCE_C + dy) * JR_BALANCE_SIZE +
+                                   (size_t)(JR_BALANCE_C + x0 - cx);
+            const uint8_t *ap = jr_balance_alpha + row_off;
+            const uint16_t *rp = jr_balance_rgb + row_off;
+            uint16_t *px = dst + (size_t)(y - y0) * HUD_W + x0;
+            const bool pos_y = dy > 0;
+            for (int x = x0; x <= x1; ++x, ++px, ++ap, ++rp) {
+                ++visited;
+                const uint32_t a0 = *ap;
+                if (a0 == 0u) {
+                    continue;
+                }
+                const uint16_t sp = *rp;
+                if (a0 == 255u) {
+                    *px = swap_bytes ? (uint16_t)((sp >> 8) | (sp << 8)) : sp;
+                    continue;
+                }
+                uint32_t a = a0;
+                const bool pos_x = x > cx;
+                if (pos_x && pos_y) {
+                    a = ((uint32_t)ap[-JR_BALANCE_SIZE - 1] +
+                         255u * ((uint32_t)ap[-JR_BALANCE_SIZE] + (uint32_t)ap[-1]) +
+                         65025u * a0 + 32768u) >> 16;
+                } else if (pos_x) {
+                    a = ((uint32_t)ap[-1] + 255u * a0 + 128u) >> 8;
+                } else if (pos_y) {
+                    a = ((uint32_t)ap[-JR_BALANCE_SIZE] + 255u * a0 + 128u) >> 8;
+                }
+                if (a < 4u) {
+                    continue;
+                }
+                const uint32_t a5 = (a + 4u) >> 3;
+                if (a5 >= 32u) {
+                    *px = swap_bytes ? (uint16_t)((sp >> 8) | (sp << 8)) : sp;
+                    continue;
+                }
+                const uint16_t d = swap_bytes ? (uint16_t)((*px >> 8) | (*px << 8)) : *px;
+                const uint16_t o = bal_blend(d, sp, a5);
+                *px = swap_bytes ? (uint16_t)((o >> 8) | (o << 8)) : o;
+            }
+        }
+        return visited;
+    }
     const int32_t c = bal_cos(a16), sn = bal_sin(a16);          /* Q15 */
     const int32_t base = (int32_t)JR_BALANCE_C << 15;
-    int visited = 0;
     for (int y = ya; y <= yb; ++y) {
         const int dy = y - cy;
         const int rem = BAL_R_DEST * BAL_R_DEST - dy * dy;
@@ -2577,6 +2687,21 @@ int hud_balance_blit(uint16_t *dst, int y0, int nrows, bool swap_bytes,
             const uint32_t fx = (uint32_t)(u >> 7) & 255u, fy = (uint32_t)(v >> 7) & 255u;
             const uint32_t w00 = (256u - fx) * (256u - fy), w10 = fx * (256u - fy);
             const uint32_t w01 = (256u - fx) * fy, w11 = fx * fy;      /* sum 65536 */
+            if ((a00 & a10 & a01 & a11) == 255u) {
+                /* Fully opaque neighborhood: skip alpha interpolation and bg blend. */
+                const uint16_t p00 = jr_balance_rgb[k], p10 = jr_balance_rgb[k + 1];
+                const uint16_t p01 = jr_balance_rgb[k + JR_BALANCE_SIZE];
+                const uint16_t p11 = jr_balance_rgb[k + JR_BALANCE_SIZE + 1];
+                const uint32_t r5 = (((p00 >> 11) & 31u) * w00 + ((p10 >> 11) & 31u) * w10 +
+                                     ((p01 >> 11) & 31u) * w01 + ((p11 >> 11) & 31u) * w11 + 32768u) >> 16;
+                const uint32_t g6 = (((p00 >> 5) & 63u) * w00 + ((p10 >> 5) & 63u) * w10 +
+                                     ((p01 >> 5) & 63u) * w01 + ((p11 >> 5) & 63u) * w11 + 32768u) >> 16;
+                const uint32_t b5 = ((p00 & 31u) * w00 + (p10 & 31u) * w10 +
+                                     (p01 & 31u) * w01 + (p11 & 31u) * w11 + 32768u) >> 16;
+                const uint16_t sp = (uint16_t)((r5 << 11) | (g6 << 5) | b5);
+                *px = swap_bytes ? (uint16_t)((sp >> 8) | (sp << 8)) : sp;
+                continue;
+            }
             const uint32_t a = (a00 * w00 + a10 * w10 + a01 * w01 + a11 * w11 + 32768u) >> 16;
             if (a < 4u) {
                 continue;
@@ -3001,6 +3126,18 @@ void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
         aa_disc(&s, WATCH_CX16, WATCH_CY16, 4 * 16, W_WHITE, A, swap_bytes);
         break;
     }
+}
+
+void hud_minimal_dial_bake_rows(uint16_t *dst, int y0, int nrows,
+                                bool swap_bytes)
+{
+    if (dst == NULL || nrows <= 0) {
+        return;
+    }
+    overlay_palette(swap_bytes);
+    memset(dst, 0, (size_t)nrows * HUD_W * sizeof(uint16_t));
+    const strip_t s = { dst, y0, y0 + nrows };
+    fallback_dial(&s, 4, 256, swap_bytes);
 }
 
 /* THE JARVIS DIAL. The style with no baked art used to be three hands on bare

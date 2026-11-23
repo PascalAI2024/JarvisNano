@@ -297,6 +297,9 @@ static int test_exec_program_budget(void)
     CHECK(strstr(g_out, "truncated:true") != NULL && strstr(g_out, "hint:HINT") != NULL,
           "a cut result says so and says how to narrow it");
     CHECK(strstr(g_out, "total:r.length") != NULL, "a cut list keeps its total");
+    CHECK(strstr(g_out, "\"coordination.portfolio\"") != NULL &&
+          strstr(g_out, ".slice(0,8)") != NULL,
+          "coordination.portfolio projects up to 8 compact projects");
     return 0;
 }
 

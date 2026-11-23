@@ -78,8 +78,8 @@ static bool s_ext_stack;
 
 static jr_power_t s_snap;
 static int64_t    s_snap_us;
-static jr_power_charge_t s_charge_snap;
-static jr_power_charge_t s_charge_work; /* sampler-owned; no I2C under cache lock */
+static jr_power_charge_t *s_charge_snap;
+static jr_power_charge_t *s_charge_work; /* sampler-owned; no I2C under cache lock */
 static bool s_charge_active, s_charge_pending;
 static size_t s_charge_next_burst;
 static uint64_t s_charge_next_start_ms;
@@ -92,8 +92,45 @@ __attribute__((constructor))
 static void power_lock_ctor(void)
 {
     s_snap_lock = xSemaphoreCreateMutexStatic(&s_snap_lock_buf);
-    jr_power_charge_reset(&s_charge_snap);
-    jr_power_charge_reset(&s_charge_work);
+}
+
+/* Allocate the two charge-diagnostic structs (~1,360 B total) once in PSRAM
+ * rather than pinning them in internal .dram0.bss. Safe fallback to general
+ * 8-bit heap if PSRAM is unavailable. */
+static void power_charge_ensure_alloc(void)
+{
+    if (s_charge_snap != NULL && s_charge_work != NULL) {
+        return;
+    }
+    jr_power_charge_t *snap = s_charge_snap;
+    jr_power_charge_t *work = s_charge_work;
+    if (snap == NULL) {
+        snap = heap_caps_malloc(sizeof(*snap), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (snap == NULL) {
+            snap = heap_caps_malloc(sizeof(*snap), MALLOC_CAP_8BIT);
+        }
+        if (snap != NULL) {
+            jr_power_charge_reset(snap);
+        }
+    }
+    if (work == NULL) {
+        work = heap_caps_malloc(sizeof(*work), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (work == NULL) {
+            work = heap_caps_malloc(sizeof(*work), MALLOC_CAP_8BIT);
+        }
+        if (work != NULL) {
+            jr_power_charge_reset(work);
+        }
+    }
+    if (s_snap_lock != NULL &&
+        xSemaphoreTake(s_snap_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_charge_snap = snap;
+        s_charge_work = work;
+        xSemaphoreGive(s_snap_lock);
+    } else {
+        s_charge_snap = snap;
+        s_charge_work = work;
+    }
 }
 
 /* Burst read of `len` consecutive registers in ONE transaction; the AXP2101
@@ -251,8 +288,9 @@ static bool power_sample(jr_power_t *s)
 
 static bool power_charge_publish(void)
 {
+    if (s_charge_snap == NULL || s_charge_work == NULL) { return false; }
     if (xSemaphoreTake(s_snap_lock, 0) != pdTRUE) { return false; }
-    s_charge_snap = s_charge_work;
+    *s_charge_snap = *s_charge_work;
     xSemaphoreGive(s_snap_lock);
     s_charge_pending = false;
     return true;
@@ -260,13 +298,14 @@ static bool power_charge_publish(void)
 
 static void power_charge_step(void)
 {
+    if (s_charge_snap == NULL || s_charge_work == NULL) { return; }
     /* Retry a contended publication without reading or waiting on the bus.
      * The stored completion/read times survive publication delay unchanged. */
     if (s_charge_pending && !power_charge_publish()) { return; }
     uint64_t now_ms = (uint64_t)esp_timer_get_time() / 1000u;
     if (!s_charge_active) {
         if (now_ms < s_charge_next_start_ms) { return; }
-        jr_power_charge_begin(&s_charge_work, now_ms);
+        jr_power_charge_begin(s_charge_work, now_ms);
         s_charge_active = true;
         s_charge_next_burst = 0;
         s_charge_next_start_ms = now_ms + POWER_CHARGE_PERIOD_MS;
@@ -278,11 +317,11 @@ static void power_charge_step(void)
                          values, burst->count, POWER_CHARGE_TIMEOUT_MS);
     now_ms = (uint64_t)esp_timer_get_time() / 1000u;
     for (size_t i = 0; i < burst->count; ++i) {
-        jr_power_charge_record(&s_charge_work, burst->first_index + i,
-                                values[i], err, now_ms);
+        jr_power_charge_record(s_charge_work, burst->first_index + i,
+                               values[i], err, now_ms);
     }
     if (++s_charge_next_burst == JR_POWER_CHARGE_BURST_COUNT) {
-        jr_power_charge_finish(&s_charge_work, now_ms);
+        jr_power_charge_finish(s_charge_work, now_ms);
         s_charge_active = false;
         s_charge_pending = true;
         (void)power_charge_publish();
@@ -350,6 +389,7 @@ esp_err_t jr_power_start(void)
     if (err != ESP_OK) {
         return err;
     }
+    power_charge_ensure_alloc();
     s_run = true;
     /* PSRAM stack — internal RAM is the scarcest resource on this board and this
      * task never touches flash. Same guarded pattern as jr_tools/jr_imu, with an
@@ -413,8 +453,8 @@ esp_err_t jr_power_charge_read(jr_power_charge_t *out)
     jr_power_charge_reset(out);
     if (!s_snap_lock) { return ESP_ERR_INVALID_STATE; }
     if (xSemaphoreTake(s_snap_lock, 0) != pdTRUE) { return ESP_ERR_TIMEOUT; }
-    const bool have = s_charge_snap.complete;
-    if (have) { *out = s_charge_snap; }
+    const bool have = s_charge_snap != NULL && s_charge_snap->complete;
+    if (have) { *out = *s_charge_snap; }
     xSemaphoreGive(s_snap_lock);
     if (have) {
         jr_power_charge_age(out, (uint64_t)esp_timer_get_time() / 1000u);

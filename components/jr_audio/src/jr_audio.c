@@ -124,6 +124,9 @@ static void speaker_pa_set(bool enabled)
 #define PB_RING_BYTES            (512U * 1024U)
 #define PB_RING_SAMPLES          (PB_RING_BYTES / sizeof(int16_t))
 #define PB_FEED_CHUNK            768        /* one 32 ms 24 kHz write */
+/* Measured live stack HWM on 4096 B: 3260 B free (~836 B peak, s_feed_chunk is
+ * static). 3072 B reclaims 1 KB of internal SRAM while keeping >2 KB free. */
+#define PB_FEEDER_STACK          3072
 #define DIAG_TAP_SECONDS         2U
 #define DIAG_CLIP_THRESHOLD      32760
 /* Earcons are rendered WHOLE into heap scratch and enqueued in one call. They
@@ -216,6 +219,7 @@ static portMUX_TYPE           s_pb_lock = portMUX_INITIALIZER_UNLOCKED;
 static TaskHandle_t           s_feeder;
 static _Atomic bool           s_feeder_writing;
 static _Atomic uint32_t       s_playback_tail_until_ms;
+static _Atomic uint32_t       s_pb_live_rms;
 static _Atomic bool           s_diag_chirp_enqueuing;
 
 /* PLAYBACK TELEMETRY (N6.2). A 60 s reply that stutters once leaves no trace
@@ -308,6 +312,7 @@ void jr_audio_set_jitter_ms(int preroll_ms, int refill_ms)
         /* Publish now so the route's readback sees it; the feeder pins. */
         atomic_store(&s_pb_preroll_ms, pre == 0u ? JR_JITTER_PREROLL_FLOOR_MS : pre);
         atomic_store(&s_pb_preroll_req, (int32_t)pre);
+        if (s_feeder != NULL) xTaskNotifyGive(s_feeder);
     }
     if (refill_ms >= 0) {
         atomic_store(&s_pb_refill_ms, refill_ms > 3000 ? 3000u : (uint32_t)refill_ms);
@@ -989,6 +994,12 @@ float jr_audio_clean_rms(void)
     return (float)atomic_load(&s_clean_rms_q8) / 256.0f;
 }
 
+uint16_t jr_audio_playback_live_rms(void)
+{
+    const uint32_t rms = atomic_load(&s_pb_live_rms);
+    return (uint16_t)(rms > 32767u ? 32767u : rms);
+}
+
 /* ======================================================================== *
  *  playback ring + feeder                                                  *
  * ======================================================================== */
@@ -1133,6 +1144,7 @@ static void sink_mute_now(void *ctx)
     pb_flush_locked();
     portEXIT_CRITICAL(&s_pb_lock);
     atomic_store(&s_playback_tail_until_ms, 0);
+    atomic_store(&s_pb_live_rms, 0u);
     if (s_feeder != NULL) xTaskNotifyGive(s_feeder);
 }
 
@@ -1154,6 +1166,7 @@ static void feeder_task(void *arg)
         if (atomic_load(&s_muted) || !atomic_load(&s_dac_open) ||
             atomic_load(&s_sleeping)) {
             s_pb_prev_wrote = false;
+            atomic_store(&s_pb_live_rms, 0u);
             ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
             continue;
         }
@@ -1252,10 +1265,25 @@ static void feeder_task(void *arg)
             }
         }
         if (hold) {
-            vTaskDelay(1);
+            atomic_store(&s_pb_live_rms, 0u);
+            /* Event-driven pre-roll wait: pb_enqueue wakes us immediately as
+             * chunks arrive; bounded timeout guarantees PB_PRIME_MAX_WAIT_MS
+             * fires on time even for a short reply. */
+            uint32_t wait_ms = 100u;
+            if (s_pb_prime_start_ms != 0u) {
+                const uint32_t elapsed = now_ms - s_pb_prime_start_ms;
+                const uint32_t rem = elapsed < PB_PRIME_MAX_WAIT_MS
+                                         ? PB_PRIME_MAX_WAIT_MS - elapsed : 10u;
+                if (rem < wait_ms) {
+                    wait_ms = rem < 10u ? 10u : rem;
+                }
+            }
+            const TickType_t wait_ticks = pdMS_TO_TICKS(wait_ms);
+            (void)ulTaskNotifyTake(pdTRUE, wait_ticks > 0 ? wait_ticks : 1);
             continue;
         }
         if (got == 0) {
+            atomic_store(&s_pb_live_rms, 0u);
             if (jo.gap_opened) {
                 /* The ring ran dry while the tail of the last write was still
                  * audible: a hole. Whatever arrives next must rebuild a
@@ -1274,17 +1302,46 @@ static void feeder_task(void *arg)
                 s_pb_prime_target = atomic_load(&s_pb_preroll_ms) * 24u;
             }
             cue_settle_mute();
-            /* CONFIG_FREERTOS_HZ=100: pdMS_TO_TICKS(5) truncates to zero and
-             * merely yields to equal-priority tasks, starving IDLE0 forever. */
-            vTaskDelay(1);
+            /* Event-driven idle sleep: woken immediately by pb_enqueue, earcon
+             * commit, or mute/unmute; bounded to 100 ms (or sooner when an
+             * audible DAC tail is settling) so jitter idle, cue_settle_mute,
+             * and PA turn-off stay prompt without a 100 Hz prio-19 spin. */
+            uint32_t wait_ms = 100u;
+            const uint32_t tail = atomic_load(&s_playback_tail_until_ms);
+            const int32_t tail_rem = (int32_t)(tail - now_ms);
+            if (tail_rem > 0 && (uint32_t)tail_rem + 10u < wait_ms) {
+                wait_ms = (uint32_t)tail_rem + 10u;
+            }
+            const TickType_t wait_ticks = pdMS_TO_TICKS(wait_ms);
+            (void)ulTaskNotifyTake(pdTRUE, wait_ticks > 0 ? wait_ticks : 1);
             continue;
         }
         int wr = -1;
         xSemaphoreTake(s_dac_guard, portMAX_DELAY);
         if (!atomic_load(&s_muted) && !atomic_load(&s_sleeping) &&
             atomic_load(&s_dac_open)) {
+            if (!earcon) {
+                /* Fast 1-in-4 decimated RMS at DAC write seam (0..32767) so
+                 * speech visuals track audible speaker output, not network arrival. */
+                uint64_t sum_sq = 0u;
+                uint32_t n = 0u;
+                for (size_t i = 0u; i < got; i += 4u) {
+                    const int32_t v = chunk[i];
+                    sum_sq += (uint64_t)((int64_t)v * (int64_t)v);
+                    n++;
+                }
+                uint32_t rms = n > 0u ? (uint32_t)sqrtf((float)sum_sq / (float)n) : 0u;
+                if (rms > 32767u) {
+                    rms = 32767u;
+                }
+                atomic_store(&s_pb_live_rms, rms);
+            } else {
+                atomic_store(&s_pb_live_rms, 0u);
+            }
             wr = esp_codec_dev_write(s_dac, chunk,
                                     (int)(got * sizeof(int16_t)));
+        } else {
+            atomic_store(&s_pb_live_rms, 0u);
         }
         /* Publish the tail BEFORE dropping in-flight ownership. */
         atomic_store(&s_playback_tail_until_ms,
@@ -1399,15 +1456,16 @@ esp_err_t jr_audio_init(void)
      * Stack INTERNAL first (fast, no PSRAM-cache-miss jitter in the realtime
      * path), PSRAM fallback only if internal is exhausted at init. */
     BaseType_t feeder_ok = xTaskCreatePinnedToCore(feeder_task, "jr_pb_feed",
-                                                   4096, NULL, 19, &s_feeder, 0);
+                                                   PB_FEEDER_STACK, NULL, 19,
+                                                   &s_feeder, 0);
 #if defined(CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM) && \
     CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM && defined(CONFIG_SPIRAM) && \
     CONFIG_SPIRAM
     if (feeder_ok != pdPASS) {
         s_feeder = NULL;
         feeder_ok = xTaskCreatePinnedToCoreWithCaps(feeder_task, "jr_pb_feed",
-                                                    4096, NULL, 19, &s_feeder,
-                                                    0,
+                                                    PB_FEEDER_STACK, NULL, 19,
+                                                    &s_feeder, 0,
                                                     MALLOC_CAP_SPIRAM |
                                                     MALLOC_CAP_8BIT);
     }
@@ -1587,6 +1645,7 @@ void jr_audio_flush_playback(void)
     pb_flush_locked();
     portEXIT_CRITICAL(&s_pb_lock);
     atomic_store(&s_playback_tail_until_ms, 0);
+    atomic_store(&s_pb_live_rms, 0u);
     if (s_feeder != NULL) xTaskNotifyGive(s_feeder);
 }
 
@@ -2029,8 +2088,9 @@ esp_err_t jr_audio_play_sweep_owner_ack(uint16_t start_hz, uint16_t end_hz,
     return play_sweep(start_hz, end_hz, duration_ms, level_percent, JR_TONE_OWNER_ACK);
 }
 
-esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
-                              uint16_t note_ms, uint8_t volume)
+static esp_err_t play_chime_kind(const uint16_t *hz, size_t notes,
+                                 uint16_t note_ms, uint8_t volume,
+                                 jr_tone_kind_t kind)
 {
     if (hz == NULL || notes == 0U) {
         return ESP_ERR_INVALID_ARG;
@@ -2043,7 +2103,7 @@ esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
 
     const size_t per_note = (size_t)GL_RX_SAMPLE_RATE * note_ms / 1000U;
     const size_t total = per_note * notes;
-    esp_err_t err = earcon_claim(total, JR_TONE_CHIME);
+    esp_err_t err = earcon_claim(total, kind);
     if (err != ESP_OK) {
         return err;
     }
@@ -2056,7 +2116,8 @@ esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
     /* Each note starts at phase zero under a raised-cosine attack and ends
      * under the matching release, so a note boundary is a zero crossing with
      * a zero slope on both sides: no click between notes, none at the ends.
-     * 8 ms ramps, or a quarter of the note when the note is shorter. */
+     * Warm 2nd harmonic (0.82*sin(f) + 0.18*sin(2f)) with a gentle bell decay
+     * gives a clean glass-bell timbre without aliasing or clipping. */
     const float amplitude = 32767.0f * (float)volume / 100.0f;
     size_t ramp = (size_t)GL_RX_SAMPLE_RATE * 8U / 1000U;
     if (ramp > per_note / 4U) {
@@ -2070,6 +2131,7 @@ esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
         if (f < 80U)   f = 80U;
         if (f > 8000U) f = 8000U;
         const float step = 2.0f * (float)M_PI * (float)f / (float)GL_RX_SAMPLE_RATE;
+        const bool harmonic2 = (f < (GL_RX_SAMPLE_RATE / 4U));
         int16_t *note = &pcm[n * per_note];
         for (size_t i = 0; i < per_note; ++i) {
             float envelope = 1.0f;
@@ -2078,13 +2140,41 @@ esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
             } else if (per_note - i <= ramp) {
                 envelope = 0.5f * (1.0f - cosf((float)M_PI * (float)(per_note - i) / (float)ramp));
             }
-            note[i] = (int16_t)(amplitude * envelope * sinf(step * (float)i));
+            const float decay = expf(-1.2f * (float)i / (float)per_note);
+            const float phase = step * (float)i;
+            const float wave = harmonic2
+                                   ? (0.82f * sinf(phase) + 0.18f * sinf(2.0f * phase))
+                                   : sinf(phase);
+            note[i] = (int16_t)(amplitude * envelope * decay * wave);
         }
     }
 
     err = earcon_commit(pcm, total);
     heap_caps_free(pcm);
     return err;
+}
+
+esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
+                              uint16_t note_ms, uint8_t volume)
+{
+    return play_chime_kind(hz, notes, note_ms, volume, JR_TONE_CHIME);
+}
+
+void jr_audio_play_wake_cue(void)
+{
+    /* Warm 2-note fifth (G5 -> D6), 55 ms/note, respects owner-mute policy
+     * (same policy slot as the attention beat) and never collides with a reply. */
+    static const uint16_t notes[2] = { 784U, 1175U };
+    (void)play_chime_kind(notes, 2U, 55U, 10U, JR_TONE_DIAG_CHIRP);
+}
+
+void jr_audio_play_timer_chime(void)
+{
+    /* Bright repeating-friendly bell arpeggio (E5 -> B5 -> E6). Uses
+     * JR_TONE_ALARM so timer alarms break through owner mute while preserving
+     * earcon accounting (playback.replies stays 0) and never interrupting speech. */
+    static const uint16_t notes[3] = { 659U, 988U, 1319U };
+    (void)play_chime_kind(notes, 3U, 95U, 18U, JR_TONE_ALARM);
 }
 
 esp_err_t jr_audio_play_cue(jr_cue_kind_t kind, uint16_t amp_permille)
