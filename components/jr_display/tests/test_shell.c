@@ -7508,6 +7508,268 @@ static void test_weather_rain_record_matches_unrecorded(void)
     free(rec);
 }
 
+/* Wave 2: Chronograph Stopwatch overlay — idle=0px, running cyan sweep at
+ * r202-206 + bottom MM:SS.d chip + L1..L4 lap badge, strip-invariant, keeps
+ * presenter_ticks_the_glass() active while running, yields to ask/shade. */
+static void test_stopwatch_overlay_and_strip_invariance(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = calloc(px, sizeof *whole);
+    uint16_t *strips = calloc(px, sizeof *strips);
+    if (!whole || !strips) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(whole); free(strips); return;
+    }
+
+    jr_display_ctx_t ctx;
+    memset(&ctx, 0, sizeof ctx);
+    ctx.board.swap_color_bytes = false;
+    s_choice_n = 0; s_ask_ease = 0; s_shade_ease = 0; s_detail_ease = 0;
+    jr_display_timer_set(false, false, 0, 0, NULL);
+    jr_display_ota_set(JR_DISPLAY_OTA_IDLE, 0U, 0U, 0xFFU, true);
+
+    /* 1. Idle stopwatch draws 0 px */
+    jr_display_stopwatch_set(false, false, 0u, 0u);
+    apply_stopwatch_overlay(&ctx, 0, HUD_H, whole, false);
+    size_t painted = 0;
+    for (size_t i = 0; i < px; ++i) if (whole[i] != 0u) painted++;
+    CHECK(painted == 0, "idle stopwatch painted %zu px", painted);
+
+    /* 2. Running stopwatch: cyan sweep in r202-206 + MM:SS.d + L2 badge, strip-invariant */
+    jr_display_stopwatch_set(true, true, 15400u, 2u);
+    apply_stopwatch_overlay(&ctx, 0, HUD_H, whole, false);
+    for (int y = 0; y < HUD_H; y += 12) {
+        const int y2 = y + 12 > HUD_H ? HUD_H : y + 12;
+        apply_stopwatch_overlay(&ctx, y, y2, strips + (size_t)y * HUD_W, false);
+    }
+    CHECK(memcmp(whole, strips, px * sizeof *whole) == 0,
+          "running stopwatch strip/whole mismatch");
+
+    size_t arc_px = 0, rim_breach = 0, chip_px = 0, lap_px = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            const uint16_t v = whole[(size_t)y * HUD_W + x];
+            if (v == 0u) continue;
+            const long dx = x - SP_CX, dy = y - SP_CY;
+            const long r2 = dx * dx + dy * dy;
+            if (r2 >= 214L * 214L) rim_breach++;
+            if (r2 >= 200L * 200L && r2 <= 209L * 209L) arc_px++;
+            if (y >= SP_TIMER_TIME_Y - 2 && y <= SP_TIMER_TIME_Y + 14) chip_px++;
+            if (y >= SP_TIMER_LBL_Y - 2 && y <= SP_TIMER_LBL_Y + 14) lap_px++;
+        }
+    }
+    CHECK(arc_px > 1000, "stopwatch sweep arc drew only %zu px", arc_px);
+    CHECK(chip_px > 50, "stopwatch MM:SS.d chip drew only %zu px", chip_px);
+    CHECK(lap_px > 15, "stopwatch L2 badge drew only %zu px", lap_px);
+    CHECK(rim_breach == 0, "stopwatch breached r>=214 rim band (%zu px)", rim_breach);
+
+    /* 3. Running keeps presenter_ticks_the_glass() active even during rest */
+    const bool saved_rest = s_rest_day;
+    const bool saved_blit = s_dial_blit;
+    s_rest_day = true;
+    s_dial_blit = true;
+    CHECK(presenter_ticks_the_glass(), "running stopwatch must tick glass at rest");
+    jr_display_stopwatch_set(true, false, 15400u, 2u);
+    s_still_key = UINT32_MAX;
+    CHECK(presenter_ticks_the_glass(), "paused stopwatch draws once on state change");
+    CHECK(!presenter_ticks_the_glass(), "paused stopwatch stops redrawing when static");
+    s_rest_day = saved_rest;
+    s_dial_blit = saved_blit;
+
+    /* 4. Yields when shade is open */
+    s_shade_ease = 128;
+    memset(whole, 0, px * sizeof *whole);
+    apply_stopwatch_overlay(&ctx, 0, HUD_H, whole, false);
+    painted = 0;
+    for (size_t i = 0; i < px; ++i) if (whole[i] != 0u) painted++;
+    CHECK(painted == 0, "stopwatch must yield to shade (%zu px)", painted);
+    s_shade_ease = 0;
+
+    jr_display_stopwatch_set(false, false, 0u, 0u);
+    free(whole);
+    free(strips);
+}
+
+/* Wave 2: Glass-2 Ask overlay — Barlow question + labels + crisp glass_arc_row
+ * choice arcs strictly in r223-231, selected arc highlight, 12-row strip invariant. */
+static void test_glass2_ask_overlay_and_strip_invariance(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = calloc(px, sizeof *whole);
+    uint16_t *strips = calloc(px, sizeof *strips);
+    uint16_t *sel_fb = calloc(px, sizeof *sel_fb);
+    if (!whole || !strips || !sel_fb) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(whole); free(strips); free(sel_fb); return;
+    }
+
+    jr_display_ctx_t ctx;
+    memset(&ctx, 0, sizeof ctx);
+    ctx.board.swap_color_bytes = false;
+
+    const char *labels[3] = { "YES", "LATER", "CANCEL" };
+    jr_display_present_choices("Enable sunlight boost?", labels, 3);
+    apply_ask_overlay(&ctx, 0, HUD_H, whole, 3, 256);
+    for (int y = 0; y < HUD_H; y += 12) {
+        const int y2 = y + 12 > HUD_H ? HUD_H : y + 12;
+        apply_ask_overlay(&ctx, y, y2, strips + (size_t)y * HUD_W, 3, 256);
+    }
+    CHECK(memcmp(whole, strips, px * sizeof *whole) == 0,
+          "Glass-2 ask overlay strip/whole mismatch");
+
+    size_t q_px = 0, arc_px = 0, priv_px = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            const uint16_t v = whole[(size_t)y * HUD_W + x];
+            if (v == 0u) continue;
+            const long dx = x - 233, dy = y - 233;
+            const long r2 = dx * dx + dy * dy;
+            if (r2 < 140L * 140L) q_px++;
+            if (r2 >= 223L * 223L && r2 <= 231L * 231L) arc_px++;
+            if (r2 >= 220L * 220L && r2 <= 222L * 222L) priv_px++;
+        }
+    }
+    CHECK(q_px > 200, "Glass-2 ask question drew only %zu px", q_px);
+    CHECK(arc_px > 2000, "Glass-2 ask choice arcs drew only %zu px", arc_px);
+    CHECK(priv_px == 0, "unselected ask arcs touched r220-222 privacy band (%zu px)", priv_px);
+
+    /* Selecting choice 0 changes the presentation (glows & highlights white) */
+    jr_display_set_choice_selected(0);
+    apply_ask_overlay(&ctx, 0, HUD_H, sel_fb, 3, 256);
+    CHECK(memcmp(whole, sel_fb, px * sizeof *whole) != 0,
+          "selecting choice 0 did not highlight arc");
+
+    jr_display_dismiss_choices();
+    s_ask_ease = 0;
+    s_ask_shown_n = 0;
+    free(whole); free(strips); free(sel_fb);
+}
+
+/* Wave 2: Living WEATHER Atmosphere — sky-tinted glow behind focal disc,
+ * daylight progress dot, and concise rain outlook ("RAIN 60% 2H" / "DRY 12H"). */
+static void test_weather_atmosphere_sun_dot_and_outlook(void)
+{
+    stage_space(JR_DISPLAY_SPACE_WEATHER);
+    jr_display_clock_set(true, 13, 0, 0);
+    jr_display_clock_set_date(3, 23, 8);
+    jr_display_sun_set(420, 1140); /* 7:00 -> 19:00 */
+
+    /* 1. Peak rain 60% at +2h -> "RAIN 60% 2H" */
+    uint8_t hrs[JR_DISPLAY_RAIN_HOURS];
+    memset(hrs, 5, sizeof hrs);
+    hrs[15] = 60; /* 13 + 2 = 15 */
+    s_fake_us = 0;
+    set_weather_hours(hrs, 23, 0U);
+    sp_compose();
+    CHECK(strcmp(s_wx_outlook, "RAIN 60% 2H") == 0,
+          "rain outlook expected 'RAIN 60%% 2H', got '%s'", s_wx_outlook);
+
+    /* 2. All dry -> "DRY 12H" */
+    memset(hrs, 0, sizeof hrs);
+    set_weather_hours(hrs, 23, 0U);
+    sp_compose();
+    CHECK(strcmp(s_wx_outlook, "DRY 12H") == 0,
+          "dry outlook expected 'DRY 12H', got '%s'", s_wx_outlook);
+
+    /* 3. Fresh CLEAR draws sky glow + daylight dot; 12-row strip invariant */
+    set_weather(true, 84, 88, 76, JR_DISPLAY_SKY_CLEAR, "CLEAR", 0U);
+    sp_compose();
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = calloc(px, sizeof *whole);
+    uint16_t *strips = calloc(px, sizeof *strips);
+    if (!whole || !strips) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(whole); free(strips); reset_nav(); return;
+    }
+    jr_display_ctx_t ctx;
+    memset(&ctx, 0, sizeof ctx);
+    ctx.board.swap_color_bytes = false;
+    sp_focal_weather(&ctx, 0, HUD_H, whole, 0, 255, SP_ENTRY_TOTAL_MS);
+    for (int y = 0; y < HUD_H; y += 12) {
+        const int y2 = y + 12 > HUD_H ? HUD_H : y + 12;
+        sp_focal_weather(&ctx, y, y2, strips + (size_t)y * HUD_W, 0, 255, SP_ENTRY_TOTAL_MS);
+    }
+    CHECK(memcmp(whole, strips, px * sizeof *whole) == 0,
+          "WEATHER atmosphere strip/whole mismatch");
+
+    /* Check daylight dot at solar noon (13:00 on 7:00-19:00 = 50% -> x~SP_CX, y~cyr+103) */
+    size_t sun_dot_px = 0;
+    const int cyr = SP_CY + SG_RING_DY;
+    for (int y = cyr + 98; y <= cyr + 109; ++y) {
+        for (int x = SP_CX - 6; x <= SP_CX + 6; ++x) {
+            if (whole[(size_t)y * HUD_W + x] != 0u) sun_dot_px++;
+        }
+    }
+    CHECK(sun_dot_px >= 10, "WEATHER daylight progress dot drew only %zu px", sun_dot_px);
+
+    /* Stale clears outlook and drops ambient glow */
+    s_fake_us = 45LL * 60 * 1000 * 1000;
+    sp_compose();
+    CHECK(s_wx_outlook[0] == '\0', "stale weather must clear rain outlook, got '%s'", s_wx_outlook);
+
+    free(whole); free(strips);
+    jr_display_sun_set(-1, -1);
+    jr_display_clock_set_date(0, 0, 0);
+    s_fake_us = 0;
+    reset_nav();
+}
+
+/* Wave 2: Quiet CELESTIAL rest in WHISPER, CO5300 HBM 0x66 pump, and TE stats. */
+static void test_celestial_quiet_rest_hbm_and_te_stats(void)
+{
+    /* 1. CELESTIAL settles into quiet still mode in WHISPER (<= 6 fps) */
+    dream_fixture();
+    stage_space(JR_DISPLAY_SPACE_WATCH);
+    jr_display_watch_style_set(JR_WATCH_CELESTIAL);
+    s_style_shown = (uint8_t)JR_WATCH_CELESTIAL;
+    s_style_prog = 256;
+    jr_display_clock_set(true, 10, 15, 30);
+    jr_display_rest_set(JR_DISPLAY_REST_NONE, false, false);
+    jr_display_set_render_fps(24);
+    CHECK(!watch_quiet_whisper(&s_display), "CELESTIAL awake at 24 fps must not be quiet");
+    jr_display_set_render_fps(6);
+    CHECK(watch_quiet_whisper(&s_display), "CELESTIAL settled at 6 fps WHISPER must be quiet");
+    CHECK(watch_should_rest_still(&s_display), "watch_should_rest_still true for quiet CELESTIAL");
+
+    /* Running stopwatch wakes quiet CELESTIAL */
+    jr_display_stopwatch_set(true, true, 1200u, 0u);
+    CHECK(!watch_quiet_whisper(&s_display), "running stopwatch must wake quiet CELESTIAL");
+    jr_display_stopwatch_set(false, false, 0u, 0u);
+    jr_display_set_render_fps(24);
+    reset_nav();
+
+    /* 2. HBM 0x66 state transitions through brightness_pump() */
+    s_stub_hbm_calls = 0u;
+    s_stub_hbm_state = false;
+    s_stub_hbm_error = ESP_OK;
+    s_stub_brightness_calls = 0u;
+    atomic_store_explicit(&s_hbm_have, false, memory_order_relaxed);
+    jr_display_set_hbm(true);
+    CHECK(jr_display_get_hbm(), "jr_display_get_hbm true after set(true)");
+    CHECK(brightness_pending(), "pending HBM change must set brightness_pending()");
+    brightness_pump();
+    CHECK(s_stub_hbm_state && s_stub_hbm_calls == 1u,
+          "brightness_pump applied HBM ON (calls=%u)", s_stub_hbm_calls);
+    jr_display_set_hbm(false);
+    CHECK(!jr_display_get_hbm(), "jr_display_get_hbm false after set(false)");
+    brightness_pump();
+    CHECK(!s_stub_hbm_state && s_stub_hbm_calls == 2u && s_stub_brightness_calls >= 1u,
+          "brightness_pump disabled HBM and restored normal brightness");
+
+    /* 3. TE stats getter returns lock-free counts */
+    s_stub_te_enabled = true;
+    atomic_store_explicit(&s_te_waits, 42u, memory_order_relaxed);
+    atomic_store_explicit(&s_te_timeouts, 1u, memory_order_relaxed);
+    bool te_en = false;
+    uint32_t waits = 0u, timeouts = 0u;
+    jr_display_get_te_stats(&te_en, &waits, &timeouts);
+    CHECK(te_en && waits == 42u && timeouts == 1u,
+          "TE stats mismatch: en=%d waits=%u to=%u", (int)te_en, waits, timeouts);
+    s_stub_te_enabled = false;
+    atomic_store_explicit(&s_te_waits, 0u, memory_order_relaxed);
+    atomic_store_explicit(&s_te_timeouts, 0u, memory_order_relaxed);
+}
+
 int main(void)
 {
     test_light_word_round_trips();
@@ -7646,6 +7908,10 @@ int main(void)
     test_timer_overlay();
     test_rim_level_arc();
     test_weather_rain_record_matches_unrecorded();
+    test_stopwatch_overlay_and_strip_invariance();
+    test_glass2_ask_overlay_and_strip_invariance();
+    test_weather_atmosphere_sun_dot_and_outlook();
+    test_celestial_quiet_rest_hbm_and_te_stats();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);

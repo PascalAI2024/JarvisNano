@@ -38,6 +38,65 @@ RTC_DATA_ATTR uint32_t s_rtc_sleep_magic;
 RTC_DATA_ATTR uint32_t s_rtc_sleeps;
 RTC_DATA_ATTR uint8_t  s_rtc_was_listening;
 RTC_DATA_ATTR uint8_t  s_rtc_armed;
+#ifndef JR_POWER_HOST_TEST
+/* Deep-sleep surviving timer snapshot (N16.4): magic + FNV-1a checksummed so
+ * power-on garbage in RTC_NOINIT_ATTR is rejected deterministically. */
+RTC_NOINIT_ATTR jr_timer_snapshot_t s_rtc_timer_snap;
+
+static int64_t power_wall_epoch_s(void)
+{
+    time_t tt = time(NULL);
+    struct tm tmv;
+    localtime_r(&tt, &tmv);
+    return (tmv.tm_year >= 2020 - 1900) ? (int64_t)tt : 0;
+}
+
+static uint32_t sleep_clamp_timer_wake_s(uint32_t requested_s)
+{
+    const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    const uint32_t clamped = jr_timer_sleep_wake_s(&s_timers, now_ms, requested_s);
+    if (clamped != requested_s) {
+        ESP_LOGI(TAG, "deep sleep: timer wake clamped %u -> %u s for active timer",
+                 (unsigned)requested_s, (unsigned)clamped);
+    }
+    return clamped;
+}
+
+static void sleep_save_timer_rtc(uint32_t wake_delay_s)
+{
+    const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    const int64_t epoch_s = power_wall_epoch_s();
+    const bool saved = jr_timer_snapshot_save(&s_timers, now_ms, epoch_s,
+                                              wake_delay_s, &s_rtc_timer_snap);
+    if (saved) {
+        ESP_LOGI(TAG, "deep sleep: saved %u active timer(s) to RTC (epoch=%lld)",
+                 (unsigned)s_rtc_timer_snap.count, (long long)epoch_s);
+    }
+}
+
+unsigned power_restore_rtc_timers(uint32_t now_ms)
+{
+    if (!jr_timer_snapshot_valid(&s_rtc_timer_snap)) {
+        return 0U;
+    }
+    const int64_t epoch_s = power_wall_epoch_s();
+    const uint32_t fallback_s = (s_boot_wake_cause == ESP_SLEEP_WAKEUP_TIMER)
+        ? s_rtc_timer_snap.wake_delay_s : 0U;
+    const unsigned restored = jr_timer_snapshot_restore(
+        &s_timers, &s_rtc_timer_snap, now_ms, epoch_s, fallback_s);
+    /* Consume snapshot so a later crash/power-on cannot replay old timers. */
+    s_rtc_timer_snap.magic = 0U;
+    s_rtc_timer_snap.checksum = 0U;
+    if (restored > 0U) {
+        ESP_LOGI(TAG, "boot: restored %u timer(s) from RTC snapshot (epoch=%lld)",
+                 restored, (long long)epoch_s);
+    }
+    return restored;
+}
+#else
+static uint32_t sleep_clamp_timer_wake_s(uint32_t requested_s) { return requested_s; }
+static void sleep_save_timer_rtc(uint32_t wake_delay_s) { (void)wake_delay_s; }
+#endif
 
 /* ---- CPU gears ------------------------------------------------------------
  *
@@ -162,6 +221,7 @@ void enter_deep_sleep(const char *why, uint32_t timer_s)
         atomic_store(&s_sleep_force, false);
         return;
     }
+    timer_s = sleep_clamp_timer_wake_s(timer_s);
     const esp_err_t timer_err =
         esp_sleep_enable_timer_wakeup((uint64_t)timer_s * 1000000ULL);
     if (timer_err != ESP_OK) {
@@ -258,6 +318,7 @@ void enter_deep_sleep(const char *why, uint32_t timer_s)
              (armed & SLEEP_ARMED_LIFT) != 0U,
              (armed & SLEEP_ARMED_TOUCH) != 0U, (unsigned)timer_s);
     /* A refused entry must not overwrite the previous RTC sleep history. */
+    sleep_save_timer_rtc(timer_s);
     s_rtc_sleep_magic = SLEEP_RTC_MAGIC;
     s_rtc_sleeps++;
     s_rtc_was_listening = !atomic_load(&s_voice_privacy_paused);

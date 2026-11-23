@@ -28,6 +28,13 @@ extern "C" {
 #define JR_TIMER_CHIME_INTERVAL_MS  4000u    /* 4 s periodic chime while ringing */
 #define JR_TIMER_FOCUS_DEFAULT_S    1500u    /* 25 min Pomodoro focus */
 #define JR_TIMER_BREAK_DEFAULT_S    300u     /* 5 min Pomodoro break */
+#define JR_STOPWATCH_MAX_LAPS       4u
+#define JR_TIMER_SNAP_MAGIC         0x4A525431u /* "JRT1" */
+#define JR_TIMER_SNAP_VERSION       1u
+#define JR_TIMER_SLEEP_MIN_REM_S    30u      /* only sleep if timer has >30 s left */
+#define JR_TIMER_SLEEP_WAKE_LEAD_S  5u       /* wake 5 s before expiry */
+#define JR_TIMER_SLEEP_WAKE_MIN_S   5u       /* minimum clamped sleep wake */
+#define JR_TIMER_RECENT_EXPIRE_S    60u      /* still ring if expired <=60 s ago */
 
 typedef enum {
     JR_TIMER_IDLE = 0,
@@ -53,6 +60,7 @@ typedef struct {
     bool     active;
     bool     ringing;
     uint16_t rem_s;                       /* remaining seconds (0..43200) */
+    uint16_t total_s;                     /* total duration seconds */
     uint8_t  pct_left;                    /* 0..100 */
     char     label[JR_TIMER_LABEL_CAP];
 } jr_timer_view_t;
@@ -106,6 +114,81 @@ uint16_t jr_timer_slot_rem_s(const jr_timer_slot_t *slot, uint32_t now_ms);
 bool jr_timer_any_active(const jr_timer_bank_t *bank);
 bool jr_timer_any_ringing(const jr_timer_bank_t *bank);
 unsigned jr_timer_active_count(const jr_timer_bank_t *bank);
+
+/* ---- Deep-sleep RTC timer snapshot & restore (N16.4) ------------------- */
+
+typedef struct {
+    uint8_t  state;                       /* 0=idle, 1=running, 2=ringing */
+    uint8_t  reserved[3];
+    uint32_t duration_s;
+    uint32_t remaining_s;                 /* relative fallback if no wall clock */
+    int64_t  end_epoch_s;                 /* wall-clock expiry epoch (>0 if valid) */
+    char     label[JR_TIMER_LABEL_CAP];
+} jr_timer_snap_slot_t;
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    int64_t  saved_epoch_s;               /* wall-clock epoch at save (0 if unset) */
+    uint32_t wake_delay_s;                /* planned sleep wake delay in seconds */
+    uint8_t  count;
+    uint8_t  reserved[3];
+    jr_timer_snap_slot_t slots[JR_TIMER_MAX];
+    uint32_t checksum;                    /* FNV-1a 32-bit over preceding bytes */
+} jr_timer_snapshot_t;
+
+/* FNV-1a 32-bit checksum over all fields before `checksum`. */
+uint32_t jr_timer_snapshot_checksum(const jr_timer_snapshot_t *snap);
+
+/* True when magic, version, count, and FNV-1a checksum all match. */
+bool jr_timer_snapshot_valid(const jr_timer_snapshot_t *snap);
+
+/* Serialize active/ringing timers into `out_snap` with FNV-1a checksum.
+ * Returns true if at least one timer was saved; still writes a valid empty
+ * snapshot (count=0) when no timers are active so stale RTC memory is cleared. */
+bool jr_timer_snapshot_save(const jr_timer_bank_t *bank, uint32_t now_ms,
+                            int64_t now_epoch_s, uint32_t wake_delay_s,
+                            jr_timer_snapshot_t *out_snap);
+
+/* Restore live or just-expired (<=60 s ago) timers from a validated snapshot.
+ * Uses wall-clock delta when both `now_epoch_s` and `snap->saved_epoch_s` are
+ * valid (>0 and non-regressing), else falls back to `elapsed_fallback_s`.
+ * Just-expired timers restore with end_ms == now_ms so the next step rings.
+ * Returns the number of timers restored (0 on invalid/corrupt snapshot). */
+unsigned jr_timer_snapshot_restore(jr_timer_bank_t *bank,
+                                   const jr_timer_snapshot_t *snap,
+                                   uint32_t now_ms, int64_t now_epoch_s,
+                                   uint32_t elapsed_fallback_s);
+
+/* Compute clamped deep-sleep wake duration when timers are active:
+ *   - If no active timers or any timer is ringing -> returns `requested_s`.
+ *   - If nearest timer has >30 s remaining -> clamps to min(requested_s,
+ *     max(5, remaining_s - 5)) so the chip wakes right before expiry. */
+uint32_t jr_timer_sleep_wake_s(const jr_timer_bank_t *bank, uint32_t now_ms,
+                               uint32_t requested_s);
+
+/* True if any timer is ringing or has <= JR_TIMER_SLEEP_MIN_REM_S left
+ * (device should stay awake rather than deep-sleeping right before expiry). */
+bool jr_timer_blocks_sleep(const jr_timer_bank_t *bank, uint32_t now_ms);
+
+/* ---- Chronograph stopwatch with up to 4 laps --------------------------- */
+
+typedef struct {
+    bool     active;
+    bool     running;
+    uint32_t start_ms;
+    uint32_t accum_ms;
+    uint32_t laps_ms[JR_STOPWATCH_MAX_LAPS];
+    uint8_t  lap_count;
+} jr_stopwatch_t;
+
+void jr_stopwatch_init(jr_stopwatch_t *sw);
+void jr_stopwatch_start(jr_stopwatch_t *sw, uint32_t now_ms);
+void jr_stopwatch_stop(jr_stopwatch_t *sw, uint32_t now_ms);
+bool jr_stopwatch_lap(jr_stopwatch_t *sw, uint32_t now_ms,
+                      uint32_t *out_lap_ms);
+void jr_stopwatch_reset(jr_stopwatch_t *sw);
+uint32_t jr_stopwatch_elapsed_ms(const jr_stopwatch_t *sw, uint32_t now_ms);
 
 #ifdef __cplusplus
 }

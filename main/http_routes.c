@@ -355,7 +355,7 @@ static esp_err_t say_get_handler(httpd_req_t *req)
 }
 
 /* POST /api/debug/timer — bench control for the on-device timer bank.
- * Supports ?sec=N[&label=...] | ?cancel=1[&label=...] | ?dismiss=1.
+ * Supports ?sec=N[&label=...] | ?focus=25[&label=...] | ?cancel=1[&label=...] | ?dismiss=1.
  * Marshals onto voice_task via s_timer_mux + s_debug_timer_req; never touches
  * privacy or operator lease. */
 static esp_err_t debug_timer_handler(httpd_req_t *req)
@@ -364,9 +364,11 @@ static esp_err_t debug_timer_handler(httpd_req_t *req)
         return ESP_OK;
     }
     int sec = -1;
+    int focus_min = -1;
     int cancel = 0;
     int dismiss = 0;
     const bool have_sec = query_int(req, "sec", &sec);
+    const bool have_focus = query_int(req, "focus", &focus_min);
     const bool have_cancel = query_int(req, "cancel", &cancel) && cancel != 0;
     const bool have_dismiss = query_int(req, "dismiss", &dismiss) && dismiss != 0;
 
@@ -389,6 +391,19 @@ static esp_err_t debug_timer_handler(httpd_req_t *req)
         dreq.kind = TIMER_REQ_CANCEL;
         strlcpy(dreq.label, label[0] != '\0' ? label : "all", sizeof dreq.label);
         action = "cancel";
+    } else if (have_focus) {
+        if (focus_min == 0) {
+            focus_min = 25;
+        }
+        if (focus_min < 1 || focus_min > 720) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "focus must be 1..720 minutes");
+            return ESP_OK;
+        }
+        dreq.kind = TIMER_REQ_FOCUS;
+        dreq.seconds = (uint32_t)focus_min * 60U;
+        strlcpy(dreq.label, label[0] != '\0' ? label : "FOCUS", sizeof dreq.label);
+        action = "focus";
     } else if (have_sec || label[0] != '\0') {
         if (have_sec && (sec < 0 || sec > (int)JR_TIMER_MAX_S)) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
@@ -401,7 +416,7 @@ static esp_err_t debug_timer_handler(httpd_req_t *req)
         action = "set";
     } else {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                            "need sec=N, cancel=1, or dismiss=1");
+                            "need sec=N, focus=M, cancel=1, or dismiss=1");
         return ESP_OK;
     }
 
@@ -417,6 +432,268 @@ static esp_err_t debug_timer_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, body, n);
     return ESP_OK;
+}
+
+/* POST /api/debug/stopwatch?action=start|stop|lap|reset — control-gated. */
+static esp_err_t debug_stopwatch_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    char q[64] = {0};
+    char action[16] = {0};
+    if (httpd_req_get_url_query_str(req, q, sizeof q) != ESP_OK ||
+        httpd_query_key_value(q, "action", action, sizeof action) != ESP_OK ||
+        action[0] == '\0') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "action=start|stop|lap|reset required");
+        return ESP_OK;
+    }
+    const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    stopwatch_snap_t snap = {0};
+    if (!device_stopwatch_action(action, now_ms, &snap)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "action must be start|stop|lap|reset");
+        return ESP_OK;
+    }
+    atomic_store(&s_glass_poke_req, true);
+    char body[192];
+    int n = snprintf(body, sizeof body,
+                     "{\"ok\":true,\"active\":%s,\"running\":%s,"
+                     "\"elapsed_ms\":%u,\"laps\":[",
+                     snap.active ? "true" : "false",
+                     snap.running ? "true" : "false",
+                     (unsigned)snap.elapsed_ms);
+    for (uint8_t i = 0U; i < snap.lap_count && i < JR_STOPWATCH_MAX_LAPS &&
+                         n > 0 && (size_t)n < sizeof body - 16U; ++i) {
+        n += snprintf(body + n, sizeof body - (size_t)n, "%s%u",
+                      i == 0U ? "" : ",", (unsigned)snap.laps_ms[i]);
+    }
+    if (n > 0 && (size_t)n + 3U < sizeof body) {
+        n += snprintf(body + n, sizeof body - (size_t)n, "]}");
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
+/* POST /api/glass — Command Deck glass switcher & HBM/UI-sounds toggle.
+ * Optional query params: screen, style, hbm=0|1, ui_sounds=0|1.
+ * STRICT INVARIANT: never touches privacy/mute or operator lease state. */
+static esp_err_t glass_post_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    char q[160] = {0};
+    if (httpd_req_get_url_query_str(req, q, sizeof q) != ESP_OK || q[0] == '\0') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "need screen, style, hbm, or ui_sounds");
+        return ESP_OK;
+    }
+    char scr_raw[24] = {0};
+    char sty_raw[24] = {0};
+    const bool have_scr = httpd_query_key_value(q, "screen", scr_raw, sizeof scr_raw) == ESP_OK &&
+                          scr_raw[0] != '\0';
+    const bool have_sty = httpd_query_key_value(q, "style", sty_raw, sizeof sty_raw) == ESP_OK &&
+                          sty_raw[0] != '\0';
+    int hbm_v = -1;
+    int ui_v = -1;
+    const bool have_hbm = query_int(req, "hbm", &hbm_v);
+    const bool have_ui = query_int(req, "ui_sounds", &ui_v);
+
+    jr_display_space_t sp = jr_display_nav_space();
+    jr_watch_style_t ws = jr_display_watch_style();
+    if ((!have_scr && !have_sty && !have_hbm && !have_ui) ||
+        (have_scr && !device_parse_glass_screen(scr_raw, &sp)) ||
+        (have_sty && !device_parse_watch_style(sty_raw, &ws)) ||
+        (have_hbm && hbm_v != 0 && hbm_v != 1) ||
+        (have_ui && ui_v != 0 && ui_v != 1)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "invalid screen/style/hbm/ui_sounds parameter");
+        return ESP_OK;
+    }
+
+    if (have_sty) {
+        jr_display_watch_style_set(ws);
+        persist_watch_style((uint8_t)ws);
+    }
+    if (have_scr) {
+        jr_display_nav_set(sp);
+    }
+    if (have_ui) {
+        ui_sounds_set(ui_v != 0);
+    }
+    bool ok = true;
+    const char *reason = NULL;
+    if (have_hbm) {
+        const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if (!device_sunlight_set(hbm_v != 0, now_ms, &reason)) {
+            ok = false;
+        }
+    }
+    if (have_scr || have_sty) {
+        jr_display_bloom();
+    }
+    atomic_store(&s_glass_poke_req, true);
+
+    char body[192];
+    int n = 0;
+    if (ok) {
+        n = snprintf(body, sizeof body,
+            "{\"ok\":true,\"screen\":\"%s\",\"watch_style\":\"%s\","
+            "\"hbm\":%s,\"ui_sounds\":%s}",
+            device_glass_space_name(jr_display_nav_space()),
+            jr_display_watch_style_name(jr_display_watch_style()),
+            jr_display_get_hbm() ? "true" : "false",
+            atomic_load(&s_ui_sounds) ? "true" : "false");
+    } else {
+        httpd_resp_set_status(req, "409 Conflict");
+        n = snprintf(body, sizeof body,
+            "{\"ok\":false,\"reason\":\"%s\",\"screen\":\"%s\","
+            "\"watch_style\":\"%s\",\"hbm\":%s,\"ui_sounds\":%s}",
+            reason ? reason : "refused",
+            device_glass_space_name(jr_display_nav_space()),
+            jr_display_watch_style_name(jr_display_watch_style()),
+            jr_display_get_hbm() ? "true" : "false",
+            atomic_load(&s_ui_sounds) ? "true" : "false");
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
+static esp_err_t notes_send_json(httpd_req_t *req, bool include_ok, bool include_max)
+{
+    const size_t cap = 1024U;
+    char *out = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    jr_note_bank_t *bank = heap_caps_calloc(1, sizeof(*bank),
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (out == NULL) {
+        out = malloc(cap);
+    }
+    if (bank == NULL) {
+        bank = calloc(1, sizeof(*bank));
+    }
+    if (out == NULL || bank == NULL) {
+        free(out);
+        free(bank);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_OK;
+    }
+    device_notes_snapshot(bank);
+    int n = 0;
+    if (include_ok && include_max) {
+        n = snprintf(out, cap, "{\"ok\":true,\"count\":%u,\"max\":%u,\"notes\":[",
+                     (unsigned)bank->count, (unsigned)JR_NOTES_MAX);
+    } else if (include_ok) {
+        n = snprintf(out, cap, "{\"ok\":true,\"count\":%u,\"notes\":[",
+                     (unsigned)bank->count);
+    } else {
+        n = snprintf(out, cap, "{\"count\":%u,\"max\":%u,\"notes\":[",
+                     (unsigned)bank->count, (unsigned)JR_NOTES_MAX);
+    }
+    for (unsigned i = 0U; i < bank->count && i < JR_NOTES_MAX &&
+                         n > 0 && (size_t)n < cap - 32U; ++i) {
+        const jr_note_item_t *it = &bank->items[i];
+        int w = snprintf(out + n, cap - (size_t)n,
+                         "%s{\"id\":%u,\"text\":\"%s\",\"created_s\":%lld}",
+                         i == 0U ? "" : ",", (unsigned)it->id, it->text,
+                         (long long)it->created_s);
+        if (w < 0 || (size_t)n + (size_t)w >= cap - 4U) {
+            break;
+        }
+        n += w;
+    }
+    if (n > 0 && (size_t)n + 3U < cap) {
+        n += snprintf(out + n, cap - (size_t)n, "]}");
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t err = httpd_resp_send(req, out, n);
+    free(out);
+    free(bank);
+    return err;
+}
+
+/* GET /api/notes — paired GET returning NVS-persisted desk notes. */
+static esp_err_t notes_get_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
+    return notes_send_json(req, false, true);
+}
+
+/* POST /api/notes — control-gated add (JSON {"text":"..."}), ?delete=<id>, or ?clear=1. */
+static esp_err_t notes_post_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    int clear_v = 0;
+    int del_id = 0;
+    if (query_int(req, "clear", &clear_v) && clear_v != 0) {
+        (void)device_notes_clear("all");
+        return notes_send_json(req, true, false);
+    }
+    if (query_int(req, "delete", &del_id)) {
+        if (del_id <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "delete id must be > 0");
+            return ESP_OK;
+        }
+        (void)device_notes_delete((uint32_t)del_id);
+        return notes_send_json(req, true, false);
+    }
+
+    char note_text[JR_NOTE_TEXT_CAP + 32U] = {0};
+    if (req->content_len > 0) {
+        if (req->content_len > 256) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "note body too large");
+            return ESP_OK;
+        }
+        char body[260] = {0};
+        size_t got = 0U;
+        while (got < (size_t)req->content_len) {
+            int r = httpd_req_recv(req, body + got, (size_t)req->content_len - got);
+            if (r <= 0) {
+                if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+                    continue;
+                }
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "failed to read body");
+                return ESP_OK;
+            }
+            got += (size_t)r;
+        }
+        body[got] = '\0';
+        cJSON *root = cJSON_Parse(body);
+        const cJSON *t = cJSON_GetObjectItemCaseSensitive(root, "text");
+        if (cJSON_IsString(t) && t->valuestring != NULL) {
+            strlcpy(note_text, t->valuestring, sizeof note_text);
+        }
+        cJSON_Delete(root);
+    } else {
+        char q[160] = {0};
+        if (httpd_req_get_url_query_str(req, q, sizeof q) == ESP_OK &&
+            httpd_query_key_value(q, "text", note_text, sizeof note_text) == ESP_OK) {
+            (void)url_decode_in_place(note_text);
+        }
+    }
+
+    if (note_text[0] == '\0') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "need JSON {\"text\":\"...\"}, ?delete=<id>, or ?clear=1");
+        return ESP_OK;
+    }
+    const uint32_t id = device_notes_add(note_text);
+    if (id == 0U) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "note empty or desk note bank full (max 6)");
+        return ESP_OK;
+    }
+    return notes_send_json(req, true, false);
 }
 
 static esp_err_t gain_get_handler(httpd_req_t *req)
@@ -619,9 +896,262 @@ void crash_note_boot(void)
 
 /* GET /api/diag/crash — reset reason plus the stored coredump summary.
  * The summary struct (~300 B) and the JSON both live on the heap: httpd has
- * about 1500 B of stack free. Read-only; nothing here erases the dump. */
-#define CRASH_JSON_CAP 1536U
+ * about 1500 B of stack free. Read-only; nothing here erases the dump.
+ *
+ * N16.11 fix: esp_core_dump_get_summary() can return ESP_OK with empty
+ * task="" / exc_pc=0 (e.g. when mmap/segment matching misses exc_tcb). When
+ * that happens, fall back to direct esp_partition_read() ELF note + segment
+ * parsing (PSRAM-backed, zero internal RAM) plus esp_core_dump_get_panic_reason(). */
+#define CRASH_JSON_CAP 1792U
 #define CRASH_BT_MAX   16U
+#define CRASH_REASON_CAP 160U
+
+typedef struct __attribute__((packed)) {
+    uint8_t  e_ident[16];
+    uint16_t e_type;
+    uint16_t e_machine;
+    uint32_t e_version;
+    uint32_t e_entry;
+    uint32_t e_phoff;
+    uint32_t e_shoff;
+    uint32_t e_flags;
+    uint16_t e_ehsize;
+    uint16_t e_phentsize;
+    uint16_t e_phnum;
+    uint16_t e_shentsize;
+    uint16_t e_shnum;
+    uint16_t e_shstrndx;
+} jr_elf32_ehdr_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t p_type;
+    uint32_t p_offset;
+    uint32_t p_vaddr;
+    uint32_t p_paddr;
+    uint32_t p_filesz;
+    uint32_t p_memsz;
+    uint32_t p_flags;
+    uint32_t p_align;
+} jr_elf32_phdr_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t n_namesz;
+    uint32_t n_descsz;
+    uint32_t n_type;
+} jr_elf32_note_t;
+
+static inline uint32_t crash_align4(uint32_t v) { return (v + 3U) & ~3U; }
+
+static bool crash_parse_elf_fallback(size_t dump_size,
+                                     esp_core_dump_summary_t *sum,
+                                     char *panic_reason, size_t reason_cap)
+{
+    const esp_partition_t *part = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, NULL);
+    if (part == NULL || dump_size < 76U || dump_size > part->size) {
+        return false;
+    }
+
+    /* Locate ELF header: normally preceded by 24-byte core_dump_header_t. */
+    uint32_t elf_base = 24U;
+    jr_elf32_ehdr_t eh = {0};
+    if (esp_partition_read(part, elf_base, &eh, sizeof eh) != ESP_OK ||
+        eh.e_ident[0] != 0x7FU || eh.e_ident[1] != 'E' ||
+        eh.e_ident[2] != 'L' || eh.e_ident[3] != 'F') {
+        elf_base = 0U;
+        if (esp_partition_read(part, elf_base, &eh, sizeof eh) != ESP_OK ||
+            eh.e_ident[0] != 0x7FU || eh.e_ident[1] != 'E' ||
+            eh.e_ident[2] != 'L' || eh.e_ident[3] != 'F') {
+            return false;
+        }
+    }
+    if (eh.e_phnum == 0U || eh.e_phnum > 256U ||
+        eh.e_phentsize < sizeof(jr_elf32_phdr_t)) {
+        return false;
+    }
+
+    uint8_t *scratch = heap_caps_calloc(1, 512U,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (scratch == NULL) {
+        scratch = calloc(1, 512U);
+    }
+    if (scratch == NULL) {
+        return false;
+    }
+
+    uint32_t pr_tcb = 0U;
+    uint32_t pr_pc = 0U;
+    bool got_any = false;
+
+    /* Pass 1: parse PT_NOTE segments (type == 4) for INFO, EXTRA_INFO,
+     * PANIC_DETAILS, and the first PR_STATUS (crashed task). */
+    for (uint16_t i = 0U; i < eh.e_phnum; ++i) {
+        jr_elf32_phdr_t ph = {0};
+        const uint32_t ph_off = elf_base + eh.e_phoff +
+                                (uint32_t)i * eh.e_phentsize;
+        if (ph_off + sizeof ph > dump_size ||
+            esp_partition_read(part, ph_off, &ph, sizeof ph) != ESP_OK) {
+            break;
+        }
+        if (ph.p_type != 4U || ph.p_filesz < sizeof(jr_elf32_note_t) ||
+            elf_base + ph.p_offset + ph.p_filesz > dump_size) {
+            continue;
+        }
+        uint32_t pos = 0U;
+        while (pos + sizeof(jr_elf32_note_t) <= ph.p_filesz) {
+            jr_elf32_note_t nh = {0};
+            if (esp_partition_read(part, elf_base + ph.p_offset + pos,
+                                   &nh, sizeof nh) != ESP_OK) {
+                break;
+            }
+            const uint32_t name_a = crash_align4(nh.n_namesz);
+            const uint32_t desc_a = crash_align4(nh.n_descsz);
+            const uint32_t step = (uint32_t)sizeof(nh) + name_a + desc_a;
+            if (step == 0U || pos + step > ph.p_filesz ||
+                nh.n_namesz > 64U || nh.n_descsz > 4096U) {
+                break;
+            }
+            const uint32_t desc_off = elf_base + ph.p_offset + pos +
+                                      (uint32_t)sizeof(nh) + name_a;
+            if (nh.n_type == 8266U && nh.n_descsz >= 8U) {
+                /* ESP_CORE_DUMP_INFO: uint32 version + char sha[66] */
+                const uint32_t rlen = nh.n_descsz < 128U ? nh.n_descsz : 128U;
+                if (esp_partition_read(part, desc_off, scratch, rlen) == ESP_OK) {
+                    uint32_t ver = 0U;
+                    memcpy(&ver, scratch, 4U);
+                    if (sum->core_dump_version == 0U) {
+                        sum->core_dump_version = ver;
+                    }
+                    if (sum->app_elf_sha256[0] == '\0' && rlen > 4U) {
+                        size_t slen = rlen - 4U;
+                        if (slen >= sizeof sum->app_elf_sha256) {
+                            slen = sizeof(sum->app_elf_sha256) - 1U;
+                        }
+                        memcpy(sum->app_elf_sha256, scratch + 4U, slen);
+                        sum->app_elf_sha256[slen] = '\0';
+                    }
+                    got_any = true;
+                }
+            } else if (nh.n_type == 677U && nh.n_descsz >= 20U) {
+                /* ESP_EXTRA_INFO: crashed_task_tcb (0), exccause pair (4..11), excvaddr pair (12..19) */
+                uint32_t words[5] = {0};
+                if (esp_partition_read(part, desc_off, words, sizeof words) == ESP_OK) {
+                    if (sum->exc_tcb == 0U && words[0] != 0U) {
+                        sum->exc_tcb = words[0];
+                    }
+                    if (sum->ex_info.exc_cause == 0U) {
+                        sum->ex_info.exc_cause = words[2];
+                    }
+                    if (sum->ex_info.exc_vaddr == 0U) {
+                        sum->ex_info.exc_vaddr = words[4];
+                    }
+                    got_any = true;
+                }
+            } else if (nh.n_type == 679U && nh.n_descsz > 0U &&
+                       panic_reason != NULL && panic_reason[0] == '\0' &&
+                       reason_cap > 1U) {
+                /* ESP_PANIC_DETAILS */
+                size_t rlen = nh.n_descsz;
+                if (rlen >= reason_cap) {
+                    rlen = reason_cap - 1U;
+                }
+                if (esp_partition_read(part, desc_off, panic_reason, rlen) == ESP_OK) {
+                    panic_reason[rlen] = '\0';
+                    got_any = true;
+                }
+            } else if (nh.n_type == 1U && pr_tcb == 0U && nh.n_descsz >= 76U) {
+                /* First NT_PRSTATUS note is always the crashed task:
+                 * pr_pid (TCB addr) at offset 24, regs.pc at offset 72. */
+                if (esp_partition_read(part, desc_off, scratch, 80U) == ESP_OK) {
+                    memcpy(&pr_tcb, scratch + 24U, 4U);
+                    memcpy(&pr_pc, scratch + 72U, 4U);
+                    got_any = true;
+                }
+            }
+            pos += step;
+        }
+    }
+
+    if (sum->exc_tcb == 0U && pr_tcb != 0U) {
+        sum->exc_tcb = pr_tcb;
+    }
+    if (sum->exc_pc == 0U && pr_pc != 0U) {
+        sum->exc_pc = pr_pc;
+    }
+
+    /* Pass 2: locate crashed task TCB + following stack segment in PT_LOAD (type == 1). */
+    const uint32_t target_tcb = sum->exc_tcb;
+    bool matched_tcb = false;
+    bool saw_first_load = false;
+    for (uint16_t i = 0U; i < eh.e_phnum; ++i) {
+        jr_elf32_phdr_t ph = {0};
+        const uint32_t ph_off = elf_base + eh.e_phoff +
+                                (uint32_t)i * eh.e_phentsize;
+        if (ph_off + sizeof ph > dump_size ||
+            esp_partition_read(part, ph_off, &ph, sizeof ph) != ESP_OK) {
+            break;
+        }
+        if (ph.p_type != 1U || elf_base + ph.p_offset + ph.p_filesz > dump_size) {
+            continue;
+        }
+        if (matched_tcb) {
+            /* Following PT_LOAD is the crashed task's stack (XtExcFrame at top). */
+            if (ph.p_filesz >= 88U &&
+                esp_partition_read(part, elf_base + ph.p_offset, scratch, 88U) == ESP_OK) {
+                uint32_t st_pc = 0U, st_cause = 0U, st_vaddr = 0U;
+                memcpy(&st_pc, scratch + 4U, 4U);
+                memcpy(&st_cause, scratch + 80U, 4U);
+                memcpy(&st_vaddr, scratch + 84U, 4U);
+                if (sum->exc_pc == 0U && st_pc != 0U) {
+                    sum->exc_pc = st_pc;
+                }
+                if (sum->ex_info.exc_cause == 0U && st_cause != 0U) {
+                    sum->ex_info.exc_cause = st_cause;
+                }
+                if (sum->ex_info.exc_vaddr == 0U && st_vaddr != 0U) {
+                    sum->ex_info.exc_vaddr = st_vaddr;
+                }
+            }
+            break;
+        }
+        const bool is_match = (target_tcb != 0U && ph.p_vaddr == target_tcb) ||
+                              (target_tcb == 0U && !saw_first_load &&
+                               ph.p_filesz >= sizeof(StaticTask_t));
+        saw_first_load = true;
+        if (is_match) {
+            if (sum->exc_task[0] == '\0' && ph.p_filesz >= sizeof(StaticTask_t)) {
+                const uint32_t rlen = sizeof(StaticTask_t) < 512U
+                    ? (uint32_t)sizeof(StaticTask_t) : 512U;
+                if (esp_partition_read(part, elf_base + ph.p_offset,
+                                       scratch, rlen) == ESP_OK) {
+                    const StaticTask_t *tcb = (const StaticTask_t *)scratch;
+                    strlcpy(sum->exc_task, (const char *)tcb->ucDummy7,
+                            sizeof sum->exc_task);
+                    got_any = true;
+                }
+            }
+            matched_tcb = true;
+        }
+    }
+
+    if (sum->exc_bt_info.depth == 0U && sum->exc_pc != 0U) {
+        sum->exc_bt_info.bt[0] = sum->exc_pc;
+        sum->exc_bt_info.depth = 1U;
+    }
+
+    free(scratch);
+    return got_any;
+}
+
+static void crash_sanitize_json_str(char *s)
+{
+    for (char *c = s; *c != '\0'; ++c) {
+        if (*c == '"' || *c == '\\' || (unsigned char)*c < 0x20U ||
+            (unsigned char)*c > 0x7EU) {
+            *c = ' ';
+        }
+    }
+}
 
 static esp_err_t crash_get_handler(httpd_req_t *req)
 {
@@ -632,16 +1162,27 @@ static esp_err_t crash_get_handler(httpd_req_t *req)
                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     esp_core_dump_summary_t *sum = heap_caps_calloc(1, sizeof *sum,
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (out == NULL || sum == NULL) {
+    char *reason = heap_caps_calloc(1, CRASH_REASON_CAP,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (out == NULL || sum == NULL || reason == NULL) {
         heap_caps_free(out);
         heap_caps_free(sum);
+        heap_caps_free(reason);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
         return ESP_OK;
     }
     size_t addr = 0, size = 0;
     const bool present = esp_core_dump_image_get(&addr, &size) == ESP_OK;
     const bool valid = present && esp_core_dump_image_check() == ESP_OK;
-    const bool have_sum = valid && esp_core_dump_get_summary(sum) == ESP_OK;
+    bool have_sum = valid && esp_core_dump_get_summary(sum) == ESP_OK;
+    if (valid) {
+        (void)esp_core_dump_get_panic_reason(reason, CRASH_REASON_CAP);
+        if (!have_sum || sum->exc_task[0] == '\0' || sum->exc_pc == 0U) {
+            if (crash_parse_elf_fallback(size, sum, reason, CRASH_REASON_CAP)) {
+                have_sum = true;
+            }
+        }
+    }
 
     uint8_t pmic_on = 0, pmic_off = 0;
     const bool pmic_ok = jr_power_boot_status(&pmic_on, &pmic_off) == ESP_OK;
@@ -659,11 +1200,9 @@ static esp_err_t crash_get_handler(httpd_req_t *req)
         char task[sizeof sum->exc_task + 1];
         memcpy(task, sum->exc_task, sizeof sum->exc_task);
         task[sizeof sum->exc_task] = '\0';
-        for (char *c = task; *c != '\0'; c++) {   /* keep the JSON valid */
-            if (*c == '"' || *c == '\\' || (unsigned char)*c < 0x20) {
-                *c = '?';
-            }
-        }
+        crash_sanitize_json_str(task);
+        crash_sanitize_json_str(reason);
+
         char sha[sizeof sum->app_elf_sha256 + 1];
         memcpy(sha, sum->app_elf_sha256, sizeof sum->app_elf_sha256);
         sha[sizeof sum->app_elf_sha256] = '\0';
@@ -674,11 +1213,12 @@ static esp_err_t crash_get_handler(httpd_req_t *req)
         }
         n += snprintf(out + n, CRASH_JSON_CAP - (size_t)n,
             "{\"task\":\"%s\",\"exc_pc\":\"0x%08x\",\"exc_cause\":%u,"
-            "\"exc_vaddr\":\"0x%08x\",\"elf_sha\":\"%s\",\"version\":%u,"
+            "\"exc_vaddr\":\"0x%08x\",\"panic_reason\":\"%s\","
+            "\"elf_sha\":\"%s\",\"version\":%u,"
             "\"bt_corrupted\":%s,\"bt_depth\":%u,\"bt\":[",
             task, (unsigned)sum->exc_pc,
             (unsigned)sum->ex_info.exc_cause, (unsigned)sum->ex_info.exc_vaddr,
-            sha, (unsigned)sum->core_dump_version,
+            reason, sha, (unsigned)sum->core_dump_version,
             sum->exc_bt_info.corrupted ? "true" : "false",
             (unsigned)sum->exc_bt_info.depth);
         uint32_t depth = sum->exc_bt_info.depth;
@@ -704,6 +1244,7 @@ static esp_err_t crash_get_handler(httpd_req_t *req)
     }
     heap_caps_free(out);
     heap_caps_free(sum);
+    heap_caps_free(reason);
     return ESP_OK;
 }
 
@@ -3159,9 +3700,9 @@ static esp_err_t brain_outbox_handler(httpd_req_t *req)
     return err;
 }
 
-/* The cockpit snapshot buffer. Grew from 4096 when the tools block gained
- * the oversize counter and the last target name. */
-#define COCKPIT_BODY_CAP 5120U   /* 4608 + wake_cuts and headroom (PSRAM) */
+/* The cockpit snapshot buffer. Lives in PSRAM so expanding for Wave 2
+ * (stopwatch, notes, weather, power, HBM/TE stats) costs 0 internal RAM. */
+#define COCKPIT_BODY_CAP 7168U
 
 static esp_err_t cockpit_handler(httpd_req_t *req)
 {
@@ -3229,9 +3770,12 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
     bool tools_configured = tools_ready && device_gateway_usable();
     char last_target[JR_TOOLS_NAME_CAP];
     jr_tools_last_target(last_target, sizeof last_target);
+    bool te_sync = false;
+    uint32_t te_waits = 0U, te_timeouts = 0U;
+    jr_display_get_te_stats(&te_sync, &te_waits, &te_timeouts);
     size_t used = 0U;
     int n = snprintf(body, COCKPIT_BODY_CAP,
-        "{\"uptime_ms\":%u,\"memory\":{\"free_internal\":%u,"
+        "{\"uptime_ms\":%u,\"ui_sounds\":%s,\"memory\":{\"free_internal\":%u,"
         "\"largest_internal_block\":%u,\"free_psram\":%u},"
         "\"network\":{\"connected\":%s,"
         "\"ip\":\"%s\",\"rssi\":%d},\"voice\":{\"phase\":\"%s\","
@@ -3260,9 +3804,11 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         "\"consent_prompted\":%u,\"consent_approved\":%u,"
         "\"consent_denied\":%u,\"consent_timed_out\":%u,"
         "\"consent_cancelled\":%u},\"display\":{\"init\":\"%s\","
-        "\"actual_fps\":%u,\"flush_completions\":%u,\"flush_errors\":%u,"
+        "\"actual_fps\":%u,\"render_frame_us\":%u,"
+        "\"flush_completions\":%u,\"flush_errors\":%u,"
         "\"requested_face\":%d,\"applied_face\":%d,"
-        "\"choices_active\":%s,\"watch_style\":\"%s\","
+        "\"choices_active\":%s,\"space\":\"%s\",\"watch_style\":\"%s\","
+        "\"hbm\":%s,\"te_sync\":%s,\"te_waits\":%u,\"te_timeouts\":%u,"
         "\"sun_rise_min\":%d,\"sun_set_min\":%d},\"touch\":{"
         "\"events\":%u,\"last\":{\"kind\":\"%s\",\"x\":%u,\"y\":%u},"
         "\"shade_open\":%s,\"panel_touch_challenge\":{\"pending\":%s,"
@@ -3271,6 +3817,7 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         "\"agent\":{\"active\":%s,\"revision_hwm\":%u,"
         "\"next_revision\":%u",
         (unsigned)now,
+        atomic_load(&s_ui_sounds) ? "true" : "false",
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
@@ -3329,11 +3876,16 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         display.init_state == JR_DISPLAY_INIT_STARTING ? "starting" :
         display.init_state == JR_DISPLAY_INIT_FAILED ? "failed" : "stopped",
         (unsigned)display.actual_fps,
+        (unsigned)display.render_frame_us,
         (unsigned)display.flush_completions,
         (unsigned)display.flush_errors,
         (int)display.requested_face, (int)display.applied_face,
         jr_display_choices_active() ? "true" : "false",
+        device_glass_space_name(jr_display_nav_space()),
         jr_display_watch_style_name(jr_display_watch_style()),
+        jr_display_get_hbm() ? "true" : "false",
+        te_sync ? "true" : "false",
+        (unsigned)te_waits, (unsigned)te_timeouts,
         (int)s_wx_sun_rise_min, (int)s_wx_sun_set_min,
         (unsigned)atomic_load(&s_touch_events),
         touch_kind_name((jr_input_kind_t)atomic_load(&s_touch_last_kind)),
@@ -3392,35 +3944,116 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         portENTER_CRITICAL(&s_timer_mux);
         tsnap = s_timer_snap;
         portEXIT_CRITICAL(&s_timer_mux);
+        stopwatch_snap_t sw = {0};
+        device_stopwatch_snapshot(now, &sw);
+        jr_power_t bat = {0};
+        const bool have_bat = jr_power_read(&bat) == ESP_OK && bat.present;
+        float chip_c = 0.0f;
+        const bool have_chip = device_chip_temp_c(&chip_c);
+        const uint32_t wx_age_s = s_weather.valid
+            ? (uint32_t)((now - s_weather.fetched_ms) / 1000U) : 0U;
         uint32_t surface_ttl_ms = brain_surface.active &&
             (int32_t)(brain_surface.expires_ms - now) > 0
             ? brain_surface.expires_ms - now : 0U;
         n = snprintf(body + used, COCKPIT_BODY_CAP - used,
             "},\"timer\":{\"active\":%s,\"ringing\":%s,\"rem_s\":%u,"
-            "\"pct_left\":%u,\"label\":\"%s\",\"count\":%u},"
-            "\"brain\":{\"voice_route\":\"%s\","
-            "\"desk_connected\":%s,\"private_android_ready\":false,"
-            "\"private_android_reason\":\"BLE firmware not enabled\","
-            "\"next_inbox_seq\":%u,\"event_cursor\":%u,"
-            "\"surface_active\":%s,\"surface_kind\":\"%s\","
-            "\"surface_title\":\"%s\",\"surface_ttl_ms\":%u}}",
+            "\"total_s\":%u,\"pct_left\":%u,\"label\":\"%s\",\"count\":%u},"
+            "\"stopwatch\":{\"active\":%s,\"running\":%s,\"elapsed_ms\":%u,\"laps\":[",
             tsnap.active ? "true" : "false",
             tsnap.ringing ? "true" : "false",
             (unsigned)tsnap.rem_s,
+            (unsigned)tsnap.total_s,
             (unsigned)tsnap.pct_left,
             tsnap.label,
             (unsigned)tsnap.count,
-            voice_route, desk_connected ? "true" : "false",
-            (unsigned)brain_inbox_next, (unsigned)brain_event_cursor,
-            brain_surface.active ? "true" : "false",
-            brain_surface.active
-                ? brain_surface_kind_name(brain_surface.view.kind) : "none",
-            brain_surface.active ? brain_surface.view.title : "",
-            (unsigned)surface_ttl_ms);
+            sw.active ? "true" : "false",
+            sw.running ? "true" : "false",
+            (unsigned)sw.elapsed_ms);
         if (n > 0 && (size_t)n < COCKPIT_BODY_CAP - used) {
             used += (size_t)n;
         } else {
             used = COCKPIT_BODY_CAP;
+        }
+        for (uint8_t i = 0U; i < sw.lap_count && i < JR_STOPWATCH_MAX_LAPS &&
+                             used < COCKPIT_BODY_CAP; ++i) {
+            n = snprintf(body + used, COCKPIT_BODY_CAP - used, "%s%u",
+                         i == 0U ? "" : ",", (unsigned)sw.laps_ms[i]);
+            if (n > 0 && (size_t)n < COCKPIT_BODY_CAP - used) {
+                used += (size_t)n;
+            } else {
+                used = COCKPIT_BODY_CAP;
+            }
+        }
+        if (used < COCKPIT_BODY_CAP) {
+            jr_note_bank_t *nb = heap_caps_calloc(1, sizeof(*nb),
+                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (nb == NULL) {
+                nb = calloc(1, sizeof(*nb));
+            }
+            if (nb != NULL) {
+                device_notes_snapshot(nb);
+            }
+            const unsigned ncnt = nb != NULL ? (unsigned)nb->count : 0U;
+            n = snprintf(body + used, COCKPIT_BODY_CAP - used,
+                         "]},\"notes\":{\"count\":%u,\"items\":[", ncnt);
+            if (n > 0 && (size_t)n < COCKPIT_BODY_CAP - used) {
+                used += (size_t)n;
+            } else {
+                used = COCKPIT_BODY_CAP;
+            }
+            for (unsigned i = 0U; nb != NULL && i < ncnt && i < JR_NOTES_MAX &&
+                                  used < COCKPIT_BODY_CAP; ++i) {
+                n = snprintf(body + used, COCKPIT_BODY_CAP - used,
+                             "%s{\"id\":%u,\"text\":\"%s\"}",
+                             i == 0U ? "" : ",",
+                             (unsigned)nb->items[i].id, nb->items[i].text);
+                if (n > 0 && (size_t)n < COCKPIT_BODY_CAP - used) {
+                    used += (size_t)n;
+                } else {
+                    used = COCKPIT_BODY_CAP;
+                }
+            }
+            free(nb);
+        }
+        if (used < COCKPIT_BODY_CAP) {
+            n = snprintf(body + used, COCKPIT_BODY_CAP - used,
+                "]},\"weather\":{\"ok\":%s,\"temp_f\":%d,\"hi_f\":%d,"
+                "\"lo_f\":%d,\"cond\":\"%s\",\"rain_pct\":%u,\"age_s\":%u,"
+                "\"sun_rise_min\":%d,\"sun_set_min\":%d},"
+                "\"power\":{\"percent\":%d,\"mv\":%u,\"charging\":%s,"
+                "\"usb\":%s,\"chip_c\":%d,\"cpu_mhz\":%d},"
+                "\"brain\":{\"voice_route\":\"%s\","
+                "\"desk_connected\":%s,\"private_android_ready\":false,"
+                "\"private_android_reason\":\"BLE firmware not enabled\","
+                "\"next_inbox_seq\":%u,\"event_cursor\":%u,"
+                "\"surface_active\":%s,\"surface_kind\":\"%s\","
+                "\"surface_title\":\"%s\",\"surface_ttl_ms\":%u}}",
+                s_weather.valid ? "true" : "false",
+                s_weather.valid ? (int)s_weather.temp_f : 0,
+                s_weather.valid ? (int)s_weather.hi_f : 0,
+                s_weather.valid ? (int)s_weather.lo_f : 0,
+                s_weather.valid ? s_weather.condition : "",
+                s_weather.valid ? (unsigned)s_weather.rain_pct : 0U,
+                (unsigned)wx_age_s,
+                (int)s_wx_sun_rise_min, (int)s_wx_sun_set_min,
+                (have_bat && bat.percent <= 100U) ? (int)bat.percent : -1,
+                have_bat ? (unsigned)bat.millivolts : 0U,
+                (have_bat && bat.charging) ? "true" : "false",
+                (have_bat && bat.usb_present) ? "true" : "false",
+                have_chip ? (int)lroundf(chip_c) : 0,
+                atomic_load(&s_cpu_mhz),
+                voice_route, desk_connected ? "true" : "false",
+                (unsigned)brain_inbox_next, (unsigned)brain_event_cursor,
+                brain_surface.active ? "true" : "false",
+                brain_surface.active
+                    ? brain_surface_kind_name(brain_surface.view.kind) : "none",
+                brain_surface.active ? brain_surface.view.title : "",
+                (unsigned)surface_ttl_ms);
+            if (n > 0 && (size_t)n < COCKPIT_BODY_CAP - used) {
+                used += (size_t)n;
+            } else {
+                used = COCKPIT_BODY_CAP;
+            }
         }
     }
     if (used >= COCKPIT_BODY_CAP) {
@@ -5146,7 +5779,7 @@ static esp_err_t display_snapshot_rgb565_handler(httpd_req_t *req)
 
 /* Handler slots the server allocates (4 B each, internal RAM). The table
  * below is checked against it at compile time. */
-#define JR_HTTP_ROUTE_SLOTS 59
+#define JR_HTTP_ROUTE_SLOTS 64
 
 void start_diag_http(void)
 {
@@ -5170,6 +5803,10 @@ void start_diag_http(void)
         { .uri = "/api/debug/say",   .method = HTTP_POST, .handler = say_get_handler  },
         { .uri = "/api/debug/briefing", .method = HTTP_POST, .handler = briefing_post_handler },
         { .uri = "/api/debug/timer", .method = HTTP_POST, .handler = debug_timer_handler },
+        { .uri = "/api/debug/stopwatch", .method = HTTP_POST, .handler = debug_stopwatch_handler },
+        { .uri = "/api/glass",       .method = HTTP_POST, .handler = glass_post_handler },
+        { .uri = "/api/notes",       .method = HTTP_GET,  .handler = notes_get_handler },
+        { .uri = "/api/notes",       .method = HTTP_POST, .handler = notes_post_handler },
         { .uri = "/api/debug/gain",  .method = HTTP_POST, .handler = gain_get_handler },
         { .uri = "/api/voice/control", .method = HTTP_POST,
           .handler = voice_control_handler },

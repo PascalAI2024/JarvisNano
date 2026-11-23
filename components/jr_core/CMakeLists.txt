@@ -22,6 +22,7 @@ idf_component_register(
         "src/pace.c"
         "src/tool_policy.c"
         "src/timer.c"
+        "src/notes.c"
     INCLUDE_DIRS "include"
     REQUIRES jr_ports jr_dsp
 )

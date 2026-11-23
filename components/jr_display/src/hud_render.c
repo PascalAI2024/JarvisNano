@@ -1034,23 +1034,44 @@ void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
          * ring is one more concentric ring in a design made of them. */
         break;
     case HUD_FACE_LISTEN: {
-        /* A 32-point breathing halo in the free r185-194 band. The old solid
-         * annulus solved two square roots and wrote ~13k pixels every frame,
-         * dropping the healthy panel from 16 to 12 fps. The baked listening
-         * face carries the waveform; these sparse points retain the unambiguous
-         * listening tell without redrawing another full ring. */
+        /* Reactive 32-point listening halo in the free r185-194 band: breathes
+         * softly in cyan when quiet and scales luminance (cyan -> luminous
+         * ice-white) plus a subtle radial swell strictly inside r185-194 with
+         * live microphone amplitude. Pure function of (now_ms, env->amp) ->
+         * 12-row strip invariant, never gold. */
         const int a = (int)(((uint64_t)now_ms * 256u) / 1500u);
-        int lv = 120 + ((100 * (128 + (lsin(a) >> 8))) >> 8) + (env->amp >> 2);
+        const int breath = (128 + (lsin(a) >> 8)); /* 0..256 */
+        const int amp = (int)env->amp;
+        int lv = 100 + ((70 * breath) >> 8) + ((amp * 155) >> 8);
         if (lv > 255) {
             lv = 255;
         }
-        const uint16_t px = shade(s_ov_cyan, lv);
+        uint16_t px;
+        if (lv <= 195 || amp < 64) {
+            px = shade(s_ov_cyan, lv);
+        } else {
+            const int k = lv - 195; /* 1..60 -> crisp ice-white-cyan boost */
+            px = pack565((k * 175) / 60, 229 + (k * 20) / 60, 255, swap_bytes);
+        }
+        /* Subtle radial swell strictly inside r185-194: exact r190 when quiet
+         * (zero rounding drift into r<185), swelling outward to r191 with live
+         * mic amplitude and a gentle 0..+1 px travelling wave. */
         for (int i = 0; i < 32; ++i) {
-            const int y = cy + s_ov_halo_dy[i];
+            int dx = s_ov_halo_dx[i];
+            int dy = s_ov_halo_dy[i];
+            if (amp >= 48) {
+                const int w = 128 + (lsin((i * 16 + a) & 255) >> 8); /* 0..256 */
+                const int boost = ((amp * (128 + w)) >> 16);         /* 0..1 */
+                if (boost > 0) {
+                    dx = (dx * 191) / 190;
+                    dy = (dy * 191) / 190;
+                }
+            }
+            const int y = cy + dy;
             if (y + 3 <= s.y0 || y >= s.y1) {
                 continue;
             }
-            ov_dot(&s, cx + s_ov_halo_dx[i], y, px, 3);
+            ov_dot(&s, cx + dx, y, px, 3);
         }
         break;
     }
@@ -1104,9 +1125,39 @@ void hud_overlay_frame(uint16_t *dst, int y0, int nrows, uint32_t now_ms,
         }
         break;
     }
-    case HUD_FACE_THINK:
-        hud_overlay_thinking(dst, y0, nrows, now_ms, swap_bytes);
+    case HUD_FACE_THINK: {
+        /* Living THINKING orbital comet in the free r185-194 band: smooth
+         * 10-dot fading cyan comet using s_ov_halo_dx/dy[32] (~1.28 s/rev,
+         * sub-step interpolated, ice-white-cyan head, never gold, 12-row
+         * strip invariant). */
+        const uint32_t step_ms = 40u;
+        const int head = (int)((now_ms / step_ms) & 31u);
+        const int frac = (int)(((now_ms % step_ms) * 256u) / step_ms); /* 0..255 */
+        for (int k = 0; k < 10; ++k) {
+            const int idx = (head - (9 - k)) & 31;
+            const int y = cy + s_ov_halo_dy[idx];
+            if (y + 3 <= s.y0 || y >= s.y1) {
+                continue;
+            }
+            const int pos = k * 256 + frac; /* 0..2559 */
+            int lv = 28 + (pos * 227) / 2560;
+            if (lv > 255) {
+                lv = 255;
+            }
+            uint16_t px;
+            if (k == 9) {
+                /* White-hot cyan head (never gold: R < G <= B). */
+                px = pack565(175, 245, 255, swap_bytes);
+            } else if (k == 8) {
+                px = pack565(90, 238, 255, swap_bytes);
+            } else {
+                px = shade(s_ov_cyan, lv);
+            }
+            const int sz = k >= 4 ? 3 : 2;
+            ov_dot(&s, cx + s_ov_halo_dx[idx], y, px, sz);
+        }
         break;
+    }
     case HUD_FACE_ERROR:
         for (int y = s.y0; y < s.y1; ++y) {
             if (y >= 0 && y < HUD_H) {
@@ -2587,9 +2638,10 @@ static inline uint16_t bal_blend(uint16_t d, uint16_t sp, uint32_t a5)
     return (uint16_t)(r | (r >> 16));
 }
 
-/* The wheel as it was: four alpha taps a pixel. */
-int hud_balance_blit(uint16_t *dst, int y0, int nrows, bool swap_bytes,
-                     int32_t angle_q16)
+/* The wheel as it was: four alpha taps a pixel. Compiled at -O2 (HOT) so the
+ * per-pixel bilinear path runs fast on ESP32-S3 with bit-identical pixels. */
+HOT int hud_balance_blit(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                         int32_t angle_q16)
 {
     if (dst == NULL || nrows <= 0) {
         return 0;
@@ -2692,13 +2744,18 @@ int hud_balance_blit(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                 const uint16_t p00 = jr_balance_rgb[k], p10 = jr_balance_rgb[k + 1];
                 const uint16_t p01 = jr_balance_rgb[k + JR_BALANCE_SIZE];
                 const uint16_t p11 = jr_balance_rgb[k + JR_BALANCE_SIZE + 1];
-                const uint32_t r5 = (((p00 >> 11) & 31u) * w00 + ((p10 >> 11) & 31u) * w10 +
-                                     ((p01 >> 11) & 31u) * w01 + ((p11 >> 11) & 31u) * w11 + 32768u) >> 16;
-                const uint32_t g6 = (((p00 >> 5) & 63u) * w00 + ((p10 >> 5) & 63u) * w10 +
-                                     ((p01 >> 5) & 63u) * w01 + ((p11 >> 5) & 63u) * w11 + 32768u) >> 16;
-                const uint32_t b5 = ((p00 & 31u) * w00 + (p10 & 31u) * w10 +
-                                     (p01 & 31u) * w01 + (p11 & 31u) * w11 + 32768u) >> 16;
-                const uint16_t sp = (uint16_t)((r5 << 11) | (g6 << 5) | b5);
+                uint16_t sp;
+                if (p00 == p10 && p00 == p01 && p00 == p11) {
+                    sp = p00;
+                } else {
+                    const uint32_t r5 = (((p00 >> 11) & 31u) * w00 + ((p10 >> 11) & 31u) * w10 +
+                                         ((p01 >> 11) & 31u) * w01 + ((p11 >> 11) & 31u) * w11 + 32768u) >> 16;
+                    const uint32_t g6 = (((p00 >> 5) & 63u) * w00 + ((p10 >> 5) & 63u) * w10 +
+                                         ((p01 >> 5) & 63u) * w01 + ((p11 >> 5) & 63u) * w11 + 32768u) >> 16;
+                    const uint32_t b5 = ((p00 & 31u) * w00 + (p10 & 31u) * w10 +
+                                         (p01 & 31u) * w01 + (p11 & 31u) * w11 + 32768u) >> 16;
+                    sp = (uint16_t)((r5 << 11) | (g6 << 5) | b5);
+                }
                 *px = swap_bytes ? (uint16_t)((sp >> 8) | (sp << 8)) : sp;
                 continue;
             }
@@ -3323,6 +3380,13 @@ void hud_overlay_jarvis_dial(uint16_t *dst, int y0, int nrows, bool swap_bytes,
         const uint32_t a_s = WATCH_A12 + (uint32_t)(((int64_t)j->ss * 65536) / 60);
         hand_poly(&p, WATCH_CX16, WATCH_CY16, a_s, -30 * 16, HUD_CLOCK_R_SEC * 16, 12, 8, 0);
         aa_fill(&s, &p, W_GOLD, (255 * A) >> 8, swap_bytes, AA_SUB);
+        /* Subtle glowing accent at the seconds hand tip. */
+        int32_t tx, ty;
+        w_polar((HUD_CLOCK_R_SEC - 2) * 16, a_s, &tx, &ty);
+        static const wrgb_t tip_glow = { 255, 206, 92 };
+        static const wrgb_t tip_core = { 255, 242, 196 };
+        aa_disc(&s, tx, ty, 5 * 16, tip_glow, (78 * A) >> 8, swap_bytes);
+        aa_disc(&s, tx, ty, 2 * 16 + 6, tip_core, (235 * A) >> 8, swap_bytes);
     }
     aa_disc(&s, WATCH_CX16, WATCH_CY16, 6 * 16, W_WHITE, (255 * A) >> 8, swap_bytes);
 }

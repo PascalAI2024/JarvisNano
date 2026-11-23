@@ -599,6 +599,14 @@ void activity_note_tool(const char *tool_name, const char *args_json)
         else if (strcmp(tool_name, "set_timer") == 0 ||
                  strcmp(tool_name, "cancel_timer") == 0 ||
                  strcmp(tool_name, "list_timers") == 0) kind = "TIMER";
+        else if (strcmp(tool_name, "start_focus") == 0) kind = "FOCUS";
+        else if (strcmp(tool_name, "stopwatch") == 0) kind = "CHRONO";
+        else if (strcmp(tool_name, "add_note") == 0 ||
+                 strcmp(tool_name, "list_notes") == 0 ||
+                 strcmp(tool_name, "clear_notes") == 0) kind = "NOTES";
+        else if (strcmp(tool_name, "daily_briefing") == 0) kind = "BRIEFING";
+        else if (strcmp(tool_name, "set_ui_sounds") == 0) kind = "SOUNDS";
+        else if (strcmp(tool_name, "set_sunlight") == 0) kind = "SUNLIGHT";
         else if (strcmp(tool_name, "set_glass") == 0) kind = "GLASS";
         else if (strcmp(tool_name, "device_status") == 0) kind = "STATUS";
     }
@@ -711,10 +719,11 @@ static void device_tool_queue_error(uint32_t call_id, const char *call_id_text,
 
 /* ---- tools the device answers itself --------------------------------------
  *
- * weather_here, set_timer, cancel_timer, list_timers, set_glass,
- * device_status (always), and current_time (when the gateway is not usable).
- * All run on the voice task with zero network round-trips. */
-static const char *glass_space_name(jr_display_space_t space)
+ * weather_here, set_timer, cancel_timer, list_timers, start_focus, stopwatch,
+ * add_note, list_notes, clear_notes, daily_briefing, set_glass, set_ui_sounds,
+ * set_sunlight, device_status (always), and current_time (when the gateway is
+ * not usable). All run locally with zero network round-trips. */
+const char *device_glass_space_name(jr_display_space_t space)
 {
     switch (space) {
     case JR_DISPLAY_SPACE_JARVIS:   return "jarvis";
@@ -727,7 +736,7 @@ static const char *glass_space_name(jr_display_space_t space)
     }
 }
 
-static bool parse_glass_screen(const char *s, jr_display_space_t *out)
+bool device_parse_glass_screen(const char *s, jr_display_space_t *out)
 {
     if (s == NULL || s[0] == '\0') return false;
     if (strcasecmp(s, "jarvis") == 0 || strcasecmp(s, "home") == 0) {
@@ -748,7 +757,7 @@ static bool parse_glass_screen(const char *s, jr_display_space_t *out)
     return false;
 }
 
-static bool parse_watch_style(const char *s, jr_watch_style_t *out)
+bool device_parse_watch_style(const char *s, jr_watch_style_t *out)
 {
     if (s == NULL || s[0] == '\0') return false;
     if (strcasecmp(s, "jarvis") == 0)    { *out = JR_WATCH_JARVIS;    return true; }
@@ -760,6 +769,377 @@ static bool parse_watch_style(const char *s, jr_watch_style_t *out)
     if (strcasecmp(s, "skeleton") == 0)  { *out = JR_WATCH_SKELETON;  return true; }
     if (strcasecmp(s, "celestial") == 0) { *out = JR_WATCH_CELESTIAL; return true; }
     return false;
+}
+
+/* ---- NVS-persisted quick desk notes ("jr_notes", PSRAM bank) ------------ */
+#define JR_NOTES_NVS_NS      "jr_notes"
+#define JR_NOTES_NVS_KEY     "bank"
+#define JR_NOTES_BLOB_MAGIC  0x4A524E31u /* "JRN1" */
+#define JR_NOTES_BLOB_VER    1u
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    jr_note_bank_t bank;
+} jr_notes_blob_t;
+
+static jr_note_bank_t *s_notes;
+static SemaphoreHandle_t s_notes_lock;
+
+static int64_t device_wall_epoch_s(void)
+{
+    time_t tt = time(NULL);
+    struct tm tmv;
+    localtime_r(&tt, &tmv);
+    return (tmv.tm_year >= 2020 - 1900) ? (int64_t)tt : 0;
+}
+
+static void notes_persist_locked(void)
+{
+    if (s_notes == NULL) {
+        return;
+    }
+    jr_notes_blob_t *blob = heap_caps_calloc(1, sizeof(*blob),
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (blob == NULL) {
+        blob = calloc(1, sizeof(*blob));
+    }
+    if (blob == NULL) {
+        return;
+    }
+    blob->magic = JR_NOTES_BLOB_MAGIC;
+    blob->version = JR_NOTES_BLOB_VER;
+    blob->bank = *s_notes;
+
+    nvs_handle_t h;
+    if (nvs_open(JR_NOTES_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        esp_err_t err = nvs_set_blob(h, JR_NOTES_NVS_KEY, blob, sizeof(*blob));
+        if (err == ESP_OK) {
+            (void)nvs_commit(h);
+        } else {
+            ESP_LOGW(TAG, "notes: NVS write failed: %s", esp_err_to_name(err));
+        }
+        nvs_close(h);
+    }
+    free(blob);
+}
+
+void device_notes_init(void)
+{
+    if (s_notes_lock == NULL) {
+        s_notes_lock = xSemaphoreCreateMutex();
+    }
+    if (s_notes == NULL) {
+        s_notes = heap_caps_calloc(1, sizeof(*s_notes),
+                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_notes == NULL) {
+            s_notes = calloc(1, sizeof(*s_notes));
+        }
+    }
+    if (s_notes == NULL) {
+        ESP_LOGE(TAG, "notes: bank alloc failed");
+        return;
+    }
+    jr_notes_init(s_notes);
+
+    nvs_handle_t h;
+    if (nvs_open(JR_NOTES_NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        jr_notes_blob_t *blob = heap_caps_calloc(1, sizeof(*blob),
+                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (blob == NULL) {
+            blob = calloc(1, sizeof(*blob));
+        }
+        if (blob != NULL) {
+            size_t len = sizeof(*blob);
+            if (nvs_get_blob(h, JR_NOTES_NVS_KEY, blob, &len) == ESP_OK &&
+                len == sizeof(*blob) &&
+                blob->magic == JR_NOTES_BLOB_MAGIC &&
+                blob->version == JR_NOTES_BLOB_VER &&
+                blob->bank.count <= JR_NOTES_MAX) {
+                *s_notes = blob->bank;
+                for (unsigned i = 0U; i < s_notes->count; ++i) {
+                    s_notes->items[i].text[JR_NOTE_TEXT_MAX] = '\0';
+                }
+                if (s_notes->next_id == 0U) {
+                    s_notes->next_id = 1U;
+                }
+                ESP_LOGI(TAG, "notes: loaded %u note(s) from NVS",
+                         (unsigned)s_notes->count);
+            }
+            free(blob);
+        }
+        nvs_close(h);
+    }
+}
+
+uint32_t device_notes_add(const char *text)
+{
+    if (s_notes == NULL || s_notes_lock == NULL ||
+        xSemaphoreTake(s_notes_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return 0U;
+    }
+    const uint32_t id = jr_notes_add(s_notes, text, device_wall_epoch_s());
+    if (id != 0U) {
+        notes_persist_locked();
+    }
+    xSemaphoreGive(s_notes_lock);
+    return id;
+}
+
+bool device_notes_delete(uint32_t id)
+{
+    if (s_notes == NULL || s_notes_lock == NULL ||
+        xSemaphoreTake(s_notes_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return false;
+    }
+    const bool ok = jr_notes_delete(s_notes, id);
+    if (ok) {
+        notes_persist_locked();
+    }
+    xSemaphoreGive(s_notes_lock);
+    return ok;
+}
+
+unsigned device_notes_clear(const char *target)
+{
+    if (s_notes == NULL || s_notes_lock == NULL ||
+        xSemaphoreTake(s_notes_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return 0U;
+    }
+    const unsigned removed = jr_notes_clear(s_notes, target);
+    if (removed > 0U) {
+        notes_persist_locked();
+    }
+    xSemaphoreGive(s_notes_lock);
+    return removed;
+}
+
+void device_notes_snapshot(jr_note_bank_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    jr_notes_init(out);
+    if (s_notes == NULL || s_notes_lock == NULL ||
+        xSemaphoreTake(s_notes_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return;
+    }
+    *out = *s_notes;
+    xSemaphoreGive(s_notes_lock);
+}
+
+int device_notes_format_briefing(char *dst, size_t cap)
+{
+    if (dst == NULL || cap == 0U) {
+        return 0;
+    }
+    dst[0] = '\0';
+    if (s_notes == NULL || s_notes_lock == NULL ||
+        xSemaphoreTake(s_notes_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return 0;
+    }
+    const int n = jr_notes_format_briefing(s_notes, dst, cap);
+    xSemaphoreGive(s_notes_lock);
+    return n;
+}
+
+/* ---- Chronograph stopwatch state + display publisher -------------------- */
+static jr_stopwatch_t s_stopwatch;
+static portMUX_TYPE s_stopwatch_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void stopwatch_fill_snap_locked(uint32_t now_ms, stopwatch_snap_t *snap)
+{
+    memset(snap, 0, sizeof(*snap));
+    snap->active = s_stopwatch.active;
+    snap->running = s_stopwatch.running;
+    snap->elapsed_ms = jr_stopwatch_elapsed_ms(&s_stopwatch, now_ms);
+    snap->lap_count = s_stopwatch.lap_count;
+    for (uint8_t i = 0U; i < s_stopwatch.lap_count && i < JR_STOPWATCH_MAX_LAPS; ++i) {
+        snap->laps_ms[i] = s_stopwatch.laps_ms[i];
+    }
+}
+
+void device_stopwatch_snapshot(uint32_t now_ms, stopwatch_snap_t *out_snap)
+{
+    if (out_snap == NULL) {
+        return;
+    }
+    portENTER_CRITICAL(&s_stopwatch_mux);
+    stopwatch_fill_snap_locked(now_ms, out_snap);
+    portEXIT_CRITICAL(&s_stopwatch_mux);
+}
+
+bool device_stopwatch_action(const char *action, uint32_t now_ms,
+                             stopwatch_snap_t *out_snap)
+{
+    if (action == NULL || action[0] == '\0') {
+        return false;
+    }
+    bool valid = true;
+    bool mutated = false;
+    stopwatch_snap_t snap = {0};
+
+    portENTER_CRITICAL(&s_stopwatch_mux);
+    if (strcasecmp(action, "start") == 0) {
+        jr_stopwatch_start(&s_stopwatch, now_ms);
+        mutated = true;
+    } else if (strcasecmp(action, "stop") == 0 || strcasecmp(action, "pause") == 0) {
+        jr_stopwatch_stop(&s_stopwatch, now_ms);
+        mutated = true;
+    } else if (strcasecmp(action, "lap") == 0) {
+        (void)jr_stopwatch_lap(&s_stopwatch, now_ms, NULL);
+        mutated = true;
+    } else if (strcasecmp(action, "reset") == 0) {
+        jr_stopwatch_reset(&s_stopwatch);
+        mutated = true;
+    } else if (strcasecmp(action, "status") == 0) {
+        /* read-only */
+    } else {
+        valid = false;
+    }
+    if (valid) {
+        stopwatch_fill_snap_locked(now_ms, &snap);
+    }
+    portEXIT_CRITICAL(&s_stopwatch_mux);
+
+    if (!valid) {
+        return false;
+    }
+    if (mutated) {
+        jr_display_stopwatch_set(snap.active, snap.running,
+                                 snap.elapsed_ms, snap.lap_count);
+    }
+    if (out_snap != NULL) {
+        *out_snap = snap;
+    }
+    return true;
+}
+
+void device_stopwatch_tick(uint32_t now_ms)
+{
+    static uint32_t s_sw_next_pub_ms;
+    stopwatch_snap_t snap = {0};
+    portENTER_CRITICAL(&s_stopwatch_mux);
+    const bool running = s_stopwatch.running;
+    if (running && (int32_t)(now_ms - s_sw_next_pub_ms) >= 0) {
+        stopwatch_fill_snap_locked(now_ms, &snap);
+    }
+    portEXIT_CRITICAL(&s_stopwatch_mux);
+    if (running && (int32_t)(now_ms - s_sw_next_pub_ms) >= 0) {
+        jr_display_stopwatch_set(snap.active, snap.running,
+                                 snap.elapsed_ms, snap.lap_count);
+        s_sw_next_pub_ms = now_ms + 100U;
+    }
+}
+
+/* ---- CO5300 Sunlight Boost (HBM) policy & 5-minute auto-revert ---------- */
+#define HBM_AUTO_REVERT_MS   300000U   /* 5 minutes */
+#define HBM_MIN_BATTERY_PCT  25U       /* refused off USB below 25% */
+#define HBM_MAX_CHIP_C       65.0f     /* refused above 65 C */
+
+static _Atomic uint32_t s_hbm_expires_ms;
+
+bool device_sunlight_set(bool enabled, uint32_t now_ms, const char **out_reason)
+{
+    if (out_reason != NULL) {
+        *out_reason = "ok";
+    }
+    if (!enabled) {
+        atomic_store(&s_hbm_expires_ms, 0U);
+        jr_display_set_hbm(false);
+        ESP_LOGI(TAG, "hbm: sunlight boost OFF");
+        return true;
+    }
+    jr_power_t bat = {0};
+    const bool have_bat = jr_power_read(&bat) == ESP_OK && bat.present;
+    if (have_bat && !bat.usb_present && bat.percent < HBM_MIN_BATTERY_PCT) {
+        if (out_reason != NULL) {
+            *out_reason = "battery_low";
+        }
+        ESP_LOGW(TAG, "hbm: refused (battery %u%% off USB)", (unsigned)bat.percent);
+        return false;
+    }
+    float chip_c = 0.0f;
+    if (device_chip_temp_c(&chip_c) && chip_c > HBM_MAX_CHIP_C) {
+        if (out_reason != NULL) {
+            *out_reason = "thermal_high";
+        }
+        ESP_LOGW(TAG, "hbm: refused (chip %.1f C > 65 C)", (double)chip_c);
+        return false;
+    }
+    uint32_t exp = now_ms + HBM_AUTO_REVERT_MS;
+    if (exp == 0U) {
+        exp = 1U;
+    }
+    atomic_store(&s_hbm_expires_ms, exp);
+    jr_display_set_hbm(true);
+    ESP_LOGI(TAG, "hbm: sunlight boost ON (auto-reverts in 5 min)");
+    return true;
+}
+
+void device_sunlight_tick(uint32_t now_ms, const jr_power_t *bat, bool have_bat)
+{
+    if (!jr_display_get_hbm()) {
+        return;
+    }
+    const uint32_t exp = atomic_load(&s_hbm_expires_ms);
+    const char *why = NULL;
+    if (exp != 0U && (int32_t)(now_ms - exp) >= 0) {
+        why = "5-min timeout";
+    } else if (have_bat && bat != NULL && bat->present &&
+               !bat->usb_present && bat->percent < HBM_MIN_BATTERY_PCT) {
+        why = "battery <25% off USB";
+    } else {
+        float chip_c = 0.0f;
+        if (device_chip_temp_c(&chip_c) && chip_c > HBM_MAX_CHIP_C) {
+            why = "chip >65 C";
+        }
+    }
+    if (why != NULL) {
+        atomic_store(&s_hbm_expires_ms, 0U);
+        jr_display_set_hbm(false);
+        ESP_LOGI(TAG, "hbm: auto-reverted (%s)", why);
+    }
+}
+
+static bool json_get_bool_opt(const cJSON *item, bool *out)
+{
+    if (cJSON_IsBool(item)) {
+        *out = cJSON_IsTrue(item);
+        return true;
+    }
+    if (cJSON_IsNumber(item)) {
+        *out = item->valuedouble != 0.0;
+        return true;
+    }
+    return false;
+}
+
+static int format_stopwatch_json(char *out, size_t cap,
+                                 const stopwatch_snap_t *snap)
+{
+    int n = snprintf(out, cap,
+                     "{\"ok\":true,\"active\":%s,\"running\":%s,"
+                     "\"elapsed_ms\":%u,\"laps\":[",
+                     snap->active ? "true" : "false",
+                     snap->running ? "true" : "false",
+                     (unsigned)snap->elapsed_ms);
+    if (n < 0 || (size_t)n >= cap) {
+        return -1;
+    }
+    for (uint8_t i = 0U; i < snap->lap_count && i < JR_STOPWATCH_MAX_LAPS; ++i) {
+        int w = snprintf(out + n, cap - (size_t)n, "%s%u",
+                         i == 0U ? "" : ",", (unsigned)snap->laps_ms[i]);
+        if (w < 0 || (size_t)n + (size_t)w >= cap) {
+            return -1;
+        }
+        n += w;
+    }
+    int tail = snprintf(out + n, cap - (size_t)n, "]}");
+    if (tail < 0 || (size_t)n + (size_t)tail >= cap) {
+        return -1;
+    }
+    return n + tail;
 }
 
 bool device_try_local_tool(const jr_command_t *cmd)
@@ -775,8 +1155,18 @@ bool device_try_local_tool(const jr_command_t *cmd)
     const bool list_timers  = strcmp(cmd->tool_name, "list_timers") == 0;
     const bool set_glass    = strcmp(cmd->tool_name, "set_glass") == 0;
     const bool dev_status   = strcmp(cmd->tool_name, "device_status") == 0;
+    const bool start_focus  = strcmp(cmd->tool_name, "start_focus") == 0;
+    const bool sw_tool      = strcmp(cmd->tool_name, "stopwatch") == 0;
+    const bool add_note     = strcmp(cmd->tool_name, "add_note") == 0;
+    const bool list_notes   = strcmp(cmd->tool_name, "list_notes") == 0;
+    const bool clear_notes  = strcmp(cmd->tool_name, "clear_notes") == 0;
+    const bool briefing     = strcmp(cmd->tool_name, "daily_briefing") == 0;
+    const bool ui_sounds    = strcmp(cmd->tool_name, "set_ui_sounds") == 0;
+    const bool sunlight     = strcmp(cmd->tool_name, "set_sunlight") == 0;
     if (!weather && !clock_tool && !set_timer && !cancel_timer &&
-        !list_timers && !set_glass && !dev_status) {
+        !list_timers && !set_glass && !dev_status && !start_focus &&
+        !sw_tool && !add_note && !list_notes && !clear_notes &&
+        !briefing && !ui_sounds && !sunlight) {
         return false;
     }
     local_tool_result_t *slot = device_tool_queue_slot(
@@ -914,8 +1304,8 @@ bool device_try_local_tool(const jr_command_t *cmd)
                              ws_item->valuestring[0] != '\0';
         jr_display_space_t sp = jr_display_nav_space();
         jr_watch_style_t ws = jr_display_watch_style();
-        const bool ok_scr = !has_scr || parse_glass_screen(scr_item->valuestring, &sp);
-        const bool ok_ws  = !has_ws  || parse_watch_style(ws_item->valuestring, &ws);
+        const bool ok_scr = !has_scr || device_parse_glass_screen(scr_item->valuestring, &sp);
+        const bool ok_ws  = !has_ws  || device_parse_watch_style(ws_item->valuestring, &ws);
         if ((!has_scr && !has_ws) || !ok_scr || !ok_ws) {
             slot->status = JR_TOOL_STATUS_INVALID_ARGS;
             (void)snprintf(out, cap,
@@ -940,7 +1330,7 @@ bool device_try_local_tool(const jr_command_t *cmd)
                 jr_display_caption_label(cap_txt, JR_DISPLAY_LABEL_WATCH_STYLE);
             } else if (has_scr) {
                 char cap_txt[16];
-                const char *sn = glass_space_name(sp);
+                const char *sn = device_glass_space_name(sp);
                 size_t k = 0U;
                 for (; sn[k] != '\0' && k + 1U < sizeof cap_txt; ++k) {
                     cap_txt[k] = (char)toupper((unsigned char)sn[k]);
@@ -950,10 +1340,10 @@ bool device_try_local_tool(const jr_command_t *cmd)
             }
             (void)snprintf(out, cap,
                 "{\"ok\":true,\"screen\":\"%s\",\"watch_style\":\"%s\"}",
-                glass_space_name(jr_display_nav_space()),
+                device_glass_space_name(jr_display_nav_space()),
                 jr_display_watch_style_name(jr_display_watch_style()));
             ESP_LOGI(TAG, "local tool=set_glass screen=%s watch_style=%s",
-                     glass_space_name(jr_display_nav_space()),
+                     device_glass_space_name(jr_display_nav_space()),
                      jr_display_watch_style_name(jr_display_watch_style()));
         }
         cJSON_Delete(args);
@@ -970,7 +1360,8 @@ bool device_try_local_tool(const jr_command_t *cmd)
             "{\"battery_pct\":%d,\"charging\":%s,\"usb\":%s,"
             "\"wifi_rssi\":%d,\"chip_temp_c\":%d,\"volume\":%d,"
             "\"brightness\":%u,\"watch_style\":\"%s\",\"screen\":\"%s\","
-            "\"muted\":%s,\"uptime_s\":%u,\"active_timers\":%u}",
+            "\"muted\":%s,\"hbm\":%s,\"ui_sounds\":%s,"
+            "\"uptime_s\":%u,\"active_timers\":%u}",
             batt_pct,
             (have_bat && bat.charging) ? "true" : "false",
             (have_bat && bat.usb_present) ? "true" : "false",
@@ -979,10 +1370,216 @@ bool device_try_local_tool(const jr_command_t *cmd)
             s_out_vol,
             (unsigned)s_brightness_cap,
             jr_display_watch_style_name(jr_display_watch_style()),
-            glass_space_name(jr_display_nav_space()),
+            device_glass_space_name(jr_display_nav_space()),
             muted ? "true" : "false",
+            jr_display_get_hbm() ? "true" : "false",
+            atomic_load(&s_ui_sounds) ? "true" : "false",
             (unsigned)(now_ms / 1000U),
             (unsigned)jr_timer_active_count(&s_timers));
+    } else if (start_focus) {
+        cJSON *args = cJSON_Parse(cmd->tool_args ? cmd->tool_args : "{}");
+        const cJSON *min_item = cJSON_GetObjectItemCaseSensitive(args, "minutes");
+        const cJSON *lbl_item = cJSON_GetObjectItemCaseSensitive(args, "label");
+        uint32_t minutes = 25U;
+        bool bad_min = false;
+        if (min_item != NULL && !cJSON_IsNull(min_item)) {
+            if (!cJSON_IsNumber(min_item) || min_item->valuedouble < 1.0 ||
+                min_item->valuedouble > 720.0) {
+                bad_min = true;
+            } else {
+                minutes = (uint32_t)lrint(min_item->valuedouble);
+            }
+        }
+        const char *label = (cJSON_IsString(lbl_item) && lbl_item->valuestring &&
+                             lbl_item->valuestring[0] != '\0')
+            ? lbl_item->valuestring : "FOCUS";
+        char norm[JR_TIMER_LABEL_CAP] = {0};
+        uint32_t eff_s = 0U;
+        if (!bad_min &&
+            jr_timer_set(&s_timers, now_ms, minutes * 60U, label,
+                         norm, sizeof norm, &eff_s)) {
+            jr_display_nav_set(JR_DISPLAY_SPACE_WATCH);
+            timer_publish_now(now_ms);
+            jr_mood_poke_awake(&s_mood, now_ms);
+            jr_display_bloom();
+            device_confirm_cue();
+            char cap_txt[32];
+            snprintf(cap_txt, sizeof cap_txt, "%.14s %u:00", norm, (unsigned)(eff_s / 60U));
+            jr_display_caption_set(cap_txt);
+            (void)snprintf(out, cap,
+                "{\"ok\":true,\"label\":\"%s\",\"minutes\":%u,\"seconds\":%u,\"screen\":\"watch\"}",
+                norm, (unsigned)(eff_s / 60U), (unsigned)eff_s);
+            ESP_LOGI(TAG, "local tool=start_focus label=%s min=%u", norm, (unsigned)(eff_s / 60U));
+        } else {
+            slot->status = JR_TOOL_STATUS_INVALID_ARGS;
+            const bool full = jr_timer_active_count(&s_timers) >= JR_TIMER_MAX;
+            (void)snprintf(out, cap,
+                "{\"error\":{\"code\":\"%s\",\"message\":\"%s\"}}",
+                full ? "timer_bank_full" : "invalid_focus",
+                full ? "All 4 timer slots are already in use."
+                     : "Focus minutes must be between 1 and 720.");
+        }
+        cJSON_Delete(args);
+    } else if (sw_tool) {
+        cJSON *args = cJSON_Parse(cmd->tool_args ? cmd->tool_args : "{}");
+        const cJSON *act_item = cJSON_GetObjectItemCaseSensitive(args, "action");
+        const char *action = (cJSON_IsString(act_item) && act_item->valuestring &&
+                              act_item->valuestring[0] != '\0')
+            ? act_item->valuestring : "status";
+        stopwatch_snap_t snap = {0};
+        if (device_stopwatch_action(action, now_ms, &snap)) {
+            jr_mood_poke_awake(&s_mood, now_ms);
+            if (strcasecmp(action, "status") != 0) {
+                device_confirm_cue();
+            }
+            if (format_stopwatch_json(out, cap, &snap) < 0) {
+                (void)snprintf(out, cap, "{\"ok\":true,\"active\":%s,\"running\":%s,\"elapsed_ms\":%u}",
+                               snap.active ? "true" : "false",
+                               snap.running ? "true" : "false",
+                               (unsigned)snap.elapsed_ms);
+            }
+            ESP_LOGI(TAG, "local tool=stopwatch action=%s elapsed_ms=%u laps=%u",
+                     action, (unsigned)snap.elapsed_ms, (unsigned)snap.lap_count);
+        } else {
+            slot->status = JR_TOOL_STATUS_INVALID_ARGS;
+            (void)snprintf(out, cap,
+                "{\"error\":{\"code\":\"invalid_action\",\"message\":"
+                "\"Use start, stop, lap, reset, or status.\"}}");
+        }
+        cJSON_Delete(args);
+    } else if (add_note) {
+        cJSON *args = cJSON_Parse(cmd->tool_args ? cmd->tool_args : "{}");
+        const cJSON *txt_item = cJSON_GetObjectItemCaseSensitive(args, "text");
+        const char *txt = (cJSON_IsString(txt_item) && txt_item->valuestring)
+            ? txt_item->valuestring : NULL;
+        const uint32_t id = device_notes_add(txt);
+        if (id != 0U) {
+            jr_note_bank_t bank;
+            device_notes_snapshot(&bank);
+            jr_mood_poke_awake(&s_mood, now_ms);
+            device_confirm_cue();
+            jr_display_caption_set("NOTE PINNED");
+            (void)snprintf(out, cap,
+                "{\"ok\":true,\"id\":%u,\"count\":%u,\"max\":%u}",
+                (unsigned)id, (unsigned)bank.count, (unsigned)JR_NOTES_MAX);
+            ESP_LOGI(TAG, "local tool=add_note id=%u count=%u",
+                     (unsigned)id, (unsigned)bank.count);
+        } else {
+            jr_note_bank_t bank;
+            device_notes_snapshot(&bank);
+            slot->status = JR_TOOL_STATUS_INVALID_ARGS;
+            const bool full = bank.count >= JR_NOTES_MAX;
+            (void)snprintf(out, cap,
+                "{\"error\":{\"code\":\"%s\",\"message\":\"%s\"}}",
+                full ? "notes_full" : "invalid_note",
+                full ? "All 6 desk note slots are full; clear one first."
+                     : "Provide non-empty note text (up to 64 chars).");
+        }
+        cJSON_Delete(args);
+    } else if (list_notes) {
+        jr_note_bank_t bank;
+        device_notes_snapshot(&bank);
+        int n = snprintf(out, cap, "{\"count\":%u,\"max\":%u,\"notes\":[",
+                         (unsigned)bank.count, (unsigned)JR_NOTES_MAX);
+        for (unsigned i = 0U; i < bank.count && n > 0 && (size_t)n < cap - 24U; ++i) {
+            int w = snprintf(out + n, cap - (size_t)n,
+                             "%s{\"id\":%u,\"text\":\"%s\"}",
+                             i == 0U ? "" : ",",
+                             (unsigned)bank.items[i].id, bank.items[i].text);
+            if (w < 0 || (size_t)n + (size_t)w >= cap - 4U) {
+                break;
+            }
+            n += w;
+        }
+        if (n > 0 && (size_t)n + 3U < cap) {
+            snprintf(out + n, cap - (size_t)n, "]}");
+        }
+    } else if (clear_notes) {
+        cJSON *args = cJSON_Parse(cmd->tool_args ? cmd->tool_args : "{}");
+        const cJSON *tgt_item = cJSON_GetObjectItemCaseSensitive(args, "target");
+        const char *target = (cJSON_IsString(tgt_item) && tgt_item->valuestring)
+            ? tgt_item->valuestring : "all";
+        const unsigned removed = device_notes_clear(target);
+        jr_note_bank_t bank;
+        device_notes_snapshot(&bank);
+        if (removed > 0U) {
+            jr_mood_poke_awake(&s_mood, now_ms);
+            device_confirm_cue();
+            jr_display_caption_set(bank.count == 0U ? "NOTES CLEARED" : "NOTE REMOVED");
+        }
+        (void)snprintf(out, cap,
+            "{\"ok\":true,\"removed\":%u,\"remaining\":%u}",
+            removed, (unsigned)bank.count);
+        ESP_LOGI(TAG, "local tool=clear_notes removed=%u remaining=%u",
+                 removed, (unsigned)bank.count);
+        cJSON_Delete(args);
+    } else if (briefing) {
+        jr_power_t bat = {0};
+        const bool have_bat = jr_power_read(&bat) == ESP_OK && bat.present;
+        char summary[480];
+        (void)briefing_compose_live(summary, sizeof summary,
+                                    have_bat ? &bat : NULL);
+        /* Sanitize any quotes/backslashes so summary embeds safely in JSON. */
+        for (char *p = summary; *p != '\0'; ++p) {
+            if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20U) {
+                *p = ' ';
+            }
+        }
+        jr_mood_poke_awake(&s_mood, now_ms);
+        jr_display_caption_set("DAILY BRIEFING");
+        (void)snprintf(out, cap, "{\"ok\":true,\"briefing\":\"%s\"}", summary);
+        ESP_LOGI(TAG, "local tool=daily_briefing (%u chars)",
+                 (unsigned)strlen(summary));
+    } else if (ui_sounds) {
+        cJSON *args = cJSON_Parse(cmd->tool_args ? cmd->tool_args : "{}");
+        const cJSON *en_item = cJSON_GetObjectItemCaseSensitive(args, "enabled");
+        bool enabled = false;
+        if (json_get_bool_opt(en_item, &enabled)) {
+            ui_sounds_set(enabled);
+            jr_mood_poke_awake(&s_mood, now_ms);
+            if (enabled) {
+                device_confirm_cue();
+            }
+            jr_display_caption_set(enabled ? "UI SOUNDS ON" : "UI SOUNDS OFF");
+            (void)snprintf(out, cap, "{\"ok\":true,\"ui_sounds\":%s}",
+                           enabled ? "true" : "false");
+            ESP_LOGI(TAG, "local tool=set_ui_sounds enabled=%d", enabled ? 1 : 0);
+        } else {
+            slot->status = JR_TOOL_STATUS_INVALID_ARGS;
+            (void)snprintf(out, cap,
+                "{\"error\":{\"code\":\"invalid_arg\",\"message\":"
+                "\"Provide boolean enabled (true or false).\"}}");
+        }
+        cJSON_Delete(args);
+    } else if (sunlight) {
+        cJSON *args = cJSON_Parse(cmd->tool_args ? cmd->tool_args : "{}");
+        const cJSON *en_item = cJSON_GetObjectItemCaseSensitive(args, "enabled");
+        bool enabled = false;
+        if (!json_get_bool_opt(en_item, &enabled)) {
+            slot->status = JR_TOOL_STATUS_INVALID_ARGS;
+            (void)snprintf(out, cap,
+                "{\"error\":{\"code\":\"invalid_arg\",\"message\":"
+                "\"Provide boolean enabled (true or false).\"}}");
+        } else {
+            const char *reason = "ok";
+            if (device_sunlight_set(enabled, now_ms, &reason)) {
+                jr_mood_poke_awake(&s_mood, now_ms);
+                device_confirm_cue();
+                jr_display_caption_set(enabled ? "SUNLIGHT BOOST" : "SUNLIGHT OFF");
+                (void)snprintf(out, cap,
+                    "{\"ok\":true,\"hbm\":%s,\"auto_revert_min\":%u}",
+                    enabled ? "true" : "false", enabled ? 5U : 0U);
+            } else {
+                slot->status = JR_TOOL_STATUS_INVALID_ARGS;
+                (void)snprintf(out, cap,
+                    "{\"error\":{\"code\":\"%s\",\"message\":\"%s\"}}",
+                    reason,
+                    strcmp(reason, "thermal_high") == 0
+                        ? "Sunlight boost refused: chip temperature is above 65 C."
+                        : "Sunlight boost refused: battery is below 25 percent off USB.");
+            }
+        }
+        cJSON_Delete(args);
     }
     return true;
 }

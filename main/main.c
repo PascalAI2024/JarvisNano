@@ -292,6 +292,102 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
         .arg_name = NULL,
         .arg_desc = NULL,
     },
+    {
+        .name = "start_focus",
+        .description =
+            "Start a local Pomodoro focus session (default 25 minutes) and "
+            "switch the glass to the watch face.",
+        .params = {
+            {
+                .name = "minutes",
+                .type = JR_GEMINI_PT_INTEGER,
+                .description = "Focus duration in minutes (1..720, default 25).",
+                .required = false,
+            },
+            {
+                .name = "label",
+                .type = JR_GEMINI_PT_STRING,
+                .description = "Optional short label (default FOCUS).",
+                .required = false,
+            },
+        },
+        .param_count = JR_GEMINI_PARAM_COUNT(2),
+    },
+    {
+        .name = "stopwatch",
+        .description =
+            "Control the on-device chronograph stopwatch with up to 4 laps: "
+            "start, stop, lap, reset, or status.",
+        .params = {{
+            .name = "action",
+            .type = JR_GEMINI_PT_STRING,
+            .description = "Action: start, stop, lap, reset, or status.",
+            .required = true,
+        }},
+        .param_count = JR_GEMINI_PARAM_COUNT(1),
+    },
+    {
+        .name = "add_note",
+        .description =
+            "Pin a short local desk note (up to 64 chars, max 6 notes) "
+            "persisted in NVS on this device.",
+        .arg_name = "text",
+        .arg_desc = "Short desk note text (up to 64 characters).",
+    },
+    {
+        .name = "list_notes",
+        .description =
+            "List all pinned local desk notes stored on this device.",
+        .arg_name = NULL,
+        .arg_desc = NULL,
+    },
+    {
+        .name = "clear_notes",
+        .description =
+            "Remove pinned local desk notes: 'all' to clear every note, a "
+            "note ID number, or a keyword to match.",
+        .params = {{
+            .name = "target",
+            .type = JR_GEMINI_PT_STRING,
+            .description = "'all', a note ID, or text keyword to clear.",
+            .required = false,
+        }},
+        .param_count = JR_GEMINI_PARAM_COUNT(1),
+    },
+    {
+        .name = "daily_briefing",
+        .description =
+            "Get a live composed briefing at any hour: date, local weather, "
+            "12-hour rain outlook, pinned desk notes, active timers, finished "
+            "tasks, and battery.",
+        .arg_name = NULL,
+        .arg_desc = NULL,
+    },
+    {
+        .name = "set_ui_sounds",
+        .description =
+            "Turn subtle touch interface sounds on or off and persist the choice.",
+        .params = {{
+            .name = "enabled",
+            .type = JR_GEMINI_PT_BOOLEAN,
+            .description = "true to enable UI sounds, false to silence them.",
+            .required = true,
+        }},
+        .param_count = JR_GEMINI_PARAM_COUNT(1),
+    },
+    {
+        .name = "set_sunlight",
+        .description =
+            "Toggle CO5300 High-Brightness Mode (sunlight boost, auto-reverts "
+            "after 5 min; refused if battery <25% off USB or chip >65 C).",
+        .params = {{
+            .name = "enabled",
+            .type = JR_GEMINI_PT_BOOLEAN,
+            .description = "true to enable sunlight boost, false to turn off.",
+            .required = true,
+        }},
+        .param_count = JR_GEMINI_PARAM_COUNT(1),
+    },
 };
 
 _Static_assert(sizeof(s_device_tool_fns) / sizeof(s_device_tool_fns[0]) ==
@@ -331,6 +427,14 @@ static const char s_device_tool_labels[][13] = {
     "TIMERS",       /* list_timers    */
     "GLASS",        /* set_glass      */
     "STATUS",       /* device_status  */
+    "FOCUS",        /* start_focus    */
+    "STOPWATCH",    /* stopwatch      */
+    "ADD NOTE",     /* add_note       */
+    "NOTES",        /* list_notes     */
+    "CLEAR NOTES",  /* clear_notes    */
+    "BRIEFING",     /* daily_briefing */
+    "UI SOUNDS",    /* set_ui_sounds  */
+    "SUNLIGHT",     /* set_sunlight   */
 };
 
 _Static_assert(sizeof(s_device_tool_labels) / sizeof(s_device_tool_labels[0]) ==
@@ -375,6 +479,7 @@ portMUX_TYPE s_timer_mux = portMUX_INITIALIZER_UNLOCKED;
 timer_snap_t s_timer_snap;
 timer_debug_req_t s_debug_timer_req_data;
 _Atomic uint32_t s_debug_timer_req;
+_Atomic bool s_glass_poke_req;
 
 void timer_publish_now(uint32_t now_ms)
 {
@@ -384,6 +489,7 @@ void timer_publish_now(uint32_t now_ms)
         .active = v.active,
         .ringing = v.ringing,
         .rem_s = v.rem_s,
+        .total_s = v.total_s,
         .pct_left = v.pct_left,
         .count = (uint8_t)jr_timer_active_count(&s_timers),
     };
@@ -1309,12 +1415,60 @@ static void morning_briefing_forced_maybe(const jr_power_t *bat)
     briefing_deliver(&tmv, bat, true);
 }
 
+int briefing_compose_live(char *dst, size_t cap, const jr_power_t *bat)
+{
+    if (dst == NULL || cap == 0U) {
+        return 0;
+    }
+    struct tm tmv;
+    const bool have_date = device_wall_time(&tmv);
+    char title[64];
+    int done = 0;
+    board_take_done(&done, title, sizeof title);
+    char notes_buf[224];
+    notes_buf[0] = '\0';
+    (void)device_notes_format_briefing(notes_buf, sizeof notes_buf);
+    const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    jr_timer_view_t tview = {0};
+    const bool have_timer = jr_timer_nearest(&s_timers, now_ms, &tview);
+    const unsigned tcount = jr_timer_active_count(&s_timers);
+    const bool gauge = bat != NULL && bat->present && bat->percent <= 100U;
+    jr_briefing_facts_t f = {
+        .have_date = have_date,
+        .wday = have_date ? tmv.tm_wday : 0,
+        .mday = have_date ? tmv.tm_mday : 0,
+        .mon = have_date ? tmv.tm_mon : 0,
+        .have_weather = s_weather.valid,
+        .temp_f = s_weather.temp_f,
+        .hi_f = s_weather.hi_f,
+        .lo_f = s_weather.lo_f,
+        .condition = s_weather.condition,
+        .rain_in_h = weather_rain_ahead_h(12),
+        .tasks_done = done,
+        .task_title = done > 0 ? title : NULL,
+        .battery_pct = gauge ? (int)bat->percent : -1,
+        .on_usb = bat != NULL && bat->usb_present,
+        .notes_summary = notes_buf[0] != '\0' ? notes_buf : NULL,
+        .active_timers = (int)tcount,
+        .nearest_timer = have_timer ? tview.label : NULL,
+        .nearest_timer_s = have_timer ? (int)tview.rem_s : 0,
+    };
+    return jr_briefing_compose(dst, cap, &f);
+}
+
 static void briefing_deliver(const struct tm *tmvp, const jr_power_t *bat, bool forced)
 {
     const struct tm tmv = *tmvp;
     char title[64];
     int done = 0;
     board_take_done(&done, title, sizeof title);
+    char notes_buf[224];
+    notes_buf[0] = '\0';
+    (void)device_notes_format_briefing(notes_buf, sizeof notes_buf);
+    const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    jr_timer_view_t tview = {0};
+    const bool have_timer = jr_timer_nearest(&s_timers, now_ms, &tview);
+    const unsigned tcount = jr_timer_active_count(&s_timers);
     const bool gauge = bat != NULL && bat->present && bat->percent <= 100U;
     jr_briefing_facts_t f = {
         .have_date = true,
@@ -1331,6 +1485,10 @@ static void briefing_deliver(const struct tm *tmvp, const jr_power_t *bat, bool 
         .task_title = done > 0 ? title : NULL,
         .battery_pct = gauge ? (int)bat->percent : -1,
         .on_usb = bat != NULL && bat->usb_present,
+        .notes_summary = notes_buf[0] != '\0' ? notes_buf : NULL,
+        .active_timers = (int)tcount,
+        .nearest_timer = have_timer ? tview.label : NULL,
+        .nearest_timer_s = have_timer ? (int)tview.rem_s : 0,
     };
     if (atomic_load(&s_voice_privacy_paused)) {
         char cap[JR_BRIEF_CAPTION_GLYPHS + 1];
@@ -1339,7 +1497,7 @@ static void briefing_deliver(const struct tm *tmvp, const jr_power_t *bat, bool 
         ESP_LOGI(TAG, "briefing: caption, muted%s (%s)", forced ? ", forced" : "", cap);
         return;
     }
-    char text[400];
+    char text[640];
     (void)jr_briefing_compose(text, sizeof text, &f);
     handle_say(text);
     jr_display_caption_set("GOOD MORNING");
@@ -2878,6 +3036,7 @@ static void voice_task(void *arg)
                 }
                 morning_briefing_maybe(lifted || boot_lift, have_power ? &bat : NULL);
                 morning_briefing_forced_maybe(have_power ? &bat : NULL);
+                device_sunlight_tick((uint32_t)now, have_power ? &bat : NULL, have_power);
             }
             /* DEEP SLEEP WHEN NOT IN USE. The ladder says when (DREAM for
              * JR_MOOD_SLEEP_MS); the world says whether: never on USB (a
@@ -2892,7 +3051,7 @@ static void voice_task(void *arg)
                     (have_power && bat.usb_present) ||
                     atomic_load(&s_ota_active) ||
                     operator_mode_active((uint32_t)now) ||
-                    jr_timer_any_active(&s_timers);
+                    jr_timer_blocks_sleep(&s_timers, (uint32_t)now);
                 if (forced) {
                     enter_deep_sleep("forced", atomic_load(&s_sleep_timer_s));
                 } else if (jr_mood_sleep_due(&s_mood, (uint32_t)now) &&
@@ -3493,19 +3652,37 @@ static void voice_task(void *arg)
             static bool s_timer_was_active;
             bool force_pub = false;
 
+            if (atomic_exchange(&s_glass_poke_req, false)) {
+                jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                companion_attention((uint32_t)now);
+            }
+            device_stopwatch_tick((uint32_t)now);
+
             const uint32_t treq = atomic_exchange(&s_debug_timer_req, 0U);
             if (treq != 0U) {
                 timer_debug_req_t dreq = {0};
                 portENTER_CRITICAL(&s_timer_mux);
                 dreq = s_debug_timer_req_data;
                 portEXIT_CRITICAL(&s_timer_mux);
-                if (dreq.kind == TIMER_REQ_SET) {
+                if (dreq.kind == TIMER_REQ_SET || dreq.kind == TIMER_REQ_FOCUS) {
                     char norm[JR_TIMER_LABEL_CAP] = {0};
                     uint32_t eff_s = 0U;
+                    const char *lbl = (dreq.kind == TIMER_REQ_FOCUS &&
+                                       dreq.label[0] == '\0')
+                        ? "FOCUS" : dreq.label;
                     if (jr_timer_set(&s_timers, (uint32_t)now, dreq.seconds,
-                                     dreq.label, norm, sizeof norm, &eff_s)) {
+                                     lbl, norm, sizeof norm, &eff_s)) {
+                        if (dreq.kind == TIMER_REQ_FOCUS) {
+                            jr_display_nav_set(JR_DISPLAY_SPACE_WATCH);
+                            jr_display_bloom();
+                            char cap[32];
+                            snprintf(cap, sizeof cap, "%.14s %u:00",
+                                     norm, (unsigned)(eff_s / 60U));
+                            jr_display_caption_set(cap);
+                        }
                         jr_mood_poke_awake(&s_mood, (uint32_t)now);
-                        ESP_LOGI(TAG, "debug timer set: %s %us",
+                        ESP_LOGI(TAG, "debug timer %s: %s %us",
+                                 dreq.kind == TIMER_REQ_FOCUS ? "focus" : "set",
                                  norm, (unsigned)eff_s);
                         force_pub = true;
                     }
@@ -4899,6 +5076,7 @@ void app_main(void)
 
     crash_note_boot();
     init_nvs();
+    device_notes_init();
 
     /* Inbound event slots go to PSRAM FIRST — 36 KB of tool-call buffers in
      * internal BSS previously starved the voice task's 20 KB internal-only
@@ -5038,6 +5216,12 @@ void app_main(void)
     restore_brightness_cap();
     (void)jr_display_set_brightness(s_brightness_cap);
     companion_boot_seed();
+    {
+        const uint32_t boot_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if (power_restore_rtc_timers(boot_ms) > 0U) {
+            timer_publish_now(boot_ms);
+        }
+    }
 
     /* pull the concrete ports. The real presenter is preferred; its panel +
      * SPIFFS + gfx bring-up runs async in its own task, so this never stalls
@@ -5258,11 +5442,18 @@ void app_main(void)
          * eight-second attention budget starts when full Jarvis is ready. */
         s_glance_until_ms = s_companion_activity_ms + GLANCE_MS;
     }
-    if (from_sleep && cause == ESP_SLEEP_WAKEUP_TIMER) {
+    if (from_sleep && cause == ESP_SLEEP_WAKEUP_TIMER &&
+        !jr_timer_any_active(&s_timers)) {
         s_mood.still_since_ms =
             (uint32_t)(esp_timer_get_time() / 1000) - JR_MOOD_DREAM_MS;
         jr_display_caption_set("ASLEEP - TAP TO WAKE");
         ESP_LOGI(TAG, "boot complete — timer wake %u, resting on",
+                 (unsigned)s_rtc_sleeps);
+    } else if (from_sleep && cause == ESP_SLEEP_WAKEUP_TIMER &&
+               jr_timer_any_active(&s_timers)) {
+        jr_mood_poke_awake(&s_mood, (uint32_t)(esp_timer_get_time() / 1000));
+        jr_display_caption_set("TIMER ACTIVE");
+        ESP_LOGI(TAG, "boot complete — timer wake %u with active countdown",
                  (unsigned)s_rtc_sleeps);
     } else if (from_sleep && s_rtc_was_listening) {
         atomic_store(&s_voice_privacy_paused, false);

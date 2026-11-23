@@ -3160,6 +3160,116 @@ static void test_minimal_dial_bake_matches_unbaked(void)
     free(unbaked_fb);
 }
 
+/* Wave 2: Living THINKING orbital comet — 10-dot fading cyan comet strictly
+ * inside r184-195 (using s_ov_halo_dx/dy[32]), zero gold pixels, animates
+ * smoothly across time, and is 100% 12-row strip invariant. */
+static void test_thinking_orbital_comet_band_and_strip_invariance(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *whole = calloc(px, sizeof *whole);
+    uint16_t *strips = calloc(px, sizeof *strips);
+    uint16_t *later = calloc(px, sizeof *later);
+    if (!whole || !strips || !later) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(whole); free(strips); free(later); return;
+    }
+
+    const hud_env_t env = {
+        .face = HUD_FACE_THINK, .amp = 0, .batt_pct = 0xFF,
+        .charging = false, .privacy_muted = false, .ox = 0, .oy = 0,
+    };
+    hud_overlay_frame(whole, 0, HUD_H, 1000u, false, &env);
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        const int nrows = (y + STRIP_ROWS <= HUD_H) ? STRIP_ROWS : (HUD_H - y);
+        hud_overlay_frame(strips + (size_t)y * HUD_W, y, nrows, 1000u, false, &env);
+    }
+    CHECK(memcmp(whole, strips, px * sizeof *whole) == 0,
+          "THINK orbital comet strip/whole mismatch");
+
+    size_t painted = 0, out_of_band = 0, gold_px = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            const uint16_t v = whole[(size_t)y * HUD_W + x];
+            if (v == 0u) continue;
+            painted++;
+            const long dx = x - 232, dy = y - 232;
+            const long r2 = dx * dx + dy * dy;
+            if (r2 < 184L * 184L || r2 > 195L * 195L) out_of_band++;
+            const int r8 = ((v >> 11) & 31) * 255 / 31;
+            const int g8 = ((v >> 5) & 63) * 255 / 63;
+            const int b8 = (v & 31) * 255 / 31;
+            if (r8 > g8 || b8 < g8 - 10) gold_px++;
+        }
+    }
+    CHECK(painted >= 50 && painted <= 150,
+          "THINK 10-dot comet expected ~70-90 px, got %zu", painted);
+    CHECK(out_of_band == 0,
+          "THINK comet escaped r184-195 band (%zu px)", out_of_band);
+    CHECK(gold_px == 0,
+          "THINK comet must never paint gold/warm pixels (%zu px)", gold_px);
+
+    hud_overlay_frame(later, 0, HUD_H, 1200u, false, &env);
+    CHECK(memcmp(whole, later, px * sizeof *whole) != 0,
+          "THINK comet did not advance between 1000ms and 1200ms");
+
+    free(whole); free(strips); free(later);
+}
+
+/* Wave 2: Enhanced LISTENING halo — reactive luminance & subtle radial swell
+ * strictly inside r185-194 at both amp=0 and amp=255, zero gold, strip-invariant. */
+static void test_listening_halo_reactive_to_mic_amp(void)
+{
+    const size_t px = (size_t)HUD_W * HUD_H;
+    uint16_t *quiet = calloc(px, sizeof *quiet);
+    uint16_t *loud = calloc(px, sizeof *loud);
+    uint16_t *strips = calloc(px, sizeof *strips);
+    if (!quiet || !loud || !strips) {
+        printf("FAIL %s: alloc\n", __func__); g_failures++;
+        free(quiet); free(loud); free(strips); return;
+    }
+
+    hud_env_t env = {
+        .face = HUD_FACE_LISTEN, .amp = 0, .batt_pct = 0xFF,
+        .charging = false, .privacy_muted = false, .ox = 0, .oy = 0,
+    };
+    hud_overlay_frame(quiet, 0, HUD_H, 1000u, false, &env);
+    env.amp = 255;
+    hud_overlay_frame(loud, 0, HUD_H, 1000u, false, &env);
+    for (int y = 0; y < HUD_H; y += STRIP_ROWS) {
+        const int nrows = (y + STRIP_ROWS <= HUD_H) ? STRIP_ROWS : (HUD_H - y);
+        hud_overlay_frame(strips + (size_t)y * HUD_W, y, nrows, 1000u, false, &env);
+    }
+    CHECK(memcmp(loud, strips, px * sizeof *loud) == 0,
+          "LISTEN loud halo strip/whole mismatch");
+
+    uint64_t lum_q = 0, lum_l = 0;
+    size_t out_of_band = 0, gold_px = 0;
+    for (int y = 0; y < HUD_H; ++y) {
+        for (int x = 0; x < HUD_W; ++x) {
+            const uint16_t qv = quiet[(size_t)y * HUD_W + x];
+            const uint16_t lv = loud[(size_t)y * HUD_W + x];
+            if (qv != 0u) {
+                lum_q += ((qv >> 11) & 31) + ((qv >> 5) & 63) + (qv & 31);
+            }
+            if (lv != 0u) {
+                lum_l += ((lv >> 11) & 31) + ((lv >> 5) & 63) + (lv & 31);
+                const long dx = x - 232, dy = y - 232;
+                const long r2 = dx * dx + dy * dy;
+                if (r2 < 185L * 185L || r2 > 194L * 194L) out_of_band++;
+                const int r8 = ((lv >> 11) & 31) * 255 / 31;
+                const int b8 = (lv & 31) * 255 / 31;
+                if (r8 > b8) gold_px++;
+            }
+        }
+    }
+    CHECK(lum_l > lum_q, "LISTEN loud amp must brighten halo (%llu vs %llu)",
+          (unsigned long long)lum_l, (unsigned long long)lum_q);
+    CHECK(out_of_band == 0, "LISTEN loud halo escaped r185-194 (%zu px)", out_of_band);
+    CHECK(gold_px == 0, "LISTEN halo painted warm/gold (%zu px)", gold_px);
+
+    free(quiet); free(loud); free(strips);
+}
+
 int main(void)
 {
     test_light_deadband_is_today();
@@ -3240,6 +3350,8 @@ int main(void)
     test_fg_changes_only_its_pixels_and_gates();
     test_speak_cadence_ring();
     test_minimal_dial_bake_matches_unbaked();
+    test_thinking_orbital_comet_band_and_strip_invariance();
+    test_listening_halo_reactive_to_mic_amp();
 
     if (g_failures) {
         printf("%d failure(s) of %d checks\n", g_failures, g_checks);

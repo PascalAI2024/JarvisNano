@@ -132,6 +132,27 @@ int jr_briefing_compose(char *dst, size_t cap, const jr_briefing_facts_t *f)
         }
         len = app(dst, len, cap, ".");
     }
+    if (f->notes_summary != NULL && f->notes_summary[0] != '\0') {
+        len = app(dst, len, cap, " %s", f->notes_summary);
+    }
+    if (f->active_timers > 0) {
+        len = app(dst, len, cap, " %d active timer%s", f->active_timers,
+                  f->active_timers == 1 ? "" : "s");
+        if (f->nearest_timer != NULL && f->nearest_timer[0] != '\0') {
+            if (f->nearest_timer_s >= 60) {
+                const int mins = (f->nearest_timer_s + 30) / 60;
+                len = app(dst, len, cap, ", nearest %s with %d minute%s left",
+                          f->nearest_timer, mins, mins == 1 ? "" : "s");
+            } else if (f->nearest_timer_s > 0) {
+                len = app(dst, len, cap, ", nearest %s with %d second%s left",
+                          f->nearest_timer, f->nearest_timer_s,
+                          f->nearest_timer_s == 1 ? "" : "s");
+            } else {
+                len = app(dst, len, cap, ", %s ringing now", f->nearest_timer);
+            }
+        }
+        len = app(dst, len, cap, ".");
+    }
     if (f->battery_pct >= 0 && f->battery_pct < 30 && !f->on_usb) {
         len = app(dst, len, cap, " Battery %d percent, worth charging.", f->battery_pct);
     }

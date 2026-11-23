@@ -58,6 +58,7 @@
 #include "jr_core/tool_policy.h"
 #include "jr_core/pace.h"
 #include "jr_core/timer.h"
+#include "jr_core/notes.h"
 #include "jr_tools/jr_weather.h"
 #include "jr_dsp/dsp.h"
 #include "jr_hal/hal.h"
@@ -82,7 +83,7 @@
 /* The catalog lives in main.c; this literal is what the other files see.
  * main.c static-asserts it against the real array, so adding a tool
  * without bumping this is a compile error, not a blank petal. */
-#define DEVICE_TOOL_DECL_COUNT 16U
+#define DEVICE_TOOL_DECL_COUNT 24U
 
 /* Render cadence per rung of the rest ladder (frames per second). 24 is the
  * measured CO5300 ceiling; 12 keeps AMBIENT's dimmed ring fluid under a
@@ -100,7 +101,7 @@
  * core 0 on a dial). At 6 the costliest dial leaves boot more than half. */
 #define RENDER_FPS_BOOT      6U
 #define LOCAL_TOOL_RESULT_CAP 4U
-#define LOCAL_TOOL_ERROR_CAP  384U
+#define LOCAL_TOOL_ERROR_CAP  576U
 #define TOOL_CONSENT_TIMEOUT_MS 15000U
 
 typedef struct {
@@ -420,12 +421,14 @@ typedef enum {
     TIMER_REQ_SET,
     TIMER_REQ_CANCEL,
     TIMER_REQ_DISMISS,
+    TIMER_REQ_FOCUS,
 } timer_req_kind_t;
 
 typedef struct {
     bool active;
     bool ringing;
     uint16_t rem_s;
+    uint16_t total_s;
     uint8_t pct_left;
     uint8_t count;
     char label[JR_TIMER_LABEL_CAP];
@@ -437,11 +440,26 @@ typedef struct {
     char label[JR_TIMER_LABEL_CAP];
 } timer_debug_req_t;
 
+typedef struct {
+    bool active;
+    bool running;
+    uint32_t elapsed_ms;
+    uint8_t lap_count;
+    uint32_t laps_ms[JR_STOPWATCH_MAX_LAPS];
+} stopwatch_snap_t;
+
 extern jr_timer_bank_t s_timers;
 extern portMUX_TYPE s_timer_mux;
 extern timer_snap_t s_timer_snap;
 extern timer_debug_req_t s_debug_timer_req_data;
 extern _Atomic uint32_t s_debug_timer_req;
+extern _Atomic bool s_glass_poke_req;
+
+/* Cross-component Wave 2 display contracts (exact signatures from jr_display.h). */
+void jr_display_stopwatch_set(bool active, bool running, uint32_t elapsed_ms, uint8_t lap_count);
+void jr_display_set_hbm(bool enabled);
+bool jr_display_get_hbm(void);
+void jr_display_get_te_stats(bool *enabled, uint32_t *waits, uint32_t *timeouts);
 
 void timer_publish_now(uint32_t now_ms);
 void persist_watch_style(uint8_t style);
@@ -450,6 +468,7 @@ bool device_chip_temp_c(float *out_c);
 void persist_ota_attempt(int slot);
 void handle_say(const char *text);
 void morning_briefing_force(void);          /* POST /api/debug/briefing */
+int briefing_compose_live(char *dst, size_t cap, const jr_power_t *bat);
 bool operator_lease_active(uint32_t now_ms);
 bool operator_mode_active(uint32_t now_ms);
 ota_preflight_t ota_preflight(void);
@@ -491,6 +510,7 @@ void cpu_gear_set(int mhz);
 const char *wake_cause_name(int cause);
 bool image_in_probation(void);
 void enter_deep_sleep(const char *why, uint32_t timer_s);
+unsigned power_restore_rtc_timers(uint32_t now_ms);
 
 /* ---- owned by device_tools.c — device-tool queue, consent, weather, activity ---- */
 
@@ -562,3 +582,23 @@ bool device_tool_present_consent(const jr_command_t *cmd, uint32_t now);
 bool device_tool_cancel_pending_consent(uint32_t call_id,
                                                const char *call_id_text);
 void device_tool_abort_pending_consent(void);
+
+/* Wave 2: glass helpers, NVS desk notes ("jr_notes"), stopwatch, HBM sunlight. */
+const char *device_glass_space_name(jr_display_space_t space);
+bool device_parse_glass_screen(const char *s, jr_display_space_t *out);
+bool device_parse_watch_style(const char *s, jr_watch_style_t *out);
+
+void device_notes_init(void);
+uint32_t device_notes_add(const char *text);
+bool device_notes_delete(uint32_t id);
+unsigned device_notes_clear(const char *target);
+void device_notes_snapshot(jr_note_bank_t *out);
+int device_notes_format_briefing(char *dst, size_t cap);
+
+bool device_stopwatch_action(const char *action, uint32_t now_ms,
+                             stopwatch_snap_t *out_snap);
+void device_stopwatch_snapshot(uint32_t now_ms, stopwatch_snap_t *out_snap);
+void device_stopwatch_tick(uint32_t now_ms);
+
+bool device_sunlight_set(bool enabled, uint32_t now_ms, const char **out_reason);
+void device_sunlight_tick(uint32_t now_ms, const jr_power_t *bat, bool have_bat);

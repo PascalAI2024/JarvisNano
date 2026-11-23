@@ -79,6 +79,10 @@ typedef struct {
     const char *task_title;     /* the newest; NULL when none                */
     int         battery_pct;    /* 0..100; anything else = no gauge          */
     bool        on_usb;
+    const char *notes_summary;  /* pinned desk notes clause; NULL/"" if none */
+    int         active_timers;  /* active countdown timers; 0 if none        */
+    const char *nearest_timer;  /* nearest timer label; NULL if none         */
+    int         nearest_timer_s;/* remaining seconds of nearest timer        */
 } jr_briefing_facts_t;
 
 /* The text turn handed to the model: an instruction plus the facts, so the

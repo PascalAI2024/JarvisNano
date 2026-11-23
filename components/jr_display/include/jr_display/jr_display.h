@@ -864,6 +864,19 @@ bool jr_display_timer_active(void);
  * 200 ms fade. Never overwrites the r221-222 privacy ring. Lock-free. */
 void jr_display_rim_level_show(bool is_brightness, uint8_t pct);
 
+/* Wave 2: Chronograph stopwatch overlay. Lock-free, any-task safe. Draws an
+ * electric-cyan sweeping chronograph seconds arc at r202-206 plus a bottom
+ * haloed MM:SS.d chip (and L1..L4 badge when lap_count > 0). */
+void jr_display_stopwatch_set(bool active, bool running, uint32_t elapsed_ms, uint8_t lap_count);
+
+/* Wave 2: CO5300 High-Brightness Mode (HBM 0x66) sunlight boost. Lock-free;
+ * applied exclusively on the gfx_render task inside panel_flush(). */
+void jr_display_set_hbm(bool enabled);
+bool jr_display_get_hbm(void);
+
+/* Wave 2: 60 Hz LCD_TE (GPIO13) tear-free flush statistics (lock-free). */
+void jr_display_get_te_stats(bool *enabled, uint32_t *waits, uint32_t *timeouts);
+
 #ifdef __cplusplus
 }
 #endif

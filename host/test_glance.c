@@ -147,6 +147,28 @@ static void test_briefing_caption_fits_the_band_in_shell_glyphs(void)
     TEST_ASSERT_EQUAL_STRING("GOOD MORNING", cap);
 }
 
+static void test_briefing_compose_includes_notes_and_timers(void)
+{
+    char out[512];
+    jr_briefing_facts_t f = {
+        .have_date = true, .wday = 1, .mday = 23, .mon = 10,
+        .notes_summary = "2 pinned notes: Call architect; Ship Wave 2.",
+        .active_timers = 2, .nearest_timer = "FOCUS", .nearest_timer_s = 1200,
+        .battery_pct = 80,
+    };
+    const int n = jr_briefing_compose(out, sizeof out, &f);
+    TEST_ASSERT_TRUE(n > 0 && n < (int)sizeof out);
+    TEST_ASSERT_NOT_NULL(strstr(out, "2 pinned notes: Call architect; Ship Wave 2."));
+    TEST_ASSERT_NOT_NULL(strstr(out, "2 active timers, nearest FOCUS with 20 minutes left."));
+
+    jr_briefing_facts_t sec_only = {
+        .active_timers = 1, .nearest_timer = "TEA", .nearest_timer_s = 45,
+        .battery_pct = -1,
+    };
+    jr_briefing_compose(out, sizeof out, &sec_only);
+    TEST_ASSERT_NOT_NULL(strstr(out, "1 active timer, nearest TEA with 45 seconds left."));
+}
+
 void glance_tests_run(void)
 {
     RUN_TEST(test_rain_warns_once_for_the_first_wet_hour);
@@ -155,4 +177,5 @@ void glance_tests_run(void)
     RUN_TEST(test_briefing_is_once_a_morning_on_a_lift);
     RUN_TEST(test_briefing_compose_says_only_what_the_device_holds);
     RUN_TEST(test_briefing_caption_fits_the_band_in_shell_glyphs);
+    RUN_TEST(test_briefing_compose_includes_notes_and_timers);
 }

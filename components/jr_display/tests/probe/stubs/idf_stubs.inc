@@ -262,5 +262,25 @@ esp_err_t jarvis_board_display_set_sleep(bool sleep)
     if (sleep) { s_stub_sleep_in_calls++; s_stub_sleep_in_us = s_fake_us; return s_stub_sleep_in_error; }
     s_stub_sleep_out_calls++; s_stub_sleep_out_us = s_fake_us; return s_stub_sleep_out_error;
 }
+static bool s_stub_hbm_state;
+static unsigned s_stub_hbm_calls;
+static esp_err_t s_stub_hbm_error;
+esp_err_t jarvis_board_set_hbm(bool on)
+{
+    s_stub_hbm_calls++;
+    if (s_stub_hbm_error != ESP_OK) { return s_stub_hbm_error; }
+    s_stub_hbm_state = on;
+    return ESP_OK;
+}
+static bool s_stub_te_enabled;
+static bool s_stub_te_wait_ok = true;
+static unsigned s_stub_te_wait_calls;
+bool jarvis_board_te_enabled(void) { return s_stub_te_enabled; }
+bool jarvis_board_te_wait(uint32_t timeout_ms)
+{
+    (void)timeout_ms;
+    s_stub_te_wait_calls++;
+    return s_stub_te_wait_ok;
+}
 
 #endif /* JR_DISPLAY_TEST_IDF_STUBS_INC */
