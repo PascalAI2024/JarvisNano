@@ -30,7 +30,9 @@ extern "C" {
 #define JR_TIMER_BREAK_DEFAULT_S    300u     /* 5 min Pomodoro break */
 #define JR_STOPWATCH_MAX_LAPS       4u
 #define JR_TIMER_SNAP_MAGIC         0x4A525431u /* "JRT1" */
-#define JR_TIMER_SNAP_VERSION       1u
+#define JR_TIMER_SNAP_VERSION_V1    1u
+#define JR_TIMER_SNAP_VERSION       2u
+#define JR_TIMER_SNAP_FLAG_SILENT   0x01u
 #define JR_TIMER_SLEEP_MIN_REM_S    30u      /* only sleep if timer has >30 s left */
 #define JR_TIMER_SLEEP_WAKE_LEAD_S  5u       /* wake 5 s before expiry */
 #define JR_TIMER_SLEEP_WAKE_MIN_S   5u       /* minimum clamped sleep wake */
@@ -44,6 +46,7 @@ typedef enum {
 
 typedef struct {
     jr_timer_state_t state;
+    bool     silent;                      /* visual-only expiry: suppress alarm chime */
     uint32_t started_ms;
     uint32_t duration_ms;
     uint32_t end_ms;
@@ -59,6 +62,7 @@ typedef struct {
 typedef struct {
     bool     active;
     bool     ringing;
+    bool     silent;                      /* true when shown slot is visual-only */
     uint16_t rem_s;                       /* remaining seconds (0..43200) */
     uint16_t total_s;                     /* total duration seconds */
     uint8_t  pct_left;                    /* 0..100 */
@@ -75,13 +79,21 @@ typedef struct {
 /* Reset all slots to IDLE. */
 void jr_timer_init(jr_timer_bank_t *bank);
 
-/* Start a timer. Normalizes `label` to <=16 uppercase ASCII chars:
+/* Start a timer with optional call-safe `silent` flag (suppresses audio alarm
+ * chime on expiry/repeat while preserving visual ringing and auto-stop).
+ * Normalizes `label` to <=16 uppercase ASCII chars:
  *   - "focus" with seconds==0 -> 1500 s (25 min)
  *   - "break" with seconds==0 -> 300 s (5 min)
  *   - empty/NULL label -> "TIMER"
  * Rejects durations outside [JR_TIMER_MIN_S, JR_TIMER_MAX_S] or a full bank.
  * If out_label != NULL, writes the normalized label. If out_seconds != NULL,
  * writes the effective duration in seconds. */
+bool jr_timer_set_ex(jr_timer_bank_t *bank, uint32_t now_ms, uint32_t seconds,
+                     const char *label, bool silent,
+                     char *out_label, size_t out_label_cap,
+                     uint32_t *out_seconds);
+
+/* Backwards-compatible wrapper forwarding `silent = false` to jr_timer_set_ex. */
 bool jr_timer_set(jr_timer_bank_t *bank, uint32_t now_ms, uint32_t seconds,
                   const char *label, char *out_label, size_t out_label_cap,
                   uint32_t *out_seconds);
@@ -113,13 +125,16 @@ uint16_t jr_timer_slot_rem_s(const jr_timer_slot_t *slot, uint32_t now_ms);
 
 bool jr_timer_any_active(const jr_timer_bank_t *bank);
 bool jr_timer_any_ringing(const jr_timer_bank_t *bank);
+/* True iff >=1 timer is RINGING and every currently ringing timer has silent==true. */
+bool jr_timer_ringing_is_silent(const jr_timer_bank_t *bank);
 unsigned jr_timer_active_count(const jr_timer_bank_t *bank);
 
 /* ---- Deep-sleep RTC timer snapshot & restore (N16.4) ------------------- */
 
 typedef struct {
     uint8_t  state;                       /* 0=idle, 1=running, 2=ringing */
-    uint8_t  reserved[3];
+    uint8_t  flags;                       /* bit 0: JR_TIMER_SNAP_FLAG_SILENT (0 in v1) */
+    uint8_t  reserved[2];
     uint32_t duration_s;
     uint32_t remaining_s;                 /* relative fallback if no wall clock */
     int64_t  end_epoch_s;                 /* wall-clock expiry epoch (>0 if valid) */

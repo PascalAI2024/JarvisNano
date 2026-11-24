@@ -77,9 +77,10 @@ void jr_timer_init(jr_timer_bank_t *bank)
     memset(bank, 0, sizeof(*bank));
 }
 
-bool jr_timer_set(jr_timer_bank_t *bank, uint32_t now_ms, uint32_t seconds,
-                  const char *label, char *out_label, size_t out_label_cap,
-                  uint32_t *out_seconds)
+bool jr_timer_set_ex(jr_timer_bank_t *bank, uint32_t now_ms, uint32_t seconds,
+                     const char *label, bool silent,
+                     char *out_label, size_t out_label_cap,
+                     uint32_t *out_seconds)
 {
     if (bank == NULL) {
         return false;
@@ -115,6 +116,7 @@ bool jr_timer_set(jr_timer_bank_t *bank, uint32_t now_ms, uint32_t seconds,
     const uint32_t dur_ms = seconds * 1000u;
     memset(free_slot, 0, sizeof(*free_slot));
     free_slot->state = JR_TIMER_RUNNING;
+    free_slot->silent = silent;
     free_slot->started_ms = now_ms;
     free_slot->duration_ms = dur_ms;
     free_slot->end_ms = now_ms + dur_ms;
@@ -127,6 +129,14 @@ bool jr_timer_set(jr_timer_bank_t *bank, uint32_t now_ms, uint32_t seconds,
         *out_seconds = seconds;
     }
     return true;
+}
+
+bool jr_timer_set(jr_timer_bank_t *bank, uint32_t now_ms, uint32_t seconds,
+                  const char *label, char *out_label, size_t out_label_cap,
+                  uint32_t *out_seconds)
+{
+    return jr_timer_set_ex(bank, now_ms, seconds, label, false,
+                           out_label, out_label_cap, out_seconds);
 }
 
 static int find_nearest_index(const jr_timer_bank_t *bank, uint32_t now_ms)
@@ -219,7 +229,9 @@ void jr_timer_step(jr_timer_bank_t *bank, uint32_t now_ms,
                                  s->label);
                     }
                     ev.expired = true;
-                    ev.chime = true;
+                    if (!s->silent) {
+                        ev.chime = true;
+                    }
                 }
             } else if (s->state == JR_TIMER_RINGING) {
                 if (time_reached(now_ms,
@@ -227,7 +239,9 @@ void jr_timer_step(jr_timer_bank_t *bank, uint32_t now_ms,
                     memset(s, 0, sizeof(*s));
                     ev.auto_stopped = true;
                 } else if (time_reached(now_ms, s->next_chime_ms)) {
-                    ev.chime = true;
+                    if (!s->silent) {
+                        ev.chime = true;
+                    }
                     s->next_chime_ms = now_ms + JR_TIMER_CHIME_INTERVAL_MS;
                 }
             }
@@ -269,6 +283,7 @@ bool jr_timer_nearest(const jr_timer_bank_t *bank, uint32_t now_ms,
     const jr_timer_slot_t *s = &bank->slots[idx];
     view.active = true;
     view.ringing = (s->state == JR_TIMER_RINGING);
+    view.silent = s->silent;
     const uint32_t tot_s = (s->duration_ms + 999u) / 1000u;
     view.total_s = (uint16_t)(tot_s > JR_TIMER_MAX_S ? JR_TIMER_MAX_S : tot_s);
     copy_str(view.label, sizeof(view.label), s->label);
@@ -311,6 +326,23 @@ bool jr_timer_any_ringing(const jr_timer_bank_t *bank)
     return false;
 }
 
+bool jr_timer_ringing_is_silent(const jr_timer_bank_t *bank)
+{
+    if (bank == NULL) {
+        return false;
+    }
+    bool any_ringing = false;
+    for (unsigned i = 0u; i < JR_TIMER_MAX; ++i) {
+        if (bank->slots[i].state == JR_TIMER_RINGING) {
+            any_ringing = true;
+            if (!bank->slots[i].silent) {
+                return false;
+            }
+        }
+    }
+    return any_ringing;
+}
+
 unsigned jr_timer_active_count(const jr_timer_bank_t *bank)
 {
     if (bank == NULL) {
@@ -348,7 +380,8 @@ bool jr_timer_snapshot_valid(const jr_timer_snapshot_t *snap)
         return false;
     }
     if (snap->magic != JR_TIMER_SNAP_MAGIC ||
-        snap->version != JR_TIMER_SNAP_VERSION ||
+        (snap->version != JR_TIMER_SNAP_VERSION_V1 &&
+         snap->version != JR_TIMER_SNAP_VERSION) ||
         snap->count > JR_TIMER_MAX) {
         return false;
     }
@@ -377,6 +410,7 @@ bool jr_timer_snapshot_save(const jr_timer_bank_t *bank, uint32_t now_ms,
             }
             jr_timer_snap_slot_t *dst = &out_snap->slots[out_idx++];
             dst->state = (s->state == JR_TIMER_RINGING) ? 2u : 1u;
+            dst->flags = s->silent ? JR_TIMER_SNAP_FLAG_SILENT : 0u;
             uint32_t dur_s = (s->duration_ms + 999u) / 1000u;
             if (dur_s < JR_TIMER_MIN_S) {
                 dur_s = JR_TIMER_MIN_S;
@@ -471,6 +505,8 @@ unsigned jr_timer_snapshot_restore(jr_timer_bank_t *bank,
         jr_timer_slot_t *dst = &bank->slots[restored++];
         memset(dst, 0, sizeof(*dst));
         dst->state = JR_TIMER_RUNNING;
+        dst->silent = (snap->version >= JR_TIMER_SNAP_VERSION) &&
+                      ((src->flags & JR_TIMER_SNAP_FLAG_SILENT) != 0u);
         dst->duration_ms = dur_s * 1000u;
         dst->end_ms = now_ms + rem_s * 1000u;
         dst->started_ms = dst->end_ms - dst->duration_ms;

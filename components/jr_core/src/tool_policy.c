@@ -19,6 +19,7 @@ bool jr_tool_needs_gateway(const char *name)
         "set_glass", "device_status", "start_focus", "stopwatch",
         "add_note", "list_notes", "clear_notes", "daily_briefing",
         "set_ui_sounds", "set_sunlight",
+        "set_desk_mode", "start_breathe", "complete_note",
     };
     for (size_t i = 0; i < sizeof kLocal / sizeof kLocal[0]; ++i) {
         if (strcmp(name, kLocal[i]) == 0) {
@@ -90,14 +91,16 @@ static const char kWithGateway[] =
     "queued and will be announced here when it lands.\n\n"
     "For weather at Sir's place, weather_here answers at once with no "
     "arguments; never ask Sir where he is. Instant local tools: set_timer, "
-    "cancel_timer, list_timers, start_focus, stopwatch, add_note, "
-    "list_notes, clear_notes, daily_briefing, set_glass (10 watch dials "
+    "cancel_timer, list_timers, start_focus, set_desk_mode (on_air, focus, "
+    "breathe, normal), start_breathe, stopwatch, add_note, list_notes, "
+    "complete_note, clear_notes, daily_briefing, set_glass (10 watch dials "
     "incl. orrery planetarium and reactor spectrum), set_ui_sounds, "
     "set_sunlight, device_status.\n\n"
     "Capabilities, when asked: web search, news, weather, Wikipedia, crypto "
     "and stocks, exchange rates, time zones, translation, research, memory, "
-    "calendar, work board, agent jobs, timers, focus, stopwatch, desk notes, "
-    "briefings, glass, status, sunlight, sounds, volume, and brightness.";
+    "calendar, work board, agent jobs, timers, desk modes (on air, focus, "
+    "breathe), stopwatch, desk inbox, briefings, glass, status, sunlight, "
+    "sounds, volume, and brightness.";
 
 /* Without one: what the device has, and what it must not offer. */
 static const char kNoGateway[] =
@@ -110,8 +113,9 @@ static const char kNoGateway[] =
     "weather this device holds for its own place, %s, which answers at "
     "once with no arguments (a question about the weather is answered from "
     "it, and you never ask Sir where he is); set_timer, cancel_timer, "
-    "list_timers, start_focus, and stopwatch for countdowns, focus sessions, "
-    "and laps; add_note, list_notes, and clear_notes for local desk notes; "
+    "list_timers, start_focus, set_desk_mode, start_breathe, and stopwatch "
+    "for countdowns, on-air/focus/breathe modes, and laps; add_note, "
+    "list_notes, complete_note, and clear_notes for local desk inbox; "
     "daily_briefing for a live summary; set_glass (incl. orrery planetarium "
     "and reactor spectrum dials), set_ui_sounds, "
     "set_sunlight, set_volume, set_brightness, and device_status for this "

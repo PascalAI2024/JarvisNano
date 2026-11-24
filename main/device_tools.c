@@ -600,9 +600,12 @@ void activity_note_tool(const char *tool_name, const char *args_json)
                  strcmp(tool_name, "cancel_timer") == 0 ||
                  strcmp(tool_name, "list_timers") == 0) kind = "TIMER";
         else if (strcmp(tool_name, "start_focus") == 0) kind = "FOCUS";
+        else if (strcmp(tool_name, "set_desk_mode") == 0) kind = "DESK";
+        else if (strcmp(tool_name, "start_breathe") == 0) kind = "BREATHE";
         else if (strcmp(tool_name, "stopwatch") == 0) kind = "CHRONO";
         else if (strcmp(tool_name, "add_note") == 0 ||
                  strcmp(tool_name, "list_notes") == 0 ||
+                 strcmp(tool_name, "complete_note") == 0 ||
                  strcmp(tool_name, "clear_notes") == 0) kind = "NOTES";
         else if (strcmp(tool_name, "daily_briefing") == 0) kind = "BRIEFING";
         else if (strcmp(tool_name, "set_ui_sounds") == 0) kind = "SOUNDS";
@@ -773,17 +776,9 @@ bool device_parse_watch_style(const char *s, jr_watch_style_t *out)
     return false;
 }
 
-/* ---- NVS-persisted quick desk notes ("jr_notes", PSRAM bank) ------------ */
+/* ---- NVS-persisted quick desk notes ("jr_notes", PSRAM bank, v2 JRN2) ---- */
 #define JR_NOTES_NVS_NS      "jr_notes"
 #define JR_NOTES_NVS_KEY     "bank"
-#define JR_NOTES_BLOB_MAGIC  0x4A524E31u /* "JRN1" */
-#define JR_NOTES_BLOB_VER    1u
-
-typedef struct {
-    uint32_t magic;
-    uint32_t version;
-    jr_note_bank_t bank;
-} jr_notes_blob_t;
 
 static jr_note_bank_t *s_notes;
 static SemaphoreHandle_t s_notes_lock;
@@ -796,34 +791,66 @@ static int64_t device_wall_epoch_s(void)
     return (tmv.tm_year >= 2020 - 1900) ? (int64_t)tt : 0;
 }
 
+static void notes_sync_inbox_locked(void)
+{
+    if (s_notes == NULL) {
+        jr_display_inbox_set(NULL, 0U, 0U);
+        return;
+    }
+    size_t open_count = 0U;
+    (void)jr_notes_counts(s_notes, &open_count, NULL);
+
+    jr_display_inbox_item_t out[JR_DISPLAY_INBOX_MAX];
+    memset(out, 0, sizeof(out));
+    size_t count = 0U;
+
+    /* Show open items first so active tasks stay on glass; fill remaining
+     * slots with completed items so checking one off visually shows done. */
+    for (unsigned pass = 0U; pass < 2U && count < JR_DISPLAY_INBOX_MAX; ++pass) {
+        const bool want_done = (pass == 1U);
+        for (unsigned i = 0U; i < s_notes->count && i < JR_NOTES_MAX &&
+                              count < JR_DISPLAY_INBOX_MAX; ++i) {
+            const jr_note_item_t *it = &s_notes->items[i];
+            if (it->done != want_done) {
+                continue;
+            }
+            out[count].id = it->id;
+            out[count].done = it->done;
+            out[count].tag = it->tag;
+            strlcpy(out[count].text, it->text, sizeof(out[count].text));
+            count++;
+        }
+    }
+    jr_display_inbox_set(out, count, open_count);
+}
+
 static void notes_persist_locked(void)
 {
     if (s_notes == NULL) {
         return;
     }
-    jr_notes_blob_t *blob = heap_caps_calloc(1, sizeof(*blob),
-                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (blob == NULL) {
-        blob = calloc(1, sizeof(*blob));
+    uint8_t *buf = heap_caps_calloc(1, JR_NOTES_PACK_MAX_SIZE,
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        buf = calloc(1, JR_NOTES_PACK_MAX_SIZE);
     }
-    if (blob == NULL) {
+    if (buf == NULL) {
         return;
     }
-    blob->magic = JR_NOTES_BLOB_MAGIC;
-    blob->version = JR_NOTES_BLOB_VER;
-    blob->bank = *s_notes;
-
-    nvs_handle_t h;
-    if (nvs_open(JR_NOTES_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
-        esp_err_t err = nvs_set_blob(h, JR_NOTES_NVS_KEY, blob, sizeof(*blob));
-        if (err == ESP_OK) {
-            (void)nvs_commit(h);
-        } else {
-            ESP_LOGW(TAG, "notes: NVS write failed: %s", esp_err_to_name(err));
+    const size_t packed = jr_notes_pack(s_notes, buf, JR_NOTES_PACK_MAX_SIZE);
+    if (packed > 0U) {
+        nvs_handle_t h;
+        if (nvs_open(JR_NOTES_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+            esp_err_t err = nvs_set_blob(h, JR_NOTES_NVS_KEY, buf, packed);
+            if (err == ESP_OK) {
+                (void)nvs_commit(h);
+            } else {
+                ESP_LOGW(TAG, "notes: NVS write failed: %s", esp_err_to_name(err));
+            }
+            nvs_close(h);
         }
-        nvs_close(h);
     }
-    free(blob);
+    free(buf);
 }
 
 void device_notes_init(void)
@@ -846,46 +873,91 @@ void device_notes_init(void)
 
     nvs_handle_t h;
     if (nvs_open(JR_NOTES_NVS_NS, NVS_READONLY, &h) == ESP_OK) {
-        jr_notes_blob_t *blob = heap_caps_calloc(1, sizeof(*blob),
-                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (blob == NULL) {
-            blob = calloc(1, sizeof(*blob));
-        }
-        if (blob != NULL) {
-            size_t len = sizeof(*blob);
-            if (nvs_get_blob(h, JR_NOTES_NVS_KEY, blob, &len) == ESP_OK &&
-                len == sizeof(*blob) &&
-                blob->magic == JR_NOTES_BLOB_MAGIC &&
-                blob->version == JR_NOTES_BLOB_VER &&
-                blob->bank.count <= JR_NOTES_MAX) {
-                *s_notes = blob->bank;
-                for (unsigned i = 0U; i < s_notes->count; ++i) {
-                    s_notes->items[i].text[JR_NOTE_TEXT_MAX] = '\0';
-                }
-                if (s_notes->next_id == 0U) {
-                    s_notes->next_id = 1U;
-                }
-                ESP_LOGI(TAG, "notes: loaded %u note(s) from NVS",
-                         (unsigned)s_notes->count);
+        size_t len = 0U;
+        if (nvs_get_blob(h, JR_NOTES_NVS_KEY, NULL, &len) == ESP_OK &&
+            len > 0U && len <= 1024U) {
+            uint8_t *raw = heap_caps_calloc(1, len,
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (raw == NULL) {
+                raw = calloc(1, len);
             }
-            free(blob);
+            if (raw != NULL) {
+                if (nvs_get_blob(h, JR_NOTES_NVS_KEY, raw, &len) == ESP_OK &&
+                    jr_notes_unpack(s_notes, raw, len)) {
+                    size_t open_n = 0U, done_n = 0U;
+                    (void)jr_notes_counts(s_notes, &open_n, &done_n);
+                    ESP_LOGI(TAG, "notes: loaded %u note(s) from NVS (%u open, %u done)",
+                             (unsigned)s_notes->count, (unsigned)open_n, (unsigned)done_n);
+                }
+                free(raw);
+            }
         }
         nvs_close(h);
     }
+    notes_sync_inbox_locked();
 }
 
-uint32_t device_notes_add(const char *text)
+void device_notes_sync_inbox(void)
+{
+    if (s_notes == NULL || s_notes_lock == NULL ||
+        xSemaphoreTake(s_notes_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return;
+    }
+    notes_sync_inbox_locked();
+    xSemaphoreGive(s_notes_lock);
+}
+
+uint32_t device_notes_add_ex(const char *text, jr_note_tag_t tag)
 {
     if (s_notes == NULL || s_notes_lock == NULL ||
         xSemaphoreTake(s_notes_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
         return 0U;
     }
-    const uint32_t id = jr_notes_add(s_notes, text, device_wall_epoch_s());
+    const uint32_t id = jr_notes_add_ex(s_notes, text, tag, device_wall_epoch_s());
     if (id != 0U) {
         notes_persist_locked();
+        notes_sync_inbox_locked();
     }
     xSemaphoreGive(s_notes_lock);
     return id;
+}
+
+uint32_t device_notes_add(const char *text)
+{
+    return device_notes_add_ex(text, JR_NOTE_TAG_LIFE);
+}
+
+bool device_notes_toggle(uint32_t id)
+{
+    if (s_notes == NULL || s_notes_lock == NULL ||
+        xSemaphoreTake(s_notes_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return false;
+    }
+    const bool ok = jr_notes_toggle(s_notes, id);
+    if (ok) {
+        notes_persist_locked();
+        notes_sync_inbox_locked();
+    }
+    xSemaphoreGive(s_notes_lock);
+    return ok;
+}
+
+bool device_notes_complete(const char *target_or_id, uint32_t *matched_id)
+{
+    if (matched_id != NULL) {
+        *matched_id = 0U;
+    }
+    if (s_notes == NULL || s_notes_lock == NULL ||
+        xSemaphoreTake(s_notes_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return false;
+    }
+    const bool ok = jr_notes_complete(s_notes, target_or_id, matched_id);
+    if (ok) {
+        notes_persist_locked();
+        notes_sync_inbox_locked();
+    }
+    xSemaphoreGive(s_notes_lock);
+    return ok;
 }
 
 bool device_notes_delete(uint32_t id)
@@ -897,6 +969,7 @@ bool device_notes_delete(uint32_t id)
     const bool ok = jr_notes_delete(s_notes, id);
     if (ok) {
         notes_persist_locked();
+        notes_sync_inbox_locked();
     }
     xSemaphoreGive(s_notes_lock);
     return ok;
@@ -911,6 +984,7 @@ unsigned device_notes_clear(const char *target)
     const unsigned removed = jr_notes_clear(s_notes, target);
     if (removed > 0U) {
         notes_persist_locked();
+        notes_sync_inbox_locked();
     }
     xSemaphoreGive(s_notes_lock);
     return removed;
@@ -928,6 +1002,23 @@ void device_notes_snapshot(jr_note_bank_t *out)
     }
     *out = *s_notes;
     xSemaphoreGive(s_notes_lock);
+}
+
+size_t device_notes_counts(size_t *open_out, size_t *done_out)
+{
+    if (open_out != NULL) {
+        *open_out = 0U;
+    }
+    if (done_out != NULL) {
+        *done_out = 0U;
+    }
+    if (s_notes == NULL || s_notes_lock == NULL ||
+        xSemaphoreTake(s_notes_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return 0U;
+    }
+    const size_t total = jr_notes_counts(s_notes, open_out, done_out);
+    xSemaphoreGive(s_notes_lock);
+    return total;
 }
 
 int device_notes_format_briefing(char *dst, size_t cap)
@@ -1158,16 +1249,20 @@ bool device_try_local_tool(const jr_command_t *cmd)
     const bool set_glass    = strcmp(cmd->tool_name, "set_glass") == 0;
     const bool dev_status   = strcmp(cmd->tool_name, "device_status") == 0;
     const bool start_focus  = strcmp(cmd->tool_name, "start_focus") == 0;
+    const bool set_desk     = strcmp(cmd->tool_name, "set_desk_mode") == 0;
+    const bool start_breath = strcmp(cmd->tool_name, "start_breathe") == 0;
     const bool sw_tool      = strcmp(cmd->tool_name, "stopwatch") == 0;
     const bool add_note     = strcmp(cmd->tool_name, "add_note") == 0;
     const bool list_notes   = strcmp(cmd->tool_name, "list_notes") == 0;
+    const bool comp_note    = strcmp(cmd->tool_name, "complete_note") == 0;
     const bool clear_notes  = strcmp(cmd->tool_name, "clear_notes") == 0;
     const bool briefing     = strcmp(cmd->tool_name, "daily_briefing") == 0;
     const bool ui_sounds    = strcmp(cmd->tool_name, "set_ui_sounds") == 0;
     const bool sunlight     = strcmp(cmd->tool_name, "set_sunlight") == 0;
     if (!weather && !clock_tool && !set_timer && !cancel_timer &&
         !list_timers && !set_glass && !dev_status && !start_focus &&
-        !sw_tool && !add_note && !list_notes && !clear_notes &&
+        !set_desk && !start_breath && !sw_tool && !add_note &&
+        !list_notes && !comp_note && !clear_notes &&
         !briefing && !ui_sounds && !sunlight) {
         return false;
     }
@@ -1216,8 +1311,11 @@ bool device_try_local_tool(const jr_command_t *cmd)
         cJSON *args = cJSON_Parse(cmd->tool_args ? cmd->tool_args : "{}");
         const cJSON *sec_item = cJSON_GetObjectItemCaseSensitive(args, "seconds");
         const cJSON *lbl_item = cJSON_GetObjectItemCaseSensitive(args, "label");
+        const cJSON *sil_item = cJSON_GetObjectItemCaseSensitive(args, "silent");
         uint32_t seconds = 0U;
         bool bad_sec = false;
+        bool silent = false;
+        (void)json_get_bool_opt(sil_item, &silent);
         if (sec_item != NULL && !cJSON_IsNull(sec_item)) {
             if (!cJSON_IsNumber(sec_item) || sec_item->valuedouble < 0.0 ||
                 sec_item->valuedouble > (double)JR_TIMER_MAX_S) {
@@ -1231,8 +1329,8 @@ bool device_try_local_tool(const jr_command_t *cmd)
         char norm[JR_TIMER_LABEL_CAP] = {0};
         uint32_t eff_s = 0U;
         if (!bad_sec &&
-            jr_timer_set(&s_timers, now_ms, seconds, label,
-                         norm, sizeof norm, &eff_s)) {
+            jr_timer_set_ex(&s_timers, now_ms, seconds, label, silent,
+                            norm, sizeof norm, &eff_s)) {
             timer_publish_now(now_ms);
             jr_mood_poke_awake(&s_mood, now_ms);
             char cap_txt[32];
@@ -1246,9 +1344,11 @@ bool device_try_local_tool(const jr_command_t *cmd)
             }
             jr_display_caption_set(cap_txt);
             (void)snprintf(out, cap,
-                "{\"ok\":true,\"label\":\"%s\",\"seconds\":%u,\"active_timers\":%u}",
-                norm, (unsigned)eff_s, (unsigned)jr_timer_active_count(&s_timers));
-            ESP_LOGI(TAG, "local tool=set_timer label=%s sec=%u", norm, (unsigned)eff_s);
+                "{\"ok\":true,\"label\":\"%s\",\"seconds\":%u,\"silent\":%s,\"active_timers\":%u}",
+                norm, (unsigned)eff_s, silent ? "true" : "false",
+                (unsigned)jr_timer_active_count(&s_timers));
+            ESP_LOGI(TAG, "local tool=set_timer label=%s sec=%u silent=%d",
+                     norm, (unsigned)eff_s, silent ? 1 : 0);
         } else {
             slot->status = JR_TOOL_STATUS_INVALID_ARGS;
             const bool full = jr_timer_active_count(&s_timers) >= JR_TIMER_MAX;
@@ -1286,9 +1386,9 @@ bool device_try_local_tool(const jr_command_t *cmd)
             const bool ringing = (s->state == JR_TIMER_RINGING);
             const uint16_t rem_s = ringing ? 0U : jr_timer_slot_rem_s(s, now_ms);
             n += snprintf(out + n, cap - (size_t)n,
-                "%s{\"label\":\"%s\",\"rem_s\":%u,\"ringing\":%s}",
+                "%s{\"label\":\"%s\",\"rem_s\":%u,\"ringing\":%s,\"silent\":%s}",
                 first ? "" : ",", s->label, (unsigned)rem_s,
-                ringing ? "true" : "false");
+                ringing ? "true" : "false", s->silent ? "true" : "false");
             first = false;
         }
         if (n > 0 && (size_t)n + 3U < cap) {
@@ -1358,11 +1458,13 @@ bool device_try_local_tool(const jr_command_t *cmd)
         const bool have_temp = device_chip_temp_c(&temp_c);
         const int batt_pct = (have_bat && bat.percent <= 100U) ? (int)bat.percent : -1;
         const bool muted = atomic_load(&s_voice_privacy_paused) || s_flip_muted;
+        desk_mode_snap_t ds = {0};
+        desk_mode_snapshot(&ds);
         (void)snprintf(out, cap,
             "{\"battery_pct\":%d,\"charging\":%s,\"usb\":%s,"
             "\"wifi_rssi\":%d,\"chip_temp_c\":%d,\"volume\":%d,"
             "\"brightness\":%u,\"watch_style\":\"%s\",\"screen\":\"%s\","
-            "\"muted\":%s,\"hbm\":%s,\"holo\":%s,\"ui_sounds\":%s,"
+            "\"desk_mode\":\"%s\",\"muted\":%s,\"hbm\":%s,\"holo\":%s,\"ui_sounds\":%s,"
             "\"uptime_s\":%u,\"active_timers\":%u}",
             batt_pct,
             (have_bat && bat.charging) ? "true" : "false",
@@ -1373,6 +1475,7 @@ bool device_try_local_tool(const jr_command_t *cmd)
             (unsigned)s_brightness_cap,
             jr_display_watch_style_name(jr_display_watch_style()),
             device_glass_space_name(jr_display_nav_space()),
+            desk_mode_api_name(ds.mode),
             muted ? "true" : "false",
             jr_display_get_hbm() ? "true" : "false",
             jr_display_holo_get() ? "true" : "false",
@@ -1383,8 +1486,11 @@ bool device_try_local_tool(const jr_command_t *cmd)
         cJSON *args = cJSON_Parse(cmd->tool_args ? cmd->tool_args : "{}");
         const cJSON *min_item = cJSON_GetObjectItemCaseSensitive(args, "minutes");
         const cJSON *lbl_item = cJSON_GetObjectItemCaseSensitive(args, "label");
+        const cJSON *sil_item = cJSON_GetObjectItemCaseSensitive(args, "silent");
         uint32_t minutes = 25U;
         bool bad_min = false;
+        bool silent = false;
+        (void)json_get_bool_opt(sil_item, &silent);
         if (min_item != NULL && !cJSON_IsNull(min_item)) {
             if (!cJSON_IsNumber(min_item) || min_item->valuedouble < 1.0 ||
                 min_item->valuedouble > 720.0) {
@@ -1396,31 +1502,145 @@ bool device_try_local_tool(const jr_command_t *cmd)
         const char *label = (cJSON_IsString(lbl_item) && lbl_item->valuestring &&
                              lbl_item->valuestring[0] != '\0')
             ? lbl_item->valuestring : "FOCUS";
-        char norm[JR_TIMER_LABEL_CAP] = {0};
-        uint32_t eff_s = 0U;
-        if (!bad_min &&
-            jr_timer_set(&s_timers, now_ms, minutes * 60U, label,
-                         norm, sizeof norm, &eff_s)) {
-            jr_display_nav_set(JR_DISPLAY_SPACE_WATCH);
-            timer_publish_now(now_ms);
-            jr_mood_poke_awake(&s_mood, now_ms);
-            jr_display_bloom();
-            device_confirm_cue();
-            char cap_txt[32];
-            snprintf(cap_txt, sizeof cap_txt, "%.14s %u:00", norm, (unsigned)(eff_s / 60U));
-            jr_display_caption_set(cap_txt);
+        if (!bad_min) {
+            desk_mode_req_t dreq = {
+                .mode = JR_DESK_FOCUS,
+                .duration_s = minutes * 60U,
+                .silent = silent,
+            };
+            strlcpy(dreq.label, label, sizeof(dreq.label));
+            desk_mode_apply_now(&dreq, now_ms, true);
+            desk_mode_snap_t ds = {0};
+            desk_mode_snapshot(&ds);
             (void)snprintf(out, cap,
-                "{\"ok\":true,\"label\":\"%s\",\"minutes\":%u,\"seconds\":%u,\"screen\":\"watch\"}",
-                norm, (unsigned)(eff_s / 60U), (unsigned)eff_s);
-            ESP_LOGI(TAG, "local tool=start_focus label=%s min=%u", norm, (unsigned)(eff_s / 60U));
+                "{\"ok\":true,\"mode\":\"focus\",\"label\":\"%s\",\"minutes\":%u,"
+                "\"rem_s\":%u,\"silent\":%s,\"sessions_today\":%u,\"minutes_today\":%u}",
+                ds.label, (unsigned)minutes, (unsigned)ds.rem_s,
+                ds.silent ? "true" : "false",
+                (unsigned)ds.sessions_today, (unsigned)ds.minutes_today);
+            ESP_LOGI(TAG, "local tool=start_focus label=%s min=%u silent=%d",
+                     ds.label, (unsigned)minutes, silent ? 1 : 0);
         } else {
             slot->status = JR_TOOL_STATUS_INVALID_ARGS;
-            const bool full = jr_timer_active_count(&s_timers) >= JR_TIMER_MAX;
             (void)snprintf(out, cap,
-                "{\"error\":{\"code\":\"%s\",\"message\":\"%s\"}}",
-                full ? "timer_bank_full" : "invalid_focus",
-                full ? "All 4 timer slots are already in use."
-                     : "Focus minutes must be between 1 and 720.");
+                "{\"error\":{\"code\":\"invalid_focus\","
+                "\"message\":\"Focus minutes must be between 1 and 720.\"}}");
+        }
+        cJSON_Delete(args);
+    } else if (set_desk) {
+        cJSON *args = cJSON_Parse(cmd->tool_args ? cmd->tool_args : "{}");
+        const cJSON *mode_item = cJSON_GetObjectItemCaseSensitive(args, "mode");
+        const cJSON *min_item  = cJSON_GetObjectItemCaseSensitive(args, "minutes");
+        const cJSON *lbl_item  = cJSON_GetObjectItemCaseSensitive(args, "label");
+        const cJSON *sil_item  = cJSON_GetObjectItemCaseSensitive(args, "silent");
+        const cJSON *pat_item  = cJSON_GetObjectItemCaseSensitive(args, "pattern");
+        const cJSON *cyc_item  = cJSON_GetObjectItemCaseSensitive(args, "cycles");
+        jr_desk_mode_t mode = JR_DESK_NORMAL;
+        const bool ok_mode = cJSON_IsString(mode_item) && mode_item->valuestring &&
+                             desk_mode_parse_name(mode_item->valuestring, &mode);
+        bool bad_arg = !ok_mode;
+        uint32_t minutes = 0U;
+        if (!bad_arg && min_item != NULL && !cJSON_IsNull(min_item)) {
+            if (!cJSON_IsNumber(min_item) || min_item->valuedouble < 0.0 ||
+                min_item->valuedouble > 720.0) {
+                bad_arg = true;
+            } else {
+                minutes = (uint32_t)lrint(min_item->valuedouble);
+            }
+        }
+        jr_breathe_pattern_t pat = JR_BREATHE_BOX;
+        if (!bad_arg && cJSON_IsString(pat_item) && pat_item->valuestring &&
+            pat_item->valuestring[0] != '\0' &&
+            !desk_breathe_parse_pattern(pat_item->valuestring, &pat)) {
+            bad_arg = true;
+        }
+        uint8_t cycles = 0U;
+        if (!bad_arg && cyc_item != NULL && !cJSON_IsNull(cyc_item)) {
+            if (!cJSON_IsNumber(cyc_item) || cyc_item->valuedouble < 1.0 ||
+                cyc_item->valuedouble > 8.0) {
+                bad_arg = true;
+            } else {
+                cycles = (uint8_t)lrint(cyc_item->valuedouble);
+            }
+        }
+        bool silent = false;
+        (void)json_get_bool_opt(sil_item, &silent);
+        if (!bad_arg) {
+            desk_mode_req_t dreq = {
+                .mode = mode,
+                .duration_s = minutes * 60U,
+                .pattern = pat,
+                .cycles = cycles,
+                .silent = silent,
+            };
+            if (cJSON_IsString(lbl_item) && lbl_item->valuestring) {
+                strlcpy(dreq.label, lbl_item->valuestring, sizeof(dreq.label));
+            }
+            desk_mode_apply_now(&dreq, now_ms, true);
+            desk_mode_snap_t ds = {0};
+            desk_mode_snapshot(&ds);
+            (void)snprintf(out, cap,
+                "{\"ok\":true,\"mode\":\"%s\",\"rem_s\":%u,\"silent\":%s,"
+                "\"sessions_today\":%u,\"minutes_today\":%u}",
+                desk_mode_api_name(ds.mode), (unsigned)ds.rem_s,
+                ds.silent ? "true" : "false",
+                (unsigned)ds.sessions_today, (unsigned)ds.minutes_today);
+            ESP_LOGI(TAG, "local tool=set_desk_mode mode=%s rem_s=%u silent=%d",
+                     desk_mode_api_name(ds.mode), (unsigned)ds.rem_s,
+                     ds.silent ? 1 : 0);
+        } else {
+            slot->status = JR_TOOL_STATUS_INVALID_ARGS;
+            (void)snprintf(out, cap,
+                "{\"error\":{\"code\":\"invalid_desk_mode\","
+                "\"message\":\"Use mode on_air, focus, breathe, or normal (minutes 0..720).\"}}");
+        }
+        cJSON_Delete(args);
+    } else if (start_breath) {
+        cJSON *args = cJSON_Parse(cmd->tool_args ? cmd->tool_args : "{}");
+        const cJSON *pat_item = cJSON_GetObjectItemCaseSensitive(args, "pattern");
+        const cJSON *cyc_item = cJSON_GetObjectItemCaseSensitive(args, "cycles");
+        const cJSON *sil_item = cJSON_GetObjectItemCaseSensitive(args, "silent");
+        jr_breathe_pattern_t pat = JR_BREATHE_BOX;
+        uint8_t cycles = JR_DESK_BREATHE_DEFAULT_CYCLES;
+        bool bad_arg = false;
+        bool silent = false;
+        (void)json_get_bool_opt(sil_item, &silent);
+        if (pat_item != NULL && !cJSON_IsNull(pat_item)) {
+            if (!cJSON_IsString(pat_item) || pat_item->valuestring == NULL ||
+                !desk_breathe_parse_pattern(pat_item->valuestring, &pat)) {
+                bad_arg = true;
+            }
+        }
+        if (cyc_item != NULL && !cJSON_IsNull(cyc_item)) {
+            if (!cJSON_IsNumber(cyc_item) || cyc_item->valuedouble < 1.0 ||
+                cyc_item->valuedouble > 8.0) {
+                bad_arg = true;
+            } else {
+                cycles = (uint8_t)lrint(cyc_item->valuedouble);
+            }
+        }
+        if (!bad_arg) {
+            desk_mode_req_t dreq = {
+                .mode = JR_DESK_BREATHE,
+                .pattern = pat,
+                .cycles = cycles,
+                .silent = silent,
+            };
+            desk_mode_apply_now(&dreq, now_ms, true);
+            desk_mode_snap_t ds = {0};
+            desk_mode_snapshot(&ds);
+            (void)snprintf(out, cap,
+                "{\"ok\":true,\"mode\":\"breathe\",\"pattern\":\"%s\","
+                "\"cycles\":%u,\"rem_s\":%u,\"silent\":%s}",
+                jr_breathe_pattern_name(pat), (unsigned)cycles,
+                (unsigned)ds.rem_s, ds.silent ? "true" : "false");
+            ESP_LOGI(TAG, "local tool=start_breathe pattern=%s cycles=%u silent=%d",
+                     jr_breathe_pattern_name(pat), (unsigned)cycles, silent ? 1 : 0);
+        } else {
+            slot->status = JR_TOOL_STATUS_INVALID_ARGS;
+            (void)snprintf(out, cap,
+                "{\"error\":{\"code\":\"invalid_breathe\","
+                "\"message\":\"Use pattern box, calm, or energize and cycles 1..8.\"}}");
         }
         cJSON_Delete(args);
     } else if (sw_tool) {
@@ -1453,9 +1673,12 @@ bool device_try_local_tool(const jr_command_t *cmd)
     } else if (add_note) {
         cJSON *args = cJSON_Parse(cmd->tool_args ? cmd->tool_args : "{}");
         const cJSON *txt_item = cJSON_GetObjectItemCaseSensitive(args, "text");
+        const cJSON *tag_item = cJSON_GetObjectItemCaseSensitive(args, "tag");
         const char *txt = (cJSON_IsString(txt_item) && txt_item->valuestring)
             ? txt_item->valuestring : NULL;
-        const uint32_t id = device_notes_add(txt);
+        const jr_note_tag_t tag = (cJSON_IsString(tag_item) && tag_item->valuestring)
+            ? jr_note_tag_parse(tag_item->valuestring) : JR_NOTE_TAG_LIFE;
+        const uint32_t id = device_notes_add_ex(txt, tag);
         if (id != 0U) {
             jr_note_bank_t bank;
             device_notes_snapshot(&bank);
@@ -1463,10 +1686,12 @@ bool device_try_local_tool(const jr_command_t *cmd)
             device_confirm_cue();
             jr_display_caption_set("NOTE PINNED");
             (void)snprintf(out, cap,
-                "{\"ok\":true,\"id\":%u,\"count\":%u,\"max\":%u}",
-                (unsigned)id, (unsigned)bank.count, (unsigned)JR_NOTES_MAX);
-            ESP_LOGI(TAG, "local tool=add_note id=%u count=%u",
-                     (unsigned)id, (unsigned)bank.count);
+                "{\"ok\":true,\"id\":%u,\"tag\":\"%s\",\"count\":%u,\"max\":%u}",
+                (unsigned)id, tag == JR_NOTE_TAG_WORK ? "work" : "life",
+                (unsigned)bank.count, (unsigned)JR_NOTES_MAX);
+            ESP_LOGI(TAG, "local tool=add_note id=%u tag=%s count=%u",
+                     (unsigned)id, tag == JR_NOTE_TAG_WORK ? "work" : "life",
+                     (unsigned)bank.count);
         } else {
             jr_note_bank_t bank;
             device_notes_snapshot(&bank);
@@ -1482,13 +1707,19 @@ bool device_try_local_tool(const jr_command_t *cmd)
     } else if (list_notes) {
         jr_note_bank_t bank;
         device_notes_snapshot(&bank);
-        int n = snprintf(out, cap, "{\"count\":%u,\"max\":%u,\"notes\":[",
-                         (unsigned)bank.count, (unsigned)JR_NOTES_MAX);
-        for (unsigned i = 0U; i < bank.count && n > 0 && (size_t)n < cap - 24U; ++i) {
+        size_t open_n = 0U, done_n = 0U;
+        (void)jr_notes_counts(&bank, &open_n, &done_n);
+        int n = snprintf(out, cap, "{\"count\":%u,\"open\":%u,\"done\":%u,\"max\":%u,\"notes\":[",
+                         (unsigned)bank.count, (unsigned)open_n, (unsigned)done_n,
+                         (unsigned)JR_NOTES_MAX);
+        for (unsigned i = 0U; i < bank.count && n > 0 && (size_t)n < cap - 32U; ++i) {
+            const jr_note_item_t *it = &bank.items[i];
             int w = snprintf(out + n, cap - (size_t)n,
-                             "%s{\"id\":%u,\"text\":\"%s\"}",
+                             "%s{\"id\":%u,\"text\":\"%s\",\"done\":%s,\"tag\":\"%s\"}",
                              i == 0U ? "" : ",",
-                             (unsigned)bank.items[i].id, bank.items[i].text);
+                             (unsigned)it->id, it->text,
+                             it->done ? "true" : "false",
+                             it->tag == (uint8_t)JR_NOTE_TAG_WORK ? "work" : "life");
             if (w < 0 || (size_t)n + (size_t)w >= cap - 4U) {
                 break;
             }
@@ -1497,6 +1728,35 @@ bool device_try_local_tool(const jr_command_t *cmd)
         if (n > 0 && (size_t)n + 3U < cap) {
             snprintf(out + n, cap - (size_t)n, "]}");
         }
+    } else if (comp_note) {
+        cJSON *args = cJSON_Parse(cmd->tool_args ? cmd->tool_args : "{}");
+        const cJSON *tgt_item = cJSON_GetObjectItemCaseSensitive(args, "target");
+        char target_buf[JR_NOTE_TEXT_CAP] = {0};
+        if (cJSON_IsString(tgt_item) && tgt_item->valuestring != NULL) {
+            strlcpy(target_buf, tgt_item->valuestring, sizeof(target_buf));
+        } else if (cJSON_IsNumber(tgt_item) && tgt_item->valuedouble >= 1.0) {
+            snprintf(target_buf, sizeof(target_buf), "%u",
+                     (unsigned)lrint(tgt_item->valuedouble));
+        }
+        uint32_t matched_id = 0U;
+        if (target_buf[0] != '\0' && device_notes_complete(target_buf, &matched_id)) {
+            size_t open_n = 0U, done_n = 0U;
+            (void)device_notes_counts(&open_n, &done_n);
+            jr_mood_poke_awake(&s_mood, now_ms);
+            device_confirm_cue();
+            jr_display_caption_set("NOTE DONE");
+            (void)snprintf(out, cap,
+                "{\"ok\":true,\"id\":%u,\"open\":%u,\"done\":%u}",
+                (unsigned)matched_id, (unsigned)open_n, (unsigned)done_n);
+            ESP_LOGI(TAG, "local tool=complete_note id=%u open=%u done=%u",
+                     (unsigned)matched_id, (unsigned)open_n, (unsigned)done_n);
+        } else {
+            slot->status = JR_TOOL_STATUS_INVALID_ARGS;
+            (void)snprintf(out, cap,
+                "{\"error\":{\"code\":\"note_not_found\","
+                "\"message\":\"No open desk note matched that ID or keyword.\"}}");
+        }
+        cJSON_Delete(args);
     } else if (clear_notes) {
         cJSON *args = cJSON_Parse(cmd->tool_args ? cmd->tool_args : "{}");
         const cJSON *tgt_item = cJSON_GetObjectItemCaseSensitive(args, "target");

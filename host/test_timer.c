@@ -357,6 +357,96 @@ static void test_timer_sleep_wake_clamping_and_block_policy(void)
     TEST_ASSERT_EQUAL_UINT32(26u, jr_timer_sleep_wake_s(&b, 569000u, 14400u));
 }
 
+static void test_timer_silent_flag_chime_suppression_and_mixed_ringing(void)
+{
+    jr_timer_bank_t b;
+    jr_timer_init(&b);
+    jr_timer_events_t ev;
+    jr_timer_view_t v;
+
+    /* Empty bank: not silently ringing */
+    TEST_ASSERT_FALSE(jr_timer_ringing_is_silent(&b));
+
+    /* Start a silent call-safe timer (10 s) and an audible timer (20 s) */
+    TEST_ASSERT_TRUE(jr_timer_set_ex(&b, 1000u, 10u, "standup", true,
+                                     NULL, 0u, NULL));
+    TEST_ASSERT_TRUE(jr_timer_set(&b, 1000u, 20u, "tea", NULL, 0u, NULL));
+
+    TEST_ASSERT_TRUE(jr_timer_nearest(&b, 2000u, &v));
+    TEST_ASSERT_EQUAL_STRING("STANDUP", v.label);
+    TEST_ASSERT_TRUE(v.silent);
+    TEST_ASSERT_FALSE(jr_timer_ringing_is_silent(&b));
+
+    /* Silent timer expires at 11000 ms: visual expired=true, chime=false */
+    jr_timer_step(&b, 11000u, &ev);
+    TEST_ASSERT_TRUE(ev.expired);
+    TEST_ASSERT_FALSE(ev.chime);
+    TEST_ASSERT_EQUAL_STRING("STANDUP", ev.expired_label);
+    TEST_ASSERT_TRUE(jr_timer_any_ringing(&b));
+    TEST_ASSERT_TRUE(jr_timer_ringing_is_silent(&b));
+
+    /* +4 s periodic tick still suppresses chime */
+    jr_timer_step(&b, 15000u, &ev);
+    TEST_ASSERT_FALSE(ev.expired);
+    TEST_ASSERT_FALSE(ev.chime);
+    TEST_ASSERT_TRUE(jr_timer_ringing_is_silent(&b));
+
+    /* Audible timer expires at 21000 ms while silent timer is still ringing:
+     * chime fires AND ringing_is_silent flips to false! */
+    jr_timer_step(&b, 21000u, &ev);
+    TEST_ASSERT_TRUE(ev.expired);
+    TEST_ASSERT_TRUE(ev.chime);
+    TEST_ASSERT_EQUAL_STRING("TEA", ev.expired_label);
+    TEST_ASSERT_FALSE(jr_timer_ringing_is_silent(&b));
+
+    /* Cancel the audible TEA timer -> only silent STANDUP remains ringing */
+    TEST_ASSERT_EQUAL_UINT(1u, jr_timer_cancel(&b, 22000u, "tea"));
+    TEST_ASSERT_TRUE(jr_timer_any_ringing(&b));
+    TEST_ASSERT_TRUE(jr_timer_ringing_is_silent(&b));
+
+    /* Auto-stop at 11000 + 60000 ms clears ringing_is_silent */
+    jr_timer_step(&b, 11000u + JR_TIMER_RING_AUTO_STOP_MS, &ev);
+    TEST_ASSERT_TRUE(ev.auto_stopped);
+    TEST_ASSERT_FALSE(jr_timer_any_ringing(&b));
+    TEST_ASSERT_FALSE(jr_timer_ringing_is_silent(&b));
+}
+
+static void test_timer_rtc_snapshot_v2_silent_and_v1_compat(void)
+{
+    jr_timer_bank_t b;
+    jr_timer_init(&b);
+    TEST_ASSERT_TRUE(jr_timer_set_ex(&b, 1000u, 120u, "call", true, NULL, 0u, NULL));
+    TEST_ASSERT_TRUE(jr_timer_set(&b, 1000u, 240u, "loud", NULL, 0u, NULL));
+
+    jr_timer_snapshot_t snap;
+    TEST_ASSERT_TRUE(jr_timer_snapshot_save(&b, 1000u, 1732400000LL, 60u, &snap));
+    TEST_ASSERT_EQUAL_UINT32(JR_TIMER_SNAP_VERSION, snap.version);
+    TEST_ASSERT_TRUE(jr_timer_snapshot_valid(&snap));
+    TEST_ASSERT_EQUAL_UINT8(JR_TIMER_SNAP_FLAG_SILENT, snap.slots[0].flags);
+    TEST_ASSERT_EQUAL_UINT8(0u, snap.slots[1].flags);
+
+    jr_timer_bank_t restored;
+    TEST_ASSERT_EQUAL_UINT(2u, jr_timer_snapshot_restore(&restored, &snap, 500u,
+                                                         1732400060LL, 60u));
+    TEST_ASSERT_TRUE(restored.slots[0].silent);
+    TEST_ASSERT_FALSE(restored.slots[1].silent);
+
+    /* Legacy v1 snapshot (version=1, flags/reserved[0]=0) still restores cleanly */
+    jr_timer_snapshot_t v1 = snap;
+    v1.version = JR_TIMER_SNAP_VERSION_V1;
+    v1.slots[0].flags = 0u;
+    v1.checksum = jr_timer_snapshot_checksum(&v1);
+    TEST_ASSERT_TRUE(jr_timer_snapshot_valid(&v1));
+
+    jr_timer_bank_t restored_v1;
+    TEST_ASSERT_EQUAL_UINT(2u, jr_timer_snapshot_restore(&restored_v1, &v1, 500u,
+                                                         1732400060LL, 60u));
+    TEST_ASSERT_FALSE(restored_v1.slots[0].silent);
+    TEST_ASSERT_FALSE(restored_v1.slots[1].silent);
+}
+
+extern void desk_mode_tests_run(void);
+
 void timer_tests_run(void)
 {
     RUN_TEST(test_timer_init_and_empty_queries);
@@ -370,4 +460,8 @@ void timer_tests_run(void)
     RUN_TEST(test_timer_rtc_snapshot_epoch_and_fallback_restore);
     RUN_TEST(test_timer_rtc_snapshot_rejects_corruption);
     RUN_TEST(test_timer_sleep_wake_clamping_and_block_policy);
+    RUN_TEST(test_timer_silent_flag_chime_suppression_and_mixed_ringing);
+    RUN_TEST(test_timer_rtc_snapshot_v2_silent_and_v1_compat);
+    /* Run jr_core/desk_mode tests inside jr_host_tests without modifying test_core.c. */
+    desk_mode_tests_run();
 }

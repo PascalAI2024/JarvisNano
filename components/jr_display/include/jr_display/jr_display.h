@@ -902,6 +902,34 @@ void jr_display_glass3_set(jr_glass3_mode_t mode);
 jr_glass3_mode_t jr_display_glass3_get(void);
 const char *jr_display_glass3_name(jr_glass3_mode_t mode);
 
+/* Glass 3.5: Procedural Cold-Boot Ignition splash (0 SPIFFS, lock-free).
+ * stage: 0=CORE, 1=AUDIO, 2=WIFI, 3=READY; progress_pct: 0..100.
+ * Transitioning active true->false runs a smooth 450 ms alpha crossfade. */
+void jr_display_boot_ignition_set(bool active, uint8_t stage, uint8_t progress_pct);
+bool jr_display_boot_ignition_active(void);
+
+/* Glass 3.5: Unified Desk Mode overlay (mode: 0=NORMAL, 1=ON_AIR, 2=FOCUS, 3=BREATHE).
+ * Lock-free, any-task safe. */
+void jr_display_desk_mode_set(uint8_t mode, uint32_t rem_s, uint8_t pct,
+                              uint8_t breathe_phase, uint8_t breathe_sec,
+                              uint8_t sessions_done, uint8_t sessions_total,
+                              bool warn_pulse, const char *label);
+bool jr_display_desk_mode_active(void);
+
+/* Glass 3.5: Tactile On-Glass Desk Inbox (displayed cleanly in ACTIVITY space). */
+#define JR_DISPLAY_INBOX_MAX 3U
+typedef struct {
+    uint32_t id;
+    bool     done;
+    uint8_t  tag;        /* 0=LIFE, 1=WORK */
+    char     text[36];
+} jr_display_inbox_item_t;
+
+void jr_display_inbox_set(const jr_display_inbox_item_t *items, size_t count, size_t open_count);
+/* Returns tapped note id (non-zero) when ACTIVITY space is settled and (x,y)
+ * hits one of the visible inbox rows, else 0. */
+uint32_t jr_display_inbox_hit(uint16_t x, uint16_t y);
+
 #ifdef __cplusplus
 }
 #endif

@@ -183,6 +183,7 @@ static void test_tools_gateway_classification(void)
         "set_glass", "device_status", "start_focus", "stopwatch",
         "add_note", "list_notes", "clear_notes", "daily_briefing",
         "set_ui_sounds", "set_sunlight",
+        "set_desk_mode", "start_breathe", "complete_note",
     };
     for (size_t i = 0; i < sizeof kGateway / sizeof kGateway[0]; ++i) {
         TEST_ASSERT_TRUE_MESSAGE(jr_tool_needs_gateway(kGateway[i]), kGateway[i]);
@@ -250,6 +251,9 @@ static void test_instruction_without_a_gateway_names_what_it_has(void)
     TEST_ASSERT_NOT_NULL(strstr(buf, "set_glass"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "set_ui_sounds"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "set_sunlight"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "set_desk_mode"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "start_breathe"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "complete_note"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "device_status"));
     /* Fits inside main.c's 1600-byte buffer. */
     char device[1600];
@@ -278,6 +282,9 @@ static void test_instruction_with_a_gateway_is_the_old_one_plus_weather(void)
     TEST_ASSERT_NOT_NULL(strstr(buf, "daily_briefing"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "set_ui_sounds"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "set_sunlight"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "set_desk_mode"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "start_breathe"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "complete_note"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "set_glass"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "device_status"));
     /* The board is delegated_tasks; execute_tool is for a method search_tools
@@ -302,7 +309,7 @@ static void test_instruction_that_does_not_fit_returns_zero(void)
 
 /* ---------------------- setup built with and without a key --------------- */
 
-/* The device's twenty-four tools, by name, in catalog order (main/main.c). */
+/* The device's twenty-seven tools, by name, in catalog order (main/main.c). */
 static const jr_gemini_fn_decl_t kCatalog[] = {
     { .name = "recall_memory", .description = "d", .arg_name = "query", .arg_desc = "q" },
     { .name = "remember", .description = "d", .arg_name = "note", .arg_desc = "n" },
@@ -328,6 +335,9 @@ static const jr_gemini_fn_decl_t kCatalog[] = {
     { .name = "daily_briefing", .description = "d" },
     { .name = "set_ui_sounds", .description = "d" },
     { .name = "set_sunlight", .description = "d" },
+    { .name = "set_desk_mode", .description = "d" },
+    { .name = "start_breathe", .description = "d" },
+    { .name = "complete_note", .description = "d" },
 };
 #define CATALOG_N (sizeof kCatalog / sizeof kCatalog[0])
 
@@ -370,7 +380,8 @@ static void test_setup_with_a_usable_gateway_declares_every_tool(void)
         "execute_tool,set_volume,set_brightness,delegate_task,"
         "delegated_tasks,ask_user,set_timer,cancel_timer,list_timers,"
         "set_glass,device_status,start_focus,stopwatch,add_note,list_notes,"
-        "clear_notes,daily_briefing,set_ui_sounds,set_sunlight", names);
+        "clear_notes,daily_briefing,set_ui_sounds,set_sunlight,"
+        "set_desk_mode,start_breathe,complete_note", names);
 }
 
 static void test_setup_without_a_gateway_declares_only_what_runs_here(void)
@@ -380,7 +391,7 @@ static void test_setup_without_a_gateway_declares_only_what_runs_here(void)
     cfg.fns = kCatalog;
     cfg.fn_count = CATALOG_N;
     cfg.no_gateway = true;
-    TEST_ASSERT_EQUAL_UINT(18u, jr_gemini_declared_fn_count(&cfg));
+    TEST_ASSERT_EQUAL_UINT(21u, jr_gemini_declared_fn_count(&cfg));
     char *setup = jr_gemini_build_setup(&cfg);
     TEST_ASSERT_NOT_NULL(setup);
     char names[512];
@@ -390,7 +401,8 @@ static void test_setup_without_a_gateway_declares_only_what_runs_here(void)
         "current_time,weather_here,set_volume,set_brightness,ask_user,"
         "set_timer,cancel_timer,list_timers,set_glass,device_status,"
         "start_focus,stopwatch,add_note,list_notes,clear_notes,"
-        "daily_briefing,set_ui_sounds,set_sunlight", names);
+        "daily_briefing,set_ui_sounds,set_sunlight,"
+        "set_desk_mode,start_breathe,complete_note", names);
 }
 
 static void test_setup_with_no_local_tools_left_has_no_declarations(void)

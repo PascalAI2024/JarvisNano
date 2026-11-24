@@ -1,21 +1,29 @@
 /*
  * SPDX-License-Identifier: Apache-2.0
  *
- * test_glass3_screens.c — Standalone host verification for Glass 3.0 data
+ * test_glass3_screens.c — Standalone host verification for Glass 3.5 data
  * screens (ATMOSPHAERA & CORTEX COMMAND).
  *
  * Verifies:
  *   1. Exact byte-for-byte strip-invariance (full 466-row vs 16-row and 12-row
- *      strips) across day/night/rain/storm/snow/fog/codex/charging/fade states.
- *   2. Exact swap_bytes=false vs swap_bytes=true byte-swap equivalence across
+ *      strips) across full procedural, static-only, and live-only entry points.
+ *   2. Exact byte-for-byte identity between `static_rows` + `live_rows` and
+ *      `jr_g3_*_rows()` at strength=255 (both native and swap_bytes=true, even
+ *      when static_rows is baked with different live/fade parameters).
+ *   3. Exact swap_bytes=false vs swap_bytes=true byte-swap equivalence across
  *      every pixel of the 466x466 frame (both on black and prefilled canvases).
- *   3. Strict non-overlap safe-zone invariants (emblem isolation vs temp hero,
+ *   4. Static key determinism, sensitivity to every static field, invariance to
+ *      every live/fade field, NULL -> 0 sentinel, and cross-screen uniqueness.
+ *   5. Strict non-overlap safe-zone invariants (emblem isolation vs temp hero,
  *      horizon clearance below y=264, 24h Sun Jewel cardinal tracking, 4-quadrant
- *      gauge isolation, LED dot placement, sparkline bounding box, OLED corner clip).
- *   4. Optional PPM visual specimen export when G3_DUMP_PPM_DIR is set.
+ *      gauge isolation, LED dot placement, sparkline bounding box, Concept 3 &
+ *      Concept 5 label safe-zone anchors, OLED corner clip).
+ *   6. Host render speedup benchmark (cached static plate + live overlay vs
+ *      full procedural render).
+ *   7. Optional PPM visual specimen export when G3_DUMP_PPM_DIR is set.
  *
  * Compiles cleanly with zero warnings under:
- *   cc -std=c11 -O2 -Wall -Wextra -Werror \
+ *   cc -std=c11 -O2 -Wall -Wextra -Werror -Wstack-usage=512 \
  *      host/test_glass3_screens.c components/jr_display/src/glass3_screens.c \
  *      -Icomponents/jr_display/src -o test_glass3_screens
  */
@@ -26,6 +34,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define W JR_G3_PANEL_W
 #define H JR_G3_PANEL_H
@@ -52,6 +61,7 @@ static uint16_t s_full[FRAME_PX];
 static uint16_t s_strip[FRAME_PX];
 static uint16_t s_ref[FRAME_PX];
 static uint16_t s_cmp[FRAME_PX];
+static uint16_t s_plate[FRAME_PX];
 
 static void fill_pattern(uint16_t *buf, bool swap_bytes)
 {
@@ -74,12 +84,48 @@ static void render_atmos_strips(uint16_t *dst, int strip_h, bool swap_bytes,
     }
 }
 
+static void render_atmos_static_strips(uint16_t *dst, int strip_h, bool swap_bytes,
+                                       const jr_g3_atmosphaera_t *env)
+{
+    for (int y0 = 0; y0 < H; y0 += strip_h) {
+        int n = (y0 + strip_h <= H) ? strip_h : (H - y0);
+        jr_g3_atmosphaera_static_rows(dst + (size_t)y0 * W, y0, n, swap_bytes, env);
+    }
+}
+
+static void render_atmos_live_strips(uint16_t *dst, int strip_h, bool swap_bytes,
+                                     const jr_g3_atmosphaera_t *env)
+{
+    for (int y0 = 0; y0 < H; y0 += strip_h) {
+        int n = (y0 + strip_h <= H) ? strip_h : (H - y0);
+        jr_g3_atmosphaera_live_rows(dst + (size_t)y0 * W, y0, n, swap_bytes, env);
+    }
+}
+
 static void render_cortex_strips(uint16_t *dst, int strip_h, bool swap_bytes,
                                  const jr_g3_cortex_t *env)
 {
     for (int y0 = 0; y0 < H; y0 += strip_h) {
         int n = (y0 + strip_h <= H) ? strip_h : (H - y0);
         jr_g3_cortex_rows(dst + (size_t)y0 * W, y0, n, swap_bytes, env);
+    }
+}
+
+static void render_cortex_static_strips(uint16_t *dst, int strip_h, bool swap_bytes,
+                                        const jr_g3_cortex_t *env)
+{
+    for (int y0 = 0; y0 < H; y0 += strip_h) {
+        int n = (y0 + strip_h <= H) ? strip_h : (H - y0);
+        jr_g3_cortex_static_rows(dst + (size_t)y0 * W, y0, n, swap_bytes, env);
+    }
+}
+
+static void render_cortex_live_strips(uint16_t *dst, int strip_h, bool swap_bytes,
+                                      const jr_g3_cortex_t *env)
+{
+    for (int y0 = 0; y0 < H; y0 += strip_h) {
+        int n = (y0 + strip_h <= H) ? strip_h : (H - y0);
+        jr_g3_cortex_live_rows(dst + (size_t)y0 * W, y0, n, swap_bytes, env);
     }
 }
 
@@ -199,8 +245,28 @@ static void test_atmosphaera_strip_and_swap(void)
         snprintf(msg, sizeof(msg), "atmos case %zu: swap_bytes exact bswap16 equivalence", i);
         check(frames_bswap_equal(s_full, s_cmp), msg);
 
-        /* Pure OLED black outside r > 232 (corners) when starting on black */
+        /* Static + Live split exact byte-for-byte identity at strength=255 */
         if (!prefill) {
+            /* Bake static plate using deliberately mutated live/fade fields */
+            jr_g3_atmosphaera_t static_env = cases[i];
+            static_env.now_ms += 99999u;
+            static_env.weather_code = JR_G3_WX_FOG;
+            static_env.rain_pct = 100u;
+            static_env.strength = 0u; /* static_rows must still render at full 255 */
+
+            memset(s_plate, 0, sizeof(s_plate));
+            jr_g3_atmosphaera_static_rows(s_plate, 0, H, false, &static_env);
+            jr_g3_atmosphaera_live_rows(s_plate, 0, H, false, &cases[i]);
+            snprintf(msg, sizeof(msg), "atmos case %zu: static+live == full (native, exact)", i);
+            check(frames_equal(s_full, s_plate, &bx, &by), msg);
+
+            /* 16-row static strips + 12-row live strips (swapped) == full swapped */
+            memset(s_strip, 0, sizeof(s_strip));
+            render_atmos_static_strips(s_strip, 16, true, &static_env);
+            render_atmos_live_strips(s_strip, 12, true, &cases[i]);
+            snprintf(msg, sizeof(msg), "atmos case %zu: static(16)+live(12) == full (swapped, exact)", i);
+            check(frames_equal(s_cmp, s_strip, &bx, &by), msg);
+
             bool corners_black = (s_full[0] == 0u && s_full[W - 1] == 0u &&
                                   s_full[(size_t)(H - 1) * W] == 0u &&
                                   s_full[(size_t)(H - 1) * W + (W - 1)] == 0u);
@@ -209,13 +275,75 @@ static void test_atmosphaera_strip_and_swap(void)
         }
     }
 
-    /* Strength == 0 must be a strict no-op */
+    /* Partial-fade live_rows strip invariance & swap_bytes equivalence over prefilled canvas */
+    fill_pattern(s_full, false);
+    fill_pattern(s_strip, false);
+    jr_g3_atmosphaera_live_rows(s_full, 0, H, false, &cases[8]);
+    render_atmos_live_strips(s_strip, 12, false, &cases[8]);
+    check(frames_equal(s_full, s_strip, NULL, NULL), "atmos live_rows: 12-row strip == full (partial fade)");
+
+    fill_pattern(s_cmp, true);
+    jr_g3_atmosphaera_live_rows(s_cmp, 0, H, true, &cases[8]);
+    check(frames_bswap_equal(s_full, s_cmp), "atmos live_rows: swap_bytes exact equivalence");
+
+    /* Strength == 0 must be a strict no-op for rows() and live_rows() */
     jr_g3_atmosphaera_t zero_env = cases[0];
     zero_env.strength = 0;
     fill_pattern(s_ref, false);
     memcpy(s_cmp, s_ref, sizeof(s_ref));
     jr_g3_atmosphaera_rows(s_cmp, 0, H, false, &zero_env);
     check(frames_equal(s_ref, s_cmp, NULL, NULL), "atmos strength=0 modifies 0 pixels");
+    jr_g3_atmosphaera_live_rows(s_cmp, 0, H, false, &zero_env);
+    check(frames_equal(s_ref, s_cmp, NULL, NULL), "atmos live_rows strength=0 modifies 0 pixels");
+
+    /* NULL / non-positive nrows defensive no-ops */
+    jr_g3_atmosphaera_static_rows(NULL, 0, 16, false, &cases[0]);
+    jr_g3_atmosphaera_static_rows(s_cmp, 0, 0, false, &cases[0]);
+    jr_g3_atmosphaera_static_rows(s_cmp, 0, 16, false, NULL);
+    jr_g3_atmosphaera_live_rows(NULL, 0, 16, false, &cases[0]);
+    jr_g3_atmosphaera_live_rows(s_cmp, 0, -4, false, &cases[0]);
+    jr_g3_atmosphaera_live_rows(s_cmp, 0, 16, false, NULL);
+    check(frames_equal(s_ref, s_cmp, NULL, NULL), "atmos defensive NULL/nrows<=0 calls leave buffer intact");
+}
+
+static void test_atmosphaera_static_key(void)
+{
+    check(jr_g3_atmosphaera_static_key(NULL) == 0u, "atmos static_key(NULL) == 0");
+
+    jr_g3_atmosphaera_t base = {
+        .hour = 13, .minute = 25, .weather_code = JR_G3_WX_PARTLY,
+        .is_day = true, .temp_f = 74, .rain_pct = 20, .now_ms = 1000, .strength = 255,
+    };
+    const uint32_t k0 = jr_g3_atmosphaera_static_key(&base);
+    check(k0 != 0u, "atmos static_key non-zero for valid env");
+    check(jr_g3_atmosphaera_static_key(&base) == k0, "atmos static_key deterministic");
+
+    /* Live/fade fields MUST NOT alter static key */
+    jr_g3_atmosphaera_t live_mod = base;
+    live_mod.now_ms = 987654u;
+    live_mod.weather_code = JR_G3_WX_STORM;
+    live_mod.rain_pct = 95u;
+    live_mod.strength = 64u;
+    check(jr_g3_atmosphaera_static_key(&live_mod) == k0,
+          "atmos static_key invariant to now_ms/weather_code/rain_pct/strength");
+
+    /* Normalization wrap equivalence */
+    jr_g3_atmosphaera_t wrap = base;
+    wrap.hour = (uint8_t)(base.hour + 24u);
+    wrap.minute = (uint8_t)(base.minute + 60u);
+    check(jr_g3_atmosphaera_static_key(&wrap) == k0,
+          "atmos static_key normalizes hour%24 and minute%60");
+
+    /* Every static field MUST change the static key */
+    jr_g3_atmosphaera_t m;
+    m = base; m.hour = 14;
+    check(jr_g3_atmosphaera_static_key(&m) != k0, "atmos static_key sensitive to hour");
+    m = base; m.minute = 26;
+    check(jr_g3_atmosphaera_static_key(&m) != k0, "atmos static_key sensitive to minute");
+    m = base; m.is_day = false;
+    check(jr_g3_atmosphaera_static_key(&m) != k0, "atmos static_key sensitive to is_day");
+    m = base; m.temp_f = 75;
+    check(jr_g3_atmosphaera_static_key(&m) != k0, "atmos static_key sensitive to temp_f");
 }
 
 static void test_atmosphaera_safe_zones_and_sun(void)
@@ -256,6 +384,31 @@ static void test_atmosphaera_safe_zones_and_sun(void)
     check(diff_outside_emblem == 0, "atmos emblem leaks 0 pixels outside its clip box");
     check(diff_in_temp_zone == 0, "atmos emblem overlaps 0 pixels of temp hero safe zone");
 
+    /* Direct live_rows clip check across all 7 weather kinds (both day & night) */
+    const uint8_t wx_all[8] = {
+        JR_G3_WX_CLEAR, JR_G3_WX_PARTLY, JR_G3_WX_CLOUDS, JR_G3_WX_FOG,
+        JR_G3_WX_RAIN, JR_G3_WX_STORM, JR_G3_WX_SNOW, JR_G3_WX_CLEAR,
+    };
+    int live_leaks = 0;
+    for (int i = 0; i < 8; ++i) {
+        jr_g3_atmosphaera_t ew = e_clear;
+        ew.weather_code = wx_all[i];
+        ew.is_day = (i < 7);
+        ew.rain_pct = 80;
+        memset(s_plate, 0, sizeof(s_plate));
+        jr_g3_atmosphaera_live_rows(s_plate, 0, H, false, &ew);
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x < W; ++x) {
+                if (s_plate[(size_t)y * W + (size_t)x] != 0u) {
+                    bool in_box = (x >= JR_G3_ATMOS_EMBLEM_X0 && x <= JR_G3_ATMOS_EMBLEM_X1 &&
+                                   y >= JR_G3_ATMOS_EMBLEM_Y0 && y <= JR_G3_ATMOS_EMBLEM_Y1);
+                    if (!in_box) { ++live_leaks; }
+                }
+            }
+        }
+    }
+    check(live_leaks == 0, "atmos live_rows modifies 0 pixels outside [248..344]x[148..232] across all wx");
+
     /* 2. Planetary horizon clears completely below y = 264:
      *    Changing temp_f from warm (82) to cool (50) tints ONLY the horizon (y >= 266)! */
     jr_g3_atmosphaera_t e_warm = e_clear;
@@ -282,7 +435,6 @@ static void test_atmosphaera_safe_zones_and_sun(void)
     }
     check(hor_diff_above_265 == 0, "atmos horizon clears y <= 264 with 0 pixels");
     check(hor_diff_below_266 > 500, "atmos horizon visibly renders illuminated arc below y >= 266");
-    /* Crest at (233, 270) should be notably luminous */
     check(luma565(s_ref[270 * W + 233]) > 140, "atmos horizon crest at (233, 270) is luminous");
 
     /* 3. Live Sun Jewel cardinal positioning: 6A=left, 12P=top, 6P=right, 12A=bottom */
@@ -301,6 +453,41 @@ static void test_atmosphaera_safe_zones_and_sun(void)
         int lum = luma565(s_full[(size_t)cardinals[i].ey * W + (size_t)cardinals[i].ex]);
         check(lum > 220, cardinals[i].label);
     }
+
+    /* 4. Concept 3 Cardinal Label Safe-Zone #define verification */
+    check(JR_G3_ATMOS_LBL_12P_X == 233 && JR_G3_ATMOS_LBL_12P_Y == 56, "atmos 12P label define exact");
+    check(JR_G3_ATMOS_LBL_12A_X == 233 && JR_G3_ATMOS_LBL_12A_Y == 398, "atmos 12A label define exact");
+    check(JR_G3_ATMOS_LBL_6A_X == 58 && JR_G3_ATMOS_LBL_6A_Y == 228, "atmos 6A label define exact");
+    check(JR_G3_ATMOS_LBL_6P_X == 392 && JR_G3_ATMOS_LBL_6P_Y == 228, "atmos 6P label define exact");
+
+    const int atmos_lbls[4][2] = {
+        { JR_G3_ATMOS_LBL_12P_X, JR_G3_ATMOS_LBL_12P_Y },
+        { JR_G3_ATMOS_LBL_12A_X, JR_G3_ATMOS_LBL_12A_Y },
+        { JR_G3_ATMOS_LBL_6A_X,  JR_G3_ATMOS_LBL_6A_Y  },
+        { JR_G3_ATMOS_LBL_6P_X,  JR_G3_ATMOS_LBL_6P_Y  },
+    };
+    /* Render with sun away from cardinals (e.g. 9:00) so cardinal labels sit on quiet dark bowl */
+    jr_g3_atmosphaera_t e_lbl = e_clear;
+    e_lbl.hour = 9;
+    e_lbl.minute = 0;
+    memset(s_full, 0, sizeof(s_full));
+    jr_g3_atmosphaera_rows(s_full, 0, H, false, &e_lbl);
+    bool lbls_clear = true;
+    for (int i = 0; i < 4; ++i) {
+        int lx = atmos_lbls[i][0], ly = atmos_lbls[i][1];
+        int dx = lx - 233, dy = ly - 233;
+        int r2 = dx * dx + dy * dy;
+        bool inside_bowl = (r2 < (JR_G3_ATMOS_BOWL_R - 10) * (JR_G3_ATMOS_BOWL_R - 10));
+        bool out_temp = !(lx >= JR_G3_ATMOS_TEMP_X0 && lx <= JR_G3_ATMOS_TEMP_X1 &&
+                          ly >= JR_G3_ATMOS_TEMP_Y0 && ly <= JR_G3_ATMOS_TEMP_Y1);
+        bool out_emblem = !(lx >= JR_G3_ATMOS_EMBLEM_X0 && lx <= JR_G3_ATMOS_EMBLEM_X1 &&
+                            ly >= JR_G3_ATMOS_EMBLEM_Y0 && ly <= JR_G3_ATMOS_EMBLEM_Y1);
+        bool dark_bg = (luma565(s_full[(size_t)ly * W + (size_t)lx]) < 45);
+        if (!inside_bowl || !out_temp || !out_emblem || !dark_bg) {
+            lbls_clear = false;
+        }
+    }
+    check(lbls_clear, "atmos 4 cardinal label anchors strictly inside bowl & clear of arc/temp/emblem");
 }
 
 /* ---- 2. CORTEX COMMAND tests --------------------------------------------- */
@@ -323,7 +510,7 @@ static void test_cortex_strip_and_swap(void)
     cases[0].now_ms = 1800;
     cases[0].strength = 255;
 
-    /* Case 1: Codex active + charging emerald pulse + live 16-band spectrum */
+    /* Case 1: Codex active + charging emerald glow + live 16-band spectrum */
     cases[1].mem_pct = 88;
     cases[1].cpu_pct = 92;
     cases[1].batt_pct = 54;
@@ -387,7 +574,25 @@ static void test_cortex_strip_and_swap(void)
         snprintf(msg, sizeof(msg), "cortex case %zu: swap_bytes exact bswap16 equivalence", i);
         check(frames_bswap_equal(s_full, s_cmp), msg);
 
+        /* Static + Live split exact byte-for-byte identity at strength=255 */
         if (!prefill) {
+            jr_g3_cortex_t static_env = cases[i];
+            static_env.now_ms += 77777u;
+            memset(static_env.bands, 0xFF, sizeof(static_env.bands));
+            static_env.strength = 0u; /* static_rows must still render at full 255 */
+
+            memset(s_plate, 0, sizeof(s_plate));
+            jr_g3_cortex_static_rows(s_plate, 0, H, false, &static_env);
+            jr_g3_cortex_live_rows(s_plate, 0, H, false, &cases[i]);
+            snprintf(msg, sizeof(msg), "cortex case %zu: static+live == full (native, exact)", i);
+            check(frames_equal(s_full, s_plate, NULL, NULL), msg);
+
+            memset(s_strip, 0, sizeof(s_strip));
+            render_cortex_static_strips(s_strip, 16, true, &static_env);
+            render_cortex_live_strips(s_strip, 12, true, &cases[i]);
+            snprintf(msg, sizeof(msg), "cortex case %zu: static(16)+live(12) == full (swapped, exact)", i);
+            check(frames_equal(s_cmp, s_strip, NULL, NULL), msg);
+
             bool corners_black = (s_full[0] == 0u && s_full[W - 1] == 0u &&
                                   s_full[(size_t)(H - 1) * W] == 0u &&
                                   s_full[(size_t)(H - 1) * W + (W - 1)] == 0u);
@@ -396,6 +601,17 @@ static void test_cortex_strip_and_swap(void)
         }
     }
 
+    /* Partial-fade live_rows strip invariance & swap_bytes equivalence over prefilled canvas */
+    fill_pattern(s_full, false);
+    fill_pattern(s_strip, false);
+    jr_g3_cortex_live_rows(s_full, 0, H, false, &cases[3]);
+    render_cortex_live_strips(s_strip, 12, false, &cases[3]);
+    check(frames_equal(s_full, s_strip, NULL, NULL), "cortex live_rows: 12-row strip == full (partial fade)");
+
+    fill_pattern(s_cmp, true);
+    jr_g3_cortex_live_rows(s_cmp, 0, H, true, &cases[3]);
+    check(frames_bswap_equal(s_full, s_cmp), "cortex live_rows: swap_bytes exact equivalence");
+
     /* Strength == 0 must be a strict no-op */
     jr_g3_cortex_t z = cases[0];
     z.strength = 0;
@@ -403,6 +619,88 @@ static void test_cortex_strip_and_swap(void)
     memcpy(s_cmp, s_ref, sizeof(s_ref));
     jr_g3_cortex_rows(s_cmp, 0, H, false, &z);
     check(frames_equal(s_ref, s_cmp, NULL, NULL), "cortex strength=0 modifies 0 pixels");
+    jr_g3_cortex_live_rows(s_cmp, 0, H, false, &z);
+    check(frames_equal(s_ref, s_cmp, NULL, NULL), "cortex live_rows strength=0 modifies 0 pixels");
+
+    /* NULL / non-positive nrows defensive no-ops */
+    jr_g3_cortex_static_rows(NULL, 0, 16, false, &cases[0]);
+    jr_g3_cortex_static_rows(s_cmp, 0, 0, false, &cases[0]);
+    jr_g3_cortex_static_rows(s_cmp, 0, 16, false, NULL);
+    jr_g3_cortex_live_rows(NULL, 0, 16, false, &cases[0]);
+    jr_g3_cortex_live_rows(s_cmp, 0, -4, false, &cases[0]);
+    jr_g3_cortex_live_rows(s_cmp, 0, 16, false, NULL);
+    check(frames_equal(s_ref, s_cmp, NULL, NULL), "cortex defensive NULL/nrows<=0 calls leave buffer intact");
+}
+
+static void test_cortex_static_key(void)
+{
+    check(jr_g3_cortex_static_key(NULL) == 0u, "cortex static_key(NULL) == 0");
+
+    jr_g3_cortex_t base;
+    memset(&base, 0, sizeof(base));
+    base.mem_pct = 62;
+    base.cpu_pct = 45;
+    base.batt_pct = 80;
+    base.agent_pct = 55;
+    base.charging = false;
+    base.codex_active = false;
+    base.row_led[0] = JR_G3_LED_GREEN;
+    base.row_led[1] = JR_G3_LED_CYAN;
+    base.row_led[2] = JR_G3_LED_AMBER;
+    base.now_ms = 1234;
+    base.strength = 255;
+
+    const uint32_t k0 = jr_g3_cortex_static_key(&base);
+    check(k0 != 0u, "cortex static_key non-zero for valid env");
+    check(jr_g3_cortex_static_key(&base) == k0, "cortex static_key deterministic");
+
+    /* Live/fade fields MUST NOT alter static key */
+    jr_g3_cortex_t live_mod = base;
+    for (int i = 0; i < 16; ++i) {
+        live_mod.bands[i] = (uint8_t)(255 - i * 12);
+    }
+    live_mod.now_ms = 555555u;
+    live_mod.strength = 32u;
+    check(jr_g3_cortex_static_key(&live_mod) == k0,
+          "cortex static_key invariant to bands[]/now_ms/strength");
+
+    /* Clamping > 100% matches 100% */
+    jr_g3_cortex_t hi1 = base, hi2 = base;
+    hi1.mem_pct = 100;
+    hi2.mem_pct = 180;
+    check(jr_g3_cortex_static_key(&hi1) == jr_g3_cortex_static_key(&hi2),
+          "cortex static_key clamps pct > 100 identically to 100");
+
+    /* Every static field MUST change the static key */
+    jr_g3_cortex_t m;
+    m = base; m.mem_pct = 63;
+    check(jr_g3_cortex_static_key(&m) != k0, "cortex static_key sensitive to mem_pct");
+    m = base; m.cpu_pct = 46;
+    check(jr_g3_cortex_static_key(&m) != k0, "cortex static_key sensitive to cpu_pct");
+    m = base; m.batt_pct = 81;
+    check(jr_g3_cortex_static_key(&m) != k0, "cortex static_key sensitive to batt_pct");
+    m = base; m.agent_pct = 56;
+    check(jr_g3_cortex_static_key(&m) != k0, "cortex static_key sensitive to agent_pct");
+    m = base; m.charging = true;
+    check(jr_g3_cortex_static_key(&m) != k0, "cortex static_key sensitive to charging");
+    m = base; m.codex_active = true;
+    check(jr_g3_cortex_static_key(&m) != k0, "cortex static_key sensitive to codex_active");
+    m = base; m.row_led[0] = JR_G3_LED_RED;
+    check(jr_g3_cortex_static_key(&m) != k0, "cortex static_key sensitive to row_led[0]");
+    m = base; m.row_led[1] = JR_G3_LED_VIOLET;
+    check(jr_g3_cortex_static_key(&m) != k0, "cortex static_key sensitive to row_led[1]");
+    m = base; m.row_led[2] = JR_G3_LED_OFF;
+    check(jr_g3_cortex_static_key(&m) != k0, "cortex static_key sensitive to row_led[2]");
+
+    /* Cross-screen domain separation on shared plate */
+    jr_g3_atmosphaera_t ae = {
+        .hour = 0, .minute = 0, .weather_code = 0, .is_day = false,
+        .temp_f = 0, .rain_pct = 0, .now_ms = 0, .strength = 255,
+    };
+    jr_g3_cortex_t ce;
+    memset(&ce, 0, sizeof(ce));
+    check(jr_g3_atmosphaera_static_key(&ae) != jr_g3_cortex_static_key(&ce),
+          "atmos & cortex static keys are domain-separated on zeroed inputs");
 }
 
 static void test_cortex_safe_zones_and_gauges(void)
@@ -444,6 +742,23 @@ static void test_cortex_safe_zones_and_gauges(void)
     check(spark_in > 300, "cortex sparkline visibly responds to live bands[16]");
     check(spark_out == 0, "cortex sparkline leaks 0 pixels outside [140..326]x[324..354]");
 
+    /* Direct live_rows clip check (both silent heartbeat and loud bands) */
+    int live_leaks = 0;
+    for (int pass = 0; pass < 2; ++pass) {
+        memset(s_plate, 0, sizeof(s_plate));
+        jr_g3_cortex_live_rows(s_plate, 0, H, false, pass == 0 ? &base : &loud);
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x < W; ++x) {
+                if (s_plate[(size_t)y * W + (size_t)x] != 0u) {
+                    bool in_box = (x >= JR_G3_CORTEX_SPARK_X0 && x <= JR_G3_CORTEX_SPARK_X1 &&
+                                   y >= JR_G3_CORTEX_SPARK_Y0 && y <= JR_G3_CORTEX_SPARK_Y1);
+                    if (!in_box) { ++live_leaks; }
+                }
+            }
+        }
+    }
+    check(live_leaks == 0, "cortex live_rows modifies 0 pixels outside [140..326]x[324..354]");
+
     /* 2. Quadrant gauge isolation: changing MEM (Top-Left) touches ONLY top-left outer annulus */
     jr_g3_cortex_t mem_hi = base;
     mem_hi.mem_pct = 100;
@@ -469,10 +784,10 @@ static void test_cortex_safe_zones_and_gauges(void)
     check(mem_card_diff == 0, "cortex MEM gauge touches 0 pixels inside mission card");
     check(mem_other_q_diff == 0, "cortex MEM gauge touches 0 pixels in other quadrants");
 
-    /* 3. Charging emerald pulse shifts PWR gauge (Bottom-Right) green upward */
+    /* 3. Charging emerald glow shifts PWR gauge (Bottom-Right) green upward */
     jr_g3_cortex_t chg = base;
     chg.charging = true;
-    chg.now_ms = 482; /* near sine peak */
+    chg.now_ms = 482;
     memset(s_cmp, 0, sizeof(s_cmp));
     jr_g3_cortex_rows(s_cmp, 0, H, false, &chg);
     int br_diff = 0;
@@ -505,6 +820,126 @@ static void test_cortex_safe_zones_and_gauges(void)
         }
     }
     check(max_text_bg_luma < 36, "cortex tabular text safe zone stays dark & unobstructed");
+
+    /* 5. Concept 5 Quadrant Micro-Label Safe-Zone #define verification */
+    check(JR_G3_CORTEX_LBL_MEM_X == 152 && JR_G3_CORTEX_LBL_MEM_Y == 114, "cortex MEM label define exact");
+    check(JR_G3_CORTEX_LBL_CPU_X == 314 && JR_G3_CORTEX_LBL_CPU_Y == 114, "cortex CPU label define exact");
+    check(JR_G3_CORTEX_LBL_AGENT_X == 132 && JR_G3_CORTEX_LBL_AGENT_Y == 310, "cortex AGENT label define exact");
+    check(JR_G3_CORTEX_LBL_PWR_X == 334 && JR_G3_CORTEX_LBL_PWR_Y == 310, "cortex PWR label define exact");
+
+    jr_g3_cortex_t maxed = loud;
+    maxed.mem_pct = 100; maxed.cpu_pct = 100; maxed.batt_pct = 100; maxed.agent_pct = 100;
+    maxed.codex_active = true;
+    memset(s_full, 0, sizeof(s_full));
+    jr_g3_cortex_rows(s_full, 0, H, false, &maxed);
+
+    const int cortex_lbls[4][2] = {
+        { JR_G3_CORTEX_LBL_MEM_X,   JR_G3_CORTEX_LBL_MEM_Y   },
+        { JR_G3_CORTEX_LBL_CPU_X,   JR_G3_CORTEX_LBL_CPU_Y   },
+        { JR_G3_CORTEX_LBL_AGENT_X, JR_G3_CORTEX_LBL_AGENT_Y },
+        { JR_G3_CORTEX_LBL_PWR_X,   JR_G3_CORTEX_LBL_PWR_Y   },
+    };
+    bool clbls_clear = true;
+    for (int i = 0; i < 4; ++i) {
+        int lx = cortex_lbls[i][0], ly = cortex_lbls[i][1];
+        int dx = lx - 233, dy = ly - 233;
+        int r2 = dx * dx + dy * dy;
+        bool inside_ticks = (r2 < 160 * 160);
+        bool out_card = !(lx >= JR_G3_CORTEX_CARD_X0 && lx <= JR_G3_CORTEX_CARD_X1 &&
+                          ly >= JR_G3_CORTEX_CARD_Y0 && ly <= JR_G3_CORTEX_CARD_Y1);
+        bool out_spark = !(lx >= JR_G3_CORTEX_SPARK_X0 && lx <= JR_G3_CORTEX_SPARK_X1 &&
+                           ly >= JR_G3_CORTEX_SPARK_Y0 && ly <= JR_G3_CORTEX_SPARK_Y1);
+        bool dark_bg = (luma565(s_full[(size_t)ly * W + (size_t)lx]) < 45);
+        if (!inside_ticks || !out_card || !out_spark || !dark_bg) {
+            clbls_clear = false;
+        }
+    }
+    check(clbls_clear, "cortex 4 quadrant label anchors clear of ticks/gauges/card/sparkline");
+}
+
+/* ---- 3. Host render speedup verification --------------------------------- */
+
+static void test_host_render_speedup(void)
+{
+    jr_g3_atmosphaera_t a = {
+        .hour = 13, .minute = 30, .weather_code = JR_G3_WX_PARTLY,
+        .is_day = true, .temp_f = 78, .rain_pct = 15, .now_ms = 1200, .strength = 255,
+    };
+    jr_g3_cortex_t c;
+    memset(&c, 0, sizeof(c));
+    c.mem_pct = 78; c.cpu_pct = 64; c.batt_pct = 86; c.agent_pct = 72;
+    c.charging = true; c.codex_active = true;
+    c.row_led[0] = JR_G3_LED_VIOLET; c.row_led[1] = JR_G3_LED_CYAN; c.row_led[2] = JR_G3_LED_GREEN;
+    for (int i = 0; i < 16; ++i) {
+        c.bands[i] = (uint8_t)(210 - i * 10);
+    }
+    c.now_ms = 500; c.strength = 255;
+
+    const int n_full = 40;
+    const int n_live = 400;
+    volatile uint32_t sink = 0u;
+
+    /* ATMOSPHAERA: full procedural vs cached-plate blit + live overlay (16-row strips) */
+    memset(s_full, 0, sizeof(s_full));
+    jr_g3_atmosphaera_rows(s_full, 0, H, false, &a);
+    clock_t t0 = clock();
+    for (int i = 0; i < n_full; ++i) {
+        a.now_ms += 40u;
+        render_atmos_strips(s_full, 16, false, &a);
+        sink += s_full[190 * W + 296];
+    }
+    double a_full_ms = ((double)(clock() - t0) * 1000.0) / ((double)CLOCKS_PER_SEC * (double)n_full);
+
+    memset(s_plate, 0, sizeof(s_plate));
+    jr_g3_atmosphaera_static_rows(s_plate, 0, H, false, &a);
+    t0 = clock();
+    for (int i = 0; i < n_live; ++i) {
+        a.now_ms += 40u;
+        for (int y0 = 0; y0 < H; y0 += 16) {
+            int n = (y0 + 16 <= H) ? 16 : (H - y0);
+            uint16_t *dst = s_strip + (size_t)y0 * W;
+            memcpy(dst, s_plate + (size_t)y0 * W, (size_t)n * W * sizeof(uint16_t));
+            jr_g3_atmosphaera_live_rows(dst, y0, n, false, &a);
+        }
+        sink += s_strip[190 * W + 296];
+    }
+    double a_split_ms = ((double)(clock() - t0) * 1000.0) / ((double)CLOCKS_PER_SEC * (double)n_live);
+    double a_speedup = (a_split_ms > 0.0001) ? (a_full_ms / a_split_ms) : 999.0;
+
+    /* CORTEX COMMAND: full procedural vs cached-plate blit + live overlay (16-row strips) */
+    memset(s_full, 0, sizeof(s_full));
+    jr_g3_cortex_rows(s_full, 0, H, false, &c);
+    t0 = clock();
+    for (int i = 0; i < n_full; ++i) {
+        c.now_ms += 40u;
+        render_cortex_strips(s_full, 16, false, &c);
+        sink += s_full[339 * W + 233];
+    }
+    double c_full_ms = ((double)(clock() - t0) * 1000.0) / ((double)CLOCKS_PER_SEC * (double)n_full);
+
+    memset(s_plate, 0, sizeof(s_plate));
+    jr_g3_cortex_static_rows(s_plate, 0, H, false, &c);
+    t0 = clock();
+    for (int i = 0; i < n_live; ++i) {
+        c.now_ms += 40u;
+        for (int y0 = 0; y0 < H; y0 += 16) {
+            int n = (y0 + 16 <= H) ? 16 : (H - y0);
+            uint16_t *dst = s_strip + (size_t)y0 * W;
+            memcpy(dst, s_plate + (size_t)y0 * W, (size_t)n * W * sizeof(uint16_t));
+            jr_g3_cortex_live_rows(dst, y0, n, false, &c);
+        }
+        sink += s_strip[339 * W + 233];
+    }
+    double c_split_ms = ((double)(clock() - t0) * 1000.0) / ((double)CLOCKS_PER_SEC * (double)n_live);
+    double c_speedup = (c_split_ms > 0.0001) ? (c_full_ms / c_split_ms) : 999.0;
+
+    (void)sink;
+    printf("host bench: ATMOS full=%.3f ms vs plate+live=%.4f ms (%.1fx) | "
+           "CORTEX full=%.3f ms vs plate+live=%.4f ms (%.1fx)\n",
+           a_full_ms, a_split_ms, a_speedup, c_full_ms, c_split_ms, c_speedup);
+
+    check(a_speedup >= 8.0, "atmos static+live achieves >= 8x host speedup over optimized full");
+    check(c_speedup >= 15.0, "cortex static+live achieves >= 15x host speedup over optimized full");
 }
 
 static void maybe_dump_specimens(void)
@@ -554,9 +989,12 @@ static void maybe_dump_specimens(void)
 int main(void)
 {
     test_atmosphaera_strip_and_swap();
+    test_atmosphaera_static_key();
     test_atmosphaera_safe_zones_and_sun();
     test_cortex_strip_and_swap();
+    test_cortex_static_key();
     test_cortex_safe_zones_and_gauges();
+    test_host_render_speedup();
     maybe_dump_specimens();
 
     if (g_fails != 0) {

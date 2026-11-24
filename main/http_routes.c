@@ -364,7 +364,8 @@ static esp_err_t say_get_handler(httpd_req_t *req)
 }
 
 /* POST /api/debug/timer — bench control for the on-device timer bank.
- * Supports ?sec=N[&label=...] | ?focus=25[&label=...] | ?cancel=1[&label=...] | ?dismiss=1.
+ * Supports ?sec=N[&label=...][&silent=1] | ?focus=25[&label=...][&silent=1] |
+ * ?cancel=1[&label=...] | ?dismiss=1.
  * Marshals onto voice_task via s_timer_mux + s_debug_timer_req; never touches
  * privacy or operator lease. */
 static esp_err_t debug_timer_handler(httpd_req_t *req)
@@ -376,13 +377,15 @@ static esp_err_t debug_timer_handler(httpd_req_t *req)
     int focus_min = -1;
     int cancel = 0;
     int dismiss = 0;
+    int silent_v = 0;
     const bool have_sec = query_int(req, "sec", &sec);
     const bool have_focus = query_int(req, "focus", &focus_min);
     const bool have_cancel = query_int(req, "cancel", &cancel) && cancel != 0;
     const bool have_dismiss = query_int(req, "dismiss", &dismiss) && dismiss != 0;
+    const bool silent = query_int(req, "silent", &silent_v) && silent_v != 0;
 
     char label[JR_TIMER_LABEL_CAP] = {0};
-    char q[128] = {0};
+    char q[160] = {0};
     if (httpd_req_get_url_query_str(req, q, sizeof q) == ESP_OK) {
         char raw[48] = {0};
         if (httpd_query_key_value(q, "label", raw, sizeof raw) == ESP_OK &&
@@ -411,6 +414,7 @@ static esp_err_t debug_timer_handler(httpd_req_t *req)
         }
         dreq.kind = TIMER_REQ_FOCUS;
         dreq.seconds = (uint32_t)focus_min * 60U;
+        dreq.silent = silent;
         strlcpy(dreq.label, label[0] != '\0' ? label : "FOCUS", sizeof dreq.label);
         action = "focus";
     } else if (have_sec || label[0] != '\0') {
@@ -421,6 +425,7 @@ static esp_err_t debug_timer_handler(httpd_req_t *req)
         }
         dreq.kind = TIMER_REQ_SET;
         dreq.seconds = have_sec ? (uint32_t)sec : 0U;
+        dreq.silent = silent;
         strlcpy(dreq.label, label, sizeof dreq.label);
         action = "set";
     } else {
@@ -434,11 +439,105 @@ static esp_err_t debug_timer_handler(httpd_req_t *req)
     portEXIT_CRITICAL(&s_timer_mux);
     atomic_store(&s_debug_timer_req, (uint32_t)dreq.kind);
 
-    char body[112];
+    char body[128];
     int n = snprintf(body, sizeof body,
-                     "{\"ok\":true,\"queued\":\"%s\",\"sec\":%u}",
-                     action, (unsigned)dreq.seconds);
+                     "{\"ok\":true,\"queued\":\"%s\",\"sec\":%u,\"silent\":%s}",
+                     action, (unsigned)dreq.seconds,
+                     dreq.silent ? "true" : "false");
     httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
+/* POST /api/desk/mode?mode=normal|focus|on_air|breathe[&minutes=..][&pattern=..]
+ * [&cycles=..][&label=..][&silent=0|1] — control-gated Desk Copilot 3.5 mode. */
+static esp_err_t desk_mode_post_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    char q[256] = {0};
+    char mode_str[24] = {0};
+    char pat_str[24] = {0};
+    char label[JR_DESK_LABEL_CAP] = {0};
+    if (httpd_req_get_url_query_str(req, q, sizeof q) == ESP_OK) {
+        if (httpd_query_key_value(q, "mode", mode_str, sizeof mode_str) == ESP_OK) {
+            (void)url_decode_in_place(mode_str);
+        }
+        if (httpd_query_key_value(q, "pattern", pat_str, sizeof pat_str) == ESP_OK) {
+            (void)url_decode_in_place(pat_str);
+        }
+        char raw_lbl[48] = {0};
+        if (httpd_query_key_value(q, "label", raw_lbl, sizeof raw_lbl) == ESP_OK &&
+            url_decode_in_place(raw_lbl)) {
+            strlcpy(label, raw_lbl, sizeof label);
+        }
+    }
+
+    jr_desk_mode_t mode = JR_DESK_NORMAL;
+    if (!desk_mode_parse_name(mode_str, &mode)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "mode must be normal, focus, on_air, or breathe");
+        return ESP_OK;
+    }
+    int minutes = 0;
+    const bool have_min = query_int(req, "minutes", &minutes);
+    if (have_min && (minutes < 0 || minutes > 720)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "minutes must be 0..720");
+        return ESP_OK;
+    }
+    jr_breathe_pattern_t pat = JR_BREATHE_BOX;
+    if (pat_str[0] != '\0' && !desk_breathe_parse_pattern(pat_str, &pat)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "pattern must be box, calm, or energize");
+        return ESP_OK;
+    }
+    int cycles = 0;
+    const bool have_cyc = query_int(req, "cycles", &cycles);
+    if (have_cyc && (cycles < 1 || cycles > 8)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "cycles must be 1..8");
+        return ESP_OK;
+    }
+    int silent_v = 0;
+    const bool silent = query_int(req, "silent", &silent_v) && silent_v != 0;
+
+    desk_mode_req_t dreq = {
+        .mode = mode,
+        .duration_s = have_min ? (uint32_t)minutes * 60U : 0U,
+        .pattern = pat,
+        .cycles = have_cyc ? (uint8_t)cycles : 0U,
+        .silent = silent || (mode == JR_DESK_ON_AIR),
+    };
+    strlcpy(dreq.label, label, sizeof dreq.label);
+    desk_mode_request_async(&dreq);
+
+    desk_mode_snap_t cur = {0};
+    desk_mode_snapshot(&cur);
+    uint32_t rem_s = 0U;
+    if (mode == JR_DESK_ON_AIR) {
+        rem_s = dreq.duration_s;
+    } else if (mode == JR_DESK_FOCUS) {
+        rem_s = dreq.duration_s > 0U ? dreq.duration_s : JR_DESK_FOCUS_DEFAULT_S;
+    } else if (mode == JR_DESK_BREATHE) {
+        const uint32_t cyc = dreq.cycles > 0U
+            ? (uint32_t)dreq.cycles : (uint32_t)JR_DESK_BREATHE_DEFAULT_CYCLES;
+        const uint32_t cyc_s = pat == JR_BREATHE_CALM ? 19U
+                             : pat == JR_BREATHE_ENERGIZE ? 10U : 16U;
+        rem_s = cyc * cyc_s;
+    }
+
+    char body[192];
+    int n = snprintf(body, sizeof body,
+                     "{\"ok\":true,\"mode\":\"%s\",\"rem_s\":%u,"
+                     "\"sessions_today\":%u,\"minutes_today\":%u,"
+                     "\"breathe_phase\":\"%s\"}",
+                     desk_mode_api_name(mode), (unsigned)rem_s,
+                     (unsigned)cur.sessions_today, (unsigned)cur.minutes_today,
+                     mode == JR_DESK_BREATHE ? "inhale" : "");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_send(req, body, n);
     return ESP_OK;
 }
@@ -585,7 +684,7 @@ static esp_err_t glass_post_handler(httpd_req_t *req)
 
 static esp_err_t notes_send_json(httpd_req_t *req, bool include_ok, bool include_max)
 {
-    const size_t cap = 1024U;
+    const size_t cap = 1408U;
     char *out = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     jr_note_bank_t *bank = heap_caps_calloc(1, sizeof(*bank),
                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -614,12 +713,15 @@ static esp_err_t notes_send_json(httpd_req_t *req, bool include_ok, bool include
                      (unsigned)bank->count, (unsigned)JR_NOTES_MAX);
     }
     for (unsigned i = 0U; i < bank->count && i < JR_NOTES_MAX &&
-                         n > 0 && (size_t)n < cap - 32U; ++i) {
+                         n > 0 && (size_t)n < cap - 48U; ++i) {
         const jr_note_item_t *it = &bank->items[i];
         int w = snprintf(out + n, cap - (size_t)n,
-                         "%s{\"id\":%u,\"text\":\"%s\",\"created_s\":%lld}",
+                         "%s{\"id\":%u,\"text\":\"%s\",\"created_s\":%lld,"
+                         "\"done\":%s,\"tag\":\"%s\"}",
                          i == 0U ? "" : ",", (unsigned)it->id, it->text,
-                         (long long)it->created_s);
+                         (long long)it->created_s,
+                         it->done ? "true" : "false",
+                         it->tag == (uint8_t)JR_NOTE_TAG_WORK ? "work" : "life");
         if (w < 0 || (size_t)n + (size_t)w >= cap - 4U) {
             break;
         }
@@ -645,7 +747,8 @@ static esp_err_t notes_get_handler(httpd_req_t *req)
     return notes_send_json(req, false, true);
 }
 
-/* POST /api/notes — control-gated add (JSON {"text":"..."}), ?delete=<id>, or ?clear=1. */
+/* POST /api/notes — control-gated add (JSON {"text":"...","tag":"work|life"} or
+ * ?text=...&tag=work|life), ?toggle=<id>, ?delete=<id>, or ?clear=1. */
 static esp_err_t notes_post_handler(httpd_req_t *req)
 {
     if (!agent_require_auth(req) || !control_intent_required(req)) {
@@ -653,8 +756,20 @@ static esp_err_t notes_post_handler(httpd_req_t *req)
     }
     int clear_v = 0;
     int del_id = 0;
+    int tog_id = 0;
     if (query_int(req, "clear", &clear_v) && clear_v != 0) {
         (void)device_notes_clear("all");
+        return notes_send_json(req, true, false);
+    }
+    if (query_int(req, "toggle", &tog_id)) {
+        if (tog_id <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "toggle id must be > 0");
+            return ESP_OK;
+        }
+        if (!device_notes_toggle((uint32_t)tog_id)) {
+            httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "note not found");
+            return ESP_OK;
+        }
         return notes_send_json(req, true, false);
     }
     if (query_int(req, "delete", &del_id)) {
@@ -667,6 +782,17 @@ static esp_err_t notes_post_handler(httpd_req_t *req)
     }
 
     char note_text[JR_NOTE_TEXT_CAP + 32U] = {0};
+    char tag_str[16] = {0};
+    char q[200] = {0};
+    if (httpd_req_get_url_query_str(req, q, sizeof q) == ESP_OK) {
+        if (httpd_query_key_value(q, "tag", tag_str, sizeof tag_str) == ESP_OK) {
+            (void)url_decode_in_place(tag_str);
+        }
+        if (req->content_len <= 0 &&
+            httpd_query_key_value(q, "text", note_text, sizeof note_text) == ESP_OK) {
+            (void)url_decode_in_place(note_text);
+        }
+    }
     if (req->content_len > 0) {
         if (req->content_len > 256) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "note body too large");
@@ -691,21 +817,21 @@ static esp_err_t notes_post_handler(httpd_req_t *req)
         if (cJSON_IsString(t) && t->valuestring != NULL) {
             strlcpy(note_text, t->valuestring, sizeof note_text);
         }
-        cJSON_Delete(root);
-    } else {
-        char q[160] = {0};
-        if (httpd_req_get_url_query_str(req, q, sizeof q) == ESP_OK &&
-            httpd_query_key_value(q, "text", note_text, sizeof note_text) == ESP_OK) {
-            (void)url_decode_in_place(note_text);
+        const cJSON *tg = cJSON_GetObjectItemCaseSensitive(root, "tag");
+        if (cJSON_IsString(tg) && tg->valuestring != NULL) {
+            strlcpy(tag_str, tg->valuestring, sizeof tag_str);
         }
+        cJSON_Delete(root);
     }
 
     if (note_text[0] == '\0') {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                            "need JSON {\"text\":\"...\"}, ?delete=<id>, or ?clear=1");
+                            "need text, ?toggle=<id>, ?delete=<id>, or ?clear=1");
         return ESP_OK;
     }
-    const uint32_t id = device_notes_add(note_text);
+    const jr_note_tag_t tag = tag_str[0] != '\0'
+        ? jr_note_tag_parse(tag_str) : JR_NOTE_TAG_LIFE;
+    const uint32_t id = device_notes_add_ex(note_text, tag);
     if (id == 0U) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                             "note empty or desk note bank full (max 6)");
@@ -3090,6 +3216,9 @@ void panic_home_clear_glass(void)
         ESP_LOGW(TAG, "ui: panic-home cleared glass without brain lock");
     }
     jr_display_dismiss_choices();
+    const desk_mode_req_t normal_req = { .mode = JR_DESK_NORMAL };
+    desk_mode_request_async(&normal_req);
+    jr_display_desk_mode_set(0U, 0U, 0U, 0U, 0U, 0U, 4U, false, "");
     jr_display_nav_home();
     s_ui_shade_open = false;
     s_watch_peek_until_ms = 0U;
@@ -3812,9 +3941,10 @@ static esp_err_t brain_outbox_handler(httpd_req_t *req)
     return err;
 }
 
-/* The cockpit snapshot buffer. Lives in PSRAM so expanding for Wave 2
- * (stopwatch, notes, weather, power, HBM/TE stats) costs 0 internal RAM. */
-#define COCKPIT_BODY_CAP 7168U
+/* The cockpit snapshot buffer. Lives in PSRAM so expanding for Glass 3.5
+ * (desk mode, silent timer, tagged/done notes, weather, power, HBM/TE stats)
+ * costs 0 internal RAM. */
+#define COCKPIT_BODY_CAP 8192U
 
 static esp_err_t cockpit_handler(httpd_req_t *req)
 {
@@ -4059,6 +4189,8 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         portENTER_CRITICAL(&s_timer_mux);
         tsnap = s_timer_snap;
         portEXIT_CRITICAL(&s_timer_mux);
+        desk_mode_snap_t dsnap = {0};
+        desk_mode_snapshot(&dsnap);
         stopwatch_snap_t sw = {0};
         device_stopwatch_snapshot(now, &sw);
         jr_power_t bat = {0};
@@ -4071,11 +4203,20 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
             (int32_t)(brain_surface.expires_ms - now) > 0
             ? brain_surface.expires_ms - now : 0U;
         n = snprintf(body + used, COCKPIT_BODY_CAP - used,
-            "},\"timer\":{\"active\":%s,\"ringing\":%s,\"rem_s\":%u,"
+            "},\"desk\":{\"mode\":\"%s\",\"rem_s\":%u,\"sessions_today\":%u,"
+            "\"minutes_today\":%u,\"breathe_phase\":\"%s\"},"
+            "\"timer\":{\"active\":%s,\"ringing\":%s,\"silent\":%s,\"rem_s\":%u,"
             "\"total_s\":%u,\"pct_left\":%u,\"label\":\"%s\",\"count\":%u},"
             "\"stopwatch\":{\"active\":%s,\"running\":%s,\"elapsed_ms\":%u,\"laps\":[",
+            desk_mode_api_name(dsnap.mode),
+            (unsigned)dsnap.rem_s,
+            (unsigned)dsnap.sessions_today,
+            (unsigned)dsnap.minutes_today,
+            dsnap.mode == JR_DESK_BREATHE
+                ? desk_breathe_phase_api_name(dsnap.breathe_phase) : "",
             tsnap.active ? "true" : "false",
             tsnap.ringing ? "true" : "false",
+            tsnap.silent ? "true" : "false",
             (unsigned)tsnap.rem_s,
             (unsigned)tsnap.total_s,
             (unsigned)tsnap.pct_left,
@@ -4118,10 +4259,13 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
             }
             for (unsigned i = 0U; nb != NULL && i < ncnt && i < JR_NOTES_MAX &&
                                   used < COCKPIT_BODY_CAP; ++i) {
+                const jr_note_item_t *it = &nb->items[i];
                 n = snprintf(body + used, COCKPIT_BODY_CAP - used,
-                             "%s{\"id\":%u,\"text\":\"%s\"}",
+                             "%s{\"id\":%u,\"text\":\"%s\",\"done\":%s,\"tag\":\"%s\"}",
                              i == 0U ? "" : ",",
-                             (unsigned)nb->items[i].id, nb->items[i].text);
+                             (unsigned)it->id, it->text,
+                             it->done ? "true" : "false",
+                             it->tag == (uint8_t)JR_NOTE_TAG_WORK ? "work" : "life");
                 if (n > 0 && (size_t)n < COCKPIT_BODY_CAP - used) {
                     used += (size_t)n;
                 } else {
@@ -5925,6 +6069,7 @@ void start_diag_http(void)
         { .uri = "/api/debug/say",   .method = HTTP_POST, .handler = say_get_handler  },
         { .uri = "/api/debug/briefing", .method = HTTP_POST, .handler = briefing_post_handler },
         { .uri = "/api/debug/timer", .method = HTTP_POST, .handler = debug_timer_handler },
+        { .uri = "/api/desk/mode",   .method = HTTP_POST, .handler = desk_mode_post_handler },
         { .uri = "/api/debug/stopwatch", .method = HTTP_POST, .handler = debug_stopwatch_handler },
         { .uri = "/api/glass",       .method = HTTP_POST, .handler = glass_post_handler },
         { .uri = "/api/notes",       .method = HTTP_GET,  .handler = notes_get_handler },

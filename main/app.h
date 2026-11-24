@@ -59,6 +59,7 @@
 #include "jr_core/pace.h"
 #include "jr_core/timer.h"
 #include "jr_core/notes.h"
+#include "jr_core/desk_mode.h"
 #include "jr_tools/jr_weather.h"
 #include "jr_dsp/dsp.h"
 #include "jr_hal/hal.h"
@@ -83,7 +84,7 @@
 /* The catalog lives in main.c; this literal is what the other files see.
  * main.c static-asserts it against the real array, so adding a tool
  * without bumping this is a compile error, not a blank petal. */
-#define DEVICE_TOOL_DECL_COUNT 24U
+#define DEVICE_TOOL_DECL_COUNT 27U
 
 /* Render cadence per rung of the rest ladder (frames per second). 24 is the
  * measured CO5300 ceiling; 12 keeps AMBIENT's dimmed ring fluid under a
@@ -427,6 +428,7 @@ typedef enum {
 typedef struct {
     bool active;
     bool ringing;
+    bool silent;
     uint16_t rem_s;
     uint16_t total_s;
     uint8_t pct_left;
@@ -437,8 +439,31 @@ typedef struct {
 typedef struct {
     timer_req_kind_t kind;
     uint32_t seconds;
+    bool silent;
     char label[JR_TIMER_LABEL_CAP];
 } timer_debug_req_t;
+
+typedef struct {
+    jr_desk_mode_t mode;
+    uint32_t rem_s;
+    uint8_t pct_left;
+    uint8_t sessions_today;
+    uint16_t minutes_today;
+    jr_breathe_phase_t breathe_phase;
+    uint8_t breathe_sec_left;
+    bool silent;
+    bool dnd_silent;
+    char label[JR_DESK_LABEL_CAP];
+} desk_mode_snap_t;
+
+typedef struct {
+    jr_desk_mode_t mode;
+    uint32_t duration_s;             /* 0 = default (focus 25m; on_air open-ended) */
+    jr_breathe_pattern_t pattern;
+    uint8_t cycles;                  /* 0 = default (4) */
+    bool silent;
+    char label[JR_DESK_LABEL_CAP];
+} desk_mode_req_t;
 
 typedef struct {
     bool active;
@@ -455,6 +480,12 @@ extern timer_debug_req_t s_debug_timer_req_data;
 extern _Atomic uint32_t s_debug_timer_req;
 extern _Atomic bool s_glass_poke_req;
 
+extern jr_desk_state_t s_desk_mode;
+extern portMUX_TYPE s_desk_mux;
+extern desk_mode_snap_t s_desk_snap;
+extern desk_mode_req_t s_desk_req_data;
+extern _Atomic uint32_t s_desk_req_pending;
+
 /* Cross-component Wave 2 display contracts (exact signatures from jr_display.h). */
 void jr_display_stopwatch_set(bool active, bool running, uint32_t elapsed_ms, uint8_t lap_count);
 void jr_display_set_hbm(bool enabled);
@@ -468,7 +499,36 @@ void jr_display_date_set_ymd(uint16_t year, uint8_t month, uint8_t day);
 void jr_display_holo_set(bool enabled);
 bool jr_display_holo_get(void);
 
+/* Cross-component Glass 3.5 display contracts (exact signatures from jr_display.h). */
+#ifndef JR_DISPLAY_INBOX_MAX
+#define JR_DISPLAY_INBOX_MAX 3U
+typedef struct {
+    uint32_t id;
+    bool     done;
+    uint8_t  tag;        /* 0=LIFE, 1=WORK */
+    char     text[36];
+} jr_display_inbox_item_t;
+void jr_display_boot_ignition_set(bool active, uint8_t stage, uint8_t progress_pct);
+bool jr_display_boot_ignition_active(void);
+void jr_display_desk_mode_set(uint8_t mode, uint32_t rem_s, uint8_t pct,
+                              uint8_t breathe_phase, uint8_t breathe_sec,
+                              uint8_t sessions_done, uint8_t sessions_total,
+                              bool warn_pulse, const char *label);
+bool jr_display_desk_mode_active(void);
+void jr_display_inbox_set(const jr_display_inbox_item_t *items, size_t count, size_t open_count);
+uint32_t jr_display_inbox_hit(uint16_t x, uint16_t y);
+#endif
+
 void timer_publish_now(uint32_t now_ms);
+void desk_mode_snapshot(desk_mode_snap_t *out);
+void desk_mode_apply_now(const desk_mode_req_t *req, uint32_t now_ms,
+                         bool play_cue);
+void desk_mode_request_async(const desk_mode_req_t *req);
+void desk_tally_persist(void);
+const char *desk_mode_api_name(jr_desk_mode_t m);
+const char *desk_breathe_phase_api_name(jr_breathe_phase_t p);
+bool desk_mode_parse_name(const char *s, jr_desk_mode_t *out);
+bool desk_breathe_parse_pattern(const char *s, jr_breathe_pattern_t *out);
 void persist_watch_style(uint8_t style);
 void persist_holo_enabled(bool enabled);
 void device_confirm_cue(void);
@@ -597,10 +657,15 @@ bool device_parse_glass_screen(const char *s, jr_display_space_t *out);
 bool device_parse_watch_style(const char *s, jr_watch_style_t *out);
 
 void device_notes_init(void);
+uint32_t device_notes_add_ex(const char *text, jr_note_tag_t tag);
 uint32_t device_notes_add(const char *text);
+bool device_notes_toggle(uint32_t id);
+bool device_notes_complete(const char *target_or_id, uint32_t *matched_id);
 bool device_notes_delete(uint32_t id);
 unsigned device_notes_clear(const char *target);
 void device_notes_snapshot(jr_note_bank_t *out);
+size_t device_notes_counts(size_t *open_out, size_t *done_out);
+void device_notes_sync_inbox(void);
 int device_notes_format_briefing(char *dst, size_t cap);
 
 bool device_stopwatch_action(const char *action, uint32_t now_ms,

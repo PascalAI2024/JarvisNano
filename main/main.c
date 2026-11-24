@@ -218,7 +218,8 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
         .name = "set_timer",
         .description =
             "Set a local countdown timer (5 to 43200 seconds) or a Pomodoro "
-            "timer (label 'focus' defaults to 25 minutes, 'break' to 5 minutes).",
+            "timer (label 'focus' defaults to 25 minutes, 'break' to 5 minutes). "
+            "Pass silent=true for a visual-only call-safe timer.",
         .params = {
             {
                 .name = "seconds",
@@ -235,8 +236,15 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
                     "Short timer label (up to 16 chars), e.g. tea, focus, break.",
                 .required = false,
             },
+            {
+                .name = "silent",
+                .type = JR_GEMINI_PT_BOOLEAN,
+                .description =
+                    "True for visual-only alert (suppresses alarm chime).",
+                .required = false,
+            },
         },
-        .param_count = JR_GEMINI_PARAM_COUNT(2),
+        .param_count = JR_GEMINI_PARAM_COUNT(3),
     },
     {
         .name = "cancel_timer",
@@ -295,8 +303,8 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
     {
         .name = "start_focus",
         .description =
-            "Start a local Pomodoro focus session (default 25 minutes) and "
-            "switch the glass to the watch face.",
+            "Start a local Deep Focus sprint (default 25 min) on the glass "
+            "and track daily focus sprints.",
         .params = {
             {
                 .name = "minutes",
@@ -310,8 +318,14 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
                 .description = "Optional short label (default FOCUS).",
                 .required = false,
             },
+            {
+                .name = "silent",
+                .type = JR_GEMINI_PT_BOOLEAN,
+                .description = "True to suppress completion chime.",
+                .required = false,
+            },
         },
-        .param_count = JR_GEMINI_PARAM_COUNT(2),
+        .param_count = JR_GEMINI_PARAM_COUNT(3),
     },
     {
         .name = "stopwatch",
@@ -329,10 +343,23 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
     {
         .name = "add_note",
         .description =
-            "Pin a short local desk note (up to 64 chars, max 6 notes) "
-            "persisted in NVS on this device.",
-        .arg_name = "text",
-        .arg_desc = "Short desk note text (up to 64 characters).",
+            "Pin a short local desk inbox item (up to 64 chars, max 6) "
+            "with optional 'work' or 'life' tag, persisted in NVS.",
+        .params = {
+            {
+                .name = "text",
+                .type = JR_GEMINI_PT_STRING,
+                .description = "Short desk note text (up to 64 characters).",
+                .required = true,
+            },
+            {
+                .name = "tag",
+                .type = JR_GEMINI_PT_STRING,
+                .description = "Category tag: work or life (default life).",
+                .required = false,
+            },
+        },
+        .param_count = JR_GEMINI_PARAM_COUNT(2),
     },
     {
         .name = "list_notes",
@@ -357,9 +384,8 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
     {
         .name = "daily_briefing",
         .description =
-            "Get a live composed briefing at any hour: date, local weather, "
-            "12-hour rain outlook, pinned desk notes, active timers, finished "
-            "tasks, and battery.",
+            "Get a live morning or evening briefing: date, weather, 12h rain, "
+            "today's focus sprints, desk inbox open/done counts, timers, and battery.",
         .arg_name = NULL,
         .arg_desc = NULL,
     },
@@ -384,6 +410,78 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
             .name = "enabled",
             .type = JR_GEMINI_PT_BOOLEAN,
             .description = "true to enable sunlight boost, false to turn off.",
+            .required = true,
+        }},
+        .param_count = JR_GEMINI_PARAM_COUNT(1),
+    },
+    {
+        .name = "set_desk_mode",
+        .description =
+            "Set the Desk Copilot mode on the glass: on_air (silent red call "
+            "beacon), focus (deep-work halo), breathe (guided reset), or normal.",
+        .params = {
+            {
+                .name = "mode",
+                .type = JR_GEMINI_PT_STRING,
+                .description = "on_air, focus, breathe, or normal.",
+                .required = true,
+            },
+            {
+                .name = "minutes",
+                .type = JR_GEMINI_PT_INTEGER,
+                .description = "Duration in minutes (0=open-ended on_air, default 25 focus).",
+                .required = false,
+            },
+            {
+                .name = "label",
+                .type = JR_GEMINI_PT_STRING,
+                .description = "Optional short label (up to 23 chars).",
+                .required = false,
+            },
+            {
+                .name = "silent",
+                .type = JR_GEMINI_PT_BOOLEAN,
+                .description = "True to suppress chimes (always true for on_air).",
+                .required = false,
+            },
+        },
+        .param_count = JR_GEMINI_PARAM_COUNT(4),
+    },
+    {
+        .name = "start_breathe",
+        .description =
+            "Start a guided breathing reset on the glass (box 4-4-4-4, calm "
+            "4-7-8, or energize 4-2-4).",
+        .params = {
+            {
+                .name = "pattern",
+                .type = JR_GEMINI_PT_STRING,
+                .description = "box, calm, or energize (default box).",
+                .required = false,
+            },
+            {
+                .name = "cycles",
+                .type = JR_GEMINI_PT_INTEGER,
+                .description = "Number of cycles 1..8 (default 4).",
+                .required = false,
+            },
+            {
+                .name = "silent",
+                .type = JR_GEMINI_PT_BOOLEAN,
+                .description = "True to suppress soft phase chimes.",
+                .required = false,
+            },
+        },
+        .param_count = JR_GEMINI_PARAM_COUNT(3),
+    },
+    {
+        .name = "complete_note",
+        .description =
+            "Check off an open local desk inbox note by ID or keyword.",
+        .params = {{
+            .name = "target",
+            .type = JR_GEMINI_PT_STRING,
+            .description = "Note ID number or keyword to mark done.",
             .required = true,
         }},
         .param_count = JR_GEMINI_PARAM_COUNT(1),
@@ -435,6 +533,9 @@ static const char s_device_tool_labels[][13] = {
     "BRIEFING",     /* daily_briefing */
     "UI SOUNDS",    /* set_ui_sounds  */
     "SUNLIGHT",     /* set_sunlight   */
+    "DESK MODE",    /* set_desk_mode  */
+    "BREATHE",      /* start_breathe  */
+    "CHECK NOTE",   /* complete_note  */
 };
 
 _Static_assert(sizeof(s_device_tool_labels) / sizeof(s_device_tool_labels[0]) ==
@@ -481,6 +582,14 @@ timer_debug_req_t s_debug_timer_req_data;
 _Atomic uint32_t s_debug_timer_req;
 _Atomic bool s_glass_poke_req;
 
+jr_desk_state_t s_desk_mode;
+portMUX_TYPE s_desk_mux = portMUX_INITIALIZER_UNLOCKED;
+desk_mode_snap_t s_desk_snap;
+desk_mode_req_t s_desk_req_data;
+_Atomic uint32_t s_desk_req_pending;
+static bool s_desk_choice_active;
+static uint32_t s_desk_choice_expires_ms;
+
 void timer_publish_now(uint32_t now_ms)
 {
     jr_timer_view_t v;
@@ -488,6 +597,7 @@ void timer_publish_now(uint32_t now_ms)
     timer_snap_t snap = {
         .active = v.active,
         .ringing = v.ringing,
+        .silent = v.silent,
         .rem_s = v.rem_s,
         .total_s = v.total_s,
         .pct_left = v.pct_left,
@@ -1389,6 +1499,251 @@ static void companion_boot_seed(void)
                            have_power ? &battery : NULL, NULL);
 }
 
+/* ---- Glass 3.5 Unified Desk Presence, Focus & Breathe ------------------- */
+const char *desk_mode_api_name(jr_desk_mode_t m)
+{
+    switch (m) {
+    case JR_DESK_ON_AIR:  return "on_air";
+    case JR_DESK_FOCUS:   return "focus";
+    case JR_DESK_BREATHE: return "breathe";
+    case JR_DESK_NORMAL:
+    default:              return "normal";
+    }
+}
+
+const char *desk_breathe_phase_api_name(jr_breathe_phase_t p)
+{
+    switch (p) {
+    case JR_BREATHE_HOLD_IN:  return "hold";
+    case JR_BREATHE_EXHALE:   return "exhale";
+    case JR_BREATHE_HOLD_OUT: return "hold";
+    case JR_BREATHE_INHALE:
+    default:                  return "inhale";
+    }
+}
+
+bool desk_mode_parse_name(const char *s, jr_desk_mode_t *out)
+{
+    if (s == NULL || s[0] == '\0' || out == NULL) {
+        return false;
+    }
+    if (strcasecmp(s, "normal") == 0 || strcasecmp(s, "off") == 0 ||
+        strcasecmp(s, "idle") == 0 || strcasecmp(s, "none") == 0) {
+        *out = JR_DESK_NORMAL;
+        return true;
+    }
+    if (strcasecmp(s, "on_air") == 0 || strcasecmp(s, "on-air") == 0 ||
+        strcasecmp(s, "on air") == 0 || strcasecmp(s, "onair") == 0) {
+        *out = JR_DESK_ON_AIR;
+        return true;
+    }
+    if (strcasecmp(s, "focus") == 0 || strcasecmp(s, "deep_focus") == 0 ||
+        strcasecmp(s, "deep focus") == 0) {
+        *out = JR_DESK_FOCUS;
+        return true;
+    }
+    if (strcasecmp(s, "breathe") == 0 || strcasecmp(s, "breathing") == 0 ||
+        strcasecmp(s, "reset") == 0) {
+        *out = JR_DESK_BREATHE;
+        return true;
+    }
+    return false;
+}
+
+bool desk_breathe_parse_pattern(const char *s, jr_breathe_pattern_t *out)
+{
+    if (s == NULL || s[0] == '\0' || out == NULL) {
+        return false;
+    }
+    if (strcasecmp(s, "box") == 0) {
+        *out = JR_BREATHE_BOX;
+        return true;
+    }
+    if (strcasecmp(s, "calm") == 0 || strcasecmp(s, "478") == 0 ||
+        strcasecmp(s, "4-7-8") == 0) {
+        *out = JR_BREATHE_CALM;
+        return true;
+    }
+    if (strcasecmp(s, "energize") == 0 || strcasecmp(s, "energy") == 0 ||
+        strcasecmp(s, "424") == 0 || strcasecmp(s, "4-2-4") == 0) {
+        *out = JR_BREATHE_ENERGIZE;
+        return true;
+    }
+    return false;
+}
+
+static uint16_t desk_current_day_key(void)
+{
+    struct tm tmv;
+    if (!device_wall_time(&tmv)) {
+        return 0U;
+    }
+    return jr_desk_make_day_key((uint16_t)(tmv.tm_year + 1900),
+                                (uint8_t)(tmv.tm_mon + 1),
+                                (uint8_t)tmv.tm_mday);
+}
+
+void desk_tally_persist(void)
+{
+    uint8_t buf[JR_DESK_TALLY_PACK_SIZE];
+    if (jr_desk_tally_pack(&s_desk_mode, buf, sizeof buf) != JR_DESK_TALLY_PACK_SIZE) {
+        return;
+    }
+    nvs_handle_t h;
+    if (nvs_open("app", NVS_READWRITE, &h) == ESP_OK) {
+        esp_err_t err = nvs_set_blob(h, "desk_tally", buf, sizeof buf);
+        if (err == ESP_OK) {
+            (void)nvs_commit(h);
+        } else {
+            ESP_LOGW(TAG, "desk: tally NVS write failed: %s", esp_err_to_name(err));
+        }
+        nvs_close(h);
+    }
+}
+
+static void desk_mode_publish_state(const jr_desk_tick_t *dt)
+{
+    const jr_desk_mode_t m = s_desk_mode.mode;
+    desk_mode_snap_t snap = {
+        .mode = m,
+        .rem_s = (m == JR_DESK_NORMAL || dt == NULL) ? 0U : dt->rem_s,
+        .pct_left = (m == JR_DESK_NORMAL || dt == NULL) ? 0U : dt->pct_left,
+        .sessions_today = s_desk_mode.focus_sessions_today,
+        .minutes_today = s_desk_mode.focus_minutes_today,
+        .breathe_phase = s_desk_mode.breathe_phase,
+        .breathe_sec_left = s_desk_mode.breathe_sec_left,
+        .silent = s_desk_mode.silent,
+        .dnd_silent = s_desk_mode.dnd_silent,
+    };
+    strlcpy(snap.label, s_desk_mode.label, sizeof snap.label);
+    portENTER_CRITICAL(&s_desk_mux);
+    s_desk_snap = snap;
+    portEXIT_CRITICAL(&s_desk_mux);
+
+    uint8_t disp_pct = 0U;
+    uint8_t sess_done = s_desk_mode.focus_sessions_today;
+    uint8_t sess_total = 4U;
+    bool warn_pulse = false;
+    if (m == JR_DESK_BREATHE) {
+        disp_pct = s_desk_mode.breathe_phase_pct;
+        sess_done = (uint8_t)(s_desk_mode.breathe_cycle_cur + 1U);
+        sess_total = s_desk_mode.breathe_cycles_total;
+    } else if (m == JR_DESK_ON_AIR) {
+        disp_pct = (s_desk_mode.duration_ms > 0U && dt != NULL) ? dt->pct_left : 0U;
+        warn_pulse = s_desk_mode.warn_5m_fired || s_desk_mode.on_air_completed_fired;
+    } else if (m == JR_DESK_FOCUS) {
+        disp_pct = dt != NULL ? dt->pct_left : 0U;
+    }
+    jr_display_desk_mode_set((uint8_t)m,
+                             snap.rem_s,
+                             disp_pct,
+                             (uint8_t)s_desk_mode.breathe_phase,
+                             s_desk_mode.breathe_sec_left,
+                             sess_done,
+                             sess_total,
+                             warn_pulse,
+                             m == JR_DESK_NORMAL ? "" : s_desk_mode.label);
+}
+
+static void restore_desk_tally(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("app", NVS_READONLY, &h) == ESP_OK) {
+        uint8_t buf[JR_DESK_TALLY_PACK_SIZE];
+        size_t len = sizeof buf;
+        if (nvs_get_blob(h, "desk_tally", buf, &len) == ESP_OK &&
+            len == sizeof buf &&
+            jr_desk_tally_unpack(&s_desk_mode, buf, len)) {
+            ESP_LOGI(TAG, "desk: tally restored (%u sprints, %u min, day=%u)",
+                     (unsigned)s_desk_mode.focus_sessions_today,
+                     (unsigned)s_desk_mode.focus_minutes_today,
+                     (unsigned)s_desk_mode.tally_day_key);
+        }
+        nvs_close(h);
+    }
+    jr_desk_tick_t dt = {0};
+    jr_desk_tick(&s_desk_mode, (uint32_t)(esp_timer_get_time() / 1000),
+                 desk_current_day_key(), &dt);
+    desk_mode_publish_state(&dt);
+}
+
+void desk_mode_snapshot(desk_mode_snap_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    portENTER_CRITICAL(&s_desk_mux);
+    *out = s_desk_snap;
+    portEXIT_CRITICAL(&s_desk_mux);
+}
+
+void desk_mode_request_async(const desk_mode_req_t *req)
+{
+    if (req == NULL) {
+        return;
+    }
+    portENTER_CRITICAL(&s_desk_mux);
+    s_desk_req_data = *req;
+    portEXIT_CRITICAL(&s_desk_mux);
+    atomic_store(&s_desk_req_pending, 1U);
+}
+
+void desk_mode_apply_now(const desk_mode_req_t *req, uint32_t now_ms,
+                         bool play_cue)
+{
+    if (req == NULL) {
+        return;
+    }
+    if (s_desk_choice_active) {
+        s_desk_choice_active = false;
+        jr_display_dismiss_choices();
+    }
+    switch (req->mode) {
+    case JR_DESK_ON_AIR:
+        jr_desk_start_on_air(&s_desk_mode, now_ms, req->duration_s, req->label);
+        jr_mood_poke_awake(&s_mood, now_ms);
+        companion_attention(now_ms);
+        jr_display_bloom();
+        /* ON AIR is strictly silent: zero audio chime on entry. */
+        break;
+    case JR_DESK_FOCUS:
+        jr_desk_start_focus(&s_desk_mode, now_ms, req->duration_s,
+                            req->label, req->silent);
+        jr_mood_poke_awake(&s_mood, now_ms);
+        companion_attention(now_ms);
+        jr_display_bloom();
+        if (play_cue && !s_desk_mode.silent && !owner_speaker_muted() &&
+            !atomic_load(&s_ota_active)) {
+            (void)jr_audio_play_cue(JR_CUE_MODE,
+                                    jr_cue_amplitude_permille(JR_CUE_MODE, s_out_vol));
+        }
+        break;
+    case JR_DESK_BREATHE:
+        jr_desk_start_breathe(&s_desk_mode, now_ms, req->pattern,
+                              req->cycles, req->silent);
+        jr_mood_poke_awake(&s_mood, now_ms);
+        companion_attention(now_ms);
+        jr_display_bloom();
+        if (play_cue && !s_desk_mode.silent && !owner_speaker_muted() &&
+            !atomic_load(&s_ota_active)) {
+            (void)jr_audio_play_cue(JR_CUE_MODE,
+                                    jr_cue_amplitude_permille(JR_CUE_MODE, s_out_vol));
+        }
+        break;
+    case JR_DESK_NORMAL:
+    default:
+        /* Exiting ON_AIR clears dnd_silent & visual beacon; never unmutes mic. */
+        jr_desk_set_normal(&s_desk_mode);
+        if (play_cue) {
+            ui_cue(JR_CUE_DISMISS, true);
+        }
+        break;
+    }
+    jr_desk_tick_t dt = {0};
+    jr_desk_tick(&s_desk_mode, now_ms, desk_current_day_key(), &dt);
+    desk_mode_publish_state(&dt);
+}
+
 /* THE MORNING GLANCE SPEAKS (wave N13). The first lift after a rest, once
  * per calendar day inside the morning window, earns one briefing made only
  * of what the device already holds: the date, the weather glance, the rain
@@ -1440,6 +1795,50 @@ static void morning_briefing_forced_maybe(const jr_power_t *bat)
     briefing_deliver(&tmv, bat, true);
 }
 
+static void briefing_append_desk(char *dst, size_t cap, bool evening)
+{
+    if (dst == NULL || cap == 0U) {
+        return;
+    }
+    if (evening) {
+        static const char kMorn[] = "Give Sir his morning briefing";
+        static const char kEve[]  = "Give Sir his evening wrap-up";
+        const size_t mlen = sizeof(kMorn) - 1U;
+        const size_t elen = sizeof(kEve) - 1U;
+        if (strncmp(dst, kMorn, mlen) == 0 && elen <= mlen) {
+            memcpy(dst, kEve, elen);
+            memmove(dst + elen, dst + mlen, strlen(dst + mlen) + 1U);
+        }
+    }
+    desk_mode_snap_t ds = {0};
+    desk_mode_snapshot(&ds);
+    size_t open_n = 0U, done_n = 0U;
+    (void)device_notes_counts(&open_n, &done_n);
+
+    size_t len = strlen(dst);
+    if (len + 1U < cap && (ds.sessions_today > 0U || ds.minutes_today > 0U)) {
+        int w = snprintf(dst + len, cap - len,
+                         " Focus today: %u sprint%s totaling %u minute%s.",
+                         (unsigned)ds.sessions_today,
+                         ds.sessions_today == 1U ? "" : "s",
+                         (unsigned)ds.minutes_today,
+                         ds.minutes_today == 1U ? "" : "s");
+        if (w > 0) {
+            len = (size_t)w < cap - len ? len + (size_t)w : cap - 1U;
+        }
+    } else if (len + 1U < cap && evening) {
+        int w = snprintf(dst + len, cap - len, " No focus sprints logged today.");
+        if (w > 0) {
+            len = (size_t)w < cap - len ? len + (size_t)w : cap - 1U;
+        }
+    }
+    if (len + 1U < cap && (open_n > 0U || done_n > 0U)) {
+        (void)snprintf(dst + len, cap - len,
+                       " Desk inbox: %u open, %u completed.",
+                       (unsigned)open_n, (unsigned)done_n);
+    }
+}
+
 int briefing_compose_live(char *dst, size_t cap, const jr_power_t *bat)
 {
     if (dst == NULL || cap == 0U) {
@@ -1478,7 +1877,9 @@ int briefing_compose_live(char *dst, size_t cap, const jr_power_t *bat)
         .nearest_timer = have_timer ? tview.label : NULL,
         .nearest_timer_s = have_timer ? (int)tview.rem_s : 0,
     };
-    return jr_briefing_compose(dst, cap, &f);
+    (void)jr_briefing_compose(dst, cap, &f);
+    briefing_append_desk(dst, cap, have_date && tmv.tm_hour >= 17);
+    return (int)strlen(dst);
 }
 
 static void briefing_deliver(const struct tm *tmvp, const jr_power_t *bat, bool forced)
@@ -1522,10 +1923,12 @@ static void briefing_deliver(const struct tm *tmvp, const jr_power_t *bat, bool 
         ESP_LOGI(TAG, "briefing: caption, muted%s (%s)", forced ? ", forced" : "", cap);
         return;
     }
+    const bool evening = tmv.tm_hour >= 17;
     char text[640];
     (void)jr_briefing_compose(text, sizeof text, &f);
+    briefing_append_desk(text, sizeof text, evening);
     handle_say(text);
-    jr_display_caption_set("GOOD MORNING");
+    jr_display_caption_set(evening ? "GOOD EVENING" : "GOOD MORNING");
     ESP_LOGI(TAG, "briefing: spoken%s (%d task%s done, rain in %d h): %s",
              forced ? ", forced" : "", done, done == 1 ? "" : "s", f.rain_in_h, text);
 }
@@ -2157,10 +2560,12 @@ static void voice_exec(void *ctx, const jr_command_t *cmd)
         }
         /* Question + labels are borrowed from the owned snapshot, which lives
          * until a NEW ask overwrites it — always after this one is resolved. */
+        s_desk_choice_active = false;
         jr_display_present_choices(ask->question, labels, (int)ask->count);
         break;
     }
     case JR_CMD_DISMISS_CHOICES:
+        s_desk_choice_active = false;
         jr_display_dismiss_choices();   /* idempotent by contract */
         break;
     case JR_CMD_SEND_CHOICE_RESULT: {
@@ -2933,7 +3338,8 @@ static void voice_task(void *arg)
                 mood_phase == JR_ST_THINKING ||
                 mood_phase == JR_ST_ASKING ||
                 (mood_phase == JR_ST_LISTENING && s_listen_speech_active) ||
-                jr_timer_any_ringing(&s_timers);
+                jr_timer_any_ringing(&s_timers) ||
+                s_desk_mode.mode != JR_DESK_NORMAL;
             static uint8_t s_move_polls, s_mood_fd_polls, s_mood_fu_polls;
             static bool s_mood_face_down;
             if (have_imu && imu.moving && imu.age_ms < 500U) {
@@ -3084,13 +3490,17 @@ static void voice_task(void *arg)
                     (have_power && bat.usb_present) ||
                     atomic_load(&s_ota_active) ||
                     operator_mode_active((uint32_t)now) ||
-                    jr_timer_blocks_sleep(&s_timers, (uint32_t)now);
+                    jr_timer_blocks_sleep(&s_timers, (uint32_t)now) ||
+                    s_desk_mode.mode != JR_DESK_NORMAL;
                 if (forced) {
                     enter_deep_sleep("forced", atomic_load(&s_sleep_timer_s));
                 } else if (jr_mood_sleep_due(&s_mood, (uint32_t)now) &&
                            !in_use && now >= SLEEP_MIN_UPTIME_MS) {
                     enter_deep_sleep("not in use", SLEEP_TIMER_WAKE_S);
                 }
+            }
+            if (s_desk_mode.mode != JR_DESK_NORMAL) {
+                s_companion_activity_ms = (uint32_t)now;
             }
             const bool companion_clock = companion_update((uint32_t)now,
                 mout.mood, moving,
@@ -3188,7 +3598,7 @@ static void voice_task(void *arg)
                     jr_display_caption_set("POWERING OFF - HOLD PWR TO START");
                     vTaskDelay(pdMS_TO_TICKS(1500));
                     jr_display_panel_off_request();
-                    for (int i = 0; i < 30 && !jr_display_panel_is_off(); ++i) {
+                    for (int i = 0; i < 45 && !jr_display_panel_is_off(); ++i) {
                         vTaskDelay(pdMS_TO_TICKS(20));
                     }
                     const esp_err_t off_err = jr_power_off();
@@ -3706,8 +4116,8 @@ static void voice_task(void *arg)
                     const char *lbl = (dreq.kind == TIMER_REQ_FOCUS &&
                                        dreq.label[0] == '\0')
                         ? "FOCUS" : dreq.label;
-                    if (jr_timer_set(&s_timers, (uint32_t)now, dreq.seconds,
-                                     lbl, norm, sizeof norm, &eff_s)) {
+                    if (jr_timer_set_ex(&s_timers, (uint32_t)now, dreq.seconds,
+                                        lbl, dreq.silent, norm, sizeof norm, &eff_s)) {
                         if (dreq.kind == TIMER_REQ_FOCUS) {
                             jr_display_nav_set(JR_DISPLAY_SPACE_WATCH);
                             jr_display_bloom();
@@ -3717,9 +4127,9 @@ static void voice_task(void *arg)
                             jr_display_caption_set(cap);
                         }
                         jr_mood_poke_awake(&s_mood, (uint32_t)now);
-                        ESP_LOGI(TAG, "debug timer %s: %s %us",
+                        ESP_LOGI(TAG, "debug timer %s: %s %us silent=%d",
                                  dreq.kind == TIMER_REQ_FOCUS ? "focus" : "set",
-                                 norm, (unsigned)eff_s);
+                                 norm, (unsigned)eff_s, dreq.silent ? 1 : 0);
                         force_pub = true;
                     }
                 } else if (dreq.kind == TIMER_REQ_CANCEL) {
@@ -3750,7 +4160,8 @@ static void voice_task(void *arg)
                 ESP_LOGI(TAG, "timer: %s expired", tev.expired_label);
                 force_pub = true;
             }
-            if (tev.chime) {
+            if (tev.chime && !jr_timer_ringing_is_silent(&s_timers) &&
+                !s_desk_mode.dnd_silent) {
                 jr_audio_play_timer_chime();
             }
             if (tev.auto_stopped) {
@@ -3764,6 +4175,101 @@ static void voice_task(void *arg)
                 timer_publish_now((uint32_t)now);
                 s_timer_was_active = active_now;
                 s_timer_next_pub_ms = (uint32_t)now + 1000U;
+            }
+        }
+
+        /* 2c) Glass 3.5 Desk Presence / Focus / Breathe drain + tick */
+        {
+            static uint32_t s_desk_next_tick_ms;
+            if (atomic_exchange(&s_desk_req_pending, 0U) != 0U) {
+                desk_mode_req_t dreq = {0};
+                portENTER_CRITICAL(&s_desk_mux);
+                dreq = s_desk_req_data;
+                portEXIT_CRITICAL(&s_desk_mux);
+                desk_mode_apply_now(&dreq, (uint32_t)now, false);
+                s_desk_next_tick_ms = (uint32_t)now +
+                    (s_desk_mode.mode == JR_DESK_BREATHE ? 100U : 1000U);
+            }
+            if (s_desk_choice_active &&
+                (int32_t)((uint32_t)now - s_desk_choice_expires_ms) >= 0) {
+                s_desk_choice_active = false;
+                jr_display_dismiss_choices();
+            }
+            const uint32_t cadence_ms =
+                (s_desk_mode.mode == JR_DESK_BREATHE) ? 100U : 1000U;
+            if ((int32_t)((uint32_t)now - s_desk_next_tick_ms) >= 0) {
+                s_desk_next_tick_ms = (uint32_t)now + cadence_ms;
+                const bool was_silent = s_desk_mode.silent;
+                const uint8_t prev_sessions = s_desk_mode.focus_sessions_today;
+                const uint16_t prev_day = s_desk_mode.tally_day_key;
+                jr_desk_tick_t dt = {0};
+                jr_desk_tick(&s_desk_mode, (uint32_t)now,
+                             desk_current_day_key(), &dt);
+                if (prev_day != 0U && s_desk_mode.tally_day_key != prev_day &&
+                    prev_sessions > 0U) {
+                    desk_tally_persist();
+                }
+                if (dt.warn_5m) {
+                    /* ON_AIR T-5:00 silent warning: visual bloom only, ZERO chime. */
+                    jr_display_bloom();
+                    ESP_LOGI(TAG, "desk: ON AIR 5m warning (silent)");
+                }
+                if (dt.completed) {
+                    if (dt.completed_mode == JR_DESK_FOCUS) {
+                        desk_tally_persist();
+                        jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                        companion_attention((uint32_t)now);
+                        jr_display_bloom();
+                        jr_display_activity_push("FOCUS", "SPRINT COMPLETE");
+                        if (!was_silent && !owner_speaker_muted() &&
+                            !atomic_load(&s_ota_active)) {
+                            (void)jr_audio_play_cue(
+                                JR_CUE_MODE,
+                                jr_cue_amplitude_permille(JR_CUE_MODE, s_out_vol));
+                        }
+                        if (jr_orch_phase(&s_app.orch) != JR_ST_ASKING) {
+                            static const char *const kFocusChoices[2] = {
+                                "5M BREAK", "DONE"
+                            };
+                            jr_display_present_choices("SPRINT DONE",
+                                                       kFocusChoices, 2);
+                            s_desk_choice_active = true;
+                            s_desk_choice_expires_ms = (uint32_t)now + 30000U;
+                        }
+                        ESP_LOGI(TAG, "desk: focus sprint complete (%u today, %u min)",
+                                 (unsigned)s_desk_mode.focus_sessions_today,
+                                 (unsigned)s_desk_mode.focus_minutes_today);
+                    } else if (dt.completed_mode == JR_DESK_ON_AIR) {
+                        /* ON_AIR stays active at 0:00 until tapped; bloom only, ZERO chime. */
+                        jr_display_bloom();
+                        ESP_LOGI(TAG, "desk: ON AIR countdown finished (holding beacon)");
+                    } else if (dt.completed_mode == JR_DESK_BREATHE) {
+                        jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                        jr_display_bloom();
+                        jr_display_caption_set("RESET COMPLETE");
+                        if (!was_silent && !owner_speaker_muted()) {
+                            static const uint16_t kDoneHz[2] = { 523U, 659U };
+                            (void)jr_audio_play_chime(kDoneHz, 2U, 80U, 4U);
+                        }
+                        ESP_LOGI(TAG, "desk: breathe reset complete");
+                    }
+                } else if (dt.breathe_phase_changed &&
+                           !s_desk_mode.silent && !owner_speaker_muted()) {
+                    if (s_desk_mode.breathe_phase == JR_BREATHE_INHALE) {
+                        static const uint16_t kInHz[2] = { 392U, 523U };
+                        (void)jr_audio_play_chime(kInHz, 2U, 90U, 4U);
+                    } else if (s_desk_mode.breathe_phase == JR_BREATHE_EXHALE) {
+                        static const uint16_t kExHz[2] = { 440U, 330U };
+                        (void)jr_audio_play_chime(kExHz, 2U, 90U, 4U);
+                    } else {
+                        static const uint16_t kHoldHz[1] = { 523U };
+                        (void)jr_audio_play_chime(kHoldHz, 1U, 70U, 4U);
+                    }
+                }
+                if (s_desk_mode.mode != JR_DESK_NORMAL || dt.completed ||
+                    s_desk_mode.focus_sessions_today != prev_sessions) {
+                    desk_mode_publish_state(&dt);
+                }
             }
         }
 
@@ -4088,7 +4594,8 @@ static void voice_task(void *arg)
              * shade names its own exits (BOOT, centre up, tap outside). */
             if (iev.kind == JR_INPUT_TAP && !jr_display_choices_active() &&
                 !s_ui_shade_open &&
-                jr_display_nav_overlay() != JR_DISPLAY_OVERLAY_SHADE) {
+                jr_display_nav_overlay() != JR_DISPLAY_OVERLAY_SHADE &&
+                jr_display_inbox_hit(iev.x, iev.y) == 0U) {
                 const bool double_tap = s_last_tap_ms != 0U &&
                     (uint32_t)now - s_last_tap_ms < 400U;
                 s_last_tap_ms = (uint32_t)now;
@@ -4141,6 +4648,34 @@ static void voice_task(void *arg)
                  * incidental. For a tap start and end differ by at most the
                  * slop, so this is identical to the old behaviour for taps. */
                 int choice = jr_display_choice_hit(iev.start_x, iev.start_y);
+                if (s_desk_choice_active) {
+                    if (choice == 0 || choice == 1) {
+                        jr_display_set_choice_selected(choice);
+                        jr_display_dismiss_choices();
+                        s_desk_choice_active = false;
+                        s_ask_tap_grace_ms = (uint32_t)now + 600U;
+                        if (choice == 0) {
+                            char norm[JR_TIMER_LABEL_CAP] = {0};
+                            uint32_t eff_s = 0U;
+                            if (jr_timer_set_ex(&s_timers, (uint32_t)now, 300U,
+                                                "BREAK", false, norm,
+                                                sizeof norm, &eff_s)) {
+                                timer_publish_now((uint32_t)now);
+                            }
+                            jr_display_caption_set("BREAK 5:00");
+                            ui_cue(JR_CUE_CONFIRM, physical);
+                            ESP_LOGI(TAG, "desk: sprint done -> 5m break started");
+                        } else {
+                            jr_display_caption_set("SPRINT COMPLETE");
+                            ui_cue(JR_CUE_DISMISS, physical);
+                            ESP_LOGI(TAG, "desk: sprint done -> dismissed");
+                        }
+                    } else {
+                        jr_display_ripple_reject(iev.x, iev.y);
+                        (void)jr_audio_play_sweep(700U, 300U, 100U, 6U);
+                    }
+                    continue;
+                }
                 if (choice >= 0 && choice < (int)s_ask.count) {
                     jr_display_set_choice_selected(choice);
                     jr_event_t picked = jr_event(JR_EV_CHOICE_PICKED);
@@ -4415,6 +4950,33 @@ static void voice_task(void *arg)
                     ui_cue(JR_CUE_DISMISS, physical);
                     ESP_LOGI(TAG, "timer: dismissed by tap");
                     continue;
+                }
+                /* Glass 3.5 Desk Mode (ON AIR / FOCUS / BREATHE): single physical
+                 * tap exits back to NORMAL; never unmutes a privacy-paused mic. */
+                if (physical && !s_ui_shade_open &&
+                    jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE &&
+                    (jr_display_desk_mode_active() ||
+                     s_desk_mode.mode != JR_DESK_NORMAL)) {
+                    const desk_mode_req_t normal_req = { .mode = JR_DESK_NORMAL };
+                    desk_mode_apply_now(&normal_req, (uint32_t)now, false);
+                    jr_display_caption_set("DESK MODE OFF");
+                    ui_cue(JR_CUE_DISMISS, physical);
+                    ESP_LOGI(TAG, "desk: exited to normal by tap");
+                    continue;
+                }
+                /* Glass 3.5 Tactile Desk Inbox (ACTIVITY space): tap a row to
+                 * toggle done, persist v2 NVS notes, re-sync inbox, play CONFIRM. */
+                if (physical && !s_ui_shade_open &&
+                    jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE) {
+                    const uint32_t hit_id = jr_display_inbox_hit(iev.x, iev.y);
+                    if (hit_id != 0U) {
+                        if (device_notes_toggle(hit_id)) {
+                            ui_cue(JR_CUE_CONFIRM, physical);
+                            ESP_LOGI(TAG, "inbox: toggled note #%u by tap",
+                                     (unsigned)hit_id);
+                        }
+                        continue;
+                    }
                 }
                 const jr_display_action_t shell_action =
                     jr_display_hit(iev.x, iev.y);
@@ -5141,6 +5703,7 @@ void app_main(void)
     };
     cJSON_InitHooks(&cjson_hooks);
     jr_timer_init(&s_timers);
+    jr_desk_init(&s_desk_mode);
 
     crash_note_boot();
     init_nvs();
@@ -5284,6 +5847,7 @@ void app_main(void)
     restore_brightness_cap();
     (void)jr_display_set_brightness(s_brightness_cap);
     companion_boot_seed();
+    restore_desk_tally();
     {
         const uint32_t boot_ms = (uint32_t)(esp_timer_get_time() / 1000);
         if (power_restore_rtc_timers(boot_ms) > 0U) {
@@ -5291,14 +5855,28 @@ void app_main(void)
         }
     }
 
+    const esp_sleep_wakeup_cause_t cause =
+        (esp_sleep_wakeup_cause_t)s_boot_wake_cause;
+    const bool from_sleep = s_rtc_sleep_magic == SLEEP_RTC_MAGIC &&
+        (cause == ESP_SLEEP_WAKEUP_EXT0 || cause == ESP_SLEEP_WAKEUP_EXT1 ||
+         cause == ESP_SLEEP_WAKEUP_TIMER);
+
+    /* Cold boot (!from_sleep): step CPU to 240 MHz early and arm Procedural
+     * Ignition BEFORE jr_display_start() at 20 fps for a silky sapphire sweep.
+     * Deep-sleep wakes preserve dark TIMER DREAM and instant 200 ms Glance! */
+    if (!from_sleep) {
+        cpu_gear_set(CPU_MHZ_LIVE);
+        jr_display_boot_ignition_set(true, 0U, 15U);
+    }
+
     /* pull the concrete ports. The real presenter is preferred; its panel +
      * SPIFFS + gfx bring-up runs async in its own task, so this never stalls
      * boot. On resource failure, fall back to the jr_hal logging stub
      * (headless, exactly the pre-Phase-3 behavior). */
     s_app.clock   = jr_hal_clock();
-    /* Boot shares a core with the render task: see RENDER_FPS_BOOT. The voice
-     * loop's cadence tick lifts this as soon as it runs. */
-    (void)jr_display_set_render_fps(RENDER_FPS_BOOT);
+    /* Cold boot runs Ignition at 20 fps (<4 ms/f); deep-sleep wakes keep
+     * RENDER_FPS_BOOT until the voice loop's cadence tick takes over. */
+    (void)jr_display_set_render_fps(from_sleep ? RENDER_FPS_BOOT : 20U);
     if (jr_display_start(&s_app.display) == ESP_OK) {
         ESP_LOGI(TAG, "display: presenter injected (CO5300 async bring-up)");
     } else {
@@ -5312,13 +5890,21 @@ void app_main(void)
     /* idle face immediately (Phase-0 acceptance target) */
     s_app.last_face = JR_FACE_IDLE;
     jr_display_present(&s_app.display, JR_FACE_IDLE, 0);
+    device_notes_sync_inbox();
+    if (!from_sleep) {
+        jr_display_boot_ignition_set(true, 0U, 20U);  /* stage 0: CORE (20%) */
+    }
 
-    /* network + config */
+    /* network + config: start non-blocking STA join now so Wi-Fi association
+     * and DHCP overlap audio, HTTP, tools, and WakeNet init (saves 2-4 s). */
+    bool net_inited = false;
+    esp_err_t wifi_start_err = ESP_ERR_INVALID_STATE;
     if (jr_net_init() == ESP_OK) {
-        esp_err_t wc = jr_net_wifi_connect();
-        if (wc != ESP_OK) {
-            ESP_LOGW(TAG, "wifi not connected (%s) — diag/session will retry once provisioned",
-                     esp_err_to_name(wc));
+        net_inited = true;
+        wifi_start_err = jr_net_wifi_connect_start();
+        if (wifi_start_err != ESP_OK) {
+            ESP_LOGW(TAG, "wifi join start skipped (%s) — will fall back to provisioning",
+                     esp_err_to_name(wifi_start_err));
         }
     }
     restore_ota_attempt();
@@ -5356,6 +5942,9 @@ void app_main(void)
     restore_briefing_day();
     s_app.mic = jr_audio_source();
     s_app.spk = jr_audio_sink();
+    if (!from_sleep) {
+        jr_display_boot_ignition_set(true, 1U, 50U);  /* stage 1: AUDIO (50%) */
+    }
 
     /* Gemini endpoint auth (key from NVS, never in-repo). The key rides only
      * the x-goog-api-key upgrade header and the URL stays bare. The WebSocket
@@ -5486,6 +6075,33 @@ void app_main(void)
         ESP_LOGW(TAG, "wake word unavailable: %s", esp_err_to_name(wake_err));
     }
 
+    /* Finalize overlapped Wi-Fi join (returns in 0 ms when association + DHCP
+     * already finished during codec/tools/WakeNet bring-up). */
+    if (!from_sleep) {
+        jr_display_boot_ignition_set(true, 2U, 80U);  /* stage 2: WIFI (80%) */
+    }
+    if (net_inited) {
+        esp_err_t wc = wifi_start_err;
+        if (wc == ESP_OK) {
+            wc = jr_net_wifi_wait_connected(
+                from_sleep ? JR_NET_DEFAULT_TIMEOUT_MS : 12000U);
+        }
+        if (wc != ESP_OK) {
+            esp_err_t prov_err = jr_net_provisioning_start();
+            ESP_LOGW(TAG, "wifi not connected (%s, prov=%s) — diag/session will retry once provisioned",
+                     esp_err_to_name(wc), esp_err_to_name(prov_err));
+        }
+    }
+
+    /* Cold boot: complete Ignition sweep -> ~250 ms READY hold -> 450 ms alpha
+     * crossfade onto Chrono-Arc Home before the initial boot caption arrives. */
+    if (!from_sleep) {
+        jr_display_boot_ignition_set(true, 3U, 100U); /* stage 3: READY (100%) */
+        vTaskDelay(pdMS_TO_TICKS(250));
+        jr_display_boot_ignition_set(false, 3U, 100U);
+        vTaskDelay(pdMS_TO_TICKS(480));               /* settle 450 ms crossfade */
+    }
+
     /* Start the stillness clock HERE, not at jr_mood_reset() above: that runs
      * ~1 s in, while Wi-Fi and the codec still have ~13 s to go, so the device
      * spent most of its rest budget before it could do anything and dimmed a
@@ -5502,11 +6118,6 @@ void app_main(void)
      * check with nobody there: the ladder resumes at DREAM so the glass stays
      * dark and the chip sleeps again in JR_MOOD_SLEEP_MS unless something
      * happens. Everything else is the privacy default. */
-    const esp_sleep_wakeup_cause_t cause =
-        (esp_sleep_wakeup_cause_t)s_boot_wake_cause;
-    const bool from_sleep = s_rtc_sleep_magic == SLEEP_RTC_MAGIC &&
-        (cause == ESP_SLEEP_WAKEUP_EXT0 || cause == ESP_SLEEP_WAKEUP_EXT1 ||
-         cause == ESP_SLEEP_WAKEUP_TIMER);
     s_companion_activity_ms = (uint32_t)(esp_timer_get_time() / 1000);
     if (from_sleep && (cause == ESP_SLEEP_WAKEUP_EXT0 ||
                        cause == ESP_SLEEP_WAKEUP_EXT1)) {
