@@ -683,6 +683,7 @@ typedef enum {
     JR_DISPLAY_ACT_VOLUME_UP,
     JR_DISPLAY_ACT_VOLUME_DOWN,
     JR_DISPLAY_ACT_PRIVACY_TOGGLE,
+    JR_DISPLAY_ACT_AQUARIUM,      /* Glass 3.7: top NANO REEF pill on shade */
 } jr_display_action_t;
 
 /* NAVIGATION. Call these from gesture routing; they are the whole state API.

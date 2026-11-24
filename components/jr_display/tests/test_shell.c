@@ -1657,6 +1657,19 @@ static void test_shade_hits_resolve_to_controls(void)
      * choice arcs; the shell must not claim taps there either. */
     CHECK(jr_display_hit(SP_CX, SP_CY - 225) == JR_DISPLAY_ACT_NONE,
           "outer band is not the shell's");
+
+    /* Glass 3.7: top NANO REEF pill on open shade routes to ACT_AQUARIUM when
+     * Glass 3 is active, and falls through to DISMISS in classic mode. */
+    reset_nav();
+    jr_display_nav_down();
+    jr_display_glass3_set(JR_GLASS3_CLASSIC);
+    CHECK(jr_display_hit(SP_CX, SG_SH_REEF_CY) == JR_DISPLAY_ACT_DISMISS,
+          "classic shade has no reef pill");
+    jr_display_glass3_set(JR_GLASS3_AUTO);
+    CHECK(jr_display_hit(SP_CX, SG_SH_REEF_CY) == JR_DISPLAY_ACT_AQUARIUM,
+          "glass3 shade reef pill hits ACT_AQUARIUM");
+    jr_display_glass3_set(JR_GLASS3_CLASSIC);
+    reset_nav();
 }
 
 /* Every ring screen's detail sheet must be ABOUT that screen.

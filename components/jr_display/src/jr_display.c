@@ -10005,6 +10005,9 @@ static void sp_draw_detail(const jr_display_ctx_t *ctx, int y1, int y2,
 #define SG_SH_STATE_Y  (SP_BTN_CY + SP_BTN_R + 20)
 #define SG_SH_HINT_Y   (SP_BTN_CY + SP_BTN_R + 44)
 #define SG_SH_KEYS_Y   372
+#define SG_SH_REEF_CY  88
+#define SG_SH_REEF_HW  74
+#define SG_SH_REEF_HH  17
 
 /* The breathing ring's two numbers at phase `ms`: how far out it has grown
  * (0..4 px, in 1/16 px) and its alpha. A raised cosine, so it rests at the
@@ -10121,7 +10124,13 @@ static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
                 SG_SH_ICON_Y + sg_ent_rise(ent, t_ic), SP_C_CYAN, a_ic);
     sg_ico_make(&i_sun, GLASS_ICON_SUN, GLASS_ICON_SM, SP_CX + SG_SH_CLUSTER_DX,
                 SG_SH_ICON_Y + sg_ent_rise(ent, t_ic), SP_C_AMBER, a_ic);
-    sg_txt_t t_vol, t_lgt, t_state_t, t_hint_t, t_keys_t;
+    sg_txt_t t_vol, t_lgt, t_state_t, t_hint_t, t_keys_t, t_reef_t = {0};
+    const bool show_reef = glass3_active();
+    const int reef_cy = SG_SH_REEF_CY + sg_ent_rise(ent, t_ic);
+    if (show_reef) {
+        sg_txt_make(&t_reef_t, GLASS_FONT_LABEL, "NANO REEF", 9, SP_CX,
+                    reef_cy - 5, 3, 0xDFFFu, a_ic);
+    }
     sg_txt_make(&t_vol, GLASS_FONT_TEXT, vbuf, vlen, SP_CX - SG_SH_CLUSTER_DX,
                 SG_SH_NUM_Y + sg_ent_rise(ent, t_ic), 1, SP_C_INK, a_ic);
     sg_txt_make(&t_lgt, GLASS_FONT_TEXT, lbuf, llen, SP_CX + SG_SH_CLUSTER_DX,
@@ -10186,6 +10195,13 @@ static void sp_draw_shade(const jr_display_ctx_t *ctx, int y1, int y2,
                            (uint8_t)((a_btn * 34) / 255), swap);
             glass_ring_row(row, y, lo, hi, cx16, bcy16, br16 - 48, br16, 0, GLASS_TURN_Q16, priv,
                            (uint8_t)a_btn, swap);
+        }
+        if (show_reef && a_ic > 0 &&
+            y >= reef_cy - SG_SH_REEF_HH && y <= reef_cy + SG_SH_REEF_HH) {
+            sp_pill_row(row, y, lo, hi, SP_CX, reef_cy, SG_SH_REEF_HW, SG_SH_REEF_HH,
+                        0x0229u, (uint8_t)((a_ic * 205) / 255),
+                        0x2F3Fu, (uint8_t)((a_ic * 225) / 255), swap);
+            sg_txt_row(row, y, lo, hi, swap, &t_reef_t);
         }
         sg_ico_row(row, y, lo, hi, swap, &i_mic);
         sg_ico_row(row, y, lo, hi, swap, &i_spk);
@@ -14697,6 +14713,12 @@ jr_display_action_t jr_display_hit(int x, int y)
     }
 
     if (sp_shade_open()) {
+        /* Glass 3.7: Top-center NANO REEF quick-launch pill. */
+        if (glass3_active() &&
+            x >= SP_CX - SG_SH_REEF_HW - 10 && x <= SP_CX + SG_SH_REEF_HW + 10 &&
+            y >= SG_SH_REEF_CY - SG_SH_REEF_HH - 8 && y <= SG_SH_REEF_CY + SG_SH_REEF_HH + 8) {
+            return JR_DISPLAY_ACT_AQUARIUM;
+        }
         /* The mute button: its drawn disc, nothing larger. */
         const int bdx = x - SP_BTN_PRIV_CX;
         const int bdy = y - SP_BTN_CY;
