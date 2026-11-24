@@ -5466,6 +5466,7 @@ static void voice_task(void *arg)
                 if (double_tap) {
                     if (app_aquarium_is_active() && !jr_display_canvas_active()) {
                         app_aquarium_set_active(false);
+                        jr_display_caption_set("SWIPE LEFT FOR REEF");
                         ui_cue(JR_CUE_DISMISS, physical);
                         ESP_LOGI(TAG, "aquarium: exited by double-tap");
                         continue;
@@ -5629,6 +5630,7 @@ static void voice_task(void *arg)
                     }
                     if (iev.direction == JR_INPUT_DIRECTION_DOWN) {
                         app_aquarium_set_active(false);
+                        jr_display_caption_set("SWIPE LEFT FOR REEF");
                         ui_cue(JR_CUE_DISMISS, physical);
                         ESP_LOGI(TAG, "aquarium: exited by swipe-down");
                         continue;
@@ -5758,6 +5760,14 @@ static void voice_task(void *arg)
                         ESP_LOGI(TAG, "ui: watch style %s",
                                  jr_display_watch_style_name(
                                      jr_display_watch_style()));
+                    } else if (overlay == JR_DISPLAY_OVERLAY_NONE &&
+                               iev.direction == JR_INPUT_DIRECTION_LEFT) {
+                        /* Glass 3.7: Swipe left from any non-WATCH screen
+                         * dives straight back into Nano Reef Aquarium. */
+                        app_aquarium_set_active(true);
+                        ui_cue(JR_CUE_CONFIRM, physical);
+                        ESP_LOGI(TAG, "ui: swipe left opened nano reef");
+                        continue;
                     } else if (overlay == JR_DISPLAY_OVERLAY_NONE) {
                         s_watch_peek_until_ms = (uint32_t)now + 10000U;
                         watch_opened = true;
@@ -5957,6 +5967,12 @@ static void voice_task(void *arg)
                         jr_display_nav_up();
                         ui_cue(JR_CUE_TICK, physical);
                         jr_display_caption_set("DETAIL - DOWN TO CLOSE");
+                        break;
+                    case JR_DISPLAY_ACT_AQUARIUM:
+                        shell_dismiss();
+                        app_aquarium_set_active(true);
+                        ui_cue(JR_CUE_CONFIRM, physical);
+                        ESP_LOGI(TAG, "ui: shade pill opened nano reef");
                         break;
                     default:
                         break;
