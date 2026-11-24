@@ -1085,14 +1085,15 @@ _Atomic bool s_voice_privacy_paused = true;
  * short "Pardon, Sir?". */
 static uint32_t         s_utt_start_ms;
 jr_utt_watch_t          s_utt;                  /* voice task writes; cockpit reads totals */
-/* The echo gate (jr_core/echo_gate.h): while the speaker is audible and for a
- * short tail after, the uplink carries silence frames instead of the
- * microphone. NOT the privacy gate, which is decided earlier and untouched.
- * On by default; /api/debug/gain?echogate=0 turns it off for calibration, not
- * persisted. The gate state is the voice task's; the cockpit reads totals. */
+/* The echo gate (jr_core/echo_gate.h): optional fallback that zeroes uplink
+ * frames while the speaker is audible and for a short tail after. NOT the
+ * privacy gate, which is decided earlier and untouched. Off by default now
+ * that speakmic=6 + speakgain=100 gives ~40 dB AEC headroom for native Gemini
+ * Live duplex barge-in (PLAN N16.9); /api/debug/gain?echogate=1&echovol=
+ * re-enables it at runtime if needed (not persisted). */
 jr_echo_gate_t          s_echo_gate;
 jr_reply_cut_t          s_reply_cut;            /* ws task drops, voice task begins */
-_Atomic bool            s_echo_gate_enabled = true;
+_Atomic bool            s_echo_gate_enabled = false;
 /* The gate applies only when the speaker volume is above this (0..100,
  * /api/debug/gain?echovol=). 0 = at every audible volume, as before. */
 _Atomic int             s_echo_gate_volume_min = 0;

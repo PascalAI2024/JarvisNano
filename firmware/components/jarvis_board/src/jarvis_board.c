@@ -154,14 +154,19 @@ static void jarvis_board_te_init(void)
                  (int)JARVIS_LCD_TE);
         return;
     }
-    const esp_err_t svc = gpio_install_isr_service(0);
-    if (svc != ESP_OK && svc != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "LCD_TE ISR service unavailable (%s); sync disabled",
-                 esp_err_to_name(svc));
-        return;
+    esp_err_t isr_err = gpio_isr_handler_add(JARVIS_LCD_TE, lcd_te_isr, NULL);
+    if (isr_err == ESP_ERR_INVALID_STATE) {
+        const esp_err_t svc = gpio_install_isr_service(0);
+        if (svc != ESP_OK && svc != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "LCD_TE ISR service unavailable (%s); sync disabled",
+                     esp_err_to_name(svc));
+            return;
+        }
+        isr_err = gpio_isr_handler_add(JARVIS_LCD_TE, lcd_te_isr, NULL);
     }
-    if (gpio_isr_handler_add(JARVIS_LCD_TE, lcd_te_isr, NULL) != ESP_OK) {
-        ESP_LOGW(TAG, "LCD_TE ISR add failed; sync disabled");
+    if (isr_err != ESP_OK) {
+        ESP_LOGW(TAG, "LCD_TE ISR add failed (%s); sync disabled",
+                 esp_err_to_name(isr_err));
         return;
     }
     s_te_ready = true;

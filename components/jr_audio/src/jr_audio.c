@@ -125,9 +125,9 @@ static void speaker_pa_set(bool enabled)
 #define PB_RING_BYTES            (512U * 1024U)
 #define PB_RING_SAMPLES          (PB_RING_BYTES / sizeof(int16_t))
 #define PB_FEED_CHUNK            768        /* one 32 ms 24 kHz write */
-/* Measured live stack HWM on 4096 B: 3260 B free (~836 B peak, s_feed_chunk is
- * static). 3072 B reclaims 1 KB of internal SRAM while keeping >2 KB free. */
-#define PB_FEEDER_STACK          3072
+/* 4096 B keeps >=1.5 KB headroom with jr_spectrum_feed + ESP_LOGW vprintf on
+ * the hole path (s_feed_chunk is static). */
+#define PB_FEEDER_STACK          4096
 #define DIAG_TAP_SECONDS         2U
 #define DIAG_CLIP_THRESHOLD      32760
 /* Earcons are rendered WHOLE into heap scratch and enqueued in one call. They
@@ -310,7 +310,7 @@ static _Atomic uint32_t       s_pb_earcon_samples;
  * them, for +0.4 s before a first word that already waits 2-4 s on
  * thinking. Tune live: /api/debug/gain?preroll=&refill=. */
 #define PB_PREROLL_MS_DEFAULT    JR_JITTER_PREROLL_FLOOR_MS /* 600: first word */
-#define PB_REFILL_MS_DEFAULT     1500u  /* lead rebuilt after a hole         */
+#define PB_REFILL_MS_DEFAULT     900u   /* lead rebuilt after a hole         */
 #define PB_PRIME_MAX_WAIT_MS     2000u  /* never hold longer than this       */
 static _Atomic uint32_t       s_pb_preroll_ms = PB_PREROLL_MS_DEFAULT;
 static _Atomic uint32_t       s_pb_refill_ms  = PB_REFILL_MS_DEFAULT;

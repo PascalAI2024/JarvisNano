@@ -53,7 +53,7 @@ static const char *TAG = "jr_display";
  * 5,120 B on live device), so 4,096 B reclaims 1,024 B of internal SRAM while
  * keeping >1.7 KB measured headroom. Re-measure via /api/diag/tasks after any
  * render change before trusting this number. */
-#define JR_DISPLAY_RENDER_STACK      4096
+#define JR_DISPLAY_RENDER_STACK      5120
 #define JR_DISPLAY_RENDER_PRIORITY   4
 #define JR_DISPLAY_RENDER_CORE       0
 /* 24, not 30: the measured CO5300 QSPI ceiling is ~23 fps full-frame — v4
@@ -964,8 +964,8 @@ static jr_face_t s_dial_frame_face = JR_FACE_COUNT;  /* the art it holds */
 static bool      s_dial_blit;
 
 #define DIAL_SLOTS          8
-#define DIAL_PSRAM_FLOOR    (2U * 1024U * 1024U)   /* free PSRAM a new frame must leave */
-#define DIAL_PSRAM_LOW      (1U * 1024U * 1024U)   /* below this the idle frames go */
+#define DIAL_PSRAM_FLOOR    (2800U * 1024U)        /* free PSRAM a new frame must leave */
+#define DIAL_PSRAM_LOW      (2400U * 1024U)        /* below this the idle frames go */
 #define DIAL_WARM_SETTLE_MS 1500U                  /* on the glass this long before a warm-up */
 
 typedef struct {
@@ -10702,6 +10702,12 @@ static esp_err_t apply_face(jr_display_ctx_t *ctx, jr_face_t face,
     jr_display_clip_t *clip = &ctx->clips[shown];
     while (clip->data == NULL) {
         esp_err_t load_err = clip_load(shown, clip);
+        if (load_err == ESP_ERR_NO_MEM) {
+            /* Idle decoded watch dials (~434 KB each) yield PSRAM immediately
+             * so live voice clips (IDLE/LISTEN/THINK/SPEAK) never OOM-loop. */
+            dial_cache_release();
+            load_err = clip_load(shown, clip);
+        }
         if (load_err == ESP_OK) {
             break;
         }
@@ -10736,18 +10742,27 @@ static esp_err_t apply_face(jr_display_ctx_t *ctx, jr_face_t face,
     if (err != ESP_OK) {
         return err;                     /* clip stays cached for the retry */
     }
+    bool left_dial_blit = false;
     err = gfx_anim_set_src(ctx->anim, clip->data, clip->size);
     if (err == ESP_OK) {
         const jr_display_clip_t *previous = ctx->bound;
         ctx->bound = clip;
         ctx->active = clip;
         clip_release_unbound_dial(ctx, previous);
+        left_dial_blit = s_dial_blit;
         s_dial_blit = false;            /* the anim is the face again */
 #ifdef ESP_PLATFORM
         s_dial_minimal = false;
 #endif
     }
     (void)gfx_emote_unlock(ctx->gfx);
+    if (left_dial_blit &&
+        heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < (3584U * 1024U)) {
+        /* Leaving WATCH for an animated voice face: release all cached watch
+         * dials (including the one just taken off the glass) so voice clips
+         * have contiguous PSRAM headroom without hitting memory-critical. */
+        dial_cache_release();
+    }
     if (err != ESP_OK) {
         /* A rejected replacement must not leave the last valid face stopped.
          * The engine still references the previously bound cache entry —
