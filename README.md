@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>A voice-first J.A.R.V.I.S. desk companion on a round 466×466 AMOLED ESP32-S3.</strong><br>
-  Native Gemini Live duplex voice, 24 built-in voice tools (18 instant 0 ms offline), 10 luxury watch dials (incl. live astronomical Orrery &amp; real-time FFT Reactor), 3D holographic voice core, embedded Wi-Fi Command Deck, physical privacy, and deep sleep.
+  Native Gemini Live duplex voice, 28 built-in voice tools (22 instant 0 ms offline), Glass 3.6 luminous OLED UI &amp; 10 watch dials (incl. live astronomical Orrery &amp; 32-bar FFT Reactor), AXP2101 80% Desk Battery-Care &amp; 80 MHz rest, Codex Mode 2.0 frosted OLED cards, embedded Wi-Fi Command Deck &amp; Diagnostics Lab, physical privacy, and deep sleep.
 </p>
 
 <p align="center">
@@ -12,12 +12,12 @@
   <img src="https://img.shields.io/badge/runtime-ESP--IDF_5.5.4-00a6ff?style=flat-square" alt="ESP-IDF 5.5.4">
   <img src="https://img.shields.io/badge/board-Waveshare_1.75C-00a6ff?style=flat-square" alt="Waveshare 1.75C">
   <img src="https://img.shields.io/badge/voice-Gemini_Live-00a6ff?style=flat-square" alt="Gemini Live">
-  <img src="https://img.shields.io/badge/host_tests-23_suites-00c896?style=flat-square" alt="23 Host Suites">
+  <img src="https://img.shields.io/badge/host_tests-25_suites-00c896?style=flat-square" alt="25 Host Suites">
 </p>
 
 <p align="center">
   <img src="images/hero.png" alt="JarvisNano enclosure concept artwork" width="820">
-  <br><em>Enclosure concept artwork. Live 466×466 device display captures appear immediately below.</em>
+  <br><em>Enclosure concept artwork. Software framebuffer captures from a running unit appear immediately below.</em>
 </p>
 
 ---
@@ -26,12 +26,12 @@
 
 <p align="center">
   <img src="docs/evidence/20261123-live/ring.png" alt="Luminous 5-screen OLED ring: JARVIS, WATCH, WEATHER, STATUS, ACTIVITY" width="900">
-  <br><em>The 5-screen spatial ring: <strong>JARVIS · WATCH · WEATHER · STATUS · ACTIVITY</strong> (plus summoned <strong>DESK</strong> while a companion is live).</em>
+  <br><em>The 5-screen spatial ring: <strong>JARVIS · WATCH · WEATHER · STATUS · ACTIVITY</strong> (plus summoned <strong>DESK</strong> while a companion or agent is live).</em>
 </p>
 
 <p align="center">
-  <img src="docs/evidence/20261123-live/watches.png" alt="All 10 luxury watch dials: JARVIS, DIVER, DRESS, PILOT, MINIMAL, FUTURE, SKELETON, CELESTIAL, ORRERY, REACTOR" width="900">
-  <br><em>All <strong>10 luxury watch dials</strong>: JARVIS · DIVER · DRESS · PILOT · MINIMAL · FUTURE · SKELETON · CELESTIAL · ORRERY · REACTOR — with IMU tilt lighting/parallax, real-time planetary ephemeris, live audio FFT, and PSRAM dial caching.</em>
+  <img src="docs/evidence/20261123-live/watches.png" alt="All 10 watch dials: JARVIS, DIVER, DRESS, PILOT, MINIMAL, FUTURE, SKELETON, CELESTIAL, ORRERY, REACTOR" width="900">
+  <br><em>All <strong>10 watch dials</strong>: JARVIS · DIVER · DRESS · PILOT · MINIMAL · FUTURE · SKELETON · CELESTIAL · ORRERY · REACTOR — with IMU tilt lighting/parallax, real-time planetary ephemeris, live audio FFT, and PSRAM dial caching.</em>
 </p>
 
 <table>
@@ -60,35 +60,37 @@
     </td>
     <td align="center" width="33%">
       <img src="docs/evidence/20261123-live/codex-canvas.png" alt="Paired Codex Mode and live 466x466 remote canvas" width="260"><br>
-      <sub><strong>Codex &amp; Remote Canvas</strong><br>466×466 RGB565 push &amp; rim-arc choices</sub>
+      <sub><strong>Codex &amp; Remote Canvas</strong><br>466×466 RGB565 push, Barlow cards &amp; 1-tap approvals</sub>
     </td>
   </tr>
 </table>
 
-> **Provenance:** Display captures above are software mirrors of the exact RGB565 frames submitted by the firmware compositor to the CO5300 AMOLED — not camera photographs of the physical glass. See [`docs/evidence/README.md`](docs/evidence/README.md).
+> **Provenance:** Every display capture in this repository is a software mirror of the exact RGB565 pixels submitted by the firmware compositor to the CO5300 AMOLED — fetched over the paired LAN client, not camera photographs of the physical glass. See [`docs/evidence/README.md`](docs/evidence/README.md).
 
 ---
 
 ## What It Does
 
-JarvisNano turns the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** into a standalone, always-ready desk companion. No phone or hub is required for voice, tools, or UI — and an optional paired ZeroChat phone or Wi-Fi desktop browser can extend it on demand.
+JarvisNano turns the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** into a standalone, always-ready desk companion. No phone or hub is required for voice, local tools, or UI — and an optional paired ZeroChat phone or Wi-Fi desktop browser can extend it on demand.
+
+**Status:** Active release candidate (`esp32s3_touch_amoled_1_75c` on ESP-IDF 5.5.4). Host test suites (`./scripts/host-tests.sh`, 25 suites) are the offline gate; hardware acceptance items such as signed OTA, TLS/authenticated transport, and attended NVS encryption remain open release gates tracked in [`PLAN.md`](PLAN.md) and [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md). Four enclosure concepts (`Monolith`, `Cube`, `Egg`, `Radio`) live in [`hardware/enclosure/`](hardware/enclosure/README.md); live captures run on the bare 1.75C board.
 
 | Pillar | Capabilities |
 |---|---|
-| **Voice-First Gemini Live** | Dedicated `jr_wake` WakeNet9 `"Jarvis"` task (cuts replies on wake word), 24 kHz shared full-duplex I²S clock, 16 kHz AEC-clean uplink, 24 kHz adaptive jitter-buffered speaker playback, DAC-synced speech cadence halo, and warm 2nd-harmonic chimes. |
-| **24 Built-in Voice Tools** | **18 instant 0 ms offline tools** + **6 JarvisMCP gateway tools** (full breakdown below) — zero network round-trips for timers, Pomodoro focus, 4-lap stopwatch, NVS desk notes, briefings, and device self-control. |
-| **Glass-2 Luminous OLED** | Single-compositor 466×466 engine: 5-screen spatial ring (`JARVIS · WATCH · WEATHER · STATUS · ACTIVITY` + summoned `DESK`), **10 luxury watch dials** (incl. real-time 6-planet `ORRERY` + 32-bar FFT `REACTOR`), real-time **3D Geodesic Holo Core**, IMU tilt lighting/parallax, 60 Hz TE sync (`GPIO13`), and CO5300 HBM sunlight boost (`0x66`). |
-| **Wi-Fi Command Deck & Codex** | Zero-dependency embedded dashboard at `http://<device-ip>/`: live 466×466 AMOLED mirror, 10-watch switcher, 3D Holo toggle, live 16-band spectrum meter, Pomodoro/Stopwatch studio, NVS Notes, drag-and-drop OLED Canvas pusher, rim-arc decision cards, live logs, board probe, and crash forensics — plus paired **ZeroChat** private-Wi-Fi phone mode. |
-| **Adaptive Power & Physical Privacy** | Adaptive CPU gears (`240 / 160 MHz`), 21 Hz low-power rest IMU, Wi-Fi minimum modem sleep, deep sleep with RTC-persisted timers & ACTIVITY, QMI8658 WoM lift-wake + CST9217 touch-wake, and **inviolate physical privacy** (inner-disc hold or face-down flip; remote APIs can never unmute). |
+| **Voice-First Gemini Live** | Dedicated `jr_wake` WakeNet9 `"Jarvis"` task (cuts replies on wake word), 24 kHz shared full-duplex I²S clock, 16 kHz AEC-clean uplink, 24 kHz adaptive jitter-buffered speaker playback, DAC-synced speech cadence halo, and 24 kHz multi-harmonic chimes. |
+| **28 Built-in Voice Tools** | **22 instant 0 ms offline tools** + **6 JarvisMCP gateway tools** (full breakdown below) — zero network round-trips for timers, ON AIR / Focus / Breathe desk modes, 4-lap stopwatch, tagged NVS desk inbox, battery care, briefings, and device self-control. |
+| **Glass 3.6 Luminous OLED** | Single-compositor 466×466 engine: Procedural Ignition cold-boot splash, 5-screen spatial ring (`JARVIS · WATCH · WEATHER · STATUS · ACTIVITY` + addressable `DESK`), **10 watch dials** (incl. 6-planet `ORRERY` + 32-bar FFT `REACTOR`), Chrono-Arc / Aetherium / Atmosphaera / Cortex Command, rotary perimeter bezel scrub, shared evictable PSRAM static plate, 60 Hz TE sync (`GPIO13`), and CO5300 HBM (`0x66`). |
+| **Codex Mode 2.0 & Command Deck** | Frosted Barlow OLED approval/consent/progress/result cards (semantic crimson `DENY` / emerald `ALLOW`), live 3-step Cortex DESK checklist, `jarvisctl ask --wait` & `jarvisctl run <cmd>` CI bridge, zero-dependency embedded Command Deck & Diagnostics Lab 2.0 at `http://<device-ip>/` (live CPU%/stack bars, 5-layer render timing, AXP2101 inspector, cursor log tail, 1-click JSON Diag Bundle), plus paired **ZeroChat** phone mode. |
+| **AXP2101 Power Care & Privacy** | NVS-persisted **80% Desk Battery-Care** (`4.0 V` CV + 75/80% USB hold hysteresis), dual-sensor chip/PMIC thermal charge throttling, continuous VBAT/VBUS/VSYS/TDIE ADC & rolling ETA analytics, `240 / 160 / 80 MHz` CPU gears, 3-tier Wi-Fi PS (`NONE`/`MIN`/`MAX`), 0-fps still-frame rest, deep sleep with RTC-persisted timers/activity, and **inviolate physical privacy** (inner-disc hold or face-down flip; remote APIs can never unmute). |
 
-### 24 Built-in Voice Tools (18 Offline · 6 Gateway)
+### 28 Built-in Voice Tools (22 Offline · 6 Gateway)
 
 | Domain | Scope | Tools |
 |---|---|---|
-| **Timers & Focus** | 0 ms offline | `set_timer` (5 s–12 h, deep-sleep surviving), `cancel_timer`, `list_timers`, `start_focus` (Pomodoro, defaults 25 min), `stopwatch` (start/stop/4-lap/reset/status) |
-| **Desk Notes & Briefings** | 0 ms offline | `add_note` (up to 6 NVS-persisted notes), `list_notes`, `clear_notes`, `daily_briefing` (date, weather, 12 h rain, notes, timers, tasks, battery) |
-| **Time, Weather & Choices** | 0 ms offline | `current_time`, `weather_here` (on-device cached forecast), `ask_user` (interactive rim-arc choice card on glass) |
-| **Device Self-Control** | 0 ms offline | `set_glass` (ring screen & 10 watch styles), `set_volume`, `set_brightness`, `set_sunlight` (CO5300 HBM with thermal/battery guard), `set_ui_sounds`, `device_status` |
+| **Timers, Focus & Desk Modes** | 0 ms offline | `set_timer` (5 s–12 h, silent option, deep-sleep surviving), `cancel_timer`, `list_timers`, `start_focus` (Pomodoro, defaults 25 min), `set_desk_mode` (`on_air`, `focus`, `breathe`, `normal`), `start_breathe`, `stopwatch` (start/stop/4-lap/reset/status) |
+| **Desk Inbox & Briefings** | 0 ms offline | `add_note` (WORK/LIFE tagged, NVS-persisted), `list_notes`, `complete_note`, `clear_notes`, `daily_briefing` (date, weather, 12 h rain, notes, timers, tasks, battery) |
+| **Time, Weather & Choices** | 0 ms offline | `current_time`, `weather_here` (on-device cached forecast), `ask_user` (interactive choice card on glass) |
+| **Device & Power Control** | 0 ms offline | `set_glass` (ring screen & 10 watch styles), `set_volume`, `set_brightness`, `set_sunlight` (CO5300 HBM with chip/PMIC thermal & battery guard), `set_ui_sounds`, `set_battery_care` (80% Desk Care vs 100% Travel), `device_status` |
 | **JarvisMCP Gateway** | HTTPS keep-alive (32 KB PSRAM + JSON projector) | `search_tools`, `execute_tool` (web search, news, weather, crypto, stocks, Wikipedia, calendar — fail-closed allowlist), `recall_memory`, `remember`, `delegate_task`, `delegated_tasks` |
 
 ---
@@ -103,17 +105,17 @@ flowchart LR
 
     subgraph Device["ESP32-S3-Touch-AMOLED-1.75C (ESP-IDF 5.5.4)"]
         Sensors["HAL · ES7210/ES8311 · QMI8658C · CST9217 · AXP2101"]
-        Core["jr_core (Session · Timers · Notes · Rest Ladder)"]
+        Core["jr_core (Session · Timers · Notes · Desk Modes · Rest Ladder)"]
         Wake["jr_wake (WakeNet9 'Jarvis' Task)"]
         Transport["jr_transport (Gemini Live WSS)"]
-        Tools["jr_tools (18 Offline + Keep-Alive MCP)"]
-        Glass["jr_display (Glass-2 · 10 Dials · 3D Holo · 60 Hz TE · HBM)"]
-        HTTP["HTTP Control Plane + Embedded Command Deck"]
+        Tools["jr_tools (22 Offline + Keep-Alive MCP)"]
+        Glass["jr_display (Glass 3.6 · 10 Dials · Cortex · Codex Cards · 60 Hz TE)"]
+        HTTP["HTTP Control Plane + Embedded Command Deck & Diag Lab"]
     end
 
     Gemini["Google Gemini Live"]
     MCP["JarvisMCP Gateway"]
-    Deck["Browser Command Deck / Codex CLI"]
+    Deck["Browser Command Deck / jarvisctl CLI"]
     ZeroChat["Paired ZeroChat Phone (Private Wi-Fi)"]
 
     Human --> Sensors --> Core
@@ -122,7 +124,7 @@ flowchart LR
     Core <--> Tools <--> MCP
     Core --> Glass --> Human
     Sensors --> Glass
-    Deck <-->|"Command Deck · Canvas · OTA"| HTTP
+    Deck <-->|"Command Deck · Codex · Canvas · OTA"| HTTP
     ZeroChat <-->|"Leased 16 kHz Mic / 24 kHz Speaker PCM"| HTTP
     HTTP --> Core
     HTTP --> Glass
@@ -144,15 +146,15 @@ sequenceDiagram
     A->>A: 24->16 kHz AEC + WakeNet9 detect
     A->>G: 16 kHz PCM realtimeInput
     G-->>C: Server VAD + function call
-    alt Local tool (18 built-in)
-        C->>L: Execute on-device (timer/note/glass/status)
+    alt Local tool (22 built-in)
+        C->>L: Execute on-device (timer/desk/note/care/glass/status)
         L-->>C: Instant JSON result (0 ms)
     else Gateway tool (6 MCP)
         C->>M: Persistent HTTPS keep-alive + allowlist
         M-->>C: Bounded <=3 KB projected result
     end
     C->>G: functionResponse
-    G-->>D: 24 kHz PCM -> Adaptive Jitter Buffer (600-1500 ms)
+    G-->>D: 24 kHz PCM -> Adaptive Jitter Buffer (600-900 ms)
     D->>U: ES8311 audio + DAC-synced speech cadence halo
 ```
 
@@ -160,10 +162,10 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    Awake["AWAKE<br/>240 MHz · 24 fps · 125 Hz IMU<br/>Full Wi-Fi · Live Voice"]
-    Ambient["AMBIENT<br/>20 s still · Dimmed<br/>Still Listening"]
-    Whisper["WHISPER<br/>5 min still · 160 MHz<br/>Quiet Clock · 21 Hz IMU · Min-Modem"]
-    Dream["DREAM<br/>15 min still or Face-Down<br/>Low Cadence · Radio Saving"]
+    Awake["AWAKE<br/>240 MHz · 24 fps · 125 Hz IMU<br/>Live Voice / HTTP Burst"]
+    Ambient["AMBIENT<br/>20 s still · 160 MHz · Dimmed<br/>Wi-Fi Min-Modem"]
+    Whisper["WHISPER<br/>5 min still · 80 MHz Muted Rest<br/>0-fps Still Clock / 2 fps · 21 Hz IMU"]
+    Dream["DREAM / NIGHTSTAND<br/>15 min still or Face-Down<br/>80 MHz · Wi-Fi Max-Modem · Quiet Clock"]
     Sleep["DEEP SLEEP<br/>+10 min on Battery · Panel Off<br/>RTC Timers & Activity Persisted"]
     Wake["WAKE SOURCES<br/>QMI8658 WoM Lift (GPIO21)<br/>CST9217 Touch (GPIO11)<br/>RTC Timer / Alarm Expiry"]
 
@@ -176,7 +178,7 @@ flowchart LR
     Wake -->|"Restores RTC state"| Awake
 ```
 
-> Below 20% battery off USB, the rest ladder runs **4× faster**. Deep sleep is refused during OTA probation, active companion leases, or USB power.
+> Below 20% battery off USB, the rest ladder runs **4× faster** and brightness caps to `45%` (`14%` whisper). On USB with **Desk Battery-Care** enabled, AXP2101 caps CV to `4.0 V` and holds at `80%` on VBUS Power-Path. Deep sleep is refused during OTA probation, active companion leases, or USB power.
 
 ---
 
@@ -186,24 +188,24 @@ The **Waveshare ESP32-S3-Touch-AMOLED-1.75C** (32 MB DIO flash, 8 MB octal PSRAM
 
 | Subsystem | 1.75C Silicon | Firmware Role |
 |---|---|---|
-| **MCU & Memory** | ESP32-S3R8 · 8 MB octal PSRAM · 32 MB DIO flash | PSRAM-first heap (`ALWAYSINTERNAL=1024`, `cJSON` in PSRAM), dual 4 MB OTA slots, WakeNet9 model, baked emotes/dials |
+| **MCU & Memory** | ESP32-S3R8 · 8 MB octal PSRAM · 32 MB DIO flash | PSRAM-first heap (`ALWAYSINTERNAL=1024`, `cJSON` in PSRAM), dual 4 MB OTA slots, WakeNet9 model, shared evictable PSRAM render plate |
 | **Display** | CO5300 466×466 QSPI AMOLED (`40 MHz`) | Single strip compositor, 60 Hz `LCD_TE` (`GPIO13`) V-blank sync, `0x66` HBM sunlight boost, `DISPOFF/SLPIN` sleep |
-| **Touch & IMU** | CST9217 (`GPIO11` INT) · QMI8658C (`GPIO21` INT1) | Single-point software gestures + touch wake; 125 Hz / 21 Hz accel, tilt lighting/parallax, flip/shake, WoM lift-wake |
-| **Audio & Power** | ES7210 + ES8311 + NS4150B · AXP2101 PMIC | Shared 24 kHz clock, 16 kHz AEC uplink, 24 kHz DAC output; 1 Hz battery/USB telemetry, soft power-off |
+| **Touch & IMU** | CST9217 (`GPIO11` INT) · QMI8658C (`GPIO21` INT1) | Single-point gestures + rotary perimeter scrub + touch wake; 125 Hz / 21 Hz accel, tilt lighting/parallax, flip/shake, WoM lift-wake |
+| **Audio & Power** | ES7210 + ES8311 + NS4150B · AXP2101 PMIC | Shared 24 kHz clock, 16 kHz AEC uplink, 24 kHz DAC output; 80% Desk Care (`0x64`/`0x18`), thermal foldback (`0x65`/`0x62`), continuous VBAT/VBUS/VSYS/TDIE ADC, soft power-off |
 
 ### One Interaction Grammar
 
 | Input | Action |
 |---|---|
 | **"Jarvis" / PWR short** | Wake & listen (or dismiss a ringing timer); never mutes |
-| **PWR hold** | Power off completely via PMIC (hold PWR 1 s to power back on) |
+| **PWR hold** | Smooth fade-out and power off completely via PMIC (hold PWR 1 s to power back on) |
 | **BOOT short** | Toggle control shade (`L VOL`, `R LGT`, `MUTE/LISTEN`) |
 | **BOOT hold 1.5–5 s** | Display 6-digit pairing code and open 60 s pairing window |
 | **BOOT hold ≥ 5 s** | Panic-home (dismiss all modals/overlays back to Home) |
-| **Left / Right rim slide** (`r ≥ 168`) | Volume ±5 (left) or Brightness ±5 (right) with live rim arc, from any screen |
+| **Perimeter bezel scrub / Rim slide** (`r ≥ 168`) | Rotary arc scrub for Volume (left) or Brightness (right) with live rim arc & tactile ticks |
 | **Centre vertical swipe** (`r < 168`) | Walk the ring: `JARVIS ↔ WATCH ↔ WEATHER ↔ STATUS ↔ (DESK) ↔ ACTIVITY`; up/down opens or closes detail sheets |
-| **Horizontal swipe** | 10 s WATCH peek; on `WATCH`, step through all **8 watch styles** (`JARVIS · DIVER · DRESS · PILOT · MINIMAL · FUTURE · SKELETON · CELESTIAL`) |
-| **Tap** | Dismiss ringing timer, answer rim-arc choice, or speak open sheet aloud |
+| **Horizontal swipe** | 10 s WATCH peek; on `WATCH`, step through all **10 watch styles** (`JARVIS · DIVER · DRESS · PILOT · MINIMAL · FUTURE · SKELETON · CELESTIAL · ORRERY · REACTOR`) |
+| **Tap** | Dismiss ringing timer, answer Codex/consent card, check off Desk Inbox note, or speak open sheet aloud |
 | **Double-tap** | Home (and immediate physical exit from any Codex/ZeroChat lease) |
 | **Inner-disc hold** (`r < 168`, 850 ms) | Physical privacy mute/unmute (commit ring fills; rim holds ignored) |
 | **Face-down / Shake / Lift** | Face-down ~600 ms = flip privacy; shake = dismiss timer or cancel turn; lift after rest = weather glance / WoM wake |
@@ -220,18 +222,18 @@ Full precedence rules and gesture provenance: [`docs/INPUT_MAP.md`](docs/INPUT_M
 git clone https://github.com/PascalAI2024/JarvisNano.git
 cd JarvisNano
 
-# 1. Build (pinned espressif/idf:v5.5.4 in Docker) & verify flash manifest
+# 1. Build (pinned espressif/idf:v5.5.4 in Docker; use FAST=1 for incremental rebuilds)
 ./scripts/build-v5.sh
 ./scripts/smoke-build.sh
 
 # 2. Initial USB flash (1.75C DIO 32 MB, verified, preserves NVS)
 ./scripts/flash-v5.sh
 
-# 3. Run all 23 host test suites (auto-uses Docker gcc container if no local cc)
+# 3. Run all 25 host test suites (auto-uses Docker gcc container if no local cc)
 ./scripts/host-tests.sh
 ```
 
-Once connected to Wi-Fi, open the embedded **Command Deck** in any browser on your LAN at **`http://<device-ip>/`**, pair once via a 1.5–5 s **BOOT** hold, and update over Wi-Fi (USB-JTAG cannot be re-flashed while the app owns the port):
+Once connected to Wi-Fi, open the embedded **Command Deck** in any browser on your LAN at **`http://<device-ip>/`**, pair once via a 1.5–5 s **BOOT** hold, and ship updates over Wi-Fi (USB-JTAG cannot be re-flashed while the app owns the port):
 
 ```bash
 export JARVIS_DEVICE_HOST='<device-ip>'
@@ -239,17 +241,22 @@ export JARVIS_DEVICE_HOST='<device-ip>'
 # First-time pairing (stores token in macOS Keychain or Windows HKCU\Software\JarvisNano\Desk)
 python3 scripts/jarvis-desk.py --host "$JARVIS_DEVICE_HOST" pair
 
-# Wi-Fi OTA (~30 s upload, dual-slot rollback probation)
-python3 scripts/jarvisctl.py ota build/jarvisrobot_v5.bin
+# 1-command safe release: secrets + JS + 25 host suites -> build + ELF archive -> OTA -> Flight Report
+python3 scripts/jarvisctl.py ship --fast
 
-# Daily operator & canvas commands
-python3 scripts/jarvisctl.py status                         # health, voice, battery, timers
-python3 scripts/jarvisctl.py voiceperf                      # voice loop & WakeNet timing
-python3 scripts/jarvisctl.py crash                          # reset reason + ELF core dump summary
-python3 scripts/board-probe.py                              # live GPIO13 TE, GPIO3, IMU & PMIC probe
-python3 scripts/screens.py --out ring.png                   # capture submitted display pixels
-python3 scripts/send-canvas.py photo.png --ttl 60           # push any image to 466x466 OLED
-python3 scripts/send-canvas.py --banner "DEEP FOCUS" --accent cyan
+# Power, profiling & live dev workbench
+python3 scripts/jarvisctl.py power [--care on|off] [--watch]  # AXP2101, ETA, thermal, CPU/Wi-Fi PS
+python3 scripts/jarvisctl.py bench [--dials] [--split]        # per-screen FPS, ms/f & 5-layer breakdown
+python3 scripts/jarvisctl.py tasks --cpu                      # live per-task CPU % & stack headroom
+python3 scripts/jarvisctl.py tail [--grep PAT]                # zero-duplicate ?since= cursor log stream
+python3 scripts/jarvisctl.py crash decode                     # auto-matched archived ELF addr2line
+python3 scripts/jarvisctl.py board                            # GPIO13 TE, PWR key, IMU & PMIC probe
+
+# Codex Mode 2.0 agent & CI bridge
+python3 scripts/jarvisctl.py ask "Deploy v3.6?" --consent --wait
+python3 scripts/jarvisctl.py run --title "TEST SUITE" -- pytest -q
+python3 scripts/screens.py --modes --out ring.png             # capture submitted display pixels
+python3 scripts/send-canvas.py photo.png --ttl 60             # push any image to 466x466 OLED
 ```
 
 > **Windows Git Bash:** `host-tests.sh` and `build-v5.sh` handle Docker path conversion automatically; when running `docker` manually under Git Bash, prefix with `MSYS_NO_PATHCONV=1`. Full instructions: [`docs/BUILD.md`](docs/BUILD.md).
@@ -268,14 +275,14 @@ python3 scripts/send-canvas.py --banner "DEEP FOCUS" --accent cyan
 
 | Path | Purpose |
 |---|---|
-| `main/` | Composition root: `main.c`, `http_routes.c`, `power.c`, `device_tools.c`, embedded `diagnostics.html` Command Deck |
-| `components/jr_core` | Pure-C session, turn policy, monitors, rest ladder, timers, notes, tool policy (host-tested) |
-| `components/jr_display` | Glass-2 compositor, 5-screen ring, 8 watch dials, TE sync, HBM, HUD & host render suites |
-| `components/jr_audio` · `jr_transport` | ES7210/ES8311 duplex audio, AEC, jitter buffer, `jr_wake`, Gemini Live WebSocket |
-| `components/jr_tools` | Offline-first tool router, JarvisMCP persistent keep-alive bridge, allowlist & JS projector |
-| `components/jr_imu` · `jr_power` · `jr_net` · `jr_probe` | QMI8658C motion/WoM, AXP2101 telemetry, Wi-Fi modem sleep, live board probe |
+| `main/` | Composition root: `main.c`, `http_routes.c`, `power.c`, `device_tools.c`, embedded `diagnostics.html` Command Deck & Diag Lab |
+| `components/jr_core` | Pure-C session, turn policy, monitors, rest ladder, timers, notes, desk modes, tool policy (host-tested) |
+| `components/jr_display` | Glass 3.6 compositor, 5-screen ring + DESK, 10 watch dials, Codex cards, TE sync, HBM, HUD & host render suites |
+| `components/jr_audio` · `jr_transport` | ES7210/ES8311 duplex audio, AEC, jitter buffer, `jr_wake`, 24 kHz harmonic cues, Gemini Live WebSocket |
+| `components/jr_tools` | Offline-first tool router, JarvisMCP persistent keep-alive bridge, allowlist & JSON projector |
+| `components/jr_imu` · `jr_power` · `jr_net` · `jr_probe` | QMI8658C motion/WoM, AXP2101 Desk Care + analytics, 3-tier Wi-Fi PS, live board probe |
 | `boards/waveshare/esp32s3_touch_amoled_1_75c` | Active 1.75C pin and peripheral definition |
-| `scripts/` | Build, flash, OTA, `host-tests.sh` (23 suites), `jarvisctl.py`, `send-canvas.py`, `board-probe.py`, `check-secrets.sh` |
+| `scripts/` | Build (`FAST=1` + ELF archive), flash, `host-tests.sh` (25 suites), `jarvisctl.py`, `screens.py`, `send-canvas.py`, `gesture-doctor.py`, `check-secrets.sh` |
 | `docs/` | Canonical architecture, hardware, input map, protocol, build, roadmap, references & evidence |
 
 Start with [`DOCUMENTATION_MAP.md`](DOCUMENTATION_MAP.md).
