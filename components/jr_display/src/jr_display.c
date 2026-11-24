@@ -20,6 +20,14 @@
 #include "showpiece_gfx.h"
 #include "glass3_ring.h"
 #include "glass3_screens.h"
+#if !defined(ESP_PLATFORM) && !defined(JR_DISPLAY_LINK_AQUARIUM_GFX)
+#define JR_AQ_API static
+#include "aquarium_gfx.h"
+#include "aquarium_gfx.c"
+#undef JR_AQ_API
+#else
+#include "aquarium_gfx.h"
+#endif
 
 #include <stdio.h>
 #include <stddef.h>
@@ -229,6 +237,7 @@ static portMUX_TYPE s_snapshot_init_mux = portMUX_INITIALIZER_UNLOCKED;
 static portMUX_TYPE s_surface_mux = portMUX_INITIALIZER_UNLOCKED;
 static jr_display_surface_t s_surface;
 static bool s_surface_active;
+static _Atomic uint8_t s_surface_hold_pct;
 
 static inline void diag_inc(volatile uint32_t *value)
 {
@@ -781,12 +790,45 @@ static uint32_t s_frame_no;               /* defined with overlay_fade_tick belo
 #define DIP_GAMMA        2        /* the light of a pixel at half value is a quarter: dip^2 */
 #define DIP_HOLD_CAP_MS  300      /* the longest the dark waits for the new screen (SP_STYLE_HOLD_MS's idea) */
 #define DIP_WRITE_MS     16       /* the panel refreshes at 60 Hz: one brightness write per refresh at most */
+/* Glass 3.7 SHUTTER timing: crisp ~260 ms optical eclipse (99 ms out, 1 cached
+ * frame dark swap, 161 ms bloom in). Classic JR_KNOB_PANEL_DIP retains 400 ms. */
+#define G3_SHUTTER_SPACE_MS 260u
+#define G3_SHUTTER_STYLE_MS 260u
+#define G3_SHUTTER_CUT      98
 
 typedef enum { DIP_IDLE, DIP_OUT, DIP_HOLD, DIP_IN } dip_phase_t;
 typedef enum { DIP_MODE_NONE, DIP_MODE_SPACE, DIP_MODE_STYLE } dip_mode_t;
 
-static bool        s_dip_on;               /* the knob bit, latched once a frame by knob_apply */
+static bool        s_dip_on;               /* the knob bit or SHUTTER, latched once a frame by knob_apply */
+static bool        s_dip_fallback;         /* true while IRIS/GLIDE fell back to SHUTTER due to low PSRAM */
 static dip_phase_t s_dip_phase = DIP_IDLE;
+
+/* Glass 3.7: Dual-frame PSRAM Cinema transitions (IRIS / GLIDE).
+ * Allocated lazily ONLY when IRIS or GLIDE runs and free PSRAM leaves at least
+ * DIAL_PSRAM_FLOOR + 1000 KB; automatically falls back to SHUTTER on low PSRAM. */
+#define CINE_FRAME_BYTES  ((size_t)HUD_W * (size_t)HUD_H * sizeof(uint16_t))
+#define CINE_PSRAM_HEAD   (1000U * 1024U)
+#define CINE_DUR_MS       260u
+
+typedef enum {
+    CINE_IDLE = 0,
+    CINE_CAPTURE_FROM,
+    CINE_CAPTURE_TO,
+    CINE_ANIMATE,
+} cine_phase_t;
+
+static uint16_t               *s_cine_from;
+static uint16_t               *s_cine_to;
+static bool                    s_cine_active;
+static cine_phase_t            s_cine_phase = CINE_IDLE;
+static jr_display_transition_t s_cine_mode  = JR_TRANSITION_IRIS;
+static int8_t                  s_cine_dir   = 1;
+static int                     s_cine_prog  = 256;
+static int                     s_cine_ease  = 256;
+static uint32_t                s_cine_t0_ms;
+static uint32_t                s_cine_el_ms;
+static uint32_t                s_cine_wait_t0;
+static bool                    s_cine_to_ready;
 static dip_mode_t  s_dip_mode;             /* which transition the compositor draws the dip way */
 static volatile int s_dip = 256;
 static int         s_dip_cut, s_dip_l0;
@@ -1068,43 +1110,132 @@ static void apply_dial(const jr_display_ctx_t *ctx, int x1, int y1,
     }
 }
 
-/* Glass 3.5: Shared evictable 434 KB PSRAM static backdrop plate for
- * ATMOSPHAERA & CORTEX COMMAND. Lazily allocated while PSRAM stays above
- * DIAL_PSRAM_FLOOR and freed in dial_cache_release() whenever the glass is
- * outside WEATHER/STATUS/DESK so PSRAM never starves. */
-#define G3_PLATE_BYTES ((size_t)HUD_W * (size_t)HUD_H * sizeof(uint16_t))
-static uint16_t *s_g3_plate;
-static uint32_t  s_g3_plate_key;
-static uint8_t   s_g3_plate_kind;  /* 0=none, 1=atmosphaera, 2=cortex */
-static bool      s_g3_plate_swap;
+/* Glass 3.7: 3-Slot Evictable PSRAM Static Plate Cache for ATMOSPHAERA
+ * (slot 0), Cortex STATUS (slot 1), and Cortex DESK (slot 2). Each 434 KB slot
+ * is lazily allocated only while free PSRAM stays above DIAL_PSRAM_FLOOR + 450 KB
+ * and evicted cleanly in dial_cache_release() on low PSRAM or rest, so swiping
+ * Weather <-> Status <-> Desk never rebakes static art. */
+#define G3_PLATE_BYTES       ((size_t)HUD_W * (size_t)HUD_H * sizeof(uint16_t))
+#define G3_PLATE_PSRAM_HEAD  (450U * 1024U)
+#define G3_PLATE_SLOT_WX     0u   /* Atmosphaera Weather (kind=1) */
+#define G3_PLATE_SLOT_STATUS 1u   /* Cortex STATUS (kind=2)       */
+#define G3_PLATE_SLOT_DESK   2u   /* Cortex DESK (kind=3)         */
+#define G3_PLATE_SLOTS       3u
 
-static uint16_t *g3_plate_acquire(void)
+typedef struct {
+    uint16_t *px;
+    uint32_t  key;
+    uint8_t   kind;  /* 0=none, 1=atmosphaera, 2=cortex-status, 3=cortex-desk */
+    bool      swap;
+} g3_plate_slot_t;
+
+static g3_plate_slot_t s_g3_plates[G3_PLATE_SLOTS];
+
+static uint16_t *g3_plate_acquire(uint8_t slot)
 {
-    if (s_g3_plate != NULL) {
-        return s_g3_plate;
-    }
-    if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < G3_PLATE_BYTES + DIAL_PSRAM_FLOOR) {
+    if (slot >= G3_PLATE_SLOTS) {
         return NULL;
     }
-    s_g3_plate = heap_caps_malloc(G3_PLATE_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    s_g3_plate_key = 0u;
-    s_g3_plate_kind = 0u;
-    return s_g3_plate;
+    g3_plate_slot_t *s = &s_g3_plates[slot];
+    if (s->px != NULL) {
+        return s->px;
+    }
+    const size_t need = (G3_PLATE_BYTES > G3_PLATE_PSRAM_HEAD
+                         ? G3_PLATE_BYTES : G3_PLATE_PSRAM_HEAD) + DIAL_PSRAM_FLOOR;
+    if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < need) {
+        return NULL;
+    }
+    s->px = heap_caps_malloc(G3_PLATE_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s->key = 0u;
+    s->kind = 0u;
+    s->swap = false;
+    return s->px;
 }
 
-static void g3_plate_blit_strip(uint16_t *pixels, int y1, int y2)
+static void g3_plate_blit_strip(uint8_t slot, uint16_t *pixels, int y1, int y2)
 {
-    if (s_g3_plate == NULL || pixels == NULL || y1 < 0 || y2 > HUD_H) {
+    if (slot >= G3_PLATE_SLOTS || s_g3_plates[slot].px == NULL ||
+        pixels == NULL || y1 < 0 || y2 > HUD_H) {
         return;
     }
+    const uint16_t *src = s_g3_plates[slot].px;
     for (int row = y1; row < y2; ++row) {
         const int d = row < DIAL_SPAN_N ? DIAL_SPAN_N - 1 - row : row - DIAL_SPAN_N;
         const int a = DIAL_SPAN_N - 1 - s_dial_span[d];
         const int b = DIAL_SPAN_N + s_dial_span[d] + 1;
         memcpy(pixels + (size_t)(row - y1) * HUD_W + (size_t)a,
-               s_g3_plate + (size_t)row * HUD_W + (size_t)a,
+               src + (size_t)row * HUD_W + (size_t)a,
                (size_t)(b - a) * sizeof(uint16_t));
     }
+}
+
+static void cine_free_buffers(void)
+{
+    if (s_cine_from != NULL) {
+        heap_caps_free(s_cine_from);
+        s_cine_from = NULL;
+    }
+    if (s_cine_to != NULL) {
+        heap_caps_free(s_cine_to);
+        s_cine_to = NULL;
+    }
+}
+
+static void cine_abort(void)
+{
+    s_cine_active = false;
+    s_cine_phase = CINE_IDLE;
+    s_cine_prog = 256;
+    s_cine_ease = 256;
+    s_cine_to_ready = false;
+}
+
+static bool cine_ensure_buffers(void)
+{
+    if (s_cine_from != NULL && s_cine_to != NULL) {
+        return true;
+    }
+    const size_t need_bufs = (s_cine_from == NULL ? CINE_FRAME_BYTES : 0u) +
+                             (s_cine_to == NULL ? CINE_FRAME_BYTES : 0u);
+    const size_t min_head = CINE_PSRAM_HEAD > need_bufs ? CINE_PSRAM_HEAD : need_bufs;
+    if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < DIAL_PSRAM_FLOOR + min_head) {
+        return false;
+    }
+    if (s_cine_from == NULL) {
+        s_cine_from = heap_caps_malloc(CINE_FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (s_cine_to == NULL) {
+        s_cine_to = heap_caps_malloc(CINE_FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (s_cine_from == NULL || s_cine_to == NULL) {
+        cine_free_buffers();
+        return false;
+    }
+    return true;
+}
+
+/* Best-effort non-blocking grab of a fresh settled frame from the snapshot
+ * mirror if an HTTP mirror consumer was already recording within 250 ms. */
+static bool snapshot_try_copy_to(uint16_t *dst, uint32_t now_ms)
+{
+    jr_display_ctx_t *ctx = &s_display;
+    if (dst == NULL ||
+        __atomic_load_n(&ctx->snapshot_initialized, __ATOMIC_ACQUIRE) == 0U ||
+        ctx->snapshot_lock == NULL) {
+        return false;
+    }
+    if (xSemaphoreTake(ctx->snapshot_lock, 0) != pdTRUE) {
+        return false;
+    }
+    bool ok = false;
+    if (ctx->snapshot_valid && ctx->snapshot_rgb565 != NULL &&
+        ctx->snapshot_bytes == CINE_FRAME_BYTES &&
+        (uint32_t)(now_ms - (uint32_t)ctx->snapshot_last_flush_ms) < 250u) {
+        memcpy(dst, ctx->snapshot_rgb565, CINE_FRAME_BYTES);
+        ok = true;
+    }
+    xSemaphoreGive(ctx->snapshot_lock);
+    return ok;
 }
 
 static void apply_canvas(jr_display_ctx_t *ctx, int x1, int y1,
@@ -1295,6 +1426,24 @@ static bool surface_prefix_ci(const char *s, const char *pfx)
         }
     }
     return true;
+}
+
+static bool surface_eq_ci(const char *s, const char *ref)
+{
+    if (s == NULL || ref == NULL) {
+        return false;
+    }
+    while (*ref != '\0') {
+        char a = *s++;
+        const char b = *ref++;
+        if (a >= 'a' && a <= 'z') {
+            a = (char)(a - 'a' + 'A');
+        }
+        if (a != b) {
+            return false;
+        }
+    }
+    return *s == '\0';
 }
 
 static uint16_t surface_lerp565(uint16_t c0, uint16_t c1, int t)
@@ -1627,6 +1776,13 @@ static void apply_surface_overlay(jr_display_ctx_t *ctx, int x1, int y1,
     if (count > JR_DISPLAY_SURFACE_ACTION_CAP) {
         count = JR_DISPLAY_SURFACE_ACTION_CAP;
     }
+    const bool consent_pair = (surface.kind == JR_DISPLAY_SURFACE_CONSENT && count == 2u);
+    uint8_t hold_pct = consent_pair
+                       ? atomic_load_explicit(&s_surface_hold_pct, memory_order_acquire)
+                       : 0u;
+    if (hold_pct > 100u) {
+        hold_pct = 100u;
+    }
     const int btn_left = 70, btn_right = 396, btn_gap = 8;
     const int btn_w = count > 0U
         ? (btn_right - btn_left - btn_gap * ((int)count - 1)) / (int)count
@@ -1635,6 +1791,7 @@ static void apply_surface_overlay(jr_display_ctx_t *ctx, int x1, int y1,
     int bx1[JR_DISPLAY_SURFACE_ACTION_CAP] = {0};
     int btx[JR_DISPLAY_SURFACE_ACTION_CAP] = {0};
     int btr[JR_DISPLAY_SURFACE_ACTION_CAP] = {0};
+    const char *blabel[JR_DISPLAY_SURFACE_ACTION_CAP] = {NULL};
     size_t blen[JR_DISPLAY_SURFACE_ACTION_CAP] = {0};
     uint16_t bfill[JR_DISPLAY_SURFACE_ACTION_CAP] = {0};
     uint16_t bborder[JR_DISPLAY_SURFACE_ACTION_CAP] = {0};
@@ -1644,16 +1801,26 @@ static void apply_surface_overlay(jr_display_ctx_t *ctx, int x1, int y1,
     for (uint8_t i = 0u; i < count; ++i) {
         bx0[i] = btn_left + (int)i * (btn_w + btn_gap);
         bx1[i] = bx0[i] + btn_w;
+        blabel[i] = surface.action_labels[i];
         blen[i] = strnlen(surface.action_labels[i], JR_DISPLAY_SURFACE_LABEL_CAP - 1U);
+        if (consent_pair && i == 1u) {
+            if (hold_pct > 0u) {
+                blabel[i] = "HOLDING...";
+                blen[i] = 10u;
+            } else if (surface_eq_ci(surface.action_labels[i], "ALLOW")) {
+                blabel[i] = "HOLD ALLOW";
+                blen[i] = 10u;
+            }
+        }
         int tr = 1;
-        int lw = glass_text_width(GLASS_FONT_LABEL, surface.action_labels[i], blen[i], tr);
+        int lw = glass_text_width(GLASS_FONT_LABEL, blabel[i], blen[i], tr);
         if (lw > btn_w - 14) {
             tr = 0;
-            lw = glass_text_width(GLASS_FONT_LABEL, surface.action_labels[i], blen[i], tr);
+            lw = glass_text_width(GLASS_FONT_LABEL, blabel[i], blen[i], tr);
         }
         btr[i] = tr;
         btx[i] = bx0[i] + (btn_w - lw) / 2;
-        if (surface.kind == JR_DISPLAY_SURFACE_CONSENT && count == 2u) {
+        if (consent_pair) {
             if (i == 0u) {
                 /* DENY: crimson frosted glass */
                 bfill[i] = 0x3045u;
@@ -1661,10 +1828,10 @@ static void apply_surface_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                 bhi[i] = 0xFC31u;
                 btxt[i] = 0xFFFFu;
             } else {
-                /* ALLOW: emerald frosted glass */
+                /* ALLOW: emerald frosted glass (brightens while holding) */
                 bfill[i] = 0x09C5u;
-                bborder[i] = 0x2731u;
-                bhi[i] = 0x6FF5u;
+                bborder[i] = hold_pct > 0u ? 0x4F14u : 0x2731u;
+                bhi[i] = hold_pct > 0u ? 0xA7F9u : 0x6FF5u;
                 btxt[i] = 0xFFFFu;
             }
         } else if (surface.kind == JR_DISPLAY_SURFACE_CHOICE) {
@@ -1687,7 +1854,9 @@ static void apply_surface_overlay(jr_display_ctx_t *ctx, int x1, int y1,
         }
     }
 
-    const char *hint = count > 0U ? "TAP TO SELECT" : "2X TAP TO EXIT";
+    const char *hint = consent_pair
+                       ? "TAP DENY \xC2\xB7 HOLD ALLOW"
+                       : (count > 0U ? "TAP TO SELECT" : "2X TAP TO EXIT");
     const size_t hint_len = strlen(hint);
     const int hint_w = glass_text_width(GLASS_FONT_LABEL, hint, hint_len, 2);
     const int hint_x = (HUD_W - hint_w) / 2 + 1;
@@ -1696,133 +1865,177 @@ static void apply_surface_overlay(jr_display_ctx_t *ctx, int x1, int y1,
     const int32_t cx16 = (HUD_W / 2) * 16;
     const int32_t cy16 = (HUD_H / 2) * 16;
     const uint16_t disc_core = surface_lerp565(0x0021u, accent, 14);
+    const int32_t hold_sweep = hold_pct > 0u
+                               ? (int32_t)(((int64_t)hold_pct * GLASS_TURN_Q16) / 100)
+                               : 0;
 
     for (int y = y1; y < y2; ++y) {
-        int lo = 0, hi = HUD_W - 1;
-        if (!surface_clip_x(y, &lo, &hi)) {
-            continue; /* strictly outside r <= 214: privacy ring & battery rim untouched */
-        }
         uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
-
-        /* 1. Solid obsidian OLED disc strictly inside r <= 214 (zero caption bleed) */
-        const int dy = y - (int)(HUD_H / 2);
-        const int dy2 = dy * dy;
-        for (int x = lo; x <= hi; ++x) {
-            const int dx = x - (int)(HUD_W / 2);
-            const int r2 = dx * dx + dy2;
-            const uint16_t bg = r2 < 145 * 145 ? disc_core : 0x0000u;
-            row[x] = glass_blend565(row[x], bg, 255u, swap);
-        }
-
-        /* 2. Outer glowing semantic accent ring (r = 204..212, clipped to r <= 214) */
-        glass_glow_row(row, y, lo, hi, cx16, cy16, 206 * 16, 210 * 16,
-                       0, GLASS_TURN_Q16, false, 14 * 16, 72u, accent, 255u, swap);
-        glass_ring_row(row, y, lo, hi, cx16, cy16, 207 * 16, 211 * 16,
-                       0, GLASS_TURN_Q16, accent, 240u, swap);
-        glass_ring_row(row, y, lo, hi, cx16, cy16, 205 * 16, 206 * 16 + 8,
-                       0, GLASS_TURN_Q16, 0xFFFFu, 48u, swap);
-
-        /* 3. Top eyebrow kind pill (y = 63..87) */
-        if (y >= 63 && y <= 87) {
-            surface_rrect_row(row, y, lo, hi, eyebrow_x0, 63, eyebrow_x1, 87, 12,
-                              accent_dark, 230u, accent, 215u, accent_hi, 75u, swap);
-            if (y >= eyebrow_ty + ml.ink_top && y <= eyebrow_ty + ml.ink_bottom) {
-                glass_text_row(row, y, lo, hi, GLASS_FONT_LABEL, eyebrow, eyebrow_len,
-                               eyebrow_tx, eyebrow_ty, 2, accent_hi, 255u, swap);
+        int lo = 0, hi = HUD_W - 1;
+        if (surface_clip_x(y, &lo, &hi)) {
+            /* 1. Solid obsidian OLED disc strictly inside r <= 214 (zero caption bleed) */
+            const int dy = y - (int)(HUD_H / 2);
+            const int dy2 = dy * dy;
+            for (int x = lo; x <= hi; ++x) {
+                const int dx = x - (int)(HUD_W / 2);
+                const int r2 = dx * dx + dy2;
+                const uint16_t bg = r2 < 145 * 145 ? disc_core : 0x0000u;
+                row[x] = glass_blend565(row[x], bg, 255u, swap);
             }
-        }
 
-        /* 4. Center frosted glass card (x = 64..402, y = 104..280, r = 18) */
-        if (y >= 104 && y <= 280) {
-            surface_rrect_row(row, y, lo, hi, 64, 104, 402, 280, 18,
-                              0x0884u, 224u, card_border, 150u, 0xFFFFu, 76u, swap);
-            /* Title text */
-            for (int i = 0; i < t_lines; ++i) {
-                if (y >= t_y[i] + m_title.ink_top && y <= t_y[i] + m_title.ink_bottom) {
-                    glass_text_row(row, y, lo, hi, title_font, t_ptr[i], t_len[i],
-                                   t_x[i], t_y[i], title_track, 0xFFFFu, 255u, swap);
+            /* 2. Outer glowing semantic accent ring (r = 204..212, clipped to r <= 214) */
+            glass_glow_row(row, y, lo, hi, cx16, cy16, 206 * 16, 210 * 16,
+                           0, GLASS_TURN_Q16, false, 14 * 16, 72u, accent, 255u, swap);
+            glass_ring_row(row, y, lo, hi, cx16, cy16, 207 * 16, 211 * 16,
+                           0, GLASS_TURN_Q16, accent, 240u, swap);
+            glass_ring_row(row, y, lo, hi, cx16, cy16, 205 * 16, 206 * 16 + 8,
+                           0, GLASS_TURN_Q16, 0xFFFFu, 48u, swap);
+
+            /* 3. Top eyebrow kind pill (y = 63..87) */
+            if (y >= 63 && y <= 87) {
+                surface_rrect_row(row, y, lo, hi, eyebrow_x0, 63, eyebrow_x1, 87, 12,
+                                  accent_dark, 230u, accent, 215u, accent_hi, 75u, swap);
+                if (y >= eyebrow_ty + ml.ink_top && y <= eyebrow_ty + ml.ink_bottom) {
+                    glass_text_row(row, y, lo, hi, GLASS_FONT_LABEL, eyebrow, eyebrow_len,
+                                   eyebrow_tx, eyebrow_ty, 2, accent_hi, 255u, swap);
                 }
             }
-            /* Subtle tapered hairline divider at y = 172 */
-            if (y == 172) {
-                int dxa = 84 < lo ? lo : 84;
-                int dxb = 382 > hi ? hi : 382;
-                for (int x = dxa; x <= dxb; ++x) {
-                    int adx = x - (int)(HUD_W / 2);
-                    if (adx < 0) adx = -adx;
-                    const int fade = 149 - adx;
-                    if (fade > 0) {
-                        const unsigned a = (unsigned)((fade * 125) / 149);
-                        row[x] = glass_blend565(row[x], accent, a, swap);
+
+            /* 4. Center frosted glass card (x = 64..402, y = 104..280, r = 18) */
+            if (y >= 104 && y <= 280) {
+                surface_rrect_row(row, y, lo, hi, 64, 104, 402, 280, 18,
+                                  0x0884u, 224u, card_border, 150u, 0xFFFFu, 76u, swap);
+                /* Title text */
+                for (int i = 0; i < t_lines; ++i) {
+                    if (y >= t_y[i] + m_title.ink_top && y <= t_y[i] + m_title.ink_bottom) {
+                        glass_text_row(row, y, lo, hi, title_font, t_ptr[i], t_len[i],
+                                       t_x[i], t_y[i], title_track, 0xFFFFu, 255u, swap);
                     }
                 }
-            }
-            /* Body text (lossless wrap) */
-            for (int i = 0; i < b_lines; ++i) {
-                if (y >= b_y[i] + m_body.ink_top && y <= b_y[i] + m_body.ink_bottom) {
-                    glass_text_row(row, y, lo, hi, body_font, b_ptr[i], b_len[i],
-                                   b_x[i], b_y[i], body_track, 0xD6DFu, 240u, swap);
-                }
-            }
-            /* Glowing progress / scanner bar (JR_DISPLAY_SURFACE_PROGRESS) */
-            if (has_prog && y >= 244 && y <= 256) {
-                surface_rrect_row(row, y, lo, hi, 88, 244, 378, 256, 6,
-                                  0x10C5u, 225u, 0x5295u, 155u, 0x0000u, 0u, swap);
-                if (y >= 246 && y <= 254 && scan_x1 > scan_x0) {
-                    int fx0 = scan_x0 < lo ? lo : scan_x0;
-                    int fx1 = scan_x1 > hi ? hi : scan_x1;
-                    /* Round inner ends smoothly on top/bottom rows */
-                    const int trim = (y == 246 || y == 254) ? 2 : ((y == 247 || y == 253) ? 1 : 0);
-                    if (fx0 < scan_x0 + trim) fx0 = scan_x0 + trim;
-                    if (fx1 > scan_x1 - trim) fx1 = scan_x1 - trim;
-                    for (int x = fx0; x <= fx1; ++x) {
-                        uint16_t col;
-                        if (prog_pct >= 0) {
-                            const int t = ((x - 90) * 255) / 286;
-                            col = surface_lerp565(0xA35Fu, 0x07FFu, t);
-                            int ds = x - shim_x;
-                            if (ds < 0) ds = -ds;
-                            if (ds < 18) {
-                                col = surface_lerp565(col, 0xFFFFu, ((18 - ds) * 165) / 18);
-                            }
-                            if (scan_x1 - x <= 3) {
-                                col = 0xFFFFu;
-                            }
-                        } else {
-                            const int mid = (scan_x0 + scan_x1) / 2;
-                            const int half = (scan_x1 - scan_x0) / 2;
-                            int dm = x - mid;
-                            if (dm < 0) dm = -dm;
-                            const int core = half > 0 ? ((half - dm) * 255) / half : 255;
-                            col = core > 180
-                                ? surface_lerp565(0x07FFu, 0xFFFFu, (core - 180) * 3)
-                                : surface_lerp565(0xA35Fu, 0x07FFu, (core * 255) / 180);
+                /* Subtle tapered hairline divider at y = 172 */
+                if (y == 172) {
+                    int dxa = 84 < lo ? lo : 84;
+                    int dxb = 382 > hi ? hi : 382;
+                    for (int x = dxa; x <= dxb; ++x) {
+                        int adx = x - (int)(HUD_W / 2);
+                        if (adx < 0) adx = -adx;
+                        const int fade = 149 - adx;
+                        if (fade > 0) {
+                            const unsigned a = (unsigned)((fade * 125) / 149);
+                            row[x] = glass_blend565(row[x], accent, a, swap);
                         }
-                        row[x] = glass_blend565(row[x], col, 245u, swap);
+                    }
+                }
+                /* Body text (lossless wrap) */
+                for (int i = 0; i < b_lines; ++i) {
+                    if (y >= b_y[i] + m_body.ink_top && y <= b_y[i] + m_body.ink_bottom) {
+                        glass_text_row(row, y, lo, hi, body_font, b_ptr[i], b_len[i],
+                                       b_x[i], b_y[i], body_track, 0xD6DFu, 240u, swap);
+                    }
+                }
+                /* Glowing progress / scanner bar (JR_DISPLAY_SURFACE_PROGRESS) */
+                if (has_prog && y >= 244 && y <= 256) {
+                    surface_rrect_row(row, y, lo, hi, 88, 244, 378, 256, 6,
+                                      0x10C5u, 225u, 0x5295u, 155u, 0x0000u, 0u, swap);
+                    if (y >= 246 && y <= 254 && scan_x1 > scan_x0) {
+                        int fx0 = scan_x0 < lo ? lo : scan_x0;
+                        int fx1 = scan_x1 > hi ? hi : scan_x1;
+                        /* Round inner ends smoothly on top/bottom rows */
+                        const int trim = (y == 246 || y == 254) ? 2 : ((y == 247 || y == 253) ? 1 : 0);
+                        if (fx0 < scan_x0 + trim) fx0 = scan_x0 + trim;
+                        if (fx1 > scan_x1 - trim) fx1 = scan_x1 - trim;
+                        for (int x = fx0; x <= fx1; ++x) {
+                            uint16_t col;
+                            if (prog_pct >= 0) {
+                                const int t = ((x - 90) * 255) / 286;
+                                col = surface_lerp565(0xA35Fu, 0x07FFu, t);
+                                int ds = x - shim_x;
+                                if (ds < 0) ds = -ds;
+                                if (ds < 18) {
+                                    col = surface_lerp565(col, 0xFFFFu, ((18 - ds) * 165) / 18);
+                                }
+                                if (scan_x1 - x <= 3) {
+                                    col = 0xFFFFu;
+                                }
+                            } else {
+                                const int mid = (scan_x0 + scan_x1) / 2;
+                                const int half = (scan_x1 - scan_x0) / 2;
+                                int dm = x - mid;
+                                if (dm < 0) dm = -dm;
+                                const int core = half > 0 ? ((half - dm) * 255) / half : 255;
+                                col = core > 180
+                                    ? surface_lerp565(0x07FFu, 0xFFFFu, (core - 180) * 3)
+                                    : surface_lerp565(0xA35Fu, 0x07FFu, (core * 255) / 180);
+                            }
+                            row[x] = glass_blend565(row[x], col, 245u, swap);
+                        }
                     }
                 }
             }
-        }
 
-        /* 5. Sculpted rounded pill buttons (x = 70..396, y = 300..354) */
-        if (count > 0U && y >= 300 && y <= 354) {
-            for (uint8_t i = 0u; i < count; ++i) {
-                surface_rrect_row(row, y, lo, hi, bx0[i], 300, bx1[i], 354, 18,
-                                  bfill[i], 232u, bborder[i], 235u, bhi[i], 95u, swap);
-                if (y >= btn_ty + ml.ink_top && y <= btn_ty + ml.ink_bottom) {
-                    const int clo = bx0[i] + 4 > lo ? bx0[i] + 4 : lo;
-                    const int chi = bx1[i] - 4 < hi ? bx1[i] - 4 : hi;
-                    glass_text_row(row, y, clo, chi, GLASS_FONT_LABEL,
-                                   surface.action_labels[i], blen[i],
-                                   btx[i], btn_ty, btr[i], btxt[i], 255u, swap);
+            /* 5. Sculpted rounded pill buttons (x = 70..396, y = 300..354) */
+            if (count > 0U && y >= 300 && y <= 354) {
+                for (uint8_t i = 0u; i < count; ++i) {
+                    surface_rrect_row(row, y, lo, hi, bx0[i], 300, bx1[i], 354, 18,
+                                      bfill[i], 232u, bborder[i], 235u, bhi[i], 95u, swap);
+                    /* Glass 3.7: Left-to-right luminous emerald fill inside ALLOW pill while holding */
+                    if (consent_pair && i == 1u && hold_pct > 0u && y > 300 && y < 354) {
+                        const int rad = 18;
+                        const int r1 = rad - 1;
+                        int inner_inset = 1;
+                        if (y < 300 + rad) {
+                            const int dy_r = (300 + rad) - y;
+                            inner_inset = (dy_r <= r1)
+                                ? (rad - surface_isqrt(r1 * r1 - dy_r * dy_r)) : -1;
+                        } else if (y > 354 - rad) {
+                            const int dy_r = y - (354 - rad);
+                            inner_inset = (dy_r <= r1)
+                                ? (rad - surface_isqrt(r1 * r1 - dy_r * dy_r)) : -1;
+                        }
+                        if (inner_inset >= 0) {
+                            int fxa = bx0[1] + inner_inset;
+                            int fxb_max = bx1[1] - inner_inset;
+                            int fxb = bx0[1] + ((bx1[1] - bx0[1]) * (int)hold_pct) / 100;
+                            if (fxb > fxb_max) fxb = fxb_max;
+                            if (fxa < lo) fxa = lo;
+                            if (fxb > hi) fxb = hi;
+                            for (int x = fxa; x <= fxb; ++x) {
+                                row[x] = glass_blend565(row[x], 0x1F2Au, 235u, swap);
+                            }
+                            if (hold_pct < 100u && fxb >= fxa && fxb <= fxb_max) {
+                                row[fxb] = glass_blend565(row[fxb], 0x4F14u, 255u, swap);
+                            }
+                        }
+                    }
+                    if (y >= btn_ty + ml.ink_top && y <= btn_ty + ml.ink_bottom) {
+                        const int clo = bx0[i] + 4 > lo ? bx0[i] + 4 : lo;
+                        const int chi = bx1[i] - 4 < hi ? bx1[i] - 4 : hi;
+                        glass_text_row(row, y, clo, chi, GLASS_FONT_LABEL,
+                                       blabel[i], blen[i],
+                                       btx[i], btn_ty, btr[i], btxt[i], 255u, swap);
+                    }
                 }
+            }
+
+            /* 6. Subtle bottom hint (y = 374..394) */
+            if (y >= hint_y + ml.ink_top && y <= hint_y + ml.ink_bottom) {
+                glass_text_row(row, y, lo, hi, GLASS_FONT_LABEL, hint, hint_len,
+                               hint_x, hint_y, 2, 0x7BDFu, 165u, swap);
             }
         }
 
-        /* 6. Subtle bottom hint (y = 374..394) */
-        if (y >= hint_y + ml.ink_top && y <= hint_y + ml.ink_bottom) {
-            glass_text_row(row, y, lo, hi, GLASS_FONT_LABEL, hint, hint_len,
-                           hint_x, hint_y, 2, 0x7BDFu, 165u, swap);
+        /* 7. Glass 3.7: Outer Leaf-Green Commitment Rim (r = 216..224) ONLY
+         * while actively holding ALLOW on a CONSENT card (hold_pct > 0).
+         * At hold_pct == 0, r > 214 remains 100% untouched! */
+        if (hold_sweep > 0) {
+            const int d = y < DIAL_SPAN_N ? DIAL_SPAN_N - 1 - y : y - DIAL_SPAN_N;
+            const int glo = DIAL_SPAN_N - 1 - s_dial_span[d];
+            const int ghi = DIAL_SPAN_N + s_dial_span[d];
+            glass_glow_row(row, y, glo, ghi, cx16, cy16, 216 * 16, 224 * 16,
+                           GLASS_Q16_12_OCLOCK, hold_sweep, true, 4 * 16, 90u,
+                           0x4F14u, 225u, swap);
+            glass_arc_row(row, y, glo, ghi, cx16, cy16, 216 * 16, 224 * 16,
+                          GLASS_Q16_12_OCLOCK, hold_sweep, 0x4F14u, 250u, swap);
         }
     }
 }
@@ -2195,11 +2408,45 @@ static uint32_t s_home_wall_hhmm;
 static time_t   s_home_wall_min;
 #endif
 
+/* Glass 3.7: 20-second Reply Gist card (lock-free double-buffered snapshot). */
+#define GIST_TTL_DEFAULT_MS 20000u
+#define GIST_TTL_MIN_MS      4000u
+#define GIST_TTL_MAX_MS     60000u
+
+static jr_display_gist_t s_gist[2];
+static _Atomic uint32_t  s_gist_slot;       /* bit 0: buf idx, bit 1: active */
+static _Atomic uint32_t  s_gist_expires_ms; /* esp_timer ms deadline         */
+static _Atomic uint32_t  s_gist_total_ms;   /* clamped TTL ms                */
+
+/* Glass 3.7+: Nano Reef Virtual Aquarium (lock-free double-buffered snapshot). */
+static jr_display_aq_state_t s_aq_snap[2];
+static _Atomic uint32_t      s_aq_slot;         /* bit 0: buf idx, bit 1: active */
+static _Atomic uint32_t      s_aq_tap_ring[4];  /* bit 31: set, 0..11: x, 12..23: y */
+static _Atomic uint32_t      s_aq_tap_wr;
+static _Atomic uint32_t      s_aq_shake_seq;
+static uint32_t              s_aq_shake_seen;   /* render task only */
+
+static void gist_expire_check(uint32_t now_ms)
+{
+    const uint32_t sw = atomic_load_explicit(&s_gist_slot, memory_order_acquire);
+    if ((sw & 2u) == 0u) {
+        return;
+    }
+    const uint32_t exp_ms = atomic_load_explicit(&s_gist_expires_ms, memory_order_acquire);
+    if ((int32_t)(exp_ms - now_ms) <= 0) {
+        if ((atomic_fetch_and_explicit(&s_gist_slot, ~2u, memory_order_acq_rel) & 2u) != 0u) {
+            data_rev_bump();
+            nav_wake();
+        }
+    }
+}
+
 static void overlay_fade_tick(void)
 {
     s_frame_no++;
     knob_apply();
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    gist_expire_check(now);
     s_split_on = (int32_t)(__atomic_load_n(&s_split_deadline_ms, __ATOMIC_RELAXED) - now) > 0;
     uint32_t dt = now - s_fade_prev_ms;
     s_fade_prev_ms = now;
@@ -2232,6 +2479,9 @@ static void overlay_fade_tick(void)
         s_clock_prog -= step;
         if (s_clock_prog < 0) {
             s_clock_prog = 0;
+        }
+        if (jr_display_aquarium_active()) {
+            tilt_tick(now);          /* Aquarium water slosh & kelp lean */
         }
     }
     s_clock_ease = fade_smoothstep(s_clock_prog);
@@ -3002,6 +3252,59 @@ static inline bool glass3_active(void)
 {
     return __atomic_load_n(&s_glass3_mode, __ATOMIC_ACQUIRE) !=
            (uint32_t)JR_GLASS3_CLASSIC;
+}
+
+/* Glass 3.7: Tear-free Cinema transitions. Static init stays CLASSIC so host
+ * pixel-identity & dip_checks.inc suites stay 100% deterministic; ESP_PLATFORM
+ * defaults to SHUTTER (60 Hz CO5300 optical eclipse dip) in jr_display_start(). */
+static volatile uint32_t s_transition_mode = (uint32_t)JR_TRANSITION_CLASSIC;
+static volatile uint32_t s_transition_explicit;
+
+void jr_display_transition_set(jr_display_transition_t mode)
+{
+    if ((uint32_t)mode > (uint32_t)JR_TRANSITION_CLASSIC) {
+        mode = JR_TRANSITION_SHUTTER;
+    }
+    __atomic_store_n(&s_transition_explicit, 1u, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_transition_mode, (uint32_t)mode, __ATOMIC_RELEASE);
+    nav_wake();
+}
+
+jr_display_transition_t jr_display_transition_get(void)
+{
+    return (jr_display_transition_t)__atomic_load_n(&s_transition_mode, __ATOMIC_ACQUIRE);
+}
+
+const char *jr_display_transition_name(jr_display_transition_t mode)
+{
+    switch (mode) {
+    case JR_TRANSITION_SHUTTER: return "shutter";
+    case JR_TRANSITION_IRIS:    return "iris";
+    case JR_TRANSITION_GLIDE:   return "glide";
+    case JR_TRANSITION_CLASSIC: return "classic";
+    default:                    return "shutter";
+    }
+}
+
+static inline jr_display_transition_t effective_transition_mode(void)
+{
+    if (!glass3_active()) {
+        return JR_TRANSITION_CLASSIC;
+    }
+    return (jr_display_transition_t)__atomic_load_n(&s_transition_mode, __ATOMIC_ACQUIRE);
+}
+
+static inline bool tr_is_cut_swap(void)
+{
+    return s_dip_mode == DIP_MODE_SPACE || s_cine_active;
+}
+
+static inline bool tr_cut_swapped(void)
+{
+    if (s_cine_active) {
+        return s_cine_phase != CINE_CAPTURE_FROM;
+    }
+    return s_dip_swapped;
 }
 
 _Static_assert((uint32_t)JR_DISPLAY_SPACE_COUNT <= NAV_SPACE_MASK + 1u,
@@ -4404,13 +4707,14 @@ static void watch_publish(void)
     jr_face_t want = JR_FACE_COUNT;
     int w = 256;
     int strength;
-    /* With the panel dip the hands are never part strength: they are all there or
-     * not there, and the cut is the dark (s_dip_swapped), not the progress. */
-    const bool dip_sp = s_dip_mode == DIP_MODE_SPACE;
-    const bool past_cut = dip_sp ? s_dip_swapped : p >= TR_CUT_SLIDE;
+    /* With the panel dip or cinema cut-swap, the hands are never part strength:
+     * they are all there or not there, and the cut is the swap boundary. */
+    const bool cut_sp = tr_is_cut_swap();
+    const bool swapped = tr_cut_swapped();
+    const bool past_cut = cut_sp ? swapped : p >= TR_CUT_SLIDE;
     if (to_watch) {
         if (!from_watch && p < 256) {                       /* entering */
-            w = dip_sp ? (s_dip_swapped ? 256 : 0) : tr_in(p, TR_CUT_SLIDE);
+            w = cut_sp ? (swapped ? 256 : 0) : tr_in(p, TR_CUT_SLIDE);
             if (past_cut && clock_on) {
                 want = watch_dial_of_style(s_style_shown);
             }
@@ -4425,7 +4729,7 @@ static void watch_publish(void)
         const int gate = clock_on ? 256 : s_clock_ease;
         strength = w < gate ? w : gate;
     } else if (from_watch && p < 256) {                     /* leaving */
-        w = dip_sp ? (s_dip_swapped ? 0 : 256) : tr_out(p, TR_CUT_SLIDE);
+        w = cut_sp ? (swapped ? 0 : 256) : tr_out(p, TR_CUT_SLIDE);
         if (!past_cut) {
             want = watch_dial_of_style(s_style_shown);
         }
@@ -4474,6 +4778,72 @@ static bool sp_dip_layer_ready(void)
     return !vis_to || (watch_layer_ready() && !s_parked);
 }
 
+static bool cine_target_layer_ready(void)
+{
+    const bool vis_to = !sp_space_is_black(s_space_to) &&
+                        !(s_space_to == (uint8_t)JR_DISPLAY_SPACE_WATCH && !watch_style_has_dial(s_style_shown));
+    return !vis_to || (watch_layer_ready() && !s_parked);
+}
+
+static inline bool transition_in_flight(void)
+{
+    return s_space_prog < 256 || s_style_prog < 256 ||
+           s_dip_phase != DIP_IDLE || s_cine_active;
+}
+
+static bool cine_begin(jr_display_transition_t mode, int8_t dir, uint32_t now_ms)
+{
+    if (!cine_ensure_buffers()) {
+        return false;
+    }
+    const bool was_anim = s_cine_active && s_cine_phase == CINE_ANIMATE;
+    const bool was_wait = s_cine_active &&
+                          (s_cine_phase == CINE_CAPTURE_FROM || s_cine_phase == CINE_CAPTURE_TO);
+    s_cine_mode = mode;
+    s_cine_dir = dir;
+    s_cine_active = true;
+    s_cine_prog = 0;
+    s_cine_ease = 0;
+    s_cine_el_ms = 0u;
+    s_cine_t0_ms = now_ms;
+    s_cine_wait_t0 = now_ms;
+    s_cine_to_ready = false;
+    if (was_anim && s_cine_to != NULL && s_cine_from != NULL) {
+        /* Rapid swipe mid-animation: keep previous target as outgoing frame. */
+        memcpy(s_cine_from, s_cine_to, CINE_FRAME_BYTES);
+        s_cine_phase = CINE_CAPTURE_TO;
+    } else if (was_wait) {
+        /* Still holding the original outgoing frame on glass: re-target cleanly. */
+        s_cine_phase = (s_cine_phase == CINE_CAPTURE_TO) ? CINE_CAPTURE_TO : CINE_CAPTURE_FROM;
+    } else if (snapshot_try_copy_to(s_cine_from, now_ms)) {
+        s_cine_phase = CINE_CAPTURE_TO;
+    } else {
+        s_cine_phase = CINE_CAPTURE_FROM;
+    }
+    return true;
+}
+
+static void cine_frame_done(void)
+{
+    if (!s_cine_active) {
+        return;
+    }
+    const uint32_t now_ms = s_fade_prev_ms != 0u
+                            ? s_fade_prev_ms
+                            : (uint32_t)(esp_timer_get_time() / 1000);
+    if (s_cine_phase == CINE_CAPTURE_FROM) {
+        s_cine_phase = CINE_CAPTURE_TO;
+        s_cine_wait_t0 = now_ms;
+        s_cine_to_ready = false;
+    } else if (s_cine_phase == CINE_CAPTURE_TO && s_cine_to_ready) {
+        s_cine_phase = CINE_ANIMATE;
+        s_cine_t0_ms = now_ms;
+        s_cine_el_ms = 0u;
+        s_cine_prog = 0;
+        s_cine_ease = 0;
+    }
+}
+
 /* Advance every shell ease. Called once per frame from overlay_fade_tick, on
  * the render task, with the same cstep the rest of the presenter fades on so
  * the shell and the existing overlays stay visually in step. */
@@ -4483,6 +4853,19 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
     const uint8_t serial = (uint8_t)(nav >> NAV_SERIAL_SHIFT);
     const uint8_t space = (uint8_t)(nav & NAV_SPACE_MASK);
     const uint8_t overlay = (uint8_t)((nav & NAV_OVL_MASK) >> NAV_OVL_SHIFT);
+    const jr_display_transition_t tmode = effective_transition_mode();
+    const bool knob_dip = (__atomic_load_n(&s_perf_knob_word, __ATOMIC_RELAXED) & JR_KNOB_PANEL_DIP) != 0u;
+    const bool g3_shutter = !knob_dip && (tmode == JR_TRANSITION_SHUTTER || s_dip_fallback);
+
+    /* Abort any in-flight cinema wipe immediately if an urgent modal/overlay claims the glass. */
+    if (s_cine_active &&
+        (jr_display_boot_ignition_active() || jr_display_surface_is_active() ||
+         __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE) > 0 ||
+         s_shade_ease > 0 || s_detail_ease > 0 || s_canvas_ease > 0 ||
+         diag_load(&s_display.test_pattern) != (uint32_t)JR_DISPLAY_TEST_OFF)) {
+        cine_abort();
+        s_space_prog = 256;
+    }
 
     /* The panel dip: the frame in which the glass has gone dark is the first one
      * drawn with the new content, and the style (if one is waiting) flips with
@@ -4498,22 +4881,49 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
 
     if (serial != s_space_serial_seen) {
         s_space_serial_seen = serial;
-        /* The panel dip: a change of screen while the glass is still showing the
-         * one it left (OUT, not yet swapped) keeps showing that one, so no screen
-         * that was never lit pops in at part brightness. */
-        const bool glass_holds_old = s_dip_on && s_dip_mode == DIP_MODE_SPACE && !s_dip_swapped &&
-                                     s_dip_phase != DIP_IDLE;
+        /* The panel dip / cinema capture: a change of screen while the glass is
+         * still showing the one it left keeps showing that one, so no screen
+         * that was never lit pops in. */
+        const bool glass_holds_old =
+            (s_dip_on && s_dip_mode == DIP_MODE_SPACE && !s_dip_swapped &&
+             s_dip_phase != DIP_IDLE) ||
+            (s_cine_active && (s_cine_phase == CINE_CAPTURE_FROM ||
+                               s_cine_phase == CINE_CAPTURE_TO));
         if (!glass_holds_old) {
             s_space_from = (uint8_t)((nav >> NAV_PREV_SHIFT) & NAV_SPACE_MASK);
         }
         s_space_to = space;
-        if (s_dip_on) {
+        s_space_dir = (nav & NAV_FORWARD_BIT) != 0U ? 1 : -1;
+        const bool want_cine =
+            !knob_dip &&
+            (tmode == JR_TRANSITION_IRIS || tmode == JR_TRANSITION_GLIDE) &&
+            !jr_display_boot_ignition_active() && !jr_display_surface_is_active() &&
+            __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE) == 0 &&
+            s_shade_ease == 0 && s_detail_ease == 0 && s_canvas_ease == 0 &&
+            diag_load(&s_display.test_pattern) == (uint32_t)JR_DISPLAY_TEST_OFF;
+        bool started_cine = false;
+        if (want_cine) {
+            if (cine_begin(tmode, s_space_dir, now_ms)) {
+                started_cine = true;
+            } else {
+                /* Low PSRAM: fall back cleanly to 60 Hz SHUTTER (0 B PSRAM). */
+                s_dip_fallback = true;
+                s_dip_on = true;
+            }
+        }
+        if (!started_cine && s_dip_on) {
+            cine_abort();
             if (s_dip_mode == DIP_MODE_STYLE) {
                 s_style_prog = 256;      /* the style dip is folded into this one: its flip happens at the swap below */
             }
-            dip_begin(DIP_MODE_SPACE, TR_CUT_SLIDE, (uint32_t)JR_DISPLAY_SPACE_MS, now_ms);
+            const bool use_shutter = !knob_dip && (tmode == JR_TRANSITION_SHUTTER || s_dip_fallback);
+            dip_begin(DIP_MODE_SPACE,
+                      use_shutter ? G3_SHUTTER_CUT : TR_CUT_SLIDE,
+                      use_shutter ? G3_SHUTTER_SPACE_MS : (uint32_t)JR_DISPLAY_SPACE_MS,
+                      now_ms);
+        } else if (!started_cine) {
+            cine_abort();
         }
-        s_space_dir = (nav & NAV_FORWARD_BIT) != 0U ? 1 : -1;
         s_space_prog = 0;
         s_space_hold_ms = now_ms + (uint32_t)JR_DISPLAY_SPACE_HOLD_MS;
         const uint32_t entry_start = (space == (uint8_t)JR_DISPLAY_SPACE_STATUS ||
@@ -4521,7 +4931,10 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
                                       space == (uint8_t)JR_DISPLAY_SPACE_DESK ||
                                       space == (uint8_t)JR_DISPLAY_SPACE_ACTIVITY)
                                          ? 0U : SP_ENTRY_TOTAL_MS;
-        if (s_dip_on) {
+        if (started_cine) {
+            /* Capture the incoming target screen settled at full strength. */
+            s_entry_ms = SP_ENTRY_TOTAL_MS;
+        } else if (s_dip_on) {
             s_dip_entry_next = entry_start;   /* (the screen on the glass keeps its own clock until the swap) */
         } else {
             s_entry_ms = entry_start;
@@ -4562,7 +4975,11 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
                 s_style_prog = 0;
                 s_style_hold_ms = 0;
                 if (s_dip_on) {
-                    dip_begin(DIP_MODE_STYLE, TR_CUT_STYLE, (uint32_t)SP_STYLE_MS, now_ms);
+                    const bool use_shutter = !knob_dip && (tmode == JR_TRANSITION_SHUTTER || s_dip_fallback);
+                    dip_begin(DIP_MODE_STYLE,
+                              use_shutter ? G3_SHUTTER_CUT : TR_CUT_STYLE,
+                              use_shutter ? G3_SHUTTER_STYLE_MS : (uint32_t)SP_STYLE_MS,
+                              now_ms);
                 }
             } else if (s_style_prog >= 256 && !(s_dip_mode == DIP_MODE_SPACE && !s_dip_swapped)) {
                 s_style_shown = style_nav;      /* (a screen change in its dark waits to flip it at the swap) */
@@ -4573,7 +4990,8 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
             /* The panel dips and the style flips in the dark (the latch above);
              * s_style_prog only says "a style change is under way" until the dip
              * is over, and nothing is drawn at part strength. */
-            s_style_prog += (int)((dt_ms * 256u) / (uint32_t)SP_STYLE_MS);
+            const uint32_t st_dur = g3_shutter ? G3_SHUTTER_STYLE_MS : (uint32_t)SP_STYLE_MS;
+            s_style_prog += (int)((dt_ms * 256u) / st_dur);
             if (s_style_prog > 255) {
                 s_style_prog = 255;
             }
@@ -4581,6 +4999,7 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
                 s_style_prog = 256;
                 s_style_from = s_style_shown;
                 s_dip_mode = DIP_MODE_NONE;
+                s_dip_fallback = false;
             }
         } else if (s_style_prog < 256) {
             int ystep = (int)((dt_ms * 256u) / (uint32_t)SP_STYLE_MS);
@@ -4609,21 +5028,49 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
         }
     }
 
-    int sstep = (int)((dt_ms * 256u) / (uint32_t)JR_DISPLAY_SPACE_MS);
+    const uint32_t sp_dur = (s_dip_mode == DIP_MODE_SPACE && g3_shutter)
+                            ? G3_SHUTTER_SPACE_MS : (uint32_t)JR_DISPLAY_SPACE_MS;
+    int sstep = (int)((dt_ms * 256u) / sp_dur);
     if (sstep < 1) {
         sstep = 1;
     }
-    s_space_prog += sstep;
-    if (s_space_prog > 256) {
-        s_space_prog = 256;
-    }
-    if (s_dip_mode == DIP_MODE_SPACE) {
-        /* the screen change is not over until the panel is lit again */
-        if (s_dip_phase != DIP_IDLE && s_space_prog > 255) {
-            s_space_prog = 255;
+    if (s_cine_active) {
+        if (s_cine_phase == CINE_ANIMATE) {
+            s_cine_el_ms += (dt_ms > 0u ? dt_ms : 16u);
+            const uint32_t wall_el = (uint32_t)(now_ms - s_cine_t0_ms);
+            if (wall_el > s_cine_el_ms && wall_el < 4000u) {
+                s_cine_el_ms = wall_el;
+            }
+            const uint32_t q16 = glass_ease_out_cubic_q16(s_cine_el_ms, CINE_DUR_MS);
+            s_cine_ease = (int)((q16 * 256u + 32768u) >> 16);
+            if (s_cine_el_ms >= CINE_DUR_MS) {
+                s_cine_active = false;
+                s_cine_phase = CINE_IDLE;
+                s_cine_prog = 256;
+                s_cine_ease = 256;
+                s_space_prog = 256;
+            } else {
+                s_cine_prog = (int)((s_cine_el_ms * 256u) / CINE_DUR_MS);
+                s_space_prog = s_cine_prog > 255 ? 255 : s_cine_prog;
+            }
+        } else {
+            s_space_prog = 0;
         }
-        if (s_dip_phase == DIP_IDLE && s_space_prog >= 256) {
-            s_dip_mode = DIP_MODE_NONE;
+    } else {
+        s_space_prog += sstep;
+        if (s_space_prog > 256) {
+            s_space_prog = 256;
+        }
+        if (s_dip_mode == DIP_MODE_SPACE) {
+            /* the screen change is not over until the panel is lit again */
+            if (s_dip_phase != DIP_IDLE && s_space_prog > 255) {
+                s_space_prog = 255;
+            }
+            if (s_dip_phase == DIP_IDLE && (s_space_prog >= 256 || g3_shutter)) {
+                s_space_prog = 256;
+                s_dip_mode = DIP_MODE_NONE;
+                s_dip_fallback = false;
+            }
         }
     }
     s_space_ease = fade_smoothstep(s_space_prog);
@@ -4650,9 +5097,9 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
         /* Signed shortest way round: a wrap is one step forward, not n-1
          * steps back. */
         const int d = (((a_to - a_from) + 2048) & 4095) - 2048;
-        /* (With the panel dip the mark, like the screens, is at the old place until
-         * the glass is dark and at the new one after it.) */
-        const int mark_ease = s_dip_mode == DIP_MODE_SPACE ? (s_dip_swapped ? 256 : 0) : s_space_ease;
+        /* (With the panel dip or cinema capture, the mark is at the old place
+         * until the swap boundary and at the new one after it.) */
+        const int mark_ease = tr_is_cut_swap() ? (tr_cut_swapped() ? 256 : 0) : s_space_ease;
         const int target = a_from + (d * mark_ease) / 256;
         if (n != s_orbit_n_seen) {
             if (s_orbit_n_seen != 0) {
@@ -4734,6 +5181,10 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
         s_dip_ready = true;                  /* this frame is the new screen, whole: its flush ends the dark */
         s_dip_ready_frame = s_frame_no;
     }
+    if (s_cine_active && s_cine_phase == CINE_CAPTURE_TO) {
+        s_cine_to_ready = cine_target_layer_ready() ||
+                          ((uint32_t)(now_ms - s_cine_wait_t0) >= 250u);
+    }
 
     /* WHAT IS UNDER THE SHELL, through a slide. The face (or a baked dial) is
      * the layer; a data screen, and a watch that draws on black, are not.
@@ -4743,14 +5194,14 @@ static void sp_fade_tick(uint32_t now_ms, uint32_t dt_ms, int cstep)
      * from slides (the layer is dark by the cut, which is darker still); only
      * the sheet and the shade veil now. */
     int veil = 0;
-    const bool dip_sp = s_dip_mode == DIP_MODE_SPACE;
+    const bool cut_sp = tr_is_cut_swap();
     const bool to_black = sp_space_is_black(s_space_to);
     const bool from_black = sp_space_is_black(s_space_from);
     int black = 0;
-    if (dip_sp) {
-        /* the panel dip: what is under the shell is the settled one of whichever
-         * screen is on the glass; the dimming is the panel's */
-        black = (s_dip_swapped ? to_black : from_black) ? 256 : 0;
+    if (cut_sp) {
+        /* the panel dip / cinema capture: what is under the shell is the settled
+         * one of whichever screen is being rendered on this frame */
+        black = (tr_cut_swapped() ? to_black : from_black) ? 256 : 0;
     } else if (s_space_prog >= 256) {
         black = to_black ? 256 : 0;
     } else {
@@ -5157,7 +5608,8 @@ static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     /* Over an active remote canvas or Glass 3.5 Desk Mode (ON AIR / FOCUS /
      * BREATHE), keep lease & pinned OTA banners only so ambient muted captions
      * never slice across the beacon ring or sprint pips. */
-    if ((s_canvas_ease > 0 || jr_display_desk_mode_active()) && !s_capd_lease &&
+    if ((s_canvas_ease > 0 || jr_display_desk_mode_active() ||
+         jr_display_aquarium_active()) && !s_capd_lease &&
         !atomic_load_explicit(&s_caption_pinned, memory_order_relaxed)) {
         return;
     }
@@ -5596,10 +6048,11 @@ static void tilt_tick(uint32_t now_ms)
         (__atomic_load_n(&s_holo_on, __ATOMIC_ACQUIRE) != 0u) &&
         ((jr_display_space_t)(__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) & NAV_SPACE_MASK) ==
             JR_DISPLAY_SPACE_JARVIS);
+    const bool aq_tilt = jr_display_aquarium_active();
     const bool live = src != NULL &&
-        (dial_tilt || holo_tilt) &&
+        (dial_tilt || holo_tilt || aq_tilt) &&
         (__atomic_load_n(&s_panel_off, __ATOMIC_ACQUIRE) & 3U) == 0U &&
-        jr_display_render_fps() >= JR_DISPLAY_RENDER_FPS &&
+        (aq_tilt || jr_display_render_fps() >= JR_DISPLAY_RENDER_FPS) &&
         src(&x_mg, &y_mg);
     if (live) {
         jr_tilt_step(&s_tilt, x_mg, y_mg, (int)(now_ms - s_tilt_prev_ms));
@@ -6924,16 +7377,18 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
             .strength = (uint8_t)(st > 255 ? 255 : (st < 0 ? 0 : st)),
         };
         const uint32_t pk = jr_g3_atmosphaera_static_key(&atmo);
-        uint16_t *plate = (oy == 0 && st >= 255 && pk != 0u) ? g3_plate_acquire() : NULL;
+        uint16_t *plate = (oy == 0 && st >= 255 && pk != 0u)
+                          ? g3_plate_acquire(G3_PLATE_SLOT_WX) : NULL;
         if (plate != NULL) {
-            if (s_g3_plate_kind != 1u || s_g3_plate_key != pk || s_g3_plate_swap != swap) {
+            g3_plate_slot_t *slot = &s_g3_plates[G3_PLATE_SLOT_WX];
+            if (slot->kind != 1u || slot->key != pk || slot->swap != swap) {
                 memset(plate, 0, G3_PLATE_BYTES);
                 jr_g3_atmosphaera_static_rows(plate, 0, HUD_H, swap, &atmo);
-                s_g3_plate_kind = 1u;
-                s_g3_plate_key = pk;
-                s_g3_plate_swap = swap;
+                slot->kind = 1u;
+                slot->key = pk;
+                slot->swap = swap;
             }
-            g3_plate_blit_strip(pixels, y1, y2);
+            g3_plate_blit_strip(G3_PLATE_SLOT_WX, pixels, y1, y2);
             jr_g3_atmosphaera_live_rows(pixels, y1, y2 - y1, swap, &atmo);
         } else {
             jr_g3_atmosphaera_rows(pixels, y1, y2 - y1, swap, &atmo);
@@ -7722,7 +8177,21 @@ static void knob_apply(void)
     const uint32_t k = __atomic_load_n(&s_perf_knob_word, __ATOMIC_RELAXED);
     hud_perf_knob = k;
     glass_perf_knob = k;
-    const bool dip = (k & JR_KNOB_PANEL_DIP) != 0u;
+    const jr_display_transition_t tmode = effective_transition_mode();
+    const bool knob_dip = (k & JR_KNOB_PANEL_DIP) != 0u;
+    if (tmode == JR_TRANSITION_CLASSIC) {
+        s_dip_fallback = false;
+    }
+    if (tmode != JR_TRANSITION_IRIS && tmode != JR_TRANSITION_GLIDE) {
+        if (s_cine_active) {
+            cine_abort();
+        }
+        if (s_cine_from != NULL || s_cine_to != NULL) {
+            cine_free_buffers();
+        }
+    }
+    const bool shutter_dip = (tmode == JR_TRANSITION_SHUTTER) || s_dip_fallback;
+    const bool dip = knob_dip || shutter_dip;
     if (!dip && (s_dip_on || s_dip_phase != DIP_IDLE || s_dip_mode != DIP_MODE_NONE)) {
         dip_abort();           /* the bit went off mid-dip: the panel is brought back, the shell goes on as on knob 0 */
     }
@@ -8142,16 +8611,18 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
         };
         spectrum_load(cx.bands);
         const uint32_t pk = jr_g3_cortex_static_key(&cx);
-        uint16_t *plate = (oy == 0 && st >= 255 && pk != 0u) ? g3_plate_acquire() : NULL;
+        uint16_t *plate = (oy == 0 && st >= 255 && pk != 0u)
+                          ? g3_plate_acquire(G3_PLATE_SLOT_DESK) : NULL;
         if (plate != NULL) {
-            if (s_g3_plate_kind != 2u || s_g3_plate_key != pk || s_g3_plate_swap != swap) {
+            g3_plate_slot_t *slot = &s_g3_plates[G3_PLATE_SLOT_DESK];
+            if (slot->kind != 3u || slot->key != pk || slot->swap != swap) {
                 memset(plate, 0, G3_PLATE_BYTES);
                 jr_g3_cortex_static_rows(plate, 0, HUD_H, swap, &cx);
-                s_g3_plate_kind = 2u;
-                s_g3_plate_key = pk;
-                s_g3_plate_swap = swap;
+                slot->kind = 3u;
+                slot->key = pk;
+                slot->swap = swap;
             }
-            g3_plate_blit_strip(pixels, y1, y2);
+            g3_plate_blit_strip(G3_PLATE_SLOT_DESK, pixels, y1, y2);
             jr_g3_cortex_live_rows(pixels, y1, y2 - y1, swap, &cx);
         } else {
             jr_g3_cortex_rows(pixels, y1, y2 - y1, swap, &cx);
@@ -8488,16 +8959,18 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
         };
         spectrum_load(cx.bands);
         const uint32_t pk = jr_g3_cortex_static_key(&cx);
-        uint16_t *plate = (oy == 0 && st >= 255 && pk != 0u) ? g3_plate_acquire() : NULL;
+        uint16_t *plate = (oy == 0 && st >= 255 && pk != 0u)
+                          ? g3_plate_acquire(G3_PLATE_SLOT_STATUS) : NULL;
         if (plate != NULL) {
-            if (s_g3_plate_kind != 2u || s_g3_plate_key != pk || s_g3_plate_swap != swap) {
+            g3_plate_slot_t *slot = &s_g3_plates[G3_PLATE_SLOT_STATUS];
+            if (slot->kind != 2u || slot->key != pk || slot->swap != swap) {
                 memset(plate, 0, G3_PLATE_BYTES);
                 jr_g3_cortex_static_rows(plate, 0, HUD_H, swap, &cx);
-                s_g3_plate_kind = 2u;
-                s_g3_plate_key = pk;
-                s_g3_plate_swap = swap;
+                slot->kind = 2u;
+                slot->key = pk;
+                slot->swap = swap;
             }
-            g3_plate_blit_strip(pixels, y1, y2);
+            g3_plate_blit_strip(G3_PLATE_SLOT_STATUS, pixels, y1, y2);
             jr_g3_cortex_live_rows(pixels, y1, y2 - y1, swap, &cx);
         } else {
             jr_g3_cortex_rows(pixels, y1, y2 - y1, swap, &cx);
@@ -9943,17 +10416,18 @@ static void apply_space_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
              * way and is gone at the cut; the incoming one starts its full
              * travel from the cut and settles ease-out. They are never both
              * above zero, so the two screens cannot sit on each other. */
-            /* The panel dip draws one screen at a time at full strength and in its
-             * settled place: the old one until the glass is dark, then the new one
-             * with its own entry clock; the dimming is the panel's. */
-            const bool dip_sp = s_dip_mode == DIP_MODE_SPACE;
-            const int po = dip_sp ? (s_dip_swapped ? 0 : 256) : tr_out(s_space_prog, TR_CUT_SLIDE);
-            const int pi = dip_sp ? (s_dip_swapped ? 256 : 0) : tr_in(s_space_prog, TR_CUT_SLIDE);
+            /* The panel dip / cinema capture draws one screen at a time at full
+             * strength and in its settled place: the old one until the swap
+             * boundary, then the new one with its own entry clock. */
+            const bool cut_sp = tr_is_cut_swap();
+            const bool swapped = tr_cut_swapped();
+            const int po = cut_sp ? (swapped ? 0 : 256) : tr_out(s_space_prog, TR_CUT_SLIDE);
+            const int pi = cut_sp ? (swapped ? 256 : 0) : tr_in(s_space_prog, TR_CUT_SLIDE);
             if (po > 0) {
                 sp_draw_space(ctx, y1, y2, pixels, s_space_from,
                               -s_space_dir * ((SP_LEAVE_PX * (256 - po)) / 256),
                               (focal * po) / 256,
-                              dip_sp ? s_entry_ms : SP_ENTRY_TOTAL_MS);   /* (a screen cut in on while it was still entering stays as it was) */
+                              cut_sp ? s_entry_ms : SP_ENTRY_TOTAL_MS);   /* (a screen cut in on while it was still entering stays as it was) */
             }
             if (pi > 0) {
                 sp_draw_space(ctx, y1, y2, pixels, s_space_to,
@@ -10018,9 +10492,11 @@ static jr_display_rest_mode_t rest_eligible_raw(const jr_display_ctx_t *ctx)
            (!ripple || now - ripple >= HUD_RIPPLE_MS) &&
            (!bloom || now - bloom >= HUD_BLOOM_MS) &&
            !jr_display_canvas_active() && !jr_display_surface_is_active() &&
+           !jr_display_gist_active() &&
            (!caption || (caption & JR_DISPLAY_CAPTION_AMBIENT)) &&
            !atomic_load(&s_caption_pinned) &&
            (s_space_from == s_space_to || s_space_ease >= 256) &&
+           s_dip_phase == DIP_IDLE && !s_cine_active &&
            s_detail_ease == 0 && s_shade_ease == 0 &&
            s_ask_ease == 0 && s_canvas_ease == 0 &&
            !glass_entry_animating(s_entry_ms, SP_ENTRY_TOTAL_MS) &&
@@ -10031,6 +10507,7 @@ static jr_display_rest_mode_t rest_eligible_raw(const jr_display_ctx_t *ctx)
            !rim_level_active(now) &&
            !jr_display_boot_ignition_active() && s_boot_ign_ease == 0 &&
            !jr_display_desk_mode_active() &&
+           !jr_display_aquarium_active() &&
            diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF &&
            jr_display_hud_enabled();
     return allowed ? mode : JR_DISPLAY_REST_NONE;
@@ -10105,10 +10582,12 @@ static bool watch_quiet_whisper(const jr_display_ctx_t *ctx)
            (!ripple || now - ripple >= HUD_RIPPLE_MS) &&
            (!bloom || now - bloom >= HUD_BLOOM_MS) &&
            !jr_display_canvas_active() && !jr_display_surface_is_active() &&
+           !jr_display_gist_active() &&
            (!caption || (caption & JR_DISPLAY_CAPTION_AMBIENT)) &&
            !atomic_load(&s_caption_pinned) &&
            s_space_to == JR_DISPLAY_SPACE_WATCH && s_space_prog == 256 &&
            s_style_prog == 256 &&
+           s_dip_phase == DIP_IDLE && !s_cine_active &&
            s_detail_ease == 0 && s_shade_ease == 0 &&
            s_ask_ease == 0 && s_canvas_ease == 0 &&
            !sp_ota_ringing((jr_display_ota_state_t)
@@ -10118,6 +10597,7 @@ static bool watch_quiet_whisper(const jr_display_ctx_t *ctx)
            !rim_level_active(now) &&
            !jr_display_boot_ignition_active() && s_boot_ign_ease == 0 &&
            !jr_display_desk_mode_active() &&
+           !jr_display_aquarium_active() &&
            (!glass3_active() || s_g3_orbit_age_ms >= G3_ORBIT_SETTLE_MS) &&
            diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF &&
            jr_display_hud_enabled();
@@ -10160,9 +10640,12 @@ static bool data_screen_should_rest_still(const jr_display_ctx_t *ctx)
            (!ripple || now - ripple >= HUD_RIPPLE_MS) &&
            (!bloom || now - bloom >= HUD_BLOOM_MS) &&
            !jr_display_canvas_active() && !jr_display_surface_is_active() &&
+           !jr_display_gist_active() &&
            (!caption || (caption & JR_DISPLAY_CAPTION_AMBIENT)) &&
            !atomic_load(&s_caption_pinned) &&
            s_space_prog == 256 &&
+           s_style_prog == 256 &&
+           s_dip_phase == DIP_IDLE && !s_cine_active &&
            s_space_serial_seen == (uint8_t)(nav >> NAV_SERIAL_SHIFT) &&
            s_detail_ease == 0 && s_shade_ease == 0 &&
            s_ask_ease == 0 && s_canvas_ease == 0 &&
@@ -10175,6 +10658,7 @@ static bool data_screen_should_rest_still(const jr_display_ctx_t *ctx)
            !rim_level_active(now) &&
            !jr_display_boot_ignition_active() && s_boot_ign_ease == 0 &&
            !jr_display_desk_mode_active() &&
+           !jr_display_aquarium_active() &&
            (!glass3_active() || s_g3_orbit_age_ms >= G3_ORBIT_SETTLE_MS) &&
            diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF &&
            jr_display_hud_enabled();
@@ -10216,9 +10700,12 @@ static bool quiet_eligible(const jr_display_ctx_t *ctx)
            (!ripple || now - ripple >= HUD_RIPPLE_MS) &&
            (!bloom || now - bloom >= HUD_BLOOM_MS) &&
            !jr_display_canvas_active() && !jr_display_surface_is_active() &&
+           !jr_display_gist_active() &&
            (!caption || (caption & JR_DISPLAY_CAPTION_AMBIENT)) &&
            !atomic_load(&s_caption_pinned) &&
            s_space_to == JR_DISPLAY_SPACE_JARVIS && s_space_prog == 256 &&
+           s_style_prog == 256 &&
+           s_dip_phase == DIP_IDLE && !s_cine_active &&
            s_space_serial_seen == (uint8_t)(nav >> NAV_SERIAL_SHIFT) &&
            s_detail_ease == 0 && s_shade_ease == 0 &&
            s_ask_ease == 0 && s_canvas_ease == 0 &&
@@ -10232,6 +10719,7 @@ static bool quiet_eligible(const jr_display_ctx_t *ctx)
            !rim_level_active(now) &&
            !jr_display_boot_ignition_active() && s_boot_ign_ease == 0 &&
            !jr_display_desk_mode_active() &&
+           !jr_display_aquarium_active() &&
            (!g3 || s_g3_orbit_age_ms >= G3_ORBIT_SETTLE_MS) &&
            diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF &&
            jr_display_hud_enabled();
@@ -10290,7 +10778,7 @@ static uint8_t watch_rim_mode(const jr_display_ctx_t *ctx, uint32_t env_word)
     /* the screen on the glass, not the one asked for: a swipe or a dip changes the
      * space at its cut, and the screen leaving keeps its own ring until then */
     const bool sliding = s_space_prog < 256;
-    const bool past_cut = s_dip_mode == DIP_MODE_SPACE ? s_dip_swapped : s_space_prog >= TR_CUT_SLIDE;
+    const bool past_cut = tr_is_cut_swap() ? tr_cut_swapped() : s_space_prog >= TR_CUT_SLIDE;
     const uint8_t shown = sliding && !past_cut ? s_space_from : s_space_to;
     if (shown != (uint8_t)JR_DISPLAY_SPACE_WATCH) {
         return HUD_RIM_RING;
@@ -10609,6 +11097,104 @@ static void apply_g3_desk_mode_overlay(const jr_display_ctx_t *ctx, int y1, int 
     }
 }
 
+/* Glass 3.7+: Nano Reef Virtual Aquarium Overlay.
+ * Fast-paths out in 1 atomic load when inactive. Strictly clipped inside
+ * r <= JR_DISPLAY_SHELL_R_MAX (214) so outer privacy ring & battery rim
+ * remain 100% untouched. Steps physics once at y1 == 0, then renders strips
+ * + subtle frosted HH:MM pill (y=68..92) & brief 2.2s biome toast pill. */
+static void apply_g3_aquarium_overlay(const jr_display_ctx_t *ctx, int x1, int y1,
+                                      int x2, int y2, uint16_t *pixels,
+                                      uint32_t frame_ms)
+{
+    const uint32_t sw = atomic_load_explicit(&s_aq_slot, memory_order_acquire);
+    if ((sw & 2u) == 0u || pixels == NULL || x1 != 0 || x2 != HUD_W || y2 <= y1) {
+        return;
+    }
+
+    if (y1 == 0) {
+        /* Drain pending tap events & shake pulses before stepping the frame. */
+        for (int ti = 0; ti < 4; ++ti) {
+            const uint32_t tw = atomic_exchange_explicit(&s_aq_tap_ring[ti], 0u,
+                                                         memory_order_acq_rel);
+            if ((tw & 0x80000000u) != 0u) {
+                jr_aquarium_tap((uint16_t)(tw & 0x0FFFu),
+                                (uint16_t)((tw >> 12) & 0x0FFFu));
+            }
+        }
+        const uint32_t sh = atomic_load_explicit(&s_aq_shake_seq, memory_order_acquire);
+        if (sh != s_aq_shake_seen) {
+            s_aq_shake_seen = sh;
+            jr_aquarium_shake();
+        }
+        const jr_display_aq_state_t snap = s_aq_snap[sw & 1u];
+        jr_aquarium_step(frame_ms, s_tilt.x, s_tilt.y, &snap);
+    }
+
+    const bool swap = ctx->board.swap_color_bytes;
+    jr_aquarium_rows(pixels, y1, y2 - y1, swap);
+
+    /* Subtle frosted HH:MM pill at y = 68..92 (pure living water >= 90%). */
+    uint32_t cw = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
+#ifdef ESP_PLATFORM
+    if ((cw & (1u << 16)) == 0u) {
+        cw = s_home_wall_hhmm;
+    }
+#endif
+    const bool show_time = (cw & (1u << 16)) != 0u && y1 <= 93 && y2 > 67;
+    char tbuf[6];
+    int thw = 0;
+    sg_txt_t t_hhmm = {0};
+    if (show_time) {
+        dream_clock_text(tbuf, cw);
+        const int tw = glass_text_width(GLASS_FONT_TEXT, tbuf, 5u, 2);
+        thw = tw / 2 + 13;
+        if (thw < 26) {
+            thw = 26;
+        }
+        sg_txt_make(&t_hhmm, GLASS_FONT_TEXT, tbuf, 5, SP_CX, 73, 2, SP_C_INK, 235);
+    }
+
+    /* Brief 2.2s biome pill on open/biome switch at y = 392..414. */
+    uint8_t ba = 0u;
+    const char *blbl = (y1 <= 415 && y2 > 391)
+        ? jr_aquarium_biome_toast(frame_ms, &ba) : NULL;
+    const bool show_biome = (blbl != NULL && ba > 0u);
+    int bhw = 0;
+    sg_txt_t t_biome = {0};
+    if (show_biome) {
+        const int blen = sp_len(blbl, 18);
+        const int bw = glass_text_width(GLASS_FONT_LABEL, blbl, (size_t)blen, 2);
+        bhw = bw / 2 + 14;
+        if (bhw > 108) {
+            bhw = 108;
+        }
+        sg_txt_make(&t_biome, GLASS_FONT_LABEL, blbl, blen, SP_CX, 398, 2,
+                    0xDFFFu, (int)ba);
+    }
+
+    if (!show_time && !show_biome) {
+        return;
+    }
+    for (int y = y1; y < y2; ++y) {
+        int lo = 0, hi = HUD_W - 1;
+        if (!sp_clip(y, &lo, &hi)) {
+            continue;
+        }
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        if (show_time && y >= 68 && y <= 92) {
+            sp_pill_row(row, y, lo, hi, SP_CX, 80, thw, 12,
+                        0x00A4u, 132u, 0x3D9Bu, 128u, swap);
+            sg_txt_row(row, y, lo, hi, swap, &t_hhmm);
+        }
+        if (show_biome && y >= 392 && y <= 414) {
+            sp_pill_row(row, y, lo, hi, SP_CX, 403, bhw, 11,
+                        0x0083u, (uint8_t)((155u * (uint32_t)ba) / 255u),
+                        0x26BDu, (uint8_t)((165u * (uint32_t)ba) / 255u), swap);
+            sg_txt_row(row, y, lo, hi, swap, &t_biome);
+        }
+    }
+}
+
 /* Glass 3.5: Procedural Cold-Boot Ignition Splash + 450 ms exit crossfade.
  * While active=true clears to pure OLED #000000 so zero uninitialized/blank
  * flash appears; during exit crossfade smoothly dims Home underneath while
@@ -10749,12 +11335,19 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
     const bool dmode_show = jr_display_desk_mode_active() &&
                             !canvas_on && !under_sheet_now &&
                             cn_now == 0 && s_ask_ease == 0;
+    const bool aq_show = jr_display_aquarium_active() &&
+                         !dmode_show && !canvas_on && !under_sheet_now &&
+                         cn_now == 0 && s_ask_ease == 0 &&
+                         !jr_display_surface_is_active() &&
+                         !jr_display_gist_active();
     const jr_display_space_t nav_space =
         (jr_display_space_t)(__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) & NAV_SPACE_MASK);
+    const bool cut_hold_old = tr_is_cut_swap() && !tr_cut_swapped();
+    const uint8_t active_sp = cut_hold_old ? s_space_from : s_space_to;
     const bool g3_home_eligible =
-        g3 && !dmode_show && !canvas_on && !under_sheet_now && cn_now == 0 &&
-        s_space_to == (uint8_t)JR_DISPLAY_SPACE_JARVIS &&
-        nav_space == JR_DISPLAY_SPACE_JARVIS &&
+        g3 && !dmode_show && !aq_show && !canvas_on && !under_sheet_now && cn_now == 0 &&
+        active_sp == (uint8_t)JR_DISPLAY_SPACE_JARVIS &&
+        (cut_hold_old || nav_space == JR_DISPLAY_SPACE_JARVIS) &&
         s_watch_s == 0 && s_space_black < 256;
     const bool voice_live =
         env.face == HUD_FACE_LISTEN || env.face == HUD_FACE_THINK ||
@@ -10767,6 +11360,18 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
     if (dmode_show) {
         const uint32_t frame_ms = s_fade_prev_ms != 0u ? s_fade_prev_ms : now_ms;
         apply_g3_desk_mode_overlay(ctx, y1, y2, pixels, frame_ms);
+    } else if (aq_show) {
+        const uint32_t frame_ms = s_fade_prev_ms != 0u ? s_fade_prev_ms : now_ms;
+        if (env.privacy_muted || env.rim == HUD_RIM_RING) {
+            hud_env_t aq_rim = env;
+            aq_rim.face = HUD_FACE_IDLE;
+            if (env.privacy_muted) {
+                aq_rim.rim = HUD_RIM_RING;
+            }
+            hud_overlay_frame(pixels, y1, nrows, now_ms,
+                              ctx->board.swap_color_bytes, &aq_rim);
+        }
+        apply_g3_aquarium_overlay(ctx, x1, y1, x2, y2, pixels, frame_ms);
     } else if (canvas_on) {
         /* Remote canvas owns the entire 466x466 glass cleanly: suppress voice
          * halos and battery rim so pushed artwork is 100% unobstructed. */
@@ -10806,9 +11411,9 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                               ctx->board.swap_color_bytes, &env);
         }
     } else {
-        if (g3 && (s_space_to == (uint8_t)JR_DISPLAY_SPACE_WEATHER ||
-                   s_space_to == (uint8_t)JR_DISPLAY_SPACE_STATUS ||
-                   s_space_to == (uint8_t)JR_DISPLAY_SPACE_DESK)) {
+        if (g3 && (active_sp == (uint8_t)JR_DISPLAY_SPACE_WEATHER ||
+                   active_sp == (uint8_t)JR_DISPLAY_SPACE_STATUS ||
+                   active_sp == (uint8_t)JR_DISPLAY_SPACE_DESK)) {
             /* Atmosphaera & Cortex Command own the full 360-deg perimeter. */
             env.rim = HUD_RIM_NONE;
         }
@@ -10821,11 +11426,11 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
      * and clamped to r <= 56 in Aetherium mode (strictly clear of the lower
      * vocal ribbon y=286..334) and r <= 86 in Chrono-Arc (inside r<106). */
     if (__atomic_load_n(&s_holo_on, __ATOMIC_ACQUIRE) != 0u &&
-        !dmode_show && !canvas_on &&
-        s_space_to == (uint8_t)JR_DISPLAY_SPACE_JARVIS &&
+        !dmode_show && !aq_show && !canvas_on &&
+        active_sp == (uint8_t)JR_DISPLAY_SPACE_JARVIS &&
         s_watch_s == 0 && s_detail_ease == 0 && s_shade_ease == 0 &&
         cn_now == 0 && s_ask_ease == 0) {
-        if (nav_space == JR_DISPLAY_SPACE_JARVIS) {
+        if (cut_hold_old || nav_space == JR_DISPLAY_SPACE_JARVIS) {
             const jr_face_t af = (jr_face_t)diag_load(&ctx->applied_face);
             jr_holo_mode_t hmode = JR_HOLO_IDLE;
             if (env.privacy_muted || af == JR_FACE_MUTED) {
@@ -10857,6 +11462,29 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
         int ring_s = 256 - s_space_black;
         if (ring_s > 255) ring_s = 255;
         apply_g3_home_typography(ctx, y1, y2, pixels, now_ms, env.privacy_muted, ring_s);
+    }
+
+    /* Glass 3.7: Subtle barge-in hint while speaking on Glass 3 Home. Sits at
+     * y = 356 (between Aetherium vocal ribbon y <= 334 and captions y >= 374)
+     * and yields cleanly to modals, gist, timer, and stopwatch. */
+    if (g3 && env.face == HUD_FACE_SPEAK && g3_home_eligible &&
+        !jr_display_surface_is_active() && !jr_display_gist_active() &&
+        !jr_display_timer_active() && !sp_stopwatch_active() &&
+        s_ask_ease == 0 && y1 <= 370 && y2 > 352) {
+        static const char k_cut_in[] = "TALK OR TAP TO CUT IN";
+        int ring_s = 256 - s_space_black;
+        if (ring_s > 255) ring_s = 255;
+        if (ring_s > 0) {
+            sg_txt_t t_cut;
+            sg_txt_make(&t_cut, GLASS_FONT_LABEL, k_cut_in, (int)(sizeof k_cut_in - 1u),
+                        SP_CX, 356, 1, 0x8C71u, (ring_s * 145) / 255);
+            for (int y = y1; y < y2; ++y) {
+                int lo = 0, hi = HUD_W - 1;
+                if (!sp_clip(y, &lo, &hi)) continue;
+                uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+                sg_txt_row(row, y, lo, hi, ctx->board.swap_color_bytes, &t_cut);
+            }
+        }
     }
 
     /* TRANS-05 tap ripple: the EARLIEST overlay — it is feedback, not
@@ -10891,7 +11519,7 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
          * draws nothing at all in JARVIS at rest. */
         /* A style change dips the layer under the dial in the same way a slide
          * does; it is not a slide, so it has no space overlay to carry it. */
-        if (!dmode_show) {
+        if (!dmode_show && !aq_show) {
             if (s_style_black > 0 && !s_parked) {
                 sp_veil_black(ctx, y1, y2, pixels, (s_style_black * 32) >> 8);
             }
@@ -11012,10 +11640,11 @@ static void apply_shell_overlay(jr_display_ctx_t *ctx, int x1, int y1,
         rim_level_active((uint32_t)(esp_timer_get_time() / 1000))) {
         return;
     }
+    const uint8_t active_sp = (tr_is_cut_swap() && !tr_cut_swapped()) ? s_space_from : s_space_to;
     if (glass3_active() &&
-        (s_space_to == (uint8_t)JR_DISPLAY_SPACE_JARVIS ||
-         s_space_to == (uint8_t)JR_DISPLAY_SPACE_STATUS ||
-         s_space_to == (uint8_t)JR_DISPLAY_SPACE_DESK)) {
+        (active_sp == (uint8_t)JR_DISPLAY_SPACE_JARVIS ||
+         active_sp == (uint8_t)JR_DISPLAY_SPACE_STATUS ||
+         active_sp == (uint8_t)JR_DISPLAY_SPACE_DESK)) {
         /* Chrono-Arc's 12 o'clock AI capsule & Cortex Command's AGENT quadrant
          * already carry agent progress cleanly in Glass 3.0 without overlapping. */
         return;
@@ -11081,6 +11710,546 @@ static void apply_shell_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                 if (completed >= 8 || challenge_sector_from_vector(dx, dy) < completed) {
                     row[x - x1] = accent;
                 }
+            }
+        }
+    }
+}
+
+/* Glass 3.7: 20-second Reply Gist card ("Every turn ends with something to
+ * look at"). Solid obsidian OLED disc strictly inside r <= 214 with a smooth
+ * draining rim hairline (r = 207..211) colored by kind, eyebrow capsule,
+ * auto-sized focal hero, tapered divider, wrapped detail lines, and footer.
+ * Zero pixels written outside r <= 214 (privacy ring & battery rim untouched). */
+static uint16_t gist_accent(uint8_t kind)
+{
+    switch (kind) {
+    case 2u: /* EVENT */
+    case 3u: /* TIMER */
+        return 0x07FFu; /* electric Ice cyan */
+    case 4u: /* NOTE */
+        return 0x4F14u; /* emerald Leaf green */
+    case 6u: /* BRIEFING */
+        return 0xB4BFu; /* luminous violet */
+    case 1u: /* NUMBER */
+    case 5u: /* WEATHER */
+    case 7u: /* ANSWER */
+    default:
+        return 0xFD20u; /* warm Ember gold */
+    }
+}
+
+static const char *gist_default_eyebrow(uint8_t kind)
+{
+    switch (kind) {
+    case 1u: return "NUMBER";
+    case 2u: return "EVENT";
+    case 3u: return "TIMER";
+    case 4u: return "NOTE";
+    case 5u: return "WEATHER";
+    case 6u: return "BRIEFING";
+    case 7u:
+    default: return "ANSWER";
+    }
+}
+
+static bool gist_font_covers(glass_font_id_t font, const char *s, size_t len)
+{
+    if (s == NULL) {
+        return false;
+    }
+    for (size_t i = 0u; i < len && s[i] != '\0'; ++i) {
+        const unsigned char c = (unsigned char)s[i];
+        if (c == ' ') {
+            continue;
+        }
+        if (c < 0x80u) {
+            if (glass_font_glyph(font, (uint32_t)c) == NULL) {
+                return false;
+            }
+        } else if (c == 0xC2u && i + 1u < len) {
+            const uint32_t cp = (uint32_t)(unsigned char)s[i + 1u];
+            if (glass_font_glyph(font, cp) == NULL) {
+                return false;
+            }
+            i++;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void apply_gist_overlay(jr_display_ctx_t *ctx, int x1, int y1,
+                               int x2, int y2, uint16_t *pixels)
+{
+    if (pixels == NULL || x1 != 0 || x2 != HUD_W || y2 <= y1) {
+        return;
+    }
+    if (jr_display_surface_is_active() ||
+        __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE) > 0 ||
+        s_ask_ease > 0 || s_shade_ease > 0 || s_detail_ease > 0 ||
+        s_canvas_ease > 0 || jr_display_desk_mode_active()) {
+        return;
+    }
+    const uint32_t sw = atomic_load_explicit(&s_gist_slot, memory_order_acquire);
+    if ((sw & 2u) == 0u) {
+        return;
+    }
+    const uint32_t now_ms = s_fade_prev_ms != 0u
+                            ? s_fade_prev_ms
+                            : (uint32_t)(esp_timer_get_time() / 1000);
+    const uint32_t exp_ms = atomic_load_explicit(&s_gist_expires_ms, memory_order_acquire);
+    const int32_t rem_signed = (int32_t)(exp_ms - now_ms);
+    if (rem_signed <= 0) {
+        return;
+    }
+    const uint32_t tot_ms = atomic_load_explicit(&s_gist_total_ms, memory_order_acquire);
+    const uint32_t denom = tot_ms > 0u ? tot_ms : GIST_TTL_DEFAULT_MS;
+    uint32_t rem_ms = (uint32_t)rem_signed;
+    if (rem_ms > denom) {
+        rem_ms = denom;
+    }
+    const jr_display_gist_t gist = s_gist[sw & 1u];
+
+    const bool swap = ctx->board.swap_color_bytes;
+    const uint16_t accent = gist_accent(gist.kind);
+    const uint16_t accent_hi = surface_lerp565(accent, 0xFFFFu, 150);
+    const uint16_t accent_dark = surface_lerp565(0x0864u, accent, 42);
+    const uint16_t track_col = surface_lerp565(0x1082u, accent, 55);
+    const uint16_t disc_core = surface_lerp565(0x0021u, accent, 14);
+    const uint16_t detail2_col = surface_lerp565(0xB5D6u, accent, 75);
+
+    const glass_metrics_t ml = glass_font_metrics(GLASS_FONT_LABEL);
+
+    /* Top eyebrow capsule (y = 70..94, GLASS_FONT_LABEL) */
+    const char *eyebrow = gist.eyebrow[0] != '\0'
+                          ? gist.eyebrow : gist_default_eyebrow(gist.kind);
+    char eb_buf[24];
+    int eb_len = sp_str(eb_buf, 0, (int)sizeof eb_buf, eyebrow);
+    eb_len = sp_fit_width(GLASS_FONT_LABEL, eb_buf, eb_len, 2, 224);
+    const int eb_w = glass_text_width(GLASS_FONT_LABEL, eb_buf, (size_t)eb_len, 2);
+    int eb_hw = eb_w / 2 + 16;
+    if (eb_hw > 132) eb_hw = 132;
+    const int eb_x0 = (HUD_W / 2) - eb_hw;
+    const int eb_x1 = (HUD_W / 2) + eb_hw;
+    const int eb_tx = (HUD_W - eb_w) / 2 + 1;
+    const int eb_ty = 82 - ml.cap_h / 2;
+
+    /* Focal hero line (y = 128..190): HERO if numeric & <= 300 px,
+     * else VALUE if covered & <= 310 px, else wrapped TEXT/LABEL. */
+    const size_t hero_len = strnlen(gist.hero, sizeof gist.hero - 1u);
+    const char *h_ptr[3] = {NULL, NULL, NULL};
+    size_t h_len[3] = {0u, 0u, 0u};
+    int h_lines = 0;
+    glass_font_id_t h_font = GLASS_FONT_TEXT;
+    int h_track = 1;
+    if (hero_len > 0u) {
+        if (hero_len <= 8u &&
+            gist_font_covers(GLASS_FONT_HERO, gist.hero, hero_len) &&
+            glass_text_width(GLASS_FONT_HERO, gist.hero, hero_len, 0) <= 300) {
+            h_font = GLASS_FONT_HERO;
+            h_track = 0;
+            h_ptr[0] = gist.hero;
+            h_len[0] = hero_len;
+            h_lines = 1;
+        } else if (gist_font_covers(GLASS_FONT_VALUE, gist.hero, hero_len) &&
+                   glass_text_width(GLASS_FONT_VALUE, gist.hero, hero_len, 1) <= 310) {
+            h_font = GLASS_FONT_VALUE;
+            h_track = 1;
+            h_ptr[0] = gist.hero;
+            h_len[0] = hero_len;
+            h_lines = 1;
+        } else {
+            h_font = GLASS_FONT_TEXT;
+            h_track = 1;
+            if (!surface_wrap_text(GLASS_FONT_TEXT, 1, gist.hero, hero_len, 304, 2,
+                                   h_ptr, h_len, &h_lines)) {
+                h_font = GLASS_FONT_LABEL;
+                h_track = 1;
+                (void)surface_wrap_text(GLASS_FONT_LABEL, 1, gist.hero, hero_len, 304, 2,
+                                        h_ptr, h_len, &h_lines);
+            }
+        }
+    }
+    const glass_metrics_t mh = glass_font_metrics(h_font);
+    int h_x[2] = {0, 0}, h_y[2] = {0, 0};
+    if (h_lines == 1) {
+        const int w = glass_text_width(h_font, h_ptr[0], h_len[0], h_track);
+        h_x[0] = (HUD_W - w) / 2;
+        h_y[0] = 159 - mh.cap_h / 2;
+    } else if (h_lines >= 2) {
+        const int step = mh.cap_h + 9;
+        const int top = 159 - (mh.cap_h + step) / 2;
+        for (int i = 0; i < 2; ++i) {
+            const int w = glass_text_width(h_font, h_ptr[i], h_len[i], h_track);
+            h_x[i] = (HUD_W - w) / 2;
+            h_y[i] = top + i * step;
+        }
+    }
+
+    /* Detail + optional detail2 lines (strictly inside y = 216..312) */
+    const size_t d1_slen = strnlen(gist.detail, sizeof gist.detail - 1u);
+    const size_t d2_slen = strnlen(gist.detail2, sizeof gist.detail2 - 1u);
+    const char *dl_ptr[4] = {NULL, NULL, NULL, NULL};
+    size_t dl_len[4] = {0u, 0u, 0u, 0u};
+    glass_font_id_t dl_font[4] = {GLASS_FONT_TEXT, GLASS_FONT_TEXT, GLASS_FONT_TEXT, GLASS_FONT_TEXT};
+    int dl_track[4] = {0, 0, 0, 0};
+    uint16_t dl_col[4] = {0xE73Fu, 0xE73Fu, 0xE73Fu, 0xE73Fu};
+    uint8_t dl_a[4] = {245u, 245u, 245u, 245u};
+    int dl_n = 0;
+
+    if (d1_slen > 0u) {
+        const int max1 = d2_slen > 0u ? 2 : 3;
+        const char *tmp_p[3] = {NULL, NULL, NULL};
+        size_t tmp_l[3] = {0u, 0u, 0u};
+        int tmp_n = 0;
+        glass_font_id_t f1 = GLASS_FONT_TEXT;
+        int tr1 = 0;
+        if (!surface_wrap_text(GLASS_FONT_TEXT, 0, gist.detail, d1_slen, 304, max1,
+                               tmp_p, tmp_l, &tmp_n)) {
+            f1 = GLASS_FONT_LABEL;
+            tr1 = 1;
+            (void)surface_wrap_text(GLASS_FONT_LABEL, 1, gist.detail, d1_slen, 304, max1,
+                                    tmp_p, tmp_l, &tmp_n);
+        }
+        for (int i = 0; i < tmp_n && dl_n < 4; ++i) {
+            dl_ptr[dl_n] = tmp_p[i];
+            dl_len[dl_n] = tmp_l[i];
+            dl_font[dl_n] = f1;
+            dl_track[dl_n] = tr1;
+            dl_col[dl_n] = 0xE73Fu;
+            dl_a[dl_n] = 245u;
+            dl_n++;
+        }
+    }
+    if (d2_slen > 0u && dl_n < 4) {
+        int max2 = 4 - dl_n;
+        if (max2 > 2) max2 = 2;
+        const char *tmp_p[3] = {NULL, NULL, NULL};
+        size_t tmp_l[3] = {0u, 0u, 0u};
+        int tmp_n = 0;
+        glass_font_id_t f2 = GLASS_FONT_TEXT;
+        int tr2 = 0;
+        if (!surface_wrap_text(GLASS_FONT_TEXT, 0, gist.detail2, d2_slen, 304, max2,
+                               tmp_p, tmp_l, &tmp_n)) {
+            f2 = GLASS_FONT_LABEL;
+            tr2 = 1;
+            (void)surface_wrap_text(GLASS_FONT_LABEL, 1, gist.detail2, d2_slen, 304, max2,
+                                    tmp_p, tmp_l, &tmp_n);
+        }
+        for (int i = 0; i < tmp_n && dl_n < 4; ++i) {
+            dl_ptr[dl_n] = tmp_p[i];
+            dl_len[dl_n] = tmp_l[i];
+            dl_font[dl_n] = f2;
+            dl_track[dl_n] = tr2;
+            dl_col[dl_n] = detail2_col;
+            dl_a[dl_n] = 230u;
+            dl_n++;
+        }
+    }
+
+    int dl_x[4] = {0, 0, 0, 0};
+    int dl_y[4] = {0, 0, 0, 0};
+    glass_metrics_t dl_m[4];
+    if (dl_n > 0) {
+        const int gap = 9;
+        int total_h = 0;
+        for (int i = 0; i < dl_n; ++i) {
+            dl_m[i] = glass_font_metrics(dl_font[i]);
+            total_h += dl_m[i].cap_h;
+            if (i + 1 < dl_n) {
+                total_h += gap;
+            }
+        }
+        int cur_y = 264 - total_h / 2;
+        if (cur_y < 218) cur_y = 218;
+        for (int i = 0; i < dl_n; ++i) {
+            const int w = glass_text_width(dl_font[i], dl_ptr[i], dl_len[i], dl_track[i]);
+            dl_x[i] = (HUD_W - w) / 2;
+            dl_y[i] = cur_y;
+            cur_y += dl_m[i].cap_h + gap;
+        }
+    }
+
+    /* Footer / clear hint (y = 336..364, GLASS_FONT_LABEL) */
+    const char *footer = gist.footer[0] != '\0'
+                         ? gist.footer : "TAP OR SWIPE TO CLEAR";
+    char ft_buf[24];
+    int ft_len = sp_str(ft_buf, 0, (int)sizeof ft_buf, footer);
+    ft_len = sp_fit_width(GLASS_FONT_LABEL, ft_buf, ft_len, 1, 276);
+    const int ft_w = glass_text_width(GLASS_FONT_LABEL, ft_buf, (size_t)ft_len, 1);
+    const int ft_x = (HUD_W - ft_w) / 2;
+    const int ft_ty = 350 - ml.cap_h / 2;
+
+    const int32_t cx16 = (HUD_W / 2) * 16;
+    const int32_t cy16 = (HUD_H / 2) * 16;
+    const int32_t drain_sweep =
+        (int32_t)(((uint64_t)rem_ms * (uint64_t)GLASS_TURN_Q16) / (uint64_t)denom);
+
+    for (int y = y1; y < y2; ++y) {
+        int lo = 0, hi = HUD_W - 1;
+        if (!surface_clip_x(y, &lo, &hi)) {
+            continue; /* strictly inside r <= 214: privacy ring at r=221 untouched */
+        }
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+
+        /* 1. Solid obsidian disc inside r <= 214 */
+        const int dy = y - (int)(HUD_H / 2);
+        const int dy2 = dy * dy;
+        for (int x = lo; x <= hi; ++x) {
+            const int dx = x - (int)(HUD_W / 2);
+            const int r2 = dx * dx + dy2;
+            const uint16_t bg = r2 < 145 * 145 ? disc_core : 0x0000u;
+            row[x] = glass_blend565(row[x], bg, 255u, swap);
+        }
+
+        /* 2. Draining rim hairline (r = 207..211, clipped strictly to r <= 214) */
+        glass_ring_row(row, y, lo, hi, cx16, cy16, 208 * 16, 210 * 16,
+                       0, GLASS_TURN_Q16, track_col, 46u, swap);
+        if (drain_sweep > 0) {
+            glass_glow_row(row, y, lo, hi, cx16, cy16, 207 * 16, 211 * 16,
+                           GLASS_Q16_12_OCLOCK, drain_sweep, true, 10 * 16, 64u,
+                           accent, 235u, swap);
+            glass_arc_row(row, y, lo, hi, cx16, cy16, 207 * 16, 211 * 16,
+                          GLASS_Q16_12_OCLOCK, drain_sweep, accent, 245u, swap);
+            glass_arc_row(row, y, lo, hi, cx16, cy16, 208 * 16, 209 * 16 + 8,
+                          GLASS_Q16_12_OCLOCK, drain_sweep, 0xFFFFu, 68u, swap);
+        }
+
+        /* 3. Top eyebrow capsule (y = 70..94) */
+        if (y >= 70 && y <= 94) {
+            surface_rrect_row(row, y, lo, hi, eb_x0, 70, eb_x1, 94, 12,
+                              accent_dark, 225u, accent, 210u, accent_hi, 75u, swap);
+            if (y >= eb_ty + ml.ink_top && y <= eb_ty + ml.ink_bottom) {
+                glass_text_row(row, y, lo, hi, GLASS_FONT_LABEL, eb_buf, (size_t)eb_len,
+                               eb_tx, eb_ty, 2, accent_hi, 255u, swap);
+            }
+        }
+
+        /* 4. Large focal hero line (y = 128..190) */
+        for (int i = 0; i < h_lines; ++i) {
+            if (y >= h_y[i] + mh.ink_top && y <= h_y[i] + mh.ink_bottom) {
+                glass_text_row(row, y, lo, hi, h_font, h_ptr[i], h_len[i],
+                               h_x[i], h_y[i], h_track, 0xFFFFu, 255u, swap);
+            }
+        }
+
+        /* 5. Subtle tapered hairline divider (y = 204) */
+        if (y == 204) {
+            int dxa = 92 < lo ? lo : 92;
+            int dxb = 374 > hi ? hi : 374;
+            for (int x = dxa; x <= dxb; ++x) {
+                int adx = x - (int)(HUD_W / 2);
+                if (adx < 0) adx = -adx;
+                const int fade = 141 - adx;
+                if (fade > 0) {
+                    const unsigned a = (unsigned)((fade * 135) / 141);
+                    row[x] = glass_blend565(row[x], accent, a, swap);
+                }
+            }
+        }
+
+        /* 6. Crisp detail + optional detail2 lines (y = 216..312) */
+        for (int i = 0; i < dl_n; ++i) {
+            if (y >= dl_y[i] + dl_m[i].ink_top && y <= dl_y[i] + dl_m[i].ink_bottom) {
+                glass_text_row(row, y, lo, hi, dl_font[i], dl_ptr[i], dl_len[i],
+                               dl_x[i], dl_y[i], dl_track[i], dl_col[i], dl_a[i], swap);
+            }
+        }
+
+        /* 7. Muted footer / hint (y = 336..364) */
+        if (y >= ft_ty + ml.ink_top && y <= ft_ty + ml.ink_bottom) {
+            glass_text_row(row, y, lo, hi, GLASS_FONT_LABEL, ft_buf, (size_t)ft_len,
+                           ft_x, ft_ty, 1, 0x8430u, 185u, swap);
+        }
+    }
+}
+
+/* Glass 3.7: Fast tear-free PSRAM dual-frame Cinema compositor (IRIS & GLIDE).
+ * Pure integer row spans strictly inside r <= 214 (preserving outer privacy
+ * ring at r > 214), 100% strip-invariant across arbitrary [y1, y2) slices. */
+static void apply_cine_composite(const jr_display_ctx_t *ctx, int y1, int y2,
+                                 uint16_t *pixels)
+{
+    if (s_cine_from == NULL || s_cine_to == NULL || pixels == NULL ||
+        y1 < 0 || y2 > HUD_H || y2 <= y1) {
+        return;
+    }
+    const bool swap = ctx->board.swap_color_bytes;
+    const bool muted = sp_privacy_muted();
+    const int ease = s_cine_ease < 0 ? 0 : (s_cine_ease > 256 ? 256 : s_cine_ease);
+
+    if (s_cine_mode == JR_TRANSITION_IRIS) {
+        const int R = (222 * ease) >> 8;
+        const int r_in = R - 3;
+        const int r_out = R + 3;
+        const int r_in2 = r_in > 0 ? r_in * r_in : -1;
+        const int r_out2 = r_out * r_out;
+        const int r_mid2 = R * R;
+        const uint16_t accent = muted ? 0xFD20u : 0x07FFu;
+        const uint16_t accent_bright = surface_lerp565(accent, 0xFFFFu, 115);
+        int glow_scale = 256;
+        if (R < 8) {
+            glow_scale = (R * 256) / 8;
+        } else if (R > 208) {
+            glow_scale = R >= 222 ? 0 : ((222 - R) * 256) / 14;
+        }
+
+        for (int y = y1; y < y2; ++y) {
+            uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+            const uint16_t *src_f = s_cine_from + (size_t)y * HUD_W;
+            const uint16_t *src_t = s_cine_to + (size_t)y * HUD_W;
+            const int d = y < DIAL_SPAN_N ? DIAL_SPAN_N - 1 - y : y - DIAL_SPAN_N;
+            const int ga = DIAL_SPAN_N - 1 - s_dial_span[d];
+            const int gb = DIAL_SPAN_N + s_dial_span[d];
+            const uint16_t *rim_src = (R >= 214) ? src_t : src_f;
+
+            int lo = 0, hi = -1;
+            if (!surface_clip_x(y, &lo, &hi)) {
+                memcpy(row + ga, rim_src + ga, (size_t)(gb - ga + 1) * sizeof(uint16_t));
+                continue;
+            }
+            if (ga < lo) {
+                memcpy(row + ga, rim_src + ga, (size_t)(lo - ga) * sizeof(uint16_t));
+            }
+            if (hi < gb) {
+                memcpy(row + hi + 1, rim_src + hi + 1, (size_t)(gb - hi) * sizeof(uint16_t));
+            }
+
+            const int dy = y - SP_CY;
+            const int dy2 = dy * dy;
+            if (dy2 > r_out2) {
+                memcpy(row + lo, src_f + lo, (size_t)(hi - lo + 1) * sizeof(uint16_t));
+                continue;
+            }
+            const int dx_out = surface_isqrt(r_out2 - dy2);
+            const int out_l = SP_CX - dx_out;
+            const int out_r = SP_CX + dx_out;
+            if (lo < out_l) {
+                const int end = out_l - 1 < hi ? out_l - 1 : hi;
+                if (lo <= end) {
+                    memcpy(row + lo, src_f + lo, (size_t)(end - lo + 1) * sizeof(uint16_t));
+                }
+            }
+            if (out_r < hi) {
+                const int start = out_r + 1 > lo ? out_r + 1 : lo;
+                if (start <= hi) {
+                    memcpy(row + start, src_f + start, (size_t)(hi - start + 1) * sizeof(uint16_t));
+                }
+            }
+            const int fl = out_l < lo ? lo : out_l;
+            const int fr = out_r > hi ? hi : out_r;
+            int span_a[2], span_b[2], nspans = 0;
+            if (r_in > 0 && dy2 < r_in2) {
+                const int dx_in = surface_isqrt(r_in2 - dy2);
+                const int in_l = SP_CX - dx_in;
+                const int in_r = SP_CX + dx_in;
+                const int cl = in_l < lo ? lo : in_l;
+                const int cr = in_r > hi ? hi : in_r;
+                if (cl <= cr) {
+                    memcpy(row + cl, src_t + cl, (size_t)(cr - cl + 1) * sizeof(uint16_t));
+                }
+                if (fl <= in_l - 1) {
+                    span_a[nspans] = fl;
+                    span_b[nspans] = (in_l - 1) < fr ? (in_l - 1) : fr;
+                    if (span_a[nspans] <= span_b[nspans]) nspans++;
+                }
+                if (in_r + 1 <= fr) {
+                    span_a[nspans] = (in_r + 1) > fl ? (in_r + 1) : fl;
+                    span_b[nspans] = fr;
+                    if (span_a[nspans] <= span_b[nspans]) nspans++;
+                }
+            } else if (fl <= fr) {
+                span_a[0] = fl;
+                span_b[0] = fr;
+                nspans = 1;
+            }
+            for (int si = 0; si < nspans; ++si) {
+                for (int x = span_a[si]; x <= span_b[si]; ++x) {
+                    const int dx = x - SP_CX;
+                    const int r2 = dx * dx + dy2;
+                    if (r_in > 0 && r2 < r_in2) {
+                        row[x] = src_t[x];
+                    } else if (r2 > r_out2) {
+                        row[x] = src_f[x];
+                    } else {
+                        uint16_t base = (r2 <= r_mid2) ? src_t[x] : src_f[x];
+                        if (glow_scale > 0) {
+                            int dr = surface_isqrt(r2) - R;
+                            if (dr < 0) dr = -dr;
+                            uint16_t col;
+                            unsigned a;
+                            if (dr == 0) {
+                                col = 0xFFFFu;
+                                a = 240u;
+                            } else if (dr == 1) {
+                                col = accent_bright;
+                                a = 220u;
+                            } else if (dr == 2) {
+                                col = accent;
+                                a = 155u;
+                            } else {
+                                col = accent;
+                                a = 80u;
+                            }
+                            a = (a * (unsigned)glow_scale) >> 8;
+                            base = glass_blend565(base, col, a, swap);
+                        }
+                        row[x] = base;
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    /* JR_TRANSITION_GLIDE: Pre-composed PSRAM vertical slide (~9 ms/f). */
+    const int dir = s_cine_dir >= 0 ? 1 : -1;
+    const int out_shift = (-dir * 28 * ease) >> 8;
+    const int in_shift = (dir * 56 * (256 - ease)) >> 8;
+    const int mix_m = (ease * 32 + 128) >> 8;
+
+    for (int y = y1; y < y2; ++y) {
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+        const uint16_t *rim_src = (ease >= 128 ? s_cine_to : s_cine_from) + (size_t)y * HUD_W;
+        const int d = y < DIAL_SPAN_N ? DIAL_SPAN_N - 1 - y : y - DIAL_SPAN_N;
+        const int ga = DIAL_SPAN_N - 1 - s_dial_span[d];
+        const int gb = DIAL_SPAN_N + s_dial_span[d];
+
+        int lo = 0, hi = -1;
+        if (!surface_clip_x(y, &lo, &hi)) {
+            memcpy(row + ga, rim_src + ga, (size_t)(gb - ga + 1) * sizeof(uint16_t));
+            continue;
+        }
+        if (ga < lo) {
+            memcpy(row + ga, rim_src + ga, (size_t)(lo - ga) * sizeof(uint16_t));
+        }
+        if (hi < gb) {
+            memcpy(row + hi + 1, rim_src + hi + 1, (size_t)(gb - hi) * sizeof(uint16_t));
+        }
+
+        const int sy_f = y - out_shift;
+        const int sy_t = y - in_shift;
+        int slo_f = 0, shi_f = -1;
+        int slo_t = 0, shi_t = -1;
+        const uint16_t *sf = (sy_f >= 0 && sy_f < HUD_H && surface_clip_x(sy_f, &slo_f, &shi_f))
+                             ? (s_cine_from + (size_t)sy_f * HUD_W) : NULL;
+        const uint16_t *st = (sy_t >= 0 && sy_t < HUD_H && surface_clip_x(sy_t, &slo_t, &shi_t))
+                             ? (s_cine_to + (size_t)sy_t * HUD_W) : NULL;
+
+        if (mix_m <= 0) {
+            for (int x = lo; x <= hi; ++x) {
+                row[x] = (sf != NULL && x >= slo_f && x <= shi_f) ? sf[x] : 0u;
+            }
+        } else if (mix_m >= 32) {
+            for (int x = lo; x <= hi; ++x) {
+                row[x] = (st != NULL && x >= slo_t && x <= shi_t) ? st[x] : 0u;
+            }
+        } else {
+            for (int x = lo; x <= hi; ++x) {
+                const uint16_t pf = (sf != NULL && x >= slo_f && x <= shi_f) ? sf[x] : 0u;
+                const uint16_t pt = (st != NULL && x >= slo_t && x <= shi_t) ? st[x] : 0u;
+                row[x] = (pf == 0u && pt == 0u) ? 0u : hud_mix565(pf, pt, mix_m, swap);
             }
         }
     }
@@ -11482,35 +12651,71 @@ static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
         }
     } else {
         int64_t mark = t0;
-        apply_dial(ctx, x1, y1, x2, y2, outbound);
-        layer_mark(ctx, 0, &mark);
-        apply_canvas(ctx, x1, y1, x2, y2, outbound);
-        apply_test_pattern(ctx, x1, y1, x2, y2, outbound);
-        layer_mark(ctx, 1, &mark);
-        if (diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF) {
-        apply_hud_overlay(ctx, x1, y1, x2, y2, outbound);
-        layer_mark(ctx, 2, &mark);
-        if (!jr_display_boot_ignition_active()) {
-            apply_shell_overlay(ctx, x1, y1, x2, y2, outbound);
-            layer_mark(ctx, 3, &mark);
-            if (__atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE) == 0 &&
-                s_ask_ease == 0 && s_shade_ease == 0 && s_detail_ease == 0) {
-                apply_surface_overlay(ctx, x1, y1, x2, y2, outbound);
+        const bool cine_strip_ok = x1 == 0 && x2 == HUD_W && y2 > y1 &&
+                                   diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF &&
+                                   !jr_display_boot_ignition_active();
+        if (cine_strip_ok && s_cine_active && s_cine_phase == CINE_ANIMATE &&
+            s_cine_from != NULL && s_cine_to != NULL) {
+            apply_cine_composite(ctx, y1, y2, outbound);
+            layer_mark(ctx, 2, &mark);
+        } else if (cine_strip_ok && s_cine_active && s_cine_phase == CINE_CAPTURE_TO &&
+                   !s_cine_to_ready && s_cine_from != NULL) {
+            memcpy(outbound, s_cine_from + (size_t)y1 * HUD_W,
+                   (size_t)(y2 - y1) * HUD_W * sizeof(uint16_t));
+            layer_mark(ctx, 2, &mark);
+        } else {
+            const bool aq_skip_dial = jr_display_aquarium_active() &&
+                !jr_display_surface_is_active() && !jr_display_desk_mode_active() &&
+                !jr_display_boot_ignition_active() && !jr_display_gist_active() &&
+                s_shade_ease == 0 && s_detail_ease == 0 && s_canvas_ease == 0 &&
+                s_ask_ease == 0 && __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE) == 0;
+            if (!aq_skip_dial) {
+                apply_dial(ctx, x1, y1, x2, y2, outbound);
             }
-            layer_mark(ctx, 4, &mark);
-        }
+            layer_mark(ctx, 0, &mark);
+            apply_canvas(ctx, x1, y1, x2, y2, outbound);
+            apply_test_pattern(ctx, x1, y1, x2, y2, outbound);
+            layer_mark(ctx, 1, &mark);
+            if (diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF) {
+                apply_hud_overlay(ctx, x1, y1, x2, y2, outbound);
+                layer_mark(ctx, 2, &mark);
+                if (!jr_display_boot_ignition_active()) {
+                    apply_shell_overlay(ctx, x1, y1, x2, y2, outbound);
+                    layer_mark(ctx, 3, &mark);
+                    if (__atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE) == 0 &&
+                        s_ask_ease == 0 && s_shade_ease == 0 && s_detail_ease == 0) {
+                        if (!jr_display_surface_is_active() && s_canvas_ease == 0 &&
+                            !jr_display_desk_mode_active() && jr_display_gist_active()) {
+                            apply_gist_overlay(ctx, x1, y1, x2, y2, outbound);
+                        }
+                        apply_surface_overlay(ctx, x1, y1, x2, y2, outbound);
+                    }
+                    layer_mark(ctx, 4, &mark);
+                }
+            }
+            if (cine_strip_ok && s_cine_active) {
+                const size_t strip_bytes = (size_t)(y2 - y1) * HUD_W * sizeof(uint16_t);
+                if (s_cine_phase == CINE_CAPTURE_FROM && s_cine_from != NULL) {
+                    memcpy(s_cine_from + (size_t)y1 * HUD_W, outbound, strip_bytes);
+                } else if (s_cine_phase == CINE_CAPTURE_TO && s_cine_to_ready &&
+                           s_cine_to != NULL && s_cine_from != NULL) {
+                    memcpy(s_cine_to + (size_t)y1 * HUD_W, outbound, strip_bytes);
+                    memcpy(outbound, s_cine_from + (size_t)y1 * HUD_W, strip_bytes);
+                }
+            }
         }
     }
     render_account(ctx, frame_start, (uint32_t)(esp_timer_get_time() - t0),
                    (uint32_t)(t0 / 1000));
-    /* Wave 2: 60 Hz V-blank TE sync right before strip 0 submission on lit
-     * AWAKE/AMBIENT frames (strictly inside gfx_render, bounded 18 ms timeout
-     * with automatic backoff if GPIO13 is temporarily detached by jr_probe). */
+    /* Wave 2 / Glass 3.7: 60 Hz V-blank TE sync right before strip 0 submission
+     * on lit AWAKE/AMBIENT frames AND always while a transition is in flight
+     * (fixes WHISPER 2 fps -> first-swipe tear). */
     if (frame_start && jarvis_board_te_enabled() &&
         diag_load(&ctx->init_state) == JR_DISPLAY_INIT_READY &&
         (__atomic_load_n(&s_panel_off, __ATOMIC_ACQUIRE) & 3U) == 0U &&
         atomic_load_explicit(&s_brightness_have, memory_order_relaxed) > 0U &&
-        jr_display_render_fps() >= JR_DISPLAY_TE_MIN_FPS) {
+        (jr_display_render_fps() >= JR_DISPLAY_TE_MIN_FPS || transition_in_flight() ||
+         jr_display_aquarium_active())) {
         const uint32_t te_now_ms = (uint32_t)(t0 / 1000);
         if (s_te_consec_timeouts < JR_DISPLAY_TE_BACKOFF_STREAK ||
             (int32_t)(te_now_ms - s_te_backoff_until_ms) >= 0) {
@@ -11553,6 +12758,7 @@ static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
     snapshot_record_flush(ctx, x1, y1, x2, y2, outbound);
     if (x2 == HUD_W && y2 >= HUD_H) {
         dip_frame_done();      /* the last strip of a frame is submitted: the panel dip may end its dark */
+        cine_frame_done();     /* advance IRIS/GLIDE capture -> animate at exact frame boundary */
         if (atomic_load_explicit(&s_boot_ign_hold_dark, memory_order_relaxed) != 0u) {
             atomic_store_explicit(&s_boot_ign_hold_dark, 0u, memory_order_release);
         }
@@ -11619,7 +12825,9 @@ static uint32_t home_wall_min_key(void)
 static bool presenter_ticks_the_glass(void)
 {
     if (sp_stopwatch_running() || jr_display_boot_ignition_active() ||
-        s_boot_ign_ease > 0 || jr_display_desk_mode_active()) {
+        s_boot_ign_ease > 0 || jr_display_desk_mode_active() ||
+        transition_in_flight() || jr_display_gist_active() ||
+        jr_display_aquarium_active()) {
         s_still_key = UINT32_MAX;
         return true;
     }
@@ -11654,10 +12862,14 @@ static bool presenter_ticks_the_glass(void)
 
 static uint32_t presenter_wait_ms(const jr_display_ctx_t *ctx)
 {
+    if (transition_in_flight() || jr_display_aquarium_active()) {
+        return (1000U + JR_DISPLAY_RENDER_FPS - 1U) / JR_DISPLAY_RENDER_FPS;
+    }
     if ((ctx->dream_active || ctx->quiet_active || s_rest_day || s_parked_still) &&
         !brightness_pending() && !sp_stopwatch_running() &&
         !jr_display_boot_ignition_active() && s_boot_ign_ease == 0 &&
-        !jr_display_desk_mode_active()) {
+        !jr_display_desk_mode_active() && !jr_display_gist_active() &&
+        !jr_display_aquarium_active()) {
         return 1000U; /* diagnostics/TTL checks; no minute-clock invalidation */
     }
     return (1000U + jr_display_render_fps() - 1U) / jr_display_render_fps();
@@ -12079,26 +13291,53 @@ static void dial_cache_release(void)
         s_dial_minimal = false;
     }
 #endif
-    if (s_g3_plate != NULL) {
+    {
+        const bool low_mem = heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < DIAL_PSRAM_LOW;
+        const bool in_dream = s_display.dream_active;
         const uint8_t nav_sp =
             (uint8_t)(__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) & NAV_SPACE_MASK);
-        const bool g3_keep =
-            s_space_to == (uint8_t)JR_DISPLAY_SPACE_WEATHER ||
-            s_space_to == (uint8_t)JR_DISPLAY_SPACE_STATUS ||
-            s_space_to == (uint8_t)JR_DISPLAY_SPACE_DESK ||
-            nav_sp == (uint8_t)JR_DISPLAY_SPACE_WEATHER ||
-            nav_sp == (uint8_t)JR_DISPLAY_SPACE_STATUS ||
-            nav_sp == (uint8_t)JR_DISPLAY_SPACE_DESK;
-        if (!g3_keep) {
+        static const uint8_t k_slot_sp[G3_PLATE_SLOTS] = {
+            (uint8_t)JR_DISPLAY_SPACE_WEATHER,
+            (uint8_t)JR_DISPLAY_SPACE_STATUS,
+            (uint8_t)JR_DISPLAY_SPACE_DESK,
+        };
+        bool any_g3_evict = false;
+        for (uint8_t i = 0u; i < G3_PLATE_SLOTS; ++i) {
+            if (s_g3_plates[i].px == NULL) {
+                continue;
+            }
+            const bool keep = !low_mem && !in_dream &&
+                              (s_space_to == k_slot_sp[i] || nav_sp == k_slot_sp[i]);
+            if (!keep) {
+                any_g3_evict = true;
+                break;
+            }
+        }
+        const jr_display_transition_t tmode = effective_transition_mode();
+        const bool evict_cine = (s_cine_from != NULL || s_cine_to != NULL) &&
+            (low_mem || in_dream ||
+             (tmode != JR_TRANSITION_IRIS && tmode != JR_TRANSITION_GLIDE));
+        if (any_g3_evict || evict_cine) {
             bool locked = false;
             if (s_display.gfx != NULL) {
                 locked = (gfx_emote_lock(s_display.gfx) == ESP_OK);
             }
             if (s_display.gfx == NULL || locked) {
-                heap_caps_free(s_g3_plate);
-                s_g3_plate = NULL;
-                s_g3_plate_key = 0u;
-                s_g3_plate_kind = 0u;
+                for (uint8_t i = 0u; i < G3_PLATE_SLOTS; ++i) {
+                    if (s_g3_plates[i].px == NULL) {
+                        continue;
+                    }
+                    const bool keep = !low_mem && !in_dream &&
+                                      (s_space_to == k_slot_sp[i] || nav_sp == k_slot_sp[i]);
+                    if (!keep) {
+                        heap_caps_free(s_g3_plates[i].px);
+                        s_g3_plates[i] = (g3_plate_slot_t){ 0 };
+                    }
+                }
+                if (evict_cine) {
+                    cine_abort();
+                    cine_free_buffers();
+                }
                 if (locked) {
                     (void)gfx_emote_unlock(s_display.gfx);
                 }
@@ -12751,11 +13990,23 @@ static void display_task(void *arg)
     uint32_t last_word = UINT32_MAX;
     uint32_t last_test_pattern = UINT32_MAX;
     uint64_t last_diag_ms = 0;
+    bool trans_fps_boost = false;
     for (;;) {
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(presenter_wait_ms(ctx)));
         uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
 
         if (diag_load(&ctx->init_state) == JR_DISPLAY_INIT_READY) {
+            gist_expire_check((uint32_t)now_ms);
+            {
+                const bool want_boost = transition_in_flight() || jr_display_aquarium_active();
+                if (want_boost && !trans_fps_boost && ctx->gfx != NULL) {
+                    (void)gfx_emote_set_fps(ctx->gfx, JR_DISPLAY_RENDER_FPS);
+                    trans_fps_boost = true;
+                } else if (!want_boost && trans_fps_boost && ctx->gfx != NULL) {
+                    (void)gfx_emote_set_fps(ctx->gfx, jr_display_render_fps());
+                    trans_fps_boost = false;
+                }
+            }
             presenter_pattern_tick(ctx, &last_test_pattern);
             uint32_t word = __atomic_load_n(&ctx->requested_word, __ATOMIC_ACQUIRE);
             bool blank = (word & JR_DISPLAY_CMD_BLANK) != 0;
@@ -12896,6 +14147,9 @@ esp_err_t jr_display_start(jr_display_t *out_port)
     }
     if (__atomic_load_n(&s_glass3_explicit, __ATOMIC_RELAXED) == 0u) {
         __atomic_store_n(&s_glass3_mode, (uint32_t)JR_GLASS3_AUTO, __ATOMIC_RELEASE);
+    }
+    if (__atomic_load_n(&s_transition_explicit, __ATOMIC_RELAXED) == 0u) {
+        __atomic_store_n(&s_transition_mode, (uint32_t)JR_TRANSITION_SHUTTER, __ATOMIC_RELEASE);
     }
 #endif
     orbit_rec_build();         /* before the render task exists to read it */
@@ -13191,6 +14445,7 @@ esp_err_t jr_display_surface_present(const jr_display_surface_t *surface)
     s_surface = *surface;
     s_surface_active = true;
     taskEXIT_CRITICAL(&s_surface_mux);
+    atomic_store_explicit(&s_surface_hold_pct, 0u, memory_order_release);
     if (s_display.task != NULL) {
         xTaskNotifyGive(s_display.task);
     }
@@ -13203,8 +14458,21 @@ void jr_display_surface_dismiss(void)
     memset(&s_surface, 0, sizeof s_surface);
     s_surface_active = false;
     taskEXIT_CRITICAL(&s_surface_mux);
+    atomic_store_explicit(&s_surface_hold_pct, 0u, memory_order_release);
     if (s_display.task != NULL) {
         xTaskNotifyGive(s_display.task);
+    }
+}
+
+void jr_display_surface_hold_set(uint8_t pct)
+{
+    if (pct > 100u) {
+        pct = 100u;
+    }
+    const uint8_t prev = atomic_exchange_explicit(&s_surface_hold_pct, pct, memory_order_acq_rel);
+    if (prev != pct) {
+        data_rev_bump();
+        nav_wake();
     }
 }
 
@@ -14036,7 +15304,9 @@ uint32_t jr_display_inbox_hit(uint16_t x, uint16_t y)
         diag_load(&s_display.test_pattern) != (uint32_t)JR_DISPLAY_TEST_OFF ||
         jr_display_choices_active() ||
         jr_display_surface_is_active() ||
+        jr_display_gist_active() ||
         jr_display_desk_mode_active() ||
+        jr_display_aquarium_active() ||
         jr_display_boot_ignition_active()) {
         return 0u;
     }
@@ -14053,4 +15323,151 @@ uint32_t jr_display_inbox_hit(uint16_t x, uint16_t y)
         }
     }
     return 0u;
+}
+
+/* ---- Glass 3.7 Public API: 20-second Reply Gist Card -------------------- */
+
+static void gist_copy_str(char *dst, size_t cap, const char *src)
+{
+    if (cap == 0u) {
+        return;
+    }
+    size_t out = 0u;
+    if (src != NULL) {
+        for (size_t i = 0u; src[i] != '\0' && out + 1u < cap; ++i) {
+            const unsigned char c = (unsigned char)src[i];
+            if (c >= 0x20u && c <= 0x7Eu) {
+                dst[out++] = (char)c;
+            } else if (c == 0xC2u && src[i + 1u] != '\0' && out + 2u < cap) {
+                const unsigned char c2 = (unsigned char)src[i + 1u];
+                if (c2 == 0xB0u || c2 == 0xB7u) {
+                    dst[out++] = (char)c;
+                    dst[out++] = (char)c2;
+                    i++;
+                } else {
+                    dst[out++] = ' ';
+                    i++;
+                }
+            } else if (c == '\n' || c == '\r' || c == '\t') {
+                dst[out++] = ' ';
+            }
+        }
+    }
+    dst[out] = '\0';
+}
+
+void jr_display_gist_show(const jr_display_gist_t *gist)
+{
+    if (gist == NULL) {
+        jr_display_gist_dismiss();
+        return;
+    }
+    const uint32_t cur = atomic_load_explicit(&s_gist_slot, memory_order_acquire) & 1u;
+    jr_display_gist_t *dst = &s_gist[cur ^ 1u];
+    memset(dst, 0, sizeof *dst);
+    dst->kind = gist->kind;
+    gist_copy_str(dst->eyebrow, sizeof dst->eyebrow, gist->eyebrow);
+    gist_copy_str(dst->hero, sizeof dst->hero, gist->hero);
+    gist_copy_str(dst->detail, sizeof dst->detail, gist->detail);
+    gist_copy_str(dst->detail2, sizeof dst->detail2, gist->detail2);
+    gist_copy_str(dst->footer, sizeof dst->footer, gist->footer);
+    if (dst->eyebrow[0] == '\0' && dst->hero[0] == '\0' && dst->detail[0] == '\0') {
+        jr_display_gist_dismiss();
+        return;
+    }
+    uint32_t ttl = gist->ttl_ms;
+    if (ttl == 0u) {
+        ttl = GIST_TTL_DEFAULT_MS;
+    } else if (ttl < GIST_TTL_MIN_MS) {
+        ttl = GIST_TTL_MIN_MS;
+    } else if (ttl > GIST_TTL_MAX_MS) {
+        ttl = GIST_TTL_MAX_MS;
+    }
+    dst->ttl_ms = ttl;
+    const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    atomic_store_explicit(&s_gist_total_ms, ttl, memory_order_release);
+    atomic_store_explicit(&s_gist_expires_ms, now_ms + ttl, memory_order_release);
+    atomic_store_explicit(&s_gist_slot, (cur ^ 1u) | 2u, memory_order_release);
+    data_rev_bump();
+    nav_wake();
+}
+
+void jr_display_gist_dismiss(void)
+{
+    const uint32_t prev = atomic_fetch_and_explicit(&s_gist_slot, ~2u, memory_order_acq_rel);
+    if ((prev & 2u) != 0u) {
+        data_rev_bump();
+        nav_wake();
+    }
+}
+
+bool jr_display_gist_active(void)
+{
+    const uint32_t sw = atomic_load_explicit(&s_gist_slot, memory_order_acquire);
+    if ((sw & 2u) == 0u) {
+        return false;
+    }
+    const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    const uint32_t exp_ms = atomic_load_explicit(&s_gist_expires_ms, memory_order_acquire);
+    return (int32_t)(exp_ms - now_ms) > 0;
+}
+
+/* ---- Glass 3.7+ Public API: Nano Reef Virtual Aquarium ------------------ */
+
+void jr_display_aquarium_set(const jr_display_aq_state_t *st)
+{
+    if (st == NULL) {
+        const uint32_t prev = atomic_fetch_and_explicit(&s_aq_slot, ~2u, memory_order_acq_rel);
+        if ((prev & 2u) != 0u) {
+            data_rev_bump();
+            nav_wake();
+        }
+        return;
+    }
+    const uint32_t cur = atomic_load_explicit(&s_aq_slot, memory_order_acquire) & 1u;
+    jr_display_aq_state_t *dst = &s_aq_snap[cur ^ 1u];
+    memset(dst, 0, sizeof *dst);
+    dst->active = st->active;
+    dst->biome = st->biome <= 2u ? st->biome : 0u;
+    dst->coral_level = st->coral_level < 1u ? 1u
+                     : (st->coral_level > 5u ? 5u : st->coral_level);
+    dst->algae = st->algae <= 100u ? st->algae : 100u;
+    dst->hour = (uint8_t)(st->hour % 24u);
+    uint8_t n = st->fish_count <= 8u ? st->fish_count : 8u;
+    dst->fish_count = n;
+    for (uint8_t i = 0u; i < n; ++i) {
+        dst->fish[i].species = st->fish[i].species <= 7u ? st->fish[i].species : 0u;
+        dst->fish[i].stage = st->fish[i].stage <= 3u ? st->fish[i].stage : 2u;
+        dst->fish[i].hunger = st->fish[i].hunger <= 100u ? st->fish[i].hunger : 100u;
+        dst->fish[i].seed = st->fish[i].seed;
+    }
+    const uint32_t next_word = (cur ^ 1u) | (st->active ? 2u : 0u);
+    atomic_store_explicit(&s_aq_slot, next_word, memory_order_release);
+    data_rev_bump();
+    nav_wake();
+}
+
+bool jr_display_aquarium_active(void)
+{
+    return (atomic_load_explicit(&s_aq_slot, memory_order_acquire) & 2u) != 0u;
+}
+
+void jr_display_aquarium_tap(uint16_t x, uint16_t y)
+{
+    if (x >= (uint16_t)HUD_W) {
+        x = (uint16_t)(HUD_W - 1);
+    }
+    if (y >= (uint16_t)HUD_H) {
+        y = (uint16_t)(HUD_H - 1);
+    }
+    const uint32_t packed = 0x80000000u | ((uint32_t)y << 12) | (uint32_t)x;
+    const uint32_t idx = atomic_fetch_add_explicit(&s_aq_tap_wr, 1u, memory_order_acq_rel);
+    atomic_store_explicit(&s_aq_tap_ring[idx & 3u], packed, memory_order_release);
+    nav_wake();
+}
+
+void jr_display_aquarium_shake(void)
+{
+    atomic_fetch_add_explicit(&s_aq_shake_seq, 1u, memory_order_acq_rel);
+    nav_wake();
 }

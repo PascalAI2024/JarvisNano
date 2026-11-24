@@ -20,7 +20,7 @@ bool jr_tool_needs_gateway(const char *name)
         "add_note", "list_notes", "clear_notes", "daily_briefing",
         "set_ui_sounds", "set_sunlight",
         "set_desk_mode", "start_breathe", "complete_note",
-        "set_battery_care",
+        "set_battery_care", "show_gist", "aquarium",
     };
     for (size_t i = 0; i < sizeof kLocal / sizeof kLocal[0]; ++i) {
         if (strcmp(name, kLocal[i]) == 0) {
@@ -90,17 +90,17 @@ static const char kWithGateway[] =
     "call answers is answered now; anything needing a browser, repository, "
     "document, or multiple steps is delegated in one call, telling Sir it is "
     "queued and will be announced here when it lands.\n\n"
-    "For weather at Sir's place, weather_here answers at once with no "
-    "arguments; never ask Sir where he is. Local tools: set_timer, "
-    "cancel_timer, list_timers, start_focus, set_desk_mode, start_breathe, "
-    "stopwatch, add_note, list_notes, complete_note, clear_notes, "
-    "daily_briefing, set_glass (10 dials incl. orrery, reactor), "
-    "set_ui_sounds, set_sunlight, set_battery_care, device_status.\n\n"
+    "For local weather, weather_here answers at once with no arguments; "
+    "never ask Sir where he is. Local tools: set_timer, cancel_timer, "
+    "list_timers, start_focus, set_desk_mode, start_breathe, stopwatch, "
+    "add_note, list_notes, complete_note, clear_notes, daily_briefing, "
+    "set_glass (orrery, reactor), aquarium (Nano Reef), set_ui_sounds, "
+    "set_sunlight, set_battery_care, device_status, and show_gist(kind, "
+    "eyebrow, hero, detail, footer) to pin replies on glass for 20 s.\n\n"
     "Capabilities, when asked: web search, news, weather, Wikipedia, crypto, "
     "stocks, FX, time zones, translation, research, memory, calendar, work "
-    "board, agent jobs, timers, desk modes (on air, focus, breathe), "
-    "stopwatch, inbox, briefings, glass, status, sunlight, battery care, "
-    "sounds, volume, brightness.";
+    "board, agent jobs, timers, desk modes, stopwatch, inbox, briefings, "
+    "glass, aquarium, status, sunlight, battery care, sounds, volume, brightness.";
 
 /* Without one: what the device has, and what it must not offer. */
 static const char kNoGateway[] =
@@ -117,10 +117,12 @@ static const char kNoGateway[] =
     "for countdowns, on-air/focus/breathe modes, and laps; add_note, "
     "list_notes, complete_note, and clear_notes for local desk inbox; "
     "daily_briefing for a live summary; set_glass (incl. orrery planetarium "
-    "and reactor spectrum dials), set_ui_sounds, "
-    "set_sunlight, set_battery_care, set_volume, set_brightness, and "
-    "device_status for this device; and ask_user to offer Sir a choice on "
-    "the glass.\n\n"
+    "and reactor spectrum dials), aquarium for the Nano Reef fish tank, "
+    "set_ui_sounds, set_sunlight, set_battery_care, set_volume, "
+    "set_brightness, and device_status for this device; ask_user to offer "
+    "Sir a choice on the glass; and show_gist(kind, eyebrow, hero, detail, "
+    "footer) to keep numbers, prices, events, or concise answers readable "
+    "on the glass for 20 s after speaking.\n\n"
     "When Sir asks what you can do, say that, in a sentence. Anything else "
     "you cannot do from here: say so in one short sentence, and answer from "
     "what you know if you can.";

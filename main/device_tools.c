@@ -613,6 +613,8 @@ void activity_note_tool(const char *tool_name, const char *args_json)
         else if (strcmp(tool_name, "set_battery_care") == 0) kind = "POWER";
         else if (strcmp(tool_name, "set_glass") == 0) kind = "GLASS";
         else if (strcmp(tool_name, "device_status") == 0) kind = "STATUS";
+        else if (strcmp(tool_name, "show_gist") == 0) kind = "GIST";
+        else if (strcmp(tool_name, "aquarium") == 0) kind = "REEF";
     }
     if (kind != NULL) {
         strlcpy(s_turn_kind, kind, sizeof s_turn_kind);
@@ -937,12 +939,18 @@ bool device_notes_toggle(uint32_t id)
         xSemaphoreTake(s_notes_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
         return false;
     }
+    size_t open_before = 0U, open_after = 0U;
+    (void)jr_notes_counts(s_notes, &open_before, NULL);
     const bool ok = jr_notes_toggle(s_notes, id);
     if (ok) {
+        (void)jr_notes_counts(s_notes, &open_after, NULL);
         notes_persist_locked();
         notes_sync_inbox_locked();
     }
     xSemaphoreGive(s_notes_lock);
+    if (ok && open_after < open_before) {
+        app_aquarium_reward(1U, 8U);
+    }
     return ok;
 }
 
@@ -955,12 +963,18 @@ bool device_notes_complete(const char *target_or_id, uint32_t *matched_id)
         xSemaphoreTake(s_notes_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
         return false;
     }
+    size_t open_before = 0U, open_after = 0U;
+    (void)jr_notes_counts(s_notes, &open_before, NULL);
     const bool ok = jr_notes_complete(s_notes, target_or_id, matched_id);
     if (ok) {
+        (void)jr_notes_counts(s_notes, &open_after, NULL);
         notes_persist_locked();
         notes_sync_inbox_locked();
     }
     xSemaphoreGive(s_notes_lock);
+    if (ok && open_after < open_before) {
+        app_aquarium_reward(1U, 8U);
+    }
     return ok;
 }
 
@@ -1255,6 +1269,77 @@ static int format_stopwatch_json(char *out, size_t cap,
     return n + tail;
 }
 
+static void gist_show_local(jr_gist_kind_t kind,
+                            const char *eyebrow,
+                            const char *hero,
+                            const char *detail,
+                            const char *detail2,
+                            const char *footer,
+                            uint32_t ttl_ms)
+{
+    jr_display_gist_t g = {0};
+    g.kind = (uint8_t)kind;
+    jr_gist_sanitize(g.eyebrow, sizeof g.eyebrow, eyebrow);
+    jr_gist_sanitize(g.hero, sizeof g.hero, hero);
+    jr_gist_sanitize(g.detail, sizeof g.detail, detail);
+    jr_gist_sanitize(g.detail2, sizeof g.detail2, detail2);
+    jr_gist_sanitize(g.footer, sizeof g.footer, footer);
+    g.ttl_ms = jr_gist_clamp_ttl(ttl_ms);
+    if (g.eyebrow[0] == '\0' && g.hero[0] == '\0' && g.detail[0] == '\0') {
+        return;
+    }
+    jr_display_gist_show(&g);
+    atomic_store(&s_glass_poke_req, true);
+}
+
+static void format_aquarium_tool_json(char *out, size_t cap,
+                                      const char *extra_kv,
+                                      const jr_aq_tank_t *tank, bool active)
+{
+    if (out == NULL || cap < 32U || tank == NULL) {
+        return;
+    }
+    int n = snprintf(
+        out, cap,
+        "{\"ok\":true,%s\"active\":%s,\"biome\":\"%s\","
+        "\"coral_level\":%u,\"pearls\":%u,\"algae\":%u,"
+        "\"fish_count\":%u,\"fish\":[",
+        (extra_kv != NULL) ? extra_kv : "",
+        active ? "true" : "false",
+        jr_aq_biome_name((jr_aq_biome_t)tank->biome),
+        (unsigned)jr_aq_coral_level(tank),
+        (unsigned)tank->pearls,
+        (unsigned)tank->algae,
+        (unsigned)tank->fish_count);
+    if (n < 0 || (size_t)n >= cap - 4U) {
+        (void)snprintf(out, cap, "{\"ok\":true,\"active\":%s}",
+                       active ? "true" : "false");
+        return;
+    }
+    bool first = true;
+    for (uint8_t i = 0U; i < JR_AQ_MAX_FISH && (size_t)n < cap - 16U; ++i) {
+        const jr_aq_fish_t *f = &tank->fish[i];
+        if (!f->active) {
+            continue;
+        }
+        int w = snprintf(
+            out + n, cap - (size_t)n,
+            "%s{\"name\":\"%s\",\"species\":\"%s\",\"stage\":\"%s\"}",
+            first ? "" : ",",
+            f->name,
+            jr_aq_species_name((jr_aq_species_t)f->species),
+            jr_aq_stage_name(jr_aq_fish_stage(f)));
+        if (w < 0 || (size_t)n + (size_t)w >= cap - 3U) {
+            break;
+        }
+        n += w;
+        first = false;
+    }
+    if ((size_t)n + 3U <= cap) {
+        (void)snprintf(out + n, cap - (size_t)n, "]}");
+    }
+}
+
 bool device_try_local_tool(const jr_command_t *cmd)
 {
     if (cmd == NULL || cmd->tool_name == NULL) {
@@ -1280,11 +1365,14 @@ bool device_try_local_tool(const jr_command_t *cmd)
     const bool ui_sounds    = strcmp(cmd->tool_name, "set_ui_sounds") == 0;
     const bool sunlight     = strcmp(cmd->tool_name, "set_sunlight") == 0;
     const bool bat_care     = strcmp(cmd->tool_name, "set_battery_care") == 0;
+    const bool show_gist    = strcmp(cmd->tool_name, "show_gist") == 0;
+    const bool aq_tool      = strcmp(cmd->tool_name, "aquarium") == 0;
     if (!weather && !clock_tool && !set_timer && !cancel_timer &&
         !list_timers && !set_glass && !dev_status && !start_focus &&
         !set_desk && !start_breath && !sw_tool && !add_note &&
         !list_notes && !comp_note && !clear_notes &&
-        !briefing && !ui_sounds && !sunlight && !bat_care) {
+        !briefing && !ui_sounds && !sunlight && !bat_care && !show_gist &&
+        !aq_tool) {
         return false;
     }
     local_tool_result_t *slot = device_tool_queue_slot(
@@ -1305,6 +1393,13 @@ bool device_try_local_tool(const jr_command_t *cmd)
                 "\"The device has no weather yet; it fetches on a timer.\"}}");
         } else {
             const uint32_t age_ms = now_ms - s_weather.fetched_ms;
+            char hero[JR_GIST_LINE_CAP];
+            char det[JR_GIST_LINE_CAP];
+            snprintf(hero, sizeof hero, "%d*", (int)s_weather.temp_f);
+            snprintf(det, sizeof det, "%s H %d* L %d*",
+                     s_weather.condition, (int)s_weather.hi_f, (int)s_weather.lo_f);
+            gist_show_local(JR_GIST_WEATHER, JR_WEATHER_PLACE, hero, det, NULL,
+                            "ON DEVICE", JR_GIST_DEFAULT_MS);
             (void)snprintf(out, cap,
                 "{\"place\":\"%s\",\"temp_f\":%d,\"feels_f\":%d,"
                 "\"condition\":\"%s\",\"high_f\":%d,\"low_f\":%d,"
@@ -1364,6 +1459,20 @@ bool device_try_local_tool(const jr_command_t *cmd)
                          norm, (unsigned)(eff_s / 60U), (unsigned)(eff_s % 60U));
             }
             jr_display_caption_set(cap_txt);
+            char hero[JR_GIST_LINE_CAP];
+            if (eff_s >= 3600U) {
+                snprintf(hero, sizeof hero, "%u:%02u:%02u",
+                         (unsigned)(eff_s / 3600U),
+                         (unsigned)((eff_s % 3600U) / 60U),
+                         (unsigned)(eff_s % 60U));
+            } else {
+                snprintf(hero, sizeof hero, "%u:%02u",
+                         (unsigned)(eff_s / 60U), (unsigned)(eff_s % 60U));
+            }
+            gist_show_local(JR_GIST_TIMER,
+                            norm[0] != '\0' ? norm : "TIMER",
+                            hero, "COUNTDOWN RUNNING", NULL,
+                            silent ? "SILENT" : "ACTIVE", JR_GIST_DEFAULT_MS);
             (void)snprintf(out, cap,
                 "{\"ok\":true,\"label\":\"%s\",\"seconds\":%u,\"silent\":%s,\"active_timers\":%u}",
                 norm, (unsigned)eff_s, silent ? "true" : "false",
@@ -1725,6 +1834,12 @@ bool device_try_local_tool(const jr_command_t *cmd)
             jr_mood_poke_awake(&s_mood, now_ms);
             device_confirm_cue();
             jr_display_caption_set("NOTE PINNED");
+            char ftr[JR_GIST_EYEBROW_CAP];
+            snprintf(ftr, sizeof ftr, "%u %s",
+                     (unsigned)bank.count, bank.count == 1U ? "NOTE" : "NOTES");
+            gist_show_local(JR_GIST_NOTE,
+                            tag == JR_NOTE_TAG_WORK ? "SAVED TO WORK" : "SAVED TO LIFE",
+                            txt, NULL, NULL, ftr, JR_GIST_DEFAULT_MS);
             (void)snprintf(out, cap,
                 "{\"ok\":true,\"id\":%u,\"tag\":\"%s\",\"count\":%u,\"max\":%u}",
                 (unsigned)id, tag == JR_NOTE_TAG_WORK ? "work" : "life",
@@ -1830,6 +1945,34 @@ bool device_try_local_tool(const jr_command_t *cmd)
         }
         jr_mood_poke_awake(&s_mood, now_ms);
         jr_display_caption_set("DAILY BRIEFING");
+        {
+            char hero[JR_GIST_LINE_CAP];
+            char det[JR_GIST_LINE_CAP];
+            char det2[JR_GIST_LINE_CAP];
+            if (s_weather.valid) {
+                snprintf(hero, sizeof hero, "%d* %s",
+                         (int)s_weather.temp_f, s_weather.condition);
+            } else if (have_bat && bat.percent <= 100U) {
+                snprintf(hero, sizeof hero, "BATTERY %u%%", (unsigned)bat.percent);
+            } else {
+                strlcpy(hero, "READY ON DESK", sizeof hero);
+            }
+            size_t open_n = 0U, done_n = 0U;
+            (void)device_notes_counts(&open_n, &done_n);
+            const unsigned tcnt = jr_timer_active_count(&s_timers);
+            snprintf(det, sizeof det, "%u OPEN NOTES - %u TIMERS",
+                     (unsigned)open_n, tcnt);
+            if (have_bat && bat.percent <= 100U) {
+                snprintf(det2, sizeof det2, "BATTERY %u%%%s",
+                         (unsigned)bat.percent,
+                         bat.charging ? " CHARGING" : "");
+            } else {
+                det2[0] = '\0';
+            }
+            gist_show_local(JR_GIST_BRIEFING, "BRIEFING", hero, det,
+                            det2[0] != '\0' ? det2 : NULL,
+                            "TAP OR SWIPE", JR_GIST_DEFAULT_MS);
+        }
         (void)snprintf(out, cap, "{\"ok\":true,\"briefing\":\"%s\"}", summary);
         ESP_LOGI(TAG, "local tool=daily_briefing (%u chars)",
                  (unsigned)strlen(summary));
@@ -1938,6 +2081,216 @@ bool device_try_local_tool(const jr_command_t *cmd)
                          enable ? 1 : 0, care.holding ? 1 : 0,
                          (unsigned)care.cv_mv);
             }
+        }
+        cJSON_Delete(args);
+    } else if (show_gist) {
+        cJSON *args = cJSON_Parse(cmd->tool_args ? cmd->tool_args : "{}");
+        const cJSON *kind_item = cJSON_GetObjectItemCaseSensitive(args, "kind");
+        const cJSON *eye_item  = cJSON_GetObjectItemCaseSensitive(args, "eyebrow");
+        const cJSON *hero_item = cJSON_GetObjectItemCaseSensitive(args, "hero");
+        const cJSON *det_item  = cJSON_GetObjectItemCaseSensitive(args, "detail");
+        const cJSON *det2_item = cJSON_GetObjectItemCaseSensitive(args, "detail2");
+        const cJSON *ftr_item  = cJSON_GetObjectItemCaseSensitive(args, "footer");
+        const cJSON *ttls_item = cJSON_GetObjectItemCaseSensitive(args, "ttl_s");
+        const cJSON *ttlm_item = cJSON_GetObjectItemCaseSensitive(args, "ttl_ms");
+
+        jr_gist_kind_t kind = JR_GIST_ANSWER;
+        if (cJSON_IsString(kind_item) && kind_item->valuestring != NULL) {
+            const jr_gist_kind_t parsed = jr_gist_parse_kind(kind_item->valuestring);
+            if (parsed != JR_GIST_NONE) {
+                kind = parsed;
+            }
+        }
+        uint32_t ttl_raw_ms = JR_GIST_DEFAULT_MS;
+        if (cJSON_IsNumber(ttls_item) && ttls_item->valuedouble > 0.0) {
+            double s = ttls_item->valuedouble;
+            if (s > 600.0) {
+                s = 600.0;
+            }
+            ttl_raw_ms = (uint32_t)lrint(s * 1000.0);
+        } else if (cJSON_IsNumber(ttlm_item) && ttlm_item->valuedouble > 0.0) {
+            double ms = ttlm_item->valuedouble;
+            if (ms > 600000.0) {
+                ms = 600000.0;
+            }
+            ttl_raw_ms = (uint32_t)lrint(ms);
+        }
+        const uint32_t ttl_ms = jr_gist_clamp_ttl(ttl_raw_ms);
+
+        jr_display_gist_t g = {0};
+        g.kind = (uint8_t)kind;
+        jr_gist_sanitize(g.eyebrow, sizeof g.eyebrow,
+                         cJSON_IsString(eye_item) ? eye_item->valuestring : NULL);
+        jr_gist_sanitize(g.hero, sizeof g.hero,
+                         cJSON_IsString(hero_item) ? hero_item->valuestring : NULL);
+        jr_gist_sanitize(g.detail, sizeof g.detail,
+                         cJSON_IsString(det_item) ? det_item->valuestring : NULL);
+        jr_gist_sanitize(g.detail2, sizeof g.detail2,
+                         cJSON_IsString(det2_item) ? det2_item->valuestring : NULL);
+        jr_gist_sanitize(g.footer, sizeof g.footer,
+                         cJSON_IsString(ftr_item) ? ftr_item->valuestring : NULL);
+        g.ttl_ms = ttl_ms;
+
+        if (g.eyebrow[0] == '\0' && g.hero[0] == '\0' && g.detail[0] == '\0') {
+            slot->status = JR_TOOL_STATUS_INVALID_ARGS;
+            (void)snprintf(out, cap,
+                "{\"error\":{\"code\":\"invalid_gist\","
+                "\"message\":\"Provide non-empty eyebrow, hero, or detail text.\"}}");
+        } else {
+            jr_display_gist_show(&g);
+            jr_mood_poke_awake(&s_mood, now_ms);
+            atomic_store(&s_glass_poke_req, true);
+            (void)snprintf(out, cap,
+                "{\"ok\":true,\"shown\":true,\"kind\":\"%s\",\"ttl_ms\":%u}",
+                jr_gist_kind_name(kind), (unsigned)ttl_ms);
+            ESP_LOGI(TAG, "local tool=show_gist kind=%s ttl_ms=%u",
+                     jr_gist_kind_name(kind), (unsigned)ttl_ms);
+        }
+        cJSON_Delete(args);
+    } else if (aq_tool) {
+        cJSON *args = cJSON_Parse(cmd->tool_args ? cmd->tool_args : "{}");
+        const cJSON *act_item   = cJSON_GetObjectItemCaseSensitive(args, "action");
+        const cJSON *sp_item    = cJSON_GetObjectItemCaseSensitive(args, "species");
+        const cJSON *name_item  = cJSON_GetObjectItemCaseSensitive(args, "name");
+        const cJSON *biome_item = cJSON_GetObjectItemCaseSensitive(args, "biome");
+        const cJSON *idx_item   = cJSON_GetObjectItemCaseSensitive(args, "idx");
+
+        const char *action = (cJSON_IsString(act_item) && act_item->valuestring &&
+                              act_item->valuestring[0] != '\0')
+            ? act_item->valuestring : "status";
+        const char *sp_str = (cJSON_IsString(sp_item) && sp_item->valuestring)
+            ? sp_item->valuestring : NULL;
+        const char *name_str = (cJSON_IsString(name_item) && name_item->valuestring)
+            ? name_item->valuestring : NULL;
+        const char *biome_str = (cJSON_IsString(biome_item) && biome_item->valuestring)
+            ? biome_item->valuestring : NULL;
+
+        bool ok_call = true;
+        char extra[96] = {0};
+
+        if (strcasecmp(action, "open") == 0) {
+            if (biome_str != NULL && biome_str[0] != '\0') {
+                jr_aq_biome_t b = JR_AQ_BIOME_REEF;
+                if (!jr_aq_biome_parse(biome_str, &b)) {
+                    ok_call = false;
+                    slot->status = JR_TOOL_STATUS_INVALID_ARGS;
+                    (void)snprintf(out, cap,
+                        "{\"error\":{\"code\":\"invalid_biome\","
+                        "\"message\":\"Use biome reef, abyss, or koi.\"}}");
+                } else {
+                    app_aquarium_set_biome(b);
+                }
+            }
+            if (ok_call) {
+                app_aquarium_set_active(true);
+                jr_mood_poke_awake(&s_mood, now_ms);
+                device_confirm_cue();
+            }
+        } else if (strcasecmp(action, "close") == 0) {
+            app_aquarium_set_active(false);
+            jr_mood_poke_awake(&s_mood, now_ms);
+        } else if (strcasecmp(action, "feed") == 0) {
+            const uint8_t fed = app_aquarium_feed(233U, 180U, false);
+            jr_mood_poke_awake(&s_mood, now_ms);
+            (void)snprintf(extra, sizeof extra, "\"fed\":%u,", (unsigned)fed);
+        } else if (strcasecmp(action, "clean") == 0) {
+            app_aquarium_clean();
+            jr_mood_poke_awake(&s_mood, now_ms);
+            device_confirm_cue();
+        } else if (strcasecmp(action, "shake") == 0) {
+            app_aquarium_shake();
+            jr_mood_poke_awake(&s_mood, now_ms);
+        } else if (strcasecmp(action, "status") == 0) {
+            /* read-only snapshot below */
+        } else if (strcasecmp(action, "biome") == 0) {
+            jr_aq_biome_t b = JR_AQ_BIOME_REEF;
+            if (biome_str == NULL || !jr_aq_biome_parse(biome_str, &b)) {
+                ok_call = false;
+                slot->status = JR_TOOL_STATUS_INVALID_ARGS;
+                (void)snprintf(out, cap,
+                    "{\"error\":{\"code\":\"invalid_biome\","
+                    "\"message\":\"Provide biome: reef, abyss, or koi.\"}}");
+            } else {
+                app_aquarium_set_biome(b);
+                jr_mood_poke_awake(&s_mood, now_ms);
+                device_confirm_cue();
+            }
+        } else if (strcasecmp(action, "add") == 0) {
+            jr_aq_species_t sp = JR_AQ_SP_CLOWNFISH;
+            if (sp_str == NULL || !jr_aq_species_parse(sp_str, &sp)) {
+                ok_call = false;
+                slot->status = JR_TOOL_STATUS_INVALID_ARGS;
+                (void)snprintf(out, cap,
+                    "{\"error\":{\"code\":\"invalid_species\","
+                    "\"message\":\"Provide species: clownfish, blue_tang, "
+                    "neon_tetra, golden_koi, mandarin, jellyfish, manta_ray, "
+                    "or seahorse.\"}}");
+            } else {
+                const int idx = app_aquarium_add(sp, name_str);
+                if (idx < 0) {
+                    ok_call = false;
+                    slot->status = JR_TOOL_STATUS_INVALID_ARGS;
+                    (void)snprintf(out, cap,
+                        "{\"error\":{\"code\":\"tank_full\","
+                        "\"message\":\"Tank is full (8/8 creatures); remove one first.\"}}");
+                } else {
+                    jr_aq_tank_t snap_add;
+                    app_aquarium_snapshot(&snap_add, NULL);
+                    const char *added_name =
+                        (idx < (int)JR_AQ_MAX_FISH && snap_add.fish[idx].active)
+                            ? snap_add.fish[idx].name : "";
+                    (void)snprintf(extra, sizeof extra,
+                                   "\"added\":\"%s\",\"added_species\":\"%s\",",
+                                   added_name, jr_aq_species_name(sp));
+                    jr_mood_poke_awake(&s_mood, now_ms);
+                    device_confirm_cue();
+                }
+            }
+        } else if (strcasecmp(action, "remove") == 0) {
+            bool removed = false;
+            if (name_str != NULL && name_str[0] != '\0') {
+                removed = app_aquarium_remove_by_name(name_str);
+                if (!removed) {
+                    char *end = NULL;
+                    long parsed = strtol(name_str, &end, 10);
+                    if (end != name_str && *end == '\0' &&
+                        parsed >= 0 && parsed < (long)JR_AQ_MAX_FISH) {
+                        removed = app_aquarium_remove((uint8_t)parsed);
+                    }
+                }
+            } else if (cJSON_IsNumber(idx_item) &&
+                       idx_item->valuedouble >= 0.0 &&
+                       idx_item->valuedouble < (double)JR_AQ_MAX_FISH) {
+                removed = app_aquarium_remove(
+                    (uint8_t)lrint(idx_item->valuedouble));
+            }
+            if (!removed) {
+                ok_call = false;
+                slot->status = JR_TOOL_STATUS_INVALID_ARGS;
+                (void)snprintf(out, cap,
+                    "{\"error\":{\"code\":\"fish_not_found\","
+                    "\"message\":\"Provide an existing creature name or index (0..7) to remove.\"}}");
+            } else {
+                jr_mood_poke_awake(&s_mood, now_ms);
+                device_confirm_cue();
+            }
+        } else {
+            ok_call = false;
+            slot->status = JR_TOOL_STATUS_INVALID_ARGS;
+            (void)snprintf(out, cap,
+                "{\"error\":{\"code\":\"invalid_action\","
+                "\"message\":\"Use open, close, feed, clean, shake, status, biome, add, or remove.\"}}");
+        }
+
+        if (ok_call) {
+            jr_aq_tank_t tank;
+            bool active = false;
+            app_aquarium_snapshot(&tank, &active);
+            format_aquarium_tool_json(out, cap, extra, &tank, active);
+            ESP_LOGI(TAG, "local tool=aquarium action=%s active=%d biome=%s fish=%u",
+                     action, active ? 1 : 0,
+                     jr_aq_biome_name((jr_aq_biome_t)tank.biome),
+                     (unsigned)tank.fish_count);
         }
         cJSON_Delete(args);
     }
@@ -2062,6 +2415,11 @@ void device_tool_resolve_consent_locked(tool_consent_outcome_t outcome)
         atomic_fetch_add(&s_tool_diag.consent_approved, 1U);
         if (submitted == ESP_OK) {
             atomic_fetch_add(&s_tool_diag.submitted, 1U);
+            char think_cap[64];
+            if (jr_tool_plain_caption(s_tool_consent.name, think_cap,
+                                      sizeof think_cap) > 0U) {
+                jr_display_caption_set(think_cap);
+            }
         } else {
             jr_command_t failed = {
                 .call_id = s_tool_consent.call_id,
