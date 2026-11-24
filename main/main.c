@@ -3781,7 +3781,8 @@ static void voice_task(void *arg)
              * exactly these fields, and its tap:swipe ratio — the signal that
              * found the rim-roll bug — would be diluted into noise otherwise. */
             const bool lifecycle = iev.kind == JR_INPUT_PRESS_DOWN ||
-                                   iev.kind == JR_INPUT_PRESS_UP;
+                                   iev.kind == JR_INPUT_PRESS_UP ||
+                                   iev.kind == JR_INPUT_BEZEL_SCRUB;
             if (!lifecycle) {
                 atomic_fetch_add(&s_touch_events, 1U);
                 atomic_store(&s_touch_last_kind, (uint32_t)iev.kind);
@@ -3818,6 +3819,33 @@ static void voice_task(void *arg)
             if (iev.kind == JR_INPUT_PRESS_UP) {
                 s_hold_start_ms = 0U;
                 jr_display_commit_ring(0U);
+                continue;
+            }
+            if (iev.kind == JR_INPUT_BEZEL_SCRUB) {
+                s_hold_start_ms = 0U;
+                jr_display_commit_ring(0U);
+                if (!jr_display_choices_active() &&
+                    !atomic_load(&s_touch_challenge_active)) {
+                    const int dir = (iev.direction == JR_INPUT_DIRECTION_RIGHT) ? 1 : -1;
+                    if (physical) {
+                        jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                    }
+                    if (jr_display_nav_space() == JR_DISPLAY_SPACE_STATUS) {
+                        const int brt = request_level_step(
+                            &s_level_brightness_request, (int)s_brightness_cap, dir * 4);
+                        jr_display_rim_level_show(true, (uint8_t)brt);
+                        ui_cue(((dir > 0 && brt >= 100) || (dir < 0 && brt <= 10))
+                                   ? JR_CUE_LIMIT : JR_CUE_SCRUB,
+                               physical);
+                    } else {
+                        const int vol = request_level_step(
+                            &s_level_volume_request, s_out_vol, dir * 4);
+                        jr_display_rim_level_show(false, (uint8_t)vol);
+                        ui_cue(((dir > 0 && vol >= 100) || (dir < 0 && vol <= 10))
+                                   ? JR_CUE_LIMIT : JR_CUE_SCRUB,
+                               physical);
+                    }
+                }
                 continue;
             }
             if (s_watch_peek_until_ms != 0U) {
@@ -4416,8 +4444,9 @@ static void voice_task(void *arg)
                             atomic_store(&s_voice_control_request,
                                          VOICE_CONTROL_ARM);
                             jr_display_caption_set("LISTENING");
-                            ui_cue(JR_CUE_CONFIRM, physical);   /* mute off */
+                            ui_cue(JR_CUE_MUTE_OFF, physical);  /* airy bloom up */
                         } else {
+                            ui_cue(JR_CUE_MUTE_ON, physical);   /* tactile thock down */
                             atomic_store(&s_voice_privacy_paused, true);
                             if (p != JR_ST_IDLE && p != JR_ST_DRAINING) {
                                 jr_orch_inject(&s_app.orch,

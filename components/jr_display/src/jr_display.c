@@ -18,6 +18,8 @@
 #include "jr_display/perf_knob.h"
 #include "jr_display/glass_icon.h"
 #include "showpiece_gfx.h"
+#include "glass3_ring.h"
+#include "glass3_screens.h"
 
 #include <stdio.h>
 #include <stddef.h>
@@ -2318,6 +2320,43 @@ bool jr_display_holo_get(void)
     return __atomic_load_n(&s_holo_on, __ATOMIC_ACQUIRE) != 0u;
 }
 
+/* Glass 3.0 unified ring & screen mode. Static init stays CLASSIC so host
+ * pixel-identity tests stay deterministic; ESP_PLATFORM boots into AUTO
+ * (Chrono-Arc + Aetherium + Atmosphaera + Cortex Command) in jr_display_start(). */
+static volatile uint32_t s_glass3_mode = (uint32_t)JR_GLASS3_CLASSIC;
+static volatile uint32_t s_glass3_explicit;
+
+void jr_display_glass3_set(jr_glass3_mode_t mode)
+{
+    if ((uint32_t)mode > (uint32_t)JR_GLASS3_CLASSIC) {
+        mode = JR_GLASS3_AUTO;
+    }
+    __atomic_store_n(&s_glass3_explicit, 1u, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_glass3_mode, (uint32_t)mode, __ATOMIC_RELEASE);
+}
+
+jr_glass3_mode_t jr_display_glass3_get(void)
+{
+    return (jr_glass3_mode_t)__atomic_load_n(&s_glass3_mode, __ATOMIC_ACQUIRE);
+}
+
+const char *jr_display_glass3_name(jr_glass3_mode_t mode)
+{
+    switch (mode) {
+    case JR_GLASS3_AUTO:      return "auto";
+    case JR_GLASS3_CHRONO:    return "chrono";
+    case JR_GLASS3_AETHERIUM: return "aetherium";
+    case JR_GLASS3_CLASSIC:   return "classic";
+    default:                  return "auto";
+    }
+}
+
+static inline bool glass3_active(void)
+{
+    return __atomic_load_n(&s_glass3_mode, __ATOMIC_ACQUIRE) !=
+           (uint32_t)JR_GLASS3_CLASSIC;
+}
+
 _Static_assert((uint32_t)JR_DISPLAY_SPACE_COUNT <= NAV_SPACE_MASK + 1u,
                "JR_DISPLAY_SPACE_COUNT exceeds the nav word's space field — "
                "widen NAV_SPACE_MASK and shift NAV_PREV/OVL/FORWARD/SERIAL");
@@ -4432,6 +4471,10 @@ static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     /* A label has no plate, so its band is only as tall as its glyphs and their
      * halo; a message keeps the round-safe band the plate fills. */
     int band_lo = JR_CAPTION_Y0, band_hi = JR_CAPTION_Y1;
+    if (glass3_active() && band_hi > 414) {
+        /* Keep caption dim plate clear of Chrono-Arc's bottom bezel arc (y>=419). */
+        band_hi = 414;
+    }
     if (label) {
         const int two = s_capd_line[1][0] != '\0';
         band_lo = s_capd_y[0] + m.ink_top - JR_CAPTION_HALO;
@@ -4444,6 +4487,12 @@ static void apply_caption_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     }
     const int e = s_cap_alpha;
     if (((e * 32) >> 8) <= 0) {
+        return;
+    }
+    /* Over an active remote canvas, keep lease & pinned OTA banners only so
+     * ambient screen hints never cover pushed artwork. */
+    if (s_canvas_ease > 0 && !s_capd_lease &&
+        !atomic_load_explicit(&s_caption_pinned, memory_order_relaxed)) {
         return;
     }
     /* No caption, of any kind, is drawn over the control shade or the detail
@@ -6183,6 +6232,70 @@ static void sp_focal_weather(const jr_display_ctx_t *ctx, int y1, int y2,
 {
     const bool swap = ctx->board.swap_color_bytes;
     const bool muted = sp_privacy_muted();
+
+    /* Glass 3.0 ATMOSPHAERA: 360-deg thermal/solar perimeter arc, live Sun
+     * Jewel, curved planetary horizon (y>=266), and optical weather emblem
+     * (x=248..344, y=148..232) with strictly non-overlapping Barlow text. */
+    if (glass3_active()) {
+        const uint32_t cw = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
+        const bool clk_ok = (cw & (1u << 16)) != 0u;
+        const uint8_t hh = clk_ok ? (uint8_t)(((cw >> 8) & 0xFFu) % 24u) : 14u;
+        const uint8_t mm = clk_ok ? (uint8_t)((cw & 0xFFu) % 60u) : 0u;
+        const uint8_t rain0 = (s_wx_valid && s_wx_hours > 0 && s_wx_hour_pct[0] != SP_WX_HOUR_NONE)
+                              ? (uint8_t)s_wx_hour_pct[0] : 0u;
+        const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        const jr_g3_atmosphaera_t atmo = {
+            .hour = hh,
+            .minute = mm,
+            .weather_code = s_wx_valid ? (uint8_t)s_wx_sky : (uint8_t)JR_G3_WX_PARTLY,
+            .is_day = (hh >= 6u && hh < 19u),
+            .temp_f = s_wx_valid ? (int16_t)s_wx_temp_f : 72,
+            .rain_pct = rain0,
+            .now_ms = now_ms,
+            .strength = (uint8_t)(st > 255 ? 255 : (st < 0 ? 0 : st)),
+        };
+        jr_g3_atmosphaera_rows(pixels, y1, y2 - y1, swap, &atmo);
+
+        const uint16_t accent = muted ? SP_C_GOLD : (s_wx_stale ? SP_C_GREY : sp_sky_native(s_wx_sky));
+        const char *head = sp_headline(JR_DISPLAY_SPACE_WEATHER);
+        const int llen = sp_len(head, SP_LABEL_CAP - 1);
+        const int tlen = sp_len(s_wx_temp, (int)sizeof s_wx_temp - 1);
+        const int hlen = sp_len(s_wx_hilo, (int)sizeof s_wx_hilo - 1);
+        const int olen = sp_len(s_wx_outlook, (int)sizeof s_wx_outlook - 1);
+        const int slen = sp_len(s_wx_sun, (int)sizeof s_wx_sun - 1);
+        const int hw = glass_text_width(GLASS_FONT_HERO, s_wx_temp, (size_t)tlen, 0);
+        const int dw = glass_text_width(GLASS_FONT_VALUE, "*", 1, 0);
+        /* Place giant temp cleanly inside [JR_G3_ATMOS_TEMP_X0..X1] (96..242),
+         * clear of the sculpted weather emblem at x=248..344. */
+        int tx0 = (JR_G3_ATMOS_TEMP_X0 + JR_G3_ATMOS_TEMP_X1 - (hw + 4 + dw)) / 2;
+        if (tx0 < JR_G3_ATMOS_TEMP_X0) tx0 = JR_G3_ATMOS_TEMP_X0;
+        const int ty0 = 166 + oy;
+
+        sg_txt_t t_label, t_temp, t_deg, t_hilo, t_sub;
+        sg_txt_make(&t_label, GLASS_FONT_LABEL, head, llen, SP_CX, 114 + oy, 3,
+                    s_wx_valid ? accent : SP_C_GREY, st);
+        sg_txt_at(&t_temp, GLASS_FONT_HERO, s_wx_temp, tlen, tx0, ty0, SP_C_INK, st);
+        sg_txt_at(&t_deg, GLASS_FONT_VALUE, "*", tlen > 0 ? 1 : 0, tx0 + hw + 4, ty0, accent, st);
+        sg_txt_make(&t_hilo, GLASS_FONT_TEXT, s_wx_hilo, hlen, SP_CX,
+                    JR_G3_ATMOS_STATS_Y0 + 4 + oy, 1, SP_C_INK, st);
+        const char *sub = olen > 0 ? s_wx_outlook : s_wx_sun;
+        const int sublen = olen > 0 ? olen : slen;
+        sg_txt_make(&t_sub, GLASS_FONT_LABEL, sub, sublen, SP_CX,
+                    JR_G3_ATMOS_STATS_Y0 + 28 + oy, 2,
+                    olen > 0 ? (muted ? SP_C_GOLD : 0x6EF7u) : SP_C_GREY, st);
+
+        for (int y = y1; y < y2; ++y) {
+            int lo = 0, hi = HUD_W - 1;
+            if (!sp_clip(y, &lo, &hi)) continue;
+            uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+            sg_txt_row(row, y, lo, hi, swap, &t_label);
+            sg_txt_row(row, y, lo, hi, swap, &t_temp);
+            sg_txt_row(row, y, lo, hi, swap, &t_deg);
+            sg_txt_row(row, y, lo, hi, swap, &t_hilo);
+            sg_txt_row(row, y, lo, hi, swap, &t_sub);
+        }
+        return;
+    }
     const uint16_t accent =
         muted ? SP_C_GOLD : (s_wx_stale ? SP_C_GREY : sp_sky_native(s_wx_sky));
     const uint16_t rain =
@@ -7104,6 +7217,69 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
     const uint16_t fill = muted ? SP_C_GOLD
                                 : (state == JR_DISPLAY_AGENT_NONE ? SP_C_VIOLET : agent_native_color(state));
     const bool swap = ctx->board.swap_color_bytes;
+
+    /* Glass 3.0 CORTEX COMMAND (Desk/Codex mode): 4 chamfered LED telemetry
+     * quadrants + crosshair reticle + frosted mission card + live sparkline. */
+    if (glass3_active()) {
+        const uint32_t pw_w = __atomic_load_n(&s_power_word, __ATOMIC_ACQUIRE);
+        const uint8_t bp = (uint8_t)((pw_w & 0xFFu) <= 100u ? (pw_w & 0xFFu) : 0u);
+        const bool chg = (pw_w & (1u << 25)) != 0u;
+        const uint32_t fp = diag_load(&ctx->free_psram_bytes);
+        uint8_t mem_p = (uint8_t)((fp * 100u) / (8u * 1024u * 1024u));
+        if (mem_p > 100u) mem_p = 100u;
+        const uint32_t fps = diag_load(&ctx->actual_fps);
+        uint8_t cpu_p = (uint8_t)((fps * 100u) / 24u);
+        if (cpu_p < 15u) cpu_p = 15u;
+        if (cpu_p > 100u) cpu_p = 100u;
+        jr_g3_cortex_t cx = {
+            .mem_pct = mem_p,
+            .cpu_pct = cpu_p,
+            .batt_pct = bp,
+            .agent_pct = (uint8_t)prog,
+            .charging = chg,
+            .codex_active = true,
+            .row_led = {
+                state == JR_DISPLAY_AGENT_FAILED ? JR_G3_LED_RED
+                    : (state == JR_DISPLAY_AGENT_SUCCEEDED ? JR_G3_LED_GREEN : JR_G3_LED_VIOLET),
+                JR_G3_LED_CYAN,
+                muted ? JR_G3_LED_AMBER : JR_G3_LED_GREEN,
+            },
+            .now_ms = (uint32_t)(esp_timer_get_time() / 1000),
+            .strength = (uint8_t)(st > 255 ? 255 : (st < 0 ? 0 : st)),
+        };
+        spectrum_load(cx.bands);
+        jr_g3_cortex_rows(pixels, y1, y2 - y1, swap, &cx);
+
+        const char *task = sp_headline(JR_DISPLAY_SPACE_DESK);
+        int tlen = sp_len(task, 14);
+        if (tlen == 0) { task = "CODEX DECK"; tlen = 10; }
+        const char *sname = sp_agent_name(state);
+        char r0[20], r1[20], r2[20];
+        int l0 = sp_str(r0, 0, (int)sizeof r0, "STATE  ");
+        l0 = sp_str(r0, l0, (int)sizeof r0, sname);
+        int l1 = sp_str(r1, 0, (int)sizeof r1, "DONE   ");
+        l1 = sp_pct(r1, l1, (int)sizeof r1, (uint32_t)prog);
+        int l2 = sp_str(r2, 0, (int)sizeof r2, muted ? "MIC    MUTED" : "LINK   CODEX");
+
+        sg_txt_t t_hdr, t_r0, t_r1, t_r2;
+        sg_txt_make(&t_hdr, GLASS_FONT_TEXT, task, tlen, SP_CX, 159 + oy, 1,
+                    muted ? SP_C_GOLD : 0xE3FFu, st);
+        sg_txt_at(&t_r0, GLASS_FONT_TEXT, r0, l0, JR_G3_CORTEX_TEXT_X0, 200 + oy, SP_C_INK, st);
+        sg_txt_at(&t_r1, GLASS_FONT_TEXT, r1, l1, JR_G3_CORTEX_TEXT_X0, 234 + oy, fill, st);
+        sg_txt_at(&t_r2, GLASS_FONT_TEXT, r2, l2, JR_G3_CORTEX_TEXT_X0, 268 + oy,
+                  muted ? SP_C_GOLD : SP_C_MINT, st);
+
+        for (int y = y1; y < y2; ++y) {
+            int lo = 0, hi = HUD_W - 1;
+            if (!sp_clip(y, &lo, &hi)) continue;
+            uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+            sg_txt_row(row, y, lo, hi, swap, &t_hdr);
+            sg_txt_row(row, y, lo, hi, swap, &t_r0);
+            sg_txt_row(row, y, lo, hi, swap, &t_r1);
+            sg_txt_row(row, y, lo, hi, swap, &t_r2);
+        }
+        return;
+    }
     const int cyr = SP_CY + oy + SG_RING_DY;
     const int cy16 = cyr * 16;
     const int cx16 = SP_CX * 16;
@@ -7327,6 +7503,76 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
     const bool quiet_head = hlen == 0 || (hlen > 3 && head[0] == 'U' && head[1] == 'P' && head[2] == ' ');
     const char *label = quiet_head ? "BATTERY" : head;
     const int label_len = quiet_head ? 7 : hlen;
+
+    /* Glass 3.0 CORTEX COMMAND (Status mode): 4 chamfered LED telemetry
+     * quadrants (MEM, CPU, PWR, AGENT) + crosshair reticle + frosted cockpit
+     * card with 3 glowing status LEDs + live bottom sparkline. */
+    if (glass3_active()) {
+        const uint32_t fp = diag_load(&ctx->free_psram_bytes);
+        uint8_t mem_p = (uint8_t)((fp * 100u) / (8u * 1024u * 1024u));
+        if (mem_p > 100u) mem_p = 100u;
+        const uint32_t fps = diag_load(&ctx->actual_fps);
+        uint8_t cpu_p = (uint8_t)((fps * 100u) / 24u);
+        if (cpu_p < 15u) cpu_p = 15u;
+        if (cpu_p > 100u) cpu_p = 100u;
+        const bool desk_on = sp_desk_live();
+        const uint8_t ag_p = desk_on
+            ? (uint8_t)(__atomic_load_n(&s_desk_word, __ATOMIC_ACQUIRE) & 0xFFu)
+            : (uint8_t)(bars * 25);
+        jr_g3_cortex_t cx = {
+            .mem_pct = mem_p,
+            .cpu_pct = cpu_p,
+            .batt_pct = have_gauge ? (uint8_t)shown : 0u,
+            .agent_pct = ag_p > 100u ? 100u : ag_p,
+            .charging = charging,
+            .codex_active = desk_on,
+            .row_led = {
+                bars >= 2 ? JR_G3_LED_GREEN : (bars == 1 ? JR_G3_LED_AMBER : JR_G3_LED_RED),
+                link_on ? JR_G3_LED_CYAN : JR_G3_LED_AMBER,
+                tools_on ? JR_G3_LED_VIOLET : JR_G3_LED_OFF,
+            },
+            .now_ms = (uint32_t)(esp_timer_get_time() / 1000),
+            .strength = (uint8_t)(st > 255 ? 255 : (st < 0 ? 0 : st)),
+        };
+        spectrum_load(cx.bands);
+        jr_g3_cortex_rows(pixels, y1, y2 - y1, swap, &cx);
+
+        char hdr[18], r0[20], r1[20], r2[20];
+        int lh = sp_str(hdr, 0, (int)sizeof hdr, charging ? "CHG  " : "PWR  ");
+        lh = sp_str(hdr, lh, (int)sizeof hdr, pctbuf);
+        if (have_gauge) lh = sp_str(hdr, lh, (int)sizeof hdr, "%");
+
+        int l0 = sp_str(r0, 0, (int)sizeof r0, "WIFI   ");
+        l0 = sp_str(r0, l0, (int)sizeof r0, dbm);
+        if (bars > 0) l0 = sp_str(r0, l0, (int)sizeof r0, " dBm");
+
+        int l1 = sp_str(r1, 0, (int)sizeof r1, "LINK   ");
+        l1 = sp_str(r1, l1, (int)sizeof r1, link_on ? "LIVE " : "IDLE ");
+        l1 = sp_str(r1, l1, (int)sizeof r1, chipbuf);
+
+        int l2 = sp_str(r2, 0, (int)sizeof r2, "TOOLS  ");
+        l2 = sp_str(r2, l2, (int)sizeof r2, tools_on ? "READY" : "STANDBY");
+
+        sg_txt_t t_hdr, t_r0, t_r1, t_r2;
+        sg_txt_make(&t_hdr, GLASS_FONT_TEXT, hdr, lh, SP_CX, 159 + oy, 1,
+                    low ? SP_C_RED : (muted ? SP_C_GOLD : SP_C_CYAN), st);
+        sg_txt_at(&t_r0, GLASS_FONT_TEXT, r0, l0, JR_G3_CORTEX_TEXT_X0, 200 + oy, SP_C_INK, st);
+        sg_txt_at(&t_r1, GLASS_FONT_TEXT, r1, l1, JR_G3_CORTEX_TEXT_X0, 234 + oy,
+                  link_on ? SP_C_CYAN : SP_C_GREY, st);
+        sg_txt_at(&t_r2, GLASS_FONT_TEXT, r2, l2, JR_G3_CORTEX_TEXT_X0, 268 + oy,
+                  tools_on ? 0xD4FFu : SP_C_GREY, st);
+
+        for (int y = y1; y < y2; ++y) {
+            int lo = 0, hi = HUD_W - 1;
+            if (!sp_clip(y, &lo, &hi)) continue;
+            uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+            sg_txt_row(row, y, lo, hi, swap, &t_hdr);
+            sg_txt_row(row, y, lo, hi, swap, &t_r0);
+            sg_txt_row(row, y, lo, hi, swap, &t_r1);
+            sg_txt_row(row, y, lo, hi, swap, &t_r2);
+        }
+        return;
+    }
 
     const glass_metrics_t hero = glass_font_metrics(GLASS_FONT_HERO);
     const glass_metrics_t val = glass_font_metrics(GLASS_FONT_VALUE);
@@ -7715,7 +7961,8 @@ static void apply_timer_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
     if ((tw & TIMER_ACTIVE_BIT) == 0u) {
         return;
     }
-    if (s_choice_n > 0 || s_ask_ease > 0 || s_shade_ease > 0 || s_detail_ease > 0) {
+    if (s_choice_n > 0 || s_ask_ease > 0 || s_shade_ease > 0 || s_detail_ease > 0 ||
+        s_canvas_ease > 0) {
         return;
     }
     const jr_display_ota_state_t ota_state =
@@ -7789,6 +8036,12 @@ static void apply_timer_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
         }
     }
 
+    const bool g3_suppress_chip =
+        glass3_active() &&
+        (s_cap_alpha > 0 ||
+         s_space_to == (uint8_t)JR_DISPLAY_SPACE_STATUS ||
+         s_space_to == (uint8_t)JR_DISPLAY_SPACE_WEATHER ||
+         s_space_to == (uint8_t)JR_DISPLAY_SPACE_DESK);
     const uint16_t txt_col = ringing ? arc_col : (rem_s < 60u ? SP_C_AMBER : SP_C_INK);
 
     for (int y = y1; y < y2; ++y) {
@@ -7808,14 +8061,14 @@ static void apply_timer_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
                               GLASS_Q16_12_OCLOCK, sweep, arc_col, arc_alpha, swap);
             }
         }
-        if (hit_lbl && llen > 0 && y >= ly_lo - 3 && y <= ly_hi + 3) {
+        if (!g3_suppress_chip && hit_lbl && llen > 0 && y >= ly_lo - 3 && y <= ly_hi + 3) {
             sp_timer_halo_row(row, y, lo, hi, lx - 6, lx + lw_px + 6, swap);
             if (y >= ly_lo && y <= ly_hi) {
                 glass_text_row(row, y, lo, hi, GLASS_FONT_LABEL, lbuf, (size_t)llen,
                                lx, SP_TIMER_LBL_Y, SP_TIMER_TRACK, SP_C_INK, arc_alpha, swap);
             }
         }
-        if (hit_time && y >= ty_lo - 3 && y <= ty_hi + 3) {
+        if (!g3_suppress_chip && hit_time && y >= ty_lo - 3 && y <= ty_hi + 3) {
             sp_timer_halo_row(row, y, lo, hi, tx - 6, tx + tw_px + 6, swap);
             if (y >= ty_lo && y <= ty_hi) {
                 glass_text_row(row, y, lo, hi, GLASS_FONT_LABEL, tbuf, (size_t)tlen,
@@ -7857,7 +8110,8 @@ static void apply_stopwatch_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
     if ((sw & SW_ACTIVE_BIT) == 0u) {
         return;
     }
-    if (s_choice_n > 0 || s_ask_ease > 0 || s_shade_ease > 0 || s_detail_ease > 0) {
+    if (s_choice_n > 0 || s_ask_ease > 0 || s_shade_ease > 0 || s_detail_ease > 0 ||
+        s_canvas_ease > 0) {
         return;
     }
     if ((atomic_load_explicit(&s_timer_word, memory_order_acquire) & TIMER_ACTIVE_BIT) != 0u) {
@@ -7916,6 +8170,12 @@ static void apply_stopwatch_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
         lx = SP_CX - lw_px / 2;
     }
 
+    const bool g3_suppress_sw_chip =
+        glass3_active() &&
+        (s_cap_alpha > 0 ||
+         s_space_to == (uint8_t)JR_DISPLAY_SPACE_STATUS ||
+         s_space_to == (uint8_t)JR_DISPLAY_SPACE_WEATHER ||
+         s_space_to == (uint8_t)JR_DISPLAY_SPACE_DESK);
     const uint16_t txt_col = running ? SP_C_INK : SP_C_GREY;
 
     for (int y = y1; y < y2; ++y) {
@@ -7934,14 +8194,14 @@ static void apply_stopwatch_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
             glass_disc_row(row, y, lo, hi, tip_x16, tip_y16, 3 * 16 + 4,
                            0xBFFFu, 250u, swap);
         }
-        if (hit_lap && llen > 0 && y >= ly_lo - 3 && y <= ly_hi + 3) {
+        if (!g3_suppress_sw_chip && hit_lap && llen > 0 && y >= ly_lo - 3 && y <= ly_hi + 3) {
             sp_timer_halo_row(row, y, lo, hi, lx - 6, lx + lw_px + 6, swap);
             if (y >= ly_lo && y <= ly_hi) {
                 glass_text_row(row, y, lo, hi, GLASS_FONT_LABEL, lbuf, (size_t)llen,
                                lx, SP_TIMER_LBL_Y, SP_TIMER_TRACK, SP_C_CYAN, 235u, swap);
             }
         }
-        if (hit_time && y >= ty_lo - 3 && y <= ty_hi + 3) {
+        if (!g3_suppress_sw_chip && hit_time && y >= ty_lo - 3 && y <= ty_hi + 3) {
             sp_timer_halo_row(row, y, lo, hi, tx - 6, tx + tw_px + 6, swap);
             if (y >= ty_lo && y <= ty_hi) {
                 glass_text_row(row, y, lo, hi, GLASS_FONT_LABEL, tbuf, (size_t)tlen,
@@ -7987,6 +8247,39 @@ static void apply_rim_level_overlay(const jr_display_ctx_t *ctx, int y1, int y2,
         pct = 100;
     }
     const bool swap = ctx->board.swap_color_bytes;
+
+    /* Glass 3.0 Rotary Bezel Scrub Overlay: luminous 270-deg precision dial
+     * arc + 41-tick inner scale + faceted jewel indicator (r=204..231) plus
+     * a crisp upper readout pill strictly inside r < 180. */
+    if (glass3_active()) {
+        jr_g3_bezel_scrub_rows(pixels, y1, y2 - y1, swap, now_ms, (uint8_t)pct,
+                               is_brt ? JR_G3_SCRUB_BRIGHTNESS : JR_G3_SCRUB_VOLUME,
+                               alpha);
+        char lbl[12];
+        int l = sp_str(lbl, 0, (int)sizeof lbl, is_brt ? "BRT " : "VOL ");
+        l = sp_pct(lbl, l, (int)sizeof lbl, (uint32_t)pct);
+        const int pill_cy = 102;
+        const int tw = glass_text_width(GLASS_FONT_LABEL, lbl, (size_t)l, 2);
+        const int hw = tw / 2 + 12;
+        const uint16_t col = is_brt ? SP_C_CYAN : SP_C_AMBER;
+        const glass_metrics_t ml = glass_font_metrics(GLASS_FONT_LABEL);
+        sg_txt_t t_sc;
+        sg_txt_make(&t_sc, GLASS_FONT_LABEL, lbl, l, SP_CX,
+                    pill_cy - ml.cap_h / 2, 2, SP_C_INK, alpha);
+        if (y1 <= pill_cy + 14 && y2 > pill_cy - 14) {
+            for (int y = y1; y < y2; ++y) {
+                if (y < pill_cy - 13 || y > pill_cy + 13) continue;
+                int lo = 0, hi = HUD_W - 1;
+                if (!sp_clip(y, &lo, &hi)) continue;
+                uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+                sp_pill_row(row, y, lo, hi, SP_CX, pill_cy, hw, 12,
+                            0x0862u, (uint8_t)((215 * alpha) / 255),
+                            col, (uint8_t)((220 * alpha) / 255), swap);
+                sg_txt_row(row, y, lo, hi, swap, &t_sc);
+            }
+        }
+        return;
+    }
     const int32_t cx16 = SP_CX * 16;
     const int32_t cy16 = SP_CY * 16;
     const int32_t span = 2 * 7282; /* +-40 deg about 9 / 3 o'clock (SG_SH_HALF_Q16) */
@@ -9097,18 +9390,86 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
     }
     int64_t sm = esp_timer_get_time();
     const uint32_t now_ms = (uint32_t)(sm / 1000);
-    hud_overlay_frame(pixels, y1, nrows, now_ms,
-                      ctx->board.swap_color_bytes, &env);
+    const bool g3 = glass3_active();
+    const jr_glass3_mode_t g3_mode =
+        (jr_glass3_mode_t)__atomic_load_n(&s_glass3_mode, __ATOMIC_ACQUIRE);
+    const bool canvas_on = s_canvas_ease > 0;
+    const bool under_sheet_now = s_detail_ease > 0 || s_shade_ease > 0;
+    const int cn_now = __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE);
+    const jr_display_space_t nav_space =
+        (jr_display_space_t)(__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) & NAV_SPACE_MASK);
+    const bool g3_home_eligible =
+        g3 && !canvas_on && !under_sheet_now && cn_now == 0 &&
+        s_space_to == (uint8_t)JR_DISPLAY_SPACE_JARVIS &&
+        nav_space == JR_DISPLAY_SPACE_JARVIS &&
+        s_watch_s == 0 && s_space_black < 256;
+    const bool voice_live =
+        env.face == HUD_FACE_LISTEN || env.face == HUD_FACE_THINK ||
+        env.face == HUD_FACE_SPEAK;
+    const bool g3_use_aeth =
+        g3_home_eligible &&
+        (g3_mode == JR_GLASS3_AETHERIUM ||
+         (g3_mode == JR_GLASS3_AUTO && voice_live && !env.privacy_muted));
 
-    /* Wave 4: Real-Time 3D Geodesic Hologram Core on JARVIS Home (r <= 92)
-     * when enabled via jr_display_holo_set(true). Drawn under sheets, asks,
-     * captions, and ripples so modal/chrome layers always read cleanly on top. */
+    if (canvas_on) {
+        /* Remote canvas owns the entire 466x466 glass cleanly: suppress voice
+         * halos and battery rim so pushed artwork is 100% unobstructed. */
+    } else if (g3_home_eligible) {
+        const uint32_t frame_ms = s_fade_prev_ms != 0u ? s_fade_prev_ms : now_ms;
+        int ring_s = 256 - s_space_black;
+        if (ring_s > 255) ring_s = 255;
+        if (ring_s > 0) {
+            if (g3_use_aeth) {
+                jr_g3_aeth_mode_t am = JR_G3_AETH_LISTEN;
+                if (env.face == HUD_FACE_SPEAK) {
+                    am = JR_G3_AETH_SPEAK;
+                } else if (env.face == HUD_FACE_THINK) {
+                    am = JR_G3_AETH_THINK;
+                }
+                uint8_t spec[16];
+                spectrum_load(spec);
+                jr_g3_aetherium_rows(pixels, y1, nrows, ctx->board.swap_color_bytes,
+                                     frame_ms, am, spec, env.amp, ring_s);
+            } else {
+                const uint32_t lk = __atomic_load_n(&s_links_word, __ATOMIC_ACQUIRE);
+                const jr_g3_chrono_env_t cenv = {
+                    .batt_pct = env.batt_pct,
+                    .charging = env.charging,
+                    .wifi_bars = (uint8_t)sp_wifi_bars(lk),
+                    .amp = env.amp,
+                    .muted = env.privacy_muted,
+                    .codex_active = sp_desk_live(),
+                    .voice_busy = voice_live,
+                };
+                jr_g3_chrono_arc_rows(pixels, y1, nrows, ctx->board.swap_color_bytes,
+                                      frame_ms, &cenv, ring_s);
+            }
+        }
+        if (env.face == HUD_FACE_ERROR) {
+            hud_overlay_frame(pixels, y1, nrows, now_ms,
+                              ctx->board.swap_color_bytes, &env);
+        }
+    } else {
+        if (g3 && (s_space_to == (uint8_t)JR_DISPLAY_SPACE_WEATHER ||
+                   s_space_to == (uint8_t)JR_DISPLAY_SPACE_STATUS ||
+                   s_space_to == (uint8_t)JR_DISPLAY_SPACE_DESK)) {
+            /* Atmosphaera & Cortex Command own the full 360-deg perimeter. */
+            env.rim = HUD_RIM_NONE;
+        }
+        hud_overlay_frame(pixels, y1, nrows, now_ms,
+                          ctx->board.swap_color_bytes, &env);
+    }
+
+    /* Wave 4 / Glass 3.0: Real-Time 3D Geodesic Hologram Core on JARVIS Home.
+     * Strictly gated on s_canvas_ease == 0 (never bleeds over remote canvas)
+     * and clamped to r <= 56 in Aetherium mode (strictly clear of the lower
+     * vocal ribbon y=286..334) and r <= 86 in Chrono-Arc (inside r<106). */
     if (__atomic_load_n(&s_holo_on, __ATOMIC_ACQUIRE) != 0u &&
+        !canvas_on &&
         s_space_to == (uint8_t)JR_DISPLAY_SPACE_JARVIS &&
         s_watch_s == 0 && s_detail_ease == 0 && s_shade_ease == 0 &&
-        __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE) == 0 && s_ask_ease == 0) {
-        const uint32_t nav_h = __atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE);
-        if ((jr_display_space_t)(nav_h & NAV_SPACE_MASK) == JR_DISPLAY_SPACE_JARVIS) {
+        cn_now == 0 && s_ask_ease == 0) {
+        if (nav_space == JR_DISPLAY_SPACE_JARVIS) {
             const jr_face_t af = (jr_face_t)diag_load(&ctx->applied_face);
             jr_holo_mode_t hmode = JR_HOLO_IDLE;
             if (env.privacy_muted || af == JR_FACE_MUTED) {
@@ -9125,8 +9486,9 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
                 const uint32_t frame_ms = s_fade_prev_ms != 0u ? s_fade_prev_ms : now_ms;
                 uint8_t spec[16];
                 spectrum_load(spec);
+                const int holo_r = g3_use_aeth ? 56 : (g3_home_eligible ? 86 : 92);
                 jr_showpiece_holo_rows(pixels, y1, nrows, ctx->board.swap_color_bytes,
-                                       frame_ms, 92, hmode, s_tilt.x, s_tilt.y,
+                                       frame_ms, holo_r, hmode, s_tilt.x, s_tilt.y,
                                        spec, env.amp, holo_s > 255 ? 255 : holo_s);
             }
         }
@@ -9175,10 +9537,10 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
             (jr_display_space_t)(__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) &
                                  NAV_SPACE_MASK) == JR_DISPLAY_SPACE_WATCH ||
             (s_space_from == (uint8_t)JR_DISPLAY_SPACE_WATCH && s_space_prog < 256);
-        if (under_sheet && watch_on_glass) {
+        if (!canvas_on && under_sheet && watch_on_glass) {
             apply_clock_overlay(ctx, y1, y2, pixels);
         }
-        if (!watch_clear_follows(ctx)) {
+        if ((!canvas_on || under_sheet) && !watch_clear_follows(ctx)) {
             apply_space_overlay(ctx, y1, y2, pixels);
         }
         split_mark(JR_DISPLAY_SPLIT_HUD_SPACE, &sm);
@@ -9193,7 +9555,7 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
          * suppressed the clock on precisely the one space that wanted it, so
          * the screen rendered the bare baked face with the time reduced to a
          * caption. */
-        if (!under_sheet && (!s_space_on || watch_on_glass)) {
+        if (!canvas_on && !under_sheet && (!s_space_on || watch_on_glass)) {
             apply_clock_overlay(ctx, y1, y2, pixels);  /* gates itself */
         }
         split_mark(JR_DISPLAY_SPLIT_HUD_CLOCK, &sm);
@@ -9271,7 +9633,16 @@ static void apply_shell_overlay(jr_display_ctx_t *ctx, int x1, int y1,
      * on. The agent rim resumes the moment the ask, its fade, and any commit
      * preview are done; the agent's progress is still on DESK meanwhile. */
     if (s_choice_n > 0 || s_ask_ease > 0 || s_commit_pct > 0U ||
+        s_canvas_ease > 0 ||
         rim_level_active((uint32_t)(esp_timer_get_time() / 1000))) {
+        return;
+    }
+    if (glass3_active() &&
+        (s_space_to == (uint8_t)JR_DISPLAY_SPACE_JARVIS ||
+         s_space_to == (uint8_t)JR_DISPLAY_SPACE_STATUS ||
+         s_space_to == (uint8_t)JR_DISPLAY_SPACE_DESK)) {
+        /* Chrono-Arc's 12 o'clock AI capsule & Cortex Command's AGENT quadrant
+         * already carry agent progress cleanly in Glass 3.0 without overlapping. */
         return;
     }
     const uint8_t progress = shell & JR_DISPLAY_SHELL_PROGRESS;
@@ -9723,7 +10094,10 @@ static void panel_flush(gfx_disp_t *disp, int x1, int y1, int x2, int y2,
         layer_mark(ctx, 2, &mark);
         apply_shell_overlay(ctx, x1, y1, x2, y2, outbound);
         layer_mark(ctx, 3, &mark);
-        apply_surface_overlay(ctx, x1, y1, x2, y2, outbound);
+        if (__atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE) == 0 &&
+            s_ask_ease == 0 && s_shade_ease == 0 && s_detail_ease == 0) {
+            apply_surface_overlay(ctx, x1, y1, x2, y2, outbound);
+        }
         layer_mark(ctx, 4, &mark);
         }
     }
@@ -11049,6 +11423,9 @@ esp_err_t jr_display_start(jr_display_t *out_port)
 #ifdef ESP_PLATFORM
     if (__atomic_load_n(&s_holo_explicit, __ATOMIC_RELAXED) == 0u) {
         __atomic_store_n(&s_holo_on, 1u, __ATOMIC_RELEASE);
+    }
+    if (__atomic_load_n(&s_glass3_explicit, __ATOMIC_RELAXED) == 0u) {
+        __atomic_store_n(&s_glass3_mode, (uint32_t)JR_GLASS3_AUTO, __ATOMIC_RELEASE);
     }
 #endif
     orbit_rec_build();         /* before the render task exists to read it */

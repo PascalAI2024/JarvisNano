@@ -887,6 +887,21 @@ void jr_display_date_set_ymd(uint16_t year, uint8_t month, uint8_t day);
 void jr_display_holo_set(bool enabled);
 bool jr_display_holo_get(void);
 
+/* Glass 3.0: Unified circular OLED ring & screen language.
+ * AUTO (hardware default): Chrono-Arc Home + Aetherium Voice + Atmosphaera
+ * Weather + Cortex Command Status/Desk + Rotary Bezel Scrub overlay.
+ * CLASSIC preserves the exact Glass-2 pixel-identity path. Lock-free. */
+typedef enum {
+    JR_GLASS3_AUTO = 0,
+    JR_GLASS3_CHRONO = 1,
+    JR_GLASS3_AETHERIUM = 2,
+    JR_GLASS3_CLASSIC = 3,
+} jr_glass3_mode_t;
+
+void jr_display_glass3_set(jr_glass3_mode_t mode);
+jr_glass3_mode_t jr_display_glass3_get(void);
+const char *jr_display_glass3_name(jr_glass3_mode_t mode);
+
 #ifdef __cplusplus
 }
 #endif

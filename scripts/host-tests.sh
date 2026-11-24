@@ -188,6 +188,8 @@ run_c_suites() {
         jr_display_companion_tests "$ROOT/components/jr_display/tests/build/jr_display_companion_tests"
     run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build"         jr_display_glass_tests "$ROOT/components/jr_display/tests/build/jr_display_glass_tests"
     run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build"         jr_display_icon_tests "$ROOT/components/jr_display/tests/build/jr_display_icon_tests"
+    run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build"         jr_display_glass3_ring_tests "$ROOT/components/jr_display/tests/build/jr_display_glass3_ring_tests"
+    run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build"         jr_display_glass3_screens_tests "$ROOT/components/jr_display/tests/build/jr_display_glass3_screens_tests"
     run_production_python_c_suite jr_display_board_tests components/jr_display/tests/test_board.py
     run_production_python_c_suite jr_display_quiet_vendor_tests components/jr_display/tests/test_quiet_vendor.py
     run_main_shell_suite

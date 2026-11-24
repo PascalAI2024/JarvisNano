@@ -35,6 +35,8 @@ add_executable(jr_display_shell_tests
     test_shell.c
     ../src/hud_render.c
     ../src/showpiece_gfx.c
+    ../src/glass3_ring.c
+    ../src/glass3_screens.c
     ../src/balance_wheel_data.c
     ../src/companion.c
     ../src/glass_font.c
@@ -63,6 +65,8 @@ add_executable(jr_display_frame_tests
     test_frame_identity.c
     ../src/hud_render.c
     ../src/showpiece_gfx.c
+    ../src/glass3_ring.c
+    ../src/glass3_screens.c
     ../src/balance_wheel_data.c
     ../src/companion.c
     ../src/glass_font.c
@@ -129,6 +133,8 @@ add_executable(glass_preview EXCLUDE_FROM_ALL
     probe/glass_preview.c
     ../src/hud_render.c
     ../src/showpiece_gfx.c
+    ../src/glass3_ring.c
+    ../src/glass3_screens.c
     ../src/balance_wheel_data.c
     ../src/companion.c
     ../src/glass_font.c
@@ -137,6 +143,23 @@ add_executable(glass_preview EXCLUDE_FROM_ALL
     ../src/glass_icon.c
     ../src/glass_icon_data.c
 )
+
+add_executable(jr_display_glass3_ring_tests
+    ../../../host/test_glass3_ring.c
+    ../src/glass3_ring.c
+    ../src/glass_draw.c
+)
+target_include_directories(jr_display_glass3_ring_tests PRIVATE ../include ../src)
+target_compile_options(jr_display_glass3_ring_tests PRIVATE -O2 -Wall -Wextra -Werror)
+add_test(NAME jr_display_glass3_ring_tests COMMAND jr_display_glass3_ring_tests)
+
+add_executable(jr_display_glass3_screens_tests
+    ../../../host/test_glass3_screens.c
+    ../src/glass3_screens.c
+)
+target_include_directories(jr_display_glass3_screens_tests PRIVATE ../include ../src)
+target_compile_options(jr_display_glass3_screens_tests PRIVATE -O2 -Wall -Wextra -Werror)
+add_test(NAME jr_display_glass3_screens_tests COMMAND jr_display_glass3_screens_tests)
 target_include_directories(glass_preview PRIVATE
     ../include
     ../src

@@ -11,6 +11,8 @@ idf_component_register(
         "src/jr_display.c"
         "src/hud_render.c"
         "src/showpiece_gfx.c"
+        "src/glass3_ring.c"
+        "src/glass3_screens.c"
         "src/companion.c"
         "src/glass_font.c"
         "src/glass_draw.c"

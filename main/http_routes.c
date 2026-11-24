@@ -246,6 +246,15 @@ static bool query_int(httpd_req_t *req, const char *key, int *out)
     return true;
 }
 
+static bool query_str(httpd_req_t *req, const char *key, char *out, size_t cap)
+{
+    char q[256];
+    if (httpd_req_get_url_query_str(req, q, sizeof q) != ESP_OK) {
+        return false;
+    }
+    return httpd_query_key_value(q, key, out, cap) == ESP_OK && out[0] != '\0';
+}
+
 static int hex_nibble(char c)
 {
     if (c >= '0' && c <= '9') { return c - '0'; }
@@ -1810,6 +1819,7 @@ static const char *touch_kind_name(jr_input_kind_t kind)
     case JR_INPUT_SWIPE:      return "swipe";
     case JR_INPUT_PRESS_DOWN: return "press_down";
     case JR_INPUT_PRESS_UP:   return "press_up";
+    case JR_INPUT_BEZEL_SCRUB: return "bezel_scrub";
     default:                  return "none";
     }
 }
@@ -2109,6 +2119,98 @@ static esp_err_t hud_toggle_handler(httpd_req_t *req)
     jr_display_set_hud_enabled(on != 0);
     char body[64];
     int n = snprintf(body, sizeof body, "{\"hud\":%s}", on ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
+/* POST /api/display/holo?on=0|1 — toggle Wave 4 / Glass 3.0 3D Geodesic Core. */
+static esp_err_t holo_toggle_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    int on = 1;
+    if (!query_int(req, "on", &on) || (on != 0 && on != 1)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "on must be 0 or 1");
+        return ESP_OK;
+    }
+    jr_display_holo_set(on != 0);
+    char body[64];
+    int n = snprintf(body, sizeof body, "{\"ok\":true,\"holo\":%s}", on ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
+/* POST /api/display/glass3?mode=auto|chrono|aetherium|classic — switch Glass 3.0 ring mode. */
+static esp_err_t glass3_mode_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    char q[24] = {0};
+    if (query_str(req, "mode", q, sizeof q)) {
+        if (strcmp(q, "auto") == 0) {
+            jr_display_glass3_set(JR_GLASS3_AUTO);
+        } else if (strcmp(q, "chrono") == 0) {
+            jr_display_glass3_set(JR_GLASS3_CHRONO);
+        } else if (strcmp(q, "aetherium") == 0) {
+            jr_display_glass3_set(JR_GLASS3_AETHERIUM);
+        } else if (strcmp(q, "classic") == 0) {
+            jr_display_glass3_set(JR_GLASS3_CLASSIC);
+        } else {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "mode must be auto|chrono|aetherium|classic");
+            return ESP_OK;
+        }
+    }
+    const jr_glass3_mode_t cur = jr_display_glass3_get();
+    char body[96];
+    int n = snprintf(body, sizeof body,
+                     "{\"ok\":true,\"glass3_mode\":\"%s\",\"glass3\":%s}",
+                     jr_display_glass3_name(cur),
+                     cur != JR_GLASS3_CLASSIC ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
+/* POST /api/debug/cue?kind=tick|scrub|confirm|dismiss|limit|mode|mute_on|mute_off|wake|timer
+ * Audition Glass 3.0 sculpted 24 kHz acoustic feedback from Command Deck. */
+static esp_err_t cue_audition_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    char kind[20] = {0};
+    if (!query_str(req, "kind", kind, sizeof kind)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "kind required");
+        return ESP_OK;
+    }
+    esp_err_t err = ESP_OK;
+    if (strcmp(kind, "wake") == 0) {
+        jr_audio_play_wake_cue();
+    } else if (strcmp(kind, "timer") == 0) {
+        jr_audio_play_timer_chime();
+    } else {
+        jr_cue_kind_t ck = JR_CUE_KIND_COUNT;
+        if (strcmp(kind, "tick") == 0)           ck = JR_CUE_TICK;
+        else if (strcmp(kind, "scrub") == 0)     ck = JR_CUE_SCRUB;
+        else if (strcmp(kind, "confirm") == 0)   ck = JR_CUE_CONFIRM;
+        else if (strcmp(kind, "dismiss") == 0)   ck = JR_CUE_DISMISS;
+        else if (strcmp(kind, "limit") == 0)     ck = JR_CUE_LIMIT;
+        else if (strcmp(kind, "mode") == 0)      ck = JR_CUE_MODE;
+        else if (strcmp(kind, "mute_on") == 0)   ck = JR_CUE_MUTE_ON;
+        else if (strcmp(kind, "mute_off") == 0)  ck = JR_CUE_MUTE_OFF;
+        else {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "unknown cue kind");
+            return ESP_OK;
+        }
+        err = jr_audio_play_cue(ck, jr_cue_amplitude_permille(ck, s_out_vol));
+    }
+    char body[96];
+    int n = snprintf(body, sizeof body, "{\"ok\":%s,\"kind\":\"%s\",\"err\":\"%s\"}",
+                     err == ESP_OK ? "true" : "false", kind, esp_err_to_name(err));
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, body, n);
     return ESP_OK;
@@ -3051,7 +3153,8 @@ bool operator_mode_release(uint32_t now, const char *reason,
 
     if (physical_feedback && !privacy_held) {
         jr_display_bloom();
-        (void)jr_audio_diag_play_chirp(160U, 8U);
+        (void)jr_audio_play_cue(JR_CUE_MODE,
+                                jr_cue_amplitude_permille(JR_CUE_MODE, s_out_vol));
     }
     ESP_LOGI(TAG, "operator: %s mode released (%s)",
              operator_owner_name(released_owner), reason);
@@ -3817,7 +3920,7 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         "\"flush_completions\":%u,\"flush_errors\":%u,"
         "\"requested_face\":%d,\"applied_face\":%d,"
         "\"choices_active\":%s,\"space\":\"%s\",\"watch_style\":\"%s\","
-        "\"hbm\":%s,\"holo\":%s,\"te_sync\":%s,\"te_waits\":%u,\"te_timeouts\":%u,"
+        "\"hbm\":%s,\"holo\":%s,\"hud\":%s,\"glass3_mode\":\"%s\",\"te_sync\":%s,\"te_waits\":%u,\"te_timeouts\":%u,"
         "\"sun_rise_min\":%d,\"sun_set_min\":%d},\"touch\":{"
         "\"events\":%u,\"last\":{\"kind\":\"%s\",\"x\":%u,\"y\":%u},"
         "\"shade_open\":%s,\"panel_touch_challenge\":{\"pending\":%s,"
@@ -3894,6 +3997,8 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         jr_display_watch_style_name(jr_display_watch_style()),
         jr_display_get_hbm() ? "true" : "false",
         jr_display_holo_get() ? "true" : "false",
+        jr_display_hud_enabled() ? "true" : "false",
+        jr_display_glass3_name(jr_display_glass3_get()),
         te_sync ? "true" : "false",
         (unsigned)te_waits, (unsigned)te_timeouts,
         (int)s_wx_sun_rise_min, (int)s_wx_sun_set_min,
@@ -5796,7 +5901,7 @@ static esp_err_t display_snapshot_rgb565_handler(httpd_req_t *req)
 
 /* Handler slots the server allocates (4 B each, internal RAM). The table
  * below is checked against it at compile time. */
-#define JR_HTTP_ROUTE_SLOTS 64
+#define JR_HTTP_ROUTE_SLOTS 72
 
 void start_diag_http(void)
 {
@@ -5843,6 +5948,12 @@ void start_diag_http(void)
           .handler = board_diag_handler },
         { .uri = "/api/display/hud", .method = HTTP_POST,
           .handler = hud_toggle_handler },
+        { .uri = "/api/display/holo", .method = HTTP_POST,
+          .handler = holo_toggle_handler },
+        { .uri = "/api/display/glass3", .method = HTTP_POST,
+          .handler = glass3_mode_handler },
+        { .uri = "/api/debug/cue", .method = HTTP_POST,
+          .handler = cue_audition_handler },
         { .uri = "/api/display/choices", .method = HTTP_POST,
           .handler = choices_debug_handler },
         { .uri = "/api/display/choices/hit", .method = HTTP_GET,

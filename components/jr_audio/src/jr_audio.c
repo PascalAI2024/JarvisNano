@@ -2183,6 +2183,21 @@ esp_err_t jr_audio_play_sweep_owner_ack(uint16_t start_hz, uint16_t end_hz,
     return play_sweep(start_hz, end_hz, duration_ms, level_percent, JR_TONE_OWNER_ACK);
 }
 
+static float chime_bell_sample(uint16_t f, float step, size_t idx)
+{
+    const float phase = step * (float)idx;
+    const float t = (float)idx / (float)GL_RX_SAMPLE_RATE;
+    const float shimmer = 1.0f + 0.05f * sinf(2.0f * (float)M_PI * 16.0f * t);
+    if (f < (GL_RX_SAMPLE_RATE / 6U)) {
+        return 0.76f * sinf(phase) +
+               (0.18f * sinf(2.0f * phase) + 0.06f * sinf(3.0f * phase)) * shimmer;
+    }
+    if (f < (GL_RX_SAMPLE_RATE / 4U)) {
+        return 0.82f * sinf(phase) + 0.18f * sinf(2.0f * phase) * shimmer;
+    }
+    return sinf(phase);
+}
+
 static esp_err_t play_chime_kind(const uint16_t *hz, size_t notes,
                                  uint16_t note_ms, uint8_t volume,
                                  jr_tone_kind_t kind)
@@ -2208,41 +2223,63 @@ static esp_err_t play_chime_kind(const uint16_t *hz, size_t notes,
         return ESP_ERR_NO_MEM;
     }
 
-    /* Each note starts at phase zero under a raised-cosine attack and ends
-     * under the matching release, so a note boundary is a zero crossing with
-     * a zero slope on both sides: no click between notes, none at the ends.
-     * Warm 2nd harmonic (0.82*sin(f) + 0.18*sin(2f)) with a gentle bell decay
-     * gives a clean glass-bell timbre without aliasing or clipping. */
+    /* Silky 3-partial bell voicing (0.76*sin(f) + 0.18*sin(2f) + 0.06*sin(3f)
+     * when below Nyquist/3) with a C1-continuous note-tail shimmer carrying
+     * each note gently into the attack of the next. First and last samples are
+     * guaranteed exact zero under raised-cosine ramps: no clicks, no clipping. */
     const float amplitude = 32767.0f * (float)volume / 100.0f;
-    size_t ramp = (size_t)GL_RX_SAMPLE_RATE * 8U / 1000U;
+    size_t ramp = (size_t)GL_RX_SAMPLE_RATE * 6U / 1000U;
     if (ramp > per_note / 4U) {
         ramp = per_note / 4U;
     }
     if (ramp == 0U) {
         ramp = 1U;
     }
+    const size_t tail_len = per_note / 3U;
+    size_t end_release = per_note / 3U;
+    if (end_release < ramp) {
+        end_release = ramp;
+    }
+    if (ramp + end_release > per_note) {
+        end_release = per_note - ramp;
+    }
+
+    uint16_t prev_f = 0U;
+    float prev_step = 0.0f;
     for (size_t n = 0; n < notes; ++n) {
         uint16_t f = hz[n];
         if (f < 80U)   f = 80U;
         if (f > 8000U) f = 8000U;
         const float step = 2.0f * (float)M_PI * (float)f / (float)GL_RX_SAMPLE_RATE;
-        const bool harmonic2 = (f < (GL_RX_SAMPLE_RATE / 4U));
+        const bool is_last = (n + 1U == notes);
         int16_t *note = &pcm[n * per_note];
         for (size_t i = 0; i < per_note; ++i) {
-            float envelope = 1.0f;
+            float env = 1.0f;
             if (i < ramp) {
-                envelope = 0.5f * (1.0f - cosf((float)M_PI * (float)i / (float)ramp));
-            } else if (per_note - i <= ramp) {
-                envelope = 0.5f * (1.0f - cosf((float)M_PI * (float)(per_note - i) / (float)ramp));
+                env = 0.5f * (1.0f - cosf((float)M_PI * (float)i / (float)ramp));
+            } else if (is_last && (per_note - 1U - i) < end_release) {
+                env = 0.5f * (1.0f - cosf((float)M_PI * (float)(per_note - 1U - i) / (float)end_release));
             }
-            const float decay = expf(-1.2f * (float)i / (float)per_note);
-            const float phase = step * (float)i;
-            const float wave = harmonic2
-                                   ? (0.82f * sinf(phase) + 0.18f * sinf(2.0f * phase))
-                                   : sinf(phase);
-            note[i] = (int16_t)(amplitude * envelope * decay * wave);
+            const float decay = expf(-1.45f * (float)i / (float)per_note);
+            float mix = 0.84f * env * decay * chime_bell_sample(f, step, i);
+
+            if (n > 0U && i < tail_len) {
+                const size_t prev_idx = per_note + i;
+                const float tail_fade =
+                    0.5f * (1.0f + cosf((float)M_PI * (float)i / (float)tail_len));
+                const float prev_decay = expf(-1.45f * (float)prev_idx / (float)per_note);
+                mix += 0.84f * tail_fade * prev_decay *
+                       chime_bell_sample(prev_f, prev_step, prev_idx);
+            }
+            if (mix > 1.0f) mix = 1.0f;
+            if (mix < -1.0f) mix = -1.0f;
+            note[i] = (int16_t)(amplitude * mix);
         }
+        prev_f = f;
+        prev_step = step;
     }
+    pcm[0] = 0;
+    pcm[total - 1U] = 0;
 
     err = earcon_commit(pcm, total);
     heap_caps_free(pcm);
@@ -2257,19 +2294,21 @@ esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
 
 void jr_audio_play_wake_cue(void)
 {
-    /* Warm 2-note fifth (G5 -> D6), 55 ms/note, respects owner-mute policy
-     * (same policy slot as the attention beat) and never collides with a reply. */
-    static const uint16_t notes[2] = { 784U, 1175U };
-    (void)play_chime_kind(notes, 2U, 55U, 10U, JR_TONE_DIAG_CHIRP);
+    /* Crisp, uplifting 2-note glass chime (A5 -> E6), 55 ms/note, vol 12%.
+     * Respects owner-mute policy (same policy slot as the attention beat) and
+     * never collides with a live reply. */
+    static const uint16_t notes[2] = { 880U, 1319U };
+    (void)play_chime_kind(notes, 2U, 55U, 12U, JR_TONE_DIAG_CHIRP);
 }
 
 void jr_audio_play_timer_chime(void)
 {
-    /* Bright repeating-friendly bell arpeggio (E5 -> B5 -> E6). Uses
-     * JR_TONE_ALARM so timer alarms break through owner mute while preserving
-     * earcon accounting (playback.replies stays 0) and never interrupting speech. */
-    static const uint16_t notes[3] = { 659U, 988U, 1319U };
-    (void)play_chime_kind(notes, 3U, 95U, 18U, JR_TONE_ALARM);
+    /* Warm 4-note resonant sunrise arpeggio (E5 -> B5 -> E6 -> G#6), 90 ms/note,
+     * vol 18%. Uses JR_TONE_ALARM so timer alarms break through owner mute
+     * while preserving earcon accounting (playback.replies stays 0) and never
+     * interrupting speech. */
+    static const uint16_t notes[4] = { 659U, 988U, 1319U, 1661U };
+    (void)play_chime_kind(notes, 4U, 90U, 18U, JR_TONE_ALARM);
 }
 
 esp_err_t jr_audio_play_cue(jr_cue_kind_t kind, uint16_t amp_permille)

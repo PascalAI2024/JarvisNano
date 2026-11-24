@@ -36,6 +36,8 @@ typedef enum {
      * dispatch is a kind if/else chain, so they fall through harmlessly. */
     JR_INPUT_PRESS_DOWN,
     JR_INPUT_PRESS_UP,
+    /* Circular perimeter bezel scrub detent (delta_x = +1 CW / -1 CCW). */
+    JR_INPUT_BEZEL_SCRUB,
 } jr_input_kind_t;
 
 typedef enum {

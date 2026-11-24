@@ -3,17 +3,21 @@
  *
  * jr_cue — quiet interface sounds. Pure: no drivers, no FreeRTOS.
  *
- * Four generated cues (24 kHz mono, nothing stored in flash):
- *   TICK     the screen changed          ~20 ms, 2 kHz, fast decay
- *   CONFIRM  a control went on           two rising notes, ~90 ms
- *   DISMISS  a control went off / closed one falling note, ~70 ms
- *   LIMIT    a slider or swipe ran out   one dull low note, ~50 ms
+ * Eight generated cues (24 kHz mono, multi-harmonic, nothing stored in flash):
+ *   TICK     the screen changed          ~22 ms, crisp mechanical crown click
+ *   CONFIRM  a control went on           ~90 ms, dual-harmonic G5 -> D6 glass chime
+ *   DISMISS  a control went off / closed ~70 ms, smooth A5 -> D5 optical glass drop
+ *   LIMIT    a slider or swipe ran out   ~55 ms, tactile damped C4 double-thump
+ *   SCRUB    rotary bezel micro-detent   ~14 ms, feather-light 2.4 kHz detent tick
+ *   MODE     major mode / Desk takeover  ~120 ms, 3-note C5 -> G5 -> D6 triad bloom
+ *   MUTE_ON  privacy mute engaged        ~65 ms, warm descending mechanical thock
+ *   MUTE_OFF privacy mute released       ~75 ms, bright airy ascending octave bloom
  *
  * jr_cue_allow() is the single gate. A cue is silent unless every rule holds:
  * the owner's ui_sounds setting is on, the touch was physical, the speaker is
  * not muted by the owner, no voice session has the microphone open, the mood
- * is AWAKE or AMBIENT, no update is running, and (ticks only) 120 ms have
- * passed since the last tick.
+ * is AWAKE or AMBIENT, no update is running, and rate-limit gaps hold (120 ms
+ * for TICK, 45 ms for SCRUB).
  */
 #ifndef JR_CORE_CUE_H
 #define JR_CORE_CUE_H
@@ -34,14 +38,20 @@ extern "C" {
  * No cue peaks above 5 %, whatever the volume setting. */
 #define JR_CUE_MAX_PERMILLE     50u
 #define JR_CUE_TICK_MIN_GAP_MS  120u
-/* Largest cue, in samples (CONFIRM, 90 ms): sizes a caller's scratch buffer. */
-#define JR_CUE_MAX_SAMPLES      (JR_CUE_SAMPLE_RATE_HZ * 90u / 1000u)
+#define JR_CUE_SCRUB_MIN_GAP_MS 45u
+/* Largest cue budget, in samples (max 130 ms; MODE is 120 ms): sizes a caller's
+ * scratch buffer. */
+#define JR_CUE_MAX_SAMPLES      (JR_CUE_SAMPLE_RATE_HZ * 130u / 1000u)
 
 typedef enum {
     JR_CUE_TICK = 0,
     JR_CUE_CONFIRM,
     JR_CUE_DISMISS,
     JR_CUE_LIMIT,
+    JR_CUE_SCRUB,
+    JR_CUE_MODE,
+    JR_CUE_MUTE_ON,
+    JR_CUE_MUTE_OFF,
     JR_CUE_KIND_COUNT,
 } jr_cue_kind_t;
 
@@ -62,6 +72,8 @@ typedef struct {
 typedef struct {
     uint32_t last_tick_ms;
     bool tick_seen;
+    uint32_t last_scrub_ms;
+    bool scrub_seen;
 } jr_cue_gate_t;
 
 /* True while the microphone is open to the model or the model is answering:

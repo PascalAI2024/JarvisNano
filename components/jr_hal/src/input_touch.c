@@ -395,6 +395,10 @@ static void touch_worker(void *arg)
     uint16_t first_y = 0;
     uint16_t last_x = 0;
     uint16_t last_y = 0;
+    bool bezel_eligible = false;
+    bool bezel_scrubbing = false;
+    uint16_t bezel_ax = 0;
+    uint16_t bezel_ay = 0;
 
     for (;;) {
         if (!gesture_active) {
@@ -425,6 +429,12 @@ static void touch_worker(void *arg)
                 press_tick = touch_tick;
                 first_x = x;
                 first_y = y;
+                const int32_t bdx0 = (int32_t)x - 232;
+                const int32_t bdy0 = (int32_t)y - 232;
+                bezel_eligible = (bdx0 * bdx0 + bdy0 * bdy0) >= (172 * 172);
+                bezel_scrubbing = false;
+                bezel_ax = x;
+                bezel_ay = y;
             }
 
             last_x = x;
@@ -449,6 +459,39 @@ static void touch_worker(void *arg)
                     touch_emit(ctx, JR_INPUT_PRESS_DOWN,
                                first_x, first_y, last_x, last_y, 0U,
                                JR_INPUT_DIRECTION_NONE, 0);
+                }
+            }
+
+            /* Glass 3.0 Circular Perimeter Bezel Scrub: finger starts in the
+             * outer rim (r >= 172), stays in the rim track (r >= 158), and
+             * glides tangentially. Emits CW (RIGHT) / CCW (LEFT) detents every
+             * ~12 deg without interfering with inward horizontal/vertical swipes. */
+            if (gesture_confirmed && bezel_eligible && (!action_sent || bezel_scrubbing)) {
+                const int32_t dx = (int32_t)last_x - 232;
+                const int32_t dy = (int32_t)last_y - 232;
+                const int32_t r2 = dx * dx + dy * dy;
+                if (r2 < (158 * 158)) {
+                    if (!bezel_scrubbing) {
+                        bezel_eligible = false;
+                    }
+                } else {
+                    const int32_t ax = (int32_t)bezel_ax - 232;
+                    const int32_t ay = (int32_t)bezel_ay - 232;
+                    const int32_t cross = ax * dy - ay * dx;
+                    const int32_t dot = ax * dx + ay * dy;
+                    const int32_t ac = cross < 0 ? -cross : cross;
+                    const int32_t thresh = bezel_scrubbing ? 21 : 18;
+                    if (dot > 0 && ac * 100 >= dot * thresh) {
+                        bezel_scrubbing = true;
+                        action_sent = true;
+                        bezel_ax = last_x;
+                        bezel_ay = last_y;
+                        touch_emit(ctx, JR_INPUT_BEZEL_SCRUB,
+                                   first_x, first_y, last_x, last_y, 0U,
+                                   cross > 0 ? JR_INPUT_DIRECTION_RIGHT
+                                             : JR_INPUT_DIRECTION_LEFT,
+                                   0);
+                    }
                 }
             }
 

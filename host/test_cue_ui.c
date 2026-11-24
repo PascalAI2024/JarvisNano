@@ -5,7 +5,12 @@
  */
 #include "unity.h"
 #include "jr_core/cue.h"
+#include <math.h>
 #include <stdlib.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 #define PEAK_CAP_LSB (32767 * (int)JR_CUE_MAX_PERMILLE / 1000 + 1)
 
@@ -40,6 +45,8 @@ static void test_gate_synthetic_input_never_sounds(void)
             jr_cue_allow(&g, &c, (jr_cue_kind_t)k, JR_CUE_SOURCE_SYNTHETIC));
         TEST_ASSERT_FALSE_MESSAGE(g.tick_seen,
             "a refused synthetic tick must not start the tick clock");
+        TEST_ASSERT_FALSE_MESSAGE(g.scrub_seen,
+            "a refused synthetic scrub must not start the scrub clock");
     }
 }
 
@@ -170,10 +177,14 @@ static int16_t buf[JR_CUE_MAX_SAMPLES];
 
 static void test_render_lengths_match_the_brief(void)
 {
-    TEST_ASSERT_EQUAL_UINT(480, jr_cue_samples(JR_CUE_TICK));      /* 20 ms */
+    TEST_ASSERT_EQUAL_UINT(528, jr_cue_samples(JR_CUE_TICK));      /* 22 ms */
     TEST_ASSERT_EQUAL_UINT(2160, jr_cue_samples(JR_CUE_CONFIRM));  /* 90 ms */
     TEST_ASSERT_EQUAL_UINT(1680, jr_cue_samples(JR_CUE_DISMISS));  /* 70 ms */
-    TEST_ASSERT_EQUAL_UINT(1200, jr_cue_samples(JR_CUE_LIMIT));    /* 50 ms */
+    TEST_ASSERT_EQUAL_UINT(1320, jr_cue_samples(JR_CUE_LIMIT));    /* 55 ms */
+    TEST_ASSERT_EQUAL_UINT(336, jr_cue_samples(JR_CUE_SCRUB));     /* 14 ms */
+    TEST_ASSERT_EQUAL_UINT(2880, jr_cue_samples(JR_CUE_MODE));     /* 120 ms */
+    TEST_ASSERT_EQUAL_UINT(1560, jr_cue_samples(JR_CUE_MUTE_ON));  /* 65 ms */
+    TEST_ASSERT_EQUAL_UINT(1800, jr_cue_samples(JR_CUE_MUTE_OFF)); /* 75 ms */
     TEST_ASSERT_EQUAL_UINT(0, jr_cue_samples(JR_CUE_KIND_COUNT));
     for (int k = 0; k < JR_CUE_KIND_COUNT; ++k) {
         TEST_ASSERT_TRUE(jr_cue_samples((jr_cue_kind_t)k) <= JR_CUE_MAX_SAMPLES);
@@ -238,6 +249,119 @@ static void test_confirm_rises_and_dismiss_falls(void)
                      crossings(buf, n / 2u));
 }
 
+/* Single-frequency DFT energy normalized by sample count (for spectral checks). */
+static double band_energy(const int16_t *x, size_t n, double freq_hz)
+{
+    double re = 0.0, im = 0.0;
+    const double step = 2.0 * M_PI * freq_hz / (double)JR_CUE_SAMPLE_RATE_HZ;
+    for (size_t i = 0; i < n; ++i) {
+        const double s = (double)x[i];
+        re += s * cos(step * (double)i);
+        im -= s * sin(step * (double)i);
+    }
+    return (re * re + im * im) / (double)(n * n);
+}
+
+static void test_gate_scrub_rate_limit_is_45_ms(void)
+{
+    jr_cue_gate_t g = {0};
+    jr_cue_ctx_t c = calm();
+    TEST_ASSERT_TRUE(jr_cue_allow(&g, &c, JR_CUE_SCRUB, JR_CUE_SOURCE_PHYSICAL));
+    c.now_ms += 44u;
+    TEST_ASSERT_FALSE(jr_cue_allow(&g, &c, JR_CUE_SCRUB, JR_CUE_SOURCE_PHYSICAL));
+    /* A refused scrub does not push the window out. */
+    c.now_ms += 1u;
+    TEST_ASSERT_TRUE(jr_cue_allow(&g, &c, JR_CUE_SCRUB, JR_CUE_SOURCE_PHYSICAL));
+    /* TICK and SCRUB maintain independent rate-limit windows. */
+    c.now_ms += 10u;
+    TEST_ASSERT_TRUE(jr_cue_allow(&g, &c, JR_CUE_TICK, JR_CUE_SOURCE_PHYSICAL));
+    TEST_ASSERT_FALSE(jr_cue_allow(&g, &c, JR_CUE_SCRUB, JR_CUE_SOURCE_PHYSICAL));
+    c.now_ms += 35u;
+    TEST_ASSERT_TRUE(jr_cue_allow(&g, &c, JR_CUE_SCRUB, JR_CUE_SOURCE_PHYSICAL));
+    TEST_ASSERT_FALSE(jr_cue_allow(&g, &c, JR_CUE_TICK, JR_CUE_SOURCE_PHYSICAL));
+
+    /* Clock wrap safety for SCRUB. */
+    jr_cue_gate_t gw = {0};
+    c.now_ms = 0xFFFFFFF0u;
+    TEST_ASSERT_TRUE(jr_cue_allow(&gw, &c, JR_CUE_SCRUB, JR_CUE_SOURCE_PHYSICAL));
+    c.now_ms = 0x00000010u; /* +32 ms across wrap */
+    TEST_ASSERT_FALSE(jr_cue_allow(&gw, &c, JR_CUE_SCRUB, JR_CUE_SOURCE_PHYSICAL));
+    c.now_ms = 0x00000020u; /* +48 ms across wrap */
+    TEST_ASSERT_TRUE(jr_cue_allow(&gw, &c, JR_CUE_SCRUB, JR_CUE_SOURCE_PHYSICAL));
+}
+
+static void test_new_cues_endpoints_and_bounded_peaks(void)
+{
+    const jr_cue_kind_t added[] = {
+        JR_CUE_SCRUB, JR_CUE_MODE, JR_CUE_MUTE_ON, JR_CUE_MUTE_OFF
+    };
+    for (size_t i = 0; i < sizeof added / sizeof added[0]; ++i) {
+        const jr_cue_kind_t k = added[i];
+        const uint16_t nom = jr_cue_amplitude_permille(k, 100);
+        const size_t n = jr_cue_render(k, nom, buf, JR_CUE_MAX_SAMPLES);
+        TEST_ASSERT_EQUAL_UINT(jr_cue_samples(k), n);
+        TEST_ASSERT_EQUAL_INT16(0, buf[0]);
+        TEST_ASSERT_EQUAL_INT16(0, buf[n - 1u]);
+        TEST_ASSERT_TRUE(abs((int)buf[1]) < 33);
+        TEST_ASSERT_TRUE(abs((int)buf[n - 2u]) < 33);
+        int peak = 0;
+        for (size_t s = 0; s < n; ++s) {
+            const int a = abs((int)buf[s]);
+            if (a > peak) peak = a;
+        }
+        const int nom_cap = 32767 * (int)nom / 1000 + 1;
+        TEST_ASSERT_TRUE(peak > 0);
+        TEST_ASSERT_TRUE(peak <= nom_cap);
+        TEST_ASSERT_TRUE(peak <= PEAK_CAP_LSB);
+    }
+    TEST_ASSERT_TRUE(jr_cue_amplitude_permille(JR_CUE_SCRUB, 100) <
+                     jr_cue_amplitude_permille(JR_CUE_TICK, 100));
+    TEST_ASSERT_TRUE(jr_cue_amplitude_permille(JR_CUE_TICK, 100) <
+                     jr_cue_amplitude_permille(JR_CUE_MODE, 100));
+}
+
+static void test_new_cues_distinct_spectral_energy(void)
+{
+    /* JR_CUE_SCRUB: high-pitched micro-detent centered around 2.4 kHz. */
+    size_t n = jr_cue_render(JR_CUE_SCRUB, 40, buf, JR_CUE_MAX_SAMPLES);
+    const double scrub_hi = band_energy(buf, n, 2400.0);
+    const double scrub_lo = band_energy(buf, n, 350.0);
+    TEST_ASSERT_TRUE_MESSAGE(scrub_hi > scrub_lo * 10.0,
+                             "SCRUB concentrates energy at 2.4 kHz");
+
+    /* JR_CUE_MODE: ascending 3-note triad C5 -> G5 -> D6. */
+    n = jr_cue_render(JR_CUE_MODE, 46, buf, JR_CUE_MAX_SAMPLES);
+    const size_t third = n / 3u;
+    const size_t z1 = crossings(buf, third);
+    const size_t z2 = crossings(buf + third, third);
+    const size_t z3 = crossings(buf + 2u * third, n - 2u * third);
+    TEST_ASSERT_TRUE_MESSAGE(z2 > z1, "MODE middle note rises above first");
+    TEST_ASSERT_TRUE_MESSAGE(z3 > z2, "MODE final note rises above middle");
+    TEST_ASSERT_TRUE(band_energy(buf, n, 523.25) > 0.0);
+    TEST_ASSERT_TRUE(band_energy(buf, n, 784.0) > 0.0);
+    TEST_ASSERT_TRUE(band_energy(buf, n, 1174.66) > 0.0);
+
+    /* JR_CUE_MUTE_ON: warm descending mechanical thock (520 -> 290 Hz). */
+    n = jr_cue_render(JR_CUE_MUTE_ON, 38, buf, JR_CUE_MAX_SAMPLES);
+    TEST_ASSERT_TRUE_MESSAGE(crossings(buf + n / 2u, n / 2u) <
+                             crossings(buf, n / 2u),
+                             "MUTE_ON pitch descends");
+    const double mute_on_lo = band_energy(buf, n, 400.0);
+    const double mute_on_hi = band_energy(buf, n, 1200.0);
+    TEST_ASSERT_TRUE_MESSAGE(mute_on_lo > mute_on_hi * 4.0,
+                             "MUTE_ON carries warm low-mid body energy");
+
+    /* JR_CUE_MUTE_OFF: bright airy ascending bloom (440 -> 880 Hz + air). */
+    n = jr_cue_render(JR_CUE_MUTE_OFF, 40, buf, JR_CUE_MAX_SAMPLES);
+    TEST_ASSERT_TRUE_MESSAGE(crossings(buf + n / 2u, n / 2u) >
+                             crossings(buf, n / 2u),
+                             "MUTE_OFF pitch ascends");
+    const double mute_off_hi = band_energy(buf, n, 880.0) +
+                               band_energy(buf, n, 1100.0);
+    TEST_ASSERT_TRUE_MESSAGE(mute_off_hi > mute_on_hi * 2.0,
+                             "MUTE_OFF is spectrally brighter than MUTE_ON");
+}
+
 void cue_ui_tests_run(void)
 {
     RUN_TEST(test_gate_allows_every_kind_when_calm_and_physical);
@@ -248,10 +372,13 @@ void cue_ui_tests_run(void)
     RUN_TEST(test_gate_rest_moods_and_ota_block);
     RUN_TEST(test_gate_tick_rate_limit_is_120_ms);
     RUN_TEST(test_gate_tick_rate_limit_survives_clock_wrap);
+    RUN_TEST(test_gate_scrub_rate_limit_is_45_ms);
     RUN_TEST(test_gate_rejects_invalid_kind);
     RUN_TEST(test_amplitude_is_quiet_and_below_the_chime);
     RUN_TEST(test_render_lengths_match_the_brief);
     RUN_TEST(test_render_edges_are_zero_and_peak_is_capped);
     RUN_TEST(test_render_refuses_a_small_buffer_and_clamps_amplitude);
     RUN_TEST(test_confirm_rises_and_dismiss_falls);
+    RUN_TEST(test_new_cues_endpoints_and_bounded_peaks);
+    RUN_TEST(test_new_cues_distinct_spectral_energy);
 }

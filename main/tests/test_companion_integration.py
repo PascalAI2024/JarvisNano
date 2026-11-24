@@ -126,6 +126,8 @@ def run(root, output, mutation, raw, hashes):
                "-Wno-unused-function", "-D_GNU_SOURCE", str(generated),
                str(root / "components/jr_display/src/hud_render.c"),
                str(root / "components/jr_display/src/showpiece_gfx.c"),
+               str(root / "components/jr_display/src/glass3_ring.c"),
+               str(root / "components/jr_display/src/glass3_screens.c"),
                str(root / "components/jr_display/src/balance_wheel_data.c"),
                str(root / "components/jr_display/src/glass_font.c"),
                str(root / "components/jr_display/src/glass_draw.c"),
