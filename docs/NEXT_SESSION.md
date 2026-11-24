@@ -1,10 +1,55 @@
 # Next Session Handoff
 
-Last reconciled: **2026-09-05**.
+Last reconciled: **2026-11-10** (wave N15; the sections below it are older and
+still describe the grammar and the safety rules correctly).
 
 The live target is the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** with 32 MB
 flash. The active image is plain ESP-IDF v5 rooted at `main/` and
 `components/jr_*`.
+
+## Owed first: voice interruption (owner, 2026-11-10)
+
+The image on the device (16e9ec6) sends silence up the socket while the
+speaker is audible and for 150 ms after (`jr_core/echo_gate.c`). It stops
+the device cutting its own replies at volume 100, and it also stops the
+owner interrupting by voice; a tap on the glass stops a reply instead. The
+owner on reading that: "this is built in gemini feature that is
+necessary". The gate is a stopgap. Do not present it as the fix and do
+not build on it.
+
+The fix is echo cancellation that works: while the device speaks the
+cleaned microphone signal reads 1000 to 6000 against 75 to 290 for the
+owner, and it goes up amplified six times. PLAN N16.9 has the calibration
+run and the gates; `docs/reference/voice-loop-2026-11-10.md` has the
+mechanism with `file:line`. The run needs the microphone open, which only
+the owner can do (long-press unmute); he asked for it to be done later.
+Ask once when he is at the device, then run it end to end: the device
+talks to itself for about three minutes.
+
+Not yet heard on 16e9ec6: a board question answered through
+`delegated_tasks`, weather answered without asking where, a tap stopping
+a reply.
+
+### Calibration result (2026-11-10, later the same day)
+
+The owner unmuted it and the run happened. At volume 100 the microphone
+rails on the device's own voice (speak gain 21 dB), so nothing can be
+cancelled; at 80 the canceller manages about 20 dB and the residual is
+still as loud as the owner. The table is in
+`docs/reference/voice-loop-2026-11-10.md`. The run also found that a
+failed I2C read during a gain change leaves the microphone silent until
+the codec is reopened (PLAN N16.10); that is fixed first, because every
+reply changes the gain twice and the second calibration changes it more.
+
+### 2026-11-11: guard proven, echo measured, one unexplained restart
+
+The microphone guard held with the microphone open (50 gain changes,
+about 40 replies, no failure). The echo table is complete: the
+canceller works when the microphone has headroom, so the speaking gain
+goes from 21 to 6 dB (PLAN N16.9, lane `feat/echo-fix`). During the last
+measurement the device restarted by itself and nothing recorded why
+(PLAN N16.11, lane `feat/crash-forensics`); the ELF of the image that
+crashed (8ca3258) is kept outside the repo for reading the dump.
 
 ## Start here
 
@@ -65,6 +110,75 @@ is the classified edge-origin swipe.
   before marking a new image valid.
 - JarvisMCP server policy is live; byte-budgeted device catalog projection and
   cursor semantics remain incomplete.
+
+## What changed on 2026-11-10 (wave N15)
+
+All of it is on `feat/glass-2`, not on `main` and not pushed. `PLAN.md` wave
+N15 has the rows; `docs/evidence/glass-n15-2026-11-10/README.md` has the
+device tables from twelve flashes; the device runs 4c33ab4 (the echo fix of PLAN N16.9, untuned, on top of a5df6cf, crash reporting of PLAN N16.11 on top of 8ca3258, the microphone guard of PLAN N16.10 on top of 16e9ec6, which is the voice loop, the echo gate and the tool budget of PLAN N16.7 and N16.8 on top of wave N16: the tilt
+stars, the dormant panel dip, the decoded-dial cache, and N16.6 "a dial owns
+the glass"). Capture QA **without a lease and at rest**:
+a lease forces the awake mood and a violet rim, and hid the layer defects of
+N16.6 for a whole wave.
+
+- **The ring is six screens, the watch eight dials.** JARVIS, WATCH, WEATHER,
+  STATUS, DESK (only under a lease or claim), ACTIVITY. Dials: JARVIS, DIVER,
+  DRESS, PILOT, MINIMAL, FUTURE, SKELETON, CELESTIAL.
+- **Frame cost roughly halved, the 20 ms target not met.** Lease held, flush
+  not counted: home 7 ms, the JARVIS style 11, ACTIVITY 24, DRESS 26, DESK 31,
+  CELESTIAL 31, WEATHER 35, DIVER 38, STATUS 38, MINIMAL 40, PILOT 42,
+  FUTURE 45, SKELETON 47, the shade over home 48. `GET /api/display` gives the
+  five layers, `?split=1` the parts of the hud layer for the next 8 s
+  (`?split=1` does not return `render_us`; poll both).
+- **Host instruction counts do not predict device milliseconds.** Two cuts
+  that counted fewer instructions ran slower because they wrote more memory.
+  Measure every cut on the device before keeping it.
+- **A cost candidate ships behind the perf knob and the device picks.**
+  `POST /api/debug/display?knob=N` selects among pixel-identical candidates
+  (`components/jr_display/include/jr_display/perf_knob.h`; no bits are defined
+  at present). The first round found MINIMAL's regression in one flash: the
+  two-pixels-to-a-word fill was 12 ms slower than the loop it replaced. It and
+  the disc record are deleted; MINIMAL is about 40 ms.
+- **Open on the watch:** SKELETON's balance wheel is about 30 ms and a class
+  map did not help. The dial copy from PSRAM is 7.5–7.8 ms on six dials. The
+  drawn dials (JARVIS style, MINIMAL) now run at the full cadence.
+- **Motion is judged on the host first, then timed on the device.**
+  `scripts/glass-preview.py --script ring|shade|watch|slide|style|watch-enter`
+  plays the real compositor at 24 fps. The transition grammar (everything
+  passes through the dark) is on the device and stutters: a transition frame
+  costs two to three times a settled one. Two knob rounds went at it (PLAN
+  N15.9). Dimming the finished strip once was slower and is deleted. Replaying
+  the ring records while a ring enters, and remembering the last blended pixel
+  in the veil and in a part-strength disc, are kept: 10 to 20 % of a
+  transition frame, about 30 % off a ring entry's worst interval. The shade
+  opening over a dial is still 90–100 ms a frame, a style change onto a baked
+  dial 50–65.
+- **A dial takes all of core 0.** A watch frame overruns its period, and an
+  overrun frame yields instead of sleeping (N14.4), so `gfx_render` measured
+  96.5 % of the core on a dial. Boot shares that core at priority 1: a lift
+  wake onto a dial took 69 s to boot with the touch dead. Boot now renders at
+  6 fps until the voice loop's first cadence tick (71d66ad; 6.06 s, proven by
+  a forced sleep and a lift). The saturation in normal use is open as N15.11.
+  `jarvisctl.py reboot` is serial-only; over Wi-Fi, force a sleep with
+  `POST /api/debug/sleep?now=1&wake_s=N` and have the device lifted.
+- **Board probe** (`scripts/board-probe.py`): TE is 60 Hz on GPIO13, the gyro
+  answers, the touch chip reports two fingers while the driver reads one, QSPI
+  runs at 40 MHz. The PWR key and a two-finger touch still need the owner's
+  hand (`--watch pwr`, `--watch touch`); `docs/HARDWARE.md` is not corrected
+  until then. PMIC VSYS and die temperature never convert on battery.
+- **QA traps:** levels are at `/api/device/levels`; a lease changes the ring
+  and the rim; read `space` back instead of counting swipes; the device sleeps
+  when still and unleased on battery.
+- **The tool gateway is connected again (2026-11-10, owner: "fix jarvis
+  mcp").** The stored address pointed at a retired host, so every board poll
+  died on DNS. The device now holds the current address and an existing
+  development key on the legacy `/act` route; after a restart the log read
+  `tool=board_poll status=ok duration_ms=2004 http_status=200`. Not yet
+  exercised: a tool called by the model in a voice session. The typed
+  `/device/v1/invoke` route has no device credential on the gateway and no
+  board tools; a dedicated, revocable device key (`SECURITY.md`) is a
+  before-release item. The board poll does not run in DREAM, and nothing
+  remote wakes a muted, sleeping device: restart it to see a first poll.
 
 ## What changed on 2026-09-05 (wave N13)
 
@@ -398,3 +512,5 @@ The actionable order and acceptance criteria are in [`../PLAN.md`](../PLAN.md).
 - Do not use raw tool result count as a byte-budget guarantee.
 - Do not turn a normal tap or PWR press into an accidental privacy toggle.
 - Do not claim physical proof from an HTTP response alone.
+
+**Echo fix, first device run (2026-11-11).** With the gate off, 4c33ab4 cancelled worse than the knob-only runs because the voice loop read only 18.4 of 31.25 frames a second while speaking (wake feed on the canceller's task, plus a 10 ms tick sleep per frame). Fixed and on the device: it runs 7e54a98 (wake detection on its own task, pacing on the time the read was blocked, `/api/diag/voiceperf`, non-default canceller modes built in PSRAM after `aecmode=6` panicked it twice). Benched muted only. The owner said no more calibration that night. Next, with the microphone open: `jarvisctl.py voiceperf` during a reply (fps near 31?), the sweep at 100/80/60 with the gate off, `aecmode=6` against the default, the assistant saying "Jarvis" must not cut itself, then the owner interrupts by voice and by "Jarvis". Reboot after a mode session (`POST /api/debug/sleep?now=1&wake_s=5`). Details: `docs/reference/echo-canceller-2026-11-11.md`.

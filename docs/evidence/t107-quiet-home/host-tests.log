@@ -1,0 +1,27 @@
+no cc/gcc on PATH — running the C suites in the jarvisnano-hosttests container
+build jr_display_hud_tests
+PASS  jr_display_hud_tests       hud_render tests passed (11451 checks)
+build jr_display_shell_tests
+PASS  jr_display_shell_tests     all shell tests passed (3563 checks)
+build jr_display_companion_tests
+PASS  jr_display_companion_tests companion passed (76940 checks)
+PASS  jr_display_board_tests     board source passed (72 checks)
+PASS  jr_display_quiet_vendor_tests vendor quiet passed (5778 checks)
+build jr_main_shell_tests
+PASS  jr_main_shell_tests        main shell tests passed (109 checks)
+build jr_charge_http_tests
+PASS  jr_charge_http_tests       charge HTTP tests passed (5120 checks)
+PASS  jr_display_http_tests      display HTTP passed (168 checks)
+PASS  jr_companion_main_tests    companion orchestration passed (2896 checks)
+PASS  jr_companion_integration_tests companion integration passed (1920 checks)
+PASS  jr_power_sleep_tests       sleep coordinator passed (16938 checks)
+PASS  jr_ota_sleep_fence_tests   OTA sleep fence passed (3278 checks)
+build jr_host_tests
+PASS  jr_host_tests              180 Tests 0 Failures 0 Ignored
+build jr_tools_template_tests
+PASS  jr_tools_template_tests    jr_tools template tests passed (81 checks)
+run   test_jarvis_desk (python3)
+PASS  test_jarvis_desk           Ran 38 tests OK
+
+suites run: 15   failed: 0
+all 15 host suites green

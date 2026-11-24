@@ -105,6 +105,27 @@ PALETTE_INSERT = f"""        anim->frame.color_palette = (uint32_t *)heap_caps_m
         }}
 """
 
+FRAME_RETRY_MARKER = "JarvisNano v5: retry an unprepared animation frame"
+FRAME_RETRY_ANCHOR = "        gfx_anim_prepare_frame(obj);\n"
+FRAME_RETRY_INSERT = f"""        /* {FRAME_RETRY_MARKER}. A transient allocation or parser
+         * failure must not advance a one-shot past its only frame. Retry on
+         * the next timer tick without publishing completion or dirty pixels. */
+        if (gfx_anim_prepare_frame(obj) != ESP_OK) {{
+            return;
+        }}
+"""
+
+
+def apply_frame_retry(source: str) -> str:
+    """Patch the pinned playback callback, rejecting partial or changed input."""
+    if FRAME_RETRY_MARKER in source:
+        if source.count(FRAME_RETRY_INSERT) != 1 or FRAME_RETRY_ANCHOR in source:
+            raise SystemExit("gfx_anim frame retry patch is partial; refusing a blind repair")
+        return source
+    if source.count(FRAME_RETRY_ANCHOR) != 1:
+        raise SystemExit("gfx_anim frame prepare anchor changed; refusing a blind patch")
+    return source.replace(FRAME_RETRY_ANCHOR, FRAME_RETRY_INSERT, 1)
+
 
 GFX_CORE_C = (
     ROOT
@@ -293,6 +314,84 @@ CLEAR_EDITS = (
 )
 
 
+CODEC = ROOT / "managed_components" / "espressif__esp_codec_dev"
+CODEC_RMW_MARKER = "JarvisNano v5: a failed codec read never reaches a write"
+CODEC_RMW_EDITS = (
+    (
+        CODEC / "device" / "es7210" / "es7210.c",
+        """    int regv = 0;
+    es7210_read_reg(codec, reg_addr, &regv);
+""",
+        f"""    int regv = 0;
+    /* {CODEC_RMW_MARKER}. The read result used to be ignored:
+     * a failed read left regv at 0 and the write below cleared every bit
+     * outside update_bits, including the PGA-enable bit (0x10) that
+     * es7210_mic_select set, which silenced the channel until a reopen. */
+    int rd = ESP_CODEC_DEV_READ_FAIL;
+    for (int attempt = 0; attempt < 3 && rd != ESP_CODEC_DEV_OK; attempt++) {{
+        rd = es7210_read_reg(codec, reg_addr, &regv);
+    }}
+    if (rd != ESP_CODEC_DEV_OK) {{
+        return rd;
+    }}
+""",
+    ),
+    (
+        CODEC / "device" / "es8311" / "es8311.c",
+        """    int ret = es8311_read_reg(codec, ES8311_DAC_REG31, &regv);
+    regv &= 0x9f;
+""",
+        f"""    /* {CODEC_RMW_MARKER}. Unmuting on a failed read would
+     * write a zeroed register; a failed read while muting still writes the
+     * mute bits, because silence is the safe direction. */
+    int ret = ESP_CODEC_DEV_READ_FAIL;
+    for (int attempt = 0; attempt < 3 && ret != ESP_CODEC_DEV_OK; attempt++) {{
+        ret = es8311_read_reg(codec, ES8311_DAC_REG31, &regv);
+    }}
+    if (ret != ESP_CODEC_DEV_OK && !mute) {{
+        return ret;
+    }}
+    regv &= 0x9f;
+""",
+    ),
+    (
+        CODEC / "platform" / "audio_codec_ctrl_i2c.c",
+        """#define DEFAULT_I2C_TRANS_TIMEOUT (100)
+""",
+        f"""/* {CODEC_RMW_MARKER}. The IDF master driver waits for its
+ * bus lock (a plain binary semaphore, no priority inheritance) with this same
+ * timeout, so a low-priority task preempted while holding the shared bus can
+ * time out a codec call that would have succeeded a moment later. */
+#define DEFAULT_I2C_TRANS_TIMEOUT (250)
+""",
+    ),
+    (
+        CODEC / "platform" / "audio_codec_ctrl_i2c.c",
+        """data_len, DEFAULT_I2C_TRANS_TIMEOUT);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Fail to read from dev %x", i2c_ctrl->addr);
+""",
+        """data_len, DEFAULT_I2C_TRANS_TIMEOUT);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Fail to read from dev %x: %s", i2c_ctrl->addr, esp_err_to_name(ret));
+""",
+    ),
+    (
+        CODEC / "platform" / "audio_codec_ctrl_i2c.c",
+        """        ESP_LOGE(TAG, "Fail to write to dev %x", i2c_ctrl->addr);
+    }
+    return ret ? ESP_CODEC_DEV_WRITE_FAIL : ESP_CODEC_DEV_OK;
+}
+#endif""",
+        """        ESP_LOGE(TAG, "Fail to write to dev %x: %s", i2c_ctrl->addr, esp_err_to_name(ret));
+    }
+    return ret ? ESP_CODEC_DEV_WRITE_FAIL : ESP_CODEC_DEV_OK;
+}
+#endif""",
+    ),
+)
+
+
 def patch_group(marker: str, edits, label: str, check: bool,
                 changed: list[str], missing: list[str]) -> None:
     """All-or-nothing anchored edits across several files under one marker."""
@@ -393,10 +492,19 @@ def main() -> int:
                         "gfx_anim palette anchor changed; refusing a blind patch"
                     )
                 gfx_source = gfx_source.replace(PALETTE_ANCHOR, PALETTE_INSERT, 1)
-                GFX_ANIM.write_text(gfx_source)
                 changed.append("gfx palette PSRAM fallback")
+        if FRAME_RETRY_MARKER in gfx_source:
+            apply_frame_retry(gfx_source)  # validate the complete idempotent patch
+        else:
+            if args.check:
+                missing.append("gfx animation frame prepare retry")
+            else:
+                gfx_source = apply_frame_retry(gfx_source)
+                changed.append("gfx animation frame prepare retry")
+        if not args.check:
+            GFX_ANIM.write_text(gfx_source)
     elif args.check:
-        missing.append("gfx palette PSRAM fallback (gfx_anim.c missing)")
+        missing.append("gfx palette/frame retry fixes (gfx_anim.c missing)")
 
     if GFX_CORE_C.is_file() and GFX_CORE_H.is_file():
         core_c = GFX_CORE_C.read_text()
@@ -425,6 +533,8 @@ def main() -> int:
     patch_group(YIELD_MARKER, YIELD_EDITS, "gfx no tick floor on an overdue frame",
                 args.check, changed, missing)
     patch_group(CLEAR_MARKER, CLEAR_EDITS, "eaf transparent decodes as black",
+                args.check, changed, missing)
+    patch_group(CODEC_RMW_MARKER, CODEC_RMW_EDITS, "codec failed read never writes",
                 args.check, changed, missing)
 
     if missing:

@@ -1,0 +1,150 @@
+{
+  "status": "readback complete; original after-long acceptance remains BLOCKED",
+  "owner_update": {
+    "reported_at": "2026-10-12T00:12Z",
+    "classification": "manual wake, per owner/orchestrator; not timer acceptance"
+  },
+  "authenticated_requests": [
+    {
+      "name": "health",
+      "path": "/api/device/health",
+      "started_at": "2026-10-12T00:15:40.623290+00:00",
+      "ok": true,
+      "elapsed_s": 0.156,
+      "completed_at": "2026-10-12T00:15:40.785702+00:00"
+    },
+    {
+      "name": "cockpit",
+      "path": "/api/cockpit",
+      "started_at": "2026-10-12T00:15:40.786703+00:00",
+      "ok": true,
+      "elapsed_s": 0.062,
+      "completed_at": "2026-10-12T00:15:40.844581+00:00"
+    },
+    {
+      "name": "sleep",
+      "path": "/api/debug/sleep",
+      "started_at": "2026-10-12T00:15:40.844581+00:00",
+      "ok": true,
+      "elapsed_s": 0.125,
+      "completed_at": "2026-10-12T00:15:40.965273+00:00"
+    },
+    {
+      "name": "logs",
+      "path": "/api/logs?tail=131072",
+      "started_at": "2026-10-12T00:15:55.219033+00:00",
+      "ok": true,
+      "elapsed_s": 0.157,
+      "bytes": 9774,
+      "completed_at": "2026-10-12T00:15:55.382451+00:00"
+    }
+  ],
+  "fresh_state": {
+    "uptime_ms": 231756,
+    "estimated_boot_utc_interval": [
+      "2026-10-12T00:11:49.030703+00:00",
+      "2026-10-12T00:11:49.088581+00:00"
+    ],
+    "boot_time_note": "host request interval minus reported esp_timer uptime; approximate, not reset-timestamp telemetry; owner update is minute-granular",
+    "wake": "touch",
+    "sleep_entries": 3,
+    "armed": {
+      "lift": true,
+      "touch": true
+    },
+    "lift_fail": "none",
+    "after_dream_ms": 600000,
+    "ota": {
+      "active": false,
+      "running": "ota_0",
+      "boot": "ota_0",
+      "state": "valid",
+      "received": 0,
+      "total": 0,
+      "last_error": "ESP_OK",
+      "last_invalid": "none"
+    },
+    "privacy_muted": true,
+    "voice_privacy_paused": true,
+    "capturing": false,
+    "audio_power": {
+      "mic": false,
+      "adc": false,
+      "dac": false,
+      "pa": false,
+      "reads": 0,
+      "silent": 0,
+      "failures": 0
+    },
+    "voice_alive": true,
+    "memory": {
+      "largest_internal": 31744,
+      "free_psram": 5681384
+    },
+    "display": {
+      "fps": 5,
+      "flush_errors": 0
+    }
+  },
+  "reset_reason": {
+    "value": null,
+    "available": false,
+    "reason": "Firmware has no esp_reset_reason readout in application/routes; sleep wake cause is distinct from reset reason. ROM reset banner predates the app log hook."
+  },
+  "current_boot_log": {
+    "first_record_uptime_ms": 877,
+    "wifi_initialized_ms": 1047,
+    "wifi_got_ip_ms": 5037,
+    "boot_complete_ms": 5617,
+    "boot_complete": "starting MUTED (privacy default), woke from sleep",
+    "glance_wake": "touch",
+    "wall_clock_local": "2026-10-11 20:12, rtc_seed=0; SNTP",
+    "contains_previous_boot": false
+  },
+  "persisted_evidence": {
+    "rtc_sleep_counter": 3,
+    "counter_semantics": "increments before wake-source arming and esp_deep_sleep_start; counts sleep-entry attempts, not timestamped successful timer wakes",
+    "rtc_fields": [
+      "sleep magic",
+      "sleep counter",
+      "was listening",
+      "armed source bits"
+    ],
+    "missing_fields": [
+      "last sleep timestamp",
+      "last timer interval",
+      "historical wake causes",
+      "historical reset reasons",
+      "prior Wi-Fi/API boot times"
+    ],
+    "application_log": "128 KiB PSRAM ring; explicitly lost on reboot; fresh app allocation",
+    "activity_rtc": "RTC_NOINIT owner activity/tool receipts, not boot/sleep/network journal; no wake producer",
+    "panic_flash": "ELF coredump configured, but no authenticated HTTP reader found; not read or erased; no USB used"
+  },
+  "timer_assessment": {
+    "sleep_start": "2026-10-11T23:30:28Z",
+    "nominal_due": "2026-10-12T00:00:28Z",
+    "due_note": "excludes shutdown and boot overhead",
+    "current_wake_is_manual": true,
+    "timer_succeeded": null,
+    "timer_woke_late": null,
+    "wifi_or_api_returned_late": null,
+    "timer_never_fired": null,
+    "counter_inference": "Two forced sleep calls are recorded in the after harness (10 s then 1800 s). Counter 3 is consistent with an intervening wake and another automatic sleep, including timer wake followed by DREAM for 600 s. No counter snapshot at the 1800 s boundary or timestamped wake history was retained, so exact attribution is not proved. Counter also increments before actual sleep.",
+    "ping_note": "Orchestrator reported 2/2 replies at 00:09Z; not independently verified; no corresponding authenticated state",
+    "classification": "Observed timer/API acceptance regression versus baseline, which completed 1801.532 s. Possible firmware regression; historical cause unresolved. Current touch wake cannot satisfy failed timer gate."
+  },
+  "drain_assessment": "Possible battery regression remains: idle 29.42->100.20 mV/h (3.41x), WATCH 65.83->126.56 (1.92x); SoC/rebound confound but do not prove cause; no saving accepted.",
+  "source_audit_reference": "t107-recovery-readback.json; baseline/candidate sleep, audio, network, routes and defaults unchanged; DREAM presenter acknowledgement changed without direct wake/Wi-Fi writes; no direct defect established.",
+  "device_writes": 0,
+  "unmute_attempts": 0,
+  "usb_flashes": 0,
+  "raw_private_hashes": {
+    "health.json": "d95754589603478473346492d3ce40f1c17224f687a41cecf222de5290f148e2",
+    "cockpit.json": "1aa71695627abe6ae597cc39307b6a16dc3210c0aaf48e0eec2295f1e1a5de2b",
+    "sleep.json": "40c9eaeea45500515fb716bdd1be8ac05292d2217bf84884712974cb1d72570f",
+    "logs.raw": "f0e32a2bab1d8be975e7f06d8901f85eca561573b898530cfc833f8561a9323e"
+  },
+  "original_power_window_preserved": true,
+  "remaining_question": "Is there a saved boot or network log covering 00:00:28Z to the owner recovery at 00:12Z?"
+}

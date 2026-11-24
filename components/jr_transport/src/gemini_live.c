@@ -13,6 +13,7 @@
  * structurally dead here (spec §5.6).
  */
 #include "jr_transport/gemini_live.h"
+#include "jr_core/tool_policy.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -128,6 +129,20 @@ static char *dup_cstr(const char *s)
 /* ======================================================================== *
  *  BUILDERS                                                                 *
  * ======================================================================== */
+size_t jr_gemini_declared_fn_count(const jr_gemini_config_t *cfg)
+{
+    if (cfg == NULL || cfg->fns == NULL) {
+        return 0u;
+    }
+    size_t n = 0u;
+    for (size_t i = 0; i < cfg->fn_count; i++) {
+        if (!cfg->no_gateway || !jr_tool_needs_gateway(cfg->fns[i].name)) {
+            n++;
+        }
+    }
+    return n;
+}
+
 char *jr_gemini_build_setup(const jr_gemini_config_t *cfg)
 {
     cJSON *root = cJSON_CreateObject();
@@ -196,11 +211,14 @@ char *jr_gemini_build_setup(const jr_gemini_config_t *cfg)
         cJSON_AddItemToObject(gs, "googleSearch", cJSON_CreateObject());
         cJSON_AddItemToArray(tools, gs);
     }
-    if (cfg && cfg->fns && cfg->fn_count) {
+    if (jr_gemini_declared_fn_count(cfg) > 0) {
         cJSON *fdtool = cJSON_CreateObject();
         cJSON *fdecls = cJSON_AddArrayToObject(fdtool, "functionDeclarations");
         for (size_t i = 0; i < cfg->fn_count; i++) {
             const jr_gemini_fn_decl_t *d = &cfg->fns[i];
+            if (cfg->no_gateway && jr_tool_needs_gateway(d->name)) {
+                continue;
+            }
             cJSON *fn = cJSON_CreateObject();
             cJSON_AddStringToObject(fn, "name", d->name ? d->name : "");
             cJSON_AddStringToObject(fn, "description", d->description ? d->description : "");

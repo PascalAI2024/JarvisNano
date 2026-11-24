@@ -1,0 +1,78 @@
+{
+  "recorded_utc": "2026-10-12T23:06:24.721134+00:00",
+  "acceptance": "PASSED",
+  "item": "Physical lift wake",
+  "source_commit": "343e51ce2d43fc70f5ebea4e40ebfb9b86d50cb5",
+  "owner_source": "Owner observation relayed by orchestrator",
+  "owner_result": "lift by the edges with the repaired image WORKED (no tap)",
+  "api_back_utc": "2026-10-12T23:03:48.687909+00:00",
+  "sleep_before": 1,
+  "sleep_after": {
+    "wake": "lift",
+    "sleeps": 2,
+    "armed": {
+      "lift": true,
+      "touch": true
+    },
+    "lift_fail": "none",
+    "force": false,
+    "after_dream_ms": 600000
+  },
+  "ota": {
+    "running": "ota_1",
+    "state": "valid"
+  },
+  "privacy_muted": true,
+  "audio_paths_off": [
+    "mic",
+    "adc",
+    "dac",
+    "pa"
+  ],
+  "usb_present": false,
+  "charging": false,
+  "battery_percent_at_capture": 77,
+  "watcher_pid": 64332,
+  "snapshot_observation": "Both opened panel-submission mirrors show WATCH; the Glance window was not captured.",
+  "timing_limit": "API return and software DMA timestamps do not measure optical wake latency; owner action time/video was not supplied.",
+  "boot_transfer_proxy_ms": {
+    "time_base": "esp_timer_since_boot",
+    "optical": false,
+    "includes_rom": false,
+    "init_started": true,
+    "init_finished": true,
+    "first_transfer_valid": true,
+    "init_start_boot_ms": 233,
+    "init_end_boot_ms": 777,
+    "first_transfer_done_boot_ms": 829,
+    "first_glance_time_transfer_valid": true,
+    "first_glance_time_transfer_done_boot_ms": 841
+  },
+  "original_failed_owner_lift": {
+    "owner_relay_utc": "2026-10-12T22:34:07Z",
+    "acceptance": "FAILED",
+    "result": "Edges-only lift left screen off; subsequent touch woke it.",
+    "api_back_utc": "2026-10-12T22:33:50.591341+00:00",
+    "wake": "touch",
+    "sleeps": 4,
+    "preserved_evidence_sha256": "dbd29d3a57f4b3b330d8367d915e7291d340cf99a827b4341a03614c34f296f7"
+  },
+  "evidence_sha256": {
+    "step4-lift-r7-baseline.json": "9bf3b8b6837e2b0398a2a98c9ee84aa8769bacdc0dd7e0c438e00c8cc25ee48b",
+    "step4-lift-r7-handoff.json": "f8971cf93d17e8650a55a9a3b95e4ce41d4dc56547a609054aec5b39d61ea779",
+    "step4-lift-r7-wake-1-first.json": "67e976aa4e39101625963ab46f2dd9a2c4663607920f620b3fc21f7dc16f2b00",
+    "step4-lift-r7-wake-1-capture.json": "0e8bc88c7076d284c8d4152efd0ae30e56098ef4c620a2c3a6ea30dc79640b2d",
+    "step4-lift-r7-wake-1-first.png": "344bc5de70af8c63b7630d937b3b2729cf28cd0143385d3e7ef68583359229a5",
+    "step4-lift-r7-wake-1-second.png": "a756fca8ef934bba8898f3a335107ee085d726130938cd4973dee61dbaa8926e",
+    "step4-lift-r7-stdout.log": "5ea4e099373bb7304b3e5a721733f14f6304ab5e560dfa8227ec2d771d15937d",
+    "step4-lift-r7-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "step4-lift-failed-owner-acceptance.json": "dbd29d3a57f4b3b330d8367d915e7291d340cf99a827b4341a03614c34f296f7"
+  },
+  "remaining_order": [
+    "Owner manual unmute and spoken turn",
+    "Owner manual re-mute and API confirmation",
+    "Unplugged matched >=45-minute B/repair HOME drain",
+    "Untouched natural ladder and default 4-hour timer",
+    "C2 after C1 acceptance"
+  ]
+}

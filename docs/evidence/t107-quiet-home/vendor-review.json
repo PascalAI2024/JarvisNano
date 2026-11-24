@@ -1,0 +1,59 @@
+{
+  "source_sha256": "3d021df92a439379e1b3421fe3db6d809a367a361ebbbf0174d3974d1876f034",
+  "unchanged_function_sha256": {
+    "free_frame_buffers": "d5339fac0fbe894dbcb64f236606e27d22bdbf71357da6cf77481ddc917ab58f",
+    "gfx_anim_reset_frame": "c30df0c8e4b6207937af8eb9558622eb2d9b49ffcc4025cabf515b6942f5a389",
+    "gfx_anim_prepare_frame": "2666fffeb70370b687e8a559170dd345eb8b33827c5717bd66499fd4d75218c0",
+    "gfx_anim_timer_callback": "42f2aa629d7f6cde23a186542e42c0d7b7b2352e699b3716fac09ab8f340c14f"
+  },
+  "runs": [
+    {
+      "name": "positive",
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--tmpfs",
+        "/tmp:exec",
+        "-v",
+        "<checkout>:/src:ro",
+        "-w",
+        "/src",
+        "jarvisnano-hosttests",
+        "sh",
+        "-c",
+        "gcc -std=c11 -Wall -Wextra -Werror .evidence/t107d/quiet-vendor-failure.positive.generated.c -o /tmp/quiet-vendor-failure && /tmp/quiet-vendor-failure"
+      ],
+      "returncode": 0,
+      "stdout": "Runtime quiet vendor proof started.\nOne-shot allocation fault retried frame zero and retained its visible prepared face for 1200 refresh/timer ticks.\nRepeat mode recovered on the next prepare attempt.\nQuiet vendor failure review passed (3613 checks).\n",
+      "stderr": ""
+    },
+    {
+      "name": "retry-removed",
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--tmpfs",
+        "/tmp:exec",
+        "-v",
+        "<checkout>:/src:ro",
+        "-w",
+        "/src",
+        "jarvisnano-hosttests",
+        "sh",
+        "-c",
+        "gcc -std=c11 -Wall -Wextra -Werror .evidence/t107d/quiet-vendor-failure.retry-removed.generated.c -o /tmp/quiet-vendor-failure && /tmp/quiet-vendor-failure"
+      ],
+      "returncode": 1,
+      "stdout": "Runtime quiet vendor proof started.\n",
+      "stderr": "failure line 283: prepares==before+1 && anim.current_frame==0 && anim.is_playing\n"
+    }
+  ]
+}

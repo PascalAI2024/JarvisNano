@@ -1,0 +1,98 @@
+{
+  "idle-rest": {
+    "samples": 21,
+    "duration_s": 300.0,
+    "drain_mv_h": -55.9,
+    "interval95_scatter_mv_h": 263.5,
+    "quantization_bound_mv_h": 29.1,
+    "endpoint_mv": [
+      3876,
+      3905
+    ],
+    "endpoint_pct": [
+      77,
+      76
+    ],
+    "mood": [
+      "WHISPER"
+    ],
+    "privacy_all_muted": true,
+    "block_means": [
+      [
+        0.00625,
+        3896.0
+      ],
+      [
+        0.022916666666666665,
+        3905.0
+      ],
+      [
+        0.03958333333333333,
+        3906.0
+      ],
+      [
+        0.05625,
+        3905.0
+      ],
+      [
+        0.075,
+        3901.0
+      ]
+    ]
+  },
+  "watch": {
+    "samples": 21,
+    "duration_s": 300.0,
+    "drain_mv_h": -20.8,
+    "interval95_scatter_mv_h": 224.6,
+    "quantization_bound_mv_h": 29.1,
+    "endpoint_mv": [
+      3861,
+      3892
+    ],
+    "endpoint_pct": [
+      76,
+      75
+    ],
+    "mood": [
+      "WHISPER"
+    ],
+    "privacy_all_muted": true,
+    "block_means": [
+      [
+        0.006251041666666667,
+        3890.75
+      ],
+      [
+        0.022916666666666665,
+        3899.5
+      ],
+      [
+        0.039584375,
+        3897.75
+      ],
+      [
+        0.05625104166666667,
+        3896.0
+      ],
+      [
+        0.07500083333333334,
+        3894.4
+      ]
+    ]
+  },
+  "sleep-cycle": {
+    "duration_s": 317.484,
+    "endpoint_mv": [
+      3892,
+      3903
+    ],
+    "endpoint_pct": [
+      75,
+      75
+    ],
+    "drain_mv_h": -124.7,
+    "quantization_bound_mv_h": 22.7,
+    "note": "Includes shutdown, cold boot and reconnect; voltage relaxation is unbounded."
+  }
+}

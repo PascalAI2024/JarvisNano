@@ -1,0 +1,100 @@
+{
+  "before": {
+    "wall_timestamp_span_s": 60.0,
+    "counter_elapsed_s": 60.319479,
+    "render_frames": 355,
+    "frames_per_s": 5.885,
+    "render_mean_us": 37154.087,
+    "render_wall_percent": 21.866,
+    "task_one_core_percent": {
+      "httpd": 0.051,
+      "IDLE1": 92.288,
+      "IDLE0": 60.255,
+      "jr_imu": 3.23,
+      "jr_voice": 6.602,
+      "gfx_render": 31.079,
+      "jr_power": 0.141,
+      "jr_present": 0.156,
+      "tiT": 0.156,
+      "jr_pb_feed": 0.004,
+      "ipc1": 0.0,
+      "jr_tools": 0.879,
+      "Tmr Svc": 0.473,
+      "esp_timer": 0.229,
+      "wifi": 4.454,
+      "sys_evt": 0.004,
+      "jr_touch": 0.0,
+      "ipc0": 0.0
+    },
+    "cpu_mhz": [
+      160,
+      160
+    ],
+    "brightness": [
+      14,
+      14
+    ],
+    "battery_pct": [
+      null,
+      null
+    ],
+    "free_psram": [
+      3711428,
+      3711448
+    ],
+    "largest_internal": [
+      31744,
+      31744
+    ]
+  },
+  "after": {
+    "wall_timestamp_span_s": 61.0,
+    "counter_elapsed_s": 60.560568,
+    "render_frames": 355,
+    "frames_per_s": 5.862,
+    "render_mean_us": 46077.789,
+    "render_wall_percent": 27.01,
+    "task_one_core_percent": {
+      "httpd": 0.064,
+      "jr_imu": 2.611,
+      "IDLE1": 92.123,
+      "IDLE0": 55.578,
+      "gfx_render": 36.191,
+      "jr_voice": 6.829,
+      "jr_present": 0.162,
+      "tiT": 0.166,
+      "jr_pb_feed": 0.004,
+      "jr_power": 0.145,
+      "ipc1": 0.0,
+      "jr_tools": 0.863,
+      "Tmr Svc": 0.498,
+      "esp_timer": 0.237,
+      "wifi": 4.522,
+      "sys_evt": 0.004,
+      "jr_touch": 0.0,
+      "ipc0": 0.0
+    },
+    "cpu_mhz": [
+      160,
+      160
+    ],
+    "brightness": [
+      14,
+      14
+    ],
+    "battery_pct": [
+      58,
+      58
+    ],
+    "free_psram": [
+      4354136,
+      4354136
+    ],
+    "largest_internal": [
+      31744,
+      31744
+    ]
+  },
+  "render_mean_reduction_percent": -24.018,
+  "note": "Profile wall timestamps have one-second precision; rates use the microsecond runtime counter span. Separate GETs are not atomic. Before profile did not retain battery values (null); nearby live capture was 69%, after profile 58%. Live differences include scheduling and SoC differences; they do not measure electrical energy. Total runtime is the one-core elapsed counter, not summed two-core task runtime."
+}

@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Rasterise the glass UI atlases into components/jr_display/src/glass_font_data.c.
+
+Barlow Semi Condensed (SIL OFL 1.1, third_party/fonts/barlow-semi-condensed/)
+is drawn at 32x, box-filtered down, trimmed to each glyph's ink box and packed
+as 4-bit alpha (two pixels per byte, high nibble first, row-major). The cap
+height of every atlas is a whole number of pixels, so caps and digits start on
+a pixel row and the baseline sits on a pixel edge.
+
+    python scripts/gen-glass-font.py            regenerate the committed file
+    python scripts/gen-glass-font.py --check    regenerate in memory; fail if
+                                                the committed file differs
+
+Needs Pillow. The check normalises line endings (the checkout is CRLF on the
+desk). A different FreeType build can move a nibble; if --check fails on a
+machine whose Pillow differs, regenerate there and review the diff.
+"""
+import argparse
+import math
+import sys
+from pathlib import Path
+
+from PIL import Image, ImageDraw, ImageFont
+
+ROOT = Path(__file__).resolve().parent.parent
+FONT_DIR = ROOT / "third_party" / "fonts" / "barlow-semi-condensed"
+OUT = ROOT / "components" / "jr_display" / "src" / "glass_font_data.c"
+
+SS = 32           # supersampling factor
+ALPHA_GAMMA = 0.85  # <1 thickens light-on-dark text a touch
+
+UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+DIGITS = "0123456789"
+# Every glyph the 5x7 font in jr_display.c supports, plus degree, middle dot
+# and the true minus. '*' is an alias for the degree glyph (see glass_font.c).
+PUNCT_5X7 = "-_.:/%?!+,'()&"
+EXTRA = "°·−"
+TEXT_SET = " " + UPPER + DIGITS + PUNCT_5X7 + EXTRA
+
+ATLASES = [
+    # name, enum, weight file, cap height px, charset
+    ("LABEL", "BarlowSemiCondensed-SemiBold.ttf", 11, TEXT_SET),
+    ("TEXT", "BarlowSemiCondensed-Medium.ttf", 15, TEXT_SET),
+    ("VALUE", "BarlowSemiCondensed-Medium.ttf", 24,
+     " " + DIGITS + "%°-−+:./" + UPPER),
+    ("HERO", "BarlowSemiCondensed-Medium.ttf", 59,
+     " " + DIGITS + "-−:"),
+]
+
+
+def rasterise(path, cap_px, charset):
+    ratio = -ImageFont.truetype(
+        str(path), 1000, layout_engine=ImageFont.Layout.BASIC
+    ).getbbox("H", anchor="ls")[1] / 1000.0
+    em = cap_px / ratio
+    # Hinting snaps the cap height to whole ppem steps, so at 8x it can land a
+    # supersampled pixel above the target and leave a faint extra row over
+    # every capital. At SS = 32 the error is a sixteenth of a pixel at worst;
+    # walk the size down until the cap is at most cap_px * SS, so the top row
+    # stays inside the cap box.
+    size = em * SS
+    for _ in range(200):
+        font = ImageFont.truetype(str(path), size, layout_engine=ImageFont.Layout.BASIC)
+        if -font.getbbox("H", anchor="ls")[1] <= cap_px * SS:
+            break
+        size -= 0.25
+    else:
+        sys.exit(f"{path}: no size gives a cap height of {cap_px} px")
+    em = size / SS
+    glyphs = []
+    bits = bytearray()
+    for ch in sorted(set(charset), key=ord):
+        adv = int(round(font.getlength(ch) / SS))
+        if ch == " ":
+            glyphs.append(dict(cp=ord(ch), off=0, w=0, h=0, xo=0, yo=0, adv=adv))
+            continue
+        l, t, r, b = font.getbbox(ch, anchor="ls")
+        x0, y0 = math.floor(l / SS), math.floor(t / SS)
+        x1, y1 = math.ceil(r / SS), math.ceil(b / SS)
+        w, h = x1 - x0, y1 - y0
+        img = Image.new("L", (w * SS, h * SS), 0)
+        ImageDraw.Draw(img).text((-x0 * SS, -y0 * SS), ch, font=font, fill=255, anchor="ls")
+        small = img.resize((w, h), Image.BOX)
+        px = [round(255 * (v / 255.0) ** ALPHA_GAMMA / 17) for v in small.tobytes()]
+        # Trim to the ink box.
+        rows = [px[i * w:(i + 1) * w] for i in range(h)]
+        ys = [i for i, rw in enumerate(rows) if any(rw)]
+        xs = [j for j in range(w) if any(rw[j] for rw in rows)]
+        if not ys:
+            glyphs.append(dict(cp=ord(ch), off=0, w=0, h=0, xo=0, yo=0, adv=adv))
+            continue
+        ty0, ty1, tx0, tx1 = ys[0], ys[-1] + 1, xs[0], xs[-1] + 1
+        gw, gh = tx1 - tx0, ty1 - ty0
+        flat = [rows[i][j] for i in range(ty0, ty1) for j in range(tx0, tx1)]
+        if len(flat) % 2:
+            flat.append(0)
+        off = len(bits)
+        bits.extend((flat[i] << 4) | flat[i + 1] for i in range(0, len(flat), 2))
+        glyphs.append(dict(cp=ord(ch), off=off, w=gw, h=gh,
+                           xo=x0 + tx0, yo=y0 + ty0 + cap_px, adv=adv))
+    assert len(bits) < 65536, "glyph offsets are 16-bit"
+    ink = [g for g in glyphs if g["h"]]
+    ink_top = min(g["yo"] for g in ink)
+    ink_bottom = max(g["yo"] + g["h"] for g in ink)
+    space_adv = next(g["adv"] for g in glyphs if g["cp"] == 0x20)
+    return dict(glyphs=glyphs, bits=bytes(bits), cap_h=cap_px,
+                line_h=int(round(em * 1.25)), ink_top=ink_top,
+                ink_bottom=ink_bottom, space_adv=space_adv, em=em)
+
+
+def emit(atlases):
+    o = []
+    o.append("/* GENERATED by scripts/gen-glass-font.py - do not edit.\n"
+             " * Barlow Semi Condensed, (c) The Barlow Project Authors, SIL Open Font\n"
+             " * License 1.1 (third_party/fonts/barlow-semi-condensed/OFL.txt).\n"
+             " * 4-bit alpha, two pixels per byte (high nibble first), row-major,\n"
+             " * each glyph trimmed to its ink box. xo is relative to the pen origin,\n"
+             " * yo to the top of the cap height. */\n")
+    o.append('#include "jr_display/glass.h"\n')
+    for name, a in atlases:
+        lo = name.lower()
+        o.append(f"/* {name}: cap {a['cap_h']} px, em {a['em']:.2f} px, "
+                 f"{len(a['glyphs'])} glyphs, {len(a['bits'])} bytes of alpha */")
+        o.append(f"static const uint8_t k_{lo}_bits[{max(1, len(a['bits']))}] = {{")
+        b = a["bits"] or b"\0"
+        for i in range(0, len(b), 16):
+            o.append("    " + ",".join(f"0x{v:02x}" for v in b[i:i + 16]) + ",")
+        o.append("};")
+        o.append(f"static const glass_glyph_t k_{lo}_glyphs[{len(a['glyphs'])}] = {{")
+        for g in a["glyphs"]:
+            o.append("    {0x%04x,%d,%d,%d,%d,%d,%d}," % (
+                g["cp"], g["off"], g["w"], g["h"], g["xo"], g["yo"], g["adv"]))
+        o.append("};\n")
+    o.append("const glass_font_t glass_fonts[GLASS_FONT_COUNT] = {")
+    for name, a in atlases:
+        lo = name.lower()
+        o.append("    [GLASS_FONT_%s] = {k_%s_glyphs, k_%s_bits, %d, %d, %d, %d, %d, %d}," % (
+            name, lo, lo, len(a["glyphs"]), a["cap_h"], a["line_h"],
+            a["ink_top"], a["ink_bottom"], a["space_adv"]))
+    o.append("};\n")
+    return "\n".join(o)
+
+
+def build():
+    atlases = []
+    for name, fname, cap, charset in ATLASES:
+        path = FONT_DIR / fname
+        head = path.read_bytes()[:4]
+        if head not in (b"\x00\x01\x00\x00", b"OTTO", b"true"):
+            sys.exit(f"{path}: not an sfnt font (header {head!r})")
+        atlases.append((name, rasterise(path, cap, charset)))
+    return atlases
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--check", action="store_true")
+    args = ap.parse_args()
+    atlases = build()
+    total = 0
+    for name, a in atlases:
+        size = len(a["bits"]) + len(a["glyphs"]) * 10
+        total += size
+        print(f"GLASS_FONT_{name:<6} cap {a['cap_h']:>2}px  glyphs {len(a['glyphs']):>3}  "
+              f"alpha {len(a['bits']):>6} B  descriptors {len(a['glyphs']) * 10:>4} B  = {size} B")
+    print(f"total rodata: {total} B ({total / 1024:.1f} KB; alpha bitmaps plus 10-byte glyph descriptors)")
+    text = emit(atlases)
+    if args.check:
+        cur = OUT.read_text(encoding="utf-8").replace("\r\n", "\n") if OUT.exists() else ""
+        if cur != text:
+            print(f"FAIL: {OUT.relative_to(ROOT)} differs from a fresh render", file=sys.stderr)
+            return 1
+        print("check ok: committed glass_font_data.c matches a fresh render")
+        return 0
+    OUT.write_text(text, encoding="utf-8", newline="\n")
+    print(f"wrote {OUT.relative_to(ROOT)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

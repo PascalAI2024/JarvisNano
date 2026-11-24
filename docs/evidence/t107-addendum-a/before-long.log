@@ -1,0 +1,46 @@
+<worktree>\.evidence\t107a\before-idle-rest.png
+START idle-rest 720
+idle-rest 0 3784 66 5
+idle-rest 60 3830 66 5
+idle-rest 120 3828 65 5
+idle-rest 180 3829 65 5
+idle-rest 240 3824 65 5
+idle-rest 300 3825 65 5
+idle-rest 360 3809 65 5
+idle-rest 420 3824 65 5
+idle-rest 480 3823 64 5
+idle-rest 540 3820 64 5
+idle-rest 600 3822 64 5
+idle-rest 660 3817 64 5
+idle-rest 720 3815 64 5
+END idle-rest
+<worktree>\.evidence\t107a\before-watch.png
+START watch 720
+watch 0 3805 64 5
+watch 60 3811 63 5
+watch 120 3812 63 5
+watch 180 3804 63 5
+watch 240 3814 63 5
+watch 300 3803 63 5
+watch 360 3808 63 5
+watch 420 3803 62 5
+watch 480 3807 62 5
+watch 540 3806 62 5
+watch 600 3800 62 5
+watch 660 3798 62 5
+watch 720 3802 62 5
+END watch
+START sleep timer=1800
+END sleep 1801.532 3784 61
+<worktree>\.evidence\t107a\before-dream.png
+START dream 420
+dream 0 3759 60 2
+dream 60 3790 60 2
+dream 120 3788 60 2
+dream 180 3792 60 2
+dream 240 3789 60 2
+dream 300 3790 60 2
+dream 360 3780 59 2
+dream 420 3784 59 2
+END dream
+FINAL {"verdict": "privacy-muted", "repairable": false, "privacy": true, "flip_muted": false, "operator": false, "phase": "Idle", "voice_alive": true, "levels": {"volume": 95, "brightness_cap": 65, "brightness_actual": 65}, "audio_power": {"mic": false, "adc": false, "dac": false, "pa": false, "reads": 0, "silent": 0, "failures": 0}, "memory": {"largest_internal": 31744, "free_psram": 4764376}, "transport": {"would_block": 0, "drops": 0, "deaths": 0}, "playback": {"underruns": 0, "max_gap_ms": 0, "low_water_ms": -1, "dac_failures": 0, "replies": 0, "prerolls": 0, "preroll_short": 0}, "rx": {"frames": 0, "max_gap_ms": 0, "queue_wait_max_ms": 0, "queue_hwm": 0, "drops": 0}, "display": {"fps": 2, "flush_errors": 0}, "ota": {"active": false, "running": "ota_1", "boot": "ota_1", "state": "valid", "received": 0, "total": 0, "last_error": "ESP_OK", "last_invalid": "none"}, "tools": {"status": "ok", "http": 0}}

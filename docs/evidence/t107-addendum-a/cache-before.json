@@ -1,0 +1,66 @@
+{
+  "source": "0b4108f",
+  "failure": "urllib.error.HTTPError: HTTP Error 503: Service Unavailable",
+  "health": {
+    "verdict": "privacy-muted",
+    "phase": "Idle",
+    "voice_alive": true,
+    "privacy": true,
+    "ota": {
+      "active": false,
+      "running": "ota_1",
+      "boot": "ota_1",
+      "state": "valid",
+      "received": 0,
+      "total": 0,
+      "last_error": "ESP_OK",
+      "last_invalid": "none"
+    },
+    "memory": {
+      "largest_internal": 30720,
+      "free_psram": 419300
+    },
+    "display": {
+      "fps": 9,
+      "flush_errors": 0
+    },
+    "transport": {
+      "would_block": 0,
+      "drops": 0,
+      "deaths": 0
+    },
+    "audio_power": {
+      "mic": false,
+      "adc": false,
+      "dac": false,
+      "pa": false,
+      "reads": 900,
+      "silent": 0,
+      "failures": 0
+    }
+  },
+  "battery": {
+    "available": true,
+    "present": true,
+    "charging": false,
+    "usb_present": false,
+    "percent": 68,
+    "millivolts": 3843,
+    "sample_seq": 599,
+    "age_ms": 199
+  },
+  "display": {
+    "init": "ready",
+    "actual_fps": 9,
+    "flush_completions": 160452,
+    "flush_errors": 0,
+    "requested_face": 6,
+    "applied_face": 8,
+    "choices_active": false,
+    "watch_style": "DIVER",
+    "sun_rise_min": 437,
+    "sun_set_min": 1136
+  },
+  "snapshot_bytes": 434312,
+  "note": "Health read immediately after failed DIVER snapshot in the first style sweep. Source bug was fixed before post-OTA acceptance; a failed capture contains no valid panel image."
+}

@@ -29,7 +29,19 @@ set(CORE_SRCS
     ${REPO_ROOT}/components/jr_core/src/orchestrator.c
     ${REPO_ROOT}/components/jr_core/src/mood.c
     ${REPO_ROOT}/components/jr_core/src/glance.c
+    ${REPO_ROOT}/components/jr_core/src/dac_mute.c
+    ${REPO_ROOT}/components/jr_core/src/cue.c
+    ${REPO_ROOT}/components/jr_core/src/utt_watch.c
+    ${REPO_ROOT}/components/jr_core/src/echo_gate.c
+    ${REPO_ROOT}/components/jr_core/src/mic_watch.c
+    ${REPO_ROOT}/components/jr_core/src/pace.c
+    ${REPO_ROOT}/components/jr_core/src/tool_policy.c
+    ${REPO_ROOT}/components/jr_core/src/timer.c
+    ${REPO_ROOT}/components/jr_core/src/notes.c
+    ${REPO_ROOT}/components/jr_core/src/desk_mode.c
     ${REPO_ROOT}/components/jr_dsp/src/dsp.c
+    ${REPO_ROOT}/components/jr_dsp/src/audio_power.c
+    ${REPO_ROOT}/components/jr_dsp/src/spectrum.c
 )
 
 # --- Run 3: the L2 Gemini transport (builders/framer/parser) compiles here too.
@@ -42,23 +54,43 @@ set(TRANSPORT_SRCS
     ${REPO_ROOT}/components/jr_transport/vendor/cJSON/cJSON.c
 )
 
+# Fixed-register decoding and rolling analytics are portable; the PMIC/I2C adapter is excluded.
+set(POWER_DIAGNOSTIC_SRCS
+    ${REPO_ROOT}/components/jr_power/src/charge.c
+    ${REPO_ROOT}/components/jr_power/src/analytics.c
+)
+
 add_executable(jr_host_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_core.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_transport.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_soak.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_mood.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_jitter.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_audio_power.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_power_charge.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_power_analytics.c
     ${CMAKE_CURRENT_SOURCE_DIR}/fakes/fake_clock.c
     ${CMAKE_CURRENT_SOURCE_DIR}/fakes/fake_ws_transport.c
     ${CMAKE_CURRENT_SOURCE_DIR}/unity/unity.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_glance.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_cue.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_cue_ui.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_voice_fix.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_mic_watch.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_pace.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_timer.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_notes.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_desk_mode.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_spectrum.c
     ${CORE_SRCS}
     ${TRANSPORT_SRCS}
+    ${POWER_DIAGNOSTIC_SRCS}
 )
 
 target_include_directories(jr_host_tests PRIVATE
     ${REPO_ROOT}/components/jr_core/include
     ${REPO_ROOT}/components/jr_dsp/include
+    ${REPO_ROOT}/components/jr_power/include
     ${REPO_ROOT}/components/jr_ports/include
     ${REPO_ROOT}/components/jr_transport/include
     ${REPO_ROOT}/components/jr_transport/vendor/cJSON
@@ -73,6 +105,17 @@ target_link_libraries(jr_host_tests PRIVATE m)
 # third-party single-file lib — keep OUR code clean but do not fail on cJSON's
 # own style, so build with warnings on but never as errors.
 target_compile_options(jr_host_tests PRIVATE -Wall -Wextra)
+target_compile_definitions(jr_host_tests PRIVATE JR_TEST_REPO_ROOT="${REPO_ROOT}")
+
+# Renders the interface cues to WAV files with the firmware's own generator.
+# Not part of the test run: cmake --build host/build --target jr_render_cues
+add_executable(jr_render_cues EXCLUDE_FROM_ALL
+    ${CMAKE_CURRENT_SOURCE_DIR}/render_cues.c
+    ${REPO_ROOT}/components/jr_core/src/cue.c)
+target_include_directories(jr_render_cues PRIVATE
+    ${REPO_ROOT}/components/jr_core/include
+    ${REPO_ROOT}/components/jr_ports/include)
+target_link_libraries(jr_render_cues PRIVATE m)
 
 enable_testing()
 add_test(NAME jr_host_tests COMMAND jr_host_tests)

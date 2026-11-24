@@ -9,11 +9,19 @@
  */
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "cJSON.h"
 #include "jr_tools/jr_tools.h"
 
 static int g_checks;
+
+/* test_weather.c: the Open-Meteo projection, against a real response. */
+int weather_tests(int *checks);
+
+/* test_project.c: on-device JSON budget projector. */
+int project_tests(int *checks);
 
 #define CHECK(cond, what)                                                     \
     do {                                                                      \
@@ -255,6 +263,115 @@ static int test_board_project_is_a_literal_not_a_program(void)
     return 0;
 }
 
+/* ---- the byte budget and the oversize body ------------------------------ */
+
+static int test_exec_program_budget(void)
+{
+    /* The largest call the device can carry: a 47-byte target (20 path
+     * segments) and a 767-byte args_json, the job's 768-byte slot less its
+     * terminator. The generated program must still fit the 4 KB code slot. */
+    char target[48] = "websearch";
+    while (strlen(target) + 2U < 48U) {
+        strcat(target, ".x");
+    }
+    CHECK(strlen(target) == 47U, "the longest target is 47 bytes");
+    char args[768];
+    int n = snprintf(args, sizeof args,
+                     "{\"tool\":\"%s\",\"args_json\":\"{\\\"q\\\":\\\"", target);
+    memset(args + n, 'x', 682U);
+    n += 682;
+    n += snprintf(args + n, sizeof args - (size_t)n, "\\\"}\"}");
+    CHECK(n == 767, "the largest args_json is 767 bytes");
+    CHECK(build("execute_tool", args) == JR_TOOL_TEMPLATE_OK, "the largest call builds");
+    CHECK(strlen(g_out) < 4096U, "and fits the code slot");
+    CHECK(starts(g_out, "const P=[\"websearch\",\"x\",\"x\""), "with its whole path");
+    CHECK(strstr(g_out, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx") != NULL,
+          "and its whole args");
+
+    /* The program carries a byte budget derived from the response slot:
+     * {"result":<value>} plus the terminator must fit, with room for cJSON. */
+    CHECK(build("execute_tool", "{\"tool\":\"websearch\",\"args_json\":\"{}\"}") == JR_TOOL_TEMPLATE_OK,
+          "websearch builds");
+    const char *max = strstr(g_out, "const MAX=");
+    CHECK(max != NULL, "the program states its budget");
+    unsigned budget = (unsigned)strtoul(max + strlen("const MAX="), NULL, 10);
+    CHECK(budget + 12U <= JR_TOOLS_RESPONSE_CAP, "the budget plus the envelope fits the response slot");
+    CHECK(budget >= 2500U, "and is not needlessly small");
+    CHECK(strstr(g_out, "truncated:true") != NULL && strstr(g_out, "hint:HINT") != NULL,
+          "a cut result says so and says how to narrow it");
+    CHECK(strstr(g_out, "total:r.length") != NULL, "a cut list keeps its total");
+    CHECK(strstr(g_out, "\"coordination.portfolio\"") != NULL &&
+          strstr(g_out, ".slice(0,8)") != NULL,
+          "coordination.portfolio projects up to 8 compact projects");
+    return 0;
+}
+
+static int test_oversize_body_is_a_bounded_answer(void)
+{
+    char out[64];
+    CHECK(jr_tools_target_name("execute_tool",
+                               "{\"tool\":\"memory.search\",\"args_json\":"
+                               "\"{\\\"query\\\":\\\"SECRETWORD\\\"}\"}",
+                               out, sizeof out) &&
+              strcmp(out, "memory.search") == 0,
+          "execute_tool is named by its target");
+    CHECK(strstr(out, "SECRETWORD") == NULL, "never by its arguments");
+    CHECK(jr_tools_target_name("delegated_tasks", "{}", out, sizeof out) &&
+              strcmp(out, "delegated_tasks") == 0,
+          "any other tool is named by itself");
+    CHECK(!jr_tools_target_name("execute_tool", "{\"tool\":\"a b;c\",\"args_json\":\"{}\"}",
+                                out, sizeof out) &&
+              strcmp(out, "?") == 0,
+          "a target outside the charset reads ?");
+    CHECK(!jr_tools_target_name("execute_tool", "{}", out, sizeof out) && strcmp(out, "?") == 0,
+          "a missing target reads ?");
+    CHECK(!jr_tools_target_name("execute_tool", NULL, out, sizeof out) && strcmp(out, "?") == 0,
+          "missing args read ?");
+    CHECK(!jr_tools_target_name(NULL, NULL, out, sizeof out) && strcmp(out, "?") == 0,
+          "a missing tool reads ?");
+    char small[4];
+    CHECK(!jr_tools_target_name("delegated_tasks", "{}", small, sizeof small) &&
+              small[0] == '?' && small[1] == '\0',
+          "a name that does not fit is not cut mid-way");
+
+    char line[160];
+    int len = jr_tools_describe_oversize(line, sizeof line, "execute_tool", "memory.search",
+                                         9000, 0U, 8192U);
+    CHECK(len > 0 && (size_t)len < sizeof line, "the log line fits");
+    CHECK(strcmp(line,
+                 "result over body cap: tool=execute_tool target=memory.search "
+                 "announced=9000 read=0 cap=8192") == 0,
+          "the log line names the tool, the target and the sizes");
+    jr_tools_describe_oversize(line, sizeof line, "recall_memory", "recall_memory", -1, 8193U, 8192U);
+    CHECK(strstr(line, "announced=-1 read=8193 cap=8192") != NULL, "an unannounced body reads -1");
+
+    char json[JR_TOOLS_RESPONSE_CAP];
+    CHECK(jr_tools_oversize_result(json, sizeof json, 9000, 0U), "an oversize answer is produced");
+    cJSON *root = cJSON_Parse(json);
+    const cJSON *r = cJSON_GetObjectItemCaseSensitive(root, "result");
+    CHECK(cJSON_IsObject(r), "it is a result object, not an error");
+    CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "truncated")), "it says truncated");
+    CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "too_large")), "and too large");
+    const cJSON *bytes = cJSON_GetObjectItemCaseSensitive(r, "bytes");
+    CHECK(cJSON_IsNumber(bytes) && (int)bytes->valuedouble == 9000, "with the announced size");
+    const cJSON *note = cJSON_GetObjectItemCaseSensitive(r, "note");
+    CHECK(cJSON_IsString(note) && strstr(note->valuestring, "narrower question") != NULL,
+          "and tells the model to narrow the request");
+    CHECK(strlen(json) < 400U, "in a few hundred bytes");
+    cJSON_Delete(root);
+
+    CHECK(jr_tools_oversize_result(json, sizeof json, -1, 8193U), "an unannounced body is handled");
+    root = cJSON_Parse(json);
+    bytes = cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(root, "result"), "bytes");
+    CHECK(cJSON_IsNumber(bytes) && (int)bytes->valuedouble == 8193, "with the bytes read instead");
+    cJSON_Delete(root);
+
+    char tiny[16];
+    CHECK(!jr_tools_oversize_result(tiny, sizeof tiny, 9000, 0U) && tiny[0] == '\0',
+          "a buffer too small is reported, not overrun");
+    return 0;
+}
+
 int main(void)
 {
     char request_id[JR_TOOLS_REQUEST_ID_CAP];
@@ -268,7 +385,9 @@ int main(void)
 
     if (test_fixed_templates() || test_execute_tool_policy() || test_invalid_arguments() ||
         test_delegate_task_is_one_work_item() || test_delegated_tasks_and_poll_are_projected() ||
-        test_board_project_is_a_literal_not_a_program()) {
+        test_board_project_is_a_literal_not_a_program() || test_exec_program_budget() ||
+        test_oversize_body_is_a_bounded_answer() || weather_tests(&g_checks) ||
+        project_tests(&g_checks)) {
         return 1;
     }
     printf("jr_tools template tests passed (%d checks)\n", g_checks);

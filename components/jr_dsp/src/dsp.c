@@ -97,9 +97,13 @@ void jr_jitter_feed(jr_jitter_t *j, uint32_t now_ms, uint32_t avail_samples,
             const uint32_t gap = now_ms - j->gap_start_ms;
             j->in_gap = false;
             if (gap <= JR_JITTER_REPLY_GAP_MS) {
-                j->reply_holes++;
-                out->hole_booked = true;
                 out->hole_ms = gap;
+                if (gap >= JR_JITTER_HOLE_MIN_MS) {
+                    j->reply_holes++;
+                    out->hole_booked = true;
+                } else {
+                    out->hole_ignored = true;
+                }
             }
         }
     } else {

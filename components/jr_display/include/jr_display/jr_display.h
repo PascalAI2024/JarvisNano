@@ -83,6 +83,78 @@ typedef struct {
     jr_display_test_pattern_t test_pattern;
 } jr_display_snapshot_info_t;
 
+/* Milliseconds since this boot's esp_timer startup, not the external wake
+ * edge: ROM/startup latency is excluded. The first actual color-DMA callback
+ * marks one completed transfer, not optical first-light or a full frame.
+ * A false validity flag means the corresponding timestamp is unavailable.
+ * init_finished includes failed init attempts; init_state gives the outcome. */
+typedef struct {
+    uint32_t init_start_boot_ms;
+    uint32_t init_end_boot_ms;
+    uint32_t first_transfer_done_boot_ms;
+    bool init_started;
+    bool init_finished;
+    bool first_transfer_valid;
+    /* First completed valid-time Glance clock strip. Same boot-relative,
+     * non-optical time base; not a completed frame or external wake edge. */
+    uint32_t first_glance_time_transfer_done_boot_ms;
+    bool first_glance_time_transfer_valid;
+} jr_display_boot_timing_t;
+
+typedef enum {
+    JR_DISPLAY_REST_NONE = 0,
+    JR_DISPLAY_REST_DREAM,
+    JR_DISPLAY_REST_NIGHTSTAND,
+    JR_DISPLAY_REST_GLANCE,
+} jr_display_rest_mode_t;
+
+/* Main owns idle/lease/update/lifetime and local night policy. Renderer also
+ * refuses foreground work and an unplugged Nightstand. No brightness change. */
+void jr_display_rest_set(jr_display_rest_mode_t mode, bool usb_present, bool night);
+/* Publish at VAD edges and before phase presentation. Busy refuses stale Rest
+ * intent independently; idle LISTENING may accompany Nightstand/Glance. */
+void jr_display_rest_voice_busy_set(bool busy);
+void jr_display_panel_on_request(void);
+/* True only after latest recovery commands and a matching transfer complete. */
+bool jr_display_panel_is_on(void);
+
+/* Where the hud layer's compositing time goes. One timer read per strip per
+ * part (never per row); `jr_display_split_name()` gives each its JSON key, so
+ * /api/display?split=1 prints them with no lookup table on the reader's side. */
+typedef enum {
+    JR_DISPLAY_SPLIT_HUD_FRAME = 0,   /* the home HUD pieces: rim, privacy ring, comet, ripple */
+    JR_DISPLAY_SPLIT_HUD_SPACE,       /* apply_space_overlay: the shell's backdrop, screens, orbit */
+    JR_DISPLAY_SPLIT_HUD_CLOCK,       /* apply_clock_overlay: the watch */
+    JR_DISPLAY_SPLIT_HUD_OTA,         /* update ring and commit ring */
+    JR_DISPLAY_SPLIT_HUD_CAPTION,
+    JR_DISPLAY_SPLIT_HUD_ASK,         /* the ask presentation and its choices */
+    JR_DISPLAY_SPLIT_HUD_BLOOM,
+    JR_DISPLAY_SPLIT_SPACE_VEIL,      /* inside hud_space: face veil and fold to black */
+    JR_DISPLAY_SPLIT_SPACE_SCREEN,    /* the focal screens, their rings and their text */
+    JR_DISPLAY_SPLIT_SPACE_SHEET,     /* the detail sheet */
+    JR_DISPLAY_SPLIT_SPACE_SHADE,     /* the control shade */
+    JR_DISPLAY_SPLIT_SPACE_ORBIT,     /* the orbit rail, dots and mark */
+    JR_DISPLAY_SPLIT_CLOCK_CLEAR,     /* inside hud_clock: the dial disc clear */
+    JR_DISPLAY_SPLIT_CLOCK_FACE,      /* the hands, dial, markers */
+    JR_DISPLAY_SPLIT_CLOCK_CELLS,     /* the sun arc and the dial's text cells */
+    JR_DISPLAY_SPLIT_COUNT
+} jr_display_split_t;
+
+/* The JSON key of a split timer, or NULL out of range. */
+const char *jr_display_split_name(unsigned index);
+
+/* Time the next few seconds of frames into the split timers. They are off
+ * otherwise (a timer read per part per strip is not free); GET
+ * /api/display?split=1 arms them, so its first answer carries what the last
+ * request counted and the next one, seconds later, the window to subtract. */
+void jr_display_split_arm(void);
+
+/* The dev-only perf knob (perf_knob.h): a word of pixel-identical cost
+ * candidates, 0 the shipped path. Set from httpd, read once a frame by the
+ * render task. */
+void jr_display_set_perf_knob(uint32_t knob);
+uint32_t jr_display_perf_knob(void);
+
 typedef struct {
     jr_display_init_state_t init_state;
     esp_err_t last_error;
@@ -112,6 +184,27 @@ typedef struct {
     uint32_t render_us;
     uint32_t render_frames;
     uint32_t render_frame_us;
+    uint32_t layer_us[5];   /* dial, canvas, hud, shell, surface */
+    /* The split inside the hud layer (the clock, the shell's backdrop and
+     * screens, the home HUD pieces), wrapping microseconds in the order of
+     * jr_display_split_t. The "space_" parts are inside "hud_space" and the
+     * "clock_" parts inside "hud_clock": they overlap their parent by design. */
+    uint32_t split_us[JR_DISPLAY_SPLIT_COUNT];
+    /* The filtered in-plane light the watch hands are lit with (milli-g, screen
+     * axes) and the shadow offset it solved to (Q4 px; rest is 32, 48). */
+    int32_t light_gx_mg, light_gy_mg;
+    int32_t light_shadow_dx_q4, light_shadow_dy_q4;
+    /* The lean the dial last drew with (tilt.h, -256..256); 0,0 off CELESTIAL. */
+    int32_t tilt_x, tilt_y;
+    /* The panel dip (perf knob bit 0): the level now (0..256, 256 = none), the
+     * brightness writes it has caused, and the length of the last dark hold. */
+    uint32_t dip, dip_writes, dip_hold_ms;
+    /* The decoded-dial cache: frames decoded, bytes of PSRAM held, style
+     * changes served from it (hits) or decoded for (misses), frames dropped for
+     * room, background warm-ups done, and the last decode's milliseconds. */
+    uint32_t dial_cached, dial_bytes, dial_hits, dial_misses, dial_evictions;
+    uint32_t dial_warms, dial_decode_ms;
+    jr_display_boot_timing_t boot_timing;
 } jr_display_diag_t;
 
 /* Start the fail-soft presenter and return its nonblocking display port.
@@ -179,6 +272,26 @@ void jr_display_set_hud_env(uint8_t batt_pct, bool charging,
                             bool privacy_muted,
                             float roll_deg, float pitch_deg);
 
+/* The room's light on the watch hands: the UP vector projected into the glass
+ * plane, milli-g, SCREEN axes (x right, y down), clamped to +-1200. Any task,
+ * any cadence (one packed word); the render task filters and solves it once a
+ * frame. valid=false (no IMU) leaves the rest light. */
+void jr_display_set_light(int gx_mg, int gy_mg, bool valid);
+
+/* The tilt the dial leans by (tilt parallax, docs/reference/tilt-parallax.md).
+ * The composition root registers a source once; the render task calls it once
+ * a frame, and ONLY while CELESTIAL is the watch on a lit panel at the awake
+ * cadence, so no other screen ever reads it. The source returns the low-passed
+ * in-plane UP vector in milli-g, SCREEN axes (x right, y down), or false when
+ * the sensor has no answer; it must not block or touch a bus. NULL removes it. */
+typedef bool (*jr_display_tilt_fn_t)(int *x_mg, int *y_mg);
+void jr_display_set_tilt_source(jr_display_tilt_fn_t fn);
+
+/* Genuine idle DREAM intent. Local foreground/OTA guards still win. This
+ * publishes a packed bit; panel work remains on the presenter/render tasks.
+ * The composition root must disable this throughout OTA image probation. */
+void jr_display_dream_set(bool enabled);
+
 /* Enable/disable the procedural HUD overlay at runtime. Exists so the HUD's
  * true frame-rate cost can be A/B measured on the panel instead of estimated —
  * flip it and read actual_fps from /api/display. Enabled by default. */
@@ -219,11 +332,30 @@ bool jr_display_hud_enabled(void);
  * edges ease over ~250 ms render-side (band and text together); text swaps
  * while visible stay immediate — a live transcript must not lag its voice. */
 void jr_display_caption_set(const char *text);
+/* A caption that names where you are, not something being said: the name of a
+ * screen the swipe landed on, or the watch style just chosen. It is a LABEL:
+ * text with a soft halo and no plate behind it; when it replaces a label already
+ * up it crossfades at the midpoint of the slide (the old name eases out with its
+ * screen, the new one in with its own); it stays up for a short time after the
+ * transition has settled and then fades over ~250 ms by itself (nobody has to
+ * clear it); and like every caption it is not drawn while the control shade or
+ * the detail sheet holds the glass. SCREEN labels sit in the footer band; STYLE
+ * labels sit higher, clear of the six o'clock marks of every dial. */
+typedef enum {
+    JR_DISPLAY_LABEL_SCREEN = 0,
+    JR_DISPLAY_LABEL_WATCH_STYLE,
+} jr_display_label_kind_t;
+#define JR_DISPLAY_LABEL_SCREEN_HOLD_MS 600u    /* after the slide settles */
+#define JR_DISPLAY_LABEL_STYLE_HOLD_MS  1200u   /* after the style has changed */
+void jr_display_caption_label(const char *text, jr_display_label_kind_t kind);
 /* Pin a caption so no other writer can replace it until unpinned (the OTA
  * "DO NOT UNPLUG" instruction). set/clear are ignored while pinned. */
 void jr_display_caption_pin(const char *text);
 void jr_display_caption_unpin(void);
 bool jr_display_caption_pinned(void);
+/* Current published facts only: a pinned or active nonambient caption owns
+ * the foreground. Cleared captions and the fixed idle hints do not. */
+bool jr_display_caption_foreground(void);
 void jr_display_caption_clear(void);
 
 /* TRANS-05: transient tap ripple — an expanding, fading ring from panel
@@ -288,7 +420,11 @@ typedef enum {
     JR_WATCH_PILOT,        /* baked matte black; sword hands, three sub-dials */
     JR_WATCH_MINIMAL,      /* drawn warm-white dial; thin blued hands, no seconds */
     JR_WATCH_FUTURE,       /* baked tech dial; slim cyan hands, four data cells */
-    JR_WATCH_STYLE_COUNT
+    JR_WATCH_SKELETON,     /* baked open movement; rose-gold lume hands */
+    JR_WATCH_CELESTIAL,    /* baked star field; slim gold leaf hands */
+    JR_WATCH_STYLE_ORRERY = 8,  /* baked midnight planetarium; real ephemeris & moon phase */
+    JR_WATCH_STYLE_REACTOR = 9, /* baked titanium/copper core; 32-bar spectrum & 3D holo */
+    JR_WATCH_STYLE_COUNT = 10
 } jr_watch_style_t;
 
 /* The day for the dials that show one (DIVER's window, FUTURE's date cell).
@@ -327,6 +463,8 @@ bool jr_display_canvas_active(void);
  * device with the frame flush and racing it asserts in spi_device_release_bus.
  * No-op until the presenter is ready. */
 esp_err_t jr_display_set_brightness(uint8_t percent);
+/* Publishing before start also seeds the first submitted frame's brightness;
+ * the display owner applies it before gfx initialization. No caller panel IO. */
 
 /* Render cadence, 2..24 fps. Any task, any rate; unchanged values are free.
  * The engine draws every period regardless of change, so this is the knob
@@ -453,7 +591,7 @@ bool jr_display_panel_is_off(void);
 
 #define JR_DISPLAY_SAFE_R        168   /* readable content stays inside     */
 #define JR_DISPLAY_SHELL_R_MAX   214   /* hard clip; privacy ring is beyond */
-#define JR_DISPLAY_SPACE_MS      260   /* space-to-space slide, ease-in-out */
+#define JR_DISPLAY_SPACE_MS      400   /* a change of screen: 4 frames out, 6 in at 24 fps */
 #define JR_DISPLAY_SPACE_HOLD_MS 900   /* page indicator lingers this long  */
 
 typedef enum {
@@ -601,6 +739,11 @@ void jr_display_jarvis_set_session(bool linked, uint16_t turns,
 void jr_display_desk_set_task(const char *task, uint8_t progress,
                               jr_display_agent_state_t state);
 
+/* Live multi-step checklist for Cortex DESK space (lock-free).
+ * leds[i]: 0=off, 1=pass(green), 2=working(violet), 3=wait(amber), 4=fail(red).
+ * count == 0 reverts DESK rows to default STATE/DONE/LINK summary. */
+void jr_display_desk_set_steps(const char rows[3][20], const uint8_t leds[3], uint8_t count);
+
 /* jr_display_tools_set() is gone with the TOOLS screen; see ACTIVITY. */
 
 /* ---- firmware update, shell-wide ----------------------------------------
@@ -643,7 +786,7 @@ void jr_display_desk_set_task(const char *task, uint8_t progress,
  *      PREFLIGHT    dim cyan, empty track   checks running
  *      BLOCKED      amber, full             refused; nothing was written
  *      RECEIVING    cyan, percent           writing the target slot
- *      PROBATION    violet, full            new image up, not yet confirmed
+ *      PROBATION    mint, full              new image up, not yet confirmed
  *      VALID        (no ring)               confirmed good
  *      ROLLED_BACK  amber, full             reverted to the previous slot
  *      FAILED       red, full
@@ -682,6 +825,11 @@ void jr_display_ota_set(jr_display_ota_state_t state, uint8_t percent,
 void jr_display_power_set(uint8_t percent, uint16_t millivolts,
                           bool usb_present, bool charging);
 
+/* Live power/charging telemetry for Nightstand & Cortex STATUS (lock-free). */
+void jr_display_power_info_set(bool care_enabled, bool care_holding,
+                               int32_t eta_min, int16_t rate_pct_x10_hr,
+                               int8_t pmic_die_c);
+
 /* The device's connections, for STATUS: what the glass can be trusted to say
  * about the outside world. Any task, lock-free, no allocation: the IP lands
  * before the packed word that gates it. tools is 0 = no gateway key,
@@ -702,12 +850,95 @@ typedef struct {
 
 void jr_display_links_set(const jr_display_links_t *links);
 
-/* The control shade's volume readout: the real number, not a mood. Brightness
- * is not passed — the display already owns it and reads back its own target,
- * so the shade can never disagree with the panel. Link quality and free
+/* The control shade's readouts: the real volume, and the owner's brightness
+ * setting (the cap, 10..100). The panel's live level is the mood ladder's and
+ * dips on its own; the shade shows what the owner chose. 0 = not known, and
+ * the shade falls back to the panel's own target. Link quality and free
  * memory used to ride along for the SETTINGS gauges; with that screen gone
  * they are /api/cockpit's, not the glass's. */
-void jr_display_set_status(uint8_t volume);
+void jr_display_set_status(uint8_t volume, uint8_t brightness_cap);
+
+/* Fit a spoken line into an ACTIVITY row of cap-1 glyphs: whole if it fits,
+ * else its last complete sentence, else its last whole word and "...". Pure.
+ * Returns the length written. */
+size_t jr_display_activity_fit(char *dst, size_t cap, const char *src);
+
+/* N16.4: Countdown timer overlay. Lock-free, any-task safe. Draws an
+ * anti-aliased sweep arc at r202-206 (cyan while running, pulsing amber under
+ * 60 s, pulsing amber/cyan when ringing — never gold) plus a haloed MM:SS
+ * readout. active=false clears immediately. */
+void jr_display_timer_set(bool active, bool ringing, uint16_t rem_s,
+                          uint8_t pct_left, const char *label);
+bool jr_display_timer_active(void);
+
+/* Glass-2: Transient rim level arc at r223-231 (left rim cyan for volume,
+ * right rim amber for brightness). Self-expires in 1200 ms with a smooth
+ * 200 ms fade. Never overwrites the r221-222 privacy ring. Lock-free. */
+void jr_display_rim_level_show(bool is_brightness, uint8_t pct);
+
+/* Wave 2: Chronograph stopwatch overlay. Lock-free, any-task safe. Draws an
+ * electric-cyan sweeping chronograph seconds arc at r202-206 plus a bottom
+ * haloed MM:SS.d chip (and L1..L4 badge when lap_count > 0). */
+void jr_display_stopwatch_set(bool active, bool running, uint32_t elapsed_ms, uint8_t lap_count);
+
+/* Wave 2: CO5300 High-Brightness Mode (HBM 0x66) sunlight boost. Lock-free;
+ * applied exclusively on the gfx_render task inside panel_flush(). */
+void jr_display_set_hbm(bool enabled);
+bool jr_display_get_hbm(void);
+
+/* Wave 2: 60 Hz LCD_TE (GPIO13) tear-free flush statistics (lock-free). */
+void jr_display_get_te_stats(bool *enabled, uint32_t *waits, uint32_t *timeouts);
+
+/* Wave 4: Showpiece graphics engine — live 16-band audio spectrum, astronomical
+ * calendar date (YYYY-MM-DD) for WATCH:ORRERY, and 3D Geodesic Hologram toggle.
+ * All four functions are lock-free and safe to call from any task. */
+void jr_display_spectrum_set(const uint8_t bands[16]);
+void jr_display_date_set_ymd(uint16_t year, uint8_t month, uint8_t day);
+void jr_display_holo_set(bool enabled);
+bool jr_display_holo_get(void);
+
+/* Glass 3.0: Unified circular OLED ring & screen language.
+ * AUTO (hardware default): Chrono-Arc Home + Aetherium Voice + Atmosphaera
+ * Weather + Cortex Command Status/Desk + Rotary Bezel Scrub overlay.
+ * CLASSIC preserves the exact Glass-2 pixel-identity path. Lock-free. */
+typedef enum {
+    JR_GLASS3_AUTO = 0,
+    JR_GLASS3_CHRONO = 1,
+    JR_GLASS3_AETHERIUM = 2,
+    JR_GLASS3_CLASSIC = 3,
+} jr_glass3_mode_t;
+
+void jr_display_glass3_set(jr_glass3_mode_t mode);
+jr_glass3_mode_t jr_display_glass3_get(void);
+const char *jr_display_glass3_name(jr_glass3_mode_t mode);
+
+/* Glass 3.5: Procedural Cold-Boot Ignition splash (0 SPIFFS, lock-free).
+ * stage: 0=CORE, 1=AUDIO, 2=WIFI, 3=READY; progress_pct: 0..100.
+ * Transitioning active true->false runs a smooth 450 ms alpha crossfade. */
+void jr_display_boot_ignition_set(bool active, uint8_t stage, uint8_t progress_pct);
+bool jr_display_boot_ignition_active(void);
+
+/* Glass 3.5: Unified Desk Mode overlay (mode: 0=NORMAL, 1=ON_AIR, 2=FOCUS, 3=BREATHE).
+ * Lock-free, any-task safe. */
+void jr_display_desk_mode_set(uint8_t mode, uint32_t rem_s, uint8_t pct,
+                              uint8_t breathe_phase, uint8_t breathe_sec,
+                              uint8_t sessions_done, uint8_t sessions_total,
+                              bool warn_pulse, const char *label);
+bool jr_display_desk_mode_active(void);
+
+/* Glass 3.5: Tactile On-Glass Desk Inbox (displayed cleanly in ACTIVITY space). */
+#define JR_DISPLAY_INBOX_MAX 3U
+typedef struct {
+    uint32_t id;
+    bool     done;
+    uint8_t  tag;        /* 0=LIFE, 1=WORK */
+    char     text[36];
+} jr_display_inbox_item_t;
+
+void jr_display_inbox_set(const jr_display_inbox_item_t *items, size_t count, size_t open_count);
+/* Returns tapped note id (non-zero) when ACTIVITY space is settled and (x,y)
+ * hits one of the visible inbox rows, else 0. */
+uint32_t jr_display_inbox_hit(uint16_t x, uint16_t y);
 
 #ifdef __cplusplus
 }

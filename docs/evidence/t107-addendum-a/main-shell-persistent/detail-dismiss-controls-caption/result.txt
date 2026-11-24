@@ -1,0 +1,6 @@
+FAIL check_panel_caption:73: WATCH dismissal must clear the caption
+FAIL check_panel_caption:76: panel 2 dismissal names panel, got CONTROLS - UP TO CLOSE
+FAIL check_panel_caption:76: panel 3 dismissal names panel, got CONTROLS - UP TO CLOSE
+FAIL check_panel_caption:76: panel 4 dismissal names panel, got CONTROLS - UP TO CLOSE
+FAIL check_panel_caption:76: panel 5 dismissal names panel, got CONTROLS - UP TO CLOSE
+5 failure(s) of 109 checks

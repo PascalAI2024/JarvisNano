@@ -1,0 +1,91 @@
+{
+  "status": "BLOCKED",
+  "authenticated_requests": [
+    {
+      "name": "health",
+      "utc": "2026-10-12T00:10:37.419535+00:00",
+      "elapsed_s": 8.047000000020489,
+      "ok": false,
+      "error": "URLError",
+      "detail": "<urlopen error timed out>"
+    },
+    {
+      "name": "cockpit",
+      "utc": "2026-10-12T00:10:45.463017+00:00",
+      "elapsed_s": 8.014999999955762,
+      "ok": false,
+      "error": "URLError",
+      "detail": "<urlopen error timed out>"
+    },
+    {
+      "name": "sleep",
+      "utc": "2026-10-12T00:10:53.481143+00:00",
+      "elapsed_s": 8.03200000000652,
+      "ok": false,
+      "error": "URLError",
+      "detail": "<urlopen error timed out>"
+    }
+  ],
+  "ping": {
+    "observation": "orchestrator-reported",
+    "utc": "2026-10-12T00:09Z",
+    "replies": "2/2",
+    "independently_verified": false
+  },
+  "fresh_uptime_ms": null,
+  "fresh_wake_reason": null,
+  "fresh_ota_state": null,
+  "fresh_privacy": null,
+  "source_checks": [
+    {
+      "path": "main/power.c",
+      "unchanged": true,
+      "sha256": "0134ce402186b8755930169fd4c5a50b969d2226acd2ea84424e82bd902b49b6"
+    },
+    {
+      "path": "main/http_routes.c",
+      "unchanged": true,
+      "sha256": "8dccaad91cbae3b1f3910ca781888b395a374250662a03b3bd20197b00f48cd1"
+    },
+    {
+      "path": "components/jr_audio/src/jr_audio.c",
+      "unchanged": true,
+      "sha256": "2e43241afb697366ae6a40377240eb51c28e07e869a32c1dc5235fe0c06ba875"
+    },
+    {
+      "path": "components/jr_dsp/src/audio_power.c",
+      "unchanged": true,
+      "sha256": "ff1571b60bf3ffb0d382a1c2a10fa146205cdae60c370cd9416031643a6488e4"
+    },
+    {
+      "path": "components/jr_net/src/jr_net.c",
+      "unchanged": true,
+      "sha256": "3c725ed174b307a2a48e7a53e1fd217750a1f2ba7693b6e7717e1468b9e3f316"
+    },
+    {
+      "path": "sdkconfig.defaults",
+      "unchanged": true,
+      "sha256": "5c622528aee694608bea421daa0ba63da3f3b83f859e72efff9548b850c306c0"
+    }
+  ],
+  "wake_assessment": "Observed acceptance regression relative to successful baseline; timer/boot/API cause and firmware causality unproven. Possible regression.",
+  "drain_assessment": "Idle fit 3.41x and WATCH fit 1.92x higher. Different SoC and baseline rebound are observed confounds, not a proven cause; possible battery regression.",
+  "device_writes": 0,
+  "unmute_attempts": 0,
+  "usb_flashes": 0,
+  "unchanged_display_functions": [
+    {
+      "name": "dream_clock_text",
+      "sha256": "f538d462a5d644d8174fe28117dc1034d052674e9f6edf5a3478147a3e61a99a"
+    },
+    {
+      "name": "apply_dream_overlay",
+      "sha256": "8198f6d72ec06c6cd02812ce34e45702a1be0f12acbcc87da17d2f8597b22f9f"
+    },
+    {
+      "name": "jr_display_start",
+      "sha256": "7c880a3cc39c08296ed8011fdfa94dedc996fecad584f298f7e6398e231221f1"
+    }
+  ],
+  "changed_dream_path": "presenter_dream_tick now commits minute/rim keys only on successful presenter_refresh; failed locks retry. No direct timer, Wi-Fi or wake-state write."
+}

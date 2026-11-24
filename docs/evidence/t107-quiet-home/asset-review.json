@@ -1,0 +1,157 @@
+{
+  "freeze_matches_before_and_after": true,
+  "frozen_sha256": {
+    "components/jr_display/src/jr_display.c": "5b9d54bd530dd3ac91a59bc038076f8f104ef72ffb2199c599511c9833de4010",
+    "components/jr_display/tests/probe/stubs/idf_stubs.inc": "5dad7d7de648f6e232e12d112c2eff8be870b1732c4ed801e60a2d24341f97aa",
+    "components/jr_display/tests/test_shell.c": "c8f5e3fc2777691041b45c6b2770991d06462eddce79c412e8825ef7c5ee1738",
+    "components/jr_display/tests/CMakeLists.txt": "5ed5ad959a04bfc3148c640a2faf5688ebd9545c409bba4159a1449fa3f1afe8",
+    "components/jr_display/tests/test_quiet_vendor.py": "077c5305f688fec47db3ea36b30cc4524ebd2403f326f52ad7cc3eba42d0cd09",
+    "components/jr_display/tests/fixtures/gfx_anim_playback_3_0_2.c": "82227e7d8e65bf7f50e0ae23b86e6dc0cf6d322bfb65626cf8e360e6979bbb5c",
+    "components/jr_display/tests/fixtures/LICENSE.esp_emote_gfx": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "scripts/patch-v5-managed.py": "9c9e7d9fb55b6e695aff2494c5e7a9041c7ba7f1a0d1fa7330d4085f6fb7a7b4"
+  },
+  "vendor_sha256": {
+    "managed_components/espressif2022__esp_emote_gfx/src/widget/gfx_anim.c": "3d021df92a439379e1b3421fe3db6d809a367a361ebbbf0174d3974d1876f034",
+    "managed_components/espressif2022__esp_emote_gfx/src/core/gfx_render.c": "02ce4ab7281279bcd203b962578e7d6914adffbb4563669b7f0dc553fb8fb460",
+    "managed_components/espressif2022__esp_emote_gfx/src/core/gfx_core.c": "2268b2642f46a78031dea9ff66fded9c12e485ec7c823ad8994d93f38ed83e19",
+    "managed_components/espressif2022__esp_emote_gfx/src/core/gfx_obj.c": "62c5c7401d0f4abdea8600ab8b26786c17171595f0b899c3faa6dff8473012a8"
+  },
+  "shell": {
+    "command": [
+      "docker",
+      "run",
+      "--rm",
+      "--network",
+      "none",
+      "--read-only",
+      "--tmpfs",
+      "/tmp:exec",
+      "-v",
+      "<checkout>:/src:ro",
+      "-w",
+      "/src",
+      "jarvisnano-hosttests",
+      "sh",
+      "-c",
+      "cmake -S components/jr_display/tests -B /tmp/quiet-review-build >/tmp/configure.log && cmake --build /tmp/quiet-review-build --target jr_display_shell_tests >/tmp/build.log && /tmp/quiet-review-build/jr_display_shell_tests >/tmp/shell.log && tail -n 1 /tmp/shell.log"
+    ],
+    "returncode": 0,
+    "stdout": "all shell tests passed (3563 checks)\n",
+    "stderr": "",
+    "checks": 3563
+  },
+  "assets": [
+    {
+      "path": "firmware\\mascot\\eaf\\happy.eaf",
+      "table_entries": 2,
+      "drawable_frames": 1,
+      "terminal_format": "_C",
+      "sha256": "1fa49a0c050fdf0f5c0bb970fec45fc7093447ff191d032e8fa312ba5af99b60"
+    },
+    {
+      "path": "firmware\\mascot\\eaf\\listen.eaf",
+      "table_entries": 2,
+      "drawable_frames": 1,
+      "terminal_format": "_C",
+      "sha256": "f161e7a555d5465c1fc71036ea267c66971e18e9c2320b95c164ec64080360bb"
+    },
+    {
+      "path": "firmware\\mascot\\eaf\\neutral.eaf",
+      "table_entries": 2,
+      "drawable_frames": 1,
+      "terminal_format": "_C",
+      "sha256": "f2f5989bede288bc374e799fd2cac7158d421926850568f4770663181269a3db"
+    },
+    {
+      "path": "firmware\\mascot\\eaf\\offline.eaf",
+      "table_entries": 2,
+      "drawable_frames": 1,
+      "terminal_format": "_C",
+      "sha256": "394bb085668410d154d0f6f9a31a1c6832b6b371a4179834c0092b8a8254a23c"
+    },
+    {
+      "path": "firmware\\mascot\\eaf\\thinking.eaf",
+      "table_entries": 2,
+      "drawable_frames": 1,
+      "terminal_format": "_C",
+      "sha256": "8c5d0444d9bc7a48fd22ec995e4c14dbd049d12303ef0f1ea0651e13e3733c37"
+    },
+    {
+      "path": "firmware\\mascot\\reactive\\dial_diver.eaf",
+      "table_entries": 2,
+      "drawable_frames": 1,
+      "terminal_format": "_C",
+      "sha256": "91eeb12e959efcca00473d4c366c5f02874c61e37b19f32109ec0c783c9de452"
+    },
+    {
+      "path": "firmware\\mascot\\reactive\\dial_dress.eaf",
+      "table_entries": 2,
+      "drawable_frames": 1,
+      "terminal_format": "_C",
+      "sha256": "1d8a69963c1adba5f4c8cc376c6ae088854a5ade16d937d2d2191e6c0252045a"
+    },
+    {
+      "path": "firmware\\mascot\\reactive\\dial_future.eaf",
+      "table_entries": 2,
+      "drawable_frames": 1,
+      "terminal_format": "_C",
+      "sha256": "73c77c41f865675f08f94d84af305704afe50e3baf2d2585384804633be88e59"
+    },
+    {
+      "path": "firmware\\mascot\\reactive\\dial_pilot.eaf",
+      "table_entries": 2,
+      "drawable_frames": 1,
+      "terminal_format": "_C",
+      "sha256": "6be00251b8134964d034f0a47bb154d73951def3a94e28d4b42fc12f9831da02"
+    },
+    {
+      "path": "firmware\\mascot\\reactive\\rwave_idle.eaf",
+      "table_entries": 31,
+      "drawable_frames": 30,
+      "terminal_format": "_C",
+      "sha256": "411385342bf333c448b5b7115c1db49ee4eb04700250bdb61ec917d72a3fe1bf"
+    },
+    {
+      "path": "firmware\\mascot\\reactive\\rwave_link.eaf",
+      "table_entries": 25,
+      "drawable_frames": 24,
+      "terminal_format": "_C",
+      "sha256": "283ce6a979ae266bbf77bd115f61796ad01cb34ceb569ede4c0589186bbc5f3a"
+    },
+    {
+      "path": "firmware\\mascot\\reactive\\rwave_listen.eaf",
+      "table_entries": 23,
+      "drawable_frames": 22,
+      "terminal_format": "_C",
+      "sha256": "d2c3b70742d47148b07a3bc4c6f8e95998edb20e2947dcd97976c68902bf9bf3"
+    },
+    {
+      "path": "firmware\\mascot\\reactive\\rwave_muted.eaf",
+      "table_entries": 17,
+      "drawable_frames": 16,
+      "terminal_format": "_C",
+      "sha256": "5aeeb1e4baf4717f1df940f3bd555668d06a2cdf56f407030e934230609fb1e8"
+    },
+    {
+      "path": "firmware\\mascot\\reactive\\rwave_rest.eaf",
+      "table_entries": 25,
+      "drawable_frames": 24,
+      "terminal_format": "_C",
+      "sha256": "b8651d2a74f0a505215af664c205f8476ebadb89ce25bc849664794d5834e71d"
+    },
+    {
+      "path": "firmware\\mascot\\reactive\\rwave_speak.eaf",
+      "table_entries": 23,
+      "drawable_frames": 22,
+      "terminal_format": "_C",
+      "sha256": "811eddb3ecaf20f50affba33f1a81d0497d8aeaa2364d637d79743b2fde10e34"
+    },
+    {
+      "path": "firmware\\mascot\\reactive\\rwave_think.eaf",
+      "table_entries": 33,
+      "drawable_frames": 32,
+      "terminal_format": "_C",
+      "sha256": "e8cd2474a6c25587feb9cd246ba4b44e83ab24efa980a0d405f0fdce5421bb1d"
+    }
+  ]
+}

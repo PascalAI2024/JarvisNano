@@ -1,0 +1,207 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdatomic.h>
+#include <string.h>
+#include <time.h>
+#include "jr_display/companion.h"
+#include "jr_core/mood.h"
+#include "jr_core/session.h"
+#define ESP_OK 0
+#define SLEEP_RTC_MAGIC 0x534C5031u
+#define GLANCE_MS 8000u
+enum { ESP_SLEEP_WAKEUP_UNDEFINED, ESP_SLEEP_WAKEUP_EXT0,
+       ESP_SLEEP_WAKEUP_EXT1, ESP_SLEEP_WAKEUP_TIMER };
+enum { JR_DISPLAY_OVERLAY_NONE, JR_DISPLAY_OVERLAY_SHADE };
+enum { JR_DISPLAY_SPACE_JARVIS, JR_DISPLAY_SPACE_WATCH, JR_DISPLAY_SPACE_WEATHER };
+typedef enum { JR_DISPLAY_REST_NONE, JR_DISPLAY_REST_DREAM,
+               JR_DISPLAY_REST_NIGHTSTAND, JR_DISPLAY_REST_GLANCE } jr_display_rest_mode_t;
+typedef struct {
+    uint32_t sample_seq, age_ms;
+    uint16_t millivolts;
+    uint8_t percent;
+    bool charging, usb_present;
+} jr_power_t;
+static _Atomic bool s_voice_privacy_paused, s_ota_active;
+static uint32_t s_companion_activity_ms, s_glance_until_ms, s_rtc_sleep_magic;
+static int s_boot_wake_cause, wake_cause;
+static uint8_t s_brightness_cap;
+static bool lease, probation, choices, pinned, canvas, surface, valid_time, caption_foreground;
+static int overlay, space, hour, minute, power_error;
+static uint32_t now_ms;
+static jr_power_t power;
+static jr_display_rest_mode_t mode;
+static bool requested_usb, requested_night, env_privacy, clock_valid;
+static bool voice_busy;
+static uint8_t env_percent, power_percent;
+static int clock_hour, clock_minute, clock_calls, date_calls;
+static unsigned checks, failures;
+#define CHECK(x) do { ++checks; if (!(x)) { ++failures; \
+    fprintf(stderr, "line %d: %s\n", __LINE__, #x); } } while (0)
+static bool operator_lease_active(uint32_t now) { (void)now; return lease; }
+static bool image_in_probation(void) { return probation; }
+static void jr_display_rest_voice_busy_set(bool busy) { voice_busy = busy; }
+static int jr_display_nav_overlay(void) { return overlay; }
+static int jr_display_nav_space(void) { return space; }
+static bool jr_display_choices_active(void) { return choices; }
+static bool jr_display_caption_pinned(void) { return pinned; }
+static bool jr_display_caption_foreground(void) { return caption_foreground; }
+static bool jr_display_canvas_active(void) { return canvas; }
+static bool jr_display_surface_is_active(void) { return surface; }
+static bool device_wall_time(struct tm *out) {
+    memset(out, 0, sizeof *out); out->tm_hour = hour; out->tm_min = minute;
+    return valid_time;
+}
+static void jr_display_rest_set(jr_display_rest_mode_t m, bool u, bool n) {
+    mode = m; requested_usb = u; requested_night = n;
+}
+static int64_t esp_timer_get_time(void) { return (int64_t)now_ms * 1000; }
+static int esp_sleep_get_wakeup_cause(void) { return wake_cause; }
+static int jr_power_read(jr_power_t *out) { *out = power; return power_error; }
+static void jr_display_set_hud_env(uint8_t pct, bool charging, bool privacy,
+                                   float roll, float pitch) {
+    (void)charging; (void)roll; (void)pitch; env_percent = pct; env_privacy = privacy;
+}
+static void jr_display_power_set(uint8_t pct, uint16_t mv, bool usb, bool charging) {
+    (void)mv; (void)usb; (void)charging; power_percent = pct;
+}
+static void jr_display_clock_set(bool valid, int h, int m, int s) {
+    (void)s; clock_valid = valid; clock_hour = h; clock_minute = m; ++clock_calls;
+}
+static void jr_display_clock_set_date(int weekday, int day, int month) {
+    (void)weekday; (void)day; (void)month; ++date_calls;
+}
+__PRODUCTION_HELPERS__
+static void reset(void) {
+    s_voice_privacy_paused = true; s_ota_active = false;
+    s_companion_activity_ms = 100; s_glance_until_ms = 0;
+    s_rtc_sleep_magic = SLEEP_RTC_MAGIC; wake_cause = ESP_SLEEP_WAKEUP_UNDEFINED;
+    s_brightness_cap = 65; lease = probation = choices = pinned = canvas = surface = false;
+    caption_foreground = false;
+    overlay = JR_DISPLAY_OVERLAY_NONE; space = JR_DISPLAY_SPACE_JARVIS;
+    valid_time = true; hour = 12; minute = 34; now_ms = 100; power_error = 0;
+    power = (jr_power_t){.sample_seq=7, .age_ms=100, .percent=60, .millivolts=3910,
+                        .usb_present=true};
+    mode = JR_DISPLAY_REST_NONE; env_privacy = false; clock_valid = false;
+    clock_calls = date_calls = 0;
+}
+int main(void) {
+    for (unsigned muted = 0; muted < 2; ++muted) {
+        reset(); s_voice_privacy_paused = muted;
+        s_glance_until_ms = 8000; mode = JR_DISPLAY_REST_GLANCE;
+        voice_busy = true;
+        companion_attention(2222);
+        CHECK(s_glance_until_ms == 0 && s_companion_activity_ms == 2222);
+        CHECK(mode == JR_DISPLAY_REST_NONE && s_voice_privacy_paused == (bool)muted);
+        CHECK(voice_busy); /* attention does not clear actual speech truth */
+    }
+    for (int phase = -1; phase <= JR_ST__COUNT; ++phase) {
+        for (int speech = 0; speech < 2; ++speech) {
+            const bool busy = companion_phase_busy((jr_state_t)phase, speech);
+            CHECK(busy == (phase != JR_ST_IDLE &&
+                          (phase != JR_ST_LISTENING || speech)));
+            reset();
+            CHECK(companion_update(30000, JR_MOOD_AWAKE, false, busy,
+                                   &power, NULL) == !busy);
+            CHECK(voice_busy == busy);
+        }
+    }
+    for (unsigned quiet = 0; quiet < 2; ++quiet) {
+        for (unsigned flags = 0; flags < 256; ++flags) {
+            reset(); s_voice_privacy_paused = quiet;
+            lease = !!(flags & 1); s_ota_active = !!(flags & 2);
+            probation = !!(flags & 4); choices = !!(flags & 8);
+            pinned = !!(flags & 16); canvas = !!(flags & 32);
+            surface = !!(flags & 64); overlay = flags & 128;
+            uint8_t brightness = 65;
+            bool visible = companion_update(30000, JR_MOOD_AWAKE, false, false,
+                                             &power, &brightness);
+            CHECK(visible == (flags == 0));
+            CHECK(mode == (flags ? JR_DISPLAY_REST_NONE : JR_DISPLAY_REST_NIGHTSTAND));
+            CHECK(s_voice_privacy_paused == (bool)quiet);
+            CHECK(!voice_busy);
+            CHECK(!flags ? brightness == 14 : brightness == 65);
+        }
+        reset(); s_voice_privacy_paused = quiet;
+        uint32_t wait = quiet ? 5000 : 20000;
+        CHECK(!companion_update(100+wait-1, JR_MOOD_AWAKE, false, false, &power, NULL));
+        CHECK(companion_update(100+wait, JR_MOOD_AWAKE, false, false, &power, NULL));
+        CHECK(!companion_update(40000, JR_MOOD_AWAKE, true, false, &power, NULL));
+        CHECK(!companion_update(40000+wait-1, JR_MOOD_AWAKE, false, false, &power, NULL));
+        CHECK(companion_update(40000+wait, JR_MOOD_AWAKE, false, false, &power, NULL));
+    }
+    for (int h = 0; h < 24; ++h) {
+        reset(); hour = h; uint8_t b = 65;
+        CHECK(companion_update(30000, JR_MOOD_AWAKE, false, false, &power, &b));
+        CHECK(requested_night == (h < 7 || h >= 22));
+        CHECK(b == ((h < 7 || h >= 22) ? 5 : 14));
+    }
+    for (int invalid = 0; invalid < 3; ++invalid) {
+        reset(); if (invalid == 0) power.age_ms = 2001;
+        if (invalid == 1) power.sample_seq = 0;
+        if (invalid == 2) power.usb_present = false;
+        CHECK(!companion_update(30000, JR_MOOD_AWAKE, false, false, &power, NULL));
+    }
+    reset(); power.age_ms = 2000;
+    CHECK(companion_update(30000, JR_MOOD_AWAKE, false, false, &power, NULL));
+    reset(); valid_time = false; uint8_t b = 65;
+    CHECK(companion_update(30000, JR_MOOD_AWAKE, false, false, &power, &b));
+    CHECK(!requested_night && b == 14);
+    reset(); space = JR_DISPLAY_SPACE_WEATHER;
+    CHECK(!companion_update(30000, JR_MOOD_AWAKE, false, false, &power, NULL));
+    reset(); caption_foreground = true; hour = 23; b = 65;
+    CHECK(!companion_update(30000, JR_MOOD_AWAKE, false, false, &power, &b));
+    CHECK(mode == JR_DISPLAY_REST_NONE && b == 65);
+    reset(); space = JR_DISPLAY_SPACE_WATCH;
+    CHECK(companion_update(30000, JR_MOOD_AWAKE, false, false, &power, NULL));
+    reset(); power.usb_present = false;
+    CHECK(companion_update(30000, JR_MOOD_DREAM, false, false, &power, NULL));
+    CHECK(mode == JR_DISPLAY_REST_DREAM);
+    reset(); s_companion_activity_ms = UINT32_MAX - 2000;
+    CHECK(companion_update(2999, JR_MOOD_AWAKE, false, false, &power, NULL));
+    reset(); power.usb_present = false; s_glance_until_ms = 8000;
+    CHECK(companion_update(7999, JR_MOOD_AWAKE, true, false, &power, NULL));
+    CHECK(mode == JR_DISPLAY_REST_GLANCE);
+    CHECK(!companion_update(8000, JR_MOOD_AWAKE, false, false, &power, NULL));
+    CHECK(s_glance_until_ms == 0);
+    reset(); power.usb_present = false; s_glance_until_ms = 3000;
+    CHECK(companion_update(UINT32_MAX-100, JR_MOOD_AWAKE, false, false, &power, NULL));
+    CHECK(!companion_update(3000, JR_MOOD_AWAKE, false, false, &power, NULL));
+    /* Foreground/lease/probation/speech cancels an already visible Glance. */
+    for (unsigned flag = 0; flag < 9; ++flag) {
+        reset(); power.usb_present = false; s_glance_until_ms = 8000;
+        lease = flag == 0; s_ota_active = flag == 1; probation = flag == 2;
+        choices = flag == 3; pinned = flag == 4; canvas = flag == 5;
+        surface = flag == 6; overlay = flag == 7;
+        CHECK(!companion_update(2000, JR_MOOD_AWAKE, false, flag == 8,
+                                &power, NULL));
+        CHECK(mode == JR_DISPLAY_REST_NONE && s_glance_until_ms == 0);
+        CHECK(s_companion_activity_ms == 2000 && s_voice_privacy_paused);
+        CHECK(voice_busy == (flag == 8));
+    }
+    for (int cause = 0; cause < 4; ++cause) {
+        for (int magic = 0; magic < 2; ++magic) {
+            for (int valid = 0; valid < 2; ++valid) {
+                reset(); wake_cause = cause; valid_time = valid;
+                if (!magic) s_rtc_sleep_magic = 0;
+                companion_boot_seed();
+                CHECK(s_boot_wake_cause == cause);
+                CHECK((mode == JR_DISPLAY_REST_GLANCE) ==
+                      (magic && (cause == 1 || cause == 2)));
+                CHECK(s_voice_privacy_paused && env_privacy);
+                CHECK(env_percent == 60 && power_percent == 60);
+                CHECK(clock_calls == 1 && clock_valid == (bool)valid);
+                CHECK(clock_hour == (valid ? 12 : 0) && clock_minute == (valid ? 34 : 0));
+                CHECK(date_calls == valid);
+            }
+        }
+    }
+    reset(); power_error = -1; wake_cause = ESP_SLEEP_WAKEUP_EXT0;
+    companion_boot_seed(); CHECK(env_percent == UINT8_MAX && power_percent == UINT8_MAX);
+    CHECK(mode == JR_DISPLAY_REST_GLANCE && !requested_usb);
+    reset(); probation = true; wake_cause = ESP_SLEEP_WAKEUP_EXT0;
+    companion_boot_seed(); CHECK(mode == JR_DISPLAY_REST_NONE && s_glance_until_ms == 0);
+    printf("companion main tests passed (%u checks, %u failures)\n", checks, failures);
+    return failures ? 1 : 0;
+}

@@ -10,6 +10,11 @@
  * handlers use stay static here.
  */
 #include "app.h"
+#include "jr_dsp/audio_power.h"
+#include "jr_probe/gpio_probe.h"
+#include "esp_core_dump.h"
+#include "esp_partition.h"
+#include "esp_system.h"
 
 /* THE FPS FLOOR FOLLOWS THE CADENCE. Health and probation both ask for a
  * live frame rate, but since 2026-09-02 the ladder deliberately renders at
@@ -21,7 +26,10 @@
 static unsigned display_fps_floor(unsigned live_floor)
 {
     const unsigned requested = jr_display_render_fps();
-    return requested < live_floor ? 2U : live_floor;
+    if (requested < live_floor) {
+        return requested <= 2U ? 1U : 2U;
+    }
+    return live_floor;
 }
 
 static const char *TAG = "jarvis_v5";
@@ -57,6 +65,25 @@ static const char *operator_owner_name(operator_mode_owner_t owner)
     }
 }
 
+static const char *net_ps_level_name(jr_net_ps_level_t ps)
+{
+    switch (ps) {
+    case JR_NET_PS_MAX:  return "max";
+    case JR_NET_PS_MIN:  return "min";
+    case JR_NET_PS_NONE:
+    default:             return "none";
+    }
+}
+
+static void http_note_activity(void)
+{
+    uint32_t ms = (uint32_t)(esp_timer_get_time() / 1000);
+    if (ms == 0U) {
+        ms = 1U;
+    }
+    atomic_store(&s_http_last_activity_ms, ms);
+}
+
 static bool zerochat_operator_active(uint32_t now_ms)
 {
     return operator_mode_active(now_ms) &&
@@ -86,7 +113,7 @@ static esp_err_t diag_get_handler(httpd_req_t *req)
     unsigned stack_hwm = s_voice_task ?
         (unsigned)uxTaskGetStackHighWaterMark(s_voice_task) : 0;
     bool tools_ready = atomic_load(&s_tool_diag.worker_ready);
-    bool tools_configured = tools_ready && jr_tools_is_configured();
+    bool tools_configured = tools_ready && device_gateway_usable();
     /* Transcript tail, defanged for direct embedding: quotes, backslashes and
      * control bytes become spaces. Lossy on purpose — this is a diag peek, not
      * a transcript API. */
@@ -177,7 +204,7 @@ static esp_err_t diag_get_handler(httpd_req_t *req)
         said_safe,
         tools_ready ? "true" : "false",
         tools_configured ? "true" : "false",
-        (unsigned)DEVICE_TOOL_DECL_COUNT,
+        (unsigned)device_declared_tools(),
         device_tool_last_name(),
         device_tool_last_status(),
         atomic_load(&s_tool_diag.last_http_status),
@@ -211,6 +238,7 @@ static esp_err_t diag_get_handler(httpd_req_t *req)
 
 static esp_err_t dashboard_handler(httpd_req_t *req)
 {
+    http_note_activity();
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
     httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
@@ -239,6 +267,15 @@ static bool query_int(httpd_req_t *req, const char *key, int *out)
     }
     *out = atoi(v);
     return true;
+}
+
+static bool query_str(httpd_req_t *req, const char *key, char *out, size_t cap)
+{
+    char q[256];
+    if (httpd_req_get_url_query_str(req, q, sizeof q) != ESP_OK) {
+        return false;
+    }
+    return httpd_query_key_value(q, key, out, cap) == ESP_OK && out[0] != '\0';
 }
 
 static int hex_nibble(char c)
@@ -349,13 +386,491 @@ static esp_err_t say_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* POST /api/debug/timer — bench control for the on-device timer bank.
+ * Supports ?sec=N[&label=...][&silent=1] | ?focus=25[&label=...][&silent=1] |
+ * ?cancel=1[&label=...] | ?dismiss=1.
+ * Marshals onto voice_task via s_timer_mux + s_debug_timer_req; never touches
+ * privacy or operator lease. */
+static esp_err_t debug_timer_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    int sec = -1;
+    int focus_min = -1;
+    int cancel = 0;
+    int dismiss = 0;
+    int silent_v = 0;
+    const bool have_sec = query_int(req, "sec", &sec);
+    const bool have_focus = query_int(req, "focus", &focus_min);
+    const bool have_cancel = query_int(req, "cancel", &cancel) && cancel != 0;
+    const bool have_dismiss = query_int(req, "dismiss", &dismiss) && dismiss != 0;
+    const bool silent = query_int(req, "silent", &silent_v) && silent_v != 0;
+
+    char label[JR_TIMER_LABEL_CAP] = {0};
+    char q[160] = {0};
+    if (httpd_req_get_url_query_str(req, q, sizeof q) == ESP_OK) {
+        char raw[48] = {0};
+        if (httpd_query_key_value(q, "label", raw, sizeof raw) == ESP_OK &&
+            url_decode_in_place(raw)) {
+            strlcpy(label, raw, sizeof label);
+        }
+    }
+
+    timer_debug_req_t dreq = {0};
+    const char *action = NULL;
+    if (have_dismiss) {
+        dreq.kind = TIMER_REQ_DISMISS;
+        action = "dismiss";
+    } else if (have_cancel) {
+        dreq.kind = TIMER_REQ_CANCEL;
+        strlcpy(dreq.label, label[0] != '\0' ? label : "all", sizeof dreq.label);
+        action = "cancel";
+    } else if (have_focus) {
+        if (focus_min == 0) {
+            focus_min = 25;
+        }
+        if (focus_min < 1 || focus_min > 720) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "focus must be 1..720 minutes");
+            return ESP_OK;
+        }
+        dreq.kind = TIMER_REQ_FOCUS;
+        dreq.seconds = (uint32_t)focus_min * 60U;
+        dreq.silent = silent;
+        strlcpy(dreq.label, label[0] != '\0' ? label : "FOCUS", sizeof dreq.label);
+        action = "focus";
+    } else if (have_sec || label[0] != '\0') {
+        if (have_sec && (sec < 0 || sec > (int)JR_TIMER_MAX_S)) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "sec must be 0..43200");
+            return ESP_OK;
+        }
+        dreq.kind = TIMER_REQ_SET;
+        dreq.seconds = have_sec ? (uint32_t)sec : 0U;
+        dreq.silent = silent;
+        strlcpy(dreq.label, label, sizeof dreq.label);
+        action = "set";
+    } else {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "need sec=N, focus=M, cancel=1, or dismiss=1");
+        return ESP_OK;
+    }
+
+    portENTER_CRITICAL(&s_timer_mux);
+    s_debug_timer_req_data = dreq;
+    portEXIT_CRITICAL(&s_timer_mux);
+    atomic_store(&s_debug_timer_req, (uint32_t)dreq.kind);
+
+    char body[128];
+    int n = snprintf(body, sizeof body,
+                     "{\"ok\":true,\"queued\":\"%s\",\"sec\":%u,\"silent\":%s}",
+                     action, (unsigned)dreq.seconds,
+                     dreq.silent ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
+/* POST /api/desk/mode?mode=normal|focus|on_air|breathe[&minutes=..][&pattern=..]
+ * [&cycles=..][&label=..][&silent=0|1] — control-gated Desk Copilot 3.5 mode. */
+static esp_err_t desk_mode_post_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    char q[256] = {0};
+    char mode_str[24] = {0};
+    char pat_str[24] = {0};
+    char label[JR_DESK_LABEL_CAP] = {0};
+    if (httpd_req_get_url_query_str(req, q, sizeof q) == ESP_OK) {
+        if (httpd_query_key_value(q, "mode", mode_str, sizeof mode_str) == ESP_OK) {
+            (void)url_decode_in_place(mode_str);
+        }
+        if (httpd_query_key_value(q, "pattern", pat_str, sizeof pat_str) == ESP_OK) {
+            (void)url_decode_in_place(pat_str);
+        }
+        char raw_lbl[48] = {0};
+        if (httpd_query_key_value(q, "label", raw_lbl, sizeof raw_lbl) == ESP_OK &&
+            url_decode_in_place(raw_lbl)) {
+            strlcpy(label, raw_lbl, sizeof label);
+        }
+    }
+
+    jr_desk_mode_t mode = JR_DESK_NORMAL;
+    if (!desk_mode_parse_name(mode_str, &mode)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "mode must be normal, focus, on_air, or breathe");
+        return ESP_OK;
+    }
+    int minutes = 0;
+    const bool have_min = query_int(req, "minutes", &minutes);
+    if (have_min && (minutes < 0 || minutes > 720)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "minutes must be 0..720");
+        return ESP_OK;
+    }
+    jr_breathe_pattern_t pat = JR_BREATHE_BOX;
+    if (pat_str[0] != '\0' && !desk_breathe_parse_pattern(pat_str, &pat)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "pattern must be box, calm, or energize");
+        return ESP_OK;
+    }
+    int cycles = 0;
+    const bool have_cyc = query_int(req, "cycles", &cycles);
+    if (have_cyc && (cycles < 1 || cycles > 8)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "cycles must be 1..8");
+        return ESP_OK;
+    }
+    int silent_v = 0;
+    const bool silent = query_int(req, "silent", &silent_v) && silent_v != 0;
+
+    desk_mode_req_t dreq = {
+        .mode = mode,
+        .duration_s = have_min ? (uint32_t)minutes * 60U : 0U,
+        .pattern = pat,
+        .cycles = have_cyc ? (uint8_t)cycles : 0U,
+        .silent = silent || (mode == JR_DESK_ON_AIR),
+    };
+    strlcpy(dreq.label, label, sizeof dreq.label);
+    desk_mode_request_async(&dreq);
+
+    desk_mode_snap_t cur = {0};
+    desk_mode_snapshot(&cur);
+    uint32_t rem_s = 0U;
+    if (mode == JR_DESK_ON_AIR) {
+        rem_s = dreq.duration_s;
+    } else if (mode == JR_DESK_FOCUS) {
+        rem_s = dreq.duration_s > 0U ? dreq.duration_s : JR_DESK_FOCUS_DEFAULT_S;
+    } else if (mode == JR_DESK_BREATHE) {
+        const uint32_t cyc = dreq.cycles > 0U
+            ? (uint32_t)dreq.cycles : (uint32_t)JR_DESK_BREATHE_DEFAULT_CYCLES;
+        const uint32_t cyc_s = pat == JR_BREATHE_CALM ? 19U
+                             : pat == JR_BREATHE_ENERGIZE ? 10U : 16U;
+        rem_s = cyc * cyc_s;
+    }
+
+    char body[192];
+    int n = snprintf(body, sizeof body,
+                     "{\"ok\":true,\"mode\":\"%s\",\"rem_s\":%u,"
+                     "\"sessions_today\":%u,\"minutes_today\":%u,"
+                     "\"breathe_phase\":\"%s\"}",
+                     desk_mode_api_name(mode), (unsigned)rem_s,
+                     (unsigned)cur.sessions_today, (unsigned)cur.minutes_today,
+                     mode == JR_DESK_BREATHE ? "inhale" : "");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
+/* POST /api/debug/stopwatch?action=start|stop|lap|reset — control-gated. */
+static esp_err_t debug_stopwatch_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    char q[64] = {0};
+    char action[16] = {0};
+    if (httpd_req_get_url_query_str(req, q, sizeof q) != ESP_OK ||
+        httpd_query_key_value(q, "action", action, sizeof action) != ESP_OK ||
+        action[0] == '\0') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "action=start|stop|lap|reset required");
+        return ESP_OK;
+    }
+    const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    stopwatch_snap_t snap = {0};
+    if (!device_stopwatch_action(action, now_ms, &snap)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "action must be start|stop|lap|reset");
+        return ESP_OK;
+    }
+    atomic_store(&s_glass_poke_req, true);
+    char body[192];
+    int n = snprintf(body, sizeof body,
+                     "{\"ok\":true,\"active\":%s,\"running\":%s,"
+                     "\"elapsed_ms\":%u,\"laps\":[",
+                     snap.active ? "true" : "false",
+                     snap.running ? "true" : "false",
+                     (unsigned)snap.elapsed_ms);
+    for (uint8_t i = 0U; i < snap.lap_count && i < JR_STOPWATCH_MAX_LAPS &&
+                         n > 0 && (size_t)n < sizeof body - 16U; ++i) {
+        n += snprintf(body + n, sizeof body - (size_t)n, "%s%u",
+                      i == 0U ? "" : ",", (unsigned)snap.laps_ms[i]);
+    }
+    if (n > 0 && (size_t)n + 3U < sizeof body) {
+        n += snprintf(body + n, sizeof body - (size_t)n, "]}");
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
+/* POST /api/glass — Command Deck glass switcher & HBM/UI-sounds/Holo toggle.
+ * Optional query params: screen, style, hbm=0|1, ui_sounds=0|1, holo=0|1.
+ * STRICT INVARIANT: never touches privacy/mute or operator lease state. */
+static esp_err_t glass_post_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    char q[160] = {0};
+    if (httpd_req_get_url_query_str(req, q, sizeof q) != ESP_OK || q[0] == '\0') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "need screen, style, hbm, ui_sounds, or holo");
+        return ESP_OK;
+    }
+    char scr_raw[24] = {0};
+    char sty_raw[24] = {0};
+    const bool have_scr = httpd_query_key_value(q, "screen", scr_raw, sizeof scr_raw) == ESP_OK &&
+                          scr_raw[0] != '\0';
+    const bool have_sty = httpd_query_key_value(q, "style", sty_raw, sizeof sty_raw) == ESP_OK &&
+                          sty_raw[0] != '\0';
+    int hbm_v = -1;
+    int ui_v = -1;
+    int holo_v = -1;
+    const bool have_hbm = query_int(req, "hbm", &hbm_v);
+    const bool have_ui = query_int(req, "ui_sounds", &ui_v);
+    const bool have_holo = query_int(req, "holo", &holo_v);
+
+    jr_display_space_t sp = jr_display_nav_space();
+    jr_watch_style_t ws = jr_display_watch_style();
+    if ((!have_scr && !have_sty && !have_hbm && !have_ui && !have_holo) ||
+        (have_scr && !device_parse_glass_screen(scr_raw, &sp)) ||
+        (have_sty && !device_parse_watch_style(sty_raw, &ws)) ||
+        (have_hbm && hbm_v != 0 && hbm_v != 1) ||
+        (have_ui && ui_v != 0 && ui_v != 1) ||
+        (have_holo && holo_v != 0 && holo_v != 1)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "invalid screen/style/hbm/ui_sounds/holo parameter");
+        return ESP_OK;
+    }
+
+    if (have_sty) {
+        jr_display_watch_style_set(ws);
+        persist_watch_style((uint8_t)ws);
+    }
+    if (have_scr) {
+        jr_display_nav_set(sp);
+    }
+    if (have_ui) {
+        ui_sounds_set(ui_v != 0);
+    }
+    if (have_holo) {
+        jr_display_holo_set(holo_v != 0);
+        persist_holo_enabled(holo_v != 0);
+    }
+    bool ok = true;
+    const char *reason = NULL;
+    if (have_hbm) {
+        const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if (!device_sunlight_set(hbm_v != 0, now_ms, &reason)) {
+            ok = false;
+        }
+    }
+    if (have_scr || have_sty) {
+        jr_display_bloom();
+    }
+    atomic_store(&s_glass_poke_req, true);
+
+    char body[256];
+    int n = 0;
+    if (ok) {
+        n = snprintf(body, sizeof body,
+            "{\"ok\":true,\"screen\":\"%s\",\"watch_style\":\"%s\","
+            "\"hbm\":%s,\"ui_sounds\":%s,\"holo\":%s}",
+            device_glass_space_name(jr_display_nav_space()),
+            jr_display_watch_style_name(jr_display_watch_style()),
+            jr_display_get_hbm() ? "true" : "false",
+            atomic_load(&s_ui_sounds) ? "true" : "false",
+            jr_display_holo_get() ? "true" : "false");
+    } else {
+        httpd_resp_set_status(req, "409 Conflict");
+        n = snprintf(body, sizeof body,
+            "{\"ok\":false,\"reason\":\"%s\",\"screen\":\"%s\","
+            "\"watch_style\":\"%s\",\"hbm\":%s,\"ui_sounds\":%s,\"holo\":%s}",
+            reason ? reason : "refused",
+            device_glass_space_name(jr_display_nav_space()),
+            jr_display_watch_style_name(jr_display_watch_style()),
+            jr_display_get_hbm() ? "true" : "false",
+            atomic_load(&s_ui_sounds) ? "true" : "false",
+            jr_display_holo_get() ? "true" : "false");
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
+static esp_err_t notes_send_json(httpd_req_t *req, bool include_ok, bool include_max)
+{
+    const size_t cap = 1408U;
+    char *out = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    jr_note_bank_t *bank = heap_caps_calloc(1, sizeof(*bank),
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (out == NULL) {
+        out = malloc(cap);
+    }
+    if (bank == NULL) {
+        bank = calloc(1, sizeof(*bank));
+    }
+    if (out == NULL || bank == NULL) {
+        free(out);
+        free(bank);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_OK;
+    }
+    device_notes_snapshot(bank);
+    int n = 0;
+    if (include_ok && include_max) {
+        n = snprintf(out, cap, "{\"ok\":true,\"count\":%u,\"max\":%u,\"notes\":[",
+                     (unsigned)bank->count, (unsigned)JR_NOTES_MAX);
+    } else if (include_ok) {
+        n = snprintf(out, cap, "{\"ok\":true,\"count\":%u,\"notes\":[",
+                     (unsigned)bank->count);
+    } else {
+        n = snprintf(out, cap, "{\"count\":%u,\"max\":%u,\"notes\":[",
+                     (unsigned)bank->count, (unsigned)JR_NOTES_MAX);
+    }
+    for (unsigned i = 0U; i < bank->count && i < JR_NOTES_MAX &&
+                         n > 0 && (size_t)n < cap - 48U; ++i) {
+        const jr_note_item_t *it = &bank->items[i];
+        int w = snprintf(out + n, cap - (size_t)n,
+                         "%s{\"id\":%u,\"text\":\"%s\",\"created_s\":%lld,"
+                         "\"done\":%s,\"tag\":\"%s\"}",
+                         i == 0U ? "" : ",", (unsigned)it->id, it->text,
+                         (long long)it->created_s,
+                         it->done ? "true" : "false",
+                         it->tag == (uint8_t)JR_NOTE_TAG_WORK ? "work" : "life");
+        if (w < 0 || (size_t)n + (size_t)w >= cap - 4U) {
+            break;
+        }
+        n += w;
+    }
+    if (n > 0 && (size_t)n + 3U < cap) {
+        n += snprintf(out + n, cap - (size_t)n, "]}");
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t err = httpd_resp_send(req, out, n);
+    free(out);
+    free(bank);
+    return err;
+}
+
+/* GET /api/notes — paired GET returning NVS-persisted desk notes. */
+static esp_err_t notes_get_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
+    return notes_send_json(req, false, true);
+}
+
+/* POST /api/notes — control-gated add (JSON {"text":"...","tag":"work|life"} or
+ * ?text=...&tag=work|life), ?toggle=<id>, ?delete=<id>, or ?clear=1. */
+static esp_err_t notes_post_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    int clear_v = 0;
+    int del_id = 0;
+    int tog_id = 0;
+    if (query_int(req, "clear", &clear_v) && clear_v != 0) {
+        (void)device_notes_clear("all");
+        return notes_send_json(req, true, false);
+    }
+    if (query_int(req, "toggle", &tog_id)) {
+        if (tog_id <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "toggle id must be > 0");
+            return ESP_OK;
+        }
+        if (!device_notes_toggle((uint32_t)tog_id)) {
+            httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "note not found");
+            return ESP_OK;
+        }
+        return notes_send_json(req, true, false);
+    }
+    if (query_int(req, "delete", &del_id)) {
+        if (del_id <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "delete id must be > 0");
+            return ESP_OK;
+        }
+        (void)device_notes_delete((uint32_t)del_id);
+        return notes_send_json(req, true, false);
+    }
+
+    char note_text[JR_NOTE_TEXT_CAP + 32U] = {0};
+    char tag_str[16] = {0};
+    char q[200] = {0};
+    if (httpd_req_get_url_query_str(req, q, sizeof q) == ESP_OK) {
+        if (httpd_query_key_value(q, "tag", tag_str, sizeof tag_str) == ESP_OK) {
+            (void)url_decode_in_place(tag_str);
+        }
+        if (req->content_len <= 0 &&
+            httpd_query_key_value(q, "text", note_text, sizeof note_text) == ESP_OK) {
+            (void)url_decode_in_place(note_text);
+        }
+    }
+    if (req->content_len > 0) {
+        if (req->content_len > 256) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "note body too large");
+            return ESP_OK;
+        }
+        char body[260] = {0};
+        size_t got = 0U;
+        while (got < (size_t)req->content_len) {
+            int r = httpd_req_recv(req, body + got, (size_t)req->content_len - got);
+            if (r <= 0) {
+                if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+                    continue;
+                }
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "failed to read body");
+                return ESP_OK;
+            }
+            got += (size_t)r;
+        }
+        body[got] = '\0';
+        cJSON *root = cJSON_Parse(body);
+        const cJSON *t = cJSON_GetObjectItemCaseSensitive(root, "text");
+        if (cJSON_IsString(t) && t->valuestring != NULL) {
+            strlcpy(note_text, t->valuestring, sizeof note_text);
+        }
+        const cJSON *tg = cJSON_GetObjectItemCaseSensitive(root, "tag");
+        if (cJSON_IsString(tg) && tg->valuestring != NULL) {
+            strlcpy(tag_str, tg->valuestring, sizeof tag_str);
+        }
+        cJSON_Delete(root);
+    }
+
+    if (note_text[0] == '\0') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "need text, ?toggle=<id>, ?delete=<id>, or ?clear=1");
+        return ESP_OK;
+    }
+    const jr_note_tag_t tag = tag_str[0] != '\0'
+        ? jr_note_tag_parse(tag_str) : JR_NOTE_TAG_LIFE;
+    const uint32_t id = device_notes_add_ex(note_text, tag);
+    if (id == 0U) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "note empty or desk note bank full (max 6)");
+        return ESP_OK;
+    }
+    return notes_send_json(req, true, false);
+}
+
 static esp_err_t gain_get_handler(httpd_req_t *req)
 {
     if (!agent_require_auth(req) || !control_intent_required(req)) {
         return ESP_OK;
     }
     int mic = -1, ref = -1, vol = -1, barge = -1, vadclean = -1, pbgain = -1;
-    int speakmic = -1;
+    int speakmic = -1, echogate = -1;
+    int speakgain = -1, aecmode = -1, aecfilter = -1, echovol = -1, wakebarge = -1;
     query_int(req, "mic", &mic);
     query_int(req, "ref", &ref);
     query_int(req, "vol", &vol);
@@ -372,9 +887,26 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
         atomic_store(&s_cpu_force, cpu);   /* bench: force a gear, 0 = auto */
     }
     query_int(req, "speakmic", &speakmic);
+    query_int(req, "echogate", &echogate);
+    query_int(req, "speakgain", &speakgain);
+    query_int(req, "aecmode", &aecmode);
+    query_int(req, "aecfilter", &aecfilter);
+    query_int(req, "echovol", &echovol);
+    query_int(req, "wakebarge", &wakebarge);
     jr_audio_set_gains(mic, ref, vol);
     if (speakmic >= 0) {
-        jr_audio_set_speak_mic_db(speakmic);
+        jr_audio_set_speak_mic_db(speakmic > 36 ? 36 : speakmic);
+    }
+    if (speakgain >= 0) {
+        jr_audio_set_speak_gain_percent(speakgain);       /* 0..400, 100 = full */
+    }
+    /* Stored only: the capture caller rebuilds the canceller between frames. */
+    jr_audio_request_aec(aecmode, aecfilter);
+    if (echovol >= 0) {
+        atomic_store(&s_echo_gate_volume_min, echovol > 100 ? 100 : echovol);
+    }
+    if (wakebarge >= 0) {
+        atomic_store(&s_wake_barge_enabled, wakebarge != 0);
     }
     if (barge >= 0) {
         s_local_barge_enabled = barge != 0;
@@ -382,26 +914,58 @@ static esp_err_t gain_get_handler(httpd_req_t *req)
     if (vadclean >= 0) {
         atomic_store(&s_vad_use_clean, vadclean != 0);
     }
+    if (echogate >= 0) {
+        /* Run-time only, never persisted: 0 lets the microphone reach the
+         * server while the speaker is audible, so a session can measure the
+         * canceller with real barge-in. Privacy is not behind this switch. */
+        atomic_store(&s_echo_gate_enabled, echogate != 0);
+    }
     if (pbgain >= 0) {
         jr_audio_set_playback_gain_percent(pbgain);
     }
     /* Report DEVICE state, never the request: a read with no arguments used
      * to answer mic/ref/vol = -1, and a partial write echoed the requested
      * value even when nothing was applied. */
-    char buf[256];
-    int n = snprintf(buf, sizeof buf,
+    /* PSRAM buffer (not internal .bss or httpd stack): reclaims 640 B SRAM. */
+    const size_t buf_cap = 640U;
+    char *buf = heap_caps_malloc(buf_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        buf = malloc(buf_cap);
+    }
+    if (buf == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_OK;
+    }
+    int n = snprintf(buf, buf_cap,
                      "{\"ok\":true,\"mic\":%d,\"ref\":%d,\"vol\":%d,"
-                     "\"speakmic\":%d,"
+                     "\"speakmic\":%d,\"speakgain\":%d,"
                      "\"barge\":%s,\"vadclean\":%s,\"pbgain\":%d,"
-                     "\"preroll\":%d,\"refill\":%d}",
+                     "\"preroll\":%d,\"refill\":%d,\"echogate\":%s,"
+                     "\"echovol\":%d,\"wakebarge\":%s,"
+                     "\"aecmode\":%d,\"aecfilter\":%d,\"aec_us\":%u,"
+                     "\"aec_rebuilds\":%u,\"aec_rebuild_failures\":%u}",
                      jr_audio_mic_db(), jr_audio_ref_db(), jr_audio_out_vol(),
-                     jr_audio_speak_mic_db(),
+                     jr_audio_speak_mic_db(), jr_audio_speak_gain_percent(),
                      s_local_barge_enabled ? "true" : "false",
                      atomic_load(&s_vad_use_clean) ? "true" : "false",
                      jr_audio_playback_gain_percent(),
-                     jr_audio_preroll_ms(), jr_audio_refill_ms());
+                     jr_audio_preroll_ms(), jr_audio_refill_ms(),
+                     atomic_load(&s_echo_gate_enabled) ? "true" : "false",
+                     atomic_load(&s_echo_gate_volume_min),
+                     atomic_load(&s_wake_barge_enabled) ? "true" : "false",
+                     jr_audio_aec_mode(), jr_audio_aec_filter(),
+                     (unsigned)jr_audio_last_aec_us(),
+                     (unsigned)jr_audio_aec_reconfigs(),
+                     (unsigned)jr_audio_aec_reconfig_fails());
+    if (n < 0 || (size_t)n >= buf_cap) {
+        free(buf);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"reply too long\"}");
+        return ESP_OK;
+    }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, n);
+    free(buf);
     return ESP_OK;
 }
 
@@ -412,8 +976,9 @@ static esp_err_t device_levels_get_handler(httpd_req_t *req)
     }
     char body[96];
     int n = snprintf(body, sizeof body,
-                     "{\"volume\":%d,\"brightness\":%u}",
-                     s_out_vol, (unsigned)s_brightness_cap);
+                     "{\"volume\":%d,\"brightness\":%u,\"ui_sounds\":%s}",
+                     s_out_vol, (unsigned)s_brightness_cap,
+                     atomic_load(&s_ui_sounds) ? "true" : "false");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_send(req, body, n);
@@ -467,6 +1032,536 @@ static const char *ota_image_state_name(esp_ota_img_states_t state)
     }
 }
 
+/* Why this boot happened. Read once at the top of app_main; the log ring is
+ * PSRAM and does not survive the reset it would need to explain. */
+static esp_reset_reason_t s_reset_reason = ESP_RST_UNKNOWN;
+
+static const char *reset_reason_name(esp_reset_reason_t r)
+{
+    switch (r) {
+    case ESP_RST_POWERON:   return "poweron";
+    case ESP_RST_EXT:       return "ext";
+    case ESP_RST_SW:        return "sw";
+    case ESP_RST_PANIC:     return "panic";
+    case ESP_RST_INT_WDT:   return "int_wdt";
+    case ESP_RST_TASK_WDT:  return "task_wdt";
+    case ESP_RST_WDT:       return "wdt";
+    case ESP_RST_DEEPSLEEP: return "deepsleep";
+    case ESP_RST_BROWNOUT:  return "brownout";
+    case ESP_RST_SDIO:      return "sdio";
+    case ESP_RST_USB:       return "usb";
+    case ESP_RST_JTAG:      return "jtag";
+    default:                return "unknown";
+    }
+}
+
+void crash_note_boot(void)
+{
+    s_reset_reason = esp_reset_reason();
+    ESP_LOGW(TAG, "boot: reset reason=%s", reset_reason_name(s_reset_reason));
+}
+
+/* GET /api/diag/crash — reset reason plus the stored coredump summary.
+ * The summary struct (~300 B) and the JSON both live on the heap: httpd has
+ * about 1500 B of stack free. Read-only; nothing here erases the dump.
+ *
+ * N16.11 fix: esp_core_dump_get_summary() can return ESP_OK with empty
+ * task="" / exc_pc=0 (e.g. when mmap/segment matching misses exc_tcb). When
+ * that happens, fall back to direct esp_partition_read() ELF note + segment
+ * parsing (PSRAM-backed, zero internal RAM) plus esp_core_dump_get_panic_reason(). */
+#define CRASH_JSON_CAP 1792U
+#define CRASH_BT_MAX   16U
+#define CRASH_REASON_CAP 160U
+
+typedef struct __attribute__((packed)) {
+    uint8_t  e_ident[16];
+    uint16_t e_type;
+    uint16_t e_machine;
+    uint32_t e_version;
+    uint32_t e_entry;
+    uint32_t e_phoff;
+    uint32_t e_shoff;
+    uint32_t e_flags;
+    uint16_t e_ehsize;
+    uint16_t e_phentsize;
+    uint16_t e_phnum;
+    uint16_t e_shentsize;
+    uint16_t e_shnum;
+    uint16_t e_shstrndx;
+} jr_elf32_ehdr_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t p_type;
+    uint32_t p_offset;
+    uint32_t p_vaddr;
+    uint32_t p_paddr;
+    uint32_t p_filesz;
+    uint32_t p_memsz;
+    uint32_t p_flags;
+    uint32_t p_align;
+} jr_elf32_phdr_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t n_namesz;
+    uint32_t n_descsz;
+    uint32_t n_type;
+} jr_elf32_note_t;
+
+static inline uint32_t crash_align4(uint32_t v) { return (v + 3U) & ~3U; }
+
+static bool crash_parse_elf_fallback(size_t dump_size,
+                                     esp_core_dump_summary_t *sum,
+                                     char *panic_reason, size_t reason_cap)
+{
+    const esp_partition_t *part = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, NULL);
+    if (part == NULL || dump_size < 76U || dump_size > part->size) {
+        return false;
+    }
+
+    /* Locate ELF header: normally preceded by 24-byte core_dump_header_t. */
+    uint32_t elf_base = 24U;
+    jr_elf32_ehdr_t eh = {0};
+    if (esp_partition_read(part, elf_base, &eh, sizeof eh) != ESP_OK ||
+        eh.e_ident[0] != 0x7FU || eh.e_ident[1] != 'E' ||
+        eh.e_ident[2] != 'L' || eh.e_ident[3] != 'F') {
+        elf_base = 0U;
+        if (esp_partition_read(part, elf_base, &eh, sizeof eh) != ESP_OK ||
+            eh.e_ident[0] != 0x7FU || eh.e_ident[1] != 'E' ||
+            eh.e_ident[2] != 'L' || eh.e_ident[3] != 'F') {
+            return false;
+        }
+    }
+    if (eh.e_phnum == 0U || eh.e_phnum > 256U ||
+        eh.e_phentsize < sizeof(jr_elf32_phdr_t)) {
+        return false;
+    }
+
+    uint8_t *scratch = heap_caps_calloc(1, 512U,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (scratch == NULL) {
+        scratch = calloc(1, 512U);
+    }
+    if (scratch == NULL) {
+        return false;
+    }
+
+    uint32_t pr_tcb = 0U;
+    uint32_t pr_pc = 0U;
+    bool got_any = false;
+
+    /* Pass 1: parse PT_NOTE segments (type == 4) for INFO, EXTRA_INFO,
+     * PANIC_DETAILS, and the first PR_STATUS (crashed task). */
+    for (uint16_t i = 0U; i < eh.e_phnum; ++i) {
+        jr_elf32_phdr_t ph = {0};
+        const uint32_t ph_off = elf_base + eh.e_phoff +
+                                (uint32_t)i * eh.e_phentsize;
+        if (ph_off + sizeof ph > dump_size ||
+            esp_partition_read(part, ph_off, &ph, sizeof ph) != ESP_OK) {
+            break;
+        }
+        if (ph.p_type != 4U || ph.p_filesz < sizeof(jr_elf32_note_t) ||
+            elf_base + ph.p_offset + ph.p_filesz > dump_size) {
+            continue;
+        }
+        uint32_t pos = 0U;
+        while (pos + sizeof(jr_elf32_note_t) <= ph.p_filesz) {
+            jr_elf32_note_t nh = {0};
+            if (esp_partition_read(part, elf_base + ph.p_offset + pos,
+                                   &nh, sizeof nh) != ESP_OK) {
+                break;
+            }
+            const uint32_t name_a = crash_align4(nh.n_namesz);
+            const uint32_t desc_a = crash_align4(nh.n_descsz);
+            const uint32_t step = (uint32_t)sizeof(nh) + name_a + desc_a;
+            if (step == 0U || pos + step > ph.p_filesz ||
+                nh.n_namesz > 64U || nh.n_descsz > 4096U) {
+                break;
+            }
+            const uint32_t desc_off = elf_base + ph.p_offset + pos +
+                                      (uint32_t)sizeof(nh) + name_a;
+            if (nh.n_type == 8266U && nh.n_descsz >= 8U) {
+                /* ESP_CORE_DUMP_INFO: uint32 version + char sha[66] */
+                const uint32_t rlen = nh.n_descsz < 128U ? nh.n_descsz : 128U;
+                if (esp_partition_read(part, desc_off, scratch, rlen) == ESP_OK) {
+                    uint32_t ver = 0U;
+                    memcpy(&ver, scratch, 4U);
+                    if (sum->core_dump_version == 0U) {
+                        sum->core_dump_version = ver;
+                    }
+                    if (sum->app_elf_sha256[0] == '\0' && rlen > 4U) {
+                        size_t slen = rlen - 4U;
+                        if (slen >= sizeof sum->app_elf_sha256) {
+                            slen = sizeof(sum->app_elf_sha256) - 1U;
+                        }
+                        memcpy(sum->app_elf_sha256, scratch + 4U, slen);
+                        sum->app_elf_sha256[slen] = '\0';
+                    }
+                    got_any = true;
+                }
+            } else if (nh.n_type == 677U && nh.n_descsz >= 20U) {
+                /* ESP_EXTRA_INFO: crashed_task_tcb (0), exccause pair (4..11), excvaddr pair (12..19) */
+                uint32_t words[5] = {0};
+                if (esp_partition_read(part, desc_off, words, sizeof words) == ESP_OK) {
+                    if (sum->exc_tcb == 0U && words[0] != 0U) {
+                        sum->exc_tcb = words[0];
+                    }
+                    if (sum->ex_info.exc_cause == 0U) {
+                        sum->ex_info.exc_cause = words[2];
+                    }
+                    if (sum->ex_info.exc_vaddr == 0U) {
+                        sum->ex_info.exc_vaddr = words[4];
+                    }
+                    got_any = true;
+                }
+            } else if (nh.n_type == 679U && nh.n_descsz > 0U &&
+                       panic_reason != NULL && panic_reason[0] == '\0' &&
+                       reason_cap > 1U) {
+                /* ESP_PANIC_DETAILS */
+                size_t rlen = nh.n_descsz;
+                if (rlen >= reason_cap) {
+                    rlen = reason_cap - 1U;
+                }
+                if (esp_partition_read(part, desc_off, panic_reason, rlen) == ESP_OK) {
+                    panic_reason[rlen] = '\0';
+                    got_any = true;
+                }
+            } else if (nh.n_type == 1U && pr_tcb == 0U && nh.n_descsz >= 76U) {
+                /* First NT_PRSTATUS note is always the crashed task:
+                 * pr_pid (TCB addr) at offset 24, regs.pc at offset 72. */
+                if (esp_partition_read(part, desc_off, scratch, 80U) == ESP_OK) {
+                    memcpy(&pr_tcb, scratch + 24U, 4U);
+                    memcpy(&pr_pc, scratch + 72U, 4U);
+                    got_any = true;
+                }
+            }
+            pos += step;
+        }
+    }
+
+    if (sum->exc_tcb == 0U && pr_tcb != 0U) {
+        sum->exc_tcb = pr_tcb;
+    }
+    if (sum->exc_pc == 0U && pr_pc != 0U) {
+        sum->exc_pc = pr_pc;
+    }
+
+    /* Pass 2: locate crashed task TCB + following stack segment in PT_LOAD (type == 1). */
+    const uint32_t target_tcb = sum->exc_tcb;
+    bool matched_tcb = false;
+    bool saw_first_load = false;
+    for (uint16_t i = 0U; i < eh.e_phnum; ++i) {
+        jr_elf32_phdr_t ph = {0};
+        const uint32_t ph_off = elf_base + eh.e_phoff +
+                                (uint32_t)i * eh.e_phentsize;
+        if (ph_off + sizeof ph > dump_size ||
+            esp_partition_read(part, ph_off, &ph, sizeof ph) != ESP_OK) {
+            break;
+        }
+        if (ph.p_type != 1U || elf_base + ph.p_offset + ph.p_filesz > dump_size) {
+            continue;
+        }
+        if (matched_tcb) {
+            /* Following PT_LOAD is the crashed task's stack (XtExcFrame at top). */
+            if (ph.p_filesz >= 88U &&
+                esp_partition_read(part, elf_base + ph.p_offset, scratch, 88U) == ESP_OK) {
+                uint32_t st_pc = 0U, st_cause = 0U, st_vaddr = 0U;
+                memcpy(&st_pc, scratch + 4U, 4U);
+                memcpy(&st_cause, scratch + 80U, 4U);
+                memcpy(&st_vaddr, scratch + 84U, 4U);
+                if (sum->exc_pc == 0U && st_pc != 0U) {
+                    sum->exc_pc = st_pc;
+                }
+                if (sum->ex_info.exc_cause == 0U && st_cause != 0U) {
+                    sum->ex_info.exc_cause = st_cause;
+                }
+                if (sum->ex_info.exc_vaddr == 0U && st_vaddr != 0U) {
+                    sum->ex_info.exc_vaddr = st_vaddr;
+                }
+            }
+            break;
+        }
+        const bool is_match = (target_tcb != 0U && ph.p_vaddr == target_tcb) ||
+                              (target_tcb == 0U && !saw_first_load &&
+                               ph.p_filesz >= sizeof(StaticTask_t));
+        saw_first_load = true;
+        if (is_match) {
+            if (sum->exc_task[0] == '\0' && ph.p_filesz >= sizeof(StaticTask_t)) {
+                const uint32_t rlen = sizeof(StaticTask_t) < 512U
+                    ? (uint32_t)sizeof(StaticTask_t) : 512U;
+                if (esp_partition_read(part, elf_base + ph.p_offset,
+                                       scratch, rlen) == ESP_OK) {
+                    const StaticTask_t *tcb = (const StaticTask_t *)scratch;
+                    strlcpy(sum->exc_task, (const char *)tcb->ucDummy7,
+                            sizeof sum->exc_task);
+                    got_any = true;
+                }
+            }
+            matched_tcb = true;
+        }
+    }
+
+    if (sum->exc_bt_info.depth == 0U && sum->exc_pc != 0U) {
+        sum->exc_bt_info.bt[0] = sum->exc_pc;
+        sum->exc_bt_info.depth = 1U;
+    }
+
+    free(scratch);
+    return got_any;
+}
+
+static void crash_sanitize_json_str(char *s)
+{
+    for (char *c = s; *c != '\0'; ++c) {
+        if (*c == '"' || *c == '\\' || (unsigned char)*c < 0x20U ||
+            (unsigned char)*c > 0x7EU) {
+            *c = ' ';
+        }
+    }
+}
+
+static esp_err_t crash_get_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
+    char *out = heap_caps_malloc(CRASH_JSON_CAP,
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    esp_core_dump_summary_t *sum = heap_caps_calloc(1, sizeof *sum,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    char *reason = heap_caps_calloc(1, CRASH_REASON_CAP,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (out == NULL || sum == NULL || reason == NULL) {
+        heap_caps_free(out);
+        heap_caps_free(sum);
+        heap_caps_free(reason);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_OK;
+    }
+    size_t addr = 0, size = 0;
+    const bool present = esp_core_dump_image_get(&addr, &size) == ESP_OK;
+    const bool valid = present && esp_core_dump_image_check() == ESP_OK;
+    bool have_sum = valid && esp_core_dump_get_summary(sum) == ESP_OK;
+    if (valid) {
+        (void)esp_core_dump_get_panic_reason(reason, CRASH_REASON_CAP);
+        if (!have_sum || sum->exc_task[0] == '\0' || sum->exc_pc == 0U) {
+            if (crash_parse_elf_fallback(size, sum, reason, CRASH_REASON_CAP)) {
+                have_sum = true;
+            }
+        }
+    }
+
+    uint8_t pmic_on = 0, pmic_off = 0;
+    const bool pmic_ok = jr_power_boot_status(&pmic_on, &pmic_off) == ESP_OK;
+
+    int n = snprintf(out, CRASH_JSON_CAP,
+        "{\"reset\":\"%s\",\"pmic_ok\":%s,\"pmic_on\":%u,\"pmic_off\":%u,"
+        "\"dump_present\":%s,\"dump_valid\":%s,"
+        "\"dump_bytes\":%u,\"summary\":",
+        reset_reason_name(s_reset_reason), pmic_ok ? "true" : "false",
+        (unsigned)pmic_on, (unsigned)pmic_off, present ? "true" : "false",
+        valid ? "true" : "false", (unsigned)size);
+    if (!have_sum) {
+        n += snprintf(out + n, CRASH_JSON_CAP - (size_t)n, "null}");
+    } else {
+        char task[sizeof sum->exc_task + 1];
+        memcpy(task, sum->exc_task, sizeof sum->exc_task);
+        task[sizeof sum->exc_task] = '\0';
+        crash_sanitize_json_str(task);
+        crash_sanitize_json_str(reason);
+
+        char sha[sizeof sum->app_elf_sha256 + 1];
+        memcpy(sha, sum->app_elf_sha256, sizeof sum->app_elf_sha256);
+        sha[sizeof sum->app_elf_sha256] = '\0';
+        for (char *c = sha; *c != '\0'; c++) {
+            if (!((*c >= '0' && *c <= '9') || (*c >= 'a' && *c <= 'f'))) {
+                *c = '?';
+            }
+        }
+        n += snprintf(out + n, CRASH_JSON_CAP - (size_t)n,
+            "{\"task\":\"%s\",\"exc_pc\":\"0x%08x\",\"exc_cause\":%u,"
+            "\"exc_vaddr\":\"0x%08x\",\"panic_reason\":\"%s\","
+            "\"elf_sha\":\"%s\",\"version\":%u,"
+            "\"bt_corrupted\":%s,\"bt_depth\":%u,\"bt\":[",
+            task, (unsigned)sum->exc_pc,
+            (unsigned)sum->ex_info.exc_cause, (unsigned)sum->ex_info.exc_vaddr,
+            reason, sha, (unsigned)sum->core_dump_version,
+            sum->exc_bt_info.corrupted ? "true" : "false",
+            (unsigned)sum->exc_bt_info.depth);
+        uint32_t depth = sum->exc_bt_info.depth;
+        if (depth > CRASH_BT_MAX) {
+            depth = CRASH_BT_MAX;
+        }
+        for (uint32_t i = 0; i < depth && n > 0 &&
+                             (size_t)n < CRASH_JSON_CAP - 24U; i++) {
+            n += snprintf(out + n, CRASH_JSON_CAP - (size_t)n, "%s\"0x%08x\"",
+                          i ? "," : "", (unsigned)sum->exc_bt_info.bt[i]);
+        }
+        if (n > 0 && (size_t)n < CRASH_JSON_CAP - 8U) {
+            n += snprintf(out + n, CRASH_JSON_CAP - (size_t)n, "]}}");
+        }
+    }
+    if (n < 0 || (size_t)n >= CRASH_JSON_CAP) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "crash response too large");
+    } else {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+        httpd_resp_send(req, out, n);
+    }
+    heap_caps_free(out);
+    heap_caps_free(sum);
+    heap_caps_free(reason);
+    return ESP_OK;
+}
+
+/* GET /api/diag/voiceperf — how well the voice loop keeps up with the
+ * microphone, per frame class, plus the wake worker's own timing.
+ * POST /api/diag/voiceperf?bench=1 queues the no-microphone bench: the wake
+ * worker times 64 noise chunks through detect(), the voice task (when it is
+ * not carrying live frames) times 64 noise frames through the canceller. Read
+ * the results with a GET a couple of seconds later. Static buffer: httpd has
+ * about 1.3 KB of stack left. */
+static esp_err_t voiceperf_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
+    if (req->method == HTTP_POST) {
+        if (!control_intent_required(req)) {
+            return ESP_OK;
+        }
+        int bench = 0;
+        (void)query_int(req, "bench", &bench);
+        if (bench == 1) {
+            atomic_store(&s_aec_bench_have, false);
+            atomic_store(&s_aec_bench_req, true);
+            jr_wake_bench_request();
+        }
+    }
+    const size_t buf_cap = 1152U;
+    char *buf = heap_caps_malloc(buf_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        buf = malloc(buf_cap);
+    }
+    if (buf == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_OK;
+    }
+    int n = 0;
+    n += snprintf(buf + n, buf_cap - (size_t)n, "{\"ok\":true,\"classes\":[");
+    for (int i = 0; i < 2; ++i) {
+        const voiceperf_class_t *c = &s_vperf[i];
+        const uint32_t f = atomic_load(&c->frames);
+        const uint32_t d = f != 0U ? f : 1U;
+        n += snprintf(buf + n, buf_cap - (size_t)n,
+            "%s{\"class\":\"%s\",\"frames\":%u,\"fps\":%u.%02u,"
+            "\"iter_mean_ms\":%u.%u,\"iter_max_ms\":%u.%u,\"read_mean_us\":%u}",
+            i ? "," : "", i == 0 ? "speaking" : "other",
+            (unsigned)f,
+            (unsigned)(atomic_load(&c->fps_x100) / 100U),
+            (unsigned)(atomic_load(&c->fps_x100) % 100U),
+            (unsigned)(atomic_load(&c->iter_sum_us) / d / 1000U),
+            (unsigned)(atomic_load(&c->iter_sum_us) / d / 100U % 10U),
+            (unsigned)(atomic_load(&c->iter_max_us) / 1000U),
+            (unsigned)(atomic_load(&c->iter_max_us) / 100U % 10U),
+            (unsigned)(atomic_load(&c->read_sum_us) / d));
+    }
+    uint32_t wmean = 0, wmax = 0;
+    const bool wbench = jr_wake_bench_result(&wmean, &wmax);
+    n += snprintf(buf + n, buf_cap - (size_t)n,
+        "],\"tick_skips\":%u,\"tick_sleeps\":%u,"
+        "\"cpu_mhz\":%d,"
+        "\"wake\":{\"ready\":%s,\"chunks\":%u,\"detect_last_us\":%u,"
+        "\"detect_max_us\":%u,\"dropped\":%u,\"stale_hits\":%u,"
+        "\"hits\":%u,\"stack_free\":%u},"
+        "\"bench\":{\"pending\":%s,\"cpu_mhz\":%d,"
+        "\"wake_chunk_mean_us\":%d,\"wake_chunk_max_us\":%d,"
+        "\"aec_frame_mean_us\":%d,\"aec_frame_max_us\":%u}}",
+        (unsigned)atomic_load(&s_vperf_tick_skips),
+        (unsigned)atomic_load(&s_vperf_tick_sleeps),
+        atomic_load(&s_cpu_mhz),
+        jr_wake_ready() ? "true" : "false",
+        (unsigned)jr_wake_chunks(), (unsigned)jr_wake_detect_last_us(),
+        (unsigned)jr_wake_detect_max_us(), (unsigned)jr_wake_dropped(),
+        (unsigned)jr_wake_stale_hits(), (unsigned)jr_wake_detections(),
+        (unsigned)jr_wake_stack_free(),
+        (atomic_load(&s_aec_bench_req) || jr_wake_bench_pending()) ? "true" : "false",
+        atomic_load(&s_aec_bench_cpu_mhz),
+        wbench ? (int)wmean : -1, wbench ? (int)wmax : -1,
+        atomic_load(&s_aec_bench_have) ? atomic_load(&s_aec_bench_mean_us) : -1,
+        atomic_load(&s_aec_bench_have) ? (unsigned)atomic_load(&s_aec_bench_max_us) : 0U);
+    if (n < 0 || (size_t)n >= buf_cap) {
+        free(buf);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"reply too long\"}");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, buf, n);
+    free(buf);
+    return ESP_OK;
+}
+
+/* POST /api/diag/crash?clear=1 — the only thing that erases the dump. */
+static esp_err_t crash_clear_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    char q[24], v[4];
+    if (httpd_req_get_url_query_str(req, q, sizeof q) != ESP_OK ||
+        httpd_query_key_value(q, "clear", v, sizeof v) != ESP_OK ||
+        v[0] != '1') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "clear=1 required");
+        return ESP_OK;
+    }
+    const esp_err_t err = esp_core_dump_image_erase();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_status(req, err == ESP_OK ? "200 OK" : "500 Internal Server Error");
+    httpd_resp_sendstr(req, err == ESP_OK ? "{\"ok\":true}" : "{\"ok\":false}");
+    return ESP_OK;
+}
+
+/* GET /api/diag/coredump.bin — the raw stored image, 4 KB at a time. */
+static esp_err_t coredump_bin_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
+    size_t addr = 0, size = 0;
+    if (esp_core_dump_image_get(&addr, &size) != ESP_OK || size == 0) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no coredump");
+        return ESP_OK;
+    }
+    const esp_partition_t *part = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, NULL);
+    uint8_t *buf = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (part == NULL || buf == NULL || addr < part->address ||
+        addr - part->address + size > part->size) {
+        heap_caps_free(buf);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "coredump unreadable");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    const size_t base = addr - part->address;
+    for (size_t off = 0; off < size; off += 4096U) {
+        const size_t len = size - off < 4096U ? size - off : 4096U;
+        if (esp_partition_read(part, base + off, buf, len) != ESP_OK ||
+            httpd_resp_send_chunk(req, (const char *)buf, (ssize_t)len) != ESP_OK) {
+            heap_caps_free(buf);
+            httpd_resp_send_chunk(req, NULL, 0);   /* short body: client sees it */
+            return ESP_FAIL;
+        }
+    }
+    heap_caps_free(buf);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
 static esp_err_t device_health_handler(httpd_req_t *req)
 {
     if (!agent_require_auth(req)) {
@@ -504,6 +1599,8 @@ static esp_err_t device_health_handler(httpd_req_t *req)
 
     jr_audio_playback_stats_t playback = {0};
     jr_audio_playback_stats(&playback);
+    jr_audio_power_stats_t audio_power = {0};
+    jr_audio_power_stats(&audio_power);
     jr_ws_rx_diag_t rx = {0};
     jr_gemini_ws_rx_diag(&rx);
 
@@ -534,18 +1631,29 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         verdict = "tool-fault";
     }
 
-    char body[1280];
+    const esp_app_desc_t *app_desc = esp_app_get_description();
+    char elf_sha[17] = {0};
+    (void)esp_app_get_elf_sha256(elf_sha, sizeof(elf_sha));
+
+    char body[2048];
     int n = snprintf(body, sizeof body,
-        "{\"verdict\":\"%s\",\"repairable\":%s,"
+        "{\"verdict\":\"%s\",\"repairable\":%s,\"reset\":\"%s\","
+        "\"fw\":{\"elf_sha\":\"%s\",\"built\":\"%s %s\"},"
+        "\"boot_ms\":{\"core\":%u,\"audio\":%u,\"wifi\":%u,\"ready\":%u},"
         "\"privacy\":%s,\"flip_muted\":%s,\"operator\":%s,"
         "\"phase\":\"%s\",\"voice_alive\":%s,"
         "\"levels\":{\"volume\":%d,\"brightness_cap\":%u,"
         "\"brightness_actual\":%u},"
+        "\"audio_power\":{\"mic\":%s,\"adc\":%s,\"dac\":%s,\"pa\":%s,"
+        "\"reads\":%u,\"silent\":%u,\"failures\":%u,\"gain_failures\":%u},"
         "\"memory\":{\"largest_internal\":%u,\"free_psram\":%u},"
         "\"transport\":{\"would_block\":%u,\"drops\":%u,\"deaths\":%u},"
         "\"playback\":{\"underruns\":%u,\"max_gap_ms\":%u,"
         "\"low_water_ms\":%d,\"dac_failures\":%u,\"replies\":%u,"
-        "\"prerolls\":%u,\"preroll_short\":%u},"
+        "\"prerolls\":%u,\"preroll_short\":%u,\"preroll_ms\":%d,"
+        "\"holes_ignored\":%u,\"feeder_stall_max_ms\":%u,"
+        "\"refill_holds\":%u,\"refill_hold_max_ms\":%u,"
+        "\"refill_hold_total_ms\":%u},"
         "\"rx\":{\"frames\":%u,\"max_gap_ms\":%u,\"queue_wait_max_ms\":%u,"
         "\"queue_hwm\":%u,\"drops\":%u},"
         "\"display\":{\"fps\":%u,\"flush_errors\":%u},"
@@ -553,13 +1661,24 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         "\"state\":\"%s\",\"received\":%u,\"total\":%u,"
         "\"last_error\":\"%s\",\"last_invalid\":\"%s\"},"
         "\"tools\":{\"status\":\"%s\",\"http\":%d}}",
-        verdict, repairable ? "true" : "false",
+        verdict, repairable ? "true" : "false", reset_reason_name(s_reset_reason),
+        elf_sha,
+        app_desc != NULL ? app_desc->date : "",
+        app_desc != NULL ? app_desc->time : "",
+        (unsigned)s_boot_stage_ms[0], (unsigned)s_boot_stage_ms[1],
+        (unsigned)s_boot_stage_ms[2], (unsigned)s_boot_stage_ms[3],
         privacy ? "true" : "false",
         s_flip_muted ? "true" : "false",
         operator_active ? "true" : "false",
         jr_state_name(phase), voice_alive ? "true" : "false",
         s_out_vol, (unsigned)s_brightness_cap,
         (unsigned)atomic_load(&s_mood_brightness),
+        audio_power.microphone_enabled ? "true" : "false",
+        audio_power.adc_open ? "true" : "false",
+        audio_power.dac_open ? "true" : "false",
+        audio_power.pa_on ? "true" : "false",
+        (unsigned)audio_power.hardware_reads, (unsigned)audio_power.silent_frames,
+        (unsigned)audio_power.failures, (unsigned)audio_power.gain_failures,
         (unsigned)largest, (unsigned)free_psram,
         (unsigned)s_app.client.live.tx_would_block,
         (unsigned)s_app.client.live.tx_drops,
@@ -568,6 +1687,11 @@ static esp_err_t device_health_handler(httpd_req_t *req)
         playback.low_water_valid ? (int)playback.low_water_ms : -1,
         (unsigned)playback.dac_failures, (unsigned)playback.replies_ended,
         (unsigned)playback.prerolls, (unsigned)playback.preroll_timeouts,
+        jr_audio_preroll_ms(),
+        (unsigned)playback.holes_ignored,
+        (unsigned)playback.feeder_stall_max_ms,
+        (unsigned)playback.refill_holds, (unsigned)playback.refill_hold_max_ms,
+        (unsigned)playback.refill_hold_total_ms,
         (unsigned)rx.frames, (unsigned)rx.max_gap_ms,
         (unsigned)rx.queue_wait_max_ms, (unsigned)rx.queue_hwm,
         (unsigned)rx.drops,
@@ -765,6 +1889,14 @@ static esp_err_t audio_tap_wav_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    if (kind != JR_AUDIO_TAP_PLAYBACK &&
+        (atomic_load(&s_voice_privacy_paused) || s_flip_muted)) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"privacy muted\"}");
+        return ESP_OK;
+    }
+
     jr_audio_tap_info_t info;
     esp_err_t err = jr_audio_diag_get_info(kind, &info);
     size_t capacity = err == ESP_OK ? info.capacity_samples : 0U;
@@ -780,6 +1912,15 @@ static esp_err_t audio_tap_wav_handler(httpd_req_t *req)
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req,
             "{\"available\":false,\"error\":\"audio tap empty\"}");
+        return ESP_OK;
+    }
+
+    if (kind != JR_AUDIO_TAP_PLAYBACK &&
+        (atomic_load(&s_voice_privacy_paused) || s_flip_muted)) {
+        heap_caps_free(pcm);
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"privacy muted\"}");
         return ESP_OK;
     }
 
@@ -814,6 +1955,11 @@ static esp_err_t audio_tap_wav_handler(httpd_req_t *req)
         if (chunk > 4096U) {
             chunk = 4096U;
         }
+        if (kind != JR_AUDIO_TAP_PLAYBACK &&
+            (atomic_load(&s_voice_privacy_paused) || s_flip_muted)) {
+            err = ESP_ERR_INVALID_STATE;
+            break;
+        }
         err = httpd_resp_send_chunk(req, (const char *)bytes + sent, chunk);
         sent += chunk;
     }
@@ -833,6 +1979,7 @@ static const char *touch_kind_name(jr_input_kind_t kind)
     case JR_INPUT_SWIPE:      return "swipe";
     case JR_INPUT_PRESS_DOWN: return "press_down";
     case JR_INPUT_PRESS_UP:   return "press_up";
+    case JR_INPUT_BEZEL_SCRUB: return "bezel_scrub";
     default:                  return "none";
     }
 }
@@ -918,6 +2065,74 @@ static esp_err_t tasks_diag_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_send(req, body, off);
+    free(body);
+    return ESP_OK;
+}
+
+/* GET /api/diag/board[?watch=pwr|touch][&gyro=1] — measures the hardware the
+ * firmware leaves idle (docs/reference/board-capabilities.md, "How to probe").
+ *
+ * Read-only apart from two bounded exceptions, both undone before returning:
+ * the QMI8658 gyro is on for about 300 ms (only with gyro=1) and the AXP2101
+ * TS/VBUS/VSYS/die-temperature ADC channels are on for about 100 ms. Each
+ * probe reports ok:false and a reason instead of failing the response. Only
+ * one watch window runs per request (3 s power key or 4 s touch), so the worst
+ * case is just under 5 s. Probes that need another task's bus go through that
+ * task (touch) or the shared I2C master's own serialisation (IMU, PMIC);
+ * nothing here sends a panel command. */
+#define BOARD_PROBE_JSON_CAP   2048
+#define BOARD_PROBE_TE_MS      500
+#define BOARD_PROBE_PWR_MS     3000
+#define BOARD_PROBE_TOUCH_MS   4000
+#define BOARD_PROBE_SPI_HZ     40000000u   /* CO5300_PANEL_IO_QSPI_CONFIG macro */
+
+static esp_err_t board_diag_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
+    char q[64] = "";
+    char watch[8] = "";
+    char gyro[4] = "";
+    if (httpd_req_get_url_query_str(req, q, sizeof q) == ESP_OK) {
+        (void)httpd_query_key_value(q, "watch", watch, sizeof watch);
+        (void)httpd_query_key_value(q, "gyro", gyro, sizeof gyro);
+    }
+    const bool watch_pwr = strcmp(watch, "pwr") == 0;
+    const bool watch_touch = strcmp(watch, "touch") == 0;
+    if (watch[0] != '\0' && !watch_pwr && !watch_touch) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "watch must be pwr or touch");
+        return ESP_OK;
+    }
+    const bool want_gyro = strcmp(gyro, "1") == 0;
+
+    char *body = malloc(BOARD_PROBE_JSON_CAP);
+    jr_probe_report_t *rep = calloc(1, sizeof *rep);
+    if (body == NULL || rep == NULL) {
+        free(body);
+        free(rep);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_OK;
+    }
+
+    jr_probe_te(BOARD_PROBE_TE_MS, &rep->te);
+    jr_probe_pwr_key(watch_pwr ? BOARD_PROBE_PWR_MS : 0, &rep->pwr_key);
+    jr_imu_probe(want_gyro, &rep->imu);
+    jr_hal_touch_probe(watch_touch ? BOARD_PROBE_TOUCH_MS : 0, &rep->touch);
+    jr_power_probe(&rep->pmic);
+    rep->spi_hz = BOARD_PROBE_SPI_HZ;
+    rep->spi_source = "library macro default, not overridden";
+
+    const int n = jr_probe_report_json(rep, body, BOARD_PROBE_JSON_CAP);
+    free(rep);
+    if (n < 0) {
+        free(body);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "board report overflow");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, body, n);
     free(body);
     return ESP_OK;
 }
@@ -1069,8 +2284,274 @@ static esp_err_t hud_toggle_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* POST /api/display/holo?on=0|1 — toggle Wave 4 / Glass 3.0 3D Geodesic Core. */
+static esp_err_t holo_toggle_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    int on = 1;
+    if (!query_int(req, "on", &on) || (on != 0 && on != 1)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "on must be 0 or 1");
+        return ESP_OK;
+    }
+    jr_display_holo_set(on != 0);
+    char body[64];
+    int n = snprintf(body, sizeof body, "{\"ok\":true,\"holo\":%s}", on ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
+/* POST /api/display/glass3?mode=auto|chrono|aetherium|classic — switch Glass 3.0 ring mode. */
+static esp_err_t glass3_mode_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    char q[24] = {0};
+    if (query_str(req, "mode", q, sizeof q)) {
+        if (strcmp(q, "auto") == 0) {
+            jr_display_glass3_set(JR_GLASS3_AUTO);
+        } else if (strcmp(q, "chrono") == 0) {
+            jr_display_glass3_set(JR_GLASS3_CHRONO);
+        } else if (strcmp(q, "aetherium") == 0) {
+            jr_display_glass3_set(JR_GLASS3_AETHERIUM);
+        } else if (strcmp(q, "classic") == 0) {
+            jr_display_glass3_set(JR_GLASS3_CLASSIC);
+        } else {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "mode must be auto|chrono|aetherium|classic");
+            return ESP_OK;
+        }
+    }
+    const jr_glass3_mode_t cur = jr_display_glass3_get();
+    char body[96];
+    int n = snprintf(body, sizeof body,
+                     "{\"ok\":true,\"glass3_mode\":\"%s\",\"glass3\":%s}",
+                     jr_display_glass3_name(cur),
+                     cur != JR_GLASS3_CLASSIC ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
+/* POST /api/debug/cue?kind=tick|scrub|confirm|dismiss|limit|mode|mute_on|mute_off|wake|timer
+ * Audition Glass 3.0 sculpted 24 kHz acoustic feedback from Command Deck. */
+static esp_err_t cue_audition_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    char kind[20] = {0};
+    if (!query_str(req, "kind", kind, sizeof kind)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "kind required");
+        return ESP_OK;
+    }
+    esp_err_t err = ESP_OK;
+    if (strcmp(kind, "wake") == 0) {
+        jr_audio_play_wake_cue();
+    } else if (strcmp(kind, "timer") == 0) {
+        jr_audio_play_timer_chime();
+    } else {
+        jr_cue_kind_t ck = JR_CUE_KIND_COUNT;
+        if (strcmp(kind, "tick") == 0)           ck = JR_CUE_TICK;
+        else if (strcmp(kind, "scrub") == 0)     ck = JR_CUE_SCRUB;
+        else if (strcmp(kind, "confirm") == 0)   ck = JR_CUE_CONFIRM;
+        else if (strcmp(kind, "dismiss") == 0)   ck = JR_CUE_DISMISS;
+        else if (strcmp(kind, "limit") == 0)     ck = JR_CUE_LIMIT;
+        else if (strcmp(kind, "mode") == 0)      ck = JR_CUE_MODE;
+        else if (strcmp(kind, "mute_on") == 0)   ck = JR_CUE_MUTE_ON;
+        else if (strcmp(kind, "mute_off") == 0)  ck = JR_CUE_MUTE_OFF;
+        else {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "unknown cue kind");
+            return ESP_OK;
+        }
+        err = jr_audio_play_cue(ck, jr_cue_amplitude_permille(ck, s_out_vol));
+    }
+    char body[96];
+    int n = snprintf(body, sizeof body, "{\"ok\":%s,\"kind\":\"%s\",\"err\":\"%s\"}",
+                     err == ESP_OK ? "true" : "false", kind, esp_err_to_name(err));
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
+/* The charge route copies only the sampler's fixed cache. Request input never
+ * chooses an address or starts I2C, and settings are limits, not current draw.
+ * Small chunks avoid a multi-kilobyte allocation from the TLS internal heap. */
+static esp_err_t power_charge_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req)) { return ESP_OK; }
+    jr_power_charge_t sample;
+    const esp_err_t read_error = jr_power_charge_read(&sample);
+    jr_power_charge_decoded_t decoded;
+    jr_power_charge_decode(&sample, &decoded);
+    char body[384];
+    int n = snprintf(body, sizeof body,
+        "{\"read_error\":\"%s\",\"complete\":%s,\"sample_seq\":%u,"
+        "\"age_ms\":%u,\"span_ms\":%u,\"started_ms\":%llu,\"completed_ms\":%llu,"
+        "\"atomic_snapshot\":false,\"measured_current\":false,\"registers\":[",
+        esp_err_to_name(read_error), sample.complete ? "true" : "false",
+        (unsigned)sample.sample_seq, (unsigned)sample.age_ms,
+        (unsigned)sample.span_ms, (unsigned long long)sample.started_ms,
+        (unsigned long long)sample.completed_ms);
+    if (n < 0 || (size_t)n >= sizeof body) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "charge encoding failed");
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t err = httpd_resp_send_chunk(req, body, (size_t)n);
+    if (err != ESP_OK) { return err; }
+    for (size_t i = 0; i < JR_POWER_CHARGE_REG_COUNT; ++i) {
+        const jr_power_charge_reg_t *reg = &sample.regs[i];
+        n = snprintf(body, sizeof body,
+            "%s{\"address\":%u,\"raw\":%u,\"attempted\":%s,\"read_ok\":%s,"
+            "\"available\":%s,\"has_success\":%s,\"error\":%ld,"
+            "\"attempt_age_ms\":%u,\"last_success_age_ms\":%u}",
+            i ? "," : "", (unsigned)reg->address, (unsigned)reg->raw,
+            reg->attempted ? "true" : "false", reg->read_ok ? "true" : "false",
+            reg->available ? "true" : "false", reg->has_success ? "true" : "false",
+            (long)reg->error, (unsigned)reg->attempt_age_ms,
+            (unsigned)reg->last_success_age_ms);
+        if (n < 0 || (size_t)n >= sizeof body) { return ESP_FAIL; }
+        err = httpd_resp_send_chunk(req, body, (size_t)n);
+        if (err != ESP_OK) { return err; }
+    }
+    err = httpd_resp_sendstr_chunk(req, "],\"decoded\":{");
+    if (err != ESP_OK) { return err; }
+    const struct {
+        const char *name;
+        jr_power_charge_value_t value;
+    } fields[] = {
+        {"usb_present", decoded.usb_present},
+        {"battery_present", decoded.battery_present},
+        {"thermal_regulation", decoded.thermal_regulation},
+        {"current_limited", decoded.current_limited},
+        {"direction", decoded.direction},
+        {"charge_phase", decoded.charge_phase},
+        {"vindpm_active", decoded.vindpm_active},
+        {"vindpm_millivolts", decoded.vindpm_millivolts},
+        {"input_limit_milliamps", decoded.input_limit_milliamps},
+        {"charge_enabled", decoded.charge_enabled},
+        {"precharge_milliamps", decoded.precharge_milliamps},
+        {"constant_current_milliamps", decoded.constant_current_milliamps},
+        {"termination_enabled", decoded.termination_enabled},
+        {"termination_milliamps", decoded.termination_milliamps},
+        {"cv_millivolts", decoded.cv_millivolts},
+        {"thermal_threshold_c", decoded.thermal_threshold_c},
+        {"precharge_timeout_enabled", decoded.precharge_timeout_enabled},
+        {"precharge_timeout_minutes", decoded.precharge_timeout_minutes},
+        {"charge_timeout_enabled", decoded.charge_timeout_enabled},
+        {"charge_timeout_hours", decoded.charge_timeout_hours},
+        {"timeout_slows_when_limited", decoded.timeout_slows_when_limited},
+    };
+    for (size_t i = 0; i < sizeof fields / sizeof fields[0]; ++i) {
+        char value[16] = "null";
+        if (fields[i].value.available) {
+            (void)snprintf(value, sizeof value, "%u", (unsigned)fields[i].value.value);
+        }
+        n = snprintf(body, sizeof body, "%s\"%s\":%s",
+                     i ? "," : "", fields[i].name, value);
+        if (n < 0 || (size_t)n >= sizeof body) { return ESP_FAIL; }
+        err = httpd_resp_send_chunk(req, body, (size_t)n);
+        if (err != ESP_OK) { return err; }
+    }
+    err = httpd_resp_sendstr_chunk(req, "}}");
+    return err == ESP_OK ? httpd_resp_send_chunk(req, NULL, 0) : err;
+}
+
+/* POST /api/power/care?enable=1|0 — toggle 80% Desk Battery Care (or JSON
+ * body {"enable":true|false}). Pairing token + control intent required. */
+static esp_err_t power_care_post_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    bool have_enable = false;
+    bool enable = false;
+    char q[64] = {0};
+    char v[16] = {0};
+    if (httpd_req_get_url_query_str(req, q, sizeof q) == ESP_OK &&
+        httpd_query_key_value(q, "enable", v, sizeof v) == ESP_OK &&
+        v[0] != '\0') {
+        if (strcmp(v, "1") == 0 || strcasecmp(v, "true") == 0 ||
+            strcasecmp(v, "on") == 0) {
+            have_enable = true;
+            enable = true;
+        } else if (strcmp(v, "0") == 0 || strcasecmp(v, "false") == 0 ||
+                   strcasecmp(v, "off") == 0) {
+            have_enable = true;
+            enable = false;
+        }
+    }
+    if (!have_enable && req->content_len > 0 && req->content_len <= 128) {
+        char jbuf[129] = {0};
+        size_t got = 0U;
+        while (got < (size_t)req->content_len) {
+            int r = httpd_req_recv(req, jbuf + got,
+                                   (size_t)req->content_len - got);
+            if (r <= 0) {
+                break;
+            }
+            got += (size_t)r;
+        }
+        jbuf[got] = '\0';
+        cJSON *root = cJSON_Parse(jbuf);
+        if (root != NULL) {
+            const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, "enable");
+            if (item == NULL) {
+                item = cJSON_GetObjectItemCaseSensitive(root, "enabled");
+            }
+            if (cJSON_IsBool(item)) {
+                have_enable = true;
+                enable = cJSON_IsTrue(item);
+            } else if (cJSON_IsNumber(item)) {
+                have_enable = true;
+                enable = item->valuedouble != 0.0;
+            }
+            cJSON_Delete(root);
+        }
+    }
+    if (!have_enable) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "enable=1|0 or JSON {\"enable\":bool} required");
+        return ESP_OK;
+    }
+    const esp_err_t err = app_set_battery_care(enable);
+    if (err != ESP_OK) {
+        char ebuf[96];
+        int en = snprintf(ebuf, sizeof ebuf,
+                          "{\"ok\":false,\"error\":\"%s\"}",
+                          esp_err_to_name(err));
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+        httpd_resp_send(req, ebuf, en > 0 && (size_t)en < sizeof ebuf ? en : 0);
+        return ESP_OK;
+    }
+    jr_power_care_status_t care = {0};
+    jr_power_care_status(&care);
+    char body[224];
+    int n = snprintf(body, sizeof body,
+                     "{\"ok\":true,\"care_enabled\":%s,\"holding\":%s,"
+                     "\"cv_mv\":%u,\"icc_ma\":%u,"
+                     "\"thermal_throttle\":%s,\"thermal_pause\":%s}",
+                     care.enabled ? "true" : "false",
+                     care.holding ? "true" : "false",
+                     (unsigned)care.cv_mv,
+                     (unsigned)care.icc_ma,
+                     care.thermal_throttle ? "true" : "false",
+                     care.thermal_pause ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, body, n > 0 && (size_t)n < sizeof body ? n : 0);
+    return ESP_OK;
+}
+
 static esp_err_t sensors_handler(httpd_req_t *req)
 {
+    http_note_activity();
     /* Start the samplers on first use rather than at boot — see the note in
      * app_main(). Both calls are idempotent. The first request after boot
      * therefore reports available=false while the samplers warm up (one 10 ms
@@ -1082,8 +2563,18 @@ static esp_err_t sensors_handler(httpd_req_t *req)
     jr_power_t bat = {0};
     const bool have_imu = jr_imu_read(&imu) == ESP_OK;
     const bool have_bat = jr_power_read(&bat) == ESP_OK;
+    jr_power_care_status_t care = {0};
+    jr_power_care_status(&care);
+    jr_power_analytics_t ana = {0};
+    app_power_analytics_get(&ana);
+    char pmic_die_str[12];
+    if (care.pmic_die_c != (int8_t)-128) {
+        snprintf(pmic_die_str, sizeof pmic_die_str, "%d", (int)care.pmic_die_c);
+    } else {
+        strlcpy(pmic_die_str, "null", sizeof pmic_die_str);
+    }
 
-    char body[768];
+    char body[1536];
     int n = snprintf(body, sizeof body,
         "{\"imu\":{\"available\":%s,\"present\":%s,\"i2c_addr\":\"0x%02X\","
         "\"raw\":{\"ax\":%d,\"ay\":%d,\"az\":%d},"
@@ -1093,7 +2584,16 @@ static esp_err_t sensors_handler(httpd_req_t *req)
         "\"sample_seq\":%u,\"age_ms\":%u},"
         "\"battery\":{\"available\":%s,\"present\":%s,\"charging\":%s,"
         "\"usb_present\":%s,\"percent\":%d,\"millivolts\":%u,"
-        "\"sample_seq\":%u,\"age_ms\":%u}}",
+        "\"sample_seq\":%u,\"age_ms\":%u},"
+        "\"pmic_die_c\":%s,\"vbus_mv\":%u,\"vsys_mv\":%u,"
+        "\"pmic_i2c_err\":%u,\"imu_i2c_err\":%u,"
+        "\"power_care\":{\"enabled\":%s,\"holding\":%s,"
+        "\"thermal_throttle\":%s,\"thermal_pause\":%s,"
+        "\"cv_mv\":%u,\"icc_ma\":%u},"
+        "\"battery_analytics\":{\"rate_valid\":%s,\"rate_pct_hr\":%.1f,"
+        "\"mv_per_hr\":%d,\"eta_empty_min\":%d,\"eta_full_min\":%d,"
+        "\"sag_mv\":%u,\"chip_c_max\":%d,\"pmic_c_max\":%d,"
+        "\"time_on_bat_s\":%u,\"time_on_usb_s\":%u}}",
         have_imu ? "true" : "false",
         imu.present ? "true" : "false",
         (unsigned)imu.i2c_addr,
@@ -1111,7 +2611,28 @@ static esp_err_t sensors_handler(httpd_req_t *req)
         bat.usb_present ? "true" : "false",
         bat.percent == 0xFF ? -1 : (int)bat.percent,
         (unsigned)bat.millivolts,
-        (unsigned)bat.sample_seq, (unsigned)bat.age_ms);
+        (unsigned)bat.sample_seq, (unsigned)bat.age_ms,
+        pmic_die_str,
+        (unsigned)care.vbus_mv,
+        (unsigned)care.vsys_mv,
+        (unsigned)jr_power_i2c_errors(),
+        (unsigned)jr_imu_i2c_errors(),
+        care.enabled ? "true" : "false",
+        care.holding ? "true" : "false",
+        care.thermal_throttle ? "true" : "false",
+        care.thermal_pause ? "true" : "false",
+        (unsigned)care.cv_mv,
+        (unsigned)care.icc_ma,
+        ana.rate_valid ? "true" : "false",
+        (double)ana.rate_pct_x10_hr / 10.0,
+        (int)ana.mv_per_hr,
+        (int)ana.eta_empty_min,
+        (int)ana.eta_full_min,
+        (unsigned)ana.sag_mv,
+        (int)ana.chip_c_max,
+        (int)ana.pmic_c_max,
+        (unsigned)ana.time_on_bat_s,
+        (unsigned)ana.time_on_usb_s);
     if (n < 0 || (size_t)n >= sizeof body) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             "sensor status encoding failed");
@@ -1125,6 +2646,7 @@ static esp_err_t sensors_handler(httpd_req_t *req)
 
 static esp_err_t touch_status_handler(httpd_req_t *req)
 {
+    http_note_activity();
     bool active = atomic_load(&s_touch_challenge_active);
     bool verified = atomic_load(&s_touch_challenge_verified);
     char body[768];
@@ -1400,6 +2922,7 @@ static esp_err_t pairing_claim_handler(httpd_req_t *req)
 
 static bool pairing_token_required(httpd_req_t *req)
 {
+    http_note_activity();
     static const char *header = "X-JarvisNano-Token";
     size_t length = httpd_req_get_hdr_value_len(req, header);
     if (length == 0U || length >= JR_CFG_PAIRING_TOKEN_CAP) {
@@ -1432,6 +2955,7 @@ static bool pairing_token_required(httpd_req_t *req)
 
 static bool agent_require_auth(httpd_req_t *req)
 {
+    http_note_activity();
 #if JR_DEV_OPEN_DIAGNOSTICS
     (void)req;
     return true;
@@ -1756,6 +3280,8 @@ bool brain_surface_handle_tap(uint16_t x, uint16_t y, uint32_t now,
          * Lose one tap rather than route it to the microphone underneath. */
         return true;
     }
+    bool tapped_action = false;
+    bool tapped_dismiss = false;
     if (s_brain_surface.active &&
         (int32_t)(now - s_brain_surface.expires_ms) < 0) {
         owned = true;
@@ -1783,6 +3309,11 @@ bool brain_surface_handle_tap(uint16_t x, uint16_t y, uint32_t now,
             action_id = "dismiss";
         }
         if (action_id != NULL) {
+            tapped_action = true;
+            tapped_dismiss =
+                strcasecmp(action_id, "deny") == 0 ||
+                strcasecmp(action_id, "dismiss") == 0 ||
+                strcasecmp(action_id, "cancel") == 0;
             uint32_t seq = ++s_brain_event_seq;
             brain_action_event_t *event =
                 &s_brain_events[(seq - 1U) % BRAIN_EVENT_CAP];
@@ -1815,6 +3346,12 @@ bool brain_surface_handle_tap(uint16_t x, uint16_t y, uint32_t now,
         configASSERT(!jr_display_surface_is_active());
     }
     xSemaphoreGive(s_brain_lock);
+    if (tapped_action) {
+        jr_display_ripple(x, y);
+        if (physical) {
+            app_play_soft_cue(tapped_dismiss ? JR_CUE_DISMISS : JR_CUE_CONFIRM);
+        }
+    }
     return owned;
 }
 
@@ -1858,6 +3395,9 @@ void panic_home_clear_glass(void)
         ESP_LOGW(TAG, "ui: panic-home cleared glass without brain lock");
     }
     jr_display_dismiss_choices();
+    const desk_mode_req_t normal_req = { .mode = JR_DESK_NORMAL };
+    desk_mode_request_async(&normal_req);
+    jr_display_desk_mode_set(0U, 0U, 0U, 0U, 0U, 0U, 4U, false, "");
     jr_display_nav_home();
     s_ui_shade_open = false;
     s_watch_peek_until_ms = 0U;
@@ -1903,6 +3443,7 @@ bool operator_mode_release(uint32_t now, const char *reason,
     atomic_store(&s_companion_audio_last_accepted, 0U);
     atomic_store(&s_companion_audio_lease_id, 0U);
     atomic_store(&s_companion_audio_last_end, false);
+    jr_display_canvas_clear();
     if (s_brain_surface.active && !s_brain_surface.local_owned) {
         jr_display_surface_dismiss();
         s_brain_surface.active = false;
@@ -1921,7 +3462,8 @@ bool operator_mode_release(uint32_t now, const char *reason,
 
     if (physical_feedback && !privacy_held) {
         jr_display_bloom();
-        (void)jr_audio_diag_play_chirp(160U, 8U);
+        (void)jr_audio_play_cue(JR_CUE_MODE,
+                                jr_cue_amplitude_permille(JR_CUE_MODE, s_out_vol));
     }
     ESP_LOGI(TAG, "operator: %s mode released (%s)",
              operator_owner_name(released_owner), reason);
@@ -2471,6 +4013,13 @@ static esp_err_t brain_inbox_handler(httpd_req_t *req)
     uint32_t next_seq = s_brain_inbox_seq_hwm + 1U;
     xSemaphoreGive(s_brain_lock);
 
+    if (present) {
+        atomic_store(&s_glass_poke_req, true);
+        if (!update) {
+            app_play_soft_cue(JR_CUE_MODE);
+        }
+    }
+
     char accepted[96];
     int n = snprintf(accepted, sizeof accepted,
         "{\"ok\":true,\"accepted\":true,\"next_inbox_seq\":%u}",
@@ -2579,6 +4128,11 @@ static esp_err_t brain_outbox_handler(httpd_req_t *req)
     return err;
 }
 
+/* The cockpit snapshot buffer. Lives in PSRAM so expanding for Glass 3.5
+ * (desk mode, silent timer, tagged/done notes, weather, power, HBM/TE stats)
+ * costs 0 internal RAM. */
+#define COCKPIT_BODY_CAP 8192U
+
 static esp_err_t cockpit_handler(httpd_req_t *req)
 {
     if (!agent_require_auth(req)) {
@@ -2626,7 +4180,7 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         xSemaphoreGive(s_brain_lock);
     }
 
-    char *body = heap_caps_malloc(4096U, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    char *body = heap_caps_malloc(COCKPIT_BODY_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (body == NULL) {
         httpd_resp_set_status(req, "503 Service Unavailable");
         httpd_resp_sendstr(req, "cockpit snapshot unavailable");
@@ -2640,24 +4194,39 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
     bool challenge_active = atomic_load(&s_touch_challenge_active);
     bool challenge_verified = atomic_load(&s_touch_challenge_verified);
     bool tools_ready = atomic_load(&s_tool_diag.worker_ready);
-    bool tools_configured = tools_ready && jr_tools_is_configured();
+    /* "configured" means USABLE: a key stored and a gateway that answers. The
+     * reason it is not is the next field. */
+    bool tools_configured = tools_ready && device_gateway_usable();
+    char last_target[JR_TOOLS_NAME_CAP];
+    jr_tools_last_target(last_target, sizeof last_target);
+    bool te_sync = false;
+    uint32_t te_waits = 0U, te_timeouts = 0U;
+    jr_display_get_te_stats(&te_sync, &te_waits, &te_timeouts);
     size_t used = 0U;
-    int n = snprintf(body, 4096U,
-        "{\"uptime_ms\":%u,\"memory\":{\"free_internal\":%u,"
+    int n = snprintf(body, COCKPIT_BODY_CAP,
+        "{\"uptime_ms\":%u,\"ui_sounds\":%s,\"memory\":{\"free_internal\":%u,"
         "\"largest_internal_block\":%u,\"free_psram\":%u},"
         "\"network\":{\"connected\":%s,"
-        "\"ip\":\"%s\",\"rssi\":%d},\"voice\":{\"phase\":\"%s\","
+        "\"ip\":\"%s\",\"rssi\":%d,\"channel\":%u,\"disconnects\":%u,"
+        "\"retry_count\":%u,\"last_disconnect_reason\":%u,\"ps_level\":\"%s\"},"
+        "\"voice\":{\"phase\":\"%s\","
         "\"voice_armed\":%s,\"always_ready\":true,"
         "\"privacy_paused\":%s,\"mood\":\"%s\",\"brightness\":%u,"
         "\"rtc\":%s,\"capturing\":%s,\"ws_connected\":%s,"
         "\"auto_idle_ms\":%u,\"mic_rms\":%.1f,\"clean_rms\":%.1f,"
         "\"vad_clean\":%s,"
         "\"vad_starts\":%u,"
+        "\"unanswered\":%u,\"answered\":%u,\"srv_interrupts\":%u,"
+        "\"phantom_interrupts\":%u,"
+        "\"echo_gate\":%s,\"echo_gated_frames\":%u,"
+        "\"echo_passed_frames\":%u,\"reply_cuts\":%u,"
+        "\"reply_cut_dropped_chunks\":%u,\"wake_cuts\":%u,"
+        "\"mic_dead\":%s,\"mic_recoveries\":%u,"
         "\"audio_diag_running\":%s},\"tools\":{"
         "\"execution\":\"on_device\",\"worker_ready\":%s,"
-        "\"configured\":%s,\"declared\":%u,\"last_tool\":\"%s\","
+        "\"configured\":%s,\"why\":\"%s\",\"declared\":%u,\"last_tool\":\"%s\","
         "\"last_status\":\"%s\",\"last_http_status\":%d,"
-        "\"last_duration_ms\":%u,"
+        "\"last_duration_ms\":%u,\"oversize\":%u,\"last_target\":\"%s\","
         "\"calls_received\":%u,\"submitted\":%u,\"submit_rejected\":%u,"
         "\"completed\":%u,"
         "\"succeeded\":%u,\"failed\":%u,\"cancelled\":%u,"
@@ -2666,9 +4235,11 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         "\"consent_prompted\":%u,\"consent_approved\":%u,"
         "\"consent_denied\":%u,\"consent_timed_out\":%u,"
         "\"consent_cancelled\":%u},\"display\":{\"init\":\"%s\","
-        "\"actual_fps\":%u,\"flush_completions\":%u,\"flush_errors\":%u,"
+        "\"actual_fps\":%u,\"render_frame_us\":%u,"
+        "\"flush_completions\":%u,\"flush_errors\":%u,"
         "\"requested_face\":%d,\"applied_face\":%d,"
-        "\"choices_active\":%s,\"watch_style\":\"%s\","
+        "\"choices_active\":%s,\"space\":\"%s\",\"watch_style\":\"%s\","
+        "\"hbm\":%s,\"holo\":%s,\"hud\":%s,\"glass3_mode\":\"%s\",\"te_sync\":%s,\"te_waits\":%u,\"te_timeouts\":%u,"
         "\"sun_rise_min\":%d,\"sun_set_min\":%d},\"touch\":{"
         "\"events\":%u,\"last\":{\"kind\":\"%s\",\"x\":%u,\"y\":%u},"
         "\"shade_open\":%s,\"panel_touch_challenge\":{\"pending\":%s,"
@@ -2677,11 +4248,15 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         "\"agent\":{\"active\":%s,\"revision_hwm\":%u,"
         "\"next_revision\":%u",
         (unsigned)now,
+        atomic_load(&s_ui_sounds) ? "true" : "false",
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
         net.sta_connected ? "true" : "false", net.sta_ip,
-        (int)net.rssi, jr_state_name(voice->phase),
+        (int)net.rssi, (unsigned)net.channel, (unsigned)net.disconnects,
+        (unsigned)net.retry_count, (unsigned)net.last_disconnect_reason,
+        net_ps_level_name(jr_net_get_ps_level()),
+        jr_state_name(voice->phase),
         voice->phase != JR_ST_IDLE && voice->phase != JR_ST_DRAINING &&
             voice->phase != JR_ST_FATAL ? "true" : "false",
         atomic_load(&s_voice_privacy_paused) ? "true" : "false",
@@ -2694,15 +4269,27 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         (double)jr_audio_clean_rms(),
         atomic_load(&s_vad_use_clean) ? "true" : "false",
         (unsigned)s_app.vad_starts,
+        (unsigned)s_utt.misses_total, (unsigned)s_utt.answered_total,
+        (unsigned)atomic_load(&s_srv_interrupts),
+        (unsigned)atomic_load(&s_srv_phantom_interrupts),
+        atomic_load(&s_echo_gate_enabled) ? "true" : "false",
+        (unsigned)s_echo_gate.gated_frames,
+        (unsigned)s_echo_gate.passed_frames,
+        (unsigned)s_reply_cut.cuts, (unsigned)s_reply_cut.dropped_chunks,
+        (unsigned)atomic_load(&s_wake_cuts),
+        jr_audio_mic_dead() ? "true" : "false",
+        (unsigned)jr_audio_mic_recoveries(),
         (int32_t)(atomic_load(&s_audio_diag_until_ms) - now) > 0
             ? "true" : "false",
         tools_ready ? "true" : "false",
         tools_configured ? "true" : "false",
-        (unsigned)DEVICE_TOOL_DECL_COUNT,
+        device_gateway_why(),
+        (unsigned)device_declared_tools(),
         device_tool_last_name(),
         device_tool_last_status(),
         atomic_load(&s_tool_diag.last_http_status),
         (unsigned)atomic_load(&s_tool_diag.last_duration_ms),
+        (unsigned)jr_tools_oversize_count(), last_target,
         (unsigned)atomic_load(&s_tool_diag.calls_received),
         (unsigned)atomic_load(&s_tool_diag.submitted),
         (unsigned)atomic_load(&s_tool_diag.submit_rejected),
@@ -2723,11 +4310,19 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         display.init_state == JR_DISPLAY_INIT_STARTING ? "starting" :
         display.init_state == JR_DISPLAY_INIT_FAILED ? "failed" : "stopped",
         (unsigned)display.actual_fps,
+        (unsigned)display.render_frame_us,
         (unsigned)display.flush_completions,
         (unsigned)display.flush_errors,
         (int)display.requested_face, (int)display.applied_face,
         jr_display_choices_active() ? "true" : "false",
+        device_glass_space_name(jr_display_nav_space()),
         jr_display_watch_style_name(jr_display_watch_style()),
+        jr_display_get_hbm() ? "true" : "false",
+        jr_display_holo_get() ? "true" : "false",
+        jr_display_hud_enabled() ? "true" : "false",
+        jr_display_glass3_name(jr_display_glass3_get()),
+        te_sync ? "true" : "false",
+        (unsigned)te_waits, (unsigned)te_timeouts,
         (int)s_wx_sun_rise_min, (int)s_wx_sun_set_min,
         (unsigned)atomic_load(&s_touch_events),
         touch_kind_name((jr_input_kind_t)atomic_load(&s_touch_last_kind)),
@@ -2743,7 +4338,7 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         (unsigned)atomic_load(&s_touch_challenge_last_latency_ms),
         agent.active ? "true" : "false",
         (unsigned)agent_revision_hwm, (unsigned)agent_next_revision);
-    if (n < 0 || (size_t)n >= 4096U) {
+    if (n < 0 || (size_t)n >= COCKPIT_BODY_CAP) {
         heap_caps_free(body);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             "cockpit encoding failed");
@@ -2753,59 +4348,202 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
     if (agent.active) {
         uint32_t ttl_ms = (int32_t)(agent.expires_ms - now) > 0
             ? agent.expires_ms - now : 0U;
-        n = snprintf(body + used, 4096U - used,
+        n = snprintf(body + used, COCKPIT_BODY_CAP - used,
             ",\"task_id\":\"%s\",\"revision\":%u,\"state\":\"%s\","
             "\"progress\":%u,\"title\":\"%s\",\"summary\":\"%s\","
             "\"ttl_ms\":%u,\"evidence\":[",
             agent.task_id, (unsigned)agent.revision, agent.state,
             (unsigned)agent.progress, agent.title, agent.summary,
             (unsigned)ttl_ms);
-        if (n < 0 || (size_t)n >= 4096U - used) {
-            used = 4096U;
+        if (n < 0 || (size_t)n >= COCKPIT_BODY_CAP - used) {
+            used = COCKPIT_BODY_CAP;
         } else {
             used += (size_t)n;
             for (uint8_t i = 0; i < agent.evidence_count; ++i) {
-                n = snprintf(body + used, 4096U - used,
+                n = snprintf(body + used, COCKPIT_BODY_CAP - used,
                     "%s{\"label\":\"%s\",\"state\":\"%s\"}",
                     i == 0 ? "" : ",", agent.evidence[i].label,
                     agent.evidence[i].state);
-                if (n < 0 || (size_t)n >= 4096U - used) {
-                    used = 4096U;
+                if (n < 0 || (size_t)n >= COCKPIT_BODY_CAP - used) {
+                    used = COCKPIT_BODY_CAP;
                     break;
                 }
                 used += (size_t)n;
             }
-            if (used < 4096U) {
-                n = snprintf(body + used, 4096U - used, "]");
-                used += n > 0 ? (size_t)n : 4096U;
+            if (used < COCKPIT_BODY_CAP) {
+                n = snprintf(body + used, COCKPIT_BODY_CAP - used, "]");
+                used += n > 0 ? (size_t)n : COCKPIT_BODY_CAP;
             }
         }
     }
-    if (used < 4096U) {
+    if (used < COCKPIT_BODY_CAP) {
+        timer_snap_t tsnap = {0};
+        portENTER_CRITICAL(&s_timer_mux);
+        tsnap = s_timer_snap;
+        portEXIT_CRITICAL(&s_timer_mux);
+        desk_mode_snap_t dsnap = {0};
+        desk_mode_snapshot(&dsnap);
+        stopwatch_snap_t sw = {0};
+        device_stopwatch_snapshot(now, &sw);
+        jr_power_t bat = {0};
+        const bool have_bat = jr_power_read(&bat) == ESP_OK && bat.present;
+        float chip_c = 0.0f;
+        const bool have_chip = device_chip_temp_c(&chip_c);
+        const uint32_t wx_age_s = s_weather.valid
+            ? (uint32_t)((now - s_weather.fetched_ms) / 1000U) : 0U;
         uint32_t surface_ttl_ms = brain_surface.active &&
             (int32_t)(brain_surface.expires_ms - now) > 0
             ? brain_surface.expires_ms - now : 0U;
-        n = snprintf(body + used, 4096U - used,
-            "},\"brain\":{\"voice_route\":\"%s\","
-            "\"desk_connected\":%s,\"private_android_ready\":false,"
-            "\"private_android_reason\":\"BLE firmware not enabled\","
-            "\"next_inbox_seq\":%u,\"event_cursor\":%u,"
-            "\"surface_active\":%s,\"surface_kind\":\"%s\","
-            "\"surface_title\":\"%s\",\"surface_ttl_ms\":%u}}",
-            voice_route, desk_connected ? "true" : "false",
-            (unsigned)brain_inbox_next, (unsigned)brain_event_cursor,
-            brain_surface.active ? "true" : "false",
-            brain_surface.active
-                ? brain_surface_kind_name(brain_surface.view.kind) : "none",
-            brain_surface.active ? brain_surface.view.title : "",
-            (unsigned)surface_ttl_ms);
-        if (n > 0 && (size_t)n < 4096U - used) {
+        n = snprintf(body + used, COCKPIT_BODY_CAP - used,
+            "},\"desk\":{\"mode\":\"%s\",\"rem_s\":%u,\"sessions_today\":%u,"
+            "\"minutes_today\":%u,\"breathe_phase\":\"%s\"},"
+            "\"timer\":{\"active\":%s,\"ringing\":%s,\"silent\":%s,\"rem_s\":%u,"
+            "\"total_s\":%u,\"pct_left\":%u,\"label\":\"%s\",\"count\":%u},"
+            "\"stopwatch\":{\"active\":%s,\"running\":%s,\"elapsed_ms\":%u,\"laps\":[",
+            desk_mode_api_name(dsnap.mode),
+            (unsigned)dsnap.rem_s,
+            (unsigned)dsnap.sessions_today,
+            (unsigned)dsnap.minutes_today,
+            dsnap.mode == JR_DESK_BREATHE
+                ? desk_breathe_phase_api_name(dsnap.breathe_phase) : "",
+            tsnap.active ? "true" : "false",
+            tsnap.ringing ? "true" : "false",
+            tsnap.silent ? "true" : "false",
+            (unsigned)tsnap.rem_s,
+            (unsigned)tsnap.total_s,
+            (unsigned)tsnap.pct_left,
+            tsnap.label,
+            (unsigned)tsnap.count,
+            sw.active ? "true" : "false",
+            sw.running ? "true" : "false",
+            (unsigned)sw.elapsed_ms);
+        if (n > 0 && (size_t)n < COCKPIT_BODY_CAP - used) {
             used += (size_t)n;
         } else {
-            used = 4096U;
+            used = COCKPIT_BODY_CAP;
+        }
+        for (uint8_t i = 0U; i < sw.lap_count && i < JR_STOPWATCH_MAX_LAPS &&
+                             used < COCKPIT_BODY_CAP; ++i) {
+            n = snprintf(body + used, COCKPIT_BODY_CAP - used, "%s%u",
+                         i == 0U ? "" : ",", (unsigned)sw.laps_ms[i]);
+            if (n > 0 && (size_t)n < COCKPIT_BODY_CAP - used) {
+                used += (size_t)n;
+            } else {
+                used = COCKPIT_BODY_CAP;
+            }
+        }
+        if (used < COCKPIT_BODY_CAP) {
+            jr_note_bank_t *nb = heap_caps_calloc(1, sizeof(*nb),
+                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (nb == NULL) {
+                nb = calloc(1, sizeof(*nb));
+            }
+            if (nb != NULL) {
+                device_notes_snapshot(nb);
+            }
+            const unsigned ncnt = nb != NULL ? (unsigned)nb->count : 0U;
+            n = snprintf(body + used, COCKPIT_BODY_CAP - used,
+                         "]},\"notes\":{\"count\":%u,\"items\":[", ncnt);
+            if (n > 0 && (size_t)n < COCKPIT_BODY_CAP - used) {
+                used += (size_t)n;
+            } else {
+                used = COCKPIT_BODY_CAP;
+            }
+            for (unsigned i = 0U; nb != NULL && i < ncnt && i < JR_NOTES_MAX &&
+                                  used < COCKPIT_BODY_CAP; ++i) {
+                const jr_note_item_t *it = &nb->items[i];
+                n = snprintf(body + used, COCKPIT_BODY_CAP - used,
+                             "%s{\"id\":%u,\"text\":\"%s\",\"done\":%s,\"tag\":\"%s\"}",
+                             i == 0U ? "" : ",",
+                             (unsigned)it->id, it->text,
+                             it->done ? "true" : "false",
+                             it->tag == (uint8_t)JR_NOTE_TAG_WORK ? "work" : "life");
+                if (n > 0 && (size_t)n < COCKPIT_BODY_CAP - used) {
+                    used += (size_t)n;
+                } else {
+                    used = COCKPIT_BODY_CAP;
+                }
+            }
+            free(nb);
+        }
+        if (used < COCKPIT_BODY_CAP) {
+            uint8_t spec[16] = {0};
+            jr_audio_get_spectrum(spec);
+            const bool op_active = operator_mode_active(now);
+            const uint32_t op_until = atomic_load(&s_operator_lease_until_ms);
+            const uint32_t op_ttl_ms = op_active && (int32_t)(op_until - now) > 0
+                ? op_until - now : 0U;
+            const operator_mode_owner_t op_owner = op_active
+                ? (operator_mode_owner_t)atomic_load(&s_operator_mode_owner)
+                : OPERATOR_OWNER_NONE;
+            jr_power_care_status_t care = {0};
+            jr_power_care_status(&care);
+            jr_power_analytics_t ana = {0};
+            app_power_analytics_get(&ana);
+            const int32_t care_eta_min = (have_bat && bat.usb_present)
+                ? ana.eta_full_min : ana.eta_empty_min;
+            n = snprintf(body + used, COCKPIT_BODY_CAP - used,
+                "]},\"weather\":{\"ok\":%s,\"temp_f\":%d,\"hi_f\":%d,"
+                "\"lo_f\":%d,\"cond\":\"%s\",\"rain_pct\":%u,\"age_s\":%u,"
+                "\"sun_rise_min\":%d,\"sun_set_min\":%d},"
+                "\"power\":{\"percent\":%d,\"mv\":%u,\"charging\":%s,"
+                "\"usb\":%s,\"chip_c\":%d,\"cpu_mhz\":%d},"
+                "\"power_care\":{\"enabled\":%s,\"holding\":%s,"
+                "\"eta_min\":%d,\"rate_pct_hr\":%.1f,"
+                "\"pmic_die_c\":%d,\"thermal_throttle\":%s,\"thermal_pause\":%s},"
+                "\"operator\":{\"active\":%s,\"mode\":\"%s\",\"owner\":\"%s\",\"ttl_ms\":%u},"
+                "\"brain\":{\"voice_route\":\"%s\","
+                "\"desk_connected\":%s,\"private_android_ready\":false,"
+                "\"private_android_reason\":\"BLE firmware not enabled\","
+                "\"next_inbox_seq\":%u,\"event_cursor\":%u,"
+                "\"surface_active\":%s,\"surface_kind\":\"%s\","
+                "\"surface_title\":\"%s\",\"surface_ttl_ms\":%u},"
+                "\"spectrum\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]}",
+                s_weather.valid ? "true" : "false",
+                s_weather.valid ? (int)s_weather.temp_f : 0,
+                s_weather.valid ? (int)s_weather.hi_f : 0,
+                s_weather.valid ? (int)s_weather.lo_f : 0,
+                s_weather.valid ? s_weather.condition : "",
+                s_weather.valid ? (unsigned)s_weather.rain_pct : 0U,
+                (unsigned)wx_age_s,
+                (int)s_wx_sun_rise_min, (int)s_wx_sun_set_min,
+                (have_bat && bat.percent <= 100U) ? (int)bat.percent : -1,
+                have_bat ? (unsigned)bat.millivolts : 0U,
+                (have_bat && bat.charging) ? "true" : "false",
+                (have_bat && bat.usb_present) ? "true" : "false",
+                have_chip ? (int)lroundf(chip_c) : 0,
+                atomic_load(&s_cpu_mhz),
+                care.enabled ? "true" : "false",
+                care.holding ? "true" : "false",
+                (int)care_eta_min,
+                (double)ana.rate_pct_x10_hr / 10.0,
+                (int)care.pmic_die_c,
+                care.thermal_throttle ? "true" : "false",
+                care.thermal_pause ? "true" : "false",
+                op_active ? "true" : "false",
+                operator_owner_name(op_owner),
+                op_owner == OPERATOR_OWNER_NONE
+                    ? "none" : operator_owner_name(op_owner),
+                (unsigned)op_ttl_ms,
+                voice_route, desk_connected ? "true" : "false",
+                (unsigned)brain_inbox_next, (unsigned)brain_event_cursor,
+                brain_surface.active ? "true" : "false",
+                brain_surface.active
+                    ? brain_surface_kind_name(brain_surface.view.kind) : "none",
+                brain_surface.active ? brain_surface.view.title : "",
+                (unsigned)surface_ttl_ms,
+                (unsigned)spec[0], (unsigned)spec[1], (unsigned)spec[2], (unsigned)spec[3],
+                (unsigned)spec[4], (unsigned)spec[5], (unsigned)spec[6], (unsigned)spec[7],
+                (unsigned)spec[8], (unsigned)spec[9], (unsigned)spec[10], (unsigned)spec[11],
+                (unsigned)spec[12], (unsigned)spec[13], (unsigned)spec[14], (unsigned)spec[15]);
+            if (n > 0 && (size_t)n < COCKPIT_BODY_CAP - used) {
+                used += (size_t)n;
+            } else {
+                used = COCKPIT_BODY_CAP;
+            }
         }
     }
-    if (used >= 4096U) {
+    if (used >= COCKPIT_BODY_CAP) {
         heap_caps_free(body);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             "cockpit encoding overflow");
@@ -2863,10 +4601,41 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "diag failed");
         return ESP_OK;
     }
+    {
+        /* ?split=1: where the hud layer's time goes, summed over the frames
+         * since boot (divide by render_frames). Its own response, because the
+         * full document's size is pinned and this adds ~15 keys. */
+        char q[24], v[4];
+        if (httpd_req_get_url_query_str(req, q, sizeof q) == ESP_OK &&
+            httpd_query_key_value(q, "split", v, sizeof v) == ESP_OK &&
+            v[0] == '1') {
+            jr_display_split_arm();   /* the timers run only while somebody asks */
+            char sb[640];
+            int m = snprintf(sb, sizeof sb, "{\"render_frames\":%u,\"render_frame_us\":%u,\"split_us\":{",
+                             (unsigned)d.render_frames, (unsigned)d.render_frame_us);
+            for (unsigned i = 0; m > 0 && (size_t)m < sizeof sb &&
+                                 i < (unsigned)JR_DISPLAY_SPLIT_COUNT; i++) {
+                m += snprintf(sb + m, sizeof sb - (size_t)m, "%s\"%s\":%u",
+                              i ? "," : "", jr_display_split_name(i),
+                              (unsigned)d.split_us[i]);
+            }
+            if (m > 0 && (size_t)m < sizeof sb - 3) {
+                m += snprintf(sb + m, sizeof sb - (size_t)m, "}}");
+            }
+            if (m < 0 || (size_t)m >= sizeof sb) {
+                httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "encoding failed");
+                return ESP_OK;
+            }
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+            httpd_resp_send(req, sb, (size_t)m);
+            return ESP_OK;
+        }
+    }
     static const char *init_names[] = { "stopped", "starting", "ready", "failed" };
     const char *init_name = d.init_state <= JR_DISPLAY_INIT_FAILED
                                 ? init_names[d.init_state] : "?";
-    char buf[640];
+    char buf[1536];   /* the tilt pair made 1280 a tight fit; the dial cache took 128 more */
     int n = snprintf(buf, sizeof buf,
         "{\"init\":\"%s\",\"last_error\":\"%s\",\"task_running\":%s,"
         "\"blanked\":%s,\"requested_face\":%d,\"applied_face\":%d,"
@@ -2875,7 +4644,22 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         "\"asset_load_failures\":%u,\"flush_submissions\":%u,"
         "\"flush_completions\":%u,\"flush_errors\":%u,\"actual_fps\":%u,"
         "\"render_us\":%u,\"render_frames\":%u,\"render_frame_us\":%u,"
-        "\"current_asset_bytes\":%u,\"free_psram\":%u,\"stack_hwm\":%u}",
+        "\"layer_us\":[%u,%u,%u,%u,%u],"
+        "\"space\":%u,\"overlay\":%u,\"knob\":%u,"
+        "\"light\":{\"gx_mg\":%d,\"gy_mg\":%d,"
+        "\"shadow_dx_q4\":%d,\"shadow_dy_q4\":%d},"
+        "\"tilt\":[%d,%d],"
+        "\"dip\":%u,\"dip_writes\":%u,\"dip_hold_ms\":%u,"
+        "\"dial_cache\":{\"n\":%u,\"bytes\":%u,\"hits\":%u,\"misses\":%u,"
+        "\"evictions\":%u,\"warms\":%u,\"decode_ms\":%u},"
+        "\"current_asset_bytes\":%u,\"free_psram\":%u,\"stack_hwm\":%u,"
+        "\"boot_timing\":{\"time_base\":\"esp_timer_since_boot\","
+        "\"optical\":false,\"includes_rom\":false,"
+        "\"init_started\":%s,\"init_finished\":%s,\"first_transfer_valid\":%s,"
+        "\"init_start_boot_ms\":%u,\"init_end_boot_ms\":%u,"
+        "\"first_transfer_done_boot_ms\":%u,"
+        "\"first_glance_time_transfer_valid\":%s,"
+        "\"first_glance_time_transfer_done_boot_ms\":%u}}",
         init_name, esp_err_to_name(d.last_error),
         d.task_running ? "true" : "false",
         d.blanked ? "true" : "false",
@@ -2887,16 +4671,37 @@ static esp_err_t display_diag_handler(httpd_req_t *req)
         (unsigned)d.flush_errors, (unsigned)d.actual_fps,
         (unsigned)d.render_us, (unsigned)d.render_frames,
         (unsigned)d.render_frame_us,
+        (unsigned)d.layer_us[0], (unsigned)d.layer_us[1],
+        (unsigned)d.layer_us[2], (unsigned)d.layer_us[3],
+        (unsigned)d.layer_us[4],
+        /* Which screen is up: a script driving the ring by swipes cannot
+         * otherwise tell where it landed (DESK joins the ring under a lease). */
+        (unsigned)jr_display_nav_space(), (unsigned)jr_display_nav_overlay(),
+        (unsigned)jr_display_perf_knob(),
+        (int)d.light_gx_mg, (int)d.light_gy_mg,
+        (int)d.light_shadow_dx_q4, (int)d.light_shadow_dy_q4,
+        (int)d.tilt_x, (int)d.tilt_y,
+        (unsigned)d.dip, (unsigned)d.dip_writes, (unsigned)d.dip_hold_ms,
+        (unsigned)d.dial_cached, (unsigned)d.dial_bytes, (unsigned)d.dial_hits,
+        (unsigned)d.dial_misses, (unsigned)d.dial_evictions, (unsigned)d.dial_warms,
+        (unsigned)d.dial_decode_ms,
         (unsigned)d.current_asset_bytes, (unsigned)d.free_psram_bytes,
-        (unsigned)d.task_stack_hwm);
-    if (n < 0) {
+        (unsigned)d.task_stack_hwm,
+        d.boot_timing.init_started ? "true" : "false",
+        d.boot_timing.init_finished ? "true" : "false",
+        d.boot_timing.first_transfer_valid ? "true" : "false",
+        (unsigned)d.boot_timing.init_start_boot_ms,
+        (unsigned)d.boot_timing.init_end_boot_ms,
+        (unsigned)d.boot_timing.first_transfer_done_boot_ms,
+        d.boot_timing.first_glance_time_transfer_valid ? "true" : "false",
+        (unsigned)d.boot_timing.first_glance_time_transfer_done_boot_ms);
+    if (n < 0 || (size_t)n >= sizeof buf) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "encoding failed");
         return ESP_OK;
     }
-    size_t len = (size_t)n < sizeof buf ? (size_t)n : sizeof buf - 1;
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    httpd_resp_send(req, buf, len);
+    httpd_resp_send(req, buf, (size_t)n);
     return ESP_OK;
 }
 
@@ -2996,6 +4801,25 @@ static esp_err_t display_canvas_handler(httpd_req_t *req)
              (unsigned)(ttl_ms ? ttl_ms : 30000U));
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+/* POST /api/debug/display?knob=<n> — the dev-only perf knob (jr_display.h,
+ * JR_KNOB_*): which of the pixel-identical cost candidates the render task
+ * runs. 0 is the shipped path. Answers the value now in force. */
+static esp_err_t debug_display_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    int knob = 0;
+    if (query_int(req, "knob", &knob) && knob >= 0) {
+        jr_display_set_perf_knob((uint32_t)knob);
+    }
+    char b[40];
+    int n = snprintf(b, sizeof b, "{\"ok\":true,\"knob\":%u}", (unsigned)jr_display_perf_knob());
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, b, (size_t)n);
     return ESP_OK;
 }
 
@@ -3118,7 +4942,10 @@ static esp_err_t debug_input_handler(httpd_req_t *req)
             ev.start_x = 60; ev.end_x = 400; ev.delta_x = 340;
         } else if (strcmp(dirs, "up") == 0) {
             ev.direction = JR_INPUT_DIRECTION_UP;
-            ev.start_y = 400; ev.end_y = 60; ev.delta_y = -340;
+            /* Starts inside the safe radius (168 px from centre): from y=400
+             * this stroke began on the rim, where a vertical swipe is a level
+             * slide, so "up" raised the brightness cap and never navigated. */
+            ev.start_y = 380; ev.end_y = 60; ev.delta_y = -320;
         } else if (strcmp(dirs, "down") == 0) {
             ev.direction = JR_INPUT_DIRECTION_DOWN;
             ev.start_y = 90; ev.end_y = 400; ev.delta_y = 310;
@@ -3169,22 +4996,51 @@ static esp_err_t logs_handler(httpd_req_t *req)
         return ESP_OK;
     }
     size_t tail = 16384;
-    char query[48], val[16] = {0};
-    if (httpd_req_get_url_query_str(req, query, sizeof query) == ESP_OK &&
-        httpd_query_key_value(query, "tail", val, sizeof val) == ESP_OK) {
+    bool have_since = false;
+    uint64_t since = 0U;
+    char query[96], val[24] = {0};
+    const bool have_query =
+        httpd_req_get_url_query_str(req, query, sizeof query) == ESP_OK;
+    if (have_query &&
+        httpd_query_key_value(query, "since", val, sizeof val) == ESP_OK &&
+        companion_query_u64(val, &since)) {
+        have_since = true;
+    } else if (have_query &&
+               httpd_query_key_value(query, "tail", val, sizeof val) == ESP_OK) {
         tail = (size_t)strtoul(val, NULL, 10);
     }
     portENTER_CRITICAL(&s_logring_mux);
     size_t len = s_logring_len;
     size_t head = s_logring_head;
+    uint64_t total = s_logring_total;
     portEXIT_CRITICAL(&s_logring_mux);
-    if (tail > len) {
+
+    char cursor_hdr[24];
+    char dropped_hdr[24] = {0};
+    snprintf(cursor_hdr, sizeof cursor_hdr, "%llu", (unsigned long long)total);
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "X-Jarvis-Log-Cursor", cursor_hdr);
+
+    if (have_since) {
+        if (since >= total) {
+            return httpd_resp_send(req, "", 0);
+        }
+        const uint64_t delta = total - since;
+        if (delta > (uint64_t)len) {
+            const uint64_t dropped = delta - (uint64_t)len;
+            snprintf(dropped_hdr, sizeof dropped_hdr, "%llu",
+                     (unsigned long long)dropped);
+            httpd_resp_set_hdr(req, "X-Jarvis-Log-Dropped", dropped_hdr);
+            tail = len;
+        } else {
+            tail = (size_t)delta;
+        }
+    } else if (tail > len) {
         tail = len;
     }
     /* oldest byte of the requested window */
     size_t start = (head + LOGRING_CAP - tail) % LOGRING_CAP;
-    httpd_resp_set_type(req, "text/plain");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     char chunk[1024];
     size_t sent = 0;
     while (sent < tail) {
@@ -3203,9 +5059,41 @@ static esp_err_t logs_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* Sleep retains this same lock from its final admission through the reboot.
+ * Publishing active before releasing it makes all subsequent OTA work a
+ * sleep veto; no bus, flash or response operation runs inside this section. */
+static esp_err_t ota_admit_upload(uint32_t *started_ms,
+                                  uint32_t *previous_lease_until_ms,
+                                  bool *was_privacy_paused)
+{
+    if (s_brain_lock == NULL ||
+        xSemaphoreTake(s_brain_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    if (atomic_load(&s_ota_active)) {
+        xSemaphoreGive(s_brain_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    *started_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    *previous_lease_until_ms = atomic_load(&s_operator_lease_until_ms);
+    *was_privacy_paused = atomic_load(&s_voice_privacy_paused);
+    atomic_store(&s_ota_active, true);
+    atomic_store(&s_operator_lease_until_ms, *started_ms + 180000U);
+    atomic_store(&s_voice_control_request, VOICE_CONTROL_PAUSE);
+    xSemaphoreGive(s_brain_lock);
+    return ESP_OK;
+}
+
 static void ota_restore_control_state(bool was_privacy_paused,
                                       uint32_t previous_lease_until_ms)
 {
+    /* Active stays true until lease restoration is complete. Sleep therefore
+     * cannot reserve the lock between clearing active and restoring a lease. */
+    if (s_brain_lock == NULL ||
+        xSemaphoreTake(s_brain_lock, portMAX_DELAY) != pdTRUE) {
+        ESP_LOGW(TAG, "ota: control restoration unavailable; update veto retained");
+        return;
+    }
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
     /* Privacy is fail-closed: never arm if voice was private before OTA or a
      * physical gesture made it private while the upload was running. */
@@ -3221,6 +5109,8 @@ static void ota_restore_control_state(bool was_privacy_paused,
                      (int32_t)(previous_lease_until_ms - now) > 0
                          ? previous_lease_until_ms : 0U);
     }
+    atomic_store(&s_ota_active, false);
+    xSemaphoreGive(s_brain_lock);
 }
 
 bool ota_confirm_running_image_if_healthy(void)
@@ -3309,7 +5199,6 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
         return ESP_OK;
     }
     const size_t len = req->content_len;
-    atomic_store(&s_ota_active, false);
     atomic_store(&s_ota_received_bytes, 0U);
     atomic_store(&s_ota_total_bytes, (uint32_t)len);
     if (len < 256U * 1024U || len > 0x400000U) {
@@ -3338,17 +5227,19 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
         return ESP_OK;
     }
     const esp_partition_t *next = preflight.target;
-    const uint32_t upload_started_ms =
-        (uint32_t)(esp_timer_get_time() / 1000);
+    uint32_t upload_started_ms = 0U;
+    uint32_t previous_lease_until_ms = 0U;
+    bool was_privacy_paused = true;
+    const esp_err_t admission = ota_admit_upload(
+        &upload_started_ms, &previous_lease_until_ms, &was_privacy_paused);
+    if (admission != ESP_OK) {
+        httpd_resp_set_status(req, admission == ESP_ERR_TIMEOUT
+            ? "503 Service Unavailable" : "409 Conflict");
+        httpd_resp_sendstr(req, "update admission unavailable");
+        return ESP_OK;
+    }
     const uint32_t upload_deadline_ms = upload_started_ms + 240000U;
-    const uint32_t previous_lease_until_ms =
-        atomic_load(&s_operator_lease_until_ms);
-    const bool was_privacy_paused =
-        atomic_load(&s_voice_privacy_paused);
     atomic_store(&s_ota_last_error, ESP_OK);
-    atomic_store(&s_ota_active, true);
-    atomic_store(&s_operator_lease_until_ms, upload_started_ms + 180000U);
-    atomic_store(&s_voice_control_request, VOICE_CONTROL_PAUSE);
     jr_display_caption_pin("UPDATING - DO NOT UNPLUG");
     ESP_LOGI(TAG, "ota: receiving %u bytes into %s", (unsigned)len,
              next->label);
@@ -3356,7 +5247,6 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     esp_ota_handle_t ota = 0;
     esp_err_t err = esp_ota_begin(next, len, &ota);
     if (err != ESP_OK) {
-        atomic_store(&s_ota_active, false);
         atomic_store(&s_ota_last_error, err);
         jr_display_caption_unpin();
         jr_display_caption_set("UPDATE FAILED - STILL ON OLD");
@@ -3429,7 +5319,6 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
         err = esp_ota_set_boot_partition(next);
     }
     if (err != ESP_OK) {
-        atomic_store(&s_ota_active, false);
         atomic_store(&s_ota_last_error, err);
         jr_display_ota_set(
             JR_DISPLAY_OTA_FAILED,
@@ -3493,16 +5382,20 @@ static esp_err_t ota_assets_handler(httpd_req_t *req)
                             "art image must be between 1 MiB and the partition size");
         return ESP_OK;
     }
-    const uint32_t started_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    uint32_t started_ms = 0U;
+    uint32_t previous_lease_until_ms = 0U;
+    bool was_privacy_paused = true;
+    const esp_err_t admission = ota_admit_upload(
+        &started_ms, &previous_lease_until_ms, &was_privacy_paused);
+    if (admission != ESP_OK) {
+        httpd_resp_set_status(req, admission == ESP_ERR_TIMEOUT
+            ? "503 Service Unavailable" : "409 Conflict");
+        httpd_resp_sendstr(req, "update admission unavailable");
+        return ESP_OK;
+    }
     const uint32_t deadline_ms = started_ms + 420000U;
-    const uint32_t previous_lease_until_ms =
-        atomic_load(&s_operator_lease_until_ms);
-    const bool was_privacy_paused = atomic_load(&s_voice_privacy_paused);
-    atomic_store(&s_ota_active, true);
     atomic_store(&s_ota_received_bytes, 0U);
     atomic_store(&s_ota_total_bytes, (uint32_t)len);
-    atomic_store(&s_operator_lease_until_ms, started_ms + 180000U);
-    atomic_store(&s_voice_control_request, VOICE_CONTROL_PAUSE);
     jr_display_caption_pin("UPDATING ART - DO NOT UNPLUG");
     ESP_LOGI(TAG, "art: receiving %u bytes into %s (%u bytes)", (unsigned)len,
              part->label, (unsigned)part->size);
@@ -3546,7 +5439,6 @@ static esp_err_t ota_assets_handler(httpd_req_t *req)
     if (err == ESP_OK && got != len) {
         err = ESP_FAIL;
     }
-    atomic_store(&s_ota_active, false);
     atomic_store(&s_ota_last_error, err);
     if (err != ESP_OK) {
         jr_display_caption_unpin();
@@ -3681,6 +5573,22 @@ static void companion_audio_window_headers(
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 }
 
+static bool companion_microphone_privacy_rejected(httpd_req_t *req)
+{
+    jr_audio_power_stats_t power;
+    jr_audio_power_stats(&power);
+    if (jr_audio_microphone_export_allowed(
+            atomic_load(&s_voice_privacy_paused), s_flip_muted,
+            power.microphone_enabled)) {
+        return false;
+    }
+    httpd_resp_set_status(req, "423 Locked");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req,
+        "{\"ok\":false,\"error\":\"physical microphone privacy is active\"}");
+    return true;
+}
+
 /* GET /api/companion/audio/in — bounded cursor reads from the sole clean-mic
  * tap. The absolute cursor makes ring overrun observable instead of silently
  * stitching unrelated audio together. */
@@ -3735,6 +5643,10 @@ static esp_err_t companion_audio_in_handler(httpd_req_t *req)
     esp_err_t err = jr_audio_diag_copy_since(
         JR_AUDIO_TAP_MIC_CLEAN, after, latest, pcm,
         latest ? 0U : max_samples, &window);
+    if (companion_microphone_privacy_rejected(req)) {
+        heap_caps_free(pcm);
+        return ESP_OK;
+    }
     if (err != ESP_OK) {
         heap_caps_free(pcm);
         httpd_resp_set_status(req,
@@ -3764,10 +5676,15 @@ static esp_err_t companion_audio_in_handler(httpd_req_t *req)
     companion_audio_window_headers(req, &window);
     if (window.copied_samples == 0U) {
         heap_caps_free(pcm);
+        if (companion_microphone_privacy_rejected(req)) return ESP_OK;
         httpd_resp_set_status(req, "204 No Content");
         return httpd_resp_send(req, NULL, 0);
     }
     httpd_resp_set_type(req, "application/octet-stream");
+    if (companion_microphone_privacy_rejected(req)) {
+        heap_caps_free(pcm);
+        return ESP_OK;
+    }
     err = httpd_resp_send(req, (const char *)pcm,
                           window.copied_samples * sizeof(int16_t));
     heap_caps_free(pcm);
@@ -3992,16 +5909,30 @@ static esp_err_t operator_lease_handler(httpd_req_t *req)
 
 
     if (release) {
-        const bool released = operator_mode_release(
-            now, "remote", false, false, requested_owner, request_lease_id);
         httpd_resp_set_type(req, "application/json");
         httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-        if (!released) {
-            httpd_resp_set_status(req, "409 Conflict");
+        if (!operator_mode_active(now)) {
+            if (atomic_load(&s_operator_mode_owner) != OPERATOR_OWNER_NONE) {
+                (void)operator_mode_release(now, "expired", false, true,
+                                            OPERATOR_OWNER_NONE, 0U);
+            }
             httpd_resp_sendstr(req,
-                "{\"ok\":false,\"error\":\"lease mode does not own the operator\"}");
+                "{\"ok\":true,\"leased\":false,\"already_released\":true,\"mode\":\"normal\"}");
+            return ESP_OK;
+        }
+        const bool released = operator_mode_release(
+            now, "remote", false, false, requested_owner, request_lease_id);
+        if (!released) {
+            if (!operator_mode_active(now)) {
+                httpd_resp_sendstr(req,
+                    "{\"ok\":true,\"leased\":false,\"already_released\":true,\"mode\":\"normal\"}");
+            } else {
+                httpd_resp_set_status(req, "409 Conflict");
+                httpd_resp_sendstr(req,
+                    "{\"ok\":false,\"error\":\"lease mode does not own the operator\"}");
+            }
         } else {
-            httpd_resp_sendstr(req, "{\"ok\":true,\"leased\":false}");
+            httpd_resp_sendstr(req, "{\"ok\":true,\"leased\":false,\"mode\":\"normal\"}");
         }
         return ESP_OK;
     }
@@ -4095,6 +6026,7 @@ static esp_err_t operator_lease_handler(httpd_req_t *req)
 
 static esp_err_t operator_status_handler(httpd_req_t *req)
 {
+    http_note_activity();
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
     const uint32_t until = atomic_load(&s_operator_lease_until_ms);
     const bool active = operator_mode_active(now);
@@ -4150,6 +6082,7 @@ static esp_err_t display_test_handler(httpd_req_t *req)
 
 static esp_err_t display_snapshot_info_handler(httpd_req_t *req)
 {
+    http_note_activity();
     jr_display_snapshot_info_t info;
     esp_err_t err = jr_display_snapshot_get_info(&info);
     if (err != ESP_OK) {
@@ -4376,6 +6309,10 @@ static esp_err_t display_snapshot_rgb565_handler(httpd_req_t *req)
     return err;
 }
 
+/* Handler slots the server allocates (4 B each, internal RAM). The table
+ * below is checked against it at compile time. */
+#define JR_HTTP_ROUTE_SLOTS 72
+
 void start_diag_http(void)
 {
     httpd_handle_t server = NULL;
@@ -4384,7 +6321,7 @@ void start_diag_http(void)
     /* Live watermark: 3,880 B free at 7,168 after doctor/snapshots/tools.
      * 6,400 retains ~3.1 KB measured margin and returns another 768 B. */
     cfg.stack_size = 6400;
-    cfg.max_uri_handlers = 48;
+    cfg.max_uri_handlers = JR_HTTP_ROUTE_SLOTS;
     cfg.max_resp_headers = 16;
     cfg.lru_purge_enable = true;
     if (httpd_start(&server, &cfg) != ESP_OK) {
@@ -4397,6 +6334,12 @@ void start_diag_http(void)
         { .uri = "/api/gemini/live", .method = HTTP_GET, .handler = diag_get_handler },
         { .uri = "/api/debug/say",   .method = HTTP_POST, .handler = say_get_handler  },
         { .uri = "/api/debug/briefing", .method = HTTP_POST, .handler = briefing_post_handler },
+        { .uri = "/api/debug/timer", .method = HTTP_POST, .handler = debug_timer_handler },
+        { .uri = "/api/desk/mode",   .method = HTTP_POST, .handler = desk_mode_post_handler },
+        { .uri = "/api/debug/stopwatch", .method = HTTP_POST, .handler = debug_stopwatch_handler },
+        { .uri = "/api/glass",       .method = HTTP_POST, .handler = glass_post_handler },
+        { .uri = "/api/notes",       .method = HTTP_GET,  .handler = notes_get_handler },
+        { .uri = "/api/notes",       .method = HTTP_POST, .handler = notes_post_handler },
         { .uri = "/api/debug/gain",  .method = HTTP_POST, .handler = gain_get_handler },
         { .uri = "/api/voice/control", .method = HTTP_POST,
           .handler = voice_control_handler },
@@ -4412,8 +6355,16 @@ void start_diag_http(void)
           .handler = sensors_handler },
         { .uri = "/api/diag/tasks", .method = HTTP_GET,
           .handler = tasks_diag_handler },
+        { .uri = "/api/diag/board", .method = HTTP_GET,
+          .handler = board_diag_handler },
         { .uri = "/api/display/hud", .method = HTTP_POST,
           .handler = hud_toggle_handler },
+        { .uri = "/api/display/holo", .method = HTTP_POST,
+          .handler = holo_toggle_handler },
+        { .uri = "/api/display/glass3", .method = HTTP_POST,
+          .handler = glass3_mode_handler },
+        { .uri = "/api/debug/cue", .method = HTTP_POST,
+          .handler = cue_audition_handler },
         { .uri = "/api/display/choices", .method = HTTP_POST,
           .handler = choices_debug_handler },
         { .uri = "/api/display/choices/hit", .method = HTTP_GET,
@@ -4449,7 +6400,19 @@ void start_diag_http(void)
         { .uri = "/api/companion/audio/out", .method = HTTP_POST,
           .handler = companion_audio_out_handler },
         { .uri = "/api/display",     .method = HTTP_GET, .handler = display_diag_handler },
+        { .uri = "/api/power/charge", .method = HTTP_GET, .handler = power_charge_handler },
+        { .uri = "/api/power/care", .method = HTTP_POST, .handler = power_care_post_handler },
         { .uri = "/api/diag/vadlog", .method = HTTP_GET, .handler = vadlog_csv_handler },
+        { .uri = "/api/diag/voiceperf", .method = HTTP_GET,
+          .handler = voiceperf_handler },
+        { .uri = "/api/diag/voiceperf", .method = HTTP_POST,
+          .handler = voiceperf_handler },
+        { .uri = "/api/diag/crash", .method = HTTP_GET,
+          .handler = crash_get_handler },
+        { .uri = "/api/diag/crash", .method = HTTP_POST,
+          .handler = crash_clear_handler },
+        { .uri = "/api/diag/coredump.bin", .method = HTTP_GET,
+          .handler = coredump_bin_handler },
         { .uri = "/api/device/health", .method = HTTP_GET,
           .handler = device_health_handler },
         { .uri = "/api/display/snapshot.json", .method = HTTP_GET,
@@ -4470,6 +6433,8 @@ void start_diag_http(void)
           .handler = logs_handler },
         { .uri = "/api/debug/input", .method = HTTP_POST,
           .handler = debug_input_handler },
+        { .uri = "/api/debug/display", .method = HTTP_POST,
+          .handler = debug_display_handler },
         { .uri = "/api/debug/audio-stats", .method = HTTP_POST,
           .handler = audio_stats_handler },
         { .uri = "/api/debug/sleep", .method = HTTP_GET,
@@ -4481,6 +6446,11 @@ void start_diag_http(void)
         { .uri = "/api/ota/assets", .method = HTTP_POST,
           .handler = ota_assets_handler },
     };
+    /* A 49th route into 48 slots registered nothing and logged one line at
+     * boot: /api/ota/assets was gone from the running image. Now the build
+     * fails instead. */
+    _Static_assert(sizeof routes / sizeof routes[0] <= JR_HTTP_ROUTE_SLOTS,
+                   "route table outgrew JR_HTTP_ROUTE_SLOTS");
     for (size_t i = 0; i < sizeof routes / sizeof routes[0]; ++i) {
         esp_err_t err = httpd_register_uri_handler(server, &routes[i]);
         if (err != ESP_OK) {

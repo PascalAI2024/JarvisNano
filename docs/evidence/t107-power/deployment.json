@@ -1,0 +1,21 @@
+{
+  "recorded_utc": "2026-10-11T20:40:09.494573+00:00",
+  "source_commit": "0b4108fc9c25b7dc2ac87a06f853c3728108713f",
+  "image_sha256": "6292894e5662c47b0276152aa7aa0ac0cd179310d5bfa69049c5a64171633a7b",
+  "bytes": 1854464,
+  "command": "JARVIS_DEVICE_HOST=<trusted-LAN-device> scripts/jarvisctl.py ota",
+  "ota": {
+    "active": false,
+    "running": "ota_1",
+    "boot": "ota_1",
+    "state": "valid",
+    "received": 0,
+    "total": 0,
+    "last_error": "ESP_OK",
+    "last_invalid": "none"
+  },
+  "acceptance_uptime_ms": 57495,
+  "privacy_muted": true,
+  "largest_internal": 31744,
+  "note": "Local image hash bound to successful full-length paired upload and candidate telemetry; device API does not expose a partition hash."
+}

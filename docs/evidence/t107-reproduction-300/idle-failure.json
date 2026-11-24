@@ -1,0 +1,15 @@
+{
+  "status": "BLOCKED",
+  "gate": "idle-pair",
+  "failed_utc": "2026-10-12T00:49:58.852932Z",
+  "elapsed_s": 105.391,
+  "samples_retained": 8,
+  "expected_mood": "WHISPER",
+  "observed_mood": "DREAM",
+  "expected_brightness": 14,
+  "observed_brightness": 5,
+  "soc_start": 19,
+  "soc_failure": 18,
+  "ota_attempted": false,
+  "baseline_window_started": false
+}

@@ -18,6 +18,12 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+import jarvisctl  # noqa: E402
+
 
 DEFAULT_HOST = os.environ.get("JARVIS_DEVICE_HOST", "")
 REPORT_DIR = ".build_logs/live-device"
@@ -121,42 +127,8 @@ def valid_pairing_token(value: str) -> bool:
 
 
 def load_pairing_token(base_url: str) -> str | None:
-    """Load the host-bound control token without putting it in argv/output."""
-    account = pairing_keychain_account(base_url)
-    try:
-        result = subprocess.run(
-            [
-                "security",
-                "find-generic-password",
-                "-a",
-                account,
-                "-s",
-                KEYCHAIN_SERVICE,
-                "-w",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        result = None
-    if result is not None and result.returncode == 0:
-        token = result.stdout.rstrip("\r\n")
-        return token if valid_pairing_token(token) else None
-
-    # Environment fallback is allowed only when explicitly bound to the same
-    # device host. This avoids accidentally sending one Nano's token to another.
-    token = os.environ.get("JARVIS_DESK_TOKEN", "")
-    configured_host = os.environ.get("JARVIS_DEVICE_HOST", "").strip()
-    if not token or not configured_host:
-        return None
-    if not configured_host.startswith(("http://", "https://")):
-        configured_host = "http://" + configured_host
-    if configured_host.rstrip("/") != base_url or not valid_pairing_token(token):
-        return None
-    return token
+    """Load the host-bound control token via jarvisctl (Keychain, Windows Registry, env)."""
+    return jarvisctl.load_pairing_token(base_url)
 
 
 class Device:
@@ -203,7 +175,10 @@ class Device:
         return self.request("POST", path, body)
 
     def get_bytes(self, path: str) -> tuple[int, dict[str, str], bytes]:
-        req = urllib.request.Request(self.base + path, headers={"Accept": "*/*"}, method="GET")
+        headers = {"Accept": "*/*"}
+        if self._pairing_token:
+            headers["X-JarvisNano-Token"] = self._pairing_token
+        req = urllib.request.Request(self.base + path, headers=headers, method="GET")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return resp.status, dict(resp.headers.items()), resp.read()
@@ -646,7 +621,31 @@ def write_report(snapshot: dict[str, Any], prefix: str) -> str:
 
 
 def convert_ppm_to_png(ppm_path: str) -> str | None:
-    png_path = ppm_path[:-4] + ".png" if ppm_path.endswith(".ppm") else ppm_path + ".png"
+    if ppm_path.endswith(".ppm"):
+        png_path = ppm_path[:-4] + ".png"
+    elif ppm_path.endswith(".rgb565"):
+        png_path = ppm_path[:-7] + ".png"
+    else:
+        png_path = ppm_path + ".png"
+    # Pillow works cross-platform (Windows, macOS, Linux); prefer it over sips/magick.
+    try:
+        from PIL import Image
+
+        if ppm_path.endswith(".rgb565"):
+            with open(ppm_path, "rb") as fh:
+                raw = fh.read()
+            side = int(round((len(raw) // 2) ** 0.5))
+            if side > 0 and side * side * 2 == len(raw):
+                jarvisctl.rgb565_to_pil(raw, side, side, big_endian=True).save(png_path)
+                if os.path.exists(png_path):
+                    return png_path
+        else:
+            with Image.open(ppm_path) as img:
+                img.save(png_path)
+            if os.path.exists(png_path):
+                return png_path
+    except Exception:  # noqa: BLE001 - fall back to external tools below
+        pass
     if shutil.which("sips"):
         result = subprocess.run(
             ["sips", "-s", "format", "png", ppm_path, "--out", png_path],
@@ -715,7 +714,7 @@ def command_screen(args: argparse.Namespace) -> int:
     if png_path:
         print_check("OK", "PNG converted", png_path)
     elif args.png:
-        print_check("WARN", "PNG conversion skipped", "sips/magick unavailable or failed")
+        print_check("WARN", "PNG conversion skipped", "Pillow/sips/magick unavailable or failed")
 
     if args.logs:
         try:
@@ -1149,7 +1148,7 @@ def command_watch(args: argparse.Namespace) -> int:
     last_logs = ""
     while True:
         snapshot = collect_snapshot(dev, args.tail)
-        os.system("clear")
+        jarvisctl.clear_terminal()
         failures = print_snapshot(snapshot)
         logs = str(snapshot.get("logs", {}).get("text", ""))
         if logs != last_logs:
@@ -1310,6 +1309,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str]) -> int:
+    jarvisctl.ensure_utf8_console()
     parser = build_parser()
     args = parser.parse_args(argv)
     if not args.host:

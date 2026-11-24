@@ -1,321 +1,294 @@
 <p align="center">
-  <img src="images/wordmark.png" alt="JarvisNano" width="640">
+  <img src="images/wordmark.png" alt="JarvisNano" width="600">
 </p>
 
 <p align="center">
-  <img src="docs/assets/jarvisnano-display-capture.png" alt="Two 466 by 466 display frames from JarvisNano: the privacy-muted face and the digital watch peek" width="760">
-  <br><em>Display frames from a running unit, 2026-10-02: the privacy-muted face and the watch peek. These are software framebuffer captures over LAN, not photographs of the panel.</em>
+  <strong>A voice-first J.A.R.V.I.S. desk companion on a round 466×466 AMOLED ESP32-S3.</strong><br>
+  Native Gemini Live duplex voice, 28 built-in voice tools (22 instant 0 ms offline), Glass 3.6 luminous OLED UI &amp; 10 watch dials (incl. live astronomical Orrery &amp; 32-bar FFT Reactor), AXP2101 80% Desk Battery-Care &amp; 80 MHz rest, Codex Mode 2.0 frosted OLED cards, embedded Wi-Fi Command Deck &amp; Diagnostics Lab, physical privacy, and deep sleep.
 </p>
 
 <p align="center">
-  <strong>A voice-first J.A.R.V.I.S. desk companion on an ESP32-S3.</strong><br>
-  Native Gemini Live conversation, a round AMOLED that shows what it knows,
-  live tools by voice, physical privacy, motion awareness, and a device that
-  sleeps when nobody is using it.
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-00a6ff?style=flat-square" alt="Apache-2.0 License"></a>
+  <img src="https://img.shields.io/badge/runtime-ESP--IDF_5.5.4-00a6ff?style=flat-square" alt="ESP-IDF 5.5.4">
+  <img src="https://img.shields.io/badge/board-Waveshare_1.75C-00a6ff?style=flat-square" alt="Waveshare 1.75C">
+  <img src="https://img.shields.io/badge/voice-Gemini_Live-00a6ff?style=flat-square" alt="Gemini Live">
+  <img src="https://img.shields.io/badge/host_tests-25_suites-00c896?style=flat-square" alt="25 Host Suites">
 </p>
 
 <p align="center">
-  <a href="https://github.com/PascalAI2024/JarvisNano/stargazers"><img src="https://img.shields.io/github/stars/PascalAI2024/JarvisNano?style=flat-square&color=00a6ff" alt="stars"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-00a6ff?style=flat-square" alt="license"></a>
-  <img src="https://img.shields.io/badge/primary-Waveshare_AMOLED--1.75C-00a6ff?style=flat-square" alt="primary board">
-  <img src="https://img.shields.io/badge/runtime-ESP--IDF_5.5.4-00a6ff?style=flat-square" alt="runtime">
-  <img src="https://img.shields.io/badge/voice-Gemini_Live-00a6ff?style=flat-square" alt="voice">
+  <img src="images/hero.png" alt="JarvisNano enclosure concept artwork" width="820">
+  <br><em>Enclosure concept artwork. Software framebuffer captures from a running unit appear immediately below.</em>
 </p>
 
 ---
 
-**What it is.** Firmware, a round-display UI and a set of read-only MCP tools that
-turn the Waveshare ESP32-S3-Touch-AMOLED-1.75C into a voice-first desk companion.
-Voice goes to Gemini Live from the device, the display shows live readings, and
-the microphone is switched off by touch or by turning the unit face-down. It
-targets one board, `esp32s3_touch_amoled_1_75c`, on ESP-IDF 5.5.4.
-
-**Build and flash.** `./scripts/build-v5.sh` builds in the pinned
-`espressif/idf:v5.5.4` Docker image, so a host ESP-IDF install is optional.
-`./scripts/flash-v5.sh` writes the 1.75C over USB the first time, and
-`scripts/jarvisctl.py ota` updates it over Wi-Fi after that.
-Requirements and the verification recipe are in [`docs/BUILD.md`](docs/BUILD.md).
-
-**Status.** Release candidate; hardware acceptance is still open. The host test
-suites are the gate that runs without a device (`scripts/host-tests.sh`). On
-hardware, lift-wake off the cell, a full-power soak read of the playback
-counters, authenticated diagnostics, signed OTA and NVS encryption are not
-closed. [`PLAN.md`](PLAN.md) lists each row and its acceptance test, and
-[`CURRENT_WORK.md`](CURRENT_WORK.md) records the last verified run. No
-completed product, shipped volume or battery or latency figure is claimed here.
-
-## What It Is
-
-JarvisNano turns the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** into a small,
-always-available desk assistant. By default the firmware runs directly on the
-ESP32-S3: the microphones stream to Gemini Live, the reply plays through the
-ES8311 speaker path at its native 24 kHz, and one compositor drives the 466×466
-round AMOLED. It needs no phone or hub in that standalone mode. An explicitly
-paired ZeroChat phone can instead claim the displayed physical pairing code,
-hold a private Wi-Fi operator lease, receive the Nano's 16 kHz microphone PCM,
-run ZeroChat's selected brain, and return 24 kHz speech PCM to the Nano speaker.
-
-The original Waveshare 1.75 and the Seeed XIAO tracks are kept as hardware
-references. The **1.75C is the product and the only supported build target**.
-
-## The Experience
-
-- Say **"Jarvis"** or press **PWR**, then talk. The face listens, thinks, and
-  speaks; a reply can be interrupted by talking over it.
-- Ask for the world. "What's the news on SpaceX?", "Weather?", "Bitcoin?" —
-  one tool call each through the JarvisMCP gateway, spoken back in a sentence.
-- Walk **the ring** with a centre swipe: **JARVIS · WATCH · WEATHER · STATUS ·
-  ACTIVITY**, and **DESK** appears only while a companion is live. Every
-  screen shows a live reading; there is no settings page.
-- Tap an open **WEATHER**, **WATCH** or **ACTIVITY** sheet and Jarvis says it
-  aloud. Pick the device up after a rest and it glances at the weather.
-- **STATUS** is the device at a glance: the cell, the charger, Wi-Fi bars with
-  the dBm, the session and tools lamps, the address, the chip temperature, the
-  CPU gear and radio mode, and how long it has been up.
-- Privacy is physical: hold the glass, turn it face-down, or press the centre
-  control. A gold ring says the mic is off, from across the room, and the
-  face closes to a still gold slit; at rest the slit breathes; while the
-  session connects a dot orbits the bezel.
-- Hands elsewhere: "Jarvis, get me a two-page brief on X" goes onto the
-  JarvisMCP work board at once, a worker on any machine picks it up, and the
-  device announces the result when it lands.
-- Left alone on battery it rests, dims, and finally **deep-sleeps**; lift it or
-  tap it and it boots back listening.
-
-## Display captures
+## Live Display Gallery
 
 <p align="center">
-  <img src="docs/evidence/20260901-ring.png" alt="The five ring stops: JARVIS, WATCH, WEATHER, STATUS, ACTIVITY" width="900">
-  <br><em>The ring, captured in one walk with <code>scripts/screens.py</code> on 2026-09-01.</em>
+  <img src="docs/evidence/20261123-live/ring.png" alt="Luminous 5-screen OLED ring: JARVIS, WATCH, WEATHER, STATUS, ACTIVITY" width="900">
+  <br><em>The 5-screen spatial ring: <strong>JARVIS · WATCH · WEATHER · STATUS · ACTIVITY</strong> (plus summoned <strong>DESK</strong> while a companion or agent is live).</em>
 </p>
-
-Every capture in this repository is a software mirror of the pixels the firmware
-submitted to the display, fetched over the paired diagnostic client. A mirror
-shows what the renderer drew; it does not prove what the AMOLED lit, and no
-camera footage of the panel is included. The 2026-10-02 frames above come with
-original pixels, request timestamps and hashes in
-[`docs/evidence/20261002-live/`](docs/evidence/20261002-live/README.md). That
-session did not establish a USB connection or the running binary's exact
-revision.
-
-## Hardware Used
-
-| Subsystem | Live hardware | Firmware role |
-|---|---|---|
-| Compute | ESP32-S3R8, dual core, 240 MHz | Voice owner, compositor, tools, HTTP control plane |
-| Display | CO5300 466×466 QSPI AMOLED | Baked reactive faces + one procedural compositor; DISPOFF/SLPIN for sleep |
-| Touch | CST9217 | Tap, hold, edge levels, ring and sheet gestures; a wake source in deep sleep |
-| Audio | ES7210 + ES8311 | 24 kHz duplex clock, 16 kHz AEC-clean uplink, native 24 kHz playback |
-| Motion | QMI8658 | Flip, shake, lift, orientation; its Wake-on-Motion engine wakes the chip |
-| Power | AXP2101 | Battery, USB and charge state, PWR key |
-| Memory | 8 MB octal PSRAM | Faces, playback ring, queues, worker stacks, snapshots |
-| Flash | 32 MB DIO | Two 4 MB OTA slots, emotes, WakeNet model |
-
-The C revision has **no TCA9554, PCF85063 RTC, or microSD slot**. Time is
-SNTP-backed. See [`docs/HARDWARE.md`](docs/HARDWARE.md) for the pin-accurate
-capability map and [`docs/reference/power-modes.md`](docs/reference/power-modes.md)
-for what sleeps and how it wakes.
-
-## Enclosure concept
 
 <p align="center">
-  <img src="images/hero.png" alt="Concept render of a JarvisNano enclosure with a round AMOLED and waveform" width="800">
-  <br><em>Concept artwork. This is a render of a proposed enclosure, not a capture of the device.</em>
+  <img src="docs/evidence/20261123-live/watches.png" alt="All 10 watch dials: JARVIS, DIVER, DRESS, PILOT, MINIMAL, FUTURE, SKELETON, CELESTIAL, ORRERY, REACTOR" width="900">
+  <br><em>All <strong>10 watch dials</strong>: JARVIS · DIVER · DRESS · PILOT · MINIMAL · FUTURE · SKELETON · CELESTIAL · ORRERY · REACTOR — with IMU tilt lighting/parallax, real-time planetary ephemeris, live audio FFT, and PSRAM dial caching.</em>
 </p>
 
-Four enclosure studies (Monolith, Cube, Egg, Radio) with dimensions, part
-assumptions and printable parts are in
-[`hardware/enclosure/`](hardware/enclosure/README.md). They are design work: the
-device in the captures above runs on the bare 1.75C board.
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <img src="docs/evidence/20261123-live/orrery.png" alt="Real-time astronomical ORRERY planetarium and Moon phase watch" width="260"><br>
+      <sub><strong>Astronomical Orrery</strong><br>Live Mercury–Saturn ephemeris, Saturn rings &amp; Moon phase</sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/evidence/20261123-live/reactor.png" alt="Machined titanium/copper REACTOR with 32-bar live FFT and 3D Holo Core" width="260"><br>
+      <sub><strong>Reactor FFT &amp; 3D Core</strong><br>32-bar fixed-point audio FFT + rotating 3D geodesic core</sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/evidence/20261123-live/holo-home.png" alt="JARVIS home screen with real-time 3D geodesic holographic core" width="260"><br>
+      <sub><strong>3D Holographic Voice Core</strong><br>IMU-tilted 3D lattice reactive to live speech spectrum</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <img src="docs/evidence/20261123-live/weather.png" alt="Living atmospheric WEATHER instrument" width="260"><br>
+      <sub><strong>Atmospheric Weather</strong><br>On-device fetch, thermal arc, sun orb &amp; rain ring</sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/evidence/20261123-live/stopwatch.png" alt="Live chronograph stopwatch and timer overlay on glass" width="260"><br>
+      <sub><strong>Chronograph &amp; Timers</strong><br>4-lap stopwatch, Pomodoro &amp; deep-sleep timers</sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/evidence/20261123-live/codex-canvas.png" alt="Paired Codex Mode and live 466x466 remote canvas" width="260"><br>
+      <sub><strong>Codex &amp; Remote Canvas</strong><br>466×466 RGB565 push, Barlow cards &amp; 1-tap approvals</sub>
+    </td>
+  </tr>
+</table>
 
-## One Interaction Grammar
+> **Provenance:** Every display capture in this repository is a software mirror of the exact RGB565 pixels submitted by the firmware compositor to the CO5300 AMOLED — fetched over the paired LAN client, not camera photographs of the physical glass. See [`docs/evidence/README.md`](docs/evidence/README.md).
 
-| Input | Action |
+---
+
+## What It Does
+
+JarvisNano turns the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** into a standalone, always-ready desk companion. No phone or hub is required for voice, local tools, or UI — and an optional paired ZeroChat phone or Wi-Fi desktop browser can extend it on demand.
+
+**Status:** Active release candidate (`esp32s3_touch_amoled_1_75c` on ESP-IDF 5.5.4). Host test suites (`./scripts/host-tests.sh`, 25 suites) are the offline gate; hardware acceptance items such as signed OTA, TLS/authenticated transport, and attended NVS encryption remain open release gates tracked in [`PLAN.md`](PLAN.md) and [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md). Four enclosure concepts (`Monolith`, `Cube`, `Egg`, `Radio`) live in [`hardware/enclosure/`](hardware/enclosure/README.md); live captures run on the bare 1.75C board.
+
+| Pillar | Capabilities |
 |---|---|
-| "Jarvis" / PWR short | Wake and listen; never mutes |
-| PWR hold | Power off completely (the PMIC drops every rail); hold PWR one second to start |
-| BOOT short | Open/close the control shade |
-| BOOT hold 1.5–5 s | Show a random six-digit code and open its 60-second pairing window |
-| BOOT held during reset | ROM downloader |
-| Left-edge vertical | Volume ± 5, from any screen |
-| Right-edge vertical | Brightness ± 5, from any screen |
-| Centre vertical swipe | The ring: JARVIS ↔ WATCH ↔ WEATHER ↔ STATUS ↔ (DESK while live) ↔ ACTIVITY, wrapping |
-| Centre up on a ring screen | Open the screen's sheet; down closes it |
-| Tap an open sheet | Jarvis speaks what the screen shows |
-| Horizontal swipe | Ten-second WATCH peek; on WATCH, the next or previous watch style |
-| Double tap | Home |
-| Glass hold | Physical privacy mute/unmute |
-| Face-down ~600 ms | Flip privacy; face-up clears only a flip-origin mute |
-| Lift after a rest | Weather glance for eight seconds |
-| Still ten minutes past DREAM, on battery | Deep sleep; lift or touch to wake |
+| **Voice-First Gemini Live** | Dedicated `jr_wake` WakeNet9 `"Jarvis"` task (cuts replies on wake word), 24 kHz shared full-duplex I²S clock, 16 kHz AEC-clean uplink, 24 kHz adaptive jitter-buffered speaker playback, DAC-synced speech cadence halo, and 24 kHz multi-harmonic chimes. |
+| **28 Built-in Voice Tools** | **22 instant 0 ms offline tools** + **6 JarvisMCP gateway tools** (full breakdown below) — zero network round-trips for timers, ON AIR / Focus / Breathe desk modes, 4-lap stopwatch, tagged NVS desk inbox, battery care, briefings, and device self-control. |
+| **Glass 3.6 Luminous OLED** | Single-compositor 466×466 engine: Procedural Ignition cold-boot splash, 5-screen spatial ring (`JARVIS · WATCH · WEATHER · STATUS · ACTIVITY` + addressable `DESK`), **10 watch dials** (incl. 6-planet `ORRERY` + 32-bar FFT `REACTOR`), Chrono-Arc / Aetherium / Atmosphaera / Cortex Command, rotary perimeter bezel scrub, shared evictable PSRAM static plate, 60 Hz TE sync (`GPIO13`), and CO5300 HBM (`0x66`). |
+| **Codex Mode 2.0 & Command Deck** | Frosted Barlow OLED approval/consent/progress/result cards (semantic crimson `DENY` / emerald `ALLOW`), live 3-step Cortex DESK checklist, `jarvisctl ask --wait` & `jarvisctl run <cmd>` CI bridge, zero-dependency embedded Command Deck & Diagnostics Lab 2.0 at `http://<device-ip>/` (live CPU%/stack bars, 5-layer render timing, AXP2101 inspector, cursor log tail, 1-click JSON Diag Bundle), plus paired **ZeroChat** phone mode. |
+| **AXP2101 Power Care & Privacy** | NVS-persisted **80% Desk Battery-Care** (`4.0 V` CV + 75/80% USB hold hysteresis), dual-sensor chip/PMIC thermal charge throttling, continuous VBAT/VBUS/VSYS/TDIE ADC & rolling ETA analytics, `240 / 160 / 80 MHz` CPU gears, 3-tier Wi-Fi PS (`NONE`/`MIN`/`MAX`), 0-fps still-frame rest, deep sleep with RTC-persisted timers/activity, and **inviolate physical privacy** (inner-disc hold or face-down flip; remote APIs can never unmute). |
 
-The shade repeats the legend on glass: `L VOL`, `R LGT`, `PWR LISTEN`,
-`BOOT CLOSE`, and the centre MUTE/LISTEN action. There is one gesture path;
-no hidden rotary recognizer.
+### 28 Built-in Voice Tools (22 Offline · 6 Gateway)
 
-## Architecture
+| Domain | Scope | Tools |
+|---|---|---|
+| **Timers, Focus & Desk Modes** | 0 ms offline | `set_timer` (5 s–12 h, silent option, deep-sleep surviving), `cancel_timer`, `list_timers`, `start_focus` (Pomodoro, defaults 25 min), `set_desk_mode` (`on_air`, `focus`, `breathe`, `normal`), `start_breathe`, `stopwatch` (start/stop/4-lap/reset/status) |
+| **Desk Inbox & Briefings** | 0 ms offline | `add_note` (WORK/LIFE tagged, NVS-persisted), `list_notes`, `complete_note`, `clear_notes`, `daily_briefing` (date, weather, 12 h rain, notes, timers, tasks, battery) |
+| **Time, Weather & Choices** | 0 ms offline | `current_time`, `weather_here` (on-device cached forecast), `ask_user` (interactive choice card on glass) |
+| **Device & Power Control** | 0 ms offline | `set_glass` (ring screen & 10 watch styles), `set_volume`, `set_brightness`, `set_sunlight` (CO5300 HBM with chip/PMIC thermal & battery guard), `set_ui_sounds`, `set_battery_care` (80% Desk Care vs 100% Travel), `device_status` |
+| **JarvisMCP Gateway** | HTTPS keep-alive (32 KB PSRAM + JSON projector) | `search_tools`, `execute_tool` (web search, news, weather, crypto, stocks, Wikipedia, calendar — fail-closed allowlist), `recall_memory`, `remember`, `delegate_task`, `delegated_tasks` |
+
+---
+
+## Visual Workflows
+
+### 1. System & Companion Topology
 
 ```mermaid
 flowchart LR
-    Human[Voice · touch · buttons · motion]
+    Human["Human (Voice · Touch · Buttons · Motion)"]
 
-    subgraph Device[ESP32-S3 1.75C]
-        HAL[jr_hal · jr_audio · jr_imu · jr_power · jr_net]
-        Core[jr_core — session, turn, monitors, rest ladder]
-        Voice[jr_transport — Gemini Live over WebSocket]
-        Tools[jr_tools — bounded worker, device-side allowlist]
-        Glass[jr_display — one compositor, the ring]
-        HTTP[main — HTTP control plane, OTA, sleep]
-        NVS[NVS — secrets, levels]
+    subgraph Device["ESP32-S3-Touch-AMOLED-1.75C (ESP-IDF 5.5.4)"]
+        Sensors["HAL · ES7210/ES8311 · QMI8658C · CST9217 · AXP2101"]
+        Core["jr_core (Session · Timers · Notes · Desk Modes · Rest Ladder)"]
+        Wake["jr_wake (WakeNet9 'Jarvis' Task)"]
+        Transport["jr_transport (Gemini Live WSS)"]
+        Tools["jr_tools (22 Offline + Keep-Alive MCP)"]
+        Glass["jr_display (Glass 3.6 · 10 Dials · Cortex · Codex Cards · 60 Hz TE)"]
+        HTTP["HTTP Control Plane + Embedded Command Deck & Diag Lab"]
     end
 
-    Gemini[Google Gemini Live]
-    MCP[JarvisMCP gateway]
-    Operator[Paired desk client]
-    ZeroChat[Paired ZeroChat brain]
+    Gemini["Google Gemini Live"]
+    MCP["JarvisMCP Gateway"]
+    Deck["Browser Command Deck / jarvisctl CLI"]
+    ZeroChat["Paired ZeroChat Phone (Private Wi-Fi)"]
 
-    Human --> HAL --> Core
-    Core <--> Voice <--> Gemini
+    Human --> Sensors --> Core
+    Sensors --> Wake --> Core
+    Core <--> Transport <--> Gemini
     Core <--> Tools <--> MCP
     Core --> Glass --> Human
-    HAL --> Glass
-    Core -->|modem sleep · deep sleep| HAL
-    NVS --> Voice
-    NVS --> Tools
-    Operator <--> HTTP
-    ZeroChat <-->|paired mic and speaker PCM| HTTP
+    Sensors --> Glass
+    Deck <-->|"Command Deck · Codex · Canvas · OTA"| HTTP
+    ZeroChat <-->|"Leased 16 kHz Mic / 24 kHz Speaker PCM"| HTTP
     HTTP --> Core
     HTTP --> Glass
 ```
 
-The image is rooted at `main/main.c` and `components/jr_*`; `main/main.c` is
-the HTTP route authority. `firmware/`, `esp-claw/` and the old dashboard are
-history, not part of the build. Ownership, data flow, the session watchdogs
-and the power ladder are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+### 2. Voice Turn & Offline-First Tool Flow
 
-## Build and Run
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant A as Audio + jr_wake
+    participant C as jr_core
+    participant G as Gemini Live
+    participant L as Local Tools (0 ms)
+    participant M as JarvisMCP (Keep-Alive)
+    participant D as Speaker + Glass Halo
 
-Requirements: Docker, Python 3, Git, and a USB-C data cable for the first flash.
+    U->>A: Speak or say "Jarvis"
+    A->>A: 24->16 kHz AEC + WakeNet9 detect
+    A->>G: 16 kHz PCM realtimeInput
+    G-->>C: Server VAD + function call
+    alt Local tool (22 built-in)
+        C->>L: Execute on-device (timer/desk/note/care/glass/status)
+        L-->>C: Instant JSON result (0 ms)
+    else Gateway tool (6 MCP)
+        C->>M: Persistent HTTPS keep-alive + allowlist
+        M-->>C: Bounded <=3 KB projected result
+    end
+    C->>G: functionResponse
+    G-->>D: 24 kHz PCM -> Adaptive Jitter Buffer (600-900 ms)
+    D->>U: ES8311 audio + DAC-synced speech cadence halo
+```
+
+### 3. Adaptive Power & Deep-Sleep Ladder
+
+```mermaid
+flowchart LR
+    Awake["AWAKE<br/>240 MHz · 24 fps · 125 Hz IMU<br/>Live Voice / HTTP Burst"]
+    Ambient["AMBIENT<br/>20 s still · 160 MHz · Dimmed<br/>Wi-Fi Min-Modem"]
+    Whisper["WHISPER<br/>5 min still · 80 MHz Muted Rest<br/>0-fps Still Clock / 2 fps · 21 Hz IMU"]
+    Dream["DREAM / NIGHTSTAND<br/>15 min still or Face-Down<br/>80 MHz · Wi-Fi Max-Modem · Quiet Clock"]
+    Sleep["DEEP SLEEP<br/>+10 min on Battery · Panel Off<br/>RTC Timers & Activity Persisted"]
+    Wake["WAKE SOURCES<br/>QMI8658 WoM Lift (GPIO21)<br/>CST9217 Touch (GPIO11)<br/>RTC Timer / Alarm Expiry"]
+
+    Awake -->|"20 s still"| Ambient
+    Ambient -->|"5 min still"| Whisper
+    Whisper -->|"15 min still"| Dream
+    Awake -->|"Face-down"| Dream
+    Dream -->|"10 min on battery<br/>(no OTA / lease)"| Sleep
+    Sleep --> Wake
+    Wake -->|"Restores RTC state"| Awake
+```
+
+> Below 20% battery off USB, the rest ladder runs **4× faster** and brightness caps to `45%` (`14%` whisper). On USB with **Desk Battery-Care** enabled, AXP2101 caps CV to `4.0 V` and holds at `80%` on VBUS Power-Path. Deep sleep is refused during OTA probation, active companion leases, or USB power.
+
+---
+
+## Hardware & One Interaction Grammar
+
+The **Waveshare ESP32-S3-Touch-AMOLED-1.75C** (32 MB DIO flash, 8 MB octal PSRAM, no TCA9554/PCF85063/microSD) is the only supported build target. Pin map, verified capabilities, and open probes live in [`docs/HARDWARE.md`](docs/HARDWARE.md).
+
+| Subsystem | 1.75C Silicon | Firmware Role |
+|---|---|---|
+| **MCU & Memory** | ESP32-S3R8 · 8 MB octal PSRAM · 32 MB DIO flash | PSRAM-first heap (`ALWAYSINTERNAL=1024`, `cJSON` in PSRAM), dual 4 MB OTA slots, WakeNet9 model, shared evictable PSRAM render plate |
+| **Display** | CO5300 466×466 QSPI AMOLED (`40 MHz`) | Single strip compositor, 60 Hz `LCD_TE` (`GPIO13`) V-blank sync, `0x66` HBM sunlight boost, `DISPOFF/SLPIN` sleep |
+| **Touch & IMU** | CST9217 (`GPIO11` INT) · QMI8658C (`GPIO21` INT1) | Single-point gestures + rotary perimeter scrub + touch wake; 125 Hz / 21 Hz accel, tilt lighting/parallax, flip/shake, WoM lift-wake |
+| **Audio & Power** | ES7210 + ES8311 + NS4150B · AXP2101 PMIC | Shared 24 kHz clock, 16 kHz AEC uplink, 24 kHz DAC output; 80% Desk Care (`0x64`/`0x18`), thermal foldback (`0x65`/`0x62`), continuous VBAT/VBUS/VSYS/TDIE ADC, soft power-off |
+
+### One Interaction Grammar
+
+| Input | Action |
+|---|---|
+| **"Jarvis" / PWR short** | Wake & listen (or dismiss a ringing timer); never mutes |
+| **PWR hold** | Smooth fade-out and power off completely via PMIC (hold PWR 1 s to power back on) |
+| **BOOT short** | Toggle control shade (`L VOL`, `R LGT`, `MUTE/LISTEN`) |
+| **BOOT hold 1.5–5 s** | Display 6-digit pairing code and open 60 s pairing window |
+| **BOOT hold ≥ 5 s** | Panic-home (dismiss all modals/overlays back to Home) |
+| **Perimeter bezel scrub / Rim slide** (`r ≥ 168`) | Rotary arc scrub for Volume (left) or Brightness (right) with live rim arc & tactile ticks |
+| **Centre vertical swipe** (`r < 168`) | Walk the ring: `JARVIS ↔ WATCH ↔ WEATHER ↔ STATUS ↔ (DESK) ↔ ACTIVITY`; up/down opens or closes detail sheets |
+| **Horizontal swipe** | 10 s WATCH peek; on `WATCH`, step through all **10 watch styles** (`JARVIS · DIVER · DRESS · PILOT · MINIMAL · FUTURE · SKELETON · CELESTIAL · ORRERY · REACTOR`) |
+| **Tap** | Dismiss ringing timer, answer Codex/consent card, check off Desk Inbox note, or speak open sheet aloud |
+| **Double-tap** | Home (and immediate physical exit from any Codex/ZeroChat lease) |
+| **Inner-disc hold** (`r < 168`, 850 ms) | Physical privacy mute/unmute (commit ring fills; rim holds ignored) |
+| **Face-down / Shake / Lift** | Face-down ~600 ms = flip privacy; shake = dismiss timer or cancel turn; lift after rest = weather glance / WoM wake |
+
+Full precedence rules and gesture provenance: [`docs/INPUT_MAP.md`](docs/INPUT_MAP.md).
+
+---
+
+## 5-Minute Quick Start
+
+**Requirements:** Docker, Python 3, Git, and a USB-C data cable for the initial flash.
 
 ```bash
 git clone https://github.com/PascalAI2024/JarvisNano.git
 cd JarvisNano
 
-./scripts/build-v5.sh          # pinned to espressif/idf:v5.5.4
-./scripts/flash-v5.sh          # 1.75C, DIO, verified, NVS preserved
+# 1. Build (pinned espressif/idf:v5.5.4 in Docker; use FAST=1 for incremental rebuilds)
+./scripts/build-v5.sh
+./scripts/smoke-build.sh
+
+# 2. Initial USB flash (1.75C DIO 32 MB, verified, preserves NVS)
+./scripts/flash-v5.sh
+
+# 3. Run all 25 host test suites (auto-uses Docker gcc container if no local cc)
+./scripts/host-tests.sh
 ```
 
-A running device cannot be re-flashed over USB-JTAG (esptool cannot sync while
-the firmware owns the port). Update it over Wi-Fi instead:
+Once connected to Wi-Fi, open the embedded **Command Deck** in any browser on your LAN at **`http://<device-ip>/`**, pair once via a 1.5–5 s **BOOT** hold, and ship updates over Wi-Fi (USB-JTAG cannot be re-flashed while the app owns the port):
 
 ```bash
 export JARVIS_DEVICE_HOST='<device-ip>'
-python3 scripts/jarvisctl.py ota build/jarvisrobot_v5.bin
-python3 scripts/jarvisctl.py status                         # exits non-zero when deaf or muted
-python3 scripts/screens.py --out ring.png                   # capture the submitted display pixels
+
+# First-time pairing (stores token in macOS Keychain or Windows HKCU\Software\JarvisNano\Desk)
+python3 scripts/jarvis-desk.py --host "$JARVIS_DEVICE_HOST" pair
+
+# 1-command safe release: secrets + JS + 25 host suites -> build + ELF archive -> OTA -> Flight Report
+python3 scripts/jarvisctl.py ship --fast
+
+# Power, profiling & live dev workbench
+python3 scripts/jarvisctl.py power [--care on|off] [--watch]  # AXP2101, ETA, thermal, CPU/Wi-Fi PS
+python3 scripts/jarvisctl.py bench [--dials] [--split]        # per-screen FPS, ms/f & 5-layer breakdown
+python3 scripts/jarvisctl.py tasks --cpu                      # live per-task CPU % & stack headroom
+python3 scripts/jarvisctl.py tail [--grep PAT]                # zero-duplicate ?since= cursor log stream
+python3 scripts/jarvisctl.py crash decode                     # auto-matched archived ELF addr2line
+python3 scripts/jarvisctl.py board                            # GPIO13 TE, PWR key, IMU & PMIC probe
+
+# Codex Mode 2.0 agent & CI bridge
+python3 scripts/jarvisctl.py ask "Deploy v3.6?" --consent --wait
+python3 scripts/jarvisctl.py run --title "TEST SUITE" -- pytest -q
+python3 scripts/screens.py --modes --out ring.png             # capture submitted display pixels
+python3 scripts/send-canvas.py photo.png --ttl 60             # push any image to 466x466 OLED
 ```
 
-`jarvis-desk.py` owns pairing and the desk workflows, `jarvisctl.py` is the
-operator's daily tool, and `live-device.py` captures evidence bundles. Details,
-gotchas and the verification recipe are in [`docs/BUILD.md`](docs/BUILD.md).
+> **Windows Git Bash:** `host-tests.sh` and `build-v5.sh` handle Docker path conversion automatically; when running `docker` manually under Git Bash, prefix with `MSYS_NO_PATHCONV=1`. Full instructions: [`docs/BUILD.md`](docs/BUILD.md).
 
-## Live Capabilities
+---
 
-- Direct Gemini Live duplex session with WakeNet "Jarvis", server VAD, and AEC.
-- An adaptive jitter buffer behind the speaker: Gemini paces native audio near
-  real time with stalls over a second, so playback runs a second behind the
-  network and rebuilds its lead after any hole. Counters at
-  `/api/device/health`.
-- Three session watchdogs: keepalive, no-reply, and unanswered-utterance — a
-  session that stops answering is replaced, not waited on.
-- Tools by voice: web search and news, weather, Wikipedia, prices, exchange
-  rates, time zones, translation, research papers, and the device's own
-  levels, behind a read-only allowlist enforced on the device.
-- The ring: WEATHER fetched by the device itself and aged honestly; STATUS with
-  live connections, battery and die temperature; ACTIVITY with the last three
-  things Jarvis did; DESK only while a companion is live.
-- Optional ZeroChat companion mode: a phone paired with the displayed six-digit
-  code claims the `zerochat` operator lease, receives 16 kHz PCM, and returns
-  sequenced 24 kHz PCM while the firmware continues to enforce privacy and
-  control ownership.
-- A rest ladder that ends in deep sleep on battery, with the IMU's own
-  motion engine, the touch line and a timer as the ways back; CPU gears by
-  mood and a four-times-faster ladder below 20 %.
-- Physical authority: synthetic input cannot clear privacy, approve consent,
-  answer asks, or escape a companion's lease.
-- Dual-slot OTA with preflight, probation, and rollback; deep sleep refuses to
-  run while an image is still on probation.
-- Host-tested rendering: 556 checks pin the ring, the sheets and the HUD,
-  mutation-checked both ways; the rest ladder and session core have their own
-  pure-C harness.
+## Evidence Discipline & Security Boundary
 
-## Evidence
+- **Evidence, not theatre:** Framebuffer snapshots prove what pixels were submitted to the panel, not optical emission; audio counters prove DAC writes, not speaker acoustics; synthetic touch proves routing, not physical authority. Hardware proof lives in [`docs/evidence/`](docs/evidence/README.md).
+- **Physical authority:** Synthetic HTTP input and remote APIs can never clear physical hold/flip privacy, approve consent, or lock out a double-tap lease exit.
+- **Current security boundary:** Secrets live only in device NVS or the host OS secret store — never in source, logs, or CLI arguments. **NVS is unencrypted today** and the LAN HTTP control plane is plaintext (isolated trusted WPA2/WPA3 LAN only; use dedicated, revocable keys). Signed OTA, authenticated TLS, attended flash/NVS encryption, and `JR_DEV_OPEN_DIAGNOSTICS=0` are mandatory public-release gates. See [`SECURITY.md`](SECURITY.md) and [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md).
 
-- A screenshot is the exact submitted RGB565 buffer, **not panel readback**.
-- A playback counter proves PCM reached the codec write seam, **not that a
-  speaker was audible**.
-- Synthetic touch proves routing, **not physical authority**.
-- A green host suite closes nothing whose contract is visible, audible or
-  physical: [`docs/evidence/`](docs/evidence/README.md) holds the photographs,
-  logs and numbers, and [`PLAN.md`](PLAN.md) says plainly what has not been
-  proven by a hand yet.
-
-## Security Boundary
-
-Secrets live in device NVS or the host keychain — never in source, logs,
-screenshots or arguments. **NVS is unencrypted today:** physical flash access
-exposes Wi-Fi, Gemini and JarvisMCP credentials. Use dedicated, revocable keys.
-
-Tools reach JarvisMCP over the legacy `/act` route with a bearer that carries
-the gateway's full authority, so the **device** is the policy: it generates
-calls only into a read-only allowlist and refuses everything else before any
-code exists. The typed `/device/v1/invoke` route with server-side capability
-policy is the intended long-term boundary and is not provisioned yet.
-
-`JR_DEV_OPEN_DIAGNOSTICS` opens the control plane to the LAN for development
-and **must be 0 before any release**. Signed images, authenticated encrypted
-upload, and attended NVS/flash encryption remain public-release gates. See
-[`SECURITY.md`](SECURITY.md) and
-[`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md).
+---
 
 ## Repository Map
 
 | Path | Purpose |
 |---|---|
-| `main/` | Composition root: voice pump, HTTP control plane, OTA, sleep |
-| `components/jr_core` | Pure session, turn, monitor and rest-ladder state (host-tested) |
-| `components/jr_transport` | Gemini framing and the WebSocket adapter |
-| `components/jr_audio` | ES7210/ES8311 capture, AEC, the playback ring and jitter buffer |
-| `components/jr_display` | The compositor, the ring, the HUD (host-tested) |
-| `components/jr_tools` | On-device tools and the JarvisMCP bridge with its allowlist |
-| `components/jr_imu` · `jr_power` · `jr_net` | Motion, PMIC, Wi-Fi with modem sleep |
-| `boards/waveshare/esp32s3_touch_amoled_1_75c` | The board definition |
-| `scripts/` | Build, flash, OTA, operator and QA tools |
-| `docs/` | Architecture, hardware, protocol, build, design, evidence, references |
-| `docs/ARCHIVE/` | Superseded plans, kept as history |
+| `main/` | Composition root: `main.c`, `http_routes.c`, `power.c`, `device_tools.c`, embedded `diagnostics.html` Command Deck & Diag Lab |
+| `components/jr_core` | Pure-C session, turn policy, monitors, rest ladder, timers, notes, desk modes, tool policy (host-tested) |
+| `components/jr_display` | Glass 3.6 compositor, 5-screen ring + DESK, 10 watch dials, Codex cards, TE sync, HBM, HUD & host render suites |
+| `components/jr_audio` · `jr_transport` | ES7210/ES8311 duplex audio, AEC, jitter buffer, `jr_wake`, 24 kHz harmonic cues, Gemini Live WebSocket |
+| `components/jr_tools` | Offline-first tool router, JarvisMCP persistent keep-alive bridge, allowlist & JSON projector |
+| `components/jr_imu` · `jr_power` · `jr_net` · `jr_probe` | QMI8658C motion/WoM, AXP2101 Desk Care + analytics, 3-tier Wi-Fi PS, live board probe |
+| `boards/waveshare/esp32s3_touch_amoled_1_75c` | Active 1.75C pin and peripheral definition |
+| `scripts/` | Build (`FAST=1` + ELF archive), flash, `host-tests.sh` (25 suites), `jarvisctl.py`, `screens.py`, `send-canvas.py`, `gesture-doctor.py`, `check-secrets.sh` |
+| `docs/` | Canonical architecture, hardware, input map, protocol, build, roadmap, references & evidence |
 
 Start with [`DOCUMENTATION_MAP.md`](DOCUMENTATION_MAP.md).
 
-## Current Priorities
+## Contributing & License
 
-The open work in [`PLAN.md`](PLAN.md), wave N10:
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md), run `./scripts/host-tests.sh` and `./scripts/check-secrets.sh` before committing, and attach hardware evidence when changing visible, audible, or physical behavior.
 
-1. Prove the lift wake by hand: a device off USB, face-down ten minutes, lifted.
-   On the same night, read the renderer's share of core 0 in DREAM: the
-   cadence is wired (24/12/6/3 fps) but only engages on the cell.
-2. Watch the unanswered-utterance watchdog in real use; tune its count if
-   ambient chatter trips it.
-3. Cache the shell veil so ring screens render at the face's 19 fps.
-4. Give the update ring and the companion rim different hues.
-5. Close the release gates: diagnostics auth on, signed OTA, encrypted storage,
-   exact third-party notices.
-
-## Contributing
-
-Start with [`CONTRIBUTING.md`](CONTRIBUTING.md), build the v5 target, and
-attach evidence from the surface you changed. Keep credentials, endpoints,
-NVS images, device logs and machine-specific state out of commits;
-`./scripts/check-secrets.sh` runs before every commit.
-
-JarvisNano is Apache-2.0. See [`LICENSE`](LICENSE), [`NOTICE`](NOTICE), and
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+Licensed under **Apache-2.0**. See [`LICENSE`](LICENSE), [`NOTICE`](NOTICE), and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

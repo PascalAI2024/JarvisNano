@@ -53,6 +53,14 @@
 #include "jr_core/orchestrator.h"
 #include "jr_core/snapshot.h"
 #include "jr_core/turn_policy.h"
+#include "jr_core/utt_watch.h"
+#include "jr_core/echo_gate.h"
+#include "jr_core/tool_policy.h"
+#include "jr_core/pace.h"
+#include "jr_core/timer.h"
+#include "jr_core/notes.h"
+#include "jr_core/desk_mode.h"
+#include "jr_tools/jr_weather.h"
 #include "jr_dsp/dsp.h"
 #include "jr_hal/hal.h"
 #include "jr_net/jr_net.h"
@@ -76,18 +84,25 @@
 /* The catalog lives in main.c; this literal is what the other files see.
  * main.c static-asserts it against the real array, so adding a tool
  * without bumping this is a compile error, not a blank petal. */
-#define DEVICE_TOOL_DECL_COUNT 10U
+#define DEVICE_TOOL_DECL_COUNT 28U
 
 /* Render cadence per rung of the rest ladder (frames per second). 24 is the
  * measured CO5300 ceiling; 12 keeps AMBIENT's dimmed ring fluid under a
- * finger; 6 breathes the WHISPER slit; 3 is a dark DREAM face and a caption
- * that can still change. Measured in docs/reference/power-modes.md. */
+ * finger; 2 breathes the WHISPER slit when not in 0-fps still-frame rest;
+ * 3 is a dark DREAM face and a caption that can still change. */
 #define RENDER_FPS_LIVE     24U
 #define RENDER_FPS_AMBIENT  12U
-#define RENDER_FPS_WHISPER   6U
+#define RENDER_FPS_WHISPER   2U
 #define RENDER_FPS_DREAM     3U
+/* Until the voice loop's first cadence tick. app_main runs at priority 1 on
+ * the render task's core, and a frame that overruns its period no longer
+ * sleeps (N14.4), so a watch dial on the glass during boot (the glance after
+ * a lift) left boot a few percent of the core: 69 s to "boot complete" and a
+ * dead touch for all of it (2026-11-10; the render task measured 96.5 % of
+ * core 0 on a dial). At 6 the costliest dial leaves boot more than half. */
+#define RENDER_FPS_BOOT      6U
 #define LOCAL_TOOL_RESULT_CAP 4U
-#define LOCAL_TOOL_ERROR_CAP  160U
+#define LOCAL_TOOL_ERROR_CAP  576U
 #define TOOL_CONSENT_TIMEOUT_MS 15000U
 
 typedef struct {
@@ -215,7 +230,7 @@ typedef struct __attribute__((packed)) {
 
 typedef enum {
     VOICE_CONTROL_NONE = 0,
-    VOICE_CONTROL_ARM,       /* explicit physical/API unmute */
+    VOICE_CONTROL_ARM,       /* explicit physical unmute only */
     VOICE_CONTROL_RESUME,    /* resume only when privacy permits */
     VOICE_CONTROL_DISARM,    /* deliberate privacy mute */
     VOICE_CONTROL_PAUSE,     /* operational stop; privacy unchanged */
@@ -228,8 +243,9 @@ typedef enum {
 #define SLEEP_ARMED_TOUCH      2U
 #define SLEEP_LIFT_ARM_FAILED  8U    /* the WoM write failed              */
 #define SLEEP_LIFT_LINE_HIGH   16U   /* INT1 already high, wake skipped    */
-#define CPU_MHZ_LIVE   240
-#define CPU_MHZ_REST   160
+#define CPU_MHZ_LIVE      240
+#define CPU_MHZ_REST      160
+#define CPU_MHZ_DEEP_REST  80
 #define BATTERY_SAVER_PCT 20U
 #define AGENT_TASK_ID_CAP   49U
 #define AGENT_TITLE_CAP     49U
@@ -327,13 +343,20 @@ extern _Atomic uint32_t s_pairing_claim_until_ms;
 extern _Atomic uint32_t s_pairing_claim_code;
 extern _Atomic uint32_t s_pairing_claim_attempts;
 extern int s_out_vol;
+/* Interface cues (jr_core/cue.h): the owner's switch, on by default. Set it
+ * through ui_sounds_set() so it persists. */
+extern _Atomic bool s_ui_sounds;
+void ui_sounds_set(bool on);
 extern uint8_t s_brightness_cap;
 extern _Atomic int s_level_volume_request;
 extern _Atomic int s_level_brightness_request;
 extern char *s_logring;
 extern volatile size_t s_logring_head;
 extern volatile size_t s_logring_len;
+extern volatile uint64_t s_logring_total;
 extern portMUX_TYPE s_logring_mux;
+extern _Atomic uint32_t s_http_last_activity_ms;
+extern uint32_t s_boot_stage_ms[4];
 extern _Atomic uint32_t s_operator_lease_until_ms;
 extern _Atomic bool s_operator_mode_active;
 extern _Atomic uint32_t s_operator_mode_entered_ms;
@@ -398,9 +421,129 @@ extern uint32_t s_brain_inbox_seq_hwm;
 extern uint32_t s_brain_event_seq;
 extern uint32_t s_brain_last_seen_ms;
 
+typedef enum {
+    TIMER_REQ_NONE = 0,
+    TIMER_REQ_SET,
+    TIMER_REQ_CANCEL,
+    TIMER_REQ_DISMISS,
+    TIMER_REQ_FOCUS,
+} timer_req_kind_t;
+
+typedef struct {
+    bool active;
+    bool ringing;
+    bool silent;
+    uint16_t rem_s;
+    uint16_t total_s;
+    uint8_t pct_left;
+    uint8_t count;
+    char label[JR_TIMER_LABEL_CAP];
+} timer_snap_t;
+
+typedef struct {
+    timer_req_kind_t kind;
+    uint32_t seconds;
+    bool silent;
+    char label[JR_TIMER_LABEL_CAP];
+} timer_debug_req_t;
+
+typedef struct {
+    jr_desk_mode_t mode;
+    uint32_t rem_s;
+    uint8_t pct_left;
+    uint8_t sessions_today;
+    uint16_t minutes_today;
+    jr_breathe_phase_t breathe_phase;
+    uint8_t breathe_sec_left;
+    bool silent;
+    bool dnd_silent;
+    char label[JR_DESK_LABEL_CAP];
+} desk_mode_snap_t;
+
+typedef struct {
+    jr_desk_mode_t mode;
+    uint32_t duration_s;             /* 0 = default (focus 25m; on_air open-ended) */
+    jr_breathe_pattern_t pattern;
+    uint8_t cycles;                  /* 0 = default (4) */
+    bool silent;
+    char label[JR_DESK_LABEL_CAP];
+} desk_mode_req_t;
+
+typedef struct {
+    bool active;
+    bool running;
+    uint32_t elapsed_ms;
+    uint8_t lap_count;
+    uint32_t laps_ms[JR_STOPWATCH_MAX_LAPS];
+} stopwatch_snap_t;
+
+extern jr_timer_bank_t s_timers;
+extern portMUX_TYPE s_timer_mux;
+extern timer_snap_t s_timer_snap;
+extern timer_debug_req_t s_debug_timer_req_data;
+extern _Atomic uint32_t s_debug_timer_req;
+extern _Atomic bool s_glass_poke_req;
+
+extern jr_desk_state_t s_desk_mode;
+extern portMUX_TYPE s_desk_mux;
+extern desk_mode_snap_t s_desk_snap;
+extern desk_mode_req_t s_desk_req_data;
+extern _Atomic uint32_t s_desk_req_pending;
+
+/* Cross-component Wave 2 display contracts (exact signatures from jr_display.h). */
+void jr_display_stopwatch_set(bool active, bool running, uint32_t elapsed_ms, uint8_t lap_count);
+void jr_display_set_hbm(bool enabled);
+bool jr_display_get_hbm(void);
+void jr_display_get_te_stats(bool *enabled, uint32_t *waits, uint32_t *timeouts);
+
+/* Cross-component Wave 4 audio/display contracts (exact signatures). */
+void jr_audio_get_spectrum(uint8_t out_bands[16]);
+void jr_display_spectrum_set(const uint8_t bands[16]);
+void jr_display_date_set_ymd(uint16_t year, uint8_t month, uint8_t day);
+void jr_display_holo_set(bool enabled);
+bool jr_display_holo_get(void);
+
+/* Cross-component Glass 3.5 display contracts (exact signatures from jr_display.h). */
+#ifndef JR_DISPLAY_INBOX_MAX
+#define JR_DISPLAY_INBOX_MAX 3U
+typedef struct {
+    uint32_t id;
+    bool     done;
+    uint8_t  tag;        /* 0=LIFE, 1=WORK */
+    char     text[36];
+} jr_display_inbox_item_t;
+void jr_display_boot_ignition_set(bool active, uint8_t stage, uint8_t progress_pct);
+bool jr_display_boot_ignition_active(void);
+void jr_display_desk_mode_set(uint8_t mode, uint32_t rem_s, uint8_t pct,
+                              uint8_t breathe_phase, uint8_t breathe_sec,
+                              uint8_t sessions_done, uint8_t sessions_total,
+                              bool warn_pulse, const char *label);
+bool jr_display_desk_mode_active(void);
+void jr_display_inbox_set(const jr_display_inbox_item_t *items, size_t count, size_t open_count);
+uint32_t jr_display_inbox_hit(uint16_t x, uint16_t y);
+#endif
+
+void timer_publish_now(uint32_t now_ms);
+void desk_mode_snapshot(desk_mode_snap_t *out);
+void desk_mode_apply_now(const desk_mode_req_t *req, uint32_t now_ms,
+                         bool play_cue);
+void desk_mode_request_async(const desk_mode_req_t *req);
+void desk_tally_persist(void);
+const char *desk_mode_api_name(jr_desk_mode_t m);
+const char *desk_breathe_phase_api_name(jr_breathe_phase_t p);
+bool desk_mode_parse_name(const char *s, jr_desk_mode_t *out);
+bool desk_breathe_parse_pattern(const char *s, jr_breathe_pattern_t *out);
+void persist_watch_style(uint8_t style);
+void persist_holo_enabled(bool enabled);
+void device_confirm_cue(void);
+void app_play_soft_cue(jr_cue_kind_t kind);
+esp_err_t app_set_battery_care(bool enable);
+void app_power_analytics_get(jr_power_analytics_t *out);
+bool device_chip_temp_c(float *out_c);
 void persist_ota_attempt(int slot);
 void handle_say(const char *text);
 void morning_briefing_force(void);          /* POST /api/debug/briefing */
+int briefing_compose_live(char *dst, size_t cap, const jr_power_t *bat);
 bool operator_lease_active(uint32_t now_ms);
 bool operator_mode_active(uint32_t now_ms);
 ota_preflight_t ota_preflight(void);
@@ -423,6 +566,7 @@ bool operator_mode_release(uint32_t now, const char *reason,
                            uint32_t expected_lease_id);
 bool ota_confirm_running_image_if_healthy(void);
 void start_diag_http(void);
+void crash_note_boot(void);   /* first line of app_main: reset reason, once */
 
 /* ---- owned by power.c — CPU gears, deep sleep, wake state ---- */
 
@@ -441,9 +585,43 @@ void cpu_gear_set(int mhz);
 const char *wake_cause_name(int cause);
 bool image_in_probation(void);
 void enter_deep_sleep(const char *why, uint32_t timer_s);
+unsigned power_restore_rtc_timers(uint32_t now_ms);
 
 /* ---- owned by device_tools.c — device-tool queue, consent, weather, activity ---- */
 
+extern jr_utt_watch_t s_utt;               /* owned by main.c's voice task */
+extern jr_echo_gate_t s_echo_gate;         /* voice task writes; cockpit reads totals */
+extern jr_reply_cut_t s_reply_cut;
+extern _Atomic bool s_echo_gate_enabled;   /* /api/debug/gain?echogate=, not persisted */
+extern _Atomic int s_echo_gate_volume_min; /* ?echovol=: gate applies above this volume */
+extern _Atomic bool s_wake_barge_enabled;  /* ?wakebarge=: "Jarvis" cuts a reply */
+extern _Atomic uint32_t s_wake_cuts;       /* replies cut by the wake word, cockpit */
+
+/* Voice-loop pacing counters for /api/diag/voiceperf. The voice task is the
+ * only writer; httpd reads them racily, which is fine for diagnostics. Class 0
+ * is the loop while Speaking, class 1 every other frame it reads (listening,
+ * asking, thinking, and the wake watch). Times are microseconds; the sums are
+ * halved together with the frame count so the mean survives a long run. */
+typedef struct {
+    _Atomic uint32_t frames;
+    _Atomic uint32_t iter_sum_us;   /* whole iteration, codec read included */
+    _Atomic uint32_t iter_max_us;
+    _Atomic uint32_t read_sum_us;   /* the codec read alone */
+    _Atomic uint32_t fps_x100;      /* frames/s over the last full window */
+} voiceperf_class_t;
+extern voiceperf_class_t s_vperf[2];
+extern _Atomic uint32_t s_vperf_tick_skips;   /* iterations that skipped the tick sleep */
+extern _Atomic uint32_t s_vperf_tick_sleeps;  /* paced iterations that slept it */
+
+/* /api/diag/voiceperf?bench=1: httpd sets the request, the voice task runs it
+ * when it is not reading the microphone, the wake worker runs its own half. */
+extern _Atomic bool s_aec_bench_req;
+extern _Atomic bool s_aec_bench_have;
+extern _Atomic int s_aec_bench_mean_us;      /* -1: no canceller or guard busy */
+extern _Atomic uint32_t s_aec_bench_max_us;
+extern _Atomic int s_aec_bench_cpu_mhz;
+extern _Atomic uint32_t s_srv_interrupts;
+extern _Atomic uint32_t s_srv_phantom_interrupts;
 extern jr_display_weather_t s_weather;
 extern uint32_t s_glance_until_ms;
 extern int16_t s_wx_sun_rise_min;          /* minutes past local midnight; -1 unknown */
@@ -462,6 +640,15 @@ void activity_note_turn_end(void);
 void device_tool_record_result(const char *name, jr_tool_status_t status,
                                       uint32_t duration_ms, int http_status);
 void device_tool_drop_local_results(void);
+/* Answers weather_here (always) and current_time (when the gateway is not
+ * usable) from the device itself; true when it took the call. */
+bool device_try_local_tool(const jr_command_t *cmd);
+/* Is the company gateway usable: configured AND answering. */
+bool device_gateway_usable(void);
+uint32_t device_gateway_poll_ms(void);
+const char *device_gateway_why(void);
+/* Tools the next setup would declare (all of them with a usable gateway). */
+unsigned device_declared_tools(void);
 void device_tool_queue_local_error(const jr_command_t *cmd,
                                           esp_err_t submit_error);
 void device_tool_drain_results(jr_app_t *a, uint64_t now);
@@ -470,3 +657,28 @@ bool device_tool_present_consent(const jr_command_t *cmd, uint32_t now);
 bool device_tool_cancel_pending_consent(uint32_t call_id,
                                                const char *call_id_text);
 void device_tool_abort_pending_consent(void);
+
+/* Wave 2: glass helpers, NVS desk notes ("jr_notes"), stopwatch, HBM sunlight. */
+const char *device_glass_space_name(jr_display_space_t space);
+bool device_parse_glass_screen(const char *s, jr_display_space_t *out);
+bool device_parse_watch_style(const char *s, jr_watch_style_t *out);
+
+void device_notes_init(void);
+uint32_t device_notes_add_ex(const char *text, jr_note_tag_t tag);
+uint32_t device_notes_add(const char *text);
+bool device_notes_toggle(uint32_t id);
+bool device_notes_complete(const char *target_or_id, uint32_t *matched_id);
+bool device_notes_delete(uint32_t id);
+unsigned device_notes_clear(const char *target);
+void device_notes_snapshot(jr_note_bank_t *out);
+size_t device_notes_counts(size_t *open_out, size_t *done_out);
+void device_notes_sync_inbox(void);
+int device_notes_format_briefing(char *dst, size_t cap);
+
+bool device_stopwatch_action(const char *action, uint32_t now_ms,
+                             stopwatch_snap_t *out_snap);
+void device_stopwatch_snapshot(uint32_t now_ms, stopwatch_snap_t *out_snap);
+void device_stopwatch_tick(uint32_t now_ms);
+
+bool device_sunlight_set(bool enabled, uint32_t now_ms, const char **out_reason);
+void device_sunlight_tick(uint32_t now_ms, const jr_power_t *bat, bool have_bat);

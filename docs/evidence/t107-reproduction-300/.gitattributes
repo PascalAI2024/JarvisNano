@@ -1,0 +1,2 @@
+# Preserve experiment receipt bytes and manifest hashes across checkouts.
+* -text

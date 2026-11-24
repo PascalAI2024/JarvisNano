@@ -1,0 +1,630 @@
+{
+  "source_commit": "0b9645d3aa988e04c9d0ade4526b96b5ef277b60",
+  "baseline_source": "03864cc",
+  "pair": {
+    "dream": {
+      "before": {
+        "samples": 29,
+        "duration_s": 420.328,
+        "drain_mv_h": 59.59,
+        "conditional95_scatter_mv_h": 25.89,
+        "conservative_rounding_mv_h": 25.33,
+        "endpoint_drain_mv_h": 59.95,
+        "endpoint_rounding_mv_h": 17.13,
+        "endpoint_mv": [
+          3821,
+          3814
+        ],
+        "endpoint_pct": [
+          63,
+          62
+        ],
+        "moods": [
+          "DREAM"
+        ],
+        "watch_styles": [
+          "FUTURE"
+        ],
+        "brightness": [
+          5
+        ],
+        "frames": 8,
+        "frames_per_s": 0.019,
+        "render_wall_percent": 0.011,
+        "render_mean_us": 5582.1,
+        "flushes": 312,
+        "max_flush_errors": 0,
+        "block_means": [
+          [
+            0.006348819444444444,
+            3818.75
+          ],
+          [
+            0.023019791666666668,
+            3817.5
+          ],
+          [
+            0.03968534722222222,
+            3816.5
+          ],
+          [
+            0.056358541666666664,
+            3814.25
+          ],
+          [
+            0.07302527777777779,
+            3815.75
+          ],
+          [
+            0.08967888888888889,
+            3814.25
+          ],
+          [
+            0.10843755555555555,
+            3811.8
+          ]
+        ],
+        "uncertainty_note": "Conditional residual scatter assumes independent blocks; ADC calibration, correlated relaxation, SoC, temperature and chronological image order remain unbounded.",
+        "soc_drain_pp_h": 8.564739917397842,
+        "soc_endpoint_bound_pp_h": 17.129479834795685,
+        "conditional_halfwidth_mv_h": 51.22,
+        "conditional_interval_mv_h": [
+          8.37,
+          110.81
+        ],
+        "pre_snapshot_battery": {
+          "available": true,
+          "present": true,
+          "charging": false,
+          "usb_present": false,
+          "percent": 63,
+          "millivolts": 3822,
+          "sample_seq": 129,
+          "age_ms": 156
+        }
+      },
+      "after": {
+        "samples": 29,
+        "duration_s": 420.344,
+        "drain_mv_h": 61.39,
+        "conditional95_scatter_mv_h": 39.96,
+        "conservative_rounding_mv_h": 25.33,
+        "endpoint_drain_mv_h": 34.26,
+        "endpoint_rounding_mv_h": 17.13,
+        "endpoint_mv": [
+          3780,
+          3776
+        ],
+        "endpoint_pct": [
+          59,
+          58
+        ],
+        "moods": [
+          "DREAM"
+        ],
+        "watch_styles": [
+          "FUTURE"
+        ],
+        "brightness": [
+          5
+        ],
+        "frames": 8,
+        "frames_per_s": 0.019,
+        "render_wall_percent": 0.011,
+        "render_mean_us": 5575.9,
+        "flushes": 312,
+        "max_flush_errors": 0,
+        "block_means": [
+          [
+            0.006355208333333333,
+            3782.5
+          ],
+          [
+            0.023015347222222222,
+            3779.5
+          ],
+          [
+            0.03967444444444444,
+            3782.0
+          ],
+          [
+            0.05634652777777778,
+            3780.75
+          ],
+          [
+            0.07301326388888887,
+            3778.0
+          ],
+          [
+            0.08967993055555556,
+            3778.0
+          ],
+          [
+            0.10843055555555556,
+            3775.2
+          ]
+        ],
+        "uncertainty_note": "Conditional residual scatter assumes independent blocks; ADC calibration, correlated relaxation, SoC, temperature and chronological image order remain unbounded.",
+        "soc_drain_pp_h": 8.564413908608188,
+        "soc_endpoint_bound_pp_h": 17.128827817216376,
+        "conditional_halfwidth_mv_h": 65.29,
+        "conditional_interval_mv_h": [
+          -3.9,
+          126.68
+        ],
+        "pre_snapshot_battery": {
+          "available": true,
+          "present": true,
+          "charging": false,
+          "usb_present": false,
+          "percent": 59,
+          "millivolts": 3785,
+          "sample_seq": 130,
+          "age_ms": 193
+        }
+      },
+      "after_minus_before_mv_h": 1.8,
+      "conditional_difference_halfwidth_mv_h": 116.51,
+      "conditional_difference_interval_mv_h": [
+        -114.71,
+        118.31
+      ]
+    },
+    "idle-rest": {
+      "before": {
+        "samples": 49,
+        "duration_s": 720.375,
+        "drain_mv_h": 51.29,
+        "conditional95_scatter_mv_h": 34.34,
+        "conservative_rounding_mv_h": 15.26,
+        "endpoint_drain_mv_h": -114.94,
+        "endpoint_rounding_mv_h": 9.99,
+        "endpoint_mv": [
+          3773,
+          3796
+        ],
+        "endpoint_pct": [
+          62,
+          60
+        ],
+        "moods": [
+          "WHISPER"
+        ],
+        "watch_styles": [
+          "FUTURE"
+        ],
+        "brightness": [
+          14
+        ],
+        "frames": 4235,
+        "frames_per_s": 5.879,
+        "render_wall_percent": 3.736,
+        "render_mean_us": 6355.1,
+        "flushes": 165160,
+        "max_flush_errors": 0,
+        "block_means": [
+          [
+            0.014682083333333333,
+            3801.75
+          ],
+          [
+            0.04801916666666667,
+            3804.625
+          ],
+          [
+            0.08135520833333335,
+            3801.75
+          ],
+          [
+            0.11468690972222223,
+            3799.0
+          ],
+          [
+            0.1480202777777778,
+            3796.875
+          ],
+          [
+            0.18344373456790122,
+            3794.8888888888887
+          ]
+        ],
+        "uncertainty_note": "Conditional residual scatter assumes independent blocks; ADC calibration, correlated relaxation, SoC, temperature and chronological image order remain unbounded.",
+        "soc_drain_pp_h": 9.994794377928162,
+        "soc_endpoint_bound_pp_h": 9.994794377928162,
+        "conditional_halfwidth_mv_h": 49.6,
+        "conditional_interval_mv_h": [
+          1.69,
+          100.89
+        ],
+        "pre_snapshot_battery": {
+          "available": true,
+          "present": true,
+          "charging": false,
+          "usb_present": false,
+          "percent": 62,
+          "millivolts": 3806,
+          "sample_seq": 671,
+          "age_ms": 915
+        }
+      },
+      "after": {
+        "samples": 49,
+        "duration_s": 720.406,
+        "drain_mv_h": 96.4,
+        "conditional95_scatter_mv_h": 44.6,
+        "conservative_rounding_mv_h": 15.27,
+        "endpoint_drain_mv_h": -59.97,
+        "endpoint_rounding_mv_h": 9.99,
+        "endpoint_mv": [
+          3735,
+          3747
+        ],
+        "endpoint_pct": [
+          58,
+          55
+        ],
+        "moods": [
+          "WHISPER"
+        ],
+        "watch_styles": [
+          "FUTURE"
+        ],
+        "brightness": [
+          14
+        ],
+        "frames": 4235,
+        "frames_per_s": 5.879,
+        "render_wall_percent": 3.897,
+        "render_mean_us": 6628.4,
+        "flushes": 165181,
+        "max_flush_errors": 0,
+        "block_means": [
+          [
+            0.014866493055555555,
+            3760.75
+          ],
+          [
+            0.04808586805555556,
+            3761.625
+          ],
+          [
+            0.08145607638888888,
+            3759.875
+          ],
+          [
+            0.11477371527777779,
+            3754.875
+          ],
+          [
+            0.14814232638888888,
+            3749.375
+          ],
+          [
+            0.1834413271604938,
+            3746.4444444444443
+          ]
+        ],
+        "uncertainty_note": "Conditional residual scatter assumes independent blocks; ADC calibration, correlated relaxation, SoC, temperature and chronological image order remain unbounded.",
+        "soc_drain_pp_h": 14.991546433538868,
+        "soc_endpoint_bound_pp_h": 9.994364289025912,
+        "conditional_halfwidth_mv_h": 59.87,
+        "conditional_interval_mv_h": [
+          36.53,
+          156.27
+        ],
+        "pre_snapshot_battery": {
+          "available": true,
+          "present": true,
+          "charging": false,
+          "usb_present": false,
+          "percent": 58,
+          "millivolts": 3765,
+          "sample_seq": 674,
+          "age_ms": 150
+        }
+      },
+      "after_minus_before_mv_h": 45.11,
+      "conditional_difference_halfwidth_mv_h": 109.47,
+      "conditional_difference_interval_mv_h": [
+        -64.36,
+        154.58
+      ]
+    }
+  },
+  "timers": {
+    "B-03864cc-r2": {
+      "api_upperbound_seconds": 304.594000000041,
+      "reset_reason": "not exposed by these API receipts",
+      "wake": "timer",
+      "sleep_counter": [
+        1,
+        2
+      ],
+      "boot_timing": {
+        "time_base": "esp_timer_since_boot",
+        "optical": false,
+        "includes_rom": false,
+        "init_started": true,
+        "init_finished": true,
+        "first_transfer_valid": true,
+        "init_start_boot_ms": 230,
+        "init_end_boot_ms": 1853,
+        "first_transfer_done_boot_ms": 1899
+      },
+      "privacy_muted": true
+    },
+    "C-0b9645d": {
+      "api_upperbound_seconds": 306.125,
+      "reset_reason": "not exposed by these API receipts",
+      "wake": "timer",
+      "sleep_counter": [
+        0,
+        1
+      ],
+      "boot_timing": {
+        "time_base": "esp_timer_since_boot",
+        "optical": false,
+        "includes_rom": false,
+        "init_started": true,
+        "init_finished": true,
+        "first_transfer_valid": true,
+        "init_start_boot_ms": 233,
+        "init_end_boot_ms": 776,
+        "first_transfer_done_boot_ms": 819,
+        "first_glance_time_transfer_valid": false,
+        "first_glance_time_transfer_done_boot_ms": 0
+      },
+      "privacy_muted": true
+    }
+  },
+  "transfer_proxy_reduction_ms": 1080,
+  "timer_probe_protocol": "Wait nominal300s after accepted request before probing; two-second retry cadence. Reported request-to-health seconds are detection upper bounds, not exact wake instants. Receipt boundary completes afterward.",
+  "wake_latency_note": "First DMA completion since esp_timer boot excludes ROM, physical wake edge, optical first pixel and full face; no optical wake-to-pixel acceptance.",
+  "projected_battery_life": {
+    "before_hours": null,
+    "after_hours": null,
+    "reason": "Short integer-gauge windows, non-linear voltage/SoC, unbounded relaxation/calibration and no current/cell-capacity measurement do not identify battery life."
+  },
+  "acceptance": {
+    "ota_valid": true,
+    "privacy_muted": true,
+    "matched_windows": true,
+    "nightstand_live_capture": false,
+    "glance_live_capture": false,
+    "controlled_lift_touch": false,
+    "natural_ladder_and_four_hour_timer": false,
+    "optical_wake_ms": false,
+    "new_image_voice": false,
+    "three_real_deck_workers": false
+  },
+  "final": {
+    "utc": "2026-10-12T05:23:53.853689+00:00",
+    "health": {
+      "verdict": "privacy-muted",
+      "repairable": false,
+      "privacy": true,
+      "flip_muted": false,
+      "operator": false,
+      "phase": "Idle",
+      "voice_alive": true,
+      "levels": {
+        "volume": 95,
+        "brightness_cap": 65,
+        "brightness_actual": 65
+      },
+      "audio_power": {
+        "mic": false,
+        "adc": false,
+        "dac": false,
+        "pa": false,
+        "reads": 0,
+        "silent": 0,
+        "failures": 0
+      },
+      "memory": {
+        "largest_internal": 29696,
+        "free_psram": 4795332
+      },
+      "transport": {
+        "would_block": 0,
+        "drops": 0,
+        "deaths": 0
+      },
+      "playback": {
+        "underruns": 0,
+        "max_gap_ms": 0,
+        "low_water_ms": -1,
+        "dac_failures": 0,
+        "replies": 0,
+        "prerolls": 0,
+        "preroll_short": 0
+      },
+      "rx": {
+        "frames": 0,
+        "max_gap_ms": 0,
+        "queue_wait_max_ms": 0,
+        "queue_hwm": 0,
+        "drops": 0
+      },
+      "display": {
+        "fps": 5,
+        "flush_errors": 0
+      },
+      "ota": {
+        "active": false,
+        "running": "ota_0",
+        "boot": "ota_0",
+        "state": "valid",
+        "received": 0,
+        "total": 0,
+        "last_error": "ESP_OK",
+        "last_invalid": "none"
+      },
+      "tools": {
+        "status": "ok",
+        "http": 0
+      }
+    },
+    "cockpit": {
+      "uptime_ms": 1401724,
+      "memory": {
+        "free_internal": 41471,
+        "largest_internal_block": 29696,
+        "free_psram": 4791232
+      },
+      "network": {
+        "connected": true,
+        "ip": "[redacted-address]",
+        "rssi": -35
+      },
+      "voice": {
+        "phase": "Idle",
+        "voice_armed": false,
+        "always_ready": true,
+        "privacy_paused": true,
+        "mood": "AWAKE",
+        "brightness": 65,
+        "rtc": false,
+        "capturing": false,
+        "ws_connected": false,
+        "auto_idle_ms": 0,
+        "mic_rms": 0.0,
+        "clean_rms": 0.0,
+        "vad_clean": true,
+        "vad_starts": 0,
+        "audio_diag_running": false
+      },
+      "tools": {
+        "execution": "on_device",
+        "worker_ready": true,
+        "configured": true,
+        "declared": 10,
+        "last_tool": "none",
+        "last_status": "idle",
+        "last_http_status": 0,
+        "last_duration_ms": 0,
+        "calls_received": 0,
+        "submitted": 0,
+        "submit_rejected": 0,
+        "completed": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "cancelled": 0,
+        "stale_dropped": 0,
+        "responses_sent": 0,
+        "response_send_failed": 0,
+        "consent_active": false,
+        "consent_prompted": 0,
+        "consent_approved": 0,
+        "consent_denied": 0,
+        "consent_timed_out": 0,
+        "consent_cancelled": 0
+      },
+      "display": {
+        "init": "ready",
+        "actual_fps": 5,
+        "flush_completions": 231500,
+        "flush_errors": 0,
+        "requested_face": 6,
+        "applied_face": 6,
+        "choices_active": false,
+        "watch_style": "FUTURE",
+        "sun_rise_min": 438,
+        "sun_set_min": 1135
+      },
+      "touch": {
+        "events": 4,
+        "last": {
+          "kind": "tap",
+          "x": 233,
+          "y": 100
+        },
+        "shade_open": false,
+        "panel_touch_challenge": {
+          "pending": false,
+          "active": false,
+          "verified": false,
+          "correct_rounds": 0,
+          "wrong": 0,
+          "expected_sector": 0,
+          "last_latency_ms": 0
+        }
+      },
+      "agent": {
+        "active": false,
+        "revision_hwm": 0,
+        "next_revision": 1
+      },
+      "brain": {
+        "voice_route": "cloud_gemini",
+        "desk_connected": false,
+        "private_android_ready": false,
+        "private_android_reason": "BLE firmware not enabled",
+        "next_inbox_seq": 1,
+        "event_cursor": 0,
+        "surface_active": false,
+        "surface_kind": "none",
+        "surface_title": "",
+        "surface_ttl_ms": 0
+      }
+    },
+    "battery": {
+      "available": true,
+      "present": true,
+      "charging": false,
+      "usb_present": false,
+      "percent": 55,
+      "millivolts": 3729,
+      "sample_seq": 1394,
+      "age_ms": 7
+    },
+    "display": {
+      "init": "ready",
+      "last_error": "ESP_OK",
+      "task_running": true,
+      "blanked": false,
+      "requested_face": 6,
+      "applied_face": 6,
+      "requested_amplitude": 0,
+      "applied_bucket": 0,
+      "requests": 2,
+      "state_changes": 2,
+      "segment_sets": 2,
+      "asset_load_failures": 0,
+      "flush_submissions": 231553,
+      "flush_completions": 231553,
+      "flush_errors": 0,
+      "actual_fps": 5,
+      "render_us": 57887224,
+      "render_frames": 5937,
+      "render_frame_us": 6183,
+      "current_asset_bytes": 236148,
+      "free_psram": 4795484,
+      "stack_hwm": 1984,
+      "boot_timing": {
+        "time_base": "esp_timer_since_boot",
+        "optical": false,
+        "includes_rom": false,
+        "init_started": true,
+        "init_finished": true,
+        "first_transfer_valid": true,
+        "init_start_boot_ms": 233,
+        "init_end_boot_ms": 776,
+        "first_transfer_done_boot_ms": 819,
+        "first_glance_time_transfer_valid": false,
+        "first_glance_time_transfer_done_boot_ms": 0
+      }
+    },
+    "sleep": {
+      "wake": "timer",
+      "sleeps": 1,
+      "armed": {
+        "lift": true,
+        "touch": true
+      },
+      "lift_fail": "none",
+      "force": false,
+      "after_dream_ms": 600000
+    }
+  }
+}

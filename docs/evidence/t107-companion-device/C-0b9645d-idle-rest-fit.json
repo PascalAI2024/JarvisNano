@@ -1,0 +1,61 @@
+{
+  "samples": 49,
+  "duration_s": 720.406,
+  "drain_mv_h": 96.4,
+  "conditional95_scatter_mv_h": 44.6,
+  "conservative_rounding_mv_h": 15.27,
+  "endpoint_drain_mv_h": -59.97,
+  "endpoint_rounding_mv_h": 9.99,
+  "endpoint_mv": [
+    3735,
+    3747
+  ],
+  "endpoint_pct": [
+    58,
+    55
+  ],
+  "moods": [
+    "WHISPER"
+  ],
+  "watch_styles": [
+    "FUTURE"
+  ],
+  "brightness": [
+    14
+  ],
+  "frames": 4235,
+  "frames_per_s": 5.879,
+  "render_wall_percent": 3.897,
+  "render_mean_us": 6628.4,
+  "flushes": 165181,
+  "max_flush_errors": 0,
+  "block_means": [
+    [
+      0.014866493055555555,
+      3760.75
+    ],
+    [
+      0.04808586805555556,
+      3761.625
+    ],
+    [
+      0.08145607638888888,
+      3759.875
+    ],
+    [
+      0.11477371527777779,
+      3754.875
+    ],
+    [
+      0.14814232638888888,
+      3749.375
+    ],
+    [
+      0.1834413271604938,
+      3746.4444444444443
+    ]
+  ],
+  "uncertainty_note": "Conditional residual scatter assumes independent blocks; ADC calibration, correlated relaxation, SoC, temperature and chronological image order remain unbounded.",
+  "soc_drain_pp_h": 14.991546433538868,
+  "soc_endpoint_bound_pp_h": 9.994364289025912
+}

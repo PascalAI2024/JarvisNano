@@ -2,7 +2,9 @@
 idf_component_register(
     SRCS
         "src/jr_tools.c"
+        "src/jr_tools_project.c"
         "src/jr_tools_templates.c"
+        "src/jr_weather.c"
     INCLUDE_DIRS "include"
     REQUIRES jr_net json
     PRIV_REQUIRES esp_http_client esp_hw_support mbedtls esp_timer heap

@@ -1,0 +1,22 @@
+all shell tests passed (951 checks)
+1 failure(s) of 951 checks
+5 failure(s) of 951 checks
+1 failure(s) of 951 checks
+8 failure(s) of 951 checks
+7 failure(s) of 951 checks
+3 failure(s) of 951 checks
+16 failure(s) of 951 checks
+5 failure(s) of 951 checks
+14 failure(s) of 951 checks
+8 failure(s) of 951 checks
+control	0
+byte-order	1
+finite-fade	1
+brightness-cap	1
+dream-retry	1
+snapshot-retry	1
+pattern-retry	1
+cache-retain	1
+cache-bound-free	1
+cache-reload	1
+cache-untracked-bind	1

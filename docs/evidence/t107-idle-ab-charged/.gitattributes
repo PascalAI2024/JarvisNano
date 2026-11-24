@@ -1,0 +1,2 @@
+# Preserve receipt bytes and manifest hashes.
+* -text whitespace=cr-at-eol

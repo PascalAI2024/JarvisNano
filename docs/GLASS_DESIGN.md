@@ -586,6 +586,64 @@ dial does not grow a gadget. Shell test: the band at noon, night at
 midnight, the ends at 07:02/19:35 (angles 139 and 17), the dot at 13:15
 (angle 205), DRESS blank, no sun blank.
 
+**SKELETON and CELESTIAL (2026-11-10, step 1: dials and hands).** Styles 6
+and 7, appended so no saved style number moves; the style count is 8, the
+limit of the nav word's three style bits (`_Static_assert`). Both are baked
+dials cut by `gen_watch_dials.py` (SKELETON from its own full-frame render
+with the balance recess left empty, CELESTIAL from the top-right quadrant of
+`20261110-dial-concepts-codex-new.png`), 204 KB and 205 KB, black floor 0.
+SKELETON hands: rose gold with a dark hairline outline and a wide cream lume
+fill, an ice-blue hairline seconds as the one cool colour; CELESTIAL: slim
+polished gold with a fine gold seconds. Renders:
+`docs/evidence/watch-dials-2026-11-10-{skeleton,celestial}-hands.png`.
+**They are not in the partition:** the pair does not fit the 0x5E0000
+`emote_assets` partition (see `docs/reference/asset-pipeline.md`), so both
+EAFs are linked into the app image (`EMBED_FILES`, 4 MiB OTA slots) and the
+dial path reads them in place from flash: the clip carries an `embedded`
+flag, no file read, no PSRAM copy of the compressed data, and no release
+path frees or writes it.
+
+**The balance wheel swings, the stars twinkle (2026-11-10).** Two live
+ornaments, drawn on the baked dial and under every hand, both only at the
+awake cadence (`hud_watch_t.alive`, the same test as the hand shadows): a
+resting watch holds them still, like the second hand's shadow.
+
+*SKELETON's balance wheel.* The skeleton dial has an empty circular recess
+(centre 234, 343 on the 466 px frame, radius about 72, measured from the ruby
+jewel and the strongest radial edge by `firmware/mascot/gen_balance_wheel.py`).
+The script cleans the Codex wheel render (threshold the alpha, keep the largest
+component, soft one-pixel edge, circular window, colour bled under the
+transparent pixels), fits it to a 141 px disc inside 2 px of padding (145 x 145)
+and writes `components/jr_display/src/balance_wheel_data.{h,c}`: RGB565 plus an
+8-bit alpha plane, 60 KB of flash. `hud_balance_blit` rotates it about the
+recess centre: each destination pixel is inverse-mapped with a fixed-point
+rotation walked along the row (no multiply per pixel for the mapping), sampled
+bilinearly, blended into the strip; integer only, no heap, no framebuffer, so a
+strip render equals the whole-frame render. Its own 65-entry sine table, because
+the shared 256-entry LUT is a coarse fit whose two half-waves sit one step apart
+(sin and cos at 45 degrees differ by 2 %: the sprite sheared by a pixel at the
+rim). Motion: +-45 degrees, one sine per second read off the clock
+(`hud_balance_angle_q16(ss, ms)`: zero at the top of every second, flat at the
+ends), about 15 frames a cycle at 14-19 fps. A real balance beats at 4 Hz, which
+the panel cannot show. Cost per frame: 15,813 destination pixels visited
+(the 143 x 143 box's disc), about 10,000 of them blended; the windows in the
+wheel cost a table read each. On the device it is an estimate of 3-4 ms, which
+only a run on the panel can confirm.
+
+*CELESTIAL's stars.* `firmware/mascot/gen_celestial_stars.py` reads the baked
+frame, drops everything within 8 px of gold (the constellation lines and their
+joints, the hour studs, the minute track), the hub and the track, ranks the
+rest by the light in a 7 x 7 blob above the local background, and keeps the
+brightest 32 at least 16 px apart (`celestial_stars_data.h`: x, y, period,
+phase, strength). Each has its own period (2.0 to 5.0 s, all dividing 60 s so
+the minute never jumps) and phase; its level is a squared sine, so a star is
+dark most of the time and rises to a short flash. A glint is additive and
+clamped, a cool white: full on the star pixel, 5/8 on its four neighbours and,
+as it peaks, 3/8 on the diagonals and 1/4 on the arm tips. At most 261 pixels
+a frame (32 stars, 13 pixels each at the very most), strongest channel step
++120 on a navy pixel. `docs/evidence/watch-dials-2026-11-10-celestial-twinkle.png`
+shows resting, live and the difference (x3) on three frames.
+
 **The weather cell never cuts a word (2026-09-05).** The 12-glyph
 `condition` cap had already turned "LIGHT DRIZZLE" into `LIGHT DRIZZL`
 before the cell's 15-glyph clip made it `LIGHT DRIZZ` on the glass
@@ -1338,3 +1396,266 @@ awake to stay ready, to a thing that is ready because you picked it up.
   says the choice annulus is r217-236 when the constants are 223-231;
   `hud_render.h:120-121` describes a thinking track ring at r=150 that
   `hud_render.c:611-617` deliberately does not draw (the comet is at r142/145).
+
+## The data screens on the glass primitives (2026-11-09)
+
+STATUS and WEATHER are drawn with the anti-aliased `glass_*` row primitives and
+the Barlow Semi Condensed atlases (`glass.h`), no longer with the 5x7 font and
+opaque annuli. Code: `sp_focal_status`, `sp_focal_weather` and the `sg_*`
+helpers in `jr_display.c`. The slide fade `st` is the primitives' alpha, so the
+vertical slide and cross-dissolve are unchanged. Colour rules are the shell's:
+cyan live, gold muted, red low battery, grey labels, ink values.
+
+**Type.** Tracked label `GLASS_FONT_LABEL`; the number `GLASS_FONT_HERO` with a
+smaller `%` (STATUS, in the ring's colour) or degree sign (WEATHER, in the
+sky's accent) beside it; body lines `GLASS_FONT_TEXT`.
+
+**Ring.** One ring, r113..123 (10 px, round caps), centred 10 px above the panel
+centre so the stats fit under it, from 12 o'clock clockwise. STATUS: the
+battery percentage over a low-alpha track (drawn only where the fill is not),
+a 2.5 px glow on the filled part only. WEATHER: twelve 30 degree slots from 12
+o'clock, slot 0 being now; each hour a round-capped stroke whose width (3..10
+px) and alpha grow with its chance of rain, a dry hour a faint tick, an unknown
+hour nothing; stale or hourless weather is a bare track. The old temperature
+gauge, its high/low band and the chance-of-rain ring are gone.
+
+**Headline.** The old line below the ring would cross the bigger ring, so the
+in-ring label carries it. STATUS shows BATTERY while the headline is the
+healthy uptime, and the headline itself when something is wrong (LOW BATTERY,
+NO WIFI, UPDATE 42%...); the uptime stays on the detail sheet. WEATHER's label
+is the condition word, or NO WEATHER.
+
+**Under the ring.** STATUS: WIFI / LINK / TOOLS, label over value, an off stat
+dim. WEATHER: the age line (`12M AGO`, `STALE 45M`). Both rows sit inside the
+orbit rail (r186) and so cross the update ring's band (r140-154); they are not
+drawn while an update rings.
+
+**Entry.** `s_entry_ms` starts at 0 when STATUS or WEATHER becomes current
+(`sp_fade_tick`), counts the frame's dt and parks at `SP_ENTRY_TOTAL_MS`
+(900 ms); the outgoing screen of a slide is always drawn settled. STATUS: the
+ring sweeps and the number counts up on one ease-out-cubic over 900 ms; label,
+power word and the three stats then fade in and rise 8 px, started 0 / 150 /
+250 / 330 / 410 ms apart, 300 ms each. WEATHER: the label, number, high/low,
+sun line and age line use the same staggers; the twelve hours build clockwise
+45 ms apart, 250 ms each. The maths (`glass_ease_out_cubic_q16`,
+`glass_stagger_q16`, `glass_count_up`, `glass_rise_px`, `glass_frac_alpha`,
+`glass_entry_animating`) is pure and integer-only in `glass_draw.c`. Settled,
+the screen draws one fixed frame and asks for nothing; `rest_eligible` and
+`quiet_eligible` also refuse to rest while an entry runs.
+
+**Cost.** `tests/probe/probe.c` prints the pixels a screen's own primitives
+write in one settled frame (veil and orbit rail excluded). Old (5x7) against
+glass: STATUS 21294 -> 19684 (muted 20631), WEATHER 17275 -> 6787, no weather
+10948 -> 8567, stale 14791 -> 12257.
+
+### The backdrop under a data screen: true black, face parked (2026-11-10)
+
+The veil used to stop at a quarter of the face's brightness, so under STATUS,
+WEATHER, DESK and ACTIVITY the engine still decoded the animated face every
+frame and `sp_veil` folded 217k pixels of it before the text went on. Now the
+destination of a slide decides:
+
+- **Black.** For a slide onto STATUS / WEATHER / DESK / ACTIVITY the face goes
+  all the way to black as the slide completes (`s_space_black`, 0..256,
+  `sp_veil_black`) and comes back with the slide going home. Between two data
+  screens it stays black the whole way. A sheet or the shade over JARVIS, and
+  everything on WATCH, keep the old quarter veil.
+- **Park.** Once black is complete, the slide has settled and nothing else
+  (ask dim, canvas, surface, test pattern) is drawing over the backdrop,
+  `sp_fade_tick` publishes `s_park_want`. The presenter
+  (`presenter_backdrop_tick`) stops and hides the anim, as `dial_show` does,
+  sets `s_parked`, and `sp_veil` is skipped. A parked strip is the engine's
+  black background plus the shell.
+- **Unpark.** When the destination stops being a data screen the verdict is
+  withdrawn on the first frame of the slide and the presenter notifies itself,
+  so the anim runs again under the outgoing screen.
+- **Face truth.** `apply_face` and `program_segment` keep binding and
+  programming the requested face while parked; `anim_run` is the one place
+  that starts and shows the anim and does nothing while `s_parked`. Unparking
+  runs whatever was programmed last. A baked dial is not shown by the unpark:
+  the face chain swaps it to the blit in the same pass.
+- **Cadence.** A hidden anim invalidates nothing, so `display_task` refreshes
+  the glass every pass while `s_parked`, exactly as for `s_dial_blit`. A missed
+  refresh freezes the screen silently.
+- Outside the shell circle (r214) the parked backdrop is black where the face
+  used to show through. Only the face art's own pixels beyond r214 change.
+
+## The remaining screens on the glass (2026-11-10)
+
+The CONTROLS shade, ACTIVITY, DESK, the detail sheet, the screen-name label and
+a small icon set follow STATUS and WEATHER onto the glass primitives. Evidence
+frames: `docs/evidence/glass-screens2-2026-11-10-*.png` (host probe renders, not
+the panel).
+
+**Screen-name label.** The caption chip is `GLASS_FONT_LABEL`, tracked +3, grey
+for the screen names and the quiet captions, ink for a message, fading with the
+chip's ease. Its dark band is weighted by `(256 - max(s_space_black,
+s_shade_ease)) / 256`: gone on the black data screens and under the shade, kept
+over the face and over a watch dial, where the grey needs something to stand on.
+
+**Icons.** `glass_icon.h/.c` draw two baked sizes (SM 28, LG 44 px, 4-bit alpha)
+from `glass_icon_data.c`, which `scripts/gen-glass-icons.py` generates from
+`third_party/icons/glass-icons-sheet.png` (`--check` fails when the file is
+stale). Twelve icons come straight off the sheet; MIC_MUTED is the microphone
+with a slash the generator draws. Uses: WEATHER's sky above its word (sun or
+moon by the sun times, an unknown sky draws nothing), STATUS's bolt beside the
+power word while charging, the shade's microphone, loudspeaker and sun.
+
+**The shade.** Volume is the left rim, brightness the right, each a 80 degree
+arc at r180-188 (cyan, amber) that fills upward from the bottom with the
+speaker or sun icon and the number inside. The mute button is a disc (r62, centred at y206, a little above the middle) with the microphone, cyan live, gold
+muted with a slash; muted adds a 3.6 s breathing ring, drawn only while the
+shade is open and the mic is muted (`s_breath_ms` stops otherwise). Under it:
+the state line, one line of hint, and one quiet line of key hints. Entry
+(`s_shade_ms`, 700 ms): arcs sweep with the numbers counting up, brightness 90
+ms behind, the button grows from 71% as it fades in, the rest follows staggered.
+
+*Touch.* What a touch does is unchanged; where it lands moved with the picture.
+The mute button's target is its drawn disc (it was a pill at y292). The volume
+target is the left rim: the upper half (above the middle) is louder, the lower
+half quieter, from r156 outward, within 130 px of the middle. The right rim is
+brightness and has no touch action, so a tap there closes the shade like any
+other empty spot. `test_shade_hits_resolve_to_controls` was re-expressed with
+the new geometry.
+
+**ACTIVITY.** Up to three two-line blocks, newest first, 62 px apart: the kind
+and the age in `GLASS_FONT_LABEL` (the age under the sheet's own truth rule:
+`JUST NOW`, `7M AGO`, or `EARLIER` when only a stamp-less carried row is left),
+the summary in `GLASS_FONT_TEXT` below, each older block a step quieter. Empty
+is one grey line, NOTHING YET. Entry: blocks fade and rise 90 ms apart. A
+summary the store already holds at its full 24 glyphs is drawn with its last
+glyph as a `.`: the push cuts silently at 24, so a full store may have been cut.
+
+**DESK.** The STATUS ring (r113-123, round caps, glow) in the agent's state
+colour (cyan with none), the progress as the hero number with a small `%`
+counting up with the sweep, the task as the tracked label above and the agent
+state as the word below. It uses `s_entry_ms` like STATUS (now also reset on
+arrival at DESK and ACTIVITY).
+
+**Detail sheet.** Header in `GLASS_FONT_LABEL` cyan tracked +3, keys in the
+label face grey, values right-aligned in the text face, on the same dimmed band
+and rows. Nine rows still fit (`test_detail_sheet_rows_stay_inside`).
+
+**Settled cost.** `sp_draw_orbit` painted an 8 px opaque rail (about 10.8k
+pixels) on every strip of every frame. It is now a 4 px glass track (r188-192,
+about 6.2k) with glass dots and a round-capped active mark, so it matches the
+rings it surrounds; the dot centres are computed once, not once per row.
+`sp_compose` formats the weather and activity strings only while that screen is
+shown or sliding to or from it (a settled STATUS used to format both every
+frame).
+
+Pixels written in one settled frame, rail included (probe `writes`; old is
+commit 6df36e5, with the 5x7 write sites counted in a patched copy):
+
+| screen            | old   | new   |
+| ----------------- | ----- | ----- |
+| ACTIVITY (3 rows) | 14475 | 13319 |
+| ACTIVITY (empty)  | 11403 |  7146 |
+| DESK              | 30444 | 25653 |
+| detail sheet      | 16412 | 13209 |
+| STATUS (charging) | 31485 | 27100 |
+| WEATHER           | 17618 | 13279 |
+| shade, live       | 35262 | 25896 |
+| shade, muted      | 35346 | 27544 |
+
+The shade's old count has no breathing ring, icons or key line; its new one has
+all of them. These are pixel counts, a proxy: frames per second on the S3 are
+for the device to say.
+
+## A dial owns the glass, 2026-11-10
+
+On WATCH the dial is the screen. The shell's furniture used to behave as if it
+owned the glass the dial was drawn on, and three rounds of work fixed that with
+one ring, one dot, one rest face and one dial.
+
+**One ring.** The rim is a single hairline ring at r218 about the true centre of
+the panel, anti-aliased: 2 px of line and a 1 px ramp either side. It used to be
+a battery arc, a charging comet and a separate privacy ring a few pixels apart,
+which over a dial's art read as a layer that had slipped. The ring's colour is the
+privacy colour (gold while the microphone is muted, cyan while it is live, red
+under 20 % and not charging). The battery is its lit part, clockwise from 12
+o'clock at full strength; the rest of the ring stays at about a fifth, so the
+level reads as the lit part of one line. While charging a bright tail travels
+through the lit part and ends in a white head, on the same radius. The choice
+arcs keep r223 and outward.
+
+**What the rim shows on WATCH** (`watch_rim_mode`). Muted and quiet: nothing.
+Live and quiet: one cyan dot, 3 px in radius, on the ring's radius at 12 o'clock
+on a slightly larger black disc, and nothing else. Quiet means no voice session
+(capture, think, speak), no error, no sheet or shade, no question or commit
+ring, no agent or operator-lease rim and no firmware update. Any one of those
+brings the whole ring back at once, and every other screen keeps the ring always.
+`test_watch_dial_owns_the_glass_no_idle_rim` pins each case, with a mutation per
+condition.
+
+**A dial at rest by day** keeps its dial: a glance, or the nightstand while it is
+not night, with a time to show. It is drawn without its seconds hand and redrawn
+on the minute, and it is not warmed or cached for the seconds. At night, in DREAM,
+with no time, and on every screen but WATCH the glass-font rest face is shown.
+
+**The rest face.** One face for every rest mode and for whichever of JARVIS or
+WATCH was shown, in the glass type: the time in the HERO digits in warm amber,
+about half strength by day and a quarter at night and in DREAM, and under it at
+most one quiet line (`74%  CHARGING`, or the next item, or nothing) at two
+thirds of that. It is a pure function of the clock word, the companion view and
+the strip, so the pixels are the same however the device got there
+(`test_rest_face_is_one_face`). The ring round a rest face is drawn at the same
+strength as its digits (`hud_env_t.rim_a`), so it is never the brightest thing on
+a bedside face; the privacy dot is dimmed the same way. A style change made at
+rest shows the new dial only once the device is awake again.
+
+**The JARVIS dial** (`hud_overlay_jarvis_dial`) is an instrument in the home
+screen's language: sixty amber ticks (hour ticks r186-201, fives, minutes
+shorter and dimmer), four cyan beads at r182 on the quarters, hairline rings at
+r184, r131 and r61, a thin amber arc at r206 from sunrise to sunset with one
+bright bead where the sun is now (none at night), tapered anti-aliased hands (cyan
+hour, white minute, a gold seconds hand only when awake), a hub, and the date
+under the centre in the glass type. It is the JARVIS watch style on the WATCH
+screen and nothing else.
+
+**The home peek stays hands only.** Any other screen that shows the time for a
+few seconds shows the three hands and the hub over the face, as it always did;
+none of the dial furniture is drawn there (`test_home_peek_is_hands_only` demands
+the peek equal `hud_overlay_clock` pixel for pixel).
+
+**Smaller fixes.** The sun arc is the JARVIS dial's only: it ran across PILOT's
+tick track, FUTURE's rings and MINIMAL's minute ticks. The shade's mute button is
+an opaque black disc under its tint, so the face no longer shows through it.
+FUTURE's weather line is one whole short word from a fixed vocabulary (CLEAR,
+CLOUDY, RAIN, SNOW, FOG, STORM) or the temperature alone (`watch_wx_word`; the
+WEATHER screen keeps `wx_cond_fit`). DIVER's date is set in the glass digits,
+centred in its window.
+
+**The ring and the dial's rings are tables.** A ring of one radius and one width
+needs no coverage worked out per frame. `scripts/gen-rim-table.py` prints, for
+the rim and for the JARVIS rings (r184, r131, r61 and the day's arc at r206), the
+columns each row crosses and the coverage of each, into
+`components/jr_display/src/hud_rim_table.inc` (about 6.5 KB of flash). Painting a
+ring is a load and a blend per pixel; the lit part and the dim remainder are the
+same coverage at two strengths, and the comet's tail is worked out only within
+reach of its head. Change a radius or a width in `hud_render.c` and run the
+script; a static assert and `test_rim_table_matches_the_formula` fail if the table
+is stale. The output is pixel for pixel what the per-pixel loop drew, so no frame
+hash moved for it.
+
+**Cost.** Whole-frame callgrind instructions, the probe's `frame` scenes at
+clk=100000, `-O2`, no vectorising. The 162.6 M stand-in face fill is in every
+row, so only the differences mean anything. Millions of instructions; they are
+host instructions, and whether a frame still holds 24 fps on the S3 is for the
+device to say.
+
+| scene          | bd16ee2 | round 2 | round 3 | change vs bd16ee2 |
+| -------------- | ------- | ------- | ------- | ----------------- |
+| home           | 172.06  | 178.84  | 172.95  | +0.89             |
+| status-74      | 178.71  | 180.04  | 179.60  | +0.89             |
+| weather        | 176.01  | 177.34  | 176.90  | +0.89             |
+| shade          | 178.44  | 180.45  | 180.01  | +1.57             |
+| watch-jarvis   | 172.07  | 177.67  | 175.94  | +3.87             |
+| watch-diver    | 176.83  | 176.78  | 176.78  | -0.05             |
+| watch-pilot    | 179.06  | 178.04  | 178.05  | -1.01             |
+| watch-future   | 177.64  | 176.62  | 176.62  | -1.02             |
+| watch-skeleton | 182.52  | 182.46  | 182.47  | -0.05             |
+
+The rim still costs about 0.9 M more than the old two-pixel dots, almost all of it
+the blend of its roughly four thousand painted pixels; the shade's other 0.7 M is
+its opaque mute-button disc. Nothing was cut to hide it.

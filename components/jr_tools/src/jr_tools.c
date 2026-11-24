@@ -22,15 +22,20 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "jr_net/jr_net.h"
+#include "jr_tools/jr_tools_project.h"
+#include "jr_tools/jr_weather.h"
 
 static const char *TAG = "jr_tools";
 
-#define JR_TOOLS_JOB_QUEUE_DEPTH     4U
-#define JR_TOOLS_RESULT_QUEUE_DEPTH  4U
-#define JR_TOOLS_CANCEL_SLOTS        12U
-#define JR_TOOLS_CODE_CAP            4096U  /* the program + args; board_poll is ~3 KB */
-#define JR_TOOLS_HTTP_BODY_CAP       8192U
-#define JR_TOOLS_HTTP_TIMEOUT_MS     35000
+#define JR_TOOLS_JOB_QUEUE_DEPTH        4U
+#define JR_TOOLS_RESULT_QUEUE_DEPTH     4U
+#define JR_TOOLS_CANCEL_SLOTS           12U
+#define JR_TOOLS_CODE_CAP               4096U  /* the program + args; board_poll is ~3 KB */
+#define JR_TOOLS_HTTP_BODY_CAP          32768U /* PSRAM-backed HTTP receive cap */
+#define JR_TOOLS_HTTP_BODY_CAP_FALLBACK 8192U  /* fallback if PSRAM alloc fails */
+#define JR_TOOLS_HTTP_TIMEOUT_MS        35000
+#define JR_TOOLS_KEEPALIVE_IDLE_US   (45LL * 1000LL * 1000LL)
+#define JR_TOOLS_IDLE_POLL_MS        5000U
 #define JR_TOOLS_TASK_STACK          16384U
 #define JR_TOOLS_TASK_PRIORITY       4U
 
@@ -96,7 +101,10 @@ static struct {
     bool initialized;
     uint32_t boot_nonce;
     uint32_t session_gen;
+    uint32_t config_gen;
     uint8_t cancel_cursor;
+    uint32_t oversize;                 /* bodies past JR_TOOLS_HTTP_BODY_CAP */
+    char last_target[JR_TOOLS_NAME_CAP]; /* method the last job addressed */
     cancel_entry_t cancelled[JR_TOOLS_CANCEL_SLOTS];
     char mcp_url[JR_CFG_MCP_URL_CAP];
     char mcp_key[JR_CFG_MCP_KEY_CAP];
@@ -222,15 +230,80 @@ static void publish_result(const jr_tool_result_t *result)
     (void)xQueueSend(s_tools.results, result, 0);
 }
 
-static bool snapshot_config(char *url, size_t url_cap, char *key, size_t key_cap)
+static bool snapshot_config(char *url, size_t url_cap, char *key, size_t key_cap,
+                            uint32_t *out_gen)
 {
     bool copied;
+    uint32_t gen;
     taskENTER_CRITICAL(&s_tools.lock);
     copied = copy_bounded(url, url_cap, s_tools.mcp_url) &&
              copy_bounded(key, key_cap, s_tools.mcp_key);
+    gen = s_tools.config_gen;
     taskEXIT_CRITICAL(&s_tools.lock);
+    if (out_gen != NULL) {
+        *out_gen = gen;
+    }
     return copied && strncmp(url, "https://", 8U) == 0 && url[8] != '\0' &&
            key[0] != '\0';
+}
+
+static uint32_t current_config_gen(void)
+{
+    taskENTER_CRITICAL(&s_tools.lock);
+    const uint32_t gen = s_tools.config_gen;
+    taskEXIT_CRITICAL(&s_tools.lock);
+    return gen;
+}
+
+/* A gateway body larger than JR_TOOLS_HTTP_BODY_CAP. It used to end as a
+ * silent bad_response on an HTTP 200; now one log line names the method (never
+ * its arguments) and the sizes, the counter moves, and the model gets a
+ * bounded answer that says the result was too large and to narrow the
+ * request. */
+static void note_oversize(const char *tool, const char *args_json,
+                          int64_t announced, size_t bytes_read, size_t cap,
+                          jr_tool_result_t *result)
+{
+    char target[JR_TOOLS_NAME_CAP];
+    char line[160];
+    (void)jr_tools_target_name(tool, args_json, target, sizeof target);
+    (void)jr_tools_describe_oversize(line, sizeof line, tool, target, announced,
+                                     bytes_read, cap);
+    ESP_LOGW(TAG, "%s", line);
+    (void)jr_tools_oversize_result(result->response_json,
+                                   sizeof(result->response_json), announced,
+                                   bytes_read);
+    taskENTER_CRITICAL(&s_tools.lock);
+    s_tools.oversize++;
+    taskEXIT_CRITICAL(&s_tools.lock);
+}
+
+static void record_target(const char *tool, const char *args_json)
+{
+    char target[JR_TOOLS_NAME_CAP];
+    (void)jr_tools_target_name(tool, args_json, target, sizeof target);
+    taskENTER_CRITICAL(&s_tools.lock);
+    memcpy(s_tools.last_target, target, sizeof s_tools.last_target);
+    taskEXIT_CRITICAL(&s_tools.lock);
+}
+
+uint32_t jr_tools_oversize_count(void)
+{
+    taskENTER_CRITICAL(&s_tools.lock);
+    const uint32_t count = s_tools.oversize;
+    taskEXIT_CRITICAL(&s_tools.lock);
+    return count;
+}
+
+void jr_tools_last_target(char *out, size_t out_cap)
+{
+    if (out == NULL || out_cap == 0U) {
+        return;
+    }
+    taskENTER_CRITICAL(&s_tools.lock);
+    strncpy(out, s_tools.last_target, out_cap - 1U);
+    taskEXIT_CRITICAL(&s_tools.lock);
+    out[out_cap - 1U] = '\0';
 }
 
 static bool response_from_mcp(const char *raw, jr_tool_result_t *result)
@@ -260,71 +333,19 @@ static bool response_from_mcp(const char *raw, jr_tool_result_t *result)
         upstream = root;
     }
 
-    cJSON *response = cJSON_CreateObject();
-    cJSON *copy = cJSON_Duplicate(upstream, true);
-    if (response == NULL || copy == NULL) {
-        cJSON_Delete(copy);
-        cJSON_Delete(response);
-        cJSON_Delete(root);
-        return false;
+    jr_tools_project_info_t info = {0};
+    bool ok = jr_tools_project_json(upstream, result->response_json,
+                                    sizeof(result->response_json), &info);
+    if (ok && info.truncated) {
+        ESP_LOGW(TAG,
+                 "mcp result projected on device: raw=%u out=%u cap=%u tier=%d fallback=%d",
+                 (unsigned)raw_len, (unsigned)strlen(result->response_json),
+                 (unsigned)sizeof(result->response_json), info.tier_index,
+                 info.used_fallback ? 1 : 0);
+    } else if (!ok) {
+        ESP_LOGE(TAG, "mcp result projection failed: raw=%u cap=%u",
+                 (unsigned)raw_len, (unsigned)sizeof(result->response_json));
     }
-    cJSON_AddItemToObject(response, "result", copy);
-    bool ok = cJSON_PrintPreallocated(response, result->response_json,
-                                     sizeof(result->response_json), false);
-    if (!ok) {
-        /* OVER BUDGET IS NOT A FAILURE. It used to be: a result one byte past
-         * the cap became bad_response, Gemini got nothing, and the owner's
-         * experience was "I can't get any help" — intermittently, because
-         * whether a search fits depends on the query. Measured on the device:
-         * need=3728 against cap=3072, over by 656 bytes.
-         *
-         * A truncated answer beats no answer. Emit a bounded object that says
-         * plainly it was cut, carries the byte counts, and includes as much of
-         * the real payload as fits — Gemini can use a partial catalogue, and
-         * the `truncated` flag lets it say so rather than inventing the rest.
-         *
-         * The proper fix is server-side projection with a cursor (PLAN N6.3);
-         * this is the floor that stops a size overrun from being total data
-         * loss while that lands. */
-        char *measured = cJSON_PrintUnformatted(response);
-        const unsigned need = (unsigned)(measured ? strlen(measured) : 0U);
-        ESP_LOGW(TAG, "mcp result over budget: need=%u cap=%u raw=%u — truncating",
-                 need, (unsigned)sizeof(result->response_json), (unsigned)raw_len);
-
-        /* Reserve room for the envelope, then fill the remainder with payload. */
-        static const char *const head =
-            "{\"result\":{\"truncated\":true,\"note\":"
-            "\"payload exceeded the device budget; content is cut\",\"text\":\"";
-        static const char *const tail = "\"}}";
-        const size_t cap = sizeof(result->response_json);
-        const size_t hlen = strlen(head), tlen = strlen(tail);
-        if (measured != NULL && cap > hlen + tlen + 16U) {
-            size_t room = cap - hlen - tlen - 1U;
-            memcpy(result->response_json, head, hlen);
-            size_t w = hlen;
-            /* Copy payload, JSON-escaping the few characters that would break
-             * the string, and stop on a whole escape rather than mid-sequence. */
-            for (size_t i = 0; measured[i] != '\0' && w + 8U < hlen + room; ++i) {
-                unsigned char ch = (unsigned char)measured[i];
-                if (ch == '"' || ch == '\\') {
-                    result->response_json[w++] = '\\';
-                    result->response_json[w++] = (char)ch;
-                } else if (ch < 0x20) {
-                    w += (size_t)snprintf(result->response_json + w,
-                                          cap - w, "\\u%04x", ch);
-                } else {
-                    result->response_json[w++] = (char)ch;
-                }
-            }
-            memcpy(result->response_json + w, tail, tlen);
-            result->response_json[w + tlen] = '\0';
-            ok = true;
-        }
-        if (measured != NULL) {
-            cJSON_free(measured);
-        }
-    }
-    cJSON_Delete(response);
     cJSON_Delete(root);
     return ok;
 }
@@ -402,6 +423,38 @@ static char *build_request_body(const char *url, const char *tool_name,
     return body;
 }
 
+/* One tools_task-owned persistent HTTPS client for JarvisMCP keep-alive.
+ * Never touched from any other task; auto-invalidated on config reload,
+ * transport/HTTP error, or 45 s idle so TLS RAM is released during rest. */
+static esp_http_client_handle_t s_mcp_client;
+static uint32_t s_mcp_client_gen;
+static int64_t  s_mcp_client_last_used_us;
+
+static void mcp_client_close(void)
+{
+    if (s_mcp_client != NULL) {
+        esp_http_client_cleanup(s_mcp_client);
+        s_mcp_client = NULL;
+        s_mcp_client_gen = 0U;
+        s_mcp_client_last_used_us = 0;
+    }
+}
+
+static void mcp_client_maybe_expire(void)
+{
+    if (s_mcp_client == NULL) {
+        return;
+    }
+    const uint32_t gen = current_config_gen();
+    const int64_t now_us = esp_timer_get_time();
+    if (gen != s_mcp_client_gen ||
+        (now_us - s_mcp_client_last_used_us) >= JR_TOOLS_KEEPALIVE_IDLE_US) {
+        ESP_LOGI(TAG, "closing idle/stale mcp keep-alive handle (cfg_changed=%d)",
+                 gen != s_mcp_client_gen ? 1 : 0);
+        mcp_client_close();
+    }
+}
+
 static jr_tool_status_t post_tool(const char *tool_name, const char *args_json,
                                   const char *code, bool physical_confirmed,
                                   const char *request_id,
@@ -410,8 +463,10 @@ static jr_tool_status_t post_tool(const char *tool_name, const char *args_json,
     char url[JR_CFG_MCP_URL_CAP] = {0};
     char key[JR_CFG_MCP_KEY_CAP] = {0};
     char auth[JR_CFG_MCP_KEY_CAP + 8U] = {0};
-    if (!snapshot_config(url, sizeof(url), key, sizeof(key))) {
+    uint32_t cfg_gen = 0U;
+    if (!snapshot_config(url, sizeof(url), key, sizeof(key), &cfg_gen)) {
         secure_zero(key, sizeof(key));
+        mcp_client_close();
         return JR_TOOL_STATUS_NOT_CONFIGURED;
     }
 
@@ -422,62 +477,137 @@ static jr_tool_status_t post_tool(const char *tool_name, const char *args_json,
         return JR_TOOL_STATUS_INTERNAL_ERROR;
     }
 
-    esp_http_client_config_t config = {
-        .url = url,
-        .method = HTTP_METHOD_POST,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = JR_TOOLS_HTTP_TIMEOUT_MS,
-        .disable_auto_redirect = true,
-        .buffer_size = 1024,
-        .buffer_size_tx = 1024,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (client == NULL) {
-        secure_zero(body, strlen(body));
-        free(body);
-        secure_zero(key, sizeof(key));
-        return JR_TOOL_STATUS_INTERNAL_ERROR;
+    /* Drop any cached handle whose config changed or whose idle budget elapsed. */
+    mcp_client_maybe_expire();
+    if (s_mcp_client != NULL && s_mcp_client_gen != cfg_gen) {
+        mcp_client_close();
     }
 
     (void)snprintf(auth, sizeof(auth), "Bearer %s", key);
     secure_zero(key, sizeof(key));
-    esp_err_t header_err = esp_http_client_set_header(client, "Content-Type",
-                                                       "application/json");
-    if (header_err == ESP_OK) {
-        header_err = esp_http_client_set_header(client, "Authorization", auth);
-    }
 
     jr_tool_status_t outcome = JR_TOOL_STATUS_NETWORK_ERROR;
-    size_t body_len = strlen(body);
-    esp_err_t err = header_err == ESP_OK
-                        ? esp_http_client_open(client, (int)body_len)
-                        : header_err;
-    if (err == ESP_OK) {
-        size_t sent = 0U;
-        while (sent < body_len) {
-            int written = esp_http_client_write(client, body + sent,
-                                                (int)(body_len - sent));
-            if (written <= 0) {
+    const size_t body_len = strlen(body);
+
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const bool reused = (s_mcp_client != NULL);
+        if (s_mcp_client == NULL) {
+            esp_http_client_config_t config = {
+                .url = url,
+                .method = HTTP_METHOD_POST,
+                .crt_bundle_attach = esp_crt_bundle_attach,
+                .timeout_ms = JR_TOOLS_HTTP_TIMEOUT_MS,
+                .disable_auto_redirect = true,
+                .keep_alive_enable = true,
+                .keep_alive_idle = 30,
+                .keep_alive_interval = 5,
+                .keep_alive_count = 3,
+                .buffer_size = 1024,
+                .buffer_size_tx = 1024,
+            };
+            s_mcp_client = esp_http_client_init(&config);
+            if (s_mcp_client == NULL) {
+                outcome = JR_TOOL_STATUS_INTERNAL_ERROR;
                 break;
             }
-            sent += (size_t)written;
+            s_mcp_client_gen = cfg_gen;
+            esp_err_t header_err = esp_http_client_set_header(
+                s_mcp_client, "Content-Type", "application/json");
+            if (header_err == ESP_OK) {
+                header_err = esp_http_client_set_header(
+                    s_mcp_client, "Authorization", auth);
+            }
+            if (header_err != ESP_OK) {
+                mcp_client_close();
+                outcome = JR_TOOL_STATUS_NETWORK_ERROR;
+                break;
+            }
         }
-        if (sent == body_len) {
-            int64_t announced = esp_http_client_fetch_headers(client);
+
+        esp_http_client_handle_t client = s_mcp_client;
+        result->http_status = 0;
+        outcome = JR_TOOL_STATUS_NETWORK_ERROR;
+        bool keep_conn = false;
+
+        esp_err_t err = esp_http_client_open(client, (int)body_len);
+        size_t sent = 0U;
+        if (err == ESP_OK) {
+            while (sent < body_len) {
+                int written = esp_http_client_write(client, body + sent,
+                                                    (int)(body_len - sent));
+                if (written <= 0) {
+                    break;
+                }
+                sent += (size_t)written;
+            }
+        }
+        int64_t announced = -1;
+        if (err == ESP_OK && sent == body_len) {
+            announced = esp_http_client_fetch_headers(client);
             result->http_status = esp_http_client_get_status_code(client);
+        }
+
+        /* A stale keep-alive socket commonly surfaces as open/write failure or
+         * immediate EOF (announced < 0, http_status == 0) on the reused handle.
+         * Tear it down and reconnect once cleanly. */
+        if (reused && attempt == 0 &&
+            (err != ESP_OK || sent < body_len ||
+             (announced < 0 && result->http_status == 0))) {
+            ESP_LOGI(TAG, "mcp keep-alive stale (err=%d sent=%u/%u status=%d), reconnecting",
+                     (int)err, (unsigned)sent, (unsigned)body_len,
+                     result->http_status);
+            mcp_client_close();
+            continue;
+        }
+
+        if (err == ESP_OK && sent == body_len &&
+            (announced >= 0 || result->http_status > 0)) {
             if (result->http_status < 200 || result->http_status >= 300) {
                 outcome = JR_TOOL_STATUS_HTTP_ERROR;
             } else if (announced > (int64_t)JR_TOOLS_HTTP_BODY_CAP) {
-                outcome = JR_TOOL_STATUS_BAD_RESPONSE;
+                note_oversize(tool_name, args_json, announced, 0U,
+                              JR_TOOLS_HTTP_BODY_CAP, result);
+                outcome = JR_TOOL_STATUS_OK;
             } else {
-                char *raw = (char *)malloc(JR_TOOLS_HTTP_BODY_CAP + 1U);
+                /* Prefer 32 KB strictly in PSRAM (0 B internal SRAM). If PSRAM
+                 * allocation fails, fall back cleanly to the 8 KB cap. */
+                size_t body_cap = JR_TOOLS_HTTP_BODY_CAP;
+                char *raw = (char *)heap_caps_malloc(
+                    body_cap + 1U,
+                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                bool fallback_oversize = false;
                 if (raw == NULL) {
+                    body_cap = JR_TOOLS_HTTP_BODY_CAP_FALLBACK;
+                    if (announced > (int64_t)body_cap) {
+                        fallback_oversize = true;
+                    } else {
+                        raw = (char *)malloc(body_cap + 1U);
+                    }
+                }
+                if (fallback_oversize) {
+                    note_oversize(tool_name, args_json, announced, 0U,
+                                  body_cap, result);
+                    outcome = JR_TOOL_STATUS_OK;
+                } else if (raw == NULL) {
                     outcome = JR_TOOL_STATUS_INTERNAL_ERROR;
                 } else {
                     size_t have = 0U;
                     bool overflow = false;
                     for (;;) {
-                        size_t room = JR_TOOLS_HTTP_BODY_CAP - have;
+                        /* Never ask for more bytes than announced: on a
+                         * keep-alive socket, reading past Content-Length waits
+                         * out the full HTTP timeout. */
+                        if (announced >= 0 && have >= (size_t)announced) {
+                            raw[have] = '\0';
+                            outcome = response_from_mcp(raw, result)
+                                          ? JR_TOOL_STATUS_OK
+                                          : JR_TOOL_STATUS_BAD_RESPONSE;
+                            break;
+                        }
+                        size_t room = body_cap - have;
+                        if (announced > 0 && (size_t)announced - have < room) {
+                            room = (size_t)announced - have;
+                        }
                         if (room == 0U) {
                             char extra;
                             int got = esp_http_client_read(client, &extra, 1);
@@ -506,23 +636,144 @@ static jr_tool_status_t post_tool(const char *tool_name, const char *args_json,
                             break;
                         }
                         have += (size_t)got;
+                        if (esp_http_client_is_complete_data_received(client)) {
+                            raw[have] = '\0';
+                            outcome = response_from_mcp(raw, result)
+                                          ? JR_TOOL_STATUS_OK
+                                          : JR_TOOL_STATUS_BAD_RESPONSE;
+                            break;
+                        }
                     }
                     if (overflow) {
-                        outcome = JR_TOOL_STATUS_BAD_RESPONSE;
+                        note_oversize(tool_name, args_json, announced,
+                                      body_cap + 1U, body_cap, result);
+                        outcome = JR_TOOL_STATUS_OK;
+                    } else if (outcome == JR_TOOL_STATUS_OK &&
+                               esp_http_client_is_complete_data_received(client)) {
+                        keep_conn = true;
                     }
-                    secure_zero(raw, JR_TOOLS_HTTP_BODY_CAP + 1U);
+                    secure_zero(raw, have < body_cap ? have + 1U : body_cap + 1U);
                     free(raw);
                 }
             }
         }
+
+        if (keep_conn) {
+            s_mcp_client_last_used_us = esp_timer_get_time();
+        } else {
+            mcp_client_close();
+        }
+        break;
     }
 
-    esp_http_client_cleanup(client);
     secure_zero(auth, sizeof(auth));
     secure_zero(body, body_len);
     free(body);
-    (void)tool_name; /* retained for the deliberately metadata-only caller log */
     return outcome;
+}
+
+/* The weather glance does not go through the gateway: Open-Meteo is public and
+ * keyless, so one direct HTTPS GET serves it, with no Authorization header and
+ * no gateway configuration. The body (bounded, measured ~2 KB) is projected to
+ * the compact JSON weather_apply_result reads. Same TLS bundle, same timeout,
+ * same single worker as post_tool. */
+static jr_tool_status_t fetch_weather(jr_tool_result_t *result)
+{
+    esp_http_client_config_t config = {
+        .url = JR_WEATHER_URL,
+        .method = HTTP_METHOD_GET,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = JR_TOOLS_HTTP_TIMEOUT_MS,
+        .disable_auto_redirect = true,
+        .buffer_size = 1024,
+        .buffer_size_tx = 1024,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) {
+        return JR_TOOL_STATUS_INTERNAL_ERROR;
+    }
+    /* Off the task stack, and off internal RAM when PSRAM exists: the TLS
+     * session is what needs the contiguous internal block. */
+    char *raw = (char *)heap_caps_malloc(JR_WEATHER_BODY_CAP + 1U,
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (raw == NULL) {
+        raw = (char *)malloc(JR_WEATHER_BODY_CAP + 1U);
+    }
+    jr_tool_status_t outcome = JR_TOOL_STATUS_NETWORK_ERROR;
+    size_t have = 0U;
+    if (raw == NULL) {
+        outcome = JR_TOOL_STATUS_INTERNAL_ERROR;
+    } else if (esp_http_client_open(client, 0) == ESP_OK) {
+        const int64_t announced = esp_http_client_fetch_headers(client);
+        result->http_status = esp_http_client_get_status_code(client);
+        if (result->http_status < 200 || result->http_status >= 300) {
+            outcome = JR_TOOL_STATUS_HTTP_ERROR;
+        } else if (announced > (int64_t)JR_WEATHER_BODY_CAP) {
+            ESP_LOGE(TAG, "weather: body too large announced=%lld cap=%u",
+                     (long long)announced, (unsigned)JR_WEATHER_BODY_CAP);
+            outcome = JR_TOOL_STATUS_BAD_RESPONSE;
+        } else {
+            for (;;) {
+                /* One byte past the cap is read to tell "exactly full" from
+                 * "too big"; a body that does not fit is rejected. Never ask
+                 * for more than the server announced: on a keep-alive
+                 * connection a read past the body waits out the whole 35 s
+                 * timeout (measured on the device: a 2 KB answer took 36.8 s). */
+                size_t want = JR_WEATHER_BODY_CAP + 1U - have;
+                if (announced > 0 && (size_t)announced - have < want) {
+                    want = (size_t)announced - have;
+                }
+                const int got = want == 0U ? 0 : esp_http_client_read(
+                    client, raw + have, (int)want);
+                if (got < 0) {
+                    outcome = JR_TOOL_STATUS_NETWORK_ERROR;
+                    break;
+                }
+                have += (size_t)got;
+                if (have > JR_WEATHER_BODY_CAP) {
+                    ESP_LOGE(TAG, "weather: body too large read=%u cap=%u",
+                             (unsigned)have, (unsigned)JR_WEATHER_BODY_CAP);
+                    outcome = JR_TOOL_STATUS_BAD_RESPONSE;
+                    break;
+                }
+                if (got == 0 || (announced > 0 && have >= (size_t)announced) ||
+                    esp_http_client_is_complete_data_received(client)) {
+                    const jr_weather_status_t ws = jr_weather_project(
+                        raw, have, result->response_json,
+                        sizeof(result->response_json));
+                    if (ws != JR_WEATHER_OK) {
+                        ESP_LOGE(TAG, "weather: projection failed (%d) bytes=%u",
+                                 (int)ws, (unsigned)have);
+                    }
+                    outcome = ws == JR_WEATHER_OK ? JR_TOOL_STATUS_OK
+                                                  : JR_TOOL_STATUS_BAD_RESPONSE;
+                    break;
+                }
+            }
+        }
+    }
+    esp_http_client_cleanup(client);
+    free(raw);
+    ESP_LOGI(TAG, "weather: open-meteo http=%d bytes=%u stack_free=%u",
+             result->http_status, (unsigned)have,
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    return outcome;
+}
+
+/* Cancellation and generation changes win races with a completed request;
+ * otherwise the outcome stands. */
+static void settle_job(const owned_job_t *job, jr_tool_result_t *result,
+                       jr_tool_status_t status)
+{
+    if (job_stale(job)) {
+        set_error_json(result, JR_TOOL_STATUS_STALE);
+    } else if (job_cancelled(job, true)) {
+        set_error_json(result, JR_TOOL_STATUS_CANCELLED);
+    } else if (status != JR_TOOL_STATUS_OK) {
+        set_error_json(result, status);
+    } else {
+        result->status = JR_TOOL_STATUS_OK;
+    }
 }
 
 static void execute_job(const owned_job_t *job, jr_tool_result_t *result)
@@ -533,6 +784,10 @@ static void execute_job(const owned_job_t *job, jr_tool_result_t *result)
     }
     if (job_cancelled(job, true)) {
         set_error_json(result, JR_TOOL_STATUS_CANCELLED);
+        return;
+    }
+    if (strcmp(job->name, JR_WEATHER_JOB_NAME) == 0) {
+        settle_job(job, result, fetch_weather(result));
         return;
     }
 
@@ -566,17 +821,8 @@ static void execute_job(const owned_job_t *job, jr_tool_result_t *result)
     secure_zero(code, sizeof(code));
     secure_zero(request_id, sizeof(request_id));
 
-    /* Cancellation and generation changes win races with a completed HTTPS
-     * request. The old payload must never be sent into a new model session. */
-    if (job_stale(job)) {
-        set_error_json(result, JR_TOOL_STATUS_STALE);
-    } else if (job_cancelled(job, true)) {
-        set_error_json(result, JR_TOOL_STATUS_CANCELLED);
-    } else if (status != JR_TOOL_STATUS_OK) {
-        set_error_json(result, status);
-    } else {
-        result->status = JR_TOOL_STATUS_OK;
-    }
+    /* The old payload must never be sent into a new model session. */
+    settle_job(job, result, status);
 }
 
 static void tools_task(void *arg)
@@ -584,12 +830,17 @@ static void tools_task(void *arg)
     (void)arg;
     owned_job_t job;
     for (;;) {
-        if (xQueueReceive(s_tools.jobs, &job, portMAX_DELAY) != pdTRUE) {
+        const TickType_t wait = (s_mcp_client != NULL)
+                                    ? pdMS_TO_TICKS(JR_TOOLS_IDLE_POLL_MS)
+                                    : portMAX_DELAY;
+        if (xQueueReceive(s_tools.jobs, &job, wait) != pdTRUE) {
+            mcp_client_maybe_expire();
             continue;
         }
         jr_tool_result_t result;
         init_result(&job, &result);
         int64_t started_us = esp_timer_get_time();
+        record_target(job.name, job.args_json);
         execute_job(&job, &result);
         int64_t elapsed_us = esp_timer_get_time() - started_us;
         result.duration_ms = elapsed_us > 0 ? (uint32_t)(elapsed_us / 1000) : 0U;
@@ -625,6 +876,7 @@ static esp_err_t apply_config(const char *url, const char *key)
     memcpy(s_tools.mcp_url, next_url, sizeof(next_url));
     secure_zero(s_tools.mcp_key, sizeof(s_tools.mcp_key));
     memcpy(s_tools.mcp_key, next_key, sizeof(next_key));
+    s_tools.config_gen++;
     taskEXIT_CRITICAL(&s_tools.lock);
     secure_zero(next_key, sizeof(next_key));
     return ESP_OK;
@@ -746,7 +998,7 @@ bool jr_tools_is_configured(void)
 {
     char url[JR_CFG_MCP_URL_CAP];
     char key[JR_CFG_MCP_KEY_CAP];
-    bool configured = snapshot_config(url, sizeof(url), key, sizeof(key));
+    bool configured = snapshot_config(url, sizeof(url), key, sizeof(key), NULL);
     secure_zero(key, sizeof(key));
     return configured;
 }

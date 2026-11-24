@@ -1,0 +1,605 @@
+{
+  "runs": [
+    {
+      "run": 1,
+      "start": {
+        "utc": "2026-10-12T09:43:59.931295+00:00",
+        "monotonic_s": 335787.89,
+        "read_duration_s": 0.23399999999674037,
+        "display": {
+          "init": "ready",
+          "last_error": "ESP_OK",
+          "task_running": true,
+          "blanked": true,
+          "requested_face": 6,
+          "applied_face": 6,
+          "requested_amplitude": 0,
+          "applied_bucket": 0,
+          "requests": 2,
+          "state_changes": 4,
+          "segment_sets": 3,
+          "asset_load_failures": 0,
+          "flush_submissions": 44431,
+          "flush_completions": 44431,
+          "flush_errors": 0,
+          "actual_fps": 13,
+          "render_us": 27000629,
+          "render_frames": 1139,
+          "render_frame_us": 8805,
+          "current_asset_bytes": 236148,
+          "free_psram": 4323304,
+          "stack_hwm": 1936,
+          "boot_timing": {
+            "time_base": "esp_timer_since_boot",
+            "optical": false,
+            "includes_rom": false,
+            "init_started": true,
+            "init_finished": true,
+            "first_transfer_valid": true,
+            "init_start_boot_ms": 233,
+            "init_end_boot_ms": 778,
+            "first_transfer_done_boot_ms": 829,
+            "first_glance_time_transfer_valid": false,
+            "first_glance_time_transfer_done_boot_ms": 0
+          }
+        },
+        "voice": {
+          "phase": "Idle",
+          "voice_armed": false,
+          "always_ready": true,
+          "privacy_paused": true,
+          "mood": "WHISPER",
+          "brightness": 5,
+          "rtc": false,
+          "capturing": false,
+          "ws_connected": false,
+          "auto_idle_ms": 0,
+          "mic_rms": 0.0,
+          "clean_rms": 0.0,
+          "vad_clean": true,
+          "vad_starts": 0,
+          "audio_diag_running": false
+        },
+        "uptime_ms": 308495,
+        "touch": {
+          "events": 2,
+          "last": {
+            "kind": "tap",
+            "x": 233,
+            "y": 100
+          },
+          "shade_open": false,
+          "panel_touch_challenge": {
+            "pending": false,
+            "active": false,
+            "verified": false,
+            "correct_rounds": 0,
+            "wrong": 0,
+            "expected_sector": 0,
+            "last_latency_ms": 0
+          }
+        },
+        "cockpit_display": {
+          "init": "ready",
+          "actual_fps": 13,
+          "flush_completions": 44431,
+          "flush_errors": 0,
+          "requested_face": 6,
+          "applied_face": 6,
+          "choices_active": false,
+          "watch_style": "FUTURE",
+          "sun_rise_min": 438,
+          "sun_set_min": 1135
+        }
+      },
+      "end": {
+        "utc": "2026-10-12T09:44:01.678885+00:00",
+        "monotonic_s": 335789.64,
+        "read_duration_s": 0.25,
+        "display": {
+          "init": "ready",
+          "last_error": "ESP_OK",
+          "task_running": true,
+          "blanked": true,
+          "requested_face": 6,
+          "applied_face": 6,
+          "requested_amplitude": 0,
+          "applied_bucket": 0,
+          "requests": 2,
+          "state_changes": 4,
+          "segment_sets": 3,
+          "asset_load_failures": 0,
+          "flush_submissions": 44470,
+          "flush_completions": 44470,
+          "flush_errors": 0,
+          "actual_fps": 13,
+          "render_us": 27007845,
+          "render_frames": 1140,
+          "render_frame_us": 7949,
+          "current_asset_bytes": 236148,
+          "free_psram": 4795824,
+          "stack_hwm": 1936,
+          "boot_timing": {
+            "time_base": "esp_timer_since_boot",
+            "optical": false,
+            "includes_rom": false,
+            "init_started": true,
+            "init_finished": true,
+            "first_transfer_valid": true,
+            "init_start_boot_ms": 233,
+            "init_end_boot_ms": 778,
+            "first_transfer_done_boot_ms": 829,
+            "first_glance_time_transfer_valid": false,
+            "first_glance_time_transfer_done_boot_ms": 0
+          }
+        },
+        "voice": {
+          "phase": "Idle",
+          "voice_armed": false,
+          "always_ready": true,
+          "privacy_paused": true,
+          "mood": "WHISPER",
+          "brightness": 5,
+          "rtc": false,
+          "capturing": false,
+          "ws_connected": false,
+          "auto_idle_ms": 0,
+          "mic_rms": 0.0,
+          "clean_rms": 0.0,
+          "vad_clean": true,
+          "vad_starts": 0,
+          "audio_diag_running": false
+        },
+        "uptime_ms": 310345,
+        "touch": {
+          "events": 2,
+          "last": {
+            "kind": "tap",
+            "x": 233,
+            "y": 100
+          },
+          "shade_open": false,
+          "panel_touch_challenge": {
+            "pending": false,
+            "active": false,
+            "verified": false,
+            "correct_rounds": 0,
+            "wrong": 0,
+            "expected_sector": 0,
+            "last_latency_ms": 0
+          }
+        },
+        "cockpit_display": {
+          "init": "ready",
+          "actual_fps": 13,
+          "flush_completions": 44470,
+          "flush_errors": 0,
+          "requested_face": 6,
+          "applied_face": 6,
+          "choices_active": false,
+          "watch_style": "FUTURE",
+          "sun_rise_min": 438,
+          "sun_set_min": 1135
+        }
+      },
+      "result": {
+        "elapsed_s": 1.75,
+        "delta": {
+          "render_frames": 1,
+          "render_us": 7216,
+          "flush_submissions": 39,
+          "flush_completions": 39,
+          "flush_errors": 0
+        },
+        "redraw_fps": 0.5714285714285714,
+        "completed_strip_flushes_per_s": 22.285714285714285,
+        "api_actual_fps": [
+          13,
+          13
+        ]
+      },
+      "both_visible": false
+    },
+    {
+      "run": 2,
+      "start": {
+        "utc": "2026-10-12T09:44:09.494954+00:00",
+        "monotonic_s": 335797.453,
+        "read_duration_s": 0.17199999996228144,
+        "display": {
+          "init": "ready",
+          "last_error": "ESP_OK",
+          "task_running": true,
+          "blanked": false,
+          "requested_face": 6,
+          "applied_face": 6,
+          "requested_amplitude": 0,
+          "applied_bucket": 0,
+          "requests": 2,
+          "state_changes": 5,
+          "segment_sets": 4,
+          "asset_load_failures": 0,
+          "flush_submissions": 44968,
+          "flush_completions": 44968,
+          "flush_errors": 0,
+          "actual_fps": 13,
+          "render_us": 27357417,
+          "render_frames": 1153,
+          "render_frame_us": 36167,
+          "current_asset_bytes": 236148,
+          "free_psram": 4795848,
+          "stack_hwm": 1936,
+          "boot_timing": {
+            "time_base": "esp_timer_since_boot",
+            "optical": false,
+            "includes_rom": false,
+            "init_started": true,
+            "init_finished": true,
+            "first_transfer_valid": true,
+            "init_start_boot_ms": 233,
+            "init_end_boot_ms": 778,
+            "first_transfer_done_boot_ms": 829,
+            "first_glance_time_transfer_valid": false,
+            "first_glance_time_transfer_done_boot_ms": 0
+          }
+        },
+        "voice": {
+          "phase": "Idle",
+          "voice_armed": false,
+          "always_ready": true,
+          "privacy_paused": true,
+          "mood": "AWAKE",
+          "brightness": 65,
+          "rtc": false,
+          "capturing": false,
+          "ws_connected": false,
+          "auto_idle_ms": 0,
+          "mic_rms": 0.0,
+          "clean_rms": 0.0,
+          "vad_clean": true,
+          "vad_starts": 0,
+          "audio_diag_running": false
+        },
+        "uptime_ms": 318143,
+        "touch": {
+          "events": 4,
+          "last": {
+            "kind": "tap",
+            "x": 233,
+            "y": 100
+          },
+          "shade_open": false,
+          "panel_touch_challenge": {
+            "pending": false,
+            "active": false,
+            "verified": false,
+            "correct_rounds": 0,
+            "wrong": 0,
+            "expected_sector": 0,
+            "last_latency_ms": 0
+          }
+        },
+        "cockpit_display": {
+          "init": "ready",
+          "actual_fps": 13,
+          "flush_completions": 44978,
+          "flush_errors": 0,
+          "requested_face": 6,
+          "applied_face": 6,
+          "choices_active": false,
+          "watch_style": "FUTURE",
+          "sun_rise_min": 438,
+          "sun_set_min": 1135
+        }
+      },
+      "end": {
+        "utc": "2026-10-12T09:44:11.207547+00:00",
+        "monotonic_s": 335799.171,
+        "read_duration_s": 0.21799999999348074,
+        "display": {
+          "init": "ready",
+          "last_error": "ESP_OK",
+          "task_running": true,
+          "blanked": false,
+          "requested_face": 6,
+          "applied_face": 6,
+          "requested_amplitude": 0,
+          "applied_bucket": 0,
+          "requests": 2,
+          "state_changes": 5,
+          "segment_sets": 4,
+          "asset_load_failures": 0,
+          "flush_submissions": 45484,
+          "flush_completions": 45484,
+          "flush_errors": 0,
+          "actual_fps": 13,
+          "render_us": 27444678,
+          "render_frames": 1166,
+          "render_frame_us": 7159,
+          "current_asset_bytes": 236148,
+          "free_psram": 4795848,
+          "stack_hwm": 1936,
+          "boot_timing": {
+            "time_base": "esp_timer_since_boot",
+            "optical": false,
+            "includes_rom": false,
+            "init_started": true,
+            "init_finished": true,
+            "first_transfer_valid": true,
+            "init_start_boot_ms": 233,
+            "init_end_boot_ms": 778,
+            "first_transfer_done_boot_ms": 829,
+            "first_glance_time_transfer_valid": false,
+            "first_glance_time_transfer_done_boot_ms": 0
+          }
+        },
+        "voice": {
+          "phase": "Idle",
+          "voice_armed": false,
+          "always_ready": true,
+          "privacy_paused": true,
+          "mood": "AWAKE",
+          "brightness": 65,
+          "rtc": false,
+          "capturing": false,
+          "ws_connected": false,
+          "auto_idle_ms": 0,
+          "mic_rms": 0.0,
+          "clean_rms": 0.0,
+          "vad_clean": true,
+          "vad_starts": 0,
+          "audio_diag_running": false
+        },
+        "uptime_ms": 319836,
+        "touch": {
+          "events": 4,
+          "last": {
+            "kind": "tap",
+            "x": 233,
+            "y": 100
+          },
+          "shade_open": false,
+          "panel_touch_challenge": {
+            "pending": false,
+            "active": false,
+            "verified": false,
+            "correct_rounds": 0,
+            "wrong": 0,
+            "expected_sector": 0,
+            "last_latency_ms": 0
+          }
+        },
+        "cockpit_display": {
+          "init": "ready",
+          "actual_fps": 13,
+          "flush_completions": 45523,
+          "flush_errors": 0,
+          "requested_face": 6,
+          "applied_face": 6,
+          "choices_active": false,
+          "watch_style": "FUTURE",
+          "sun_rise_min": 438,
+          "sun_set_min": 1135
+        }
+      },
+      "result": {
+        "elapsed_s": 1.7179999999934807,
+        "delta": {
+          "render_frames": 13,
+          "render_us": 87261,
+          "flush_submissions": 516,
+          "flush_completions": 516,
+          "flush_errors": 0
+        },
+        "redraw_fps": 7.566938300377958,
+        "completed_strip_flushes_per_s": 300.3492433073097,
+        "api_actual_fps": [
+          13,
+          13
+        ]
+      },
+      "both_visible": true
+    },
+    {
+      "run": 3,
+      "start": {
+        "utc": "2026-10-12T09:44:19.100616+00:00",
+        "monotonic_s": 335807.062,
+        "read_duration_s": 0.1559999999590218,
+        "display": {
+          "init": "ready",
+          "last_error": "ESP_OK",
+          "task_running": true,
+          "blanked": false,
+          "requested_face": 6,
+          "applied_face": 6,
+          "requested_amplitude": 0,
+          "applied_bucket": 0,
+          "requests": 2,
+          "state_changes": 7,
+          "segment_sets": 5,
+          "asset_load_failures": 0,
+          "flush_submissions": 46949,
+          "flush_completions": 46949,
+          "flush_errors": 0,
+          "actual_fps": 8,
+          "render_us": 27915492,
+          "render_frames": 1204,
+          "render_frame_us": 30540,
+          "current_asset_bytes": 236148,
+          "free_psram": 4759540,
+          "stack_hwm": 1936,
+          "boot_timing": {
+            "time_base": "esp_timer_since_boot",
+            "optical": false,
+            "includes_rom": false,
+            "init_started": true,
+            "init_finished": true,
+            "first_transfer_valid": true,
+            "init_start_boot_ms": 233,
+            "init_end_boot_ms": 778,
+            "first_transfer_done_boot_ms": 829,
+            "first_glance_time_transfer_valid": false,
+            "first_glance_time_transfer_done_boot_ms": 0
+          }
+        },
+        "voice": {
+          "phase": "Idle",
+          "voice_armed": false,
+          "always_ready": true,
+          "privacy_paused": true,
+          "mood": "AWAKE",
+          "brightness": 65,
+          "rtc": false,
+          "capturing": false,
+          "ws_connected": false,
+          "auto_idle_ms": 0,
+          "mic_rms": 0.0,
+          "clean_rms": 0.0,
+          "vad_clean": true,
+          "vad_starts": 0,
+          "audio_diag_running": false
+        },
+        "uptime_ms": 327749,
+        "touch": {
+          "events": 6,
+          "last": {
+            "kind": "tap",
+            "x": 233,
+            "y": 100
+          },
+          "shade_open": false,
+          "panel_touch_challenge": {
+            "pending": false,
+            "active": false,
+            "verified": false,
+            "correct_rounds": 0,
+            "wrong": 0,
+            "expected_sector": 0,
+            "last_latency_ms": 0
+          }
+        },
+        "cockpit_display": {
+          "init": "ready",
+          "actual_fps": 8,
+          "flush_completions": 46966,
+          "flush_errors": 0,
+          "requested_face": 6,
+          "applied_face": 6,
+          "choices_active": false,
+          "watch_style": "FUTURE",
+          "sun_rise_min": 438,
+          "sun_set_min": 1135
+        }
+      },
+      "end": {
+        "utc": "2026-10-12T09:44:20.775385+00:00",
+        "monotonic_s": 335808.734,
+        "read_duration_s": 0.1720000000204891,
+        "display": {
+          "init": "ready",
+          "last_error": "ESP_OK",
+          "task_running": true,
+          "blanked": false,
+          "requested_face": 6,
+          "applied_face": 6,
+          "requested_amplitude": 0,
+          "applied_bucket": 0,
+          "requests": 2,
+          "state_changes": 7,
+          "segment_sets": 5,
+          "asset_load_failures": 0,
+          "flush_submissions": 47473,
+          "flush_completions": 47473,
+          "flush_errors": 0,
+          "actual_fps": 12,
+          "render_us": 28006234,
+          "render_frames": 1217,
+          "render_frame_us": 7287,
+          "current_asset_bytes": 236148,
+          "free_psram": 4795848,
+          "stack_hwm": 1936,
+          "boot_timing": {
+            "time_base": "esp_timer_since_boot",
+            "optical": false,
+            "includes_rom": false,
+            "init_started": true,
+            "init_finished": true,
+            "first_transfer_valid": true,
+            "init_start_boot_ms": 233,
+            "init_end_boot_ms": 778,
+            "first_transfer_done_boot_ms": 829,
+            "first_glance_time_transfer_valid": false,
+            "first_glance_time_transfer_done_boot_ms": 0
+          }
+        },
+        "voice": {
+          "phase": "Idle",
+          "voice_armed": false,
+          "always_ready": true,
+          "privacy_paused": true,
+          "mood": "AWAKE",
+          "brightness": 65,
+          "rtc": false,
+          "capturing": false,
+          "ws_connected": false,
+          "auto_idle_ms": 0,
+          "mic_rms": 0.0,
+          "clean_rms": 0.0,
+          "vad_clean": true,
+          "vad_starts": 0,
+          "audio_diag_running": false
+        },
+        "uptime_ms": 329417,
+        "touch": {
+          "events": 6,
+          "last": {
+            "kind": "tap",
+            "x": 233,
+            "y": 100
+          },
+          "shade_open": false,
+          "panel_touch_challenge": {
+            "pending": false,
+            "active": false,
+            "verified": false,
+            "correct_rounds": 0,
+            "wrong": 0,
+            "expected_sector": 0,
+            "last_latency_ms": 0
+          }
+        },
+        "cockpit_display": {
+          "init": "ready",
+          "actual_fps": 12,
+          "flush_completions": 47508,
+          "flush_errors": 0,
+          "requested_face": 6,
+          "applied_face": 6,
+          "choices_active": false,
+          "watch_style": "FUTURE",
+          "sun_rise_min": 438,
+          "sun_set_min": 1135
+        }
+      },
+      "result": {
+        "elapsed_s": 1.672000000020489,
+        "delta": {
+          "render_frames": 13,
+          "render_us": 90742,
+          "flush_submissions": 524,
+          "flush_completions": 524,
+          "flush_errors": 0
+        },
+        "redraw_fps": 7.775119617129602,
+        "completed_strip_flushes_per_s": 313.3971291827624,
+        "api_actual_fps": [
+          8,
+          12
+        ]
+      },
+      "both_visible": true
+    }
+  ],
+  "limitation": "Charging HOME is explicitly excluded from quiet_eligible; forced HOME resets activity and re-enters Nightstand at five seconds. No unplugged quiet-HOME proof or drain started."
+}

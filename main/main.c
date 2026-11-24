@@ -23,6 +23,8 @@
  * device-tool lane. Ownership did not move — only the line numbers did.
  */
 #include "app.h"
+#include "jr_dsp/audio_power.h"
+#include "jr_display/companion.h"
 
 static const char *TAG = "jarvis_v5";
 
@@ -32,7 +34,40 @@ static const char *TAG = "jarvis_v5";
     "wss://generativelanguage.googleapis.com/ws/" \
     "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 
-#define VOICE_FRAME_SAMPLES  512   /* 32 ms @ 16 kHz — one AEC chunk / uplink frame */
+/* THE LIGHT ON THE WATCH HANDS follows gravity. The IMU reading points UP in
+ * the device frame; the glass wants that vector with x to the right and y
+ * DOWN. These two signs are the whole mapping, so a hand test flips one:
+ *   Y: IMU +y is taken to point at 12 o'clock (orientation_from_g calls
+ *      gy > 0 "portrait_up"), which is -y on the glass -> -1.
+ *   X: IMU +x is ASSUMED to point at 3 o'clock -> +1. NOT VERIFIED on the
+ *      device: stand it on edge and tilt toward 3 o'clock; if the shadow
+ *      swings toward 3 instead of 9, flip this sign. */
+#define JR_LIGHT_IMU_X_SIGN  (+1)
+#define JR_LIGHT_IMU_Y_SIGN  (-1)
+
+/* TILT PARALLAX leans CELESTIAL's stars by the change of the same UP vector, so
+ * it maps axes exactly like the light does; they are separate so a hand test
+ * can flip the stars without moving the shadows. Which way the stars should
+ * slide for a given lean is a taste the glass has not judged yet: flip both
+ * signs to reverse it (docs/reference/tilt-parallax.md). */
+#define JR_TILT_IMU_X_SIGN   (+1)
+#define JR_TILT_IMU_Y_SIGN   (-1)
+
+/* The display calls this once a frame, only while CELESTIAL is on a lit panel
+ * (jr_display_set_tilt_source). jr_imu knows no display and the display no
+ * sensor; this is the only place the two meet. Lock-free, no bus. */
+static bool tilt_source(int *x_mg, int *y_mg)
+{
+    int gx = 0, gy = 0;
+    if (!jr_imu_tilt_read(&gx, &gy)) {
+        return false;
+    }
+    *x_mg = JR_TILT_IMU_X_SIGN * gx;
+    *y_mg = JR_TILT_IMU_Y_SIGN * gy;
+    return true;
+}
+
+#define VOICE_FRAME_SAMPLES  512  /* 32 ms @ 16 kHz — one AEC chunk / uplink frame */
 #define INBOX_CAP            16
 /* Brief guard against the model's own acoustic tail right after it stops
  * speaking. Keep this SHORT: it gates the user's reply onset (SPEECH_STARTED),
@@ -72,6 +107,16 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
         .arg_desc = NULL,
     },
     {
+        .name = "weather_here",
+        .description =
+            "The weather this device holds for its own place: temperature, "
+            "feels-like, condition, today's high and low, humidity, wind. No "
+            "arguments, answers at once. Use it for any question about the "
+            "weather here or at Sir's place, and never ask Sir where he is.",
+        .arg_name = NULL,
+        .arg_desc = NULL,
+    },
+    {
         .name = "search_tools",
         .description =
             "Find a Jarvis capability by describing it: web search, weather, "
@@ -94,8 +139,8 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
             "remember anything he tells you (say what you remembered); "
             "memory.search {\"query\"} to recall it; butlercrm.calendar.upcoming "
             "{} and butlercrm.calendar.create {\"title\",\"starts_at\"} for his "
-            "calendar; coordination.portfolio {} and coordination.createWorkItem "
-            "{\"projectId\",\"title\"} for the work board. Otherwise use the "
+            "calendar. Never for the work board, the tasks, or what is queued "
+            "or done: that is delegated_tasks. Otherwise use the "
             "tool and params search_tools returned, keys in that order.",
         .params = {
             {
@@ -156,15 +201,304 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
     {
         .name = "delegated_tasks",
         .description =
-            "List the jobs queued for Sir's agents, newest first, with their "
-            "status and result. The only tool for anything about the board, "
-            "the tasks, or a delegated job; never execute_tool for that.",
+            "Sir's work board: the jobs queued for his agents, newest first, "
+            "with their status and result. Use it for \"what is on the "
+            "board\", \"the tasks\", \"what is queued, running or done\". The "
+            "only tool for anything about the board, the tasks, or a "
+            "delegated job; never search_tools or execute_tool for that.",
         .arg_name = NULL,
         .arg_desc = NULL,
     },
     /* ask_user never reaches the HTTPS tool worker: rich_cb intercepts it and
      * it becomes the Asking substate (choice arcs on glass, STATE-05/06). */
     JR_GEMINI_ASK_USER_DECL,
+    /* Offline-ready local tools: answered instantly in device_try_local_tool()
+     * with zero network round-trips, with or without the JarvisMCP gateway. */
+    {
+        .name = "set_timer",
+        .description =
+            "Set a local countdown timer (5 to 43200 seconds) or a Pomodoro "
+            "timer (label 'focus' defaults to 25 minutes, 'break' to 5 minutes). "
+            "Pass silent=true for a visual-only call-safe timer.",
+        .params = {
+            {
+                .name = "seconds",
+                .type = JR_GEMINI_PT_INTEGER,
+                .description =
+                    "Duration in seconds (5..43200). Optional when label is "
+                    "'focus' (1500 s) or 'break' (300 s).",
+                .required = false,
+            },
+            {
+                .name = "label",
+                .type = JR_GEMINI_PT_STRING,
+                .description =
+                    "Short timer label (up to 16 chars), e.g. tea, focus, break.",
+                .required = false,
+            },
+            {
+                .name = "silent",
+                .type = JR_GEMINI_PT_BOOLEAN,
+                .description =
+                    "True for visual-only alert (suppresses alarm chime).",
+                .required = false,
+            },
+        },
+        .param_count = JR_GEMINI_PARAM_COUNT(3),
+    },
+    {
+        .name = "cancel_timer",
+        .description =
+            "Cancel an active or ringing timer by label, 'all' to cancel every "
+            "timer, or omit label to cancel the nearest timer.",
+        .params = {{
+            .name = "label",
+            .type = JR_GEMINI_PT_STRING,
+            .description = "Timer label, 'all', or omit for nearest timer.",
+            .required = false,
+        }},
+        .param_count = JR_GEMINI_PARAM_COUNT(1),
+    },
+    {
+        .name = "list_timers",
+        .description =
+            "List all active and ringing local timers with remaining seconds.",
+        .arg_name = NULL,
+        .arg_desc = NULL,
+    },
+    {
+        .name = "set_glass",
+        .description =
+            "Switch the device's ring screen (jarvis, watch, weather, status, "
+            "activity) and/or persist one of the 10 watch styles (jarvis, diver, "
+            "dress, pilot, minimal, future, skeleton, celestial, orrery, reactor).",
+        .params = {
+            {
+                .name = "screen",
+                .type = JR_GEMINI_PT_STRING,
+                .description =
+                    "Target ring screen: jarvis, watch, weather, status, or activity.",
+                .required = false,
+            },
+            {
+                .name = "watch_style",
+                .type = JR_GEMINI_PT_STRING,
+                .description =
+                    "Watch style: jarvis, diver, dress, pilot, minimal, future, "
+                    "skeleton, celestial, orrery, or reactor.",
+                .required = false,
+            },
+        },
+        .param_count = JR_GEMINI_PARAM_COUNT(2),
+    },
+    {
+        .name = "device_status",
+        .description =
+            "Read live local device status in 0 ms: battery, charging, USB, "
+            "Wi-Fi RSSI, chip temperature, volume, brightness, watch style, "
+            "screen, muted state, uptime, and active timers.",
+        .arg_name = NULL,
+        .arg_desc = NULL,
+    },
+    {
+        .name = "start_focus",
+        .description =
+            "Start a local Deep Focus sprint (default 25 min) on the glass "
+            "and track daily focus sprints.",
+        .params = {
+            {
+                .name = "minutes",
+                .type = JR_GEMINI_PT_INTEGER,
+                .description = "Focus duration in minutes (1..720, default 25).",
+                .required = false,
+            },
+            {
+                .name = "label",
+                .type = JR_GEMINI_PT_STRING,
+                .description = "Optional short label (default FOCUS).",
+                .required = false,
+            },
+            {
+                .name = "silent",
+                .type = JR_GEMINI_PT_BOOLEAN,
+                .description = "True to suppress completion chime.",
+                .required = false,
+            },
+        },
+        .param_count = JR_GEMINI_PARAM_COUNT(3),
+    },
+    {
+        .name = "stopwatch",
+        .description =
+            "Control the on-device chronograph stopwatch with up to 4 laps: "
+            "start, stop, lap, reset, or status.",
+        .params = {{
+            .name = "action",
+            .type = JR_GEMINI_PT_STRING,
+            .description = "Action: start, stop, lap, reset, or status.",
+            .required = true,
+        }},
+        .param_count = JR_GEMINI_PARAM_COUNT(1),
+    },
+    {
+        .name = "add_note",
+        .description =
+            "Pin a short local desk inbox item (up to 64 chars, max 6) "
+            "with optional 'work' or 'life' tag, persisted in NVS.",
+        .params = {
+            {
+                .name = "text",
+                .type = JR_GEMINI_PT_STRING,
+                .description = "Short desk note text (up to 64 characters).",
+                .required = true,
+            },
+            {
+                .name = "tag",
+                .type = JR_GEMINI_PT_STRING,
+                .description = "Category tag: work or life (default life).",
+                .required = false,
+            },
+        },
+        .param_count = JR_GEMINI_PARAM_COUNT(2),
+    },
+    {
+        .name = "list_notes",
+        .description =
+            "List all pinned local desk notes stored on this device.",
+        .arg_name = NULL,
+        .arg_desc = NULL,
+    },
+    {
+        .name = "clear_notes",
+        .description =
+            "Remove pinned local desk notes: 'all' to clear every note, a "
+            "note ID number, or a keyword to match.",
+        .params = {{
+            .name = "target",
+            .type = JR_GEMINI_PT_STRING,
+            .description = "'all', a note ID, or text keyword to clear.",
+            .required = false,
+        }},
+        .param_count = JR_GEMINI_PARAM_COUNT(1),
+    },
+    {
+        .name = "daily_briefing",
+        .description =
+            "Get a live morning or evening briefing: date, weather, 12h rain, "
+            "today's focus sprints, desk inbox open/done counts, timers, and battery.",
+        .arg_name = NULL,
+        .arg_desc = NULL,
+    },
+    {
+        .name = "set_ui_sounds",
+        .description =
+            "Turn subtle touch interface sounds on or off and persist the choice.",
+        .params = {{
+            .name = "enabled",
+            .type = JR_GEMINI_PT_BOOLEAN,
+            .description = "true to enable UI sounds, false to silence them.",
+            .required = true,
+        }},
+        .param_count = JR_GEMINI_PARAM_COUNT(1),
+    },
+    {
+        .name = "set_sunlight",
+        .description =
+            "Toggle CO5300 High-Brightness Mode (sunlight boost, auto-reverts "
+            "after 5 min; refused if battery <25% off USB or chip >65 C).",
+        .params = {{
+            .name = "enabled",
+            .type = JR_GEMINI_PT_BOOLEAN,
+            .description = "true to enable sunlight boost, false to turn off.",
+            .required = true,
+        }},
+        .param_count = JR_GEMINI_PARAM_COUNT(1),
+    },
+    {
+        .name = "set_desk_mode",
+        .description =
+            "Set the Desk Copilot mode on the glass: on_air (silent red call "
+            "beacon), focus (deep-work halo), breathe (guided reset), or normal.",
+        .params = {
+            {
+                .name = "mode",
+                .type = JR_GEMINI_PT_STRING,
+                .description = "on_air, focus, breathe, or normal.",
+                .required = true,
+            },
+            {
+                .name = "minutes",
+                .type = JR_GEMINI_PT_INTEGER,
+                .description = "Duration in minutes (0=open-ended on_air, default 25 focus).",
+                .required = false,
+            },
+            {
+                .name = "label",
+                .type = JR_GEMINI_PT_STRING,
+                .description = "Optional short label (up to 23 chars).",
+                .required = false,
+            },
+            {
+                .name = "silent",
+                .type = JR_GEMINI_PT_BOOLEAN,
+                .description = "True to suppress chimes (always true for on_air).",
+                .required = false,
+            },
+        },
+        .param_count = JR_GEMINI_PARAM_COUNT(4),
+    },
+    {
+        .name = "start_breathe",
+        .description =
+            "Start a guided breathing reset on the glass (box 4-4-4-4, calm "
+            "4-7-8, or energize 4-2-4).",
+        .params = {
+            {
+                .name = "pattern",
+                .type = JR_GEMINI_PT_STRING,
+                .description = "box, calm, or energize (default box).",
+                .required = false,
+            },
+            {
+                .name = "cycles",
+                .type = JR_GEMINI_PT_INTEGER,
+                .description = "Number of cycles 1..8 (default 4).",
+                .required = false,
+            },
+            {
+                .name = "silent",
+                .type = JR_GEMINI_PT_BOOLEAN,
+                .description = "True to suppress soft phase chimes.",
+                .required = false,
+            },
+        },
+        .param_count = JR_GEMINI_PARAM_COUNT(3),
+    },
+    {
+        .name = "complete_note",
+        .description =
+            "Check off an open local desk inbox note by ID or keyword.",
+        .params = {{
+            .name = "target",
+            .type = JR_GEMINI_PT_STRING,
+            .description = "Note ID number or keyword to mark done.",
+            .required = true,
+        }},
+        .param_count = JR_GEMINI_PARAM_COUNT(1),
+    },
+    {
+        .name = "set_battery_care",
+        .description =
+            "Enable or disable Desk Battery Care (80 percent charge cap for "
+            "all-day USB longevity; disable for 100 percent full travel charge).",
+        .params = {{
+            .name = "enable",
+            .type = JR_GEMINI_PT_BOOLEAN,
+            .description = "True for 80% Desk Battery Care; false for 100% full travel charge.",
+            .required = true,
+        }},
+        .param_count = JR_GEMINI_PARAM_COUNT(1),
+    },
 };
 
 _Static_assert(sizeof(s_device_tool_fns) / sizeof(s_device_tool_fns[0]) ==
@@ -191,6 +525,7 @@ static const char s_device_tool_labels[][13] = {
     "RECALL",       /* recall_memory  */
     "REMEMBER",     /* remember       */
     "TIME",         /* current_time   */
+    "WEATHER",      /* weather_here   */
     "SEARCH",       /* search_tools   */
     "EXECUTE",      /* execute_tool   */
     "VOLUME",       /* set_volume     */
@@ -198,6 +533,23 @@ static const char s_device_tool_labels[][13] = {
     "DELEGATE",     /* delegate_task  */
     "TASKS",        /* delegated_tasks */
     "ASK",          /* ask_user       */
+    "SET TIMER",    /* set_timer      */
+    "END TIMER",    /* cancel_timer   */
+    "TIMERS",       /* list_timers    */
+    "GLASS",        /* set_glass      */
+    "STATUS",       /* device_status  */
+    "FOCUS",        /* start_focus    */
+    "STOPWATCH",    /* stopwatch      */
+    "ADD NOTE",     /* add_note       */
+    "NOTES",        /* list_notes     */
+    "CLEAR NOTES",  /* clear_notes    */
+    "BRIEFING",     /* daily_briefing */
+    "UI SOUNDS",    /* set_ui_sounds  */
+    "SUNLIGHT",     /* set_sunlight   */
+    "DESK MODE",    /* set_desk_mode  */
+    "BREATHE",      /* start_breathe  */
+    "CHECK NOTE",   /* complete_note  */
+    "BAT CARE",     /* set_battery_care */
 };
 
 _Static_assert(sizeof(s_device_tool_labels) / sizeof(s_device_tool_labels[0]) ==
@@ -237,6 +589,40 @@ _Atomic uint32_t s_sim_touch;
  * dismiss, n == 0, encodes as 1). The httpd handler only posts here; the app
  * task drains it — jr_display's choice statics keep exactly ONE writer. */
 _Atomic uint32_t s_debug_choices_req;
+jr_timer_bank_t s_timers;
+portMUX_TYPE s_timer_mux = portMUX_INITIALIZER_UNLOCKED;
+timer_snap_t s_timer_snap;
+timer_debug_req_t s_debug_timer_req_data;
+_Atomic uint32_t s_debug_timer_req;
+_Atomic bool s_glass_poke_req;
+
+jr_desk_state_t s_desk_mode;
+portMUX_TYPE s_desk_mux = portMUX_INITIALIZER_UNLOCKED;
+desk_mode_snap_t s_desk_snap;
+desk_mode_req_t s_desk_req_data;
+_Atomic uint32_t s_desk_req_pending;
+static bool s_desk_choice_active;
+static uint32_t s_desk_choice_expires_ms;
+
+void timer_publish_now(uint32_t now_ms)
+{
+    jr_timer_view_t v;
+    (void)jr_timer_nearest(&s_timers, now_ms, &v);
+    timer_snap_t snap = {
+        .active = v.active,
+        .ringing = v.ringing,
+        .silent = v.silent,
+        .rem_s = v.rem_s,
+        .total_s = v.total_s,
+        .pct_left = v.pct_left,
+        .count = (uint8_t)jr_timer_active_count(&s_timers),
+    };
+    strlcpy(snap.label, v.label, sizeof snap.label);
+    portENTER_CRITICAL(&s_timer_mux);
+    s_timer_snap = snap;
+    portEXIT_CRITICAL(&s_timer_mux);
+    jr_display_timer_set(v.active, v.ringing, v.rem_s, v.pct_left, v.label);
+}
 
 /* App-task only: taps are swallowed until this deadline right after an arc was
  * tapped, so the trailing contact of a double-tap cannot reach the mute
@@ -281,17 +667,12 @@ static void boot_button_tick(uint32_t now_ms)
         const uint32_t held_ms = now_ms - pressed_ms;
         was_down = false;
         if (held_ms >= 200U && held_ms < 1500U) {
+            /* The shade names its own way out (PWR LISTEN, BOOT CLOSE, in its
+             * own hint line), so no caption opens or closes it. */
             if (jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_SHADE) {
                 jr_display_nav_up();
-                jr_display_caption_set("CONTROLS CLOSED");
             } else {
                 jr_display_nav_down();
-                /* Was caption_clear(). Opening a capturing surface and then
-                 * wiping the one line that could say how to leave it is the
-                 * same defect the swipe path shed in 80636399 — it just
-                 * survived on the button path. Any surface that captures input
-                 * captions its own exit, for as long as it is up. */
-                jr_display_caption_set("CONTROLS - UP TO CLOSE");
             }
             ESP_LOGI(TAG, "boot button: controls toggle (%lu ms)",
                      (unsigned long)held_ms);
@@ -332,9 +713,97 @@ static void boot_button_tick(uint32_t now_ms)
 #endif
 }
 
+/* The owner's speaker mute: privacy pause (hold, shade, disarm) or the flip
+ * latch. jr_audio refuses every tone while this is true. */
+static bool owner_speaker_muted(void)
+{
+    return atomic_load(&s_voice_privacy_paused) || s_flip_muted;
+}
+
+/* ui_sounds: the owner's switch for the interface cues (jr_core/cue.h).
+ * On by default; kept in NVS next to the volume. */
+_Atomic bool s_ui_sounds = true;
+static jr_cue_gate_t s_cue_gate;
+
+static void persist_ui_sounds(bool on)
+{
+    nvs_handle_t h;
+    if (nvs_open("app", NVS_READWRITE, &h) == ESP_OK) {
+        (void)nvs_set_u8(h, "ui_sounds", on ? 1U : 0U);
+        (void)nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static void restore_ui_sounds(void)
+{
+    nvs_handle_t h;
+    uint8_t on = 1;
+    if (nvs_open("app", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_u8(h, "ui_sounds", &on) == ESP_OK) {
+            atomic_store(&s_ui_sounds, on != 0U);
+        }
+        nvs_close(h);
+    }
+}
+
+void ui_sounds_set(bool on)
+{
+    atomic_store(&s_ui_sounds, on);
+    persist_ui_sounds(on);
+}
+
+/* One interface cue. `physical` is false for input injected over HTTP, which
+ * never makes a sound. The gate and the lane both drop what must not play. */
+static void ui_cue(jr_cue_kind_t kind, bool physical)
+{
+    const jr_cue_ctx_t ctx = {
+        .ui_sounds = atomic_load(&s_ui_sounds),
+        .owner_muted = owner_speaker_muted(),
+        .phase = jr_orch_phase(&s_app.orch),
+        .mood = s_mood.mood,
+        .ota_active = atomic_load(&s_ota_active),
+        .now_ms = (uint32_t)(esp_timer_get_time() / 1000),
+    };
+    if (jr_cue_allow(&s_cue_gate, &ctx, kind,
+                     physical ? JR_CUE_SOURCE_PHYSICAL
+                              : JR_CUE_SOURCE_SYNTHETIC)) {
+        (void)jr_audio_play_cue(kind,
+                                jr_cue_amplitude_permille(kind, s_out_vol));
+    }
+}
+
+/* A level that a step pushed into its end stop says so. */
+static void ui_level_cue(int level, int delta, bool physical)
+{
+    if ((delta > 0 && level >= 100) || (delta < 0 && level <= 10)) {
+        ui_cue(JR_CUE_LIMIT, physical);
+    }
+}
+
+void device_confirm_cue(void)
+{
+    ui_cue(JR_CUE_CONFIRM, true);
+}
+
+void app_play_soft_cue(jr_cue_kind_t kind)
+{
+    if (!atomic_load(&s_ui_sounds) || owner_speaker_muted() ||
+        atomic_load(&s_ota_active)) {
+        return;
+    }
+    desk_mode_snap_t ds = {0};
+    desk_mode_snapshot(&ds);
+    if (ds.mode == JR_DESK_ON_AIR || ds.dnd_silent) {
+        return;
+    }
+    (void)jr_audio_play_cue(kind, jr_cue_amplitude_permille(kind, s_out_vol));
+}
+
 /* Speaker volume (app task only) — gesture-adjustable, NVS-persistent. */
 int s_out_vol = 100;
 uint8_t s_brightness_cap = 100;
+static uint32_t s_bright_user_boost_until_ms;
 _Atomic int s_level_volume_request = -1;
 _Atomic int s_level_brightness_request = -1;
 
@@ -403,7 +872,7 @@ static void restore_brightness_cap(void)
 }
 
 /* The watch style is the owner's choice, kept the way the brightness cap is. */
-static void persist_watch_style(uint8_t style)
+void persist_watch_style(uint8_t style)
 {
     nvs_handle_t h;
     if (nvs_open("app", NVS_READWRITE, &h) == ESP_OK) {
@@ -455,6 +924,125 @@ static void restore_watch_style(void)
     }
 }
 
+void persist_holo_enabled(bool enabled)
+{
+    nvs_handle_t h;
+    if (nvs_open("app", NVS_READWRITE, &h) == ESP_OK) {
+        (void)nvs_set_u8(h, "holo", enabled ? 1U : 0U);
+        (void)nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static void restore_holo_enabled(void)
+{
+    bool enabled = true;
+    nvs_handle_t h;
+    uint8_t v = 1U;
+    if (nvs_open("app", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_u8(h, "holo", &v) == ESP_OK) {
+            enabled = (v != 0U);
+        }
+        nvs_close(h);
+    }
+    jr_display_holo_set(enabled);
+}
+
+/* ---- Glass 3.6 Desk Battery-Care & Rolling Power Analytics -------------- */
+static jr_power_analytics_ctx_t s_power_analytics;
+static portMUX_TYPE s_power_analytics_mux = portMUX_INITIALIZER_UNLOCKED;
+_Atomic uint32_t s_http_last_activity_ms;
+uint32_t s_boot_stage_ms[4];
+
+static void persist_battery_care(bool enable)
+{
+    nvs_handle_t h;
+    if (nvs_open("app", NVS_READWRITE, &h) == ESP_OK) {
+        (void)nvs_set_u8(h, "bat_care", enable ? 1U : 0U);
+        (void)nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static void restore_battery_care(void)
+{
+    nvs_handle_t h;
+    uint8_t v = 0U;
+    if (nvs_open("app", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_u8(h, "bat_care", &v) == ESP_OK) {
+            (void)jr_power_set_battery_care(v != 0U);
+            ESP_LOGI(TAG, "battery care restored: %s",
+                     v != 0U ? "desk 80%" : "travel 100%");
+        }
+        nvs_close(h);
+    }
+}
+
+void app_power_analytics_get(jr_power_analytics_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    const bool care = jr_power_get_battery_care();
+    portENTER_CRITICAL(&s_power_analytics_mux);
+    jr_power_analytics_snapshot(&s_power_analytics, care, out);
+    portEXIT_CRITICAL(&s_power_analytics_mux);
+}
+
+static void power_analytics_record_and_publish(const jr_power_t *bat,
+                                               bool have_bat,
+                                               bool push_sample)
+{
+    jr_power_care_status_t care = {0};
+    jr_power_care_status(&care);
+    float chip_f = 0.0f;
+    const bool have_chip = device_chip_temp_c(&chip_f);
+    const int8_t chip_c = have_chip ? (int8_t)lroundf(chip_f) : (int8_t)-128;
+
+    if (push_sample && have_bat && bat != NULL && bat->present) {
+        const jr_power_sample_t sample = {
+            .uptime_s = (uint32_t)(esp_timer_get_time() / 1000000ULL),
+            .pct = bat->percent <= 100U ? (int8_t)bat->percent : (int8_t)-1,
+            .mv = bat->millivolts,
+            .usb = bat->usb_present,
+            .charging = bat->charging,
+            .chip_c = chip_c,
+            .pmic_c = care.pmic_die_c,
+        };
+        portENTER_CRITICAL(&s_power_analytics_mux);
+        jr_power_analytics_push(&s_power_analytics, &sample, care.enabled);
+        portEXIT_CRITICAL(&s_power_analytics_mux);
+    }
+
+    jr_power_analytics_t snap = {0};
+    app_power_analytics_get(&snap);
+    const bool on_usb = have_bat && bat != NULL && bat->usb_present;
+    const int32_t eta_min = on_usb ? snap.eta_full_min : snap.eta_empty_min;
+    jr_display_power_info_set(care.enabled, care.holding, eta_min,
+                              snap.rate_pct_x10_hr, care.pmic_die_c);
+}
+
+esp_err_t app_set_battery_care(bool enable)
+{
+    const esp_err_t err = jr_power_set_battery_care(enable);
+    if (err != ESP_OK) {
+        return err;
+    }
+    persist_battery_care(enable);
+    jr_power_t bat = {0};
+    const bool have_bat = jr_power_read(&bat) == ESP_OK && bat.present;
+    float chip_f = 0.0f;
+    const int chip_c = device_chip_temp_c(&chip_f) ? (int)lroundf(chip_f) : 25;
+    if (have_bat) {
+        jr_power_care_tick(bat.usb_present,
+                           bat.percent <= 100U ? (int)bat.percent : -1,
+                           chip_c);
+    }
+    power_analytics_record_and_publish(&bat, have_bat, have_bat);
+    app_play_soft_cue(JR_CUE_CONFIRM);
+    return ESP_OK;
+}
+
 void persist_ota_attempt(int slot)
 {
     nvs_handle_t h;
@@ -495,6 +1083,7 @@ static void restore_ota_attempt(void)
 char *s_logring;                 /* PSRAM, alloc'd in app_main */
 volatile size_t s_logring_head;  /* next write offset */
 volatile size_t s_logring_len;   /* filled bytes, saturates at CAP */
+volatile uint64_t s_logring_total; /* monotonic bytes written since boot */
 portMUX_TYPE s_logring_mux = portMUX_INITIALIZER_UNLOCKED;
 static vprintf_like_t s_logring_prev;
 
@@ -523,6 +1112,7 @@ static int logring_vprintf(const char *fmt, va_list ap)
             s_logring_head = (head + w) % LOGRING_CAP;
             s_logring_len = s_logring_len + w > LOGRING_CAP
                                 ? LOGRING_CAP : s_logring_len + w;
+            s_logring_total += (uint64_t)w;
             portEXIT_CRITICAL(&s_logring_mux);
         }
     }
@@ -721,19 +1311,102 @@ _Atomic bool s_voice_privacy_paused = true;
  * runs, no frame comes back, and the owner talks to a wall. Seen on the
  * glass 2026-09-01: three questions in 40 s, no reply, then it answered
  * again as if nothing happened. So every utterance of some length that ends
- * in Listening starts a clock; ANY server frame or a phase change stops it;
- * two unanswered in a row are a deaf session and the core is told
- * StaleDeadline, which is exactly what it does for a keepalive miss —
- * reconnect with the resume handle. Ambient chatter Gemini rightly ignores
- * can trip this too; the cost is one reconnect. */
-#define UTT_MIN_MS          800U
-#define UTT_REPLY_WAIT_MS   7000U
-#define UTT_DEAF_COUNT      2U
+ * in Listening starts a clock (jr_core/utt_watch.h owns the policy); ANY
+ * server frame stops it, an answering one also clears the run of misses; two
+ * unanswered IN A ROW are a deaf session and the core is told StaleDeadline,
+ * which is exactly what it does for a keepalive miss: a fresh session. The
+ * old session's conversation is NOT carried over: the setup message never
+ * asks for session resumption (see docs/reference/voice-loop-2026-11-10.md).
+ * Ambient chatter Gemini rightly ignores can trip this too; the cost is one
+ * short "Pardon, Sir?". */
 static uint32_t         s_utt_start_ms;
-static _Atomic uint32_t s_reply_deadline_ms;
-static uint8_t          s_unanswered;
-static _Atomic uint32_t s_unanswered_total;
+jr_utt_watch_t          s_utt;                  /* voice task writes; cockpit reads totals */
+/* The echo gate (jr_core/echo_gate.h): optional fallback that zeroes uplink
+ * frames while the speaker is audible and for a short tail after. NOT the
+ * privacy gate, which is decided earlier and untouched. Off by default now
+ * that speakmic=6 + speakgain=100 gives ~40 dB AEC headroom for native Gemini
+ * Live duplex barge-in (PLAN N16.9); /api/debug/gain?echogate=1&echovol=
+ * re-enables it at runtime if needed (not persisted). */
+jr_echo_gate_t          s_echo_gate;
+jr_reply_cut_t          s_reply_cut;            /* ws task drops, voice task begins */
+_Atomic bool            s_echo_gate_enabled = false;
+/* The gate applies only when the speaker volume is above this (0..100,
+ * /api/debug/gain?echovol=). 0 = at every audible volume, as before. */
+_Atomic int             s_echo_gate_volume_min = 0;
+/* Feed the wake word while the device speaks and cut the reply on a hit
+ * (/api/debug/gain?wakebarge=). Voice task only reads the hits. */
+_Atomic bool            s_wake_barge_enabled = true;
+_Atomic uint32_t        s_wake_cuts;
+voiceperf_class_t       s_vperf[2];
+_Atomic uint32_t        s_vperf_tick_skips;
+_Atomic uint32_t        s_vperf_tick_sleeps;
+_Atomic bool            s_aec_bench_req;
+_Atomic bool            s_aec_bench_have;
+_Atomic int             s_aec_bench_mean_us = -1;
+_Atomic uint32_t        s_aec_bench_max_us;
+_Atomic int             s_aec_bench_cpu_mhz;
+
+/* A hit older than this when the voice task gets to it is discarded: the
+ * worker runs about one chunk (32 ms) behind the push, so anything over half a
+ * second means the voice task was away and the word is no longer "now". */
+#define WAKE_HIT_MAX_AGE_MS 500U
+
+/* One frame read by the voice loop, for /api/diag/voiceperf. */
+static void vperf_frame(int cls, uint32_t iter_us, uint32_t read_us,
+                        uint32_t now_ms)
+{
+    voiceperf_class_t *c = &s_vperf[cls];
+    static uint32_t win_start[2];
+    static uint32_t win_frames[2];
+    static uint32_t last_ms[2];
+    uint32_t frames = atomic_load_explicit(&c->frames, memory_order_relaxed) + 1U;
+    uint32_t isum = atomic_load_explicit(&c->iter_sum_us, memory_order_relaxed) + iter_us;
+    uint32_t rsum = atomic_load_explicit(&c->read_sum_us, memory_order_relaxed) + read_us;
+    if (frames >= (1U << 14)) {   /* keeps the 32-bit sums from wrapping */
+        frames >>= 1; isum >>= 1; rsum >>= 1;
+    }
+    atomic_store_explicit(&c->frames, frames, memory_order_relaxed);
+    atomic_store_explicit(&c->iter_sum_us, isum, memory_order_relaxed);
+    atomic_store_explicit(&c->read_sum_us, rsum, memory_order_relaxed);
+    if (iter_us > atomic_load_explicit(&c->iter_max_us, memory_order_relaxed)) {
+        atomic_store_explicit(&c->iter_max_us, iter_us, memory_order_relaxed);
+    }
+    /* A gap (the other class had the loop, or the mic was off) starts a fresh
+     * window instead of diluting the rate. */
+    if (win_frames[cls] == 0U || now_ms - last_ms[cls] > 500U) {
+        win_start[cls] = now_ms;
+        win_frames[cls] = 0U;
+    }
+    last_ms[cls] = now_ms;
+    ++win_frames[cls];
+    const uint32_t span = now_ms - win_start[cls];
+    if (span >= 4000U) {
+        atomic_store_explicit(&c->fps_x100,
+            (uint32_t)(((uint64_t)win_frames[cls] * 100000U) / span),
+            memory_order_relaxed);
+        win_frames[cls] = 0U;
+    }
+}
+/* The ws task's side of the watch: it counts frames, the voice task reads the
+ * counts. Alive = any frame; answer = a frame that replies to the owner. */
+static _Atomic uint32_t s_srv_alive_seq;
+static _Atomic uint32_t s_srv_answer_seq;
+/* What the uplink carried for the utterance now in flight (the log line at
+ * speech end), and server interruptions the local VAD never heard. */
+static uint32_t         s_utt_ul_frames;
+static uint32_t         s_utt_ul_drops0;
+_Atomic uint32_t        s_srv_interrupts;
+_Atomic uint32_t        s_srv_phantom_interrupts;
+static _Atomic uint32_t s_local_speech_start_ms;  /* last accepted VAD start */
 static temperature_sensor_handle_t s_tsens;
+
+bool device_chip_temp_c(float *out_c)
+{
+    if (out_c == NULL || s_tsens == NULL) {
+        return false;
+    }
+    return temperature_sensor_get_celsius(s_tsens, out_c) == ESP_OK;
+}
 jr_mood_state_t s_mood;
 _Atomic uint8_t s_mood_id;
 _Atomic uint8_t s_mood_brightness;
@@ -837,6 +1510,366 @@ static bool device_wall_time(struct tm *out)
     return false;
 }
 
+/* Presentation policy, not a new power ladder. Reuse the existing quiet /
+ * ambient attention windows and WHISPER / DREAM brightness ratios. USB still
+ * keeps an unmuted voice session awake. Only a physical owner can clear mute. */
+static uint32_t s_companion_activity_ms;
+
+static bool companion_phase_busy(jr_state_t phase, bool speech)
+{
+    return (phase != JR_ST_IDLE && phase != JR_ST_LISTENING) ||
+           (phase == JR_ST_LISTENING && speech);
+}
+
+static void companion_attention(uint32_t now)
+{
+    s_glance_until_ms = 0U;
+    s_companion_activity_ms = now;
+    jr_display_rest_set(JR_DISPLAY_REST_NONE, false, false);
+}
+
+static bool companion_update(uint32_t now, jr_mood_t mood, bool moving,
+                             bool busy, const jr_power_t *battery,
+                             uint8_t *brightness)
+{
+    jr_display_rest_voice_busy_set(busy);
+    const bool quiet = atomic_load(&s_voice_privacy_paused);
+    const bool usb = battery != NULL && battery->sample_seq != 0U &&
+                     battery->age_ms <= 2000U && battery->usb_present;
+    if (moving || busy) {
+        s_companion_activity_ms = now;
+    }
+    if (s_glance_until_ms != 0U &&
+        (int32_t)(now - s_glance_until_ms) >= 0) {
+        s_glance_until_ms = 0U;
+    }
+    const bool operator_active = operator_lease_active(now);
+    const bool ota = atomic_load(&s_ota_active);
+    const bool probation = image_in_probation();
+    const bool foreground = jr_display_nav_overlay() != JR_DISPLAY_OVERLAY_NONE ||
+        (jr_display_nav_space() != JR_DISPLAY_SPACE_JARVIS &&
+         jr_display_nav_space() != JR_DISPLAY_SPACE_WATCH) ||
+        jr_display_choices_active() || jr_display_caption_pinned() ||
+        jr_display_caption_foreground() ||
+        jr_display_canvas_active() || jr_display_surface_is_active();
+    if (busy || foreground || operator_active || ota || probation) {
+        s_glance_until_ms = 0U;
+        /* A finished overlay must earn the normal attention window again. */
+        s_companion_activity_ms = now;
+    }
+    jr_companion_input_t input = {
+        .requested = s_glance_until_ms != 0U ? JR_COMPANION_GLANCE :
+            usb && !moving && (uint32_t)(now - s_companion_activity_ms) >=
+                (quiet ? JR_MOOD_QUIET_MS : JR_MOOD_AMBIENT_MS)
+                ? JR_COMPANION_NIGHTSTAND : JR_COMPANION_OFF,
+        .usb_present = usb, .idle = !busy, .foreground = foreground,
+        .operator_active = operator_active, .ota_active = ota,
+        .probation = probation, .privacy_muted = quiet,
+        .charging = battery != NULL && battery->charging,
+        .battery_percent = battery != NULL ? battery->percent : UINT8_MAX,
+        .night_start_hour = 22, .night_end_hour = 7,
+        .next_state = JR_COMPANION_NEXT_UNKNOWN,
+    };
+    struct tm local;
+    if (device_wall_time(&local)) {
+        input.time_valid = true;
+        input.hour = (uint8_t)local.tm_hour;
+        input.minute = (uint8_t)local.tm_min;
+    }
+    jr_companion_view_t view;
+    if (jr_companion_build(&input, &view)) {
+        jr_display_rest_set(view.mode == JR_COMPANION_GLANCE
+                            ? JR_DISPLAY_REST_GLANCE : JR_DISPLAY_REST_NIGHTSTAND,
+                            usb, view.night);
+        if (brightness != NULL && view.mode == JR_COMPANION_NIGHTSTAND) {
+            *brightness = (uint8_t)(((view.night ? 8U : 22U) *
+                                    s_brightness_cap + 50U) / 100U);
+        }
+        return true;
+    }
+    const bool dream = jr_mood_dream_glass(mood, busy, usb,
+                                          operator_active, ota || probation);
+    jr_display_rest_set(dream ? JR_DISPLAY_REST_DREAM : JR_DISPLAY_REST_NONE,
+                        false, false);
+    return dream;
+}
+
+/* Before Wi-Fi/audio: a physical deep-sleep wake earns a local Glance, even
+ * with no weather or next-item feed. Invalid retained time shows --:--. */
+static void companion_boot_seed(void)
+{
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    s_companion_activity_ms = now;
+    s_boot_wake_cause = (int)esp_sleep_get_wakeup_cause();
+    const bool physical_wake = s_rtc_sleep_magic == SLEEP_RTC_MAGIC &&
+        (s_boot_wake_cause == ESP_SLEEP_WAKEUP_EXT0 ||
+         s_boot_wake_cause == ESP_SLEEP_WAKEUP_EXT1);
+    s_glance_until_ms = physical_wake ? now + GLANCE_MS : 0U;
+    jr_power_t battery = {0};
+    const bool have_power = jr_power_read(&battery) == ESP_OK;
+    jr_display_set_hud_env(have_power ? battery.percent : UINT8_MAX,
+                          have_power && battery.charging,
+                          atomic_load(&s_voice_privacy_paused), 0.0f, 0.0f);
+    jr_display_power_set(have_power ? battery.percent : UINT8_MAX,
+                        have_power ? battery.millivolts : 0U,
+                        have_power && battery.usb_present,
+                        have_power && battery.charging);
+    struct tm local;
+    const bool valid = device_wall_time(&local);
+    jr_display_clock_set(valid, valid ? local.tm_hour : 0,
+                         valid ? local.tm_min : 0, valid ? local.tm_sec : 0);
+    if (valid) {
+        jr_display_clock_set_date(local.tm_wday, local.tm_mday, local.tm_mon);
+    }
+    (void)companion_update(now, JR_MOOD_AWAKE, false, false,
+                           have_power ? &battery : NULL, NULL);
+}
+
+/* ---- Glass 3.5 Unified Desk Presence, Focus & Breathe ------------------- */
+const char *desk_mode_api_name(jr_desk_mode_t m)
+{
+    switch (m) {
+    case JR_DESK_ON_AIR:  return "on_air";
+    case JR_DESK_FOCUS:   return "focus";
+    case JR_DESK_BREATHE: return "breathe";
+    case JR_DESK_NORMAL:
+    default:              return "normal";
+    }
+}
+
+const char *desk_breathe_phase_api_name(jr_breathe_phase_t p)
+{
+    switch (p) {
+    case JR_BREATHE_HOLD_IN:  return "hold";
+    case JR_BREATHE_EXHALE:   return "exhale";
+    case JR_BREATHE_HOLD_OUT: return "hold";
+    case JR_BREATHE_INHALE:
+    default:                  return "inhale";
+    }
+}
+
+bool desk_mode_parse_name(const char *s, jr_desk_mode_t *out)
+{
+    if (s == NULL || s[0] == '\0' || out == NULL) {
+        return false;
+    }
+    if (strcasecmp(s, "normal") == 0 || strcasecmp(s, "off") == 0 ||
+        strcasecmp(s, "idle") == 0 || strcasecmp(s, "none") == 0) {
+        *out = JR_DESK_NORMAL;
+        return true;
+    }
+    if (strcasecmp(s, "on_air") == 0 || strcasecmp(s, "on-air") == 0 ||
+        strcasecmp(s, "on air") == 0 || strcasecmp(s, "onair") == 0) {
+        *out = JR_DESK_ON_AIR;
+        return true;
+    }
+    if (strcasecmp(s, "focus") == 0 || strcasecmp(s, "deep_focus") == 0 ||
+        strcasecmp(s, "deep focus") == 0) {
+        *out = JR_DESK_FOCUS;
+        return true;
+    }
+    if (strcasecmp(s, "breathe") == 0 || strcasecmp(s, "breathing") == 0 ||
+        strcasecmp(s, "reset") == 0) {
+        *out = JR_DESK_BREATHE;
+        return true;
+    }
+    return false;
+}
+
+bool desk_breathe_parse_pattern(const char *s, jr_breathe_pattern_t *out)
+{
+    if (s == NULL || s[0] == '\0' || out == NULL) {
+        return false;
+    }
+    if (strcasecmp(s, "box") == 0) {
+        *out = JR_BREATHE_BOX;
+        return true;
+    }
+    if (strcasecmp(s, "calm") == 0 || strcasecmp(s, "478") == 0 ||
+        strcasecmp(s, "4-7-8") == 0) {
+        *out = JR_BREATHE_CALM;
+        return true;
+    }
+    if (strcasecmp(s, "energize") == 0 || strcasecmp(s, "energy") == 0 ||
+        strcasecmp(s, "424") == 0 || strcasecmp(s, "4-2-4") == 0) {
+        *out = JR_BREATHE_ENERGIZE;
+        return true;
+    }
+    return false;
+}
+
+static uint16_t desk_current_day_key(void)
+{
+    struct tm tmv;
+    if (!device_wall_time(&tmv)) {
+        return 0U;
+    }
+    return jr_desk_make_day_key((uint16_t)(tmv.tm_year + 1900),
+                                (uint8_t)(tmv.tm_mon + 1),
+                                (uint8_t)tmv.tm_mday);
+}
+
+void desk_tally_persist(void)
+{
+    uint8_t buf[JR_DESK_TALLY_PACK_SIZE];
+    if (jr_desk_tally_pack(&s_desk_mode, buf, sizeof buf) != JR_DESK_TALLY_PACK_SIZE) {
+        return;
+    }
+    nvs_handle_t h;
+    if (nvs_open("app", NVS_READWRITE, &h) == ESP_OK) {
+        esp_err_t err = nvs_set_blob(h, "desk_tally", buf, sizeof buf);
+        if (err == ESP_OK) {
+            (void)nvs_commit(h);
+        } else {
+            ESP_LOGW(TAG, "desk: tally NVS write failed: %s", esp_err_to_name(err));
+        }
+        nvs_close(h);
+    }
+}
+
+static void desk_mode_publish_state(const jr_desk_tick_t *dt)
+{
+    const jr_desk_mode_t m = s_desk_mode.mode;
+    desk_mode_snap_t snap = {
+        .mode = m,
+        .rem_s = (m == JR_DESK_NORMAL || dt == NULL) ? 0U : dt->rem_s,
+        .pct_left = (m == JR_DESK_NORMAL || dt == NULL) ? 0U : dt->pct_left,
+        .sessions_today = s_desk_mode.focus_sessions_today,
+        .minutes_today = s_desk_mode.focus_minutes_today,
+        .breathe_phase = s_desk_mode.breathe_phase,
+        .breathe_sec_left = s_desk_mode.breathe_sec_left,
+        .silent = s_desk_mode.silent,
+        .dnd_silent = s_desk_mode.dnd_silent,
+    };
+    strlcpy(snap.label, s_desk_mode.label, sizeof snap.label);
+    portENTER_CRITICAL(&s_desk_mux);
+    s_desk_snap = snap;
+    portEXIT_CRITICAL(&s_desk_mux);
+
+    uint8_t disp_pct = 0U;
+    uint8_t sess_done = s_desk_mode.focus_sessions_today;
+    uint8_t sess_total = 4U;
+    bool warn_pulse = false;
+    if (m == JR_DESK_BREATHE) {
+        disp_pct = s_desk_mode.breathe_phase_pct;
+        sess_done = (uint8_t)(s_desk_mode.breathe_cycle_cur + 1U);
+        sess_total = s_desk_mode.breathe_cycles_total;
+    } else if (m == JR_DESK_ON_AIR) {
+        disp_pct = (s_desk_mode.duration_ms > 0U && dt != NULL) ? dt->pct_left : 0U;
+        warn_pulse = s_desk_mode.warn_5m_fired || s_desk_mode.on_air_completed_fired;
+    } else if (m == JR_DESK_FOCUS) {
+        disp_pct = dt != NULL ? dt->pct_left : 0U;
+    }
+    jr_display_desk_mode_set((uint8_t)m,
+                             snap.rem_s,
+                             disp_pct,
+                             (uint8_t)s_desk_mode.breathe_phase,
+                             s_desk_mode.breathe_sec_left,
+                             sess_done,
+                             sess_total,
+                             warn_pulse,
+                             m == JR_DESK_NORMAL ? "" : s_desk_mode.label);
+}
+
+static void restore_desk_tally(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("app", NVS_READONLY, &h) == ESP_OK) {
+        uint8_t buf[JR_DESK_TALLY_PACK_SIZE];
+        size_t len = sizeof buf;
+        if (nvs_get_blob(h, "desk_tally", buf, &len) == ESP_OK &&
+            len == sizeof buf &&
+            jr_desk_tally_unpack(&s_desk_mode, buf, len)) {
+            ESP_LOGI(TAG, "desk: tally restored (%u sprints, %u min, day=%u)",
+                     (unsigned)s_desk_mode.focus_sessions_today,
+                     (unsigned)s_desk_mode.focus_minutes_today,
+                     (unsigned)s_desk_mode.tally_day_key);
+        }
+        nvs_close(h);
+    }
+    jr_desk_tick_t dt = {0};
+    jr_desk_tick(&s_desk_mode, (uint32_t)(esp_timer_get_time() / 1000),
+                 desk_current_day_key(), &dt);
+    desk_mode_publish_state(&dt);
+}
+
+void desk_mode_snapshot(desk_mode_snap_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    portENTER_CRITICAL(&s_desk_mux);
+    *out = s_desk_snap;
+    portEXIT_CRITICAL(&s_desk_mux);
+}
+
+void desk_mode_request_async(const desk_mode_req_t *req)
+{
+    if (req == NULL) {
+        return;
+    }
+    portENTER_CRITICAL(&s_desk_mux);
+    s_desk_req_data = *req;
+    portEXIT_CRITICAL(&s_desk_mux);
+    atomic_store(&s_desk_req_pending, 1U);
+}
+
+void desk_mode_apply_now(const desk_mode_req_t *req, uint32_t now_ms,
+                         bool play_cue)
+{
+    if (req == NULL) {
+        return;
+    }
+    if (s_desk_choice_active) {
+        s_desk_choice_active = false;
+        jr_display_dismiss_choices();
+    }
+    switch (req->mode) {
+    case JR_DESK_ON_AIR:
+        jr_desk_start_on_air(&s_desk_mode, now_ms, req->duration_s, req->label);
+        jr_mood_poke_awake(&s_mood, now_ms);
+        companion_attention(now_ms);
+        jr_display_bloom();
+        /* ON AIR is strictly silent: zero audio chime on entry. */
+        break;
+    case JR_DESK_FOCUS:
+        jr_desk_start_focus(&s_desk_mode, now_ms, req->duration_s,
+                            req->label, req->silent);
+        jr_mood_poke_awake(&s_mood, now_ms);
+        companion_attention(now_ms);
+        jr_display_bloom();
+        if (play_cue && !s_desk_mode.silent && !owner_speaker_muted() &&
+            !atomic_load(&s_ota_active)) {
+            (void)jr_audio_play_cue(JR_CUE_MODE,
+                                    jr_cue_amplitude_permille(JR_CUE_MODE, s_out_vol));
+        }
+        break;
+    case JR_DESK_BREATHE:
+        jr_desk_start_breathe(&s_desk_mode, now_ms, req->pattern,
+                              req->cycles, req->silent);
+        jr_mood_poke_awake(&s_mood, now_ms);
+        companion_attention(now_ms);
+        jr_display_bloom();
+        if (play_cue && !s_desk_mode.silent && !owner_speaker_muted() &&
+            !atomic_load(&s_ota_active)) {
+            (void)jr_audio_play_cue(JR_CUE_MODE,
+                                    jr_cue_amplitude_permille(JR_CUE_MODE, s_out_vol));
+        }
+        break;
+    case JR_DESK_NORMAL:
+    default:
+        /* Exiting ON_AIR clears dnd_silent & visual beacon; never unmutes mic. */
+        jr_desk_set_normal(&s_desk_mode);
+        if (play_cue) {
+            ui_cue(JR_CUE_DISMISS, true);
+        }
+        break;
+    }
+    jr_desk_tick_t dt = {0};
+    jr_desk_tick(&s_desk_mode, now_ms, desk_current_day_key(), &dt);
+    desk_mode_publish_state(&dt);
+}
+
 /* THE MORNING GLANCE SPEAKS (wave N13). The first lift after a rest, once
  * per calendar day inside the morning window, earns one briefing made only
  * of what the device already holds: the date, the weather glance, the rain
@@ -888,12 +1921,106 @@ static void morning_briefing_forced_maybe(const jr_power_t *bat)
     briefing_deliver(&tmv, bat, true);
 }
 
+static void briefing_append_desk(char *dst, size_t cap, bool evening)
+{
+    if (dst == NULL || cap == 0U) {
+        return;
+    }
+    if (evening) {
+        static const char kMorn[] = "Give Sir his morning briefing";
+        static const char kEve[]  = "Give Sir his evening wrap-up";
+        const size_t mlen = sizeof(kMorn) - 1U;
+        const size_t elen = sizeof(kEve) - 1U;
+        if (strncmp(dst, kMorn, mlen) == 0 && elen <= mlen) {
+            memcpy(dst, kEve, elen);
+            memmove(dst + elen, dst + mlen, strlen(dst + mlen) + 1U);
+        }
+    }
+    desk_mode_snap_t ds = {0};
+    desk_mode_snapshot(&ds);
+    size_t open_n = 0U, done_n = 0U;
+    (void)device_notes_counts(&open_n, &done_n);
+
+    size_t len = strlen(dst);
+    if (len + 1U < cap && (ds.sessions_today > 0U || ds.minutes_today > 0U)) {
+        int w = snprintf(dst + len, cap - len,
+                         " Focus today: %u sprint%s totaling %u minute%s.",
+                         (unsigned)ds.sessions_today,
+                         ds.sessions_today == 1U ? "" : "s",
+                         (unsigned)ds.minutes_today,
+                         ds.minutes_today == 1U ? "" : "s");
+        if (w > 0) {
+            len = (size_t)w < cap - len ? len + (size_t)w : cap - 1U;
+        }
+    } else if (len + 1U < cap && evening) {
+        int w = snprintf(dst + len, cap - len, " No focus sprints logged today.");
+        if (w > 0) {
+            len = (size_t)w < cap - len ? len + (size_t)w : cap - 1U;
+        }
+    }
+    if (len + 1U < cap && (open_n > 0U || done_n > 0U)) {
+        (void)snprintf(dst + len, cap - len,
+                       " Desk inbox: %u open, %u completed.",
+                       (unsigned)open_n, (unsigned)done_n);
+    }
+}
+
+int briefing_compose_live(char *dst, size_t cap, const jr_power_t *bat)
+{
+    if (dst == NULL || cap == 0U) {
+        return 0;
+    }
+    struct tm tmv;
+    const bool have_date = device_wall_time(&tmv);
+    char title[64];
+    int done = 0;
+    board_take_done(&done, title, sizeof title);
+    char notes_buf[224];
+    notes_buf[0] = '\0';
+    (void)device_notes_format_briefing(notes_buf, sizeof notes_buf);
+    const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    jr_timer_view_t tview = {0};
+    const bool have_timer = jr_timer_nearest(&s_timers, now_ms, &tview);
+    const unsigned tcount = jr_timer_active_count(&s_timers);
+    const bool gauge = bat != NULL && bat->present && bat->percent <= 100U;
+    jr_briefing_facts_t f = {
+        .have_date = have_date,
+        .wday = have_date ? tmv.tm_wday : 0,
+        .mday = have_date ? tmv.tm_mday : 0,
+        .mon = have_date ? tmv.tm_mon : 0,
+        .have_weather = s_weather.valid,
+        .temp_f = s_weather.temp_f,
+        .hi_f = s_weather.hi_f,
+        .lo_f = s_weather.lo_f,
+        .condition = s_weather.condition,
+        .rain_in_h = weather_rain_ahead_h(12),
+        .tasks_done = done,
+        .task_title = done > 0 ? title : NULL,
+        .battery_pct = gauge ? (int)bat->percent : -1,
+        .on_usb = bat != NULL && bat->usb_present,
+        .notes_summary = notes_buf[0] != '\0' ? notes_buf : NULL,
+        .active_timers = (int)tcount,
+        .nearest_timer = have_timer ? tview.label : NULL,
+        .nearest_timer_s = have_timer ? (int)tview.rem_s : 0,
+    };
+    (void)jr_briefing_compose(dst, cap, &f);
+    briefing_append_desk(dst, cap, have_date && tmv.tm_hour >= 17);
+    return (int)strlen(dst);
+}
+
 static void briefing_deliver(const struct tm *tmvp, const jr_power_t *bat, bool forced)
 {
     const struct tm tmv = *tmvp;
     char title[64];
     int done = 0;
     board_take_done(&done, title, sizeof title);
+    char notes_buf[224];
+    notes_buf[0] = '\0';
+    (void)device_notes_format_briefing(notes_buf, sizeof notes_buf);
+    const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    jr_timer_view_t tview = {0};
+    const bool have_timer = jr_timer_nearest(&s_timers, now_ms, &tview);
+    const unsigned tcount = jr_timer_active_count(&s_timers);
     const bool gauge = bat != NULL && bat->present && bat->percent <= 100U;
     jr_briefing_facts_t f = {
         .have_date = true,
@@ -910,6 +2037,10 @@ static void briefing_deliver(const struct tm *tmvp, const jr_power_t *bat, bool 
         .task_title = done > 0 ? title : NULL,
         .battery_pct = gauge ? (int)bat->percent : -1,
         .on_usb = bat != NULL && bat->usb_present,
+        .notes_summary = notes_buf[0] != '\0' ? notes_buf : NULL,
+        .active_timers = (int)tcount,
+        .nearest_timer = have_timer ? tview.label : NULL,
+        .nearest_timer_s = have_timer ? (int)tview.rem_s : 0,
     };
     if (atomic_load(&s_voice_privacy_paused)) {
         char cap[JR_BRIEF_CAPTION_GLYPHS + 1];
@@ -918,10 +2049,12 @@ static void briefing_deliver(const struct tm *tmvp, const jr_power_t *bat, bool 
         ESP_LOGI(TAG, "briefing: caption, muted%s (%s)", forced ? ", forced" : "", cap);
         return;
     }
-    char text[400];
+    const bool evening = tmv.tm_hour >= 17;
+    char text[640];
     (void)jr_briefing_compose(text, sizeof text, &f);
+    briefing_append_desk(text, sizeof text, evening);
     handle_say(text);
-    jr_display_caption_set("GOOD MORNING");
+    jr_display_caption_set(evening ? "GOOD EVENING" : "GOOD MORNING");
     ESP_LOGI(TAG, "briefing: spoken%s (%d task%s done, rain in %d h): %s",
              forced ? ", forced" : "", done, done == 1 ? "" : "s", f.rain_in_h, text);
 }
@@ -1059,7 +2192,13 @@ static void rich_cb(void *u, const jr_gemini_event_t *ge)
         ESP_LOGI(TAG, "rx: server event kind=%d", (int)ge->kind);
     }
     if (ge->kind != JR_GEV_RESUMPTION_UPDATE && ge->kind != JR_GEV_UNKNOWN) {
-        atomic_store(&s_reply_deadline_ms, 0U);   /* the server is there */
+        atomic_fetch_add(&s_srv_alive_seq, 1U);    /* the server is there */
+        if (ge->kind == JR_GEV_AUDIO_CHUNK || ge->kind == JR_GEV_TEXT ||
+            ge->kind == JR_GEV_TOOL_CALL || ge->kind == JR_GEV_INTERRUPTED ||
+            ge->kind == JR_GEV_TURN_COMPLETE ||
+            ge->kind == JR_GEV_GENERATION_COMPLETE) {
+            atomic_fetch_add(&s_srv_answer_seq, 1U);   /* and it is replying */
+        }
     }
     jr_event_t e = jr_event(JR_EV_HEARTBEAT);
     switch (ge->kind) {
@@ -1071,8 +2210,17 @@ static void rich_cb(void *u, const jr_gemini_event_t *ge)
         }
         e = jr_event(JR_EV_SETUP_COMPLETE);
         e.resumption_token = io->last_resumable_token;
+        jr_reply_cut_boundary(&s_reply_cut);    /* a new session: no old reply to cut */
         break;
     case JR_GEV_AUDIO_CHUNK:
+        if (jr_reply_cut_drop_audio(&s_reply_cut,
+                                    (uint32_t)jr_clock_now_ms(&a->clock))) {
+            /* A tap stopped this reply and the server is still sending it.
+             * The rest is not staged and the core is not told the model is
+             * speaking (that would unmute the DAC and play it). */
+            e = jr_event(JR_EV_HEARTBEAT);
+            break;
+        }
         a->rx_audio_chunks++;
         a->rx_audio_samples += (uint32_t)ge->pcm_len;
         if (ge->pcm != NULL && ge->pcm_len > 0) {
@@ -1096,12 +2244,30 @@ static void rich_cb(void *u, const jr_gemini_event_t *ge)
         e.pcm_len = ge->pcm_len;
         e.sample_rate = ge->sample_rate;
         break;
-    case JR_GEV_INTERRUPTED:
+    case JR_GEV_INTERRUPTED: {
+        /* Server VAD decided someone spoke over the reply. If the local VAD
+         * heard no speech start in the last 1.5 s, what the server heard was
+         * most likely the speaker (2026-11-10: "interrupted" at the end of a
+         * reply, volume 100, then "I didn't quite catch that"). Counted and
+         * logged so a capture can tell echo from an owner the local VAD
+         * missed; nothing is changed by it. */
+        const uint32_t since = (uint32_t)jr_clock_now_ms(&a->clock) -
+                               atomic_load(&s_local_speech_start_ms);
+        atomic_fetch_add(&s_srv_interrupts, 1U);
+        if (since > 1500U) {
+            atomic_fetch_add(&s_srv_phantom_interrupts, 1U);
+            ESP_LOGW(TAG, "server interrupted with no local speech start in "
+                     "%u ms (volume=%d): echo or a missed onset",
+                     (unsigned)since, s_out_vol);
+        }
         a->terminal_pending = false;
+        jr_reply_cut_boundary(&s_reply_cut);
         caption_reset();   /* barged: those words were cut off mid-air */
         e = jr_event(JR_EV_SERVER_INTERRUPTED);
         break;
+    }
     case JR_GEV_TURN_COMPLETE:
+        jr_reply_cut_boundary(&s_reply_cut);
         a->rx_turn_complete++;
         activity_note_turn_end();
         s_caption_acc[0] = '\0';   /* next turn starts a fresh caption; the
@@ -1115,6 +2281,7 @@ static void rich_cb(void *u, const jr_gemini_event_t *ge)
         }
         break;
     case JR_GEV_GENERATION_COMPLETE:
+        jr_reply_cut_boundary(&s_reply_cut);
         a->rx_generation_complete++;
         s_caption_acc[0] = '\0';
         if (jr_audio_playback_pending()) {
@@ -1329,7 +2496,13 @@ static void voice_exec(void *ctx, const jr_command_t *cmd)
         }
         break;
     case JR_CMD_SEND_SETUP: {
-        ESP_LOGI(TAG, "exec: SEND_SETUP");
+        /* Each session is told what the device can really do right now: with
+         * no usable gateway the gateway-backed tools are not declared and the
+         * system text says so (jr_core/tool_policy.h). */
+        a->cfg.no_gateway = !device_gateway_usable();
+        ESP_LOGI(TAG, "exec: SEND_SETUP tools=%u gateway=%s",
+                 (unsigned)jr_gemini_declared_fn_count(&a->cfg),
+                 a->cfg.no_gateway ? device_gateway_why() : "ok");
         compose_system_instruction();   /* each session knows what time it is */
         char *setup = jr_gemini_build_setup(&a->cfg);
         if (setup) {
@@ -1403,6 +2576,12 @@ static void voice_exec(void *ctx, const jr_command_t *cmd)
     }
     case JR_CMD_DISPATCH_TOOL_CALL: {
         atomic_fetch_add(&s_tool_diag.calls_received, 1U);
+        /* weather_here (and current_time with no gateway) are answered from
+         * the device itself: no worker, no network, no gateway. */
+        if (device_try_local_tool(cmd)) {
+            activity_note_tool(cmd->tool_name, "{}");
+            break;
+        }
         /* A SPOKEN "REMEMBER" IS THE APPROVAL. The consent arc that used to
          * intercept this tool asked the owner to tap the glass to confirm a
          * note they had just dictated; from across the room the tap never
@@ -1507,10 +2686,12 @@ static void voice_exec(void *ctx, const jr_command_t *cmd)
         }
         /* Question + labels are borrowed from the owned snapshot, which lives
          * until a NEW ask overwrites it — always after this one is resolved. */
+        s_desk_choice_active = false;
         jr_display_present_choices(ask->question, labels, (int)ask->count);
         break;
     }
     case JR_CMD_DISMISS_CHOICES:
+        s_desk_choice_active = false;
         jr_display_dismiss_choices();   /* idempotent by contract */
         break;
     case JR_CMD_SEND_CHOICE_RESULT: {
@@ -1592,6 +2773,52 @@ static jr_display_agent_state_t agent_state_to_display(const char *state)
     return JR_DISPLAY_AGENT_NONE;
 }
 
+static void shell_caption_space(void)
+{
+    /* WATCH identifies itself without a caption beneath its hands. */
+    static const char *const mode_name[JR_DISPLAY_SPACE_COUNT] =
+        { "JARVIS", "", "WEATHER", "STATUS", "DESK", "ACTIVITY" };
+    const jr_display_space_t sp = jr_display_nav_space();
+    /* A label: it crossfades with the slide, stands for a moment once the
+     * screen has settled, then fades by itself (nothing clears it). */
+    jr_display_caption_label(
+        sp < JR_DISPLAY_SPACE_COUNT ? mode_name[sp] : "JARVIS",
+        JR_DISPLAY_LABEL_SCREEN);
+}
+
+static void shell_vertical_navigation(jr_input_direction_t direction)
+{
+    if (direction == JR_INPUT_DIRECTION_DOWN) {
+        /* A detail sheet promises DOWN TO CLOSE. Its underlying panel must
+         * remain selected; the next stroke can resume the mode ring. */
+        if (jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_DETAIL) {
+            jr_display_nav_down();
+        } else {
+            jr_display_nav_next();
+        }
+    } else if (direction == JR_INPUT_DIRECTION_UP) {
+        jr_display_nav_prev();
+    }
+}
+
+static void shell_dismiss(void)
+{
+    const jr_display_overlay_t overlay = jr_display_nav_overlay();
+    /* The nav overlay and /api/ui/shade each have a door into controls. */
+    /* No caption on any of these. The shade and the detail sheet each carry
+     * their own hint line in the caption band, so a caption there wrapped
+     * across it; and the shade leaving is the message, "CONTROLS CLOSED" only
+     * lingered after it. */
+    if (overlay == JR_DISPLAY_OVERLAY_SHADE) {
+        jr_display_nav_up();
+        s_ui_shade_open = false;
+    } else if (s_ui_shade_open) {
+        s_ui_shade_open = false;
+    } else {
+        jr_display_nav_down();
+    }
+}
+
 
 ota_preflight_t ota_preflight(void)
 {
@@ -1671,12 +2898,39 @@ void title_shorten(char *dst, size_t cap, const char *src)
     dst[keep + 1U] = '\0';
 }
 
+static uint8_t evidence_state_to_led(const char *st)
+{
+    if (st == NULL || st[0] == '\0') {
+        return 0U;
+    }
+    if (strcasecmp(st, "pass") == 0 || strcasecmp(st, "done") == 0 ||
+        strcasecmp(st, "succeeded") == 0) {
+        return 1U;
+    }
+    if (strcasecmp(st, "working") == 0 || strcasecmp(st, "running") == 0 ||
+        strcasecmp(st, "active") == 0) {
+        return 2U;
+    }
+    if (strcasecmp(st, "wait") == 0 || strcasecmp(st, "queued") == 0 ||
+        strcasecmp(st, "pending") == 0) {
+        return 3U;
+    }
+    if (strcasecmp(st, "fail") == 0 || strcasecmp(st, "failed") == 0 ||
+        strcasecmp(st, "error") == 0 || strcasecmp(st, "blocked") == 0) {
+        return 4U;
+    }
+    return 0U;
+}
+
 static void publish_shell_state(uint32_t now_ms)
 {
     static bool cached_active;
     static uint8_t cached_progress;
     static jr_display_agent_state_t cached_state;
-    static char cached_title[13] = "STANDBY";
+    static char cached_title[20] = "STANDBY";
+    static char cached_step_rows[3][20];
+    static uint8_t cached_step_leds[3];
+    static uint8_t cached_step_count;
     static uint32_t next_status_ms;
 
     if (s_agent_link_lock != NULL &&
@@ -1708,30 +2962,54 @@ static void publish_shell_state(uint32_t now_ms)
         title_shorten(cached_title, sizeof(cached_title),
                       s_agent_link.active && s_agent_link.title[0] != '\0'
                           ? s_agent_link.title : "STANDBY");
+        cached_step_count = 0U;
+        if (s_agent_link.active && s_agent_link.evidence_count > 0U) {
+            uint8_t n = s_agent_link.evidence_count;
+            if (n > 3U) {
+                n = 3U;
+            }
+            for (uint8_t i = 0U; i < n; ++i) {
+                strlcpy(cached_step_rows[i], s_agent_link.evidence[i].label,
+                        sizeof(cached_step_rows[i]));
+                cached_step_leds[i] =
+                    evidence_state_to_led(s_agent_link.evidence[i].state);
+            }
+            cached_step_count = n;
+        }
         xSemaphoreGive(s_agent_link_lock);
     }
+
+    bool display_active = cached_active;
+    uint8_t display_progress = cached_progress;
+    jr_display_agent_state_t display_state = cached_state;
+    char display_title[20];
+    strlcpy(display_title, cached_title, sizeof(display_title));
+    uint8_t display_step_count = cached_active ? cached_step_count : 0U;
+
     uint32_t pairing_until = atomic_load(&s_pairing_claim_until_ms);
     if ((int32_t)(pairing_until - now_ms) > 0) {
-        cached_active = true;
-        cached_progress = 100U;
-        cached_state = JR_DISPLAY_AGENT_WAITING;
-        strlcpy(cached_title, "PAIR DEVICE", sizeof(cached_title));
+        display_active = true;
+        display_progress = 100U;
+        display_state = JR_DISPLAY_AGENT_WAITING;
+        strlcpy(display_title, "PAIR DEVICE", sizeof(display_title));
+        display_step_count = 0U;
     } else if (pairing_until != 0U) {
         atomic_store(&s_pairing_claim_until_ms, 0U);
         atomic_store(&s_pairing_claim_code, 0U);
         atomic_store(&s_pairing_claim_attempts, 0U);
     }
-    if (operator_mode_active(now_ms)) {
-        cached_active = true;
-        cached_progress = 100U;
-        cached_state = JR_DISPLAY_AGENT_WORKING;
-        strlcpy(cached_title,
+    if (operator_mode_active(now_ms) && !display_active) {
+        display_active = true;
+        display_progress = 100U;
+        display_state = JR_DISPLAY_AGENT_WORKING;
+        strlcpy(display_title,
                 atomic_load(&s_operator_mode_owner) == OPERATOR_OWNER_ZEROCHAT
                     ? "ZEROCHAT" : "CODEX",
-                sizeof(cached_title));
+                sizeof(display_title));
+        display_step_count = 0U;
     }
-    jr_display_set_shell_state(s_ui_shade_open, cached_active,
-                               cached_progress, cached_state);
+    jr_display_set_shell_state(s_ui_shade_open, display_active,
+                               display_progress, display_state);
     /* DESK is on the mode ring again, so its feed is restored — and unlike
      * TOOLS it was never fake: cached_title/progress/state come from the real
      * agent-link push. TOOLS stays unfed on purpose; it now renders an honest
@@ -1746,7 +3024,9 @@ static void publish_shell_state(uint32_t now_ms)
      *
      * cached_title/progress/state also reach the shell via
      * jr_display_set_shell_state(), which draws the agent rim segments. */
-    jr_display_desk_set_task(cached_title, cached_progress, cached_state);
+    jr_display_desk_set_task(display_title, display_progress, display_state);
+    jr_display_desk_set_steps(cached_step_rows, cached_step_leds,
+                              display_step_count);
 
     /* TOOLS is gone; ACTIVITY is fed at turn end (activity_note_turn). */
     const jr_state_snapshot_t *snapshot = jr_orch_snapshot(&s_app.orch);
@@ -1754,7 +3034,7 @@ static void publish_shell_state(uint32_t now_ms)
         s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN,
         (uint16_t)(snapshot->transitions / 2U), now_ms / 1000U);
     if ((int32_t)(now_ms - next_status_ms) >= 0) {
-        jr_display_set_status((uint8_t)s_out_vol);
+        jr_display_set_status((uint8_t)s_out_vol, s_brightness_cap);
 
         const ota_preflight_t preflight = ota_preflight();
         const esp_partition_t *running = preflight.running;
@@ -1822,7 +3102,7 @@ static void publish_shell_state(uint32_t now_ms)
             .wifi_up = net.sta_connected,
             .rssi_dbm = net.rssi,
             .link_open = s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN,
-            .tools = !jr_tools_is_configured() ? 0U
+            .tools = !device_gateway_usable() ? 0U
                      : atomic_load(&s_tool_diag.worker_ready) ? 2U : 1U,
             .desk_live = desk_live,
             .radio_saving = jr_net_power_save_active(),
@@ -1832,6 +3112,14 @@ static void publish_shell_state(uint32_t now_ms)
         jr_display_links_set(&links);
         /* The day arc: the sun from the last glance, or nothing at all. */
         jr_display_sun_set((int)s_wx_sun_rise_min, (int)s_wx_sun_set_min);
+        /* Publish real-world SNTP calendar Y/M/D at 1 Hz for WATCH:ORRERY
+         * planetary ephemeris and lunar phase. */
+        struct tm tmv;
+        if (device_wall_time(&tmv)) {
+            jr_display_date_set_ymd((uint16_t)(tmv.tm_year + 1900),
+                                    (uint8_t)(tmv.tm_mon + 1),
+                                    (uint8_t)tmv.tm_mday);
+        }
         next_status_ms = now_ms + 1000U;
     }
 }
@@ -2004,6 +3292,16 @@ static bool input_next(jr_input_t *in, jr_input_event_t *iev)
     return jr_input_poll(in, iev);
 }
 
+/* Stop the speaker and tell the orchestrator the owner barged in. The part of
+ * a cut that a tap on the glass and the wake word "Jarvis" share; the caller
+ * decides whether to also discard the rest of the server's reply
+ * (jr_reply_cut_begin), which only a physical tap or the wake word may do. */
+static void speaking_stop_playback(uint64_t now)
+{
+    jr_audio_sink_mute_now(&s_app.spk);
+    jr_orch_inject(&s_app.orch, jr_event(JR_EV_BARGE_DETECTED), now);
+}
+
 static void voice_task(void *arg)
 {
     (void)arg;
@@ -2013,7 +3311,7 @@ static void voice_task(void *arg)
      * would-block dropped a full 128 ms of microphone audio. Two frames stay
      * queueable under backpressure while halving the per-frame send rate. */
     static jr_pcm_t mic_batch[2 * VOICE_FRAME_SAMPLES];
-    static size_t   mic_batch_fill = 0;
+    static jr_audio_uplink_batch_t mic_batch_state;
     static bool codex_tap_pending;
     static jr_input_event_t codex_pending_tap;
     static uint32_t codex_pending_tap_ms;
@@ -2028,7 +3326,17 @@ static void voice_task(void *arg)
     }
     s_voice_task_running = true;
 
+    uint32_t tick_skips_in_row = 0U;
     for (;;) {
+        const int64_t iter_t0 = esp_timer_get_time();
+        /* Pacing numbers for this iteration: which class of frame it read
+         * (-1: none) and how long the codec read took. */
+        int vperf_class = -1;
+        uint32_t read_us = JR_PACE_READ_UNKNOWN;
+        /* How long that read was blocked. The canceller runs inside the read
+         * (12 to 15 ms while speaking), so read_us alone cannot say whether
+         * the frame was already waiting; the pacing below needs this one. */
+        uint32_t wait_us = JR_PACE_READ_UNKNOWN;
         uint64_t now = jr_clock_now_ms(&s_app.clock);
         s_voice_task_heartbeat_ms = (uint32_t)now;
 
@@ -2084,6 +3392,10 @@ static void voice_task(void *arg)
                 atomic_load(&s_voice_privacy_paused),
                 have_imu ? imu.roll_deg : 0.0f,
                 have_imu ? imu.pitch_deg : 0.0f);
+            jr_display_set_light(
+                (int)(JR_LIGHT_IMU_X_SIGN * imu.gx * 1000.0f),
+                (int)(JR_LIGHT_IMU_Y_SIGN * imu.gy * 1000.0f),
+                have_imu);
             jr_display_power_set(
                 have_power ? bat.percent : 0xFFU,
                 have_power ? bat.millivolts : 0U,
@@ -2093,21 +3405,63 @@ static void voice_task(void *arg)
             static bool power_seen;
             static bool last_usb;
             static bool last_charging;
+            static bool last_care_enabled;
             static uint32_t last_power_seq;
+            static uint32_t s_analytics_next_ms;
             if (have_power && bat.sample_seq != last_power_seq) {
+                float chip_f = 0.0f;
+                const int chip_c = device_chip_temp_c(&chip_f)
+                    ? (int)lroundf(chip_f) : 25;
+                jr_power_care_tick(bat.usb_present,
+                                   bat.percent <= 100U ? (int)bat.percent : -1,
+                                   chip_c);
+                jr_power_care_status_t care = {0};
+                jr_power_care_status(&care);
+                const bool power_edge = !power_seen ||
+                    (bat.usb_present != last_usb) ||
+                    (bat.charging != last_charging) ||
+                    (care.enabled != last_care_enabled);
+                const bool analytics_due = power_edge ||
+                    (int32_t)((uint32_t)now - s_analytics_next_ms) >= 0;
+                if (analytics_due) {
+                    s_analytics_next_ms = (uint32_t)now + 30000U;
+                }
+                power_analytics_record_and_publish(&bat, true, analytics_due);
+
+                jr_power_analytics_t snap = {0};
+                app_power_analytics_get(&snap);
                 if (power_seen && !last_usb && bat.usb_present) {
-                    char caption[24];
-                    if (bat.charging && bat.percent <= 100U) {
-                        snprintf(caption, sizeof caption, "CHARGING %u%%",
-                                 (unsigned)bat.percent);
+                    char caption[32];
+                    if (care.holding) {
+                        strlcpy(caption, "DESK CARE 80% - HOLD", sizeof caption);
+                    } else if (bat.charging && bat.percent <= 100U) {
+                        if (snap.eta_full_min > 0) {
+                            const unsigned hm = (unsigned)snap.eta_full_min;
+                            if (hm >= 60U) {
+                                snprintf(caption, sizeof caption,
+                                         "CHARGING %u%% - %uH%02uM",
+                                         (unsigned)bat.percent,
+                                         hm / 60U, hm % 60U);
+                            } else {
+                                snprintf(caption, sizeof caption,
+                                         "CHARGING %u%% - %uM",
+                                         (unsigned)bat.percent, hm);
+                            }
+                        } else {
+                            snprintf(caption, sizeof caption, "CHARGING %u%%",
+                                     (unsigned)bat.percent);
+                        }
                     } else {
                         strlcpy(caption, "POWER CONNECTED", sizeof caption);
                     }
                     jr_display_caption_set(caption);
                     jr_display_bloom();
+                    app_play_soft_cue(JR_CUE_CONFIRM);
                 } else if (power_seen && last_charging && !bat.charging &&
                            bat.usb_present) {
-                    jr_display_caption_set("CHARGE COMPLETE");
+                    jr_display_caption_set(care.holding
+                                               ? "DESK CARE 80% - HOLD"
+                                               : "CHARGE COMPLETE");
                     jr_display_bloom();
                 } else if (power_seen && last_usb && !bat.usb_present) {
                     jr_display_caption_set("ON BATTERY");
@@ -2115,6 +3469,7 @@ static void voice_task(void *arg)
                 power_seen = true;
                 last_usb = bat.usb_present;
                 last_charging = bat.charging;
+                last_care_enabled = care.enabled;
                 last_power_seq = bat.sample_seq;
             }
 
@@ -2143,7 +3498,12 @@ static void voice_task(void *arg)
                 s_shake_polls = 0;
                 s_shake_cool_ms = (uint32_t)now + 1500U;
                 jr_state_t sp = jr_orch_phase(&s_app.orch);
-                if (sp == JR_ST_SPEAKING || sp == JR_ST_THINKING ||
+                if (jr_timer_any_ringing(&s_timers)) {
+                    (void)jr_timer_dismiss_ringing(&s_timers);
+                    timer_publish_now((uint32_t)now);
+                    jr_display_caption_set("TIMER DISMISSED");
+                    ESP_LOGI(TAG, "gesture: shake dismissed timer");
+                } else if (sp == JR_ST_SPEAKING || sp == JR_ST_THINKING ||
                     sp == JR_ST_ASKING) {
                     jr_audio_flush_playback();
                     jr_audio_sink_mute_now(&s_app.spk);
@@ -2199,7 +3559,9 @@ static void voice_task(void *arg)
                 mood_phase == JR_ST_SPEAKING ||
                 mood_phase == JR_ST_THINKING ||
                 mood_phase == JR_ST_ASKING ||
-                (mood_phase == JR_ST_LISTENING && s_listen_speech_active);
+                (mood_phase == JR_ST_LISTENING && s_listen_speech_active) ||
+                jr_timer_any_ringing(&s_timers) ||
+                s_desk_mode.mode != JR_DESK_NORMAL;
             static uint8_t s_move_polls, s_mood_fd_polls, s_mood_fu_polls;
             static bool s_mood_face_down;
             if (have_imu && imu.moving && imu.age_ms < 500U) {
@@ -2272,20 +3634,70 @@ static void voice_task(void *arg)
                 .quiet = quiet,
             };
             jr_mood_out_t mout = jr_mood_step(&s_mood, &min);
+            const bool dream_glass = jr_mood_dream_glass(
+                mout.mood, user_busy, have_power && bat.usb_present,
+                operator_mode_active((uint32_t)now),
+                atomic_load(&s_ota_active) || image_in_probation());
+            const uint32_t http_last = atomic_load(&s_http_last_activity_ms);
+            const bool http_burst = http_last != 0U &&
+                (uint32_t)((uint32_t)now - http_last) < 5000U;
+            const bool op_leased = operator_mode_active((uint32_t)now) ||
+                                   operator_lease_active((uint32_t)now);
+            const bool ota_now = atomic_load(&s_ota_active);
+            const bool audio_diag = atomic_load(&s_audio_diag_until_ms) != 0U;
+            const bool i2s_active = s_app.io.capturing ||
+                                    jr_audio_playback_pending() || audio_diag;
+            const bool usb_present = have_power && bat.usb_present;
             const bool realtime_power =
-                mout.voice_armed || user_busy ||
-                operator_mode_active((uint32_t)now) ||
-                atomic_load(&s_ota_active);
-            (void)jr_net_set_power_save(!realtime_power);
-            /* THE GEAR. Anything happening, or a cable: 240. Resting on the
-             * cell with the session closed: REST. Never lower while the
-             * audio self-test owns the codec. */
+                (mout.voice_armed && !quiet) || user_busy || op_leased ||
+                ota_now || http_burst || i2s_active;
+            /* Wi-Fi modem power-save tier: NONE only for live speech/think/
+             * speak, OTA, operator lease, provisioning (handled in jr_net),
+             * or an active HTTP burst (<5s); MAX in DREAM or quiet battery
+             * WHISPER without recent touch/HTTP; MIN everywhere else. */
+            {
+                const bool voice_active_io =
+                    mood_phase == JR_ST_SPEAKING ||
+                    mood_phase == JR_ST_THINKING ||
+                    mood_phase == JR_ST_ASKING ||
+                    mood_phase == JR_ST_CONNECTING ||
+                    (mood_phase == JR_ST_LISTENING && s_listen_speech_active);
+                const bool recent_touch =
+                    (uint32_t)((uint32_t)now - s_companion_activity_ms) < 5000U;
+                jr_net_ps_level_t target_ps;
+                if (voice_active_io || ota_now || op_leased || http_burst) {
+                    target_ps = JR_NET_PS_NONE;
+                } else if (mout.mood == JR_MOOD_DREAM ||
+                           (quiet && mout.mood == JR_MOOD_WHISPER &&
+                            !usb_present && !recent_touch && !http_burst)) {
+                    target_ps = JR_NET_PS_MAX;
+                } else {
+                    target_ps = JR_NET_PS_MIN;
+                }
+                jr_net_set_ps_level(target_ps);
+            }
+            /* THE GEAR. 240 MHz when active/speaking/OTA/leased/HTTP burst;
+             * 80 MHz DEEP_REST (80 MHz APB intact) in quiet WHISPER/DREAM or
+             * muted USB Nightstand rest when realtime_power is false; 160 MHz
+             * REST in resting AMBIENT. */
             {
                 const int forced = atomic_load(&s_cpu_force);
-                cpu_gear_set(forced != 0 ? forced
-                             : ((!on_cell && !quiet) || realtime_power ||
-                                atomic_load(&s_audio_diag_until_ms) != 0U)
-                                   ? CPU_MHZ_LIVE : CPU_MHZ_REST);
+                int target_mhz;
+                if (forced != 0) {
+                    target_mhz = forced;
+                } else if (!realtime_power &&
+                           (mout.mood == JR_MOOD_WHISPER ||
+                            mout.mood == JR_MOOD_DREAM ||
+                            (usb_present && quiet && mout.mood != JR_MOOD_AWAKE))) {
+                    target_mhz = CPU_MHZ_DEEP_REST;
+                } else if (user_busy || op_leased || ota_now || http_burst ||
+                           audio_diag || mout.mood == JR_MOOD_AWAKE ||
+                           (!on_cell && !quiet)) {
+                    target_mhz = CPU_MHZ_LIVE;
+                } else {
+                    target_mhz = CPU_MHZ_REST;
+                }
+                cpu_gear_set(target_mhz);
             }
             /* THE CADENCE. The engine draws every period whether or not a
              * pixel changed, so at rest the frame rate is the display's whole
@@ -2293,25 +3705,42 @@ static void voice_task(void *arg)
              * it down as the device settles. A touch restores 24 at once in
              * the input loop, before this tick can notice. */
             (void)jr_display_set_render_fps(
-                (realtime_power || mout.mood == JR_MOOD_AWAKE) ? RENDER_FPS_LIVE
-                : mout.mood == JR_MOOD_AMBIENT                ? RENDER_FPS_AMBIENT
-                : mout.mood == JR_MOOD_WHISPER                ? RENDER_FPS_WHISPER
-                                                              : RENDER_FPS_DREAM);
+                (user_busy || op_leased || ota_now || mout.mood == JR_MOOD_AWAKE)
+                    ? RENDER_FPS_LIVE
+                : mout.mood == JR_MOOD_AMBIENT ? RENDER_FPS_AMBIENT
+                : mout.mood == JR_MOOD_WHISPER ? RENDER_FPS_WHISPER
+                                               : RENDER_FPS_DREAM);
             uint8_t effective_brightness = (uint8_t)(
                 ((unsigned)mout.brightness * s_brightness_cap + 50U) / 100U);
+            if (on_cell && !jr_display_get_hbm()) {
+                if (saver) {
+                    const uint8_t saver_cap =
+                        (mout.mood == JR_MOOD_WHISPER) ? 14U
+                        : (mout.mood == JR_MOOD_DREAM) ? 8U
+                                                       : 45U;
+                    if (effective_brightness > saver_cap) {
+                        effective_brightness = saver_cap;
+                    }
+                } else {
+                    const bool user_boost =
+                        s_bright_user_boost_until_ms != 0U &&
+                        (int32_t)((uint32_t)now - s_bright_user_boost_until_ms) < 0;
+                    if (!user_boost && effective_brightness > 80U) {
+                        effective_brightness = 80U;
+                    }
+                }
+            }
             {
                 static uint8_t prev_mood = (uint8_t)JR_MOOD_AWAKE;
                 const bool rested = prev_mood == (uint8_t)JR_MOOD_WHISPER ||
                                     prev_mood == (uint8_t)JR_MOOD_DREAM;
                 const bool lifted = mout.changed && mout.mood == JR_MOOD_AWAKE &&
                                     rested && moving;
-                if (lifted && s_weather.valid &&
+                if (lifted &&
                     jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE &&
                     !jr_display_choices_active()) {
-                    jr_display_nav_set(JR_DISPLAY_SPACE_WEATHER);
-                    jr_display_bloom();
                     s_glance_until_ms = (uint32_t)now + GLANCE_MS;
-                    ESP_LOGI(TAG, "glance: lifted after rest, showing weather");
+                    ESP_LOGI(TAG, "glance: lifted after rest, local time and battery");
                 }
                 prev_mood = (uint8_t)mout.mood;
                 /* A deep-sleep wake by lift or touch is the same gesture seen
@@ -2332,20 +3761,23 @@ static void voice_task(void *arg)
                 }
                 morning_briefing_maybe(lifted || boot_lift, have_power ? &bat : NULL);
                 morning_briefing_forced_maybe(have_power ? &bat : NULL);
+                device_sunlight_tick((uint32_t)now, have_power ? &bat : NULL, have_power);
             }
             /* DEEP SLEEP WHEN NOT IN USE. The ladder says when (DREAM for
              * JR_MOOD_SLEEP_MS); the world says whether: never on USB (a
              * desk device on its cable is a desk device), never mid-update,
              * never with a companion in, and never in the first three
              * minutes, so a device is always reachable for a while after
-             * any boot. A forced sleep (the debug route) skips the gates:
-             * it exists to prove the wake sources from a desk. */
+             * any boot. Debug skips the ladder, but power.c still refuses
+             * probation, USB or unknown/stale USB telemetry. */
             {
                 const bool forced = atomic_load(&s_sleep_force);
                 const bool in_use =
                     (have_power && bat.usb_present) ||
                     atomic_load(&s_ota_active) ||
-                    operator_mode_active((uint32_t)now);
+                    operator_mode_active((uint32_t)now) ||
+                    jr_timer_blocks_sleep(&s_timers, (uint32_t)now) ||
+                    s_desk_mode.mode != JR_DESK_NORMAL;
                 if (forced) {
                     enter_deep_sleep("forced", atomic_load(&s_sleep_timer_s));
                 } else if (jr_mood_sleep_due(&s_mood, (uint32_t)now) &&
@@ -2353,15 +3785,14 @@ static void voice_task(void *arg)
                     enter_deep_sleep("not in use", SLEEP_TIMER_WAKE_S);
                 }
             }
-            if (s_glance_until_ms != 0U &&
-                (int32_t)((uint32_t)now - s_glance_until_ms) >= 0) {
-                s_glance_until_ms = 0U;
-                if (jr_display_nav_space() == JR_DISPLAY_SPACE_WEATHER &&
-                    jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE) {
-                    jr_display_nav_home();
-                    jr_display_caption_set("JARVIS");
-                }
+            if (s_desk_mode.mode != JR_DESK_NORMAL) {
+                s_companion_activity_ms = (uint32_t)now;
             }
+            const bool companion_clock = companion_update((uint32_t)now,
+                mout.mood, moving,
+                companion_phase_busy(mood_phase, s_listen_speech_active),
+                have_power ? &bat : NULL,
+                &effective_brightness);
             atomic_store(&s_mood_id, (uint8_t)mout.mood);
             atomic_store(&s_mood_brightness, effective_brightness);
             s_bright_tgt = effective_brightness;
@@ -2374,6 +3805,8 @@ static void voice_task(void *arg)
             }
             (void)jr_display_set_brightness(s_bright_now);
             if (mout.changed) {
+                jr_imu_set_rest(mout.mood == JR_MOOD_WHISPER ||
+                                mout.mood == JR_MOOD_DREAM);
                 ESP_LOGI(TAG, "mood -> %s brightness=%u cap=%u voice=%d",
                          jr_mood_name(mout.mood),
                          (unsigned)effective_brightness,
@@ -2413,12 +3846,20 @@ static void voice_task(void *arg)
                 uint32_t pkey_s = 0, pkey_l = 0;
                 jr_power_pkey_take(&pkey_s, &pkey_l);
                 if (pkey_s > 0) {
-                    s_flip_muted = false;
-                    atomic_store(&s_voice_privacy_paused, false);
+                    companion_attention((uint32_t)now);
                     jr_mood_poke_awake(&s_mood, (uint32_t)now);
-                    atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
-                    jr_display_caption_set("LISTENING");
-                    ESP_LOGI(TAG, "pkey: listen");
+                    if (jr_timer_any_ringing(&s_timers)) {
+                        (void)jr_timer_dismiss_ringing(&s_timers);
+                        timer_publish_now((uint32_t)now);
+                        jr_display_caption_set("TIMER DISMISSED");
+                        ESP_LOGI(TAG, "pkey: dismissed timer");
+                    } else {
+                        s_flip_muted = false;
+                        atomic_store(&s_voice_privacy_paused, false);
+                        atomic_store(&s_voice_control_request, VOICE_CONTROL_ARM);
+                        jr_display_caption_set("LISTENING");
+                        ESP_LOGI(TAG, "pkey: listen");
+                    }
                 }
                 if (pkey_l > 0) {
                     /* HOLD PWR: OFF. The owner: "the big button hold should
@@ -2443,7 +3884,7 @@ static void voice_task(void *arg)
                     jr_display_caption_set("POWERING OFF - HOLD PWR TO START");
                     vTaskDelay(pdMS_TO_TICKS(1500));
                     jr_display_panel_off_request();
-                    for (int i = 0; i < 30 && !jr_display_panel_is_off(); ++i) {
+                    for (int i = 0; i < 45 && !jr_display_panel_is_off(); ++i) {
                         vTaskDelay(pdMS_TO_TICKS(20));
                     }
                     const esp_err_t off_err = jr_power_off();
@@ -2524,7 +3965,18 @@ static void voice_task(void *arg)
              * the entire frame and dropping the glass from 16 to 13 fps. */
             static uint32_t s_clock_next_ms;
             static int s_clock_last_min = -1;
-            if ((int32_t)((uint32_t)now - s_clock_next_ms) >= 0) {
+            /* The hands and the dial follow the clock word, which this block
+             * publishes once a second. A walk onto or off WATCH must not wait
+             * for the next second: the glass would show the old screen, or
+             * nothing, for up to a second after the swipe, and the dial the
+             * presenter binds on the strength of it would arrive just as
+             * late. So a change of screen publishes the clock at once. */
+            static jr_display_space_t s_clock_space_seen = JR_DISPLAY_SPACE_JARVIS;
+            const jr_display_space_t clock_space_now = jr_display_nav_space();
+            const bool clock_space_moved = clock_space_now != s_clock_space_seen;
+            s_clock_space_seen = clock_space_now;
+            if (clock_space_moved ||
+                (int32_t)((uint32_t)now - s_clock_next_ms) >= 0) {
                 s_clock_next_ms = (uint32_t)now + 1000U;
                 bool clock_on = false;
                 bool peek = s_watch_peek_until_ms != 0U &&
@@ -2546,12 +3998,15 @@ static void voice_task(void *arg)
                  * watch peek does. */
                 const bool watch_space =
                     jr_display_nav_space() == JR_DISPLAY_SPACE_WATCH;
-                if (peek || watch_space) {
+                if (peek || watch_space || dream_glass || companion_clock) {
                     struct tm tmv;
                     if (device_wall_time(&tmv)) {
                         clock_on = true;
                         jr_display_clock_set(true, tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
                         jr_display_clock_set_date(tmv.tm_wday, tmv.tm_mday, tmv.tm_mon);
+                        jr_display_date_set_ymd((uint16_t)(tmv.tm_year + 1900),
+                                                (uint8_t)(tmv.tm_mon + 1),
+                                                (uint8_t)tmv.tm_mday);
                         device_rtc_capture_os_time();
                         /* Only the PEEK narrates the time. On the WATCH
                          * screen the hands ARE the readout, so adding a
@@ -2600,6 +4055,9 @@ static void voice_task(void *arg)
          * half-commit button that leaves the microphone armed forever. */
         voice_control_request_t control = (voice_control_request_t)
             atomic_exchange(&s_voice_control_request, VOICE_CONTROL_NONE);
+        if (control != VOICE_CONTROL_NONE)
+            jr_audio_uplink_batch_reset(&mic_batch_state, mic_batch,
+                                       2U * VOICE_FRAME_SAMPLES);
         jr_state_t controlled_phase = jr_orch_phase(&s_app.orch);
         if (control == VOICE_CONTROL_ARM ||
             control == VOICE_CONTROL_RESUME) {
@@ -2645,11 +4103,15 @@ static void voice_task(void *arg)
             s_out_vol = requested_volume;
             jr_audio_set_gains(-1, -1, requested_volume);
             persist_out_vol((uint8_t)requested_volume);
+            jr_display_rim_level_show(false, (uint8_t)requested_volume);
             ESP_LOGI(TAG, "levels: volume=%d", requested_volume);
         }
         if (requested_brightness >= 10 && requested_brightness <= 100) {
             s_brightness_cap = (uint8_t)requested_brightness;
+            s_bright_user_boost_until_ms = requested_brightness > 80
+                ? (uint32_t)now + 600000U : 0U;
             persist_brightness_cap((uint8_t)requested_brightness);
+            jr_display_rim_level_show(true, (uint8_t)requested_brightness);
             ESP_LOGI(TAG, "levels: brightness cap=%d", requested_brightness);
         }
         if (requested_volume >= 0 || requested_brightness >= 0) {
@@ -2695,6 +4157,11 @@ static void voice_task(void *arg)
         /* A self-test owns the codec only through the existing audio seams. If
          * voice is live, stop it gracefully first; once Idle, reset all four
          * taps, enqueue the chirp, and let this task pace ADC capture. */
+        if (atomic_load(&s_audio_diag_requested) &&
+            (atomic_load(&s_voice_privacy_paused) || s_flip_muted)) {
+            atomic_store(&s_audio_diag_requested, false);
+            atomic_store(&s_audio_diag_until_ms, 0U);
+        }
         if (atomic_load(&s_audio_diag_requested)) {
             jr_state_t p = jr_orch_phase(&s_app.orch);
             if (p == JR_ST_IDLE) {
@@ -2824,36 +4291,45 @@ static void voice_task(void *arg)
                 s_pending_text_inflight = false;
             }
             {
-                const uint32_t deadline = atomic_load(&s_reply_deadline_ms);
-                if (deadline != 0U && ph != JR_ST_LISTENING) {
-                    atomic_store(&s_reply_deadline_ms, 0U);
-                    s_unanswered = 0U;
-                } else if (deadline != 0U &&
-                           (int32_t)((uint32_t)now - deadline) >= 0) {
-                    atomic_store(&s_reply_deadline_ms, 0U);
-                    s_unanswered++;
-                    atomic_fetch_add(&s_unanswered_total, 1U);
-                    ESP_LOGW(TAG, "voice: utterance unanswered (%u in a row)",
-                             (unsigned)s_unanswered);
-                    if (s_unanswered < UTT_DEAF_COUNT) {
-                        /* THE FIRST MISS GETS A NUDGE, NOT SILENCE. The model
-                         * still holds the audio it did not answer; a short
-                         * text turn asks it to answer what it heard or ask
-                         * for a repeat. Seen on the glass: a clear 3 s
-                         * question straight after connecting, ignored, and
-                         * the owner waiting at a device that looked fine. */
-                        handle_say("Sir just spoke and you did not answer. "
-                                   "If you heard a question, answer it now; "
-                                   "if it was unclear, ask one short question.");
-                    }
-                    if (s_unanswered >= UTT_DEAF_COUNT) {
-                        s_unanswered = 0U;
-                        ESP_LOGW(TAG, "voice: session is deaf — fresh session");
-                        jr_display_caption_set("RECONNECTING");
-                        jr_orch_inject(&s_app.orch,
-                                       jr_event(JR_EV_STALE_DEADLINE), now);
-                        ph = jr_orch_phase(&s_app.orch);
-                    }
+                /* The ws task counts frames; the watch is the voice task's. */
+                static uint32_t s_seen_alive, s_seen_answer;
+                const uint32_t alive = atomic_load(&s_srv_alive_seq);
+                const uint32_t answer = atomic_load(&s_srv_answer_seq);
+                if (answer != s_seen_answer) {
+                    s_seen_answer = answer;
+                    s_seen_alive = alive;
+                    jr_utt_answered(&s_utt);
+                } else if (alive != s_seen_alive) {
+                    s_seen_alive = alive;
+                    jr_utt_server_alive(&s_utt);
+                }
+                if (ph != JR_ST_LISTENING && s_utt.armed) {
+                    s_utt.armed = false;     /* the phase moved on: not a miss */
+                    s_utt.misses = 0U;
+                }
+                const jr_utt_action_t utt = jr_utt_poll(&s_utt, (uint32_t)now);
+                if (utt != JR_UTT_NONE) {
+                    ESP_LOGW(TAG, "voice: utterance unanswered (%u in a row, "
+                             "%u answered since boot)",
+                             (unsigned)(utt == JR_UTT_RECONNECT
+                                            ? JR_UTT_DEAF_MISSES : s_utt.misses),
+                             (unsigned)s_utt.answered_total);
+                }
+                if (utt == JR_UTT_PARDON) {
+                    /* THE FIRST MISS GETS A WORD, NOT SILENCE, AND NOT A
+                     * SPEECH. The model still holds the audio it did not
+                     * answer. The old nudge ("answer it now, or ask one
+                     * question") made it announce that it had heard nothing
+                     * and ask for the request, at length (2026-11-10). Now it
+                     * is told the three words to say. */
+                    handle_say("Sir just spoke and it did not reach you. Say "
+                               "only: Pardon, Sir?");
+                } else if (utt == JR_UTT_RECONNECT) {
+                    ESP_LOGW(TAG, "voice: session is deaf — fresh session");
+                    jr_display_caption_set("RECONNECTING");
+                    jr_orch_inject(&s_app.orch,
+                                   jr_event(JR_EV_STALE_DEADLINE), now);
+                    ph = jr_orch_phase(&s_app.orch);
                 }
             }
             if (ph == JR_ST_LISTENING && s_pending_text_set) {
@@ -2904,6 +4380,187 @@ static void voice_task(void *arg)
             }
         }
 
+        /* 2b) timer bank drain + step + 1 Hz display publish */
+        {
+            static uint32_t s_timer_next_pub_ms;
+            static bool s_timer_was_active;
+            bool force_pub = false;
+
+            if (atomic_exchange(&s_glass_poke_req, false)) {
+                jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                companion_attention((uint32_t)now);
+            }
+            device_stopwatch_tick((uint32_t)now);
+
+            const uint32_t treq = atomic_exchange(&s_debug_timer_req, 0U);
+            if (treq != 0U) {
+                timer_debug_req_t dreq = {0};
+                portENTER_CRITICAL(&s_timer_mux);
+                dreq = s_debug_timer_req_data;
+                portEXIT_CRITICAL(&s_timer_mux);
+                if (dreq.kind == TIMER_REQ_SET || dreq.kind == TIMER_REQ_FOCUS) {
+                    char norm[JR_TIMER_LABEL_CAP] = {0};
+                    uint32_t eff_s = 0U;
+                    const char *lbl = (dreq.kind == TIMER_REQ_FOCUS &&
+                                       dreq.label[0] == '\0')
+                        ? "FOCUS" : dreq.label;
+                    if (jr_timer_set_ex(&s_timers, (uint32_t)now, dreq.seconds,
+                                        lbl, dreq.silent, norm, sizeof norm, &eff_s)) {
+                        if (dreq.kind == TIMER_REQ_FOCUS) {
+                            jr_display_nav_set(JR_DISPLAY_SPACE_WATCH);
+                            jr_display_bloom();
+                            char cap[32];
+                            snprintf(cap, sizeof cap, "%.14s %u:00",
+                                     norm, (unsigned)(eff_s / 60U));
+                            jr_display_caption_set(cap);
+                        }
+                        jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                        ESP_LOGI(TAG, "debug timer %s: %s %us silent=%d",
+                                 dreq.kind == TIMER_REQ_FOCUS ? "focus" : "set",
+                                 norm, (unsigned)eff_s, dreq.silent ? 1 : 0);
+                        force_pub = true;
+                    }
+                } else if (dreq.kind == TIMER_REQ_CANCEL) {
+                    const unsigned n = jr_timer_cancel(&s_timers, (uint32_t)now,
+                                                       dreq.label);
+                    ESP_LOGI(TAG, "debug timer cancel: %u", n);
+                    force_pub = true;
+                } else if (dreq.kind == TIMER_REQ_DISMISS) {
+                    const unsigned n = jr_timer_dismiss_ringing(&s_timers);
+                    ESP_LOGI(TAG, "debug timer dismiss: %u", n);
+                    force_pub = true;
+                }
+            }
+
+            jr_timer_events_t tev;
+            jr_timer_step(&s_timers, (uint32_t)now, &tev);
+            if (tev.expired) {
+                jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                companion_attention((uint32_t)now);
+                jr_display_rest_set(JR_DISPLAY_REST_NONE, false, false);
+                jr_display_bloom();
+                char row[25];
+                snprintf(row, sizeof row, "%.16s DONE", tev.expired_label);
+                jr_display_activity_push("TIMER", row);
+                char cap[32];
+                snprintf(cap, sizeof cap, "%.16s DONE - TAP", tev.expired_label);
+                jr_display_caption_set(cap);
+                ESP_LOGI(TAG, "timer: %s expired", tev.expired_label);
+                force_pub = true;
+            }
+            if (tev.chime && !jr_timer_ringing_is_silent(&s_timers) &&
+                !s_desk_mode.dnd_silent) {
+                jr_audio_play_timer_chime();
+            }
+            if (tev.auto_stopped) {
+                ESP_LOGI(TAG, "timer: auto-stopped after 60 s");
+                force_pub = true;
+            }
+            const bool active_now = jr_timer_any_active(&s_timers);
+            if (force_pub || active_now != s_timer_was_active ||
+                (active_now &&
+                 (int32_t)((uint32_t)now - s_timer_next_pub_ms) >= 0)) {
+                timer_publish_now((uint32_t)now);
+                s_timer_was_active = active_now;
+                s_timer_next_pub_ms = (uint32_t)now + 1000U;
+            }
+        }
+
+        /* 2c) Glass 3.5 Desk Presence / Focus / Breathe drain + tick */
+        {
+            static uint32_t s_desk_next_tick_ms;
+            if (atomic_exchange(&s_desk_req_pending, 0U) != 0U) {
+                desk_mode_req_t dreq = {0};
+                portENTER_CRITICAL(&s_desk_mux);
+                dreq = s_desk_req_data;
+                portEXIT_CRITICAL(&s_desk_mux);
+                desk_mode_apply_now(&dreq, (uint32_t)now, false);
+                s_desk_next_tick_ms = (uint32_t)now +
+                    (s_desk_mode.mode == JR_DESK_BREATHE ? 100U : 1000U);
+            }
+            if (s_desk_choice_active &&
+                (int32_t)((uint32_t)now - s_desk_choice_expires_ms) >= 0) {
+                s_desk_choice_active = false;
+                jr_display_dismiss_choices();
+            }
+            const uint32_t cadence_ms =
+                (s_desk_mode.mode == JR_DESK_BREATHE) ? 100U : 1000U;
+            if ((int32_t)((uint32_t)now - s_desk_next_tick_ms) >= 0) {
+                s_desk_next_tick_ms = (uint32_t)now + cadence_ms;
+                const bool was_silent = s_desk_mode.silent;
+                const uint8_t prev_sessions = s_desk_mode.focus_sessions_today;
+                const uint16_t prev_day = s_desk_mode.tally_day_key;
+                jr_desk_tick_t dt = {0};
+                jr_desk_tick(&s_desk_mode, (uint32_t)now,
+                             desk_current_day_key(), &dt);
+                if (prev_day != 0U && s_desk_mode.tally_day_key != prev_day &&
+                    prev_sessions > 0U) {
+                    desk_tally_persist();
+                }
+                if (dt.warn_5m) {
+                    /* ON_AIR T-5:00 silent warning: visual bloom only, ZERO chime. */
+                    jr_display_bloom();
+                    ESP_LOGI(TAG, "desk: ON AIR 5m warning (silent)");
+                }
+                if (dt.completed) {
+                    if (dt.completed_mode == JR_DESK_FOCUS) {
+                        desk_tally_persist();
+                        jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                        companion_attention((uint32_t)now);
+                        jr_display_bloom();
+                        jr_display_activity_push("FOCUS", "SPRINT COMPLETE");
+                        if (!was_silent && !owner_speaker_muted() &&
+                            !atomic_load(&s_ota_active)) {
+                            (void)jr_audio_play_cue(
+                                JR_CUE_MODE,
+                                jr_cue_amplitude_permille(JR_CUE_MODE, s_out_vol));
+                        }
+                        if (jr_orch_phase(&s_app.orch) != JR_ST_ASKING) {
+                            static const char *const kFocusChoices[2] = {
+                                "5M BREAK", "DONE"
+                            };
+                            jr_display_present_choices("SPRINT DONE",
+                                                       kFocusChoices, 2);
+                            s_desk_choice_active = true;
+                            s_desk_choice_expires_ms = (uint32_t)now + 30000U;
+                        }
+                        ESP_LOGI(TAG, "desk: focus sprint complete (%u today, %u min)",
+                                 (unsigned)s_desk_mode.focus_sessions_today,
+                                 (unsigned)s_desk_mode.focus_minutes_today);
+                    } else if (dt.completed_mode == JR_DESK_ON_AIR) {
+                        /* ON_AIR stays active at 0:00 until tapped; bloom only, ZERO chime. */
+                        jr_display_bloom();
+                        ESP_LOGI(TAG, "desk: ON AIR countdown finished (holding beacon)");
+                    } else if (dt.completed_mode == JR_DESK_BREATHE) {
+                        jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                        jr_display_bloom();
+                        jr_display_caption_set("RESET COMPLETE");
+                        if (!was_silent && !owner_speaker_muted()) {
+                            static const uint16_t kDoneHz[2] = { 523U, 659U };
+                            (void)jr_audio_play_chime(kDoneHz, 2U, 80U, 4U);
+                        }
+                        ESP_LOGI(TAG, "desk: breathe reset complete");
+                    }
+                } else if (dt.breathe_phase_changed &&
+                           !s_desk_mode.silent && !owner_speaker_muted()) {
+                    if (s_desk_mode.breathe_phase == JR_BREATHE_INHALE) {
+                        static const uint16_t kInHz[2] = { 392U, 523U };
+                        (void)jr_audio_play_chime(kInHz, 2U, 90U, 4U);
+                    } else if (s_desk_mode.breathe_phase == JR_BREATHE_EXHALE) {
+                        static const uint16_t kExHz[2] = { 440U, 330U };
+                        (void)jr_audio_play_chime(kExHz, 2U, 90U, 4U);
+                    } else {
+                        static const uint16_t kHoldHz[1] = { 523U };
+                        (void)jr_audio_play_chime(kHoldHz, 1U, 70U, 4U);
+                    }
+                }
+                if (s_desk_mode.mode != JR_DESK_NORMAL || dt.completed ||
+                    s_desk_mode.focus_sessions_today != prev_sessions) {
+                    desk_mode_publish_state(&dt);
+                }
+            }
+        }
+
         /* 2) manual/PTT input (CST9217 via jr_hal input_touch) */
         jr_input_event_t iev;
         while (input_next(&s_app.input, &iev)) {
@@ -2918,7 +4575,8 @@ static void voice_task(void *arg)
              * exactly these fields, and its tap:swipe ratio — the signal that
              * found the rim-roll bug — would be diluted into noise otherwise. */
             const bool lifecycle = iev.kind == JR_INPUT_PRESS_DOWN ||
-                                   iev.kind == JR_INPUT_PRESS_UP;
+                                   iev.kind == JR_INPUT_PRESS_UP ||
+                                   iev.kind == JR_INPUT_BEZEL_SCRUB;
             if (!lifecycle) {
                 atomic_fetch_add(&s_touch_events, 1U);
                 atomic_store(&s_touch_last_kind, (uint32_t)iev.kind);
@@ -2942,6 +4600,12 @@ static void voice_task(void *arg)
              * gesture visible and escapable. Privacy moves to the PWR button
              * once that button grows a double-tap (docs/INPUT_MAP.md §3.1) —
              * moving it before its replacement exists would strand it. */
+            if (physical) {
+                companion_attention((uint32_t)now);
+                if (iev.kind == JR_INPUT_PRESS_DOWN) {
+                    jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                }
+            }
             if (iev.kind == JR_INPUT_PRESS_DOWN) {
                 s_hold_start_ms = physical ? (uint32_t)now : 0U;
                 continue;
@@ -2949,6 +4613,33 @@ static void voice_task(void *arg)
             if (iev.kind == JR_INPUT_PRESS_UP) {
                 s_hold_start_ms = 0U;
                 jr_display_commit_ring(0U);
+                continue;
+            }
+            if (iev.kind == JR_INPUT_BEZEL_SCRUB) {
+                s_hold_start_ms = 0U;
+                jr_display_commit_ring(0U);
+                if (!jr_display_choices_active() &&
+                    !atomic_load(&s_touch_challenge_active)) {
+                    const int dir = (iev.direction == JR_INPUT_DIRECTION_RIGHT) ? 1 : -1;
+                    if (physical) {
+                        jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                    }
+                    if (jr_display_nav_space() == JR_DISPLAY_SPACE_STATUS) {
+                        const int brt = request_level_step(
+                            &s_level_brightness_request, (int)s_brightness_cap, dir * 4);
+                        jr_display_rim_level_show(true, (uint8_t)brt);
+                        ui_cue(((dir > 0 && brt >= 100) || (dir < 0 && brt <= 10))
+                                   ? JR_CUE_LIMIT : JR_CUE_SCRUB,
+                               physical);
+                    } else {
+                        const int vol = request_level_step(
+                            &s_level_volume_request, s_out_vol, dir * 4);
+                        jr_display_rim_level_show(false, (uint8_t)vol);
+                        ui_cue(((dir > 0 && vol >= 100) || (dir < 0 && vol <= 10))
+                                   ? JR_CUE_LIMIT : JR_CUE_SCRUB,
+                               physical);
+                    }
+                }
                 continue;
             }
             if (s_watch_peek_until_ms != 0U) {
@@ -3191,7 +4882,8 @@ static void voice_task(void *arg)
              * shade names its own exits (BOOT, centre up, tap outside). */
             if (iev.kind == JR_INPUT_TAP && !jr_display_choices_active() &&
                 !s_ui_shade_open &&
-                jr_display_nav_overlay() != JR_DISPLAY_OVERLAY_SHADE) {
+                jr_display_nav_overlay() != JR_DISPLAY_OVERLAY_SHADE &&
+                jr_display_inbox_hit(iev.x, iev.y) == 0U) {
                 const bool double_tap = s_last_tap_ms != 0U &&
                     (uint32_t)now - s_last_tap_ms < 400U;
                 s_last_tap_ms = (uint32_t)now;
@@ -3199,12 +4891,15 @@ static void voice_task(void *arg)
                     jr_display_nav_home();
                     s_ui_shade_open = false;
                     jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                    s_glance_until_ms = 0U;
+                    s_companion_activity_ms = (uint32_t)now;
+                    jr_display_rest_set(JR_DISPLAY_REST_NONE, false, false);
                     jr_display_bloom();
                     /* Was "JARVIS - RIGHT WATCH", which instructed a gesture
                      * that no longer navigates — right swipe peeks the watch,
                      * it does not walk to it. Home says where you are; the
                      * ring teaches itself by being slid. */
-                    jr_display_caption_set("JARVIS");
+                    jr_display_caption_label("JARVIS", JR_DISPLAY_LABEL_SCREEN);
                     ESP_LOGI(TAG, "gesture: double-tap home");
                     continue;
                 }
@@ -3241,6 +4936,34 @@ static void voice_task(void *arg)
                  * incidental. For a tap start and end differ by at most the
                  * slop, so this is identical to the old behaviour for taps. */
                 int choice = jr_display_choice_hit(iev.start_x, iev.start_y);
+                if (s_desk_choice_active) {
+                    if (choice == 0 || choice == 1) {
+                        jr_display_set_choice_selected(choice);
+                        jr_display_dismiss_choices();
+                        s_desk_choice_active = false;
+                        s_ask_tap_grace_ms = (uint32_t)now + 600U;
+                        if (choice == 0) {
+                            char norm[JR_TIMER_LABEL_CAP] = {0};
+                            uint32_t eff_s = 0U;
+                            if (jr_timer_set_ex(&s_timers, (uint32_t)now, 300U,
+                                                "BREAK", false, norm,
+                                                sizeof norm, &eff_s)) {
+                                timer_publish_now((uint32_t)now);
+                            }
+                            jr_display_caption_set("BREAK 5:00");
+                            ui_cue(JR_CUE_CONFIRM, physical);
+                            ESP_LOGI(TAG, "desk: sprint done -> 5m break started");
+                        } else {
+                            jr_display_caption_set("SPRINT COMPLETE");
+                            ui_cue(JR_CUE_DISMISS, physical);
+                            ESP_LOGI(TAG, "desk: sprint done -> dismissed");
+                        }
+                    } else {
+                        jr_display_ripple_reject(iev.x, iev.y);
+                        (void)jr_audio_play_sweep(700U, 300U, 100U, 6U);
+                    }
+                    continue;
+                }
                 if (choice >= 0 && choice < (int)s_ask.count) {
                     jr_display_set_choice_selected(choice);
                     jr_event_t picked = jr_event(JR_EV_CHOICE_PICKED);
@@ -3279,6 +5002,8 @@ static void voice_task(void *arg)
             if (iev.kind == JR_INPUT_SWIPE) {
                 const jr_display_overlay_t overlay =
                     jr_display_nav_overlay();
+                const jr_display_space_t cue_space = jr_display_nav_space();
+                bool cue_handled = false;   /* a level moved: its own feedback */
                 bool watch_opened = false;
                 bool style_changed = false;
                 /* PLACE IS SCOPE: the rim carries the device's own knobs, the
@@ -3308,9 +5033,13 @@ static void voice_task(void *arg)
                     const int level = request_level_step(
                         &s_level_volume_request, s_out_vol,
                         iev.direction == JR_INPUT_DIRECTION_UP ? 5 : -5);
+                    jr_display_rim_level_show(false, (uint8_t)level);
                     char caption[24];
                     snprintf(caption, sizeof caption, "VOLUME %d", level);
                     jr_display_caption_set(caption);
+                    ui_level_cue(level,
+                                 iev.direction == JR_INPUT_DIRECTION_UP ? 1 : -1,
+                                 physical);
                     continue;
                 }
                 if (edge_vertical && iev.start_x > 232U) {
@@ -3323,9 +5052,13 @@ static void voice_task(void *arg)
                          * defect, not a preference: nothing about the device can
                          * teach you which half you are on. */
                         iev.direction == JR_INPUT_DIRECTION_UP ? 5 : -5);
+                    jr_display_rim_level_show(true, (uint8_t)level);
                     char caption[24];
                     snprintf(caption, sizeof caption, "BRIGHTNESS %d", level);
                     jr_display_caption_set(caption);
+                    ui_level_cue(level,
+                                 iev.direction == JR_INPUT_DIRECTION_UP ? 1 : -1,
+                                 physical);
                     continue;
                 }
                 if (overlay == JR_DISPLAY_OVERLAY_SHADE) {
@@ -3335,6 +5068,10 @@ static void voice_task(void *arg)
                             &s_level_volume_request, s_out_vol,
                             iev.direction == JR_INPUT_DIRECTION_RIGHT ? 10 : -10);
                         ESP_LOGI(TAG, "ui: shade swipe volume=%d", level);
+                        cue_handled = true;
+                        ui_level_cue(level,
+                                     iev.direction == JR_INPUT_DIRECTION_RIGHT
+                                         ? 1 : -1, physical);
                     } else {
                         /* EITHER vertical direction leaves. Only UP used to,
                          * and DOWN fell through to nothing at all — so a shade
@@ -3380,7 +5117,6 @@ static void voice_task(void *arg)
                         jr_display_watch_style_step(
                             iev.direction == JR_INPUT_DIRECTION_RIGHT ? 1 : -1);
                         persist_watch_style((uint8_t)jr_display_watch_style());
-                        jr_display_bloom();
                         style_changed = true;
                         ESP_LOGI(TAG, "ui: watch style %s",
                                  jr_display_watch_style_name(
@@ -3389,20 +5125,8 @@ static void voice_task(void *arg)
                         s_watch_peek_until_ms = (uint32_t)now + 10000U;
                         watch_opened = true;
                     }
-                } else if (iev.direction == JR_INPUT_DIRECTION_DOWN) {
-                    /* THE MODE RING. Sliding down walks forward through the
-                     * screens, endlessly — there is no end to hit and no wall
-                     * to bounce off, which is the whole point: you find what
-                     * the device can do by continuing, not by remembering.
-                     *
-                     * Vertical used to open the shade (down) and the detail
-                     * sheet (up). The shade now lives on the BOOT button,
-                     * which is a better home for it anyway: a control surface
-                     * should be reachable when the glass is confusing, and a
-                     * button cannot be swallowed by whatever is on screen. */
-                    jr_display_nav_next();
-                } else if (iev.direction == JR_INPUT_DIRECTION_UP) {
-                    jr_display_nav_prev();
+                } else {
+                    shell_vertical_navigation(iev.direction);
                 }
                 s_ui_shade_open =
                     jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_SHADE;
@@ -3413,35 +5137,37 @@ static void voice_task(void *arg)
                     snprintf(cap, sizeof cap, "WATCH - %s",
                              jr_display_watch_style_name(
                                  jr_display_watch_style()));
-                    jr_display_caption_set(cap);
+                    jr_display_caption_label(cap,
+                                             JR_DISPLAY_LABEL_WATCH_STYLE);
                 } else if (watch_opened) {
                     jr_display_caption_set("WATCH - 10 SECONDS");
-                } else if (jr_display_nav_overlay() ==
-                           JR_DISPLAY_OVERLAY_SHADE) {
-                    /* The shade used to CLEAR the caption, so the one surface
-                     * you can get stuck in was also the only one that told you
-                     * nothing. Name the way out, on the glass, always. */
-                    jr_display_caption_set("SHADE - UP TO CLOSE");
-                } else if (jr_display_nav_overlay() ==
-                           JR_DISPLAY_OVERLAY_DETAIL) {
-                    jr_display_caption_set("DETAIL - DOWN TO CLOSE");
+                } else if (jr_display_nav_space() == cue_space &&
+                           jr_display_nav_overlay() != overlay) {
+                    /* The shade or the detail sheet opened or closed over the
+                     * same screen. Each carries its own hint line in the
+                     * caption band, and the shade leaving is the message: no
+                     * caption names a sheet, and none lingers after it. */
                 } else {
-                    /* Name the screen you just landed on. On an endless ring
-                     * the caption IS the position indicator — it answers
-                     * "where am I" without a dial mark that has to jump when
-                     * the ring wraps. */
-                    /* WATCH is deliberately blank: a clock face is the one
-                     * screen that needs no caption to identify it, and the
-                     * word sat directly under the hands as pure clutter.
-                     * caption_set("") routes to caption_clear(). */
-                    static const char *const mode_name[JR_DISPLAY_SPACE_COUNT] =
-                        { "JARVIS", "", "WEATHER", "STATUS", "DESK", "ACTIVITY" };
-                    const jr_display_space_t sp = jr_display_nav_space();
-                    jr_display_caption_set(
-                        sp < JR_DISPLAY_SPACE_COUNT ? mode_name[sp] : "JARVIS");
+                    shell_caption_space();
                 }
                 ESP_LOGI(TAG, "ui: nav overlay=%d",
                          (int)jr_display_nav_overlay());
+                {
+                    const jr_display_overlay_t landed = jr_display_nav_overlay();
+                    const bool moved = landed != overlay ||
+                                       jr_display_nav_space() != cue_space ||
+                                       style_changed || watch_opened;
+                    if (cue_handled) {
+                        /* the level cue above already spoke */
+                    } else if (overlay != JR_DISPLAY_OVERLAY_NONE &&
+                               landed == JR_DISPLAY_OVERLAY_NONE) {
+                        ui_cue(JR_CUE_DISMISS, physical);
+                    } else if (moved) {
+                        ui_cue(JR_CUE_TICK, physical);
+                    } else {
+                        ui_cue(JR_CUE_LIMIT, physical);   /* nowhere to go */
+                    }
+                }
             } else if (iev.kind == JR_INPUT_LONG_PRESS) {
                 if (!physical) {
                     ESP_LOGW(TAG, "synthetic hold cannot change privacy");
@@ -3485,7 +5211,7 @@ static void voice_task(void *arg)
                     /* The ring closing is the visual half; this is the other.
                      * A completed commit rises — the same shape as the
                      * attention beat — where a refusal falls. */
-                    (void)jr_audio_play_sweep(500U, 1100U, 100U, 7U);
+                    (void)jr_audio_play_sweep_owner_ack(500U, 1100U, 100U, 7U);
                     ESP_LOGI(TAG, "gesture: long-press unmute");
                 } else {
                     atomic_store(&s_voice_privacy_paused, true);
@@ -3499,13 +5225,53 @@ static void voice_task(void *arg)
                      * opposite outcomes of the same gesture and must not sound
                      * alike; with the glass possibly face-down or unread, the
                      * tone may be the only signal that reaches the user. */
-                    (void)jr_audio_play_sweep(1100U, 500U, 100U, 7U);
+                    (void)jr_audio_play_sweep_owner_ack(1100U, 500U, 100U, 7U);
                     ESP_LOGI(TAG, "gesture: long-press mute");
                 }
             } else if (iev.kind == JR_INPUT_TAP) {
+                /* Dismiss a ringing timer on physical tap — safely below
+                 * codex_mode, double-tap-home, brain surface, and ask arcs. */
+                if (physical && jr_timer_any_ringing(&s_timers)) {
+                    (void)jr_timer_dismiss_ringing(&s_timers);
+                    timer_publish_now((uint32_t)now);
+                    jr_display_caption_set("TIMER DISMISSED");
+                    ui_cue(JR_CUE_DISMISS, physical);
+                    ESP_LOGI(TAG, "timer: dismissed by tap");
+                    continue;
+                }
+                /* Glass 3.5 Desk Mode (ON AIR / FOCUS / BREATHE): single physical
+                 * tap exits back to NORMAL; never unmutes a privacy-paused mic. */
+                if (physical && !s_ui_shade_open &&
+                    jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE &&
+                    (jr_display_desk_mode_active() ||
+                     s_desk_mode.mode != JR_DESK_NORMAL)) {
+                    const desk_mode_req_t normal_req = { .mode = JR_DESK_NORMAL };
+                    desk_mode_apply_now(&normal_req, (uint32_t)now, false);
+                    jr_display_caption_set("DESK MODE OFF");
+                    ui_cue(JR_CUE_DISMISS, physical);
+                    ESP_LOGI(TAG, "desk: exited to normal by tap");
+                    continue;
+                }
+                /* Glass 3.5 Tactile Desk Inbox (ACTIVITY space): tap a row to
+                 * toggle done, persist v2 NVS notes, re-sync inbox, play CONFIRM. */
+                if (physical && !s_ui_shade_open &&
+                    jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE) {
+                    const uint32_t hit_id = jr_display_inbox_hit(iev.x, iev.y);
+                    if (hit_id != 0U) {
+                        if (device_notes_toggle(hit_id)) {
+                            ui_cue(JR_CUE_CONFIRM, physical);
+                            ESP_LOGI(TAG, "inbox: toggled note #%u by tap",
+                                     (unsigned)hit_id);
+                        }
+                        continue;
+                    }
+                }
                 const jr_display_action_t shell_action =
                     jr_display_hit(iev.x, iev.y);
                 if (shell_action != JR_DISPLAY_ACT_NONE) {
+                    if (shell_action == JR_DISPLAY_ACT_DISMISS) {
+                        ui_cue(JR_CUE_DISMISS, physical);
+                    }
                     switch (shell_action) {
                     case JR_DISPLAY_ACT_VOLUME_UP:
                     case JR_DISPLAY_ACT_VOLUME_DOWN: {
@@ -3513,6 +5279,9 @@ static void voice_task(void *arg)
                             &s_level_volume_request, s_out_vol,
                             shell_action == JR_DISPLAY_ACT_VOLUME_UP ? 10 : -10);
                         ESP_LOGI(TAG, "ui: shade tap volume=%d", volume);
+                        ui_level_cue(volume,
+                                     shell_action == JR_DISPLAY_ACT_VOLUME_UP ? 1 : -1,
+                                     physical);
                         break;
                     }
                     case JR_DISPLAY_ACT_PRIVACY_TOGGLE:
@@ -3525,7 +5294,9 @@ static void voice_task(void *arg)
                             atomic_store(&s_voice_control_request,
                                          VOICE_CONTROL_ARM);
                             jr_display_caption_set("LISTENING");
+                            ui_cue(JR_CUE_MUTE_OFF, physical);  /* airy bloom up */
                         } else {
+                            ui_cue(JR_CUE_MUTE_ON, physical);   /* tactile thock down */
                             atomic_store(&s_voice_privacy_paused, true);
                             if (p != JR_ST_IDLE && p != JR_ST_DRAINING) {
                                 jr_orch_inject(&s_app.orch,
@@ -3535,33 +5306,11 @@ static void voice_task(void *arg)
                         }
                         break;
                     case JR_DISPLAY_ACT_DISMISS:
-                        /* Same invariant as the swipe and button paths: a
-                         * surface that captures input names its own exit.
-                         * Opening the shade here used to set no caption at
-                         * all, which is how a tap could drop you into the one
-                         * surface that told you nothing. */
-                        /* TWO DOORS, ONE SHADE. A finger opens it through the
-                         * nav overlay; /api/ui/shade opens it through the
-                         * shell bit (s_ui_shade_open). The re-derivation
-                         * after this switch used to read only the nav door,
-                         * so ONE tap on an HTTP-opened shade — a volume step —
-                         * re-derived "closed" and shut it. Each door now
-                         * closes its own. */
-                        if (jr_display_nav_overlay() ==
-                            JR_DISPLAY_OVERLAY_SHADE) {
-                            jr_display_nav_up();
-                            s_ui_shade_open = false;
-                            jr_display_caption_set("CONTROLS CLOSED");
-                        } else if (s_ui_shade_open) {
-                            s_ui_shade_open = false;
-                            jr_display_caption_set("CONTROLS CLOSED");
-                        } else {
-                            jr_display_nav_down();
-                            jr_display_caption_set("CONTROLS - UP TO CLOSE");
-                        }
+                        shell_dismiss();
                         break;
                     case JR_DISPLAY_ACT_FOCUS:
                         jr_display_nav_up();
+                        ui_cue(JR_CUE_TICK, physical);
                         jr_display_caption_set("DETAIL - DOWN TO CLOSE");
                         break;
                     default:
@@ -3600,11 +5349,21 @@ static void voice_task(void *arg)
                 } else if (p == JR_ST_SPEAKING) {
                     /* Tap while it talks = stop playback but stay armed.
                      * Deliberate privacy lives on hold, flip, and shade. */
-                    jr_audio_sink_mute_now(&s_app.spk);
-                    jr_orch_inject(&s_app.orch, jr_event(JR_EV_BARGE_DETECTED),
-                                   now);
+                    speaking_stop_playback(now);
+                    if (physical) {
+                        /* With the echo gate the owner cannot barge in by
+                         * voice, so this is how a reply is stopped. The
+                         * server is not told (no transport message ends a
+                         * turn without starting another) and keeps sending:
+                         * discard the rest of that reply until its boundary,
+                         * or it would unmute the DAC and play on. Synthetic
+                         * input stops the local audio as before but cannot
+                         * cut the reply: it acts on the session. */
+                        jr_reply_cut_begin(&s_reply_cut, (uint32_t)now);
+                    }
                     jr_display_caption_set("LISTENING");
-                    ESP_LOGI(TAG, "gesture: tap stopped playback");
+                    ESP_LOGI(TAG, "gesture: tap stopped playback%s",
+                             physical ? " and cut the reply" : "");
                 } else if (p != JR_ST_DRAINING) {
                     /* Tap in any other live phase: harmless attention. */
                     jr_display_caption_set("YES, SIR?");
@@ -3647,6 +5406,18 @@ static void voice_task(void *arg)
          * there can synthesize SpeechStarted/activityStart and cancel the
          * model reply before its first audio chunk. Server VAD intentionally
          * keeps streaming through Thinking. This matches the proven v4 lane. */
+        jr_audio_set_microphone_enabled(
+            !atomic_load(&s_voice_privacy_paused) && !s_flip_muted);
+        /* PRIVACY EDGE FOR THE WAKE WORKER. Every mute (tap, long press, API,
+         * flip, shade) is stored by this task above, so one look here sees it
+         * before any frame of this iteration is pushed. While the microphone
+         * is gated the ring is emptied on every pass, which also voids a hit
+         * whose chunk was already inside the detector: audio captured before
+         * a mute is never analysed after it, and no hit can arrive while
+         * muted. Cheap: two atomic stores. */
+        if (atomic_load(&s_voice_privacy_paused) || s_flip_muted) {
+            jr_wake_flush();
+        }
         bool read_paced = false;
         jr_state_t capture_phase = jr_orch_phase(&s_app.orch);
         bool phase_allows_capture = capture_phase == JR_ST_LISTENING ||
@@ -3661,6 +5432,8 @@ static void voice_task(void *arg)
                                     capture_phase == JR_ST_ASKING ||
                                     (capture_phase == JR_ST_THINKING &&
                                      s_app.cfg.vad_mode == JR_VAD_SERVER);
+        if (atomic_load(&s_voice_privacy_paused) || s_flip_muted)
+            atomic_store(&s_audio_diag_until_ms, 0U);
         uint32_t audio_diag_until = atomic_load(&s_audio_diag_until_ms);
         bool audio_diag_active =
             (int32_t)(audio_diag_until - (uint32_t)now) > 0;
@@ -3696,33 +5469,49 @@ static void voice_task(void *arg)
             operator_mode_active((uint32_t)now) &&
             atomic_load(&s_operator_mode_owner) == OPERATOR_OWNER_ZEROCHAT &&
             !atomic_load(&s_voice_privacy_paused) && !s_flip_muted;
+        /* A stopped capture, diagnostic/companion lane, closed transport, or
+         * privacy edge cannot leave a live half for a later text turn. */
+        const bool voice_uplink_capture = s_app.io.capturing &&
+            phase_allows_capture && !audio_diag_active && !companion_listen;
+        jr_audio_uplink_batch_guard(&mic_batch_state, mic_batch,
+            2U * VOICE_FRAME_SAMPLES,
+            voice_uplink_capture &&
+                s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN &&
+                (s_app.cfg.vad_mode == JR_VAD_SERVER || s_app.io.activity_open),
+            !atomic_load(&s_voice_privacy_paused) && !s_flip_muted);
+        /* Canceller bench (/api/diag/voiceperf?bench=1). It reads no
+         * microphone and opens nothing, so a muted device may run it; it
+         * waits for a loop that has no frame to carry (not capturing, or the
+         * frames are privacy zeros) and for the speaker to be quiet. */
+        if (atomic_load(&s_aec_bench_req) && !audio_diag_active &&
+            !companion_listen && !jr_audio_playback_pending() &&
+            (!(s_app.io.capturing && phase_allows_capture) ||
+             atomic_load(&s_voice_privacy_paused) || s_flip_muted)) {
+            atomic_store(&s_aec_bench_req, false);
+            uint32_t worst_us = 0U;
+            atomic_store(&s_aec_bench_mean_us,
+                         jr_audio_aec_bench(64, &worst_us));
+            atomic_store(&s_aec_bench_max_us, worst_us);
+            atomic_store(&s_aec_bench_cpu_mhz, atomic_load(&s_cpu_mhz));
+            atomic_store(&s_aec_bench_have, true);
+        }
         if ((s_app.io.capturing && phase_allows_capture) || audio_diag_active ||
             companion_listen) {
+            const int64_t read_t0 = esp_timer_get_time();
             int n = jr_audio_source_read(&s_app.mic, mic_frame, VOICE_FRAME_SAMPLES);
             if (n > 0) {
-                s_app.mic_level = jr_dsp_rms(mic_frame, (size_t)n);
+                read_us = (uint32_t)(esp_timer_get_time() - read_t0);
+                wait_us = jr_audio_last_read_wait_us();
+                vperf_class = capture_phase == JR_ST_SPEAKING ? 0 : 1;
+                /* The source supplies paced zeros under privacy. Recheck the
+                 * app latch after a blocking read, before diagnostics or levels,
+                 * so a privacy edge in flight cannot publish a live frame. */
+                const bool mic_gated = atomic_load(&s_voice_privacy_paused) || s_flip_muted;
+                if (mic_gated) memset(mic_frame, 0, (size_t)n * sizeof(jr_pcm_t));
+                s_app.mic_level = mic_gated ? 0.0f : jr_dsp_rms(mic_frame, (size_t)n);
                 if (audio_diag_active || companion_listen) {
                     read_paced = true;
                     goto capture_complete;
-                }
-                /* PRIVACY IS THE MICROPHONE, NOT A FLAG ON THE RE-ARM. The
-                 * flag used to gate only the always-ready re-arm, so any
-                 * other road into a live session — a text turn from the desk
-                 * route, a companion, a reconnect — brought the uplink up
-                 * under a gold ring that said MUTED. Seen by the owner: "it's
-                 * on privacy mode but look, it's listening to me". Here the
-                 * frame is read (the codec keeps its pace) and dropped: no
-                 * VAD, no uplink, no level, whatever the session is doing.
-                 * Text turns still work with the mic shut.
-                 *
-                 * The frame is ZEROED rather than dropped: with no frames at
-                 * all the server's turn detection has no silence to conclude a
-                 * text turn on, and a desk turn under privacy took 47 s to
-                 * answer. Zeros are a quiet room, not the room. */
-                const bool mic_gated = atomic_load(&s_voice_privacy_paused);
-                if (mic_gated) {
-                    memset(mic_frame, 0, (size_t)n * sizeof(jr_pcm_t));
-                    s_app.mic_level = 0.0f;
                 }
                 jr_capture_pause_on_capture(
                     &s_app.orch.capture_pause, now);
@@ -3774,7 +5563,13 @@ static void voice_task(void *arg)
                     } else {
                         s_app.vad_starts++;
                         s_listen_speech_active = true;
+                        jr_display_rest_voice_busy_set(true);
+                        companion_attention((uint32_t)now);
                         s_utt_start_ms = (uint32_t)now;
+                        jr_utt_speech_start(&s_utt, (uint32_t)now);
+                        atomic_store(&s_local_speech_start_ms, (uint32_t)now);
+                        s_utt_ul_frames = 0U;
+                        s_utt_ul_drops0 = s_app.client.live.tx_drops;
                         ESP_LOGI(TAG, "vad: speech start rms=%.1f floor=%.1f",
                                  (double)td.rms, (double)td.noise_floor);
                         /* Server VAD: Gemini owns turn detection + barge; the
@@ -3799,49 +5594,122 @@ static void voice_task(void *arg)
                                  (double)td.rms);
                     }
                 }
+                /* SAY "JARVIS" TO INTERRUPT. While the device speaks, the same
+                 * frame the uplink would carry (canceller output after
+                 * make-up) also goes to WakeNet, from this one caller. The
+                 * detector runs on its own task (jr_wake_push only copies the
+                 * frame); a hit that has arrived by now cuts the reply
+                 * exactly as a tap on the glass does, and the microphone is
+                 * let through the echo gate for the sentence that follows, at
+                 * any volume. Pushed only from a live frame: under privacy
+                 * mic_gated has already zeroed it and the loop top flushed
+                 * the ring, so a muted device neither hears the word nor
+                 * opens anything, and the pass window below only ever
+                 * un-zeroes the ECHO gate. */
+                if (ph == JR_ST_SPEAKING && !mic_gated &&
+                    atomic_load(&s_wake_barge_enabled) && jr_wake_ready()) {
+                    (void)jr_wake_push(mic_frame, (size_t)n);
+                    if (jr_wake_take_hit(
+                            (uint32_t)(esp_timer_get_time() / 1000),
+                            WAKE_HIT_MAX_AGE_MS)) {
+                        speaking_stop_playback(now);
+                        jr_reply_cut_begin(&s_reply_cut, (uint32_t)now);
+                        jr_echo_gate_pass_for(&s_echo_gate, (uint32_t)now,
+                                              JR_ECHO_PASS_MS);
+                        atomic_fetch_add(&s_wake_cuts, 1U);
+                        jr_display_caption_set("LISTENING");
+                        ESP_LOGI(TAG, "wake: \"%s\" heard over a reply — cut it",
+                                 jr_wake_model());
+                    }
+                }
                 /* Both VAD modes batch two 32 ms frames. The manual path used
                  * to send every frame and exhausted the bounded TX queue in a
                  * real conversation (1620 would-blocks / 449 drops). Two
                  * frames remain below the 4096-byte queue slot while halving
                  * lock/socket pressure. Flush a partial batch at speech end. */
                 const bool send_uplink =
+                    voice_uplink_capture && s_app.io.capturing &&
                     s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN &&
                     (s_app.cfg.vad_mode == JR_VAD_SERVER ||
                      s_app.io.activity_open);
+                const bool upload_microphone_enabled =
+                    !atomic_load(&s_voice_privacy_paused) && !s_flip_muted;
+                jr_audio_uplink_batch_guard(&mic_batch_state, mic_batch,
+                    2U * VOICE_FRAME_SAMPLES, send_uplink,
+                    upload_microphone_enabled);
                 if (send_uplink) {
                     const size_t cap = 2 * VOICE_FRAME_SAMPLES;
                     size_t take = (size_t)n;
-                    if (mic_batch_fill + take > cap) {
-                        take = cap - mic_batch_fill;
+                    if (mic_batch_state.filled + take > cap) {
+                        take = cap - mic_batch_state.filled;
                     }
-                    memcpy(mic_batch + mic_batch_fill, mic_frame,
-                           take * sizeof(jr_pcm_t));
-                    mic_batch_fill += take;
-                    if (mic_batch_fill >= cap ||
+                    if (upload_microphone_enabled) {
+                        /* ECHO GATE. Not the privacy gate (that is the else
+                         * branch below and the guards above, and it is
+                         * decided first): this only turns a live frame into a
+                         * frame of zeros, same length, same cadence, while the
+                         * speaker is audible and for JR_ECHO_TAIL_MS after.
+                         * Server VAD judges whatever goes up, and its own
+                         * voice at volume 100 was cutting its replies. */
+                        const bool audible =
+                            jr_audio_playback_pending() ||
+                            (s_app.last_playback_chunk_ms != 0 &&
+                             now >= s_app.last_playback_chunk_ms &&
+                             now - s_app.last_playback_chunk_ms < 250);
+                        if (jr_echo_gate_silence(&s_echo_gate, (uint32_t)now,
+                                audible,
+                                jr_echo_gate_applies(
+                                    atomic_load(&s_echo_gate_enabled),
+                                    jr_audio_out_vol(),
+                                    atomic_load(&s_echo_gate_volume_min))))
+                            memset(mic_batch + mic_batch_state.filled, 0,
+                                   take * sizeof(jr_pcm_t));
+                        else
+                            memcpy(mic_batch + mic_batch_state.filled, mic_frame,
+                                   take * sizeof(jr_pcm_t));
+                    } else
+                        memset(mic_batch + mic_batch_state.filled, 0,
+                               take * sizeof(jr_pcm_t));
+                    mic_batch_state.filled += take;
+                    if (mic_batch_state.filled >= cap ||
                         (td.event == JR_TP_EV_SPEECH_ENDED &&
-                         mic_batch_fill > 0U)) {
-                        jr_err_t r = s_app.rvc.send_audio(
-                            s_app.rvc.ctx, mic_batch, mic_batch_fill);
-                        if (r == JR_ERR_CLOSED) {
-                            ESP_LOGW(TAG,
-                                     "mic uplink observed closed transport");
+                         mic_batch_state.filled > 0U)) {
+                        /* Recheck after VAD and buffer work, immediately before
+                         * handing bytes to the transport builder. */
+                        jr_audio_uplink_batch_guard(&mic_batch_state, mic_batch,
+                            cap, s_app.io.capturing &&
+                                s_app.ws.state(s_app.ws.ctx) == JR_WS_OPEN,
+                            !atomic_load(&s_voice_privacy_paused) && !s_flip_muted);
+                        if (mic_batch_state.filled > 0U) {
+                            jr_err_t r = s_app.rvc.send_audio(
+                                s_app.rvc.ctx, mic_batch, mic_batch_state.filled);
+                            if (r == JR_OK) {
+                                s_utt_ul_frames++;
+                            }
+                            if (r == JR_ERR_CLOSED) {
+                                ESP_LOGW(TAG,
+                                         "mic uplink observed closed transport");
+                            }
                         }
-                        mic_batch_fill = 0U;
+                        jr_audio_uplink_batch_reset(&mic_batch_state, mic_batch, cap);
                     }
-                } else {
-                    mic_batch_fill = 0U;
                 }
                 if (td.event == JR_TP_EV_SPEECH_ENDED) {
                     s_app.vad_ends++;
                     s_listen_speech_active = false;
-                    ESP_LOGI(TAG, "vad: speech end rms=%.1f floor=%.1f",
-                             (double)td.rms, (double)td.noise_floor);
-                    if (jr_orch_phase(&s_app.orch) == JR_ST_LISTENING &&
-                        !s_pending_text_set &&
-                        (uint32_t)now - s_utt_start_ms >= UTT_MIN_MS) {
-                        atomic_store(&s_reply_deadline_ms,
-                                     (uint32_t)now + UTT_REPLY_WAIT_MS);
-                    }
+                    /* What the server was sent for this utterance: if frames
+                     * or drops disagree with its length, the uplink and not
+                     * the server's ear is what lost it. */
+                    ESP_LOGI(TAG, "vad: speech end rms=%.1f floor=%.1f "
+                             "len=%u ms uplink=%u frames drops=%u",
+                             (double)td.rms, (double)td.noise_floor,
+                             (unsigned)((uint32_t)now - s_utt_start_ms),
+                             (unsigned)s_utt_ul_frames,
+                             (unsigned)(s_app.client.live.tx_drops -
+                                        s_utt_ul_drops0));
+                    jr_utt_speech_end(&s_utt, (uint32_t)now,
+                                      jr_orch_phase(&s_app.orch) == JR_ST_LISTENING,
+                                      s_pending_text_set);
                     /* Server VAD: Gemini decides end-of-turn (it sends the
                      * response audio, which drives Listening->Speaking). A local
                      * SPEECH_ENDED here would fire audioStreamEnd and commit the
@@ -3852,6 +5720,9 @@ static void voice_task(void *arg)
                     }
                 }
                 read_paced = true;
+            } else {
+                jr_audio_uplink_batch_reset(&mic_batch_state, mic_batch,
+                                           2U * VOICE_FRAME_SAMPLES);
             }
         } else if (jr_wake_ready() && !s_flip_muted &&
                    !atomic_load(&s_voice_privacy_paused) &&
@@ -3868,22 +5739,31 @@ static void voice_task(void *arg)
              * flip (s_flip_muted) and tap/long-press/API (privacy_paused)
              * both gate this branch off. The codec read paces this branch at
              * the frame cadence, same as the uplink path. */
+            const int64_t read_t0 = esp_timer_get_time();
             int n = jr_audio_source_read(&s_app.mic, mic_frame,
                                          VOICE_FRAME_SAMPLES);
             if (n > 0) {
                 read_paced = true;
-                if (jr_wake_feed(mic_frame, (size_t)n)) {
+                read_us = (uint32_t)(esp_timer_get_time() - read_t0);
+                wait_us = jr_audio_last_read_wait_us();
+                vperf_class = 1;
+                (void)jr_wake_push(mic_frame, (size_t)n);
+                if (jr_wake_take_hit((uint32_t)(esp_timer_get_time() / 1000),
+                                     WAKE_HIT_MAX_AGE_MS)) {
                     ESP_LOGI(TAG, "wake: \"%s\" heard — waking from rest",
                              jr_wake_model());
                     jr_mood_poke_awake(&s_mood, (uint32_t)now);
+                    s_glance_until_ms = 0U;
+                    s_companion_activity_ms = (uint32_t)now;
+                    jr_display_rest_set(JR_DISPLAY_REST_NONE, false, false);
                     /* Bloom AFTER the poke: it only renders while frames
                      * flush, so the display must be waking first (glass-ux
                      * contract). The VISION's beat: a point of light blooms
                      * into the ring. */
                     jr_display_bloom();
-                    /* the sound half of the attention moment — a short soft
-                     * rise; refuses on its own if a reply is playing */
-                    (void)jr_audio_diag_play_chirp(160U, 8U);
+                    /* the sound half of the attention moment — a warm two-note
+                     * wake cue; refuses on its own if a reply is playing */
+                    jr_audio_play_wake_cue();
                     s_mood_rest_disarmed = false;
                     atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
                     jr_display_caption_set("YES?");
@@ -3902,7 +5782,16 @@ capture_complete:
          * presenter, present() is an atomic mailbox store, so feeding it
          * every loop is free; with the logging stub, amp stays 0 and the
          * call still fires only on face change (no log spam). */
-        jr_face_t f = phase_to_face(jr_orch_phase(&s_app.orch));
+        const jr_state_t face_phase = jr_orch_phase(&s_app.orch);
+        const bool companion_busy =
+            companion_phase_busy(face_phase, s_listen_speech_active);
+        jr_display_rest_voice_busy_set(companion_busy);
+        if (companion_busy) {
+            jr_display_rest_set(JR_DISPLAY_REST_NONE, false, false);
+            s_glance_until_ms = 0U;
+            s_companion_activity_ms = (uint32_t)now;
+        }
+        jr_face_t f = phase_to_face(face_phase);
         if (f == JR_FACE_IDLE || f == JR_FACE_LISTENING) {
             /* Idle has three truths the face used to hide: muted is gold and
              * still; resting (WHISPER/DREAM) is a breathing slit; only a
@@ -3921,10 +5810,12 @@ capture_complete:
         }
         uint8_t amp = 0;
         if (jr_display_is_ready()) {
+            uint8_t spec[16];
+            jr_audio_get_spectrum(spec);
+            jr_display_spectrum_set(spec);
             if (f == JR_FACE_SPEAKING) {
-                bool fresh = now >= s_app.last_playback_chunk_ms &&
-                             now - s_app.last_playback_chunk_ms < 250;
-                amp = fresh ? rms_to_amp(s_app.playback_level, 3.2f) : 0;
+                const uint16_t live_rms = jr_audio_playback_live_rms();
+                amp = live_rms > 0U ? rms_to_amp((float)live_rms, 3.2f) : 0;
             } else if (f == JR_FACE_LISTENING) {
                 amp = rms_to_amp(s_app.mic_level, 8.0f);
             }
@@ -3940,7 +5831,51 @@ capture_complete:
          * Always block for at least one tick so IDLE1 services the task WDT. */
         /* CONFIG_FREERTOS_HZ=100: a millisecond conversion is zero ticks.
          * Use one literal tick on the paced path so IDLE1 actually runs. */
-        vTaskDelay(read_paced ? 1 : pdMS_TO_TICKS(20));
+        const uint32_t iter_us = (uint32_t)(esp_timer_get_time() - iter_t0);
+        if (vperf_class >= 0) {
+            vperf_frame(vperf_class, iter_us,
+                        read_us == JR_PACE_READ_UNKNOWN ? 0U : read_us,
+                        (uint32_t)(esp_timer_get_time() / 1000));
+        }
+        /* When the loop is behind (the codec read did not block, or this
+         * iteration's own work took a frame) the next frame is already queued
+         * and a 10 ms tick would only make the backlog worse. Skip the sleep
+         * then, at most JR_PACE_MAX_SKIPS times in a row, so IDLE1 still gets
+         * a tick every fourth frame. Work is everything that was not waiting,
+         * the canceller inside the read included. The unpaced path keeps its
+         * 20 ms. */
+        if (read_paced) {
+            const uint32_t work_us =
+                (wait_us == JR_PACE_READ_UNKNOWN || iter_us <= wait_us)
+                    ? 0U : iter_us - wait_us;
+            if (jr_pace_skip_sleep(wait_us, work_us, tick_skips_in_row)) {
+                ++tick_skips_in_row;
+                atomic_fetch_add_explicit(&s_vperf_tick_skips, 1U,
+                                          memory_order_relaxed);
+                continue;
+            }
+            tick_skips_in_row = 0U;
+            atomic_fetch_add_explicit(&s_vperf_tick_sleeps, 1U,
+                                      memory_order_relaxed);
+            vTaskDelay(1);
+        } else {
+            tick_skips_in_row = 0U;
+            const uint8_t idle_mood = atomic_load(&s_mood_id);
+            const bool deep_idle =
+                atomic_load(&s_voice_privacy_paused) &&
+                face_phase == JR_ST_IDLE &&
+                !jr_timer_any_ringing(&s_timers) &&
+                s_hold_start_ms == 0U &&
+                s_watch_peek_until_ms == 0U &&
+                s_demo_start_ms == 0U &&
+                atomic_load(&s_sim_touch) == 0U &&
+                atomic_load(&s_debug_timer_req) == 0U &&
+                atomic_load(&s_level_volume_request) < 0 &&
+                atomic_load(&s_level_brightness_request) < 0 &&
+                (idle_mood == (uint8_t)JR_MOOD_WHISPER ||
+                 idle_mood == (uint8_t)JR_MOOD_DREAM);
+            vTaskDelay(pdMS_TO_TICKS(deep_idle ? 100 : 20));
+        }
     }
 }
 
@@ -3978,7 +5913,7 @@ static void compose_system_instruction(void)
             return;
         }
     }
-    static const char kBase[] =
+    static const char kPersona[] =
         "RESPOND ONLY IN ENGLISH (UNITED STATES). YOU MUST RESPOND UNMISTAKABLY "
         "IN ENGLISH, EVEN IF THE INPUT AUDIO OR AMBIENT SPEECH IS IN ANOTHER "
         "LANGUAGE. Never switch languages, mix tongues, or use foreign phrases "
@@ -4009,24 +5944,7 @@ static void compose_system_instruction(void)
         "television, music, other people talking to each other. When in "
         "doubt, answer briefly.\n"
         "- Never narrate that you are listening or thinking.\n\n"
-        "You exist to help with Sir's life and work, and the Jarvis tools are "
-        "how you act: remember what he tells you, recall it later, read and "
-        "add to his calendar, keep his work board, search the world. Use them "
-        "without being asked twice; never claim a tool succeeded unless its "
-        "response says so.\n\n"
-        "You also have hands elsewhere. delegate_task queues a job for Sir's "
-        "agents, who work on their own machines and report back to this "
-        "device; delegated_tasks lists what is queued, running, done or "
-        "blocked. Anything one tool call answers is answered now: a fact, the "
-        "weather, a price, a note. Anything that needs a browser, a "
-        "repository, a document, or several steps is delegated in one call, "
-        "with Sir told it is queued and that the result will be announced "
-        "here when it lands. Nothing that can be answered now is delegated.\n\n"
-        "Capabilities, for when Sir asks what you can do: live web search and "
-        "news, weather, Wikipedia, crypto and stock prices, exchange rates, "
-        "time zones, translation, research papers, remembering and recalling "
-        "Sir's notes, his calendar, his work board, jobs for his agents, and "
-        "this device's volume and brightness.";
+        "";
     char when[160] = "";
     time_t tt = time(NULL);
     struct tm tmv;
@@ -4037,11 +5955,26 @@ static void compose_system_instruction(void)
                  "greeting or courtesy match it; at unsociable hours a dry "
                  "aside is welcome.", &tmv);
     }
-    int n = snprintf(s_sys_instr, SYS_INSTR_CAP, "%s%s", kBase, when);
+    /* What the model is told it has depends on whether the gateway can be
+     * used right now (jr_core/tool_policy.h): with none it is told, plainly,
+     * what the device itself offers and not to offer the rest. */
+    char tools[1600];
+    if (jr_tool_instruction(device_gateway_usable(), JR_WEATHER_PLACE,
+                            tools, sizeof tools) == 0U) {
+        ESP_LOGE(TAG, "tool instruction did not fit");
+    }
+    int n = snprintf(s_sys_instr, SYS_INSTR_CAP, "%s%s%s", kPersona, tools,
+                     when);
     if (n < 0 || (size_t)n >= SYS_INSTR_CAP) {
         /* A cut persona is a changed persona: say so where it can be read. */
         ESP_LOGE(TAG, "sys_instr truncated: %d >= %u", n, (unsigned)SYS_INSTR_CAP);
     }
+}
+
+static void *cjson_psram_malloc(size_t sz)
+{
+    void *p = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return p != NULL ? p : malloc(sz);
 }
 
 void app_main(void)
@@ -4050,7 +5983,19 @@ void app_main(void)
     ESP_LOGI(TAG, " JarvisRobot v5  |  hexagonal core  |  voice boot     ");
     ESP_LOGI(TAG, "=====================================================");
 
+    /* Route cJSON parse/print trees to PSRAM first (internal fallback) to
+     * keep internal SRAM fragmentation low for Wi-Fi/TLS handshakes. */
+    cJSON_Hooks cjson_hooks = {
+        .malloc_fn = cjson_psram_malloc,
+        .free_fn = free,
+    };
+    cJSON_InitHooks(&cjson_hooks);
+    jr_timer_init(&s_timers);
+    jr_desk_init(&s_desk_mode);
+
+    crash_note_boot();
     init_nvs();
+    device_notes_init();
 
     /* Inbound event slots go to PSRAM FIRST — 36 KB of tool-call buffers in
      * internal BSS previously starved the voice task's 20 KB internal-only
@@ -4167,6 +6112,8 @@ void app_main(void)
     if (pwr_err != ESP_OK) {
         ESP_LOGW(TAG, "battery sampler unavailable: %s", esp_err_to_name(pwr_err));
     }
+    jr_power_analytics_init(&s_power_analytics);
+    restore_battery_care();
 #if !defined(CONFIG_ESP_BOARD_ESP32S3_TOUCH_AMOLED_1_75C)
     esp_err_t rtc_err = jr_rtc_start();
     if (rtc_err != ESP_OK) {
@@ -4183,29 +6130,72 @@ void app_main(void)
     atomic_store(&s_mood_id, (uint8_t)JR_MOOD_AWAKE);
     atomic_store(&s_mood_brightness, 100);
 
+    /* Retained OS time is usable before network connection. Establish local
+     * timezone and the authoritative privacy/battery rims before first draw. */
+    setenv("TZ", "EST5EDT,M3.2.0,M11.1.0", 1);
+    tzset();
+    restore_brightness_cap();
+    (void)jr_display_set_brightness(s_brightness_cap);
+    companion_boot_seed();
+    restore_desk_tally();
+    {
+        const uint32_t boot_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if (power_restore_rtc_timers(boot_ms) > 0U) {
+            timer_publish_now(boot_ms);
+        }
+    }
+
+    const esp_sleep_wakeup_cause_t cause =
+        (esp_sleep_wakeup_cause_t)s_boot_wake_cause;
+    const bool from_sleep = s_rtc_sleep_magic == SLEEP_RTC_MAGIC &&
+        (cause == ESP_SLEEP_WAKEUP_EXT0 || cause == ESP_SLEEP_WAKEUP_EXT1 ||
+         cause == ESP_SLEEP_WAKEUP_TIMER);
+
+    /* Cold boot (!from_sleep): step CPU to 240 MHz early and arm Procedural
+     * Ignition BEFORE jr_display_start() at 20 fps for a silky sapphire sweep.
+     * Deep-sleep wakes preserve dark TIMER DREAM and instant 200 ms Glance! */
+    if (!from_sleep) {
+        cpu_gear_set(CPU_MHZ_LIVE);
+        jr_display_boot_ignition_set(true, 0U, 15U);
+    }
+
     /* pull the concrete ports. The real presenter is preferred; its panel +
      * SPIFFS + gfx bring-up runs async in its own task, so this never stalls
      * boot. On resource failure, fall back to the jr_hal logging stub
      * (headless, exactly the pre-Phase-3 behavior). */
     s_app.clock   = jr_hal_clock();
+    /* Cold boot runs Ignition at 20 fps (<4 ms/f); deep-sleep wakes keep
+     * RENDER_FPS_BOOT until the voice loop's cadence tick takes over. */
+    (void)jr_display_set_render_fps(from_sleep ? RENDER_FPS_BOOT : 20U);
     if (jr_display_start(&s_app.display) == ESP_OK) {
         ESP_LOGI(TAG, "display: presenter injected (CO5300 async bring-up)");
     } else {
         s_app.display = jr_hal_display();
         ESP_LOGW(TAG, "display: presenter start failed — falling back to log stub");
     }
+    restore_holo_enabled();
+    jr_display_set_tilt_source(tilt_source);
     s_app.input   = jr_hal_input();
 
     /* idle face immediately (Phase-0 acceptance target) */
     s_app.last_face = JR_FACE_IDLE;
     jr_display_present(&s_app.display, JR_FACE_IDLE, 0);
+    device_notes_sync_inbox();
+    s_boot_stage_ms[0] = (uint32_t)(esp_timer_get_time() / 1000);
+    if (!from_sleep) {
+        jr_display_boot_ignition_set(true, 0U, 20U);  /* stage 0: CORE (20%) */
+    }
 
-    /* network + config */
+    /* network + config: start non-blocking STA join now so Wi-Fi association
+     * and DHCP overlap audio, HTTP, tools, and WakeNet init (saves 2-4 s). */
+    bool net_inited = false;
+    esp_err_t wifi_start_err = ESP_ERR_INVALID_STATE;
     if (jr_net_init() == ESP_OK) {
-        esp_err_t wc = jr_net_wifi_connect();
-        if (wc != ESP_OK) {
-            ESP_LOGW(TAG, "wifi not connected (%s) — diag/session will retry once provisioned",
-                     esp_err_to_name(wc));
+        net_inited = true;
+        wifi_start_err = jr_net_wifi_connect_start();
+        if (wifi_start_err != ESP_OK) {
+            ESP_LOGW(TAG, "wifi join start skipped (%s) — will fall back to provisioning",
+                     esp_err_to_name(wifi_start_err));
         }
     }
     restore_ota_attempt();
@@ -4215,8 +6205,6 @@ void app_main(void)
      * tool call). esp_netif_sntp retries internally until Wi-Fi is up, so
      * starting it here is safe even before the first got-ip. TZ is compile-time
      * for now; SVC-04 settings can make it NVS-backed later. */
-    setenv("TZ", "EST5EDT,M3.2.0,M11.1.0", 1);   /* US Eastern w/ DST rules */
-    tzset();
     {
         esp_sntp_config_t sntp_cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
         sntp_cfg.start = true;
@@ -4225,6 +6213,9 @@ void app_main(void)
         }
         struct tm seeded;
         if (device_wall_time(&seeded)) {
+            jr_display_date_set_ymd((uint16_t)(seeded.tm_year + 1900),
+                                    (uint8_t)(seeded.tm_mon + 1),
+                                    (uint8_t)seeded.tm_mday);
             ESP_LOGI(TAG, "wall clock %04d-%02d-%02d %02d:%02d (rtc_seed=%d)",
                      seeded.tm_year + 1900, seeded.tm_mon + 1, seeded.tm_mday,
                      seeded.tm_hour, seeded.tm_min, (int)s_rtc_seeded_os);
@@ -4236,11 +6227,16 @@ void app_main(void)
         ESP_LOGW(TAG, "jr_audio_init degraded — capture may be silent until on-device tune");
     }
     restore_out_vol();   /* gesture-set volume survives reboot */
-    restore_brightness_cap();
+    restore_ui_sounds();
+    jr_audio_set_owner_mute_probe(owner_speaker_muted);
     restore_watch_style();
     restore_briefing_day();
     s_app.mic = jr_audio_source();
     s_app.spk = jr_audio_sink();
+    s_boot_stage_ms[1] = (uint32_t)(esp_timer_get_time() / 1000);
+    if (!from_sleep) {
+        jr_display_boot_ignition_set(true, 1U, 50U);  /* stage 1: AUDIO (50%) */
+    }
 
     /* Gemini endpoint auth (key from NVS, never in-repo). The key rides only
      * the x-goog-api-key upgrade header and the URL stays bare. The WebSocket
@@ -4371,9 +6367,33 @@ void app_main(void)
         ESP_LOGW(TAG, "wake word unavailable: %s", esp_err_to_name(wake_err));
     }
 
-    atomic_store(&s_voice_start_gate, true);
-    if (task_ok == pdPASS && VOICE_ALWAYS_READY) {
-        atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
+    /* Finalize overlapped Wi-Fi join (returns in 0 ms when association + DHCP
+     * already finished during codec/tools/WakeNet bring-up). */
+    s_boot_stage_ms[2] = (uint32_t)(esp_timer_get_time() / 1000);
+    if (!from_sleep) {
+        jr_display_boot_ignition_set(true, 2U, 80U);  /* stage 2: WIFI (80%) */
+    }
+    if (net_inited) {
+        esp_err_t wc = wifi_start_err;
+        if (wc == ESP_OK) {
+            wc = jr_net_wifi_wait_connected(
+                from_sleep ? JR_NET_DEFAULT_TIMEOUT_MS : 12000U);
+        }
+        if (wc != ESP_OK) {
+            esp_err_t prov_err = jr_net_provisioning_start();
+            ESP_LOGW(TAG, "wifi not connected (%s, prov=%s) — diag/session will retry once provisioned",
+                     esp_err_to_name(wc), esp_err_to_name(prov_err));
+        }
+    }
+
+    /* Cold boot: complete Ignition sweep -> ~250 ms READY hold -> 450 ms alpha
+     * crossfade onto Chrono-Arc Home before the initial boot caption arrives. */
+    s_boot_stage_ms[3] = (uint32_t)(esp_timer_get_time() / 1000);
+    if (!from_sleep) {
+        jr_display_boot_ignition_set(true, 3U, 100U); /* stage 3: READY (100%) */
+        vTaskDelay(pdMS_TO_TICKS(250));
+        jr_display_boot_ignition_set(false, 3U, 100U);
+        vTaskDelay(pdMS_TO_TICKS(480));               /* settle 450 ms crossfade */
     }
 
     /* Start the stillness clock HERE, not at jr_mood_reset() above: that runs
@@ -4392,16 +6412,25 @@ void app_main(void)
      * check with nobody there: the ladder resumes at DREAM so the glass stays
      * dark and the chip sleeps again in JR_MOOD_SLEEP_MS unless something
      * happens. Everything else is the privacy default. */
-    const esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-    s_boot_wake_cause = (int)cause;
-    const bool from_sleep = s_rtc_sleep_magic == SLEEP_RTC_MAGIC &&
-        (cause == ESP_SLEEP_WAKEUP_EXT0 || cause == ESP_SLEEP_WAKEUP_EXT1 ||
-         cause == ESP_SLEEP_WAKEUP_TIMER);
-    if (from_sleep && cause == ESP_SLEEP_WAKEUP_TIMER) {
+    s_companion_activity_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    if (from_sleep && (cause == ESP_SLEEP_WAKEUP_EXT0 ||
+                       cause == ESP_SLEEP_WAKEUP_EXT1)) {
+        /* The early local face survives network bootstrap; its existing
+         * eight-second attention budget starts when full Jarvis is ready. */
+        s_glance_until_ms = s_companion_activity_ms + GLANCE_MS;
+    }
+    if (from_sleep && cause == ESP_SLEEP_WAKEUP_TIMER &&
+        !jr_timer_any_active(&s_timers)) {
         s_mood.still_since_ms =
             (uint32_t)(esp_timer_get_time() / 1000) - JR_MOOD_DREAM_MS;
         jr_display_caption_set("ASLEEP - TAP TO WAKE");
         ESP_LOGI(TAG, "boot complete — timer wake %u, resting on",
+                 (unsigned)s_rtc_sleeps);
+    } else if (from_sleep && cause == ESP_SLEEP_WAKEUP_TIMER &&
+               jr_timer_any_active(&s_timers)) {
+        jr_mood_poke_awake(&s_mood, (uint32_t)(esp_timer_get_time() / 1000));
+        jr_display_caption_set("TIMER ACTIVE");
+        ESP_LOGI(TAG, "boot complete — timer wake %u with active countdown",
                  (unsigned)s_rtc_sleeps);
     } else if (from_sleep && s_rtc_was_listening) {
         atomic_store(&s_voice_privacy_paused, false);
@@ -4414,4 +6443,11 @@ void app_main(void)
         ESP_LOGI(TAG, "boot complete — starting MUTED (privacy default)%s",
                  from_sleep ? ", woke from sleep" : "");
     }
+    /* Publish the voice start gate last: boot seeds and the initial privacy /
+     * rest decision are complete before the single-writer pump can run. */
+    if (task_ok == pdPASS && VOICE_ALWAYS_READY &&
+        atomic_load(&s_voice_control_request) != VOICE_CONTROL_ARM) {
+        atomic_store(&s_voice_control_request, VOICE_CONTROL_RESUME);
+    }
+    atomic_store(&s_voice_start_gate, true);
 }

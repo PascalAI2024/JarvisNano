@@ -1,0 +1,173 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Compile the extracted production handler with the real portable decoder. */
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "jr_power/charge.h"
+
+typedef int esp_err_t;
+#define ESP_OK 0
+#define ESP_FAIL (-1)
+#define ESP_ERR_INVALID_STATE 259
+#define ESP_ERR_TIMEOUT 263
+#define HTTPD_500_INTERNAL_SERVER_ERROR 500
+typedef struct { const char *uri; } httpd_req_t;
+
+static jr_power_charge_t cached;
+static esp_err_t cache_error;
+static bool authorized = true, denied, terminated;
+static unsigned auth_calls, cache_calls, chunks, fail_at, max_chunk, errors;
+static char response[16384], content_type[32], cache_control[32];
+static size_t response_used;
+
+static bool agent_require_auth(httpd_req_t *req)
+{
+    (void)req;
+    ++auth_calls;
+    if (!authorized) {
+        denied = true;
+        strcpy(response, "{\"error\":\"unauthorized\"}");
+        response_used = strlen(response);
+    }
+    return authorized;
+}
+
+static esp_err_t jr_power_charge_read(jr_power_charge_t *out)
+{
+    ++cache_calls;
+    jr_power_charge_reset(out);
+    if (cache_error == ESP_OK) { *out = cached; }
+    return cache_error;
+}
+
+static const char *esp_err_to_name(esp_err_t err)
+{
+    switch (err) {
+        case ESP_OK: return "ESP_OK";
+        case ESP_ERR_INVALID_STATE: return "ESP_ERR_INVALID_STATE";
+        case ESP_ERR_TIMEOUT: return "ESP_ERR_TIMEOUT";
+        default: return "UNKNOWN_ERROR";
+    }
+}
+
+static esp_err_t httpd_resp_set_type(httpd_req_t *req, const char *type)
+{
+    (void)req;
+    (void)snprintf(content_type, sizeof content_type, "%s", type);
+    return ESP_OK;
+}
+
+static esp_err_t httpd_resp_set_hdr(httpd_req_t *req, const char *name,
+                                    const char *value)
+{
+    (void)req;
+    if (strcmp(name, "Cache-Control") != 0) { abort(); }
+    (void)snprintf(cache_control, sizeof cache_control, "%s", value);
+    return ESP_OK;
+}
+
+static esp_err_t httpd_resp_send_err(httpd_req_t *req, int status,
+                                    const char *message)
+{
+    (void)req; (void)status; (void)message;
+    ++errors;
+    return ESP_FAIL;
+}
+
+static esp_err_t httpd_resp_send_chunk(httpd_req_t *req, const char *data,
+                                      size_t length)
+{
+    (void)req;
+    ++chunks;
+    if (length > max_chunk) { max_chunk = (unsigned)length; }
+    if (!data && length == 0) { terminated = true; }
+    if (chunks == fail_at) { return ESP_FAIL; }
+    if (!data) { return ESP_OK; }
+    if (response_used + length >= sizeof response) { abort(); }
+    memcpy(response + response_used, data, length);
+    response_used += length;
+    response[response_used] = 0;
+    return ESP_OK;
+}
+
+static esp_err_t httpd_resp_sendstr_chunk(httpd_req_t *req, const char *data)
+{
+    return httpd_resp_send_chunk(req, data, strlen(data));
+}
+
+__PRODUCTION_HANDLER__
+
+static const uint8_t good_raw[JR_POWER_CHARGE_REG_COUNT] = {
+    0x2B, 0x2A, 5, 3, 2, 0xAA, 0xBB, 0xCC,
+    0xDD, 0xEE, 3, 12, 0x12, 3, 1, 0xD5
+};
+
+static void prepare(const char *scenario)
+{
+    jr_power_charge_reset(&cached);
+    if (strcmp(scenario, "never") == 0) {
+        cache_error = ESP_ERR_INVALID_STATE;
+        return;
+    }
+    if (strcmp(scenario, "busy") == 0) {
+        cache_error = ESP_ERR_TIMEOUT;
+        return;
+    }
+    const uint64_t offset = strcmp(scenario, "large-clock") == 0
+        ? UINT64_MAX - 5000 : 0;
+    cached.sample_seq = 41;
+    jr_power_charge_begin(&cached, offset + 1000);
+    for (size_t i = 0; i < JR_POWER_CHARGE_REG_COUNT; ++i) {
+        jr_power_charge_record(&cached, i, good_raw[i], 0, offset + 1000 + 100 * i);
+    }
+    jr_power_charge_finish(&cached, offset + 2600);
+    jr_power_charge_age(&cached, offset + 2700);
+    if (strcmp(scenario, "all-failed") == 0 ||
+        strncmp(scenario, "failure-", 8) == 0) {
+        const bool all = strcmp(scenario, "all-failed") == 0;
+        const size_t failed = all ? 0 : (size_t)strtoul(scenario + 8, NULL, 10);
+        jr_power_charge_begin(&cached, 3000);
+        for (size_t i = 0; i < JR_POWER_CHARGE_REG_COUNT; ++i) {
+            jr_power_charge_record(&cached, i, good_raw[i],
+                                  all || i == failed ? ESP_ERR_TIMEOUT : 0,
+                                  3000 + 100 * i);
+        }
+        jr_power_charge_finish(&cached, 4600);
+        jr_power_charge_age(&cached, 4700);
+    } else if (strcmp(scenario, "stale") == 0) {
+        jr_power_charge_age(&cached, 14000);
+    } else if (strcmp(scenario, "mixed-age") == 0) {
+        jr_power_charge_age(&cached, 11100);
+    } else if (strcmp(scenario, "reserved") == 0) {
+        cached.regs[JR_POWER_CHARGE_STATUS2].raw = 0x67;
+        cached.regs[JR_POWER_CHARGE_INPUT_LIMIT].raw = 6;
+        cached.regs[JR_POWER_CHARGE_PRECHARGE].raw = 9;
+        cached.regs[JR_POWER_CHARGE_CC].raw = 22;
+        cached.regs[JR_POWER_CHARGE_TERMINATION].raw = 0x19;
+        cached.regs[JR_POWER_CHARGE_CV].raw = 0;
+    }
+}
+
+int main(int argc, char **argv)
+{
+    if (argc != 3) { return 2; }
+    const char *scenario = argv[1];
+    fail_at = (unsigned)strtoul(argv[2], NULL, 10);
+    authorized = strcmp(scenario, "unauthorized") != 0;
+    prepare(scenario);
+    /* The route must ignore request-controlled PMIC addresses/settings. */
+    httpd_req_t req = {"/api/power/charge?address=255&write=1&current=1500"};
+    const esp_err_t err = power_charge_handler(&req);
+    printf("{\"result\":%d,\"auth_calls\":%u,\"cache_calls\":%u,"
+           "\"chunks\":%u,\"max_chunk\":%u,\"errors\":%u,"
+           "\"denied\":%s,\"terminated\":%s,\"type\":\"%s\","
+           "\"cache_control\":\"%s\"}\n",
+           err, auth_calls, cache_calls, chunks, max_chunk, errors,
+           denied ? "true" : "false", terminated ? "true" : "false",
+           content_type, cache_control);
+    puts(response);
+    return 0;
+}

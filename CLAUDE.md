@@ -28,12 +28,13 @@ RECONFIGURE=1 ./scripts/build-v5.sh     # regenerate sdkconfig from sdkconfig.de
 # Flash over Wi-Fi while the firmware is running (esptool cannot sync then)
 export JARVIS_DEVICE_HOST=<ip>; scripts/jarvisctl.py ota
 
-# Host tests — no ESP-IDF needed. host-tests.sh runs all four lines below
-# (five suites); with no cc/gcc on PATH the C suites run in Docker.
+# Host tests — no ESP-IDF needed. host-tests.sh runs six suites, including
+# main/tests production input routing; without cc/gcc the C suites run in Docker.
 ./scripts/host-tests.sh
 cd host && cmake -B build && cmake --build build && ./build/jr_host_tests   # jr_core + jr_dsp + jr_transport
 cmake -S components/jr_tools/host -B build-tools-host && cmake --build build-tools-host && ctest --test-dir build-tools-host --output-on-failure
 python3 -m unittest scripts/test_jarvis_desk.py
+python3 main/tests/test_shell_input.py  # production routing against shell stubs
 
 # Pre-commit gates
 ./scripts/check-secrets.sh

@@ -10,6 +10,7 @@ idf_component_register(
     INCLUDE_DIRS "include"
     REQUIRES
         jr_ports
+        jr_core
         jr_dsp
         jr_hal
         esp_board_manager

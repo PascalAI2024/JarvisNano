@@ -9,6 +9,9 @@
  * (the board is not attached here); this compiles and links the real path.
  */
 #include "jr_audio/jr_audio.h"
+#include "jr_core/dac_mute.h"
+#include "jr_core/echo_gate.h"
+#include "jr_core/mic_watch.h"
 
 #include <math.h>
 #include <string.h>
@@ -29,17 +32,21 @@
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_types.h"
 #include "jr_dsp/dsp.h"
+#include "jr_dsp/audio_power.h"
+#include "jr_dsp/spectrum.h"
 
 #include "esp_aec.h"                  /* esp-sr direct low-level AEC             */
 
 static const char *TAG = "jr_audio";
 
-static void speaker_pa_enable(void)
+static void speaker_pa_set(bool enabled)
 {
 #if defined(CONFIG_ESP_BOARD_ESP32S3_TOUCH_AMOLED_1_75C)
     /* Board-manager/codec owns PA lifecycle; this idempotent board-specific
      * latch preserves the known C-board unmute behavior without remuxing GPIO. */
-    (void)gpio_set_level(GPIO_NUM_46, 1);
+    (void)gpio_set_level(GPIO_NUM_46, enabled ? 1 : 0);
+#else
+    (void)enabled;
 #endif
 }
 
@@ -71,12 +78,14 @@ static void speaker_pa_enable(void)
  * suppression -> echo residual ~180 instead of a railed ~9000). Restored to 24
  * dB on LISTENING so the user's own voice is loud for the local VAD. */
 #if defined(CONFIG_ESP_BOARD_ESP32S3_TOUCH_AMOLED_1_75C)
-/* 21, not 9: at 9 dB the owner's talk-over read ~20 rms on the C — inaudible
- * to both the local barge gate and Gemini's server VAD, so barge-in was dead.
- * At 21 dB (vadlog 2026-08-27) the AEC still held the echo residual to a
- * median of ~20 rms, so the hotter capture costs nothing. Runtime knob:
- * /api/debug/gain?speakmic=. */
-#define GL_MIC_PGA_SPEAK_DB      21
+/* 6, not 21 (echo-fix, docs/reference/echo-canceller-2026-11-11.md): at 21 dB
+ * the microphone rails on the device's own voice at volume 100 (raw rms
+ * 6900-12100, up to 2000 clipped samples per window) and the canceller has
+ * nothing to cancel; with raw peaks under about 16000 it reaches 40 dB and
+ * more. The owner's level is given back as digital make-up AFTER the
+ * canceller (jr_uplink_makeup_q8), where it costs no headroom. Runtime knobs:
+ * /api/debug/gain?speakmic= and ?speakgain=. */
+#define GL_MIC_PGA_SPEAK_DB      6
 #else
 #define GL_MIC_PGA_SPEAK_DB      9
 #endif
@@ -116,6 +125,9 @@ static void speaker_pa_enable(void)
 #define PB_RING_BYTES            (512U * 1024U)
 #define PB_RING_SAMPLES          (PB_RING_BYTES / sizeof(int16_t))
 #define PB_FEED_CHUNK            768        /* one 32 ms 24 kHz write */
+/* 4096 B keeps >=1.5 KB headroom with jr_spectrum_feed + ESP_LOGW vprintf on
+ * the hole path (s_feed_chunk is static). */
+#define PB_FEEDER_STACK          4096
 #define DIAG_TAP_SECONDS         2U
 #define DIAG_CLIP_THRESHOLD      32760
 /* Earcons are rendered WHOLE into heap scratch and enqueued in one call. They
@@ -133,16 +145,44 @@ static void speaker_pa_enable(void)
 /* --------------------------- module state ------------------------------ */
 static esp_codec_dev_handle_t s_dac;
 static esp_codec_dev_handle_t s_adc;
-static bool                   s_dac_open;
-static bool                   s_adc_open;
+static _Atomic bool           s_dac_open;
+static _Atomic bool           s_adc_open;
+static _Atomic bool           s_pa_on;
+static _Atomic bool           s_microphone_enabled;
+static _Atomic bool           s_sleeping;
+static _Atomic bool           s_clear_capture_taps;
+static _Atomic uint32_t       s_hardware_reads;
+static _Atomic uint32_t       s_silent_frames;
+static _Atomic uint32_t       s_power_failures;
+static _Atomic uint32_t       s_gain_failures;
+/* Dead-microphone watch: touched only by src_read (the one capture caller);
+ * the two atomics are its published copy. */
+static jr_mic_watch_t         s_mic_watch;
+static _Atomic bool           s_mic_dead;
+static _Atomic uint32_t       s_mic_recoveries;
+static SemaphoreHandle_t      s_adc_guard;
+static SemaphoreHandle_t      s_dac_guard;
+static jr_audio_power_t       s_power;
+static portMUX_TYPE           s_pa_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static aec_handle_t          *s_aec;
+/* Active canceller configuration (capture caller only) and a pending request
+ * (httpd stores, the capture caller applies between frames). -1 = none. */
+static int                    s_aec_mode_active   = GL_AEC_MODE;
+static int                    s_aec_filter_active = GL_AEC_FILTER_LENGTH;
+static _Atomic int            s_aec_mode_pub      = GL_AEC_MODE;
+static _Atomic int            s_aec_filter_pub    = GL_AEC_FILTER_LENGTH;
+static _Atomic int            s_aec_mode_req      = -1;
+static _Atomic int            s_aec_filter_req    = -1;
+static _Atomic uint32_t       s_aec_reconfigs;
+static _Atomic uint32_t       s_aec_reconfig_fails;
 static int16_t               *s_aec_mic;     /* 16-byte aligned, 512 int16 */
 static int16_t               *s_aec_ref;
 static int16_t               *s_aec_clean;
 static _Atomic uint32_t       s_last_aec_us;
 /* AEC-clean mic RMS in Q8, measured before the uplink make-up gain. */
 static _Atomic uint32_t       s_clean_rms_q8;
+static _Atomic uint32_t       s_last_wait_us;   /* last src_read: time blocked */
 
 static int16_t               *s_raw_cap;     /* 768*4 int16 (24k read)     */
 static int16_t               *s_raw16;       /* 512*4 int16 (16k demuxed)  */
@@ -151,6 +191,13 @@ static int16_t               *s_raw16;       /* 512*4 int16 (16k demuxed)  */
 static _Atomic int            s_mic_db       = GL_MIC_PGA_DB;
 static _Atomic int            s_mic_speak_db = GL_MIC_PGA_SPEAK_DB;
 static _Atomic int            s_ref_db       = GL_REF_PGA_DB;
+/* The microphone PGA the codec was last told, set only after a write that
+ * succeeded (apply_in_gains). The uplink make-up follows THIS, not the
+ * s_capture_speaking flag, so the compensation switches on the frame after the
+ * PGA really changed and a failed write cannot leave the owner 18 dB hot. */
+static _Atomic int            s_applied_mic_db = GL_MIC_PGA_DB;
+/* Percent of the computed make-up compensation (?speakgain=): 100 = full. */
+static _Atomic int            s_speak_gain_pct = 100;
 static _Atomic int            s_out_vol      = GL_OUT_VOL_DEFAULT;
 /* True while the model is speaking — selects the low SPEAKING mic gain so the
  * echo stays unclipped for the AEC. Set by the app on phase transitions. */
@@ -158,6 +205,12 @@ static _Atomic bool           s_capture_speaking;
 
 /* fast-kill mute flag (set from capture task; read by feeder) */
 static _Atomic bool           s_muted;
+/* A tone unmuted the DAC and owes the mute back (jr_core/dac_mute.h). Set by
+ * earcon_commit when s_muted was true; cleared by any real mute or unmute;
+ * paid by the feeder once the tone has fully played out. */
+static _Atomic bool           s_cue_restore;
+/* The owner's speaker mute lives in main.c; tones ask through this probe. */
+static bool                 (*s_owner_mute_probe)(void);
 
 /* playback ring (int16 mono @ 24 kHz) */
 static int16_t               *s_pb;
@@ -167,7 +220,40 @@ static portMUX_TYPE           s_pb_lock = portMUX_INITIALIZER_UNLOCKED;
 static TaskHandle_t           s_feeder;
 static _Atomic bool           s_feeder_writing;
 static _Atomic uint32_t       s_playback_tail_until_ms;
+static _Atomic uint32_t       s_pb_live_rms;
 static _Atomic bool           s_diag_chirp_enqueuing;
+static jr_spectrum_t          s_pb_spec;       /* feeder task only          */
+static jr_spectrum_t          s_mic_spec;      /* capture caller (adc_guard)*/
+static _Atomic uint64_t       s_spec_lo;       /* lock-free bands[0..7]     */
+static _Atomic uint64_t       s_spec_hi;       /* lock-free bands[8..15]    */
+static _Atomic bool           s_pb_spec_active;
+static _Atomic bool           s_pb_spec_reset_req;
+
+static void spec_publish(const uint8_t bands[JR_SPECTRUM_BANDS])
+{
+    uint64_t lo = 0u;
+    uint64_t hi = 0u;
+    memcpy(&lo, &bands[0], sizeof(lo));
+    memcpy(&hi, &bands[8], sizeof(hi));
+    atomic_store_explicit(&s_spec_lo, lo, memory_order_relaxed);
+    atomic_store_explicit(&s_spec_hi, hi, memory_order_relaxed);
+}
+
+static void spec_clear(void)
+{
+    atomic_store_explicit(&s_spec_lo, 0u, memory_order_relaxed);
+    atomic_store_explicit(&s_spec_hi, 0u, memory_order_relaxed);
+}
+
+static void pb_spec_clear_if_active(void)
+{
+    const bool was_active = atomic_exchange(&s_pb_spec_active, false);
+    const bool reset_req = atomic_exchange(&s_pb_spec_reset_req, false);
+    if (was_active || reset_req) {
+        jr_spectrum_reset(&s_pb_spec);
+        spec_clear();
+    }
+}
 
 /* PLAYBACK TELEMETRY (N6.2). A 60 s reply that stutters once leaves no trace
  * in the transport counters — the socket delivered every byte — so "choppy"
@@ -224,7 +310,7 @@ static _Atomic uint32_t       s_pb_earcon_samples;
  * them, for +0.4 s before a first word that already waits 2-4 s on
  * thinking. Tune live: /api/debug/gain?preroll=&refill=. */
 #define PB_PREROLL_MS_DEFAULT    JR_JITTER_PREROLL_FLOOR_MS /* 600: first word */
-#define PB_REFILL_MS_DEFAULT     1500u  /* lead rebuilt after a hole         */
+#define PB_REFILL_MS_DEFAULT     900u   /* lead rebuilt after a hole         */
 #define PB_PRIME_MAX_WAIT_MS     2000u  /* never hold longer than this       */
 static _Atomic uint32_t       s_pb_preroll_ms = PB_PREROLL_MS_DEFAULT;
 static _Atomic uint32_t       s_pb_refill_ms  = PB_REFILL_MS_DEFAULT;
@@ -241,6 +327,16 @@ static uint32_t               s_pb_prime_start_ms;      /* feeder task only */
 static _Atomic bool           s_pb_skip_prime;          /* diagnostic queued */
 static _Atomic uint32_t       s_pb_prerolls;
 static _Atomic uint32_t       s_pb_preroll_timeouts;
+/* Who left the ring dry (see jr_audio_playback_stats_t). The feeder is the
+ * only writer. */
+static _Atomic uint32_t       s_pb_holes_ignored;
+static _Atomic uint32_t       s_pb_feeder_stall_max_ms;
+static _Atomic uint32_t       s_pb_refill_holds;
+static _Atomic uint32_t       s_pb_refill_hold_max_ms;
+static _Atomic uint32_t       s_pb_refill_hold_total_ms;
+static bool                   s_pb_refill_hold_open;   /* feeder task only */
+static uint32_t               s_pb_prev_pass_ms;       /* feeder task only */
+static bool                   s_pb_prev_wrote;         /* feeder task only */
 
 void jr_audio_set_jitter_ms(int preroll_ms, int refill_ms)
 {
@@ -249,6 +345,7 @@ void jr_audio_set_jitter_ms(int preroll_ms, int refill_ms)
         /* Publish now so the route's readback sees it; the feeder pins. */
         atomic_store(&s_pb_preroll_ms, pre == 0u ? JR_JITTER_PREROLL_FLOOR_MS : pre);
         atomic_store(&s_pb_preroll_req, (int32_t)pre);
+        if (s_feeder != NULL) xTaskNotifyGive(s_feeder);
     }
     if (refill_ms >= 0) {
         atomic_store(&s_pb_refill_ms, refill_ms > 3000 ? 3000u : (uint32_t)refill_ms);
@@ -305,6 +402,10 @@ static void tap_write(jr_audio_tap_kind_t kind, const int16_t *samples,
     }
     if (xSemaphoreTake(tap->lock, 0) != pdTRUE) {
         atomic_fetch_add(&tap->skipped, (uint32_t)count);
+        return;
+    }
+    if (kind != JR_AUDIO_TAP_PLAYBACK && !atomic_load(&s_microphone_enabled)) {
+        xSemaphoreGive(tap->lock);
         return;
     }
     tap_account_skips_locked(tap);
@@ -408,9 +509,26 @@ static void acquire_handles(void)
     ESP_LOGI(TAG, "codec handles: dac=%p adc=%p", (void *)s_dac, (void *)s_adc);
 }
 
+#define IN_GAIN_ATTEMPTS 3
+
+static bool set_in_gain_checked(uint16_t channel_mask, float db)
+{
+    for (int attempt = 0; attempt < IN_GAIN_ATTEMPTS; ++attempt) {
+        if (esp_codec_dev_set_in_channel_gain(s_adc, channel_mask, db) ==
+            ESP_CODEC_DEV_OK) {
+            return true;
+        }
+        vTaskDelay(1);
+    }
+    atomic_fetch_add(&s_gain_failures, 1u);
+    ESP_LOGW(TAG, "adc gain set failed after %d tries (mask 0x%x)",
+             IN_GAIN_ATTEMPTS, (unsigned)channel_mask);
+    return false;
+}
+
 static void apply_in_gains(void)
 {
-    if (s_adc == NULL) {
+    if (s_adc == NULL || !atomic_load(&s_adc_open)) {
         return;
     }
     /* State-aware: low mic gain while the model speaks (unclipped echo -> AEC
@@ -418,11 +536,15 @@ static void apply_in_gains(void)
     float mic = (float)atomic_load(atomic_load(&s_capture_speaking)
                                    ? &s_mic_speak_db : &s_mic_db);
     float ref = (float)atomic_load(&s_ref_db);
-    /* MEMS MIC1|MIC2 = chip mask bits 0|1; echo-ref MIC3 = chip mask bit 2. */
-    esp_codec_dev_set_in_channel_gain(s_adc,
-        ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) | ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1), mic);
-    esp_codec_dev_set_in_channel_gain(s_adc,
-        ESP_CODEC_DEV_MAKE_CHANNEL_MASK(GL_REF_CHIP_MASK_BIT), ref);
+    /* MEMS MIC1|MIC2 = chip mask bits 0|1; echo-ref MIC3 = chip mask bit 2.
+     * A failed set is retried: the managed driver no longer writes after a
+     * failed read (patch-v5-managed.py), so a failure leaves the old gain, not
+     * a silent channel, and trying again is safe. */
+    if (set_in_gain_checked(ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) |
+                            ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1), mic)) {
+        atomic_store(&s_applied_mic_db, (int)mic);
+    }
+    set_in_gain_checked(ESP_CODEC_DEV_MAKE_CHANNEL_MASK(GL_REF_CHIP_MASK_BIT), ref);
 }
 
 static esp_err_t open_adc(void)
@@ -462,11 +584,166 @@ static esp_err_t open_dac(void)
         return ESP_FAIL;
     }
     s_dac_open = true;
-    esp_codec_dev_set_out_mute(s_dac, false);
+    esp_codec_dev_set_out_mute(s_dac, atomic_load(&s_muted));
     esp_codec_dev_set_out_vol(s_dac, atomic_load(&s_out_vol));
-    speaker_pa_enable();
     return ESP_OK;
 }
+
+static bool power_open_adc(void *ctx)
+{
+    (void)ctx;
+    return open_adc() == ESP_OK;
+}
+
+static bool power_open_dac(void *ctx)
+{
+    (void)ctx;
+    return open_dac() == ESP_OK;
+}
+
+static bool power_close_adc(void *ctx)
+{
+    (void)ctx;
+    if (esp_codec_dev_close(s_adc) != ESP_CODEC_DEV_OK) return false;
+    atomic_store(&s_adc_open, false);
+    return true;
+}
+
+static bool power_close_dac(void *ctx)
+{
+    (void)ctx;
+    if (esp_codec_dev_close(s_dac) != ESP_CODEC_DEV_OK) return false;
+    atomic_store(&s_dac_open, false);
+    return true;
+}
+
+static void power_set_pa(void *ctx, bool on)
+{
+    (void)ctx;
+    portENTER_CRITICAL(&s_pa_lock);
+    on = on && !atomic_load(&s_muted) && !atomic_load(&s_sleeping);
+    speaker_pa_set(on);
+    atomic_store(&s_pa_on, on);
+    portEXIT_CRITICAL(&s_pa_lock);
+}
+
+static const jr_audio_power_ops_t s_power_ops = {
+    .open_adc = power_open_adc, .close_adc = power_close_adc,
+    .open_dac = power_open_dac, .close_dac = power_close_dac,
+    .set_pa = power_set_pa,
+};
+
+/* RX and TX remain concurrent at steady state. Only transitions take both
+ * guards (ADC then DAC), so closing either codec cannot race read/write or
+ * channel gain changes. Codec-dev's S3 shared-I2S adapter defers DMA disable
+ * until the other codec also closes; closing ADC still stops its analog path. */
+static bool audio_reconcile(TickType_t budget)
+{
+    bool mic = atomic_load(&s_microphone_enabled);
+    bool sleeping = atomic_load(&s_sleeping);
+    bool pending = !atomic_load(&s_muted) && jr_audio_playback_pending();
+    bool want_adc = mic && !sleeping;
+    bool want_dac = !sleeping && (want_adc || pending);
+    bool want_pa = !sleeping && pending;
+    if (atomic_load(&s_adc_open) == want_adc &&
+        atomic_load(&s_dac_open) == want_dac &&
+        atomic_load(&s_pa_on) == want_pa) return true;
+    if (s_adc_guard == NULL || s_dac_guard == NULL) return false;
+    TickType_t started = xTaskGetTickCount();
+    if (xSemaphoreTake(s_adc_guard, budget) != pdTRUE) {
+        atomic_fetch_add(&s_power_failures, 1u);
+        return false;
+    }
+    TickType_t used = xTaskGetTickCount() - started;
+    TickType_t remaining = used < budget ? budget - used : 0;
+    if (xSemaphoreTake(s_dac_guard, remaining) != pdTRUE) {
+        xSemaphoreGive(s_adc_guard);
+        atomic_fetch_add(&s_power_failures, 1u);
+        return false;
+    }
+    /* Requests may have changed while either channel was in flight. */
+    mic = atomic_load(&s_microphone_enabled);
+    sleeping = atomic_load(&s_sleeping);
+    pending = !atomic_load(&s_muted) && jr_audio_playback_pending();
+    /* Join the electrical fast-kill latch before a rapid unmute. */
+    s_power.pa_on = atomic_load(&s_pa_on);
+    bool ok = jr_audio_power_reconcile(&s_power, mic, pending, sleeping,
+                                       &s_power_ops);
+    xSemaphoreGive(s_dac_guard);
+    xSemaphoreGive(s_adc_guard);
+    if (!ok) atomic_fetch_add(&s_power_failures, 1u);
+    return ok;
+}
+
+/* Recover a dead microphone lane: close the ADC and open it again through the
+ * same reconcile the privacy and sleep paths use, which re-runs the codec's
+ * mic select. Only ever called for a microphone that is already meant to be
+ * open, and the second reconcile re-reads the request, so a mute or sleep that
+ * lands between the two leaves the ADC closed rather than reopening it. Called
+ * by the capture caller with no guard held; takes both guards in the order
+ * audio_reconcile does. */
+static void mic_reopen_cycle(void)
+{
+    if (s_adc_guard == NULL || s_dac_guard == NULL) return;
+    if (xSemaphoreTake(s_adc_guard, pdMS_TO_TICKS(200)) != pdTRUE) return;
+    if (xSemaphoreTake(s_dac_guard, pdMS_TO_TICKS(200)) != pdTRUE) {
+        xSemaphoreGive(s_adc_guard);
+        return;
+    }
+    bool ok = false;
+    if (atomic_load(&s_microphone_enabled) && !atomic_load(&s_sleeping)) {
+        bool pending = !atomic_load(&s_muted) && jr_audio_playback_pending();
+        s_power.pa_on = atomic_load(&s_pa_on);
+        ok = jr_audio_power_reconcile(&s_power, false, pending, false, &s_power_ops);
+        bool mic = atomic_load(&s_microphone_enabled);
+        bool sleeping = atomic_load(&s_sleeping);
+        pending = !atomic_load(&s_muted) && jr_audio_playback_pending();
+        s_power.pa_on = atomic_load(&s_pa_on);
+        ok = jr_audio_power_reconcile(&s_power, mic, pending, sleeping,
+                                      &s_power_ops) && ok;
+    }
+    xSemaphoreGive(s_dac_guard);
+    xSemaphoreGive(s_adc_guard);
+    if (!ok) atomic_fetch_add(&s_power_failures, 1u);
+    ESP_LOGW(TAG, "mic dead: ADC reopened (recovery %u, ok=%d)",
+             (unsigned)atomic_load(&s_mic_recoveries), (int)ok);
+}
+
+static bool capture_read_hardware(void *ctx)
+{
+    (void)ctx;
+    atomic_fetch_add(&s_hardware_reads, 1u);
+    return esp_codec_dev_read(s_adc, s_raw_cap, GL_CAP_RAW_BYTES) == ESP_CODEC_DEV_OK;
+}
+
+static void capture_wait_frame(void *ctx, uint32_t ms)
+{
+    (void)ctx;
+    /* Carry the sub-tick remainder: CONFIG_FREERTOS_HZ=100 alternates 30/40
+     * ms waits for a 32 ms mean cadence, rather than accumulating drift. */
+    static TickType_t next;
+    static uint32_t remainder;
+    TickType_t now = xTaskGetTickCount();
+    if (next == 0 || (int32_t)(now - next) > (int32_t)pdMS_TO_TICKS(100)) {
+        next = now;
+        remainder = 0;
+    }
+    remainder += ms * configTICK_RATE_HZ;
+    next += remainder / 1000u;
+    remainder %= 1000u;
+    if ((int32_t)(next - now) > 0) vTaskDelay(next - now);
+}
+
+static bool capture_microphone_enabled(void *ctx)
+{
+    (void)ctx;
+    return atomic_load(&s_microphone_enabled) && !atomic_load(&s_sleeping);
+}
+
+static const jr_audio_capture_ops_t s_capture_ops = {
+    .read_hardware = capture_read_hardware, .wait_frame = capture_wait_frame,
+    .microphone_enabled = capture_microphone_enabled,
+};
 
 /* ======================================================================== *
  *  capture DSP                                                             *
@@ -492,11 +769,99 @@ static void downsample_24to16_4lane(const int16_t *in, int16_t *out)
     }
 }
 
+/* One canceller handle for (mode, filter), refused unless its chunk is exactly
+ * one uplink frame.
+ *
+ * Only the boot default is tried in internal RAM, with PSRAM as its fallback.
+ * Every other pair goes straight to PSRAM: esp-sr does not survive a failed
+ * internal allocation. ?aecmode=6 on 2026-11-11 panicked twice in
+ * esp_aec3_dlfft_init (StoreProhibited at address 0, core dump decoded) with
+ * 21 KB as the largest internal block, instead of returning NULL. A knob must
+ * not be able to do that, and a bench variant has no claim on internal RAM
+ * anyway. */
+static aec_handle_t *aec_build(int mode, int filter)
+{
+    const bool boot_default = mode == GL_AEC_MODE &&
+                              filter == GL_AEC_FILTER_LENGTH;
+    aec_config_t cfg = {
+        .mic_num       = 1,
+        .ref_num       = 1,
+        .out_num       = 1,
+        .filter_length = filter,
+        .sample_rate   = GL_TX_SAMPLE_RATE,    /* MUST be 16000 per header */
+        .caps          = boot_default ? (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+                                      : MALLOC_CAP_SPIRAM,
+        .mode          = (aec_mode_t)mode,
+        .nlp_level     = AEC_NLP_LEVEL_AGGR,
+    };
+    aec_handle_t *h = aec_create_from_config(&cfg);
+    if (h == NULL && boot_default) {
+        cfg.caps = MALLOC_CAP_SPIRAM;
+        h = aec_create_from_config(&cfg);
+    }
+    if (h != NULL) {
+        int cs = aec_get_chunksize(h);
+        if (cs != GL_TX_SAMPLES_PER_CHUNK) {
+            ESP_LOGW(TAG, "aec chunksize %d != %d — disabling AEC (pass-through)",
+                     cs, GL_TX_SAMPLES_PER_CHUNK);
+            aec_destroy(h);
+            h = NULL;
+        }
+    }
+    return h;
+}
+
+/* Apply a pending ?aecmode= / ?aecfilter= request. Called by the capture
+ * caller (src_read) with the ADC guard held, between frames, so nothing is
+ * inside aec_process; httpd only stores the request. Destroys the handle and
+ * builds the new one; if that fails the previous configuration is rebuilt, and
+ * if that fails too the capture runs un-cancelled (s_aec NULL = pass-through).
+ * The filter restarts from zero, so the first second after a change is not a
+ * measurement. Internal RAM's largest block is logged before and after. */
+static void aec_apply_pending(void)
+{
+    int mode = atomic_exchange(&s_aec_mode_req, -1);
+    int filt = atomic_exchange(&s_aec_filter_req, -1);
+    if (mode < 0 && filt < 0) return;
+    if (mode < 0) mode = s_aec_mode_active;
+    if (filt < 0) filt = s_aec_filter_active;
+    if (mode == s_aec_mode_active && filt == s_aec_filter_active &&
+        s_aec != NULL) {
+        return;
+    }
+    const size_t before = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    const int64_t t0 = esp_timer_get_time();
+    if (s_aec != NULL) {
+        aec_handle_t *old = s_aec;
+        s_aec = NULL;                      /* nothing runs it while we rebuild */
+        aec_destroy(old);
+    }
+    s_aec = aec_build(mode, filt);
+    if (s_aec != NULL) {
+        s_aec_mode_active = mode;
+        s_aec_filter_active = filt;
+        atomic_fetch_add(&s_aec_reconfigs, 1u);
+    } else {
+        atomic_fetch_add(&s_aec_reconfig_fails, 1u);
+        ESP_LOGW(TAG, "aec rebuild mode=%d filter=%d failed — restoring %d/%d",
+                 mode, filt, s_aec_mode_active, s_aec_filter_active);
+        s_aec = aec_build(s_aec_mode_active, s_aec_filter_active);
+    }
+    atomic_store(&s_aec_mode_pub, s_aec_mode_active);
+    atomic_store(&s_aec_filter_pub, s_aec_filter_active);
+    ESP_LOGI(TAG, "aec now mode=%d filter=%d %s (%lld ms); largest internal "
+             "block %u -> %u", s_aec_mode_active, s_aec_filter_active,
+             s_aec ? "on" : "OFF", (long long)((esp_timer_get_time() - t0) / 1000),
+             (unsigned)before,
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+}
+
 /* Uplink digital make-up with a soft knee to keep the AEC-clean signal audible
  * without harsh clipping. */
-static inline int16_t soft_gain(int32_t x)
+static inline int16_t soft_gain(int32_t x, int32_t gain_q8)
 {
-    int32_t g = (x * GL_OUT_GAIN_Q8) >> 8;
+    /* |x| <= 32768 and gain_q8 <= JR_UPLINK_MAKEUP_MAX_Q8 (2^14): fits int32. */
+    int32_t g = (x * gain_q8) >> 8;
     /* soft knee above ~85% FS */
     const int32_t knee = 28000;
     if (g > knee) {
@@ -513,13 +878,36 @@ static inline int16_t soft_gain(int32_t x)
 static int src_read(void *ctx, jr_pcm_t *frame, size_t max_samples)
 {
     (void)ctx;
-    if (!s_ready || !s_adc_open || frame == NULL || max_samples == 0) {
+    if (!s_ready || frame == NULL || max_samples == 0 || atomic_load(&s_sleeping)) {
         return 0;
     }
-
-    int r = esp_codec_dev_read(s_adc, s_raw_cap, GL_CAP_RAW_BYTES);
-    if (r != ESP_CODEC_DEV_OK) {
-        return 0;   /* nothing this tick */
+    size_t n = (max_samples < (size_t)GL_TX_SAMPLES_PER_CHUNK)
+                   ? max_samples : (size_t)GL_TX_SAMPLES_PER_CHUNK;
+    /* How long this read was blocked (guard + codec), not how long it took:
+     * the canceller below is work, and the voice loop's pacing must be able to
+     * tell a read that waited for its frame from one that only computed. */
+    const int64_t wait_t0 = esp_timer_get_time();
+    if (xSemaphoreTake(s_adc_guard, pdMS_TO_TICKS(100)) != pdTRUE) return 0;
+    aec_apply_pending();
+    jr_audio_capture_result_t capture = jr_audio_power_capture(
+        atomic_load(&s_microphone_enabled), atomic_load(&s_adc_open),
+        frame, n, &s_capture_ops);
+    atomic_store(&s_last_wait_us, (uint32_t)(esp_timer_get_time() - wait_t0));
+    if (capture != JR_AUDIO_CAPTURE_LIVE || !atomic_load(&s_microphone_enabled)) {
+        jr_spectrum_reset(&s_mic_spec);
+        if (!atomic_load(&s_pb_spec_active)) {
+            spec_clear();
+        }
+        if (capture == JR_AUDIO_CAPTURE_SILENT ||
+            (capture == JR_AUDIO_CAPTURE_LIVE && !atomic_load(&s_microphone_enabled))) {
+            memset(frame, 0, n * sizeof(*frame));
+            atomic_store(&s_clean_rms_q8, 0u);
+            atomic_fetch_add(&s_silent_frames, 1u);
+            xSemaphoreGive(s_adc_guard);
+            return (int)n;
+        }
+        xSemaphoreGive(s_adc_guard);
+        return 0;
     }
     downsample_24to16_4lane(s_raw_cap, s_raw16);
 
@@ -531,6 +919,17 @@ static int src_read(void *ctx, jr_pcm_t *frame, size_t max_samples)
     }
     tap_write(JR_AUDIO_TAP_MIC_RAW, s_aec_mic,
               GL_TX_SAMPLES_PER_CHUNK);
+    /* Is the lane alive? Judged on the raw microphone lane, before AEC and
+     * make-up gain, and only while the microphone is meant to be open. */
+    bool reopen_mic = jr_mic_watch_frame(
+        &s_mic_watch, (uint32_t)(esp_timer_get_time() / 1000),
+        jr_dsp_rms(s_aec_mic, GL_TX_SAMPLES_PER_CHUNK),
+        atomic_load(&s_adc_open),
+        jr_mic_watch_meant_open(atomic_load(&s_microphone_enabled),
+                                atomic_load(&s_sleeping),
+                                atomic_load(&s_capture_speaking)));
+    atomic_store(&s_mic_dead, s_mic_watch.dead);
+    atomic_store(&s_mic_recoveries, s_mic_watch.recoveries);
     tap_write(JR_AUDIO_TAP_REFERENCE, s_aec_ref,
               GL_TX_SAMPLES_PER_CHUNK);
 
@@ -547,9 +946,6 @@ static int src_read(void *ctx, jr_pcm_t *frame, size_t max_samples)
         clean = s_aec_mic;
     }
 
-    size_t n = (max_samples < (size_t)GL_TX_SAMPLES_PER_CHUNK)
-                   ? max_samples : (size_t)GL_TX_SAMPLES_PER_CHUNK;
-
     /* Measure the AEC-clean signal BEFORE the uplink make-up gain.
      *
      * `frame` below is amplified GL_OUT_GAIN_Q8 (6x) so Gemini can hear the
@@ -562,16 +958,115 @@ static int src_read(void *ctx, jr_pcm_t *frame, size_t max_samples)
     float clean_rms = jr_dsp_rms(clean, n);
     atomic_store(&s_clean_rms_q8, (uint32_t)(clean_rms * 256.0f));
 
+    /* Feed live capture spectrum only when unmuted (not privacy-paused) and
+     * speaker playback is not active, so visuals dance to room/voice audio
+     * while listening and to Jarvis's speech while replying. */
+    if (atomic_load(&s_microphone_enabled) && !atomic_load(&s_sleeping) &&
+        !jr_audio_playback_pending() && !atomic_load(&s_pb_spec_active)) {
+        jr_spectrum_feed(&s_mic_spec, clean, n);
+        if (atomic_load(&s_microphone_enabled) && !atomic_load(&s_sleeping) &&
+            !jr_audio_playback_pending() && !atomic_load(&s_pb_spec_active)) {
+            spec_publish(s_mic_spec.bands);
+        } else if (!atomic_load(&s_pb_spec_active)) {
+            jr_spectrum_reset(&s_mic_spec);
+            spec_clear();
+        }
+    } else {
+        jr_spectrum_reset(&s_mic_spec);
+    }
+
+    /* Make-up for the PGA that is really applied: while speaking the PGA is
+     * turned down for the canceller and the owner's level is given back here,
+     * after it. Computed per frame from the codec bookkeeping, so the switch
+     * lands on the first frame after the PGA write took effect (the exact
+     * conversion frame inside the ES7210 is not knowable); clean_rms above
+     * stays pre-gain. */
+    const int32_t makeup_q8 = (int32_t)jr_uplink_makeup_q8(
+        (uint32_t)GL_OUT_GAIN_Q8, atomic_load(&s_mic_db),
+        atomic_load(&s_applied_mic_db), atomic_load(&s_speak_gain_pct));
     for (size_t i = 0; i < n; ++i) {
-        frame[i] = soft_gain((int32_t)clean[i]);
+        frame[i] = soft_gain((int32_t)clean[i], makeup_q8);
     }
     tap_write(JR_AUDIO_TAP_MIC_CLEAN, frame, n);
+    if (!atomic_load(&s_microphone_enabled)) {
+        memset(frame, 0, n * sizeof(*frame));
+        atomic_store(&s_clean_rms_q8, 0u);
+        jr_spectrum_reset(&s_mic_spec);
+        if (!atomic_load(&s_pb_spec_active)) {
+            spec_clear();
+        }
+    }
+    xSemaphoreGive(s_adc_guard);
+    if (reopen_mic) mic_reopen_cycle();
     return (int)n;
+}
+
+uint32_t jr_audio_last_read_wait_us(void)
+{
+    return atomic_load(&s_last_wait_us);
+}
+
+int jr_audio_aec_bench(int frames, uint32_t *max_us)
+{
+    if (frames <= 0 || !s_ready || s_aec == NULL || s_aec_mic == NULL ||
+        s_aec_ref == NULL || s_aec_clean == NULL) {
+        return -1;
+    }
+    /* The same guard src_read holds around aec_process, so a bench can never
+     * run the canceller concurrently with a capture or a rebuild. */
+    if (xSemaphoreTake(s_adc_guard, pdMS_TO_TICKS(100)) != pdTRUE) return -1;
+    /* A muted idle device never reads, so a pending ?aecmode= / ?aecfilter=
+     * would wait for the next live frame. Apply it here, under the same guard
+     * and from the same task as src_read, so modes can be compared muted. */
+    aec_apply_pending();
+    if (s_aec == NULL) {
+        xSemaphoreGive(s_adc_guard);
+        return -1;
+    }
+    uint32_t seed = 0x9E3779B9u;
+    uint64_t sum = 0;
+    uint32_t worst = 0;
+    for (int f = 0; f < frames; ++f) {
+        for (int i = 0; i < GL_TX_SAMPLES_PER_CHUNK; ++i) {
+            seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+            s_aec_ref[i] = (int16_t)((int32_t)(seed & 0x1FFFu) - 0x1000);
+            seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+            s_aec_mic[i] = (int16_t)((int32_t)(seed & 0x1FFFu) - 0x1000);
+        }
+        const int64_t t0 = esp_timer_get_time();
+        aec_process(s_aec, s_aec_mic, s_aec_ref, s_aec_clean);
+        const uint32_t us = (uint32_t)(esp_timer_get_time() - t0);
+        sum += us;
+        if (us > worst) worst = us;
+        if ((f & 7) == 7) {
+            vTaskDelay(1);   /* IDLE1 and the display get a tick, as in capture */
+        }
+    }
+    xSemaphoreGive(s_adc_guard);
+    if (max_us != NULL) *max_us = worst;
+    return (int)(sum / (uint64_t)frames);
 }
 
 float jr_audio_clean_rms(void)
 {
     return (float)atomic_load(&s_clean_rms_q8) / 256.0f;
+}
+
+uint16_t jr_audio_playback_live_rms(void)
+{
+    const uint32_t rms = atomic_load(&s_pb_live_rms);
+    return (uint16_t)(rms > 32767u ? 32767u : rms);
+}
+
+void jr_audio_get_spectrum(uint8_t out_bands[16])
+{
+    if (out_bands == NULL) {
+        return;
+    }
+    const uint64_t lo = atomic_load_explicit(&s_spec_lo, memory_order_relaxed);
+    const uint64_t hi = atomic_load_explicit(&s_spec_hi, memory_order_relaxed);
+    memcpy(&out_bands[0], &lo, sizeof(lo));
+    memcpy(&out_bands[8], &hi, sizeof(hi));
 }
 
 /* ======================================================================== *
@@ -593,7 +1088,8 @@ static size_t pb_enqueue(const int16_t *frame, size_t samples,
     if (diagnostic) {
         atomic_store(&s_pb_skip_prime, true);
     }
-    if (diagnostic || !atomic_load(&s_diag_chirp_enqueuing)) {
+    if (!atomic_load(&s_sleeping) &&
+        (diagnostic || !atomic_load(&s_diag_chirp_enqueuing))) {
         const size_t level = pb_count_locked();
         size_t free_slots = PB_RING_SAMPLES - 1 - level;
         size_t take = (samples < free_slots) ? samples : free_slots;
@@ -617,6 +1113,7 @@ static size_t pb_enqueue(const int16_t *frame, size_t samples,
         }
     }
     portEXIT_CRITICAL(&s_pb_lock);
+    if (accepted > 0 && s_feeder != NULL) xTaskNotifyGive(s_feeder);
     return accepted;
 }
 
@@ -705,15 +1202,25 @@ static int sink_write(void *ctx, const jr_pcm_t *frame, size_t samples)
 static void sink_mute_now(void *ctx)
 {
     (void)ctx;
+    atomic_store(&s_cue_restore, false);   /* a real mute: nothing is owed */
     atomic_store(&s_muted, true);
-    if (s_dac_open) {
-        esp_codec_dev_set_out_mute(s_dac, true);
+    power_set_pa(NULL, false); /* immediate electrical kill during a write */
+    if (s_dac_guard != NULL && xSemaphoreTake(s_dac_guard, 0) == pdTRUE) {
+        if (atomic_load(&s_dac_open)) esp_codec_dev_set_out_mute(s_dac, true);
+        xSemaphoreGive(s_dac_guard);
     }
     portENTER_CRITICAL(&s_pb_lock);
     pb_flush_locked();
     portEXIT_CRITICAL(&s_pb_lock);
     atomic_store(&s_playback_tail_until_ms, 0);
+    atomic_store(&s_pb_live_rms, 0u);
+    atomic_store(&s_pb_spec_active, false);
+    atomic_store(&s_pb_spec_reset_req, true);
+    spec_clear();
+    if (s_feeder != NULL) xTaskNotifyGive(s_feeder);
 }
+
+static void cue_settle_mute(void);
 
 /* The feeder's one write chunk. Static, not on the task stack: 1536 B on a
  * 4096 B internal-RAM stack left 524 B of headroom once ESP_LOGW's vprintf
@@ -725,10 +1232,16 @@ static void feeder_task(void *arg)
     (void)arg;
     int16_t *const chunk = s_feed_chunk;
     jr_jitter_init(&s_jitter, atomic_load(&s_pb_preroll_ms));
+    jr_spectrum_init(&s_pb_spec);
     s_pb_prime_target = atomic_load(&s_pb_preroll_ms) * 24u;
     for (;;) {
-        if (atomic_load(&s_muted) || !s_dac_open) {
-            vTaskDelay(pdMS_TO_TICKS(10));
+        (void)audio_reconcile(pdMS_TO_TICKS(100));
+        if (atomic_load(&s_muted) || !atomic_load(&s_dac_open) ||
+            atomic_load(&s_sleeping)) {
+            s_pb_prev_wrote = false;
+            atomic_store(&s_pb_live_rms, 0u);
+            pb_spec_clear_if_active();
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
             continue;
         }
         const int32_t req = atomic_exchange(&s_pb_preroll_req, -1);
@@ -759,14 +1272,40 @@ static void feeder_task(void *arg)
             } else {
                 hold = true;
             }
+            /* A hold that follows a hole is silence the hold itself adds on
+             * top of the network's: book how long it lasted. */
+            if (s_pb_refill_hold_open && s_pb_prime_start_ms != 0u) {
+                if (s_pb_primed) {
+                    const uint32_t held = now_ms - s_pb_prime_start_ms;
+                    atomic_fetch_add(&s_pb_refill_holds, 1u);
+                    atomic_fetch_add(&s_pb_refill_hold_total_ms, held);
+                    if (held > atomic_load(&s_pb_refill_hold_max_ms)) {
+                        atomic_store(&s_pb_refill_hold_max_ms, held);
+                    }
+                    s_pb_refill_hold_open = false;
+                }
+            }
+        }
+        /* The feeder's own stall: this pass has audio waiting and the last one
+         * wrote some, so the gap between them should be one chunk (~32 ms). */
+        if (avail > 0 && s_pb_prev_wrote && !hold) {
+            const uint32_t gap = now_ms - s_pb_prev_pass_ms;
+            if (gap > atomic_load(&s_pb_feeder_stall_max_ms)) {
+                atomic_store(&s_pb_feeder_stall_max_ms, gap);
+            }
         }
         size_t take = hold ? 0 : (avail < PB_FEED_CHUNK) ? avail : PB_FEED_CHUNK;
+        /* Publish before dequeue: the ring can become empty while this chunk
+         * still owns the DAC. Lifecycle readers use the same ring lock. */
+        if (take > 0) atomic_store(&s_feeder_writing, true);
         for (size_t i = 0; i < take; ++i) {
             chunk[i] = s_pb[s_pb_head];
             s_pb_head = (s_pb_head + 1) % PB_RING_SAMPLES;
         }
         got = take;
         portEXIT_CRITICAL(&s_pb_lock);
+        s_pb_prev_pass_ms = now_ms;
+        s_pb_prev_wrote = got > 0;
 
         /* One pass of the reply / hole inference; book what it reports. It
          * sees nothing while an earcon owns the ring — the pure stepper's
@@ -781,6 +1320,9 @@ static void feeder_task(void *arg)
             }
             ESP_LOGW(TAG, "playback underrun: %u ms hole mid-reply",
                      (unsigned)jo.hole_ms);
+        }
+        if (jo.hole_ignored) {
+            atomic_fetch_add(&s_pb_holes_ignored, 1u);
         }
         if (jo.gap_ended) {
             atomic_fetch_add(&s_pb_gaps_ended_by_silence, 1u);
@@ -797,10 +1339,27 @@ static void feeder_task(void *arg)
             }
         }
         if (hold) {
-            vTaskDelay(1);
+            atomic_store(&s_pb_live_rms, 0u);
+            pb_spec_clear_if_active();
+            /* Event-driven pre-roll wait: pb_enqueue wakes us immediately as
+             * chunks arrive; bounded timeout guarantees PB_PRIME_MAX_WAIT_MS
+             * fires on time even for a short reply. */
+            uint32_t wait_ms = 100u;
+            if (s_pb_prime_start_ms != 0u) {
+                const uint32_t elapsed = now_ms - s_pb_prime_start_ms;
+                const uint32_t rem = elapsed < PB_PRIME_MAX_WAIT_MS
+                                         ? PB_PRIME_MAX_WAIT_MS - elapsed : 10u;
+                if (rem < wait_ms) {
+                    wait_ms = rem < 10u ? 10u : rem;
+                }
+            }
+            const TickType_t wait_ticks = pdMS_TO_TICKS(wait_ms);
+            (void)ulTaskNotifyTake(pdTRUE, wait_ticks > 0 ? wait_ticks : 1);
             continue;
         }
         if (got == 0) {
+            atomic_store(&s_pb_live_rms, 0u);
+            pb_spec_clear_if_active();
             if (jo.gap_opened) {
                 /* The ring ran dry while the tail of the last write was still
                  * audible: a hole. Whatever arrives next must rebuild a
@@ -808,23 +1367,72 @@ static void feeder_task(void *arg)
                 s_pb_primed = false;
                 s_pb_prime_start_ms = 0u;
                 s_pb_prime_target = atomic_load(&s_pb_refill_ms) * 24u;
+                s_pb_refill_hold_open = true;
             }
             /* Once the ring has been empty long enough that whatever comes
              * next is a new reply, re-arm the smaller start-of-reply lead. */
             if (jo.idle) {
+                s_pb_refill_hold_open = false;   /* a new reply, not a hole */
                 s_pb_primed = false;
                 s_pb_prime_start_ms = 0u;
                 s_pb_prime_target = atomic_load(&s_pb_preroll_ms) * 24u;
             }
-            /* CONFIG_FREERTOS_HZ=100: pdMS_TO_TICKS(5) truncates to zero and
-             * merely yields to equal-priority tasks, starving IDLE0 forever. */
-            vTaskDelay(1);
+            cue_settle_mute();
+            /* Event-driven idle sleep: woken immediately by pb_enqueue, earcon
+             * commit, or mute/unmute; bounded to 100 ms (or sooner when an
+             * audible DAC tail is settling) so jitter idle, cue_settle_mute,
+             * and PA turn-off stay prompt without a 100 Hz prio-19 spin. */
+            uint32_t wait_ms = 100u;
+            const uint32_t tail = atomic_load(&s_playback_tail_until_ms);
+            const int32_t tail_rem = (int32_t)(tail - now_ms);
+            if (tail_rem > 0 && (uint32_t)tail_rem + 10u < wait_ms) {
+                wait_ms = (uint32_t)tail_rem + 10u;
+            }
+            const TickType_t wait_ticks = pdMS_TO_TICKS(wait_ms);
+            (void)ulTaskNotifyTake(pdTRUE, wait_ticks > 0 ? wait_ticks : 1);
             continue;
         }
-        atomic_store(&s_feeder_writing, true);
-        int wr = esp_codec_dev_write(s_dac, chunk,
-                                     (int)(got * sizeof(int16_t)));
+        int wr = -1;
+        xSemaphoreTake(s_dac_guard, portMAX_DELAY);
+        if (!atomic_load(&s_muted) && !atomic_load(&s_sleeping) &&
+            atomic_load(&s_dac_open)) {
+            if (!earcon) {
+                /* Fast 1-in-4 decimated RMS at DAC write seam (0..32767) so
+                 * speech visuals track audible speaker output, not network arrival. */
+                uint64_t sum_sq = 0u;
+                uint32_t n = 0u;
+                for (size_t i = 0u; i < got; i += 4u) {
+                    const int32_t v = chunk[i];
+                    sum_sq += (uint64_t)((int64_t)v * (int64_t)v);
+                    n++;
+                }
+                uint32_t rms = n > 0u ? (uint32_t)sqrtf((float)sum_sq / (float)n) : 0u;
+                if (rms > 32767u) {
+                    rms = 32767u;
+                }
+                atomic_store(&s_pb_live_rms, rms);
+                if (atomic_exchange(&s_pb_spec_reset_req, false)) {
+                    jr_spectrum_reset(&s_pb_spec);
+                }
+                jr_spectrum_feed(&s_pb_spec, chunk, got);
+                atomic_store(&s_pb_spec_active, true);
+                spec_publish(s_pb_spec.bands);
+            } else {
+                atomic_store(&s_pb_live_rms, 0u);
+                pb_spec_clear_if_active();
+            }
+            wr = esp_codec_dev_write(s_dac, chunk,
+                                    (int)(got * sizeof(int16_t)));
+        } else {
+            atomic_store(&s_pb_live_rms, 0u);
+            pb_spec_clear_if_active();
+        }
+        /* Publish the tail BEFORE dropping in-flight ownership. */
+        atomic_store(&s_playback_tail_until_ms,
+                     atomic_load(&s_muted) || wr != ESP_CODEC_DEV_OK
+                         ? 0u : (uint32_t)(esp_timer_get_time() / 1000) + 80u);
         atomic_store(&s_feeder_writing, false);
+        xSemaphoreGive(s_dac_guard);
         /* After the write, so the earcon's tail in the stepper starts where
          * the DAC's does: the first pass with no outstanding samples. */
         if (earcon) {
@@ -843,10 +1451,6 @@ static void feeder_task(void *arg)
          * add a one-tick delay here: at 100 Hz that is 10 ms after every 32 ms
          * of PCM, which guarantees gaps and makes the producer outrun playback.
          * The empty-ring path above still blocks for one tick so IDLE0 runs. */
-        atomic_store(&s_playback_tail_until_ms,
-                     atomic_load(&s_muted) || wr != ESP_CODEC_DEV_OK
-                         ? 0u
-                         : (uint32_t)(esp_timer_get_time() / 1000) + 80u);
     }
 }
 
@@ -870,6 +1474,12 @@ esp_err_t jr_audio_init(void)
     }
 
     acquire_handles();
+    jr_mic_watch_init(&s_mic_watch);
+    jr_spectrum_init(&s_mic_spec);
+    spec_clear();
+    s_adc_guard = xSemaphoreCreateMutex();
+    s_dac_guard = xSemaphoreCreateMutex();
+    if (s_adc_guard == NULL || s_dac_guard == NULL) return ESP_ERR_NO_MEM;
 
     /* capture/downsample scratch (PSRAM ok) */
     s_raw_cap = (int16_t *)heap_caps_malloc(GL_CAP_RAW_BYTES, MALLOC_CAP_SPIRAM);
@@ -902,38 +1512,18 @@ esp_err_t jr_audio_init(void)
     (void)diag_taps_init();
 
     /* open ADC first, then DAC (muted at rest) — spec §codec-bringup §2. */
-    esp_err_t adc_err = open_adc();
-    esp_err_t dac_err = open_dac();
-    if (dac_err == ESP_OK) {
-        esp_codec_dev_set_out_mute(s_dac, true);
-        atomic_store(&s_muted, true);
-    }
+    atomic_store(&s_muted, true);
+    /* Validate and restore the codec settings once, then honor boot privacy
+     * before either task can capture. Both closes release shared I2S clocks. */
+    bool codecs_ok = jr_audio_power_reconcile(&s_power, true, false, false,
+                                               &s_power_ops);
+    codecs_ok = jr_audio_power_reconcile(&s_power, false, false, false,
+                                         &s_power_ops) && codecs_ok;
 
-    /* create the AEC: FD_LOW_COST, filter 4, 16 kHz, 1 mic + 1 ref. */
-    aec_config_t aec_cfg = {
-        .mic_num       = 1,
-        .ref_num       = 1,
-        .out_num       = 1,
-        .filter_length = GL_AEC_FILTER_LENGTH,
-        .sample_rate   = GL_TX_SAMPLE_RATE,    /* MUST be 16000 per header */
-        .caps          = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT,
-        .mode          = GL_AEC_MODE,
-        .nlp_level     = AEC_NLP_LEVEL_AGGR,
-    };
-    s_aec = aec_create_from_config(&aec_cfg);
+    /* create the AEC: FD_LOW_COST, filter 4, 16 kHz, 1 mic + 1 ref (the
+     * defaults; ?aecmode= / ?aecfilter= change them at run time). */
+    s_aec = aec_build(GL_AEC_MODE, GL_AEC_FILTER_LENGTH);
     if (s_aec == NULL) {
-        aec_cfg.caps = MALLOC_CAP_SPIRAM;
-        s_aec = aec_create_from_config(&aec_cfg);
-    }
-    if (s_aec != NULL) {
-        int cs = aec_get_chunksize(s_aec);
-        if (cs != GL_TX_SAMPLES_PER_CHUNK) {
-            ESP_LOGW(TAG, "aec chunksize %d != %d — disabling AEC (pass-through)",
-                     cs, GL_TX_SAMPLES_PER_CHUNK);
-            aec_destroy(s_aec);
-            s_aec = NULL;
-        }
-    } else {
         ESP_LOGW(TAG, "aec create failed — capture runs un-cancelled");
     }
 
@@ -952,15 +1542,16 @@ esp_err_t jr_audio_init(void)
      * Stack INTERNAL first (fast, no PSRAM-cache-miss jitter in the realtime
      * path), PSRAM fallback only if internal is exhausted at init. */
     BaseType_t feeder_ok = xTaskCreatePinnedToCore(feeder_task, "jr_pb_feed",
-                                                   4096, NULL, 19, &s_feeder, 0);
+                                                   PB_FEEDER_STACK, NULL, 19,
+                                                   &s_feeder, 0);
 #if defined(CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM) && \
     CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM && defined(CONFIG_SPIRAM) && \
     CONFIG_SPIRAM
     if (feeder_ok != pdPASS) {
         s_feeder = NULL;
         feeder_ok = xTaskCreatePinnedToCoreWithCaps(feeder_task, "jr_pb_feed",
-                                                    4096, NULL, 19, &s_feeder,
-                                                    0,
+                                                    PB_FEEDER_STACK, NULL, 19,
+                                                    &s_feeder, 0,
                                                     MALLOC_CAP_SPIRAM |
                                                     MALLOC_CAP_8BIT);
     }
@@ -973,12 +1564,44 @@ esp_err_t jr_audio_init(void)
 
     s_ready = true;
     ESP_LOGI(TAG, "audio init: adc=%s dac=%s aec=%s",
-             adc_err == ESP_OK ? "ok" : "FAIL",
-             dac_err == ESP_OK ? "ok" : "FAIL",
+             codecs_ok ? "ok" : "FAIL",
+             codecs_ok ? "ok" : "FAIL",
              s_aec ? "on" : "off");
     /* ADC is the load-bearing lane; report its status. */
-    return adc_err;
+    return codecs_ok ? ESP_OK : ESP_FAIL;
 }
+
+esp_err_t jr_audio_prepare_sleep(void)
+{
+    if (!s_ready) return ESP_ERR_INVALID_STATE;
+    bool was_sleeping = atomic_exchange(&s_sleeping, true);
+    bool was_muted = atomic_load(&s_muted);
+    sink_mute_now(NULL);
+    if (!audio_reconcile(pdMS_TO_TICKS(200))) {
+        atomic_store(&s_sleeping, was_sleeping);
+        atomic_store(&s_muted, was_muted);
+        if (!was_muted) jr_audio_dac_unmute();
+        if (s_feeder != NULL) xTaskNotifyGive(s_feeder);
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
+}
+
+void jr_audio_power_stats(jr_audio_power_stats_t *out)
+{
+    if (out == NULL) return;
+    *out = (jr_audio_power_stats_t){
+        .microphone_enabled = atomic_load(&s_microphone_enabled),
+        .adc_open = atomic_load(&s_adc_open), .dac_open = atomic_load(&s_dac_open),
+        .pa_on = atomic_load(&s_pa_on), .hardware_reads = atomic_load(&s_hardware_reads),
+        .silent_frames = atomic_load(&s_silent_frames),
+        .failures = atomic_load(&s_power_failures),
+        .gain_failures = atomic_load(&s_gain_failures),
+    };
+}
+
+bool jr_audio_mic_dead(void)          { return atomic_load(&s_mic_dead); }
+uint32_t jr_audio_mic_recoveries(void) { return atomic_load(&s_mic_recoveries); }
 
 jr_audio_source_t jr_audio_source(void)
 {
@@ -1017,6 +1640,11 @@ void jr_audio_playback_stats(jr_audio_playback_stats_t *out)
     out->replies_ended = atomic_load(&s_pb_gaps_ended_by_silence);
     out->prerolls = atomic_load(&s_pb_prerolls);
     out->preroll_timeouts = atomic_load(&s_pb_preroll_timeouts);
+    out->holes_ignored = atomic_load(&s_pb_holes_ignored);
+    out->feeder_stall_max_ms = atomic_load(&s_pb_feeder_stall_max_ms);
+    out->refill_holds = atomic_load(&s_pb_refill_holds);
+    out->refill_hold_max_ms = atomic_load(&s_pb_refill_hold_max_ms);
+    out->refill_hold_total_ms = atomic_load(&s_pb_refill_hold_total_ms);
 }
 
 void jr_audio_playback_stats_reset(void)
@@ -1028,6 +1656,11 @@ void jr_audio_playback_stats_reset(void)
     atomic_store(&s_pb_gaps_ended_by_silence, 0u);
     atomic_store(&s_pb_prerolls, 0u);
     atomic_store(&s_pb_preroll_timeouts, 0u);
+    atomic_store(&s_pb_holes_ignored, 0u);
+    atomic_store(&s_pb_feeder_stall_max_ms, 0u);
+    atomic_store(&s_pb_refill_holds, 0u);
+    atomic_store(&s_pb_refill_hold_max_ms, 0u);
+    atomic_store(&s_pb_refill_hold_total_ms, 0u);
 }
 
 bool jr_audio_playback_pending(void)
@@ -1044,13 +1677,47 @@ bool jr_audio_playback_pending(void)
     return buffered || atomic_load(&s_feeder_writing) || tail_active;
 }
 
+/* Open the DAC. Shared by the real unmute and by a tone, which differ only in
+ * whether the mute is owed back afterwards. */
+static void dac_open_for_playback(void)
+{
+    if (atomic_load(&s_sleeping)) return;
+    atomic_store(&s_muted, false);
+    if (s_dac_guard != NULL &&
+        xSemaphoreTake(s_dac_guard, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (atomic_load(&s_dac_open)) esp_codec_dev_set_out_mute(s_dac, false);
+        xSemaphoreGive(s_dac_guard);
+    }
+    if (s_feeder != NULL) xTaskNotifyGive(s_feeder);
+}
+
 void jr_audio_dac_unmute(void)
 {
-    atomic_store(&s_muted, false);
-    if (s_dac_open) {
-        esp_codec_dev_set_out_mute(s_dac, false);
-        speaker_pa_enable();
+    atomic_store(&s_cue_restore, false);   /* a real unmute: nothing is owed */
+    dac_open_for_playback();
+}
+
+/* The feeder found the ring empty. If a tone owed the mute back and nothing is
+ * left sounding, pay it: the device ends exactly as muted as it began. */
+static void cue_settle_mute(void)
+{
+    if (!atomic_load(&s_cue_restore) || jr_audio_playback_pending()) {
+        return;
     }
+    if (!atomic_exchange(&s_cue_restore, false)) {
+        return;
+    }
+    atomic_store(&s_muted, true);
+    if (s_dac_guard != NULL &&
+        xSemaphoreTake(s_dac_guard, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (atomic_load(&s_dac_open)) esp_codec_dev_set_out_mute(s_dac, true);
+        xSemaphoreGive(s_dac_guard);
+    }
+}
+
+void jr_audio_set_owner_mute_probe(bool (*probe)(void))
+{
+    s_owner_mute_probe = probe;
 }
 
 bool jr_audio_dac_muted(void)
@@ -1064,6 +1731,20 @@ void jr_audio_flush_playback(void)
     pb_flush_locked();
     portEXIT_CRITICAL(&s_pb_lock);
     atomic_store(&s_playback_tail_until_ms, 0);
+    atomic_store(&s_pb_live_rms, 0u);
+    atomic_store(&s_pb_spec_active, false);
+    atomic_store(&s_pb_spec_reset_req, true);
+    spec_clear();
+    if (s_feeder != NULL) xTaskNotifyGive(s_feeder);
+}
+
+static void apply_in_gains_guarded(void)
+{
+    if (s_adc_guard != NULL &&
+        xSemaphoreTake(s_adc_guard, pdMS_TO_TICKS(100)) == pdTRUE) {
+        apply_in_gains();
+        xSemaphoreGive(s_adc_guard);
+    }
 }
 
 void jr_audio_set_gains(int mic_db, int ref_db, int out_vol)
@@ -1071,12 +1752,14 @@ void jr_audio_set_gains(int mic_db, int ref_db, int out_vol)
     if (mic_db >= 0) atomic_store(&s_mic_db, mic_db);
     if (ref_db >= 0) atomic_store(&s_ref_db, ref_db);
     if (mic_db >= 0 || ref_db >= 0) {
-        apply_in_gains();
+        apply_in_gains_guarded();
     }
     if (out_vol >= 0) {
         atomic_store(&s_out_vol, out_vol);
-        if (s_dac_open) {
-            esp_codec_dev_set_out_vol(s_dac, out_vol);
+        if (s_dac_guard != NULL &&
+            xSemaphoreTake(s_dac_guard, pdMS_TO_TICKS(100)) == pdTRUE) {
+            if (atomic_load(&s_dac_open)) esp_codec_dev_set_out_vol(s_dac, out_vol);
+            xSemaphoreGive(s_dac_guard);
         }
     }
 }
@@ -1086,11 +1769,32 @@ int jr_audio_ref_db(void)       { return atomic_load(&s_ref_db); }
 int jr_audio_out_vol(void)      { return atomic_load(&s_out_vol); }
 int jr_audio_speak_mic_db(void) { return atomic_load(&s_mic_speak_db); }
 
+void jr_audio_set_speak_gain_percent(int percent)
+{
+    if (percent >= 0 && percent <= 400) atomic_store(&s_speak_gain_pct, percent);
+}
+int jr_audio_speak_gain_percent(void) { return atomic_load(&s_speak_gain_pct); }
+
+void jr_audio_request_aec(int mode, int filter)
+{
+    /* The modes esp_aec.h defines for one microphone. Stored only: the capture
+     * caller applies it between frames (aec_apply_pending). */
+    if (mode == 0 || mode == 1 || mode == 3 || mode == 4 || mode == 5 ||
+        mode == 6) {
+        atomic_store(&s_aec_mode_req, mode);
+    }
+    if (filter >= 1 && filter <= 8) atomic_store(&s_aec_filter_req, filter);
+}
+int jr_audio_aec_mode(void)   { return atomic_load(&s_aec_mode_pub); }
+int jr_audio_aec_filter(void) { return atomic_load(&s_aec_filter_pub); }
+uint32_t jr_audio_aec_reconfigs(void)      { return atomic_load(&s_aec_reconfigs); }
+uint32_t jr_audio_aec_reconfig_fails(void) { return atomic_load(&s_aec_reconfig_fails); }
+
 void jr_audio_set_speak_mic_db(int speak_db)
 {
     if (speak_db >= 0) {
         atomic_store(&s_mic_speak_db, speak_db);
-        apply_in_gains();
+        apply_in_gains_guarded();
     }
 }
 
@@ -1101,7 +1805,7 @@ void jr_audio_set_speaking(bool speaking)
         /* Re-apply the PGA on the edge, exactly like v4's gl_set_state: the low
          * SPEAKING gain keeps the echo unclipped for the AEC; LISTENING restores
          * the loud gain for the user's voice. */
-        apply_in_gains();
+        apply_in_gains_guarded();
     }
 }
 
@@ -1148,12 +1852,42 @@ void jr_audio_diag_reset(void)
         audio_tap_t *tap = &s_taps[i];
         if (tap->lock != NULL &&
             xSemaphoreTake(tap->lock, portMAX_DELAY) == pdTRUE) {
-            tap->head = 0;
-            tap->count = 0;
-            tap->total = 0;
+            jr_audio_tap_history_clear(&tap->head, &tap->count, &tap->total, true);
             xSemaphoreGive(tap->lock);
         }
     }
+}
+
+void jr_audio_set_microphone_enabled(bool enabled)
+{
+    bool was = atomic_exchange(&s_microphone_enabled, enabled);
+    if (was && !enabled) atomic_store(&s_clear_capture_taps, true);
+    if (!s_ready) return;
+    (void)audio_reconcile(pdMS_TO_TICKS(200));
+    if (atomic_load(&s_clear_capture_taps) && atomic_load(&s_taps_ready) &&
+        xSemaphoreTake(s_adc_guard, pdMS_TO_TICKS(100)) == pdTRUE) {
+        /* Join any in-flight DSP before erasing the captured microphone and
+         * reference history. Playback evidence remains available. */
+        for (int i = 0; i < JR_AUDIO_TAP_PLAYBACK; ++i) {
+            audio_tap_t *tap = &s_taps[i];
+            if (tap->lock != NULL && xSemaphoreTake(tap->lock, portMAX_DELAY) == pdTRUE) {
+                tap_account_skips_locked(tap);
+                jr_audio_tap_history_clear(&tap->head, &tap->count,
+                                          &tap->total, false);
+                xSemaphoreGive(tap->lock);
+            }
+        }
+        atomic_store(&s_clean_rms_q8, 0u);
+        jr_spectrum_reset(&s_mic_spec);
+        if (!atomic_load(&s_pb_spec_active)) {
+            spec_clear();
+        }
+        atomic_store(&s_clear_capture_taps, false);
+        xSemaphoreGive(s_adc_guard);
+    } else if (!enabled && !atomic_load(&s_pb_spec_active)) {
+        spec_clear();
+    }
+    if (was != enabled && s_feeder != NULL) xTaskNotifyGive(s_feeder);
 }
 
 esp_err_t jr_audio_diag_get_info(jr_audio_tap_kind_t kind,
@@ -1172,7 +1906,13 @@ esp_err_t jr_audio_diag_get_info(jr_audio_tap_kind_t kind,
         return ESP_ERR_INVALID_STATE;
     }
     tap_account_skips_locked(tap);
-    tap_fill_info_locked(tap, out_info);
+    if (kind != JR_AUDIO_TAP_PLAYBACK && !atomic_load(&s_microphone_enabled)) {
+        memset(out_info, 0, sizeof(*out_info));
+        out_info->sample_rate = tap->sample_rate;
+        out_info->capacity_samples = (uint32_t)tap->capacity;
+    } else {
+        tap_fill_info_locked(tap, out_info);
+    }
     xSemaphoreGive(tap->lock);
     return ESP_OK;
 }
@@ -1187,10 +1927,16 @@ esp_err_t jr_audio_diag_copy(jr_audio_tap_kind_t kind, int16_t *dst,
     if (!atomic_load(&s_taps_ready)) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (kind != JR_AUDIO_TAP_PLAYBACK && !atomic_load(&s_microphone_enabled))
+        return ESP_ERR_INVALID_STATE;
 
     audio_tap_t *tap = &s_taps[kind];
     if (tap->lock == NULL ||
         xSemaphoreTake(tap->lock, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (kind != JR_AUDIO_TAP_PLAYBACK && !atomic_load(&s_microphone_enabled)) {
+        xSemaphoreGive(tap->lock);
         return ESP_ERR_INVALID_STATE;
     }
     tap_account_skips_locked(tap);
@@ -1231,10 +1977,16 @@ esp_err_t jr_audio_diag_copy_since(jr_audio_tap_kind_t kind,
     if (!atomic_load(&s_taps_ready)) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (kind != JR_AUDIO_TAP_PLAYBACK && !atomic_load(&s_microphone_enabled))
+        return ESP_ERR_INVALID_STATE;
 
     audio_tap_t *tap = &s_taps[kind];
     if (tap->lock == NULL ||
         xSemaphoreTake(tap->lock, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (kind != JR_AUDIO_TAP_PLAYBACK && !atomic_load(&s_microphone_enabled)) {
+        xSemaphoreGive(tap->lock);
         return ESP_ERR_INVALID_STATE;
     }
     tap_account_skips_locked(tap);
@@ -1292,9 +2044,15 @@ esp_err_t jr_audio_diag_copy_since(jr_audio_tap_kind_t kind,
  * response: rejects while playback is pending, rechecks after claiming the
  * lane to close the race with the normal sink writer, and reserves ring
  * capacity. On ESP_OK the caller owns the lane until earcon_release(). */
-static esp_err_t earcon_claim(size_t total)
+static esp_err_t earcon_claim(size_t total, jr_tone_kind_t kind)
 {
-    if (!s_ready || !s_dac_open || s_pb == NULL || s_feeder == NULL) {
+    if (!s_ready || atomic_load(&s_sleeping) || s_pb == NULL || s_feeder == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* The owner has muted the speaker: whether this tone still plays is the
+     * one table in jr_core/dac_mute.c (jr_dac_mute_sounds_under_owner_mute). */
+    if (s_owner_mute_probe != NULL && s_owner_mute_probe() &&
+        !jr_dac_mute_sounds_under_owner_mute(kind)) {
         return ESP_ERR_INVALID_STATE;
     }
     if (jr_audio_playback_pending()) {
@@ -1348,13 +2106,20 @@ static esp_err_t earcon_commit(const int16_t *pcm, size_t total)
         earcon_release();
         return ESP_FAIL;
     }
-    jr_audio_dac_unmute();
+    /* Open the DAC for the tone, but never change the mute state: when it was
+     * muted the feeder mutes it again once the tone has played out. The owed
+     * flag goes up first so a real unmute landing in between clears it. */
+    if (atomic_load(&s_muted)) {
+        atomic_store(&s_cue_restore, true);
+    }
+    dac_open_for_playback();
     earcon_release();
     return ESP_OK;
 }
 
-esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
-                              uint32_t duration_ms, uint8_t level_percent)
+static esp_err_t play_sweep(uint16_t start_hz, uint16_t end_hz,
+                            uint32_t duration_ms, uint8_t level_percent,
+                            jr_tone_kind_t kind)
 {
     if (duration_ms < 100U) duration_ms = 100U;
     if (duration_ms > EARCON_MAX_MS) duration_ms = EARCON_MAX_MS;
@@ -1366,7 +2131,7 @@ esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
     if (end_hz   > 8000U) end_hz   = 8000U;
 
     const size_t total = (size_t)GL_RX_SAMPLE_RATE * duration_ms / 1000U;
-    esp_err_t err = earcon_claim(total);
+    esp_err_t err = earcon_claim(total, kind);
     if (err != ESP_OK) {
         return err;
     }
@@ -1405,8 +2170,37 @@ esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
     return err;
 }
 
-esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
-                              uint16_t note_ms, uint8_t volume)
+esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
+                              uint32_t duration_ms, uint8_t level_percent)
+{
+    return play_sweep(start_hz, end_hz, duration_ms, level_percent, JR_TONE_SWEEP);
+}
+
+esp_err_t jr_audio_play_sweep_owner_ack(uint16_t start_hz, uint16_t end_hz,
+                                        uint32_t duration_ms,
+                                        uint8_t level_percent)
+{
+    return play_sweep(start_hz, end_hz, duration_ms, level_percent, JR_TONE_OWNER_ACK);
+}
+
+static float chime_bell_sample(uint16_t f, float step, size_t idx)
+{
+    const float phase = step * (float)idx;
+    const float t = (float)idx / (float)GL_RX_SAMPLE_RATE;
+    const float shimmer = 1.0f + 0.05f * sinf(2.0f * (float)M_PI * 16.0f * t);
+    if (f < (GL_RX_SAMPLE_RATE / 6U)) {
+        return 0.76f * sinf(phase) +
+               (0.18f * sinf(2.0f * phase) + 0.06f * sinf(3.0f * phase)) * shimmer;
+    }
+    if (f < (GL_RX_SAMPLE_RATE / 4U)) {
+        return 0.82f * sinf(phase) + 0.18f * sinf(2.0f * phase) * shimmer;
+    }
+    return sinf(phase);
+}
+
+static esp_err_t play_chime_kind(const uint16_t *hz, size_t notes,
+                                 uint16_t note_ms, uint8_t volume,
+                                 jr_tone_kind_t kind)
 {
     if (hz == NULL || notes == 0U) {
         return ESP_ERR_INVALID_ARG;
@@ -1419,7 +2213,7 @@ esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
 
     const size_t per_note = (size_t)GL_RX_SAMPLE_RATE * note_ms / 1000U;
     const size_t total = per_note * notes;
-    esp_err_t err = earcon_claim(total);
+    esp_err_t err = earcon_claim(total, kind);
     if (err != ESP_OK) {
         return err;
     }
@@ -1429,35 +2223,116 @@ esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
         return ESP_ERR_NO_MEM;
     }
 
-    /* Each note starts at phase zero under a raised-cosine attack and ends
-     * under the matching release, so a note boundary is a zero crossing with
-     * a zero slope on both sides: no click between notes, none at the ends.
-     * 8 ms ramps, or a quarter of the note when the note is shorter. */
+    /* Silky 3-partial bell voicing (0.76*sin(f) + 0.18*sin(2f) + 0.06*sin(3f)
+     * when below Nyquist/3) with a C1-continuous note-tail shimmer carrying
+     * each note gently into the attack of the next. First and last samples are
+     * guaranteed exact zero under raised-cosine ramps: no clicks, no clipping. */
     const float amplitude = 32767.0f * (float)volume / 100.0f;
-    size_t ramp = (size_t)GL_RX_SAMPLE_RATE * 8U / 1000U;
+    size_t ramp = (size_t)GL_RX_SAMPLE_RATE * 6U / 1000U;
     if (ramp > per_note / 4U) {
         ramp = per_note / 4U;
     }
     if (ramp == 0U) {
         ramp = 1U;
     }
+    const size_t tail_len = per_note / 3U;
+    size_t end_release = per_note / 3U;
+    if (end_release < ramp) {
+        end_release = ramp;
+    }
+    if (ramp + end_release > per_note) {
+        end_release = per_note - ramp;
+    }
+
+    uint16_t prev_f = 0U;
+    float prev_step = 0.0f;
     for (size_t n = 0; n < notes; ++n) {
         uint16_t f = hz[n];
         if (f < 80U)   f = 80U;
         if (f > 8000U) f = 8000U;
         const float step = 2.0f * (float)M_PI * (float)f / (float)GL_RX_SAMPLE_RATE;
+        const bool is_last = (n + 1U == notes);
         int16_t *note = &pcm[n * per_note];
         for (size_t i = 0; i < per_note; ++i) {
-            float envelope = 1.0f;
+            float env = 1.0f;
             if (i < ramp) {
-                envelope = 0.5f * (1.0f - cosf((float)M_PI * (float)i / (float)ramp));
-            } else if (per_note - i <= ramp) {
-                envelope = 0.5f * (1.0f - cosf((float)M_PI * (float)(per_note - i) / (float)ramp));
+                env = 0.5f * (1.0f - cosf((float)M_PI * (float)i / (float)ramp));
+            } else if (is_last && (per_note - 1U - i) < end_release) {
+                env = 0.5f * (1.0f - cosf((float)M_PI * (float)(per_note - 1U - i) / (float)end_release));
             }
-            note[i] = (int16_t)(amplitude * envelope * sinf(step * (float)i));
-        }
-    }
+            const float decay = expf(-1.45f * (float)i / (float)per_note);
+            float mix = 0.84f * env * decay * chime_bell_sample(f, step, i);
 
+            if (n > 0U && i < tail_len) {
+                const size_t prev_idx = per_note + i;
+                const float tail_fade =
+                    0.5f * (1.0f + cosf((float)M_PI * (float)i / (float)tail_len));
+                const float prev_decay = expf(-1.45f * (float)prev_idx / (float)per_note);
+                mix += 0.84f * tail_fade * prev_decay *
+                       chime_bell_sample(prev_f, prev_step, prev_idx);
+            }
+            if (mix > 1.0f) mix = 1.0f;
+            if (mix < -1.0f) mix = -1.0f;
+            note[i] = (int16_t)(amplitude * mix);
+        }
+        prev_f = f;
+        prev_step = step;
+    }
+    pcm[0] = 0;
+    pcm[total - 1U] = 0;
+
+    err = earcon_commit(pcm, total);
+    heap_caps_free(pcm);
+    return err;
+}
+
+esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
+                              uint16_t note_ms, uint8_t volume)
+{
+    return play_chime_kind(hz, notes, note_ms, volume, JR_TONE_CHIME);
+}
+
+void jr_audio_play_wake_cue(void)
+{
+    /* Crisp, uplifting 2-note glass chime (A5 -> E6), 55 ms/note, vol 12%.
+     * Respects owner-mute policy (same policy slot as the attention beat) and
+     * never collides with a live reply. */
+    static const uint16_t notes[2] = { 880U, 1319U };
+    (void)play_chime_kind(notes, 2U, 55U, 12U, JR_TONE_DIAG_CHIRP);
+}
+
+void jr_audio_play_timer_chime(void)
+{
+    /* Warm 4-note resonant sunrise arpeggio (E5 -> B5 -> E6 -> G#6), 90 ms/note,
+     * vol 18%. Uses JR_TONE_ALARM so timer alarms break through owner mute
+     * while preserving earcon accounting (playback.replies stays 0) and never
+     * interrupting speech. */
+    static const uint16_t notes[4] = { 659U, 988U, 1319U, 1661U };
+    (void)play_chime_kind(notes, 4U, 90U, 18U, JR_TONE_ALARM);
+}
+
+esp_err_t jr_audio_play_cue(jr_cue_kind_t kind, uint16_t amp_permille)
+{
+    const size_t total = jr_cue_samples(kind);
+    if (total == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* Same lane as the chime: a cue requested while any playback is pending,
+     * including another cue, is dropped, never queued behind it. */
+    esp_err_t err = earcon_claim(total, JR_TONE_UI_CUE);
+    if (err != ESP_OK) {
+        return err;
+    }
+    int16_t *pcm = earcon_scratch(total);
+    if (pcm == NULL) {
+        earcon_release();
+        return ESP_ERR_NO_MEM;
+    }
+    if (jr_cue_render(kind, amp_permille, pcm, total) != total) {
+        heap_caps_free(pcm);
+        earcon_release();
+        return ESP_ERR_INVALID_SIZE;
+    }
     err = earcon_commit(pcm, total);
     heap_caps_free(pcm);
     return err;
@@ -1468,5 +2343,5 @@ esp_err_t jr_audio_diag_play_chirp(uint32_t duration_ms, uint8_t level_percent)
     /* The original 400 -> 2000 Hz diagnostic sweep, unchanged. Every existing
      * caller (the attention beat, the audio self-test) keeps its exact sound;
      * jr_audio_play_sweep() only exposes the endpoints the body always had. */
-    return jr_audio_play_sweep(400U, 2000U, duration_ms, level_percent);
+    return play_sweep(400U, 2000U, duration_ms, level_percent, JR_TONE_DIAG_CHIRP);
 }

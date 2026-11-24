@@ -1,0 +1,26 @@
+{
+  "worst_case_bytes": 1281,
+  "capacity": 1536,
+  "string_limits": [
+    32,
+    5,
+    5,
+    5,
+    5,
+    32,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    16,
+    16,
+    32,
+    64,
+    16,
+    64
+  ],
+  "numeric": "all uint32 max and int32 min",
+  "overflow_action": "HTTP 500 before send"
+}

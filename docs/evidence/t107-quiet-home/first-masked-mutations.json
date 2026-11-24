@@ -1,0 +1,385 @@
+{
+  "source_sha256": "5b9d54bd530dd3ac91a59bc038076f8f104ef72ffb2199c599511c9833de4010",
+  "freeze_verified": true,
+  "mutants": 53,
+  "results": [
+    {
+      "name": "positive",
+      "compile_rc": 0,
+      "run_rc": 0,
+      "assertion_failures": 0,
+      "expected": true
+    },
+    {
+      "name": "restore_periodic_task_path",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 1,
+      "expected": true
+    },
+    {
+      "name": "no_idle_wait",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 1,
+      "expected": true
+    },
+    {
+      "name": "blank_keeps_quiet",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 1,
+      "expected": true
+    },
+    {
+      "name": "ignore_privacy",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_charging",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 7,
+      "expected": true
+    },
+    {
+      "name": "ignore_cadence",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_blank_request",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_face",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 8,
+      "expected": true
+    },
+    {
+      "name": "ignore_nav",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 6,
+      "expected": true
+    },
+    {
+      "name": "ignore_shell",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_choices",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_commit",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_ripple",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_bloom",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_canvas",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_surface",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_caption",
+      "compile_rc": 0,
+      "run_rc": 0,
+      "assertion_failures": 0,
+      "expected": false
+    },
+    {
+      "name": "ignore_pinned",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_space_settled",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_nav_serial",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_detail_fade",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_shade_fade",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_ask_fade",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_canvas_fade",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_caption_fade",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_clock_fade",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_ota",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "ignore_test_pattern",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 1,
+      "expected": true
+    },
+    {
+      "name": "ignore_hud",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 1,
+      "expected": true
+    },
+    {
+      "name": "ignore_voice_busy",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 3,
+      "expected": true
+    },
+    {
+      "name": "ignore_rest_owner",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 1,
+      "expected": true
+    },
+    {
+      "name": "freeze_wrong_loaded_asset",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "freeze_hidden_asset",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 1,
+      "expected": true
+    },
+    {
+      "name": "freeze_empty_segment",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 1,
+      "expected": true
+    },
+    {
+      "name": "entry_race_no_recheck",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 1,
+      "expected": true
+    },
+    {
+      "name": "quiet_uses_zero_length_segment",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 1,
+      "expected": true
+    },
+    {
+      "name": "quiet_repeats_animation",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "quiet_does_not_stop",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 1,
+      "expected": true
+    },
+    {
+      "name": "quiet_stays_hidden",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "entry_error_latched",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 1,
+      "expected": true
+    },
+    {
+      "name": "exit_keeps_segment_cache",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 31,
+      "expected": true
+    },
+    {
+      "name": "exit_keeps_request_cache",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 30,
+      "expected": true
+    },
+    {
+      "name": "ignore_clock_fact",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 7,
+      "expected": true
+    },
+    {
+      "name": "ignore_env_fact",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 18,
+      "expected": true
+    },
+    {
+      "name": "ignore_caption_fact",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 10,
+      "expected": true
+    },
+    {
+      "name": "ignore_dma_fault",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 2,
+      "expected": true
+    },
+    {
+      "name": "refresh_every_tick",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 16,
+      "expected": true
+    },
+    {
+      "name": "failed_lock_consumes_keys",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 4,
+      "expected": true
+    },
+    {
+      "name": "caption_change_has_no_revision",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 10,
+      "expected": true
+    },
+    {
+      "name": "same_caption_redirties",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 13,
+      "expected": true
+    },
+    {
+      "name": "vendor_restore_ignored_prepare_failure",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 5766,
+      "expected": true
+    },
+    {
+      "name": "vendor_advances_failed_frame",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 5767,
+      "expected": true
+    },
+    {
+      "name": "vendor_dirties_failed_frame",
+      "compile_rc": 0,
+      "run_rc": 1,
+      "assertion_failures": 5765,
+      "expected": true
+    }
+  ]
+}

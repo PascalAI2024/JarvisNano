@@ -17,8 +17,14 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 add_executable(jr_display_hud_tests
     test_hud_render.c
     ../src/hud_render.c
+    ../src/showpiece_gfx.c
+    ../src/balance_wheel_data.c
+    ../src/glass_draw.c
+    ../src/glass_font.c
+    ../src/glass_font_data.c
 )
-target_include_directories(jr_display_hud_tests PRIVATE ../include)
+target_include_directories(jr_display_hud_tests PRIVATE ../include ../src)
+target_link_libraries(jr_display_hud_tests PRIVATE m)
 target_compile_options(jr_display_hud_tests PRIVATE -Wall -Wextra -Werror)
 
 # The spatial shell lives in jr_display.c, which does touch IDF. It is pulled
@@ -28,6 +34,16 @@ target_compile_options(jr_display_hud_tests PRIVATE -Wall -Wextra -Werror)
 add_executable(jr_display_shell_tests
     test_shell.c
     ../src/hud_render.c
+    ../src/showpiece_gfx.c
+    ../src/glass3_ring.c
+    ../src/glass3_screens.c
+    ../src/balance_wheel_data.c
+    ../src/companion.c
+    ../src/glass_font.c
+    ../src/glass_draw.c
+    ../src/glass_font_data.c
+    ../src/glass_icon.c
+    ../src/glass_icon_data.c
 )
 target_include_directories(jr_display_shell_tests PRIVATE
     ../include
@@ -38,7 +54,121 @@ target_include_directories(jr_display_shell_tests PRIVATE
 target_compile_options(jr_display_shell_tests PRIVATE
     -Wall -Wextra -Werror -Wno-unused-function
 )
+# The two embedded dials: the stub reads the real baked EAFs from here.
+target_compile_definitions(jr_display_shell_tests PRIVATE
+    JR_HOST_DIAL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../firmware/mascot/reactive"
+)
+
+# The whole frame, byte for byte, over the same production path: the proof that a
+# performance change moved no pixel. See test_frame_identity.c.
+add_executable(jr_display_frame_tests
+    test_frame_identity.c
+    ../src/hud_render.c
+    ../src/showpiece_gfx.c
+    ../src/glass3_ring.c
+    ../src/glass3_screens.c
+    ../src/balance_wheel_data.c
+    ../src/companion.c
+    ../src/glass_font.c
+    ../src/glass_draw.c
+    ../src/glass_font_data.c
+    ../src/glass_icon.c
+    ../src/glass_icon_data.c
+)
+target_include_directories(jr_display_frame_tests PRIVATE
+    ../include
+    ../src
+    ../../jr_ports/include
+    probe/stubs
+)
+target_compile_options(jr_display_frame_tests PRIVATE
+    -Wall -Wextra -Werror -Wno-unused-function
+)
+target_compile_definitions(jr_display_frame_tests PRIVATE
+    JR_HOST_DIAL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../firmware/mascot/reactive"
+)
 
 enable_testing()
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME jr_display_board_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_board.py)
+add_test(NAME jr_display_quiet_vendor_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_quiet_vendor.py)
+add_executable(jr_display_companion_tests test_companion.c ../src/companion.c)
+target_include_directories(jr_display_companion_tests PRIVATE ../include)
+target_compile_options(jr_display_companion_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME jr_display_companion_tests COMMAND jr_display_companion_tests)
+# The glass primitives (anti-aliased type, discs, rings, arcs, glows). Pure C,
+# so like hud_render.c they stand alone; the test links libm for its analytic
+# references only - the code under test uses none.
+set(GLASS_SRCS ../src/glass_font.c ../src/glass_draw.c ../src/glass_font_data.c
+    ../src/glass_icon.c ../src/glass_icon_data.c)
+add_executable(jr_display_glass_tests test_glass.c glass_ref.c ${GLASS_SRCS})
+target_include_directories(jr_display_glass_tests PRIVATE ../include)
+target_compile_options(jr_display_glass_tests PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(jr_display_glass_tests PRIVATE m)
+add_test(NAME jr_display_glass_tests COMMAND jr_display_glass_tests)
+add_executable(jr_display_icon_tests test_glass_icon.c ../src/glass_icon.c ../src/glass_icon_data.c ../src/glass_draw.c ../src/glass_font.c ../src/glass_font_data.c)
+target_include_directories(jr_display_icon_tests PRIVATE ../include)
+target_compile_options(jr_display_icon_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME jr_display_icon_tests COMMAND jr_display_icon_tests)
+# Eyes-on-the-glass specimen: renders two scenes through the row API to PPMs.
+# Not a suite; build it with `cmake --build build --target glass_specimen`.
+add_executable(glass_specimen EXCLUDE_FROM_ALL probe/glass_specimen.c ${GLASS_SRCS})
+target_include_directories(glass_specimen PRIVATE ../include)
+target_compile_options(glass_specimen PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(glass_specimen PRIVATE m)
+# Cost bench for the same primitives next to the slow reference. Host numbers
+# only (x86, -O2); not a suite. Build with --target glass_bench.
+add_executable(glass_bench EXCLUDE_FROM_ALL probe/glass_bench.c glass_ref.c ${GLASS_SRCS})
+target_include_directories(glass_bench PRIVATE ../include)
+target_compile_options(glass_bench PRIVATE -O2 -Wall -Wextra -Werror)
 add_test(NAME jr_display_hud_tests COMMAND jr_display_hud_tests)
 add_test(NAME jr_display_shell_tests COMMAND jr_display_shell_tests)
+add_test(NAME jr_display_frame_tests COMMAND jr_display_frame_tests)
+# The production compositor played through time (scripts/glass-preview.py builds
+# and runs this in Docker). Not a suite: its output is an animation. See
+# docs/reference/glass-preview.md.
+add_executable(glass_preview EXCLUDE_FROM_ALL
+    probe/glass_preview.c
+    ../src/hud_render.c
+    ../src/showpiece_gfx.c
+    ../src/glass3_ring.c
+    ../src/glass3_screens.c
+    ../src/balance_wheel_data.c
+    ../src/companion.c
+    ../src/glass_font.c
+    ../src/glass_draw.c
+    ../src/glass_font_data.c
+    ../src/glass_icon.c
+    ../src/glass_icon_data.c
+)
+
+add_executable(jr_display_glass3_ring_tests
+    ../../../host/test_glass3_ring.c
+    ../src/glass3_ring.c
+    ../src/glass_draw.c
+)
+target_include_directories(jr_display_glass3_ring_tests PRIVATE ../include ../src)
+target_compile_options(jr_display_glass3_ring_tests PRIVATE -O2 -Wall -Wextra -Werror)
+add_test(NAME jr_display_glass3_ring_tests COMMAND jr_display_glass3_ring_tests)
+
+add_executable(jr_display_glass3_screens_tests
+    ../../../host/test_glass3_screens.c
+    ../src/glass3_screens.c
+)
+target_include_directories(jr_display_glass3_screens_tests PRIVATE ../include ../src)
+target_compile_options(jr_display_glass3_screens_tests PRIVATE -O2 -Wall -Wextra -Werror)
+add_test(NAME jr_display_glass3_screens_tests COMMAND jr_display_glass3_screens_tests)
+target_include_directories(glass_preview PRIVATE
+    ../include
+    ../src
+    ../../jr_ports/include
+    probe/stubs
+    .
+)
+target_compile_options(glass_preview PRIVATE -O2 -Wall -Wextra -Werror -Wno-unused-function)
+target_link_libraries(glass_preview PRIVATE m)
+target_compile_definitions(glass_preview PRIVATE
+    JR_HOST_DIAL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../firmware/mascot/reactive"
+)

@@ -1,0 +1,132 @@
+[
+  {
+    "name": "batch_guard_removed",
+    "build_exit": 0,
+    "test_exit": 4,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-repair-mutations-v1/work/host/test_core.c:171:test_listening_half_cannot_reach_muted_text_upload:FAIL: Expected 0 Was 512",
+      "/project/.evidence/t107/audio-repair-mutations-v1/work/host/test_core.c:186:test_batch_privacy_edge_during_capture_drops_live_half:FAIL: Expected 0 Was 1",
+      "/project/.evidence/t107/audio-repair-mutations-v1/work/host/test_core.c:202:test_batch_capture_and_transport_gaps_reset_partial:FAIL: Expected 0 Was 512",
+      "/project/.evidence/t107/audio-repair-mutations-v1/work/host/test_core.c:227:test_batch_retains_two_frame_cadence_and_speech_end_flush:FAIL: Expected 2 Was 3"
+    ]
+  },
+  {
+    "name": "batch_privacy_edge_ignored",
+    "build_exit": 0,
+    "test_exit": 2,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-repair-mutations-v1/work/host/test_core.c:186:test_batch_privacy_edge_during_capture_drops_live_half:FAIL: Expected 0 Was 1",
+      "/project/.evidence/t107/audio-repair-mutations-v1/work/host/test_core.c:227:test_batch_retains_two_frame_cadence_and_speech_end_flush:FAIL: Expected 2 Was 3"
+    ]
+  },
+  {
+    "name": "batch_capture_transport_gap_ignored",
+    "build_exit": 0,
+    "test_exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-repair-mutations-v1/work/host/test_core.c:202:test_batch_capture_and_transport_gaps_reset_partial:FAIL: Expected 0 Was 512"
+    ]
+  },
+  {
+    "name": "privacy_cursor_rewinds",
+    "build_exit": 0,
+    "test_exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-repair-mutations-v1/work/host/test_core.c:237:test_privacy_history_clear_preserves_absolute_cursor:FAIL: Expected 4294967808 Was 0"
+    ]
+  },
+  {
+    "name": "companion_app_privacy_ignored",
+    "build_exit": 0,
+    "test_exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-repair-mutations-v1/work/host/test_core.c:278:test_copied_companion_pcm_obeys_privacy_before_send:FAIL: Expected 0 Was 1"
+    ]
+  },
+  {
+    "name": "companion_flip_privacy_ignored",
+    "build_exit": 0,
+    "test_exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-repair-mutations-v1/work/host/test_core.c:278:test_copied_companion_pcm_obeys_privacy_before_send:FAIL: Expected 0 Was 1"
+    ]
+  },
+  {
+    "name": "companion_audio_authority_ignored",
+    "build_exit": 0,
+    "test_exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-repair-mutations-v1/work/host/test_core.c:278:test_copied_companion_pcm_obeys_privacy_before_send:FAIL: Expected 0 Was 1"
+    ]
+  },
+  {
+    "name": "main_pre_capture_guard_removed",
+    "build_exit": 0,
+    "test_exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-repair-mutations-v1/work/host/test_core.c:373:test_production_batch_cursor_and_companion_privacy_wiring:FAIL: Expected TRUE Was FALSE"
+    ]
+  },
+  {
+    "name": "main_pre_send_guard_removed",
+    "build_exit": 0,
+    "test_exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-repair-mutations-v1/work/host/test_core.c:378:test_production_batch_cursor_and_companion_privacy_wiring:FAIL: Expected Non-NULL"
+    ]
+  },
+  {
+    "name": "main_control_reset_removed",
+    "build_exit": 0,
+    "test_exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-repair-mutations-v1/work/host/test_core.c:384:test_production_batch_cursor_and_companion_privacy_wiring:FAIL: Expected Non-NULL"
+    ]
+  },
+  {
+    "name": "automatic_clear_resets_cursor",
+    "build_exit": 0,
+    "test_exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-repair-mutations-v1/work/host/test_core.c:389:test_production_batch_cursor_and_companion_privacy_wiring:FAIL: Expected Non-NULL"
+    ]
+  },
+  {
+    "name": "automatic_clear_discards_skipped_cursor",
+    "build_exit": 0,
+    "test_exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-repair-mutations-v1/work/host/test_core.c:388:test_production_batch_cursor_and_companion_privacy_wiring:FAIL: Expected Non-NULL"
+    ]
+  },
+  {
+    "name": "companion_post_copy_guard_removed",
+    "build_exit": 0,
+    "test_exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-repair-mutations-v1/work/host/test_core.c:400:test_production_batch_cursor_and_companion_privacy_wiring:FAIL: Expected TRUE Was FALSE"
+    ]
+  },
+  {
+    "name": "companion_pre_send_guard_removed",
+    "build_exit": 0,
+    "test_exit": 1,
+    "rejected": true,
+    "failures": [
+      "/project/.evidence/t107/audio-repair-mutations-v1/work/host/test_core.c:405:test_production_batch_cursor_and_companion_privacy_wiring:FAIL: Expected Non-NULL"
+    ]
+  }
+]

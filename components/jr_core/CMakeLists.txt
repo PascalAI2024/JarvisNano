@@ -14,6 +14,16 @@ idf_component_register(
         "src/orchestrator.c"
         "src/mood.c"
         "src/glance.c"
+        "src/dac_mute.c"
+        "src/cue.c"
+        "src/utt_watch.c"
+        "src/echo_gate.c"
+        "src/mic_watch.c"
+        "src/pace.c"
+        "src/tool_policy.c"
+        "src/timer.c"
+        "src/notes.c"
+        "src/desk_mode.c"
     INCLUDE_DIRS "include"
     REQUIRES jr_ports jr_dsp
 )

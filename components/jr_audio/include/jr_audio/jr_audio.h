@@ -27,6 +27,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "jr_core/cue.h"
 #include "jr_ports/audio_source.h"
 #include "jr_ports/audio_sink.h"
 
@@ -35,11 +36,39 @@ extern "C" {
 #endif
 
 /* Acquire the ES7210/ES8311 codec handles (double-cast, spec §codec-bringup),
- * open ADC (24 kHz, 4-ch, mask 0) then DAC (24 kHz, muted), apply per-channel
- * PGA, create the AEC, allocate the playback ring, and start the feeder task.
+ * validate ADC (24 kHz, 4-ch, mask 0) and DAC (24 kHz, muted), apply gains,
+ * close both for boot privacy, create AEC, allocate the ring, and start the
+ * feeder. Physical unmute restores codec rates/gains before any I/O.
  * Returns ESP_OK when the codec path is up. A degraded return still leaves the
  * ports safe to call (they no-op). */
 esp_err_t jr_audio_init(void);
+
+/* Only the composition root publishes the physical privacy/flip gate. False
+ * closes ADC sampling, clears microphone/reference taps, and feeds text turns
+ * paced silence. It does not interrupt DAC playback. */
+void jr_audio_set_microphone_enabled(bool enabled);
+
+/* Bounded paired shutdown before deep sleep; failure leaves sleep aborted. */
+esp_err_t jr_audio_prepare_sleep(void);
+
+typedef struct {
+    bool microphone_enabled;
+    bool adc_open;
+    bool dac_open;
+    bool pa_on;
+    uint32_t hardware_reads;
+    uint32_t silent_frames;
+    uint32_t failures;
+    uint32_t gain_failures;   /* codec gain writes that still failed after retries */
+} jr_audio_power_stats_t;
+void jr_audio_power_stats(jr_audio_power_stats_t *out);
+
+/* Dead-microphone watch (jr_core/mic_watch.h): the ADC is open and meant to be
+ * open but the raw microphone lane is electrically silent / how many times the
+ * ADC was reopened to recover it. Scalar getters so an HTTP handler needs no
+ * stats struct on its small stack. */
+bool     jr_audio_mic_dead(void);
+uint32_t jr_audio_mic_recoveries(void);
 
 /* The two port factories the composition root injects into the core. Valid
  * after jr_audio_init(). */
@@ -55,6 +84,30 @@ uint32_t jr_audio_last_aec_us(void);
  * model can hear the user; judging voice activity on that same buffer scales
  * the room's noise bed up with it. This is the unamplified view. */
 float jr_audio_clean_rms(void);
+
+/* Live linear PCM RMS (0..32767) of the speech chunk currently being written
+ * to the DAC by the playback feeder (0 when muted, idle, or playing earcons).
+ * Lock-free and DAC-synced for speech-reactive glass visuals. */
+uint16_t jr_audio_playback_live_rms(void);
+
+/* Live 16-band log-spaced audio spectrum (0..255 per band), lock-free.
+ * Tracks speaker speech output during playback, or unmuted mic capture when
+ * playback is idle (never feeds mic audio while privacy-paused). */
+void jr_audio_get_spectrum(uint8_t out_bands[16]);
+
+/* How long the last source read was blocked waiting (guard + codec), in
+ * microseconds. The canceller runs inside the read, so the read's duration
+ * alone cannot say whether the frame was already waiting. */
+uint32_t jr_audio_last_read_wait_us(void);
+
+/* Bench: run `frames` frames of pseudo-random noise through the live canceller
+ * under the ADC guard and return the mean aec_process time in microseconds
+ * (worst frame in *max_us when given), or -1 when there is no canceller or the
+ * guard is busy. Opens nothing and reads no microphone. The noise adapts the
+ * filter, so the first second of the next real reply is not a measurement.
+ * Call from the capture caller's task only (the voice task); it holds the
+ * guard for the whole run, so keep frames small (64 is about 0.8 s). */
+int jr_audio_aec_bench(int frames, uint32_t *max_us);
 
 /* True while decoded PCM is queued, a codec write is in flight, or the final
  * DMA/physical-output tail is still expected to be audible. The composition
@@ -73,6 +126,16 @@ typedef struct {
     uint32_t replies_ended;   /* ring-empty episodes followed by silence */
     uint32_t prerolls;        /* replies that started with a full pre-roll */
     uint32_t preroll_timeouts;/* replies that started short (max wait hit) */
+    /* Telling a server pause from a local starve (2026-11-10). A hole is the
+     * ring running dry; these say who left it dry. If max_gap_ms (above) is
+     * large while feeder_stall_max_ms stays near the 32 ms chunk, the feeder
+     * kept pace and nothing arrived: the server or the socket. If the stall is
+     * large, the feeder itself was kept off the CPU with audio waiting. */
+    uint32_t holes_ignored;   /* dry under the DAC tail, back before it mattered */
+    uint32_t feeder_stall_max_ms; /* longest gap between feeder passes that had audio waiting */
+    uint32_t refill_holds;    /* times a hole made the feeder hold for a bigger lead */
+    uint32_t refill_hold_max_ms;  /* longest such hold: silence the hold itself added */
+    uint32_t refill_hold_total_ms;
 } jr_audio_playback_stats_t;
 
 void jr_audio_playback_stats(jr_audio_playback_stats_t *out);
@@ -87,6 +150,13 @@ void jr_audio_dac_unmute(void);
 /* True while the fast-kill mute is asserted (feeder discards everything).
  * Diagnostic visibility: a stuck mute is "no sound with green counters". */
 bool jr_audio_dac_muted(void);
+
+/* Register the owner's speaker-mute query (privacy pause or flip latch, which
+ * live in main.c). While it returns true, the tones the policy table in
+ * jr_core/dac_mute.c marks silent (today only the interface cues) refuse with
+ * ESP_ERR_INVALID_STATE; every older tone sounds as it always did. A tone that does play opens a muted DAC only for its
+ * own length and mutes it again after: it never changes the mute state. */
+void jr_audio_set_owner_mute_probe(bool (*probe)(void));
 
 /* Flush the playback ring without muting (maps JR_CMD_FLUSH_PLAYBACK_RING). */
 void jr_audio_flush_playback(void);
@@ -115,6 +185,20 @@ int jr_audio_mic_db(void);
 int jr_audio_ref_db(void);
 int jr_audio_out_vol(void);
 int jr_audio_speak_mic_db(void);
+
+/* Percent of the computed uplink make-up compensation while the PGA is turned
+ * down for the canceller (0 = none, 100 = full, max 400). */
+void jr_audio_set_speak_gain_percent(int percent);
+int jr_audio_speak_gain_percent(void);
+
+/* Ask for a canceller mode (esp_aec.h aec_mode_t: 0,1,3,4,5,6) and/or filter
+ * length (1..8); -1 leaves one unchanged. Safe from any task: it only stores
+ * the request, the capture caller applies it between frames. */
+void jr_audio_request_aec(int mode, int filter);
+int jr_audio_aec_mode(void);               /* active, as last applied */
+int jr_audio_aec_filter(void);
+uint32_t jr_audio_aec_reconfigs(void);     /* successful rebuilds, lifetime */
+uint32_t jr_audio_aec_reconfig_fails(void);
 
 /* Playback digital make-up gain as a percent of unity (100 == 1.0x). Applied
  * before the soft-knee limiter at the sink-write seam. Board default: 400 on
@@ -207,7 +291,13 @@ esp_err_t jr_audio_diag_play_chirp(uint32_t duration_ms,
 esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
                               uint32_t duration_ms, uint8_t level_percent);
 
-/* A short melody: `notes` sine notes at hz[] (80..8000), note_ms each
+/* The same sweep, named for the acknowledgement of the owner's own mute gesture
+ * (long press). Its own row in the owner-mute policy table. */
+esp_err_t jr_audio_play_sweep_owner_ack(uint16_t start_hz, uint16_t end_hz,
+                                        uint32_t duration_ms,
+                                        uint8_t level_percent);
+
+/* A short melody: `notes` harmonic notes at hz[] (80..8000), note_ms each
  * (20..500), back to back, each under a raised-cosine attack and release so
  * the boundaries do not click. volume clamps to 1..30 percent like the
  * sweeps. Rendered whole and queued in one enqueue as UI feedback: it never
@@ -215,6 +305,21 @@ esp_err_t jr_audio_play_sweep(uint16_t start_hz, uint16_t end_hz,
  * exactly as the sweeps do, so it can never talk over a reply. */
 esp_err_t jr_audio_play_chime(const uint16_t *hz, size_t notes,
                               uint16_t note_ms, uint8_t volume);
+
+/* Crisp warm 2-note fifth (G5 -> D6) wake acknowledgement. Respects the
+ * owner-mute tone policy and never collides with active playback. */
+void jr_audio_play_wake_cue(void);
+
+/* Bright harmonic glass-bell arpeggio (E5 -> B5 -> E6) for countdown timer
+ * alarms. Uses JR_TONE_ALARM so it breaks through owner mute, preserves
+ * earcon accounting (playback.replies stays 0), and never talks over a reply. */
+void jr_audio_play_timer_chime(void);
+
+/* One generated interface cue (jr_core/cue.h) at `amp_permille` of full scale.
+ * The caller owns the policy (jr_cue_allow); this owns the lane: it drops the
+ * cue, returning ESP_ERR_INVALID_STATE, while the owner has muted the speaker
+ * or any playback, including another cue, is pending. Never blocks. */
+esp_err_t jr_audio_play_cue(jr_cue_kind_t kind, uint16_t amp_permille);
 
 #ifdef __cplusplus
 }

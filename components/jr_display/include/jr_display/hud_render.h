@@ -142,8 +142,20 @@ typedef struct {
      * cell — two alarm hues for one state. */
 #define HUD_BATT_LOW_PCT 20
     bool    charging;
-    bool    privacy_muted; /* persistent outer gold ring when voice is off  */
+    bool    privacy_muted; /* the ring is gold while voice is off            */
     int8_t  ox, oy;      /* parallax offset in px; see hud_tilt_offset()    */
+    /* What the rim shows. One ring, one radius (r218), is the default; a dial
+     * that owns the glass shows less: a single privacy dot at 12 o'clock while
+     * the microphone is live and nothing is happening, nothing while it is
+     * muted and nothing is happening. */
+#define HUD_RIM_RING 0
+#define HUD_RIM_DOT  1
+#define HUD_RIM_NONE 2
+    uint8_t rim;
+    /* How strongly the rim is drawn, 0..255; 0 (the zero-initialised default) is
+     * full strength. A rest face is dim, and the ring round it is as dim as its
+     * digits: the caller passes the digits' strength here. */
+    uint8_t rim_a;
 } hud_env_t;
 
 /* The whole HUD for one strip: battery rim + privacy state + the face element,
@@ -419,10 +431,30 @@ void hud_overlay_bloom(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 void hud_overlay_clock(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                        int hh, int mm, int ss, int strength);
 
-/* THE WATCHES, SECOND CUT (2026-09-02). Six styles (jr_watch_style_t in
- * jr_display.h: 0 JARVIS, 1 DIVER, 2 DRESS, 3 PILOT, 4 MINIMAL, 5 FUTURE).
+/* The JARVIS style's dial: the instrument the hands sit on (a 60-tick amber
+ * minute track, a thin rail, two faint amber rings as on the home face, four
+ * cyan beads), drawn anti-aliased inside r 201, with the day's arc at r 206.
+ * Faded with the hands by one strength; <= 0 paints nothing. */
+typedef struct {
+    int  hh, mm, ss;
+    bool seconds;            /* the gold seconds hand (false at rest) */
+    bool sun;                /* a day to draw: sunrise and sunset are known */
+    int  sun_rise_q16;       /* sunrise, a Q16 turn clockwise from 12 o'clock */
+    int  sun_sweep_q16;      /* sunrise to sunset, Q16 turns */
+    int  sun_now_q16;        /* where the sun is now, or -1 (night, or no time) */
+} hud_jarvis_t;
+
+/* Anti-aliased tapered hands, a hub, and (when `j->sun`) the day's arc with a
+ * bead at the sun; the hands are part of the dial so the call replaces
+ * hud_overlay_clock for this style. */
+void hud_overlay_jarvis_dial(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                             int strength, const hud_jarvis_t *j);
+
+/* THE WATCHES, SECOND CUT (2026-09-02). Eight styles (jr_watch_style_t in
+ * jr_display.h: 0 JARVIS, 1 DIVER, 2 DRESS, 3 PILOT, 4 MINIMAL, 5 FUTURE,
+ * 6 SKELETON, 7 CELESTIAL).
  * Style 0 is hud_overlay_clock, pixel for pixel; an unknown style draws
- * style 0. Styles 1-5 draw anti-aliased bevelled hands (a tapered polygon
+ * style 0. Styles 1-7 draw anti-aliased bevelled hands (a tapered polygon
  * per flank, a hairline outline, a soft shadow, lume where the style has it)
  * over whatever the strip already holds — the baked dial when `dial_baked`,
  * otherwise a black stand-in dial drawn first. The seconds hand sweeps from
@@ -472,6 +504,33 @@ void hud_overlay_clock(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 #define HUD_WATCH_CELL_LINK_CX ((HUD_WATCH_CELL_LINK_X0 + HUD_WATCH_CELL_LINK_X1) / 2)
 #define HUD_WATCH_CELL_LINK_CY ((HUD_WATCH_CELL_LINK_Y0 + HUD_WATCH_CELL_LINK_Y1) / 2)
 
+/* THE LIGHT ON THE HANDS. Geometry never moves; only the light does, so the
+ * hands stay registered with the baked dial. Solved once per frame from the
+ * in-plane gravity (hud_light_solve) and read by every strip. At rest (flat,
+ * or no data) it is exactly the fixed light the watch shipped with. */
+typedef struct {
+    int shadow_dx, shadow_dy;   /* Q4 px: rest (32, 48); length <= 96 (6 px)  */
+    int bevel_lx, bevel_ly;     /* Q15 unit vector toward the light; rest
+                                 * (-19661, -26214) = (-0.6, -0.8)            */
+    int glint_x, glint_y;       /* hub glint, 1/16 of (hub radius / 3);
+                                 * rest (-16, -16) = -rad/3 each way          */
+} hud_light_t;
+
+/* (gx_mg, gy_mg): the UP vector projected into the screen plane, milli-g,
+ * x to the right, y downward on the glass (the caller applies the IMU axis
+ * signs). Inside an 80 mg dead band the result is exactly the rest light;
+ * beyond it the light swings, the shadow falls downhill and lengthens to 6 px
+ * at 1 g. Integer only, no libm. */
+#define HUD_LIGHT_DEADBAND_MG 80
+void hud_light_solve(int gx_mg, int gy_mg, hud_light_t *out);
+
+/* One step of the render task's one-pole filter on one axis. `cur_q8` is the
+ * filtered value in milli-g * 256, `target_mg` the latest reading, dt_ms the
+ * time since the last step. Time constant HUD_LIGHT_TAU_MS; the step is
+ * dt / (tau + dt), always < 1, so it converges and never overshoots. */
+#define HUD_LIGHT_TAU_MS 250
+int hud_light_ease(int cur_q8, int target_mg, int dt_ms);
+
 typedef struct {
     int  hh, mm, ss, ms;     /* ms 0..999: the phase inside the second     */
     int  batt_pct;           /* 0..100, or -1 when the gauge has no answer */
@@ -479,10 +538,62 @@ typedef struct {
     int  temp_f;
     bool dial_baked;         /* the baked dial is under the hands          */
     bool shadow;             /* the hands cast shadows: the awake cadence  */
+    bool still;              /* a resting dial: no seconds hand (and the caller
+                              * holds ss and ms at 0), nothing else moves     */
+    bool alive;              /* the dial's own motion (SKELETON's balance
+                              * wheel, CELESTIAL's stars) runs: the awake
+                              * cadence; false holds it still               */
+    const hud_light_t *light; /* where the room's light is; NULL = at rest  */
+    int  tilt_x, tilt_y;     /* the dial's lean, -256..256 (tilt.h); 0 = none.
+                              * CELESTIAL's foreground stars read it while `alive` */
 } hud_watch_t;
+
+/* THE LIVE ORNAMENTS (2026-11-10). SKELETON's balance wheel: a baked sprite
+ * rotated about the dial's recess and alpha-blended under the hands.
+ * hud_balance_angle_q16 is the swing, +-HUD_BALANCE_SWING_Q16 (45 degrees,
+ * positive clockwise), one sine per BAL_PERIOD (1 s) read off the clock, so it
+ * is the same on every strip and zero at the top of every second.
+ * hud_balance_blit draws the wheel at an angle into rows [y0, y0 + nrows) and
+ * returns how many dial pixels it visited. CELESTIAL's stars: hud_celestial_
+ * star_level is star i's glint 0..254 at that clock; twinkle adds the glints
+ * and returns the pixels it touched. Same strip contract as every overlay. */
+#define HUD_BALANCE_SWING_Q16 8192
+int32_t hud_balance_angle_q16(int ss, int ms);
+int     hud_balance_blit(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                         int32_t angle_q16);
+int     hud_celestial_star_level(int i, int ss, int ms);
+int     hud_celestial_twinkle(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                              int ss, int ms);
+
+/* THE FOREGROUND STARS (2026-11-10, tilt parallax). HUD_FG_COUNT four-point
+ * sparkles drawn over CELESTIAL's baked dial, none of them in the art: the baked
+ * field is the far sky, these are the near ones, in three depths (0 near, 4
+ * stars; 1 middle, 5; 2 far, 5) with their own size and travel (14, 8, 4 px at
+ * full lean). hud_celestial_foreground draws them, anti-aliased at a 1/16 px
+ * position; the lean (tilt_x/tilt_y, -256..256, tilt.h) slides each by its
+ * depth's travel, and `alive` lets the near ones breathe. Drawn at rest too.
+ * hud_celestial_fg_pos is star i's centre in 1/16 px at a lean, with the
+ * guards: a slide that would put the arms outside radius HUD_FG_GLASS_R or
+ * inside HUD_FG_HUB_R (of the glass centre) is held at the rest position. */
+#define HUD_FG_COUNT     14
+#define HUD_FG_GLASS_R   210
+#define HUD_FG_HUB_R     32
+int     hud_celestial_fg_depth(int i);
+void    hud_celestial_fg_pos(int i, int tilt_x, int tilt_y, int *x_q4, int *y_q4);
+int     hud_celestial_foreground(uint16_t *dst, int y0, int nrows, bool swap_bytes,
+                                 int ss, int ms, bool alive, int tilt_x, int tilt_y);
 
 void hud_overlay_watch(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                        const hud_watch_t *w, int strength, int style);
+
+/* Rasterize MINIMAL's static dial (ivory disc + 60 ticks + 12 hour dots) onto
+ * black for rows [y0, y0 + nrows). Used on ESP_PLATFORM to bake the static
+ * dial once into a PSRAM slot so MINIMAL frames draw only hands + hub. */
+void hud_minimal_dial_bake_rows(uint16_t *dst, int y0, int nrows,
+                                bool swap_bytes);
+
+/* The perf knob as the render task last read it (perf_knob.h); 0 = shipped. */
+extern uint32_t hud_perf_knob;
 
 /* One hand alone (0 hour, 1 minute, 2 seconds) at a Q16-turn angle
  * (65536 per revolution, 12 o'clock at 192 << 8, clockwise), with or
@@ -495,16 +606,9 @@ void hud_watch_hand(uint16_t *dst, int y0, int nrows, bool swap_bytes,
 void hud_overlay_clock_style(uint16_t *dst, int y0, int nrows, bool swap_bytes,
                              int hh, int mm, int ss, int strength, int style);
 
-/* Map IMU tilt to a HUD parallax offset, clamped to +/-HUD_TILT_MAX px.
- *
- * This is the one place the device beats the browser mockup: a simulated HUD
- * can only ever loop, but this one is anchored to the physical world, so the
- * furniture leans as you tilt the puck and the face reads as sitting behind
- * glass rather than painted on it. Deliberately gentle — this is depth, not a
- * spirit level.
- *
- * roll_deg/pitch_deg come straight from jr_imu. Pass 0,0 to disable. */
 #define HUD_TILT_MAX 10
+/* Parallax is disabled to keep the HUD registered with the baked face.
+ * Writes zero to each non-null output pointer for every input angle. */
 void hud_tilt_offset(float roll_deg, float pitch_deg, int8_t *ox, int8_t *oy);
 
 #ifdef __cplusplus

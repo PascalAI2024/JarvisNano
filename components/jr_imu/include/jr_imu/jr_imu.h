@@ -41,6 +41,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "jr_probe/board_probe.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -77,6 +78,16 @@ esp_err_t jr_imu_start(void);
 void jr_imu_stop(void);
 
 /**
+ * @brief Hint whether the device is resting (WHISPER/DREAM).
+ *
+ * Lock-free and safe from any task. In AWAKE/AMBIENT the sampler runs at
+ * 100 Hz (QMI8658 125 Hz Normal) so shake-to-cancel and tilt stay crisp; in
+ * WHISPER/DREAM it drops to 20 Hz (QMI8658 21 Hz low-power CTRL2 = 0x2D) and
+ * restores 125 Hz immediately on exit from rest.
+ */
+void jr_imu_set_rest(bool resting);
+
+/**
  * @brief Arm the QMI8658 Wake-on-Motion engine on INT1 for deep sleep.
  *
  * Call AFTER jr_imu_stop() has let the sampler leave the bus. Writes the
@@ -101,8 +112,39 @@ esp_err_t jr_imu_arm_wake_on_motion(uint8_t threshold_mg);
  */
 esp_err_t jr_imu_read(jr_imu_t *out);
 
+/**
+ * @brief The low-passed gravity direction, for tilt as a display input.
+ *        LOCK-FREE and non-blocking: one packed word the sampler stores,
+ *        no snapshot mutex, safe from any task.
+ *
+ * gx/gy are the accelerometer's in-plane X and Y in milli-g (an up vector:
+ * +1000 means the axis points straight up), SENSOR axes, the same ones
+ * jr_imu_t.gx/gy carry. One pole, gain 1/8 per 10 ms sample, about 80 ms.
+ * The caller turns it into a change of tilt (neutral is wherever it is held)
+ * and maps axes to the glass; jr_imu knows neither.
+ *
+ * @return false until the first sample, and again once the sampler stops.
+ */
+bool jr_imu_tilt_read(int *gx_mg, int *gy_mg);
+
 /** @brief True once a QMI8658 has answered WHO_AM_I. */
 bool jr_imu_present(void);
+
+/** @brief Cumulative count of QMI8658 I2C read/write errors since boot. */
+uint32_t jr_imu_i2c_errors(void);
+
+/**
+ * @brief One-shot board probe for GET /api/diag/board. Reads WHO_AM_I,
+ *        REVISION, CTRL1/2/3/7 and the temperature register; with gyro=true
+ *        also enables the gyroscope for about 300 ms, takes 20 samples and
+ *        restores CTRL7 and CTRL3 to the values found.
+ *
+ * Safe beside the sampler (the I2C master serialises transactions). The gyro
+ * pass is refused while the sampler is stopped or Wake-on-Motion is armed.
+ * Takes about 350 ms with gyro, a few ms without. Never returns an error for
+ * a refused or failed sub-probe: that is reported inside *out.
+ */
+void jr_imu_probe(bool gyro, jr_probe_imu_t *out);
 
 #ifdef __cplusplus
 }

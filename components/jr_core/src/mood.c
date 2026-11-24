@@ -107,6 +107,31 @@ bool jr_mood_sleep_due(const jr_mood_state_t *s, uint32_t now_ms)
                JR_MOOD_SLEEP_MS / (s->saver ? JR_MOOD_SAVER_DIV : 1u);
 }
 
+bool jr_mood_dream_glass(jr_mood_t mood, bool busy, bool usb_present,
+                        bool operator_active, bool ota_or_probation)
+{
+    return mood == JR_MOOD_DREAM && !busy && !usb_present &&
+           !operator_active && !ota_or_probation;
+}
+
+bool jr_mood_weather_due(jr_mood_t mood, bool network_connected,
+                         uint32_t now_ms, uint32_t last_fetch_ms,
+                         bool failed, bool on_screen)
+{
+    if (!network_connected ||
+        (mood != JR_MOOD_AWAKE && mood != JR_MOOD_AMBIENT)) {
+        return false;
+    }
+    if (last_fetch_ms == 0U) {
+        return now_ms >= 20000U;
+    }
+    const uint32_t since = now_ms - last_fetch_ms;
+    if (failed) {
+        return since >= 120000U;
+    }
+    return (on_screen && since >= 600000U) || since >= 1800000U;
+}
+
 const char *jr_mood_name(jr_mood_t mood)
 {
     switch (mood) {

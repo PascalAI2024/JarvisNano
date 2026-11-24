@@ -37,25 +37,73 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+import jarvisctl  # noqa: E402
+
+REPO = os.path.dirname(HERE)
 TOUCH_SRC = os.path.join(REPO, "components", "jr_hal", "src", "input_touch.c")
 HUD_SRC = os.path.join(REPO, "components", "jr_display", "src", "hud_render.c")
+DISPLAY_PORT_HDR = os.path.join(REPO, "components", "jr_ports", "include", "jr_ports", "display.h")
+KEYCHAIN_SERVICE = "com.ingeniousdigital.jarvisnano.desk"
+
+_FALLBACK_FACES = [
+    "IDLE", "LISTENING", "THINKING", "SPEAKING", "ERROR",
+    "RESTING", "MUTED", "LINKING",
+    "DIAL_DIVER", "DIAL_DRESS", "DIAL_PILOT", "DIAL_FUTURE",
+    "DIAL_SKELETON", "DIAL_CELESTIAL", "DIAL_ORRERY", "DIAL_REACTOR",
+]
+
+
+def faces_from_header(repo_root: str = REPO) -> list[str]:
+    """Parse jr_face_t enum order directly from jr_ports/display.h."""
+    hdr = os.path.join(repo_root, "components", "jr_ports", "include", "jr_ports", "display.h")
+    try:
+        with open(hdr, encoding="utf-8", errors="replace") as fh:
+            src = fh.read()
+    except OSError:
+        return list(_FALLBACK_FACES)
+    end = src.find("} jr_face_t;")
+    if end < 0:
+        return list(_FALLBACK_FACES)
+    start = src.rfind("typedef enum {", 0, end)
+    if start < 0:
+        return list(_FALLBACK_FACES)
+    block = re.sub(r"/\*.*?\*/", "", src[start:end], flags=re.S)
+    block = re.sub(r"//.*", "", block)
+    names = re.findall(r"\bJR_FACE_([A-Z0-9_]+)\b", block)
+    faces = [n for n in names if n != "COUNT"]
+    return faces if faces else list(_FALLBACK_FACES)
+
+
+FACES = faces_from_header(REPO)
 
 OK, WARN, BAD = "ok  ", "WARN", "FAIL"
 
 
-def get(base: str, path: str, timeout: float = 8.0, retries: int = 3):
+def _pairing_token(base: str) -> str | None:
+    """Best-effort paired token lookup via shared jarvisctl resolver."""
+    return jarvisctl.load_pairing_token(base)
+
+
+def get(base: str, path: str, timeout: float = 8.0, retries: int = 3,
+        headers: dict[str, str] | None = None):
     """GET with retries — ESP32 wifi power-save drops single requests routinely.
     One failed curl means nothing on this device; three in a row means something."""
     last = None
     for attempt in range(retries):
         try:
-            with urllib.request.urlopen(base + path, timeout=timeout) as r:
+            req = urllib.request.Request(base + path, headers=headers or {})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 return json.loads(r.read().decode("utf-8"))
         except (urllib.error.URLError, urllib.error.HTTPError, OSError,
                 json.JSONDecodeError) as exc:
@@ -276,17 +324,37 @@ def check_touch(base: str) -> list[str]:
     return lines
 
 
+def _read_mood(base: str) -> str | None:
+    """Read current power mood from /api/cockpit when accessible (optional)."""
+    tok = _pairing_token(base)
+    hdrs = {"X-JarvisNano-Token": tok} if tok else None
+    c = get(base, "/api/cockpit", timeout=6.0, retries=1, headers=hdrs)
+    if "__error" in c or not isinstance(c, dict):
+        return None
+    voice = c.get("voice")
+    mood = voice.get("mood") if isinstance(voice, dict) else None
+    return mood.upper() if isinstance(mood, str) and mood else None
+
+
 def check_display(base: str) -> list[str]:
     d = get(base, "/api/display")
     if "__error" in d:
         return [f"{BAD} /api/display unreachable: {d['__error']}"]
-    faces = ["IDLE", "LISTENING", "THINKING", "SPEAKING", "ERROR"]
     face = d.get("applied_face")
-    name = faces[face] if isinstance(face, int) and 0 <= face < len(faces) else face
+    name = FACES[face] if isinstance(face, int) and 0 <= face < len(FACES) else face
     fps = d.get("actual_fps")
-    lines = [f"{OK} display {d.get('init')} face={name} fps={fps} "
+    mood = _read_mood(base)
+    mood_str = f" mood={mood}" if mood else ""
+    lines = [f"{OK} display {d.get('init')} face={name}{mood_str} fps={fps} "
              f"flush_errors={d.get('flush_errors')}"]
-    if isinstance(fps, int) and fps < 8:
+    blanked = bool(d.get("blanked"))
+    if mood == "DREAM" or blanked:
+        pass  # panel intentionally dark/resting in DREAM
+    elif mood == "WHISPER" or name == "RESTING":
+        # WHISPER intentionally renders at a 6 fps cadence (measured 5-6 fps).
+        if isinstance(fps, int) and fps < 4:
+            lines.append(f"{WARN} fps {fps} is low for WHISPER resting cadence")
+    elif isinstance(fps, int) and fps < 8:
         lines.append(f"{WARN} fps {fps} is low — the render task may be starved")
     if d.get("flush_errors"):
         lines.append(f"{BAD} panel flush errors present")
@@ -326,21 +394,44 @@ def run(base: str) -> int:
     return worst
 
 
+def run_static() -> int:
+    """Run source-tree threshold and design-invariant checks without needing a device."""
+    print(f"gesture-doctor --static ({len(FACES)} faces parsed from display.h)\n")
+    sections = [
+        ("classifier thresholds (source of truth: the tree)", check_thresholds),
+        ("design invariants (comments that must stay true)", check_invariants),
+    ]
+    worst = 0
+    for title, fn in sections:
+        print(f"── {title}")
+        for line in fn():
+            print("  " + line)
+            if line.startswith(BAD):
+                worst = 2
+            elif line.startswith(WARN):
+                worst = max(worst, 1)
+        print()
+    print("verdict:", ["healthy", "warnings", "DEFECT FOUND"][worst])
+    return worst
+
+
 def main() -> int:
     # The report draws box rules (U+2500). A Windows console defaults to
     # cp1252 and Python then dies with UnicodeEncodeError on the first one —
     # the doctor crashed before printing a single check (2026-09-05).
-    for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8", errors="replace")
+    jarvisctl.ensure_utf8_console()
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default=os.environ.get("JARVIS_DEVICE_HOST", ""),
                     help="device IP or host (or set JARVIS_DEVICE_HOST)")
+    ap.add_argument("--static", action="store_true",
+                    help="run source-tree threshold & design-invariant checks offline (no --host required)")
     ap.add_argument("--watch", action="store_true",
                     help="re-run every 10 s so you can touch the glass and watch "
                          "the counters move")
     args = ap.parse_args()
+    if args.static:
+        return run_static()
     if not args.host:
         print("set JARVIS_DEVICE_HOST or pass --host (the address is on the "
               "device's STATUS screen, or in your router's client list as "

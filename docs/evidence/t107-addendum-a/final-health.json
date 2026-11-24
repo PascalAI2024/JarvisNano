@@ -1,0 +1,7 @@
+{
+  "checked_utc": "2026-10-12T00:02:41Z",
+  "after_gate_exit": 1,
+  "reachable": false,
+  "error": "URLError",
+  "reason": "<urlopen error timed out>"
+}

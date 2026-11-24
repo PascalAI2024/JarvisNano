@@ -1,314 +1,95 @@
 # Hardware
 
 The live product target is the **Waveshare ESP32-S3-Touch-AMOLED-1.75C**.
-The [official C-board manual and examples](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.75C)
-and the pin-accurate local definition
-[`boards/waveshare/esp32s3_touch_amoled_1_75c/`](../boards/waveshare/esp32s3_touch_amoled_1_75c/)
-are the hardware sources of truth. Do not apply the XIAO or original-1.75 pin
-maps to the C revision.
+Pin and peripheral declarations live in [`boards/waveshare/esp32s3_touch_amoled_1_75c/`](../boards/waveshare/esp32s3_touch_amoled_1_75c/), and the schematic-level hardware audit + probe guide lives in [`docs/reference/board-capabilities.md`](reference/board-capabilities.md).
 
-## Live 1.75C capability map
+> **Important:** The **1.75C** has **32 MB DIO flash**, an anodised CNC aluminium case, and **no TCA9554 IO expander, PCF85063 RTC, microSD slot, GNSS, or haptic motor**. Never apply original-1.75 or Seeed XIAO pin maps to the 1.75C.
 
-| Subsystem | Hardware | Live use |
+---
+
+## 1.75C silicon & verification status
+
+Every capability below distinguishes what is **hardware-verified on a live 1.75C**, **wired in firmware (pending optical/scope measurement)**, or **hardware-present but unused/unverified**:
+
+| Subsystem | Hardware | Status & firmware role |
 |---|---|---|
-| Compute | ESP32-S3R8, dual-core 240 MHz | Voice owner, display compositor, sensors, HTTP control |
-| Memory | 8 MB octal PSRAM | face assets, snapshots, audio/log/VAD rings, worker stacks |
-| Flash | **32 MB DIO @ 80 MHz** | dual 4 MB OTA slots, emote assets, WakeNet model, FAT fallback |
-| Display | CO5300 466×466 QSPI AMOLED | baked reactive faces plus one procedural overlay compositor |
-| Touch | CST9217 IRQ-driven capacitive panel | tap, 850 ms hold, four-way swipe, choice actions, synthetic-event provenance |
-| Audio | ES7210 dual mic + echo reference; ES8311 DAC | 24 kHz shared full-duplex clock, 16 kHz AEC-clean uplink, native Gemini server VAD |
-| Motion | QMI8658 | ±8 g accelerometer at 125 Hz ODR, sampled every 10 ms for flip/shake/lift/orientation; gyro off. Its Wake-on-Motion engine on **INT1 → GPIO21** wakes the chip from deep sleep |
-| Power | AXP2101 | 0.2 Hz battery/voltage/USB/charge telemetry, PKEY, charging animation. No current reading. The PWR key cannot wake the S3 from deep sleep |
-| Network | 2.4 GHz Wi-Fi | direct Gemini Live, JarvisMCP, diagnostics, OTA; modem sleep while the device rests (STATUS `RADIO` row); off entirely in deep sleep |
-| USB | native USB-Serial-JTAG | initial provisioning and recovery |
+| **MCU & Memory** | ESP32-S3R8 (240/160 MHz) · 8 MB octal PSRAM · **32 MB DIO @ 80 MHz** | **Verified:** PSRAM-first heap (`ALWAYSINTERNAL=1024`, `cJSON` in PSRAM), dual 4 MB OTA slots, WakeNet9 model, baked `.eaf` faces & dials |
+| **Display** | CO5300 466×466 QSPI AMOLED (`40 MHz` bus) | **Verified:** 12-row internal-DMA strip compositor, `0x51` brightness, `DISPOFF`/`SLPIN` sleep |
+| **Display TE Sync** | `LCD_TE` → **`GPIO13`** (CO5300 `0x35` V-blank) | **Active in firmware:** rising-edge ISR semaphore in `jarvis_board.c` + `gfx_render` with 1000 ms timeout backoff; live 60 Hz pulse rate probeable via `GET /api/diag/board` |
+| **Display HBM** | CO5300 `0x63` (peak DBV `0xFF`) + **`0x66` bit 1** (`HBMCTL`) | **Wired in firmware / optical gain unverified:** `set_sunlight` & `/api/glass?hbm=1` enable `0x66` with 5-min auto-revert and >65 °C / <25% off-USB guards; optical luminance (nits) and current draw not yet photometer-measured |
+| **Touch** | CST9217 (`I²C 0x5A`, `INT → GPIO11`, `RST → GPIO2`) | **Verified (1-point):** single-point software gesture classifier + `ext1` deep-sleep wake. **Unverified (2-point):** hardware may report 2 fingers (probeable via `board-probe.py --watch touch`) |
+| **Audio** | ES7210 (dual MEMS mics + MIC3 echo ref) · ES8311 DAC · NS4150B amp (`PA_CTRL → GPIO46`) | **Verified:** shared 24 kHz full-duplex I²S clock, 16 kHz AEC uplink, native 24 kHz playback with adaptive jitter buffer |
+| **IMU** | **QMI8658C** (`I²C 0x6B`, `INT1 → GPIO21`; `INT2` unconnected) | **Verified (accel + WoM):** ±8 g accel scaling **125 Hz** (`0x26`) in `AWAKE`/`AMBIENT` → **21 Hz** low-power (`0x2D`) in `WHISPER`/`DREAM`; Wake-on-Motion lift-wake passed on `343e51c`. **Gyro:** kept off at runtime to preserve low-power modes, probeable on demand via `/api/diag/board?gyro=1`. *(Note: QMI8658C does not have the QMI8658A's tap/pedometer engines.)* |
+| **PMIC** | **AXP2101** (`I²C 0x34`; IRQ not wired to S3) | **Verified (telemetry + soft off):** 1 Hz VBAT/SoC/USB/charge cache, 5 s read-only charge-register diagnostic, PWR short/long I²C latch, soft power-off. Extra ADC channels (`die_c`, `vbus_mv`, `vsys_mv`, `ts_mv`) transiently probeable via `/api/diag/board` (restored afterward). **No battery current ammeter** exists on this chip. |
+| **PWR-key mirror** | `PWRON` → BSS138 → `SYS_OUT` (**`GPIO3`**) | **Wired on schematic / unverified on hardware:** probeable via `board-probe.py --watch pwr`. Not yet used as a deep-sleep wake source (GPIO3 strapping & live polarity verification pending). |
+| **Radio & USB** | 2.4 GHz Wi-Fi · BLE 5.0 · Native USB-Serial-JTAG (`GPIO19/20`) | **Verified:** Wi-Fi station + minimum modem sleep at rest; BLE intentionally off (coexistence starves duplex audio); USB-C used for initial flash & recovery |
+| **Expansion pads** | `GPIO17, 18, 39–42`, `U0TXD/RXD`, shared I²C, `3V3/VBUS/GND` | **Unpopulated pads only** — unused by stock firmware |
 
-### Physical interaction grammar
+---
 
-| Input | Runtime action |
-|---|---|
-| PWR short press | Wake/re-arm voice and show `LISTENING`; never mutes |
-| PWR long press | Power off completely: `jr_power_off()` sets the PMIC's power-on hold to 1 s and asserts its soft power-off; every rail drops, charging keeps working; hold PWR 1 s to start. The PMIC's own forced-cut hold (several seconds) remains beneath it |
-| BOOT short press (runtime) | Open/close the controls shade |
-| BOOT hold 1.5–5 s (runtime) | Open a visible 60-second pairing claim window |
-| BOOT held during reset | Enter the ESP32-S3 ROM downloader; not an application gesture |
-| Left-edge vertical swipe | Volume +/− 5 from any screen |
-| Right-edge vertical swipe | Brightness +/− 5 from any screen |
-| Centre vertical swipe | Walk the ring: Jarvis/Watch/Weather/Status/(Desk while live)/Activity (wraps) |
-| Tap on an open sheet | Jarvis speaks what the screen shows |
-| Lift after a rest | Weather glance for eight seconds |
-| Still ten minutes past DREAM, on battery | Deep sleep; lift, touch or a 4 h timer wakes it |
-| Horizontal swipe | Watch peek, 10 s |
-| Top-edge swipe down | Open controls |
-| Centre swipe up | Open detail or close controls |
-| Double tap | Return to Jarvis Home |
-| Glass hold | Physical privacy mute/unmute |
-| Sustained face-down / face-up | Enter flip privacy / clear only a flip-origin mute |
+## 1.75C pin map (schematic-verified)
 
-The edge-swipe classifier is deliberate: the CST9217 reliably reports vertical
-start/end trajectories but did not produce stable continuous circular samples.
-There is one production gesture path, not a hidden rotary fallback.
+Cross-checked against the Waveshare 1.75C schematic and `boards/waveshare/esp32s3_touch_amoled_1_75c/*.yaml`:
 
-The 1.75C **does not have** the original board’s TCA9554, PCF85063 RTC, or
-microSD slot. Wall time is SNTP-backed. Diagnostics persist only in the bounded
-128 KB PSRAM log ring until fetched.
+| GPIO | Net | Firmware role |
+|---|---|---|
+| `0` | `BOOT` key | Shade toggle, 60 s pairing hold, panic-home, ROM download on reset |
+| `1` | `LCD_RESET` | CO5300 panel reset |
+| `2` | `TP_RESET` | CST9217 touch reset |
+| `3` | `SYS_OUT` | PWR-key MOSFET mirror (read-only probe via `/api/diag/board`; not yet a wake pin) |
+| `4, 5, 6, 7` | `QSPI SIO0..3` | CO5300 quad SPI data |
+| `8` / `10` | `I2S DOUT` / `DIN` | ES8311 speaker data out / ES7210 TDM mic data in |
+| `9` / `45` / `16` | `I2S SCLK` / `LRCK` / `MCLK` | Shared 24 kHz full-duplex audio clocks |
+| `11` | `TP_INT` | CST9217 touch IRQ & deep-sleep `ext1` wake |
+| `12` / `38` | `LCD_CS` / `QSPI_SCL` | CO5300 chip select & 40 MHz clock |
+| `13` | `LCD_TE` | CO5300 60 Hz V-blank tearing-effect sync input |
+| `14` / `15` | `I2C SCL` / `SDA` | Shared bus: AXP2101 (`0x34`), ES8311 (`0x30`), ES7210 (`0x80`), CST9217 (`0x5A`), QMI8658C (`0x6B`) |
+| `19` / `20` | `USB D-` / `D+` | Native USB-Serial-JTAG |
+| `21` | `QMI_INT1` | QMI8658C Wake-on-Motion deep-sleep `ext0` wake |
+| `46` | `PA_CTRL` | NS4150B speaker amplifier enable |
 
-## Binding constraints
+---
 
-1. Largest contiguous internal RAM, not total PSRAM, gates TLS/AES and display
-   DMA. Preserve at least an 8 KB block at steady state and measure after every
-   release-shaped change.
-2. The CO5300 path requires 12-row internal-DMA strips. Do not add LVGL or a
-   second renderer beside the existing compositor.
-3. Realtime voice, OTA, provisioning, and operator mode force full Wi-Fi radio
-   availability; rest uses minimum modem sleep; deep sleep follows ten minutes
-   of DREAM on battery. The CPU runs in gears, 240 MHz live and 160 at rest
-   on the cell, chosen from measured idle share; light sleep cannot engage
-   while the codec captures (`docs/reference/power-modes.md`).
-4. QMI8658 polls at 100 Hz while awake; before deep sleep its Wake-on-Motion
-   engine is armed on **INT1 → GPIO21** (resolved from the C schematic — INT2
-   is not connected). The touch INT is GPIO11. Both are RTC-capable wake pins.
+## Binding hardware constraints
 
-## Wake sources in deep sleep
+1. **Contiguous internal SRAM** (not total PSRAM) gates TLS/AES handshakes and QSPI/I²S DMA. Maintain ≥ 8 KB largest internal free block via PSRAM-first allocation (`CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024`, `cJSON` in PSRAM).
+2. **One display compositor:** CO5300 transfers use 12-row internal-DMA strips at 40 MHz QSPI (~21.7 ms pure wire time per full 466×466 frame). Do not add LVGL or a second renderer.
+3. **No light sleep while capturing:** Full-duplex codec capture prevents ESP-IDF automatic light sleep; power savings come from adaptive CPU gears (`240 / 160 MHz`), 21 Hz rest IMU, Wi-Fi minimum modem sleep, quiet clock cadence, and true deep sleep on battery.
+4. **SNTP timekeeping:** With no external PCF85063 RTC on the 1.75C, wall time is SNTP-backed and deep-sleep countdown timers survive via a checksummed `RTC_NOINIT_ATTR` snapshot + clamped RTC timer wake.
+
+---
+
+## Deep-sleep wake topology
 
 ```mermaid
 flowchart LR
-    subgraph S3[ESP32-S3 in deep sleep]
-        EXT0[ext0 · GPIO21 · level high]
-        EXT1[ext1 · GPIO11 · any low]
-        TMR[RTC timer · 4 h]
-    end
-    IMU[QMI8658 INT1<br/>Wake-on-Motion, 100 mg] --> EXT0
-    TP[CST9217 INT<br/>pull-up kept on] --> EXT1
-    EXT0 --> Boot[Boot → LISTENING if it was]
-    EXT1 --> Boot
-    TMR --> Rest[Boot → resume at DREAM]
+    IMU["QMI8658C INT1<br/>Wake-on-Motion (100 mg)"] --> EXT0["ESP32-S3 ext0<br/>GPIO21 (level high)"]
+    TP["CST9217 INT<br/>Touch (pull-up kept)"] --> EXT1["ESP32-S3 ext1<br/>GPIO11 (any low)"]
+    RTC["RTC Wake Timer<br/>(4 h default or active timer expiry)"] --> Wake
+
+    EXT0 --> Wake["Boot -> Restore RTC Timers &amp; Listening State"]
+    EXT1 --> Wake
 ```
 
-Each line is armed only if it reads its resting level at that moment; the
-timer is always armed. The AXP2101 PWR key is not a wake source on this board.
+Each GPIO wake source is armed only if the pin reads its resting level at sleep entry (preventing boot loops); the RTC timer is always armed and clamped to the nearest active countdown timer. Deep sleep refuses to engage on USB, during OTA probation, or during an active companion lease.
 
-## Compatibility tracks
+### Live board probe (`scripts/board-probe.py`)
 
-The original Waveshare 1.75 is a 16 MB hardware/source reference with
-RTC/microSD; it is not a current release build. The Seeed XIAO ESP32-S3 Sense
-remains a camera experiment. The sections below document that XIAO wiring only;
-they are not instructions for the live product.
+Verify open hardware questions directly on a running 1.75C without flashing debug builds:
 
-## XIAO ESP32-S3 Sense at a glance
-
-| Spec       | Value                                |
-| ---------- | ------------------------------------ |
-| MCU        | ESP32-S3R8 (dual-core 240 MHz)       |
-| Flash      | 8 MB QIO @ 80 MHz                    |
-| PSRAM      | 8 MB octal @ 80 MHz                  |
-| Wi-Fi      | 2.4 GHz, BLE 5.0                     |
-| USB        | Native USB-C (USB-Serial-JTAG)       |
-| Mic        | MSM261D3526H1CPM PDM (on-board)      |
-| Camera     | **OV3660 3 MP** on 2026 batches; OV2640 2 MP on older units. SCCB at 0x3C (OV3660) or 0x30 (OV2640). See [CAMERA.md](CAMERA.md) for the silent-swap story + driver state. |
-| Footprint  | 21 × 17.5 mm                         |
-| Power      | 5 V via USB-C, 3.3 V LDO regulated   |
-
-## Pin assignments (Phase 1 firmware)
-
-| Header | GPIO | Direction | Phase | Use |
-| --- | --- | --- | --- | --- |
-| D0 | 1  | output | 1 | RMT WS2812 placeholder (optional) |
-| D1 | 2  | reserved | — | free (was I²S BCLK in MAX98357 alt; unused under PAM8002A) |
-| D2 | 3  | reserved | — | free (was I²S WS in MAX98357 alt; unused under PAM8002A) |
-| **D3** | **4**  | output | **2** | **PDM-TX → 270 Ω + 100 nF → PAM8002A IN+** |
-| D4 | 5  | I²C | 1/3 | I²C SDA (touchscreen + sensors) |
-| D5 | 6  | I²C | 1/3 | I²C SCL |
-| D6 | 43 | UART | — | UART TX (free if not used) |
-| D7 | 44 | UART | — | UART RX (free if not used) |
-| D8 | 7  | output | 3 | free — Phase 3 LCD CS candidate |
-| D9 | 8  | output | 3 | free — Phase 3 LCD RST candidate |
-| D10 | 9 | output | 3 | free — Phase 3 LCD DC candidate |
-| (on-board) | **21** | output | 1 | **User LED — active LOW** (native boot/alive heartbeat) |
-| (on-board) | **41** | input | 1 | **PDM mic DATA** (full-duplex on I²S0 RX) |
-| (on-board) | **42** | output | 1 | **PDM mic CLK** |
-
-```mermaid
-flowchart LR
-    subgraph BOARD[XIAO ESP32-S3 Sense]
-        direction TB
-        D0[D0 GPIO1<br/>WS2812 ext]
-        D3X[D3 GPIO4<br/>PDM-TX out]
-        D4[D4 GPIO5<br/>I2C SDA]
-        D5[D5 GPIO6<br/>I2C SCL]
-        ONBOARD41[GPIO41<br/>PDM mic DATA]
-        ONBOARD42[GPIO42<br/>PDM mic CLK]
-        LED21[GPIO21<br/>USER LED active-LOW]
-    end
-
-    subgraph PDM[On-board MEMS mic]
-        MIC[MSM261D3526H1CPM]
-    end
-
-    subgraph AMP[Phase 2 PAM8002A combo + speaker]
-        R[270 ohm]
-        C[100 nF to GND]
-        INP[IN+]
-    end
-
-    subgraph SCREEN[Phase 3 Seeed Round Display 1.28in]
-        TSDA[I2C SDA]
-        TSCL[I2C SCL]
-    end
-
-    MIC -->|PDM CLK| ONBOARD42
-    MIC -->|PDM DATA| ONBOARD41
-    D3X --> R
-    R --> INP
-    R --- C
-    D4 --> TSDA
-    D5 --> TSCL
+```bash
+export JARVIS_DEVICE_HOST='<device-ip>'
+python3 scripts/board-probe.py                  # GPIO13 TE, GPIO3, IMU regs/temp, PMIC ADC
+python3 scripts/board-probe.py --gyro           # + 300 ms QMI8658C gyro pass (restores CTRL3/7)
+python3 scripts/board-probe.py --watch pwr      # 3 s window to test GPIO3 PWR-key mirror
+python3 scripts/board-probe.py --watch touch    # 4 s window to test 2-finger CST9217 report
 ```
 
-## Wiring — Phase 1 (bare board)
+---
 
-Nothing to wire. Plug USB-C into your Mac, hit `./scripts/flash.sh`,
-done. The on-board PDM mic and Wi-Fi are already on the chip.
+## Compatibility & historical tracks
 
-## Wiring — Phase 2 (add the PAM8002A speaker module)
-
-The chosen Phase-2 amp is the **PAM8002A combo board** — analog mono 3 W amp with a built-in 28 mm 4 Ω speaker (the ubiquitous ~$3 AliExpress module).
-
-The XIAO ESP32-S3 has no DAC, so the firmware drives **I²S PDM-TX on a single GPIO** (D3 / GPIO4) and an external **RC low-pass filter** reconstructs the analog signal that the PAM8002A expects on its IN+ pin.
-
-```mermaid
-flowchart LR
-    subgraph X[XIAO ESP32-S3 Sense]
-        V5[5V]
-        GND[GND]
-        D3[D3 GPIO4 PDM-TX]
-    end
-
-    R[270 ohm resistor]
-    C[100 nF cap]
-
-    subgraph A[PAM8002A combo module]
-        VIN[VCC]
-        AGND[GND]
-        INP[IN+]
-        INN[IN-]
-        SPK[28 mm speaker dome on-board]
-    end
-
-    V5 --> VIN
-    GND --> AGND
-    D3 --> R
-    R --> INP
-    INP --- C
-    C --- GND
-    INN --> GND
-```
-
-**Notes:**
-- **Why this works:** PDM-TX out of GPIO4 is a high-frequency 1-bit pulse density signal (~1 MHz). The 270 Ω + 100 nF low-pass (cutoff ≈ 6 kHz, gentle 1st-order roll-off) smooths it back into a usable line-level analog signal. Higher-fidelity setups stack a second RC stage; for a 28 mm speaker on a desk, single-stage is plenty.
-- **Power the amp from `5V`** (the USB-C rail), not `3V3`. The 3.3 V regulator can't deliver 1 W audio peaks.
-- **Common ground is critical** — tie `AGND` to the XIAO `GND`.
-- **No I²S BCLK or WS lines** are used — that path is only needed for digital amps like the MAX98357A. PDM-TX is single-pin.
-- The board manager YAML at [`boards/seeed/xiao_esp32s3_sense/board_peripherals.yaml`](../boards/seeed/xiao_esp32s3_sense/board_peripherals.yaml) already declares `format: pdm-out` on `i2s_audio_out`, so once you wire the RC filter the firmware drives audio out on first boot.
-
-### Alternative: MAX98357A I²S amp
-
-If you already have a MAX98357A on hand, swap the YAML back to `format: std-out` with the original BCLK / WS / DOUT pin trio (D1 / D2 / D3) and skip the RC filter. The enclosure cavity fits both modules.
-
-```mermaid
-flowchart LR
-    subgraph X[XIAO ESP32-S3 Sense]
-        V5[5V]
-        GND[GND]
-        D1[D1 GPIO2 BCLK]
-        D2[D2 GPIO3 WS LRC]
-        D3[D3 GPIO4 DIN]
-    end
-
-    subgraph A[MAX98357A]
-        VIN[VIN]
-        AGND[GND]
-        BCLK[BCLK]
-        LRC[LRC]
-        DIN[DIN]
-        SPK1[SPK+]
-        SPK2[SPK-]
-        GAIN[GAIN floating = 9 dB]
-        SD[SD floating = on]
-    end
-
-    SPKR[4 ohm 1W speaker]
-
-    V5 --> VIN
-    GND --> AGND
-    D1 --> BCLK
-    D2 --> LRC
-    D3 --> DIN
-    SPK1 --> SPKR
-    SPKR --> SPK2
-```
-
-**Notes:**
-- Power the amp from `5V` (the USB-C rail), not `3V3`. The 3.3 V regulator on the XIAO can't deliver 1 W audio peaks.
-- Common ground is critical — tie `AGND` to the XIAO `GND`.
-- `SD` (shutdown) and `GAIN` can stay floating for default behavior. Pull `SD` low to mute.
-- After wiring, flip the `audio_dac` block in [`board_devices.yaml`](../boards/seeed/xiao_esp32s3_sense/board_devices.yaml) from `chip: none` to `chip: dummy` and rebuild.
-
-## Wiring — Phase 3 (touchscreen)
-
-A 2.8" or 3.2" SPI ILI9341 + XPT2046 resistive touch is the cheapest
-path. The shared SPI bus on the XIAO has only one set of free SPI pins,
-so the LCD and touch share MOSI/MISO/SCK with separate CS lines.
-
-Pin sketch (subject to change once we crib LVGL bringup from the M5 CoreS3 board config):
-
-| LCD pin   | XIAO pin  | Notes                          |
-| --------- | --------- | ------------------------------ |
-| VCC       | 3V3       |                                |
-| GND       | GND       |                                |
-| CS        | D8/GPIO7  | LCD chip-select                |
-| RST       | D9/GPIO8  | reset                          |
-| DC        | D10/GPIO9 | data/command                   |
-| MOSI      | D6/GPIO43 | SPI MOSI (also UART TX)        |
-| SCK       | D7/GPIO44 | SPI SCK (also UART RX)         |
-| MISO      | not used  | LCD is write-only              |
-| LED       | 3V3       | backlight always on for now    |
-| T_CS      | TBD       | XPT2046 touch CS               |
-| T_IRQ     | TBD       | optional touch IRQ             |
-
-This phase will need a new `spi_display` peripheral entry in
-`board_peripherals.yaml` and a `display_lcd` device entry — see the
-`boards/m5stack/m5stack_cores3/` config for the LVGL pattern.
-
-## BOM
-
-| Phase | Item                         | Where           | Approx cost |
-| ----- | ---------------------------- | --------------- | ----------- |
-| 1     | Seeed XIAO ESP32-S3 Sense    | Seeed / Mouser  | $14         |
-| 1     | USB-C cable (data + power)   | anywhere        | $5          |
-| 2     | **PAM8002A combo amp + 28 mm speaker module** | AliExpress | $3 |
-| 2     | 270 Ω resistor + 100 nF cap (RC LPF) | bin / Mouser | $0.10 |
-| 2     | 503450 LiPo (850 mAh) — solders to BAT+ | AliExpress | $4 |
-| 2     | (alternative) MAX98357A I²S amp + 4 Ω speaker | Adafruit / AliEx | $5+$2 |
-| 3     | Seeed Round Display for XIAO (1.28" GC9A01 + XPT2046) | Seeed | $14 |
-| 3     | 3D-printed Monolith enclosure | hardware/enclosure/ | filament |
-
-Total Phase 1: **~$19**. Phase 2 (PAM8002A path): **+$7**. Phase 3 (touchscreen + enclosure): **+$14**.
-
-## XIAO reference power budget
-
-Order-of-magnitude figures, USB-C 5 V input:
-
-| State                     | Current  | Notes                                |
-| ------------------------- | -------- | ------------------------------------ |
-| Wi-Fi idle                | ~80 mA   | both cores idling, mic off           |
-| Listening (PDM RX)        | ~110 mA  | mic + DMA active                     |
-| Status LED on full        | +6 mA    | brief during boot flash + LISTENING  |
-| Wi-Fi TX burst            | ~250 mA  | spike during chat upload             |
-| PAM8002A @ 1 W (Phase 2)  | +180 mA  | analog amp, RC-filtered PDM input    |
-| MAX98357A alt @ 1 W       | +200 mA  | digital I²S amp                      |
-| Touchscreen backlight     | +60 mA   | 1.28" round AMOLED (Phase 3)         |
-| LiPo charger (Phase 2)    | +200 mA  | only when charging via USB           |
-
-A standard 5 V / 1 A USB charger covers all phases comfortably. With the
-850 mAh LiPo and Wi-Fi + chat workload, expect **~5–7 h of run time**
-unplugged before the LED starts SOS-ing low battery.
+| Track | Status | Notes |
+|---|---|---|
+| **Original Waveshare 1.75** | Reference only (`boards/waveshare/esp32s3_touch_amoled_1_75/`) | 16 MB flash, carries PCF85063 RTC, microSD, TCA9554; not release-built |
+| **Seeed XIAO ESP32-S3 Sense** | Reference only (`boards/seeed/xiao_esp32s3_sense/`) | Early compact/camera experiment (OV3660/OV2640, PDM-TX PAM8002A); see [`CAMERA.md`](CAMERA.md) |

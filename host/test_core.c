@@ -36,10 +36,21 @@ extern void transport_tests_run(void);
  * defined in host/test_soak.c; registered inside this file's UNITY_BEGIN/END. */
 extern void soak_tests_run(void);
 extern void mood_tests_run(void);
+extern void cue_tests_run(void);
+extern void cue_ui_tests_run(void);
 /* The rain warning and the morning briefing (wave N13), pure. */
 extern void glance_tests_run(void);
 /* The playback feeder's reply / hole / pre-roll walk and its earcon guard. */
 extern void jitter_tests_run(void);
+extern void voice_fix_tests_run(void);
+extern void mic_watch_tests_run(void);
+extern void pace_tests_run(void);
+extern void timer_tests_run(void);
+extern void notes_tests_run(void);
+extern void audio_power_tests_run(void);
+extern void spectrum_tests_run(void);
+extern void power_charge_tests_run(void);
+extern void power_analytics_tests_run(void);
 
 /* ---- shared fixtures ---- */
 static jr_clock_t g_clk;
@@ -1931,6 +1942,22 @@ int main(void)
 
     /* The playback feeder's reply / hole / pre-roll walk, and its earcon guard. */
     jitter_tests_run();
+    audio_power_tests_run();
+    power_charge_tests_run();
+    power_analytics_tests_run();
+
+    /* What a tone may do to the speaker's mute state, and the interface cues. */
+    cue_tests_run();
+    cue_ui_tests_run();
+
+    /* The unanswered-utterance watch, the gateway/tool policy and the setup it
+     * shapes (the 2026-11-10 voice session). */
+    voice_fix_tests_run();
+    mic_watch_tests_run();
+    pace_tests_run();
+    timer_tests_run();
+    notes_tests_run();
+    spectrum_tests_run();
 
     return UNITY_END();
 }

@@ -20,7 +20,7 @@ typedef struct {
     jr_jitter_t j;
     uint32_t now;
     uint32_t tail_until;      /* the harness's DAC tail, like the feeder's */
-    unsigned holes, gaps_opened, gaps_ended, replies_ended, quiet, changes;
+    unsigned holes, ignored, gaps_opened, gaps_ended, replies_ended, quiet, changes;
     uint32_t last_hole_ms;
     uint32_t last_prev_ms;
 } sim_t;
@@ -38,6 +38,7 @@ static void tick(sim_t *s, uint32_t avail, bool earcon)
     jr_jitter_out_t o;
     jr_jitter_feed(&s->j, s->now, avail, tail, earcon, &o);
     s->holes += o.hole_booked;
+    s->ignored += o.hole_ignored;
     s->gaps_opened += o.gap_opened;
     s->gaps_ended += o.gap_ended;
     s->replies_ended += o.reply_ended;
@@ -231,9 +232,77 @@ static void test_jitter_pinned_preroll_never_moves(void)
     TEST_ASSERT_EQUAL_UINT32(3000u, s.j.preroll_ms);
 }
 
+/* A reply with one hole of the given length in the middle. */
+static void reply_with_hole(sim_t *s, uint32_t hole_ms)
+{
+    play(s, 500u);
+    dry(s, hole_ms);
+    play(s, 500u);
+    dry(s, 3000u);
+}
+
+/* The 2026-11-10 session: holes of 18 and 107 ms (the 80 ms DAC tail covers
+ * most of both) must not step the lead; they are still counted, as ignored,
+ * so the cockpit can show how often the ring ran that close. */
+static void test_jitter_hole_the_tail_covers_is_not_booked(void)
+{
+    sim_t s;
+    sim_init(&s, 600u);
+    reply_with_hole(&s, 20u);
+    TEST_ASSERT_EQUAL_UINT(0u, s.holes);
+    TEST_ASSERT_EQUAL_UINT(1u, s.ignored);
+    TEST_ASSERT_EQUAL_UINT(1u, s.replies_ended);
+    TEST_ASSERT_EQUAL_UINT32(600u, s.j.preroll_ms);
+    TEST_ASSERT_EQUAL_UINT(0u, s.changes);
+    TEST_ASSERT_EQUAL_UINT32(1u, s.j.clean_replies);   /* it was a clean reply */
+
+    reply_with_hole(&s, 110u);
+    TEST_ASSERT_EQUAL_UINT(0u, s.holes);
+    TEST_ASSERT_EQUAL_UINT(2u, s.ignored);
+    TEST_ASSERT_EQUAL_UINT32(600u, s.j.preroll_ms);
+}
+
+static void test_jitter_hole_you_can_hear_is_still_booked(void)
+{
+    sim_t s;
+    sim_init(&s, 600u);
+    reply_with_hole(&s, 210u);
+    TEST_ASSERT_EQUAL_UINT(1u, s.holes);
+    TEST_ASSERT_EQUAL_UINT(0u, s.ignored);
+    TEST_ASSERT_EQUAL_UINT32(900u, s.j.preroll_ms);
+}
+
+/* The whole logged session, replayed: six replies with holes of 607 ms, none,
+ * 208 ms, 107 ms, none, 18 ms. The old policy booked four holes and walked
+ * 600 -> 900 -> 1200 -> 1500; this one books two, ends at 1200, and three
+ * clean replies later it comes back down. */
+static void test_jitter_the_logged_session_replayed(void)
+{
+    sim_t s;
+    sim_init(&s, 600u);
+    reply_with_hole(&s, 610u);
+    TEST_ASSERT_EQUAL_UINT32(900u, s.j.preroll_ms);
+    clean_reply(&s);
+    reply_with_hole(&s, 210u);
+    TEST_ASSERT_EQUAL_UINT32(1200u, s.j.preroll_ms);
+    reply_with_hole(&s, 110u);
+    clean_reply(&s);
+    reply_with_hole(&s, 20u);
+    TEST_ASSERT_EQUAL_UINT(2u, s.holes);
+    TEST_ASSERT_EQUAL_UINT(2u, s.ignored);
+    TEST_ASSERT_EQUAL_UINT32(1000u, s.j.preroll_ms);   /* 1200 - 200 after 3 clean */
+    clean_reply(&s);
+    clean_reply(&s);
+    clean_reply(&s);
+    TEST_ASSERT_EQUAL_UINT32(800u, s.j.preroll_ms);
+}
+
 /* ---- registration (called from test_core.c main, inside UNITY_BEGIN/END) ---- */
 void jitter_tests_run(void)
 {
+    RUN_TEST(test_jitter_hole_the_tail_covers_is_not_booked);
+    RUN_TEST(test_jitter_hole_you_can_hear_is_still_booked);
+    RUN_TEST(test_jitter_the_logged_session_replayed);
     RUN_TEST(test_jitter_reply_with_one_hole_steps_600_to_900);
     RUN_TEST(test_jitter_three_clean_replies_step_900_to_700);
     RUN_TEST(test_jitter_earcon_is_no_reply_no_hole_no_step);

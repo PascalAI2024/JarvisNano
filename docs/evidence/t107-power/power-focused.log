@@ -1,0 +1,19 @@
+.evidence/t107/power_runner.c:374:test_sleep_probation_refuses_before_audio_or_rtc:PASS
+.evidence/t107/power_runner.c:375:test_sleep_failed_audio_leaves_rtc_and_peripherals_untouched:PASS
+.evidence/t107/power_runner.c:376:test_sleep_quiesces_audio_then_records_and_arms_wake:PASS
+.evidence/t107/power_runner.c:377:test_dream_glass_requires_genuine_idle:PASS
+.evidence/t107/power_runner.c:378:test_weather_first_and_retries_respect_rest_and_network:PASS
+.evidence/t107/power_runner.c:379:test_weather_cadence_and_wraparound_are_preserved:PASS
+.evidence/t107/power_runner.c:380:test_mood_starts_awake:PASS
+.evidence/t107/power_runner.c:381:test_mood_still_climbs_ambient_whisper_dream:PASS
+.evidence/t107/power_runner.c:382:test_mood_motion_wakes:PASS
+.evidence/t107/power_runner.c:383:test_mood_busy_holds_awake:PASS
+.evidence/t107/power_runner.c:384:test_mood_face_down_is_dream:PASS
+.evidence/t107/power_runner.c:385:test_mood_quiet_rests_as_a_watch_in_five_seconds:PASS
+.evidence/t107/power_runner.c:386:test_mood_poke_awake_resets_still:PASS
+.evidence/t107/power_runner.c:387:test_mood_sleep_is_due_ten_minutes_into_dream:PASS
+.evidence/t107/power_runner.c:388:test_mood_saver_ladder_is_four_times_faster:PASS
+
+-----------------------
+15 Tests 0 Failures 0 Ignored
+OK

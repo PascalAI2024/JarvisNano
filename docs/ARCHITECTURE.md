@@ -1,50 +1,52 @@
 # Architecture
 
-> **Live target:** plain ESP-IDF 5.5.4 on the Waveshare
-> ESP32-S3-Touch-AMOLED-1.75C. Last reconciled: **2026-09-01**.
+> **Live target:** plain ESP-IDF 5.5.4 on the **Waveshare ESP32-S3-Touch-AMOLED-1.75C**.
+> Last reconciled with compiled source: **2026-11-23**.
 
-The image is rooted in `main/`, `components/jr_*`, and the selected board
-definition. `firmware/`, `esp-claw/`, and the older dashboard are not part of
-the image produced by `scripts/build-v5.sh`.
+The firmware image is rooted at `main/`, `components/jr_*`, `firmware/components/jarvis_board`, and `boards/waveshare/esp32s3_touch_amoled_1_75c/`. Legacy `esp-claw/` and `dashboard/` trees are not built by `scripts/build-v5.sh`.
+
+---
 
 ## System overview
 
 ```mermaid
 flowchart TB
-    Human[Voice · touch · PWR/BOOT · motion]
+    Human["Human (Voice · Touch · PWR/BOOT · Motion)"]
 
-    subgraph Board[Waveshare ESP32-S3-Touch-AMOLED-1.75C]
-        S3[ESP32-S3R8<br/>240 MHz · 8 MB PSRAM · 32 MB flash]
-        Mic[ES7210 microphones]
-        DAC[ES8311 speaker output]
-        Screen[CO5300 466×466 AMOLED]
-        Touch[CST9217 touch<br/>INT on GPIO11]
-        IMU[QMI8658<br/>INT1 on GPIO21]
-        PMIC[AXP2101 + PWR]
-        Boot[GPIO0 BOOT]
+    subgraph Board["Waveshare ESP32-S3-Touch-AMOLED-1.75C"]
+        S3["ESP32-S3R8<br/>240/160 MHz · 8 MB PSRAM · 32 MB DIO Flash"]
+        Mic["ES7210 Dual Mic + Echo Ref"]
+        DAC["ES8311 DAC + NS4150B Amp"]
+        Screen["CO5300 466×466 AMOLED<br/>40 MHz QSPI · LCD_TE GPIO13 · HBM 0x66"]
+        Touch["CST9217 Touch (INT GPIO11)"]
+        IMU["QMI8658C IMU (INT1 GPIO21)"]
+        PMIC["AXP2101 PMIC + PWR"]
+        Boot["GPIO0 BOOT"]
     end
 
-    subgraph Runtime[JarvisNano v5]
-        HAL[jr_hal · jr_audio · jr_imu · jr_power · jr_net]
-        Core[jr_core: session · turn · monitors · rest ladder]
-        Voice[jr_transport: Gemini Live]
-        Tools[jr_tools: bounded worker + allowlist]
-        Display[jr_display + hud_render: the ring]
-        HTTP[main: HTTP control plane]
-        OTA[app_update: dual-slot OTA]
-        Sleep[main: modem sleep · deep sleep]
-        NVS[(NVS: config, levels)]
+    subgraph Runtime["JarvisNano v5 Runtime"]
+        HAL["jr_hal · jr_audio · jr_imu · jr_power · jr_net · jr_probe"]
+        Wake["jr_wake (WakeNet9 'Jarvis' Worker)"]
+        Core["jr_core (Session · Turn · Monitors · Rest · Timers · Notes)"]
+        Voice["jr_transport (Gemini Live WSS)"]
+        Tools["jr_tools (Keep-Alive MCP Bridge + Allowlist)"]
+        Display["jr_display + hud_render (Glass-2 · 8 Dials · TE Sync)"]
+        HTTP["main/http_routes.c + Embedded Command Deck"]
+        Sleep["main/power.c (CPU Gears · Modem · Deep Sleep + RTC)"]
+        NVS[("NVS (Secrets · Levels · Watch Style · Notes)")]
     end
 
-    Gemini[Google Gemini Live]
-    MCP[JarvisMCP gateway]
-    Desk[Paired desk client]
+    Gemini["Google Gemini Live"]
+    MCP["JarvisMCP Gateway"]
+    Deck["Browser Command Deck / Codex CLI"]
+    ZeroChat["Paired ZeroChat Phone"]
 
     Human --> Touch --> HAL
     Human --> Mic --> HAL
     Human --> PMIC --> HAL
     Human --> Boot --> HAL
     IMU --> HAL
+    HAL --> Wake --> Core
     HAL --> Core
     Core <--> Voice <--> Gemini
     Core <--> Tools <--> MCP
@@ -52,283 +54,168 @@ flowchart TB
     Core --> HAL --> DAC --> Human
     Core --> Sleep --> IMU
     Sleep --> Screen
-    HAL -->|links, 1 Hz| Display
+    HAL -->|"1 Hz state"| Display
     NVS --> Voice
     NVS --> Tools
-    Desk <--> HTTP
+    NVS --> Core
+    Deck <--> HTTP
+    ZeroChat <-->|"Leased 16/24 kHz PCM"| HTTP
     HTTP --> Core
     HTTP --> Display
-    HTTP --> OTA
     HTTP --> Sleep
 ```
 
-## Ownership and tasks
+---
 
-The runtime is single-owner at every load-bearing boundary.
+## Single-owner task topology
 
-| Owner | Responsibility |
+Every load-bearing subsystem has exactly one owning task; cross-task communication uses bounded queues, atomics, or lock-free packed state words.
+
+| Task / Owner | Responsibility |
 |---|---|
-| `jr_voice` | `jr_orch_step`, Gemini events and commands, physical input policy, the rest ladder, privacy, levels, the sleep decision |
-| `websocket_task` | TLS/WebSocket transport events only |
-| `jr_pb_feed` | Drain the bounded playback ring into `esp_codec_dev_write`, behind the jitter buffer |
-| `gfx_render` | Render one frame in 12-row strips and submit synchronous DMA; the only task that may issue a panel command (brightness, DISPOFF, SLPIN) |
-| `jr_present` | Load and cache face assets, apply the latest requested face |
-| `jr_tools` | Execute one bounded local or JarvisMCP job, publish one bounded result |
-| `httpd` | Parse and authenticate requests, post bounded commands; never owns realtime state |
-| `jr_imu` / `jr_power` | Publish non-blocking sensor snapshots; the IMU sampler stops before deep sleep hands the part its wake engine |
+| `jr_voice` | Orchestrator (`jr_orch_step`), Gemini events & commands, physical input policy, timers/notes/briefing, rest ladder, privacy, levels, and sleep admission |
+| `jr_wake` | Dedicated WakeNet9 `"Jarvis"` worker task (12 KB stack); receives copied 16 kHz frames via `jr_wake_push()` so wake inference never stalls the voice loop or AEC |
+| `websocket_task` | TLS/WebSocket transport events only (separate TX lock enabled) |
+| `jr_pb_feed` | Event-driven (`ulTaskNotifyTake`) playback feeder draining the 512 KiB PSRAM ring into `esp_codec_dev_write()` behind the adaptive jitter buffer; computes live decimated playback RMS (`jr_audio_playback_live_rms()`) right before the DAC write to drive the speech cadence halo |
+| `gfx_render` | Renders 12-row internal-DMA strips, gates frame submission on 60 Hz `LCD_TE` (`GPIO13`) with automatic timeout backoff, and is the **only task** permitted to issue panel commands (`0x51` brightness, `0x66` HBM, `DISPOFF/SLPIN`) |
+| `jr_present` | Loads baked `.eaf` faces and caches decoded watch dials in PSRAM (`DIAL_PSRAM_FLOOR` = 2 MB guard) |
+| `jr_tools` | Executes bounded JarvisMCP gateway calls over a single persistent HTTPS keep-alive handle (45 s idle expiry, config-gen invalidation, 1-shot stale-EOF reconnect) |
+| `httpd` | Serves the zero-dependency embedded **Command Deck** (`GET /`, `main/diagnostics.html`) and authenticated HTTP control plane; never owns realtime state |
+| `jr_imu` / `jr_power` | Non-blocking sensor publishers; `jr_imu` scales from 125 Hz normal (`0x26`) in `AWAKE`/`AMBIENT` down to 21 Hz low-power (`0x2D`) in `WHISPER`/`DREAM`, and halts cleanly before handing `INT1` to Wake-on-Motion in deep sleep |
 
-The composition root owns concrete wiring. It is four files under `main/`
-over one internal seam, `app.h`: `main.c` (wiring, the voice task,
-presentation, the 1 Hz shell publish), `http_routes.c` (the control plane),
-`power.c` (CPU gears, deep sleep, wake state) and `device_tools.c` (the
-device-tool queue, consent, weather, activity). Pure `jr_core` code calls no
-ESP-IDF, touch, audio, display, HTTP or network API, and is tested on the host
-(`host/`, 122 tests) alongside the display's own harness
-(`components/jr_display/tests`, 556 checks).
+The composition root in `main/` is split across `main.c` (wiring, voice loop, presentation, 1 Hz shell publish), `http_routes.c` (HTTP route authority), `power.c` (CPU gears, deep sleep, RTC state), `device_tools.c` (offline tools, timers, stopwatch, NVS notes, sunlight boost policy, weather, activity), and `diagnostics.html` (embedded Command Deck), sharing `main/app.h`.
 
-## Voice path
+Pure C logic in `components/jr_core` (`orchestrator`, `session`, `turn_policy`, `monitors`, `mood`, `timer`, `notes`, `tool_policy`, `dac_mute`, `cue`, `echo_gate`, `glance`, `mic_watch`, `pace`, `utt_watch`, `snapshot`) has zero ESP-IDF dependencies and runs natively under the host test suite.
 
-The 1.75C shares one 24 kHz I²S clock between ES7210 capture and ES8311
-playback. Capture is read as four TDM lanes, demultiplexed, and downsampled
-24→16 kHz for AEC, VAD and Gemini input. Gemini output stays native 24 kHz.
+---
+
+## Voice, wake & playback path
+
+The 1.75C shares one 24 kHz full-duplex I²S clock between ES7210 capture (MIC1/MIC2 + MIC3 echo reference) and ES8311 speaker output. Capture is demultiplexed and downsampled 24→16 kHz for AEC, VAD, `jr_wake`, and Gemini uplink; speaker output remains native 24 kHz.
 
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant A as jr_audio
+    participant A as jr_audio (ES7210 + AEC)
+    participant W as jr_wake (WakeNet9)
     participant C as jr_core
     participant T as jr_transport
     participant G as Gemini Live
-    participant P as Playback feeder
-    participant D as jr_display
+    participant P as jr_pb_feed (24 kHz)
+    participant D as jr_display (Halo)
 
-    U->>A: speech at the microphones
-    A->>A: demux + AEC + 24→16 kHz
-    A->>T: bounded two-frame audio batches
+    U->>A: Speech at microphones
+    A->>A: 4-lane TDM demux + AEC + 24->16 kHz
+    A->>W: Non-blocking frame copy (jr_wake_push)
+    W-->>C: "Jarvis" hit (wakes rest or cuts reply)
+    A->>T: Bounded 16 kHz audio batches
     T->>G: realtimeInput.audio
-    G-->>T: server VAD · text · audio · tool calls
-    T-->>C: typed server events (96-deep queue)
-    C->>D: Listening / Thinking / Speaking
-    T-->>P: 24 kHz PCM into a 512 KiB ring
-    P->>P: adaptive pre-roll 600–1500 ms, refill 1500 ms after a hole
-    P->>U: ES8311 speaker output
+    G-->>T: Server VAD · audio · text · tool calls
+    T-->>C: Typed server events (96-deep queue)
+    T-->>P: 24 kHz PCM into 512 KiB PSRAM ring
+    P->>P: Adaptive pre-roll (600-1500 ms) + live RMS
+    P->>D: DAC-synced speech cadence RMS
+    P->>U: ES8311 speaker output + warm harmonic chimes
 ```
 
-Gemini's server VAD owns turn boundaries and interruption. The local VAD is
-observability and pacing, and one more thing: the clock behind the
-unanswered-utterance watchdog below.
+- **Adaptive jitter buffer:** Gemini paces native audio near real time with 0.8–2.2 s mid-sentence stalls. `jr_pb_feed` holds a 600–1500 ms adaptive pre-roll (stepping +300 ms after any hole, −200 ms after three clean replies) and rebuilds a 1500 ms lead after an underrun. Counters live at `/api/device/health` → `playback`, `rx`.
+- **Voice loop timing & benching:** `GET /api/diag/voiceperf` reports per-class loop FPS/latency, tick skips, and `jr_wake` chunk timing; `POST /api/diag/voiceperf?bench=1` runs a 64-frame offline AEC + WakeNet9 microbenchmark.
+- **Harmonic earcons:** `jr_audio_play_chime()` uses a warm fundamental + 2nd harmonic (`0.82·sin(f) + 0.18·sin(2f)`) with exponential bell decay and raised-cosine edges for wake cues (`G5→D6`), timer alarms (`E5→B5→E6`), and UI feedback cues.
 
-**Why the speaker runs a second behind the network.** Measured from the
-transcript timing, Gemini paces native audio near real time and stalls
-0.8–2.2 s mid-sentence. Draining as fast as it arrives produced holes; the
-feeder waits for a lead before a reply's first word (600 ms, stepping up 300 ms
-after any reply with a hole and down 200 ms after three clean ones, between 600
-and 1500) and rebuilds a 1500 ms lead after any underrun, capped so a reply
-boundary never waits more than 2.5 s. Counters: `/api/device/health` → `playback`, `rx`.
+### Session liveness watchdogs
 
-### Session liveness
-
-Three watchdogs, each answering a different silence:
-
-| Watchdog | Detects | Acts |
+| Watchdog | Detects | Action |
 |---|---|---|
-| Keepalive (`jr_core` monitors) | no server frame for the keepalive window | `StaleDeadline` → reconnect with the resume handle |
-| No-reply (`jr_core` monitors) | Thinking older than 20 s | `NoReplyTimeout` → the turn is abandoned |
-| Unanswered utterance (`main.c`, `UTT_*`) | an utterance ≥ 800 ms ends with the device still Listening and no server frame arrives within 7 s; two in a row | injects `StaleDeadline`, caption `RECONNECTING` |
+| **Keepalive** (`jr_core/monitors`) | No server frame for the keepalive window | `StaleDeadline` → reconnect with session resume handle |
+| **No-reply** (`jr_core/monitors`) | `THINKING` older than 20 s | `NoReplyTimeout` → abandon hung turn |
+| **Unanswered utterance** (`jr_core/utt_watch`) | Utterance ≥ 800 ms ends while `LISTENING` with no server frame in 7 s (two in a row) | Inject `StaleDeadline`, caption `RECONNECTING` |
 
-The third exists because a server that goes quiet while the socket stays up
-looks, to the first two, exactly like a healthy idle session. Seen on the
-glass: three whole questions in forty seconds, no reply, no error, then
-answers again.
+---
 
-## Physical input policy
+## Glass-2 display engine
 
-Touch reports tap, long press and four-way swipes with origin and end
-coordinates and synthetic provenance. One production gesture path:
+One procedural + baked-asset compositor drives the 466×466 CO5300 AMOLED in 12-row internal-DMA strips:
 
-| Input | Action |
-|---|---|
-| "Jarvis" / PWR short | Listen; never mutes |
-| PWR hold | Power off completely via the PMIC; a one-second hold of PWR starts it again |
-| BOOT short | Control shade open/close |
-| BOOT hold 1.5–5 s | Visible 60-second pairing window |
-| BOOT held during reset | ROM downloader |
-| Left-edge vertical | Volume |
-| Right-edge vertical | Brightness |
-| Centre vertical swipe | The ring: JARVIS ↔ WATCH ↔ WEATHER ↔ STATUS ↔ (DESK while live) ↔ ACTIVITY, wrapping |
-| Centre up / down | Open / close the current screen's sheet |
-| Tap on an open sheet | Jarvis speaks the screen (a text turn; the mic is untouched) |
-| Horizontal swipe | Ten-second WATCH peek |
-| Double tap | Home |
-| Glass hold | Physical privacy |
-| Face-down / face-up | Enter flip privacy / clear only a flip-origin mute |
-| Lift after a rest | Weather glance for eight seconds |
+- **Spatial ring:** `JARVIS · WATCH · WEATHER · STATUS · ACTIVITY` (plus `DESK` only while a companion is live), composed within measured circular bands (focal ring `r76–96`, safe text disc `r168`, listening halo `r186–193`, battery rim `r215–220`, privacy gold ring `r221–222`, choice arcs `r223–231`).
+- **8 luxury watch dials (`jr_watch_style_t`):** `JARVIS`, `DIVER`, `DRESS`, `PILOT`, `MINIMAL`, `FUTURE`, `SKELETON` (oscillating balance wheel), and `CELESTIAL` (14-star foreground parallax). Baked dials decode once into a PSRAM frame cache (`s_dial_frame`) so style switching and redraws avoid flash churn; IMU tilt drives specular bevel/hand lighting and `CELESTIAL` star depth travel.
+- **60 Hz TE-synchronized flush (`GPIO13`):** `jarvis_board.c` arms a rising-edge ISR on `LCD_TE` (`GPIO13`, CO5300 `0x35` V-blank mode). `gfx_render` waits on the TE semaphore before flushing frames, with a 1000 ms automatic backoff if TE pulses stop (e.g., while the panel sleeps).
+- **CO5300 High-Brightness Mode (`0x66`):** `jarvis_board_set_hbm()` toggles `HBMCTL` (`0x66` bit 1) using `0x63=0xFF` peak DBV, restoring normal `0x51` brightness when turned off. `device_tools.c` enforces a 5-minute auto-revert and refuses HBM if die temperature > 65 °C or battery < 25% off USB.
+- **Live overlays:** Countdown timer & Pomodoro ring/banner, 4-lap chronograph stopwatch, live rim volume/brightness arcs, DAC-synced speech waveform halo, and TTL-bounded 466×466 RGB565 remote canvas.
 
-Edge intent is accepted only after the swipe classifier selects UP/DOWN, so
-horizontal navigation stays untouched. Synthetic input may walk the ring and
-open sheets but cannot clear privacy, approve consent, answer asks, or escape
-a companion's lease.
+---
 
-## Display path
+## Offline-first tool path (24 voice tools)
 
-One display engine. Baked `rwave_*.eaf` assets provide the reactor face;
-`hud_render` and `jr_display` add the battery rim, the gold privacy ring,
-captions, choice arcs, the WATCH face, the shade, and the ring's screens in
-the measured negative space of a 466 px circle: a focal ring at r76–96, a
-sheet band inside r168, an orbit rail at r185–194, the shell clipped at r214,
-and the rim tenants beyond.
-
-Each ring screen is a focal object plus a sheet composed once per frame from
-packed words other tasks publish lock-free: the power word from `jr_power`,
-the weather from the device's own fetch, the activity feed from turn ends,
-and the links word (`jr_display_links_set`, 1 Hz from `publish_shell_state`)
-that carries Wi-Fi state and RSSI, the session socket, the tools bridge, the
-companion, the radio's power mode and the die temperature. STATUS reads the
-same words `/api/cockpit` serves, so the glass and the API cannot disagree.
-
-Measured on the panel with the mic idle: JARVIS 19 fps, the ring screens
-12–14. The shell veil is recomputed every strip; caching it is the next win.
-
-Snapshot routes are software mirrors of the submitted RGB565, not panel
-readback:
-
-| Route | Meaning |
-|---|---|
-| `/api/display` | Presenter health and counters |
-| `/api/display/snapshot.json` | Mirror metadata and freshness |
-| `/api/display/snapshot.ppm` | The exact submitted frame |
-
-## Tool path
-
-Gemini sees eight declared tools: the fixed device tools, the local level
-tools, `search_tools` and `execute_tool`. Everything except the levels runs on
-the `jr_tools` worker.
+Gemini is configured with **24 declared tools** (`DEVICE_TOOL_DECL_COUNT == 24U` in `main/app.h`), split cleanly by `jr_tool_needs_gateway()` (`components/jr_core/src/tool_policy.c`):
 
 ```mermaid
 flowchart LR
-    Call[Gemini function call] --> Local{Local tool?}
-    Local -->|levels| App[App-task request]
-    Local -->|no| Worker[jr_tools worker]
-    Worker --> Fixed[Fixed template<br/>weather_glance, memory, time …]
-    Worker --> Search[search_tools<br/>8 matches → tool, what, params]
-    Worker --> Exec{execute_tool<br/>device allowlist}
-    Exec -->|read-only service| Gen[Generated bracket-path call<br/>positional first, named on failure]
-    Exec -->|anything else| Refuse[Refused before any code exists]
-    Fixed --> Act[JarvisMCP legacy /act]
-    Search --> Act
-    Gen --> Act
-    Act --> Result[≤ 3 KB projected result]
-    Refuse --> Result
-    Result --> Reply[Gemini functionResponse]
+    Call["Gemini Function Call"] --> Route{"jr_tool_needs_gateway()"}
+    Route -->|"18 Local Tools (0 ms)"| Local["device_tools.c / jr_core<br/>Timers · Focus · Stopwatch · Notes<br/>Weather · Time · Briefing · Glass<br/>Levels · Sunlight · Status · ask_user"]
+    Route -->|"6 Gateway Tools"| Worker["jr_tools Worker<br/>Persistent HTTPS Keep-Alive"]
+    Worker --> Policy{"Device Allowlist &amp; Templates"}
+    Policy -->|"Allowed"| MCP["JarvisMCP Gateway<br/>(<=3 KB Projected Result)"]
+    Policy -->|"Disallowed"| Refuse["Refused Before Code Exists"]
+    Local --> Reply["Gemini functionResponse"]
+    MCP --> Reply
+    Refuse --> Reply
 ```
 
-The legacy `/act` bearer carries the gateway's full authority, so the device
-is the policy: `execute_tool` generates calls only into a read-only allowlist
-(`components/jr_tools/src/jr_tools_templates.c`) and results are projected to
-fit the 3,072-byte Gemini slot. The typed `/device/v1/invoke` route with
-server-side capability policy is the intended long-term boundary and is not
-provisioned. Jobs the device owns (the weather glance) are tagged
-`JR_TOOLS_SESSION_ANY` so no session close can orphan them.
+- **18 instant offline tools (0 ms):** `current_time`, `weather_here`, `set_volume`, `set_brightness`, `ask_user`, `set_timer`, `cancel_timer`, `list_timers`, `set_glass`, `device_status`, `start_focus`, `stopwatch`, `add_note`, `list_notes`, `clear_notes`, `daily_briefing`, `set_ui_sounds`, `set_sunlight`. All work even with no JarvisMCP gateway configured.
+- **6 JarvisMCP gateway tools:** `recall_memory`, `remember`, `search_tools`, `execute_tool`, `delegate_task`, `delegated_tasks`. `jr_tools` maintains a single persistent HTTPS keep-alive client (reused across calls, dropped after 45 s idle or config change) and projects responses into the ≤ 3,072-byte Gemini slot.
 
-## Power ladder
+---
 
-The rest ladder in `jr_core` names the state; `main/power.c`, called from the
-mood tick in `main.c`, drives the hardware under it: the CPU gear (240 MHz while anything is happening, 160 at rest on
-the cell, max pinned to min so nothing scales under a peripheral), Wi-Fi
-modem sleep, and deep sleep at the bottom. Below 20 % on the cell the
-ladder runs four times faster. Light sleep cannot engage while the
-microphones capture, which is always. Measurements and the gear rationale:
-[`reference/power-modes.md`](reference/power-modes.md).
+## Persistent local state & power ladder
+
+### Timers, notes & RTC survival
+- **`jr_core/timer`:** Manages countdown timers (5 s–12 h), Pomodoro focus sessions, and a 4-lap chronograph stopwatch. Before deep sleep, `main/power.c` clamps the RTC wake delay to the nearest active timer and writes a magic + FNV-1a checksummed `jr_timer_snapshot_t` into `RTC_NOINIT_ATTR`; on wake, `power_restore_rtc_timers()` restores remaining durations and consumes the snapshot so crashes never replay stale alarms.
+- **`jr_core/notes`:** Stores up to 6 pinned desk notes (64 chars each) durably in NVS, accessible by voice (`add_note` / `list_notes` / `clear_notes`), daily briefing, and the Command Deck (`/api/notes`).
+
+### Adaptive rest & deep-sleep ladder
 
 ```mermaid
 stateDiagram-v2
     [*] --> AWAKE
-    AWAKE --> AMBIENT: still 20 s · dim, still listening
-    AMBIENT --> WHISPER: still 5 min · session closed, radio saving
-    WHISPER --> DREAM: still 15 min
-    AWAKE --> DREAM: face-down
-    DREAM --> SLEEP: 10 min more · on battery · no update · no companion
-    SLEEP --> AWAKE: lift (QMI8658 Wake-on-Motion, GPIO21)
-    SLEEP --> AWAKE: touch (CST9217 INT, GPIO11)
-    SLEEP --> DREAM: 4 h timer
-    AMBIENT --> AWAKE: motion · voice · USB
-    WHISPER --> AWAKE: motion · voice · USB
-    DREAM --> AWAKE: motion · tap · wake word
+    AWAKE --> AMBIENT: "20 s still (dim, still listening)"
+    AMBIENT --> WHISPER: "5 min still (160 MHz, 21 Hz IMU, min-modem)"
+    WHISPER --> DREAM: "15 min still"
+    AWAKE --> DREAM: "Face-down"
+    DREAM --> DEEP_SLEEP: "+10 min on battery (no OTA probation / lease)"
+    DEEP_SLEEP --> AWAKE: "Lift (QMI8658 WoM GPIO21) or Touch (CST9217 GPIO11)"
+    DEEP_SLEEP --> AWAKE: "RTC timer / active countdown expiry"
+    AMBIENT --> AWAKE: "Motion · voice · USB"
+    WHISPER --> AWAKE: "Motion · voice · USB"
+    DREAM --> AWAKE: "Motion · tap · 'Jarvis' wake word"
 ```
 
-Each wake line is armed only if it is quiet at that moment, so a wrong
-polarity costs a wake source and never a boot loop; the timer is always
-armed. RTC memory carries whether the mic was live, so a lifted device comes
-back `LISTENING`. Deep sleep refuses to run while the image is on OTA
-probation, because it is a reboot through the bootloader and would roll the
-image back. Recipe, measurements and gotchas:
-[`reference/power-modes.md`](reference/power-modes.md).
+Below 20% battery off USB, the rest ladder advances **4× faster**. Deep sleep refuses to engage while an OTA image is on probation (a cold boot would roll it back), while on USB, or while a companion lease is active.
 
-## HTTP and authority
+---
 
-`main/http_routes.c` is the route authority (the handlers were split out of
-`main.c` on 2026-09-02; they still post into the voice task's lanes and own
-no realtime state). Content-bearing reads and mutating
-routes require the proof named for that surface — pairing token, control
-header, or both — in [`PROTOCOL.md`](PROTOCOL.md). With
-`JR_DEV_OPEN_DIAGNOSTICS` set the control header alone suffices on the LAN;
-that flag must be 0 before release.
+## PSRAM-first SRAM architecture
 
-Physical authority is stronger than remote control:
+Contiguous internal SRAM (not total 8 MB PSRAM) is the binding constraint for TLS/AES, I²S/QSPI DMA, and real-time tasks. The firmware enforces a strict PSRAM-first budget:
 
-- Remote input is tagged synthetic.
-- Remote resume never clears physical hold or flip privacy.
-- Privacy gates the microphone frames themselves, not just the re-arm: while
-  paused, every frame is zeroed before the VAD and the uplink, whatever the
-  session is doing. A text turn from the desk works with the mic shut.
-- Consent accepts only physical post-prompt taps.
-- A companion's lease has a physical double-tap escape.
-- OTA cannot override deliberate privacy state.
+- **`sdkconfig.defaults`:** `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024` routes allocations ≥ 1 KB to PSRAM automatically while keeping `CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536` reserved for DMA/TLS/task stacks, alongside `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y`, `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`, and `CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y`.
+- **PSRAM-backed subsystems:** `cJSON_InitHooks()` in `main/main.c` routes all JSON AST allocations to PSRAM; playback ring (512 KiB), 128 KB log ring, framebuffer mirrors, remote canvas, baked watch dial cache, `jr_power` charge snapshots, `jr_tools` HTTP body buffers, and `httpd` diagnostic response buffers allocate from PSRAM first.
+- **Internal SRAM reserved for:** 12-row QSPI display DMA strip buffers, audio DMA, `jr_voice` owner stack, and TLS AES headroom (≥ 8 KB largest contiguous block monitored by runtime admission gates).
 
-## Memory discipline
+---
 
-Internal contiguous RAM, not total PSRAM, is the binding resource for TLS,
-DMA and task creation: the Gemini handshake fails once the largest internal
-block drops under about 8 KB. Queue payloads, logs, snapshots, the playback
-ring and worker stacks live in PSRAM; display DMA buffers stay internal.
-`sdkconfig` is generated, so memory tuning lives in `sdkconfig.defaults`.
+## Embedded Command Deck, OTA & build boundary
 
-Runtime gates refuse optional work when the largest internal block is below
-8 KB, PSRAM is below 2 MB, the display is unstable, or OTA preflight fails.
-No failure path may retry unbounded, queue unbounded work, or reboot because
-a diagnostic counter moved.
-
-## OTA and release boundary
-
-Two 4 MB application slots. OTA writes only the inactive slot, then boots
-under a probation window that requires voice, network, tools, HTTP, wake and
-display progress before the image is marked valid; the update ring is violet
-on every screen until then. A running device is updated over Wi-Fi
-(`POST /api/ota/upload`) because esptool cannot sync over USB-JTAG while the
-firmware owns the port.
-
-Trusted-LAN OTA is operational. Public release still requires signed images,
-authenticated encrypted upload, attended at-rest credential protection, and
-an exact third-party notice bundle. Secure Boot, anti-rollback, flash
-encryption and eFuses are separately attended hardware operations.
-
-## Build boundary
+`main/http_routes.c` serves the zero-dependency **Wi-Fi Command Deck** (`main/diagnostics.html`) at `GET /` with live 466×466 AMOLED mirroring, ring/watch-style switching, Pomodoro/Stopwatch controls, NVS Notes, drag-and-drop RGB565 Canvas push, Codex surface testing, live log tailing, board probing (`/api/diag/board`), and crash forensics (`/api/diag/crash` + ELF coredump summary).
 
 ```mermaid
 flowchart LR
-    Source[main/ · components/jr_* · boards/]
-    Host[Host suites: jr_core 121 tests · jr_display 556 checks]
-    Docker[ESP-IDF 5.5.4 Docker build]
-    Image[jarvisrobot_v5.bin]
-    USB[Verified USB flash · first time]
-    OTA[POST /api/ota/upload · preflight · inactive slot · probation]
-    Device[Physical 1.75C]
-
-    Source --> Host
-    Source --> Docker --> Image
-    Image --> USB --> Device
-    Image --> OTA --> Device
+    Source["main/ · components/jr_* · boards/"] --> Host["./scripts/host-tests.sh (23 Suites)"]
+    Source --> Docker["ESP-IDF 5.5.4 Docker Build"]
+    Docker --> Image["build/jarvisrobot_v5.bin"]
+    Image --> USB["USB Initial Flash (32 MB DIO)"]
+    Image --> OTA["POST /api/ota/upload (Dual-Slot Probation)"]
+    USB --> Device["Physical Waveshare 1.75C"]
+    OTA --> Device
 ```
 
-Use [`BUILD.md`](BUILD.md), [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md),
-and [`../PLAN.md`](../PLAN.md) for commands, gates and open work.
+See [`PROTOCOL.md`](PROTOCOL.md) for the complete HTTP and tool contract, [`BUILD.md`](BUILD.md) for build/flash/test workflows, and [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) for remaining public-release gates.

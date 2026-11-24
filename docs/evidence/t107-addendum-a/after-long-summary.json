@@ -1,0 +1,120 @@
+{
+  "idle-rest": {
+    "samples": 49,
+    "duration_s": 720.016,
+    "drain_mv_h": 100.2,
+    "conditional95_scatter_mv_h": 25.77,
+    "conservative_rounding_mv_h": 15.26,
+    "endpoint_drain_mv_h": 105.0,
+    "endpoint_rounding_mv_h": 10.0,
+    "endpoint_mv": [
+      3759,
+      3738
+    ],
+    "endpoint_pct": [
+      57,
+      54
+    ],
+    "moods": [
+      "WHISPER"
+    ],
+    "watch_styles": [
+      "FUTURE"
+    ],
+    "brightness": [
+      14
+    ],
+    "frames": 4236,
+    "frames_per_s": 5.883,
+    "render_wall_percent": 3.872,
+    "render_mean_us": 6582.1,
+    "flushes": 165193,
+    "max_flush_errors": 0,
+    "block_means": [
+      [
+        0.014583333333333334,
+        3757.25
+      ],
+      [
+        0.04791722222222222,
+        3757.0
+      ],
+      [
+        0.08125,
+        3752.625
+      ],
+      [
+        0.11458333333333333,
+        3747.5
+      ],
+      [
+        0.14791666666666667,
+        3745.75
+      ],
+      [
+        0.18333382716049382,
+        3741.4444444444443
+      ]
+    ],
+    "uncertainty_note": "Conditional residual scatter assumes independent blocks; ADC calibration, correlated relaxation, SoC, temperature and chronological image order remain unbounded."
+  },
+  "watch": {
+    "samples": 49,
+    "duration_s": 720.0,
+    "drain_mv_h": 126.56,
+    "conditional95_scatter_mv_h": 14.52,
+    "conservative_rounding_mv_h": 15.26,
+    "endpoint_drain_mv_h": 125.0,
+    "endpoint_rounding_mv_h": 10.0,
+    "endpoint_mv": [
+      3737,
+      3712
+    ],
+    "endpoint_pct": [
+      53,
+      49
+    ],
+    "moods": [
+      "WHISPER"
+    ],
+    "watch_styles": [
+      "FUTURE"
+    ],
+    "brightness": [
+      14
+    ],
+    "frames": 4232,
+    "frames_per_s": 5.878,
+    "render_wall_percent": 25.739,
+    "render_mean_us": 43789.7,
+    "flushes": 165044,
+    "max_flush_errors": 0,
+    "block_means": [
+      [
+        0.01458388888888889,
+        3731.75
+      ],
+      [
+        0.04791666666666667,
+        3728.875
+      ],
+      [
+        0.08125055555555556,
+        3722.625
+      ],
+      [
+        0.11458333333333333,
+        3719.375
+      ],
+      [
+        0.14791666666666667,
+        3715.25
+      ],
+      [
+        0.18333333333333332,
+        3710.777777777778
+      ]
+    ],
+    "uncertainty_note": "Conditional residual scatter assumes independent blocks; ADC calibration, correlated relaxation, SoC, temperature and chronological image order remain unbounded."
+  }
+}

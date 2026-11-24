@@ -1,0 +1,16 @@
+# a watch style change: dial to dial, baked dial to MINIMAL (drawn, no art),
+# MINIMAL to a baked dial, and the wrap from the last style to JARVIS
+scene watch-diver
+wait 800
+swipe right       # DIVER -> DRESS
+wait 2000
+scene watch-pilot
+wait 800
+swipe right       # PILOT -> MINIMAL
+wait 2000
+swipe right       # MINIMAL -> FUTURE
+wait 2000
+scene watch-celestial
+wait 800
+swipe right       # CELESTIAL -> JARVIS (the wrap)
+wait 2000

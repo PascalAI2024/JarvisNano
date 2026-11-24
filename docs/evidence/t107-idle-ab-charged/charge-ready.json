@@ -1,0 +1,14 @@
+{
+  "utc": "2026-10-12T03:41:42.812064+00:00",
+  "poll": 12,
+  "battery": {
+    "available": true,
+    "present": true,
+    "charging": false,
+    "usb_present": false,
+    "percent": 58,
+    "millivolts": 3915,
+    "sample_seq": 3676,
+    "age_ms": 257
+  }
+}

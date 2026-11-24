@@ -1,0 +1,10 @@
+FAIL test_tilt_offset_is_disabled:478: tilt must not deflect (roll=0.0 pitch=0.0 -> 1,0)
+FAIL test_tilt_offset_is_disabled:478: tilt must not deflect (roll=177.7 pitch=1.3 -> 1,0)
+FAIL test_tilt_offset_is_disabled:478: tilt must not deflect (roll=-177.7 pitch=-1.3 -> 1,0)
+FAIL test_tilt_offset_is_disabled:478: tilt must not deflect (roll=30.0 pitch=30.0 -> 1,0)
+FAIL test_tilt_offset_is_disabled:478: tilt must not deflect (roll=-30.0 pitch=-30.0 -> 1,0)
+FAIL test_tilt_offset_is_disabled:478: tilt must not deflect (roll=1000.0 pitch=-1000.0 -> 1,0)
+      [agree] painted=9445 answering=19140 (2.03x) worst-gap=9 px
+6 failure(s) of 11451 checks
+hud_render tests FAILED (6)
+exit=1 (expected 1)

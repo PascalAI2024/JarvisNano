@@ -1,0 +1,3 @@
+{"ota": {"active": false, "running": "ota_0", "boot": "ota_0", "state": "pending-verify", "received": 0, "total": 0, "last_error": "ESP_OK", "last_invalid": "none"}, "uptime_ms": 5701, "privacy": true}
+{"ota": {"active": false, "running": "ota_0", "boot": "ota_0", "state": "valid", "received": 0, "total": 0, "last_error": "ESP_OK", "last_invalid": "none"}, "uptime_ms": 59727, "privacy": true}
+authenticated candidate slot valid; privacy muted; audio off

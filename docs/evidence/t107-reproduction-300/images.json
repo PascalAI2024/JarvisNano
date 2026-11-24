@@ -1,0 +1,26 @@
+{
+  "utc": "2026-10-12T00:31:21.419174+00:00",
+  "candidate": {
+    "source_commit": "7578238fb766f4774f2fe772c6310e93512e5b41",
+    "sha256": "7f2c42e3b9f3552912ce7188e859ddba2ff9d3725488adf36703ad746686e4b3",
+    "bytes": 1855168
+  },
+  "baseline": {
+    "source_commit": "0b4108fc9c25b7dc2ac87a06f853c3728108713f",
+    "original_sha256": "6292894e5662c47b0276152aa7aa0ac0cd179310d5bfa69049c5a64171633a7b",
+    "note": "Original binary was overwritten by Addendum build. Isolated rebuild of exact baseline source; compile date is enabled so rebuilt binary hash will differ.",
+    "sha256": "1ae73d543d3c479dbb4ea5c80702670e2b4d80b8a957fa706dfb55869405da86",
+    "bytes": 1854464,
+    "free_percent": 55.786,
+    "descriptor": {
+      "version": "1",
+      "project": "jarvisrobot_v5",
+      "time": "00:38:33",
+      "date": "Oct 12 2026",
+      "idf": "v5.5.4"
+    },
+    "tracked_source_files_verified": 134,
+    "resolved_sdkconfig_matches_candidate": true,
+    "build_exit_code": 0
+  }
+}

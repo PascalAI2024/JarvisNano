@@ -11,17 +11,35 @@
 # runs is worse than no suite, because it looks like coverage. Add new suites
 # HERE, not to a habit.
 #
-# The five suites, in the order they run:
+# The twenty-three suites, in the order they run:
 #   jr_display_hud_tests      components/jr_display/tests   procedural renderer
 #   jr_display_shell_tests    components/jr_display/tests   spatial shell
+#   jr_display_frame_tests    components/jr_display/tests   whole-frame hashes: no pixel moved
+#   jr_display_companion_tests components/jr_display/tests  portable Rest policy
+#   jr_display_glass_tests    components/jr_display/tests   AA type, discs, rings, arcs, glows
+#   jr_display_icon_tests     components/jr_display/tests   the icon set: ink, box, clip, alpha
+#   jr_display_board_tests    components/jr_display/tests   production panel transport
+#   jr_display_quiet_vendor_tests components/jr_display/tests pinned playback and frame retry
+#   jr_main_shell_tests       main/tests/                   production input routing
+#   jr_charge_http_tests      main/tests/                   actual paired charge handler
+#   jr_display_http_tests     main/tests/                   actual transfer timing JSON
+#   jr_companion_main_tests   main/tests/                   actual companion orchestration
+#   jr_companion_integration_tests main/tests/              orchestration to actual renderer
+#   jr_power_sleep_tests      main/tests/                   actual sleep entry coordinator
+#   jr_ota_sleep_fence_tests  main/tests/                   actual OTA admission and restoration
+#   jr_ui_cue_tests           main/tests/                   production cue wiring, real gate
+#   jr_board_gate_tests       main/tests/                   no gateway key, no board poll
+#   jr_imu_wom_tests          components/jr_imu/tests       actual command/arming handshake
+#   jr_probe_board_json_tests components/jr_probe/tests     the board probe's JSON, real encoder
 #   jr_host_tests             host/                         jr_core + jr_dsp + jr_transport
 #   jr_tools_template_tests   components/jr_tools/host      the generated JS template
 #   test_jarvis_desk          scripts/                      the desk CLI (Python)
+#   test_tools_budget         scripts/                      exec JS generator, probe, tool wording (Python)
 #
 # A suite must run a positive number of tests to pass; "0 Tests" is a failure,
 # and a run in which nothing ran at all exits 2.
 #
-# No C compiler on PATH (a Windows desk)? With Docker present the four C suites
+# No C compiler on PATH (a Windows desk)? With Docker present the seven C suites
 # re-run inside the jarvisnano-hosttests image (gcc:14 + cmake + ninja +
 # python3, built from scripts/host-tests.Dockerfile on first use); the Python
 # suite runs natively either way. docs/reference/build-toolchain.md has the
@@ -130,29 +148,79 @@ run_ctest_suite() {  # src bdir name
     finish_c "$name" "$rc" "$out"
 }
 
+run_main_shell_suite() {
+    local py out rc
+    if ! py="$(pick_python)"; then
+        fail "jr_main_shell_tests" "no working python3/python on PATH"; return
+    fi
+    [ $QUIET -eq 1 ] || printf "${DIM}build${NC} jr_main_shell_tests\n"
+    out="$("$py" "$ROOT/main/tests/test_shell_input.py" 2>&1)"; rc=$?
+    finish_c "jr_main_shell_tests" "$rc" "$out"
+}
+
+run_charge_http_suite() {
+    local py out rc
+    if ! py="$(pick_python)"; then
+        fail "jr_charge_http_tests" "no working python3/python on PATH"; return
+    fi
+    [ $QUIET -eq 1 ] || printf "${DIM}build${NC} jr_charge_http_tests\n"
+    out="$("$py" "$ROOT/main/tests/test_charge_http.py" 2>&1)"; rc=$?
+    finish_c "jr_charge_http_tests" "$rc" "$out"
+}
+
+run_production_python_c_suite() { # suite runner
+    local py out rc
+    if ! py="$(pick_python)"; then
+        fail "$1" "no working python3/python on PATH"; return
+    fi
+    out="$("$py" "$ROOT/$2" 2>&1)"; rc=$?
+    finish_c "$1" "$rc" "$out"
+}
+
 run_c_suites() {
     run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build" \
         jr_display_hud_tests "$ROOT/components/jr_display/tests/build/jr_display_hud_tests"
     run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build" \
         jr_display_shell_tests "$ROOT/components/jr_display/tests/build/jr_display_shell_tests"
+    run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build" \
+        jr_display_frame_tests "$ROOT/components/jr_display/tests/build/jr_display_frame_tests"
+    run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build" \
+        jr_display_companion_tests "$ROOT/components/jr_display/tests/build/jr_display_companion_tests"
+    run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build"         jr_display_glass_tests "$ROOT/components/jr_display/tests/build/jr_display_glass_tests"
+    run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build"         jr_display_icon_tests "$ROOT/components/jr_display/tests/build/jr_display_icon_tests"
+    run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build"         jr_display_glass3_ring_tests "$ROOT/components/jr_display/tests/build/jr_display_glass3_ring_tests"
+    run_cmake_suite "$ROOT/components/jr_display/tests" "$ROOT/components/jr_display/tests/build"         jr_display_glass3_screens_tests "$ROOT/components/jr_display/tests/build/jr_display_glass3_screens_tests"
+    run_production_python_c_suite jr_display_board_tests components/jr_display/tests/test_board.py
+    run_production_python_c_suite jr_display_quiet_vendor_tests components/jr_display/tests/test_quiet_vendor.py
+    run_main_shell_suite
+    run_charge_http_suite
+    run_production_python_c_suite jr_display_http_tests main/tests/test_display_http.py
+    run_production_python_c_suite jr_companion_main_tests main/tests/test_companion_main.py
+    run_production_python_c_suite jr_companion_integration_tests main/tests/test_companion_integration.py
+    run_production_python_c_suite jr_power_sleep_tests main/tests/test_power_sleep.py
+    run_production_python_c_suite jr_ota_sleep_fence_tests main/tests/test_ota_sleep_fence.py
+    run_production_python_c_suite jr_ui_cue_tests main/tests/test_ui_cue.py
+    run_production_python_c_suite jr_board_gate_tests main/tests/test_board_gate.py
+    run_production_python_c_suite jr_imu_wom_tests components/jr_imu/tests/test_wom.py
+    run_production_python_c_suite jr_probe_board_json_tests components/jr_probe/tests/test_board_json.py
     run_cmake_suite "$ROOT/host" "$ROOT/host/build" jr_host_tests "$ROOT/host/build/jr_host_tests"
     run_ctest_suite "$ROOT/components/jr_tools/host" "$ROOT/build-tools-host" jr_tools_template_tests
 }
 
-run_python_suite() {
-    local py out rc count
+run_python_suite() {  # name file
+    local name="$1" file="$2" py out rc count
     if ! py="$(pick_python)"; then
-        fail "test_jarvis_desk" "no working python3/python on PATH"; return
+        fail "$name" "no working python3/python on PATH"; return
     fi
-    [ $QUIET -eq 1 ] || printf "${DIM}run${NC}   test_jarvis_desk (%s)\n" "$py"
-    out="$(cd "$ROOT" && "$py" -m unittest scripts/test_jarvis_desk.py 2>&1)"; rc=$?
+    [ $QUIET -eq 1 ] || printf "${DIM}run${NC}   %s (%s)\n" "$name" "$py"
+    out="$(cd "$ROOT" && "$py" -m unittest "$file" 2>&1)"; rc=$?
     count="$(printf '%s\n' "$out" | sed -n 's/^Ran \([0-9][0-9]*\) tests\{0,1\} .*/\1/p' | tail -1)"
     if [ "$rc" -eq 0 ] && [ "${count:-0}" -gt 0 ] 2>/dev/null; then
-        pass "test_jarvis_desk" "Ran $count tests OK"
+        pass "$name" "Ran $count tests OK"
     elif [ "$rc" -eq 0 ]; then
-        fail "test_jarvis_desk" "exited 0 but ran no tests"
+        fail "$name" "exited 0 but ran no tests"
     else
-        fail "test_jarvis_desk" "Ran ${count:-0} tests, rc=$rc"
+        fail "$name" "Ran ${count:-0} tests, rc=$rc"
         printf '%s\n' "$out" | grep -E '^(FAIL|ERROR):' | head -20 | sed 's/^/    /'
     fi
 }
@@ -202,7 +270,8 @@ elif command -v docker >/dev/null 2>&1; then
 else
     fail "c-suites" "no cc/gcc and no docker on PATH"
 fi
-run_python_suite
+run_python_suite test_jarvis_desk scripts/test_jarvis_desk.py
+run_python_suite test_tools_budget scripts/test_tools_budget.py
 
 echo
 # Assert what RAN, not just what failed: a suite that never executed reports no

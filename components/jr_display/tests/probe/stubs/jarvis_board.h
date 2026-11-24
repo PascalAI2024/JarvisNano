@@ -12,3 +12,7 @@ typedef struct {
 } jarvis_board_display_t;
 esp_err_t jarvis_board_display_get(jarvis_board_display_t *out);
 esp_err_t jarvis_board_set_brightness(uint8_t pct);
+esp_err_t jarvis_board_display_set_sleep(bool sleep);
+esp_err_t jarvis_board_set_hbm(bool on);
+bool jarvis_board_te_enabled(void);
+bool jarvis_board_te_wait(uint32_t timeout_ms);

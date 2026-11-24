@@ -1,0 +1,13 @@
+{"utc": "2026-10-12T02:41:42.819302+00:00", "battery": {"available": true, "present": true, "charging": true, "usb_present": true, "percent": 16, "millivolts": 3684, "sample_seq": 76, "age_ms": 575}}
+{"utc": "2026-10-12T02:46:42.818337+00:00", "poll": 1, "battery": {"available": true, "present": true, "charging": true, "usb_present": true, "percent": 18, "millivolts": 3727, "sample_seq": 376, "age_ms": 749}}
+{"utc": "2026-10-12T02:51:42.811043+00:00", "poll": 2, "battery": {"available": true, "present": true, "charging": true, "usb_present": true, "percent": 20, "millivolts": 3750, "sample_seq": 676, "age_ms": 244}}
+{"utc": "2026-10-12T02:56:42.811537+00:00", "poll": 3, "battery": {"available": true, "present": true, "charging": true, "usb_present": true, "percent": 22, "millivolts": 3775, "sample_seq": 976, "age_ms": 388}}
+{"utc": "2026-10-12T03:01:42.811600+00:00", "poll": 4, "battery": {"available": true, "present": true, "charging": true, "usb_present": true, "percent": 24, "millivolts": 3803, "sample_seq": 1276, "age_ms": 249}}
+{"utc": "2026-10-12T03:06:42.811339+00:00", "poll": 5, "battery": {"available": true, "present": true, "charging": true, "usb_present": true, "percent": 27, "millivolts": 3836, "sample_seq": 1576, "age_ms": 926}}
+{"utc": "2026-10-12T03:11:42.811836+00:00", "poll": 6, "battery": {"available": true, "present": true, "charging": true, "usb_present": true, "percent": 30, "millivolts": 3868, "sample_seq": 1876, "age_ms": 380}}
+{"utc": "2026-10-12T03:16:42.811205+00:00", "poll": 7, "battery": {"available": true, "present": true, "charging": true, "usb_present": true, "percent": 33, "millivolts": 3896, "sample_seq": 2176, "age_ms": 398}}
+{"utc": "2026-10-12T03:21:42.811407+00:00", "poll": 8, "battery": {"available": true, "present": true, "charging": true, "usb_present": true, "percent": 37, "millivolts": 3920, "sample_seq": 2476, "age_ms": 501}}
+{"utc": "2026-10-12T03:26:42.811413+00:00", "poll": 9, "battery": {"available": true, "present": true, "charging": true, "usb_present": true, "percent": 42, "millivolts": 3941, "sample_seq": 2776, "age_ms": 878}}
+{"utc": "2026-10-12T03:31:42.811843+00:00", "poll": 10, "battery": {"available": true, "present": true, "charging": true, "usb_present": true, "percent": 47, "millivolts": 3961, "sample_seq": 3076, "age_ms": 723}}
+{"utc": "2026-10-12T03:36:42.811732+00:00", "poll": 11, "battery": {"available": true, "present": true, "charging": true, "usb_present": true, "percent": 52, "millivolts": 3980, "sample_seq": 3376, "age_ms": 317}}
+{"utc": "2026-10-12T03:41:42.812064+00:00", "poll": 12, "battery": {"available": true, "present": true, "charging": false, "usb_present": false, "percent": 58, "millivolts": 3915, "sample_seq": 3676, "age_ms": 257}}

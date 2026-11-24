@@ -1,0 +1,95 @@
+<worktree>\.evidence\t107a\after-idle-rest.png
+START idle-rest 720
+idle-rest 0 3759 57 5
+idle-rest 60 3757 57 5
+idle-rest 120 3762 56 5
+idle-rest 180 3757 56 5
+idle-rest 240 3756 56 5
+idle-rest 300 3751 56 5
+idle-rest 360 3754 55 5
+idle-rest 420 3752 55 5
+idle-rest 480 3748 55 5
+idle-rest 540 3740 54 5
+idle-rest 600 3745 54 5
+idle-rest 660 3743 54 5
+idle-rest 720 3738 54 5
+END idle-rest
+<worktree>\.evidence\t107a\after-watch.png
+START watch 720
+watch 0 3737 53 5
+watch 60 3720 53 5
+watch 120 3728 52 5
+watch 180 3732 52 5
+watch 240 3720 52 5
+watch 300 3721 51 5
+watch 360 3719 51 5
+watch 420 3719 50 5
+watch 480 3720 50 5
+watch 540 3716 50 5
+watch 600 3711 49 5
+watch 660 3713 49 5
+watch 720 3712 49 5
+END watch
+START sleep timer=1800
+Traceback (most recent call last):
+  File "<worktree>\.evidence\t107a\measure_long.py", line 38, in <module>
+    print('START sleep timer=1800',flush=True);timer_sleep(1800)
+                                               ^^^^^^^^^^^^^^^^^
+  File "<worktree>\.evidence\t107a\device_lib.py", line 27, in timer_sleep
+    raise RuntimeError('timer wake failed')
+RuntimeError: timer wake failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py", line 1344, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\http\client.py", line 1338, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\http\client.py", line 1384, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\http\client.py", line 1333, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\http\client.py", line 1093, in _send_output
+    self.send(msg)
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\http\client.py", line 1037, in send
+    self.connect()
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\http\client.py", line 1003, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\socket.py", line 865, in create_connection
+    raise exceptions[0]
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\socket.py", line 850, in create_connection
+    sock.connect(sa)
+TimeoutError: timed out
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<worktree>\.evidence\t107a\measure_long.py", line 45, in <module>
+    post('/api/voice/control?armed=0');home()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<worktree>\.evidence\t107a\device_lib.py", line 7, in post
+    return json.loads(ctl.api(p,'POST',json.dumps(body).encode() if body is not None else b''))
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<worktree>\scripts\jarvisctl.py", line 135, in api
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py", line 515, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py", line 532, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py", line 1373, in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py", line 1347, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error timed out>

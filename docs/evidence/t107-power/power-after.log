@@ -1,0 +1,22 @@
+restore baseline brightness cap=65 and volume=95 {'ok': True, 'volume': 95, 'brightness': 65, 'privacy_unchanged': True}
+<worktree>\.evidence\t107\after-idle.png
+START idle-rest window_s= 300
+idle-rest 0 3876 77 Idle WHISPER 5
+idle-rest 60 3906 77 Idle WHISPER 5
+idle-rest 120 3906 77 Idle WHISPER 5
+idle-rest 180 3903 76 Idle WHISPER 5
+idle-rest 240 3894 76 Idle WHISPER 5
+idle-rest 300 3905 76 Idle WHISPER 5
+END idle-rest
+<worktree>\.evidence\t107\after-watch.png
+START watch window_s= 300
+watch 0 3861 76 Idle WHISPER 5
+watch 60 3896 76 Idle WHISPER 5
+watch 120 3897 76 Idle WHISPER 5
+watch 180 3899 75 Idle WHISPER 5
+watch 240 3890 75 Idle WHISPER 5
+watch 300 3892 75 Idle WHISPER 5
+END watch
+START sleep timer_s= 300
+END sleep 317.484 3892 -> 3903
+privacy restored muted

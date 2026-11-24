@@ -4,6 +4,7 @@
 
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
+#include "esp_attr.h"
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_lcd_co5300.h"
@@ -26,6 +27,7 @@ static const char *TAG = "jarvis_board";
 #define JARVIS_LCD_DATA1 GPIO_NUM_5
 #define JARVIS_LCD_DATA2 GPIO_NUM_6
 #define JARVIS_LCD_DATA3 GPIO_NUM_7
+#define JARVIS_LCD_TE    GPIO_NUM_13
 /* Panel reset differs by board revision: the 1.75C freed GPIO1 by dropping the
  * SD slot and moved LCD RST there (original 1.75: GPIO39). Selected board comes
  * from the esp_board_manager-generated CONFIG_ESP_BOARD_* symbol. */
@@ -46,11 +48,12 @@ static const co5300_lcd_init_cmd_t s_lcd_init_cmds[] = {
     {0x3A, (uint8_t[]){0x55}, 1, 0},
     {0x35, (uint8_t[]){0x00}, 1, 0},
     {0x53, (uint8_t[]){0x20}, 1, 0},
-    {0x51, (uint8_t[]){0xFF}, 1, 0},
+    {0x51, (uint8_t[]){0x00}, 1, 0}, /* dark before init's DISPON */
     {0x63, (uint8_t[]){0xFF}, 1, 0},
     {0x2A, (uint8_t[]){0x00, 0x06, 0x01, 0xD7}, 4, 0},
-    {0x2B, (uint8_t[]){0x00, 0x00, 0x01, 0xD1}, 4, 600},
-    {0x11, NULL, 0, 600},
+    {0x2B, (uint8_t[]){0x00, 0x00, 0x01, 0xD1}, 4, 0},
+    /* CO5300 sleep-out booster settling; reset timing remains vendor-owned. */
+    {0x11, NULL, 0, 120},
     {0x29, NULL, 0, 0},
 };
 
@@ -58,6 +61,16 @@ static StaticSemaphore_t s_lock_buf;
 static SemaphoreHandle_t s_lock;
 static bool s_display_ready;
 static jarvis_board_display_t s_display;
+
+esp_err_t jarvis_board_display_set_sleep(bool sleep)
+{
+    if (!s_display_ready || !s_display.io) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const unsigned opcode = sleep ? 0x10u : 0x11u;
+    return esp_lcd_panel_io_tx_param(s_display.io,
+                                    (0x02u << 24) | (opcode << 8), NULL, 0);
+}
 
 static SemaphoreHandle_t jarvis_board_lock(void)
 {
@@ -76,6 +89,109 @@ esp_err_t jarvis_board_set_brightness(uint8_t percent)
         percent = 100;
     }
     return esp_lcd_panel_co5300_set_brightness(s_display.panel, percent);
+}
+
+/* Gfx-owner only: CO5300 High-Brightness Mode (datasheet 7.5.46/7.5.49).
+ * 0x63 WRHBMDISBV sets peak HBM DBV (0xFF); 0x66 HBMCTL bit 1 (0x02) enables
+ * HBM, 0x00 disables it (caller restores normal 0x51 brightness after off). */
+esp_err_t jarvis_board_set_hbm(bool on)
+{
+    if (!s_display_ready || s_display.io == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (on) {
+        const uint8_t dbv = 0xFFu;
+        esp_err_t err = esp_lcd_panel_io_tx_param(
+            s_display.io, (0x02u << 24) | (0x63u << 8), &dbv, 1);
+        if (err != ESP_OK) {
+            return err;
+        }
+        const uint8_t ctl = 0x02u;
+        return esp_lcd_panel_io_tx_param(
+            s_display.io, (0x02u << 24) | (0x66u << 8), &ctl, 1);
+    }
+    const uint8_t ctl = 0x00u;
+    return esp_lcd_panel_io_tx_param(
+        s_display.io, (0x02u << 24) | (0x66u << 8), &ctl, 1);
+}
+
+static StaticSemaphore_t s_te_sem_buf;
+static SemaphoreHandle_t s_te_sem;
+static volatile bool     s_te_ready;
+
+static void IRAM_ATTR lcd_te_isr(void *arg)
+{
+    (void)arg;
+    BaseType_t woken = pdFALSE;
+    if (s_te_sem != NULL) {
+        (void)xSemaphoreGiveFromISR(s_te_sem, &woken);
+    }
+    if (woken == pdTRUE) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+static void jarvis_board_te_init(void)
+{
+    if (s_te_ready) {
+        return;
+    }
+    if (s_te_sem == NULL) {
+        s_te_sem = xSemaphoreCreateBinaryStatic(&s_te_sem_buf);
+    }
+    if (s_te_sem == NULL) {
+        return;
+    }
+    const gpio_config_t cfg = {
+        .pin_bit_mask = 1ULL << JARVIS_LCD_TE,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_POSEDGE,
+    };
+    if (gpio_config(&cfg) != ESP_OK) {
+        ESP_LOGW(TAG, "LCD_TE GPIO%d config failed; tear-free sync disabled",
+                 (int)JARVIS_LCD_TE);
+        return;
+    }
+    esp_err_t isr_err = gpio_isr_handler_add(JARVIS_LCD_TE, lcd_te_isr, NULL);
+    if (isr_err == ESP_ERR_INVALID_STATE) {
+        const esp_err_t svc = gpio_install_isr_service(0);
+        if (svc != ESP_OK && svc != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "LCD_TE ISR service unavailable (%s); sync disabled",
+                     esp_err_to_name(svc));
+            return;
+        }
+        isr_err = gpio_isr_handler_add(JARVIS_LCD_TE, lcd_te_isr, NULL);
+    }
+    if (isr_err != ESP_OK) {
+        ESP_LOGW(TAG, "LCD_TE ISR add failed (%s); sync disabled",
+                 esp_err_to_name(isr_err));
+        return;
+    }
+    s_te_ready = true;
+    ESP_LOGI(TAG, "LCD_TE V-blank sync armed on GPIO%d (rising edge)",
+             (int)JARVIS_LCD_TE);
+}
+
+bool jarvis_board_te_enabled(void)
+{
+    return s_te_ready;
+}
+
+bool jarvis_board_te_wait(uint32_t timeout_ms)
+{
+    if (!s_te_ready || s_te_sem == NULL) {
+        return false;
+    }
+    /* Drain any stale edge that arrived while compositing the previous frame,
+     * then wait (bounded) for the next fresh rising V-blank edge. */
+    (void)xSemaphoreTake(s_te_sem, 0);
+    TickType_t ticks = pdMS_TO_TICKS(timeout_ms);
+    if (ticks == 0) {
+        ticks = 1;
+    }
+    return xSemaphoreTake(s_te_sem, ticks) == pdTRUE;
 }
 
 esp_err_t jarvis_board_display_get(jarvis_board_display_t *out_display)
@@ -141,7 +257,9 @@ esp_err_t jarvis_board_display_get(jarvis_board_display_t *out_display)
                           "esp_lcd_panel_init failed");
         ESP_GOTO_ON_ERROR(esp_lcd_panel_disp_on_off(panel, true), fail_display, TAG,
                           "esp_lcd_panel_disp_on failed");
-        ESP_GOTO_ON_ERROR(esp_lcd_panel_co5300_set_brightness(panel, 100), fail_display, TAG,
+        /* The display owner applies its seeded app cap before the first DMA.
+         * Keep retained/undefined bootstrap pixels dark until that handoff. */
+        ESP_GOTO_ON_ERROR(esp_lcd_panel_co5300_set_brightness(panel, 0), fail_display, TAG,
                           "esp_lcd_panel_co5300_set_brightness failed");
 
         jarvis_board_display_t display = {
@@ -153,6 +271,7 @@ esp_err_t jarvis_board_display_get(jarvis_board_display_t *out_display)
         };
         memcpy(&s_display, &display, sizeof(s_display));
         s_display_ready = true;
+        jarvis_board_te_init();
         ESP_LOGI(TAG, "CO5300 QSPI display ready: %ux%u panel=%p io=%p",
                  (unsigned)s_display.width, (unsigned)s_display.height,
                  (void *)s_display.panel, (void *)s_display.io);

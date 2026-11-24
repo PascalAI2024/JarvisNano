@@ -1,0 +1,3 @@
+vendor quiet tests: 5778 checks, 0 failures
+vendor quiet passed (5778 checks)
+artifact: .evidence/t107/quiet-display/vendor/ab597f41332ff22843b3b9bac6b64dd857de0065969b2d5a620645bcdcb01db3-fixture

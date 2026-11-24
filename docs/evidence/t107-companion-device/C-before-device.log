@@ -1,0 +1,31 @@
+SETTLE DREAM 120
+Traceback (most recent call last):
+  File "C:\Users\pasca\dev\projects\JarvisNano\.worktrees\t107-codex\.evidence\t107c\measure_stages.py", line 60, in <module>
+    window('dream',420,'DREAM',5)
+  File "C:\Users\pasca\dev\projects\JarvisNano\.worktrees\t107-codex\.evidence\t107c\measure_stages.py", line 27, in window
+    assert ctl.cmd_screen(str(OUT/(a.image+'-'+state+'.png')))==0
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\pasca\dev\projects\JarvisNano\.worktrees\t107-codex\scripts\jarvisctl.py", line 235, in cmd_screen
+    f.write(api("/api/display/snapshot.ppm", timeout=20))
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\pasca\dev\projects\JarvisNano\.worktrees\t107-codex\scripts\jarvisctl.py", line 135, in api
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py", line 521, in open
+    response = meth(req, response)
+               ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py", line 630, in http_response
+    response = self.parent.error(
+               ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py", line 559, in error
+    return self._call_chain(*args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\pasca\AppData\Local\Programs\Python\Python312\Lib\urllib\request.py", line 639, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 503: Service Unavailable
