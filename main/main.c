@@ -499,6 +499,81 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
         }},
         .param_count = JR_GEMINI_PARAM_COUNT(1),
     },
+    {
+        .name = "show_gist",
+        .description =
+            "Pin a clean 20-second Reply Gist card on the round glass so Sir "
+            "can read a price, number, event, timer, note, weather, briefing, "
+            "or concise answer after you speak. Optional detail2 and ttl_s "
+            "(4..60, default 20) are also accepted.",
+        .arg_name = "kind",
+        .arg_desc =
+            "Card kind: number, event, timer, note, weather, briefing, or answer.",
+        .params = {
+            {
+                .name = "eyebrow",
+                .type = JR_GEMINI_PT_STRING,
+                .description = "Short top label, e.g. BITCOIN or NEXT IN 42M.",
+                .required = true,
+            },
+            {
+                .name = "hero",
+                .type = JR_GEMINI_PT_STRING,
+                .description = "Big focal text, e.g. 96,420 or DENTIST.",
+                .required = true,
+            },
+            {
+                .name = "detail",
+                .type = JR_GEMINI_PT_STRING,
+                .description = "Optional supporting detail line.",
+                .required = false,
+            },
+            {
+                .name = "footer",
+                .type = JR_GEMINI_PT_STRING,
+                .description = "Optional short bottom footer.",
+                .required = false,
+            },
+        },
+        .param_count = JR_GEMINI_PARAM_COUNT(4),
+    },
+    {
+        .name = "aquarium",
+        .description =
+            "Control Sir's persistent Nano Reef Virtual Aquarium on the round "
+            "glass: open or close the living tank, feed all fish, clean algae, "
+            "check tank status, switch biome (reef, abyss, koi), or add/remove "
+            "creatures (clownfish, blue_tang, neon_tetra, golden_koi, mandarin, "
+            "jellyfish, manta_ray, seahorse; max 8).",
+        .arg_name = "action",
+        .arg_desc =
+            "Action: open, close, feed, clean, status, biome, add, or remove.",
+        .params = {
+            {
+                .name = "species",
+                .type = JR_GEMINI_PT_STRING,
+                .description =
+                    "Optional species for add: clownfish, blue_tang, neon_tetra, "
+                    "golden_koi, mandarin, jellyfish, manta_ray, or seahorse.",
+                .required = false,
+            },
+            {
+                .name = "name",
+                .type = JR_GEMINI_PT_STRING,
+                .description =
+                    "Optional creature name for add or remove (up to 13 chars).",
+                .required = false,
+            },
+            {
+                .name = "biome",
+                .type = JR_GEMINI_PT_STRING,
+                .description =
+                    "Optional biome for biome/open: reef, abyss, or koi.",
+                .required = false,
+            },
+        },
+        .param_count = JR_GEMINI_PARAM_COUNT(3),
+    },
 };
 
 _Static_assert(sizeof(s_device_tool_fns) / sizeof(s_device_tool_fns[0]) ==
@@ -550,6 +625,8 @@ static const char s_device_tool_labels[][13] = {
     "BREATHE",      /* start_breathe  */
     "CHECK NOTE",   /* complete_note  */
     "BAT CARE",     /* set_battery_care */
+    "GIST",         /* show_gist      */
+    "REEF",         /* aquarium       */
 };
 
 _Static_assert(sizeof(s_device_tool_labels) / sizeof(s_device_tool_labels[0]) ==
@@ -646,6 +723,13 @@ static uint32_t s_last_tap_ms;
 /* Hold-to-commit: ms at which the current physical contact was confirmed, or 0
  * when no hold is in flight. App task only. */
 uint32_t s_hold_start_ms;
+/* Glass 3.7: 0.8s Hold-to-Allow state for destructive CONSENT cards. App task only. */
+static bool     s_consent_hold_active;
+static uint32_t s_consent_hold_start_ms;
+static uint32_t s_consent_hold_emitted_ms;
+static uint16_t s_consent_hold_x;
+static uint16_t s_consent_hold_y;
+static bool     s_consent_hold_committed;
 _Atomic uint32_t s_pairing_claim_until_ms;
 _Atomic uint32_t s_pairing_claim_code;
 _Atomic uint32_t s_pairing_claim_attempts;
@@ -976,6 +1060,43 @@ static void restore_battery_care(void)
         }
         nvs_close(h);
     }
+}
+
+/* ---- Glass 3.7 Cinema Transition Persistence ---------------------------- */
+static void persist_transition_mode(jr_display_transition_t mode)
+{
+    nvs_handle_t h;
+    if (nvs_open("app", NVS_READWRITE, &h) == ESP_OK) {
+        (void)nvs_set_u8(h, "tr_mode", (uint8_t)mode);
+        (void)nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static void restore_transition_mode(void)
+{
+    jr_display_transition_t mode = JR_TRANSITION_SHUTTER;
+    nvs_handle_t h;
+    uint8_t v = (uint8_t)JR_TRANSITION_SHUTTER;
+    if (nvs_open("app", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_u8(h, "tr_mode", &v) == ESP_OK &&
+            v <= (uint8_t)JR_TRANSITION_CLASSIC) {
+            mode = (jr_display_transition_t)v;
+        }
+        nvs_close(h);
+    }
+    jr_display_transition_set(mode);
+    ESP_LOGI(TAG, "transition mode restored: %s",
+             jr_display_transition_name(mode));
+}
+
+void app_set_transition_mode(jr_display_transition_t mode)
+{
+    if ((unsigned)mode > (unsigned)JR_TRANSITION_CLASSIC) {
+        mode = JR_TRANSITION_SHUTTER;
+    }
+    jr_display_transition_set(mode);
+    persist_transition_mode(mode);
 }
 
 void app_power_analytics_get(jr_power_analytics_t *out)
@@ -1824,6 +1945,9 @@ void desk_mode_apply_now(const desk_mode_req_t *req, uint32_t now_ms,
         s_desk_choice_active = false;
         jr_display_dismiss_choices();
     }
+    if (req->mode != JR_DESK_NORMAL && app_aquarium_is_active()) {
+        app_aquarium_set_active(false);
+    }
     switch (req->mode) {
     case JR_DESK_ON_AIR:
         jr_desk_start_on_air(&s_desk_mode, now_ms, req->duration_s, req->label);
@@ -1868,6 +1992,323 @@ void desk_mode_apply_now(const desk_mode_req_t *req, uint32_t now_ms,
     jr_desk_tick_t dt = {0};
     jr_desk_tick(&s_desk_mode, now_ms, desk_current_day_key(), &dt);
     desk_mode_publish_state(&dt);
+}
+
+/* ---- Glass 3.7+: Nano Reef Persistent Virtual Aquarium ------------------ */
+static jr_aq_tank_t s_aquarium;
+static _Atomic bool s_aquarium_active;
+static SemaphoreHandle_t s_aquarium_lock;
+static uint32_t s_aquarium_last_save_ms;
+
+static uint32_t app_aquarium_now_epoch_s(void)
+{
+    struct tm tmv;
+    if (!device_wall_time(&tmv)) {
+        return 0U;
+    }
+    const time_t tt = time(NULL);
+    return (tt > 0) ? (uint32_t)tt : 0U;
+}
+
+static uint8_t app_aquarium_wall_hour(void)
+{
+    struct tm tmv;
+    if (device_wall_time(&tmv) && tmv.tm_hour >= 0 && tmv.tm_hour <= 23) {
+        return (uint8_t)tmv.tm_hour;
+    }
+    return 12U;
+}
+
+static void app_aquarium_publish_locked(void)
+{
+    jr_display_aq_state_t st;
+    memset(&st, 0, sizeof(st));
+    st.active = atomic_load(&s_aquarium_active);
+    st.biome = (s_aquarium.biome < JR_AQ_BIOME_COUNT) ? s_aquarium.biome : 0U;
+    st.coral_level = jr_aq_coral_level(&s_aquarium);
+    st.algae = s_aquarium.algae <= 100U ? s_aquarium.algae : 100U;
+    st.hour = app_aquarium_wall_hour();
+    uint8_t n = 0U;
+    for (uint8_t i = 0U; i < JR_AQ_MAX_FISH && n < 8U; ++i) {
+        const jr_aq_fish_t *f = &s_aquarium.fish[i];
+        if (!f->active) {
+            continue;
+        }
+        st.fish[n].species = f->species;
+        st.fish[n].stage = (uint8_t)jr_aq_fish_stage(f);
+        st.fish[n].hunger = f->hunger;
+        st.fish[n].seed = f->seed;
+        n++;
+    }
+    st.fish_count = n;
+    jr_display_aquarium_set(&st);
+}
+
+static void app_aquarium_save_locked(void)
+{
+    uint8_t *buf = heap_caps_calloc(1, JR_AQ_BLOB_MAX,
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        buf = calloc(1, JR_AQ_BLOB_MAX);
+    }
+    if (buf == NULL) {
+        return;
+    }
+    const size_t packed = jr_aq_blob_pack(&s_aquarium, buf, JR_AQ_BLOB_MAX);
+    if (packed > 0U) {
+        nvs_handle_t h;
+        if (nvs_open("app", NVS_READWRITE, &h) == ESP_OK) {
+            const esp_err_t err = nvs_set_blob(h, "aq_tank", buf, packed);
+            if (err == ESP_OK) {
+                (void)nvs_commit(h);
+                s_aquarium_last_save_ms = (uint32_t)(esp_timer_get_time() / 1000);
+            } else {
+                ESP_LOGW(TAG, "aquarium: NVS write failed: %s", esp_err_to_name(err));
+            }
+            nvs_close(h);
+        }
+    }
+    free(buf);
+}
+
+static void app_aquarium_init(void)
+{
+    if (s_aquarium_lock == NULL) {
+        s_aquarium_lock = xSemaphoreCreateMutex();
+    }
+    const uint32_t now_epoch = app_aquarium_now_epoch_s();
+    bool loaded = false;
+    nvs_handle_t h;
+    if (nvs_open("app", NVS_READONLY, &h) == ESP_OK) {
+        size_t len = 0U;
+        if (nvs_get_blob(h, "aq_tank", NULL, &len) == ESP_OK &&
+            len > 0U && len <= JR_AQ_BLOB_MAX) {
+            uint8_t *raw = heap_caps_calloc(1, len,
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (raw == NULL) {
+                raw = calloc(1, len);
+            }
+            if (raw != NULL) {
+                if (nvs_get_blob(h, "aq_tank", raw, &len) == ESP_OK &&
+                    jr_aq_blob_unpack(&s_aquarium, raw, len)) {
+                    loaded = true;
+                }
+                free(raw);
+            }
+        }
+        nvs_close(h);
+    }
+    if (loaded) {
+        jr_aq_advance_time(&s_aquarium, now_epoch);
+        ESP_LOGI(TAG, "aquarium: restored %u fish, biome=%s, coral_lv=%u, pearls=%u",
+                 (unsigned)s_aquarium.fish_count,
+                 jr_aq_biome_name((jr_aq_biome_t)s_aquarium.biome),
+                 (unsigned)jr_aq_coral_level(&s_aquarium),
+                 (unsigned)s_aquarium.pearls);
+    } else {
+        jr_aq_init_default(&s_aquarium, now_epoch);
+        ESP_LOGI(TAG, "aquarium: initialized default starter reef (%u fish)",
+                 (unsigned)s_aquarium.fish_count);
+    }
+    atomic_store(&s_aquarium_active, false);
+    app_aquarium_publish_locked();
+}
+
+static void app_aquarium_tick(uint32_t now_ms)
+{
+    if (s_aquarium_lock == NULL ||
+        xSemaphoreTake(s_aquarium_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return;
+    }
+    const uint32_t prev_tick = s_aquarium.last_tick_epoch_s;
+    jr_aq_advance_time(&s_aquarium, app_aquarium_now_epoch_s());
+    if (s_aquarium.last_tick_epoch_s != prev_tick &&
+        (s_aquarium_last_save_ms == 0U ||
+         (uint32_t)(now_ms - s_aquarium_last_save_ms) >= 900000U)) {
+        app_aquarium_save_locked();
+    }
+    app_aquarium_publish_locked();
+    xSemaphoreGive(s_aquarium_lock);
+}
+
+bool app_aquarium_is_active(void)
+{
+    return atomic_load(&s_aquarium_active);
+}
+
+void app_aquarium_set_active(bool active)
+{
+    if (active) {
+        desk_mode_snap_t ds = {0};
+        desk_mode_snapshot(&ds);
+        if (ds.mode != JR_DESK_NORMAL) {
+            const desk_mode_req_t normal_req = { .mode = JR_DESK_NORMAL };
+            desk_mode_request_async(&normal_req);
+            jr_display_desk_mode_set(0U, 0U, 0U, 0U, 0U, 0U, 4U, false, "");
+        }
+        jr_display_gist_dismiss();
+        jr_display_rest_set(JR_DISPLAY_REST_NONE, false, false);
+        (void)jr_display_set_render_fps(RENDER_FPS_LIVE);
+        atomic_store(&s_glass_poke_req, true);
+    }
+    if (s_aquarium_lock != NULL &&
+        xSemaphoreTake(s_aquarium_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (active) {
+            jr_aq_advance_time(&s_aquarium, app_aquarium_now_epoch_s());
+        }
+        atomic_store(&s_aquarium_active, active);
+        app_aquarium_publish_locked();
+        xSemaphoreGive(s_aquarium_lock);
+    } else {
+        atomic_store(&s_aquarium_active, active);
+        if (!active) {
+            jr_display_aq_state_t off;
+            memset(&off, 0, sizeof(off));
+            off.active = false;
+            jr_display_aquarium_set(&off);
+        }
+    }
+}
+
+void app_aquarium_step_biome(int dir)
+{
+    if (s_aquarium_lock == NULL ||
+        xSemaphoreTake(s_aquarium_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return;
+    }
+    jr_aq_step_biome(&s_aquarium, dir);
+    app_aquarium_save_locked();
+    app_aquarium_publish_locked();
+    xSemaphoreGive(s_aquarium_lock);
+}
+
+void app_aquarium_set_biome(jr_aq_biome_t biome)
+{
+    if ((unsigned)biome >= (unsigned)JR_AQ_BIOME_COUNT ||
+        s_aquarium_lock == NULL ||
+        xSemaphoreTake(s_aquarium_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return;
+    }
+    jr_aq_set_biome(&s_aquarium, biome);
+    app_aquarium_save_locked();
+    app_aquarium_publish_locked();
+    xSemaphoreGive(s_aquarium_lock);
+}
+
+uint8_t app_aquarium_feed(uint16_t tap_x, uint16_t tap_y, bool from_tap)
+{
+    uint8_t fed = 0U;
+    if (s_aquarium_lock != NULL &&
+        xSemaphoreTake(s_aquarium_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        fed = jr_aq_feed(&s_aquarium, app_aquarium_now_epoch_s());
+        app_aquarium_save_locked();
+        app_aquarium_publish_locked();
+        xSemaphoreGive(s_aquarium_lock);
+    }
+    const uint16_t fx = from_tap ? tap_x : 233U;
+    const uint16_t fy = from_tap ? tap_y : 180U;
+    jr_display_aquarium_tap(fx, fy);
+    app_play_soft_cue(JR_CUE_TICK);
+    return fed;
+}
+
+void app_aquarium_clean(void)
+{
+    if (s_aquarium_lock == NULL ||
+        xSemaphoreTake(s_aquarium_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return;
+    }
+    jr_aq_clean(&s_aquarium);
+    app_aquarium_save_locked();
+    app_aquarium_publish_locked();
+    xSemaphoreGive(s_aquarium_lock);
+}
+
+void app_aquarium_shake(void)
+{
+    jr_display_aquarium_shake();
+    app_play_soft_cue(JR_CUE_TICK);
+}
+
+void app_aquarium_reward(uint16_t pearls, uint16_t coral_bonus)
+{
+    if (s_aquarium_lock == NULL ||
+        xSemaphoreTake(s_aquarium_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return;
+    }
+    jr_aq_reward_productivity(&s_aquarium, pearls, coral_bonus,
+                              app_aquarium_now_epoch_s());
+    app_aquarium_save_locked();
+    app_aquarium_publish_locked();
+    xSemaphoreGive(s_aquarium_lock);
+    ESP_LOGI(TAG, "aquarium: reward +%u pearls +%u coral_xp",
+             (unsigned)pearls, (unsigned)coral_bonus);
+}
+
+void app_aquarium_snapshot(jr_aq_tank_t *out, bool *active_out)
+{
+    if (active_out != NULL) {
+        *active_out = atomic_load(&s_aquarium_active);
+    }
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    if (s_aquarium_lock == NULL ||
+        xSemaphoreTake(s_aquarium_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return;
+    }
+    *out = s_aquarium;
+    if (active_out != NULL) {
+        *active_out = atomic_load(&s_aquarium_active);
+    }
+    xSemaphoreGive(s_aquarium_lock);
+}
+
+int app_aquarium_add(jr_aq_species_t sp, const char *name)
+{
+    if (s_aquarium_lock == NULL ||
+        xSemaphoreTake(s_aquarium_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return -1;
+    }
+    const int idx = jr_aq_add_fish(&s_aquarium, sp, name,
+                                   app_aquarium_now_epoch_s());
+    if (idx >= 0) {
+        app_aquarium_save_locked();
+        app_aquarium_publish_locked();
+    }
+    xSemaphoreGive(s_aquarium_lock);
+    return idx;
+}
+
+bool app_aquarium_remove(uint8_t idx)
+{
+    if (s_aquarium_lock == NULL ||
+        xSemaphoreTake(s_aquarium_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return false;
+    }
+    const bool ok = jr_aq_remove_fish(&s_aquarium, idx);
+    if (ok) {
+        app_aquarium_save_locked();
+        app_aquarium_publish_locked();
+    }
+    xSemaphoreGive(s_aquarium_lock);
+    return ok;
+}
+
+bool app_aquarium_remove_by_name(const char *name)
+{
+    if (s_aquarium_lock == NULL ||
+        xSemaphoreTake(s_aquarium_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return false;
+    }
+    const bool ok = jr_aq_remove_fish_by_name(&s_aquarium, name);
+    if (ok) {
+        app_aquarium_save_locked();
+        app_aquarium_publish_locked();
+    }
+    xSemaphoreGive(s_aquarium_lock);
+    return ok;
 }
 
 /* THE MORNING GLANCE SPEAKS (wave N13). The first lift after a rest, once
@@ -2576,6 +3017,16 @@ static void voice_exec(void *ctx, const jr_command_t *cmd)
     }
     case JR_CMD_DISPATCH_TOOL_CALL: {
         atomic_fetch_add(&s_tool_diag.calls_received, 1U);
+        /* Glass 3.7: Plain-language tool thinking caption — always plain words
+         * plus ON DEVICE / GATEWAY scope, never raw snake_case tool names. */
+        if (cmd->tool_name != NULL && cmd->tool_name[0] != '\0' &&
+            strcmp(cmd->tool_name, "show_gist") != 0) {
+            char think_cap[64];
+            if (jr_tool_plain_caption(cmd->tool_name, think_cap,
+                                      sizeof think_cap) > 0U) {
+                jr_display_caption_set(think_cap);
+            }
+        }
         /* weather_here (and current_time with no gateway) are answered from
          * the device itself: no worker, no network, no gateway. */
         if (device_try_local_tool(cmd)) {
@@ -3512,6 +3963,13 @@ static void voice_task(void *arg)
                                    now);
                     ESP_LOGI(TAG, "gesture: shake cancelled %s",
                              jr_state_name(sp));
+                } else if (app_aquarium_is_active() &&
+                           !jr_display_surface_is_active() &&
+                           !jr_display_choices_active() &&
+                           !s_ui_shade_open &&
+                           !jr_display_canvas_active()) {
+                    app_aquarium_shake();
+                    ESP_LOGI(TAG, "gesture: shake bubbled aquarium");
                 }
             }
 
@@ -3561,7 +4019,8 @@ static void voice_task(void *arg)
                 mood_phase == JR_ST_ASKING ||
                 (mood_phase == JR_ST_LISTENING && s_listen_speech_active) ||
                 jr_timer_any_ringing(&s_timers) ||
-                s_desk_mode.mode != JR_DESK_NORMAL;
+                s_desk_mode.mode != JR_DESK_NORMAL ||
+                app_aquarium_is_active();
             static uint8_t s_move_polls, s_mood_fd_polls, s_mood_fu_polls;
             static bool s_mood_face_down;
             if (have_imu && imu.moving && imu.age_ms < 500U) {
@@ -3777,7 +4236,8 @@ static void voice_task(void *arg)
                     atomic_load(&s_ota_active) ||
                     operator_mode_active((uint32_t)now) ||
                     jr_timer_blocks_sleep(&s_timers, (uint32_t)now) ||
-                    s_desk_mode.mode != JR_DESK_NORMAL;
+                    s_desk_mode.mode != JR_DESK_NORMAL ||
+                    app_aquarium_is_active();
                 if (forced) {
                     enter_deep_sleep("forced", atomic_load(&s_sleep_timer_s));
                 } else if (jr_mood_sleep_due(&s_mood, (uint32_t)now) &&
@@ -3785,7 +4245,7 @@ static void voice_task(void *arg)
                     enter_deep_sleep("not in use", SLEEP_TIMER_WAKE_S);
                 }
             }
-            if (s_desk_mode.mode != JR_DESK_NORMAL) {
+            if (s_desk_mode.mode != JR_DESK_NORMAL || app_aquarium_is_active()) {
                 s_companion_activity_ms = (uint32_t)now;
             }
             const bool companion_clock = companion_update((uint32_t)now,
@@ -3932,6 +4392,9 @@ static void voice_task(void *arg)
              * they put themselves. Double-tap remains the way home. */
 
             if (atomic_exchange(&s_panic_home_request, false)) {
+                s_consent_hold_active = false;
+                s_consent_hold_committed = false;
+                jr_display_surface_hold_set(0U);
                 panic_home_clear_glass();
                 jr_mood_poke_awake(&s_mood, (uint32_t)now);
                 jr_display_bloom();
@@ -3957,6 +4420,35 @@ static void voice_task(void *arg)
                     const uint32_t pct =
                         span >= 450U ? 100U : (span * 100U) / 450U;
                     jr_display_commit_ring((uint8_t)pct);
+                }
+            }
+
+            /* Glass 3.7: 0.8-second Hold-to-Allow on destructive CONSENT cards
+             * ("Duration says how sure"). Suppresses the privacy commit ring
+             * while running, fills the ALLOW hold bar smoothly from 0..100%,
+             * and commits ALLOW at >= 800 ms. */
+            if (s_consent_hold_active) {
+                if (!brain_surface_is_consent_active()) {
+                    s_consent_hold_active = false;
+                    jr_display_surface_hold_set(0U);
+                } else {
+                    const uint32_t now_ms = (uint32_t)now;
+                    const uint32_t elapsed = now_ms - s_consent_hold_start_ms;
+                    const uint32_t pct =
+                        elapsed >= 800U ? 100U : (elapsed * 100U) / 800U;
+                    jr_display_surface_hold_set((uint8_t)pct);
+                    if (elapsed >= 800U) {
+                        s_consent_hold_active = false;
+                        s_consent_hold_committed = true;
+                        jr_display_surface_hold_set(0U);
+                        if (brain_surface_commit_consent_allow(
+                                now_ms, s_consent_hold_emitted_ms)) {
+                            jr_display_ripple(s_consent_hold_x,
+                                              s_consent_hold_y);
+                            app_play_soft_cue(JR_CUE_CONFIRM);
+                            ESP_LOGI(TAG, "consent: 0.8s hold committed ALLOW");
+                        }
+                    }
                 }
             }
 
@@ -4509,6 +5001,7 @@ static void voice_task(void *arg)
                         companion_attention((uint32_t)now);
                         jr_display_bloom();
                         jr_display_activity_push("FOCUS", "SPRINT COMPLETE");
+                        app_aquarium_reward(3U, 15U);
                         if (!was_silent && !owner_speaker_muted() &&
                             !atomic_load(&s_ota_active)) {
                             (void)jr_audio_play_cue(
@@ -4535,6 +5028,7 @@ static void voice_task(void *arg)
                         jr_mood_poke_awake(&s_mood, (uint32_t)now);
                         jr_display_bloom();
                         jr_display_caption_set("RESET COMPLETE");
+                        app_aquarium_reward(2U, 10U);
                         if (!was_silent && !owner_speaker_muted()) {
                             static const uint16_t kDoneHz[2] = { 523U, 659U };
                             (void)jr_audio_play_chime(kDoneHz, 2U, 80U, 4U);
@@ -4558,6 +5052,15 @@ static void voice_task(void *arg)
                     s_desk_mode.focus_sessions_today != prev_sessions) {
                     desk_mode_publish_state(&dt);
                 }
+            }
+        }
+
+        /* 2d) Glass 3.7+ Nano Reef Aquarium 60 s background tick */
+        {
+            static uint32_t s_aq_next_tick_ms;
+            if ((int32_t)((uint32_t)now - s_aq_next_tick_ms) >= 0) {
+                s_aq_next_tick_ms = (uint32_t)now + 60000U;
+                app_aquarium_tick((uint32_t)now);
             }
         }
 
@@ -4607,17 +5110,46 @@ static void voice_task(void *arg)
                 }
             }
             if (iev.kind == JR_INPUT_PRESS_DOWN) {
-                s_hold_start_ms = physical ? (uint32_t)now : 0U;
+                s_consent_hold_committed = false;
+                if (physical && brain_surface_is_consent_active() &&
+                    jr_display_surface_hit_test(iev.x, iev.y) == 1) {
+                    s_consent_hold_active = true;
+                    s_consent_hold_start_ms = (uint32_t)now;
+                    s_consent_hold_emitted_ms =
+                        iev.emitted_ms != 0U ? iev.emitted_ms : (uint32_t)now;
+                    s_consent_hold_x = iev.x;
+                    s_consent_hold_y = iev.y;
+                    s_hold_start_ms = 0U;   /* suppress privacy hold ring */
+                    jr_display_commit_ring(0U);
+                    jr_display_surface_hold_set(0U);
+                } else {
+                    if (s_consent_hold_active) {
+                        s_consent_hold_active = false;
+                        jr_display_surface_hold_set(0U);
+                    }
+                    s_hold_start_ms =
+                        (physical && !brain_surface_is_consent_active())
+                            ? (uint32_t)now : 0U;
+                }
                 continue;
             }
             if (iev.kind == JR_INPUT_PRESS_UP) {
                 s_hold_start_ms = 0U;
                 jr_display_commit_ring(0U);
+                if (s_consent_hold_active) {
+                    s_consent_hold_active = false;
+                    jr_display_surface_hold_set(0U);
+                }
+                s_consent_hold_committed = false;
                 continue;
             }
             if (iev.kind == JR_INPUT_BEZEL_SCRUB) {
                 s_hold_start_ms = 0U;
                 jr_display_commit_ring(0U);
+                if (s_consent_hold_active) {
+                    s_consent_hold_active = false;
+                    jr_display_surface_hold_set(0U);
+                }
                 if (!jr_display_choices_active() &&
                     !atomic_load(&s_touch_challenge_active)) {
                     const int dir = (iev.direction == JR_INPUT_DIRECTION_RIGHT) ? 1 : -1;
@@ -4640,6 +5172,25 @@ static void voice_task(void *arg)
                                physical);
                     }
                 }
+                continue;
+            }
+            /* Glass 3.7: Consume trailing events from a just-committed 0.8s
+             * CONSENT hold (e.g. 850 ms LONG_PRESS or lift TAP/SWIPE), cancel
+             * any in-flight consent hold on early lift/drag, and suppress
+             * 850 ms privacy LONG_PRESS whenever a CONSENT card is active. */
+            if (physical && s_consent_hold_committed) {
+                continue;
+            }
+            if (s_consent_hold_active) {
+                s_consent_hold_active = false;
+                jr_display_surface_hold_set(0U);
+                if (iev.kind == JR_INPUT_LONG_PRESS) {
+                    continue;
+                }
+            }
+            if (iev.kind == JR_INPUT_LONG_PRESS &&
+                brain_surface_is_consent_active()) {
+                ESP_LOGI(TAG, "consent: suppressed long-press privacy toggle");
                 continue;
             }
             if (s_watch_peek_until_ms != 0U) {
@@ -4866,6 +5417,29 @@ static void voice_task(void *arg)
                  * says who is in, it does not say who is in charge. */
             }
             codex_tap_pending = false;
+            /* Glass 3.7: Single tap or swipe-down dismisses an active 20 s
+             * Reply Gist cleanly when no higher modal/surface/shade/timer owns
+             * the glass; swallows the event so nothing underneath toggles. */
+            if ((iev.kind == JR_INPUT_TAP ||
+                 (iev.kind == JR_INPUT_SWIPE &&
+                  iev.direction == JR_INPUT_DIRECTION_DOWN)) &&
+                jr_display_gist_active() &&
+                !jr_display_surface_is_active() &&
+                !jr_display_choices_active() &&
+                !s_ui_shade_open &&
+                jr_display_nav_overlay() == JR_DISPLAY_OVERLAY_NONE &&
+                !jr_display_desk_mode_active() &&
+                !jr_display_canvas_active() &&
+                !jr_timer_any_ringing(&s_timers)) {
+                jr_display_gist_dismiss();
+                s_last_tap_ms = 0U;
+                if (physical) {
+                    app_play_soft_cue(JR_CUE_TICK);
+                }
+                ESP_LOGI(TAG, "gist: dismissed by %s",
+                         iev.kind == JR_INPUT_TAP ? "tap" : "swipe-down");
+                continue;
+            }
             /* An open ask OUTRANKS double-tap-home. Without this guard the
              * double-tap branch sits above the ask branch below, so missing an
              * arc and immediately retrying — the exact reflex a hand has, and
@@ -4881,13 +5455,22 @@ static void voice_task(void *arg)
              * gesture, ejecting the owner to the face mid-adjustment. The
              * shade names its own exits (BOOT, centre up, tap outside). */
             if (iev.kind == JR_INPUT_TAP && !jr_display_choices_active() &&
+                !jr_display_surface_is_active() &&
                 !s_ui_shade_open &&
                 jr_display_nav_overlay() != JR_DISPLAY_OVERLAY_SHADE &&
-                jr_display_inbox_hit(iev.x, iev.y) == 0U) {
+                (app_aquarium_is_active() ||
+                 jr_display_inbox_hit(iev.x, iev.y) == 0U)) {
                 const bool double_tap = s_last_tap_ms != 0U &&
                     (uint32_t)now - s_last_tap_ms < 400U;
                 s_last_tap_ms = (uint32_t)now;
                 if (double_tap) {
+                    if (app_aquarium_is_active() && !jr_display_canvas_active()) {
+                        app_aquarium_set_active(false);
+                        ui_cue(JR_CUE_DISMISS, physical);
+                        ESP_LOGI(TAG, "aquarium: exited by double-tap");
+                        continue;
+                    }
+                    jr_display_gist_dismiss();
                     jr_display_nav_home();
                     s_ui_shade_open = false;
                     jr_mood_poke_awake(&s_mood, (uint32_t)now);
@@ -4997,6 +5580,60 @@ static void voice_task(void *arg)
                 (int32_t)((uint32_t)now - s_ask_tap_grace_ms) < 0) {
                 ESP_LOGI(TAG, "ask: trailing tap swallowed (answer grace)");
                 continue;
+            }
+            /* Glass 3.7+: Nano Reef Virtual Aquarium owns tap & swipe gestures
+             * when active and no higher modal (consent/surface/ask/shade/canvas/
+             * ringing timer) owns the glass. Long-press falls through to
+             * physical privacy mute/unmute. */
+            if (app_aquarium_is_active() &&
+                !jr_display_surface_is_active() &&
+                !jr_display_choices_active() &&
+                !s_ui_shade_open &&
+                jr_display_nav_overlay() != JR_DISPLAY_OVERLAY_SHADE &&
+                !jr_display_canvas_active() &&
+                !jr_timer_any_ringing(&s_timers)) {
+                if (iev.kind == JR_INPUT_TAP) {
+                    (void)app_aquarium_feed(iev.x, iev.y, true);
+                    ESP_LOGI(TAG, "aquarium: fed at (%u,%u)",
+                             (unsigned)iev.x, (unsigned)iev.y);
+                    continue;
+                }
+                if (iev.kind == JR_INPUT_SWIPE) {
+                    if (iev.direction == JR_INPUT_DIRECTION_LEFT ||
+                        iev.direction == JR_INPUT_DIRECTION_RIGHT) {
+                        const int dir =
+                            (iev.direction == JR_INPUT_DIRECTION_LEFT) ? 1 : -1;
+                        app_aquarium_step_biome(dir);
+                        if (physical) {
+                            app_play_soft_cue(JR_CUE_TICK);
+                        }
+                        ESP_LOGI(TAG, "aquarium: biome stepped (%+d)", dir);
+                        continue;
+                    }
+                    if (iev.direction == JR_INPUT_DIRECTION_UP) {
+                        jr_aq_tank_t snap;
+                        app_aquarium_snapshot(&snap, NULL);
+                        const bool had_algae = snap.algae > 0U;
+                        app_aquarium_clean();
+                        if (had_algae) {
+                            ui_cue(JR_CUE_CONFIRM, physical);
+                        } else {
+                            jr_display_aquarium_shake();
+                            if (physical) {
+                                app_play_soft_cue(JR_CUE_TICK);
+                            }
+                        }
+                        ESP_LOGI(TAG, "aquarium: glass cleaned (had_algae=%d)",
+                                 had_algae ? 1 : 0);
+                        continue;
+                    }
+                    if (iev.direction == JR_INPUT_DIRECTION_DOWN) {
+                        app_aquarium_set_active(false);
+                        ui_cue(JR_CUE_DISMISS, physical);
+                        ESP_LOGI(TAG, "aquarium: exited by swipe-down");
+                        continue;
+                    }
+                }
             }
             jr_state_t p = jr_orch_phase(&s_app.orch);
             if (iev.kind == JR_INPUT_SWIPE) {
@@ -5154,14 +5791,22 @@ static void voice_task(void *arg)
                          (int)jr_display_nav_overlay());
                 {
                     const jr_display_overlay_t landed = jr_display_nav_overlay();
+                    const bool space_changed = jr_display_nav_space() != cue_space;
                     const bool moved = landed != overlay ||
-                                       jr_display_nav_space() != cue_space ||
+                                       space_changed ||
                                        style_changed || watch_opened;
                     if (cue_handled) {
                         /* the level cue above already spoke */
                     } else if (overlay != JR_DISPLAY_OVERLAY_NONE &&
                                landed == JR_DISPLAY_OVERLAY_NONE) {
                         ui_cue(JR_CUE_DISMISS, physical);
+                    } else if (space_changed) {
+                        /* Glass 3.7: soft acoustic tick on ring space switch,
+                         * honoring privacy mute, UI sounds toggle, and ON_AIR. */
+                        if (physical && p != JR_ST_SPEAKING &&
+                            !jr_audio_playback_pending()) {
+                            app_play_soft_cue(JR_CUE_TICK);
+                        }
                     } else if (moved) {
                         ui_cue(JR_CUE_TICK, physical);
                     } else {
@@ -5866,6 +6511,7 @@ capture_complete:
                 face_phase == JR_ST_IDLE &&
                 !jr_timer_any_ringing(&s_timers) &&
                 s_hold_start_ms == 0U &&
+                !s_consent_hold_active &&
                 s_watch_peek_until_ms == 0U &&
                 s_demo_start_ms == 0U &&
                 atomic_load(&s_sim_touch) == 0U &&
@@ -6114,6 +6760,7 @@ void app_main(void)
     }
     jr_power_analytics_init(&s_power_analytics);
     restore_battery_care();
+    restore_transition_mode();
 #if !defined(CONFIG_ESP_BOARD_ESP32S3_TOUCH_AMOLED_1_75C)
     esp_err_t rtc_err = jr_rtc_start();
     if (rtc_err != ESP_OK) {
@@ -6138,6 +6785,7 @@ void app_main(void)
     (void)jr_display_set_brightness(s_brightness_cap);
     companion_boot_seed();
     restore_desk_tally();
+    app_aquarium_init();
     {
         const uint32_t boot_ms = (uint32_t)(esp_timer_get_time() / 1000);
         if (power_restore_rtc_timers(boot_ms) > 0U) {

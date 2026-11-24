@@ -24,6 +24,8 @@ idf_component_register(
         "src/timer.c"
         "src/notes.c"
         "src/desk_mode.c"
+        "src/gist.c"
+        "src/aquarium.c"
     INCLUDE_DIRS "include"
     REQUIRES jr_ports jr_dsp
 )

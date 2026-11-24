@@ -39,6 +39,8 @@ set(CORE_SRCS
     ${REPO_ROOT}/components/jr_core/src/timer.c
     ${REPO_ROOT}/components/jr_core/src/notes.c
     ${REPO_ROOT}/components/jr_core/src/desk_mode.c
+    ${REPO_ROOT}/components/jr_core/src/gist.c
+    ${REPO_ROOT}/components/jr_core/src/aquarium.c
     ${REPO_ROOT}/components/jr_dsp/src/dsp.c
     ${REPO_ROOT}/components/jr_dsp/src/audio_power.c
     ${REPO_ROOT}/components/jr_dsp/src/spectrum.c
@@ -81,6 +83,8 @@ add_executable(jr_host_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_timer.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_notes.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_desk_mode.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_gist.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_aquarium.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_spectrum.c
     ${CORE_SRCS}
     ${TRANSPORT_SRCS}

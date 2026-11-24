@@ -2303,7 +2303,8 @@ static esp_err_t holo_toggle_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-/* POST /api/display/glass3?mode=auto|chrono|aetherium|classic — switch Glass 3.0 ring mode. */
+/* POST /api/display/glass3?mode=auto|chrono|aetherium|classic&transition=shutter|iris|glide|classic
+ * Switch Glass 3.0 ring mode and/or Glass 3.7 Cinema transition mode (0 new HTTP slots). */
 static esp_err_t glass3_mode_handler(httpd_req_t *req)
 {
     if (!agent_require_auth(req) || !control_intent_required(req)) {
@@ -2324,15 +2325,353 @@ static esp_err_t glass3_mode_handler(httpd_req_t *req)
             return ESP_OK;
         }
     }
+    char tq[24] = {0};
+    if (query_str(req, "transition", tq, sizeof tq)) {
+        if (strcmp(tq, "shutter") == 0) {
+            app_set_transition_mode(JR_TRANSITION_SHUTTER);
+        } else if (strcmp(tq, "iris") == 0) {
+            app_set_transition_mode(JR_TRANSITION_IRIS);
+        } else if (strcmp(tq, "glide") == 0) {
+            app_set_transition_mode(JR_TRANSITION_GLIDE);
+        } else if (strcmp(tq, "classic") == 0) {
+            app_set_transition_mode(JR_TRANSITION_CLASSIC);
+        } else {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "transition must be shutter|iris|glide|classic");
+            return ESP_OK;
+        }
+    }
     const jr_glass3_mode_t cur = jr_display_glass3_get();
-    char body[96];
+    const jr_display_transition_t tr = jr_display_transition_get();
+    char body[160];
     int n = snprintf(body, sizeof body,
-                     "{\"ok\":true,\"glass3_mode\":\"%s\",\"glass3\":%s}",
+                     "{\"ok\":true,\"glass3_mode\":\"%s\",\"glass3\":%s,\"transition\":\"%s\"}",
                      jr_display_glass3_name(cur),
-                     cur != JR_GLASS3_CLASSIC ? "true" : "false");
+                     cur != JR_GLASS3_CLASSIC ? "true" : "false",
+                     jr_display_transition_name(tr));
     httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_send(req, body, n);
     return ESP_OK;
+}
+
+/* POST /api/display/gist[?clear=1] — Glass 3.7 20-second Reply Gist card.
+ * Control-gated. JSON body: {kind, eyebrow, hero, detail, detail2, footer, ttl_ms}. */
+static esp_err_t display_gist_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    int clear_v = 0;
+    if (query_int(req, "clear", &clear_v) && clear_v == 1) {
+        jr_display_gist_dismiss();
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+        httpd_resp_sendstr(req, "{\"ok\":true,\"active\":false}");
+        return ESP_OK;
+    }
+    if (req->content_len <= 0 || req->content_len > 512) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "gist JSON body required (1..512 bytes) or ?clear=1");
+        return ESP_OK;
+    }
+    char body[516] = {0};
+    size_t got = 0U;
+    while (got < (size_t)req->content_len) {
+        int r = httpd_req_recv(req, body + got, (size_t)req->content_len - got);
+        if (r <= 0) {
+            if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+                continue;
+            }
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "failed to read gist body");
+            return ESP_OK;
+        }
+        got += (size_t)r;
+    }
+    body[got] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
+    if (root == NULL || !cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON object");
+        return ESP_OK;
+    }
+    const cJSON *kind_item = cJSON_GetObjectItemCaseSensitive(root, "kind");
+    const cJSON *eye_item  = cJSON_GetObjectItemCaseSensitive(root, "eyebrow");
+    const cJSON *hero_item = cJSON_GetObjectItemCaseSensitive(root, "hero");
+    const cJSON *det_item  = cJSON_GetObjectItemCaseSensitive(root, "detail");
+    const cJSON *det2_item = cJSON_GetObjectItemCaseSensitive(root, "detail2");
+    const cJSON *ftr_item  = cJSON_GetObjectItemCaseSensitive(root, "footer");
+    const cJSON *ttlm_item = cJSON_GetObjectItemCaseSensitive(root, "ttl_ms");
+    const cJSON *ttls_item = cJSON_GetObjectItemCaseSensitive(root, "ttl_s");
+
+    jr_gist_kind_t kind = JR_GIST_ANSWER;
+    if (kind_item != NULL && !cJSON_IsNull(kind_item)) {
+        if (!cJSON_IsString(kind_item) || kind_item->valuestring == NULL) {
+            cJSON_Delete(root);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "kind must be number|event|timer|note|weather|briefing|answer");
+            return ESP_OK;
+        }
+        kind = jr_gist_parse_kind(kind_item->valuestring);
+        if (kind == JR_GIST_NONE) {
+            cJSON_Delete(root);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "kind must be number|event|timer|note|weather|briefing|answer");
+            return ESP_OK;
+        }
+    }
+    uint32_t ttl_raw_ms = JR_GIST_DEFAULT_MS;
+    if (cJSON_IsNumber(ttlm_item) && ttlm_item->valuedouble > 0.0) {
+        double ms = ttlm_item->valuedouble;
+        if (ms > 600000.0) {
+            ms = 600000.0;
+        }
+        ttl_raw_ms = (uint32_t)lrint(ms);
+    } else if (cJSON_IsNumber(ttls_item) && ttls_item->valuedouble > 0.0) {
+        double s = ttls_item->valuedouble;
+        if (s > 600.0) {
+            s = 600.0;
+        }
+        ttl_raw_ms = (uint32_t)lrint(s * 1000.0);
+    }
+    const uint32_t ttl_ms = jr_gist_clamp_ttl(ttl_raw_ms);
+
+    jr_display_gist_t dg = {0};
+    dg.kind = (uint8_t)kind;
+    jr_gist_sanitize(dg.eyebrow, sizeof dg.eyebrow,
+                     cJSON_IsString(eye_item) ? eye_item->valuestring : NULL);
+    jr_gist_sanitize(dg.hero, sizeof dg.hero,
+                     cJSON_IsString(hero_item) ? hero_item->valuestring : NULL);
+    jr_gist_sanitize(dg.detail, sizeof dg.detail,
+                     cJSON_IsString(det_item) ? det_item->valuestring : NULL);
+    jr_gist_sanitize(dg.detail2, sizeof dg.detail2,
+                     cJSON_IsString(det2_item) ? det2_item->valuestring : NULL);
+    jr_gist_sanitize(dg.footer, sizeof dg.footer,
+                     cJSON_IsString(ftr_item) ? ftr_item->valuestring : NULL);
+    dg.ttl_ms = ttl_ms;
+    cJSON_Delete(root);
+
+    if (dg.eyebrow[0] == '\0' && dg.hero[0] == '\0' && dg.detail[0] == '\0') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "need non-empty eyebrow, hero, or detail");
+        return ESP_OK;
+    }
+    jr_display_gist_show(&dg);
+    atomic_store(&s_glass_poke_req, true);
+
+    char resp[128];
+    int n = snprintf(resp, sizeof resp,
+                     "{\"ok\":true,\"active\":true,\"kind\":\"%s\",\"ttl_ms\":%u}",
+                     jr_gist_kind_name(kind), (unsigned)ttl_ms);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, resp, n);
+    return ESP_OK;
+}
+
+/* ---- Glass 3.7+: Nano Reef Virtual Aquarium HTTP Control ---------------- */
+static uint32_t http_aquarium_now_epoch_s(void)
+{
+    time_t tt = time(NULL);
+    struct tm tmv;
+    localtime_r(&tt, &tmv);
+    return (tmv.tm_year >= 2020 - 1900 && tt > 0) ? (uint32_t)tt : 0U;
+}
+
+static esp_err_t aquarium_send_json(httpd_req_t *req)
+{
+    const size_t cap = 2048U;
+    jr_aq_tank_t *tank = heap_caps_calloc(1, sizeof(*tank),
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (tank == NULL) {
+        tank = calloc(1, sizeof(*tank));
+    }
+    char *out = heap_caps_calloc(1, cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (out == NULL) {
+        out = calloc(1, cap);
+    }
+    if (tank == NULL || out == NULL) {
+        free(tank);
+        free(out);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
+
+    bool active = false;
+    app_aquarium_snapshot(tank, &active);
+    const uint32_t now_epoch = http_aquarium_now_epoch_s();
+
+    int n = snprintf(
+        out, cap,
+        "{\"ok\":true,\"active\":%s,\"biome\":\"%s\","
+        "\"coral_level\":%u,\"coral_xp\":%u,\"pearls\":%u,"
+        "\"algae\":%u,\"total_feeds\":%u,\"fish\":[",
+        active ? "true" : "false",
+        jr_aq_biome_name((jr_aq_biome_t)tank->biome),
+        (unsigned)jr_aq_coral_level(tank),
+        (unsigned)tank->coral_xp,
+        (unsigned)tank->pearls,
+        (unsigned)tank->algae,
+        (unsigned)tank->total_feeds);
+
+    bool first = true;
+    for (uint8_t i = 0U; i < JR_AQ_MAX_FISH && n > 0 && (size_t)n < cap - 32U; ++i) {
+        const jr_aq_fish_t *f = &tank->fish[i];
+        if (!f->active) {
+            continue;
+        }
+        int w = snprintf(
+            out + n, cap - (size_t)n,
+            "%s{\"idx\":%u,\"name\":\"%s\",\"species\":\"%s\","
+            "\"stage\":\"%s\",\"xp\":%u,\"hunger\":%u,"
+            "\"happiness\":%u,\"age_hours\":%u}",
+            first ? "" : ",",
+            (unsigned)i,
+            f->name,
+            jr_aq_species_name((jr_aq_species_t)f->species),
+            jr_aq_stage_name(jr_aq_fish_stage(f)),
+            (unsigned)f->xp,
+            (unsigned)f->hunger,
+            (unsigned)f->happiness,
+            (unsigned)jr_aq_fish_age_hours(f, now_epoch));
+        if (w < 0 || (size_t)n + (size_t)w >= cap - 4U) {
+            break;
+        }
+        n += w;
+        first = false;
+    }
+    if (n > 0 && (size_t)n + 3U <= cap) {
+        n += snprintf(out + n, cap - (size_t)n, "]}");
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t err = httpd_resp_send(req, out, n);
+    free(out);
+    free(tank);
+    return err;
+}
+
+/* GET /api/aquarium — paired GET returning living Nano Reef tank state. */
+static esp_err_t aquarium_get_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req)) {
+        return ESP_OK;
+    }
+    return aquarium_send_json(req);
+}
+
+/* POST /api/aquarium — control-gated actions:
+ * ?action=open|close|feed|clean|shake|biome|add|remove
+ * with optional biome=, species=, name=, idx=. */
+static esp_err_t aquarium_post_handler(httpd_req_t *req)
+{
+    if (!agent_require_auth(req) || !control_intent_required(req)) {
+        return ESP_OK;
+    }
+    char q[256] = {0};
+    if (httpd_req_get_url_query_str(req, q, sizeof q) != ESP_OK || q[0] == '\0') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "missing action (open|close|feed|clean|shake|biome|add|remove)");
+        return ESP_OK;
+    }
+    char act[24] = {0};
+    if (httpd_query_key_value(q, "action", act, sizeof act) != ESP_OK ||
+        !url_decode_in_place(act) || act[0] == '\0') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "missing action (open|close|feed|clean|shake|biome|add|remove)");
+        return ESP_OK;
+    }
+
+    if (strcasecmp(act, "open") == 0) {
+        app_aquarium_set_active(true);
+    } else if (strcasecmp(act, "close") == 0) {
+        app_aquarium_set_active(false);
+    } else if (strcasecmp(act, "feed") == 0) {
+        (void)app_aquarium_feed(233U, 180U, false);
+    } else if (strcasecmp(act, "clean") == 0) {
+        app_aquarium_clean();
+    } else if (strcasecmp(act, "shake") == 0) {
+        app_aquarium_shake();
+    } else if (strcasecmp(act, "biome") == 0) {
+        char bio[32] = {0};
+        jr_aq_biome_t b = JR_AQ_BIOME_REEF;
+        if (httpd_query_key_value(q, "biome", bio, sizeof bio) != ESP_OK ||
+            !url_decode_in_place(bio) || !jr_aq_biome_parse(bio, &b)) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "invalid biome (use reef|abyss|koi)");
+            return ESP_OK;
+        }
+        app_aquarium_set_biome(b);
+    } else if (strcasecmp(act, "add") == 0) {
+        char sp_str[32] = {0};
+        jr_aq_species_t sp = JR_AQ_SP_CLOWNFISH;
+        if (httpd_query_key_value(q, "species", sp_str, sizeof sp_str) != ESP_OK ||
+            !url_decode_in_place(sp_str) || !jr_aq_species_parse(sp_str, &sp)) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "invalid species");
+            return ESP_OK;
+        }
+        char name_str[64] = {0};
+        if (httpd_query_key_value(q, "name", name_str, sizeof name_str) == ESP_OK) {
+            if (!url_decode_in_place(name_str)) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                    "malformed URL encoding in name");
+                return ESP_OK;
+            }
+        }
+        const int idx = app_aquarium_add(sp, name_str[0] != '\0' ? name_str : NULL);
+        if (idx < 0) {
+            httpd_resp_set_status(req, "409 Conflict");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+            httpd_resp_sendstr(req,
+                "{\"ok\":false,\"error\":\"tank full (max 8 creatures)\"}");
+            return ESP_OK;
+        }
+    } else if (strcasecmp(act, "remove") == 0) {
+        char idx_str[16] = {0};
+        char name_str[64] = {0};
+        if (httpd_query_key_value(q, "idx", idx_str, sizeof idx_str) == ESP_OK &&
+            idx_str[0] != '\0') {
+            char *end = NULL;
+            long val = strtol(idx_str, &end, 10);
+            if (end == idx_str || *end != '\0' ||
+                val < 0 || val >= (long)JR_AQ_MAX_FISH) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                    "idx must be 0..7");
+                return ESP_OK;
+            }
+            if (!app_aquarium_remove((uint8_t)val)) {
+                httpd_resp_send_err(req, HTTPD_404_NOT_FOUND,
+                                    "creature not found");
+                return ESP_OK;
+            }
+        } else if (httpd_query_key_value(q, "name", name_str, sizeof name_str) == ESP_OK &&
+                   name_str[0] != '\0') {
+            if (!url_decode_in_place(name_str)) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                    "malformed URL encoding in name");
+                return ESP_OK;
+            }
+            if (!app_aquarium_remove_by_name(name_str)) {
+                httpd_resp_send_err(req, HTTPD_404_NOT_FOUND,
+                                    "creature not found");
+                return ESP_OK;
+            }
+        } else {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "provide idx (0..7) or name");
+            return ESP_OK;
+        }
+    } else {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "invalid action (open|close|feed|clean|shake|biome|add|remove)");
+        return ESP_OK;
+    }
+
+    return aquarium_send_json(req);
 }
 
 /* POST /api/debug/cue?kind=tick|scrub|confirm|dismiss|limit|mode|mute_on|mute_off|wake|timer
@@ -3261,6 +3600,70 @@ void brain_surface_expire(uint32_t now)
     }
 }
 
+/* Glass 3.7: True while a destructive 2-action CONSENT card (local tool
+ * consent OR remote Codex/Brain consent) currently owns the glass. */
+bool brain_surface_is_consent_active(void)
+{
+    if (!jr_display_surface_is_active() || s_brain_lock == NULL) {
+        return false;
+    }
+    if (xSemaphoreTake(s_brain_lock, pdMS_TO_TICKS(10)) != pdTRUE) {
+        return false;
+    }
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    const bool active = s_brain_surface.active &&
+        (int32_t)(now - s_brain_surface.expires_ms) < 0 &&
+        s_brain_surface.view.kind == JR_DISPLAY_SURFACE_CONSENT &&
+        s_brain_surface.view.action_count == 2U;
+    xSemaphoreGive(s_brain_lock);
+    return active;
+}
+
+/* Glass 3.7: Commit ALLOW (action_index == 1) after a deliberate 0.8s physical
+ * hold on a CONSENT card. Handles BOTH local tool consent and remote Codex
+ * surface.action outbox events. */
+bool brain_surface_commit_consent_allow(uint32_t now, uint32_t emitted_ms)
+{
+    if (s_brain_lock == NULL ||
+        xSemaphoreTake(s_brain_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return false;
+    }
+    bool committed = false;
+    if (s_brain_surface.active &&
+        (int32_t)(now - s_brain_surface.expires_ms) < 0 &&
+        s_brain_surface.view.kind == JR_DISPLAY_SURFACE_CONSENT &&
+        s_brain_surface.view.action_count == 2U) {
+        if (s_brain_surface.local_owned) {
+            if (emitted_ms >= s_tool_consent.presented_ms) {
+                device_tool_resolve_consent_locked(TOOL_CONSENT_ALLOW);
+                committed = true;
+            } else {
+                ESP_LOGW(TAG, "consent hold ignored stale press");
+            }
+        } else {
+            const char *action_id = s_brain_surface.action_ids[1];
+            if (action_id[0] != '\0') {
+                uint32_t seq = ++s_brain_event_seq;
+                brain_action_event_t *event =
+                    &s_brain_events[(seq - 1U) % BRAIN_EVENT_CAP];
+                memset(event, 0, sizeof *event);
+                event->seq = seq;
+                event->ts_ms = now;
+                strlcpy(event->session, s_brain_surface.session,
+                        sizeof event->session);
+                strlcpy(event->id, s_brain_surface.id, sizeof event->id);
+                strlcpy(event->action_id, action_id, sizeof event->action_id);
+                jr_display_surface_dismiss();
+                s_brain_surface.active = false;
+                configASSERT(!jr_display_surface_is_active());
+                committed = true;
+            }
+        }
+    }
+    xSemaphoreGive(s_brain_lock);
+    return committed;
+}
+
 /* Returns true whenever a Desk surface owns the tap, even if the tap missed a
  * choice button. This prevents a card interaction from accidentally toggling
  * the always-ready microphone underneath it. */
@@ -3282,10 +3685,14 @@ bool brain_surface_handle_tap(uint16_t x, uint16_t y, uint32_t now,
     }
     bool tapped_action = false;
     bool tapped_dismiss = false;
+    bool consent_hold_hint = false;
     if (s_brain_surface.active &&
         (int32_t)(now - s_brain_surface.expires_ms) < 0) {
         owned = true;
         int action_index = jr_display_surface_hit_test(x, y);
+        const bool is_consent_pair =
+            s_brain_surface.view.kind == JR_DISPLAY_SURFACE_CONSENT &&
+            s_brain_surface.view.action_count == 2U;
         if (s_brain_surface.local_owned) {
             if (!physical || emitted_ms < s_tool_consent.presented_ms) {
                 ESP_LOGW(TAG, "consent ignored non-physical/stale tap");
@@ -3293,40 +3700,45 @@ bool brain_surface_handle_tap(uint16_t x, uint16_t y, uint32_t now,
                 return true;
             }
             if (action_index == 0) {
+                tapped_action = true;
+                tapped_dismiss = true;
                 device_tool_resolve_consent_locked(TOOL_CONSENT_DENY);
             } else if (action_index == 1) {
-                device_tool_resolve_consent_locked(TOOL_CONSENT_ALLOW);
+                /* Glass 3.7: destructive ALLOW requires a 0.8s deliberate hold. */
+                consent_hold_hint = true;
             }
-            xSemaphoreGive(s_brain_lock);
-            return true;
-        }
-        uint8_t count = s_brain_surface.view.action_count;
-        const char *action_id = NULL;
-        if (action_index >= 0 && action_index < count) {
-            action_id = s_brain_surface.action_ids[action_index];
-        } else if (count == 0U &&
-                   s_brain_surface.view.kind != JR_DISPLAY_SURFACE_PROGRESS) {
-            action_id = "dismiss";
-        }
-        if (action_id != NULL) {
-            tapped_action = true;
-            tapped_dismiss =
-                strcasecmp(action_id, "deny") == 0 ||
-                strcasecmp(action_id, "dismiss") == 0 ||
-                strcasecmp(action_id, "cancel") == 0;
-            uint32_t seq = ++s_brain_event_seq;
-            brain_action_event_t *event =
-                &s_brain_events[(seq - 1U) % BRAIN_EVENT_CAP];
-            memset(event, 0, sizeof *event);
-            event->seq = seq;
-            event->ts_ms = now;
-            strlcpy(event->session, s_brain_surface.session,
-                    sizeof event->session);
-            strlcpy(event->id, s_brain_surface.id, sizeof event->id);
-            strlcpy(event->action_id, action_id, sizeof event->action_id);
-            jr_display_surface_dismiss();
-            s_brain_surface.active = false;
-            configASSERT(!jr_display_surface_is_active());
+        } else {
+            uint8_t count = s_brain_surface.view.action_count;
+            const char *action_id = NULL;
+            if (is_consent_pair && action_index == 1) {
+                /* Glass 3.7: destructive ALLOW requires a 0.8s deliberate hold. */
+                consent_hold_hint = true;
+            } else if (action_index >= 0 && action_index < count) {
+                action_id = s_brain_surface.action_ids[action_index];
+            } else if (count == 0U &&
+                       s_brain_surface.view.kind != JR_DISPLAY_SURFACE_PROGRESS) {
+                action_id = "dismiss";
+            }
+            if (action_id != NULL) {
+                tapped_action = true;
+                tapped_dismiss =
+                    strcasecmp(action_id, "deny") == 0 ||
+                    strcasecmp(action_id, "dismiss") == 0 ||
+                    strcasecmp(action_id, "cancel") == 0;
+                uint32_t seq = ++s_brain_event_seq;
+                brain_action_event_t *event =
+                    &s_brain_events[(seq - 1U) % BRAIN_EVENT_CAP];
+                memset(event, 0, sizeof *event);
+                event->seq = seq;
+                event->ts_ms = now;
+                strlcpy(event->session, s_brain_surface.session,
+                        sizeof event->session);
+                strlcpy(event->id, s_brain_surface.id, sizeof event->id);
+                strlcpy(event->action_id, action_id, sizeof event->action_id);
+                jr_display_surface_dismiss();
+                s_brain_surface.active = false;
+                configASSERT(!jr_display_surface_is_active());
+            }
         }
     } else if (s_brain_surface.active) {
         /* The expiry edge still owns this physical tap. Otherwise the user can
@@ -3351,6 +3763,12 @@ bool brain_surface_handle_tap(uint16_t x, uint16_t y, uint32_t now,
         if (physical) {
             app_play_soft_cue(tapped_dismiss ? JR_CUE_DISMISS : JR_CUE_CONFIRM);
         }
+    } else if (consent_hold_hint) {
+        jr_display_ripple(x, y);
+        if (physical) {
+            app_play_soft_cue(JR_CUE_TICK);
+        }
+        ESP_LOGI(TAG, "consent: quick tap on ALLOW ignored (hold 0.8s to allow)");
     }
     return owned;
 }
@@ -3395,6 +3813,9 @@ void panic_home_clear_glass(void)
         ESP_LOGW(TAG, "ui: panic-home cleared glass without brain lock");
     }
     jr_display_dismiss_choices();
+    jr_display_gist_dismiss();
+    app_aquarium_set_active(false);
+    jr_display_surface_hold_set(0U);
     const desk_mode_req_t normal_req = { .mode = JR_DESK_NORMAL };
     desk_mode_request_async(&normal_req);
     jr_display_desk_mode_set(0U, 0U, 0U, 0U, 0U, 0U, 4U, false, "");
@@ -4239,7 +4660,8 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         "\"flush_completions\":%u,\"flush_errors\":%u,"
         "\"requested_face\":%d,\"applied_face\":%d,"
         "\"choices_active\":%s,\"space\":\"%s\",\"watch_style\":\"%s\","
-        "\"hbm\":%s,\"holo\":%s,\"hud\":%s,\"glass3_mode\":\"%s\",\"te_sync\":%s,\"te_waits\":%u,\"te_timeouts\":%u,"
+        "\"hbm\":%s,\"holo\":%s,\"hud\":%s,\"glass3_mode\":\"%s\","
+        "\"transition\":\"%s\",\"gist_active\":%s,\"aquarium_active\":%s,\"te_sync\":%s,\"te_waits\":%u,\"te_timeouts\":%u,"
         "\"sun_rise_min\":%d,\"sun_set_min\":%d},\"touch\":{"
         "\"events\":%u,\"last\":{\"kind\":\"%s\",\"x\":%u,\"y\":%u},"
         "\"shade_open\":%s,\"panel_touch_challenge\":{\"pending\":%s,"
@@ -4321,6 +4743,9 @@ static esp_err_t cockpit_handler(httpd_req_t *req)
         jr_display_holo_get() ? "true" : "false",
         jr_display_hud_enabled() ? "true" : "false",
         jr_display_glass3_name(jr_display_glass3_get()),
+        jr_display_transition_name(jr_display_transition_get()),
+        jr_display_gist_active() ? "true" : "false",
+        app_aquarium_is_active() ? "true" : "false",
         te_sync ? "true" : "false",
         (unsigned)te_waits, (unsigned)te_timeouts,
         (int)s_wx_sun_rise_min, (int)s_wx_sun_set_min,
@@ -6363,6 +6788,12 @@ void start_diag_http(void)
           .handler = holo_toggle_handler },
         { .uri = "/api/display/glass3", .method = HTTP_POST,
           .handler = glass3_mode_handler },
+        { .uri = "/api/display/gist", .method = HTTP_POST,
+          .handler = display_gist_handler },
+        { .uri = "/api/aquarium", .method = HTTP_GET,
+          .handler = aquarium_get_handler },
+        { .uri = "/api/aquarium", .method = HTTP_POST,
+          .handler = aquarium_post_handler },
         { .uri = "/api/debug/cue", .method = HTTP_POST,
           .handler = cue_audition_handler },
         { .uri = "/api/display/choices", .method = HTTP_POST,

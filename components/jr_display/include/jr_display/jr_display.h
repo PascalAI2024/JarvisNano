@@ -940,6 +940,59 @@ void jr_display_inbox_set(const jr_display_inbox_item_t *items, size_t count, si
  * hits one of the visible inbox rows, else 0. */
 uint32_t jr_display_inbox_hit(uint16_t x, uint16_t y);
 
+/* Glass 3.7: Tear-free Cinema transition modes. */
+typedef enum {
+    JR_TRANSITION_SHUTTER = 0, /* 60 Hz CO5300 optical eclipse dip (0% tear possible) */
+    JR_TRANSITION_IRIS    = 1, /* Glowing radial aperture wipe (PSRAM dual-frame) */
+    JR_TRANSITION_GLIDE   = 2, /* Pre-composed PSRAM vertical slide (~9 ms/f) */
+    JR_TRANSITION_CLASSIC = 3, /* Classic Glass-2 pixel slide/fade */
+} jr_display_transition_t;
+
+void jr_display_transition_set(jr_display_transition_t mode);
+jr_display_transition_t jr_display_transition_get(void);
+const char *jr_display_transition_name(jr_display_transition_t mode);
+
+/* Glass 3.7: Live Hold-to-Allow progress (0..100) for destructive CONSENT cards. */
+void jr_display_surface_hold_set(uint8_t pct);
+
+/* Glass 3.7: 20-second Reply Gist card ("Every turn ends with something to look at"). */
+typedef struct {
+    uint8_t  kind;         /* 1=number, 2=event, 3=timer, 4=note, 5=weather, 6=briefing, 7=answer */
+    char     eyebrow[24];
+    char     hero[44];
+    char     detail[44];
+    char     detail2[44];
+    char     footer[24];
+    uint32_t ttl_ms;       /* 0 -> default 20000 ms */
+} jr_display_gist_t;
+
+void jr_display_gist_show(const jr_display_gist_t *gist);
+void jr_display_gist_dismiss(void);
+bool jr_display_gist_active(void);
+
+/* Glass 3.7+: Nano Reef Virtual Aquarium (lock-free double-buffered snapshot). */
+typedef struct {
+    uint8_t  species;      /* 0=clown, 1=tang, 2=tetra, 3=koi, 4=mandarin, 5=jelly, 6=manta, 7=seahorse */
+    uint8_t  stage;        /* 0=fry, 1=juvenile, 2=adult, 3=elder */
+    uint8_t  hunger;       /* 0..100 */
+    uint16_t seed;
+} jr_display_aq_fish_t;
+
+typedef struct {
+    bool     active;
+    uint8_t  biome;        /* 0=reef, 1=abyss, 2=koi */
+    uint8_t  coral_level;  /* 1..5 */
+    uint8_t  algae;        /* 0..100 */
+    uint8_t  hour;         /* 0..23 circadian lighting */
+    uint8_t  fish_count;   /* 0..8 */
+    jr_display_aq_fish_t fish[8];
+} jr_display_aq_state_t;
+
+void jr_display_aquarium_set(const jr_display_aq_state_t *st);
+bool jr_display_aquarium_active(void);
+void jr_display_aquarium_tap(uint16_t x, uint16_t y);
+void jr_display_aquarium_shake(void);
+
 #ifdef __cplusplus
 }
 #endif

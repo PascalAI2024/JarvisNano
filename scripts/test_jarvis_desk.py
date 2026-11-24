@@ -1372,5 +1372,519 @@ class CodexAndWorkbenchTests(unittest.TestCase):
             self.assertIn("USB-C", err.getvalue())
 
 
+class Glass37CinemaAndGistTests(unittest.TestCase):
+    def test_transition_reads_cockpit_text_and_json(self) -> None:
+        cockpit = {
+            "display": {
+                "transition": "shutter",
+                "glass3_mode": "auto",
+                "glass3": True,
+                "gist_active": False,
+            }
+        }
+        out = io.StringIO()
+        with patch.object(ctl, "get_json", return_value=cockpit) as get_mock, \
+             patch.object(sys, "stdout", out):
+            self.assertEqual(ctl.cmd_transition([]), 0)
+        get_mock.assert_called_once_with("/api/cockpit")
+        self.assertIn("shutter", out.getvalue())
+        self.assertIn("glass3_mode=auto", out.getvalue())
+
+        out_json = io.StringIO()
+        with patch.object(ctl, "get_json", return_value=cockpit), \
+             patch.object(sys, "stdout", out_json):
+            self.assertEqual(ctl.cmd_transition(["--json"]), 0)
+        parsed = json.loads(out_json.getvalue())
+        self.assertEqual(parsed["transition"], "shutter")
+        self.assertEqual(parsed["glass3_mode"], "auto")
+        self.assertTrue(parsed["glass3"])
+        self.assertFalse(parsed["gist_active"])
+
+    def test_transition_sets_each_mode_with_headers_and_json(self) -> None:
+        for mode in ("shutter", "iris", "glide", "classic"):
+            called: list[tuple[str, str, bytes | None]] = []
+            resp_payload = {
+                "ok": True,
+                "glass3_mode": "auto",
+                "glass3": True,
+                "transition": mode,
+            }
+            resp_bytes = json.dumps(resp_payload).encode("utf-8")
+
+            def fake_api(
+                path: str,
+                method: str = "GET",
+                body: bytes | None = None,
+                timeout: int = 10,
+                _resp: bytes = resp_bytes,
+                _called: list[tuple[str, str, bytes | None]] = called,
+            ) -> bytes:
+                _called.append((path, method, body))
+                return _resp
+
+            out = io.StringIO()
+            with patch.object(ctl, "api", side_effect=fake_api), \
+                 patch.object(sys, "stdout", out):
+                self.assertEqual(ctl.cmd_transition([mode.upper()]), 0)
+            self.assertEqual(called, [(f"/api/display/glass3?transition={mode}", "POST", b"")])
+            self.assertIn(mode, out.getvalue())
+            self.assertIn("glass3_mode=auto", out.getvalue())
+
+            out_json = io.StringIO()
+            with patch.object(ctl, "api", side_effect=fake_api), \
+                 patch.object(sys, "stdout", out_json):
+                self.assertEqual(ctl.cmd_transition([mode, "--json"]), 0)
+            self.assertEqual(json.loads(out_json.getvalue()), resp_payload)
+
+        # Verify end-to-end Control + Token headers via urllib
+        captured: list[Any] = []
+        secret = "t" * 32
+
+        def fake_open(req: Any, timeout: float = 10) -> FakeResponse:
+            captured.append(req)
+            return FakeResponse({"ok": True, "glass3_mode": "auto", "glass3": True, "transition": "iris"})
+
+        with patch.object(ctl, "host", return_value="device.local"), \
+             patch.object(ctl, "pairing_token", return_value=secret), \
+             patch.object(ctl.urllib.request, "urlopen", side_effect=fake_open), \
+             patch.object(sys, "stdout", io.StringIO()):
+            self.assertEqual(ctl.cmd_transition(["iris"]), 0)
+        self.assertEqual(captured[0].full_url, "http://device.local/api/display/glass3?transition=iris")
+        self.assertEqual(captured[0].get_method(), "POST")
+        self.assertEqual(captured[0].get_header("X-jarvisnano-control"), "1")
+        self.assertEqual(captured[0].get_header("X-jarvisnano-token"), secret)
+
+    def test_transition_rejects_invalid_mode(self) -> None:
+        err = io.StringIO()
+        with patch.object(ctl, "api", side_effect=AssertionError("must not call api")), \
+             patch.object(sys, "stderr", err):
+            with self.assertRaises(SystemExit) as raised:
+                ctl.cmd_transition(["warp"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("invalid choice", err.getvalue())
+
+    def test_gist_present_sanitizes_bounds_clamps_ttl_and_posts_json(self) -> None:
+        posted: list[tuple[str, dict[str, Any]]] = []
+
+        def fake_post(path: str, payload: dict[str, Any], timeout: float = 10.0) -> dict[str, Any]:
+            posted.append((path, payload))
+            return {"ok": True, "active": True}
+
+        # Sanitization, length bounds (23 / 43), degree symbol, URL/script strip, low TTL clamp
+        out = io.StringIO()
+        with patch.object(ctl, "post_json", side_effect=fake_post), \
+             patch.object(sys, "stdout", out):
+            rc = ctl.cmd_gist([
+                "--kind", "weather",
+                "--eyebrow", "  TOMORROW FORECAST — EXTRA LONG EYEBROW  ",
+                "--hero", "71°F https://evil.test <script>bad</script> — CLEAR SKIES ALL AFTERNOON LONG",
+                "--detail", "RAIN FROM 3:30 PM " + ("X" * 40),
+                "--detail2", "WIND 12 MPH " + ("Y" * 40),
+                "--footer", "LOCAL SENSOR FOOTER EXTRA TEXT",
+                "--ttl", "1",
+            ])
+        self.assertEqual(rc, 0)
+        self.assertEqual(posted[0][0], "/api/display/gist")
+        body = posted[0][1]
+        self.assertEqual(body["kind"], "weather")
+        self.assertLessEqual(len(body["eyebrow"]), 23)
+        self.assertLessEqual(len(body["footer"]), 23)
+        self.assertLessEqual(len(body["hero"]), 43)
+        self.assertLessEqual(len(body["detail"]), 43)
+        self.assertLessEqual(len(body["detail2"]), 43)
+        self.assertIn("71*F", body["hero"])
+        self.assertNotIn("http", body["hero"].lower())
+        self.assertNotIn("script", body["hero"].lower())
+        self.assertNotIn("bad", body["hero"].lower())
+        self.assertEqual(body["ttl_ms"], 4000)
+        self.assertIn("GIST [weather]:", out.getvalue())
+        self.assertIn("ttl=4s", out.getvalue())
+
+        # High TTL clamp (>60 -> 60000 ms), default kind='answer', empty optionals stay "", --json
+        posted.clear()
+        out_json = io.StringIO()
+        with patch.object(ctl, "post_json", side_effect=fake_post), \
+             patch.object(sys, "stdout", out_json):
+            rc = ctl.cmd_gist([
+                "--eyebrow", "PRICE",
+                "--hero", "$96,420",
+                "--ttl", "999",
+                "--json",
+            ])
+        self.assertEqual(rc, 0)
+        body2 = posted[0][1]
+        self.assertEqual(body2["kind"], "answer")
+        self.assertEqual(body2["hero"], "$96,420")
+        self.assertEqual(body2["detail"], "")
+        self.assertEqual(body2["detail2"], "")
+        self.assertEqual(body2["footer"], "")
+        self.assertEqual(body2["ttl_ms"], 60000)
+        parsed = json.loads(out_json.getvalue())
+        self.assertTrue(parsed["ok"])
+        self.assertTrue(parsed["active"])
+        self.assertEqual(parsed["hero"], "$96,420")
+        self.assertEqual(parsed["ttl_ms"], 60000)
+
+    def test_gist_clear_posts_clear_query_with_headers_and_json(self) -> None:
+        captured: list[Any] = []
+        secret = "g" * 32
+
+        def fake_open(req: Any, timeout: float = 10) -> FakeResponse:
+            captured.append(req)
+            return FakeResponse({"ok": True, "active": False})
+
+        out = io.StringIO()
+        with patch.object(ctl, "host", return_value="device.local"), \
+             patch.object(ctl, "pairing_token", return_value=secret), \
+             patch.object(ctl.urllib.request, "urlopen", side_effect=fake_open), \
+             patch.object(sys, "stdout", out):
+            self.assertEqual(ctl.cmd_gist(["clear"]), 0)
+        self.assertEqual(captured[0].full_url, "http://device.local/api/display/gist?clear=1")
+        self.assertEqual(captured[0].get_method(), "POST")
+        self.assertEqual(captured[0].get_header("X-jarvisnano-control"), "1")
+        self.assertEqual(captured[0].get_header("X-jarvisnano-token"), secret)
+        self.assertIn("cleared", out.getvalue())
+
+        out_json = io.StringIO()
+        with patch.object(ctl, "host", return_value="device.local"), \
+             patch.object(ctl, "pairing_token", return_value=secret), \
+             patch.object(ctl.urllib.request, "urlopen", side_effect=fake_open), \
+             patch.object(sys, "stdout", out_json):
+            self.assertEqual(ctl.cmd_gist(["clear", "--json"]), 0)
+        self.assertEqual(json.loads(out_json.getvalue()), {"ok": True, "active": False})
+
+    def test_gist_presets_and_field_overrides(self) -> None:
+        expected_kinds = {
+            "price": "number",
+            "event": "event",
+            "timer": "timer",
+            "note": "note",
+            "briefing": "briefing",
+        }
+        for preset, exp_kind in expected_kinds.items():
+            posted: list[dict[str, Any]] = []
+            with patch.object(ctl, "post_json", side_effect=lambda _p, body, **_k: (posted.append(body), {"ok": True})[1]), \
+                 patch.object(sys, "stdout", io.StringIO()):
+                self.assertEqual(ctl.cmd_gist(["--preset", preset]), 0)
+            body = posted[0]
+            self.assertEqual(body["kind"], exp_kind)
+            self.assertTrue(1 <= len(body["eyebrow"]) <= 23)
+            self.assertTrue(1 <= len(body["hero"]) <= 43)
+            self.assertLessEqual(len(body["detail"]), 43)
+            self.assertLessEqual(len(body["detail2"]), 43)
+            self.assertLessEqual(len(body["footer"]), 23)
+            self.assertEqual(body["ttl_ms"], 20000)
+
+        # Override preset fields and TTL
+        posted_ov: list[dict[str, Any]] = []
+        out = io.StringIO()
+        with patch.object(ctl, "post_json", side_effect=lambda _p, body, **_k: (posted_ov.append(body), {"ok": True})[1]), \
+             patch.object(sys, "stdout", out):
+            rc = ctl.cmd_gist(["--preset", "price", "--hero", "$102,500", "--ttl", "45", "--json"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(posted_ov[0]["kind"], "number")
+        self.assertEqual(posted_ov[0]["eyebrow"], "BITCOIN")
+        self.assertEqual(posted_ov[0]["hero"], "$102,500")
+        self.assertEqual(posted_ov[0]["ttl_ms"], 45000)
+        self.assertEqual(json.loads(out.getvalue())["hero"], "$102,500")
+
+    def test_gist_argument_validation_errors(self) -> None:
+        bad_invocations = [
+            [],
+            ["--eyebrow", "ONLY_EYEBROW"],
+            ["--hero", "ONLY_HERO"],
+            ["--kind", "invalid", "--eyebrow", "A", "--hero", "B"],
+            ["--preset", "unknown"],
+            ["bogus"],
+            ["clear", "--preset", "price"],
+            ["clear", "--hero", "Nope"],
+            ["clear", "--ttl", "10"],
+            ["--eyebrow", "   ", "--hero", "Valid"],
+            ["--eyebrow", "Valid", "--hero", "https://only-url.test"],
+        ]
+        for argv in bad_invocations:
+            err = io.StringIO()
+            with patch.object(ctl, "post_json", side_effect=AssertionError("must not post")), \
+                 patch.object(ctl, "api", side_effect=AssertionError("must not call api")), \
+                 patch.object(sys, "stderr", err):
+                with self.assertRaises(SystemExit, msg=f"expected exit 2 for {argv}") as raised:
+                    ctl.cmd_gist(argv)
+            self.assertEqual(raised.exception.code, 2, msg=f"bad exit code for {argv}")
+
+    def test_main_dispatch_and_ask_consent_help_text(self) -> None:
+        with patch.object(ctl.sys, "argv", ["jarvisctl", "--host", "device.local", "transition", "glide"]), \
+             patch.object(ctl, "cmd_transition", return_value=0) as m_tr:
+            self.assertEqual(ctl.main(), 0)
+        m_tr.assert_called_once_with(["glide"])
+
+        with patch.object(ctl.sys, "argv", ["jarvisctl", "--host", "device.local", "gist", "clear"]), \
+             patch.object(ctl, "cmd_gist", return_value=0) as m_gist:
+            self.assertEqual(ctl.main(), 0)
+        m_gist.assert_called_once_with(["clear"])
+
+        help_out = io.StringIO()
+        with patch.object(sys, "stdout", help_out):
+            with self.assertRaises(SystemExit) as raised:
+                ctl.cmd_ask(["--help"])
+        self.assertEqual(raised.exception.code, 0)
+        help_text = help_out.getvalue()
+        self.assertIn("0.8 s", help_text)
+        self.assertIn("leaf-green", help_text)
+        self.assertIn("1-tap", help_text)
+
+
+class NanoReefAquariumTests(unittest.TestCase):
+    SAMPLE_TANK: dict[str, Any] = {
+        "ok": True,
+        "active": True,
+        "biome": "reef",
+        "coral_level": 2,
+        "coral_xp": 45,
+        "pearls": 4,
+        "algae": 5,
+        "total_feeds": 12,
+        "fish": [
+            {
+                "idx": 0,
+                "name": "NEMO",
+                "species": "clownfish",
+                "stage": "juvenile",
+                "xp": 42,
+                "hunger": 18,
+                "happiness": 92,
+                "age_hours": 6,
+            },
+            {
+                "idx": 1,
+                "name": "NOVA",
+                "species": "neon_tetra",
+                "stage": "elder",
+                "xp": 265,
+                "hunger": 10,
+                "happiness": 100,
+                "age_hours": 30,
+            },
+        ],
+    }
+
+    def test_aquarium_status_default_and_explicit_text_and_json(self) -> None:
+        for argv in ([], ["status"], ["STATUS"]):
+            out = io.StringIO()
+            with patch.object(ctl, "get_json", return_value=self.SAMPLE_TANK) as get_mock, \
+                 patch.object(sys, "stdout", out):
+                self.assertEqual(ctl.cmd_aquarium(argv), 0)
+            get_mock.assert_called_once_with("/api/aquarium")
+            txt = out.getvalue()
+            self.assertIn("AQUARIUM [ACTIVE]", txt)
+            self.assertIn("biome=reef (Tropical Reef)", txt)
+            self.assertIn("coral=Lv 2 (45 XP)", txt)
+            self.assertIn("pearls=4", txt)
+            self.assertIn("clarity=95%", txt)
+            self.assertIn("feeds=12", txt)
+            self.assertIn("fish=2/8", txt)
+            for col in ("#", "NAME", "SPECIES", "STAGE", "XP", "HUNGER", "HAPPY", "AGE"):
+                self.assertIn(col, txt)
+            self.assertIn("NEMO", txt)
+            self.assertIn("clownfish", txt)
+            self.assertIn("JUVENILE", txt)
+            self.assertIn("18%", txt)
+            self.assertIn("92%", txt)
+            self.assertIn("6h", txt)
+            self.assertIn("NOVA", txt)
+            self.assertIn("ELDER", txt)
+            self.assertIn("1d 6h", txt)
+
+        for argv in (["--json"], ["status", "--json"], ["--json", "status"]):
+            out_json = io.StringIO()
+            with patch.object(ctl, "get_json", return_value=self.SAMPLE_TANK), \
+                 patch.object(sys, "stdout", out_json):
+                self.assertEqual(ctl.cmd_aquarium(argv), 0)
+            self.assertEqual(json.loads(out_json.getvalue()), self.SAMPLE_TANK)
+
+        empty_tank = {
+            "ok": True, "active": False, "biome": "koi",
+            "coral_level": 1, "coral_xp": 0, "pearls": 0, "algae": 0,
+            "total_feeds": 0, "fish": [],
+        }
+        out_empty = io.StringIO()
+        with patch.object(ctl, "get_json", return_value=empty_tank), \
+             patch.object(sys, "stdout", out_empty):
+            self.assertEqual(ctl.cmd_aquarium([]), 0)
+        self.assertIn("AQUARIUM [STANDBY]", out_empty.getvalue())
+        self.assertIn("clarity=100%", out_empty.getvalue())
+        self.assertIn("(tank empty)", out_empty.getvalue())
+        self.assertEqual(ctl._fmt_age_hours(48), "2d")
+        self.assertEqual(ctl._fmt_age_hours(None), "-")
+
+    def test_aquarium_simple_actions_and_auth_headers(self) -> None:
+        resp_bytes = json.dumps(self.SAMPLE_TANK).encode("utf-8")
+        for action in ("open", "close", "feed", "clean", "shake"):
+            called: list[tuple[str, str, bytes | None]] = []
+
+            def fake_api(
+                path: str,
+                method: str = "GET",
+                body: bytes | None = None,
+                timeout: int = 10,
+                _called: list[tuple[str, str, bytes | None]] = called,
+            ) -> bytes:
+                _called.append((path, method, body))
+                return resp_bytes
+
+            out = io.StringIO()
+            with patch.object(ctl, "api", side_effect=fake_api), \
+                 patch.object(sys, "stdout", out):
+                self.assertEqual(ctl.cmd_aquarium([action.upper()]), 0)
+            self.assertEqual(called, [(f"/api/aquarium?action={action}", "POST", b"")])
+            self.assertIn("AQUARIUM [ACTIVE]", out.getvalue())
+
+            out_json = io.StringIO()
+            with patch.object(ctl, "api", side_effect=fake_api), \
+                 patch.object(sys, "stdout", out_json):
+                self.assertEqual(ctl.cmd_aquarium([action, "--json"]), 0)
+            self.assertEqual(json.loads(out_json.getvalue()), self.SAMPLE_TANK)
+
+        # End-to-end header check via urllib (Control + Token)
+        captured: list[Any] = []
+        secret = "q" * 32
+
+        def fake_open(req: Any, timeout: float = 10) -> FakeResponse:
+            captured.append(req)
+            return FakeResponse(self.SAMPLE_TANK)
+
+        with patch.object(ctl, "host", return_value="device.local"), \
+             patch.object(ctl, "pairing_token", return_value=secret), \
+             patch.object(ctl.urllib.request, "urlopen", side_effect=fake_open), \
+             patch.object(sys, "stdout", io.StringIO()):
+            self.assertEqual(ctl.cmd_aquarium(["feed"]), 0)
+        self.assertEqual(captured[0].full_url, "http://device.local/api/aquarium?action=feed")
+        self.assertEqual(captured[0].get_method(), "POST")
+        self.assertEqual(captured[0].get_header("X-jarvisnano-control"), "1")
+        self.assertEqual(captured[0].get_header("X-jarvisnano-token"), secret)
+
+        # Non-ok response returns exit code 1
+        with patch.object(ctl, "api", return_value=b'{"ok":false,"fish":[]}'), \
+             patch.object(sys, "stdout", io.StringIO()):
+            self.assertEqual(ctl.cmd_aquarium(["shake"]), 1)
+
+    def test_aquarium_biome_valid_and_invalid(self) -> None:
+        for biome in ("reef", "abyss", "koi"):
+            called: list[tuple[str, str, bytes | None]] = []
+            payload = {**self.SAMPLE_TANK, "biome": biome}
+            resp_bytes = json.dumps(payload).encode("utf-8")
+
+            def fake_api(
+                path: str,
+                method: str = "GET",
+                body: bytes | None = None,
+                timeout: int = 10,
+                _called: list[tuple[str, str, bytes | None]] = called,
+                _resp: bytes = resp_bytes,
+            ) -> bytes:
+                _called.append((path, method, body))
+                return _resp
+
+            out = io.StringIO()
+            with patch.object(ctl, "api", side_effect=fake_api), \
+                 patch.object(sys, "stdout", out):
+                self.assertEqual(ctl.cmd_aquarium(["biome", biome.upper()]), 0)
+            self.assertEqual(called, [(f"/api/aquarium?action=biome&biome={biome}", "POST", b"")])
+            self.assertIn(f"biome={biome}", out.getvalue())
+
+            out_json = io.StringIO()
+            with patch.object(ctl, "api", side_effect=fake_api), \
+                 patch.object(sys, "stdout", out_json):
+                self.assertEqual(ctl.cmd_aquarium(["biome", biome, "--json"]), 0)
+            self.assertEqual(json.loads(out_json.getvalue())["biome"], biome)
+
+        err = io.StringIO()
+        with patch.object(ctl, "api", side_effect=AssertionError("must not call api")), \
+             patch.object(sys, "stderr", err):
+            with self.assertRaises(SystemExit) as raised:
+                ctl.cmd_aquarium(["biome", "swamp"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("invalid choice", err.getvalue())
+
+    def test_aquarium_add_all_species_and_url_encoding(self) -> None:
+        resp_bytes = json.dumps(self.SAMPLE_TANK).encode("utf-8")
+        all_species = (
+            "clownfish", "blue_tang", "neon_tetra", "golden_koi",
+            "mandarin", "jellyfish", "manta_ray", "seahorse",
+        )
+        for sp in all_species:
+            called: list[tuple[str, str]] = []
+            with patch.object(ctl, "api", side_effect=lambda p, m="GET", *_a, _c=called: (_c.append((p, m)), resp_bytes)[1]), \
+                 patch.object(sys, "stdout", io.StringIO()):
+                self.assertEqual(ctl.cmd_aquarium(["add", sp.upper()]), 0)
+            self.assertEqual(called, [(f"/api/aquarium?action=add&species={sp}", "POST")])
+
+        # With name, URL encoding, whitespace-only name, and action-keyword name
+        cases = [
+            (["add", "clownfish", "NOVA"], "/api/aquarium?action=add&species=clownfish&name=NOVA"),
+            (["add", "blue_tang", "SIR FIN & CO"], "/api/aquarium?action=add&species=blue_tang&name=SIR%20FIN%20%26%20CO"),
+            (["add", "seahorse", "   "], "/api/aquarium?action=add&species=seahorse"),
+            (["add", "clownfish", "FEED", "--json"], "/api/aquarium?action=add&species=clownfish&name=FEED"),
+        ]
+        for argv, expected_path in cases:
+            called = []
+            out = io.StringIO()
+            with patch.object(ctl, "api", side_effect=lambda p, m="GET", *_a, _c=called: (_c.append((p, m)), resp_bytes)[1]), \
+                 patch.object(sys, "stdout", out):
+                self.assertEqual(ctl.cmd_aquarium(argv), 0)
+            self.assertEqual(called, [(expected_path, "POST")])
+            if "--json" in argv:
+                self.assertEqual(json.loads(out.getvalue()), self.SAMPLE_TANK)
+
+        err = io.StringIO()
+        with patch.object(ctl, "api", side_effect=AssertionError("must not call api")), \
+             patch.object(sys, "stderr", err):
+            with self.assertRaises(SystemExit) as raised:
+                ctl.cmd_aquarium(["add", "shark", "JAWS"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("invalid choice", err.getvalue())
+
+    def test_aquarium_remove_valid_and_bounds(self) -> None:
+        resp_bytes = json.dumps(self.SAMPLE_TANK).encode("utf-8")
+        for idx in (0, 7):
+            called: list[tuple[str, str]] = []
+            out = io.StringIO()
+            with patch.object(ctl, "api", side_effect=lambda p, m="GET", *_a, _c=called: (_c.append((p, m)), resp_bytes)[1]), \
+                 patch.object(sys, "stdout", out):
+                self.assertEqual(ctl.cmd_aquarium(["remove", str(idx), "--json"]), 0)
+            self.assertEqual(called, [(f"/api/aquarium?action=remove&idx={idx}", "POST")])
+            self.assertEqual(json.loads(out.getvalue()), self.SAMPLE_TANK)
+
+        for bad in (["remove", "-1"], ["remove", "8"], ["remove", "abc"], ["bogus"]):
+            err = io.StringIO()
+            with patch.object(ctl, "api", side_effect=AssertionError("must not call api")), \
+                 patch.object(sys, "stderr", err):
+                with self.assertRaises(SystemExit, msg=f"expected exit 2 for {bad}") as raised:
+                    ctl.cmd_aquarium(bad)
+            self.assertEqual(raised.exception.code, 2)
+
+    def test_aquarium_main_dispatch_and_help(self) -> None:
+        with patch.object(ctl.sys, "argv", ["jarvisctl", "--host", "device.local", "aquarium", "feed"]), \
+             patch.object(ctl, "cmd_aquarium", return_value=0) as m_aq:
+            self.assertEqual(ctl.main(), 0)
+        m_aq.assert_called_once_with(["feed"])
+
+        help_out = io.StringIO()
+        with patch.object(sys, "stdout", help_out):
+            with self.assertRaises(SystemExit) as raised:
+                ctl.cmd_aquarium(["--help"])
+        self.assertEqual(raised.exception.code, 0)
+        help_text = help_out.getvalue()
+        for word in ("status", "open", "close", "feed", "clean", "shake", "biome", "add", "remove"):
+            self.assertIn(word, help_text)
+        self.assertNotIn("%%", help_text)
+
+        clean_help = io.StringIO()
+        with patch.object(sys, "stdout", clean_help):
+            with self.assertRaises(SystemExit) as raised2:
+                ctl.cmd_aquarium(["clean", "--help"])
+        self.assertEqual(raised2.exception.code, 0)
+        self.assertIn("100% clarity", clean_help.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

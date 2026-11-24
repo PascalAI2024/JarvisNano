@@ -60,6 +60,8 @@
 #include "jr_core/timer.h"
 #include "jr_core/notes.h"
 #include "jr_core/desk_mode.h"
+#include "jr_core/gist.h"
+#include "jr_core/aquarium.h"
 #include "jr_tools/jr_weather.h"
 #include "jr_dsp/dsp.h"
 #include "jr_hal/hal.h"
@@ -84,7 +86,7 @@
 /* The catalog lives in main.c; this literal is what the other files see.
  * main.c static-asserts it against the real array, so adding a tool
  * without bumping this is a compile error, not a blank petal. */
-#define DEVICE_TOOL_DECL_COUNT 28U
+#define DEVICE_TOOL_DECL_COUNT 30U
 
 /* Render cadence per rung of the rest ladder (frames per second). 24 is the
  * measured CO5300 ceiling; 12 keeps AMBIENT's dimmed ring fluid under a
@@ -538,6 +540,19 @@ void persist_holo_enabled(bool enabled);
 void device_confirm_cue(void);
 void app_play_soft_cue(jr_cue_kind_t kind);
 esp_err_t app_set_battery_care(bool enable);
+void app_set_transition_mode(jr_display_transition_t mode);
+void app_aquarium_set_active(bool active);
+bool app_aquarium_is_active(void);
+void app_aquarium_step_biome(int dir);
+uint8_t app_aquarium_feed(uint16_t tap_x, uint16_t tap_y, bool from_tap);
+void app_aquarium_clean(void);
+void app_aquarium_shake(void);
+void app_aquarium_reward(uint16_t pearls, uint16_t coral_bonus);
+void app_aquarium_snapshot(jr_aq_tank_t *out, bool *active_out);
+int app_aquarium_add(jr_aq_species_t sp, const char *name);
+bool app_aquarium_remove(uint8_t idx);
+bool app_aquarium_remove_by_name(const char *name);
+void app_aquarium_set_biome(jr_aq_biome_t biome);
 void app_power_analytics_get(jr_power_analytics_t *out);
 bool device_chip_temp_c(float *out_c);
 void persist_ota_attempt(int slot);
@@ -559,6 +574,8 @@ bool brain_render_text_safe(const char *value, size_t capacity,
 void brain_surface_expire(uint32_t now);
 bool brain_surface_handle_tap(uint16_t x, uint16_t y, uint32_t now,
                                      bool physical, uint32_t emitted_ms);
+bool brain_surface_is_consent_active(void);
+bool brain_surface_commit_consent_allow(uint32_t now, uint32_t emitted_ms);
 void panic_home_clear_glass(void);
 bool operator_mode_release(uint32_t now, const char *reason,
                            bool physical_feedback, bool only_if_expired,

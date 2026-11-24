@@ -47,6 +47,20 @@ Dev Workbench 2.0:
     jarvisctl tasks [--cpu] [--interval 2.0] [--json]
     jarvisctl board [--watch pwr|touch] [--gyro] [--json]
 
+Glass 3.7 Cinema & Reply Gist:
+    jarvisctl transition [shutter|iris|glide|classic] [--json]
+    jarvisctl gist [--kind KIND] --eyebrow TEXT --hero TEXT [--detail TEXT]
+                   [--detail2 TEXT] [--footer TEXT] [--ttl 20] [--json]
+    jarvisctl gist --preset price|event|timer|note|briefing [--ttl 20] [--json]
+    jarvisctl gist clear [--json]
+
+Nano Reef Aquarium:
+    jarvisctl aquarium [status] [--json]
+    jarvisctl aquarium open|close|feed|clean|shake [--json]
+    jarvisctl aquarium biome <reef|abyss|koi> [--json]
+    jarvisctl aquarium add <species> [name] [--json]
+    jarvisctl aquarium remove <idx> [--json]
+
 Exit code 0 = healthy/ok. `status` exits 1 when the device is deaf/muted so
 scripts and agents can gate on it.
 """
@@ -106,9 +120,98 @@ CHARGE_PHASES: dict[int, str] = {
     4: "DONE",
     5: "NOT_CHARGING",
 }
+TRANSITION_MODES: tuple[str, ...] = ("shutter", "iris", "glide", "classic")
+TRANSITION_DESCRIPTIONS: dict[str, str] = {
+    "shutter": "60 Hz optical eclipse dip (0% tear)",
+    "iris": "Glowing radial aperture wipe (PSRAM)",
+    "glide": "Pre-composed PSRAM vertical slide",
+    "classic": "Classic Glass-2 pixel fade",
+}
+GIST_KINDS: tuple[str, ...] = (
+    "number",
+    "event",
+    "timer",
+    "note",
+    "weather",
+    "briefing",
+    "answer",
+)
+GIST_EYEBROW_MAX = 23
+GIST_LINE_MAX = 43
+GIST_TTL_MIN_S = 4
+GIST_TTL_MAX_S = 60
+GIST_TTL_DEFAULT_S = 20
+GIST_PRESETS: dict[str, dict[str, str]] = {
+    "price": {
+        "kind": "number",
+        "eyebrow": "BITCOIN",
+        "hero": "$96,420",
+        "detail": "+2.1% TODAY",
+        "detail2": "",
+        "footer": "24H RANGE",
+    },
+    "event": {
+        "kind": "event",
+        "eyebrow": "NEXT IN 42 MIN",
+        "hero": "DENTIST",
+        "detail": "3:30 PM",
+        "detail2": "LEAVE BY 3:10",
+        "footer": "CALENDAR",
+    },
+    "timer": {
+        "kind": "timer",
+        "eyebrow": "PASTA",
+        "hero": "9:00",
+        "detail": "COUNTDOWN RUNNING",
+        "detail2": "",
+        "footer": "ENDS 6:31 PM",
+    },
+    "note": {
+        "kind": "note",
+        "eyebrow": "SAVED TO WORK",
+        "hero": "CALL LANDLORD",
+        "detail": "ABOUT THE HEATER",
+        "detail2": "",
+        "footer": "4 NOTES IN WORK",
+    },
+    "briefing": {
+        "kind": "briefing",
+        "eyebrow": "MORNING BRIEFING",
+        "hero": "71* CLEAR",
+        "detail": "DENTIST AT 3:30 PM",
+        "detail2": "4 WORK NOTES OPEN",
+        "footer": "TAP OR SWIPE",
+    },
+}
+AQUARIUM_BIOMES: tuple[str, ...] = ("reef", "abyss", "koi")
+AQUARIUM_BIOME_LABELS: dict[str, str] = {
+    "reef": "Tropical Reef",
+    "abyss": "Deep Abyss",
+    "koi": "Zen Koi",
+}
+AQUARIUM_SPECIES: tuple[str, ...] = (
+    "clownfish",
+    "blue_tang",
+    "neon_tetra",
+    "golden_koi",
+    "mandarin",
+    "jellyfish",
+    "manta_ray",
+    "seahorse",
+)
+AQUARIUM_MAX_FISH = 8
+_AQUARIUM_SIMPLE_ACTIONS: tuple[str, ...] = ("open", "close", "feed", "clean", "shake")
+_AQUARIUM_ALL_ACTIONS: tuple[str, ...] = (
+    "status",
+    *_AQUARIUM_SIMPLE_ACTIONS,
+    "biome",
+    "add",
+    "remove",
+)
 
 _RGB565_LUT: list[bytes] | None = None
 _GLASS_ALLOWED_RE = re.compile(r"[^A-Za-z0-9\-_.:/?!+,'()&% ]+")
+_GIST_ALLOWED_RE = re.compile(r"[^A-Za-z0-9\-_.:/?!+,'()&%$*# ]+")
 _AGENT_DISALLOWED_RE = re.compile(r"[\x00-\x1f\x7f<>\"\\]+")
 _UNICODE_PUNCT = str.maketrans({
     "\u2014": "-",
@@ -120,6 +223,19 @@ _UNICODE_PUNCT = str.maketrans({
     "\u2026": "...",
     "\u00b7": "-",
     "\u2022": "-",
+})
+_GIST_UNICODE_PUNCT = str.maketrans({
+    "\u2014": "-",
+    "\u2013": "-",
+    "\u2212": "-",
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201c": "'",
+    "\u201d": "'",
+    "\u2026": "...",
+    "\u00b7": "-",
+    "\u2022": "-",
+    "\u00b0": "*",
 })
 
 
@@ -378,6 +494,19 @@ def sanitize_glass_text(text: str, max_len: int, *, fallback: str = "-") -> str:
         cleaned = cleaned[:max_len].rstrip()
     if not cleaned:
         cleaned = fallback[:max_len]
+    return cleaned
+
+
+def sanitize_gist_text(text: str | None, max_len: int) -> str:
+    """Sanitize and bound Reply Gist text for the Glass 3.7 display."""
+    cleaned = str(text or "").translate(_GIST_UNICODE_PUNCT)
+    cleaned = re.sub(r"https?://\S*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<script\b[^>]*>.*?</script>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"</?script\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = _GIST_ALLOWED_RE.sub(" ", cleaned)
+    cleaned = " ".join(cleaned.split()).strip()
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len].rstrip()
     return cleaned
 
 
@@ -974,8 +1103,15 @@ def cmd_ask(argv: list[str]) -> int:
     ap.add_argument("--body", default="", help="card body (<=48 safe ASCII)")
     ap.add_argument("--choices", default=None,
                     help="comma-separated choices (up to 3; or 2 for --consent, e.g. 'Deny,Allow')")
-    ap.add_argument("--consent", action="store_true",
-                    help="present as 2-choice consent card (default Deny,Allow; exits 1 on deny)")
+    ap.add_argument(
+        "--consent",
+        action="store_true",
+        help=(
+            "present as 2-choice consent card (default Deny,Allow; exits 1 on deny). "
+            "On Glass 3.7 DENY is 1-tap while ALLOW requires a deliberate 0.8 s hold "
+            "with leaf-green rim fill"
+        ),
+    )
     ap.add_argument("--ttl", type=int, default=120, help="card lifetime in seconds (1..600)")
     ap.add_argument("--wait", action="store_true",
                     help="poll /api/brain/outbox every 0.4s until tapped or TTL timeout (exit 124)")
@@ -2264,6 +2400,407 @@ def cmd_board(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Glass 3.7 Cinema Transition & Reply Gist commands
+# ---------------------------------------------------------------------------
+
+def cmd_transition(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(
+        prog="jarvisctl transition",
+        description="Read or set the Glass 3.7 Cinema screen transition mode.",
+    )
+    ap.add_argument(
+        "mode",
+        nargs="?",
+        default=None,
+        type=str.lower,
+        choices=TRANSITION_MODES,
+        help="transition mode to activate (omit to read current mode from /api/cockpit)",
+    )
+    ap.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    args = ap.parse_args(argv)
+
+    if args.mode is None:
+        cockpit = get_json("/api/cockpit")
+        disp = cockpit.get("display")
+        if not isinstance(disp, dict):
+            disp = {}
+        transition = disp.get("transition")
+        glass3_mode = disp.get("glass3_mode")
+        if args.json:
+            out: dict[str, Any] = {
+                "transition": transition,
+                "glass3_mode": glass3_mode,
+            }
+            if "glass3" in disp:
+                out["glass3"] = bool(disp["glass3"])
+            if "gist_active" in disp:
+                out["gist_active"] = bool(disp["gist_active"])
+            print(json.dumps(out, indent=2))
+        else:
+            mode_str = str(transition) if transition is not None else "unknown"
+            g3_str = str(glass3_mode) if glass3_mode is not None else "unknown"
+            desc = TRANSITION_DESCRIPTIONS.get(mode_str.lower(), "")
+            suffix = f"  ({desc})" if desc else ""
+            print(f"TRANSITION: {mode_str}  glass3_mode={g3_str}{suffix}")
+        return 0
+
+    raw = api(f"/api/display/glass3?transition={args.mode}", "POST", b"")
+    resp = json.loads(raw.decode("utf-8")) if raw else {"ok": True, "transition": args.mode}
+    if args.json:
+        print(json.dumps(resp, indent=2))
+    else:
+        active = str(resp.get("transition", args.mode))
+        g3_mode = str(resp.get("glass3_mode", "auto"))
+        desc = TRANSITION_DESCRIPTIONS.get(active.lower(), "")
+        glass3_flag = resp.get("glass3")
+        g3_extra = f"  glass3={glass3_flag}" if glass3_flag is not None else ""
+        suffix = f"  ({desc})" if desc else ""
+        print(f"TRANSITION: {active}  glass3_mode={g3_mode}{g3_extra}{suffix}")
+    return 0 if resp.get("ok", True) else 1
+
+
+def cmd_gist(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(
+        prog="jarvisctl gist",
+        description="Present or clear a Glass 3.7 Reply Gist card on the round OLED.",
+    )
+    ap.add_argument(
+        "action",
+        nargs="?",
+        default=None,
+        type=str.lower,
+        choices=("clear",),
+        help="pass 'clear' to dismiss any active Reply Gist card",
+    )
+    ap.add_argument(
+        "--kind",
+        default=None,
+        type=str.lower,
+        choices=GIST_KINDS,
+        help="gist card accent/kind (default: answer, or preset's kind)",
+    )
+    ap.add_argument(
+        "--eyebrow",
+        default=None,
+        metavar="TEXT",
+        help=f"top eyebrow label (sanitized, <={GIST_EYEBROW_MAX} chars)",
+    )
+    ap.add_argument(
+        "--hero",
+        default=None,
+        metavar="TEXT",
+        help=f"large focal hero line (sanitized, <={GIST_LINE_MAX} chars)",
+    )
+    ap.add_argument(
+        "--detail",
+        default=None,
+        metavar="TEXT",
+        help=f"primary detail line (sanitized, <={GIST_LINE_MAX} chars)",
+    )
+    ap.add_argument(
+        "--detail2",
+        default=None,
+        metavar="TEXT",
+        help=f"secondary detail line (sanitized, <={GIST_LINE_MAX} chars)",
+    )
+    ap.add_argument(
+        "--footer",
+        default=None,
+        metavar="TEXT",
+        help=f"bottom footer hint (sanitized, <={GIST_EYEBROW_MAX} chars)",
+    )
+    ap.add_argument(
+        "--ttl",
+        type=int,
+        default=None,
+        metavar="SEC",
+        help=(
+            f"display duration in seconds (clamped to {GIST_TTL_MIN_S}..{GIST_TTL_MAX_S}, "
+            f"default {GIST_TTL_DEFAULT_S})"
+        ),
+    )
+    ap.add_argument(
+        "--preset",
+        default=None,
+        type=str.lower,
+        choices=tuple(GIST_PRESETS.keys()),
+        help="1-command hardware test preset (explicit field flags override preset values)",
+    )
+    ap.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    args = ap.parse_args(argv)
+
+    if args.action == "clear":
+        if any(
+            val is not None
+            for val in (
+                args.preset,
+                args.kind,
+                args.eyebrow,
+                args.hero,
+                args.detail,
+                args.detail2,
+                args.footer,
+                args.ttl,
+            )
+        ):
+            ap.error("gist clear does not accept card fields, --preset, or --ttl")
+        raw = api("/api/display/gist?clear=1", "POST", b"")
+        resp = json.loads(raw.decode("utf-8")) if raw else {"ok": True, "active": False}
+        if args.json:
+            print(json.dumps(resp, indent=2))
+        else:
+            print("GIST: cleared")
+        return 0 if resp.get("ok", True) else 1
+
+    base = dict(GIST_PRESETS[args.preset]) if args.preset else {}
+    if not args.preset and (args.eyebrow is None or args.hero is None):
+        ap.error("provide 'clear', --preset, or both --eyebrow and --hero")
+
+    kind = args.kind or base.get("kind") or "answer"
+    raw_eyebrow = args.eyebrow if args.eyebrow is not None else base.get("eyebrow", "")
+    raw_hero = args.hero if args.hero is not None else base.get("hero", "")
+    raw_detail = args.detail if args.detail is not None else base.get("detail", "")
+    raw_detail2 = args.detail2 if args.detail2 is not None else base.get("detail2", "")
+    raw_footer = args.footer if args.footer is not None else base.get("footer", "")
+
+    eyebrow = sanitize_gist_text(raw_eyebrow, GIST_EYEBROW_MAX)
+    hero = sanitize_gist_text(raw_hero, GIST_LINE_MAX)
+    detail = sanitize_gist_text(raw_detail, GIST_LINE_MAX)
+    detail2 = sanitize_gist_text(raw_detail2, GIST_LINE_MAX)
+    footer = sanitize_gist_text(raw_footer, GIST_EYEBROW_MAX)
+
+    if not eyebrow:
+        ap.error("--eyebrow must contain displayable text")
+    if not hero:
+        ap.error("--hero must contain displayable text")
+
+    raw_ttl = GIST_TTL_DEFAULT_S if args.ttl is None else args.ttl
+    ttl_s = max(GIST_TTL_MIN_S, min(GIST_TTL_MAX_S, raw_ttl))
+
+    payload: dict[str, Any] = {
+        "kind": kind,
+        "eyebrow": eyebrow,
+        "hero": hero,
+        "detail": detail,
+        "detail2": detail2,
+        "footer": footer,
+        "ttl_ms": ttl_s * 1000,
+    }
+    resp = post_json("/api/display/gist", payload, timeout=10.0)
+    ok = bool(resp.get("ok", True))
+
+    if args.json:
+        print(json.dumps({"ok": ok, **payload, **resp}, indent=2))
+    else:
+        details = " / ".join(part for part in (detail, detail2) if part)
+        extra = f"  ({details})" if details else ""
+        foot = f"  footer={footer!r}" if footer else ""
+        print(f"GIST [{kind}]: {eyebrow} | {hero}{extra}{foot}  ttl={ttl_s}s")
+    return 0 if ok else 1
+
+
+# ---------------------------------------------------------------------------
+# Nano Reef Aquarium commands
+# ---------------------------------------------------------------------------
+
+def _fmt_age_hours(hours: Any) -> str:
+    if hours is None or isinstance(hours, bool):
+        return "-"
+    try:
+        h = max(0, int(hours))
+    except (ValueError, TypeError):
+        return "-"
+    if h < 24:
+        return f"{h}h"
+    days, rem = divmod(h, 24)
+    return f"{days}d {rem}h" if rem else f"{days}d"
+
+
+def _render_aquarium_view(doc: dict[str, Any]) -> str:
+    active = bool(doc.get("active"))
+    state = "ACTIVE" if active else "STANDBY"
+    biome = str(doc.get("biome") or "reef").lower()
+    biome_label = AQUARIUM_BIOME_LABELS.get(biome, biome)
+    coral_lv = max(1, int(doc.get("coral_level", 1) or 1))
+    coral_xp = doc.get("coral_xp")
+    coral_str = (
+        f"Lv {coral_lv} ({int(coral_xp)} XP)"
+        if isinstance(coral_xp, (int, float)) and not isinstance(coral_xp, bool)
+        else f"Lv {coral_lv}"
+    )
+    pearls = max(0, int(doc.get("pearls", 0) or 0))
+    algae = max(0, min(100, int(doc.get("algae", 0) or 0)))
+    clarity = 100 - algae
+    total_feeds = max(0, int(doc.get("total_feeds", 0) or 0))
+    fish = doc.get("fish") if isinstance(doc.get("fish"), list) else []
+
+    lines = [
+        f"AQUARIUM [{state}]  biome={biome} ({biome_label})  "
+        f"coral={coral_str}  pearls={pearls}  clarity={clarity}% (algae={algae}%)  "
+        f"feeds={total_feeds}  fish={len(fish)}/{AQUARIUM_MAX_FISH}",
+    ]
+    if not fish:
+        lines.append("  (tank empty)")
+        return "\n".join(lines)
+
+    lines.append(
+        f"  {'#':>2}  {'NAME':<13}  {'SPECIES':<11}  {'STAGE':<8}  "
+        f"{'XP':>5}  {'HUNGER':>6}  {'HAPPY':>5}  {'AGE':>7}"
+    )
+    lines.append("  " + "-" * 71)
+    for i, item in enumerate(fish):
+        if not isinstance(item, dict):
+            continue
+        idx = item.get("idx", i)
+        name = str(item.get("name") or "-")[:13]
+        species = str(item.get("species") or "-")[:11]
+        stage = str(item.get("stage") or "fry").upper()[:8]
+        xp = max(0, int(item.get("xp", 0) or 0))
+        hunger = max(0, min(100, int(item.get("hunger", 0) or 0)))
+        happy = max(0, min(100, int(item.get("happiness", 0) or 0)))
+        age = _fmt_age_hours(item.get("age_hours"))
+        lines.append(
+            f"  {int(idx):>2}  {name:<13}  {species:<11}  {stage:<8}  "
+            f"{xp:>5}  {hunger:>5}%  {happy:>4}%  {age:>7}"
+        )
+    return "\n".join(lines)
+
+
+def _build_aquarium_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(
+        prog="jarvisctl aquarium",
+        description="Inspect and control the Nano Reef Aquarium living tank.",
+    )
+    ap.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="emit machine-readable JSON",
+    )
+    sub = ap.add_subparsers(dest="action", metavar="ACTION")
+
+    for act, help_txt in (
+        ("status", "show tank summary and fish roster (default)"),
+        ("open", "open the Nano Reef Aquarium on the round glass"),
+        ("close", "exit the aquarium and return to normal glass"),
+        ("feed", "drop food pellets to feed all fish (+XP, -hunger)"),
+        ("clean", "wipe algae from the glass (restores 100%% clarity)"),
+        ("shake", "trigger a bubble burst and playful fish swirl"),
+    ):
+        p = sub.add_parser(act, help=help_txt, description=help_txt.replace("%%", "%").capitalize() + ".")
+        p.add_argument(
+            "--json",
+            action="store_true",
+            default=argparse.SUPPRESS,
+            help="emit machine-readable JSON",
+        )
+
+    p_bio = sub.add_parser(
+        "biome",
+        help="switch tank biome (reef, abyss, koi)",
+        description="Switch the Nano Reef Aquarium biome.",
+    )
+    p_bio.add_argument(
+        "biome",
+        type=str.lower,
+        choices=AQUARIUM_BIOMES,
+        help="target biome: reef, abyss, or koi",
+    )
+    p_bio.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="emit machine-readable JSON",
+    )
+
+    p_add = sub.add_parser(
+        "add",
+        help="add a creature to the tank (max 8)",
+        description="Add a new creature to the Nano Reef Aquarium.",
+    )
+    p_add.add_argument(
+        "species",
+        type=str.lower,
+        choices=AQUARIUM_SPECIES,
+        help="species: " + ", ".join(AQUARIUM_SPECIES),
+    )
+    p_add.add_argument(
+        "name",
+        nargs="?",
+        default=None,
+        help="optional creature name (<=13 chars; auto-named if omitted)",
+    )
+    p_add.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="emit machine-readable JSON",
+    )
+
+    p_rm = sub.add_parser(
+        "remove",
+        help="release a creature from the tank by roster index",
+        description="Release a creature from the Nano Reef Aquarium by roster index.",
+    )
+    p_rm.add_argument(
+        "idx",
+        type=int,
+        help=f"fish roster index (0..{AQUARIUM_MAX_FISH - 1})",
+    )
+    p_rm.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="emit machine-readable JSON",
+    )
+    return ap
+
+
+def cmd_aquarium(argv: list[str]) -> int:
+    norm_argv = list(argv)
+    for i, tok in enumerate(norm_argv):
+        if tok.startswith("-"):
+            continue
+        if tok.lower() in _AQUARIUM_ALL_ACTIONS:
+            norm_argv[i] = tok.lower()
+        break
+
+    ap = _build_aquarium_parser()
+    args = ap.parse_args(norm_argv)
+    action = args.action or "status"
+
+    if action == "status":
+        resp = get_json("/api/aquarium")
+    elif action in _AQUARIUM_SIMPLE_ACTIONS:
+        raw = api(f"/api/aquarium?action={action}", "POST", b"")
+        resp = json.loads(raw.decode("utf-8")) if raw else {"ok": True}
+    elif action == "biome":
+        raw = api(f"/api/aquarium?action=biome&biome={args.biome}", "POST", b"")
+        resp = json.loads(raw.decode("utf-8")) if raw else {"ok": True, "biome": args.biome}
+    elif action == "add":
+        params: list[tuple[str, str]] = [("action", "add"), ("species", args.species)]
+        clean_name = (args.name or "").strip()
+        if clean_name:
+            params.append(("name", clean_name))
+        path = "/api/aquarium?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+        raw = api(path, "POST", b"")
+        resp = json.loads(raw.decode("utf-8")) if raw else {"ok": True}
+    elif action == "remove":
+        if args.idx < 0 or args.idx >= AQUARIUM_MAX_FISH:
+            ap.error(f"idx must be between 0 and {AQUARIUM_MAX_FISH - 1}")
+        raw = api(f"/api/aquarium?action=remove&idx={args.idx}", "POST", b"")
+        resp = json.loads(raw.decode("utf-8")) if raw else {"ok": True}
+    else:
+        ap.error(f"unsupported aquarium action: {action}")
+
+    if args.json:
+        print(json.dumps(resp, indent=2))
+    else:
+        print(_render_aquarium_view(resp))
+    return 0 if resp.get("ok", True) else 1
+
+
 def main() -> int:
     ensure_utf8_console()
     # Strip --host before any `--` separator; host() re-reads sys.argv when needed.
@@ -2365,6 +2902,14 @@ def main() -> int:
         return cmd_tasks(rest)
     if cmd == "board":
         return cmd_board(rest)
+    # Glass 3.7 Cinema & Reply Gist
+    if cmd == "transition":
+        return cmd_transition(rest)
+    if cmd == "gist":
+        return cmd_gist(rest)
+    # Nano Reef Aquarium
+    if cmd == "aquarium":
+        return cmd_aquarium(rest)
 
     print(__doc__)
     return 2
