@@ -166,8 +166,8 @@ static void sp_glow_orb_rows(uint16_t *dst, int y0, int y1, bool swap_bytes,
             if (d2 >= r16_sq) {
                 continue;
             }
-            /* smooth quadratic falloff: (1 - d^2/r^2)^2 */
-            const uint32_t t = (uint32_t)(((int64_t)(r16_sq - d2) * 255) / r16_sq);
+            /* smooth quadratic falloff: (1 - d^2/r^2)^2 (32-bit exact for r_px <= 255) */
+            const uint32_t t = ((uint32_t)(r16_sq - d2) * 255u) / (uint32_t)r16_sq;
             const unsigned a = (unsigned)((t * t * peak_a) >> 16);
             if (a > 0u) {
                 row[x] = sp_add565(row[x], color, a, swap_bytes);
@@ -289,7 +289,10 @@ static void holo_prepare(holo_cache_t *c, uint32_t now_ms, int max_r,
     uint8_t zero_bands[16] = { 0 };
     const uint8_t *b = bands ? bands : zero_bands;
 
-    if (c->valid && c->now_ms == now_ms && c->max_r == max_r &&
+    const bool frozen = (mode == JR_HOLO_MUTED) || (now_ms == 0u);
+    const uint32_t key_ms = frozen ? 0u : now_ms;
+
+    if (c->valid && c->now_ms == key_ms && c->max_r == max_r &&
         c->mode == (int)mode && c->tilt_x == tilt_x && c->tilt_y == tilt_y &&
         c->amp == amp && c->strength == strength &&
         memcmp(c->bands, b, 16) == 0) {
@@ -297,7 +300,7 @@ static void holo_prepare(holo_cache_t *c, uint32_t now_ms, int max_r,
     }
 
     c->valid = true;
-    c->now_ms = now_ms;
+    c->now_ms = key_ms;
     c->max_r = max_r;
     c->mode = (int)mode;
     c->tilt_x = tilt_x;
@@ -343,8 +346,8 @@ static void holo_prepare(holo_cache_t *c, uint32_t now_ms, int max_r,
         c->far_col   = 0x6241u;  /* deep bronze-gold */
         c->inner_col = 0xFEA8u;  /* soft warm gold inner crystal */
         c->core_col  = 0xFFF2u;
-        yaw_speed = 3u;
-        pitch_speed = 2u;
+        yaw_speed = 0u;
+        pitch_speed = 0u;
         break;
     case JR_HOLO_REACTOR:
         c->near_col  = 0xEFFFu;  /* ice-white cyan */
@@ -374,10 +377,14 @@ static void holo_prepare(holo_cache_t *c, uint32_t now_ms, int max_r,
         mid_e = (int)(amp * 3u / 4u);
     }
 
-    /* Smooth rotation + QMI8658 IMU tilt response */
-    const uint32_t yaw   = (now_ms * yaw_speed) & 0xFFFFu;
-    const uint32_t pitch = ((now_ms * pitch_speed) + (uint32_t)(tilt_y * 28)) & 0xFFFFu;
-    const uint32_t roll  = ((now_ms * 1u) + (uint32_t)(tilt_x * 28)) & 0xFFFFu;
+    /* Smooth rotation + QMI8658 IMU tilt response (frozen in muted/WHISPER rest) */
+    const uint32_t yaw   = frozen ? 8192u : ((now_ms * yaw_speed) & 0xFFFFu);
+    const uint32_t pitch = frozen
+        ? ((5120u + (uint32_t)(tilt_y * 28)) & 0xFFFFu)
+        : (((now_ms * pitch_speed) + (uint32_t)(tilt_y * 28)) & 0xFFFFu);
+    const uint32_t roll  = frozen
+        ? ((uint32_t)(tilt_x * 28) & 0xFFFFu)
+        : (((now_ms * 1u) + (uint32_t)(tilt_x * 28)) & 0xFFFFu);
 
     const uint32_t iyaw   = (uint32_t)(-((int32_t)yaw * 3 / 2)) & 0xFFFFu;
     const uint32_t ipitch = (pitch + (pitch >> 2) + 12288u) & 0xFFFFu;
@@ -400,8 +407,8 @@ static void holo_prepare(holo_cache_t *c, uint32_t now_ms, int max_r,
      * stays <= safe_r. */
     const int32_t base_scale = (safe_r * 16 * 7600) / 4096;
 
-    /* Subtle breathing on LISTEN/IDLE */
-    const int breath = (glass_sin_q15((now_ms * 14u) & 0xFFFFu) * 140) >> 15; /* +-140 in Q12 */
+    /* Subtle breathing on LISTEN/IDLE (frozen at rest) */
+    const int breath = frozen ? 0 : ((glass_sin_q15((now_ms * 14u) & 0xFFFFu) * 140) >> 15); /* +-140 in Q12 */
 
     for (int i = 0; i < HOLO_VERTS; ++i) {
         const bool inner = (i >= 12);

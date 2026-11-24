@@ -130,6 +130,9 @@ bool jr_imu_tilt_read(int *gx_mg, int *gy_mg);
 /** @brief True once a QMI8658 has answered WHO_AM_I. */
 bool jr_imu_present(void);
 
+/** @brief Cumulative count of QMI8658 I2C read/write errors since boot. */
+uint32_t jr_imu_i2c_errors(void);
+
 /**
  * @brief One-shot board probe for GET /api/diag/board. Reads WHO_AM_I,
  *        REVISION, CTRL1/2/3/7 and the temperature register; with gyro=true

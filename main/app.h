@@ -84,15 +84,15 @@
 /* The catalog lives in main.c; this literal is what the other files see.
  * main.c static-asserts it against the real array, so adding a tool
  * without bumping this is a compile error, not a blank petal. */
-#define DEVICE_TOOL_DECL_COUNT 27U
+#define DEVICE_TOOL_DECL_COUNT 28U
 
 /* Render cadence per rung of the rest ladder (frames per second). 24 is the
  * measured CO5300 ceiling; 12 keeps AMBIENT's dimmed ring fluid under a
- * finger; 6 breathes the WHISPER slit; 3 is a dark DREAM face and a caption
- * that can still change. Measured in docs/reference/power-modes.md. */
+ * finger; 2 breathes the WHISPER slit when not in 0-fps still-frame rest;
+ * 3 is a dark DREAM face and a caption that can still change. */
 #define RENDER_FPS_LIVE     24U
 #define RENDER_FPS_AMBIENT  12U
-#define RENDER_FPS_WHISPER   6U
+#define RENDER_FPS_WHISPER   2U
 #define RENDER_FPS_DREAM     3U
 /* Until the voice loop's first cadence tick. app_main runs at priority 1 on
  * the render task's core, and a frame that overruns its period no longer
@@ -243,8 +243,9 @@ typedef enum {
 #define SLEEP_ARMED_TOUCH      2U
 #define SLEEP_LIFT_ARM_FAILED  8U    /* the WoM write failed              */
 #define SLEEP_LIFT_LINE_HIGH   16U   /* INT1 already high, wake skipped    */
-#define CPU_MHZ_LIVE   240
-#define CPU_MHZ_REST   160
+#define CPU_MHZ_LIVE      240
+#define CPU_MHZ_REST      160
+#define CPU_MHZ_DEEP_REST  80
 #define BATTERY_SAVER_PCT 20U
 #define AGENT_TASK_ID_CAP   49U
 #define AGENT_TITLE_CAP     49U
@@ -352,7 +353,10 @@ extern _Atomic int s_level_brightness_request;
 extern char *s_logring;
 extern volatile size_t s_logring_head;
 extern volatile size_t s_logring_len;
+extern volatile uint64_t s_logring_total;
 extern portMUX_TYPE s_logring_mux;
+extern _Atomic uint32_t s_http_last_activity_ms;
+extern uint32_t s_boot_stage_ms[4];
 extern _Atomic uint32_t s_operator_lease_until_ms;
 extern _Atomic bool s_operator_mode_active;
 extern _Atomic uint32_t s_operator_mode_entered_ms;
@@ -532,6 +536,9 @@ bool desk_breathe_parse_pattern(const char *s, jr_breathe_pattern_t *out);
 void persist_watch_style(uint8_t style);
 void persist_holo_enabled(bool enabled);
 void device_confirm_cue(void);
+void app_play_soft_cue(jr_cue_kind_t kind);
+esp_err_t app_set_battery_care(bool enable);
+void app_power_analytics_get(jr_power_analytics_t *out);
 bool device_chip_temp_c(float *out_c);
 void persist_ota_attempt(int slot);
 void handle_say(const char *text);

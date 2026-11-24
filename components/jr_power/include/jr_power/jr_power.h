@@ -36,6 +36,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "jr_power/analytics.h"
 #include "jr_power/charge.h"
 #include "jr_probe/board_probe.h"
 
@@ -117,6 +118,49 @@ esp_err_t jr_power_boot_status(uint8_t *on_src, uint8_t *off_src);
  * Failures are reported inside *out, never as an error.
  */
 void jr_power_probe(jr_probe_pmic_t *out);
+
+/* ---- Desk Battery-Care (80% cap), Thermal Foldback & Continuous ADC ----- */
+
+typedef struct {
+    bool     enabled;          /* Desk Care 80% cap enabled */
+    bool     holding;          /* Currently paused at >=80% on USB */
+    bool     thermal_throttle; /* SW ICC step-down active (chip/pmic >=55C) */
+    bool     thermal_pause;    /* SW charge pause active (chip/pmic >=65C) */
+    uint16_t cv_mv;            /* Active CV target (4000 or 4200 mV) */
+    uint16_t icc_ma;           /* Active ICC target (mA) */
+    uint16_t factory_icc_ma;   /* Factory boot ICC ceiling (mA) */
+    int8_t   pmic_die_c;       /* Latest AXP2101 die temp C (-128 if invalid) */
+    uint16_t vbus_mv;          /* Latest VBUS mV (0 if invalid) */
+    uint16_t vsys_mv;          /* Latest VSYS mV (0 if invalid) */
+} jr_power_care_status_t;
+
+/**
+ * @brief Enable or disable Desk Battery-Care (80% charge cap).
+ *
+ * Writes AXP2101 CV register 0x64 bits[2:0] via RMW (1 = 4.0 V when enabled,
+ * 3 = 4.2 V when disabled, preserving 0xF8). If disabling while paused at the
+ * 80% hold ceiling, immediately re-enables 0x18 bit1 (preserving bit3 gauge_en).
+ */
+esp_err_t jr_power_set_battery_care(bool enable);
+
+/** @brief Lock-free query of whether Desk Battery-Care is currently enabled. */
+bool jr_power_get_battery_care(void);
+
+/**
+ * @brief Periodic policy tick for Desk Battery-Care 75/80% hysteresis and
+ *        dual-sensor (chip + PMIC die) thermal ICC step-down / charge pause.
+ *
+ * Writes I2C registers (0x62 ICC, 0x18 cell_chg_en) only on state transitions.
+ * Never exceeds the factory boot 0x62 ICC ceiling and always preserves 0x18
+ * bit3 (gauge_en = 1).
+ */
+void jr_power_care_tick(bool usb_present, int pct, int chip_temp_c);
+
+/** @brief Copy cached Desk Care, thermal, and continuous ADC status. No I2C. */
+void jr_power_care_status(jr_power_care_status_t *out);
+
+/** @brief Cumulative count of AXP2101 I2C read/write errors since boot. */
+uint32_t jr_power_i2c_errors(void);
 
 #ifdef __cplusplus
 }

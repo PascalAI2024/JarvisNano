@@ -157,9 +157,10 @@ typedef struct {
     bool dream_active;             /* presenter-owned stopped emote */
     bool quiet_active;             /* visible one-shot muted HOME frame */
     uint32_t quiet_clock_key, quiet_env_key, quiet_caption_key;
-    uint32_t quiet_flush_error_key;
+    uint32_t quiet_flush_error_key, quiet_facts_key;
     uint32_t dream_clock_key;
     uint32_t dream_rim_key;
+    uint32_t dream_power_info_key;
     jr_display_rest_mode_t rest_mode;
     jr_companion_view_t rest_view;
     bool panel_touched;
@@ -1255,32 +1256,247 @@ static bool surface_text_pixel(const char *text, size_t max_chars,
             (1U << glyph_y)) != 0U;
 }
 
-static uint16_t surface_accent(jr_display_surface_kind_t kind)
+static int surface_isqrt(int n)
+{
+    if (n <= 0) {
+        return 0;
+    }
+    uint32_t v = (uint32_t)n;
+    uint32_t r = 0u;
+    uint32_t bit = 1u << 30;
+    while (bit > v) {
+        bit >>= 2;
+    }
+    while (bit != 0u) {
+        if (v >= r + bit) {
+            v -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+        bit >>= 2;
+    }
+    return (int)r;
+}
+
+static bool surface_prefix_ci(const char *s, const char *pfx)
+{
+    if (s == NULL || pfx == NULL) {
+        return false;
+    }
+    while (*pfx != '\0') {
+        char a = *s++;
+        const char b = *pfx++;
+        if (a >= 'a' && a <= 'z') {
+            a = (char)(a - 'a' + 'A');
+        }
+        if (a != b) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static uint16_t surface_lerp565(uint16_t c0, uint16_t c1, int t)
+{
+    if (t <= 0) return c0;
+    if (t >= 255) return c1;
+    const int r0 = (c0 >> 11) & 31, g0 = (c0 >> 5) & 63, b0 = c0 & 31;
+    const int r1 = (c1 >> 11) & 31, g1 = (c1 >> 5) & 63, b1 = c1 & 31;
+    const int r = r0 + (((r1 - r0) * t) >> 8);
+    const int g = g0 + (((g1 - g0) * t) >> 8);
+    const int b = b0 + (((b1 - b0) * t) >> 8);
+    return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+static uint16_t surface_accent(jr_display_surface_kind_t kind, bool is_fail)
 {
     switch (kind) {
-    case JR_DISPLAY_SURFACE_RESULT:  return 0x07e0;
-    case JR_DISPLAY_SURFACE_CONSENT: return 0xfd20;
-    case JR_DISPLAY_SURFACE_CHOICE:  return 0x07ff;
-    case JR_DISPLAY_SURFACE_PROGRESS:return 0xa81f;
+    case JR_DISPLAY_SURFACE_CONSENT:  return 0xFD20u; /* warm amber gold */
+    case JR_DISPLAY_SURFACE_CHOICE:   return 0x07FFu; /* electric Glass 3 cyan */
+    case JR_DISPLAY_SURFACE_PROGRESS: return 0xA35Fu; /* electric violet */
+    case JR_DISPLAY_SURFACE_RESULT:   return is_fail ? 0xF8A8u : 0x2FE8u; /* crimson / emerald */
     case JR_DISPLAY_SURFACE_NOTICE:
-    default:                         return 0x681f;
+    default:                          return 0x5DDFu; /* ice blue */
     }
 }
 
-static void surface_split_body(const char *body, char first[25], char second[25])
+static const char *surface_eyebrow_text(jr_display_surface_kind_t kind)
 {
-    size_t length = strnlen(body, JR_DISPLAY_SURFACE_BODY_CAP);
-    size_t split = length > 24U ? 24U : length;
-    /* Split exactly at the display boundary. Word-wrapping at an earlier
-     * space could silently discard characters from a 48-character consent
-     * body, which is unacceptable when the text itself is the authority. */
-    memcpy(first, body, split);
-    first[split] = '\0';
-    size_t next = split;
-    size_t remain = length - next;
-    if (remain > 24U) remain = 24U;
-    memcpy(second, body + next, remain);
-    second[remain] = '\0';
+    switch (kind) {
+    case JR_DISPLAY_SURFACE_CONSENT:  return "CONSENT";
+    case JR_DISPLAY_SURFACE_CHOICE:   return "CODEX CHOICE";
+    case JR_DISPLAY_SURFACE_PROGRESS: return "IN PROGRESS";
+    case JR_DISPLAY_SURFACE_RESULT:   return "RESULT";
+    case JR_DISPLAY_SURFACE_NOTICE:
+    default:                          return "NOTICE";
+    }
+}
+
+static bool surface_clip_x(int y, int *lo, int *hi)
+{
+    const int dy = y - (int)(HUD_H / 2);
+    const int rem = JR_DISPLAY_SHELL_R_MAX * JR_DISPLAY_SHELL_R_MAX - dy * dy;
+    if (rem < 0) {
+        return false;
+    }
+    const int dx = surface_isqrt(rem);
+    int a = (int)(HUD_W / 2) - dx;
+    int b = (int)(HUD_W / 2) + dx;
+    if (a < 0) a = 0;
+    if (b >= HUD_W) b = HUD_W - 1;
+    *lo = a;
+    *hi = b;
+    return a <= b;
+}
+
+/* Strip-invariant frosted rounded rectangle with 1px border & top highlight. */
+static void surface_rrect_row(uint16_t *row, int y, int lo, int hi,
+                              int x0, int y0, int x1, int y1, int rad,
+                              uint16_t fill_col, uint8_t fill_a,
+                              uint16_t border_col, uint8_t border_a,
+                              uint16_t top_hi_col, uint8_t top_hi_a,
+                              bool swap)
+{
+    if (y < y0 || y > y1 || x0 >= x1) {
+        return;
+    }
+    const int half_h = (y1 - y0) / 2;
+    const int half_w = (x1 - x0) / 2;
+    if (rad > half_h) rad = half_h;
+    if (rad > half_w) rad = half_w;
+    if (rad < 0) rad = 0;
+
+    int inset = 0;
+    int inner_inset = 1;
+    if (y == y0 || y == y1) {
+        inset = rad;
+        inner_inset = -1;
+    } else if (y < y0 + rad) {
+        const int dy = (y0 + rad) - y;
+        inset = rad - surface_isqrt(rad * rad - dy * dy);
+        const int r1 = rad - 1;
+        inner_inset = (r1 >= 0 && dy <= r1)
+            ? (rad - surface_isqrt(r1 * r1 - dy * dy)) : -1;
+    } else if (y > y1 - rad) {
+        const int dy = y - (y1 - rad);
+        inset = rad - surface_isqrt(rad * rad - dy * dy);
+        const int r1 = rad - 1;
+        inner_inset = (r1 >= 0 && dy <= r1)
+            ? (rad - surface_isqrt(r1 * r1 - dy * dy)) : -1;
+    }
+
+    int xa = x0 + inset;
+    int xb = x1 - inset;
+    if (xa < lo) xa = lo;
+    if (xb > hi) xb = hi;
+    if (xa > xb) {
+        return;
+    }
+    const int ixa = x0 + inner_inset;
+    const int ixb = x1 - inner_inset;
+    const bool is_top_hi = (y == y0 + 1) && top_hi_a > 0u;
+    for (int x = xa; x <= xb; ++x) {
+        const bool is_edge = inner_inset < 0 || x < ixa || x > ixb;
+        if (is_edge) {
+            if (border_a > 0u) {
+                row[x] = glass_blend565(row[x], border_col, border_a, swap);
+            }
+        } else {
+            if (fill_a > 0u) {
+                row[x] = glass_blend565(row[x], fill_col, fill_a, swap);
+            }
+            if (is_top_hi) {
+                row[x] = glass_blend565(row[x], top_hi_col, top_hi_a, swap);
+            }
+        }
+    }
+}
+
+/* Parse first explicit "0..100%" token from text, or -1 if indeterminate. */
+static int surface_parse_pct_one(const char *s)
+{
+    if (s == NULL) {
+        return -1;
+    }
+    for (size_t i = 0u; s[i] != '\0'; ++i) {
+        if (s[i] >= '0' && s[i] <= '9') {
+            int val = 0;
+            size_t j = i;
+            while (s[j] >= '0' && s[j] <= '9' && (j - i) < 3u) {
+                val = val * 10 + (int)(s[j] - '0');
+                j++;
+            }
+            if (s[j] == '%' && val >= 0 && val <= 100) {
+                return val;
+            }
+            i = j > i ? j - 1u : i;
+        }
+    }
+    return -1;
+}
+
+/* Lossless pixel-measured multi-line wrap into `max_lines` lines within `max_px`.
+ * Returns true if the entire input string fit without dropping a single character. */
+static bool surface_wrap_text(glass_font_id_t font, int track, const char *src,
+                              size_t src_len, int max_px, int max_lines,
+                              const char *out_ptr[3], size_t out_len[3], int *out_n)
+{
+    *out_n = 0;
+    size_t pos = 0u;
+    while (pos < src_len && src[pos] == ' ') {
+        pos++;
+    }
+    if (pos >= src_len) {
+        return true;
+    }
+    for (int line = 0; line < max_lines && pos < src_len; ++line) {
+        /* Trim leading space on continuation lines only if we broke at a space. */
+        while (line > 0 && pos < src_len && src[pos] == ' ') {
+            pos++;
+        }
+        if (pos >= src_len) {
+            break;
+        }
+        size_t rem = src_len - pos;
+        size_t take = rem;
+        while (take > 1u &&
+               glass_text_width(font, src + pos, take, track) > max_px) {
+            take--;
+        }
+        if (take < rem && line + 1 < max_lines) {
+            /* Prefer breaking at the last space if doing so keeps remaining lines lossless. */
+            size_t sp = take;
+            while (sp > 0u && src[pos + sp] != ' ') {
+                sp--;
+            }
+            if (sp > 0u && src[pos + sp] == ' ') {
+                /* Verify remaining characters still fit in the remaining lines. */
+                size_t next_pos = pos + sp + 1u;
+                while (next_pos < src_len && src[next_pos] == ' ') {
+                    next_pos++;
+                }
+                const int rem_lines = max_lines - line - 1;
+                if (rem_lines > 0 &&
+                    glass_text_width(font, src + next_pos, src_len - next_pos, track) <=
+                        max_px * rem_lines) {
+                    take = sp;
+                }
+            }
+        }
+        size_t vis = take;
+        while (vis > 0u && src[pos + vis - 1u] == ' ') {
+            vis--;
+        }
+        out_ptr[*out_n] = src + pos;
+        out_len[*out_n] = vis;
+        (*out_n)++;
+        pos += take;
+    }
+    while (pos < src_len && src[pos] == ' ') {
+        pos++;
+    }
+    return pos >= src_len;
 }
 
 static void apply_surface_overlay(jr_display_ctx_t *ctx, int x1, int y1,
@@ -1292,81 +1508,321 @@ static void apply_surface_overlay(jr_display_ctx_t *ctx, int x1, int y1,
     active = s_surface_active;
     surface = s_surface;
     taskEXIT_CRITICAL(&s_surface_mux);
-    if (!active || pixels == NULL) return;
+    if (!active || pixels == NULL || x1 != 0 || x2 != HUD_W || y2 <= y1) {
+        return;
+    }
 
-    char body_first[25] = {0};
-    char body_second[25] = {0};
-    surface_split_body(surface.body, body_first, body_second);
-    uint16_t accent = surface_accent(surface.kind);
-    int width = x2 - x1;
-    for (int row = 0; row < y2 - y1; ++row) {
-        int y = y1 + row;
-        for (int col = 0; col < width; ++col) {
-            int x = x1 + col;
-            uint16_t *slot = &pixels[(size_t)row * (size_t)width + (size_t)col];
-            uint16_t native = panel_order_color(ctx, *slot);
-            /* A ROUND PLATE ON ROUND GLASS.
-             *
-             * This card was a rectangle spanning x 52..413, y 72..388. Its
-             * corners sit at r~242 on a panel whose glass ends at r232.5, so
-             * the bezel sliced all four of them off — and because everything
-             * outside the rectangle was darkened, the card also flattened the
-             * face, the orbit and the rim into a grey surround. On a circular
-             * display a rectangle cannot be centred, only cropped.
-             *
-             * The plate is now the shell disc itself, bounded by the same
-             * JR_DISPLAY_SHELL_R_MAX every other shell primitive obeys, with
-             * the accent as a ring around its edge instead of four straight
-             * borders. Every text row and both action buttons already fall
-             * inside r214 (the farthest corner of a button is r~203), so no
-             * content moved.
-             *
-             * Outside the plate is left ALONE rather than darkened: r215-222
-             * is where the battery arc and the gold privacy ring live, and a
-             * card has no business dimming the indicator that says the
-             * microphone is off. */
-            const int cdx = x - (int)(HUD_W / 2);
-            const int cdy = y - (int)(HUD_H / 2);
-            const int cr2 = cdx * cdx + cdy * cdy;
-            const bool card = cr2 <= JR_DISPLAY_SHELL_R_MAX *
-                                     JR_DISPLAY_SHELL_R_MAX;
-            if (!card) {
-                /* rim tenants keep their full brightness */
+    const bool swap = ctx->board.swap_color_bytes;
+    const bool is_fail = (surface.kind == JR_DISPLAY_SURFACE_RESULT) &&
+        (surface_prefix_ci(surface.title, "FAIL") ||
+         surface_prefix_ci(surface.title, "ERR"));
+    const uint16_t accent = surface_accent(surface.kind, is_fail);
+    const uint16_t accent_hi = surface_lerp565(accent, 0xFFFFu, 150);
+    const uint16_t accent_dark = surface_lerp565(0x0864u, accent, 42);
+    const uint16_t card_border = surface_lerp565(0x2148u, accent, 105);
+
+    const char *eyebrow = surface_eyebrow_text(surface.kind);
+    const size_t eyebrow_len = strlen(eyebrow);
+    const glass_metrics_t ml = glass_font_metrics(GLASS_FONT_LABEL);
+    const int eyebrow_w = glass_text_width(GLASS_FONT_LABEL, eyebrow, eyebrow_len, 2);
+    const int eyebrow_hw = eyebrow_w / 2 + 16;
+    const int eyebrow_x0 = (HUD_W / 2) - eyebrow_hw;
+    const int eyebrow_x1 = (HUD_W / 2) + eyebrow_hw;
+    const int eyebrow_tx = (HUD_W - eyebrow_w) / 2 + 1;
+    const int eyebrow_ty = 75 - ml.cap_h / 2;
+
+    /* Title wrap (GLASS_FONT_TEXT 15px, max 2 lines inside card x=82..384) */
+    const size_t title_len = strnlen(surface.title, JR_DISPLAY_SURFACE_TITLE_CAP - 1U);
+    const char *t_ptr[3] = {NULL, NULL, NULL};
+    size_t t_len[3] = {0u, 0u, 0u};
+    int t_lines = 0;
+    glass_font_id_t title_font = GLASS_FONT_TEXT;
+    int title_track = 1;
+    if (!surface_wrap_text(GLASS_FONT_TEXT, 1, surface.title, title_len, 302, 2,
+                           t_ptr, t_len, &t_lines)) {
+        title_font = GLASS_FONT_LABEL;
+        title_track = 1;
+        (void)surface_wrap_text(GLASS_FONT_LABEL, 1, surface.title, title_len, 302, 2,
+                                t_ptr, t_len, &t_lines);
+    }
+    const glass_metrics_t m_title = glass_font_metrics(title_font);
+    int t_x[2] = {0, 0}, t_y[2] = {0, 0};
+    if (t_lines == 1) {
+        const int w = glass_text_width(title_font, t_ptr[0], t_len[0], title_track);
+        t_x[0] = (HUD_W - w) / 2 + title_track / 2;
+        t_y[0] = 138 - m_title.cap_h / 2;
+    } else if (t_lines >= 2) {
+        const int step = m_title.cap_h + 9;
+        const int top = 138 - (m_title.cap_h + step) / 2;
+        for (int i = 0; i < 2; ++i) {
+            const int w = glass_text_width(title_font, t_ptr[i], t_len[i], title_track);
+            t_x[i] = (HUD_W - w) / 2 + title_track / 2;
+            t_y[i] = top + i * step;
+        }
+    }
+
+    /* Body wrap (100% lossless for 48-char CONSENT bodies):
+     * Prefer GLASS_FONT_TEXT (15px) when it fits; automatically use
+     * GLASS_FONT_LABEL (11px, >90 chars across 3 lines) otherwise. */
+    const size_t body_len = strnlen(surface.body, JR_DISPLAY_SURFACE_BODY_CAP - 1U);
+    const int body_max_lines = (surface.kind == JR_DISPLAY_SURFACE_PROGRESS) ? 2 : 3;
+    const char *b_ptr[3] = {NULL, NULL, NULL};
+    size_t b_len[3] = {0u, 0u, 0u};
+    int b_lines = 0;
+    glass_font_id_t body_font = GLASS_FONT_TEXT;
+    int body_track = 0;
+    if (body_len > 0u) {
+        if (!surface_wrap_text(GLASS_FONT_TEXT, 0, surface.body, body_len, 302,
+                               body_max_lines, b_ptr, b_len, &b_lines)) {
+            body_font = GLASS_FONT_LABEL;
+            body_track = 1;
+            (void)surface_wrap_text(GLASS_FONT_LABEL, 1, surface.body, body_len, 302,
+                                    3, b_ptr, b_len, &b_lines);
+        }
+    }
+    const glass_metrics_t m_body = glass_font_metrics(body_font);
+    const int body_zone_cy = (surface.kind == JR_DISPLAY_SURFACE_PROGRESS) ? 208 : 225;
+    const int body_step = m_body.cap_h + (body_font == GLASS_FONT_TEXT ? 9 : 8);
+    int b_x[3] = {0, 0, 0}, b_y[3] = {0, 0, 0};
+    if (b_lines > 0) {
+        const int total_h = m_body.cap_h + (b_lines - 1) * body_step;
+        const int top = body_zone_cy - total_h / 2;
+        for (int i = 0; i < b_lines; ++i) {
+            const int w = glass_text_width(body_font, b_ptr[i], b_len[i], body_track);
+            b_x[i] = (HUD_W - w) / 2 + body_track / 2;
+            b_y[i] = top + i * body_step;
+        }
+    }
+
+    /* Progress bar geometry (JR_DISPLAY_SURFACE_PROGRESS only) */
+    const bool has_prog = (surface.kind == JR_DISPLAY_SURFACE_PROGRESS);
+    int prog_pct = -1;
+    int scan_x0 = 90, scan_x1 = 174;
+    int shim_x = 90;
+    if (has_prog) {
+        prog_pct = surface_parse_pct_one(surface.body);
+        if (prog_pct < 0) {
+            prog_pct = surface_parse_pct_one(surface.title);
+        }
+        const uint32_t anim_ms = s_fade_prev_ms != 0u
+            ? s_fade_prev_ms
+            : (uint32_t)(esp_timer_get_time() / 1000);
+        const uint32_t ph = (anim_ms / 6u) % 512u;
+        const int tri = (int)(ph <= 255u ? ph : (511u - ph)); /* 0..255 */
+        if (prog_pct >= 0) {
+            const int fill_w = (286 * prog_pct) / 100;
+            scan_x0 = 90;
+            scan_x1 = 90 + fill_w;
+            shim_x = fill_w > 12 ? (90 + ((tri * fill_w) >> 8)) : scan_x1;
+        } else {
+            const int bar_w = 84;
+            scan_x0 = 90 + ((tri * (286 - bar_w)) >> 8);
+            scan_x1 = scan_x0 + bar_w;
+        }
+    }
+
+    /* Sculpted pill buttons matching jr_display_surface_hit_test() EXACTLY:
+     * x in [70, 396], y in [300, 354], gap = 8. */
+    uint8_t count = surface.action_count;
+    if (count > JR_DISPLAY_SURFACE_ACTION_CAP) {
+        count = JR_DISPLAY_SURFACE_ACTION_CAP;
+    }
+    const int btn_left = 70, btn_right = 396, btn_gap = 8;
+    const int btn_w = count > 0U
+        ? (btn_right - btn_left - btn_gap * ((int)count - 1)) / (int)count
+        : 0;
+    int bx0[JR_DISPLAY_SURFACE_ACTION_CAP] = {0};
+    int bx1[JR_DISPLAY_SURFACE_ACTION_CAP] = {0};
+    int btx[JR_DISPLAY_SURFACE_ACTION_CAP] = {0};
+    int btr[JR_DISPLAY_SURFACE_ACTION_CAP] = {0};
+    size_t blen[JR_DISPLAY_SURFACE_ACTION_CAP] = {0};
+    uint16_t bfill[JR_DISPLAY_SURFACE_ACTION_CAP] = {0};
+    uint16_t bborder[JR_DISPLAY_SURFACE_ACTION_CAP] = {0};
+    uint16_t bhi[JR_DISPLAY_SURFACE_ACTION_CAP] = {0};
+    uint16_t btxt[JR_DISPLAY_SURFACE_ACTION_CAP] = {0};
+    const int btn_ty = 327 - ml.cap_h / 2;
+    for (uint8_t i = 0u; i < count; ++i) {
+        bx0[i] = btn_left + (int)i * (btn_w + btn_gap);
+        bx1[i] = bx0[i] + btn_w;
+        blen[i] = strnlen(surface.action_labels[i], JR_DISPLAY_SURFACE_LABEL_CAP - 1U);
+        int tr = 1;
+        int lw = glass_text_width(GLASS_FONT_LABEL, surface.action_labels[i], blen[i], tr);
+        if (lw > btn_w - 14) {
+            tr = 0;
+            lw = glass_text_width(GLASS_FONT_LABEL, surface.action_labels[i], blen[i], tr);
+        }
+        btr[i] = tr;
+        btx[i] = bx0[i] + (btn_w - lw) / 2;
+        if (surface.kind == JR_DISPLAY_SURFACE_CONSENT && count == 2u) {
+            if (i == 0u) {
+                /* DENY: crimson frosted glass */
+                bfill[i] = 0x3045u;
+                bborder[i] = 0xF9CBu;
+                bhi[i] = 0xFC31u;
+                btxt[i] = 0xFFFFu;
             } else {
-                const bool border = cr2 >= (JR_DISPLAY_SHELL_R_MAX - 6) *
-                                           (JR_DISPLAY_SHELL_R_MAX - 6);
-                native = border ? accent : 0x0842;
-                if (surface_text_pixel(surface.title, 24U, x, y, 88, 128, 2) ||
-                    surface_text_pixel(body_first, 24U, x, y, 88, 184, 2) ||
-                    surface_text_pixel(body_second, 24U, x, y, 88, 210, 2)) {
-                    native = 0xffff;
+                /* ALLOW: emerald frosted glass */
+                bfill[i] = 0x09C5u;
+                bborder[i] = 0x2731u;
+                bhi[i] = 0x6FF5u;
+                btxt[i] = 0xFFFFu;
+            }
+        } else if (surface.kind == JR_DISPLAY_SURFACE_CHOICE) {
+            if (i == 0u) {
+                bfill[i] = 0x098Cu;
+                bborder[i] = 0x07FFu;
+                bhi[i] = 0x8FFFu;
+                btxt[i] = 0xFFFFu;
+            } else {
+                bfill[i] = 0x10A6u;
+                bborder[i] = 0x655Fu;
+                bhi[i] = 0xBDF7u;
+                btxt[i] = 0xE73Fu;
+            }
+        } else {
+            bfill[i] = accent_dark;
+            bborder[i] = accent;
+            bhi[i] = accent_hi;
+            btxt[i] = 0xFFFFu;
+        }
+    }
+
+    const char *hint = count > 0U ? "TAP TO SELECT" : "2X TAP TO EXIT";
+    const size_t hint_len = strlen(hint);
+    const int hint_w = glass_text_width(GLASS_FONT_LABEL, hint, hint_len, 2);
+    const int hint_x = (HUD_W - hint_w) / 2 + 1;
+    const int hint_y = 378;
+
+    const int32_t cx16 = (HUD_W / 2) * 16;
+    const int32_t cy16 = (HUD_H / 2) * 16;
+    const uint16_t disc_core = surface_lerp565(0x0021u, accent, 14);
+
+    for (int y = y1; y < y2; ++y) {
+        int lo = 0, hi = HUD_W - 1;
+        if (!surface_clip_x(y, &lo, &hi)) {
+            continue; /* strictly outside r <= 214: privacy ring & battery rim untouched */
+        }
+        uint16_t *row = pixels + (size_t)(y - y1) * HUD_W;
+
+        /* 1. Solid obsidian OLED disc strictly inside r <= 214 (zero caption bleed) */
+        const int dy = y - (int)(HUD_H / 2);
+        const int dy2 = dy * dy;
+        for (int x = lo; x <= hi; ++x) {
+            const int dx = x - (int)(HUD_W / 2);
+            const int r2 = dx * dx + dy2;
+            const uint16_t bg = r2 < 145 * 145 ? disc_core : 0x0000u;
+            row[x] = glass_blend565(row[x], bg, 255u, swap);
+        }
+
+        /* 2. Outer glowing semantic accent ring (r = 204..212, clipped to r <= 214) */
+        glass_glow_row(row, y, lo, hi, cx16, cy16, 206 * 16, 210 * 16,
+                       0, GLASS_TURN_Q16, false, 14 * 16, 72u, accent, 255u, swap);
+        glass_ring_row(row, y, lo, hi, cx16, cy16, 207 * 16, 211 * 16,
+                       0, GLASS_TURN_Q16, accent, 240u, swap);
+        glass_ring_row(row, y, lo, hi, cx16, cy16, 205 * 16, 206 * 16 + 8,
+                       0, GLASS_TURN_Q16, 0xFFFFu, 48u, swap);
+
+        /* 3. Top eyebrow kind pill (y = 63..87) */
+        if (y >= 63 && y <= 87) {
+            surface_rrect_row(row, y, lo, hi, eyebrow_x0, 63, eyebrow_x1, 87, 12,
+                              accent_dark, 230u, accent, 215u, accent_hi, 75u, swap);
+            if (y >= eyebrow_ty + ml.ink_top && y <= eyebrow_ty + ml.ink_bottom) {
+                glass_text_row(row, y, lo, hi, GLASS_FONT_LABEL, eyebrow, eyebrow_len,
+                               eyebrow_tx, eyebrow_ty, 2, accent_hi, 255u, swap);
+            }
+        }
+
+        /* 4. Center frosted glass card (x = 64..402, y = 104..280, r = 18) */
+        if (y >= 104 && y <= 280) {
+            surface_rrect_row(row, y, lo, hi, 64, 104, 402, 280, 18,
+                              0x0884u, 224u, card_border, 150u, 0xFFFFu, 76u, swap);
+            /* Title text */
+            for (int i = 0; i < t_lines; ++i) {
+                if (y >= t_y[i] + m_title.ink_top && y <= t_y[i] + m_title.ink_bottom) {
+                    glass_text_row(row, y, lo, hi, title_font, t_ptr[i], t_len[i],
+                                   t_x[i], t_y[i], title_track, 0xFFFFu, 255u, swap);
                 }
-                uint8_t count = surface.action_count;
-                if (count > JR_DISPLAY_SURFACE_ACTION_CAP)
-                    count = JR_DISPLAY_SURFACE_ACTION_CAP;
-                if (count > 0U && y >= 300 && y <= 354) {
-                    const int left = 70, right = 396, gap = 8;
-                    int button_w = (right - left - gap * ((int)count - 1)) /
-                                   (int)count;
-                    for (uint8_t i = 0; i < count; ++i) {
-                        int bx0 = left + (int)i * (button_w + gap);
-                        int bx1 = bx0 + button_w;
-                        if (x >= bx0 && x <= bx1) {
-                            bool edge = x <= bx0 + 2 || x >= bx1 - 2 ||
-                                        y <= 302 || y >= 352;
-                            native = edge ? accent : 0x1084;
-                            size_t label_len = strnlen(
-                                surface.action_labels[i],
-                                JR_DISPLAY_SURFACE_LABEL_CAP);
-                            int label_x = bx0 + (button_w - (int)label_len * 6) / 2;
-                            if (surface_text_pixel(surface.action_labels[i],
-                                    JR_DISPLAY_SURFACE_LABEL_CAP - 1U,
-                                    x, y, label_x, 324, 1)) native = 0xffff;
-                        }
+            }
+            /* Subtle tapered hairline divider at y = 172 */
+            if (y == 172) {
+                int dxa = 84 < lo ? lo : 84;
+                int dxb = 382 > hi ? hi : 382;
+                for (int x = dxa; x <= dxb; ++x) {
+                    int adx = x - (int)(HUD_W / 2);
+                    if (adx < 0) adx = -adx;
+                    const int fade = 149 - adx;
+                    if (fade > 0) {
+                        const unsigned a = (unsigned)((fade * 125) / 149);
+                        row[x] = glass_blend565(row[x], accent, a, swap);
                     }
                 }
             }
-            *slot = panel_order_color(ctx, native);
+            /* Body text (lossless wrap) */
+            for (int i = 0; i < b_lines; ++i) {
+                if (y >= b_y[i] + m_body.ink_top && y <= b_y[i] + m_body.ink_bottom) {
+                    glass_text_row(row, y, lo, hi, body_font, b_ptr[i], b_len[i],
+                                   b_x[i], b_y[i], body_track, 0xD6DFu, 240u, swap);
+                }
+            }
+            /* Glowing progress / scanner bar (JR_DISPLAY_SURFACE_PROGRESS) */
+            if (has_prog && y >= 244 && y <= 256) {
+                surface_rrect_row(row, y, lo, hi, 88, 244, 378, 256, 6,
+                                  0x10C5u, 225u, 0x5295u, 155u, 0x0000u, 0u, swap);
+                if (y >= 246 && y <= 254 && scan_x1 > scan_x0) {
+                    int fx0 = scan_x0 < lo ? lo : scan_x0;
+                    int fx1 = scan_x1 > hi ? hi : scan_x1;
+                    /* Round inner ends smoothly on top/bottom rows */
+                    const int trim = (y == 246 || y == 254) ? 2 : ((y == 247 || y == 253) ? 1 : 0);
+                    if (fx0 < scan_x0 + trim) fx0 = scan_x0 + trim;
+                    if (fx1 > scan_x1 - trim) fx1 = scan_x1 - trim;
+                    for (int x = fx0; x <= fx1; ++x) {
+                        uint16_t col;
+                        if (prog_pct >= 0) {
+                            const int t = ((x - 90) * 255) / 286;
+                            col = surface_lerp565(0xA35Fu, 0x07FFu, t);
+                            int ds = x - shim_x;
+                            if (ds < 0) ds = -ds;
+                            if (ds < 18) {
+                                col = surface_lerp565(col, 0xFFFFu, ((18 - ds) * 165) / 18);
+                            }
+                            if (scan_x1 - x <= 3) {
+                                col = 0xFFFFu;
+                            }
+                        } else {
+                            const int mid = (scan_x0 + scan_x1) / 2;
+                            const int half = (scan_x1 - scan_x0) / 2;
+                            int dm = x - mid;
+                            if (dm < 0) dm = -dm;
+                            const int core = half > 0 ? ((half - dm) * 255) / half : 255;
+                            col = core > 180
+                                ? surface_lerp565(0x07FFu, 0xFFFFu, (core - 180) * 3)
+                                : surface_lerp565(0xA35Fu, 0x07FFu, (core * 255) / 180);
+                        }
+                        row[x] = glass_blend565(row[x], col, 245u, swap);
+                    }
+                }
+            }
+        }
+
+        /* 5. Sculpted rounded pill buttons (x = 70..396, y = 300..354) */
+        if (count > 0U && y >= 300 && y <= 354) {
+            for (uint8_t i = 0u; i < count; ++i) {
+                surface_rrect_row(row, y, lo, hi, bx0[i], 300, bx1[i], 354, 18,
+                                  bfill[i], 232u, bborder[i], 235u, bhi[i], 95u, swap);
+                if (y >= btn_ty + ml.ink_top && y <= btn_ty + ml.ink_bottom) {
+                    const int clo = bx0[i] + 4 > lo ? bx0[i] + 4 : lo;
+                    const int chi = bx1[i] - 4 < hi ? bx1[i] - 4 : hi;
+                    glass_text_row(row, y, clo, chi, GLASS_FONT_LABEL,
+                                   surface.action_labels[i], blen[i],
+                                   btx[i], btn_ty, btr[i], btxt[i], 255u, swap);
+                }
+            }
+        }
+
+        /* 6. Subtle bottom hint (y = 374..394) */
+        if (y >= hint_y + ml.ink_top && y <= hint_y + ml.ink_bottom) {
+            glass_text_row(row, y, lo, hi, GLASS_FONT_LABEL, hint, hint_len,
+                           hint_x, hint_y, 2, 0x7BDFu, 165u, swap);
         }
     }
 }
@@ -1486,6 +1942,8 @@ static bool             s_cap_was_on;              /* the caption flag as of the
 static bool             s_cap_pend;                /* the swap to the staged words is due at the cut */
 static uint32_t         s_cap_age_ms;              /* settled time a label has been up */
 static uint32_t         s_cap_hold_ms;             /* 0: this caption never times out */
+static volatile uint32_t s_cap_set_ms;             /* esp_timer ms when caption was set */
+#define JR_DISPLAY_CAPTION_TRANSIENT_HOLD_MS 5500U /* auto-expire non-ambient toasts */
 static int              s_cap_alpha;               /* s_caption_ease through the phase, 0..256 */
 
 /* TRANS-05 ripple slot: ONLY the app task writes (a new tap replaces the old
@@ -1683,6 +2141,50 @@ typedef struct {
 
 static jr_inbox_snap_t  s_inbox[2];
 static _Atomic uint32_t s_inbox_slot;
+
+/* Glass 3.6: Lock-free power telemetry (Nightstand & Cortex STATUS), live
+ * Cortex DESK multi-step checklist, and monotonic data-screen revision. */
+static _Atomic uint32_t s_data_rev;
+
+static inline void data_rev_bump(void)
+{
+    atomic_fetch_add_explicit(&s_data_rev, 1u, memory_order_release);
+}
+
+typedef struct {
+    bool    care_enabled;
+    bool    care_holding;
+    int32_t eta_min;
+    int16_t rate_pct_x10_hr;
+    int8_t  pmic_die_c;
+} jr_power_info_snap_t;
+
+static jr_power_info_snap_t s_power_info[2] = {
+    { .eta_min = -1, .pmic_die_c = -128 },
+    { .eta_min = -1, .pmic_die_c = -128 },
+};
+static _Atomic uint32_t s_power_info_slot;
+
+static inline jr_power_info_snap_t power_info_load(void)
+{
+    const uint32_t s = atomic_load_explicit(&s_power_info_slot, memory_order_acquire);
+    return s_power_info[s & 1u];
+}
+
+typedef struct {
+    char    rows[3][20];
+    uint8_t leds[3];
+    uint8_t count;
+} jr_desk_steps_snap_t;
+
+static jr_desk_steps_snap_t s_desk_steps[2];
+static _Atomic uint32_t s_desk_steps_slot;
+
+static inline jr_desk_steps_snap_t desk_steps_load(void)
+{
+    const uint32_t s = atomic_load_explicit(&s_desk_steps_slot, memory_order_acquire);
+    return s_desk_steps[s & 1u];
+}
 
 /* Glass 3.5: Orbit settle fade timer & wall-clock cache for Chrono-Arc Home. */
 #define G3_ORBIT_SETTLE_MS 350u
@@ -2057,6 +2559,7 @@ static void caption_store(const char *text, uint8_t label)
     s_caption_grey = caption_is_quiet(s_caption_text);
     s_caption_lease = caption_is_lease(s_caption_text);
     s_caption_label = label;
+    __atomic_store_n(&s_cap_set_ms, (uint32_t)(esp_timer_get_time() / 1000), __ATOMIC_RELEASE);
     __atomic_store_n(&s_caption_on, JR_DISPLAY_CAPTION_ACTIVE |
                      (caption_is_ambient(s_caption_text)
                          ? JR_DISPLAY_CAPTION_AMBIENT : 0), __ATOMIC_RELEASE);
@@ -3754,7 +4257,10 @@ static void caption_tick(uint32_t dt_ms)
                 s_cap_p = 256;
                 s_cap_dip = false;
                 s_cap_pend = false;
-                s_cap_hold_ms = 0U;
+                const bool transient = !(on & JR_DISPLAY_CAPTION_AMBIENT) &&
+                                       !s_caption_lease &&
+                                       !atomic_load(&s_caption_pinned);
+                s_cap_hold_ms = transient ? JR_DISPLAY_CAPTION_TRANSIENT_HOLD_MS : 0U;
             } else {
                 const int f_now = caption_phase_factor();
                 /* Only a name that is still held eases out. One that has timed
@@ -3801,15 +4307,19 @@ static void caption_tick(uint32_t dt_ms)
         }
     }
     if (s_cap_hold_ms != 0U && on != 0) {
-        const bool settled = s_space_prog >= 256 && s_style_prog >= 256 && s_cap_p >= 256;
-        if (sheet) {
-            s_cap_age_ms = s_cap_hold_ms;
-        } else if (settled) {
-            s_cap_age_ms += dt_ms;
-        }
-        if (s_cap_age_ms >= s_cap_hold_ms) {
+        if (atomic_load(&s_caption_pinned)) {
             s_cap_hold_ms = 0U;
-            jr_display_caption_clear();
+        } else {
+            const bool settled = s_space_prog >= 256 && s_style_prog >= 256 && s_cap_p >= 256;
+            if (sheet && s_capd_label) {
+                s_cap_age_ms = s_cap_hold_ms;
+            } else if (settled) {
+                s_cap_age_ms += dt_ms;
+            }
+            if (s_cap_age_ms >= s_cap_hold_ms) {
+                s_cap_hold_ms = 0U;
+                jr_display_caption_clear();
+            }
         }
     }
     s_cap_was_on = on != 0;
@@ -7523,6 +8033,59 @@ static void sp_focal_activity(const jr_display_ctx_t *ctx, int y1, int y2,
 /* DESK: Holographic Violet Companion Core. Deep electric violet-magenta radial
  * bloom behind the r108..122 progress ring, subtle orbital scanner ticks at
  * r127..132, and a bright violet-white leading tip on the progress arc. */
+static int sp_eta_fmt(char *dst, int pos, int cap, int32_t eta_min)
+{
+    if (eta_min <= 0) {
+        return pos;
+    }
+    const uint32_t m = (uint32_t)eta_min;
+    if (m >= 60u) {
+        const uint32_t h = m / 60u;
+        const uint32_t r = m % 60u;
+        pos = sp_num(dst, pos, cap, h);
+        pos = sp_str(dst, pos, cap, "H");
+        if (r < 10u) {
+            pos = sp_str(dst, pos, cap, "0");
+        }
+        pos = sp_num(dst, pos, cap, r);
+        pos = sp_str(dst, pos, cap, "M");
+    } else {
+        pos = sp_num(dst, pos, cap, m);
+        pos = sp_str(dst, pos, cap, "M");
+    }
+    return pos;
+}
+
+static int sp_fit_width(glass_font_id_t font, const char *s, int len, int track, int max_px)
+{
+    while (len > 0 && glass_text_width(font, s, (size_t)len, track) > max_px) {
+        len--;
+    }
+    return len;
+}
+
+static uint8_t desk_step_led_color(uint8_t led)
+{
+    switch (led) {
+    case 1u: return JR_G3_LED_GREEN;   /* pass */
+    case 2u: return JR_G3_LED_VIOLET;  /* working */
+    case 3u: return JR_G3_LED_AMBER;   /* wait */
+    case 4u: return JR_G3_LED_RED;     /* fail */
+    default: return JR_G3_LED_OFF;     /* off */
+    }
+}
+
+static uint16_t desk_step_text_color(uint8_t led)
+{
+    switch (led) {
+    case 1u: return SP_C_MINT;
+    case 2u: return SP_C_INK;
+    case 3u: return SP_C_AMBER;
+    case 4u: return SP_C_RED;
+    default: return SP_C_GREY;
+    }
+}
+
 static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
                           uint16_t *pixels, int oy, int st, uint32_t ent)
 {
@@ -7551,6 +8114,8 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
         uint8_t cpu_p = (uint8_t)((fps * 100u) / 24u);
         if (cpu_p < 15u) cpu_p = 15u;
         if (cpu_p > 100u) cpu_p = 100u;
+        const jr_desk_steps_snap_t steps = desk_steps_load();
+        const bool has_steps = steps.count > 0u;
         jr_g3_cortex_t cx = {
             .mem_pct = mem_p,
             .cpu_pct = cpu_p,
@@ -7559,10 +8124,16 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
             .charging = chg,
             .codex_active = true,
             .row_led = {
-                state == JR_DISPLAY_AGENT_FAILED ? JR_G3_LED_RED
-                    : (state == JR_DISPLAY_AGENT_SUCCEEDED ? JR_G3_LED_GREEN : JR_G3_LED_VIOLET),
-                JR_G3_LED_CYAN,
-                muted ? JR_G3_LED_AMBER : JR_G3_LED_GREEN,
+                has_steps
+                    ? desk_step_led_color(steps.leds[0])
+                    : (state == JR_DISPLAY_AGENT_FAILED ? JR_G3_LED_RED
+                        : (state == JR_DISPLAY_AGENT_SUCCEEDED ? JR_G3_LED_GREEN : JR_G3_LED_VIOLET)),
+                has_steps
+                    ? (steps.count >= 2u ? desk_step_led_color(steps.leds[1]) : JR_G3_LED_OFF)
+                    : JR_G3_LED_CYAN,
+                has_steps
+                    ? (steps.count >= 3u ? desk_step_led_color(steps.leds[2]) : JR_G3_LED_OFF)
+                    : (muted ? JR_G3_LED_AMBER : JR_G3_LED_GREEN),
             },
             .now_ms = s_fade_prev_ms != 0u
                       ? s_fade_prev_ms
@@ -7587,25 +8158,52 @@ static void sp_focal_desk(const jr_display_ctx_t *ctx, int y1, int y2,
         }
 
         const char *task = sp_headline(JR_DISPLAY_SPACE_DESK);
-        int tlen = sp_len(task, 14);
-        if (tlen == 0) { task = "CODEX DECK"; tlen = 10; }
+        char task_buf[20];
+        int tlen = sp_str(task_buf, 0, (int)sizeof task_buf, task);
+        if (tlen == 0) {
+            tlen = sp_str(task_buf, 0, (int)sizeof task_buf, "CODEX DECK");
+        }
+        tlen = sp_fit_width(GLASS_FONT_TEXT, task_buf, tlen, 1, 210);
+        task = task_buf;
         const char *sname = sp_agent_name(state);
         char r0[20], r1[20], r2[20];
-        int l0 = sp_str(r0, 0, (int)sizeof r0, "STATE  ");
-        l0 = sp_str(r0, l0, (int)sizeof r0, sname);
-        int l1 = sp_str(r1, 0, (int)sizeof r1, "DONE   ");
-        l1 = sp_pct(r1, l1, (int)sizeof r1, (uint32_t)prog);
-        int l2 = sp_str(r2, 0, (int)sizeof r2, muted ? "MIC    MUTED" : "LINK   CODEX");
+        int l0 = 0, l1 = 0, l2 = 0;
+        uint16_t c0 = SP_C_INK, c1 = fill, c2 = muted ? SP_C_GOLD : SP_C_MINT;
+        if (has_steps) {
+            const int row_max_px = JR_G3_CORTEX_TEXT_X1 - JR_G3_CORTEX_TEXT_X0;
+            l0 = sp_str(r0, 0, (int)sizeof r0, steps.rows[0]);
+            l0 = sp_fit_width(GLASS_FONT_TEXT, r0, l0, 0, row_max_px);
+            c0 = desk_step_text_color(steps.leds[0]);
+            if (steps.count >= 2u) {
+                l1 = sp_str(r1, 0, (int)sizeof r1, steps.rows[1]);
+                l1 = sp_fit_width(GLASS_FONT_TEXT, r1, l1, 0, row_max_px);
+                c1 = desk_step_text_color(steps.leds[1]);
+            } else {
+                r1[0] = '\0';
+            }
+            if (steps.count >= 3u) {
+                l2 = sp_str(r2, 0, (int)sizeof r2, steps.rows[2]);
+                l2 = sp_fit_width(GLASS_FONT_TEXT, r2, l2, 0, row_max_px);
+                c2 = desk_step_text_color(steps.leds[2]);
+            } else {
+                r2[0] = '\0';
+            }
+        } else {
+            l0 = sp_str(r0, 0, (int)sizeof r0, "STATE  ");
+            l0 = sp_str(r0, l0, (int)sizeof r0, sname);
+            l1 = sp_str(r1, 0, (int)sizeof r1, "DONE   ");
+            l1 = sp_pct(r1, l1, (int)sizeof r1, (uint32_t)prog);
+            l2 = sp_str(r2, 0, (int)sizeof r2, muted ? "MIC    MUTED" : "LINK   CODEX");
+        }
 
         const int qa = (st * 215) / 255;
         sg_txt_t t_hdr, t_r0, t_r1, t_r2;
         sg_txt_t t_qmem, t_qcpu, t_qag, t_qpwr;
         sg_txt_make(&t_hdr, GLASS_FONT_TEXT, task, tlen, SP_CX, 159 + oy, 1,
                     muted ? SP_C_GOLD : 0xE3FFu, st);
-        sg_txt_at(&t_r0, GLASS_FONT_TEXT, r0, l0, JR_G3_CORTEX_TEXT_X0, 200 + oy, SP_C_INK, st);
-        sg_txt_at(&t_r1, GLASS_FONT_TEXT, r1, l1, JR_G3_CORTEX_TEXT_X0, 234 + oy, fill, st);
-        sg_txt_at(&t_r2, GLASS_FONT_TEXT, r2, l2, JR_G3_CORTEX_TEXT_X0, 268 + oy,
-                  muted ? SP_C_GOLD : SP_C_MINT, st);
+        sg_txt_at(&t_r0, GLASS_FONT_TEXT, r0, l0, JR_G3_CORTEX_TEXT_X0, 200 + oy, c0, st);
+        sg_txt_at(&t_r1, GLASS_FONT_TEXT, r1, l1, JR_G3_CORTEX_TEXT_X0, 234 + oy, c1, st);
+        sg_txt_at(&t_r2, GLASS_FONT_TEXT, r2, l2, JR_G3_CORTEX_TEXT_X0, 268 + oy, c2, st);
         sg_txt_make(&t_qmem, GLASS_FONT_LABEL, "MEM", 3,
                     JR_G3_CORTEX_LBL_MEM_X, JR_G3_CORTEX_LBL_MEM_Y + oy, 1, SP_C_MINT, qa);
         sg_txt_make(&t_qcpu, GLASS_FONT_LABEL, "CPU", 3,
@@ -7870,12 +8468,13 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
         const uint8_t ag_p = desk_on
             ? (uint8_t)(__atomic_load_n(&s_desk_word, __ATOMIC_ACQUIRE) & 0xFFu)
             : (uint8_t)(bars * 25);
+        const jr_power_info_snap_t pinfo = power_info_load();
         jr_g3_cortex_t cx = {
             .mem_pct = mem_p,
             .cpu_pct = cpu_p,
             .batt_pct = have_gauge ? (uint8_t)shown : 0u,
             .agent_pct = ag_p > 100u ? 100u : ag_p,
-            .charging = charging,
+            .charging = charging || pinfo.care_holding,
             .codex_active = desk_on,
             .row_led = {
                 bars >= 2 ? JR_G3_LED_GREEN : (bars == 1 ? JR_G3_LED_AMBER : JR_G3_LED_RED),
@@ -7904,18 +8503,54 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
             jr_g3_cortex_rows(pixels, y1, y2 - y1, swap, &cx);
         }
 
-        char hdr[18], r0[20], r1[20], r2[20];
-        int lh = sp_str(hdr, 0, (int)sizeof hdr, charging ? "CHG  " : "PWR  ");
-        lh = sp_str(hdr, lh, (int)sizeof hdr, pctbuf);
-        if (have_gauge) lh = sp_str(hdr, lh, (int)sizeof hdr, "%");
+        char hdr[20], r0[20], r1[20], r2[20];
+        int lh = 0;
+        uint16_t hdr_col = low ? SP_C_RED : (muted ? SP_C_GOLD : SP_C_CYAN);
+        if (have_gauge && pinfo.care_holding) {
+            lh = sp_str(hdr, 0, (int)sizeof hdr, pctbuf);
+            lh = sp_str(hdr, lh, (int)sizeof hdr, "% CARE HOLD");
+            hdr_col = muted ? SP_C_GOLD : SP_C_MINT;
+        } else if (have_gauge && pinfo.eta_min > 0) {
+            lh = sp_str(hdr, 0, (int)sizeof hdr, charging ? "CHG " : "PWR ");
+            lh = sp_str(hdr, lh, (int)sizeof hdr, pctbuf);
+            lh = sp_str(hdr, lh, (int)sizeof hdr, "% ");
+            lh = sp_eta_fmt(hdr, lh, (int)sizeof hdr, pinfo.eta_min);
+        } else if (have_gauge && pinfo.care_enabled) {
+            lh = sp_str(hdr, 0, (int)sizeof hdr, charging ? "CHG " : "PWR ");
+            lh = sp_str(hdr, lh, (int)sizeof hdr, pctbuf);
+            lh = sp_str(hdr, lh, (int)sizeof hdr, "% CARE");
+        } else {
+            lh = sp_str(hdr, 0, (int)sizeof hdr, charging ? "CHG  " : "PWR  ");
+            lh = sp_str(hdr, lh, (int)sizeof hdr, pctbuf);
+            if (have_gauge) lh = sp_str(hdr, lh, (int)sizeof hdr, "%");
+        }
+        lh = sp_fit_width(GLASS_FONT_TEXT, hdr, lh, 1, 210);
 
         int l0 = sp_str(r0, 0, (int)sizeof r0, "WIFI   ");
         l0 = sp_str(r0, l0, (int)sizeof r0, dbm);
         if (bars > 0) l0 = sp_str(r0, l0, (int)sizeof r0, " dBm");
 
-        int l1 = sp_str(r1, 0, (int)sizeof r1, "LINK   ");
-        l1 = sp_str(r1, l1, (int)sizeof r1, link_on ? "LIVE " : "IDLE ");
-        l1 = sp_str(r1, l1, (int)sizeof r1, chipbuf);
+        const int row_max_px = JR_G3_CORTEX_TEXT_X1 - JR_G3_CORTEX_TEXT_X0;
+        int l1 = 0;
+        if (pinfo.pmic_die_c > -100) {
+            l1 = sp_str(r1, 0, (int)sizeof r1, "LINK  ");
+            l1 = sp_str(r1, l1, (int)sizeof r1, link_on ? "LIVE " : "IDLE ");
+            if (chip_ok) {
+                l1 = sp_int(r1, l1, (int)sizeof r1, chip_c);
+                l1 = sp_str(r1, l1, (int)sizeof r1, "/");
+                l1 = sp_int(r1, l1, (int)sizeof r1, (int)pinfo.pmic_die_c);
+                l1 = sp_str(r1, l1, (int)sizeof r1, "*");
+            } else {
+                l1 = sp_str(r1, l1, (int)sizeof r1, "P");
+                l1 = sp_int(r1, l1, (int)sizeof r1, (int)pinfo.pmic_die_c);
+                l1 = sp_str(r1, l1, (int)sizeof r1, "*");
+            }
+            l1 = sp_fit_width(GLASS_FONT_TEXT, r1, l1, 0, row_max_px);
+        } else {
+            l1 = sp_str(r1, 0, (int)sizeof r1, "LINK   ");
+            l1 = sp_str(r1, l1, (int)sizeof r1, link_on ? "LIVE " : "IDLE ");
+            l1 = sp_str(r1, l1, (int)sizeof r1, chipbuf);
+        }
 
         int l2 = sp_str(r2, 0, (int)sizeof r2, "TOOLS  ");
         l2 = sp_str(r2, l2, (int)sizeof r2, tools_on ? "READY" : "STANDBY");
@@ -7923,8 +8558,7 @@ static void sp_focal_status(const jr_display_ctx_t *ctx, int y1, int y2,
         const int qa = (st * 215) / 255;
         sg_txt_t t_hdr, t_r0, t_r1, t_r2;
         sg_txt_t t_qmem, t_qcpu, t_qag, t_qpwr;
-        sg_txt_make(&t_hdr, GLASS_FONT_TEXT, hdr, lh, SP_CX, 159 + oy, 1,
-                    low ? SP_C_RED : (muted ? SP_C_GOLD : SP_C_CYAN), st);
+        sg_txt_make(&t_hdr, GLASS_FONT_TEXT, hdr, lh, SP_CX, 159 + oy, 1, hdr_col, st);
         sg_txt_at(&t_r0, GLASS_FONT_TEXT, r0, l0, JR_G3_CORTEX_TEXT_X0, 200 + oy, SP_C_INK, st);
         sg_txt_at(&t_r1, GLASS_FONT_TEXT, r1, l1, JR_G3_CORTEX_TEXT_X0, 234 + oy,
                   link_on ? SP_C_CYAN : SP_C_GREY, st);
@@ -9438,10 +10072,9 @@ static bool watch_rest_day(const jr_display_ctx_t *ctx)
     return rest_mode_keeps_dial(ctx, rest_eligible_raw(ctx));
 }
 
-/* PLAN.md N16.6: Quiet WATCH rest in WHISPER (<= 6 fps). CELESTIAL (stars off
- * when not awake), DRESS, and MINIMAL have no live motion when settled at
- * rest, so redrawing them at 6 fps wastes CPU/SPI power. Follow the exact same
- * minute-clock still rule as daytime NIGHTSTAND/GLANCE when settled & static. */
+/* Glass 3.6: Quiet WATCH rest in WHISPER (<= 6 fps). All 10 watch styles
+ * settle cleanly to 0-fps minute-driven still-frame rest when no voice,
+ * animation, ripple, toast, bezel scrub, or ringing timer is active. */
 static bool watch_quiet_whisper(const jr_display_ctx_t *ctx)
 {
     if (jr_display_render_fps() > 6U) {
@@ -9451,24 +10084,21 @@ static bool watch_quiet_whisper(const jr_display_ctx_t *ctx)
     if ((nav & (NAV_SPACE_MASK | NAV_OVL_MASK)) != (uint32_t)JR_DISPLAY_SPACE_WATCH) {
         return false;
     }
-    const uint32_t style = (nav & NAV_STYLE_MASK) >> NAV_STYLE_SHIFT;
-    if (style != (uint32_t)JR_WATCH_CELESTIAL &&
-        style != (uint32_t)JR_WATCH_DRESS &&
-        style != (uint32_t)JR_WATCH_MINIMAL) {
-        return false;
-    }
     const uint32_t clock = __atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE);
     if ((clock & (1u << 16)) == 0U) {
         return false;
     }
     const uint32_t env = __atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE);
     const uint32_t request = __atomic_load_n(&ctx->requested_word, __ATOMIC_ACQUIRE);
+    const jr_face_t face = (jr_face_t)((request & JR_DISPLAY_CMD_FACE_MASK) >>
+                                      JR_DISPLAY_CMD_FACE_SHIFT);
     const int caption = __atomic_load_n(&s_caption_on, __ATOMIC_ACQUIRE);
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
     const uint32_t ripple = __atomic_load_n(&s_ripple_start_ms, __ATOMIC_ACQUIRE);
     const uint32_t bloom = __atomic_load_n(&s_bloom_start_ms, __ATOMIC_ACQUIRE);
     return !(env & JR_DISPLAY_ENV_VOICE_BUSY) &&
            !(request & JR_DISPLAY_CMD_BLANK) &&
+           (face == JR_FACE_IDLE || face == JR_FACE_RESTING || face == JR_FACE_MUTED) &&
            !(diag_load(&ctx->shell_word) & (JR_DISPLAY_SHELL_SHADE | JR_DISPLAY_SHELL_AGENT)) &&
            __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE) == 0 &&
            __atomic_load_n(&s_commit_pct, __ATOMIC_ACQUIRE) == 0U &&
@@ -9486,6 +10116,9 @@ static bool watch_quiet_whisper(const jr_display_ctx_t *ctx)
            !sp_timer_ringing() &&
            !sp_stopwatch_running() &&
            !rim_level_active(now) &&
+           !jr_display_boot_ignition_active() && s_boot_ign_ease == 0 &&
+           !jr_display_desk_mode_active() &&
+           (!glass3_active() || s_g3_orbit_age_ms >= G3_ORBIT_SETTLE_MS) &&
            diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF &&
            jr_display_hud_enabled();
 }
@@ -9495,15 +10128,67 @@ static bool watch_should_rest_still(const jr_display_ctx_t *ctx)
     return watch_rest_day(ctx) || watch_quiet_whisper(ctx);
 }
 
+/* Glass 3.6: Parked static data screens (STATUS, WEATHER, DESK, ACTIVITY)
+ * settle to 0-fps still-frame rest in WHISPER / muted rest, redrawing only
+ * on minute ticks or real data-revision updates instead of spinning forever. */
+static bool data_screen_should_rest_still(const jr_display_ctx_t *ctx)
+{
+    if (!s_parked) {
+        return false;
+    }
+    const uint32_t env = __atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE);
+    const bool muted = (env & (1u << 9)) != 0U;
+    const uint8_t fps = jr_display_render_fps();
+    if (fps > 6U && !(muted && fps <= 12U)) {
+        return false;
+    }
+    const uint32_t request = __atomic_load_n(&ctx->requested_word, __ATOMIC_ACQUIRE);
+    const jr_face_t face = (jr_face_t)((request & JR_DISPLAY_CMD_FACE_MASK) >>
+                                      JR_DISPLAY_CMD_FACE_SHIFT);
+    const uint32_t nav = __atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE);
+    const int caption = __atomic_load_n(&s_caption_on, __ATOMIC_ACQUIRE);
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    const uint32_t ripple = __atomic_load_n(&s_ripple_start_ms, __ATOMIC_ACQUIRE);
+    const uint32_t bloom = __atomic_load_n(&s_bloom_start_ms, __ATOMIC_ACQUIRE);
+    return !(env & JR_DISPLAY_ENV_VOICE_BUSY) &&
+           !(request & JR_DISPLAY_CMD_BLANK) &&
+           (face == JR_FACE_IDLE || face == JR_FACE_RESTING || face == JR_FACE_MUTED) &&
+           !(nav & NAV_OVL_MASK) &&
+           !(diag_load(&ctx->shell_word) & JR_DISPLAY_SHELL_SHADE) &&
+           __atomic_load_n(&s_choice_n, __ATOMIC_ACQUIRE) == 0 &&
+           __atomic_load_n(&s_commit_pct, __ATOMIC_ACQUIRE) == 0U &&
+           (!ripple || now - ripple >= HUD_RIPPLE_MS) &&
+           (!bloom || now - bloom >= HUD_BLOOM_MS) &&
+           !jr_display_canvas_active() && !jr_display_surface_is_active() &&
+           (!caption || (caption & JR_DISPLAY_CAPTION_AMBIENT)) &&
+           !atomic_load(&s_caption_pinned) &&
+           s_space_prog == 256 &&
+           s_space_serial_seen == (uint8_t)(nav >> NAV_SERIAL_SHIFT) &&
+           s_detail_ease == 0 && s_shade_ease == 0 &&
+           s_ask_ease == 0 && s_canvas_ease == 0 &&
+           !glass_entry_animating(s_entry_ms, SP_ENTRY_TOTAL_MS) &&
+           s_caption_prog == (caption ? 256 : 0) &&
+           !sp_ota_ringing((jr_display_ota_state_t)
+               (__atomic_load_n(&s_ota_word, __ATOMIC_ACQUIRE) & 0xfu)) &&
+           !sp_timer_ringing() &&
+           !sp_stopwatch_running() &&
+           !rim_level_active(now) &&
+           !jr_display_boot_ignition_active() && s_boot_ign_ease == 0 &&
+           !jr_display_desk_mode_active() &&
+           (!glass3_active() || s_g3_orbit_age_ms >= G3_ORBIT_SETTLE_MS) &&
+           diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF &&
+           jr_display_hud_enabled();
+}
+
 static bool dream_eligible(const jr_display_ctx_t *ctx)
 {
     return rest_eligible(ctx) == JR_DISPLAY_REST_DREAM;
 }
 
-/* WHISPER's cadence is only a ceiling. A muted, settled HOME has no moving
- * face to justify dirtying it on every engine period. Keep every foreground
- * owner and every finite fade on the normal animation path. WATCH and the
- * charging comet remain dynamic; clock/rim facts are explicitly refreshed. */
+/* WHISPER's cadence is only a ceiling. In Glass 3.5, settled idle HOME (muted
+ * or unmuted, voice idle) rests at 0 fps and wakes on minute ticks or fact
+ * updates; CLASSIC retains muted-only/non-charging semantics. Keep every
+ * foreground owner and every finite fade on the normal animation path. */
 static bool quiet_eligible(const jr_display_ctx_t *ctx)
 {
     const uint32_t env = __atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE);
@@ -9516,8 +10201,12 @@ static bool quiet_eligible(const jr_display_ctx_t *ctx)
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
     const uint32_t ripple = __atomic_load_n(&s_ripple_start_ms, __ATOMIC_ACQUIRE);
     const uint32_t bloom = __atomic_load_n(&s_bloom_start_ms, __ATOMIC_ACQUIRE);
-    return (env & (1u << 9)) && !(env & ((1u << 8) | JR_DISPLAY_ENV_VOICE_BUSY |
-                                      JR_DISPLAY_ENV_MODE_MASK)) &&
+    const bool g3 = glass3_active();
+    const bool env_quiet_ok = g3
+        ? !(env & (JR_DISPLAY_ENV_VOICE_BUSY | JR_DISPLAY_ENV_MODE_MASK))
+        : ((env & (1u << 9)) && !(env & ((1u << 8) | JR_DISPLAY_ENV_VOICE_BUSY |
+                                         JR_DISPLAY_ENV_MODE_MASK)));
+    return env_quiet_ok &&
            jr_display_render_fps() <= 6U && !(request & JR_DISPLAY_CMD_BLANK) &&
            (face == JR_FACE_IDLE || face == JR_FACE_RESTING || face == JR_FACE_MUTED) &&
            (nav & (NAV_SPACE_MASK | NAV_OVL_MASK)) == JR_DISPLAY_SPACE_JARVIS &&
@@ -9543,6 +10232,7 @@ static bool quiet_eligible(const jr_display_ctx_t *ctx)
            !rim_level_active(now) &&
            !jr_display_boot_ignition_active() && s_boot_ign_ease == 0 &&
            !jr_display_desk_mode_active() &&
+           (!g3 || s_g3_orbit_age_ms >= G3_ORBIT_SETTLE_MS) &&
            diag_load(&ctx->test_pattern) == JR_DISPLAY_TEST_OFF &&
            jr_display_hud_enabled();
 }
@@ -9713,8 +10403,18 @@ static bool apply_companion_overlay(jr_display_ctx_t *ctx, int y1, int y2,
     if (view.lines[1].text[0] != '\0') {
         snprintf(line, sizeof line, "%s", view.lines[1].text);
     } else if (view.battery_percent <= 100U) {
-        snprintf(line, sizeof line, "%u%%%s%s", (unsigned)view.battery_percent,
-                 view.lines[3].text[0] != '\0' ? "  " : "", view.lines[3].text);
+        const jr_power_info_snap_t pinfo = power_info_load();
+        if (mode == JR_DISPLAY_REST_NIGHTSTAND && pinfo.care_holding) {
+            snprintf(line, sizeof line, "%u%%  CARE HOLD", (unsigned)view.battery_percent);
+        } else if (mode == JR_DISPLAY_REST_NIGHTSTAND && view.charging && pinfo.eta_min > 0) {
+            char etabuf[12];
+            const int el = sp_eta_fmt(etabuf, 0, (int)sizeof etabuf, pinfo.eta_min);
+            etabuf[el] = '\0';
+            snprintf(line, sizeof line, "%u%%  %s", (unsigned)view.battery_percent, etabuf);
+        } else {
+            snprintf(line, sizeof line, "%u%%%s%s", (unsigned)view.battery_percent,
+                     view.lines[3].text[0] != '\0' ? "  " : "", view.lines[3].text);
+        }
     } else if (view.lines[3].text[0] != '\0') {
         snprintf(line, sizeof line, "%s", view.lines[3].text);
     }
@@ -10139,12 +10839,16 @@ static void apply_hud_overlay(jr_display_ctx_t *ctx, int x1, int y1,
             }
             const int holo_s = 256 - s_space_black;
             if (holo_s > 0) {
-                const uint32_t frame_ms = s_fade_prev_ms != 0u ? s_fade_prev_ms : now_ms;
+                const bool holo_rest = (hmode == JR_HOLO_MUTED) ||
+                                       (hmode == JR_HOLO_IDLE && jr_display_render_fps() <= 6U);
+                const uint32_t frame_ms = holo_rest ? 0u
+                    : (s_fade_prev_ms != 0u ? s_fade_prev_ms : now_ms);
                 uint8_t spec[16];
                 spectrum_load(spec);
                 const int holo_r = g3_use_aeth ? 56 : (g3_home_eligible ? 86 : 92);
                 jr_showpiece_holo_rows(pixels, y1, nrows, ctx->board.swap_color_bytes,
-                                       frame_ms, holo_r, hmode, s_tilt.x, s_tilt.y,
+                                       frame_ms, holo_r, hmode,
+                                       holo_rest ? 0 : s_tilt.x, holo_rest ? 0 : s_tilt.y,
                                        spec, env.amp, holo_s > 255 ? 255 : holo_s);
             }
         }
@@ -10897,9 +11601,20 @@ static bool brightness_pending(void)
  * rim key of the last frame asked for; it is invalid outside rest, so entering
  * rest always draws once. Presenter task only. */
 static bool s_rest_day;
+static bool s_parked_still;               /* parked data screen resting at 0 fps */
 static bool s_still_held;                 /* the engine's anim was stopped for the rest */
 static uint32_t s_still_key = UINT32_MAX;
 static uint32_t s_still_frames;           /* frames asked for while at rest (host evidence) */
+
+static uint32_t home_wall_min_key(void)
+{
+#ifdef ESP_PLATFORM
+    const time_t now_t = time(NULL);
+    return now_t >= (time_t)G3_WALL_VALID ? (uint32_t)(now_t / 60) : 0u;
+#else
+    return 0u;
+#endif
+}
 
 static bool presenter_ticks_the_glass(void)
 {
@@ -10911,18 +11626,24 @@ static bool presenter_ticks_the_glass(void)
     if (!(s_dial_blit || s_parked || __atomic_load_n(&s_watch_tick, __ATOMIC_RELAXED) != 0u)) {
         return false;
     }
-    if (!s_rest_day) {
+    if (!s_rest_day && !s_parked_still) {
         s_still_key = UINT32_MAX;
         return true;
     }
     const uint32_t timer_w = atomic_load_explicit(&s_timer_word, memory_order_acquire);
     const uint32_t sw_w = atomic_load_explicit(&s_sw_word, memory_order_acquire);
     const uint32_t sw_ms = atomic_load_explicit(&s_sw_elapsed_ms, memory_order_acquire);
-    const uint32_t key =
+    uint32_t key =
         (__atomic_load_n(&s_clock_word, __ATOMIC_ACQUIRE) & JR_DISPLAY_CLOCK_MINUTE_MASK) ^
         (__atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE) & JR_DISPLAY_ENV_RIM_MASK) * 2654435761u ^
         (timer_w * 1140071481u) ^
         ((sw_w ^ sw_ms) * 2246822519u);
+    if (s_parked_still) {
+        key ^= (__atomic_load_n(&s_nav_word, __ATOMIC_ACQUIRE) * 3266489917u) ^
+               (atomic_load_explicit(&s_data_rev, memory_order_acquire) * 668265263u) ^
+               (__atomic_load_n(&s_caption_revision, __ATOMIC_ACQUIRE) * 374761393u) ^
+               (home_wall_min_key() * 2862933555u);
+    }
     if (key == s_still_key && !brightness_pending()) {
         return false;
     }
@@ -10933,7 +11654,7 @@ static bool presenter_ticks_the_glass(void)
 
 static uint32_t presenter_wait_ms(const jr_display_ctx_t *ctx)
 {
-    if ((ctx->dream_active || ctx->quiet_active || s_rest_day) &&
+    if ((ctx->dream_active || ctx->quiet_active || s_rest_day || s_parked_still) &&
         !brightness_pending() && !sp_stopwatch_running() &&
         !jr_display_boot_ignition_active() && s_boot_ign_ease == 0 &&
         !jr_display_desk_mode_active()) {
@@ -10994,6 +11715,7 @@ static bool presenter_dream_tick(jr_display_ctx_t *ctx, uint32_t *last_word)
                            JR_DISPLAY_CLOCK_MINUTE_MASK;
     const uint32_t rim = __atomic_load_n(&s_hud_env_word, __ATOMIC_ACQUIRE) &
                          JR_DISPLAY_ENV_RIM_MASK;
+    const uint32_t pinfo_key = atomic_load_explicit(&s_power_info_slot, memory_order_acquire);
     jr_companion_view_t view = {0};
     if (mode != JR_DISPLAY_REST_DREAM) { companion_view(mode, &view); }
     if (!ctx->dream_active) {
@@ -11004,16 +11726,19 @@ static bool presenter_dream_tick(jr_display_ctx_t *ctx, uint32_t *last_word)
         dial_cache_release();       /* the glass shows no dial now: give the PSRAM back */
         ctx->dream_clock_key = clock;
         ctx->dream_rim_key = rim;
+        ctx->dream_power_info_key = pinfo_key;
         ctx->rest_mode = mode;
         ctx->rest_view = view;
         diag_inc(&ctx->state_changes);
     } else if (ctx->rest_mode != mode || ctx->dream_clock_key != clock ||
                ctx->dream_rim_key != rim ||
+               ctx->dream_power_info_key != pinfo_key ||
                !jr_companion_view_equal(&ctx->rest_view, &view) ||
                brightness_pending()) {
         if (presenter_refresh(ctx)) {
             ctx->dream_clock_key = clock;
             ctx->dream_rim_key = rim;
+            ctx->dream_power_info_key = pinfo_key;
             ctx->rest_mode = mode;
             ctx->rest_view = view;
         }
@@ -11141,6 +11866,12 @@ static bool presenter_quiet_tick(jr_display_ctx_t *ctx, uint32_t *last_word)
                          (atomic_load_explicit(&s_timer_word, memory_order_acquire) * 1140071481u);
     const uint32_t caption = __atomic_load_n(&s_caption_revision, __ATOMIC_ACQUIRE);
     const uint32_t flush_errors = diag_load(&ctx->flush_errors);
+    const uint32_t facts =
+        (atomic_load_explicit(&s_inbox_slot, memory_order_acquire) * 2654435761u) ^
+        (atomic_load_explicit(&s_power_info_slot, memory_order_acquire) * 2246822519u) ^
+        (atomic_load_explicit(&s_dmode_slot, memory_order_acquire) * 3266489917u) ^
+        (atomic_load_explicit(&s_data_rev, memory_order_acquire) * 668265263u) ^
+        (home_wall_min_key() * 2862933555u);
     if (!ctx->quiet_active) {
         if (gfx_emote_lock(ctx->gfx) != ESP_OK) { return false; }
         if (!quiet_eligible(ctx) || request !=
@@ -11169,15 +11900,18 @@ static bool presenter_quiet_tick(jr_display_ctx_t *ctx, uint32_t *last_word)
         ctx->quiet_env_key = env;
         ctx->quiet_caption_key = caption;
         ctx->quiet_flush_error_key = flush_errors;
+        ctx->quiet_facts_key = facts;
         diag_inc(&ctx->segment_sets);
     } else if (ctx->quiet_clock_key != clock || ctx->quiet_env_key != env ||
                ctx->quiet_caption_key != caption ||
-               ctx->quiet_flush_error_key != flush_errors || brightness_pending()) {
+               ctx->quiet_flush_error_key != flush_errors ||
+               ctx->quiet_facts_key != facts || brightness_pending()) {
         if (presenter_refresh(ctx)) {
             ctx->quiet_clock_key = clock;
             ctx->quiet_env_key = env;
             ctx->quiet_caption_key = caption;
             ctx->quiet_flush_error_key = flush_errors;
+            ctx->quiet_facts_key = facts;
         }
     }
     *last_word = request;
@@ -12046,6 +12780,7 @@ static void display_task(void *arg)
 
             presenter_backdrop_tick(ctx);
             s_rest_day = watch_should_rest_still(ctx);
+            s_parked_still = data_screen_should_rest_still(ctx);
 
             if (presenter_dream_tick(ctx, &last_word)) {
                 /* The stopped emote yields to the minute clock. */
@@ -12414,6 +13149,7 @@ void jr_display_set_shell_state(bool shade_open, bool agent_active,
     if (previous == word) {
         return;
     }
+    data_rev_bump();
     /* THE STRAND. If the job ends while DESK is the screen under the owner's
      * eyes, the ring no longer admits DESK — so walk them one step forward,
      * to ACTIVITY, where what just finished is the newest row. Forward, not
@@ -12729,18 +13465,29 @@ void jr_display_space_set_label(jr_display_space_t space, const char *headline,
     if (space < JR_DISPLAY_SPACE_JARVIS || space >= JR_DISPLAY_SPACE_COUNT) {
         return;
     }
+    char prev_h[SP_LABEL_CAP], prev_n[SP_LABEL_CAP];
+    memcpy(prev_h, s_space_head[space], sizeof prev_h);
+    memcpy(prev_n, s_space_note[space], sizeof prev_n);
     sp_copy(s_space_head[space], headline);
     sp_copy(s_space_note[space], note);
+    if (memcmp(prev_h, s_space_head[space], sizeof prev_h) != 0 ||
+        memcmp(prev_n, s_space_note[space], sizeof prev_n) != 0) {
+        data_rev_bump();
+    }
     nav_wake();
 }
 
 void jr_display_jarvis_set_session(bool linked, uint16_t turns,
                                    uint32_t elapsed_s)
 {
+    const uint32_t word = (uint32_t)turns | (linked ? (1u << 16) : 0u);
+    const bool changed = diag_load(&s_jarvis_secs) != elapsed_s ||
+                         __atomic_load_n(&s_jarvis_word, __ATOMIC_ACQUIRE) != word;
     diag_store(&s_jarvis_secs, elapsed_s);
-    __atomic_store_n(&s_jarvis_word,
-                     (uint32_t)turns | (linked ? (1u << 16) : 0u),
-                     __ATOMIC_RELEASE);
+    __atomic_store_n(&s_jarvis_word, word, __ATOMIC_RELEASE);
+    if (changed) {
+        data_rev_bump();
+    }
 }
 
 void jr_display_desk_set_task(const char *task, uint8_t progress,
@@ -12752,12 +13499,50 @@ void jr_display_desk_set_task(const char *task, uint8_t progress,
     if (state < JR_DISPLAY_AGENT_NONE || state > JR_DISPLAY_AGENT_FAILED) {
         state = JR_DISPLAY_AGENT_NONE;
     }
+    char prev_t[SP_LABEL_CAP];
+    memcpy(prev_t, s_desk_task, sizeof prev_t);
     sp_copy(s_desk_task, task);
+    const uint32_t word = (uint32_t)progress | ((uint32_t)state << 8);
+    const uint32_t prev_w = __atomic_exchange_n(&s_desk_word, word, __ATOMIC_ACQ_REL);
     /* Release AFTER the text: a racing frame can read a stale word, never a
      * word that points at half-written characters. */
-    __atomic_store_n(&s_desk_word,
-                     (uint32_t)progress | ((uint32_t)state << 8),
-                     __ATOMIC_RELEASE);
+    if (prev_w != word || memcmp(prev_t, s_desk_task, sizeof prev_t) != 0) {
+        data_rev_bump();
+        nav_wake();
+    }
+}
+
+void jr_display_desk_set_steps(const char rows[3][20], const uint8_t leds[3], uint8_t count)
+{
+    if (count > 3u) {
+        count = 3u;
+    }
+    jr_desk_steps_snap_t next;
+    memset(&next, 0, sizeof next);
+    if (count > 0u) {
+        next.count = count;
+        for (uint8_t i = 0u; i < count; ++i) {
+            if (rows != NULL) {
+                size_t n = 0u;
+                for (; n < 19u && rows[i][n] != '\0'; ++n) {
+                    const unsigned char c = (unsigned char)rows[i][n];
+                    next.rows[i][n] = (c >= 0x20u && c <= 0x7Eu) ? (char)c : ' ';
+                }
+                next.rows[i][n] = '\0';
+            }
+            if (leds != NULL) {
+                next.leds[i] = leds[i] <= 4u ? leds[i] : 0u;
+            }
+        }
+    }
+    const uint32_t cur = atomic_load_explicit(&s_desk_steps_slot, memory_order_acquire);
+    if (memcmp(&s_desk_steps[cur & 1u], &next, sizeof next) == 0) {
+        return;
+    }
+    s_desk_steps[(cur + 1u) & 1u] = next;
+    atomic_store_explicit(&s_desk_steps_slot, cur + 1u, memory_order_release);
+    data_rev_bump();
+    nav_wake();
 }
 
 void jr_display_weather_set(const jr_display_weather_t *weather)
@@ -12779,6 +13564,7 @@ void jr_display_weather_set(const jr_display_weather_t *weather)
     /* The slot flips AFTER the copy: a racing frame reads the old weather
      * whole, never the new one half-written. */
     __atomic_store_n(&s_weather_slot, cur ^ 1u, __ATOMIC_RELEASE);
+    data_rev_bump();
     nav_wake();
 }
 
@@ -12896,6 +13682,7 @@ void jr_display_activity_push(const char *kind, const char *summary)
     n = n < (uint32_t)ACT_MAX ? n + 1u : n;
     __atomic_store_n(&s_act_count, n, __ATOMIC_RELEASE);
     act_rtc_save(n);
+    data_rev_bump();
     nav_wake();
 }
 
@@ -12913,8 +13700,36 @@ void jr_display_power_set(uint8_t percent, uint16_t millivolts,
         return;
     }
     __atomic_store_n(&s_power_word, word, __ATOMIC_RELEASE);
+    data_rev_bump();
     nav_wake();
 }
+
+void jr_display_power_info_set(bool care_enabled, bool care_holding,
+                               int32_t eta_min, int16_t rate_pct_x10_hr,
+                               int8_t pmic_die_c)
+{
+    jr_power_info_snap_t next = {
+        .care_enabled = care_enabled,
+        .care_holding = care_holding,
+        .eta_min = eta_min,
+        .rate_pct_x10_hr = rate_pct_x10_hr,
+        .pmic_die_c = pmic_die_c,
+    };
+    const uint32_t cur = atomic_load_explicit(&s_power_info_slot, memory_order_acquire);
+    const jr_power_info_snap_t *prev = &s_power_info[cur & 1u];
+    if (prev->care_enabled == next.care_enabled &&
+        prev->care_holding == next.care_holding &&
+        prev->eta_min == next.eta_min &&
+        prev->rate_pct_x10_hr == next.rate_pct_x10_hr &&
+        prev->pmic_die_c == next.pmic_die_c) {
+        return;
+    }
+    s_power_info[(cur + 1u) & 1u] = next;
+    atomic_store_explicit(&s_power_info_slot, cur + 1u, memory_order_release);
+    data_rev_bump();
+    nav_wake();
+}
+
 void jr_display_ota_set(jr_display_ota_state_t state, uint8_t percent,
                         uint8_t active_slot, uint8_t target_slot,
                         bool preflight_ok)
@@ -12933,12 +13748,14 @@ void jr_display_ota_set(jr_display_ota_state_t state, uint8_t percent,
     if (target_slot > 1U) {
         target_slot = (uint8_t)OTA_SLOT_NONE;
     }
-    __atomic_store_n(&s_ota_word,
-                     (uint32_t)state | ((uint32_t)percent << 8) |
-                         ((uint32_t)active_slot << 16) |
-                         ((uint32_t)target_slot << 20) |
-                         (preflight_ok ? (1u << 24) : 0u),
-                     __ATOMIC_RELEASE);
+    const uint32_t word =
+        (uint32_t)state | ((uint32_t)percent << 8) |
+        ((uint32_t)active_slot << 16) |
+        ((uint32_t)target_slot << 20) |
+        (preflight_ok ? (1u << 24) : 0u);
+    if (__atomic_exchange_n(&s_ota_word, word, __ATOMIC_ACQ_REL) != word) {
+        data_rev_bump();
+    }
     nav_wake();
 }
 
@@ -13005,6 +13822,7 @@ void jr_display_links_set(const jr_display_links_t *links)
         return;
     }
     __atomic_store_n(&s_links_word, word, __ATOMIC_RELEASE);
+    data_rev_bump();
     nav_wake();
 }
 
@@ -13016,8 +13834,10 @@ void jr_display_set_status(uint8_t volume, uint8_t brightness_cap)
     if (brightness_cap > 100U) {
         brightness_cap = 100U;
     }
-    __atomic_store_n(&s_status_word,
-                     (uint32_t)volume | ((uint32_t)brightness_cap << 8), __ATOMIC_RELEASE);
+    const uint32_t word = (uint32_t)volume | ((uint32_t)brightness_cap << 8);
+    if (__atomic_exchange_n(&s_status_word, word, __ATOMIC_ACQ_REL) != word) {
+        data_rev_bump();
+    }
 }
 
 void jr_display_timer_set(bool active, bool ringing, uint16_t rem_s,
@@ -13161,8 +13981,12 @@ void jr_display_desk_mode_set(uint8_t mode, uint32_t rem_s, uint8_t pct,
         }
         dst->label[n] = '\0';
     }
+    const bool changed = memcmp(&s_dmode[cur], dst, sizeof *dst) != 0;
     const uint32_t next_word = (cur ^ 1u) | (mode != 0u ? 2u : 0u);
     atomic_store_explicit(&s_dmode_slot, next_word, memory_order_release);
+    if (changed) {
+        data_rev_bump();
+    }
     nav_wake();
 }
 
@@ -13194,7 +14018,11 @@ void jr_display_inbox_set(const jr_display_inbox_item_t *items, size_t count, si
         dst->count = (uint8_t)count;
     }
     dst->open_count = (uint8_t)(open_count > 99u ? 99u : open_count);
+    const bool changed = memcmp(&s_inbox[cur], dst, sizeof *dst) != 0;
     atomic_store_explicit(&s_inbox_slot, cur ^ 1u, memory_order_release);
+    if (changed) {
+        data_rev_bump();
+    }
     nav_wake();
 }
 

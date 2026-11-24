@@ -739,6 +739,11 @@ void jr_display_jarvis_set_session(bool linked, uint16_t turns,
 void jr_display_desk_set_task(const char *task, uint8_t progress,
                               jr_display_agent_state_t state);
 
+/* Live multi-step checklist for Cortex DESK space (lock-free).
+ * leds[i]: 0=off, 1=pass(green), 2=working(violet), 3=wait(amber), 4=fail(red).
+ * count == 0 reverts DESK rows to default STATE/DONE/LINK summary. */
+void jr_display_desk_set_steps(const char rows[3][20], const uint8_t leds[3], uint8_t count);
+
 /* jr_display_tools_set() is gone with the TOOLS screen; see ACTIVITY. */
 
 /* ---- firmware update, shell-wide ----------------------------------------
@@ -819,6 +824,11 @@ void jr_display_ota_set(jr_display_ota_state_t state, uint8_t percent,
  * this setter only publishes bounded state. */
 void jr_display_power_set(uint8_t percent, uint16_t millivolts,
                           bool usb_present, bool charging);
+
+/* Live power/charging telemetry for Nightstand & Cortex STATUS (lock-free). */
+void jr_display_power_info_set(bool care_enabled, bool care_holding,
+                               int32_t eta_min, int16_t rate_pct_x10_hr,
+                               int8_t pmic_die_c);
 
 /* The device's connections, for STATUS: what the glass can be trusted to say
  * about the outside world. Any task, lock-free, no allocation: the IP lands

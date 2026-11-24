@@ -44,50 +44,55 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+import jarvisctl  # noqa: E402
+
+REPO = os.path.dirname(HERE)
 TOUCH_SRC = os.path.join(REPO, "components", "jr_hal", "src", "input_touch.c")
 HUD_SRC = os.path.join(REPO, "components", "jr_display", "src", "hud_render.c")
+DISPLAY_PORT_HDR = os.path.join(REPO, "components", "jr_ports", "include", "jr_ports", "display.h")
 KEYCHAIN_SERVICE = "com.ingeniousdigital.jarvisnano.desk"
 
-FACES = [
+_FALLBACK_FACES = [
     "IDLE", "LISTENING", "THINKING", "SPEAKING", "ERROR",
     "RESTING", "MUTED", "LINKING",
     "DIAL_DIVER", "DIAL_DRESS", "DIAL_PILOT", "DIAL_FUTURE",
-    "DIAL_SKELETON", "DIAL_CELESTIAL",
+    "DIAL_SKELETON", "DIAL_CELESTIAL", "DIAL_ORRERY", "DIAL_REACTOR",
 ]
+
+
+def faces_from_header(repo_root: str = REPO) -> list[str]:
+    """Parse jr_face_t enum order directly from jr_ports/display.h."""
+    hdr = os.path.join(repo_root, "components", "jr_ports", "include", "jr_ports", "display.h")
+    try:
+        with open(hdr, encoding="utf-8", errors="replace") as fh:
+            src = fh.read()
+    except OSError:
+        return list(_FALLBACK_FACES)
+    end = src.find("} jr_face_t;")
+    if end < 0:
+        return list(_FALLBACK_FACES)
+    start = src.rfind("typedef enum {", 0, end)
+    if start < 0:
+        return list(_FALLBACK_FACES)
+    block = re.sub(r"/\*.*?\*/", "", src[start:end], flags=re.S)
+    block = re.sub(r"//.*", "", block)
+    names = re.findall(r"\bJR_FACE_([A-Z0-9_]+)\b", block)
+    faces = [n for n in names if n != "COUNT"]
+    return faces if faces else list(_FALLBACK_FACES)
+
+
+FACES = faces_from_header(REPO)
 
 OK, WARN, BAD = "ok  ", "WARN", "FAIL"
 
 
 def _pairing_token(base: str) -> str | None:
-    """Best-effort paired token lookup so /api/cockpit mood check works when paired."""
-    account = "jarvis-desk@" + urllib.parse.urlsplit(base).netloc
-    try:
-        res = subprocess.run(
-            ["security", "find-generic-password", "-a", account,
-             "-s", KEYCHAIN_SERVICE, "-w"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, check=False,
-        )
-    except (FileNotFoundError, OSError):
-        res = None
-    if res is not None and res.returncode == 0:
-        tok = res.stdout.rstrip("\r\n")
-        if 32 <= len(tok.encode("utf-8")) <= 64:
-            return tok
-    if sys.platform == "win32":
-        import winreg
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                                r"Software\JarvisNano\Desk") as key:
-                tok, kind = winreg.QueryValueEx(key, account)
-            if kind == winreg.REG_SZ and 32 <= len(tok.encode("utf-8")) <= 64:
-                return tok
-        except OSError:
-            pass
-    tok = (os.environ.get("JARVIS_PAIRING_TOKEN")
-           or os.environ.get("JARVIS_DESK_TOKEN") or "")
-    return tok or None
+    """Best-effort paired token lookup via shared jarvisctl resolver."""
+    return jarvisctl.load_pairing_token(base)
 
 
 def get(base: str, path: str, timeout: float = 8.0, retries: int = 3,
@@ -389,21 +394,44 @@ def run(base: str) -> int:
     return worst
 
 
+def run_static() -> int:
+    """Run source-tree threshold and design-invariant checks without needing a device."""
+    print(f"gesture-doctor --static ({len(FACES)} faces parsed from display.h)\n")
+    sections = [
+        ("classifier thresholds (source of truth: the tree)", check_thresholds),
+        ("design invariants (comments that must stay true)", check_invariants),
+    ]
+    worst = 0
+    for title, fn in sections:
+        print(f"── {title}")
+        for line in fn():
+            print("  " + line)
+            if line.startswith(BAD):
+                worst = 2
+            elif line.startswith(WARN):
+                worst = max(worst, 1)
+        print()
+    print("verdict:", ["healthy", "warnings", "DEFECT FOUND"][worst])
+    return worst
+
+
 def main() -> int:
     # The report draws box rules (U+2500). A Windows console defaults to
     # cp1252 and Python then dies with UnicodeEncodeError on the first one —
     # the doctor crashed before printing a single check (2026-09-05).
-    for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8", errors="replace")
+    jarvisctl.ensure_utf8_console()
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default=os.environ.get("JARVIS_DEVICE_HOST", ""),
                     help="device IP or host (or set JARVIS_DEVICE_HOST)")
+    ap.add_argument("--static", action="store_true",
+                    help="run source-tree threshold & design-invariant checks offline (no --host required)")
     ap.add_argument("--watch", action="store_true",
                     help="re-run every 10 s so you can touch the glass and watch "
                          "the counters move")
     args = ap.parse_args()
+    if args.static:
+        return run_static()
     if not args.host:
         print("set JARVIS_DEVICE_HOST or pass --host (the address is on the "
               "device's STATUS screen, or in your router's client list as "

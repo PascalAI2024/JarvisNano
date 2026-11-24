@@ -610,6 +610,7 @@ void activity_note_tool(const char *tool_name, const char *args_json)
         else if (strcmp(tool_name, "daily_briefing") == 0) kind = "BRIEFING";
         else if (strcmp(tool_name, "set_ui_sounds") == 0) kind = "SOUNDS";
         else if (strcmp(tool_name, "set_sunlight") == 0) kind = "SUNLIGHT";
+        else if (strcmp(tool_name, "set_battery_care") == 0) kind = "POWER";
         else if (strcmp(tool_name, "set_glass") == 0) kind = "GLASS";
         else if (strcmp(tool_name, "device_status") == 0) kind = "STATUS";
     }
@@ -753,6 +754,9 @@ bool device_parse_glass_screen(const char *s, jr_display_space_t *out)
     }
     if (strcasecmp(s, "status") == 0) {
         *out = JR_DISPLAY_SPACE_STATUS; return true;
+    }
+    if (strcasecmp(s, "desk") == 0) {
+        *out = JR_DISPLAY_SPACE_DESK; return true;
     }
     if (strcasecmp(s, "activity") == 0) {
         *out = JR_DISPLAY_SPACE_ACTIVITY; return true;
@@ -1129,6 +1133,7 @@ void device_stopwatch_tick(uint32_t now_ms)
 #define HBM_AUTO_REVERT_MS   300000U   /* 5 minutes */
 #define HBM_MIN_BATTERY_PCT  25U       /* refused off USB below 25% */
 #define HBM_MAX_CHIP_C       65.0f     /* refused above 65 C */
+#define HBM_MAX_PMIC_C       65        /* refused above 65 C PMIC die temp */
 
 static _Atomic uint32_t s_hbm_expires_ms;
 
@@ -1160,6 +1165,16 @@ bool device_sunlight_set(bool enabled, uint32_t now_ms, const char **out_reason)
         ESP_LOGW(TAG, "hbm: refused (chip %.1f C > 65 C)", (double)chip_c);
         return false;
     }
+    jr_power_care_status_t care = {0};
+    jr_power_care_status(&care);
+    if (care.pmic_die_c != (int8_t)-128 && (int)care.pmic_die_c > HBM_MAX_PMIC_C) {
+        if (out_reason != NULL) {
+            *out_reason = "thermal_high";
+        }
+        ESP_LOGW(TAG, "hbm: refused (pmic %d C > %d C)",
+                 (int)care.pmic_die_c, HBM_MAX_PMIC_C);
+        return false;
+    }
     uint32_t exp = now_ms + HBM_AUTO_REVERT_MS;
     if (exp == 0U) {
         exp = 1U;
@@ -1184,8 +1199,13 @@ void device_sunlight_tick(uint32_t now_ms, const jr_power_t *bat, bool have_bat)
         why = "battery <25% off USB";
     } else {
         float chip_c = 0.0f;
+        jr_power_care_status_t care = {0};
+        jr_power_care_status(&care);
         if (device_chip_temp_c(&chip_c) && chip_c > HBM_MAX_CHIP_C) {
             why = "chip >65 C";
+        } else if (care.pmic_die_c != (int8_t)-128 &&
+                   (int)care.pmic_die_c > HBM_MAX_PMIC_C) {
+            why = "pmic >65 C";
         }
     }
     if (why != NULL) {
@@ -1259,11 +1279,12 @@ bool device_try_local_tool(const jr_command_t *cmd)
     const bool briefing     = strcmp(cmd->tool_name, "daily_briefing") == 0;
     const bool ui_sounds    = strcmp(cmd->tool_name, "set_ui_sounds") == 0;
     const bool sunlight     = strcmp(cmd->tool_name, "set_sunlight") == 0;
+    const bool bat_care     = strcmp(cmd->tool_name, "set_battery_care") == 0;
     if (!weather && !clock_tool && !set_timer && !cancel_timer &&
         !list_timers && !set_glass && !dev_status && !start_focus &&
         !set_desk && !start_breath && !sw_tool && !add_note &&
         !list_notes && !comp_note && !clear_notes &&
-        !briefing && !ui_sounds && !sunlight) {
+        !briefing && !ui_sounds && !sunlight && !bat_care) {
         return false;
     }
     local_tool_result_t *slot = device_tool_queue_slot(
@@ -1460,8 +1481,22 @@ bool device_try_local_tool(const jr_command_t *cmd)
         const bool muted = atomic_load(&s_voice_privacy_paused) || s_flip_muted;
         desk_mode_snap_t ds = {0};
         desk_mode_snapshot(&ds);
+        jr_power_care_status_t care = {0};
+        jr_power_care_status(&care);
+        jr_power_analytics_t ana = {0};
+        app_power_analytics_get(&ana);
+        const int32_t eta_min = (have_bat && bat.usb_present)
+            ? ana.eta_full_min : ana.eta_empty_min;
+        char pmic_c_str[12];
+        if (care.pmic_die_c != (int8_t)-128) {
+            snprintf(pmic_c_str, sizeof pmic_c_str, "%d", (int)care.pmic_die_c);
+        } else {
+            strlcpy(pmic_c_str, "null", sizeof pmic_c_str);
+        }
         (void)snprintf(out, cap,
             "{\"battery_pct\":%d,\"charging\":%s,\"usb\":%s,"
+            "\"care_enabled\":%s,\"care_holding\":%s,\"pmic_die_c\":%s,"
+            "\"eta_min\":%d,\"rate_pct_hr\":%.1f,"
             "\"wifi_rssi\":%d,\"chip_temp_c\":%d,\"volume\":%d,"
             "\"brightness\":%u,\"watch_style\":\"%s\",\"screen\":\"%s\","
             "\"desk_mode\":\"%s\",\"muted\":%s,\"hbm\":%s,\"holo\":%s,\"ui_sounds\":%s,"
@@ -1469,6 +1504,11 @@ bool device_try_local_tool(const jr_command_t *cmd)
             batt_pct,
             (have_bat && bat.charging) ? "true" : "false",
             (have_bat && bat.usb_present) ? "true" : "false",
+            care.enabled ? "true" : "false",
+            care.holding ? "true" : "false",
+            pmic_c_str,
+            (int)eta_min,
+            (double)ana.rate_pct_x10_hr / 10.0,
             have_net ? (int)net.rssi : 0,
             have_temp ? (int)lroundf(temp_c) : 0,
             s_out_vol,
@@ -1838,8 +1878,65 @@ bool device_try_local_tool(const jr_command_t *cmd)
                     "{\"error\":{\"code\":\"%s\",\"message\":\"%s\"}}",
                     reason,
                     strcmp(reason, "thermal_high") == 0
-                        ? "Sunlight boost refused: chip temperature is above 65 C."
+                        ? "Sunlight boost refused: chip or PMIC temperature is above 65 C."
                         : "Sunlight boost refused: battery is below 25 percent off USB.");
+            }
+        }
+        cJSON_Delete(args);
+    } else if (bat_care) {
+        cJSON *args = cJSON_Parse(cmd->tool_args ? cmd->tool_args : "{}");
+        const cJSON *en_item = cJSON_GetObjectItemCaseSensitive(args, "enable");
+        if (en_item == NULL) {
+            en_item = cJSON_GetObjectItemCaseSensitive(args, "enabled");
+        }
+        bool enable = false;
+        bool ok_arg = json_get_bool_opt(en_item, &enable);
+        if (!ok_arg) {
+            const cJSON *mode_item = cJSON_GetObjectItemCaseSensitive(args, "mode");
+            if (cJSON_IsString(mode_item) && mode_item->valuestring) {
+                if (strcasecmp(mode_item->valuestring, "desk_care") == 0 ||
+                    strcasecmp(mode_item->valuestring, "desk") == 0 ||
+                    strcasecmp(mode_item->valuestring, "care") == 0 ||
+                    strcasecmp(mode_item->valuestring, "80") == 0) {
+                    enable = true;
+                    ok_arg = true;
+                } else if (strcasecmp(mode_item->valuestring, "full") == 0 ||
+                           strcasecmp(mode_item->valuestring, "travel") == 0 ||
+                           strcasecmp(mode_item->valuestring, "100") == 0 ||
+                           strcasecmp(mode_item->valuestring, "off") == 0) {
+                    enable = false;
+                    ok_arg = true;
+                }
+            }
+        }
+        if (!ok_arg) {
+            slot->status = JR_TOOL_STATUS_INVALID_ARGS;
+            (void)snprintf(out, cap,
+                "{\"error\":{\"code\":\"invalid_arg\",\"message\":"
+                "\"Provide boolean enable (true for 80 percent Desk Care, false for 100 percent Full).\"}}");
+        } else {
+            const esp_err_t err = app_set_battery_care(enable);
+            if (err != ESP_OK) {
+                slot->status = JR_TOOL_STATUS_INTERNAL_ERROR;
+                (void)snprintf(out, cap,
+                    "{\"error\":{\"code\":\"pmic_unavailable\",\"message\":\"%s\"}}",
+                    esp_err_to_name(err));
+            } else {
+                jr_power_care_status_t care = {0};
+                jr_power_care_status(&care);
+                jr_mood_poke_awake(&s_mood, now_ms);
+                jr_display_caption_set(enable ? "DESK CARE 80% ON"
+                                              : "FULL CHARGE 100%");
+                (void)snprintf(out, cap,
+                    "{\"ok\":true,\"care_enabled\":%s,\"holding\":%s,"
+                    "\"cv_mv\":%u,\"icc_ma\":%u}",
+                    care.enabled ? "true" : "false",
+                    care.holding ? "true" : "false",
+                    (unsigned)care.cv_mv,
+                    (unsigned)care.icc_ma);
+                ESP_LOGI(TAG, "local tool=set_battery_care enable=%d hold=%d cv=%u",
+                         enable ? 1 : 0, care.holding ? 1 : 0,
+                         (unsigned)care.cv_mv);
             }
         }
         cJSON_Delete(args);

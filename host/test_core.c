@@ -50,6 +50,7 @@ extern void notes_tests_run(void);
 extern void audio_power_tests_run(void);
 extern void spectrum_tests_run(void);
 extern void power_charge_tests_run(void);
+extern void power_analytics_tests_run(void);
 
 /* ---- shared fixtures ---- */
 static jr_clock_t g_clk;
@@ -1943,6 +1944,7 @@ int main(void)
     jitter_tests_run();
     audio_power_tests_run();
     power_charge_tests_run();
+    power_analytics_tests_run();
 
     /* What a tone may do to the speaker's mute state, and the interface cues. */
     cue_tests_run();

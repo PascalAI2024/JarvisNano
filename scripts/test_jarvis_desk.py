@@ -845,7 +845,7 @@ class SendCanvasTests(unittest.TestCase):
     @unittest.skipUnless(importlib.util.find_spec("PIL"), "Pillow not installed")
     def test_banner_renders_valid_466_rgb565_for_all_accents(self) -> None:
         expected_len = send_canvas.SIZE * send_canvas.SIZE * 2
-        for accent in ("cyan", "violet", "amber", "mint"):
+        for accent in ("cyan", "violet", "amber", "mint", "crimson"):
             raw = send_canvas.banner_to_rgb565(
                 "IN A MEETING", sub="Available at 2:30 PM", accent=accent
             )
@@ -854,6 +854,522 @@ class SendCanvasTests(unittest.TestCase):
             self.assertEqual(raw[0:2], b"\x00\x00")
             # Frame must contain visible luminous pixels
             self.assertTrue(any(b != 0 for b in raw))
+
+
+class DeskHttpErrorDetailTests(unittest.TestCase):
+    def _http_error(self, code: int, body: bytes) -> desk.urllib.error.HTTPError:
+        return desk.urllib.error.HTTPError(
+            "http://192.0.2.10/api/ota/upload",
+            code,
+            "Err",
+            hdrs=None,  # type: ignore[arg-type]
+            fp=io.BytesIO(body),
+        )
+
+    def test_post_binary_preserves_sanitized_503_ota_preflight_reason(self) -> None:
+        secret = "s" * 32
+        reason = b"connect power or charge battery above 30 percent (tok " + secret.encode() + b")"
+        err = self._http_error(503, reason)
+        client = desk.DeviceClient("http://192.0.2.10", 5.0, opener=lambda *_a, **_k: (_ for _ in ()).throw(err))
+        with self.assertRaises(desk.DeskError) as raised:
+            client.post_binary("/api/ota/upload", b"bin", token=secret)
+        exc = raised.exception
+        self.assertEqual(exc.http_status, 503)
+        self.assertIn("connect power or charge battery above 30 percent", exc.message)
+        self.assertNotIn(secret, exc.message)
+        payload = exc.as_payload()
+        self.assertIn("connect power or charge battery above 30 percent", payload["error"]["detail"])
+        self.assertNotIn(secret, json.dumps(payload))
+
+    def test_409_422_preserve_json_error_and_401_suppresses_body(self) -> None:
+        err422 = self._http_error(422, b'{"ok":false,"error":"invalid bounded brain envelope"}')
+        c422 = desk.DeviceClient("http://192.0.2.10", 5.0, opener=lambda *_a, **_k: (_ for _ in ()).throw(err422))
+        with self.assertRaises(desk.DeskError) as r422:
+            c422.post("/api/brain/inbox", {}, token="t" * 32)
+        self.assertIn("invalid bounded brain envelope", r422.exception.message)
+
+        err401 = self._http_error(401, b"sensitive-proxy-echo")
+        c401 = desk.DeviceClient("http://192.0.2.10", 5.0, opener=lambda *_a, **_k: (_ for _ in ()).throw(err401))
+        with self.assertRaises(desk.DeskError) as r401:
+            c401.get("/api/cockpit", token="t" * 32)
+        self.assertNotIn("sensitive-proxy-echo", r401.exception.message)
+        self.assertIsNone(r401.exception.detail)
+
+
+def _load_script(name: str, filename: str) -> ModuleType:
+    path = Path(__file__).with_name(filename)
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class ToolingFixesTests(unittest.TestCase):
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "Pillow not installed")
+    def test_rgb565_to_pil_decodes_exact_channels(self) -> None:
+        import struct
+        raw = struct.pack(">4H", 0xF800, 0x07E0, 0x001F, 0x0000)
+        img = ctl.rgb565_to_pil(raw, 2, 2, big_endian=True)
+        self.assertEqual(img.getpixel((0, 0)), (255, 0, 0))
+        self.assertEqual(img.getpixel((1, 0)), (0, 255, 0))
+        self.assertEqual(img.getpixel((0, 1)), (0, 0, 255))
+        self.assertEqual(img.getpixel((1, 1)), (0, 0, 0))
+
+    def test_live_device_get_bytes_attaches_pairing_token(self) -> None:
+        live = _load_script("live_device_test", "live-device.py")
+        secret = "k" * 32
+        captured: list[Any] = []
+
+        class Resp:
+            status = 200
+            headers = {"Content-Type": "application/octet-stream"}
+
+            def __enter__(self) -> "Resp":
+                return self
+
+            def __exit__(self, *_a: Any) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b"DATA"
+
+        def fake_open(req: Any, timeout: float = 4.0) -> Resp:
+            captured.append(req)
+            return Resp()
+
+        with patch.object(live, "load_pairing_token", return_value=secret), \
+             patch.object(live.urllib.request, "urlopen", side_effect=fake_open):
+            dev = live.Device("device.local", 4.0)
+            code, _, body = dev.get_bytes("/api/display/snapshot.rgb565")
+        self.assertEqual(code, 200)
+        self.assertEqual(body, b"DATA")
+        self.assertEqual(captured[0].get_header("X-jarvisnano-token"), secret)
+
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "Pillow not installed")
+    def test_live_device_convert_ppm_and_rgb565_with_pil(self) -> None:
+        import struct
+        live = _load_script("live_device_pil_test", "live-device.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            ppm = Path(tmp) / "frame.ppm"
+            ppm.write_bytes(TWO_BY_TWO_PPM)
+            with patch.object(live.shutil, "which", return_value=None):
+                png = live.convert_ppm_to_png(str(ppm))
+            self.assertIsNotNone(png)
+            assert png is not None
+            self.assertTrue(Path(png).read_bytes().startswith(b"\x89PNG"))
+
+            rgb = Path(tmp) / "frame.rgb565"
+            rgb.write_bytes(struct.pack(">4H", 0xF800, 0x07E0, 0x001F, 0xFFFF))
+            with patch.object(live.shutil, "which", return_value=None):
+                png2 = live.convert_ppm_to_png(str(rgb))
+            self.assertIsNotNone(png2)
+            assert png2 is not None
+            self.assertTrue(Path(png2).read_bytes().startswith(b"\x89PNG"))
+
+    def test_gesture_doctor_parses_faces_including_orrery_and_reactor(self) -> None:
+        gd = _load_script("gesture_doctor_test", "gesture-doctor.py")
+        self.assertGreaterEqual(len(gd.FACES), 16)
+        self.assertEqual(gd.FACES[14], "DIAL_ORRERY")
+        self.assertEqual(gd.FACES[15], "DIAL_REACTOR")
+        # Fallback list also includes both dials if header is absent
+        with tempfile.TemporaryDirectory() as tmp:
+            fallback = gd.faces_from_header(tmp)
+            self.assertEqual(fallback[14], "DIAL_ORRERY")
+            self.assertEqual(fallback[15], "DIAL_REACTOR")
+
+    def test_usb_monitor_windows_pyserial_detect_and_no_reset_open(self) -> None:
+        usb = _load_script("usb_monitor_test", "usb-monitor.py")
+        events: list[str] = []
+
+        class FakeSerial:
+            def __init__(self, **kwargs: Any) -> None:
+                self.kwargs = kwargs
+                self.port = kwargs.get("port")
+                self._dtr = True
+                self._rts = True
+
+            @property
+            def dtr(self) -> bool:
+                return self._dtr
+
+            @dtr.setter
+            def dtr(self, val: bool) -> None:
+                self._dtr = val
+                events.append(f"dtr={val}")
+
+            @property
+            def rts(self) -> bool:
+                return self._rts
+
+            @rts.setter
+            def rts(self, val: bool) -> None:
+                self._rts = val
+                events.append(f"rts={val}")
+
+            def open(self) -> None:
+                events.append(f"open:{self.port}")
+
+        fake_serial = ModuleType("serial")
+        fake_serial.Serial = FakeSerial  # type: ignore[attr-defined]
+        fake_tools = ModuleType("serial.tools")
+        fake_lp = ModuleType("serial.tools.list_ports")
+        fake_lp.comports = lambda: [  # type: ignore[attr-defined]
+            SimpleNamespace(device="COM3", vid=0x1234, description="Other"),
+            SimpleNamespace(device="COM7", vid=0x303A, description="USB JTAG/serial debug unit"),
+        ]
+        fake_tools.list_ports = fake_lp  # type: ignore[attr-defined]
+        fake_serial.tools = fake_tools  # type: ignore[attr-defined]
+
+        with patch.dict(sys.modules, {
+            "serial": fake_serial,
+            "serial.tools": fake_tools,
+            "serial.tools.list_ports": fake_lp,
+        }):
+            detected = usb.detect_port_pyserial()
+            self.assertEqual(detected, "COM7")
+            ser = usb.open_pyserial("COM7", 115200)
+        self.assertFalse(ser.kwargs["dsrdtr"])
+        self.assertFalse(ser.kwargs["rtscts"])
+        # DTR and RTS must be set False BEFORE open()
+        open_idx = events.index("open:COM7")
+        self.assertIn("dtr=False", events[:open_idx])
+        self.assertIn("rts=False", events[:open_idx])
+
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "Pillow not installed")
+    def test_screens_rgb565_grab_and_markdown_table(self) -> None:
+        import struct
+        sc = _load_script("screens_test", "screens.py")
+        raw = struct.pack(">4H", 0xF800, 0x07E0, 0x001F, 0x0000)
+        hdrs = {"X-Jarvis-Display-Width": "2", "X-Jarvis-Display-Height": "2"}
+        with patch.object(sc, "_req", return_value=(hdrs, raw)):
+            img = sc.grab("device.local", retries=1)
+        self.assertIsNotNone(img)
+        assert img is not None
+        self.assertEqual(img.size, (2, 2))
+        self.assertEqual(img.getpixel((0, 0)), (255, 0, 0))
+
+        md = sc.format_markdown_table([{
+            "name": "HOME",
+            "metrics": {
+                "space": 0, "fps": 22, "frame_ms": 18.4,
+                "top_layer": "hud", "top_layer_ms": 11.2,
+                "layer_us": [0, 0, 11200, 1100, 0],
+            },
+        }])
+        self.assertIn("| HOME | 0 | 22 | 18.4 | hud (11.2ms) |", md)
+
+
+class CodexAndWorkbenchTests(unittest.TestCase):
+    def test_sanitize_glass_text_enforces_firmware_rules(self) -> None:
+        s = ctl.sanitize_glass_text("Deploy https://evil.test <script> — v3.6!", 24)
+        self.assertLessEqual(len(s), 24)
+        self.assertNotIn("http", s.lower())
+        self.assertNotIn("<", s)
+        self.assertIn("Deploy", s)
+
+    def test_ask_consent_wait_allow_deny_and_timeout(self) -> None:
+        posted: list[dict[str, Any]] = []
+        session_id = "desk-test-session"
+
+        def fake_post(path: str, payload: dict[str, Any], timeout: float = 10.0) -> dict[str, Any]:
+            posted.append(payload)
+            return {"ok": True}
+
+        # 1. Allow -> exit 0
+        polls = iter([
+            {"next_after": 10, "next_inbox_seq": 5, "events": []},
+            {
+                "next_after": 11,
+                "next_inbox_seq": 6,
+                "events": [{
+                    "v": 1, "seq": 11, "type": "surface.action",
+                    "session": session_id, "id": "placeholder",
+                    "payload": {"action_id": "allow", "ts_ms": 999},
+                }],
+            },
+        ])
+
+        def fake_get_allow(path: str, timeout: int = 10) -> dict[str, Any]:
+            item = next(polls)
+            if posted and item["events"]:
+                item["events"][0]["id"] = posted[0]["id"]
+            return item
+
+        out = io.StringIO()
+        with patch.object(ctl, "_stable_session_id", return_value=session_id), \
+             patch.object(ctl, "get_json", side_effect=fake_get_allow), \
+             patch.object(ctl, "post_json", side_effect=fake_post), \
+             patch.object(ctl.time, "sleep", lambda _: None), \
+             patch.object(sys, "stdout", out):
+            rc = ctl.cmd_ask(["Ship release?", "--consent", "--wait", "--json"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(posted[0]["payload"]["kind"], "consent")
+        self.assertEqual([a["id"] for a in posted[0]["payload"]["actions"]], ["deny", "allow"])
+        self.assertEqual(json.loads(out.getvalue())["action_id"], "allow")
+
+        # 2. Deny -> exit 1
+        posted.clear()
+        polls_deny = iter([
+            {"next_after": 11, "next_inbox_seq": 6, "events": []},
+            {
+                "next_after": 12,
+                "next_inbox_seq": 7,
+                "events": [{
+                    "v": 1, "seq": 12, "type": "surface.action",
+                    "session": session_id, "id": "placeholder",
+                    "payload": {"action_id": "deny", "ts_ms": 1000},
+                }],
+            },
+        ])
+
+        def fake_get_deny(path: str, timeout: int = 10) -> dict[str, Any]:
+            item = next(polls_deny)
+            if posted and item["events"]:
+                item["events"][0]["id"] = posted[0]["id"]
+            return item
+
+        with patch.object(ctl, "_stable_session_id", return_value=session_id), \
+             patch.object(ctl, "get_json", side_effect=fake_get_deny), \
+             patch.object(ctl, "post_json", side_effect=fake_post), \
+             patch.object(ctl.time, "sleep", lambda _: None), \
+             patch.object(sys, "stdout", io.StringIO()):
+            rc = ctl.cmd_ask(["Ship release?", "--consent", "--wait"])
+        self.assertEqual(rc, 1)
+
+        # 3. Timeout -> dismiss + exit 124
+        posted.clear()
+        ticks = iter([0.0, 0.5, 5.0])
+        with patch.object(ctl, "_stable_session_id", return_value=session_id), \
+             patch.object(ctl, "get_json", return_value={"next_after": 12, "next_inbox_seq": 7, "events": []}), \
+             patch.object(ctl, "post_json", side_effect=fake_post), \
+             patch.object(ctl.time, "monotonic", side_effect=lambda: next(ticks, 99.0)), \
+             patch.object(ctl.time, "sleep", lambda _: None), \
+             patch.object(sys, "stderr", io.StringIO()):
+            rc = ctl.cmd_ask(["Timeout test", "--ttl", "1", "--wait"])
+        self.assertEqual(rc, 124)
+        self.assertEqual(posted[-1]["type"], "surface.dismiss")
+
+    def test_run_streams_updates_agent_link_and_posts_result(self) -> None:
+        api_calls: list[str] = []
+        json_posts: list[tuple[str, dict[str, Any]]] = []
+        rev = [1]
+
+        def fake_api(path: str, method: str = "GET", body: bytes | None = None, timeout: int = 10) -> bytes:
+            api_calls.append(f"{method} {path}")
+            return b'{"ok":true}'
+
+        def fake_get(path: str, timeout: int = 10) -> dict[str, Any]:
+            if path == "/api/agent/link":
+                return {"active": True, "next_revision": rev[0]}
+            return {"next_after": 1, "next_inbox_seq": 3, "events": []}
+
+        def fake_post(path: str, payload: dict[str, Any], timeout: float = 10.0) -> dict[str, Any]:
+            json_posts.append((path, payload))
+            if path == "/api/agent/link":
+                rev[0] += 1
+            return {"ok": True}
+
+        out = io.StringIO()
+        with patch.object(ctl, "api", side_effect=fake_api), \
+             patch.object(ctl, "get_json", side_effect=fake_get), \
+             patch.object(ctl, "post_json", side_effect=fake_post), \
+             patch.object(ctl, "_stable_session_id", return_value="desk-test"), \
+             patch.object(sys, "stdout", out):
+            rc = ctl.cmd_run([
+                "--title", "UnitRun",
+                "--takeover",
+                "--",
+                sys.executable, "-c",
+                "print('[1/2] Compile'); print('[2/2] Verify')",
+            ])
+        self.assertEqual(rc, 0)
+        self.assertIn("[1/2] Compile", out.getvalue())
+        self.assertIn("POST /api/glass?screen=desk", api_calls)
+        self.assertIn("POST /api/operator/lease?ttl=120&mode=codex", api_calls)
+        self.assertIn("POST /api/operator/lease?release=1", api_calls)
+        link_posts = [p for path, p in json_posts if path == "/api/agent/link"]
+        self.assertGreaterEqual(len(link_posts), 2)
+        self.assertEqual(link_posts[-1]["state"], "succeeded")
+        self.assertEqual(link_posts[-1]["progress"], 100)
+        # Firmware requires evidence items with keys "label" and "state"
+        for item in link_posts[-1].get("evidence", []):
+            self.assertEqual(set(item.keys()), {"label", "state"})
+        result_posts = [p for path, p in json_posts if path == "/api/brain/inbox"]
+        self.assertEqual(len(result_posts), 1)
+        self.assertEqual(result_posts[0]["payload"]["kind"], "result")
+        self.assertTrue(result_posts[0]["payload"]["title"].startswith("PASS:"))
+
+    def test_agent_post_maps_aliases_and_validates_steps(self) -> None:
+        posted: list[dict[str, Any]] = []
+        with patch.object(ctl, "get_json", return_value={"next_revision": 4}), \
+             patch.object(ctl, "post_json", side_effect=lambda _p, body, **_k: (posted.append(body), {"ok": True})[1]), \
+             patch.object(sys, "stdout", io.StringIO()):
+            rc = ctl.cmd_agent([
+                "post", "--title", "Deploy", "--state", "complete",
+                "--summary", "All green", "--step", "Tests:pass", "--step", "Flash:working",
+            ])
+        self.assertEqual(rc, 0)
+        self.assertEqual(posted[0]["state"], "succeeded")
+        self.assertEqual(posted[0]["progress"], 100)
+        self.assertEqual(posted[0]["revision"], 4)
+        self.assertEqual(
+            posted[0]["evidence"],
+            [{"label": "Tests", "state": "pass"}, {"label": "Flash", "state": "working"}],
+        )
+
+    def test_mode_and_inbox_commands(self) -> None:
+        out = io.StringIO()
+        with patch.object(ctl, "get_json", return_value={"active": True, "mode": "codex", "owner": "codex", "ttl_ms": 112000}), \
+             patch.object(sys, "stdout", out):
+            self.assertEqual(ctl.cmd_mode([]), 0)
+        self.assertIn("active", out.getvalue())
+        self.assertIn("112.0s", out.getvalue())
+
+        notes_doc = {
+            "count": 2,
+            "max": 6,
+            "notes": [
+                {"id": 1, "text": "Buy milk", "done": False, "tag": "life"},
+                {"id": 2, "text": "Refactor OTA", "done": False, "tag": "work"},
+                {"id": 3, "text": "Old task", "done": True, "tag": "work"},
+            ],
+        }
+        out2 = io.StringIO()
+        with patch.object(ctl, "get_json", return_value=notes_doc), \
+             patch.object(sys, "stdout", out2):
+            self.assertEqual(ctl.cmd_inbox(["--tag", "work"]), 0)
+        self.assertIn("Refactor OTA", out2.getvalue())
+        self.assertNotIn("Buy milk", out2.getvalue())
+
+        # Marking already-done note #3 must be idempotent (no toggle POST)
+        toggled: list[str] = []
+        with patch.object(ctl, "get_json", return_value=notes_doc), \
+             patch.object(ctl, "api", side_effect=lambda p, *_a, **_k: (toggled.append(p), b'{"ok":true}')[1]), \
+             patch.object(sys, "stdout", io.StringIO()):
+            self.assertEqual(ctl.cmd_inbox(["--done", "3"]), 0)
+            self.assertEqual(toggled, [])
+            self.assertEqual(ctl.cmd_inbox(["--done", "2"]), 0)
+            self.assertEqual(toggled, ["/api/notes?toggle=2"])
+
+    def test_power_care_and_telemetry_render(self) -> None:
+        called: list[str] = []
+        resp = b'{"ok":true,"care_enabled":true,"holding":true,"cv_mv":4100,"icc_ma":500,"thermal_throttle":false,"thermal_pause":false}'
+        out = io.StringIO()
+        with patch.object(ctl, "api", side_effect=lambda p, *_a, **_k: (called.append(p), resp)[1]), \
+             patch.object(sys, "stdout", out):
+            self.assertEqual(ctl.cmd_power(["--care", "on"]), 0)
+        self.assertEqual(called, ["/api/power/care?enable=1"])
+        self.assertIn("holding=True", out.getvalue())
+
+        text = ctl._render_power_view(
+            {
+                "battery": {"percent": 80, "millivolts": 4085, "charging": False, "usb_present": True},
+                "pmic_die_c": 37.5, "vbus_mv": 5020, "vsys_mv": 4120,
+                "pmic_i2c_err": 0, "imu_i2c_err": 1,
+                "power_care": {"care_enabled": True, "holding": True, "cv_mv": 4100, "icc_ma": 500},
+                "battery_analytics": {
+                    "rate_valid": True, "rate_pct_hr": -4.2, "mv_per_hr": -38,
+                    "eta_empty_min": 190, "sag_mv": 22, "time_on_bat_s": 600, "time_on_usb_s": 3600,
+                },
+            },
+            {"decoded": {"direction": 0, "charge_phase": 4, "constant_current_milliamps": 500}, "registers": []},
+            {"power": {"chip_c": 44, "cpu_mhz": 160}, "network": {"rssi": -54, "channel": 6, "ps_level": 1}},
+        )
+        self.assertIn("80%", text)
+        self.assertIn("PMIC die=37.5", text)
+        self.assertIn("phase=DONE", text)
+        self.assertIn("ETA=3h 10m", text)
+
+    def test_tail_overlap_dedupe_and_tasks_and_board(self) -> None:
+        self.assertEqual(ctl._overlap_new_suffix("line1\nline2\n", "line2\nline3\n"), "line3\n")
+        self.assertEqual(ctl._overlap_new_suffix("same\n", "same\n"), "")
+
+        samples = iter([
+            {"cpu_mhz": 160, "free_internal": 90000, "largest_internal_block": 32000, "total_runtime": 1000,
+             "tasks": [{"name": "IDLE0", "prio": 0, "stack_free": 1200, "run": 800},
+                       {"name": "tight_task", "prio": 5, "stack_free": 768, "run": 100}]},
+            {"cpu_mhz": 160, "free_internal": 90000, "largest_internal_block": 32000, "total_runtime": 2000,
+             "tasks": [{"name": "IDLE0", "prio": 0, "stack_free": 1200, "run": 1600},
+                       {"name": "tight_task", "prio": 5, "stack_free": 768, "run": 250}]},
+        ])
+        out = io.StringIO()
+        with patch.object(ctl, "get_json", side_effect=lambda *_a, **_k: next(samples)), \
+             patch.object(ctl.time, "sleep", lambda _: None), \
+             patch.object(sys, "stdout", out):
+            self.assertEqual(ctl.cmd_tasks(["--cpu", "--interval", "0.2"]), 0)
+        self.assertIn("IDLE0=80.0%", out.getvalue())
+        self.assertIn("WARN (<1024B)", out.getvalue())
+
+        board_doc = {
+            "spi": {"ok": True, "hz": 40000000, "source": "macro"},
+            "pwr_key": {"ok": True, "level": 1},
+            "imu": {"ok": True, "who_am_i": 0x05, "temp_c": 31.2, "wom": True},
+            "pmic": {"ok": True, "die_c": 36.1, "vbus_mv": 5010, "vsys_mv": 4100, "vbat_mv": 4080, "charge_cc_ma": 500},
+            "touch": {"ok": True},
+            "te": {"ok": True, "edges": 28, "hz": 59.9},
+        }
+        out_b = io.StringIO()
+        with patch.object(ctl, "get_json", return_value=board_doc), \
+             patch.object(sys, "stdout", out_b):
+            self.assertEqual(ctl.cmd_board([]), 0)
+        self.assertIn("40 MHz", out_b.getvalue())
+        self.assertIn("0x05", out_b.getvalue())
+        self.assertIn("die=36.1 C", out_b.getvalue())
+
+    def test_crash_decode_matches_archived_elf(self) -> None:
+        import hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            elf_bytes = b"\x7fELFfake-jarvis-elf"
+            sha16 = hashlib.sha256(elf_bytes).hexdigest()[:16]
+            elf_dir = Path(tmp) / ".build_logs" / "elfs"
+            elf_dir.mkdir(parents=True)
+            elf_file = elf_dir / f"{sha16}-deadbee.elf"
+            elf_file.write_bytes(elf_bytes)
+
+            crash_doc = {
+                "reset": "panic", "dump_present": True, "dump_valid": True,
+                "summary": {
+                    "task": "render_task", "exc_pc": "0x42001234", "exc_cause": 28,
+                    "exc_vaddr": "0x00000000", "panic_reason": "LoadProhibited",
+                    "elf_sha": sha16, "bt_corrupted": False, "bt_depth": 1,
+                    "bt": ["0x42005678"],
+                },
+            }
+            out = io.StringIO()
+            with patch.object(ctl, "REPO_ROOT", tmp), \
+                 patch.object(ctl, "get_json", return_value=crash_doc), \
+                 patch.object(ctl, "_run_addr2line", return_value=(0, "0x42001234: draw_strip at hud.c:42\n0x42005678: flush at disp.c:10\n", "")) as a2l, \
+                 patch.object(sys, "stdout", out):
+                rc = ctl.cmd_crash(["decode"])
+            self.assertEqual(rc, 0)
+            self.assertEqual(Path(a2l.call_args.args[0]).resolve(), elf_file.resolve())
+            self.assertIn("SHA MATCH", out.getvalue())
+            self.assertIn("draw_strip at hud.c:42", out.getvalue())
+
+    def test_ship_preflight_blocks_low_battery_without_usb(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bdir = Path(tmp) / "build"
+            bdir.mkdir()
+            (bdir / "jarvisrobot_v5.bin").write_bytes(b"A" * (300 * 1024))
+
+            def fake_get(path: str, timeout: int = 10) -> dict[str, Any]:
+                if path == "/api/sensors":
+                    return {"battery": {"usb_present": False, "percent": 18}}
+                if path == "/api/device/health":
+                    return {"verdict": "ok", "memory": {"largest_internal": 32768}, "ota": {"running": "ota_0"}}
+                raise AssertionError(path)
+
+            err = io.StringIO()
+            with patch.object(ctl, "REPO_ROOT", tmp), \
+                 patch.object(ctl, "get_json", side_effect=fake_get), \
+                 patch.object(sys, "stdout", io.StringIO()), \
+                 patch.object(sys, "stderr", err):
+                rc = ctl.cmd_ship(["--skip-tests", "--skip-build"])
+            self.assertEqual(rc, 1)
+            self.assertIn("18%", err.getvalue())
+            self.assertIn("USB-C", err.getvalue())
 
 
 if __name__ == "__main__":

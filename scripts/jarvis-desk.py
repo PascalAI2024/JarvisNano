@@ -69,16 +69,20 @@ class DeskError(Exception):
         message: str,
         *,
         http_status: int | None = None,
+        detail: str | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.http_status = http_status
+        self.detail = detail
 
     def as_payload(self) -> dict[str, Any]:
         error: dict[str, Any] = {"code": self.code, "message": self.message}
         if self.http_status is not None:
             error["http_status"] = self.http_status
+        if self.detail:
+            error["detail"] = self.detail
         return {"ok": False, "error": error}
 
 
@@ -293,6 +297,47 @@ class DeviceClient:
             raise DeskError("invalid_response", f"device returned a non-object JSON response for {route}")
         return payload
 
+    @staticmethod
+    def _extract_http_error_detail(
+        exc: urllib.error.HTTPError,
+        *,
+        token: str | None = None,
+    ) -> str | None:
+        """Preserve sanitized device reason text on 409/422/503 responses.
+
+        Auth/pairing errors (401/403) and generic 5xx responses are drained
+        without echoing so request material or proxy traces never leak.
+        """
+        try:
+            raw = exc.read(MAX_RESPONSE_BYTES + 1)
+        except Exception:
+            return None
+        if exc.code not in (409, 422, 503) or not raw:
+            return None
+        secrets = (token,) if token else ()
+        text = raw[:4096].decode("utf-8", "replace").strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            cleaned_obj = sanitize(parsed, secrets)
+            candidate = (
+                cleaned_obj.get("error")
+                or cleaned_obj.get("reason")
+                or cleaned_obj.get("message")
+            )
+            if isinstance(candidate, str) and candidate.strip():
+                text = candidate.strip()
+            else:
+                text = json.dumps(cleaned_obj, separators=(",", ":"), sort_keys=True)
+        else:
+            text = str(sanitize(text, secrets))
+        text = " ".join(text.split())
+        return text[:240] or None
+
     def request(
         self,
         method: str,
@@ -327,16 +372,13 @@ class DeviceClient:
                 payload = self._read_json(response, path)
                 return HttpResult(status=int(response.status), payload=payload)
         except urllib.error.HTTPError as exc:
-            # Do not echo a response body here. Pairing errors and proxies have
-            # been known to return request material; status and route suffice.
-            try:
-                exc.read(MAX_RESPONSE_BYTES + 1)
-            except Exception:
-                pass
+            detail = self._extract_http_error_detail(exc, token=token)
+            msg = f"device rejected {method} {path}" + (f": {detail}" if detail else "")
             raise DeskError(
                 "http_error",
-                f"device rejected {method} {path}",
+                msg,
                 http_status=exc.code,
+                detail=detail,
             ) from None
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             reason = "timed out" if isinstance(exc, TimeoutError) else "failed"
@@ -383,14 +425,13 @@ class DeviceClient:
             with self._opener(request, timeout=timeout) as response:
                 return self._read_json(response, path)
         except urllib.error.HTTPError as exc:
-            try:
-                exc.read(MAX_RESPONSE_BYTES + 1)
-            except Exception:
-                pass
+            detail = self._extract_http_error_detail(exc, token=token)
+            msg = f"device rejected POST {path}" + (f": {detail}" if detail else "")
             raise DeskError(
                 "http_error",
-                f"device rejected POST {path}",
+                msg,
                 http_status=exc.code,
+                detail=detail,
             ) from None
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             reason = "timed out" if isinstance(exc, TimeoutError) else "failed"
@@ -420,9 +461,14 @@ class DeviceClient:
             with self._opener(request, timeout=self.timeout) as response:
                 raw = response.read(max_bytes + 1)
         except urllib.error.HTTPError as exc:
+            detail = self._extract_http_error_detail(exc, token=token)
+            msg = f"device rejected GET {path}" + (f": {detail}" if detail else "")
             raise DeskError(
-                "http_error", f"device rejected GET {path}",
-                http_status=exc.code) from None
+                "http_error",
+                msg,
+                http_status=exc.code,
+                detail=detail,
+            ) from None
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             reason = "timed out" if isinstance(exc, TimeoutError) else "failed"
             raise DeskError(

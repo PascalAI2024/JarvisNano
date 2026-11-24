@@ -33,22 +33,41 @@
 #define AXP2101_PKEY_SHORT_BIT    (1u << 3)
 #define AXP2101_PKEY_LONG_BIT     (1u << 2)
 #define POWER_PKEY_POLL_MS        500
-#define AXP2101_REG_STATUS1       0x00
-#define AXP2101_REG_STATUS2       0x01
-#define AXP2101_REG_ADC_CH_CTRL   0x30
-#define AXP2101_REG_VBAT_H        0x34  /* ADC_DATA_RELUST0 */
-#define AXP2101_REG_BAT_DET_CTRL  0x68  /* battery presence detection */
-#define AXP2101_REG_BAT_PERCENT   0xA4
-#define AXP2101_REG_COMMON_CFG    0x10  /* bit0: soft power-off (all rails)  */
-#define AXP2101_REG_PWRON_CFG     0x27  /* bits1:0 ON hold: 0=128ms 1=512ms 2=1s 3=2s */
-#define AXP2101_COMMON_PWROFF     0x01
-#define AXP2101_ONLEVEL_MASK      0x03
-#define AXP2101_ONLEVEL_1S        0x02
+#define AXP2101_REG_STATUS1          0x00
+#define AXP2101_REG_STATUS2          0x01
+#define AXP2101_REG_COMMON_CFG       0x10  /* bit0: soft power-off (all rails)  */
+#define AXP2101_REG_CHARGE_GAUGE_WDT 0x18  /* bit3=gauge_en, bit1=cell_chg_en   */
+#define AXP2101_REG_PWRON_CFG        0x27  /* bits1:0 ON hold: 0=128ms 1=512ms 2=1s 3=2s */
+#define AXP2101_REG_ADC_CH_CTRL      0x30
+#define AXP2101_REG_VBAT_H           0x34  /* ADC_DATA_RELUST0 (0x34..0x3D)     */
+#define AXP2101_ADC_DATA_FIRST       0x34  /* VBAT H5L8, TS H6L8, VBUS, VSYS, Tdie */
+#define AXP2101_REG_CC_SETTING       0x62  /* bits[4:0] ICC charge current      */
+#define AXP2101_REG_CV_SETTING       0x64  /* bits[2:0] CV: 1=4.0V, 3=4.2V      */
+#define AXP2101_REG_THERMAL_THRES    0x65  /* bits[1:0]: 0=60C 1=80C 2=100C 3=120C */
+#define AXP2101_REG_BAT_DET_CTRL     0x68  /* battery presence detection        */
+#define AXP2101_REG_BAT_PERCENT      0xA4
+#define AXP2101_COMMON_PWROFF        0x01
+#define AXP2101_ONLEVEL_MASK         0x03
+#define AXP2101_ONLEVEL_1S           0x02
 
-#define AXP2101_STATUS1_VBUS_GOOD   (1u << 5)
-#define AXP2101_STATUS1_BAT_PRESENT (1u << 3)
-#define AXP2101_ADC_CH_BATT_VOLT    (1u << 0)
-#define AXP2101_BAT_DET_ENABLE      (1u << 0)
+#define AXP2101_STATUS1_VBUS_GOOD    (1u << 5)
+#define AXP2101_STATUS1_BAT_PRESENT  (1u << 3)
+#define AXP2101_GAUGE_EN_BIT         (1u << 3)
+#define AXP2101_CELL_CHG_EN_BIT      (1u << 1)
+#define AXP2101_ADC_CH_BATT_VOLT     (1u << 0)
+#define AXP2101_ADC_CH_TS            (1u << 1)
+#define AXP2101_ADC_CH_VBUS          (1u << 2)
+#define AXP2101_ADC_CH_VSYS          (1u << 3)
+#define AXP2101_ADC_CH_TDIE          (1u << 4)
+/* Continuous ADC mask: VBAT|VBUS|VSYS|TDIE = 0x1D (TS bit1 MUST remain 0!). */
+#define AXP2101_ADC_CH_CONTINUOUS    (AXP2101_ADC_CH_BATT_VOLT | \
+                                      AXP2101_ADC_CH_VBUS | \
+                                      AXP2101_ADC_CH_VSYS | \
+                                      AXP2101_ADC_CH_TDIE)
+#define AXP2101_BAT_DET_ENABLE       (1u << 0)
+#define AXP2101_ICC_FALLBACK_CODE    8u    /* 200 mA safe ceiling if read fails */
+#define AXP2101_ICC_MIN_THROTTLE     4u    /* 100 mA floor for thermal step-down */
+#define AXP2101_DIE_TEMP_INVALID     ((int8_t)-128)
 
 #define AXP2101_I2C_TIMEOUT_MS  100
 /* At most ONE diagnostic burst after PKEY/battery per pass. Do not add seven
@@ -65,6 +84,8 @@
 
 static _Atomic uint32_t s_pkey_short;
 static _Atomic uint32_t s_pkey_long;
+static _Atomic uint32_t s_pmic_i2c_errors;
+static _Atomic bool     s_care_enabled_atomic;
 
 static const char *TAG = "jr_power";
 
@@ -78,6 +99,29 @@ static bool s_ext_stack;
 
 static jr_power_t s_snap;
 static int64_t    s_snap_us;
+static int8_t     s_adc_die_c = AXP2101_DIE_TEMP_INVALID;
+static uint16_t   s_adc_vbus_mv;
+static uint16_t   s_adc_vsys_mv;
+
+/* Care & thermal control state (serialized by s_care_i2c_lock; published to
+ * s_care_pub under s_snap_lock so readers never block on I2C). */
+static bool     s_care_enabled;
+static bool     s_care_cv_pending;
+static bool     s_care_holding;
+static bool     s_thermal_throttle;
+static bool     s_thermal_pause;
+static bool     s_active_chg_en = true;
+static uint8_t  s_factory_icc_code = AXP2101_ICC_FALLBACK_CODE;
+static uint8_t  s_active_icc_code  = AXP2101_ICC_FALLBACK_CODE;
+static uint16_t s_active_cv_mv     = 4200u;
+
+static jr_power_care_status_t s_care_pub = {
+    .cv_mv          = 4200u,
+    .icc_ma         = 200u,
+    .factory_icc_ma = 200u,
+    .pmic_die_c     = AXP2101_DIE_TEMP_INVALID,
+};
+
 static jr_power_charge_t *s_charge_snap;
 static jr_power_charge_t *s_charge_work; /* sampler-owned; no I2C under cache lock */
 static bool s_charge_active, s_charge_pending;
@@ -85,13 +129,18 @@ static size_t s_charge_next_burst;
 static uint64_t s_charge_next_start_ms;
 static SemaphoreHandle_t s_snap_lock;
 static StaticSemaphore_t s_snap_lock_buf;
+static SemaphoreHandle_t s_care_i2c_lock;
+static StaticSemaphore_t s_care_i2c_lock_buf;
 
-/* Constructor-created static mutex — ESP-IDF runs constructors single-threaded
- * before app_main(), so there is no creation race to bootstrap around. */
+/* Constructor-created static mutexes — ESP-IDF runs constructors single-threaded
+ * before app_main(), so there is no creation race to bootstrap around.
+ * Lock order: s_care_i2c_lock -> s_snap_lock (never reversed; no I2C under
+ * s_snap_lock). */
 __attribute__((constructor))
 static void power_lock_ctor(void)
 {
     s_snap_lock = xSemaphoreCreateMutexStatic(&s_snap_lock_buf);
+    s_care_i2c_lock = xSemaphoreCreateMutexStatic(&s_care_i2c_lock_buf);
 }
 
 /* Allocate the two charge-diagnostic structs (~1,360 B total) once in PSRAM
@@ -133,6 +182,33 @@ static void power_charge_ensure_alloc(void)
     }
 }
 
+static uint32_t adc14(const uint8_t *p)
+{
+    return ((uint32_t)(p[0] & 0x3Fu) << 8) | p[1];
+}
+
+static uint16_t pmic_icc_code_to_ma(uint8_t code)
+{
+    code &= 0x1Fu;
+    if (code <= 8u) {
+        return (uint16_t)(25u * code);
+    }
+    if (code <= 21u) {
+        return (uint16_t)(200u + 100u * (code - 8u));
+    }
+    return 0u;
+}
+
+static uint16_t pmic_cv_code_to_mv(uint8_t code)
+{
+    static const uint16_t k_volts[] = { 0u, 4000u, 4100u, 4200u, 4350u, 4400u };
+    code &= 0x07u;
+    if (code >= 1u && code <= 5u) {
+        return k_volts[code];
+    }
+    return 4200u;
+}
+
 /* Burst read of `len` consecutive registers in ONE transaction; the AXP2101
  * auto-increments its register pointer on multi-byte reads.
  * NOTE: the new i2c_master API takes its timeout in MILLISECONDS
@@ -140,8 +216,12 @@ static void power_charge_ensure_alloc(void)
  * shrink 100 ms to 10 at CONFIG_FREERTOS_HZ=100. */
 static esp_err_t pmic_read_regs(uint8_t reg, uint8_t *buf, size_t len)
 {
-    return i2c_master_transmit_receive(s_dev, &reg, 1, buf, len,
-                                       AXP2101_I2C_TIMEOUT_MS);
+    const esp_err_t err = i2c_master_transmit_receive(
+        s_dev, &reg, 1, buf, len, AXP2101_I2C_TIMEOUT_MS);
+    if (err != ESP_OK) {
+        atomic_fetch_add(&s_pmic_i2c_errors, 1u);
+    }
+    return err;
 }
 
 static esp_err_t pmic_read_reg(uint8_t reg, uint8_t *val)
@@ -152,7 +232,99 @@ static esp_err_t pmic_read_reg(uint8_t reg, uint8_t *val)
 static esp_err_t pmic_write_reg(uint8_t reg, uint8_t val)
 {
     uint8_t buf[2] = { reg, val };
-    return i2c_master_transmit(s_dev, buf, sizeof(buf), AXP2101_I2C_TIMEOUT_MS);
+    const esp_err_t err = i2c_master_transmit(
+        s_dev, buf, sizeof(buf), AXP2101_I2C_TIMEOUT_MS);
+    if (err != ESP_OK) {
+        atomic_fetch_add(&s_pmic_i2c_errors, 1u);
+    }
+    return err;
+}
+
+/* RMW 0x18 bit1 (cell_chg_en), ALWAYS preserving 0xFD and forcing bit3
+ * (gauge_en = 1). Caller holds s_care_i2c_lock. */
+static esp_err_t pmic_write_chg_en(bool enable)
+{
+    if (s_dev == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    uint8_t cur = 0;
+    esp_err_t err = pmic_read_reg(AXP2101_REG_CHARGE_GAUGE_WDT, &cur);
+    if (err != ESP_OK) {
+        return err;
+    }
+    uint8_t want = (uint8_t)((cur & 0xFDu) | AXP2101_GAUGE_EN_BIT);
+    if (enable) {
+        want |= AXP2101_CELL_CHG_EN_BIT;
+    }
+    if (want == cur) {
+        return ESP_OK;
+    }
+    return pmic_write_reg(AXP2101_REG_CHARGE_GAUGE_WDT, want);
+}
+
+/* RMW 0x64 bits[2:0] (CV target: 1=4.0V Desk Care, 3=4.2V Full), preserving
+ * 0xF8. Caller holds s_care_i2c_lock. */
+static esp_err_t pmic_write_cv(bool care_enable)
+{
+    if (s_dev == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    uint8_t cur = 0;
+    esp_err_t err = pmic_read_reg(AXP2101_REG_CV_SETTING, &cur);
+    if (err != ESP_OK) {
+        return err;
+    }
+    const uint8_t code = care_enable ? 1u : 3u;
+    const uint8_t want = (uint8_t)((cur & 0xF8u) | code);
+    if (want == cur) {
+        return ESP_OK;
+    }
+    return pmic_write_reg(AXP2101_REG_CV_SETTING, want);
+}
+
+/* RMW 0x62 bits[4:0] (ICC target), preserving 0xE0 and NEVER exceeding the
+ * latched factory boot ceiling s_factory_icc_code. Caller holds s_care_i2c_lock. */
+static esp_err_t pmic_write_icc(uint8_t code)
+{
+    if (s_dev == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    code &= 0x1Fu;
+    if (code > s_factory_icc_code) {
+        code = s_factory_icc_code;
+    }
+    uint8_t cur = 0;
+    esp_err_t err = pmic_read_reg(AXP2101_REG_CC_SETTING, &cur);
+    if (err != ESP_OK) {
+        return err;
+    }
+    const uint8_t want = (uint8_t)((cur & 0xE0u) | code);
+    if (want == cur) {
+        return ESP_OK;
+    }
+    return pmic_write_reg(AXP2101_REG_CC_SETTING, want);
+}
+
+/* Publish care/thermal fields into s_care_pub without holding s_snap_lock over
+ * any I2C. Caller holds s_care_i2c_lock. */
+static void power_care_publish_locked(void)
+{
+    if (s_snap_lock != NULL &&
+        xSemaphoreTake(s_snap_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_care_pub.enabled          = s_care_enabled;
+        s_care_pub.holding          = s_care_holding;
+        s_care_pub.thermal_throttle = s_thermal_throttle;
+        s_care_pub.thermal_pause    = s_thermal_pause;
+        s_care_pub.cv_mv            = s_active_cv_mv;
+        s_care_pub.icc_ma           = pmic_icc_code_to_ma(s_active_icc_code);
+        s_care_pub.factory_icc_ma   = pmic_icc_code_to_ma(s_factory_icc_code);
+        xSemaphoreGive(s_snap_lock);
+    }
+}
+
+uint32_t jr_power_i2c_errors(void)
+{
+    return atomic_load(&s_pmic_i2c_errors);
 }
 
 esp_err_t jr_power_boot_status(uint8_t *on_src, uint8_t *off_src)
@@ -176,6 +348,22 @@ esp_err_t jr_power_off(void)
     if (s_dev == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
+    /* Fail-safe: ALWAYS restore 0x18 bit1 (cell_chg_en = 1) and bit3
+     * (gauge_en = 1) before soft power-off so charging keeps working while
+     * powered off (0x64 = 4.0 V remains active as HW cap if Desk Care is on). */
+    const bool locked = (s_care_i2c_lock != NULL) &&
+                        (xSemaphoreTake(s_care_i2c_lock, pdMS_TO_TICKS(100)) == pdTRUE);
+    const esp_err_t chg_err = pmic_write_chg_en(true);
+    if (chg_err == ESP_OK) {
+        s_active_chg_en = true;
+    } else {
+        ESP_LOGW(TAG, "power_off: restore cell_chg_en failed: %s",
+                 esp_err_to_name(chg_err));
+    }
+    if (locked) {
+        xSemaphoreGive(s_care_i2c_lock);
+    }
+
     /* First the way back: the PMIC's own power-on hold set to one second, so
      * a brush of the key in a bag does not boot it, a deliberate hold does.
      * The register lives in the PMIC's always-on domain and survives the
@@ -223,12 +411,17 @@ static esp_err_t power_bring_up(void)
         return err;
     }
 
-    /* Enable the battery-voltage ADC channel. Read-only side data — this does
-     * NOT alter the factory rail sequencing the panel/codecs rely on. */
+    /* Enable continuous ADC channels 0x30 = 0x1D (VBAT|VBUS|VSYS|TDIE) while
+     * explicitly keeping TS bit1 = 0 (no NTC on board). Touches ZERO rails. */
     uint8_t ch = 0;
-    if (pmic_read_reg(AXP2101_REG_ADC_CH_CTRL, &ch) == ESP_OK &&
-        !(ch & AXP2101_ADC_CH_BATT_VOLT)) {
-        pmic_write_reg(AXP2101_REG_ADC_CH_CTRL, ch | AXP2101_ADC_CH_BATT_VOLT);
+    if (pmic_read_reg(AXP2101_REG_ADC_CH_CTRL, &ch) == ESP_OK) {
+        const uint8_t want_ch = (uint8_t)((ch & (uint8_t)~AXP2101_ADC_CH_TS) |
+                                          AXP2101_ADC_CH_CONTINUOUS);
+        if (want_ch != ch) {
+            (void)pmic_write_reg(AXP2101_REG_ADC_CH_CTRL, want_ch);
+        }
+    } else {
+        (void)pmic_write_reg(AXP2101_REG_ADC_CH_CTRL, AXP2101_ADC_CH_CONTINUOUS);
     }
 
     /* Enable battery-presence detection. Without this STATUS1[3] can read 0 even
@@ -241,6 +434,57 @@ static esp_err_t power_bring_up(void)
         pmic_write_reg(AXP2101_REG_BAT_DET_CTRL, det | AXP2101_BAT_DET_ENABLE);
     }
 
+    /* Latch factory 0x62 ICC ceiling (never exceed), set HW thermal foldback
+     * 0x65 bits[1:0] = 1 (80 C, RMW preserving 0xFC), and sync CV/CHG_EN state.
+     * Touches ZERO DCDC/LDO rail registers (0x80..0x9A). */
+    const bool locked = (s_care_i2c_lock != NULL) &&
+                        (xSemaphoreTake(s_care_i2c_lock, pdMS_TO_TICKS(100)) == pdTRUE);
+
+    uint8_t cc_raw = 0;
+    if (pmic_read_reg(AXP2101_REG_CC_SETTING, &cc_raw) == ESP_OK &&
+        (cc_raw & 0x1Fu) > 0u && (cc_raw & 0x1Fu) <= 21u) {
+        s_factory_icc_code = (uint8_t)(cc_raw & 0x1Fu);
+    } else {
+        s_factory_icc_code = AXP2101_ICC_FALLBACK_CODE;
+    }
+    s_active_icc_code = s_factory_icc_code;
+
+    uint8_t th = 0;
+    if (pmic_read_reg(AXP2101_REG_THERMAL_THRES, &th) == ESP_OK) {
+        const uint8_t want_th = (uint8_t)((th & 0xFCu) | 0x01u); /* 80 C */
+        if (want_th != th) {
+            (void)pmic_write_reg(AXP2101_REG_THERMAL_THRES, want_th);
+        }
+    }
+
+    if (s_care_cv_pending) {
+        if (pmic_write_cv(s_care_enabled) == ESP_OK) {
+            s_active_cv_mv = s_care_enabled ? 4000u : 4200u;
+            s_care_cv_pending = false;
+        }
+    } else {
+        uint8_t cv_raw = 0;
+        if (pmic_read_reg(AXP2101_REG_CV_SETTING, &cv_raw) == ESP_OK) {
+            s_active_cv_mv = pmic_cv_code_to_mv(cv_raw);
+        }
+    }
+
+    uint8_t chg_ctrl = 0;
+    if (pmic_read_reg(AXP2101_REG_CHARGE_GAUGE_WDT, &chg_ctrl) == ESP_OK) {
+        s_active_chg_en = (chg_ctrl & AXP2101_CELL_CHG_EN_BIT) != 0u;
+        if ((chg_ctrl & AXP2101_GAUGE_EN_BIT) == 0u) {
+            (void)pmic_write_reg(AXP2101_REG_CHARGE_GAUGE_WDT,
+                                 (uint8_t)(chg_ctrl | AXP2101_GAUGE_EN_BIT));
+        }
+    } else {
+        s_active_chg_en = true;
+    }
+
+    power_care_publish_locked();
+    if (locked) {
+        xSemaphoreGive(s_care_i2c_lock);
+    }
+
     /* Arm PKEY short/long IRQ latching and clear anything stale. */
     uint8_t inten2 = 0;
     if (pmic_read_reg(AXP2101_REG_INTEN2, &inten2) == ESP_OK) {
@@ -251,14 +495,22 @@ static esp_err_t power_bring_up(void)
     (void)pmic_write_reg(AXP2101_REG_INTSTS2, 0xFF);
 
     s_ready = true;
-    ESP_LOGI(TAG, "AXP2101 fuel gauge online (0x%02X)", AXP2101_I2C_ADDR);
+    ESP_LOGI(TAG, "AXP2101 online (0x%02X, factory ICC=%u mA, CV=%u mV, thermal=80C)",
+             AXP2101_I2C_ADDR, (unsigned)pmic_icc_code_to_ma(s_factory_icc_code),
+             (unsigned)s_active_cv_mv);
     return ESP_OK;
 }
 
-static bool power_sample(jr_power_t *s)
+static bool power_sample(jr_power_t *s, bool *out_adc_ok,
+                         int8_t *out_die_c, uint16_t *out_vbus_mv,
+                         uint16_t *out_vsys_mv)
 {
     memset(s, 0, sizeof(*s));
     s->percent = 0xFF;
+    *out_adc_ok = false;
+    *out_die_c = AXP2101_DIE_TEMP_INVALID;
+    *out_vbus_mv = 0u;
+    *out_vsys_mv = 0u;
 
     uint8_t s1 = 0, s2 = 0;
     if (pmic_read_reg(AXP2101_REG_STATUS1, &s1) != ESP_OK) {
@@ -275,12 +527,26 @@ static bool power_sample(jr_power_t *s)
         if (pmic_read_reg(AXP2101_REG_BAT_PERCENT, &pct) == ESP_OK && pct <= 100) {
             s->percent = pct;
         }
-        /* VBAT H/L (0x34/0x35) in ONE 2-byte transaction — two separate reads
-         * can pair the high byte of one ADC sample with the low byte of the
-         * next (torn reading). */
-        uint8_t v[2] = { 0, 0 };
-        if (pmic_read_regs(AXP2101_REG_VBAT_H, v, sizeof(v)) == ESP_OK) {
-            s->millivolts = (uint16_t)(((v[0] & 0x1Fu) << 8) | v[1]);
+    }
+
+    /* 10-byte burst 0x34..0x3D in ONE transaction: VBAT H5L8, TS (ignored),
+     * VBUS H6L8, VSYS H6L8, Tdie H6L8 — prevents torn high/low byte reads
+     * and adds zero extra I2C transactions over the old 2-byte VBAT read. */
+    uint8_t d[10] = {0};
+    if (pmic_read_regs(AXP2101_ADC_DATA_FIRST, d, sizeof(d)) == ESP_OK) {
+        *out_adc_ok = true;
+        if (s->present) {
+            s->millivolts = (uint16_t)(((d[0] & 0x1Fu) << 8) | d[1]);
+        }
+        *out_vbus_mv = (uint16_t)adc14(&d[4]);
+        *out_vsys_mv = (uint16_t)adc14(&d[6]);
+        const uint32_t die_raw = adc14(&d[8]);
+        if (die_raw != 0u) {
+            /* XPowersLib: 22 + (7274 - raw) / 20 degrees C. */
+            const int die_c = 22 + (7274 - (int)die_raw) / 20;
+            if (die_c >= -40 && die_c <= 125) {
+                *out_die_c = (int8_t)die_c;
+            }
         }
     }
     return true;
@@ -315,6 +581,9 @@ static void power_charge_step(void)
     uint8_t values[5] = {0}; /* largest fixed burst; no allocation/request input */
     const esp_err_t err = i2c_master_transmit_receive(s_dev, &burst->address, 1,
                          values, burst->count, POWER_CHARGE_TIMEOUT_MS);
+    if (err != ESP_OK) {
+        atomic_fetch_add(&s_pmic_i2c_errors, 1u);
+    }
     now_ms = (uint64_t)esp_timer_get_time() / 1000u;
     for (size_t i = 0; i < burst->count; ++i) {
         jr_power_charge_record(s_charge_work, burst->first_index + i,
@@ -357,11 +626,20 @@ static void power_task(void *arg)
         }
         if ((pass++ % (POWER_SAMPLE_PERIOD_MS / POWER_PKEY_POLL_MS)) == 0) {
             jr_power_t s;
-            if (power_sample(&s)) {
+            bool adc_ok = false;
+            int8_t die_c = AXP2101_DIE_TEMP_INVALID;
+            uint16_t vbus_mv = 0u;
+            uint16_t vsys_mv = 0u;
+            if (power_sample(&s, &adc_ok, &die_c, &vbus_mv, &vsys_mv)) {
                 s.sample_seq = ++seq;
                 if (xSemaphoreTake(s_snap_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
                     s_snap = s;
                     s_snap_us = esp_timer_get_time();
+                    if (adc_ok) {
+                        s_adc_die_c = die_c;
+                        s_adc_vbus_mv = vbus_mv;
+                        s_adc_vsys_mv = vsys_mv;
+                    }
                     xSemaphoreGive(s_snap_lock);
                 }
             }
@@ -471,19 +749,163 @@ void jr_power_pkey_take(uint32_t *out_short, uint32_t *out_long)
     if (out_long)  { *out_long  = lp; }
 }
 
+/* ---- Desk Battery-Care (80% cap) & Thermal Charge Throttling ------------ */
+
+esp_err_t jr_power_set_battery_care(bool enable)
+{
+    if (s_care_i2c_lock == NULL ||
+        xSemaphoreTake(s_care_i2c_lock, pdMS_TO_TICKS(200)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    if (!s_ready || s_dev == NULL) {
+        s_care_enabled = enable;
+        s_care_cv_pending = true;
+        if (!enable) {
+            s_care_holding = false;
+        }
+        atomic_store(&s_care_enabled_atomic, enable);
+        power_care_publish_locked();
+        xSemaphoreGive(s_care_i2c_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t err = pmic_write_cv(enable);
+    if (err == ESP_OK) {
+        const bool was_holding = s_care_holding;
+        s_care_enabled = enable;
+        s_care_cv_pending = false;
+        s_active_cv_mv = enable ? 4000u : 4200u;
+        atomic_store(&s_care_enabled_atomic, enable);
+        if (!enable && was_holding) {
+            s_care_holding = false;
+            if (!s_thermal_pause) {
+                const esp_err_t chg_err = pmic_write_chg_en(true);
+                if (chg_err == ESP_OK) {
+                    s_active_chg_en = true;
+                } else {
+                    err = chg_err;
+                }
+            }
+        }
+        power_care_publish_locked();
+        ESP_LOGI(TAG, "battery care: %s (CV=%u mV)",
+                 enable ? "DESK 80%" : "TRAVEL 100%", (unsigned)s_active_cv_mv);
+    }
+
+    xSemaphoreGive(s_care_i2c_lock);
+    return err;
+}
+
+bool jr_power_get_battery_care(void)
+{
+    return atomic_load(&s_care_enabled_atomic);
+}
+
+void jr_power_care_tick(bool usb_present, int pct, int chip_temp_c)
+{
+    int8_t pmic_die_c = AXP2101_DIE_TEMP_INVALID;
+    if (s_snap_lock != NULL &&
+        xSemaphoreTake(s_snap_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
+        pmic_die_c = s_adc_die_c;
+        xSemaphoreGive(s_snap_lock);
+    }
+
+    if (s_care_i2c_lock == NULL ||
+        xSemaphoreTake(s_care_i2c_lock, pdMS_TO_TICKS(200)) != pdTRUE) {
+        return;
+    }
+
+    /* Dual-sensor thermal envelope: max(chip_temp_c, pmic_die_c if valid). */
+    int hot_c = chip_temp_c;
+    if (pmic_die_c != AXP2101_DIE_TEMP_INVALID && pmic_die_c > hot_c) {
+        hot_c = (int)pmic_die_c;
+    }
+
+    /* Thermal hysteresis: pause >=65C (clear <60C), throttle >=55C (clear <50C). */
+    if (hot_c >= 65) {
+        s_thermal_pause = true;
+    } else if (hot_c < 60) {
+        s_thermal_pause = false;
+    }
+    if (hot_c >= 55) {
+        s_thermal_throttle = true;
+    } else if (hot_c < 50) {
+        s_thermal_throttle = false;
+    }
+
+    /* Target 0x62 ICC code: step down to max(4, factory/2), NEVER > factory. */
+    uint8_t target_icc = s_factory_icc_code;
+    if (s_thermal_throttle) {
+        const uint8_t half = (uint8_t)(s_factory_icc_code / 2u);
+        target_icc = half > AXP2101_ICC_MIN_THROTTLE
+                         ? half
+                         : AXP2101_ICC_MIN_THROTTLE;
+        if (target_icc > s_factory_icc_code) {
+            target_icc = s_factory_icc_code;
+        }
+    }
+    if (s_ready && s_dev != NULL && target_icc != s_active_icc_code) {
+        if (pmic_write_icc(target_icc) == ESP_OK) {
+            s_active_icc_code = target_icc;
+            ESP_LOGI(TAG, "thermal ICC -> %u mA (hot=%dC, throttle=%d)",
+                     (unsigned)pmic_icc_code_to_ma(target_icc),
+                     hot_c, (int)s_thermal_throttle);
+        }
+    }
+
+    /* Desk Care 75/80% hysteresis on USB; always clears off USB or care off. */
+    if (s_care_enabled && usb_present) {
+        if (pct >= 0 && pct <= 100) {
+            if (pct >= 80) {
+                s_care_holding = true;
+            } else if (pct <= 75) {
+                s_care_holding = false;
+            }
+        }
+    } else {
+        s_care_holding = false;
+    }
+
+    /* Desired 0x18 bit1 (cell_chg_en): 0 ONLY when usb && (holding || pause). */
+    const bool want_chg_en = !(usb_present && (s_care_holding || s_thermal_pause));
+    if (s_ready && s_dev != NULL && want_chg_en != s_active_chg_en) {
+        if (pmic_write_chg_en(want_chg_en) == ESP_OK) {
+            s_active_chg_en = want_chg_en;
+            ESP_LOGI(TAG, "cell_chg_en -> %d (usb=%d pct=%d hold=%d tpause=%d)",
+                     (int)want_chg_en, (int)usb_present, pct,
+                     (int)s_care_holding, (int)s_thermal_pause);
+        }
+    }
+
+    power_care_publish_locked();
+    xSemaphoreGive(s_care_i2c_lock);
+}
+
+void jr_power_care_status(jr_power_care_status_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    out->pmic_die_c = AXP2101_DIE_TEMP_INVALID;
+    if (s_snap_lock == NULL ||
+        xSemaphoreTake(s_snap_lock, pdMS_TO_TICKS(20)) != pdTRUE) {
+        return;
+    }
+    *out = s_care_pub;
+    out->pmic_die_c = s_adc_die_c;
+    out->vbus_mv = s_adc_vbus_mv;
+    out->vsys_mv = s_adc_vsys_mv;
+    xSemaphoreGive(s_snap_lock);
+}
+
 /* ---- board probe (GET /api/diag/board) ---------------------------------- */
 
-#define AXP2101_REG_CC_SETTING    0x62  /* read only here */
 #define AXP2101_ADC_CH_PROBE_MASK 0x1F  /* VBAT, TS, VBUS, VSYS, die temp */
-#define AXP2101_ADC_DATA_FIRST    0x34  /* VBAT H5L8, TS H6L8, VBUS, VSYS, Tdie */
 /* 100 ms was not enough: on 2026-11-10 VSYS and Tdie read raw 0 that soon
  * after their channels were enabled (reported as 0 mV and 385.7 C). */
 #define PROBE_ADC_SETTLE_MS       500
-
-static uint32_t adc14(const uint8_t *p)
-{
-    return ((uint32_t)(p[0] & 0x3Fu) << 8) | p[1];
-}
 
 void jr_power_probe(jr_probe_pmic_t *out)
 {
@@ -503,7 +925,7 @@ void jr_power_probe(jr_probe_pmic_t *out)
         const uint8_t code = cc & 31u;   /* same decode as charge.c */
         if (code <= 21) {
             out->chg_cc_known = true;
-            out->chg_cc_ma = code <= 8 ? 25u * code : 200u + 100u * (code - 8u);
+            out->chg_cc_ma = pmic_icc_code_to_ma(code);
         }
     }
 

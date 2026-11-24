@@ -121,6 +121,7 @@ typedef struct {
     uint8_t channel;
     uint8_t retry_count;
     uint16_t last_disconnect_reason;
+    uint32_t disconnects;
     esp_err_t last_error;
 } jr_net_status_t;
 
@@ -166,9 +167,22 @@ esp_err_t jr_net_wifi_connect(void);
 bool jr_net_is_connected(void);
 esp_err_t jr_net_get_status(jr_net_status_t *out);
 
-/* Toggle station modem sleep without stopping Wi-Fi or changing credentials.
+typedef enum {
+    JR_NET_PS_NONE = 0,
+    JR_NET_PS_MIN  = 1,
+    JR_NET_PS_MAX  = 2,
+} jr_net_ps_level_t;
+
+/* Set station modem power-save tier (NONE / MIN_MODEM / MAX_MODEM).
  * The requested policy survives reconnects; provisioning always forces full
- * radio availability. Use false for realtime voice, OTA, and operator mode. */
+ * radio availability. Use JR_NET_PS_NONE for realtime voice, OTA, and lease. */
+void jr_net_set_ps_level(jr_net_ps_level_t level);
+
+/* Applied modem power-save tier currently in force on the radio. */
+jr_net_ps_level_t jr_net_get_ps_level(void);
+
+/* Toggle station modem sleep without stopping Wi-Fi or changing credentials.
+ * Compatibility wrapper for jr_net_set_ps_level(enabled ? MIN : NONE). */
 esp_err_t jr_net_set_power_save(bool enabled);
 
 /* Whether modem sleep is in force right now — the APPLIED policy, not the

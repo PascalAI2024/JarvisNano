@@ -486,6 +486,19 @@ const jr_gemini_fn_decl_t s_device_tool_fns[] = {
         }},
         .param_count = JR_GEMINI_PARAM_COUNT(1),
     },
+    {
+        .name = "set_battery_care",
+        .description =
+            "Enable or disable Desk Battery Care (80 percent charge cap for "
+            "all-day USB longevity; disable for 100 percent full travel charge).",
+        .params = {{
+            .name = "enable",
+            .type = JR_GEMINI_PT_BOOLEAN,
+            .description = "True for 80% Desk Battery Care; false for 100% full travel charge.",
+            .required = true,
+        }},
+        .param_count = JR_GEMINI_PARAM_COUNT(1),
+    },
 };
 
 _Static_assert(sizeof(s_device_tool_fns) / sizeof(s_device_tool_fns[0]) ==
@@ -536,6 +549,7 @@ static const char s_device_tool_labels[][13] = {
     "DESK MODE",    /* set_desk_mode  */
     "BREATHE",      /* start_breathe  */
     "CHECK NOTE",   /* complete_note  */
+    "BAT CARE",     /* set_battery_care */
 };
 
 _Static_assert(sizeof(s_device_tool_labels) / sizeof(s_device_tool_labels[0]) ==
@@ -772,9 +786,24 @@ void device_confirm_cue(void)
     ui_cue(JR_CUE_CONFIRM, true);
 }
 
+void app_play_soft_cue(jr_cue_kind_t kind)
+{
+    if (!atomic_load(&s_ui_sounds) || owner_speaker_muted() ||
+        atomic_load(&s_ota_active)) {
+        return;
+    }
+    desk_mode_snap_t ds = {0};
+    desk_mode_snapshot(&ds);
+    if (ds.mode == JR_DESK_ON_AIR || ds.dnd_silent) {
+        return;
+    }
+    (void)jr_audio_play_cue(kind, jr_cue_amplitude_permille(kind, s_out_vol));
+}
+
 /* Speaker volume (app task only) — gesture-adjustable, NVS-persistent. */
 int s_out_vol = 100;
 uint8_t s_brightness_cap = 100;
+static uint32_t s_bright_user_boost_until_ms;
 _Atomic int s_level_volume_request = -1;
 _Atomic int s_level_brightness_request = -1;
 
@@ -919,6 +948,101 @@ static void restore_holo_enabled(void)
     jr_display_holo_set(enabled);
 }
 
+/* ---- Glass 3.6 Desk Battery-Care & Rolling Power Analytics -------------- */
+static jr_power_analytics_ctx_t s_power_analytics;
+static portMUX_TYPE s_power_analytics_mux = portMUX_INITIALIZER_UNLOCKED;
+_Atomic uint32_t s_http_last_activity_ms;
+uint32_t s_boot_stage_ms[4];
+
+static void persist_battery_care(bool enable)
+{
+    nvs_handle_t h;
+    if (nvs_open("app", NVS_READWRITE, &h) == ESP_OK) {
+        (void)nvs_set_u8(h, "bat_care", enable ? 1U : 0U);
+        (void)nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static void restore_battery_care(void)
+{
+    nvs_handle_t h;
+    uint8_t v = 0U;
+    if (nvs_open("app", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_u8(h, "bat_care", &v) == ESP_OK) {
+            (void)jr_power_set_battery_care(v != 0U);
+            ESP_LOGI(TAG, "battery care restored: %s",
+                     v != 0U ? "desk 80%" : "travel 100%");
+        }
+        nvs_close(h);
+    }
+}
+
+void app_power_analytics_get(jr_power_analytics_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    const bool care = jr_power_get_battery_care();
+    portENTER_CRITICAL(&s_power_analytics_mux);
+    jr_power_analytics_snapshot(&s_power_analytics, care, out);
+    portEXIT_CRITICAL(&s_power_analytics_mux);
+}
+
+static void power_analytics_record_and_publish(const jr_power_t *bat,
+                                               bool have_bat,
+                                               bool push_sample)
+{
+    jr_power_care_status_t care = {0};
+    jr_power_care_status(&care);
+    float chip_f = 0.0f;
+    const bool have_chip = device_chip_temp_c(&chip_f);
+    const int8_t chip_c = have_chip ? (int8_t)lroundf(chip_f) : (int8_t)-128;
+
+    if (push_sample && have_bat && bat != NULL && bat->present) {
+        const jr_power_sample_t sample = {
+            .uptime_s = (uint32_t)(esp_timer_get_time() / 1000000ULL),
+            .pct = bat->percent <= 100U ? (int8_t)bat->percent : (int8_t)-1,
+            .mv = bat->millivolts,
+            .usb = bat->usb_present,
+            .charging = bat->charging,
+            .chip_c = chip_c,
+            .pmic_c = care.pmic_die_c,
+        };
+        portENTER_CRITICAL(&s_power_analytics_mux);
+        jr_power_analytics_push(&s_power_analytics, &sample, care.enabled);
+        portEXIT_CRITICAL(&s_power_analytics_mux);
+    }
+
+    jr_power_analytics_t snap = {0};
+    app_power_analytics_get(&snap);
+    const bool on_usb = have_bat && bat != NULL && bat->usb_present;
+    const int32_t eta_min = on_usb ? snap.eta_full_min : snap.eta_empty_min;
+    jr_display_power_info_set(care.enabled, care.holding, eta_min,
+                              snap.rate_pct_x10_hr, care.pmic_die_c);
+}
+
+esp_err_t app_set_battery_care(bool enable)
+{
+    const esp_err_t err = jr_power_set_battery_care(enable);
+    if (err != ESP_OK) {
+        return err;
+    }
+    persist_battery_care(enable);
+    jr_power_t bat = {0};
+    const bool have_bat = jr_power_read(&bat) == ESP_OK && bat.present;
+    float chip_f = 0.0f;
+    const int chip_c = device_chip_temp_c(&chip_f) ? (int)lroundf(chip_f) : 25;
+    if (have_bat) {
+        jr_power_care_tick(bat.usb_present,
+                           bat.percent <= 100U ? (int)bat.percent : -1,
+                           chip_c);
+    }
+    power_analytics_record_and_publish(&bat, have_bat, have_bat);
+    app_play_soft_cue(JR_CUE_CONFIRM);
+    return ESP_OK;
+}
+
 void persist_ota_attempt(int slot)
 {
     nvs_handle_t h;
@@ -959,6 +1083,7 @@ static void restore_ota_attempt(void)
 char *s_logring;                 /* PSRAM, alloc'd in app_main */
 volatile size_t s_logring_head;  /* next write offset */
 volatile size_t s_logring_len;   /* filled bytes, saturates at CAP */
+volatile uint64_t s_logring_total; /* monotonic bytes written since boot */
 portMUX_TYPE s_logring_mux = portMUX_INITIALIZER_UNLOCKED;
 static vprintf_like_t s_logring_prev;
 
@@ -987,6 +1112,7 @@ static int logring_vprintf(const char *fmt, va_list ap)
             s_logring_head = (head + w) % LOGRING_CAP;
             s_logring_len = s_logring_len + w > LOGRING_CAP
                                 ? LOGRING_CAP : s_logring_len + w;
+            s_logring_total += (uint64_t)w;
             portEXIT_CRITICAL(&s_logring_mux);
         }
     }
@@ -2772,12 +2898,39 @@ void title_shorten(char *dst, size_t cap, const char *src)
     dst[keep + 1U] = '\0';
 }
 
+static uint8_t evidence_state_to_led(const char *st)
+{
+    if (st == NULL || st[0] == '\0') {
+        return 0U;
+    }
+    if (strcasecmp(st, "pass") == 0 || strcasecmp(st, "done") == 0 ||
+        strcasecmp(st, "succeeded") == 0) {
+        return 1U;
+    }
+    if (strcasecmp(st, "working") == 0 || strcasecmp(st, "running") == 0 ||
+        strcasecmp(st, "active") == 0) {
+        return 2U;
+    }
+    if (strcasecmp(st, "wait") == 0 || strcasecmp(st, "queued") == 0 ||
+        strcasecmp(st, "pending") == 0) {
+        return 3U;
+    }
+    if (strcasecmp(st, "fail") == 0 || strcasecmp(st, "failed") == 0 ||
+        strcasecmp(st, "error") == 0 || strcasecmp(st, "blocked") == 0) {
+        return 4U;
+    }
+    return 0U;
+}
+
 static void publish_shell_state(uint32_t now_ms)
 {
     static bool cached_active;
     static uint8_t cached_progress;
     static jr_display_agent_state_t cached_state;
-    static char cached_title[13] = "STANDBY";
+    static char cached_title[20] = "STANDBY";
+    static char cached_step_rows[3][20];
+    static uint8_t cached_step_leds[3];
+    static uint8_t cached_step_count;
     static uint32_t next_status_ms;
 
     if (s_agent_link_lock != NULL &&
@@ -2809,30 +2962,54 @@ static void publish_shell_state(uint32_t now_ms)
         title_shorten(cached_title, sizeof(cached_title),
                       s_agent_link.active && s_agent_link.title[0] != '\0'
                           ? s_agent_link.title : "STANDBY");
+        cached_step_count = 0U;
+        if (s_agent_link.active && s_agent_link.evidence_count > 0U) {
+            uint8_t n = s_agent_link.evidence_count;
+            if (n > 3U) {
+                n = 3U;
+            }
+            for (uint8_t i = 0U; i < n; ++i) {
+                strlcpy(cached_step_rows[i], s_agent_link.evidence[i].label,
+                        sizeof(cached_step_rows[i]));
+                cached_step_leds[i] =
+                    evidence_state_to_led(s_agent_link.evidence[i].state);
+            }
+            cached_step_count = n;
+        }
         xSemaphoreGive(s_agent_link_lock);
     }
+
+    bool display_active = cached_active;
+    uint8_t display_progress = cached_progress;
+    jr_display_agent_state_t display_state = cached_state;
+    char display_title[20];
+    strlcpy(display_title, cached_title, sizeof(display_title));
+    uint8_t display_step_count = cached_active ? cached_step_count : 0U;
+
     uint32_t pairing_until = atomic_load(&s_pairing_claim_until_ms);
     if ((int32_t)(pairing_until - now_ms) > 0) {
-        cached_active = true;
-        cached_progress = 100U;
-        cached_state = JR_DISPLAY_AGENT_WAITING;
-        strlcpy(cached_title, "PAIR DEVICE", sizeof(cached_title));
+        display_active = true;
+        display_progress = 100U;
+        display_state = JR_DISPLAY_AGENT_WAITING;
+        strlcpy(display_title, "PAIR DEVICE", sizeof(display_title));
+        display_step_count = 0U;
     } else if (pairing_until != 0U) {
         atomic_store(&s_pairing_claim_until_ms, 0U);
         atomic_store(&s_pairing_claim_code, 0U);
         atomic_store(&s_pairing_claim_attempts, 0U);
     }
-    if (operator_mode_active(now_ms)) {
-        cached_active = true;
-        cached_progress = 100U;
-        cached_state = JR_DISPLAY_AGENT_WORKING;
-        strlcpy(cached_title,
+    if (operator_mode_active(now_ms) && !display_active) {
+        display_active = true;
+        display_progress = 100U;
+        display_state = JR_DISPLAY_AGENT_WORKING;
+        strlcpy(display_title,
                 atomic_load(&s_operator_mode_owner) == OPERATOR_OWNER_ZEROCHAT
                     ? "ZEROCHAT" : "CODEX",
-                sizeof(cached_title));
+                sizeof(display_title));
+        display_step_count = 0U;
     }
-    jr_display_set_shell_state(s_ui_shade_open, cached_active,
-                               cached_progress, cached_state);
+    jr_display_set_shell_state(s_ui_shade_open, display_active,
+                               display_progress, display_state);
     /* DESK is on the mode ring again, so its feed is restored — and unlike
      * TOOLS it was never fake: cached_title/progress/state come from the real
      * agent-link push. TOOLS stays unfed on purpose; it now renders an honest
@@ -2847,7 +3024,9 @@ static void publish_shell_state(uint32_t now_ms)
      *
      * cached_title/progress/state also reach the shell via
      * jr_display_set_shell_state(), which draws the agent rim segments. */
-    jr_display_desk_set_task(cached_title, cached_progress, cached_state);
+    jr_display_desk_set_task(display_title, display_progress, display_state);
+    jr_display_desk_set_steps(cached_step_rows, cached_step_leds,
+                              display_step_count);
 
     /* TOOLS is gone; ACTIVITY is fed at turn end (activity_note_turn). */
     const jr_state_snapshot_t *snapshot = jr_orch_snapshot(&s_app.orch);
@@ -3226,21 +3405,63 @@ static void voice_task(void *arg)
             static bool power_seen;
             static bool last_usb;
             static bool last_charging;
+            static bool last_care_enabled;
             static uint32_t last_power_seq;
+            static uint32_t s_analytics_next_ms;
             if (have_power && bat.sample_seq != last_power_seq) {
+                float chip_f = 0.0f;
+                const int chip_c = device_chip_temp_c(&chip_f)
+                    ? (int)lroundf(chip_f) : 25;
+                jr_power_care_tick(bat.usb_present,
+                                   bat.percent <= 100U ? (int)bat.percent : -1,
+                                   chip_c);
+                jr_power_care_status_t care = {0};
+                jr_power_care_status(&care);
+                const bool power_edge = !power_seen ||
+                    (bat.usb_present != last_usb) ||
+                    (bat.charging != last_charging) ||
+                    (care.enabled != last_care_enabled);
+                const bool analytics_due = power_edge ||
+                    (int32_t)((uint32_t)now - s_analytics_next_ms) >= 0;
+                if (analytics_due) {
+                    s_analytics_next_ms = (uint32_t)now + 30000U;
+                }
+                power_analytics_record_and_publish(&bat, true, analytics_due);
+
+                jr_power_analytics_t snap = {0};
+                app_power_analytics_get(&snap);
                 if (power_seen && !last_usb && bat.usb_present) {
-                    char caption[24];
-                    if (bat.charging && bat.percent <= 100U) {
-                        snprintf(caption, sizeof caption, "CHARGING %u%%",
-                                 (unsigned)bat.percent);
+                    char caption[32];
+                    if (care.holding) {
+                        strlcpy(caption, "DESK CARE 80% - HOLD", sizeof caption);
+                    } else if (bat.charging && bat.percent <= 100U) {
+                        if (snap.eta_full_min > 0) {
+                            const unsigned hm = (unsigned)snap.eta_full_min;
+                            if (hm >= 60U) {
+                                snprintf(caption, sizeof caption,
+                                         "CHARGING %u%% - %uH%02uM",
+                                         (unsigned)bat.percent,
+                                         hm / 60U, hm % 60U);
+                            } else {
+                                snprintf(caption, sizeof caption,
+                                         "CHARGING %u%% - %uM",
+                                         (unsigned)bat.percent, hm);
+                            }
+                        } else {
+                            snprintf(caption, sizeof caption, "CHARGING %u%%",
+                                     (unsigned)bat.percent);
+                        }
                     } else {
                         strlcpy(caption, "POWER CONNECTED", sizeof caption);
                     }
                     jr_display_caption_set(caption);
                     jr_display_bloom();
+                    app_play_soft_cue(JR_CUE_CONFIRM);
                 } else if (power_seen && last_charging && !bat.charging &&
                            bat.usb_present) {
-                    jr_display_caption_set("CHARGE COMPLETE");
+                    jr_display_caption_set(care.holding
+                                               ? "DESK CARE 80% - HOLD"
+                                               : "CHARGE COMPLETE");
                     jr_display_bloom();
                 } else if (power_seen && last_usb && !bat.usb_present) {
                     jr_display_caption_set("ON BATTERY");
@@ -3248,6 +3469,7 @@ static void voice_task(void *arg)
                 power_seen = true;
                 last_usb = bat.usb_present;
                 last_charging = bat.charging;
+                last_care_enabled = care.enabled;
                 last_power_seq = bat.sample_seq;
             }
 
@@ -3416,21 +3638,66 @@ static void voice_task(void *arg)
                 mout.mood, user_busy, have_power && bat.usb_present,
                 operator_mode_active((uint32_t)now),
                 atomic_load(&s_ota_active) || image_in_probation());
+            const uint32_t http_last = atomic_load(&s_http_last_activity_ms);
+            const bool http_burst = http_last != 0U &&
+                (uint32_t)((uint32_t)now - http_last) < 5000U;
+            const bool op_leased = operator_mode_active((uint32_t)now) ||
+                                   operator_lease_active((uint32_t)now);
+            const bool ota_now = atomic_load(&s_ota_active);
+            const bool audio_diag = atomic_load(&s_audio_diag_until_ms) != 0U;
+            const bool i2s_active = s_app.io.capturing ||
+                                    jr_audio_playback_pending() || audio_diag;
+            const bool usb_present = have_power && bat.usb_present;
             const bool realtime_power =
-                mout.voice_armed || user_busy ||
-                operator_mode_active((uint32_t)now) ||
-                atomic_load(&s_ota_active);
-            (void)jr_net_set_power_save(!realtime_power);
-            /* THE GEAR. Anything happening, or a cable: 240. Resting on the
-             * cell with the session closed: REST. Never lower while the
-             * audio self-test owns the codec. */
+                (mout.voice_armed && !quiet) || user_busy || op_leased ||
+                ota_now || http_burst || i2s_active;
+            /* Wi-Fi modem power-save tier: NONE only for live speech/think/
+             * speak, OTA, operator lease, provisioning (handled in jr_net),
+             * or an active HTTP burst (<5s); MAX in DREAM or quiet battery
+             * WHISPER without recent touch/HTTP; MIN everywhere else. */
+            {
+                const bool voice_active_io =
+                    mood_phase == JR_ST_SPEAKING ||
+                    mood_phase == JR_ST_THINKING ||
+                    mood_phase == JR_ST_ASKING ||
+                    mood_phase == JR_ST_CONNECTING ||
+                    (mood_phase == JR_ST_LISTENING && s_listen_speech_active);
+                const bool recent_touch =
+                    (uint32_t)((uint32_t)now - s_companion_activity_ms) < 5000U;
+                jr_net_ps_level_t target_ps;
+                if (voice_active_io || ota_now || op_leased || http_burst) {
+                    target_ps = JR_NET_PS_NONE;
+                } else if (mout.mood == JR_MOOD_DREAM ||
+                           (quiet && mout.mood == JR_MOOD_WHISPER &&
+                            !usb_present && !recent_touch && !http_burst)) {
+                    target_ps = JR_NET_PS_MAX;
+                } else {
+                    target_ps = JR_NET_PS_MIN;
+                }
+                jr_net_set_ps_level(target_ps);
+            }
+            /* THE GEAR. 240 MHz when active/speaking/OTA/leased/HTTP burst;
+             * 80 MHz DEEP_REST (80 MHz APB intact) in quiet WHISPER/DREAM or
+             * muted USB Nightstand rest when realtime_power is false; 160 MHz
+             * REST in resting AMBIENT. */
             {
                 const int forced = atomic_load(&s_cpu_force);
-                cpu_gear_set(forced != 0 ? forced
-                             : ((!on_cell && !quiet) || realtime_power ||
-                                mout.mood == JR_MOOD_AWAKE ||
-                                atomic_load(&s_audio_diag_until_ms) != 0U)
-                                   ? CPU_MHZ_LIVE : CPU_MHZ_REST);
+                int target_mhz;
+                if (forced != 0) {
+                    target_mhz = forced;
+                } else if (!realtime_power &&
+                           (mout.mood == JR_MOOD_WHISPER ||
+                            mout.mood == JR_MOOD_DREAM ||
+                            (usb_present && quiet && mout.mood != JR_MOOD_AWAKE))) {
+                    target_mhz = CPU_MHZ_DEEP_REST;
+                } else if (user_busy || op_leased || ota_now || http_burst ||
+                           audio_diag || mout.mood == JR_MOOD_AWAKE ||
+                           (!on_cell && !quiet)) {
+                    target_mhz = CPU_MHZ_LIVE;
+                } else {
+                    target_mhz = CPU_MHZ_REST;
+                }
+                cpu_gear_set(target_mhz);
             }
             /* THE CADENCE. The engine draws every period whether or not a
              * pixel changed, so at rest the frame rate is the display's whole
@@ -3438,12 +3705,31 @@ static void voice_task(void *arg)
              * it down as the device settles. A touch restores 24 at once in
              * the input loop, before this tick can notice. */
             (void)jr_display_set_render_fps(
-                (realtime_power || mout.mood == JR_MOOD_AWAKE) ? RENDER_FPS_LIVE
-                : mout.mood == JR_MOOD_AMBIENT                ? RENDER_FPS_AMBIENT
-                : mout.mood == JR_MOOD_WHISPER                ? RENDER_FPS_WHISPER
-                                                              : RENDER_FPS_DREAM);
+                (user_busy || op_leased || ota_now || mout.mood == JR_MOOD_AWAKE)
+                    ? RENDER_FPS_LIVE
+                : mout.mood == JR_MOOD_AMBIENT ? RENDER_FPS_AMBIENT
+                : mout.mood == JR_MOOD_WHISPER ? RENDER_FPS_WHISPER
+                                               : RENDER_FPS_DREAM);
             uint8_t effective_brightness = (uint8_t)(
                 ((unsigned)mout.brightness * s_brightness_cap + 50U) / 100U);
+            if (on_cell && !jr_display_get_hbm()) {
+                if (saver) {
+                    const uint8_t saver_cap =
+                        (mout.mood == JR_MOOD_WHISPER) ? 14U
+                        : (mout.mood == JR_MOOD_DREAM) ? 8U
+                                                       : 45U;
+                    if (effective_brightness > saver_cap) {
+                        effective_brightness = saver_cap;
+                    }
+                } else {
+                    const bool user_boost =
+                        s_bright_user_boost_until_ms != 0U &&
+                        (int32_t)((uint32_t)now - s_bright_user_boost_until_ms) < 0;
+                    if (!user_boost && effective_brightness > 80U) {
+                        effective_brightness = 80U;
+                    }
+                }
+            }
             {
                 static uint8_t prev_mood = (uint8_t)JR_MOOD_AWAKE;
                 const bool rested = prev_mood == (uint8_t)JR_MOOD_WHISPER ||
@@ -3822,6 +4108,8 @@ static void voice_task(void *arg)
         }
         if (requested_brightness >= 10 && requested_brightness <= 100) {
             s_brightness_cap = (uint8_t)requested_brightness;
+            s_bright_user_boost_until_ms = requested_brightness > 80
+                ? (uint32_t)now + 600000U : 0U;
             persist_brightness_cap((uint8_t)requested_brightness);
             jr_display_rim_level_show(true, (uint8_t)requested_brightness);
             ESP_LOGI(TAG, "levels: brightness cap=%d", requested_brightness);
@@ -5824,6 +6112,8 @@ void app_main(void)
     if (pwr_err != ESP_OK) {
         ESP_LOGW(TAG, "battery sampler unavailable: %s", esp_err_to_name(pwr_err));
     }
+    jr_power_analytics_init(&s_power_analytics);
+    restore_battery_care();
 #if !defined(CONFIG_ESP_BOARD_ESP32S3_TOUCH_AMOLED_1_75C)
     esp_err_t rtc_err = jr_rtc_start();
     if (rtc_err != ESP_OK) {
@@ -5891,6 +6181,7 @@ void app_main(void)
     s_app.last_face = JR_FACE_IDLE;
     jr_display_present(&s_app.display, JR_FACE_IDLE, 0);
     device_notes_sync_inbox();
+    s_boot_stage_ms[0] = (uint32_t)(esp_timer_get_time() / 1000);
     if (!from_sleep) {
         jr_display_boot_ignition_set(true, 0U, 20U);  /* stage 0: CORE (20%) */
     }
@@ -5942,6 +6233,7 @@ void app_main(void)
     restore_briefing_day();
     s_app.mic = jr_audio_source();
     s_app.spk = jr_audio_sink();
+    s_boot_stage_ms[1] = (uint32_t)(esp_timer_get_time() / 1000);
     if (!from_sleep) {
         jr_display_boot_ignition_set(true, 1U, 50U);  /* stage 1: AUDIO (50%) */
     }
@@ -6077,6 +6369,7 @@ void app_main(void)
 
     /* Finalize overlapped Wi-Fi join (returns in 0 ms when association + DHCP
      * already finished during codec/tools/WakeNet bring-up). */
+    s_boot_stage_ms[2] = (uint32_t)(esp_timer_get_time() / 1000);
     if (!from_sleep) {
         jr_display_boot_ignition_set(true, 2U, 80U);  /* stage 2: WIFI (80%) */
     }
@@ -6095,6 +6388,7 @@ void app_main(void)
 
     /* Cold boot: complete Ignition sweep -> ~250 ms READY hold -> 450 ms alpha
      * crossfade onto Chrono-Arc Home before the initial boot caption arrives. */
+    s_boot_stage_ms[3] = (uint32_t)(esp_timer_get_time() / 1000);
     if (!from_sleep) {
         jr_display_boot_ignition_set(true, 3U, 100U); /* stage 3: READY (100%) */
         vTaskDelay(pdMS_TO_TICKS(250));

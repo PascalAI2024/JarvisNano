@@ -6,6 +6,7 @@
 #include "jr_net/jr_net.h"
 
 #include <ctype.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -68,6 +69,7 @@ static volatile bool s_connect_requested;
 static volatile bool s_provisioning;
 static volatile uint8_t s_retry;
 static volatile uint16_t s_last_disconnect_reason;
+static _Atomic uint32_t s_disconnect_count;
 static volatile esp_err_t s_last_error;
 static volatile wifi_ps_type_t s_requested_ps = WIFI_PS_NONE;
 static volatile wifi_ps_type_t s_applied_ps = WIFI_PS_NONE;
@@ -637,8 +639,10 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
     }
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         s_wifi_started = true;
-        if (esp_wifi_set_ps(s_requested_ps) == ESP_OK) {
-            s_applied_ps = s_requested_ps;
+        const wifi_ps_type_t ps =
+            s_provisioning ? WIFI_PS_NONE : s_requested_ps;
+        if (esp_wifi_set_ps(ps) == ESP_OK) {
+            s_applied_ps = ps;
         }
         if (s_connect_requested) {
             esp_err_t err = esp_wifi_connect();
@@ -658,10 +662,13 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         const wifi_event_sta_disconnected_t *event =
             (const wifi_event_sta_disconnected_t *)data;
         s_connected = false;
+        atomic_fetch_add(&s_disconnect_count, 1u);
         s_last_disconnect_reason = event != NULL ? event->reason : 0U;
         s_applied_ps = (wifi_ps_type_t)-1;
-        if (esp_wifi_set_ps(s_requested_ps) == ESP_OK) {
-            s_applied_ps = s_requested_ps;
+        const wifi_ps_type_t ps =
+            s_provisioning ? WIFI_PS_NONE : s_requested_ps;
+        if (esp_wifi_set_ps(ps) == ESP_OK) {
+            s_applied_ps = ps;
         }
         xEventGroupClearBits(s_wifi_events, JR_NET_CONNECTED_BIT);
         if (s_connect_requested && s_retry < JR_NET_MAX_RETRY) {
@@ -843,6 +850,7 @@ esp_err_t jr_net_wifi_connect_start(void)
     memcpy(wifi.sta.password, config.wifi_password, strlen(config.wifi_password));
     wifi.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
     wifi.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+    wifi.sta.listen_interval = 5U;
     wifi.sta.threshold.authmode = config.wifi_password[0] == '\0'
                                       ? WIFI_AUTH_OPEN
                                       : WIFI_AUTH_WPA2_PSK;
@@ -1168,6 +1176,7 @@ esp_err_t jr_net_get_status(jr_net_status_t *out)
     out->provisioning_active = s_provisioning;
     out->retry_count = s_retry;
     out->last_disconnect_reason = s_last_disconnect_reason;
+    out->disconnects = atomic_load(&s_disconnect_count);
     out->last_error = s_last_error;
     (void)copy_string(out->ap_ssid, sizeof out->ap_ssid, s_ap_ssid);
 
@@ -1203,29 +1212,77 @@ esp_err_t jr_net_get_status(jr_net_status_t *out)
     return ESP_OK;
 }
 
-esp_err_t jr_net_set_power_save(bool enabled)
+static wifi_ps_type_t ps_level_to_wifi(jr_net_ps_level_t level)
 {
-    const wifi_ps_type_t requested =
-        enabled && !s_provisioning ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE;
-    if (s_requested_ps == requested && s_applied_ps == requested) {
+    switch (level) {
+    case JR_NET_PS_MIN: return WIFI_PS_MIN_MODEM;
+    case JR_NET_PS_MAX: return WIFI_PS_MAX_MODEM;
+    case JR_NET_PS_NONE:
+    default:            return WIFI_PS_NONE;
+    }
+}
+
+static jr_net_ps_level_t wifi_to_ps_level(wifi_ps_type_t ps)
+{
+    switch (ps) {
+    case WIFI_PS_MIN_MODEM: return JR_NET_PS_MIN;
+    case WIFI_PS_MAX_MODEM: return JR_NET_PS_MAX;
+    case WIFI_PS_NONE:
+    default:                return JR_NET_PS_NONE;
+    }
+}
+
+static const char *ps_type_name(wifi_ps_type_t ps)
+{
+    switch (ps) {
+    case WIFI_PS_MIN_MODEM: return "min-modem";
+    case WIFI_PS_MAX_MODEM: return "max-modem";
+    case WIFI_PS_NONE:
+    default:                return "realtime";
+    }
+}
+
+static esp_err_t net_apply_ps_level(jr_net_ps_level_t level)
+{
+    const wifi_ps_type_t requested = ps_level_to_wifi(level);
+    const wifi_ps_type_t effective =
+        s_provisioning ? WIFI_PS_NONE : requested;
+    if (s_requested_ps == requested && s_applied_ps == effective) {
         return ESP_OK;
     }
     s_requested_ps = requested;
     if (!s_wifi_started) {
         return ESP_OK;
     }
-    esp_err_t err = esp_wifi_set_ps(requested);
+    esp_err_t err = esp_wifi_set_ps(effective);
     if (err == ESP_OK) {
-        s_applied_ps = requested;
-        ESP_LOGI(TAG, "wifi power save: %s",
-                 requested == WIFI_PS_NONE ? "realtime" : "min-modem");
+        s_applied_ps = effective;
+        ESP_LOGI(TAG, "wifi power save: %s", ps_type_name(effective));
     }
     return err;
 }
 
+void jr_net_set_ps_level(jr_net_ps_level_t level)
+{
+    (void)net_apply_ps_level(level);
+}
+
+jr_net_ps_level_t jr_net_get_ps_level(void)
+{
+    if (!s_wifi_started) {
+        return JR_NET_PS_NONE;
+    }
+    return wifi_to_ps_level(s_applied_ps);
+}
+
+esp_err_t jr_net_set_power_save(bool enabled)
+{
+    return net_apply_ps_level(enabled ? JR_NET_PS_MIN : JR_NET_PS_NONE);
+}
+
 bool jr_net_power_save_active(void)
 {
-    return s_wifi_started && s_applied_ps != WIFI_PS_NONE;
+    return jr_net_get_ps_level() != JR_NET_PS_NONE;
 }
 
 esp_err_t jr_net_mdns_start(const char *hostname)

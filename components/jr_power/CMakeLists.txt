@@ -5,6 +5,7 @@ idf_component_register(
     SRCS
         "src/jr_power.c"
         "src/charge.c"
+        "src/analytics.c"
     INCLUDE_DIRS
         "include"
     REQUIRES

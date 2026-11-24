@@ -55,17 +55,18 @@ ACCENTS: dict[str, dict[str, tuple[int, int, int]]] = {
         "glow": (18, 96, 64),
         "deep": (6, 34, 22),
     },
+    "crimson": {
+        "primary": (255, 74, 98),
+        "bright": (255, 206, 214),
+        "glow": (122, 22, 38),
+        "deep": (44, 6, 14),
+    },
 }
 
 
 def load_pairing_token(host: str) -> str | None:
     """Reuse jarvisctl's host-bound pairing token lookup without exposing it."""
-    orig_host = jarvisctl.host
-    try:
-        jarvisctl.host = lambda: host
-        return jarvisctl.pairing_token()
-    finally:
-        jarvisctl.host = orig_host
+    return jarvisctl.load_pairing_token(host)
 
 
 def build_request(

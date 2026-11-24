@@ -4,7 +4,7 @@
  * power.c — CPU gears, deep sleep and the way back.
  *
  * The mood ladder names the state; this file is the mechanism under it:
- * the 240/160 MHz gears, the RTC-memory record that survives a sleep, the
+ * the 240/160/80 MHz gears, the RTC-memory record that survives a sleep, the
  * wake sources, and the probation guard that keeps a sleep from rolling an
  * update back. Split out of main.c on 2026-09-02 with no behavior change.
  */
@@ -103,10 +103,11 @@ static void sleep_save_timer_rtc(uint32_t wake_delay_s) { (void)wake_delay_s; }
  * The owner: "are we optimizing the megahertz for battery?" We were not: 240
  * from boot to deep sleep. Now the mood picks a gear, max pinned to min so
  * nothing scales underneath a running peripheral and light sleep stays out.
- * LIVE (240) whenever anything is happening — voice armed, an update, a
- * lease, USB present. REST_MHZ once the session is closed on the cell. */
+ * LIVE (240) whenever active/speaking/OTA/leased/HTTP burst, REST (160) in
+ * resting AMBIENT, and DEEP_REST (80, keeping 80 MHz APB) in quiet WHISPER/
+ * DREAM or muted USB Nightstand rest. */
 _Atomic int s_cpu_mhz;
-_Atomic int s_cpu_force;   /* bench: /api/debug/gain?cpu=160; 0 = auto */
+_Atomic int s_cpu_force;   /* bench: /api/debug/gain?cpu=80|160|240; 0 = auto */
 _Atomic bool s_power_off_req;   /* PWR long, or /api/debug/sleep?off=1 */
 
 void cpu_gear_set(int mhz)

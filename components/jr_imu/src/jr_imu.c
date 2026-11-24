@@ -9,6 +9,7 @@
 #include "jr_imu/jr_imu.h"
 
 #include <math.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include "driver/i2c_master.h"
@@ -100,6 +101,7 @@ static bool    s_ready;
 static TaskHandle_t s_task;
 static volatile bool s_run;
 static volatile bool s_rest_req;
+static _Atomic uint32_t s_imu_i2c_errors;
 /* True when the task stack came from PSRAM via xTaskCreateWithCaps — such a
  * task MUST be torn down with vTaskDeleteWithCaps or its stack leaks. */
 static bool s_ext_stack;
@@ -136,14 +138,23 @@ static void imu_lock_ctor(void)
  * shrink 100 ms to 10 at CONFIG_FREERTOS_HZ=100. */
 static esp_err_t imu_read_reg(uint8_t reg, uint8_t *val)
 {
-    return i2c_master_transmit_receive(s_dev, &reg, 1, val, 1,
-                                       QMI8658_I2C_TIMEOUT_MS);
+    const esp_err_t err = i2c_master_transmit_receive(s_dev, &reg, 1, val, 1,
+                                                      QMI8658_I2C_TIMEOUT_MS);
+    if (err != ESP_OK) {
+        atomic_fetch_add_explicit(&s_imu_i2c_errors, 1U, memory_order_relaxed);
+    }
+    return err;
 }
 
 static esp_err_t imu_write_reg(uint8_t reg, uint8_t val)
 {
     uint8_t buf[2] = { reg, val };
-    return i2c_master_transmit(s_dev, buf, sizeof(buf), QMI8658_I2C_TIMEOUT_MS);
+    const esp_err_t err = i2c_master_transmit(s_dev, buf, sizeof(buf),
+                                              QMI8658_I2C_TIMEOUT_MS);
+    if (err != ESP_OK) {
+        atomic_fetch_add_explicit(&s_imu_i2c_errors, 1U, memory_order_relaxed);
+    }
+    return err;
 }
 
 static bool imu_probe_addr(i2c_master_bus_handle_t bus, uint8_t addr)
@@ -321,6 +332,7 @@ static esp_err_t imu_read_axes(int16_t *ax, int16_t *ay, int16_t *az)
     esp_err_t err = i2c_master_transmit_receive(s_dev, &reg, 1, raw, sizeof(raw),
                                                 QMI8658_I2C_TIMEOUT_MS);
     if (err != ESP_OK) {
+        atomic_fetch_add_explicit(&s_imu_i2c_errors, 1U, memory_order_relaxed);
         return err;
     }
     *ax = (int16_t)(((uint16_t)raw[1] << 8) | raw[0]);
@@ -599,6 +611,11 @@ bool jr_imu_present(void)
     return s_ready;
 }
 
+uint32_t jr_imu_i2c_errors(void)
+{
+    return atomic_load_explicit(&s_imu_i2c_errors, memory_order_relaxed);
+}
+
 /* ---- board probe (GET /api/diag/board) ---------------------------------- */
 
 /* Probe gyro setting: gFS = 101 (+-512 dps -> 64 LSB/dps), gODR = 0110
@@ -626,8 +643,9 @@ static void probe_gyro(jr_probe_imu_t *out)
         for (int i = 0; i < PROBE_GYRO_SAMPLES; ++i) {
             uint8_t reg = QMI8658_REG_GX_L;
             uint8_t raw[6] = {0};
-            if (i2c_master_transmit_receive(s_dev, &reg, 1, raw, sizeof(raw),
-                                            QMI8658_I2C_TIMEOUT_MS) == ESP_OK) {
+            const esp_err_t gerr = i2c_master_transmit_receive(
+                s_dev, &reg, 1, raw, sizeof(raw), QMI8658_I2C_TIMEOUT_MS);
+            if (gerr == ESP_OK) {
                 int16_t v[3];
                 for (int a = 0; a < 3; ++a) {
                     v[a] = (int16_t)(((uint16_t)raw[2 * a + 1] << 8) | raw[2 * a]);
@@ -644,6 +662,8 @@ static void probe_gyro(jr_probe_imu_t *out)
                     }
                     n++;
                 }
+            } else {
+                atomic_fetch_add_explicit(&s_imu_i2c_errors, 1U, memory_order_relaxed);
             }
             vTaskDelay(IMU_SAMPLE_GAP_TICKS);
         }
@@ -695,6 +715,8 @@ void jr_imu_probe(bool gyro, jr_probe_imu_t *out)
         const int16_t raw = (int16_t)(((uint16_t)t[1] << 8) | t[0]);
         out->temp_ok = true;
         out->temp_tenths = ((int)raw * 10) / 256;   /* 1/256 degree per LSB */
+    } else {
+        atomic_fetch_add_explicit(&s_imu_i2c_errors, 1U, memory_order_relaxed);
     }
 
     /* Wake-on-Motion leaves the sampler stopped and INT1 enabled in CTRL1
