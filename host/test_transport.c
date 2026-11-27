@@ -53,7 +53,10 @@ static void test_setup_model_pinned(void)
     cJSON *model = cJSON_GetObjectItem(cJSON_GetObjectItem(root, "setup"), "model");
     TEST_ASSERT_TRUE(cJSON_IsString(model));
     TEST_ASSERT_EQUAL_STRING(JR_GEMINI_MODEL_PRIMARY, model->valuestring);
-    TEST_ASSERT_EQUAL_STRING("models/gemini-3.1-flash-live-preview", model->valuestring);
+    TEST_ASSERT_EQUAL_STRING("models/gemini-3.8-live", model->valuestring);
+    /* gemini-3.8-live: thinkingConfig must be omitted. */
+    cJSON *gc = cJSON_GetObjectItem(cJSON_GetObjectItem(root, "setup"), "generationConfig");
+    TEST_ASSERT_NULL(cJSON_GetObjectItem(gc, "thinkingConfig"));
     cJSON_Delete(root);
     free(j);
 }
@@ -62,6 +65,7 @@ static void test_setup_model_pinned(void)
 static void test_setup_thinkingLevel_nested_not_flat(void)
 {
     jr_gemini_config_t cfg = manual_cfg();
+    cfg.model = "models/gemini-3.1-flash-live-preview";
     cfg.thinking_level = "minimal";
     char *j = jr_gemini_build_setup(&cfg);
     cJSON *root = cJSON_Parse(j);
@@ -152,6 +156,7 @@ static void test_setup_ask_user_array_schema_golden(void)
 {
     jr_gemini_fn_decl_t fns[] = { JR_GEMINI_ASK_USER_DECL };
     jr_gemini_config_t cfg = manual_cfg();
+    cfg.model = "models/gemini-3.1-flash-live-preview";
     cfg.fns = fns;
     cfg.fn_count = 1;
     char *j = jr_gemini_build_setup(&cfg);
@@ -223,6 +228,7 @@ static void test_setup_legacy_single_string_decl_byte_identical(void)
 #pragma GCC diagnostic pop
 #endif
     jr_gemini_config_t cfg = manual_cfg();
+    cfg.model = "models/gemini-3.1-flash-live-preview";
     cfg.fns = fns;
     cfg.fn_count = 1;
     char *j = jr_gemini_build_setup(&cfg);

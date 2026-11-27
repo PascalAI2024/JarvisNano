@@ -13,6 +13,8 @@ calls, and bounded session state. `main/main.c` supplies policy and
 `models/gemini-3.1-flash-live-preview`, with
 `models/gemini-2.5-flash-native-audio-preview-12-2025` as fallback.
 
+**2026-11-27:** the primary model is now `models/gemini-3.8-live` (setup omits `thinkingConfig` for it); the fallback is unchanged.
+
 Model availability is provider-controlled. Recheck the official catalog before
 a release rather than treating this dated research pass as an availability
 guarantee.
