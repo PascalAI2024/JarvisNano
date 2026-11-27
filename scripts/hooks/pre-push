@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Opt-in pre-push guard. Install: scripts/hooks/install.sh
+set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+"$ROOT/scripts/check-secrets.sh"
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks detect --source . --config .gitleaks.toml --redact --no-banner
+else
+  echo "pre-push: gitleaks not installed; only check-secrets.sh ran (CI runs gitleaks)." >&2
+fi

@@ -12,6 +12,7 @@ EXCLUDED = {
     "components/jr_memory/src/jr_memory_guard.c",
     "components/jr_memory/tests/test_guard.c",
     "scripts/check_secrets.py",
+    ".gitleaks.toml",
 }
 
 PATTERNS = {
