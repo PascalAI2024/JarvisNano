@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>A voice-first J.A.R.V.I.S. desk companion on a round 466×466 AMOLED ESP32-S3.</strong><br>
-  Native Gemini Live duplex voice, 28 built-in voice tools (22 instant 0 ms offline), Glass 3.6 luminous OLED UI &amp; 10 watch dials (incl. live astronomical Orrery &amp; 32-bar FFT Reactor), AXP2101 80% Desk Battery-Care &amp; 80 MHz rest, Codex Mode 2.0 frosted OLED cards, embedded Wi-Fi Command Deck &amp; Diagnostics Lab, physical privacy, and deep sleep.
+  Native Gemini Live duplex voice, 30 built-in voice tools (24 instant 0 ms offline), Glass 3.7 luminous OLED UI &amp; 10 watch dials (incl. live astronomical Orrery &amp; 32-bar FFT Reactor), AXP2101 80% Desk Battery-Care &amp; 80 MHz rest, Codex Mode 2.0 frosted OLED cards, embedded Wi-Fi Command Deck &amp; Diagnostics Lab, physical privacy, and deep sleep.
 </p>
 
 <p align="center">
@@ -78,12 +78,12 @@ JarvisNano turns the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** into a standalone
 | Pillar | Capabilities |
 |---|---|
 | **Voice-First Gemini Live** | Dedicated `jr_wake` WakeNet9 `"Jarvis"` task (cuts replies on wake word), 24 kHz shared full-duplex I²S clock, 16 kHz AEC-clean uplink, 24 kHz adaptive jitter-buffered speaker playback, DAC-synced speech cadence halo, and 24 kHz multi-harmonic chimes. |
-| **28 Built-in Voice Tools** | **22 instant 0 ms offline tools** + **6 JarvisMCP gateway tools** (full breakdown below) — zero network round-trips for timers, ON AIR / Focus / Breathe desk modes, 4-lap stopwatch, tagged NVS desk inbox, battery care, briefings, and device self-control. |
-| **Glass 3.6 Luminous OLED** | Single-compositor 466×466 engine: Procedural Ignition cold-boot splash, 5-screen spatial ring (`JARVIS · WATCH · WEATHER · STATUS · ACTIVITY` + addressable `DESK`), **10 watch dials** (incl. 6-planet `ORRERY` + 32-bar FFT `REACTOR`), Chrono-Arc / Aetherium / Atmosphaera / Cortex Command, rotary perimeter bezel scrub, shared evictable PSRAM static plate, 60 Hz TE sync (`GPIO13`), and CO5300 HBM (`0x66`). |
+| **30 Built-in Voice Tools** | **24 instant 0 ms offline tools** + **6 JarvisMCP gateway tools** (full breakdown below) — zero network round-trips for timers, ON AIR / Focus / Breathe desk modes, 4-lap stopwatch, tagged NVS desk inbox, battery care, briefings, and device self-control. |
+| **Glass 3.7 Luminous OLED** | Single-compositor 466×466 engine: Procedural Ignition cold-boot splash, 5-screen spatial ring (`JARVIS · WATCH · WEATHER · STATUS · ACTIVITY` + addressable `DESK`), **10 watch dials** (incl. 6-planet `ORRERY` + 32-bar FFT `REACTOR`), Chrono-Arc / Aetherium / Atmosphaera / Cortex Command, rotary perimeter bezel scrub, shared evictable PSRAM static plate, 60 Hz TE sync (`GPIO13`), and CO5300 HBM (`0x66`). Glass 3.7 adds four live-switchable screen transitions (`SHUTTER`, `IRIS`, `GLIDE`, `CLASSIC`), plain-language tool status with a 20-second reply gist (`show_gist`), and **Nano Reef**, a persistent virtual aquarium (8 species, 3 biomes) that grows with wall-clock time and is opened by swiping left or from the Control Shade. |
 | **Codex Mode 2.0 & Command Deck** | Frosted Barlow OLED approval/consent/progress/result cards (semantic crimson `DENY` / emerald `ALLOW`), live 3-step Cortex DESK checklist, `jarvisctl ask --wait` & `jarvisctl run <cmd>` CI bridge, zero-dependency embedded Command Deck & Diagnostics Lab 2.0 at `http://<device-ip>/` (live CPU%/stack bars, 5-layer render timing, AXP2101 inspector, cursor log tail, 1-click JSON Diag Bundle), plus paired **ZeroChat** phone mode. |
 | **AXP2101 Power Care & Privacy** | NVS-persisted **80% Desk Battery-Care** (`4.0 V` CV + 75/80% USB hold hysteresis), dual-sensor chip/PMIC thermal charge throttling, continuous VBAT/VBUS/VSYS/TDIE ADC & rolling ETA analytics, `240 / 160 / 80 MHz` CPU gears, 3-tier Wi-Fi PS (`NONE`/`MIN`/`MAX`), 0-fps still-frame rest, deep sleep with RTC-persisted timers/activity, and **inviolate physical privacy** (inner-disc hold or face-down flip; remote APIs can never unmute). |
 
-### 28 Built-in Voice Tools (22 Offline · 6 Gateway)
+### 30 Built-in Voice Tools (24 Offline · 6 Gateway)
 
 | Domain | Scope | Tools |
 |---|---|---|
@@ -91,6 +91,7 @@ JarvisNano turns the **Waveshare ESP32-S3-Touch-AMOLED-1.75C** into a standalone
 | **Desk Inbox & Briefings** | 0 ms offline | `add_note` (WORK/LIFE tagged, NVS-persisted), `list_notes`, `complete_note`, `clear_notes`, `daily_briefing` (date, weather, 12 h rain, notes, timers, tasks, battery) |
 | **Time, Weather & Choices** | 0 ms offline | `current_time`, `weather_here` (on-device cached forecast), `ask_user` (interactive choice card on glass) |
 | **Device & Power Control** | 0 ms offline | `set_glass` (ring screen & 10 watch styles), `set_volume`, `set_brightness`, `set_sunlight` (CO5300 HBM with chip/PMIC thermal & battery guard), `set_ui_sounds`, `set_battery_care` (80% Desk Care vs 100% Travel), `device_status` |
+| **Reply Gist & Nano Reef** | 0 ms offline | `show_gist` (plain-words status of the running tool and a 20-second reply gist), `aquarium` (open, close, feed, clean, shake, add a fish, switch biome, status; biomes reef, abyss, koi) |
 | **JarvisMCP Gateway** | HTTPS keep-alive (32 KB PSRAM + JSON projector) | `search_tools`, `execute_tool` (web search, news, weather, crypto, stocks, Wikipedia, calendar — fail-closed allowlist), `recall_memory`, `remember`, `delegate_task`, `delegated_tasks` |
 
 ---
@@ -108,8 +109,8 @@ flowchart LR
         Core["jr_core (Session · Timers · Notes · Desk Modes · Rest Ladder)"]
         Wake["jr_wake (WakeNet9 'Jarvis' Task)"]
         Transport["jr_transport (Gemini Live WSS)"]
-        Tools["jr_tools (22 Offline + Keep-Alive MCP)"]
-        Glass["jr_display (Glass 3.6 · 10 Dials · Cortex · Codex Cards · 60 Hz TE)"]
+        Tools["jr_tools (24 Offline + Keep-Alive MCP)"]
+        Glass["jr_display (Glass 3.7 · 10 Dials · Cortex · Codex Cards · 60 Hz TE)"]
         HTTP["HTTP Control Plane + Embedded Command Deck & Diag Lab"]
     end
 
@@ -146,7 +147,7 @@ sequenceDiagram
     A->>A: 24->16 kHz AEC + WakeNet9 detect
     A->>G: 16 kHz PCM realtimeInput
     G-->>C: Server VAD + function call
-    alt Local tool (22 built-in)
+    alt Local tool (24 built-in)
         C->>L: Execute on-device (timer/desk/note/care/glass/status)
         L-->>C: Instant JSON result (0 ms)
     else Gateway tool (6 MCP)
@@ -277,7 +278,7 @@ python3 scripts/send-canvas.py photo.png --ttl 60             # push any image t
 |---|---|
 | `main/` | Composition root: `main.c`, `http_routes.c`, `power.c`, `device_tools.c`, embedded `diagnostics.html` Command Deck & Diag Lab |
 | `components/jr_core` | Pure-C session, turn policy, monitors, rest ladder, timers, notes, desk modes, tool policy (host-tested) |
-| `components/jr_display` | Glass 3.6 compositor, 5-screen ring + DESK, 10 watch dials, Codex cards, TE sync, HBM, HUD & host render suites |
+| `components/jr_display` | Glass 3.7 compositor, 5-screen ring + DESK, 10 watch dials, Codex cards, TE sync, HBM, HUD & host render suites |
 | `components/jr_audio` · `jr_transport` | ES7210/ES8311 duplex audio, AEC, jitter buffer, `jr_wake`, 24 kHz harmonic cues, Gemini Live WebSocket |
 | `components/jr_tools` | Offline-first tool router, JarvisMCP persistent keep-alive bridge, allowlist & JSON projector |
 | `components/jr_imu` · `jr_power` · `jr_net` · `jr_probe` | QMI8658C motion/WoM, AXP2101 Desk Care + analytics, 3-tier Wi-Fi PS, live board probe |
