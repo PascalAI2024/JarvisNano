@@ -148,8 +148,8 @@ char *jr_gemini_build_setup(const jr_gemini_config_t *cfg)
     cJSON *root = cJSON_CreateObject();
     if (!root) { return NULL; }
     cJSON *setup = cJSON_AddObjectToObject(root, "setup");
-    cJSON_AddStringToObject(setup, "model",
-                            (cfg && cfg->model) ? cfg->model : JR_GEMINI_MODEL_PRIMARY);
+    const char *model = (cfg && cfg->model) ? cfg->model : JR_GEMINI_MODEL_PRIMARY;
+    cJSON_AddStringToObject(setup, "model", model);
 
     /* generationConfig.responseModalities + thinkingConfig.thinkingLevel
      * (NESTED under thinkingConfig — the v4 flat-field bug: a flat thinkingLevel
@@ -157,9 +157,12 @@ char *jr_gemini_build_setup(const jr_gemini_config_t *cfg)
     cJSON *gc = cJSON_AddObjectToObject(setup, "generationConfig");
     cJSON *rm = cJSON_AddArrayToObject(gc, "responseModalities");
     cJSON_AddItemToArray(rm, cJSON_CreateString("AUDIO"));
-    cJSON *tcfg = cJSON_AddObjectToObject(gc, "thinkingConfig");
-    cJSON_AddStringToObject(tcfg, "thinkingLevel",
-                            (cfg && cfg->thinking_level) ? cfg->thinking_level : "low");
+    /* gemini-3.8-live rejects thinkingConfig; it must be omitted. */
+    if (strcmp(model, "models/gemini-3.8-live") != 0) {
+        cJSON *tcfg = cJSON_AddObjectToObject(gc, "thinkingConfig");
+        cJSON_AddStringToObject(tcfg, "thinkingLevel",
+                                (cfg && cfg->thinking_level) ? cfg->thinking_level : "low");
+    }
 
     /* speechConfig — output-language anchor + fixed voice. Without a
      * languageCode the native-audio model drifts into arbitrary languages

@@ -41,10 +41,9 @@ extern "C" {
 /* ======================================================================== *
  *  Model pin (docs/reference/gemini-live-api-v5.md §2, ADR 2026-07-07)      *
  * ======================================================================== */
-/* Primary: real + current flagship Live/native-audio preview (released
- * 2026-03-11, in Google's own get-started samples). Retest before device
- * commit — v4 saw a stale 404 on this string (unresolved); fall back if so. */
-#define JR_GEMINI_MODEL_PRIMARY  "models/gemini-3.1-flash-live-preview"
+/* Primary: Gemini 3.8 Live (GA), which replaces gemini-3.1-flash-live-preview.
+ * Its setup must omit thinkingConfig (see jr_gemini_build_setup). */
+#define JR_GEMINI_MODEL_PRIMARY  "models/gemini-3.8-live"
 /* Fallback: successor to the confirmed-dead -09-2025 string. */
 #define JR_GEMINI_MODEL_FALLBACK "models/gemini-2.5-flash-native-audio-preview-12-2025"
 
