@@ -387,6 +387,9 @@ before parsing; 96 does not.
 
 ## Open questions
 
+- 2026-11-27: `gemini-3.8-live` (GA) replaces `gemini-3.1-flash-live-preview`, but
+  its setup must omit `thinkingConfig.thinkingLevel`, which `jr_gemini_build_setup`
+  always sends. The primary model stays on 3.1 until that is handled.
 - Why did `gemini-3.1-flash-live-preview` 404 on 2026-05-23 when its official release
   date is March 11 2026? Retest directly before committing v5 to this model.
 - Does `gemini-2.5-flash-native-audio-preview-12-2025` actually have the WS-close-1011
