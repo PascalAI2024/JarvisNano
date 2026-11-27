@@ -52,4 +52,9 @@ regexes = [
   '''device\.local''',
   '''/home/(user|runner)/''',
   '''YOUR_[A-Z_]+''',
+  # History triage 2026-11 (docs/security/push-audit-2026-11.md): exact values only.
+  # ESP32 SoftAP default address, and RFC-1918 fixtures in test_shell.c.
+  '''^(192\.168\.4\.1|10\.0\.0\.7|192\.168\.1\.20|192\.168\.100\.200)$''',
+  # Test fixture key, RFC 6455 sample WebSocket nonce, SHA-256 digest in an evidence json.
+  '''^(key-0123456789|dGhlIHNhbXBsZSBub25jZQ==|8e15e3d2c86d130023f92a06ca3a865d4356b8cecfbb39328b87ae4f7285109f)$''',
 ]

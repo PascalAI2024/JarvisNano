@@ -31,3 +31,30 @@ The Gemini model id change in `56d4583` is a public model name.
   TLDs, `device.local`, `YOUR_*` placeholders, and the files that define patterns.
 - `.github/workflows/secret-scan.yml`: gitleaks on every push and PR.
 - `scripts/hooks/install.sh`: opt-in local pre-push hook (`check-secrets.sh`, plus gitleaks if installed).
+
+## History before 2026-11-20
+
+Full-history scan (`gitleaks detect --log-opts=HEAD`, v8.21.2, this repo's
+config before the allowlist below): **101 hits in 7 groups. No provider key,
+token or credential found. Nothing to ROTATE.** None of these values is in the
+current tree. Values are not reproduced; history rewriting is out of scope.
+
+| Rule / group | Count | Example (file:line, commit) | Verdict |
+|---|---|---|---|
+| `lan-ip`: ESP32 SoftAP default address | 29 (15 files) | `scripts/check-secrets.sh:26`, `289f8bd` | PUBLIC-BY-DESIGN: the documented factory SoftAP address that every setup guide tells users to open |
+| `lan-ip`: RFC1918 fixtures in a C test | 15 (1 file) | `components/jr_display/tests/test_shell.c:427`, `ca3a430` | FALSE POSITIVE: made-up addresses fed to the shell test parser |
+| `lan-ip`: a real home-LAN device address | 7 (3 files) | `scripts/jarvis-desk.py:23`, `2e1eab4`; `CURRENT_WORK.md:26`, `ee2b177` | REAL, not a credential: private LAN address of a developer's device, default host in an early script and a handoff note. Unroutable from outside; no rotation. Owner decides on history rewrite |
+| `absolute-local-path`: Windows profile path | 45 (6 files) | `docs/evidence/t107-companion-device/C-after-device.log:2`, `82b3102` | REAL, not a credential: OS account name in evidence logs (build output). Personal identifier only; no rotation. Owner decides on history rewrite |
+| `absolute-local-path`: macOS home path | 2 (2 files) | `CURRENT_WORK.md:6`, `ee2b177`; `docs/reference/aec-barge-in.md:371`, `f453c9c` | REAL, not a credential: same category as above |
+| `generic-api-key`: test fixture and RFC sample | 3 (3 files) | `scripts/test_tools_budget.py:191`, `70e7fbf`; `scripts/http-matrix.sh:84`, `226a965` | FALSE POSITIVE: placeholder test key; the RFC 6455 sample WebSocket nonce; a SHA-256 digest of a captured response in an evidence json (`docs/evidence/t107-privacy-restored.json:140`, `6f9f1cf`) |
+
+The scan also reports 3 `gcp-api-key` hits on remote-tracking refs of the
+throwaway proof branches (deliberate fake key, deleted); they are not on `main`.
+
+Allowlist added to `.gitleaks.toml` (exact-value, so new look-alikes still fail):
+the SoftAP address, the three fixture addresses, and the three false-positive
+`generic-api-key` strings (46 of the 101 hits). The remaining 54 hits (7 LAN
+address, 47 home paths) are deliberately left flagged: they are real personal
+identifiers, so a full-history scan stays non-clean until the owner either
+rewrites history or accepts them by adding fingerprints to a `.gitleaksignore`.
+CI scans only new commits, so it is unaffected.
