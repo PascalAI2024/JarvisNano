@@ -26,7 +26,7 @@ tags = ["private-host"]
 [[rules]]
 id = "absolute-local-path"
 description = "Absolute path into a personal home directory"
-regex = '''(?i)(C:\\+Users\\+[A-Za-z0-9._-]+|/home/(?!user\b|runner\b)[a-z][a-z0-9_-]+/|/Users/[A-Za-z0-9._-]+/)'''
+regex = '''(?i)(C:\\+Users\\+[A-Za-z0-9._-]+|/home/[a-z][a-z0-9_-]+/|/Users/[A-Za-z0-9._-]+/)'''
 tags = ["local-path"]
 
 [[rules]]
@@ -50,5 +50,6 @@ regexes = [
   '''203\.0\.113\.[0-9]+''',
   '''[a-z0-9.-]+\.(example|test|invalid)\b''',
   '''device\.local''',
+  '''/home/(user|runner)/''',
   '''YOUR_[A-Z_]+''',
 ]
